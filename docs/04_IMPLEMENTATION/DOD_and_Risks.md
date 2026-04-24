@@ -48,13 +48,15 @@ v0.6 明确删除或降级：
 出现以下情况，任务必须 block：
 
 ```text
-- 超过 inference budget advisory 值（PI 在 Dashboard 决定是否继续）；
 - 超过 max retries；
 - 没有 baseline 却生成比较结论；
 - 没有 StackLock/DataProvenance 却要进入报告验证区；
 - Worker 修改了允许范围之外的文件；
 - Job 无进展超过阈值。
 ```
+
+注意：超过 inference budget advisory 值**不会**自动 block 任务。
+状态栏标黄提醒，由 PI 在 Web Dashboard 自行决定是否中止（见 `03_SPEC/Cost_Inference_Budget.md`）。
 
 ## 5. 成功不是自治，而是节省 PI 和工程师时间
 

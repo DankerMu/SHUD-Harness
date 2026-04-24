@@ -2,15 +2,15 @@
 
 ## 1. 执行模式
 
-MVP 支持三类执行：
+MVP 支持三类执行（字段定义以 `03_SPEC/Minimal_Schemas.md` 为准）：
 
 ```text
-local_direct：短命令，直接 bash；
-local_job：长命令，后台进程 + pid/status file；
-docker_job：可选，用于固定环境。
+local_direct — 短命令，同步 bash 执行
+local_job    — 长命令，后台进程 + pid/status file + Park/Resume
+docker_job   — 可选，固定环境容器执行
 ```
 
-Slurm/HPC 只定义接口，不在 MVP 必做。
+Slurm/HPC 仅定义接口，不在 MVP 实现。
 
 ## 2. RunJob 状态机
 

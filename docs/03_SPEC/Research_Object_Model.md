@@ -13,49 +13,51 @@
 ### 1. TaskCard
 
 统一任务入口。替代过重的 RCS 主控地位。
+字段定义以 `03_SPEC/Minimal_Schemas.md` 为准。
 
 ```yaml
 task_id: TASK-0001
 type: engineering | science_assist | ops
-owner: pi_or_engineer_name
-title: Add event diagnostics to SHUD output
-status: planned
-question_or_goal: >
-  Add event-scale diagnostics while preserving old rSHUD readers.
-pi_decision_needed: true
-linked_objects:
-  stacklock: STACK-0001
-  data: DATA-0001
-  jobs: []
-  reports: []
+status: created | planned | running | parked | reporting | awaiting_pi | done | cancelled
+title: "Add event diagnostics to SHUD output"
+question_or_goal: "Add event-scale diagnostics while preserving old rSHUD readers."
+created_by: alice
+current_owner: alice
+reviewer: pi_name
+stack_id: STACK-0001
+data_id: DATA-0001
+linked_jobs: []
+linked_reports: []
 ```
 
 ### 2. StackLock
 
 合并 StackLock + EnvLock + HarnessLock。
+字段定义以 `03_SPEC/Minimal_Schemas.md` 为准。
 
 ```yaml
 stack_id: STACK-0001
 repos:
-  SHUD: {commit: abc123}
-  rSHUD: {commit: def456}
-  AutoSHUD: {commit: ghi789}
+  SHUD:      { commit: 9b55b0c, branch: master }
+  rSHUD:     { commit: d162db3, branch: master }
+  AutoSHUD:  { commit: 1cbec6f, branch: master }
 runtime:
-  container: shud-harness:2026-04-24
-  r: 4.4.1
-  python: 3.12
-  sundials: 6.7.0
-  gdal: 3.8
+  os: "Darwin 24.6.0"
+  r_version: "4.4.1"
+  r_packages_lock: renv.lock
+  python_version: "3.12.4"
+  sundials_version: "6.0.0"
+  gcc_version: "14.1.0"
+  gdal_version: "3.9.0"
 harness:
-  version: 0.6.0
-  prompt_pack: promptpack-0003
-  skills_version: skills-0004
-  policy_version: policy-0002
-limits:
-  cpu: 8
-  memory_gb: 32
-  wall_minutes: 240
+  version: "0.8.0"
+  prompt_pack: promptpack-0001
+  skills_version: skills-0001
+fingerprint: "sha256:..."
+created_at: 2026-04-25T10:00:00Z
 ```
+
+> `limits` 已移入 RunJob.resources（执行级，非环境级）。
 
 ### 3. DataProvenance
 
@@ -88,44 +90,52 @@ preprocess:
 ### 4. RunJob
 
 执行请求。覆盖本地短任务和长任务。
+字段定义以 `03_SPEC/Minimal_Schemas.md` 为准。
 
 ```yaml
 job_id: JOB-0001
 task_id: TASK-0001
-backend: local | docker | slurm
-status: submitted
-command: bash scripts/run_tiny_case.sh
+backend: local_direct | local_job | docker_job
+status: created | submitted | running | succeeded | failed | cancelled | timed_out | collected
+command: "cd repos/SHUD && make shud && ./shud ccw"
+cwd: "workspaces/TASK-0001/worktrees/SHUD"
 resources:
-  cpu: 4
-  memory_gb: 16
-  wall_minutes: 60
+  max_wall_minutes: 30
+  max_memory_mb: 4096
 cost_budget:
-  advisory_llm_usd: 0.50     # 建议值，超出时状态栏提醒，不自动中断
-  max_compute_hours: 2
+  max_compute_minutes: 60
+pid: null
+submitted_at: null
+finished_at: null
 ```
 
 ### 5. RunRecord
 
 执行结果。替代 RunManifest + ArtifactManifest 的大部分职责。
+字段定义以 `03_SPEC/Minimal_Schemas.md` 为准。
 
 ```yaml
 run_id: RUN-0001
 job_id: JOB-0001
-status: success
+task_id: TASK-0001
 stack_id: STACK-0001
 data_id: DATA-0001
+status: succeeded | failed
+command: "cd repos/SHUD && make shud && ./shud ccw"
 artifacts:
-  stdout: artifacts/RUN-0001/stdout.txt
-  stderr: artifacts/RUN-0001/stderr.txt
-  metrics: artifacts/RUN-0001/metrics.parquet
-  plots: artifacts/RUN-0001/plots/
+  stdout: "artifacts/RUN-0001/stdout.log"
+  stderr: "artifacts/RUN-0001/stderr.log"
+  shud_output: "runs/RUN-0001/output/"
+  metrics_summary: "artifacts/RUN-0001/metrics.yaml"
+  plots: ["artifacts/RUN-0001/hydrograph.png"]
 numerical_health:
   water_balance_residual: 0.0008
   cvode_failures: 0
   negative_state_count: 0
+  max_solver_dt: 5.2
 resources:
-  runtime_seconds: 2512
-  memory_peak_mb: 1830
+  wall_seconds: 420
+  peak_memory_mb: 1830
 ```
 
 ### 6. AnalysisPlan
