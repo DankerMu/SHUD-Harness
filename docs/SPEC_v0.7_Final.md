@@ -1,4 +1,4 @@
-# SHUD-Harness 实施规格书 v0.7
+# SHUD-Harness 实施规格书 v0.8
 
 **日期**: 2026-04-24 **状态**: 可实施 **团队**: 1 PI + 1 工程师 + 0.5 数据支持
 
@@ -8,11 +8,13 @@
 
 ## 1. 项目定义
 
-**一句话**: SHUD-Harness 是 PI 主导的科研工程助手——用 Python CLI 驱动 SHUD/rSHUD/AutoSHUD 的模型运行、诊断、敏感性分析和跨仓库代码变更，产出 Markdown 报告供 PI 决策。
+**一句话**: SHUD-Harness 是 PI 主导的科研工程助手——通过 Web 界面（实时对话 + 日志流 + 审批 + 报告阅读）驱动 SHUD/rSHUD/AutoSHUD 的模型运行、诊断、敏感性分析和跨仓库代码变更，产出 Markdown 报告供 PI 决策。
 
-**不是什么**: 不是自治科研平台，不是 Web 应用，不是多 Agent 编排系统。
+**不是什么**: 不是自治科研平台，不是多 Agent 自主编排系统。
 
-**成功标准**: PI 从"手工跑模型 + 手工对比 + 手工写总结"变成"下命令 + 看报告 + 做判断"。衡量时间节省，不衡量自治程度。
+**技术基础**: 基于 Zero agent runtime (TypeScript/Bun) 扩展，复用其 AgentLoop、Session、WebSocket、Tool 架构，在其上构建 SHUD 领域逻辑。
+
+**成功标准**: PI 从"手工跑模型 + 手工对比 + 手工写总结"变成"在浏览器里对话 + 看报告 + 点审批"。衡量时间节省，不衡量自治程度。
 
 ---
 
@@ -36,9 +38,10 @@
 - 配置: `.autoshud.txt` 键值对
 - 核心依赖: rSHUD 的 `shud.triangle()`, `write.mesh()` 等
 
-### Zero (参考，不 fork)
-- 可借鉴: bash tool 安全检查, SKILL.md 格式, spawn/wait agent 模式, 命令 trace 结构
-- 不使用: TypeScript monorepo, Web control plane, 多 channel adapter, Memory 默认 verified
+### Zero (基础实现，在此扩展)
+- 直接复用: AgentLoop + Hook 架构, Session + WebSocket, Tool 注册/调度, bash 工具安全检查, SKILL.md 格式, spawn/wait agent 模式, 命令 trace 结构, Hono + React Web 框架
+- 需扩展: Park/Resume 长任务状态机, SHUD 专用工具 (编译/运行/解析), 结构化 RunRecord/EvidenceReport, PI 审批界面, 科研 Closure Classifier
+- 需修改: Memory create status (不默认 verified), Role 定义 (Coordinator/Worker/Reviewer)
 
 ---
 
@@ -264,12 +267,24 @@ patch_bundle: artifacts/CHG-0001/patch.tar.gz
 ### 5.1 目录结构
 
 ```
-shud-harness/                    # 代码仓库
-  shud_harness/                  # Python 包
-    cli.py                       # typer CLI 入口
-    tasks.py, stacklock.py, provenance.py, jobs.py, runs.py,
-    reports.py, sandbox.py, skills.py, memory.py, costs.py
-    schemas/                     # pydantic models
+shud-harness/                    # 代码仓库 (TypeScript monorepo, 基于 Zero 扩展)
+  packages/
+    core/                        # 扩展 Zero 核心 (AgentLoop, Tool, Session)
+      src/
+        agent/                   # Coordinator/Worker/Reviewer 角色定义
+        tools/                   # SHUD 专用工具 (shud-build, shud-run, rshud-parse)
+        domain/                  # 领域对象 (TaskCard, RunJob, RunRecord, etc.)
+          schemas/               # Zod schemas (前后端共享)
+        services/                # 业务逻辑 (task, job, report, sandbox)
+    backend/                     # Hono API 服务
+      src/
+        routes/                  # REST API + WebSocket 端点
+          tasks.ts, jobs.ts, reports.ts, analysis.ts, patches.ts, notes.ts
+        middleware/               # 认证、sandbox 隔离
+    frontend/                    # React Web UI
+      src/
+        pages/                   # 任务列表、任务详情、报告阅读
+        components/              # ChatInterface, LogViewer, ApprovalButtons, CostDashboard
   prompts/
     coordinator.md, worker.md, reviewer.md
   skills/
@@ -278,10 +293,10 @@ shud-harness/                    # 代码仓库
     rshud-roundtrip-test/SKILL.md
     summarize-sensitivity-results/SKILL.md
     build-task-report/SKILL.md
-  scripts/                       # 确定性脚本 (非 LLM)
+  scripts/                       # 确定性脚本 (非 LLM, R/bash)
     shud/build.sh, run.sh
     rshud/read_output.R, water_balance.R, roundtrip_test.R
-    metrics/summarize.py, sensitivity_table.py, tornado_plot.py
+    metrics/sensitivity_table.ts, tornado_plot.ts
   templates/
     task_report.md.j2, evidence_report.md.j2
   tests/
@@ -330,10 +345,10 @@ SHUD 运行可能几十分钟到几小时。Agent 不应空转等待。
 ```
 Coordinator 构建 RunJob → submit → job.status = submitted
 → task.status = parked → Agent 退出 (不消耗 LLM tokens)
-→ 用户或 cron 运行: shud-harness job collect JOB-0001
-→ job.status = collected → RunRecord 生成
-→ 用户运行: shud-harness report TASK-0001
-→ Coordinator 恢复, 读取 RunRecord, 生成报告
+→ job 完成 → WebSocket 推送通知到前端
+→ 后端自动 collect → job.status = collected → RunRecord 生成
+→ Coordinator 自动恢复, 读取 RunRecord, 生成报告
+→ 前端实时展示报告, PI 在浏览器中审阅
 ```
 
 ### 5.4 失败恢复
@@ -343,10 +358,10 @@ Coordinator 构建 RunJob → submit → job.status = submitted
 | 编译失败 | 记录 stderr, 标记 job failed, 报告中列出错误 |
 | 运行崩溃 | 收集 partial log, 检查 CVODE 错误, 建议诊断方向 |
 | 代码写坏 | `git checkout -- .` 回滚 worktree |
-| 临时文件堆积 | `task clean --mode scratch-only` |
+| 临时文件堆积 | Web Dashboard "清理" 按钮 → 后端清理 scratch |
 | Agent 死循环 | `max_no_progress_steps: 3` → 自动 block |
 | 预算超出建议值 | 状态栏标黄提醒 PI, 不自动中断 |
-| Job 孤儿 | `job status` 检查 pid, 超时标记 timed_out |
+| Job 孤儿 | 后端定期检查 pid, 超时标记 timed_out, 前端展示告警 |
 
 ### 5.5 Memory (两级)
 
@@ -537,9 +552,11 @@ FOR each step in plan:
 
 ### Tiny 运行步骤 (skill: run-shud-tiny-case)
 
+PI 在 Web 界面点击 "Run Tiny Case" 或在对话中输入指令，后端执行：
+
 ```bash
-# 1. 锁版本
-shud-harness stack lock
+# 1. 锁版本 (POST /api/stacks/lock)
+# 后端自动采集 repo commits + runtime versions
 
 # 2. 准备 workspace
 cp -r repos/SHUD/input/ccw workspaces/TASK-$TASK/ccw
@@ -548,7 +565,7 @@ sed -i 's/^END.*/END 30/' workspaces/TASK-$TASK/ccw/ccw.cfg.para
 # 3. 编译
 cd repos/SHUD && make shud
 
-# 4. 运行
+# 4. 运行 (前端实时展示 stdout 日志流)
 ./shud workspaces/TASK-$TASK/ccw/ccw
 
 # 5. 解析
@@ -557,7 +574,7 @@ Rscript scripts/rshud/read_output.R --path workspaces/TASK-$TASK/ccw --keywords 
 # 6. 水量平衡
 Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 
-# 7. 生成 RunRecord
+# 7. 生成 RunRecord → 前端实时展示结果
 ```
 
 ### 验收标准
@@ -574,9 +591,10 @@ Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 ### Playbook A: 工程任务 — "给 SHUD 添加 event flux 诊断输出"
 
 ```
-1. task create --type engineering --title "Add event flux diagnostics"
+1. [Web] PI 在对话框输入 "添加 event flux 诊断输出" 或点击 "新建任务"
+   → POST /api/tasks {type: engineering, title: "Add event flux diagnostics"}
 
-2. stack lock
+2. [API] POST /api/stacks/lock → 自动采集版本
    └── 失败? → 检查 SUNDIALS/R 环境, 修复后重试
 
 3. run tiny baseline
@@ -618,10 +636,10 @@ Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 ### Playbook B: 科研辅助 — "诊断 ccw 暴雨洪峰偏低"
 
 ```
-1. task create --type science_assist --title "Peak underestimation sensitivity"
-   --budget deep
+1. [Web] PI 在对话中描述问题: "ccw 暴雨洪峰偏低，做敏感性分析"
+   → POST /api/tasks {type: science_assist, title: "Peak underestimation sensitivity", budget: deep}
 
-2. stack lock + data register (ccw, storm_2008_02_14)
+2. [API] POST /api/stacks/lock + POST /api/data/register (ccw, storm_2008_02_14)
 
 3. 创建 AnalysisPlan
    mode: sensitivity
@@ -666,11 +684,11 @@ Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 ### Playbook C: 运维 — "记录一次 rSHUD 兼容性失败经验"
 
 ```
-1. task create --type ops --title "Record old-output failure" --budget cheap
-2. 执行诊断命令
-3. note add --type note --title "rSHUD 2.2.0 读旧输出缺少 header fallback"
-   --tags "rshud,output-compatibility"
-4. task done
+1. [Web] Coordinator 自动创建 ops 任务
+   → POST /api/tasks {type: ops, title: "Record old-output failure", budget: cheap}
+2. 后端执行诊断命令，前端展示日志
+3. [API] POST /api/notes {type: note, title: "rSHUD 2.2.0 读旧输出缺少 header fallback", tags: ["rshud","output-compatibility"]}
+4. task done → 前端通知 PI
 ```
 
 ---
@@ -679,20 +697,20 @@ Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 
 | 周 | 交付物 | 验收标准 |
 |----|--------|----------|
-| **W1** | CLI 骨架 + workspace init + TaskCard schema | `task create` 可用, 空报告骨架生成 |
-| **W2** | StackLock + DataProvenance + renv.lock 集成 | 任何 task 绑定 stack_id + data_id |
-| **W3** | Sandbox + RunJob (local) + 命令 trace | 提交 dummy job, park, collect |
-| **W4** | Tiny SHUD loop (ccw 30天) + RunRecord | 可重复运行, 生成完整 RunRecord |
-| **W5** | rSHUD roundtrip + 旧输出兼容 + ChangeRequest | 发现旧输出 reader 失败并写入报告 |
-| **W6** | 敏感性分析 (AnalysisPlan) + DuckDB warehouse | PI 指定参数 → 敏感性表 + tornado 图 |
-| **W7** | Memory/Skills + 推理预算追踪 | 报告显示 LLM 成本, notes 可保存 |
-| **W8** | 端到端 demo + 失败恢复测试 + 文档 | PI 看报告就能做判断, 工程师能重放每次运行 |
+| **W1** | Hono API 骨架 + React 壳 + workspace init + TaskCard Zod schema | 前端可创建 task, 后端返回空报告骨架 |
+| **W2** | StackLock + DataProvenance + renv.lock 集成 | 任何 task 绑定 stack_id + data_id, 前端展示版本信息 |
+| **W3** | Sandbox + RunJob (local) + 命令 trace + WebSocket 日志流 | 提交 dummy job, 前端实时看日志, park/collect 正常 |
+| **W4** | Tiny SHUD loop (ccw 30天) + RunRecord + 前端结果展示 | 可重复运行, 前端展示完整 RunRecord |
+| **W5** | rSHUD roundtrip + 旧输出兼容 + ChangeRequest | 发现旧输出 reader 失败并在前端展示报告 |
+| **W6** | 敏感性分析 (AnalysisPlan) + DuckDB warehouse + 前端图表 | PI 在 Web 界面指定参数 → 敏感性表 + tornado 图 |
+| **W7** | Memory/Skills + 推理预算 Dashboard + PI 审批界面 | Dashboard 显示 LLM 成本, notes 可保存, PI 可点审批 |
+| **W8** | 端到端 Web demo + 实时对话 + 失败恢复 + 文档 | PI 在浏览器中对话+看报告+点审批即可完成全流程 |
 
 ---
 
 ## 10. 验收标准 (9 项)
 
-1. CLI 能创建 task, 绑定 stack/data, 运行 job, 生成报告
+1. Web 界面能创建 task, 绑定 stack/data, 运行 job, 生成报告
 2. 每次运行有完整 RunRecord (stack_id + data_id + artifacts + metrics + numerical_health)
 3. ccw tiny benchmark 可重复运行
 4. rSHUD roundtrip 可执行
@@ -700,7 +718,7 @@ Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 6. patch bundle 可生成 + 可回滚
 7. 长任务能 park / collect / resume
 8. 每个 task 报告显示 LLM + compute 成本
-9. PI 从 Markdown 报告就能决定下一步
+9. PI 在浏览器中看报告 + 对话 + 点审批就能决定下一步
 
 **不通过条件** (任一项即不合格):
 - 结果无法绑定 StackLock

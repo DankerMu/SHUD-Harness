@@ -1,13 +1,15 @@
-# SHUD-Harness Lite 模块化详细方案 v0.6
+# SHUD-Harness Lite 模块化详细方案 v0.6 (历史归档)
+
+> **注意**: 本文档包为 v0.6 历史归档。当前实施基准为 `docs/SPEC_v0.7_Final.md` (已升级为 v0.8: Web-first + TypeScript 全栈 + 基于 Zero 扩展)。
+> v0.6 的核心设计决策（8 对象、Coordinator 角色、Park/Resume、科研治理）在 v0.8 中保留，但技术栈从 Python CLI 迁移到 TypeScript Web-first。
 
 本包是对 v0.5 的收敛重构版。它接受以下前提：
 
 - 团队规模按 **1 名 PI + 1 名工程师 + 0.5 名数据支持** 设计；
-- SHUD-Harness 不是“全自动科研系统”，而是 **PI 主导的科研工程助手**；
+- SHUD-Harness 不是”全自动科研系统”，而是 **PI 主导的科研工程助手**；
 - 主 agent 不是科学决策者，而是 **执行协调员 / research engineering coordinator**；
-- 第一阶段不 fork ZeRo，不做大平台，先从 **独立极简 runtime** 落地；
-- ZeRo 作为参考实现，用于借鉴 agent loop、bash tool、trace、skills loader、spawn/wait 等工程模式；
-- 目标是无需 ZeRo 也能实现，但有 ZeRo 源码时可以更快、更稳地实现同类模块。
+- ~~第一阶段不 fork ZeRo~~ → **v0.8 已决定基于 Zero 扩展**；
+- ~~先从独立极简 runtime 落地~~ → **v0.8 采用 Zero 的 AgentLoop/Session/WebSocket 作为基础**。
 
 ## 推荐阅读顺序
 

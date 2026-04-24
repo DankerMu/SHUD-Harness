@@ -5,7 +5,7 @@
 系统达到 MVP 可用，需要满足：
 
 ```text
-1. CLI 能创建 task、绑定 stack/data、运行 job、生成 report。
+1. Web 界面能创建 task、绑定 stack/data、运行 job、生成 report。
 2. 每个 run 有 RunRecord、logs、metrics 和 artifacts。
 3. tiny benchmark 可重复运行。
 4. rSHUD roundtrip 可运行。
@@ -13,7 +13,7 @@
 6. patch bundle 可生成并可回滚。
 7. 长任务可 park/collect/resume。
 8. 每个 task 显示 LLM cost 和 compute cost。
-9. PI 可以从 Markdown report 做下一步决策。
+9. PI 在浏览器中对话 + 看报告 + 点审批即可做下一步决策。
 ```
 
 ## 2. 删除/降级清单
@@ -26,8 +26,7 @@ v0.6 明确删除或降级：
 - Critic 科学判断角色；
 - memory 四级审批；
 - skill 六级生命周期；
-- 10 页 Web Console；
-- 双路径 fork/no-fork 摇摆；
+- 双路径 fork/no-fork 摇摆（已决定基于 Zero 扩展）；
 - Harness Optimizer MVP。
 ```
 
@@ -49,7 +48,7 @@ v0.6 明确删除或降级：
 出现以下情况，任务必须 block：
 
 ```text
-- 超过 inference budget；
+- 超过 inference budget advisory 值（PI 在 Dashboard 决定是否继续）；
 - 超过 max retries；
 - 没有 baseline 却生成比较结论；
 - 没有 StackLock/DataProvenance 却要进入报告验证区；
