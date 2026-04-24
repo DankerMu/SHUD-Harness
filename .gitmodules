@@ -1,0 +1,12 @@
+[submodule "SHUD"]
+	path = SHUD
+	url = https://github.com/SHUD-System/SHUD.git
+[submodule "rSHUD"]
+	path = rSHUD
+	url = https://github.com/SHUD-System/rSHUD.git
+[submodule "AutoSHUD"]
+	path = AutoSHUD
+	url = https://github.com/SHUD-System/AutoSHUD.git
+[submodule "zero"]
+	path = zero
+	url = https://github.com/V1ki/zero.git
