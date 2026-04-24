@@ -29,8 +29,18 @@ POST   /api/analysis/calibration         # 校准
 
 # 报告与变更
 POST   /api/tasks/:id/report              # 生成报告
+GET    /api/reports/:taskId               # 获取报告 (Markdown)
 GET    /api/patches/:id/diff              # 查看 patch diff
 POST   /api/patches/:id/bundle            # 打包 patch
+
+# 结果与可视化
+GET    /api/runs/:id/metrics              # RunRecord 指标
+GET    /api/runs/:id/hydrograph           # 水文过程线数据 (时间序列)
+GET    /api/analysis/:id/heatmap          # 敏感性热力图数据 (参数×指标矩阵)
+GET    /api/analysis/:id/parameters       # 参数集表格数据
+
+# 审批
+POST   /api/tasks/:id/approve             # PI 审批 (accept/revise/reject + 选择的 next action)
 
 # 笔记
 POST   /api/notes                        # 添加笔记
@@ -40,9 +50,11 @@ GET    /api/notes                        # 笔记列表
 ## 2. WebSocket 端点
 
 ```text
-WS     /ws/chat                          # LLM 对话流 (streaming)
-WS     /ws/logs/:jobId                   # Job 日志实时流
-WS     /ws/events                        # 全局事件推送 (job 完成/审批请求/成本告警)
+WS     /ws/session/:sessionId            # 统一 session 通道:
+                                         #   - agent 活动流 (多角色消息)
+                                         #   - LLM streaming (打字机效果)
+                                         #   - job 日志流 (实时终端)
+                                         #   - 事件推送 (job 完成/审批请求/成本告警)
 ```
 
 ## 3. 任务创建示例 (Web 界面)

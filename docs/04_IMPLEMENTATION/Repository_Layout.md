@@ -55,21 +55,46 @@ shud-harness/                        # TypeScript monorepo (Bun workspace)
         middleware/
           auth.ts
           sandbox-guard.ts
-    frontend/                        # React Web UI
+    frontend/                        # React Web UI (科研工作台)
       src/
         pages/
-          Dashboard.tsx              # 任务概览 + 成本面板
-          TaskDetail.tsx             # 任务详情 + 日志 + 报告
-          ReportView.tsx             # Markdown 报告渲染
+          Dashboard.tsx              # 所有任务概览 + 最近活动
+          Workbench.tsx              # 四栏科研工作台 (主工作界面)
+          ReportFullscreen.tsx       # 报告全屏阅读
+          CostAdmin.tsx              # 成本汇总 (按任务/天/Agent)
+        layouts/
+          WorkbenchLayout.tsx        # 四栏布局容器 (SideNav + Feed + Experiment + Results)
         components/
-          ChatInterface.tsx          # 实时对话
-          LogViewer.tsx              # 日志流展示
-          ApprovalButtons.tsx        # PI 审批按钮
-          CostDashboard.tsx          # LLM + compute 成本面板
-          TaskList.tsx               # 任务列表
-          JobStatus.tsx              # Job 状态卡片
+          # A. 左侧导航栏
+          SideNav.tsx                # 导航栏容器
+          ConversationHistory.tsx    # 会话历史列表
+          ResearchContext.tsx        # 当前任务上下文 (StackLock/Data/Notes)
+          CostMonitor.tsx            # 底部成本悬浮面板
+          # B. Agent 活动流
+          AgentActivityFeed.tsx      # 多 Agent 消息流 (Coordinator/Worker/Coder/Reviewer)
+          AgentMessage.tsx           # 单条 Agent 消息 (角色标识 + 折叠详情)
+          PIInput.tsx                # PI 输入框 (自然语言 + 指令)
+          StreamingText.tsx          # LLM 打字机效果
+          # C. 实验详情面板
+          ExperimentHeader.tsx       # 实验头部 (EXP-ID, basin, event, status)
+          HydrographChart.tsx        # 交互式水文过程线 (观测 vs baseline vs 实验)
+          RuntimeTerminal.tsx        # 嵌入式终端 (实时日志流, 语法高亮)
+          ParameterSetTable.tsx      # 参数集表格 (可排序, 高亮最优)
+          # D. 结果面板
+          ResultsOverview.tsx        # 关键指标卡片 (NSE, Peak Error, Timing, etc.)
+          HydrographComparison.tsx   # baseline vs experiment 对比图 (差异带)
+          SensitivityHeatmap.tsx     # 敏感性热力图 (参数 vs 指标)
+          NextSuggestedAction.tsx    # 下一步建议面板 (PI 选择并执行)
+          # 通用
+          StatusBar.tsx              # 底部状态栏
+          MarkdownRenderer.tsx       # Markdown 报告渲染
+          DiffViewer.tsx             # 代码 diff 预览
         api/
-          client.ts                  # API client (共享 Zod schemas)
+          client.ts                  # API + WebSocket client (共享 Zod schemas)
+        hooks/
+          useWebSocket.ts            # WebSocket 连接管理
+          useAgentStream.ts          # Agent 活动流订阅
+          useHydrograph.ts           # 水文数据加载
   prompts/
     coordinator.md, worker.md, reviewer.md
   skills/

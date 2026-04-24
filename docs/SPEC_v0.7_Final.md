@@ -281,10 +281,14 @@ shud-harness/                    # 代码仓库 (TypeScript monorepo, 基于 Zer
         routes/                  # REST API + WebSocket 端点
           tasks.ts, jobs.ts, reports.ts, analysis.ts, patches.ts, notes.ts
         middleware/               # 认证、sandbox 隔离
-    frontend/                    # React Web UI
+    frontend/                    # React 科研工作台
       src/
-        pages/                   # 任务列表、任务详情、报告阅读
-        components/              # ChatInterface, LogViewer, ApprovalButtons, CostDashboard
+        pages/                   # Dashboard, Workbench(四栏), ReportFullscreen, CostAdmin
+        layouts/                 # WorkbenchLayout (四栏容器)
+        components/              # SideNav, AgentActivityFeed, ExperimentDashboard,
+                                 # HydrographChart, RuntimeTerminal, ParameterSetTable,
+                                 # ResultsOverview, SensitivityHeatmap, NextSuggestedAction
+        hooks/                   # useWebSocket, useAgentStream, useHydrograph
   prompts/
     coordinator.md, worker.md, reviewer.md
   skills/
@@ -697,14 +701,14 @@ Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 
 | 周 | 交付物 | 验收标准 |
 |----|--------|----------|
-| **W1** | Hono API 骨架 + React 壳 + workspace init + TaskCard Zod schema | 前端可创建 task, 后端返回空报告骨架 |
-| **W2** | StackLock + DataProvenance + renv.lock 集成 | 任何 task 绑定 stack_id + data_id, 前端展示版本信息 |
-| **W3** | Sandbox + RunJob (local) + 命令 trace + WebSocket 日志流 | 提交 dummy job, 前端实时看日志, park/collect 正常 |
-| **W4** | Tiny SHUD loop (ccw 30天) + RunRecord + 前端结果展示 | 可重复运行, 前端展示完整 RunRecord |
-| **W5** | rSHUD roundtrip + 旧输出兼容 + ChangeRequest | 发现旧输出 reader 失败并在前端展示报告 |
-| **W6** | 敏感性分析 (AnalysisPlan) + DuckDB warehouse + 前端图表 | PI 在 Web 界面指定参数 → 敏感性表 + tornado 图 |
-| **W7** | Memory/Skills + 推理预算 Dashboard + PI 审批界面 | Dashboard 显示 LLM 成本, notes 可保存, PI 可点审批 |
-| **W8** | 端到端 Web demo + 实时对话 + 失败恢复 + 文档 | PI 在浏览器中对话+看报告+点审批即可完成全流程 |
+| **W1** | Monorepo + 四栏布局壳 + 基础 API + TaskCard schema | 浏览器打开四栏布局, 可创建 task |
+| **W2** | StackLock + DataProvenance + ResearchContext + ExperimentHeader | task 绑定 stack/data, SideNav 展示上下文 |
+| **W3** | Sandbox + RunJob + WebSocket + AgentActivityFeed + RuntimeTerminal | Agent 多角色活动流实时展示, 嵌入终端显示日志 |
+| **W4** | Tiny SHUD loop + HydrographChart + ResultsOverview | 过程线交互式展示, 指标卡片 (NSE/Peak/WB) |
+| **W5** | rSHUD roundtrip + DiffViewer + HydrographComparison | diff 预览 + baseline vs experiment 差异带对比图 |
+| **W6** | 敏感性分析 + ParameterSetTable + SensitivityHeatmap | 参数表可排序 + 热力图颜色编码 |
+| **W7** | Memory/Skills + CostMonitor + NextSuggestedAction + 审批 | PI 在建议面板选择方案并执行 |
+| **W8** | LLM streaming 对话 + 全流程 demo + 失败恢复 | PI 自然语言驱动, 四栏工作台实时联动 |
 
 ---
 
