@@ -142,6 +142,7 @@
 | 文件 | 用途 |
 |------|------|
 | [`Phased_Plan.md`](../04_IMPLEMENTATION/Phased_Plan.md) | 8 周分阶段实施计划 |
+| [`Phased_Spec_Activation.md`](../04_IMPLEMENTATION/Phased_Spec_Activation.md) | 分阶段 Spec 激活与对齐检查点 |
 | [`MVP_Implementation_Readiness_Checklist.md`](../04_IMPLEMENTATION/MVP_Implementation_Readiness_Checklist.md) | 开工前 readiness 检查清单 |
 | [`Repository_Layout.md`](../04_IMPLEMENTATION/Repository_Layout.md) | 仓库目录与 monorepo 结构 |
 | [`Schemas_APIs_CLIs.md`](../04_IMPLEMENTATION/Schemas_APIs_CLIs.md) | API 端点与 schema 验证 |
