@@ -176,7 +176,7 @@ rules:
 ```yaml
 report_id: REPORT-0001                # 格式: REPORT-NNNN
 task_id: TASK-0001
-status: draft | pi_reviewed | accepted | rejected
+status: draft | reviewed | awaiting_pi | accepted | revision_requested | rejected
 summary: "Tiny benchmark passes; old-output compatibility failed in rSHUD reader."
 observations:
   - "baseline available"
@@ -191,7 +191,10 @@ linked_runs: [RUN-0001, RUN-0002]     # 支撑本报告的 RunRecord
 created_at: 2026-04-25T15:00:00Z
 ```
 
-**废弃字段**: 仅 `draft` 的简写（必须支持完整 4 态）。
+**状态流转**: `draft` → `reviewed`（Reviewer 工程检查通过）→ `awaiting_pi` → `accepted | revision_requested | rejected`。
+`revision_requested` 表示 PI 要求修订后重新提交（区别于直接 `rejected`）。
+
+**废弃字段**: 旧 4 态 `draft | pi_reviewed | accepted | rejected`（`pi_reviewed` 拆分为 `reviewed` + `awaiting_pi`，增加 `revision_requested`）。
 
 ---
 
@@ -243,5 +246,5 @@ created_at: 2026-04-25T16:00:00Z
 | RunRecord.status | `success` | `succeeded` | 与 RunJob 终态命名一致 |
 | TaskCard 所有者 | 单个 `owner` | `created_by` + `current_owner` + `reviewer` | 区分创建者、当前负责人、审阅者三个角色 |
 | TaskCard 关联 | 嵌套 `linked_objects: {stacklock, data, jobs, reports}` | 扁平 `stack_id` + `data_id` + `linked_jobs[]` + `linked_reports[]` | 减少嵌套深度 |
-| EvidenceReport.status | 仅 `draft` | `draft \| pi_reviewed \| accepted \| rejected` | 完整生命周期 |
+| EvidenceReport.status | 仅 `draft` 或旧 4 态 `pi_reviewed` | `draft \| reviewed \| awaiting_pi \| accepted \| revision_requested \| rejected` | 区分 Reviewer 检查与 PI 审阅，增加修订态 |
 | StackLock.limits | 在 StackLock 中 | 移入 RunJob.resources | limits 是执行级，不是环境级 |

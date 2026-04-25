@@ -1,0 +1,154 @@
+# Workspace 约定
+
+**状态：** P1 设计规范  
+**适用范围：** runtime workspace、submodule、runs、artifacts、tasks、reports  
+**目标：** 固定目录结构、命名和文件生命周期，使 RunRecord 和 EvidenceReport 可复盘。
+
+## 1. 根目录结构
+
+```text
+workspace/
+  repos/
+    SHUD/
+    rSHUD/
+    AutoSHUD/
+    zero/
+  stacks/
+  data/
+  tasks/
+  jobs/
+  runs/
+  artifacts/
+  reports/
+  sessions/
+  warehouse/
+  tmp/
+```
+
+源码仓库可以来自 submodule、runtime clone 或 worktree，但 StackLock 必须记录实际 commit 和 dirty state。
+
+## 2. Task 目录
+
+```text
+tasks/TASK-001/
+  task.yaml
+  plan.md
+  parked_state.yaml
+  gates/
+  notes.md
+  locks/
+```
+
+TaskCard 是任务生命周期核心；不要把所有运行输出塞到 task 目录中。
+
+## 3. Run 目录
+
+```text
+runs/RUN-001/
+  run.yaml
+  input/
+  output/
+  logs/
+  metrics.yaml
+  artifacts.yaml
+```
+
+每个 RunRecord 对应一个 run directory。参数扫描中每个参数集单独 run directory。
+
+## 4. Artifact 目录
+
+```text
+artifacts/
+  logs/
+  figures/
+  metrics/
+  reports/
+  patches/
+  toolcalls/
+  manifests/
+```
+
+Artifact 文件名建议包含 task/run/report ID：
+
+```text
+RUN-001_rivqdown_hydrograph.png
+RUN-001_metrics.yaml
+TASK-001_patch_bundle.diff
+```
+
+## 5. Data 目录
+
+```text
+data/
+  DATA-001/
+    provenance.yaml
+    processed/
+    checksums.yaml
+```
+
+Raw data 推荐只读引用，不直接复制到 Git。若复制到 workspace，也必须保留 checksum 和来源。
+
+## 6. Warehouse
+
+```text
+warehouse/
+  metrics.parquet
+  runs.parquet
+  parameter_sets.parquet
+  artifacts.parquet
+```
+
+Warehouse 用于查询和 Dashboard，不替代 RunRecord。RunRecord 仍是复盘的源事实。
+
+## 7. 临时文件
+
+`tmp/` 可清理，不可作为报告证据来源。若临时文件需要进入报告，必须转为 artifact。
+
+## 8. Git 策略
+
+建议进入 Git：
+
+- schema；
+- prompts；
+- skills；
+- small fixtures；
+- benchmark definitions；
+- markdown reports；
+- small metrics summaries。
+
+不建议进入 Git：
+
+- 大型 SHUD 输出；
+- NetCDF/raster；
+- 完整 batch logs；
+- secrets；
+- large binary artifacts。
+
+## 9. 路径安全
+
+所有用户输入路径必须规范化并检查：
+
+```text
+resolve path
+→ ensure path under workspace or allowed readonly path
+→ reject symlink escape
+→ record normalized path
+```
+
+## 10. 清理策略
+
+| 对象 | 清理策略 |
+|---|---|
+| tmp | 可自动清理 |
+| failed run output | 默认保留，便于 debug |
+| logs | 保留摘要和完整日志，可按策略归档 |
+| reports | 不自动删除 |
+| raw data | 不由 Harness 自动删除 |
+
+## 11. 验收标准
+
+- [ ] 每个 RunRecord 有独立 run directory。
+- [ ] artifact manifest 可列出报告引用的所有文件。
+- [ ] tmp 文件不能被 EvidenceReport 直接引用。
+- [ ] workspace 外路径写入被拒绝。
+- [ ] StackLock 记录四个 submodule 的 commit 和 dirty state。

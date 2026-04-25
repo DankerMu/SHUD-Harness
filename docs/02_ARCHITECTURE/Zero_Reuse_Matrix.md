@@ -1,5 +1,7 @@
 # Zero 路线决策：基于 Zero 扩展，构建 SHUD 领域逻辑
 
+> **注：** 第 7–13 节的实现级细节合并自 v0.8 设计附录 `Zero_Extension_Map.md`，覆盖 adapter 模式、工具命名、prompt 改造、接入步骤与验收标准。
+
 ## 1. 当前决策
 
 **SHUD-Harness 基于 Zero agent runtime 构建。**
@@ -85,3 +87,149 @@ Built on Zero's proven agent runtime;
 Extend with SHUD domain-specific capabilities.
 One language, one repo, one team.
 ```
+
+---
+
+## 7. 推荐 Monorepo 目录结构
+
+建议将 Zero 作为 submodule 管理，SHUD-Harness 领域逻辑按 monorepo 分包组织：
+
+```text
+submodules/zero/              # upstream/fork Zero runtime
+packages/harness-core/        # SHUD-Harness 领域对象与 schema
+packages/harness-agent/       # Zero adapter 与 Coordinator runtime
+packages/harness-tools/       # SHUD/rSHUD/AutoSHUD 工具封装
+apps/web/                     # Web scientific workbench
+apps/server/                  # Hono/Bun API 与 WebSocket
+```
+
+## 8. Adapter 层模式
+
+不建议直接在 Zero 内部到处写 SHUD 逻辑。推荐建立 adapter 层，使 Zero 的升级成本较低，科研规则集中管理：
+
+```ts
+interface ZeroHarnessAdapter {
+  buildSystemPrompt(input: HarnessAgentContext): string;
+  beforeToolCall(call: ToolCall): Promise<ToolCallPolicyResult>;
+  afterToolCall(result: ToolCallResult): Promise<void>;
+  classifyClosure(state: TaskRuntimeState): Promise<ClosureDecision>;
+  emitHarnessEvent(event: HarnessEvent): Promise<void>;
+}
+```
+
+## 9. 必须覆盖的 Zero 行为（详细规范）
+
+### 9.1 Memory create
+
+Zero 若默认将记忆标为 `verified` 或较高 confidence，会与科研证据治理冲突。SHUD-Harness 中 memory 写入必须分级：
+
+```yaml
+memory_candidate:
+  type: preference | project_fact | stack_fact | evidence_summary | pi_decision
+  verification_status: candidate | pi_confirmed | deprecated
+  confidence: null
+  evidence_refs:
+    - report: REPORT-...
+```
+
+`evidence_summary` 不允许自动变为 `pi_confirmed`。只有用户明确确认或通过审批流程后才能升级。
+
+### 9.2 Bash/Sandbox
+
+Zero 的通用 bash 工具需要加以下限制：
+
+- cwd 必须在 workspace 内；
+- 命令必须记录 digest；
+- stdout/stderr 分片保存；
+- 长命令转 RunJob；
+- 删除 raw data、覆盖 baseline、修改 submodule 默认分支等操作必须被拦截；
+- 所有命令结果写入 toolcall artifact。
+
+### 9.3 Closure classifier
+
+Zero 通用的"任务完成"判断不适合科研建模。SHUD-Harness closure 必须检查：
+
+- TaskCard 状态；
+- 是否有 RunRecord；
+- 是否有 StackLock/DataProvenance；
+- 是否有 deterministic metrics；
+- 是否触发未处理 PI gate；
+- EvidenceReport 是否包含 limitations 和 pi_questions。
+
+## 10. 新增工具命名空间
+
+工具按领域分命名空间，输入输出必须使用 Zod schema，并在 WebSocket 中以 `tool.started`、`tool.stdout`、`tool.stderr`、`tool.completed`、`tool.failed` 推送：
+
+```text
+harness.task.create
+harness.stack.lock
+harness.data.register
+harness.job.submit
+harness.job.collect
+harness.runrecord.write
+harness.report.generate
+harness.change_request.create
+shud.build
+shud.run
+shud.scan_outputs
+rshud.read_output
+rshud.compute_metrics
+autoshud.run_step
+sandbox.exec
+```
+
+## 11. Zero Prompt 改造
+
+System prompt 应注入四类信息：
+
+1. **角色边界。** 当前 Agent 是 Coordinator、Worker、Coder 还是 Reviewer。
+2. **科研治理。** 不得宣称科学结论；必须标注限制；PI gate 不可绕过。
+3. **当前上下文。** TaskCard、StackLock、DataProvenance、最近 RunRecord、ResearchContext。
+4. **工具策略。** 短任务直接执行；长任务转 RunJob；证据必须落盘。
+
+## 12. Zero Web UI 改造
+
+Zero 原有 Chat UI 可作为基础，但 v0.8 需要四栏布局：
+
+```text
+SideNav | AgentActivityFeed | ExperimentDashboard | ResultsPanel
+```
+
+Zero 的 streaming 能力应服务于 AgentActivityFeed 和 RuntimeTerminal，而不是只展示普通聊天消息。
+
+## 13. Submodule 版本锁
+
+StackLock 应记录 Zero 自身版本：
+
+```yaml
+zero:
+  path: submodules/zero
+  commit: abc123
+  branch: shud-harness-v0.8
+  dirty: false
+  adapter_version: 0.8.0
+  prompt_version: 0.8.0
+  skill_versions:
+    shud_runtime: 0.8.0
+```
+
+如果 Zero submodule dirty，系统应允许本地开发运行，但 EvidenceReport 必须标注 dirty state；benchmark 和 validated 报告默认不接受 dirty runtime。
+
+## 14. 接入步骤
+
+1. 建立 `packages/harness-agent`，实现 Zero adapter。
+2. 把 Zero AgentLoop 的 event 输出转换为 Harness WebSocket envelope。
+3. 覆盖 MemoryTool 和 SandboxTool。
+4. 加入 Coordinator role prompt。
+5. 实现 dummy tool 和 dummy RunJob。
+6. 跑通 deterministic skeleton。
+7. 再接入真实 SHUD/rSHUD/AutoSHUD 工具。
+
+## 15. 验收标准
+
+- [ ] Zero AgentLoop 能在 SHUD-Harness session 中运行。
+- [ ] 所有 tool call 都带 `task_id`、`session_id`、`workspace_id`。
+- [ ] MemoryTool 不会自动创建 verified evidence。
+- [ ] SandboxTool 不允许 workspace 外写入。
+- [ ] WebSocket 事件符合 `WebSocket_Protocol.md`。
+- [ ] Closure 不由 Zero 默认 classifier 独立决定。

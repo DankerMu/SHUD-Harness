@@ -126,4 +126,155 @@ Block 后报告包含：已尝试的操作、失败点、建议 PI 下一步。
 - resource usage
 ```
 
-没有 RunRecord 的结果，不进入 report 的“已验证结果”部分。
+没有 RunRecord 的结果，不进入 report 的”已验证结果”部分。
+
+## 9. Sandbox 执行器
+
+Sandbox Executor 是所有命令执行的统一入口，覆盖 `sandbox.exec`、`shud.build`、`shud.run`、`rshud.*`、`autoshud.*` 工具。
+目标是将通用 bash 执行器改造成可审计、可限制、可 streaming 的科研运行执行器。
+
+### 9.1 执行请求 Schema
+
+每次执行必须绑定 TaskCard、workspace 和 agent：
+
+```yaml
+sandbox_exec_request:
+  task_id: TASK-001
+  workspace_id: WS-001
+  cwd: workspace/repos/SHUD
+  command:
+    - make
+    - shud
+  env:
+    OMP_NUM_THREADS: “1”
+  timeout_seconds: 600
+  stream: true
+  capture_output: true
+  risk_level: low | medium | high
+```
+
+### 9.2 路径策略
+
+允许路径：
+
+```text
+workspace/repos/*
+workspace/runs/*
+workspace/artifacts/*
+workspace/tasks/*
+workspace/tmp/*
+```
+
+默认禁止：
+
+```text
+~/.ssh
+system root paths
+raw data overwrite paths
+outside workspace writes
+.git directory destructive operations
+```
+
+如需读取 raw data，应通过 registered DataProvenance path，以只读方式挂载或引用。
+
+### 9.3 命令风险分类（四级）
+
+| 风险 | 示例 | 策略 |
+|---|---|---|
+| low | `ls`, `cat`, `make`, `Rscript read_output.R` | 可执行，记录日志 |
+| medium | `cp`, `rsync`, `git diff`, `patch --dry-run` | 需要 workspace 内路径检查 |
+| high | `rm -rf`, `git reset --hard`, 覆盖 baseline | 需要 PI gate 或拒绝 |
+| forbidden | 删除 raw data、写系统路径、泄露 secrets | 拒绝 |
+
+### 9.4 Streaming 策略
+
+执行器将日志分片推送至 WebSocket：
+
+```text
+tool.started
+tool.stdout / tool.stderr ...
+tool.completed 或 tool.failed
+```
+
+每个分片同时 append 到本地文件：
+
+```text
+workspace/artifacts/toolcalls/<toolcall_id>.stdout
+workspace/artifacts/toolcalls/<toolcall_id>.stderr
+```
+
+### 9.5 资源限制
+
+MVP 至少支持：
+
+- timeout（超时后进程和子进程被终止）；
+- 最大 stdout/stderr 内存窗口；
+- 最大日志文件大小提醒；
+- 并发命令数量限制；
+- 可选 CPU/thread env 设置（如 `OMP_NUM_THREADS`）。
+
+Docker 模式可进一步支持 memory/cpu 限制（对应第 1 节 `docker_job`）。
+
+### 9.6 命令审计记录
+
+每次命令执行生成 `toolcall.json`：
+
+```yaml
+toolcall:
+  id: TOOLCALL-001
+  command: “make shud”
+  command_digest: sha256:...
+  cwd: workspace/repos/SHUD
+  env_redacted:
+    OMP_NUM_THREADS: “1”
+  started_at: ...
+  completed_at: ...
+  exit_code: 0
+  stdout_ref: artifacts/toolcalls/TOOLCALL-001.stdout
+  stderr_ref: artifacts/toolcalls/TOOLCALL-001.stderr
+```
+
+env 中的 secrets 必须 redacted，不得明文写入审计记录。
+
+### 9.7 SHUD 工具封装关系
+
+不建议让 Coordinator 直接运行复杂命令字符串。应提供高层工具封装：
+
+```text
+shud.build(project, options)
+shud.run(project, run_dir, options)
+rshud.read_output(run_dir, variables)
+autoshud.run_step(step, config)
+```
+
+高层工具内部调用 Sandbox Executor，并输出结构化结果。
+这些高层工具与第 1 节执行模式对应：`shud.build` 通常走 `local_direct`，`shud.run` 走 `local_job` + Park/Resume。
+
+## 10. 长任务自动转换
+
+### 10.1 转换规则
+
+短命令直接在 LLM loop 内同步执行；超过阈值的命令必须自动转为 RunJob，触发 Park/Resume 流程（见第 3 节）：
+
+```text
+sandbox.exec(short) → 直接运行（local_direct）
+shud.run(long)      → RunJob + Park/Resume（local_job）
+```
+
+### 10.2 阈值配置
+
+```yaml
+short_task_timeout_seconds: 120    # 超过 120s 预期时长的命令 → RunJob
+long_task_requires_runjob: true    # 长任务强制走 RunJob，不可绕过
+```
+
+已知长任务（如 `shud.run`）应在工具定义中标记为 `always_runjob: true`，无需等待 timeout 触发。
+
+### 10.3 验收标准
+
+- [ ] workspace 外写入被拒绝
+- [ ] stdout/stderr 实时显示并完整落盘
+- [ ] timeout 后进程和子进程被终止
+- [ ] high/forbidden 命令需要 PI gate 或被拒绝
+- [ ] toolcall artifact 包含 command_digest 和 redacted env
+- [ ] SHUD 长运行转 RunJob 而不是阻塞 LLM loop

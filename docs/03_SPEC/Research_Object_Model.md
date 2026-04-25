@@ -168,7 +168,7 @@ rules:
 ```yaml
 report_id: REPORT-0001
 task_id: TASK-0001
-status: draft | pi_reviewed | accepted | rejected
+status: draft | reviewed | awaiting_pi | accepted | revision_requested | rejected
 summary: >
   Tiny benchmark passes; old-output compatibility failed in rSHUD reader.
 observations:
