@@ -83,6 +83,40 @@ API 错误响应、HTTP status mapping、Idempotency-Key 和 retry policy 见 [A
 - Convenience API 内部必须委托给 canonical 实现，禁止维护独立的数据查询逻辑
 - 后续扩展新的可视化类型时，只扩展 canonical API
 
+## 1.2 健康检查与运维 API
+
+```text
+# Health
+GET /api/health/live       # liveness: process alive
+GET /api/health/ready      # readiness: workspace/db/event/watcher/disk
+GET /api/health/deep       # authenticated deep diagnostics
+
+# Ops dashboard
+GET /api/ops/dashboard     # aggregated ops status
+GET /api/ops/metrics       # recent metrics samples
+GET /api/ops/alerts        # active/resolved alerts
+GET /api/ops/incidents     # OpsIncident list
+GET /api/ops/logs          # query structured logs ?task_id=&job_id=&run_id=&since=&limit=
+GET /api/ops/logs/:id/tail # tail large logs
+
+# Dependencies
+GET /api/dependencies/lock # DependencyLock summary
+GET /api/dependencies/status # lock drift, audit summary, submodule status
+
+# Requirements
+GET /api/requirements      # Requirements catalog
+GET /api/requirements/coverage # requirement -> tests -> release gate coverage
+```
+
+### 行为规则
+
+- `/api/health/live` 不需要认证；
+- `/api/health/ready` 可不需要认证，但不得泄露敏感路径；
+- `/api/health/deep` 必须认证；
+- ops logs API 必须分页/limit；
+- dependencies API 不返回 secret；
+- requirements API 可读 markdown/generated JSON，不作为运行时业务对象。
+
 ## 2. WebSocket 端点
 
 ```text

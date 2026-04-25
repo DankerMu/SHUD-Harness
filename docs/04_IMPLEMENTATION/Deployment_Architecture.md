@@ -80,10 +80,33 @@ workspace/warehouse/*.parquet
 
 后续需要多用户协作时再引入数据库。
 
-## 8. 验收标准
+## 8. Observability 服务组成
+
+```text
+health service        # live/ready/deep
+metrics collector     # API/WS/job/report/storage metrics
+alert evaluator       # threshold + dedupe
+ops dashboard API     # dashboard aggregation
+log aggregator        # NDJSON + optional DuckDB ingest
+dependency checker    # lockfile/submodule/core version summary
+```
+
+## 9. 单机部署 Ops 补充
+
+- workspace 分区必须配置 disk warning/critical 阈值；
+- systemd/Docker health probe 使用 `/api/health/live` 和 `/api/health/ready`；
+- logs 写入 `workspace/logs/` 或配置目录；
+- DuckDB warehouse 损坏时可从 filesystem/NDJSON 重建；
+- ops dashboard 可以与 Web workbench 共用 auth。
+
+## 10. 验收标准
 
 - [ ] local dev 可启动 Web UI 和 API。
 - [ ] workspace 路径可配置。
 - [ ] server 重启后能恢复 parked jobs。
 - [ ] Docker 模式能运行 tiny fixture 或 dummy run。
 - [ ] HPC 模式不会阻塞 LLM loop。
+- [ ] live/ready endpoints 可用于 process manager。
+- [ ] disk critical 时新 job 被阻止。
+- [ ] ops dashboard 能显示 Dependencies 和 Storage。
+- [ ] log aggregation 不依赖第三方 SaaS。

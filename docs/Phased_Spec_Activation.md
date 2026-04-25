@@ -20,7 +20,10 @@
 | [SPEC_v0.8_Final.md](SPEC_v0.8_Final.md) | 自包含阅读基准 |
 | [CANONICAL_CONTRACTS.md](00_INDEX/CANONICAL_CONTRACTS.md) | 唯一事实源索引 |
 | [Minimal_Schemas.md](03_SPEC/Minimal_Schemas.md) | 8 核心对象字段定义（所有 spec 的依赖根） |
-| [Support_Schema_Contracts.md](03_SPEC/Support_Schema_Contracts.md) | 18 个 support schema 定义 |
+| [Support_Schema_Contracts.md](03_SPEC/Support_Schema_Contracts.md) | 24 个 support schema 定义（含 v0.8.2 新增 6 个） |
+| [Requirements_Catalog.md](00_INDEX/Requirements_Catalog.md) | 正式需求目录（US/FR/NFR/DR/GR/IR/TR） |
+| [Requirements_Numbering_Conventions.md](00_INDEX/Requirements_Numbering_Conventions.md) | 需求编号规则与 traceability |
+| [Dependency_Versioning_Policy.md](04_IMPLEMENTATION/Dependency_Versioning_Policy.md) | 依赖锁定与更新策略（W0 起） |
 | [Repository_Layout.md](04_IMPLEMENTATION/Repository_Layout.md) | Monorepo 目录结构 |
 | [Schemas_APIs_CLIs.md](04_IMPLEMENTATION/Schemas_APIs_CLIs.md) | API 端点注册表（随阶段增长） |
 
@@ -31,6 +34,8 @@
 | [Testing_Strategy.md](04_IMPLEMENTATION/Testing_Strategy.md) | 每阶段激活对应测试类别 |
 | [Error_Handling_Spec.md](03_SPEC/Error_Handling_Spec.md) | Phase 2 起激活，错误分类覆盖全层 |
 | [Config_Secrets_And_Environment_Spec.md](03_SPEC/Config_Secrets_And_Environment_Spec.md) | Phase 1 起激活，env/secret/redaction 贯穿全程 |
+| [Performance_NFR_Spec.md](03_SPEC/Performance_NFR_Spec.md) | Phase 1 起激活，性能 NFR 贯穿全程 |
+| [Observability_Monitoring_Spec.md](03_SPEC/Observability_Monitoring_Spec.md) | Phase 1 起激活，健康检查/指标 贯穿全程 |
 
 ---
 
@@ -49,6 +54,8 @@
 | [UI_Implementation_Spec.md](03_SPEC/UI_Implementation_Spec.md) | 设计 tokens、组件基础 |
 | [API_Error_And_Idempotency_Contracts.md](04_IMPLEMENTATION/API_Error_And_Idempotency_Contracts.md) | 错误响应 envelope |
 | [MVP_Implementation_Readiness_Checklist.md](04_IMPLEMENTATION/MVP_Implementation_Readiness_Checklist.md) | P0 开工门禁 |
+| [Performance_Test_Plan.md](04_IMPLEMENTATION/Performance_Test_Plan.md) | 性能测试计划（W1 起） |
+| [Observability_Test_Plan.md](04_IMPLEMENTATION/Observability_Test_Plan.md) | 可观测性测试计划（W1 起） |
 
 ### 交付摘要
 
@@ -264,6 +271,9 @@ T0 + T1 + T3(UI report) + 语言检查负例测试通过。
 |------|--------|
 | [CICD_Release.md](04_IMPLEMENTATION/CICD_Release.md) | 完整 CI、schema drift 强制检查 |
 | [Deployment_Architecture.md](04_IMPLEMENTATION/Deployment_Architecture.md) | 部署拓扑 |
+| [Operations_Runbook.md](04_IMPLEMENTATION/Operations_Runbook.md) | 运维手册（Phase 6 正式激活，但 Phase 2 起可参考） |
+| [Alerting_Thresholds_Spec.md](03_SPEC/Alerting_Thresholds_Spec.md) | 告警阈值与升级策略 |
+| [Log_Aggregation_Spec.md](03_SPEC/Log_Aggregation_Spec.md) | 结构化日志与聚合 |
 | [DOD_and_Risks.md](04_IMPLEMENTATION/DOD_and_Risks.md) | 9 项完成定义 |
 | [Schema_Generation_And_Drift_Control.md](04_IMPLEMENTATION/Schema_Generation_And_Drift_Control.md) | Zod → JSON Schema → Markdown |
 | [Operational_UX_Testing_Addendum.md](04_IMPLEMENTATION/Operational_UX_Testing_Addendum.md) | 运维体验测试 |
@@ -303,13 +313,13 @@ T0-T5 全部通过，release regression 通过。
 
 | 阶段 | 新激活 | 累计 |
 |------|------:|-----:|
-| 基座 | 10 | 10 |
-| Phase 1 骨架 | 7 | 17 |
-| Phase 2 执行 | 12 | 29 |
-| Phase 3 科学 | 6 | 35 |
-| Phase 4 分析 | 6 | 41 |
-| Phase 5 治理 | 7 | 48 |
-| Phase 6 交付 | 10 | 58 |
+| 基座 | 14 | 14 |
+| Phase 1 骨架 | 9 | 23 |
+| Phase 2 执行 | 12 | 35 |
+| Phase 3 科学 | 6 | 41 |
+| Phase 4 分析 | 6 | 47 |
+| Phase 5 治理 | 7 | 54 |
+| Phase 6 交付 | 13 | 67 |
 
 ---
 
@@ -333,6 +343,12 @@ Report_Generation → Evidence_Lineage → PI_Decision_Comments → Notification
 
 Chain 6: Governance (全程约束)
 Research_Constitution → Roles_and_Boundaries → Agent_Architecture → Task_Playbooks
+
+Chain 7: Observability → Operations
+Observability_Monitoring_Spec → Alerting_Thresholds → Log_Aggregation → Operations_Runbook → Performance_NFR
+
+Chain 8: Requirements → Traceability
+Requirements_Catalog → Requirements_Numbering → Traceability_Matrix → Dependency_Versioning_Policy
 ```
 
 ---
@@ -347,4 +363,6 @@ Research_Constitution → Roles_and_Boundaries → Agent_Architecture → Task_P
 | [Module_Status_Matrix.md](02_ARCHITECTURE/Module_Status_Matrix.md) | 进度追踪 |
 | [GAP_ANALYSIS.md](00_INDEX/GAP_ANALYSIS.md) | 历史 |
 | [Spec_Gap_Audit_v0_8_1.md](00_INDEX/Spec_Gap_Audit_v0_8_1.md) | 历史 |
+| [PRD_Spec_Gap_Audit_v0_8_2.md](00_INDEX/PRD_Spec_Gap_Audit_v0_8_2.md) | v0.8.2 缺口审查 |
+| [PRD_Spec_Merge_Map.md](00_INDEX/PRD_Spec_Merge_Map.md) | 合并地图 |
 | [Phased_Plan.md](04_IMPLEMENTATION/Phased_Plan.md) | 时间维度参考 |

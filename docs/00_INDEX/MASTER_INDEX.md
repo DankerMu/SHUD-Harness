@@ -1,9 +1,9 @@
 # SHUD-Harness 文档主索引
 
-> **版本**: v0.8.1 (2026-04-25)
+> **版本**: v0.8.2 (2026-04-25)
 > **技术栈**: TypeScript 全栈 (Bun + Hono + React)，基于 Zero Agent Runtime 扩展
 > **交互模式**: Web-first，实时对话 + 日志流 + PI 审批 + 报告阅读
-> **文档总量**: 4 个目录，68 份规范文档
+> **文档总量**: 4 个目录，80 份规范文档
 
 ---
 
@@ -28,6 +28,10 @@
 | [`GAP_ANALYSIS.md`](GAP_ANALYSIS.md) | v0.8 设计差距分析 |
 | [`CANONICAL_CONTRACTS.md`](CANONICAL_CONTRACTS.md) | Canonical contract 索引 |
 | [`Spec_Gap_Audit_v0_8_1.md`](Spec_Gap_Audit_v0_8_1.md) | v0.8.1 规格缺口审查 |
+| [`PRD_Spec_Gap_Audit_v0_8_2.md`](PRD_Spec_Gap_Audit_v0_8_2.md) | v0.8.2 PRD/Spec 缺口审查 |
+| [`PRD_Spec_Merge_Map.md`](PRD_Spec_Merge_Map.md) | v0.8.2 补充文档合并地图 |
+| [`Requirements_Catalog.md`](Requirements_Catalog.md) | 正式需求目录（US/FR/NFR/DR/GR/IR/TR 编号体系） |
+| [`Requirements_Numbering_Conventions.md`](Requirements_Numbering_Conventions.md) | 需求编号、状态、优先级和 traceability 规则 |
 
 ---
 
@@ -125,6 +129,15 @@
 | [`Notification_Design.md`](../03_SPEC/Notification_Design.md) | 通知设计 |
 | [`Operational_UX_Addendum.md`](../03_SPEC/Operational_UX_Addendum.md) | 运维体验补充 |
 
+### 监控与性能 NFR
+
+| 文件 | 用途 |
+|------|------|
+| [`Observability_Monitoring_Spec.md`](../03_SPEC/Observability_Monitoring_Spec.md) | 可观测性、健康检查、指标与 Ops Dashboard |
+| [`Alerting_Thresholds_Spec.md`](../03_SPEC/Alerting_Thresholds_Spec.md) | 告警阈值、严重性、dedupe 与升级策略 |
+| [`Log_Aggregation_Spec.md`](../03_SPEC/Log_Aggregation_Spec.md) | 结构化日志、聚合、保留与 redaction |
+| [`Performance_NFR_Spec.md`](../03_SPEC/Performance_NFR_Spec.md) | REST、WebSocket、report、batch、并发性能 NFR |
+
 ### 运行时
 
 | 文件 | 用途 |
@@ -158,6 +171,10 @@
 | [`Task_Playbooks.md`](../04_IMPLEMENTATION/Task_Playbooks.md) | 任务 Playbook |
 | [`Operational_UX_API_Contracts.md`](../04_IMPLEMENTATION/Operational_UX_API_Contracts.md) | 运维体验 API 契约 |
 | [`Operational_UX_Testing_Addendum.md`](../04_IMPLEMENTATION/Operational_UX_Testing_Addendum.md) | 运维体验测试补充 |
+| [`Operations_Runbook.md`](../04_IMPLEMENTATION/Operations_Runbook.md) | 磁盘满、Job 卡死、DuckDB 损坏、SMTP 故障、OOM、密钥泄露运维手册 |
+| [`Dependency_Versioning_Policy.md`](../04_IMPLEMENTATION/Dependency_Versioning_Policy.md) | Bun/npm/TypeScript/Zod/React/DuckDB 依赖锁定与更新策略 |
+| [`Performance_Test_Plan.md`](../04_IMPLEMENTATION/Performance_Test_Plan.md) | 性能 NFR 测试计划 |
+| [`Observability_Test_Plan.md`](../04_IMPLEMENTATION/Observability_Test_Plan.md) | 健康检查、日志、指标、告警和 runbook drill 测试计划 |
 
 ---
 
@@ -178,5 +195,7 @@
    - 前端开发：Interaction_Model -> Frontend_State_Design -> WebSocket_Protocol -> UI_Implementation_Spec -> UX_Design_Spec
    - 数据层：Data_Storage_Provenance -> Workspace_Conventions -> Artifact_Registry_Spec
    - 分析校准：Sensitivity_Calibration_Benchmark -> Parameter_Set_And_Analysis_Run_Mapping
-   - 部署运维：Deployment_Architecture -> CICD_Release -> Testing_Strategy
+   - 部署运维：Deployment_Architecture -> CICD_Release -> Testing_Strategy -> Operations_Runbook -> Dependency_Versioning_Policy
+   - 监控性能：Observability_Monitoring_Spec -> Alerting_Thresholds_Spec -> Log_Aggregation_Spec -> Performance_NFR_Spec
+   - 需求追踪：Requirements_Catalog -> Requirements_Numbering_Conventions -> Traceability_Matrix
    - 实施计划：Phased_Plan -> Repository_Layout -> DOD_and_Risks

@@ -154,7 +154,41 @@ E2E 流程：
 - **Runner adapter 测试**：local_direct / local_job 的 status mapping 和 collect result 格式。
 - **API error 测试**：400 / 403 / 409 / 422 统一 envelope 返回。
 
-## 8. 验收标准
+## 8. Observability tests
+
+- `OBS-HEALTH-001`: live endpoint returns 200。
+- `OBS-HEALTH-002`: ready detects workspace not writable。
+- `OBS-HEALTH-003`: disk critical triggers alert and blocks new jobs。
+- `OBS-LOG-001`: API request writes structured NDJSON。
+- `OBS-LOG-002`: secret values redacted。
+- `OBS-ALERT-001`: alert dedupe works。
+- `OBS-DASH-001`: ops dashboard returns health/jobs/storage/errors/dependencies。
+
+## 9. Performance tests
+
+- `PERF-API-001`: metadata API P95 <= 300ms in mock workspace。
+- `PERF-WS-001`: reconnect + replay/snapshot <= 5s。
+- `PERF-REPORT-001`: tiny report generation <= 30s。
+- `PERF-BATCH-001`: batch progress update <= 2s。
+- `PERF-CONC-001`: MVP concurrency smoke。
+
+## 10. Dependency tests
+
+- lockfile exists；
+- frozen install；
+- packageManager fixed；
+- dependency status endpoint；
+- DuckDB client smoke；
+- submodule status captured。
+
+## 11. Requirements tests
+
+- requirement IDs unique；
+- P0/P1 requirements have acceptance criteria；
+- P0 requirements have test_ids before release；
+- Traceability matrix references valid requirement IDs。
+
+## 12. 验收标准
 
 - [ ] CI 跑 schema/unit/integration 测试。
 - [ ] 本地可手动跑 ccw tiny fixture。

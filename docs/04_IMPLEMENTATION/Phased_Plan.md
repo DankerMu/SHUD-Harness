@@ -17,6 +17,10 @@
 - docs link check 脚本占位
 - schema generation 脚本占位
 - readiness gate YAML 记录
+- 合并 Requirements_Catalog 和 Requirements_Numbering_Conventions
+- 确定 packageManager 和 lockfile
+- 生成 initial DependencyLock
+- 增加 health/live 和 health/ready 的 skeleton contract
 ```
 
 非目标：不实现 runtime；不启动 React/Hono；不接 LLM。
@@ -66,6 +70,11 @@
 - API error envelope negative test
 - docs link check smoke
 - typecheck + build web app
+- `/api/health/live` 返回 200
+- `/api/health/ready` 基础 workspace/artifact/event store 检查
+- structured API logs 验证
+- requirements ID uniqueness check
+- API metadata perf smoke
 
 验收：浏览器打开四栏布局，可创建任务，SideNav 展示会话历史。
 
@@ -175,6 +184,12 @@
 - collect idempotency
 - service restart 后 uncollected terminal job 可恢复
 - secret redaction
+- job metrics 收集
+- stale job detection
+- ops dashboard API skeleton
+- alert evaluator skeleton
+- log aggregation NDJSON
+- disk critical block new jobs
 
 验收：提交 dummy job, Agent 活动流实时展示多角色消息, RuntimeTerminal 实时展示日志。
 
@@ -334,6 +349,10 @@
 - partial batch 仍能出 report limitation
 - heatmap metric aggregation 正确
 - retry failed parameter_set 创建新 attempt，不覆盖旧 FailureRecord
+- ccw tiny run metrics 收集
+- batch progress latency measurement
+- storage/artifact metrics
+- DuckDB fallback/rebuild test
 
 验收：PI 指定参数后, 前端展示参数表 + 热力图 + 过程线。
 
@@ -393,6 +412,11 @@
 - accepted HTML has no draft watermark
 - export manifest records included/excluded artifacts
 - notification mock dedupe
+- notification metrics
+- report/export performance test
+- runbook drills
+- dependency release manifest
+- requirements coverage report
 
 验收：Dashboard 显示成本, PI 可在 Next Action 面板选择方案并执行。
 

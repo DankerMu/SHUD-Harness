@@ -89,7 +89,42 @@ harness:
   secrets_policy_version: 0.8.1
 ```
 
-## 7. 验收标准
+## 7. Observability / Operations 环境变量
+
+```text
+HARNESS_OPS_DASHBOARD_ENABLED
+HARNESS_HEALTH_DEEP_ENABLED
+HARNESS_LOG_DIR
+HARNESS_LOG_RETENTION_DAYS
+HARNESS_ALERT_DISK_WARN_PERCENT
+HARNESS_ALERT_DISK_CRITICAL_PERCENT
+HARNESS_ALERT_DISK_CRITICAL_GB
+HARNESS_MAX_CONCURRENT_LOCAL_JOBS
+HARNESS_MAX_WS_CONNECTIONS
+HARNESS_DUCKDB_PATH
+HARNESS_DUCKDB_BACKUP_DIR
+HARNESS_PACKAGE_MANAGER_VERSION
+```
+
+## 8. Dependency config
+
+```yaml
+dependency_policy:
+  package_manager: bun
+  required_lockfile: true
+  frozen_install_in_ci: true
+  allow_floating_latest: false
+  duckdb_client_decision_required: true
+```
+
+## 9. Secret leak response
+
+- secret scan 命中时生成 `OpsIncident(category=secret_leak)`；
+- 相关 artifact/export 标记 `quarantined`；
+- 轮换 secret 后才能关闭 incident；
+- redaction pattern 更新后必须重新跑 affected tests。
+
+## 10. 验收标准
 
 - [ ] secrets 不进入 RunRecord、EvidenceReport、ArtifactManifest、NotificationRecord body。
 - [ ] toolcall env 写入前 redacted。

@@ -18,6 +18,12 @@
 | `parser_error` | rSHUD 读取失败、输出变量缺失 | 生成 parser failure artifact |
 | `report_error` | 报告引用缺失 artifact | 阻止 report reviewed |
 | `agent_error` | LLM 工具选择错误、上下文不足 | Coordinator 可恢复或要求 PI 输入 |
+| `ops_error` | disk full、OOM | 创建 OpsIncident，执行 runbook |
+| `duckdb_error` | warehouse open/query failure | degraded mode，filesystem fallback |
+| `dependency_error` | lockfile drift、native binding load fail | 阻塞 release 或标记 service degraded |
+| `health_check_error` | ready check fail | 根据 severity 返回 not_ready/degraded |
+| `alert_error` | alert dedupe/persist fail | 写 service log，不影响 RunRecord |
+| `log_aggregation_error` | DuckDB aggregation fail | 保留 NDJSON，dashboard fallback |
 
 ## 2. 严重性
 
@@ -158,7 +164,15 @@ Critical failure notification 仍必须使用 dedupe key，避免同一错误反
 - private SSH path；
 - local absolute paths if configured as sensitive。
 
-## 10. 验收标准
+## 10. Observability / Ops 错误规则
+
+- DuckDB/ops dashboard 失败不等于科学运行失败；
+- disk critical 可以 block new jobs；
+- secret leak 可以 quarantine artifact；
+- dependency drift 可以 block release；
+- 所有 critical ops errors 必须有 OpsIncident。
+
+## 11. 验收标准
 
 - [ ] 每个失败 tool/job/report 都有结构化错误对象。
 - [ ] 失败 run 不会被误标为 succeeded。
