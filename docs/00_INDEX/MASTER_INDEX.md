@@ -56,6 +56,7 @@
 | `Park_Resume_Design.md` | **长任务全生命周期**: parked_state/job watcher/幂等 collect/Resume 上下文重建 |
 | `WebSocket_Protocol.md` | **实时通信协议**: 事件 envelope/20 种消息类型/seq/ack/心跳/断线重连 |
 | `Frontend_State_Design.md` | **四栏前端状态**: 5 层 store/WebSocket reducer/entity 缓存/chart 状态 |
+| `UI_Implementation_Spec.md` | **UI 实现规格**: 设计 tokens/组件规格/状态矩阵/响应式/a11y/技术栈 |
 | `Visualization_Data_Spec.md` | **可视化数据契约**: Hydrograph/Comparison/Heatmap/MetricsCards 的 JSON 格式 |
 | `SHUD_Output_Variables.md` | **SHUD 输出变量注册表**: 32 变量/单位/优先级/水量平衡角色/数值健康阈值 |
 | `Report_Generation_Spec.md` | **EvidenceReport 生成**: 6 阶段流程/模板/语言约束/证据等级/审阅状态 |
