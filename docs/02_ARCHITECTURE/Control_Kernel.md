@@ -34,16 +34,20 @@ PI 使用频率: 可能每天 1–2 次。
 
 ## 3. Runtime state machine
 
+TaskCard.status 使用粗粒度状态机（权威定义见 `03_SPEC/Minimal_Schemas.md`）：
+
 ```text
 created
   → planned
-  → running_local | submitted_job
-  → parked_waiting_for_job
-  → collecting
+  → running          ← runtime_phase: running_local | submitted_job | collecting
+  → parked           ← runtime_phase: waiting_for_job
   → reporting
   → awaiting_pi
-  → done | revised | cancelled
+  → done | cancelled | blocked
 ```
+
+`runtime_phase` 是辅助字段，用于前端展示和调试，不是状态机转换条件。
+PI 要求修订时，TaskCard 回到 `planned`（不使用 `revised` 状态）。
 
 ## 4. 每个状态的职责
 
@@ -64,21 +68,17 @@ Coordinator 生成 plan，并列出：
 - 风险和人工审批点。
 ```
 
-### running_local
+### running
 
-短任务，直接在 sandbox 里跑。
+任务正在执行。通过 `runtime_phase` 区分细节：
 
-### submitted_job
+- `running_local`：短命令在 sandbox 同步执行
+- `submitted_job`：已提交 RunJob，LLM loop 仍活跃
+- `collecting`：Job 完成后正在收集日志、指标和 artifacts
 
-长任务，生成 RunJob 并提交 local/docker/slurm backend。
+### parked
 
-### parked_waiting_for_job
-
-任务暂停，不继续消耗 LLM token。
-
-### collecting
-
-Job 完成后收集日志、指标和 artifacts。
+Agent 已暂停，不继续消耗 LLM token。`runtime_phase = waiting_for_job`。
 
 ### reporting
 
@@ -87,6 +87,10 @@ Job 完成后收集日志、指标和 artifacts。
 ### awaiting_pi
 
 等待 PI 决策。
+
+### blocked
+
+硬限制触发（max_retries、no_progress）或 workspace 损坏。需要人工检查。
 
 ## 5. Stop conditions
 

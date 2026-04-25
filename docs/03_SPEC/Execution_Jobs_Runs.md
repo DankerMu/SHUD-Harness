@@ -29,7 +29,7 @@ created
 ```text
 submit job
   → save RunJob
-  → task status = parked_waiting_for_job
+  → task.status = parked, task.runtime_phase = waiting_for_job
   → no more LLM calls
 ```
 
@@ -79,7 +79,7 @@ shud-harness patch bundle TASK-0001
 
 ## 6. Coordinator 死循环防护
 
-硬限制（触发后 task.status = blocked）：
+硬限制（触发后 task.status = `blocked`）：
 
 ```yaml
 max_retries_per_command: 2

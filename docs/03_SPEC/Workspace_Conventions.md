@@ -4,12 +4,32 @@
 **适用范围：** runtime workspace、submodule、runs、artifacts、tasks、reports  
 **目标：** 固定目录结构、命名和文件生命周期，使 RunRecord 和 EvidenceReport 可复盘。
 
-## 1. 根目录结构
+## 1. 路径体系 Canonical 规则
+
+本项目存在两层路径体系，用途不同，不可混淆：
+
+### 1.1 源码仓库 (Source reference)
+
+根目录的 git submodule，是只读参考源：
+
+```text
+SHUD-Harness/          ← 项目根
+  SHUD/                ← submodule, 只读参考
+  rSHUD/               ← submodule, 只读参考
+  AutoSHUD/            ← submodule, 只读参考
+  zero/                ← submodule, 只读参考
+```
+
+**规则**: Agent 不得直接修改根 submodule。任何需要改代码的任务，必须在 runtime workspace 中通过 `git worktree` 创建工作副本。
+
+### 1.2 Runtime workspace (执行副本)
+
+每个 TaskCard 对应的运行时工作区：
 
 ```text
 workspace/
   repos/
-    SHUD/
+    SHUD/              ← 从 source submodule clone 或 worktree
     rSHUD/
     AutoSHUD/
     zero/
@@ -24,6 +44,23 @@ workspace/
   warehouse/
   tmp/
 ```
+
+### 1.3 映射关系
+
+| 层级 | 路径 | 用途 | Agent 写权限 |
+|------|------|------|-------------|
+| Source | `SHUD/`, `rSHUD/`, `AutoSHUD/`, `zero/` | 只读参考、StackLock 基线 | 禁止 |
+| Runtime repos | `workspace/repos/*` | 编译、运行的工作副本 | 受限（Sandbox policy） |
+| Task worktree | `workspace/tasks/TASK-*/worktrees/*` | 任务特定代码修改 | 允许 |
+| Scratch/tmp | `workspace/tasks/TASK-*/scratch/`, `workspace/tmp/` | 临时文件 | 允许 |
+| Artifacts | `workspace/artifacts/`, `workspace/runs/*/` | 运行产出 | 允许 |
+
+### 1.4 与其他规范的关系
+
+- **Sandbox path policy** (`Execution_Jobs_Runs.md` §9.2): 允许路径列表对应上表中"允许"和"受限"行
+- **StackLock**: 记录 source submodule 的 commit；若 runtime repos 有本地修改，StackLock 标记 `dirty: true`
+- **ChangeRequest patch bundle**: 基于 task worktree 与 source submodule 的 diff 生成
+- **Git worktree rollback**: 仅影响 `workspace/tasks/TASK-*/worktrees/`，不触及 source submodule
 
 源码仓库可以来自 submodule、runtime clone 或 worktree，但 StackLock 必须记录实际 commit 和 dirty state。
 

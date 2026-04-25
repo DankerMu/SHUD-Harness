@@ -7,7 +7,7 @@
 ## 核心文件 (只需读这两个即可开始开发)
 
 1. **`../CLAUDE.md`** — 项目定义 + 仓库布局 + 设计决策速查
-2. **`SPEC_v0.7_Final.md`** — 自包含实施规格书 (v0.8: 对象模型 + Coordinator 行为 + Playbook + 8 周计划 + 验收标准)
+2. **`SPEC_v0.8_Final.md`** — 自包含实施规格书 (v0.8: 对象模型 + Coordinator 行为 + Playbook + 8 周计划 + 验收标准)
 
 ## 补充参考
 

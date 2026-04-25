@@ -51,7 +51,7 @@ error:
 
 RunJob 失败不等于 TaskCard 失败。TaskCard 可以进入：
 
-- `collecting`：仍需收集失败日志；
+- `running`（runtime_phase=`collecting`）：仍需收集失败日志；
 - `reporting`：生成失败分析报告；
 - `awaiting_pi`：需要 PI 决定是否重试或调整；
 - `blocked`：缺少必要输入或权限。

@@ -92,16 +92,18 @@ One language, one repo, one team.
 
 ## 7. 推荐 Monorepo 目录结构
 
-建议将 Zero 作为 submodule 管理，SHUD-Harness 领域逻辑按 monorepo 分包组织：
+Zero 作为根目录 submodule 管理（路径 `zero/`，与实际 repo 一致），SHUD-Harness 领域逻辑按 monorepo 分包组织：
 
 ```text
-submodules/zero/              # upstream/fork Zero runtime
+zero/                         # submodule, upstream/fork Zero runtime (只读参考)
 packages/harness-core/        # SHUD-Harness 领域对象与 schema
 packages/harness-agent/       # Zero adapter 与 Coordinator runtime
 packages/harness-tools/       # SHUD/rSHUD/AutoSHUD 工具封装
 apps/web/                     # Web scientific workbench
 apps/server/                  # Hono/Bun API 与 WebSocket
 ```
+
+> 路径体系的完整规则见 `03_SPEC/Workspace_Conventions.md` §1。
 
 ## 8. Adapter 层模式
 
@@ -203,7 +205,7 @@ StackLock 应记录 Zero 自身版本：
 
 ```yaml
 zero:
-  path: submodules/zero
+  path: zero
   commit: abc123
   branch: shud-harness-v0.8
   dirty: false

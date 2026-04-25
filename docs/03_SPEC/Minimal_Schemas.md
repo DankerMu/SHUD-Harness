@@ -1,7 +1,7 @@
 # Canonical Schema Contract (v0.8)
 
 > **本文件是 8 个核心对象 + MemoryNote 的唯一权威字段定义。**
-> 其他文档（Research_Object_Model、SPEC_v0.7_Final、Execution_Jobs_Runs 等）若与本文件冲突，以本文件为准。
+> 其他文档（Research_Object_Model、SPEC_v0.8_Final、Execution_Jobs_Runs 等）若与本文件冲突，以本文件为准。
 > 进入实现后，Zod schema 必须与此一一对应。
 
 ---
@@ -11,7 +11,8 @@
 ```yaml
 task_id: TASK-0001                    # 格式: TASK-NNNN
 type: engineering | science_assist | ops
-status: created | planned | running | parked | reporting | awaiting_pi | done | cancelled
+status: created | planned | running | parked | reporting | awaiting_pi | done | cancelled | blocked
+runtime_phase: null               # 运行时辅助字段，见下方说明
 title: "给 SHUD 添加 event flux 诊断输出"
 question_or_goal: "在不破坏 rSHUD 旧版读取的前提下，添加 event_flux 可选输出"
 created_by: alice                     # 创建者，不可变
@@ -31,6 +32,24 @@ updated_at: 2026-04-25T14:30:00Z
 ```
 
 **废弃字段**: 单个 `owner`（歧义）、嵌套 `linked_objects`（过深）。
+
+**runtime_phase 说明**:
+TaskCard.status 使用粗粒度状态机管理任务生命周期。执行期间的细粒度阶段通过 `runtime_phase` 辅助字段跟踪，不参与核心状态流转：
+
+| status | runtime_phase（可选值） | 语义 |
+|--------|------------------------|------|
+| running | `running_local` | 短命令在 sandbox 同步执行 |
+| running | `submitted_job` | 已提交 RunJob，LLM loop 仍活跃 |
+| parked | `waiting_for_job` | Agent 已暂停，等待外部 job 完成 |
+| running | `collecting` | 正在收集日志、输出、指标和 artifact |
+
+`runtime_phase` 仅用于前端展示和调试，不作为状态机转换条件。
+其他文档（Park_Resume_Design、Control_Kernel、Execution_Jobs_Runs 等）中出现的
+`running_local`、`submitted_job`、`parked_waiting_for_job`、`collecting` 均指 runtime_phase，不是 TaskCard.status。
+
+**blocked 说明**: 当硬限制触发（max_retries、no_progress）或 workspace 损坏时，TaskCard 进入 `blocked`。需要人工检查后手动恢复。
+
+**废弃状态**: `revised`（PI 要求修订时，TaskCard 回到 `planned` 并关联新的 ChangeRequest，不使用独立状态）。
 
 ---
 
@@ -176,7 +195,7 @@ rules:
 ```yaml
 report_id: REPORT-0001                # 格式: REPORT-NNNN
 task_id: TASK-0001
-status: draft | reviewed | awaiting_pi | accepted | revision_requested | rejected
+status: draft | reviewed | awaiting_pi | accepted | revision_requested | rejected | archived
 summary: "Tiny benchmark passes; old-output compatibility failed in rSHUD reader."
 observations:
   - "baseline available"
@@ -193,6 +212,7 @@ created_at: 2026-04-25T15:00:00Z
 
 **状态流转**: `draft` → `reviewed`（Reviewer 工程检查通过）→ `awaiting_pi` → `accepted | revision_requested | rejected`。
 `revision_requested` 表示 PI 要求修订后重新提交（区别于直接 `rejected`）。
+`archived` 是 `accepted` 或 `rejected` 之后的可选终态，表示报告已归档、不再活跃但保留可查。
 
 **废弃字段**: 旧 4 态 `draft | pi_reviewed | accepted | rejected`（`pi_reviewed` 拆分为 `reviewed` + `awaiting_pi`，增加 `revision_requested`）。
 
@@ -248,3 +268,6 @@ created_at: 2026-04-25T16:00:00Z
 | TaskCard 关联 | 嵌套 `linked_objects: {stacklock, data, jobs, reports}` | 扁平 `stack_id` + `data_id` + `linked_jobs[]` + `linked_reports[]` | 减少嵌套深度 |
 | EvidenceReport.status | 仅 `draft` 或旧 4 态 `pi_reviewed` | `draft \| reviewed \| awaiting_pi \| accepted \| revision_requested \| rejected` | 区分 Reviewer 检查与 PI 审阅，增加修订态 |
 | StackLock.limits | 在 StackLock 中 | 移入 RunJob.resources | limits 是执行级，不是环境级 |
+| TaskCard 执行细节 | `running_local \| submitted_job \| parked_waiting_for_job \| collecting` 作为 TaskCard.status | 下沉至 `TaskCard.runtime_phase`；TaskCard.status 保持 `running \| parked` 粗粒度 | 执行细节属于 RunJob/ParkedState 领域，不应膨胀 TaskCard 状态机 |
+| TaskCard.revised | `revised` 作为独立状态 | 废弃；PI 修订时回到 `planned` | 减少状态数，`revised` 语义可由 ChangeRequest 关联表达 |
+| TaskCard.blocked | 未在 canonical schema 声明 | 加入 `blocked` | 硬限制和 workspace 损坏需要明确终态 |

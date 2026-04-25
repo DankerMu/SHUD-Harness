@@ -1,6 +1,6 @@
 # 科研宪法与治理规则
 
-> 权威规格见 `SPEC_v0.7_Final.md` Section 3。本文件提供补充说明。
+> 权威规格见 `SPEC_v0.8_Final.md` Section 3。本文件提供补充说明。
 
 ## 1. 核心原则
 

@@ -72,7 +72,7 @@ MVP 不做：
 ```text
 - 全自动科研；
 - 自主演化的 Harness Optimizer；
-- 完整 Web Console；
+- 复杂平台级 Web Console（MVP 做 Web-first 四栏科研工作台的最小可运行版本）；
 - 多层 memory 审批；
 - 大规模 HPC 平台；
 - 复杂 release gate；

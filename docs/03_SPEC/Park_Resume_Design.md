@@ -14,17 +14,18 @@ Plan → Submit RunJob → Park TaskCard → Watch Job → Collect RunRecord →
 
 ## 2. 状态定义
 
-TaskCard 的状态应使用仓库 canonical schema。本文只定义语义：
+TaskCard.status 使用粗粒度状态机（权威定义见 `03_SPEC/Minimal_Schemas.md`）。
+Park/Resume 涉及的阶段映射如下：
 
-| 阶段 | 语义 |
-|---|---|
-| planned | 已形成可执行计划 |
-| submitted_job | 已提交一个或多个 RunJob |
-| parked_waiting_for_job | Agent 已暂停，等待外部 job 完成 |
-| collecting | 正在收集日志、输出、指标和 artifact |
-| reporting | 正在生成 EvidenceReport |
-| awaiting_pi | 等待 PI 审阅、批准或补充判断 |
-| done/blocked/cancelled | 已结束或被阻塞/取消 |
+| TaskCard.status | runtime_phase | 语义 |
+|---|---|---|
+| planned | — | 已形成可执行计划 |
+| running | `submitted_job` | 已提交一个或多个 RunJob |
+| parked | `waiting_for_job` | Agent 已暂停，等待外部 job 完成 |
+| running | `collecting` | 正在收集日志、输出、指标和 artifact |
+| reporting | — | 正在生成 EvidenceReport |
+| awaiting_pi | — | 等待 PI 审阅、批准或补充判断 |
+| done / blocked / cancelled | — | 已结束或被阻塞/取消 |
 
 RunJob 状态应与 TaskCard 区分。TaskCard 代表任务生命周期；RunJob 代表一次执行请求。
 

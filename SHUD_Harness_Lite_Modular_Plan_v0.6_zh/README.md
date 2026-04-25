@@ -1,6 +1,6 @@
 # SHUD-Harness Lite 模块化详细方案 v0.6 (历史归档)
 
-> **注意**: 本文档包为 v0.6 历史归档。当前实施基准为 `docs/SPEC_v0.7_Final.md` (已升级为 v0.8: Web-first + TypeScript 全栈 + 基于 Zero 扩展)。
+> **注意**: 本文档包为 v0.6 历史归档。当前实施基准为 `docs/SPEC_v0.8_Final.md` (已升级为 v0.8: Web-first + TypeScript 全栈 + 基于 Zero 扩展)。
 > v0.6 的核心设计决策（8 对象、Coordinator 角色、Park/Resume、科研治理）在 v0.8 中保留，但技术栈从 Python CLI 迁移到 TypeScript Web-first。
 
 本包是对 v0.5 的收敛重构版。它接受以下前提：

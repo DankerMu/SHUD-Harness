@@ -176,14 +176,16 @@ parameter_set_table:
 
 ## 10. Artifact API
 
-建议接口：
+以下为 canonical data API（权威 endpoint 注册见 `04_IMPLEMENTATION/Schemas_APIs_CLIs.md` §1.1）：
 
 ```text
-GET /api/artifacts/:artifactId/data
-GET /api/runs/:runId/variables
-GET /api/runs/:runId/series?variable_id=rivqdown&aggregation=outlet
-GET /api/analysis/:analysisPlanId/heatmap?metric_id=nse
+GET /api/artifacts/:artifactId/data                                    # canonical
+GET /api/runs/:runId/variables                                         # canonical
+GET /api/runs/:runId/series?variable_id=rivqdown&aggregation=outlet    # canonical
+GET /api/analysis/:analysisPlanId/heatmap?metric_id=nse                # canonical
 ```
+
+图表组件应直接调用上述 canonical API。`/api/runs/:id/hydrograph` 等 convenience endpoint 仅供 MVP 快捷调用，内部代理到 canonical 实现。
 
 ## 11. 验收标准
 
