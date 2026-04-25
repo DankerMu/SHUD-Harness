@@ -150,6 +150,9 @@
 | [`API_Error_And_Idempotency_Contracts.md`](../04_IMPLEMENTATION/API_Error_And_Idempotency_Contracts.md) | API 错误响应与幂等请求契约 |
 | [`Schema_Generation_And_Drift_Control.md`](../04_IMPLEMENTATION/Schema_Generation_And_Drift_Control.md) | Schema 生成与 drift 控制 |
 | [`Testing_Strategy.md`](../04_IMPLEMENTATION/Testing_Strategy.md) | 测试策略 |
+| [`Phase_By_Phase_Test_Plan.md`](../04_IMPLEMENTATION/Phase_By_Phase_Test_Plan.md) | W0-W8 阶段测试矩阵（Test ID + 场景 + Pass Criterion） |
+| [`Test_Fixtures_And_Command_Matrix.md`](../04_IMPLEMENTATION/Test_Fixtures_And_Command_Matrix.md) | 测试 Fixture 层级与命令矩阵 |
+| [`Traceability_Matrix.md`](../04_IMPLEMENTATION/Traceability_Matrix.md) | 需求 → 文档 → 代码 → 测试 → Release 追踪矩阵 |
 | [`CICD_Release.md`](../04_IMPLEMENTATION/CICD_Release.md) | CI/CD 与发布 |
 | [`Deployment_Architecture.md`](../04_IMPLEMENTATION/Deployment_Architecture.md) | 部署架构 |
 | [`DOD_and_Risks.md`](../04_IMPLEMENTATION/DOD_and_Risks.md) | 完成定义与风险 |

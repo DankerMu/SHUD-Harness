@@ -14,6 +14,22 @@
 | report | EvidenceReport 生成和 language guard |
 | e2e | Web UI 创建 task、运行 job、生成 report |
 
+### 阶段测试矩阵
+
+| Week | 必须新增的自动化测试 | Fixture | CI 级别 |
+|---:|---|---|---|
+| W0 | gitmodules parse, docs link, readiness YAML | none | PR |
+| W1 | core schema, API task, snapshot reload, UI shell smoke | schema-only | PR |
+| W2 | submodule discovery, data sha256, artifact manifest | schema-only | PR |
+| W3 | dummy job submit/log/collect, WebSocket reconnect, recovery smoke | dummy-runner | PR |
+| W4 | SHUD build/run tiny, RunRecord, hydrograph, WB residual | ccw tiny | nightly/manual |
+| W5 | rSHUD roundtrip, old-output fixture, patch bundle | old-output | PR/nightly |
+| W6 | batch progress, failed cell, heatmap aggregation | dummy-batch | PR |
+| W7 | report guard, PI decision, export, notification mock | report fixture | PR |
+| W8 | Zero adapter, LLM stream, natural language e2e | dummy-runner | PR/nightly |
+
+详细阶段测试见 [Phase_By_Phase_Test_Plan.md](Phase_By_Phase_Test_Plan.md)。Fixture 与命令矩阵见 [Test_Fixtures_And_Command_Matrix.md](Test_Fixtures_And_Command_Matrix.md)。CI 映射见 [CICD_Release.md](CICD_Release.md)。
+
 ## 2. Schema 测试
 
 必须测试：

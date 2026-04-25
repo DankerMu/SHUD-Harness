@@ -1,0 +1,19 @@
+# Manifest
+
+```text
+README.md
+MANIFEST.md
+
+docs/04_IMPLEMENTATION/Readiness_Gate_Closeout_Checklist.md
+docs/04_IMPLEMENTATION/Implementation_Sprint_Backlog.md
+docs/04_IMPLEMENTATION/Phase_By_Phase_Test_Plan.md
+docs/04_IMPLEMENTATION/Test_Fixtures_And_Command_Matrix.md
+docs/04_IMPLEMENTATION/CI_Test_Jobs_By_Phase.md
+docs/04_IMPLEMENTATION/Traceability_Matrix.md
+
+patches/04_IMPLEMENTATION/Phased_Plan__add_phase_gates.md
+patches/04_IMPLEMENTATION/Testing_Strategy__add_phase_matrix.md
+patches/04_IMPLEMENTATION/MVP_Implementation_Readiness_Checklist__closeout.md
+patches/04_IMPLEMENTATION/CICD_Release__add_phase_jobs.md
+patches/docs/SPEC_v0.8_Final__minor_state_diagram_fix.md
+```

@@ -447,7 +447,7 @@ Job 等待期间 ≠ LLM 调用, 不计费。
 ```
 TaskCard.status 流转:
 created ──→ planned ──→ running ──→ reporting ──→ awaiting_pi ──→ done
-                    │                                        ├──→ revision_requested → running
+                    │                                        ├──→ planned (PI request_revision; 旧报告 EvidenceReport.status → revision_requested)
                     ├──→ parked ──→ running ──→ reporting     └──→ cancelled
                     └──→ blocked (budget/error/no-progress)
 
@@ -640,7 +640,7 @@ Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 
 9. PI 判断
    ├── 接受 → apply patch to main branch
-   ├── 修改 → task.status = revision_requested → 回到 step 4
+   ├── 修改 → task.status = planned (旧报告 EvidenceReport.status → revision_requested) → 回到 step 4
    └── 拒绝 → task.status = cancelled
 ```
 
