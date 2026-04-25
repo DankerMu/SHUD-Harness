@@ -12,6 +12,10 @@ docker_job   — 可选，固定环境容器执行
 
 Slurm/HPC 仅定义接口，不在 MVP 实现。
 
+### Runner Adapter 统一接口
+
+各 backend（local_direct / local_job / docker_job / slurm）的 submit / status / cancel / collect 接口见 [Runner_Adapter_Contracts.md](Runner_Adapter_Contracts.md)。RunJob.backend 是领域状态，不应暴露 Docker/SLURM 的原始状态。
+
 ## 2. RunJob 状态机
 
 ```text
@@ -108,6 +112,10 @@ Block 后报告包含：已尝试的操作、失败点、建议 PI 下一步。
 | SHUD output format | SHUD tiny + rSHUD roundtrip + compatibility |
 | numerical core | tiny + fixed regression + PI 选择是否 batch |
 | preprocessing | affected basin/event only |
+
+### Collect 幂等性
+
+Collect 必须幂等。重复 collect 同一 job 不得生成多个 RunRecord。幂等 key、collect.lock、recovery 规则见 [Idempotency_Concurrency_Locking_Spec.md](Idempotency_Concurrency_Locking_Spec.md)。
 
 ## 8. RunRecord 是复盘核心
 

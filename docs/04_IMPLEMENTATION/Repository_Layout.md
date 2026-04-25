@@ -37,6 +37,18 @@ shud-harness/                        # TypeScript monorepo (Bun workspace)
             sandbox.ts
             memory-service.ts
             cost-tracker.ts
+            artifact-registry.ts
+            idempotency-service.ts
+            lock-service.ts
+            snapshot-service.ts
+            notification-service.ts
+            config-service.ts
+            audit-service.ts
+            runner-adapters/
+              local-direct.ts
+              local-job.ts
+              docker-job.ts
+              slurm.ts
     backend/                         # Hono API 服务
       src/
         routes/
@@ -89,6 +101,12 @@ shud-harness/                        # TypeScript monorepo (Bun workspace)
           StatusBar.tsx              # 底部状态栏
           MarkdownRenderer.tsx       # Markdown 报告渲染
           DiffViewer.tsx             # 代码 diff 预览
+          BatchProgressGrid.tsx      # 批量运行进度网格
+          BatchCellDetailPanel.tsx   # 单 cell 详情面板
+          ReportExportButton.tsx     # 报告导出按钮
+          PIDecisionPanel.tsx        # PI 审批决策面板
+          NotificationStatus.tsx     # 通知状态指示器
+          ArtifactRef.tsx            # Artifact 引用组件
         api/
           client.ts                  # API + WebSocket client (共享 Zod schemas)
         hooks/

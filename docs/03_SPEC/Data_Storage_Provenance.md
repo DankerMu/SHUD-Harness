@@ -24,6 +24,10 @@ shud-workspace/
   reports/           # Markdown reports
 ```
 
+### Artifact Registry
+
+所有 `artifacts/` 下可被 EvidenceReport、Visualization、ReportExport 或 RunRecord 引用的文件，都必须登记为 Artifact。Artifact schema、manifest、retention_class 和 evidence_usable 规则见 [Artifact_Registry_Spec.md](Artifact_Registry_Spec.md)。
+
 ## 3. Git 策略
 
 进入 Git：
@@ -92,6 +96,10 @@ MVP 必须有清理策略：
 - benchmark baseline runs: 保留，除非 PI 批准替换；
 - batch sensitivity raw outputs: 可按需归档。
 ```
+
+### 数据包与清理边界
+
+Report export、evidence package、debug package 和 benchmark package 的打包边界见 [Data_Package_And_Retention_Spec.md](Data_Package_And_Retention_Spec.md)。清理策略必须先检查 artifact 是否被 accepted report 或 benchmark baseline 引用。
 
 ## 7. Agent 不得修改 raw data
 

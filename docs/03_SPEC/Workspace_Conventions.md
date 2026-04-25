@@ -105,6 +105,16 @@ artifacts/
   manifests/
 ```
 
+### 补充目录
+
+```text
+snapshots/          — workspace/session/task 状态快照
+locks/              — 幂等锁和任务锁文件
+exports/            — 报告导出文件
+packages/           — 数据打包（evidence/debug/benchmark）
+notifications/      — 通知记录
+```
+
 Artifact 文件名建议包含 task/run/report ID：
 
 ```text
@@ -210,6 +220,10 @@ memory/pi_decisions/NOTE-001.yaml
 ### Path safety
 
 Standalone HTML export 不得写出 workspace 根目录。Export 中引用的 artifact path 应使用相对路径或 artifact id，不使用敏感绝对路径。
+
+### 锁与恢复机制
+
+锁文件和幂等记录见 [Idempotency_Concurrency_Locking_Spec.md](Idempotency_Concurrency_Locking_Spec.md)。Workspace snapshot 和 service restart recovery 见 [Workspace_Snapshot_And_Recovery_Spec.md](Workspace_Snapshot_And_Recovery_Spec.md)。
 
 ## 10. 清理策略
 

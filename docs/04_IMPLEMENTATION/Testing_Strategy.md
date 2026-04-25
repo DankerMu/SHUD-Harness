@@ -129,6 +129,15 @@ E2E 流程：
 - [ ] 成功 decision 写 audit log、MemoryNote 和 report decision history。
 - [ ] MemoryNote(type=pi_decision) 的 `generalization_allowed=false`。
 
+### 补充测试类别
+
+- **Support schema 测试**：Artifact、PiGate、NotificationRecord、ReportExport、AnalysisProgressPayload、ErrorRecord、AuditEvent 的 Zod 校验。
+- **Artifact registry 测试**：evidence_usable 判定、retention_class 约束、manifest integrity 校验。
+- **Idempotency 测试**：collect / export / notification / PI decision 重复请求不产生冲突对象。
+- **Snapshot recovery 测试**：since_seq 过期时走 snapshot_required 流程、service restart 后 parked job 恢复。
+- **Runner adapter 测试**：local_direct / local_job 的 status mapping 和 collect result 格式。
+- **API error 测试**：400 / 403 / 409 / 422 统一 envelope 返回。
+
 ## 8. 验收标准
 
 - [ ] CI 跑 schema/unit/integration 测试。

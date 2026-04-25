@@ -65,6 +65,10 @@ POST   /api/notes                        # 添加笔记
 GET    /api/notes                        # 笔记列表
 ```
 
+### API 错误与幂等性
+
+API 错误响应、HTTP status mapping、Idempotency-Key 和 retry policy 见 [API_Error_And_Idempotency_Contracts.md](API_Error_And_Idempotency_Contracts.md)。
+
 ## 1.1 API 分层规则
 
 数据读取 API 分为两层：
@@ -145,6 +149,10 @@ AnalysisProgressPayload → packages/core/src/domain/schemas/analysis-progress.t
 PiGateDecision     → packages/core/src/domain/schemas/pi-gate-decision.ts
 MemoryNote(pi_decision) → packages/core/src/domain/schemas/note.ts
 ```
+
+### Schema 生成与 Drift 控制
+
+Zod schema 生成 JSON Schema / Markdown schema 的流程见 [Schema_Generation_And_Drift_Control.md](Schema_Generation_And_Drift_Control.md)。实现后不再手工维护 generated schema 文档。
 
 ## 6. Report Generation
 

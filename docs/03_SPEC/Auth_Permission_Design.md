@@ -92,6 +92,10 @@ POST /api/pi-gates/:gateId/decision
 
 `POST /api/tasks/:id/approve` 可作为 convenience endpoint，但内部应委托到 PI gate decision handler。
 
+### 关联 Schema 定义
+
+User、Session、PermissionDecision、AuditEvent 和 AgentIdentity 的完整 schema 定义见 [User_Session_And_Audit_Schema.md](User_Session_And_Audit_Schema.md)。
+
 ## 5. Session 与登录
 
 MVP 可以采用本地密码或一次性 setup token。小团队部署建议：
@@ -135,6 +139,10 @@ llm_usage:
   model: gpt-5.5-pro
   api_key_ref: local_env:OPENAI_API_KEY
 ```
+
+### 配置与密钥管理规范
+
+SecretRef、ConfigRecord、环境变量命名和 redaction policy 的完整规范见 [Config_Secrets_And_Environment_Spec.md](Config_Secrets_And_Environment_Spec.md)。
 
 ## 7. Agent 权限
 

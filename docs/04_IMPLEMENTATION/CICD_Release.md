@@ -41,6 +41,16 @@ bun run schema:generate
  git diff --exit-code docs/generated/schema
 ```
 
+### 补充 CI 检查项
+
+- `.gitmodules` 格式验证
+- 文档链接检查（`docs:links`）
+- Schema 生成与 drift 检查（`schema:generate` + `schema:check`）
+- docs 和 sample artifacts 的 secret 扫描
+- Support schema 测试
+- Artifact manifest 测试
+- Idempotency 测试
+
 ## 4. 文档检查
 
 Markdown lint 至少检查：
@@ -50,6 +60,8 @@ Markdown lint 至少检查：
 - 代码块闭合；
 - 文件路径是否英文；
 - canonical/superseded 标注。
+
+文档链接检查必须确认 `MASTER_INDEX.md` 中列出的每个文件存在。
 
 ## 5. Release 内容
 

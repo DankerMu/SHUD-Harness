@@ -27,6 +27,10 @@ created_by: agent
 reviewed_by: null
 ```
 
+### PI Decision 类型约束
+
+`pi_decision` 类型 MemoryNote 的详细 schema 见 [Support_Schema_Contracts.md](Support_Schema_Contracts.md) 和 [PI_Decision_Comments_Spec.md](PI_Decision_Comments_Spec.md)。其 `generalization_allowed` 必须为 false，不得自动升级为跨流域科学事实。
+
 ## 3. 什么时候需要 PI review
 
 需要 PI review：
@@ -112,3 +116,8 @@ MVP 先用 keyword + tags，不强依赖 embeddings：
 ```
 
 需要时再加 embedding，以控制成本。
+
+## 9. 验收标准
+
+- [ ] MemoryTool 不自动把 evidence_note 标记为 verified。
+- [ ] pi_decision note 只能由 PI decision flow 产生。

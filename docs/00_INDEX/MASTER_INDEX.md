@@ -1,101 +1,178 @@
 # SHUD-Harness 文档主索引
 
-> **当前基准版本**: v0.8.1 (2026-04-24)
-> 技术栈: TypeScript 全栈 (Bun + Hono + React)，基于 Zero agent runtime 扩展。
-> Web 是用户唯一交互渠道。所有旧版文档 (v0.1–v0.6) 已归档或保留为参考。
-
-## 核心文件 (只需读这两个即可开始开发)
-
-1. **`../CLAUDE.md`** — 项目定义 + 仓库布局 + 设计决策速查
-2. **`SPEC_v0.8_Final.md`** — 自包含实施规格书 (v0.8: 对象模型 + Coordinator 行为 + Playbook + 8 周计划 + 验收标准)
-
-## 补充参考
-
-- `01_CODEBASE/` — 四个 repo 的代码现实报告 (SHUD/rSHUD/AutoSHUD/Zero)
-- `02_ARCHITECTURE/` — 架构文档 (定位/角色/Agent 实例模型/Web 交互模型/状态机/Zero 扩展)
-- `03_SPEC/` — 规范文档 (对象/Schema/执行/沙箱/WebSocket/前端/可视化/报告/Park-Resume/权限/错误处理/变量注册/成本)
-- `04_IMPLEMENTATION/` — 实施文档 (TS monorepo/REST API/8 周计划/DoD/Playbook/部署/测试/CI-CD)
-- `00_INDEX/GAP_ANALYSIS.md` — 文档设计 vs 代码现实差距分析
+> **版本**: v0.8.1 (2026-04-25)
+> **技术栈**: TypeScript 全栈 (Bun + Hono + React)，基于 Zero Agent Runtime 扩展
+> **交互模式**: Web-first，实时对话 + 日志流 + PI 审批 + 报告阅读
+> **文档总量**: 4 个目录，68 份规范文档
 
 ---
 
-## 文档清单
+## 核心文件
 
-### 00_INDEX/ — 索引与导航
+开始开发前只需读这三份：
+
 | 文件 | 用途 |
 |------|------|
-| `MASTER_INDEX.md` | 本文件 |
-| `GAP_ANALYSIS.md` | 文档设计 vs 代码现实差距分析 (v0.5 阶段，部分已解决) |
+| [`../../CLAUDE.md`](../../CLAUDE.md) | 项目定义 + 仓库布局 + 设计决策速查 |
+| [`../SPEC_v0.8_Final.md`](../SPEC_v0.8_Final.md) | 自包含实施规格书（阅读基准） |
+| [`CANONICAL_CONTRACTS.md`](CANONICAL_CONTRACTS.md) | Schema / API / Event / Path / Artifact / Lock 的唯一事实源索引 |
 
-### 01_CODEBASE/ — 代码库现实报告 (2026-04-24 深度探索)
-| 文件 | 对象 |
-|------|------|
-| `SHUD_Codebase_Report.md` | C++ 求解器: ~7K 行, CVODE 6.0, 5 类状态变量 |
-| `rSHUD_Codebase_Report.md` | R 工具包: 154 函数, terra/sf, 二进制 I/O |
-| `AutoSHUD_Codebase_Report.md` | R 自动化: 7 步流水线, 多源数据, 配置驱动 |
-| `Zero_Codebase_Report.md` | Agent Runtime: 11 包, 18 工具, SHUD-Harness 基础实现 |
+---
 
-### 02_ARCHITECTURE/ — 架构与治理
+## 00_INDEX/ -- 索引与导航
+
 | 文件 | 用途 |
 |------|------|
-| `Architecture_Decisions.md` | MVP 定位、边界、非目标 |
-| `Roles_and_Boundaries.md` | PI/Coordinator/Worker/Reviewer 职责边界 |
-| `Agent_Architecture.md` | **Agent 实例模型**: 角色/通信/决策流/闭环标准/并发规则 |
-| `Interaction_Model.md` | **Web 四栏工作台**: 对话驱动 + 日志流 + PI 审批 + 报告阅读 |
-| `Control_Kernel.md` | 最小运行时状态机 + Park/Resume |
-| `Zero_Reuse_Matrix.md` | **基于 Zero 扩展**: 复用矩阵 + Adapter 层 + Hook/Tool 命名空间 + 集成步骤 |
-| `Module_Status_Matrix.md` | [E]/[O]/[N] 模块矩阵 |
-| `Research_Constitution.md` | 科研治理规则 (参见 SPEC v0.8 Section 3) |
+| [`MASTER_INDEX.md`](MASTER_INDEX.md) | 本文件 |
+| [`GAP_ANALYSIS.md`](GAP_ANALYSIS.md) | v0.8 设计差距分析 |
+| [`CANONICAL_CONTRACTS.md`](CANONICAL_CONTRACTS.md) | Canonical contract 索引 |
+| [`Spec_Gap_Audit_v0_8_1.md`](Spec_Gap_Audit_v0_8_1.md) | v0.8.1 规格缺口审查 |
 
-### 03_SPEC/ — 规范
+---
+
+## 01_CODEBASE/ -- 代码库现实报告
+
 | 文件 | 用途 |
 |------|------|
-| `Minimal_Schemas.md` | **Canonical Schema Contract**: 9 个对象唯一权威字段定义 |
-| `Research_Object_Model.md` | 8 个核心对象 + 合并/降级对照表 |
-| `Execution_Jobs_Runs.md` | 3 种执行模式、Park/Resume、失败恢复、Sandbox 执行器、长任务转换 |
-| `Park_Resume_Design.md` | **长任务全生命周期**: parked_state/job watcher/幂等 collect/Resume 上下文重建 |
-| `WebSocket_Protocol.md` | **实时通信协议**: 事件 envelope/20 种消息类型/seq/ack/心跳/断线重连 |
-| `Frontend_State_Design.md` | **四栏前端状态**: 5 层 store/WebSocket reducer/entity 缓存/chart 状态 |
-| `UI_Implementation_Spec.md` | **UI 实现规格**: 设计 tokens/组件规格/状态矩阵/响应式/a11y/技术栈 |
-| `UX_Design_Spec.md` | **UX 设计规格**: 用户旅程/信息层级/反馈模式/注意力管理/决策支持/长任务体验 |
-| `Visualization_Data_Spec.md` | **可视化数据契约**: Hydrograph/Comparison/Heatmap/MetricsCards 的 JSON 格式 |
-| `SHUD_Output_Variables.md` | **SHUD 输出变量注册表**: 32 变量/单位/优先级/水量平衡角色/数值健康阈值 |
-| `Report_Generation_Spec.md` | **EvidenceReport 生成**: 6 阶段流程/模板/语言约束/证据等级/审阅状态 |
-| `Auth_Permission_Design.md` | **认证与权限**: 5 角色权限矩阵/PI gate/session/API key/审计 |
-| `Error_Handling_Spec.md` | **错误处理**: 10 分类/4 严重级别/重试策略/用户提示/错误记录 |
-| `Sensitivity_Calibration_Benchmark.md` | 敏感性一等公民、校准 ≠ 科学、3 层 benchmark |
-| `Sensitivity_Calibration_Benchmark_Addendum.md` | **补充**: 参数空间/批运行独立性/指标解读/语言推荐/PI gate 触发 |
-| `Sandbox_and_Executor.md` | 沙箱权限、命令 trace、回滚策略 |
-| `Workspace_Conventions.md` | **Workspace 约定**: 目录结构/artifact 命名/路径安全/清理策略 |
-| `Memory_Skills_Lite.md` | 2 级 memory、3 阶段 skill |
-| `Cost_Inference_Budget.md` | 软监控: cheap/normal/deep + cost_record 结构 + Token 阶段归因 |
-| `Multiuser_Harness_Versioning.md` | Lite 锁、Harness 版本进 StackLock |
-| `Internationalization_Localization.md` | **国际化**: 中英术语表/报告语言约束/单位显示 |
-| `Operational_UX_Addendum.md` | **v0.8.1 操作体验补充**: 通知、报告导出、批运行进度、PI 审批批注总览 |
-| `Notification_Design.md` | **长任务通知**: Park/Resume 后 out-of-band email 通知、收件人解析、去重和失败策略 |
-| `Report_Export_Spec.md` | **报告导出**: EvidenceReport standalone HTML / Markdown export、draft watermark、export manifest |
-| `Batch_Progress_View_Spec.md` | **批运行进度视图**: ParameterSet × RunJob status grid、cell detail、progress payload |
-| `PI_Decision_Comments_Spec.md` | **PI 审批批注**: decision comment、必填规则、audit log、MemoryNote(type=pi_decision) |
-| `Data_Storage_Provenance.md` | 存储层次、Git 策略、DuckDB 指标仓 |
+| [`SHUD_Codebase_Report.md`](../01_CODEBASE/SHUD_Codebase_Report.md) | SHUD C++ 求解器代码报告 |
+| [`rSHUD_Codebase_Report.md`](../01_CODEBASE/rSHUD_Codebase_Report.md) | rSHUD R 工具包代码报告 |
+| [`AutoSHUD_Codebase_Report.md`](../01_CODEBASE/AutoSHUD_Codebase_Report.md) | AutoSHUD R 脚本代码报告 |
+| [`Zero_Codebase_Report.md`](../01_CODEBASE/Zero_Codebase_Report.md) | Zero Agent Runtime 代码报告 |
 
-### 04_IMPLEMENTATION/ — 实施
+---
+
+## 02_ARCHITECTURE/ -- 架构与治理
+
 | 文件 | 用途 |
 |------|------|
-| `Repository_Layout.md` | **TS monorepo** (packages/core + backend + frontend) + shud-workspace |
-| `Schemas_APIs_CLIs.md` | **REST API + WebSocket** 端点 + Zod schema |
-| `Phased_Plan.md` | **8 周实施计划** (Hono + React + 逐周功能交付) |
-| `DOD_and_Risks.md` | 9 项 MVP DoD + 成功 = 时间节省 |
-| `Task_Playbooks.md` | 工程/科研辅助/运维 3 种 Web 交互工作流 |
-| `Deployment_Architecture.md` | **部署架构**: 本地开发/单机/Docker/HPC-SLURM 4 种模式 |
-| `Testing_Strategy.md` | **测试策略**: 5 层测试金字塔/Schema/WebSocket/Sandbox/fixture/E2E |
-| `Operational_UX_API_Contracts.md` | **Operational UX API**: report export、PI gate decision、analysis progress、notification events |
-| `Operational_UX_Testing_Addendum.md` | **Operational UX 测试补充**: 通知、导出、批进度、PI comment 的 unit/integration/E2E 测试 |
-| `CICD_Release.md` | **CI/CD**: 11 步 pipeline/submodule 检查/schema drift 检测/版本策略 |
+| [`Architecture_Decisions.md`](../02_ARCHITECTURE/Architecture_Decisions.md) | 架构决策记录 |
+| [`Agent_Architecture.md`](../02_ARCHITECTURE/Agent_Architecture.md) | Agent 架构 |
+| [`Control_Kernel.md`](../02_ARCHITECTURE/Control_Kernel.md) | 控制内核 |
+| [`Interaction_Model.md`](../02_ARCHITECTURE/Interaction_Model.md) | 交互模型 |
+| [`Roles_and_Boundaries.md`](../02_ARCHITECTURE/Roles_and_Boundaries.md) | 角色与边界 |
+| [`Research_Constitution.md`](../02_ARCHITECTURE/Research_Constitution.md) | 研究宪章 |
+| [`Module_Status_Matrix.md`](../02_ARCHITECTURE/Module_Status_Matrix.md) | 模块状态矩阵 |
+| [`Zero_Reuse_Matrix.md`](../02_ARCHITECTURE/Zero_Reuse_Matrix.md) | Zero 复用矩阵 |
 
-### 99_ARCHIVE/ — 已归档
-| 内容 | 数量 |
+---
+
+## 03_SPEC/ -- 规范
+
+### 核心对象与 Schema
+
+| 文件 | 用途 |
 |------|------|
-| v0.1–v0.4 文档 | 6 个 .md |
-| v0.5 模块化方案包 | 完整目录 (27 文件) |
-| v0.6 设计补充包 | shud_harness_v0_8_design_addendum_zh/ (原始来源) |
-| 项目图片 | 6 个 .png |
+| [`Minimal_Schemas.md`](../03_SPEC/Minimal_Schemas.md) | 8 个核心对象 + MemoryNote 权威定义 |
+| [`Support_Schema_Contracts.md`](../03_SPEC/Support_Schema_Contracts.md) | Support schema 统一定义（Artifact、ErrorRecord、PiGate 等） |
+| [`Research_Object_Model.md`](../03_SPEC/Research_Object_Model.md) | 研究对象模型 |
+
+### 执行与运行
+
+| 文件 | 用途 |
+|------|------|
+| [`Execution_Jobs_Runs.md`](../03_SPEC/Execution_Jobs_Runs.md) | 执行、长任务、RunRecord 与恢复 |
+| [`Runner_Adapter_Contracts.md`](../03_SPEC/Runner_Adapter_Contracts.md) | Runner 统一 adapter 接口（local/docker/slurm） |
+| [`Sandbox_and_Executor.md`](../03_SPEC/Sandbox_and_Executor.md) | 沙箱与执行器 |
+| [`Park_Resume_Design.md`](../03_SPEC/Park_Resume_Design.md) | Park/Resume 长任务设计 |
+| [`Idempotency_Concurrency_Locking_Spec.md`](../03_SPEC/Idempotency_Concurrency_Locking_Spec.md) | 幂等、并发与锁 |
+
+### 数据与存储
+
+| 文件 | 用途 |
+|------|------|
+| [`Data_Storage_Provenance.md`](../03_SPEC/Data_Storage_Provenance.md) | 数据存储与溯源 |
+| [`Artifact_Registry_Spec.md`](../03_SPEC/Artifact_Registry_Spec.md) | Artifact 注册、manifest、证据性 |
+| [`Workspace_Conventions.md`](../03_SPEC/Workspace_Conventions.md) | Workspace 路径与文件生命周期 |
+| [`Workspace_Snapshot_And_Recovery_Spec.md`](../03_SPEC/Workspace_Snapshot_And_Recovery_Spec.md) | Snapshot 与恢复 |
+| [`Data_Package_And_Retention_Spec.md`](../03_SPEC/Data_Package_And_Retention_Spec.md) | 数据包与保留策略 |
+| [`Config_Secrets_And_Environment_Spec.md`](../03_SPEC/Config_Secrets_And_Environment_Spec.md) | 配置、密钥与环境变量 |
+
+### 分析与校准
+
+| 文件 | 用途 |
+|------|------|
+| [`Sensitivity_Calibration_Benchmark.md`](../03_SPEC/Sensitivity_Calibration_Benchmark.md) | 敏感性/校准/基准分析 |
+| [`Sensitivity_Calibration_Benchmark_Addendum.md`](../03_SPEC/Sensitivity_Calibration_Benchmark_Addendum.md) | 分析补充规范 |
+| [`Parameter_Set_And_Analysis_Run_Mapping.md`](../03_SPEC/Parameter_Set_And_Analysis_Run_Mapping.md) | ParameterSet 与运行映射 |
+
+### 报告与证据
+
+| 文件 | 用途 |
+|------|------|
+| [`Report_Generation_Spec.md`](../03_SPEC/Report_Generation_Spec.md) | EvidenceReport 生成规范 |
+| [`Report_Review_And_Evidence_Lineage_Spec.md`](../03_SPEC/Report_Review_And_Evidence_Lineage_Spec.md) | 报告审查与证据链 |
+| [`Report_Export_Spec.md`](../03_SPEC/Report_Export_Spec.md) | 报告导出规范 |
+
+### 权限与审计
+
+| 文件 | 用途 |
+|------|------|
+| [`Auth_Permission_Design.md`](../03_SPEC/Auth_Permission_Design.md) | 认证与权限设计 |
+| [`User_Session_And_Audit_Schema.md`](../03_SPEC/User_Session_And_Audit_Schema.md) | User/Session/Audit schema |
+
+### 交互与前端
+
+| 文件 | 用途 |
+|------|------|
+| [`WebSocket_Protocol.md`](../03_SPEC/WebSocket_Protocol.md) | WebSocket 实时协议 |
+| [`Visualization_Data_Spec.md`](../03_SPEC/Visualization_Data_Spec.md) | 可视化数据规范 |
+| [`UI_Implementation_Spec.md`](../03_SPEC/UI_Implementation_Spec.md) | UI 实施规范 |
+| [`UX_Design_Spec.md`](../03_SPEC/UX_Design_Spec.md) | UX 设计规范 |
+| [`Frontend_State_Design.md`](../03_SPEC/Frontend_State_Design.md) | 前端状态设计 |
+| [`Batch_Progress_View_Spec.md`](../03_SPEC/Batch_Progress_View_Spec.md) | 批量进度视图规范 |
+| [`PI_Decision_Comments_Spec.md`](../03_SPEC/PI_Decision_Comments_Spec.md) | PI 决策批注规范 |
+| [`Notification_Design.md`](../03_SPEC/Notification_Design.md) | 通知设计 |
+| [`Operational_UX_Addendum.md`](../03_SPEC/Operational_UX_Addendum.md) | 运维体验补充 |
+
+### 运行时
+
+| 文件 | 用途 |
+|------|------|
+| [`Memory_Skills_Lite.md`](../03_SPEC/Memory_Skills_Lite.md) | 轻量记忆与技能 |
+| [`Cost_Inference_Budget.md`](../03_SPEC/Cost_Inference_Budget.md) | 推理预算 |
+| [`Error_Handling_Spec.md`](../03_SPEC/Error_Handling_Spec.md) | 错误处理规范 |
+| [`Multiuser_Harness_Versioning.md`](../03_SPEC/Multiuser_Harness_Versioning.md) | 多用户与版本管理 |
+| [`Internationalization_Localization.md`](../03_SPEC/Internationalization_Localization.md) | 国际化 |
+| [`SHUD_Output_Variables.md`](../03_SPEC/SHUD_Output_Variables.md) | SHUD 输出变量 |
+
+---
+
+## 04_IMPLEMENTATION/ -- 实施
+
+| 文件 | 用途 |
+|------|------|
+| [`Phased_Plan.md`](../04_IMPLEMENTATION/Phased_Plan.md) | 8 周分阶段实施计划 |
+| [`MVP_Implementation_Readiness_Checklist.md`](../04_IMPLEMENTATION/MVP_Implementation_Readiness_Checklist.md) | 开工前 readiness 检查清单 |
+| [`Repository_Layout.md`](../04_IMPLEMENTATION/Repository_Layout.md) | 仓库目录与 monorepo 结构 |
+| [`Schemas_APIs_CLIs.md`](../04_IMPLEMENTATION/Schemas_APIs_CLIs.md) | API 端点与 schema 验证 |
+| [`API_Error_And_Idempotency_Contracts.md`](../04_IMPLEMENTATION/API_Error_And_Idempotency_Contracts.md) | API 错误响应与幂等请求契约 |
+| [`Schema_Generation_And_Drift_Control.md`](../04_IMPLEMENTATION/Schema_Generation_And_Drift_Control.md) | Schema 生成与 drift 控制 |
+| [`Testing_Strategy.md`](../04_IMPLEMENTATION/Testing_Strategy.md) | 测试策略 |
+| [`CICD_Release.md`](../04_IMPLEMENTATION/CICD_Release.md) | CI/CD 与发布 |
+| [`Deployment_Architecture.md`](../04_IMPLEMENTATION/Deployment_Architecture.md) | 部署架构 |
+| [`DOD_and_Risks.md`](../04_IMPLEMENTATION/DOD_and_Risks.md) | 完成定义与风险 |
+| [`Task_Playbooks.md`](../04_IMPLEMENTATION/Task_Playbooks.md) | 任务 Playbook |
+| [`Operational_UX_API_Contracts.md`](../04_IMPLEMENTATION/Operational_UX_API_Contracts.md) | 运维体验 API 契约 |
+| [`Operational_UX_Testing_Addendum.md`](../04_IMPLEMENTATION/Operational_UX_Testing_Addendum.md) | 运维体验测试补充 |
+
+---
+
+## 99_ARCHIVE/ -- 已归档
+
+历史版本文档（v0.1--v0.6）及设计补充包（v0.8 design addendum、operational UX addendum）均已归档于此目录，仅供追溯参考。当前规范以上述各目录中的正式文档为准。
+
+---
+
+## 文档阅读顺序建议
+
+1. **[`../../CLAUDE.md`](../../CLAUDE.md)** -- 了解项目定位、仓库布局和 10 项设计决策
+2. **[`../SPEC_v0.8_Final.md`](../SPEC_v0.8_Final.md)** -- 通读自包含规格书，建立全局认知
+3. **[`CANONICAL_CONTRACTS.md`](CANONICAL_CONTRACTS.md)** -- 掌握所有 canonical contract 的索引位置
+4. **[`../03_SPEC/Minimal_Schemas.md`](../03_SPEC/Minimal_Schemas.md)** -- 熟悉 8 个核心对象字段定义
+5. **按需深入** -- 根据当前工作领域选读：
+   - 后端开发：Execution_Jobs_Runs -> Park_Resume_Design -> Runner_Adapter_Contracts -> Sandbox_and_Executor
+   - 前端开发：Interaction_Model -> Frontend_State_Design -> WebSocket_Protocol -> UI_Implementation_Spec -> UX_Design_Spec
+   - 数据层：Data_Storage_Provenance -> Workspace_Conventions -> Artifact_Registry_Spec
+   - 分析校准：Sensitivity_Calibration_Benchmark -> Parameter_Set_And_Analysis_Run_Mapping
+   - 部署运维：Deployment_Architecture -> CICD_Release -> Testing_Strategy
+   - 实施计划：Phased_Plan -> Repository_Layout -> DOD_and_Risks

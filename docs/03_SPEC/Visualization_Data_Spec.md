@@ -30,6 +30,10 @@ visualization_dataset:
   data: ...
 ```
 
+### Artifact 关联要求
+
+每个 visualization dataset 必须登记为 Artifact 或引用已有 Artifact。图表数据不可直接从任意文件读取，必须通过 [Artifact_Registry_Spec.md](Artifact_Registry_Spec.md) 中的 metadata 和 source_refs 校验。
+
 ## 3. HydrographChart
 
 ### 3.1 数据格式
@@ -235,6 +239,10 @@ GET /api/analysis/:analysisPlanId/progress
 - 不依赖浏览器内 runtime state 才能理解。
 
 不应把完整 timeseries JSON 或大型日志内联到 standalone HTML。HTML 中保留 artifact ref 和摘要即可。
+
+### 导出图表 Artifact 规范
+
+导出图表的 PNG/SVG artifact 必须包含 alt text、caption、generation parameters、source_ref 和 sha256。
 
 ## 11. 验收标准
 

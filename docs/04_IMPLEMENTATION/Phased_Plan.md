@@ -1,5 +1,9 @@
 # 8 周实施计划
 
+### Readiness Gate
+
+进入 Week 1 前，必须完成 [MVP_Implementation_Readiness_Checklist.md](MVP_Implementation_Readiness_Checklist.md) 的 P0 项。
+
 ## Week 1：Monorepo + 四栏壳 + 基础 API
 
 交付：
@@ -11,6 +15,10 @@
 - Dashboard 页面 (任务列表)
 - TaskCard Zod schema
 - workspace 文件树自动生成
+- Artifact schema + artifact registry skeleton
+- ErrorRecord schema + API error envelope
+- Idempotency/lock service skeleton
+- Task snapshot skeleton
 ```
 
 验收：浏览器打开四栏布局，可创建任务，SideNav 展示会话历史。
@@ -41,6 +49,9 @@
 - 前端 AgentActivityFeed + AgentMessage 组件 (多角色消息流)
 - 前端 RuntimeTerminal 组件 (嵌入式实时日志, 语法高亮)
 - 前端 StatusBar 组件
+- local_job runner adapter
+- Collect idempotency 测试
+- Service restart recovery smoke test
 ```
 
 验收：提交 dummy job, Agent 活动流实时展示多角色消息, RuntimeTerminal 实时展示日志。

@@ -152,6 +152,10 @@ failure reason
 
 失败参数集不能从 grid、ParameterSetTable、summary 或 EvidenceReport 中消失。Heatmap 可以排除失败 cell 的 metric 聚合，但必须显式说明 excluded cells。
 
+### ParameterSet 与运行映射
+
+ParameterSet、parameter_set_id、RunJob、RunRecord、FailureRecord 和 heatmap excluded cells 的映射规则见 [Parameter_Set_And_Analysis_Run_Mapping.md](Parameter_Set_And_Analysis_Run_Mapping.md)。
+
 ## 7. 指标解释
 
 | 指标 | 注意事项 |
@@ -207,3 +211,5 @@ Benchmark 报告推荐写法：
 - [ ] 失败参数集在最终结果和报告中保持可见。
 - [ ] 每个 batch cell 能追溯到 RunJob、RunRecord 或 failure reason。
 - [ ] Heatmap 排除失败 cell 时必须记录 excluded cells。
+- [ ] 一个 parameter_set 同时只能有一个 active RunJob。
+- [ ] Heatmap 排除失败 cell 时写 excluded_cells artifact。

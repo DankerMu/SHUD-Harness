@@ -4,6 +4,8 @@
 
 本文件是唯一的实施基准。不依赖任何外部文档即可开始开发。
 
+> **Canonical Source 说明：** 本文件为自包含阅读基准。字段细节以 [Minimal_Schemas.md](03_SPEC/Minimal_Schemas.md) 和 [Support_Schema_Contracts.md](03_SPEC/Support_Schema_Contracts.md) 为权威源。Report export、notification、batch progress、PI decision comments 均为 support schema，不改变 8 个核心对象。
+
 ---
 
 ## 1. 项目定义
@@ -79,7 +81,8 @@
 ```yaml
 task_id: TASK-0001
 type: engineering | science_assist | ops
-status: created | planned | running | parked | reporting | awaiting_pi | done | cancelled
+status: created | planned | running | parked | reporting | awaiting_pi | done | cancelled | blocked
+runtime_phase: null | running_local | submitted_job | waiting_for_job | collecting
 title: "给 SHUD 添加 event flux 诊断输出"
 question_or_goal: "在不破坏 rSHUD 旧版读取的前提下，添加 event_flux 可选输出"
 created_by: alice
@@ -114,7 +117,7 @@ runtime:
   gcc_version: "14.1.0"
   gdal_version: "3.9.0"
 harness:
-  version: "0.7.0"
+  version: "0.8.1"
   prompt_pack: promptpack-0001
   skills_version: skills-0001
 fingerprint: sha256:...
@@ -221,7 +224,7 @@ outputs: [sensitivity_table, tornado_plot, PI_summary]
 ```yaml
 report_id: TASK-0001_report.md
 task_id: TASK-0001
-status: draft | pi_reviewed | accepted | rejected
+status: draft | reviewed | awaiting_pi | accepted | revision_requested | rejected | archived
 summary: "event_flux 输出已添加, rSHUD 旧版读取兼容, 水量平衡误差 < 0.1%"
 observations:
   - "peak_flow_error 对 ksat 不敏感 (range: -2% ~ +3%)"
@@ -442,11 +445,15 @@ Job 等待期间 ≠ LLM 调用, 不计费。
 ### 6.1 状态机
 
 ```
-created ──→ planned ──→ running_local ──→ reporting ──→ awaiting_pi ──→ done
-                    ├──→ submitted_job ──→ parked ──→ collected ──→ reporting
+TaskCard.status 流转:
+created ──→ planned ──→ running ──→ reporting ──→ awaiting_pi ──→ done
+                    │                                        ├──→ revision_requested → running
+                    ├──→ parked ──→ running ──→ reporting     └──→ cancelled
                     └──→ blocked (budget/error/no-progress)
-                                                              ──→ revised (PI 要求修改)
-                                                              ──→ cancelled
+
+TaskCard.runtime_phase (仅 status=running 时有意义):
+null ──→ running_local        (短任务直接执行)
+     ──→ submitted_job ──→ waiting_for_job ──→ collecting ──→ null
 ```
 
 ### 6.2 System Prompt (Coordinator)
@@ -633,7 +640,7 @@ Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 
 9. PI 判断
    ├── 接受 → apply patch to main branch
-   ├── 修改 → task.status = revised → 回到 step 4
+   ├── 修改 → task.status = revision_requested → 回到 step 4
    └── 拒绝 → task.status = cancelled
 ```
 

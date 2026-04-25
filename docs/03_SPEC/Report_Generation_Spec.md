@@ -150,6 +150,10 @@ HTML 可内联小型 PNG/SVG 图表和 metrics summary，但不得内联完整 s
 
 Export manifest 应记录 included/excluded artifacts，说明哪些图表被内联、哪些大型日志或数据只保留引用。
 
+### Evidence Lineage
+
+报告中关键陈述应建立 evidence lineage。ReportAssertion、assertion_type、evidence_level 和 lineage guard 的完整规范见 [Report_Review_And_Evidence_Lineage_Spec.md](Report_Review_And_Evidence_Lineage_Spec.md)。
+
 ## 8. Reviewer 检查清单
 
 Reviewer 应检查：
@@ -164,6 +168,10 @@ Reviewer 应检查：
 - [ ] 是否把 calibration 结果误写成验证；
 - [ ] 是否包含失败运行；
 - [ ] 是否清楚标注 dirty stack。
+- [ ] 每个关键指标有 source_ref。
+- [ ] 每个图表观察有 figure/timeseries artifact ref。
+- [ ] PI comment 没有被自动写成科学事实。
+- [ ] report 没有引用 tmp 路径。
 
 ## 9. 报告状态
 
