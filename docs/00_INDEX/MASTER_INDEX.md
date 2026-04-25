@@ -9,13 +9,14 @@
 
 ## 核心文件
 
-开始开发前只需读这三份：
+开始开发前只需读这四份：
 
 | 文件 | 用途 |
 |------|------|
 | [`../../CLAUDE.md`](../../CLAUDE.md) | 项目定义 + 仓库布局 + 设计决策速查 |
 | [`../SPEC_v0.8_Final.md`](../SPEC_v0.8_Final.md) | 自包含实施规格书（阅读基准） |
 | [`CANONICAL_CONTRACTS.md`](CANONICAL_CONTRACTS.md) | Schema / API / Event / Path / Artifact / Lock 的唯一事实源索引 |
+| [`../04_IMPLEMENTATION/Phased_Spec_Activation.md`](../04_IMPLEMENTATION/Phased_Spec_Activation.md) | **开发路线图** — 6 阶段 Spec 激活顺序 + 对齐检查点 |
 
 ---
 
