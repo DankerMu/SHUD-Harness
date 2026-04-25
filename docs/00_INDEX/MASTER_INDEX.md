@@ -16,7 +16,7 @@
 | [`../../CLAUDE.md`](../../CLAUDE.md) | 项目定义 + 仓库布局 + 设计决策速查 |
 | [`../SPEC_v0.8_Final.md`](../SPEC_v0.8_Final.md) | 自包含实施规格书（阅读基准） |
 | [`CANONICAL_CONTRACTS.md`](CANONICAL_CONTRACTS.md) | Schema / API / Event / Path / Artifact / Lock 的唯一事实源索引 |
-| [`../04_IMPLEMENTATION/Phased_Spec_Activation.md`](../04_IMPLEMENTATION/Phased_Spec_Activation.md) | **开发路线图** — 6 阶段 Spec 激活顺序 + 对齐检查点 |
+| [`../Phased_Spec_Activation.md`](../Phased_Spec_Activation.md) | **开发路线图** — 6 阶段 Spec 激活 + 交付摘要 + 测试出口 + 对齐检查点 |
 
 ---
 
@@ -143,7 +143,6 @@
 | 文件 | 用途 |
 |------|------|
 | [`Phased_Plan.md`](../04_IMPLEMENTATION/Phased_Plan.md) | 8 周分阶段实施计划 |
-| [`Phased_Spec_Activation.md`](../04_IMPLEMENTATION/Phased_Spec_Activation.md) | 分阶段 Spec 激活与对齐检查点 |
 | [`MVP_Implementation_Readiness_Checklist.md`](../04_IMPLEMENTATION/MVP_Implementation_Readiness_Checklist.md) | 开工前 readiness 检查清单 |
 | [`Repository_Layout.md`](../04_IMPLEMENTATION/Repository_Layout.md) | 仓库目录与 monorepo 结构 |
 | [`Schemas_APIs_CLIs.md`](../04_IMPLEMENTATION/Schemas_APIs_CLIs.md) | API 端点与 schema 验证 |
