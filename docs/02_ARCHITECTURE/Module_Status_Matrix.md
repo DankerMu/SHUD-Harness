@@ -16,6 +16,7 @@
 | PI 审批 UI | [N] | Web 内审批按钮，触发 ChangeRequest gate |
 | TaskCard | [N] | 统一承载工程/科学辅助/运维任务 |
 | Coordinator kernel | [E]/[N] | 复用 Zero AgentLoop + Hook，扩展 Brief/Plan/Park/Resume/Report |
+| Repo Explorer Agent | [E]/[N] | 复用 Zero Explorer，只读探索仓库上下文并产出 RepoContextBrief |
 | Worker Agent | [E] | 复用 Zero spawn/wait，执行编译/运行/后处理 |
 | Reviewer Agent | [E]/[N] | 复用 Zero Role system，只做工程/报告完整性检查 |
 | Bash sandbox | [E]/[N] | 复用 Zero BashTool，添加 workspace 路径约束 + data/raw 只读 |

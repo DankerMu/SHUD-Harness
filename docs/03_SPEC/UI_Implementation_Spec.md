@@ -54,6 +54,7 @@
 
 # Agent 角色色
 --color-agent-coordinator: #3B82F6   # 蓝
+--color-agent-explorer:    #14B8A6   # 青绿
 --color-agent-worker:      #10B981   # 绿
 --color-agent-coder:       #8B5CF6   # 紫
 --color-agent-reviewer:    #F97316   # 橙
@@ -208,8 +209,8 @@ interface ActivityEvent {
   eventId: string;
   type: "agent.message" | "tool.started" | "tool.completed" | "tool.failed"
       | "job.submitted" | "job.status" | "runrecord.created" | "pi_gate.required"
-      | "report.draft_created" | "pi_gate.decision_recorded";
-  source: "coordinator" | "worker" | "coder" | "reviewer" | "client";
+      | "report.draft_created" | "repo_context.created" | "pi_gate.decision_recorded";
+  source: "coordinator" | "repo_explorer" | "worker" | "coder" | "reviewer" | "client";
   visibility: "user_visible" | "internal";
   timestamp: string;
   payload: unknown;
@@ -228,11 +229,14 @@ interface ActivityEvent {
 
 ```text
 coordinator → primary-500 蓝
+repo_explorer → #14B8A6 青绿
 worker      → success 绿
 coder       → #8B5CF6 紫
 reviewer    → #F97316 橙
 client (PI) → gray-700 深灰，右对齐
 ```
+
+`repo_context.created` 卡片应展示 RepoContextBrief 摘要、涉及仓库、inspected refs 数量和 unknowns 数量；默认折叠文件清单，避免 ActivityFeed 被长路径列表淹没。
 
 ### 4.3 ExperimentDashboard
 

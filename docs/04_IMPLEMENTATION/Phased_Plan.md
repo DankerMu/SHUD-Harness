@@ -145,6 +145,7 @@
 - command trace 记录
 - POST /api/jobs, GET /api/jobs/:id, POST /api/jobs/:id/collect
 - WS /ws/session/:sessionId (统一 WebSocket 通道)
+- Repo Explorer 角色定义与 RepoContextBrief artifact 契约
 - 前端 AgentActivityFeed + AgentMessage 组件 (多角色消息流)
 - 前端 RuntimeTerminal 组件 (嵌入式实时日志, 语法高亮)
 - 前端 StatusBar 组件
@@ -162,6 +163,8 @@
 - `GET /api/jobs/:id`
 - `POST /api/jobs/:id/collect`
 - command trace
+- Repo Explorer read-only tool policy
+- RepoContextBrief artifact writer
 - stdout/stderr log artifact
 - WebSocket envelope：event_id、seq、type、payload、created_at
 - session event log
@@ -170,6 +173,7 @@
 ### 前端任务
 
 - AgentActivityFeed
+- Repo Explorer / RepoContextBrief 卡片
 - RuntimeTerminal
 - WebSocket reconnect
 - job status badge

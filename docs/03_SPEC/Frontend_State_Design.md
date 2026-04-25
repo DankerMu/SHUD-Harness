@@ -146,6 +146,7 @@ AgentActivityFeed 展示用户可理解的事件卡片：
 |---|---|
 | `agent.message` | Agent 文本消息 |
 | `plan.created` | 计划卡片，可展开步骤 |
+| `repo_context.created` | 仓库上下文卡片，可展开 inspected refs、impact surface 和 unknowns |
 | `tool.started/completed/failed` | 工具调用卡片 |
 | `job.submitted/status` | 运行任务卡片 |
 | `runrecord.created` | 结果卡片 |

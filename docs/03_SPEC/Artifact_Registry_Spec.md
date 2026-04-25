@@ -25,6 +25,7 @@
 | `report_markdown` | REPORT-001.md | 是 | accepted_report 或 evidence |
 | `report_export` | standalone.html | 分享用，不替代原报告 | accepted_report |
 | `patch` | CHG-001.patch | 是，工程证据 | evidence |
+| `repo_context` | BRIEF-001.yaml | 否，仅支持计划/review | debug |
 | `toolcall` | TOOLCALL-001.json | 调试和审计 | debug |
 | `manifest` | artifact_manifest.yaml | 是 | evidence |
 | `analysis_progress` | progress.json | 运行状态证据 | evidence |

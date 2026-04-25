@@ -1,7 +1,7 @@
 # Agent 架构
 
 **状态：** P0 设计规范  
-**适用范围：** Coordinator、Worker、Coder、Reviewer、PI gate、Zero AgentLoop 扩展  
+**适用范围：** Coordinator、Repo Explorer、Worker、Coder、Reviewer、PI gate、Zero AgentLoop 扩展
 **目标：** 将 v0.8 的“PI-led scientific research engineering assistant”落实为可实现的 Agent 实例模型和通信规则。
 
 ## 1. 架构原则
@@ -9,16 +9,18 @@
 SHUD-Harness 的 Agent 架构不是开放式多 Agent 自主系统，而是受 TaskCard 状态机约束的科研工程协作系统。核心原则如下：
 
 1. **Coordinator 单点编排。** 同一 TaskCard 在同一时刻只有一个 Coordinator 拥有调度权。
-2. **Worker 不做科学裁决。** Worker 可以运行命令、解析日志、计算指标和生成 artifact，但不能判断某个水文假设是否成立。
-3. **Coder 只处理代码变更。** Coder 的输出必须落入 ChangeRequest、patch bundle 或 diff review，不允许直接修改 baseline。
-4. **Reviewer 审查完整性，不替代 PI。** Reviewer 检查复盘链、报告语言、schema、artifact 和风险标注，不批准科学结论。
-5. **PI gate 是硬边界。** 物理方程、默认参数、benchmark baseline、validated 状态和破坏性数据操作必须等待 PI 或授权用户确认。
+2. **Repo Explorer 只读探索。** Repo Explorer 可以读取源码、文档、git 历史和运行只读诊断命令，为 Coordinator/Coder 提供上下文，不修改文件、不提交 RunJob。
+3. **Worker 不做科学裁决。** Worker 可以运行命令、解析日志、计算指标和生成 artifact，但不能判断某个水文假设是否成立。
+4. **Coder 只处理代码变更。** Coder 的输出必须落入 ChangeRequest、patch bundle 或 diff review，不允许直接修改 baseline。
+5. **Reviewer 审查完整性，不替代 PI。** Reviewer 检查复盘链、报告语言、schema、artifact 和风险标注，不批准科学结论。
+6. **PI gate 是硬边界。** 物理方程、默认参数、benchmark baseline、validated 状态和破坏性数据操作必须等待 PI 或授权用户确认。
 
 ## 2. Agent 角色
 
 | 角色 | 主要职责 | 不允许做的事 |
 |---|---|---|
 | Coordinator | 解析 brief，创建计划，选择工具和子角色，决定 park/resume，生成 PI 问题 | 伪造证据，跳过审批，自动宣称科学结论 |
+| Repo Explorer | 探索当前仓库、定位入口/调用链/测试命令/影响面，生成 RepoContextBrief | 写文件，改代码，提交 RunJob，裁定科学结论，写入 verified memory |
 | Execution Worker | 编译、运行、监控作业、收集日志、生成 RunRecord | 修改模型源码，改变科学假设 |
 | Analysis Worker | 调用 rSHUD/脚本计算指标，生成 deterministic figures 和 summary tables | 把 calibration 改进解释成模型结构验证 |
 | Coder | 生成 patch、接口迁移、测试、diff 摘要 | 未审批直接改 baseline 或默认参数 |
@@ -32,7 +34,7 @@ SHUD-Harness 的 Agent 架构不是开放式多 Agent 自主系统，而是受 T
 ```yaml
 agent_instance:
   id: agent_01J...
-  role: coordinator | execution_worker | analysis_worker | coder | reviewer | memory_curator
+  role: coordinator | repo_explorer | execution_worker | analysis_worker | coder | reviewer | memory_curator
   task_id: TASK-...
   session_id: SESSION-...
   workspace_id: WS-...
@@ -51,6 +53,7 @@ Coordinator 的运行分为六个阶段：
 ```text
 Brief
 → Classify
+→ Explore (optional)
 → Plan
 → Dispatch
 → Collect/Review
@@ -80,7 +83,53 @@ reporting
 
 分类结果只用于选择流程模板，不应作为权限依据。权限仍由 Auth/Permission 规范决定。
 
-### 4.3 Plan
+### 4.3 Explore (optional)
+
+Coordinator 在以下场景应先派发 Repo Explorer，再进入 Plan 或 Coder：
+
+- 任务涉及跨仓库影响面，尤其是 SHUD/rSHUD/AutoSHUD/Zero 之间的接口变更；
+- 任务类型为 `code_change`、`debugging`，且入口文件、调用链或测试命令不明确；
+- 最近一次 Worker/Coder 失败原因指向“上下文不足”或“改动范围误判”；
+- 需要确认实际代码与 docs/spec 是否一致。
+
+Repo Explorer 的输出必须写入 task artifact，建议路径：
+
+```text
+workspace/tasks/TASK-*/artifacts/repo_context/BRIEF-*.yaml
+```
+
+最低输出契约：
+
+```yaml
+repo_context_brief:
+  brief_id: BRIEF-001
+  task_id: TASK-001
+  repos:
+    - SHUD
+    - rSHUD
+  inspected_refs:
+    - path: SHUD/src/...
+      reason: "solver entrypoint"
+  entrypoints:
+    - repo: SHUD
+      path: src/...
+      symbol: "main"
+  impact_surface:
+    - repo: rSHUD
+      path: R/read_output.R
+      risk: "output schema coupling"
+  recommended_test_commands:
+    - "make shud"
+    - "Rscript scripts/rshud-roundtrip.R"
+  risks:
+    - "binary output format changes require PI gate if breaking"
+  unknowns:
+    - "tiny fixture acceptance threshold not yet specified"
+```
+
+RepoContextBrief 是工程上下文，不是科学证据。EvidenceReport 可以引用它解释“为什么选择这些文件/测试”，但不能把它作为模型结论依据。
+
+### 4.4 Plan
 
 计划必须写入 TaskCard 或 `plan.md`，包含：
 
@@ -93,15 +142,15 @@ reporting
 - 预期 artifact；
 - 停止条件。
 
-### 4.4 Dispatch
+### 4.5 Dispatch
 
 Coordinator 根据计划派发 Worker。短任务可以同步执行，长任务必须转换成 RunJob 并进入 Park/Resume 流程。
 
-### 4.5 Collect/Review
+### 4.6 Collect/Review
 
 执行完成后，Coordinator 只读取结构化输出：RunRecord、metrics、logs summary、artifact manifest、patch bundle。不得依赖未记录的终端输出作为证据。
 
-### 4.6 Report/Ask PI
+### 4.7 Report/Ask PI
 
 Coordinator 生成 EvidenceReport 草稿，并明确列出：
 
@@ -171,10 +220,11 @@ TaskCard 不能仅因为 LLM 认为“完成了”而关闭。完成需要满足
 ## 8. 并发规则
 
 1. 同一 TaskCard 只能有一个 active Coordinator。
-2. 同一 workspace 可并行多个 RunJob，但不得共享同一 run directory。
-3. 代码变更任务必须独占对应 worktree。
-4. sensitivity batch 可并发，但每个 parameter set 必须独立 RunRecord。
-5. Reviewer 可以并行审查多个已完成 artifact，但不能改写原始输出。
+2. Repo Explorer 可以与 Coordinator planning 并行，但只能读 source/runtime repo 和 task artifact。
+3. 同一 workspace 可并行多个 RunJob，但不得共享同一 run directory。
+4. 代码变更任务必须独占对应 worktree。
+5. sensitivity batch 可并发，但每个 parameter set 必须独立 RunRecord。
+6. Reviewer 可以并行审查多个已完成 artifact，但不能改写原始输出。
 
 ## 9. 失败处理
 
@@ -198,6 +248,7 @@ Coordinator 收到 Worker 失败后，可以进行一次低风险重试；若重
 
 - [ ] 每个 Agent 事件都绑定 `task_id` 和 `session_id`。
 - [ ] Coordinator 的计划可以从磁盘恢复。
+- [ ] 跨仓库 code_change/debugging 任务在进入 Coder 前生成 RepoContextBrief，或在 plan 中说明跳过原因。
 - [ ] Worker 输出只能通过 RunRecord、metrics、artifact manifest 或 patch bundle 被报告引用。
 - [ ] Reviewer 可以发现缺失 StackLock/DataProvenance/RunRecord 的报告。
 - [ ] PI gate 动作不能被 Worker 或 Reviewer 自动批准。

@@ -21,6 +21,9 @@ node_modules/
 *.swp
 *.swo
 
+# Local proposal drafts and generated report images
+docs/05_PROPOSAL/
+
 # Large data
 *.dat
 *.nc
@@ -30,4 +33,3 @@ node_modules/
 # Secrets
 .env
 .env.local
-

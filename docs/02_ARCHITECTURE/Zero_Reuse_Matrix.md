@@ -33,8 +33,8 @@ SHUD-Harness 以 Web 为唯一用户交互渠道，需要：
 | Zero 能力 | SHUD-Harness 用途 |
 |-----------|-------------------|
 | AgentLoop + Hook | Coordinator 执行循环 + 科研治理 hook |
-| Role system | Coordinator / Worker / Reviewer 角色 |
-| spawn/wait agent | Coordinator spawn Worker 执行编译/运行 |
+| Role system | Coordinator / Repo Explorer / Worker / Coder / Reviewer 角色 |
+| spawn/wait agent | Coordinator spawn Repo Explorer 补上下文，spawn Worker/Coder 执行编译、运行或修改 |
 | bash tool + safety | SHUD sandbox 命令执行 |
 | SKILL.md loader | 5 个 SHUD 专用 skill |
 | Session + WebSocket | PI 实时对话 + 日志流 |
@@ -74,7 +74,7 @@ SHUD-Harness 以 Web 为唯一用户交互渠道，需要：
 
 ```text
 - Memory create 默认 status 改为 draft, 不是 verified
-- Role 定义: coordinator (系统提示含科研约束), worker (执行), reviewer (兼容性检查)
+- Role 定义: coordinator (系统提示含科研约束), repo_explorer (只读仓库探索), worker (执行), coder (变更), reviewer (兼容性检查)
 - Agent loop hook: 添加 Park/Resume gate + PI 审批 gate
 - Closure decision: 扩展分类器, 增加 "needs_pi_approval" / "needs_holdout" 判断
 - Runtime state: .zero workspace 状态 + shud-workspace 研究状态分离
@@ -184,10 +184,16 @@ sandbox.exec
 
 System prompt 应注入四类信息：
 
-1. **角色边界。** 当前 Agent 是 Coordinator、Worker、Coder 还是 Reviewer。
+1. **角色边界。** 当前 Agent 是 Coordinator、Repo Explorer、Worker、Coder 还是 Reviewer。
 2. **科研治理。** 不得宣称科学结论；必须标注限制；PI gate 不可绕过。
 3. **当前上下文。** TaskCard、StackLock、DataProvenance、最近 RunRecord、ResearchContext。
 4. **工具策略。** 短任务直接执行；长任务转 RunJob；证据必须落盘。
+
+Repo Explorer prompt 还必须注入：
+
+- 只读工具策略：允许 read/search/git inspect/只读 shell 诊断；禁止 write/edit/package install/RunJob submit；
+- 输出契约：必须生成 RepoContextBrief，列出 inspected_refs、entrypoints、impact_surface、recommended_test_commands、risks、unknowns；
+- 证据边界：RepoContextBrief 只支持工程计划和 review，不支持科学结论。
 
 ## 12. Zero Web UI 改造
 

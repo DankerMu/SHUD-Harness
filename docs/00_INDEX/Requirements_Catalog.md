@@ -36,6 +36,7 @@
 | FR-009 | Health checks | 系统必须提供 live、ready、deep 三类健康检查端点。 | P0 | Observability_Monitoring_Spec | live/ready 无需外部服务；deep 需要认证 |
 | FR-010 | Ops dashboard | 系统必须提供运维 dashboard 所需的数据 API。 | P1 | Observability_Monitoring_Spec | `/api/ops/dashboard` 返回聚合状态 |
 | FR-011 | Requirements API | 系统应能读取需求目录并输出 coverage summary。 | P2 | Requirements_Catalog | `GET /api/requirements` 可返回编号列表 |
+| FR-012 | RepoContextBrief | 系统应支持只读 Repo Explorer 为 code_change/debugging/cross-repo 任务生成仓库上下文简报。 | P1 | Agent_Architecture / Roles_and_Boundaries | Explorer 写操作被拒绝；Brief 包含 inspected refs、entrypoints、impact surface、tests、risks、unknowns |
 
 ---
 

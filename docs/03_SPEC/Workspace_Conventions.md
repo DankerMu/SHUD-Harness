@@ -101,6 +101,7 @@ artifacts/
   metrics/
   reports/
   patches/
+  repo_context/
   toolcalls/
   manifests/
 ```

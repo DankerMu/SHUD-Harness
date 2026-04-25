@@ -11,6 +11,7 @@ shud-harness/                        # TypeScript monorepo (Bun workspace)
       src/
         agent/
           coordinator.ts             # Coordinator 角色定义 + system prompt
+          explorer.ts                # Repo Explorer 只读仓库上下文探索
           worker.ts                  # Worker 角色定义
           reviewer.ts                # Reviewer 角色定义
           park-resume.ts             # Park/Resume 长任务状态机
@@ -83,7 +84,7 @@ shud-harness/                        # TypeScript monorepo (Bun workspace)
           ResearchContext.tsx        # 当前任务上下文 (StackLock/Data/Notes)
           CostMonitor.tsx            # 底部成本悬浮面板
           # B. Agent 活动流
-          AgentActivityFeed.tsx      # 多 Agent 消息流 (Coordinator/Worker/Coder/Reviewer)
+          AgentActivityFeed.tsx      # 多 Agent 消息流 (Coordinator/Repo Explorer/Worker/Coder/Reviewer)
           AgentMessage.tsx           # 单条 Agent 消息 (角色标识 + 折叠详情)
           PIInput.tsx                # PI 输入框 (自然语言 + 指令)
           StreamingText.tsx          # LLM 打字机效果

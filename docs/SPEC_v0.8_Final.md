@@ -43,7 +43,7 @@
 ### Zero (基础实现，在此扩展)
 - 直接复用: AgentLoop + Hook 架构, Session + WebSocket, Tool 注册/调度, bash 工具安全检查, SKILL.md 格式, spawn/wait agent 模式, 命令 trace 结构, Hono + React Web 框架
 - 需扩展: Park/Resume 长任务状态机, SHUD 专用工具 (编译/运行/解析), 结构化 RunRecord/EvidenceReport, PI 审批界面, 科研 Closure Classifier
-- 需修改: Memory create status (不默认 verified), Role 定义 (Coordinator/Worker/Reviewer)
+- 需修改: Memory create status (不默认 verified), Role 定义 (Coordinator/Repo Explorer/Worker/Coder/Reviewer)
 
 ---
 
@@ -55,6 +55,7 @@
 |------|--------|----------|
 | **PI** | 提问题、定方向、判断证据、批准高风险变更 | 不写代码、不跑模型 |
 | **Coordinator** | 解析任务、调度执行、汇总报告、建议下一步 | 不判断科学结论、不自主修改物理代码 |
+| **Repo Explorer** | 只读探索仓库、定位入口/调用链/影响面、生成 RepoContextBrief | 不写文件、不提交 RunJob、不做科学判断 |
 | **Worker** | 编译、运行、解析日志、写脚本、生成图表、创建 patch | 不决定实验方向、不写长期 memory |
 | **Reviewer** | 检查兼容性、输出格式、工程完整性 | 不审查科学假设 |
 
@@ -274,7 +275,7 @@ shud-harness/                    # 代码仓库 (TypeScript monorepo, 基于 Zer
   packages/
     core/                        # 扩展 Zero 核心 (AgentLoop, Tool, Session)
       src/
-        agent/                   # Coordinator/Worker/Reviewer 角色定义
+        agent/                   # Coordinator/Repo Explorer/Worker/Coder/Reviewer 角色定义
         tools/                   # SHUD 专用工具 (shud-build, shud-run, rshud-parse)
         domain/                  # 领域对象 (TaskCard, RunJob, RunRecord, etc.)
           schemas/               # Zod schemas (前后端共享)
@@ -293,7 +294,7 @@ shud-harness/                    # 代码仓库 (TypeScript monorepo, 基于 Zer
                                  # ResultsOverview, SensitivityHeatmap, NextSuggestedAction
         hooks/                   # useWebSocket, useAgentStream, useHydrograph
   prompts/
-    coordinator.md, worker.md, reviewer.md
+    coordinator.md, explorer.md, worker.md, coder.md, reviewer.md
   skills/
     run-shud-tiny-case/SKILL.md
     diagnose-shud-run-failure/SKILL.md

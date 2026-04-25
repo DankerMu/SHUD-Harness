@@ -24,6 +24,7 @@ interface Artifact {
     | "report_markdown"
     | "report_export"
     | "patch"
+    | "repo_context"
     | "toolcall"
     | "manifest"
     | "analysis_progress"
@@ -53,6 +54,50 @@ interface ArtifactManifest {
   generated_at: string;
   generator: string;
   manifest_sha256?: string;
+}
+```
+
+## 2.1 RepoContextBrief
+
+RepoContextBrief 是 Repo Explorer 生成的只读仓库上下文简报。它用于计划、编码和 review，不作为科学证据使用。对应 Artifact 应使用：
+
+```text
+type = "repo_context"
+created_by = "agent"
+evidence_usable = false
+retention_class = "debug"
+```
+
+```ts
+interface RepoContextBrief {
+  brief_id: string;
+  task_id: string;
+  created_by_agent_id: string;
+  created_at: string;
+  repos: Array<"SHUD" | "rSHUD" | "AutoSHUD" | "zero" | "harness">;
+  trigger: "code_change" | "debugging" | "cross_repo" | "spec_code_alignment" | "failure_followup";
+  inspected_refs: Array<{
+    repo: string;
+    path: string;
+    symbol?: string;
+    reason: string;
+  }>;
+  entrypoints: Array<{
+    repo: string;
+    path: string;
+    symbol?: string;
+    notes?: string;
+  }>;
+  impact_surface: Array<{
+    repo: string;
+    path: string;
+    risk: string;
+    required_followup?: string;
+  }>;
+  recommended_test_commands: string[];
+  risks: string[];
+  unknowns: string[];
+  artifact_refs: string[];
 }
 ```
 
@@ -385,7 +430,7 @@ interface DependencyLock {
 - [ ] support schema 变更会触发 schema drift CI。
 - [ ] support object 不替代 8 个核心对象。
 - [ ] 所有文件落盘前通过 schema 校验。
-- [ ] 新对象（Requirement、HealthStatus、AlertRule/Record、OpsIncident、DependencyLock）进入 Zod schema。
+- [ ] 新对象（Requirement、RepoContextBrief、HealthStatus、AlertRule/Record、OpsIncident、DependencyLock）进入 Zod schema。
 - [ ] schema generation 覆盖新增对象。
 - [ ] AlertRecord/OpsIncident 必须包含 evidence_refs。
 - [ ] Requirement 编号唯一性有测试。

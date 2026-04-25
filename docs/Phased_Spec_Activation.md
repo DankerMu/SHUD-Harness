@@ -106,15 +106,16 @@ T0(schema) + T1(API) + UI smoke 全部通过。
 ### 交付摘要
 
 ```
-后端: Sandbox path policy, local_direct/local_job runner, POST/GET /api/jobs, POST /api/jobs/:id/collect, WebSocket server, command trace, service startup recovery
-前端: AgentActivityFeed, RuntimeTerminal, WebSocket reconnect, job status badge, error banner
-测试: dummy job submit/log/collect, collect idempotency, WebSocket seq/reconnect, sandbox path escape, service restart recovery, secret redaction
+后端: Sandbox path policy, local_direct/local_job runner, POST/GET /api/jobs, POST /api/jobs/:id/collect, WebSocket server, command trace, Repo Explorer read-only policy, RepoContextBrief artifact, service startup recovery
+前端: AgentActivityFeed, RepoContextBrief card, RuntimeTerminal, WebSocket reconnect, job status badge, error banner
+测试: dummy job submit/log/collect, collect idempotency, WebSocket seq/reconnect, sandbox path escape, Repo Explorer write denial, service restart recovery, secret redaction
 ```
 
 ### 出口标准
 
 ```
 dummy job submit → 实时日志推流 → collect 生成 RunRecord → UI 展示。
+code_change/debugging 任务可生成 RepoContextBrief，且 Explorer 写操作被拒绝。
 服务重启后 uncollected terminal job 自动恢复。
 T0 + T1 + T2(WebSocket) + T3(UI dummy) 全部通过。
 ```

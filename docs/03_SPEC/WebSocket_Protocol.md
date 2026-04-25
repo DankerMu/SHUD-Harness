@@ -27,7 +27,7 @@ interface WsEvent<T = unknown> {
   run_id?: string;
   job_id?: string;
   timestamp: string;
-  source: "server" | "coordinator" | "worker" | "coder" | "reviewer" | "job" | "tool" | "client";
+  source: "server" | "coordinator" | "repo_explorer" | "worker" | "coder" | "reviewer" | "job" | "tool" | "client";
   visibility: "user_visible" | "internal";
   payload: T;
 }
@@ -45,6 +45,7 @@ interface WsEvent<T = unknown> {
 | `agent.status` | server → client | Agent 状态变更 |
 | `task.updated` | server → client | TaskCard 状态或字段变更 |
 | `plan.created` | server → client | Coordinator 生成计划 |
+| `repo_context.created` | server → client | Repo Explorer 生成 RepoContextBrief |
 | `tool.started` | server → client | 工具调用开始 |
 | `tool.stdout` | server → client | stdout 分片 |
 | `tool.stderr` | server → client | stderr 分片 |
@@ -111,6 +112,28 @@ stdout/stderr/job log 使用分片发送：
 ```
 
 Agent 消息不得包含未落盘的证据引用。若引用日志、图表或指标，必须提供 artifact ref。
+
+### 5.1 Repo Explorer 消息
+
+Repo Explorer 相关消息必须使用 `source: "repo_explorer"`，并通过 artifact ref 指向落盘的 RepoContextBrief：
+
+```json
+{
+  "type": "repo_context.created",
+  "source": "repo_explorer",
+  "visibility": "user_visible",
+  "payload": {
+    "brief_id": "BRIEF-001",
+    "summary": "已定位 SHUD 输出写入入口和 rSHUD 读取耦合点。",
+    "artifact_ref": "tasks/TASK-001/artifacts/repo_context/BRIEF-001.yaml",
+    "repos": ["SHUD", "rSHUD"],
+    "inspected_count": 9,
+    "unknown_count": 1
+  }
+}
+```
+
+该事件只表示工程上下文探索完成，不表示实验、模型运行或科学证据已生成。
 
 ## 6. PI gate 消息
 

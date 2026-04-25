@@ -84,7 +84,7 @@ Agent 不是普通 user。Agent 可有 `agent_id`，但不得拥有 `pi` role。
 ```ts
 interface AgentIdentity {
   agent_id: string;
-  role: "coordinator" | "execution_worker" | "analysis_worker" | "coder" | "reviewer" | "memory_curator";
+  role: "coordinator" | "repo_explorer" | "execution_worker" | "analysis_worker" | "coder" | "reviewer" | "memory_curator";
   task_id: string;
   delegated_by_user_id?: string;
   allowed_tools: string[];
@@ -92,10 +92,13 @@ interface AgentIdentity {
 }
 ```
 
+`repo_explorer` 的 `allowed_tools` 必须限制为只读工具，例如 file read/search、git inspect 和只读 shell 诊断。`denied_actions` 至少包含 write/edit、RunJob submit、patch apply、baseline update、verified memory write。
+
 ## 6. 验收标准
 
 - [ ] WebSocket 建连绑定有效 Session。
 - [ ] PI gate decision 写 AuditEvent。
 - [ ] Agent 身份没有 `pi` role。
+- [ ] `repo_explorer` 身份不能获得写文件、提交 RunJob 或应用 patch 的工具权限。
 - [ ] 权限失败写 PermissionDecision 和 AuditEvent。
 - [ ] AuditEvent 不包含 secrets。

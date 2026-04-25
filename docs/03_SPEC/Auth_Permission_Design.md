@@ -32,6 +32,7 @@
 | 创建 TaskCard | ✓ | ✓ | ✓ |  |  |
 | 提交 RunJob | ✓ | ✓ |  |  | 受 Coordinator 委托 |
 | collect RunJob | ✓ | ✓ |  |  | 受 Coordinator 委托 |
+| 生成 RepoContextBrief | ✓ | ✓ | ✓ |  | 受 Coordinator 委托，仅只读 |
 | 生成 EvidenceReport 草稿 | ✓ | ✓ | ✓ |  | 受 Coordinator 委托 |
 | 接受 EvidenceReport | ✓ |  |  |  |  |
 | 批准物理方程修改 | ✓ |  |  |  |  |
@@ -40,6 +41,8 @@
 | 创建 patch | ✓ | ✓ |  |  | 受 Coder 委托 |
 | 应用 patch 到 baseline | ✓ |  |  |  |  |
 | 删除 raw data | ✓ |  |  |  |  |
+
+`repo_explorer` 是 `agent` 内部身份的一种。它只能读取允许的 source/runtime repo、task artifact 和文档索引；不得获得写文件、提交 RunJob、应用 patch、覆盖 baseline 或升级 memory verification 的权限。
 
 ## 4. PI gate
 
