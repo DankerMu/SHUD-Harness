@@ -123,6 +123,41 @@ reports/REPORT-001.generation_error.yaml
 }
 ```
 
+## 9.1 Notification-related errors
+
+Notification 是辅助通道，不是科研证据链的一部分。通知失败不得回滚 RunRecord、EvidenceReport、AnalysisPlan summary 或 PI gate 状态。
+
+### Error classes
+
+| 错误 | 严重性 | 处理 |
+|---|---|---|
+| `notification.no_recipient` | warning | 写 `NotificationRecord(status=skipped)` |
+| `notification.smtp_timeout` | warning | 写 failed，可按 retry policy 重试 |
+| `notification.provider_auth_failed` | warning/high | 写 failed，提示工程师检查 secret |
+| `notification.dedupe_suppressed` | info | 不发送，记录 suppressed |
+
+### Critical failure notification
+
+对于需要人工介入的严重失败，可触发 immediate notification：
+
+- SHUD build failed；
+- sandbox permission denied for required path；
+- raw data missing/corrupted；
+- numerical crash with no recoverable RunRecord；
+- repeated batch failures exceed stop condition。
+
+Critical failure notification 仍必须使用 dedupe key，避免同一错误反复打扰 PI。
+
+### Redaction
+
+错误消息进入 notification 前必须脱敏：
+
+- API keys；
+- tokens；
+- passwords；
+- private SSH path；
+- local absolute paths if configured as sensitive。
+
 ## 10. 验收标准
 
 - [ ] 每个失败 tool/job/report 都有结构化错误对象。
@@ -131,3 +166,6 @@ reports/REPORT-001.generation_error.yaml
 - [ ] parser 缺少可选变量不会导致整个 UI 崩溃。
 - [ ] 重试只发生在明确安全和幂等的场景。
 - [ ] 用户提示包含 evidence refs。
+- [ ] notification failure 不改变 task/report/run 的主状态。
+- [ ] critical failure notification 使用 dedupe key。
+- [ ] notification body 经过 secret redaction。

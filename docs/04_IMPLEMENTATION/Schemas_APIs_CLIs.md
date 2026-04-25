@@ -44,8 +44,21 @@ GET    /api/runs/:id/metrics              # → artifacts/:metricsArtifactId/dat
 GET    /api/runs/:id/hydrograph           # → runs/:id/series?variable_id=rivqdown&aggregation=outlet
 GET    /api/analysis/:id/parameters       # → 聚合 parameter_set_table artifact
 
-# 审批
-POST   /api/tasks/:id/approve             # PI 审批 (accept/revise/reject + 选择的 next action)
+# 报告导出
+GET    /api/reports/:reportId/export       # ?format=html|markdown，返回 standalone export
+POST   /api/reports/:reportId/export       # 可选：按 body 参数重新生成 export
+
+# 分析进度
+GET    /api/analysis/:analysisPlanId/progress  # BatchProgressGrid 数据
+
+# 审批 — Canonical
+POST   /api/pi-gates/:gateId/decision      # PI gate decision: approved/rejected/request_revision + comment + evidence_refs
+
+# 审批 — Convenience
+POST   /api/tasks/:id/approve             # MVP 快捷接口，内部委托到 /api/pi-gates/:gateId/decision
+
+# 通知
+GET    /api/tasks/:taskId/notifications   # 最近 notification records，用于 UI 状态显示
 
 # 笔记
 POST   /api/notes                        # 添加笔记
@@ -74,6 +87,10 @@ WS     /ws/session/:sessionId            # 统一 session 通道:
                                          #   - LLM streaming (打字机效果)
                                          #   - job 日志流 (实时终端)
                                          #   - 事件推送 (job 完成/审批请求/成本告警)
+                                         #   - analysis.progress.updated
+                                         #   - report.export_ready
+                                         #   - pi_gate.decision_recorded
+                                         #   - notification.status
 ```
 
 ## 3. 任务创建示例 (Web 界面)
@@ -122,6 +139,11 @@ AnalysisPlan    → packages/core/src/domain/schemas/analysis.ts
 EvidenceReport  → packages/core/src/domain/schemas/report.ts
 ChangeRequest   → packages/core/src/domain/schemas/change.ts
 MemoryNote      → packages/core/src/domain/schemas/note.ts
+NotificationRecord → packages/core/src/domain/schemas/notification.ts
+ReportExport       → packages/core/src/domain/schemas/report-export.ts
+AnalysisProgressPayload → packages/core/src/domain/schemas/analysis-progress.ts
+PiGateDecision     → packages/core/src/domain/schemas/pi-gate-decision.ts
+MemoryNote(pi_decision) → packages/core/src/domain/schemas/note.ts
 ```
 
 ## 6. Report Generation
@@ -134,3 +156,11 @@ logs summary:       脚本生成 → 前端 LogViewer 展示
 interpretive text:  LLM 草拟，标记为 draft
 PI decision:        前端 ApprovalButtons → POST /api/tasks/:id/approve
 ```
+
+## 7. Operational UX API rules
+
+- Report export endpoint 不改变 report status。
+- PI gate decision endpoint 必须服务端校验权限，Agent 不能批准 PI gate。
+- reject/request_revision/high-risk approve 必须带 comment。
+- Analysis progress endpoint 可以从 RunJob/RunRecord 实时派生，也可以读取 progress artifact。
+- Notification API 不返回完整邮件正文或 secrets。

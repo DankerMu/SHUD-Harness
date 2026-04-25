@@ -1,6 +1,6 @@
 # SHUD-Harness 文档主索引
 
-> **当前基准版本**: v0.8 (2026-04-24)
+> **当前基准版本**: v0.8.1 (2026-04-24)
 > 技术栈: TypeScript 全栈 (Bun + Hono + React)，基于 Zero agent runtime 扩展。
 > Web 是用户唯一交互渠道。所有旧版文档 (v0.1–v0.6) 已归档或保留为参考。
 
@@ -69,6 +69,11 @@
 | `Cost_Inference_Budget.md` | 软监控: cheap/normal/deep + cost_record 结构 + Token 阶段归因 |
 | `Multiuser_Harness_Versioning.md` | Lite 锁、Harness 版本进 StackLock |
 | `Internationalization_Localization.md` | **国际化**: 中英术语表/报告语言约束/单位显示 |
+| `Operational_UX_Addendum.md` | **v0.8.1 操作体验补充**: 通知、报告导出、批运行进度、PI 审批批注总览 |
+| `Notification_Design.md` | **长任务通知**: Park/Resume 后 out-of-band email 通知、收件人解析、去重和失败策略 |
+| `Report_Export_Spec.md` | **报告导出**: EvidenceReport standalone HTML / Markdown export、draft watermark、export manifest |
+| `Batch_Progress_View_Spec.md` | **批运行进度视图**: ParameterSet × RunJob status grid、cell detail、progress payload |
+| `PI_Decision_Comments_Spec.md` | **PI 审批批注**: decision comment、必填规则、audit log、MemoryNote(type=pi_decision) |
 | `Data_Storage_Provenance.md` | 存储层次、Git 策略、DuckDB 指标仓 |
 
 ### 04_IMPLEMENTATION/ — 实施
@@ -81,6 +86,8 @@
 | `Task_Playbooks.md` | 工程/科研辅助/运维 3 种 Web 交互工作流 |
 | `Deployment_Architecture.md` | **部署架构**: 本地开发/单机/Docker/HPC-SLURM 4 种模式 |
 | `Testing_Strategy.md` | **测试策略**: 5 层测试金字塔/Schema/WebSocket/Sandbox/fixture/E2E |
+| `Operational_UX_API_Contracts.md` | **Operational UX API**: report export、PI gate decision、analysis progress、notification events |
+| `Operational_UX_Testing_Addendum.md` | **Operational UX 测试补充**: 通知、导出、批进度、PI comment 的 unit/integration/E2E 测试 |
 | `CICD_Release.md` | **CI/CD**: 11 步 pipeline/submodule 检查/schema drift 检测/版本策略 |
 
 ### 99_ARCHIVE/ — 已归档

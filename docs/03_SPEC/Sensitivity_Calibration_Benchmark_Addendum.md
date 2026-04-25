@@ -121,6 +121,37 @@ runs/RUN-003/
 
 不要让多个参数集共享输出目录。失败运行保留在 table 中。
 
+## 6.1 Batch progress view
+
+Batch analysis 必须在最终 heatmap 之前提供中间进度视图。MVP 使用 BatchProgressGrid，展示每个 parameter set / RunJob 的状态：
+
+```text
+queued | running | collecting | succeeded | failed | cancelled | blocked
+```
+
+BatchProgressGrid 从以下数据派生：
+
+```text
+AnalysisPlan.parameter_sets
+RunJob.status
+RunRecord presence
+Artifact refs
+failure reason
+```
+
+每个 cell 点击后应展示：
+
+- parameter changes；
+- RunJob status；
+- stdout/stderr tail；
+- log artifact link；
+- RunRecord link；
+- metrics summary；
+- failure reason；
+- retry action（若允许）。
+
+失败参数集不能从 grid、ParameterSetTable、summary 或 EvidenceReport 中消失。Heatmap 可以排除失败 cell 的 metric 聚合，但必须显式说明 excluded cells。
+
 ## 7. 指标解释
 
 | 指标 | 注意事项 |
@@ -172,3 +203,7 @@ Benchmark 报告推荐写法：
 - [ ] Calibration 报告包含训练/验证窗口。
 - [ ] Benchmark 报告包含 baseline/candidate StackLock。
 - [ ] 任何默认参数变更需要 PI gate。
+- [ ] Batch analysis 运行中显示 BatchProgressGrid。
+- [ ] 失败参数集在最终结果和报告中保持可见。
+- [ ] 每个 batch cell 能追溯到 RunJob、RunRecord 或 failure reason。
+- [ ] Heatmap 排除失败 cell 时必须记录 excluded cells。

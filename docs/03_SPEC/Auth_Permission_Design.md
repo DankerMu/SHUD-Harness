@@ -69,6 +69,29 @@ pi_approval:
     - reports/REPORT-001.md
 ```
 
+### 4.1 PI decision comment rules
+
+PI gate decision 支持 `comment`。必填规则：
+
+| 场景 | comment 是否必填 |
+|---|---|
+| 普通 approve report | 可选 |
+| reject | 必填 |
+| request_revision | 必填 |
+| approve scientific interpretation | 必填 |
+| 将 calibration 结果标记为 validated | 必填 |
+| 覆盖 benchmark baseline | 必填 |
+| 修改默认参数 | 必填 |
+| 应用影响论文结论的 patch | 必填 |
+
+Canonical endpoint：
+
+```http
+POST /api/pi-gates/:gateId/decision
+```
+
+`POST /api/tasks/:id/approve` 可作为 convenience endpoint，但内部应委托到 PI gate decision handler。
+
 ## 5. Session 与登录
 
 MVP 可以采用本地密码或一次性 setup token。小团队部署建议：
@@ -91,6 +114,18 @@ LLM API key、远程服务器凭据和数据库凭据不应进入 Git 或 RunRec
 workspace/secrets/     # 加密或权限限制目录
 system keyring         # 可选
 ```
+
+### 6.1 Notification secret policy
+
+SMTP / SendGrid / notification provider 凭据只允许来自：
+
+```text
+.env.local
+workspace/secrets/
+system keyring
+```
+
+不得写入 RunRecord、EvidenceReport、artifact manifest、NotificationRecord body 或 git。
 
 EvidenceReport 中只记录使用的 provider/model，不记录 key。
 
@@ -119,6 +154,19 @@ agent_authorization:
 
 Agent 永远不能自行批准 PI gate。
 
+## 7.1 Notification recipient resolution
+
+MVP email notification 的收件人解析顺序：
+
+```text
+task.notification_recipients[]
+→ task.pi_owner_email
+→ task.reviewer_email
+→ HARNESS_DEFAULT_NOTIFY_EMAIL
+```
+
+无可用收件人时，系统写入 `NotificationRecord(status=skipped)`，不得中断 RunRecord、AnalysisPlan summary 或 EvidenceReport 生成。
+
 ## 8. 审计日志
 
 所有权限敏感动作写入 audit log：
@@ -134,6 +182,20 @@ audit_event:
   result: success
 ```
 
+PI gate decision 审计示例：
+
+```yaml
+audit_event:
+  id: AUDIT-002
+  actor_type: user
+  actor_id: user_pi
+  action: decide_pi_gate
+  target_id: GATE-001
+  decision_id: DECISION-001
+  result: success
+  timestamp: ...
+```
+
 ## 9. 验收标准
 
 - [ ] WebSocket 建连需要有效 session。
@@ -142,3 +204,8 @@ audit_event:
 - [ ] LLM API key 不进入 RunRecord、report、artifact manifest。
 - [ ] 审批记录包含 actor、decision、comment、evidence_refs。
 - [ ] 删除 raw data 等高风险动作默认禁止。
+- [ ] reject/request_revision 缺少 comment 时服务端拒绝。
+- [ ] high-risk approve 缺少 comment 时服务端拒绝。
+- [ ] Agent 不能调用 PI decision endpoint 成功通过权限检查。
+- [ ] Notification provider secrets 不进入任何 report、RunRecord 或 artifact。
+- [ ] 无 notification recipient 时写 skipped，不中断主流程。
