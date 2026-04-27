@@ -205,7 +205,26 @@ gates:
 patch_bundle: artifacts/CHG-0001.patch
 ```
 
-## 2.1 Operational UX support objects
+## 2.1 Theory-to-Code support objects
+
+这些对象不是新的核心对象，而是 ChangeRequest、AnalysisPlan、EvidenceReport 和 PiGate 的 support schema：
+
+- TheoryToCodeBundle
+- TheoryNote
+- EquationSpec
+- DerivationRecord
+- NumericalSchemeSpec
+- ImplementationMapping
+- VerificationCase
+- PreflightGuardResult
+- ExperimentTrial / ExperimentLedger
+
+规则：
+- 纯 ops / pure engineering 任务不需要这些对象。
+- scientific/numerical semantic change 必须引用 bundle。
+- search/calibration 使用 ExperimentLedger，但不能替代理论审查。
+
+## 2.2 Operational UX support objects
 
 v0.8.1 增加四个 operational UX 能力：notification、report export、batch progress view、PI decision comments。这些能力不改变 8 个核心对象模型，只增加支撑对象：
 

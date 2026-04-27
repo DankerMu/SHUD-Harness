@@ -6,7 +6,10 @@
 - [ ] 1.4 Add IdempotencyRecord schema and inferred type.
 - [ ] 1.5 Add LockRecord schema and inferred type.
 - [ ] 1.6 Add shared AgentRole/ActivitySource enums including `repo_explorer`.
-- [ ] 1.7 Export all Phase 1 schemas and types from core package entrypoints.
+- [ ] 1.7 Add TheoryToCodeBundle placeholder schema (id, task_id, status, semantic_level — minimal fields only).
+- [ ] 1.8 Add VerificationCase placeholder schema (id, bundle_id, status, case_type — minimal fields only).
+- [ ] 1.9 Add ChangeSemanticLevel enum (pure_engineering | io_format | output_semantics | numerical_implementation | parameter_default | physical_equation | model_assumption).
+- [ ] 1.10 Export all Phase 1 schemas and types from core package entrypoints.
 
 ## 2. Fixtures And Tests
 

@@ -54,6 +54,21 @@ shud-harness patch bundle TASK-0001
 shud-harness patch revert TASK-0001
 ```
 
+### 3.1 Mutation boundary
+
+不同任务类型的修改边界限制：
+
+| 任务类型 | 允许修改 | 禁止修改，除非 PI gate |
+|---|---|---|
+| sensitivity | parameter override、AnalysisPlan | solver source、raw data、evaluation scripts |
+| calibration | allowed parameter set | hidden numerical tolerance、raw observation、baseline |
+| pure_engineering | Harness worktree、test code | raw data、accepted report、baseline |
+| code_change | ChangeRequest 指定 worktree/file | main repo、benchmark baseline、raw data |
+| physical_equation | TheoryToCodeBundle + worktree | 直接 search、未审查公式、accepted baseline |
+| output_semantics | mapping + output registry patch | 静默改变 reader/report 语义 |
+
+完整 Preflight 和 Mutation Boundary 规范见 [Preflight_And_Mutation_Boundary_Spec.md](Preflight_And_Mutation_Boundary_Spec.md)。
+
 ## 4. 回滚策略
 
 | 场景 | 回滚方式 |
@@ -85,3 +100,9 @@ MVP 必须通过测试：
 - resume a parked task after job completion；
 - detect no-progress loop and block。
 ```
+
+## 7. 验收标准
+
+- [ ] search/calibration 不能修改 solver source。
+- [ ] code_change 只能改 worktree 中 ChangeRequest 指定范围。
+- [ ] raw data/baseline 修改需要 PI gate。

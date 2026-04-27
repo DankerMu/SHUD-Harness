@@ -5,6 +5,7 @@ Phase 1 needs stable shared contracts before API, workspace persistence, and UI 
 ## What Changes
 
 - Add Phase 1 Zod schemas for TaskCard, Artifact, ErrorRecord, IdempotencyRecord, and LockRecord.
+- Add TheoryToCodeBundle and VerificationCase schema placeholders (stub types with minimal fields, full implementation in Phase 3).
 - Export inferred TypeScript types for frontend and backend use.
 - Add valid and invalid schema fixtures.
 - Add schema unit tests covering required fields, enum values, timestamps, and rejected malformed payloads.
@@ -29,6 +30,7 @@ None.
 | `docs/03_SPEC/Minimal_Schemas.md` | Normative field source for TaskCard and core object references used in Phase 1. | Implement TaskCard now; other core schemas can remain out of scope unless needed by Phase 1 tests. |
 | `docs/03_SPEC/Support_Schema_Contracts.md` | Normative field source for Artifact, ErrorRecord, IdempotencyRecord, and LockRecord. | Implement only the support schema subset needed by Phase 1. |
 | `docs/02_ARCHITECTURE/Control_Kernel.md` | Normative state-machine context for TaskCard status and `runtime_phase`. | Runtime execution transitions are not implemented in this changeset. |
+| `docs/03_SPEC/Theory_To_Code_Governance_Spec.md` | Normative bundle schema and state machine for Theory-to-Code governance. | Phase 1 only adds stub/placeholder types; full CRUD and state machine in Phase 3. |
 | `docs/04_IMPLEMENTATION/Schema_Generation_And_Drift_Control.md` | Reference-only future schema generation and drift-control policy. | No full generator is required in this changeset; quality gates may add placeholders later. |
 
 ## Impact

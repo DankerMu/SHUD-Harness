@@ -163,6 +163,12 @@ ccw tiny 编译+运行成功，water_balance_residual < 阈值，前端展示 ri
 T0 + T1 + T4(fixture ccw tiny) 通过。
 ```
 
+### Phase 3 追加激活（Theory-to-Code）
+
+- Theory_To_Code_Governance_Spec.md
+- Verification_Case_Spec.md
+- Preflight_And_Mutation_Boundary_Spec.md
+
 ### → Phase 4 对齐检查点
 
 - [ ] Artifact type 枚举覆盖 SHUD 所有产出？
@@ -201,6 +207,19 @@ T0 + T1 + T4(fixture ccw tiny) 通过。
 ```
 PI 指定参数空间 → batch 运行 → 前端展示参数表 + 热力图 + 对比过程线，失败 cell 可见。
 T0 + T1 + T3(UI batch) 通过。
+```
+
+### Phase 4 追加激活（Theory-to-Code）
+
+- Controlled_Search_Boundary_Spec.md
+- Equation_And_Derivation_Spec.md
+- Numerical_Scheme_Spec.md
+- Implementation_Mapping_Spec.md
+
+Phase 4 出口标准补充：
+
+```text
+search/calibration cannot run downstream of high-risk change unless bundle is accepted_for_search.
 ```
 
 ### → Phase 5 对齐检查点
@@ -242,6 +261,18 @@ T0 + T1 + T3(UI batch) 通过。
 RunRecord → report → Reviewer 检查 → PI 审批(含 comment) → HTML 导出，审计链可查，通知可发。
 T0 + T1 + T3(UI report) + 语言检查负例测试通过。
 ```
+
+### Phase 5 追加激活（Theory-to-Code）
+
+- Scientific_Change_Gating_Spec.md
+- Theory_To_Code_Report_Lineage_Spec.md
+- Scientific_Change_Playbooks.md
+
+### Theory-to-Code Phased Activation 验收标准
+
+- [ ] 合并后不破坏现有 8 核心对象原则。
+- [ ] 高风险科学变更不能绕过 PI gate。
+- [ ] Search/calibration 仍保持后置。
 
 ### → Phase 6 对齐检查点
 

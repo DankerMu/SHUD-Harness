@@ -69,6 +69,79 @@ GET    /api/notes                        # 笔记列表
 
 API 错误响应、HTTP status mapping、Idempotency-Key 和 retry policy 见 [API_Error_And_Idempotency_Contracts.md](API_Error_And_Idempotency_Contracts.md)。
 
+## 1.0.1 Theory-to-Code API
+
+并入 [Theory_To_Code_API_Contracts.md](Theory_To_Code_API_Contracts.md) 的 endpoint、error code 和 WebSocket event。
+
+```text
+# Bundle
+POST /api/theory-bundles
+GET  /api/theory-bundles/:bundleId
+PATCH /api/theory-bundles/:bundleId
+POST /api/theory-bundles/:bundleId/transition
+
+# Equation / Derivation
+POST /api/theory-bundles/:bundleId/equations
+PATCH /api/equations/:equationSpecId
+POST /api/equations/:equationSpecId/dimension-checks
+POST /api/theory-bundles/:bundleId/derivation
+PATCH /api/derivations/:derivationRecordId
+
+# Numerical Scheme
+POST /api/theory-bundles/:bundleId/numerical-schemes
+PATCH /api/numerical-schemes/:schemeId
+POST /api/numerical-schemes/:schemeId/conservation-expectations
+
+# Implementation Mapping
+POST /api/theory-bundles/:bundleId/implementation-mapping
+PATCH /api/implementation-mappings/:mappingId
+POST /api/implementation-mappings/:mappingId/code-targets
+POST /api/implementation-mappings/:mappingId/complexity-cost
+
+# Verification
+POST /api/theory-bundles/:bundleId/verification-cases
+GET  /api/verification-cases/:caseId
+POST /api/verification-cases/:caseId/run
+POST /api/verification-cases/:caseId/collect
+PATCH /api/verification-cases/:caseId/review
+
+# Search Preflight
+POST /api/analysis/:analysisPlanId/preflight
+```
+
+### Theory-to-Code Error Codes
+
+| code | 用途 |
+|---|---|
+| `THEORY_BUNDLE_REQUIRED` | 高风险变更缺少 bundle |
+| `THEORY_BUNDLE_STATUS_BLOCKS_SEARCH` | bundle 状态不允许 search |
+| `EQUATION_SYMBOL_UNIT_MISSING` | 关键符号缺 unit |
+| `DIMENSION_CHECK_FAILED` | dimension check fail |
+| `IMPLEMENTATION_MAPPING_REQUIRED` | 缺少 mapping |
+| `VERIFICATION_CASE_REQUIRED` | 缺少 verification case |
+| `VERIFICATION_ARTIFACT_MISSING` | passed case 缺 artifact |
+| `SCIENTIFIC_GATE_COMMENT_REQUIRED` | 高风险 PI decision 缺 comment |
+
+### Theory-to-Code WebSocket Events
+
+```text
+theory_bundle.status_updated
+equation.dimension_check_updated
+implementation_mapping.updated
+verification_case.status_updated
+verification_case.run_started
+verification_case.result_recorded
+scientific_gate.required
+scientific_gate.decision_recorded
+search_preflight.completed
+```
+
+### Theory-to-Code API 验收标准
+
+- [ ] API registry 包含 /api/theory-bundles 等 endpoint。
+- [ ] 错误码使用统一 API error envelope。
+- [ ] search preflight endpoint 有测试。
+
 ## 1.1 API 分层规则
 
 数据读取 API 分为两层：

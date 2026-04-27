@@ -51,6 +51,22 @@ outputs:
 
 第三个问题只由 PI 判断。
 
+## 2.1 Search precondition for scientific changes
+
+如果 sensitivity/calibration/search 依赖的 ChangeRequest 属于 high-risk semantic level：
+
+```text
+output_semantics | numerical_implementation | parameter_default | physical_equation | model_assumption
+```
+
+则 AnalysisPlan 必须引用 `requires_theory_bundle_id`，且该 bundle 状态必须为：
+
+```text
+accepted_for_search | accepted
+```
+
+没有 baseline_run_id 时，报告不得生成 improvement claim。
+
 ## 3. CalibrationPlan
 
 ```yaml

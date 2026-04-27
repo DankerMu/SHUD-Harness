@@ -262,6 +262,40 @@ created_at: 2026-04-25T16:00:00Z
 
 ---
 
+## Theory-to-Code optional field additions
+
+以下字段为 optional，不破坏现有 8 核心对象。high-risk `semantic_level` 触发 Scientific_Change_Gating_Spec。
+
+```ts
+// TaskCard optional additions
+theory_bundle_ids?: string[];
+
+// ChangeRequest additions
+semantic_level?:
+  | "pure_engineering"
+  | "io_format"
+  | "output_semantics"
+  | "numerical_implementation"
+  | "parameter_default"
+  | "physical_equation"
+  | "model_assumption";
+theory_bundle_id?: string;
+verification_case_ids?: string[];
+pi_gate_required?: boolean;
+
+// AnalysisPlan additions
+requires_theory_bundle_id?: string;
+baseline_run_id?: string;
+search_preflight_status?: "not_run" | "passed" | "failed";
+experiment_ledger_id?: string;
+
+// EvidenceReport additions
+theory_bundle_ids?: string[];
+verification_case_ids?: string[];
+```
+
+---
+
 ## Support Schemas for Operational UX
 
 以下 schema 是 v0.8.1 operational UX 支撑对象，不属于 8 个核心对象。它们用于通知、报告导出、批运行进度和 PI decision comment。

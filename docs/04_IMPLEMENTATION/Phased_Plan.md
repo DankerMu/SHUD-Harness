@@ -250,6 +250,22 @@
 - `rivqdown` series loads
 - missing output variable produces ErrorRecord not crash
 
+### Theory-to-Code (Phase 3)
+
+并入 [Theory_To_Code_Phase_Activation.md](Theory_To_Code_Phase_Activation.md)。
+
+Phase 3 ccw tiny 不只是"跑通 SHUD"，还应产生一个最小 VerificationCase：
+
+```text
+VC-CCW-TINY-001
+case_type: tiny_basin
+expected: exit_code=0, WB residual threshold, required output exists
+run_record_id: RUN-...
+artifact_refs: metrics/hydrograph/logs
+```
+
+- [ ] Phase 3 ccw tiny 生成 VerificationCase。
+
 验收：tiny case 运行完成, 前端展示水文过程线 + 指标卡片。
 
 ### Test Gate
@@ -358,6 +374,19 @@
 - storage/artifact metrics
 - DuckDB fallback/rebuild test
 
+### Theory-to-Code (Phase 4)
+
+Phase 4 sensitivity/search 前增加前置检查：
+
+```text
+if analysis is downstream of high-risk change:
+  require bundle.status in accepted_for_search | accepted
+else:
+  require baseline_run_id for improvement claims
+```
+
+- [ ] Phase 4 AnalysisPlan preflight 检查 accepted_for_search。
+
 验收：PI 指定参数后, 前端展示参数表 + 热力图 + 过程线。
 
 ### Test Gate
@@ -421,6 +450,12 @@
 - runbook drills
 - dependency release manifest
 - requirements coverage report
+
+### Theory-to-Code (Phase 5)
+
+Report template 增加 Theory-to-Code Evidence，尤其用于 code_change / numerical implementation / physical equation tasks。
+
+- [ ] Phase 5 report 有 Theory-to-Code Evidence。
 
 验收：Dashboard 显示成本, PI 可在 Next Action 面板选择方案并执行。
 

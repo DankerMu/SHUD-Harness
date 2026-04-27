@@ -188,7 +188,70 @@ E2E 流程：
 - P0 requirements have test_ids before release；
 - Traceability matrix references valid requirement IDs。
 
-## 12. 验收标准
+## 12. Theory-to-Code Tests
+
+并入 [Theory_To_Code_Test_Plan.md](Theory_To_Code_Test_Plan.md) 的 Test IDs。
+
+### Test Categories
+
+| 类别 | 测试对象 | CI 级别 |
+|---|---|---|
+| schema | TheoryToCodeBundle 等 Zod schema | PR |
+| state machine | bundle transition | PR |
+| governance | high-risk gate / role permission | PR |
+| equation | symbol/unit/dimension check | PR |
+| mapping | equation_id → code_target | PR |
+| verification | VerificationCase run/collect/status | PR/nightly |
+| report | Theory-to-Code Evidence + language guard | PR |
+| search boundary | accepted_for_search 前禁止 search | PR |
+| artifact retention | failed verification evidence retained | PR |
+
+### Test IDs
+
+| Test ID | 场景 | Pass criterion |
+|---|---|---|
+| TC-SCHEMA-001 | valid TheoryToCodeBundle | Zod parse pass |
+| TC-SCHEMA-002 | missing scientific_question | Zod parse fail |
+| TC-EQ-001 | symbol missing unit | cannot enter reviewed |
+| TC-EQ-002 | dimension_check fail | bundle cannot enter implementation_review |
+| TC-GATE-001 | physical_equation CR without bundle | API 422 |
+| TC-GATE-002 | agent attempts accept bundle | API 403 |
+| TC-GATE-003 | high-risk approve without comment | API 400 |
+| TC-MAP-001 | high-risk code target without equation_id | API 422 |
+| TC-VER-001 | passed verification missing artifact | cannot enter reviewed |
+| TC-VER-002 | failed verification retains logs/artifacts | artifact query pass |
+| TC-REPORT-001 | high-risk report missing Theory-to-Code Evidence | cannot enter reviewed |
+| TC-REPORT-002 | calibration-as-validation phrase | language guard fail |
+| TC-SEARCH-001 | search before accepted_for_search | API 409 |
+| TC-SEARCH-002 | improvement claim without baseline | report guard fail |
+| TC-TRACE-001 | equation_id → code_target → verification_case → run_record → report | traceability check pass |
+
+### Fixture Strategy
+
+- **schema-only fixture**: 用于 W1/W2，不依赖 SHUD。
+- **dummy verification fixture**: 模拟 VerificationCase run/collect（VC-DUMMY-001）。
+- **ccw tiny verification fixture**: 真实 SHUD tiny case，case_type=tiny_basin。
+
+### Negative Tests
+
+必须覆盖：
+
+- Agent 自行 accepted；
+- 没有 bundle 的 physical equation change；
+- 没有 baseline 的 improvement claim；
+- passed verification 缺 artifact；
+- calibration report 写"结构验证"；
+- output semantics change 没有 PI gate；
+- failed verification 被隐藏。
+
+### Theory-to-Code 测试验收标准
+
+- [ ] TC-GATE-001/002/003 进入 PR CI。
+- [ ] TC-REPORT-002 进入 language guard 负例。
+- [ ] TC-SEARCH-001 阻止未审查 search。
+- [ ] TC-TRACE-001 进入 release check。
+
+## 13. 验收标准
 
 - [ ] CI 跑 schema/unit/integration 测试。
 - [ ] 本地可手动跑 ccw tiny fixture。

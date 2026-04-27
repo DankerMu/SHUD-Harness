@@ -1,6 +1,6 @@
 # Canonical Contracts Index
 
-**状态：** v0.8.1 合同索引  
+**状态：** v0.8.3 合同索引  
 **目标：** 明确每类工程事实的唯一来源，避免实现时在多个 Markdown 文档中寻找字段定义。
 
 ## 1. Canonical source 顺序
@@ -198,3 +198,20 @@ docs/04_IMPLEMENTATION/Dependency_Versioning_Policy.md
 ```
 
 实现后 lockfile 和 `package.json` 的 `packageManager` 为依赖版本事实源，release manifest 记录发布时快照。
+
+## 15. Theory-to-Code canonical sources
+
+| Contract | Canonical source |
+|---|---|
+| TheoryToCodeBundle / EquationSpec / NumericalSchemeSpec / ImplementationMapping / VerificationCase | `Support_Schema_Contracts.md` + generated Zod schema |
+| Scientific semantic level and gate rules | `Scientific_Change_Gating_Spec.md` |
+| Theory-to-Code report section and assertion lineage | `Theory_To_Code_Report_Lineage_Spec.md` |
+| Search preflight and mutation boundary | `Preflight_And_Mutation_Boundary_Spec.md` |
+| API contracts | `Theory_To_Code_API_Contracts.md` and `Schemas_APIs_CLIs.md` |
+| Tests | `Theory_To_Code_Test_Plan.md` |
+
+Implementation rule:
+
+```text
+Markdown explains semantics; Zod schema is the executable source of truth after implementation.
+```

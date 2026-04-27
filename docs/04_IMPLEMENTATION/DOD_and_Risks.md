@@ -80,6 +80,24 @@ v0.6 明确删除或降级：
 | lockfile 漂移 | schema/runtime 行为不稳定 | frozen install + dependency check |
 | 需求无编号 | 测试和 release gate 无法追踪 | Requirements_Catalog + Traceability |
 
+## Theory-to-Code DOD additions
+
+Release blocker:
+- high-risk scientific ChangeRequest accepted without TheoryToCodeBundle;
+- calibration/search report claims theory validation;
+- failed VerificationCase hidden from EvidenceReport;
+- output semantics changed without PI gate.
+
+Done means:
+- high-risk changes have bundle, mapping, verification evidence and PI decision;
+- search is only run downstream of accepted_for_search or low-risk baseline analysis.
+
+### Theory-to-Code DOD 验收标准
+
+- [ ] 合并后不破坏现有 8 核心对象原则。
+- [ ] 高风险科学变更不能绕过 PI gate。
+- [ ] Search/calibration 仍保持后置。
+
 ## 7. 成功不是自治，而是节省 PI 和工程师时间
 
 评价指标：

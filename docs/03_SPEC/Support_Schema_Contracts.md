@@ -423,7 +423,84 @@ interface DependencyLock {
 }
 ```
 
-## 18. 验收标准
+## 18. Theory-to-Code Support Schemas
+
+以下 schema 由 Theory-to-Code 补充引入，用于支持科学语义变更的理论/公式/推导/映射/验证证据链。详细字段定义见各正式 spec 及 Zod 实现。
+
+### Schema list
+
+```text
+TheoryToCodeBundle
+TheoryNote
+EquationSpec
+SymbolDefinition
+EquationDefinition
+DimensionCheck
+DerivationRecord
+DerivationStep
+NumericalSchemeSpec
+StateVariableSpec
+FluxTermSpec
+SourceSinkTermSpec
+BoundaryConditionSpec
+InitialConditionSpec
+ConservationExpectation
+StabilityExpectation
+ImplementationMapping
+CodeTargetMapping
+SymbolCodeMapping
+OutputSemanticsChange
+SemanticRisk
+ComplexityCost
+VerificationCase
+PreflightGuardResult
+PreflightCheck
+ExperimentTrial
+ExperimentLedger
+BaselineComparisonRef
+```
+
+### Canonical source recommendation
+
+```text
+packages/core/src/domain/schemas/theory-to-code.ts
+packages/core/src/domain/schemas/equation.ts
+packages/core/src/domain/schemas/numerical-scheme.ts
+packages/core/src/domain/schemas/implementation-mapping.ts
+packages/core/src/domain/schemas/verification.ts
+packages/core/src/domain/schemas/controlled-search.ts
+```
+
+Markdown 文档应只解释语义，字段细节以 Zod schema + generated JSON Schema 为准。
+
+### Common fields
+
+所有 theory-to-code support schema 应包含：
+
+```ts
+interface CommonSupportFields {
+  created_at: string;
+  updated_at?: string;
+  created_by: string;
+  reviewed_by?: string;
+  artifact_refs?: string[];
+  audit_event_refs?: string[];
+}
+```
+
+### Evidence usability
+
+理论/公式/推导类 artifact 默认是 human-review evidence，不是 deterministic numeric evidence。报告引用时应区分：
+
+```text
+human_reviewed_theory
+deterministic_verification
+pi_confirmed_decision
+llm_summary
+hypothesis
+```
+
+## 19. 验收标准
 
 - [ ] 每个 support schema 都有 Zod 定义。
 - [ ] 每个 support schema 都能生成 JSON Schema。

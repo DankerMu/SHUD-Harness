@@ -30,6 +30,12 @@
 - 修改输出格式 (breaking)
 - 删除原始数据
 
+## 1.6 Search is downstream of scientific correctness
+
+SHUD-Harness 不得用参数搜索、校准或 benchmark improvement 替代理论审查、公式推导、数值离散审查、代码语义映射和 verification。
+
+任何涉及 physical_equation、model_assumption、numerical_implementation、parameter_default 或 output_semantics 的变更，都必须先建立 Theory-to-Code evidence chain，再进入 search/calibration。
+
 ## 2. 风险分级
 
 | 级别 | 动作 |

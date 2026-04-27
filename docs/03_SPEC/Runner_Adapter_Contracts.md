@@ -37,6 +37,63 @@ interface RunnerSubmitRequest {
 }
 ```
 
+### 2.1 Preflight guard
+
+Runner submit 前应执行 preflight 检查：
+
+```ts
+interface PreflightGuardResult {
+  guard_id: string;
+  task_id: string;
+  job_id?: string;
+  change_request_id?: string;
+  analysis_plan_id?: string;
+
+  checks: PreflightCheck[];
+  status: "pass" | "fail" | "warning";
+  blocking_reasons: string[];
+  artifact_id: string;
+}
+
+interface PreflightCheck {
+  check_id: string;
+  name: string;
+  status: "pass" | "fail" | "warning" | "not_applicable";
+  details: string;
+}
+```
+
+必须检查项：
+
+```text
+workspace_allowed_path
+worktree_clean_or_expected_patch
+theory_bundle_required_if_high_risk
+theory_bundle_status_allows_search
+baseline_required_for_improvement_claim
+evaluation_script_hash_recorded
+input_data_checksum_verified
+raw_data_not_modified
+benchmark_baseline_not_modified_without_gate
+disk_free_threshold_passed
+memory_thread_budget_declared
+secret_redaction_enabled
+output_directory_run_scoped
+```
+
+Preflight 执行流程：
+
+```text
+preflight(task, job/analysis/change_request)
+if status == fail:
+  reject submit with ErrorRecord
+else:
+  write preflight artifact
+  continue submit
+```
+
+完整 Preflight 和 Mutation Boundary 规范见 [Preflight_And_Mutation_Boundary_Spec.md](Preflight_And_Mutation_Boundary_Spec.md)。
+
 ## 3. Status mapping
 
 不同后端状态必须映射到 RunJob.status：
@@ -107,3 +164,6 @@ SLURM array job 每个 array item 应映射到独立 parameter_set 或 child job
 - [ ] local_job 服务重启可恢复 watcher。
 - [ ] docker/slurm 缺失依赖时错误进入 ErrorRecord。
 - [ ] long SHUD run 不通过 local_direct 阻塞 LLM loop。
+- [ ] Runner submit 前执行 preflight。
+- [ ] preflight fail 返回 ErrorRecord，不创建 running job。
+- [ ] preflight artifact 进入 RunRecord lineage。

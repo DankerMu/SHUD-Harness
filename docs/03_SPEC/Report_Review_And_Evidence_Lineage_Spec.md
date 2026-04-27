@@ -42,6 +42,33 @@ interface ReportAssertion {
 
 MVP 不要求每句话都建 assertion，但报告中的关键指标、限制、PI 问题和建议必须有 evidence refs。
 
+### 2.1 Theory-to-Code assertion types
+
+```ts
+type TheoryToCodeAssertionType =
+  | "theory_assumption"
+  | "equation_statement"
+  | "derivation_step"
+  | "numerical_scheme_statement"
+  | "implementation_mapping_statement"
+  | "verification_result"
+  | "search_result"
+  | "validation_context";
+```
+
+### 2.2 Theory-to-Code lineage requirements
+
+| assertion type | required refs |
+|---|---|
+| theory_assumption | theory_note_id |
+| equation_statement | equation_id + equation_spec_id |
+| derivation_step | derivation_record_id + step_id |
+| numerical_scheme_statement | numerical_scheme_id |
+| implementation_mapping_statement | implementation_mapping_id + target_id |
+| verification_result | verification_case_id + run_record/artifact |
+| search_result | analysis_plan_id + baseline/candidate run refs |
+| validation_context | observation/data provenance refs |
+
 ## 3. Reviewer lineage checklist
 
 Reviewer 在将 report 从 `draft` 推到 `reviewed` 前必须检查：

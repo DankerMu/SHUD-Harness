@@ -99,6 +99,47 @@ POST /api/pi-gates/:gateId/decision
 
 User、Session、PermissionDecision、AuditEvent 和 AgentIdentity 的完整 schema 定义见 [User_Session_And_Audit_Schema.md](User_Session_And_Audit_Schema.md)。
 
+### 4.2 Scientific change gate matrix
+
+根据 ChangeRequest 的科学语义风险等级，决定是否需要 Theory-to-Code Bundle、VerificationCase 和 PI approval：
+
+| semantic_level | 需要 bundle | 需要 verification | 需要 PI gate | 能否进入 search |
+|---|---:|---:|---:|---:|
+| pure_engineering | 否 | 视情况 | 通常否 | 不相关 |
+| io_format | 视情况 | 是，若影响 reader | 视情况 | 可以 |
+| output_semantics | 是 | 是 | 是 | accepted_for_search 后 |
+| numerical_implementation | 是 | 是 | 是 | accepted_for_search 后 |
+| parameter_default | 是 | 是 | 是 | accepted_for_search 后 |
+| physical_equation | 是 | 是 | 是 | accepted_for_search 后 |
+| model_assumption | 是 | 是 | 是 | accepted_for_search 后 |
+
+### 4.3 自动 gate 规则
+
+系统应自动生成 PiGate：
+
+- semantic_level in `output_semantics | numerical_implementation | parameter_default | physical_equation | model_assumption`；
+- benchmark baseline replacement；
+- SHUD output variable unit/meaning change；
+- rSHUD reader semantics change；
+- VerificationCase waived；
+- failed verification 仍想进入 search；
+- Agent narrative 想把 calibration 写成 validation。
+
+### 4.4 Scientific change comment required rules
+
+PI decision comment 必填规则（补充 4.1 通用规则）：
+
+| 情况 | comment |
+|---|---:|
+| rejected | 必填 |
+| revision_requested | 必填 |
+| approve high-risk semantic change | 必填 |
+| waive verification | 必填 |
+| accepted_for_search despite inconclusive verification | 必填 |
+| accepted report only | 可选 |
+
+完整 Scientific Change Gating 规范见 [Scientific_Change_Gating_Spec.md](Scientific_Change_Gating_Spec.md)。
+
 ## 5. Session 与登录
 
 MVP 可以采用本地密码或一次性 setup token。小团队部署建议：
@@ -220,3 +261,6 @@ audit_event:
 - [ ] Agent 不能调用 PI decision endpoint 成功通过权限检查。
 - [ ] Notification provider secrets 不进入任何 report、RunRecord 或 artifact。
 - [ ] 无 notification recipient 时写 skipped，不中断主流程。
+- [ ] Agent 不能 approve scientific gate。
+- [ ] high-risk approve/comment required 规则生效。
+- [ ] waived verification 必须 PI comment。

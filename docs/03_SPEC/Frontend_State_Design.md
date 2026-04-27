@@ -229,6 +229,24 @@ chartState: {
 - [ ] PI gate 的按钮显示和服务端权限一致。
 - [ ] ResultsPanel 不展示缺少 RunRecord 的结果为 confirmed evidence。
 
+## Theory-to-Code UI state
+
+Entity cache 增加：
+- theoryBundles
+- equationSpecs
+- implementationMappings
+- verificationCases
+- experimentLedgers
+
+MVP 组件：
+- TheoryBundleSummaryCard
+- EquationSymbolTable
+- ImplementationMappingTable
+- VerificationCaseTable
+- SearchPreflightBanner
+
+Phase 3/4 可先以只读卡片实现，不阻塞 W1/W2 skeleton。
+
 ## Operational UX WebSocket reducer
 
 新增事件处理：
@@ -237,3 +255,9 @@ chartState: {
 - `report.export_ready` → update `reportExports[export_id]`
 - `pi_gate.decision_recorded` → update `piGateDecisions[decision_id]`
 - `notification.status` → update `notifications[notification_id]`
+
+## Theory-to-Code 验收标准补充
+
+- [ ] 合并后不破坏现有 8 核心对象原则。
+- [ ] 高风险科学变更不能绕过 PI gate。
+- [ ] Search/calibration 仍保持后置。

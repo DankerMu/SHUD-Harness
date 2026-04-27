@@ -126,7 +126,26 @@ Reviewer 不是 “科学 Critic”。v0.6 中它只做两类检查：
 - 是否有让 PI 判断的开放问题。
 ```
 
-Reviewer 不判断“水文机制是否成立”。
+Reviewer 不判断”水文机制是否成立”。
+
+### C. Derivation Reviewer responsibility
+
+Reviewer 可检查：
+- symbol/unit/dimension 是否完整；
+- derivation steps 是否跳步；
+- numerical scheme 是否列出 conservation/stability expectation；
+- implementation mapping 是否覆盖 equation_id 和 code target；
+- verification cases 是否覆盖关键风险。
+
+Reviewer 不替代 PI 判断科学假设是否成立。
+
+### D. Agent restrictions
+
+Agent 不得：
+- 将自己生成的 TheoryToCodeBundle 标记为 accepted；
+- 将 calibration improvement 写成 theory validation；
+- 修改 physical equation 后绕过 PI gate；
+- 删除失败 verification 证据。
 
 ## 7. 人机协作闭环
 

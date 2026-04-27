@@ -142,6 +142,16 @@ RepoContextBrief 是工程上下文，不是科学证据。EvidenceReport 可以
 - 预期 artifact；
 - 停止条件。
 
+### 4.4a Scientific change routing
+
+If task/change semantic_level is `physical_equation`, `model_assumption`, `numerical_implementation`, `parameter_default`, or `output_semantics`:
+
+1. Coordinator creates or requests TheoryToCodeBundle.
+2. Coder may only modify code after implementation_mapping is drafted.
+3. Worker may run verification cases, not calibration/search, until bundle reaches accepted_for_search.
+4. Reviewer checks theory-to-code lineage.
+5. PI gate controls accepted/accepted_for_search.
+
 ### 4.5 Dispatch
 
 Coordinator 根据计划派发 Worker。短任务可以同步执行，长任务必须转换成 RunJob 并进入 Park/Resume 流程。

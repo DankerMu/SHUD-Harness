@@ -75,6 +75,16 @@
 
 ---
 
+## Theory-to-Code Principle
+
+For SHUD scientific changes, SHUD-Harness prioritizes the reviewable chain:
+
+Research question → theory note → equation spec → derivation record → numerical scheme → implementation mapping → verification case → evidence report → PI decision.
+
+Sensitivity analysis, calibration and controlled search are downstream tools. They must not be used to replace theory review, derivation review, implementation mapping or verification.
+
+---
+
 ## 4. 对象模型 (8 个)
 
 ### 4.1 TaskCard — 任务入口

@@ -1,9 +1,9 @@
 # SHUD-Harness 文档主索引
 
-> **版本**: v0.8.2 (2026-04-25)
+> **版本**: v0.8.3 (2026-04-27)
 > **技术栈**: TypeScript 全栈 (Bun + Hono + React)，基于 Zero Agent Runtime 扩展
 > **交互模式**: Web-first，实时对话 + 日志流 + PI 审批 + 报告阅读
-> **文档总量**: 4 个目录，80 份规范文档
+> **文档总量**: 4 个目录，95 份规范文档
 
 ---
 
@@ -32,6 +32,9 @@
 | [`PRD_Spec_Merge_Map.md`](PRD_Spec_Merge_Map.md) | v0.8.2 补充文档合并地图 |
 | [`Requirements_Catalog.md`](Requirements_Catalog.md) | 正式需求目录（US/FR/NFR/DR/GR/IR/TR 编号体系） |
 | [`Requirements_Numbering_Conventions.md`](Requirements_Numbering_Conventions.md) | 需求编号、状态、优先级和 traceability 规则 |
+| [`Theory_To_Code_Rationale.md`](Theory_To_Code_Rationale.md) | 理论到代码补充理由 |
+| [`Theory_To_Code_Merge_Map.md`](Theory_To_Code_Merge_Map.md) | 理论到代码合并地图 |
+| [`Theory_To_Code_Requirements_Addendum.md`](Theory_To_Code_Requirements_Addendum.md) | 理论到代码需求补充（US-TC / FR-TC / GR-TC / TR-TC / NFR-TC） |
 
 ---
 
@@ -108,6 +111,21 @@
 | [`Report_Review_And_Evidence_Lineage_Spec.md`](../03_SPEC/Report_Review_And_Evidence_Lineage_Spec.md) | 报告审查与证据链 |
 | [`Report_Export_Spec.md`](../03_SPEC/Report_Export_Spec.md) | 报告导出规范 |
 
+### 理论到代码治理
+
+| 文件 | 用途 |
+|------|------|
+| [`Theory_To_Code_Governance_Spec.md`](../03_SPEC/Theory_To_Code_Governance_Spec.md) | 科学假设→公式→推导→数值方案→代码实现→验证的治理链路 |
+| [`Equation_And_Derivation_Spec.md`](../03_SPEC/Equation_And_Derivation_Spec.md) | 公式、符号、单位、维度检查和推导记录 |
+| [`Numerical_Scheme_Spec.md`](../03_SPEC/Numerical_Scheme_Spec.md) | 离散化、状态变量、通量/源汇项、边界条件、守恒/稳定性预期 |
+| [`Implementation_Mapping_Spec.md`](../03_SPEC/Implementation_Mapping_Spec.md) | equation_id/symbol_id 到代码文件、函数、变量和输出语义的映射 |
+| [`Verification_Case_Spec.md`](../03_SPEC/Verification_Case_Spec.md) | verification/validation/calibration 边界与验证用例 |
+| [`Scientific_Change_Gating_Spec.md`](../03_SPEC/Scientific_Change_Gating_Spec.md) | 科学语义变更分级与 PI gate |
+| [`Controlled_Search_Boundary_Spec.md`](../03_SPEC/Controlled_Search_Boundary_Spec.md) | 搜索/校准作为后置工具的边界 |
+| [`Preflight_And_Mutation_Boundary_Spec.md`](../03_SPEC/Preflight_And_Mutation_Boundary_Spec.md) | RunJob/Search/ChangeRequest preflight 与修改边界 |
+| [`Theory_To_Code_Report_Lineage_Spec.md`](../03_SPEC/Theory_To_Code_Report_Lineage_Spec.md) | EvidenceReport 中理论到代码证据链 |
+| [`Theory_To_Code_Support_Schemas.md`](../03_SPEC/Theory_To_Code_Support_Schemas.md) | Theory-to-Code 支持 schema 汇总 |
+
 ### 权限与审计
 
 | 文件 | 用途 |
@@ -175,6 +193,11 @@
 | [`Dependency_Versioning_Policy.md`](../04_IMPLEMENTATION/Dependency_Versioning_Policy.md) | Bun/npm/TypeScript/Zod/React/DuckDB 依赖锁定与更新策略 |
 | [`Performance_Test_Plan.md`](../04_IMPLEMENTATION/Performance_Test_Plan.md) | 性能 NFR 测试计划 |
 | [`Observability_Test_Plan.md`](../04_IMPLEMENTATION/Observability_Test_Plan.md) | 健康检查、日志、指标、告警和 runbook drill 测试计划 |
+| [`Theory_To_Code_API_Contracts.md`](../04_IMPLEMENTATION/Theory_To_Code_API_Contracts.md) | TheoryToCodeBundle / VerificationCase API |
+| [`Theory_To_Code_Test_Plan.md`](../04_IMPLEMENTATION/Theory_To_Code_Test_Plan.md) | Theory-to-Code 测试计划 |
+| [`Theory_To_Code_Phase_Activation.md`](../04_IMPLEMENTATION/Theory_To_Code_Phase_Activation.md) | 阶段激活补充 |
+| [`Scientific_Change_Playbooks.md`](../04_IMPLEMENTATION/Scientific_Change_Playbooks.md) | 科学语义变更 Playbook |
+| [`Theory_To_Code_Traceability_Addendum.md`](../04_IMPLEMENTATION/Theory_To_Code_Traceability_Addendum.md) | equation→code→verification→report 追踪补充 |
 
 ---
 
@@ -197,5 +220,6 @@
    - 分析校准：Sensitivity_Calibration_Benchmark -> Parameter_Set_And_Analysis_Run_Mapping
    - 部署运维：Deployment_Architecture -> CICD_Release -> Testing_Strategy -> Operations_Runbook -> Dependency_Versioning_Policy
    - 监控性能：Observability_Monitoring_Spec -> Alerting_Thresholds_Spec -> Log_Aggregation_Spec -> Performance_NFR_Spec
+   - 理论到代码：Theory_To_Code_Governance_Spec -> Equation_And_Derivation_Spec -> Numerical_Scheme_Spec -> Implementation_Mapping_Spec -> Verification_Case_Spec -> Scientific_Change_Gating_Spec
    - 需求追踪：Requirements_Catalog -> Requirements_Numbering_Conventions -> Traceability_Matrix
    - 实施计划：Phased_Plan -> Repository_Layout -> DOD_and_Risks
