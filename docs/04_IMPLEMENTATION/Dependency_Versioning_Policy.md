@@ -53,6 +53,7 @@
 | DuckDB Node client | 优先评估 `@duckdb/node-api` Neo client；如使用 deprecated `duckdb`，必须记录原因 | DuckDB 官方旧 Node client 已 deprecated，应在实现前决策 |
 | Playwright | 锁定 minor | e2e/UI smoke |
 | Markdown/HTML render deps | 锁定 minor | report export 不能依赖 floating latest |
+| **LLM provider/model** | 锁定完整 model_id（含日期后缀），禁止 `-latest` 类浮动别名 | agent 行为最大的依赖项。model/params/prompt_pack 记录于 StackLock.llm（[Minimal_Schemas](../03_SPEC/Minimal_Schemas.md) §2）；变更按 major upgrade 流程处理并触发行为 eval（[Agent_Behavior_Eval_Spec](Agent_Behavior_Eval_Spec.md)） |
 
 ---
 
@@ -127,6 +128,12 @@ interface DependencyLock {
     commit: string;
     dirty: boolean;
   }>;
+  llm?: {
+    provider: string;
+    model_id: string;          // 完整标识，禁止浮动别名
+    params_digest: string;
+    prompt_pack_digest: string;
+  };
 }
 ```
 

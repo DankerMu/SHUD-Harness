@@ -89,6 +89,10 @@ tail logs：进入 command trace；
 summary：进入 agent context/report。
 ```
 
+tail 与 summary 的具体截断规则（tail ≤ 100 行 / 8KB、head 20 + tail 80、summary 由确定性规则生成而非 LLM 压缩）
+统一由 [Context_Trust_And_Injection_Spec](Context_Trust_And_Injection_Spec.md) §5 定义，本文不另立标准。
+命令输出进入 context 时按 T4 外部内容包裹（同规范 §3）。
+
 ## 6. 最低恢复能力
 
 MVP 必须通过测试：

@@ -206,8 +206,11 @@ Layer 3: 点击指标卡 → 展开来源 artifact ref + 历史趋势
 |------|---------|
 | 短操作 (< 3s) | 按钮 spinner |
 | 中等操作 (3-30s) | Feed 消息 + StatusBar 状态更新 |
+| **LLM 推理中 (3-60s)** | Feed 角色卡片 thinking/streaming 指示（`agent.turn.*` 事件驱动），与 job 运行视觉区分；超 60s 显示"推理时间偏长"提示 |
 | 长操作 (> 30s) | BatchProgressGrid / Terminal 实时日志 + StatusBar job 计数 |
 | 超长操作 (> 5min) | Park 提示 + 邮件通知选项 |
+
+运行中输入框旁必须有介入提示：默认输入=排队生效（append），"打断并调整"和"终止任务"为显式按钮（语义见 [Interaction_Model](../02_ARCHITECTURE/Interaction_Model.md) §7.1）。
 
 ### 5.3 成功反馈
 

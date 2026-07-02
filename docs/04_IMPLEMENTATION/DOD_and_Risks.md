@@ -74,6 +74,7 @@ v0.6 明确删除或降级：
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
+| Park/Resume 恢复语义未经原型验证 | 全系统技术风险最高点在后期才暴露，返工波及执行闭环 | Phase 2 首个里程碑：dummy job 打通 park→collect→resume→按 plan_cursor 接续 的端到端闭环 |
 | 无 health endpoint | 部署后无法判断服务是否可接收任务 | W1 实现 live/ready |
 | 性能目标缺失 | UI/API 在开发后期才发现不可用 | W1 建 perf smoke |
 | 运维手册缺失 | 真实长任务失败后恢复混乱 | W3 前合并 Operations_Runbook |

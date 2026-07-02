@@ -62,6 +62,15 @@ Artifact 只有满足下列条件才能被 EvidenceReport 当作 deterministic e
 6. `redaction_status != unsafe`；
 7. 若是图表，必须有生成参数和数据来源。
 
+**LLM 产物的默认值（AGA-P2）**：上述 7 条针对确定性程序产出（metrics、log、patch、manifest）。
+内容由 LLM 直接生成的 artifact（报告草稿正文、LLM 摘要、解读性文本）`evidence_usable` **默认 false**：
+
+- 升级为 true 只能由 PI 或工程师操作，且写 audit log；
+- agent 不得把自己产出的 artifact 标记为 evidence_usable——registry 层校验 `created_by`
+  与操作者身份，agent 请求一律 403；
+- 报告引用此类 artifact 时，对应断言的 evidence_level 上限为 `llm_summary`
+  （见 [Report_Review_And_Evidence_Lineage_Spec](Report_Review_And_Evidence_Lineage_Spec.md)）。
+
 ## 5. Artifact manifest
 
 每个 RunRecord 和 EvidenceReport 都应有 manifest：
@@ -113,6 +122,7 @@ GET /api/artifacts/:artifactId/download
 
 - [ ] Report 引用的每个 artifact 都能查到 metadata。
 - [ ] Artifact 不在 `tmp/` 时才可作为 evidence。
+- [ ] LLM 生成内容的 artifact 默认 `evidence_usable=false`；升级操作有 audit 记录且操作者不是 agent。
 - [ ] HTML export 的 included/excluded artifacts 来自 manifest。
 - [ ] 清理 debug logs 不会删除 accepted report 依赖的 summary artifact。
 - [ ] Artifact API 不泄露绝对敏感路径或 secrets。

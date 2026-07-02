@@ -16,6 +16,37 @@ type ChangeSemanticLevel =
   | "model_assumption";
 ```
 
+## 1.1 分类的确定性下限（semantic level floor）
+
+**问题（AGA-P0-2）**：semantic_level 由 Coder（LLM）自填。若无制衡，agent 把物理语义改动标为 `pure_engineering` 即可旁路整条治理链。分类是治理链最弱环节，必须有机器强制的下限。
+
+**机制**：维护确定性的 path → 最低 semantic_level 映射表（配置文件，非硬编码）：
+
+```yaml
+# config/semantic_level_floor.yaml（示例初值，随 ImplementationMapping 积累细化）
+floors:
+  - pattern: "SHUD/src/ModelData/**"        # 求解器物理/数值核心
+    floor: numerical_implementation
+  - pattern: "SHUD/src/classes/**"
+    floor: numerical_implementation
+  - pattern: "SHUD/input/**/*.para*"        # 默认参数文件
+    floor: parameter_default
+  - pattern: "SHUD/src/**/IO*"              # 输出格式
+    floor: io_format
+  - pattern: "rSHUD/R/*read*"               # reader 语义
+    floor: io_format
+  - pattern: "docs/**, scripts/**, templates/**"
+    floor: pure_engineering
+```
+
+**强制规则**（harness 代码执行，不是 prompt）：
+
+1. `effective_level = max(declared_level, max(floor(f) for f in files_changed))`。gate matrix 一律按 effective_level 求值。
+2. files_changed 命中未登记 pattern 的求解器源码路径 → effective_level 至少 `numerical_implementation`，并要求 Reviewer 确认分类（保守默认）。
+3. **降级需 PI**：agent 声明的级别低于 floor 时不报错，直接按 floor 执行；如确属误报（如纯注释修改），由 PI/工程师在 gate 上豁免并记录理由——agent 无降级权。
+4. Reviewer validator（确定性）交叉核对 files_changed 与 effective_level，不一致即拒绝进入 reviewed。
+5. ImplementationMapping 存在时，floor 表应从 mapping 的 code_targets 自动增补（equation 映射过的文件自动获得对应 floor）。
+
 ## 2. Gate matrix
 
 | semantic_level | 需要 bundle | 需要 verification | 需要 PI gate | 能否进入 search |
@@ -92,3 +123,5 @@ calibration improved
 - [ ] Agent 角色不能 approve scientific gate。
 - [ ] PI decision 写入 AuditEvent、MemoryNote、report decision history。
 - [ ] search/calibration 前置检查 bundle status。
+- [ ] 负例：files_changed 触及 floor=numerical_implementation 的路径而声明 pure_engineering → effective_level 按 floor 生效，gate 照常触发（EVAL-GOV-001）。
+- [ ] agent 无法修改 semantic_level_floor 配置（路径在沙箱写禁区）。

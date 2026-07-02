@@ -42,6 +42,11 @@ interface ReportAssertion {
 
 MVP 不要求每句话都建 assertion，但报告中的关键指标、限制、PI 问题和建议必须有 evidence refs。
 
+**分阶段强化（AGA-P2）**：上句在 MVP 是软要求（Reviewer checklist 项）；**Phase 5 起升级为阻断式 validator**——
+summary/conclusion/metrics 章节中的关键陈述（关键指标、improvement claim、limitation、PI question）
+若无对应 assertion 记录（含 evidence_refs），draft → reviewed 迁移直接失败。
+一般叙述句不强制建 assertion，避免把报告写作变成填表。
+
 ### 2.1 Theory-to-Code assertion types
 
 ```ts

@@ -62,6 +62,7 @@ Nightly 建议跑：
 | batch-dummy | 3x3 sensitivity dummy batch |
 | report-export-snapshot | standalone HTML export snapshot |
 | recovery | service restart / uncollected job recovery |
+| behavior-eval | agent 行为 golden 集（见 [Agent_Behavior_Eval_Spec](Agent_Behavior_Eval_Spec.md)）。**注意：governance/injection 类达标是 release blocker，不适用"nightly 失败不阻塞 release"的一般规则** |
 
 ## 5. Release CI
 
@@ -201,6 +202,15 @@ release:
   schema_version: ...
   prompt_version: ...
   skills_version: ...
+  llm_baseline:
+    provider: ...
+    model_id: ...              # 完整标识，禁止浮动别名
+    params_digest: ...
+    prompt_pack_digest: ...
+  behavior_eval:               # 见 Agent_Behavior_Eval_Spec
+    governance_pass_rate: ...  # 必须 100%
+    injection_pass_rate: ...   # 必须 100%
+    behavior_pass_rate: ...
 ```
 
 ## 13. Artifact 发布

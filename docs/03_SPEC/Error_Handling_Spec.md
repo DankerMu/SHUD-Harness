@@ -18,6 +18,8 @@
 | `parser_error` | rSHUD 读取失败、输出变量缺失 | 生成 parser failure artifact |
 | `report_error` | 报告引用缺失 artifact | 阻止 report reviewed |
 | `agent_error` | LLM 工具选择错误、上下文不足 | Coordinator 可恢复或要求 PI 输入 |
+| `llm_provider_error` | 限流、超时、5xx、配额耗尽、认证失效 | 见 §5.1 分级降级；不影响运行中 RunJob |
+| `llm_output_error` | 结构化输出 parse 失败、schema 不匹配、工具参数非法 | 重新生成 ≤2 次，计入失败签名；仍失败 → blocked |
 | `ops_error` | disk full、OOM | 创建 OpsIncident，执行 runbook |
 | `duckdb_error` | warehouse open/query failure | degraded mode，filesystem fallback |
 | `dependency_error` | lockfile drift、native binding load fail | 阻塞 release 或标记 service degraded |
@@ -75,6 +77,21 @@ RunJob 失败不等于 TaskCard 失败。TaskCard 可以进入：
 | rSHUD parser 缺少可选变量 | ✓ | 标记 not_available 后继续 |
 | numerical health fail |  | 不自动改参数 |
 | LLM 生成报告语言违规 | ✓ | 使用 guard 后重新生成一次 |
+| LLM rate_limit / timeout / 5xx | ✓ | 指数退避 ≤2 次（见 §5.1） |
+| LLM quota / auth 失效 |  | 不重试，task blocked + critical 通知 |
+| LLM 输出 parse / 参数非法 | ✓ | 重新生成 ≤2 次；注意重试=重新采样，非幂等 |
+
+### 5.1 LLM provider 故障降级（AGA-P1-3）
+
+LLM 故障只影响 agent loop，**不影响运行中 RunJob**——job 是独立 OS 进程，watcher 继续工作，collect 照常。
+
+| 故障 | 处理 |
+|---|---|
+| rate_limit / timeout / server_error | 指数退避重试 ≤2；仍失败 → TaskCard blocked，ErrorRecord(retryable=true)，工程师/PI 可一键恢复（恢复 = 从 plan_cursor 重新进入当前阶段） |
+| quota_exhausted / auth_error | 不重试；TaskCard blocked，critical NotificationRecord（此时 WebSocket 之外的通知通道是唯一可达路径） |
+| mid-turn 崩溃（回复到一半进程死亡） | 该轮丢弃；恢复按 Workspace_Snapshot 的 service restart recovery：领域对象状态为准，从 plan_cursor 重放当前步骤（LLM 步骤重放=重新采样，可接受，因为副作用都有幂等保护） |
+
+parked 任务不受 LLM 故障影响（本来就不消耗 LLM）；resume 时 provider 仍不可用 → resume 推迟并告警，job 结果不丢。
 
 ## 6. 用户提示
 

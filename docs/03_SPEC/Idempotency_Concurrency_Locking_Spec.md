@@ -53,6 +53,18 @@ interface LockRecord {
 | Notification send | `task_id + trigger + target_id + recipient` |
 | PI gate decision | `gate_id + actor_user_id + decision + evidence_digest` |
 
+### 4.1 LLM 步骤不幂等（AGA-P2）
+
+上表的 key 全部保护**确定性副作用**。LLM 推理步骤本质不幂等——同 prompt 重放得到不同输出，
+重试即重采样。规则：
+
+- 不为 LLM 调用本身设 idempotency key，也不缓存 completion 冒充“重放”；
+- LLM 输出先落入 draft 单元（plan 草稿、narrative、ChangeRequest 草稿），draft 可整体丢弃重生成；
+  对外副作用（提交 job、写 RunRecord、发通知）必须过上表幂等 key——
+  “turn 重放导致重复提交”由 key 拦截，不靠 LLM 自觉；
+- phase 重入（mid-turn crash 后 replay，见 Error_Handling_Spec §5.1）由 task lock + 状态单调性保护：
+  重放 turn 产生不同措辞是可接受的，重复推进状态或重复触发副作用是不可接受的。
+
 ## 5. Lock 文件路径
 
 ```text
@@ -84,3 +96,4 @@ workspace/tasks/TASK-001/pi_gates/GATE-001.lock
 - [ ] report export 重复请求返回同一 export 或创建明确新版本，不覆盖旧文件。
 - [ ] 同一 dedupe key notification 只发送一次。
 - [ ] lock 过期 recovery 有 audit log。
+- [ ] mid-turn crash 后 replay 不产生重复 RunJob/notification（幂等 key 拦截，单测）。

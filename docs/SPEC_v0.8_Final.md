@@ -56,8 +56,11 @@
 | **PI** | 提问题、定方向、判断证据、批准高风险变更 | 不写代码、不跑模型 |
 | **Coordinator** | 解析任务、调度执行、汇总报告、建议下一步 | 不判断科学结论、不自主修改物理代码 |
 | **Repo Explorer** | 只读探索仓库、定位入口/调用链/影响面、生成 RepoContextBrief | 不写文件、不提交 RunJob、不做科学判断 |
-| **Worker** | 编译、运行、解析日志、写脚本、生成图表、创建 patch | 不决定实验方向、不写长期 memory |
+| **Worker** | 编译、运行、解析日志、写脚本、生成图表 | 不决定实验方向、不改仓库源码、不写长期 memory |
+| **Coder** | 在 worktree 中修改代码、生成 patch bundle 和 ChangeRequest | 不直接改 baseline/主分支、不决定变更是否接受 |
 | **Reviewer** | 检查兼容性、输出格式、工程完整性 | 不审查科学假设 |
+
+> 角色枚举 canonical 定义：[02_ARCHITECTURE/Roles_and_Boundaries.md](02_ARCHITECTURE/Roles_and_Boundaries.md) §0。
 
 ### 治理规则 (硬编码)
 
@@ -131,6 +134,11 @@ harness:
   version: "0.8.1"
   prompt_pack: promptpack-0001
   skills_version: skills-0001
+llm:
+  provider: anthropic
+  model_id: "claude-sonnet-5"
+  params_digest: sha256:...
+  prompt_pack_digest: sha256:...
 fingerprint: sha256:...
 created_at: 2026-04-25T10:00:00Z
 ```
@@ -377,7 +385,7 @@ Coordinator 构建 RunJob → submit → job.status = submitted
 | 运行崩溃 | 收集 partial log, 检查 CVODE 错误, 建议诊断方向 |
 | 代码写坏 | `git checkout -- .` 回滚 worktree |
 | 临时文件堆积 | Web Dashboard "清理" 按钮 → 后端清理 scratch |
-| Agent 死循环 | `max_no_progress_steps: 3` → 自动 block |
+| Agent 死循环 | `max_no_progress_steps: 3` → 自动 block（“无进展”判定语义见 [02_ARCHITECTURE/Control_Kernel.md](02_ARCHITECTURE/Control_Kernel.md) §5.1） |
 | 预算超出建议值 | 状态栏标黄提醒 PI, 不自动中断 |
 | Job 孤儿 | 后端定期检查 pid, 超时标记 timed_out, 前端展示告警 |
 

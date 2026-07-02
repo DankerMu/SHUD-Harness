@@ -110,6 +110,16 @@ LLM raw prompts if marked sensitive
 OPENAI_API_KEY=sk-... → OPENAI_API_KEY=[REDACTED:secret_ref:env:OPENAI_API_KEY]
 ```
 
+### 5.1 LLM 交互留痕（AGA-P1-7）
+
+"不留 prompt"和"事后能回答 agent 为什么这么做"不可兼得。取舍如下：
+
+- **默认留存** LLM 请求-响应对（system prompt 引用 pack digest 而非全文、messages、completion、tool calls），
+  写入 `workspace/sessions/<session_id>/llm_calls/`，**先过 secret redaction 再落盘**；
+- 留存目的仅限事后审计与行为漂移诊断，不作为科学证据源（与事件持久化同规则）；
+- 单条记录含 `model_id + params_digest + prompt_pack_digest`，与 StackLock.llm 可对账；
+- 敏感任务可按 task 级配置关闭留存（`llm_call_logging: false`），关闭本身写 audit log。
+
 ---
 
 ## 6. Retention
@@ -122,6 +132,7 @@ OPENAI_API_KEY=sk-... → OPENAI_API_KEY=[REDACTED:secret_ref:env:OPENAI_API_KEY
 | job stdout/stderr artifact | 由 artifact retention_class 决定 |
 | notification logs | 90 天 |
 | ops DuckDB summaries | 1 年或按 workspace 配置 |
+| LLM 请求-响应对 | 30 天（redacted；诊断窗口，过期自动清理） |
 
 ---
 

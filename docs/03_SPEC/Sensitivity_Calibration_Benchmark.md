@@ -29,6 +29,23 @@ outputs:
   - PI_summary
 ```
 
+### 1.1 参数空间来源记录（AGA-P2）
+
+`parameters` 的取值网格常由 LLM 起草，而参数空间本身就是科学选择。AnalysisPlan 必须记录来源与理由：
+
+```yaml
+parameter_space_rationale:
+  proposed_by: agent | pi | engineer
+  basis: "ksat 倍率按常见物理范围取对数均匀 3 点；mannings_n 参考文献区间"
+  confirmed_by: null        # PI/工程师确认后填写
+```
+
+规则：
+
+- agent 起草的参数空间是 T3 内容：未经确认时，报告必须标注“参数范围为 agent 建议值”；
+- 报告 limitations 必须包含未覆盖的参数区域（如“仅测试 ksat×[0.5,2]，未覆盖极端值”）——
+  sensitivity/calibration 模式下，limitations 至少含 1 条 coverage 声明，由 Reviewer validator 强制。
+
 ## 2. Sensitivity 不等于 calibration
 
 敏感性分析回答：

@@ -331,7 +331,62 @@ snapshot_required_total
 
 ---
 
-## 10. 事故记录模板
+## 10. LLM provider 故障（限流 / 超时 / 配额 / 认证）
+
+### 症状
+
+- ALERT-LLM-001/003 触发；
+- 活跃 task 集中进入 blocked，ErrorRecord.category = `llm_provider_error`；
+- agent 活动流停止但 job 仍在跑（正常——job 独立于 LLM）。
+
+### 诊断
+
+```text
+provider status page / API 直连测试
+error category: rate_limit | timeout | server_error | quota | auth
+影响面：blocked task 列表 vs 运行中 RunJob（后者应不受影响）
+API key 有效性与余额
+```
+
+### 恢复步骤
+
+1. 确认运行中 RunJob 与 watcher 正常——LLM 故障不得中断 collect。
+2. rate_limit/临时故障：等待或降低并发，blocked task 从 plan_cursor 恢复。
+3. quota/auth：更新密钥或充值，验证单次调用成功后批量恢复 task。
+4. 长时间不可用：dashboard 显示 llm degraded；parked/新任务照常受理（提交 job 不需要 LLM 的部分），仅 agent 推理暂停。
+5. OpsIncident 记录 provider、时段、影响 task 数。
+
+---
+
+## 11. LLM 成本失控 / 模型行为漂移
+
+### 症状
+
+- ALERT-LLM-004/005 或 ALERT-AGENT-001/002 触发；
+- 单 task 调用数/成本远超 advisory；同类任务成本突然系统性上涨；
+- eval nightly 通过率下降（行为漂移的直接信号）。
+
+### 诊断
+
+```text
+cost_record 按 task/phase 聚合：钱烧在哪个阶段
+no-progress 签名列表：是否死循环撞同一面墙
+StackLock.llm.model_id 是否变化（provider 静默升级？）
+prompt_pack_digest 是否变化（谁改了 prompt？）
+对比 behavior eval 基线：governance/injection 通过率
+```
+
+### 恢复步骤
+
+1. 死循环成本：确认 no-progress blocker 生效（3 步阈值）；未生效属实现 bug，手动 block task。
+2. 行为漂移：锁回已知良好的 model_id/prompt_pack（StackLock 有记录），重跑 eval 确认恢复。
+3. 漂移源自 provider 静默升级：将浮动别名替换为固定版本标识，补 DependencyLock。
+4. 全局成本：临时下调 ALERT-LLM-005 日上限，暂停新 LLM 任务受理（运行中不杀——半途中止比完成更浪费）。
+5. OpsIncident 记录漂移前后指标对比，eval 基线入档。
+
+---
+
+## 12. 事故记录模板
 
 ```yaml
 incident_id: INC-001
@@ -357,7 +412,7 @@ postmortem_required: true
 
 ---
 
-## 11. 验收标准
+## 13. 验收标准
 
 - [ ] 每个 HIGH 运维场景有症状、诊断、恢复、不能做、事后记录。
 - [ ] Runbook 引用 AlertRule 和 OpsIncident。
@@ -365,3 +420,5 @@ postmortem_required: true
 - [ ] DuckDB 损坏可从 filesystem records 重建。
 - [ ] Job 卡死恢复不覆盖旧 RunJob。
 - [ ] Disk full 恢复遵守 retention policy。
+- [ ] LLM provider 故障演练：blocked task 可从 plan_cursor 批量恢复，运行中 job 不受影响。
+- [ ] 行为漂移演练：能通过 StackLock.llm 锁回已知良好版本并以 eval 验证恢复。

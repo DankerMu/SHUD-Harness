@@ -98,8 +98,29 @@ Agent 已暂停，不继续消耗 LLM token。`runtime_phase = waiting_for_job`�
 
 ```text
 - max_retry_per_failed_command: 2；
-- no_progress_detection: 连续 3 步无进展 → 自动 block。
+- no_progress_detection: 连续 3 步无进展 → 自动 block（判定语义见 §5.1）。
 ```
+
+### 5.1 无进展（no-progress）判定器
+
+“无进展”不是 LLM 的自我感觉，是确定性判定：
+
+**步（step）**：Agent loop 中一次执行了至少一个工具调用的迭代。纯文本迭代不计步。
+
+**进展事件（progress event）**，本步内发生任一即视为有进展：
+
+1. task workspace 内新增或修改了文件（CommandTrace.files_changed 非空）；
+2. 领域对象发生状态迁移或新建（TaskCard / RunJob / RunRecord / EvidenceReport / ChangeRequest / MemoryNote）；
+3. 提交了新 RunJob 或完成了一次 collect；
+4. 出现**新的失败签名**——失败也是进展，前提是它提供了新的诊断信息。
+
+**失败签名（failure signature）**：`sha256(command_digest + exit_code + stderr 错误类别)`。
+同一 task 内重复出现相同失败签名的步直接计为无进展步——同一面墙撞第二次不是进展。
+
+**计数规则**：连续无进展步计数器在任一进展事件时清零；达到 3 时 TaskCard → blocked，
+生成 partial report 并附最近失败签名列表供人工检查。
+
+parked 状态不计步；job 等待时间不参与判定。判定器实现必须是纯函数（输入 CommandTrace + 对象事件流，输出 progress/no-progress），可独立单测。
 
 软监控（状态栏提醒，PI 决定是否中止）：
 

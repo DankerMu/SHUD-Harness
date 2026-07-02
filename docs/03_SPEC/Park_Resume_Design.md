@@ -86,6 +86,10 @@ parked_state:
     plan: tasks/TASK-.../plan.md
     stack_lock: stacks/STACK-.../stacklock.yaml
     data_provenance: data/DATA-.../provenance.yaml
+  plan_cursor:
+    completed_steps: [step-1, step-2]
+    next_step: step-3
+    plan_revision: 2          # plan.md 修订号；恢复时若磁盘上的 plan revision 更新，以磁盘为准并重算 cursor
   last_user_visible_summary: "已提交 ccw tiny run，等待 SHUD 运行完成。"
 ```
 
@@ -158,6 +162,10 @@ resume_context:
   task_card: ...
   original_brief: ...
   plan_summary: ...
+  plan_cursor:
+    completed_steps: [step-1, step-2]
+    next_step: step-3
+    plan_revision: 2
   stack_lock_summary: ...
   data_provenance_summary: ...
   run_records:
@@ -171,9 +179,19 @@ resume_context:
 Coordinator resume prompt 应明确：
 
 - 这是恢复任务，不是新任务；
+- 按 `plan_cursor` 从 `next_step` 接续，不重做 `completed_steps`；
 - 不要重新提交已完成 job；
 - 先检查 RunRecord 和 metrics；
 - 只在证据不足时建议下一步。
+
+多个 job 乱序完成时，resume 不逐 job 触发：按 `resume_policy.trigger` 聚合（如 `all_jobs_completed`），
+resume_context.run_records 一次性给出全部终态 job 的 RunRecord。
+
+**resume_context 组装规则（AGA-P1-4）**：resume_context 不是自由拼接——允许进入的内容清单与预算上限
+（Resume 阶段 ≤ 16KB）由 [Context_Trust_And_Injection_Spec](Context_Trust_And_Injection_Spec.md) §5 统一定义。
+其中 `plan_summary` / `stack_lock_summary` / `data_provenance_summary` 由确定性模板生成（字段抽取，非 LLM 压缩）；
+run_records 只带 status 与 metrics_ref，不内联日志或输出数据；job stdout/stderr 若需引用，
+按同规范 §5 的 tail 截断规则并以 T4 包裹注入。
 
 ## 7. 触发策略
 

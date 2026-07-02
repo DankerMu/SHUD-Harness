@@ -86,6 +86,9 @@ T0(schema) + T1(API) + UI smoke 全部通过。
 
 > RunJob submit → sandbox 执行 → WebSocket 推流 → collect → RunRecord → Park/Resume → 服务重启恢复
 
+**风险优先级：** Park/Resume 恢复语义是全系统技术风险最高点（见 [DOD_and_Risks.md](04_IMPLEMENTATION/DOD_and_Risks.md) §6）。
+Phase 2 第一个里程碑必须是 dummy job 的 park→collect→resume→按 plan_cursor 接续 端到端原型，先于 WebSocket 细节打磨。
+
 ### 激活 Spec
 
 | 文件 | 关注点 |
@@ -102,6 +105,8 @@ T0(schema) + T1(API) + UI smoke 全部通过。
 | [Frontend_State_Design.md](03_SPEC/Frontend_State_Design.md) | WebSocket reducer、entity cache、seq 去重 |
 | [Roles_and_Boundaries.md](02_ARCHITECTURE/Roles_and_Boundaries.md) | 角色边界 |
 | [Agent_Architecture.md](02_ARCHITECTURE/Agent_Architecture.md) | Agent 角色、Coordinator 决策流 |
+| [Context_Trust_And_Injection_Spec.md](03_SPEC/Context_Trust_And_Injection_Spec.md) | Context 信任分级、注入防护（Repo Explorer 上线即注入面打开） |
+| [Agent_Behavior_Eval_Spec.md](04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md) | 行为 eval 管道空跑 + golden 场景积累（Phase 6 真实 LLM 接入前必须全量可运行） |
 
 ### 交付摘要
 
@@ -347,11 +352,11 @@ T0-T5 全部通过，release regression 通过。
 |------|------:|-----:|
 | 基座 | 14 | 14 |
 | Phase 1 骨架 | 9 | 23 |
-| Phase 2 执行 | 12 | 35 |
-| Phase 3 科学 | 6 | 41 |
-| Phase 4 分析 | 6 | 47 |
-| Phase 5 治理 | 7 | 54 |
-| Phase 6 交付 | 13 | 67 |
+| Phase 2 执行 | 14 | 37 |
+| Phase 3 科学 | 6 | 43 |
+| Phase 4 分析 | 6 | 49 |
+| Phase 5 治理 | 7 | 56 |
+| Phase 6 交付 | 13 | 69 |
 
 ---
 

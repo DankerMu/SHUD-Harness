@@ -40,11 +40,16 @@ collect deterministic artifacts
 → run report language guard
 → LLM draft narrative
 → deterministic citation/reference insertion
+→ reference existence validation（生成时强制）
 → Reviewer check
 → PI review
 ```
 
 LLM 不应自行计算指标；指标由脚本或 rSHUD pipeline 生成。
+
+**引用存在性校验（AGA-P2）**：LLM narrative 中出现的每个 `ART-*`/`RUN-*`/`REPORT-*`/路径引用在**生成时**逐一解析：
+引用对象不存在、不在 registry、或 hash 不匹配 → 报告生成失败（计入 `llm_output_error`，重生成 ≤ 2 次），
+不产出 draft。幻觉引用必须在生成侧拦截，而不是指望 Reviewer 逐条点开。
 
 ## 4. 报告模板
 
@@ -153,6 +158,16 @@ LLM 不应自行计算指标；指标由脚本或 rSHUD pipeline 生成。
 - “该结果支持进一步检查假设，但不足以构成普遍结论”；
 - “该解释需要 PI 结合水文背景判断”。
 
+### 5.2 Language guard 能力边界
+
+Language guard 是**枚举短语的确定性 lint**，必须清楚它能做什么、不能做什么：
+
+- **能**：拦截 §5 / §5.1 枚举的禁止用语及其配置化扩展；在 draft → reviewed 状态迁移前强制执行，命中即拒绝迁移（负例测试见 TR-003）。
+- **不能**：识别换一种说法的越权表述（paraphrase evasion）。LLM 把“已验证”换写成“表现出稳健的普适性改善”时，guard 不会命中。
+- **因此**：guard 通过 ≠ 报告表述合规。语义级别的越权表述由两道后置防线兜底：lineage guard（关键陈述必须有 evidence_refs，见 [Report_Review_And_Evidence_Lineage_Spec.md](Report_Review_And_Evidence_Lineage_Spec.md)）和 **PI 审阅（最终防线）**。任何文档不得把 language guard 描述为科学表述合规的充分条件。
+
+禁止用语清单应作为配置维护（不硬编码在实现里），发现新的越权表述模式时由 PI/工程师追加，并同步补负例测试。
+
 ## 6. 证据等级
 
 | 等级 | 含义 |
@@ -219,22 +234,29 @@ Export manifest 应记录 included/excluded artifacts，说明哪些图表被内
 
 ## 8. Reviewer 检查清单
 
-Reviewer 应检查：
+**实现规则：凡可机械判定的检查项必须实现为确定性 validator（代码），Reviewer LLM 只负责语义判断项。**
+validator 失败直接阻断 draft → reviewed，不消耗 LLM 调用；LLM 判断项失败产生 review note，由 Coordinator 修订后重检。
 
-- [ ] 是否有 StackLock；
-- [ ] 是否有 DataProvenance；
-- [ ] 所有结果是否绑定 RunRecord；
-- [ ] 指标是否来自 deterministic artifact；
-- [ ] 是否列出 limitations；
-- [ ] 是否列出 PI questions；
-- [ ] 是否存在禁止用语；
-- [ ] 是否把 calibration 结果误写成验证；
-- [ ] 是否包含失败运行；
-- [ ] 是否清楚标注 dirty stack。
-- [ ] 每个关键指标有 source_ref。
-- [ ] 每个图表观察有 figure/timeseries artifact ref。
-- [ ] PI comment 没有被自动写成科学事实。
-- [ ] report 没有引用 tmp 路径。
+确定性 validator 项（D，代码强制）：
+
+- [ ] (D) 是否有 StackLock；
+- [ ] (D) 是否有 DataProvenance；
+- [ ] (D) 所有结果是否绑定 RunRecord；
+- [ ] (D) 指标是否来自 deterministic artifact；
+- [ ] (D) 是否列出 limitations（非空）；
+- [ ] (D) 是否列出 PI questions（非空）；
+- [ ] (D) 是否存在禁止用语（language guard）；
+- [ ] (D) 是否包含失败运行；
+- [ ] (D) 是否清楚标注 dirty stack；
+- [ ] (D) 每个关键指标有 source_ref；
+- [ ] (D) 每个图表观察有 figure/timeseries artifact ref；
+- [ ] (D) report 没有引用 tmp 路径。
+
+LLM 语义判断项（L，validator 无法覆盖）：
+
+- [ ] (L) 是否把 calibration 结果误写成验证（含 guard 未枚举的换述形式）；
+- [ ] (L) PI comment 没有被自动写成科学事实；
+- [ ] (L) observations 是否存在其他越权表述或因果跳跃。
 
 ## 9. 报告状态
 
@@ -285,7 +307,7 @@ report:
 - [ ] Reviewer 能检测禁止用语。
 - [ ] PI questions 必须非空，除非任务类型为纯 ops。
 - [ ] accepted 状态需要权限。
-- [ ] 报告引用的 artifact 均存在。
+- [ ] 报告引用的 artifact 均存在：生成时逐一解析校验，幻觉引用导致生成失败而非流入 draft（负例测试）。
 - [ ] 每个 EvidenceReport 可导出 standalone HTML。
 - [ ] draft/reviewed/awaiting_pi 状态的 HTML 导出有可见 watermark。
 - [ ] HTML 导出不包含 secrets、完整日志或 raw binary output。

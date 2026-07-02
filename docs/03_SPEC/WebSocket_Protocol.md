@@ -65,6 +65,11 @@ interface WsEvent<T = unknown> {
 | `pi_gate.decision_recorded` | server → client | PI gate decision 已记录 |
 | `notification.status` | server → client | email notification sent/failed/skipped 状态 |
 | `client.action` | client → server | 用户操作，如 approve、cancel、resume |
+| `client.interrupt` | client → server | PI 介入运行中任务：append / interrupt / abort（见 §10.1） |
+| `client.interrupt.ack` | server → client | 介入请求的受理结果与实际生效语义 |
+| `agent.turn.started` | server → client | agent 开始一轮 LLM 推理（前端据此显示"思考中"，区别于 job 运行） |
+| `agent.turn.completed` | server → client | 一轮推理结束，含可选 rationale_summary（一句话决策理由） |
+| `agent.no_progress` | server → client | 无进展计数变化（count/threshold，见 Control_Kernel §5.1） |
 | `health.status` | server → client | 服务健康状态变更 |
 | `ops.metric.updated` | server → client | 运维指标聚合更新 |
 | `alert.raised` | server → client | 告警触发 |
@@ -310,6 +315,35 @@ PI gate decision 扩展：
 ```
 
 服务端必须重新检查权限和 comment 必填规则，不能只相信前端按钮状态。
+
+### 10.1 PI 介入协议（client.interrupt）
+
+**问题（AGA-P0-3）**：agent 长时间自主运行期间 PI 必须能介入。介入分三级语义：
+
+```json
+{
+  "type": "client.interrupt",
+  "payload": {
+    "task_id": "TASK-0001",
+    "mode": "append | interrupt | abort",
+    "message": "先别扫参数，检查一下 forcing 数据对不对"
+  }
+}
+```
+
+| mode | 语义 | 对运行中工具/Job 的影响 |
+|---|---|---|
+| `append` | 消息入队，agent 当前工具调用完成后、下一轮 LLM 推理前注入 context | 无 |
+| `interrupt` | 当前工具调用跑完后中止后续步骤，带着 PI 消息重新进入 Plan | 不 kill 运行中 RunJob（已提交的 job 独立于 agent loop） |
+| `abort` | 等价任务取消 | 运行中 RunJob 按 job cancel 语义处理；task → cancelled |
+
+排队与合并规则：
+
+- 多条 `append` FIFO 合并为一个 batch，在下一轮推理前一次性注入（复用 Zero 消息队列语义）；
+- `interrupt` 优先级高于队列中所有 `append`；`abort` 最高且立即生效；
+- parked 状态收到 `append` → 存入 parked_state，resume 时注入；收到 `interrupt`/`abort` → 直接按 task 级操作处理，不等 resume。
+
+竞态规则：**server 端状态机是唯一真值**。介入到达时任务已进入终态（done/cancelled/blocked）→ 返回 `client.interrupt.ack {applied: false, reason: "task_terminal"}`；前端 optimistic UI 必须可回滚。同理，PI gate decision 与任务超时/取消竞态时，以 server 按到达顺序的状态机判定为准，被拒绝的操作必须收到明确 ack。
 
 ## 11. 事件持久化
 

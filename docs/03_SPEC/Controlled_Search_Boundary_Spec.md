@@ -31,6 +31,26 @@ and task/change semantic_level is high-risk:
   require TheoryToCodeBundle.status in accepted_for_search | accepted
 ```
 
+### 2.1 search_scope 绑定（AGA-P2）
+
+`accepted_for_search` 不是无边界通行证。PI 授予该状态时同时绑定 search_scope 声明：
+
+```yaml
+search_scope:
+  bundle_id: TTC-001
+  allowed_parameters: [ksat_multiplier, mannings_n_multiplier]
+  allowed_ranges:
+    ksat_multiplier: [0.25, 2.0]
+  allowed_files: []          # search 期间允许 patch 的文件，通常为空
+  expires_at: null           # 可选
+```
+
+规则：
+
+- 后续 trial 的 parameter_set 或 patch 超出 scope → preflight **409 拒绝**，需重新 preflight
+  （PI 扩 scope 或另立 bundle），agent 不能以“同一 bundle 已 accepted_for_search”为由继续；
+- scope 校验是确定性代码：比对 parameter 名/取值范围、files_changed 与 allowed_files，不靠 agent 自觉。
+
 ## 3. Baseline-first rule
 
 任何 improvement claim 必须有 baseline：
@@ -140,4 +160,5 @@ model structure validated
 - [ ] 没有 baseline 的 improvement claim 被 report guard 拒绝。
 - [ ] discarded/crash trial 保留 patch/log/metrics artifact。
 - [ ] high-risk change 未 accepted_for_search 不能启动 search。
+- [ ] trial 超出 search_scope 被 preflight 409 拒绝（负例测试）。
 - [ ] ledger summary 可导出到 report artifact。

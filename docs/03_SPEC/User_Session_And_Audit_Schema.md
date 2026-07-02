@@ -84,7 +84,7 @@ Agent 不是普通 user。Agent 可有 `agent_id`，但不得拥有 `pi` role。
 ```ts
 interface AgentIdentity {
   agent_id: string;
-  role: "coordinator" | "repo_explorer" | "execution_worker" | "analysis_worker" | "coder" | "reviewer" | "memory_curator";
+  role: "coordinator" | "repo_explorer" | "worker" | "coder" | "reviewer";  // canonical 枚举见 02_ARCHITECTURE/Roles_and_Boundaries.md §0
   task_id: string;
   delegated_by_user_id?: string;
   allowed_tools: string[];
@@ -92,7 +92,7 @@ interface AgentIdentity {
 }
 ```
 
-`repo_explorer` 的 `allowed_tools` 必须限制为只读工具，例如 file read/search、git inspect 和只读 shell 诊断。`denied_actions` 至少包含 write/edit、RunJob submit、patch apply、baseline update、verified memory write。
+`repo_explorer` 的 `allowed_tools` 必须限制为只读工具，例如 file read/search、git inspect 和只读 shell 诊断。`denied_actions` 至少包含 write/edit、RunJob submit、patch apply、baseline update、memory status escalation（draft→accepted；MemoryNote 无 "verified" 状态，权威枚举见 Minimal_Schemas §9）。
 
 ## 6. 验收标准
 

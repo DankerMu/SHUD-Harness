@@ -199,7 +199,21 @@ docs/04_IMPLEMENTATION/Dependency_Versioning_Policy.md
 
 实现后 lockfile 和 `package.json` 的 `packageManager` 为依赖版本事实源，release manifest 记录发布时快照。
 
-## 15. Theory-to-Code canonical sources
+## 15. Agent roles and runtime behavior
+
+| Contract | Canonical source |
+|---|---|
+| Agent 角色枚举与权限剖面 | `docs/02_ARCHITECTURE/Roles_and_Boundaries.md` §0 |
+| Closure 确定性判据（validator 主闸 + LLM advisory） | `docs/02_ARCHITECTURE/Agent_Architecture.md` §7 |
+| No-progress 判定器 | `docs/02_ARCHITECTURE/Control_Kernel.md` §5.1 |
+| Language guard 能力边界 | `docs/03_SPEC/Report_Generation_Spec.md` §5.2 |
+| Reviewer 检查清单 D/L 分层 | `docs/03_SPEC/Report_Generation_Spec.md` §8 |
+| Context 信任分级与组装预算 | `docs/03_SPEC/Context_Trust_And_Injection_Spec.md` |
+| Agent 行为 eval（golden 集 + gate 规则） | `docs/04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md` |
+| LLM 错误类别与降级语义 | `docs/03_SPEC/Error_Handling_Spec.md`（LLM 章节） |
+| StackLock.llm（模型版本锁） | `docs/03_SPEC/Minimal_Schemas.md` §2 |
+
+## 16. Theory-to-Code canonical sources
 
 | Contract | Canonical source |
 |---|---|

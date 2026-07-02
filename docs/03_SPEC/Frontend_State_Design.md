@@ -56,6 +56,18 @@ function applyWsEvent(state: AppState, event: WsEvent): AppState {
 - 失败事件不覆盖已成功 artifact；
 - task/run/report 状态以服务端实体为准。
 
+### 3.1 Agent 推理态与介入状态
+
+前端必须能区分三种"看起来都在等"的状态（AGA-P1-8），来源事件不同：
+
+| 状态 | 驱动事件 | UI 语义 |
+|---|---|---|
+| agent 思考中 | `agent.turn.started` / `agent.turn.completed` | 角色卡片 thinking 指示；StatusBar 保持 running |
+| job 运行中 | `job.status` | Terminal 日志流 + job 计数 |
+| 任务 parked | `task.updated (parked)` | "已挂起等待运行完成"提示 |
+
+reducer 需维护 `agentTurn: {taskId, role, startedAt} | null`；`agent.no_progress` 事件更新 StatusBar 计数（count/threshold 可视）；`client.interrupt` 走 optimistic UI，但必须在收到 `client.interrupt.ack {applied:false}` 时回滚并 toast 说明原因。
+
 ## 4. Entity 模型
 
 前端应缓存以下实体：

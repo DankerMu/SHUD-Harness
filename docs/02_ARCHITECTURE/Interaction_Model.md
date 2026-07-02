@@ -255,6 +255,18 @@ PI: "选方案 1, 补 holdout 验证"
 → Coordinator 自动创建子任务 → 执行 → 报告
 ```
 
+### 7.1 PI 介入语义（运行中任务）
+
+Agent 执行期间 PI 的输入不是"发出去就没了"，按三级语义处理（协议细节见 [WebSocket_Protocol](../03_SPEC/WebSocket_Protocol.md) §10.1）：
+
+| PI 行为 | 语义 | 前端呈现 |
+|---|---|---|
+| 直接输入消息 | 默认 `append`：入队，下一轮推理前注入 | 消息旁显示"已排队，将在当前步骤后生效" |
+| 点击"打断并调整" | `interrupt`：当前工具调用完成后重新规划 | Feed 显示"正在中断当前步骤…"直至 ack |
+| 点击"终止任务" | `abort`：任务取消，运行中 job 一并 cancel | 二次确认后执行 |
+
+关键区别必须让 PI 看得见：**agent 在思考（LLM 推理中）、job 在跑（模型计算中）、任务已挂起（parked）是三种不同状态**，输入框旁的状态提示随 `agent.turn.*` / `job.status` / `task.updated` 事件切换。parked 期间的输入会被保存并在 resume 时注入，前端明确提示这一点。
+
 ## 8. Markdown 报告
 
 每个任务仍生成 `reports/TASK-*_report.md`，在 `/reports/:taskId` 路由全屏渲染。

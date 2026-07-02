@@ -89,7 +89,11 @@ skills/run-shud-tiny-case/
   examples/
 ```
 
-但不要求复杂 contract.yaml、promotion proposal、Critic review。
+但不要求复杂 contract.yaml、promotion proposal、Reviewer review。
+
+**skill 激活的最低审查（AGA-P1-6）**：skill 含可执行脚本且正文会进入 LLM context（信任级 T1，见
+[Context_Trust_And_Injection_Spec](Context_Trust_And_Injection_Spec.md)），因此 `draft → active` 必须留下工程师审查记录——
+一行即可（`activated_by` + `reviewed_at` 写入 SKILL.md frontmatter），但不能没有。draft skill 不注入 context、不可被 agent 执行。
 
 ## 7. 何时把 note 提升成 skill
 
@@ -117,7 +121,24 @@ MVP 先用 keyword + tags，不强依赖 embeddings：
 
 需要时再加 embedding，以控制成本。
 
+### 8.1 检索结果的信任标记（AGA-P1-6）
+
+检索命中的 note 注入 context 时必须携带 status，且 draft 与 accepted 在 prompt 中显式区分：
+
+```text
+[NOTE-0007 | accepted | pi_decision] 暂不修改物理方程……
+[NOTE-0012 | draft | 未经 PI 确认] rSHUD roundtrip 失败可能因为……
+```
+
+规则：
+
+- draft note 是 T3 信任级内容——可作诊断线索，不得作为报告结论或 ChangeRequest 的直接依据；
+- 单次注入 note 数量有上限（accepted ≤ 5、draft ≤ 3，见 Context_Trust_And_Injection_Spec §5），按相关度截断；
+- 错误/恶意 draft note 的影响半径由此受限：它带着"未确认"标记进入 context，且进不了证据链（lineage guard 拒绝 draft note 作为 evidence_refs 唯一来源）。
+
 ## 9. 验收标准
 
-- [ ] MemoryTool 不自动把 evidence_note 标记为 verified。
+- [ ] MemoryTool 不自动把 evidence_note 标记为 accepted（Zero 默认 verified 行为必须改掉）。
 - [ ] pi_decision note 只能由 PI decision flow 产生。
+- [ ] 检索注入的 note 均带 status 标记；draft note 带"未经 PI 确认"前缀（单测）。
+- [ ] draft skill 不被加载进 skill catalog；active skill 的 SKILL.md 有 activated_by 记录。

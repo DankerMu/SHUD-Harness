@@ -17,15 +17,17 @@ SHUD-Harness 的 Agent 架构不是开放式多 Agent 自主系统，而是受 T
 
 ## 2. Agent 角色
 
+> 角色集合的 canonical 定义见 [Roles_and_Boundaries.md](Roles_and_Boundaries.md) §0。本文件不得新增角色。
+
 | 角色 | 主要职责 | 不允许做的事 |
 |---|---|---|
-| Coordinator | 解析 brief，创建计划，选择工具和子角色，决定 park/resume，生成 PI 问题 | 伪造证据，跳过审批，自动宣称科学结论 |
+| Coordinator | 解析 brief，创建计划，选择工具和子角色，决定 park/resume，生成 PI 问题，收尾时整理 memory candidate | 伪造证据，跳过审批，自动宣称科学结论，把 memory 标记为 verified |
 | Repo Explorer | 探索当前仓库、定位入口/调用链/测试命令/影响面，生成 RepoContextBrief | 写文件，改代码，提交 RunJob，裁定科学结论，写入 verified memory |
-| Execution Worker | 编译、运行、监控作业、收集日志、生成 RunRecord | 修改模型源码，改变科学假设 |
-| Analysis Worker | 调用 rSHUD/脚本计算指标，生成 deterministic figures 和 summary tables | 把 calibration 改进解释成模型结构验证 |
+| Worker | 编译、运行、监控作业、收集日志、生成 RunRecord；调用 rSHUD/脚本计算指标，生成 deterministic figures 和 summary tables | 修改模型源码，改变科学假设，把 calibration 改进解释成模型结构验证 |
 | Coder | 生成 patch、接口迁移、测试、diff 摘要 | 未审批直接改 baseline 或默认参数 |
 | Reviewer | 审查 RunRecord、EvidenceReport、ChangeRequest 是否完整 | 替 PI 接受结论或覆盖 benchmark |
-| Memory Curator | 将可保存的信息转为 memory candidate | 自动把 evidence 标记为 verified |
+
+Worker 按任务画像（execution / analysis）区分 prompt profile，但权限剖面相同，不拆分为独立角色。memory curation 不设独立角色，memory 写入对所有角色一律 proposal-only。
 
 ## 3. Agent 实例模型
 
@@ -34,7 +36,7 @@ SHUD-Harness 的 Agent 架构不是开放式多 Agent 自主系统，而是受 T
 ```yaml
 agent_instance:
   id: agent_01J...
-  role: coordinator | repo_explorer | execution_worker | analysis_worker | coder | reviewer | memory_curator
+  role: coordinator | repo_explorer | worker | coder | reviewer
   task_id: TASK-...
   session_id: SESSION-...
   workspace_id: WS-...
@@ -181,7 +183,7 @@ event:
   task_id: TASK-...
   session_id: SESSION-...
   from_role: coordinator
-  to_role: execution_worker
+  to_role: worker
   visibility: internal | user_visible
   content:
     summary: "运行 ccw tiny fixture"
@@ -215,17 +217,21 @@ tool_call:
 
 ## 7. Closure 判据
 
-TaskCard 不能仅因为 LLM 认为“完成了”而关闭。完成需要满足类型对应的 closure 判据。
+TaskCard 不能仅因为 LLM 认为“完成了”而关闭。closure 由两层组成：
 
-| 任务类型 | 最低 closure 条件 |
+1. **确定性判据（主闸，代码强制）。** 以下谓词由 harness 在状态迁移前求值，不满足则拒绝进入 reporting/done。谓词只引用可查询的对象和字段，不依赖 LLM 输出。每条谓词对应一个可独立测试的 validator 函数。
+2. **LLM closure 分类器（辅助，advisory）。** 沿用 Zero task-closure 的 finish/continue/block 分类，但结果只用于提示 Coordinator 补做遗漏动作，**不作为状态迁移依据，且不可覆盖 validator 的拒绝结果**。Zero 默认分类器 prompt 面向聊天助手场景，必须替换为科研任务版本。
+
+| 任务类型 | 确定性 closure 谓词（全部满足才可进入 reporting） |
 |---|---|
-| engineering | 产生目标 artifact 或明确失败报告；日志和命令可追溯 |
-| science_assist | EvidenceReport 包含指标、限制、PI questions |
-| debugging | 复现条件、根因候选、修复或下一步排查均已记录 |
-| sensitivity | AnalysisPlan 中定义的运行集已完成或失败项已解释 |
-| calibration | 参数空间、目标函数、训练/验证窗口和结果限制已记录 |
-| benchmark | baseline、candidate、指标、环境、差异摘要完整 |
-| code_change | ChangeRequest、patch、测试结果、review note 完整 |
+| engineering | ∃ ChangeRequest(task_id) ∧ (patch_bundle ≠ null ∨ ∃ FailureRecord)；所有 linked_jobs 处于 collected/failed 终态；compat_checks 无 pending |
+| science_assist | ∃ EvidenceReport(draft)：observations ≥ 1 ∧ limitations ≥ 1 ∧ pi_questions ≥ 1；每个 metric_fact 有 evidence_refs |
+| ops | ∃ CommandTrace（exit_code 记录完整）∨ ∃ MemoryNote(draft) |
+| debugging | 复现命令、根因候选、下一步排查三者均落盘为 artifact 或 note |
+| sensitivity | AnalysisPlan.parameter_sets 全部处于终态；failed cell 均有 failure_reason；sensitivity_table artifact 存在 |
+| calibration | 参数空间、目标函数、calibration/holdout 窗口已落盘；holdout 结果存在或明确标记 not_run；报告含 calibration ≠ validation 限制 |
+| benchmark | baseline 与 candidate 的 RunRecord 均存在且 stack_id/data_id 可比；差异摘要 artifact 存在 |
+| code_change | ChangeRequest、patch、测试结果、review note 四者完整；semantic_level 已填写 |
 
 ## 8. 并发规则
 
@@ -243,7 +249,7 @@ Agent 失败应转为结构化错误，而不是隐藏在对话中：
 ```yaml
 agent_failure:
   agent_id: agent_...
-  role: execution_worker
+  role: worker
   task_id: TASK-...
   severity: warn | error | critical
   reason: "SHUD 编译失败"

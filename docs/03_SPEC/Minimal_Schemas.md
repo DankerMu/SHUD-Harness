@@ -75,9 +75,16 @@ harness:
   version: "0.8.0"
   prompt_pack: promptpack-0001
   skills_version: skills-0001
+llm:
+  provider: anthropic
+  model_id: "claude-sonnet-5"         # provider 完整模型标识，含版本后缀
+  params_digest: "sha256:..."         # 采样参数集（temperature/top_p/max_tokens 等）的哈希
+  prompt_pack_digest: "sha256:..."    # prompt_pack 实际内容哈希（防同名不同内容漂移）
 fingerprint: "sha256:..."             # 整体哈希，用于快速比对
 created_at: 2026-04-25T10:00:00Z
 ```
+
+**llm 字段说明**（AGA-P0-1）：agent 行为由 model + params + prompt 共同决定，三者任一变化都视为 **stack 变更**——需要新 StackLock，且触发行为 eval 子集（见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)）。cost_record 中的 per-call model 字段是计费粒度，不能替代本处的复现锁。
 
 **废弃字段**: `runtime.container`（MVP 不强制容器）、`limits`（已移入 RunJob.resources）、`policy_version`（已合并入 harness.version）。
 

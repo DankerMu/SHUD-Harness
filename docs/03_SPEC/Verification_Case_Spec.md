@@ -42,7 +42,14 @@ interface VerificationCase {
   target_code_targets?: string[];
   description: string;
   expected_result: string;
+  expected_result_source:            // AGA-P1-1：期望值不能自出自判
+    | "analytic"                     // 解析解/量纲推导，可独立复核
+    | "published"                    // 文献/手册值，附引用
+    | "pi_provided"                  // PI 给定
+    | "baseline_regression"          // 已有 baseline 输出（regression 类）
+    | "agent_proposed";              // agent 自拟——见下方独立性规则
   pass_criteria: string;
+  pass_criteria_confirmed_by?: string;  // agent_proposed 时必填（PI/工程师 user id）
 
   runner_backend?: "local_direct" | "local_job" | "docker_job" | "slurm";
   run_job_ids: string[];
@@ -75,6 +82,14 @@ interface VerificationCase {
 - `inconclusive` 必须说明缺少什么证据。
 - `waived_by_pi` 只能由 PI 设置，并写明原因。
 - verification failure 不一定导致任务失败，但必须阻止 bundle 自动进入 accepted。
+
+### 4.1 期望值独立性规则（AGA-P1-1）
+
+出题人和判卷人不能是同一个 LLM 会话：
+
+- `expected_result_source = agent_proposed` 的 case，**其 `passed` 不能计入 bundle 进入 `accepted_for_search` 的验证证据**，除非 `pass_criteria_confirmed_by` 已由 PI/工程师填写（gate 上一并确认，不要求单独流程）。
+- pass_criteria 必须是确定性可求值表达式（阈值/容差），judgement 型标准（"结果看起来合理"）拒绝进 schema。
+- 报告的 Theory-to-Code Evidence 章节必须展示每个 case 的 expected_result_source——PI 一眼能看出哪些期望值是 agent 自拟的。
 
 ## 5. 与 RunRecord 关系
 

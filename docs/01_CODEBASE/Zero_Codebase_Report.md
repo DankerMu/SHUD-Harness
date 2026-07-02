@@ -66,7 +66,7 @@ Hooks (全部可自定义):
 | memory | memory.ts | → 必须改 (默认 verified=true) |
 | memory_search | memory-search.ts | → 可用, 需调整检索策略 |
 | memory_read | memory-read.ts | → 可直接用 |
-| spawn_agent | spawn-agent.ts | → Commander→Worker/Critic |
+| spawn_agent | spawn-agent.ts | → Coordinator→Worker/Coder/Reviewer |
 | wait_agent | wait-agent.ts | → 可直接用 |
 | close_agent | close-agent.ts | → 可直接用 |
 | send_input | send-input.ts | → 可直接用 |
@@ -76,11 +76,11 @@ Hooks (全部可自定义):
 
 ### 2.3 Roles (`packages/core/src/agent/roles.ts`)
 
-内置角色 (需替换):
-- **explorer**: read, bash, fetch → 保留或映射
-- **coder**: read, write, edit, bash, codex → 替换为 **Worker**
-- **reviewer**: read, bash → 替换为 **Critic**
-- 需新增: **Commander**, **Harness Optimizer**
+内置角色 (需替换; canonical 枚举见 docs/02_ARCHITECTURE/Roles_and_Boundaries.md §0):
+- **explorer**: read, bash, fetch → 映射为 **Repo Explorer** (收紧为只读)
+- **coder**: read, write, edit, bash, codex → 映射为 **Coder** (去掉 codex, 限定 worktree)
+- **reviewer**: read, bash → 映射为 **Reviewer**
+- 需新增: **Coordinator**, **Worker**
 
 支持从 `.zero/roles/` 加载 TOML/YAML 自定义角色。
 
@@ -132,7 +132,7 @@ Bootstrap 文件: SOUL.md, USER.md, TOOLS.md (从 .zero/workspace/zero/ 加载)
 |------|------|------|
 | Agent loop + hooks | [R] 可直接用 | 通过 hooks 接入 SHUD 语义 |
 | 工具注册 | [R] 可直接用 | 无需改动 |
-| Sub-agent 编排 | [R] 可直接用 | Commander→Worker/Critic 映射 |
+| Sub-agent 编排 | [R] 可直接用 | Coordinator→Worker/Coder/Reviewer 映射 |
 | Session/trace | [R] 可直接用 | 保留 |
 | Scheduler | [R] 可直接用 | 不等于 Executor |
 | Supervisor | [R] 可直接用 | 心跳+修复 |

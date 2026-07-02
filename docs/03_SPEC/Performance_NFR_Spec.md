@@ -77,6 +77,17 @@ GET /api/analysis/:id/heatmap
 | heatmap dummy batch | ≤ 1000ms |
 | 大型 timeseries | 必须分页、降采样或异步生成 |
 
+### 2.4 LLM 延迟不在 REST SLA 内（AGA-P2）
+
+§2 的目标只约束确定性服务路径。任何触发 LLM 推理的请求（chat 消息、report narrative、agent turn）
+不适用上述延迟目标——LLM 延迟由 provider 决定，秒级到分钟级都正常：
+
+- 触发 agent 的 API 一律异步：立即返回 202 + task/turn 引用，进度走 WebSocket（`agent.turn.*` 事件）；
+- agent 单轮（LLM call + 工具执行）**P95 ≤ 60s 为 advisory 目标**：超出只产生 ALERT-LLM-002 告警，
+  不算 SLA 违约、不自动 kill；深度计划、长报告等任务可在 task 级显式豁免并记录；
+- 监控口径分开：`api_request_duration_ms` 不含 LLM 时间，LLM 用 `llm_call_duration_ms`
+  （见 Observability_Monitoring_Spec §3.7），两者混算会同时污染两个 SLA。
+
 ---
 
 ## 3. WebSocket SLA
@@ -199,3 +210,4 @@ concurrent runner jobs: configurable, depends on machine/HPC
 - [ ] Batch progress latency 有 dummy batch 测试。
 - [ ] 大日志不会导致 frontend memory runaway。
 - [ ] NFR 违反会产生 alert 或 test failure。
+- [ ] 触发 LLM 的请求不纳入 metadata API SLA 统计；agent turn 延迟单独采集并有 advisory 告警。

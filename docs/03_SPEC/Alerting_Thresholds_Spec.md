@@ -41,6 +41,13 @@
 | ALERT-REPORT-001 | report guard failure | `>= 1` | warning | retry once |
 | ALERT-REPORT-002 | export generation failure | `>= 2` | error | runbook |
 | ALERT-BATCH-001 | batch failed cells | `> stop_condition` | error | notify PI, await decision |
+| ALERT-LLM-001 | LLM API error rate | `> 20% for 10min` | error | dashboard + runbook（LLM provider 故障） |
+| ALERT-LLM-002 | LLM 单轮延迟 P95 | `> 60s for 15min` | warning | dashboard |
+| ALERT-LLM-003 | quota/余额耗尽或 auth 失效 | first failure | critical | 全部活跃 task 标注 + notify admin（走邮件，WebSocket 可能无人在看） |
+| ALERT-LLM-004 | 单 task LLM 成本 | `> 3 × advisory_usd` | warning | StatusBar 标黄 + dashboard（不中断，Cost_Inference_Budget 原则） |
+| ALERT-LLM-005 | 全局日 LLM 成本 | `> configured daily cap` | error | 暂停接受新 LLM 任务 + notify admin（运行中不杀） |
+| ALERT-AGENT-001 | agent no-progress block 触发 | per occurrence | warning | Feed + dashboard，附失败签名 |
+| ALERT-AGENT-002 | 同一 task llm_output_error | `>= 3` | error | 提示 prompt/schema 可能漂移，runbook |
 
 ---
 

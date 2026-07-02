@@ -163,6 +163,24 @@ failed
 | `notification_dedupe_suppressed_total` | counter | dedupe 抑制 |
 | `smtp_failures_total` | counter | SMTP/SendGrid 失败 |
 
+### 3.7 Agent 行为 metrics（AGA-P1-7）
+
+agent 的行为健康与 job/API 健康是两回事，需要独立指标：
+
+| Metric | 类型 | 说明 |
+|---|---|---|
+| `agent_turns_total` | counter | 按 task/role，LLM 推理轮数 |
+| `agent_turn_duration_ms` | histogram | 单轮（LLM call + 工具执行）耗时 |
+| `llm_call_duration_ms` | histogram | 纯 LLM 调用延迟，按 provider/model |
+| `llm_errors_total` | counter | 按 error category（rate_limit/timeout/quota/parse） |
+| `agent_retry_total` | counter | 命令级重试次数 |
+| `agent_no_progress_events_total` | counter | 无进展步计数事件 |
+| `agent_no_progress_blocks_total` | counter | 触发 3 步 block 的次数 |
+| `closure_verdicts_total` | counter | 按 finish/continue/block 分布（advisory 分类器输出） |
+| `task_llm_cost_usd` | histogram | 按 task/mode，成本分布 |
+
+这些指标是行为漂移的一线信号：`agent_retry_total` 或 `no_progress` 突增而代码未变 → 先查 model/prompt 是否变化（Runbook §11）。
+
 ---
 
 ## 4. Ops dashboard

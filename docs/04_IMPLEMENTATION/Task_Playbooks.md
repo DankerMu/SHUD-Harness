@@ -49,7 +49,7 @@ Coordinator 自动记录一次兼容性失败：
 4. task done → 前端通知
 ```
 
-不需要 Critic，不需要 Coordinator approval。
+不需要 Reviewer，不需要 Coordinator approval。
 
 ## 4. Scientific Change Playbooks
 

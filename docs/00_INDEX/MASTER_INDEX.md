@@ -29,6 +29,7 @@
 | [`CANONICAL_CONTRACTS.md`](CANONICAL_CONTRACTS.md) | Canonical contract 索引 |
 | [`Spec_Gap_Audit_v0_8_1.md`](Spec_Gap_Audit_v0_8_1.md) | v0.8.1 规格缺口审查 |
 | [`PRD_Spec_Gap_Audit_v0_8_2.md`](PRD_Spec_Gap_Audit_v0_8_2.md) | v0.8.2 PRD/Spec 缺口审查 |
+| [`Agent_System_Audit_v0_8_3.md`](Agent_System_Audit_v0_8_3.md) | v0.8.3 Agent 系统本质审计（10 维 / 5 P0 / 8 P1 / 8 P2，advisory） |
 | [`PRD_Spec_Merge_Map.md`](PRD_Spec_Merge_Map.md) | v0.8.2 补充文档合并地图 |
 | [`Requirements_Catalog.md`](Requirements_Catalog.md) | 正式需求目录（US/FR/NFR/DR/GR/IR/TR 编号体系） |
 | [`Requirements_Numbering_Conventions.md`](Requirements_Numbering_Conventions.md) | 需求编号、状态、优先级和 traceability 规则 |
@@ -132,6 +133,7 @@
 |------|------|
 | [`Auth_Permission_Design.md`](../03_SPEC/Auth_Permission_Design.md) | 认证与权限设计 |
 | [`User_Session_And_Audit_Schema.md`](../03_SPEC/User_Session_And_Audit_Schema.md) | User/Session/Audit schema |
+| [`Context_Trust_And_Injection_Spec.md`](../03_SPEC/Context_Trust_And_Injection_Spec.md) | Context 信任分级、prompt 注入防护、组装预算 |
 
 ### 交互与前端
 
@@ -180,6 +182,7 @@
 | [`API_Error_And_Idempotency_Contracts.md`](../04_IMPLEMENTATION/API_Error_And_Idempotency_Contracts.md) | API 错误响应与幂等请求契约 |
 | [`Schema_Generation_And_Drift_Control.md`](../04_IMPLEMENTATION/Schema_Generation_And_Drift_Control.md) | Schema 生成与 drift 控制 |
 | [`Testing_Strategy.md`](../04_IMPLEMENTATION/Testing_Strategy.md) | 测试策略 |
+| [`Agent_Behavior_Eval_Spec.md`](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md) | Agent 行为 eval：golden 任务集、通过率 gate、prompt/model 变更回归 |
 | [`Phase_By_Phase_Test_Plan.md`](../04_IMPLEMENTATION/Phase_By_Phase_Test_Plan.md) | W0-W8 阶段测试矩阵（Test ID + 场景 + Pass Criterion） |
 | [`Test_Fixtures_And_Command_Matrix.md`](../04_IMPLEMENTATION/Test_Fixtures_And_Command_Matrix.md) | 测试 Fixture 层级与命令矩阵 |
 | [`Traceability_Matrix.md`](../04_IMPLEMENTATION/Traceability_Matrix.md) | 需求 → 文档 → 代码 → 测试 → Release 追踪矩阵 |

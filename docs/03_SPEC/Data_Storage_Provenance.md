@@ -85,6 +85,14 @@ WHERE task_id = 'TASK-0002'
 ORDER BY peak_flow_error;
 ```
 
+**Agent SQL 访问边界（AGA-P2）**：
+
+- agent 对 warehouse 只持只读连接（DuckDB `read_only=true`）；
+- 查询走参数化模板，`task_id` 等取值作为绑定参数传入，不拼接 SQL 字符串
+  （LLM 生成的标识符是不可信输入）；
+- 禁止 DDL/DML（CREATE/INSERT/UPDATE/DELETE/ATTACH/`COPY TO`）；
+- warehouse 写入只属于确定性 ingest 进程，损坏时可从 NDJSON/Parquet 重建（见 Log_Aggregation_Spec §4）。
+
 ## 6. Retention policy
 
 MVP 必须有清理策略：

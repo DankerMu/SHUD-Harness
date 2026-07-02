@@ -1,5 +1,35 @@
 # 角色边界：PI 主导，Agent 协调执行
 
+> **本文件是 Agent 角色集合的唯一权威定义（canonical source）。**
+> 其他文档（CLAUDE.md、SPEC_v0.8_Final、Agent_Architecture、User_Session_And_Audit_Schema、Interaction_Model 等）出现的角色列表若与本文件冲突，以本文件为准。进入实现后，Zod/TS 的 role 枚举必须与 §0 一一对应。
+
+## 0. Canonical Agent Role Registry
+
+**角色成立判据：一个 Agent 角色成立，当且仅当它的工具/写权限剖面与其他角色不同。**
+只是 prompt 措辞不同而权限相同的，是同一角色的任务画像（profile），不是新角色。
+
+Agent 角色枚举：
+
+```text
+coordinator | repo_explorer | worker | coder | reviewer
+```
+
+| 角色 | 权限剖面 | 产出对象 |
+|---|---|---|
+| `coordinator` | 调度工具（spawn/wait agent、job submit、report build）；不直接改仓库源码 | TaskCard 计划、EvidenceReport 草稿 |
+| `repo_explorer` | 只读：file read/search、git inspect、只读诊断命令；禁 write/edit、禁提交 RunJob | RepoContextBrief |
+| `worker` | sandbox 命令执行 + artifact 写入（workspaces/artifacts/runs）；禁改仓库源码 | RunRecord、metrics、图表 |
+| `coder` | worktree 内 write/edit + patch 工具；禁直接改 baseline 与主分支 | ChangeRequest、patch bundle |
+| `reviewer` | 只读 + 调用确定性 validator；禁改写任何原始输出 | review note、检查结果 |
+
+人类角色（不进 Agent 枚举）：**PI/Researcher**（科学判断）、**Data Support**（数据与 benchmark 维护）。
+
+**明确不设的角色**（判据不满足，防止角色膨胀）：
+
+- *Execution Worker / Analysis Worker*：两者权限剖面相同（sandbox 执行），是 `worker` 的两种任务画像，用 prompt profile 区分，不拆角色。
+- *Memory Curator*：memory 写入对所有角色一律 proposal-only（draft），无独立权限剖面。整理 memory candidate 是 `coordinator` 的收尾职责。
+- *Commander / Critic / Harness Optimizer*：v0.6 起已废弃。
+
 ## 1. 角色总览
 
 | 角色 | 定位 | 是否做科学判断 |
@@ -7,7 +37,8 @@
 | PI / Researcher | 科学负责人 | 是 |
 | Coordinator Agent | 执行协调员 | 否 |
 | Repo Explorer Agent | 仓库上下文探索者 | 否 |
-| Worker Agent | 具体执行者 | 否 |
+| Worker Agent | 具体执行者（运行/解析/图表） | 否 |
+| Coder Agent | 代码变更执行者（patch/ChangeRequest） | 否 |
 | Reviewer Agent | 工程/证据完整性检查者 | 否 |
 | Data Support | 数据与 benchmark 维护者 | 部分，限数据质量 |
 
@@ -96,14 +127,37 @@ Worker 负责：
 - 解析日志；
 - 写脚本；
 - 生成图表；
-- 改一小段代码；
-- 生成 patch bundle；
 - 汇报失败原因。
 ```
 
-Worker 不直接写长期 memory，不决定科学结论。
+Worker 不直接写长期 memory，不决定科学结论。代码修改与 patch 生成归 Coder（见 §6），Worker 无仓库源码写权限。
 
-## 6. Reviewer Agent
+## 6. Coder Agent
+
+Coder 是代码变更的唯一执行者，工作范围限定在 task worktree 内。
+
+Coder 负责：
+
+```text
+- 在 worktree 中修改 SHUD / rSHUD / AutoSHUD / Harness 代码；
+- 生成 patch bundle 和 diff 摘要；
+- 编写或更新配套测试；
+- 把变更落入 ChangeRequest（含 semantic_level 与 interface_impact）。
+```
+
+Coder 不负责：
+
+```text
+- 直接修改 baseline、主分支或默认参数（必须走 ChangeRequest + gate）；
+- 决定变更是否被接受；
+- 在 implementation_mapping 起草前修改高风险科学语义代码（见 Agent_Architecture §4.4a）。
+```
+
+**semantic_level 声明不是自由填空**：Coder 填写的级别只是声明值，harness 按
+`max(声明值, path floor)` 求 effective_level（见 [Scientific_Change_Gating_Spec](../03_SPEC/Scientific_Change_Gating_Spec.md) §1.1），
+Reviewer validator 交叉核对 files_changed。Coder 无降级权，降级豁免仅 PI/工程师可做。
+
+## 7. Reviewer Agent
 
 Reviewer 不是 “科学 Critic”。v0.6 中它只做两类检查：
 
@@ -135,9 +189,15 @@ Reviewer 可检查：
 - derivation steps 是否跳步；
 - numerical scheme 是否列出 conservation/stability expectation；
 - implementation mapping 是否覆盖 equation_id 和 code target；
-- verification cases 是否覆盖关键风险。
+- verification cases 是否覆盖关键风险；
+- verification case 的 expected_result_source 与 pass_criteria 可求值性（见 Verification_Case_Spec §4.1）。
 
 Reviewer 不替代 PI 判断科学假设是否成立。
+
+**数学正确性职权声明（AGA-P1-2）**：Reviewer 对推导做**形式与合理性检查**（量纲一致、步骤连贯、可疑步骤标注），
+但 `reviewed` 状态**不构成推导数学/物理正确的担保**——LLM Reviewer 与推导生成者共享同类盲区。
+推导正确性的最终担保人是 PI：高风险 bundle 的 PI gate 即包含对推导链的人工审查，
+报告中引用推导结论时 evidence_level 最高标注为 `llm_summary`，直至 PI 确认后才可升为 `pi_confirmed`。
 
 ### D. Agent restrictions
 
@@ -147,7 +207,7 @@ Agent 不得：
 - 修改 physical equation 后绕过 PI gate；
 - 删除失败 verification 证据。
 
-## 7. 人机协作闭环
+## 8. 人机协作闭环
 
 推荐闭环：
 
@@ -155,7 +215,7 @@ Agent 不得：
 PI: 提出任务 / 选择路线
 Coordinator: 建 TaskCard + 执行计划
 Repo Explorer: 补齐仓库上下文和影响面（按需）
-Worker/Job: 跑模型 / 改代码 / 产出报告
+Worker/Coder/Job: 跑模型 / 改代码 / 产出报告
 Reviewer: 检查工程和报告完整性
 PI: 接受、修改、继续、终止
 ```
