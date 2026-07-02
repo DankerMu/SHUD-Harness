@@ -117,6 +117,8 @@ kernel 校验保证"发生了也过不去"。
 `ZeroHarnessAdapter.beforeToolCall`（Zero_Reuse_Matrix 的 adapter 接口）——spawn 工具执行前对
 depth / 并发数 / allowed_tools 剖面求值，拒绝即返回工具错误，不改 Zero 内核。
 "[E] 直接复用"指复用 spawn 机制本身，不指复用其无校验的默认通路。
+落地事实（zero@13e25c1）：loop 级 `onToolCallStart` 仅观测、不可否决——该接口在**工具注册层**
+以横切包装实现（`ToolBase.beforeExecute` throw 即阻断），见 Zero_Reuse_Matrix §8 与 ADR-0001。
 
 ### 5.1 无进展（no-progress）判定器
 

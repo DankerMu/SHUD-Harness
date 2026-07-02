@@ -3,7 +3,7 @@
 > **版本**: v0.8.3 (2026-04-27)
 > **技术栈**: TypeScript 全栈 (Bun + Hono + React)，基于 Zero Agent Runtime 扩展
 > **交互模式**: Web-first，实时对话 + 日志流 + PI 审批 + 报告阅读
-> **文档总量**: 4 个目录，97 份规范文档
+> **文档总量**: 4 个目录，97 份规范文档 + adr/ 决策账本 1 篇
 
 ---
 
@@ -203,6 +203,14 @@
 | [`Theory_To_Code_Phase_Activation.md`](../04_IMPLEMENTATION/Theory_To_Code_Phase_Activation.md) | 阶段激活补充 |
 | [`Scientific_Change_Playbooks.md`](../04_IMPLEMENTATION/Scientific_Change_Playbooks.md) | 科学语义变更 Playbook |
 | [`Theory_To_Code_Traceability_Addendum.md`](../04_IMPLEMENTATION/Theory_To_Code_Traceability_Addendum.md) | equation→code→verification→report 追踪补充 |
+
+---
+
+## adr/ -- 架构决策记录（长期账本）
+
+| 文件 | 用途 |
+|------|------|
+| [`../adr/0001-agent-runtime-and-topology.md`](../adr/0001-agent-runtime-and-topology.md) | 运行时基座与拓扑决策（Zero=Trial + 星型拓扑 + 领域层运行时无关；zero@13e25c1 实测事实与 revisit 触发器） |
 
 ---
 

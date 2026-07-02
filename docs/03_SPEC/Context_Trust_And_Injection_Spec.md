@@ -124,7 +124,10 @@ session_digest:
 - digest 以 T3 标记注入（`pi_confirmed` 后按 T1），与 draft note 同等待遇：可作线索、不作证据，
   lineage guard 拒绝其作为 observation 唯一依据（注入标记格式见 Memory_Skills_Lite §8.1）；
 - digest 在 Research Context 面板可见、PI 可编辑（见 Interaction_Model §3A）；
-- digest 不是研究对象——它是 context 层支持对象（与 parked_state 同定位），不进 8 对象清单。
+- digest 不是研究对象——它是 context 层支持对象（与 parked_state 同定位），不进 8 对象清单；
+- 实现载体（zero@13e25c1）：上游 session `context_compression` 快照（compressedSummary/Range）
+  与本对象同形，可复用为生成机制——但产物必须落盘为 digest 对象并带 T3 标记，
+  上游默认的窗口内匿名压缩保持关闭（Zero_Reuse_Matrix §3/§5）。
 
 secrets：进入 context 前一律先过 Config_Secrets_And_Environment_Spec 的 redaction。
 

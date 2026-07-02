@@ -8,6 +8,11 @@
 
 Zero 提供经过验证的 agent 基础设施（AgentLoop、Session、WebSocket、Tool、Memory、Skills），SHUD-Harness 在其上扩展 SHUD 领域特定功能。
 
+> **上游事实基线**：zero@13e25c1（development 分支，2026-07-02 同步；自 af44a7c 吸收 117 commits——
+> memory 治理重写（R2-R12 对抗加固）、core 模块合并重构、后台工具完成事件、context 分段预算、
+> DingTalk/Feishu 通道、secrets vault）。本文件所有模块级断言以该 commit 为准；
+> 基座决策与 revisit 触发器见 [ADR-0001](../adr/0001-agent-runtime-and-topology.md)。
+
 ## 2. 为什么选择基于 Zero
 
 ### A. Web-first 需要完整的 agent 基础设施
@@ -35,7 +40,7 @@ SHUD-Harness 以 Web 为唯一用户交互渠道，需要：
 | AgentLoop + Hook | Coordinator 执行循环 + 科研治理 hook |
 | Role system | Coordinator / Repo Explorer / Worker / Coder / Reviewer 角色 |
 | spawn/wait agent | Coordinator spawn Repo Explorer 补上下文，spawn Worker/Coder 执行编译、运行或修改 |
-| bash tool + safety | SHUD sandbox 命令执行 |
+| bash tool（safety 为 SHUD 侧扩展，上游无内置） | SHUD sandbox 命令执行 |
 | SKILL.md loader | 5 个 SHUD 专用 skill |
 | Session + WebSocket | PI 实时对话 + 日志流 |
 | Hono + React | Web 界面 (Dashboard + 审批 + 报告) |
@@ -46,15 +51,17 @@ SHUD-Harness 以 Web 为唯一用户交互渠道，需要：
 
 | Zero 模块 | 决策 | SHUD 扩展 |
 |-----------|------|-----------|
-| AgentLoop | [E] 直接复用 | 添加 Park/Resume hook |
-| BashTool | [E] 直接复用 | 添加 workspace 路径约束 + data/raw 只读检查 |
-| MemoryTool | [O] 修改后复用 | 禁用默认 verified, 改为 draft + PI review |
+| AgentLoop | [E] 直接复用 | 添加 Park/Resume hook；hook 面（13e25c1，15 个）全部观测型——策略阻断不在 loop 层（见 §8） |
+| BashTool | [E] 直接复用 | 添加 workspace 路径约束 + data/raw 只读检查（上游 bash.ts 无内置 safety，约束全为 SHUD 扩展） |
+| MemoryTool | [O] 修改后复用 | 上游（13e25c1）已原生 draft/verified/archived/conflict + governance/lifecycle；SHUD 收窄为：verified 提升仅 PI principal、evidence 两级映射、conflict 不进 context（Memory_Skills_Lite §2.1） |
 | Skills loader | [E] 直接复用 | 加载 5 个 SHUD skill |
 | Spawn/Wait Agent | [E] 直接复用 | Coordinator → Worker (编译/运行/解析)；spawn 前置硬校验（depth/并发/剖面子集）经 `ZeroHarnessAdapter.beforeToolCall` 注入，见 Control_Kernel §5（对抗审查 A02-6） |
 | Web (Hono+React) | [E] 直接复用 | 添加 task/job/report/approval 页面 |
 | Session | [E] 直接复用 | 添加 Park/Resume 状态持久化 |
 | Closure Classifier | [O] 修改后复用 | 科研 closure (baseline? holdout? PI gate?) |
 | Task Orchestrator | [E] 直接复用 | 扩展 DAG 支持长任务 park |
+| Background tool sink | [E] 直接复用 | BackgroundToolTaskSink（thresholdMs 超阈接管）+ background_tool_completed 消息 = local_job watcher / park-resume 的接入缝（Park_Resume §4） |
+| Context budget/compression | [O] 修改后复用 | ContextBudget 分段预算复用；session context_compression（compressedSummary/Range）与 session digest 同形——包装为落盘 digest 对象 + T3 标记，匿名管道内压缩禁用（Context_Trust §5.1） |
 
 标注: [E] = Extend (直接扩展), [O] = Override (需修改后复用), [A] = Add (纯新增)
 
@@ -73,7 +80,8 @@ SHUD-Harness 以 Web 为唯一用户交互渠道，需要：
 ## 5. 修改 Zero 的关键点 [O]
 
 ```text
-- Memory create 默认 status 改为 draft, 不是 verified
+- Memory verified 提升权限收窄到 PI principal（上游 13e25c1 已有 draft/verified/archived/conflict 状态机，改的是 authority 不是状态机）
+- Session context_compression：默认关闭，或包装为落盘 session digest 对象（禁匿名管道内压缩，Context_Trust §5.1）
 - Role 定义: coordinator (系统提示含科研约束), repo_explorer (只读仓库探索), worker (执行), coder (变更), reviewer (兼容性检查)
 - Agent loop hook: 添加 Park/Resume gate + PI 审批 gate
 - Closure decision: 扩展分类器, 增加 "needs_pi_approval" / "needs_holdout" 判断
@@ -119,11 +127,19 @@ interface ZeroHarnessAdapter {
 }
 ```
 
+**beforeToolCall 的落地事实（zero@13e25c1）**：`AgentLoopHooks.onToolCallStart` 是 void 观测钩子，
+**不可否决**；可阻断缝是 `ToolBase.beforeExecute`（throw 即拒，逐工具模板方法）。因此中央策略门在
+**工具注册层**以横切包装实现——注册时统一 wrap execute，先过 kernel 校验（路径、spawn 剖面、
+mutation boundary）再放行，不改 Zero 内核。这是 Week 1-2 spike 的首项验证（ADR-0001）。
+
 ## 9. 必须覆盖的 Zero 行为（详细规范）
 
 ### 9.1 Memory create
 
-Zero 若默认将记忆标为 `verified` 或较高 confidence，会与科研证据治理冲突。SHUD-Harness 中 memory 写入必须分级：
+上游 memory（13e25c1）已原生 `draft/verified/archived/conflict` 状态机与 governance/lifecycle 端点，
+"默认 verified"的旧担忧不再成立；冲突点收窄为**提升权限**——SHUD 侧必须把 verified 提升动作
+收窄到 PI principal（adapter 收窄上游 authority 允许的 actor 集合，agent 不可自提）。
+memory 写入仍必须分级：
 
 ```yaml
 memory_candidate:
@@ -212,8 +228,8 @@ StackLock 应记录 Zero 自身版本：
 ```yaml
 zero:
   path: zero
-  commit: abc123
-  branch: shud-harness-v0.8
+  commit: 13e25c1          # 上游 development 无稳定 tag，以 commit 钉版本
+  branch: development       # fork 分支建立后改指 fork
   dirty: false
   adapter_version: 0.8.0
   prompt_version: 0.8.0
