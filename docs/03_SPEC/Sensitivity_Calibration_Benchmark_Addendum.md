@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Sensitivity / Calibration / Benchmark 补充规范
 
 **状态：** P1 设计补充  

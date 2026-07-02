@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [domain-cli]
+---
+
 # Domain CLI 规范（shud-harness 领域命令面）
 
 **状态**：P0 设计规范（源自三仓库对齐审查，2026-07-02）
@@ -10,16 +15,16 @@
 
 1. **T2 唯一生产通道**：报告/warehouse 里的 deterministic 证据（metrics、水量平衡、对比结论）只能由本 CLI 产出。
    agent 在 sandbox 里仍可自由写 R/bash 做探索，但探索产物是 T3——进证据位必须经 CLI 重算
-   （与 Context_Trust §2 的信任提升点定义一致）。
+   （与 [Context_Trust §2](Context_Trust_And_Injection_Spec.md) 的信任提升点定义一致）。
 2. **参数化，不拼接**：agent 提供的一切取值（项目名、变量名、路径）作为 argv 传入，CLI 内部校验白名单/路径边界；
    LLM 生成的字符串不进入 shell 解释（与 Data_Storage_Provenance 的 SQL 参数化同构）。
 3. **机器可读结果**：每条命令产出 result YAML（含 `schema_version`、`cli_version`、输入 digest、上游退出码），
    exit code 遵循 §5 契约。stdout 给人看，result 文件给机器用。
 4. **确定性**：同输入同版本 → result 字节级一致（时间戳字段除外，单列不参与 digest）。
-   这使 command_digest 幂等 key（Idempotency §4）和失败签名（Control_Kernel §5.1）稳定。
+   这使 command_digest 幂等 key（[Idempotency §4](Idempotency_Concurrency_Locking_Spec.md)）和失败签名（[Control_Kernel §5.1](../02_ARCHITECTURE/Control_Kernel.md)）稳定。
 5. **不包探索**：一次性分析、绘图实验不进 CLI。命令面只收录重复出现的证据生产操作——
    每加一条命令都要有对应 fixture 与兼容测试，命令面膨胀=维护负担膨胀。
-6. **与 patch 组同入口**：`shud-harness patch diff|bundle|revert`（Sandbox_and_Executor §3 定义）
+6. **与 patch 组同入口**：`shud-harness patch diff|bundle|revert`（[Sandbox_and_Executor §3](Sandbox_and_Executor.md) 定义）
    与本命令面共享同一可执行文件与 result 契约，本规范不重复其语义。
 
 ## 2. 命令面（v0.1，基于三仓库当前事实）
@@ -101,7 +106,7 @@ shud-harness compare <base-run> <cand-run> [--obs <csv>] [--out <yaml>]
   该集合**不受 --vars 影响**——负状态在 SHUD 内被静默钳零（无日志），只能输出侧检测：
   钳零特征（长零段 + 收支残差联合判定，启发式阈值实现期校准）计入 negative_state_count，
   连同 water_balance_residual / cvode_failures（stderr 解析）组成 **RunRecord.numerical_health
-  的唯一生产通道**（Execution_Jobs_Runs §8）。--vars 只作用于 metrics 载荷；
+  的唯一生产通道**（[Execution_Jobs_Runs §8](Execution_Jobs_Runs.md)）。--vars 只作用于 metrics 载荷；
 - compare：产出 Controlled_Search 的 `BaselineComparisonRef`（same_stack_lock/same_data_id 校验 + metric_delta）；
   给 `--obs` 时经 hydroGOF 计算 NSE/KGE 等 GOF 指标。
 
@@ -180,7 +185,7 @@ result:
 且 SHUD-Harness 的研究成果（ChangeRequest 上行合并）**本身会改变上游接口**。规则：
 
 1. **CLI 有独立 semver**，进三处：每个 result YAML、CommandTrace、`StackLock.harness.cli_version`
-   （Minimal_Schemas §2）。RunRecord 由此可追溯"这份 metrics 是哪个 CLI 版本算的"。
+   （[Minimal_Schemas §2](Minimal_Schemas.md)）。RunRecord 由此可追溯"这份 metrics 是哪个 CLI 版本算的"。
 2. **兼容矩阵显式声明**：CLI 每个 minor 版本声明支持的上游区间——
    `shud: [3aec657, HEAD-of-tested]`（退出码表 + 输入清单 + 输出命名为契约面）、
    `rshud: >=2.5.0 <3.0`（现代 API 面）、`autoshud: [f421445, ...]`（步骤/配置键/必需输出 15 变量表为契约面）。

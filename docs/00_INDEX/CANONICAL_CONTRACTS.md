@@ -1,3 +1,8 @@
+---
+status: living
+canonical_for: [canonical-source-index]
+---
+
 # Canonical Contracts Index
 
 **状态：** v0.8.3 合同索引  

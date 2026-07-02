@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # 多用户与 Harness 自身版本管理
 
 ## 1. 多用户假设

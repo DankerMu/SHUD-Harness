@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Idempotency、Concurrency 与 Locking 规范
 
 **状态：** v0.8.1 P0 补充规范  
@@ -54,7 +58,7 @@ interface LockRecord {
 | `POST /api/jobs/:id/collect` | `job_id + output_digest_or_exit_marker` |
 | `POST /api/tasks/:id/report` | `task_id + run_record_ids + report_template_version` |
 | `GET /api/reports/:id/export` 触发生成 | `report_id + format + report_sha256 + export_options` |
-| Notification send | `task_id + trigger + target_id + recipient`（target_id 按 trigger 映射，critical_failure → error_id，见 Notification_Design §5，对抗审查 A08-4） |
+| Notification send | `task_id + trigger + target_id + recipient`（target_id 按 trigger 映射，critical_failure → error_id，见 [Notification_Design §5](Notification_Design.md)，对抗审查 A08-4） |
 | PI gate decision | `gate_id + actor_user_id + decision + evidence_digest` |
 
 ### 4.1 LLM 步骤不幂等（AGA-P2）
@@ -66,7 +70,7 @@ interface LockRecord {
 - LLM 输出先落入 draft 单元（plan 草稿、narrative、ChangeRequest 草稿），draft 可整体丢弃重生成；
   对外副作用（提交 job、写 RunRecord、发通知）必须过上表幂等 key——
   “turn 重放导致重复提交”由 key 拦截，不靠 LLM 自觉；
-- phase 重入（mid-turn crash 后 replay，见 Error_Handling_Spec §5.1）由 task lock + 状态单调性保护：
+- phase 重入（mid-turn crash 后 replay，见 [Error_Handling_Spec §5.1](Error_Handling_Spec.md)）由 task lock + 状态单调性保护：
   重放 turn 产生不同措辞是可接受的，重复推进状态或重复触发副作用是不可接受的。
 
 ## 5. Lock 文件路径

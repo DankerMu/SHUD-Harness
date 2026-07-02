@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Traceability Matrix
 
 **状态：** v0.8.1 实施追踪补充  

@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Scientific Change Playbooks
 
 **状态**：v0.8.3 P2 实施补充  

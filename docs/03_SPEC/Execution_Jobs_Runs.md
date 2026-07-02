@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # 执行、长任务、RunRecord 与恢复
 
 ## 1. 执行模式
@@ -205,9 +209,9 @@ sandbox.exec 按发起 agent 的角色施加确定性写策略，不靠 prompt �
 | reviewer | 只读模式，同上 |
 | worker | 允许写集合，除 worktrees/*（改码不属 worker 剖面） |
 | coder | 允许写集合（worktree 为主入口） |
-| coordinator | 不直接执行 sandbox 命令（Roles_and_Boundaries §0） |
+| coordinator | 不直接执行 sandbox 命令（[Roles_and_Boundaries §0](../02_ARCHITECTURE/Roles_and_Boundaries.md)） |
 
-Roles_and_Boundaries §0 的 denied_actions（write/edit）由本表映射为路径判定——
+[Roles_and_Boundaries §0](../02_ARCHITECTURE/Roles_and_Boundaries.md) 的 denied_actions（write/edit）由本表映射为路径判定——
 "只读"由沙箱层强制，system prompt 里的只读声明只是给 LLM 的提示，不是防线。
 
 ### 9.3 命令风险分类（四级）

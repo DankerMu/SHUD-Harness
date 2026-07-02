@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [websocket-event-registry]
+---
+
 # WebSocket 协议
 
 **状态：** P0 设计规范  
@@ -83,7 +88,7 @@ interface WsEvent<T = unknown> {
 | `client.interrupt.ack` | server → client | 介入请求的受理结果与实际生效语义 |
 | `agent.turn.started` | server → client | agent 开始一轮 LLM 推理（前端据此显示"思考中"，区别于 job 运行） |
 | `agent.turn.completed` | server → client | 一轮推理结束，含可选 rationale_summary（一句话决策理由） |
-| `agent.no_progress` | server → client | 无进展计数变化（count/threshold，见 Control_Kernel §5.1） |
+| `agent.no_progress` | server → client | 无进展计数变化（count/threshold，见 [Control_Kernel §5.1](../02_ARCHITECTURE/Control_Kernel.md)） |
 | `health.status` | server → client | 服务健康状态变更 |
 | `ops.metric.updated` | server → client | 运维指标聚合更新 |
 | `alert.raised` | server → client | 告警触发 |

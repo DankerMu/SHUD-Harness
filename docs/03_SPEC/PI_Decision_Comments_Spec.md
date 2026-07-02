@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [pi-decision-verbs, pi-decision-memory-note]
+---
+
 # PI Decision Comments 规范
 
 **状态：** v0.8.1 设计补充  

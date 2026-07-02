@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [core-object-schemas, runjob-backend-enum, stacklock-llm]
+---
+
 # Canonical Schema Contract (v0.8)
 
 > **本文件是 8 个核心对象 + MemoryNote 的唯一权威字段定义。**
@@ -81,6 +86,9 @@ llm:
   model_id: "claude-sonnet-5"         # provider 完整模型标识，含版本后缀
   params_digest: "sha256:..."         # 采样参数集（temperature/top_p/max_tokens 等）的哈希
   prompt_pack_digest: "sha256:..."    # prompt_pack 实际内容哈希（防同名不同内容漂移）
+  # 演进备注（harness 评审 G7）：MVP 全角色单模型。将来引入 per-role 模型路由（简单节点下放
+  # 小模型省成本）时，本键升级为 role→{model_id, params_digest} 映射——breaking，先立 ADR
+  # 并跑全量行为 eval 回归后方可切换。
 fingerprint: "sha256:..."             # 整体哈希，用于快速比对
 created_at: 2026-04-25T10:00:00Z
 ```

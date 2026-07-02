@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Park/Resume 设计
 
 **状态：** P0 设计规范  
@@ -55,7 +59,7 @@ park 不是零成本：resume 是一次冷读重建（provider 提示缓存 TTL 
 | 灰区（~TTL 边界） | 会话内短等，超时自动升级为 park | 超时兜底，不悬挂 |
 | 长（真实流域 run、batch、HPC 排队） | park | cache 必然冷：保留会话 = resume 冷读全量历史（随 park 轮次复利增长）；重建投影 ≤16KB，恒定且便宜 10-30× |
 
-阈值进配置，按 provider cache TTL 校准（另见 Cost_Inference_Budget §4.1 前缀缓存快照）。
+阈值进配置，按 provider cache TTL 校准（另见 [Cost_Inference_Budget §4.1](Cost_Inference_Budget.md) 前缀缓存快照）。
 误判偏向 park：错 park 只多付一次 ≤16KB 重建；错不 park，冷读成本随历史长度增长无上界。
 
 ## 2. 状态定义
@@ -77,7 +81,7 @@ RunJob 状态应与 TaskCard 区分。TaskCard 代表任务生命周期；RunJob
 
 ## 2.1 plan.md 结构契约与修订规则
 
-对抗审查 A02-1/A02-2/A04-5：plan_cursor、幂等 key（Idempotency §4 的 plan_step_id）与
+对抗审查 A02-1/A02-2/A04-5：plan_cursor、幂等 key（[Idempotency §4](Idempotency_Concurrency_Locking_Spec.md) 的 plan_step_id）与
 "plan 以磁盘为准"都引用 plan 步骤，但步骤结构、修订权与重算算法此前无任何定义。契约：
 
 **步骤 ID**：plan.md 的可执行步骤必须带稳定 ID（`step-NNN`，创建时由 harness 按序分配）；
@@ -86,7 +90,7 @@ plan_step_id 一律引用该 ID。
 
 **修订权与信任级**：plan.md 仅 Coordinator 可写，且仅在 Plan / Resume 阶段（Execute 期间要改
 计划须先让 TaskCard 回 planned，走 Control_Kernel 状态机）；每次修订产生 `plan.revised` 事件，
-记录 actor、revision 号与依据 refs——refs 不得为空且不得全为 T4（Context_Trust §4 高影响动作中
+记录 actor、revision 号与依据 refs——refs 不得为空且不得全为 T4（[Context_Trust §4](Context_Trust_And_Injection_Spec.md) 高影响动作中
 机器可查的部分）。PI 要求修订走 TaskCard 回 planned 的既有路径。
 
 **cursor 重算（确定性集合运算，无 LLM 参与）**：resume 发现磁盘 revision > parked revision 时：
@@ -137,7 +141,7 @@ Job watcher 是非 LLM 后台进程，负责轮询或订阅 job 状态。它不�
 
 实现缝（zero@13e25c1）：上游 `BackgroundToolTaskSink`（thresholdMs 超阈接管执行 +
 `background_tool_completed` 消息回注）即本 watcher 的接入点——local_job 后端实现该 sink，
-完成事件驱动 collect/resume，不必在 loop 外自建通知通道（Zero_Reuse_Matrix §3）。
+完成事件驱动 collect/resume，不必在 loop 外自建通知通道（[Zero_Reuse_Matrix §3](../02_ARCHITECTURE/Zero_Reuse_Matrix.md)）。
 
 ### 4.1 本地 job
 
@@ -229,7 +233,7 @@ resume_context.run_records 一次性给出全部终态 job 的 RunRecord。
 run_records 只带 status 与 metrics_ref，不内联日志或输出数据；job stdout/stderr 若需引用，
 按同规范 §5 的 tail 截断规则并以 T4 包裹注入。
 
-resume 时 system prompt 复用 session 首轮存盘的字节级快照（见 Cost_Inference_Budget §4.1），
+resume 时 system prompt 复用 session 首轮存盘的字节级快照（见 [Cost_Inference_Budget §4.1](Cost_Inference_Budget.md)），
 不重新渲染——重建的是对话上下文，不是前缀。
 
 ## 7. 触发策略

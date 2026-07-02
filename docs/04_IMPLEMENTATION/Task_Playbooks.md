@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Task Playbooks (Web 交互)
 
 ## 1. 工程任务：添加输出诊断

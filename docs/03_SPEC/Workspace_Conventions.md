@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [workspace-paths]
+---
+
 # Workspace 约定
 
 **状态：** P1 设计规范  

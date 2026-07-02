@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Parameter Set 与 Analysis Run Mapping 规范
 
 **状态：** v0.8.1 P1 补充规范  

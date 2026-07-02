@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [performance-nfr]
+---
+
 # Performance Non-Functional Requirements Spec
 
 **状态**：v0.8.2 HIGH 新增规范  
@@ -86,7 +91,7 @@ GET /api/analysis/:id/heatmap
 - agent 单轮（LLM call + 工具执行）**P95 ≤ 60s 为 advisory 目标**：超出只产生 ALERT-LLM-002 告警，
   不算 SLA 违约、不自动 kill；深度计划、长报告等任务可在 task 级显式豁免并记录；
 - 监控口径分开：`api_request_duration_ms` 不含 LLM 时间，LLM 用 `llm_call_duration_ms`
-  （见 Observability_Monitoring_Spec §3.7），两者混算会同时污染两个 SLA。
+  （见 [Observability_Monitoring_Spec §3.7](Observability_Monitoring_Spec.md)），两者混算会同时污染两个 SLA。
 
 ---
 

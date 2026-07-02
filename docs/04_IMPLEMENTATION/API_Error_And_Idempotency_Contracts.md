@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [api-error-idempotency-contracts]
+---
+
 # API Error 与 Idempotency Contracts
 
 **状态：** v0.8.1 P1 实施补充  

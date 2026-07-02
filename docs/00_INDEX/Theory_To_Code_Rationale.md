@@ -1,3 +1,7 @@
+---
+status: snapshot
+---
+
 # Theory-to-Code 补充理由
 
 **状态**：v0.8.3 建议补充  

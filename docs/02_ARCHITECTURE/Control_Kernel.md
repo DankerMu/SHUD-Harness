@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [no-progress-detector]
+---
+
 # 极简 Runtime Kernel
 
 ## 1. 不再使用长自主循环
@@ -80,7 +85,7 @@ Coordinator 生成 plan，并列出：
 
 Agent 已暂停，不继续消耗 LLM token。`runtime_phase = waiting_for_job`。
 
-是否 park 按预期等待时长决策（阈值策略见 Park_Resume §1.2）：短等待留在会话内吃热缓存，
+是否 park 按预期等待时长决策（阈值策略见 [Park_Resume §1.2](../03_SPEC/Park_Resume_Design.md)）：短等待留在会话内吃热缓存，
 长等待 park——park 的经济性来自等待时长超过提示缓存 TTL。
 
 ### reporting
@@ -118,7 +123,13 @@ kernel 校验保证"发生了也过不去"。
 depth / 并发数 / allowed_tools 剖面求值，拒绝即返回工具错误，不改 Zero 内核。
 "[E] 直接复用"指复用 spawn 机制本身，不指复用其无校验的默认通路。
 落地事实（zero@13e25c1）：loop 级 `onToolCallStart` 仅观测、不可否决——该接口在**工具注册层**
-以横切包装实现（`ToolBase.beforeExecute` throw 即阻断），见 Zero_Reuse_Matrix §8 与 ADR-0001。
+以横切包装实现（`ToolBase.beforeExecute` throw 即阻断），见 [Zero_Reuse_Matrix §8](Zero_Reuse_Matrix.md) 与 ADR-0001。
+
+**拒绝载荷约定（harness 评审 G2，2026-07-02）**：策略门与硬校验拒绝时返回的工具错误
+必须携带 `ErrorRecord.remediation` 结构（`next_action` + `hint` + `ref`，权威源
+[Support_Schema_Contracts §3](../03_SPEC/Support_Schema_Contracts.md)）——拒绝而不导航
+制造重试风暴或静默绕行；新颖失败预算（§5.1）是止损底线，不是引导手段。示例：spawn 剖面
+超集被拒 → `next_action=adjust_scope, hint="移除 allowed_tools 中超出 worker 剖面的 X/Y", ref=Roles_and_Boundaries §0`。
 
 ### 5.1 无进展（no-progress）判定器
 
@@ -158,6 +169,34 @@ parked 状态不计步；job 等待时间不参与判定。判定器实现必须
 - advisory_usd: 状态栏显示费用，超出建议值标黄；
 - wall_time_without_user: 仅记录，不自动中断。
 ```
+
+### 5.2 护栏分类与换代减重（harness 评审 G5）
+
+护栏按存在理由分两类，实现时每条硬护栏标注 `guard_class`：
+
+- **authority（权威护栏）**：存在理由是"决策权属于 PI"，与模型能力无关，**永不随模型升级退役**——
+  PI gate、科学变更分级、语言护栏（calibration≠validation）、raw data 保护、spawn 剖面超集拒绝。
+- **capability（能力护栏）**：存在理由是"当前模型在此不可靠"，是对模型缺陷的工程补偿——
+  no-progress 阈值（3 步）、新颖失败预算（≤3）、park 阈值、决策卡密度、重试上限。
+
+减重规则：`StackLock.llm` 升级且行为 eval 全量达标后，触发一次**减重审查**
+（流程挂在 [Agent_Behavior_Eval_Spec §4](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)）：
+capability 类逐项评估"新模型是否已不需要"，产出一页 memo 供 PI 决定放宽/退役；authority 类不参与。
+护栏只增不减是另一种熵——最好的 harness 是刚好够用的那个，每个 guard 都在补偿一个模型缺陷，缺陷消失 guard 就该退场。
+
+### 5.3 工具面治理约定（harness 评审 G6）
+
+工具是给模型看的产品界面；注册进角色剖面的工具面遵守：
+
+- **数量预算**：单角色可见工具 ≤ 20（Zero 原生 + 领域工具合计）；超出先合并/裁剪再注册——
+  工具过多时模型在相似工具间误选的概率显著上升；
+- **单一职责 + 强 schema**：拒绝瑞士军刀工具；参数 Zod 校验，校验失败按 §5 拒绝载荷约定
+  回吐给模型自修，不静默吞掉；
+- **描述规范**：每个工具描述写清"何时该用 / 何时不该用 / 成功与失败分别长什么样"；
+- **领域动作优先走 Domain CLI**（[Domain_CLI_Spec](../03_SPEC/Domain_CLI_Spec.md) 已是模范面：
+  6 命令、YAML 契约、exit code 语义），不为每个动作造新工具。
+
+落点：工具注册层（与策略门同一横切点）；Week 1-2 实现时以注册期 lint 强制数量预算与描述完整性。
 
 ## 6. 核心原则
 

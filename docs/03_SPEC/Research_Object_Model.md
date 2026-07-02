@@ -1,3 +1,7 @@
+---
+status: demoted
+---
+
 # 轻量对象模型
 
 > **地位声明（2026-07-02）**：本文**非 canonical**——对象字段与状态机的权威源是
@@ -6,6 +10,8 @@
 
 ## 1. 设计原则
 
+> ⚠️ 非 canonical：对象字段与状态机以 [Minimal_Schemas.md](Minimal_Schemas.md) 及各权威 spec 为准。
+
 不再把每个治理关切都建成独立对象。v0.6 使用：
 
 ```text
@@ -13,6 +19,8 @@
 ```
 
 ## 2. 8 个核心对象
+
+> ⚠️ 非 canonical：对象字段与状态机以 [Minimal_Schemas.md](Minimal_Schemas.md) 及各权威 spec 为准。
 
 ### 1. TaskCard
 
@@ -211,6 +219,8 @@ patch_bundle: artifacts/CHG-0001.patch
 
 ## 2.1 Theory-to-Code support objects
 
+> ⚠️ 非 canonical：对象字段与状态机以 [Minimal_Schemas.md](Minimal_Schemas.md) 及各权威 spec 为准。
+
 这些对象不是新的核心对象，而是 ChangeRequest、AnalysisPlan、EvidenceReport 和 PiGate 的 support schema：
 
 - TheoryToCodeBundle
@@ -229,6 +239,8 @@ patch_bundle: artifacts/CHG-0001.patch
 - search/calibration 使用 ExperimentLedger，但不能替代理论审查。
 
 ## 2.2 Operational UX support objects
+
+> ⚠️ 非 canonical：对象字段与状态机以 [Minimal_Schemas.md](Minimal_Schemas.md) 及各权威 spec 为准。
 
 v0.8.1 增加四个 operational UX 能力：notification、report export、batch progress view、PI decision comments。这些能力不改变 8 个核心对象模型，只增加支撑对象：
 
@@ -262,6 +274,8 @@ memory_note:
 
 ## 3. 被合并/降级的对象
 
+> ⚠️ 非 canonical：对象字段与状态机以 [Minimal_Schemas.md](Minimal_Schemas.md) 及各权威 spec 为准。
+
 | v0.5 对象 | v0.6 处理方式 |
 |---|---|
 | EnvLock | 合并进 StackLock.runtime / StackLock.limits |
@@ -283,6 +297,8 @@ memory_note:
 | BenchmarkPolicy | 合并进 AnalysisPlan.rules + benchmark config |
 
 ## 4. 保留治理能力，但不保留对象膨胀
+
+> ⚠️ 非 canonical：对象字段与状态机以 [Minimal_Schemas.md](Minimal_Schemas.md) 及各权威 spec 为准。
 
 治理不靠对象数量，而靠：
 

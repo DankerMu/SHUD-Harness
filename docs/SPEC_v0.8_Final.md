@@ -1,3 +1,7 @@
+---
+status: demoted
+---
+
 # SHUD-Harness 实施规格书 v0.8
 
 **日期**: 2026-04-24 **状态**: 可实施 **团队**: 1 PI + 1 工程师 + 0.5 数据支持
@@ -14,6 +18,8 @@
 
 ## 1. 项目定义
 
+> ⚠️ 非规范快照（2026-07-02 降级）：本节不再回填后续修订，以 canonical spec 为准，入口见 [00_INDEX/MASTER_INDEX.md](00_INDEX/MASTER_INDEX.md)。
+
 **一句话**: SHUD-Harness 是 PI 主导的科研工程助手——通过 Web 界面（实时对话 + 日志流 + 审批 + 报告阅读）驱动 SHUD/rSHUD/AutoSHUD 的模型运行、诊断、敏感性分析和跨仓库代码变更，产出 Markdown 报告供 PI 决策。
 
 **不是什么**: 不是自治科研平台，不是多 Agent 自主编排系统。
@@ -25,6 +31,8 @@
 ---
 
 ## 2. 代码栈接口摘要
+
+> ⚠️ 非规范快照（2026-07-02 降级）：本节不再回填后续修订，以 canonical spec 为准，入口见 [00_INDEX/MASTER_INDEX.md](00_INDEX/MASTER_INDEX.md)。
 
 ### SHUD (C++14)
 - 构建: `./configure && make shud`
@@ -52,6 +60,8 @@
 ---
 
 ## 3. 角色与治理
+
+> ⚠️ 非规范快照（2026-07-02 降级）：本节不再回填后续修订，以 canonical spec 为准，入口见 [00_INDEX/MASTER_INDEX.md](00_INDEX/MASTER_INDEX.md)。
 
 ### 角色边界
 
@@ -84,6 +94,8 @@
 
 ## Theory-to-Code Principle
 
+> ⚠️ 非规范快照（2026-07-02 降级）：本节不再回填后续修订，以 canonical spec 为准，入口见 [00_INDEX/MASTER_INDEX.md](00_INDEX/MASTER_INDEX.md)。
+
 For SHUD scientific changes, SHUD-Harness prioritizes the reviewable chain:
 
 Research question → theory note → equation spec → derivation record → numerical scheme → implementation mapping → verification case → evidence report → PI decision.
@@ -93,6 +105,8 @@ Sensitivity analysis, calibration and controlled search are downstream tools. Th
 ---
 
 ## 4. 对象模型 (8 个)
+
+> ⚠️ 非规范快照（2026-07-02 降级）：本节不再回填后续修订，以 canonical spec 为准，入口见 [00_INDEX/MASTER_INDEX.md](00_INDEX/MASTER_INDEX.md)。
 
 ### 4.1 TaskCard — 任务入口
 
@@ -291,6 +305,8 @@ patch_bundle: artifacts/CHG-0001/patch.tar.gz
 
 ## 5. 运行时
 
+> ⚠️ 非规范快照（2026-07-02 降级）：本节不再回填后续修订，以 canonical spec 为准，入口见 [00_INDEX/MASTER_INDEX.md](00_INDEX/MASTER_INDEX.md)。
+
 ### 5.1 目录结构
 
 ```
@@ -466,6 +482,8 @@ Job 等待期间 ≠ LLM 调用, 不计费。
 
 ## 6. Coordinator 行为规格
 
+> ⚠️ 非规范快照（2026-07-02 降级）：本节不再回填后续修订，以 canonical spec 为准，入口见 [00_INDEX/MASTER_INDEX.md](00_INDEX/MASTER_INDEX.md)。
+
 ### 6.1 状态机
 
 ```
@@ -575,6 +593,8 @@ FOR each step in plan:
 
 ## 7. Tiny Fixture 定义
 
+> ⚠️ 非规范快照（2026-07-02 降级）：本节不再回填后续修订，以 canonical spec 为准，入口见 [00_INDEX/MASTER_INDEX.md](00_INDEX/MASTER_INDEX.md)。
+
 ### 选择: ccw (Cache Creek Watershed)
 
 | 属性 | 值 | 原因 |
@@ -622,6 +642,8 @@ Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 ---
 
 ## 8. Task Playbook (含决策树)
+
+> ⚠️ 非规范快照（2026-07-02 降级）：本节不再回填后续修订，以 canonical spec 为准，入口见 [00_INDEX/MASTER_INDEX.md](00_INDEX/MASTER_INDEX.md)。
 
 ### Playbook A: 工程任务 — "给 SHUD 添加 event flux 诊断输出"
 
@@ -730,6 +752,8 @@ Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 
 ## 9. 八周实施计划
 
+> ⚠️ 非规范快照（2026-07-02 降级）：本节不再回填后续修订，以 canonical spec 为准，入口见 [00_INDEX/MASTER_INDEX.md](00_INDEX/MASTER_INDEX.md)。
+
 | 周 | 交付物 | 验收标准 |
 |----|--------|----------|
 | **W1** | Monorepo + 四栏布局壳 + 基础 API + TaskCard schema | 浏览器打开四栏布局, 可创建 task |
@@ -744,6 +768,8 @@ Rscript scripts/rshud/water_balance.R --path workspaces/TASK-$TASK/ccw
 ---
 
 ## 10. 验收标准 (9 项)
+
+> ⚠️ 非规范快照（2026-07-02 降级）：本节不再回填后续修订，以 canonical spec 为准，入口见 [00_INDEX/MASTER_INDEX.md](00_INDEX/MASTER_INDEX.md)。
 
 1. Web 界面能创建 task, 绑定 stack/data, 运行 job, 生成报告
 2. 每次运行有完整 RunRecord (stack_id + data_id + artifacts + metrics + numerical_health)

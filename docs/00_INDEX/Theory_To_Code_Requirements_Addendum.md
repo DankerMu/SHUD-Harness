@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Theory-to-Code Requirements Addendum
 
 **状态**：建议并入 `docs/00_INDEX/Requirements_Catalog.md`  

@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [api-registry]
+---
+
 # REST API、WebSocket 与 Schemas
 
 ## 1. API 端点 (Hono 后端)

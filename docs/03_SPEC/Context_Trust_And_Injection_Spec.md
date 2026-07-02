@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [context-trust-tiers]
+---
+
 # Context 信任分级与注入防护规范
 
 **状态**：P0 设计规范（源自 Agent_System_Audit_v0_8_3 AGA-P0-4 / AGA-P1-4）
@@ -51,7 +56,7 @@
 
 2. **T4 内容默认摘要化**：优先由确定性脚本提取所需字段（信任提升到 T2），仅在必须阅读原文时（如 Coder 改代码）注入原文。
 3. **skill 内容例外**：active 状态的 skill 视为 T1（前提是 skill 激活流程含工程师 review，见 Memory_Skills_Lite）；draft skill 不得注入 context。
-4. **note 检索注入**：检索结果必须携带 status 标签；draft note 在 prompt 中必须以"未经 PI 确认"的显式前缀呈现（见 Memory_Skills_Lite §8）。
+4. **note 检索注入**：检索结果必须携带 status 标签；draft note 在 prompt 中必须以"未经 PI 确认"的显式前缀呈现（见 [Memory_Skills_Lite §8](Memory_Skills_Lite.md)）。
 
 ## 4. 高影响动作的来源要求
 
@@ -73,14 +78,14 @@
 | Brief | TaskCard、StackLock 摘要、DataProvenance 摘要、相关 accepted notes(≤5)、draft notes(≤3, 带标记) | 8 KB |
 | Plan | Brief 内容 + RepoContextBrief + 相关 skill 正文 | 24 KB |
 | Execute | 计划游标 + 当前步骤上下文 + 命令 tail（见下） | 每步增量 ≤4 KB |
-| Resume | resume_context（Park_Resume §6 白名单）| 16 KB |
+| Resume | resume_context（[Park_Resume §6](Park_Resume_Design.md) 白名单）| 16 KB |
 | Report | RunRecord 字段 + metrics + limitations 素材（不含日志原文） | 16 KB |
 
 **阶段切换 = 重投影**：phase 迁移时**不携带**上一阶段的组装内容，按新阶段白名单从磁盘对象重新组装——
-上一阶段的结论必须已沉淀为对象（没沉淀即步骤未完成，见 Control_Kernel §5.1 的进展判定）。
+上一阶段的结论必须已沉淀为对象（没沉淀即步骤未完成，见 [Control_Kernel §5.1](../02_ARCHITECTURE/Control_Kernel.md) 的进展判定）。
 白名单是每个阶段 context 的**完整定义**，不是"只管新增内容、旧上下文一路拖到底"的准入门槛。
 
-命令输出进入 context 的截断规则（Sandbox_and_Executor §5 引用本表）：
+命令输出进入 context 的截断规则（[Sandbox_and_Executor §5](Sandbox_and_Executor.md) 引用本表）：
 
 ```text
 stdout_tail / stderr_tail: 各 ≤ 100 行 且 ≤ 8 KB，超限取 head 20 行 + tail 80 行；
@@ -122,12 +127,12 @@ session_digest:
 - 摘要器输入仅限 T0/T1 内容，T4 不进摘要器——摘要器本身也是 LLM 调用，同样是注入面（负例见 §7）；
   T1 note 正文内嵌的 T4 定界片段在进摘要器前剥除（§2 判定规则：accepted 不提升引用原文，对抗审查 A04-2）；
 - digest 以 T3 标记注入（`pi_confirmed` 后按 T1），与 draft note 同等待遇：可作线索、不作证据，
-  lineage guard 拒绝其作为 observation 唯一依据（注入标记格式见 Memory_Skills_Lite §8.1）；
-- digest 在 Research Context 面板可见、PI 可编辑（见 Interaction_Model §3A）；
+  lineage guard 拒绝其作为 observation 唯一依据（注入标记格式见 [Memory_Skills_Lite §8.1](Memory_Skills_Lite.md)）；
+- digest 在 Research Context 面板可见、PI 可编辑（见 [Interaction_Model §3A](../02_ARCHITECTURE/Interaction_Model.md)）；
 - digest 不是研究对象——它是 context 层支持对象（与 parked_state 同定位），不进 8 对象清单；
 - 实现载体（zero@13e25c1）：上游 session `context_compression` 快照（compressedSummary/Range）
   与本对象同形，可复用为生成机制——但产物必须落盘为 digest 对象并带 T3 标记，
-  上游默认的窗口内匿名压缩保持关闭（Zero_Reuse_Matrix §3/§5）。
+  上游默认的窗口内匿名压缩保持关闭（[Zero_Reuse_Matrix §3](../02_ARCHITECTURE/Zero_Reuse_Matrix.md)/§5）。
 
 secrets：进入 context 前一律先过 Config_Secrets_And_Environment_Spec 的 redaction。
 

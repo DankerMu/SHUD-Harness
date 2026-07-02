@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # 轻量 Memory 与 Skills
 
 ## 1. Memory 不再走重审批
@@ -38,7 +42,7 @@ reviewed_by: null
 - note `draft` ↔ 上游 `draft`；`accepted` ↔ `verified`——**提升动作仅 PI principal**
   （adapter 收窄上游 authority 允许的 actor 集合，agent 不可自提）；`retired` ↔ `archived`；
 - 上游 `conflict` 态在 SHUD 侧按"待人工裁决的 draft"处理，不进 context 组装白名单；
-- 复用决策由此从"改上游默认行为"收窄为"收权限 + 状态映射"，见 Zero_Reuse_Matrix §3 / §9.1。
+- 复用决策由此从"改上游默认行为"收窄为"收权限 + 状态映射"，见 [Zero_Reuse_Matrix §3](../02_ARCHITECTURE/Zero_Reuse_Matrix.md) / §9.1。
 
 ## 3. 什么时候需要 PI review
 
@@ -142,13 +146,31 @@ MVP 先用 keyword + tags，不强依赖 embeddings：
 规则：
 
 - draft note 是 T3 信任级内容——可作诊断线索，不得作为报告结论或 ChangeRequest 的直接依据；
-- 单次注入 note 数量有上限（accepted ≤ 5、draft ≤ 3，见 Context_Trust_And_Injection_Spec §5），按相关度截断；
+- 单次注入 note 数量有上限（accepted ≤ 5、draft ≤ 3，见 [Context_Trust_And_Injection_Spec §5](Context_Trust_And_Injection_Spec.md)），按相关度截断；
 - 错误/恶意 draft note 的影响半径由此受限：它带着"未确认"标记进入 context，且进不了证据链（lineage guard 拒绝 draft note 作为 evidence_refs 唯一来源）；
-- session digest（Context_Trust §5.1）注入时同规则：`[DIGEST-0001 | draft | 未经 PI 确认]`，`pi_confirmed` 后按 accepted 待遇。
+- session digest（[Context_Trust §5.1](Context_Trust_And_Injection_Spec.md)）注入时同规则：`[DIGEST-0001 | draft | 未经 PI 确认]`，`pi_confirmed` 后按 accepted 待遇。
 
-## 9. 验收标准
+## 9. 周期清扫（gardening，harness 评审 G4）
+
+记忆和技能会腐烂：过时的 draft 沉积成后续 agent 模仿的先例，失效的 skill 继续被加载。
+两级状态机（§1/§4）只定义了状态，没人负责推动退休——清扫机制补上这一环：
+
+- **触发**：周期 job（建议每周），不新增 agent 角色；产出候选清单，**不直接删除或退休**。
+- **MemoryNote 扫描规则**（进退休候选）：draft 超 30 天未被检索命中；已被 conflict 裁决取代；
+  引用的对象（task/run/skill）已 retired。`accepted`/`evidence`/`pi_decision` 类**只能 PI 退休**，
+  扫描只提名不动手。
+- **Skill 扫描规则**：active skill 关联 eval 通过率连续下滑，或 30 天零调用 → 降级候选
+  （active→draft 或 retired），走 §4 既有状态机。
+- **产出**：sweep report（候选 + 触发规则 + 一键批准），经 Web 审批面呈 PI；批准后的状态迁移
+  写 AuditEvent。
+- **指标**：cleanup half-life（候选产生 → 处置的中位时长），实现期注册进 observability；
+  半衰期持续拉长说明清扫在空转，规则需要收紧。
+
+## 10. 验收标准
 
 - [ ] MemoryTool 不自动把 evidence_note 标记为 accepted（Zero 默认 verified 行为必须改掉）。
 - [ ] pi_decision note 只能由 PI decision flow 产生。
 - [ ] 检索注入的 note 均带 status 标记；draft note 带"未经 PI 确认"前缀（单测）。
 - [ ] draft skill 不被加载进 skill catalog；active skill 的 SKILL.md 有 activated_by 记录。
+- [ ] sweep job 只产生候选清单；accepted/evidence/pi_decision 类退休必须有 PI 决策记录（单测）。
+- [ ] 清扫触发的状态迁移均有 AuditEvent。

@@ -1,3 +1,7 @@
+---
+status: accepted
+---
+
 # ADR-0001: Agent 运行时基座与拓扑（Zero + 单 Coordinator 星型）
 
 **状态**: accepted（2026-07-02） · **决策人**: PI + 工程师 · **方法**: future-aware-architecture 分析
@@ -57,6 +61,9 @@
 3. submodule bump 频率 > 1 次/季 → 兼容矩阵与契约面探针自动化。
 4. 多 PI 需求出现 → ACL 泛化（principal 化设计已留门）。
 5. 模型层注入防护实质突破 → T4 处理可放宽（在此之前不放）。
+6. `StackLock.llm` 升级且行为 eval 全量达标 → 触发能力护栏减重审查
+   （[Control_Kernel §5.2](../02_ARCHITECTURE/Control_Kernel.md)，harness 评审 G5）——
+   capability 类护栏逐项评估退役，authority 类不参与；护栏只增不减是另一种熵。
 
 ## 参照
 

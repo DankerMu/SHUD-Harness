@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Zero 路线决策：基于 Zero 扩展，构建 SHUD 领域逻辑
 
 > **注：** 第 7–13 节的实现级细节合并自 v0.8 设计附录 `Zero_Extension_Map.md`，覆盖 adapter 模式、工具命名、prompt 改造、接入步骤与验收标准。
@@ -53,15 +57,15 @@ SHUD-Harness 以 Web 为唯一用户交互渠道，需要：
 |-----------|------|-----------|
 | AgentLoop | [E] 直接复用 | 添加 Park/Resume hook；hook 面（13e25c1，15 个）全部观测型——策略阻断不在 loop 层（见 §8） |
 | BashTool | [E] 直接复用 | 添加 workspace 路径约束 + data/raw 只读检查（上游 bash.ts 无内置 safety，约束全为 SHUD 扩展） |
-| MemoryTool | [O] 修改后复用 | 上游（13e25c1）已原生 draft/verified/archived/conflict + governance/lifecycle；SHUD 收窄为：verified 提升仅 PI principal、evidence 两级映射、conflict 不进 context（Memory_Skills_Lite §2.1） |
+| MemoryTool | [O] 修改后复用 | 上游（13e25c1）已原生 draft/verified/archived/conflict + governance/lifecycle；SHUD 收窄为：verified 提升仅 PI principal、evidence 两级映射、conflict 不进 context（[Memory_Skills_Lite §2.1](../03_SPEC/Memory_Skills_Lite.md)） |
 | Skills loader | [E] 直接复用 | 加载 5 个 SHUD skill |
-| Spawn/Wait Agent | [E] 直接复用 | Coordinator → Worker (编译/运行/解析)；spawn 前置硬校验（depth/并发/剖面子集）经 `ZeroHarnessAdapter.beforeToolCall` 注入，见 Control_Kernel §5（对抗审查 A02-6） |
+| Spawn/Wait Agent | [E] 直接复用 | Coordinator → Worker (编译/运行/解析)；spawn 前置硬校验（depth/并发/剖面子集）经 `ZeroHarnessAdapter.beforeToolCall` 注入，见 [Control_Kernel §5](Control_Kernel.md)（对抗审查 A02-6） |
 | Web (Hono+React) | [E] 直接复用 | 添加 task/job/report/approval 页面 |
 | Session | [E] 直接复用 | 添加 Park/Resume 状态持久化 |
 | Closure Classifier | [O] 修改后复用 | 科研 closure (baseline? holdout? PI gate?) |
 | Task Orchestrator | [E] 直接复用 | 扩展 DAG 支持长任务 park |
-| Background tool sink | [E] 直接复用 | BackgroundToolTaskSink（thresholdMs 超阈接管）+ background_tool_completed 消息 = local_job watcher / park-resume 的接入缝（Park_Resume §4） |
-| Context budget/compression | [O] 修改后复用 | ContextBudget 分段预算复用；session context_compression（compressedSummary/Range）与 session digest 同形——包装为落盘 digest 对象 + T3 标记，匿名管道内压缩禁用（Context_Trust §5.1） |
+| Background tool sink | [E] 直接复用 | BackgroundToolTaskSink（thresholdMs 超阈接管）+ background_tool_completed 消息 = local_job watcher / park-resume 的接入缝（[Park_Resume §4](../03_SPEC/Park_Resume_Design.md)） |
+| Context budget/compression | [O] 修改后复用 | ContextBudget 分段预算复用；session context_compression（compressedSummary/Range）与 session digest 同形——包装为落盘 digest 对象 + T3 标记，匿名管道内压缩禁用（[Context_Trust §5.1](../03_SPEC/Context_Trust_And_Injection_Spec.md)） |
 
 标注: [E] = Extend (直接扩展), [O] = Override (需修改后复用), [A] = Add (纯新增)
 

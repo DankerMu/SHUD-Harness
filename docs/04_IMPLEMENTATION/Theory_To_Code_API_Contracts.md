@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [t2c-api-contracts]
+---
+
 # Theory-to-Code API Contracts
 
 **状态**：v0.8.3 P1 实施补充  

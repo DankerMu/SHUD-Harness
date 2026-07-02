@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # MVP Implementation Readiness Checklist
 
 **状态：** v0.8.1 开工前检查  

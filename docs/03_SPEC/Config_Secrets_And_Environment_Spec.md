@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Config、Secrets 与 Environment 规范
 
 **状态：** v0.8.1 P1 补充规范  

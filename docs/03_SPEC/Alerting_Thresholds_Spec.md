@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [alerting-thresholds]
+---
+
 # Alerting Thresholds Spec
 
 **状态**：v0.8.2 新增规范  
@@ -50,7 +55,7 @@
 | ALERT-AGENT-002 | 同一 task llm_output_error | `>= 3` | error | 提示 prompt/schema 可能漂移，runbook |
 
 > ALERT-BATCH-001 注（对抗审查 A09-5）：原判据 `failed cells > stop_condition` 把整数与枚举比较、不可计算；
-> stop_condition 枚举与 failure_rate_threshold 数值字段见 Parameter_Set_And_Analysis_Run_Mapping §2。
+> stop_condition 枚举与 failure_rate_threshold 数值字段见 [Parameter_Set_And_Analysis_Run_Mapping §2](Parameter_Set_And_Analysis_Run_Mapping.md)。
 >
 > ALERT-LLM-004 注（对抗审查 A09-3）：与 Cost_Inference_Budget 的 2× 不是双写，是**有意两级**——
 > 2× 时 CostMonitor 置 `exceeded`（仅 UI 着色，不产生 alert 记录）；3× 才生成 alert（降噪）。

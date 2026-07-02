@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [t2c-report-lineage]
+---
+
 # Theory-to-Code Report Lineage Spec
 
 **状态**：v0.8.3 P1 补充规范  

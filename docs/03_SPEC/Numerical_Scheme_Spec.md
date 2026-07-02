@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Numerical Scheme Spec
 
 **状态**：v0.8.3 P0 补充规范  

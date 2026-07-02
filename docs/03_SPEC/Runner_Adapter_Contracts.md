@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [runner-contract]
+---
+
 # Runner Adapter Contracts
 
 **状态：** v0.8.1 P1 补充规范  
@@ -61,6 +66,7 @@ interface PreflightCheck {
   name: string;
   status: "pass" | "fail" | "warning" | "not_applicable";
   details: string;
+  remediation?: string;   // fail 时必填，语义见权威源 §2（harness 评审 G2）
 }
 ```
 

@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # LLM 成本与 Inference Budget
 
 ## 1. 设计哲学

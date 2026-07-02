@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Definition of Done 与风险控制
 
 ## 1. MVP DoD

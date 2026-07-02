@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Report Review 与 Evidence Lineage 规范
 
 **状态：** v0.8.1 P1 补充规范  
@@ -104,7 +108,7 @@ for each key claim:
 ```
 
 校准语义的结构化兜底（对抗审查 A05-3）：narrative 换述拦不住（language guard 自认，
-Report_Generation §5.2），但结构化字段拦得住——`analysis_mode` 从 AnalysisPlan 派生非 LLM 自填，
+[Report_Generation §5.2](Report_Generation_Spec.md)），但结构化字段拦得住——`analysis_mode` 从 AnalysisPlan 派生非 LLM 自填，
 calibration 产物想以 verification/validation 类型入账是确定性可拒的。语义级换述仍由
 Reviewer (L) 项 + PI 兜底。
 
@@ -113,7 +117,7 @@ Reviewer (L) 项 + PI 兜底。
 （CLI result / RunRecord / artifact manifest，带 cli_version 戳）→ 才可标 `deterministic`；
 refs 含 T3 对象（draft note / session digest / LLM 叙述）→ 上限 `llm_summary`；
 `pi_confirmed` 要求 refs 含 PiGateDecision 或 pi_decision note。自填级别高于派生上限 → 拒绝进入
-reviewed。这是 Context_Trust §2 来源链规则在 guard 里的确定性执行点。
+reviewed。这是 [Context_Trust §2](Context_Trust_And_Injection_Spec.md) 来源链规则在 guard 里的确定性执行点。
 
 ## 5. Report export
 

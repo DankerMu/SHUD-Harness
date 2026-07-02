@@ -1,3 +1,7 @@
+---
+status: snapshot
+---
+
 # 对抗性设计审查 v0.8.3
 
 **日期**：2026-07-02
@@ -47,19 +51,19 @@ v0.8.3 用 semantic_level_floor 修掉了"语义级别自报"（AGA-P0-2），�
 ## 1. CONFIRMED（17）
 
 > **处置状态（2026-07-02）：17/17 已修复**。落点速查：
-> A01-1 → Scientific_Change_Gating §1.1 规则 0/4（observed 集 + 对账）+ Preflight 检查项 + EVAL-GOV-005 ·
-> A01-2 → Minimal_Schemas 枚举映射注 + CANONICAL_CONTRACTS §15 登记 ·
-> A03-1 → Execution_Jobs_Runs §9.2 读写分离（repos 只读、runs 按状态转只读、config 只读） ·
-> A03-3 → Execution_Jobs_Runs §9.2.1 按角色执行模式 · A03-4 → Control_Kernel §5 spawn_profile_subset ·
+> A01-1 → [Scientific_Change_Gating §1.1](../03_SPEC/Scientific_Change_Gating_Spec.md) 规则 0/4（observed 集 + 对账）+ Preflight 检查项 + EVAL-GOV-005 ·
+> A01-2 → Minimal_Schemas 枚举映射注 + [CANONICAL_CONTRACTS §15](CANONICAL_CONTRACTS.md) 登记 ·
+> A03-1 → [Execution_Jobs_Runs §9.2](../03_SPEC/Execution_Jobs_Runs.md) 读写分离（repos 只读、runs 按状态转只读、config 只读） ·
+> A03-3 → [Execution_Jobs_Runs §9.2.1](../03_SPEC/Execution_Jobs_Runs.md) 按角色执行模式 · A03-4 → [Control_Kernel §5](../02_ARCHITECTURE/Control_Kernel.md) spawn_profile_subset ·
 > A05-2 → floor 表扩（rSHUD 物理 + AutoSHUD）+ 兜底扩至三仓库任意未登记路径 ·
-> A05-3 → Report_Review §4 analysis_mode 派生字段 + assertion_type 确定性限制 ·
-> A06-3 → Report_Generation §9 终态 ACL + Auth_Permission 矩阵两行 ·
-> A07-2 → Domain_CLI_Spec §2.2 numerical_health 生产通道（5 状态变量固定加载）+ Execution_Jobs_Runs §8 指针 ·
-> A08-1 → WebSocket_Protocol §2.1 seq 分配器 · A08-2 → Snapshot_Recovery §4 事件回放接口 ·
+> A05-3 → [Report_Review §4](../03_SPEC/Report_Review_And_Evidence_Lineage_Spec.md) analysis_mode 派生字段 + assertion_type 确定性限制 ·
+> A06-3 → [Report_Generation §9](../03_SPEC/Report_Generation_Spec.md) 终态 ACL + Auth_Permission 矩阵两行 ·
+> A07-2 → [Domain_CLI_Spec §2.2](../03_SPEC/Domain_CLI_Spec.md) numerical_health 生产通道（5 状态变量固定加载）+ [Execution_Jobs_Runs §8](../03_SPEC/Execution_Jobs_Runs.md) 指针 ·
+> A08-1 → [WebSocket_Protocol §2.1](../03_SPEC/WebSocket_Protocol.md) seq 分配器 · A08-2 → [Snapshot_Recovery §4](../03_SPEC/Workspace_Snapshot_And_Recovery_Spec.md) 事件回放接口 ·
 > A08-5 → UI_Implementation_Spec 类型对齐（补 plan.created/agent.turn.*） ·
-> A10-1 → CICD_Release §12 gate 适用条件分段 · A01-5 → 三处枚举补 submitted/timed_out
-> （Minimal + Support + ParameterSet 派生源） · A04-5 → Park_Resume §2.1 plan 结构契约 ·
-> A06-6 → Report_Export §4 状态水印表 · A09-5 → ALERT-BATCH-001 按 stop_condition 分支化。
+> A10-1 → [CICD_Release §12](../04_IMPLEMENTATION/CICD_Release.md) gate 适用条件分段 · A01-5 → 三处枚举补 submitted/timed_out
+> （Minimal + Support + ParameterSet 派生源） · A04-5 → [Park_Resume §2.1](../03_SPEC/Park_Resume_Design.md) plan 结构契约 ·
+> A06-6 → [Report_Export §4](../03_SPEC/Report_Export_Spec.md) 状态水印表 · A09-5 → ALERT-BATCH-001 按 stop_condition 分支化。
 
 ### High（6）
 
@@ -79,9 +83,9 @@ PiGateDecision.decision=`request_revision`（Support_Schema_Contracts:194、Mini
 → 修复方向：repos/ 共享副本只读（写只经 worktree）；runs/ 在 collected/baseline 状态转只读（沙箱按 run 状态查表）；mutation boundary 表格降为"路径规则的语义说明"。
 
 **A03-4 [gap] "spawn 剖面只能减不能加"无校验点，kernel 硬校验只管深度/并发不管内容**
-Roles_and_Boundaries §0 把剖面冻结挂到 Control_Kernel §5，但 §5 只校验 max_spawn_depth/max_concurrent_subagents（:98-110）；全库无"子代理 allowed_tools ⊆ canonical 剖面"的谓词。
+[Roles_and_Boundaries §0](../02_ARCHITECTURE/Roles_and_Boundaries.md) 把剖面冻结挂到 [Control_Kernel §5](../02_ARCHITECTURE/Control_Kernel.md)，但 §5 只校验 max_spawn_depth/max_concurrent_subagents（:98-110）；全库无"子代理 allowed_tools ⊆ canonical 剖面"的谓词。
 场景：coordinator spawn worker 时传入超集工具（含 baseline.update），深度/并发校验通过，越权剖面生效。
-→ 修复方向：kernel spawn 校验补第三项：allowed_tools ⊆ role canonical profile（canonical 剖面表本身已存在于 Roles_and_Boundaries §0）。
+→ 修复方向：kernel spawn 校验补第三项：allowed_tools ⊆ role canonical profile（canonical 剖面表本身已存在于 [Roles_and_Boundaries §0](../02_ARCHITECTURE/Roles_and_Boundaries.md)）。
 
 **A05-2 [bypass] floor 表不覆盖 rSHUD 物理后处理与整个 AutoSHUD，降级申报旁路对这些路径仍成立**
 floor 表只含 SHUD C++ + 参数文件 + `rSHUD/R/*read*`（Scientific_Change_Gating:27-45）；WaterBalance.R、PET.R 不匹配 `*read*`，AutoSHUD 零条目——而 Sub_iSoil_*.R / Step3_BuidModel.R 恰恰决定土壤水力默认参数与 landcover→Manning 映射（parameter_default/physical_equation 级）。保守兜底只针对"求解器源码路径"，R 脚本不命中。
@@ -129,8 +133,8 @@ Frontend_State_Design:160 要求 Feed 渲染 plan.created，Interaction_Model B 
 → 修复方向：以 WebSocket_Protocol 事件注册表为唯一源，UI spec 类型改为引用而非复写。
 
 **A10-1 [contradiction] 治理 eval 100% 是发布前提，但 0.8.1/0.8.2 两个版本无 LLM，通过率无从产生**
-CICD_Release §12 要求每次 release 治理/注入 100%（:191-238），§14 版本方案前两版无 LLM；Agent_Behavior_Eval §1 eval 需真实 LLM 调用。skeleton 版要么发不出、要么被迫豁免违反明文。
-→ 修复方向：发布 gate 分段——0.8.1/0.8.2 以确定性测试层为 gate，eval gate 自首个含 LLM 的 release 起强制；写进 CICD §12 的适用条件。
+[CICD_Release §12](../04_IMPLEMENTATION/CICD_Release.md) 要求每次 release 治理/注入 100%（:191-238），§14 版本方案前两版无 LLM；[Agent_Behavior_Eval §1](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md) eval 需真实 LLM 调用。skeleton 版要么发不出、要么被迫豁免违反明文。
+→ 修复方向：发布 gate 分段——0.8.1/0.8.2 以确定性测试层为 gate，eval gate 自首个含 LLM 的 release 起强制；写进 [CICD §12](../04_IMPLEMENTATION/CICD_Release.md) 的适用条件。
 
 ### Low（2）
 
@@ -145,30 +149,30 @@ CICD_Release §12 要求每次 release 治理/注入 100%（:191-238），§14 �
 > **处置状态（2026-07-02）：24/24 全部落修进 spec**——其中 4 条随 CONFIRMED 顺带修复，20 条本轮逐条落点
 > （部分为把既有机制的决策点显式写死，如 A03-5 的防线分工、A07-4 的区间外事实声明，其余为新增规则/字段）。
 >
-> 随 CONFIRMED 顺带：A05-1（Scientific_Change_Gating §1.2 + Controlled_Search §2）·
-> A02-1/A02-2（Park_Resume §2.1）· A03-6（Execution_Jobs_Runs §9.2 repos/* 只读）。
+> 随 CONFIRMED 顺带：A05-1（[Scientific_Change_Gating §1.2](../03_SPEC/Scientific_Change_Gating_Spec.md) + [Controlled_Search §2](../03_SPEC/Controlled_Search_Boundary_Spec.md)）·
+> A02-1/A02-2（[Park_Resume §2.1](../03_SPEC/Park_Resume_Design.md)）· A03-6（[Execution_Jobs_Runs §9.2](../03_SPEC/Execution_Jobs_Runs.md) repos/* 只读）。
 >
 > 其余 20 条落点速查：
-> - A01-3 → Minimal_Schemas §4：RunJob +stack_id/data_id（submit 时从 TaskCard 固化，collect 不回猜）
-> - A02-4 → Park_Resume §8：collect.lock 统一为 job 级（与 Idempotency §5 对齐）
-> - A02-5 → Control_Kernel §5.1：新颖失败预算——连续仅靠新失败签名的进展步 ≤3，超出只有实质进展能清零
-> - A02-6 → Control_Kernel §5 + Zero_Reuse_Matrix §3：spawn 硬校验注入点 = ZeroHarnessAdapter.beforeToolCall
-> - A03-5 → Preflight §4：preflight 挡计划错误；运行期越界由沙箱路径层拦（job 进程继承同一约束）
-> - A04-1 → Report_Review §4：evidence_level 由 refs 目标对象派生上限，自填高于上限即拒
-> - A04-2 → Context_Trust §2/§5.1：T1 note 内嵌 T4 定界片段不随 accept 洗白，进摘要器前剥除
-> - A05-4 → Scientific_Change_Gating §1.1：output_semantics 入 floor 值域 + floor_categories 集合防类别被枚举序吞
-> - A05-5 → Theory_To_Code_Governance §3：五个 *_review 态推进仅非 agent principal 可触发
-> - A07-4 → Domain_CLI §5.2：加速线（db4ccdb）在区间外为显式事实，采纳必须走 bump 流程 + RELTOL 探针
-> - A07-5 → Domain_CLI §5.4：回流触发确定性化——diff 触及契约面路径 → CI 强制 fixture 或 cli-impact:none 声明
-> - A07-6 → Domain_CLI §2.1：run 输入 copy-in 隔离，ic.update 不回写源输入，inputs_digest 幂等保住
-> - A08-3 → Snapshot §2：latest_seq 必填 + 事件总线临界区读取 + ndjson 裁剪不越最新 snapshot
-> - A08-4 → Notification §5 + Idempotency §4：target_id 映射统一（critical_failure → error_id）+ 24h 风暴抑制
-> - A08-6 → Scientific_Change_Gating §4：calibration 复核 gate 由派生 analysis_mode 确定性触发，非叙事检测
-> - A09-2 → Observability §2.2：DuckDB 失败定死 degraded（可重建、不在关键路径）
-> - A09-3 → Alerting §2 注：2×=UI exceeded / 3×=alert，有意两级非双写，约束 alert 档 ≥ UI 档
-> - A09-6 → Alerting §2 注：RSS 分母按进程类型解析（容器 limit / RunJob.resources / 服务配置项），解析不到即 not_applicable
-> - A10-2 → Agent_Behavior_Eval §3/§6：单轮 5/5 降格为冒烟信号，release 判据 = 7 天滚动窗口累计 0 失败；治理类禁减 repeats
-> - A10-3 → Agent_Behavior_Eval §3：语义断言强制改写为确定性代理（子串/trace 事实），残余显式交 Reviewer/PI
+> - A01-3 → [Minimal_Schemas §4](../03_SPEC/Minimal_Schemas.md)：RunJob +stack_id/data_id（submit 时从 TaskCard 固化，collect 不回猜）
+> - A02-4 → [Park_Resume §8](../03_SPEC/Park_Resume_Design.md)：collect.lock 统一为 job 级（与 [Idempotency §5](../03_SPEC/Idempotency_Concurrency_Locking_Spec.md) 对齐）
+> - A02-5 → [Control_Kernel §5.1](../02_ARCHITECTURE/Control_Kernel.md)：新颖失败预算——连续仅靠新失败签名的进展步 ≤3，超出只有实质进展能清零
+> - A02-6 → [Control_Kernel §5](../02_ARCHITECTURE/Control_Kernel.md) + [Zero_Reuse_Matrix §3](../02_ARCHITECTURE/Zero_Reuse_Matrix.md)：spawn 硬校验注入点 = ZeroHarnessAdapter.beforeToolCall
+> - A03-5 → [Preflight §4](../03_SPEC/Preflight_And_Mutation_Boundary_Spec.md)：preflight 挡计划错误；运行期越界由沙箱路径层拦（job 进程继承同一约束）
+> - A04-1 → [Report_Review §4](../03_SPEC/Report_Review_And_Evidence_Lineage_Spec.md)：evidence_level 由 refs 目标对象派生上限，自填高于上限即拒
+> - A04-2 → [Context_Trust §2](../03_SPEC/Context_Trust_And_Injection_Spec.md)/§5.1：T1 note 内嵌 T4 定界片段不随 accept 洗白，进摘要器前剥除
+> - A05-4 → [Scientific_Change_Gating §1.1](../03_SPEC/Scientific_Change_Gating_Spec.md)：output_semantics 入 floor 值域 + floor_categories 集合防类别被枚举序吞
+> - A05-5 → [Theory_To_Code_Governance §3](../03_SPEC/Theory_To_Code_Governance_Spec.md)：五个 *_review 态推进仅非 agent principal 可触发
+> - A07-4 → [Domain_CLI §5.2](../03_SPEC/Domain_CLI_Spec.md)：加速线（db4ccdb）在区间外为显式事实，采纳必须走 bump 流程 + RELTOL 探针
+> - A07-5 → [Domain_CLI §5.4](../03_SPEC/Domain_CLI_Spec.md)：回流触发确定性化——diff 触及契约面路径 → CI 强制 fixture 或 cli-impact:none 声明
+> - A07-6 → [Domain_CLI §2.1](../03_SPEC/Domain_CLI_Spec.md)：run 输入 copy-in 隔离，ic.update 不回写源输入，inputs_digest 幂等保住
+> - A08-3 → [Snapshot §2](../03_SPEC/Workspace_Snapshot_And_Recovery_Spec.md)：latest_seq 必填 + 事件总线临界区读取 + ndjson 裁剪不越最新 snapshot
+> - A08-4 → [Notification §5](../03_SPEC/Notification_Design.md) + [Idempotency §4](../03_SPEC/Idempotency_Concurrency_Locking_Spec.md)：target_id 映射统一（critical_failure → error_id）+ 24h 风暴抑制
+> - A08-6 → [Scientific_Change_Gating §4](../03_SPEC/Scientific_Change_Gating_Spec.md)：calibration 复核 gate 由派生 analysis_mode 确定性触发，非叙事检测
+> - A09-2 → [Observability §2.2](../03_SPEC/Observability_Monitoring_Spec.md)：DuckDB 失败定死 degraded（可重建、不在关键路径）
+> - A09-3 → [Alerting §2](../03_SPEC/Alerting_Thresholds_Spec.md) 注：2×=UI exceeded / 3×=alert，有意两级非双写，约束 alert 档 ≥ UI 档
+> - A09-6 → [Alerting §2](../03_SPEC/Alerting_Thresholds_Spec.md) 注：RSS 分母按进程类型解析（容器 limit / RunJob.resources / 服务配置项），解析不到即 not_applicable
+> - A10-2 → [Agent_Behavior_Eval §3](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)/§6：单轮 5/5 降格为冒烟信号，release 判据 = 7 天滚动窗口累计 0 失败；治理类禁减 repeats
+> - A10-3 → [Agent_Behavior_Eval §3](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)：语义断言强制改写为确定性代理（子串/trace 事实），残余显式交 Reviewer/PI
 
 | ID | 严重度 | 发现 | 关键证据 |
 |---|---|---|---|
@@ -214,10 +218,10 @@ CICD_Release §12 要求每次 release 治理/注入 100%（:191-238），§14 �
 | 越权表述写成叙述句绕过 assertion | 稻草人：spec 明示 MVP 不承诺逐句回溯，主张本身没这么强 |
 | draft pi_decision note 洗白通道 | pi_decision note 只能由 PI decision flow 产生（created_by:"pi" 硬约束 + endpoint 权限） |
 | lineage 强制推迟 Phase 5 有空窗 | 报告子系统整体 Phase 5 才上线，上线即自带阻断 validator，无空窗 |
-| 手写 metrics.yaml 伪造 T2 | Artifact_Registry §4：进证据位需 evidence_usable 链（registered by collect/CLI），手写文件不入链 |
+| 手写 metrics.yaml 伪造 T2 | [Artifact_Registry §4](../03_SPEC/Artifact_Registry_Spec.md)：进证据位需 evidence_usable 链（registered by collect/CLI），手写文件不入链 |
 | AutoSHUD 15 变量契约丢 eleveta | 15 变量是 Step4 校验下限非输出全集，SHUD 默认输出含 eleveta |
 | 磁盘满仍可提交 job | preflight disk_free_threshold_passed 是确定性 submit 准入项 |
-| closure 分类器打破"确定性分类"主张 | Error_Handling §5.1 范围限定 provider 错误；closure_verdicts 显式标注 LLM advisory 且隔离 |
+| closure 分类器打破"确定性分类"主张 | [Error_Handling §5.1](../03_SPEC/Error_Handling_Spec.md) 范围限定 provider 错误；closure_verdicts 显式标注 LLM advisory 且隔离 |
 | 治理 eval Phase 2-5 零保护 | 场景随依赖对象出现而增补是明文激活规则，非一次性前置 |
 | Zero 复用等级两文档相反 | [E]=Extend（框架上扩展）与 [M]=需改造语义不同轴，每行已写明扩展内容 |
 | MemoryNote 枚举与 Zero 矩阵不相交 | Zero 矩阵是迁移示意非 canonical 源，schema 以 Minimal_Schemas 为准已声明 |

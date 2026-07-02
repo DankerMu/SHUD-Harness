@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [observability-metrics]
+---
+
 # Observability and Monitoring Spec
 
 **状态**：v0.8.2 新增 HIGH 规格  
@@ -179,7 +184,7 @@ agent 的行为健康与 job/API 健康是两回事，需要独立指标：
 | `closure_verdicts_total` | counter | 按 finish/continue/block 分布（advisory 分类器输出） |
 | `task_llm_cost_usd` | histogram | 按 task/mode，成本分布 |
 
-这些指标是行为漂移的一线信号：`agent_retry_total` 或 `no_progress` 突增而代码未变 → 先查 model/prompt 是否变化（Runbook §11）。
+这些指标是行为漂移的一线信号：`agent_retry_total` 或 `no_progress` 突增而代码未变 → 先查 model/prompt 是否变化（[Runbook §11](../04_IMPLEMENTATION/Operations_Runbook.md)）。
 
 ---
 

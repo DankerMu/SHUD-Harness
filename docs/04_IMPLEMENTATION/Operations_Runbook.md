@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [operations-runbook]
+---
+
 # Operations Runbook
 
 **状态**：v0.8.2 HIGH 新增实施手册  

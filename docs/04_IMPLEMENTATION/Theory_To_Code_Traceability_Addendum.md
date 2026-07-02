@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Theory-to-Code Traceability Addendum
 
 **状态**：建议补到 `Traceability_Matrix.md`  

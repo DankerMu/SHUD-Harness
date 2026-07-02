@@ -1,3 +1,7 @@
+---
+status: living
+---
+
 # 分阶段开发路线图
 
 **原则：** 代码跟着 spec 走，spec 是权威源。近百份文档不同时激活——每个阶段只激活该阶段代码直接依赖的文档。阶段切换时，基于实现经验对齐下一阶段的 spec。
@@ -6,6 +10,12 @@
 ① bug 级修正（错误事实、自相矛盾）；② ADR 级例外（新增能力先立 ADR 说明为何必须先写 spec）。
 其余设计演进跟着代码走——实现期的决策直接改 canonical 规范并在 PR 中说明，不再开新文档。
 下一个制品是 Week 1 代码（含 ADR-0001 的策略门 spike，验收标准见 Phased_Plan Week 1）。
+**例外批次（2026-07-02，PI 授权）**：吸收觉察流 harness 工程评审 G2–G7——拒绝即教学 remediation
+契约（Support_Schema_Contracts §3 / Preflight §2 / Control_Kernel §5）、Reviewer 植入缺陷校准
+（Behavior_Eval EVAL-REV-* + 漂移度量）、记忆/技能周期清扫（Memory_Skills_Lite §9）、护栏
+authority/capability 分类与换代减重（Control_Kernel §5.2 + ADR-0001 触发器 6）、工具面治理约定
+（Control_Kernel §5.3）、模型路由演进备注（Minimal_Schemas）。G1（时间节省度量）PI 裁定不采纳：
+反事实基线（人工研究耗时）不可得。
 
 **依据：** 本文档基于全部文档的交叉引用和依赖链深度分析生成。
 

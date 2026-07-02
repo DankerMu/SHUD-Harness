@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [dependency-versioning]
+---
+
 # Dependency Versioning Policy
 
 **状态**：v0.8.2 MEDIUM 新增实施规范  

@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [closure-determinism]
+---
+
 # Agent 架构
 
 **状态：** P0 设计规范  

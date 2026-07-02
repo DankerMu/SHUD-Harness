@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [log-aggregation]
+---
+
 # Log Aggregation Spec
 
 **状态**：v0.8.2 新增规范  

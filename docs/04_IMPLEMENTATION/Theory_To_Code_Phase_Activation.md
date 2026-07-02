@@ -1,3 +1,7 @@
+---
+status: demoted
+---
+
 # Theory-to-Code Phase Activation Addendum
 
 **状态**：已并入主账（2026-07-02，见 Phased_Spec_Activation "Theory-to-Code 卫星账并入"节）；本文降为细节附录，激活时机以主账为准。  

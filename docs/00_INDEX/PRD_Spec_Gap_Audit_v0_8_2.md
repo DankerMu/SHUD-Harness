@@ -1,3 +1,7 @@
+---
+status: snapshot
+---
+
 # PRD / Spec Gap Audit v0.8.2
 
 **状态**：新增审查补充  

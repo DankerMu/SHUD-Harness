@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # User、Session 与 Audit Schema
 
 **状态：** v0.8.1 P1 补充规范  
@@ -92,7 +96,7 @@ interface AgentIdentity {
 }
 ```
 
-`repo_explorer` 的 `allowed_tools` 必须限制为只读工具，例如 file read/search、git inspect 和只读 shell 诊断。`denied_actions` 至少包含 write/edit、RunJob submit、patch apply、baseline update、memory status escalation（draft→accepted；MemoryNote 无 "verified" 状态，权威枚举见 Minimal_Schemas §9）。
+`repo_explorer` 的 `allowed_tools` 必须限制为只读工具，例如 file read/search、git inspect 和只读 shell 诊断。`denied_actions` 至少包含 write/edit、RunJob submit、patch apply、baseline update、memory status escalation（draft→accepted；MemoryNote 无 "verified" 状态，权威枚举见 [Minimal_Schemas §9](Minimal_Schemas.md)）。
 
 ## 6. 验收标准
 

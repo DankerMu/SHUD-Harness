@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Controlled Search Boundary Spec
 
 **状态**：v0.8.3 P1 补充规范  

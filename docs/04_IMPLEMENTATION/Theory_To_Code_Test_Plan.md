@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [t2c-test-plan]
+---
+
 # Theory-to-Code Test Plan
 
 **状态**：v0.8.3 P1 测试补充  

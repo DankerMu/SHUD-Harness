@@ -1,7 +1,11 @@
+---
+status: frozen
+---
+
 # Theory-to-Code Support Schemas
 
 **状态**：已定性为投影附录（2026-07-02）——T2C 对象与 CommonSupportFields 的字段事实源 =
-`Support_Schema_Contracts.md`（CANONICAL_CONTRACTS §17），本文仅作 T2C 视角的语义汇总，勿手改字段。  
+`Support_Schema_Contracts.md`（[CANONICAL_CONTRACTS §17](../00_INDEX/CANONICAL_CONTRACTS.md)），本文仅作 T2C 视角的语义汇总，勿手改字段。  
 **目标**：集中列出本补充涉及的 support schema，便于后续 Zod 实现与 schema drift 控制。
 
 ## 1. Schema list

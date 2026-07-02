@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Theory-to-Code Governance Spec
 
 **状态**：v0.8.3 P0 补充规范  
@@ -145,7 +149,7 @@ interface TheoryToCodeBundle {
 - **3 个决策选项 + 1 个推荐标记 + 自由输入通道**。选项是该 gate 的真实分支（如 theory_review：
   ① 通过，进入 derivation_review；② 要求修订假设 X；③ 升级为 PI 问题），每项附一句后果说明；
   **推荐项必须带理由与 evidence refs**（指向 bundle 材料）——无 refs 不得标推荐。
-- **推荐 ≠ 预选**：选项等视觉权重、无默认选中（与 UI_Implementation_Spec §4.4 等权重规则同源），
+- **推荐 ≠ 预选**：选项等视觉权重、无默认选中（与 [UI_Implementation_Spec §4.4](UI_Implementation_Spec.md) 等权重规则同源），
   推荐仅以 badge 呈现；自由输入作为第 4 选项，内容进 decision comment。
 - **审计**：决策卡全文（选项、推荐、理由）与最终选择一并落 AuditEvent——复盘时可见
   "当时给了什么选项、推荐了什么、人选了什么"。

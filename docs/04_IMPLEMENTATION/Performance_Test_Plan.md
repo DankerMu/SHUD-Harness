@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Performance Test Plan
 
 **状态**：v0.8.2 新增实施测试计划  

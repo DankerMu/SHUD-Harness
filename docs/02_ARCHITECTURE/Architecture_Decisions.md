@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # 项目定位：SHUD-Harness Lite MVP
 
 ## 1. 定位调整

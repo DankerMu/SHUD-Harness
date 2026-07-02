@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Phase-by-Phase Test Plan
 
 **状态：** v0.8.1 测试计划补充  

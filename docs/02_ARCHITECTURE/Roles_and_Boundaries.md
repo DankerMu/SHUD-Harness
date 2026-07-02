@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [agent-role-enum]
+---
+
 # 角色边界：PI 主导，Agent 协调执行
 
 > **本文件是 Agent 角色集合的唯一权威定义（canonical source）。**
@@ -26,8 +31,8 @@ coordinator | repo_explorer | worker | coder | reviewer
 
 子代理工具剖面在 spawn 时**冻结**（对标 hermes-agent 吸收）：spawn 参数只能在角色 canonical
 剖面基础上**删减**工具、不能增补；spawn 深度、并发上限与**剖面子集关系**（allowed_tools ⊆ canonical 剖面）
-三项均由 kernel 硬校验（见 Control_Kernel §5，对抗审查 A03-4 补第三项）。
-repo_explorer/reviewer 的"只读"由沙箱按角色执行模式强制（Execution_Jobs_Runs §9.2.1），非 prompt 约定。
+三项均由 kernel 硬校验（见 [Control_Kernel §5](Control_Kernel.md)，对抗审查 A03-4 补第三项）。
+repo_explorer/reviewer 的"只读"由沙箱按角色执行模式强制（[Execution_Jobs_Runs §9.2.1](../03_SPEC/Execution_Jobs_Runs.md)），非 prompt 约定。
 
 **明确不设的角色**（判据不满足，防止角色膨胀）：
 
@@ -195,7 +200,7 @@ Reviewer 可检查：
 - numerical scheme 是否列出 conservation/stability expectation；
 - implementation mapping 是否覆盖 equation_id 和 code target；
 - verification cases 是否覆盖关键风险；
-- verification case 的 expected_result_source 与 pass_criteria 可求值性（见 Verification_Case_Spec §4.1）。
+- verification case 的 expected_result_source 与 pass_criteria 可求值性（见 [Verification_Case_Spec §4.1](../03_SPEC/Verification_Case_Spec.md)）。
 
 Reviewer 不替代 PI 判断科学假设是否成立。
 

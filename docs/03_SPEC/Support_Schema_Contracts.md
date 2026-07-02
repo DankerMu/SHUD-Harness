@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [support-schemas, t2c-bundle-schemas]
+---
+
 # Support Schema Contracts
 
 **状态：** v0.8.1 P0 补充规范  
@@ -127,7 +132,12 @@ interface ErrorRecord {
   user_message: string;
   evidence_refs: string[];
   retryable: boolean;
-  recommended_next_actions: string[];
+  recommended_next_actions: string[];  // 面向人展示的自由文本建议
+  remediation?: {                      // 拒绝即教学（harness 评审 G2）：给 agent 的机器可行动指引
+    next_action: "escalate_to_pi" | "open_gate" | "adjust_scope" | "fix_and_retry" | "abort";
+    hint: string;                      // 一句可直接行动的下一步（如何变合规 / 走哪个 gate）
+    ref?: string;                      // 规则出处：spec §号 / gate id / preflight check_id
+  };
   created_at: string;
 }
 ```

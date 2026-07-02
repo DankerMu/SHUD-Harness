@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Operational UX Testing Addendum
 
 **状态：** v0.8.1 测试补充  

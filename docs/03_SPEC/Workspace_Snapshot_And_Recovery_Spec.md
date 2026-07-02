@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [event-replay-snapshot-recovery]
+---
+
 # Workspace Snapshot 与 Recovery 规范
 
 **状态：** v0.8.1 P1 补充规范  
@@ -34,7 +39,7 @@ interface TaskSnapshot {
 ```
 
 **seq 一致性契约（对抗审查 A08-3）**：snapshot 生成与 `latest_seq` 读取在事件总线同一临界区完成
-（WebSocket_Protocol §2.1 的单一分配点），恢复侧从 `latest_seq + 1` replay 即无缝。
+（[WebSocket_Protocol §2.1](WebSocket_Protocol.md) 的单一分配点），恢复侧从 `latest_seq + 1` replay 即无缝。
 events.ndjson 裁剪规则：只允许裁到**最新 snapshot 的 latest_seq** 为止——先出新 snapshot，
 才可裁其之前的事件，保证 `[latest_seq + 1, now]` 永远可回放；replay gap（§4）只在
 "请求的 seq 早于全部现存 snapshot"时出现。

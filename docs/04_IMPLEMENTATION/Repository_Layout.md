@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # 仓库结构 (TypeScript 全栈，基于 Zero)
 
 ## 1. 代码仓库结构

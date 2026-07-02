@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # UI 实现规格
 
 **状态：** P1 设计规范
@@ -306,7 +310,7 @@ interface ResultsPanelProps {
 | SensitivityHeatmap | 参数 × 指标 矩阵；cell 颜色用 heatmap 渐变；cell 内显示数值 `text-xs`；失败 cell 显示 `✕` + `gray-300` 背景 |
 | NextSuggestedAction | 白底卡片；编号列表。**语义 = 建议即草稿**：点击任一项将其展开为可编辑文本填入 PIInputBar，PI 确认发送后才生效——面板不直接触发执行（无隐式动作，所有指令过输入框留审计事件）。底部按钮：`填入输入框` (primary) / `终止任务` (ghost error)；"修改方案"即填入后编辑，不设单独按钮 |
 | ReportExportButton | v0.8.1；report 面板右上角；下拉菜单 `Export HTML` / `Export Markdown`；draft 状态旁显示 `⚠ 含 draft 水印` |
-| ReviewDecisionCard | T2C review 态推进卡（Theory_To_Code_Governance §5.0）：3 选项卡片 + 推荐 badge + 自由输入；选项等视觉权重、无默认选中；推荐项内联理由与 evidence refs；提交即落 AuditEvent |
+| ReviewDecisionCard | T2C review 态推进卡（[Theory_To_Code_Governance §5.0](Theory_To_Code_Governance_Spec.md)）：3 选项卡片 + 推荐 badge + 自由输入；选项等视觉权重、无默认选中；推荐项内联理由与 evidence refs；提交即落 AuditEvent |
 | PIDecisionPanel | v0.8.1；审批卡片，黄色左边框 4px（高风险 gate 红色系）。**渲染条件**：`TaskCard.status == awaiting_pi` 或存在 pending PiGate 时才渲染决策按钮组；任务运行中只渲染 `Pause / Park`（效果图"batch 83% 时常驻 Continue/Approve"禁止——运行中不存在可批之物）。**按钮权重**：approve / revision / reject 三按钮等视觉权重（同尺寸同字重，仅色相区分），不得让 approve 独占 primary 样式。**证据必经**：高风险 gate（Theory-to-Code 或 semantic_level 高危）中 approve 在证据入口（EvidenceReport / 验证链）被打开之前禁用并提示"请先查看证据"；打开行为记审计事件 |
 
 ### 4.5 StatusBar

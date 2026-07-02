@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [llm-error-degradation]
+---
+
 # 错误处理规范
 
 **状态：** P1 设计规范  
@@ -52,8 +57,16 @@ error:
     - "检查 input project 文件路径"
     - "查看最后 100 行 stderr"
   retryable: true
+  remediation:                     # 拒绝即教学（harness 评审 G2）：给 agent 的结构化下一步
+    next_action: fix_and_retry     # escalate_to_pi | open_gate | adjust_scope | fix_and_retry | abort
+    hint: "检查 .cfg.para 中 project 路径拼写后重试同一命令"
+    ref: "Domain_CLI_Spec §3"
   created_at: ...
 ```
+
+字段事实源 = [Support_Schema_Contracts §3](Support_Schema_Contracts.md)。`recommended_next_actions`
+面向人展示，`remediation` 面向 agent 行动；策略门/preflight/权限类拒绝（`permission_error`、
+`schema_error`）**必填** remediation——类别到默认 `next_action` 的完整映射表实现期在错误工厂中定义。
 
 ## 4. RunJob 失败规则
 
@@ -89,7 +102,7 @@ LLM 故障只影响 agent loop，**不影响运行中 RunJob**——job 是独�
 |---|---|
 | rate_limit / timeout / server_error | 指数退避重试 ≤2；仍失败 → TaskCard blocked，ErrorRecord(retryable=true)，工程师/PI 可一键恢复（恢复 = 从 plan_cursor 重新进入当前阶段） |
 | quota_exhausted / auth_error | 不重试；TaskCard blocked，critical NotificationRecord（此时 WebSocket 之外的通知通道是唯一可达路径） |
-| context_overflow（请求超出上下文窗口） | 不原样重试；按 Context_Trust §5 预算**确定性重组**上下文后重试一次（禁止用 LLM 压缩兜底），仍超限 → blocked + 工程师检查组装配置 |
+| context_overflow（请求超出上下文窗口） | 不原样重试；按 [Context_Trust §5](Context_Trust_And_Injection_Spec.md) 预算**确定性重组**上下文后重试一次（禁止用 LLM 压缩兜底），仍超限 → blocked + 工程师检查组装配置 |
 | model_not_found / model_deprecated | 不重试、**不静默换模型**；TaskCard blocked + critical 通知。换 model 是 StackLock.llm 变更，须 PI/工程师确认并触发 behavior eval（见 Dependency_Versioning_Policy） |
 | mid-turn 崩溃（回复到一半进程死亡） | 该轮丢弃；恢复按 Workspace_Snapshot 的 service restart recovery：领域对象状态为准，从 plan_cursor 重放当前步骤（LLM 步骤重放=重新采样，可接受，因为副作用都有幂等保护） |
 

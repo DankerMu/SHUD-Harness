@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Test Fixtures and Command Matrix
 
 **状态：** v0.8.1 测试 fixture 补充  

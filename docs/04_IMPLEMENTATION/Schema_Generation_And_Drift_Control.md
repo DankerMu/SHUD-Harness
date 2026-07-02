@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [schema-drift-policy]
+---
+
 # Schema Generation 与 Drift Control
 
 **状态：** v0.8.1 P1 实施补充  

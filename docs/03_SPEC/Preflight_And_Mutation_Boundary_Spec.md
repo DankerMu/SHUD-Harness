@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [search-preflight-mutation-boundary, preflight-guard-schemas]
+---
+
 # Preflight and Mutation Boundary Spec
 
 **状态**：v0.8.3 P1 补充规范  
@@ -35,8 +40,14 @@ interface PreflightCheck {
   name: string;
   status: "pass" | "fail" | "warning" | "not_applicable";
   details: string;
+  remediation?: string;   // fail 时必填：如何让本项变 pass，或该走哪个 gate（harness 评审 G2）
 }
 ```
+
+**拒绝即教学（harness 评审 G2，2026-07-02）**：`status=fail` 的 check 必须填 `remediation`——
+一句机器可行动的指引（"把 X 移出 files_changed 或为 Y 开 PiGate"），不是复述失败原因。
+被 preflight 拦下而不知道下一步的 agent 只会重试或绕行；错误信息是 agent 的教学面
+（对标 OpenAI harness 实践：lint 报错内嵌修复指引）。`blocking_reasons` 与 fail check 一一对应。
 
 ## 3. 必须检查项
 
@@ -73,7 +84,7 @@ else:
 
 **Preflight 是 submit 前的门，不是运行期防线（对抗审查 A03-5）**：job 运行期对 baseline / raw /
 collected 的写入由沙箱路径策略拦截——执行器 spawn 的 job 进程继承与 agent 命令相同的路径约束
-（Execution_Jobs_Runs §9.2 / §9.2.1；local 后端以权限位/只读目录落实，docker 后端以 ro bind mount 落实）。
+（[Execution_Jobs_Runs §9.2](Execution_Jobs_Runs.md) / §9.2.1；local 后端以权限位/只读目录落实，docker 后端以 ro bind mount 落实）。
 分工：preflight 挡计划性错误（提交前可判定的），路径层挡运行期越界（提交后才发生的）。
 
 ## 5. 验收标准

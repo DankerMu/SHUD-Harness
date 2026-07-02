@@ -106,7 +106,7 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 ## 项目本地适配（living 文件，按需创建）
 
 - `openspec/project-profile.md` — workflow 适配（入口/契约/风险轴）；`subagent-workflow` 首次运行可自动 bootstrap。
-- `openspec/glossary.md` — 领域 ubiquitous language 单一来源；由 `grill-with-docs` / `improve-codebase-architecture` 维护。
+- `openspec/glossary.md` — 领域 ubiquitous language 单一来源（已创建：中英术语映射，grep 前先查两态关键词）；由 `grill-with-docs` / `improve-codebase-architecture` 维护。
 - `docs/adr/NNNN-slug.md` — 长期架构决策账本（三门槛：难回退 + 无背景会困惑 + 真实权衡）。
 
 ## 反熵约定

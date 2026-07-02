@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [artifact-registry]
+---
+
 # Artifact Registry 规范
 
 **状态：** v0.8.1 P0 补充规范  

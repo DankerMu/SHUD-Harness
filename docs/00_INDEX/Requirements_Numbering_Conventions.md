@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [requirements-numbering]
+---
+
 # Requirements Numbering Conventions
 
 **状态**：新增 PRD 规范  

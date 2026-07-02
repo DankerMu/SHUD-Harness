@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [language-guard, reviewer-checklist]
+---
+
 # EvidenceReport 生成规范
 
 **状态：** P1 设计规范  
@@ -168,7 +173,7 @@ Language guard 是**枚举短语的确定性 lint**，必须清楚它能做什�
 
 禁止用语清单应作为配置维护（不硬编码在实现里），发现新的越权表述模式时由 PI/工程师追加，并同步补负例测试。
 结构化兜底：calibration 语义的 assertion 带派生字段 `analysis_mode`，其 assertion_type 受确定性限制
-（见 Report_Review_And_Evidence_Lineage §4，对抗审查 A05-3）。
+（见 [Report_Review_And_Evidence_Lineage §4](Report_Review_And_Evidence_Lineage_Spec.md)，对抗审查 A05-3）。
 
 ## 6. 证据等级
 
@@ -270,7 +275,7 @@ draft
 一律只能由 PI 或授权用户经 decision/archive endpoint 设置，API 层对 agent principal 返回 403；
 agent 最多把报告推进到 `awaiting_pi`。原规则只约束 accepted，留下 agent 单方面以
 rejected/archived 终结报告、绕过 PI 审阅的通道。`archived` 仅对已达 accepted|rejected 的报告可用
-（Minimal_Schemas §7 状态流转），操作者与时间记录进 decision_history。
+（[Minimal_Schemas §7](Minimal_Schemas.md) 状态流转），操作者与时间记录进 decision_history。
 
 ## 10. 报告元数据
 

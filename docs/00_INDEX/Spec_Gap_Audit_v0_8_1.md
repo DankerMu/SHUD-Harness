@@ -1,3 +1,7 @@
+---
+status: snapshot
+---
+
 # SHUD-Harness v0.8.1 规格缺口审查
 
 **状态：** 规格审查补充  

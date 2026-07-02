@@ -1,9 +1,13 @@
+---
+status: living
+---
+
 # SHUD-Harness 文档主索引
 
 > **版本**: v0.8.3 (2026-04-27)
 > **技术栈**: TypeScript 全栈 (Bun + Hono + React)，基于 Zero Agent Runtime 扩展
 > **交互模式**: Web-first，实时对话 + 日志流 + PI 审批 + 报告阅读
-> **文档总量**: 4 个目录，97 份规范文档 + adr/ 决策账本 1 篇
+> **文档总量**: 5 个正式目录 104 份 + 根 2 份（激活账本 + 非规范快照）+ adr/ 决策账本 1 篇 = 107 份
 
 ---
 
@@ -17,6 +21,22 @@
 | [`../SPEC_v0.8_Final.md`](../SPEC_v0.8_Final.md) | 非规范导读快照（v0.8 定稿全景；不随修复更新，冲突以 canonical 为准） |
 | [`CANONICAL_CONTRACTS.md`](CANONICAL_CONTRACTS.md) | Schema / API / Event / Path / Artifact / Lock 的唯一事实源索引 |
 | [`../Phased_Spec_Activation.md`](../Phased_Spec_Activation.md) | **开发路线图** — 6 阶段 Spec 激活 + 交付摘要 + 测试出口 + 对齐检查点 |
+
+---
+
+## 机器可读元数据约定（2026-07-02）
+
+每份正式文档头部带 YAML frontmatter，agent 用 `head -5` 即可判定文档地位，无需解析散文：
+
+- `status: frozen` — 冻结规格面，仅收 bug 级修正与 ADR 例外（规则见 Phased_Spec_Activation 头部）
+- `status: living` — 导航与账本层（本索引、CANONICAL_CONTRACTS、激活账本），随事实更新
+- `status: snapshot` — 一次性审计/审查/代码现实报告，不随后续修复更新
+- `status: demoted` — 降级参考（SPEC_v0.8_Final、Research_Object_Model、T2C_Phase_Activation），冲突以 canonical 为准
+- `status: accepted` — ADR 已采纳
+- `canonical_for: [...]` — 仅权威源持有，键与 [CANONICAL_CONTRACTS](CANONICAL_CONTRACTS.md) 条目对应
+- 激活阶段**不入** frontmatter：以 [Phased_Spec_Activation](../Phased_Spec_Activation.md) 为唯一激活账本，避免双源漂移
+
+术语中英映射（grep 前先查，解决中文叙述/英文标识符双态检索）：[`openspec/glossary.md`](../../openspec/glossary.md)
 
 ---
 

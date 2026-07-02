@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Data Package 与 Retention 规范
 
 **状态：** v0.8.1 P2 补充规范  

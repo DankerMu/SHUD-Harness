@@ -1,3 +1,7 @@
+---
+status: snapshot
+---
+
 # Theory-to-Code 合并地图
 
 **状态**：v0.8.3 merge guide  

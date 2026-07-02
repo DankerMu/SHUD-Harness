@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [requirements-catalog]
+---
+
 # SHUD-Harness Requirements Catalog
 
 **状态**：v0.8.3 PRD 补充（含 Theory-to-Code addendum）  

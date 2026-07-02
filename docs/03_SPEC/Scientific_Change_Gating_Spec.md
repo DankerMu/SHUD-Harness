@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [scientific-semantic-levels]
+---
+
 # Scientific Change Gating Spec
 
 **状态**：v0.8.3 P0 补充规范  
@@ -69,7 +74,7 @@ floors:
 6. floor 值域是 §1 全枚举（含 output_semantics）。max() 按枚举序取 effective_level 定 gate 强度；
    同时产出 `floor_categories`（命中的全部 floor 值集合）记入 ChangeRequest 并显示在 gate 卡片——
    命中 output_semantics 时即使 effective_level 被更高 floor 覆盖，bundle 仍须含 output registry
-   patch 项（Preflight §1 output_semantics 行）。类别不因枚举序被吞（对抗审查 A05-4）。
+   patch 项（[Preflight §1](Preflight_And_Mutation_Boundary_Spec.md) output_semantics 行）。类别不因枚举序被吞（对抗审查 A05-4）。
 
 ## 1.2 参数语义下限（无 ChangeRequest 的 search 任务）
 
@@ -87,9 +92,9 @@ parameters:
 ```
 
 规则：AnalysisPlan preflight 对 `parameters` / `parameter_sets` 的全部键求
-`parameter_effective_level = max(floor(p))`，高风险时按 §2 与 Controlled_Search §2 要求 bundle；
+`parameter_effective_level = max(floor(p))`，高风险时按 §2 与 [Controlled_Search §2](Controlled_Search_Boundary_Spec.md) 要求 bundle；
 该求值与 files_changed floor 相互独立、取并集生效。"hidden numerical tolerance 需 PI gate"
-（Preflight §1 mutation boundary）由此获得确定性执行点。
+（[Preflight §1](Preflight_And_Mutation_Boundary_Spec.md) mutation boundary）由此获得确定性执行点。
 
 ## 2. Gate matrix
 
@@ -128,7 +133,7 @@ interface ChangeRequestScientificAdditions {
 - VerificationCase waived；
 - failed verification 仍想进入 search；
 - 报告关联 `mode=calibration` 的 AnalysisPlan——gate 原因自动含 calibration≠validation 复核项。
-  触发条件是派生字段 `analysis_mode`（Report_Review §2，非 LLM 自填），不依赖叙事检测或 agent
+  触发条件是派生字段 `analysis_mode`（[Report_Review §2](Report_Review_And_Evidence_Lineage_Spec.md)，非 LLM 自填），不依赖叙事检测或 agent
   自愿 emit（对抗审查 A08-6）；narrative 级换述仍由 Reviewer (L) + PI 审阅兜底。
 
 ## 5. Comment required rules

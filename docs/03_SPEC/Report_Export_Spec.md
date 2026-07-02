@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Report Export 规范
 
 **状态：** v0.8.1 设计补充  

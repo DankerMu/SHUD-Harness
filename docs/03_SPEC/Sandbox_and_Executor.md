@@ -1,3 +1,8 @@
+---
+status: frozen
+canonical_for: [patch-group-commands]
+---
+
 # 沙箱、Trace 与恢复
 
 ## 1. 沙箱原则

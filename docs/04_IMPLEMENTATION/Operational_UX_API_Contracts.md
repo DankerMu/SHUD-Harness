@@ -1,3 +1,7 @@
+---
+status: frozen
+---
+
 # Operational UX API Contracts
 
 **状态：** v0.8.1 实施补充  
