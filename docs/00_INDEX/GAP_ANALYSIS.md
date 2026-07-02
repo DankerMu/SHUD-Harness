@@ -2,6 +2,9 @@
 
 > 本文写于 v0.5 设计阶段。当前权威规格为 `SPEC_v0.8_Final.md`。
 > 其中 3.4 R 环境依赖已在 v0.7 StackLock 中通过 `r_version` + `renv.lock` 解决。
+> **2026-07-02 注**: 本文"代码现实"各栏反映 2026-04-24 快照 (SHUD 9b55b0c / rSHUD d162db3 v2.2.0 / AutoSHUD 1cbec6f)。
+> 子模块现已同步至 SHUD 3aec657 / rSHUD 2b7742e (v2.5.0) / AutoSHUD f421445，
+> 当前事实以 `01_CODEBASE/` 三份报告与 `03_SPEC/Domain_CLI_Spec.md` 为准；下文已过时结论就地加注。
 
 **日期**: 2026-04-24
 **方法**: 对比 v0.5 方案设计 与 四个 repo 的实际代码探索结果
@@ -38,20 +41,20 @@ v0.5 方案设计质量很高，但它是**纯设计文档**——当前没有�
 | 有测试 | 确认: 10 个 testthat 文件 | ✅ |
 | API 名称 (readmesh → read_mesh) | 确认: 新旧两套 API 共存 | ⚠️ 设计中旧名仍出现 |
 
-**差距**: 设计中多处使用旧函数名 (`readmesh`, `readriv`)，实际代码已迁移到 snake_case (`read_mesh`, `read_river`)。`rshud-roundtrip-test` skill 需要对齐实际函数名。rSHUD v3.0 开发中，可能有进一步 API 变化。
+**差距**: 设计中多处使用旧函数名 (`readmesh`, `readriv`)，实际代码已迁移到 snake_case (`read_mesh`, `read_river`)。`rshud-roundtrip-test` skill 需要对齐实际函数名。~~rSHUD v3.0 开发中，可能有进一步 API 变化。~~（2026-07-02 注: snake_case 现代 API 已随 v2.3–v2.5.0 落地，v2.5.0 为当前稳定版）
 
 ### 2.3 AutoSHUD ← 设计假设成立, 但接口方式不同
 
 | 设计假设 | 代码现实 | 对齐度 |
 |----------|----------|--------|
-| 自动化建模流水线 | 确认: 7 步 R 脚本链 | ✅ |
+| 自动化建模流水线 | 确认: ~~7 步 R 脚本链~~（2026-07-02 注: 现实为 Step0.1 可选 + Step1-5 共 5-6 步，见 Domain_CLI_Spec §6） | ✅ |
 | 配置驱动 | 确认: `.autoshud.txt` 键值对 | ✅ |
 | 依赖 rSHUD | 确认: `shud.triangle()`, `write.mesh()` 等 | ✅ |
 | 能自动编译运行 SHUD | 确认: Step4 git clone + make + run | ✅ |
 | 多源数据支持 | 确认: HWSD/ISRIC/SSURGO + GLC/NLCD + 多个 LDAS | ✅ |
 | 版本管理 | 发现: V2→V3 过渡, tag-v2-freeze.sh | ⚠️ 设计未涉及 |
 
-**差距**: AutoSHUD 不是 R 包而是脚本集合，没有测试套件。Harness 需要把 AutoSHUD 当作"可执行脚本链"而非"可调用 API"来编排。设计中 `add-shud-output-diagnostics` skill 假设能修改 AutoSHUD，实际上 AutoSHUD 的"report"阶段比较简单。
+**差距**: AutoSHUD 不是 R 包而是脚本集合，~~没有测试套件~~（2026-07-02 注: f421445 已含 tests/ 下 6 个 acceptance/hardening 测试）。Harness 需要把 AutoSHUD 当作"可执行脚本链"而非"可调用 API"来编排。设计中 `add-shud-output-diagnostics` skill 假设能修改 AutoSHUD，实际上 AutoSHUD 的"report"阶段比较简单。
 
 ### 2.4 Zero ← 设计假设高度成立, 但细节差异存在
 
@@ -86,10 +89,11 @@ v0.5 方案设计质量很高，但它是**纯设计文档**——当前没有�
 - 设计需要明确哪些是"已有但未被 rSHUD 充分使用"
 - 哪些是"SHUD 需要新增"
 
-### 3.3 跨仓库 worktree 的实操路径未验证
+### 3.3 跨仓库 worktree 的实操路径 ~~未验证~~ ✅ 已解决
 设计假设可以为 SHUD/rSHUD/AutoSHUD 创建 git worktree。
-但这三个 repo 当前作为 SHUD-Harness 的子目录存在，不是 git submodule。
-需要确定: 是把它们改成 submodule? 还是在 episode 中 clone fresh copies?
+~~但这三个 repo 当前作为 SHUD-Harness 的子目录存在，不是 git submodule。
+需要确定: 是把它们改成 submodule? 还是在 episode 中 clone fresh copies?~~
+**2026-07-02 更新**: 三仓库 (及 zero) 已作为 git submodule 钉版本管理，repo 管理策略已定。
 
 ### 3.4 R 环境依赖 ~~未被设计覆盖~~ ✅ 已在 v0.7 解决
 rSHUD 和 AutoSHUD 都需要完整 R 环境 + 大量 R 包。
@@ -102,7 +106,7 @@ rSHUD 和 AutoSHUD 都需要完整 R 环境 + 大量 R 包。
 | 优先级 | 项目 | 原因 |
 |--------|------|------|
 | P0 | 确定 tiny benchmark fixture | 没有它, 第一个闭环无法启动 |
-| P0 | 确认 repo 管理策略 (submodule vs clone) | 影响 sandbox 设计 |
+| P0 | ~~确认 repo 管理策略 (submodule vs clone)~~ ✅ 已定 submodule | 影响 sandbox 设计 |
 | P0 | 创建 R 环境 StackLock schema 扩展 | rSHUD/AutoSHUD 强依赖 |
 | P1 | 对齐 rSHUD API 名称 | skill 脚本会调用这些函数 |
 | P1 | 盘点 SHUD 现有输出变量 vs 诊断需求缺口 | 确定 event diagnostics 范围 |
