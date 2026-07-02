@@ -105,15 +105,15 @@ One language, one repo, one team.
 
 ## 7. 推荐 Monorepo 目录结构
 
-Zero 作为根目录 submodule 管理（路径 `zero/`，与实际 repo 一致），SHUD-Harness 领域逻辑按 monorepo 分包组织：
+Zero 作为根目录 submodule 管理（路径 `zero/`，与实际 repo 一致），SHUD-Harness 领域逻辑按 monorepo 分包组织
+（包名以 [Repository_Layout](../04_IMPLEMENTATION/Repository_Layout.md) 与 [CANONICAL_CONTRACTS §1](../00_INDEX/CANONICAL_CONTRACTS.md)
+的 `packages/core + backend + frontend` 为准；2026-07-02 对齐审查 E-1 修正——原 harness-\*/apps/\* 为早期草案命名）：
 
 ```text
-zero/                         # submodule, upstream/fork Zero runtime (只读参考)
-packages/harness-core/        # SHUD-Harness 领域对象与 schema
-packages/harness-agent/       # Zero adapter 与 Coordinator runtime
-packages/harness-tools/       # SHUD/rSHUD/AutoSHUD 工具封装
-apps/web/                     # Web scientific workbench
-apps/server/                  # Hono/Bun API 与 WebSocket
+zero/                         # submodule, upstream Zero runtime (只读参考；fork 时机 = M1 grill 议程)
+packages/core/                # SHUD-Harness 领域对象与 schema（含 role→tool_id 映射、工具封装模块）
+packages/backend/             # Hono/Bun API 与 WebSocket + Zero adapter 与 Coordinator runtime
+packages/frontend/            # Web scientific workbench
 ```
 
 > 路径体系的完整规则见 `03_SPEC/Workspace_Conventions.md` §1。
@@ -246,7 +246,7 @@ zero:
 
 ## 14. 接入步骤
 
-1. 建立 `packages/harness-agent`，实现 Zero adapter。
+1. 建立 `packages/backend` 的 Zero adapter 模块（包名见 §7 修正注）。
 2. 把 Zero AgentLoop 的 event 输出转换为 Harness WebSocket envelope。
 3. 覆盖 MemoryTool 和 SandboxTool。
 4. 加入 Coordinator role prompt。

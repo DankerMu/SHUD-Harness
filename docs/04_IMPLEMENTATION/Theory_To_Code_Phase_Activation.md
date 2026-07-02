@@ -17,7 +17,7 @@ Theory-to-Code 不应阻塞 Phase 1/2 的 deterministic skeleton。它从 Phase 
 |---|---|---|
 | Phase 1 骨架 | 只准备 schema placeholder，不强制 UI | Support schema placeholder |
 | Phase 2 执行闭环 | Runner preflight 初版 | Preflight_And_Mutation_Boundary_Spec |
-| Phase 3 科学运行 | 激活 VerificationCase + basic bundle | Verification_Case_Spec, Theory_To_Code_Governance_Spec |
+| Phase 3 科学运行 | 激活 VerificationCase + basic bundle | Verification_Case_Spec, Theory_To_Code_Governance_Spec（完整四篇含 API_Contracts/Test_Plan，见主账 Phase 3 追加激活） |
 | Phase 4 分析引擎 | 激活 accepted_for_search 前置检查 | Controlled_Search_Boundary_Spec |
 | Phase 5 报告治理 | 激活 Theory-to-Code Evidence 报告章节 | Report lineage spec |
 | Phase 6 集成交付 | 激活完整 playbook 与 PI gate drill | Scientific_Change_Playbooks |

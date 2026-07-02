@@ -9,7 +9,7 @@ status: living
 **Spec 冻结（2026-07-02）**：规格体系冻结于本轮体检修复后的状态。此后仅接受
 ① bug 级修正（错误事实、自相矛盾）；② ADR 级例外（新增能力先立 ADR 说明为何必须先写 spec）。
 其余设计演进跟着代码走——实现期的决策直接改 canonical 规范并在 PR 中说明，不再开新文档。
-下一个制品是 Week 1 代码（含 ADR-0001 的策略门 spike，验收标准见 Phased_Plan Week 1）。
+下一个制品是 M1 代码（含 ADR-0001 的策略门 spike，验收标准见 Phased_Plan M1）。
 **例外批次 1（2026-07-02，PI 授权）**：吸收觉察流 harness 工程评审 G2–G7——拒绝即教学 remediation
 契约（Support_Schema_Contracts §3 / Preflight §2 / Control_Kernel §5）、Reviewer 植入缺陷校准
 （Behavior_Eval EVAL-REV-* + 漂移度量）、记忆/技能周期清扫（Memory_Skills_Lite §9）、护栏
@@ -24,11 +24,15 @@ authority/capability 分类与换代减重（Control_Kernel §5.2 + ADR-0001 触
 （机器常开）；⑥ slurm/HPC 适配器不实现（全本机）；⑦ 运行时模型 GLM 5.2，StackLock.llm 增 `base_url`；
 ⑧ 里程碑制（M1..Mn 弹性门）取代日历周，Phased_Plan 周序降为依赖参考。旧 openspec changes（4 月
 产物 9 个 bundle）因漂移于同日清理，实施记录按本批次决策重建。
+**例外批次 3（2026-07-02，PI 指令）**：Phased_Plan 由"8 周日历版"整体重写为里程碑制（M1–M9）
+**实施唯一真相源**（排期/交付/验收门/每里程碑必读），吸收五路对齐审查修复（敏感性压缩、回放主链、
+patch diff 端点方法、备胎表述随 ADR-0001 修订、新机制落点）；本账 Phase 3 T2C 追加激活清单与并入表
+统一，Preflight 归位 Phase 2（审查 B-1 修正）。配套测试文档沿用 W0–W8 标签，经 Phased_Plan §0 映射表解析。
 
 **依据：** 本文档基于全部文档的交叉引用和依赖链深度分析生成。
 
 **配套文档：**
-- [Phased_Plan.md](04_IMPLEMENTATION/Phased_Plan.md) — 每周交付细分（后端/前端/测试）
+- [Phased_Plan.md](04_IMPLEMENTATION/Phased_Plan.md) — 里程碑实施计划 M1–M9（排期/交付/验收门/必读的唯一真相源）
 - [Phase_By_Phase_Test_Plan.md](04_IMPLEMENTATION/Phase_By_Phase_Test_Plan.md) — 每阶段 Test ID + 场景 + Pass Criterion
 - [Test_Fixtures_And_Command_Matrix.md](04_IMPLEMENTATION/Test_Fixtures_And_Command_Matrix.md) — Fixture 层级与命令
 - [Traceability_Matrix.md](04_IMPLEMENTATION/Traceability_Matrix.md) — 需求 → 文档 → 代码 → 测试追踪
@@ -142,6 +146,7 @@ Phase 2 第一个里程碑必须是 dummy job 的 park→collect→resume→按 
 | [Agent_Architecture.md](02_ARCHITECTURE/Agent_Architecture.md) | Agent 角色、Coordinator 决策流 |
 | [Context_Trust_And_Injection_Spec.md](03_SPEC/Context_Trust_And_Injection_Spec.md) | Context 信任分级、注入防护（Repo Explorer 上线即注入面打开） |
 | [Agent_Behavior_Eval_Spec.md](04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md) | 行为 eval 管道空跑 + golden 场景积累（Phase 6 真实 LLM 接入前必须全量可运行） |
+| [Preflight_And_Mutation_Boundary_Spec.md](03_SPEC/Preflight_And_Mutation_Boundary_Spec.md) | runner preflight 初版 + PreflightCheck.remediation（T2C 完整 preflight 随 Phase 3–4 长成；2026-07-02 自 Phase 3 归位） |
 
 ### 交付摘要
 
@@ -208,7 +213,10 @@ T0 + T1 + T4(fixture ccw tiny) 通过。
 
 - Theory_To_Code_Governance_Spec.md
 - Verification_Case_Spec.md
-- Preflight_And_Mutation_Boundary_Spec.md
+- Theory_To_Code_API_Contracts.md
+- Theory_To_Code_Test_Plan.md
+
+（与卫星账并入表一致；Preflight_And_Mutation_Boundary_Spec 已归位 Phase 2 激活表——2026-07-02 对齐审查 B-1 修正）
 
 ### → Phase 4 对齐检查点
 
@@ -394,6 +402,8 @@ T0-T5 全部通过，release regression 通过。
 | Phase 5 治理 | 7 | 57 |
 | Phase 6 交付 | 13 | 70 |
 
+> 计数为并账前量级参考；归属以各 Phase 激活表为准（2026-07-02 起 Preflight 归位 Phase 2、T2C API/Test 契约入 Phase 3）。
+
 ---
 
 ## 关键依赖链
@@ -438,4 +448,3 @@ Requirements_Catalog → Requirements_Numbering → Traceability_Matrix → Depe
 | [Spec_Gap_Audit_v0_8_1.md](00_INDEX/Spec_Gap_Audit_v0_8_1.md) | 历史 |
 | [PRD_Spec_Gap_Audit_v0_8_2.md](00_INDEX/PRD_Spec_Gap_Audit_v0_8_2.md) | v0.8.2 缺口审查 |
 | [PRD_Spec_Merge_Map.md](00_INDEX/PRD_Spec_Merge_Map.md) | 合并地图 |
-| [Phased_Plan.md](04_IMPLEMENTATION/Phased_Plan.md) | 时间维度参考 |

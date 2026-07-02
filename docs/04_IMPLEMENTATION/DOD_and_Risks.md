@@ -4,6 +4,8 @@ status: frozen
 
 # Definition of Done 与风险控制
 
+> **排期语义（2026-07-02）**：本文周/Phase 表述按 [Phased_Plan §0 映射表](Phased_Plan.md) 解析为里程碑 M1–M9（ADR-0002 D8 里程碑制）；MVP 验收载体 = M9 openMP RHS 已知答案回放。
+
 ## 1. MVP DoD
 
 系统达到 MVP 可用，需要满足：
@@ -78,7 +80,7 @@ v0.6 明确删除或降级：
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| Park/Resume 恢复语义未经原型验证 | 全系统技术风险最高点在后期才暴露，返工波及执行闭环 | Phase 2 首个里程碑：dummy job 打通 park→collect→resume→按 plan_cursor 接续 的端到端闭环 |
+| Park/Resume 恢复语义未经原型验证 | 全系统技术风险最高点在后期才暴露，返工波及执行闭环 | M3（账本 Phase 2）首个 issue：dummy job 打通 park→collect→resume→按 plan_cursor 接续 的端到端闭环 |
 | 无 health endpoint | 部署后无法判断服务是否可接收任务 | W1 实现 live/ready |
 | 性能目标缺失 | UI/API 在开发后期才发现不可用 | W1 建 perf smoke |
 | 运维手册缺失 | 真实长任务失败后恢复混乱 | W3 前合并 Operations_Runbook |

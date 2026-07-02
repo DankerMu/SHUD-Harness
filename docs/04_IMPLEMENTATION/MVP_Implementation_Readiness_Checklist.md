@@ -5,7 +5,9 @@ status: frozen
 # MVP Implementation Readiness Checklist
 
 **状态：** v0.8.1 开工前检查  
-**目标：** 在进入 Week 1 deterministic skeleton 前，确认规格已足够稳定。
+**目标：** 在进入 M1 deterministic skeleton 前，确认规格已足够稳定。
+
+> **排期语义（2026-07-02）**：本清单是 [Phased_Plan](Phased_Plan.md) M1 的前置门（原 W0 并入 M1）；周表述按 Phased_Plan §0 映射表解析（ADR-0002 D8 里程碑制）。
 
 ## P0 — 必须完成
 
@@ -86,7 +88,7 @@ SHUD-Harness 的 readiness 不等于"所有功能已经设计完"。本项目的
 ```yaml
 readiness_gate:
   version: v0.8.1
-  checked_at: 2026-04-25T00:00:00Z
+  checked_at: <签核时填写 ISO8601 时间戳>
   checked_by: engineer
   decision: pass | pass_with_notes | block
   p0:

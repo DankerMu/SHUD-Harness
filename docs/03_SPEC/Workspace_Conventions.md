@@ -119,6 +119,7 @@ locks/              — 幂等锁和任务锁文件
 exports/            — 报告导出文件
 packages/           — 数据打包（evidence/debug/benchmark）
 notifications/      — 通知记录
+readiness/          — readiness gate 签核 YAML（Readiness_Checklist；2026-07-02 对齐审查 E-4 补录）
 ```
 
 Artifact 文件名建议包含 task/run/report ID：

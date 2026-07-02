@@ -7,6 +7,8 @@ status: frozen
 **状态：** v0.8.1 测试 fixture 补充  
 **目标：** 明确每阶段用哪些 fixture、命令和 expected artifacts，避免测试依赖真实长任务。
 
+> **排期语义（2026-07-02）**：本文 W1+..W7+ 阶段标签仅作依赖参考，按 [Phased_Plan §0 映射表](Phased_Plan.md) 解析为里程碑 M1–M9（ADR-0002 D8 里程碑制）；W6 相关 fixture 按 M6 压缩口径取舍。
+
 ---
 
 ## 1. Fixture 层级
@@ -15,7 +17,7 @@ status: frozen
 |---|---:|---|---|
 | schema-only | W1+ | core/support schema 校验 | 否 |
 | dummy-runner | W3+ | job submit/log/collect/report | 否 |
-| dummy-batch | W6+ | AnalysisPlan/BatchProgress/Heatmap | 否 |
+| dummy-batch | W6+ | AnalysisPlan/BatchProgress（Heatmap 出 MVP，见 Phased_Plan M6） | 否 |
 | old-output fixture | W5+ | rSHUD backward compatibility | 部分依赖 rSHUD |
 | ccw tiny | W4+ | 真实 SHUD/rSHUD 闭环 | 是 |
 | report fixture | W7+ | EvidenceReport/export/language guard | 否 |
@@ -51,6 +53,10 @@ workspace/artifacts/RUN-*/metrics.yaml
 ---
 
 ## 3. Dummy batch
+
+> **MVP 口径（ADR-0002 D5 / Phased_Plan M6）**：MVP 期参数集用最小 OAT（3–5 组），产出用普通 artifact
+> （analysis_progress.json + batch 汇总表），**不产 parquet / heatmap.json**；下述 3×3 命令与 parquet/heatmap
+> 定义保留供 post-MVP（首个真实敏感性研究任务）复用。
 
 ### 命令
 

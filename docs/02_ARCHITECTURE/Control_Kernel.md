@@ -100,7 +100,7 @@ Agent 已暂停，不继续消耗 LLM token。`runtime_phase = waiting_for_job`�
 
 硬限制触发（max_retries、no_progress）或 workspace 损坏。需要人工检查。
 
-## 5. Stop conditions
+## 5. Stop conditions 与策略门校验约定
 
 硬编码（不可跳过）：
 
@@ -196,7 +196,7 @@ capability 类逐项评估"新模型是否已不需要"，产出一页 memo 供 
 - **领域动作优先走 Domain CLI**（[Domain_CLI_Spec](../03_SPEC/Domain_CLI_Spec.md) 已是模范面：
   6 命令、YAML 契约、exit code 语义），不为每个动作造新工具。
 
-落点：工具注册层（与策略门同一横切点）；Week 1-2 实现时以注册期 lint 强制数量预算与描述完整性。
+落点：工具注册层（与策略门同一横切点）；M1（[Phased_Plan](../04_IMPLEMENTATION/Phased_Plan.md) 工具注册层落地）实现时以注册期 lint 强制数量预算与描述完整性。
 
 ## 6. 核心原则
 

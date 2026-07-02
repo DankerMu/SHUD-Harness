@@ -8,6 +8,8 @@ status: frozen
 **适用范围：** schema、API、WebSocket、executor、SHUD fixture、report、UI  
 **目标：** 用分层测试保证 v0.8 端到端闭环可复盘。
 
+> **排期语义（2026-07-02）**：本文 W0–W8 周标签仅作依赖参考，按 [Phased_Plan §0 映射表](Phased_Plan.md) 解析为里程碑 M1–M9（ADR-0002 D8 里程碑制）。
+
 ## 1. 测试分层
 
 | 层级 | 测试对象 |

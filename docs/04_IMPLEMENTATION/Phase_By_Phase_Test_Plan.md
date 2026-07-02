@@ -8,6 +8,8 @@ status: frozen
 **目标：** 将 `Testing_Strategy.md` 的分层测试扩展为每个实施阶段可执行的测试矩阵。  
 **测试原则：** 每周结束时必须有可自动化的验收测试；真实 SHUD 运行只在指定 fixture 阶段引入。
 
+> **排期语义（2026-07-02）**：本文 W0–W8 周标签仅作依赖参考，按 [Phased_Plan §0 映射表](Phased_Plan.md) 解析为里程碑 M1–M9（ADR-0002 D8 里程碑制）；W6 条目按 M6 压缩口径取舍（heatmap/DuckDB/3×3 出 MVP）。
+
 ---
 
 ## 1. 测试分级
