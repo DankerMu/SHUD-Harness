@@ -231,6 +231,7 @@ status: living
 | 文件 | 用途 |
 |------|------|
 | [`../adr/0001-agent-runtime-and-topology.md`](../adr/0001-agent-runtime-and-topology.md) | 运行时基座与拓扑决策（Zero=Trial + 星型拓扑 + 领域层运行时无关；zero@13e25c1 实测事实与 revisit 触发器） |
+| [`../adr/0002-mvp-reality-anchoring.md`](../adr/0002-mvp-reality-anchoring.md) | MVP 现实锚定（grill-me 压测 9 决策：全本机 / openMP RHS 已知答案回放 / 单用户 / agent 全代驾 + 里程碑制 / GLM 5.2 第三方端点） |
 
 ---
 

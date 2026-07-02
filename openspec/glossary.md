@@ -88,6 +88,7 @@ status: living
 | 验证用例 | `VerificationCase` | verification/validation/calibration 三界清晰的验证单元 | [Verification_Case_Spec](../docs/03_SPEC/Verification_Case_Spec.md) |
 | 准入搜索 | `accepted_for_search` | bundle 状态：允许下游校准/搜索的前置门 | [Controlled_Search_Boundary_Spec](../docs/03_SPEC/Controlled_Search_Boundary_Spec.md) |
 | 校准 ≠ 结构验证 | calibration vs structural validation | 校准结果必须标注 calibration，不得表述为模型结构改进 | Verification_Case_Spec + CLAUDE.md Governance Rules |
+| 已知答案回放 | known-answer replay | 首任务模式：从兄弟项目 openMP 抽取已完成变更，经 Harness 治理链路重走，用既有 ground truth 评价 Harness 正确性 | [ADR-0002](../docs/adr/0002-mvp-reality-anchoring.md) D3/D4 |
 
 ## 7. 记忆与技能
 

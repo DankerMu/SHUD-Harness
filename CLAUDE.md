@@ -93,7 +93,8 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 - **方案**: v0.8.3 Web-first + TS 全栈，基于 Zero 扩展，含 Theory-to-Code 治理层
 - **代码**: 零。Zero 作为基础实现已就位（submodule 追 development@13e25c1），待扩展 SHUD 领域逻辑
 - **Spec 冻结**: 规格体系已冻结（2026-07-02，对抗审查 41 修复 + 体检修复后）；仅收 bug 修正与 ADR 例外，规则见 `docs/Phased_Spec_Activation.md` 头部；架构决策入 `docs/adr/`
-- **下一步**: Week 1 — Hono API 骨架 + React 壳 + workspace 初始化 + TaskCard schema + 策略门 spike（验收五条见 Phased_Plan Week 1，判 ADR-0001 触发器）
+- **MVP 现实锚定**: grill-me 压测 9 决策已落 `docs/adr/0002`（全本机 Mac / 首任务 = openMP RHS 已知答案回放 / 单用户 / agent 全代驾 + 里程碑制 / 运行时模型 GLM 5.2 第三方端点）；旧 openspec changes 已清理
+- **下一步**: 重建 M1 实施记录（stage-change-pipeline）→ M1 grill → M1 代码（骨架 + 策略门 spike + GLM provider 配置 + SHUD make 复验；spike 验收五条见 Phased_Plan Week 1，判 ADR-0001 触发器）
 
 ## 已装能力
 

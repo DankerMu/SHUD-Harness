@@ -66,6 +66,7 @@ SHUD-Harness 以 Web 为唯一用户交互渠道，需要：
 | Task Orchestrator | [E] 直接复用 | 扩展 DAG 支持长任务 park |
 | Background tool sink | [E] 直接复用 | BackgroundToolTaskSink（thresholdMs 超阈接管）+ background_tool_completed 消息 = local_job watcher / park-resume 的接入缝（[Park_Resume §4](../03_SPEC/Park_Resume_Design.md)） |
 | Context budget/compression | [O] 修改后复用 | ContextBudget 分段预算复用；session context_compression（compressedSummary/Range）与 session digest 同形——包装为落盘 digest 对象 + T3 标记，匿名管道内压缩禁用（[Context_Trust §5.1](../03_SPEC/Context_Trust_And_Injection_Spec.md)） |
+| Provider 配置 | [E] 直接复用 | 多 provider 模型池：`api_type: openai_chat_completions` + `base_url` + `api_key_ref` + `fallback_chain` + 按功能选模型（task_closure_model 等）——GLM 5.2 第三方端点接入即配置（[ADR-0002](../adr/0002-mvp-reality-anchoring.md) D9），LLM 降级三件套有原生落点 |
 
 标注: [E] = Extend (直接扩展), [O] = Override (需修改后复用), [A] = Add (纯新增)
 

@@ -10,12 +10,20 @@ status: living
 ① bug 级修正（错误事实、自相矛盾）；② ADR 级例外（新增能力先立 ADR 说明为何必须先写 spec）。
 其余设计演进跟着代码走——实现期的决策直接改 canonical 规范并在 PR 中说明，不再开新文档。
 下一个制品是 Week 1 代码（含 ADR-0001 的策略门 spike，验收标准见 Phased_Plan Week 1）。
-**例外批次（2026-07-02，PI 授权）**：吸收觉察流 harness 工程评审 G2–G7——拒绝即教学 remediation
+**例外批次 1（2026-07-02，PI 授权）**：吸收觉察流 harness 工程评审 G2–G7——拒绝即教学 remediation
 契约（Support_Schema_Contracts §3 / Preflight §2 / Control_Kernel §5）、Reviewer 植入缺陷校准
 （Behavior_Eval EVAL-REV-* + 漂移度量）、记忆/技能周期清扫（Memory_Skills_Lite §9）、护栏
 authority/capability 分类与换代减重（Control_Kernel §5.2 + ADR-0001 触发器 6）、工具面治理约定
 （Control_Kernel §5.3）、模型路由演进备注（Minimal_Schemas）。G1（时间节省度量）PI 裁定不采纳：
 反事实基线（人工研究耗时）不可得。
+**例外批次 2（2026-07-02，PI 授权）**：grill-me 方案压测 9 项决策沉淀，全文见
+[ADR-0002](adr/0002-mvp-reality-anchoring.md)。MVP 范围随之调整（约束实施记录重建，不改各 spec 正文）：
+① Phase 3 主链 = ChangeRequest **已知答案回放**（openMP RHS 切片，正确性门，不做性能复现）；
+② 敏感性压缩为最小 OAT（3–5 run）随 Phase 4；③ Controlled_Search/校准边界 MVP 仅 schema 占位；
+④ `Multiuser_Harness_Versioning` 停用（单用户，Auth 缩为单账号 + localhost）；⑤ 邮件通知保留 MVP
+（机器常开）；⑥ slurm/HPC 适配器不实现（全本机）；⑦ 运行时模型 GLM 5.2，StackLock.llm 增 `base_url`；
+⑧ 里程碑制（M1..Mn 弹性门）取代日历周，Phased_Plan 周序降为依赖参考。旧 openspec changes（4 月
+产物 9 个 bundle）因漂移于同日清理，实施记录按本批次决策重建。
 
 **依据：** 本文档基于全部文档的交叉引用和依赖链深度分析生成。
 

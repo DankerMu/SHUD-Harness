@@ -65,6 +65,11 @@ status: accepted
    （[Control_Kernel §5.2](../02_ARCHITECTURE/Control_Kernel.md)，harness 评审 G5）——
    capability 类护栏逐项评估退役，authority 类不参与；护栏只增不减是另一种熵。
 
+> **修订（2026-07-02，[ADR-0002](0002-mvp-reality-anchoring.md) D9）**：运行时模型定为 GLM 5.2
+> （第三方 OpenAI 兼容端点）后，触发器 1/2 命中时"Claude Agent SDK (TS) 迁移"作为首选备胎的前提
+> （Anthropic 生态运行时）不再成立。备选评估顺序改为：① **自建薄工具注册层**（provider 无关，
+> 保留 Zero 其余复用面）；② Claude Agent SDK 迁移（仅当运行时模型回到 Anthropic 生态时才是候选）。
+
 ## 参照
 
 [Zero_Reuse_Matrix](../02_ARCHITECTURE/Zero_Reuse_Matrix.md) ·

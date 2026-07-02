@@ -82,13 +82,14 @@ harness:
   prompt_pack: promptpack-0001
   skills_version: skills-0001
 llm:
-  provider: anthropic
-  model_id: "claude-sonnet-5"         # provider 完整模型标识，含版本后缀
+  provider: openai_compatible         # 第三方 OpenAI 兼容服务（ADR-0002 D9）
+  model_id: "glm-5.2"                 # provider 完整模型标识，含版本后缀
+  base_url: "https://<vendor>/v1"     # 第三方端点必锁：同名模型在不同端点可能被静默换版/量化（ADR-0002）
   params_digest: "sha256:..."         # 采样参数集（temperature/top_p/max_tokens 等）的哈希
   prompt_pack_digest: "sha256:..."    # prompt_pack 实际内容哈希（防同名不同内容漂移）
-  # 演进备注（harness 评审 G7）：MVP 全角色单模型。将来引入 per-role 模型路由（简单节点下放
-  # 小模型省成本）时，本键升级为 role→{model_id, params_digest} 映射——breaking，先立 ADR
-  # 并跑全量行为 eval 回归后方可切换。
+  # 演进备注（harness 评审 G7；2026-07-02 按 zero 实测放宽）：MVP 全角色单模型。Zero 原生支持
+  # 多 provider 模型池与按功能选模型（task_closure_model / context_compaction_model），per-role
+  # 路由无需运行时改造；升级仅涉本 schema（llm → role 映射），仍需先立 ADR + 全量行为 eval 回归。
 fingerprint: "sha256:..."             # 整体哈希，用于快速比对
 created_at: 2026-04-25T10:00:00Z
 ```
