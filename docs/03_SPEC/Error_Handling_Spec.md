@@ -18,7 +18,7 @@
 | `parser_error` | rSHUD 读取失败、输出变量缺失 | 生成 parser failure artifact |
 | `report_error` | 报告引用缺失 artifact | 阻止 report reviewed |
 | `agent_error` | LLM 工具选择错误、上下文不足 | Coordinator 可恢复或要求 PI 输入 |
-| `llm_provider_error` | 限流、超时、5xx、配额耗尽、认证失效 | 见 §5.1 分级降级；不影响运行中 RunJob |
+| `llm_provider_error` | 限流、超时、5xx、配额耗尽、认证失效、上下文超限、模型下线 | 见 §5.1 分级降级；不影响运行中 RunJob |
 | `llm_output_error` | 结构化输出 parse 失败、schema 不匹配、工具参数非法 | 重新生成 ≤2 次，计入失败签名；仍失败 → blocked |
 | `ops_error` | disk full、OOM | 创建 OpsIncident，执行 runbook |
 | `duckdb_error` | warehouse open/query failure | degraded mode，filesystem fallback |
@@ -89,9 +89,17 @@ LLM 故障只影响 agent loop，**不影响运行中 RunJob**——job 是独�
 |---|---|
 | rate_limit / timeout / server_error | 指数退避重试 ≤2；仍失败 → TaskCard blocked，ErrorRecord(retryable=true)，工程师/PI 可一键恢复（恢复 = 从 plan_cursor 重新进入当前阶段） |
 | quota_exhausted / auth_error | 不重试；TaskCard blocked，critical NotificationRecord（此时 WebSocket 之外的通知通道是唯一可达路径） |
+| context_overflow（请求超出上下文窗口） | 不原样重试；按 Context_Trust §5 预算**确定性重组**上下文后重试一次（禁止用 LLM 压缩兜底），仍超限 → blocked + 工程师检查组装配置 |
+| model_not_found / model_deprecated | 不重试、**不静默换模型**；TaskCard blocked + critical 通知。换 model 是 StackLock.llm 变更，须 PI/工程师确认并触发 behavior eval（见 Dependency_Versioning_Policy） |
 | mid-turn 崩溃（回复到一半进程死亡） | 该轮丢弃；恢复按 Workspace_Snapshot 的 service restart recovery：领域对象状态为准，从 plan_cursor 重放当前步骤（LLM 步骤重放=重新采样，可接受，因为副作用都有幂等保护） |
 
 parked 任务不受 LLM 故障影响（本来就不消耗 LLM）；resume 时 provider 仍不可用 → resume 推迟并告警，job 结果不丢。
+
+**分类器实现要求（对标 hermes-agent error_classifier 吸收）**：故障分类是**确定性模式匹配**
+（HTTP status + provider error code + 消息模式），每一类映射唯一恢复路径
+`retry_backoff | reassemble_context | block | block_and_notify`——禁止 catch-all 一律退避重试：
+把 quota 耗尽当 rate_limit 重试三次，只是把"该叫人了"推迟三个退避周期。
+分类表进配置，新 provider 接入时补分类用例（负例测试：未知错误必须落 block 而非 retry）。
 
 ## 6. 用户提示
 

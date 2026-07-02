@@ -24,6 +24,9 @@ coordinator | repo_explorer | worker | coder | reviewer
 
 人类角色（不进 Agent 枚举）：**PI/Researcher**（科学判断）、**Data Support**（数据与 benchmark 维护）。
 
+子代理工具剖面在 spawn 时**冻结**（对标 hermes-agent 吸收）：spawn 参数只能在角色 canonical
+剖面基础上**删减**工具、不能增补；spawn 深度与并发上限由 kernel 硬校验（见 Control_Kernel §5）。
+
 **明确不设的角色**（判据不满足，防止角色膨胀）：
 
 - *Execution Worker / Analysis Worker*：两者权限剖面相同（sandbox 执行），是 `worker` 的两种任务画像，用 prompt profile 区分，不拆角色。

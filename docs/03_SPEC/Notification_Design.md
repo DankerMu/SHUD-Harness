@@ -70,8 +70,10 @@ interface NotificationRecord {
   subject: string;
   body_preview: string;
 
-  status: "pending" | "sent" | "failed" | "skipped";
+  status: "pending" | "sent" | "failed" | "skipped" | "dead";
   dedupe_key: string;
+  attempts: number;
+  next_attempt_at?: string;
   attempted_at?: string;
   sent_at?: string;
   error?: string;
@@ -129,15 +131,16 @@ system keyring
 
 不得进入 RunRecord、EvidenceReport、artifact manifest 或 git。
 
-## 8. 失败策略
+## 8. 失败策略（outbox 事务化，对标 golutra 吸收）
 
-通知失败不得回滚 RunRecord、EvidenceReport 或 AnalysisPlan summary。应写入：
+通知失败不得回滚 RunRecord、EvidenceReport 或 AnalysisPlan summary，但也不得**丢失**——
+dedupe 只防重发，不防蒸发（发送失败 + 服务重启 = 通知消失，PI 永远不知道任务完成了）。
+NotificationRecord 即持久化 outbox：
 
-```yaml
-notification:
-  status: failed
-  error: smtp_timeout
-```
+- 发送前先落盘 `status=pending`（意图先于副作用持久化），成功后改 `sent`；
+- 失败改 `failed` 并更新 `attempts` + `next_attempt_at`（指数退避：基数 1min、上限 30min、最多 6 次）；
+- 服务重启时扫描 `pending`/`failed` 且 `next_attempt_at` 到期的记录，继续重试——crash 不丢通知意图；
+- 6 次耗尽 → `status=dead`，进 ops dashboard 人工处理，不再自动重试。
 
 UI 应显示“通知发送失败”，但任务本身仍可标记为 `awaiting_pi` 或 `done`。
 
@@ -146,6 +149,7 @@ UI 应显示“通知发送失败”，但任务本身仍可标记为 `awaiting_
 - [ ] 浏览器关闭不影响 notification 发送。
 - [ ] Batch 默认只在 analysis/report ready 后发送一封通知。
 - [ ] 同一 dedupe key 不重复发送。
+- [ ] 发送失败的通知在服务重启后按退避计划恢复重试；重试耗尽进入 dead 且 dashboard 可见。
 - [ ] 无收件人时写 skipped，不中断 task。
 - [ ] 邮件正文不包含 secrets、完整日志或 raw output。
 - [ ] SMTP/SendGrid 凭据不进入 report、RunRecord 或 artifact manifest。

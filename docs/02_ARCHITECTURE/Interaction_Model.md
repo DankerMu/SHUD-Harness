@@ -59,6 +59,7 @@ Web Console 不是"对话框 + 几个按钮"，而是一个**完整的科研工�
 ├ Research Context (当前任务上下文)
 │   ├ StackLock 摘要 (repo commits + runtime versions)
 │   ├ DataProvenance 摘要 (basin, event, sources)
+│   ├ Session Digest (对话摘要, PI 可编辑; 语义见 Context_Trust §5.1)
 │   ├ Related Notes (关联笔记/经验)
 │   └ Active Skills (当前可用 skill 列表)
 └ Cost Monitor (底部悬浮)
@@ -241,6 +242,17 @@ WS     /ws/session/:sessionId        # 统一 session 通道 (agent 活动流 + 
 ```
 
 ## 7. 对话驱动工作流
+
+**轻量应答分流（对标 xagent 吸收）**：不是每句输入都值得立卡。Coordinator 收到 PI 消息先做三分类：
+
+| 类型 | 判据 | 处理 |
+|---|---|---|
+| 轻量问答 | 答案可从已有对象（TaskCard/RunRecord/报告/note）直接给出，无需执行 | 直接回答，不建 TaskCard、不产生对象 |
+| 追问/修订 | 指向当前活动任务 | 走 §7.1 append/interrupt 语义 |
+| 新工作 | 需要运行、改码、分析或产出报告 | 建 TaskCard，走完整闭环 |
+
+规则：轻量问答**不得触发工具执行与对象写入**——要执行就必须有卡，审计链不留裸执行；
+分类保守（拿不准就立卡），分错的代价是一次澄清而不是治理漏洞；回答引用对象时照常带 ID。
 
 PI 通过 Agent 活动流底部输入框驱动所有操作：
 

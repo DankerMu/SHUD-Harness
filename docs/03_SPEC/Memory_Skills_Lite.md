@@ -134,7 +134,8 @@ MVP 先用 keyword + tags，不强依赖 embeddings：
 
 - draft note 是 T3 信任级内容——可作诊断线索，不得作为报告结论或 ChangeRequest 的直接依据；
 - 单次注入 note 数量有上限（accepted ≤ 5、draft ≤ 3，见 Context_Trust_And_Injection_Spec §5），按相关度截断；
-- 错误/恶意 draft note 的影响半径由此受限：它带着"未确认"标记进入 context，且进不了证据链（lineage guard 拒绝 draft note 作为 evidence_refs 唯一来源）。
+- 错误/恶意 draft note 的影响半径由此受限：它带着"未确认"标记进入 context，且进不了证据链（lineage guard 拒绝 draft note 作为 evidence_refs 唯一来源）；
+- session digest（Context_Trust §5.1）注入时同规则：`[DIGEST-0001 | draft | 未经 PI 确认]`，`pi_confirmed` 后按 accepted 待遇。
 
 ## 9. 验收标准
 

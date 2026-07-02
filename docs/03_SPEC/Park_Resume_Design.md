@@ -44,6 +44,20 @@ task.notification_recipients[]
 
 Batch 模式不得对每个 RunJob completion 发送邮件；默认只在 analysis summary 或 report draft 可审阅时发送一封。
 
+## 1.2 Park 阈值决策：何时 park、何时留在会话内等
+
+park 不是零成本：resume 是一次冷读重建（provider 提示缓存 TTL ~5min，几小时后必然全冷）。
+判据是**预期等待时长与缓存 TTL 的关系**：
+
+| 预期等待 | 决策 | 经济账 |
+|---|---|---|
+| 短（tiny run、编译；< 阈值，默认 180s） | 留在会话内同步等待（running_local / submitted_job 轮询） | cache 尚热，续跑按缓存价（~1/10）；park+重建反而贵 |
+| 灰区（~TTL 边界） | 会话内短等，超时自动升级为 park | 超时兜底，不悬挂 |
+| 长（真实流域 run、batch、HPC 排队） | park | cache 必然冷：保留会话 = resume 冷读全量历史（随 park 轮次复利增长）；重建投影 ≤16KB，恒定且便宜 10-30× |
+
+阈值进配置，按 provider cache TTL 校准（另见 Cost_Inference_Budget §4.1 前缀缓存快照）。
+误判偏向 park：错 park 只多付一次 ≤16KB 重建；错不 park，冷读成本随历史长度增长无上界。
+
 ## 2. 状态定义
 
 TaskCard.status 使用粗粒度状态机（权威定义见 `03_SPEC/Minimal_Schemas.md`）。
@@ -192,6 +206,9 @@ resume_context.run_records 一次性给出全部终态 job 的 RunRecord。
 其中 `plan_summary` / `stack_lock_summary` / `data_provenance_summary` 由确定性模板生成（字段抽取，非 LLM 压缩）；
 run_records 只带 status 与 metrics_ref，不内联日志或输出数据；job stdout/stderr 若需引用，
 按同规范 §5 的 tail 截断规则并以 T4 包裹注入。
+
+resume 时 system prompt 复用 session 首轮存盘的字节级快照（见 Cost_Inference_Budget §4.1），
+不重新渲染——重建的是对话上下文，不是前缀。
 
 ## 7. 触发策略
 

@@ -80,6 +80,9 @@ Coordinator 生成 plan，并列出：
 
 Agent 已暂停，不继续消耗 LLM token。`runtime_phase = waiting_for_job`。
 
+是否 park 按预期等待时长决策（阈值策略见 Park_Resume §1.2）：短等待留在会话内吃热缓存，
+长等待 park——park 的经济性来自等待时长超过提示缓存 TTL。
+
 ### reporting
 
 生成 Markdown 报告和下一步建议。
@@ -98,8 +101,14 @@ Agent 已暂停，不继续消耗 LLM token。`runtime_phase = waiting_for_job`�
 
 ```text
 - max_retry_per_failed_command: 2；
-- no_progress_detection: 连续 3 步无进展 → 自动 block（判定语义见 §5.1）。
+- no_progress_detection: 连续 3 步无进展 → 自动 block（判定语义见 §5.1）；
+- max_spawn_depth: 1（结构上仅 coordinator 有 spawn 权限；运行时硬校验兜底，
+  防 prompt 越权或实现失误导致委派循环）；
+- max_concurrent_subagents: 3（超出排队执行，不并发爆炸）。
 ```
+
+spawn 上限为运行时校验而非仅靠角色剖面（对标 hermes-agent 吸收）：角色剖面说"不该发生"，
+kernel 校验保证"发生了也过不去"。
 
 ### 5.1 无进展（no-progress）判定器
 
@@ -119,6 +128,12 @@ Agent 已暂停，不继续消耗 LLM token。`runtime_phase = waiting_for_job`�
 
 **计数规则**：连续无进展步计数器在任一进展事件时清零；达到 3 时 TaskCard → blocked，
 生成 partial report 并附最近失败签名列表供人工检查。
+
+**预警档（对标 hermes-agent tool guardrails 吸收）**：计数达到 2 时先向 agent context 注入一条
+确定性警告（"连续 2 步无进展；最近失败签名：…；再无进展将 block"），给一次自我纠正机会，
+同时发 `agent.no_progress` 事件让前端 StatusBar 计数；达到 3 才 block。警告注入本身不算进展事件。
+同理，`max_retry_per_failed_command` 允许的那次重试前，把上次失败签名注入 context——
+盲目原样重试撞同一面墙的概率远大于换个姿势。
 
 parked 状态不计步；job 等待时间不参与判定。判定器实现必须是纯函数（输入 CommandTrace + 对象事件流，输出 progress/no-progress），可独立单测。
 

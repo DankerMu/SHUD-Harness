@@ -63,8 +63,20 @@ inference_budget:
 - LLM 只读摘要，不读全量输出；
 - report sections 先模板化；
 - memory extraction 周期性人工触发，不每轮自动；
-- embedding 可选，先用 tags/grep。
+- embedding 可选，先用 tags/grep；
+- system prompt 字节级快照复用（见 §4.1）。
 ```
+
+### 4.1 系统提示快照与前缀缓存（对标 hermes-agent 吸收）
+
+provider 前缀缓存只认**字节级一致**的 prompt 前缀。规则：
+
+- session 首轮渲染 system prompt 后原样存盘
+  （`workspace/sessions/<session_id>/system_prompt.txt`），digest 与 StackLock.llm.prompt_pack_digest 对账；
+- 同 session 后续轮次与 park 后 resume 一律复用存盘字节串，**不重新渲染**——
+  重渲染哪怕一个空格漂移都击穿缓存，整段 system prompt 的 token 重新计费；
+- prompt pack 升级 → 开新 session（这本来就是 StackLock 变更，要走新任务 + eval），不在 session 中途换前缀；
+- 快照缺失/损坏 → 降级为重新渲染 + warn 日志，记录 `missing | corrupted` 状态供缓存失效排查。
 
 ## 5. 成本报告
 

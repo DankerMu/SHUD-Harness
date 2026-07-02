@@ -42,6 +42,10 @@ interface LockRecord {
 }
 ```
 
+长任务持锁靠**心跳续租**（对标 xagent 吸收）：holder 周期性延长 `expires_at`（建议 TTL 60s、心跳间隔 20s）；
+过期未续说明 holder 已死，recovery 流程可接管并标记 `stolen_after_recovery` + audit log。
+锁不是"拿了就永久有效"，是"活着才有效"——这让 §9 里"服务重启后锁已过期可 recovery"有了确定的判据。
+
 ## 4. 必须幂等的操作
 
 | 操作 | idempotency key |

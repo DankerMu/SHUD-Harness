@@ -33,6 +33,7 @@
 | **T4** | 外部/仓库原始内容 | 仓库文件原文、数据文件内容、日志原文、stderr、下载内容 |
 
 判定规则：内容的信任级别取其**来源链上最低**的一级（T2 的 metrics 若由解析 T4 日志得出，数值本身仍是 T2——确定性脚本是信任提升点；但被引用的日志原文片段仍是 T4）。
+信任提升点的 canonical 载体是领域命令面：进入证据位的 T2 产物只能由 [Domain_CLI_Spec](Domain_CLI_Spec.md) 定义的命令生产（result 带 cli_version 戳，lineage guard 据此校验）。
 
 ## 3. 进入 context 的组装规则
 
@@ -73,6 +74,10 @@
 | Resume | resume_context（Park_Resume §6 白名单）| 16 KB |
 | Report | RunRecord 字段 + metrics + limitations 素材（不含日志原文） | 16 KB |
 
+**阶段切换 = 重投影**：phase 迁移时**不携带**上一阶段的组装内容，按新阶段白名单从磁盘对象重新组装——
+上一阶段的结论必须已沉淀为对象（没沉淀即步骤未完成，见 Control_Kernel §5.1 的进展判定）。
+白名单是每个阶段 context 的**完整定义**，不是"只管新增内容、旧上下文一路拖到底"的准入门槛。
+
 命令输出进入 context 的截断规则（Sandbox_and_Executor §5 引用本表）：
 
 ```text
@@ -81,7 +86,42 @@ summary: ≤ 1 KB，由确定性规则生成（exit_code + 首个错误行 + 文
 完整日志永远走 artifact，绝不整体进 context。
 ```
 
-超预算处理：**确定性截断**（丢弃最旧的 T4 内容优先），不用 LLM 压缩摘要——LLM 压缩会把不可信内容洗成不带标记的"事实"。
+### 5.1 超预算收纳策略（按信任级分层）
+
+超预算不是单一动作，按内容信任级分层处理；**管道内压缩一律禁止**（指在组装路径中用 LLM
+重写历史、产物不落盘）——组装必须保持"磁盘状态 → context"的纯函数性质，非确定性只允许
+发生在对象生成步骤：
+
+| 信任级 | 超预算处理 | 理由 |
+|---|---|---|
+| T0 PI 对话 | LLM 摘要 → **session digest 对象**（见下）进 context，原文永留 event log | 意图不可丢，确定性丢弃比摘要更糟 |
+| T1 accepted 对象 | 确定性再投影：字段抽取 + ID 引用替代内联 | 对象在磁盘，有结构，不需要 LLM |
+| T2 确定性产物 | 同上 | 同上 |
+| T3 agent 草稿 | 直接丢弃，需要时重新生成 | 可再生内容不值得压缩 |
+| T4 外部原文 | 确定性截断（先丢最旧），**禁 LLM 压缩** | LLM 压缩会把不可信内容洗成不带标记的"事实" |
+
+**session digest**——唯一允许的 LLM 压缩形态，压缩产物是落盘对象而非窗口重写：
+
+```yaml
+session_digest:
+  digest_id: DIGEST-0001
+  session_id: SESSION-001
+  source_range: { from_event_seq: 120, to_event_seq: 310 }   # 原文范围，event log 可回放
+  digest_text: >
+    PI 目标：ccw 洪峰偏低诊断；已排除 forcing 单位问题；决定先做 ksat 敏感性。
+  generated_by: llm
+  trust: T3
+  status: draft | pi_confirmed      # PI 确认/编辑后按 T1 对待
+  created_at: ...
+```
+
+规则：
+
+- 摘要器输入仅限 T0/T1 内容，T4 不进摘要器——摘要器本身也是 LLM 调用，同样是注入面（负例见 §7）；
+- digest 以 T3 标记注入（`pi_confirmed` 后按 T1），与 draft note 同等待遇：可作线索、不作证据，
+  lineage guard 拒绝其作为 observation 唯一依据（注入标记格式见 Memory_Skills_Lite §8.1）；
+- digest 在 Research Context 面板可见、PI 可编辑（见 Interaction_Model §3A）；
+- digest 不是研究对象——它是 context 层支持对象（与 parked_state 同定位），不进 8 对象清单。
 
 secrets：进入 context 前一律先过 Config_Secrets_And_Environment_Spec 的 redaction。
 
@@ -100,6 +140,7 @@ secrets：进入 context 前一律先过 Config_Secrets_And_Environment_Spec 的
 - [ ] 定界完整性：T4 内容进入 context 的代码路径都加了 source/trust 标记（单测：组装函数输出扫描）。
 - [ ] 截断确定性：同一日志输入两次，tail/summary 字节级一致。
 - [ ] draft note 注入时带"未经 PI 确认"前缀（单测）。
+- [ ] digest 摘要器负例：被摘要对话中混入注入载荷时，digest_text 不得转写为指令性内容，且 digest 仍带 T3 标记（EVAL-INJ-004）。
 - [ ] lineage guard 拒绝 evidence_refs 仅指向 T4 内容的 observation。
 
 ## 8. 验收标准
