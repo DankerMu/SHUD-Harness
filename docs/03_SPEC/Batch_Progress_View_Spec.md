@@ -49,6 +49,8 @@ artifacts/analysis/PLAN-001/progress.json
 
 ## 4. AnalysisProgressPayload
 
+> 投影声明：字段事实源 = [Support_Schema_Contracts.md](Support_Schema_Contracts.md)，改动先落权威源。
+
 ```ts
 interface AnalysisProgressPayload {
   analysis_plan_id: string;

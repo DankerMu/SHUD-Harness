@@ -50,6 +50,8 @@ task.notification_recipients[]
 
 ## 4. NotificationRecord
 
+> 投影声明：字段事实源 = [Support_Schema_Contracts.md](Support_Schema_Contracts.md)，改动先落权威源。
+
 ```ts
 interface NotificationRecord {
   notification_id: string;
@@ -100,6 +102,11 @@ task:TASK-003:critical_failure:ERR-001:pi@example.com
 ## 6. 邮件内容
 
 邮件必须短、可追溯、低敏感。
+
+**决策摘要必含（2026-07-02，补偿移动端不适配）**：UI_Implementation_Spec §6.2 对 <768px 只防崩溃，
+"PI 在手机上点开审批邮件"的场景由邮件本体补偿——正文必须含任务状态、关键指标（≤4 项）、
+待决项列表（gate 原因 / 建议动作标题），使 PI 不打开工作台即可形成初步判断；
+链接仍指向桌面工作台，正式决策只在工作台完成。
 
 ```text
 Subject: SHUD-Harness task ready for review: TASK-001

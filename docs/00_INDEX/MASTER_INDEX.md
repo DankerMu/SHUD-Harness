@@ -14,7 +14,7 @@
 | 文件 | 用途 |
 |------|------|
 | [`../../CLAUDE.md`](../../CLAUDE.md) | 项目定义 + 仓库布局 + 设计决策速查 |
-| [`../SPEC_v0.8_Final.md`](../SPEC_v0.8_Final.md) | 自包含实施规格书（阅读基准） |
+| [`../SPEC_v0.8_Final.md`](../SPEC_v0.8_Final.md) | 非规范导读快照（v0.8 定稿全景；不随修复更新，冲突以 canonical 为准） |
 | [`CANONICAL_CONTRACTS.md`](CANONICAL_CONTRACTS.md) | Schema / API / Event / Path / Artifact / Lock 的唯一事实源索引 |
 | [`../Phased_Spec_Activation.md`](../Phased_Spec_Activation.md) | **开发路线图** — 6 阶段 Spec 激活 + 交付摘要 + 测试出口 + 对齐检查点 |
 

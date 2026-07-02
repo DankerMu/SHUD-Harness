@@ -97,7 +97,7 @@ shud-harness/                        # TypeScript monorepo (Bun workspace)
           ResultsOverview.tsx        # 关键指标卡片 (NSE, Peak Error, Timing, etc.)
           HydrographComparison.tsx   # baseline vs experiment 对比图 (差异带)
           SensitivityHeatmap.tsx     # 敏感性热力图 (参数 vs 指标)
-          NextSuggestedAction.tsx    # 下一步建议面板 (PI 选择并执行)
+          NextSuggestedAction.tsx    # 下一步建议面板 (建议即草稿, 填入输入框待 PI 确认)
           # 通用
           StatusBar.tsx              # 底部状态栏
           MarkdownRenderer.tsx       # Markdown 报告渲染

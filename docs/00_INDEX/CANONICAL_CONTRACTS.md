@@ -67,6 +67,12 @@ IdempotencyRecord
 LockRecord
 ```
 
+> **投影标注规则（2026-07-02，对抗审查 A01-5/A08-5 系统化）**：任何权威源之外的 schema 副本
+> （14 个 interface 存在 ≥2 处定义）必须带"投影声明"标注，改动先落权威源再同步副本；
+> `schema:generate` 上线（Week 1）后，投影副本一律转为生成物，手写副本从 CI drift check 报错。
+> 专职规范持有的权威源例外：PiDecisionMemoryNote → PI_Decision_Comments_Spec，
+> PreflightGuardResult/PreflightCheck → Preflight_And_Mutation_Boundary_Spec。
+
 ## 4. API registry
 
 唯一来源：

@@ -39,7 +39,8 @@ interface RunnerSubmitRequest {
 
 ### 2.1 Preflight guard
 
-Runner submit 前应执行 preflight 检查：
+Runner submit 前应执行 preflight 检查（PreflightGuardResult / PreflightCheck 为投影副本，
+权威源 = [Preflight_And_Mutation_Boundary_Spec.md](Preflight_And_Mutation_Boundary_Spec.md) §2）：
 
 ```ts
 interface PreflightGuardResult {

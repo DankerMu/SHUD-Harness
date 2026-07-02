@@ -310,6 +310,12 @@ verification_case_ids?: string[];
 
 以下 schema 是 v0.8.1 operational UX 支撑对象，不属于 8 个核心对象。它们用于通知、报告导出、批运行进度和 PI decision comment。
 
+> **投影声明（2026-07-02 单源治理）**：本节全部定义（NotificationRecord / ReportExport /
+> AnalysisProgressPayload / PiGateDecision / PiDecisionMemoryNote）为**投影副本**——字段事实源 =
+> [Support_Schema_Contracts.md](Support_Schema_Contracts.md)（PiDecisionMemoryNote 的权威源为
+> [PI_Decision_Comments_Spec.md](PI_Decision_Comments_Spec.md)）。改动先落权威源再同步此处；
+> `schema:generate` 上线后本节转为生成物（CANONICAL_CONTRACTS 投影规则）。
+
 ### NotificationRecord
 
 ```ts

@@ -4,7 +4,12 @@
 **适用范围：** React 前端、四栏工作台、组件库、设计系统
 **目标：** 基于效果图，固定设计 tokens、组件规格、状态定义、响应式策略和可访问性要求，使前端开发可并行推进。
 
-**效果图参考：** `docs/99_ARCHIVE/images/ChatGPT Image Apr 19, 2026, 10_53_22 PM.png`
+**效果图参考：** `docs/05_PROPOSAL/assets/final-workbench-effect.png` 与 `scenario-*.png`（早期稿在 99_ARCHIVE/images）。
+**效果图地位（2026-07-02 裁决）**：参考视觉稿，非 canonical——与本 spec 冲突处一律以本 spec 为准。
+已知冲突：三张图的左栏导航模型互不一致（以 §4.1 任务优先模型为准）、决策面板在运行中常驻
+（以 §4.4 渲染条件为准）、同屏重复图表（以 §4.4 栏职责纪律为准）、界面英文（以下语言策略为准）。
+**语言策略**：MVP 界面文案全中文（目标用户为中文科研组，效果图英文为视觉稿残留）；
+代码与组件命名英文；文案集中管理，保留 i18n key 层但 MVP 不做多语言。
 
 ---
 
@@ -171,12 +176,19 @@ Panel
 
 ### 4.1 SideNav
 
+**导航模型定案（2026-07-02，裁决三张效果图的分歧）**：**任务优先**。TaskCard 是治理锚点，
+也是导航单位；会话是任务的驱动方式而非组织单位——会话历史收进任务详情（每个 task 关联其对话流），
+不作左栏一级列表。次级对象视图命名与 8 对象 canonical 名一致（Analysis Plans / Evidence Reports，
+不用效果图中的 Experiments / Reports 变体）。
+
 ```ts
 interface SideNavProps {
   collapsed: boolean;
   onToggle: () => void;
-  sessions: SessionSummary[];
-  activeSessionId: string;
+  tasks: TaskCardSummary[];          // 一级导航：任务列表（状态 + 风险 badge）
+  activeTaskId: string | null;
+  objectViews: ObjectViewLink[];     // 次级入口：Runs / Analysis Plans / Evidence Reports /
+                                     // Change Requests / Verification Cases / Data / Settings
   researchContext: {
     stackLock: StackLockSummary | null;
     dataProvenance: DataProvenanceSummary | null;
@@ -190,9 +202,10 @@ interface SideNavProps {
 | 子组件 | 行为 |
 |--------|------|
 | Logo | `SHUD-Harness` 蓝色图标 + 文字；collapsed 时只显示图标 |
-| NewConversation | 蓝色主按钮，`radius-md`，full width |
-| SessionList | 按时间倒序；当前 session 高亮 `primary-100` 背景；状态 icon 前缀 |
-| ResearchContext | 折叠组，标题 `font-medium text-sm text-gray-500`；内容 `text-sm` |
+| NewTask | 蓝色主按钮，`radius-md`，full width；建卡入口（对话随任务开启） |
+| TaskList | 按最近活动倒序；当前 task 高亮 `primary-100` 背景；状态 badge + 风险 badge（high 红）前缀 |
+| ObjectViews | 次级导航组，跨任务对象检索视图；命名用 canonical 对象名 |
+| ResearchContext | 折叠组，标题 `font-medium text-sm text-gray-500`；内容 `text-sm`；随 activeTask 切换 |
 | CostMonitor | 底部固定；预算接近时 `warning` 色；超出时 `error` 色 |
 
 ### 4.2 AgentActivityFeed
@@ -226,7 +239,7 @@ interface ActivityEvent {
 | MessageDetail | 可折叠展开区域，浅灰背景 `gray-50`，包含日志/diff/RunRecord 摘要 |
 | PIInputBar | 底部固定，输入框 + 发送按钮；placeholder "输入消息或指令..." |
 | StreamingIndicator | 三点跳动动画，打字机效果逐字渲染 |
-| PIGateCard | 黄色左边框，Approve/Revision/Reject 三按钮 + comment textarea |
+| PIGateCard | 黄色左边框，Approve/Revision/Reject 三按钮 + comment textarea；按钮权重与证据必经规则同 §4.4 PIDecisionPanel |
 
 消息头像颜色映射：
 
@@ -268,6 +281,12 @@ RuntimeTerminal 高度：
 收起: 36px (只显示最后一行 + 展开按钮)
 ```
 
+**C/D 栏职责纪律（2026-07-02 裁决，效果图中 hydrograph/heatmap 同屏双渲染即违例）**：
+C 栏（ExperimentDashboard）= 过程性/全量视图——运行中曲线、原始批网格、终端、可交互探索；
+D 栏（ResultsPanel）= 结论性/精选视图——当前最优 vs baseline 对比、报告候选图表、决策组件。
+同一图表禁止同屏双渲染：D 栏图表必须是对比/摘要形态（HydrographComparison 而非 HydrographChart 复制），
+C 栏已有的全量图不得在 D 栏重复出现。
+
 ### 4.4 ResultsPanel
 
 ```ts
@@ -285,9 +304,10 @@ interface ResultsPanelProps {
 | ResultsOverview | 水平排列 4 个指标卡 (卡片 white bg, `shadow-sm`)；数值 `text-2xl font-semibold`；变化箭头 `▲` green / `▼` red；标签 `text-xs text-gray-500` |
 | HydrographComparison | 紧凑折线叠加图；差异带 (fill-between) 半透明蓝色 |
 | SensitivityHeatmap | 参数 × 指标 矩阵；cell 颜色用 heatmap 渐变；cell 内显示数值 `text-xs`；失败 cell 显示 `✕` + `gray-300` 背景 |
-| NextSuggestedAction | 白底卡片；编号列表；每项可选 radio；底部三按钮 `选择并执行` (primary) / `修改方案` (outline) / `终止任务` (ghost error) |
+| NextSuggestedAction | 白底卡片；编号列表。**语义 = 建议即草稿**：点击任一项将其展开为可编辑文本填入 PIInputBar，PI 确认发送后才生效——面板不直接触发执行（无隐式动作，所有指令过输入框留审计事件）。底部按钮：`填入输入框` (primary) / `终止任务` (ghost error)；"修改方案"即填入后编辑，不设单独按钮 |
 | ReportExportButton | v0.8.1；report 面板右上角；下拉菜单 `Export HTML` / `Export Markdown`；draft 状态旁显示 `⚠ 含 draft 水印` |
-| PIDecisionPanel | v0.8.1；审批卡片，黄色左边框 4px |
+| ReviewDecisionCard | T2C review 态推进卡（Theory_To_Code_Governance §5.0）：3 选项卡片 + 推荐 badge + 自由输入；选项等视觉权重、无默认选中；推荐项内联理由与 evidence refs；提交即落 AuditEvent |
+| PIDecisionPanel | v0.8.1；审批卡片，黄色左边框 4px（高风险 gate 红色系）。**渲染条件**：`TaskCard.status == awaiting_pi` 或存在 pending PiGate 时才渲染决策按钮组；任务运行中只渲染 `Pause / Park`（效果图"batch 83% 时常驻 Continue/Approve"禁止——运行中不存在可批之物）。**按钮权重**：approve / revision / reject 三按钮等视觉权重（同尺寸同字重，仅色相区分），不得让 approve 独占 primary 样式。**证据必经**：高风险 gate（Theory-to-Code 或 semantic_level 高危）中 approve 在证据入口（EvidenceReport / 验证链）被打开之前禁用并提示"请先查看证据"；打开行为记审计事件 |
 
 ### 4.5 StatusBar
 

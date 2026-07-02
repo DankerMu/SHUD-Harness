@@ -1,6 +1,11 @@
 # 分阶段开发路线图
 
-**原则：** 代码跟着 spec 走，spec 是权威源。71 份文档不同时激活——每个阶段只激活该阶段代码直接依赖的文档。阶段切换时，基于实现经验对齐下一阶段的 spec。
+**原则：** 代码跟着 spec 走，spec 是权威源。近百份文档不同时激活——每个阶段只激活该阶段代码直接依赖的文档。阶段切换时，基于实现经验对齐下一阶段的 spec。
+
+**Spec 冻结（2026-07-02）**：规格体系冻结于本轮体检修复后的状态。此后仅接受
+① bug 级修正（错误事实、自相矛盾）；② ADR 级例外（新增能力先立 ADR 说明为何必须先写 spec）。
+其余设计演进跟着代码走——实现期的决策直接改 canonical 规范并在 PR 中说明，不再开新文档。
+下一个制品是 Week 1 代码（含 ADR-0001 的策略门 spike，验收标准见 Phased_Plan Week 1）。
 
 **依据：** 本文档基于全部文档的交叉引用和依赖链深度分析生成。
 
@@ -11,6 +16,18 @@
 - [Traceability_Matrix.md](04_IMPLEMENTATION/Traceability_Matrix.md) — 需求 → 文档 → 代码 → 测试追踪
 
 ---
+
+## Theory-to-Code 卫星账并入（2026-07-02）
+
+原 `Theory_To_Code_Phase_Activation.md` 独立登记的 T2C 文档并入本账（卫星文档降为细节附录，一个系统一本激活账）：
+
+| Phase | 激活 T2C 文档 |
+|---|---|
+| Phase 1 | Theory_To_Code_Support_Schemas（schema placeholder，不强制 UI） |
+| Phase 3 | Theory_To_Code_Governance_Spec · Verification_Case_Spec · Theory_To_Code_API_Contracts · Theory_To_Code_Test_Plan |
+| Phase 4 | Controlled_Search_Boundary_Spec（accepted_for_search 前置检查） |
+| Phase 5 | Theory_To_Code_Traceability_Addendum + Report lineage 的 T2C 章节 |
+| Phase 6 | Scientific_Change_Playbooks（完整 playbook + PI gate drill） |
 
 ## 全程基座（始终激活）
 

@@ -4,8 +4,8 @@
 **适用范围：** PI/工程师在 Web 工作台中的完整交互体验
 **目标：** 从用户视角定义交互模式、信息层级、反馈机制、注意力管理和决策支持，使 PI 能高效地驱动科研任务而不被系统复杂性淹没。
 
-**效果图参考：** `docs/99_ARCHIVE/images/ChatGPT Image Apr 19, 2026, 10_53_22 PM.png`
-**关联文档：** `Interaction_Model.md`（布局架构）、`UI_Implementation_Spec.md`（视觉实现）、`Frontend_State_Design.md`（状态管理）
+**效果图参考：** `docs/05_PROPOSAL/assets/final-workbench-effect.png` 与 `scenario-*.png`（非 canonical，冲突以 spec 为准，见 UI_Implementation_Spec 头部裁决）
+**关联文档与分工（2026-07-02 声明）：** 布局/组件/tokens/响应式 → `UI_Implementation_Spec.md`（canonical）；交互协议（介入语义/事件）→ `Interaction_Model.md`；状态管理 → `Frontend_State_Design.md`；**本文只管流程、信息层级与注意力管理**——与前三者重叠处以它们为准
 
 ---
 
@@ -63,7 +63,7 @@ PI 打开浏览器 → 进入 Dashboard (/)
   ↓
 看到空态: 简洁插图 + "开始第一个科研任务"
   ↓
-点击 "New Conversation" 或直接在输入框打字
+点击 "New Task" 或直接在输入框打字（任务优先导航，UI_Implementation_Spec §4.1）
   ↓
 系统自动初始化 workspace（后台，PI 无感）
   ↓
@@ -353,7 +353,7 @@ PI: "把 roughness 范围扩大到 ±30%"  ← 引用当前分析上下文
 
 ### 8.2 任务切换
 
-SideNav 会话列表支持：
+SideNav 任务列表支持：
 
 ```text
 点击 → 切换到对应 session, 四栏全部更新

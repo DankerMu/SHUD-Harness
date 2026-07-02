@@ -88,12 +88,12 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 - 单流域指标提升 ≠ 模型改进 → Agent 不允许这样表述
 - 校准结果 ≠ 结构验证 → Agent 必须标注为 calibration
 
-## Current State (2026-04-27)
+## Current State (2026-07-02)
 
 - **方案**: v0.8.3 Web-first + TS 全栈，基于 Zero 扩展，含 Theory-to-Code 治理层
-- **代码**: 零。Zero 作为基础实现已就位，待扩展 SHUD 领域逻辑
-- **v0.8.3 新增**: Theory-to-Code 证据链（TheoryToCodeBundle → EquationSpec → NumericalSchemeSpec → ImplementationMapping → VerificationCase），search 后置于科学正确性
-- **下一步**: Week 1 — Hono API 骨架 + React 壳 + workspace 初始化 + TaskCard schema
+- **代码**: 零。Zero 作为基础实现已就位（submodule 追 development@13e25c1），待扩展 SHUD 领域逻辑
+- **Spec 冻结**: 规格体系已冻结（2026-07-02，对抗审查 41 修复 + 体检修复后）；仅收 bug 修正与 ADR 例外，规则见 `docs/Phased_Spec_Activation.md` 头部；架构决策入 `docs/adr/`
+- **下一步**: Week 1 — Hono API 骨架 + React 壳 + workspace 初始化 + TaskCard schema + 策略门 spike（验收五条见 Phased_Plan Week 1，判 ADR-0001 触发器）
 
 ## 已装能力
 

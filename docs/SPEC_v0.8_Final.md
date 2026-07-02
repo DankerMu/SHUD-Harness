@@ -2,9 +2,13 @@
 
 **日期**: 2026-04-24 **状态**: 可实施 **团队**: 1 PI + 1 工程师 + 0.5 数据支持
 
-本文件是唯一的实施基准。不依赖任何外部文档即可开始开发。
-
-> **Canonical Source 说明：** 本文件为自包含阅读基准。字段细节以 [Minimal_Schemas.md](03_SPEC/Minimal_Schemas.md) 和 [Support_Schema_Contracts.md](03_SPEC/Support_Schema_Contracts.md) 为权威源。Report export、notification、batch progress、PI decision comments 均为 support schema，不改变 8 个核心对象。
+> **地位声明（2026-07-02 降级重定位）**：本文是 **v0.8 定稿时刻的非规范导读快照**，用于快速建立
+> 全局图景——**不是实施基准，不随后续修复更新**。此后的治理加固（对抗审查 41 处修复：semantic floor
+> 观测集化、参数语义下限、终态 ACL、seq 分配器等）只落在 canonical 规范中，本文不回填。
+> 实施以 [CANONICAL_CONTRACTS](00_INDEX/CANONICAL_CONTRACTS.md) 指向的权威源为准：schema →
+> [Minimal_Schemas](03_SPEC/Minimal_Schemas.md) / [Support_Schema_Contracts](03_SPEC/Support_Schema_Contracts.md)，
+> 治理 → 03_SPEC 各专职规范，路线 → [Phased_Spec_Activation](Phased_Spec_Activation.md)。
+> 本文与权威源冲突时一律以权威源为准（本文示例中的 submodule commit 等事实均已过时）。
 
 ---
 

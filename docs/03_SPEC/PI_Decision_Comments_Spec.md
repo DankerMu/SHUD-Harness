@@ -71,6 +71,9 @@ request_revision → revision_requested
 
 ## 5. PiGateDecision schema
 
+> 投影声明：PiGateDecision 字段事实源 = [Support_Schema_Contracts.md](Support_Schema_Contracts.md)，
+> 本节为语义解释用投影；本文的 **PiDecisionMemoryNote 是权威源**（Minimal_Schemas 中为其投影）。
+
 ```ts
 interface PiGateDecision {
   decision_id: string;

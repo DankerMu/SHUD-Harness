@@ -44,6 +44,18 @@
 - Task snapshot skeleton
 ```
 
+### 策略门 spike（Week 1-2 内完成；ADR-0001 触发器 1 的判定标准）
+
+ADR-0001 的"工作量超预期→评估 SDK 迁移"必须可判定。spike 通过 = 以下五条全绿：
+
+1. 工具注册层中央策略门对**全部**工具调用生效（含 spawn/bash/edit；`ToolBase.beforeExecute` 包装或注册 wrap，拦截即返回工具错误，不改 Zero 内核）；
+2. 一条治理规则端到端穿透：路径写禁区（如 `data/raw/**`）在 bash 工具真实执行前被拒，拒绝事件出 WebSocket 并落 AuditEvent；
+3. spawn 剖面校验负例：传入超集 allowed_tools 的 spawn 被拒（Control_Kernel §5）；
+4. 策略门有独立单测（纯函数：ToolCall → allow/deny + reason）；
+5. 以上全部在 zero@13e25c1 上以 adapter/包装实现，Zero 源码 diff = 0。
+
+任一条在 2 人周内做不绿 → 触发 ADR-0001 revisit（Claude Agent SDK 迁移评估），不带病继续。
+
 ### 后端任务
 
 - `packages/core` 建立 Zod schema：TaskCard、Artifact、ErrorRecord、IdempotencyRecord、LockRecord

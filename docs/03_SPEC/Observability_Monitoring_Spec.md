@@ -242,6 +242,9 @@ ops.incident.updated
 
 ## 7. Support schema 草案
 
+> **投影声明**：本节 HealthStatus / HealthCheck / MetricSample / AlertRule / AlertRecord / OpsIncident
+> 为投影副本，字段事实源 = [Support_Schema_Contracts.md](Support_Schema_Contracts.md)；改动先落权威源。
+
 ```ts
 interface HealthStatus {
   status: "ok" | "degraded" | "not_ready" | "failed";

@@ -1,6 +1,6 @@
 # Theory-to-Code Phase Activation Addendum
 
-**状态**：建议补到 `docs/Phased_Spec_Activation.md` 与 `docs/04_IMPLEMENTATION/Phased_Plan.md`  
+**状态**：已并入主账（2026-07-02，见 Phased_Spec_Activation "Theory-to-Code 卫星账并入"节）；本文降为细节附录，激活时机以主账为准。  
 **目标**：明确 Theory-to-Code 规范在哪些阶段激活，避免阻塞 Week 1 skeleton，但也避免 Phase 4 search 先于科学链路。
 
 ## 1. Activation principle
