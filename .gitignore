@@ -21,6 +21,11 @@ node_modules/
 *.swp
 *.swo
 
+# Agent runtime projections (regenerate by reinstalling packs; canonical source: instructions/)
+.claude/
+.agents/
+.codex/
+
 # Large data
 *.dat
 *.nc
