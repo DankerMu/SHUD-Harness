@@ -3,7 +3,7 @@
 > **版本**: v0.8.3 (2026-04-27)
 > **技术栈**: TypeScript 全栈 (Bun + Hono + React)，基于 Zero Agent Runtime 扩展
 > **交互模式**: Web-first，实时对话 + 日志流 + PI 审批 + 报告阅读
-> **文档总量**: 4 个目录，95 份规范文档
+> **文档总量**: 4 个目录，96 份规范文档
 
 ---
 
@@ -82,6 +82,7 @@
 | [`Execution_Jobs_Runs.md`](../03_SPEC/Execution_Jobs_Runs.md) | 执行、长任务、RunRecord 与恢复 |
 | [`Runner_Adapter_Contracts.md`](../03_SPEC/Runner_Adapter_Contracts.md) | Runner 统一 adapter 接口（local/docker/slurm） |
 | [`Sandbox_and_Executor.md`](../03_SPEC/Sandbox_and_Executor.md) | 沙箱与执行器 |
+| [`Domain_CLI_Spec.md`](../03_SPEC/Domain_CLI_Spec.md) | shud-harness 领域命令面：T2 证据唯一生产通道、SHUD/rSHUD/AutoSHUD 包装与 CLI 版本治理 |
 | [`Park_Resume_Design.md`](../03_SPEC/Park_Resume_Design.md) | Park/Resume 长任务设计 |
 | [`Idempotency_Concurrency_Locking_Spec.md`](../03_SPEC/Idempotency_Concurrency_Locking_Spec.md) | 幂等、并发与锁 |
 

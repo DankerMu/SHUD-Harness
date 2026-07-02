@@ -51,14 +51,14 @@ SHUD-Harness/                    ← you are here
 - 输出: 二进制 `.dat` (~50 变量)
 - 示例: ccw, heihe, qhh
 
-### rSHUD (R, v2.2.0, 154 函数)
+### rSHUD (R, v2.5.0, 228 导出函数)
 - 前处理: DEM→网格→属性→SHUD 输入
 - 后处理: `read_output()` 读二进制, `wb.all()` 水量平衡
-- terra/sf 现代栈; 10 个测试文件
+- terra/sf 现代栈; 12 个测试文件
 
-### AutoSHUD (R 脚本, V3.x)
-- 7 步流水线; `.autoshud.txt` 配置驱动
-- 多源数据整合; 依赖 rSHUD
+### AutoSHUD (R 脚本, ≈v2.5.0-rc)
+- 5-6 步流水线 (Step0.1 可选 + Step1-5); `.autoshud.txt` 配置驱动
+- 多源数据整合; 依赖 rSHUD ≥2.5.0
 
 ## Agent Roles
 

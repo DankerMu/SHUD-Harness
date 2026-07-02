@@ -95,7 +95,7 @@
 | minor update | TS/Zod/React minor | 单独 PR，跑 schema/UI/report tests |
 | major update | React 20、Zod 5、TS 7 | ChangeRequest + migration notes + full CI |
 | native dependency update | DuckDB/SUNDIALS/GDAL | 必须跑 fixture/nightly，记录 StackLock |
-| submodule update | SHUD/rSHUD/AutoSHUD/zero | ChangeRequest + compatibility tests |
+| submodule update | SHUD/rSHUD/AutoSHUD/zero | ChangeRequest + Domain CLI 兼容 fixture 套件（[Domain_CLI_Spec](../03_SPEC/Domain_CLI_Spec.md) §7）+ 兼容矩阵上界更新；破坏性变更须同 PR 内完成 CLI 适配与版本 bump |
 
 ---
 
@@ -150,6 +150,7 @@ dependency lockfile drift check
 schema generate/check
 dependency audit
 secret scan
+domain CLI compat fixtures（仅 submodule bump PR，见 Domain_CLI_Spec §7）
 ```
 
 Nightly：

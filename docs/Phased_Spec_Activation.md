@@ -150,6 +150,7 @@ T0 + T1 + T2(WebSocket) + T3(UI dummy) 全部通过。
 | [Memory_Skills_Lite.md](03_SPEC/Memory_Skills_Lite.md) | MemoryNote、Skill 生命周期、run-shud-tiny-case |
 | [Cost_Inference_Budget.md](03_SPEC/Cost_Inference_Budget.md) | 三档预算、CostRecord |
 | [Research_Constitution.md](02_ARCHITECTURE/Research_Constitution.md) | 科研治理规则、禁止表述 |
+| [Domain_CLI_Spec.md](03_SPEC/Domain_CLI_Spec.md) | 本阶段交付的 "SHUD build/run wrapper + metrics artifact" 即此 CLI 的 shud/metrics 组；autoshud 组随首个数据准备任务启用 |
 
 **参考：** [SHUD_Codebase_Report.md](01_CODEBASE/SHUD_Codebase_Report.md) · [rSHUD_Codebase_Report.md](01_CODEBASE/rSHUD_Codebase_Report.md) · [AutoSHUD_Codebase_Report.md](01_CODEBASE/AutoSHUD_Codebase_Report.md)
 
@@ -353,10 +354,10 @@ T0-T5 全部通过，release regression 通过。
 | 基座 | 14 | 14 |
 | Phase 1 骨架 | 9 | 23 |
 | Phase 2 执行 | 14 | 37 |
-| Phase 3 科学 | 6 | 43 |
-| Phase 4 分析 | 6 | 49 |
-| Phase 5 治理 | 7 | 56 |
-| Phase 6 交付 | 13 | 69 |
+| Phase 3 科学 | 7 | 44 |
+| Phase 4 分析 | 6 | 50 |
+| Phase 5 治理 | 7 | 57 |
+| Phase 6 交付 | 13 | 70 |
 
 ---
 

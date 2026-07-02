@@ -73,6 +73,7 @@ runtime:
   gdal_version: "3.9.0"
 harness:
   version: "0.8.0"
+  cli_version: "0.1.0"                # 领域 CLI semver，见 Domain_CLI_Spec §5（T2 证据可追溯到生产它的 CLI 版本）
   prompt_pack: promptpack-0001
   skills_version: skills-0001
 llm:

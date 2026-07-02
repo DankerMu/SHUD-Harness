@@ -54,6 +54,9 @@ shud-harness patch bundle TASK-0001
 shud-harness patch revert TASK-0001
 ```
 
+领域科学命令组（shud/metrics/wb/compare/autoshud/version）与 patch 组共享同一 `shud-harness` 入口；
+命令面、result 契约与 "T2 证据只能由 CLI 生产" 规则见 [Domain_CLI_Spec](Domain_CLI_Spec.md)。
+
 ### 3.1 Mutation boundary
 
 不同任务类型的修改边界限制：

@@ -229,3 +229,15 @@ Implementation rule:
 ```text
 Markdown explains semantics; Zod schema is the executable source of truth after implementation.
 ```
+
+## 17. Domain CLI
+
+唯一来源：
+
+```text
+docs/03_SPEC/Domain_CLI_Spec.md
+```
+
+覆盖：命令面（shud/metrics/wb/compare/autoshud/version）、result YAML 契约、exit code 契约、
+SHUD 退出码映射、CLI↔三仓库兼容矩阵与版本治理、成果回流上游时的 CLI 适配义务。
+patch 组命令（diff/bundle/revert）语义仍以 `docs/03_SPEC/Sandbox_and_Executor.md` §3 为准，二者共享同一 `shud-harness` 入口。
