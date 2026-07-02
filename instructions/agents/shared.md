@@ -1,9 +1,3 @@
-<!--
-Generated from instructions/agents/shared.md and instructions/agents/claude.md
-by the project-instruction-bootstrap skill. Edit those sources, then re-run the skill.
-Do not hand-edit this file.
--->
-
 # SHUD-Harness
 
 ## Project Identity
@@ -122,9 +116,3 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 ## Observable Completion
 
 完工附一行 `Execution Summary: agents=...; skills=...; tools=...; verification=...; limits=...`；保持事实、不展开隐藏推理。
-
-## Claude Code Notes
-
-- 知识域类 skill（如调试方法论）自动触发率低，优先显式 `/skill-name` 调用。
-- 安装重叠 skill 时剪枝旧/被取代项，保持技能列表清晰。
-- Claude runtime 安装：skills -> `.claude/skills/`，agents -> `.claude/agents/`；改 canonical 后重装，勿编辑投影副本。
