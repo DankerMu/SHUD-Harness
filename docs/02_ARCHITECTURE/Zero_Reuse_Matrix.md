@@ -50,7 +50,7 @@ SHUD-Harness 以 Web 为唯一用户交互渠道，需要：
 | BashTool | [E] 直接复用 | 添加 workspace 路径约束 + data/raw 只读检查 |
 | MemoryTool | [O] 修改后复用 | 禁用默认 verified, 改为 draft + PI review |
 | Skills loader | [E] 直接复用 | 加载 5 个 SHUD skill |
-| Spawn/Wait Agent | [E] 直接复用 | Coordinator → Worker (编译/运行/解析) |
+| Spawn/Wait Agent | [E] 直接复用 | Coordinator → Worker (编译/运行/解析)；spawn 前置硬校验（depth/并发/剖面子集）经 `ZeroHarnessAdapter.beforeToolCall` 注入，见 Control_Kernel §5（对抗审查 A02-6） |
 | Web (Hono+React) | [E] 直接复用 | 添加 task/job/report/approval 页面 |
 | Session | [E] 直接复用 | 添加 Park/Resume 状态持久化 |
 | Closure Classifier | [O] 修改后复用 | 科研 closure (baseline? holdout? PI gate?) |

@@ -13,7 +13,8 @@ interface ParameterSet {
   label?: string;
   changes: Record<string, number | string | boolean>;
   baseline: boolean;
-  status: "queued" | "submitted" | "running" | "collecting" | "succeeded" | "failed" | "cancelled" | "blocked";
+  // timed_out 与 RunJob 终态对齐（对抗审查 A01-5：派生源缺态会把超时误映射为 failed）
+  status: "queued" | "submitted" | "running" | "collecting" | "succeeded" | "failed" | "timed_out" | "cancelled" | "blocked";
   job_id?: string;
   run_id?: string;
   metrics_artifact_id?: string;

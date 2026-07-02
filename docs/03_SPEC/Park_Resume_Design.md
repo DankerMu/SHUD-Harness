@@ -75,6 +75,24 @@ Park/Resume 涉及的阶段映射如下：
 
 RunJob 状态应与 TaskCard 区分。TaskCard 代表任务生命周期；RunJob 代表一次执行请求。
 
+## 2.1 plan.md 结构契约与修订规则
+
+对抗审查 A02-1/A02-2/A04-5：plan_cursor、幂等 key（Idempotency §4 的 plan_step_id）与
+"plan 以磁盘为准"都引用 plan 步骤，但步骤结构、修订权与重算算法此前无任何定义。契约：
+
+**步骤 ID**：plan.md 的可执行步骤必须带稳定 ID（`step-NNN`，创建时由 harness 按序分配）；
+修订可增删步骤，但**不得重编号、不得复用已分配 ID**。plan_cursor.completed_steps 与幂等 key 的
+plan_step_id 一律引用该 ID。
+
+**修订权与信任级**：plan.md 仅 Coordinator 可写，且仅在 Plan / Resume 阶段（Execute 期间要改
+计划须先让 TaskCard 回 planned，走 Control_Kernel 状态机）；每次修订产生 `plan.revised` 事件，
+记录 actor、revision 号与依据 refs——refs 不得为空且不得全为 T4（Context_Trust §4 高影响动作中
+机器可查的部分）。PI 要求修订走 TaskCard 回 planned 的既有路径。
+
+**cursor 重算（确定性集合运算，无 LLM 参与）**：resume 发现磁盘 revision > parked revision 时：
+`completed' = completed ∩ 新 plan 步骤 ID 集`；被删除的已完成步骤记入 resume warning
+（不重跑、不静默消失）；`next_step = 新 plan 中第一个 ∉ completed' 的步骤`。
+
 ## 3. parked_state 文件
 
 每次 park 必须落盘：
@@ -226,8 +244,8 @@ MVP 推荐默认：单 job 使用 `any_job_failed_or_completed`；batch 使用 `
 为了避免重复 collect 或重复 report，应使用 lock 文件：
 
 ```text
-workspace/tasks/<task_id>/locks/collect.lock
-workspace/tasks/<task_id>/locks/resume.lock
+workspace/jobs/<job_id>/locks/collect.lock    # job 级——batch 多 job 并发 collect 互不阻塞（对抗审查 A02-4，与 Idempotency §5 一致）
+workspace/tasks/<task_id>/locks/resume.lock   # resume 是 task 级动作，保持 task 级
 ```
 
 锁内容记录持有者、开始时间、过期时间。服务重启时，如果锁已过期，可以进入 recovery 流程。

@@ -35,6 +35,8 @@
 | 生成 RepoContextBrief | ✓ | ✓ | ✓ |  | 受 Coordinator 委托，仅只读 |
 | 生成 EvidenceReport 草稿 | ✓ | ✓ | ✓ |  | 受 Coordinator 委托 |
 | 接受 EvidenceReport | ✓ |  |  |  |  |
+| 驳回/要求修订 EvidenceReport（rejected/revision_requested） | ✓ |  |  |  |  |
+| 归档 EvidenceReport（archived，仅 accepted\|rejected 之后） | ✓ | ✓ |  |  |  |
 | 批准物理方程修改 | ✓ |  |  |  |  |
 | 批准默认参数修改 | ✓ |  |  |  |  |
 | 批准 benchmark baseline 覆盖 | ✓ |  |  |  |  |

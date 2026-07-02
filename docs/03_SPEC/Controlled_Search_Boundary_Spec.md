@@ -27,9 +27,14 @@ Controlled Search Loop 适用于：
 
 ```text
 If AnalysisPlan.mode in sensitivity | calibration | controlled_search
-and task/change semantic_level is high-risk:
+and (task/change semantic_level is high-risk
+     or parameter_effective_level is high-risk):     # 参数语义下限，见 Scientific_Change_Gating §1.2
   require TheoryToCodeBundle.status in accepted_for_search | accepted
 ```
+
+无 ChangeRequest（files_changed 为空集）的纯 search 任务由 `parameter_effective_level` 兜底：
+参数 floor 对 AnalysisPlan 全部参数键求值，未登记键直接 block（对抗审查 A05-1——
+否则空 files_changed 使 floor 机制完全不参与，search 前置被"依赖 ChangeRequest 时"限定语旁路）。
 
 ### 2.1 search_scope 绑定（AGA-P2）
 

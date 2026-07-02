@@ -212,6 +212,7 @@ docs/04_IMPLEMENTATION/Dependency_Versioning_Policy.md
 | Agent 行为 eval（golden 集 + gate 规则） | `docs/04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md` |
 | LLM 错误类别与降级语义 | `docs/03_SPEC/Error_Handling_Spec.md`（LLM 章节） |
 | StackLock.llm（模型版本锁） | `docs/03_SPEC/Minimal_Schemas.md` §2 |
+| PI 决策动词 ↔ 对象状态映射（request_revision → revision_requested） | `docs/03_SPEC/PI_Decision_Comments_Spec.md`（两个 Zod enum + 显式映射函数，禁止直接赋值） |
 
 ## 16. Theory-to-Code canonical sources
 

@@ -255,10 +255,12 @@ interface AnalysisProgressPayload {
   task_id: string;
   total: number;
   queued: number;
+  submitted: number;
   running: number;
   collecting: number;
   succeeded: number;
   failed: number;
+  timed_out: number;
   cancelled: number;
   blocked: number;
   updated_at: string;
@@ -266,7 +268,8 @@ interface AnalysisProgressPayload {
     parameter_set_id: string;
     job_id?: string;
     run_id?: string;
-    status: "queued" | "running" | "collecting" | "succeeded" | "failed" | "cancelled" | "blocked";
+    // 与 ParameterSet.status 派生源对齐，补 submitted/timed_out（对抗审查 A01-5）
+    status: "queued" | "submitted" | "running" | "collecting" | "succeeded" | "failed" | "timed_out" | "cancelled" | "blocked";
     parameter_changes: Record<string, unknown>;
     log_artifact_id?: string;
     metrics_artifact_id?: string;

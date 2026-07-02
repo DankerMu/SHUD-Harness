@@ -119,6 +119,8 @@ uncertainty_notes: "降水空间插值可能低估高海拔降水量"
 ```yaml
 job_id: JOB-0001                      # 格式: JOB-NNNN
 task_id: TASK-0001
+stack_id: STACK-0001                  # submit 时从 TaskCard 固化——RunRecord 的 stack/data 绑定由 job 携带，
+data_id: DATA-0001                    # collect 不回猜（对抗审查 A01-3）
 backend: local_direct | local_job | docker_job
 #   local_direct — 短命令，同步 bash 执行
 #   local_job    — 长命令，后台进程 + pid/status file + Park/Resume
@@ -372,10 +374,12 @@ interface AnalysisProgressPayload {
   task_id: string;
   total: number;
   queued: number;
+  submitted: number;
   running: number;
   collecting: number;
   succeeded: number;
   failed: number;
+  timed_out: number;
   cancelled: number;
   blocked: number;
   updated_at: string;
@@ -383,7 +387,9 @@ interface AnalysisProgressPayload {
     parameter_set_id: string;
     job_id?: string;
     run_id?: string;
-    status: "queued" | "running" | "collecting" | "succeeded" | "failed" | "cancelled" | "blocked";
+    // 与 ParameterSet.status 派生源对齐，补 submitted/timed_out（对抗审查 A01-5：
+    // 缺态会把超时误映射为 failed、已提交误映射为 queued）
+    status: "queued" | "submitted" | "running" | "collecting" | "succeeded" | "failed" | "timed_out" | "cancelled" | "blocked";
     parameter_changes: Record<string, number | string | boolean>;
     log_artifact_id?: string;
     metrics_artifact_id?: string;
@@ -412,6 +418,11 @@ interface PiGateDecision {
   created_at: string;
 }
 ```
+
+> **枚举映射（对抗审查 A01-2）**：`decision` 是动词态枚举（`request_revision`），对象状态是名词态
+> （PiGate.status / EvidenceReport.status 的 `revision_requested`）。两个集合不同，实现时必须是
+> 两个独立 Zod enum + 一个显式映射函数（canonical 映射表见 PI_Decision_Comments_Spec）；
+> 禁止 `report.status = decision` 直接赋值——枚举值不相等会静默丢迁移。
 
 ### MemoryNote(type=pi_decision)
 
@@ -454,7 +465,7 @@ interface EvidenceReport {
 // AnalysisPlan 扩展
 interface AnalysisPlan {
   progress_artifact_id?: string;
-  progress_summary?: Pick<AnalysisProgressPayload, "total" | "queued" | "running" | "collecting" | "succeeded" | "failed" | "cancelled" | "blocked">;
+  progress_summary?: Pick<AnalysisProgressPayload, "total" | "queued" | "submitted" | "running" | "collecting" | "succeeded" | "failed" | "timed_out" | "cancelled" | "blocked">;
 }
 ```
 

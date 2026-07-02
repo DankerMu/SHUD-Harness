@@ -40,7 +40,7 @@
 | ALERT-SEC-001 | secret pattern in generated artifact | detected | critical | quarantine artifact + incident |
 | ALERT-REPORT-001 | report guard failure | `>= 1` | warning | retry once |
 | ALERT-REPORT-002 | export generation failure | `>= 2` | error | runbook |
-| ALERT-BATCH-001 | batch failed cells | `> stop_condition` | error | notify PI, await decision |
+| ALERT-BATCH-001 | batch failed cells | 按 stop_condition 分支：`first_failure` → 首个 failed cell 即触发；`failure_rate_exceeds_threshold` → `failed/total > failure_rate_threshold`；`all_terminal` → 不告警（等 batch summary） | error | notify PI, await decision |
 | ALERT-LLM-001 | LLM API error rate | `> 20% for 10min` | error | dashboard + runbook（LLM provider 故障） |
 | ALERT-LLM-002 | LLM 单轮延迟 P95 | `> 60s for 15min` | warning | dashboard |
 | ALERT-LLM-003 | quota/余额耗尽或 auth 失效 | first failure | critical | 全部活跃 task 标注 + notify admin（走邮件，WebSocket 可能无人在看） |
@@ -48,6 +48,18 @@
 | ALERT-LLM-005 | 全局日 LLM 成本 | `> configured daily cap` | error | 暂停接受新 LLM 任务 + notify admin（运行中不杀） |
 | ALERT-AGENT-001 | agent no-progress block 触发 | per occurrence | warning | Feed + dashboard，附失败签名 |
 | ALERT-AGENT-002 | 同一 task llm_output_error | `>= 3` | error | 提示 prompt/schema 可能漂移，runbook |
+
+> ALERT-BATCH-001 注（对抗审查 A09-5）：原判据 `failed cells > stop_condition` 把整数与枚举比较、不可计算；
+> stop_condition 枚举与 failure_rate_threshold 数值字段见 Parameter_Set_And_Analysis_Run_Mapping §2。
+>
+> ALERT-LLM-004 注（对抗审查 A09-3）：与 Cost_Inference_Budget 的 2× 不是双写，是**有意两级**——
+> 2× 时 CostMonitor 置 `exceeded`（仅 UI 着色，不产生 alert 记录）；3× 才生成 alert（降噪）。
+> 两档均可配置，约束：alert 档 ≥ UI 档。
+>
+> ALERT-OOM-001 注（对抗审查 A09-6）：`soft limit` 分母按进程类型解析——job 进程：docker_job →
+> 容器 memory limit；local_job/local_direct → `RunJob.resources.max_memory_mb`；harness 服务自身 →
+> 配置项 `limits.service_rss_soft_mb`；SLURM（未实现）→ cgroup limit。解析不到上限 → 该进程该规则
+> `not_applicable`（在 health deep 标注），禁止拿"物理内存的 80%"充当分母。
 
 ---
 

@@ -207,7 +207,10 @@ interface AgentActivityFeedProps {
 
 interface ActivityEvent {
   eventId: string;
-  type: "agent.message" | "tool.started" | "tool.completed" | "tool.failed"
+  // 类型集合以 WebSocket_Protocol §3 事件注册表为唯一源，本处仅为投影（对抗审查 A08-5：
+  // 此前复写漏掉 plan.created 与 agent.turn.*，按类型实现会渲染不出计划卡片/thinking 指示）
+  type: "agent.message" | "agent.turn.started" | "agent.turn.completed" | "agent.no_progress"
+      | "plan.created" | "tool.started" | "tool.completed" | "tool.failed"
       | "job.submitted" | "job.status" | "runrecord.created" | "pi_gate.required"
       | "report.draft_created" | "repo_context.created" | "pi_gate.decision_recorded";
   source: "coordinator" | "repo_explorer" | "worker" | "coder" | "reviewer" | "client";

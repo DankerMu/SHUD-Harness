@@ -54,7 +54,7 @@ interface LockRecord {
 | `POST /api/jobs/:id/collect` | `job_id + output_digest_or_exit_marker` |
 | `POST /api/tasks/:id/report` | `task_id + run_record_ids + report_template_version` |
 | `GET /api/reports/:id/export` 触发生成 | `report_id + format + report_sha256 + export_options` |
-| Notification send | `task_id + trigger + target_id + recipient` |
+| Notification send | `task_id + trigger + target_id + recipient`（target_id 按 trigger 映射，critical_failure → error_id，见 Notification_Design §5，对抗审查 A08-4） |
 | PI gate decision | `gate_id + actor_user_id + decision + evidence_digest` |
 
 ### 4.1 LLM 步骤不幂等（AGA-P2）

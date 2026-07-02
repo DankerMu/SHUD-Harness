@@ -167,6 +167,8 @@ Language guard 是**枚举短语的确定性 lint**，必须清楚它能做什�
 - **因此**：guard 通过 ≠ 报告表述合规。语义级别的越权表述由两道后置防线兜底：lineage guard（关键陈述必须有 evidence_refs，见 [Report_Review_And_Evidence_Lineage_Spec.md](Report_Review_And_Evidence_Lineage_Spec.md)）和 **PI 审阅（最终防线）**。任何文档不得把 language guard 描述为科学表述合规的充分条件。
 
 禁止用语清单应作为配置维护（不硬编码在实现里），发现新的越权表述模式时由 PI/工程师追加，并同步补负例测试。
+结构化兜底：calibration 语义的 assertion 带派生字段 `analysis_mode`，其 assertion_type 受确定性限制
+（见 Report_Review_And_Evidence_Lineage §4，对抗审查 A05-3）。
 
 ## 6. 证据等级
 
@@ -218,11 +220,8 @@ GET /api/reports/:reportId/export?format=html
 GET /api/reports/:reportId/export?format=markdown
 ```
 
-如果报告状态不是 `accepted`，HTML 顶部必须显示：
-
-```text
-DRAFT — not accepted by PI
-```
+水印按报告状态查表显示（7 态各有对应标记，权威表见 [Report_Export_Spec](Report_Export_Spec.md) §4——
+布尔判据 `status != accepted` 已废除，它会把 accepted 后归档的报告误标为草稿，对抗审查 A06-6）。
 
 HTML 可内联小型 PNG/SVG 图表和 metrics summary，但不得内联完整 stdout/stderr、raw SHUD binary output、大型 timeseries 或 secrets。
 
@@ -267,7 +266,11 @@ draft
 → accepted | revision_requested | rejected | archived
 ```
 
-`accepted` 只能由 PI 或授权用户设置。
+**终态 ACL（对抗审查 A06-3）**：四个终态转换（accepted / revision_requested / rejected / archived）
+一律只能由 PI 或授权用户经 decision/archive endpoint 设置，API 层对 agent principal 返回 403；
+agent 最多把报告推进到 `awaiting_pi`。原规则只约束 accepted，留下 agent 单方面以
+rejected/archived 终结报告、绕过 PI 审阅的通道。`archived` 仅对已达 accepted|rejected 的报告可用
+（Minimal_Schemas §7 状态流转），操作者与时间记录进 decision_history。
 
 ## 10. 报告元数据
 

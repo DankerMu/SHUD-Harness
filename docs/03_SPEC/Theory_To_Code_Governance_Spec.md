@@ -73,6 +73,12 @@ draft
 | `rejected` | 不接受该变更链路 |
 | `archived` | 历史记录，保留证据 |
 
+**Review 态推进的角色门（对抗审查 A05-5）**：五个 `*_review` 态到下一态的迁移只能由非 agent
+principal（engineer/PI）触发——agent（含 coordinator）只能提交材料把 bundle 推**进** review 态，
+不能把它推**出**，与"agent 不得 accept 自己的 bundle"同源；每次迁移记录 actor 进 AuditEvent。
+`verification_ready → verification_running → verification_review` 属执行流转，agent 可触发；
+`awaiting_pi → 终态`已由 PI-only ACL 覆盖。
+
 ## 4. Bundle schema
 
 ```ts

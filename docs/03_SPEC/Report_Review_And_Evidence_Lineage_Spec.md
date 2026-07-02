@@ -37,6 +37,8 @@ interface ReportAssertion {
   evidence_level: "deterministic" | "llm_summary" | "pi_confirmed" | "hypothesis" | "unsupported";
   evidence_refs: string[];
   generated_by: "template" | "deterministic_script" | "llm" | "pi" | "reviewer";
+  analysis_mode?: "sensitivity" | "calibration" | "benchmark" | "comparison";
+  // analysis_mode 由 lineage 生成器从 evidence_refs 指向的 AnalysisPlan.mode 派生，非 LLM 自填
 }
 ```
 
@@ -96,7 +98,22 @@ for each key claim:
   require evidence_level != unsupported
   if evidence_level == llm_summary:
     require deterministic source underneath
+  if analysis_mode == calibration:
+    require assertion_type in (run_fact, metric_fact, search_result, limitation)
+    # verification_result / validation_context 直接阻断
 ```
+
+校准语义的结构化兜底（对抗审查 A05-3）：narrative 换述拦不住（language guard 自认，
+Report_Generation §5.2），但结构化字段拦得住——`analysis_mode` 从 AnalysisPlan 派生非 LLM 自填，
+calibration 产物想以 verification/validation 类型入账是确定性可拒的。语义级换述仍由
+Reviewer (L) 项 + PI 兜底。
+
+**evidence_level 派生校验（对抗审查 A04-1）**：`evidence_level` 不是自填即生效——lineage guard
+解析 evidence_refs 的目标对象类型，派生该 assertion 的级别上限：refs 全部指向 T2 确定性产物
+（CLI result / RunRecord / artifact manifest，带 cli_version 戳）→ 才可标 `deterministic`；
+refs 含 T3 对象（draft note / session digest / LLM 叙述）→ 上限 `llm_summary`；
+`pi_confirmed` 要求 refs 含 PiGateDecision 或 pi_decision note。自填级别高于派生上限 → 拒绝进入
+reviewed。这是 Context_Trust §2 来源链规则在 guard 里的确定性执行点。
 
 ## 5. Report export
 

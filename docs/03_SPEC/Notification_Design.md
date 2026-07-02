@@ -92,6 +92,11 @@ task:TASK-003:critical_failure:ERR-001:pi@example.com
 
 同一 dedupe key 的通知若已 `sent`，服务重启、watcher retry 或 collect retry 后不得重复发送。
 
+`target_id` 取值映射（与 Idempotency §4 的 key 公式 `task_id + trigger + target_id + recipient`
+一一对应，对抗审查 A08-4）：report 类 trigger → report_id；analysis 类 → plan_id；job 类 → job_id；
+`critical_failure` → **error_id**——每个独立 critical 错误首次即报；同一 task 24h 内 critical 通知
+超过 3 条后并入 daily digest（防错误风暴轰炸邮箱），抑制发生时 dashboard 仍逐条可见。
+
 ## 6. 邮件内容
 
 邮件必须短、可追溯、低敏感。

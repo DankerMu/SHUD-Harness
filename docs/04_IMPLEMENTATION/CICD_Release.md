@@ -207,11 +207,17 @@ release:
     model_id: ...              # 完整标识，禁止浮动别名
     params_digest: ...
     prompt_pack_digest: ...
-  behavior_eval:               # 见 Agent_Behavior_Eval_Spec
+  behavior_eval:               # 见 Agent_Behavior_Eval_Spec；适用条件见下注
     governance_pass_rate: ...  # 必须 100%
     injection_pass_rate: ...   # 必须 100%
     behavior_pass_rate: ...
 ```
+
+**behavior_eval gate 的适用条件（对抗审查 A10-1）**：行为 eval 需要真实 LLM 调用，而 §14 版本策略的
+0.8.1-skeleton 与 0.8.2-tiny-run 无 LLM runtime，无法产生通过率。这两个 release 的发布 gate 为
+确定性测试层全绿（对应 Testing_Strategy T0-T4），manifest 中 behavior_eval 各字段填
+`not_applicable (no_llm_runtime)`。自首个含 LLM runtime 的 release（0.8.3-zero-agent）起，
+governance/injection 100% 成为无豁免的发布前提——"100% 是发布前提"与"skeleton 版先行"由此不再自相矛盾。
 
 ## 13. Artifact 发布
 

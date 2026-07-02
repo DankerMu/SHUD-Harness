@@ -3,7 +3,7 @@
 > **版本**: v0.8.3 (2026-04-27)
 > **技术栈**: TypeScript 全栈 (Bun + Hono + React)，基于 Zero Agent Runtime 扩展
 > **交互模式**: Web-first，实时对话 + 日志流 + PI 审批 + 报告阅读
-> **文档总量**: 4 个目录，96 份规范文档
+> **文档总量**: 4 个目录，97 份规范文档
 
 ---
 
@@ -30,6 +30,7 @@
 | [`Spec_Gap_Audit_v0_8_1.md`](Spec_Gap_Audit_v0_8_1.md) | v0.8.1 规格缺口审查 |
 | [`PRD_Spec_Gap_Audit_v0_8_2.md`](PRD_Spec_Gap_Audit_v0_8_2.md) | v0.8.2 PRD/Spec 缺口审查 |
 | [`Agent_System_Audit_v0_8_3.md`](Agent_System_Audit_v0_8_3.md) | v0.8.3 Agent 系统本质审计（10 维 / 5 P0 / 8 P1 / 8 P2，advisory） |
+| [`Adversarial_Design_Review_v0_8_3.md`](Adversarial_Design_Review_v0_8_3.md) | v0.8.3 对抗性设计审查（10 方面红队 + 逐条对抗核验：17 确认 / 24 存疑 / 18 证伪，advisory） |
 | [`PRD_Spec_Merge_Map.md`](PRD_Spec_Merge_Map.md) | v0.8.2 补充文档合并地图 |
 | [`Requirements_Catalog.md`](Requirements_Catalog.md) | 正式需求目录（US/FR/NFR/DR/GR/IR/TR 编号体系） |
 | [`Requirements_Numbering_Conventions.md`](Requirements_Numbering_Conventions.md) | 需求编号、状态、优先级和 traceability 规则 |

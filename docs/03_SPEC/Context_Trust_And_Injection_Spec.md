@@ -33,6 +33,8 @@
 | **T4** | 外部/仓库原始内容 | 仓库文件原文、数据文件内容、日志原文、stderr、下载内容 |
 
 判定规则：内容的信任级别取其**来源链上最低**的一级（T2 的 metrics 若由解析 T4 日志得出，数值本身仍是 T2——确定性脚本是信任提升点；但被引用的日志原文片段仍是 T4）。
+同理，accepted MemoryNote(T1) 正文中内嵌的日志/文件原文引用仍是 T4——PI accept 提升的是 note 的
+结论陈述，不洗白其引用的原文；引用片段在 note 存储时保留 external_content 定界（对抗审查 A04-2）。
 信任提升点的 canonical 载体是领域命令面：进入证据位的 T2 产物只能由 [Domain_CLI_Spec](Domain_CLI_Spec.md) 定义的命令生产（result 带 cli_version 戳，lineage guard 据此校验）。
 
 ## 3. 进入 context 的组装规则
@@ -118,6 +120,7 @@ session_digest:
 规则：
 
 - 摘要器输入仅限 T0/T1 内容，T4 不进摘要器——摘要器本身也是 LLM 调用，同样是注入面（负例见 §7）；
+  T1 note 正文内嵌的 T4 定界片段在进摘要器前剥除（§2 判定规则：accepted 不提升引用原文，对抗审查 A04-2）；
 - digest 以 T3 标记注入（`pi_confirmed` 后按 T1），与 draft note 同等待遇：可作线索、不作证据，
   lineage guard 拒绝其作为 observation 唯一依据（注入标记格式见 Memory_Skills_Lite §8.1）；
 - digest 在 Research Context 面板可见、PI 可编辑（见 Interaction_Model §3A）；

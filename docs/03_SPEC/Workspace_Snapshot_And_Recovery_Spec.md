@@ -28,10 +28,16 @@ interface TaskSnapshot {
   active_analysis_plan_id?: string;
   latest_report_id?: string;
   pending_pi_gates: string[];
-  latest_seq?: number;
+  latest_seq: number;   // 必填：snapshot 落盘时在事件总线临界区读取（WebSocket_Protocol §2.1，对抗审查 A08-3）
   updated_at: string;
 }
 ```
+
+**seq 一致性契约（对抗审查 A08-3）**：snapshot 生成与 `latest_seq` 读取在事件总线同一临界区完成
+（WebSocket_Protocol §2.1 的单一分配点），恢复侧从 `latest_seq + 1` replay 即无缝。
+events.ndjson 裁剪规则：只允许裁到**最新 snapshot 的 latest_seq** 为止——先出新 snapshot，
+才可裁其之前的事件，保证 `[latest_seq + 1, now]` 永远可回放；replay gap（§4）只在
+"请求的 seq 早于全部现存 snapshot"时出现。
 
 ## 3. Session event replay
 
@@ -64,9 +70,13 @@ workspace/sessions/SESSION-001/events.ndjson
 前端必须：
 
 1. 丢弃旧 reducer 缓存；
-2. 拉取 snapshot；
-3. 重新建立 WebSocket；
-4. 从 snapshot 的 `latest_seq` 后继续 replay。
+2. 拉取 snapshot（实体状态：任务/job/run/report/gates）；
+3. 经事件回放接口补齐叙事流：`GET /api/sessions/:id/events?before_seq=<latest_seq>&limit=N`
+   分页读取 events.ndjson 的用户可见事件——snapshot 是实体快照、不含 activityStore，
+   B 栏 AgentActivityFeed 的历史必须走本接口重建（首屏取最近 N 条，向上翻页取更早；
+   对抗审查 A08-2：否则 seq 过期后 B 栏必然空白）；
+4. 重新建立 WebSocket；
+5. 从 snapshot 的 `latest_seq` 后继续 replay。
 
 ## 5. Service startup recovery
 

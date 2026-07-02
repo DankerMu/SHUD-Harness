@@ -104,11 +104,19 @@ Agent 已暂停，不继续消耗 LLM token。`runtime_phase = waiting_for_job`�
 - no_progress_detection: 连续 3 步无进展 → 自动 block（判定语义见 §5.1）；
 - max_spawn_depth: 1（结构上仅 coordinator 有 spawn 权限；运行时硬校验兜底，
   防 prompt 越权或实现失误导致委派循环）；
-- max_concurrent_subagents: 3（超出排队执行，不并发爆炸）。
+- max_concurrent_subagents: 3（超出排队执行，不并发爆炸）；
+- spawn_profile_subset: spawn 传入的 allowed_tools 必须 ⊆ 该角色 canonical 剖面
+  （Roles_and_Boundaries §0）；超集即拒绝 spawn。数量限制防爆炸，本项防越权——
+  "剖面只能减不能加"由此获得执行点（对抗审查 A03-4）。
 ```
 
 spawn 上限为运行时校验而非仅靠角色剖面（对标 hermes-agent 吸收）：角色剖面说"不该发生"，
 kernel 校验保证"发生了也过不去"。
+
+**校验注入点（对抗审查 A02-6）**：spawn/wait 是工具调用，上述硬校验全部实现在
+`ZeroHarnessAdapter.beforeToolCall`（Zero_Reuse_Matrix 的 adapter 接口）——spawn 工具执行前对
+depth / 并发数 / allowed_tools 剖面求值，拒绝即返回工具错误，不改 Zero 内核。
+"[E] 直接复用"指复用 spawn 机制本身，不指复用其无校验的默认通路。
 
 ### 5.1 无进展（no-progress）判定器
 
@@ -125,6 +133,10 @@ kernel 校验保证"发生了也过不去"。
 
 **失败签名（failure signature）**：`sha256(command_digest + exit_code + stderr 错误类别)`。
 同一 task 内重复出现相同失败签名的步直接计为无进展步——同一面墙撞第二次不是进展。
+
+**新颖失败预算（对抗审查 A02-5）**：第 4 类事件单独设限——连续仅靠"新失败签名"维持进展的步数 ≤ 3。
+超出后新失败签名不再计为进展事件（签名含 command_digest，换个命令就能刷出新签名；
+无限换姿势撞墙 ≠ 接近目标），此时只有 1–3 类事件能清零计数器；窗口在任一 1–3 类进展事件出现时重置。
 
 **计数规则**：连续无进展步计数器在任一进展事件时清零；达到 3 时 TaskCard → blocked，
 生成 partial report 并附最近失败签名列表供人工检查。

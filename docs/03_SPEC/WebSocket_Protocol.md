@@ -35,6 +35,20 @@ interface WsEvent<T = unknown> {
 
 `seq` 在 session 内单调递增。前端 reducer 应按 seq 应用事件，重复事件按 `event_id` 去重。
 
+### 2.1 seq 分配器（对抗审查 A08-1）
+
+"seq 单调"不是假设，是下述实现契约的结果——此前该分配器从未被设计，仅在测试计划里出现过一次：
+
+- **单一分配点**：所有事件生产者（agent loop、job watcher、tool executor、server）不自取 seq，
+  一律经进程内事件总线 `emit(event)` 提交；总线是 session 内 seq 的唯一分配者。
+- **分配与落盘同临界区**：总线在同一临界区内完成 `seq = ++counter` → append 到 events.ndjson →
+  broadcast。先落盘后广播：崩溃时磁盘领先于客户端，replay 语义安全。
+- **重启恢复**：启动时从 events.ndjson 尾行读最大 seq 初始化计数器；ndjson 缺失 → 用 session
+  snapshot.latest_seq；二者皆无 → 0。计数器只前进不回退。
+- **单进程假设显式化**：MVP 后端单进程（Bun），总线为进程内单例即可；未来多进程部署需把分配点
+  移到共享存储（文件锁/DB 序列），届时本节升版。
+- 测试锚点：并发 emit 无重号；崩溃重启后 seq 续增不回退（Phase_By_Phase_Test_Plan "seq allocator"）。
+
 ## 3. 主要消息类型
 
 | 类型 | 方向 | 用途 |

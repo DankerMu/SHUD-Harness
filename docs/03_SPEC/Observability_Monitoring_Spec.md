@@ -52,7 +52,7 @@
 | workspace path exists | `not_ready` |
 | workspace writable | `not_ready` |
 | artifact directory writable | `not_ready` |
-| DuckDB / warehouse can open | `not_ready` 或 `degraded` |
+| DuckDB / warehouse can open | `degraded`——warehouse 可从文件系统重建、不在关键路径（对抗审查 A09-2，与 Runbook"不停主流程"一致） |
 | event store append/read | `not_ready` |
 | background watcher running | `degraded` |
 | schema version compatible | `not_ready` |

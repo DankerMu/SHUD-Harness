@@ -136,6 +136,10 @@ Collect 必须幂等。重复 collect 同一 job 不得生成多个 RunRecord。
 
 没有 RunRecord 的结果，不进入 report 的”已验证结果”部分。
 
+`numerical_health` 的生产者是 Domain CLI 的 `wb --health`（[Domain_CLI_Spec](Domain_CLI_Spec.md) §2.2）：
+固定加载 5 个状态变量求负状态/钳零特征，不受调用方变量选择（--vars）影响——
+"必需字段无生产者"缺口的封堵（对抗审查 A07-2）。
+
 ## 9. Sandbox 执行器
 
 Sandbox Executor 是所有命令执行的统一入口，覆盖 `sandbox.exec`、`shud.build`、`shud.run`、`rshud.*`、`autoshud.*` 工具。
@@ -163,27 +167,48 @@ sandbox_exec_request:
 
 ### 9.2 路径策略
 
-允许路径：
+路径按读/写分离（对抗审查 A03-1：原表把 repos/*、runs/* 整体列为可写，使 mutation boundary 的
+"禁改 solver source / baseline"没有路径级执行点）：
+
+允许写：
 
 ```text
-workspace/repos/*
-workspace/runs/*
+workspace/tasks/TASK-*/worktrees/*     # 改码唯一入口（coder）
+workspace/tasks/TASK-*/scratch/*
+workspace/tasks/TASK-*/artifacts/*
 workspace/artifacts/*
-workspace/tasks/*
 workspace/tmp/*
+workspace/runs/<run_id>/*              # 仅 owning job 运行期间；job 终态或 collected 后转只读
 ```
 
-默认禁止：
+只读（写一律拒绝，不走风险分级）：
 
 ```text
-~/.ssh
-system root paths
-raw data overwrite paths
-outside workspace writes
-.git directory destructive operations
+workspace/repos/*                      # 三仓库共享参考副本——一切修改经 task worktree
+workspace/runs/* 中已 collected 或 baseline 标记的 run 目录    # baseline 解除只读需 PI gate
+data/raw/*                             # registered DataProvenance 只读挂载
+config/*                               # 含 semantic_level_floor.yaml
+~/.ssh、system root paths、.git 破坏性操作、workspace 外一切写
 ```
 
-如需读取 raw data，应通过 registered DataProvenance path，以只读方式挂载或引用。
+run 目录的只读转换在 collect 完成时执行（标记 + 执行器查表）；baseline run 由
+Sensitivity_Calibration_Benchmark 的 baseline 注册标记。§9.3 的风险分级只对允许写集合内的命令生效，
+不再充当跨只读区的放行通道。
+
+### 9.2.1 按角色的执行模式（对抗审查 A03-3）
+
+sandbox.exec 按发起 agent 的角色施加确定性写策略，不靠 prompt 约定：
+
+| 角色 | 写策略 |
+|---|---|
+| repo_explorer | 只读模式：一切写路径拒绝（产物 RepoContextBrief 经对象 API 落盘，不经 shell） |
+| reviewer | 只读模式，同上 |
+| worker | 允许写集合，除 worktrees/*（改码不属 worker 剖面） |
+| coder | 允许写集合（worktree 为主入口） |
+| coordinator | 不直接执行 sandbox 命令（Roles_and_Boundaries §0） |
+
+Roles_and_Boundaries §0 的 denied_actions（write/edit）由本表映射为路径判定——
+"只读"由沙箱层强制，system prompt 里的只读声明只是给 LLM 的提示，不是防线。
 
 ### 9.3 命令风险分类（四级）
 

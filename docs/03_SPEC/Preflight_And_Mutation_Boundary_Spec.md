@@ -43,6 +43,8 @@ interface PreflightCheck {
 ```text
 workspace_allowed_path
 worktree_clean_or_expected_patch
+files_changed_matches_worktree_diff        # ChangeRequest.files_changed == git diff 观测集（Scientific_Change_Gating §1.1 规则 0/4）
+analysis_parameters_within_registry        # AnalysisPlan 参数键全部登记且参数 floor 求值完成（同规范 §1.2）
 theory_bundle_required_if_high_risk
 theory_bundle_status_allows_search
 baseline_required_for_improvement_claim
@@ -68,6 +70,11 @@ else:
   write preflight artifact
   continue submit
 ```
+
+**Preflight 是 submit 前的门，不是运行期防线（对抗审查 A03-5）**：job 运行期对 baseline / raw /
+collected 的写入由沙箱路径策略拦截——执行器 spawn 的 job 进程继承与 agent 命令相同的路径约束
+（Execution_Jobs_Runs §9.2 / §9.2.1；local 后端以权限位/只读目录落实，docker 后端以 ro bind mount 落实）。
+分工：preflight 挡计划性错误（提交前可判定的），路径层挡运行期越界（提交后才发生的）。
 
 ## 5. 验收标准
 

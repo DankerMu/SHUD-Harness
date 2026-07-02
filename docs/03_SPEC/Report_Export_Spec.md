@@ -46,21 +46,20 @@ HTML 应包含：
 - generated_at 和 exported_at；
 - Harness version。
 
-## 4. Draft watermark
+## 4. 状态水印
 
-如果报告状态不是 `accepted`，HTML 顶部必须显示：
+水印按报告状态查表（对抗审查 A06-6：原布尔判据 `status != accepted` 会把 accepted 后归档的报告
+误标为草稿，也不传达 rejected 这一关键得多的状态）：
 
-```text
-DRAFT — not accepted by PI
-```
+| status | 水印（中文 UI 对应） |
+|---|---|
+| draft / reviewed / awaiting_pi | `DRAFT — not accepted by PI`（草稿 — 尚未由 PI 接受） |
+| accepted | 无水印 |
+| revision_requested | `REVISION REQUESTED — returned by PI`（修订中 — PI 要求修订） |
+| rejected | `REJECTED by PI`（已被 PI 驳回） |
+| archived | 按归档前终态：曾 accepted → `ARCHIVED — accepted by PI on <date>`；曾 rejected → `ARCHIVED — rejected` |
 
-中文 UI 可显示：
-
-```text
-草稿 — 尚未由 PI 接受
-```
-
-该水印不能只靠 CSS 隐藏，应作为 HTML 可见正文的一部分。
+`status_at_export` 与归档前终态取自 decision_history。该水印不能只靠 CSS 隐藏，应作为 HTML 可见正文的一部分。
 
 ## 5. 图表内联规则
 
