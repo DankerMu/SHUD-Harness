@@ -7,8 +7,10 @@ import argparse
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,8 +38,40 @@ class GateResult:
     summary: str
 
 
+@dataclass(frozen=True)
+class SubmoduleState:
+    name: str
+    path: str
+    gitlink: str | None
+    head: str | None
+    branch: str | None
+    branchish: str | None
+    dirty: bool | None
+    status_short: tuple[str, ...]
+    worktree_top_level: str | None
+    errors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RepoState:
+    path: str
+    git_top_level: str | None
+    is_top_level: bool
+    head: str | None
+    branch: str | None
+    branchish: str | None
+    dirty: bool | None
+    status_short: tuple[str, ...]
+    errors: tuple[str, ...]
+    submodules: tuple[SubmoduleState, ...]
+
+
 def pass_gate(summary: str) -> GateResult:
     return GateResult("pass", summary)
+
+
+def pass_with_notes_gate(summary: str) -> GateResult:
+    return GateResult("pass_with_notes", summary)
 
 
 def block_gate(summary: str) -> GateResult:
@@ -65,6 +99,13 @@ def read_contract(repo_root: Path, relative_path: str) -> tuple[str | None, Gate
         return None, block_gate(f"Cannot read required contract file {relative_path}: {exc}.")
 
 
+def contract_has_crlf(repo_root: Path, relative_path: str) -> bool:
+    try:
+        return b"\r\n" in (repo_root / relative_path).read_bytes()
+    except OSError:
+        return False
+
+
 def missing_tokens(text: str, tokens: list[str], *, case_sensitive: bool = True) -> list[str]:
     haystack = text if case_sensitive else text.lower()
     misses: list[str] = []
@@ -73,6 +114,176 @@ def missing_tokens(text: str, tokens: list[str], *, case_sensitive: bool = True)
         if needle not in haystack:
             misses.append(token)
     return misses
+
+
+def code_blocks(text: str) -> tuple[str, ...]:
+    return tuple(
+        match.group("body")
+        for match in re.finditer(r"^```[^\n]*\n(?P<body>.*?)^```", text, re.MULTILINE | re.DOTALL)
+    )
+
+
+def has_interface_definition(text: str, interface_name: str) -> bool:
+    interface_re = re.compile(rf"^\s*(?:export\s+)?interface\s+{re.escape(interface_name)}\s*\{{", re.MULTILINE)
+    return any(interface_re.search(block) for block in code_blocks(text))
+
+
+def find_interface_definition(
+    repo_root: Path, interface_name: str, candidate_paths: tuple[str, ...]
+) -> tuple[str | None, str | None]:
+    read_errors: list[str] = []
+    for relative_path in candidate_paths:
+        text, error = read_contract(repo_root, relative_path)
+        if error:
+            read_errors.append(f"{relative_path}: {error.summary}")
+            continue
+        assert text is not None
+        if has_interface_definition(text, interface_name):
+            return relative_path, None
+    if read_errors and len(read_errors) == len(candidate_paths):
+        return None, "; ".join(read_errors)
+    return None, None
+
+
+def git_stdout(args: list[str], cwd: Path) -> tuple[str | None, str | None]:
+    result = run_command(["git", "-C", str(cwd), *args])
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        return None, detail or f"git {' '.join(args)} failed"
+    return result.stdout.strip(), None
+
+
+def git_head(cwd: Path) -> tuple[str | None, str | None]:
+    output, error = git_stdout(["rev-parse", "--verify", "HEAD"], cwd)
+    if error:
+        return None, error
+    if output and re.fullmatch(r"[0-9a-fA-F]{40}", output):
+        return output, None
+    return None, f"invalid HEAD {output!r}"
+
+
+def git_branch(cwd: Path) -> str | None:
+    output, error = git_stdout(["symbolic-ref", "--short", "-q", "HEAD"], cwd)
+    if error or not output:
+        return None
+    return output
+
+
+def git_branchish(cwd: Path, branch: str | None) -> str | None:
+    if branch:
+        return branch
+    output, error = git_stdout(["describe", "--tags", "--always", "--dirty"], cwd)
+    if error:
+        return None
+    return output
+
+
+def git_status_short(cwd: Path) -> tuple[str, ...]:
+    result = run_command(["git", "-C", str(cwd), "status", "--short", "--untracked-files=all"])
+    if result.returncode != 0:
+        return ()
+    return tuple(line for line in result.stdout.splitlines() if line)
+
+
+def git_top_level(cwd: Path) -> tuple[str | None, str | None]:
+    return git_stdout(["rev-parse", "--show-toplevel"], cwd)
+
+
+def superproject_gitlink(repo_root: Path, name: str) -> tuple[str | None, str | None]:
+    result = run_command(["git", "-C", str(repo_root), "ls-tree", "HEAD", "--", name])
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        return None, detail or f"cannot read gitlink for {name}"
+    line = result.stdout.strip()
+    if not line:
+        return None, "missing superproject gitlink"
+    match = re.fullmatch(r"160000\s+commit\s+([0-9a-fA-F]{40})\t(.+)", line)
+    if not match:
+        return None, f"expected 160000 commit gitlink, got {line!r}"
+    if match.group(2) != name:
+        return None, f"gitlink path mismatch: expected {name}, got {match.group(2)}"
+    return match.group(1), None
+
+
+def collect_repo_state(repo_root: Path) -> RepoState:
+    root_errors: list[str] = []
+    root_top_level, top_error = git_top_level(repo_root)
+    if top_error:
+        root_errors.append(top_error)
+    root_resolved = str(repo_root.resolve())
+    top_resolved = str(Path(root_top_level).resolve()) if root_top_level else None
+    is_top_level = top_resolved == root_resolved
+    if root_top_level and not is_top_level:
+        root_errors.append(f"repo_root is not git worktree top-level: top-level is {root_top_level}")
+
+    root_head, head_error = git_head(repo_root)
+    if head_error:
+        root_errors.append(head_error)
+    root_branch = git_branch(repo_root)
+    root_branchish = git_branchish(repo_root, root_branch)
+    root_status = git_status_short(repo_root)
+
+    submodules: list[SubmoduleState] = []
+    for name in EXPECTED_SUBMODULES:
+        submodule_path = repo_root / name
+        errors: list[str] = []
+        gitlink, gitlink_error = superproject_gitlink(repo_root, name)
+        if gitlink_error:
+            errors.append(gitlink_error)
+
+        head: str | None = None
+        branch: str | None = None
+        branchish: str | None = None
+        dirty: bool | None = None
+        status_short: tuple[str, ...] = ()
+        worktree_top_level: str | None = None
+
+        if not submodule_path.is_dir():
+            errors.append("missing directory")
+        else:
+            worktree_top_level, worktree_error = git_top_level(submodule_path)
+            if worktree_error:
+                errors.append(f"not a git worktree: {worktree_error}")
+            else:
+                expected_top = str(submodule_path.resolve())
+                actual_top = str(Path(worktree_top_level).resolve()) if worktree_top_level else None
+                if actual_top != expected_top:
+                    errors.append(f"submodule worktree top-level mismatch: {worktree_top_level}")
+            head, sub_head_error = git_head(submodule_path)
+            if sub_head_error:
+                errors.append(f"no checked-out commit: {sub_head_error}")
+            branch = git_branch(submodule_path)
+            branchish = git_branchish(submodule_path, branch)
+            status_short = git_status_short(submodule_path)
+            dirty = bool(status_short)
+
+        submodules.append(
+            SubmoduleState(
+                name=name,
+                path=str(submodule_path),
+                gitlink=gitlink,
+                head=head,
+                branch=branch,
+                branchish=branchish,
+                dirty=dirty,
+                status_short=status_short,
+                worktree_top_level=worktree_top_level,
+                errors=tuple(errors),
+            )
+        )
+
+    return RepoState(
+        path=str(repo_root),
+        git_top_level=root_top_level,
+        is_top_level=is_top_level,
+        head=root_head,
+        branch=root_branch,
+        branchish=root_branchish,
+        dirty=bool(root_status),
+        status_short=root_status,
+        errors=tuple(root_errors),
+        submodules=tuple(submodules),
+    )
 
 
 def gate_gitmodules_parse(repo_root: Path) -> GateResult:
@@ -119,26 +330,29 @@ def gate_gitmodules_parse(repo_root: Path) -> GateResult:
 
 
 def gate_submodules_checkout(repo_root: Path) -> GateResult:
+    state = collect_repo_state(repo_root)
+    blockers: list[str] = []
     commits: list[str] = []
-    missing: list[str] = []
-    for name in EXPECTED_SUBMODULES:
-        submodule_path = repo_root / name
-        if not submodule_path.is_dir():
-            missing.append(f"{name}: missing directory")
-            continue
-        result = run_command(["git", "-C", str(submodule_path), "rev-parse", "--verify", "HEAD"])
-        if result.returncode != 0:
-            missing.append(f"{name}: no checked-out commit")
-            continue
-        commit = result.stdout.strip()
-        if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
-            missing.append(f"{name}: invalid commit {commit!r}")
-            continue
-        commits.append(f"{name}@{commit[:12]}")
 
-    if missing:
-        return block_gate(f"Submodule checkout incomplete: {', '.join(missing)}.")
-    return pass_gate("Submodule directories exist with commits: " + ", ".join(commits) + ".")
+    if state.errors:
+        blockers.extend(f"root: {error}" for error in state.errors)
+
+    for submodule in state.submodules:
+        if submodule.errors:
+            blockers.extend(f"{submodule.name}: {error}" for error in submodule.errors)
+        if submodule.gitlink and submodule.head and submodule.gitlink != submodule.head:
+            blockers.append(
+                f"{submodule.name}: gitlink {submodule.gitlink[:12]} != checkout HEAD {submodule.head[:12]}"
+            )
+        if submodule.dirty:
+            detail = "; ".join(submodule.status_short[:5])
+            blockers.append(f"{submodule.name}: dirty checkout ({detail})")
+        if submodule.gitlink and submodule.head and submodule.gitlink == submodule.head:
+            commits.append(f"{submodule.name}@{submodule.head[:12]}")
+
+    if blockers:
+        return block_gate("Submodule state is not bound to superproject gitlinks: " + "; ".join(blockers) + ".")
+    return pass_gate("Submodule gitlinks match checkout HEAD and checkouts are clean: " + ", ".join(commits) + ".")
 
 
 def gate_canonical_index(repo_root: Path) -> GateResult:
@@ -165,6 +379,10 @@ def gate_canonical_index(repo_root: Path) -> GateResult:
     misses = missing_tokens(text, required)
     if misses:
         return block_gate("Canonical index is missing required source-of-truth entries: " + ", ".join(misses) + ".")
+    if contract_has_crlf(repo_root, "docs/00_INDEX/CANONICAL_CONTRACTS.md"):
+        return pass_with_notes_gate(
+            "Canonical index content is complete; document format note: CRLF line endings should be normalized in M1 CI."
+        )
     return pass_gate("Canonical index identifies unique sources for schema, API, events, paths, artifacts, locks, and recovery.")
 
 
@@ -244,20 +462,55 @@ def gate_support_schema(repo_root: Path) -> GateResult:
     if error:
         return error
     assert text is not None
-    required = [
-        "interface Artifact",
-        "interface ErrorRecord",
-        "interface PiGate",
-        "interface NotificationRecord",
-        "interface ReportExport",
-        "AuditEvent",
-        "LockRecord",
-        "runner result",
-    ]
-    misses = missing_tokens(text, required, case_sensitive=False)
+    checks: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+        ("Artifact", "Artifact", ("docs/03_SPEC/Support_Schema_Contracts.md",)),
+        ("ErrorRecord", "ErrorRecord", ("docs/03_SPEC/Support_Schema_Contracts.md",)),
+        ("PiGate", "PiGate", ("docs/03_SPEC/Support_Schema_Contracts.md",)),
+        ("NotificationRecord", "NotificationRecord", ("docs/03_SPEC/Support_Schema_Contracts.md",)),
+        ("ReportExport", "ReportExport", ("docs/03_SPEC/Support_Schema_Contracts.md",)),
+        (
+            "AuditEvent",
+            "AuditEvent",
+            (
+                "docs/03_SPEC/Support_Schema_Contracts.md",
+                "docs/03_SPEC/User_Session_And_Audit_Schema.md",
+            ),
+        ),
+        (
+            "LockRecord",
+            "LockRecord",
+            (
+                "docs/03_SPEC/Support_Schema_Contracts.md",
+                "docs/03_SPEC/Idempotency_Concurrency_Locking_Spec.md",
+            ),
+        ),
+        (
+            "RunnerResult",
+            "RunnerResult",
+            (
+                "docs/03_SPEC/Support_Schema_Contracts.md",
+                "docs/03_SPEC/Runner_Adapter_Contracts.md",
+            ),
+        ),
+    )
+    misses: list[str] = []
+    evidence: list[str] = []
+    read_errors: list[str] = []
+    for label, interface_name, candidate_paths in checks:
+        found_path, read_error = find_interface_definition(repo_root, interface_name, candidate_paths)
+        if found_path:
+            evidence.append(f"{label}={interface_name}@{found_path}")
+            continue
+        misses.append(label)
+        if read_error:
+            read_errors.append(f"{label}: {read_error}")
+
     if misses:
-        return block_gate("Support schema contract is missing required definitions or references: " + ", ".join(misses) + ".")
-    return pass_gate("Support schema covers Artifact, ErrorRecord, PiGate, Notification, ReportExport, Audit, Lock, and runner result.")
+        detail = "missing definition-level evidence for " + ", ".join(misses)
+        if read_errors:
+            detail += "; read errors: " + "; ".join(read_errors)
+        return block_gate(detail + ".")
+    return pass_gate("Support schema definition evidence: " + "; ".join(evidence) + ".")
 
 
 def gate_api_registry(repo_root: Path) -> GateResult:
@@ -366,23 +619,56 @@ def is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
+def lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def assert_existing_output_file_safe(output_path: Path) -> None:
+    output_stat = lstat_or_none(output_path)
+    if output_stat is None:
+        return
+    if stat.S_ISLNK(output_stat.st_mode):
+        raise RuntimeError(f"Refusing to overwrite symlinked output file: {output_path}")
+    if not stat.S_ISREG(output_stat.st_mode):
+        raise RuntimeError(f"Readiness output target is not a regular file: {output_path}")
+    if output_stat.st_nlink != 1:
+        raise RuntimeError(f"Refusing to overwrite hardlinked output file: {output_path}")
+
+
+def ensure_output_ancestors(repo_root: Path, *, create: bool) -> Path:
+    current = repo_root
+    for part in OUTPUT_RELATIVE.parts[:-1]:
+        current = current / part
+        current_stat = lstat_or_none(current)
+        if current_stat is None:
+            if not create:
+                raise RuntimeError(f"Readiness output parent disappeared: {current}")
+            current.mkdir()
+            current_stat = lstat_or_none(current)
+            if current_stat is None:
+                raise RuntimeError(f"Readiness output parent could not be created: {current}")
+        if stat.S_ISLNK(current_stat.st_mode):
+            raise RuntimeError(f"Refusing to write through symlinked output ancestor: {current}")
+        if not stat.S_ISDIR(current_stat.st_mode):
+            raise RuntimeError(f"Readiness output ancestor is not a directory: {current}")
+    return current
+
+
 def resolve_output_path(repo_root: Path) -> Path:
     repo_real = repo_root.resolve()
     output_path = repo_root / OUTPUT_RELATIVE
-    readiness_dir = output_path.parent
-
-    resolved_parent = readiness_dir.resolve(strict=False)
-    resolved_output = output_path.resolve(strict=False)
-    if not is_relative_to(resolved_parent, repo_real) or not is_relative_to(resolved_output, repo_real):
+    if repo_root != repo_real:
+        raise RuntimeError(f"Repository root must be the resolved git top-level: {repo_root}")
+    readiness_dir = ensure_output_ancestors(repo_root, create=True)
+    if readiness_dir != output_path.parent:
+        raise RuntimeError(f"Unexpected readiness output parent: {readiness_dir}")
+    assert_existing_output_file_safe(output_path)
+    resolved_parent = readiness_dir.resolve(strict=True)
+    if not is_relative_to(resolved_parent, repo_real):
         raise RuntimeError(f"Refusing to write outside repo root: {OUTPUT_RELATIVE}")
-    if readiness_dir.exists() and readiness_dir.is_symlink():
-        raise RuntimeError(f"Refusing to write through symlinked directory: {readiness_dir}")
-    if output_path.exists() and output_path.is_symlink():
-        raise RuntimeError(f"Refusing to overwrite symlinked output file: {output_path}")
-
-    readiness_dir.mkdir(parents=True, exist_ok=True)
-    if not readiness_dir.is_dir():
-        raise RuntimeError(f"Readiness output parent is not a directory: {readiness_dir}")
     return output_path
 
 
@@ -390,7 +676,90 @@ def yaml_quote(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def build_yaml(*, checked_at: str, checked_by: str, decision: str, results: dict[str, GateResult]) -> str:
+def yaml_scalar(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return yaml_quote(str(value))
+
+
+def append_yaml_list(lines: list[str], indent: str, key: str, values: tuple[str, ...]) -> None:
+    if not values:
+        lines.append(f"{indent}{key}: []")
+        return
+    lines.append(f"{indent}{key}:")
+    for value in values:
+        lines.append(f"{indent}  - {yaml_quote(value)}")
+
+
+def append_repo_state_yaml(lines: list[str], repo_state: RepoState) -> None:
+    lines.extend(
+        [
+            "  repo_state:",
+            "    root:",
+            f"      path: {yaml_scalar(repo_state.path)}",
+            f"      git_top_level: {yaml_scalar(repo_state.git_top_level)}",
+            f"      is_top_level: {yaml_scalar(repo_state.is_top_level)}",
+            f"      head: {yaml_scalar(repo_state.head)}",
+            f"      branch: {yaml_scalar(repo_state.branch)}",
+            f"      branchish: {yaml_scalar(repo_state.branchish)}",
+            f"      dirty: {yaml_scalar(repo_state.dirty)}",
+        ]
+    )
+    append_yaml_list(lines, "      ", "status_short", repo_state.status_short)
+    append_yaml_list(lines, "      ", "errors", repo_state.errors)
+    lines.append("    submodules:")
+    for submodule in repo_state.submodules:
+        lines.extend(
+            [
+                f"      {submodule.name}:",
+                f"        path: {yaml_scalar(submodule.path)}",
+                f"        gitlink: {yaml_scalar(submodule.gitlink)}",
+                f"        head: {yaml_scalar(submodule.head)}",
+                f"        branch: {yaml_scalar(submodule.branch)}",
+                f"        branchish: {yaml_scalar(submodule.branchish)}",
+                f"        dirty: {yaml_scalar(submodule.dirty)}",
+                f"        worktree_top_level: {yaml_scalar(submodule.worktree_top_level)}",
+            ]
+        )
+        append_yaml_list(lines, "        ", "status_short", submodule.status_short)
+        append_yaml_list(lines, "        ", "errors", submodule.errors)
+
+
+def write_text_atomic(output_path: Path, content: str, repo_root: Path) -> None:
+    temp_path: str | None = None
+    try:
+        ensure_output_ancestors(repo_root, create=False)
+        assert_existing_output_file_safe(output_path)
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            dir=str(output_path.parent),
+            text=True,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        ensure_output_ancestors(repo_root, create=False)
+        assert_existing_output_file_safe(output_path)
+        os.replace(temp_path, output_path)
+        temp_path = None
+        ensure_output_ancestors(repo_root, create=False)
+        assert_existing_output_file_safe(output_path)
+        resolved_output = output_path.resolve(strict=True)
+        if not is_relative_to(resolved_output, repo_root.resolve()):
+            raise RuntimeError(f"Readiness output escaped repo root after replace: {output_path}")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def build_yaml(
+    *, checked_at: str, checked_by: str, decision: str, results: dict[str, GateResult], repo_state: RepoState
+) -> str:
     lines = [
         "readiness_gate:",
         f"  version: {VERSION}",
@@ -411,17 +780,19 @@ def build_yaml(*, checked_at: str, checked_by: str, decision: str, results: dict
             "Scope: #12 verifies the nine P0 readiness gates only; link check, DependencyLock, SHUD make, and rSHUD version checks are separate M1 issues."
         )
     )
+    append_repo_state_yaml(lines, repo_state)
     return "\n".join(lines) + "\n"
 
 
-def run_readiness(repo_root: Path) -> dict[str, GateResult]:
+def run_readiness(repo_root: Path) -> tuple[dict[str, GateResult], RepoState]:
+    repo_state = collect_repo_state(repo_root)
     results: dict[str, GateResult] = {}
     for key in P0_KEYS:
         try:
             results[key] = GATE_RUNNERS[key](repo_root)
         except Exception as exc:  # Defensive: a checker crash is a blocking readiness failure.
             results[key] = block_gate(f"Gate checker failed: {exc}.")
-    return results
+    return results, repo_state
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -431,21 +802,77 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def normalize_repo_root(repo_root_arg: str) -> Path:
+    candidate = Path(repo_root_arg).expanduser().resolve()
+    if not candidate.is_dir():
+        raise RuntimeError(f"repo root is not a directory: {candidate}")
+    top_level, error = git_top_level(candidate)
+    if error or top_level is None:
+        raise RuntimeError(f"repo root is not a git worktree: {candidate}: {error}")
+    top_path = Path(top_level).resolve()
+    if top_path != candidate:
+        raise RuntimeError(f"repo root must be the git worktree top-level: got {candidate}, top-level is {top_path}")
+    return top_path
+
+
+def aggregate_decision(results: dict[str, GateResult]) -> str:
+    statuses = [result.status for result in results.values()]
+    if any(status == "block" for status in statuses):
+        return "block"
+    if any(status == "pass_with_notes" for status in statuses):
+        return "pass_with_notes"
+    return "pass"
+
+
+def short_ref(value: str | None) -> str:
+    if value is None:
+        return "null"
+    if re.fullmatch(r"[0-9a-fA-F]{40}", value):
+        return value[:12]
+    return value
+
+
+def print_repo_state(repo_state: RepoState) -> None:
+    print(
+        "repo_state: "
+        f"head={short_ref(repo_state.head)} "
+        f"branch={repo_state.branch or 'detached'} "
+        f"dirty={repo_state.dirty}"
+    )
+    for submodule in repo_state.submodules:
+        print(
+            "submodule_state: "
+            f"{submodule.name} "
+            f"gitlink={short_ref(submodule.gitlink)} "
+            f"head={short_ref(submodule.head)} "
+            f"branch={submodule.branch or 'detached'} "
+            f"dirty={submodule.dirty}"
+        )
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    repo_root = Path(args.repo_root).expanduser().resolve()
-    if not repo_root.is_dir():
-        print(f"error: repo root is not a directory: {repo_root}", file=sys.stderr)
+    try:
+        repo_root = normalize_repo_root(args.repo_root)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    results = run_readiness(repo_root)
-    decision = "pass" if all(result.status == "pass" for result in results.values()) else "block"
+    results, repo_state = run_readiness(repo_root)
+    decision = aggregate_decision(results)
     checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     try:
         output_path = resolve_output_path(repo_root)
-        output_path.write_text(
-            build_yaml(checked_at=checked_at, checked_by=args.checked_by, decision=decision, results=results),
-            encoding="utf-8",
+        write_text_atomic(
+            output_path,
+            build_yaml(
+                checked_at=checked_at,
+                checked_by=args.checked_by,
+                decision=decision,
+                results=results,
+                repo_state=repo_state,
+            ),
+            repo_root,
         )
     except OSError as exc:
         print(f"error: failed to write readiness YAML: {exc}", file=sys.stderr)
@@ -459,7 +886,8 @@ def main(argv: list[str]) -> int:
     for key in P0_KEYS:
         result = results[key]
         print(f"{key}: {result.status} - {result.summary}")
-    return 0 if decision == "pass" else 1
+    print_repo_state(repo_state)
+    return 0 if decision != "block" else 1
 
 
 if __name__ == "__main__":
