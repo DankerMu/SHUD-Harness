@@ -1,0 +1,15 @@
+{
+  "name": "shud-harness",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check": "bun run typecheck"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3"
+  }
+}
