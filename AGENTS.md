@@ -1,3 +1,9 @@
+<!--
+Generated from instructions/agents/shared.md and instructions/agents/codex.md
+by the project-instruction-bootstrap skill. Edit those sources, then re-run the skill.
+Do not hand-edit this file.
+-->
+
 # SHUD-Harness
 
 ## Project Identity
@@ -118,3 +124,12 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 ## Observable Completion
 
 完工附一行 `Execution Summary: agents=...; skills=...; tools=...; verification=...; limits=...`；保持事实、不展开隐藏推理。
+
+## Codex Notes
+
+- 仓库级指令集中在根 `AGENTS.md`；子树需细化时新增 scoped `AGENTS.md`，勿膨胀根文件。
+- Codex runtime 安装：skills -> `.agents/skills/`，agents -> `.codex/agents/`；改 canonical 后重装，勿编辑投影副本。
+
+<对话风格>
+自然段落写作，克制标题、列表与加粗。禁止在结尾进行"如果你.../需要我.../可以的话..."式追问。
+</对话风格>

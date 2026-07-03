@@ -59,11 +59,13 @@ canonical_for: [implementation-plan]
 **目标**：可持续施工的地基——monorepo 骨架 + TaskCard 最小链路 + 中央策略门可行性判定（ADR-0001
 触发器）+ 唯一运行时模型接通（D9）。此后不再做架构判断。
 
-**前置（M1 grill）**：① ADR-0002 四个开放项——回放切片粒度与 SHUD pin（M9 前定即可）、GLM 计价
-预算档（M7 前）、SMTP 发信账号（M7 前）、金样 eval 不过的 plan B（M8 前）；② **M1 开工三决**（切 issue
-前必须定）——zero 引用方式与 fork 时机（倾向：M1 不 fork，workspace 相对引用 `zero/` submodule，fork
-决策挂 ADR-0001 触发器）、role→tool_id 映射的各角色工具面（spike 第 3 条比对基准，PI 确认）、GLM api
-key 环境变量名（`api_key_ref` 形态见 Config_Secrets §3）。
+**前置（M1 grill）**：✅ 已完成（2026-07-03，七项议程全部定案，记录见
+[ADR-0002 开放项处置节](../adr/0002-mvp-reality-anchoring.md)，实施记录 = openspec change `m1-foundation`）——
+① 四开放项：回放切片 = 单 PR 尺寸 + openMP pin/基线体系 + keliya（具体 PR M9 备料时选）；预算三档
+call 数不动、USD 由冒烟实测换算（M7 校准写回）；SMTP = Gmail 应用密码自发自收；eval plan B = 分层
+递进（提示工程 → 治理节点切强模型 → 换供应商）。② 开工三决：zero 不 fork（submodule 钉 13e25c1
+相对引用，fork 挂 ADR-0001 触发器）、role→tool_id 工具面照准（快照基准入 packages/core）、GLM key =
+`GLM_API_KEY`。
 
 **必读（增量重点）**：
 

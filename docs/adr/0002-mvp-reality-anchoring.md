@@ -28,12 +28,21 @@ status: accepted
 - **负面（接受的债）**：第三方端点可能静默换版/量化——以 StackLock 锁 base_url + nightly 行为 eval 作漂移保险；GLM 治理遵循能力未知——治理类 eval 5/5 是准入门，不达标时按开放项 B 计划处理。
 - **对 ADR-0001 的修订**：D9 使"Claude Agent SDK (TS) 迁移"作为首选备胎的前提（Anthropic 生态运行时）不再成立，备选顺序改写——见 ADR-0001 2026-07-02 修订注。
 
-## 开放项（M1 grill 靶子）
+## 开放项处置（M1 grill 定案，2026-07-03）
 
-1. 回放切片的 PR 粒度与 SHUD 基线 pin（openMP 的 B0/P1e-tag 基线体系 vs Harness submodule 现状）。
-2. GLM 定价下 InferenceBudget 三档默认值。
-3. SMTP 发件账号与凭据来源。
-4. GLM 治理 eval 不达标的 B 计划（提示工程 / 治理节点切强模型 / 换供应商）。
+原四个开放项 + M1 开工三决（共七项议程）经 M1 grill 逐项定案：
+
+| # | 议题 | 定案 |
+|---|---|---|
+| 1 | 回放切片粒度与 SHUD pin | 单个自包含 PR 尺寸切片（StrictOMP RHS 单 phase/函数级 + deterministic gather），素材自 openMP P1e 已交付 patch 抽取，具体 PR 到 M9 备料时选；pin = task workspace 内检出 openMP 侧 SHUD pin（P1e 收口 `3341368d` 或含 nested-Timer fix 的 `7a1dc8f`）及其基线体系（B0-tag / baseline-P1e），Harness 根 submodule 不动；小流域 fixture = keliya（484 单元，本地秒级） |
+| 2 | InferenceBudget 三档默认值 | call 数三档不动（6/12/30）；USD 初值 = M1 冒烟实测均价 × call 数 × 2 裕度，拿不到计费回执时现值 ÷10 占位（0.03 / 0.10 / 0.50）；M7 CostRecord 实测后校准写回 Cost_Inference_Budget |
+| 3 | SMTP 发件账号 | PI 自有 Gmail + 应用专用密码（smtp.gmail.com:587，发件人 = 收件人 = PI 邮箱）；凭据经 SMTP_* 环境变量注入（Config_Secrets §4，SecretRef purpose=smtp），不入 git/对象/报告 |
+| 4 | 金样 eval plan B | 分层递进：① 提示工程迭代一轮（限单 issue 尺寸）→ ② 治理关键节点（closure 判定 / gate 判定 / language guard）经 zero 按功能选模型切强模型，其余调用留 GLM → ③ 整体能力性不达标（非治理单点）才换供应商/模型重议（回 revisit 触发器 1） |
+
+**M1 开工三决**（同场定案，细节固化于 openspec change `m1-foundation` 与 Phased_Plan M1）：
+① zero M1 **不 fork**——保持根目录 submodule 钉 13e25c1 相对引用，引用技术形态由策略门 spike 条 1 实测确认，fork 决策挂 ADR-0001 触发器；
+② role→tool_id 五角色工具面**照准草案**（coordinator 调度面含 file_read 无 bash；repo_explorer/reviewer 纯只读；worker sandbox bash + artifact 写；coder worktree 内 read/write/edit + patch + bash），落 packages/core 常量 + 快照测试；
+③ GLM api key 环境变量名 = **`GLM_API_KEY`**（`api_key_ref: env:GLM_API_KEY`；Config_Secrets §4 补行走 ADR 例外，账本例外批次 4）。
 
 ## Revisit 触发器
 

@@ -28,6 +28,10 @@ authority/capability 分类与换代减重（Control_Kernel §5.2 + ADR-0001 触
 **实施唯一真相源**（排期/交付/验收门/每里程碑必读），吸收五路对齐审查修复（敏感性压缩、回放主链、
 patch diff 端点方法、备胎表述随 ADR-0001 修订、新机制落点）；本账 Phase 3 T2C 追加激活清单与并入表
 统一，Preflight 归位 Phase 2（审查 B-1 修正）。配套测试文档沿用 W0–W8 标签，经 Phased_Plan §0 映射表解析。
+**例外批次 4（2026-07-03，M1 grill 定案）**：七项议程全部定案（ADR-0002 四开放项 + M1 开工三决），
+记录见 [ADR-0002 开放项处置节](adr/0002-mvp-reality-anchoring.md)；实施记录 `openspec/changes/m1-foundation`
+同步固化。spec 正文唯一改动：Config_Secrets §4 推荐环境变量表补 `GLM_API_KEY` 一行（D9 运行时模型
+key 变量，走 ADR 例外通道）；InferenceBudget 三档 USD 按定案流程待 M7 实测校准后写回，本批不改 spec。
 
 **依据：** 本文档基于全部文档的交叉引用和依赖链深度分析生成。
 
