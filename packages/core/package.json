@@ -10,5 +10,9 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@zero-os/core": "workspace:*",
+    "@zero-os/shared": "workspace:*"
   }
 }
