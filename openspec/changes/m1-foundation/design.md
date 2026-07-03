@@ -29,7 +29,7 @@
 
 1. **策略门注入点 = 工具注册层横切包装**。注册时统一 wrap execute（`ToolBase.beforeExecute` throw 即拒），先过 kernel 校验再放行；loop 级 hook 仅作观测。备选"改 Zero 内核"违反 diff=0 与升级成本约束；备选"loop hook 阻断"被 zero@13e25c1 实测否决（不可否决型钩子）。出处：ADR-0001、[Zero_Reuse_Matrix §8](../../../docs/02_ARCHITECTURE/Zero_Reuse_Matrix.md)、[Control_Kernel §5](../../../docs/02_ARCHITECTURE/Control_Kernel.md)。
 2. **spike 内部顺序**：条 1（横切包装）先行；注册期 lint 与 guard_class 标注挂同一横切点其后；条 3 依赖 role→tool_id 映射表（比对基准）。判定条款：任一条 2 人周内不绿 → ADR-0001 revisit，备选顺序按 2026-07-02 修订注（① 自建薄工具注册层 ② Claude Agent SDK 迁移），不带病继续。
-3. **zero 引用姿势 [GRILL-1，已定案 2026-07-03]**：M1 不 fork——zero 保持根目录 submodule 钉 13e25c1，packages/* 相对引用；fork 决策挂 ADR-0001 触发器。引用的技术形态（workspace 纳入 zero 子包 vs `file:` 依赖 vs 运行时入口加载）在 spike 条 1 实现时确认并回写本节——zero 自身是 Bun workspace（9 packages），嵌套 workspace 的解析行为需实测，不在纸面裁决。
+3. **zero 引用姿势 [GRILL-1，已定案 2026-07-03；#17 实测回写]**：M1 不 fork——zero 保持根目录 submodule 钉 13e25c1，fork 决策挂 ADR-0001 触发器。引用技术形态在 spike 条 1 已实测定形为 **root Bun workspace 纳入 `zero/packages/*` + SHUD 包按需声明 `@zero-os/*` workspace 依赖**，当前 `packages/core` 直接依赖 `@zero-os/core` / `@zero-os/shared`。实测证据：临时真实目录 Bun workspace（`workspaces=["packages/*","zero/packages/*"]` + `@zero-os/core@workspace:*`）安装通过，当前根 workspace 下 `import("@zero-os/core")` 可解析 `BaseTool` / `ToolRegistry`；`file:` 直连 `zero/packages/core` 失败，因为 zero 内部 `@zero-os/shared|model|observe|secrets` 仍是 `workspace:*` 传递依赖；直接加载 `zero/apps/server/src/cli/dispatch.ts` 会继续引入 app 级 server 依赖（如 `qrcode-terminal`），依赖面超出 M1 package adapter 目标。因此 M1 定形为 workspace-package-reference；不纳入 `zero/apps/*`，不改 zero 源码，`git -C zero diff --quiet` 仍为硬验收。
 4. **拒绝载荷统一走 `ErrorRecord.remediation`**：`{next_action ∈ escalate_to_pi|open_gate|adjust_scope|fix_and_retry|abort, hint, ref}`（权威源 [Support_Schema_Contracts §3](../../../docs/03_SPEC/Support_Schema_Contracts.md)）；spawn 剖面超集拒绝断言 `next_action=adjust_scope`。拒绝而不导航制造重试风暴（Control_Kernel §5 拒绝载荷约定）。拒绝事件的 WS 出口不新增事件类型——复用 [WebSocket_Protocol §3](../../../docs/03_SPEC/WebSocket_Protocol.md) 注册表既有的 `tool.failed`（payload 携带含 remediation 的 ErrorRecord）；audit 最小行字段（event/tool_id/rule/decision/ts）与无任务上下文时的 fixture 任务路径（`workspace/tasks/TASK-M1-SPIKE/audit/`）见 policy-gate-spike spec。
 5. **role→tool_id 映射表 = packages/core 常量 + 快照测试**。Roles_and_Boundaries §0 只有权限类别散文，本表是唯一具象化落点，也是 spike 条 3 子集校验的比对基准。各角色工具面已 PI 确认（[GRILL-2] 定案 2026-07-03，附表见 tool-registry-governance spec），据此固化快照。
 6. **GLM provider 零开发接入**：zero `providers:` 块（`api_type: openai_chat_completions` + `base_url` + `api_key_ref` + `fallback_chain` + 按功能选模型）。`api_key_ref` 遵 [Config_Secrets §3](../../../docs/03_SPEC/Config_Secrets_And_Environment_Spec.md) SecretRef 形态（`env:GLM_API_KEY`，provider=env，purpose=llm；[GRILL-3] 定案 2026-07-03，Config_Secrets §4 已补行）。冒烟判定 = 最小 prompt 一次往返得到非空 completion 且实际命中配置的 `base_url`，exit 0。
@@ -55,7 +55,7 @@
 ## Open Questions
 
 - [GRILL-1..3] 已全部定案（2026-07-03 M1 grill，记录见 [ADR-0002 开放项处置节](../../../docs/adr/0002-mvp-reality-anchoring.md)）：不 fork + submodule 引用；工具面照准草案；`GLM_API_KEY`（Config_Secrets §4 已补行，账本例外批次 4）。
-- zero 包引用技术形态（workspace 纳入 vs `file:` 依赖 vs 运行时入口加载）：**唯一存留开放项**，spike 条 1 实现时实测确认并回写 Decision 3。
+- zero 包引用技术形态（workspace 纳入 vs `file:` 依赖 vs 运行时入口加载）：已由 #17 spike 条 1 实测解决并回写 Decision 3；M1 采用 workspace-package-reference。
 
 ## Subagent Workflow Fixture — Issue #12
 

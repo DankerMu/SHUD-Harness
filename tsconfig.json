@@ -10,6 +10,7 @@
     "SHUD",
     "rSHUD",
     "AutoSHUD",
-    "workspace"
+    "workspace",
+    "packages/**/*.test.ts"
   ]
 }
