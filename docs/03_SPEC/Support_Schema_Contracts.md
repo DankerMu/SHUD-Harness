@@ -165,6 +165,33 @@ interface FailureRecord {
 }
 ```
 
+## 4.1 RunnerResult
+
+RunnerResult 是 support schema 中持久化的 runner evidence projection，用于把 `RunnerCollectResult` 的 collect 语义落盘并关联 TaskCard、RunJob、artifact 和错误记录。`RunnerCollectResult` 仍是 runner adapter 的返回契约；RunnerResult 不替代该接口，只固定可持久化、可审计、可被报告引用的证据结构。
+
+```ts
+interface RunnerResult {
+  result_id: string;
+  task_id: string;
+  job_id: string;
+  run_id?: string;
+  analysis_plan_id?: string;
+  runner_kind: "local_direct" | "local_job" | "docker_job" | "slurm";
+  status: "succeeded" | "failed" | "cancelled" | "timed_out" | "collected";
+  exit_code?: number;
+  started_at?: string;
+  finished_at?: string;
+  wall_seconds?: number;
+  peak_memory_mb?: number;
+  stdout_path: string;
+  stderr_path: string;
+  output_paths: string[];
+  artifact_refs: string[];
+  error_id?: string;
+  created_at: string;
+}
+```
+
 ## 5. PiGate
 
 ```ts
