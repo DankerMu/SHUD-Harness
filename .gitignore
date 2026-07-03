@@ -28,7 +28,7 @@ node_modules/
 .codex/
 
 # Runtime workspace
-workspace/
+/workspace/
 
 # Large data
 *.dat

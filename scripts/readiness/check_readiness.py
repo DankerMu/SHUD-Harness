@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,8 @@ from pathlib import Path
 
 VERSION = "v0.8.1"
 OUTPUT_RELATIVE = Path("workspace/readiness/readiness_gate_v0_8_1.yaml")
+READINESS_TEST_HOOK_ENV = "_SHUD_READINESS_TEST_HOOK"
+READINESS_TEST_HOOK_STAGE_ENV = "_SHUD_READINESS_TEST_HOOK_STAGE"
 EXPECTED_SUBMODULES = ("SHUD", "rSHUD", "AutoSHUD", "zero")
 P0_KEYS = (
     "gitmodules_parse",
@@ -336,6 +339,9 @@ def gate_submodules_checkout(repo_root: Path) -> GateResult:
 
     if state.errors:
         blockers.extend(f"root: {error}" for error in state.errors)
+    if state.dirty:
+        detail = "; ".join(state.status_short[:5])
+        blockers.append(f"root: dirty checkout ({detail})")
 
     for submodule in state.submodules:
         if submodule.errors:
@@ -626,16 +632,17 @@ def lstat_or_none(path: Path) -> os.stat_result | None:
         return None
 
 
-def assert_existing_output_file_safe(output_path: Path) -> None:
-    output_stat = lstat_or_none(output_path)
-    if output_stat is None:
+def assert_existing_output_file_safe_fd(readiness_dir_fd: int, output_name: str, display_path: Path) -> None:
+    try:
+        output_stat = os.stat(output_name, dir_fd=readiness_dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
         return
     if stat.S_ISLNK(output_stat.st_mode):
-        raise RuntimeError(f"Refusing to overwrite symlinked output file: {output_path}")
+        raise RuntimeError(f"Refusing to overwrite symlinked output file: {display_path}")
     if not stat.S_ISREG(output_stat.st_mode):
-        raise RuntimeError(f"Readiness output target is not a regular file: {output_path}")
+        raise RuntimeError(f"Readiness output target is not a regular file: {display_path}")
     if output_stat.st_nlink != 1:
-        raise RuntimeError(f"Refusing to overwrite hardlinked output file: {output_path}")
+        raise RuntimeError(f"Refusing to overwrite hardlinked output file: {display_path}")
 
 
 def ensure_output_ancestors(repo_root: Path, *, create: bool) -> Path:
@@ -662,14 +669,110 @@ def resolve_output_path(repo_root: Path) -> Path:
     output_path = repo_root / OUTPUT_RELATIVE
     if repo_root != repo_real:
         raise RuntimeError(f"Repository root must be the resolved git top-level: {repo_root}")
-    readiness_dir = ensure_output_ancestors(repo_root, create=True)
-    if readiness_dir != output_path.parent:
-        raise RuntimeError(f"Unexpected readiness output parent: {readiness_dir}")
-    assert_existing_output_file_safe(output_path)
-    resolved_parent = readiness_dir.resolve(strict=True)
-    if not is_relative_to(resolved_parent, repo_real):
-        raise RuntimeError(f"Refusing to write outside repo root: {OUTPUT_RELATIVE}")
     return output_path
+
+
+def dir_open_flags() -> int:
+    required_flags = ("O_DIRECTORY", "O_NOFOLLOW")
+    missing = [flag for flag in required_flags if not hasattr(os, flag)]
+    if missing:
+        raise RuntimeError("fd-relative readiness writes require POSIX directory flags: " + ", ".join(missing))
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def create_file_flags() -> int:
+    return os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def raise_output_ancestor_error(parent_fd: int, part: str, display_path: Path, exc: OSError) -> None:
+    try:
+        current_stat = os.stat(part, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        raise RuntimeError(f"Readiness output parent disappeared: {display_path}") from exc
+    except OSError:
+        raise RuntimeError(f"Cannot inspect readiness output ancestor {display_path}: {exc}") from exc
+    if stat.S_ISLNK(current_stat.st_mode):
+        raise RuntimeError(f"Refusing to write through symlinked output ancestor: {display_path}") from exc
+    if not stat.S_ISDIR(current_stat.st_mode):
+        raise RuntimeError(f"Readiness output ancestor is not a directory: {display_path}") from exc
+    raise RuntimeError(f"Cannot open readiness output ancestor {display_path}: {exc}") from exc
+
+
+def open_child_directory_fd(parent_fd: int, part: str, display_path: Path, *, create: bool) -> int:
+    try:
+        return os.open(part, dir_open_flags(), dir_fd=parent_fd)
+    except FileNotFoundError:
+        if not create:
+            raise RuntimeError(f"Readiness output parent disappeared: {display_path}")
+        os.mkdir(part, mode=0o755, dir_fd=parent_fd)
+        try:
+            return os.open(part, dir_open_flags(), dir_fd=parent_fd)
+        except OSError as exc:
+            raise_output_ancestor_error(parent_fd, part, display_path, exc)
+    except OSError as exc:
+        raise_output_ancestor_error(parent_fd, part, display_path, exc)
+    raise AssertionError("unreachable")
+
+
+def open_readiness_directory_fd(repo_root: Path, *, create: bool) -> int:
+    root_fd = os.open(str(repo_root), dir_open_flags())
+    current_fd = root_fd
+    current_path = repo_root
+    try:
+        for part in OUTPUT_RELATIVE.parts[:-1]:
+            current_path = current_path / part
+            child_fd = open_child_directory_fd(current_fd, part, current_path, create=create)
+            os.close(current_fd)
+            current_fd = child_fd
+        return current_fd
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def verify_held_readiness_directory(repo_root: Path, readiness_dir_fd: int) -> None:
+    readiness_dir = ensure_output_ancestors(repo_root, create=False)
+    held_stat = os.fstat(readiness_dir_fd)
+    path_stat = os.stat(readiness_dir, follow_symlinks=False)
+    if not stat.S_ISDIR(held_stat.st_mode):
+        raise RuntimeError(f"Held readiness output parent is not a directory: {readiness_dir}")
+    if (held_stat.st_dev, held_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+        raise RuntimeError(f"Readiness output parent changed while writing: {readiness_dir}")
+    resolved_parent = readiness_dir.resolve(strict=True)
+    if not is_relative_to(resolved_parent, repo_root.resolve()):
+        raise RuntimeError(f"Refusing to write outside repo root: {OUTPUT_RELATIVE}")
+
+
+def create_temp_file_fd(readiness_dir_fd: int, output_name: str) -> tuple[int, str]:
+    for _ in range(100):
+        temp_name = f".{output_name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        try:
+            return os.open(temp_name, create_file_flags(), mode=0o600, dir_fd=readiness_dir_fd), temp_name
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise RuntimeError(f"Refusing unsafe readiness temp file name: {temp_name}") from exc
+            raise
+    raise RuntimeError("Could not allocate a unique readiness temp file name.")
+
+
+def run_internal_test_hook(stage: str, repo_root: Path) -> None:
+    hook = os.environ.get(READINESS_TEST_HOOK_ENV)
+    if not hook:
+        return
+    target_stage = os.environ.get(READINESS_TEST_HOOK_STAGE_ENV)
+    if target_stage and target_stage != stage:
+        return
+    if hook != "swap_readiness_to_docs":
+        raise RuntimeError(f"Unsupported readiness test hook: {hook}")
+
+    readiness_dir = repo_root / OUTPUT_RELATIVE.parent
+    backup_dir = repo_root / "workspace" / f"readiness.held.{stage}.{os.getpid()}"
+    (repo_root / "docs").mkdir(exist_ok=True)
+    if readiness_dir.exists() or readiness_dir.is_symlink():
+        readiness_dir.rename(backup_dir)
+    os.symlink("../docs", readiness_dir)
 
 
 def yaml_quote(value: str) -> str:
@@ -728,33 +831,45 @@ def append_repo_state_yaml(lines: list[str], repo_state: RepoState) -> None:
 
 
 def write_text_atomic(output_path: Path, content: str, repo_root: Path) -> None:
-    temp_path: str | None = None
+    readiness_dir_fd: int | None = None
+    temp_name: str | None = None
     try:
-        ensure_output_ancestors(repo_root, create=False)
-        assert_existing_output_file_safe(output_path)
-        fd, temp_path = tempfile.mkstemp(
-            prefix=f".{output_path.name}.",
-            suffix=".tmp",
-            dir=str(output_path.parent),
-            text=True,
-        )
+        readiness_dir_fd = open_readiness_directory_fd(repo_root, create=True)
+        verify_held_readiness_directory(repo_root, readiness_dir_fd)
+        assert_existing_output_file_safe_fd(readiness_dir_fd, output_path.name, output_path)
+
+        run_internal_test_hook("before_temp_create", repo_root)
+        verify_held_readiness_directory(repo_root, readiness_dir_fd)
+        assert_existing_output_file_safe_fd(readiness_dir_fd, output_path.name, output_path)
+
+        fd, temp_name = create_temp_file_fd(readiness_dir_fd, output_path.name)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
 
-        ensure_output_ancestors(repo_root, create=False)
-        assert_existing_output_file_safe(output_path)
-        os.replace(temp_path, output_path)
-        temp_path = None
-        ensure_output_ancestors(repo_root, create=False)
-        assert_existing_output_file_safe(output_path)
-        resolved_output = output_path.resolve(strict=True)
-        if not is_relative_to(resolved_output, repo_root.resolve()):
-            raise RuntimeError(f"Readiness output escaped repo root after replace: {output_path}")
+        run_internal_test_hook("before_replace", repo_root)
+        verify_held_readiness_directory(repo_root, readiness_dir_fd)
+        assert_existing_output_file_safe_fd(readiness_dir_fd, output_path.name, output_path)
+
+        os.replace(
+            temp_name,
+            output_path.name,
+            src_dir_fd=readiness_dir_fd,
+            dst_dir_fd=readiness_dir_fd,
+        )
+        temp_name = None
+        assert_existing_output_file_safe_fd(readiness_dir_fd, output_path.name, output_path)
+        os.fsync(readiness_dir_fd)
+        verify_held_readiness_directory(repo_root, readiness_dir_fd)
     finally:
-        if temp_path and os.path.exists(temp_path):
-            os.unlink(temp_path)
+        if readiness_dir_fd is not None:
+            if temp_name is not None:
+                try:
+                    os.unlink(temp_name, dir_fd=readiness_dir_fd)
+                except FileNotFoundError:
+                    pass
+            os.close(readiness_dir_fd)
 
 
 def build_yaml(

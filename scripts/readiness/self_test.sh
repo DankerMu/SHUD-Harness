@@ -31,6 +31,13 @@ if [ -n "$workspace_status_before" ]; then
   fail "live workspace was not clean before self-test"
 fi
 
+if ! git -C "$REPO_ROOT" check-ignore --no-index -v workspace/readiness/readiness_gate_v0_8_1.yaml >/dev/null; then
+  fail "root runtime workspace readiness output is not ignored"
+fi
+if git -C "$REPO_ROOT" check-ignore --no-index -v packages/core/src/workspace/index.ts >/dev/null; then
+  fail "nested package workspace path is over-ignored"
+fi
+
 assert_live_unchanged() {
   workspace_status_after=$(git -C "$REPO_ROOT" status --short -- workspace)
   if [ -n "$workspace_status_after" ]; then
@@ -153,6 +160,7 @@ docs/03_SPEC/Artifact_Registry_Spec.md'
     cp "$REPO_ROOT/$file_path" "$fixture_root/$file_path"
   done
   cp "$REPO_ROOT/.gitmodules" "$fixture_root/.gitmodules"
+  cp "$REPO_ROOT/.gitignore" "$fixture_root/.gitignore"
 }
 
 append_runner_result_definition() {
@@ -178,6 +186,7 @@ init_git_repo() {
   git -C "$fixture_root" init -q
   git -C "$fixture_root" config user.email "readiness-test@example.invalid"
   git -C "$fixture_root" config user.name "readiness-test"
+  git -C "$fixture_root" config core.autocrlf false
   git -C "$fixture_root" config advice.addEmbeddedRepo false
 }
 
@@ -196,7 +205,7 @@ create_fake_submodules() {
 
 commit_superproject_with_gitlinks() {
   fixture_root=$1
-  git -C "$fixture_root" add .gitmodules docs
+  git -C "$fixture_root" add .gitignore .gitmodules docs
   for name in SHUD rSHUD AutoSHUD zero; do
     git -C "$fixture_root" add "$name" 2>/dev/null
   done
@@ -222,7 +231,7 @@ make_fake_standalone_fixture() {
   init_git_repo "$fixture_root"
   copy_contracts "$fixture_root"
   append_runner_result_definition "$fixture_root"
-  git -C "$fixture_root" add .gitmodules docs
+  git -C "$fixture_root" add .gitignore .gitmodules docs
   git -C "$fixture_root" commit -q -m "fixture superproject without gitlinks"
   create_fake_submodules "$fixture_root"
 }
@@ -263,6 +272,8 @@ path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 path.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
 PY
+git -C "$notes_fixture" add docs/00_INDEX/CANONICAL_CONTRACTS.md
+git -C "$notes_fixture" commit -q -m "fixture committed crlf note"
 "$HELPER" --repo-root "$notes_fixture" --checked-by readiness-self-test >/dev/null || fail "pass_with_notes fixture returned non-zero"
 validate_yaml "$notes_fixture/$OUTPUT_REL" pass_with_notes canonical_index pass_with_notes
 
@@ -297,6 +308,14 @@ if "$HELPER" --repo-root "$dirty_fixture" --checked-by readiness-self-test >/dev
   fail "dirty submodule fixture unexpectedly returned zero"
 fi
 validate_yaml "$dirty_fixture/$OUTPUT_REL" block submodules_checkout block
+
+root_dirty_fixture="$TMP_ROOT/fixture-dirty-root"
+make_fixture "$root_dirty_fixture"
+printf '\nroot dirty fixture\n' >> "$root_dirty_fixture/docs/04_IMPLEMENTATION/Schemas_APIs_CLIs.md"
+if "$HELPER" --repo-root "$root_dirty_fixture" --checked-by readiness-self-test >/dev/null; then
+  fail "dirty root fixture unexpectedly returned zero"
+fi
+validate_yaml "$root_dirty_fixture/$OUTPUT_REL" block submodules_checkout block
 
 workspace_symlink_fixture="$TMP_ROOT/fixture-workspace-symlink"
 make_fixture "$workspace_symlink_fixture"
@@ -340,6 +359,24 @@ if "$HELPER" --repo-root "$hardlink_fixture" --checked-by readiness-self-test >/
 fi
 if ! grep -q stale "$hardlink_fixture/$OUTPUT_REL"; then
   fail "helper overwrote hardlinked output"
+fi
+
+before_temp_swap_fixture="$TMP_ROOT/fixture-swap-before-temp"
+make_fixture "$before_temp_swap_fixture"
+if _SHUD_READINESS_TEST_HOOK=swap_readiness_to_docs _SHUD_READINESS_TEST_HOOK_STAGE=before_temp_create "$HELPER" --repo-root "$before_temp_swap_fixture" --checked-by readiness-self-test >/dev/null 2>/dev/null; then
+  fail "before-temp readiness dir swap fixture unexpectedly returned zero"
+fi
+if [ -e "$before_temp_swap_fixture/docs/readiness_gate_v0_8_1.yaml" ]; then
+  fail "before-temp readiness dir swap wrote through symlink target"
+fi
+
+before_replace_swap_fixture="$TMP_ROOT/fixture-swap-before-replace"
+make_fixture "$before_replace_swap_fixture"
+if _SHUD_READINESS_TEST_HOOK=swap_readiness_to_docs _SHUD_READINESS_TEST_HOOK_STAGE=before_replace "$HELPER" --repo-root "$before_replace_swap_fixture" --checked-by readiness-self-test >/dev/null 2>/dev/null; then
+  fail "before-replace readiness dir swap fixture unexpectedly returned zero"
+fi
+if [ -e "$before_replace_swap_fixture/docs/readiness_gate_v0_8_1.yaml" ]; then
+  fail "before-replace readiness dir swap wrote through symlink target"
 fi
 
 assert_live_unchanged
