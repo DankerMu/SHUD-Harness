@@ -181,6 +181,25 @@ interface RunnerResult {
 EOF
 }
 
+strip_runner_result_definition() {
+  fixture_root=$1
+  python3 - "$fixture_root/docs/03_SPEC/Support_Schema_Contracts.md" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+text = re.sub(
+    r"\n## (?:4\.1 RunnerResult|Self-test RunnerResult fixture)\n\n.*?(?=\n## [0-9]+(?:\.[0-9]+)?\.? |\Z)",
+    "\n",
+    text,
+    flags=re.DOTALL,
+)
+path.write_text(text, encoding="utf-8")
+PY
+}
+
 init_git_repo() {
   fixture_root=$1
   git -C "$fixture_root" init -q
@@ -219,7 +238,11 @@ make_fixture() {
   init_git_repo "$fixture_root"
   copy_contracts "$fixture_root"
   if [ "$runner_schema" = "with-runner" ]; then
-    append_runner_result_definition "$fixture_root"
+    if ! grep -q 'interface RunnerResult' "$fixture_root/docs/03_SPEC/Support_Schema_Contracts.md"; then
+      append_runner_result_definition "$fixture_root"
+    fi
+  else
+    strip_runner_result_definition "$fixture_root"
   fi
   create_fake_submodules "$fixture_root"
   commit_superproject_with_gitlinks "$fixture_root"
