@@ -27,6 +27,9 @@ node_modules/
 .agents/
 .codex/
 
+# Runtime workspace
+/workspace/
+
 # Large data
 *.dat
 *.nc
