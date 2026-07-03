@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@zero-os/core": "workspace:*",
-    "@zero-os/shared": "workspace:*"
+    "@zero-os/shared": "workspace:*",
+    "zod": "4.0.1"
   }
 }
