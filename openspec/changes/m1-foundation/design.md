@@ -56,3 +56,67 @@
 
 - [GRILL-1..3] 已全部定案（2026-07-03 M1 grill，记录见 [ADR-0002 开放项处置节](../../../docs/adr/0002-mvp-reality-anchoring.md)）：不 fork + submodule 引用；工具面照准草案；`GLM_API_KEY`（Config_Secrets §4 已补行，账本例外批次 4）。
 - zero 包引用技术形态（workspace 纳入 vs `file:` 依赖 vs 运行时入口加载）：**唯一存留开放项**，spike 条 1 实现时实测确认并回写 Decision 3。
+
+## Subagent Workflow Fixture — Issue #12
+
+Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.
+
+Expanded-trigger rationale:
+- Core triggers: deterministic script entry, schema/field/format contract (`readiness_gate` YAML), file output/path/overwrite under `workspace/readiness/`, legacy/submodule compatibility, and persisted/shared-state gating for all downstream M1 coding issues.
+- Profile triggers: `readiness`, `workspace`, `idempotency`, `lock`, `SHUD`, `rSHUD`, `AutoSHUD`, `Zero`.
+
+Change surface:
+- Optional deterministic readiness helper under `scripts/readiness/`.
+- Runtime-only output `workspace/readiness/readiness_gate_v0_8_1.yaml` (must not be committed).
+- Contract reads across `.gitmodules`, submodule checkouts, `docs/00_INDEX/CANONICAL_CONTRACTS.md`, `docs/03_SPEC/*`, and `docs/04_IMPLEMENTATION/*`.
+
+Must preserve:
+- No edits to frozen docs, implementation packages, or submodule source.
+- `workspace/` remains runtime state outside tracked source.
+- A blocking readiness conflict must stop downstream coding instead of being hidden as pass.
+
+Must add/change:
+- A reproducible way to execute and record the P0 nine-gate readiness result.
+- Evidence that every gate has an independent result matching `MVP_Implementation_Readiness_Checklist.md`.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - helper script is a user-invoked deterministic entrypoint.
+- Config / project setup: selected - `.gitmodules`, submodule state, package/workspace readiness, and local environment are gate inputs.
+- File IO / path safety / overwrite: selected - helper writes runtime YAML and must not write outside `workspace/readiness/`.
+- Schema / columns / units / field names: selected - YAML keys and decision values are part of the readiness contract.
+- Auth / permissions / secrets: not selected - no credential handling; secret checks are later GLM/observability work.
+- Concurrency / shared state / ordering: selected - #12 unlocks or blocks all downstream M1 coding issues.
+- Resource limits / large input / discovery: not selected - reads are bounded known files and submodule metadata.
+- Legacy compatibility / examples: selected - four submodules must remain readable and unchanged.
+- Error handling / rollback / partial outputs: selected - failed gates must produce stable `block` or `pass_with_notes` without partial misleading signoff.
+- Release / packaging / dependency compatibility: not selected - packageManager/lockfile are #14.
+- Documentation / migration notes: selected - issue/PR summary must record gate evidence and decision.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - readiness signoff is governance evidence for M1 entry.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: selected - submodule checkout gates cover three scientific repos.
+- Zero adapter / tool registry / agent role governance: selected - zero checkout and frozen no-source-edit boundary are M1 prerequisites.
+
+Invariant Matrix:
+- Governing invariant: The #12 readiness decision must be derived only from the nine canonical P0 gate checks and must bind to the exact local repo/submodule state inspected.
+- Source-of-truth identity/contract: `MVP_Implementation_Readiness_Checklist.md` P0 Gate table plus the generated YAML `readiness_gate.version`, `checked_at`, `decision`, and per-gate keys.
+- Producers: readiness helper or manual gate runner; issue/PR evidence summary.
+- Validators/preflight: YAML decision enum validation; per-gate pass/block/pass_with_notes mapping.
+- Storage/cache/query: `workspace/readiness/readiness_gate_v0_8_1.yaml` runtime file only.
+- Public routes/entrypoints: none - #12 has no backend/API surface.
+- Frontend/downstream consumers: M1 downstream issues consume the decision semantics, not the runtime file directly.
+- Failure paths/rollback/stale state: gate failure yields `decision: block`; workspace output is overwrite-safe and regenerated for current HEAD.
+- Evidence/audit/readiness: issue comment or PR description records gate summary, commands, and whether downstream coding is unlocked.
+- Regression rows:
+  - Current HEAD with all nine P0 checks passing -> YAML contains exactly `gitmodules_parse`, `submodules_checkout`, `canonical_index`, `core_schema`, `support_schema`, `api_registry`, `error_idempotency`, `artifact_registry`, `lock_recovery` under `p0`, each `pass`, and aggregate `decision: pass`.
+  - Missing required contract file or unreadable submodule in an isolated temp fixture -> affected gate is non-pass and aggregate decision is `block`.
+  - `workspace/readiness/` absent or preexisting -> helper creates/overwrites only `workspace/readiness/readiness_gate_v0_8_1.yaml`; `git status --short -- workspace` remains empty because runtime assets are ignored/untracked.
+  - PR or issue evidence summary records per-gate inputs/results and the downstream action: `block` freezes #16+ coding, while `pass|pass_with_notes` unlocks it.
+
+Non-goals:
+- Link checking / CI (#13), lockfile and DependencyLock (#14), SHUD make and rSHUD version verification (#15).
+- Canonical frozen doc edits; any discovered conflict becomes a block or a separately governed bug-fix/ADR exception.
+
+Review focus:
+- Gate list exactly matches the P0 table.
+- Runtime output cannot accidentally satisfy source-controlled evidence or enter git.
+- `decision` aggregation is conservative and cannot classify contract conflicts as pass.

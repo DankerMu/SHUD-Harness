@@ -7,6 +7,11 @@
 ## 1. 就绪收口（readiness-gates）
 
 - [ ] 1.1 P0 九 Gate 逐项验证 + 签核 YAML 落 `workspace/readiness/readiness_gate_v0_8_1.yaml`（校验类合并一个 issue；decision=block 时后续编码任务全部冻结）
+  - Evidence floor (#12):
+    - Current HEAD + nine P0 checks -> `workspace/readiness/readiness_gate_v0_8_1.yaml` contains `checked_at`, `checked_by`, legal `decision`, and exactly these `p0` keys: `gitmodules_parse`, `submodules_checkout`, `canonical_index`, `core_schema`, `support_schema`, `api_registry`, `error_idempotency`, `artifact_registry`, `lock_recovery`.
+    - All nine gates pass -> aggregate `decision: pass`; a schema/API/path/lock conflict in an isolated failure fixture (for example missing required contract file) -> affected gate non-pass and aggregate `decision: block`.
+    - Absent or preexisting `workspace/readiness/` -> helper creates/overwrites only `workspace/readiness/readiness_gate_v0_8_1.yaml`; `git status --short -- workspace` remains empty.
+    - PR description or issue comment -> records per-gate input/result, command evidence, and downstream action: `block` freezes #16+ coding; `pass|pass_with_notes` unlocks downstream M1 coding.
 - [ ] 1.2 link check 脚本入库 `scripts/` + CI 工作流骨架（PR 触发：link check + 单测占位；schema drift 检查由 4.2 接入，PERF-API-001 冒烟由 6.5 接入）
 - [ ] 1.3 根 `package.json` 固定 packageManager + lockfile 入库 + 初始 DependencyLock（四 submodule commit + 运行时依赖版本）
 - [ ] 1.4 SHUD `make` 复验（一次本机编译 + 环境快照记入 readiness notes）+ rSHUD ≥2.5.0 在位确认
