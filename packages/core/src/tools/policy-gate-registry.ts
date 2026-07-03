@@ -1,30 +1,22 @@
 import { BaseTool, ToolRegistry } from "@zero-os/core";
 import type { ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
+import {
+  evaluatePolicyGate,
+  type HarnessRole,
+  type PolicyGateContext,
+  type PolicyGateDecision,
+  type PolicyGateToolCall
+} from "./policy-gate-core";
 
-export type HarnessRole = "coordinator" | "repo_explorer" | "worker" | "coder" | "reviewer";
-
-export interface PolicyGateRemediation {
-  next_action: "escalate_to_pi" | "open_gate" | "adjust_scope" | "fix_and_retry" | "abort";
-  hint: string;
-  ref: string;
-}
-
-export type PolicyGateDecision =
-  | {
-      decision: "allow";
-    }
-  | {
-      decision: "deny";
-      reason: string;
-      remediation?: PolicyGateRemediation;
-    };
-
-export interface PolicyGateToolCall {
-  toolId: string;
-  role: HarnessRole | "unknown";
-  input: unknown;
-  workDir?: string;
-}
+export type {
+  HarnessRole,
+  PolicyGateContext,
+  PolicyGateDecision,
+  PolicyGateRemediation,
+  PolicyGateToolCall,
+  PolicyRule,
+  PolicyRuleDecision
+} from "./policy-gate-core";
 
 export interface PolicyGateEvaluationContext {
   tool: BaseTool;
@@ -48,6 +40,10 @@ export type PolicyGatedTool = BaseTool & {
 };
 
 const policyGatedTools = new WeakSet<BaseTool>();
+
+export function createPolicyGateEvaluator(context: PolicyGateContext): PolicyGateEvaluator {
+  return (call) => evaluatePolicyGate(call, context);
+}
 
 export function wrapToolWithPolicyGate(
   tool: BaseTool,
@@ -171,6 +167,7 @@ function buildPolicyGateDeniedResult(
     error: "policy_gate_denied",
     tool_id: toolId,
     reason: decision.reason,
+    ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
     ...(decision.remediation ? { remediation: decision.remediation } : {})
   };
 

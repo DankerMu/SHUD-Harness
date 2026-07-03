@@ -7,5 +7,6 @@ export const CORE_TOOL_MODULES = [
 
 export type CoreToolModule = (typeof CORE_TOOL_MODULES)[number];
 
+export * from "./policy-gate-core";
 export * from "./policy-gate-registry";
 export * from "./zero-reference-shape";

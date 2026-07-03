@@ -4,17 +4,33 @@ import type { ToolContext, ToolLogger, ToolResult } from "@zero-os/shared";
 import {
   assertAllToolsPolicyGated,
   assertPolicyGatedToolRegistry,
+  createPolicyGateEvaluator,
   createPolicyGatedToolRegistry,
   isPolicyGatedTool,
-  wrapToolWithPolicyGate,
-  type PolicyGateEvaluator
+  wrapToolWithPolicyGate
 } from "./policy-gate-registry";
 
 describe("policy-gated zero tool registry", () => {
   test("denies before executing the underlying bash BaseTool", async () => {
     const bashTool = new RecordingTool("bash");
     const registry = createPolicyGatedToolRegistry([bashTool], {
-      evaluate: denyAll("raw data writes are blocked")
+      evaluate: createPolicyGateEvaluator({
+        rules: [
+          {
+            ruleId: "raw-data-write",
+            description: "Reject writes to raw data.",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "raw data writes are blocked",
+              remediation: {
+                next_action: "adjust_scope",
+                hint: "Use a governed workspace path instead of data/raw.",
+                ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+              }
+            })
+          }
+        ]
+      })
     });
 
     const result = await registry.get("bash")?.run(createToolContext("worker"), {
@@ -24,6 +40,22 @@ describe("policy-gated zero tool registry", () => {
     expect(result?.success).toBe(false);
     expect(result?.output).toContain("policy_gate_denied");
     expect(result?.output).toContain("raw data writes are blocked");
+    const payload = JSON.parse(result?.output ?? "{}") as {
+      ruleId?: string;
+      reason?: string;
+      remediation?: {
+        next_action?: string;
+        hint?: string;
+        ref?: string;
+      };
+    };
+    expect(payload.ruleId).toBe("raw-data-write");
+    expect(payload.reason).toBe("raw data writes are blocked");
+    expect(payload.remediation?.next_action).toBe("adjust_scope");
+    expect(payload.remediation?.hint).toBe("Use a governed workspace path instead of data/raw.");
+    expect(payload.remediation?.ref).toBe(
+      "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+    );
     expect(bashTool.calls).toBe(0);
   });
 
@@ -75,18 +107,6 @@ describe("policy-gated zero tool registry", () => {
     expect(() => assertAllToolsPolicyGated([forgedTool])).toThrow("edit");
   });
 });
-
-function denyAll(reason: string): PolicyGateEvaluator {
-  return async () => ({
-    decision: "deny",
-    reason,
-    remediation: {
-      next_action: "adjust_scope",
-      hint: "Use a governed workspace path instead of data/raw.",
-      ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-    }
-  });
-}
 
 class RecordingTool extends BaseTool {
   description: string;
