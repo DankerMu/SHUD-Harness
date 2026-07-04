@@ -388,15 +388,12 @@ describe("raw data seatbelt sandbox", () => {
     try {
       const result = await runSandboxed(
         fixture,
-        "2>workspace/err.log >data/raw/hidden.txt printf hidden",
+        'd=data; r=raw; p="$d/$r/hidden.txt"; 2>workspace/err.log > "$p"; echo ok',
         { enableAdvisory: false }
       );
 
       const payload = expectDeniedPayload(result, "denied_by_sandbox");
       await expectMissing(join(fixture.rawRoot, "hidden.txt"));
-      expect(await readFile(join(fixture.workspaceRoot, "err.log"), "utf8")).toMatch(
-        /Operation not permitted|Permission denied|sandbox/i
-      );
       const rows = await readAuditRows(fixture.root);
       expectAuditMatchesPayload(rows.at(-1), payload);
     } finally {
@@ -463,7 +460,91 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  nodeSeatbeltTest("Node unlink and copy-to-raw mutations are denied when stderr is suppressed", async () => {
+  pythonSeatbeltTest("assignment-wrapped Python hidden raw write is denied while raw read copy remains allowed", async () => {
+    const fixture = await createFixture();
+    try {
+      const denied = await runSandboxed(
+        fixture,
+        'TMPDIR="$PWD/workspace/tmp" python3 -c \'open("data/raw/assignment-hidden.txt", mode="w").write("x")\' 2>/dev/null || true',
+        { enableAdvisory: false }
+      );
+
+      const payload = expectDeniedPayload(denied, "denied_by_sandbox");
+      expect(payload.reason).toContain("hide sandbox denial");
+      await expectMissing(join(fixture.rawRoot, "assignment-hidden.txt"));
+
+      const allowed = await runSandboxed(
+        fixture,
+        'TMPDIR="$PWD/workspace/tmp" python3 -c \'from pathlib import Path; Path("workspace/assignment-copy.csv").write_text(Path("data/raw/input.csv").read_text())\''
+      );
+
+      expect(allowed.success).toBe(true);
+      expect(await readFile(join(fixture.workspaceRoot, "assignment-copy.csv"), "utf8")).toBe(
+        "raw,input\n"
+      );
+      const rows = await readAuditRows(fixture.root);
+      expectAuditMatchesPayload(
+        rows.find((row) => row.error_id === payload.error_record.error_id),
+        payload
+      );
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  pythonSeatbeltTest("Python Path receiver and named-mode raw mutations are denied", async () => {
+    const fixture = await createFixture();
+    try {
+      const cases = [
+        {
+          command:
+            'python3 -c \'from pathlib import Path; Path("data/raw/input.csv").unlink()\' 2>/dev/null || true',
+          assert: async () => {
+            expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
+          }
+        },
+        {
+          command:
+            'python3 -c \'from pathlib import Path; Path("data/raw/path-open.txt").open("w").write("x")\' 2>/dev/null || true',
+          assert: async () => {
+            await expectMissing(join(fixture.rawRoot, "path-open.txt"));
+          }
+        },
+        {
+          command:
+            'python3 -c \'open("data/raw/named-mode.txt", mode="w").write("x")\' 2>/dev/null || true',
+          assert: async () => {
+            await expectMissing(join(fixture.rawRoot, "named-mode.txt"));
+          }
+        },
+        {
+          command:
+            'python3 -c \'from pathlib import Path; Path("data/raw/input.csv").rename("workspace/path-moved.csv")\' 2>/dev/null || true',
+          assert: async () => {
+            expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
+            await expectMissing(join(fixture.workspaceRoot, "path-moved.csv"));
+          }
+        }
+      ];
+
+      for (const commandCase of cases) {
+        const result = await runSandboxed(fixture, commandCase.command, {
+          enableAdvisory: false
+        });
+        const payload = expectDeniedPayload(result, "denied_by_sandbox");
+        expect(payload.reason).toContain("hide sandbox denial");
+        await commandCase.assert();
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  nodeSeatbeltTest("Node unlink, rename, and copy-to-raw mutations are denied when stderr is suppressed", async () => {
     const fixture = await createFixture();
     try {
       await writeFile(join(fixture.workspaceRoot, "node-source.csv"), "derived\n", "utf8");
@@ -473,6 +554,14 @@ describe("raw data seatbelt sandbox", () => {
             'node -e \'const fs = require("fs"); fs.unlinkSync("data/raw/input.csv")\' 2>/dev/null || true',
           assert: async () => {
             expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
+          }
+        },
+        {
+          command:
+            'node -e \'const fs = require("fs"); fs.renameSync("data/raw/input.csv", "workspace/node-moved.csv")\' 2>/dev/null || true',
+          assert: async () => {
+            expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
+            await expectMissing(join(fixture.workspaceRoot, "node-moved.csv"));
           }
         },
         {
@@ -992,6 +1081,23 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  rscriptSeatbeltTest("env-wrapped Rscript hidden raw write is denied", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        'env TMPDIR="$PWD/workspace/tmp" Rscript -e \'writeLines("x", "data/raw/r-env-hidden.txt")\' 2>/dev/null || true',
+        { enableAdvisory: false }
+      );
+
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(payload.reason).toContain("hide sandbox denial");
+      await expectMissing(join(fixture.rawRoot, "r-env-hidden.txt"));
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   rscriptSeatbeltTest("Rscript file mutation helpers are denied when stderr is suppressed", async () => {
     const fixture = await createFixture();
     try {
@@ -1132,6 +1238,94 @@ describe("raw data seatbelt sandbox", () => {
       expect(result.outputSummary).not.toContain("sandbox-exec");
       expect(loggerEvents.filter((event) => event === "tool_call_complete")).toHaveLength(1);
       expect(operationEvents.filter((event) => event === "tool_call_complete")).toHaveLength(1);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("running metadata matches final allowed ToolResult", async () => {
+    const fixture = await createFixture();
+    try {
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+
+      const result = await runSandboxed(fixture, "printf ok > workspace/metadata-ok.txt", {
+        context: {
+          ...fixture.context,
+          runningToolRegistry
+        }
+      });
+
+      expect(result.success).toBe(true);
+      expect(handle.getTerminalMetadata()).toMatchObject({
+        cause: "completed",
+        success: true,
+        outputSummary: result.outputSummary
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("running metadata matches final visible raw-denial ToolResult", async () => {
+    const fixture = await createFixture();
+    try {
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+
+      const result = await runSandboxed(fixture, "printf nope > data/raw/metadata-denied.txt", {
+        enableAdvisory: false,
+        context: {
+          ...fixture.context,
+          runningToolRegistry
+        }
+      });
+
+      expectDeniedPayload(result, "denied_by_sandbox");
+      expect(handle.getTerminalMetadata()).toMatchObject({
+        cause: "completed",
+        success: false,
+        outputSummary: result.outputSummary
+      });
+      await expectMissing(join(fixture.rawRoot, "metadata-denied.txt"));
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("running metadata matches final audit-unavailable ToolResult", async () => {
+    const fixture = await createFixture();
+    try {
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+
+      const result = await runSandboxed(fixture, "printf no-run > workspace/metadata-audit.txt", {
+        auditTaskId: "..",
+        context: {
+          ...fixture.context,
+          runningToolRegistry
+        }
+      });
+
+      expectAuditReservationFailure(result);
+      expect(handle.getTerminalMetadata()).toMatchObject({
+        cause: "completed",
+        success: false,
+        outputSummary: result.outputSummary
+      });
+      await expectMissing(join(fixture.workspaceRoot, "metadata-audit.txt"));
     } finally {
       await fixture.cleanup();
     }
@@ -1278,6 +1472,71 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  pythonSeatbeltTest("session-escape descendants are rejected before timeout or abort can leak writes", async () => {
+    const fixture = await createFixture();
+    try {
+      const timeoutLeakPath = join(fixture.workspaceRoot, "timeout-setsid-leak.txt");
+      const abortLeakPath = join(fixture.workspaceRoot, "abort-setpgrp-leak.txt");
+
+      const timeoutResult = await runSandboxed(
+        fixture,
+        'python3 -c \'import os, time; os.setsid(); time.sleep(0.2); open("workspace/timeout-setsid-leak.txt", "w").write("leaked")\'',
+        { timeout: 40 }
+      );
+      expectProcessContainmentFailure(timeoutResult);
+
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+      const abortResult = await runSandboxed(
+        fixture,
+        'python3 -c \'import os, time; os.setpgrp(); time.sleep(0.2); open("workspace/abort-setpgrp-leak.txt", "w").write("leaked")\'',
+        {
+          timeout: 5_000,
+          context: {
+            ...fixture.context,
+            runningToolRegistry
+          }
+        }
+      );
+
+      expectProcessContainmentFailure(abortResult);
+      expect(handle.requestAbort("too late")).toBe("already_finished");
+      await expectMissing(timeoutLeakPath);
+      await expectMissing(abortLeakPath);
+      await Bun.sleep(350);
+      await expectMissing(timeoutLeakPath);
+      await expectMissing(abortLeakPath);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("unwaited delayed background audit subtree move fails closed with canonical audit intact", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        "(sleep 0.2; mv workspace/tasks workspace/tasks.moved) & true",
+        { enableAdvisory: false }
+      );
+
+      expectProcessContainmentFailure(result);
+      await Bun.sleep(350);
+      await expectMissing(join(fixture.workspaceRoot, "tasks.moved"));
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        decision: "policy_gate_process_containment_unavailable"
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("raw source copy to workspace succeeds and raw destination copy is denied", async () => {
     const fixture = await createFixture();
     try {
@@ -1377,6 +1636,35 @@ describe("raw data seatbelt sandbox", () => {
       const denied = await runSandboxed(fixture, "printf nope > data/raw/root.txt");
       expectDeniedPayload(denied, "denied_by_advisory");
       await expectMissing(join(fixture.rawRoot, "root.txt"));
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  pythonSeatbeltTest("cwd-aware interpreter targets allow workspace-local data/raw and deny protected root data/raw", async () => {
+    const fixture = await createFixture();
+    try {
+      const workspaceLocal =
+        'mkdir -p workspace/data/raw; cd workspace && python3 -c \'try:\n f=open("data/raw/interpreter-out.txt", mode="w"); f.write("ok"); f.close()\nexcept Exception:\n pass\'';
+      const protectedRoot =
+        'python3 -c \'try:\n f=open("data/raw/interpreter-root.txt", mode="w"); f.write("nope"); f.close()\nexcept Exception:\n pass\'';
+
+      expect(evaluateRawDataWriteAdvisory(workspaceLocal, [fixture.rawRoot])).toEqual({
+        decision: "allow"
+      });
+
+      const allowed = await runSandboxed(fixture, workspaceLocal);
+      expect(allowed.success).toBe(true);
+      expect(
+        await readFile(join(fixture.workspaceRoot, "data", "raw", "interpreter-out.txt"), "utf8")
+      ).toBe("ok");
+
+      const denied = await runSandboxed(fixture, protectedRoot, {
+        enableAdvisory: false
+      });
+      const payload = expectDeniedPayload(denied, "denied_by_sandbox");
+      expect(payload.reason).toContain("hide sandbox denial");
+      await expectMissing(join(fixture.rawRoot, "interpreter-root.txt"));
     } finally {
       await fixture.cleanup();
     }
@@ -2032,6 +2320,30 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("fresh project root with data/raw but no workspace writes audit under workspace/tasks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shud-raw-fresh-project-"));
+    try {
+      const rawRoot = join(root, "data", "raw");
+      await mkdir(rawRoot, { recursive: true });
+      await writeFile(join(rawRoot, "input.csv"), "raw,input\n", "utf8");
+
+      const auditPath = await appendPolicyGateAuditRow({
+        workspaceRoot: root,
+        protectedRawPaths: [rawRoot],
+        fileName: "fresh-project.ndjson",
+        row: minimalAuditRow()
+      });
+
+      const canonicalRoot = await realpath(root);
+      expect(auditPath).toBe(
+        join(canonicalRoot, "workspace", "tasks", "TASK-M1-SPIKE", "audit", "fresh-project.ndjson")
+      );
+      expect(await readFile(auditPath, "utf8")).toContain("denied_by_advisory");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   seatbeltTest("sandboxed bash writes audit rows under canonical workspace root", async () => {
     const fixture = await createFixture();
     try {
@@ -2090,6 +2402,50 @@ describe("raw data seatbelt sandbox", () => {
       await expect(
         scanProtectedHardlinks({ protectedRoots: [fixture.rawRoot], maxScannedPathCount: 2 })
       ).rejects.toThrow("exceeded budget");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("large benign command inside advisory scan budget still runs under OS authority", async () => {
+    const fixture = await createFixture();
+    try {
+      const filler = "x".repeat(60_000);
+      const startedAt = Date.now();
+      const result = await runSandboxed(
+        fixture,
+        `printf ok > workspace/large-benign.txt # ${filler}`,
+        { timeout: 30_000 }
+      );
+
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      expect(result.success).toBe(true);
+      expect(await readFile(join(fixture.workspaceRoot, "large-benign.txt"), "utf8")).toBe("ok");
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("large hidden-sensitive command fails closed on scan budget before side effects", async () => {
+    const fixture = await createFixture();
+    try {
+      const filler = "x".repeat(140_000);
+      const startedAt = Date.now();
+      const result = await runSandboxed(
+        fixture,
+        `printf ok > workspace/large-adversarial.txt 2>/dev/null; true # ${filler}`,
+        { enableAdvisory: false }
+      );
+
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(payload.reason).toContain("analysis budget exceeded");
+      await expectMissing(join(fixture.workspaceRoot, "large-adversarial.txt"));
     } finally {
       await fixture.cleanup();
     }
@@ -2232,6 +2588,7 @@ async function runSandboxed(
     enableAdvisory?: boolean;
     fuseRules?: readonly FuseRule[];
     auditWorkspaceRoot?: string;
+    auditTaskId?: string;
     profileRoot?: string;
     tempRoot?: string;
     context?: ToolContext;
@@ -2245,6 +2602,7 @@ async function runSandboxed(
     profileRoot: options.profileRoot ?? fixture.profileRoot,
     enableAdvisory: options.enableAdvisory,
     auditWorkspaceRoot: options.auditWorkspaceRoot,
+    auditTaskId: options.auditTaskId,
     fuseRules: options.fuseRules ?? []
   });
 
@@ -2290,6 +2648,24 @@ function expectAuditReservationFailure(result: ToolResult): void {
   expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
   expect(payload.remediation?.next_action).toBe("fix_and_retry");
   expect(payload.remediation?.hint).toContain("audit path");
+  expect(payload.remediation?.ref).toContain("policy-gate-spike");
+}
+
+function expectProcessContainmentFailure(result: ToolResult): void {
+  expect(result.success).toBe(false);
+  const payload = JSON.parse(result.output) as {
+    error?: string;
+    rule?: string;
+    remediation?: {
+      next_action?: string;
+      hint?: string;
+      ref?: string;
+    };
+  };
+  expect(payload.error).toBe("policy_gate_process_containment_unavailable");
+  expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
+  expect(payload.remediation?.next_action).toBe("fix_and_retry");
+  expect(payload.remediation?.hint).toContain("foreground");
   expect(payload.remediation?.ref).toContain("policy-gate-spike");
 }
 

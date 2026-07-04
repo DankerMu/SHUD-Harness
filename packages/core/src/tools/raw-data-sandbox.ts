@@ -42,6 +42,12 @@ const SANDBOX_DENIAL_PATTERN = /Operation not permitted|Permission denied|sandbo
 const INTERPRETER_WRITE_DENIAL_PATTERN = /can't open file/i;
 const PIPE_GRACE_MS = 1000;
 const FORCE_KILL_SETTLE_MS = 75;
+const DESCENDANT_SAMPLE_INTERVAL_MS = 20;
+const DESCENDANT_KILL_SETTLE_MS = 120;
+const COMMAND_ANALYSIS_MAX_LENGTH = 128_000;
+const INTERPRETER_PAYLOAD_ANALYSIS_MAX_LENGTH = 32_000;
+const COMMAND_ANALYSIS_MAX_SEGMENTS = 512;
+const COMMAND_ANALYSIS_MAX_CALLS = 512;
 const DEFAULT_ABORT_MESSAGE = "Command aborted by user from Session Detail.";
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export interface RawDataSeatbeltProfileOptions {
@@ -287,17 +293,17 @@ export class RawDataSandboxedBashTool extends BaseTool {
   protected async execute(ctx: ToolContext, input: unknown): Promise<ToolResult> {
     const command = readBashCommand(input);
     if (!command) {
-      return {
+      return this.finalizeToolResult(ctx, {
         success: false,
         output: "Sandboxed bash requires a string command.",
         outputSummary: "Sandboxed bash missing command"
-      };
+      });
     }
 
     const protectedRawPaths = await canonicalizePathSet(this.options.protectedRawPaths);
     const auditReservation = await this.reserveAuditEvidence(ctx, protectedRawPaths);
     if ("toolResult" in auditReservation) {
-      return auditReservation.toolResult;
+      return this.finalizeToolResult(ctx, auditReservation.toolResult);
     }
 
     let profilePath: string | undefined;
@@ -333,9 +339,9 @@ export class RawDataSandboxedBashTool extends BaseTool {
         });
         const appendFailure = await this.appendDenialAudit(ctx, auditReservation, evidence);
         if (appendFailure) {
-          return appendFailure;
+          return this.finalizeToolResult(ctx, appendFailure);
         }
-        return evidence.toolResult;
+        return this.finalizeToolResult(ctx, evidence.toolResult);
       }
 
       if (this.options.enableAdvisory !== false) {
@@ -351,19 +357,39 @@ export class RawDataSandboxedBashTool extends BaseTool {
           });
           const appendFailure = await this.appendDenialAudit(ctx, auditReservation, evidence);
           if (appendFailure) {
-            return appendFailure;
+            return this.finalizeToolResult(ctx, appendFailure);
           }
-          return evidence.toolResult;
+          return this.finalizeToolResult(ctx, evidence.toolResult);
         }
       }
 
-      const result = await runSeatbeltSandboxedBash(ctx, {
+      const containmentPreflight = evaluateProcessContainmentPreflight(command);
+      if (containmentPreflight.decision === "deny") {
+        const result = buildProcessContainmentFailureResult({
+          toolId: this.name,
+          reason: containmentPreflight.reason
+        });
+        const appendFailure = await this.appendAudit(ctx, auditReservation, {
+          event: "tool.failed",
+          decision: "policy_gate_process_containment_unavailable",
+          profile,
+          profilePath
+        });
+        if (appendFailure) {
+          return this.finalizeToolResult(ctx, appendFailure);
+        }
+        return this.finalizeToolResult(ctx, result);
+      }
+
+      const run = await runSeatbeltSandboxedBash(ctx, {
         ...(typeof input === "object" && input !== null ? input : {}),
+        toolId: this.name,
         command,
         profilePath,
         sandboxExecutable: DEFAULT_SANDBOX_EXECUTABLE,
         bashExecutable: DEFAULT_SANDBOX_BASH
       });
+      const result = run.result;
 
       if (isLikelySandboxDenialForCommand(command, result, protectedRawPathSignals)) {
         const evidence = buildRawDataDenialEvidence({
@@ -377,9 +403,22 @@ export class RawDataSandboxedBashTool extends BaseTool {
         });
         const appendFailure = await this.appendDenialAudit(ctx, auditReservation, evidence);
         if (appendFailure) {
-          return appendFailure;
+          return this.finalizeToolResult(ctx, appendFailure, run.cause);
         }
-        return evidence.toolResult;
+        return this.finalizeToolResult(ctx, evidence.toolResult, run.cause);
+      }
+
+      if (isProcessContainmentFailureResult(result)) {
+        const appendFailure = await this.appendAudit(ctx, auditReservation, {
+          event: "tool.failed",
+          decision: "policy_gate_process_containment_unavailable",
+          profile,
+          profilePath
+        });
+        if (appendFailure) {
+          return this.finalizeToolResult(ctx, appendFailure, run.cause);
+        }
+        return this.finalizeToolResult(ctx, result, run.cause);
       }
 
       const appendFailure = await this.appendAudit(ctx, auditReservation, {
@@ -389,9 +428,13 @@ export class RawDataSandboxedBashTool extends BaseTool {
         profilePath
       });
       if (appendFailure) {
-        return appendFailure;
+        return this.finalizeToolResult(ctx, appendFailure, run.cause);
       }
-      return normalizeSandboxedBashResult(result, command, profilePath);
+      return this.finalizeToolResult(
+        ctx,
+        normalizeSandboxedBashResult(result, command, profilePath),
+        run.cause
+      );
     } finally {
       await closePolicyGateAuditReservation(auditReservation);
       if (profilePath) {
@@ -488,6 +531,15 @@ export class RawDataSandboxedBashTool extends BaseTool {
       };
     }
   }
+
+  private finalizeToolResult(
+    ctx: ToolContext,
+    result: ToolResult,
+    cause: RunningToolTerminationCause = "completed"
+  ): ToolResult {
+    markRunningToolFinished(ctx, result, cause);
+    return result;
+  }
 }
 
 interface PolicyGateAuditReservation {
@@ -529,12 +581,17 @@ export function evaluateRawDataWriteAdvisory(
   command: string,
   protectedRawPaths: readonly string[]
 ): PolicyRuleDecision {
-  const suppressedDenial = evaluateSuppressedSandboxFailureGuard(command, protectedRawPaths);
+  const analysis = analyzeRawDataCommand(command, protectedRawPaths);
+  const suppressedDenial = evaluateSuppressedSandboxFailureGuard(
+    command,
+    protectedRawPaths,
+    analysis
+  );
   if (suppressedDenial.decision === "deny") {
     return suppressedDenial;
   }
 
-  if (hasStaticRawDataWrite(command, protectedRawPaths)) {
+  if (analysis.hasStaticRawWrite) {
     return {
       decision: "deny",
       reason: "obvious static raw-data write target",
@@ -547,9 +604,19 @@ export function evaluateRawDataWriteAdvisory(
 
 export function evaluateSuppressedSandboxFailureGuard(
   command: string,
-  protectedRawPaths: readonly string[]
+  protectedRawPaths: readonly string[],
+  existingAnalysis?: RawDataCommandAnalysis
 ): PolicyRuleDecision {
-  if (hasInterpreterInternalRawWriteSuppressionRisk(command, protectedRawPaths)) {
+  const analysis = existingAnalysis ?? analyzeRawDataCommand(command, protectedRawPaths);
+  if (analysis.budgetExceeded && analysis.hasHiddenEvidenceRisk) {
+    return {
+      decision: "deny",
+      reason: "policy gate command analysis budget exceeded for hidden-denial-sensitive bash form",
+      remediation: rawDataWriteRemediation()
+    };
+  }
+
+  if (analysis.hasInterpreterSuppressedRawWrite || analysis.hasHiddenRawWriteTarget) {
     return {
       decision: "deny",
       reason: "raw-data write form can hide sandbox denial",
@@ -557,19 +624,85 @@ export function evaluateSuppressedSandboxFailureGuard(
     };
   }
 
-  if (!canHideSandboxFailure(command)) {
-    return { decision: "allow" };
+  return { decision: "allow" };
+}
+
+interface RawDataCommandAnalysis {
+  budgetExceeded: boolean;
+  budgetReason?: string;
+  hasStaticRawWrite: boolean;
+  hasKnownRawWriteTarget: boolean;
+  hasHiddenEvidenceRisk: boolean;
+  hasHiddenRawWriteTarget: boolean;
+  hasInterpreterSuppressedRawWrite: boolean;
+}
+
+function analyzeRawDataCommand(
+  command: string,
+  protectedRawPaths: readonly string[]
+): RawDataCommandAnalysis {
+  const budget = evaluateCommandAnalysisBudget(command);
+  if (!budget.ok) {
+    return {
+      budgetExceeded: true,
+      budgetReason: budget.reason,
+      hasStaticRawWrite: false,
+      hasKnownRawWriteTarget: false,
+      hasHiddenEvidenceRisk: true,
+      hasHiddenRawWriteTarget: false,
+      hasInterpreterSuppressedRawWrite: false
+    };
   }
 
-  if (!hasKnownRawDataWriteTarget(command, protectedRawPaths)) {
-    return { decision: "allow" };
-  }
+  const hasHiddenEvidenceRisk = canLoseSandboxDenialEvidence(command);
+  const hasStaticRawWrite = hasStaticRawDataWrite(command, protectedRawPaths);
+  const hasKnownRawWriteTarget = hasKnownRawDataWriteTarget(command, protectedRawPaths, {
+    staticRawWrite: hasStaticRawWrite
+  });
+  const hasInterpreterSuppressedRawWrite = hasInterpreterInternalRawWriteSuppressionRisk(
+    command,
+    protectedRawPaths
+  );
 
   return {
-    decision: "deny",
-    reason: "raw-data write form can hide sandbox denial",
-    remediation: rawDataWriteRemediation()
+    budgetExceeded: false,
+    hasStaticRawWrite,
+    hasKnownRawWriteTarget,
+    hasHiddenEvidenceRisk,
+    hasHiddenRawWriteTarget: hasKnownRawWriteTarget && hasHiddenEvidenceRisk,
+    hasInterpreterSuppressedRawWrite
   };
+}
+
+function evaluateCommandAnalysisBudget(
+  command: string
+): { ok: true } | { ok: false; reason: string } {
+  if (command.length > COMMAND_ANALYSIS_MAX_LENGTH) {
+    return {
+      ok: false,
+      reason: `command length exceeds policy gate analysis budget: ${COMMAND_ANALYSIS_MAX_LENGTH}`
+    };
+  }
+
+  const segments = splitStaticShellSegments(command);
+  if (segments.length > COMMAND_ANALYSIS_MAX_SEGMENTS) {
+    return {
+      ok: false,
+      reason: `command segment count exceeds policy gate analysis budget: ${COMMAND_ANALYSIS_MAX_SEGMENTS}`
+    };
+  }
+
+  for (const segment of segments) {
+    const payload = interpreterPayload(commandTokensFromSegment(segment));
+    if (payload && payload.length > INTERPRETER_PAYLOAD_ANALYSIS_MAX_LENGTH) {
+      return {
+        ok: false,
+        reason: `interpreter payload length exceeds policy gate analysis budget: ${INTERPRETER_PAYLOAD_ANALYSIS_MAX_LENGTH}`
+      };
+    }
+  }
+
+  return { ok: true };
 }
 
 export async function appendPolicyGateAuditRow(
@@ -827,7 +960,56 @@ function buildAuditReservationFailureResult(input: {
   };
 }
 
+function buildProcessContainmentFailureResult(input: {
+  toolId: string;
+  reason: string;
+}): ToolResult {
+  const payload = {
+    error: "policy_gate_process_containment_unavailable",
+    tool_id: input.toolId,
+    rule: RAW_DATA_WRITE_RULE_ID,
+    reason: input.reason,
+    remediation: {
+      next_action: "fix_and_retry",
+      hint: "Run bash commands in the foreground without daemonizing or untracked background mutation.",
+      ref: RAW_DATA_POLICY_REF
+    }
+  };
+
+  return {
+    success: false,
+    output: JSON.stringify(payload),
+    outputSummary: "Policy gate process containment unavailable"
+  };
+}
+
+function isProcessContainmentFailureResult(result: ToolResult): boolean {
+  try {
+    const payload = JSON.parse(result.output) as { error?: unknown };
+    return payload.error === "policy_gate_process_containment_unavailable";
+  } catch {
+    return false;
+  }
+}
+
+function markRunningToolFinished(
+  ctx: ToolContext,
+  result: ToolResult,
+  cause: RunningToolTerminationCause
+): void {
+  const toolUseId = ctx.currentToolUseId;
+  const runningHandle =
+    toolUseId && ctx.runningToolRegistry ? ctx.runningToolRegistry.get(toolUseId) : undefined;
+  runningHandle?.markFinished({
+    finishedAt: new Date().toISOString(),
+    cause,
+    success: result.success,
+    outputSummary: result.outputSummary
+  });
+}
+
 interface SandboxedBashInput {
+  toolId: string;
   command: string;
   timeout?: number;
   envSecrets?: Record<string, string>;
@@ -836,6 +1018,11 @@ interface SandboxedBashInput {
   profilePath: string;
   sandboxExecutable: string;
   bashExecutable: string;
+}
+
+interface SandboxedBashExecution {
+  result: ToolResult;
+  cause: RunningToolTerminationCause;
 }
 
 interface ResolvedBashSecret {
@@ -851,16 +1038,16 @@ type BashSecretResolution =
 async function runSeatbeltSandboxedBash(
   ctx: ToolContext,
   input: SandboxedBashInput
-): Promise<ToolResult> {
+): Promise<SandboxedBashExecution> {
   const { command, timeout = 120_000 } = input;
   const resolvedExecutables = await verifySeatbeltExecutables(input);
   if (!resolvedExecutables.success) {
-    return resolvedExecutables.result;
+    return { result: resolvedExecutables.result, cause: "spawn_error" };
   }
 
   const resolvedSecrets = resolveBashSecretInputs(ctx, input);
   if (!resolvedSecrets.success) {
-    return resolvedSecrets.result;
+    return { result: resolvedSecrets.result, cause: "completed" };
   }
 
   const usesSecretRefs = resolvedSecrets.secrets.length > 0;
@@ -870,16 +1057,15 @@ async function runSeatbeltSandboxedBash(
   );
   if (leakedSecret) {
     return {
-      success: false,
-      output:
-        "Command contains a resolved secret value. Use envSecrets variables or stdinSecretRef instead.",
-      outputSummary: "Command rejected: secret value in command"
+      result: {
+        success: false,
+        output:
+          "Command contains a resolved secret value. Use envSecrets variables or stdinSecretRef instead.",
+        outputSummary: "Command rejected: secret value in command"
+      },
+      cause: "completed"
     };
   }
-
-  const toolUseId = ctx.currentToolUseId;
-  const runningHandle =
-    toolUseId && ctx.runningToolRegistry ? ctx.runningToolRegistry.get(toolUseId) : undefined;
 
   let proc: ReturnType<typeof Bun.spawn>;
   try {
@@ -906,19 +1092,21 @@ async function runSeatbeltSandboxedBash(
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    runningHandle?.markFinished({
-      finishedAt: new Date().toISOString(),
-      cause: "spawn_error",
-      success: false,
-      outputSummary: `Spawn failed: ${message.slice(0, 80)}`
-    });
     return {
-      success: false,
-      output: message,
-      outputSummary: `Spawn failed: ${message.slice(0, 80)}`
+      result: {
+        success: false,
+        output: message,
+        outputSummary: `Spawn failed: ${message.slice(0, 80)}`
+      },
+      cause: "spawn_error"
     };
   }
 
+  const toolUseId = ctx.currentToolUseId;
+  const runningHandle =
+    toolUseId && ctx.runningToolRegistry ? ctx.runningToolRegistry.get(toolUseId) : undefined;
+  const descendantTracker = createInvocationDescendantTracker(proc);
+  descendantTracker.start();
   const stdoutCapture = createStreamCapture(proc.stdout);
   const stderrCapture = createStreamCapture(proc.stderr);
   let stdinWriteError: string | undefined;
@@ -931,19 +1119,6 @@ async function runSeatbeltSandboxedBash(
         });
   let terminationCause: RunningToolTerminationCause | undefined;
   let abortMessage: string | undefined;
-
-  const markFinished = (
-    cause: RunningToolTerminationCause,
-    success: boolean,
-    outputSummary?: string
-  ) => {
-    runningHandle?.markFinished({
-      finishedAt: new Date().toISOString(),
-      cause,
-      success,
-      outputSummary
-    });
-  };
 
   const latchTerminationCause = (cause: RunningToolTerminationCause) => {
     if (terminationCause) {
@@ -958,15 +1133,14 @@ async function runSeatbeltSandboxedBash(
     if (!latchTerminationCause("abort")) {
       return;
     }
-    tryKillProcess(proc, "SIGKILL");
+    void terminateInvocationProcesses(proc, descendantTracker);
   });
 
   const timeoutId = setTimeout(() => {
     if (!latchTerminationCause("timeout")) {
       return;
     }
-    markFinished("timeout", false, `Command timed out: ${summaryCommand}`);
-    tryKillProcess(proc, "SIGKILL");
+    void terminateInvocationProcesses(proc, descendantTracker);
   }, timeout);
 
   const exitCode = await proc.exited;
@@ -974,15 +1148,19 @@ async function runSeatbeltSandboxedBash(
     await stdinWrite;
   }
   clearTimeout(timeoutId);
-  if (terminationCause === "timeout" || terminationCause === "abort") {
-    await forceKillProcessGroup(proc);
-  }
 
   const finalCause = terminationCause ?? "completed";
-  if (finalCause === "abort") {
-    markFinished("abort", false, `Command aborted: ${summaryCommand}`);
-  } else if (finalCause === "completed") {
-    markFinished("completed", exitCode === 0, undefined);
+  const containment = await terminateInvocationProcesses(proc, descendantTracker);
+  descendantTracker.stop();
+  if (!containment.success) {
+    await Promise.allSettled([stdoutCapture.cancel(), stderrCapture.cancel()]);
+    return {
+      result: buildProcessContainmentFailureResult({
+        toolId: input.toolId,
+        reason: containment.reason
+      }),
+      cause: finalCause
+    };
   }
 
   const streamDrain = Promise.allSettled([stdoutCapture.done, stderrCapture.done]);
@@ -1007,7 +1185,7 @@ async function runSeatbeltSandboxedBash(
     stdinWriteError,
     summaryCommand
   });
-  return filterToolResultSecrets(ctx, result);
+  return { result: filterToolResultSecrets(ctx, result), cause: finalCause };
 }
 
 function buildSandboxedBashResult(input: {
@@ -1347,9 +1525,189 @@ function tryKillProcess(proc: ReturnType<typeof Bun.spawn>, signal?: NodeJS.Sign
   }
 }
 
-async function forceKillProcessGroup(proc: ReturnType<typeof Bun.spawn>): Promise<void> {
+interface InvocationDescendantTracker {
+  readonly knownPids: Set<number>;
+  start(): void;
+  stop(): void;
+  sample(): Promise<void>;
+}
+
+function createInvocationDescendantTracker(
+  proc: ReturnType<typeof Bun.spawn>
+): InvocationDescendantTracker {
+  const rootPid = typeof proc.pid === "number" ? proc.pid : undefined;
+  const knownPids = new Set<number>();
+  if (rootPid) {
+    knownPids.add(rootPid);
+  }
+  let interval: ReturnType<typeof setInterval> | undefined;
+  let sampling = false;
+
+  const sample = async () => {
+    if (!rootPid || process.platform === "win32" || sampling) {
+      return;
+    }
+    sampling = true;
+    try {
+      const descendants = await listDescendantPids(knownPids);
+      for (const pid of descendants) {
+        knownPids.add(pid);
+      }
+    } finally {
+      sampling = false;
+    }
+  };
+
+  return {
+    knownPids,
+    start() {
+      if (!rootPid || interval) {
+        return;
+      }
+      void sample();
+      interval = setInterval(() => {
+        void sample();
+      }, DESCENDANT_SAMPLE_INTERVAL_MS);
+    },
+    stop() {
+      if (!interval) {
+        return;
+      }
+      clearInterval(interval);
+      interval = undefined;
+    },
+    sample
+  };
+}
+
+async function terminateInvocationProcesses(
+  proc: ReturnType<typeof Bun.spawn>,
+  tracker: InvocationDescendantTracker
+): Promise<{ success: true } | { success: false; reason: string }> {
+  tracker.stop();
+  try {
+    await tracker.sample();
+  } catch (error) {
+    return {
+      success: false,
+      reason: `Could not enumerate invocation descendants before teardown: ${errorMessage(error)}`
+    };
+  }
+
   tryKillProcess(proc, "SIGKILL");
+  killKnownInvocationPids(tracker.knownPids);
   await Bun.sleep(FORCE_KILL_SETTLE_MS);
+
+  try {
+    await tracker.sample();
+  } catch (error) {
+    return {
+      success: false,
+      reason: `Could not verify invocation descendants after teardown: ${errorMessage(error)}`
+    };
+  }
+
+  killKnownInvocationPids(tracker.knownPids);
+  await Bun.sleep(DESCENDANT_KILL_SETTLE_MS);
+
+  const survivors = await livePids([...tracker.knownPids]);
+  const rootPid = typeof proc.pid === "number" ? proc.pid : undefined;
+  const escapedSurvivors = survivors.filter((pid) => pid !== rootPid);
+  if (escapedSurvivors.length > 0) {
+    return {
+      success: false,
+      reason: `Invocation descendants survived containment: ${escapedSurvivors.join(", ")}`
+    };
+  }
+
+  return { success: true };
+}
+
+function killKnownInvocationPids(pids: ReadonlySet<number>): void {
+  const sortedPids = [...pids].sort((a, b) => b - a);
+  for (const pid of sortedPids) {
+    if (pid <= 0) {
+      continue;
+    }
+    if (process.platform !== "win32") {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        // The pid may not be a process-group leader; direct kill follows.
+      }
+    }
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Ignore processes that have already exited.
+    }
+  }
+}
+
+async function listDescendantPids(rootPids: ReadonlySet<number>): Promise<Set<number>> {
+  if (rootPids.size === 0 || process.platform === "win32") {
+    return new Set();
+  }
+  const table = await readProcessParentTable();
+  const descendants = new Set<number>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [pid, ppid] of table) {
+      if (rootPids.has(pid) || descendants.has(pid)) {
+        continue;
+      }
+      if (rootPids.has(ppid) || descendants.has(ppid)) {
+        descendants.add(pid);
+        changed = true;
+      }
+    }
+  }
+  return descendants;
+}
+
+async function readProcessParentTable(): Promise<Map<number, number>> {
+  const proc = Bun.spawn(["/bin/ps", "-axo", "pid=,ppid="], {
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || `ps exited with ${exitCode}`);
+  }
+  const table = new Map<number, number>();
+  for (const line of stdout.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)$/);
+    if (!match) {
+      continue;
+    }
+    table.set(Number(match[1]), Number(match[2]));
+  }
+  return table;
+}
+
+async function livePids(pids: readonly number[]): Promise<number[]> {
+  const live: number[] = [];
+  for (const pid of pids) {
+    if (pid <= 0) {
+      continue;
+    }
+    try {
+      process.kill(pid, 0);
+      live.push(pid);
+    } catch {
+      // Not live or not visible.
+    }
+  }
+  return live;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isWebWritableStream(stream: unknown): stream is WritableStream<Uint8Array> {
@@ -1441,13 +1799,21 @@ function commandSummary(command: string): string {
   return command.slice(0, 80);
 }
 
+interface RawPathResolutionOptions {
+  treatRelativeRawAsProtected?: boolean;
+  cwdCandidates?: readonly string[];
+}
+
 function hasStaticRawDataWrite(
   command: string,
   protectedRawPaths: readonly string[],
-  options: { treatInitialRelativeRawAsProtected?: boolean } = {}
+  options: { treatInitialRelativeRawAsProtected?: boolean; initialCwdCandidates?: readonly string[] } = {}
 ): boolean {
   const staticPathVariables = new Map<string, string>();
-  let relativeRawPathsAmbiguous = options.treatInitialRelativeRawAsProtected === false;
+  let cwdCandidates =
+    options.initialCwdCandidates ?? inferredProtectedRawProjectRoots(protectedRawPaths);
+  let relativeRawPathsAmbiguous =
+    options.treatInitialRelativeRawAsProtected === false || cwdCandidates.length === 0;
 
   for (const segment of splitStaticShellSegments(command)) {
     const tokens = effectiveShellTokens(tokenizeStaticShellSegment(segment));
@@ -1457,17 +1823,30 @@ function hasStaticRawDataWrite(
 
     collectStaticPathAssignments(tokens, staticPathVariables);
     const resolvedTokens = tokens.map((token) => resolveStaticPathToken(token, staticPathVariables));
-    const commandName = normalizeCommandName(resolvedTokens[0]);
+    const commandTokens = stripShellCommandPrefixes(resolvedTokens);
+    const commandName = commandTokens[0] ? normalizeCommandName(commandTokens[0]) : "";
 
     if (isCwdChangingCommand(commandName)) {
-      relativeRawPathsAmbiguous = true;
+      if ((commandName === "cd" || commandName === "pushd") && commandTokens[1]) {
+        const nextCwdCandidates = resolveStaticCwdCandidates(cwdCandidates, commandTokens[1]);
+        if (nextCwdCandidates) {
+          cwdCandidates = nextCwdCandidates;
+          relativeRawPathsAmbiguous = false;
+        } else {
+          cwdCandidates = [];
+          relativeRawPathsAmbiguous = true;
+        }
+      } else {
+        cwdCandidates = [];
+        relativeRawPathsAmbiguous = true;
+      }
       continue;
     }
 
-    const treatRelativeRawAsProtected = !relativeRawPathsAmbiguous;
+    const pathOptions = rawPathResolutionOptions(cwdCandidates, !relativeRawPathsAmbiguous);
     if (
       hasRawDataWriteRedirection(resolvedTokens, protectedRawPaths, {
-        treatRelativeRawAsProtected
+        ...pathOptions
       })
     ) {
       return true;
@@ -1475,8 +1854,8 @@ function hasStaticRawDataWrite(
 
     if (
       (commandName === "bash" || commandName === "sh") &&
-      hasChildShellRawDataWrite(resolvedTokens, protectedRawPaths, {
-        treatRelativeRawAsProtected
+      hasChildShellRawDataWrite(commandTokens, protectedRawPaths, {
+        ...pathOptions
       })
     ) {
       return true;
@@ -1484,21 +1863,21 @@ function hasStaticRawDataWrite(
 
     if (
       isInterpreterCommand(commandName) &&
-      hasInterpreterRawDataWrite(resolvedTokens, protectedRawPaths, {
-        treatRelativeRawAsProtected
+      hasInterpreterRawDataWrite(commandTokens, protectedRawPaths, {
+        ...pathOptions
       })
     ) {
       return true;
     }
 
-    const operands = extractCommandOperands(resolvedTokens.slice(1));
+    const operands = extractCommandOperands(commandTokens.slice(1));
 
     if (
       (commandName === "sed" || commandName === "perl") &&
       hasInPlaceMutationFlag(resolvedTokens) &&
       operands.some((operand) =>
         isRawDataPathToken(operand, protectedRawPaths, {
-          treatRelativeRawAsProtected
+          ...pathOptions
         })
       )
     ) {
@@ -1507,9 +1886,9 @@ function hasStaticRawDataWrite(
 
     if (
       commandName === "awk" &&
-      resolvedTokens
+      commandTokens
         .slice(1)
-        .some((token) => hasAwkRawWriteTarget(token, protectedRawPaths, { treatRelativeRawAsProtected }))
+        .some((token) => hasAwkRawWriteTarget(token, protectedRawPaths, { ...pathOptions }))
     ) {
       return true;
     }
@@ -1523,7 +1902,7 @@ function hasStaticRawDataWrite(
       if (
         destination &&
         isRawDataPathToken(destination, protectedRawPaths, {
-          treatRelativeRawAsProtected
+          ...pathOptions
         })
       ) {
         return true;
@@ -1538,7 +1917,7 @@ function hasStaticRawDataWrite(
           return (
             outputMatch !== null &&
             isRawDataPathToken(outputMatch[1], protectedRawPaths, {
-              treatRelativeRawAsProtected
+              ...pathOptions
             })
           );
         })
@@ -1553,7 +1932,7 @@ function hasStaticRawDataWrite(
       if (
         destination &&
         isRawDataPathToken(destination, protectedRawPaths, {
-          treatRelativeRawAsProtected
+          ...pathOptions
         })
       ) {
         return true;
@@ -1565,7 +1944,7 @@ function hasStaticRawDataWrite(
       if (
         operands.some((operand) =>
           isRawDataPathToken(operand, protectedRawPaths, {
-            treatRelativeRawAsProtected
+            ...pathOptions
           })
         )
       ) {
@@ -1589,7 +1968,7 @@ function hasStaticRawDataWrite(
       if (
         operands.some((operand) =>
           isRawDataPathToken(operand, protectedRawPaths, {
-            treatRelativeRawAsProtected
+            ...pathOptions
           })
         )
       ) {
@@ -1629,10 +2008,87 @@ function resolveStaticPathToken(token: string, bindings: ReadonlyMap<string, str
   return token;
 }
 
+function commandTokensFromSegment(segment: string): string[] {
+  return stripShellCommandPrefixes(effectiveShellTokens(tokenizeStaticShellSegment(segment)));
+}
+
+function stripShellCommandPrefixes(tokens: readonly string[]): string[] {
+  let index = 0;
+  while (index < tokens.length && isShellAssignmentToken(tokens[index])) {
+    index += 1;
+  }
+
+  if (normalizeCommandName(tokens[index] ?? "") !== "env") {
+    return tokens.slice(index);
+  }
+
+  index += 1;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token === "--") {
+      index += 1;
+      break;
+    }
+    if (token === "-i" || token === "-0" || token === "--ignore-environment" || token === "--null") {
+      index += 1;
+      continue;
+    }
+    if (token === "-u" || token === "--unset") {
+      index += 2;
+      continue;
+    }
+    if (token.startsWith("-u") && token.length > 2) {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--unset=")) {
+      index += 1;
+      continue;
+    }
+    if (isShellAssignmentToken(token)) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+
+  return tokens.slice(index);
+}
+
+function isShellAssignmentToken(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
+}
+
+function rawPathResolutionOptions(
+  cwdCandidates: readonly string[],
+  treatRelativeRawAsProtected: boolean
+): RawPathResolutionOptions {
+  return {
+    treatRelativeRawAsProtected,
+    ...(cwdCandidates.length > 0 ? { cwdCandidates } : {})
+  };
+}
+
+function resolveStaticCwdCandidates(
+  cwdCandidates: readonly string[],
+  nextCwd: string
+): string[] | undefined {
+  if (!isSimpleStaticPathToken(nextCwd) || nextCwd === "-") {
+    return undefined;
+  }
+  if (nextCwd === "~" || nextCwd.startsWith("~/")) {
+    return undefined;
+  }
+
+  return sortedUnique(
+    cwdCandidates.map((cwd) => normalize(resolve(cwd, nextCwd)).replace(/\/+$/, ""))
+  );
+}
+
 function hasRawDataWriteRedirection(
   tokens: readonly string[],
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   for (let index = 0; index < tokens.length - 1; index += 1) {
     if (
@@ -1649,12 +2105,13 @@ function hasRawDataWriteRedirection(
 function hasChildShellRawDataWrite(
   tokens: readonly string[],
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   for (let index = 1; index < tokens.length - 1; index += 1) {
     if (tokens[index] === "-c") {
       return hasStaticRawDataWrite(tokens[index + 1], protectedRawPaths, {
-        treatInitialRelativeRawAsProtected: options.treatRelativeRawAsProtected !== false
+        treatInitialRelativeRawAsProtected: options.treatRelativeRawAsProtected !== false,
+        initialCwdCandidates: options.cwdCandidates
       });
     }
   }
@@ -1669,7 +2126,7 @@ function isInterpreterCommand(commandName: string): boolean {
 function hasInterpreterRawDataWrite(
   tokens: readonly string[],
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   const payload = interpreterPayload(tokens);
   if (!payload) {
@@ -1692,7 +2149,7 @@ function interpreterPayload(tokens: readonly string[]): string | undefined {
 function hasInterpreterRawWriteTarget(
   payload: string,
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   return (
     hasCallWithRawTargetArgument(payload, /\b(?:writeFile|appendFile)(?:Sync)?/, [0], protectedRawPaths, options) ||
@@ -1712,7 +2169,7 @@ function hasCallWithRawTargetArgument(
   calleePattern: RegExp,
   argumentIndexes: readonly number[],
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   for (const argsText of findCallArgumentLists(payload, calleePattern)) {
     const args = splitTopLevelArguments(argsText);
@@ -1730,7 +2187,7 @@ function hasCallWithRawTargetArgument(
 function hasOpenCallWithRawWriteTarget(
   payload: string,
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   for (const argsText of findCallArgumentLists(payload, /\b(?:File\.)?open(?:Sync)?/)) {
     const args = splitTopLevelArguments(argsText);
@@ -1739,6 +2196,15 @@ function hasOpenCallWithRawWriteTarget(
       isRawDataTargetExpression(args[0], protectedRawPaths, options) &&
       args[1] &&
       isWriteModeExpression(args[1])
+    ) {
+      return true;
+    }
+    const namedMode = findNamedArgument(args, "mode");
+    if (
+      args[0] &&
+      isRawDataTargetExpression(args[0], protectedRawPaths, options) &&
+      namedMode &&
+      isWriteModeExpression(namedMode)
     ) {
       return true;
     }
@@ -1757,13 +2223,38 @@ function hasOpenCallWithRawWriteTarget(
 function hasPathWriteMethodRawTarget(
   payload: string,
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
-  const methodPattern = /\.(?:write_text|write_bytes)\s*\(/g;
+  const methodPattern = /\.(?:write_text|write_bytes|unlink|rename|replace|open)\s*\(/g;
   let match = methodPattern.exec(payload);
   while (match) {
+    const method = match[0].match(/\.([A-Za-z_][A-Za-z0-9_]*)\s*\(/)?.[1];
     const receiver = extractReceiverExpressionBefore(payload, match.index);
-    if (receiver && isRawDataTargetExpression(receiver, protectedRawPaths, options)) {
+    if (!receiver) {
+      match = methodPattern.exec(payload);
+      continue;
+    }
+    const receiverIsRaw = isRawDataTargetExpression(receiver, protectedRawPaths, options);
+    if (method === "open") {
+      const argsText = extractCallArgumentsAtOpenParen(payload, methodPattern.lastIndex - 1);
+      const args = argsText ? splitTopLevelArguments(argsText) : [];
+      const namedMode = findNamedArgument(args, "mode");
+      const mode = namedMode ?? args[0];
+      if (receiverIsRaw && mode && isWriteModeExpression(mode)) {
+        return true;
+      }
+    } else if (method === "rename" || method === "replace") {
+      const argsText = extractCallArgumentsAtOpenParen(payload, methodPattern.lastIndex - 1);
+      const args = argsText ? splitTopLevelArguments(argsText) : [];
+      if (
+        receiverIsRaw ||
+        (args[0] && isRawDataTargetExpression(args[0], protectedRawPaths, options)) ||
+        (findNamedArgument(args, "target") &&
+          isRawDataTargetExpression(findNamedArgument(args, "target")!, protectedRawPaths, options))
+      ) {
+        return true;
+      }
+    } else if (receiverIsRaw) {
       return true;
     }
     match = methodPattern.exec(payload);
@@ -1774,7 +2265,7 @@ function hasPathWriteMethodRawTarget(
 function hasInterpreterDeleteRawTarget(
   payload: string,
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   const helpers: readonly {
     callee: RegExp;
@@ -1812,7 +2303,7 @@ function hasInterpreterDeleteRawTarget(
 function hasInterpreterMoveRawEndpoint(
   payload: string,
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   const helpers: readonly {
     callee: RegExp;
@@ -1837,7 +2328,7 @@ function hasInterpreterMoveRawEndpoint(
 function hasInterpreterCopyRawDestination(
   payload: string,
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   const helpers: readonly {
     callee: RegExp;
@@ -1875,7 +2366,7 @@ function hasAnyCallRawTarget(
     namedArguments?: readonly string[];
   }[],
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   for (const helper of helpers) {
     for (const argsText of findCallArgumentLists(payload, helper.callee)) {
@@ -1902,7 +2393,7 @@ function hasAnyCallRawTarget(
 function hasRWriteHelperRawTarget(
   payload: string,
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   const helpers: readonly {
     callee: RegExp;
@@ -1941,7 +2432,7 @@ function hasRWriteHelperRawTarget(
 function hasAwkRawWriteTarget(
   payload: string,
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   const writeTargetPattern = />\s*(["'`][^"'`]+["'`])/g;
   let match = writeTargetPattern.exec(payload);
@@ -1958,13 +2449,33 @@ function hasInterpreterInternalRawWriteSuppressionRisk(
   command: string,
   protectedRawPaths: readonly string[]
 ): boolean {
+  let cwdCandidates = inferredProtectedRawProjectRoots(protectedRawPaths);
+  let relativeRawPathsAmbiguous = cwdCandidates.length === 0;
+
   for (const segment of splitStaticShellSegments(command)) {
-    const tokens = effectiveShellTokens(tokenizeStaticShellSegment(segment));
+    const tokens = commandTokensFromSegment(segment);
     if (tokens.length === 0) {
       continue;
     }
 
     const commandName = normalizeCommandName(tokens[0]);
+    if (isCwdChangingCommand(commandName)) {
+      if ((commandName === "cd" || commandName === "pushd") && tokens[1]) {
+        const nextCwdCandidates = resolveStaticCwdCandidates(cwdCandidates, tokens[1]);
+        if (nextCwdCandidates) {
+          cwdCandidates = nextCwdCandidates;
+          relativeRawPathsAmbiguous = false;
+        } else {
+          cwdCandidates = [];
+          relativeRawPathsAmbiguous = true;
+        }
+      } else {
+        cwdCandidates = [];
+        relativeRawPathsAmbiguous = true;
+      }
+      continue;
+    }
+
     if (!isInterpreterCommand(commandName)) {
       continue;
     }
@@ -1975,7 +2486,11 @@ function hasInterpreterInternalRawWriteSuppressionRisk(
     }
 
     if (
-      hasInterpreterRawWriteTarget(payload, protectedRawPaths) &&
+      hasInterpreterRawWriteTarget(
+        payload,
+        protectedRawPaths,
+        rawPathResolutionOptions(cwdCandidates, !relativeRawPathsAmbiguous)
+      ) &&
       hasInterpreterExceptionSwallowSignal(payload)
     ) {
       return true;
@@ -2002,15 +2517,21 @@ function findCallArgumentLists(payload: string, calleePattern: RegExp): string[]
   const regex = new RegExp(`${calleePattern.source}\\s*\\(`, flags);
   const calls: string[] = [];
   let match = regex.exec(payload);
-  while (match) {
+  while (match && calls.length < COMMAND_ANALYSIS_MAX_CALLS) {
     const openIndex = regex.lastIndex - 1;
-    const closeIndex = findMatchingRightParen(payload, openIndex);
-    const endIndex = closeIndex ?? payload.length;
-    calls.push(payload.slice(openIndex + 1, endIndex));
+    const argsText = extractCallArgumentsAtOpenParen(payload, openIndex);
+    const endIndex =
+      argsText === undefined ? payload.length : openIndex + argsText.length + 1;
+    calls.push(argsText ?? payload.slice(openIndex + 1, endIndex));
     regex.lastIndex = endIndex + 1;
     match = regex.exec(payload);
   }
   return calls;
+}
+
+function extractCallArgumentsAtOpenParen(value: string, openIndex: number): string | undefined {
+  const closeIndex = findMatchingRightParen(value, openIndex);
+  return closeIndex === undefined ? undefined : value.slice(openIndex + 1, closeIndex);
 }
 
 function findMatchingRightParen(value: string, openIndex: number): number | undefined {
@@ -2122,7 +2643,7 @@ function findNamedArgument(args: readonly string[], name: string): string | unde
 function isRawDataTargetExpression(
   expression: string,
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   const cleaned = stripOuterParentheses(expression.trim());
   const literal = parseSingleStringLiteral(cleaned);
@@ -2130,12 +2651,23 @@ function isRawDataTargetExpression(
     return isRawDataPathToken(literal, protectedRawPaths, options);
   }
 
+  const pathConstructor = parsePathConstructorExpression(cleaned);
+  if (
+    pathConstructor !== undefined &&
+    isRawDataPathToken(pathConstructor, protectedRawPaths, options)
+  ) {
+    return true;
+  }
+
   const joinedPath = parseJoinedStringPath(cleaned);
   if (joinedPath !== undefined) {
     return isRawDataPathToken(joinedPath, protectedRawPaths, options);
   }
 
-  return containsFragmentedRawDataPathSignal(cleaned);
+  return (
+    containsFragmentedRawDataPathSignal(cleaned) &&
+    isRawDataPathToken("data/raw", protectedRawPaths, options)
+  );
 }
 
 function stripOuterParentheses(value: string): string {
@@ -2188,6 +2720,18 @@ function parseJoinedStringPath(expression: string): string | undefined {
     .map((arg) => parseSingleStringLiteral(stripOuterParentheses(arg.trim())))
     .filter((segment): segment is string => segment !== undefined);
   return segments.length > 0 ? segments.join("/") : undefined;
+}
+
+function parsePathConstructorExpression(expression: string): string | undefined {
+  if (!/\b(?:pathlib\.)?Path\s*\(/.test(expression)) {
+    return undefined;
+  }
+  const argsText = findCallArgumentLists(expression, /\b(?:pathlib\.)?Path/)[0];
+  if (!argsText) {
+    return undefined;
+  }
+  const firstArg = splitTopLevelArguments(argsText)[0];
+  return firstArg ? parseSingleStringLiteral(stripOuterParentheses(firstArg.trim())) : undefined;
 }
 
 function isWriteModeExpression(expression: string): boolean {
@@ -2403,7 +2947,7 @@ function extractCommandOperands(tokens: readonly string[]): string[] {
 function isRawDataPathToken(
   token: string,
   protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
+  options: RawPathResolutionOptions = {}
 ): boolean {
   if (/[`$*?[\]]/.test(token)) {
     return false;
@@ -2415,23 +2959,40 @@ function isRawDataPathToken(
   }
 
   const normalizedToken = normalize(cleaned);
-  if (
-    options.treatRelativeRawAsProtected !== false &&
-    (normalizedToken === "data/raw" ||
-      normalizedToken.startsWith("data/raw/") ||
-      normalizedToken === "./data/raw" ||
-      normalizedToken.startsWith("./data/raw/"))
-  ) {
-    return true;
-  }
-
   if (!isAbsolute(cleaned)) {
-    return false;
+    const cwdCandidates = options.cwdCandidates ?? [];
+    if (cwdCandidates.length > 0) {
+      return cwdCandidates.some((cwd) =>
+        isAbsolutePathInsideProtectedRaw(resolve(cwd, cleaned), protectedRawPaths)
+      );
+    }
+
+    return (
+      options.treatRelativeRawAsProtected !== false &&
+      isRelativeRawDataPathToken(normalizedToken)
+    );
   }
 
-  const absoluteToken = normalize(cleaned);
+  return isAbsolutePathInsideProtectedRaw(cleaned, protectedRawPaths);
+}
+
+function isRelativeRawDataPathToken(normalizedToken: string): boolean {
+  return (
+    normalizedToken === "data/raw" ||
+    normalizedToken.startsWith("data/raw/") ||
+    normalizedToken === "./data/raw" ||
+    normalizedToken.startsWith("./data/raw/") ||
+    /^(?:\.\.\/)+data\/raw(?:\/|$)/.test(normalizedToken)
+  );
+}
+
+function isAbsolutePathInsideProtectedRaw(
+  path: string,
+  protectedRawPaths: readonly string[]
+): boolean {
+  const absoluteToken = normalize(resolve(path)).replace(/\/+$/, "");
   return protectedRawPaths.some((protectedPath) => {
-    const root = normalize(protectedPath).replace(/\/+$/, "");
+    const root = normalize(resolve(protectedPath)).replace(/\/+$/, "");
     return absoluteToken === root || absoluteToken.startsWith(`${root}/`);
   });
 }
@@ -2719,6 +3280,84 @@ function isCwdChangingCommand(commandName: string): boolean {
   return commandName === "cd" || commandName === "pushd" || commandName === "popd";
 }
 
+function evaluateProcessContainmentPreflight(
+  command: string
+): { decision: "allow" } | { decision: "deny"; reason: string } {
+  if (hasSessionEscapeSignal(command)) {
+    return {
+      decision: "deny",
+      reason: "command attempts to create an invocation descendant outside the tracked process group"
+    };
+  }
+
+  if (hasUnwaitedBackgroundExecution(command)) {
+    return {
+      decision: "deny",
+      reason: "command starts background work without a static wait before returning"
+    };
+  }
+
+  return { decision: "allow" };
+}
+
+function hasSessionEscapeSignal(command: string): boolean {
+  return /\b(?:setsid|setpgrp|daemonize|start_new_session|os\.setsid|os\.setpgrp|Process\.daemon)\b/.test(
+    command
+  );
+}
+
+function hasUnwaitedBackgroundExecution(command: string): boolean {
+  if (!hasUnquotedBackgroundOperator(command)) {
+    return false;
+  }
+
+  return !splitStaticShellSegments(command).some((segment) => {
+    const tokens = commandTokensFromSegment(segment);
+    return tokens.length > 0 && normalizeCommandName(tokens[0]) === "wait";
+  });
+}
+
+function hasUnquotedBackgroundOperator(command: string): boolean {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (char !== "&") {
+      continue;
+    }
+    const previous = command[index - 1];
+    const next = command[index + 1];
+    if (next === "&" || previous === "&" || previous === ">" || next === ">") {
+      continue;
+    }
+    if (/\d/.test(next ?? "")) {
+      continue;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 function canHideSandboxFailure(command: string): boolean {
   return hasShellExitStatusNormalizer(command) || hasShellDenialOutputSuppression(command);
 }
@@ -2760,36 +3399,34 @@ function isLikelySandboxDenialForCommand(
   result: ToolResult,
   protectedRawPaths: readonly string[]
 ): boolean {
+  const analysis = analyzeRawDataCommand(command, protectedRawPaths);
+  if (analysis.budgetExceeded) {
+    return !result.success && analysis.hasHiddenEvidenceRisk;
+  }
+
   const output = result.output;
   const denialOutput =
     isLikelySandboxDenial(output) || INTERPRETER_WRITE_DENIAL_PATTERN.test(output);
   if (!denialOutput) {
     return (
       !result.success &&
-      hasFailedResultRawWriteSignal(command, protectedRawPaths) &&
-      canLoseSandboxDenialEvidence(command)
+      analysis.hasKnownRawWriteTarget &&
+      analysis.hasHiddenEvidenceRisk
     );
   }
 
-  return hasPreciseRawWriteTargetSignal(command, protectedRawPaths);
-}
-
-function hasPreciseRawWriteTargetSignal(
-  command: string,
-  protectedRawPaths: readonly string[]
-): boolean {
-  return hasKnownRawDataWriteTarget(command, protectedRawPaths);
+  return analysis.hasKnownRawWriteTarget;
 }
 
 function hasKnownRawDataWriteTarget(
   command: string,
-  protectedRawPaths: readonly string[]
+  protectedRawPaths: readonly string[],
+  known?: { staticRawWrite?: boolean }
 ): boolean {
   return (
-    hasStaticRawDataWrite(command, protectedRawPaths) ||
+    (known?.staticRawWrite ?? hasStaticRawDataWrite(command, protectedRawPaths)) ||
     hasParentRelativeRawDataWriteAlias(command, protectedRawPaths) ||
-    hasDynamicRawDataWriteRisk(command) ||
-    hasInPlaceRawMutationSignal(command, protectedRawPaths)
+    hasDynamicRawDataWriteRisk(command)
   );
 }
 
@@ -2826,7 +3463,7 @@ function hasParentRelativeRawDataWriteAliasFromCwd(
   let cwd = initialCwd;
 
   for (const segment of splitStaticShellSegments(command)) {
-    const tokens = effectiveShellTokens(tokenizeStaticShellSegment(segment));
+    const tokens = commandTokensFromSegment(segment);
     if (tokens.length === 0) {
       continue;
     }
@@ -2987,43 +3624,6 @@ function isSimpleStaticPathToken(token: string): boolean {
   return !/[`$*?[\]]/.test(token);
 }
 
-function hasFailedResultRawWriteSignal(
-  command: string,
-  protectedRawPaths: readonly string[]
-): boolean {
-  return hasPreciseRawWriteTargetSignal(command, protectedRawPaths);
-}
-
-function hasInPlaceRawMutationSignal(
-  command: string,
-  protectedRawPaths: readonly string[]
-): boolean {
-  for (const segment of splitStaticShellSegments(command)) {
-    const tokens = effectiveShellTokens(tokenizeStaticShellSegment(segment));
-    if (tokens.length === 0) {
-      continue;
-    }
-    const commandName = normalizeCommandName(tokens[0]);
-    if (commandName !== "sed" && commandName !== "perl") {
-      continue;
-    }
-    if (!hasInPlaceMutationFlag(tokens)) {
-      continue;
-    }
-    const operands = extractCommandOperands(tokens.slice(1));
-    if (
-      operands.some((operand) =>
-        isRawDataPathToken(operand, protectedRawPaths, {
-          treatRelativeRawAsProtected: true
-        })
-      )
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function hasInPlaceMutationFlag(tokens: readonly string[]): boolean {
   return tokens.some((token) => token === "-i" || /^-[A-Za-z]*i[A-Za-z]*$/.test(token));
 }
@@ -3179,11 +3779,6 @@ async function hasProjectRootWorkspaceLayout(
   rootRealPath: string,
   protectedRawPaths: readonly string[]
 ): Promise<boolean> {
-  const workspaceChild = join(rootRealPath, "workspace");
-  if (!(await isExistingDirectory(workspaceChild))) {
-    return false;
-  }
-
   const projectRawRoot = normalize(resolve(rootRealPath, "data", "raw")).replace(/\/+$/, "");
   return protectedRawPaths.some((protectedRawPath) => {
     const normalizedProtectedPath = normalize(resolve(protectedRawPath)).replace(/\/+$/, "");
@@ -3192,18 +3787,6 @@ async function hasProjectRootWorkspaceLayout(
       normalizedProtectedPath.startsWith(`${projectRawRoot}/`)
     );
   });
-}
-
-async function isExistingDirectory(path: string): Promise<boolean> {
-  try {
-    const metadata = await lstat(path);
-    return metadata.isDirectory() && !metadata.isSymbolicLink();
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) {
-      return false;
-    }
-    throw error;
-  }
 }
 
 function assertProtectedRawPathsProvided(
