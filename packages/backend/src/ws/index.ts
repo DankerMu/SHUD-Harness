@@ -14,14 +14,14 @@ export interface ToolFailedWsEventInput {
   profileId?: string;
   invocationId?: string;
   eventId?: string;
-  ts?: string;
+  timestamp?: string;
 }
 
 export interface ToolFailedWsEvent {
   seq: number;
   event_id: string;
   type: "tool.failed";
-  ts: string;
+  timestamp: string;
   payload: {
     tool_id: string;
     error: ErrorRecord;
@@ -34,12 +34,12 @@ export interface ToolFailedWsEvent {
 }
 
 export function buildToolFailedWsEvent(input: ToolFailedWsEventInput): ToolFailedWsEvent {
-  const ts = input.ts ?? new Date().toISOString();
+  const timestamp = input.timestamp ?? new Date().toISOString();
   return {
     seq: input.seq,
     event_id: input.eventId ?? `tool.failed:${input.seq}`,
     type: "tool.failed",
-    ts,
+    timestamp,
     payload: {
       tool_id: input.toolId,
       error: input.error,

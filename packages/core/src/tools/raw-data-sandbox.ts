@@ -42,6 +42,7 @@ const SANDBOX_DENIAL_PATTERN = /Operation not permitted|Permission denied|sandbo
 const INTERPRETER_WRITE_DENIAL_PATTERN = /can't open file/i;
 const PIPE_GRACE_MS = 1000;
 const FORCE_KILL_GRACE_MS = 750;
+const FORCE_KILL_SETTLE_MS = 75;
 const DEFAULT_ABORT_MESSAGE = "Command aborted by user from Session Detail.";
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export interface RawDataSeatbeltProfileOptions {
@@ -309,7 +310,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
         profileRoot: this.options.profileRoot,
         protectedEvidencePaths: [
           ...(this.options.protectedEvidencePaths ?? []),
-          auditReservation.protectedEvidenceRoot
+          auditReservation.protectedEvidencePath
         ]
       });
       profilePath = await writeRawDataSeatbeltProfileFile(profile, this.options.profileRoot);
@@ -484,8 +485,10 @@ export class RawDataSandboxedBashTool extends BaseTool {
 interface PolicyGateAuditReservation {
   auditDir: string;
   auditPath: string;
-  protectedEvidenceRoot: string;
+  protectedEvidencePath: string;
   handle: FileHandle;
+  dev: number;
+  ino: number;
 }
 
 interface PolicyGateAuditReservationFailure {
@@ -550,10 +553,7 @@ export function evaluateSuppressedSandboxFailureGuard(
     return { decision: "allow" };
   }
 
-  if (
-    !hasStaticRawDataWrite(command, protectedRawPaths) &&
-    !hasDynamicRawDataWriteRisk(command)
-  ) {
+  if (!hasKnownRawDataWriteTarget(command, protectedRawPaths)) {
     return { decision: "allow" };
   }
 
@@ -978,6 +978,9 @@ async function runSeatbeltSandboxedBash(
   if (forceKillTimer) {
     clearTimeout(forceKillTimer);
   }
+  if (terminationCause === "timeout" || terminationCause === "abort") {
+    await forceKillProcessGroup(proc);
+  }
 
   const finalCause = terminationCause ?? "completed";
   if (finalCause === "abort") {
@@ -1348,6 +1351,11 @@ function tryKillProcess(proc: ReturnType<typeof Bun.spawn>, signal?: NodeJS.Sign
   }
 }
 
+async function forceKillProcessGroup(proc: ReturnType<typeof Bun.spawn>): Promise<void> {
+  tryKillProcess(proc, "SIGKILL");
+  await Bun.sleep(FORCE_KILL_SETTLE_MS);
+}
+
 function isWebWritableStream(stream: unknown): stream is WritableStream<Uint8Array> {
   return (
     typeof stream === "object" &&
@@ -1488,6 +1496,28 @@ function hasStaticRawDataWrite(
     }
 
     const operands = extractCommandOperands(resolvedTokens.slice(1));
+
+    if (
+      (commandName === "sed" || commandName === "perl") &&
+      hasInPlaceMutationFlag(resolvedTokens) &&
+      operands.some((operand) =>
+        isRawDataPathToken(operand, protectedRawPaths, {
+          treatRelativeRawAsProtected
+        })
+      )
+    ) {
+      return true;
+    }
+
+    if (
+      commandName === "awk" &&
+      resolvedTokens
+        .slice(1)
+        .some((token) => hasAwkRawWriteTarget(token, protectedRawPaths, { treatRelativeRawAsProtected }))
+    ) {
+      return true;
+    }
+
     if (operands.length === 0) {
       continue;
     }
@@ -1637,7 +1667,7 @@ function hasChildShellRawDataWrite(
 }
 
 function isInterpreterCommand(commandName: string): boolean {
-  return /^(?:python(?:\d+(?:\.\d+)?)?|perl|ruby|node|bun)$/.test(commandName);
+  return /^(?:python(?:\d+(?:\.\d+)?)?|perl|ruby|node|bun|R|Rscript)$/.test(commandName);
 }
 
 function hasInterpreterRawDataWrite(
@@ -1650,11 +1680,7 @@ function hasInterpreterRawDataWrite(
     return false;
   }
 
-  if (!containsAnyRawDataPathSignal(payload, protectedRawPaths, options)) {
-    return false;
-  }
-
-  return hasInterpreterWriteApiSignal(payload);
+  return hasInterpreterRawWriteTarget(payload, protectedRawPaths, options);
 }
 
 function interpreterPayload(tokens: readonly string[]): string | undefined {
@@ -1667,19 +1693,138 @@ function interpreterPayload(tokens: readonly string[]): string | undefined {
   return undefined;
 }
 
-function hasInterpreterWriteApiSignal(payload: string): boolean {
+function hasInterpreterRawWriteTarget(
+  payload: string,
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
   return (
-    /(?:^|[^\w.])open(?:Sync)?\s*\([^)]*["'`](?:[rwaxtb]*\+|[wax]>?)[^"'`]*["'`]/.test(
-      payload
-    ) ||
-    /(?:^|[^\w])File\.open\s*\([^)]*["'`](?:[rwaxtb]*\+|[wax]>?)[^"'`]*["'`]/.test(
-      payload
-    ) ||
-    /(?:fs\.)?(?:writeFile|appendFile)(?:Sync)?\s*\(/.test(payload) ||
-    /(?:fs\.)?createWriteStream\s*\(/.test(payload) ||
-    /(?:write_text|write_bytes)\s*\(/.test(payload) ||
-    /(?:File|IO)\.write\s*\(/.test(payload)
+    hasCallWithRawTargetArgument(payload, /\b(?:writeFile|appendFile)(?:Sync)?/, [0], protectedRawPaths, options) ||
+    hasCallWithRawTargetArgument(payload, /\bcreateWriteStream/, [0], protectedRawPaths, options) ||
+    hasCallWithRawTargetArgument(payload, /\b(?:File|IO)\.write/, [0], protectedRawPaths, options) ||
+    hasOpenCallWithRawWriteTarget(payload, protectedRawPaths, options) ||
+    hasPathWriteMethodRawTarget(payload, protectedRawPaths, options) ||
+    hasRWriteHelperRawTarget(payload, protectedRawPaths, options)
   );
+}
+
+function hasCallWithRawTargetArgument(
+  payload: string,
+  calleePattern: RegExp,
+  argumentIndexes: readonly number[],
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  for (const argsText of findCallArgumentLists(payload, calleePattern)) {
+    const args = splitTopLevelArguments(argsText);
+    if (
+      argumentIndexes.some((index) =>
+        args[index] ? isRawDataTargetExpression(args[index], protectedRawPaths, options) : false
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasOpenCallWithRawWriteTarget(
+  payload: string,
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  for (const argsText of findCallArgumentLists(payload, /\b(?:File\.)?open(?:Sync)?/)) {
+    const args = splitTopLevelArguments(argsText);
+    if (
+      args[0] &&
+      isRawDataTargetExpression(args[0], protectedRawPaths, options) &&
+      args[1] &&
+      isWriteModeExpression(args[1])
+    ) {
+      return true;
+    }
+    if (
+      args[2] &&
+      isRawDataTargetExpression(args[2], protectedRawPaths, options) &&
+      args[1] &&
+      isWriteModeExpression(args[1])
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasPathWriteMethodRawTarget(
+  payload: string,
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  const methodPattern = /\.(?:write_text|write_bytes)\s*\(/g;
+  let match = methodPattern.exec(payload);
+  while (match) {
+    const receiver = extractReceiverExpressionBefore(payload, match.index);
+    if (receiver && isRawDataTargetExpression(receiver, protectedRawPaths, options)) {
+      return true;
+    }
+    match = methodPattern.exec(payload);
+  }
+  return false;
+}
+
+function hasRWriteHelperRawTarget(
+  payload: string,
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  const helpers: readonly {
+    callee: RegExp;
+    positionalIndexes: readonly number[];
+    namedArguments: readonly string[];
+  }[] = [
+    { callee: /\bwrite\.(?:csv|table)/, positionalIndexes: [1], namedArguments: ["file"] },
+    { callee: /\bwriteLines/, positionalIndexes: [1], namedArguments: ["con", "file"] },
+    { callee: /\bsaveRDS/, positionalIndexes: [1], namedArguments: ["file"] },
+    { callee: /\bsave/, positionalIndexes: [], namedArguments: ["file"] },
+    { callee: /\bsink/, positionalIndexes: [0], namedArguments: ["file"] }
+  ];
+
+  for (const helper of helpers) {
+    for (const argsText of findCallArgumentLists(payload, helper.callee)) {
+      const args = splitTopLevelArguments(argsText);
+      if (
+        helper.positionalIndexes.some((index) =>
+          args[index] ? isRawDataTargetExpression(args[index], protectedRawPaths, options) : false
+        )
+      ) {
+        return true;
+      }
+      for (const name of helper.namedArguments) {
+        const namedValue = findNamedArgument(args, name);
+        if (namedValue && isRawDataTargetExpression(namedValue, protectedRawPaths, options)) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+function hasAwkRawWriteTarget(
+  payload: string,
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  const writeTargetPattern = />\s*(["'`][^"'`]+["'`])/g;
+  let match = writeTargetPattern.exec(payload);
+  while (match) {
+    if (isRawDataTargetExpression(match[1], protectedRawPaths, options)) {
+      return true;
+    }
+    match = writeTargetPattern.exec(payload);
+  }
+  return false;
 }
 
 function hasInterpreterInternalRawWriteSuppressionRisk(
@@ -1703,8 +1848,7 @@ function hasInterpreterInternalRawWriteSuppressionRisk(
     }
 
     if (
-      containsAnyRawDataPathSignal(payload, protectedRawPaths) &&
-      hasInterpreterWriteApiSignal(payload) &&
+      hasInterpreterRawWriteTarget(payload, protectedRawPaths) &&
       hasInterpreterExceptionSwallowSignal(payload)
     ) {
       return true;
@@ -1724,15 +1868,219 @@ function hasInterpreterExceptionSwallowSignal(payload: string): boolean {
   );
 }
 
-function containsAnyRawDataPathSignal(
-  value: string,
+function findCallArgumentLists(payload: string, calleePattern: RegExp): string[] {
+  const flags = calleePattern.flags.includes("g")
+    ? calleePattern.flags
+    : `${calleePattern.flags}g`;
+  const regex = new RegExp(`${calleePattern.source}\\s*\\(`, flags);
+  const calls: string[] = [];
+  let match = regex.exec(payload);
+  while (match) {
+    const openIndex = regex.lastIndex - 1;
+    const closeIndex = findMatchingRightParen(payload, openIndex);
+    const endIndex = closeIndex ?? payload.length;
+    calls.push(payload.slice(openIndex + 1, endIndex));
+    regex.lastIndex = endIndex + 1;
+    match = regex.exec(payload);
+  }
+  return calls;
+}
+
+function findMatchingRightParen(value: string, openIndex: number): number | undefined {
+  let depth = 0;
+  let quote: "'" | '"' | "`" | undefined;
+  let escaped = false;
+
+  for (let index = openIndex; index < value.length; index += 1) {
+    const char = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function splitTopLevelArguments(argsText: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | "`" | undefined;
+  let escaped = false;
+  let depth = 0;
+
+  for (const char of argsText) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      }
+      current += char;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{") {
+      depth += 1;
+      current += char;
+      continue;
+    }
+    if (char === ")" || char === "]" || char === "}") {
+      depth = Math.max(0, depth - 1);
+      current += char;
+      continue;
+    }
+    if (char === "," && depth === 0) {
+      args.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+
+  if (current.trim() || argsText.trim()) {
+    args.push(current.trim());
+  }
+
+  return args;
+}
+
+function findNamedArgument(args: readonly string[], name: string): string | undefined {
+  const pattern = new RegExp(`^${escapeRegExp(name)}\\s*=\\s*([\\s\\S]+)$`);
+  for (const arg of args) {
+    const match = arg.match(pattern);
+    if (match) {
+      return match[1].trim();
+    }
+  }
+  return undefined;
+}
+
+function isRawDataTargetExpression(
+  expression: string,
   protectedRawPaths: readonly string[],
   options: { treatRelativeRawAsProtected?: boolean } = {}
 ): boolean {
-  return (
-    containsRawDataPathSignal(value, protectedRawPaths, options) ||
-    containsFragmentedRawDataPathSignal(value)
+  const cleaned = stripOuterParentheses(expression.trim());
+  const literal = parseSingleStringLiteral(cleaned);
+  if (literal !== undefined) {
+    return isRawDataPathToken(literal, protectedRawPaths, options);
+  }
+
+  const joinedPath = parseJoinedStringPath(cleaned);
+  if (joinedPath !== undefined) {
+    return isRawDataPathToken(joinedPath, protectedRawPaths, options);
+  }
+
+  return containsFragmentedRawDataPathSignal(cleaned);
+}
+
+function stripOuterParentheses(value: string): string {
+  let current = value;
+  while (current.startsWith("(") && current.endsWith(")")) {
+    const closeIndex = findMatchingRightParen(current, 0);
+    if (closeIndex !== current.length - 1) {
+      break;
+    }
+    current = current.slice(1, -1).trim();
+  }
+  return current;
+}
+
+function parseSingleStringLiteral(value: string): string | undefined {
+  const quote = value[0];
+  if ((quote !== "'" && quote !== '"' && quote !== "`") || value.at(-1) !== quote) {
+    return undefined;
+  }
+  const body = value.slice(1, -1);
+  let output = "";
+  let escaped = false;
+  for (const char of body) {
+    if (escaped) {
+      output += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    output += char;
+  }
+  return output;
+}
+
+function parseJoinedStringPath(expression: string): string | undefined {
+  if (!/\b(?:path\.join|os\.path\.join|File\.join|file\.path)\s*\(/.test(expression)) {
+    return undefined;
+  }
+  const argsText = findCallArgumentLists(
+    expression,
+    /\b(?:path\.join|os\.path\.join|File\.join|file\.path)/
+  )[0];
+  if (!argsText) {
+    return undefined;
+  }
+  const segments = splitTopLevelArguments(argsText)
+    .map((arg) => parseSingleStringLiteral(stripOuterParentheses(arg.trim())))
+    .filter((segment): segment is string => segment !== undefined);
+  return segments.length > 0 ? segments.join("/") : undefined;
+}
+
+function isWriteModeExpression(expression: string): boolean {
+  const literal = parseSingleStringLiteral(stripOuterParentheses(expression.trim()));
+  if (literal === undefined) {
+    return false;
+  }
+  return /[wax+]|\br\+|>/.test(literal);
+}
+
+function extractReceiverExpressionBefore(value: string, dotIndex: number): string | undefined {
+  const prefix = value.slice(0, dotIndex).trimEnd();
+  const boundary = Math.max(
+    prefix.lastIndexOf(";"),
+    prefix.lastIndexOf("\n"),
+    prefix.lastIndexOf("="),
+    prefix.lastIndexOf("{")
   );
+  const receiver = prefix.slice(boundary + 1).trim();
+  return receiver || undefined;
 }
 
 function containsFragmentedRawDataPathSignal(value: string): boolean {
@@ -1747,6 +2095,9 @@ function containsFragmentedRawDataPathSignal(value: string): boolean {
       value
     ) ||
     new RegExp(`(?:path|os\\.path|File|Path)\\.join\\s*\\(\\s*${quotedData}\\s*,\\s*${quotedRaw}`).test(
+      value
+    ) ||
+    new RegExp(`file\\.path\\s*\\(\\s*${quotedData}\\s*,\\s*${quotedRaw}`).test(
       value
     ) ||
     new RegExp(`(?:pathlib\\.)?Path\\s*\\(\\s*${quotedData}\\s*\\)\\s*\\.joinpath\\s*\\(\\s*${quotedRaw}`).test(
@@ -2077,7 +2428,13 @@ function collectDynamicRawPathState(command: string): {
     if (normalized === "raw" || normalized === "./raw") {
       rawVariables.add(name);
     }
-    if (containsRelativeRawLiteral(value)) {
+    if (
+      isDynamicRawTargetAtPathStart(value, {
+        rawCandidateVariables,
+        dataVariables,
+        rawVariables
+      })
+    ) {
       rawCandidateVariables.add(name);
     }
   }
@@ -2089,12 +2446,13 @@ function collectDynamicRawPathState(command: string): {
       if (rawCandidateVariables.has(name)) {
         continue;
       }
-      const referencesRawCandidate = referencesAnyVariable(value, rawCandidateVariables);
-      const referencesDataAndRaw =
-        referencesAnyVariable(value, dataVariables) &&
-        (referencesAnyVariable(value, rawVariables) || /(?:^|\/)raw(?:\/|$)/.test(value));
-
-      if (referencesRawCandidate || referencesDataAndRaw) {
+      if (
+        isDynamicRawTargetAtPathStart(value, {
+          rawCandidateVariables,
+          dataVariables,
+          rawVariables
+        })
+      ) {
         rawCandidateVariables.add(name);
         changed = true;
       }
@@ -2148,11 +2506,7 @@ function referencesDynamicRawTarget(
     rawVariables: ReadonlySet<string>;
   }
 ): boolean {
-  return (
-    referencesAnyVariable(value, dynamicState.rawCandidateVariables) ||
-    (referencesAnyVariable(value, dynamicState.dataVariables) &&
-      referencesAnyVariable(value, dynamicState.rawVariables))
-  );
+  return isDynamicRawTargetAtPathStart(value, dynamicState);
 }
 
 function containsRelativeRawLiteral(value: string): boolean {
@@ -2165,19 +2519,88 @@ function containsRelativeRawLiteral(value: string): boolean {
   );
 }
 
-function referencesAnyVariable(value: string, variables: ReadonlySet<string>): boolean {
-  for (const variable of variables) {
-    if (referencesVariable(value, variable)) {
+function isDynamicRawTargetAtPathStart(
+  value: string,
+  dynamicState: {
+    rawCandidateVariables: ReadonlySet<string>;
+    dataVariables: ReadonlySet<string>;
+    rawVariables: ReadonlySet<string>;
+  }
+): boolean {
+  const normalized = value.trim().replace(/^['"]|['"]$/g, "");
+  if (/[`*?[\]]/.test(normalized)) {
+    return false;
+  }
+  const withoutDot = normalized.startsWith("./") ? normalized.slice(2) : normalized;
+
+  if (containsRelativeRawLiteral(withoutDot)) {
+    return true;
+  }
+
+  for (const rawCandidateVariable of dynamicState.rawCandidateVariables) {
+    const rest = consumeVariableAtStart(withoutDot, rawCandidateVariable);
+    if (rest !== undefined) {
       return true;
     }
   }
+
+  const afterLiteralData = consumeLiteralPathSegment(withoutDot, "data");
+  if (afterLiteralData !== undefined) {
+    for (const rawVariable of dynamicState.rawVariables) {
+      const rest = consumeVariableAtStart(afterLiteralData, rawVariable);
+      if (rest !== undefined) {
+        return true;
+      }
+    }
+  }
+
+  for (const dataVariable of dynamicState.dataVariables) {
+    const afterDataVariable = consumeVariableAtStart(withoutDot, dataVariable);
+    if (afterDataVariable === undefined) {
+      continue;
+    }
+    const afterRawLiteral = consumeLiteralPathSegment(afterDataVariable, "raw");
+    if (afterRawLiteral !== undefined) {
+      return true;
+    }
+    for (const rawVariable of dynamicState.rawVariables) {
+      const rest = consumeVariableAtStart(afterDataVariable, rawVariable);
+      if (rest !== undefined) {
+        return true;
+      }
+    }
+  }
+
   return false;
 }
 
-function referencesVariable(value: string, variable: string): boolean {
-  return new RegExp(`\\$(?:${escapeRegExp(variable)}\\b|\\{${escapeRegExp(variable)}\\})`).test(
-    value
-  );
+function consumeLiteralPathSegment(value: string, segment: string): string | undefined {
+  if (value === segment) {
+    return "";
+  }
+  if (value.startsWith(`${segment}/`)) {
+    return value.slice(segment.length + 1);
+  }
+  return undefined;
+}
+
+function consumeVariableAtStart(value: string, variable: string): string | undefined {
+  const simple = `$${variable}`;
+  if (value === simple) {
+    return "";
+  }
+  if (value.startsWith(`${simple}/`)) {
+    return value.slice(simple.length + 1);
+  }
+
+  const braced = `\${${variable}}`;
+  if (value === braced) {
+    return "";
+  }
+  if (value.startsWith(`${braced}/`)) {
+    return value.slice(braced.length + 1);
+  }
+  return undefined;
 }
 
 function isCwdChangingCommand(commandName: string): boolean {
@@ -2240,17 +2663,26 @@ function isLikelySandboxDenialForCommand(
     return hasPreciseRawWriteTargetSignal(command, protectedRawPaths);
   }
 
-  return hasFailedResultRawWriteSignal(command, protectedRawPaths);
+  return (
+    hasFailedResultRawWriteSignal(command, protectedRawPaths) ||
+    hasVisibleShellRawWriteDenialSignal(command, protectedRawPaths)
+  );
 }
 
 function hasPreciseRawWriteTargetSignal(
   command: string,
   protectedRawPaths: readonly string[]
 ): boolean {
+  return hasKnownRawDataWriteTarget(command, protectedRawPaths);
+}
+
+function hasKnownRawDataWriteTarget(
+  command: string,
+  protectedRawPaths: readonly string[]
+): boolean {
   return (
     hasStaticRawDataWrite(command, protectedRawPaths) ||
     hasDynamicRawDataWriteRisk(command) ||
-    hasInterpreterInternalRawWriteSuppressionRisk(command, protectedRawPaths) ||
     hasInPlaceRawMutationSignal(command, protectedRawPaths)
   );
 }
@@ -2259,29 +2691,19 @@ function hasFailedResultRawWriteSignal(
   command: string,
   protectedRawPaths: readonly string[]
 ): boolean {
-  return (
-    hasPreciseRawWriteTargetSignal(command, protectedRawPaths) ||
-    hasRawWriteLiteralSignal(command, protectedRawPaths)
-  );
+  return hasPreciseRawWriteTargetSignal(command, protectedRawPaths);
 }
 
-function hasRawWriteLiteralSignal(command: string, protectedRawPaths: readonly string[]): boolean {
-  const shellWriteSignal =
-    /(?:^|[\s;&|])(?:cp|mv|tee|touch|mkdir|truncate|chmod|chown|chgrp|xattr|rm|unlink|dd|install|ln|sed|perl)\b|>/.test(
-      command
-    );
-  const interpreterWriteSignal =
-    /(?:^|[\s;&|])(?:python(?:\d+(?:\.\d+)?)?|perl|ruby|node|bun)\b/.test(command) &&
-    hasInterpreterWriteApiSignal(command);
-  if (!shellWriteSignal && !interpreterWriteSignal) {
+function hasVisibleShellRawWriteDenialSignal(
+  command: string,
+  protectedRawPaths: readonly string[]
+): boolean {
+  if (!containsRawDataPathSignal(command, protectedRawPaths)) {
     return false;
   }
-
-  if (containsRawDataPathSignal(command, protectedRawPaths)) {
-    return true;
-  }
-
-  return protectedRawPaths.some((protectedPath) => command.includes(protectedPath));
+  return /(?:^|[\s;&|])(?:awk|cp|mv|tee|touch|mkdir|truncate|chmod|chown|chgrp|xattr|rm|unlink|dd|install|ln|sed|perl|sh|bash)\b|>/.test(
+    command
+  );
 }
 
 function hasInPlaceRawMutationSignal(
@@ -2424,24 +2846,23 @@ async function ensurePolicyGateAuditReservation(
     "policy gate audit workspace root"
   );
   let current = workspaceRealPath;
-  let protectedEvidenceRoot = "";
 
   for (const segment of ["workspace", "tasks", taskId, "audit"]) {
     current = join(current, segment);
     await ensureSafeAuditDirComponent(current, workspaceRealPath, protectedRawPaths);
-    if (segment === "tasks") {
-      protectedEvidenceRoot = current;
-    }
   }
 
   const auditPath = join(current, fileName);
   const handle = await openAuditFileForAppendNoFollow(auditPath);
+  const metadata = await handle.stat();
 
   return {
     auditDir: current,
     auditPath,
-    protectedEvidenceRoot,
-    handle
+    protectedEvidencePath: auditPath,
+    handle,
+    dev: metadata.dev,
+    ino: metadata.ino
   };
 }
 
@@ -2511,6 +2932,7 @@ async function appendReservedPolicyGateAuditRow(
   reservation: PolicyGateAuditReservation,
   row: PolicyGateAuditRow
 ): Promise<void> {
+  await assertAuditPathIdentity(reservation);
   await appendAuditHandle(reservation.handle, reservation.auditPath, `${JSON.stringify(row)}\n`);
 }
 
@@ -2526,6 +2948,20 @@ async function assertSafeAuditHandle(handle: FileHandle, path: string): Promise<
   }
   if (metadata.nlink > 1) {
     throw new Error(`Policy gate audit target must not be a hardlink: ${path}`);
+  }
+}
+
+async function assertAuditPathIdentity(reservation: PolicyGateAuditReservation): Promise<void> {
+  await assertSafeAuditFileTarget(reservation.auditPath);
+  const pathMetadata = await lstat(reservation.auditPath);
+  const handleMetadata = await reservation.handle.stat();
+  if (
+    pathMetadata.dev !== reservation.dev ||
+    pathMetadata.ino !== reservation.ino ||
+    handleMetadata.dev !== reservation.dev ||
+    handleMetadata.ino !== reservation.ino
+  ) {
+    throw new Error(`Policy gate audit target was moved or replaced: ${reservation.auditPath}`);
   }
 }
 

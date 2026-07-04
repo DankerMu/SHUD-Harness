@@ -16,7 +16,7 @@ describe("backend ws tool.failed skeleton", () => {
     const event = buildToolFailedWsEvent({
       seq: 7,
       eventId: "evt-7",
-      ts: "2026-07-04T00:00:00.000Z",
+      timestamp: "2026-07-04T00:00:00.000Z",
       ...rawDataDenialPayloadToToolFailedEventInput(payload)
     });
 
@@ -24,7 +24,7 @@ describe("backend ws tool.failed skeleton", () => {
       seq: 7,
       event_id: "evt-7",
       type: "tool.failed",
-      ts: "2026-07-04T00:00:00.000Z",
+      timestamp: "2026-07-04T00:00:00.000Z",
       payload: {
         tool_id: payload.tool_id,
         rule: payload.rule,
@@ -46,12 +46,13 @@ describe("backend ws tool.failed skeleton", () => {
     const payload = await sampleRawDataDenialPayload("denied_by_sandbox");
     const event = buildToolFailedWsEvent({
       seq: 8,
-      ts: "2026-07-04T00:00:00.000Z",
+      timestamp: "2026-07-04T00:00:00.000Z",
       ...rawDataDenialPayloadToToolFailedEventInput(payload)
     });
 
     expect(event.event_id).toBe("tool.failed:8");
     expect(event.type).toBe("tool.failed");
+    expect(event.timestamp).toBe("2026-07-04T00:00:00.000Z");
     expect(event.payload).toMatchObject({
       tool_id: payload.tool_id,
       rule: payload.rule,
