@@ -83,13 +83,12 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 - 单流域指标提升 ≠ 模型改进 → Agent 不允许这样表述
 - 校准结果 ≠ 结构验证 → Agent 必须标注为 calibration
 
-## Current State (2026-07-02)
+## Current State
 
-- **方案**: v0.8.3 Web-first + TS 全栈，基于 Zero 扩展，含 Theory-to-Code 治理层
-- **代码**: 零。Zero 作为基础实现已就位（submodule 追 development@13e25c1），待扩展 SHUD 领域逻辑
-- **Spec 冻结**: 规格体系已冻结（2026-07-02，对抗审查 41 修复 + 体检修复后）；仅收 bug 修正与 ADR 例外，规则见 `docs/Phased_Spec_Activation.md` 头部；架构决策入 `docs/adr/`
-- **MVP 现实锚定**: grill-me 压测 9 决策已落 `docs/adr/0002`（全本机 Mac / 首任务 = openMP RHS 已知答案回放 / 单用户 / agent 全代驾 + 里程碑制 / 运行时模型 GLM 5.2 第三方端点）；旧 openspec changes 已清理
-- **下一步**: M1 代码——按 Epic #11（27 子 issue #12–#38，实施记录 = openspec change `m1-foundation`）以 subagent-workflow 逐 issue 施工；M1 grill 七项已定案（2026-07-03，ADR-0002 开放项处置节：zero 不 fork / 工具面照准 / GLM_API_KEY / 回放单 PR 切片 + openMP pin / 预算冒烟换算 / Gmail SMTP / eval 分层递进）。首序 = 就绪收口 #12 → 骨架 #16 → spike 条 1 #17（判 ADR-0001 触发器）。实施排期唯一真相源 = Phased_Plan（里程碑制 M1–M9，MVP 验收 = M9 已知答案回放）
+- **方案**: v0.8.3 Web-first + TS 全栈，基于 Zero 扩展（root submodule 钉 13e25c1，不 fork），含 Theory-to-Code 治理层
+- **Spec 冻结**: 2026-07-02 起仅收 bug 修正与 ADR 例外——规则与例外批次账见 `docs/Phased_Spec_Activation.md` 头部；架构决策入 `docs/adr/`
+- **MVP 锚定**: 现实假设与运行时选型见 `docs/adr/0002`（全本机 Mac / 单用户 / 首任务 = openMP RHS 已知答案回放 / 运行时模型 GLM 5.2）
+- **实施**: 里程碑制 M1–M9，排期/交付/验收唯一真相源 = `docs/04_IMPLEMENTATION/Phased_Plan.md`；实施记录 = `openspec/changes/` 下的 active change（每里程碑一个，以 subagent-workflow 逐 issue 施工）。当前进度、首序与阻塞以对应 GitHub Epic（label `epic`）与 `docs/adr/` 最新 revisit 记录为准——不在本文件复写状态
 
 ## 已装能力
 

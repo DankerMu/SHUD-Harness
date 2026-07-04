@@ -4,7 +4,7 @@ status: accepted
 
 # ADR-0001: Agent 运行时基座与拓扑（Zero + 单 Coordinator 星型）
 
-**状态**: accepted（2026-07-02） · **执行状态**: Trial，M1 spike 触发 revisit（2026-07-04）
+**状态**: accepted（2026-07-02） · **执行状态**: Trial，M1 spike 触发 revisit → 边界重划已裁决（2026-07-04），条 2' 绿后复判转正
 · **决策人**: PI + 工程师 · **方法**: future-aware-architecture 分析
 **事实基线**: zero@13e25c1（development 分支）· SHUD-Harness v0.8.3（97 篇 spec，零代码）
 
@@ -98,6 +98,31 @@ status: accepted
 下一步按 2026-07-02 修订注顺序评估：① 自建薄工具注册/执行边界，保留 Zero 可复用面，但把 raw-data
 写保护放到可观测真实目标路径的执行层或 OS sandbox/read-only mount；② Claude Agent SDK 迁移仅在运行时模型
 回到 Anthropic 生态时重新成为候选。
+
+### 2026-07-04 裁决：边界重划，基座不换
+
+按上节顺序完成评估，同日结案：
+
+1. **根因是层错位，不是基座缺陷**。冻结 spec 早已分工——preflight 挡提交前可判定的计划性错误，
+   运行期写入由沙箱路径策略拦截（[Preflight_And_Mutation_Boundary_Spec](../03_SPEC/Preflight_And_Mutation_Boundary_Spec.md)
+   "preflight 是 submit 前的门，不是运行期防线"A03-5；[Sandbox_and_Executor §1](../03_SPEC/Sandbox_and_Executor.md)）。
+   #19 将写禁区 authority 误置于 pre-exec 扫描层，是实施记录相对 spec 的漂移。"写哪些文件"是程序语义属性，
+   对图灵完备的 shell 不可静态判定——该墙对两个备胎同样存在（任何 pre-exec 字符串门都撞；Claude Code 自身
+   在 macOS 亦以 seatbelt 实现 bash 沙箱），故备胎评估关闭：不换基座。
+2. **新 enforcement boundary（guard_class 两分落位）**：authority 类结构化校验（role→tool、spawn 剖面、
+   结构化路径参数）留 pre-exec 策略核心（spike 条 1/4 成果继续有效）；bash 的 capability 约束下沉执行层——
+   bash 工具 spawn 命令时施加 OS 沙箱 profile（macOS `sandbox-exec`/seatbelt：`(deny file-write*
+   (subpath data/raw))`，子进程继承；包装在 SHUD 侧工具实现内，zero diff 仍 = 0）。pre-exec 静态检查
+   降级 advisory（UX/remediation/audit 提示，fail-open），不再作为唯一 authority。
+3. **实测证据（2026-07-04 本机 14 用例 probe）**：六类 blocker（解释器 payload、pipeline/stdin、动态目标、
+   shell 状态与子/孙进程、symlink 与 `../` 别名、rename/unlink）全部 syscall 层 DENY，新建 hardlink DENY；
+   合法 raw 读与 workspace 写 ALLOW（fail-closed 读误拒消失）。唯一原理性残留 = enforcement 生效前已存在的
+   hardlink 别名——兜底 = ingest/readiness `nlink>1` 扫描 + DataProvenance 校验和交叉验证。
+4. **执行状态**：Zero 维持 Trial；spike 条 2 重定为条 2'（执行层穿透，issue #19 已重定标；PR #46 按
+   verdict 留作 spike 证据关闭不合并）；条 3（#20）与该墙无依赖，与其余 3.x/5.x 一并解冻按原依赖图恢复；
+   条 2' 绿后基于五条重出判定再议转正。落账：Phased_Plan M1 条 2 行同步修订（账本例外批次 5）。
+5. **迁移出口**：`sandbox-exec` deprecated-but-universal（Chromium/Bazel/Nix/Claude Code 在用）；
+   若离开 macOS 单机形态，等价物 = Linux landlock/bwrap/ro-bind，authority 语义不变。
 
 ## 参照
 

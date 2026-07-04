@@ -32,6 +32,12 @@ patch diff 端点方法、备胎表述随 ADR-0001 修订、新机制落点）�
 记录见 [ADR-0002 开放项处置节](adr/0002-mvp-reality-anchoring.md)；实施记录 `openspec/changes/m1-foundation`
 同步固化。spec 正文唯一改动：Config_Secrets §4 推荐环境变量表补 `GLM_API_KEY` 一行（D9 运行时模型
 key 变量，走 ADR 例外通道）；InferenceBudget 三档 USD 按定案流程待 M7 实测校准后写回，本批不改 spec。
+**例外批次 5（2026-07-04，ADR-0001 revisit 裁决）**：M1 策略门 spike 首轮判定条 2 不绿——pre-exec 静态
+命令串扫描原理性不可行（六类逃逸 + 读误拒，证据 `openspec/changes/m1-foundation/policy-gate-spike-verdict.md`）。
+裁决 = 边界重划而非换基座：bash 写禁区 authority 下沉执行层 OS 沙箱（macOS seatbelt，子进程继承），
+pre-exec 静态检查降级 advisory——与 Preflight_And_Mutation_Boundary_Spec"preflight 是 submit 前的门，
+不是运行期防线"（A03-5）既有分工一致。spec 正文唯一改动：Phased_Plan M1 spike 条 2 行机制修订（真相源
+条文与裁决对齐）；其余落实施记录 `m1-foundation` 与 [ADR-0001 revisit 记录](adr/0001-agent-runtime-and-topology.md)。
 
 **依据：** 本文档基于全部文档的交叉引用和依赖链深度分析生成。
 

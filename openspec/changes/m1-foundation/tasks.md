@@ -25,12 +25,14 @@
 > 判定（2026-07-04，#21）：spike 条 2（#19 / PR #46）最终 review+verifier gate 不绿，已触发 ADR-0001 revisit。
 > Zero 保持 Trial；#19 当前实现保留为 spike 证据，不 merge。策略门依赖的 3.x/5.x 后续任务暂停到 enforcement boundary 重审完成。
 > 逐条证据见 `policy-gate-spike-verdict.md`。
+>
+> **裁决（2026-07-04 同日，ADR-0001 revisit 记录）**：边界重划，基座不换——bash 写禁区 authority 下沉执行层 OS 沙箱（macOS seatbelt，子进程继承），pre-exec 静态检查降级 advisory；3.3 重定为条 2'（#19 已重定标），冻结解除（3.4 与 3.3 无依赖可并行，5.x 按原依赖图恢复）；条 2' 绿后重出五条判定再议 Trial 转正。
 
 - [ ] 3.1 spike 条 1：工具注册层横切包装（`ToolBase.beforeExecute` 包装/注册期 wrap；未包装工具装配失败负例；Zero 内核零改动）+ zero 引用技术形态定形（嵌套 Bun workspace 解析实测：workspace 纳入 vs `file:` 依赖 vs 运行时入口加载，实测结论回写 design.md Decision 3；验收含「Decision 3 已回写」）——依赖: 2.1
 - [ ] 3.2 spike 条 4：策略门纯函数核心（ToolCall → allow/deny + reason + remediation）+ 独立单测（正负例 + remediation 载荷断言）——依赖: 4.1（ErrorRecord.remediation 枚举）
-- [ ] 3.3 spike 条 2：`data/raw/**` 写禁区端到端穿透（bash 执行前拒 + remediation 三字段 + WS 复用注册表事件 `tool.failed` 推送（envelope 含 seq/event_id）+ audit 最小行落盘（event/tool_id/rule/decision/ts，路径与 fixture 任务见 policy-gate-spike spec））——依赖: 4.1
-- [ ] 3.4 spike 条 3：spawn 剖面超集拒绝负例（比对基准 = 5.1 映射表；断言 `remediation.next_action=adjust_scope`）——依赖: 5.1
-- [x] 3.5 spike 条 5 核验 + 判定记录（`git -C zero diff --quiet` && HEAD=13e25c1；五条全绿 → Trial 转正记录；任一条 2 人周不绿 → ADR-0001 revisit 备忘并冻结 3.x/5.x 后续）——依赖: 节内 3.1–3.4 + 跨节 4.1、5.1（经 3.2/3.4 传递）
+- [ ] 3.3 spike 条 2'：`data/raw/**` 写禁区执行层穿透（authority = bash 工具 spawn 时施加 OS 沙箱 profile——macOS `sandbox-exec`/seatbelt `deny file-write*` subpath、子进程继承；六类逃逸负例（解释器 payload / pipeline·stdin / 动态目标 / shell 状态与子进程 / symlink·`../` 别名 / rename+unlink）+ raw 读与 workspace 写正例 + 预存 hardlink 残留演示与 nlink>1 扫描检出；pre-exec 静态检查降级 advisory（fail-open，复用 3.2 纯函数 + 3.1 横切缝）；拒绝面 remediation 三字段 + WS 复用 `tool.failed`（envelope 含 seq/event_id）+ audit 最小行落盘（event/tool_id/rule/decision/ts + profile 标识，路径与 fixture 任务见 policy-gate-spike spec））——依赖: 4.1；2026-07-04 重定（ADR-0001 revisit 裁决）
+- [ ] 3.4 spike 条 3：spawn 剖面超集拒绝负例（比对基准 = 5.1 映射表；断言 `remediation.next_action=adjust_scope`）——依赖: 5.1；与 3.3 无依赖，可并行（2026-07-04 裁决解冻）
+- [x] 3.5 spike 条 5 核验 + 判定记录（`git -C zero diff --quiet` && HEAD=13e25c1；五条全绿 → Trial 转正记录；任一条 2 人周不绿 → ADR-0001 revisit 备忘并冻结 3.x/5.x 后续）——依赖: 节内 3.1–3.4 + 跨节 4.1、5.1（经 3.2/3.4 传递）；首轮判定已出（2026-07-04：条 2 不绿 → revisit 已裁决），条 2' 绿后重出五条判定
 
 ## 4. core schema（core-schemas）
 

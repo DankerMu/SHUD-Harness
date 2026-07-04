@@ -36,3 +36,7 @@ Preferred option to evaluate first: keep Zero's reusable packages and Web/runtim
 Second option: evaluate Claude Agent SDK migration only if the runtime-model and provider assumptions return to an Anthropic-centered stack. ADR-0002 D9 currently makes this the secondary option rather than the first fallback.
 
 Rejected continuation path: keep adding static command patterns until review stops finding bypasses. The final #19 gate showed the same invariant family across executable payloads, dynamic shell state, pipelines, and filesystem aliases; continuing that loop would violate the "do not carry a not-green spike forward" rule.
+
+## Resolution (2026-07-04)
+
+Boundary redesign adjudicated same day; ruling recorded in the ADR-0001 revisit record ("2026-07-04 裁决"). Summary: spike item 2 is redefined as item 2' — write-denial authority moves to the executor layer (macOS seatbelt profile applied by the SHUD-owned bash tool wrapper, child processes inherit; measured 14-case probe: all six blocker classes denied at syscall level, raw reads and workspace writes allowed, sole principled residual = pre-existing hardlink aliases with nlink-scan + DataProvenance checksum backstop). Static preflight is demoted to an advisory hint layer. Runtime basis stays Zero (both fallbacks hit the same wall; evaluation closed), the 3.x/5.x freeze is lifted, issue #19 re-scoped, PR #46 stays closed-unmerged as spike evidence. This file remains the immutable first-round evidence record.

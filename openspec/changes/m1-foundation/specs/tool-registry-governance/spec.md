@@ -69,7 +69,7 @@
 
 ### Requirement: 硬护栏 guard_class 标注
 
-M1 落地的每条硬护栏——路径写禁区（policy-gate-spike 条 2）、spawn 剖面子集校验（policy-gate-spike 条 3）、spawn depth 上限与并发上限（本 spec「spawn depth 与并发上限硬校验」requirement）——SHALL 标注 `guard_class ∈ {authority, capability}`（Control_Kernel §5.2 分类），为换代减重审查留数据基础；存在未标注护栏时装配或 lint MUST 失败。
+M1 落地的每条硬护栏——路径写禁区（policy-gate-spike 条 2'，执行层沙箱护栏与其 advisory 层均须标注）、spawn 剖面子集校验（policy-gate-spike 条 3）、spawn depth 上限与并发上限（本 spec「spawn depth 与并发上限硬校验」requirement）——SHALL 标注 `guard_class ∈ {authority, capability}`（Control_Kernel §5.2 分类），为换代减重审查留数据基础；存在未标注护栏时装配或 lint MUST 失败。
 
 #### Scenario: 未标注护栏被拦截
 
