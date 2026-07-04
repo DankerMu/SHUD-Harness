@@ -1,9 +1,18 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, realpath, appendFile, lstat, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { BaseTool, BashTool } from "@zero-os/core";
-import type { ToolContext, ToolResult } from "@zero-os/shared";
+import type { FuseRule, ToolContext, ToolResult } from "@zero-os/shared";
 import type { ErrorRecord } from "../domain/schemas";
 import type {
   PolicyGateRemediation,
@@ -44,13 +53,15 @@ export interface RawDataSeatbeltProfile {
   metadata: RawDataSeatbeltProfileMetadata;
 }
 
-export interface RawDataSandboxedBashToolOptions extends RawDataSeatbeltProfileOptions {
-  innerTool?: BaseTool;
+export type RawDataSandboxedBashToolOptions = RawDataSeatbeltProfileOptions & {
   toolId?: string;
   enableAdvisory?: boolean;
   auditWorkspaceRoot?: string;
   auditTaskId?: string;
-}
+} & (
+    | { innerTool: BaseTool; fuseRules?: never }
+    | { innerTool?: never; fuseRules: readonly FuseRule[] }
+  );
 
 export interface PolicyGateAuditRow {
   event: string;
@@ -60,6 +71,11 @@ export interface PolicyGateAuditRow {
   ts: string;
   profile_id?: string;
   profile_path?: string;
+  guard_class?: RawDataGuardClass;
+  error_id?: string;
+  invocation_id?: string;
+  remediation_next_action?: string;
+  remediation_ref?: string;
   [key: string]: unknown;
 }
 
@@ -75,11 +91,32 @@ export interface RawDataDenialPayload {
   tool_id: string;
   rule: typeof RAW_DATA_WRITE_RULE_ID;
   decision: "denied_by_advisory" | "denied_by_sandbox";
+  guard_class: RawDataGuardClass;
   reason: string;
   remediation: PolicyGateRemediation;
   profile_id: string;
   profile_path?: string;
+  invocation_id?: string;
   error_record: ErrorRecord;
+}
+
+export type RawDataGuardClass = "authority" | "advisory";
+
+export interface RawDataDenialEvidence {
+  payload: RawDataDenialPayload;
+  toolResult: ToolResult;
+  auditRow: PolicyGateAuditRow;
+  toolFailedEventInput: RawDataToolFailedEventInput;
+}
+
+export interface RawDataToolFailedEventInput {
+  toolId: string;
+  rule: typeof RAW_DATA_WRITE_RULE_ID;
+  decision: RawDataDenialPayload["decision"];
+  guardClass: RawDataGuardClass;
+  profileId: string;
+  invocationId?: string;
+  error: ErrorRecord;
 }
 
 export interface HardlinkRisk {
@@ -162,8 +199,13 @@ export async function writeRawDataSeatbeltProfileFile(
   const root = profileRoot ?? profile.metadata.profileRoot ?? profile.metadata.tempRoot;
   await mkdir(root, { recursive: true });
   const canonicalRoot = await canonicalizeExistingPath(root);
-  const profilePath = join(canonicalRoot, `${profile.profileId}.sb`);
-  await writeFile(profilePath, `${profile.profileText}\n`, { mode: 0o600 });
+  const runRoot = await mkdtemp(join(canonicalRoot, `${profile.profileId}-`));
+  const profilePath = join(runRoot, rawDataSandboxProfileFileName(profile));
+  await writeFile(profilePath, `${profile.profileText}\n`, { mode: 0o600, flag: "wx" });
+  const metadata = await lstat(profilePath);
+  if (!metadata.isFile()) {
+    throw new Error(`Seatbelt profile path is not a regular file: ${profilePath}`);
+  }
   return canonicalizeExistingPath(profilePath);
 }
 
@@ -176,7 +218,13 @@ export class RawDataSandboxedBashTool extends BaseTool {
 
   constructor(private readonly options: RawDataSandboxedBashToolOptions) {
     super();
-    this.innerTool = options.innerTool ?? new BashTool([]);
+    if ("innerTool" in options && options.innerTool) {
+      this.innerTool = options.innerTool;
+    } else if ("fuseRules" in options && options.fuseRules) {
+      this.innerTool = new BashTool([...options.fuseRules]);
+    } else {
+      throw new Error("RawDataSandboxedBashTool requires either innerTool or fuseRules.");
+    }
     this.name = options.toolId ?? this.innerTool.name;
     this.description = this.innerTool.description;
     this.parameters = this.innerTool.parameters;
@@ -197,59 +245,92 @@ export class RawDataSandboxedBashTool extends BaseTool {
     const profile = await buildRawDataSeatbeltProfile(this.options);
     const profilePath = await writeRawDataSeatbeltProfileFile(profile, this.options.profileRoot);
 
-    if (this.options.enableAdvisory !== false) {
-      const advisory = evaluateRawDataWriteAdvisory(command, profile.metadata.protectedRawPaths);
-      if (advisory.decision === "deny") {
-        const result = buildRawDataDeniedToolResult({
+    try {
+      const suppressedDenial = evaluateSuppressedSandboxFailureGuard(
+        command,
+        profile.metadata.protectedRawPaths
+      );
+      if (suppressedDenial.decision === "deny") {
+        const evidence = buildRawDataDenialEvidence({
           toolId: this.name,
-          decision: "denied_by_advisory",
-          reason: advisory.reason,
+          decision: "denied_by_sandbox",
+          reason: suppressedDenial.reason,
           profile,
-          profilePath
+          profilePath,
+          invocationId: readInvocationId(ctx)
         });
-        await this.appendAudit(ctx, {
-          event: "tool.failed",
-          decision: "denied_by_advisory",
-          profile,
-          profilePath
-        });
-        return result;
+        await this.appendDenialAudit(ctx, evidence);
+        return evidence.toolResult;
       }
-    }
 
-    const wrappedCommand = `sandbox-exec -f ${shellQuote(profilePath)} bash -c ${shellQuote(
-      command
-    )}`;
-    const result = await this.innerTool.run(ctx, {
-      ...(typeof input === "object" && input !== null ? input : {}),
-      command: wrappedCommand
-    });
+      if (this.options.enableAdvisory !== false) {
+        const advisory = evaluateRawDataWriteAdvisory(command, profile.metadata.protectedRawPaths);
+        if (advisory.decision === "deny") {
+          const evidence = buildRawDataDenialEvidence({
+            toolId: this.name,
+            decision: "denied_by_advisory",
+            reason: advisory.reason,
+            profile,
+            profilePath,
+            invocationId: readInvocationId(ctx)
+          });
+          await this.appendDenialAudit(ctx, evidence);
+          return evidence.toolResult;
+        }
+      }
 
-    if (isLikelySandboxDenialForCommand(command, result.output)) {
-      const denied = buildRawDataDeniedToolResult({
-        toolId: this.name,
-        decision: "denied_by_sandbox",
-        reason: "raw data writes are blocked by the OS sandbox profile",
-        profile,
-        profilePath,
-        underlyingOutput: result.output
+      const wrappedCommand = `sandbox-exec -f ${shellQuote(profilePath)} bash -c ${shellQuote(
+        command
+      )}`;
+      const result = await this.innerTool.run(ctx, {
+        ...(typeof input === "object" && input !== null ? input : {}),
+        command: wrappedCommand
       });
+
+      if (isLikelySandboxDenialForCommand(command, result.output)) {
+        const evidence = buildRawDataDenialEvidence({
+          toolId: this.name,
+          decision: "denied_by_sandbox",
+          reason: "raw data writes are blocked by the OS sandbox profile",
+          profile,
+          profilePath,
+          underlyingOutput: result.output,
+          invocationId: readInvocationId(ctx)
+        });
+        await this.appendDenialAudit(ctx, evidence);
+        return evidence.toolResult;
+      }
+
       await this.appendAudit(ctx, {
-        event: "tool.failed",
-        decision: "denied_by_sandbox",
+        event: result.success ? "tool.completed" : "tool.failed",
+        decision: result.success ? "allowed" : "failed",
         profile,
         profilePath
       });
-      return denied;
+      return result;
+    } finally {
+      await cleanupRawDataSeatbeltProfileFile(profilePath);
     }
+  }
 
-    await this.appendAudit(ctx, {
-      event: result.success ? "tool.completed" : "tool.failed",
-      decision: result.success ? "allowed" : "failed",
-      profile,
-      profilePath
-    });
-    return result;
+  private async appendDenialAudit(
+    ctx: ToolContext,
+    evidence: RawDataDenialEvidence
+  ): Promise<void> {
+    try {
+      await appendPolicyGateAuditRow({
+        workspaceRoot: this.options.auditWorkspaceRoot ?? ctx.workDir,
+        taskId: this.options.auditTaskId,
+        row: evidence.auditRow
+      });
+    } catch (error) {
+      ctx.logger.warn("policy_gate_audit_append_failed", {
+        tool: this.name,
+        rule: evidence.payload.rule,
+        decision: evidence.payload.decision,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
 
   private async appendAudit(
@@ -262,19 +343,28 @@ export class RawDataSandboxedBashTool extends BaseTool {
     }
   ): Promise<void> {
     const workspaceRoot = this.options.auditWorkspaceRoot ?? ctx.workDir;
-    await appendPolicyGateAuditRow({
-      workspaceRoot,
-      taskId: this.options.auditTaskId,
-      row: {
-        event: input.event,
-        tool_id: this.name,
+    try {
+      await appendPolicyGateAuditRow({
+        workspaceRoot,
+        taskId: this.options.auditTaskId,
+        row: {
+          event: input.event,
+          tool_id: this.name,
+          rule: RAW_DATA_WRITE_RULE_ID,
+          decision: input.decision,
+          ts: new Date().toISOString(),
+          profile_id: input.profile.profileId,
+          profile_path: input.profilePath
+        }
+      });
+    } catch (error) {
+      ctx.logger.warn("policy_gate_audit_append_failed", {
+        tool: this.name,
         rule: RAW_DATA_WRITE_RULE_ID,
         decision: input.decision,
-        ts: new Date().toISOString(),
-        profile_id: input.profile.profileId,
-        profile_path: input.profilePath
-      }
-    });
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
 }
 
@@ -304,46 +394,57 @@ export function evaluateRawDataWriteAdvisory(
   command: string,
   protectedRawPaths: readonly string[]
 ): PolicyRuleDecision {
-  const protectedTargets = [
-    "data/raw/",
-    "./data/raw/",
-    ...protectedRawPaths.flatMap((protectedPath) => [
-      ensureTrailingSlash(protectedPath),
-      ensureTrailingSlash(resolve(protectedPath))
-    ])
-  ];
+  const suppressedDenial = evaluateSuppressedSandboxFailureGuard(command, protectedRawPaths);
+  if (suppressedDenial.decision === "deny") {
+    return suppressedDenial;
+  }
 
-  for (const target of sortedUnique(protectedTargets)) {
-    const escapedTarget = escapeRegExp(target);
-    const quotedTarget = String.raw`(?:"${escapedTarget}|'${escapedTarget}|${escapedTarget})`;
-    const redirectionPattern = new RegExp(String.raw`(?:^|[\s;&|])(?:>{1,2}|<>)\s*${quotedTarget}`);
-    const writeCommandPattern = new RegExp(
-      String.raw`(?:^|[\s;&|])(?:/usr/bin/)?(?:tee|touch|rm|unlink|mv|cp)\b[^\n;&|]*\s+${quotedTarget}`
-    );
-
-    if (redirectionPattern.test(command) || writeCommandPattern.test(command)) {
-      return {
-        decision: "deny",
-        reason: "obvious static raw-data write target",
-        remediation: rawDataWriteRemediation()
-      };
-    }
+  if (hasStaticRawDataWrite(command, protectedRawPaths)) {
+    return {
+      decision: "deny",
+      reason: "obvious static raw-data write target",
+      remediation: rawDataWriteRemediation()
+    };
   }
 
   return { decision: "allow" };
+}
+
+export function evaluateSuppressedSandboxFailureGuard(
+  command: string,
+  protectedRawPaths: readonly string[]
+): PolicyRuleDecision {
+  if (!canHideSandboxFailure(command)) {
+    return { decision: "allow" };
+  }
+
+  if (!hasKnownSuppressedShellShape(command)) {
+    return { decision: "allow" };
+  }
+
+  if (!hasStaticRawDataWrite(command, protectedRawPaths)) {
+    return { decision: "allow" };
+  }
+
+  return {
+    decision: "deny",
+    reason: "raw-data write form can hide sandbox denial",
+    remediation: rawDataWriteRemediation()
+  };
 }
 
 export async function appendPolicyGateAuditRow(
   options: AppendPolicyGateAuditRowOptions
 ): Promise<string> {
   const taskId = options.taskId ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID;
-  if (!/^[A-Za-z0-9._-]+$/.test(taskId)) {
-    throw new Error(`Invalid audit task id: ${taskId}`);
-  }
+  assertSafePathSegment(taskId, "audit task id");
+
+  const fileName = options.fileName ?? DEFAULT_AUDIT_FILE_NAME;
+  assertSafePathSegment(fileName, "audit file name");
 
   const auditDir = join(resolve(options.workspaceRoot), "workspace", "tasks", taskId, "audit");
   await mkdir(auditDir, { recursive: true });
-  const auditPath = join(auditDir, options.fileName ?? DEFAULT_AUDIT_FILE_NAME);
+  const auditPath = join(auditDir, fileName);
   await appendFile(auditPath, `${JSON.stringify(options.row)}\n`, "utf8");
   return auditPath;
 }
@@ -355,10 +456,12 @@ export function buildRawDataDeniedPayload(input: {
   profile: RawDataSeatbeltProfile;
   profilePath?: string;
   underlyingOutput?: string;
+  invocationId?: string;
   ts?: string;
 }): RawDataDenialPayload {
   const ts = input.ts ?? new Date().toISOString();
   const remediation = rawDataWriteRemediation();
+  const guardClass = rawDataGuardClassForDecision(input.decision);
   const message =
     input.decision === "denied_by_sandbox"
       ? "Raw data write denied by OS sandbox."
@@ -369,10 +472,12 @@ export function buildRawDataDeniedPayload(input: {
     tool_id: input.toolId,
     rule: RAW_DATA_WRITE_RULE_ID,
     decision: input.decision,
+    guard_class: guardClass,
     reason: input.reason,
     remediation,
     profile_id: input.profile.profileId,
     ...(input.profilePath ? { profile_path: input.profilePath } : {}),
+    ...(input.invocationId ? { invocation_id: input.invocationId } : {}),
     error_record: {
       error_id: `${RAW_DATA_WRITE_RULE_ID}:${input.decision}:${input.profile.profileId}`,
       category: input.decision === "denied_by_sandbox" ? "sandbox_error" : "permission_error",
@@ -391,6 +496,33 @@ export function buildRawDataDeniedPayload(input: {
   };
 }
 
+export function buildRawDataDenialEvidence(input: {
+  toolId: string;
+  decision: "denied_by_advisory" | "denied_by_sandbox";
+  reason: string;
+  profile: RawDataSeatbeltProfile;
+  profilePath?: string;
+  underlyingOutput?: string;
+  invocationId?: string;
+  ts?: string;
+}): RawDataDenialEvidence {
+  const payload = buildRawDataDeniedPayload(input);
+  const auditRow = rawDataDenialPayloadToAuditRow(payload, input.ts);
+  const toolFailedEventInput = rawDataDenialPayloadToToolFailedEventInput(payload);
+  const toolResult = {
+    success: false,
+    output: JSON.stringify(payload),
+    outputSummary: `Raw data write denied: ${input.reason}`
+  };
+
+  return {
+    payload,
+    toolResult,
+    auditRow,
+    toolFailedEventInput
+  };
+}
+
 export function buildRawDataDeniedToolResult(input: {
   toolId: string;
   decision: "denied_by_advisory" | "denied_by_sandbox";
@@ -398,6 +530,7 @@ export function buildRawDataDeniedToolResult(input: {
   profile: RawDataSeatbeltProfile;
   profilePath?: string;
   underlyingOutput?: string;
+  invocationId?: string;
 }): ToolResult {
   const payload = buildRawDataDeniedPayload(input);
   return {
@@ -407,10 +540,51 @@ export function buildRawDataDeniedToolResult(input: {
   };
 }
 
+export function rawDataDenialPayloadToAuditRow(
+  payload: RawDataDenialPayload,
+  ts = payload.error_record.created_at
+): PolicyGateAuditRow {
+  return {
+    event: "tool.failed",
+    tool_id: payload.tool_id,
+    rule: payload.rule,
+    decision: payload.decision,
+    guard_class: payload.guard_class,
+    ts,
+    profile_id: payload.profile_id,
+    ...(payload.profile_path ? { profile_path: payload.profile_path } : {}),
+    error_id: payload.error_record.error_id,
+    ...(payload.invocation_id ? { invocation_id: payload.invocation_id } : {}),
+    remediation_next_action: payload.remediation.next_action,
+    ...(payload.remediation.ref ? { remediation_ref: payload.remediation.ref } : {}),
+    reason: payload.reason
+  };
+}
+
+export function rawDataDenialPayloadToToolFailedEventInput(
+  payload: RawDataDenialPayload
+): RawDataToolFailedEventInput {
+  return {
+    toolId: payload.tool_id,
+    rule: payload.rule,
+    decision: payload.decision,
+    guardClass: payload.guard_class,
+    profileId: payload.profile_id,
+    ...(payload.invocation_id ? { invocationId: payload.invocation_id } : {}),
+    error: payload.error_record
+  };
+}
+
 export async function scanProtectedHardlinks(input: {
   protectedRoots: readonly string[];
+  maxScannedPathCount?: number;
 }): Promise<HardlinkScanResult> {
   const protectedRoots = await canonicalizePathSet(input.protectedRoots);
+  const maxScannedPathCount = input.maxScannedPathCount ?? 10_000;
+  if (!Number.isInteger(maxScannedPathCount) || maxScannedPathCount < 1) {
+    throw new Error(`Invalid hardlink scan budget: ${maxScannedPathCount}`);
+  }
+
   const riskyPaths: HardlinkRisk[] = [];
   let scannedPathCount = 0;
 
@@ -425,6 +599,10 @@ export async function scanProtectedHardlinks(input: {
   };
 
   async function scanPath(path: string): Promise<void> {
+    if (scannedPathCount >= maxScannedPathCount) {
+      throw new Error(`Protected hardlink scan exceeded budget: ${maxScannedPathCount}`);
+    }
+
     const metadata = await lstat(path);
     scannedPathCount += 1;
 
@@ -460,6 +638,336 @@ export function isLikelySandboxDenial(output: string): boolean {
   return SANDBOX_DENIAL_PATTERN.test(output);
 }
 
+function hasStaticRawDataWrite(
+  command: string,
+  protectedRawPaths: readonly string[]
+): boolean {
+  const staticPathVariables = new Map<string, string>();
+
+  for (const segment of splitStaticShellSegments(command)) {
+    const tokens = tokenizeStaticShellSegment(segment);
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    collectStaticPathAssignments(tokens, staticPathVariables);
+    const resolvedTokens = tokens.map((token) => resolveStaticPathToken(token, staticPathVariables));
+
+    if (hasRawDataWriteRedirection(resolvedTokens, protectedRawPaths)) {
+      return true;
+    }
+
+    const commandName = normalizeCommandName(resolvedTokens[0]);
+    if (
+      (commandName === "bash" || commandName === "sh") &&
+      hasChildShellRawDataWrite(resolvedTokens, protectedRawPaths)
+    ) {
+      return true;
+    }
+
+    const operands = extractCommandOperands(resolvedTokens.slice(1));
+    if (operands.length === 0) {
+      continue;
+    }
+
+    if (commandName === "cp") {
+      const destination = operands.at(-1);
+      if (destination && isRawDataPathToken(destination, protectedRawPaths)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (commandName === "mv") {
+      if (operands.some((operand) => isRawDataPathToken(operand, protectedRawPaths))) {
+        return true;
+      }
+      continue;
+    }
+
+    if (
+      commandName === "tee" ||
+      commandName === "touch" ||
+      commandName === "rm" ||
+      commandName === "unlink"
+    ) {
+      if (operands.some((operand) => isRawDataPathToken(operand, protectedRawPaths))) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function collectStaticPathAssignments(tokens: readonly string[], bindings: Map<string, string>): void {
+  for (const token of tokens) {
+    const match = token.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.+)$/);
+    if (!match) {
+      continue;
+    }
+    const [, name, value] = match;
+    if (/[`$*?[\]]/.test(value)) {
+      continue;
+    }
+    bindings.set(name, value);
+  }
+}
+
+function resolveStaticPathToken(token: string, bindings: ReadonlyMap<string, string>): string {
+  const simpleVariable = token.match(/^\$([A-Za-z_][A-Za-z0-9_]*)$/);
+  if (simpleVariable) {
+    return bindings.get(simpleVariable[1]) ?? token;
+  }
+
+  const bracedVariable = token.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/);
+  if (bracedVariable) {
+    return bindings.get(bracedVariable[1]) ?? token;
+  }
+
+  return token;
+}
+
+function hasRawDataWriteRedirection(
+  tokens: readonly string[],
+  protectedRawPaths: readonly string[]
+): boolean {
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    if (
+      isWriteRedirectionToken(tokens[index]) &&
+      isRawDataPathToken(tokens[index + 1], protectedRawPaths)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasChildShellRawDataWrite(
+  tokens: readonly string[],
+  protectedRawPaths: readonly string[]
+): boolean {
+  for (let index = 1; index < tokens.length - 1; index += 1) {
+    if (tokens[index] === "-c") {
+      return hasStaticRawDataWrite(tokens[index + 1], protectedRawPaths);
+    }
+  }
+
+  return false;
+}
+
+function isWriteRedirectionToken(token: string): boolean {
+  return /^(?:\d*)?(?:>{1,2}|<>)$/.test(token);
+}
+
+function splitStaticShellSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+
+  for (const char of command) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      }
+      current += char;
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      current += char;
+      continue;
+    }
+
+    if (char === ";" || char === "\n" || char === "|" || char === "&") {
+      if (current.trim()) {
+        segments.push(current.trim());
+      }
+      current = "";
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current.trim()) {
+    segments.push(current.trim());
+  }
+
+  return segments;
+}
+
+function tokenizeStaticShellSegment(segment: string): string[] {
+  const tokens: string[] = [];
+  let index = 0;
+
+  while (index < segment.length) {
+    while (index < segment.length && /\s/.test(segment[index])) {
+      index += 1;
+    }
+    if (index >= segment.length) {
+      break;
+    }
+
+    const descriptorRedirect = segment.slice(index).match(/^\d*(?:>>?|<>)/);
+    if (descriptorRedirect) {
+      tokens.push(descriptorRedirect[0]);
+      index += descriptorRedirect[0].length;
+      continue;
+    }
+
+    let token = "";
+    let quote: "'" | '"' | undefined;
+    let escaped = false;
+    while (index < segment.length) {
+      const char = segment[index];
+      if (escaped) {
+        token += char;
+        escaped = false;
+        index += 1;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaped = true;
+        index += 1;
+        continue;
+      }
+
+      if (quote) {
+        if (char === quote) {
+          quote = undefined;
+          index += 1;
+          continue;
+        }
+        token += char;
+        index += 1;
+        continue;
+      }
+
+      if (char === "'" || char === '"') {
+        quote = char;
+        index += 1;
+        continue;
+      }
+
+      if (/\s/.test(char)) {
+        break;
+      }
+
+      if (char === ">" || (char === "<" && segment[index + 1] === ">")) {
+        break;
+      }
+
+      token += char;
+      index += 1;
+    }
+
+    if (token.length > 0) {
+      tokens.push(token);
+    } else {
+      index += 1;
+    }
+  }
+
+  return tokens;
+}
+
+function normalizeCommandName(token: string): string {
+  return basename(token);
+}
+
+function extractCommandOperands(tokens: readonly string[]): string[] {
+  const operands: string[] = [];
+  let afterOptionTerminator = false;
+
+  for (const token of tokens) {
+    if (token.length === 0) {
+      continue;
+    }
+    if (!afterOptionTerminator && token === "--") {
+      afterOptionTerminator = true;
+      continue;
+    }
+    if (!afterOptionTerminator && token.startsWith("-")) {
+      continue;
+    }
+    if (isWriteRedirectionToken(token)) {
+      continue;
+    }
+    operands.push(token);
+  }
+
+  return operands;
+}
+
+function isRawDataPathToken(token: string, protectedRawPaths: readonly string[]): boolean {
+  if (/[`$*?[\]]/.test(token)) {
+    return false;
+  }
+
+  const cleaned = token.replace(/\/+$/, "");
+  if (!cleaned) {
+    return false;
+  }
+
+  const normalizedToken = normalize(cleaned);
+  if (
+    normalizedToken === "data/raw" ||
+    normalizedToken.startsWith("data/raw/") ||
+    normalizedToken === "./data/raw" ||
+    normalizedToken.startsWith("./data/raw/")
+  ) {
+    return true;
+  }
+
+  if (!isAbsolute(cleaned)) {
+    return false;
+  }
+
+  const absoluteToken = normalize(cleaned);
+  return protectedRawPaths.some((protectedPath) => {
+    const root = normalize(protectedPath).replace(/\/+$/, "");
+    return absoluteToken === root || absoluteToken.startsWith(`${root}/`);
+  });
+}
+
+function canHideSandboxFailure(command: string): boolean {
+  return (
+    /(?:^|[\s;&|])2\s*>{1,2}\s*\/dev\/null(?:\s|$)/.test(command) &&
+    /\|\|\s*true(?:\s|$)/.test(command)
+  );
+}
+
+function hasKnownSuppressedShellShape(command: string): boolean {
+  return (
+    /(?:^|[\s;&|])(?:bash|sh)\s+-c\b/.test(command) ||
+    /(?:^|[\s;&|])\(/.test(command) ||
+    /(?:^|[\s;&|])\{/.test(command)
+  );
+}
+
+function rawDataGuardClassForDecision(
+  decision: RawDataDenialPayload["decision"]
+): RawDataGuardClass {
+  return decision === "denied_by_sandbox" ? "authority" : "advisory";
+}
+
 function isLikelySandboxDenialForCommand(command: string, output: string): boolean {
   return (
     isLikelySandboxDenial(output) ||
@@ -467,6 +975,11 @@ function isLikelySandboxDenialForCommand(command: string, output: string): boole
       command.includes(">") &&
       command.includes("data/raw"))
   );
+}
+
+function readInvocationId(ctx: ToolContext): string | undefined {
+  const id = (ctx as ToolContext & { currentToolUseId?: unknown }).currentToolUseId;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
 }
 
 function readBashCommand(input: unknown): string | undefined {
@@ -490,6 +1003,10 @@ async function canonicalizeExistingPath(path: string): Promise<string> {
   return realpath(resolve(path));
 }
 
+async function cleanupRawDataSeatbeltProfileFile(profilePath: string): Promise<void> {
+  await rm(dirname(profilePath), { recursive: true, force: true });
+}
+
 function quoteSeatbeltString(value: string): string {
   return `"${value
     .replaceAll("\\", "\\\\")
@@ -506,12 +1023,10 @@ function sortedUnique(values: readonly string[]): string[] {
   return Array.from(new Set(values)).sort();
 }
 
-function ensureTrailingSlash(value: string): string {
-  return value.endsWith("/") ? value : `${value}/`;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function assertSafePathSegment(value: string, label: string): void {
+  if (!/^[A-Za-z0-9._-]+$/.test(value) || value === "." || value === "..") {
+    throw new Error(`Invalid ${label}: ${value}`);
+  }
 }
 
 export function rawDataSandboxProfileFileName(profile: RawDataSeatbeltProfile): string {

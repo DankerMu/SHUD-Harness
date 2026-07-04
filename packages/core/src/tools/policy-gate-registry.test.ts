@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BaseTool, ToolRegistry } from "@zero-os/core";
 import type { ToolContext, ToolLogger, ToolResult } from "@zero-os/shared";
 import {
@@ -6,9 +10,19 @@ import {
   assertPolicyGatedToolRegistry,
   createPolicyGateEvaluator,
   createPolicyGatedToolRegistry,
+  createShudRuntimeToolRegistry,
   isPolicyGatedTool,
   wrapToolWithPolicyGate
 } from "./policy-gate-registry";
+import {
+  RAW_DATA_WRITE_RULE_ID,
+  RawDataSandboxedBashTool,
+  type PolicyGateAuditRow,
+  type RawDataDenialPayload
+} from "./raw-data-sandbox";
+
+const seatbeltTest =
+  process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec") ? test : test.skip;
 
 describe("policy-gated zero tool registry", () => {
   test("denies before executing the underlying bash BaseTool", async () => {
@@ -106,6 +120,66 @@ describe("policy-gated zero tool registry", () => {
     expect(isPolicyGatedTool(forgedTool)).toBe(false);
     expect(() => assertAllToolsPolicyGated([forgedTool])).toThrow("edit");
   });
+
+  seatbeltTest("SHUD runtime registry obtains wrapped bash with raw sandbox and fused BashTool", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const registry = createShudRuntimeToolRegistry({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [{ pattern: "blocked-by-registry-fuse", description: "registry sentinel" }]
+      });
+      const bash = registry.get("bash");
+
+      expect(bash).toBeInstanceOf(RawDataSandboxedBashTool);
+      expect(registry.list().find((tool) => tool.name === "bash")).toBe(bash);
+
+      const scopedRegistry = new ToolRegistry();
+      scopedRegistry.register(registry.get("bash")!);
+      expect(scopedRegistry.get("bash")).toBe(bash);
+      expect(scopedRegistry.get("bash")).toBeInstanceOf(RawDataSandboxedBashTool);
+
+      const rawRead = await bash?.run(fixture.context, { command: "cat data/raw/input.csv" });
+      expect(rawRead?.success).toBe(true);
+      expect(rawRead?.output).toContain("raw,input");
+
+      const workspaceWrite = await bash?.run(fixture.context, {
+        command: "printf allowed > workspace/out.txt"
+      });
+      expect(workspaceWrite?.success).toBe(true);
+      expect(await readFile(join(fixture.workspaceRoot, "out.txt"), "utf8")).toBe("allowed");
+
+      const fused = await bash?.run(fixture.context, { command: "printf blocked-by-registry-fuse" });
+      expect(fused?.success).toBe(false);
+      expect(fused?.output).toContain("registry sentinel");
+
+      const denied = await bash?.run(fixture.context, {
+        command: "printf nope > data/raw/registry-denied.txt"
+      });
+      const payload = JSON.parse(denied?.output ?? "{}") as RawDataDenialPayload;
+      expect(denied?.success).toBe(false);
+      expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
+      expect(payload.decision).toBe("denied_by_advisory");
+      await expect(readFile(join(fixture.rawRoot, "registry-denied.txt"), "utf8")).rejects.toThrow();
+
+      const rows = await readRawAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        tool_id: "bash",
+        rule: RAW_DATA_WRITE_RULE_ID,
+        decision: payload.decision,
+        guard_class: payload.guard_class,
+        profile_id: payload.profile_id,
+        error_id: payload.error_record.error_id,
+        invocation_id: "REGISTRY-CALL-1"
+      });
+      expect(rows.at(-1)?.profile_id).toMatch(/^shud-raw-seatbelt-/);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
 });
 
 class RecordingTool extends BaseTool {
@@ -146,3 +220,57 @@ const testLogger: ToolLogger = {
   warn() {},
   error() {}
 };
+
+interface RawFixture {
+  root: string;
+  rawRoot: string;
+  workspaceRoot: string;
+  profileRoot: string;
+  tempRoot: string;
+  context: ToolContext;
+  cleanup(): Promise<void>;
+}
+
+async function createRawFixture(): Promise<RawFixture> {
+  const root = await mkdtemp(join(tmpdir(), "shud-registry-raw-"));
+  const rawRoot = join(root, "data", "raw");
+  const workspaceRoot = join(root, "workspace");
+  const profileRoot = join(workspaceRoot, "profiles");
+  const tempRoot = join(workspaceRoot, "tmp");
+  await mkdir(rawRoot, { recursive: true });
+  await mkdir(profileRoot, { recursive: true });
+  await mkdir(tempRoot, { recursive: true });
+  await writeFile(join(rawRoot, "input.csv"), "raw,input\n", "utf8");
+
+  return {
+    root,
+    rawRoot,
+    workspaceRoot,
+    profileRoot,
+    tempRoot,
+    context: {
+      sessionId: "TEST-SESSION",
+      currentToolUseId: "REGISTRY-CALL-1",
+      workDir: root,
+      logger: testLogger
+    },
+    cleanup: () => rm(root, { recursive: true, force: true })
+  };
+}
+
+async function readRawAuditRows(root: string): Promise<PolicyGateAuditRow[]> {
+  const auditFile = join(
+    root,
+    "workspace",
+    "tasks",
+    "TASK-M1-SPIKE",
+    "audit",
+    "policy-gate.ndjson"
+  );
+  const content = await readFile(auditFile, "utf8");
+  return content
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as PolicyGateAuditRow);
+}

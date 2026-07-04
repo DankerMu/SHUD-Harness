@@ -1,5 +1,5 @@
-import { BaseTool, ToolRegistry } from "@zero-os/core";
-import type { ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
+import { BaseTool, BashTool, ToolRegistry, loadFuseList } from "@zero-os/core";
+import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
 import {
   evaluatePolicyGate,
   type HarnessRole,
@@ -7,6 +7,10 @@ import {
   type PolicyGateDecision,
   type PolicyGateToolCall
 } from "./policy-gate-core";
+import {
+  RawDataSandboxedBashTool,
+  type RawDataSeatbeltProfileOptions
+} from "./raw-data-sandbox";
 
 export type {
   HarnessRole,
@@ -33,6 +37,21 @@ export interface PolicyGateWrapperOptions {
   role?: HarnessRole;
   evaluate: PolicyGateEvaluator;
 }
+
+export type ShudBashFuseSource =
+  | { fuseRules: readonly FuseRule[]; fuseListPath?: never }
+  | { fuseListPath: string; fuseRules?: never };
+
+export type ShudSandboxedBashToolOptions = RawDataSeatbeltProfileOptions &
+  ShudBashFuseSource & {
+    enableAdvisory?: boolean;
+    auditWorkspaceRoot?: string;
+    auditTaskId?: string;
+  };
+
+export type ShudRuntimeToolRegistryOptions = ShudSandboxedBashToolOptions & {
+  tools?: readonly BaseTool[];
+};
 
 export type PolicyGatedTool = BaseTool & {
   readonly innerTool: BaseTool;
@@ -81,6 +100,37 @@ export function createPolicyGatedToolRegistry(
     registry.register(tool);
   }
   assertPolicyGatedToolRegistry(registry);
+  return registry;
+}
+
+export function createShudSandboxedBashTool(
+  options: ShudSandboxedBashToolOptions
+): RawDataSandboxedBashTool {
+  const fuseRules = resolveShudBashFuseRules(options);
+  return new RawDataSandboxedBashTool({
+    protectedRawPaths: options.protectedRawPaths,
+    allowedWriteRoots: options.allowedWriteRoots,
+    tempRoot: options.tempRoot,
+    profileRoot: options.profileRoot,
+    enableAdvisory: options.enableAdvisory,
+    auditWorkspaceRoot: options.auditWorkspaceRoot,
+    auditTaskId: options.auditTaskId,
+    toolId: "bash",
+    innerTool: new BashTool([...fuseRules])
+  });
+}
+
+export function createShudRuntimeToolRegistry(
+  options: ShudRuntimeToolRegistryOptions
+): ToolRegistry {
+  const registry = new ToolRegistry();
+  for (const tool of options.tools ?? []) {
+    if (tool.name !== "bash") {
+      registry.register(tool);
+    }
+  }
+
+  registry.register(createShudSandboxedBashTool(options));
   return registry;
 }
 
@@ -176,6 +226,14 @@ function buildPolicyGateDeniedResult(
     output: JSON.stringify(payload),
     outputSummary: `Policy gate denied ${toolId}: ${decision.reason}`
   };
+}
+
+function resolveShudBashFuseRules(options: ShudBashFuseSource): readonly FuseRule[] {
+  if ("fuseRules" in options && options.fuseRules) {
+    return options.fuseRules;
+  }
+
+  return loadFuseList(options.fuseListPath);
 }
 
 function resolveRole(toolContext: ToolContext): HarnessRole | "unknown" {

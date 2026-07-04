@@ -1,19 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import type { ErrorRecord } from "@shud-harness/core";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  buildRawDataDeniedPayload,
+  buildRawDataSeatbeltProfile,
+  rawDataDenialPayloadToToolFailedEventInput,
+  type RawDataDenialPayload
+} from "@shud-harness/core";
 import { buildToolFailedWsEvent } from "./index";
 
 describe("backend ws tool.failed skeleton", () => {
-  test("builds only the existing tool.failed event with remediation payload", () => {
-    const error = sampleErrorRecord();
+  test("builds tool.failed from actual raw-data advisory denial payload", async () => {
+    const payload = await sampleRawDataDenialPayload("denied_by_advisory");
     const event = buildToolFailedWsEvent({
       seq: 7,
       eventId: "evt-7",
       ts: "2026-07-04T00:00:00.000Z",
-      toolId: "bash",
-      rule: "raw-data-write",
-      decision: "denied_by_sandbox",
-      profileId: "shud-raw-seatbelt-test",
-      error
+      ...rawDataDenialPayloadToToolFailedEventInput(payload)
     });
 
     expect(event).toEqual({
@@ -22,33 +26,71 @@ describe("backend ws tool.failed skeleton", () => {
       event: "tool.failed",
       ts: "2026-07-04T00:00:00.000Z",
       payload: {
-        tool_id: "bash",
-        rule: "raw-data-write",
-        decision: "denied_by_sandbox",
-        profile_id: "shud-raw-seatbelt-test",
-        error
+        tool_id: payload.tool_id,
+        rule: payload.rule,
+        decision: payload.decision,
+        guard_class: payload.guard_class,
+        profile_id: payload.profile_id,
+        invocation_id: payload.invocation_id,
+        error: payload.error_record
       }
     });
     expect(event.event).not.toBe("policy.denied");
+    expect(event.payload.error.error_id).toBe(payload.error_record.error_id);
     expect(event.payload.error.remediation?.next_action).toBe("adjust_scope");
+  });
+
+  test("builds tool.failed from actual raw-data sandbox denial payload", async () => {
+    const payload = await sampleRawDataDenialPayload("denied_by_sandbox");
+    const event = buildToolFailedWsEvent({
+      seq: 8,
+      ts: "2026-07-04T00:00:00.000Z",
+      ...rawDataDenialPayloadToToolFailedEventInput(payload)
+    });
+
+    expect(event.event_id).toBe("tool.failed:8");
+    expect(event.payload).toMatchObject({
+      tool_id: payload.tool_id,
+      rule: payload.rule,
+      decision: "denied_by_sandbox",
+      guard_class: "authority",
+      profile_id: payload.profile_id,
+      invocation_id: payload.invocation_id
+    });
+    expect(event.payload.error).toBe(payload.error_record);
+    expect(event.payload.error.error_id).toContain("denied_by_sandbox");
   });
 });
 
-function sampleErrorRecord(): ErrorRecord {
-  return {
-    error_id: "raw-data-write:denied_by_sandbox:shud-raw-seatbelt-test",
-    category: "sandbox_error",
-    severity: "error",
-    message: "Raw data write denied by OS sandbox.",
-    user_message: "data/raw is protected evidence input and cannot be mutated by bash.",
-    evidence_refs: ["openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"],
-    retryable: false,
-    recommended_next_actions: ["Write derived files outside data/raw."],
-    remediation: {
-      next_action: "adjust_scope",
-      hint: "Write derived files outside data/raw.",
-      ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-    },
-    created_at: "2026-07-04T00:00:00.000Z"
-  };
+async function sampleRawDataDenialPayload(
+  decision: RawDataDenialPayload["decision"]
+): Promise<RawDataDenialPayload> {
+  const root = await mkdtemp(join(tmpdir(), "shud-ws-raw-denial-"));
+  try {
+    const rawRoot = join(root, "data", "raw");
+    const workspaceRoot = join(root, "workspace");
+    const tempRoot = join(workspaceRoot, "tmp");
+    await mkdir(rawRoot, { recursive: true });
+    await mkdir(tempRoot, { recursive: true });
+    const profile = await buildRawDataSeatbeltProfile({
+      protectedRawPaths: [rawRoot],
+      allowedWriteRoots: [root],
+      tempRoot
+    });
+
+    return buildRawDataDeniedPayload({
+      toolId: "bash",
+      decision,
+      reason:
+        decision === "denied_by_sandbox"
+          ? "raw data writes are blocked by the OS sandbox profile"
+          : "obvious static raw-data write target",
+      profile,
+      profilePath: join(tempRoot, "profile.sb"),
+      invocationId: "TOOL-CALL-WS-1",
+      ts: "2026-07-04T00:00:00.000Z"
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
