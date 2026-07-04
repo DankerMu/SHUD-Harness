@@ -37,6 +37,7 @@ import {
 
 const hasSeatbelt = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
 const seatbeltTest = hasSeatbelt ? test : test.skip;
+const nodeSeatbeltTest = hasSeatbelt && commandExistsSync("node") ? test : test.skip;
 const pythonSeatbeltTest = hasSeatbelt && commandExistsSync("python3") ? test : test.skip;
 const rubySeatbeltTest = hasSeatbelt && commandExistsSync("ruby") ? test : test.skip;
 const rscriptSeatbeltTest = hasSeatbelt && commandExistsSync("Rscript") ? test : test.skip;
@@ -206,6 +207,43 @@ describe("raw data seatbelt sandbox", () => {
       await expectMissing(join(fixture.rawRoot, "node-fragment.txt"));
       const rows = await readAuditRows(fixture.root);
       expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("interpreter mutation helpers are target-aware in advisory classification", async () => {
+    const fixture = await createFixture();
+    try {
+      const deniedCommands = [
+        'python3 -c \'import os; os.unlink("data/raw/input.csv")\'',
+        'python3 -c \'import os; os.rename("data/raw/input.csv", "workspace/input.csv")\'',
+        'python3 -c \'import shutil; shutil.copyfile("workspace/source.csv", "data/raw/python-copy.csv")\'',
+        'node -e \'const fs = require("fs"); fs.unlinkSync("data/raw/input.csv")\'',
+        'node -e \'const fs = require("fs"); fs.renameSync("data/raw/input.csv", "workspace/input.csv")\'',
+        'node -e \'const fs = require("fs"); fs.copyFileSync("workspace/source.csv", "data/raw/node-copy.csv")\'',
+        'ruby -rfileutils -e \'File.delete("data/raw/input.csv")\'',
+        'ruby -rfileutils -e \'FileUtils.mv("data/raw/input.csv", "workspace/input.csv")\'',
+        'ruby -rfileutils -e \'FileUtils.cp("workspace/source.csv", "data/raw/ruby-copy.csv")\'',
+        'Rscript -e \'unlink("data/raw/input.csv")\'',
+        'Rscript -e \'file.rename("data/raw/input.csv", "workspace/input.csv")\'',
+        'Rscript -e \'file.copy("workspace/source.csv", "data/raw/r-copy.csv")\''
+      ];
+      const allowedCommands = [
+        'python3 -c \'import shutil; shutil.copyfile("data/raw/input.csv", "workspace/python-copy.csv")\'',
+        'node -e \'const fs = require("fs"); fs.copyFileSync("data/raw/input.csv", "workspace/node-copy.csv")\'',
+        'ruby -rfileutils -e \'FileUtils.cp("data/raw/input.csv", "workspace/ruby-copy.csv")\'',
+        'Rscript -e \'file.copy("data/raw/input.csv", "workspace/r-copy.csv")\''
+      ];
+
+      for (const command of deniedCommands) {
+        expect(evaluateRawDataWriteAdvisory(command, [fixture.rawRoot]).decision).toBe("deny");
+      }
+      for (const command of allowedCommands) {
+        expect(evaluateRawDataWriteAdvisory(command, [fixture.rawRoot])).toEqual({
+          decision: "allow"
+        });
+      }
     } finally {
       await fixture.cleanup();
     }
@@ -384,6 +422,81 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  pythonSeatbeltTest("Python delete, rename, and copy-to-raw mutations are denied when stderr is suppressed", async () => {
+    const fixture = await createFixture();
+    try {
+      await writeFile(join(fixture.workspaceRoot, "python-source.csv"), "derived\n", "utf8");
+      const cases = [
+        {
+          command: 'python3 -c \'import os; os.unlink("data/raw/input.csv")\' 2>/dev/null || true',
+          assert: async () => {
+            expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
+          }
+        },
+        {
+          command:
+            'python3 -c \'import os; os.rename("data/raw/input.csv", "workspace/python-moved.csv")\' 2>/dev/null || true',
+          assert: async () => {
+            expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
+            await expectMissing(join(fixture.workspaceRoot, "python-moved.csv"));
+          }
+        },
+        {
+          command:
+            'python3 -c \'import shutil; shutil.copyfile("workspace/python-source.csv", "data/raw/python-copy.csv")\' 2>/dev/null || true',
+          assert: async () => {
+            await expectMissing(join(fixture.rawRoot, "python-copy.csv"));
+          }
+        }
+      ];
+
+      for (const commandCase of cases) {
+        const result = await runSandboxed(fixture, commandCase.command, {
+          enableAdvisory: false
+        });
+        const payload = expectDeniedPayload(result, "denied_by_sandbox");
+        expect(payload.reason).toContain("hide sandbox denial");
+        await commandCase.assert();
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  nodeSeatbeltTest("Node unlink and copy-to-raw mutations are denied when stderr is suppressed", async () => {
+    const fixture = await createFixture();
+    try {
+      await writeFile(join(fixture.workspaceRoot, "node-source.csv"), "derived\n", "utf8");
+      const cases = [
+        {
+          command:
+            'node -e \'const fs = require("fs"); fs.unlinkSync("data/raw/input.csv")\' 2>/dev/null || true',
+          assert: async () => {
+            expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
+          }
+        },
+        {
+          command:
+            'node -e \'const fs = require("fs"); fs.copyFileSync("workspace/node-source.csv", "data/raw/node-copy.csv")\' 2>/dev/null || true',
+          assert: async () => {
+            await expectMissing(join(fixture.rawRoot, "node-copy.csv"));
+          }
+        }
+      ];
+
+      for (const commandCase of cases) {
+        const result = await runSandboxed(fixture, commandCase.command, {
+          enableAdvisory: false
+        });
+        const payload = expectDeniedPayload(result, "denied_by_sandbox");
+        expect(payload.reason).toContain("hide sandbox denial");
+        await commandCase.assert();
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("Node path.join raw write is denied when interpreter errors are suppressed", async () => {
     const fixture = await createFixture();
     try {
@@ -397,6 +510,47 @@ describe("raw data seatbelt sandbox", () => {
       await expectMissing(join(fixture.rawRoot, "node-path-join.txt"));
       const rows = await readAuditRows(fixture.root);
       expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  rubySeatbeltTest("Ruby delete, move, and copy-to-raw mutations are denied when stderr is suppressed", async () => {
+    const fixture = await createFixture();
+    try {
+      await writeFile(join(fixture.workspaceRoot, "ruby-source.csv"), "derived\n", "utf8");
+      const cases = [
+        {
+          command: "ruby -rfileutils -e 'File.delete(\"data/raw/input.csv\")' 2>/dev/null || true",
+          assert: async () => {
+            expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
+          }
+        },
+        {
+          command:
+            "ruby -rfileutils -e 'FileUtils.mv(\"data/raw/input.csv\", \"workspace/ruby-moved.csv\")' 2>/dev/null || true",
+          assert: async () => {
+            expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
+            await expectMissing(join(fixture.workspaceRoot, "ruby-moved.csv"));
+          }
+        },
+        {
+          command:
+            "ruby -rfileutils -e 'FileUtils.cp(\"workspace/ruby-source.csv\", \"data/raw/ruby-copy.csv\")' 2>/dev/null || true",
+          assert: async () => {
+            await expectMissing(join(fixture.rawRoot, "ruby-copy.csv"));
+          }
+        }
+      ];
+
+      for (const commandCase of cases) {
+        const result = await runSandboxed(fixture, commandCase.command, {
+          enableAdvisory: false
+        });
+        const payload = expectDeniedPayload(result, "denied_by_sandbox");
+        expect(payload.reason).toContain("hide sandbox denial");
+        await commandCase.assert();
+      }
     } finally {
       await fixture.cleanup();
     }
@@ -675,6 +829,64 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  seatbeltTest("raw read copy into non-writable workspace path stays a generic command failure", async () => {
+    const fixture = await createFixture();
+    const noWriteDir = join(fixture.workspaceRoot, "no-write");
+    try {
+      await mkdir(noWriteDir, { recursive: true });
+      await chmod(noWriteDir, 0o500);
+
+      const result = await runSandboxed(
+        fixture,
+        "cp data/raw/input.csv workspace/no-write/input.csv",
+        { enableAdvisory: false }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Permission denied");
+      expect(result.outputSummary).toContain("Command failed");
+      expect(() => JSON.parse(result.output)).toThrow();
+      await expectMissing(join(noWriteDir, "input.csv"));
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        decision: "failed"
+      });
+    } finally {
+      await chmod(noWriteDir, 0o700).catch(() => {});
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("raw-reading grep with unrelated Permission denied stays a generic command failure", async () => {
+    const fixture = await createFixture();
+    const noReadFile = join(fixture.workspaceRoot, "no-read.txt");
+    try {
+      await writeFile(noReadFile, "workspace\n", "utf8");
+      await chmod(noReadFile, 0o000);
+
+      const result = await runSandboxed(
+        fixture,
+        "grep raw data/raw/input.csv workspace/no-read.txt",
+        { enableAdvisory: false }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("raw,input");
+      expect(result.output).toContain("Permission denied");
+      expect(result.outputSummary).toContain("Command failed");
+      expect(() => JSON.parse(result.output)).toThrow();
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        decision: "failed"
+      });
+    } finally {
+      await chmod(noReadFile, 0o600).catch(() => {});
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("Node raw read copied to workspace is not advisory-denied", async () => {
     const fixture = await createFixture();
     try {
@@ -775,6 +987,68 @@ describe("raw data seatbelt sandbox", () => {
       const payload = expectDeniedPayload(result, "denied_by_sandbox");
       expect(payload.reason).toContain("hide sandbox denial");
       await expectMissing(join(fixture.rawRoot, "r-hidden.txt"));
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  rscriptSeatbeltTest("Rscript file mutation helpers are denied when stderr is suppressed", async () => {
+    const fixture = await createFixture();
+    try {
+      await writeFile(join(fixture.workspaceRoot, "r-source.csv"), "derived\n", "utf8");
+      const cases = [
+        {
+          command: 'Rscript -e \'unlink("data/raw/input.csv")\' 2>/dev/null || true',
+          assert: async () => {
+            expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
+          }
+        },
+        {
+          command:
+            'Rscript -e \'file.rename("data/raw/input.csv", "workspace/r-moved.csv")\' 2>/dev/null || true',
+          assert: async () => {
+            expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
+            await expectMissing(join(fixture.workspaceRoot, "r-moved.csv"));
+          }
+        },
+        {
+          command:
+            'Rscript -e \'file.copy("workspace/r-source.csv", "data/raw/r-copy.csv")\' 2>/dev/null || true',
+          assert: async () => {
+            await expectMissing(join(fixture.rawRoot, "r-copy.csv"));
+          }
+        }
+      ];
+
+      for (const commandCase of cases) {
+        const result = await runSandboxed(fixture, commandCase.command, {
+          enableAdvisory: false
+        });
+        const payload = expectDeniedPayload(result, "denied_by_sandbox");
+        expect(payload.reason).toContain("hide sandbox denial");
+        await commandCase.assert();
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  rscriptSeatbeltTest("Rscript raw source file.copy to workspace remains allowed", async () => {
+    const fixture = await createFixture();
+    try {
+      const command =
+        'env TMPDIR="$PWD/workspace/tmp" Rscript -e \'file.copy("data/raw/input.csv", "workspace/r-input-copy.csv")\'';
+
+      expect(evaluateRawDataWriteAdvisory(command, [fixture.rawRoot])).toEqual({
+        decision: "allow"
+      });
+
+      const result = await runSandboxed(fixture, command);
+
+      expect(result.success).toBe(true);
+      expect(await readFile(join(fixture.workspaceRoot, "r-input-copy.csv"), "utf8")).toBe(
+        "raw,input\n"
+      );
     } finally {
       await fixture.cleanup();
     }
@@ -905,6 +1179,7 @@ describe("raw data seatbelt sandbox", () => {
       );
 
       expect(result.success).toBe(false);
+      await expectMissing(leakPath);
       await Bun.sleep(400);
       await expectMissing(leakPath);
     } finally {
@@ -923,6 +1198,7 @@ describe("raw data seatbelt sandbox", () => {
       );
 
       expect(result.success).toBe(false);
+      await expectMissing(leakPath);
       await Bun.sleep(400);
       await expectMissing(leakPath);
     } finally {
@@ -958,6 +1234,7 @@ describe("raw data seatbelt sandbox", () => {
 
       expect(result.success).toBe(false);
       expect(handle.getTerminalMetadata()?.cause).toBe("abort");
+      await expectMissing(leakPath);
       await Bun.sleep(500);
       await expectMissing(leakPath);
     } finally {
@@ -993,6 +1270,7 @@ describe("raw data seatbelt sandbox", () => {
 
       expect(result.success).toBe(false);
       expect(handle.getTerminalMetadata()?.cause).toBe("abort");
+      await expectMissing(leakPath);
       await Bun.sleep(500);
       await expectMissing(leakPath);
     } finally {
@@ -1146,6 +1424,32 @@ describe("raw data seatbelt sandbox", () => {
       }
     });
   }
+
+  seatbeltTest("parent-relative workspace data/raw write is not treated as protected raw", async () => {
+    const fixture = await createFixture();
+    try {
+      const command =
+        "mkdir -p workspace/data/raw workspace/subdir; cd workspace/subdir && printf ok > ../data/raw/parent-out.txt";
+
+      expect(evaluateRawDataWriteAdvisory(command, [fixture.rawRoot])).toEqual({
+        decision: "allow"
+      });
+
+      const result = await runSandboxed(fixture, command);
+
+      expect(result.success).toBe(true);
+      expect(
+        await readFile(join(fixture.workspaceRoot, "data", "raw", "parent-out.txt"), "utf8")
+      ).toBe("ok");
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
 
   test("requires either an explicit inner tool or fuse rules", async () => {
     const fixture = await createFixture();
@@ -1630,6 +1934,24 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  seatbeltTest("allowed command moving audit ancestor fails closed instead of losing audit", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        "mv workspace/tasks workspace/tasks.moved; mkdir -p workspace/tasks/TASK-M1-SPIKE/audit; true",
+        { enableAdvisory: false }
+      );
+
+      expectAuditReservationFailure(result);
+      expect(await readdir(join(fixture.root, "workspace", "tasks.moved"))).toContain(
+        "TASK-M1-SPIKE"
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("pre-existing hardlink residual is demonstrated and bounded nlink scan detects it", async () => {
     const fixture = await createFixture();
     try {
@@ -1660,6 +1982,81 @@ describe("raw data seatbelt sandbox", () => {
       for (const risk of scan.riskyPaths) {
         expect(risk.path.startsWith(await realpath(fixture.rawRoot))).toBe(true);
       }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("audit root resolves project-root fixtures and canonical workspace roots", async () => {
+    const fixture = await createFixture();
+    try {
+      const canonicalWorkspaceRoot = await realpath(fixture.workspaceRoot);
+      const projectRootAuditPath = await appendPolicyGateAuditRow({
+        workspaceRoot: fixture.root,
+        protectedRawPaths: [fixture.rawRoot],
+        fileName: "project-root.ndjson",
+        row: minimalAuditRow()
+      });
+      const canonicalWorkspaceAuditPath = await appendPolicyGateAuditRow({
+        workspaceRoot: fixture.workspaceRoot,
+        protectedRawPaths: [fixture.rawRoot],
+        fileName: "canonical-workspace.ndjson",
+        row: minimalAuditRow()
+      });
+
+      expect(projectRootAuditPath).toBe(
+        join(
+          canonicalWorkspaceRoot,
+          "tasks",
+          "TASK-M1-SPIKE",
+          "audit",
+          "project-root.ndjson"
+        )
+      );
+      expect(canonicalWorkspaceAuditPath).toBe(
+        join(
+          canonicalWorkspaceRoot,
+          "tasks",
+          "TASK-M1-SPIKE",
+          "audit",
+          "canonical-workspace.ndjson"
+        )
+      );
+      expect(canonicalWorkspaceAuditPath).not.toContain("workspace/workspace");
+      expect(await readFile(projectRootAuditPath, "utf8")).toContain("denied_by_advisory");
+      expect(await readFile(canonicalWorkspaceAuditPath, "utf8")).toContain(
+        "denied_by_advisory"
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("sandboxed bash writes audit rows under canonical workspace root", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        "printf ok > workspace/canonical-audit-root.txt",
+        { auditWorkspaceRoot: fixture.workspaceRoot }
+      );
+
+      expect(result.success).toBe(true);
+      const rows = await readAuditRowsFromWorkspaceRoot(fixture.workspaceRoot);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
+      });
+      await expectMissing(
+        join(
+          fixture.workspaceRoot,
+          "workspace",
+          "tasks",
+          "TASK-M1-SPIKE",
+          "audit",
+          "policy-gate.ndjson"
+        )
+      );
     } finally {
       await fixture.cleanup();
     }
@@ -1939,9 +2336,12 @@ async function createAuditDir(root: string): Promise<string> {
 }
 
 async function readAuditRows(root: string): Promise<PolicyGateAuditRow[]> {
+  return readAuditRowsFromWorkspaceRoot(join(root, "workspace"));
+}
+
+async function readAuditRowsFromWorkspaceRoot(workspaceRoot: string): Promise<PolicyGateAuditRow[]> {
   const auditFile = join(
-    root,
-    "workspace",
+    workspaceRoot,
     "tasks",
     "TASK-M1-SPIKE",
     "audit",

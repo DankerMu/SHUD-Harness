@@ -41,7 +41,6 @@ const DEFAULT_SANDBOX_BASH = "/bin/bash";
 const SANDBOX_DENIAL_PATTERN = /Operation not permitted|Permission denied|sandbox/i;
 const INTERPRETER_WRITE_DENIAL_PATTERN = /can't open file/i;
 const PIPE_GRACE_MS = 1000;
-const FORCE_KILL_GRACE_MS = 750;
 const FORCE_KILL_SETTLE_MS = 75;
 const DEFAULT_ABORT_MESSAGE = "Command aborted by user from Session Detail.";
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -383,12 +382,15 @@ export class RawDataSandboxedBashTool extends BaseTool {
         return evidence.toolResult;
       }
 
-      await this.appendAudit(ctx, auditReservation, {
+      const appendFailure = await this.appendAudit(ctx, auditReservation, {
         event: result.success ? "tool.completed" : "tool.failed",
         decision: result.success ? "allowed" : "failed",
         profile,
         profilePath
       });
+      if (appendFailure) {
+        return appendFailure;
+      }
       return normalizeSandboxedBashResult(result, command, profilePath);
     } finally {
       await closePolicyGateAuditReservation(auditReservation);
@@ -430,7 +432,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
       profile: RawDataSeatbeltProfile;
       profilePath: string;
     }
-  ): Promise<void> {
+  ): Promise<ToolResult | undefined> {
     try {
       await appendReservedPolicyGateAuditRow(
         reservation,
@@ -444,12 +446,18 @@ export class RawDataSandboxedBashTool extends BaseTool {
           profile_path: input.profilePath
         }
       );
+      return undefined;
     } catch (error) {
-      ctx.logger.warn("policy_gate_audit_append_failed", {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.logger.error("policy_gate_audit_append_failed", {
         tool: this.name,
         rule: RAW_DATA_WRITE_RULE_ID,
         decision: input.decision,
-        error: error instanceof Error ? error.message : String(error)
+        error: message
+      });
+      return buildAuditReservationFailureResult({
+        toolId: this.name,
+        reason: `Policy gate lifecycle audit evidence could not be persisted: ${message}`
       });
     }
   }
@@ -815,7 +823,7 @@ function buildAuditReservationFailureResult(input: {
   return {
     success: false,
     output: JSON.stringify(payload),
-    outputSummary: "Policy gate audit unavailable before bash execution"
+    outputSummary: "Policy gate audit unavailable"
   };
 }
 
@@ -923,7 +931,6 @@ async function runSeatbeltSandboxedBash(
         });
   let terminationCause: RunningToolTerminationCause | undefined;
   let abortMessage: string | undefined;
-  let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
 
   const markFinished = (
     cause: RunningToolTerminationCause,
@@ -946,19 +953,12 @@ async function runSeatbeltSandboxedBash(
     return true;
   };
 
-  const scheduleForceKill = () => {
-    forceKillTimer = setTimeout(() => {
-      tryKillProcess(proc, "SIGKILL");
-    }, FORCE_KILL_GRACE_MS);
-  };
-
   runningHandle?.setAbortHandler((reason) => {
     abortMessage = reason?.trim() || DEFAULT_ABORT_MESSAGE;
     if (!latchTerminationCause("abort")) {
       return;
     }
-    tryKillProcess(proc, "SIGTERM");
-    scheduleForceKill();
+    tryKillProcess(proc, "SIGKILL");
   });
 
   const timeoutId = setTimeout(() => {
@@ -966,8 +966,7 @@ async function runSeatbeltSandboxedBash(
       return;
     }
     markFinished("timeout", false, `Command timed out: ${summaryCommand}`);
-    tryKillProcess(proc, "SIGTERM");
-    scheduleForceKill();
+    tryKillProcess(proc, "SIGKILL");
   }, timeout);
 
   const exitCode = await proc.exited;
@@ -975,9 +974,6 @@ async function runSeatbeltSandboxedBash(
     await stdinWrite;
   }
   clearTimeout(timeoutId);
-  if (forceKillTimer) {
-    clearTimeout(forceKillTimer);
-  }
   if (terminationCause === "timeout" || terminationCause === "abort") {
     await forceKillProcessGroup(proc);
   }
@@ -1704,6 +1700,9 @@ function hasInterpreterRawWriteTarget(
     hasCallWithRawTargetArgument(payload, /\b(?:File|IO)\.write/, [0], protectedRawPaths, options) ||
     hasOpenCallWithRawWriteTarget(payload, protectedRawPaths, options) ||
     hasPathWriteMethodRawTarget(payload, protectedRawPaths, options) ||
+    hasInterpreterDeleteRawTarget(payload, protectedRawPaths, options) ||
+    hasInterpreterMoveRawEndpoint(payload, protectedRawPaths, options) ||
+    hasInterpreterCopyRawDestination(payload, protectedRawPaths, options) ||
     hasRWriteHelperRawTarget(payload, protectedRawPaths, options)
   );
 }
@@ -1769,6 +1768,134 @@ function hasPathWriteMethodRawTarget(
     }
     match = methodPattern.exec(payload);
   }
+  return false;
+}
+
+function hasInterpreterDeleteRawTarget(
+  payload: string,
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  const helpers: readonly {
+    callee: RegExp;
+    positionalIndexes: readonly number[];
+    namedArguments?: readonly string[];
+  }[] = [
+    {
+      callee: /\b(?:os\.)?(?:unlink|remove)\b/,
+      positionalIndexes: [0],
+      namedArguments: ["path"]
+    },
+    {
+      callee: /\b(?:(?:fs\.)?(?:unlink|unlinkSync|rmSync)|fs\.rm)\b/,
+      positionalIndexes: [0],
+      namedArguments: ["path"]
+    },
+    {
+      callee: /\bFile\.(?:delete|unlink)\b/,
+      positionalIndexes: [0]
+    },
+    {
+      callee: /\bFileUtils\.(?:rm|rm_f|rm_rf)\b/,
+      positionalIndexes: [0]
+    },
+    {
+      callee: /\bunlink\b/,
+      positionalIndexes: [0],
+      namedArguments: ["x"]
+    }
+  ];
+
+  return hasAnyCallRawTarget(payload, helpers, protectedRawPaths, options);
+}
+
+function hasInterpreterMoveRawEndpoint(
+  payload: string,
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  const helpers: readonly {
+    callee: RegExp;
+    positionalIndexes: readonly number[];
+    namedArguments?: readonly string[];
+  }[] = [
+    {
+      callee: /\b(?:os\.|fs\.|File\.)?(?:rename|renameSync|replace|move|mv)\b/,
+      positionalIndexes: [0, 1],
+      namedArguments: ["src", "dst", "from", "to"]
+    },
+    {
+      callee: /\b(?:shutil\.move|FileUtils\.mv|file\.rename)\b/,
+      positionalIndexes: [0, 1],
+      namedArguments: ["from", "to"]
+    }
+  ];
+
+  return hasAnyCallRawTarget(payload, helpers, protectedRawPaths, options);
+}
+
+function hasInterpreterCopyRawDestination(
+  payload: string,
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  const helpers: readonly {
+    callee: RegExp;
+    positionalIndexes: readonly number[];
+    namedArguments?: readonly string[];
+  }[] = [
+    {
+      callee: /\b(?:copyFile|copyFileSync)\b/,
+      positionalIndexes: [1]
+    },
+    {
+      callee: /\b(?:shutil\.)?(?:copyfile|copy|copy2)\b/,
+      positionalIndexes: [1],
+      namedArguments: ["dst", "to"]
+    },
+    {
+      callee: /\bFileUtils\.(?:cp|copy|cp_r)\b/,
+      positionalIndexes: [1]
+    },
+    {
+      callee: /\bfile\.copy\b/,
+      positionalIndexes: [1],
+      namedArguments: ["to"]
+    }
+  ];
+
+  return hasAnyCallRawTarget(payload, helpers, protectedRawPaths, options);
+}
+
+function hasAnyCallRawTarget(
+  payload: string,
+  helpers: readonly {
+    callee: RegExp;
+    positionalIndexes: readonly number[];
+    namedArguments?: readonly string[];
+  }[],
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  for (const helper of helpers) {
+    for (const argsText of findCallArgumentLists(payload, helper.callee)) {
+      const args = splitTopLevelArguments(argsText);
+      if (
+        helper.positionalIndexes.some((index) =>
+          args[index] ? isRawDataTargetExpression(args[index], protectedRawPaths, options) : false
+        )
+      ) {
+        return true;
+      }
+      for (const name of helper.namedArguments ?? []) {
+        const namedValue = findNamedArgument(args, name);
+        if (namedValue && isRawDataTargetExpression(namedValue, protectedRawPaths, options)) {
+          return true;
+        }
+      }
+    }
+  }
+
   return false;
 }
 
@@ -2309,21 +2436,6 @@ function isRawDataPathToken(
   });
 }
 
-function containsRawDataPathSignal(
-  value: string,
-  protectedRawPaths: readonly string[],
-  options: { treatRelativeRawAsProtected?: boolean } = {}
-): boolean {
-  if (
-    options.treatRelativeRawAsProtected !== false &&
-    /(?:^|[\s"'`(=,:])(?:\.\.\/|\.\/)*data\/raw(?:\/|[\s"'`),:]|$)/.test(value)
-  ) {
-    return true;
-  }
-
-  return protectedRawPaths.some((protectedPath) => value.includes(protectedPath));
-}
-
 function hasDynamicRawDataWriteRisk(command: string): boolean {
   const dynamicState = collectDynamicRawPathState(command);
   if (
@@ -2659,14 +2771,7 @@ function isLikelySandboxDenialForCommand(
     );
   }
 
-  if (result.success) {
-    return hasPreciseRawWriteTargetSignal(command, protectedRawPaths);
-  }
-
-  return (
-    hasFailedResultRawWriteSignal(command, protectedRawPaths) ||
-    hasVisibleShellRawWriteDenialSignal(command, protectedRawPaths)
-  );
+  return hasPreciseRawWriteTargetSignal(command, protectedRawPaths);
 }
 
 function hasPreciseRawWriteTargetSignal(
@@ -2682,9 +2787,204 @@ function hasKnownRawDataWriteTarget(
 ): boolean {
   return (
     hasStaticRawDataWrite(command, protectedRawPaths) ||
+    hasParentRelativeRawDataWriteAlias(command, protectedRawPaths) ||
     hasDynamicRawDataWriteRisk(command) ||
     hasInPlaceRawMutationSignal(command, protectedRawPaths)
   );
+}
+
+function hasParentRelativeRawDataWriteAlias(
+  command: string,
+  protectedRawPaths: readonly string[]
+): boolean {
+  if (!/(?:^|[\s"'`(])(?:\.\.\/)+data\/raw(?:\/|[\s"'`),:]|$)/.test(command)) {
+    return false;
+  }
+
+  return inferredProtectedRawProjectRoots(protectedRawPaths).some((initialCwd) =>
+    hasParentRelativeRawDataWriteAliasFromCwd(command, protectedRawPaths, initialCwd)
+  );
+}
+
+function inferredProtectedRawProjectRoots(protectedRawPaths: readonly string[]): string[] {
+  return sortedUnique(
+    protectedRawPaths.map((protectedRawPath) => {
+      const normalizedRawPath = normalize(resolve(protectedRawPath)).replace(/\/+$/, "");
+      if (basename(normalizedRawPath) === "raw" && basename(dirname(normalizedRawPath)) === "data") {
+        return dirname(dirname(normalizedRawPath));
+      }
+      return dirname(normalizedRawPath);
+    })
+  );
+}
+
+function hasParentRelativeRawDataWriteAliasFromCwd(
+  command: string,
+  protectedRawPaths: readonly string[],
+  initialCwd: string
+): boolean {
+  let cwd = initialCwd;
+
+  for (const segment of splitStaticShellSegments(command)) {
+    const tokens = effectiveShellTokens(tokenizeStaticShellSegment(segment));
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    const commandName = normalizeCommandName(tokens[0]);
+    if (commandName === "cd" || commandName === "pushd") {
+      const nextCwd = tokens[1];
+      if (nextCwd && isSimpleStaticPathToken(nextCwd)) {
+        cwd = normalize(resolve(cwd, nextCwd));
+      }
+      continue;
+    }
+
+    if (
+      (commandName === "bash" || commandName === "sh") &&
+      hasChildShellParentRelativeRawDataWrite(tokens, protectedRawPaths, cwd)
+    ) {
+      return true;
+    }
+
+    if (hasParentRelativeRawDataWriteRedirection(tokens, protectedRawPaths, cwd)) {
+      return true;
+    }
+
+    const operands = extractCommandOperands(tokens.slice(1));
+    if (operands.length === 0) {
+      continue;
+    }
+
+    if (commandName === "cp") {
+      const destination = operands.at(-1);
+      if (
+        destination &&
+        isParentRelativeRawDataPathResolvedToProtected(destination, cwd, protectedRawPaths)
+      ) {
+        return true;
+      }
+      continue;
+    }
+
+    if (commandName === "dd") {
+      if (
+        operands.some((operand) => {
+          const outputMatch = operand.match(/^of=(.+)$/);
+          return (
+            outputMatch !== null &&
+            isParentRelativeRawDataPathResolvedToProtected(
+              outputMatch[1],
+              cwd,
+              protectedRawPaths
+            )
+          );
+        })
+      ) {
+        return true;
+      }
+      continue;
+    }
+
+    if (commandName === "install" || commandName === "ln") {
+      const destination = operands.at(-1);
+      if (
+        destination &&
+        isParentRelativeRawDataPathResolvedToProtected(destination, cwd, protectedRawPaths)
+      ) {
+        return true;
+      }
+      continue;
+    }
+
+    if (
+      commandName === "mv" ||
+      commandName === "tee" ||
+      commandName === "touch" ||
+      commandName === "mkdir" ||
+      commandName === "truncate" ||
+      commandName === "chmod" ||
+      commandName === "chown" ||
+      commandName === "chgrp" ||
+      commandName === "xattr" ||
+      commandName === "rm" ||
+      commandName === "unlink"
+    ) {
+      if (
+        operands.some((operand) =>
+          isParentRelativeRawDataPathResolvedToProtected(operand, cwd, protectedRawPaths)
+        )
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function hasChildShellParentRelativeRawDataWrite(
+  tokens: readonly string[],
+  protectedRawPaths: readonly string[],
+  cwd: string
+): boolean {
+  for (let index = 1; index < tokens.length - 1; index += 1) {
+    if (tokens[index] === "-c") {
+      return hasParentRelativeRawDataWriteAliasFromCwd(
+        tokens[index + 1],
+        protectedRawPaths,
+        cwd
+      );
+    }
+  }
+
+  return false;
+}
+
+function hasParentRelativeRawDataWriteRedirection(
+  tokens: readonly string[],
+  protectedRawPaths: readonly string[],
+  cwd: string
+): boolean {
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    if (
+      isWriteRedirectionToken(tokens[index]) &&
+      isParentRelativeRawDataPathResolvedToProtected(tokens[index + 1], cwd, protectedRawPaths)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isParentRelativeRawDataPathResolvedToProtected(
+  token: string,
+  cwd: string,
+  protectedRawPaths: readonly string[]
+): boolean {
+  if (!isParentRelativeRawDataPathToken(token)) {
+    return false;
+  }
+
+  const resolvedPath = normalize(resolve(cwd, token)).replace(/\/+$/, "");
+  return protectedRawPaths.some((protectedRawPath) => {
+    const root = normalize(resolve(protectedRawPath)).replace(/\/+$/, "");
+    return resolvedPath === root || resolvedPath.startsWith(`${root}/`);
+  });
+}
+
+function isParentRelativeRawDataPathToken(token: string): boolean {
+  if (/[`$*?[\]]/.test(token)) {
+    return false;
+  }
+
+  const normalizedToken = normalize(token.replace(/\/+$/, ""));
+  return /^(?:\.\.\/)+data\/raw(?:\/|$)/.test(normalizedToken);
+}
+
+function isSimpleStaticPathToken(token: string): boolean {
+  return !/[`$*?[\]]/.test(token);
 }
 
 function hasFailedResultRawWriteSignal(
@@ -2692,18 +2992,6 @@ function hasFailedResultRawWriteSignal(
   protectedRawPaths: readonly string[]
 ): boolean {
   return hasPreciseRawWriteTargetSignal(command, protectedRawPaths);
-}
-
-function hasVisibleShellRawWriteDenialSignal(
-  command: string,
-  protectedRawPaths: readonly string[]
-): boolean {
-  if (!containsRawDataPathSignal(command, protectedRawPaths)) {
-    return false;
-  }
-  return /(?:^|[\s;&|])(?:awk|cp|mv|tee|touch|mkdir|truncate|chmod|chown|chgrp|xattr|rm|unlink|dd|install|ln|sed|perl|sh|bash)\b|>/.test(
-    command
-  );
 }
 
 function hasInPlaceRawMutationSignal(
@@ -2840,16 +3128,16 @@ async function ensurePolicyGateAuditReservation(
   assertProtectedRawPathsProvided(protectedRawPaths);
   assertSafePathSegment(taskId, "audit task id");
   assertSafePathSegment(fileName, "audit file name");
-  const workspaceRealPath = await ensureDirectoryOutsideProtectedRaw(
+  const protectedRawRealPaths = await canonicalizePathSet(protectedRawPaths);
+  const workspaceRealPath = await resolvePolicyGateAuditWorkspaceRoot(
     workspaceRoot,
-    protectedRawPaths,
-    "policy gate audit workspace root"
+    protectedRawRealPaths
   );
   let current = workspaceRealPath;
 
-  for (const segment of ["workspace", "tasks", taskId, "audit"]) {
+  for (const segment of ["tasks", taskId, "audit"]) {
     current = join(current, segment);
-    await ensureSafeAuditDirComponent(current, workspaceRealPath, protectedRawPaths);
+    await ensureSafeAuditDirComponent(current, workspaceRealPath, protectedRawRealPaths);
   }
 
   const auditPath = join(current, fileName);
@@ -2864,6 +3152,58 @@ async function ensurePolicyGateAuditReservation(
     dev: metadata.dev,
     ino: metadata.ino
   };
+}
+
+async function resolvePolicyGateAuditWorkspaceRoot(
+  workspaceRoot: string,
+  protectedRawPaths: readonly string[]
+): Promise<string> {
+  const rootRealPath = await ensureDirectoryOutsideProtectedRaw(
+    workspaceRoot,
+    protectedRawPaths,
+    "policy gate audit workspace root"
+  );
+
+  if (await hasProjectRootWorkspaceLayout(rootRealPath, protectedRawPaths)) {
+    return ensureDirectoryOutsideProtectedRaw(
+      join(rootRealPath, "workspace"),
+      protectedRawPaths,
+      "policy gate audit workspace root"
+    );
+  }
+
+  return rootRealPath;
+}
+
+async function hasProjectRootWorkspaceLayout(
+  rootRealPath: string,
+  protectedRawPaths: readonly string[]
+): Promise<boolean> {
+  const workspaceChild = join(rootRealPath, "workspace");
+  if (!(await isExistingDirectory(workspaceChild))) {
+    return false;
+  }
+
+  const projectRawRoot = normalize(resolve(rootRealPath, "data", "raw")).replace(/\/+$/, "");
+  return protectedRawPaths.some((protectedRawPath) => {
+    const normalizedProtectedPath = normalize(resolve(protectedRawPath)).replace(/\/+$/, "");
+    return (
+      normalizedProtectedPath === projectRawRoot ||
+      normalizedProtectedPath.startsWith(`${projectRawRoot}/`)
+    );
+  });
+}
+
+async function isExistingDirectory(path: string): Promise<boolean> {
+  try {
+    const metadata = await lstat(path);
+    return metadata.isDirectory() && !metadata.isSymbolicLink();
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function assertProtectedRawPathsProvided(
