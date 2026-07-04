@@ -22,11 +22,15 @@
 
 ## 3. 策略门 spike（policy-gate-spike）——ADR-0001 触发器 1
 
+> 判定（2026-07-04，#21）：spike 条 2（#19 / PR #46）最终 review+verifier gate 不绿，已触发 ADR-0001 revisit。
+> Zero 保持 Trial；#19 当前实现保留为 spike 证据，不 merge。策略门依赖的 3.x/5.x 后续任务暂停到 enforcement boundary 重审完成。
+> 逐条证据见 `policy-gate-spike-verdict.md`。
+
 - [ ] 3.1 spike 条 1：工具注册层横切包装（`ToolBase.beforeExecute` 包装/注册期 wrap；未包装工具装配失败负例；Zero 内核零改动）+ zero 引用技术形态定形（嵌套 Bun workspace 解析实测：workspace 纳入 vs `file:` 依赖 vs 运行时入口加载，实测结论回写 design.md Decision 3；验收含「Decision 3 已回写」）——依赖: 2.1
 - [ ] 3.2 spike 条 4：策略门纯函数核心（ToolCall → allow/deny + reason + remediation）+ 独立单测（正负例 + remediation 载荷断言）——依赖: 4.1（ErrorRecord.remediation 枚举）
 - [ ] 3.3 spike 条 2：`data/raw/**` 写禁区端到端穿透（bash 执行前拒 + remediation 三字段 + WS 复用注册表事件 `tool.failed` 推送（envelope 含 seq/event_id）+ audit 最小行落盘（event/tool_id/rule/decision/ts，路径与 fixture 任务见 policy-gate-spike spec））——依赖: 4.1
 - [ ] 3.4 spike 条 3：spawn 剖面超集拒绝负例（比对基准 = 5.1 映射表；断言 `remediation.next_action=adjust_scope`）——依赖: 5.1
-- [ ] 3.5 spike 条 5 核验 + 判定记录（`git -C zero diff --quiet` && HEAD=13e25c1；五条全绿 → Trial 转正记录；任一条 2 人周不绿 → ADR-0001 revisit 备忘并冻结 3.x/5.x 后续）——依赖: 节内 3.1–3.4 + 跨节 4.1、5.1（经 3.2/3.4 传递）
+- [x] 3.5 spike 条 5 核验 + 判定记录（`git -C zero diff --quiet` && HEAD=13e25c1；五条全绿 → Trial 转正记录；任一条 2 人周不绿 → ADR-0001 revisit 备忘并冻结 3.x/5.x 后续）——依赖: 节内 3.1–3.4 + 跨节 4.1、5.1（经 3.2/3.4 传递）
 
 ## 4. core schema（core-schemas）
 

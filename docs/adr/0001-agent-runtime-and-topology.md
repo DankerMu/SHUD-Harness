@@ -4,7 +4,8 @@ status: accepted
 
 # ADR-0001: Agent 运行时基座与拓扑（Zero + 单 Coordinator 星型）
 
-**状态**: accepted（2026-07-02） · **决策人**: PI + 工程师 · **方法**: future-aware-architecture 分析
+**状态**: accepted（2026-07-02） · **执行状态**: Trial，M1 spike 触发 revisit（2026-07-04）
+· **决策人**: PI + 工程师 · **方法**: future-aware-architecture 分析
 **事实基线**: zero@13e25c1（development 分支）· SHUD-Harness v0.8.3（97 篇 spec，零代码）
 
 ## 背景
@@ -69,6 +70,34 @@ status: accepted
 > （第三方 OpenAI 兼容端点）后，触发器 1/2 命中时"Claude Agent SDK (TS) 迁移"作为首选备胎的前提
 > （Anthropic 生态运行时）不再成立。备选评估顺序改为：① **自建薄工具注册层**（provider 无关，
 > 保留 Zero 其余复用面）；② Claude Agent SDK 迁移（仅当运行时模型回到 Anthropic 生态时才是候选）。
+
+## Revisit 记录
+
+### 2026-07-04: 触发器 1 命中（M1 policy-gate spike）
+
+判定：Zero 基座不转正，保持 Trial；M1 后续策略门任务暂停到 enforcement boundary 重审完成。
+
+证据：
+- spike 条 1（工具注册层横切包装）已由 issue [#17](https://github.com/DankerMu/SHUD-Harness/issues/17)
+  / PR [#43](https://github.com/DankerMu/SHUD-Harness/pull/43) 验证通过。
+- spike 条 4（策略门纯函数核心）已由 issue [#18](https://github.com/DankerMu/SHUD-Harness/issues/18)
+  / PR [#45](https://github.com/DankerMu/SHUD-Harness/pull/45) 验证通过。
+- spike 条 2（`data/raw/**` 写禁区）在 issue [#19](https://github.com/DankerMu/SHUD-Harness/issues/19)
+  / PR [#46](https://github.com/DankerMu/SHUD-Harness/pull/46) 中产生实现证据，但最终 comprehensive review
+  + independent verifier gate 确认仍有 merge-blocking 问题。失败类别覆盖 executable payload writes、
+  pipeline/stdin dataflow、dynamic write target、shell dynamic state、pre-existing filesystem alias，以及 raw-read
+  compatibility false positives。
+- spike 条 3（spawn 剖面超集拒绝，issue [#20](https://github.com/DankerMu/SHUD-Harness/issues/20)）未作为失败源执行；
+  因条 2 已触发不绿分支而停止。
+- spike 条 5 的确定性检查仍成立：`zero/` 无源码 diff，HEAD 保持 `13e25c1`；但五条全绿条件不满足。
+
+结论：当前纯 pre-exec static scanner 不能同时满足"任意 bash 写入 `data/raw/**` 前置拒绝"、
+"合法 raw 读取兼容"和"不实现 full shell parser"三项约束。#19 的当前 PR 仅作为 spike 证据保留，
+不得按 authority implementation 合并。
+
+下一步按 2026-07-02 修订注顺序评估：① 自建薄工具注册/执行边界，保留 Zero 可复用面，但把 raw-data
+写保护放到可观测真实目标路径的执行层或 OS sandbox/read-only mount；② Claude Agent SDK 迁移仅在运行时模型
+回到 Anthropic 生态时重新成为候选。
 
 ## 参照
 
