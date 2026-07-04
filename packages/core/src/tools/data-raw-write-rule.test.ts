@@ -27,6 +27,9 @@ describe("data/raw write deny policy", () => {
   const largeExecutableCodeWriteCommand = `Rscript -e '${"read.csv(\"data/raw/input.csv\");".repeat(
     3000
   )}writeLines("x", "data/raw/out.csv")'`;
+  const largeNonExecutableHeredocCommand = `cat > workspace/tasks/TASK-001/script.sh <<'SH'\n${"echo filler\n".repeat(
+    30000
+  )}rm data/raw/input.csv\nSH`;
 
   const deniedCommands = [
     {
@@ -54,6 +57,10 @@ describe("data/raw write deny policy", () => {
     {
       name: "cd updates relative remove target",
       command: "cd data && rm raw/input.csv"
+    },
+    {
+      name: "brace group cd side effect updates following remove target",
+      command: "{ cd data; }; rm raw/input.csv"
     },
     {
       name: "cd updates relative redirect target",
@@ -144,6 +151,10 @@ describe("data/raw write deny policy", () => {
       command: 'RAW=data/raw; rm "${RAW}/input.csv"'
     },
     {
+      name: "braced variable slice-expanded remove",
+      command: 'RAW=data/raw-extra; rm "${RAW:0:8}/input.csv"'
+    },
+    {
       name: "partial variable-expanded remove",
       command: "RAW=raw; rm data/$RAW/file"
     },
@@ -182,6 +193,14 @@ describe("data/raw write deny policy", () => {
     {
       name: "glob bracket path expansion remove",
       command: "rm data/ra[w]/input.csv"
+    },
+    {
+      name: "glob negated bracket path expansion remove",
+      command: "rm data/ra[!x]/input.csv"
+    },
+    {
+      name: "glob caret-negated bracket path expansion remove",
+      command: "rm data/ra[^x]/input.csv"
     },
     {
       name: "glob question path expansion remove",
@@ -254,6 +273,10 @@ describe("data/raw write deny policy", () => {
     {
       name: "rsync destination under raw",
       command: "rsync /tmp/input.csv data/raw/input.csv"
+    },
+    {
+      name: "rsync remove-source-files mutates raw source",
+      command: "rsync --remove-source-files data/raw/input.csv /tmp/out.csv"
     },
     {
       name: "tar extraction into raw",
@@ -438,6 +461,22 @@ describe("data/raw write deny policy", () => {
       command: "dd if=/dev/zero of=data/raw/input.csv"
     },
     {
+      name: "tee raw target",
+      command: "tee data/raw/input.csv"
+    },
+    {
+      name: "mv raw destination",
+      command: "mv /tmp/input.csv data/raw/input.csv"
+    },
+    {
+      name: "install raw destination",
+      command: "install /tmp/input.csv data/raw/input.csv"
+    },
+    {
+      name: "ln raw destination",
+      command: "ln /tmp/input.csv data/raw/input.csv"
+    },
+    {
       name: "truncate target",
       command: "truncate -s 0 data/raw/input.csv"
     },
@@ -452,6 +491,10 @@ describe("data/raw write deny policy", () => {
     {
       name: "bash shell wrapper",
       command: "bash -c 'printf x > data/raw/input.csv'"
+    },
+    {
+      name: "bash shell wrapper positional raw remove",
+      command: "bash -c 'rm \"$1\"' -- data/raw/input.csv"
     },
     {
       name: "sh shell wrapper",
@@ -492,6 +535,10 @@ describe("data/raw write deny policy", () => {
     {
       name: "large executable code raw write is bounded",
       command: largeExecutableCodeWriteCommand
+    },
+    {
+      name: "large non-executable heredoc is bounded",
+      command: largeNonExecutableHeredocCommand
     }
   ] as const;
 
@@ -589,6 +636,14 @@ describe("data/raw write deny policy", () => {
       command: "cd data/raw && cat input.csv"
     },
     {
+      name: "subshell cd does not leak into following remove target",
+      command: "(cd data); rm raw/input.csv"
+    },
+    {
+      name: "brace group cd does not affect preceding remove target",
+      command: "rm raw/input.csv; { cd data; }"
+    },
+    {
       name: "task scratch workDir relative data raw write",
       command: "touch data/raw/out.csv",
       workDir: "/tmp/shud-harness-test/workspace/tasks/TASK-001/scratch"
@@ -600,6 +655,14 @@ describe("data/raw write deny policy", () => {
     {
       name: "rsync raw source to governed destination",
       command: "rsync data/raw/input.csv workspace/tasks/TASK-001/input.csv"
+    },
+    {
+      name: "bash shell wrapper positional raw read",
+      command: "bash -c 'cat \"$1\"' -- data/raw/input.csv"
+    },
+    {
+      name: "workspace script heredoc with raw mutation text",
+      command: "cat > workspace/tasks/TASK-001/script.sh <<'SH'\nrm data/raw/input.csv\nSH"
     },
     {
       name: "R read.csv raw read",
@@ -624,6 +687,32 @@ describe("data/raw write deny policy", () => {
       expect(bashTool.calls).toBe(1);
     });
   }
+
+  test("denies mutation through a workspace symlink alias that resolves to data/raw", async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-raw-alias-"));
+    tempDirs.push(workspaceRoot);
+
+    const rawDir = path.join(workspaceRoot, "data", "raw");
+    const scratchDir = path.join(
+      workspaceRoot,
+      "workspace",
+      "tasks",
+      "TASK-001",
+      "scratch"
+    );
+    await mkdir(rawDir, { recursive: true });
+    await mkdir(scratchDir, { recursive: true });
+    await symlink(rawDir, path.join(scratchDir, "raw-link"), "dir");
+
+    const { result, bashTool } = await runWrappedBashCommand(
+      "touch workspace/tasks/TASK-001/scratch/raw-link/input.csv",
+      { workDir: workspaceRoot }
+    );
+
+    expect(result?.success).toBe(false);
+    expect(bashTool.calls).toBe(0);
+    expect(parseDeniedPayload(result).rule_id).toBe(DATA_RAW_WRITE_DENY_RULE_ID);
+  });
 
   test("audit helper appends a minimal row under the no-TaskCard fixture path", async () => {
     const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-"));
@@ -719,6 +808,25 @@ describe("data/raw write deny policy", () => {
     ).rejects.toThrow("Invalid policy gate audit directory: resolves outside workspace.");
 
     expect(await pathExists(path.join(outsideDir, "policy-gate-audit.ndjson"))).toBe(false);
+  });
+
+  test("audit helper rejects an audit directory symlink that resolves inside the workspace", async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-"));
+    tempDirs.push(workspaceRoot);
+
+    const taskDir = path.join(workspaceRoot, "workspace", "tasks", "TASK-M1-SPIKE");
+    const otherAuditDir = path.join(workspaceRoot, "workspace", "tasks", "TASK-OTHER", "audit");
+    await mkdir(taskDir, { recursive: true });
+    await mkdir(otherAuditDir, { recursive: true });
+    await symlink(otherAuditDir, path.join(taskDir, "audit"), "dir");
+
+    await expect(
+      appendPolicyGateAuditRow(sampleAuditRow(), {
+        workspaceRoot
+      })
+    ).rejects.toThrow("Invalid policy gate audit directory: must not be a symlink.");
+
+    expect(await pathExists(path.join(otherAuditDir, "policy-gate-audit.ndjson"))).toBe(false);
   });
 
   test("audit helper rejects an audit file symlink that resolves outside the audit directory", async () => {

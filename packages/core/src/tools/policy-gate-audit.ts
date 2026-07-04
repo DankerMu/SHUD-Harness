@@ -154,6 +154,9 @@ async function assertAuditDirectoryCanBeCreatedInsideWorkspace(
     if (!isPathInside(realCurrentPath, realWorkspaceRoot)) {
       throw new Error("Invalid policy gate audit directory: resolves outside workspace.");
     }
+    if (existingPath.isSymbolicLink()) {
+      throw new Error("Invalid policy gate audit directory: must not be a symlink.");
+    }
   }
 }
 
@@ -166,6 +169,10 @@ async function assertAuditLocationInsideWorkspace(
   const realAuditDir = await realpath(auditDir);
   if (!isPathInside(realAuditDir, realWorkspaceRoot)) {
     throw new Error("Invalid policy gate audit directory: resolves outside workspace.");
+  }
+  const auditDirPath = await lstat(auditDir);
+  if (auditDirPath.isSymbolicLink()) {
+    throw new Error("Invalid policy gate audit directory: must not be a symlink.");
   }
 
   const existingAuditPath = await lstatIfExists(auditPath);
@@ -231,6 +238,10 @@ async function assertOpenedAuditFileStillInsideWorkspace(
   const realAuditDir = await realpath(auditDir);
   if (!isPathInside(realAuditDir, realWorkspaceRoot)) {
     throw new Error("Invalid policy gate audit directory: resolves outside workspace.");
+  }
+  const auditDirPath = await lstat(auditDir);
+  if (auditDirPath.isSymbolicLink()) {
+    throw new Error("Invalid policy gate audit directory: must not be a symlink.");
   }
 
   const realAuditPath = await realpath(auditPath);

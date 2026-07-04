@@ -1,3 +1,4 @@
+import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import type { PolicyGateToolCall, PolicyRule } from "./policy-gate-core";
 
@@ -42,6 +43,7 @@ const SHELL_COMMANDS = new Set(["bash", "sh", "zsh"]);
 const FIND_MUTATION_ACTIONS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir"]);
 const LOCAL_URL_SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
 const EXECUTABLE_CODE_STDIN_ARG = "-";
+const MAX_SHELL_COMMAND_SCAN_CHARS = 256 * 1024;
 const MAX_EXECUTABLE_CODE_SCAN_CHARS = 64 * 1024;
 const MAX_EXECUTABLE_RAW_TARGETS = 64;
 
@@ -79,8 +81,14 @@ type ShellScanState = {
 };
 
 type ShellScanBudget = {
+  remainingShellCommandChars: number;
   remainingExecutableCodeChars: number;
   remainingExecutableRawTargets: number;
+};
+
+type ShellCommandInvocation = {
+  command: string;
+  positionalArgs: readonly ShellToken[];
 };
 
 type SegmentCommandScanState = ShellScanState & {
@@ -152,22 +160,28 @@ function findProtectedDataRawWriteTargetWithState(
   command: string,
   state: ShellScanState
 ): string | undefined {
+  if (!reserveShellCommandScanBudget(command, state.scanBudget)) {
+    return "data/raw";
+  }
+
   const heredocTarget = findExecutableHeredocRawWriteTarget(command, state);
   if (heredocTarget) {
     return heredocTarget;
   }
 
-  const substitutionTarget = findCommandSubstitutionWriteTarget(command, state);
+  const commandWithoutHeredocBodies = stripHeredocBodies(command);
+
+  const substitutionTarget = findCommandSubstitutionWriteTarget(commandWithoutHeredocBodies, state);
   if (substitutionTarget) {
     return substitutionTarget;
   }
 
-  const groupedTarget = findGroupedCommandWriteTarget(command, state);
+  const groupedTarget = findGroupedCommandWriteTarget(commandWithoutHeredocBodies, state);
   if (groupedTarget) {
     return groupedTarget;
   }
 
-  const tokens = tokenizeShellCommand(command);
+  const tokens = tokenizeShellCommand(commandWithoutHeredocBodies);
   const pathContext = (): PathEvaluationContext => pathContextFromState(state);
 
   for (const segment of splitCommandSegments(tokens)) {
@@ -254,14 +268,24 @@ function findGroupedCommandWriteTarget(
       continue;
     }
 
-    const target = findProtectedDataRawWriteTargetWithState(group.body, {
+    const groupState = {
       variables: new Map(state.variables),
       cwd: state.cwd,
       cwdKnown: state.cwdKnown,
       scanBudget: state.scanBudget
-    });
+    };
+    const target = findProtectedDataRawWriteTargetWithState(group.body, groupState);
     if (target) {
       return target;
+    }
+    if (group.kind === "brace") {
+      const suffixTarget = findProtectedDataRawWriteTargetWithState(
+        command.slice(group.endIndex + 1),
+        groupState
+      );
+      if (suffixTarget) {
+        return suffixTarget;
+      }
     }
     index = group.endIndex + 1;
   }
@@ -272,10 +296,11 @@ function findGroupedCommandWriteTarget(
 function readSimpleCommandGroup(
   command: string,
   startIndex: number
-): { body: string; endIndex: number } | undefined {
+): { body: string; endIndex: number; kind: "brace" | "subshell" } | undefined {
   const char = command[startIndex];
   if (char === "(" && isShellGroupBoundary(command, startIndex - 1)) {
-    return readBalancedCommandGroup(command, startIndex, "(", ")");
+    const group = readBalancedCommandGroup(command, startIndex, "(", ")");
+    return group ? { ...group, kind: "subshell" } : undefined;
   }
   if (
     char === "{" &&
@@ -283,7 +308,9 @@ function readSimpleCommandGroup(
     isShellGroupBoundary(command, startIndex + 1)
   ) {
     const group = readBalancedCommandGroup(command, startIndex, "{", "}");
-    return group ? { body: group.body.replace(/;?\s*$/, ""), endIndex: group.endIndex } : undefined;
+    return group
+      ? { body: group.body.replace(/;?\s*$/, ""), endIndex: group.endIndex, kind: "brace" }
+      : undefined;
   }
 
   return undefined;
@@ -465,6 +492,12 @@ function findMutationCommandTarget(
       return target;
     }
   }
+  if (command === "rsync") {
+    const target = findRsyncSourceMutationTarget(args, context);
+    if (target) {
+      return target;
+    }
+  }
   if (ANY_ENDPOINT_RAW_PATH_COMMANDS.has(command)) {
     const target = findRawPathArgument(args, context);
     if (target) {
@@ -528,17 +561,20 @@ function findMutationCommandTarget(
     }
   }
   if (SHELL_COMMANDS.has(command)) {
-    const shellCommand = findShellCommandArgument(args);
-    const target = shellCommand
-      ? findProtectedDataRawWriteTargetWithState(shellCommand, {
-          variables: new Map(commandState.variables),
+    const shellInvocation = findShellCommandInvocation(args);
+    if (shellInvocation) {
+      const shellVariables = new Map(commandState.variables);
+      bindShellPositionalParameters(shellVariables, shellInvocation.positionalArgs);
+      const target = findProtectedDataRawWriteTargetWithState(shellInvocation.command, {
+          variables: shellVariables,
           cwd: commandState.cwd,
           cwdKnown: commandState.cwdKnown,
           scanBudget: commandState.scanBudget
-        })
-      : undefined;
-    if (target) {
-      return target;
+        });
+      if (target) {
+        return target;
+      }
+      return undefined;
     }
   }
 
@@ -798,6 +834,10 @@ function findProtectedRawPathCandidate(
   token: ShellToken,
   context: PathEvaluationContext
 ): PathCandidate | undefined {
+  if (token.value === "{" || token.value === "}") {
+    return undefined;
+  }
+
   const wholeTokenCandidate = pathCandidateFromToken(token);
   if (isProtectedDataRawCandidate(wholeTokenCandidate, context)) {
     return wholeTokenCandidate;
@@ -885,6 +925,10 @@ function isCopyOutOfRawCommand(
   args: readonly ShellToken[],
   context: PathEvaluationContext
 ): boolean {
+  if (args.some(isRsyncSourceMutationOption)) {
+    return false;
+  }
+
   const targetDirectory = findTargetDirectoryArgument(args);
   if (targetDirectory !== undefined) {
     return (
@@ -900,6 +944,21 @@ function isCopyOutOfRawCommand(
   }
 
   return positionalArgs.slice(0, -1).some((arg) => isProtectedDataRawCandidate(arg, context));
+}
+
+function findRsyncSourceMutationTarget(
+  args: readonly ShellToken[],
+  context: PathEvaluationContext
+): string | undefined {
+  if (!args.some(isRsyncSourceMutationOption)) {
+    return undefined;
+  }
+
+  return findRawPathArgument(args, context);
+}
+
+function isRsyncSourceMutationOption(arg: ShellToken): boolean {
+  return arg.value === "--remove-source-files";
 }
 
 function lastNonOptionArgument(
@@ -1382,21 +1441,45 @@ function findExecutableCodeStringAt(
   return undefined;
 }
 
-function findShellCommandArgument(args: readonly ShellToken[]): string | undefined {
+function findShellCommandInvocation(args: readonly ShellToken[]): ShellCommandInvocation | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index].value;
     if (arg === "--") {
       continue;
     }
     if (arg === "-c") {
-      return args[index + 1]?.value;
+      return shellCommandInvocationAt(args, index + 1);
     }
     if (arg.startsWith("-") && !arg.startsWith("--") && arg.includes("c")) {
-      return args[index + 1]?.value;
+      return shellCommandInvocationAt(args, index + 1);
     }
   }
 
   return undefined;
+}
+
+function shellCommandInvocationAt(
+  args: readonly ShellToken[],
+  commandIndex: number
+): ShellCommandInvocation | undefined {
+  const command = args[commandIndex]?.value;
+  if (!command) {
+    return undefined;
+  }
+
+  return {
+    command,
+    positionalArgs: args.slice(commandIndex + 2)
+  };
+}
+
+function bindShellPositionalParameters(
+  variables: Map<string, string>,
+  positionalArgs: readonly ShellToken[]
+): void {
+  for (let index = 0; index < positionalArgs.length; index += 1) {
+    variables.set(String(index + 1), positionalArgs[index].value);
+  }
 }
 
 function findExecutableHeredocRawWriteTarget(
@@ -1439,6 +1522,37 @@ function findExecutableHeredocRawWriteTarget(
   }
 
   return undefined;
+}
+
+function stripHeredocBodies(command: string): string {
+  const lines = command.split(/\r?\n/);
+  const strippedLines: string[] = [];
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
+    const heredoc = parseHeredocStart(line);
+    strippedLines.push(line);
+    if (!heredoc) {
+      continue;
+    }
+
+    let bodyIndex = lineIndex + 1;
+    for (; bodyIndex < lines.length; bodyIndex += 1) {
+      const delimiterLine = heredoc.stripLeadingTabs
+        ? lines[bodyIndex].replace(/^\t+/, "")
+        : lines[bodyIndex];
+      if (delimiterLine === heredoc.delimiter) {
+        strippedLines.push(lines[bodyIndex]);
+        break;
+      }
+    }
+
+    if (bodyIndex < lines.length) {
+      lineIndex = bodyIndex;
+    }
+  }
+
+  return strippedLines.join("\n");
 }
 
 function parseHeredocStart(line: string):
@@ -1563,9 +1677,23 @@ function pathContextFromState(state: Pick<ShellScanState, "cwd" | "cwdKnown">): 
 
 function makeShellScanBudget(): ShellScanBudget {
   return {
+    remainingShellCommandChars: MAX_SHELL_COMMAND_SCAN_CHARS,
     remainingExecutableCodeChars: MAX_EXECUTABLE_CODE_SCAN_CHARS,
     remainingExecutableRawTargets: MAX_EXECUTABLE_RAW_TARGETS
   };
+}
+
+function reserveShellCommandScanBudget(
+  command: string,
+  scanBudget: ShellScanBudget
+): boolean {
+  if (command.length > scanBudget.remainingShellCommandChars) {
+    scanBudget.remainingShellCommandChars = 0;
+    return false;
+  }
+
+  scanBudget.remainingShellCommandChars -= command.length;
+  return true;
 }
 
 function findExecutableCodeRawMutationTargetInText(
@@ -1684,16 +1812,40 @@ function expandTokenParameterReferences(
     return token;
   }
 
-  const expandedValue = token.value.replace(
-    /\$(?:{([A-Za-z_][A-Za-z0-9_]*)}|([A-Za-z_][A-Za-z0-9_]*))/g,
-    (match, bracedName: string | undefined, bareName: string | undefined) => {
-      const variableName = bracedName ?? bareName;
-      const value = variableName ? variables.get(variableName) : undefined;
-      return value ?? match;
-    }
+  const expandedBraces = token.value.replace(/\$\{([^}]+)\}/g, (match, expression: string) =>
+    expandBracedParameterExpression(match, expression, variables)
+  );
+  const expandedValue = expandedBraces.replace(
+    /\$([A-Za-z_][A-Za-z0-9_]*|[0-9]+)/g,
+    (match, variableName: string) => variables.get(variableName) ?? match
   );
 
   return expandedValue === token.value ? token : { ...token, value: expandedValue };
+}
+
+function expandBracedParameterExpression(
+  match: string,
+  expression: string,
+  variables: ReadonlyMap<string, string>
+): string {
+  const simple = expression.match(/^([A-Za-z_][A-Za-z0-9_]*|[0-9]+)$/);
+  if (simple) {
+    return variables.get(simple[1]) ?? match;
+  }
+
+  const slice = expression.match(/^([A-Za-z_][A-Za-z0-9_]*|[0-9]+):([0-9]+)(?::([0-9]+))?$/);
+  if (!slice) {
+    return match;
+  }
+
+  const value = variables.get(slice[1]);
+  if (value === undefined) {
+    return match;
+  }
+
+  const start = Number(slice[2]);
+  const length = slice[3] === undefined ? undefined : Number(slice[3]);
+  return length === undefined ? value.slice(start) : value.slice(start, start + length);
 }
 
 function recordVariableAssignments(
@@ -1760,6 +1912,9 @@ function isProtectedDataRawCandidate(
   if (isProtectedDataRawPath(candidate.value, context)) {
     return true;
   }
+  if (isProtectedDataRawAlias(candidate.value, context)) {
+    return true;
+  }
   if (
     !candidate.fullyQuoted &&
     expandShellBraceAlternatives(candidate.value).some((expanded) =>
@@ -1770,6 +1925,40 @@ function isProtectedDataRawCandidate(
   }
 
   return canUnresolvedShellPathResolveToProtectedRaw(candidate, context);
+}
+
+function isProtectedDataRawAlias(candidate: string, context: PathEvaluationContext): boolean {
+  const localCandidate = normalizeLocalPathCandidate(candidate);
+  if (!localCandidate || !context.cwdKnown) {
+    return false;
+  }
+
+  const absoluteCandidate =
+    context.cwd && isRelativeLocalPath(localCandidate)
+      ? path.resolve(context.cwd, localCandidate)
+      : path.resolve(localCandidate);
+  const resolvedCandidate = resolveExistingPathAlias(absoluteCandidate);
+  return resolvedCandidate ? isProtectedDataRawPathVariant(resolvedCandidate) : false;
+}
+
+function resolveExistingPathAlias(absoluteCandidate: string): string | undefined {
+  let existingPrefix = absoluteCandidate;
+  const suffixSegments: string[] = [];
+
+  while (!existsSync(existingPrefix)) {
+    const parent = path.dirname(existingPrefix);
+    if (parent === existingPrefix) {
+      return undefined;
+    }
+    suffixSegments.unshift(path.basename(existingPrefix));
+    existingPrefix = parent;
+  }
+
+  try {
+    return path.join(realpathSync(existingPrefix), ...suffixSegments);
+  } catch {
+    return undefined;
+  }
 }
 
 function isProtectedDataRawPath(
@@ -1988,11 +2177,22 @@ function globSegmentPatternToRegex(pattern: string): RegExp | undefined {
         changed = true;
         continue;
       }
+      source += ".";
+      changed = true;
+      continue;
     }
     source += escapeRegExp(char);
   }
 
-  return changed ? new RegExp(`^${source}$`, "i") : undefined;
+  if (!changed) {
+    return undefined;
+  }
+
+  try {
+    return new RegExp(`^${source}$`, "i");
+  } catch {
+    return /^.*$/i;
+  }
 }
 
 function findGlobBracketExpressionEnd(pattern: string, openIndex: number): number {
@@ -2007,6 +2207,9 @@ function findGlobBracketExpressionEnd(pattern: string, openIndex: number): numbe
 function globBracketExpressionToRegexSource(expression: string): string {
   const posixClass = expression.match(/^\[\[:([A-Za-z]+):\]\]$/);
   if (!posixClass) {
+    if (expression.startsWith("[!")) {
+      return `[^${expression.slice(2, -1)}]`;
+    }
     return expression;
   }
 
