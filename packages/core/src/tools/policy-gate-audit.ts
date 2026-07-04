@@ -1,4 +1,5 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { PolicyGateDenyDecision } from "./policy-gate-core";
 
@@ -43,10 +44,12 @@ export async function appendPolicyGateAuditRow(
     ...row,
     ts: row.ts ?? options.now?.() ?? new Date().toISOString()
   };
-  const { auditDir, auditPath } = resolvePolicyGateAuditLocation(options);
+  const { workspaceRoot, auditDir, auditPath } = resolvePolicyGateAuditLocation(options);
 
+  await assertAuditDirectoryCanBeCreatedInsideWorkspace(workspaceRoot, auditDir);
   await mkdir(auditDir, { recursive: true });
-  await appendFile(auditPath, `${JSON.stringify(resolvedRow)}\n`, "utf8");
+  await assertAuditLocationInsideWorkspace(workspaceRoot, auditDir, auditPath);
+  await appendPolicyGateAuditLineNoFollow(auditPath, `${JSON.stringify(resolvedRow)}\n`);
 
   return {
     auditDir,
@@ -74,6 +77,7 @@ export function buildPolicyGateAuditRowFromDeniedDecision(
 }
 
 function resolvePolicyGateAuditLocation(options: AppendPolicyGateAuditRowOptions = {}): {
+  workspaceRoot: string;
   auditDir: string;
   auditPath: string;
 } {
@@ -94,6 +98,7 @@ function resolvePolicyGateAuditLocation(options: AppendPolicyGateAuditRowOptions
   }
 
   return {
+    workspaceRoot,
     auditDir,
     auditPath
   };
@@ -117,4 +122,110 @@ function validateAuditPathSegment(field: "taskId" | "fileName", value: string): 
 function isPathInside(candidatePath: string, containingDir: string): boolean {
   const relativePath = path.relative(containingDir, candidatePath);
   return relativePath.length === 0 || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+}
+
+async function assertAuditDirectoryCanBeCreatedInsideWorkspace(
+  workspaceRoot: string,
+  auditDir: string
+): Promise<void> {
+  const realWorkspaceRoot = await realpath(workspaceRoot);
+  const relativeAuditDir = path.relative(workspaceRoot, auditDir);
+  let currentPath = workspaceRoot;
+
+  for (const segment of relativeAuditDir.split(path.sep)) {
+    if (!segment) {
+      continue;
+    }
+
+    currentPath = path.join(currentPath, segment);
+    const existingPath = await lstatIfExists(currentPath);
+    if (!existingPath) {
+      break;
+    }
+
+    const realCurrentPath = await realpath(currentPath);
+    if (!isPathInside(realCurrentPath, realWorkspaceRoot)) {
+      throw new Error("Invalid policy gate audit directory: resolves outside workspace.");
+    }
+  }
+}
+
+async function assertAuditLocationInsideWorkspace(
+  workspaceRoot: string,
+  auditDir: string,
+  auditPath: string
+): Promise<void> {
+  const realWorkspaceRoot = await realpath(workspaceRoot);
+  const realAuditDir = await realpath(auditDir);
+  if (!isPathInside(realAuditDir, realWorkspaceRoot)) {
+    throw new Error("Invalid policy gate audit directory: resolves outside workspace.");
+  }
+
+  const existingAuditPath = await lstatIfExists(auditPath);
+  if (!existingAuditPath) {
+    return;
+  }
+
+  const realAuditPath = await realpath(auditPath);
+  if (!isPathInside(realAuditPath, realAuditDir)) {
+    throw new Error("Invalid policy gate audit fileName: resolves outside audit directory.");
+  }
+}
+
+async function appendPolicyGateAuditLineNoFollow(
+  auditPath: string,
+  line: string
+): Promise<void> {
+  const noFollowFlag =
+    typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | noFollowFlag;
+  let fileHandle: Awaited<ReturnType<typeof open>> | undefined;
+
+  try {
+    if (noFollowFlag === 0) {
+      const existingAuditPath = await lstatIfExists(auditPath);
+      if (existingAuditPath?.isSymbolicLink()) {
+        throw new Error("Invalid policy gate audit fileName: must not be a symlink.");
+      }
+    }
+    fileHandle = await open(auditPath, flags, 0o600);
+    await fileHandle.writeFile(line, "utf8");
+  } catch (error) {
+    if (isSymlinkOpenError(error)) {
+      throw new Error("Invalid policy gate audit fileName: must not be a symlink.");
+    }
+    throw error;
+  } finally {
+    await fileHandle?.close();
+  }
+}
+
+async function lstatIfExists(filePath: string) {
+  try {
+    return await lstat(filePath);
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function isSymlinkOpenError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    ((error as { code?: unknown }).code === "ELOOP" ||
+      (error as { code?: unknown }).code === "EMLINK")
+  );
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT"
+  );
 }
