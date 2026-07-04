@@ -1,4 +1,4 @@
-import { BaseTool, BashTool, ToolRegistry, loadFuseList } from "@zero-os/core";
+import { BaseTool, BashTool, SpawnAgentTool, ToolRegistry, loadFuseList } from "@zero-os/core";
 import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
 import {
   evaluatePolicyGate,
@@ -51,6 +51,8 @@ export type ShudSandboxedBashToolOptions = RawDataSeatbeltProfileOptions &
 
 export type ShudRuntimeToolRegistryOptions = ShudSandboxedBashToolOptions & {
   tools?: readonly BaseTool[];
+  modelRouter?: ConstructorParameters<typeof SpawnAgentTool>[0];
+  metrics?: ConstructorParameters<typeof SpawnAgentTool>[2];
 };
 
 export type PolicyGatedTool = BaseTool & {
@@ -124,13 +126,32 @@ export function createShudRuntimeToolRegistry(
   options: ShudRuntimeToolRegistryOptions
 ): ToolRegistry {
   const registry = new ToolRegistry();
+  let includesSpawnAgent = false;
+
   for (const tool of options.tools ?? []) {
-    if (tool.name !== "bash") {
-      registry.register(tool);
+    if (tool.name === "spawn_agent") {
+      includesSpawnAgent = true;
+      continue;
     }
+
+    if (tool.name === "bash") {
+      continue;
+    }
+
+    registry.register(tool);
   }
 
   registry.register(createShudSandboxedBashTool(options));
+
+  if (includesSpawnAgent) {
+    if (!options.modelRouter) {
+      throw new Error(
+        "SHUD runtime registry cannot reuse a prebuilt spawn_agent; provide modelRouter to rebuild it against the final registry."
+      );
+    }
+    registry.register(new SpawnAgentTool(options.modelRouter, registry, options.metrics));
+  }
+
   return registry;
 }
 

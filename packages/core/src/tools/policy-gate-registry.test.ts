@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BaseTool, ToolRegistry } from "@zero-os/core";
+import { BaseTool, BashTool, SpawnAgentTool, ToolRegistry } from "@zero-os/core";
 import type { ToolContext, ToolLogger, ToolResult } from "@zero-os/shared";
 import {
   assertAllToolsPolicyGated,
@@ -180,6 +180,43 @@ describe("policy-gated zero tool registry", () => {
       await fixture.cleanup();
     }
   });
+
+  test("SHUD runtime rebuilds spawn_agent so scoped registries inherit sandboxed bash", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new BashTool([]));
+      zeroLikeRegistry.register(new RecordingTool("edit"));
+      const staleSpawn = new SpawnAgentTool(modelRouter, zeroLikeRegistry);
+      zeroLikeRegistry.register(staleSpawn);
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter
+      });
+
+      const spawn = registry.get("spawn_agent");
+      expect(spawn).toBeInstanceOf(SpawnAgentTool);
+      expect(spawn).not.toBe(staleSpawn);
+
+      const scopedRegistry = (
+        spawn as SpawnAgentTool & {
+          buildScopedRegistry(toolNames?: string[]): ToolRegistry;
+        }
+      ).buildScopedRegistry(["bash"]);
+
+      expect(scopedRegistry.get("bash")).toBe(registry.get("bash"));
+      expect(scopedRegistry.get("bash")).toBeInstanceOf(RawDataSandboxedBashTool);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
 });
 
 class RecordingTool extends BaseTool {
@@ -212,6 +249,16 @@ function createToolContext(role: string): ToolContext & { role: string } {
     workDir: "/tmp/shud-harness-test",
     logger: testLogger
   };
+}
+
+function createSpawnModelRouterStub(): ConstructorParameters<typeof SpawnAgentTool>[0] {
+  return {
+    getRegistry: () => ({ listModels: () => [] }),
+    resolveModel: () => undefined,
+    getCurrentModel: () => undefined,
+    getAdapter: () => undefined,
+    getModelLabel: () => "test/model"
+  } as unknown as ConstructorParameters<typeof SpawnAgentTool>[0];
 }
 
 const testLogger: ToolLogger = {

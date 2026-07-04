@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import {
-  appendFile,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   realpath,
   rm,
@@ -144,9 +145,17 @@ export async function buildRawDataSeatbeltProfile(
 
   const protectedRawPaths = await canonicalizePathSet(options.protectedRawPaths);
   const allowedWriteRoots = await canonicalizePathSet(options.allowedWriteRoots);
-  const tempRoot = await canonicalizeExistingPath(options.tempRoot ?? tmpdir());
+  const tempRoot = await canonicalizeExistingRootOutsideProtectedRaw(
+    options.tempRoot ?? tmpdir(),
+    protectedRawPaths,
+    "seatbelt temp root"
+  );
   const profileRoot = options.profileRoot
-    ? await canonicalizeDirectory(options.profileRoot)
+    ? await canonicalizeDirectoryOutsideProtectedRaw(
+        options.profileRoot,
+        protectedRawPaths,
+        "seatbelt profile root"
+      )
     : undefined;
 
   const idInput = JSON.stringify({
@@ -197,8 +206,11 @@ export async function writeRawDataSeatbeltProfileFile(
   profileRoot?: string
 ): Promise<string> {
   const root = profileRoot ?? profile.metadata.profileRoot ?? profile.metadata.tempRoot;
-  await mkdir(root, { recursive: true });
-  const canonicalRoot = await canonicalizeExistingPath(root);
+  const canonicalRoot = await canonicalizeDirectoryOutsideProtectedRaw(
+    root,
+    profile.metadata.protectedRawPaths,
+    "seatbelt profile root"
+  );
   const runRoot = await mkdtemp(join(canonicalRoot, `${profile.profileId}-`));
   const profilePath = join(runRoot, rawDataSandboxProfileFileName(profile));
   await writeFile(profilePath, `${profile.profileText}\n`, { mode: 0o600, flag: "wx" });
@@ -287,7 +299,10 @@ export class RawDataSandboxedBashTool extends BaseTool {
         command: wrappedCommand
       });
 
-      if (isLikelySandboxDenialForCommand(command, result.output)) {
+      if (
+        !result.success &&
+        isLikelySandboxDenialForCommand(command, result.output, profile.metadata.protectedRawPaths)
+      ) {
         const evidence = buildRawDataDenialEvidence({
           toolId: this.name,
           decision: "denied_by_sandbox",
@@ -422,7 +437,10 @@ export function evaluateSuppressedSandboxFailureGuard(
     return { decision: "allow" };
   }
 
-  if (!hasStaticRawDataWrite(command, protectedRawPaths)) {
+  if (
+    !hasStaticRawDataWrite(command, protectedRawPaths) &&
+    !hasDynamicRawDataWriteRisk(command)
+  ) {
     return { decision: "allow" };
   }
 
@@ -442,10 +460,9 @@ export async function appendPolicyGateAuditRow(
   const fileName = options.fileName ?? DEFAULT_AUDIT_FILE_NAME;
   assertSafePathSegment(fileName, "audit file name");
 
-  const auditDir = join(resolve(options.workspaceRoot), "workspace", "tasks", taskId, "audit");
-  await mkdir(auditDir, { recursive: true });
+  const auditDir = await ensurePolicyGateAuditDir(resolve(options.workspaceRoot), taskId);
   const auditPath = join(auditDir, fileName);
-  await appendFile(auditPath, `${JSON.stringify(options.row)}\n`, "utf8");
+  await appendAuditFileNoFollow(auditPath, `${JSON.stringify(options.row)}\n`);
   return auditPath;
 }
 
@@ -462,6 +479,12 @@ export function buildRawDataDeniedPayload(input: {
   const ts = input.ts ?? new Date().toISOString();
   const remediation = rawDataWriteRemediation();
   const guardClass = rawDataGuardClassForDecision(input.decision);
+  const errorId = [
+    RAW_DATA_WRITE_RULE_ID,
+    input.decision,
+    input.profile.profileId,
+    ...(input.invocationId ? [input.invocationId] : [])
+  ].join(":");
   const message =
     input.decision === "denied_by_sandbox"
       ? "Raw data write denied by OS sandbox."
@@ -479,7 +502,7 @@ export function buildRawDataDeniedPayload(input: {
     ...(input.profilePath ? { profile_path: input.profilePath } : {}),
     ...(input.invocationId ? { invocation_id: input.invocationId } : {}),
     error_record: {
-      error_id: `${RAW_DATA_WRITE_RULE_ID}:${input.decision}:${input.profile.profileId}`,
+      error_id: errorId,
       category: input.decision === "denied_by_sandbox" ? "sandbox_error" : "permission_error",
       severity: "error",
       message,
@@ -640,9 +663,11 @@ export function isLikelySandboxDenial(output: string): boolean {
 
 function hasStaticRawDataWrite(
   command: string,
-  protectedRawPaths: readonly string[]
+  protectedRawPaths: readonly string[],
+  options: { treatInitialRelativeRawAsProtected?: boolean } = {}
 ): boolean {
   const staticPathVariables = new Map<string, string>();
+  let relativeRawPathsAmbiguous = options.treatInitialRelativeRawAsProtected === false;
 
   for (const segment of splitStaticShellSegments(command)) {
     const tokens = tokenizeStaticShellSegment(segment);
@@ -652,15 +677,27 @@ function hasStaticRawDataWrite(
 
     collectStaticPathAssignments(tokens, staticPathVariables);
     const resolvedTokens = tokens.map((token) => resolveStaticPathToken(token, staticPathVariables));
+    const commandName = normalizeCommandName(resolvedTokens[0]);
 
-    if (hasRawDataWriteRedirection(resolvedTokens, protectedRawPaths)) {
+    if (isCwdChangingCommand(commandName)) {
+      relativeRawPathsAmbiguous = true;
+      continue;
+    }
+
+    const treatRelativeRawAsProtected = !relativeRawPathsAmbiguous;
+    if (
+      hasRawDataWriteRedirection(resolvedTokens, protectedRawPaths, {
+        treatRelativeRawAsProtected
+      })
+    ) {
       return true;
     }
 
-    const commandName = normalizeCommandName(resolvedTokens[0]);
     if (
       (commandName === "bash" || commandName === "sh") &&
-      hasChildShellRawDataWrite(resolvedTokens, protectedRawPaths)
+      hasChildShellRawDataWrite(resolvedTokens, protectedRawPaths, {
+        treatRelativeRawAsProtected
+      })
     ) {
       return true;
     }
@@ -672,14 +709,25 @@ function hasStaticRawDataWrite(
 
     if (commandName === "cp") {
       const destination = operands.at(-1);
-      if (destination && isRawDataPathToken(destination, protectedRawPaths)) {
+      if (
+        destination &&
+        isRawDataPathToken(destination, protectedRawPaths, {
+          treatRelativeRawAsProtected
+        })
+      ) {
         return true;
       }
       continue;
     }
 
     if (commandName === "mv") {
-      if (operands.some((operand) => isRawDataPathToken(operand, protectedRawPaths))) {
+      if (
+        operands.some((operand) =>
+          isRawDataPathToken(operand, protectedRawPaths, {
+            treatRelativeRawAsProtected
+          })
+        )
+      ) {
         return true;
       }
       continue;
@@ -691,7 +739,13 @@ function hasStaticRawDataWrite(
       commandName === "rm" ||
       commandName === "unlink"
     ) {
-      if (operands.some((operand) => isRawDataPathToken(operand, protectedRawPaths))) {
+      if (
+        operands.some((operand) =>
+          isRawDataPathToken(operand, protectedRawPaths, {
+            treatRelativeRawAsProtected
+          })
+        )
+      ) {
         return true;
       }
     }
@@ -730,12 +784,13 @@ function resolveStaticPathToken(token: string, bindings: ReadonlyMap<string, str
 
 function hasRawDataWriteRedirection(
   tokens: readonly string[],
-  protectedRawPaths: readonly string[]
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
 ): boolean {
   for (let index = 0; index < tokens.length - 1; index += 1) {
     if (
       isWriteRedirectionToken(tokens[index]) &&
-      isRawDataPathToken(tokens[index + 1], protectedRawPaths)
+      isRawDataPathToken(tokens[index + 1], protectedRawPaths, options)
     ) {
       return true;
     }
@@ -746,11 +801,14 @@ function hasRawDataWriteRedirection(
 
 function hasChildShellRawDataWrite(
   tokens: readonly string[],
-  protectedRawPaths: readonly string[]
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
 ): boolean {
   for (let index = 1; index < tokens.length - 1; index += 1) {
     if (tokens[index] === "-c") {
-      return hasStaticRawDataWrite(tokens[index + 1], protectedRawPaths);
+      return hasStaticRawDataWrite(tokens[index + 1], protectedRawPaths, {
+        treatInitialRelativeRawAsProtected: options.treatRelativeRawAsProtected !== false
+      });
     }
   }
 
@@ -916,7 +974,11 @@ function extractCommandOperands(tokens: readonly string[]): string[] {
   return operands;
 }
 
-function isRawDataPathToken(token: string, protectedRawPaths: readonly string[]): boolean {
+function isRawDataPathToken(
+  token: string,
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
   if (/[`$*?[\]]/.test(token)) {
     return false;
   }
@@ -928,10 +990,11 @@ function isRawDataPathToken(token: string, protectedRawPaths: readonly string[])
 
   const normalizedToken = normalize(cleaned);
   if (
-    normalizedToken === "data/raw" ||
-    normalizedToken.startsWith("data/raw/") ||
-    normalizedToken === "./data/raw" ||
-    normalizedToken.startsWith("./data/raw/")
+    options.treatRelativeRawAsProtected !== false &&
+    (normalizedToken === "data/raw" ||
+      normalizedToken.startsWith("data/raw/") ||
+      normalizedToken === "./data/raw" ||
+      normalizedToken.startsWith("./data/raw/"))
   ) {
     return true;
   }
@@ -945,6 +1008,161 @@ function isRawDataPathToken(token: string, protectedRawPaths: readonly string[])
     const root = normalize(protectedPath).replace(/\/+$/, "");
     return absoluteToken === root || absoluteToken.startsWith(`${root}/`);
   });
+}
+
+function hasDynamicRawDataWriteRisk(command: string): boolean {
+  const rawCandidateVariables = collectDynamicRawPathVariables(command);
+  if (rawCandidateVariables.size === 0) {
+    return false;
+  }
+
+  let relativeRawPathsAmbiguous = false;
+  for (const segment of splitStaticShellSegments(command)) {
+    const tokens = tokenizeStaticShellSegment(segment);
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    const commandName = normalizeCommandName(tokens[0]);
+    if (isCwdChangingCommand(commandName)) {
+      relativeRawPathsAmbiguous = true;
+      continue;
+    }
+
+    if (relativeRawPathsAmbiguous) {
+      continue;
+    }
+
+    if (hasRawCandidateVariableRedirection(tokens, rawCandidateVariables)) {
+      return true;
+    }
+
+    const operands = extractCommandOperands(tokens.slice(1));
+    if (operands.length === 0) {
+      continue;
+    }
+
+    if (commandName === "cp") {
+      const destination = operands.at(-1);
+      if (destination && referencesAnyVariable(destination, rawCandidateVariables)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (
+      commandName === "mv" ||
+      commandName === "tee" ||
+      commandName === "touch" ||
+      commandName === "rm" ||
+      commandName === "unlink"
+    ) {
+      if (operands.some((operand) => referencesAnyVariable(operand, rawCandidateVariables))) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function collectDynamicRawPathVariables(command: string): Set<string> {
+  const assignments = collectShellPathAssignments(command);
+  const values = new Map(assignments.map((assignment) => [assignment.name, assignment.value]));
+  const dataVariables = new Set<string>();
+  const rawVariables = new Set<string>();
+  const rawCandidateVariables = new Set<string>();
+
+  for (const [name, value] of values) {
+    const normalized = normalize(value).replace(/\/+$/, "");
+    if (normalized === "data" || normalized === "./data") {
+      dataVariables.add(name);
+    }
+    if (normalized === "raw" || normalized === "./raw") {
+      rawVariables.add(name);
+    }
+    if (containsRelativeRawLiteral(value)) {
+      rawCandidateVariables.add(name);
+    }
+  }
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [name, value] of values) {
+      if (rawCandidateVariables.has(name)) {
+        continue;
+      }
+      const referencesRawCandidate = referencesAnyVariable(value, rawCandidateVariables);
+      const referencesDataAndRaw =
+        referencesAnyVariable(value, dataVariables) &&
+        (referencesAnyVariable(value, rawVariables) || /(?:^|\/)raw(?:\/|$)/.test(value));
+
+      if (referencesRawCandidate || referencesDataAndRaw) {
+        rawCandidateVariables.add(name);
+        changed = true;
+      }
+    }
+  }
+
+  return rawCandidateVariables;
+}
+
+function collectShellPathAssignments(command: string): { name: string; value: string }[] {
+  const assignments: { name: string; value: string }[] = [];
+  for (const segment of splitStaticShellSegments(command)) {
+    for (const token of tokenizeStaticShellSegment(segment)) {
+      const match = token.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.+)$/);
+      if (match) {
+        assignments.push({ name: match[1], value: match[2] });
+      }
+    }
+  }
+  return assignments;
+}
+
+function hasRawCandidateVariableRedirection(
+  tokens: readonly string[],
+  rawCandidateVariables: ReadonlySet<string>
+): boolean {
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    if (
+      isWriteRedirectionToken(tokens[index]) &&
+      referencesAnyVariable(tokens[index + 1], rawCandidateVariables)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function containsRelativeRawLiteral(value: string): boolean {
+  const normalized = normalize(value).replace(/\/+$/, "");
+  return (
+    normalized === "data/raw" ||
+    normalized.startsWith("data/raw/") ||
+    normalized === "./data/raw" ||
+    normalized.startsWith("./data/raw/")
+  );
+}
+
+function referencesAnyVariable(value: string, variables: ReadonlySet<string>): boolean {
+  for (const variable of variables) {
+    if (referencesVariable(value, variable)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function referencesVariable(value: string, variable: string): boolean {
+  return new RegExp(`\\$(?:${escapeRegExp(variable)}\\b|\\{${escapeRegExp(variable)}\\})`).test(
+    value
+  );
+}
+
+function isCwdChangingCommand(commandName: string): boolean {
+  return commandName === "cd" || commandName === "pushd" || commandName === "popd";
 }
 
 function canHideSandboxFailure(command: string): boolean {
@@ -968,13 +1186,34 @@ function rawDataGuardClassForDecision(
   return decision === "denied_by_sandbox" ? "authority" : "advisory";
 }
 
-function isLikelySandboxDenialForCommand(command: string, output: string): boolean {
+function isLikelySandboxDenialForCommand(
+  command: string,
+  output: string,
+  protectedRawPaths: readonly string[]
+): boolean {
+  const denialOutput =
+    isLikelySandboxDenial(output) || INTERPRETER_WRITE_DENIAL_PATTERN.test(output);
+  if (!denialOutput) {
+    return false;
+  }
+
   return (
-    isLikelySandboxDenial(output) ||
-    (INTERPRETER_WRITE_DENIAL_PATTERN.test(output) &&
-      command.includes(">") &&
-      command.includes("data/raw"))
+    hasStaticRawDataWrite(command, protectedRawPaths) ||
+    hasDynamicRawDataWriteRisk(command) ||
+    hasRawWriteLiteralSignal(command, protectedRawPaths)
   );
+}
+
+function hasRawWriteLiteralSignal(command: string, protectedRawPaths: readonly string[]): boolean {
+  if (!/(?:^|[\s;&|])(?:cp|mv|tee|touch|rm|unlink)\b|>/.test(command)) {
+    return false;
+  }
+
+  if (/(?:^|[\s"'=])(?:\.\.\/|\.\/)*data\/raw(?:\/|[\s"']|$)/.test(command)) {
+    return true;
+  }
+
+  return protectedRawPaths.some((protectedPath) => command.includes(protectedPath));
 }
 
 function readInvocationId(ctx: ToolContext): string | undefined {
@@ -999,6 +1238,141 @@ async function canonicalizeDirectory(path: string): Promise<string> {
   return canonicalizeExistingPath(path);
 }
 
+async function canonicalizeExistingRootOutsideProtectedRaw(
+  path: string,
+  protectedRawPaths: readonly string[],
+  label: string
+): Promise<string> {
+  await assertRootOutsideProtectedRaw(path, protectedRawPaths, label);
+  const canonical = await canonicalizeExistingPath(path);
+  assertPathOutsideProtectedRaw(canonical, protectedRawPaths, label, "canonical");
+  return canonical;
+}
+
+async function canonicalizeDirectoryOutsideProtectedRaw(
+  path: string,
+  protectedRawPaths: readonly string[],
+  label: string
+): Promise<string> {
+  await assertRootOutsideProtectedRaw(path, protectedRawPaths, label);
+  const canonical = await canonicalizeDirectory(path);
+  assertPathOutsideProtectedRaw(canonical, protectedRawPaths, label, "canonical");
+  return canonical;
+}
+
+async function assertRootOutsideProtectedRaw(
+  path: string,
+  protectedRawPaths: readonly string[],
+  label: string
+): Promise<void> {
+  assertPathOutsideProtectedRaw(resolve(path), protectedRawPaths, label, "lexical");
+  try {
+    const canonical = await canonicalizeExistingPath(path);
+    assertPathOutsideProtectedRaw(canonical, protectedRawPaths, label, "canonical");
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) {
+      throw error;
+    }
+  }
+}
+
+function assertPathOutsideProtectedRaw(
+  path: string,
+  protectedRawPaths: readonly string[],
+  label: string,
+  mode: "lexical" | "canonical"
+): void {
+  const absolutePath = normalize(resolve(path)).replace(/\/+$/, "");
+  for (const protectedRawPath of protectedRawPaths) {
+    const rawRoot = normalize(resolve(protectedRawPath)).replace(/\/+$/, "");
+    if (absolutePath === rawRoot || absolutePath.startsWith(`${rawRoot}/`)) {
+      throw new Error(
+        `${label} must not be inside protected raw data path (${mode}): ${path}`
+      );
+    }
+  }
+}
+
+async function ensurePolicyGateAuditDir(workspaceRoot: string, taskId: string): Promise<string> {
+  await mkdir(workspaceRoot, { recursive: true });
+  const workspaceRealPath = await canonicalizeExistingPath(workspaceRoot);
+  let current = workspaceRoot;
+
+  for (const segment of ["workspace", "tasks", taskId, "audit"]) {
+    current = join(current, segment);
+    await ensureSafeAuditDirComponent(current, workspaceRealPath);
+  }
+
+  return current;
+}
+
+async function ensureSafeAuditDirComponent(path: string, workspaceRealPath: string): Promise<void> {
+  try {
+    const metadata = await lstat(path);
+    if (metadata.isSymbolicLink()) {
+      throw new Error(`Policy gate audit path component must not be a symlink: ${path}`);
+    }
+    if (!metadata.isDirectory()) {
+      throw new Error(`Policy gate audit path component is not a directory: ${path}`);
+    }
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) {
+      throw error;
+    }
+    await mkdir(path, { mode: 0o700 });
+    const metadata = await lstat(path);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error(`Policy gate audit path component is unsafe: ${path}`);
+    }
+  }
+
+  const componentRealPath = await canonicalizeExistingPath(path);
+  if (!isPathInsideOrEqual(componentRealPath, workspaceRealPath)) {
+    throw new Error(`Policy gate audit path component escapes workspace root: ${path}`);
+  }
+}
+
+async function appendAuditFileNoFollow(path: string, line: string): Promise<void> {
+  await assertSafeAuditFileTarget(path);
+  const flags =
+    fsConstants.O_CREAT |
+    fsConstants.O_APPEND |
+    fsConstants.O_WRONLY |
+    (fsConstants.O_NOFOLLOW ?? 0);
+  const handle = await open(path, flags, 0o600);
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) {
+      throw new Error(`Policy gate audit target is not a regular file: ${path}`);
+    }
+    if (metadata.nlink > 1) {
+      throw new Error(`Policy gate audit target must not be a hardlink: ${path}`);
+    }
+    await handle.writeFile(line, "utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+async function assertSafeAuditFileTarget(path: string): Promise<void> {
+  try {
+    const metadata = await lstat(path);
+    if (metadata.isSymbolicLink()) {
+      throw new Error(`Policy gate audit target must not be a symlink: ${path}`);
+    }
+    if (!metadata.isFile()) {
+      throw new Error(`Policy gate audit target is not a regular file: ${path}`);
+    }
+    if (metadata.nlink > 1) {
+      throw new Error(`Policy gate audit target must not be a hardlink: ${path}`);
+    }
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) {
+      throw error;
+    }
+  }
+}
+
 async function canonicalizeExistingPath(path: string): Promise<string> {
   return realpath(resolve(path));
 }
@@ -1021,6 +1395,25 @@ function shellQuote(value: string): string {
 
 function sortedUnique(values: readonly string[]): string[] {
   return Array.from(new Set(values)).sort();
+}
+
+function isPathInsideOrEqual(path: string, root: string): boolean {
+  const normalizedPath = normalize(resolve(path)).replace(/\/+$/, "");
+  const normalizedRoot = normalize(resolve(root)).replace(/\/+$/, "");
+  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+}
+
+function isErrno(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === code
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function assertSafePathSegment(value: string, label: string): void {
