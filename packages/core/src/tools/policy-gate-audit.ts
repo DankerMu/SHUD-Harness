@@ -172,6 +172,9 @@ async function assertAuditLocationInsideWorkspace(
   if (!existingAuditPath) {
     return;
   }
+  if (!existingAuditPath.isSymbolicLink() && !existingAuditPath.isFile()) {
+    throw new Error("Invalid policy gate audit fileName: must be a regular file.");
+  }
 
   const realAuditPath = await realpath(auditPath);
   if (!isPathInside(realAuditPath, realAuditDir)) {
@@ -188,7 +191,10 @@ async function appendPolicyGateAuditLineNoFollow(
 ): Promise<void> {
   const noFollowFlag =
     typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | noFollowFlag;
+  const nonBlockingFlag =
+    typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0;
+  const flags =
+    constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | noFollowFlag | nonBlockingFlag;
   let fileHandle: Awaited<ReturnType<typeof open>> | undefined;
 
   try {
@@ -205,6 +211,9 @@ async function appendPolicyGateAuditLineNoFollow(
   } catch (error) {
     if (isSymlinkOpenError(error)) {
       throw new Error("Invalid policy gate audit fileName: must not be a symlink.");
+    }
+    if (isSpecialFileOpenError(error)) {
+      throw new Error("Invalid policy gate audit fileName: must be a regular file.");
     }
     throw error;
   } finally {
@@ -231,6 +240,9 @@ async function assertOpenedAuditFileStillInsideWorkspace(
 
   const openedFile = await fileHandle.stat();
   const currentPath = await lstat(auditPath);
+  if (!openedFile.isFile() || !currentPath.isFile()) {
+    throw new Error("Invalid policy gate audit fileName: must be a regular file.");
+  }
   if (!isSameFilesystemEntry(openedFile, currentPath)) {
     throw new Error("Invalid policy gate audit fileName: changed before audit write.");
   }
@@ -261,6 +273,15 @@ function isSymlinkOpenError(error: unknown): boolean {
     "code" in error &&
     ((error as { code?: unknown }).code === "ELOOP" ||
       (error as { code?: unknown }).code === "EMLINK")
+  );
+}
+
+function isSpecialFileOpenError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENXIO"
   );
 }
 

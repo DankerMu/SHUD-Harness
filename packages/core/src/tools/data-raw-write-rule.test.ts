@@ -24,6 +24,10 @@ afterEach(async () => {
 });
 
 describe("data/raw write deny policy", () => {
+  const largeExecutableCodeWriteCommand = `Rscript -e '${"read.csv(\"data/raw/input.csv\");".repeat(
+    3000
+  )}writeLines("x", "data/raw/out.csv")'`;
+
   const deniedCommands = [
     {
       name: "redirect write",
@@ -156,6 +160,18 @@ describe("data/raw write deny policy", () => {
       command: 'export RAW=data/raw; bash -c \'rm "$RAW/input.csv"\''
     },
     {
+      name: "command-scoped assignment shell wrapper remove",
+      command: 'RAW=data/raw bash -c \'rm "$RAW/input.csv"\''
+    },
+    {
+      name: "env assignment shell wrapper redirect write",
+      command: 'env RAW=data/raw sh -c \'printf x > "$RAW/out.csv"\''
+    },
+    {
+      name: "env assignment partial path shell wrapper remove",
+      command: "env KIND=raw sh -c 'rm data/$KIND/input.csv'"
+    },
+    {
       name: "command substitution path expansion remove",
       command: "rm data/ra$(printf w)/input.csv"
     },
@@ -174,6 +190,14 @@ describe("data/raw write deny policy", () => {
     {
       name: "glob bracket redirect write",
       command: "printf x > data/ra[w]/input.csv"
+    },
+    {
+      name: "posix class glob remove",
+      command: "rm data/ra[[:lower:]]/input.csv"
+    },
+    {
+      name: "mac case-insensitive raw redirect write",
+      command: "printf x > DATA/RAW/input.csv"
     },
     {
       name: "curl short output option",
@@ -246,6 +270,31 @@ describe("data/raw write deny policy", () => {
     {
       name: "git clone destination under raw",
       command: "git clone https://example.invalid/repo.git data/raw/repo"
+    },
+    {
+      name: "curl remote-name output in raw cwd",
+      command: "curl -O https://example.invalid/input.csv",
+      workDir: "/tmp/shud-harness-test/data/raw"
+    },
+    {
+      name: "curl remote-header-name output in raw cwd",
+      command: "curl -OJ https://example.invalid/input.csv",
+      workDir: "/tmp/shud-harness-test/data/raw"
+    },
+    {
+      name: "wget default output in raw cwd",
+      command: "wget https://example.invalid/input.csv",
+      workDir: "/tmp/shud-harness-test/data/raw"
+    },
+    {
+      name: "git clone default destination in raw cwd",
+      command: "git clone https://example.invalid/repo.git",
+      workDir: "/tmp/shud-harness-test/data/raw"
+    },
+    {
+      name: "tar default extraction in raw cwd",
+      command: "tar -xf archive.tar",
+      workDir: "/tmp/shud-harness-test/data/raw"
     },
     {
       name: "brace expansion touching raw",
@@ -411,6 +460,38 @@ describe("data/raw write deny policy", () => {
     {
       name: "zsh shell wrapper",
       command: "zsh -c 'printf x > data/raw/input.csv'"
+    },
+    {
+      name: "env chdir relative remove",
+      command: "env -C data rm raw/input.csv"
+    },
+    {
+      name: "env long chdir shell wrapper relative remove",
+      command: "env --chdir=data bash -c 'rm raw/input.csv'"
+    },
+    {
+      name: "subshell cd relative remove",
+      command: "(cd data && rm raw/input.csv)"
+    },
+    {
+      name: "group cd relative remove",
+      command: "{ cd data; rm raw/input.csv; }"
+    },
+    {
+      name: "R writeLines raw write",
+      command: 'Rscript -e \'writeLines("x", "data/raw/input.csv")\''
+    },
+    {
+      name: "R write.csv raw write",
+      command: 'Rscript -e \'write.csv(data.frame(x=1), "data/raw/input.csv")\''
+    },
+    {
+      name: "R saveRDS raw write",
+      command: 'Rscript -e \'saveRDS(list(x=1), "data/raw/input.rds")\''
+    },
+    {
+      name: "large executable code raw write is bounded",
+      command: largeExecutableCodeWriteCommand
     }
   ] as const;
 
@@ -504,6 +585,27 @@ describe("data/raw write deny policy", () => {
       command: "touch workspace/tasks/TASK-001/scratch/data/raw/out.csv"
     },
     {
+      name: "cd raw then read relative input",
+      command: "cd data/raw && cat input.csv"
+    },
+    {
+      name: "task scratch workDir relative data raw write",
+      command: "touch data/raw/out.csv",
+      workDir: "/tmp/shud-harness-test/workspace/tasks/TASK-001/scratch"
+    },
+    {
+      name: "awk reads raw input",
+      command: "awk '{print $1}' data/raw/input.csv"
+    },
+    {
+      name: "rsync raw source to governed destination",
+      command: "rsync data/raw/input.csv workspace/tasks/TASK-001/input.csv"
+    },
+    {
+      name: "R read.csv raw read",
+      command: 'Rscript -e \'read.csv("data/raw/input.csv")\''
+    },
+    {
       name: "quoted brace fallback option",
       command: 'unknown-writer "--out=data/{raw,processed}/out.csv"'
     },
@@ -513,9 +615,9 @@ describe("data/raw write deny policy", () => {
     }
   ] as const;
 
-  for (const { name, command } of allowedCommands) {
+  for (const { name, command, workDir } of allowedCommands) {
     test(`allows ${name} through the wrapper`, async () => {
-      const { result, bashTool } = await runWrappedBashCommand(command);
+      const { result, bashTool } = await runWrappedBashCommand(command, { workDir });
 
       expect(result?.success).toBe(true);
       expect(result?.output).toBe("bash executed");
@@ -683,6 +785,27 @@ describe("data/raw write deny policy", () => {
 
     expect(await pathExists(path.join(outsideDir, "policy-gate-audit.ndjson"))).toBe(false);
     expect(await readFile(auditPathAfterMove, "utf8")).toBe("");
+  });
+
+  test("audit helper rejects a preexisting FIFO audit file without blocking", async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-"));
+    tempDirs.push(workspaceRoot);
+
+    const auditDir = path.join(workspaceRoot, "workspace", "tasks", "TASK-M1-SPIKE", "audit");
+    const auditPath = path.join(auditDir, "policy-gate-audit.ndjson");
+    await mkdir(auditDir, { recursive: true });
+
+    const mkfifo = Bun.spawn(["mkfifo", auditPath], {
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    expect(await mkfifo.exited).toBe(0);
+
+    await expect(
+      appendPolicyGateAuditRow(sampleAuditRow(), {
+        workspaceRoot
+      })
+    ).rejects.toThrow("Invalid policy gate audit fileName: must be a regular file.");
   });
 
   test("data/raw rule exposes a legal guard_class marker", () => {
