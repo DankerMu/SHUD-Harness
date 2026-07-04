@@ -120,3 +120,76 @@ Review focus:
 - Gate list exactly matches the P0 table.
 - Runtime output cannot accidentally satisfy source-controlled evidence or enter git.
 - `decision` aggregation is conservative and cannot classify contract conflicts as pass.
+
+## Subagent Workflow Fixture — Issue #19
+
+Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.
+
+Expanded-trigger rationale:
+- Core triggers: bash/tool entrypoint, path write boundary under `data/raw/**`, WebSocket event envelope, ErrorRecord remediation payload, and audit file output under `workspace/tasks/*/audit/`.
+- Profile triggers: `workspace`, `remediation`, `guard_class`, and Zero adapter/tool registry governance.
+
+Change surface:
+- `packages/core` policy rule and audit helper for `data/raw/**` write denials.
+- `packages/backend/src/ws` skeleton event builder for existing `tool.failed`.
+- Focused tests for pre-execution denial, remediation payload, event envelope, and fixture audit row write.
+
+Must preserve:
+- Policy-gate core remains pure; IO is outside `evaluatePolicyGate`.
+- No new WebSocket event type is introduced.
+- `zero/` remains source-clean and pinned; no full WebSocket protocol or full AuditEvent schema is implemented in M1.
+
+Must add/change:
+- Bash write attempts targeting `data/raw/**` are denied before the wrapped tool executes.
+- Denial output, `tool.failed` payload, and audit row all carry the same rule identity and navigable remediation.
+- The hard guard has a legal `guard_class` marker; #26 owns the later lint/assembly enforcement if not yet merged.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - bash tool calls are the execution entrypoint being guarded.
+- Config / project setup: not selected - no runtime config or package manager behavior changes.
+- File IO / path safety / overwrite: selected - the feature prevents protected raw-data writes and writes audit evidence.
+- Schema / columns / units / field names: selected - ErrorRecord remediation, `tool.failed` envelope, and audit row fields are contract-shaped.
+- Auth / permissions / secrets: not selected - no credential or user permission surface in this slice.
+- Concurrency / shared state / ordering: selected - WS skeleton must carry seq/event_id, but no multi-producer allocator is implemented in M1.
+- Resource limits / large input / discovery: not selected - tests use bounded command strings and a single fixture audit file.
+- Legacy compatibility / examples: selected - existing policy-gate allow behavior and wrapped tool execution must keep working.
+- Error handling / rollback / partial outputs: selected - deny path must be stable and must not execute the wrapped command.
+- Release / packaging / dependency compatibility: not selected - no lockfile/packageManager changes in this issue.
+- Documentation / migration notes: selected - PR evidence records #26 guard_class follow-up boundary.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - raw data is protected evidence input; denials must be auditable.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no model/runtime invocation or hydrology file format changes.
+- Zero adapter / tool registry / agent role governance: selected - uses the #17 wrapper seam without modifying Zero.
+
+Invariant Matrix:
+- Governing invariant: A policy-denied bash write to `data/raw/**` must be stopped before execution and leave synchronized remediation, WS, and audit evidence for the same rule.
+- Source-of-truth identity/contract: `policy-gate-spike` rule id, `guard_class`, `ErrorRecord.remediation`, `tool.failed`, and `workspace/tasks/TASK-M1-SPIKE/audit/`.
+- Producers: data/raw write rule; policy-gated wrapped bash tool; audit helper; WS event builder.
+- Validators/preflight: rule command detector, remediation schema validation, focused tests.
+- Storage/cache/query: fixture audit file under `workspace/tasks/TASK-M1-SPIKE/audit/`; no committed runtime artifact.
+- Public routes/entrypoints: none - M1 skeleton builder only, no WS server route implementation.
+- Frontend/downstream consumers: future AgentActivityFeed consumes `tool.failed`; M1 asserts envelope/payload shape only.
+- Failure paths/rollback/stale state: deny returns stable tool error and does not execute the inner tool; audit append failure is scoped to helper tests, not policy core.
+- Evidence/audit/readiness: unit/integration tests plus PR evidence and review-loop log.
+- Regression rows:
+  - Bash `printf x > data/raw/input.csv` through the wrapped tool -> deny result, inner tool call count stays zero, remediation has `next_action`, `hint`, and `ref`.
+  - Same denial converted to WS -> type is exactly `tool.failed`, envelope has seq/event_id, payload carries remediation and rule identity.
+  - Same denial written as audit -> row lands under `workspace/tasks/TASK-M1-SPIKE/audit/` with event/tool_id/rule/decision/ts.
+  - Bash read-only command against `data/raw/input.csv` -> existing wrapped-tool allow path still executes.
+
+Boundary-surface checklist:
+- Shared helper roots: `packages/core/src/tools/*` policy helpers.
+- Public entrypoints: wrapped bash tool `run()` path only.
+- Write/delete/overwrite surfaces: blocked command detector and audit append helper.
+- Producer/consumer evidence boundaries: denial payload -> WS payload -> audit row must preserve rule/remediation identity.
+- Unchanged downstream consumers: generic ErrorRecord optional `remediation.ref` remains unchanged; policy-gate denials still require `ref`.
+
+Non-goals:
+- Full shell parser, complete WebSocket server/session bus, full AuditEvent schema, and #26 guard lint enforcement.
+- Raw data read prohibition; this issue blocks writes/mutations only.
+
+Review focus:
+- Denial happens before wrapped command execution.
+- `tool.failed` is reused without extending the event registry.
+- Audit write stays in the fixture task audit path and runtime artifacts are not committed.
+- Guard marking is present without pretending #26 enforcement already exists.

@@ -41,7 +41,7 @@ describe("policy-gated zero tool registry", () => {
     expect(result?.output).toContain("policy_gate_denied");
     expect(result?.output).toContain("raw data writes are blocked");
     const payload = JSON.parse(result?.output ?? "{}") as {
-      ruleId?: string;
+      rule_id?: string;
       reason?: string;
       remediation?: {
         next_action?: string;
@@ -49,7 +49,7 @@ describe("policy-gated zero tool registry", () => {
         ref?: string;
       };
     };
-    expect(payload.ruleId).toBe("raw-data-write");
+    expect(payload.rule_id).toBe("raw-data-write");
     expect(payload.reason).toBe("raw data writes are blocked");
     expect(payload.remediation?.next_action).toBe("adjust_scope");
     expect(payload.remediation?.hint).toBe("Use a governed workspace path instead of data/raw.");

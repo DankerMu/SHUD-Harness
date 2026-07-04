@@ -167,7 +167,8 @@ function buildPolicyGateDeniedResult(
     error: "policy_gate_denied",
     tool_id: toolId,
     reason: decision.reason,
-    ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
+    rule_id: decision.ruleId,
+    ...(decision.guard_class ? { guard_class: decision.guard_class } : {}),
     ...(decision.remediation ? { remediation: decision.remediation } : {})
   };
 

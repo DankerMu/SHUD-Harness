@@ -3,6 +3,9 @@ import { RemediationNextActionSchema } from "../domain/schemas";
 
 export type HarnessRole = "coordinator" | "repo_explorer" | "worker" | "coder" | "reviewer";
 
+export const GuardClassSchema = z.enum(["authority", "capability"]);
+export type GuardClass = z.infer<typeof GuardClassSchema>;
+
 // Policy-gate denials require a navigable ref, even though generic ErrorRecord.ref is optional.
 export const PolicyGateRemediationSchema = z.object({
   next_action: RemediationNextActionSchema,
@@ -36,12 +39,14 @@ export type PolicyGateDecision =
   | {
       decision: "deny";
       ruleId: string;
+      guard_class?: GuardClass;
       reason: string;
       remediation: PolicyGateRemediation;
     };
 
 export interface PolicyRule {
   ruleId: string;
+  guard_class?: GuardClass;
   description: string;
   evaluate(call: PolicyGateToolCall, context: PolicyGateContext): PolicyRuleDecision;
 }
@@ -65,9 +70,11 @@ export function evaluatePolicyGate(
     }
 
     validatePolicyGateRemediation(rule.ruleId, result.remediation);
+    validateGuardClassMarker(rule.ruleId, rule.guard_class);
     return {
       decision: "deny",
       ruleId: rule.ruleId,
+      ...(rule.guard_class ? { guard_class: rule.guard_class } : {}),
       reason: result.reason,
       remediation: result.remediation
     };
@@ -88,4 +95,17 @@ function validatePolicyGateRemediation(ruleId: string, remediation: PolicyGateRe
     .join(", ");
 
   throw new Error(`Invalid policy gate remediation for ${ruleId}: ${fieldPaths || "remediation"}`);
+}
+
+function validateGuardClassMarker(ruleId: string, guardClass: GuardClass | undefined): void {
+  if (guardClass === undefined) {
+    return;
+  }
+
+  const parsed = GuardClassSchema.safeParse(guardClass);
+  if (parsed.success) {
+    return;
+  }
+
+  throw new Error(`Invalid policy gate guard_class for ${ruleId}: ${guardClass}`);
 }
