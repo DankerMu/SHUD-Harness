@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, parse, resolve } from "node:path";
 import { BaseTool, BashTool } from "@zero-os/core";
-import type { FuseRule, ToolContext, ToolResult } from "@zero-os/shared";
+import type { FuseRule, ToolContext, ToolLogger, ToolResult } from "@zero-os/shared";
 import type { ErrorRecord } from "../domain/schemas";
 import type {
   PolicyGateRemediation,
@@ -31,6 +31,11 @@ export const DEFAULT_POLICY_GATE_AUDIT_TASK_ID = "TASK-M1-SPIKE";
 const DEFAULT_AUDIT_FILE_NAME = "policy-gate.ndjson";
 const SANDBOX_DENIAL_PATTERN = /Operation not permitted|Permission denied|sandbox/i;
 const INTERPRETER_WRITE_DENIAL_PATTERN = /can't open file/i;
+const NOOP_TOOL_LOGGER: ToolLogger = {
+  info() {},
+  warn() {},
+  error() {}
+};
 
 export interface RawDataSeatbeltProfileOptions {
   protectedRawPaths: readonly string[];
@@ -85,9 +90,9 @@ export interface PolicyGateAuditRow {
 export interface AppendPolicyGateAuditRowOptions {
   workspaceRoot: string;
   row: PolicyGateAuditRow;
+  protectedRawPaths: readonly string[];
   taskId?: string;
   fileName?: string;
-  protectedRawPaths?: readonly string[];
 }
 
 export interface RawDataDenialPayload {
@@ -264,7 +269,10 @@ export class RawDataSandboxedBashTool extends BaseTool {
     }
 
     const protectedRawPaths = await canonicalizePathSet(this.options.protectedRawPaths);
-    const auditReservation = await this.reserveAuditDir(ctx, protectedRawPaths);
+    const auditReservation = await this.reserveAuditEvidence(ctx, protectedRawPaths);
+    if ("toolResult" in auditReservation) {
+      return auditReservation.toolResult;
+    }
     const profile = await buildRawDataSeatbeltProfile({
       protectedRawPaths,
       allowedWriteRoots: this.options.allowedWriteRoots,
@@ -272,7 +280,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
       profileRoot: this.options.profileRoot,
       protectedEvidencePaths: [
         ...(this.options.protectedEvidencePaths ?? []),
-        ...(auditReservation ? [auditReservation.auditDir] : [])
+        auditReservation.protectedEvidenceRoot
       ]
     });
     const profilePath = await writeRawDataSeatbeltProfileFile(profile, this.options.profileRoot);
@@ -318,14 +326,12 @@ export class RawDataSandboxedBashTool extends BaseTool {
       const wrappedCommand = `sandbox-exec -f ${shellQuote(profilePath)} bash -c ${shellQuote(
         command
       )}`;
-      const result = await this.innerTool.run(ctx, {
+      const result = await this.innerTool.run(createInnerSandboxToolContext(ctx), {
         ...(typeof input === "object" && input !== null ? input : {}),
         command: wrappedCommand
       });
 
-      if (
-        isLikelySandboxDenialForCommand(command, result.output, protectedRawPathSignals)
-      ) {
+      if (isLikelySandboxDenialForCommand(command, result, protectedRawPathSignals)) {
         const evidence = buildRawDataDenialEvidence({
           toolId: this.name,
           decision: "denied_by_sandbox",
@@ -345,7 +351,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
         profile,
         profilePath
       });
-      return result;
+      return normalizeSandboxedBashResult(result, command, profilePath);
     } finally {
       await cleanupRawDataSeatbeltProfileFile(profilePath);
     }
@@ -408,30 +414,42 @@ export class RawDataSandboxedBashTool extends BaseTool {
     }
   }
 
-  private async reserveAuditDir(
+  private async reserveAuditEvidence(
     ctx: ToolContext,
     protectedRawPaths: readonly string[]
-  ): Promise<PolicyGateAuditReservation | undefined> {
+  ): Promise<PolicyGateAuditReservation | PolicyGateAuditReservationFailure> {
     try {
-      const auditDir = await ensurePolicyGateAuditDir(
+      return await ensurePolicyGateAuditReservation(
         resolve(this.options.auditWorkspaceRoot ?? ctx.workDir),
         this.options.auditTaskId ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID,
+        DEFAULT_AUDIT_FILE_NAME,
         protectedRawPaths
       );
-      return { auditDir };
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       ctx.logger.warn("policy_gate_audit_reserve_failed", {
         tool: this.name,
         rule: RAW_DATA_WRITE_RULE_ID,
-        error: error instanceof Error ? error.message : String(error)
+        error: message
       });
-      return undefined;
+      return {
+        toolResult: buildAuditReservationFailureResult({
+          toolId: this.name,
+          reason: `Policy gate audit evidence path is unavailable: ${message}`
+        })
+      };
     }
   }
 }
 
 interface PolicyGateAuditReservation {
   auditDir: string;
+  auditPath: string;
+  protectedEvidenceRoot: string;
+}
+
+interface PolicyGateAuditReservationFailure {
+  toolResult: ToolResult;
 }
 
 export function createRawDataWriteAdvisoryRule(
@@ -480,6 +498,14 @@ export function evaluateSuppressedSandboxFailureGuard(
   command: string,
   protectedRawPaths: readonly string[]
 ): PolicyRuleDecision {
+  if (hasInterpreterInternalRawWriteSuppressionRisk(command, protectedRawPaths)) {
+    return {
+      decision: "deny",
+      reason: "raw-data write form can hide sandbox denial",
+      remediation: rawDataWriteRemediation()
+    };
+  }
+
   if (!canHideSandboxFailure(command)) {
     return { decision: "allow" };
   }
@@ -501,20 +527,21 @@ export function evaluateSuppressedSandboxFailureGuard(
 export async function appendPolicyGateAuditRow(
   options: AppendPolicyGateAuditRowOptions
 ): Promise<string> {
+  assertProtectedRawPathsProvided(options.protectedRawPaths);
   const taskId = options.taskId ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID;
   assertSafePathSegment(taskId, "audit task id");
 
   const fileName = options.fileName ?? DEFAULT_AUDIT_FILE_NAME;
   assertSafePathSegment(fileName, "audit file name");
 
-  const auditDir = await ensurePolicyGateAuditDir(
+  const reservation = await ensurePolicyGateAuditReservation(
     resolve(options.workspaceRoot),
     taskId,
-    options.protectedRawPaths ?? []
+    fileName,
+    options.protectedRawPaths
   );
-  const auditPath = join(auditDir, fileName);
-  await appendAuditFileNoFollow(auditPath, `${JSON.stringify(options.row)}\n`);
-  return auditPath;
+  await appendAuditFileNoFollow(reservation.auditPath, `${JSON.stringify(options.row)}\n`);
+  return reservation.auditPath;
 }
 
 export function buildRawDataDeniedPayload(input: {
@@ -723,6 +750,61 @@ export function rawDataWriteRemediation(): PolicyGateRemediation {
 
 export function isLikelySandboxDenial(output: string): boolean {
   return SANDBOX_DENIAL_PATTERN.test(output);
+}
+
+function buildAuditReservationFailureResult(input: {
+  toolId: string;
+  reason: string;
+}): ToolResult {
+  const payload = {
+    error: "policy_gate_audit_unavailable",
+    tool_id: input.toolId,
+    rule: RAW_DATA_WRITE_RULE_ID,
+    reason: input.reason,
+    remediation: {
+      next_action: "fix_and_retry",
+      hint: "Repair the policy-gate audit path before running bash so denial evidence can be recorded.",
+      ref: RAW_DATA_POLICY_REF
+    }
+  };
+
+  return {
+    success: false,
+    output: JSON.stringify(payload),
+    outputSummary: "Policy gate audit unavailable before bash execution"
+  };
+}
+
+function createInnerSandboxToolContext(ctx: ToolContext): ToolContext {
+  return {
+    ...ctx,
+    logger: NOOP_TOOL_LOGGER,
+    observability: undefined
+  };
+}
+
+function normalizeSandboxedBashResult(
+  result: ToolResult,
+  command: string,
+  profilePath: string
+): ToolResult {
+  if (
+    !result.outputSummary.includes("sandbox-exec") &&
+    !result.outputSummary.includes(profilePath)
+  ) {
+    return result;
+  }
+
+  return {
+    ...result,
+    outputSummary: result.success
+      ? `Executed: ${commandSummary(command)}`
+      : `Command failed: ${commandSummary(command)}`
+  };
+}
+
+function commandSummary(command: string): string {
+  return command.slice(0, 80);
 }
 
 function hasStaticRawDataWrite(
@@ -938,7 +1020,7 @@ function hasInterpreterRawDataWrite(
     return false;
   }
 
-  if (!containsRawDataPathSignal(payload, protectedRawPaths, options)) {
+  if (!containsAnyRawDataPathSignal(payload, protectedRawPaths, options)) {
     return false;
   }
 
@@ -963,6 +1045,78 @@ function hasInterpreterWriteApiSignal(payload: string): boolean {
     /(?:fs\.)?createWriteStream\s*\(/.test(payload) ||
     /(?:write_text|write_bytes)\s*\(/.test(payload) ||
     /(?:File|IO)\.write\s*\(/.test(payload)
+  );
+}
+
+function hasInterpreterInternalRawWriteSuppressionRisk(
+  command: string,
+  protectedRawPaths: readonly string[]
+): boolean {
+  for (const segment of splitStaticShellSegments(command)) {
+    const tokens = tokenizeStaticShellSegment(segment);
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    const commandName = normalizeCommandName(tokens[0]);
+    if (!isInterpreterCommand(commandName)) {
+      continue;
+    }
+
+    const payload = interpreterPayload(tokens);
+    if (!payload) {
+      continue;
+    }
+
+    if (
+      containsAnyRawDataPathSignal(payload, protectedRawPaths) &&
+      hasInterpreterWriteApiSignal(payload) &&
+      hasInterpreterExceptionSwallowSignal(payload)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasInterpreterExceptionSwallowSignal(payload: string): boolean {
+  return (
+    /try\s*{[\s\S]*}\s*catch(?:\s*\([^)]*\))?\s*{\s*}/.test(payload) ||
+    /try\s*{[\s\S]*}\s*catch\b/.test(payload) ||
+    /\bexcept\b[\s\S]*(?:\bpass\b|sys\.exit\s*\(\s*0\s*\)|exit\s*\(?\s*0\s*\)?)/.test(payload) ||
+    /\brescue\b[\s\S]*(?:nil|true|$)/.test(payload) ||
+    /\beval\s*{[\s\S]*}/.test(payload)
+  );
+}
+
+function containsAnyRawDataPathSignal(
+  value: string,
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  return (
+    containsRawDataPathSignal(value, protectedRawPaths, options) ||
+    containsFragmentedRawDataPathSignal(value)
+  );
+}
+
+function containsFragmentedRawDataPathSignal(value: string): boolean {
+  const quotedData = String.raw`["'\`]data["'\`]`;
+  const quotedRaw = String.raw`["'\`]raw["'\`]`;
+  const slash = String.raw`["'\`]\/["'\`]`;
+  return (
+    new RegExp(`\\[\\s*${quotedData}\\s*,\\s*${quotedRaw}[\\s\\S]*?\\]\\s*\\.join\\s*\\(\\s*${slash}\\s*\\)`).test(
+      value
+    ) ||
+    new RegExp(`${slash}\\s*\\.join\\s*\\(\\s*\\[\\s*${quotedData}\\s*,\\s*${quotedRaw}`).test(
+      value
+    ) ||
+    new RegExp(`(?:path|os\\.path|File|Path)\\.join\\s*\\(\\s*${quotedData}\\s*,\\s*${quotedRaw}`).test(
+      value
+    ) ||
+    new RegExp(`${quotedData}\\s*\\+\\s*${slash}\\s*\\+\\s*${quotedRaw}`).test(value) ||
+    new RegExp(`${quotedData}\\s*/\\s*${quotedRaw}`).test(value)
   );
 }
 
@@ -1358,21 +1512,19 @@ function isCwdChangingCommand(commandName: string): boolean {
 }
 
 function canHideSandboxFailure(command: string): boolean {
-  const stderrSuppressionPattern =
-    /(?:^|[\s;&|])2\s*>{1,2}\s*\/dev\/null(?=[\s;|&)]|$)/g;
-  const exitNormalizerPattern = /^\s*(?:\|\||;|\n|&)\s*true(?:\s|[;|&)]|$)/;
-  let suppressionMatch: RegExpExecArray | null;
+  return hasShellExitStatusNormalizer(command) || hasShellDenialOutputSuppression(command);
+}
 
-  while ((suppressionMatch = stderrSuppressionPattern.exec(command)) !== null) {
-    const commandAfterSuppression = command.slice(
-      suppressionMatch.index + suppressionMatch[0].length
-    );
-    if (exitNormalizerPattern.test(commandAfterSuppression)) {
-      return true;
-    }
-  }
+function hasShellExitStatusNormalizer(command: string): boolean {
+  return /(?:^|[\s;&|])(?:\|\||;|\n|&)\s*(?::|true|exit\s+0)(?=\s|[;|&)]|$)/.test(command);
+}
 
-  return false;
+function hasShellDenialOutputSuppression(command: string): boolean {
+  return (
+    /(?:^|[\s;&|])2\s*>{1,2}\s*\/dev\/null(?=[\s;|&)]|$)/.test(command) ||
+    /(?:^|[\s;&|])2\s*>\s*&\s*-(?=[\s;|&)]|$)/.test(command) ||
+    /(?:^|[\s;&|])>\s*\/dev\/null\s+2\s*>\s*&\s*1(?=[\s;|&)]|$)/.test(command)
+  );
 }
 
 function rawDataGuardClassForRawData(): RawDataGuardClass {
@@ -1381,18 +1533,40 @@ function rawDataGuardClassForRawData(): RawDataGuardClass {
 
 function isLikelySandboxDenialForCommand(
   command: string,
-  output: string,
+  result: ToolResult,
   protectedRawPaths: readonly string[]
 ): boolean {
+  const output = result.output;
   const denialOutput =
     isLikelySandboxDenial(output) || INTERPRETER_WRITE_DENIAL_PATTERN.test(output);
   if (!denialOutput) {
     return false;
   }
 
+  if (result.success) {
+    return hasPreciseRawWriteTargetSignal(command, protectedRawPaths);
+  }
+
+  return hasFailedResultRawWriteSignal(command, protectedRawPaths);
+}
+
+function hasPreciseRawWriteTargetSignal(
+  command: string,
+  protectedRawPaths: readonly string[]
+): boolean {
   return (
     hasStaticRawDataWrite(command, protectedRawPaths) ||
     hasDynamicRawDataWriteRisk(command) ||
+    hasInterpreterInternalRawWriteSuppressionRisk(command, protectedRawPaths)
+  );
+}
+
+function hasFailedResultRawWriteSignal(
+  command: string,
+  protectedRawPaths: readonly string[]
+): boolean {
+  return (
+    hasPreciseRawWriteTargetSignal(command, protectedRawPaths) ||
     hasRawWriteLiteralSignal(command, protectedRawPaths)
   );
 }
@@ -1534,32 +1708,47 @@ function assertPathOutsideProtectedRaw(
   }
 }
 
-async function ensurePolicyGateAuditDir(
+async function ensurePolicyGateAuditReservation(
   workspaceRoot: string,
   taskId: string,
-  protectedRawPaths: readonly string[] = []
-): Promise<string> {
-  const workspaceRealPath =
-    protectedRawPaths.length > 0
-      ? await ensureDirectoryOutsideProtectedRaw(
-          workspaceRoot,
-          protectedRawPaths,
-          "policy gate audit workspace root"
-        )
-      : await ensureDirectory(workspaceRoot);
+  fileName: string,
+  protectedRawPaths: readonly string[]
+): Promise<PolicyGateAuditReservation> {
+  assertProtectedRawPathsProvided(protectedRawPaths);
+  assertSafePathSegment(taskId, "audit task id");
+  assertSafePathSegment(fileName, "audit file name");
+  const workspaceRealPath = await ensureDirectoryOutsideProtectedRaw(
+    workspaceRoot,
+    protectedRawPaths,
+    "policy gate audit workspace root"
+  );
   let current = workspaceRealPath;
+  let protectedEvidenceRoot = "";
 
   for (const segment of ["workspace", "tasks", taskId, "audit"]) {
     current = join(current, segment);
     await ensureSafeAuditDirComponent(current, workspaceRealPath, protectedRawPaths);
+    if (segment === "tasks") {
+      protectedEvidenceRoot = current;
+    }
   }
 
-  return current;
+  const auditPath = join(current, fileName);
+  await assertSafeAuditFileTarget(auditPath);
+
+  return {
+    auditDir: current,
+    auditPath,
+    protectedEvidenceRoot
+  };
 }
 
-async function ensureDirectory(path: string): Promise<string> {
-  await mkdir(path, { recursive: true });
-  return canonicalizeExistingPath(path);
+function assertProtectedRawPathsProvided(
+  protectedRawPaths: readonly string[] | undefined
+): asserts protectedRawPaths is readonly string[] {
+  if (!Array.isArray(protectedRawPaths) || protectedRawPaths.length === 0) {
+    throw new Error("protectedRawPaths is required for policy gate audit writes.");
+  }
 }
 
 async function ensureSafeAuditDirComponent(

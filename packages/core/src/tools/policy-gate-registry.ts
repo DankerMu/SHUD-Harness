@@ -1,6 +1,7 @@
 import { BaseTool, BashTool, SpawnAgentTool, ToolRegistry, loadFuseList } from "@zero-os/core";
 import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
 import {
+  EMPTY_POLICY_GATE_CONTEXT,
   evaluatePolicyGate,
   type HarnessRole,
   type PolicyGateContext,
@@ -51,6 +52,8 @@ export type ShudSandboxedBashToolOptions = RawDataSeatbeltProfileOptions &
 
 export type ShudRuntimeToolRegistryOptions = ShudSandboxedBashToolOptions & {
   tools?: readonly BaseTool[];
+  evaluate?: PolicyGateEvaluator;
+  role?: HarnessRole;
   modelRouter?: ConstructorParameters<typeof SpawnAgentTool>[0];
   metrics?: ConstructorParameters<typeof SpawnAgentTool>[2];
 };
@@ -111,6 +114,7 @@ export function createShudSandboxedBashTool(
   const fuseRules = resolveShudBashFuseRules(options);
   return new RawDataSandboxedBashTool({
     protectedRawPaths: options.protectedRawPaths,
+    protectedEvidencePaths: options.protectedEvidencePaths,
     allowedWriteRoots: options.allowedWriteRoots,
     tempRoot: options.tempRoot,
     profileRoot: options.profileRoot,
@@ -126,6 +130,7 @@ export function createShudRuntimeToolRegistry(
   options: ShudRuntimeToolRegistryOptions
 ): ToolRegistry {
   const registry = new ToolRegistry();
+  const evaluate = options.evaluate ?? createPolicyGateEvaluator(EMPTY_POLICY_GATE_CONTEXT);
   let includesSpawnAgent = false;
 
   for (const tool of options.tools ?? []) {
@@ -138,10 +143,22 @@ export function createShudRuntimeToolRegistry(
       continue;
     }
 
-    registry.register(tool);
+    registry.register(
+      wrapToolWithPolicyGate(tool, {
+        evaluate,
+        role: options.role,
+        toolId: tool.name
+      })
+    );
   }
 
-  registry.register(createShudSandboxedBashTool(options));
+  registry.register(
+    wrapToolWithPolicyGate(createShudSandboxedBashTool(options), {
+      evaluate,
+      role: options.role,
+      toolId: "bash"
+    })
+  );
 
   if (includesSpawnAgent) {
     if (!options.modelRouter) {
@@ -149,9 +166,16 @@ export function createShudRuntimeToolRegistry(
         "SHUD runtime registry cannot reuse a prebuilt spawn_agent; provide modelRouter to rebuild it against the final registry."
       );
     }
-    registry.register(new SpawnAgentTool(options.modelRouter, registry, options.metrics));
+    registry.register(
+      wrapToolWithPolicyGate(new SpawnAgentTool(options.modelRouter, registry, options.metrics), {
+        evaluate,
+        role: options.role,
+        toolId: "spawn_agent"
+      })
+    );
   }
 
+  assertPolicyGatedToolRegistry(registry);
   return registry;
 }
 

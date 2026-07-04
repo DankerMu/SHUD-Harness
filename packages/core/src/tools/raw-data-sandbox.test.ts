@@ -180,6 +180,25 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("interpreter-internal fragmented raw path with swallowed exception is pre-denied", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        'node -e \'const fs = require("fs"); try { fs.writeFileSync(["data","raw","node-fragment.txt"].join("/"), "node"); } catch (error) {}\'',
+        { enableAdvisory: false }
+      );
+
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(payload.reason).toContain("hide sandbox denial");
+      await expectMissing(join(fixture.rawRoot, "node-fragment.txt"));
+      const rows = await readAuditRows(fixture.root);
+      expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("semicolon-normalized interpreter raw write is pre-denied", async () => {
     const fixture = await createFixture();
     try {
@@ -291,6 +310,33 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  seatbeltTest("raw read redirected to workspace with denial-like stdout stays allowed", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        "cat data/raw/input.csv > workspace/input-copy.csv; printf 'Permission denied sandbox\\n'"
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("Permission denied sandbox");
+      expect(result.outputSummary).not.toContain("sandbox-exec");
+      expect(result.outputSummary).not.toContain(fixture.profileRoot);
+      expect(await readFile(join(fixture.workspaceRoot, "input-copy.csv"), "utf8")).toBe(
+        "raw,input\n"
+      );
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed",
+        profile_id: expect.stringMatching(/^shud-raw-seatbelt-/),
+        profile_path: expect.stringContaining(".sb")
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("workspace allowed write succeeds under the same profile", async () => {
     const fixture = await createFixture();
     try {
@@ -301,8 +347,45 @@ describe("raw data seatbelt sandbox", () => {
       const rows = await readAuditRows(fixture.root);
       expect(rows.at(-1)).toMatchObject({
         event: "tool.completed",
-        decision: "allowed"
+        decision: "allowed",
+        profile_id: expect.stringMatching(/^shud-raw-seatbelt-/),
+        profile_path: expect.stringContaining(".sb")
       });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("allowed sandboxed bash logs a single outer lifecycle without profile summary leak", async () => {
+    const fixture = await createFixture();
+    try {
+      const loggerEvents: string[] = [];
+      const operationEvents: string[] = [];
+      const result = await runSandboxed(fixture, "printf allowed > workspace/logged.txt", {
+        context: {
+          ...fixture.context,
+          logger: {
+            debug() {},
+            info(event) {
+              loggerEvents.push(event);
+            },
+            warn() {},
+            error() {}
+          },
+          observability: {
+            logEvent() {},
+            recordOperation(entry) {
+              operationEvents.push(entry.event);
+            }
+          }
+        } as ToolContext
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.outputSummary).toBe("Executed: printf allowed > workspace/logged.txt");
+      expect(result.outputSummary).not.toContain("sandbox-exec");
+      expect(loggerEvents.filter((event) => event === "tool_call_complete")).toHaveLength(1);
+      expect(operationEvents.filter((event) => event === "tool_call_complete")).toHaveLength(1);
     } finally {
       await fixture.cleanup();
     }
@@ -444,7 +527,7 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  test("preserves denial payload when audit append fails", async () => {
+  test("audit reservation failure fails closed before bash execution", async () => {
     const fixture = await createFixture();
     try {
       const tool = new RawDataSandboxedBashTool({
@@ -457,13 +540,13 @@ describe("raw data seatbelt sandbox", () => {
       });
 
       const result = await tool.run(fixture.context, {
-        command: "printf nope > data/raw/audit-fail.txt",
+        command: "printf side-effect > workspace/audit-fail-side-effect.txt; printf nope > data/raw/audit-fail.txt",
         timeout: 30_000
       });
 
-      const payload = expectDeniedPayload(result, "denied_by_advisory");
-      expect(payload.reason).toContain("raw-data write target");
+      expectAuditReservationFailure(result);
       await expectMissing(join(fixture.rawRoot, "audit-fail.txt"));
+      await expectMissing(join(fixture.workspaceRoot, "audit-fail-side-effect.txt"));
     } finally {
       await fixture.cleanup();
     }
@@ -575,6 +658,24 @@ describe("raw data seatbelt sandbox", () => {
       target: "swallowed-dynamic.txt",
       command: () =>
         'd=data; r=raw; p="$d/$r/swallowed-dynamic.txt"; { printf swallowed > "$p"; } 2>/dev/null || true'
+    },
+    {
+      name: "exit-zero masked dynamic raw write",
+      target: "masked-exit-zero.txt",
+      command: () =>
+        'd=data; r=raw; p="$d/$r/masked-exit-zero.txt"; printf masked > "$p" 2>/dev/null; exit 0'
+    },
+    {
+      name: "colon masked dynamic raw write",
+      target: "masked-colon.txt",
+      command: () =>
+        'd=data; r=raw; p="$d/$r/masked-colon.txt"; printf masked > "$p" 2>/dev/null || :'
+    },
+    {
+      name: "stderr-before-raw-redirection dynamic raw write",
+      target: "stderr-before-raw.txt",
+      command: () =>
+        'd=data; r=raw; p="$d/$r/stderr-before-raw.txt"; printf masked 2>/dev/null > "$p"'
     }
   ];
 
@@ -637,7 +738,7 @@ describe("raw data seatbelt sandbox", () => {
         auditWorkspaceRoot: fixture.rawRoot
       });
 
-      expectDeniedPayload(result, "denied_by_advisory");
+      expectAuditReservationFailure(result);
       expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
     } finally {
       await fixture.cleanup();
@@ -659,7 +760,7 @@ describe("raw data seatbelt sandbox", () => {
         }
       );
 
-      expectDeniedPayload(result, "denied_by_advisory");
+      expectAuditReservationFailure(result);
       expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
     } finally {
       await fixture.cleanup();
@@ -677,8 +778,52 @@ describe("raw data seatbelt sandbox", () => {
         auditWorkspaceRoot: auditRootLink
       });
 
-      expectDeniedPayload(result, "denied_by_advisory");
+      expectAuditReservationFailure(result);
       expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("stale audit file symlink fails closed before bash side effects", async () => {
+    const fixture = await createFixture();
+    try {
+      const rawInput = join(fixture.rawRoot, "input.csv");
+      const beforeRaw = await readFile(rawInput, "utf8");
+      const auditDir = await createAuditDir(fixture.root);
+      await symlink(rawInput, join(auditDir, "policy-gate.ndjson"));
+
+      const result = await runSandboxed(
+        fixture,
+        "printf side-effect > workspace/stale-symlink-side-effect.txt; printf nope > data/raw/stale-symlink.txt"
+      );
+
+      expectAuditReservationFailure(result);
+      expect(await readFile(rawInput, "utf8")).toBe(beforeRaw);
+      await expectMissing(join(fixture.rawRoot, "stale-symlink.txt"));
+      await expectMissing(join(fixture.workspaceRoot, "stale-symlink-side-effect.txt"));
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("stale audit file hardlink fails closed before bash side effects", async () => {
+    const fixture = await createFixture();
+    try {
+      const rawInput = join(fixture.rawRoot, "input.csv");
+      const beforeRaw = await readFile(rawInput, "utf8");
+      const auditDir = await createAuditDir(fixture.root);
+      await link(rawInput, join(auditDir, "policy-gate.ndjson"));
+
+      const result = await runSandboxed(
+        fixture,
+        "printf side-effect > workspace/stale-hardlink-side-effect.txt; printf nope > data/raw/stale-hardlink.txt"
+      );
+
+      expectAuditReservationFailure(result);
+      expect(await readFile(rawInput, "utf8")).toBe(beforeRaw);
+      await expectMissing(join(fixture.rawRoot, "stale-hardlink.txt"));
+      await expectMissing(join(fixture.workspaceRoot, "stale-hardlink-side-effect.txt"));
     } finally {
       await fixture.cleanup();
     }
@@ -695,6 +840,30 @@ describe("raw data seatbelt sandbox", () => {
 
       const payload = expectDeniedPayload(result, "denied_by_sandbox");
       await expectMissing(join(fixture.rawRoot, "audit-sabotage.txt"));
+      const auditContent = await readFile(
+        join(fixture.root, "workspace", "tasks", "TASK-M1-SPIKE", "audit", "policy-gate.ndjson"),
+        "utf8"
+      );
+      expect(auditContent).not.toContain("forged");
+      const rows = await readAuditRows(fixture.root);
+      expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("sandbox command cannot move or replace policy-gate audit ancestor", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        "mv workspace/tasks workspace/tasks.moved; mkdir -p workspace/tasks/TASK-M1-SPIKE/audit; printf forged > workspace/tasks/TASK-M1-SPIKE/audit/policy-gate.ndjson; printf nope > data/raw/audit-ancestor.txt",
+        { enableAdvisory: false }
+      );
+
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      await expectMissing(join(fixture.rawRoot, "audit-ancestor.txt"));
+      await expectMissing(join(fixture.root, "workspace", "tasks.moved"));
       const auditContent = await readFile(
         join(fixture.root, "workspace", "tasks", "TASK-M1-SPIKE", "audit", "policy-gate.ndjson"),
         "utf8"
@@ -748,6 +917,7 @@ describe("raw data seatbelt sandbox", () => {
       await expect(
         appendPolicyGateAuditRow({
           workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
           taskId: "..",
           row: minimalAuditRow()
         })
@@ -755,6 +925,7 @@ describe("raw data seatbelt sandbox", () => {
       await expect(
         appendPolicyGateAuditRow({
           workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
           fileName: "../policy-gate.ndjson",
           row: minimalAuditRow()
         })
@@ -768,6 +939,22 @@ describe("raw data seatbelt sandbox", () => {
       await expect(
         scanProtectedHardlinks({ protectedRoots: [fixture.rawRoot], maxScannedPathCount: 2 })
       ).rejects.toThrow("exceeded budget");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("audit append rejects missing protected roots without mutating raw workspace root", async () => {
+    const fixture = await createFixture();
+    try {
+      const beforeRawEntries = await sortedRawEntries(fixture.rawRoot);
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.rawRoot,
+          row: minimalAuditRow()
+        } as Parameters<typeof appendPolicyGateAuditRow>[0])
+      ).rejects.toThrow("protectedRawPaths is required");
+      expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
     } finally {
       await fixture.cleanup();
     }
@@ -790,6 +977,7 @@ describe("raw data seatbelt sandbox", () => {
       await expect(
         appendPolicyGateAuditRow({
           workspaceRoot: dirFixture.root,
+          protectedRawPaths: [dirFixture.rawRoot],
           fileName: "input.csv",
           row: minimalAuditRow()
         })
@@ -809,6 +997,7 @@ describe("raw data seatbelt sandbox", () => {
       await expect(
         appendPolicyGateAuditRow({
           workspaceRoot: fileFixture.root,
+          protectedRawPaths: [fileFixture.rawRoot],
           row: minimalAuditRow()
         })
       ).rejects.toThrow("symlink");
@@ -829,6 +1018,7 @@ describe("raw data seatbelt sandbox", () => {
       await expect(
         appendPolicyGateAuditRow({
           workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
           row: minimalAuditRow()
         })
       ).rejects.toThrow("hardlink");
@@ -927,7 +1117,27 @@ function expectDeniedPayload(
   expect(payload.remediation.hint).toContain("data/raw");
   expect(payload.remediation.ref).toContain("policy-gate-spike");
   expect(payload.error_record.remediation?.next_action).toBe("adjust_scope");
+  expect(payload.error_record.remediation?.hint).toContain("data/raw");
+  expect(payload.error_record.remediation?.ref).toContain("policy-gate-spike");
   return payload;
+}
+
+function expectAuditReservationFailure(result: ToolResult): void {
+  expect(result.success).toBe(false);
+  const payload = JSON.parse(result.output) as {
+    error?: string;
+    rule?: string;
+    remediation?: {
+      next_action?: string;
+      hint?: string;
+      ref?: string;
+    };
+  };
+  expect(payload.error).toBe("policy_gate_audit_unavailable");
+  expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
+  expect(payload.remediation?.next_action).toBe("fix_and_retry");
+  expect(payload.remediation?.hint).toContain("audit path");
+  expect(payload.remediation?.ref).toContain("policy-gate-spike");
 }
 
 function expectAuditMatchesPayload(

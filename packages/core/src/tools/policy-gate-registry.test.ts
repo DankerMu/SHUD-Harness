@@ -126,6 +126,7 @@ describe("policy-gated zero tool registry", () => {
     try {
       const registry = createShudRuntimeToolRegistry({
         protectedRawPaths: [fixture.rawRoot],
+        protectedEvidencePaths: [fixture.evidenceRoot],
         allowedWriteRoots: [fixture.root],
         tempRoot: fixture.tempRoot,
         profileRoot: fixture.profileRoot,
@@ -133,13 +134,18 @@ describe("policy-gated zero tool registry", () => {
       });
       const bash = registry.get("bash");
 
-      expect(bash).toBeInstanceOf(RawDataSandboxedBashTool);
+      assertPolicyGatedToolRegistry(registry);
+      expect(bash && isPolicyGatedTool(bash)).toBe(true);
+      expect(isPolicyGatedTool(bash!) && bash.innerTool).toBeInstanceOf(RawDataSandboxedBashTool);
       expect(registry.list().find((tool) => tool.name === "bash")).toBe(bash);
 
       const scopedRegistry = new ToolRegistry();
       scopedRegistry.register(registry.get("bash")!);
       expect(scopedRegistry.get("bash")).toBe(bash);
-      expect(scopedRegistry.get("bash")).toBeInstanceOf(RawDataSandboxedBashTool);
+      expect(isPolicyGatedTool(scopedRegistry.get("bash")!)).toBe(true);
+      expect(
+        isPolicyGatedTool(scopedRegistry.get("bash")!) && scopedRegistry.get("bash")!.innerTool
+      ).toBeInstanceOf(RawDataSandboxedBashTool);
 
       const rawRead = await bash?.run(fixture.context, { command: "cat data/raw/input.csv" });
       expect(rawRead?.success).toBe(true);
@@ -150,6 +156,12 @@ describe("policy-gated zero tool registry", () => {
       });
       expect(workspaceWrite?.success).toBe(true);
       expect(await readFile(join(fixture.workspaceRoot, "out.txt"), "utf8")).toBe("allowed");
+
+      const protectedEvidenceWrite = await bash?.run(fixture.context, {
+        command: "printf blocked > workspace/protected-evidence/out.txt"
+      });
+      expect(protectedEvidenceWrite?.success).toBe(false);
+      await expect(readFile(join(fixture.evidenceRoot, "out.txt"), "utf8")).rejects.toThrow();
 
       const fused = await bash?.run(fixture.context, { command: "printf blocked-by-registry-fuse" });
       expect(fused?.success).toBe(false);
@@ -200,19 +212,76 @@ describe("policy-gated zero tool registry", () => {
         fuseRules: [],
         modelRouter
       });
+      assertPolicyGatedToolRegistry(registry);
 
       const spawn = registry.get("spawn_agent");
-      expect(spawn).toBeInstanceOf(SpawnAgentTool);
+      expect(spawn && isPolicyGatedTool(spawn)).toBe(true);
+      expect(isPolicyGatedTool(spawn!) && spawn.innerTool).toBeInstanceOf(SpawnAgentTool);
       expect(spawn).not.toBe(staleSpawn);
 
       const scopedRegistry = (
-        spawn as SpawnAgentTool & {
+        (isPolicyGatedTool(spawn!) ? spawn.innerTool : spawn) as SpawnAgentTool & {
           buildScopedRegistry(toolNames?: string[]): ToolRegistry;
         }
       ).buildScopedRegistry(["bash"]);
 
       expect(scopedRegistry.get("bash")).toBe(registry.get("bash"));
-      expect(scopedRegistry.get("bash")).toBeInstanceOf(RawDataSandboxedBashTool);
+      expect(isPolicyGatedTool(scopedRegistry.get("bash")!)).toBe(true);
+      expect(
+        isPolicyGatedTool(scopedRegistry.get("bash")!) && scopedRegistry.get("bash")!.innerTool
+      ).toBeInstanceOf(RawDataSandboxedBashTool);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime policy evaluator denies bash, edit, and spawn before execution", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const modelRouter = createSpawnModelRouterStub();
+      const edit = new RecordingTool("edit");
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new BashTool([]));
+      zeroLikeRegistry.register(edit);
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async () => ({
+          decision: "deny",
+          ruleId: "runtime-deny",
+          reason: "blocked by runtime evaluator",
+          remediation: {
+            next_action: "adjust_scope",
+            hint: "Use an allowed tool for this role.",
+            ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+          }
+        })
+      });
+
+      assertPolicyGatedToolRegistry(registry);
+      const bashDenied = await registry.get("bash")?.run(fixture.context, {
+        command: "printf side-effect > workspace/denied-by-policy.txt"
+      });
+      const editDenied = await registry.get("edit")?.run(fixture.context, {});
+      const spawnDenied = await registry.get("spawn_agent")?.run(fixture.context, {
+        instruction: "should not spawn",
+        tools: ["bash"]
+      });
+
+      expect(bashDenied?.success).toBe(false);
+      expect(bashDenied?.output).toContain("policy_gate_denied");
+      await expect(readFile(join(fixture.workspaceRoot, "denied-by-policy.txt"), "utf8")).rejects.toThrow();
+      expect(editDenied?.success).toBe(false);
+      expect(edit.calls).toBe(0);
+      expect(spawnDenied?.success).toBe(false);
+      expect(spawnDenied?.output).toContain("policy_gate_denied");
     } finally {
       await fixture.cleanup();
     }
@@ -272,6 +341,7 @@ interface RawFixture {
   root: string;
   rawRoot: string;
   workspaceRoot: string;
+  evidenceRoot: string;
   profileRoot: string;
   tempRoot: string;
   context: ToolContext;
@@ -282,9 +352,11 @@ async function createRawFixture(): Promise<RawFixture> {
   const root = await mkdtemp(join(tmpdir(), "shud-registry-raw-"));
   const rawRoot = join(root, "data", "raw");
   const workspaceRoot = join(root, "workspace");
+  const evidenceRoot = join(workspaceRoot, "protected-evidence");
   const profileRoot = join(workspaceRoot, "profiles");
   const tempRoot = join(workspaceRoot, "tmp");
   await mkdir(rawRoot, { recursive: true });
+  await mkdir(evidenceRoot, { recursive: true });
   await mkdir(profileRoot, { recursive: true });
   await mkdir(tempRoot, { recursive: true });
   await writeFile(join(rawRoot, "input.csv"), "raw,input\n", "utf8");
@@ -293,6 +365,7 @@ async function createRawFixture(): Promise<RawFixture> {
     root,
     rawRoot,
     workspaceRoot,
+    evidenceRoot,
     profileRoot,
     tempRoot,
     context: {

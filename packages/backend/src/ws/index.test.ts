@@ -38,6 +38,8 @@ describe("backend ws tool.failed skeleton", () => {
     expect(event.event).not.toBe("policy.denied");
     expect(event.payload.error.error_id).toBe(payload.error_record.error_id);
     expect(event.payload.error.remediation?.next_action).toBe("adjust_scope");
+    expect(event.payload.error.remediation?.hint).toContain("data/raw");
+    expect(event.payload.error.remediation?.ref).toContain("policy-gate-spike");
   });
 
   test("builds tool.failed from actual raw-data sandbox denial payload", async () => {
@@ -59,6 +61,9 @@ describe("backend ws tool.failed skeleton", () => {
     });
     expect(event.payload.error).toBe(payload.error_record);
     expect(event.payload.error.error_id).toContain("denied_by_sandbox");
+    expect(event.payload.error.remediation?.next_action).toBe("adjust_scope");
+    expect(event.payload.error.remediation?.hint).toContain("data/raw");
+    expect(event.payload.error.remediation?.ref).toContain("policy-gate-spike");
   });
 });
 
