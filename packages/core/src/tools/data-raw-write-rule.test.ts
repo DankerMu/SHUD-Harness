@@ -27,6 +27,8 @@ describe("data/raw write deny policy", () => {
   const largeExecutableCodeWriteCommand = `Rscript -e '${"read.csv(\"data/raw/input.csv\");".repeat(
     3000
   )}writeLines("x", "data/raw/out.csv")'`;
+  const largeNoRawCommand = `printf '${"x".repeat(300000)}'`;
+  const largeRawWriteEvidenceCommand = `${"true\n".repeat(60000)}rm data/raw/input.csv`;
   const largeNonExecutableHeredocCommand = `cat > workspace/tasks/TASK-001/script.sh <<'SH'\n${"echo filler\n".repeat(
     30000
   )}rm data/raw/input.csv\nSH`;
@@ -131,6 +133,34 @@ describe("data/raw write deny policy", () => {
       command: 'python -c \'open("data/raw/x","w").write("x")\''
     },
     {
+      name: "python executable code string raw variable write mode",
+      command: 'python -c \'path="data/raw/out.csv"; open(path, mode="w").write("x")\''
+    },
+    {
+      name: "node executable code string raw variable write",
+      command: 'node -e \'const p="data/raw/out.csv"; require("fs").writeFileSync(p, "x")\''
+    },
+    {
+      name: "R executable code string raw variable write",
+      command: 'Rscript -e \'p <- "data/raw/out.csv"; writeLines("x", p)\''
+    },
+    {
+      name: "Bun executable code string raw variable write",
+      command: 'bun -e \'const p="data/raw/out.csv"; await Bun.write(p, "x")\''
+    },
+    {
+      name: "Ruby executable code string raw variable write",
+      command: 'ruby -e \'p="data/raw/out.csv"; File.write(p, "x")\''
+    },
+    {
+      name: "PHP executable code string raw variable write",
+      command: "php -r '$p=\"data/raw/out.csv\"; file_put_contents($p, \"x\");'"
+    },
+    {
+      name: "Perl executable code string raw variable write",
+      command: 'perl -e \'my $p="data/raw/out.csv"; open(my $fh, ">", $p); print $fh "x";\''
+    },
+    {
       name: "python heredoc raw write",
       command: "python - <<'PY'\nopen(\"data/raw/input.csv\",\"w\").write(\"x\")\nPY"
     },
@@ -147,12 +177,44 @@ describe("data/raw write deny policy", () => {
       command: 'export RAW=data/raw; touch "$RAW/input.csv"'
     },
     {
+      name: "readonly variable-expanded remove",
+      command: 'readonly RAW=data/raw; rm "$RAW/input.csv"'
+    },
+    {
+      name: "declare variable-expanded remove",
+      command: 'declare RAW=data/raw; rm "$RAW/input.csv"'
+    },
+    {
+      name: "typeset variable-expanded remove",
+      command: 'typeset RAW=data/raw; rm "$RAW/input.csv"'
+    },
+    {
       name: "braced variable-expanded remove",
       command: 'RAW=data/raw; rm "${RAW}/input.csv"'
     },
     {
       name: "braced variable slice-expanded remove",
       command: 'RAW=data/raw-extra; rm "${RAW:0:8}/input.csv"'
+    },
+    {
+      name: "braced variable suffix trim remove",
+      command: 'RAW=data/raw/input.csv; rm "${RAW%/*}/out.csv"'
+    },
+    {
+      name: "braced variable prefix trim redirect write",
+      command: 'RAW=prefixdata/raw/input.csv; printf x > "${RAW#prefix}"'
+    },
+    {
+      name: "braced variable substitution remove",
+      command: 'RAW=data/processed/input.csv; rm "${RAW/processed/raw}"'
+    },
+    {
+      name: "braced variable substitution nested shell remove",
+      command: 'RAW=data/processed/input.csv bash -c \'rm "${RAW/processed/raw}"\''
+    },
+    {
+      name: "braced variable substitution eval remove",
+      command: 'RAW=data/processed/input.csv; eval \'rm "${RAW/processed/raw}"\''
     },
     {
       name: "partial variable-expanded remove",
@@ -255,6 +317,10 @@ describe("data/raw write deny policy", () => {
       command: "sed -nEi 's/a/b/' data/raw/input.csv"
     },
     {
+      name: "sed script write command raw output",
+      command: "sed -n 's/x/y/w data/raw/out.csv' /tmp/in"
+    },
+    {
       name: "find delete under raw",
       command: "find data/raw -delete"
     },
@@ -269,6 +335,22 @@ describe("data/raw write deny policy", () => {
     {
       name: "find ok remove under raw",
       command: "find data/raw -type f -ok rm {} +"
+    },
+    {
+      name: "find exec shell raw redirect write",
+      command: "find . -exec sh -c 'printf x > data/raw/out.csv' \\;"
+    },
+    {
+      name: "trap shell raw remove",
+      command: "trap 'rm data/raw/input.csv' EXIT"
+    },
+    {
+      name: "awk script raw output redirection",
+      command: "awk 'BEGIN { print \"x\" > \"data/raw/out.csv\" }'"
+    },
+    {
+      name: "awk script raw system mutation",
+      command: "awk 'BEGIN { system(\"rm data/raw/out.csv\") }'"
     },
     {
       name: "rsync destination under raw",
@@ -477,6 +559,14 @@ describe("data/raw write deny policy", () => {
       command: "ln /tmp/input.csv data/raw/input.csv"
     },
     {
+      name: "same-command relative symlink alias to data raw",
+      command: "ln -s data data-link; touch data-link/raw/input.csv"
+    },
+    {
+      name: "same-command absolute symlink alias to data raw",
+      command: "ln -s /tmp/shud-harness-test/data data-link; touch data-link/raw/input.csv"
+    },
+    {
       name: "truncate target",
       command: "truncate -s 0 data/raw/input.csv"
     },
@@ -497,12 +587,52 @@ describe("data/raw write deny policy", () => {
       command: "bash -c 'rm \"$1\"' -- data/raw/input.csv"
     },
     {
+      name: "bash shell wrapper positional zero raw remove",
+      command: "bash -c 'rm \"$0\"' data/raw/input.csv"
+    },
+    {
+      name: "bash shell wrapper positional at raw remove",
+      command: "bash -c 'rm \"$@\"' -- data/raw/input.csv"
+    },
+    {
+      name: "bash shell wrapper positional star raw remove",
+      command: "bash -c 'rm \"$*\"' -- data/raw/input.csv"
+    },
+    {
       name: "sh shell wrapper",
       command: "sh -c 'printf x > data/raw/input.csv'"
     },
     {
+      name: "sh shell wrapper positional zero raw remove",
+      command: "sh -c 'rm \"$0\"' data/raw/input.csv"
+    },
+    {
+      name: "sh shell wrapper positional at raw remove",
+      command: "sh -c 'rm \"$@\"' -- data/raw/input.csv"
+    },
+    {
+      name: "sh shell wrapper positional star raw remove",
+      command: "sh -c 'rm \"$*\"' -- data/raw/input.csv"
+    },
+    {
       name: "zsh shell wrapper",
       command: "zsh -c 'printf x > data/raw/input.csv'"
+    },
+    {
+      name: "zsh shell wrapper positional zero raw remove",
+      command: "zsh -c 'rm \"$0\"' data/raw/input.csv"
+    },
+    {
+      name: "zsh shell wrapper positional at raw remove",
+      command: "zsh -c 'rm \"$@\"' -- data/raw/input.csv"
+    },
+    {
+      name: "zsh shell wrapper positional star raw remove",
+      command: "zsh -c 'rm \"$*\"' -- data/raw/input.csv"
+    },
+    {
+      name: "implicit positional loop raw remove",
+      command: "bash -c 'for p; do rm \"$p\"; done' -- data/raw/input.csv"
     },
     {
       name: "env chdir relative remove",
@@ -537,8 +667,8 @@ describe("data/raw write deny policy", () => {
       command: largeExecutableCodeWriteCommand
     },
     {
-      name: "large non-executable heredoc is bounded",
-      command: largeNonExecutableHeredocCommand
+      name: "large shell raw write evidence is bounded",
+      command: largeRawWriteEvidenceCommand
     }
   ] as const;
 
@@ -600,8 +730,48 @@ describe("data/raw write deny policy", () => {
       command: "sha256sum data/raw/input.csv"
     },
     {
+      name: "du raw directory",
+      command: "du -sh data/raw"
+    },
+    {
+      name: "file raw input",
+      command: "file data/raw/input.csv"
+    },
+    {
+      name: "test raw input exists",
+      command: "test -f data/raw/input.csv"
+    },
+    {
+      name: "read raw input redirect",
+      command: "read p < data/raw/input.csv"
+    },
+    {
+      name: "mapfile raw input redirect",
+      command: "mapfile a < data/raw/input.csv"
+    },
+    {
+      name: "input-only raw redirect",
+      command: "< data/raw/input.csv"
+    },
+    {
       name: "python executable code string raw read",
       command: 'python -c \'print(open("data/raw/input.csv").read())\''
+    },
+    {
+      name: "node executable code string raw read",
+      command: 'node -e \'const p="data/raw/input.csv"; require("fs").readFileSync(p)\''
+    },
+    {
+      name: "Ruby executable code string raw read",
+      command: 'ruby -e \'p="data/raw/input.csv"; File.read(p)\''
+    },
+    {
+      name: "PHP executable code string raw read",
+      command: "php -r '$p=\"data/raw/input.csv\"; file_get_contents($p);'"
+    },
+    {
+      name: "Perl executable code string raw read",
+      command: 'perl -e \'my $p="data/raw/input.csv"; open(my $fh, "<", $p);\''
     },
     {
       name: "read-only find under raw",
@@ -661,6 +831,22 @@ describe("data/raw write deny policy", () => {
       command: "bash -c 'cat \"$1\"' -- data/raw/input.csv"
     },
     {
+      name: "bash shell wrapper positional zero raw read",
+      command: "bash -c 'cat \"$0\"' data/raw/input.csv"
+    },
+    {
+      name: "bash shell wrapper positional at raw read",
+      command: "bash -c 'cat \"$@\"' -- data/raw/input.csv"
+    },
+    {
+      name: "bash shell wrapper positional star raw read",
+      command: "bash -c 'cat \"$*\"' -- data/raw/input.csv"
+    },
+    {
+      name: "implicit positional loop raw read",
+      command: "bash -c 'for p; do cat \"$p\"; done' -- data/raw/input.csv"
+    },
+    {
       name: "workspace script heredoc with raw mutation text",
       command: "cat > workspace/tasks/TASK-001/script.sh <<'SH'\nrm data/raw/input.csv\nSH"
     },
@@ -675,6 +861,22 @@ describe("data/raw write deny policy", () => {
     {
       name: "single-quoted glob-like non-raw path mutation",
       command: "rm 'data/ra[w]/input.csv'"
+    },
+    {
+      name: "declare benign non-raw variable write",
+      command: 'declare OUT=workspace/tasks/TASK-001/out.csv; touch "$OUT"'
+    },
+    {
+      name: "readonly benign non-raw variable write",
+      command: 'readonly OUT=workspace/tasks/TASK-001/out.csv; touch "$OUT"'
+    },
+    {
+      name: "large command without raw path text",
+      command: largeNoRawCommand
+    },
+    {
+      name: "large non-executable workspace heredoc with raw mutation text",
+      command: largeNonExecutableHeredocCommand
     }
   ] as const;
 
@@ -687,32 +889,6 @@ describe("data/raw write deny policy", () => {
       expect(bashTool.calls).toBe(1);
     });
   }
-
-  test("denies mutation through a workspace symlink alias that resolves to data/raw", async () => {
-    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-raw-alias-"));
-    tempDirs.push(workspaceRoot);
-
-    const rawDir = path.join(workspaceRoot, "data", "raw");
-    const scratchDir = path.join(
-      workspaceRoot,
-      "workspace",
-      "tasks",
-      "TASK-001",
-      "scratch"
-    );
-    await mkdir(rawDir, { recursive: true });
-    await mkdir(scratchDir, { recursive: true });
-    await symlink(rawDir, path.join(scratchDir, "raw-link"), "dir");
-
-    const { result, bashTool } = await runWrappedBashCommand(
-      "touch workspace/tasks/TASK-001/scratch/raw-link/input.csv",
-      { workDir: workspaceRoot }
-    );
-
-    expect(result?.success).toBe(false);
-    expect(bashTool.calls).toBe(0);
-    expect(parseDeniedPayload(result).rule_id).toBe(DATA_RAW_WRITE_DENY_RULE_ID);
-  });
 
   test("audit helper appends a minimal row under the no-TaskCard fixture path", async () => {
     const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-"));

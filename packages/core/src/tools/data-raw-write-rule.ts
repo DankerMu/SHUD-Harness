@@ -1,4 +1,3 @@
-import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import type { PolicyGateToolCall, PolicyRule } from "./policy-gate-core";
 
@@ -23,14 +22,20 @@ const DESTINATION_RAW_PATH_COMMANDS = new Set(["cp", "install", "ln", "rsync"]);
 const ANY_ENDPOINT_RAW_PATH_COMMANDS = new Set(["mv"]);
 const READ_ONLY_RAW_PATH_COMMANDS = new Set([
   "cat",
+  "du",
+  "file",
   "grep",
   "head",
   "ls",
+  "mapfile",
+  "read",
   "sha256sum",
   "stat",
   "tail",
+  "test",
   "wc"
 ]);
+const ASSIGNMENT_BUILTIN_COMMANDS = new Set(["declare", "export", "readonly", "typeset"]);
 const WRAPPER_COMMANDS = new Set(["command", "doas", "env", "nice", "nohup", "sudo", "time"]);
 const WRAPPER_OPTIONS_WITH_OPERANDS = new Map<string, ReadonlySet<string>>([
   ["doas", new Set(["-u"])],
@@ -71,12 +76,14 @@ type PathCandidate = {
 type PathEvaluationContext = {
   cwd?: string;
   cwdKnown: boolean;
+  pathAliases: ReadonlyMap<string, string>;
 };
 
 type ShellScanState = {
   variables: Map<string, string>;
   cwd?: string;
   cwdKnown: boolean;
+  pathAliases: Map<string, string>;
   scanBudget: ShellScanBudget;
 };
 
@@ -95,6 +102,8 @@ type SegmentCommandScanState = ShellScanState & {
   commandIndex?: number;
   uncertainWrapper: boolean;
 };
+
+const EMPTY_PATH_ALIASES = new Map<string, string>();
 
 export const DATA_RAW_WRITE_DENY_RULE: PolicyRule = {
   ruleId: DATA_RAW_WRITE_DENY_RULE_ID,
@@ -152,6 +161,7 @@ export function findProtectedDataRawWriteTarget(
     variables: new Map(initialVariables),
     cwd: normalizeInitialCwd(workDir),
     cwdKnown: true,
+    pathAliases: new Map(),
     scanBudget: makeShellScanBudget()
   });
 }
@@ -160,16 +170,18 @@ function findProtectedDataRawWriteTargetWithState(
   command: string,
   state: ShellScanState
 ): string | undefined {
-  if (!reserveShellCommandScanBudget(command, state.scanBudget)) {
-    return "data/raw";
-  }
-
   const heredocTarget = findExecutableHeredocRawWriteTarget(command, state);
   if (heredocTarget) {
     return heredocTarget;
   }
 
   const commandWithoutHeredocBodies = stripHeredocBodies(command);
+  if (!reserveShellCommandScanBudget(commandWithoutHeredocBodies, state.scanBudget)) {
+    return hasProtectedRawPathText(commandWithoutHeredocBodies) &&
+      hasShellWriteIntentMarker(commandWithoutHeredocBodies)
+      ? "data/raw"
+      : undefined;
+  }
 
   const substitutionTarget = findCommandSubstitutionWriteTarget(commandWithoutHeredocBodies, state);
   if (substitutionTarget) {
@@ -179,6 +191,14 @@ function findProtectedDataRawWriteTargetWithState(
   const groupedTarget = findGroupedCommandWriteTarget(commandWithoutHeredocBodies, state);
   if (groupedTarget) {
     return groupedTarget;
+  }
+
+  const positionalLoopTarget = findImplicitPositionalLoopWriteTarget(
+    commandWithoutHeredocBodies,
+    state
+  );
+  if (positionalLoopTarget) {
+    return positionalLoopTarget;
   }
 
   const tokens = tokenizeShellCommand(commandWithoutHeredocBodies);
@@ -200,6 +220,7 @@ function findProtectedDataRawWriteTargetWithState(
     }
 
     updateCwdFromCdSegment(expandedSegment, state);
+    recordSymlinkAlias(expandedSegment, state);
     recordVariableAssignments(expandedSegment, state.variables);
   }
 
@@ -272,6 +293,7 @@ function findGroupedCommandWriteTarget(
       variables: new Map(state.variables),
       cwd: state.cwd,
       cwdKnown: state.cwdKnown,
+      pathAliases: new Map(state.pathAliases),
       scanBudget: state.scanBudget
     };
     const target = findProtectedDataRawWriteTargetWithState(group.body, groupState);
@@ -474,10 +496,19 @@ function findMutationCommandTarget(
       return target;
     }
   }
+  if (command === "trap") {
+    const target = findTrapCommandTarget(args, commandState);
+    if (target) {
+      return target;
+    }
+  }
   if (isExecutableCodeStringCommand(command)) {
     const target = findExecutableCodeStringRawMutationTarget(command, args, commandState);
     if (target) {
       return target;
+    }
+    if (hasExecutableCodeStringArgument(command, args)) {
+      return undefined;
     }
   }
   if (ANY_RAW_PATH_MUTATION_COMMANDS.has(command)) {
@@ -524,6 +555,12 @@ function findMutationCommandTarget(
       return target;
     }
   }
+  if (command === "sed") {
+    const target = findSedScriptWriteTarget(args, context);
+    if (target) {
+      return target;
+    }
+  }
   if (command === "curl") {
     const target = findCurlOutputTarget(args, context);
     if (target) {
@@ -531,6 +568,10 @@ function findMutationCommandTarget(
     }
   }
   if (command === "find") {
+    const execTarget = findFindExecMutationTarget(args, commandState);
+    if (execTarget) {
+      return execTarget;
+    }
     const target = findFindMutationTarget(args, context);
     if (target) {
       return target;
@@ -560,6 +601,12 @@ function findMutationCommandTarget(
       return target;
     }
   }
+  if (command === "awk") {
+    const target = findAwkScriptWriteTarget(args, context);
+    if (target) {
+      return target;
+    }
+  }
   if (SHELL_COMMANDS.has(command)) {
     const shellInvocation = findShellCommandInvocation(args);
     if (shellInvocation) {
@@ -569,6 +616,7 @@ function findMutationCommandTarget(
           variables: shellVariables,
           cwd: commandState.cwd,
           cwdKnown: commandState.cwdKnown,
+          pathAliases: new Map(commandState.pathAliases),
           scanBudget: commandState.scanBudget
         });
       if (target) {
@@ -616,6 +664,7 @@ function buildSegmentCommandScanState(
     variables: new Map(state.variables),
     cwd: state.cwd,
     cwdKnown: state.cwdKnown,
+    pathAliases: new Map(state.pathAliases),
     scanBudget: state.scanBudget,
     uncertainWrapper: false
   };
@@ -842,6 +891,12 @@ function findProtectedRawPathCandidate(
   if (isProtectedDataRawCandidate(wholeTokenCandidate, context)) {
     return wholeTokenCandidate;
   }
+  const embeddedCandidate = findFirstProtectedRawPathInText(token.value, context, {
+    allowRelativeFallback: false
+  });
+  if (embeddedCandidate) {
+    return pathCandidateFromToken(token, embeddedCandidate);
+  }
 
   if (!token.value.startsWith("-")) {
     return undefined;
@@ -884,6 +939,9 @@ function isReadOnlySafeRawPathCommand(
   args: readonly ShellToken[],
   context: PathEvaluationContext
 ): boolean {
+  if (isInputOnlyRedirectCommand(command)) {
+    return true;
+  }
   if (READ_ONLY_RAW_PATH_COMMANDS.has(command)) {
     return true;
   }
@@ -912,6 +970,10 @@ function isReadOnlySafeRawPathCommand(
   return command === "cp" && isCopyOutOfRawCommand(args, context);
 }
 
+function isInputOnlyRedirectCommand(command: string): boolean {
+  return command === "<" || command === "0<" || command.startsWith("<") || command.startsWith("0<");
+}
+
 function isReadOnlyAwkCommand(args: readonly ShellToken[]): boolean {
   return !args.some((arg) => {
     if (!arg.fullyQuoted && (arg.value === ">" || arg.value === ">>")) {
@@ -919,6 +981,46 @@ function isReadOnlyAwkCommand(args: readonly ShellToken[]): boolean {
     }
     return /(^|[^A-Za-z_])(?:system|close)\s*\(|>{1,2}/.test(arg.value);
   });
+}
+
+function findAwkScriptWriteTarget(
+  args: readonly ShellToken[],
+  context: PathEvaluationContext
+): string | undefined {
+  for (const script of findAwkScriptArguments(args)) {
+    const target = findFirstProtectedRawPathInText(script.value, context, {
+      allowRelativeFallback: false
+    });
+    if (!target) {
+      continue;
+    }
+    if (/(^|[^A-Za-z_])system\s*\(|>{1,2}/.test(script.value)) {
+      return target;
+    }
+  }
+
+  return undefined;
+}
+
+function findAwkScriptArguments(args: readonly ShellToken[]): ShellToken[] {
+  const scripts: ShellToken[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg.value === "-f" || arg.value === "-v") {
+      index += 1;
+      continue;
+    }
+    if (arg.value.startsWith("-f") || arg.value.startsWith("-v")) {
+      continue;
+    }
+    if (arg.value.startsWith("-")) {
+      continue;
+    }
+    scripts.push(arg);
+    break;
+  }
+
+  return scripts;
 }
 
 function isCopyOutOfRawCommand(
@@ -1098,6 +1200,61 @@ function isSedInPlaceOption(arg: ShellToken): boolean {
   );
 }
 
+function findSedScriptWriteTarget(
+  args: readonly ShellToken[],
+  context: PathEvaluationContext
+): string | undefined {
+  for (const script of findSedScriptArguments(args)) {
+    const target = findFirstProtectedRawPathInText(script.value, context, {
+      allowRelativeFallback: false
+    });
+    if (!target) {
+      continue;
+    }
+    if (/(^|[;{}\n])\s*(?:s\b|[A-Za-z0-9,$!\/\\^.*+ -])*w\s+/.test(script.value)) {
+      return target;
+    }
+  }
+
+  return undefined;
+}
+
+function findSedScriptArguments(args: readonly ShellToken[]): ShellToken[] {
+  const scripts: ShellToken[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg.value === "-e" || arg.value === "--expression") {
+      if (args[index + 1]) {
+        scripts.push(args[index + 1]);
+      }
+      index += 1;
+      continue;
+    }
+    if (arg.value.startsWith("--expression=")) {
+      scripts.push(pathCandidateToken(arg, arg.value.slice("--expression=".length)));
+      continue;
+    }
+    if (arg.value === "-f" || arg.value === "--file") {
+      index += 1;
+      continue;
+    }
+    if (arg.value.startsWith("--file=")) {
+      continue;
+    }
+    if (arg.value.startsWith("-")) {
+      continue;
+    }
+    scripts.push(arg);
+    break;
+  }
+
+  return scripts;
+}
+
+function pathCandidateToken(token: ShellToken, value: string): ShellToken {
+  return { ...token, value };
+}
+
 function findFindMutationTarget(
   args: readonly ShellToken[],
   context: PathEvaluationContext
@@ -1138,7 +1295,7 @@ function findGitCloneTarget(
 function protectedCurrentWorkingDirectoryTarget(
   context: PathEvaluationContext
 ): string | undefined {
-  return context.cwdKnown && context.cwd && isProtectedDataRawPathVariant(context.cwd)
+  return context.cwdKnown && context.cwd && isProtectedDataRawPath(context.cwd, context)
     ? context.cwd
     : undefined;
 }
@@ -1330,9 +1487,63 @@ function findEvalCommandTarget(
         variables: new Map(state.variables),
         cwd: context.cwd,
         cwdKnown: context.cwdKnown,
+        pathAliases: new Map(context.pathAliases),
         scanBudget: state.scanBudget
       })
     : undefined;
+}
+
+function findTrapCommandTarget(
+  args: readonly ShellToken[],
+  state: ShellScanState
+): string | undefined {
+  const action = args.find((arg) => !arg.value.startsWith("-"));
+  if (!action || action.value === "-") {
+    return undefined;
+  }
+
+  return findProtectedDataRawWriteTargetWithState(action.value, {
+    variables: new Map(state.variables),
+    cwd: state.cwd,
+    cwdKnown: state.cwdKnown,
+    pathAliases: new Map(state.pathAliases),
+    scanBudget: state.scanBudget
+  });
+}
+
+function findFindExecMutationTarget(
+  args: readonly ShellToken[],
+  state: ShellScanState
+): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    if (!["-exec", "-execdir", "-ok", "-okdir"].includes(args[index].value)) {
+      continue;
+    }
+
+    const endIndex = findFindExecTerminatorIndex(args, index + 1);
+    const execSegment = args.slice(index + 1, endIndex);
+    if (execSegment.length === 0) {
+      continue;
+    }
+
+    const target = findMutationCommandTarget(execSegment, state);
+    if (target) {
+      return target;
+    }
+    index = endIndex;
+  }
+
+  return undefined;
+}
+
+function findFindExecTerminatorIndex(args: readonly ShellToken[], startIndex: number): number {
+  for (let index = startIndex; index < args.length; index += 1) {
+    if (args[index].value === ";" || args[index].value === "+") {
+      return index;
+    }
+  }
+
+  return args.length;
 }
 
 function isExecutableCodeStringCommand(command: string): boolean {
@@ -1379,6 +1590,14 @@ function findExecutableCodeStringRawMutationTarget(
   }
 
   return undefined;
+}
+
+function hasExecutableCodeStringArgument(command: string, args: readonly ShellToken[]): boolean {
+  if (command.toLowerCase() === "deno" && args[0]?.value === "eval") {
+    return true;
+  }
+
+  return args.some((_arg, index) => findExecutableCodeStringAt(args, index) !== undefined);
 }
 
 function findDenoEvalRawMutationTarget(
@@ -1469,7 +1688,7 @@ function shellCommandInvocationAt(
 
   return {
     command,
-    positionalArgs: args.slice(commandIndex + 2)
+    positionalArgs: args.slice(commandIndex + 1)
   };
 }
 
@@ -1477,9 +1696,66 @@ function bindShellPositionalParameters(
   variables: Map<string, string>,
   positionalArgs: readonly ShellToken[]
 ): void {
-  for (let index = 0; index < positionalArgs.length; index += 1) {
-    variables.set(String(index + 1), positionalArgs[index].value);
+  for (const key of [...variables.keys()]) {
+    if (/^(?:[0-9]+|[@*])$/.test(key)) {
+      variables.delete(key);
+    }
   }
+
+  if (positionalArgs.length > 0) {
+    variables.set("0", positionalArgs[0].value);
+  }
+
+  const shellParameters = positionalArgs.slice(1);
+  for (let index = 0; index < shellParameters.length; index += 1) {
+    variables.set(String(index + 1), shellParameters[index].value);
+  }
+  const joinedParameters = shellParameters.map((arg) => arg.value).join(" ");
+  variables.set("@", joinedParameters);
+  variables.set("*", joinedParameters);
+}
+
+function findImplicitPositionalLoopWriteTarget(
+  command: string,
+  state: ShellScanState
+): string | undefined {
+  const positionalValues = knownShellPositionalValues(state.variables);
+  if (positionalValues.length === 0 || !/\bfor\s+[A-Za-z_][A-Za-z0-9_]*\s*;?\s*do\b/.test(command)) {
+    return undefined;
+  }
+
+  const loopPattern = /\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*do\b([\s\S]*?)\bdone\b/g;
+  let match: RegExpExecArray | null;
+  while ((match = loopPattern.exec(command)) !== null) {
+    const [, loopVariable, body] = match;
+    for (const positionalValue of positionalValues) {
+      const loopState: ShellScanState = {
+        variables: new Map(state.variables),
+        cwd: state.cwd,
+        cwdKnown: state.cwdKnown,
+        pathAliases: new Map(state.pathAliases),
+        scanBudget: state.scanBudget
+      };
+      loopState.variables.set(loopVariable, positionalValue);
+      const target = findProtectedDataRawWriteTargetWithState(body, loopState);
+      if (target) {
+        return target;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function knownShellPositionalValues(variables: ReadonlyMap<string, string>): string[] {
+  return [...variables.entries()]
+    .map(([key, value]) => {
+      const numericKey = /^[0-9]+$/.test(key) ? Number(key) : undefined;
+      return numericKey !== undefined && numericKey > 0 ? { index: numericKey, value } : undefined;
+    })
+    .filter((entry): entry is { index: number; value: string } => entry !== undefined)
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.value);
 }
 
 function findExecutableHeredocRawWriteTarget(
@@ -1599,6 +1875,7 @@ function findExecutableStdinRawWriteTarget(
       variables: new Map(commandState.variables),
       cwd: commandState.cwd,
       cwdKnown: commandState.cwdKnown,
+      pathAliases: new Map(commandState.pathAliases),
       scanBudget: commandState.scanBudget
     });
   }
@@ -1641,6 +1918,82 @@ function updateCwdFromCdSegment(segment: readonly ShellToken[], state: ShellScan
   applyCwdTargetToState(target, state);
 }
 
+function recordSymlinkAlias(segment: readonly ShellToken[], state: ShellScanState): void {
+  const commandState = buildSegmentCommandScanState(segment, state);
+  const { commandIndex } = commandState;
+  if (commandIndex === undefined) {
+    return;
+  }
+
+  const command = path.posix.basename(segment[commandIndex].value);
+  if (command !== "ln") {
+    return;
+  }
+
+  const alias = parseLnSymlinkAlias(segment.slice(commandIndex + 1), commandState);
+  if (!alias) {
+    return;
+  }
+
+  state.pathAliases.set(alias.linkPath, alias.targetPath);
+}
+
+function parseLnSymlinkAlias(
+  args: readonly ShellToken[],
+  state: Pick<ShellScanState, "cwd" | "cwdKnown">
+): { linkPath: string; targetPath: string } | undefined {
+  let symbolic = false;
+  const operands: ShellToken[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index].value;
+    if (arg === "--") {
+      operands.push(...args.slice(index + 1));
+      break;
+    }
+    if (arg === "-t" || arg === "--target-directory") {
+      return undefined;
+    }
+    if (arg.startsWith("--target-directory=")) {
+      return undefined;
+    }
+    if (arg === "-s" || arg === "--symbolic") {
+      symbolic = true;
+      continue;
+    }
+    if (arg.startsWith("-") && !arg.startsWith("--")) {
+      symbolic = symbolic || arg.slice(1).includes("s");
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      continue;
+    }
+    operands.push(args[index]);
+  }
+
+  if (!symbolic || operands.length !== 2) {
+    return undefined;
+  }
+
+  const [target, link] = operands;
+  if (!isSimpleLiteralPathValue(target.value) || !isSimpleLiteralPathValue(link.value)) {
+    return undefined;
+  }
+
+  const resolvedLink = resolveShellPathWithKnowledge(state.cwd, state.cwdKnown, link.value);
+  if (!resolvedLink.cwdKnown || !resolvedLink.cwd) {
+    return undefined;
+  }
+
+  const linkPath = path.resolve(resolvedLink.cwd);
+  const targetPath =
+    path.isAbsolute(target.value) || path.posix.isAbsolute(target.value)
+      ? path.resolve(target.value)
+      : path.resolve(path.dirname(linkPath), target.value);
+
+  return { linkPath, targetPath };
+}
+
 function isSimpleLiteralCdTarget(target: ShellToken): boolean {
   return isSimpleLiteralPathValue(target.value);
 }
@@ -1668,10 +2021,15 @@ function normalizeInitialCwd(workDir: string | undefined): string {
   return path.resolve(workDir ?? process.cwd());
 }
 
-function pathContextFromState(state: Pick<ShellScanState, "cwd" | "cwdKnown">): PathEvaluationContext {
+function pathContextFromState(
+  state: Pick<ShellScanState, "cwd" | "cwdKnown"> & {
+    pathAliases?: ReadonlyMap<string, string>;
+  }
+): PathEvaluationContext {
   return {
     cwd: state.cwd,
-    cwdKnown: state.cwdKnown
+    cwdKnown: state.cwdKnown,
+    pathAliases: state.pathAliases ?? EMPTY_PATH_ALIASES
   };
 }
 
@@ -1710,6 +2068,9 @@ function findExecutableCodeRawMutationTargetInText(
   const scanResult = findProtectedRawPathsInText(value, context, scanBudget);
   if (scanResult.exceeded && hasExecutableCodeWriteIntentMarker(value)) {
     return scanResult.targets[0] ?? "data/raw";
+  }
+  if (scanResult.targets.length > 0 && hasExecutableCodeWriteIntentMarker(value)) {
+    return scanResult.targets[0];
   }
 
   for (const target of scanResult.targets) {
@@ -1754,6 +2115,35 @@ function findProtectedRawPathsInText(
   return { targets, exceeded: false };
 }
 
+function findFirstProtectedRawPathInText(
+  value: string,
+  context: PathEvaluationContext,
+  options: { allowRelativeFallback?: boolean } = {}
+): string | undefined {
+  const rawPathPattern = /(?:file:\/\/)?[A-Za-z0-9_./@%:+-]*data\/raw(?:\/[A-Za-z0-9_./@%:+-]*)?/gi;
+  let match: RegExpExecArray | null;
+  while ((match = rawPathPattern.exec(value)) !== null) {
+    const candidate = match[0];
+    if (isProtectedDataRawPath(candidate, context)) {
+      return candidate;
+    }
+
+    if (options.allowRelativeFallback === false) {
+      continue;
+    }
+
+    const rawPathIndex = candidate.toLowerCase().indexOf("data/raw");
+    if (rawPathIndex !== -1) {
+      const relativeCandidate = candidate.slice(rawPathIndex);
+      if (isProtectedDataRawPath(relativeCandidate, context)) {
+        return relativeCandidate;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function reserveExecutableCodeScanBudget(
   value: string,
   scanBudget: ShellScanBudget
@@ -1771,11 +2161,24 @@ function hasProtectedRawPathText(value: string): boolean {
   return value.toLowerCase().includes("data/raw");
 }
 
+function hasShellWriteIntentMarker(value: string): boolean {
+  return (
+    /(?:^|[\s;&|(){}])(?:rm|touch|truncate|mkdir|rmdir|chmod|chown|mv|cp|install|ln|rsync|dd|tee|curl|wget|tar|unzip|git|sed|awk|find|eval|bash|sh|zsh|python|python\d+(?:\.\d+)?|node|bun|deno|r|rscript|ruby|php|perl)\b/i.test(
+      value
+    ) || /(?:^|\s)(?:>|>>|>\||1>|1>>|2>|2>>|&>|&>>|>&)\s*/.test(value)
+  );
+}
+
 function hasExecutableCodeWriteIntentMarker(value: string): boolean {
   return (
-    /\b(?:open|writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream|unlink|unlinkSync|rm|rmSync|remove|removeSync|rename|renameSync|mkdir|mkdirSync|rmdir|rmdirSync|truncate|truncateSync|writeLines|write\.csv|write\.table|saveRDS|save)\s*\(/i.test(
+    /\bopen\s*\([^)]*(?:,\s*(?:mode\s*=\s*)?["'][^"']*[wax+][^"']*["']|\bmode\s*=\s*["'][^"']*[wax+][^"']*["']|["']>{1,2}["'])/i.test(
       value
-    ) || /\.write_(?:text|bytes)\s*\(/i.test(value)
+    ) ||
+    /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream|unlink|unlinkSync|rm|rmSync|remove|removeSync|rename|renameSync|mkdir|mkdirSync|rmdir|rmdirSync|truncate|truncateSync|writeLines|write\.csv|write\.table|saveRDS|save|file_put_contents)\s*\(/i.test(
+      value
+    ) ||
+    /\b(?:Bun\.write|File\.write)\s*\(/i.test(value) ||
+    /\.write_(?:text|bytes)\s*\(/i.test(value)
   );
 }
 
@@ -1816,7 +2219,7 @@ function expandTokenParameterReferences(
     expandBracedParameterExpression(match, expression, variables)
   );
   const expandedValue = expandedBraces.replace(
-    /\$([A-Za-z_][A-Za-z0-9_]*|[0-9]+)/g,
+    /\$([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])/g,
     (match, variableName: string) => variables.get(variableName) ?? match
   );
 
@@ -1828,12 +2231,39 @@ function expandBracedParameterExpression(
   expression: string,
   variables: ReadonlyMap<string, string>
 ): string {
-  const simple = expression.match(/^([A-Za-z_][A-Za-z0-9_]*|[0-9]+)$/);
+  const simple = expression.match(/^([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])$/);
   if (simple) {
     return variables.get(simple[1]) ?? match;
   }
 
-  const slice = expression.match(/^([A-Za-z_][A-Za-z0-9_]*|[0-9]+):([0-9]+)(?::([0-9]+))?$/);
+  const prefixOrSuffixRemoval = expression.match(
+    /^([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])(#{1,2}|%{1,2})(.+)$/
+  );
+  if (prefixOrSuffixRemoval) {
+    const value = variables.get(prefixOrSuffixRemoval[1]);
+    return value === undefined
+      ? match
+      : applyShellParameterTrim(value, prefixOrSuffixRemoval[2], prefixOrSuffixRemoval[3]);
+  }
+
+  const substitution = expression.match(
+    /^([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])(\/{1,2})([^/]*)\/(.*)$/
+  );
+  if (substitution) {
+    const value = variables.get(substitution[1]);
+    return value === undefined
+      ? match
+      : applyShellParameterSubstitution(
+          value,
+          substitution[3],
+          substitution[4],
+          substitution[2] === "//"
+        );
+  }
+
+  const slice = expression.match(
+    /^([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*]):([0-9]+)(?::([0-9]+))?$/
+  );
   if (!slice) {
     return match;
   }
@@ -1846,6 +2276,79 @@ function expandBracedParameterExpression(
   const start = Number(slice[2]);
   const length = slice[3] === undefined ? undefined : Number(slice[3]);
   return length === undefined ? value.slice(start) : value.slice(start, start + length);
+}
+
+function applyShellParameterTrim(value: string, operator: string, pattern: string): string {
+  if (operator.startsWith("#")) {
+    const indexes =
+      operator === "##"
+        ? Array.from({ length: value.length + 1 }, (_item, index) => value.length - index)
+        : Array.from({ length: value.length + 1 }, (_item, index) => index);
+    for (const index of indexes) {
+      if (shellPatternMatchesWholeValue(value.slice(0, index), pattern)) {
+        return value.slice(index);
+      }
+    }
+    return value;
+  }
+
+  const indexes =
+    operator === "%%"
+      ? Array.from({ length: value.length + 1 }, (_item, index) => index)
+      : Array.from({ length: value.length + 1 }, (_item, index) => value.length - index);
+  for (const index of indexes) {
+    if (shellPatternMatchesWholeValue(value.slice(index), pattern)) {
+      return value.slice(0, index);
+    }
+  }
+  return value;
+}
+
+function applyShellParameterSubstitution(
+  value: string,
+  pattern: string,
+  replacement: string,
+  global: boolean
+): string {
+  if (pattern.length === 0) {
+    return value;
+  }
+
+  const regex = shellPatternToRegExp(pattern, global ? "g" : undefined);
+  return regex ? value.replace(regex, replacement) : value.replace(pattern, replacement);
+}
+
+function shellPatternMatchesWholeValue(value: string, pattern: string): boolean {
+  const regex = shellPatternToRegExp(pattern, undefined, true);
+  return regex ? regex.test(value) : value === pattern;
+}
+
+function shellPatternToRegExp(
+  pattern: string,
+  flags?: string,
+  anchored = false
+): RegExp | undefined {
+  let source = "";
+  let changed = false;
+  for (const char of pattern) {
+    if (char === "*") {
+      source += "[\\s\\S]*";
+      changed = true;
+      continue;
+    }
+    if (char === "?") {
+      source += "[\\s\\S]";
+      changed = true;
+      continue;
+    }
+    source += escapeRegExp(char);
+  }
+
+  try {
+    return new RegExp(anchored ? `^${source}$` : source, flags);
+  } catch {
+    return changed ? /[\s\S]*/ : undefined;
+  }
 }
 
 function recordVariableAssignments(
@@ -1861,12 +2364,12 @@ function recordVariableAssignments(
   }
 
   const command = path.posix.basename(segment[commandIndex].value);
-  if (command !== "export") {
+  if (!ASSIGNMENT_BUILTIN_COMMANDS.has(command)) {
     return;
   }
 
   for (const arg of segment.slice(commandIndex + 1)) {
-    if (arg.value.startsWith("-")) {
+    if (arg.value === "--" || arg.value.startsWith("-")) {
       continue;
     }
     recordVariableAssignment(arg, variables);
@@ -1912,9 +2415,6 @@ function isProtectedDataRawCandidate(
   if (isProtectedDataRawPath(candidate.value, context)) {
     return true;
   }
-  if (isProtectedDataRawAlias(candidate.value, context)) {
-    return true;
-  }
   if (
     !candidate.fullyQuoted &&
     expandShellBraceAlternatives(candidate.value).some((expanded) =>
@@ -1927,43 +2427,9 @@ function isProtectedDataRawCandidate(
   return canUnresolvedShellPathResolveToProtectedRaw(candidate, context);
 }
 
-function isProtectedDataRawAlias(candidate: string, context: PathEvaluationContext): boolean {
-  const localCandidate = normalizeLocalPathCandidate(candidate);
-  if (!localCandidate || !context.cwdKnown) {
-    return false;
-  }
-
-  const absoluteCandidate =
-    context.cwd && isRelativeLocalPath(localCandidate)
-      ? path.resolve(context.cwd, localCandidate)
-      : path.resolve(localCandidate);
-  const resolvedCandidate = resolveExistingPathAlias(absoluteCandidate);
-  return resolvedCandidate ? isProtectedDataRawPathVariant(resolvedCandidate) : false;
-}
-
-function resolveExistingPathAlias(absoluteCandidate: string): string | undefined {
-  let existingPrefix = absoluteCandidate;
-  const suffixSegments: string[] = [];
-
-  while (!existsSync(existingPrefix)) {
-    const parent = path.dirname(existingPrefix);
-    if (parent === existingPrefix) {
-      return undefined;
-    }
-    suffixSegments.unshift(path.basename(existingPrefix));
-    existingPrefix = parent;
-  }
-
-  try {
-    return path.join(realpathSync(existingPrefix), ...suffixSegments);
-  } catch {
-    return undefined;
-  }
-}
-
 function isProtectedDataRawPath(
   candidate: string,
-  context: PathEvaluationContext = { cwdKnown: false }
+  context: PathEvaluationContext = { cwdKnown: false, pathAliases: EMPTY_PATH_ALIASES }
 ): boolean {
   return candidatePathVariants(candidate, context).some((variant) =>
     isProtectedDataRawPathVariant(variant)
@@ -1992,7 +2458,10 @@ function candidatePathVariants(
   }
 
   if (context.cwdKnown && context.cwd && isRelativeLocalPath(localCandidate)) {
-    return [path.resolve(context.cwd, localCandidate)];
+    return withDeterministicAliasVariants(
+      [path.resolve(context.cwd, localCandidate)],
+      context.pathAliases
+    );
   }
 
   const variants = [localCandidate];
@@ -2000,7 +2469,45 @@ function candidatePathVariants(
     variants.push(path.resolve(context.cwd, localCandidate));
   }
 
-  return variants;
+  return withDeterministicAliasVariants(variants, context.pathAliases);
+}
+
+function withDeterministicAliasVariants(
+  variants: readonly string[],
+  pathAliases: ReadonlyMap<string, string>
+): string[] {
+  const expanded = [...variants];
+  for (const variant of variants) {
+    expanded.push(...resolveDeterministicPathAliases(variant, pathAliases));
+  }
+  return expanded;
+}
+
+function resolveDeterministicPathAliases(
+  candidate: string,
+  pathAliases: ReadonlyMap<string, string>
+): string[] {
+  if (pathAliases.size === 0 || !path.isAbsolute(candidate)) {
+    return [];
+  }
+
+  const resolved: string[] = [];
+  const normalizedCandidate = path.resolve(candidate);
+  for (const [aliasPath, targetPath] of pathAliases) {
+    if (!isPathEqualOrInside(normalizedCandidate, aliasPath)) {
+      continue;
+    }
+
+    const suffix = path.relative(aliasPath, normalizedCandidate);
+    resolved.push(suffix ? path.resolve(targetPath, suffix) : targetPath);
+  }
+
+  return resolved;
+}
+
+function isPathEqualOrInside(candidatePath: string, containingPath: string): boolean {
+  const relativePath = path.relative(containingPath, candidatePath);
+  return relativePath.length === 0 || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
 }
 
 function normalizeLocalPathCandidate(candidate: string): string | undefined {
@@ -2535,6 +3042,7 @@ function findCommandSubstitutionWriteTarget(
         variables: new Map(state.variables),
         cwd: state.cwd,
         cwdKnown: state.cwdKnown,
+        pathAliases: new Map(state.pathAliases),
         scanBudget: state.scanBudget
       });
       if (target) {
@@ -2554,6 +3062,7 @@ function findCommandSubstitutionWriteTarget(
         variables: new Map(state.variables),
         cwd: state.cwd,
         cwdKnown: state.cwdKnown,
+        pathAliases: new Map(state.pathAliases),
         scanBudget: state.scanBudget
       });
       if (target) {
@@ -2573,6 +3082,7 @@ function findCommandSubstitutionWriteTarget(
         variables: new Map(state.variables),
         cwd: state.cwd,
         cwdKnown: state.cwdKnown,
+        pathAliases: new Map(state.pathAliases),
         scanBudget: state.scanBudget
       });
       if (target) {
