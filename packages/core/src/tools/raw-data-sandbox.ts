@@ -5,13 +5,13 @@ import {
   mkdir,
   mkdtemp,
   open,
-  readdir,
+  opendir,
   realpath,
   rm,
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, parse, resolve } from "node:path";
 import { BaseTool, BashTool } from "@zero-os/core";
 import type { FuseRule, ToolContext, ToolResult } from "@zero-os/shared";
 import type { ErrorRecord } from "../domain/schemas";
@@ -37,12 +37,14 @@ export interface RawDataSeatbeltProfileOptions {
   allowedWriteRoots: readonly string[];
   tempRoot?: string;
   profileRoot?: string;
+  protectedEvidencePaths?: readonly string[];
 }
 
 export interface RawDataSeatbeltProfileMetadata {
   profileVersion: typeof RAW_DATA_SANDBOX_PROFILE_VERSION;
   profileId: string;
   protectedRawPaths: readonly string[];
+  protectedEvidencePaths: readonly string[];
   allowedWriteRoots: readonly string[];
   tempRoot: string;
   profileRoot?: string;
@@ -85,6 +87,7 @@ export interface AppendPolicyGateAuditRowOptions {
   row: PolicyGateAuditRow;
   taskId?: string;
   fileName?: string;
+  protectedRawPaths?: readonly string[];
 }
 
 export interface RawDataDenialPayload {
@@ -101,7 +104,7 @@ export interface RawDataDenialPayload {
   error_record: ErrorRecord;
 }
 
-export type RawDataGuardClass = "authority" | "advisory";
+export type RawDataGuardClass = "authority" | "capability";
 
 export interface RawDataDenialEvidence {
   payload: RawDataDenialPayload;
@@ -144,6 +147,9 @@ export async function buildRawDataSeatbeltProfile(
   }
 
   const protectedRawPaths = await canonicalizePathSet(options.protectedRawPaths);
+  const protectedEvidencePaths = options.protectedEvidencePaths
+    ? await canonicalizePathSet(options.protectedEvidencePaths)
+    : [];
   const allowedWriteRoots = await canonicalizePathSet(options.allowedWriteRoots);
   const tempRoot = await canonicalizeExistingRootOutsideProtectedRaw(
     options.tempRoot ?? tmpdir(),
@@ -151,7 +157,7 @@ export async function buildRawDataSeatbeltProfile(
     "seatbelt temp root"
   );
   const profileRoot = options.profileRoot
-    ? await canonicalizeDirectoryOutsideProtectedRaw(
+    ? await ensureDirectoryOutsideProtectedRaw(
         options.profileRoot,
         protectedRawPaths,
         "seatbelt profile root"
@@ -161,6 +167,7 @@ export async function buildRawDataSeatbeltProfile(
   const idInput = JSON.stringify({
     profileVersion: RAW_DATA_SANDBOX_PROFILE_VERSION,
     protectedRawPaths,
+    protectedEvidencePaths,
     allowedWriteRoots,
     tempRoot
   });
@@ -182,9 +189,10 @@ export async function buildRawDataSeatbeltProfile(
     ...writeAllowRoots.map(
       (allowedRoot) => `(allow file-write* (subpath ${quoteSeatbeltString(allowedRoot)}))`
     ),
-    ...protectedRawPaths.map(
-      (protectedPath) => `(deny file-write* (subpath ${quoteSeatbeltString(protectedPath)}))`
-    )
+    ...[...protectedRawPaths, ...protectedEvidencePaths].flatMap((protectedPath) => [
+      `(deny file-write* (literal ${quoteSeatbeltString(protectedPath)}))`,
+      `(deny file-write* (subpath ${quoteSeatbeltString(protectedPath)}))`
+    ])
   ].join("\n");
 
   return {
@@ -194,6 +202,7 @@ export async function buildRawDataSeatbeltProfile(
       profileVersion: RAW_DATA_SANDBOX_PROFILE_VERSION,
       profileId,
       protectedRawPaths,
+      protectedEvidencePaths,
       allowedWriteRoots,
       tempRoot,
       ...(profileRoot ? { profileRoot } : {})
@@ -206,7 +215,7 @@ export async function writeRawDataSeatbeltProfileFile(
   profileRoot?: string
 ): Promise<string> {
   const root = profileRoot ?? profile.metadata.profileRoot ?? profile.metadata.tempRoot;
-  const canonicalRoot = await canonicalizeDirectoryOutsideProtectedRaw(
+  const canonicalRoot = await ensureDirectoryOutsideProtectedRaw(
     root,
     profile.metadata.protectedRawPaths,
     "seatbelt profile root"
@@ -254,13 +263,28 @@ export class RawDataSandboxedBashTool extends BaseTool {
       };
     }
 
-    const profile = await buildRawDataSeatbeltProfile(this.options);
+    const protectedRawPaths = await canonicalizePathSet(this.options.protectedRawPaths);
+    const auditReservation = await this.reserveAuditDir(ctx, protectedRawPaths);
+    const profile = await buildRawDataSeatbeltProfile({
+      protectedRawPaths,
+      allowedWriteRoots: this.options.allowedWriteRoots,
+      tempRoot: this.options.tempRoot,
+      profileRoot: this.options.profileRoot,
+      protectedEvidencePaths: [
+        ...(this.options.protectedEvidencePaths ?? []),
+        ...(auditReservation ? [auditReservation.auditDir] : [])
+      ]
+    });
     const profilePath = await writeRawDataSeatbeltProfileFile(profile, this.options.profileRoot);
+    const protectedRawPathSignals = rawDataSignalPaths(
+      this.options.protectedRawPaths,
+      profile.metadata.protectedRawPaths
+    );
 
     try {
       const suppressedDenial = evaluateSuppressedSandboxFailureGuard(
         command,
-        profile.metadata.protectedRawPaths
+        protectedRawPathSignals
       );
       if (suppressedDenial.decision === "deny") {
         const evidence = buildRawDataDenialEvidence({
@@ -271,12 +295,12 @@ export class RawDataSandboxedBashTool extends BaseTool {
           profilePath,
           invocationId: readInvocationId(ctx)
         });
-        await this.appendDenialAudit(ctx, evidence);
+        await this.appendDenialAudit(ctx, evidence, profile);
         return evidence.toolResult;
       }
 
       if (this.options.enableAdvisory !== false) {
-        const advisory = evaluateRawDataWriteAdvisory(command, profile.metadata.protectedRawPaths);
+        const advisory = evaluateRawDataWriteAdvisory(command, protectedRawPathSignals);
         if (advisory.decision === "deny") {
           const evidence = buildRawDataDenialEvidence({
             toolId: this.name,
@@ -286,7 +310,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
             profilePath,
             invocationId: readInvocationId(ctx)
           });
-          await this.appendDenialAudit(ctx, evidence);
+          await this.appendDenialAudit(ctx, evidence, profile);
           return evidence.toolResult;
         }
       }
@@ -300,8 +324,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
       });
 
       if (
-        !result.success &&
-        isLikelySandboxDenialForCommand(command, result.output, profile.metadata.protectedRawPaths)
+        isLikelySandboxDenialForCommand(command, result.output, protectedRawPathSignals)
       ) {
         const evidence = buildRawDataDenialEvidence({
           toolId: this.name,
@@ -312,7 +335,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
           underlyingOutput: result.output,
           invocationId: readInvocationId(ctx)
         });
-        await this.appendDenialAudit(ctx, evidence);
+        await this.appendDenialAudit(ctx, evidence, profile);
         return evidence.toolResult;
       }
 
@@ -330,12 +353,14 @@ export class RawDataSandboxedBashTool extends BaseTool {
 
   private async appendDenialAudit(
     ctx: ToolContext,
-    evidence: RawDataDenialEvidence
+    evidence: RawDataDenialEvidence,
+    profile: RawDataSeatbeltProfile
   ): Promise<void> {
     try {
       await appendPolicyGateAuditRow({
         workspaceRoot: this.options.auditWorkspaceRoot ?? ctx.workDir,
         taskId: this.options.auditTaskId,
+        protectedRawPaths: profile.metadata.protectedRawPaths,
         row: evidence.auditRow
       });
     } catch (error) {
@@ -362,6 +387,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
       await appendPolicyGateAuditRow({
         workspaceRoot,
         taskId: this.options.auditTaskId,
+        protectedRawPaths: input.profile.metadata.protectedRawPaths,
         row: {
           event: input.event,
           tool_id: this.name,
@@ -381,6 +407,31 @@ export class RawDataSandboxedBashTool extends BaseTool {
       });
     }
   }
+
+  private async reserveAuditDir(
+    ctx: ToolContext,
+    protectedRawPaths: readonly string[]
+  ): Promise<PolicyGateAuditReservation | undefined> {
+    try {
+      const auditDir = await ensurePolicyGateAuditDir(
+        resolve(this.options.auditWorkspaceRoot ?? ctx.workDir),
+        this.options.auditTaskId ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID,
+        protectedRawPaths
+      );
+      return { auditDir };
+    } catch (error) {
+      ctx.logger.warn("policy_gate_audit_reserve_failed", {
+        tool: this.name,
+        rule: RAW_DATA_WRITE_RULE_ID,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return undefined;
+    }
+  }
+}
+
+interface PolicyGateAuditReservation {
+  auditDir: string;
 }
 
 export function createRawDataWriteAdvisoryRule(
@@ -433,10 +484,6 @@ export function evaluateSuppressedSandboxFailureGuard(
     return { decision: "allow" };
   }
 
-  if (!hasKnownSuppressedShellShape(command)) {
-    return { decision: "allow" };
-  }
-
   if (
     !hasStaticRawDataWrite(command, protectedRawPaths) &&
     !hasDynamicRawDataWriteRisk(command)
@@ -460,7 +507,11 @@ export async function appendPolicyGateAuditRow(
   const fileName = options.fileName ?? DEFAULT_AUDIT_FILE_NAME;
   assertSafePathSegment(fileName, "audit file name");
 
-  const auditDir = await ensurePolicyGateAuditDir(resolve(options.workspaceRoot), taskId);
+  const auditDir = await ensurePolicyGateAuditDir(
+    resolve(options.workspaceRoot),
+    taskId,
+    options.protectedRawPaths ?? []
+  );
   const auditPath = join(auditDir, fileName);
   await appendAuditFileNoFollow(auditPath, `${JSON.stringify(options.row)}\n`);
   return auditPath;
@@ -478,7 +529,7 @@ export function buildRawDataDeniedPayload(input: {
 }): RawDataDenialPayload {
   const ts = input.ts ?? new Date().toISOString();
   const remediation = rawDataWriteRemediation();
-  const guardClass = rawDataGuardClassForDecision(input.decision);
+  const guardClass = rawDataGuardClassForRawData();
   const errorId = [
     RAW_DATA_WRITE_RULE_ID,
     input.decision,
@@ -642,9 +693,22 @@ export async function scanProtectedHardlinks(input: {
       return;
     }
 
-    const entries = await readdir(path, { withFileTypes: true });
-    for (const entry of entries) {
-      await scanPath(join(path, entry.name));
+    const dir = await opendir(path);
+    try {
+      let entry = await dir.read();
+      while (entry !== null) {
+        if (scannedPathCount >= maxScannedPathCount) {
+          throw new Error(`Protected hardlink scan exceeded budget: ${maxScannedPathCount}`);
+        }
+        await scanPath(join(path, entry.name));
+        entry = await dir.read();
+      }
+    } finally {
+      try {
+        await Promise.resolve(dir.close());
+      } catch {
+        // Directory handles may already be closed after exhausting iteration.
+      }
     }
   }
 }
@@ -702,12 +766,51 @@ function hasStaticRawDataWrite(
       return true;
     }
 
+    if (
+      isInterpreterCommand(commandName) &&
+      hasInterpreterRawDataWrite(resolvedTokens, protectedRawPaths, {
+        treatRelativeRawAsProtected
+      })
+    ) {
+      return true;
+    }
+
     const operands = extractCommandOperands(resolvedTokens.slice(1));
     if (operands.length === 0) {
       continue;
     }
 
     if (commandName === "cp") {
+      const destination = operands.at(-1);
+      if (
+        destination &&
+        isRawDataPathToken(destination, protectedRawPaths, {
+          treatRelativeRawAsProtected
+        })
+      ) {
+        return true;
+      }
+      continue;
+    }
+
+    if (commandName === "dd") {
+      if (
+        operands.some((operand) => {
+          const outputMatch = operand.match(/^of=(.+)$/);
+          return (
+            outputMatch !== null &&
+            isRawDataPathToken(outputMatch[1], protectedRawPaths, {
+              treatRelativeRawAsProtected
+            })
+          );
+        })
+      ) {
+        return true;
+      }
+      continue;
+    }
+
+    if (commandName === "install" || commandName === "ln") {
       const destination = operands.at(-1);
       if (
         destination &&
@@ -736,6 +839,12 @@ function hasStaticRawDataWrite(
     if (
       commandName === "tee" ||
       commandName === "touch" ||
+      commandName === "mkdir" ||
+      commandName === "truncate" ||
+      commandName === "chmod" ||
+      commandName === "chown" ||
+      commandName === "chgrp" ||
+      commandName === "xattr" ||
       commandName === "rm" ||
       commandName === "unlink"
     ) {
@@ -813,6 +922,48 @@ function hasChildShellRawDataWrite(
   }
 
   return false;
+}
+
+function isInterpreterCommand(commandName: string): boolean {
+  return /^(?:python(?:\d+(?:\.\d+)?)?|perl|ruby|node|bun)$/.test(commandName);
+}
+
+function hasInterpreterRawDataWrite(
+  tokens: readonly string[],
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  const payload = interpreterPayload(tokens);
+  if (!payload) {
+    return false;
+  }
+
+  if (!containsRawDataPathSignal(payload, protectedRawPaths, options)) {
+    return false;
+  }
+
+  return hasInterpreterWriteApiSignal(payload);
+}
+
+function interpreterPayload(tokens: readonly string[]): string | undefined {
+  for (let index = 1; index < tokens.length - 1; index += 1) {
+    if (tokens[index] === "-c" || tokens[index] === "-e") {
+      return tokens[index + 1];
+    }
+  }
+
+  return undefined;
+}
+
+function hasInterpreterWriteApiSignal(payload: string): boolean {
+  return (
+    /(?:^|[^\w.])open(?:Sync)?\s*\([^)]*["'`][waax+>][^"'`]*["'`]/.test(payload) ||
+    /(?:^|[^\w])File\.open\s*\([^)]*["'`][waax+>][^"'`]*["'`]/.test(payload) ||
+    /(?:fs\.)?(?:writeFile|appendFile)(?:Sync)?\s*\(/.test(payload) ||
+    /(?:fs\.)?createWriteStream\s*\(/.test(payload) ||
+    /(?:write_text|write_bytes)\s*\(/.test(payload) ||
+    /(?:File|IO)\.write\s*\(/.test(payload)
+  );
 }
 
 function isWriteRedirectionToken(token: string): boolean {
@@ -1010,6 +1161,21 @@ function isRawDataPathToken(
   });
 }
 
+function containsRawDataPathSignal(
+  value: string,
+  protectedRawPaths: readonly string[],
+  options: { treatRelativeRawAsProtected?: boolean } = {}
+): boolean {
+  if (
+    options.treatRelativeRawAsProtected !== false &&
+    /(?:^|[\s"'`(=,:])(?:\.\.\/|\.\/)*data\/raw(?:\/|[\s"'`),:]|$)/.test(value)
+  ) {
+    return true;
+  }
+
+  return protectedRawPaths.some((protectedPath) => value.includes(protectedPath));
+}
+
 function hasDynamicRawDataWriteRisk(command: string): boolean {
   const rawCandidateVariables = collectDynamicRawPathVariables(command);
   if (rawCandidateVariables.size === 0) {
@@ -1050,10 +1216,36 @@ function hasDynamicRawDataWriteRisk(command: string): boolean {
       continue;
     }
 
+    if (commandName === "dd") {
+      if (
+        operands.some((operand) => {
+          const outputMatch = operand.match(/^of=(.+)$/);
+          return outputMatch !== null && referencesAnyVariable(outputMatch[1], rawCandidateVariables);
+        })
+      ) {
+        return true;
+      }
+      continue;
+    }
+
+    if (commandName === "install" || commandName === "ln") {
+      const destination = operands.at(-1);
+      if (destination && referencesAnyVariable(destination, rawCandidateVariables)) {
+        return true;
+      }
+      continue;
+    }
+
     if (
       commandName === "mv" ||
       commandName === "tee" ||
       commandName === "touch" ||
+      commandName === "mkdir" ||
+      commandName === "truncate" ||
+      commandName === "chmod" ||
+      commandName === "chown" ||
+      commandName === "chgrp" ||
+      commandName === "xattr" ||
       commandName === "rm" ||
       commandName === "unlink"
     ) {
@@ -1166,24 +1358,25 @@ function isCwdChangingCommand(commandName: string): boolean {
 }
 
 function canHideSandboxFailure(command: string): boolean {
-  return (
-    /(?:^|[\s;&|])2\s*>{1,2}\s*\/dev\/null(?:\s|$)/.test(command) &&
-    /\|\|\s*true(?:\s|$)/.test(command)
-  );
+  const stderrSuppressionPattern =
+    /(?:^|[\s;&|])2\s*>{1,2}\s*\/dev\/null(?=[\s;|&)]|$)/g;
+  const exitNormalizerPattern = /^\s*(?:\|\||;|\n|&)\s*true(?:\s|[;|&)]|$)/;
+  let suppressionMatch: RegExpExecArray | null;
+
+  while ((suppressionMatch = stderrSuppressionPattern.exec(command)) !== null) {
+    const commandAfterSuppression = command.slice(
+      suppressionMatch.index + suppressionMatch[0].length
+    );
+    if (exitNormalizerPattern.test(commandAfterSuppression)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
-function hasKnownSuppressedShellShape(command: string): boolean {
-  return (
-    /(?:^|[\s;&|])(?:bash|sh)\s+-c\b/.test(command) ||
-    /(?:^|[\s;&|])\(/.test(command) ||
-    /(?:^|[\s;&|])\{/.test(command)
-  );
-}
-
-function rawDataGuardClassForDecision(
-  decision: RawDataDenialPayload["decision"]
-): RawDataGuardClass {
-  return decision === "denied_by_sandbox" ? "authority" : "advisory";
+function rawDataGuardClassForRawData(): RawDataGuardClass {
+  return "authority";
 }
 
 function isLikelySandboxDenialForCommand(
@@ -1205,11 +1398,18 @@ function isLikelySandboxDenialForCommand(
 }
 
 function hasRawWriteLiteralSignal(command: string, protectedRawPaths: readonly string[]): boolean {
-  if (!/(?:^|[\s;&|])(?:cp|mv|tee|touch|rm|unlink)\b|>/.test(command)) {
+  const shellWriteSignal =
+    /(?:^|[\s;&|])(?:cp|mv|tee|touch|mkdir|truncate|chmod|chown|chgrp|xattr|rm|unlink|dd|install|ln)\b|>/.test(
+      command
+    );
+  const interpreterWriteSignal =
+    /(?:^|[\s;&|])(?:python(?:\d+(?:\.\d+)?)?|perl|ruby|node|bun)\b/.test(command) &&
+    hasInterpreterWriteApiSignal(command);
+  if (!shellWriteSignal && !interpreterWriteSignal) {
     return false;
   }
 
-  if (/(?:^|[\s"'=])(?:\.\.\/|\.\/)*data\/raw(?:\/|[\s"']|$)/.test(command)) {
+  if (containsRawDataPathSignal(command, protectedRawPaths)) {
     return true;
   }
 
@@ -1233,9 +1433,14 @@ async function canonicalizePathSet(paths: readonly string[]): Promise<string[]> 
   return sortedUnique(await Promise.all(paths.map((path) => canonicalizeExistingPath(path))));
 }
 
-async function canonicalizeDirectory(path: string): Promise<string> {
-  await mkdir(path, { recursive: true });
-  return canonicalizeExistingPath(path);
+function rawDataSignalPaths(
+  inputPaths: readonly string[],
+  canonicalPaths: readonly string[]
+): string[] {
+  return sortedUnique([
+    ...canonicalPaths,
+    ...inputPaths.map((path) => normalize(resolve(path)).replace(/\/+$/, ""))
+  ]);
 }
 
 async function canonicalizeExistingRootOutsideProtectedRaw(
@@ -1249,15 +1454,51 @@ async function canonicalizeExistingRootOutsideProtectedRaw(
   return canonical;
 }
 
-async function canonicalizeDirectoryOutsideProtectedRaw(
+async function ensureDirectoryOutsideProtectedRaw(
   path: string,
   protectedRawPaths: readonly string[],
   label: string
 ): Promise<string> {
-  await assertRootOutsideProtectedRaw(path, protectedRawPaths, label);
-  const canonical = await canonicalizeDirectory(path);
-  assertPathOutsideProtectedRaw(canonical, protectedRawPaths, label, "canonical");
-  return canonical;
+  const absolutePath = resolve(path);
+  assertPathOutsideProtectedRaw(absolutePath, protectedRawPaths, label, "lexical");
+  const parsedRoot = resolveRoot(absolutePath);
+  let current = parsedRoot;
+
+  for (const segment of absolutePath.slice(parsedRoot.length).split("/").filter(Boolean)) {
+    current = join(current, segment);
+    assertPathOutsideProtectedRaw(current, protectedRawPaths, label, "lexical");
+    try {
+      const metadata = await lstat(current);
+      if (metadata.isSymbolicLink()) {
+        const canonical = await canonicalizeExistingPath(current);
+        assertPathOutsideProtectedRaw(canonical, protectedRawPaths, label, "canonical");
+        const canonicalMetadata = await lstat(canonical);
+        if (!canonicalMetadata.isDirectory()) {
+          throw new Error(`${label} path component is not a directory: ${current}`);
+        }
+        continue;
+      }
+      if (!metadata.isDirectory()) {
+        throw new Error(`${label} path component is not a directory: ${current}`);
+      }
+    } catch (error) {
+      if (!isErrno(error, "ENOENT")) {
+        throw error;
+      }
+      await mkdir(current, { mode: 0o700 });
+      const metadata = await lstat(current);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new Error(`${label} path component is unsafe: ${current}`);
+      }
+    }
+
+    const canonical = await canonicalizeExistingPath(current);
+    assertPathOutsideProtectedRaw(canonical, protectedRawPaths, label, "canonical");
+  }
+
+  const canonicalPath = await canonicalizeExistingPath(absolutePath);
+  assertPathOutsideProtectedRaw(canonicalPath, protectedRawPaths, label, "canonical");
+  return canonicalPath;
 }
 
 async function assertRootOutsideProtectedRaw(
@@ -1293,20 +1534,40 @@ function assertPathOutsideProtectedRaw(
   }
 }
 
-async function ensurePolicyGateAuditDir(workspaceRoot: string, taskId: string): Promise<string> {
-  await mkdir(workspaceRoot, { recursive: true });
-  const workspaceRealPath = await canonicalizeExistingPath(workspaceRoot);
-  let current = workspaceRoot;
+async function ensurePolicyGateAuditDir(
+  workspaceRoot: string,
+  taskId: string,
+  protectedRawPaths: readonly string[] = []
+): Promise<string> {
+  const workspaceRealPath =
+    protectedRawPaths.length > 0
+      ? await ensureDirectoryOutsideProtectedRaw(
+          workspaceRoot,
+          protectedRawPaths,
+          "policy gate audit workspace root"
+        )
+      : await ensureDirectory(workspaceRoot);
+  let current = workspaceRealPath;
 
   for (const segment of ["workspace", "tasks", taskId, "audit"]) {
     current = join(current, segment);
-    await ensureSafeAuditDirComponent(current, workspaceRealPath);
+    await ensureSafeAuditDirComponent(current, workspaceRealPath, protectedRawPaths);
   }
 
   return current;
 }
 
-async function ensureSafeAuditDirComponent(path: string, workspaceRealPath: string): Promise<void> {
+async function ensureDirectory(path: string): Promise<string> {
+  await mkdir(path, { recursive: true });
+  return canonicalizeExistingPath(path);
+}
+
+async function ensureSafeAuditDirComponent(
+  path: string,
+  workspaceRealPath: string,
+  protectedRawPaths: readonly string[]
+): Promise<void> {
+  assertPathOutsideProtectedRaw(path, protectedRawPaths, "policy gate audit path", "lexical");
   try {
     const metadata = await lstat(path);
     if (metadata.isSymbolicLink()) {
@@ -1327,6 +1588,12 @@ async function ensureSafeAuditDirComponent(path: string, workspaceRealPath: stri
   }
 
   const componentRealPath = await canonicalizeExistingPath(path);
+  assertPathOutsideProtectedRaw(
+    componentRealPath,
+    protectedRawPaths,
+    "policy gate audit path",
+    "canonical"
+  );
   if (!isPathInsideOrEqual(componentRealPath, workspaceRealPath)) {
     throw new Error(`Policy gate audit path component escapes workspace root: ${path}`);
   }
@@ -1401,6 +1668,10 @@ function isPathInsideOrEqual(path: string, root: string): boolean {
   const normalizedPath = normalize(resolve(path)).replace(/\/+$/, "");
   const normalizedRoot = normalize(resolve(root)).replace(/\/+$/, "");
   return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+}
+
+function resolveRoot(path: string): string {
+  return parse(resolve(path)).root;
 }
 
 function isErrno(error: unknown, code: string): boolean {
