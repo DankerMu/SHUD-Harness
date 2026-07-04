@@ -182,6 +182,9 @@ async function assertAuditLocationInsideWorkspace(
   if (!existingAuditPath.isSymbolicLink() && !existingAuditPath.isFile()) {
     throw new Error("Invalid policy gate audit fileName: must be a regular file.");
   }
+  if (existingAuditPath.nlink > 1) {
+    throw new Error("Invalid policy gate audit fileName: must not be a hardlink.");
+  }
 
   const realAuditPath = await realpath(auditPath);
   if (!isPathInside(realAuditPath, realAuditDir)) {
@@ -253,6 +256,9 @@ async function assertOpenedAuditFileStillInsideWorkspace(
   const currentPath = await lstat(auditPath);
   if (!openedFile.isFile() || !currentPath.isFile()) {
     throw new Error("Invalid policy gate audit fileName: must be a regular file.");
+  }
+  if (openedFile.nlink > 1 || currentPath.nlink > 1) {
+    throw new Error("Invalid policy gate audit fileName: must not be a hardlink.");
   }
   if (!isSameFilesystemEntry(openedFile, currentPath)) {
     throw new Error("Invalid policy gate audit fileName: changed before audit write.");

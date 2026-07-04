@@ -23,11 +23,13 @@ const ANY_ENDPOINT_RAW_PATH_COMMANDS = new Set(["mv"]);
 const READ_ONLY_RAW_PATH_COMMANDS = new Set([
   "cat",
   "du",
+  "echo",
   "file",
   "grep",
   "head",
   "ls",
   "mapfile",
+  "printf",
   "read",
   "sha256sum",
   "stat",
@@ -37,6 +39,9 @@ const READ_ONLY_RAW_PATH_COMMANDS = new Set([
 ]);
 const ASSIGNMENT_BUILTIN_COMMANDS = new Set(["declare", "export", "readonly", "typeset"]);
 const WRAPPER_COMMANDS = new Set(["command", "doas", "env", "nice", "nohup", "sudo", "time"]);
+const WRAPPER_OPTIONS_WITHOUT_OPERANDS = new Map<string, ReadonlySet<string>>([
+  ["command", new Set(["-p"])]
+]);
 const WRAPPER_OPTIONS_WITH_OPERANDS = new Map<string, ReadonlySet<string>>([
   ["doas", new Set(["-u"])],
   ["env", new Set(["-C", "--chdir", "-u", "--unset"])],
@@ -45,7 +50,8 @@ const WRAPPER_OPTIONS_WITH_OPERANDS = new Map<string, ReadonlySet<string>>([
   ["time", new Set(["-f", "--format"])]
 ]);
 const SHELL_COMMANDS = new Set(["bash", "sh", "zsh"]);
-const FIND_MUTATION_ACTIONS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir"]);
+const FIND_EXEC_ACTIONS = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+const FIND_MUTATION_ACTIONS = new Set(["-delete"]);
 const LOCAL_URL_SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
 const EXECUTABLE_CODE_STDIN_ARG = "-";
 const MAX_SHELL_COMMAND_SCAN_CHARS = 256 * 1024;
@@ -157,10 +163,11 @@ export function findProtectedDataRawWriteTarget(
   initialVariables: ReadonlyMap<string, string> = new Map(),
   workDir?: string
 ): string | undefined {
+  const initialCwd = normalizeInitialCwd(workDir);
   return findProtectedDataRawWriteTargetWithState(command, {
     variables: new Map(initialVariables),
-    cwd: normalizeInitialCwd(workDir),
-    cwdKnown: true,
+    cwd: initialCwd.cwd,
+    cwdKnown: initialCwd.cwdKnown,
     pathAliases: new Map(),
     scanBudget: makeShellScanBudget()
   });
@@ -177,7 +184,7 @@ function findProtectedDataRawWriteTargetWithState(
 
   const commandWithoutHeredocBodies = stripHeredocBodies(command);
   if (!reserveShellCommandScanBudget(commandWithoutHeredocBodies, state.scanBudget)) {
-    return hasProtectedRawPathText(commandWithoutHeredocBodies) &&
+    return hasPotentialProtectedRawPathText(commandWithoutHeredocBodies) &&
       hasShellWriteIntentMarker(commandWithoutHeredocBodies)
       ? "data/raw"
       : undefined;
@@ -201,7 +208,11 @@ function findProtectedDataRawWriteTargetWithState(
     return positionalLoopTarget;
   }
 
-  const tokens = tokenizeShellCommand(commandWithoutHeredocBodies);
+  const commandWithoutHandledLoops = stripHandledImplicitPositionalLoops(
+    commandWithoutHeredocBodies,
+    state
+  );
+  const tokens = tokenizeShellCommand(commandWithoutHandledLoops);
   const pathContext = (): PathEvaluationContext => pathContextFromState(state);
 
   for (const segment of splitCommandSegments(tokens)) {
@@ -502,6 +513,12 @@ function findMutationCommandTarget(
       return target;
     }
   }
+  if ((command === "perl" || command === "ruby") && args.some(isInterpreterInPlaceOption)) {
+    const target = findRawPathArgument(args, context);
+    if (target) {
+      return target;
+    }
+  }
   if (isExecutableCodeStringCommand(command)) {
     const target = findExecutableCodeStringRawMutationTarget(command, args, commandState);
     if (target) {
@@ -513,6 +530,12 @@ function findMutationCommandTarget(
   }
   if (ANY_RAW_PATH_MUTATION_COMMANDS.has(command)) {
     const target = findRawPathArgument(args, context);
+    if (target) {
+      return target;
+    }
+  }
+  if (command === "ln") {
+    const target = findLnRawAncestorSymlinkTarget(args, commandState);
     if (target) {
       return target;
     }
@@ -568,7 +591,7 @@ function findMutationCommandTarget(
     }
   }
   if (command === "find") {
-    const execTarget = findFindExecMutationTarget(args, commandState);
+    const execTarget = findFindExecMutationTarget(args, commandState, context);
     if (execTarget) {
       return execTarget;
     }
@@ -834,7 +857,12 @@ function parseWrapperOptions(
 function wrapperOptionOperandMode(
   command: string,
   option: string
-): "inline" | "separate" | undefined {
+): "inline" | "separate" | "none" | undefined {
+  const optionsWithoutOperands = WRAPPER_OPTIONS_WITHOUT_OPERANDS.get(command);
+  if (optionsWithoutOperands?.has(option)) {
+    return "none";
+  }
+
   const optionsWithOperands = WRAPPER_OPTIONS_WITH_OPERANDS.get(command);
   if (!optionsWithOperands) {
     return undefined;
@@ -946,7 +974,7 @@ function isReadOnlySafeRawPathCommand(
     return true;
   }
   if (command === "find") {
-    return !hasFindMutationAction(args);
+    return findFindMutationTarget(args, context) === undefined;
   }
   if (command === "sed") {
     return !args.some(isSedInPlaceOption);
@@ -1128,20 +1156,46 @@ function findCurlOutputTarget(
   context: PathEvaluationContext
 ): string | undefined {
   let usesRemoteNameOutput = false;
+  let hasRelativeExplicitOutputTarget = false;
+  let outputDirectory: PathCandidate | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index].value;
     if (arg === "-o" || arg === "--output") {
       const target = args[index + 1];
+      hasRelativeExplicitOutputTarget =
+        hasRelativeExplicitOutputTarget || (target !== undefined && isRelativeLocalPath(target.value));
       if (target && isProtectedDataRawCandidate(target, context)) {
         return target.value;
+      }
+      if (
+        target &&
+        outputDirectory &&
+        isRelativeLocalPath(target.value) &&
+        isProtectedDataRawCandidate(outputDirectory, context)
+      ) {
+        return outputDirectory.value;
       }
       continue;
     }
     if (arg.startsWith("--output=")) {
       const target = pathCandidateFromToken(args[index], arg.slice("--output=".length));
+      hasRelativeExplicitOutputTarget =
+        hasRelativeExplicitOutputTarget || isRelativeLocalPath(target.value);
       if (isProtectedDataRawCandidate(target, context)) {
         return target.value;
       }
+      if (
+        outputDirectory &&
+        isRelativeLocalPath(target.value) &&
+        isProtectedDataRawCandidate(outputDirectory, context)
+      ) {
+        return outputDirectory.value;
+      }
+      continue;
+    }
+    const directoryTarget = findCurlOutputDirectoryAt(args, index);
+    if (directoryTarget) {
+      outputDirectory = directoryTarget;
       continue;
     }
 
@@ -1155,6 +1209,13 @@ function findCurlOutputTarget(
     }
   }
 
+  if (
+    outputDirectory &&
+    (usesRemoteNameOutput || hasRelativeExplicitOutputTarget) &&
+    isProtectedDataRawCandidate(outputDirectory, context)
+  ) {
+    return outputDirectory.value;
+  }
   return usesRemoteNameOutput ? protectedCurrentWorkingDirectoryTarget(context) : undefined;
 }
 
@@ -1162,8 +1223,19 @@ function isCurlRemoteNameOption(arg: string): boolean {
   return (
     arg === "-O" ||
     arg === "--remote-name" ||
+    arg === "--remote-name-all" ||
     (!arg.startsWith("--") && arg.startsWith("-") && arg.slice(1).includes("O"))
   );
+}
+
+function findCurlOutputDirectoryAt(
+  args: readonly ShellToken[],
+  index: number
+): PathCandidate | undefined {
+  return findOptionValueAt(args, index, {
+    separate: new Set(["--output-dir"]),
+    longAssignments: ["--output-dir="]
+  });
 }
 
 function findCurlShortOutputTarget(
@@ -1191,6 +1263,16 @@ function findCurlShortOutputTarget(
 }
 
 function isSedInPlaceOption(arg: ShellToken): boolean {
+  return (
+    arg.value === "-i" ||
+    arg.value.startsWith("-i") ||
+    (arg.value.startsWith("-") && !arg.value.startsWith("--") && arg.value.slice(1).includes("i")) ||
+    arg.value === "--in-place" ||
+    arg.value.startsWith("--in-place=")
+  );
+}
+
+function isInterpreterInPlaceOption(arg: ShellToken): boolean {
   return (
     arg.value === "-i" ||
     arg.value.startsWith("-i") ||
@@ -1513,10 +1595,12 @@ function findTrapCommandTarget(
 
 function findFindExecMutationTarget(
   args: readonly ShellToken[],
-  state: ShellScanState
+  state: ShellScanState,
+  context: PathEvaluationContext
 ): string | undefined {
+  const rawSearchRoot = findFindSearchRootRawPath(args, context);
   for (let index = 0; index < args.length; index += 1) {
-    if (!["-exec", "-execdir", "-ok", "-okdir"].includes(args[index].value)) {
+    if (!FIND_EXEC_ACTIONS.has(args[index].value)) {
       continue;
     }
 
@@ -1530,10 +1614,77 @@ function findFindExecMutationTarget(
     if (target) {
       return target;
     }
+    if (rawSearchRoot && findExecPayloadMutatesSelection(execSegment, state)) {
+      return rawSearchRoot;
+    }
     index = endIndex;
   }
 
   return undefined;
+}
+
+function findFindSearchRootRawPath(
+  args: readonly ShellToken[],
+  context: PathEvaluationContext
+): string | undefined {
+  const firstActionIndex = args.findIndex(
+    (arg) => FIND_EXEC_ACTIONS.has(arg.value) || FIND_MUTATION_ACTIONS.has(arg.value)
+  );
+  const searchArgs = firstActionIndex === -1 ? args : args.slice(0, firstActionIndex);
+  return findRawPathArgument(searchArgs, context);
+}
+
+function findExecPayloadMutatesSelection(
+  execSegment: readonly ShellToken[],
+  state: ShellScanState
+): boolean {
+  if (!execSegment.some((arg) => arg.value.includes("{}"))) {
+    return false;
+  }
+
+  const commandState = buildSegmentCommandScanState(execSegment, state);
+  const { commandIndex } = commandState;
+  if (commandIndex === undefined) {
+    return false;
+  }
+
+  if (commandState.uncertainWrapper) {
+    return true;
+  }
+
+  const command = path.posix.basename(execSegment[commandIndex].value);
+  const args = execSegment.slice(commandIndex + 1);
+  if (READ_ONLY_RAW_PATH_COMMANDS.has(command)) {
+    return false;
+  }
+  if (command === "sed") {
+    return args.some(isSedInPlaceOption);
+  }
+  if (command === "awk") {
+    return !isReadOnlyAwkCommand(args);
+  }
+  if ((command === "perl" || command === "ruby") && args.some(isInterpreterInPlaceOption)) {
+    return true;
+  }
+  if (SHELL_COMMANDS.has(command)) {
+    return hasShellWriteIntentMarker(args.map((arg) => arg.value).join(" "));
+  }
+  if (DESTINATION_RAW_PATH_COMMANDS.has(command)) {
+    return findDestinationArgumentIncludesPlaceholder(args);
+  }
+  return ANY_RAW_PATH_MUTATION_COMMANDS.has(command) || ANY_ENDPOINT_RAW_PATH_COMMANDS.has(command);
+}
+
+function findDestinationArgumentIncludesPlaceholder(args: readonly ShellToken[]): boolean {
+  const targetDirectory = findTargetDirectoryArgument(args);
+  if (targetDirectory !== undefined) {
+    return targetDirectory.value.includes("{}");
+  }
+
+  return args
+    .filter((arg) => !arg.value.startsWith("-"))
+    .at(-1)
+    ?.value.includes("{}") === true;
 }
 
 function findFindExecTerminatorIndex(args: readonly ShellToken[], startIndex: number): number {
@@ -1745,6 +1896,14 @@ function findImplicitPositionalLoopWriteTarget(
   }
 
   return undefined;
+}
+
+function stripHandledImplicitPositionalLoops(command: string, state: ShellScanState): string {
+  if (knownShellPositionalValues(state.variables).length === 0) {
+    return command;
+  }
+
+  return command.replace(/\bfor\s+[A-Za-z_][A-Za-z0-9_]*\s*;?\s*do\b[\s\S]*?\bdone\b/g, ":");
 }
 
 function knownShellPositionalValues(variables: ReadonlyMap<string, string>): string[] {
@@ -1994,6 +2153,25 @@ function parseLnSymlinkAlias(
   return { linkPath, targetPath };
 }
 
+function findLnRawAncestorSymlinkTarget(
+  args: readonly ShellToken[],
+  state: Pick<ShellScanState, "cwd" | "cwdKnown">
+): string | undefined {
+  const alias = parseLnSymlinkAlias(args, state);
+  if (!alias) {
+    return undefined;
+  }
+
+  return isProtectedRawSymlinkTarget(alias.targetPath) ? alias.targetPath : undefined;
+}
+
+function isProtectedRawSymlinkTarget(targetPath: string): boolean {
+  return (
+    isProtectedDataRawPath(targetPath) ||
+    isProtectedDataRawPath(path.join(targetPath, "raw"))
+  );
+}
+
 function isSimpleLiteralCdTarget(target: ShellToken): boolean {
   return isSimpleLiteralPathValue(target.value);
 }
@@ -2017,8 +2195,10 @@ function resolveShellPathWithKnowledge(
   return { cwd: path.resolve(cwd, target), cwdKnown: true };
 }
 
-function normalizeInitialCwd(workDir: string | undefined): string {
-  return path.resolve(workDir ?? process.cwd());
+function normalizeInitialCwd(workDir: string | undefined): { cwd?: string; cwdKnown: boolean } {
+  return workDir === undefined
+    ? { cwd: undefined, cwdKnown: false }
+    : { cwd: path.resolve(workDir), cwdKnown: true };
 }
 
 function pathContextFromState(
@@ -2060,9 +2240,14 @@ function findExecutableCodeRawMutationTargetInText(
   scanBudget: ShellScanBudget
 ): string | undefined {
   if (!reserveExecutableCodeScanBudget(value, scanBudget)) {
-    return hasProtectedRawPathText(value) && hasExecutableCodeWriteIntentMarker(value)
+    return hasPotentialExecutableProtectedRawPathText(value) && hasExecutableCodeWriteIntentMarker(value)
       ? "data/raw"
       : undefined;
+  }
+
+  const constructedTarget = findConstructedExecutableRawPathTarget(value, context);
+  if (constructedTarget && hasExecutableCodeWriteIntentMarker(value)) {
+    return constructedTarget;
   }
 
   const scanResult = findProtectedRawPathsInText(value, context, scanBudget);
@@ -2144,6 +2329,29 @@ function findFirstProtectedRawPathInText(
   return undefined;
 }
 
+function findConstructedExecutableRawPathTarget(
+  value: string,
+  context: PathEvaluationContext
+): string | undefined {
+  return hasExecutableRawPathConstruction(value) && isProtectedDataRawPath("data/raw", context)
+    ? "data/raw"
+    : undefined;
+}
+
+function hasPotentialExecutableProtectedRawPathText(value: string): boolean {
+  return hasProtectedRawPathText(value) || hasExecutableRawPathConstruction(value);
+}
+
+function hasExecutableRawPathConstruction(value: string): boolean {
+  return [
+    /["']data\/?["']\s*\+\s*["']\/?raw(?:\/[^"']*)?["']/i,
+    /["']data["']\s*\+\s*["']\/raw(?:\/[^"']*)?["']/i,
+    /\bPath\s*\(\s*["']data["']\s*\)\s*\/\s*["']raw(?:\/[^"']*)?["']/i,
+    /\bpath\.join\s*\(\s*["']data["']\s*,\s*["']raw["']/i,
+    /\bfile\.path\s*\(\s*["']data["']\s*,\s*["']raw["']/i
+  ].some((pattern) => pattern.test(value));
+}
+
 function reserveExecutableCodeScanBudget(
   value: string,
   scanBudget: ShellScanBudget
@@ -2161,11 +2369,19 @@ function hasProtectedRawPathText(value: string): boolean {
   return value.toLowerCase().includes("data/raw");
 }
 
+function hasPotentialProtectedRawPathText(value: string): boolean {
+  return (
+    hasProtectedRawPathText(value) ||
+    /\bdata\//i.test(value) &&
+      /(?:\$\(|`|\$\{|\$[A-Za-z_][A-Za-z0-9_]*|[*?\[\]{}])/.test(value)
+  );
+}
+
 function hasShellWriteIntentMarker(value: string): boolean {
   return (
     /(?:^|[\s;&|(){}])(?:rm|touch|truncate|mkdir|rmdir|chmod|chown|mv|cp|install|ln|rsync|dd|tee|curl|wget|tar|unzip|git|sed|awk|find|eval|bash|sh|zsh|python|python\d+(?:\.\d+)?|node|bun|deno|r|rscript|ruby|php|perl)\b/i.test(
       value
-    ) || /(?:^|\s)(?:>|>>|>\||1>|1>>|2>|2>>|&>|&>>|>&)\s*/.test(value)
+    ) || /(?:^|\s)(?:[0-9]*<>|>|>>|>\||1>|1>>|2>|2>>|&>|&>>|>&)\s*/.test(value)
   );
 }
 
@@ -2174,7 +2390,7 @@ function hasExecutableCodeWriteIntentMarker(value: string): boolean {
     /\bopen\s*\([^)]*(?:,\s*(?:mode\s*=\s*)?["'][^"']*[wax+][^"']*["']|\bmode\s*=\s*["'][^"']*[wax+][^"']*["']|["']>{1,2}["'])/i.test(
       value
     ) ||
-    /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream|unlink|unlinkSync|rm|rmSync|remove|removeSync|rename|renameSync|mkdir|mkdirSync|rmdir|rmdirSync|truncate|truncateSync|writeLines|write\.csv|write\.table|saveRDS|save|file_put_contents)\s*\(/i.test(
+    /\b(?:writeFile|writeFileSync|writeTextFile|writeTextFileSync|appendFile|appendFileSync|createWriteStream|unlink|unlinkSync|rm|rmSync|remove|removeSync|rename|renameSync|mkdir|mkdirSync|rmdir|rmdirSync|truncate|truncateSync|writeLines|write\.csv|write\.table|saveRDS|save|file_put_contents)\s*\(/i.test(
       value
     ) ||
     /\b(?:Bun\.write|File\.write)\s*\(/i.test(value) ||
@@ -2188,7 +2404,7 @@ function hasExecutableCodeWriteIntentForRawPath(value: string, target: string): 
 
   return [
     new RegExp(`\\bopen\\s*\\(${codeBeforeRawCloseParen},\\s*["'][^"']*[wax+][^"']*["']`, "i"),
-    new RegExp(`\\b(?:writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream)\\s*\\(${codeBeforeRawCloseParen}`, "i"),
+    new RegExp(`\\b(?:writeFile|writeFileSync|writeTextFile|writeTextFileSync|appendFile|appendFileSync|createWriteStream)\\s*\\(${codeBeforeRawCloseParen}`, "i"),
     new RegExp(`\\b(?:unlink|unlinkSync|rm|rmSync|remove|removeSync|rename|renameSync|mkdir|mkdirSync|rmdir|rmdirSync|truncate|truncateSync)\\s*\\(${codeBeforeRawCloseParen}`, "i"),
     new RegExp(`\\b(?:writeLines|write\\.csv|write\\.table|saveRDS|save)\\s*\\([\\s\\S]{0,1024}${escapedTarget}`, "i"),
     new RegExp(`\\bPath\\s*\\(${codeBeforeRawCloseParen}\\)\\.write_(?:text|bytes)\\s*\\(`, "i"),
@@ -2234,6 +2450,26 @@ function expandBracedParameterExpression(
   const simple = expression.match(/^([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])$/);
   if (simple) {
     return variables.get(simple[1]) ?? match;
+  }
+
+  const caseModification = expression.match(
+    /^([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])([,]{1,2}|\^{1,2})$/
+  );
+  if (caseModification) {
+    const value = variables.get(caseModification[1]);
+    if (value === undefined) {
+      return match;
+    }
+    const operator = caseModification[2];
+    if (operator === ",,") {
+      return value.toLowerCase();
+    }
+    if (operator === "^^") {
+      return value.toUpperCase();
+    }
+    return operator === ","
+      ? `${value.slice(0, 1).toLowerCase()}${value.slice(1)}`
+      : `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
   }
 
   const prefixOrSuffixRemoval = expression.match(
@@ -2592,9 +2828,16 @@ function shellExpansionPattern(candidate: PathCandidate): string | undefined {
     changed = changed || withCommandSubstitutions !== pattern;
     pattern = withCommandSubstitutions;
 
-    const withParameterExpansions = pattern.replace(/\$\{[^}]+\}/g, "*");
-    changed = changed || withParameterExpansions !== pattern;
-    pattern = withParameterExpansions;
+    const withBracedParameterExpansions = pattern.replace(/\$\{[^}]+\}/g, "data/raw");
+    changed = changed || withBracedParameterExpansions !== pattern;
+    pattern = withBracedParameterExpansions;
+
+    const withUnbracedParameterExpansions = pattern.replace(
+      /\$([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*])/g,
+      "data/raw"
+    );
+    changed = changed || withUnbracedParameterExpansions !== pattern;
+    pattern = withUnbracedParameterExpansions;
   }
 
   if (!candidate.quoted && /[*?\[]/.test(pattern)) {

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -29,6 +29,9 @@ describe("data/raw write deny policy", () => {
   )}writeLines("x", "data/raw/out.csv")'`;
   const largeNoRawCommand = `printf '${"x".repeat(300000)}'`;
   const largeRawWriteEvidenceCommand = `${"true\n".repeat(60000)}rm data/raw/input.csv`;
+  const largeDynamicRawWriteEvidenceCommand = `${"true\n".repeat(
+    60000
+  )}rm data/ra$(printf w)/input.csv`;
   const largeNonExecutableHeredocCommand = `cat > workspace/tasks/TASK-001/script.sh <<'SH'\n${"echo filler\n".repeat(
     30000
   )}rm data/raw/input.csv\nSH`;
@@ -161,6 +164,40 @@ describe("data/raw write deny policy", () => {
       command: 'perl -e \'my $p="data/raw/out.csv"; open(my $fh, ">", $p); print $fh "x";\''
     },
     {
+      name: "python executable code string concat raw write",
+      command: 'python -c \'open("data/"+"raw/out.csv","w").write("x")\''
+    },
+    {
+      name: "python pathlib executable code string raw write",
+      command:
+        'python -c \'from pathlib import Path; p=Path("data")/"raw"/"out.csv"; p.write_text("x")\''
+    },
+    {
+      name: "node path join executable code string raw write",
+      command:
+        'node -e \'const path=require("path"); require("fs").writeFileSync(path.join("data","raw","out.csv"), "x")\''
+    },
+    {
+      name: "R file.path executable code string raw write",
+      command: 'Rscript -e \'writeLines("x", file.path("data","raw","out.csv"))\''
+    },
+    {
+      name: "Deno writeTextFile raw write",
+      command: 'deno eval \'await Deno.writeTextFile("data/raw/out.txt", "x")\''
+    },
+    {
+      name: "Deno writeTextFileSync raw write",
+      command: 'deno eval \'Deno.writeTextFileSync("data/raw/out.txt", "x")\''
+    },
+    {
+      name: "Perl in-place raw edit",
+      command: "perl -pi -e 's/a/b/' data/raw/input.csv"
+    },
+    {
+      name: "Ruby in-place raw edit",
+      command: "ruby -pi -e 'gsub(/a/, \"b\")' data/raw/input.csv"
+    },
+    {
       name: "python heredoc raw write",
       command: "python - <<'PY'\nopen(\"data/raw/input.csv\",\"w\").write(\"x\")\nPY"
     },
@@ -249,6 +286,22 @@ describe("data/raw write deny policy", () => {
       command: "rm data/ra$(printf w)/input.csv"
     },
     {
+      name: "dynamic variable assignment full raw path remove",
+      command: 'RAW=$(printf data/raw); rm "$RAW/input.csv"'
+    },
+    {
+      name: "dynamic variable assignment partial raw redirect write",
+      command: 'KIND=$(printf raw); printf x > "data/$KIND/out.csv"'
+    },
+    {
+      name: "dynamic default assignment composed raw remove",
+      command: 'unset MISSING; ROOT=${MISSING:-data}; KIND=raw; rm "$ROOT/$KIND/input.csv"'
+    },
+    {
+      name: "dynamic default assignment partial raw remove",
+      command: "unset KIND; KIND=${KIND:-raw}; rm data/$KIND/input.csv"
+    },
+    {
       name: "parameter default path expansion remove",
       command: "rm ${UNSET:-data/raw/input.csv}"
     },
@@ -281,6 +334,14 @@ describe("data/raw write deny policy", () => {
       command: "printf x > DATA/RAW/input.csv"
     },
     {
+      name: "braced variable lowercase transform raw touch",
+      command: 'RAW=DATA/RAW; touch "${RAW,,}/x"'
+    },
+    {
+      name: "braced variable uppercase transform raw touch",
+      command: 'RAW=data/raw; touch "${RAW^^}/x"'
+    },
+    {
       name: "curl short output option",
       command: "curl -o data/raw/input.csv https://example.invalid/input.csv"
     },
@@ -303,6 +364,18 @@ describe("data/raw write deny policy", () => {
     {
       name: "curl long output assignment option",
       command: "curl --output=data/raw/input.csv https://example.invalid/input.csv"
+    },
+    {
+      name: "curl output directory with relative output",
+      command: "curl --output-dir data/raw -o input.csv https://example.invalid/input.csv"
+    },
+    {
+      name: "curl remote-name output directory",
+      command: "curl -O --output-dir data/raw https://example.invalid/input.csv"
+    },
+    {
+      name: "curl remote-name-all output directory assignment",
+      command: "curl --output-dir=data/raw --remote-name-all https://example.invalid/input.csv"
     },
     {
       name: "sed long in-place option",
@@ -535,6 +608,10 @@ describe("data/raw write deny policy", () => {
       command: "time -f '%E' rm data/raw/input.csv"
     },
     {
+      name: "command path wrapper remove",
+      command: "command -p rm data/raw/input.csv"
+    },
+    {
       name: "env chdir wrapper remove",
       command: "env --chdir /tmp rm data/raw/input.csv"
     },
@@ -557,6 +634,10 @@ describe("data/raw write deny policy", () => {
     {
       name: "ln raw destination",
       command: "ln /tmp/input.csv data/raw/input.csv"
+    },
+    {
+      name: "symlink target exposes raw ancestor",
+      command: "ln -s data data-link"
     },
     {
       name: "same-command relative symlink alias to data raw",
@@ -669,6 +750,10 @@ describe("data/raw write deny policy", () => {
     {
       name: "large shell raw write evidence is bounded",
       command: largeRawWriteEvidenceCommand
+    },
+    {
+      name: "large shell dynamic raw write evidence is bounded",
+      command: largeDynamicRawWriteEvidenceCommand
     }
   ] as const;
 
@@ -692,6 +777,14 @@ describe("data/raw write deny policy", () => {
     {
       name: "cat raw input",
       command: "cat data/raw/input.csv"
+    },
+    {
+      name: "echo raw input path",
+      command: "echo data/raw/input.csv"
+    },
+    {
+      name: "printf raw input path",
+      command: "printf '%s\\n' data/raw/input.csv"
     },
     {
       name: "copy raw input outside raw",
@@ -778,6 +871,14 @@ describe("data/raw write deny policy", () => {
       command: "find data/raw -maxdepth 1 -type f"
     },
     {
+      name: "read-only find exec cat under raw",
+      command: "find data/raw -type f -exec cat {} +"
+    },
+    {
+      name: "read-only find exec grep under raw",
+      command: "find data/raw -type f -exec grep needle {} +"
+    },
+    {
       name: "ls raw directory",
       command: "ls data/raw"
     },
@@ -825,6 +926,10 @@ describe("data/raw write deny policy", () => {
     {
       name: "rsync raw source to governed destination",
       command: "rsync data/raw/input.csv workspace/tasks/TASK-001/input.csv"
+    },
+    {
+      name: "command path wrapper raw read",
+      command: "command -p cat data/raw/input.csv"
     },
     {
       name: "bash shell wrapper positional raw read",
@@ -889,6 +994,33 @@ describe("data/raw write deny policy", () => {
       expect(bashTool.calls).toBe(1);
     });
   }
+
+  test("data/raw rule treats missing workDir as an unknown cwd", async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-cwd-"));
+    tempDirs.push(workspaceRoot);
+    const dataDir = path.join(workspaceRoot, "data");
+    await mkdir(path.join(dataDir, "raw"), { recursive: true });
+
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(os.tmpdir());
+      const outsideDecision = DATA_RAW_WRITE_DENY_RULE.evaluate({
+        toolId: "bash",
+        input: { command: "touch raw/input.csv" }
+      });
+
+      process.chdir(dataDir);
+      const dataDirDecision = DATA_RAW_WRITE_DENY_RULE.evaluate({
+        toolId: "bash",
+        input: { command: "touch raw/input.csv" }
+      });
+
+      expect(outsideDecision.decision).toBe("allow");
+      expect(dataDirDecision.decision).toBe("allow");
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
 
   test("audit helper appends a minimal row under the no-TaskCard fixture path", async () => {
     const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-"));
@@ -1044,6 +1176,27 @@ describe("data/raw write deny policy", () => {
     ).rejects.toThrow("Invalid policy gate audit fileName: must not be a symlink.");
 
     expect(await readFile(realAuditFile, "utf8")).toBe("original\n");
+  });
+
+  test("audit helper rejects a hardlinked audit file before appending through it", async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-"));
+    const outsideDir = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-outside-"));
+    tempDirs.push(workspaceRoot, outsideDir);
+
+    const auditDir = path.join(workspaceRoot, "workspace", "tasks", "TASK-M1-SPIKE", "audit");
+    const outsideFile = path.join(outsideDir, "policy-gate-audit.ndjson");
+    const auditPath = path.join(auditDir, "policy-gate-audit.ndjson");
+    await mkdir(auditDir, { recursive: true });
+    await writeFile(outsideFile, "original\n", "utf8");
+    await link(outsideFile, auditPath);
+
+    await expect(
+      appendPolicyGateAuditRow(sampleAuditRow(), {
+        workspaceRoot
+      })
+    ).rejects.toThrow("Invalid policy gate audit fileName: must not be a hardlink.");
+
+    expect(await readFile(outsideFile, "utf8")).toBe("original\n");
   });
 
   test("audit helper rejects a parent directory swap before writing the opened file", async () => {
