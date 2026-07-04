@@ -38,10 +38,10 @@
 - **WHEN** agent 通过 bash 读取 `data/raw/` 下文件，或写入 workspace 允许目录，或经**合法 waited 前台子进程**（如 `python3 -c 'import subprocess,sys; p=subprocess.Popen([...]); sys.exit(p.wait())'` 写 workspace）
 - **THEN** 命令在沙箱 profile 下成功执行，无误拒；process-creation preflight MUST NOT 因存在子进程创建而拒绝已 wait 的合法前台子进程
 
-#### Scenario: 预存 hardlink 残留有兜底
+#### Scenario: 预存 hardlink 残留有兜底且扫描有界
 
 - **WHEN** `data/raw/` 内文件在 enforcement 生效前已存在指向 raw 外的 hardlink 别名，且通过该别名写入
-- **THEN** 写入不被 profile 拦截（已知原理性残留，spike 证据 MUST 如实记录）；`nlink>1` 扫描 MUST 能检出该别名并报告（兜底接线归 ingest/readiness 面，长期由 DataProvenance 校验和交叉验证）
+- **THEN** 写入不被 profile 拦截（已知原理性残留，spike 证据 MUST 如实记录）；`nlink>1` 扫描 MUST 接收显式 protected roots，只读取这些 roots 下的 metadata，不遍历更广 workspace/repo 路径，并能检出该别名/源文件风险（兜底接线归 ingest/readiness 面，长期由 DataProvenance 校验和交叉验证）
 
 #### Scenario: advisory 提前拒可导航
 

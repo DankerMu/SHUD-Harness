@@ -8,9 +8,10 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test:policy-gate": "bun test ./packages/core/src/tools/policy-gate-core.test.ts ./packages/core/src/tools/policy-gate-registry.test.ts",
+    "test:policy-gate": "bun test ./packages/core/src/tools/policy-gate-core.test.ts ./packages/core/src/tools/policy-gate-registry.test.ts ./packages/core/src/tools/raw-data-sandbox.test.ts",
+    "test:backend-ws": "bun test ./packages/backend/src/ws/index.test.ts",
     "test:schemas": "bun test ./packages/core/src/domain/schemas/core-schemas.test.ts",
-    "check": "bun run typecheck && bun run test:policy-gate && bun run test:schemas"
+    "check": "bun run typecheck && bun run test:policy-gate && bun run test:backend-ws && bun run test:schemas"
   },
   "devDependencies": {
     "typescript": "5.8.3"

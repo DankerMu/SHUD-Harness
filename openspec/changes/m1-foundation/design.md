@@ -121,3 +121,80 @@ Review focus:
 - Gate list exactly matches the P0 table.
 - Runtime output cannot accidentally satisfy source-controlled evidence or enter git.
 - `decision` aggregation is conservative and cannot classify contract conflicts as pass.
+
+## Subagent Workflow Fixture — Issue #19
+
+Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.
+
+Expanded-trigger rationale:
+- Core triggers: bash tool entrypoint, subprocess execution wrapper, OS sandbox profile, file write/delete/rename boundary under `data/raw/**`, symlink/path alias behavior, audit file output, and WebSocket `tool.failed` envelope.
+- Profile triggers: `workspace`, `remediation`, `guard_class`, `Zero`, `ToolBase`, `beforeExecute`, and Zero adapter/tool registry governance.
+
+Change surface:
+- `packages/core` bash sandbox/profile helpers, bash execution wrapper, advisory policy-gate rule, hardlink/nlink check helper, and focused tests.
+- `packages/backend/src/ws` skeleton event builder for existing `tool.failed`, if not already in place.
+- Audit helper for `workspace/tasks/TASK-M1-SPIKE/audit/` minimum rows with profile identity.
+
+Must preserve:
+- `zero/` remains source-clean and pinned to `13e25c1`; wrapping lives in SHUD-owned packages only.
+- Pre-exec policy gate core remains pure; static detection is advisory/fail-open and must not be the authority for arbitrary bash writes.
+- Legitimate `data/raw/**` reads and writes to workspace allowed directories remain allowed under the sandbox.
+- No new WebSocket event type is introduced; `tool.failed` remains the only skeleton event used here.
+
+Must add/change:
+- Bash execution applies a macOS seatbelt profile via `sandbox-exec -f <profile>` so writes to canonical `data/raw/**` are denied at syscall time and inherited by child processes.
+- Sandbox denials return the same remediation-shaped tool error family as advisory denials and produce `tool.failed` plus audit minimum row evidence.
+- The profile builder records a stable profile identifier in audit rows.
+- A reusable `nlink>1` scanner/helper demonstrates and detects the pre-existing hardlink residual; formal ingest/readiness wiring remains out of scope.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - bash tool invocation and SHUD wrapper are the guarded execution entrypoint.
+- Config / project setup: selected - macOS `sandbox-exec` availability and generated seatbelt profile path affect runtime behavior.
+- File IO / path safety / overwrite: selected - protected raw-data write/delete/rename behavior and symlink/path alias handling are the core invariant.
+- Schema / columns / units / field names: selected - ErrorRecord remediation, `tool.failed` payload, and audit row fields are contract-shaped.
+- Auth / permissions / secrets: not selected - no credential or user permission model changes in this slice.
+- Concurrency / shared state / ordering: selected - subprocess children must inherit the sandbox and audit output must bind to the exact profile/run.
+- Resource limits / large input / discovery: selected - nlink scanning must be bounded to the protected roots it is asked to inspect.
+- Legacy compatibility / examples: selected - existing policy-gate wrapper behavior and raw-data read flows must continue working.
+- Error handling / rollback / partial outputs: selected - sandbox denial must leave no raw write behind and must return a stable tool failure.
+- Release / packaging / dependency compatibility: selected - implementation must keep zero source diff at 0 and avoid adding non-M1 runtime dependencies.
+- Documentation / migration notes: selected - PR evidence must state macOS-only seatbelt scope and Linux backend as ADR-recorded migration exit.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - raw data is protected evidence input; denials and residual hardlink detection must be auditable.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: selected - raw input reads are common scientific workflows and must not be blocked.
+- Zero adapter / tool registry / agent role governance: selected - wrapper uses the #17 seam and must not modify Zero.
+
+Invariant Matrix:
+- Governing invariant: A bash command may read `data/raw/**` but must not be able to create, modify, delete, rename, or truncate protected raw-data bytes through the SHUD bash wrapper.
+- Source-of-truth identity/contract: ADR-0001 2026-07-04裁决, policy-gate-spike 条 2', guard/profile id, `ErrorRecord.remediation`, `tool.failed`, and `workspace/tasks/TASK-M1-SPIKE/audit/`.
+- Producers: bash sandbox/profile helper, bash wrapper, advisory rule, audit helper, WS event builder.
+- Validators/preflight: profile builder tests, advisory rule tests, nlink scanner tests, sandbox execution tests.
+- Storage/cache/query: temporary sandbox profile file during execution; fixture audit file under `workspace/tasks/TASK-M1-SPIKE/audit/`.
+- Public routes/entrypoints: none - M1 skeleton builder only, no full backend WS route implementation.
+- Frontend/downstream consumers: future AgentActivityFeed consumes `tool.failed`; M1 asserts envelope/payload shape only.
+- Failure paths/rollback/stale state: sandbox denial returns stable tool error and must not leave a raw-data mutation; advisory denial is allowed only for clear static writes and must not overdeny reads.
+- Evidence/audit/readiness: unit/integration tests plus PR evidence; hardlink residual evidence records both leak demonstration and `nlink>1` detection.
+- Regression rows:
+  - Six escape classes (interpreter payload, pipeline/stdin, dynamic target, shell state/child process, symlink or `../` alias, rename/unlink) targeting `data/raw/**` -> no raw mutation, failed tool result with remediation, `tool.failed`, audit row including profile id and `decision=denied_by_sandbox`.
+  - `cat data/raw/input.csv` and a workspace allowed write under the same profile -> command succeeds.
+  - Pre-existing hardlink alias to a raw file written outside the protected subpath -> documented residual behavior, `nlink>1` helper accepts explicit protected roots, reads metadata only under those roots, avoids broader workspace/repo traversal, and flags the raw source/root as unsafe.
+  - Obvious static raw write seen by advisory layer -> may be denied before execution with remediation and audit/WS evidence; advisory misses remain covered by sandbox and advisory must not block legal reads.
+  - `git -C zero diff --quiet` and HEAD `13e25c1` -> unchanged after implementation.
+
+Boundary-surface checklist:
+- Shared helper roots: `packages/core/src/tools/*` policy/sandbox/audit helpers.
+- Public entrypoints: wrapped bash tool `run()` path only.
+- Read surfaces: raw-data reads under sandbox; nlink scan reads metadata only.
+- Write/delete/overwrite surfaces: sandboxed bash subprocess writes, deletes, renames, truncation, symlink aliases, and audit append helper.
+- Producer/consumer evidence boundaries: sandbox/advisory denial -> ErrorRecord-shaped payload -> WS `tool.failed` -> audit row with same rule/profile identity.
+- Unchanged downstream consumers: generic policy-gate pure evaluator, Zero tool registry wrapper, and future full WS/AuditEvent implementation.
+
+Non-goals:
+- Full shell parser, Linux landlock/bwrap backend, full WebSocket protocol/session bus, full AuditEvent schema, and ingest/readiness hardlink scan wiring.
+- Raw data read prohibition.
+
+Review focus:
+- Sandbox denial is the authority and runs at execution time, not a static string scan.
+- Child process inheritance, path alias behavior, and raw-read compatibility are covered by tests.
+- Denial evidence is synchronized across tool result, WS skeleton event, and audit row.
+- Hardlink residual is demonstrated honestly and the reusable nlink helper detects it.
