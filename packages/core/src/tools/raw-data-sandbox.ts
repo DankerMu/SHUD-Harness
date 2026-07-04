@@ -168,11 +168,13 @@ export async function buildRawDataSeatbeltProfile(
   const protectedEvidencePaths = options.protectedEvidencePaths
     ? await canonicalizePathSet(options.protectedEvidencePaths)
     : [];
+  const allowedWriteRoots = await canonicalizePathSet(options.allowedWriteRoots);
+  const protectedEvidenceAncestorLiteralPaths =
+    protectedEvidenceAncestorLiterals(protectedEvidencePaths, allowedWriteRoots);
   const protectedWriteDenyPaths = sortedUnique([
     ...protectedRawPaths,
     ...protectedEvidencePaths
   ]);
-  const allowedWriteRoots = await canonicalizePathSet(options.allowedWriteRoots);
   const tempRoot = await ensureDirectoryOutsideProtectedRaw(
     options.tempRoot ?? tmpdir(),
     protectedWriteDenyPaths,
@@ -190,6 +192,7 @@ export async function buildRawDataSeatbeltProfile(
     profileVersion: RAW_DATA_SANDBOX_PROFILE_VERSION,
     protectedRawPaths,
     protectedEvidencePaths,
+    protectedEvidenceAncestorLiteralPaths,
     allowedWriteRoots,
     tempRoot
   });
@@ -214,7 +217,10 @@ export async function buildRawDataSeatbeltProfile(
     ...[...protectedRawPaths, ...protectedEvidencePaths].flatMap((protectedPath) => [
       `(deny file-write* (literal ${quoteSeatbeltString(protectedPath)}))`,
       `(deny file-write* (subpath ${quoteSeatbeltString(protectedPath)}))`
-    ])
+    ]),
+    ...protectedEvidenceAncestorLiteralPaths.map(
+      (protectedPath) => `(deny file-write* (literal ${quoteSeatbeltString(protectedPath)}))`
+    )
   ].join("\n");
 
   return {
@@ -254,6 +260,29 @@ export async function writeRawDataSeatbeltProfileFile(
     throw new Error(`Seatbelt profile path is not a regular file: ${profilePath}`);
   }
   return canonicalizeExistingPath(profilePath);
+}
+
+function protectedEvidenceAncestorLiterals(
+  protectedEvidencePaths: readonly string[],
+  allowedWriteRoots: readonly string[]
+): string[] {
+  const ancestors: string[] = [];
+  for (const protectedEvidencePath of protectedEvidencePaths) {
+    let current = dirname(protectedEvidencePath);
+    while (current !== dirname(current)) {
+      const isAllowedWriteRoot = allowedWriteRoots.some(
+        (root) => normalize(resolve(current)) === normalize(resolve(root))
+      );
+      if (isAllowedWriteRoot) {
+        break;
+      }
+      if (allowedWriteRoots.some((root) => isPathInsideOrEqual(current, root))) {
+        ancestors.push(current);
+      }
+      current = dirname(current);
+    }
+  }
+  return sortedUnique(ancestors);
 }
 
 export class RawDataSandboxedBashTool extends BaseTool {
@@ -331,7 +360,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
       if (suppressedDenial.decision === "deny") {
         const evidence = buildRawDataDenialEvidence({
           toolId: this.name,
-          decision: "denied_by_sandbox",
+          decision: "denied_by_advisory",
           reason: suppressedDenial.reason,
           profile,
           profilePath,
@@ -608,10 +637,10 @@ export function evaluateSuppressedSandboxFailureGuard(
   existingAnalysis?: RawDataCommandAnalysis
 ): PolicyRuleDecision {
   const analysis = existingAnalysis ?? analyzeRawDataCommand(command, protectedRawPaths);
-  if (analysis.budgetExceeded && analysis.hasHiddenEvidenceRisk) {
+  if (analysis.hasIncompleteHiddenInterpreterWriteScan) {
     return {
       decision: "deny",
-      reason: "policy gate command analysis budget exceeded for hidden-denial-sensitive bash form",
+      reason: "policy gate interpreter call scan was incomplete for hidden-denial-sensitive write-capable payload",
       remediation: rawDataWriteRemediation()
     };
   }
@@ -635,6 +664,7 @@ interface RawDataCommandAnalysis {
   hasHiddenEvidenceRisk: boolean;
   hasHiddenRawWriteTarget: boolean;
   hasInterpreterSuppressedRawWrite: boolean;
+  hasIncompleteHiddenInterpreterWriteScan: boolean;
 }
 
 function analyzeRawDataCommand(
@@ -648,9 +678,10 @@ function analyzeRawDataCommand(
       budgetReason: budget.reason,
       hasStaticRawWrite: false,
       hasKnownRawWriteTarget: false,
-      hasHiddenEvidenceRisk: true,
+      hasHiddenEvidenceRisk: canLoseSandboxDenialEvidence(command),
       hasHiddenRawWriteTarget: false,
-      hasInterpreterSuppressedRawWrite: false
+      hasInterpreterSuppressedRawWrite: false,
+      hasIncompleteHiddenInterpreterWriteScan: false
     };
   }
 
@@ -663,6 +694,8 @@ function analyzeRawDataCommand(
     command,
     protectedRawPaths
   );
+  const hasIncompleteHiddenInterpreterWriteScan =
+    hasIncompleteHiddenInterpreterWriteScanRisk(command);
 
   return {
     budgetExceeded: false,
@@ -670,7 +703,8 @@ function analyzeRawDataCommand(
     hasKnownRawWriteTarget,
     hasHiddenEvidenceRisk,
     hasHiddenRawWriteTarget: hasKnownRawWriteTarget && hasHiddenEvidenceRisk,
-    hasInterpreterSuppressedRawWrite
+    hasInterpreterSuppressedRawWrite,
+    hasIncompleteHiddenInterpreterWriteScan
   };
 }
 
@@ -2500,6 +2534,48 @@ function hasInterpreterInternalRawWriteSuppressionRisk(
   return false;
 }
 
+function hasIncompleteHiddenInterpreterWriteScanRisk(command: string): boolean {
+  for (const segment of splitStaticShellSegments(command)) {
+    const tokens = commandTokensFromSegment(segment);
+    if (tokens.length === 0 || !isInterpreterCommand(normalizeCommandName(tokens[0]))) {
+      continue;
+    }
+
+    const payload = interpreterPayload(tokens);
+    if (
+      payload &&
+      hasInterpreterExceptionSwallowSignal(payload) &&
+      hasTruncatedWriteCapableCallScan(payload)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasTruncatedWriteCapableCallScan(payload: string): boolean {
+  const writeCapablePatterns: readonly RegExp[] = [
+    /\b(?:writeFile|appendFile)(?:Sync)?/,
+    /\bcreateWriteStream/,
+    /\b(?:File|IO)\.write/,
+    /\b(?:File\.)?open(?:Sync)?/,
+    /\b(?:os\.)?(?:unlink|remove)\b/,
+    /\b(?:(?:fs\.)?(?:unlink|unlinkSync|rmSync)|fs\.rm)\b/,
+    /\b(?:os\.|fs\.|File\.)?(?:rename|renameSync|replace|move|mv)\b/,
+    /\b(?:copyFile|copyFileSync)\b/,
+    /\b(?:shutil\.)?(?:copyfile|copy|copy2)\b/,
+    /\bwrite\.(?:csv|table)/,
+    /\bwriteLines/,
+    /\bsaveRDS/,
+    /\bsink/
+  ];
+
+  return writeCapablePatterns.some(
+    (pattern) => scanCallArgumentLists(payload, pattern).truncated
+  );
+}
+
 function hasInterpreterExceptionSwallowSignal(payload: string): boolean {
   return (
     /try\s*{[\s\S]*}\s*catch(?:\s*\([^)]*\))?\s*{\s*}/.test(payload) ||
@@ -2511,13 +2587,28 @@ function hasInterpreterExceptionSwallowSignal(payload: string): boolean {
 }
 
 function findCallArgumentLists(payload: string, calleePattern: RegExp): string[] {
+  return scanCallArgumentLists(payload, calleePattern).calls;
+}
+
+interface CallArgumentListScan {
+  calls: string[];
+  truncated: boolean;
+}
+
+function scanCallArgumentLists(
+  payload: string,
+  calleePattern: RegExp
+): CallArgumentListScan {
   const flags = calleePattern.flags.includes("g")
     ? calleePattern.flags
     : `${calleePattern.flags}g`;
   const regex = new RegExp(`${calleePattern.source}\\s*\\(`, flags);
   const calls: string[] = [];
   let match = regex.exec(payload);
-  while (match && calls.length < COMMAND_ANALYSIS_MAX_CALLS) {
+  while (match) {
+    if (calls.length >= COMMAND_ANALYSIS_MAX_CALLS) {
+      return { calls, truncated: true };
+    }
     const openIndex = regex.lastIndex - 1;
     const argsText = extractCallArgumentsAtOpenParen(payload, openIndex);
     const endIndex =
@@ -2526,7 +2617,7 @@ function findCallArgumentLists(payload: string, calleePattern: RegExp): string[]
     regex.lastIndex = endIndex + 1;
     match = regex.exec(payload);
   }
-  return calls;
+  return { calls, truncated: false };
 }
 
 function extractCallArgumentsAtOpenParen(value: string, openIndex: number): string | undefined {
@@ -2651,6 +2742,14 @@ function isRawDataTargetExpression(
     return isRawDataPathToken(literal, protectedRawPaths, options);
   }
 
+  const concatenatedLiteral = parseSimpleConcatenatedStringExpression(cleaned);
+  if (
+    concatenatedLiteral !== undefined &&
+    isRawDataPathToken(concatenatedLiteral, protectedRawPaths, options)
+  ) {
+    return true;
+  }
+
   const pathConstructor = parsePathConstructorExpression(cleaned);
   if (
     pathConstructor !== undefined &&
@@ -2680,6 +2779,104 @@ function stripOuterParentheses(value: string): string {
     current = current.slice(1, -1).trim();
   }
   return current;
+}
+
+function parseSimpleConcatenatedStringExpression(expression: string): string | undefined {
+  if (!expression.includes("+")) {
+    return undefined;
+  }
+
+  const parts = splitTopLevelPlus(expression);
+  if (parts.length < 2) {
+    return undefined;
+  }
+
+  let output = "";
+  for (const part of parts) {
+    const cleaned = stripOuterParentheses(part.trim());
+    const literal = parseSingleStringLiteral(cleaned);
+    if (literal !== undefined) {
+      output += literal;
+      continue;
+    }
+
+    const char = parseChrCall(cleaned);
+    if (char !== undefined) {
+      output += char;
+      continue;
+    }
+
+    return undefined;
+  }
+
+  return output;
+}
+
+function splitTopLevelPlus(expression: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | "`" | undefined;
+  let escaped = false;
+  let depth = 0;
+
+  for (const char of expression) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      }
+      current += char;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{") {
+      depth += 1;
+      current += char;
+      continue;
+    }
+    if (char === ")" || char === "]" || char === "}") {
+      depth = Math.max(0, depth - 1);
+      current += char;
+      continue;
+    }
+    if (char === "+" && depth === 0) {
+      parts.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+
+  if (current.trim() || expression.trim()) {
+    parts.push(current.trim());
+  }
+  return parts;
+}
+
+function parseChrCall(expression: string): string | undefined {
+  const match = expression.match(/^chr\s*\(\s*(\d{1,7})\s*\)$/);
+  if (!match) {
+    return undefined;
+  }
+
+  const codePoint = Number(match[1]);
+  if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+    return undefined;
+  }
+  return String.fromCodePoint(codePoint);
 }
 
 function parseSingleStringLiteral(value: string): string | undefined {
@@ -3301,9 +3498,199 @@ function evaluateProcessContainmentPreflight(
 }
 
 function hasSessionEscapeSignal(command: string): boolean {
-  return /\b(?:setsid|setpgrp|daemonize|start_new_session|os\.setsid|os\.setpgrp|Process\.daemon)\b/.test(
-    command
+  for (const segment of splitStaticShellSegments(command)) {
+    const tokens = commandTokensFromSegment(segment);
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    const commandName = normalizeCommandName(tokens[0]);
+    if (
+      commandName === "setsid" ||
+      commandName === "setpgrp" ||
+      commandName === "daemonize"
+    ) {
+      return true;
+    }
+
+    if (isInterpreterCommand(commandName)) {
+      const payload = interpreterPayload(tokens);
+      if (payload && hasInterpreterProcessContainmentRisk(commandName, payload)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function hasInterpreterProcessContainmentRisk(commandName: string, payload: string): boolean {
+  const code = stripInterpreterLiteralAndCommentText(payload);
+  return (
+    hasInterpreterSessionEscapeSignal(code) ||
+    hasInterpreterProgrammaticProcessCreationSignal(commandName, payload, code)
   );
+}
+
+function hasInterpreterSessionEscapeSignal(code: string): boolean {
+  return (
+    /\b(?:os\.)?(?:setsid|setpgrp)\s*\(/.test(code) ||
+    /\bProcess\.(?:daemon|setpgrp)(?:\s*\(|\b)/.test(code) ||
+    /\bdaemonize\s*\(/.test(code) ||
+    /\bstart_new_session\s*=\s*True\b/.test(code) ||
+    /\bpreexec_fn\s*=\s*(?:os\.)?(?:setsid|setpgrp)\b/.test(code) ||
+    /\b(?:spawn|exec|execFile|fork)\s*\([\s\S]*\bdetached\s*:\s*true\b/.test(code) ||
+    /\bsystem(?:2)?\s*\([\s\S]*\bwait\s*=\s*FALSE\b/.test(code)
+  );
+}
+
+function hasInterpreterProgrammaticProcessCreationSignal(
+  commandName: string,
+  payload: string,
+  code: string
+): boolean {
+  if (isPythonCommand(commandName)) {
+    return hasPythonProgrammaticProcessCreationSignal(code);
+  }
+
+  if (isNodeLikeCommand(commandName)) {
+    return hasNodeProgrammaticProcessCreationSignal(payload, code);
+  }
+
+  if (isRubyCommand(commandName)) {
+    return hasRubyProgrammaticProcessCreationSignal(code);
+  }
+
+  if (isRCommand(commandName)) {
+    return hasRProgrammaticProcessCreationSignal(code);
+  }
+
+  return false;
+}
+
+function isPythonCommand(commandName: string): boolean {
+  return /^python(?:\d+(?:\.\d+)?)?$/.test(commandName);
+}
+
+function isNodeLikeCommand(commandName: string): boolean {
+  return commandName === "node" || commandName === "bun";
+}
+
+function isRubyCommand(commandName: string): boolean {
+  return commandName === "ruby";
+}
+
+function isRCommand(commandName: string): boolean {
+  return commandName === "R" || commandName === "Rscript";
+}
+
+function hasPythonProgrammaticProcessCreationSignal(code: string): boolean {
+  return (
+    /\bsubprocess\s*\.\s*Popen\s*\(/.test(code) ||
+    /\bos\s*\.\s*fork\s*\(/.test(code) ||
+    /\bmultiprocessing\s*\.\s*Process\s*\(/.test(code) ||
+    /\bdaemon\s*\.\s*DaemonContext\s*\(/.test(code)
+  );
+}
+
+function hasNodeProgrammaticProcessCreationSignal(payload: string, code: string): boolean {
+  if (/\bchild_process\s*\.\s*(?:spawn|exec|execFile|fork)\s*\(/.test(code)) {
+    return true;
+  }
+
+  if (!hasNodeChildProcessModuleReference(payload)) {
+    return false;
+  }
+
+  return (
+    /\.\s*(?:spawn|exec|execFile|fork)\s*\(/.test(code) ||
+    /\b(?:spawn|exec|execFile|fork)\s*\(/.test(code)
+  );
+}
+
+function hasNodeChildProcessModuleReference(payload: string): boolean {
+  return (
+    /\brequire\s*\(\s*["'](?:node:)?child_process["']\s*\)/.test(payload) ||
+    /\bimport\s*\(\s*["'](?:node:)?child_process["']\s*\)/.test(payload) ||
+    /\bfrom\s*["'](?:node:)?child_process["']/.test(payload) ||
+    /\bimport\s+["'](?:node:)?child_process["']/.test(payload)
+  );
+}
+
+function hasRubyProgrammaticProcessCreationSignal(code: string): boolean {
+  return (
+    /\b(?:Process|Kernel)\s*\.\s*(?:fork|spawn)\s*\(/.test(code) ||
+    /\b(?:fork|spawn)\s*\(/.test(code)
+  );
+}
+
+function hasRProgrammaticProcessCreationSignal(code: string): boolean {
+  return (
+    /\b(?:parallel\s*::\s*)?mcparallel\s*\(/.test(code) ||
+    /\bcallr\s*::\s*r_bg\s*\(/.test(code) ||
+    /\bprocessx\s*::\s*process\s*\$\s*new\s*\(/.test(code)
+  );
+}
+
+function stripInterpreterLiteralAndCommentText(payload: string): string {
+  let output = "";
+  let quote: "'" | '"' | "`" | undefined;
+  let escaped = false;
+  let lineComment: "#" | "//" | undefined;
+
+  for (let index = 0; index < payload.length; index += 1) {
+    const char = payload[index];
+    const next = payload[index + 1];
+
+    if (lineComment) {
+      if (char === "\n") {
+        lineComment = undefined;
+        output += "\n";
+      } else {
+        output += " ";
+      }
+      continue;
+    }
+
+    if (escaped) {
+      output += " ";
+      escaped = false;
+      continue;
+    }
+
+    if (quote) {
+      if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = undefined;
+      }
+      output += " ";
+      continue;
+    }
+
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      output += " ";
+      continue;
+    }
+
+    if (char === "#") {
+      lineComment = "#";
+      output += " ";
+      continue;
+    }
+
+    if (char === "/" && next === "/") {
+      lineComment = "//";
+      output += "  ";
+      index += 1;
+      continue;
+    }
+
+    output += char;
+  }
+
+  return output;
 }
 
 function hasUnwaitedBackgroundExecution(command: string): boolean {
@@ -3401,7 +3788,10 @@ function isLikelySandboxDenialForCommand(
 ): boolean {
   const analysis = analyzeRawDataCommand(command, protectedRawPaths);
   if (analysis.budgetExceeded) {
-    return !result.success && analysis.hasHiddenEvidenceRisk;
+    return (
+      !result.success &&
+      (isLikelySandboxDenial(result.output) || INTERPRETER_WRITE_DENIAL_PATTERN.test(result.output))
+    );
   }
 
   const output = result.output;
@@ -3747,7 +4137,7 @@ async function ensurePolicyGateAuditReservation(
   return {
     auditDir: current,
     auditPath,
-    protectedEvidencePath: auditPath,
+    protectedEvidencePath: current,
     handle,
     dev: metadata.dev,
     ino: metadata.ino

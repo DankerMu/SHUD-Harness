@@ -1,0 +1,5 @@
+Verifier verdict for: cand-2689-03
+Reviewed head SHA: 2689f1f9bb82b23a86acd51418e40f8fafba3d04
+Verdict: CONFIRMED
+Evidence: `findCallArgumentLists` stops at `calls.length < COMMAND_ANALYSIS_MAX_CALLS` with `COMMAND_ANALYSIS_MAX_CALLS = 512` (raw-data-sandbox.ts:50,2520), while the budget check does not count calls (677-705). A swallowed raw write after 512 benign `open()` calls can evade `hasInterpreterRawWriteTarget`, then `buildSandboxedBashResult` returns `success: true` for exit 0 (1222-1226), `isLikelySandboxDenialForCommand` only normalizes when denial output or known target exists (3397-3418), and the fallback audit records `event: result.success ? "tool.completed" : "tool.failed"` / `decision: result.success ? "allowed" : "failed"` (424-427). This violates spec.md:25 and :31-32 requiring denied OS-layer raw mutations to return a remediation tool error plus `tool.failed` audit evidence.
+Note: The `chr(100)+"ata/raw/hidden.txt"` variant is also not covered by the listed target-expression parsers/fragments at raw-data-sandbox.ts:2643-2670 and 2757-2779.
