@@ -21,6 +21,7 @@ export interface AppendPolicyGateAuditRowOptions {
   taskId?: string;
   fileName?: string;
   now?: () => string;
+  beforeWriteForTest?: () => void | Promise<void>;
 }
 
 export interface AppendPolicyGateAuditRowResult {
@@ -49,7 +50,13 @@ export async function appendPolicyGateAuditRow(
   await assertAuditDirectoryCanBeCreatedInsideWorkspace(workspaceRoot, auditDir);
   await mkdir(auditDir, { recursive: true });
   await assertAuditLocationInsideWorkspace(workspaceRoot, auditDir, auditPath);
-  await appendPolicyGateAuditLineNoFollow(auditPath, `${JSON.stringify(resolvedRow)}\n`);
+  await appendPolicyGateAuditLineNoFollow(
+    workspaceRoot,
+    auditDir,
+    auditPath,
+    `${JSON.stringify(resolvedRow)}\n`,
+    options.beforeWriteForTest
+  );
 
   return {
     auditDir,
@@ -173,8 +180,11 @@ async function assertAuditLocationInsideWorkspace(
 }
 
 async function appendPolicyGateAuditLineNoFollow(
+  workspaceRoot: string,
+  auditDir: string,
   auditPath: string,
-  line: string
+  line: string,
+  beforeWriteForTest?: () => void | Promise<void>
 ): Promise<void> {
   const noFollowFlag =
     typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
@@ -189,6 +199,8 @@ async function appendPolicyGateAuditLineNoFollow(
       }
     }
     fileHandle = await open(auditPath, flags, 0o600);
+    await beforeWriteForTest?.();
+    await assertOpenedAuditFileStillInsideWorkspace(workspaceRoot, auditDir, auditPath, fileHandle);
     await fileHandle.writeFile(line, "utf8");
   } catch (error) {
     if (isSymlinkOpenError(error)) {
@@ -197,6 +209,30 @@ async function appendPolicyGateAuditLineNoFollow(
     throw error;
   } finally {
     await fileHandle?.close();
+  }
+}
+
+async function assertOpenedAuditFileStillInsideWorkspace(
+  workspaceRoot: string,
+  auditDir: string,
+  auditPath: string,
+  fileHandle: Awaited<ReturnType<typeof open>>
+): Promise<void> {
+  const realWorkspaceRoot = await realpath(workspaceRoot);
+  const realAuditDir = await realpath(auditDir);
+  if (!isPathInside(realAuditDir, realWorkspaceRoot)) {
+    throw new Error("Invalid policy gate audit directory: resolves outside workspace.");
+  }
+
+  const realAuditPath = await realpath(auditPath);
+  if (!isPathInside(realAuditPath, realAuditDir)) {
+    throw new Error("Invalid policy gate audit fileName: resolves outside audit directory.");
+  }
+
+  const openedFile = await fileHandle.stat();
+  const currentPath = await lstat(auditPath);
+  if (!isSameFilesystemEntry(openedFile, currentPath)) {
+    throw new Error("Invalid policy gate audit fileName: changed before audit write.");
   }
 }
 
@@ -209,6 +245,13 @@ async function lstatIfExists(filePath: string) {
     }
     throw error;
   }
+}
+
+function isSameFilesystemEntry(
+  left: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["stat"]>>,
+  right: Awaited<ReturnType<typeof lstat>>
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function isSymlinkOpenError(error: unknown): boolean {

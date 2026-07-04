@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -36,6 +36,24 @@ describe("data/raw write deny policy", () => {
     {
       name: "fd redirect write with attached target",
       command: "printf x >&data/raw/input.csv"
+    },
+    {
+      name: "redirect write from raw workDir",
+      command: "printf x > input.csv",
+      workDir: "/tmp/shud-harness-test/data/raw"
+    },
+    {
+      name: "relative raw write from data workDir",
+      command: "touch raw/input.csv",
+      workDir: "/tmp/shud-harness-test/data"
+    },
+    {
+      name: "cd updates relative remove target",
+      command: "cd data && rm raw/input.csv"
+    },
+    {
+      name: "cd updates relative redirect target",
+      command: "cd data && printf x > raw/input.csv"
     },
     {
       name: "command substitution remove",
@@ -102,6 +120,14 @@ describe("data/raw write deny policy", () => {
       command: 'python -c \'open("data/raw/x","w").write("x")\''
     },
     {
+      name: "python heredoc raw write",
+      command: "python - <<'PY'\nopen(\"data/raw/input.csv\",\"w\").write(\"x\")\nPY"
+    },
+    {
+      name: "shell heredoc raw write",
+      command: "bash <<'SH'\nrm data/raw/input.csv\nSH"
+    },
+    {
       name: "variable-expanded remove",
       command: 'RAW=data/raw; rm "$RAW/input.csv"'
     },
@@ -118,8 +144,36 @@ describe("data/raw write deny policy", () => {
       command: "RAW=raw; rm data/$RAW/file"
     },
     {
+      name: "composed variable-expanded remove",
+      command: 'ROOT=data; KIND=raw; PATHNAME="$ROOT/$KIND"; rm "$PATHNAME/input.csv"'
+    },
+    {
+      name: "composed variable-expanded eval remove",
+      command: 'ROOT=data; KIND=raw; CMD="rm $ROOT/$KIND/input.csv"; eval "$CMD"'
+    },
+    {
       name: "exported variable-expanded shell wrapper remove",
       command: 'export RAW=data/raw; bash -c \'rm "$RAW/input.csv"\''
+    },
+    {
+      name: "command substitution path expansion remove",
+      command: "rm data/ra$(printf w)/input.csv"
+    },
+    {
+      name: "parameter default path expansion remove",
+      command: "rm ${UNSET:-data/raw/input.csv}"
+    },
+    {
+      name: "glob bracket path expansion remove",
+      command: "rm data/ra[w]/input.csv"
+    },
+    {
+      name: "glob question path expansion remove",
+      command: "rm data/ra?/input.csv"
+    },
+    {
+      name: "glob bracket redirect write",
+      command: "printf x > data/ra[w]/input.csv"
     },
     {
       name: "curl short output option",
@@ -360,9 +414,9 @@ describe("data/raw write deny policy", () => {
     }
   ] as const;
 
-  for (const { name, command } of deniedCommands) {
+  for (const { name, command, workDir } of deniedCommands) {
     test(`denies ${name} before the command implementation executes`, async () => {
-      const { result, bashTool } = await runWrappedBashCommand(command);
+      const { result, bashTool } = await runWrappedBashCommand(command, { workDir });
 
       expect(result?.success).toBe(false);
       expect(bashTool.calls).toBe(0);
@@ -402,6 +456,26 @@ describe("data/raw write deny policy", () => {
       command: "curl -fsSL https://example.invalid/input.csv"
     },
     {
+      name: "curl read-only URL containing data raw",
+      command: "curl -fsSL https://example.invalid/data/raw/input.csv"
+    },
+    {
+      name: "wget read-only URL containing data raw",
+      command: "wget https://example.invalid/data/raw/input.csv"
+    },
+    {
+      name: "stat raw input",
+      command: "stat data/raw/input.csv"
+    },
+    {
+      name: "sha256sum raw input",
+      command: "sha256sum data/raw/input.csv"
+    },
+    {
+      name: "python executable code string raw read",
+      command: 'python -c \'print(open("data/raw/input.csv").read())\''
+    },
+    {
       name: "read-only find under raw",
       command: "find data/raw -maxdepth 1 -type f"
     },
@@ -432,6 +506,10 @@ describe("data/raw write deny policy", () => {
     {
       name: "quoted brace fallback option",
       command: 'unknown-writer "--out=data/{raw,processed}/out.csv"'
+    },
+    {
+      name: "single-quoted glob-like non-raw path mutation",
+      command: "rm 'data/ra[w]/input.csv'"
     }
   ] as const;
 
@@ -582,12 +660,40 @@ describe("data/raw write deny policy", () => {
     expect(await readFile(realAuditFile, "utf8")).toBe("original\n");
   });
 
+  test("audit helper rejects a parent directory swap before writing the opened file", async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-"));
+    const outsideDir = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-outside-"));
+    tempDirs.push(workspaceRoot, outsideDir);
+
+    const taskDir = path.join(workspaceRoot, "workspace", "tasks", "TASK-M1-SPIKE");
+    const auditDir = path.join(taskDir, "audit");
+    const movedAuditDir = path.join(taskDir, "audit-original");
+    const auditPathAfterMove = path.join(movedAuditDir, "policy-gate-audit.ndjson");
+    await mkdir(auditDir, { recursive: true });
+
+    await expect(
+      appendPolicyGateAuditRow(sampleAuditRow(), {
+        workspaceRoot,
+        beforeWriteForTest: async () => {
+          await rename(auditDir, movedAuditDir);
+          await symlink(outsideDir, auditDir, "dir");
+        }
+      })
+    ).rejects.toThrow("Invalid policy gate audit directory: resolves outside workspace.");
+
+    expect(await pathExists(path.join(outsideDir, "policy-gate-audit.ndjson"))).toBe(false);
+    expect(await readFile(auditPathAfterMove, "utf8")).toBe("");
+  });
+
   test("data/raw rule exposes a legal guard_class marker", () => {
     expect(DATA_RAW_WRITE_DENY_RULE.guard_class).toBe("authority");
   });
 });
 
-async function runWrappedBashCommand(command: string): Promise<{
+async function runWrappedBashCommand(
+  command: string,
+  options: { workDir?: string } = {}
+): Promise<{
   result: ToolResult | undefined;
   bashTool: RecordingTool;
 }> {
@@ -596,9 +702,12 @@ async function runWrappedBashCommand(command: string): Promise<{
     evaluate: createPolicyGateEvaluator(makeDataRawPolicyGateContext())
   });
 
-  const result = await registry.get("bash")?.run(createToolContext("worker"), {
-    command
-  });
+  const result = await registry.get("bash")?.run(
+    createToolContext("worker", options.workDir),
+    {
+      command
+    }
+  );
 
   return {
     result,
@@ -683,11 +792,13 @@ class RecordingTool extends BaseTool {
   }
 }
 
-function createToolContext(role: string): ToolContext & { role: string } {
+function createToolContext(role: string, workDir = "/tmp/shud-harness-test"): ToolContext & {
+  role: string;
+} {
   return {
     role,
     sessionId: "TEST-SESSION",
-    workDir: "/tmp/shud-harness-test",
+    workDir,
     logger: testLogger
   };
 }
