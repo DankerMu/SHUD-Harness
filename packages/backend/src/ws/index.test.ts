@@ -23,7 +23,7 @@ describe("backend ws tool.failed skeleton", () => {
     expect(event).toEqual({
       seq: 7,
       event_id: "evt-7",
-      event: "tool.failed",
+      type: "tool.failed",
       ts: "2026-07-04T00:00:00.000Z",
       payload: {
         tool_id: payload.tool_id,
@@ -35,7 +35,7 @@ describe("backend ws tool.failed skeleton", () => {
         error: payload.error_record
       }
     });
-    expect(event.event).not.toBe("policy.denied");
+    expect(event.type).toBe("tool.failed");
     expect(event.payload.error.error_id).toBe(payload.error_record.error_id);
     expect(event.payload.error.remediation?.next_action).toBe("adjust_scope");
     expect(event.payload.error.remediation?.hint).toContain("data/raw");
@@ -51,6 +51,7 @@ describe("backend ws tool.failed skeleton", () => {
     });
 
     expect(event.event_id).toBe("tool.failed:8");
+    expect(event.type).toBe("tool.failed");
     expect(event.payload).toMatchObject({
       tool_id: payload.tool_id,
       rule: payload.rule,

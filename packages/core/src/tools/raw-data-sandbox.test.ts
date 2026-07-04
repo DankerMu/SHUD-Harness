@@ -35,8 +35,10 @@ import {
   type RawDataDenialPayload
 } from "./raw-data-sandbox";
 
-const seatbeltTest =
-  process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec") ? test : test.skip;
+const hasSeatbelt = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
+const seatbeltTest = hasSeatbelt ? test : test.skip;
+const pythonSeatbeltTest = hasSeatbelt && commandExistsSync("python3") ? test : test.skip;
+const rubySeatbeltTest = hasSeatbelt && commandExistsSync("ruby") ? test : test.skip;
 
 describe("raw data seatbelt sandbox", () => {
   test("profile builder canonicalizes paths and returns stable profile identity", async () => {
@@ -342,6 +344,27 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  seatbeltTest("stderr redirected away from parent still classifies raw write as sandbox denial", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        "2>workspace/err.log >data/raw/hidden.txt printf hidden",
+        { enableAdvisory: false }
+      );
+
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      await expectMissing(join(fixture.rawRoot, "hidden.txt"));
+      expect(await readFile(join(fixture.workspaceRoot, "err.log"), "utf8")).toMatch(
+        /Operation not permitted|Permission denied|sandbox/i
+      );
+      const rows = await readAuditRows(fixture.root);
+      expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("Python Path.joinpath raw write is denied when interpreter errors are suppressed", async () => {
     const fixture = await createFixture();
     try {
@@ -353,6 +376,62 @@ describe("raw data seatbelt sandbox", () => {
 
       const payload = expectDeniedPayload(result, "denied_by_sandbox");
       await expectMissing(join(fixture.rawRoot, "pathlib.txt"));
+      const rows = await readAuditRows(fixture.root);
+      expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("Node path.join raw write is denied when interpreter errors are suppressed", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        'node -e \'const fs = require("fs"); const path = require("path"); fs.writeFileSync(path.join("data", "raw", "node-path-join.txt"), "node")\' 2>/dev/null || true',
+        { enableAdvisory: false }
+      );
+
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      await expectMissing(join(fixture.rawRoot, "node-path-join.txt"));
+      const rows = await readAuditRows(fixture.root);
+      expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  rubySeatbeltTest("Ruby File.join raw write is denied when interpreter errors are suppressed", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        "ruby -e 'File.write(File.join(\"data\", \"raw\", \"ruby-path-join.txt\"), \"ruby\")' 2>/dev/null || true",
+        { enableAdvisory: false }
+      );
+
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      await expectMissing(join(fixture.rawRoot, "ruby-path-join.txt"));
+      const rows = await readAuditRows(fixture.root);
+      expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  pythonSeatbeltTest("Python r+ raw file modification is denied and preserves existing bytes", async () => {
+    const fixture = await createFixture();
+    try {
+      const target = join(fixture.rawRoot, "input.csv");
+      const before = await readFile(target, "utf8");
+      const result = await runSandboxed(
+        fixture,
+        'python3 -c \'f = open("data/raw/input.csv", "r+"); f.write("MUTATED"); f.close()\'',
+        { enableAdvisory: false }
+      );
+
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(await readFile(target, "utf8")).toBe(before);
       const rows = await readAuditRows(fixture.root);
       expectAuditMatchesPayload(rows.at(-1), payload);
     } finally {
@@ -408,6 +487,36 @@ describe("raw data seatbelt sandbox", () => {
     {
       name: "dd overwrite",
       command: "dd if=/dev/zero of=data/raw/input.csv bs=1 count=1"
+    }
+  ]) {
+    seatbeltTest(`existing raw file ${commandCase.name} is denied and preserves bytes`, async () => {
+      const fixture = await createFixture();
+      try {
+        const target = join(fixture.rawRoot, "input.csv");
+        const before = await readFile(target, "utf8");
+
+        const result = await runSandboxed(fixture, commandCase.command, {
+          enableAdvisory: false
+        });
+
+        const payload = expectDeniedPayload(result, "denied_by_sandbox");
+        expect(await readFile(target, "utf8")).toBe(before);
+        const rows = await readAuditRows(fixture.root);
+        expectAuditMatchesPayload(rows.at(-1), payload);
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  }
+
+  for (const commandCase of [
+    {
+      name: "unsuppressed overwrite redirection",
+      command: ": > data/raw/input.csv"
+    },
+    {
+      name: "unsuppressed append redirection",
+      command: "printf appended >> data/raw/input.csv"
     }
   ]) {
     seatbeltTest(`existing raw file ${commandCase.name} is denied and preserves bytes`, async () => {
@@ -593,6 +702,59 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  seatbeltTest("timeout terminates background children before they can write", async () => {
+    const fixture = await createFixture();
+    try {
+      const leakPath = join(fixture.workspaceRoot, "timeout-child-write.txt");
+      const result = await runSandboxed(
+        fixture,
+        "sh -c 'sleep 0.25; printf leaked > workspace/timeout-child-write.txt' & wait",
+        { timeout: 40 }
+      );
+
+      expect(result.success).toBe(false);
+      await Bun.sleep(400);
+      await expectMissing(leakPath);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("abort terminates background children before they can write", async () => {
+    const fixture = await createFixture();
+    try {
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+      const leakPath = join(fixture.workspaceRoot, "abort-child-write.txt");
+      const run = runSandboxed(
+        fixture,
+        "sh -c 'sleep 0.35; printf leaked > workspace/abort-child-write.txt' & wait",
+        {
+          timeout: 5_000,
+          context: {
+            ...fixture.context,
+            runningToolRegistry
+          }
+        }
+      );
+
+      await Bun.sleep(80);
+      expect(handle.requestAbort("stop command")).toBe("accepted");
+      const result = await run;
+
+      expect(result.success).toBe(false);
+      expect(handle.getTerminalMetadata()?.cause).toBe("abort");
+      await Bun.sleep(500);
+      await expectMissing(leakPath);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("raw source copy to workspace succeeds and raw destination copy is denied", async () => {
     const fixture = await createFixture();
     try {
@@ -708,6 +870,12 @@ describe("raw data seatbelt sandbox", () => {
       name: "grouped cd",
       outputPath: ["data", "raw", "group-out.txt"],
       command: "mkdir -p workspace/data/raw; { cd workspace; printf ok > data/raw/group-out.txt; }"
+    },
+    {
+      name: "child bash cd",
+      outputPath: ["data", "raw", "child-bash-out.txt"],
+      command:
+        "mkdir -p workspace/data/raw; bash -c 'cd workspace && printf ok > data/raw/child-bash-out.txt'"
     }
   ]) {
     seatbeltTest(`${commandCase.name} workspace data/raw write is not advisory false-denied`, async () => {
@@ -858,6 +1026,74 @@ describe("raw data seatbelt sandbox", () => {
       const beforeRawEntries = await sortedRawEntries(fixture.rawRoot);
       await rm(fixture.tempRoot, { recursive: true, force: true });
       await symlink(fixture.rawRoot, fixture.tempRoot);
+
+      const result = await runSandboxed(fixture, "cat data/raw/input.csv");
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("protected raw data path");
+      expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("profileRoot inside protected evidence root is rejected before profile artifacts", async () => {
+    const fixture = await createFixture();
+    try {
+      const beforeRawEntries = await sortedRawEntries(fixture.rawRoot);
+      const result = await runSandboxed(fixture, "cat data/raw/input.csv", {
+        profileRoot: join(fixture.root, "workspace", "tasks", "profiles")
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("protected raw data path");
+      expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
+      await expectMissing(join(fixture.root, "workspace", "tasks", "profiles"));
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("tempRoot inside protected evidence root is rejected before profile artifacts", async () => {
+    const fixture = await createFixture();
+    try {
+      const beforeRawEntries = await sortedRawEntries(fixture.rawRoot);
+      const result = await runSandboxed(fixture, "cat data/raw/input.csv", {
+        tempRoot: join(fixture.root, "workspace", "tasks", "tmp")
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("protected raw data path");
+      expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
+      await expectMissing(join(fixture.root, "workspace", "tasks", "tmp"));
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("profileRoot symlink into protected evidence root is rejected before profile artifacts", async () => {
+    const fixture = await createFixture();
+    try {
+      const beforeRawEntries = await sortedRawEntries(fixture.rawRoot);
+      await rm(fixture.profileRoot, { recursive: true, force: true });
+      await symlink(join(fixture.root, "workspace", "tasks"), fixture.profileRoot);
+
+      const result = await runSandboxed(fixture, "cat data/raw/input.csv");
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("protected raw data path");
+      expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("tempRoot symlink into protected evidence root is rejected before profile artifacts", async () => {
+    const fixture = await createFixture();
+    try {
+      const beforeRawEntries = await sortedRawEntries(fixture.rawRoot);
+      await rm(fixture.tempRoot, { recursive: true, force: true });
+      await symlink(join(fixture.root, "workspace", "tasks"), fixture.tempRoot);
 
       const result = await runSandboxed(fixture, "cat data/raw/input.csv");
 
@@ -1359,6 +1595,7 @@ async function runSandboxed(
     fuseRules?: readonly FuseRule[];
     auditWorkspaceRoot?: string;
     profileRoot?: string;
+    tempRoot?: string;
     context?: ToolContext;
     timeout?: number;
   } = {}
@@ -1366,7 +1603,7 @@ async function runSandboxed(
   const tool = new RawDataSandboxedBashTool({
     protectedRawPaths: [fixture.rawRoot],
     allowedWriteRoots: [fixture.root],
-    tempRoot: fixture.tempRoot,
+    tempRoot: options.tempRoot ?? fixture.tempRoot,
     profileRoot: options.profileRoot ?? fixture.profileRoot,
     enableAdvisory: options.enableAdvisory,
     auditWorkspaceRoot: options.auditWorkspaceRoot,
@@ -1483,6 +1720,13 @@ function restoreEnv(name: string, value: string | undefined): void {
     return;
   }
   process.env[name] = value;
+}
+
+function commandExistsSync(command: string): boolean {
+  return (process.env.PATH ?? "")
+    .split(":")
+    .filter(Boolean)
+    .some((dir) => existsSync(join(dir, command)));
 }
 
 class TestRunningToolRegistry implements RunningToolRegistry {

@@ -162,16 +162,20 @@ export async function buildRawDataSeatbeltProfile(
   const protectedEvidencePaths = options.protectedEvidencePaths
     ? await canonicalizePathSet(options.protectedEvidencePaths)
     : [];
+  const protectedWriteDenyPaths = sortedUnique([
+    ...protectedRawPaths,
+    ...protectedEvidencePaths
+  ]);
   const allowedWriteRoots = await canonicalizePathSet(options.allowedWriteRoots);
-  const tempRoot = await canonicalizeExistingRootOutsideProtectedRaw(
+  const tempRoot = await ensureDirectoryOutsideProtectedRaw(
     options.tempRoot ?? tmpdir(),
-    protectedRawPaths,
+    protectedWriteDenyPaths,
     "seatbelt temp root"
   );
   const profileRoot = options.profileRoot
     ? await ensureDirectoryOutsideProtectedRaw(
         options.profileRoot,
-        protectedRawPaths,
+        protectedWriteDenyPaths,
         "seatbelt profile root"
       )
     : undefined;
@@ -227,9 +231,13 @@ export async function writeRawDataSeatbeltProfileFile(
   profileRoot?: string
 ): Promise<string> {
   const root = profileRoot ?? profile.metadata.profileRoot ?? profile.metadata.tempRoot;
+  const protectedWriteDenyPaths = sortedUnique([
+    ...profile.metadata.protectedRawPaths,
+    ...profile.metadata.protectedEvidencePaths
+  ]);
   const canonicalRoot = await ensureDirectoryOutsideProtectedRaw(
     root,
-    profile.metadata.protectedRawPaths,
+    protectedWriteDenyPaths,
     "seatbelt profile root"
   );
   const runRoot = await mkdtemp(join(canonicalRoot, `${profile.profileId}-`));
@@ -881,6 +889,7 @@ async function runSeatbeltSandboxedBash(
         stdin: resolvedSecrets.stdin === undefined ? "ignore" : "pipe",
         stdout: "pipe",
         stderr: "pipe",
+        detached: true,
         env: {
           ...buildSanitizedToolProcessEnv(ctx),
           ...resolvedSecrets.env
@@ -1322,6 +1331,16 @@ function createStreamCapture(stream?: ReadableStream<Uint8Array> | number | null
 }
 
 function tryKillProcess(proc: ReturnType<typeof Bun.spawn>, signal?: NodeJS.Signals): void {
+  const pid = typeof proc.pid === "number" ? proc.pid : undefined;
+  if (pid && process.platform !== "win32") {
+    try {
+      process.kill(-pid, signal ?? "SIGTERM");
+      return;
+    } catch {
+      // Fall back to the direct subprocess handle below.
+    }
+  }
+
   try {
     signal ? proc.kill(signal) : proc.kill();
   } catch {
@@ -1650,8 +1669,12 @@ function interpreterPayload(tokens: readonly string[]): string | undefined {
 
 function hasInterpreterWriteApiSignal(payload: string): boolean {
   return (
-    /(?:^|[^\w.])open(?:Sync)?\s*\([^)]*["'`][waax+>][^"'`]*["'`]/.test(payload) ||
-    /(?:^|[^\w])File\.open\s*\([^)]*["'`][waax+>][^"'`]*["'`]/.test(payload) ||
+    /(?:^|[^\w.])open(?:Sync)?\s*\([^)]*["'`](?:[rwaxtb]*\+|[wax]>?)[^"'`]*["'`]/.test(
+      payload
+    ) ||
+    /(?:^|[^\w])File\.open\s*\([^)]*["'`](?:[rwaxtb]*\+|[wax]>?)[^"'`]*["'`]/.test(
+      payload
+    ) ||
     /(?:fs\.)?(?:writeFile|appendFile)(?:Sync)?\s*\(/.test(payload) ||
     /(?:fs\.)?createWriteStream\s*\(/.test(payload) ||
     /(?:write_text|write_bytes)\s*\(/.test(payload) ||
@@ -2177,6 +2200,22 @@ function hasShellDenialOutputSuppression(command: string): boolean {
   );
 }
 
+function canLoseSandboxDenialEvidence(command: string): boolean {
+  return canHideSandboxFailure(command) || hasShellStderrFileRedirection(command);
+}
+
+function hasShellStderrFileRedirection(command: string): boolean {
+  return (
+    /(?:^|[\s;&|])2\s*>{1,2}\s*(?!&[12]\b)(?!\/dev\/stderr\b)(?!\/proc\/self\/fd\/2\b)[^\s;|&)]+/.test(
+      command
+    ) ||
+    /(?:^|[\s;&|])(?:&>|>&)\s*(?!&[12]\b)(?!\/dev\/stderr\b)(?!\/proc\/self\/fd\/2\b)[^\s;|&)]+/.test(
+      command
+    ) ||
+    /(?:^|[\s;&|])>{1,2}\s*(?!&[12]\b)[^\s;|&)]+[\s\S]*2\s*>\s*&\s*1/.test(command)
+  );
+}
+
 function rawDataGuardClassForRawData(): RawDataGuardClass {
   return "authority";
 }
@@ -2190,7 +2229,11 @@ function isLikelySandboxDenialForCommand(
   const denialOutput =
     isLikelySandboxDenial(output) || INTERPRETER_WRITE_DENIAL_PATTERN.test(output);
   if (!denialOutput) {
-    return false;
+    return (
+      !result.success &&
+      hasFailedResultRawWriteSignal(command, protectedRawPaths) &&
+      canLoseSandboxDenialEvidence(command)
+    );
   }
 
   if (result.success) {
@@ -2302,17 +2345,6 @@ function rawDataSignalPaths(
   ]);
 }
 
-async function canonicalizeExistingRootOutsideProtectedRaw(
-  path: string,
-  protectedRawPaths: readonly string[],
-  label: string
-): Promise<string> {
-  await assertRootOutsideProtectedRaw(path, protectedRawPaths, label);
-  const canonical = await canonicalizeExistingPath(path);
-  assertPathOutsideProtectedRaw(canonical, protectedRawPaths, label, "canonical");
-  return canonical;
-}
-
 async function ensureDirectoryOutsideProtectedRaw(
   path: string,
   protectedRawPaths: readonly string[],
@@ -2358,22 +2390,6 @@ async function ensureDirectoryOutsideProtectedRaw(
   const canonicalPath = await canonicalizeExistingPath(absolutePath);
   assertPathOutsideProtectedRaw(canonicalPath, protectedRawPaths, label, "canonical");
   return canonicalPath;
-}
-
-async function assertRootOutsideProtectedRaw(
-  path: string,
-  protectedRawPaths: readonly string[],
-  label: string
-): Promise<void> {
-  assertPathOutsideProtectedRaw(resolve(path), protectedRawPaths, label, "lexical");
-  try {
-    const canonical = await canonicalizeExistingPath(path);
-    assertPathOutsideProtectedRaw(canonical, protectedRawPaths, label, "canonical");
-  } catch (error) {
-    if (!isErrno(error, "ENOENT")) {
-      throw error;
-    }
-  }
 }
 
 function assertPathOutsideProtectedRaw(

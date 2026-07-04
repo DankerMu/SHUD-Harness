@@ -20,7 +20,7 @@ export interface ToolFailedWsEventInput {
 export interface ToolFailedWsEvent {
   seq: number;
   event_id: string;
-  event: "tool.failed";
+  type: "tool.failed";
   ts: string;
   payload: {
     tool_id: string;
@@ -38,7 +38,7 @@ export function buildToolFailedWsEvent(input: ToolFailedWsEventInput): ToolFaile
   return {
     seq: input.seq,
     event_id: input.eventId ?? `tool.failed:${input.seq}`,
-    event: "tool.failed",
+    type: "tool.failed",
     ts,
     payload: {
       tool_id: input.toolId,
