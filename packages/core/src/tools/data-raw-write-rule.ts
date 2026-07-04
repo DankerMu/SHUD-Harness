@@ -21,7 +21,17 @@ const ANY_RAW_PATH_MUTATION_COMMANDS = new Set([
 const DESTINATION_RAW_PATH_COMMANDS = new Set(["cp", "install", "ln"]);
 const ANY_ENDPOINT_RAW_PATH_COMMANDS = new Set(["mv"]);
 const WRAPPER_COMMANDS = new Set(["command", "doas", "env", "nice", "nohup", "sudo", "time"]);
+const WRAPPER_OPTIONS_WITH_OPERANDS = new Map<string, ReadonlySet<string>>([
+  ["env", new Set(["-u", "--unset"])],
+  ["nice", new Set(["-n", "--adjustment"])]
+]);
 const SHELL_COMMANDS = new Set(["bash", "sh", "zsh"]);
+
+type ShellToken = {
+  value: string;
+  fromOperator: boolean;
+  quoted: boolean;
+};
 
 export const DATA_RAW_WRITE_DENY_RULE: PolicyRule = {
   ruleId: DATA_RAW_WRITE_DENY_RULE_ID,
@@ -71,6 +81,11 @@ export function extractBashCommand(input: unknown): string | undefined {
 }
 
 export function findProtectedDataRawWriteTarget(command: string): string | undefined {
+  const substitutionTarget = findCommandSubstitutionWriteTarget(command);
+  if (substitutionTarget) {
+    return substitutionTarget;
+  }
+
   const tokens = tokenizeShellCommand(command);
   const redirectTarget = findRedirectWriteTarget(tokens);
   if (redirectTarget) {
@@ -95,14 +110,14 @@ export function makeDataRawPolicyGateContext() {
 
 export type DataRawWritePolicyCall = PolicyGateToolCall;
 
-function findRedirectWriteTarget(tokens: readonly string[]): string | undefined {
+function findRedirectWriteTarget(tokens: readonly ShellToken[]): string | undefined {
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (!REDIRECT_WRITE_OPERATORS.has(token)) {
+    if (!isUnquotedOperatorToken(token, REDIRECT_WRITE_OPERATORS)) {
       continue;
     }
 
-    const target = tokens[index + 1];
+    const target = tokens[index + 1]?.value;
     if (target && isProtectedDataRawPath(target)) {
       return target;
     }
@@ -111,12 +126,12 @@ function findRedirectWriteTarget(tokens: readonly string[]): string | undefined 
   return undefined;
 }
 
-function splitCommandSegments(tokens: readonly string[]): string[][] {
-  const segments: string[][] = [];
-  let current: string[] = [];
+function splitCommandSegments(tokens: readonly ShellToken[]): ShellToken[][] {
+  const segments: ShellToken[][] = [];
+  let current: ShellToken[] = [];
 
   for (const token of tokens) {
-    if (SEGMENT_SEPARATORS.has(token)) {
+    if (isUnquotedOperatorToken(token, SEGMENT_SEPARATORS)) {
       if (current.length > 0) {
         segments.push(current);
         current = [];
@@ -133,31 +148,39 @@ function splitCommandSegments(tokens: readonly string[]): string[][] {
   return segments;
 }
 
-function findMutationCommandTarget(segment: readonly string[]): string | undefined {
+function isUnquotedOperatorToken(token: ShellToken, operators: ReadonlySet<string>): boolean {
+  return token.fromOperator && !token.quoted && operators.has(token.value);
+}
+
+function findMutationCommandTarget(segment: readonly ShellToken[]): string | undefined {
   const commandIndex = findCommandTokenIndex(segment);
   if (commandIndex === undefined) {
     return undefined;
   }
 
-  const command = path.posix.basename(segment[commandIndex]);
+  const command = path.posix.basename(segment[commandIndex].value);
   const args = segment.slice(commandIndex + 1);
   if (ANY_RAW_PATH_MUTATION_COMMANDS.has(command)) {
-    return args.find(isProtectedDataRawPath);
+    return findRawPathArgument(args);
   }
   if (DESTINATION_RAW_PATH_COMMANDS.has(command)) {
     return findDestinationRawPathTarget(args);
   }
   if (ANY_ENDPOINT_RAW_PATH_COMMANDS.has(command)) {
-    return args.find(isProtectedDataRawPath);
+    return findRawPathArgument(args);
   }
   if (command === "dd") {
     return findDdOutputTarget(args);
   }
   if (command === "tee") {
-    return args.find((arg) => !arg.startsWith("-") && isProtectedDataRawPath(arg));
+    return args.find((arg) => !arg.value.startsWith("-") && isProtectedDataRawPath(arg.value))
+      ?.value;
   }
-  if (command === "sed" && args.some((arg) => arg === "-i" || arg.startsWith("-i"))) {
-    return args.find(isProtectedDataRawPath);
+  if (command === "sed" && args.some((arg) => arg.value === "-i" || arg.value.startsWith("-i"))) {
+    return findRawPathArgument(args);
+  }
+  if (command === "curl") {
+    return findCurlOutputTarget(args);
   }
   if (SHELL_COMMANDS.has(command)) {
     const shellCommand = findShellCommandArgument(args);
@@ -167,7 +190,7 @@ function findMutationCommandTarget(segment: readonly string[]): string | undefin
   return undefined;
 }
 
-function findCommandTokenIndex(segment: readonly string[]): number | undefined {
+function findCommandTokenIndex(segment: readonly ShellToken[]): number | undefined {
   let index = 0;
   while (index < segment.length) {
     const token = segment[index];
@@ -176,11 +199,15 @@ function findCommandTokenIndex(segment: readonly string[]): number | undefined {
       continue;
     }
 
-    const command = path.posix.basename(token);
+    const command = path.posix.basename(token.value);
     if (WRAPPER_COMMANDS.has(command)) {
       index += 1;
-      while (index < segment.length && segment[index].startsWith("-")) {
+      while (index < segment.length && segment[index].value.startsWith("-")) {
+        const option = segment[index].value;
         index += 1;
+        if (wrapperOptionConsumesOperand(command, option) && index < segment.length) {
+          index += 1;
+        }
       }
       continue;
     }
@@ -191,12 +218,20 @@ function findCommandTokenIndex(segment: readonly string[]): number | undefined {
   return undefined;
 }
 
-function lastNonOptionArgument(args: readonly string[]): string | undefined {
-  const target = args.filter((arg) => !arg.startsWith("-")).at(-1);
+function wrapperOptionConsumesOperand(command: string, option: string): boolean {
+  return WRAPPER_OPTIONS_WITH_OPERANDS.get(command)?.has(option) ?? false;
+}
+
+function findRawPathArgument(args: readonly ShellToken[]): string | undefined {
+  return args.find((arg) => isProtectedDataRawPath(arg.value))?.value;
+}
+
+function lastNonOptionArgument(args: readonly ShellToken[]): string | undefined {
+  const target = args.filter((arg) => !arg.value.startsWith("-")).at(-1)?.value;
   return target && isProtectedDataRawPath(target) ? target : undefined;
 }
 
-function findDestinationRawPathTarget(args: readonly string[]): string | undefined {
+function findDestinationRawPathTarget(args: readonly ShellToken[]): string | undefined {
   const targetDirectory = findTargetDirectoryArgument(args);
   if (targetDirectory !== undefined) {
     return isProtectedDataRawPath(targetDirectory) ? targetDirectory : undefined;
@@ -205,11 +240,11 @@ function findDestinationRawPathTarget(args: readonly string[]): string | undefin
   return lastNonOptionArgument(args);
 }
 
-function findTargetDirectoryArgument(args: readonly string[]): string | undefined {
+function findTargetDirectoryArgument(args: readonly ShellToken[]): string | undefined {
   for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
+    const arg = args[index].value;
     if (arg === "-t" || arg === "--target-directory") {
-      return args[index + 1] ?? "";
+      return args[index + 1]?.value ?? "";
     }
     if (arg.startsWith("--target-directory=")) {
       return arg.slice("--target-directory=".length);
@@ -222,13 +257,13 @@ function findTargetDirectoryArgument(args: readonly string[]): string | undefine
   return undefined;
 }
 
-function findDdOutputTarget(args: readonly string[]): string | undefined {
+function findDdOutputTarget(args: readonly ShellToken[]): string | undefined {
   for (const arg of args) {
-    if (!arg.startsWith("of=")) {
+    if (!arg.value.startsWith("of=")) {
       continue;
     }
 
-    const target = arg.slice("of=".length);
+    const target = arg.value.slice("of=".length);
     if (isProtectedDataRawPath(target)) {
       return target;
     }
@@ -237,25 +272,72 @@ function findDdOutputTarget(args: readonly string[]): string | undefined {
   return undefined;
 }
 
-function findShellCommandArgument(args: readonly string[]): string | undefined {
+function findCurlOutputTarget(args: readonly ShellToken[]): string | undefined {
   for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--") {
+    const arg = args[index].value;
+    if (arg === "-o" || arg === "--output") {
+      const target = args[index + 1]?.value;
+      if (target && isProtectedDataRawPath(target)) {
+        return target;
+      }
       continue;
     }
-    if (arg === "-c") {
-      return args[index + 1];
+    if (arg.startsWith("--output=")) {
+      const target = arg.slice("--output=".length);
+      if (isProtectedDataRawPath(target)) {
+        return target;
+      }
+      continue;
     }
-    if (arg.startsWith("-") && !arg.startsWith("--") && arg.includes("c")) {
-      return args[index + 1];
+
+    const shortOptionTarget = findCurlShortOutputTarget(args, index);
+    if (shortOptionTarget) {
+      return shortOptionTarget;
     }
   }
 
   return undefined;
 }
 
-function isAssignment(token: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
+function findCurlShortOutputTarget(
+  args: readonly ShellToken[],
+  index: number
+): string | undefined {
+  const arg = args[index].value;
+  if (!arg.startsWith("-") || arg.startsWith("--") || arg.length < 3) {
+    return undefined;
+  }
+
+  const optionCluster = arg.slice(1);
+  const outputOptionIndex = optionCluster.indexOf("o");
+  if (outputOptionIndex === -1) {
+    return undefined;
+  }
+
+  const attachedTarget = optionCluster.slice(outputOptionIndex + 1);
+  const target = attachedTarget.length > 0 ? attachedTarget : args[index + 1]?.value;
+  return target && isProtectedDataRawPath(target) ? target : undefined;
+}
+
+function findShellCommandArgument(args: readonly ShellToken[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index].value;
+    if (arg === "--") {
+      continue;
+    }
+    if (arg === "-c") {
+      return args[index + 1]?.value;
+    }
+    if (arg.startsWith("-") && !arg.startsWith("--") && arg.includes("c")) {
+      return args[index + 1]?.value;
+    }
+  }
+
+  return undefined;
+}
+
+function isAssignment(token: ShellToken): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.value);
 }
 
 function isProtectedDataRawPath(candidate: string): boolean {
@@ -269,16 +351,18 @@ function isProtectedDataRawPath(candidate: string): boolean {
   );
 }
 
-function tokenizeShellCommand(command: string): string[] {
-  const tokens: string[] = [];
+function tokenizeShellCommand(command: string): ShellToken[] {
+  const tokens: ShellToken[] = [];
   let current = "";
+  let currentQuoted = false;
   let quote: "'" | '"' | undefined;
   let index = 0;
 
   const flush = () => {
     if (current.length > 0) {
-      tokens.push(current);
+      tokens.push({ value: current, fromOperator: false, quoted: currentQuoted });
       current = "";
+      currentQuoted = false;
     }
   };
 
@@ -306,13 +390,14 @@ function tokenizeShellCommand(command: string): string[] {
 
     if (char === "'" || char === `"`) {
       quote = char;
+      currentQuoted = true;
       index += 1;
       continue;
     }
 
     if (char === "\n" || char === "\r") {
       flush();
-      tokens.push(";");
+      tokens.push({ value: ";", fromOperator: true, quoted: false });
       index += 1;
       continue;
     }
@@ -326,7 +411,7 @@ function tokenizeShellCommand(command: string): string[] {
     const operator = readShellOperator(command, index);
     if (operator) {
       flush();
-      tokens.push(operator);
+      tokens.push({ value: operator, fromOperator: true, quoted: false });
       index += operator.length;
       continue;
     }
@@ -346,6 +431,157 @@ function tokenizeShellCommand(command: string): string[] {
 
   flush();
   return tokens;
+}
+
+function findCommandSubstitutionWriteTarget(command: string): string | undefined {
+  let quote: "'" | '"' | undefined;
+  let index = 0;
+
+  while (index < command.length) {
+    const char = command[index];
+
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+
+    if (quote === "'") {
+      if (char === "'") {
+        quote = undefined;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (char === "'" && !quote) {
+      quote = "'";
+      index += 1;
+      continue;
+    }
+
+    if (char === `"`) {
+      quote = quote === `"` ? undefined : `"`;
+      index += 1;
+      continue;
+    }
+
+    if (char === "$" && command[index + 1] === "(") {
+      const substitution = readCommandSubstitution(command, index + 1);
+      if (!substitution) {
+        return undefined;
+      }
+
+      const target = findProtectedDataRawWriteTarget(substitution.content);
+      if (target) {
+        return target;
+      }
+      index = substitution.endIndex + 1;
+      continue;
+    }
+
+    if (char === "`") {
+      const substitution = readBacktickCommandSubstitution(command, index);
+      if (!substitution) {
+        return undefined;
+      }
+
+      const target = findProtectedDataRawWriteTarget(substitution.content);
+      if (target) {
+        return target;
+      }
+      index = substitution.endIndex + 1;
+      continue;
+    }
+
+    index += 1;
+  }
+
+  return undefined;
+}
+
+function readCommandSubstitution(
+  command: string,
+  openParenIndex: number
+): { content: string; endIndex: number } | undefined {
+  let quote: "'" | '"' | undefined;
+  let depth = 1;
+  let index = openParenIndex + 1;
+
+  while (index < command.length) {
+    const char = command[index];
+
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (char === "'" || char === `"`) {
+      quote = char;
+      index += 1;
+      continue;
+    }
+
+    if (char === "(") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (char === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          content: command.slice(openParenIndex + 1, index),
+          endIndex: index
+        };
+      }
+    }
+
+    index += 1;
+  }
+
+  return undefined;
+}
+
+function readBacktickCommandSubstitution(
+  command: string,
+  openBacktickIndex: number
+): { content: string; endIndex: number } | undefined {
+  let content = "";
+  let index = openBacktickIndex + 1;
+
+  while (index < command.length) {
+    const char = command[index];
+
+    if (char === "\\") {
+      const next = command[index + 1];
+      if (next !== undefined) {
+        content += `${char}${next}`;
+        index += 2;
+        continue;
+      }
+    }
+
+    if (char === "`") {
+      return {
+        content,
+        endIndex: index
+      };
+    }
+
+    content += char;
+    index += 1;
+  }
+
+  return undefined;
 }
 
 function readShellOperator(command: string, index: number): string | undefined {

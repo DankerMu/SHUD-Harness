@@ -30,8 +30,76 @@ describe("data/raw write deny policy", () => {
       command: "printf x > data/raw/input.csv"
     },
     {
+      name: "command substitution remove",
+      command: "echo $(rm data/raw/input.csv)"
+    },
+    {
+      name: "backtick command substitution remove",
+      command: "echo `rm data/raw/input.csv`"
+    },
+    {
+      name: "double-quoted command substitution remove",
+      command: 'echo "$(rm data/raw/input.csv)"'
+    },
+    {
+      name: "command substitution redirect write",
+      command: "echo $(printf x > data/raw/input.csv)"
+    },
+    {
+      name: "backtick command substitution redirect write",
+      command: "echo `printf x > data/raw/input.csv`"
+    },
+    {
+      name: "backtick command substitution escaped backtick",
+      command: "echo `printf \\`; rm data/raw/input.csv`"
+    },
+    {
+      name: "curl short output option",
+      command: "curl -o data/raw/input.csv https://example.invalid/input.csv"
+    },
+    {
+      name: "curl clustered short output option",
+      command: "curl -Lo data/raw/input.csv https://example.invalid/input.csv"
+    },
+    {
+      name: "curl clustered flags short output option",
+      command: "curl -fsSLo data/raw/input.csv https://example.invalid/input.csv"
+    },
+    {
+      name: "curl attached short output option",
+      command: "curl -odata/raw/input.csv https://example.invalid/input.csv"
+    },
+    {
+      name: "curl long output option",
+      command: "curl --output data/raw/input.csv https://example.invalid/input.csv"
+    },
+    {
+      name: "curl long output assignment option",
+      command: "curl --output=data/raw/input.csv https://example.invalid/input.csv"
+    },
+    {
       name: "newline command list",
       command: "cat data/raw/input.csv\nrm data/raw/input.csv"
+    },
+    {
+      name: "nice short adjustment wrapper remove",
+      command: "nice -n 5 rm data/raw/input.csv"
+    },
+    {
+      name: "nice long adjustment wrapper remove",
+      command: "nice --adjustment 5 rm data/raw/input.csv"
+    },
+    {
+      name: "env short unset wrapper remove",
+      command: "env -u FOO rm data/raw/input.csv"
+    },
+    {
+      name: "env long unset wrapper remove",
+      command: "env --unset FOO rm data/raw/input.csv"
+    },
+    {
+      name: "env long unset assignment wrapper remove",
+      command: "env --unset=FOO rm data/raw/input.csv"
     },
     {
       name: "dd output file",
@@ -91,6 +159,18 @@ describe("data/raw write deny policy", () => {
     {
       name: "read-only multiline command list",
       command: "cat data/raw/input.csv\ncp data/raw/input.csv /tmp/out.csv"
+    },
+    {
+      name: "quoted operator pattern",
+      command: "grep '>' data/raw/input.csv"
+    },
+    {
+      name: "single-quoted backtick literal",
+      command: "grep '`' data/raw/input.csv"
+    },
+    {
+      name: "curl read-only request",
+      command: "curl -fsSL https://example.invalid/input.csv"
     }
   ] as const;
 
