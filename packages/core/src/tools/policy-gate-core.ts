@@ -44,6 +44,8 @@ export type PolicyGateDecision =
       remediation: PolicyGateRemediation;
     };
 
+export type PolicyGateDenyDecision = Extract<PolicyGateDecision, { decision: "deny" }>;
+
 export interface PolicyRule {
   ruleId: string;
   guard_class?: GuardClass;

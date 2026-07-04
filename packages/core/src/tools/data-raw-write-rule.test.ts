@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -8,7 +8,7 @@ import {
   createPolicyGateEvaluator,
   createPolicyGatedToolRegistry
 } from "./policy-gate-registry";
-import { appendPolicyGateAuditRow } from "./policy-gate-audit";
+import { appendPolicyGateAuditRow, getPolicyGateAuditDir } from "./policy-gate-audit";
 import {
   DATA_RAW_WRITE_DENY_RULE,
   DATA_RAW_WRITE_DENY_RULE_ID,
@@ -24,49 +24,85 @@ afterEach(async () => {
 });
 
 describe("data/raw write deny policy", () => {
-  test("denies wrapped bash writes before the command implementation executes", async () => {
-    const bashTool = new RecordingTool("bash");
-    const registry = createPolicyGatedToolRegistry([bashTool], {
-      evaluate: createPolicyGateEvaluator(makeDataRawPolicyGateContext())
-    });
-
-    const result = await registry.get("bash")?.run(createToolContext("worker"), {
+  const deniedCommands = [
+    {
+      name: "redirect write",
       command: "printf x > data/raw/input.csv"
+    },
+    {
+      name: "newline command list",
+      command: "cat data/raw/input.csv\nrm data/raw/input.csv"
+    },
+    {
+      name: "dd output file",
+      command: "dd if=/dev/zero of=data/raw/input.csv"
+    },
+    {
+      name: "truncate target",
+      command: "truncate -s 0 data/raw/input.csv"
+    },
+    {
+      name: "cp short target directory",
+      command: "cp -t data/raw /tmp/input.csv"
+    },
+    {
+      name: "cp long target directory",
+      command: "cp --target-directory=data/raw /tmp/input.csv"
+    },
+    {
+      name: "bash shell wrapper",
+      command: "bash -c 'printf x > data/raw/input.csv'"
+    },
+    {
+      name: "sh shell wrapper",
+      command: "sh -c 'printf x > data/raw/input.csv'"
+    },
+    {
+      name: "zsh shell wrapper",
+      command: "zsh -c 'printf x > data/raw/input.csv'"
+    }
+  ] as const;
+
+  for (const { name, command } of deniedCommands) {
+    test(`denies ${name} before the command implementation executes`, async () => {
+      const { result, bashTool } = await runWrappedBashCommand(command);
+
+      expect(result?.success).toBe(false);
+      expect(bashTool.calls).toBe(0);
+
+      const payload = parseDeniedPayload(result);
+      expect(payload.rule_id).toBe(DATA_RAW_WRITE_DENY_RULE_ID);
+      expect(payload.guard_class).toBe(DATA_RAW_WRITE_GUARD_CLASS);
+      expect(payload.remediation?.next_action).toBeTruthy();
+      expect(payload.remediation?.hint).toBeTruthy();
+      expect(payload.remediation?.ref).toBeTruthy();
     });
+  }
 
-    expect(result?.success).toBe(false);
-    expect(bashTool.calls).toBe(0);
-
-    const payload = JSON.parse(result?.output ?? "{}") as {
-      rule_id?: string;
-      guard_class?: string;
-      remediation?: {
-        next_action?: string;
-        hint?: string;
-        ref?: string;
-      };
-    };
-    expect(payload.rule_id).toBe(DATA_RAW_WRITE_DENY_RULE_ID);
-    expect(payload.guard_class).toBe(DATA_RAW_WRITE_GUARD_CLASS);
-    expect(payload.remediation?.next_action).toBeTruthy();
-    expect(payload.remediation?.hint).toBeTruthy();
-    expect(payload.remediation?.ref).toBeTruthy();
-  });
-
-  test("read-only data/raw bash commands still execute through the wrapper", async () => {
-    const bashTool = new RecordingTool("bash");
-    const registry = createPolicyGatedToolRegistry([bashTool], {
-      evaluate: createPolicyGateEvaluator(makeDataRawPolicyGateContext())
-    });
-
-    const result = await registry.get("bash")?.run(createToolContext("worker"), {
+  const allowedCommands = [
+    {
+      name: "cat raw input",
       command: "cat data/raw/input.csv"
-    });
+    },
+    {
+      name: "copy raw input outside raw",
+      command: "cp data/raw/input.csv /tmp/out.csv"
+    },
+    {
+      name: "read-only multiline command list",
+      command: "cat data/raw/input.csv\ncp data/raw/input.csv /tmp/out.csv"
+    }
+  ] as const;
 
-    expect(result?.success).toBe(true);
-    expect(result?.output).toBe("bash executed");
-    expect(bashTool.calls).toBe(1);
-  });
+  for (const { name, command } of allowedCommands) {
+    test(`allows ${name} through the wrapper`, async () => {
+      const { result, bashTool } = await runWrappedBashCommand(command);
+
+      expect(result?.success).toBe(true);
+      expect(result?.output).toBe("bash executed");
+      expect(bashTool.calls).toBe(1);
+    });
+  }
 
   test("audit helper appends a minimal row under the no-TaskCard fixture path", async () => {
     const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-"));
@@ -104,10 +140,122 @@ describe("data/raw write deny policy", () => {
     });
   });
 
+  test("audit helper rejects traversal task ids before writing outside the task audit directory", async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-"));
+    tempDirs.push(workspaceRoot);
+
+    expect(() => getPolicyGateAuditDir({ workspaceRoot, taskId: "../../outside" })).toThrow(
+      "Invalid policy gate audit taskId: must be a single path segment."
+    );
+    await expect(
+      appendPolicyGateAuditRow(sampleAuditRow(), {
+        workspaceRoot,
+        taskId: "../../outside"
+      })
+    ).rejects.toThrow("Invalid policy gate audit taskId: must be a single path segment.");
+
+    expect(
+      await pathExists(
+        path.join(workspaceRoot, "workspace", "outside", "audit", "policy-gate-audit.ndjson")
+      )
+    ).toBe(false);
+  });
+
+  test("audit helper rejects path-bearing file names before writing outside the audit directory", async () => {
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "shud-policy-audit-"));
+    tempDirs.push(workspaceRoot);
+
+    expect(() => getPolicyGateAuditDir({ workspaceRoot, fileName: "../outside.ndjson" })).toThrow(
+      "Invalid policy gate audit fileName: must be a single path segment."
+    );
+    await expect(
+      appendPolicyGateAuditRow(sampleAuditRow(), {
+        workspaceRoot,
+        fileName: "../outside.ndjson"
+      })
+    ).rejects.toThrow("Invalid policy gate audit fileName: must be a single path segment.");
+
+    expect(
+      await pathExists(
+        path.join(workspaceRoot, "workspace", "tasks", "TASK-M1-SPIKE", "outside.ndjson")
+      )
+    ).toBe(false);
+  });
+
   test("data/raw rule exposes a legal guard_class marker", () => {
     expect(DATA_RAW_WRITE_DENY_RULE.guard_class).toBe("authority");
   });
 });
+
+async function runWrappedBashCommand(command: string): Promise<{
+  result: ToolResult | undefined;
+  bashTool: RecordingTool;
+}> {
+  const bashTool = new RecordingTool("bash");
+  const registry = createPolicyGatedToolRegistry([bashTool], {
+    evaluate: createPolicyGateEvaluator(makeDataRawPolicyGateContext())
+  });
+
+  const result = await registry.get("bash")?.run(createToolContext("worker"), {
+    command
+  });
+
+  return {
+    result,
+    bashTool
+  };
+}
+
+function parseDeniedPayload(result: ToolResult | undefined): {
+  rule_id?: string;
+  guard_class?: string;
+  remediation?: {
+    next_action?: string;
+    hint?: string;
+    ref?: string;
+  };
+} {
+  return JSON.parse(result?.output ?? "{}") as {
+    rule_id?: string;
+    guard_class?: string;
+    remediation?: {
+      next_action?: string;
+      hint?: string;
+      ref?: string;
+    };
+  };
+}
+
+function sampleAuditRow() {
+  return {
+    event: "tool.failed",
+    tool_id: "bash",
+    rule: DATA_RAW_WRITE_DENY_RULE_ID,
+    decision: "deny" as const,
+    guard_class: DATA_RAW_WRITE_GUARD_CLASS
+  };
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await stat(filePath);
+    return true;
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT"
+  );
+}
 
 class RecordingTool extends BaseTool {
   description: string;

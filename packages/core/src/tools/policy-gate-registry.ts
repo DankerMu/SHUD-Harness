@@ -2,16 +2,21 @@ import { BaseTool, ToolRegistry } from "@zero-os/core";
 import type { ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
 import {
   evaluatePolicyGate,
+  type GuardClass,
   type HarnessRole,
   type PolicyGateContext,
   type PolicyGateDecision,
+  type PolicyGateDenyDecision,
+  type PolicyGateRemediation,
   type PolicyGateToolCall
 } from "./policy-gate-core";
 
 export type {
   HarnessRole,
+  GuardClass,
   PolicyGateContext,
   PolicyGateDecision,
+  PolicyGateDenyDecision,
   PolicyGateRemediation,
   PolicyGateToolCall,
   PolicyRule,
@@ -32,6 +37,15 @@ export interface PolicyGateWrapperOptions {
   toolId?: string;
   role?: HarnessRole;
   evaluate: PolicyGateEvaluator;
+}
+
+export interface PolicyGateDeniedToolPayload {
+  error: "policy_gate_denied";
+  tool_id: string;
+  reason: string;
+  rule_id: string;
+  guard_class?: GuardClass;
+  remediation: PolicyGateRemediation;
 }
 
 export type PolicyGatedTool = BaseTool & {
@@ -161,21 +175,28 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
 
 function buildPolicyGateDeniedResult(
   toolId: string,
-  decision: Extract<PolicyGateDecision, { decision: "deny" }>
+  decision: PolicyGateDenyDecision
 ): ToolResult {
-  const payload = {
-    error: "policy_gate_denied",
-    tool_id: toolId,
-    reason: decision.reason,
-    rule_id: decision.ruleId,
-    ...(decision.guard_class ? { guard_class: decision.guard_class } : {}),
-    ...(decision.remediation ? { remediation: decision.remediation } : {})
-  };
+  const payload = buildPolicyGateDeniedToolPayload(toolId, decision);
 
   return {
     success: false,
     output: JSON.stringify(payload),
     outputSummary: `Policy gate denied ${toolId}: ${decision.reason}`
+  };
+}
+
+export function buildPolicyGateDeniedToolPayload(
+  toolId: string,
+  decision: PolicyGateDenyDecision
+): PolicyGateDeniedToolPayload {
+  return {
+    error: "policy_gate_denied",
+    tool_id: toolId,
+    reason: decision.reason,
+    rule_id: decision.ruleId,
+    ...(decision.guard_class ? { guard_class: decision.guard_class } : {}),
+    remediation: decision.remediation
   };
 }
 

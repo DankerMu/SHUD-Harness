@@ -15,11 +15,13 @@ const ANY_RAW_PATH_MUTATION_COMMANDS = new Set([
   "mkdir",
   "rm",
   "rmdir",
-  "touch"
+  "touch",
+  "truncate"
 ]);
 const DESTINATION_RAW_PATH_COMMANDS = new Set(["cp", "install", "ln"]);
 const ANY_ENDPOINT_RAW_PATH_COMMANDS = new Set(["mv"]);
 const WRAPPER_COMMANDS = new Set(["command", "doas", "env", "nice", "nohup", "sudo", "time"]);
+const SHELL_COMMANDS = new Set(["bash", "sh", "zsh"]);
 
 export const DATA_RAW_WRITE_DENY_RULE: PolicyRule = {
   ruleId: DATA_RAW_WRITE_DENY_RULE_ID,
@@ -143,16 +145,23 @@ function findMutationCommandTarget(segment: readonly string[]): string | undefin
     return args.find(isProtectedDataRawPath);
   }
   if (DESTINATION_RAW_PATH_COMMANDS.has(command)) {
-    return lastNonOptionArgument(args);
+    return findDestinationRawPathTarget(args);
   }
   if (ANY_ENDPOINT_RAW_PATH_COMMANDS.has(command)) {
     return args.find(isProtectedDataRawPath);
+  }
+  if (command === "dd") {
+    return findDdOutputTarget(args);
   }
   if (command === "tee") {
     return args.find((arg) => !arg.startsWith("-") && isProtectedDataRawPath(arg));
   }
   if (command === "sed" && args.some((arg) => arg === "-i" || arg.startsWith("-i"))) {
     return args.find(isProtectedDataRawPath);
+  }
+  if (SHELL_COMMANDS.has(command)) {
+    const shellCommand = findShellCommandArgument(args);
+    return shellCommand ? findProtectedDataRawWriteTarget(shellCommand) : undefined;
   }
 
   return undefined;
@@ -185,6 +194,64 @@ function findCommandTokenIndex(segment: readonly string[]): number | undefined {
 function lastNonOptionArgument(args: readonly string[]): string | undefined {
   const target = args.filter((arg) => !arg.startsWith("-")).at(-1);
   return target && isProtectedDataRawPath(target) ? target : undefined;
+}
+
+function findDestinationRawPathTarget(args: readonly string[]): string | undefined {
+  const targetDirectory = findTargetDirectoryArgument(args);
+  if (targetDirectory !== undefined) {
+    return isProtectedDataRawPath(targetDirectory) ? targetDirectory : undefined;
+  }
+
+  return lastNonOptionArgument(args);
+}
+
+function findTargetDirectoryArgument(args: readonly string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "-t" || arg === "--target-directory") {
+      return args[index + 1] ?? "";
+    }
+    if (arg.startsWith("--target-directory=")) {
+      return arg.slice("--target-directory=".length);
+    }
+    if (arg.startsWith("-t") && !arg.startsWith("--") && arg.length > 2) {
+      return arg.slice(2);
+    }
+  }
+
+  return undefined;
+}
+
+function findDdOutputTarget(args: readonly string[]): string | undefined {
+  for (const arg of args) {
+    if (!arg.startsWith("of=")) {
+      continue;
+    }
+
+    const target = arg.slice("of=".length);
+    if (isProtectedDataRawPath(target)) {
+      return target;
+    }
+  }
+
+  return undefined;
+}
+
+function findShellCommandArgument(args: readonly string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") {
+      continue;
+    }
+    if (arg === "-c") {
+      return args[index + 1];
+    }
+    if (arg.startsWith("-") && !arg.startsWith("--") && arg.includes("c")) {
+      return args[index + 1];
+    }
+  }
+
+  return undefined;
 }
 
 function isAssignment(token: string): boolean {
@@ -239,6 +306,13 @@ function tokenizeShellCommand(command: string): string[] {
 
     if (char === "'" || char === `"`) {
       quote = char;
+      index += 1;
+      continue;
+    }
+
+    if (char === "\n" || char === "\r") {
+      flush();
+      tokens.push(";");
       index += 1;
       continue;
     }
