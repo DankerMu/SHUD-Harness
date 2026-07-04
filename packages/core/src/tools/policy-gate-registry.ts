@@ -1,4 +1,4 @@
-import { BaseTool, BashTool, SpawnAgentTool, ToolRegistry, loadFuseList } from "@zero-os/core";
+import { BaseTool, SpawnAgentTool, ToolRegistry, loadFuseList } from "@zero-os/core";
 import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
 import {
   EMPTY_POLICY_GATE_CONTEXT,
@@ -9,6 +9,7 @@ import {
   type PolicyGateToolCall
 } from "./policy-gate-core";
 import {
+  RAW_DATA_WRITE_RULE_ID,
   RawDataSandboxedBashTool,
   type RawDataSeatbeltProfileOptions
 } from "./raw-data-sandbox";
@@ -73,11 +74,7 @@ export function wrapToolWithPolicyGate(
   tool: BaseTool,
   options: PolicyGateWrapperOptions
 ): PolicyGatedTool {
-  if (isPolicyGatedTool(tool)) {
-    return tool;
-  }
-
-  const wrapped = new PolicyGatedBaseToolAdapter(tool, options);
+  const wrapped = new PolicyGatedBaseToolAdapter(unwrapPolicyGatedTool(tool), options);
   policyGatedTools.add(wrapped);
   return wrapped;
 }
@@ -122,7 +119,7 @@ export function createShudSandboxedBashTool(
     auditWorkspaceRoot: options.auditWorkspaceRoot,
     auditTaskId: options.auditTaskId,
     toolId: "bash",
-    innerTool: new BashTool([...fuseRules])
+    fuseRules: [...fuseRules]
   });
 }
 
@@ -199,6 +196,14 @@ export function isPolicyGatedTool(tool: BaseTool): tool is PolicyGatedTool {
   return policyGatedTools.has(tool);
 }
 
+function unwrapPolicyGatedTool(tool: BaseTool): BaseTool {
+  let current = tool;
+  while (isPolicyGatedTool(current)) {
+    current = current.innerTool;
+  }
+  return current;
+}
+
 class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
   readonly policyGateToolId: string;
 
@@ -243,6 +248,12 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     );
 
     if (decision.decision === "deny") {
+      if (
+        decision.ruleId === RAW_DATA_WRITE_RULE_ID &&
+        this.innerTool instanceof RawDataSandboxedBashTool
+      ) {
+        return this.innerTool.run(toolContext, input);
+      }
       return buildPolicyGateDeniedResult(this.policyGateToolId, decision);
     }
 

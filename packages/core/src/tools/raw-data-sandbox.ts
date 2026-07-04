@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
+  access,
   lstat,
   mkdir,
   mkdtemp,
@@ -10,10 +11,16 @@ import {
   rm,
   writeFile
 } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, parse, resolve } from "node:path";
-import { BaseTool, BashTool } from "@zero-os/core";
-import type { FuseRule, ToolContext, ToolLogger, ToolResult } from "@zero-os/shared";
+import { BaseTool, BashTool, FuseListChecker } from "@zero-os/core";
+import type {
+  FuseRule,
+  RunningToolTerminationCause,
+  ToolContext,
+  ToolResult
+} from "@zero-os/shared";
 import type { ErrorRecord } from "../domain/schemas";
 import type {
   PolicyGateRemediation,
@@ -29,14 +36,14 @@ export const RAW_DATA_POLICY_REF =
 export const DEFAULT_POLICY_GATE_AUDIT_TASK_ID = "TASK-M1-SPIKE";
 
 const DEFAULT_AUDIT_FILE_NAME = "policy-gate.ndjson";
+const DEFAULT_SANDBOX_EXECUTABLE = "/usr/bin/sandbox-exec";
+const DEFAULT_SANDBOX_BASH = "/bin/bash";
 const SANDBOX_DENIAL_PATTERN = /Operation not permitted|Permission denied|sandbox/i;
 const INTERPRETER_WRITE_DENIAL_PATTERN = /can't open file/i;
-const NOOP_TOOL_LOGGER: ToolLogger = {
-  info() {},
-  warn() {},
-  error() {}
-};
-
+const PIPE_GRACE_MS = 1000;
+const FORCE_KILL_GRACE_MS = 750;
+const DEFAULT_ABORT_MESSAGE = "Command aborted by user from Session Detail.";
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export interface RawDataSeatbeltProfileOptions {
   protectedRawPaths: readonly string[];
   allowedWriteRoots: readonly string[];
@@ -240,22 +247,33 @@ export class RawDataSandboxedBashTool extends BaseTool {
   readonly description: string;
   readonly parameters: Record<string, unknown>;
 
-  private readonly innerTool: BaseTool;
+  private readonly fuseChecker: FuseListChecker;
 
   constructor(private readonly options: RawDataSandboxedBashToolOptions) {
     super();
+    let metadataTool: BaseTool;
+    let fuseRules: readonly FuseRule[] = [];
     if ("innerTool" in options && options.innerTool) {
-      this.innerTool = options.innerTool;
+      metadataTool = options.innerTool;
     } else if ("fuseRules" in options && options.fuseRules) {
-      this.innerTool = new BashTool([...options.fuseRules]);
+      fuseRules = options.fuseRules;
+      metadataTool = new BashTool([]);
     } else {
       throw new Error("RawDataSandboxedBashTool requires either innerTool or fuseRules.");
     }
-    this.name = options.toolId ?? this.innerTool.name;
-    this.description = this.innerTool.description;
-    this.parameters = this.innerTool.parameters;
-    this.kind = this.innerTool.kind;
-    this.requiredModelCapabilities = this.innerTool.requiredModelCapabilities;
+    this.fuseChecker = new FuseListChecker([...fuseRules]);
+    this.name = options.toolId ?? metadataTool.name;
+    this.description = metadataTool.description;
+    this.parameters = metadataTool.parameters;
+    this.kind = metadataTool.kind;
+    this.requiredModelCapabilities = metadataTool.requiredModelCapabilities;
+  }
+
+  protected async fuseCheck(input: unknown): Promise<void> {
+    const command = readBashCommand(input);
+    if (command) {
+      this.fuseChecker.check(command);
+    }
   }
 
   protected async execute(ctx: ToolContext, input: unknown): Promise<ToolResult> {
@@ -273,23 +291,25 @@ export class RawDataSandboxedBashTool extends BaseTool {
     if ("toolResult" in auditReservation) {
       return auditReservation.toolResult;
     }
-    const profile = await buildRawDataSeatbeltProfile({
-      protectedRawPaths,
-      allowedWriteRoots: this.options.allowedWriteRoots,
-      tempRoot: this.options.tempRoot,
-      profileRoot: this.options.profileRoot,
-      protectedEvidencePaths: [
-        ...(this.options.protectedEvidencePaths ?? []),
-        auditReservation.protectedEvidenceRoot
-      ]
-    });
-    const profilePath = await writeRawDataSeatbeltProfileFile(profile, this.options.profileRoot);
-    const protectedRawPathSignals = rawDataSignalPaths(
-      this.options.protectedRawPaths,
-      profile.metadata.protectedRawPaths
-    );
 
+    let profilePath: string | undefined;
     try {
+      const profile = await buildRawDataSeatbeltProfile({
+        protectedRawPaths,
+        allowedWriteRoots: this.options.allowedWriteRoots,
+        tempRoot: this.options.tempRoot,
+        profileRoot: this.options.profileRoot,
+        protectedEvidencePaths: [
+          ...(this.options.protectedEvidencePaths ?? []),
+          auditReservation.protectedEvidenceRoot
+        ]
+      });
+      profilePath = await writeRawDataSeatbeltProfileFile(profile, this.options.profileRoot);
+      const protectedRawPathSignals = rawDataSignalPaths(
+        this.options.protectedRawPaths,
+        profile.metadata.protectedRawPaths
+      );
+
       const suppressedDenial = evaluateSuppressedSandboxFailureGuard(
         command,
         protectedRawPathSignals
@@ -303,7 +323,10 @@ export class RawDataSandboxedBashTool extends BaseTool {
           profilePath,
           invocationId: readInvocationId(ctx)
         });
-        await this.appendDenialAudit(ctx, evidence, profile);
+        const appendFailure = await this.appendDenialAudit(ctx, auditReservation, evidence);
+        if (appendFailure) {
+          return appendFailure;
+        }
         return evidence.toolResult;
       }
 
@@ -318,17 +341,20 @@ export class RawDataSandboxedBashTool extends BaseTool {
             profilePath,
             invocationId: readInvocationId(ctx)
           });
-          await this.appendDenialAudit(ctx, evidence, profile);
+          const appendFailure = await this.appendDenialAudit(ctx, auditReservation, evidence);
+          if (appendFailure) {
+            return appendFailure;
+          }
           return evidence.toolResult;
         }
       }
 
-      const wrappedCommand = `sandbox-exec -f ${shellQuote(profilePath)} bash -c ${shellQuote(
-        command
-      )}`;
-      const result = await this.innerTool.run(createInnerSandboxToolContext(ctx), {
+      const result = await runSeatbeltSandboxedBash(ctx, {
         ...(typeof input === "object" && input !== null ? input : {}),
-        command: wrappedCommand
+        command,
+        profilePath,
+        sandboxExecutable: DEFAULT_SANDBOX_EXECUTABLE,
+        bashExecutable: DEFAULT_SANDBOX_BASH
       });
 
       if (isLikelySandboxDenialForCommand(command, result, protectedRawPathSignals)) {
@@ -341,11 +367,14 @@ export class RawDataSandboxedBashTool extends BaseTool {
           underlyingOutput: result.output,
           invocationId: readInvocationId(ctx)
         });
-        await this.appendDenialAudit(ctx, evidence, profile);
+        const appendFailure = await this.appendDenialAudit(ctx, auditReservation, evidence);
+        if (appendFailure) {
+          return appendFailure;
+        }
         return evidence.toolResult;
       }
 
-      await this.appendAudit(ctx, {
+      await this.appendAudit(ctx, auditReservation, {
         event: result.success ? "tool.completed" : "tool.failed",
         decision: result.success ? "allowed" : "failed",
         profile,
@@ -353,34 +382,39 @@ export class RawDataSandboxedBashTool extends BaseTool {
       });
       return normalizeSandboxedBashResult(result, command, profilePath);
     } finally {
-      await cleanupRawDataSeatbeltProfileFile(profilePath);
+      await closePolicyGateAuditReservation(auditReservation);
+      if (profilePath) {
+        await cleanupRawDataSeatbeltProfileFile(profilePath);
+      }
     }
   }
 
   private async appendDenialAudit(
     ctx: ToolContext,
+    reservation: PolicyGateAuditReservation,
     evidence: RawDataDenialEvidence,
-    profile: RawDataSeatbeltProfile
-  ): Promise<void> {
+  ): Promise<ToolResult | undefined> {
     try {
-      await appendPolicyGateAuditRow({
-        workspaceRoot: this.options.auditWorkspaceRoot ?? ctx.workDir,
-        taskId: this.options.auditTaskId,
-        protectedRawPaths: profile.metadata.protectedRawPaths,
-        row: evidence.auditRow
-      });
+      await appendReservedPolicyGateAuditRow(reservation, evidence.auditRow);
+      return undefined;
     } catch (error) {
-      ctx.logger.warn("policy_gate_audit_append_failed", {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.logger.error("policy_gate_audit_append_failed", {
         tool: this.name,
         rule: evidence.payload.rule,
         decision: evidence.payload.decision,
-        error: error instanceof Error ? error.message : String(error)
+        error: message
+      });
+      return buildAuditReservationFailureResult({
+        toolId: this.name,
+        reason: `Policy gate denial audit evidence could not be persisted: ${message}`
       });
     }
   }
 
   private async appendAudit(
     ctx: ToolContext,
+    reservation: PolicyGateAuditReservation,
     input: {
       event: string;
       decision: string;
@@ -388,13 +422,10 @@ export class RawDataSandboxedBashTool extends BaseTool {
       profilePath: string;
     }
   ): Promise<void> {
-    const workspaceRoot = this.options.auditWorkspaceRoot ?? ctx.workDir;
     try {
-      await appendPolicyGateAuditRow({
-        workspaceRoot,
-        taskId: this.options.auditTaskId,
-        protectedRawPaths: input.profile.metadata.protectedRawPaths,
-        row: {
+      await appendReservedPolicyGateAuditRow(
+        reservation,
+        {
           event: input.event,
           tool_id: this.name,
           rule: RAW_DATA_WRITE_RULE_ID,
@@ -403,7 +434,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
           profile_id: input.profile.profileId,
           profile_path: input.profilePath
         }
-      });
+      );
     } catch (error) {
       ctx.logger.warn("policy_gate_audit_append_failed", {
         tool: this.name,
@@ -446,6 +477,7 @@ interface PolicyGateAuditReservation {
   auditDir: string;
   auditPath: string;
   protectedEvidenceRoot: string;
+  handle: FileHandle;
 }
 
 interface PolicyGateAuditReservationFailure {
@@ -540,8 +572,12 @@ export async function appendPolicyGateAuditRow(
     fileName,
     options.protectedRawPaths
   );
-  await appendAuditFileNoFollow(reservation.auditPath, `${JSON.stringify(options.row)}\n`);
-  return reservation.auditPath;
+  try {
+    await appendReservedPolicyGateAuditRow(reservation, options.row);
+    return reservation.auditPath;
+  } finally {
+    await closePolicyGateAuditReservation(reservation);
+  }
 }
 
 export function buildRawDataDeniedPayload(input: {
@@ -775,11 +811,586 @@ function buildAuditReservationFailureResult(input: {
   };
 }
 
-function createInnerSandboxToolContext(ctx: ToolContext): ToolContext {
+interface SandboxedBashInput {
+  command: string;
+  timeout?: number;
+  envSecrets?: Record<string, string>;
+  stdinSecretRef?: string;
+  stdinAppendNewline?: boolean;
+  profilePath: string;
+  sandboxExecutable: string;
+  bashExecutable: string;
+}
+
+interface ResolvedBashSecret {
+  ref: string;
+  value: string;
+  envName?: string;
+}
+
+type BashSecretResolution =
+  | { success: true; env: Record<string, string>; stdin?: string; secrets: ResolvedBashSecret[] }
+  | { success: false; result: ToolResult };
+
+async function runSeatbeltSandboxedBash(
+  ctx: ToolContext,
+  input: SandboxedBashInput
+): Promise<ToolResult> {
+  const { command, timeout = 120_000 } = input;
+  const resolvedExecutables = await verifySeatbeltExecutables(input);
+  if (!resolvedExecutables.success) {
+    return resolvedExecutables.result;
+  }
+
+  const resolvedSecrets = resolveBashSecretInputs(ctx, input);
+  if (!resolvedSecrets.success) {
+    return resolvedSecrets.result;
+  }
+
+  const usesSecretRefs = resolvedSecrets.secrets.length > 0;
+  const summaryCommand = commandLabel(command, usesSecretRefs);
+  const leakedSecret = resolvedSecrets.secrets.find(
+    (secret) => secret.value.length >= 4 && command.includes(secret.value)
+  );
+  if (leakedSecret) {
+    return {
+      success: false,
+      output:
+        "Command contains a resolved secret value. Use envSecrets variables or stdinSecretRef instead.",
+      outputSummary: "Command rejected: secret value in command"
+    };
+  }
+
+  const toolUseId = ctx.currentToolUseId;
+  const runningHandle =
+    toolUseId && ctx.runningToolRegistry ? ctx.runningToolRegistry.get(toolUseId) : undefined;
+
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    proc = Bun.spawn(
+      [
+        resolvedExecutables.sandboxExecutable,
+        "-f",
+        input.profilePath,
+        resolvedExecutables.bashExecutable,
+        "-c",
+        command
+      ],
+      {
+        cwd: ctx.workDir,
+        stdin: resolvedSecrets.stdin === undefined ? "ignore" : "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...buildSanitizedToolProcessEnv(ctx),
+          ...resolvedSecrets.env
+        }
+      }
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    runningHandle?.markFinished({
+      finishedAt: new Date().toISOString(),
+      cause: "spawn_error",
+      success: false,
+      outputSummary: `Spawn failed: ${message.slice(0, 80)}`
+    });
+    return {
+      success: false,
+      output: message,
+      outputSummary: `Spawn failed: ${message.slice(0, 80)}`
+    };
+  }
+
+  const stdoutCapture = createStreamCapture(proc.stdout);
+  const stderrCapture = createStreamCapture(proc.stderr);
+  let stdinWriteError: string | undefined;
+  const stdinWrite =
+    resolvedSecrets.stdin === undefined
+      ? undefined
+      : writeProcessStdin(proc, resolvedSecrets.stdin).catch((error) => {
+          stdinWriteError = error instanceof Error ? error.message : String(error);
+          tryKillProcess(proc, "SIGTERM");
+        });
+  let terminationCause: RunningToolTerminationCause | undefined;
+  let abortMessage: string | undefined;
+  let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const markFinished = (
+    cause: RunningToolTerminationCause,
+    success: boolean,
+    outputSummary?: string
+  ) => {
+    runningHandle?.markFinished({
+      finishedAt: new Date().toISOString(),
+      cause,
+      success,
+      outputSummary
+    });
+  };
+
+  const latchTerminationCause = (cause: RunningToolTerminationCause) => {
+    if (terminationCause) {
+      return false;
+    }
+    terminationCause = cause;
+    return true;
+  };
+
+  const scheduleForceKill = () => {
+    forceKillTimer = setTimeout(() => {
+      tryKillProcess(proc, "SIGKILL");
+    }, FORCE_KILL_GRACE_MS);
+  };
+
+  runningHandle?.setAbortHandler((reason) => {
+    abortMessage = reason?.trim() || DEFAULT_ABORT_MESSAGE;
+    if (!latchTerminationCause("abort")) {
+      return;
+    }
+    tryKillProcess(proc, "SIGTERM");
+    scheduleForceKill();
+  });
+
+  const timeoutId = setTimeout(() => {
+    if (!latchTerminationCause("timeout")) {
+      return;
+    }
+    markFinished("timeout", false, `Command timed out: ${summaryCommand}`);
+    tryKillProcess(proc, "SIGTERM");
+    scheduleForceKill();
+  }, timeout);
+
+  const exitCode = await proc.exited;
+  if (stdinWrite) {
+    await stdinWrite;
+  }
+  clearTimeout(timeoutId);
+  if (forceKillTimer) {
+    clearTimeout(forceKillTimer);
+  }
+
+  const finalCause = terminationCause ?? "completed";
+  if (finalCause === "abort") {
+    markFinished("abort", false, `Command aborted: ${summaryCommand}`);
+  } else if (finalCause === "completed") {
+    markFinished("completed", exitCode === 0, undefined);
+  }
+
+  const streamDrain = Promise.allSettled([stdoutCapture.done, stderrCapture.done]);
+  const drainResult = await Promise.race([
+    streamDrain.then(() => "drained" as const),
+    Bun.sleep(PIPE_GRACE_MS).then(() => "timeout" as const)
+  ]);
+  if (drainResult === "timeout") {
+    await Promise.allSettled([stdoutCapture.cancel(), stderrCapture.cancel()]);
+  }
+
+  const output = buildBashOutput(
+    stdoutCapture.getText(),
+    stderrCapture.getText(),
+    finalCause === "abort" ? abortMessage ?? DEFAULT_ABORT_MESSAGE : undefined
+  );
+
+  const result = buildSandboxedBashResult({
+    output,
+    exitCode,
+    finalCause,
+    stdinWriteError,
+    summaryCommand
+  });
+  return filterToolResultSecrets(ctx, result);
+}
+
+function buildSandboxedBashResult(input: {
+  output: string;
+  exitCode: number;
+  finalCause: RunningToolTerminationCause;
+  stdinWriteError?: string;
+  summaryCommand: string;
+}): ToolResult {
+  if (input.finalCause === "abort") {
+    return {
+      success: false,
+      output: input.output,
+      outputSummary: `Command aborted: ${input.summaryCommand}`
+    };
+  }
+
+  if (input.stdinWriteError) {
+    return {
+      success: false,
+      output: `Failed to write stdin secret: ${input.stdinWriteError}\n\n${input.output}`,
+      outputSummary: "Failed to write stdin secret"
+    };
+  }
+
+  if (input.exitCode !== 0 || input.finalCause === "timeout") {
+    return {
+      success: false,
+      output: input.output || formatExitCode(input.exitCode),
+      outputSummary: `Command failed (exit ${input.exitCode}): ${input.summaryCommand}`
+    };
+  }
+
   return {
-    ...ctx,
-    logger: NOOP_TOOL_LOGGER,
-    observability: undefined
+    success: true,
+    output: input.output,
+    outputSummary: `Executed: ${input.summaryCommand}`
+  };
+}
+
+async function verifySeatbeltExecutables(input: {
+  sandboxExecutable: string;
+  bashExecutable: string;
+}): Promise<
+  | { success: true; sandboxExecutable: string; bashExecutable: string }
+  | { success: false; result: ToolResult }
+> {
+  try {
+    const sandboxExecutable = await verifyExecutable(input.sandboxExecutable, "sandbox-exec");
+    const bashExecutable = await verifyExecutable(input.bashExecutable, "bash");
+    return { success: true, sandboxExecutable, bashExecutable };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      success: false,
+      result: {
+        success: false,
+        output: message,
+        outputSummary: `Spawn failed: ${message.slice(0, 80)}`
+      }
+    };
+  }
+}
+
+async function verifyExecutable(path: string, label: string): Promise<string> {
+  if (!isAbsolute(path)) {
+    throw new Error(`${label} executable must be absolute: ${path}`);
+  }
+  await access(path, fsConstants.X_OK);
+  const canonical = await canonicalizeExistingPath(path);
+  await access(canonical, fsConstants.X_OK);
+  return canonical;
+}
+
+function resolveBashSecretInputs(
+  ctx: ToolContext,
+  input: Pick<SandboxedBashInput, "envSecrets" | "stdinSecretRef" | "stdinAppendNewline">
+): BashSecretResolution {
+  if (!hasSecretInput(input)) {
+    return { success: true, env: {}, secrets: [] };
+  }
+
+  if (!ctx.secretResolver) {
+    return {
+      success: false,
+      result: {
+        success: false,
+        output: "Secret references require a secretResolver in the tool context",
+        outputSummary: "No secret resolver"
+      }
+    };
+  }
+
+  if (!ctx.secretFilter) {
+    return {
+      success: false,
+      result: {
+        success: false,
+        output: "Secret references require a secretFilter in the tool context",
+        outputSummary: "No secret filter"
+      }
+    };
+  }
+
+  const env: Record<string, string> = {};
+  const secrets: ResolvedBashSecret[] = [];
+
+  for (const [envName, ref] of Object.entries(input.envSecrets ?? {})) {
+    if (!ENV_NAME_PATTERN.test(envName)) {
+      return {
+        success: false,
+        result: {
+          success: false,
+          output: `Invalid environment variable name for envSecrets: ${envName}`,
+          outputSummary: "Invalid secret env name"
+        }
+      };
+    }
+    if (isShellPreludeEnvName(envName)) {
+      return {
+        success: false,
+        result: {
+          success: false,
+          output: `Shell prelude environment variable is not allowed in envSecrets: ${envName}`,
+          outputSummary: "Invalid secret env name"
+        }
+      };
+    }
+    if (typeof ref !== "string") {
+      return {
+        success: false,
+        result: {
+          success: false,
+          output: `Secret reference for ${envName} must be a string`,
+          outputSummary: "Invalid secret reference"
+        }
+      };
+    }
+
+    const resolved = resolveBashSecret(ctx, ref);
+    if (!resolved.success) {
+      return resolved;
+    }
+
+    env[envName] = resolved.value;
+    secrets.push({ ref: ref.trim(), value: resolved.value, envName });
+  }
+
+  let stdin: string | undefined;
+  if (input.stdinSecretRef) {
+    const resolved = resolveBashSecret(ctx, input.stdinSecretRef);
+    if (!resolved.success) {
+      return resolved;
+    }
+
+    stdin = input.stdinAppendNewline === false ? resolved.value : `${resolved.value}\n`;
+    secrets.push({ ref: input.stdinSecretRef.trim(), value: resolved.value });
+  }
+
+  return { success: true, env, stdin, secrets };
+}
+
+function hasSecretInput(
+  input: Pick<SandboxedBashInput, "envSecrets" | "stdinSecretRef">
+): boolean {
+  return (
+    (input.envSecrets && Object.keys(input.envSecrets).length > 0) ||
+    Boolean(input.stdinSecretRef)
+  );
+}
+
+function resolveBashSecret(
+  ctx: ToolContext,
+  ref: string
+): { success: true; value: string } | { success: false; result: ToolResult } {
+  const trimmedRef = ref.trim();
+  if (!trimmedRef) {
+    return {
+      success: false,
+      result: {
+        success: false,
+        output: "Secret reference cannot be empty",
+        outputSummary: "Empty secret reference"
+      }
+    };
+  }
+
+  const value = ctx.secretResolver?.(trimmedRef);
+  if (!value) {
+    return {
+      success: false,
+      result: {
+        success: false,
+        output: `Secret reference "${trimmedRef}" not found in vault`,
+        outputSummary: "Secret reference not found"
+      }
+    };
+  }
+
+  ctx.secretFilter?.addSecret(trimmedRef, value);
+  return { success: true, value };
+}
+
+function buildSanitizedToolProcessEnv(ctx: ToolContext): Record<string, string> {
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
+  );
+
+  for (const key of Object.keys(env)) {
+    if (isShellPreludeEnvName(key)) {
+      delete env[key];
+    }
+  }
+
+  env.ZERO_WORKSPACE = ctx.workDir;
+  env.ZERO_PROJECT_ROOT = ctx.projectRoot ?? process.cwd();
+  env.ZERO_SESSION_ID = ctx.sessionId;
+
+  if (ctx.channelBinding?.channelName) {
+    env.ZERO_CHANNEL_NAME = ctx.channelBinding.channelName;
+  }
+
+  if (ctx.channelBinding?.channelId) {
+    env.ZERO_CHANNEL_ID = ctx.channelBinding.channelId;
+  }
+
+  return env;
+}
+
+function isShellPreludeEnvName(name: string): boolean {
+  return name === "BASH_ENV" || name === "ENV" || name.startsWith("BASH_FUNC_");
+}
+
+function commandLabel(command: string, usesSecretRefs: boolean): string {
+  return usesSecretRefs ? "command with secret references" : command.slice(0, 80);
+}
+
+function formatExitCode(exitCode: number): string {
+  return `Exit code: ${exitCode}`;
+}
+
+function buildBashOutput(stdout: string, stderr: string, abortMessage?: string): string {
+  const trimmedStdout = stdout.trimEnd();
+  const trimmedStderr = stderr.trimEnd();
+
+  let output = trimmedStdout;
+  if (trimmedStderr) {
+    output = output ? `${output}\n[stderr]\n${trimmedStderr}` : `[stderr]\n${trimmedStderr}`;
+  }
+  if (!output) {
+    output = "(no output)";
+  }
+
+  if (abortMessage) {
+    output = `${output}\n\n[abort]\n${abortMessage}`;
+  }
+
+  return output;
+}
+
+function createStreamCapture(stream?: ReadableStream<Uint8Array> | number | null) {
+  if (!stream || typeof stream === "number") {
+    return {
+      done: Promise.resolve(),
+      cancel: async () => {},
+      getText: () => ""
+    };
+  }
+
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let flushed = false;
+
+  const flushDecoder = () => {
+    if (flushed) {
+      return;
+    }
+    const tail = decoder.decode();
+    if (tail) {
+      chunks.push(tail);
+    }
+    flushed = true;
+  };
+
+  const done = (async () => {
+    try {
+      while (true) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) {
+          break;
+        }
+        if (value) {
+          chunks.push(decoder.decode(value, { stream: true }));
+        }
+      }
+    } catch {
+      // Best effort: cancellation and subprocess teardown can end the stream abruptly.
+    } finally {
+      flushDecoder();
+    }
+  })();
+
+  return {
+    done,
+    cancel: async () => {
+      try {
+        await reader.cancel();
+      } catch {
+        // Ignore cancellation races.
+      } finally {
+        flushDecoder();
+      }
+    },
+    getText: () => {
+      flushDecoder();
+      return chunks.join("");
+    }
+  };
+}
+
+function tryKillProcess(proc: ReturnType<typeof Bun.spawn>, signal?: NodeJS.Signals): void {
+  try {
+    signal ? proc.kill(signal) : proc.kill();
+  } catch {
+    // Ignore cases where the process already exited.
+  }
+}
+
+function isWebWritableStream(stream: unknown): stream is WritableStream<Uint8Array> {
+  return (
+    typeof stream === "object" &&
+    stream !== null &&
+    "getWriter" in stream &&
+    typeof stream.getWriter === "function"
+  );
+}
+
+function isFileSinkLike(
+  stream: unknown
+): stream is { write(data: string): unknown; flush?: () => unknown; end(): unknown } {
+  return (
+    typeof stream === "object" &&
+    stream !== null &&
+    "write" in stream &&
+    typeof stream.write === "function" &&
+    "end" in stream &&
+    typeof stream.end === "function"
+  );
+}
+
+async function writeProcessStdin(proc: ReturnType<typeof Bun.spawn>, text: string): Promise<void> {
+  const stdin: unknown = proc.stdin;
+  if (!stdin || typeof stdin === "number") {
+    throw new Error("Subprocess stdin is unavailable");
+  }
+
+  if (isWebWritableStream(stdin)) {
+    const writer = stdin.getWriter();
+    try {
+      await writer.write(new TextEncoder().encode(text));
+    } finally {
+      await writer.close();
+    }
+    return;
+  }
+
+  if (isFileSinkLike(stdin)) {
+    stdin.write(text);
+    if (stdin.flush) {
+      await Promise.resolve(stdin.flush());
+    }
+    stdin.end();
+    return;
+  }
+
+  throw new Error("Subprocess stdin does not support writing");
+}
+
+function filterToolResultSecrets(ctx: ToolContext, result: ToolResult): ToolResult {
+  if (!ctx.secretFilter) {
+    return result;
+  }
+
+  return {
+    ...result,
+    output: ctx.secretFilter.filter(result.output),
+    outputSummary: ctx.secretFilter.filter(result.outputSummary),
+    contentItems: result.contentItems?.map((item) =>
+      item.type === "text" ? { ...item, text: ctx.secretFilter!.filter(item.text) } : item
+    )
   };
 }
 
@@ -816,7 +1427,7 @@ function hasStaticRawDataWrite(
   let relativeRawPathsAmbiguous = options.treatInitialRelativeRawAsProtected === false;
 
   for (const segment of splitStaticShellSegments(command)) {
-    const tokens = tokenizeStaticShellSegment(segment);
+    const tokens = effectiveShellTokens(tokenizeStaticShellSegment(segment));
     if (tokens.length === 0) {
       continue;
     }
@@ -1053,7 +1664,7 @@ function hasInterpreterInternalRawWriteSuppressionRisk(
   protectedRawPaths: readonly string[]
 ): boolean {
   for (const segment of splitStaticShellSegments(command)) {
-    const tokens = tokenizeStaticShellSegment(segment);
+    const tokens = effectiveShellTokens(tokenizeStaticShellSegment(segment));
     if (tokens.length === 0) {
       continue;
     }
@@ -1113,6 +1724,9 @@ function containsFragmentedRawDataPathSignal(value: string): boolean {
       value
     ) ||
     new RegExp(`(?:path|os\\.path|File|Path)\\.join\\s*\\(\\s*${quotedData}\\s*,\\s*${quotedRaw}`).test(
+      value
+    ) ||
+    new RegExp(`(?:pathlib\\.)?Path\\s*\\(\\s*${quotedData}\\s*\\)\\s*\\.joinpath\\s*\\(\\s*${quotedRaw}`).test(
       value
     ) ||
     new RegExp(`${quotedData}\\s*\\+\\s*${slash}\\s*\\+\\s*${quotedRaw}`).test(value) ||
@@ -1251,6 +1865,12 @@ function tokenizeStaticShellSegment(segment: string): string[] {
   return tokens;
 }
 
+function effectiveShellTokens(tokens: readonly string[]): string[] {
+  return tokens
+    .map((token) => token.replace(/^[({]+/, "").replace(/[)}]+$/, ""))
+    .filter((token) => token.length > 0 && token !== "{" && token !== "}");
+}
+
 function normalizeCommandName(token: string): string {
   return basename(token);
 }
@@ -1331,14 +1951,17 @@ function containsRawDataPathSignal(
 }
 
 function hasDynamicRawDataWriteRisk(command: string): boolean {
-  const rawCandidateVariables = collectDynamicRawPathVariables(command);
-  if (rawCandidateVariables.size === 0) {
+  const dynamicState = collectDynamicRawPathState(command);
+  if (
+    dynamicState.rawCandidateVariables.size === 0 &&
+    (dynamicState.dataVariables.size === 0 || dynamicState.rawVariables.size === 0)
+  ) {
     return false;
   }
 
   let relativeRawPathsAmbiguous = false;
   for (const segment of splitStaticShellSegments(command)) {
-    const tokens = tokenizeStaticShellSegment(segment);
+    const tokens = effectiveShellTokens(tokenizeStaticShellSegment(segment));
     if (tokens.length === 0) {
       continue;
     }
@@ -1353,7 +1976,7 @@ function hasDynamicRawDataWriteRisk(command: string): boolean {
       continue;
     }
 
-    if (hasRawCandidateVariableRedirection(tokens, rawCandidateVariables)) {
+    if (hasRawCandidateVariableRedirection(tokens, dynamicState)) {
       return true;
     }
 
@@ -1364,7 +1987,7 @@ function hasDynamicRawDataWriteRisk(command: string): boolean {
 
     if (commandName === "cp") {
       const destination = operands.at(-1);
-      if (destination && referencesAnyVariable(destination, rawCandidateVariables)) {
+      if (destination && referencesDynamicRawTarget(destination, dynamicState)) {
         return true;
       }
       continue;
@@ -1374,7 +1997,7 @@ function hasDynamicRawDataWriteRisk(command: string): boolean {
       if (
         operands.some((operand) => {
           const outputMatch = operand.match(/^of=(.+)$/);
-          return outputMatch !== null && referencesAnyVariable(outputMatch[1], rawCandidateVariables);
+          return outputMatch !== null && referencesDynamicRawTarget(outputMatch[1], dynamicState);
         })
       ) {
         return true;
@@ -1384,7 +2007,7 @@ function hasDynamicRawDataWriteRisk(command: string): boolean {
 
     if (commandName === "install" || commandName === "ln") {
       const destination = operands.at(-1);
-      if (destination && referencesAnyVariable(destination, rawCandidateVariables)) {
+      if (destination && referencesDynamicRawTarget(destination, dynamicState)) {
         return true;
       }
       continue;
@@ -1403,7 +2026,7 @@ function hasDynamicRawDataWriteRisk(command: string): boolean {
       commandName === "rm" ||
       commandName === "unlink"
     ) {
-      if (operands.some((operand) => referencesAnyVariable(operand, rawCandidateVariables))) {
+      if (operands.some((operand) => referencesDynamicRawTarget(operand, dynamicState))) {
         return true;
       }
     }
@@ -1412,7 +2035,11 @@ function hasDynamicRawDataWriteRisk(command: string): boolean {
   return false;
 }
 
-function collectDynamicRawPathVariables(command: string): Set<string> {
+function collectDynamicRawPathState(command: string): {
+  rawCandidateVariables: Set<string>;
+  dataVariables: Set<string>;
+  rawVariables: Set<string>;
+} {
   const assignments = collectShellPathAssignments(command);
   const values = new Map(assignments.map((assignment) => [assignment.name, assignment.value]));
   const dataVariables = new Set<string>();
@@ -1451,7 +2078,11 @@ function collectDynamicRawPathVariables(command: string): Set<string> {
     }
   }
 
-  return rawCandidateVariables;
+  return {
+    rawCandidateVariables,
+    dataVariables,
+    rawVariables
+  };
 }
 
 function collectShellPathAssignments(command: string): { name: string; value: string }[] {
@@ -1469,17 +2100,36 @@ function collectShellPathAssignments(command: string): { name: string; value: st
 
 function hasRawCandidateVariableRedirection(
   tokens: readonly string[],
-  rawCandidateVariables: ReadonlySet<string>
+  dynamicState: {
+    rawCandidateVariables: ReadonlySet<string>;
+    dataVariables: ReadonlySet<string>;
+    rawVariables: ReadonlySet<string>;
+  }
 ): boolean {
   for (let index = 0; index < tokens.length - 1; index += 1) {
     if (
       isWriteRedirectionToken(tokens[index]) &&
-      referencesAnyVariable(tokens[index + 1], rawCandidateVariables)
+      referencesDynamicRawTarget(tokens[index + 1], dynamicState)
     ) {
       return true;
     }
   }
   return false;
+}
+
+function referencesDynamicRawTarget(
+  value: string,
+  dynamicState: {
+    rawCandidateVariables: ReadonlySet<string>;
+    dataVariables: ReadonlySet<string>;
+    rawVariables: ReadonlySet<string>;
+  }
+): boolean {
+  return (
+    referencesAnyVariable(value, dynamicState.rawCandidateVariables) ||
+    (referencesAnyVariable(value, dynamicState.dataVariables) &&
+      referencesAnyVariable(value, dynamicState.rawVariables))
+  );
 }
 
 function containsRelativeRawLiteral(value: string): boolean {
@@ -1557,7 +2207,8 @@ function hasPreciseRawWriteTargetSignal(
   return (
     hasStaticRawDataWrite(command, protectedRawPaths) ||
     hasDynamicRawDataWriteRisk(command) ||
-    hasInterpreterInternalRawWriteSuppressionRisk(command, protectedRawPaths)
+    hasInterpreterInternalRawWriteSuppressionRisk(command, protectedRawPaths) ||
+    hasInPlaceRawMutationSignal(command, protectedRawPaths)
   );
 }
 
@@ -1573,7 +2224,7 @@ function hasFailedResultRawWriteSignal(
 
 function hasRawWriteLiteralSignal(command: string, protectedRawPaths: readonly string[]): boolean {
   const shellWriteSignal =
-    /(?:^|[\s;&|])(?:cp|mv|tee|touch|mkdir|truncate|chmod|chown|chgrp|xattr|rm|unlink|dd|install|ln)\b|>/.test(
+    /(?:^|[\s;&|])(?:cp|mv|tee|touch|mkdir|truncate|chmod|chown|chgrp|xattr|rm|unlink|dd|install|ln|sed|perl)\b|>/.test(
       command
     );
   const interpreterWriteSignal =
@@ -1588,6 +2239,40 @@ function hasRawWriteLiteralSignal(command: string, protectedRawPaths: readonly s
   }
 
   return protectedRawPaths.some((protectedPath) => command.includes(protectedPath));
+}
+
+function hasInPlaceRawMutationSignal(
+  command: string,
+  protectedRawPaths: readonly string[]
+): boolean {
+  for (const segment of splitStaticShellSegments(command)) {
+    const tokens = effectiveShellTokens(tokenizeStaticShellSegment(segment));
+    if (tokens.length === 0) {
+      continue;
+    }
+    const commandName = normalizeCommandName(tokens[0]);
+    if (commandName !== "sed" && commandName !== "perl") {
+      continue;
+    }
+    if (!hasInPlaceMutationFlag(tokens)) {
+      continue;
+    }
+    const operands = extractCommandOperands(tokens.slice(1));
+    if (
+      operands.some((operand) =>
+        isRawDataPathToken(operand, protectedRawPaths, {
+          treatRelativeRawAsProtected: true
+        })
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasInPlaceMutationFlag(tokens: readonly string[]): boolean {
+  return tokens.some((token) => token === "-i" || /^-[A-Za-z]*i[A-Za-z]*$/.test(token));
 }
 
 function readInvocationId(ctx: ToolContext): string | undefined {
@@ -1734,12 +2419,13 @@ async function ensurePolicyGateAuditReservation(
   }
 
   const auditPath = join(current, fileName);
-  await assertSafeAuditFileTarget(auditPath);
+  const handle = await openAuditFileForAppendNoFollow(auditPath);
 
   return {
     auditDir: current,
     auditPath,
-    protectedEvidenceRoot
+    protectedEvidenceRoot,
+    handle
   };
 }
 
@@ -1788,7 +2474,7 @@ async function ensureSafeAuditDirComponent(
   }
 }
 
-async function appendAuditFileNoFollow(path: string, line: string): Promise<void> {
+async function openAuditFileForAppendNoFollow(path: string): Promise<FileHandle> {
   await assertSafeAuditFileTarget(path);
   const flags =
     fsConstants.O_CREAT |
@@ -1797,16 +2483,43 @@ async function appendAuditFileNoFollow(path: string, line: string): Promise<void
     (fsConstants.O_NOFOLLOW ?? 0);
   const handle = await open(path, flags, 0o600);
   try {
-    const metadata = await handle.stat();
-    if (!metadata.isFile()) {
-      throw new Error(`Policy gate audit target is not a regular file: ${path}`);
-    }
-    if (metadata.nlink > 1) {
-      throw new Error(`Policy gate audit target must not be a hardlink: ${path}`);
-    }
-    await handle.writeFile(line, "utf8");
-  } finally {
+    await assertSafeAuditHandle(handle, path);
+  } catch (error) {
     await handle.close();
+    throw error;
+  }
+  return handle;
+}
+
+async function appendReservedPolicyGateAuditRow(
+  reservation: PolicyGateAuditReservation,
+  row: PolicyGateAuditRow
+): Promise<void> {
+  await appendAuditHandle(reservation.handle, reservation.auditPath, `${JSON.stringify(row)}\n`);
+}
+
+async function appendAuditHandle(handle: FileHandle, path: string, line: string): Promise<void> {
+  await assertSafeAuditHandle(handle, path);
+  await handle.writeFile(line, "utf8");
+}
+
+async function assertSafeAuditHandle(handle: FileHandle, path: string): Promise<void> {
+  const metadata = await handle.stat();
+  if (!metadata.isFile()) {
+    throw new Error(`Policy gate audit target is not a regular file: ${path}`);
+  }
+  if (metadata.nlink > 1) {
+    throw new Error(`Policy gate audit target must not be a hardlink: ${path}`);
+  }
+}
+
+async function closePolicyGateAuditReservation(
+  reservation: PolicyGateAuditReservation
+): Promise<void> {
+  try {
+    await reservation.handle.close();
+  } catch {
+    // Closing a best-effort evidence handle must not mask the tool result.
   }
 }
 
@@ -1843,10 +2556,6 @@ function quoteSeatbeltString(value: string): string {
     .replaceAll('"', '\\"')
     .replaceAll("\n", "\\n")
     .replaceAll("\r", "\\r")}"`;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function sortedUnique(values: readonly string[]): string[] {

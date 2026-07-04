@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import {
+  chmod,
   link,
   mkdir,
   mkdtemp,
@@ -13,7 +14,15 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { FuseRule, ToolContext, ToolLogger, ToolResult } from "@zero-os/shared";
+import type {
+  FuseRule,
+  RunningToolHandle,
+  RunningToolRegistry,
+  RunningToolTerminalMetadata,
+  ToolContext,
+  ToolLogger,
+  ToolResult
+} from "@zero-os/shared";
 import {
   appendPolicyGateAuditRow,
   RAW_DATA_WRITE_RULE_ID,
@@ -259,6 +268,168 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  seatbeltTest("fake sandbox-exec earlier in PATH cannot bypass the absolute launcher", async () => {
+    const fixture = await createFixture();
+    const originalPath = process.env.PATH;
+    try {
+      const fakeBin = join(fixture.workspaceRoot, "fake-bin");
+      await mkdir(fakeBin, { recursive: true });
+      const fakeLauncher = join(fakeBin, "sandbox-exec");
+      await writeFile(
+        fakeLauncher,
+        "#!/bin/sh\nwhile [ \"$1\" ]; do if [ \"$1\" = \"-f\" ]; then shift 2; else break; fi; done\nexec \"$@\"\n",
+        "utf8"
+      );
+      await chmod(fakeLauncher, 0o755);
+      process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+
+      const result = await runSandboxed(fixture, "printf fake > data/raw/fake-path.txt", {
+        enableAdvisory: false
+      });
+
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      await expectMissing(join(fixture.rawRoot, "fake-path.txt"));
+      const rows = await readAuditRows(fixture.root);
+      expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      process.env.PATH = originalPath;
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("BASH_ENV raw-write prelude cannot run before sandbox authority", async () => {
+    const fixture = await createFixture();
+    const originalBashEnv = process.env.BASH_ENV;
+    const originalEnv = process.env.ENV;
+    try {
+      const prelude = join(fixture.workspaceRoot, "bash-env.sh");
+      await writeFile(prelude, "printf prelude > data/raw/bash-env-prelude.txt\n", "utf8");
+      process.env.BASH_ENV = prelude;
+      process.env.ENV = prelude;
+
+      const result = await runSandboxed(fixture, "printf main > data/raw/bash-env-main.txt", {
+        enableAdvisory: false
+      });
+
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      await expectMissing(join(fixture.rawRoot, "bash-env-prelude.txt"));
+      await expectMissing(join(fixture.rawRoot, "bash-env-main.txt"));
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)?.decision).toBe("denied_by_sandbox");
+      expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      restoreEnv("BASH_ENV", originalBashEnv);
+      restoreEnv("ENV", originalEnv);
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("direct data/raw variable-composed target is denied when shell errors are masked", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        'd=data; r=raw; printf x > "$d/$r/direct.txt" 2>/dev/null || true',
+        { enableAdvisory: false }
+      );
+
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      await expectMissing(join(fixture.rawRoot, "direct.txt"));
+      const rows = await readAuditRows(fixture.root);
+      expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("Python Path.joinpath raw write is denied when interpreter errors are suppressed", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        'python3 -c \'from pathlib import Path; Path("data").joinpath("raw", "pathlib.txt").write_text("x")\' 2>/dev/null || true',
+        { enableAdvisory: false }
+      );
+
+      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      await expectMissing(join(fixture.rawRoot, "pathlib.txt"));
+      const rows = await readAuditRows(fixture.root);
+      expectAuditMatchesPayload(rows.at(-1), payload);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  for (const commandCase of [
+    {
+      name: "sed -i",
+      fileName: "sed-input.txt",
+      command: "sed -i '' 's/ORIGINAL/MUTATED/' data/raw/sed-input.txt"
+    },
+    {
+      name: "perl -pi",
+      fileName: "perl-input.txt",
+      command: "perl -pi -e 's/ORIGINAL/MUTATED/' data/raw/perl-input.txt"
+    }
+  ]) {
+    seatbeltTest(`${commandCase.name} raw mutation is normalized to raw-data denial`, async () => {
+      const fixture = await createFixture();
+      try {
+        const target = join(fixture.rawRoot, commandCase.fileName);
+        await writeFile(target, "ORIGINAL\n", "utf8");
+
+        const result = await runSandboxed(fixture, commandCase.command, {
+          enableAdvisory: false
+        });
+
+        const payload = expectDeniedPayload(result, "denied_by_sandbox");
+        expect(await readFile(target, "utf8")).toBe("ORIGINAL\n");
+        const rows = await readAuditRows(fixture.root);
+        expectAuditMatchesPayload(rows.at(-1), payload);
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  }
+
+  for (const commandCase of [
+    {
+      name: "overwrite redirection",
+      command: ": > data/raw/input.csv 2>/dev/null || true"
+    },
+    {
+      name: "append redirection",
+      command: "printf appended >> data/raw/input.csv 2>/dev/null || true"
+    },
+    {
+      name: "truncate",
+      command: "truncate -s 0 data/raw/input.csv"
+    },
+    {
+      name: "dd overwrite",
+      command: "dd if=/dev/zero of=data/raw/input.csv bs=1 count=1"
+    }
+  ]) {
+    seatbeltTest(`existing raw file ${commandCase.name} is denied and preserves bytes`, async () => {
+      const fixture = await createFixture();
+      try {
+        const target = join(fixture.rawRoot, "input.csv");
+        const before = await readFile(target, "utf8");
+
+        const result = await runSandboxed(fixture, commandCase.command, {
+          enableAdvisory: false
+        });
+
+        const payload = expectDeniedPayload(result, "denied_by_sandbox");
+        expect(await readFile(target, "utf8")).toBe(before);
+        const rows = await readAuditRows(fixture.root);
+        expectAuditMatchesPayload(rows.at(-1), payload);
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  }
+
   seatbeltTest("raw read succeeds under the same profile and is not advisory-denied", async () => {
     const fixture = await createFixture();
     try {
@@ -391,6 +562,37 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  seatbeltTest("timeout terminal metadata is owned by the outer wrapper", async () => {
+    const fixture = await createFixture();
+    try {
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+
+      const result = await runSandboxed(fixture, "sleep 2", {
+        timeout: 40,
+        context: {
+          ...fixture.context,
+          runningToolRegistry
+        }
+      });
+
+      expect(result.success).toBe(false);
+      const metadata = handle.getTerminalMetadata();
+      expect(metadata?.cause).toBe("timeout");
+      expect(metadata?.outputSummary).toContain("sleep 2");
+      expect(metadata?.outputSummary).not.toContain("sandbox-exec");
+      expect(metadata?.outputSummary).not.toContain(fixture.profileRoot);
+      expect(result.outputSummary).not.toContain("sandbox-exec");
+      expect(result.outputSummary).not.toContain(fixture.profileRoot);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("raw source copy to workspace succeeds and raw destination copy is denied", async () => {
     const fixture = await createFixture();
     try {
@@ -494,6 +696,43 @@ describe("raw data seatbelt sandbox", () => {
       await fixture.cleanup();
     }
   });
+
+  for (const commandCase of [
+    {
+      name: "subshell cd",
+      outputPath: ["data", "raw", "subshell-out.txt"],
+      command:
+        "mkdir -p workspace/data/raw; (cd workspace && printf ok > data/raw/subshell-out.txt)"
+    },
+    {
+      name: "grouped cd",
+      outputPath: ["data", "raw", "group-out.txt"],
+      command: "mkdir -p workspace/data/raw; { cd workspace; printf ok > data/raw/group-out.txt; }"
+    }
+  ]) {
+    seatbeltTest(`${commandCase.name} workspace data/raw write is not advisory false-denied`, async () => {
+      const fixture = await createFixture();
+      try {
+        expect(evaluateRawDataWriteAdvisory(commandCase.command, [fixture.rawRoot])).toEqual({
+          decision: "allow"
+        });
+
+        const result = await runSandboxed(fixture, commandCase.command);
+
+        expect(result.success).toBe(true);
+        expect(
+          await readFile(join(fixture.workspaceRoot, ...commandCase.outputPath), "utf8")
+        ).toBe("ok");
+        const rows = await readAuditRows(fixture.root);
+        expect(rows.at(-1)).toMatchObject({
+          event: "tool.completed",
+          decision: "allowed"
+        });
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  }
 
   test("requires either an explicit inner tool or fuse rules", async () => {
     const fixture = await createFixture();
@@ -829,6 +1068,44 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("non-writable regular audit file fails closed before bash side effects", async () => {
+    const fixture = await createFixture();
+    const auditFile = join(
+      fixture.root,
+      "workspace",
+      "tasks",
+      "TASK-M1-SPIKE",
+      "audit",
+      "policy-gate.ndjson"
+    );
+    try {
+      await createAuditDir(fixture.root);
+      await writeFile(auditFile, "", { mode: 0o400 });
+      await chmod(auditFile, 0o400);
+
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          row: minimalAuditRow()
+        })
+      ).rejects.toThrow();
+
+      const result = await runSandboxed(
+        fixture,
+        "printf side-effect > workspace/non-writable-audit-side-effect.txt; printf nope > data/raw/non-writable-audit.txt",
+        { enableAdvisory: false }
+      );
+
+      expectAuditReservationFailure(result);
+      await expectMissing(join(fixture.workspaceRoot, "non-writable-audit-side-effect.txt"));
+      await expectMissing(join(fixture.rawRoot, "non-writable-audit.txt"));
+    } finally {
+      await chmod(auditFile, 0o600).catch(() => {});
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("sandbox command cannot sabotage policy-gate audit subtree before denial append", async () => {
     const fixture = await createFixture();
     try {
@@ -1083,6 +1360,7 @@ async function runSandboxed(
     auditWorkspaceRoot?: string;
     profileRoot?: string;
     context?: ToolContext;
+    timeout?: number;
   } = {}
 ): Promise<ToolResult> {
   const tool = new RawDataSandboxedBashTool({
@@ -1097,7 +1375,7 @@ async function runSandboxed(
 
   return tool.run(options.context ?? fixture.context, {
     command,
-    timeout: 30_000
+    timeout: options.timeout ?? 30_000
   });
 }
 
@@ -1197,6 +1475,90 @@ async function readAuditRows(root: string): Promise<PolicyGateAuditRow[]> {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line) as PolicyGateAuditRow);
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
+}
+
+class TestRunningToolRegistry implements RunningToolRegistry {
+  private readonly handles = new Map<string, TestRunningToolHandle>();
+
+  register(entry: {
+    toolUseId: string;
+    toolName: string;
+    abortable: boolean;
+  }): RunningToolHandle {
+    const handle = new TestRunningToolHandle(entry);
+    this.handles.set(entry.toolUseId, handle);
+    return handle;
+  }
+
+  get(toolUseId: string): RunningToolHandle | undefined {
+    return this.handles.get(toolUseId);
+  }
+}
+
+class TestRunningToolHandle implements RunningToolHandle {
+  readonly toolUseId: string;
+  readonly toolName: string;
+  readonly abortable: boolean;
+
+  private state: "running" | "abort_requested" | "finished" = "running";
+  private abortReason: string | undefined;
+  private abortHandler: ((reason?: string) => void) | undefined;
+  private terminalMetadata: RunningToolTerminalMetadata | undefined;
+
+  constructor(entry: { toolUseId: string; toolName: string; abortable: boolean }) {
+    this.toolUseId = entry.toolUseId;
+    this.toolName = entry.toolName;
+    this.abortable = entry.abortable;
+  }
+
+  getState(): "running" | "abort_requested" | "finished" {
+    return this.state;
+  }
+
+  getAbortReason(): string | undefined {
+    return this.abortReason;
+  }
+
+  getTerminalMetadata(): RunningToolTerminalMetadata | undefined {
+    return this.terminalMetadata;
+  }
+
+  requestAbort(reason?: string): "accepted" | "already_requested" | "already_finished" | "not_abortable" {
+    if (!this.abortable) {
+      return "not_abortable";
+    }
+    if (this.state === "finished") {
+      return "already_finished";
+    }
+    if (this.state === "abort_requested") {
+      return "already_requested";
+    }
+    this.state = "abort_requested";
+    this.abortReason = reason;
+    this.abortHandler?.(reason);
+    return "accepted";
+  }
+
+  setAbortHandler(handler: (reason?: string) => void): void {
+    this.abortHandler = handler;
+  }
+
+  markFinished(metadata: RunningToolTerminalMetadata): boolean {
+    if (this.state === "finished") {
+      return false;
+    }
+    this.state = "finished";
+    this.terminalMetadata = metadata;
+    return true;
+  }
 }
 
 const testLogger: ToolLogger = {
