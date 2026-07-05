@@ -4,6 +4,7 @@ import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os
 import {
   EMPTY_POLICY_GATE_CONTEXT,
   evaluatePolicyGate,
+  PolicyGateRemediationSchema,
   type HarnessRole,
   type PolicyGateContext,
   type PolicyGateDecision,
@@ -242,7 +243,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     const startTime = Date.now();
     let decision: PolicyGateDecision;
     try {
-      decision = await this.options.evaluate(
+      const candidate = await this.options.evaluate(
         {
           toolId: this.policyGateToolId,
           role: this.options.role ?? resolveRole(toolContext),
@@ -254,6 +255,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
           toolContext
         }
       );
+      decision = validatePolicyGateDecision(this.policyGateToolId, candidate);
     } catch (error) {
       const durationMs = Date.now() - startTime;
       const errorMessage = toErrorMessage(error);
@@ -329,6 +331,65 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       outputSummary: result.outputSummary
     });
   }
+}
+
+function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyGateDecision {
+  if (candidate === null || typeof candidate !== "object") {
+    throw new Error(`Invalid policy gate decision for ${toolId}: decision`);
+  }
+
+  const rawDecision = candidate as Record<string, unknown>;
+  if (rawDecision.decision === "allow") {
+    return { decision: "allow" };
+  }
+
+  if (rawDecision.decision !== "deny") {
+    throw new Error(`Invalid policy gate decision for ${toolId}: decision`);
+  }
+
+  const ruleId = rawDecision.ruleId;
+  const reason = rawDecision.reason;
+  const validRuleId = typeof ruleId === "string" ? ruleId : undefined;
+  const validReason = typeof reason === "string" ? reason : undefined;
+  const issuePaths: string[] = [];
+  if (validRuleId === undefined) {
+    issuePaths.push("ruleId");
+  }
+  if (validReason === undefined) {
+    issuePaths.push("reason");
+  }
+
+  const parsedRemediation = PolicyGateRemediationSchema.safeParse(rawDecision.remediation);
+  let remediation: PolicyGateRemediation | undefined;
+  if (!parsedRemediation.success) {
+    issuePaths.push(
+      ...parsedRemediation.error.issues.map((issue) =>
+        issue.path.length > 0 ? `remediation.${issue.path.join(".")}` : "remediation"
+      )
+    );
+  } else {
+    remediation = parsedRemediation.data;
+  }
+
+  if (
+    issuePaths.length > 0 ||
+    validRuleId === undefined ||
+    validReason === undefined ||
+    !remediation
+  ) {
+    const ruleLabel = validRuleId && validRuleId.trim() !== "" ? validRuleId : "<missing>";
+    const invalidFields = issuePaths.length > 0 ? issuePaths : ["decision"];
+    throw new Error(
+      `Invalid policy gate decision for ${toolId} (rule ${ruleLabel}): ${invalidFields.join(", ")}`
+    );
+  }
+
+  return {
+    decision: "deny",
+    ruleId: validRuleId,
+    reason: validReason,
+    remediation
+  };
 }
 
 function snapshotRawDataSeatbeltProfileOptions(

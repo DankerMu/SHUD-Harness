@@ -132,6 +132,93 @@ describe("policy-gated zero tool registry", () => {
     });
   });
 
+  test("malformed raw-rule deny from custom evaluator fails closed and finishes running handle", async () => {
+    const bashTool = new RecordingTool("bash");
+    const runningToolRegistry = new TestRunningToolRegistry();
+    const handle = runningToolRegistry.register({
+      toolUseId: "POLICY-MALFORMED-RAW-1",
+      toolName: "bash",
+      abortable: false
+    });
+    const wrapped = wrapToolWithPolicyGate(bashTool, {
+      evaluate: async () =>
+        ({
+          decision: "deny",
+          ruleId: RAW_DATA_WRITE_RULE_ID,
+          reason: "bad raw deny"
+        }) as never
+    });
+
+    const result = await wrapped.run(
+      {
+        ...createToolContext("worker"),
+        currentToolUseId: "POLICY-MALFORMED-RAW-1",
+        runningToolRegistry
+      },
+      {
+        command: "printf nope > data/raw/input.csv"
+      }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain(RAW_DATA_WRITE_RULE_ID);
+    expect(result.output).toContain("remediation");
+    expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+    expect(bashTool.calls).toBe(0);
+    expect(handle.getState()).toBe("finished");
+    expect(handle.getTerminalMetadata()).toEqual({
+      finishedAt: expect.any(String),
+      cause: "completed",
+      success: false,
+      outputSummary: result.outputSummary
+    });
+  });
+
+  test("malformed generic deny from custom evaluator fails without policy_gate_denied payload", async () => {
+    const bashTool = new RecordingTool("bash");
+    const runningToolRegistry = new TestRunningToolRegistry();
+    const handle = runningToolRegistry.register({
+      toolUseId: "POLICY-MALFORMED-GENERIC-1",
+      toolName: "bash",
+      abortable: false
+    });
+    const wrapped = wrapToolWithPolicyGate(bashTool, {
+      evaluate: async () =>
+        ({
+          decision: "deny",
+          ruleId: "generic-deny",
+          reason: "bad generic deny"
+        }) as never
+    });
+
+    const result = await wrapped.run(
+      {
+        ...createToolContext("worker"),
+        currentToolUseId: "POLICY-MALFORMED-GENERIC-1",
+        runningToolRegistry
+      },
+      {
+        command: "printf nope > workspace/out.txt"
+      }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain("generic-deny");
+    expect(result.output).toContain("remediation");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+    expect(bashTool.calls).toBe(0);
+    expect(handle.getState()).toBe("finished");
+    expect(handle.getTerminalMetadata()).toEqual({
+      finishedAt: expect.any(String),
+      cause: "completed",
+      success: false,
+      outputSummary: result.outputSummary
+    });
+  });
+
   test("invalid remediation from policy evaluator returns failed ToolResult", async () => {
     const bashTool = new RecordingTool("bash");
     const wrapped = wrapToolWithPolicyGate(bashTool, {
