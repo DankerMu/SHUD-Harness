@@ -237,6 +237,58 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("profile builder denies protected ancestor literals introduced by broad temp roots", async () => {
+    const broadTempRoot = await realpath("/tmp");
+    const fixture = await createFixture(broadTempRoot);
+    try {
+      const evidenceRoot = join(fixture.root, "evidence", "reports");
+      await mkdir(evidenceRoot, { recursive: true });
+
+      const broadProfile = await buildRawDataSeatbeltProfile({
+        protectedRawPaths: [fixture.rawRoot],
+        protectedEvidencePaths: [evidenceRoot],
+        allowedWriteRoots: [fixture.workspaceRoot],
+        tempRoot: broadTempRoot,
+        profileRoot: fixture.profileRoot
+      });
+      const scopedProfile = await buildRawDataSeatbeltProfile({
+        protectedRawPaths: [fixture.rawRoot],
+        protectedEvidencePaths: [evidenceRoot],
+        allowedWriteRoots: [fixture.workspaceRoot],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot
+      });
+      const rootAncestor = await realpath(fixture.root);
+      const dataAncestor = await realpath(join(fixture.root, "data"));
+      const evidenceAncestor = await realpath(join(fixture.root, "evidence"));
+      const expectedRawAncestors = [rootAncestor, dataAncestor].sort();
+      const expectedEvidenceAncestors = [rootAncestor, evidenceAncestor].sort();
+
+      expect(broadProfile.metadata.protectedRawAncestorLiteralPaths).toEqual(
+        expectedRawAncestors
+      );
+      expect(broadProfile.metadata.protectedEvidenceAncestorLiteralPaths).toEqual(
+        expectedEvidenceAncestors
+      );
+      for (const ancestor of [...expectedRawAncestors, ...expectedEvidenceAncestors]) {
+        expect(broadProfile.profileText).toContain(
+          `(deny file-write* (literal "${ancestor}"))`
+        );
+      }
+      expect(scopedProfile.metadata.protectedRawAncestorLiteralPaths).toEqual([]);
+      expect(scopedProfile.metadata.protectedEvidenceAncestorLiteralPaths).toEqual([]);
+      expect(scopedProfile.profileText).not.toContain(
+        `(deny file-write* (literal "${dataAncestor}"))`
+      );
+      expect(scopedProfile.profileText).not.toContain(
+        `(deny file-write* (literal "${evidenceAncestor}"))`
+      );
+      expect(broadProfile.profileId).not.toBe(scopedProfile.profileId);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("relative protected raw paths resolve against stable pathResolutionRoot", async () => {
     const fixture = await createFixture();
     try {
@@ -3424,6 +3476,36 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  seatbeltTest("broad tempRoot cannot authorize raw ancestor moves outside scoped writes", async () => {
+    const broadTempRoot = await realpath("/tmp");
+    const fixture = await createFixture(broadTempRoot);
+    try {
+      const rawInput = join(fixture.rawRoot, "input.csv");
+      const before = await readFile(rawInput, "utf8");
+      const tool = new RawDataSandboxedBashTool({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.workspaceRoot],
+        tempRoot: broadTempRoot,
+        profileRoot: fixture.profileRoot,
+        enableAdvisory: false,
+        fuseRules: []
+      });
+
+      const result = await tool.run(fixture.context, {
+        command: "mv data data.moved; printf MUTATED > data.moved/raw/input.csv",
+        timeout: 30_000
+      });
+
+      expect(result.success).toBe(false);
+      expect(existsSync(join(fixture.root, "data"))).toBe(true);
+      await expectMissing(join(fixture.root, "data.moved"));
+      expect(await readFile(rawInput, "utf8")).toBe(before);
+      await expectGenericSandboxLifecycle(fixture, result);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("pre-existing hardlink residual is demonstrated and bounded nlink scan detects it", async () => {
     const fixture = await createFixture();
     try {
@@ -3960,8 +4042,8 @@ interface Fixture {
   cleanup(): Promise<void>;
 }
 
-async function createFixture(): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), "shud-raw-sandbox-"));
+async function createFixture(parentRoot = tmpdir()): Promise<Fixture> {
+  const root = await mkdtemp(join(parentRoot, "shud-raw-sandbox-"));
   const rawRoot = join(root, "data", "raw");
   const workspaceRoot = join(root, "workspace");
   const profileRoot = join(workspaceRoot, "profiles");

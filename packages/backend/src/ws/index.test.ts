@@ -10,6 +10,7 @@ import {
   rawDataWriteRemediation,
   RawDataSandboxedBashTool,
   RAW_DATA_WRITE_RULE_ID,
+  type ErrorRecord,
   type RawDataToolFailedEventInput,
   type RawDataDenialPayload
 } from "@shud-harness/core";
@@ -50,6 +51,57 @@ describe("backend ws tool.failed skeleton", () => {
     expect(event.payload.error.remediation?.next_action).toBe("adjust_scope");
     expect(event.payload.error.remediation?.hint).toContain("data/raw");
     expect(event.payload.error.remediation?.ref).toContain("policy-gate-spike");
+  });
+
+  test("raw-data advisory builder ignores caller mutations of helper-returned evidence", async () => {
+    const trusted = await sampleTrustedRawDataAdvisoryToolFailedEvent();
+    const originalInput = cloneRawDataToolFailedEventInput(trusted.input);
+    const helperInput = rawDataDeniedToolResultToToolFailedEventInput(trusted.toolResult);
+    if (!helperInput) {
+      throw new Error("Expected trusted raw-data advisory tool.failed input.");
+    }
+    const mutableInput = helperInput as unknown as {
+      toolId: string;
+      rule: string;
+      decision: string;
+      profileId: string;
+      error: ErrorRecord;
+    };
+
+    expect(helperInput).not.toBe(trusted.input);
+    expect(helperInput.error).not.toBe(trusted.input.error);
+
+    mutableInput.toolId = "mutated-bash";
+    mutableInput.rule = "workspace-quota";
+    mutableInput.decision = "allowed";
+    mutableInput.profileId = "mutated-profile";
+    mutableInput.error.error_id = "mutated-error";
+    mutableInput.error.message = "Mutated message.";
+    mutableInput.error.evidence_refs.push("mutated-ref");
+    if (mutableInput.error.remediation) {
+      mutableInput.error.remediation.hint = "mutated hint";
+    }
+
+    const event = buildRawDataAdvisoryToolFailedWsEvent({
+      seq: 16,
+      eventId: "evt-16",
+      timestamp: "2026-07-04T00:00:00.000Z",
+      toolResult: trusted.toolResult
+    });
+
+    expect(event.payload).toMatchObject({
+      tool_id: originalInput.toolId,
+      rule: originalInput.rule,
+      decision: originalInput.decision,
+      guard_class: originalInput.guardClass,
+      profile_id: originalInput.profileId,
+      invocation_id: originalInput.invocationId
+    });
+    expect(event.payload.error).toEqual(originalInput.error);
+    expect(event.payload.error).not.toBe(helperInput.error);
+
+    mutableInput.error.user_message = "Mutated after emit.";
+    expect(event.payload.error.user_message).toBe(originalInput.error.user_message);
   });
 
   test("raw-data advisory builder rejects caller-authored structural payloads", async () => {
@@ -269,6 +321,20 @@ const testLogger = {
   warn(_event: string, _data?: Record<string, unknown>): void {},
   error(_event: string, _data?: Record<string, unknown>): void {}
 };
+
+function cloneRawDataToolFailedEventInput(
+  input: RawDataToolFailedEventInput
+): RawDataToolFailedEventInput {
+  return {
+    ...input,
+    error: {
+      ...input.error,
+      evidence_refs: [...input.error.evidence_refs],
+      recommended_next_actions: [...input.error.recommended_next_actions],
+      ...(input.error.remediation ? { remediation: { ...input.error.remediation } } : {})
+    }
+  };
+}
 
 async function sampleReservedRawDataSandboxDenialPayload(): Promise<RawDataDenialPayload> {
   const root = await mkdtemp(join(tmpdir(), "shud-ws-raw-denial-"));

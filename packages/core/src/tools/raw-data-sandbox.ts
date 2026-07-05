@@ -206,12 +206,6 @@ export async function buildRawDataSeatbeltProfile(
     ? await canonicalizePathSet(options.protectedEvidencePaths)
     : [];
   const allowedWriteRoots = await canonicalizePathSet(options.allowedWriteRoots);
-  const protectedRawAncestorLiteralPaths = protectedRawAncestorLiterals(
-    protectedRawPaths,
-    allowedWriteRoots
-  );
-  const protectedEvidenceAncestorLiteralPaths =
-    protectedEvidenceAncestorLiterals(protectedEvidencePaths, allowedWriteRoots);
   const protectedWriteDenyPaths = sortedUnique([
     ...protectedRawPaths,
     ...protectedEvidencePaths
@@ -221,6 +215,13 @@ export async function buildRawDataSeatbeltProfile(
     protectedWriteDenyPaths,
     "seatbelt temp root"
   );
+  const writeAllowRoots = sortedUnique([tempRoot, ...allowedWriteRoots]);
+  const protectedRawAncestorLiteralPaths = protectedRawAncestorLiterals(
+    protectedRawPaths,
+    writeAllowRoots
+  );
+  const protectedEvidenceAncestorLiteralPaths =
+    protectedEvidenceAncestorLiterals(protectedEvidencePaths, writeAllowRoots);
   const profileRoot = options.profileRoot
     ? await ensureDirectoryOutsideProtectedRaw(
         options.profileRoot,
@@ -243,7 +244,6 @@ export async function buildRawDataSeatbeltProfile(
     .digest("hex")
     .slice(0, 16)}`;
 
-  const writeAllowRoots = sortedUnique([tempRoot, ...allowedWriteRoots]);
   const profileText = [
     "(version 1)",
     "(deny default)",
@@ -961,10 +961,13 @@ export function buildRawDataDenialEvidence(input: {
 }
 
 function trustRawDataDenialEvidence(evidence: RawDataDenialEvidence): void {
-  proveRawDataToolFailedEventInput(evidence.toolFailedEventInput);
+  const trustedInput = frozenTrustedRawDataToolFailedEventInput(
+    evidence.toolFailedEventInput
+  );
+  proveRawDataToolFailedEventInput(trustedInput);
   trustedRawDataToolFailedEventInputsByResult.set(
     evidence.toolResult,
-    evidence.toolFailedEventInput
+    trustedInput
   );
 }
 
@@ -1024,7 +1027,13 @@ export function rawDataDenialPayloadToToolFailedEventInput(
 export function rawDataDeniedToolResultToToolFailedEventInput(
   result: ToolResult
 ): RawDataToolFailedEventInput | undefined {
-  return trustedRawDataToolFailedEventInputsByResult.get(result);
+  const trustedInput = trustedRawDataToolFailedEventInputsByResult.get(result);
+  if (!trustedInput) {
+    return undefined;
+  }
+  const copiedInput = cloneRawDataToolFailedEventInput(trustedInput);
+  proveRawDataToolFailedEventInput(copiedInput);
+  return copiedInput;
 }
 
 export function assertTrustedRawDataToolFailedEventInput(
@@ -1053,6 +1062,53 @@ function proveRawDataToolFailedEventInput(input: RawDataToolFailedEventInput): v
     input,
     rawDataToolFailedEventInputProof(input)
   );
+}
+
+function frozenTrustedRawDataToolFailedEventInput(
+  input: RawDataToolFailedEventInput
+): RawDataToolFailedEventInput {
+  const trustedInput = cloneRawDataToolFailedEventInput(input);
+  Object.freeze(trustedInput.error.evidence_refs);
+  Object.freeze(trustedInput.error.recommended_next_actions);
+  if (trustedInput.error.remediation) {
+    Object.freeze(trustedInput.error.remediation);
+  }
+  Object.freeze(trustedInput.error);
+  Object.freeze(trustedInput);
+  return trustedInput;
+}
+
+function cloneRawDataToolFailedEventInput(
+  input: RawDataToolFailedEventInput
+): RawDataToolFailedEventInput {
+  return {
+    toolId: input.toolId,
+    rule: input.rule,
+    decision: input.decision,
+    guardClass: input.guardClass,
+    profileId: input.profileId,
+    ...(input.invocationId !== undefined ? { invocationId: input.invocationId } : {}),
+    error: cloneErrorRecord(input.error)
+  };
+}
+
+function cloneErrorRecord(error: ErrorRecord): ErrorRecord {
+  return {
+    error_id: error.error_id,
+    category: error.category,
+    severity: error.severity,
+    ...(error.task_id !== undefined ? { task_id: error.task_id } : {}),
+    ...(error.job_id !== undefined ? { job_id: error.job_id } : {}),
+    ...(error.run_id !== undefined ? { run_id: error.run_id } : {}),
+    ...(error.report_id !== undefined ? { report_id: error.report_id } : {}),
+    message: error.message,
+    user_message: error.user_message,
+    evidence_refs: [...error.evidence_refs],
+    retryable: error.retryable,
+    recommended_next_actions: [...error.recommended_next_actions],
+    ...(error.remediation !== undefined ? { remediation: { ...error.remediation } } : {}),
+    created_at: error.created_at
+  };
 }
 
 function rawDataToolFailedEventInputProof(input: RawDataToolFailedEventInput): string {

@@ -1,4 +1,5 @@
 import {
+  assertTrustedRawDataToolFailedEventInput,
   isReservedRawDataDenialErrorId,
   rawDataDeniedToolResultToToolFailedEventInput,
   RAW_DATA_WRITE_RULE_ID,
@@ -110,6 +111,7 @@ function readRawDataAdvisoryToolFailedWsEventInput(
   ) {
     throw new Error("Only trusted raw-data advisory denial events are supported.");
   }
+  assertTrustedRawDataToolFailedEventInput(trustedInput);
   return trustedInput;
 }
 
