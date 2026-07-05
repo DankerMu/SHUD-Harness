@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (no submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      # Bun workspace 含 zero/packages/*，装依赖前只需 zero；SHUD/rSHUD/AutoSHUD 是
+      # 大体量科学仓库，与 typecheck/单测无关，故不初始化。
+      - name: Init zero submodule only
+        run: git submodule update --init zero
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Typecheck + unit tests
+        run: bun run check
+
+      # 项目铁律：zero 作为 root submodule 钉住不 fork，spike 条 5 要求 diff 为零。
+      - name: Verify zero submodule unchanged
+        run: |
+          git -C zero diff --quiet
+          test "$(git -C zero rev-parse HEAD)" = "13e25c116c62411e6ee8a0ad67a6c53dc7c376c6"
