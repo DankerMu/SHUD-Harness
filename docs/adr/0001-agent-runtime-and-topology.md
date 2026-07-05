@@ -136,8 +136,9 @@ independent verifier 确认 4 条 merge-blocking finding，但它们是同一堵
    字节均**未泄漏**，失败点只是 audit 标签记成 `allowed`；`cand-02` 的残留写只落 **workspace**（raw 仍锁），
    属生命周期问题非完整性问题。
 2. **denial telemetry 收窄为可信可观测**：wrapper 仅对可信 raw-denial 证据源产 `tool.failed` + remediation +
-   audit denial 行。当前 M1 可信源为 advisory/static 层提前捕获的同根 raw 写意图；`denied_by_sandbox` 预留给
-   后续不可伪造的 OS 事件源。post-exec stdout/stderr/退出码可由被测命令伪造，因此只记录普通 lifecycle
+   audit denial 行。当前 M1 可信源为 sandbox tool 内层 advisory/static 层提前捕获的同根 raw 写意图；外层
+   policy-gate evaluator 若返回 `RAW_DATA_WRITE_RULE_ID`，属于配置误用，必须 fail closed，不能静默 generic deny
+   或伪造 raw profile/audit 证据。`denied_by_sandbox` 预留给后续不可伪造的 OS 事件源。post-exec stdout/stderr/退出码可由被测命令伪造，因此只记录普通 lifecycle
    `failed` 事实，不得据此声明 `raw_data_write_denied` 或 `denied_by_sandbox`。子进程**吞掉** EPERM、抑制
    stderr、exit 0 的隐藏拒绝，当前 M1 wrapper 原语不能可靠观测 → 移出 #19。audit 行只记可观测事实（施加的
    seatbelt profile、退出状态、advisory 决策），不得声称已检出每一次被拒尝试。

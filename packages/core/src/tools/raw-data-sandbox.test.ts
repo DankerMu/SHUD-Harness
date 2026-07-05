@@ -43,6 +43,12 @@ const rubySeatbeltTest = hasSeatbelt && commandExistsSync("ruby") ? test : test.
 const rscriptSeatbeltTest = hasSeatbelt && commandExistsSync("Rscript") ? test : test.skip;
 
 describe("raw data seatbelt sandbox", () => {
+  test("forgeable sandbox denial classifier is not exported as public authority", async () => {
+    const toolExports = await import("./index");
+
+    expect("isLikelySandboxDenial" in toolExports).toBe(false);
+  });
+
   test("profile builder canonicalizes paths and returns stable profile identity", async () => {
     const fixture = await createFixture();
     try {
@@ -1896,6 +1902,38 @@ describe("raw data seatbelt sandbox", () => {
         expectProcessContainmentFailure(result);
         await expectMissing(join(fixture.workspaceRoot, commandCase.path));
       }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("earlier wait does not authorize later un-awaited background work", async () => {
+    const fixture = await createFixture();
+    try {
+      const cases = [
+        {
+          command: "wait; (sleep 0.2; printf leaked > workspace/wait-before-bg.txt) & true",
+          path: "wait-before-bg.txt"
+        },
+        {
+          command:
+            "wait 999; (sleep 0.2; printf leaked > workspace/wait-pid-before-bg.txt) & true",
+          path: "wait-pid-before-bg.txt"
+        }
+      ];
+
+      for (const commandCase of cases) {
+        const result = await runSandboxed(fixture, commandCase.command);
+        expectProcessContainmentFailure(result);
+        await expectMissing(join(fixture.workspaceRoot, commandCase.path));
+        await Bun.sleep(300);
+        await expectMissing(join(fixture.workspaceRoot, commandCase.path));
+      }
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        decision: "policy_gate_process_containment_unavailable"
+      });
     } finally {
       await fixture.cleanup();
     }

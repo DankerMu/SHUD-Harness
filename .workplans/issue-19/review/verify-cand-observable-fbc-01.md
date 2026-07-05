@@ -13,4 +13,3 @@ Evidence:
 
 Disposition:
 Update canonical OpenSpec/ADR/plan wording to match the fbc0cc0 implementation boundary: post-exec process output alone is generic lifecycle in M1; trusted advisory/static raw-denial evidence may emit raw-denial telemetry; `denied_by_sandbox` is reserved for a future non-forgeable OS denial source.
-

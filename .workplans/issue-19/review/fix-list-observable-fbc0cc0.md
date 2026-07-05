@@ -12,4 +12,3 @@ Reviewed head SHA: `fbc0cc009b3fbed1c0c3f79c09bf9ea12dffdc48`
 - Update `design.md` Decision 13, fixture acceptance rows, and review focus to remove process-result-only `denied_by_sandbox` requirements.
 - Update `tasks.md`, ADR-0001, and `Phased_Plan.md` pointers to the same 2026-07-05 conservative telemetry boundary.
 - Re-run OpenSpec validation, grep for stale process-result denial wording, `bun run check`, `git diff --check`, and zero submodule guard.
-

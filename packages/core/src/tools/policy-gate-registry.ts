@@ -9,6 +9,7 @@ import {
   type PolicyGateToolCall
 } from "./policy-gate-core";
 import {
+  RAW_DATA_WRITE_RULE_ID,
   RawDataSandboxedBashTool,
   type RawDataSeatbeltProfileOptions
 } from "./raw-data-sandbox";
@@ -247,6 +248,9 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     );
 
     if (decision.decision === "deny") {
+      if (decision.ruleId === RAW_DATA_WRITE_RULE_ID) {
+        return buildRawDataRuleMisconfiguredResult(this.policyGateToolId, decision);
+      }
       return buildPolicyGateDeniedResult(this.policyGateToolId, decision);
     }
 
@@ -256,6 +260,31 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
   protected async execute(): Promise<ToolResult> {
     throw new Error("PolicyGatedBaseToolAdapter delegates through run().");
   }
+}
+
+function buildRawDataRuleMisconfiguredResult(
+  toolId: string,
+  decision: Extract<PolicyGateDecision, { decision: "deny" }>
+): ToolResult {
+  const payload = {
+    error: "policy_gate_raw_data_rule_misconfigured",
+    tool_id: toolId,
+    rule: RAW_DATA_WRITE_RULE_ID,
+    reason:
+      "Outer policy gate attempted to deny raw-data writes. Raw advisory and raw-denial evidence ownership belongs inside RawDataSandboxedBashTool.",
+    outer_reason: decision.reason,
+    remediation: {
+      next_action: "fix_configuration",
+      hint: "Remove RAW_DATA_WRITE_RULE_ID from the outer policy evaluator and let RawDataSandboxedBashTool own raw advisory, audit reservation, and tool-failed evidence.",
+      ...(decision.remediation?.ref ? { ref: decision.remediation.ref } : {})
+    }
+  };
+
+  return {
+    success: false,
+    output: JSON.stringify(payload),
+    outputSummary: `Policy gate raw-data rule misconfigured for ${toolId}: ${decision.reason}`
+  };
 }
 
 function buildPolicyGateDeniedResult(

@@ -32,7 +32,7 @@ describe("policy-gated zero tool registry", () => {
       evaluate: createPolicyGateEvaluator({
         rules: [
           {
-            ruleId: "raw-data-write",
+            ruleId: "workspace-write-deny",
             description: "Reject writes to raw data.",
             evaluate: () => ({
               decision: "deny",
@@ -64,7 +64,7 @@ describe("policy-gated zero tool registry", () => {
         ref?: string;
       };
     };
-    expect(payload.ruleId).toBe("raw-data-write");
+    expect(payload.ruleId).toBe("workspace-write-deny");
     expect(payload.reason).toBe("raw data writes are blocked");
     expect(payload.remediation?.next_action).toBe("adjust_scope");
     expect(payload.remediation?.hint).toBe("Use a governed workspace path instead of data/raw.");
@@ -288,7 +288,7 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
-  test("SHUD runtime routes custom outer raw advisory composition through generic policy denial", async () => {
+  test("SHUD runtime fails closed when custom outer evaluator owns raw advisory composition", async () => {
     const fixture = await createRawFixture();
     try {
       const registry = createShudRuntimeToolRegistry({
@@ -307,15 +307,9 @@ describe("policy-gated zero tool registry", () => {
       });
 
       expect(result?.success).toBe(false);
-      const payload = JSON.parse(result?.output ?? "{}") as {
-        error?: string;
-        ruleId?: string;
-        profile_id?: string;
-      };
-      expect(payload.error).toBe("policy_gate_denied");
-      expect(payload.ruleId).toBe(RAW_DATA_WRITE_RULE_ID);
-      expect(payload.profile_id).toBeUndefined();
+      expectOuterRawRuleMisconfiguration(result);
       expect(result?.output).not.toContain("raw_data_write_denied");
+      expect(result?.output).not.toContain("policy_gate_denied");
       await expect(readFile(join(fixture.rawRoot, "outer-raw-advisory.txt"), "utf8")).rejects.toThrow();
       await expect(readRawAuditRows(fixture.root)).rejects.toThrow();
     } finally {
@@ -344,15 +338,9 @@ describe("policy-gated zero tool registry", () => {
       });
 
       expect(result?.success).toBe(false);
-      const payload = JSON.parse(result?.output ?? "{}") as {
-        error?: string;
-        ruleId?: string;
-        profile_id?: string;
-      };
-      expect(payload.error).toBe("policy_gate_denied");
-      expect(payload.ruleId).toBe(RAW_DATA_WRITE_RULE_ID);
-      expect(payload.profile_id).toBeUndefined();
+      expectOuterRawRuleMisconfiguration(result);
       expect(result?.output).not.toContain("raw_data_write_denied");
+      expect(result?.output).not.toContain("policy_gate_denied");
       await expect(readFile(join(fixture.workspaceRoot, "outer-disabled-side-effect.txt"), "utf8")).rejects.toThrow();
       await expect(readFile(join(fixture.rawRoot, "outer-disabled.txt"), "utf8")).rejects.toThrow();
       await expect(readRawAuditRows(fixture.root)).rejects.toThrow();
@@ -361,7 +349,7 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
-  test("outer raw deny root mismatch returns generic policy denial without sandbox profile identity", async () => {
+  test("outer raw deny root mismatch returns explicit non-trusted composition error", async () => {
     const fixture = await createRawFixture();
     try {
       const outerRawRoot = join(fixture.root, "outer", "raw");
@@ -383,15 +371,9 @@ describe("policy-gated zero tool registry", () => {
       });
 
       expect(result?.success).toBe(false);
-      const payload = JSON.parse(result?.output ?? "{}") as {
-        error?: string;
-        ruleId?: string;
-        profile_id?: string;
-      };
-      expect(payload.error).toBe("policy_gate_denied");
-      expect(payload.ruleId).toBe(RAW_DATA_WRITE_RULE_ID);
-      expect(payload.profile_id).toBeUndefined();
+      expectOuterRawRuleMisconfiguration(result);
       expect(result?.output).not.toContain("raw_data_write_denied");
+      expect(result?.output).not.toContain("policy_gate_denied");
       await expect(readFile(join(fixture.workspaceRoot, "mismatch-side-effect.txt"), "utf8")).rejects.toThrow();
       await expect(readFile(join(fixture.rawRoot, "inner.txt"), "utf8")).rejects.toThrow();
       await expect(readFile(join(outerRawRoot, "outer-denied.txt"), "utf8")).rejects.toThrow();
@@ -472,6 +454,31 @@ function createToolContext(role: string): ToolContext & { role: string } {
     workDir: "/tmp/shud-harness-test",
     logger: testLogger
   };
+}
+
+function expectOuterRawRuleMisconfiguration(result: ToolResult | undefined): void {
+  const payload = JSON.parse(result?.output ?? "{}") as {
+    error?: string;
+    rule?: string;
+    reason?: string;
+    outer_reason?: string;
+    profile_id?: string;
+    profile_path?: string;
+    remediation?: {
+      next_action?: string;
+      hint?: string;
+      ref?: string;
+    };
+  };
+
+  expect(payload.error).toBe("policy_gate_raw_data_rule_misconfigured");
+  expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
+  expect(payload.reason).toContain("RawDataSandboxedBashTool");
+  expect(payload.outer_reason).toBe("obvious static raw-data write target");
+  expect(payload.profile_id).toBeUndefined();
+  expect(payload.profile_path).toBeUndefined();
+  expect(payload.remediation?.next_action).toBe("fix_configuration");
+  expect(payload.remediation?.hint).toContain("RawDataSandboxedBashTool");
 }
 
 function createSpawnModelRouterStub(): ConstructorParameters<typeof SpawnAgentTool>[0] {

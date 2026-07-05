@@ -38,7 +38,6 @@ export const DEFAULT_POLICY_GATE_AUDIT_TASK_ID = "TASK-M1-SPIKE";
 const DEFAULT_AUDIT_FILE_NAME = "policy-gate.ndjson";
 const DEFAULT_SANDBOX_EXECUTABLE = "/usr/bin/sandbox-exec";
 const DEFAULT_SANDBOX_BASH = "/bin/bash";
-const SANDBOX_DENIAL_PATTERN = /Operation not permitted|Permission denied|sandbox/i;
 const PIPE_GRACE_MS = 1000;
 const FORCE_KILL_SETTLE_MS = 75;
 const DESCENDANT_SAMPLE_INTERVAL_MS = 100;
@@ -873,10 +872,6 @@ export function rawDataWriteRemediation(): PolicyGateRemediation {
     hint: "Write derived or temporary files outside data/raw; keep raw inputs read-only.",
     ref: RAW_DATA_POLICY_REF
   };
-}
-
-export function isLikelySandboxDenial(output: string): boolean {
-  return SANDBOX_DENIAL_PATTERN.test(output);
 }
 
 function buildAuditReservationFailureResult(input: {
@@ -3431,27 +3426,32 @@ function stripInterpreterLiteralAndCommentText(payload: string): string {
 }
 
 function hasUnwaitedBackgroundExecution(command: string): boolean {
-  if (!hasUnquotedBackgroundOperator(command)) {
-    return false;
-  }
-
-  return !splitStaticShellSegments(command).some((segment) => {
-    const tokens = commandTokensFromSegment(segment);
-    return tokens.length > 0 && normalizeCommandName(tokens[0]) === "wait";
-  });
-}
-
-function hasUnquotedBackgroundOperator(command: string): boolean {
+  let current = "";
   let quote: "'" | '"' | undefined;
   let escaped = false;
+  let hasPendingBackground = false;
+  let sawBackground = false;
+
+  const consumeSegment = () => {
+    if (!current.trim()) {
+      current = "";
+      return;
+    }
+    if (isStaticWaitSegment(current) && hasPendingBackground) {
+      hasPendingBackground = false;
+    }
+    current = "";
+  };
 
   for (let index = 0; index < command.length; index += 1) {
     const char = command[index];
     if (escaped) {
+      current += char;
       escaped = false;
       continue;
     }
     if (char === "\\") {
+      current += char;
       escaped = true;
       continue;
     }
@@ -3459,27 +3459,48 @@ function hasUnquotedBackgroundOperator(command: string): boolean {
       if (char === quote) {
         quote = undefined;
       }
+      current += char;
       continue;
     }
     if (char === "'" || char === '"') {
       quote = char;
+      current += char;
+      continue;
+    }
+    if (char === ";" || char === "\n" || char === "|") {
+      consumeSegment();
       continue;
     }
     if (char !== "&") {
+      current += char;
       continue;
     }
+
     const previous = command[index - 1];
     const next = command[index + 1];
-    if (next === "&" || previous === "&" || previous === ">" || next === ">") {
+    if (
+      next === "&" ||
+      previous === "&" ||
+      previous === ">" ||
+      next === ">" ||
+      /\d/.test(next ?? "")
+    ) {
+      current += char;
       continue;
     }
-    if (/\d/.test(next ?? "")) {
-      continue;
-    }
-    return true;
+
+    consumeSegment();
+    hasPendingBackground = true;
+    sawBackground = true;
   }
 
-  return false;
+  consumeSegment();
+  return sawBackground && hasPendingBackground;
+}
+
+function isStaticWaitSegment(segment: string): boolean {
+  const tokens = commandTokensFromSegment(segment);
+  return tokens.length > 0 && normalizeCommandName(tokens[0]) === "wait";
 }
 
 function rawDataGuardClassForRawData(): RawDataGuardClass {
