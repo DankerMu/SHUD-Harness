@@ -4,7 +4,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BaseTool, BashTool, SpawnAgentTool, ToolRegistry } from "@zero-os/core";
-import type { FuseRule, ToolContext, ToolLogger, ToolResult } from "@zero-os/shared";
+import type {
+  FuseRule,
+  SecretFilter,
+  ToolContext,
+  ToolLogger,
+  ToolResult
+} from "@zero-os/shared";
 import { PolicyGateRemediationSchema } from "./policy-gate-core";
 import {
   assertAllToolsPolicyGated,
@@ -25,8 +31,17 @@ import {
   type RawDataDenialPayload
 } from "./raw-data-sandbox";
 
-const seatbeltTest =
-  process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec") ? test : test.skip;
+const requireSeatbeltTests = process.env.SHUD_REQUIRE_SEATBELT_TESTS === "1";
+const hasSeatbelt = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
+if (requireSeatbeltTests) {
+  if (process.platform !== "darwin") {
+    throw new Error("SHUD_REQUIRE_SEATBELT_TESTS requires macOS.");
+  }
+  if (!existsSync("/usr/bin/sandbox-exec")) {
+    throw new Error("SHUD_REQUIRE_SEATBELT_TESTS requires /usr/bin/sandbox-exec.");
+  }
+}
+const seatbeltTest = hasSeatbelt ? test : test.skip;
 
 describe("policy-gated zero tool registry", () => {
   test("denies before executing the underlying bash BaseTool", async () => {
@@ -74,6 +89,103 @@ describe("policy-gated zero tool registry", () => {
     expect(payload.remediation?.ref).toBe(
       "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
     );
+    expect(bashTool.calls).toBe(0);
+  });
+
+  test("policy deny redacts registered secrets before returning", async () => {
+    const secret = "fake-policy-deny-secret";
+    const secretFilter = new TestSecretFilter();
+    secretFilter.addSecret("policy-deny-secret", secret);
+    const bashTool = new RecordingTool("bash");
+    const registry = createPolicyGatedToolRegistry([bashTool], {
+      evaluate: createPolicyGateEvaluator({
+        rules: [
+          {
+            ruleId: "workspace-write-deny",
+            description: "Reject writes to raw data.",
+            evaluate: () => ({
+              decision: "deny",
+              reason: `blocked because ${secret}`,
+              remediation: {
+                next_action: "adjust_scope",
+                hint: `Use a governed path, not ${secret}.`,
+                ref: `openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md#${secret}`
+              }
+            })
+          }
+        ]
+      })
+    });
+
+    const result = await registry.get("bash")?.run(
+      {
+        ...createToolContext("worker"),
+        secretFilter
+      },
+      {
+        command: "printf nope > data/raw/input.csv"
+      }
+    );
+
+    expect(result?.success).toBe(false);
+    expect(result?.output).not.toContain(secret);
+    expect(result?.outputSummary).not.toContain(secret);
+    expect(result?.output).toContain("[redacted:policy-deny-secret]");
+    expect(result?.outputSummary).toContain("[redacted:policy-deny-secret]");
+    const payload = JSON.parse(result?.output ?? "{}") as {
+      reason?: string;
+      remediation?: {
+        hint?: string;
+        ref?: string;
+      };
+    };
+    expect(payload.reason).toContain("[redacted:policy-deny-secret]");
+    expect(payload.remediation?.hint).toContain("[redacted:policy-deny-secret]");
+    expect(payload.remediation?.ref).toContain("[redacted:policy-deny-secret]");
+    expect(bashTool.calls).toBe(0);
+  });
+
+  test("raw-data rule misconfiguration deny redacts registered secrets before returning", async () => {
+    const secret = "fake-raw-rule-secret";
+    const secretFilter = new TestSecretFilter();
+    secretFilter.addSecret("raw-rule-secret", secret);
+    const bashTool = new RecordingTool("bash");
+    const wrapped = wrapToolWithPolicyGate(bashTool, {
+      evaluate: async () => ({
+        decision: "deny",
+        ruleId: RAW_DATA_WRITE_RULE_ID,
+        reason: `outer raw rule leaked ${secret}`,
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: `Remove the outer raw rule containing ${secret}.`,
+          ref: `openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md#${secret}`
+        }
+      })
+    });
+
+    const result = await wrapped.run(
+      {
+        ...createToolContext("worker"),
+        secretFilter
+      },
+      {
+        command: "printf nope > data/raw/input.csv"
+      }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.output).not.toContain(secret);
+    expect(result.outputSummary).not.toContain(secret);
+    expect(result.output).toContain("[redacted:raw-rule-secret]");
+    expect(result.outputSummary).toContain("[redacted:raw-rule-secret]");
+    const payload = JSON.parse(result.output) as {
+      outer_reason?: string;
+      remediation?: {
+        ref?: string;
+      };
+    };
+    expect(payload.outer_reason).toContain("[redacted:raw-rule-secret]");
+    expect(payload.remediation?.ref).toContain("[redacted:raw-rule-secret]");
     expect(bashTool.calls).toBe(0);
   });
 
@@ -757,6 +869,26 @@ function createSpawnModelRouterStub(): ConstructorParameters<typeof SpawnAgentTo
     getAdapter: () => undefined,
     getModelLabel: () => "test/model"
   } as unknown as ConstructorParameters<typeof SpawnAgentTool>[0];
+}
+
+class TestSecretFilter implements SecretFilter {
+  private readonly secrets = new Map<string, string>();
+
+  filter(text: string): string {
+    let filtered = text;
+    for (const [key, value] of this.secrets) {
+      filtered = filtered.split(value).join(`[redacted:${key}]`);
+    }
+    return filtered;
+  }
+
+  addSecret(key: string, value: string): void {
+    this.secrets.set(key, value);
+  }
+
+  removeSecret(key: string): void {
+    this.secrets.delete(key);
+  }
 }
 
 const testLogger: ToolLogger = {

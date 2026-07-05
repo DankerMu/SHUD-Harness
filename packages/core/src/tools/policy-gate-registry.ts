@@ -1,4 +1,5 @@
 import { BaseTool, SpawnAgentTool, ToolRegistry, loadFuseList } from "@zero-os/core";
+import { toErrorMessage } from "@zero-os/shared";
 import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
 import {
   EMPTY_POLICY_GATE_CONTEXT,
@@ -238,6 +239,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
   }
 
   async run(toolContext: ToolContext, input: unknown): Promise<ToolResult> {
+    const startTime = Date.now();
     const decision = await this.options.evaluate(
       {
         toolId: this.policyGateToolId,
@@ -252,10 +254,19 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     );
 
     if (decision.decision === "deny") {
+      const durationMs = Date.now() - startTime;
       if (decision.ruleId === RAW_DATA_WRITE_RULE_ID) {
-        return buildRawDataRuleMisconfiguredResult(this.policyGateToolId, decision);
+        return this.finalizeDeniedResult(
+          toolContext,
+          buildRawDataRuleMisconfiguredResult(this.policyGateToolId, decision),
+          durationMs
+        );
       }
-      return buildPolicyGateDeniedResult(this.policyGateToolId, decision);
+      return this.finalizeDeniedResult(
+        toolContext,
+        buildPolicyGateDeniedResult(this.policyGateToolId, decision),
+        durationMs
+      );
     }
 
     return this.innerTool.run(toolContext, input);
@@ -263,6 +274,29 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
 
   protected async execute(): Promise<ToolResult> {
     throw new Error("PolicyGatedBaseToolAdapter delegates through run().");
+  }
+
+  private async finalizeDeniedResult(
+    toolContext: ToolContext,
+    result: ToolResult,
+    durationMs: number
+  ): Promise<ToolResult> {
+    try {
+      await this.afterExecute(toolContext, result, durationMs);
+      return result;
+    } catch (error) {
+      const errorMessage = toErrorMessage(error);
+      toolContext.logger.error("tool_call_error", {
+        tool: this.name,
+        error: errorMessage,
+        durationMs
+      });
+      return {
+        success: false,
+        output: errorMessage,
+        outputSummary: `Error: ${errorMessage.slice(0, 100)}`
+      };
+    }
   }
 }
 

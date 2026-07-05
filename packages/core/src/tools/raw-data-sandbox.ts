@@ -499,6 +499,10 @@ export class RawDataSandboxedBashTool extends BaseTool {
 
   private readonly fuseChecker: FuseListChecker;
   private readonly options: RawDataSandboxedBashToolOptions;
+  private readonly terminationCausesByInvocation = new Map<
+    string,
+    RunningToolTerminationCause
+  >();
 
   constructor(options: RawDataSandboxedBashToolOptions) {
     super();
@@ -522,9 +526,19 @@ export class RawDataSandboxedBashTool extends BaseTool {
   }
 
   async run(ctx: ToolContext, input: unknown): Promise<ToolResult> {
-    const result = await super.run(ctx, input);
-    markRunningToolFinished(ctx, result, "completed");
-    return result;
+    const invocationKey = runningToolInvocationKey(ctx);
+    try {
+      const result = await super.run(ctx, input);
+      const cause = invocationKey
+        ? this.terminationCausesByInvocation.get(invocationKey)
+        : undefined;
+      markRunningToolFinished(ctx, result, cause ?? "completed");
+      return result;
+    } finally {
+      if (invocationKey) {
+        this.terminationCausesByInvocation.delete(invocationKey);
+      }
+    }
   }
 
   protected async fuseCheck(_input: unknown): Promise<void> {
@@ -802,7 +816,10 @@ export class RawDataSandboxedBashTool extends BaseTool {
     result: ToolResult,
     cause: RunningToolTerminationCause = "completed"
   ): ToolResult {
-    markRunningToolFinished(ctx, result, cause);
+    const invocationKey = runningToolInvocationKey(ctx);
+    if (invocationKey) {
+      this.terminationCausesByInvocation.set(invocationKey, cause);
+    }
     return result;
   }
 
@@ -1611,6 +1628,14 @@ function markRunningToolFinished(
     success: result.success,
     outputSummary: result.outputSummary
   });
+}
+
+function runningToolInvocationKey(ctx: ToolContext): string | undefined {
+  const toolUseId = ctx.currentToolUseId;
+  if (!toolUseId) {
+    return undefined;
+  }
+  return `${ctx.sessionId}\0${toolUseId}`;
 }
 
 interface SandboxedBashInput {

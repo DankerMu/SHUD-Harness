@@ -46,10 +46,23 @@ import {
   terminateRawDataSandboxInvocationProcessesForTest
 } from "../../test-support/raw-data-sandbox-test-support";
 
+const requireSeatbeltTests = process.env.SHUD_REQUIRE_SEATBELT_TESTS === "1";
 const hasSeatbelt = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
+const hasPython3 = commandExistsSync("python3");
+if (requireSeatbeltTests) {
+  if (process.platform !== "darwin") {
+    throw new Error("SHUD_REQUIRE_SEATBELT_TESTS requires macOS.");
+  }
+  if (!existsSync("/usr/bin/sandbox-exec")) {
+    throw new Error("SHUD_REQUIRE_SEATBELT_TESTS requires /usr/bin/sandbox-exec.");
+  }
+  if (!hasPython3) {
+    throw new Error("SHUD_REQUIRE_SEATBELT_TESTS requires python3.");
+  }
+}
 const seatbeltTest = hasSeatbelt ? test : test.skip;
 const nodeSeatbeltTest = hasSeatbelt && commandExistsSync("node") ? test : test.skip;
-const pythonSeatbeltTest = hasSeatbelt && commandExistsSync("python3") ? test : test.skip;
+const pythonSeatbeltTest = hasSeatbelt && hasPython3 ? test : test.skip;
 const rubySeatbeltTest = hasSeatbelt && commandExistsSync("ruby") ? test : test.skip;
 const rscriptSeatbeltTest = hasSeatbelt && commandExistsSync("Rscript") ? test : test.skip;
 
@@ -2540,6 +2553,51 @@ describe("raw data seatbelt sandbox", () => {
       expect(handle.getTerminalMetadata()).toMatchObject({
         cause: "completed",
         success: true,
+        outputSummary: result.outputSummary
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("running metadata follows final ToolResult when afterExecute fails", async () => {
+    const fixture = await createFixture();
+    try {
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+
+      const result = await runSandboxed(
+        fixture,
+        "printf ok > workspace/metadata-afterexecute.txt",
+        {
+          context: {
+            ...fixture.context,
+            runningToolRegistry,
+            logger: {
+              debug() {},
+              info() {
+                throw new Error("afterExecute failed after sandbox success");
+              },
+              warn() {},
+              error() {}
+            }
+          }
+        }
+      );
+
+      expect(await readFile(join(fixture.workspaceRoot, "metadata-afterexecute.txt"), "utf8")).toBe(
+        "ok"
+      );
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("afterExecute failed after sandbox success");
+      expect(handle.getState()).toBe("finished");
+      expect(handle.getTerminalMetadata()).toMatchObject({
+        cause: "completed",
+        success: false,
         outputSummary: result.outputSummary
       });
     } finally {
