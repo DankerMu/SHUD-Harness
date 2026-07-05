@@ -252,7 +252,9 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
         decision.ruleId === RAW_DATA_WRITE_RULE_ID &&
         this.innerTool instanceof RawDataSandboxedBashTool
       ) {
-        return this.innerTool.run(toolContext, input);
+        return this.innerTool.denyByOuterRawPolicyGate(toolContext, {
+          reason: decision.reason
+        });
       }
       return buildPolicyGateDeniedResult(this.policyGateToolId, decision);
     }

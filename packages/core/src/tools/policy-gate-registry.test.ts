@@ -327,6 +327,77 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("outer raw deny with inner advisory disabled does not execute bash side effects", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const registry = createShudRuntimeToolRegistry({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        enableAdvisory: false,
+        fuseRules: [],
+        evaluate: createPolicyGateEvaluator({
+          rules: [createRawDataWriteAdvisoryRule([fixture.rawRoot])]
+        })
+      });
+
+      const result = await registry.get("bash")?.run(fixture.context, {
+        command:
+          "printf side-effect > workspace/outer-disabled-side-effect.txt; printf nope > data/raw/outer-disabled.txt"
+      });
+
+      expect(result?.success).toBe(false);
+      const payload = JSON.parse(result?.output ?? "{}") as RawDataDenialPayload;
+      expect(payload.error).toBe("raw_data_write_denied");
+      expect(payload.decision).toBe("denied_by_advisory");
+      await expect(readFile(join(fixture.workspaceRoot, "outer-disabled-side-effect.txt"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(fixture.rawRoot, "outer-disabled.txt"), "utf8")).rejects.toThrow();
+      const rows = await readRawAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        tool_id: "bash",
+        rule: RAW_DATA_WRITE_RULE_ID,
+        decision: "denied_by_advisory",
+        profile_id: payload.profile_id,
+        error_id: payload.error_record.error_id
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("outer raw deny root mismatch still prevents writes to the outer-denied path", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const outerRawRoot = join(fixture.root, "outer", "raw");
+      await mkdir(outerRawRoot, { recursive: true });
+      const registry = createShudRuntimeToolRegistry({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        enableAdvisory: false,
+        fuseRules: [],
+        evaluate: createPolicyGateEvaluator({
+          rules: [createRawDataWriteAdvisoryRule([outerRawRoot])]
+        })
+      });
+
+      const result = await registry.get("bash")?.run(fixture.context, {
+        command: `printf nope > ${join(outerRawRoot, "outer-denied.txt")}`
+      });
+
+      expect(result?.success).toBe(false);
+      const payload = JSON.parse(result?.output ?? "{}") as RawDataDenialPayload;
+      expect(payload.error).toBe("raw_data_write_denied");
+      expect(payload.decision).toBe("denied_by_advisory");
+      await expect(readFile(join(outerRawRoot, "outer-denied.txt"), "utf8")).rejects.toThrow();
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime rewraps prewrapped tools with the current evaluator", async () => {
     const fixture = await createRawFixture();
     try {

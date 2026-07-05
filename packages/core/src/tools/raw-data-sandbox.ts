@@ -7,6 +7,7 @@ import {
   mkdtemp,
   open,
   opendir,
+  readlink,
   realpath,
   rm,
   writeFile
@@ -42,12 +43,17 @@ const SANDBOX_DENIAL_PATTERN = /Operation not permitted|Permission denied|sandbo
 const INTERPRETER_WRITE_DENIAL_PATTERN = /can't open file/i;
 const PIPE_GRACE_MS = 1000;
 const FORCE_KILL_SETTLE_MS = 75;
-const DESCENDANT_SAMPLE_INTERVAL_MS = 20;
+const DESCENDANT_SAMPLE_INTERVAL_MS = 100;
 const DESCENDANT_KILL_SETTLE_MS = 120;
 const COMMAND_ANALYSIS_MAX_LENGTH = 128_000;
 const INTERPRETER_PAYLOAD_ANALYSIS_MAX_LENGTH = 32_000;
 const COMMAND_ANALYSIS_MAX_SEGMENTS = 512;
 const COMMAND_ANALYSIS_MAX_CALLS = 512;
+const PROCESS_PREFLIGHT_ANALYSIS_MAX_LENGTH = 32_000;
+const STREAM_CAPTURE_MAX_CHARS = 64_000;
+const SYMLINK_ALIAS_MAX_TARGETS = 64;
+const SYMLINK_ALIAS_MAX_PATH_COMPONENTS = 128;
+const SYMLINK_ALIAS_MAX_SYMLINKS = 16;
 const DEFAULT_ABORT_MESSAGE = "Command aborted by user from Session Detail.";
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export interface RawDataSeatbeltProfileOptions {
@@ -79,10 +85,8 @@ export type RawDataSandboxedBashToolOptions = RawDataSeatbeltProfileOptions & {
   enableAdvisory?: boolean;
   auditWorkspaceRoot?: string;
   auditTaskId?: string;
-} & (
-    | { innerTool: BaseTool; fuseRules?: never }
-    | { innerTool?: never; fuseRules: readonly FuseRule[] }
-  );
+  fuseRules: readonly FuseRule[];
+};
 
 export interface PolicyGateAuditRow {
   event: string;
@@ -294,17 +298,16 @@ export class RawDataSandboxedBashTool extends BaseTool {
 
   constructor(private readonly options: RawDataSandboxedBashToolOptions) {
     super();
-    let metadataTool: BaseTool;
-    let fuseRules: readonly FuseRule[] = [];
-    if ("innerTool" in options && options.innerTool) {
-      metadataTool = options.innerTool;
-    } else if ("fuseRules" in options && options.fuseRules) {
-      fuseRules = options.fuseRules;
-      metadataTool = new BashTool([]);
-    } else {
-      throw new Error("RawDataSandboxedBashTool requires either innerTool or fuseRules.");
+    if ("innerTool" in (options as unknown as Record<string, unknown>)) {
+      throw new Error(
+        "RawDataSandboxedBashTool does not accept innerTool; pass explicit fuseRules."
+      );
     }
-    this.fuseChecker = new FuseListChecker([...fuseRules]);
+    if (!Array.isArray(options.fuseRules)) {
+      throw new Error("RawDataSandboxedBashTool requires explicit fuseRules.");
+    }
+    const metadataTool = new BashTool([...options.fuseRules]);
+    this.fuseChecker = new FuseListChecker([...options.fuseRules]);
     this.name = options.toolId ?? metadataTool.name;
     this.description = metadataTool.description;
     this.parameters = metadataTool.parameters;
@@ -400,7 +403,11 @@ export class RawDataSandboxedBashTool extends BaseTool {
       });
       const result = run.result;
 
-      if (isLikelySandboxDenialForCommand(command, result, protectedRawPathSignals)) {
+      if (
+        await isLikelySandboxDenialForCommand(command, result, protectedRawPathSignals, {
+          workDir: ctx.workDir
+        })
+      ) {
         const evidence = buildRawDataDenialEvidence({
           toolId: this.name,
           decision: "denied_by_sandbox",
@@ -444,6 +451,50 @@ export class RawDataSandboxedBashTool extends BaseTool {
         normalizeSandboxedBashResult(result, command, profilePath),
         run.cause
       );
+    } finally {
+      await closePolicyGateAuditReservation(auditReservation);
+      if (profilePath) {
+        await cleanupRawDataSeatbeltProfileFile(profilePath);
+      }
+    }
+  }
+
+  async denyByOuterRawPolicyGate(
+    ctx: ToolContext,
+    input: { reason: string }
+  ): Promise<ToolResult> {
+    const protectedRawPaths = await canonicalizePathSet(this.options.protectedRawPaths);
+    const auditReservation = await this.reserveAuditEvidence(ctx, protectedRawPaths);
+    if ("toolResult" in auditReservation) {
+      return this.finalizeToolResult(ctx, auditReservation.toolResult);
+    }
+
+    let profilePath: string | undefined;
+    try {
+      const profile = await buildRawDataSeatbeltProfile({
+        protectedRawPaths,
+        allowedWriteRoots: this.options.allowedWriteRoots,
+        tempRoot: this.options.tempRoot,
+        profileRoot: this.options.profileRoot,
+        protectedEvidencePaths: [
+          ...(this.options.protectedEvidencePaths ?? []),
+          auditReservation.protectedEvidencePath
+        ]
+      });
+      profilePath = await writeRawDataSeatbeltProfileFile(profile, this.options.profileRoot);
+      const evidence = buildRawDataDenialEvidence({
+        toolId: this.name,
+        decision: "denied_by_advisory",
+        reason: input.reason,
+        profile,
+        profilePath,
+        invocationId: readInvocationId(ctx)
+      });
+      const appendFailure = await this.appendDenialAudit(ctx, auditReservation, evidence);
+      if (appendFailure) {
+        return this.finalizeToolResult(ctx, appendFailure);
+      }
+      return this.finalizeToolResult(ctx, evidence.toolResult);
     } finally {
       await closePolicyGateAuditReservation(auditReservation);
       if (profilePath) {
@@ -1134,8 +1185,8 @@ async function runSeatbeltSandboxedBash(
   }
 
   const output = buildBashOutput(
-    stdoutCapture.getText(),
-    stderrCapture.getText(),
+    stdoutCapture.getText("stdout"),
+    stderrCapture.getText("stderr"),
     finalCause === "abort" ? abortMessage ?? DEFAULT_ABORT_MESSAGE : undefined
   );
 
@@ -1412,14 +1463,36 @@ function createStreamCapture(stream?: ReadableStream<Uint8Array> | number | null
     return {
       done: Promise.resolve(),
       cancel: async () => {},
-      getText: () => ""
+      getText: () => "",
+      isTruncated: () => false
     };
   }
 
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   const chunks: string[] = [];
+  let capturedChars = 0;
+  let truncated = false;
   let flushed = false;
+
+  const appendChunk = (chunk: string) => {
+    if (!chunk || truncated) {
+      return;
+    }
+    const remaining = STREAM_CAPTURE_MAX_CHARS - capturedChars;
+    if (remaining <= 0) {
+      truncated = true;
+      return;
+    }
+    if (chunk.length > remaining) {
+      chunks.push(chunk.slice(0, remaining));
+      capturedChars += remaining;
+      truncated = true;
+      return;
+    }
+    chunks.push(chunk);
+    capturedChars += chunk.length;
+  };
 
   const flushDecoder = () => {
     if (flushed) {
@@ -1427,7 +1500,7 @@ function createStreamCapture(stream?: ReadableStream<Uint8Array> | number | null
     }
     const tail = decoder.decode();
     if (tail) {
-      chunks.push(tail);
+      appendChunk(tail);
     }
     flushed = true;
   };
@@ -1440,7 +1513,7 @@ function createStreamCapture(stream?: ReadableStream<Uint8Array> | number | null
           break;
         }
         if (value) {
-          chunks.push(decoder.decode(value, { stream: true }));
+          appendChunk(decoder.decode(value, { stream: true }));
         }
       }
     } catch {
@@ -1461,10 +1534,14 @@ function createStreamCapture(stream?: ReadableStream<Uint8Array> | number | null
         flushDecoder();
       }
     },
-    getText: () => {
+    getText: (label = "stream") => {
       flushDecoder();
-      return chunks.join("");
-    }
+      const text = chunks.join("");
+      return truncated
+        ? `${text}\n[${label} truncated after ${STREAM_CAPTURE_MAX_CHARS} chars]`
+        : text;
+    },
+    isTruncated: () => truncated
   };
 }
 
@@ -3300,14 +3377,15 @@ function isCwdChangingCommand(commandName: string): boolean {
 function evaluateProcessContainmentPreflight(
   command: string
 ): { decision: "allow" } | { decision: "deny"; reason: string } {
-  if (hasSessionEscapeSignal(command)) {
+  const boundedCommand = command.slice(0, PROCESS_PREFLIGHT_ANALYSIS_MAX_LENGTH);
+  if (hasSessionEscapeSignal(boundedCommand)) {
     return {
       decision: "deny",
       reason: "command attempts to create an invocation descendant outside the tracked process group"
     };
   }
 
-  if (hasUnwaitedBackgroundExecution(command)) {
+  if (hasUnwaitedBackgroundExecution(boundedCommand)) {
     return {
       decision: "deny",
       reason: "command starts background work without a static wait before returning"
@@ -3478,17 +3556,15 @@ function rawDataGuardClassForRawData(): RawDataGuardClass {
   return "authority";
 }
 
-function isLikelySandboxDenialForCommand(
+async function isLikelySandboxDenialForCommand(
   command: string,
   result: ToolResult,
-  protectedRawPaths: readonly string[]
-): boolean {
+  protectedRawPaths: readonly string[],
+  options: { workDir: string }
+): Promise<boolean> {
   const analysis = analyzeRawDataCommand(command, protectedRawPaths);
   if (analysis.budgetExceeded) {
-    return (
-      !result.success &&
-      (isLikelySandboxDenial(result.output) || INTERPRETER_WRITE_DENIAL_PATTERN.test(result.output))
-    );
+    return false;
   }
 
   const output = result.output;
@@ -3498,7 +3574,11 @@ function isLikelySandboxDenialForCommand(
     return false;
   }
 
-  return !result.success && analysis.hasKnownRawWriteTarget;
+  if (analysis.hasKnownRawWriteTarget) {
+    return true;
+  }
+
+  return hasResolvableSymlinkRawDataWriteAlias(command, protectedRawPaths, options);
 }
 
 function hasKnownRawDataWriteTarget(
@@ -3511,6 +3591,216 @@ function hasKnownRawDataWriteTarget(
     hasParentRelativeRawDataWriteAlias(command, protectedRawPaths) ||
     hasDynamicRawDataWriteRisk(command)
   );
+}
+
+async function hasResolvableSymlinkRawDataWriteAlias(
+  command: string,
+  protectedRawPaths: readonly string[],
+  options: { workDir: string }
+): Promise<boolean> {
+  const targets = collectLiteralWriteTargetCandidates(command, options.workDir);
+  for (const target of targets.slice(0, SYMLINK_ALIAS_MAX_TARGETS)) {
+    for (const candidate of resolveLiteralTargetPaths(target)) {
+      if (!isPathInsideOrEqual(candidate, options.workDir)) {
+        continue;
+      }
+      const resolved = await resolvePathFollowingSymlinks(candidate);
+      if (
+        resolved?.followedSymlink &&
+        isAbsolutePathInsideProtectedRaw(resolved.path, protectedRawPaths)
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+interface LiteralWriteTargetCandidate {
+  token: string;
+  cwdCandidates: readonly string[];
+}
+
+function collectLiteralWriteTargetCandidates(
+  command: string,
+  initialCwd: string
+): LiteralWriteTargetCandidate[] {
+  const targets: LiteralWriteTargetCandidate[] = [];
+  let cwdCandidates: string[] = [normalize(resolve(initialCwd))];
+  let cwdAmbiguous = false;
+
+  for (const segment of splitStaticShellSegments(command)) {
+    if (targets.length >= SYMLINK_ALIAS_MAX_TARGETS) {
+      break;
+    }
+    const tokens = commandTokensFromSegment(segment);
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    const commandName = normalizeCommandName(tokens[0]);
+    if (isCwdChangingCommand(commandName)) {
+      if ((commandName === "cd" || commandName === "pushd") && tokens[1]) {
+        const nextCwdCandidates = resolveStaticCwdCandidates(cwdCandidates, tokens[1]);
+        if (nextCwdCandidates) {
+          cwdCandidates = nextCwdCandidates;
+          cwdAmbiguous = false;
+        } else {
+          cwdCandidates = [];
+          cwdAmbiguous = true;
+        }
+      } else {
+        cwdCandidates = [];
+        cwdAmbiguous = true;
+      }
+      continue;
+    }
+
+    for (let index = 0; index < tokens.length - 1; index += 1) {
+      if (isWriteRedirectionToken(tokens[index])) {
+        pushLiteralTarget(targets, tokens[index + 1], cwdCandidates, cwdAmbiguous);
+      }
+    }
+
+    if (
+      (commandName === "bash" || commandName === "sh") &&
+      targets.length < SYMLINK_ALIAS_MAX_TARGETS
+    ) {
+      for (let index = 1; index < tokens.length - 1; index += 1) {
+        if (tokens[index] === "-c") {
+          targets.push(
+            ...collectLiteralWriteTargetCandidates(tokens[index + 1], cwdCandidates[0] ?? initialCwd)
+          );
+        }
+      }
+    }
+
+    const operands = extractCommandOperands(tokens.slice(1));
+    if (operands.length === 0) {
+      continue;
+    }
+
+    if (commandName === "cp" || commandName === "install") {
+      pushLiteralTarget(targets, operands.at(-1), cwdCandidates, cwdAmbiguous);
+      continue;
+    }
+
+    if (commandName === "dd") {
+      for (const operand of operands) {
+        const outputMatch = operand.match(/^of=(.+)$/);
+        if (outputMatch) {
+          pushLiteralTarget(targets, outputMatch[1], cwdCandidates, cwdAmbiguous);
+        }
+      }
+      continue;
+    }
+
+    if (
+      commandName === "tee" ||
+      commandName === "touch" ||
+      commandName === "truncate" ||
+      commandName === "chmod" ||
+      commandName === "chown" ||
+      commandName === "chgrp" ||
+      commandName === "xattr"
+    ) {
+      for (const operand of operands) {
+        pushLiteralTarget(targets, operand, cwdCandidates, cwdAmbiguous);
+      }
+    }
+  }
+
+  return targets.slice(0, SYMLINK_ALIAS_MAX_TARGETS);
+}
+
+function pushLiteralTarget(
+  targets: LiteralWriteTargetCandidate[],
+  token: string | undefined,
+  cwdCandidates: readonly string[],
+  cwdAmbiguous: boolean
+): void {
+  if (
+    !token ||
+    cwdAmbiguous ||
+    targets.length >= SYMLINK_ALIAS_MAX_TARGETS ||
+    !isSimpleStaticPathToken(token)
+  ) {
+    return;
+  }
+  targets.push({
+    token,
+    cwdCandidates: [...cwdCandidates]
+  });
+}
+
+function resolveLiteralTargetPaths(target: LiteralWriteTargetCandidate): string[] {
+  if (isAbsolute(target.token)) {
+    return [normalize(resolve(target.token))];
+  }
+
+  return sortedUnique(target.cwdCandidates.map((cwd) => normalize(resolve(cwd, target.token))));
+}
+
+async function resolvePathFollowingSymlinks(
+  path: string
+): Promise<{ path: string; followedSymlink: boolean } | undefined> {
+  let absolutePath = normalize(resolve(path));
+  let current = resolveRoot(absolutePath);
+  let remaining = pathSegmentsFromAbsolute(absolutePath);
+  let followedSymlink = false;
+  let symlinkCount = 0;
+  let componentCount = 0;
+
+  while (remaining.length > 0) {
+    componentCount += 1;
+    if (componentCount > SYMLINK_ALIAS_MAX_PATH_COMPONENTS) {
+      return undefined;
+    }
+
+    const segment = remaining.shift()!;
+    const nextPath = join(current, segment);
+    let metadata: Awaited<ReturnType<typeof lstat>>;
+    try {
+      metadata = await lstat(nextPath);
+    } catch (error) {
+      if (isErrno(error, "ENOENT") && followedSymlink) {
+        return {
+          path: normalize(resolve(nextPath, ...remaining)),
+          followedSymlink
+        };
+      }
+      return undefined;
+    }
+
+    if (!metadata.isSymbolicLink()) {
+      current = nextPath;
+      continue;
+    }
+
+    symlinkCount += 1;
+    if (symlinkCount > SYMLINK_ALIAS_MAX_SYMLINKS) {
+      return undefined;
+    }
+
+    followedSymlink = true;
+    const linkTarget = await readlink(nextPath);
+    absolutePath = normalize(
+      resolve(dirname(nextPath), linkTarget, ...remaining)
+    );
+    current = resolveRoot(absolutePath);
+    remaining = pathSegmentsFromAbsolute(absolutePath);
+  }
+
+  return {
+    path: current,
+    followedSymlink
+  };
+}
+
+function pathSegmentsFromAbsolute(path: string): string[] {
+  const root = resolveRoot(path);
+  return path.slice(root.length).split("/").filter(Boolean);
 }
 
 function hasParentRelativeRawDataWriteAlias(
