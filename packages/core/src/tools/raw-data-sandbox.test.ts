@@ -206,6 +206,37 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("profile builder denies raw ancestor literals under broad allowed roots", async () => {
+    const fixture = await createFixture();
+    try {
+      const broadProfile = await buildRawDataSeatbeltProfile({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot
+      });
+      const scopedProfile = await buildRawDataSeatbeltProfile({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.workspaceRoot],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot
+      });
+      const dataAncestor = await realpath(join(fixture.root, "data"));
+
+      expect(broadProfile.metadata.protectedRawAncestorLiteralPaths).toEqual([dataAncestor]);
+      expect(broadProfile.profileText).toContain(
+        `(deny file-write* (literal "${dataAncestor}"))`
+      );
+      expect(scopedProfile.metadata.protectedRawAncestorLiteralPaths).toEqual([]);
+      expect(scopedProfile.profileText).not.toContain(
+        `(deny file-write* (literal "${dataAncestor}"))`
+      );
+      expect(broadProfile.profileId).not.toBe(scopedProfile.profileId);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("relative protected raw paths resolve against stable pathResolutionRoot", async () => {
     const fixture = await createFixture();
     try {
@@ -3366,6 +3397,28 @@ describe("raw data seatbelt sandbox", () => {
         event: "tool.completed",
         decision: "allowed"
       });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("raw ancestor move under broad allowed root is denied and preserves bytes", async () => {
+    const fixture = await createFixture();
+    try {
+      const rawInput = join(fixture.rawRoot, "input.csv");
+      const before = await readFile(rawInput, "utf8");
+
+      const result = await runSandboxed(
+        fixture,
+        "mv data data.moved; printf MUTATED > data.moved/raw/input.csv",
+        { enableAdvisory: false }
+      );
+
+      expect(result.success).toBe(false);
+      expect(existsSync(join(fixture.root, "data"))).toBe(true);
+      await expectMissing(join(fixture.root, "data.moved"));
+      expect(await readFile(rawInput, "utf8")).toBe(before);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }

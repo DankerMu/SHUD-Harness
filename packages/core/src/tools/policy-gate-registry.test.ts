@@ -195,6 +195,39 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  seatbeltTest("SHUD runtime registry denies raw ancestor rename under broad allowed root", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const registry = createShudRuntimeToolRegistry({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        enableAdvisory: false,
+        fuseRules: []
+      });
+      const rawInput = join(fixture.rawRoot, "input.csv");
+      const before = await readFile(rawInput, "utf8");
+
+      const result = await registry.get("bash")?.run(fixture.context, {
+        command: "mv data data.moved; printf MUTATED > data.moved/raw/input.csv",
+        timeout: 30_000
+      });
+
+      expect(result?.success).toBe(false);
+      expect(existsSync(join(fixture.root, "data"))).toBe(true);
+      await expect(readFile(join(fixture.root, "data.moved", "raw", "input.csv"), "utf8")).rejects.toThrow();
+      expect(await readFile(rawInput, "utf8")).toBe(before);
+      const rows = await readRawAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        decision: "failed"
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("SHUD runtime registry propagates pathResolutionRoot to sandboxed bash", async () => {
     const fixture = await createRawFixture();
     try {

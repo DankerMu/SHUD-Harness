@@ -54,10 +54,11 @@ const RESERVED_RAW_DATA_DENIAL_ERROR_ID_PREFIXES = [
   `${RAW_DATA_WRITE_RULE_ID}:denied_by_advisory`,
   `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox`
 ] as const;
-const RAW_DATA_TOOL_FAILED_EVENT_INPUT_PROOF = Symbol(
-  "raw-data-tool-failed-event-input-proof"
-);
 const RAW_DATA_TOOL_FAILED_EVENT_INPUT_PROOF_SECRET = randomBytes(32).toString("hex");
+const trustedRawDataToolFailedEventInputProofs = new WeakMap<
+  RawDataToolFailedEventInput,
+  string
+>();
 const trustedRawDataToolFailedEventInputsByResult = new WeakMap<
   ToolResult,
   RawDataToolFailedEventInput
@@ -74,7 +75,9 @@ export interface RawDataSeatbeltProfileMetadata {
   profileVersion: typeof RAW_DATA_SANDBOX_PROFILE_VERSION;
   profileId: string;
   protectedRawPaths: readonly string[];
+  protectedRawAncestorLiteralPaths: readonly string[];
   protectedEvidencePaths: readonly string[];
+  protectedEvidenceAncestorLiteralPaths: readonly string[];
   allowedWriteRoots: readonly string[];
   tempRoot: string;
   profileRoot?: string;
@@ -203,6 +206,10 @@ export async function buildRawDataSeatbeltProfile(
     ? await canonicalizePathSet(options.protectedEvidencePaths)
     : [];
   const allowedWriteRoots = await canonicalizePathSet(options.allowedWriteRoots);
+  const protectedRawAncestorLiteralPaths = protectedRawAncestorLiterals(
+    protectedRawPaths,
+    allowedWriteRoots
+  );
   const protectedEvidenceAncestorLiteralPaths =
     protectedEvidenceAncestorLiterals(protectedEvidencePaths, allowedWriteRoots);
   const protectedWriteDenyPaths = sortedUnique([
@@ -225,6 +232,7 @@ export async function buildRawDataSeatbeltProfile(
   const idInput = JSON.stringify({
     profileVersion: RAW_DATA_SANDBOX_PROFILE_VERSION,
     protectedRawPaths,
+    protectedRawAncestorLiteralPaths,
     protectedEvidencePaths,
     protectedEvidenceAncestorLiteralPaths,
     allowedWriteRoots,
@@ -252,6 +260,9 @@ export async function buildRawDataSeatbeltProfile(
       `(deny file-write* (literal ${quoteSeatbeltString(protectedPath)}))`,
       `(deny file-write* (subpath ${quoteSeatbeltString(protectedPath)}))`
     ]),
+    ...protectedRawAncestorLiteralPaths.map(
+      (protectedPath) => `(deny file-write* (literal ${quoteSeatbeltString(protectedPath)}))`
+    ),
     ...protectedEvidenceAncestorLiteralPaths.map(
       (protectedPath) => `(deny file-write* (literal ${quoteSeatbeltString(protectedPath)}))`
     )
@@ -264,7 +275,9 @@ export async function buildRawDataSeatbeltProfile(
       profileVersion: RAW_DATA_SANDBOX_PROFILE_VERSION,
       profileId,
       protectedRawPaths,
+      protectedRawAncestorLiteralPaths,
       protectedEvidencePaths,
+      protectedEvidenceAncestorLiteralPaths,
       allowedWriteRoots,
       tempRoot,
       ...(profileRoot ? { profileRoot } : {})
@@ -411,13 +424,27 @@ function resolveRuntimeRoot(
   return resolve(pathResolutionRoot, path);
 }
 
+function protectedRawAncestorLiterals(
+  protectedRawPaths: readonly string[],
+  allowedWriteRoots: readonly string[]
+): string[] {
+  return protectedPathAncestorLiterals(protectedRawPaths, allowedWriteRoots);
+}
+
 function protectedEvidenceAncestorLiterals(
   protectedEvidencePaths: readonly string[],
   allowedWriteRoots: readonly string[]
 ): string[] {
+  return protectedPathAncestorLiterals(protectedEvidencePaths, allowedWriteRoots);
+}
+
+function protectedPathAncestorLiterals(
+  protectedPaths: readonly string[],
+  allowedWriteRoots: readonly string[]
+): string[] {
   const ancestors: string[] = [];
-  for (const protectedEvidencePath of protectedEvidencePaths) {
-    let current = dirname(protectedEvidencePath);
+  for (const protectedPath of protectedPaths) {
+    let current = dirname(protectedPath);
     while (current !== dirname(current)) {
       const isAllowedWriteRoot = allowedWriteRoots.some(
         (root) => normalize(resolve(current)) === normalize(resolve(root))
@@ -1007,9 +1034,7 @@ export function assertTrustedRawDataToolFailedEventInput(
     throw new Error("Only trusted raw-data advisory denial events are supported.");
   }
 
-  const proof = (input as TrustedRawDataToolFailedEventInput)[
-    RAW_DATA_TOOL_FAILED_EVENT_INPUT_PROOF
-  ];
+  const proof = trustedRawDataToolFailedEventInputProofs.get(input);
   if (proof !== rawDataToolFailedEventInputProof(input)) {
     throw new Error(
       "Raw-data advisory tool.failed events require RawDataSandboxedBashTool trusted evidence."
@@ -1023,17 +1048,11 @@ export function isReservedRawDataDenialErrorId(errorId: string | undefined): boo
   );
 }
 
-type TrustedRawDataToolFailedEventInput = RawDataToolFailedEventInput & {
-  [RAW_DATA_TOOL_FAILED_EVENT_INPUT_PROOF]?: string;
-};
-
 function proveRawDataToolFailedEventInput(input: RawDataToolFailedEventInput): void {
-  Object.defineProperty(input, RAW_DATA_TOOL_FAILED_EVENT_INPUT_PROOF, {
-    value: rawDataToolFailedEventInputProof(input),
-    enumerable: true,
-    configurable: false,
-    writable: false
-  });
+  trustedRawDataToolFailedEventInputProofs.set(
+    input,
+    rawDataToolFailedEventInputProof(input)
+  );
 }
 
 function rawDataToolFailedEventInputProof(input: RawDataToolFailedEventInput): string {

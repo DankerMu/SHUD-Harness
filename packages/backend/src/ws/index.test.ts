@@ -13,16 +13,20 @@ import {
   type RawDataToolFailedEventInput,
   type RawDataDenialPayload
 } from "@shud-harness/core";
-import { buildRawDataAdvisoryToolFailedWsEvent, buildToolFailedWsEvent } from "./index";
+import {
+  buildRawDataAdvisoryToolFailedWsEvent,
+  buildToolFailedWsEvent,
+  type RawDataAdvisoryToolFailedWsEventInput
+} from "./index";
 
 describe("backend ws tool.failed skeleton", () => {
   test("builds tool.failed from sandbox-owned raw-data advisory denial evidence", async () => {
-    const trustedInput = await sampleTrustedRawDataAdvisoryToolFailedEventInput();
+    const trusted = await sampleTrustedRawDataAdvisoryToolFailedEvent();
     const event = buildRawDataAdvisoryToolFailedWsEvent({
       seq: 7,
       eventId: "evt-7",
       timestamp: "2026-07-04T00:00:00.000Z",
-      ...trustedInput
+      toolResult: trusted.toolResult
     });
 
     expect(event).toEqual({
@@ -31,17 +35,17 @@ describe("backend ws tool.failed skeleton", () => {
       type: "tool.failed",
       timestamp: "2026-07-04T00:00:00.000Z",
       payload: {
-        tool_id: trustedInput.toolId,
-        rule: trustedInput.rule,
-        decision: trustedInput.decision,
-        guard_class: trustedInput.guardClass,
-        profile_id: trustedInput.profileId,
-        invocation_id: trustedInput.invocationId,
-        error: trustedInput.error
+        tool_id: trusted.input.toolId,
+        rule: trusted.input.rule,
+        decision: trusted.input.decision,
+        guard_class: trusted.input.guardClass,
+        profile_id: trusted.input.profileId,
+        invocation_id: trusted.input.invocationId,
+        error: trusted.input.error
       }
     });
     expect(event.type).toBe("tool.failed");
-    expect(event.payload.error.error_id).toBe(trustedInput.error.error_id);
+    expect(event.payload.error.error_id).toBe(trusted.input.error.error_id);
     expect(event.payload.error.error_id).toContain(`${RAW_DATA_WRITE_RULE_ID}:denied_by_advisory`);
     expect(event.payload.error.remediation?.next_action).toBe("adjust_scope");
     expect(event.payload.error.remediation?.hint).toContain("data/raw");
@@ -56,7 +60,51 @@ describe("backend ws tool.failed skeleton", () => {
         seq: 8,
         timestamp: "2026-07-04T00:00:00.000Z",
         ...rawDataDenialPayloadToToolFailedEventInput(advisory)
-      })
+      } as never)
+    ).toThrow("Raw-data advisory tool.failed events require RawDataSandboxedBashTool trusted evidence");
+  });
+
+  test("raw-data advisory builder rejects cloned trusted inputs and result-shaped clones", async () => {
+    const trusted = await sampleTrustedRawDataAdvisoryToolFailedEvent();
+    const spreadInput = { ...trusted.input };
+    const assignedInput = Object.assign({}, trusted.input);
+    const spreadResult = { ...trusted.toolResult };
+    const assignedResult = Object.assign({}, trusted.toolResult);
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 12,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        ...spreadInput
+      } as never)
+    ).toThrow("Raw-data advisory tool.failed events require RawDataSandboxedBashTool trusted evidence");
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent(
+        Object.assign(
+          {
+            seq: 13,
+            timestamp: "2026-07-04T00:00:00.000Z"
+          },
+          assignedInput
+        ) as never
+      )
+    ).toThrow("Raw-data advisory tool.failed events require RawDataSandboxedBashTool trusted evidence");
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 14,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: spreadResult
+      } as never)
+    ).toThrow("Raw-data advisory tool.failed events require RawDataSandboxedBashTool trusted evidence");
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 15,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: assignedResult
+      } as never)
     ).toThrow("Raw-data advisory tool.failed events require RawDataSandboxedBashTool trusted evidence");
   });
 
@@ -142,9 +190,10 @@ describe("backend ws tool.failed skeleton", () => {
   });
 });
 
-async function sampleTrustedRawDataAdvisoryToolFailedEventInput(): Promise<
-  RawDataToolFailedEventInput
-> {
+async function sampleTrustedRawDataAdvisoryToolFailedEvent(): Promise<{
+  toolResult: RawDataAdvisoryToolFailedWsEventInput["toolResult"];
+  input: RawDataToolFailedEventInput;
+}> {
   const root = await mkdtemp(join(tmpdir(), "shud-ws-raw-denial-"));
   try {
     const rawRoot = join(root, "data", "raw");
@@ -180,7 +229,7 @@ async function sampleTrustedRawDataAdvisoryToolFailedEventInput(): Promise<
     if (!input) {
       throw new Error("Expected trusted raw-data advisory tool.failed input.");
     }
-    return input;
+    return { toolResult: result, input };
   } finally {
     await rm(root, { recursive: true, force: true });
   }

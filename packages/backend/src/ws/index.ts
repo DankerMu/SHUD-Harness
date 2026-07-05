@@ -1,6 +1,6 @@
 import {
-  assertTrustedRawDataToolFailedEventInput,
   isReservedRawDataDenialErrorId,
+  rawDataDeniedToolResultToToolFailedEventInput,
   RAW_DATA_WRITE_RULE_ID,
   type ErrorRecord,
   type RawDataToolFailedEventInput
@@ -23,8 +23,12 @@ export interface ToolFailedWsEventInput {
   timestamp?: string;
 }
 
-export type RawDataAdvisoryToolFailedWsEventInput = RawDataToolFailedEventInput &
-  Pick<ToolFailedWsEventInput, "seq" | "eventId" | "timestamp">;
+export type RawDataAdvisoryToolFailedWsEventInput = Pick<
+  ToolFailedWsEventInput,
+  "seq" | "eventId" | "timestamp"
+> & {
+  toolResult: Parameters<typeof rawDataDeniedToolResultToToolFailedEventInput>[0];
+};
 
 export interface ToolFailedWsEvent {
   seq: number;
@@ -50,8 +54,13 @@ export function buildToolFailedWsEvent(input: ToolFailedWsEventInput): ToolFaile
 export function buildRawDataAdvisoryToolFailedWsEvent(
   input: RawDataAdvisoryToolFailedWsEventInput
 ): ToolFailedWsEvent {
-  assertRawDataAdvisoryToolFailedWsEventInput(input);
-  return buildToolFailedWsEventUnchecked(input);
+  const trustedInput = readRawDataAdvisoryToolFailedWsEventInput(input);
+  return buildToolFailedWsEventUnchecked({
+    seq: input.seq,
+    eventId: input.eventId,
+    timestamp: input.timestamp,
+    ...trustedInput
+  });
 }
 
 function buildToolFailedWsEventUnchecked(input: ToolFailedWsEventInput): ToolFailedWsEvent {
@@ -86,13 +95,22 @@ function assertPublicToolFailedWsEventInput(input: ToolFailedWsEventInput): void
   }
 }
 
-function assertRawDataAdvisoryToolFailedWsEventInput(
+function readRawDataAdvisoryToolFailedWsEventInput(
   input: RawDataAdvisoryToolFailedWsEventInput
-): void {
-  if (input.rule !== RAW_DATA_WRITE_RULE_ID || input.decision !== "denied_by_advisory") {
+): RawDataToolFailedEventInput {
+  const trustedInput = rawDataDeniedToolResultToToolFailedEventInput(input.toolResult);
+  if (!trustedInput) {
+    throw new Error(
+      "Raw-data advisory tool.failed events require RawDataSandboxedBashTool trusted evidence."
+    );
+  }
+  if (
+    trustedInput.rule !== RAW_DATA_WRITE_RULE_ID ||
+    trustedInput.decision !== "denied_by_advisory"
+  ) {
     throw new Error("Only trusted raw-data advisory denial events are supported.");
   }
-  assertTrustedRawDataToolFailedEventInput(input);
+  return trustedInput;
 }
 
 function isRawDataDenialDecision(decision: string | undefined): boolean {
