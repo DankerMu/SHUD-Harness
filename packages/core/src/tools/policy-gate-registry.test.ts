@@ -12,6 +12,7 @@ import {
   createPolicyGateEvaluator,
   createPolicyGatedToolRegistry,
   createShudRuntimeToolRegistry,
+  createShudSandboxedBashTool,
   isPolicyGatedTool,
   wrapToolWithPolicyGate
 } from "./policy-gate-registry";
@@ -121,6 +122,67 @@ describe("policy-gated zero tool registry", () => {
 
     expect(isPolicyGatedTool(forgedTool)).toBe(false);
     expect(() => assertAllToolsPolicyGated([forgedTool])).toThrow("edit");
+  });
+
+  test("SHUD sandboxed bash loads fuse rules from fuseListPath", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const fuseListPath = join(fixture.root, "fuse-list.yaml");
+      await writeFile(
+        fuseListPath,
+        [
+          "rules:",
+          "  - pattern: blocked-from-fuse-list",
+          "    description: file sentinel"
+        ].join("\n"),
+        "utf8"
+      );
+      const tool = createShudSandboxedBashTool({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseListPath
+      });
+
+      const result = await tool.run(fixture.context, {
+        command: "printf blocked-from-fuse-list"
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Command blocked by fuse list");
+      expect(result.output).toContain("file sentinel");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD sandboxed bash rejects ambiguous or missing fuse sources at runtime", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const fuseListPath = join(fixture.root, "fuse-list.yaml");
+      await writeFile(fuseListPath, "rules: []\n", "utf8");
+      const baseOptions = {
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot
+      };
+
+      expect(() =>
+        createShudSandboxedBashTool({
+          ...baseOptions,
+          fuseRules: [],
+          fuseListPath
+        } as never)
+      ).toThrow("exactly one of fuseRules or fuseListPath");
+
+      expect(() => createShudSandboxedBashTool(baseOptions as never)).toThrow(
+        "exactly one of fuseRules or fuseListPath"
+      );
+    } finally {
+      await fixture.cleanup();
+    }
   });
 
   seatbeltTest("SHUD runtime registry obtains wrapped bash with raw sandbox and fused BashTool", async () => {

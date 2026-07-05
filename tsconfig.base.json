@@ -20,9 +20,6 @@
     "paths": {
       "@shud-harness/core": [
         "packages/core/src/index.ts"
-      ],
-      "@shud-harness/core/*": [
-        "packages/core/src/*"
       ]
     }
   }

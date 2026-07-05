@@ -311,11 +311,26 @@ function buildPolicyGateDeniedResult(
 }
 
 function resolveShudBashFuseRules(options: ShudBashFuseSource): readonly FuseRule[] {
-  if ("fuseRules" in options && options.fuseRules) {
-    return options.fuseRules;
+  const rawOptions = options as Record<string, unknown>;
+  const hasFuseRules = Object.prototype.hasOwnProperty.call(rawOptions, "fuseRules");
+  const hasFuseListPath = Object.prototype.hasOwnProperty.call(rawOptions, "fuseListPath");
+
+  if (hasFuseRules === hasFuseListPath) {
+    throw new Error("SHUD sandboxed bash requires exactly one of fuseRules or fuseListPath.");
   }
 
-  return loadFuseList(options.fuseListPath);
+  if (hasFuseRules) {
+    if (!Array.isArray(rawOptions.fuseRules)) {
+      throw new Error("SHUD sandboxed bash fuseRules must be an array.");
+    }
+    return rawOptions.fuseRules as readonly FuseRule[];
+  }
+
+  if (typeof rawOptions.fuseListPath !== "string" || rawOptions.fuseListPath.trim() === "") {
+    throw new Error("SHUD sandboxed bash fuseListPath must be a non-empty string.");
+  }
+
+  return loadFuseList(rawOptions.fuseListPath);
 }
 
 function resolveRole(toolContext: ToolContext): HarnessRole | "unknown" {

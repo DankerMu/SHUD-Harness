@@ -38,6 +38,9 @@ export const DEFAULT_POLICY_GATE_AUDIT_TASK_ID = "TASK-M1-SPIKE";
 const DEFAULT_AUDIT_FILE_NAME = "policy-gate.ndjson";
 const DEFAULT_SANDBOX_EXECUTABLE = "/usr/bin/sandbox-exec";
 const DEFAULT_SANDBOX_BASH = "/bin/bash";
+const DEFAULT_SANDBOXED_BASH_TIMEOUT_MS = 120_000;
+const MIN_SANDBOXED_BASH_TIMEOUT_MS = 1;
+const MAX_SANDBOXED_BASH_TIMEOUT_MS = 86_400_000;
 const PIPE_GRACE_MS = 1000;
 const FORCE_KILL_SETTLE_MS = 75;
 const DESCENDANT_SAMPLE_INTERVAL_MS = 100;
@@ -324,24 +327,32 @@ async function createRawDataSeatbeltProfileFile(
     protectedWriteDenyPaths,
     "seatbelt profile root"
   );
-  const runRoot = await mkdtemp(join(canonicalRoot, `${profile.profileId}-`));
-  const profilePath = join(runRoot, rawDataSandboxProfileFileName(profile));
-  await writeFile(profilePath, `${profile.profileText}\n`, { mode: 0o600, flag: "wx" });
-  const metadata = await lstat(profilePath);
-  if (!metadata.isFile()) {
-    throw new Error(`Seatbelt profile path is not a regular file: ${profilePath}`);
+  let runRoot: string | undefined;
+  try {
+    runRoot = await mkdtemp(join(canonicalRoot, `${profile.profileId}-`));
+    const profilePath = join(runRoot, rawDataSandboxProfileFileName(profile));
+    await writeFile(profilePath, `${profile.profileText}\n`, { mode: 0o600, flag: "wx" });
+    const metadata = await lstat(profilePath);
+    if (!metadata.isFile()) {
+      throw new Error(`Seatbelt profile path is not a regular file: ${profilePath}`);
+    }
+    const runRootMetadata = await lstat(runRoot);
+    if (runRootMetadata.isSymbolicLink() || !runRootMetadata.isDirectory()) {
+      throw new Error(`Seatbelt profile run directory is unsafe: ${runRoot}`);
+    }
+    return {
+      profilePath: await canonicalizeExistingPath(profilePath),
+      runRoot,
+      runRootRealPath: await canonicalizeExistingPath(runRoot),
+      runRootDev: runRootMetadata.dev,
+      runRootIno: runRootMetadata.ino
+    };
+  } catch (error) {
+    if (runRoot) {
+      await rm(runRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
+    throw error;
   }
-  const runRootMetadata = await lstat(runRoot);
-  if (runRootMetadata.isSymbolicLink() || !runRootMetadata.isDirectory()) {
-    throw new Error(`Seatbelt profile run directory is unsafe: ${runRoot}`);
-  }
-  return {
-    profilePath: await canonicalizeExistingPath(profilePath),
-    runRoot,
-    runRootRealPath: await canonicalizeExistingPath(runRoot),
-    runRootDev: runRootMetadata.dev,
-    runRootIno: runRootMetadata.ino
-  };
 }
 
 interface ResolvedRawDataSandboxRuntimeRoots {
@@ -491,7 +502,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
     this.fuseChecker = new FuseListChecker([...options.fuseRules]);
     this.name = options.toolId ?? metadataTool.name;
     this.description = metadataTool.description;
-    this.parameters = metadataTool.parameters;
+    this.parameters = rawDataSandboxedBashParameters(metadataTool.parameters);
     this.kind = metadataTool.kind;
     this.requiredModelCapabilities = metadataTool.requiredModelCapabilities;
   }
@@ -511,6 +522,17 @@ export class RawDataSandboxedBashTool extends BaseTool {
         output: "Sandboxed bash requires a string command.",
         outputSummary: "Sandboxed bash missing command"
       });
+    }
+
+    const timeoutValidation = readSandboxedBashTimeout(input);
+    if (!timeoutValidation.success) {
+      return this.finalizeToolResult(
+        ctx,
+        buildInvalidTimeoutFailureResult({
+          toolId: this.name,
+          reason: timeoutValidation.reason
+        })
+      );
     }
 
     let runtimeRoots: ResolvedRawDataSandboxRuntimeRoots;
@@ -539,19 +561,30 @@ export class RawDataSandboxedBashTool extends BaseTool {
 
     let profileFile: RawDataSeatbeltProfileFile | undefined;
     let profilePath: string | undefined;
+    let profile: RawDataSeatbeltProfile;
     try {
-      const profile = await buildRawDataSeatbeltProfile({
-        protectedRawPaths,
-        allowedWriteRoots: profileOptions.allowedWriteRoots,
-        tempRoot: profileOptions.tempRoot,
-        profileRoot: profileOptions.profileRoot,
-        protectedEvidencePaths: [
-          ...(profileOptions.protectedEvidencePaths ?? []),
-          auditReservation.protectedEvidencePath
-        ]
-      });
-      profileFile = await createRawDataSeatbeltProfileFile(profile, profileOptions.profileRoot);
-      profilePath = profileFile.profilePath;
+      try {
+        profile = await buildRawDataSeatbeltProfile({
+          protectedRawPaths,
+          allowedWriteRoots: profileOptions.allowedWriteRoots,
+          tempRoot: profileOptions.tempRoot,
+          profileRoot: profileOptions.profileRoot,
+          protectedEvidencePaths: [
+            ...(profileOptions.protectedEvidencePaths ?? []),
+            auditReservation.protectedEvidencePath
+          ]
+        });
+        profileFile = await createRawDataSeatbeltProfileFile(profile, profileOptions.profileRoot);
+        profilePath = profileFile.profilePath;
+      } catch (error) {
+        return this.finalizeToolResult(
+          ctx,
+          buildProfileSetupFailureResult({
+            toolId: this.name,
+            reason: errorMessage(error)
+          })
+        );
+      }
       const protectedRawPathSignals = rawDataSignalPaths(
         profileOptions.protectedRawPaths,
         profile.metadata.protectedRawPaths
@@ -598,6 +631,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
         ...(typeof input === "object" && input !== null ? input : {}),
         toolId: this.name,
         command,
+        timeout: timeoutValidation.timeout,
         profilePath,
         sandboxExecutable: DEFAULT_SANDBOX_EXECUTABLE,
         bashExecutable: DEFAULT_SANDBOX_BASH
@@ -737,6 +771,80 @@ export class RawDataSandboxedBashTool extends BaseTool {
     markRunningToolFinished(ctx, result, cause);
     return result;
   }
+}
+
+function rawDataSandboxedBashParameters(
+  parameters: Record<string, unknown>
+): Record<string, unknown> {
+  const properties = isRecord(parameters.properties) ? parameters.properties : {};
+  const timeoutProperty = isRecord(properties.timeout) ? properties.timeout : {};
+
+  return {
+    ...parameters,
+    properties: {
+      ...properties,
+      timeout: {
+        ...timeoutProperty,
+        type: "number",
+        minimum: MIN_SANDBOXED_BASH_TIMEOUT_MS,
+        maximum: MAX_SANDBOXED_BASH_TIMEOUT_MS,
+        description: `Timeout in milliseconds (default ${DEFAULT_SANDBOXED_BASH_TIMEOUT_MS}, min ${MIN_SANDBOXED_BASH_TIMEOUT_MS}, max ${MAX_SANDBOXED_BASH_TIMEOUT_MS})`
+      }
+    }
+  };
+}
+
+function readSandboxedBashTimeout(
+  input: unknown
+): { success: true; timeout: number } | { success: false; reason: string } {
+  const timeout =
+    typeof input === "object" && input !== null && "timeout" in input
+      ? (input as { timeout?: unknown }).timeout
+      : undefined;
+
+  return validateSandboxedBashTimeout(timeout);
+}
+
+function validateSandboxedBashTimeout(
+  timeout: unknown
+): { success: true; timeout: number } | { success: false; reason: string } {
+  if (timeout === undefined) {
+    return { success: true, timeout: DEFAULT_SANDBOXED_BASH_TIMEOUT_MS };
+  }
+
+  if (typeof timeout !== "number" || !Number.isFinite(timeout)) {
+    return {
+      success: false,
+      reason: "timeout must be a finite number of milliseconds."
+    };
+  }
+
+  if (!Number.isInteger(timeout)) {
+    return {
+      success: false,
+      reason: "timeout must be a whole number of milliseconds."
+    };
+  }
+
+  if (timeout < MIN_SANDBOXED_BASH_TIMEOUT_MS) {
+    return {
+      success: false,
+      reason: `timeout must be at least ${MIN_SANDBOXED_BASH_TIMEOUT_MS}ms.`
+    };
+  }
+
+  if (timeout > MAX_SANDBOXED_BASH_TIMEOUT_MS) {
+    return {
+      success: false,
+      reason: `timeout must be at most ${MAX_SANDBOXED_BASH_TIMEOUT_MS}ms.`
+    };
+  }
+
+  return { success: true, timeout };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 interface PolicyGateAuditReservation {
@@ -1343,6 +1451,52 @@ function buildPathResolutionFailureResult(input: {
   };
 }
 
+function buildInvalidTimeoutFailureResult(input: {
+  toolId: string;
+  reason: string;
+}): ToolResult {
+  const payload = {
+    error: "raw_data_sandbox_invalid_timeout",
+    tool_id: input.toolId,
+    rule: RAW_DATA_WRITE_RULE_ID,
+    reason: input.reason,
+    remediation: {
+      next_action: "fix_and_retry",
+      hint: `Set timeout to a whole number of milliseconds between ${MIN_SANDBOXED_BASH_TIMEOUT_MS} and ${MAX_SANDBOXED_BASH_TIMEOUT_MS}.`,
+      ref: RAW_DATA_POLICY_REF
+    }
+  };
+
+  return {
+    success: false,
+    output: JSON.stringify(payload),
+    outputSummary: "Raw data sandbox timeout invalid"
+  };
+}
+
+function buildProfileSetupFailureResult(input: {
+  toolId: string;
+  reason: string;
+}): ToolResult {
+  const payload = {
+    error: "raw_data_sandbox_profile_unavailable",
+    tool_id: input.toolId,
+    rule: RAW_DATA_WRITE_RULE_ID,
+    reason: input.reason,
+    remediation: {
+      next_action: "fix_and_retry",
+      hint: "Repair the raw sandbox temp/profile roots before running bash.",
+      ref: RAW_DATA_POLICY_REF
+    }
+  };
+
+  return {
+    success: false,
+    output: JSON.stringify(payload),
+    outputSummary: "Raw data sandbox profile unavailable"
+  };
+}
+
 function buildProcessContainmentFailureResult(input: {
   toolId: string;
   reason: string;
@@ -1422,7 +1576,18 @@ async function runSeatbeltSandboxedBash(
   ctx: ToolContext,
   input: SandboxedBashInput
 ): Promise<SandboxedBashExecution> {
-  const { command, timeout = 120_000 } = input;
+  const { command } = input;
+  const timeoutValidation = validateSandboxedBashTimeout(input.timeout);
+  if (!timeoutValidation.success) {
+    return {
+      result: buildInvalidTimeoutFailureResult({
+        toolId: input.toolId,
+        reason: timeoutValidation.reason
+      }),
+      cause: "completed"
+    };
+  }
+  const timeout = timeoutValidation.timeout;
   const resolvedExecutables = await verifySeatbeltExecutables(input);
   if (!resolvedExecutables.success) {
     return { result: resolvedExecutables.result, cause: "spawn_error" };
@@ -1493,6 +1658,10 @@ async function runSeatbeltSandboxedBash(
   const stdoutCapture = createStreamCapture(proc.stdout);
   const stderrCapture = createStreamCapture(proc.stderr);
   let stdinWriteError: string | undefined;
+  let rootProcessExited = false;
+  const exited = proc.exited.finally(() => {
+    rootProcessExited = true;
+  });
   const stdinWrite =
     resolvedSecrets.stdin === undefined
       ? undefined
@@ -1502,6 +1671,7 @@ async function runSeatbeltSandboxedBash(
         });
   let terminationCause: RunningToolTerminationCause | undefined;
   let abortMessage: string | undefined;
+  let terminationTeardown: Promise<{ success: true } | { success: false; reason: string }> | undefined;
 
   const latchTerminationCause = (cause: RunningToolTerminationCause) => {
     if (terminationCause) {
@@ -1511,26 +1681,26 @@ async function runSeatbeltSandboxedBash(
     return true;
   };
 
-  runningHandle?.setAbortHandler((reason) => {
-    abortMessage = reason?.trim() || DEFAULT_ABORT_MESSAGE;
-    if (!latchTerminationCause("abort")) {
+  const requestTermination = (cause: RunningToolTerminationCause): void => {
+    if (!latchTerminationCause(cause)) {
       return;
     }
-    void terminateInvocationProcesses(proc, descendantTracker, {
-      signalRootProcessGroup: true
+    terminationTeardown = terminateInvocationProcesses(proc, descendantTracker, {
+      signalRootProcessGroup: true,
+      seedRootProcess: !rootProcessExited
     });
+  };
+
+  runningHandle?.setAbortHandler((reason) => {
+    abortMessage = reason?.trim() || DEFAULT_ABORT_MESSAGE;
+    requestTermination("abort");
   });
 
   const timeoutId = setTimeout(() => {
-    if (!latchTerminationCause("timeout")) {
-      return;
-    }
-    void terminateInvocationProcesses(proc, descendantTracker, {
-      signalRootProcessGroup: true
-    });
+    requestTermination("timeout");
   }, timeout);
 
-  const exitCode = await proc.exited;
+  const exitCode = await exited;
   if (stdinWrite) {
     await stdinWrite;
   }
@@ -1540,9 +1710,7 @@ async function runSeatbeltSandboxedBash(
   const containment =
     finalCause === "completed"
       ? completeInvocationProcesses(descendantTracker)
-      : await terminateInvocationProcesses(proc, descendantTracker, {
-          signalRootProcessGroup: true
-        });
+      : await finalizeTerminatedInvocationProcesses(proc, descendantTracker, terminationTeardown);
   descendantTracker.stop();
   if (!containment.success) {
     await Promise.allSettled([stdoutCapture.cancel(), stderrCapture.cancel()]);
@@ -1927,19 +2095,8 @@ function createStreamCapture(stream?: ReadableStream<Uint8Array> | number | null
 
 function tryKillProcess(
   proc: SignalableInvocationProcess,
-  signal?: NodeJS.Signals,
-  signalProcess: (pid: number, signal?: NodeJS.Signals) => void = process.kill
+  signal?: NodeJS.Signals
 ): void {
-  const pid = typeof proc.pid === "number" ? proc.pid : undefined;
-  if (pid && process.platform !== "win32") {
-    try {
-      signalProcess(-pid, signal ?? "SIGTERM");
-      return;
-    } catch {
-      // Fall back to the direct subprocess handle below.
-    }
-  }
-
   try {
     signal ? proc.kill(signal) : proc.kill();
   } catch {
@@ -1952,7 +2109,12 @@ interface InvocationDescendantTracker {
   readonly currentPids: Set<number>;
   start(): void;
   stop(): void;
-  sample(): Promise<void>;
+  sample(options?: InvocationDescendantSampleOptions): Promise<void>;
+}
+
+interface InvocationDescendantSampleOptions {
+  seedRootProcess?: boolean;
+  seedKnownDescendants?: boolean;
 }
 
 interface InvocationProcessRecord {
@@ -1985,6 +2147,8 @@ interface InvocationProcessSignalOptions {
   signalProcess?: (pid: number, signal?: NodeJS.Signals) => void;
   sleep?: (ms: number) => Promise<void>;
   signalRootProcessGroup?: boolean;
+  /** Only set while the caller still owns a root process handle not observed as exited. */
+  seedRootProcess?: boolean;
 }
 
 const defaultInvocationDescendantTrackerScheduler: InvocationDescendantTrackerScheduler = {
@@ -2015,27 +2179,25 @@ function createInvocationDescendantTracker(
   const scheduler = options.scheduler ?? defaultInvocationDescendantTrackerScheduler;
   const knownPids = new Set<number>();
   const currentPids = new Set<number>();
-  if (rootPid) {
-    knownPids.add(rootPid);
-  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   let active = false;
   let completedPeriodicSampleCount = 0;
   let sampleInFlight: Promise<void> | undefined;
 
-  const sample = async () => {
+  const sample = async (sampleOptions: InvocationDescendantSampleOptions = {}) => {
     if (!rootPid || process.platform === "win32") {
       return;
     }
-    if (sampleInFlight) {
+    while (sampleInFlight) {
       await sampleInFlight;
-      return;
     }
     sampleInFlight = (async () => {
       const table = await readProcessTable();
       const currentProcesses = listCurrentInvocationProcesses({
         rootPid,
-        table
+        table,
+        seedRootProcess: sampleOptions.seedRootProcess !== false,
+        seedKnownPids: sampleOptions.seedKnownDescendants ? knownPids : undefined
       });
       currentPids.clear();
       for (const processRecord of currentProcesses.values()) {
@@ -2110,8 +2272,18 @@ async function terminateInvocationProcesses(
   const signalProcess = options.signalProcess ?? process.kill;
   const sleep = options.sleep ?? Bun.sleep;
   tracker.stop();
+  // Root seeding is opt-in for the first teardown sample only; verification never
+  // re-seeds from ps because the root PID may already belong to another process.
+  const refreshBeforeTeardown = {
+    seedRootProcess: options.seedRootProcess === true,
+    seedKnownDescendants: true
+  };
+  const refreshTrackedDescendants = {
+    seedRootProcess: false,
+    seedKnownDescendants: true
+  };
   try {
-    await tracker.sample();
+    await tracker.sample(refreshBeforeTeardown);
   } catch (error) {
     return {
       success: false,
@@ -2119,14 +2291,14 @@ async function terminateInvocationProcesses(
     };
   }
 
-  if (options.signalRootProcessGroup) {
-    tryKillProcess(proc, "SIGKILL", signalProcess);
-  }
   killCurrentInvocationPids(tracker.currentPids, signalProcess);
+  if (options.signalRootProcessGroup) {
+    tryKillProcess(proc, "SIGKILL");
+  }
   await sleep(FORCE_KILL_SETTLE_MS);
 
   try {
-    await tracker.sample();
+    await tracker.sample(refreshTrackedDescendants);
   } catch (error) {
     return {
       success: false,
@@ -2138,7 +2310,7 @@ async function terminateInvocationProcesses(
   await sleep(DESCENDANT_KILL_SETTLE_MS);
 
   try {
-    await tracker.sample();
+    await tracker.sample(refreshTrackedDescendants);
   } catch (error) {
     return {
       success: false,
@@ -2146,8 +2318,7 @@ async function terminateInvocationProcesses(
     };
   }
 
-  const rootPid = typeof proc.pid === "number" ? proc.pid : undefined;
-  const escapedSurvivors = [...tracker.currentPids].filter((pid) => pid !== rootPid);
+  const escapedSurvivors = [...tracker.currentPids];
   if (escapedSurvivors.length > 0) {
     return {
       success: false,
@@ -2156,6 +2327,26 @@ async function terminateInvocationProcesses(
   }
 
   return { success: true };
+}
+
+async function finalizeTerminatedInvocationProcesses(
+  proc: SignalableInvocationProcess,
+  tracker: InvocationDescendantTracker,
+  terminationTeardown:
+    | Promise<{ success: true } | { success: false; reason: string }>
+    | undefined
+): Promise<{ success: true } | { success: false; reason: string }> {
+  if (terminationTeardown) {
+    const initialContainment = await terminationTeardown;
+    if (!initialContainment.success) {
+      return initialContainment;
+    }
+  }
+
+  return terminateInvocationProcesses(proc, tracker, {
+    signalRootProcessGroup: false,
+    seedRootProcess: false
+  });
 }
 
 function completeInvocationProcesses(
@@ -2209,21 +2400,35 @@ function killCurrentInvocationPids(
 function listCurrentInvocationProcesses(input: {
   rootPid: number;
   table: InvocationProcessParentTable;
+  seedRootProcess: boolean;
+  seedKnownPids?: ReadonlySet<number>;
 }): Map<number, InvocationProcessRecord> {
   const currentProcesses = new Map<number, InvocationProcessRecord>();
-  const rootRecord = input.table.get(input.rootPid);
-  if (rootRecord) {
-    currentProcesses.set(rootRecord.pid, rootRecord);
+  const seedPids = new Set<number>();
+  if (input.seedRootProcess && input.table.has(input.rootPid)) {
+    seedPids.add(input.rootPid);
+  }
+  for (const pid of input.seedKnownPids ?? []) {
+    if (isCurrentDescendantOfRoot(pid, input.rootPid, input.table)) {
+      seedPids.add(pid);
+    }
   }
 
   let changed = true;
   while (changed) {
     changed = false;
     for (const processRecord of input.table.values()) {
+      if (processRecord.pid === input.rootPid) {
+        continue;
+      }
       if (currentProcesses.has(processRecord.pid)) {
         continue;
       }
-      if (currentProcesses.has(processRecord.ppid)) {
+      if (
+        seedPids.has(processRecord.pid) ||
+        seedPids.has(processRecord.ppid) ||
+        currentProcesses.has(processRecord.ppid)
+      ) {
         currentProcesses.set(processRecord.pid, processRecord);
         changed = true;
       }
@@ -2231,6 +2436,36 @@ function listCurrentInvocationProcesses(input: {
   }
 
   return currentProcesses;
+}
+
+function isCurrentDescendantOfRoot(
+  pid: number,
+  rootPid: number,
+  table: InvocationProcessParentTable
+): boolean {
+  if (pid <= 0 || pid === rootPid || !table.has(pid)) {
+    return false;
+  }
+
+  const seenPids = new Set<number>([pid]);
+  let parentPid = table.get(pid)?.ppid;
+  while (parentPid !== undefined) {
+    if (parentPid === rootPid) {
+      return true;
+    }
+    if (parentPid <= 0 || seenPids.has(parentPid)) {
+      return false;
+    }
+
+    const parentRecord = table.get(parentPid);
+    if (!parentRecord) {
+      return false;
+    }
+    seenPids.add(parentPid);
+    parentPid = parentRecord.ppid;
+  }
+
+  return false;
 }
 
 async function readProcessParentTable(): Promise<InvocationProcessParentTable> {

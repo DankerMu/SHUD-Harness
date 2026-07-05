@@ -15,7 +15,7 @@ import {
 import {
   buildRawDataDeniedPayload,
   rawDataDenialPayloadToToolFailedEventInput
-} from "../../../core/src/tools/raw-data-sandbox-test-support";
+} from "../../../core/test-support/raw-data-sandbox-test-support";
 import {
   buildRawDataAdvisoryToolFailedWsEvent,
   buildToolFailedWsEvent,

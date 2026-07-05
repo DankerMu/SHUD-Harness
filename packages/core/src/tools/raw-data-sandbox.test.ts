@@ -43,7 +43,7 @@ import {
   rawDataDenialPayloadToToolFailedEventInput,
   rawDataSandboxDescendantSampleDelayMs,
   terminateRawDataSandboxInvocationProcessesForTest
-} from "./raw-data-sandbox-test-support";
+} from "../../test-support/raw-data-sandbox-test-support";
 
 const hasSeatbelt = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
 const seatbeltTest = hasSeatbelt ? test : test.skip;
@@ -121,6 +121,15 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("package subpath does not expose raw sandbox test support", () => {
+    expect(() =>
+      Bun.resolveSync(
+        "@shud-harness/core/tools/raw-data-sandbox-test-support",
+        import.meta.dir
+      )
+    ).toThrow();
+  });
+
   test("normal completion cleanup does not sample or signal a reused root PID", async () => {
     let readCount = 0;
     const tracker = createRawDataSandboxInvocationDescendantTrackerForTest(
@@ -156,13 +165,16 @@ describe("raw data seatbelt sandbox", () => {
       }
     );
     await tracker.sample();
-    expect([...tracker.currentPids].sort((a, b) => a - b)).toEqual([100, 200]);
+    expect([...tracker.currentPids].sort((a, b) => a - b)).toEqual([200]);
 
     const signals: Array<{ pid: number; signal?: NodeJS.Signals }> = [];
+    const rootSignals: Array<NodeJS.Signals | undefined> = [];
     const result = await terminateRawDataSandboxInvocationProcessesForTest(
       {
         pid: 100,
-        kill(_signal?: NodeJS.Signals) {}
+        kill(signal?: NodeJS.Signals) {
+          rootSignals.push(signal);
+        }
       },
       tracker,
       {
@@ -198,13 +210,16 @@ describe("raw data seatbelt sandbox", () => {
       }
     );
     await tracker.sample();
-    expect([...tracker.currentPids].sort((a, b) => a - b)).toEqual([100, 200]);
+    expect([...tracker.currentPids].sort((a, b) => a - b)).toEqual([200]);
 
     const signals: Array<{ pid: number; signal?: NodeJS.Signals }> = [];
+    const rootSignals: Array<NodeJS.Signals | undefined> = [];
     const result = await terminateRawDataSandboxInvocationProcessesForTest(
       {
         pid: 100,
-        kill(_signal?: NodeJS.Signals) {}
+        kill(signal?: NodeJS.Signals) {
+          rootSignals.push(signal);
+        }
       },
       tracker,
       {
@@ -217,7 +232,101 @@ describe("raw data seatbelt sandbox", () => {
     );
 
     expect(result).toEqual({ success: true });
+    expect(rootSignals).toEqual(["SIGKILL"]);
+    expect(signals.some((signal) => Math.abs(signal.pid) === 100)).toBe(false);
     expect(signals.some((signal) => Math.abs(signal.pid) === 200)).toBe(false);
+  });
+
+  test("timeout cleanup does not signal a reused root PID through signalProcess", async () => {
+    const tables = [
+      processTable([
+        { pid: 100, ppid: 1, identity: "root-1" },
+        { pid: 200, ppid: 100, identity: "child-1" }
+      ]),
+      processTable([{ pid: 100, ppid: 1, identity: "unrelated-reuse" }]),
+      processTable([{ pid: 100, ppid: 1, identity: "unrelated-reuse" }])
+    ];
+    let tableIndex = 0;
+    const tracker = createRawDataSandboxInvocationDescendantTrackerForTest(
+      { pid: 100 },
+      {
+        readProcessParentTable: async () => tables[Math.min(tableIndex++, tables.length - 1)]
+      }
+    );
+    await tracker.sample();
+    expect([...tracker.currentPids]).toEqual([200]);
+
+    const signals: Array<{ pid: number; signal?: NodeJS.Signals }> = [];
+    const rootSignals: Array<NodeJS.Signals | undefined> = [];
+    const result = await terminateRawDataSandboxInvocationProcessesForTest(
+      {
+        pid: 100,
+        kill(signal?: NodeJS.Signals) {
+          rootSignals.push(signal);
+        }
+      },
+      tracker,
+      {
+        sleep: async () => {},
+        signalRootProcessGroup: true,
+        seedRootProcess: false,
+        signalProcess: (pid, signal) => {
+          signals.push({ pid, signal });
+        }
+      }
+    );
+
+    expect(result).toEqual({ success: true });
+    expect(rootSignals).toEqual(["SIGKILL"]);
+    expect(signals.some((signal) => Math.abs(signal.pid) === 100)).toBe(false);
+    expect(signals.some((signal) => Math.abs(signal.pid) === 200)).toBe(false);
+  });
+
+  test("timeout cleanup still signals live descendants from the invocation parent chain", async () => {
+    const tables = [
+      processTable([
+        { pid: 100, ppid: 1, identity: "root-1" },
+        { pid: 200, ppid: 100, identity: "child-1" }
+      ]),
+      processTable([
+        { pid: 100, ppid: 1, identity: "root-1" },
+        { pid: 200, ppid: 100, identity: "child-1" }
+      ]),
+      processTable([])
+    ];
+    let tableIndex = 0;
+    const tracker = createRawDataSandboxInvocationDescendantTrackerForTest(
+      { pid: 100 },
+      {
+        readProcessParentTable: async () => tables[Math.min(tableIndex++, tables.length - 1)]
+      }
+    );
+    await tracker.sample();
+    expect([...tracker.currentPids]).toEqual([200]);
+
+    const signals: Array<{ pid: number; signal?: NodeJS.Signals }> = [];
+    const rootSignals: Array<NodeJS.Signals | undefined> = [];
+    const result = await terminateRawDataSandboxInvocationProcessesForTest(
+      {
+        pid: 100,
+        kill(signal?: NodeJS.Signals) {
+          rootSignals.push(signal);
+        }
+      },
+      tracker,
+      {
+        sleep: async () => {},
+        signalRootProcessGroup: true,
+        signalProcess: (pid, signal) => {
+          signals.push({ pid, signal });
+        }
+      }
+    );
+
+    expect(result).toEqual({ success: true });
+    expect(rootSignals).toEqual(["SIGKILL"]);
+    expect(signals.some((signal) => Math.abs(signal.pid) === 100)).toBe(false);
+    expect(signals.some((signal) => Math.abs(signal.pid) === 200)).toBe(true);
   });
 
   test("forgeable sandbox denial classifier is not exported as public authority", async () => {
@@ -3128,6 +3237,90 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("invalid timeout values fail before bash side effects", async () => {
+    const fixture = await createFixture();
+    try {
+      const invalidTimeouts: unknown[] = [
+        0,
+        -1,
+        1.5,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        86_400_001,
+        "1000"
+      ];
+
+      for (const [index, timeout] of invalidTimeouts.entries()) {
+        const result = await runSandboxed(
+          fixture,
+          `printf side-effect > workspace/invalid-timeout-${index}.txt`,
+          {
+            timeout: timeout as number
+          }
+        );
+
+        expectInvalidTimeoutFailure(result);
+        await expectMissing(join(fixture.workspaceRoot, `invalid-timeout-${index}.txt`));
+      }
+
+      await expect(readAuditRows(fixture.root)).rejects.toThrow();
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("sandboxed bash timeout metadata advertises runtime min and max", async () => {
+    const fixture = await createFixture();
+    try {
+      const tool = new RawDataSandboxedBashTool({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: []
+      });
+      const parameters = tool.parameters as {
+        properties?: {
+          timeout?: {
+            minimum?: number;
+            maximum?: number;
+            description?: string;
+          };
+        };
+      };
+
+      expect(parameters.properties?.timeout?.minimum).toBe(1);
+      expect(parameters.properties?.timeout?.maximum).toBe(86_400_000);
+      expect(parameters.properties?.timeout?.description).toContain("max 86400000");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("default timeout still executes a valid command", async () => {
+    const fixture = await createFixture();
+    try {
+      const tool = new RawDataSandboxedBashTool({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: []
+      });
+
+      const result = await tool.run(fixture.context, {
+        command: "printf ok > workspace/default-timeout-ok.txt"
+      });
+
+      expect(result.success).toBe(true);
+      expect(await readFile(join(fixture.workspaceRoot, "default-timeout-ok.txt"), "utf8")).toBe(
+        "ok"
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("task scratch and artifacts writes remain allowed under audit protection", async () => {
     const fixture = await createFixture();
     try {
@@ -3205,6 +3398,38 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("profileRoot symlink failure finalizes the running tool handle", async () => {
+    const fixture = await createFixture();
+    try {
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+      const beforeRawEntries = await sortedRawEntries(fixture.rawRoot);
+      await rm(fixture.profileRoot, { recursive: true, force: true });
+      await symlink(fixture.rawRoot, fixture.profileRoot);
+
+      const result = await runSandboxed(fixture, "cat data/raw/input.csv", {
+        context: {
+          ...fixture.context,
+          runningToolRegistry
+        }
+      });
+
+      expectProfileSetupFailure(result);
+      expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
+      expect(handle.getTerminalMetadata()).toMatchObject({
+        cause: "completed",
+        success: false,
+        outputSummary: result.outputSummary
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("profileRoot symlink ancestor into protected raw is rejected before missing leaf creation", async () => {
     const fixture = await createFixture();
     try {
@@ -3236,6 +3461,38 @@ describe("raw data seatbelt sandbox", () => {
       expect(result.success).toBe(false);
       expect(result.output).toContain("protected raw data path");
       expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("tempRoot symlink failure finalizes the running tool handle", async () => {
+    const fixture = await createFixture();
+    try {
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+      const beforeRawEntries = await sortedRawEntries(fixture.rawRoot);
+      await rm(fixture.tempRoot, { recursive: true, force: true });
+      await symlink(fixture.rawRoot, fixture.tempRoot);
+
+      const result = await runSandboxed(fixture, "cat data/raw/input.csv", {
+        context: {
+          ...fixture.context,
+          runningToolRegistry
+        }
+      });
+
+      expectProfileSetupFailure(result);
+      expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
+      expect(handle.getTerminalMetadata()).toMatchObject({
+        cause: "completed",
+        success: false,
+        outputSummary: result.outputSummary
+      });
     } finally {
       await fixture.cleanup();
     }
@@ -4370,6 +4627,44 @@ function expectAuditReservationFailure(result: ToolResult): void {
   expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
   expect(payload.remediation?.next_action).toBe("fix_and_retry");
   expect(payload.remediation?.hint).toContain("audit path");
+  expect(payload.remediation?.ref).toContain("policy-gate-spike");
+}
+
+function expectInvalidTimeoutFailure(result: ToolResult): void {
+  expect(result.success).toBe(false);
+  const payload = JSON.parse(result.output) as {
+    error?: string;
+    rule?: string;
+    remediation?: {
+      next_action?: string;
+      hint?: string;
+      ref?: string;
+    };
+  };
+  expect(payload.error).toBe("raw_data_sandbox_invalid_timeout");
+  expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
+  expect(payload.remediation?.next_action).toBe("fix_and_retry");
+  expect(payload.remediation?.hint).toContain("timeout");
+  expect(payload.remediation?.ref).toContain("policy-gate-spike");
+}
+
+function expectProfileSetupFailure(result: ToolResult): void {
+  expect(result.success).toBe(false);
+  const payload = JSON.parse(result.output) as {
+    error?: string;
+    rule?: string;
+    reason?: string;
+    remediation?: {
+      next_action?: string;
+      hint?: string;
+      ref?: string;
+    };
+  };
+  expect(payload.error).toBe("raw_data_sandbox_profile_unavailable");
+  expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
+  expect(payload.reason).toContain("protected raw data path");
+  expect(payload.remediation?.next_action).toBe("fix_and_retry");
+  expect(payload.remediation?.hint).toContain("temp/profile roots");
   expect(payload.remediation?.ref).toContain("policy-gate-spike");
 }
 

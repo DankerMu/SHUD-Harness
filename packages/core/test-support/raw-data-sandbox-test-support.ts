@@ -6,4 +6,4 @@ export {
   rawDataDenialPayloadToToolFailedEventInput,
   rawDataSandboxDescendantSampleDelayMs,
   terminateRawDataSandboxInvocationProcessesForTest
-} from "./raw-data-sandbox";
+} from "../src/tools/raw-data-sandbox";
