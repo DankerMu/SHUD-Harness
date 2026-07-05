@@ -28,19 +28,22 @@ import {
   RAW_DATA_WRITE_RULE_ID,
   RawDataSandboxedBashTool,
   buildRawDataSeatbeltProfile,
-  createRawDataSandboxInvocationDescendantTrackerForTest,
   evaluateRawDataWriteAdvisory,
-  rawDataDenialPayloadToAuditRow,
-  rawDataDenialPayloadToToolFailedEventInput,
-  rawDataSandboxDescendantSampleDelayMs,
   rawDataSandboxProfileFileName,
   rawDataWriteRemediation,
   scanProtectedHardlinks,
-  terminateRawDataSandboxInvocationProcessesForTest,
   writeRawDataSeatbeltProfileFile,
   type PolicyGateAuditRow,
   type RawDataDenialPayload
 } from "./raw-data-sandbox";
+import {
+  completeRawDataSandboxInvocationProcessesForTest,
+  createRawDataSandboxInvocationDescendantTrackerForTest,
+  rawDataDenialPayloadToAuditRow,
+  rawDataDenialPayloadToToolFailedEventInput,
+  rawDataSandboxDescendantSampleDelayMs,
+  terminateRawDataSandboxInvocationProcessesForTest
+} from "./raw-data-sandbox-test-support";
 
 const hasSeatbelt = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
 const seatbeltTest = hasSeatbelt ? test : test.skip;
@@ -99,6 +102,44 @@ describe("raw data seatbelt sandbox", () => {
     tracker.stop();
   });
 
+  test("package root does not expose raw sandbox test seams or denial builders", async () => {
+    const coreExports = await import("@shud-harness/core");
+    const absentSymbols = [
+      "buildRawDataDeniedPayload",
+      "buildRawDataDenialEvidence",
+      "buildRawDataDeniedToolResult",
+      "completeRawDataSandboxInvocationProcessesForTest",
+      "createRawDataSandboxInvocationDescendantTrackerForTest",
+      "rawDataDenialPayloadToAuditRow",
+      "rawDataDenialPayloadToToolFailedEventInput",
+      "rawDataSandboxDescendantSampleDelayMs",
+      "terminateRawDataSandboxInvocationProcessesForTest"
+    ];
+
+    for (const symbol of absentSymbols) {
+      expect(symbol in coreExports).toBe(false);
+    }
+  });
+
+  test("normal completion cleanup does not sample or signal a reused root PID", async () => {
+    let readCount = 0;
+    const tracker = createRawDataSandboxInvocationDescendantTrackerForTest(
+      { pid: 100 },
+      {
+        readProcessParentTable: async () => {
+          readCount += 1;
+          return processTable([{ pid: 100, ppid: 1, identity: "unrelated-reuse" }]);
+        }
+      }
+    );
+
+    const result = completeRawDataSandboxInvocationProcessesForTest(tracker);
+
+    expect(result).toEqual({ success: true });
+    expect(readCount).toBe(0);
+    expect([...tracker.currentPids]).toEqual([]);
+  });
+
   test("normal completion cleanup does not signal stale reused historical PIDs", async () => {
     const tables = [
       processTable([
@@ -135,6 +176,48 @@ describe("raw data seatbelt sandbox", () => {
     expect(result).toEqual({ success: true });
     expect(signals).toEqual([]);
     expect([...tracker.currentPids]).toEqual([]);
+  });
+
+  test("timeout cleanup does not signal historical child PID outside the live parent chain", async () => {
+    const tables = [
+      processTable([
+        { pid: 100, ppid: 1, identity: "root-1" },
+        { pid: 200, ppid: 100, identity: "same-second-child" }
+      ]),
+      processTable([
+        { pid: 100, ppid: 1, identity: "root-1" },
+        { pid: 200, ppid: 1, identity: "same-second-child" }
+      ]),
+      processTable([{ pid: 100, ppid: 1, identity: "root-1" }])
+    ];
+    let tableIndex = 0;
+    const tracker = createRawDataSandboxInvocationDescendantTrackerForTest(
+      { pid: 100 },
+      {
+        readProcessParentTable: async () => tables[Math.min(tableIndex++, tables.length - 1)]
+      }
+    );
+    await tracker.sample();
+    expect([...tracker.currentPids].sort((a, b) => a - b)).toEqual([100, 200]);
+
+    const signals: Array<{ pid: number; signal?: NodeJS.Signals }> = [];
+    const result = await terminateRawDataSandboxInvocationProcessesForTest(
+      {
+        pid: 100,
+        kill(_signal?: NodeJS.Signals) {}
+      },
+      tracker,
+      {
+        sleep: async () => {},
+        signalRootProcessGroup: true,
+        signalProcess: (pid, signal) => {
+          signals.push({ pid, signal });
+        }
+      }
+    );
+
+    expect(result).toEqual({ success: true });
+    expect(signals.some((signal) => Math.abs(signal.pid) === 200)).toBe(false);
   });
 
   test("forgeable sandbox denial classifier is not exported as public authority", async () => {
@@ -279,6 +362,31 @@ describe("raw data seatbelt sandbox", () => {
       );
       expect(await readFile(nonRawPath, "utf8")).toContain('"rule":"workspace-quota"');
       expect(await readFile(nonRawPath, "utf8")).toContain('"decision":"quota_rejected"');
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append snapshots caller row before async reservation", async () => {
+    const fixture = await createFixture();
+    try {
+      const row = minimalAuditRow();
+      const append = appendPolicyGateAuditRow({
+        workspaceRoot: fixture.root,
+        protectedRawPaths: [fixture.rawRoot],
+        fileName: "snapshot.ndjson",
+        row
+      });
+
+      row.decision = "denied_by_sandbox";
+      row.error_id = `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox:reserved-profile:TOOL-CALL-1`;
+
+      const auditPath = await append;
+      const content = await readFile(auditPath, "utf8");
+
+      expect(content).toContain('"decision":"failed"');
+      expect(content).not.toContain('"decision":"denied_by_sandbox"');
+      expect(content).not.toContain(`${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox`);
     } finally {
       await fixture.cleanup();
     }
@@ -3868,6 +3976,17 @@ describe("raw data seatbelt sandbox", () => {
       }
       await expect(
         scanProtectedHardlinks({ protectedRoots: [fixture.rawRoot], maxScannedPathCount: 2 })
+      ).rejects.toThrow("exceeded budget");
+
+      const roots = [join(fixture.root, "many-root-1"), join(fixture.root, "many-root-2")];
+      for (const root of roots) {
+        await mkdir(root, { recursive: true });
+      }
+      await expect(
+        scanProtectedHardlinks({
+          protectedRoots: [...roots, join(fixture.root, "missing-after-budget")],
+          maxScannedPathCount: 2
+        })
       ).rejects.toThrow("exceeded budget");
     } finally {
       await fixture.cleanup();

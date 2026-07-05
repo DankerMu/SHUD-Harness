@@ -857,10 +857,11 @@ function evaluateCommandAnalysisBudget(
 export async function appendPolicyGateAuditRow(
   options: AppendPolicyGateAuditRowOptions
 ): Promise<string> {
+  const row = snapshotPolicyGateAuditRow(options.row);
   assertProtectedRawPathsProvided(options.protectedRawPaths);
   assertAbsoluteRoot(options.workspaceRoot, "workspaceRoot");
   assertAbsoluteRoots(options.protectedRawPaths, "protectedRawPaths");
-  assertPublicPolicyGateAuditRow(options.row);
+  assertPublicPolicyGateAuditRow(row);
   const taskId = options.taskId ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID;
   assertSafePathSegment(taskId, "audit task id");
 
@@ -874,11 +875,49 @@ export async function appendPolicyGateAuditRow(
     options.protectedRawPaths
   );
   try {
-    await appendReservedPolicyGateAuditRow(reservation, options.row);
+    await appendReservedPolicyGateAuditRow(reservation, row);
     return reservation.auditPath;
   } finally {
     await closePolicyGateAuditReservation(reservation);
   }
+}
+
+function snapshotPolicyGateAuditRow(row: PolicyGateAuditRow): PolicyGateAuditRow {
+  return snapshotAuditValue(row) as PolicyGateAuditRow;
+}
+
+function snapshotAuditValue(
+  value: unknown,
+  seen = new WeakMap<object, unknown>()
+): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+
+  const existing = seen.get(value);
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  if (value instanceof Date) {
+    return new Date(value.getTime());
+  }
+
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    seen.set(value, copy);
+    for (const item of value) {
+      copy.push(snapshotAuditValue(item, seen));
+    }
+    return copy;
+  }
+
+  const copy: Record<string, unknown> = {};
+  seen.set(value, copy);
+  for (const [key, item] of Object.entries(value)) {
+    copy[key] = snapshotAuditValue(item, seen);
+  }
+  return copy;
 }
 
 function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
@@ -1177,7 +1216,6 @@ export async function scanProtectedHardlinks(input: {
   maxScannedPathCount?: number;
 }): Promise<HardlinkScanResult> {
   assertAbsoluteRoots(input.protectedRoots, "protectedRoots");
-  const protectedRoots = await canonicalizePathSet(input.protectedRoots);
   const maxScannedPathCount = input.maxScannedPathCount ?? 10_000;
   if (!Number.isInteger(maxScannedPathCount) || maxScannedPathCount < 1) {
     throw new Error(`Invalid hardlink scan budget: ${maxScannedPathCount}`);
@@ -1185,9 +1223,17 @@ export async function scanProtectedHardlinks(input: {
 
   const riskyPaths: HardlinkRisk[] = [];
   let scannedPathCount = 0;
+  const canonicalProtectedRoots: string[] = [];
+
+  for (const root of input.protectedRoots) {
+    assertHardlinkScanBudgetAvailable();
+    canonicalProtectedRoots.push(await canonicalizeExistingPath(root));
+    scannedPathCount += 1;
+  }
+  const protectedRoots = sortedUnique(canonicalProtectedRoots);
 
   for (const root of protectedRoots) {
-    await scanPath(root);
+    await scanPath(root, { alreadyCounted: true });
   }
 
   return {
@@ -1196,13 +1242,22 @@ export async function scanProtectedHardlinks(input: {
     riskyPaths
   };
 
-  async function scanPath(path: string): Promise<void> {
+  function assertHardlinkScanBudgetAvailable(): void {
     if (scannedPathCount >= maxScannedPathCount) {
       throw new Error(`Protected hardlink scan exceeded budget: ${maxScannedPathCount}`);
     }
+  }
+
+  async function scanPath(
+    path: string,
+    options: { alreadyCounted?: boolean } = {}
+  ): Promise<void> {
+    if (!options.alreadyCounted) {
+      assertHardlinkScanBudgetAvailable();
+      scannedPathCount += 1;
+    }
 
     const metadata = await lstat(path);
-    scannedPathCount += 1;
 
     if (metadata.nlink > 1 && metadata.isFile()) {
       riskyPaths.push({
@@ -1221,9 +1276,6 @@ export async function scanProtectedHardlinks(input: {
     try {
       let entry = await dir.read();
       while (entry !== null) {
-        if (scannedPathCount >= maxScannedPathCount) {
-          throw new Error(`Protected hardlink scan exceeded budget: ${maxScannedPathCount}`);
-        }
         await scanPath(join(path, entry.name));
         entry = await dir.read();
       }
@@ -1485,7 +1537,12 @@ async function runSeatbeltSandboxedBash(
   clearTimeout(timeoutId);
 
   const finalCause = terminationCause ?? "completed";
-  const containment = await terminateInvocationProcesses(proc, descendantTracker);
+  const containment =
+    finalCause === "completed"
+      ? completeInvocationProcesses(descendantTracker)
+      : await terminateInvocationProcesses(proc, descendantTracker, {
+          signalRootProcessGroup: true
+        });
   descendantTracker.stop();
   if (!containment.success) {
     await Promise.allSettled([stdoutCapture.cancel(), stderrCapture.cancel()]);
@@ -1957,7 +2014,6 @@ function createInvocationDescendantTracker(
   const readProcessTable = options.readProcessParentTable ?? readProcessParentTable;
   const scheduler = options.scheduler ?? defaultInvocationDescendantTrackerScheduler;
   const knownPids = new Set<number>();
-  const knownProcessIdentities = new Map<number, string>();
   const currentPids = new Set<number>();
   if (rootPid) {
     knownPids.add(rootPid);
@@ -1979,13 +2035,11 @@ function createInvocationDescendantTracker(
       const table = await readProcessTable();
       const currentProcesses = listCurrentInvocationProcesses({
         rootPid,
-        knownProcessIdentities,
         table
       });
       currentPids.clear();
       for (const processRecord of currentProcesses.values()) {
         knownPids.add(processRecord.pid);
-        knownProcessIdentities.set(processRecord.pid, processRecord.identity);
         currentPids.add(processRecord.pid);
       }
     })();
@@ -2104,6 +2158,21 @@ async function terminateInvocationProcesses(
   return { success: true };
 }
 
+function completeInvocationProcesses(
+  tracker: InvocationDescendantTracker
+): { success: true } {
+  tracker.stop();
+  tracker.currentPids.clear();
+  return { success: true };
+}
+
+/** @internal exported for adapter-backed normal-completion regression coverage. */
+export function completeRawDataSandboxInvocationProcessesForTest(
+  tracker: InvocationDescendantTracker
+): { success: true } {
+  return completeInvocationProcesses(tracker);
+}
+
 /** @internal exported for adapter-backed termination regression coverage. */
 export async function terminateRawDataSandboxInvocationProcessesForTest(
   proc: SignalableInvocationProcess,
@@ -2139,20 +2208,12 @@ function killCurrentInvocationPids(
 
 function listCurrentInvocationProcesses(input: {
   rootPid: number;
-  knownProcessIdentities: ReadonlyMap<number, string>;
   table: InvocationProcessParentTable;
 }): Map<number, InvocationProcessRecord> {
   const currentProcesses = new Map<number, InvocationProcessRecord>();
   const rootRecord = input.table.get(input.rootPid);
-  if (rootRecord && processIdentityMatchesKnown(rootRecord, input.knownProcessIdentities)) {
+  if (rootRecord) {
     currentProcesses.set(rootRecord.pid, rootRecord);
-  }
-
-  for (const [pid, identity] of input.knownProcessIdentities) {
-    const processRecord = input.table.get(pid);
-    if (processRecord?.identity === identity) {
-      currentProcesses.set(pid, processRecord);
-    }
   }
 
   let changed = true;
@@ -2170,14 +2231,6 @@ function listCurrentInvocationProcesses(input: {
   }
 
   return currentProcesses;
-}
-
-function processIdentityMatchesKnown(
-  processRecord: InvocationProcessRecord,
-  knownProcessIdentities: ReadonlyMap<number, string>
-): boolean {
-  const knownIdentity = knownProcessIdentities.get(processRecord.pid);
-  return knownIdentity === undefined || knownIdentity === processRecord.identity;
 }
 
 async function readProcessParentTable(): Promise<InvocationProcessParentTable> {

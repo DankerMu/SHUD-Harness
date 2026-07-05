@@ -3,10 +3,8 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  buildRawDataDeniedPayload,
   buildRawDataSeatbeltProfile,
   rawDataDeniedToolResultToToolFailedEventInput,
-  rawDataDenialPayloadToToolFailedEventInput,
   rawDataWriteRemediation,
   RawDataSandboxedBashTool,
   RAW_DATA_WRITE_RULE_ID,
@@ -14,6 +12,10 @@ import {
   type RawDataToolFailedEventInput,
   type RawDataDenialPayload
 } from "@shud-harness/core";
+import {
+  buildRawDataDeniedPayload,
+  rawDataDenialPayloadToToolFailedEventInput
+} from "../../../core/src/tools/raw-data-sandbox-test-support";
 import {
   buildRawDataAdvisoryToolFailedWsEvent,
   buildToolFailedWsEvent,
