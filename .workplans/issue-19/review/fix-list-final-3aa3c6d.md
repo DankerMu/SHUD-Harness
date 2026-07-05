@@ -71,4 +71,3 @@ Required after implementation:
 - `openspec validate m1-foundation --strict --no-interactive`
 - `git diff --check origin/main...HEAD`
 - `git -C zero diff --quiet && git -C zero rev-parse HEAD`
-

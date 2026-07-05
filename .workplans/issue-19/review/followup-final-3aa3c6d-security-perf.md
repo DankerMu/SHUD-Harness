@@ -31,4 +31,3 @@ Findings:
 
 Non-blocking notes:
 - Reviewer did not run Bun/OpenSpec tests.
-

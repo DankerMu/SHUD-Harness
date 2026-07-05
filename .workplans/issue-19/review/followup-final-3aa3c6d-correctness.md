@@ -34,4 +34,3 @@ Findings:
 Non-blocking notes:
 - Prior explicit-root V1/V2 and cleanup V3 fixes appear closed.
 - Reviewer did not run Bun tests; orchestrator local `bun run check` passed separately.
-

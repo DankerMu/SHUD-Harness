@@ -34,6 +34,7 @@ import {
   rawDataSandboxProfileFileName,
   rawDataWriteRemediation,
   scanProtectedHardlinks,
+  writeRawDataSeatbeltProfileFile,
   type PolicyGateAuditRow,
   type RawDataDenialPayload
 } from "./raw-data-sandbox";
@@ -111,6 +112,17 @@ describe("raw data seatbelt sandbox", () => {
         })
       ).rejects.toThrow("Raw-data denial audit rows require");
 
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          row: {
+            ...minimalAuditRow(),
+            error_id: `${RAW_DATA_WRITE_RULE_ID}:denied_by_advisory:reserved-profile:TOOL-CALL-1`
+          }
+        })
+      ).rejects.toThrow("Reserved raw-data denial error_id values require");
+
       await expectMissing(
         join(
           fixture.workspaceRoot,
@@ -132,7 +144,10 @@ describe("raw data seatbelt sandbox", () => {
         workspaceRoot: fixture.root,
         protectedRawPaths: [fixture.rawRoot],
         fileName: "lifecycle.ndjson",
-        row: minimalAuditRow()
+        row: {
+          ...minimalAuditRow(),
+          error_id: `${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle`
+        }
       });
       const nonRawPath = await appendPolicyGateAuditRow({
         workspaceRoot: fixture.root,
@@ -146,6 +161,9 @@ describe("raw data seatbelt sandbox", () => {
       });
 
       expect(await readFile(lifecyclePath, "utf8")).toContain('"decision":"failed"');
+      expect(await readFile(lifecyclePath, "utf8")).toContain(
+        `"error_id":"${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle"`
+      );
       expect(await readFile(nonRawPath, "utf8")).toContain('"rule":"workspace-quota"');
       expect(await readFile(nonRawPath, "utf8")).toContain('"decision":"denied_by_advisory"');
     } finally {
@@ -3393,6 +3411,13 @@ describe("raw data seatbelt sandbox", () => {
     const originalCwd = process.cwd();
     const otherCwd = await mkdtemp(join(tmpdir(), "shud-raw-helper-cwd-"));
     try {
+      const profile = await buildRawDataSeatbeltProfile({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot
+      });
+
       process.chdir(otherCwd);
 
       await expect(
@@ -3437,6 +3462,9 @@ describe("raw data seatbelt sandbox", () => {
         })
       ).rejects.toThrow("profileRoot must be absolute");
       await expect(
+        writeRawDataSeatbeltProfileFile(profile, "workspace/profiles")
+      ).rejects.toThrow("profileRoot must be absolute");
+      await expect(
         appendPolicyGateAuditRow({
           workspaceRoot: "workspace",
           protectedRawPaths: [fixture.rawRoot],
@@ -3454,6 +3482,10 @@ describe("raw data seatbelt sandbox", () => {
         scanProtectedHardlinks({ protectedRoots: ["data/raw"] })
       ).rejects.toThrow("protectedRoots must be absolute");
 
+      const profilePath = await writeRawDataSeatbeltProfileFile(profile, fixture.profileRoot);
+      expect(profilePath.startsWith(await realpath(fixture.profileRoot))).toBe(true);
+      expect(await readFile(profilePath, "utf8")).toContain("(version 1)");
+      await expectMissing(join(otherCwd, "workspace", "profiles"));
       await expectMissing(join(otherCwd, "workspace", "tasks"));
     } finally {
       process.chdir(originalCwd);

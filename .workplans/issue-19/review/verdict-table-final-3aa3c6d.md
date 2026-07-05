@@ -14,4 +14,3 @@ Fixture level / repair intensity: high
 | cand-3aa3-05-abort-fake-flake | test-evidence | flaky verification / fake integration mismatch | PLAUSIBLE | high-risk PLAUSIBLE blocks | Fix in Phase 6 |
 
 Summary: latest comprehensive cross-review is not clean. Four candidates are CONFIRMED and one is PLAUSIBLE; all are merge-blocking under the high-risk fixture.
-

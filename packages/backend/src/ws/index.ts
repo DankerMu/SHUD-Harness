@@ -1,4 +1,6 @@
 import {
+  assertTrustedRawDataToolFailedEventInput,
+  isReservedRawDataDenialErrorId,
   RAW_DATA_WRITE_RULE_ID,
   type ErrorRecord,
   type RawDataToolFailedEventInput
@@ -77,6 +79,11 @@ function assertPublicToolFailedWsEventInput(input: ToolFailedWsEventInput): void
       "Raw-data denial tool.failed events require the trusted raw-data advisory event builder."
     );
   }
+  if (isReservedRawDataDenialErrorId(input.error.error_id)) {
+    throw new Error(
+      "Reserved raw-data denial error_id values require the trusted raw-data advisory event builder."
+    );
+  }
 }
 
 function assertRawDataAdvisoryToolFailedWsEventInput(
@@ -85,6 +92,7 @@ function assertRawDataAdvisoryToolFailedWsEventInput(
   if (input.rule !== RAW_DATA_WRITE_RULE_ID || input.decision !== "denied_by_advisory") {
     throw new Error("Only trusted raw-data advisory denial events are supported.");
   }
+  assertTrustedRawDataToolFailedEventInput(input);
 }
 
 function isRawDataDenialDecision(decision: string | undefined): boolean {

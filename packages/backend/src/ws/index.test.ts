@@ -5,21 +5,24 @@ import { join } from "node:path";
 import {
   buildRawDataDeniedPayload,
   buildRawDataSeatbeltProfile,
+  rawDataDeniedToolResultToToolFailedEventInput,
   rawDataDenialPayloadToToolFailedEventInput,
   rawDataWriteRemediation,
+  RawDataSandboxedBashTool,
   RAW_DATA_WRITE_RULE_ID,
+  type RawDataToolFailedEventInput,
   type RawDataDenialPayload
 } from "@shud-harness/core";
 import { buildRawDataAdvisoryToolFailedWsEvent, buildToolFailedWsEvent } from "./index";
 
 describe("backend ws tool.failed skeleton", () => {
-  test("builds tool.failed from actual raw-data advisory denial payload", async () => {
-    const payload = await sampleRawDataAdvisoryDenialPayload();
+  test("builds tool.failed from sandbox-owned raw-data advisory denial evidence", async () => {
+    const trustedInput = await sampleTrustedRawDataAdvisoryToolFailedEventInput();
     const event = buildRawDataAdvisoryToolFailedWsEvent({
       seq: 7,
       eventId: "evt-7",
       timestamp: "2026-07-04T00:00:00.000Z",
-      ...rawDataDenialPayloadToToolFailedEventInput(payload)
+      ...trustedInput
     });
 
     expect(event).toEqual({
@@ -28,20 +31,33 @@ describe("backend ws tool.failed skeleton", () => {
       type: "tool.failed",
       timestamp: "2026-07-04T00:00:00.000Z",
       payload: {
-        tool_id: payload.tool_id,
-        rule: payload.rule,
-        decision: payload.decision,
-        guard_class: payload.guard_class,
-        profile_id: payload.profile_id,
-        invocation_id: payload.invocation_id,
-        error: payload.error_record
+        tool_id: trustedInput.toolId,
+        rule: trustedInput.rule,
+        decision: trustedInput.decision,
+        guard_class: trustedInput.guardClass,
+        profile_id: trustedInput.profileId,
+        invocation_id: trustedInput.invocationId,
+        error: trustedInput.error
       }
     });
     expect(event.type).toBe("tool.failed");
-    expect(event.payload.error.error_id).toBe(payload.error_record.error_id);
+    expect(event.payload.error.error_id).toBe(trustedInput.error.error_id);
+    expect(event.payload.error.error_id).toContain(`${RAW_DATA_WRITE_RULE_ID}:denied_by_advisory`);
     expect(event.payload.error.remediation?.next_action).toBe("adjust_scope");
     expect(event.payload.error.remediation?.hint).toContain("data/raw");
     expect(event.payload.error.remediation?.ref).toContain("policy-gate-spike");
+  });
+
+  test("raw-data advisory builder rejects caller-authored structural payloads", async () => {
+    const advisory = await sampleRawDataAdvisoryDenialPayload();
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 8,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        ...rawDataDenialPayloadToToolFailedEventInput(advisory)
+      })
+    ).toThrow("Raw-data advisory tool.failed events require RawDataSandboxedBashTool trusted evidence");
   });
 
   test("generic tool.failed builder rejects raw-data denial-shaped events", async () => {
@@ -98,7 +114,77 @@ describe("backend ws tool.failed skeleton", () => {
       decision: "failed"
     });
   });
+
+  test("generic tool.failed builder rejects reserved raw-denial error IDs", () => {
+    const remediation = rawDataWriteRemediation();
+
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 11,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: RAW_DATA_WRITE_RULE_ID,
+        decision: "failed",
+        error: {
+          error_id: `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox:reserved-profile:TOOL-CALL-WS-1`,
+          category: "sandbox_error",
+          severity: "error",
+          message: "Bash command failed.",
+          user_message: "Bash command failed.",
+          evidence_refs: [],
+          retryable: false,
+          recommended_next_actions: [remediation.hint],
+          remediation,
+          created_at: "2026-07-04T00:00:00.000Z"
+        }
+      })
+    ).toThrow("Reserved raw-data denial error_id values require");
+  });
 });
+
+async function sampleTrustedRawDataAdvisoryToolFailedEventInput(): Promise<
+  RawDataToolFailedEventInput
+> {
+  const root = await mkdtemp(join(tmpdir(), "shud-ws-raw-denial-"));
+  try {
+    const rawRoot = join(root, "data", "raw");
+    const workspaceRoot = join(root, "workspace");
+    const tempRoot = join(workspaceRoot, "tmp");
+    const profileRoot = join(workspaceRoot, "profiles");
+    await mkdir(rawRoot, { recursive: true });
+    await mkdir(tempRoot, { recursive: true });
+    await mkdir(profileRoot, { recursive: true });
+
+    const tool = new RawDataSandboxedBashTool({
+      protectedRawPaths: [rawRoot],
+      allowedWriteRoots: [root],
+      tempRoot,
+      profileRoot,
+      fuseRules: []
+    });
+    const result = await tool.run(
+      {
+        sessionId: "TEST-SESSION",
+        currentToolUseId: "TOOL-CALL-WS-1",
+        workDir: root,
+        logger: testLogger
+      },
+      {
+        command: "printf nope > data/raw/ws-advisory.txt",
+        timeout: 30_000
+      }
+    );
+
+    expect(result.success).toBe(false);
+    const input = rawDataDeniedToolResultToToolFailedEventInput(result);
+    if (!input) {
+      throw new Error("Expected trusted raw-data advisory tool.failed input.");
+    }
+    return input;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
 
 async function sampleRawDataAdvisoryDenialPayload(): Promise<
   RawDataDenialPayload & { decision: "denied_by_advisory" }
@@ -128,6 +214,12 @@ async function sampleRawDataAdvisoryDenialPayload(): Promise<
     await rm(root, { recursive: true, force: true });
   }
 }
+
+const testLogger = {
+  info(_event: string, _data?: Record<string, unknown>): void {},
+  warn(_event: string, _data?: Record<string, unknown>): void {},
+  error(_event: string, _data?: Record<string, unknown>): void {}
+};
 
 async function sampleReservedRawDataSandboxDenialPayload(): Promise<RawDataDenialPayload> {
   const root = await mkdtemp(join(tmpdir(), "shud-ws-raw-denial-"));

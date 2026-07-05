@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
   access,
@@ -50,6 +50,18 @@ const PROCESS_PREFLIGHT_ANALYSIS_MAX_LENGTH = 32_000;
 const STREAM_CAPTURE_MAX_CHARS = 64_000;
 const DEFAULT_ABORT_MESSAGE = "Command aborted by user from Session Detail.";
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const RESERVED_RAW_DATA_DENIAL_ERROR_ID_PREFIXES = [
+  `${RAW_DATA_WRITE_RULE_ID}:denied_by_advisory`,
+  `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox`
+] as const;
+const RAW_DATA_TOOL_FAILED_EVENT_INPUT_PROOF = Symbol(
+  "raw-data-tool-failed-event-input-proof"
+);
+const RAW_DATA_TOOL_FAILED_EVENT_INPUT_PROOF_SECRET = randomBytes(32).toString("hex");
+const trustedRawDataToolFailedEventInputsByResult = new WeakMap<
+  ToolResult,
+  RawDataToolFailedEventInput
+>();
 export interface RawDataSeatbeltProfileOptions {
   protectedRawPaths: readonly string[];
   allowedWriteRoots: readonly string[];
@@ -273,6 +285,14 @@ async function createRawDataSeatbeltProfileFile(
   profileRoot?: string
 ): Promise<RawDataSeatbeltProfileFile> {
   const root = profileRoot ?? profile.metadata.profileRoot ?? profile.metadata.tempRoot;
+  assertAbsoluteRoot(
+    root,
+    profileRoot !== undefined
+      ? "profileRoot"
+      : profile.metadata.profileRoot !== undefined
+        ? "profile.metadata.profileRoot"
+        : "profile.metadata.tempRoot"
+  );
   const protectedWriteDenyPaths = sortedUnique([
     ...profile.metadata.protectedRawPaths,
     ...profile.metadata.protectedEvidencePaths
@@ -515,6 +535,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
           if (appendFailure) {
             return this.finalizeToolResult(ctx, appendFailure);
           }
+          trustRawDataDenialEvidence(evidence);
           return this.finalizeToolResult(ctx, evidence.toolResult);
         }
       }
@@ -830,6 +851,11 @@ function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
       "Raw-data denial audit rows require RawDataSandboxedBashTool trusted evidence."
     );
   }
+  if (isReservedRawDataDenialErrorId(row.error_id)) {
+    throw new Error(
+      "Reserved raw-data denial error_id values require RawDataSandboxedBashTool trusted evidence."
+    );
+  }
 }
 
 export function buildRawDataDeniedPayload(input: {
@@ -907,6 +933,14 @@ export function buildRawDataDenialEvidence(input: {
   };
 }
 
+function trustRawDataDenialEvidence(evidence: RawDataDenialEvidence): void {
+  proveRawDataToolFailedEventInput(evidence.toolFailedEventInput);
+  trustedRawDataToolFailedEventInputsByResult.set(
+    evidence.toolResult,
+    evidence.toolFailedEventInput
+  );
+}
+
 export function buildRawDataDeniedToolResult(input: {
   toolId: string;
   reason: string;
@@ -957,6 +991,92 @@ export function rawDataDenialPayloadToToolFailedEventInput(
     profileId: payload.profile_id,
     ...(payload.invocation_id ? { invocationId: payload.invocation_id } : {}),
     error: payload.error_record
+  };
+}
+
+export function rawDataDeniedToolResultToToolFailedEventInput(
+  result: ToolResult
+): RawDataToolFailedEventInput | undefined {
+  return trustedRawDataToolFailedEventInputsByResult.get(result);
+}
+
+export function assertTrustedRawDataToolFailedEventInput(
+  input: RawDataToolFailedEventInput
+): void {
+  if (input.rule !== RAW_DATA_WRITE_RULE_ID || input.decision !== "denied_by_advisory") {
+    throw new Error("Only trusted raw-data advisory denial events are supported.");
+  }
+
+  const proof = (input as TrustedRawDataToolFailedEventInput)[
+    RAW_DATA_TOOL_FAILED_EVENT_INPUT_PROOF
+  ];
+  if (proof !== rawDataToolFailedEventInputProof(input)) {
+    throw new Error(
+      "Raw-data advisory tool.failed events require RawDataSandboxedBashTool trusted evidence."
+    );
+  }
+}
+
+export function isReservedRawDataDenialErrorId(errorId: string | undefined): boolean {
+  return RESERVED_RAW_DATA_DENIAL_ERROR_ID_PREFIXES.some(
+    (prefix) => errorId === prefix || errorId?.startsWith(`${prefix}:`) === true
+  );
+}
+
+type TrustedRawDataToolFailedEventInput = RawDataToolFailedEventInput & {
+  [RAW_DATA_TOOL_FAILED_EVENT_INPUT_PROOF]?: string;
+};
+
+function proveRawDataToolFailedEventInput(input: RawDataToolFailedEventInput): void {
+  Object.defineProperty(input, RAW_DATA_TOOL_FAILED_EVENT_INPUT_PROOF, {
+    value: rawDataToolFailedEventInputProof(input),
+    enumerable: true,
+    configurable: false,
+    writable: false
+  });
+}
+
+function rawDataToolFailedEventInputProof(input: RawDataToolFailedEventInput): string {
+  return createHash("sha256")
+    .update(RAW_DATA_TOOL_FAILED_EVENT_INPUT_PROOF_SECRET)
+    .update(JSON.stringify(rawDataToolFailedEventInputProofMaterial(input)))
+    .digest("hex");
+}
+
+function rawDataToolFailedEventInputProofMaterial(input: RawDataToolFailedEventInput): unknown {
+  return {
+    toolId: input.toolId,
+    rule: input.rule,
+    decision: input.decision,
+    guardClass: input.guardClass,
+    profileId: input.profileId,
+    invocationId: input.invocationId ?? null,
+    error: errorRecordProofMaterial(input.error)
+  };
+}
+
+function errorRecordProofMaterial(error: ErrorRecord): unknown {
+  return {
+    error_id: error.error_id,
+    category: error.category,
+    severity: error.severity,
+    task_id: error.task_id ?? null,
+    job_id: error.job_id ?? null,
+    run_id: error.run_id ?? null,
+    report_id: error.report_id ?? null,
+    message: error.message,
+    user_message: error.user_message,
+    evidence_refs: [...error.evidence_refs],
+    retryable: error.retryable,
+    recommended_next_actions: [...error.recommended_next_actions],
+    remediation: error.remediation
+      ? {
+          next_action: error.remediation.next_action,
+          hint: error.remediation.hint,
+          ref: error.remediation.ref ?? null
+        }
+      : null,
+    created_at: error.created_at
   };
 }
 

@@ -32,4 +32,3 @@ Findings:
 
 Non-blocking notes:
 - Reviewer remained read-only.
-

@@ -41,4 +41,3 @@ Findings:
 
 Non-blocking notes:
 - Historical evidence is SHA-scoped.
-
