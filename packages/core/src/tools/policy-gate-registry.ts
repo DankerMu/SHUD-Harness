@@ -240,29 +240,44 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
 
   async run(toolContext: ToolContext, input: unknown): Promise<ToolResult> {
     const startTime = Date.now();
-    const decision = await this.options.evaluate(
-      {
-        toolId: this.policyGateToolId,
-        role: this.options.role ?? resolveRole(toolContext),
-        input,
-        workDir: toolContext.workDir
-      },
-      {
-        tool: this.innerTool,
-        toolContext
-      }
-    );
+    let decision: PolicyGateDecision;
+    try {
+      decision = await this.options.evaluate(
+        {
+          toolId: this.policyGateToolId,
+          role: this.options.role ?? resolveRole(toolContext),
+          input,
+          workDir: toolContext.workDir
+        },
+        {
+          tool: this.innerTool,
+          toolContext
+        }
+      );
+    } catch (error) {
+      const durationMs = Date.now() - startTime;
+      const errorMessage = toErrorMessage(error);
+      return this.finalizePolicyGateResult(
+        toolContext,
+        {
+          success: false,
+          output: errorMessage,
+          outputSummary: `Error: ${errorMessage.slice(0, 100)}`
+        },
+        durationMs
+      );
+    }
 
     if (decision.decision === "deny") {
       const durationMs = Date.now() - startTime;
       if (decision.ruleId === RAW_DATA_WRITE_RULE_ID) {
-        return this.finalizeDeniedResult(
+        return this.finalizePolicyGateResult(
           toolContext,
           buildRawDataRuleMisconfiguredResult(this.policyGateToolId, decision),
           durationMs
         );
       }
-      return this.finalizeDeniedResult(
+      return this.finalizePolicyGateResult(
         toolContext,
         buildPolicyGateDeniedResult(this.policyGateToolId, decision),
         durationMs
@@ -276,14 +291,14 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     throw new Error("PolicyGatedBaseToolAdapter delegates through run().");
   }
 
-  private async finalizeDeniedResult(
+  private async finalizePolicyGateResult(
     toolContext: ToolContext,
     result: ToolResult,
     durationMs: number
   ): Promise<ToolResult> {
+    let finalResult = result;
     try {
-      await this.afterExecute(toolContext, result, durationMs);
-      return result;
+      await this.afterExecute(toolContext, finalResult, durationMs);
     } catch (error) {
       const errorMessage = toErrorMessage(error);
       toolContext.logger.error("tool_call_error", {
@@ -291,12 +306,28 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
         error: errorMessage,
         durationMs
       });
-      return {
+      finalResult = {
         success: false,
         output: errorMessage,
         outputSummary: `Error: ${errorMessage.slice(0, 100)}`
       };
     }
+    this.markRunningToolFinished(toolContext, finalResult);
+    return finalResult;
+  }
+
+  private markRunningToolFinished(toolContext: ToolContext, result: ToolResult): void {
+    const toolUseId = toolContext.currentToolUseId;
+    const runningHandle =
+      toolUseId && toolContext.runningToolRegistry
+        ? toolContext.runningToolRegistry.get(toolUseId)
+        : undefined;
+    runningHandle?.markFinished({
+      finishedAt: new Date().toISOString(),
+      cause: "completed",
+      success: result.success,
+      outputSummary: result.outputSummary
+    });
   }
 }
 

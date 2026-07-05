@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { BaseTool, BashTool, SpawnAgentTool, ToolRegistry } from "@zero-os/core";
 import type {
   FuseRule,
+  RunningToolHandle,
+  RunningToolRegistry,
+  RunningToolTerminalMetadata,
   SecretFilter,
   ToolContext,
   ToolLogger,
@@ -89,6 +92,77 @@ describe("policy-gated zero tool registry", () => {
     expect(payload.remediation?.ref).toBe(
       "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
     );
+    expect(bashTool.calls).toBe(0);
+  });
+
+  test("evaluator exceptions fail closed without executing the inner tool", async () => {
+    const editTool = new RecordingTool("edit");
+    const runningToolRegistry = new TestRunningToolRegistry();
+    const handle = runningToolRegistry.register({
+      toolUseId: "POLICY-EVALUATOR-1",
+      toolName: "edit",
+      abortable: false
+    });
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: () => {
+        throw new Error("policy evaluator unavailable");
+      }
+    });
+
+    const result = await wrapped.run(
+      {
+        ...createToolContext("worker"),
+        currentToolUseId: "POLICY-EVALUATOR-1",
+        runningToolRegistry
+      },
+      {
+        command: "write"
+      }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy evaluator unavailable");
+    expect(result.outputSummary).toContain("Error: policy evaluator unavailable");
+    expect(editTool.calls).toBe(0);
+    expect(handle.getState()).toBe("finished");
+    expect(handle.getTerminalMetadata()).toMatchObject({
+      cause: "completed",
+      success: false,
+      outputSummary: result.outputSummary
+    });
+  });
+
+  test("invalid remediation from policy evaluator returns failed ToolResult", async () => {
+    const bashTool = new RecordingTool("bash");
+    const wrapped = wrapToolWithPolicyGate(bashTool, {
+      evaluate: createPolicyGateEvaluator({
+        rules: [
+          {
+            ruleId: "invalid-remediation-rule",
+            description: "Returns invalid remediation.",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "invalid remediation",
+              remediation: {
+                next_action: "try_anyway",
+                hint: "No route.",
+                ref: "spec"
+              } as never
+            })
+          }
+        ]
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: "printf nope > data/raw/input.csv"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain(
+      "Invalid policy gate remediation for invalid-remediation-rule"
+    );
+    expect(result.outputSummary).toContain("Error: Invalid policy gate remediation");
     expect(bashTool.calls).toBe(0);
   });
 
@@ -869,6 +943,85 @@ function createSpawnModelRouterStub(): ConstructorParameters<typeof SpawnAgentTo
     getAdapter: () => undefined,
     getModelLabel: () => "test/model"
   } as unknown as ConstructorParameters<typeof SpawnAgentTool>[0];
+}
+
+class TestRunningToolRegistry implements RunningToolRegistry {
+  private readonly handles = new Map<string, TestRunningToolHandle>();
+
+  register(entry: {
+    toolUseId: string;
+    toolName: string;
+    abortable: boolean;
+  }): RunningToolHandle {
+    const handle = new TestRunningToolHandle(entry);
+    this.handles.set(entry.toolUseId, handle);
+    return handle;
+  }
+
+  get(toolUseId: string): RunningToolHandle | undefined {
+    return this.handles.get(toolUseId);
+  }
+}
+
+class TestRunningToolHandle implements RunningToolHandle {
+  readonly toolUseId: string;
+  readonly toolName: string;
+  readonly abortable: boolean;
+
+  private state: "running" | "abort_requested" | "finished" = "running";
+  private abortReason: string | undefined;
+  private abortHandler: ((reason?: string) => void) | undefined;
+  private terminalMetadata: RunningToolTerminalMetadata | undefined;
+
+  constructor(entry: { toolUseId: string; toolName: string; abortable: boolean }) {
+    this.toolUseId = entry.toolUseId;
+    this.toolName = entry.toolName;
+    this.abortable = entry.abortable;
+  }
+
+  getState(): "running" | "abort_requested" | "finished" {
+    return this.state;
+  }
+
+  getAbortReason(): string | undefined {
+    return this.abortReason;
+  }
+
+  getTerminalMetadata(): RunningToolTerminalMetadata | undefined {
+    return this.terminalMetadata;
+  }
+
+  requestAbort(reason?: string): "accepted" | "already_requested" | "already_finished" | "not_abortable" {
+    if (!this.abortable) {
+      return "not_abortable";
+    }
+    if (this.state === "finished") {
+      return "already_finished";
+    }
+    if (this.state === "abort_requested") {
+      return "already_requested";
+    }
+    this.state = "abort_requested";
+    this.abortReason = reason;
+    this.abortHandler?.(reason);
+    return "accepted";
+  }
+
+  setAbortHandler(handler: (reason?: string) => void): void {
+    this.abortHandler = handler;
+    if (this.state === "abort_requested") {
+      handler(this.abortReason);
+    }
+  }
+
+  markFinished(metadata: RunningToolTerminalMetadata): boolean {
+    if (this.state === "finished") {
+      return false;
+    }
+    this.state = "finished";
+    this.terminalMetadata = metadata;
+    return true;
+  }
 }
 
 class TestSecretFilter implements SecretFilter {

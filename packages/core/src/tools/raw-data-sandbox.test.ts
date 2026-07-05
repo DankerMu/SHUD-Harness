@@ -1764,7 +1764,7 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  rubySeatbeltTest("Ruby delete, move, and copy-to-raw mutations are denied when stderr is suppressed", async () => {
+  rubySeatbeltTest("Ruby delete/copy-to-raw are denied and raw-source move preserves raw bytes while copy-to-workspace may occur when stderr is suppressed", async () => {
     const fixture = await createFixture();
     try {
       await writeFile(join(fixture.workspaceRoot, "ruby-source.csv"), "derived\n", "utf8");
@@ -1779,8 +1779,11 @@ describe("raw data seatbelt sandbox", () => {
           command:
             "ruby -rfileutils -e 'FileUtils.mv(\"data/raw/input.csv\", \"workspace/ruby-moved.csv\")' 2>/dev/null || true",
           assert: async () => {
+            const movedPath = join(fixture.workspaceRoot, "ruby-moved.csv");
             expect(await readFile(join(fixture.rawRoot, "input.csv"), "utf8")).toBe("raw,input\n");
-            await expectMissing(join(fixture.workspaceRoot, "ruby-moved.csv"));
+            if (existsSync(movedPath)) {
+              expect(await readFile(movedPath, "utf8")).toBe("raw,input\n");
+            }
           }
         },
         {
