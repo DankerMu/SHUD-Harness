@@ -38,6 +38,12 @@ key 变量，走 ADR 例外通道）；InferenceBudget 三档 USD 按定案流�
 pre-exec 静态检查降级 advisory——与 Preflight_And_Mutation_Boundary_Spec"preflight 是 submit 前的门，
 不是运行期防线"（A03-5）既有分工一致。spec 正文唯一改动：Phased_Plan M1 spike 条 2 行机制修订（真相源
 条文与裁决对齐）；其余落实施记录 `m1-foundation` 与 [ADR-0001 revisit 记录](adr/0001-agent-runtime-and-topology.md)。
+**2026-07-04 PR #48 post-gate 延伸**：条 2' 首实现经六路 review + verifier 确认 4 条 merge-blocking finding，
+均为同一堵墙换位（wrapper 从命令文本 + 进程采样反推运行期真相），且**无一击穿 raw 字节完整性**。裁决补充 =
+保证分层：byte authority（seatbelt 守 raw 字节，不变）留验收核，denial telemetry 收窄为可观测（advisory +
+经进程结果外显的 OS 拒绝），隐藏拒绝完整遥测 + 任意后代进程生命周期所有权移出 M1 归后续 executor/audit 后端。
+spec 正文改动仍限 Phased_Plan M1 条 2 行（追加可观测边界注）；其余落 `m1-foundation` 与 ADR-0001 裁决补充。
+四条 finding 按 acceptance-boundary 修正处置（非实现漏项，cand-04 随 process-creation preflight 收窄修复）。
 
 **依据：** 本文档基于全部文档的交叉引用和依赖链深度分析生成。
 

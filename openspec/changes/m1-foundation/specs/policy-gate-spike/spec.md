@@ -22,19 +22,21 @@
 
 路径写禁区规则（`data/raw/**`）的 authority SHALL 位于执行层 OS 沙箱：bash 工具 spawn 命令时施加沙箱 profile（macOS = `sandbox-exec`/seatbelt：`deny file-write*` subpath `data/raw`，其余默认放行），写入在 syscall 层按解析后真实目标路径被拒，子进程 MUST 继承约束；合法 `data/raw` 读取与 workspace 允许目录写入 MUST 不受影响。pre-exec 静态检查降级为 advisory 提示层（fail-open）：MAY 对可静态识别的明显违规在执行前拒绝并给出 remediation，MUST NOT 作为唯一 authority，MUST NOT 因不确定而误拒合法读取。
 
-拒绝面（advisory 提前拒与 OS 层运行期拒同一错误形态）MUST 产出含 `remediation{next_action, hint, ref}` 的工具错误；拒绝事件 MUST 经 WebSocket 推出，事件类型复用 WebSocket_Protocol §3 注册表既有的 `tool.failed`（冻结注册表内无 policy-denial 类事件，本 change 不新增事件类型），payload 携带含 remediation 的 ErrorRecord，skeleton 深度：envelope 含 seq/event_id。同时 MUST 落 audit 最小行：字段至少含 `event`、`tool_id`、`rule`、`decision`、`ts`，施加了沙箱 profile 的每次 bash 调用 audit 行 MUST 含 profile 标识（运行期拒 decision 记 `denied_by_sandbox`）；落盘遵 Workspace_Conventions `tasks/<task_id>/audit/` 布局，spike 的 bash 拒绝发生在无 TaskCard 上下文时固定使用 fixture 任务目录 `workspace/tasks/TASK-M1-SPIKE/audit/`；完整 AuditEvent schema（User_Session_And_Audit_Schema §4）与完整协议随 M3 对齐。
+**可观测拒绝面**（advisory 提前拒 + 经进程结果外显的 OS 层拒绝，同一错误形态）MUST 产出含 `remediation{next_action, hint, ref}` 的工具错误；该拒绝事件 MUST 经 WebSocket 推出，事件类型复用 WebSocket_Protocol §3 注册表既有的 `tool.failed`（冻结注册表内无 policy-denial 类事件，本 change 不新增事件类型），payload 携带含 remediation 的 ErrorRecord，skeleton 深度：envelope 含 seq/event_id。每次施加了沙箱 profile 的 bash 调用 MUST 落 audit 最小行：字段至少含 `event`、`tool_id`、`rule`、`decision`、`ts` + profile 标识（可观测 OS 拒绝 decision 记 `denied_by_sandbox`）；audit 行 MUST 只记可观测事实（施加的 profile、退出状态、advisory 决策），MUST NOT 声称已检出每一次被拒尝试。落盘遵 Workspace_Conventions `tasks/<task_id>/audit/` 布局，spike 的 bash 拒绝发生在无 TaskCard 上下文时固定使用 fixture 任务目录 `workspace/tasks/TASK-M1-SPIKE/audit/`；完整 AuditEvent schema（User_Session_And_Audit_Schema §4）与完整协议随 M3 对齐。
 
-重定背景（2026-07-04）：首轮条 2 以 pre-exec 静态命令串扫描作为唯一 authority 判 Not green——静态扫描无法同时满足"任意 bash 写入拒绝 / 合法 raw 读兼容 / 不实现 full shell parser"，六类逃逸 + 读误拒证据见 [policy-gate-spike-verdict](../../policy-gate-spike-verdict.md)（PR #46 留作 spike 证据）；按 ADR-0001 revisit 裁决与冻结 spec 既有分工重定为执行层 enforcement。
+隐藏拒绝遥测与进程树所有权移出条 2'（2026-07-04 PR #48 post-gate 补充）：子进程**吞掉** OS 拒绝（捕获 EPERM、抑制 stderr、exit 0）时，当前 M1 wrapper 原语不能可靠观测该被拒尝试，此类**隐藏拒绝的完整遥测** SHALL NOT 作为条 2' 验收项，归后续 executor/audit 后端（OS 事件源）。同理，双 fork/setsid/会话分裂产生的**任意后代进程生命周期所有权**（终态后 workspace 写）经 PPID 采样不可靠，SHALL NOT 作为条 2' 验收项，归后续 executor/runtime containment；raw 字节仍由继承 profile 守住。为捕获后代而设的 process-creation preflight MUST NOT 过宽——合法的 **waited 前台子进程**（fork 后 wait 再退出）写 workspace MUST 保持放行。上述移出项 MUST NOT 削弱本 requirement 第一段的 **raw 字节完整性**不变量：seatbelt 对六类逃逸的字节保护不依赖遥测或进程采样。
+
+重定背景（2026-07-04）：首轮条 2 以 pre-exec 静态命令串扫描作为唯一 authority 判 Not green——静态扫描无法同时满足"任意 bash 写入拒绝 / 合法 raw 读兼容 / 不实现 full shell parser"，六类逃逸 + 读误拒证据见 [policy-gate-spike-verdict](../../policy-gate-spike-verdict.md)（PR #46 留作 spike 证据）；按 ADR-0001 revisit 裁决与冻结 spec 既有分工重定为执行层 enforcement；条 2' 首实现（PR #48）post-gate 复审进一步把遥测/进程所有权收窄为可观测边界（见上文移出项与 [ADR-0001](../../../../../docs/adr/0001-agent-runtime-and-topology.md) 2026-07-04 裁决补充）。
 
 #### Scenario: 六类逃逸负例在 OS 层被拒
 
 - **WHEN** agent 通过 bash 以下列任一形态尝试写入 `data/raw/`：解释器 payload（如 perl/python open 写）、pipeline/stdin 数据流（如 tee）、动态构造写目标（变量拼路径）、shell 动态状态（cd 后相对路径、子/孙进程）、别名路径（symlink 指入、`../` 穿越）、rename/unlink
-- **THEN** 写入无一落盘（syscall 层拒绝）、返回含 remediation 三字段的工具错误、WebSocket 收到 `tool.failed` 事件（envelope 含 seq/event_id，payload 携带 remediation）、audit 最小行落盘于约定路径且含 event/tool_id/rule/decision/ts + profile 标识
+- **THEN** 六类形态的写入**无一落盘**（syscall 层按解析后真实路径拒绝，穿 symlink/`../`/超预算/继承 profile 的子孙进程一致）——此为**必须全过**的 raw 字节完整性不变量；当该拒绝**可观测**（advisory 提前捕获，或 OS 拒绝经非零退出/未捕获错误外显）时，MUST 返回含 remediation 三字段的工具错误、WebSocket 收到 `tool.failed` 事件（envelope 含 seq/event_id，payload 携带 remediation）、audit 最小行落盘含 event/tool_id/rule/decision/ts + profile 标识；子进程吞掉拒绝并 exit 0 的隐藏形态，字节保护仍成立而完整遥测不作验收（见上文移出项）
 
 #### Scenario: 合法读取与 workspace 写不受影响
 
-- **WHEN** agent 通过 bash 读取 `data/raw/` 下文件，或写入 workspace 允许目录
-- **THEN** 命令在沙箱 profile 下成功执行，无误拒
+- **WHEN** agent 通过 bash 读取 `data/raw/` 下文件，或写入 workspace 允许目录，或经**合法 waited 前台子进程**（如 `python3 -c 'import subprocess,sys; p=subprocess.Popen([...]); sys.exit(p.wait())'` 写 workspace）
+- **THEN** 命令在沙箱 profile 下成功执行，无误拒；process-creation preflight MUST NOT 因存在子进程创建而拒绝已 wait 的合法前台子进程
 
 #### Scenario: 预存 hardlink 残留有兜底
 
@@ -45,6 +47,11 @@
 
 - **WHEN** pre-exec advisory 层识别出明显的 raw 写入意图
 - **THEN** 可在执行前拒绝并返回与 OS 层拒绝同形态的 remediation 错误；advisory 漏判不构成放行风险（OS 层兜底），advisory 误判 MUST NOT 拦截合法读取
+
+#### Scenario: 隐藏拒绝与后代生命周期不构成 raw 完整性缺口
+
+- **WHEN** 子进程吞掉 OS 拒绝后 exit 0（隐藏拒绝），或双 fork/setsid 后代在 wrapper 终态后尝试写入
+- **THEN** `data/raw/**` 字节仍未被改写（继承 profile 在 syscall 层守住）——raw 字节完整性不变量成立；隐藏拒绝的完整遥测与任意后代进程生命周期所有权不作为条 2' 验收项（归后续 executor/audit 后端），实现证据 MUST 如实标注为移出边界，MUST NOT 以静态扫描/进程采样伪造"已检出"
 
 ### Requirement: spawn 剖面超集拒绝（spike 条 3）
 
