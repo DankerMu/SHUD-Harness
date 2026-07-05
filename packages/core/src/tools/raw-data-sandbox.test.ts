@@ -86,9 +86,20 @@ describe("raw data seatbelt sandbox", () => {
     );
   });
 
-  test("public audit append rejects reserved sandbox raw-denial rows", async () => {
+  test("public audit append rejects raw-denial rows", async () => {
     const fixture = await createFixture();
     try {
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          row: {
+            ...minimalAuditRow(),
+            decision: "denied_by_advisory"
+          }
+        })
+      ).rejects.toThrow("Raw-data denial audit rows require");
+
       await expect(
         appendPolicyGateAuditRow({
           workspaceRoot: fixture.root,
@@ -98,7 +109,7 @@ describe("raw data seatbelt sandbox", () => {
             decision: "denied_by_sandbox"
           }
         })
-      ).rejects.toThrow("Reserved sandbox raw-denial");
+      ).rejects.toThrow("Raw-data denial audit rows require");
 
       await expectMissing(
         join(
@@ -109,6 +120,34 @@ describe("raw data seatbelt sandbox", () => {
           "policy-gate.ndjson"
         )
       );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append keeps lifecycle and non-raw denial rows available", async () => {
+    const fixture = await createFixture();
+    try {
+      const lifecyclePath = await appendPolicyGateAuditRow({
+        workspaceRoot: fixture.root,
+        protectedRawPaths: [fixture.rawRoot],
+        fileName: "lifecycle.ndjson",
+        row: minimalAuditRow()
+      });
+      const nonRawPath = await appendPolicyGateAuditRow({
+        workspaceRoot: fixture.root,
+        protectedRawPaths: [fixture.rawRoot],
+        fileName: "non-raw-denial.ndjson",
+        row: {
+          ...minimalAuditRow(),
+          rule: "workspace-quota",
+          decision: "denied_by_advisory"
+        }
+      });
+
+      expect(await readFile(lifecyclePath, "utf8")).toContain('"decision":"failed"');
+      expect(await readFile(nonRawPath, "utf8")).toContain('"rule":"workspace-quota"');
+      expect(await readFile(nonRawPath, "utf8")).toContain('"decision":"denied_by_advisory"');
     } finally {
       await fixture.cleanup();
     }
@@ -220,6 +259,41 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  seatbeltTest("omitted auditWorkspaceRoot defaults to stable pathResolutionRoot workspace", async () => {
+    const fixture = await createFixture();
+    try {
+      const nestedWorkDir = join(fixture.workspaceRoot, "nested", "child");
+      await mkdir(nestedWorkDir, { recursive: true });
+
+      const result = await runSandboxed(
+        fixture,
+        `printf ok > ${join(fixture.workspaceRoot, "stable-default-audit-root.txt")}`,
+        {
+          pathResolutionRoot: fixture.root,
+          context: {
+            ...fixture.context,
+            workDir: nestedWorkDir
+          }
+        }
+      );
+
+      expect(result.success).toBe(true);
+      expect(
+        await readFile(join(fixture.workspaceRoot, "stable-default-audit-root.txt"), "utf8")
+      ).toBe("ok");
+      const rows = await readAuditRowsFromWorkspaceRoot(fixture.workspaceRoot);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
+      });
+      await expectMissing(
+        join(nestedWorkDir, "tasks", "TASK-M1-SPIKE", "audit", "policy-gate.ndjson")
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("relative runtime roots without pathResolutionRoot fail closed before execution", async () => {
     const cases: readonly {
       name: string;
@@ -285,6 +359,57 @@ describe("raw data seatbelt sandbox", () => {
       } finally {
         await fixture.cleanup();
       }
+    }
+  });
+
+  seatbeltTest("relative protected evidence paths bind to pathResolutionRoot despite cwd drift", async () => {
+    const fixture = await createFixture();
+    const originalCwd = process.cwd();
+    const otherCwd = await mkdtemp(join(tmpdir(), "shud-raw-other-cwd-"));
+    try {
+      process.chdir(otherCwd);
+      const evidenceRoot = join(fixture.workspaceRoot, "protected-evidence");
+      const nestedWorkDir = join(fixture.workspaceRoot, "nested");
+      await mkdir(evidenceRoot, { recursive: true });
+      await mkdir(nestedWorkDir, { recursive: true });
+
+      const tool = new RawDataSandboxedBashTool({
+        protectedRawPaths: ["data/raw"],
+        protectedEvidencePaths: ["workspace/protected-evidence"],
+        allowedWriteRoots: ["workspace"],
+        tempRoot: "workspace/tmp",
+        profileRoot: "workspace/profiles",
+        pathResolutionRoot: fixture.root,
+        enableAdvisory: false,
+        fuseRules: []
+      });
+      const result = await tool.run(
+        {
+          ...fixture.context,
+          workDir: nestedWorkDir
+        },
+        {
+          command:
+            "printf blocked > ../protected-evidence/blocked.txt; printf ok > ../evidence-normal.txt",
+          timeout: 30_000
+        }
+      );
+
+      expect(result.success).toBe(true);
+      await expectMissing(join(evidenceRoot, "blocked.txt"));
+      expect(await readFile(join(fixture.workspaceRoot, "evidence-normal.txt"), "utf8")).toBe(
+        "ok"
+      );
+      await expectMissing(join(otherCwd, "workspace", "protected-evidence", "blocked.txt"));
+      const rows = await readAuditRowsFromWorkspaceRoot(fixture.workspaceRoot);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
+      });
+    } finally {
+      process.chdir(originalCwd);
+      await rm(otherCwd, { recursive: true, force: true });
+      await fixture.cleanup();
     }
   });
 
@@ -1949,6 +2074,25 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("test running tool handle replays abort requested before handler registration", () => {
+    const registry = new TestRunningToolRegistry();
+    const handle = registry.register({
+      toolUseId: "TOOL-CALL-ABORT",
+      toolName: "bash",
+      abortable: true
+    });
+    let deliveredReason: string | undefined;
+
+    expect(handle.requestAbort("early stop")).toBe("accepted");
+    handle.setAbortHandler((reason) => {
+      deliveredReason = reason;
+    });
+
+    expect(deliveredReason).toBe("early stop");
+    expect(handle.getState()).toBe("abort_requested");
+    expect(handle.getAbortReason()).toBe("early stop");
+  });
+
   seatbeltTest("abort terminates background children before they can write", async () => {
     const fixture = await createFixture();
     try {
@@ -3244,6 +3388,80 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("public helpers reject relative roots instead of binding to process cwd", async () => {
+    const fixture = await createFixture();
+    const originalCwd = process.cwd();
+    const otherCwd = await mkdtemp(join(tmpdir(), "shud-raw-helper-cwd-"));
+    try {
+      process.chdir(otherCwd);
+
+      await expect(
+        buildRawDataSeatbeltProfile({
+          protectedRawPaths: ["data/raw"],
+          allowedWriteRoots: [fixture.root],
+          tempRoot: fixture.tempRoot,
+          profileRoot: fixture.profileRoot
+        })
+      ).rejects.toThrow("protectedRawPaths must be absolute");
+      await expect(
+        buildRawDataSeatbeltProfile({
+          protectedRawPaths: [fixture.rawRoot],
+          allowedWriteRoots: ["workspace"],
+          tempRoot: fixture.tempRoot,
+          profileRoot: fixture.profileRoot
+        })
+      ).rejects.toThrow("allowedWriteRoots must be absolute");
+      await expect(
+        buildRawDataSeatbeltProfile({
+          protectedRawPaths: [fixture.rawRoot],
+          protectedEvidencePaths: ["workspace/evidence"],
+          allowedWriteRoots: [fixture.root],
+          tempRoot: fixture.tempRoot,
+          profileRoot: fixture.profileRoot
+        })
+      ).rejects.toThrow("protectedEvidencePaths must be absolute");
+      await expect(
+        buildRawDataSeatbeltProfile({
+          protectedRawPaths: [fixture.rawRoot],
+          allowedWriteRoots: [fixture.root],
+          tempRoot: "workspace/tmp",
+          profileRoot: fixture.profileRoot
+        })
+      ).rejects.toThrow("tempRoot must be absolute");
+      await expect(
+        buildRawDataSeatbeltProfile({
+          protectedRawPaths: [fixture.rawRoot],
+          allowedWriteRoots: [fixture.root],
+          tempRoot: fixture.tempRoot,
+          profileRoot: "workspace/profiles"
+        })
+      ).rejects.toThrow("profileRoot must be absolute");
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: "workspace",
+          protectedRawPaths: [fixture.rawRoot],
+          row: minimalAuditRow()
+        })
+      ).rejects.toThrow("workspaceRoot must be absolute");
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: ["data/raw"],
+          row: minimalAuditRow()
+        })
+      ).rejects.toThrow("protectedRawPaths must be absolute");
+      await expect(
+        scanProtectedHardlinks({ protectedRoots: ["data/raw"] })
+      ).rejects.toThrow("protectedRoots must be absolute");
+
+      await expectMissing(join(otherCwd, "workspace", "tasks"));
+    } finally {
+      process.chdir(originalCwd);
+      await rm(otherCwd, { recursive: true, force: true });
+      await fixture.cleanup();
+    }
+  });
+
   test("audit root resolves project-root fixtures and canonical workspace roots", async () => {
     const fixture = await createFixture();
     try {
@@ -3280,9 +3498,9 @@ describe("raw data seatbelt sandbox", () => {
         )
       );
       expect(canonicalWorkspaceAuditPath).not.toContain("workspace/workspace");
-      expect(await readFile(projectRootAuditPath, "utf8")).toContain("denied_by_advisory");
+      expect(await readFile(projectRootAuditPath, "utf8")).toContain('"decision":"failed"');
       expect(await readFile(canonicalWorkspaceAuditPath, "utf8")).toContain(
-        "denied_by_advisory"
+        '"decision":"failed"'
       );
     } finally {
       await fixture.cleanup();
@@ -3307,7 +3525,7 @@ describe("raw data seatbelt sandbox", () => {
       expect(auditPath).toBe(
         join(canonicalRoot, "workspace", "tasks", "TASK-M1-SPIKE", "audit", "fresh-project.ndjson")
       );
-      expect(await readFile(auditPath, "utf8")).toContain("denied_by_advisory");
+      expect(await readFile(auditPath, "utf8")).toContain('"decision":"failed"');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -3834,7 +4052,7 @@ function minimalAuditRow(): PolicyGateAuditRow {
     event: "tool.failed",
     tool_id: "bash",
     rule: RAW_DATA_WRITE_RULE_ID,
-    decision: "denied_by_advisory",
+    decision: "failed",
     ts: "2026-07-04T00:00:00.000Z"
   };
 }
@@ -3952,6 +4170,9 @@ class TestRunningToolHandle implements RunningToolHandle {
 
   setAbortHandler(handler: (reason?: string) => void): void {
     this.abortHandler = handler;
+    if (this.state === "abort_requested") {
+      handler(this.abortReason);
+    }
   }
 
   markFinished(metadata: RunningToolTerminalMetadata): boolean {

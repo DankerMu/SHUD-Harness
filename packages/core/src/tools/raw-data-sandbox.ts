@@ -174,6 +174,17 @@ export async function buildRawDataSeatbeltProfile(
   if (options.allowedWriteRoots.length === 0) {
     throw new Error("At least one allowed write root is required.");
   }
+  assertAbsoluteRoots(options.protectedRawPaths, "protectedRawPaths");
+  assertAbsoluteRoots(options.allowedWriteRoots, "allowedWriteRoots");
+  if (options.protectedEvidencePaths) {
+    assertAbsoluteRoots(options.protectedEvidencePaths, "protectedEvidencePaths");
+  }
+  if (options.tempRoot !== undefined) {
+    assertAbsoluteRoot(options.tempRoot, "tempRoot");
+  }
+  if (options.profileRoot !== undefined) {
+    assertAbsoluteRoot(options.profileRoot, "profileRoot");
+  }
 
   const protectedRawPaths = await canonicalizePathSet(options.protectedRawPaths);
   const protectedEvidencePaths = options.protectedEvidencePaths
@@ -333,16 +344,34 @@ function resolveRawDataSandboxRuntimeRoots(
           }
         : {})
     },
-    ...(options.auditWorkspaceRoot !== undefined
-      ? {
-          auditWorkspaceRoot: resolveRuntimeRoot(
-            options.auditWorkspaceRoot,
-            "auditWorkspaceRoot",
-            options.pathResolutionRoot
-          )
-        }
-      : {})
+    ...resolveAuditWorkspaceRootOption(options)
   };
+}
+
+function resolveAuditWorkspaceRootOption(
+  options: RawDataSandboxedBashToolOptions
+): Pick<ResolvedRawDataSandboxRuntimeRoots, "auditWorkspaceRoot"> {
+  if (options.auditWorkspaceRoot !== undefined) {
+    return {
+      auditWorkspaceRoot: resolveRuntimeRoot(
+        options.auditWorkspaceRoot,
+        "auditWorkspaceRoot",
+        options.pathResolutionRoot
+      )
+    };
+  }
+
+  if (options.pathResolutionRoot !== undefined) {
+    return {
+      auditWorkspaceRoot: resolveRuntimeRoot(
+        "workspace",
+        "auditWorkspaceRoot",
+        options.pathResolutionRoot
+      )
+    };
+  }
+
+  return {};
 }
 
 function resolveRuntimeRoot(
@@ -772,6 +801,8 @@ export async function appendPolicyGateAuditRow(
   options: AppendPolicyGateAuditRowOptions
 ): Promise<string> {
   assertProtectedRawPathsProvided(options.protectedRawPaths);
+  assertAbsoluteRoot(options.workspaceRoot, "workspaceRoot");
+  assertAbsoluteRoots(options.protectedRawPaths, "protectedRawPaths");
   assertPublicPolicyGateAuditRow(options.row);
   const taskId = options.taskId ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID;
   assertSafePathSegment(taskId, "audit task id");
@@ -794,8 +825,10 @@ export async function appendPolicyGateAuditRow(
 }
 
 function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
-  if (row.rule === RAW_DATA_WRITE_RULE_ID && row.decision === "denied_by_sandbox") {
-    throw new Error("Reserved sandbox raw-denial audit rows require a trusted OS event source.");
+  if (row.rule === RAW_DATA_WRITE_RULE_ID && isRawDataDenialDecision(row.decision)) {
+    throw new Error(
+      "Raw-data denial audit rows require RawDataSandboxedBashTool trusted evidence."
+    );
   }
 }
 
@@ -939,6 +972,7 @@ export async function scanProtectedHardlinks(input: {
   protectedRoots: readonly string[];
   maxScannedPathCount?: number;
 }): Promise<HardlinkScanResult> {
+  assertAbsoluteRoots(input.protectedRoots, "protectedRoots");
   const protectedRoots = await canonicalizePathSet(input.protectedRoots);
   const maxScannedPathCount = input.maxScannedPathCount ?? 10_000;
   if (!Number.isInteger(maxScannedPathCount) || maxScannedPathCount < 1) {
@@ -4103,6 +4137,22 @@ function assertProtectedRawPathsProvided(
   if (!Array.isArray(protectedRawPaths) || protectedRawPaths.length === 0) {
     throw new Error("protectedRawPaths is required for policy gate audit writes.");
   }
+}
+
+function assertAbsoluteRoots(paths: readonly string[], label: string): void {
+  for (const path of paths) {
+    assertAbsoluteRoot(path, label);
+  }
+}
+
+function assertAbsoluteRoot(path: string, label: string): void {
+  if (!isAbsolute(path)) {
+    throw new Error(`${label} must be absolute: ${path}`);
+  }
+}
+
+function isRawDataDenialDecision(decision: string): boolean {
+  return decision === "denied_by_advisory" || decision === "denied_by_sandbox";
 }
 
 async function ensureSafeAuditDirComponent(

@@ -1,4 +1,8 @@
-import type { ErrorRecord } from "@shud-harness/core";
+import {
+  RAW_DATA_WRITE_RULE_ID,
+  type ErrorRecord,
+  type RawDataToolFailedEventInput
+} from "@shud-harness/core";
 
 export const BACKEND_WS_NAMESPACE = "backend/ws" as const;
 
@@ -17,6 +21,9 @@ export interface ToolFailedWsEventInput {
   timestamp?: string;
 }
 
+export type RawDataAdvisoryToolFailedWsEventInput = RawDataToolFailedEventInput &
+  Pick<ToolFailedWsEventInput, "seq" | "eventId" | "timestamp">;
+
 export interface ToolFailedWsEvent {
   seq: number;
   event_id: string;
@@ -34,6 +41,18 @@ export interface ToolFailedWsEvent {
 }
 
 export function buildToolFailedWsEvent(input: ToolFailedWsEventInput): ToolFailedWsEvent {
+  assertPublicToolFailedWsEventInput(input);
+  return buildToolFailedWsEventUnchecked(input);
+}
+
+export function buildRawDataAdvisoryToolFailedWsEvent(
+  input: RawDataAdvisoryToolFailedWsEventInput
+): ToolFailedWsEvent {
+  assertRawDataAdvisoryToolFailedWsEventInput(input);
+  return buildToolFailedWsEventUnchecked(input);
+}
+
+function buildToolFailedWsEventUnchecked(input: ToolFailedWsEventInput): ToolFailedWsEvent {
   const timestamp = input.timestamp ?? new Date().toISOString();
   return {
     seq: input.seq,
@@ -50,4 +69,24 @@ export function buildToolFailedWsEvent(input: ToolFailedWsEventInput): ToolFaile
       ...(input.invocationId ? { invocation_id: input.invocationId } : {})
     }
   };
+}
+
+function assertPublicToolFailedWsEventInput(input: ToolFailedWsEventInput): void {
+  if (input.rule === RAW_DATA_WRITE_RULE_ID && isRawDataDenialDecision(input.decision)) {
+    throw new Error(
+      "Raw-data denial tool.failed events require the trusted raw-data advisory event builder."
+    );
+  }
+}
+
+function assertRawDataAdvisoryToolFailedWsEventInput(
+  input: RawDataAdvisoryToolFailedWsEventInput
+): void {
+  if (input.rule !== RAW_DATA_WRITE_RULE_ID || input.decision !== "denied_by_advisory") {
+    throw new Error("Only trusted raw-data advisory denial events are supported.");
+  }
+}
+
+function isRawDataDenialDecision(decision: string | undefined): boolean {
+  return decision === "denied_by_advisory" || decision === "denied_by_sandbox";
 }

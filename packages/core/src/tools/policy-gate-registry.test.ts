@@ -230,6 +230,48 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  seatbeltTest("SHUD runtime registry defaults audit root from pathResolutionRoot", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const nestedWorkDir = join(fixture.workspaceRoot, "nested", "child");
+      await mkdir(nestedWorkDir, { recursive: true });
+      const registry = createShudRuntimeToolRegistry({
+        protectedRawPaths: ["data/raw"],
+        allowedWriteRoots: ["workspace"],
+        tempRoot: "workspace/tmp",
+        profileRoot: "workspace/profiles",
+        pathResolutionRoot: fixture.root,
+        fuseRules: []
+      });
+
+      const result = await registry.get("bash")?.run(
+        {
+          ...fixture.context,
+          workDir: nestedWorkDir
+        },
+        { command: `printf ok > ${join(fixture.workspaceRoot, "registry-default-audit.txt")}` }
+      );
+
+      expect(result?.success).toBe(true);
+      expect(await readFile(join(fixture.workspaceRoot, "registry-default-audit.txt"), "utf8")).toBe(
+        "ok"
+      );
+      const rows = await readRawAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
+      });
+      await expect(
+        readFile(
+          join(nestedWorkDir, "tasks", "TASK-M1-SPIKE", "audit", "policy-gate.ndjson"),
+          "utf8"
+        )
+      ).rejects.toThrow();
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime rebuilds spawn_agent so scoped registries inherit sandboxed bash", async () => {
     const fixture = await createRawFixture();
     try {

@@ -10,12 +10,12 @@ import {
   RAW_DATA_WRITE_RULE_ID,
   type RawDataDenialPayload
 } from "@shud-harness/core";
-import { buildToolFailedWsEvent } from "./index";
+import { buildRawDataAdvisoryToolFailedWsEvent, buildToolFailedWsEvent } from "./index";
 
 describe("backend ws tool.failed skeleton", () => {
   test("builds tool.failed from actual raw-data advisory denial payload", async () => {
     const payload = await sampleRawDataAdvisoryDenialPayload();
-    const event = buildToolFailedWsEvent({
+    const event = buildRawDataAdvisoryToolFailedWsEvent({
       seq: 7,
       eventId: "evt-7",
       timestamp: "2026-07-04T00:00:00.000Z",
@@ -44,37 +44,59 @@ describe("backend ws tool.failed skeleton", () => {
     expect(event.payload.error.remediation?.ref).toContain("policy-gate-spike");
   });
 
-  test("builds tool.failed from reserved trusted raw-data sandbox denial payload shape", async () => {
-    // Shape coverage only; this fixture does not use public core builders to mint reserved authority.
+  test("generic tool.failed builder rejects raw-data denial-shaped events", async () => {
+    const advisory = await sampleRawDataAdvisoryDenialPayload();
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 8,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        ...rawDataDenialPayloadToToolFailedEventInput(advisory)
+      })
+    ).toThrow("Raw-data denial tool.failed events require");
+
     const payload = await sampleReservedRawDataSandboxDenialPayload();
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 9,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: payload.tool_id,
+        rule: payload.rule,
+        decision: payload.decision,
+        guardClass: payload.guard_class,
+        profileId: payload.profile_id,
+        invocationId: payload.invocation_id,
+        error: payload.error_record
+      })
+    ).toThrow("Raw-data denial tool.failed events require");
+  });
+
+  test("generic tool.failed builder still accepts raw lifecycle failures", () => {
+    const remediation = rawDataWriteRemediation();
     const event = buildToolFailedWsEvent({
-      seq: 8,
+      seq: 10,
       timestamp: "2026-07-04T00:00:00.000Z",
-      toolId: payload.tool_id,
-      rule: payload.rule,
-      decision: payload.decision,
-      guardClass: payload.guard_class,
-      profileId: payload.profile_id,
-      invocationId: payload.invocation_id,
-      error: payload.error_record
+      toolId: "bash",
+      rule: RAW_DATA_WRITE_RULE_ID,
+      decision: "failed",
+      error: {
+        error_id: "raw-data-write:failed:lifecycle",
+        category: "sandbox_error",
+        severity: "error",
+        message: "Bash command failed.",
+        user_message: "Bash command failed.",
+        evidence_refs: [],
+        retryable: false,
+        recommended_next_actions: [remediation.hint],
+        remediation,
+        created_at: "2026-07-04T00:00:00.000Z"
+      }
     });
 
-    expect(event.event_id).toBe("tool.failed:8");
-    expect(event.type).toBe("tool.failed");
-    expect(event.timestamp).toBe("2026-07-04T00:00:00.000Z");
     expect(event.payload).toMatchObject({
-      tool_id: payload.tool_id,
-      rule: payload.rule,
-      decision: "denied_by_sandbox",
-      guard_class: "authority",
-      profile_id: payload.profile_id,
-      invocation_id: payload.invocation_id
+      tool_id: "bash",
+      rule: RAW_DATA_WRITE_RULE_ID,
+      decision: "failed"
     });
-    expect(event.payload.error).toBe(payload.error_record);
-    expect(event.payload.error.error_id).toContain("denied_by_sandbox");
-    expect(event.payload.error.remediation?.next_action).toBe("adjust_scope");
-    expect(event.payload.error.remediation?.hint).toContain("data/raw");
-    expect(event.payload.error.remediation?.ref).toContain("policy-gate-spike");
   });
 });
 
