@@ -84,7 +84,7 @@ function buildToolFailedWsEventUnchecked(input: ToolFailedWsEventInput): ToolFai
 }
 
 function assertPublicToolFailedWsEventInput(input: ToolFailedWsEventInput): void {
-  if (input.rule === RAW_DATA_WRITE_RULE_ID && isRawDataDenialDecision(input.decision)) {
+  if (isRawDataDenialDecision(input.decision)) {
     throw new Error(
       "Raw-data denial tool.failed events require the trusted raw-data advisory event builder."
     );

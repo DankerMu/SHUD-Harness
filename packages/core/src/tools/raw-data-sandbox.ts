@@ -882,7 +882,7 @@ export async function appendPolicyGateAuditRow(
 }
 
 function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
-  if (row.rule === RAW_DATA_WRITE_RULE_ID && isRawDataDenialDecision(row.decision)) {
+  if (isRawDataDenialDecision(row.decision)) {
     throw new Error(
       "Raw-data denial audit rows require RawDataSandboxedBashTool trusted evidence."
     );
@@ -1464,14 +1464,18 @@ async function runSeatbeltSandboxedBash(
     if (!latchTerminationCause("abort")) {
       return;
     }
-    void terminateInvocationProcesses(proc, descendantTracker);
+    void terminateInvocationProcesses(proc, descendantTracker, {
+      signalRootProcessGroup: true
+    });
   });
 
   const timeoutId = setTimeout(() => {
     if (!latchTerminationCause("timeout")) {
       return;
     }
-    void terminateInvocationProcesses(proc, descendantTracker);
+    void terminateInvocationProcesses(proc, descendantTracker, {
+      signalRootProcessGroup: true
+    });
   }, timeout);
 
   const exitCode = await proc.exited;
@@ -1864,11 +1868,15 @@ function createStreamCapture(stream?: ReadableStream<Uint8Array> | number | null
   };
 }
 
-function tryKillProcess(proc: ReturnType<typeof Bun.spawn>, signal?: NodeJS.Signals): void {
+function tryKillProcess(
+  proc: SignalableInvocationProcess,
+  signal?: NodeJS.Signals,
+  signalProcess: (pid: number, signal?: NodeJS.Signals) => void = process.kill
+): void {
   const pid = typeof proc.pid === "number" ? proc.pid : undefined;
   if (pid && process.platform !== "win32") {
     try {
-      process.kill(-pid, signal ?? "SIGTERM");
+      signalProcess(-pid, signal ?? "SIGTERM");
       return;
     } catch {
       // Fall back to the direct subprocess handle below.
@@ -1884,10 +1892,48 @@ function tryKillProcess(proc: ReturnType<typeof Bun.spawn>, signal?: NodeJS.Sign
 
 interface InvocationDescendantTracker {
   readonly knownPids: Set<number>;
+  readonly currentPids: Set<number>;
   start(): void;
   stop(): void;
   sample(): Promise<void>;
 }
+
+interface InvocationProcessRecord {
+  pid: number;
+  ppid: number;
+  identity: string;
+}
+
+interface InvocationRootProcess {
+  readonly pid?: number;
+}
+
+interface SignalableInvocationProcess extends InvocationRootProcess {
+  kill(signal?: NodeJS.Signals): void;
+}
+
+type InvocationProcessParentTable = Map<number, InvocationProcessRecord>;
+
+interface InvocationDescendantTrackerScheduler {
+  setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout>;
+  clearTimeout(timer: ReturnType<typeof setTimeout>): void;
+}
+
+interface InvocationDescendantTrackerOptions {
+  readProcessParentTable?: () => Promise<InvocationProcessParentTable>;
+  scheduler?: InvocationDescendantTrackerScheduler;
+}
+
+interface InvocationProcessSignalOptions {
+  signalProcess?: (pid: number, signal?: NodeJS.Signals) => void;
+  sleep?: (ms: number) => Promise<void>;
+  signalRootProcessGroup?: boolean;
+}
+
+const defaultInvocationDescendantTrackerScheduler: InvocationDescendantTrackerScheduler = {
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (timer) => clearTimeout(timer)
+};
 
 /** @internal exported for focused scheduler regression coverage. */
 export function rawDataSandboxDescendantSampleDelayMs(
@@ -1904,10 +1950,15 @@ export function rawDataSandboxDescendantSampleDelayMs(
 }
 
 function createInvocationDescendantTracker(
-  proc: ReturnType<typeof Bun.spawn>
+  proc: InvocationRootProcess,
+  options: InvocationDescendantTrackerOptions = {}
 ): InvocationDescendantTracker {
   const rootPid = typeof proc.pid === "number" ? proc.pid : undefined;
+  const readProcessTable = options.readProcessParentTable ?? readProcessParentTable;
+  const scheduler = options.scheduler ?? defaultInvocationDescendantTrackerScheduler;
   const knownPids = new Set<number>();
+  const knownProcessIdentities = new Map<number, string>();
+  const currentPids = new Set<number>();
   if (rootPid) {
     knownPids.add(rootPid);
   }
@@ -1925,9 +1976,17 @@ function createInvocationDescendantTracker(
       return;
     }
     sampleInFlight = (async () => {
-      const descendants = await listDescendantPids(knownPids);
-      for (const pid of descendants) {
-        knownPids.add(pid);
+      const table = await readProcessTable();
+      const currentProcesses = listCurrentInvocationProcesses({
+        rootPid,
+        knownProcessIdentities,
+        table
+      });
+      currentPids.clear();
+      for (const processRecord of currentProcesses.values()) {
+        knownPids.add(processRecord.pid);
+        knownProcessIdentities.set(processRecord.pid, processRecord.identity);
+        currentPids.add(processRecord.pid);
       }
     })();
     try {
@@ -1945,7 +2004,7 @@ function createInvocationDescendantTracker(
     if (delayMs === undefined) {
       return;
     }
-    timer = setTimeout(() => {
+    timer = scheduler.setTimeout(() => {
       timer = undefined;
       if (!active) {
         return;
@@ -1959,6 +2018,7 @@ function createInvocationDescendantTracker(
 
   return {
     knownPids,
+    currentPids,
     start() {
       if (!rootPid || active) {
         return;
@@ -1972,7 +2032,7 @@ function createInvocationDescendantTracker(
     stop() {
       active = false;
       if (timer) {
-        clearTimeout(timer);
+        scheduler.clearTimeout(timer);
         timer = undefined;
       }
     },
@@ -1980,10 +2040,21 @@ function createInvocationDescendantTracker(
   };
 }
 
+/** @internal exported for adapter-backed tracker regression coverage. */
+export function createRawDataSandboxInvocationDescendantTrackerForTest(
+  proc: { pid?: number },
+  options: InvocationDescendantTrackerOptions
+): InvocationDescendantTracker {
+  return createInvocationDescendantTracker(proc, options);
+}
+
 async function terminateInvocationProcesses(
-  proc: ReturnType<typeof Bun.spawn>,
-  tracker: InvocationDescendantTracker
+  proc: SignalableInvocationProcess,
+  tracker: InvocationDescendantTracker,
+  options: InvocationProcessSignalOptions = {}
 ): Promise<{ success: true } | { success: false; reason: string }> {
+  const signalProcess = options.signalProcess ?? process.kill;
+  const sleep = options.sleep ?? Bun.sleep;
   tracker.stop();
   try {
     await tracker.sample();
@@ -1994,9 +2065,11 @@ async function terminateInvocationProcesses(
     };
   }
 
-  tryKillProcess(proc, "SIGKILL");
-  killKnownInvocationPids(tracker.knownPids);
-  await Bun.sleep(FORCE_KILL_SETTLE_MS);
+  if (options.signalRootProcessGroup) {
+    tryKillProcess(proc, "SIGKILL", signalProcess);
+  }
+  killCurrentInvocationPids(tracker.currentPids, signalProcess);
+  await sleep(FORCE_KILL_SETTLE_MS);
 
   try {
     await tracker.sample();
@@ -2007,12 +2080,20 @@ async function terminateInvocationProcesses(
     };
   }
 
-  killKnownInvocationPids(tracker.knownPids);
-  await Bun.sleep(DESCENDANT_KILL_SETTLE_MS);
+  killCurrentInvocationPids(tracker.currentPids, signalProcess);
+  await sleep(DESCENDANT_KILL_SETTLE_MS);
 
-  const survivors = await livePids([...tracker.knownPids]);
+  try {
+    await tracker.sample();
+  } catch (error) {
+    return {
+      success: false,
+      reason: `Could not verify invocation descendants after final teardown: ${errorMessage(error)}`
+    };
+  }
+
   const rootPid = typeof proc.pid === "number" ? proc.pid : undefined;
-  const escapedSurvivors = survivors.filter((pid) => pid !== rootPid);
+  const escapedSurvivors = [...tracker.currentPids].filter((pid) => pid !== rootPid);
   if (escapedSurvivors.length > 0) {
     return {
       success: false,
@@ -2023,7 +2104,19 @@ async function terminateInvocationProcesses(
   return { success: true };
 }
 
-function killKnownInvocationPids(pids: ReadonlySet<number>): void {
+/** @internal exported for adapter-backed termination regression coverage. */
+export async function terminateRawDataSandboxInvocationProcessesForTest(
+  proc: SignalableInvocationProcess,
+  tracker: InvocationDescendantTracker,
+  options: InvocationProcessSignalOptions = {}
+): Promise<{ success: true } | { success: false; reason: string }> {
+  return terminateInvocationProcesses(proc, tracker, options);
+}
+
+function killCurrentInvocationPids(
+  pids: ReadonlySet<number>,
+  signalProcess: (pid: number, signal?: NodeJS.Signals) => void
+): void {
   const sortedPids = [...pids].sort((a, b) => b - a);
   for (const pid of sortedPids) {
     if (pid <= 0) {
@@ -2031,43 +2124,64 @@ function killKnownInvocationPids(pids: ReadonlySet<number>): void {
     }
     if (process.platform !== "win32") {
       try {
-        process.kill(-pid, "SIGKILL");
+        signalProcess(-pid, "SIGKILL");
       } catch {
         // The pid may not be a process-group leader; direct kill follows.
       }
     }
     try {
-      process.kill(pid, "SIGKILL");
+      signalProcess(pid, "SIGKILL");
     } catch {
       // Ignore processes that have already exited.
     }
   }
 }
 
-async function listDescendantPids(rootPids: ReadonlySet<number>): Promise<Set<number>> {
-  if (rootPids.size === 0 || process.platform === "win32") {
-    return new Set();
+function listCurrentInvocationProcesses(input: {
+  rootPid: number;
+  knownProcessIdentities: ReadonlyMap<number, string>;
+  table: InvocationProcessParentTable;
+}): Map<number, InvocationProcessRecord> {
+  const currentProcesses = new Map<number, InvocationProcessRecord>();
+  const rootRecord = input.table.get(input.rootPid);
+  if (rootRecord && processIdentityMatchesKnown(rootRecord, input.knownProcessIdentities)) {
+    currentProcesses.set(rootRecord.pid, rootRecord);
   }
-  const table = await readProcessParentTable();
-  const descendants = new Set<number>();
+
+  for (const [pid, identity] of input.knownProcessIdentities) {
+    const processRecord = input.table.get(pid);
+    if (processRecord?.identity === identity) {
+      currentProcesses.set(pid, processRecord);
+    }
+  }
+
   let changed = true;
   while (changed) {
     changed = false;
-    for (const [pid, ppid] of table) {
-      if (rootPids.has(pid) || descendants.has(pid)) {
+    for (const processRecord of input.table.values()) {
+      if (currentProcesses.has(processRecord.pid)) {
         continue;
       }
-      if (rootPids.has(ppid) || descendants.has(ppid)) {
-        descendants.add(pid);
+      if (currentProcesses.has(processRecord.ppid)) {
+        currentProcesses.set(processRecord.pid, processRecord);
         changed = true;
       }
     }
   }
-  return descendants;
+
+  return currentProcesses;
 }
 
-async function readProcessParentTable(): Promise<Map<number, number>> {
-  const proc = Bun.spawn(["/bin/ps", "-axo", "pid=,ppid="], {
+function processIdentityMatchesKnown(
+  processRecord: InvocationProcessRecord,
+  knownProcessIdentities: ReadonlyMap<number, string>
+): boolean {
+  const knownIdentity = knownProcessIdentities.get(processRecord.pid);
+  return knownIdentity === undefined || knownIdentity === processRecord.identity;
+}
+
+async function readProcessParentTable(): Promise<InvocationProcessParentTable> {
+  const proc = Bun.spawn(["/bin/ps", "-axo", "pid=,ppid=,lstart="], {
     stdout: "pipe",
     stderr: "pipe"
   });
@@ -2079,31 +2193,20 @@ async function readProcessParentTable(): Promise<Map<number, number>> {
   if (exitCode !== 0) {
     throw new Error(stderr.trim() || `ps exited with ${exitCode}`);
   }
-  const table = new Map<number, number>();
+  const table: InvocationProcessParentTable = new Map();
   for (const line of stdout.split("\n")) {
-    const match = line.trim().match(/^(\d+)\s+(\d+)$/);
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
     if (!match) {
       continue;
     }
-    table.set(Number(match[1]), Number(match[2]));
+    const pid = Number(match[1]);
+    table.set(pid, {
+      pid,
+      ppid: Number(match[2]),
+      identity: match[3].trim()
+    });
   }
   return table;
-}
-
-async function livePids(pids: readonly number[]): Promise<number[]> {
-  const live: number[] = [];
-  for (const pid of pids) {
-    if (pid <= 0) {
-      continue;
-    }
-    try {
-      process.kill(pid, 0);
-      live.push(pid);
-    } catch {
-      // Not live or not visible.
-    }
-  }
-  return live;
 }
 
 function errorMessage(error: unknown): string {

@@ -28,6 +28,7 @@ import {
   RAW_DATA_WRITE_RULE_ID,
   RawDataSandboxedBashTool,
   buildRawDataSeatbeltProfile,
+  createRawDataSandboxInvocationDescendantTrackerForTest,
   evaluateRawDataWriteAdvisory,
   rawDataDenialPayloadToAuditRow,
   rawDataDenialPayloadToToolFailedEventInput,
@@ -35,6 +36,7 @@ import {
   rawDataSandboxProfileFileName,
   rawDataWriteRemediation,
   scanProtectedHardlinks,
+  terminateRawDataSandboxInvocationProcessesForTest,
   writeRawDataSeatbeltProfileFile,
   type PolicyGateAuditRow,
   type RawDataDenialPayload
@@ -62,6 +64,77 @@ describe("raw data seatbelt sandbox", () => {
     expect(rawDataSandboxDescendantSampleDelayMs(delays.length)).toBeUndefined();
     expect(rawDataSandboxDescendantSampleDelayMs(-1)).toBeUndefined();
     expect(rawDataSandboxDescendantSampleDelayMs(1.5)).toBeUndefined();
+  });
+
+  test("descendant tracker start performs only the bounded periodic samples", async () => {
+    const scheduler = new ManualDescendantSampleScheduler();
+    const readIndexes: number[] = [];
+    const tracker = createRawDataSandboxInvocationDescendantTrackerForTest(
+      { pid: 100 },
+      {
+        scheduler,
+        readProcessParentTable: async () => {
+          readIndexes.push(readIndexes.length);
+          return processTable([{ pid: 100, ppid: 1, identity: "root-1" }]);
+        }
+      }
+    );
+
+    tracker.start();
+    await flushTrackerMicrotasks();
+
+    const delays: number[] = [];
+    for (;;) {
+      const delay = scheduler.runNext();
+      if (delay === undefined) {
+        break;
+      }
+      delays.push(delay);
+      await flushTrackerMicrotasks();
+    }
+
+    expect(delays).toEqual([100, 250, 500, 1_000, 2_000, 4_000]);
+    expect(readIndexes).toHaveLength(1 + delays.length);
+    expect(scheduler.pendingDelayMs()).toEqual([]);
+    tracker.stop();
+  });
+
+  test("normal completion cleanup does not signal stale reused historical PIDs", async () => {
+    const tables = [
+      processTable([
+        { pid: 100, ppid: 1, identity: "root-1" },
+        { pid: 200, ppid: 100, identity: "child-1" }
+      ]),
+      processTable([{ pid: 200, ppid: 1, identity: "unrelated-reuse" }])
+    ];
+    let tableIndex = 0;
+    const tracker = createRawDataSandboxInvocationDescendantTrackerForTest(
+      { pid: 100 },
+      {
+        readProcessParentTable: async () => tables[Math.min(tableIndex++, tables.length - 1)]
+      }
+    );
+    await tracker.sample();
+    expect([...tracker.currentPids].sort((a, b) => a - b)).toEqual([100, 200]);
+
+    const signals: Array<{ pid: number; signal?: NodeJS.Signals }> = [];
+    const result = await terminateRawDataSandboxInvocationProcessesForTest(
+      {
+        pid: 100,
+        kill(_signal?: NodeJS.Signals) {}
+      },
+      tracker,
+      {
+        sleep: async () => {},
+        signalProcess: (pid, signal) => {
+          signals.push({ pid, signal });
+        }
+      }
+    );
+
+    expect(result).toEqual({ success: true });
+    expect(signals).toEqual([]);
+    expect([...tracker.currentPids]).toEqual([]);
   });
 
   test("forgeable sandbox denial classifier is not exported as public authority", async () => {
@@ -124,6 +197,29 @@ describe("raw data seatbelt sandbox", () => {
           protectedRawPaths: [fixture.rawRoot],
           row: {
             ...minimalAuditRow(),
+            rule: "workspace-quota",
+            decision: "denied_by_sandbox"
+          }
+        })
+      ).rejects.toThrow("Raw-data denial audit rows require");
+
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          row: auditRowWithoutRule({
+            ...minimalAuditRow(),
+            decision: "denied_by_sandbox"
+          })
+        })
+      ).rejects.toThrow("Raw-data denial audit rows require");
+
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          row: {
+            ...minimalAuditRow(),
             decision: "denied_by_sandbox"
           }
         })
@@ -173,7 +269,7 @@ describe("raw data seatbelt sandbox", () => {
         row: {
           ...minimalAuditRow(),
           rule: "workspace-quota",
-          decision: "denied_by_advisory"
+          decision: "quota_rejected"
         }
       });
 
@@ -182,7 +278,7 @@ describe("raw data seatbelt sandbox", () => {
         `"error_id":"${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle"`
       );
       expect(await readFile(nonRawPath, "utf8")).toContain('"rule":"workspace-quota"');
-      expect(await readFile(nonRawPath, "utf8")).toContain('"decision":"denied_by_advisory"');
+      expect(await readFile(nonRawPath, "utf8")).toContain('"decision":"quota_rejected"');
     } finally {
       await fixture.cleanup();
     }
@@ -4241,6 +4337,12 @@ function minimalAuditRow(): PolicyGateAuditRow {
   };
 }
 
+function auditRowWithoutRule(row: PolicyGateAuditRow): PolicyGateAuditRow {
+  const copy = { ...row } as Partial<PolicyGateAuditRow>;
+  delete copy.rule;
+  return copy as PolicyGateAuditRow;
+}
+
 async function expectMissing(path: string): Promise<void> {
   await expect(readFile(path, "utf8")).rejects.toThrow();
 }
@@ -4281,6 +4383,64 @@ function restoreEnv(name: string, value: string | undefined): void {
     return;
   }
   process.env[name] = value;
+}
+
+interface ProcessTableRecord {
+  pid: number;
+  ppid: number;
+  identity: string;
+}
+
+function processTable(records: readonly ProcessTableRecord[]): Map<number, ProcessTableRecord> {
+  return new Map(records.map((record) => [record.pid, record]));
+}
+
+async function flushTrackerMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+interface ManualDescendantSampleTimer {
+  callback: () => void;
+  delayMs: number;
+  cleared: boolean;
+  fired: boolean;
+}
+
+class ManualDescendantSampleScheduler {
+  private readonly timers: ManualDescendantSampleTimer[] = [];
+
+  setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout> {
+    const timer = {
+      callback,
+      delayMs,
+      cleared: false,
+      fired: false
+    };
+    this.timers.push(timer);
+    return timer as unknown as ReturnType<typeof setTimeout>;
+  }
+
+  clearTimeout(timer: ReturnType<typeof setTimeout>): void {
+    (timer as unknown as ManualDescendantSampleTimer).cleared = true;
+  }
+
+  runNext(): number | undefined {
+    const timer = this.timers.find((candidate) => !candidate.cleared && !candidate.fired);
+    if (!timer) {
+      return undefined;
+    }
+    timer.fired = true;
+    timer.callback();
+    return timer.delayMs;
+  }
+
+  pendingDelayMs(): number[] {
+    return this.timers
+      .filter((timer) => !timer.cleared && !timer.fired)
+      .map((timer) => timer.delayMs);
+  }
 }
 
 function commandExistsSync(command: string): boolean {

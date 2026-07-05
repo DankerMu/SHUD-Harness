@@ -186,6 +186,43 @@ describe("backend ws tool.failed skeleton", () => {
     ).toThrow("Raw-data denial tool.failed events require");
   });
 
+  test("generic tool.failed builder rejects reserved decisions without raw rule authority", () => {
+    const remediation = rawDataWriteRemediation();
+    const error: ErrorRecord = {
+      error_id: "workspace-quota:generic-denial",
+      category: "permission_error",
+      severity: "error",
+      message: "Workspace quota denied.",
+      user_message: "Workspace quota denied.",
+      evidence_refs: [],
+      retryable: false,
+      recommended_next_actions: [remediation.hint],
+      remediation,
+      created_at: "2026-07-04T00:00:00.000Z"
+    };
+
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 17,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "denied_by_sandbox",
+        error
+      })
+    ).toThrow("Raw-data denial tool.failed events require");
+
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 18,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        decision: "denied_by_sandbox",
+        error
+      })
+    ).toThrow("Raw-data denial tool.failed events require");
+  });
+
   test("generic tool.failed builder still accepts raw lifecycle failures", () => {
     const remediation = rawDataWriteRemediation();
     const event = buildToolFailedWsEvent({
