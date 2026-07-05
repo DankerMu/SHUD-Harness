@@ -39,7 +39,7 @@
 10. **M1 验收门观测/性能细目 = 最小骨架交付 + 显式豁免**。Phased_Plan M1 验收门点名 Observability_Test_Plan（health / structured logs）与 Performance_Test_Plan（API metadata perf smoke），M1 据此交付：NDJSON 结构化请求日志（OBS-LOG-001 八字段 + OBS-LOG-002 secret redaction）、health live 字段集（OBS-HEALTH-001）、ready 含 workspace_writable（OBS-HEALTH-002）、PERF-API-001 冒烟脚本入 PR CI（task-api spec 承接，tasks 6.1/6.4/6.5）。豁免并指派：OBS-HEALTH-003（disk critical + job submit 409）依赖 RunJob 与运维骨架 → M3；OBS-HEALTH-004（deep health 认证）依赖认证语境 → M3+；核销按 tasks 9.1 显式清单执行，不再按三份 canonical 测试计划全量字面核销。
 11. **Control_Kernel §5 spawn 三项硬校验 M1 全落地**：剖面子集 = spike 条 3（policy-gate-spike）；depth 上限与并发上限 = tool-registry-governance「spawn depth 与并发上限硬校验」requirement（与条 3 同注入点、同为纯函数判定 + 负例单测；并发项 M1 断言非 allow，真实排队调度随 M3 spawn 接线）。由此 guard_class requirement 枚举的护栏与 M1 实际交付一致，不留未承接项。
 12. **幂等 skeleton 的 M1 验证载体 = `POST /api/tasks`（change-scoped）**：canonical 幂等适用清单（Idempotency_Concurrency_Locking_Spec §4 / API_Error_And_Idempotency_Contracts §3）不含该端点且 M1 无 §4 表内端点可用，故以 change-scoped 配方（scope=task、request_digest = 规范化请求体 sha256、mismatch 422）在该端点验证 skeleton 通用能力，不以验收断言扩张 canonical 契约；纳入 canonical 清单的账本 bug 修正待办见 proposal Impact。
-13. **bash 写禁区 authority = 执行层 OS 沙箱（2026-07-04 revisit 裁决）**：首轮 spike 条 2 证明 pre-exec 静态命令串扫描不能同时满足"任意 bash 写入拒绝 / 合法 raw 读兼容 / 不实现 full shell parser"——六类逃逸 + 读误拒，证据见 [verdict](policy-gate-spike-verdict.md)；"写哪些文件"是程序语义属性，对图灵完备的 shell 只在 syscall 时刻可观测。冻结 spec 本就如此分工（[Preflight_And_Mutation_Boundary_Spec](../../../docs/03_SPEC/Preflight_And_Mutation_Boundary_Spec.md)"preflight 是 submit 前的门，不是运行期防线"A03-5；[Sandbox_and_Executor §1](../../../docs/03_SPEC/Sandbox_and_Executor.md)）。落点：bash 工具 spawn 命令时施加 seatbelt profile（macOS `sandbox-exec`：`(deny file-write* (subpath data/raw))`，子进程继承；包装在 SHUD 侧工具实现内，zero diff 仍 = 0）；pre-exec 静态检查降级 advisory 提示层（fail-open）。实测（2026-07-04 本机 14 用例 probe）：六类 blocker 全 DENY、raw 读与 workspace 写 ALLOW、新建 hardlink DENY；唯一原理性残留 = 预存 hardlink 别名，兜底 = nlink>1 扫描 + DataProvenance 校验和。否决备选：继续堆静态规则（verdict 明拒——失败类无穷）；ro-mount 独立只读卷（连 PI 一起锁死 + ingest remount 摩擦）；换基座（自建注册层 / Claude Agent SDK 撞同一堵墙，Claude Code 自身在 macOS 亦以 seatbelt 实现 bash 沙箱）。迁移出口：若离开 macOS 单机形态，等价物 = Linux landlock/bwrap（authority 语义不变）。**2026-07-04 补充（PR #48 post-gate）**：条 2' 保证分两层——(a) **byte authority**：seatbelt 在 syscall 层守 raw 字节，穿 symlink/超预算/继承 profile 的子孙进程全覆盖（六类逃逸字节均不落盘）；(b) **denial telemetry**：wrapper 仅对可观测拒绝（advisory 捕获 + 经进程结果外显的 OS 拒绝）产 `tool.failed`/remediation/audit denial 行——子进程吞 EPERM+抑制 stderr+exit 0 的隐藏拒绝、及双 fork/setsid 后代的任意进程树所有权，当前 wrapper 原语不能诚实兑现，移出 #19 归后续 executor/audit 后端；audit 行只记可观测事实，不声称检出每次被拒尝试。合法 waited 前台子进程（`subprocess.Popen`+wait 写 workspace）MUST 保持放行——process-creation preflight 不得过宽误杀。四条 post-gate finding（cand-01 symlink 标签假成功 / cand-02 后代生命周期 / cand-03 超预算标签假成功 / cand-04 waited 前台误拒）均**未击穿 raw 字节完整性**，按 acceptance-boundary 修正处置。
+13. **bash 写禁区 authority = 执行层 OS 沙箱（2026-07-04 revisit 裁决）**：首轮 spike 条 2 证明 pre-exec 静态命令串扫描不能同时满足"任意 bash 写入拒绝 / 合法 raw 读兼容 / 不实现 full shell parser"——六类逃逸 + 读误拒，证据见 [verdict](policy-gate-spike-verdict.md)；"写哪些文件"是程序语义属性，对图灵完备的 shell 只在 syscall 时刻可观测。冻结 spec 本就如此分工（[Preflight_And_Mutation_Boundary_Spec](../../../docs/03_SPEC/Preflight_And_Mutation_Boundary_Spec.md)"preflight 是 submit 前的门，不是运行期防线"A03-5；[Sandbox_and_Executor §1](../../../docs/03_SPEC/Sandbox_and_Executor.md)）。落点：bash 工具 spawn 命令时施加 seatbelt profile（macOS `sandbox-exec`：`(deny file-write* (subpath data/raw))`，子进程继承；包装在 SHUD 侧工具实现内，zero diff 仍 = 0）；相对 raw / evidence / workspace root 必须以显式稳定 project root 解析，不随 agent 进程 cwd 或每次 `ctx.workDir` 漂移；pre-exec 静态检查降级 advisory 提示层（fail-open）。实测（2026-07-04 本机 14 用例 probe）：六类 blocker 全 DENY、raw 读与 workspace 写 ALLOW、新建 hardlink DENY；唯一原理性残留 = 预存 hardlink 别名，兜底 = nlink>1 扫描 + DataProvenance 校验和。否决备选：继续堆静态规则（verdict 明拒——失败类无穷）；ro-mount 独立只读卷（连 PI 一起锁死 + ingest remount 摩擦）；换基座（自建注册层 / Claude Agent SDK 撞同一堵墙，Claude Code 自身在 macOS 亦以 seatbelt 实现 bash 沙箱）。迁移出口：若离开 macOS 单机形态，等价物 = Linux landlock/bwrap（authority 语义不变）。**2026-07-05 补充（PR #48 gate 收窄）**：条 2' 保证分两层——(a) **byte authority**：seatbelt 在 syscall 层守 raw 字节，穿 symlink/超预算/继承 profile 的子孙进程全覆盖（六类逃逸字节均不落盘）；(b) **denial telemetry**：M1 wrapper 只把可信 raw-denial 证据源升格为 raw 写拒绝，当前可信源为 sandbox tool 内层 advisory/static 同根 raw 写捕获；外层 policy-gate evaluator 若返回 `RAW_DATA_WRITE_RULE_ID`，属于配置误用，必须 fail closed，不得静默 generic deny 或伪造 raw evidence；post-exec stdout/stderr/退出码可被被测命令伪造，仅记录普通 lifecycle `failed`，不得单凭进程结果声明 `raw_data_write_denied` 或 `denied_by_sandbox`。`denied_by_sandbox` 预留给后续不可伪造 OS 事件源。隐藏拒绝完整遥测与双 fork/setsid 后代任意进程树所有权移出 #19，归后续 executor/audit 后端；audit 行只记可观测事实，不声称检出每次被拒尝试。合法 waited 前台子进程（`subprocess.Popen`+wait 写 workspace）MUST 保持放行——process-creation preflight 不得过宽误杀。post-gate findings 均**未击穿 raw 字节完整性**，按 acceptance-boundary 修正处置。
 
 ## Risks / Trade-offs
 
@@ -121,3 +121,80 @@ Review focus:
 - Gate list exactly matches the P0 table.
 - Runtime output cannot accidentally satisfy source-controlled evidence or enter git.
 - `decision` aggregation is conservative and cannot classify contract conflicts as pass.
+
+## Subagent Workflow Fixture — Issue #19
+
+Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.
+
+Expanded-trigger rationale:
+- Core triggers: bash tool entrypoint, subprocess execution wrapper, OS sandbox profile, file write/delete/rename boundary under `data/raw/**`, symlink/path alias behavior, audit file output, and WebSocket `tool.failed` envelope.
+- Profile triggers: `workspace`, `remediation`, `guard_class`, `Zero`, `ToolBase`, `beforeExecute`, and Zero adapter/tool registry governance.
+
+Change surface:
+- `packages/core` bash sandbox/profile helpers, bash execution wrapper, advisory policy-gate rule, hardlink/nlink check helper, and focused tests.
+- `packages/backend/src/ws` skeleton event builder for existing `tool.failed`, if not already in place.
+- Audit helper for `workspace/tasks/TASK-M1-SPIKE/audit/` minimum rows with profile identity.
+
+Must preserve:
+- `zero/` remains source-clean and pinned to `13e25c1`; wrapping lives in SHUD-owned packages only.
+- Pre-exec policy gate core remains pure; static detection is advisory/fail-open and must not be the authority for arbitrary bash writes.
+- Legitimate `data/raw/**` reads and writes to workspace allowed directories remain allowed under the sandbox.
+- No new WebSocket event type is introduced; `tool.failed` remains the only skeleton event used here.
+
+Must add/change:
+- Bash execution applies a macOS seatbelt profile via `sandbox-exec -f <profile>` so writes to canonical `data/raw/**` are denied at syscall time and inherited by child processes.
+- Trusted sandbox-tool-owned raw-denial evidence returns the remediation-shaped tool error family, produces `tool.failed`, and writes audit denial evidence; outer `RAW_DATA_WRITE_RULE_ID` evaluator denials fail closed as configuration misuse; post-exec process output alone remains generic lifecycle evidence.
+- The profile builder records a stable profile identifier in audit rows.
+- A reusable `nlink>1` scanner/helper demonstrates and detects the pre-existing hardlink residual; formal ingest/readiness wiring remains out of scope.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - bash tool invocation and SHUD wrapper are the guarded execution entrypoint.
+- Config / project setup: selected - macOS `sandbox-exec` availability and generated seatbelt profile path affect runtime behavior.
+- File IO / path safety / overwrite: selected - protected raw-data write/delete/rename behavior and symlink/path alias handling are the core invariant.
+- Schema / columns / units / field names: selected - ErrorRecord remediation, `tool.failed` payload, and audit row fields are contract-shaped.
+- Auth / permissions / secrets: not selected - no credential or user permission model changes in this slice.
+- Concurrency / shared state / ordering: selected - subprocess children must inherit the sandbox and audit output must bind to the exact profile/run.
+- Resource limits / large input / discovery: selected - nlink scanning must be bounded to the protected roots it is asked to inspect.
+- Legacy compatibility / examples: selected - existing policy-gate wrapper behavior and raw-data read flows must continue working.
+- Error handling / rollback / partial outputs: selected - sandbox enforcement must leave no raw write behind; trusted advisory/static raw-denial evidence returns a stable tool failure, while post-exec process output alone stays generic lifecycle failure.
+- Release / packaging / dependency compatibility: selected - implementation must keep zero source diff at 0 and avoid adding non-M1 runtime dependencies.
+- Documentation / migration notes: selected - PR evidence must state macOS-only seatbelt scope and Linux backend as ADR-recorded migration exit.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - raw data is protected evidence input; denials and residual hardlink detection must be auditable.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: selected - raw input reads are common scientific workflows and must not be blocked.
+- Zero adapter / tool registry / agent role governance: selected - wrapper uses the #17 seam and must not modify Zero.
+
+Invariant Matrix:
+- Governing invariant: A bash command may read `data/raw/**` but must not be able to create, modify, delete, rename, or truncate protected raw-data bytes through the SHUD bash wrapper.
+- Source-of-truth identity/contract: ADR-0001 2026-07-04裁决, policy-gate-spike 条 2', guard/profile id, `ErrorRecord.remediation`, `tool.failed`, and `workspace/tasks/TASK-M1-SPIKE/audit/`.
+- Producers: bash sandbox/profile helper, bash wrapper, advisory rule, audit helper, WS event builder.
+- Validators/preflight: profile builder tests, advisory rule tests, nlink scanner tests, sandbox execution tests.
+- Storage/cache/query: temporary sandbox profile file during execution; fixture audit file under `workspace/tasks/TASK-M1-SPIKE/audit/`.
+- Public routes/entrypoints: none - M1 skeleton builder only, no full backend WS route implementation.
+- Frontend/downstream consumers: future AgentActivityFeed consumes `tool.failed`; M1 asserts envelope/payload shape only.
+- Failure paths/rollback/stale state: seatbelt enforcement must not leave a raw-data mutation; advisory/static denial is allowed only for clear writes and must not overdeny reads; process-result-only failures must not be mislabeled as `denied_by_sandbox`.
+- Evidence/audit/readiness: unit/integration tests plus PR evidence; hardlink residual evidence records both leak demonstration and `nlink>1` detection.
+- Regression rows:
+  - Six escape classes (interpreter payload, pipeline/stdin, dynamic target, shell state/child process, symlink or `../` alias, rename/unlink) targeting `data/raw/**` -> no raw mutation; advisory/static same-root evidence may fail before execution with remediation, `tool.failed`, audit row including profile id and `decision=denied_by_advisory`; post-exec process-result-only failures remain generic lifecycle evidence and must not be presented as `denied_by_sandbox`; hidden/suppressed denials remain out of telemetry scope and must not be presented as detected.
+  - `cat data/raw/input.csv` and a workspace allowed write under the same profile -> command succeeds.
+  - Pre-existing hardlink alias to a raw file written outside the protected subpath -> documented residual behavior, `nlink>1` helper accepts explicit protected roots, reads metadata only under those roots, avoids broader workspace/repo traversal, and flags the raw source/root as unsafe.
+  - Obvious static raw write seen by advisory layer -> may be denied before execution with remediation and audit/WS evidence; advisory misses remain covered by sandbox and advisory must not block legal reads.
+  - `git -C zero diff --quiet` and HEAD `13e25c1` -> unchanged after implementation.
+
+Boundary-surface checklist:
+- Shared helper roots: `packages/core/src/tools/*` policy/sandbox/audit helpers.
+- Public entrypoints: wrapped bash tool `run()` path only.
+- Read surfaces: raw-data reads under sandbox; nlink scan reads metadata only.
+- Write/delete/overwrite surfaces: sandboxed bash subprocess writes, deletes, renames, truncation, symlink aliases, and audit append helper.
+- Producer/consumer evidence boundaries: trusted sandbox-tool-owned advisory/static raw-denial -> ErrorRecord-shaped payload -> WS `tool.failed` -> audit row with same rule/profile identity; outer raw-rule evaluator misuse -> configuration failure without raw profile identity; sandboxed command lifecycle -> audit row with profile identity and generic `allowed|failed`.
+- Unchanged downstream consumers: generic policy-gate pure evaluator, Zero tool registry wrapper, and future full WS/AuditEvent implementation.
+
+Non-goals:
+- Full shell parser, Linux landlock/bwrap backend, full WebSocket protocol/session bus, full AuditEvent schema, and ingest/readiness hardlink scan wiring.
+- Raw data read prohibition.
+
+Review focus:
+- Sandbox denial is the authority and runs at execution time, not a static string scan.
+- Child process inheritance, path alias behavior, and raw-read compatibility are covered by tests.
+- Denial evidence is synchronized across tool result, WS skeleton event, and audit row only for trusted raw-denial sources; process-result-only failures stay synchronized as generic lifecycle facts.
+- Hardlink residual is demonstrated honestly and the reusable nlink helper detects it.

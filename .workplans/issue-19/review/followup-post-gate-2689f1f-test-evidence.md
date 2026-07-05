@@ -1,0 +1,41 @@
+Reviewer agent: review-test-evidence
+Review round: post-gate follow-up after V73 fixes
+Reviewed head SHA: 2689f1f9bb82b23a86acd51418e40f8fafba3d04
+Summary: Raw sandbox/V73 evidence is much stronger, but scan-budget and containment-preflight boundary tests still miss legal read/write false-denial cases.
+
+Invariant Matrix Coverage:
+- Selected task 3.3 raw execution-layer denial: covered - macOS seatbelt wrapper, raw denial, remediation, audit, WS skeleton, hardlink residual, and registry surfaces are represented in `raw-data-sandbox.test.ts`, `policy-gate-registry.test.ts`, and `ws/index.test.ts`.
+- Governing invariant: missing - raw mutation denial is covered, but legal raw-read/workspace-write compatibility is not covered for scan-budget overflow and containment-keyword boundaries; see Findings 1-2.
+- Source-of-truth identity/contract: covered - profile id, rule id, remediation, audit row, and `tool.failed` skeleton are asserted; see `raw-data-sandbox.test.ts:138-152`, `2615-2688`, `ws/index.test.ts:14-69`.
+- Producers: covered - sandbox/profile helper, wrapper, advisory rule, audit helper, registry factory, and WS builder are present and tested.
+- Validators/preflight: missing - V73 preflight tests cover hidden-denial and process-containment positives, but not legal commands that should fail open under the same new guards.
+- Storage/cache/query: covered - profile path safety, audit reservation, stale symlink/hardlink/non-writable audit files, canonical workspace/project-root audit layout, and hardlink scan budget are tested at `raw-data-sandbox.test.ts:1774-2408`.
+- Public routes/entrypoints: covered - M1 has no full WS route; registry tests exercise the SHUD runtime registry and wrapped bash/spawn/edit surfaces at `policy-gate-registry.test.ts:125-368`.
+- Frontend/downstream consumers: out-of-scope - design explicitly defers full AgentActivityFeed/full WS bus; skeleton event shape is tested.
+- Failure paths/rollback/stale state: covered - denial, audit-unavailable, process-containment, timeout/abort, stale audit targets, audit ancestor moves, and raw byte preservation are tested.
+- Evidence/audit/readiness: covered - denial and lifecycle audit rows include profile identity; hardlink residual is demonstrated and bounded scan detects it.
+- Six escape classes: covered - interpreter, pipeline/stdin, dynamic target, child/grandchild, symlink/`../`, rename/unlink plus overwrite/truncate/append/dd are exercised with raw-byte preservation.
+- Legal raw read/workspace write: missing - ordinary cases are covered, but legal over-budget raw reads and legal workspace writes containing containment keywords are not.
+- Process containment: missing - timeout/abort/background/session-escape tests exist, but false-positive containment keyword boundaries are untested; see Finding 2.
+- Audit durability: covered - audit appendability is now reserved with an append handle before execution, and stale non-writable/symlink/hardlink cases fail closed.
+- Metadata: covered - running metadata matches final allowed, denied, audit-unavailable, timeout, and abort results.
+- Scan budget: missing - budget bounds are tested, but the over-budget hidden-sensitive path is tested only as fail-closed, not for legal raw-read fail-open compatibility; see Finding 1.
+- V73-01 env/assignment interpreter: covered - assignment/env-wrapped Python and Rscript hidden raw writes are denied, legal raw-read copy remains allowed.
+- V73-02 receiver/cwd interpreter: covered - Python receiver/named-mode raw mutations and workspace-local `data/raw` after `cd workspace` are tested.
+- V73-03 stderr file success mask: covered - stderr redirected to workspace plus trailing success maps to `denied_by_sandbox`.
+- V73-04 setsid/timeout/abort escape: missing - literal session-escape denial is tested, but the guard can false-deny legal commands containing those words; see Finding 2.
+- V73-05 delayed audit sabotage: covered - unwaited delayed audit move fails closed and audit ancestor replacement is detected.
+- V73-06 advisory cwd false denial: covered - workspace-local `data/raw` writes after `cd`, subshell/group/child bash, and parent-relative workspace paths are allowed.
+- V73-07 running metadata mismatch: covered - final wrapper result owns running metadata across allowed, denied, audit unavailable, timeout, and abort cases.
+- V73-08 fresh project-root audit layout: covered - fresh project root with `data/raw` and no `workspace` writes audit under `workspace/tasks`.
+- V73-09 Node rename runtime evidence: covered - Node `renameSync` runtime sandbox case is present at `raw-data-sandbox.test.ts:547-587`.
+- V73-10 bounded pre-exec scan: missing - budgets exist, but fail-open compatibility for legal raw-read/workspace-write commands beyond the budget is not proven; see Finding 1.
+- Zero clean: covered - `git -C zero diff --quiet` exited 0 and `zero` HEAD is `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`; `git diff --check origin/main...HEAD` produced no output.
+
+Findings:
+- P2 / test-evidence + compatibility / V73-10 scan-budget handling must not overdeny legal raw reads / Evidence: `packages/core/src/tools/raw-data-sandbox.ts:611-616` denies when `budgetExceeded && hasHiddenEvidenceRisk`; `raw-data-sandbox.ts:640-654` marks any over-budget command as `hasHiddenEvidenceRisk: true` before target analysis; the only over-budget test at `packages/core/src/tools/raw-data-sandbox.test.ts:2434-2448` expects fail-closed for a workspace-only command / Scenario or repro: an oversized legal command such as `cat data/raw/input.csv > workspace/large-copy.csv 2>/dev/null; true # <140k filler>` is rejected before the OS sandbox can allow the raw read/workspace write / Consequence: violates `policy-gate-spike` legal raw-read fail-open compatibility (`spec.md:23`, `34-47`) and leaves V73-10 only half-proven / Fix direction: on budget overflow, distinguish commands with a bounded raw-target signal from commands where target is unknown; preserve fail-open behavior for legal reads/workspace writes, or document a narrower non-goal in the spec / Required verification: add over-budget legal raw-read-to-workspace and legal workspace-write tests that succeed, plus over-budget hidden raw-write tests that still fail closed or are sandbox-normalized / Sibling surfaces: interpreter payload budget, segment-count budget, large generated R/Python scripts, advisory-disabled wrapper path / Blocks merge: Yes for final evidence sign-off unless explicitly scoped as non-goal.
+- P2 / false-positive coverage gap / process-containment preflight must not reject legal workspace writes by matching keywords in data or filenames / Evidence: `packages/core/src/tools/raw-data-sandbox.ts:3283-3307` runs `hasSessionEscapeSignal()` over the raw command string with a broad word regex; legal workspace write tests at `raw-data-sandbox.test.ts:1192-1205` do not include containment keywords / Scenario or repro: `printf setsid > workspace/setsid.txt` or `printf daemonize > workspace/note.txt` is a legal workspace write, but it matches the session-escape regex and returns `policy_gate_process_containment_unavailable` before execution / Consequence: the V73-04 containment fix can break legal workspace writes, violating `spec.md:23` and `design.md:141` / Fix direction: parse containment-sensitive command positions instead of scanning arbitrary string content, or add a precise allow path for quoted data and output filenames while keeping real `setsid`/`setpgrp` commands denied / Required verification: add positive legal workspace-write tests containing `setsid`, `setpgrp`, `daemonize`, and `start_new_session` as data/path text, plus existing negative session-escape tests / Sibling surfaces: comments, script arguments, filenames, generated reports, Python/R strings containing containment words / Blocks merge: Yes for final evidence sign-off unless accepted as an explicit compatibility tradeoff.
+
+Non-blocking notes:
+- Historical review artifacts in `.workplans/issue-19/review/` are correctly head-SHA labeled as blocked prior rounds; they should not be treated as current pass evidence.
+- I did not rerun the full Bun/OpenSpec suite in this read-only review; I inspected code, tests, PR metadata, diff check, and zero cleanliness.

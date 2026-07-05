@@ -1,0 +1,5 @@
+Verifier verdict for: cand-final-92f5569-01-malformed-custom-evaluator-deny
+Reviewed head SHA: 92f556915416a57015dcaa32ca97e044c9fc3353
+Verdict: CONFIRMED
+Evidence: `PolicyGatedBaseToolAdapter.run()` only catches `this.options.evaluate(...)` at `packages/core/src/tools/policy-gate-registry.ts:244-257`; after that, raw deny calls `buildRawDataRuleMisconfiguredResult(...)` at `:273-276`, which dereferences `ref: decision.remediation.ref` at `:361-365`. `finalizePolicyGateResult()` and `markRunningToolFinished()` occur later at `:294-316`, so that throw bypasses them; Zero also marks running handles only after `await tool.run(...)` resolves at `zero/packages/core/src/agent/agent.ts:251-258`. Generic deny also conditionally omits remediation at `policy-gate-registry.ts:387-393` despite remediation requiring `ref` in `policy-gate-core.ts:6-11`.
+Note: Direct `createPolicyGateEvaluator(...)` validates remediation, but direct custom evaluators passed through `wrapToolWithPolicyGate()` / `createShudRuntimeToolRegistry({ evaluate })` are not runtime-validated.

@@ -1,12 +1,21 @@
-import { BaseTool, ToolRegistry } from "@zero-os/core";
-import type { ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
+import { BaseTool, SpawnAgentTool, ToolRegistry, loadFuseList } from "@zero-os/core";
+import { toErrorMessage } from "@zero-os/shared";
+import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
 import {
+  EMPTY_POLICY_GATE_CONTEXT,
   evaluatePolicyGate,
+  PolicyGateRemediationSchema,
   type HarnessRole,
   type PolicyGateContext,
   type PolicyGateDecision,
+  type PolicyGateRemediation,
   type PolicyGateToolCall
 } from "./policy-gate-core";
+import {
+  RAW_DATA_WRITE_RULE_ID,
+  RawDataSandboxedBashTool,
+  type RawDataSeatbeltProfileOptions
+} from "./raw-data-sandbox";
 
 export type {
   HarnessRole,
@@ -34,6 +43,26 @@ export interface PolicyGateWrapperOptions {
   evaluate: PolicyGateEvaluator;
 }
 
+export type ShudBashFuseSource =
+  | { fuseRules: readonly FuseRule[]; fuseListPath?: never }
+  | { fuseListPath: string; fuseRules?: never };
+
+export type ShudSandboxedBashToolOptions = RawDataSeatbeltProfileOptions &
+  ShudBashFuseSource & {
+    enableAdvisory?: boolean;
+    pathResolutionRoot?: string;
+    auditWorkspaceRoot?: string;
+    auditTaskId?: string;
+  };
+
+export type ShudRuntimeToolRegistryOptions = ShudSandboxedBashToolOptions & {
+  tools?: readonly BaseTool[];
+  evaluate?: PolicyGateEvaluator;
+  role?: HarnessRole;
+  modelRouter?: ConstructorParameters<typeof SpawnAgentTool>[0];
+  metrics?: ConstructorParameters<typeof SpawnAgentTool>[2];
+};
+
 export type PolicyGatedTool = BaseTool & {
   readonly innerTool: BaseTool;
   readonly policyGateToolId: string;
@@ -49,11 +78,7 @@ export function wrapToolWithPolicyGate(
   tool: BaseTool,
   options: PolicyGateWrapperOptions
 ): PolicyGatedTool {
-  if (isPolicyGatedTool(tool)) {
-    return tool;
-  }
-
-  const wrapped = new PolicyGatedBaseToolAdapter(tool, options);
+  const wrapped = new PolicyGatedBaseToolAdapter(unwrapPolicyGatedTool(tool), options);
   policyGatedTools.add(wrapped);
   return wrapped;
 }
@@ -84,6 +109,79 @@ export function createPolicyGatedToolRegistry(
   return registry;
 }
 
+export function createShudSandboxedBashTool(
+  options: ShudSandboxedBashToolOptions
+): RawDataSandboxedBashTool {
+  const fuseRules = resolveShudBashFuseRules(options);
+  const profileOptions = snapshotRawDataSeatbeltProfileOptions(options);
+  return new RawDataSandboxedBashTool({
+    protectedRawPaths: profileOptions.protectedRawPaths,
+    protectedEvidencePaths: profileOptions.protectedEvidencePaths,
+    allowedWriteRoots: profileOptions.allowedWriteRoots,
+    tempRoot: profileOptions.tempRoot,
+    profileRoot: profileOptions.profileRoot,
+    enableAdvisory: options.enableAdvisory,
+    pathResolutionRoot: options.pathResolutionRoot,
+    auditWorkspaceRoot: options.auditWorkspaceRoot,
+    auditTaskId: options.auditTaskId,
+    toolId: "bash",
+    fuseRules: cloneFuseRules(fuseRules)
+  });
+}
+
+export function createShudRuntimeToolRegistry(
+  options: ShudRuntimeToolRegistryOptions
+): ToolRegistry {
+  const registry = new ToolRegistry();
+  const evaluate = options.evaluate ?? createPolicyGateEvaluator(EMPTY_POLICY_GATE_CONTEXT);
+  let includesSpawnAgent = false;
+
+  for (const tool of options.tools ?? []) {
+    if (tool.name === "spawn_agent") {
+      includesSpawnAgent = true;
+      continue;
+    }
+
+    if (tool.name === "bash") {
+      continue;
+    }
+
+    registry.register(
+      wrapToolWithPolicyGate(tool, {
+        evaluate,
+        role: options.role,
+        toolId: tool.name
+      })
+    );
+  }
+
+  registry.register(
+    wrapToolWithPolicyGate(createShudSandboxedBashTool(options), {
+      evaluate,
+      role: options.role,
+      toolId: "bash"
+    })
+  );
+
+  if (includesSpawnAgent) {
+    if (!options.modelRouter) {
+      throw new Error(
+        "SHUD runtime registry cannot reuse a prebuilt spawn_agent; provide modelRouter to rebuild it against the final registry."
+      );
+    }
+    registry.register(
+      wrapToolWithPolicyGate(new SpawnAgentTool(options.modelRouter, registry, options.metrics), {
+        evaluate,
+        role: options.role,
+        toolId: "spawn_agent"
+      })
+    );
+  }
+
+  assertPolicyGatedToolRegistry(registry);
+  return registry;
+}
+
 export function assertPolicyGatedToolRegistry(registry: ToolRegistry): void {
   assertAllToolsPolicyGated(registry.list());
 }
@@ -102,6 +200,14 @@ export function assertAllToolsPolicyGated(tools: readonly BaseTool[]): void {
 
 export function isPolicyGatedTool(tool: BaseTool): tool is PolicyGatedTool {
   return policyGatedTools.has(tool);
+}
+
+function unwrapPolicyGatedTool(tool: BaseTool): BaseTool {
+  let current = tool;
+  while (isPolicyGatedTool(current)) {
+    current = current.innerTool;
+  }
+  return current;
 }
 
 class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
@@ -134,21 +240,50 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
   }
 
   async run(toolContext: ToolContext, input: unknown): Promise<ToolResult> {
-    const decision = await this.options.evaluate(
-      {
-        toolId: this.policyGateToolId,
-        role: this.options.role ?? resolveRole(toolContext),
-        input,
-        workDir: toolContext.workDir
-      },
-      {
-        tool: this.innerTool,
-        toolContext
-      }
-    );
+    const startTime = Date.now();
+    let decision: PolicyGateDecision;
+    try {
+      const candidate = await this.options.evaluate(
+        {
+          toolId: this.policyGateToolId,
+          role: this.options.role ?? resolveRole(toolContext),
+          input,
+          workDir: toolContext.workDir
+        },
+        {
+          tool: this.innerTool,
+          toolContext
+        }
+      );
+      decision = validatePolicyGateDecision(this.policyGateToolId, candidate);
+    } catch (error) {
+      const durationMs = Date.now() - startTime;
+      const errorMessage = toErrorMessage(error);
+      return this.finalizePolicyGateResult(
+        toolContext,
+        {
+          success: false,
+          output: errorMessage,
+          outputSummary: `Error: ${errorMessage.slice(0, 100)}`
+        },
+        durationMs
+      );
+    }
 
     if (decision.decision === "deny") {
-      return buildPolicyGateDeniedResult(this.policyGateToolId, decision);
+      const durationMs = Date.now() - startTime;
+      if (decision.ruleId === RAW_DATA_WRITE_RULE_ID) {
+        return this.finalizePolicyGateResult(
+          toolContext,
+          buildRawDataRuleMisconfiguredResult(this.policyGateToolId, decision),
+          durationMs
+        );
+      }
+      return this.finalizePolicyGateResult(
+        toolContext,
+        buildPolicyGateDeniedResult(this.policyGateToolId, decision),
+        durationMs
+      );
     }
 
     return this.innerTool.run(toolContext, input);
@@ -157,6 +292,153 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
   protected async execute(): Promise<ToolResult> {
     throw new Error("PolicyGatedBaseToolAdapter delegates through run().");
   }
+
+  private async finalizePolicyGateResult(
+    toolContext: ToolContext,
+    result: ToolResult,
+    durationMs: number
+  ): Promise<ToolResult> {
+    let finalResult = result;
+    try {
+      await this.afterExecute(toolContext, finalResult, durationMs);
+    } catch (error) {
+      const errorMessage = toErrorMessage(error);
+      toolContext.logger.error("tool_call_error", {
+        tool: this.name,
+        error: errorMessage,
+        durationMs
+      });
+      finalResult = {
+        success: false,
+        output: errorMessage,
+        outputSummary: `Error: ${errorMessage.slice(0, 100)}`
+      };
+    }
+    this.markRunningToolFinished(toolContext, finalResult);
+    return finalResult;
+  }
+
+  private markRunningToolFinished(toolContext: ToolContext, result: ToolResult): void {
+    const toolUseId = toolContext.currentToolUseId;
+    const runningHandle =
+      toolUseId && toolContext.runningToolRegistry
+        ? toolContext.runningToolRegistry.get(toolUseId)
+        : undefined;
+    runningHandle?.markFinished({
+      finishedAt: new Date().toISOString(),
+      cause: "completed",
+      success: result.success,
+      outputSummary: result.outputSummary
+    });
+  }
+}
+
+function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyGateDecision {
+  if (candidate === null || typeof candidate !== "object") {
+    throw new Error(`Invalid policy gate decision for ${toolId}: decision`);
+  }
+
+  const rawDecision = candidate as Record<string, unknown>;
+  if (rawDecision.decision === "allow") {
+    return { decision: "allow" };
+  }
+
+  if (rawDecision.decision !== "deny") {
+    throw new Error(`Invalid policy gate decision for ${toolId}: decision`);
+  }
+
+  const ruleId = rawDecision.ruleId;
+  const reason = rawDecision.reason;
+  const validRuleId = typeof ruleId === "string" ? ruleId : undefined;
+  const validReason = typeof reason === "string" ? reason : undefined;
+  const issuePaths: string[] = [];
+  if (validRuleId === undefined) {
+    issuePaths.push("ruleId");
+  }
+  if (validReason === undefined) {
+    issuePaths.push("reason");
+  }
+
+  const parsedRemediation = PolicyGateRemediationSchema.safeParse(rawDecision.remediation);
+  let remediation: PolicyGateRemediation | undefined;
+  if (!parsedRemediation.success) {
+    issuePaths.push(
+      ...parsedRemediation.error.issues.map((issue) =>
+        issue.path.length > 0 ? `remediation.${issue.path.join(".")}` : "remediation"
+      )
+    );
+  } else {
+    remediation = parsedRemediation.data;
+  }
+
+  if (
+    issuePaths.length > 0 ||
+    validRuleId === undefined ||
+    validReason === undefined ||
+    !remediation
+  ) {
+    const ruleLabel = validRuleId && validRuleId.trim() !== "" ? validRuleId : "<missing>";
+    const invalidFields = issuePaths.length > 0 ? issuePaths : ["decision"];
+    throw new Error(
+      `Invalid policy gate decision for ${toolId} (rule ${ruleLabel}): ${invalidFields.join(", ")}`
+    );
+  }
+
+  return {
+    decision: "deny",
+    ruleId: validRuleId,
+    reason: validReason,
+    remediation
+  };
+}
+
+function snapshotRawDataSeatbeltProfileOptions(
+  options: RawDataSeatbeltProfileOptions
+): RawDataSeatbeltProfileOptions {
+  const snapshot: RawDataSeatbeltProfileOptions = {
+    protectedRawPaths: frozenStringArray(options.protectedRawPaths),
+    allowedWriteRoots: frozenStringArray(options.allowedWriteRoots)
+  };
+  if (options.protectedEvidencePaths !== undefined) {
+    snapshot.protectedEvidencePaths = frozenStringArray(options.protectedEvidencePaths);
+  }
+  if (options.tempRoot !== undefined) {
+    snapshot.tempRoot = options.tempRoot;
+  }
+  if (options.profileRoot !== undefined) {
+    snapshot.profileRoot = options.profileRoot;
+  }
+  return snapshot;
+}
+
+function frozenStringArray(values: readonly string[]): readonly string[] {
+  return Object.freeze([...values]);
+}
+
+function buildRawDataRuleMisconfiguredResult(
+  toolId: string,
+  decision: Extract<PolicyGateDecision, { decision: "deny" }>
+): ToolResult {
+  const remediation: PolicyGateRemediation = {
+    next_action: "fix_and_retry",
+    hint: "Remove RAW_DATA_WRITE_RULE_ID from the outer policy evaluator and let RawDataSandboxedBashTool own raw advisory, audit reservation, and tool-failed evidence.",
+    ref: decision.remediation.ref
+  };
+  const payload = {
+    error: "policy_gate_raw_data_rule_misconfigured",
+    tool_id: toolId,
+    rule: RAW_DATA_WRITE_RULE_ID,
+    reason:
+      "Outer policy gate attempted to deny raw-data writes. Raw advisory and raw-denial evidence ownership belongs inside RawDataSandboxedBashTool.",
+    outer_reason: decision.reason,
+    remediation
+  };
+
+  return {
+    success: false,
+    output: JSON.stringify(payload),
+    outputSummary: `Policy gate raw-data rule misconfigured for ${toolId}: ${decision.reason}`
+  };
 }
 
 function buildPolicyGateDeniedResult(
@@ -176,6 +458,36 @@ function buildPolicyGateDeniedResult(
     output: JSON.stringify(payload),
     outputSummary: `Policy gate denied ${toolId}: ${decision.reason}`
   };
+}
+
+function resolveShudBashFuseRules(options: ShudBashFuseSource): readonly FuseRule[] {
+  const rawOptions = options as Record<string, unknown>;
+  const hasFuseRules = Object.prototype.hasOwnProperty.call(rawOptions, "fuseRules");
+  const hasFuseListPath = Object.prototype.hasOwnProperty.call(rawOptions, "fuseListPath");
+
+  if (hasFuseRules === hasFuseListPath) {
+    throw new Error("SHUD sandboxed bash requires exactly one of fuseRules or fuseListPath.");
+  }
+
+  if (hasFuseRules) {
+    if (!Array.isArray(rawOptions.fuseRules)) {
+      throw new Error("SHUD sandboxed bash fuseRules must be an array.");
+    }
+    return cloneFuseRules(rawOptions.fuseRules as readonly FuseRule[]);
+  }
+
+  if (typeof rawOptions.fuseListPath !== "string" || rawOptions.fuseListPath.trim() === "") {
+    throw new Error("SHUD sandboxed bash fuseListPath must be a non-empty string.");
+  }
+
+  return cloneFuseRules(loadFuseList(rawOptions.fuseListPath));
+}
+
+function cloneFuseRules(rules: readonly FuseRule[]): FuseRule[] {
+  return rules.map((rule) => ({
+    pattern: rule.pattern,
+    description: rule.description
+  }));
 }
 
 function resolveRole(toolContext: ToolContext): HarnessRole | "unknown" {
