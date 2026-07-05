@@ -288,7 +288,7 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
-  test("SHUD runtime routes outer raw advisory composition through raw-denial evidence", async () => {
+  test("SHUD runtime routes custom outer raw advisory composition through generic policy denial", async () => {
     const fixture = await createRawFixture();
     try {
       const registry = createShudRuntimeToolRegistry({
@@ -307,21 +307,17 @@ describe("policy-gated zero tool registry", () => {
       });
 
       expect(result?.success).toBe(false);
-      const payload = JSON.parse(result?.output ?? "{}") as RawDataDenialPayload;
-      expect(payload.error).toBe("raw_data_write_denied");
-      expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
-      expect(payload.decision).toBe("denied_by_advisory");
-      expect(result?.output).not.toContain("policy_gate_denied");
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        error?: string;
+        ruleId?: string;
+        profile_id?: string;
+      };
+      expect(payload.error).toBe("policy_gate_denied");
+      expect(payload.ruleId).toBe(RAW_DATA_WRITE_RULE_ID);
+      expect(payload.profile_id).toBeUndefined();
+      expect(result?.output).not.toContain("raw_data_write_denied");
       await expect(readFile(join(fixture.rawRoot, "outer-raw-advisory.txt"), "utf8")).rejects.toThrow();
-      const rows = await readRawAuditRows(fixture.root);
-      expect(rows.at(-1)).toMatchObject({
-        event: "tool.failed",
-        tool_id: "bash",
-        rule: RAW_DATA_WRITE_RULE_ID,
-        decision: "denied_by_advisory",
-        profile_id: payload.profile_id,
-        error_id: payload.error_record.error_id
-      });
+      await expect(readRawAuditRows(fixture.root)).rejects.toThrow();
     } finally {
       await fixture.cleanup();
     }
@@ -348,20 +344,18 @@ describe("policy-gated zero tool registry", () => {
       });
 
       expect(result?.success).toBe(false);
-      const payload = JSON.parse(result?.output ?? "{}") as RawDataDenialPayload;
-      expect(payload.error).toBe("raw_data_write_denied");
-      expect(payload.decision).toBe("denied_by_advisory");
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        error?: string;
+        ruleId?: string;
+        profile_id?: string;
+      };
+      expect(payload.error).toBe("policy_gate_denied");
+      expect(payload.ruleId).toBe(RAW_DATA_WRITE_RULE_ID);
+      expect(payload.profile_id).toBeUndefined();
+      expect(result?.output).not.toContain("raw_data_write_denied");
       await expect(readFile(join(fixture.workspaceRoot, "outer-disabled-side-effect.txt"), "utf8")).rejects.toThrow();
       await expect(readFile(join(fixture.rawRoot, "outer-disabled.txt"), "utf8")).rejects.toThrow();
-      const rows = await readRawAuditRows(fixture.root);
-      expect(rows.at(-1)).toMatchObject({
-        event: "tool.failed",
-        tool_id: "bash",
-        rule: RAW_DATA_WRITE_RULE_ID,
-        decision: "denied_by_advisory",
-        profile_id: payload.profile_id,
-        error_id: payload.error_record.error_id
-      });
+      await expect(readRawAuditRows(fixture.root)).rejects.toThrow();
     } finally {
       await fixture.cleanup();
     }
@@ -385,7 +379,7 @@ describe("policy-gated zero tool registry", () => {
       });
 
       const result = await registry.get("bash")?.run(fixture.context, {
-        command: `printf side-effect > workspace/mismatch-side-effect.txt; printf nope > ${join(outerRawRoot, "outer-denied.txt")}`
+        command: `if false; then printf nope > data/raw/inner.txt; fi; printf side-effect > workspace/mismatch-side-effect.txt; printf nope > ${join(outerRawRoot, "outer-denied.txt")}`
       });
 
       expect(result?.success).toBe(false);
@@ -399,6 +393,7 @@ describe("policy-gated zero tool registry", () => {
       expect(payload.profile_id).toBeUndefined();
       expect(result?.output).not.toContain("raw_data_write_denied");
       await expect(readFile(join(fixture.workspaceRoot, "mismatch-side-effect.txt"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(fixture.rawRoot, "inner.txt"), "utf8")).rejects.toThrow();
       await expect(readFile(join(outerRawRoot, "outer-denied.txt"), "utf8")).rejects.toThrow();
       await expect(readRawAuditRows(fixture.root)).rejects.toThrow();
     } finally {

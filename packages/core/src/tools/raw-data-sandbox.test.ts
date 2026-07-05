@@ -130,7 +130,7 @@ describe("raw data seatbelt sandbox", () => {
   ];
 
   for (const negativeCase of negativeCases) {
-    seatbeltTest(`${negativeCase.name} is denied by sandbox without mutating data/raw`, async () => {
+    seatbeltTest(`${negativeCase.name} is byte-blocked without sandbox-denial telemetry`, async () => {
       const fixture = await createFixture();
       try {
         await negativeCase.setup?.(fixture);
@@ -138,28 +138,20 @@ describe("raw data seatbelt sandbox", () => {
           enableAdvisory: false
         });
 
-        const payload = expectDeniedPayload(result, "denied_by_sandbox");
+        expect(result.success).toBe(false);
         if (negativeCase.assertRaw) {
           await negativeCase.assertRaw(fixture);
         } else {
           await expectMissing(join(fixture.rawRoot, negativeCase.target));
         }
-        const rows = await readAuditRows(fixture.root);
-        expect(rows.at(-1)).toMatchObject({
-          event: "tool.failed",
-          tool_id: "bash",
-          rule: RAW_DATA_WRITE_RULE_ID,
-          decision: "denied_by_sandbox"
-        });
-        expect(rows.at(-1)?.profile_id).toMatch(/^shud-raw-seatbelt-/);
-        expectAuditMatchesPayload(rows.at(-1), payload);
+        await expectGenericSandboxLifecycle(fixture, result);
       } finally {
         await fixture.cleanup();
       }
     });
   }
 
-  seatbeltTest("visible symlink-only raw alias write maps to raw-data payload", async () => {
+  seatbeltTest("visible symlink-only raw alias write is byte-blocked without sandbox-denial telemetry", async () => {
     const fixture = await createFixture();
     try {
       await symlink(
@@ -171,16 +163,15 @@ describe("raw data seatbelt sandbox", () => {
         enableAdvisory: false
       });
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(false);
       await expectMissing(join(fixture.rawRoot, "symlink-only.txt"));
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
   });
 
-  seatbeltTest("visible symlinked raw directory mutations map to raw-data payloads", async () => {
+  seatbeltTest("visible symlinked raw directory mutations are byte-blocked without sandbox-denial telemetry", async () => {
     const fixture = await createFixture();
     try {
       const rawInputBefore = await readFile(join(fixture.rawRoot, "input.csv"), "utf8");
@@ -211,9 +202,8 @@ describe("raw data seatbelt sandbox", () => {
         const result = await runSandboxed(fixture, commandCase.command, {
           enableAdvisory: false
         });
-        const payload = expectDeniedPayload(result, "denied_by_sandbox");
-        const rows = await readAuditRows(fixture.root);
-        expectAuditMatchesPayload(rows.at(-1), payload);
+        expect(result.success).toBe(false);
+        await expectGenericSandboxLifecycle(fixture, result);
         if (commandCase.rawPath.endsWith("input.csv")) {
           expect(await readFile(commandCase.rawPath, "utf8")).toBe(rawInputBefore);
         } else {
@@ -251,7 +241,7 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  seatbeltTest("visible or-true raw write with known target maps to raw-data payload", async () => {
+  seatbeltTest("visible or-true raw write with known target is byte-blocked without sandbox-denial telemetry", async () => {
     const fixture = await createFixture();
     try {
       const result = await runSandboxed(
@@ -260,16 +250,15 @@ describe("raw data seatbelt sandbox", () => {
         { enableAdvisory: false }
       );
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(true);
       await expectMissing(join(fixture.rawRoot, "or-true-visible.txt"));
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
   });
 
-  nodeSeatbeltTest("interpreter file API raw write denial maps to raw-data payload", async () => {
+  nodeSeatbeltTest("interpreter file API raw write is byte-blocked without sandbox-denial telemetry", async () => {
     const fixture = await createFixture();
     try {
       const result = await runSandboxed(
@@ -278,10 +267,9 @@ describe("raw data seatbelt sandbox", () => {
         { enableAdvisory: false }
       );
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(false);
       await expectMissing(join(fixture.rawRoot, "node-write.txt"));
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
@@ -370,7 +358,7 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  nodeSeatbeltTest("visible semicolon-normalized interpreter raw write maps to raw-data payload", async () => {
+  nodeSeatbeltTest("visible semicolon-normalized interpreter raw write is byte-blocked without sandbox-denial telemetry", async () => {
     const fixture = await createFixture();
     try {
       const beforeRawEntries = await sortedRawEntries(fixture.rawRoot);
@@ -380,16 +368,15 @@ describe("raw data seatbelt sandbox", () => {
         { enableAdvisory: false }
       );
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(true);
       expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
   });
 
-  seatbeltTest("visible stderr masked by true maps to raw-data payload", async () => {
+  seatbeltTest("visible stderr masked by true is byte-blocked without sandbox-denial telemetry", async () => {
     const fixture = await createFixture();
     try {
       const result = await runSandboxed(
@@ -398,16 +385,15 @@ describe("raw data seatbelt sandbox", () => {
         { enableAdvisory: false }
       );
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(true);
       await expectMissing(join(fixture.rawRoot, "dynamic-visible.txt"));
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
   });
 
-  seatbeltTest("visible child shell masked denial maps to raw-data payload", async () => {
+  seatbeltTest("visible child shell masked denial is byte-blocked without sandbox-denial telemetry", async () => {
     const fixture = await createFixture();
     try {
       const result = await runSandboxed(
@@ -416,10 +402,9 @@ describe("raw data seatbelt sandbox", () => {
         { enableAdvisory: false }
       );
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(true);
       await expectMissing(join(fixture.rawRoot, "child-mask.txt"));
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
@@ -444,10 +429,9 @@ describe("raw data seatbelt sandbox", () => {
         enableAdvisory: false
       });
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(false);
       await expectMissing(join(fixture.rawRoot, "fake-path.txt"));
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       process.env.PATH = originalPath;
       await fixture.cleanup();
@@ -468,12 +452,10 @@ describe("raw data seatbelt sandbox", () => {
         enableAdvisory: false
       });
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(false);
       await expectMissing(join(fixture.rawRoot, "bash-env-prelude.txt"));
       await expectMissing(join(fixture.rawRoot, "bash-env-main.txt"));
-      const rows = await readAuditRows(fixture.root);
-      expect(rows.at(-1)?.decision).toBe("denied_by_sandbox");
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       restoreEnv("BASH_ENV", originalBashEnv);
       restoreEnv("ENV", originalEnv);
@@ -481,7 +463,7 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  seatbeltTest("direct data/raw variable-composed target with visible denial maps to raw-data payload", async () => {
+  seatbeltTest("direct data/raw variable-composed target with visible denial is byte-blocked without sandbox-denial telemetry", async () => {
     const fixture = await createFixture();
     try {
       const result = await runSandboxed(
@@ -490,10 +472,9 @@ describe("raw data seatbelt sandbox", () => {
         { enableAdvisory: false }
       );
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(true);
       await expectMissing(join(fixture.rawRoot, "direct.txt"));
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
@@ -908,10 +889,9 @@ describe("raw data seatbelt sandbox", () => {
         { enableAdvisory: false }
       );
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(false);
       expect(await readFile(target, "utf8")).toBe(before);
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
@@ -921,17 +901,15 @@ describe("raw data seatbelt sandbox", () => {
     {
       name: "sed -i",
       fileName: "sed-input.txt",
-      command: "sed -i '' 's/ORIGINAL/MUTATED/' data/raw/sed-input.txt",
-      observableDenial: true
+      command: "sed -i '' 's/ORIGINAL/MUTATED/' data/raw/sed-input.txt"
     },
     {
       name: "perl -pi",
       fileName: "perl-input.txt",
-      command: "perl -pi -e 's/ORIGINAL/MUTATED/' data/raw/perl-input.txt",
-      observableDenial: true
+      command: "perl -pi -e 's/ORIGINAL/MUTATED/' data/raw/perl-input.txt"
     }
   ]) {
-    seatbeltTest(`${commandCase.name} raw mutation preserves bytes with honest telemetry`, async () => {
+    seatbeltTest(`${commandCase.name} raw mutation preserves bytes without sandbox-denial telemetry`, async () => {
       const fixture = await createFixture();
       try {
         const target = join(fixture.rawRoot, commandCase.fileName);
@@ -942,19 +920,7 @@ describe("raw data seatbelt sandbox", () => {
         });
 
         expect(await readFile(target, "utf8")).toBe("ORIGINAL\n");
-        const rows = await readAuditRows(fixture.root);
-        if (commandCase.observableDenial) {
-          const payload = expectDeniedPayload(result, "denied_by_sandbox");
-          expectAuditMatchesPayload(rows.at(-1), payload);
-        } else {
-          expect(result.success).toBe(true);
-          expectNoRawDataDenialClaim(result);
-          expect(rows.at(-1)).toMatchObject({
-            event: "tool.completed",
-            decision: "allowed"
-          });
-          expectNoSandboxDenialAudit(rows.at(-1));
-        }
+        await expectGenericSandboxLifecycle(fixture, result);
       } finally {
         await fixture.cleanup();
       }
@@ -1027,9 +993,7 @@ describe("raw data seatbelt sandbox", () => {
         });
 
         expect(await readFile(target, "utf8")).toBe(before);
-        const rows = await readAuditRows(fixture.root);
-        const payload = expectDeniedPayload(result, "denied_by_sandbox");
-        expectAuditMatchesPayload(rows.at(-1), payload);
+        await expectGenericSandboxLifecycle(fixture, result);
       } finally {
         await fixture.cleanup();
       }
@@ -1056,10 +1020,8 @@ describe("raw data seatbelt sandbox", () => {
           enableAdvisory: false
         });
 
-        const payload = expectDeniedPayload(result, "denied_by_sandbox");
         expect(await readFile(target, "utf8")).toBe(before);
-        const rows = await readAuditRows(fixture.root);
-        expectAuditMatchesPayload(rows.at(-1), payload);
+        await expectGenericSandboxLifecycle(fixture, result);
       } finally {
         await fixture.cleanup();
       }
@@ -1169,6 +1131,44 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  for (const forgedCase of [
+    {
+      name: "target-qualified path",
+      target: "dead-branch-target.txt",
+      denialText: "data/raw/dead-branch-target.txt: Permission denied"
+    },
+    {
+      name: "basename-only target",
+      target: "dead-branch-basename.txt",
+      denialText: "dead-branch-basename.txt: Permission denied"
+    }
+  ]) {
+    seatbeltTest(`dead-branch raw target with forged ${forgedCase.name} denial text stays generic`, async () => {
+      const fixture = await createFixture();
+      try {
+        const result = await runSandboxed(
+          fixture,
+          `if false; then printf nope > data/raw/${forgedCase.target}; fi; printf '${forgedCase.denialText}\\n' >&2; false`,
+          { enableAdvisory: false }
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.output).toContain(forgedCase.denialText);
+        expect(result.outputSummary).toContain("Command failed");
+        expectNoRawDataDenialClaim(result);
+        await expectMissing(join(fixture.rawRoot, forgedCase.target));
+        const rows = await readAuditRows(fixture.root);
+        expect(rows.at(-1)).toMatchObject({
+          event: "tool.failed",
+          decision: "failed"
+        });
+        expectNoSandboxDenialAudit(rows.at(-1));
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  }
+
   seatbeltTest("suppressed raw denial with unrelated visible denial text stays generic failed result", async () => {
     const fixture = await createFixture();
     try {
@@ -1190,6 +1190,37 @@ describe("raw data seatbelt sandbox", () => {
       });
       expectNoSandboxDenialAudit(rows.at(-1));
     } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("suppressed raw denial with same-basename workspace permission error stays generic", async () => {
+    const fixture = await createFixture();
+    const noReadFile = join(fixture.workspaceRoot, "no-read.txt");
+    try {
+      await writeFile(noReadFile, "workspace\n", "utf8");
+      await chmod(noReadFile, 0o000);
+
+      const result = await runSandboxed(
+        fixture,
+        "printf hidden 2>/dev/null > data/raw/no-read.txt || true; cat workspace/no-read.txt",
+        { enableAdvisory: false }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("no-read.txt");
+      expect(result.output).toContain("Permission denied");
+      expect(result.outputSummary).toContain("Command failed");
+      expectNoRawDataDenialClaim(result);
+      await expectMissing(join(fixture.rawRoot, "no-read.txt"));
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        decision: "failed"
+      });
+      expectNoSandboxDenialAudit(rows.at(-1));
+    } finally {
+      await chmod(noReadFile, 0o600).catch(() => {});
       await fixture.cleanup();
     }
   });
@@ -1487,10 +1518,9 @@ describe("raw data seatbelt sandbox", () => {
       const denied = await runSandboxed(fixture, directRawCommand, {
         enableAdvisory: false
       });
-      const payload = expectDeniedPayload(denied, "denied_by_sandbox");
+      expect(denied.success).toBe(true);
       await expectMissing(join(fixture.rawRoot, "direct-dynamic.txt"));
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, denied);
     } finally {
       await fixture.cleanup();
     }
@@ -1578,7 +1608,7 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  seatbeltTest("running metadata matches final visible raw-denial ToolResult", async () => {
+  seatbeltTest("running metadata matches final visible generic raw-write failure", async () => {
     const fixture = await createFixture();
     try {
       const runningToolRegistry = new TestRunningToolRegistry();
@@ -1596,13 +1626,15 @@ describe("raw data seatbelt sandbox", () => {
         }
       });
 
-      expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(false);
+      expectNoRawDataDenialClaim(result);
       expect(handle.getTerminalMetadata()).toMatchObject({
         cause: "completed",
         success: false,
         outputSummary: result.outputSummary
       });
       await expectMissing(join(fixture.rawRoot, "metadata-denied.txt"));
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
@@ -2493,14 +2525,12 @@ describe("raw data seatbelt sandbox", () => {
     {
       name: "exit-zero masked dynamic raw write",
       target: "masked-exit-zero.txt",
-      observableDenial: true,
       command: () =>
         'd=data; r=raw; p="$d/$r/masked-exit-zero.txt"; printf masked > "$p" 2>/dev/null; exit 0'
     },
     {
       name: "colon masked dynamic raw write",
       target: "masked-colon.txt",
-      observableDenial: true,
       command: () =>
         'd=data; r=raw; p="$d/$r/masked-colon.txt"; printf masked > "$p" 2>/dev/null || :'
     },
@@ -2514,28 +2544,18 @@ describe("raw data seatbelt sandbox", () => {
   ];
 
   for (const suppressedCase of suppressedCases) {
-    const telemetryExpectation = suppressedCase.observableDenial
-      ? "with observable sandbox-denial telemetry"
-      : "without false sandbox-denial telemetry";
-    seatbeltTest(`${suppressedCase.name} is byte-blocked ${telemetryExpectation}`, async () => {
+    seatbeltTest(`${suppressedCase.name} is byte-blocked without sandbox-denial telemetry`, async () => {
       const fixture = await createFixture();
       try {
         const result = await runSandboxed(fixture, suppressedCase.command(fixture), {
           enableAdvisory: false
         });
 
-        const payload = suppressedCase.observableDenial
-          ? expectDeniedPayload(result, "denied_by_sandbox")
-          : undefined;
-        if (!suppressedCase.observableDenial) {
-          expect(result.success).toBe(suppressedCase.expectSuccess ?? true);
-          expectNoRawDataDenialClaim(result);
-        }
+        expect(result.success).toBe(suppressedCase.expectSuccess ?? true);
+        expectNoRawDataDenialClaim(result);
         await expectMissing(join(fixture.rawRoot, suppressedCase.target));
         const rows = await readAuditRows(fixture.root);
-        if (payload) {
-          expectAuditMatchesPayload(rows.at(-1), payload);
-        } else if (suppressedCase.expectSuccess === false) {
+        if (suppressedCase.expectSuccess === false) {
           expect(rows.at(-1)).toMatchObject({
             event: "tool.failed",
             decision: "failed"
@@ -2728,15 +2748,14 @@ describe("raw data seatbelt sandbox", () => {
         { enableAdvisory: false }
       );
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(false);
       await expectMissing(join(fixture.rawRoot, "audit-sabotage.txt"));
       const auditContent = await readFile(
         join(fixture.root, "workspace", "tasks", "TASK-M1-SPIKE", "audit", "policy-gate.ndjson"),
         "utf8"
       );
       expect(auditContent).not.toContain("forged");
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
@@ -2751,11 +2770,10 @@ describe("raw data seatbelt sandbox", () => {
         { enableAdvisory: false }
       );
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(false);
       await expectMissing(join(fixture.rawRoot, "audit-ancestor.txt"));
       await expectMissing(join(fixture.workspaceRoot, "tasks.moved"));
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
@@ -3054,7 +3072,35 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  seatbeltTest("over-budget visible raw write denial maps to raw-data payload", async () => {
+  seatbeltTest("over-budget dead-branch raw target with forged denial text stays generic", async () => {
+    const fixture = await createFixture();
+    try {
+      const filler = "x".repeat(140_000);
+      const target = "over-budget-forged.txt";
+      const forgedDenial = `data/raw/${target}: Permission denied`;
+      const result = await runSandboxed(
+        fixture,
+        `if false; then printf nope > data/raw/${target}; fi; printf '${forgedDenial}\\n' >&2; false # ${filler}`,
+        { enableAdvisory: false }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain(forgedDenial);
+      expect(result.outputSummary).toContain("Command failed");
+      expectNoRawDataDenialClaim(result);
+      await expectMissing(join(fixture.rawRoot, target));
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        decision: "failed"
+      });
+      expectNoSandboxDenialAudit(rows.at(-1));
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("over-budget visible raw write denial stays generic without sandbox-denial telemetry", async () => {
     const fixture = await createFixture();
     try {
       const filler = "x".repeat(140_000);
@@ -3064,10 +3110,9 @@ describe("raw data seatbelt sandbox", () => {
         { enableAdvisory: false }
       );
 
-      const payload = expectDeniedPayload(result, "denied_by_sandbox");
+      expect(result.success).toBe(true);
       await expectMissing(join(fixture.rawRoot, "over-budget-visible.txt"));
-      const rows = await readAuditRows(fixture.root);
-      expectAuditMatchesPayload(rows.at(-1), payload);
+      await expectGenericSandboxLifecycle(fixture, result);
     } finally {
       await fixture.cleanup();
     }
@@ -3188,7 +3233,6 @@ interface NegativeCase {
   name: string;
   target: string;
   expectSuccess?: boolean;
-  observableDenial?: boolean;
   setup?: (fixture: Fixture) => Promise<void>;
   command: (fixture: Fixture) => string;
   assertRaw?: (fixture: Fixture) => Promise<void>;
@@ -3330,6 +3374,19 @@ function expectNoRawDataDenialClaim(result: ToolResult): void {
 
 function expectNoSandboxDenialAudit(row: PolicyGateAuditRow | undefined): void {
   expect(row?.decision).not.toBe("denied_by_sandbox");
+}
+
+async function expectGenericSandboxLifecycle(
+  fixture: Fixture,
+  result: ToolResult
+): Promise<void> {
+  expectNoRawDataDenialClaim(result);
+  const rows = await readAuditRows(fixture.root);
+  expect(rows.at(-1)).toMatchObject({
+    event: result.success ? "tool.completed" : "tool.failed",
+    decision: result.success ? "allowed" : "failed"
+  });
+  expectNoSandboxDenialAudit(rows.at(-1));
 }
 
 function expectAuditMatchesPayload(

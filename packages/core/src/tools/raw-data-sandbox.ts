@@ -7,7 +7,6 @@ import {
   mkdtemp,
   open,
   opendir,
-  readlink,
   realpath,
   rm,
   writeFile
@@ -40,7 +39,6 @@ const DEFAULT_AUDIT_FILE_NAME = "policy-gate.ndjson";
 const DEFAULT_SANDBOX_EXECUTABLE = "/usr/bin/sandbox-exec";
 const DEFAULT_SANDBOX_BASH = "/bin/bash";
 const SANDBOX_DENIAL_PATTERN = /Operation not permitted|Permission denied|sandbox/i;
-const INTERPRETER_WRITE_DENIAL_PATTERN = /can't open file/i;
 const PIPE_GRACE_MS = 1000;
 const FORCE_KILL_SETTLE_MS = 75;
 const DESCENDANT_SAMPLE_INTERVAL_MS = 100;
@@ -51,9 +49,6 @@ const COMMAND_ANALYSIS_MAX_SEGMENTS = 512;
 const COMMAND_ANALYSIS_MAX_CALLS = 512;
 const PROCESS_PREFLIGHT_ANALYSIS_MAX_LENGTH = 32_000;
 const STREAM_CAPTURE_MAX_CHARS = 64_000;
-const SYMLINK_ALIAS_MAX_TARGETS = 64;
-const SYMLINK_ALIAS_MAX_PATH_COMPONENTS = 128;
-const SYMLINK_ALIAS_MAX_SYMLINKS = 16;
 const DEFAULT_ABORT_MESSAGE = "Command aborted by user from Session Detail.";
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export interface RawDataSeatbeltProfileOptions {
@@ -403,27 +398,6 @@ export class RawDataSandboxedBashTool extends BaseTool {
       });
       const result = run.result;
 
-      if (
-        await isLikelySandboxDenialForCommand(command, result, protectedRawPathSignals, {
-          workDir: ctx.workDir
-        })
-      ) {
-        const evidence = buildRawDataDenialEvidence({
-          toolId: this.name,
-          decision: "denied_by_sandbox",
-          reason: "raw data writes are blocked by the OS sandbox profile",
-          profile,
-          profilePath,
-          underlyingOutput: result.output,
-          invocationId: readInvocationId(ctx)
-        });
-        const appendFailure = await this.appendDenialAudit(ctx, auditReservation, evidence);
-        if (appendFailure) {
-          return this.finalizeToolResult(ctx, appendFailure, run.cause);
-        }
-        return this.finalizeToolResult(ctx, evidence.toolResult, run.cause);
-      }
-
       if (isProcessContainmentFailureResult(result)) {
         const appendFailure = await this.appendAudit(ctx, auditReservation, {
           event: "tool.failed",
@@ -457,64 +431,6 @@ export class RawDataSandboxedBashTool extends BaseTool {
         await cleanupRawDataSeatbeltProfileFile(profilePath);
       }
     }
-  }
-
-  async denyByOuterRawPolicyGate(
-    ctx: ToolContext,
-    input: { reason: string }
-  ): Promise<ToolResult> {
-    const protectedRawPaths = await canonicalizePathSet(this.options.protectedRawPaths);
-    const auditReservation = await this.reserveAuditEvidence(ctx, protectedRawPaths);
-    if ("toolResult" in auditReservation) {
-      return this.finalizeToolResult(ctx, auditReservation.toolResult);
-    }
-
-    let profilePath: string | undefined;
-    try {
-      const profile = await buildRawDataSeatbeltProfile({
-        protectedRawPaths,
-        allowedWriteRoots: this.options.allowedWriteRoots,
-        tempRoot: this.options.tempRoot,
-        profileRoot: this.options.profileRoot,
-        protectedEvidencePaths: [
-          ...(this.options.protectedEvidencePaths ?? []),
-          auditReservation.protectedEvidencePath
-        ]
-      });
-      profilePath = await writeRawDataSeatbeltProfileFile(profile, this.options.profileRoot);
-      const evidence = buildRawDataDenialEvidence({
-        toolId: this.name,
-        decision: "denied_by_advisory",
-        reason: input.reason,
-        profile,
-        profilePath,
-        invocationId: readInvocationId(ctx)
-      });
-      const appendFailure = await this.appendDenialAudit(ctx, auditReservation, evidence);
-      if (appendFailure) {
-        return this.finalizeToolResult(ctx, appendFailure);
-      }
-      return this.finalizeToolResult(ctx, evidence.toolResult);
-    } finally {
-      await closePolicyGateAuditReservation(auditReservation);
-      if (profilePath) {
-        await cleanupRawDataSeatbeltProfileFile(profilePath);
-      }
-    }
-  }
-
-  async canAttributeOuterRawPolicyGateDeny(input: unknown): Promise<boolean> {
-    const command = readBashCommand(input);
-    if (!command) {
-      return false;
-    }
-
-    const protectedRawPaths = await canonicalizePathSet(this.options.protectedRawPaths);
-    const protectedRawPathSignals = rawDataSignalPaths(
-      this.options.protectedRawPaths,
-      protectedRawPaths
-    );
-    return evaluateRawDataWriteAdvisory(command, protectedRawPathSignals).decision === "deny";
   }
 
   private async appendDenialAudit(
@@ -3570,39 +3486,6 @@ function rawDataGuardClassForRawData(): RawDataGuardClass {
   return "authority";
 }
 
-async function isLikelySandboxDenialForCommand(
-  command: string,
-  result: ToolResult,
-  protectedRawPaths: readonly string[],
-  options: { workDir: string }
-): Promise<boolean> {
-  const analysis = analyzeRawDataCommand(command, protectedRawPaths);
-  const denialLines = observableSandboxDenialLines(result.output);
-  if (denialLines.length === 0) {
-    return false;
-  }
-
-  const boundedCommand = analysis.budgetExceeded
-    ? command.slice(0, COMMAND_ANALYSIS_MAX_LENGTH)
-    : command;
-  const rawTargets = await collectObservableRawMutationTargets(
-    boundedCommand,
-    protectedRawPaths,
-    options
-  );
-  if (denialLines.some((line) => rawTargets.some((target) => lineMentionsTarget(line, target)))) {
-    return true;
-  }
-
-  const boundedAnalysis =
-    boundedCommand === command ? analysis : analyzeRawDataCommand(boundedCommand, protectedRawPaths);
-  if (!analysis.hasKnownRawWriteTarget && !boundedAnalysis.hasKnownRawWriteTarget) {
-    return false;
-  }
-
-  return denialLines.some((line) => lineMentionsProtectedRawSignal(line, protectedRawPaths));
-}
-
 function hasKnownRawDataWriteTarget(
   command: string,
   protectedRawPaths: readonly string[],
@@ -3613,306 +3496,6 @@ function hasKnownRawDataWriteTarget(
     hasParentRelativeRawDataWriteAlias(command, protectedRawPaths) ||
     hasDynamicRawDataWriteRisk(command)
   );
-}
-
-interface ObservableRawMutationTarget {
-  token: string;
-  resolvedPath: string;
-  cwdCandidates: readonly string[];
-}
-
-async function collectObservableRawMutationTargets(
-  command: string,
-  protectedRawPaths: readonly string[],
-  options: { workDir: string }
-): Promise<ObservableRawMutationTarget[]> {
-  const rawTargets: ObservableRawMutationTarget[] = [];
-  const targets = collectLiteralWriteTargetCandidates(command, options.workDir);
-  for (const target of targets.slice(0, SYMLINK_ALIAS_MAX_TARGETS)) {
-    for (const candidate of resolveLiteralTargetPaths(target)) {
-      if (isAbsolutePathInsideProtectedRaw(candidate, protectedRawPaths)) {
-        rawTargets.push({
-          token: target.token,
-          resolvedPath: candidate,
-          cwdCandidates: target.cwdCandidates
-        });
-        continue;
-      }
-      if (!isPathInsideOrEqual(candidate, options.workDir)) {
-        continue;
-      }
-      const resolved = await resolvePathFollowingSymlinks(candidate);
-      if (
-        resolved?.followedSymlink &&
-        isAbsolutePathInsideProtectedRaw(resolved.path, protectedRawPaths) &&
-        !(target.operation === "remove" && (await isSymlinkLeaf(candidate)))
-      ) {
-        rawTargets.push({
-          token: target.token,
-          resolvedPath: resolved.path,
-          cwdCandidates: target.cwdCandidates
-        });
-      }
-    }
-  }
-
-  return rawTargets;
-}
-
-function observableSandboxDenialLines(output: string): string[] {
-  return output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(
-      (line) =>
-        line.length > 0 &&
-        (SANDBOX_DENIAL_PATTERN.test(line) || INTERPRETER_WRITE_DENIAL_PATTERN.test(line))
-    );
-}
-
-function lineMentionsTarget(line: string, target: ObservableRawMutationTarget): boolean {
-  const token = target.token.replace(/\/+$/, "");
-  const resolvedPath = normalize(resolve(target.resolvedPath)).replace(/\/+$/, "");
-  const variants = sortedUnique([
-    token,
-    normalize(token),
-    token.startsWith("./") ? token.slice(2) : token,
-    resolvedPath,
-    ...target.cwdCandidates.map((cwd) =>
-      normalize(resolve(cwd, target.token)).replace(/\/+$/, "")
-    ),
-    ...target.cwdCandidates.map((cwd) =>
-      normalize(resolve(cwd, target.token)).replace(/\/+$/, "").replace(`${normalize(resolve(cwd)).replace(/\/+$/, "")}/`, "")
-    )
-  ]).filter((value) => value.length > 0);
-
-  if (variants.some((variant) => line.includes(variant))) {
-    return true;
-  }
-
-  const name = basename(resolvedPath);
-  return name.length >= 4 && line.includes(name);
-}
-
-function lineMentionsProtectedRawSignal(
-  line: string,
-  protectedRawPaths: readonly string[]
-): boolean {
-  if (
-    protectedRawPaths.some((protectedRawPath) =>
-      line.includes(normalize(resolve(protectedRawPath)).replace(/\/+$/, ""))
-    )
-  ) {
-    return true;
-  }
-
-  return /(?:^|[^A-Za-z0-9_.-])(?:\.\/)?data\/raw(?:\/|[^A-Za-z0-9_.-]|$)/.test(line);
-}
-
-async function isSymlinkLeaf(path: string): Promise<boolean> {
-  try {
-    return (await lstat(path)).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
-interface LiteralWriteTargetCandidate {
-  token: string;
-  cwdCandidates: readonly string[];
-  operation?: "remove";
-}
-
-function collectLiteralWriteTargetCandidates(
-  command: string,
-  initialCwd: string
-): LiteralWriteTargetCandidate[] {
-  const targets: LiteralWriteTargetCandidate[] = [];
-  let cwdCandidates: string[] = [normalize(resolve(initialCwd))];
-  let cwdAmbiguous = false;
-
-  for (const segment of splitStaticShellSegments(command)) {
-    if (targets.length >= SYMLINK_ALIAS_MAX_TARGETS) {
-      break;
-    }
-    const tokens = commandTokensFromSegment(segment);
-    if (tokens.length === 0) {
-      continue;
-    }
-
-    const commandName = normalizeCommandName(tokens[0]);
-    if (isCwdChangingCommand(commandName)) {
-      if ((commandName === "cd" || commandName === "pushd") && tokens[1]) {
-        const nextCwdCandidates = resolveStaticCwdCandidates(cwdCandidates, tokens[1]);
-        if (nextCwdCandidates) {
-          cwdCandidates = nextCwdCandidates;
-          cwdAmbiguous = false;
-        } else {
-          cwdCandidates = [];
-          cwdAmbiguous = true;
-        }
-      } else {
-        cwdCandidates = [];
-        cwdAmbiguous = true;
-      }
-      continue;
-    }
-
-    for (let index = 0; index < tokens.length - 1; index += 1) {
-      if (isWriteRedirectionToken(tokens[index])) {
-        pushLiteralTarget(targets, tokens[index + 1], cwdCandidates, cwdAmbiguous);
-      }
-    }
-
-    if (
-      (commandName === "bash" || commandName === "sh") &&
-      targets.length < SYMLINK_ALIAS_MAX_TARGETS
-    ) {
-      for (let index = 1; index < tokens.length - 1; index += 1) {
-        if (tokens[index] === "-c") {
-          targets.push(
-            ...collectLiteralWriteTargetCandidates(tokens[index + 1], cwdCandidates[0] ?? initialCwd)
-          );
-        }
-      }
-    }
-
-    const operands = extractCommandOperands(tokens.slice(1));
-    if (operands.length === 0) {
-      continue;
-    }
-
-    if (commandName === "cp" || commandName === "install" || commandName === "ln") {
-      pushLiteralTarget(targets, operands.at(-1), cwdCandidates, cwdAmbiguous);
-      continue;
-    }
-
-    if (commandName === "dd") {
-      for (const operand of operands) {
-        const outputMatch = operand.match(/^of=(.+)$/);
-        if (outputMatch) {
-          pushLiteralTarget(targets, outputMatch[1], cwdCandidates, cwdAmbiguous);
-        }
-      }
-      continue;
-    }
-
-    if (commandName === "mv" || commandName === "mkdir") {
-      for (const operand of operands) {
-        pushLiteralTarget(targets, operand, cwdCandidates, cwdAmbiguous);
-      }
-      continue;
-    }
-
-    if (commandName === "rm" || commandName === "unlink") {
-      for (const operand of operands) {
-        pushLiteralTarget(targets, operand, cwdCandidates, cwdAmbiguous, "remove");
-      }
-      continue;
-    }
-
-    if (
-      commandName === "tee" ||
-      commandName === "touch" ||
-      commandName === "truncate" ||
-      commandName === "chmod" ||
-      commandName === "chown" ||
-      commandName === "chgrp" ||
-      commandName === "xattr"
-    ) {
-      for (const operand of operands) {
-        pushLiteralTarget(targets, operand, cwdCandidates, cwdAmbiguous);
-      }
-    }
-  }
-
-  return targets.slice(0, SYMLINK_ALIAS_MAX_TARGETS);
-}
-
-function pushLiteralTarget(
-  targets: LiteralWriteTargetCandidate[],
-  token: string | undefined,
-  cwdCandidates: readonly string[],
-  cwdAmbiguous: boolean,
-  operation?: LiteralWriteTargetCandidate["operation"]
-): void {
-  if (
-    !token ||
-    cwdAmbiguous ||
-    targets.length >= SYMLINK_ALIAS_MAX_TARGETS ||
-    !isSimpleStaticPathToken(token)
-  ) {
-    return;
-  }
-  targets.push({
-    token,
-    cwdCandidates: [...cwdCandidates],
-    ...(operation ? { operation } : {})
-  });
-}
-
-function resolveLiteralTargetPaths(target: LiteralWriteTargetCandidate): string[] {
-  if (isAbsolute(target.token)) {
-    return [normalize(resolve(target.token))];
-  }
-
-  return sortedUnique(target.cwdCandidates.map((cwd) => normalize(resolve(cwd, target.token))));
-}
-
-async function resolvePathFollowingSymlinks(
-  path: string
-): Promise<{ path: string; followedSymlink: boolean } | undefined> {
-  let absolutePath = normalize(resolve(path));
-  let current = resolveRoot(absolutePath);
-  let remaining = pathSegmentsFromAbsolute(absolutePath);
-  let followedSymlink = false;
-  let symlinkCount = 0;
-  let componentCount = 0;
-
-  while (remaining.length > 0) {
-    componentCount += 1;
-    if (componentCount > SYMLINK_ALIAS_MAX_PATH_COMPONENTS) {
-      return undefined;
-    }
-
-    const segment = remaining.shift()!;
-    const nextPath = join(current, segment);
-    let metadata: Awaited<ReturnType<typeof lstat>>;
-    try {
-      metadata = await lstat(nextPath);
-    } catch (error) {
-      if (isErrno(error, "ENOENT") && followedSymlink) {
-        return {
-          path: normalize(resolve(nextPath, ...remaining)),
-          followedSymlink
-        };
-      }
-      return undefined;
-    }
-
-    if (!metadata.isSymbolicLink()) {
-      current = nextPath;
-      continue;
-    }
-
-    symlinkCount += 1;
-    if (symlinkCount > SYMLINK_ALIAS_MAX_SYMLINKS) {
-      return undefined;
-    }
-
-    followedSymlink = true;
-    const linkTarget = await readlink(nextPath);
-    absolutePath = normalize(
-      resolve(dirname(nextPath), linkTarget, ...remaining)
-    );
-    current = resolveRoot(absolutePath);
-    remaining = pathSegmentsFromAbsolute(absolutePath);
-  }
-
-  return {
-    path: current,
-    followedSymlink
-  };
 }
 
 function pathSegmentsFromAbsolute(path: string): string[] {

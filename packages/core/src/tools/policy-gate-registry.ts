@@ -9,7 +9,6 @@ import {
   type PolicyGateToolCall
 } from "./policy-gate-core";
 import {
-  RAW_DATA_WRITE_RULE_ID,
   RawDataSandboxedBashTool,
   type RawDataSeatbeltProfileOptions
 } from "./raw-data-sandbox";
@@ -248,15 +247,6 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     );
 
     if (decision.decision === "deny") {
-      if (
-        decision.ruleId === RAW_DATA_WRITE_RULE_ID &&
-        this.innerTool instanceof RawDataSandboxedBashTool &&
-        (await this.innerTool.canAttributeOuterRawPolicyGateDeny(input))
-      ) {
-        return this.innerTool.denyByOuterRawPolicyGate(toolContext, {
-          reason: decision.reason
-        });
-      }
       return buildPolicyGateDeniedResult(this.policyGateToolId, decision);
     }
 
