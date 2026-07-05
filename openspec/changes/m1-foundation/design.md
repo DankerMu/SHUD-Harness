@@ -175,7 +175,7 @@ Invariant Matrix:
 - Failure paths/rollback/stale state: sandbox denial returns stable tool error and must not leave a raw-data mutation; advisory denial is allowed only for clear static writes and must not overdeny reads.
 - Evidence/audit/readiness: unit/integration tests plus PR evidence; hardlink residual evidence records both leak demonstration and `nlink>1` detection.
 - Regression rows:
-  - Six escape classes (interpreter payload, pipeline/stdin, dynamic target, shell state/child process, symlink or `../` alias, rename/unlink) targeting `data/raw/**` -> no raw mutation, failed tool result with remediation, `tool.failed`, audit row including profile id and `decision=denied_by_sandbox`.
+  - Six escape classes (interpreter payload, pipeline/stdin, dynamic target, shell state/child process, symlink or `../` alias, rename/unlink) targeting `data/raw/**` -> no raw mutation; when the denial is observable through advisory or process result, failed tool result with remediation, `tool.failed`, audit row including profile id and `decision=denied_by_sandbox`; hidden/suppressed denials remain out of telemetry scope and must not be presented as detected.
   - `cat data/raw/input.csv` and a workspace allowed write under the same profile -> command succeeds.
   - Pre-existing hardlink alias to a raw file written outside the protected subpath -> documented residual behavior, `nlink>1` helper accepts explicit protected roots, reads metadata only under those roots, avoids broader workspace/repo traversal, and flags the raw source/root as unsafe.
   - Obvious static raw write seen by advisory layer -> may be denied before execution with remediation and audit/WS evidence; advisory misses remain covered by sandbox and advisory must not block legal reads.

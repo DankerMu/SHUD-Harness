@@ -353,26 +353,6 @@ export class RawDataSandboxedBashTool extends BaseTool {
         profile.metadata.protectedRawPaths
       );
 
-      const suppressedDenial = evaluateSuppressedSandboxFailureGuard(
-        command,
-        protectedRawPathSignals
-      );
-      if (suppressedDenial.decision === "deny") {
-        const evidence = buildRawDataDenialEvidence({
-          toolId: this.name,
-          decision: "denied_by_advisory",
-          reason: suppressedDenial.reason,
-          profile,
-          profilePath,
-          invocationId: readInvocationId(ctx)
-        });
-        const appendFailure = await this.appendDenialAudit(ctx, auditReservation, evidence);
-        if (appendFailure) {
-          return this.finalizeToolResult(ctx, appendFailure);
-        }
-        return this.finalizeToolResult(ctx, evidence.toolResult);
-      }
-
       if (this.options.enableAdvisory !== false) {
         const advisory = evaluateRawDataWriteAdvisory(command, protectedRawPathSignals);
         if (advisory.decision === "deny") {
@@ -611,44 +591,10 @@ export function evaluateRawDataWriteAdvisory(
   protectedRawPaths: readonly string[]
 ): PolicyRuleDecision {
   const analysis = analyzeRawDataCommand(command, protectedRawPaths);
-  const suppressedDenial = evaluateSuppressedSandboxFailureGuard(
-    command,
-    protectedRawPaths,
-    analysis
-  );
-  if (suppressedDenial.decision === "deny") {
-    return suppressedDenial;
-  }
-
   if (analysis.hasStaticRawWrite) {
     return {
       decision: "deny",
       reason: "obvious static raw-data write target",
-      remediation: rawDataWriteRemediation()
-    };
-  }
-
-  return { decision: "allow" };
-}
-
-export function evaluateSuppressedSandboxFailureGuard(
-  command: string,
-  protectedRawPaths: readonly string[],
-  existingAnalysis?: RawDataCommandAnalysis
-): PolicyRuleDecision {
-  const analysis = existingAnalysis ?? analyzeRawDataCommand(command, protectedRawPaths);
-  if (analysis.hasIncompleteHiddenInterpreterWriteScan) {
-    return {
-      decision: "deny",
-      reason: "policy gate interpreter call scan was incomplete for hidden-denial-sensitive write-capable payload",
-      remediation: rawDataWriteRemediation()
-    };
-  }
-
-  if (analysis.hasInterpreterSuppressedRawWrite || analysis.hasHiddenRawWriteTarget) {
-    return {
-      decision: "deny",
-      reason: "raw-data write form can hide sandbox denial",
       remediation: rawDataWriteRemediation()
     };
   }
@@ -661,10 +607,6 @@ interface RawDataCommandAnalysis {
   budgetReason?: string;
   hasStaticRawWrite: boolean;
   hasKnownRawWriteTarget: boolean;
-  hasHiddenEvidenceRisk: boolean;
-  hasHiddenRawWriteTarget: boolean;
-  hasInterpreterSuppressedRawWrite: boolean;
-  hasIncompleteHiddenInterpreterWriteScan: boolean;
 }
 
 function analyzeRawDataCommand(
@@ -677,34 +619,19 @@ function analyzeRawDataCommand(
       budgetExceeded: true,
       budgetReason: budget.reason,
       hasStaticRawWrite: false,
-      hasKnownRawWriteTarget: false,
-      hasHiddenEvidenceRisk: canLoseSandboxDenialEvidence(command),
-      hasHiddenRawWriteTarget: false,
-      hasInterpreterSuppressedRawWrite: false,
-      hasIncompleteHiddenInterpreterWriteScan: false
+      hasKnownRawWriteTarget: false
     };
   }
 
-  const hasHiddenEvidenceRisk = canLoseSandboxDenialEvidence(command);
   const hasStaticRawWrite = hasStaticRawDataWrite(command, protectedRawPaths);
   const hasKnownRawWriteTarget = hasKnownRawDataWriteTarget(command, protectedRawPaths, {
     staticRawWrite: hasStaticRawWrite
   });
-  const hasInterpreterSuppressedRawWrite = hasInterpreterInternalRawWriteSuppressionRisk(
-    command,
-    protectedRawPaths
-  );
-  const hasIncompleteHiddenInterpreterWriteScan =
-    hasIncompleteHiddenInterpreterWriteScanRisk(command);
 
   return {
     budgetExceeded: false,
     hasStaticRawWrite,
-    hasKnownRawWriteTarget,
-    hasHiddenEvidenceRisk,
-    hasHiddenRawWriteTarget: hasKnownRawWriteTarget && hasHiddenEvidenceRisk,
-    hasInterpreterSuppressedRawWrite,
-    hasIncompleteHiddenInterpreterWriteScan
+    hasKnownRawWriteTarget
   };
 }
 
@@ -2479,113 +2406,6 @@ function hasAwkRawWriteTarget(
   return false;
 }
 
-function hasInterpreterInternalRawWriteSuppressionRisk(
-  command: string,
-  protectedRawPaths: readonly string[]
-): boolean {
-  let cwdCandidates = inferredProtectedRawProjectRoots(protectedRawPaths);
-  let relativeRawPathsAmbiguous = cwdCandidates.length === 0;
-
-  for (const segment of splitStaticShellSegments(command)) {
-    const tokens = commandTokensFromSegment(segment);
-    if (tokens.length === 0) {
-      continue;
-    }
-
-    const commandName = normalizeCommandName(tokens[0]);
-    if (isCwdChangingCommand(commandName)) {
-      if ((commandName === "cd" || commandName === "pushd") && tokens[1]) {
-        const nextCwdCandidates = resolveStaticCwdCandidates(cwdCandidates, tokens[1]);
-        if (nextCwdCandidates) {
-          cwdCandidates = nextCwdCandidates;
-          relativeRawPathsAmbiguous = false;
-        } else {
-          cwdCandidates = [];
-          relativeRawPathsAmbiguous = true;
-        }
-      } else {
-        cwdCandidates = [];
-        relativeRawPathsAmbiguous = true;
-      }
-      continue;
-    }
-
-    if (!isInterpreterCommand(commandName)) {
-      continue;
-    }
-
-    const payload = interpreterPayload(tokens);
-    if (!payload) {
-      continue;
-    }
-
-    if (
-      hasInterpreterRawWriteTarget(
-        payload,
-        protectedRawPaths,
-        rawPathResolutionOptions(cwdCandidates, !relativeRawPathsAmbiguous)
-      ) &&
-      hasInterpreterExceptionSwallowSignal(payload)
-    ) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function hasIncompleteHiddenInterpreterWriteScanRisk(command: string): boolean {
-  for (const segment of splitStaticShellSegments(command)) {
-    const tokens = commandTokensFromSegment(segment);
-    if (tokens.length === 0 || !isInterpreterCommand(normalizeCommandName(tokens[0]))) {
-      continue;
-    }
-
-    const payload = interpreterPayload(tokens);
-    if (
-      payload &&
-      hasInterpreterExceptionSwallowSignal(payload) &&
-      hasTruncatedWriteCapableCallScan(payload)
-    ) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function hasTruncatedWriteCapableCallScan(payload: string): boolean {
-  const writeCapablePatterns: readonly RegExp[] = [
-    /\b(?:writeFile|appendFile)(?:Sync)?/,
-    /\bcreateWriteStream/,
-    /\b(?:File|IO)\.write/,
-    /\b(?:File\.)?open(?:Sync)?/,
-    /\b(?:os\.)?(?:unlink|remove)\b/,
-    /\b(?:(?:fs\.)?(?:unlink|unlinkSync|rmSync)|fs\.rm)\b/,
-    /\b(?:os\.|fs\.|File\.)?(?:rename|renameSync|replace|move|mv)\b/,
-    /\b(?:copyFile|copyFileSync)\b/,
-    /\b(?:shutil\.)?(?:copyfile|copy|copy2)\b/,
-    /\bwrite\.(?:csv|table)/,
-    /\bwriteLines/,
-    /\bsaveRDS/,
-    /\bsink/
-  ];
-
-  return writeCapablePatterns.some(
-    (pattern) => scanCallArgumentLists(payload, pattern).truncated
-  );
-}
-
-function hasInterpreterExceptionSwallowSignal(payload: string): boolean {
-  return (
-    /try\s*{[\s\S]*}\s*catch(?:\s*\([^)]*\))?\s*{\s*}/.test(payload) ||
-    /try\s*{[\s\S]*}\s*catch\b/.test(payload) ||
-    /\bexcept\b[\s\S]*(?:\bpass\b|sys\.exit\s*\(\s*0\s*\)|exit\s*\(?\s*0\s*\)?)/.test(payload) ||
-    /\brescue\b[\s\S]*(?:nil|true|$)/.test(payload) ||
-    /\beval\s*{[\s\S]*}/.test(payload)
-  );
-}
-
 function findCallArgumentLists(payload: string, calleePattern: RegExp): string[] {
   return scanCallArgumentLists(payload, calleePattern).calls;
 }
@@ -3515,7 +3335,7 @@ function hasSessionEscapeSignal(command: string): boolean {
 
     if (isInterpreterCommand(commandName)) {
       const payload = interpreterPayload(tokens);
-      if (payload && hasInterpreterProcessContainmentRisk(commandName, payload)) {
+      if (payload && hasInterpreterProcessContainmentRisk(payload)) {
         return true;
       }
     }
@@ -3524,12 +3344,9 @@ function hasSessionEscapeSignal(command: string): boolean {
   return false;
 }
 
-function hasInterpreterProcessContainmentRisk(commandName: string, payload: string): boolean {
+function hasInterpreterProcessContainmentRisk(payload: string): boolean {
   const code = stripInterpreterLiteralAndCommentText(payload);
-  return (
-    hasInterpreterSessionEscapeSignal(code) ||
-    hasInterpreterProgrammaticProcessCreationSignal(commandName, payload, code)
-  );
+  return hasInterpreterSessionEscapeSignal(code);
 }
 
 function hasInterpreterSessionEscapeSignal(code: string): boolean {
@@ -3541,94 +3358,6 @@ function hasInterpreterSessionEscapeSignal(code: string): boolean {
     /\bpreexec_fn\s*=\s*(?:os\.)?(?:setsid|setpgrp)\b/.test(code) ||
     /\b(?:spawn|exec|execFile|fork)\s*\([\s\S]*\bdetached\s*:\s*true\b/.test(code) ||
     /\bsystem(?:2)?\s*\([\s\S]*\bwait\s*=\s*FALSE\b/.test(code)
-  );
-}
-
-function hasInterpreterProgrammaticProcessCreationSignal(
-  commandName: string,
-  payload: string,
-  code: string
-): boolean {
-  if (isPythonCommand(commandName)) {
-    return hasPythonProgrammaticProcessCreationSignal(code);
-  }
-
-  if (isNodeLikeCommand(commandName)) {
-    return hasNodeProgrammaticProcessCreationSignal(payload, code);
-  }
-
-  if (isRubyCommand(commandName)) {
-    return hasRubyProgrammaticProcessCreationSignal(code);
-  }
-
-  if (isRCommand(commandName)) {
-    return hasRProgrammaticProcessCreationSignal(code);
-  }
-
-  return false;
-}
-
-function isPythonCommand(commandName: string): boolean {
-  return /^python(?:\d+(?:\.\d+)?)?$/.test(commandName);
-}
-
-function isNodeLikeCommand(commandName: string): boolean {
-  return commandName === "node" || commandName === "bun";
-}
-
-function isRubyCommand(commandName: string): boolean {
-  return commandName === "ruby";
-}
-
-function isRCommand(commandName: string): boolean {
-  return commandName === "R" || commandName === "Rscript";
-}
-
-function hasPythonProgrammaticProcessCreationSignal(code: string): boolean {
-  return (
-    /\bsubprocess\s*\.\s*Popen\s*\(/.test(code) ||
-    /\bos\s*\.\s*fork\s*\(/.test(code) ||
-    /\bmultiprocessing\s*\.\s*Process\s*\(/.test(code) ||
-    /\bdaemon\s*\.\s*DaemonContext\s*\(/.test(code)
-  );
-}
-
-function hasNodeProgrammaticProcessCreationSignal(payload: string, code: string): boolean {
-  if (/\bchild_process\s*\.\s*(?:spawn|exec|execFile|fork)\s*\(/.test(code)) {
-    return true;
-  }
-
-  if (!hasNodeChildProcessModuleReference(payload)) {
-    return false;
-  }
-
-  return (
-    /\.\s*(?:spawn|exec|execFile|fork)\s*\(/.test(code) ||
-    /\b(?:spawn|exec|execFile|fork)\s*\(/.test(code)
-  );
-}
-
-function hasNodeChildProcessModuleReference(payload: string): boolean {
-  return (
-    /\brequire\s*\(\s*["'](?:node:)?child_process["']\s*\)/.test(payload) ||
-    /\bimport\s*\(\s*["'](?:node:)?child_process["']\s*\)/.test(payload) ||
-    /\bfrom\s*["'](?:node:)?child_process["']/.test(payload) ||
-    /\bimport\s+["'](?:node:)?child_process["']/.test(payload)
-  );
-}
-
-function hasRubyProgrammaticProcessCreationSignal(code: string): boolean {
-  return (
-    /\b(?:Process|Kernel)\s*\.\s*(?:fork|spawn)\s*\(/.test(code) ||
-    /\b(?:fork|spawn)\s*\(/.test(code)
-  );
-}
-
-function hasRProgrammaticProcessCreationSignal(code: string): boolean {
-  return (
-    /\b(?:parallel\s*::\s*)?mcparallel\s*\(/.test(code) ||
-    /\bcallr\s*::\s*r_bg\s*\(/.test(code) ||
-    /\bprocessx\s*::\s*process\s*\$\s*new\s*\(/.test(code)
   );
 }
 
@@ -3745,38 +3474,6 @@ function hasUnquotedBackgroundOperator(command: string): boolean {
   return false;
 }
 
-function canHideSandboxFailure(command: string): boolean {
-  return hasShellExitStatusNormalizer(command) || hasShellDenialOutputSuppression(command);
-}
-
-function hasShellExitStatusNormalizer(command: string): boolean {
-  return /(?:^|[\s;&|])(?:\|\||;|\n|&)\s*(?::|true|exit\s+0)(?=\s|[;|&)]|$)/.test(command);
-}
-
-function hasShellDenialOutputSuppression(command: string): boolean {
-  return (
-    /(?:^|[\s;&|])2\s*>{1,2}\s*\/dev\/null(?=[\s;|&)]|$)/.test(command) ||
-    /(?:^|[\s;&|])2\s*>\s*&\s*-(?=[\s;|&)]|$)/.test(command) ||
-    /(?:^|[\s;&|])>\s*\/dev\/null\s+2\s*>\s*&\s*1(?=[\s;|&)]|$)/.test(command)
-  );
-}
-
-function canLoseSandboxDenialEvidence(command: string): boolean {
-  return canHideSandboxFailure(command) || hasShellStderrFileRedirection(command);
-}
-
-function hasShellStderrFileRedirection(command: string): boolean {
-  return (
-    /(?:^|[\s;&|])2\s*>{1,2}\s*(?!&[12]\b)(?!\/dev\/stderr\b)(?!\/proc\/self\/fd\/2\b)[^\s;|&)]+/.test(
-      command
-    ) ||
-    /(?:^|[\s;&|])(?:&>|>&)\s*(?!&[12]\b)(?!\/dev\/stderr\b)(?!\/proc\/self\/fd\/2\b)[^\s;|&)]+/.test(
-      command
-    ) ||
-    /(?:^|[\s;&|])>{1,2}\s*(?!&[12]\b)[^\s;|&)]+[\s\S]*2\s*>\s*&\s*1/.test(command)
-  );
-}
-
 function rawDataGuardClassForRawData(): RawDataGuardClass {
   return "authority";
 }
@@ -3798,14 +3495,10 @@ function isLikelySandboxDenialForCommand(
   const denialOutput =
     isLikelySandboxDenial(output) || INTERPRETER_WRITE_DENIAL_PATTERN.test(output);
   if (!denialOutput) {
-    return (
-      !result.success &&
-      analysis.hasKnownRawWriteTarget &&
-      analysis.hasHiddenEvidenceRisk
-    );
+    return false;
   }
 
-  return analysis.hasKnownRawWriteTarget;
+  return !result.success && analysis.hasKnownRawWriteTarget;
 }
 
 function hasKnownRawDataWriteTarget(
