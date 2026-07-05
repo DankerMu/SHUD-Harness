@@ -42,7 +42,8 @@ describe("backend ws tool.failed skeleton", () => {
     expect(event.payload.error.remediation?.ref).toContain("policy-gate-spike");
   });
 
-  test("builds tool.failed from actual raw-data sandbox denial payload", async () => {
+  test("builds tool.failed from reserved trusted raw-data sandbox denial payload shape", async () => {
+    // Shape coverage only; M1 post-exec process output does not produce this reserved decision.
     const payload = await sampleRawDataDenialPayload("denied_by_sandbox");
     const event = buildToolFailedWsEvent({
       seq: 8,
@@ -90,7 +91,7 @@ async function sampleRawDataDenialPayload(
       decision,
       reason:
         decision === "denied_by_sandbox"
-          ? "raw data writes are blocked by the OS sandbox profile"
+          ? "trusted OS sandbox source reserved a raw-data write denial"
           : "obvious static raw-data write target",
       profile,
       profilePath: join(tempRoot, "profile.sb"),

@@ -124,7 +124,7 @@ status: accepted
 5. **迁移出口**：`sandbox-exec` deprecated-but-universal（Chromium/Bazel/Nix/Claude Code 在用）；
    若离开 macOS 单机形态，等价物 = Linux landlock/bwrap/ro-bind，authority 语义不变。
 
-### 2026-07-04 裁决补充：可观测边界（PR #48 post-gate）
+### 2026-07-04 裁决补充 / 2026-07-05 gate 收窄：可信可观测边界（PR #48）
 
 条 2' 首个实现（PR [#48](https://github.com/DankerMu/SHUD-Harness/pull/48)）经六路 comprehensive review +
 independent verifier 确认 4 条 merge-blocking finding，但它们是同一堵墙换位复发：wrapper 想从"命令文本 +
@@ -135,10 +135,12 @@ independent verifier 确认 4 条 merge-blocking finding，但它们是同一堵
    超预算命令、继承 profile 的子/孙进程一律锁死。`cand-01`（symlink 假成功）、`cand-03`（超预算假成功）的
    字节均**未泄漏**，失败点只是 audit 标签记成 `allowed`；`cand-02` 的残留写只落 **workspace**（raw 仍锁），
    属生命周期问题非完整性问题。
-2. **denial telemetry 收窄为可观测**：wrapper 仅对**可观测**拒绝产 `tool.failed` + remediation + audit denial
-   行——(a) advisory 提前捕获，(b) 经进程结果外显的 OS 拒绝（非零退出 / 未捕获错误传回）。子进程**吞掉**
-   EPERM、抑制 stderr、exit 0 的隐藏拒绝，当前 M1 wrapper 原语不能可靠观测 → 移出 #19。audit 行只记可观测
-   事实（施加的 seatbelt profile、退出状态、advisory 决策），不得声称已检出每一次被拒尝试。
+2. **denial telemetry 收窄为可信可观测**：wrapper 仅对可信 raw-denial 证据源产 `tool.failed` + remediation +
+   audit denial 行。当前 M1 可信源为 advisory/static 层提前捕获的同根 raw 写意图；`denied_by_sandbox` 预留给
+   后续不可伪造的 OS 事件源。post-exec stdout/stderr/退出码可由被测命令伪造，因此只记录普通 lifecycle
+   `failed` 事实，不得据此声明 `raw_data_write_denied` 或 `denied_by_sandbox`。子进程**吞掉** EPERM、抑制
+   stderr、exit 0 的隐藏拒绝，当前 M1 wrapper 原语不能可靠观测 → 移出 #19。audit 行只记可观测事实（施加的
+   seatbelt profile、退出状态、advisory 决策），不得声称已检出每一次被拒尝试。
 3. **进程树生命周期所有权 deferred**：双 fork/setsid/会话分裂后代经 PPID 采样不可靠捕获——M1 不承诺阻止一切
    invocation-owned 后代在终态后写 workspace（raw 仍由继承 profile 守住）。为抓 cand-02 而收紧的
    process-creation preflight 误杀合法 **waited 前台子进程**（`cand-04`）须收窄，合法 workspace 写保持放行。
@@ -146,8 +148,8 @@ independent verifier 确认 4 条 merge-blocking finding，但它们是同一堵
 4. **M1 验收核 = raw 字节完整性不变量**：任何 bash 调用及其后代不能改写 `data/raw/**` 字节——seatbelt 守住，
    四条 finding 未破。隐藏拒绝遥测与任意进程树所有权是**执行器/审计后端**能力，非 M1 wrapper 原语可诚实兑现，
    显式移出条 2'；四条 finding 按 acceptance-boundary 修正处置（非实现漏项，cand-04 随 preflight 收窄修复）。
-   落账：Phased_Plan M1 条 2 行与 policy-gate-spike spec 同步（账本例外批次 5 延伸）。PR #48 保持 blocked
-   存证，Codex 基于更新后的 boundary 重做实现。
+   落账：Phased_Plan M1 条 2 行与 policy-gate-spike spec 同步（账本例外批次 5 延伸）。PR #48 基于更新后的
+   boundary 重做实现并继续 gate。
 
 ## 参照
 

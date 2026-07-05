@@ -22,16 +22,16 @@
 
 路径写禁区规则（`data/raw/**`）的 authority SHALL 位于执行层 OS 沙箱：bash 工具 spawn 命令时施加沙箱 profile（macOS = `sandbox-exec`/seatbelt：`deny file-write*` subpath `data/raw`，其余默认放行），写入在 syscall 层按解析后真实目标路径被拒，子进程 MUST 继承约束；合法 `data/raw` 读取与 workspace 允许目录写入 MUST 不受影响。pre-exec 静态检查降级为 advisory 提示层（fail-open）：MAY 对可静态识别的明显违规在执行前拒绝并给出 remediation，MUST NOT 作为唯一 authority，MUST NOT 因不确定而误拒合法读取。
 
-**可观测拒绝面**（advisory 提前拒 + 经进程结果外显的 OS 层拒绝，同一错误形态）MUST 产出含 `remediation{next_action, hint, ref}` 的工具错误；该拒绝事件 MUST 经 WebSocket 推出，事件类型复用 WebSocket_Protocol §3 注册表既有的 `tool.failed`（冻结注册表内无 policy-denial 类事件，本 change 不新增事件类型），payload 携带含 remediation 的 ErrorRecord，skeleton 深度：envelope 含 seq/event_id。每次施加了沙箱 profile 的 bash 调用 MUST 落 audit 最小行：字段至少含 `event`、`tool_id`、`rule`、`decision`、`ts` + profile 标识（可观测 OS 拒绝 decision 记 `denied_by_sandbox`）；audit 行 MUST 只记可观测事实（施加的 profile、退出状态、advisory 决策），MUST NOT 声称已检出每一次被拒尝试。落盘遵 Workspace_Conventions `tasks/<task_id>/audit/` 布局，spike 的 bash 拒绝发生在无 TaskCard 上下文时固定使用 fixture 任务目录 `workspace/tasks/TASK-M1-SPIKE/audit/`；完整 AuditEvent schema（User_Session_And_Audit_Schema §4）与完整协议随 M3 对齐。
+**可观测拒绝面**（2026-07-05 收窄）：M1 wrapper 只能把**可信 raw-denial 证据源**归类为 raw 写拒绝。当前可信源为 advisory/static 层在执行前识别出的同根 raw 写意图；该拒绝 MUST 产出含 `remediation{next_action, hint, ref}` 的工具错误，MUST 经 WebSocket 推出既有 `tool.failed`（envelope 含 seq/event_id，payload 携带含 remediation 的 ErrorRecord），并落 audit denial 行。`decision=denied_by_sandbox` 仅预留给后续不可伪造的 OS 拒绝事件源；M1 MUST NOT 仅凭子进程 stdout/stderr/退出码把 post-exec 结果升级为 `raw_data_write_denied` 或 `denied_by_sandbox`。每次施加了沙箱 profile 的 bash 调用 MUST 落 audit 最小生命周期行：字段至少含 `event`、`tool_id`、`rule`、`decision`、`ts` + profile 标识，decision 记录 wrapper 可直接观测的 `allowed|failed|denied_by_advisory` 等事实。落盘遵 Workspace_Conventions `tasks/<task_id>/audit/` 布局，spike 的 bash 拒绝发生在无 TaskCard 上下文时固定使用 fixture 任务目录 `workspace/tasks/TASK-M1-SPIKE/audit/`；完整 AuditEvent schema（User_Session_And_Audit_Schema §4）与完整协议随 M3 对齐。
 
-隐藏拒绝遥测与进程树所有权移出条 2'（2026-07-04 PR #48 post-gate 补充）：子进程**吞掉** OS 拒绝（捕获 EPERM、抑制 stderr、exit 0）时，当前 M1 wrapper 原语不能可靠观测该被拒尝试，此类**隐藏拒绝的完整遥测** SHALL NOT 作为条 2' 验收项，归后续 executor/audit 后端（OS 事件源）。同理，双 fork/setsid/会话分裂产生的**任意后代进程生命周期所有权**（终态后 workspace 写）经 PPID 采样不可靠，SHALL NOT 作为条 2' 验收项，归后续 executor/runtime containment；raw 字节仍由继承 profile 守住。为捕获后代而设的 process-creation preflight MUST NOT 过宽——合法的 **waited 前台子进程**（fork 后 wait 再退出）写 workspace MUST 保持放行。上述移出项 MUST NOT 削弱本 requirement 第一段的 **raw 字节完整性**不变量：seatbelt 对六类逃逸的字节保护不依赖遥测或进程采样。
+隐藏拒绝遥测、post-exec 拒绝归因与进程树所有权移出条 2'（2026-07-05 PR #48 gate 收窄）：子进程**吞掉** OS 拒绝（捕获 EPERM、抑制 stderr、exit 0）时，当前 M1 wrapper 原语不能可靠观测该被拒尝试；即使拒绝文本经 stdout/stderr/退出码外显，进程输出本身仍可由被测命令伪造，M1 只能记录普通 lifecycle failure，不能据此声明 `denied_by_sandbox`。此类**完整拒绝遥测** SHALL NOT 作为条 2' 验收项，归后续 executor/audit 后端（不可伪造 OS 事件源）。同理，双 fork/setsid/会话分裂产生的**任意后代进程生命周期所有权**（终态后 workspace 写）经 PPID 采样不可靠，SHALL NOT 作为条 2' 验收项，归后续 executor/runtime containment；raw 字节仍由继承 profile 守住。为捕获后代而设的 process-creation preflight MUST NOT 过宽——合法的 **waited 前台子进程**（fork 后 wait 再退出）写 workspace MUST 保持放行。上述移出项 MUST NOT 削弱本 requirement 第一段的 **raw 字节完整性**不变量：seatbelt 对六类逃逸的字节保护不依赖遥测或进程采样。
 
-重定背景（2026-07-04）：首轮条 2 以 pre-exec 静态命令串扫描作为唯一 authority 判 Not green——静态扫描无法同时满足"任意 bash 写入拒绝 / 合法 raw 读兼容 / 不实现 full shell parser"，六类逃逸 + 读误拒证据见 [policy-gate-spike-verdict](../../policy-gate-spike-verdict.md)（PR #46 留作 spike 证据）；按 ADR-0001 revisit 裁决与冻结 spec 既有分工重定为执行层 enforcement；条 2' 首实现（PR #48）post-gate 复审进一步把遥测/进程所有权收窄为可观测边界（见上文移出项与 [ADR-0001](../../../../../docs/adr/0001-agent-runtime-and-topology.md) 2026-07-04 裁决补充）。
+重定背景（2026-07-04）：首轮条 2 以 pre-exec 静态命令串扫描作为唯一 authority 判 Not green——静态扫描无法同时满足"任意 bash 写入拒绝 / 合法 raw 读兼容 / 不实现 full shell parser"，六类逃逸 + 读误拒证据见 [policy-gate-spike-verdict](../../policy-gate-spike-verdict.md)（PR #46 留作 spike 证据）；按 ADR-0001 revisit 裁决与冻结 spec 既有分工重定为执行层 enforcement；条 2' 首实现（PR #48）gate 复审进一步把遥测/进程所有权收窄为可信可观测边界（见上文移出项与 [ADR-0001](../../../../../docs/adr/0001-agent-runtime-and-topology.md) 2026-07-04 裁决补充 / 2026-07-05 gate 收窄）。
 
 #### Scenario: 六类逃逸负例在 OS 层被拒
 
 - **WHEN** agent 通过 bash 以下列任一形态尝试写入 `data/raw/`：解释器 payload（如 perl/python open 写）、pipeline/stdin 数据流（如 tee）、动态构造写目标（变量拼路径）、shell 动态状态（cd 后相对路径、子/孙进程）、别名路径（symlink 指入、`../` 穿越）、rename/unlink
-- **THEN** 六类形态的写入**无一落盘**（syscall 层按解析后真实路径拒绝，穿 symlink/`../`/超预算/继承 profile 的子孙进程一致）——此为**必须全过**的 raw 字节完整性不变量；当该拒绝**可观测**（advisory 提前捕获，或 OS 拒绝经非零退出/未捕获错误外显）时，MUST 返回含 remediation 三字段的工具错误、WebSocket 收到 `tool.failed` 事件（envelope 含 seq/event_id，payload 携带 remediation）、audit 最小行落盘含 event/tool_id/rule/decision/ts + profile 标识；子进程吞掉拒绝并 exit 0 的隐藏形态，字节保护仍成立而完整遥测不作验收（见上文移出项）
+- **THEN** 六类形态的写入**无一落盘**（syscall 层按解析后真实路径拒绝，穿 symlink/`../`/超预算/继承 profile 的子孙进程一致）——此为**必须全过**的 raw 字节完整性不变量；当 advisory/static 层在执行前识别出可信 raw 写意图时，MUST 返回含 remediation 三字段的工具错误、WebSocket 收到 `tool.failed` 事件（envelope 含 seq/event_id，payload 携带 remediation）、audit denial 行落盘含 event/tool_id/rule/decision/ts + profile 标识；post-exec 进程结果仅能支撑普通 lifecycle `failed` 事实，MUST NOT 单凭该结果声明 `denied_by_sandbox`；子进程吞掉拒绝并 exit 0 的隐藏形态，字节保护仍成立而完整遥测不作验收（见上文移出项）
 
 #### Scenario: 合法读取与 workspace 写不受影响
 
@@ -46,7 +46,7 @@
 #### Scenario: advisory 提前拒可导航
 
 - **WHEN** pre-exec advisory 层识别出明显的 raw 写入意图
-- **THEN** 可在执行前拒绝并返回与 OS 层拒绝同形态的 remediation 错误；advisory 漏判不构成放行风险（OS 层兜底），advisory 误判 MUST NOT 拦截合法读取
+- **THEN** 可在执行前拒绝并返回 remediation 错误、`tool.failed` skeleton 与 audit denial 行；advisory 漏判不构成 raw 字节放行风险（OS 层兜底），但漏判后的 post-exec 进程结果只记录普通 lifecycle 事实，advisory 误判 MUST NOT 拦截合法读取
 
 #### Scenario: 隐藏拒绝与后代生命周期不构成 raw 完整性缺口
 
