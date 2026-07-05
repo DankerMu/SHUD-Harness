@@ -511,10 +511,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
       throw new Error("RawDataSandboxedBashTool requires explicit fuseRules.");
     }
     const fuseRules = cloneFuseRules(options.fuseRules);
-    this.options = {
-      ...options,
-      fuseRules
-    };
+    this.options = snapshotRawDataSandboxedBashToolOptions(options, fuseRules);
     const metadataTool = new BashTool(cloneFuseRules(fuseRules));
     this.fuseChecker = new FuseListChecker(cloneFuseRules(fuseRules));
     this.name = options.toolId ?? metadataTool.name;
@@ -524,11 +521,15 @@ export class RawDataSandboxedBashTool extends BaseTool {
     this.requiredModelCapabilities = metadataTool.requiredModelCapabilities;
   }
 
-  protected async fuseCheck(input: unknown): Promise<void> {
-    const command = readBashCommand(input);
-    if (command) {
-      this.fuseChecker.check(command);
-    }
+  async run(ctx: ToolContext, input: unknown): Promise<ToolResult> {
+    const result = await super.run(ctx, input);
+    markRunningToolFinished(ctx, result, "completed");
+    return result;
+  }
+
+  protected async fuseCheck(_input: unknown): Promise<void> {
+    // RawDataSandboxedBashTool owns running-handle finalization, so fuse checks
+    // happen inside execute() where every terminal path can be finalized.
   }
 
   protected async execute(ctx: ToolContext, input: unknown): Promise<ToolResult> {
@@ -539,6 +540,11 @@ export class RawDataSandboxedBashTool extends BaseTool {
         output: "Sandboxed bash requires a string command.",
         outputSummary: "Sandboxed bash missing command"
       });
+    }
+
+    const fuseFailure = this.checkFuse(command);
+    if (fuseFailure) {
+      return this.finalizeToolResult(ctx, fuseFailure);
     }
 
     const timeoutValidation = readSandboxedBashTimeout(input);
@@ -799,6 +805,40 @@ export class RawDataSandboxedBashTool extends BaseTool {
     markRunningToolFinished(ctx, result, cause);
     return result;
   }
+
+  private checkFuse(command: string): ToolResult | undefined {
+    try {
+      this.fuseChecker.check(command);
+      return undefined;
+    } catch (error) {
+      const message = errorMessage(error);
+      return {
+        success: false,
+        output: message,
+        outputSummary: `Error: ${message.slice(0, 100)}`
+      };
+    }
+  }
+}
+
+function snapshotRawDataSandboxedBashToolOptions(
+  options: RawDataSandboxedBashToolOptions,
+  fuseRules: readonly FuseRule[]
+): RawDataSandboxedBashToolOptions {
+  const snapshot: RawDataSandboxedBashToolOptions = {
+    ...options,
+    protectedRawPaths: frozenStringArray(options.protectedRawPaths),
+    allowedWriteRoots: frozenStringArray(options.allowedWriteRoots),
+    fuseRules
+  };
+  if (options.protectedEvidencePaths !== undefined) {
+    snapshot.protectedEvidencePaths = frozenStringArray(options.protectedEvidencePaths);
+  }
+  return snapshot;
+}
+
+function frozenStringArray(values: readonly string[]): readonly string[] {
+  return Object.freeze([...values]);
 }
 
 function rawDataSandboxedBashParameters(
@@ -1984,7 +2024,7 @@ function buildSanitizedToolProcessEnv(ctx: ToolContext): Record<string, string> 
     if (value === undefined || isShellPreludeEnvName(key)) {
       continue;
     }
-    if (SANDBOX_ENV_ALLOWLIST.has(key) || isLocaleEnvName(key)) {
+    if (SANDBOX_ENV_ALLOWLIST.has(key)) {
       env[key] = value;
     }
   }
@@ -2006,10 +2046,6 @@ function buildSanitizedToolProcessEnv(ctx: ToolContext): Record<string, string> 
 
 function isShellPreludeEnvName(name: string): boolean {
   return name === "BASH_ENV" || name === "ENV" || name.startsWith("BASH_FUNC_");
-}
-
-function isLocaleEnvName(name: string): boolean {
-  return /^LC_[A-Z_]+$/.test(name);
 }
 
 function cloneFuseRules(rules: readonly FuseRule[]): FuseRule[] {
@@ -4299,9 +4335,7 @@ function isPythonPopenCallStaticallyWaited(
     return false;
   }
 
-  return new RegExp(
-    `\\b${escapeRegExp(assignedName)}\\s*\\.\\s*(?:wait|communicate)\\s*\\(`
-  ).test(afterCall);
+  return isPythonAssignedPopenImmediatelyWaited(afterCall, assignedName);
 }
 
 function readPythonAssignmentTargetBeforeCall(
@@ -4311,6 +4345,47 @@ function readPythonAssignmentTargetBeforeCall(
   const beforeCall = code.slice(0, calleeStart);
   const match = beforeCall.match(/(?:^|[;\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*$/);
   return match?.[1];
+}
+
+function isPythonAssignedPopenImmediatelyWaited(
+  afterCall: string,
+  assignedName: string
+): boolean {
+  const nextStatement = pythonNextStatementAfterCall(afterCall);
+  if (!nextStatement) {
+    return false;
+  }
+  const name = escapeRegExp(assignedName);
+  return (
+    new RegExp(`^${name}\\s*\\.\\s*(?:wait|communicate)\\s*\\(`).test(nextStatement) ||
+    new RegExp(
+      `^sys\\s*\\.\\s*exit\\s*\\(\\s*${name}\\s*\\.\\s*(?:wait|communicate)\\s*\\(`
+    ).test(nextStatement)
+  );
+}
+
+function pythonNextStatementAfterCall(afterCall: string): string | undefined {
+  let index = 0;
+  let sawStatementBoundary = false;
+
+  while (index < afterCall.length) {
+    const char = afterCall[index];
+    if (char === ";" || char === "\n") {
+      sawStatementBoundary = true;
+      index += 1;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+
+  if (!sawStatementBoundary || index >= afterCall.length) {
+    return undefined;
+  }
+  return afterCall.slice(index);
 }
 
 function isPythonCommand(commandName: string): boolean {

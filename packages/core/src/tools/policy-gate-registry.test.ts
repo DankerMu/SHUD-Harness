@@ -19,6 +19,7 @@ import {
 import {
   RAW_DATA_WRITE_RULE_ID,
   RawDataSandboxedBashTool,
+  buildRawDataSeatbeltProfile,
   createRawDataWriteAdvisoryRule,
   type PolicyGateAuditRow,
   type RawDataDenialPayload
@@ -181,6 +182,70 @@ describe("policy-gated zero tool registry", () => {
       expect(result.output).toContain("Command blocked by fuse list");
       expect(result.output).toContain("inline sentinel");
       expect(result.output).not.toContain("mutated sentinel");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("SHUD sandboxed bash snapshots root arrays at factory boundary", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const protectedRawPaths = [fixture.rawRoot];
+      const protectedEvidencePaths = [fixture.evidenceRoot];
+      const allowedWriteRoots = [fixture.workspaceRoot];
+      const tool = createShudSandboxedBashTool({
+        protectedRawPaths,
+        protectedEvidencePaths,
+        allowedWriteRoots,
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        enableAdvisory: false,
+        fuseRules: []
+      });
+      const auditDir = join(
+        fixture.workspaceRoot,
+        "tasks",
+        "TASK-M1-SPIKE",
+        "audit"
+      );
+      await mkdir(auditDir, { recursive: true });
+      const expectedProfile = await buildRawDataSeatbeltProfile({
+        protectedRawPaths: [fixture.rawRoot],
+        protectedEvidencePaths: [fixture.evidenceRoot, auditDir],
+        allowedWriteRoots: [fixture.workspaceRoot],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot
+      });
+      const otherRawRoot = join(fixture.root, "data", "other-raw");
+      const otherEvidenceRoot = join(fixture.workspaceRoot, "other-evidence");
+      await mkdir(otherRawRoot, { recursive: true });
+      await mkdir(otherEvidenceRoot, { recursive: true });
+
+      protectedRawPaths[0] = otherRawRoot;
+      protectedEvidencePaths[0] = otherEvidenceRoot;
+      allowedWriteRoots.push(fixture.root);
+
+      const result = await tool.run(fixture.context, {
+        command:
+          "printf ok > workspace/factory-allowed.txt; printf raw > data/raw/factory-denied.txt; printf evidence > workspace/protected-evidence/factory-evidence.txt",
+        timeout: 30_000
+      });
+
+      expect(result.success).toBe(false);
+      expect(await readFile(join(fixture.workspaceRoot, "factory-allowed.txt"), "utf8")).toBe(
+        "ok"
+      );
+      await expect(readFile(join(fixture.rawRoot, "factory-denied.txt"), "utf8")).rejects.toThrow();
+      await expect(
+        readFile(join(fixture.evidenceRoot, "factory-evidence.txt"), "utf8")
+      ).rejects.toThrow();
+      const rows = await readRawAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        decision: "failed",
+        profile_id: expectedProfile.profileId
+      });
+      expect(rows.at(-1)?.profile_path).toContain(expectedProfile.profileId);
     } finally {
       await fixture.cleanup();
     }

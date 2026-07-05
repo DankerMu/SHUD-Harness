@@ -845,6 +845,78 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  seatbeltTest("snapshots protected raw and evidence root arrays at sandboxed bash construction", async () => {
+    const fixture = await createFixture();
+    try {
+      const evidenceRoot = join(fixture.workspaceRoot, "protected-evidence");
+      const otherRawRoot = join(fixture.root, "data", "other-raw");
+      const otherEvidenceRoot = join(fixture.workspaceRoot, "other-evidence");
+      await mkdir(evidenceRoot, { recursive: true });
+      await mkdir(otherRawRoot, { recursive: true });
+      await mkdir(otherEvidenceRoot, { recursive: true });
+      const protectedRawPaths = [fixture.rawRoot];
+      const protectedEvidencePaths = [evidenceRoot];
+      const tool = new RawDataSandboxedBashTool({
+        protectedRawPaths,
+        protectedEvidencePaths,
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        enableAdvisory: false,
+        fuseRules: []
+      });
+      const rawInputPath = join(fixture.rawRoot, "input.csv");
+      const beforeRaw = await readFile(rawInputPath, "utf8");
+
+      protectedRawPaths[0] = otherRawRoot;
+      protectedEvidencePaths[0] = otherEvidenceRoot;
+
+      const result = await tool.run(fixture.context, {
+        command:
+          "printf mutated > data/raw/input.csv; printf evidence > workspace/protected-evidence/evidence.txt",
+        timeout: 30_000
+      });
+
+      expect(result.success).toBe(false);
+      expect(await readFile(rawInputPath, "utf8")).toBe(beforeRaw);
+      await expectMissing(join(evidenceRoot, "evidence.txt"));
+      await expectGenericSandboxLifecycle(fixture, result);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("snapshots allowed write root arrays at sandboxed bash construction", async () => {
+    const fixture = await createFixture();
+    try {
+      const allowedWriteRoots = [fixture.workspaceRoot];
+      const tool = new RawDataSandboxedBashTool({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots,
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        enableAdvisory: false,
+        fuseRules: []
+      });
+      allowedWriteRoots.push(fixture.root);
+
+      const result = await tool.run(fixture.context, {
+        command:
+          "printf ok > workspace/allowed-root-snapshot.txt; printf leaked > allowed-root-mutation.txt",
+        timeout: 30_000
+      });
+
+      expect(result.success).toBe(false);
+      expect(await readFile(join(fixture.workspaceRoot, "allowed-root-snapshot.txt"), "utf8")).toBe(
+        "ok"
+      );
+      await expectMissing(join(fixture.root, "allowed-root-mutation.txt"));
+      await expectGenericSandboxLifecycle(fixture, result);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   const negativeCases: readonly NegativeCase[] = [
     {
       name: "interpreter payload",
@@ -1234,6 +1306,9 @@ describe("raw data seatbelt sandbox", () => {
     const fixture = await createFixture();
     const originalGlmApiKey = process.env.GLM_API_KEY;
     const originalSmtpPassword = process.env.SMTP_PASSWORD;
+    const originalLcApiKey = process.env.LC_API_KEY;
+    const originalLcPassword = process.env.LC_PASSWORD;
+    const originalLcAll = process.env.LC_ALL;
     const originalHome = process.env.HOME;
     const originalUser = process.env.USER;
     const originalLogname = process.env.LOGNAME;
@@ -1241,6 +1316,9 @@ describe("raw data seatbelt sandbox", () => {
     try {
       process.env.GLM_API_KEY = "ambient-glm-secret";
       process.env.SMTP_PASSWORD = "ambient-smtp-secret";
+      process.env.LC_API_KEY = "ambient-lc-api-key-secret";
+      process.env.LC_PASSWORD = "ambient-lc-password-secret";
+      process.env.LC_ALL = "C";
       process.env.HOME = "ambient-home-sentinel";
       process.env.USER = "ambient-user-sentinel";
       process.env.LOGNAME = "ambient-logname-sentinel";
@@ -1248,18 +1326,23 @@ describe("raw data seatbelt sandbox", () => {
 
       const result = await runSandboxed(
         fixture,
-        'printf "glm=%s smtp=%s home=%s user=%s logname=%s shell=%s\\n" "$GLM_API_KEY" "$SMTP_PASSWORD" "$HOME" "$USER" "$LOGNAME" "$SHELL"; env'
+        'printf "glm=%s smtp=%s lc_api=%s lc_password=%s lc_all=%s home=%s user=%s logname=%s shell=%s\\n" "$GLM_API_KEY" "$SMTP_PASSWORD" "$LC_API_KEY" "$LC_PASSWORD" "$LC_ALL" "$HOME" "$USER" "$LOGNAME" "$SHELL"; env'
       );
 
       expect(result.success).toBe(true);
       expect(result.output).not.toContain("ambient-glm-secret");
       expect(result.output).not.toContain("ambient-smtp-secret");
+      expect(result.output).not.toContain("ambient-lc-api-key-secret");
+      expect(result.output).not.toContain("ambient-lc-password-secret");
       expect(result.output).not.toContain("ambient-home-sentinel");
       expect(result.output).not.toContain("ambient-user-sentinel");
       expect(result.output).not.toContain("ambient-logname-sentinel");
       expect(result.output).not.toContain("ambient-shell-sentinel");
       expect(result.output).not.toContain("GLM_API_KEY=");
       expect(result.output).not.toContain("SMTP_PASSWORD=");
+      expect(result.output).not.toContain("LC_API_KEY=");
+      expect(result.output).not.toContain("LC_PASSWORD=");
+      expect(result.output).toContain("LC_ALL=C");
       expect(result.output).toContain("ZERO_WORKSPACE=");
       const rows = await readAuditRows(fixture.root);
       expect(rows.at(-1)).toMatchObject({
@@ -1269,6 +1352,9 @@ describe("raw data seatbelt sandbox", () => {
     } finally {
       restoreEnv("GLM_API_KEY", originalGlmApiKey);
       restoreEnv("SMTP_PASSWORD", originalSmtpPassword);
+      restoreEnv("LC_API_KEY", originalLcApiKey);
+      restoreEnv("LC_PASSWORD", originalLcPassword);
+      restoreEnv("LC_ALL", originalLcAll);
       restoreEnv("HOME", originalHome);
       restoreEnv("USER", originalUser);
       restoreEnv("LOGNAME", originalLogname);
@@ -2924,6 +3010,59 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  pythonSeatbeltTest("Python Popen wait after earlier sys.exit is rejected before delayed side effects", async () => {
+    const fixture = await createFixture();
+    try {
+      const leakPath = join(fixture.workspaceRoot, "fake-wait-sys-exit.txt");
+      const result = await runSandboxed(
+        fixture,
+        'python3 -c \'import subprocess, sys; p=subprocess.Popen(["sh", "-c", "sleep 0.25; printf leaked > workspace/fake-wait-sys-exit.txt"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); sys.exit(0); p.wait()\''
+      );
+
+      expectProcessContainmentFailure(result);
+      await expectMissing(leakPath);
+      await Bun.sleep(400);
+      await expectMissing(leakPath);
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        decision: "policy_gate_process_containment_unavailable"
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  pythonSeatbeltTest("Python Popen wait hidden behind if False is rejected before delayed side effects", async () => {
+    const fixture = await createFixture();
+    try {
+      const leakPath = join(fixture.workspaceRoot, "fake-wait-if-false.txt");
+      const result = await runSandboxed(
+        fixture,
+        [
+          "python3 -c '",
+          "import subprocess\n",
+          'p=subprocess.Popen(["sh", "-c", "sleep 0.25; printf leaked > workspace/fake-wait-if-false.txt"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n',
+          "if False:\n",
+          " p.wait()\n",
+          "'"
+        ].join("")
+      );
+
+      expectProcessContainmentFailure(result);
+      await expectMissing(leakPath);
+      await Bun.sleep(400);
+      await expectMissing(leakPath);
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        decision: "policy_gate_process_containment_unavailable"
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   pythonSeatbeltTest("over-budget process preflight fails open without scanning delayed interpreter payload", async () => {
     const fixture = await createFixture();
     try {
@@ -3344,6 +3483,80 @@ describe("raw data seatbelt sandbox", () => {
       expect(result.output).toContain("Command blocked by fuse list");
       expect(result.output).toContain("original sentinel fuse");
       expect(result.output).not.toContain("mutated sentinel");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("fuse-denied commands finalize the running tool handle", async () => {
+    const fixture = await createFixture();
+    try {
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+
+      const result = await runSandboxed(fixture, "printf blocked-by-handle-fuse", {
+        fuseRules: [
+          { pattern: "blocked-by-handle-fuse", description: "handle sentinel fuse" }
+        ],
+        context: {
+          ...fixture.context,
+          runningToolRegistry
+        }
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Command blocked by fuse list");
+      expect(result.output).toContain("handle sentinel fuse");
+      expect(handle.getTerminalMetadata()).toMatchObject({
+        cause: "completed",
+        success: false,
+        outputSummary: result.outputSummary
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("BaseTool validation failures finalize the running tool handle", async () => {
+    const fixture = await createFixture();
+    try {
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+      const tool = new RawDataSandboxedBashTool({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: []
+      });
+
+      const result = await tool.run(
+        {
+          ...fixture.context,
+          runningToolRegistry
+        },
+        { timeout: 30_000 } as unknown
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain('Tool "bash" missing required fields: [command]');
+      expect(handle.getState()).toBe("finished");
+      expect(handle.getTerminalMetadata()).toMatchObject({
+        cause: "completed",
+        success: false,
+        outputSummary: result.outputSummary
+      });
+      expect(handle.getTerminalMetadata()?.outputSummary).toContain(
+        "missing required fields: [command]"
+      );
     } finally {
       await fixture.cleanup();
     }

@@ -111,12 +111,13 @@ export function createShudSandboxedBashTool(
   options: ShudSandboxedBashToolOptions
 ): RawDataSandboxedBashTool {
   const fuseRules = resolveShudBashFuseRules(options);
+  const profileOptions = snapshotRawDataSeatbeltProfileOptions(options);
   return new RawDataSandboxedBashTool({
-    protectedRawPaths: options.protectedRawPaths,
-    protectedEvidencePaths: options.protectedEvidencePaths,
-    allowedWriteRoots: options.allowedWriteRoots,
-    tempRoot: options.tempRoot,
-    profileRoot: options.profileRoot,
+    protectedRawPaths: profileOptions.protectedRawPaths,
+    protectedEvidencePaths: profileOptions.protectedEvidencePaths,
+    allowedWriteRoots: profileOptions.allowedWriteRoots,
+    tempRoot: profileOptions.tempRoot,
+    profileRoot: profileOptions.profileRoot,
     enableAdvisory: options.enableAdvisory,
     pathResolutionRoot: options.pathResolutionRoot,
     auditWorkspaceRoot: options.auditWorkspaceRoot,
@@ -263,6 +264,29 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
   protected async execute(): Promise<ToolResult> {
     throw new Error("PolicyGatedBaseToolAdapter delegates through run().");
   }
+}
+
+function snapshotRawDataSeatbeltProfileOptions(
+  options: RawDataSeatbeltProfileOptions
+): RawDataSeatbeltProfileOptions {
+  const snapshot: RawDataSeatbeltProfileOptions = {
+    protectedRawPaths: frozenStringArray(options.protectedRawPaths),
+    allowedWriteRoots: frozenStringArray(options.allowedWriteRoots)
+  };
+  if (options.protectedEvidencePaths !== undefined) {
+    snapshot.protectedEvidencePaths = frozenStringArray(options.protectedEvidencePaths);
+  }
+  if (options.tempRoot !== undefined) {
+    snapshot.tempRoot = options.tempRoot;
+  }
+  if (options.profileRoot !== undefined) {
+    snapshot.profileRoot = options.profileRoot;
+  }
+  return snapshot;
+}
+
+function frozenStringArray(values: readonly string[]): readonly string[] {
+  return Object.freeze([...values]);
 }
 
 function buildRawDataRuleMisconfiguredResult(
