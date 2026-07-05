@@ -86,6 +86,34 @@ describe("raw data seatbelt sandbox", () => {
     );
   });
 
+  test("public audit append rejects reserved sandbox raw-denial rows", async () => {
+    const fixture = await createFixture();
+    try {
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          row: {
+            ...minimalAuditRow(),
+            decision: "denied_by_sandbox"
+          }
+        })
+      ).rejects.toThrow("Reserved sandbox raw-denial");
+
+      await expectMissing(
+        join(
+          fixture.workspaceRoot,
+          "tasks",
+          "TASK-M1-SPIKE",
+          "audit",
+          "policy-gate.ndjson"
+        )
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("profile builder canonicalizes paths and returns stable profile identity", async () => {
     const fixture = await createFixture();
     try {
@@ -117,6 +145,44 @@ describe("raw data seatbelt sandbox", () => {
         expect(profile.profileText).not.toContain('(subpath "/tmp")');
       }
     } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("relative protected raw paths resolve against ctx workDir instead of process cwd", async () => {
+    const fixture = await createFixture();
+    const originalCwd = process.cwd();
+    const otherCwd = await mkdtemp(join(tmpdir(), "shud-raw-other-cwd-"));
+    try {
+      await mkdir(join(otherCwd, "data", "raw"), { recursive: true });
+      process.chdir(otherCwd);
+
+      const tool = new RawDataSandboxedBashTool({
+        protectedRawPaths: ["data/raw"],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        enableAdvisory: false,
+        fuseRules: []
+      });
+      const result = await tool.run(
+        {
+          ...fixture.context,
+          workDir: fixture.root
+        },
+        {
+          command: "printf x > data/raw/relative-blocked.txt",
+          timeout: 30_000
+        }
+      );
+
+      expect(process.cwd()).not.toBe(fixture.root);
+      expect(result.success).toBe(false);
+      await expectMissing(join(fixture.rawRoot, "relative-blocked.txt"));
+      await expectGenericSandboxLifecycle(fixture, result);
+    } finally {
+      process.chdir(originalCwd);
+      await rm(otherCwd, { recursive: true, force: true });
       await fixture.cleanup();
     }
   });
@@ -1920,6 +1986,11 @@ describe("raw data seatbelt sandbox", () => {
         },
         {
           command:
+            'python3 -c \'import os, subprocess; subprocess.Popen(["sh", "-c", "printf leaked > workspace/real-python-preexec.txt"], preexec_fn=os.setsid)\'',
+          path: "real-python-preexec.txt"
+        },
+        {
+          command:
             'node -e \'require("child_process").spawn("sh", ["-c", "printf leaked > workspace/real-node-detached.txt"], { detached: true })\'',
           path: "real-node-detached.txt"
         },
@@ -1939,6 +2010,43 @@ describe("raw data seatbelt sandbox", () => {
         expectProcessContainmentFailure(result);
         await expectMissing(join(fixture.workspaceRoot, commandCase.path));
       }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  pythonSeatbeltTest("Python floor-division is not stripped as a line comment in process preflight", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        'python3 -c \'0//1; import os, time; os.setsid(); time.sleep(0.2); open("workspace/python-floor-division-setsid.txt", "w").write("leaked")\''
+      );
+
+      expectProcessContainmentFailure(result);
+      await expectMissing(join(fixture.workspaceRoot, "python-floor-division-setsid.txt"));
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  pythonSeatbeltTest("bare Python containment keyword assignments can write workspace", async () => {
+    const fixture = await createFixture();
+    try {
+      const result = await runSandboxed(
+        fixture,
+        'python3 -c \'import os; start_new_session=True; preexec_fn=os.setsid; open("workspace/python-benign-assignments.txt", "w").write("ok")\''
+      );
+
+      expect(result.success).toBe(true);
+      expect(
+        await readFile(join(fixture.workspaceRoot, "python-benign-assignments.txt"), "utf8")
+      ).toBe("ok");
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
+      });
     } finally {
       await fixture.cleanup();
     }
@@ -1970,6 +2078,38 @@ describe("raw data seatbelt sandbox", () => {
       expect(rows.at(-1)).toMatchObject({
         event: "tool.failed",
         decision: "policy_gate_process_containment_unavailable"
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("only top-level parent shell wait clears pending background preflight", async () => {
+    const fixture = await createFixture();
+    try {
+      const groupedWait = await runSandboxed(
+        fixture,
+        "(sleep 0.3; printf leaked > workspace/grouped-wait-bg.txt) & (wait)"
+      );
+      const pipedWait = await runSandboxed(
+        fixture,
+        "sleep 0.3 & wait | cat"
+      );
+      const topLevelWait = await runSandboxed(
+        fixture,
+        "sleep 0.1 & wait"
+      );
+
+      expectProcessContainmentFailure(groupedWait);
+      expectProcessContainmentFailure(pipedWait);
+      expect(topLevelWait.success).toBe(true);
+      await expectMissing(join(fixture.workspaceRoot, "grouped-wait-bg.txt"));
+      await Bun.sleep(400);
+      await expectMissing(join(fixture.workspaceRoot, "grouped-wait-bg.txt"));
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
       });
     } finally {
       await fixture.cleanup();
@@ -2564,6 +2704,44 @@ describe("raw data seatbelt sandbox", () => {
       expect(await readFile(join(fixture.workspaceRoot, "temp-task-ok.txt"), "utf8")).toBe("ok");
       expect(await sortedRawEntries(fixture.rawRoot)).toEqual(beforeRawEntries);
     } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("profile cleanup failure is logged without replacing command result", async () => {
+    const fixture = await createFixture();
+    const warnings: { event: string; data?: Record<string, unknown> }[] = [];
+    const logger: ToolLogger = {
+      ...testLogger,
+      warn(event, data) {
+        warnings.push({ event, data });
+      }
+    };
+    try {
+      const result = await runSandboxed(
+        fixture,
+        "printf ok > workspace/profile-cleanup-result.txt; chmod 500 workspace/profiles",
+        {
+          context: {
+            ...fixture.context,
+            logger
+          }
+        }
+      );
+
+      expect(result.success).toBe(true);
+      expect(await readFile(join(fixture.workspaceRoot, "profile-cleanup-result.txt"), "utf8")).toBe(
+        "ok"
+      );
+      expect(warnings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            event: "raw_data_sandbox_profile_cleanup_failed"
+          })
+        ])
+      );
+    } finally {
+      await chmod(fixture.profileRoot, 0o700).catch(() => {});
       await fixture.cleanup();
     }
   });

@@ -264,6 +264,35 @@ export async function writeRawDataSeatbeltProfileFile(
   return canonicalizeExistingPath(profilePath);
 }
 
+function bindSeatbeltProfileOptionsToWorkDir(
+  options: RawDataSeatbeltProfileOptions,
+  workDir: string
+): RawDataSeatbeltProfileOptions {
+  return {
+    protectedRawPaths: options.protectedRawPaths.map((path) =>
+      bindPathToWorkDir(path, workDir)
+    ),
+    allowedWriteRoots: options.allowedWriteRoots.map((path) =>
+      bindPathToWorkDir(path, workDir)
+    ),
+    ...(options.protectedEvidencePaths
+      ? {
+          protectedEvidencePaths: options.protectedEvidencePaths.map((path) =>
+            bindPathToWorkDir(path, workDir)
+          )
+        }
+      : {}),
+    ...(options.tempRoot ? { tempRoot: bindPathToWorkDir(options.tempRoot, workDir) } : {}),
+    ...(options.profileRoot
+      ? { profileRoot: bindPathToWorkDir(options.profileRoot, workDir) }
+      : {})
+  };
+}
+
+function bindPathToWorkDir(path: string, workDir: string): string {
+  return isAbsolute(path) ? path : resolve(workDir, path);
+}
+
 function protectedEvidenceAncestorLiterals(
   protectedEvidencePaths: readonly string[],
   allowedWriteRoots: readonly string[]
@@ -330,7 +359,11 @@ export class RawDataSandboxedBashTool extends BaseTool {
       });
     }
 
-    const protectedRawPaths = await canonicalizePathSet(this.options.protectedRawPaths);
+    const profileOptions = bindSeatbeltProfileOptionsToWorkDir(
+      this.options,
+      ctx.workDir
+    );
+    const protectedRawPaths = await canonicalizePathSet(profileOptions.protectedRawPaths);
     const auditReservation = await this.reserveAuditEvidence(ctx, protectedRawPaths);
     if ("toolResult" in auditReservation) {
       return this.finalizeToolResult(ctx, auditReservation.toolResult);
@@ -340,17 +373,17 @@ export class RawDataSandboxedBashTool extends BaseTool {
     try {
       const profile = await buildRawDataSeatbeltProfile({
         protectedRawPaths,
-        allowedWriteRoots: this.options.allowedWriteRoots,
-        tempRoot: this.options.tempRoot,
-        profileRoot: this.options.profileRoot,
+        allowedWriteRoots: profileOptions.allowedWriteRoots,
+        tempRoot: profileOptions.tempRoot,
+        profileRoot: profileOptions.profileRoot,
         protectedEvidencePaths: [
-          ...(this.options.protectedEvidencePaths ?? []),
+          ...(profileOptions.protectedEvidencePaths ?? []),
           auditReservation.protectedEvidencePath
         ]
       });
-      profilePath = await writeRawDataSeatbeltProfileFile(profile, this.options.profileRoot);
+      profilePath = await writeRawDataSeatbeltProfileFile(profile, profileOptions.profileRoot);
       const protectedRawPathSignals = rawDataSignalPaths(
-        this.options.protectedRawPaths,
+        profileOptions.protectedRawPaths,
         profile.metadata.protectedRawPaths
       );
 
@@ -430,7 +463,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
     } finally {
       await closePolicyGateAuditReservation(auditReservation);
       if (profilePath) {
-        await cleanupRawDataSeatbeltProfileFile(profilePath);
+        await cleanupRawDataSeatbeltProfileFile(ctx, profilePath);
       }
     }
   }
@@ -653,6 +686,7 @@ export async function appendPolicyGateAuditRow(
   options: AppendPolicyGateAuditRowOptions
 ): Promise<string> {
   assertProtectedRawPathsProvided(options.protectedRawPaths);
+  assertPublicPolicyGateAuditRow(options.row);
   const taskId = options.taskId ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID;
   assertSafePathSegment(taskId, "audit task id");
 
@@ -670,6 +704,12 @@ export async function appendPolicyGateAuditRow(
     return reservation.auditPath;
   } finally {
     await closePolicyGateAuditReservation(reservation);
+  }
+}
+
+function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
+  if (row.rule === RAW_DATA_WRITE_RULE_ID && row.decision === "denied_by_sandbox") {
+    throw new Error("Reserved sandbox raw-denial audit rows require a trusted OS event source.");
   }
 }
 
@@ -3345,7 +3385,7 @@ function hasSessionEscapeSignal(command: string): boolean {
 
     if (isInterpreterCommand(commandName)) {
       const payload = interpreterPayload(tokens);
-      if (payload && hasInterpreterProcessContainmentRisk(payload)) {
+      if (payload && hasInterpreterProcessContainmentRisk(payload, commandName)) {
         return true;
       }
     }
@@ -3354,24 +3394,49 @@ function hasSessionEscapeSignal(command: string): boolean {
   return false;
 }
 
-function hasInterpreterProcessContainmentRisk(payload: string): boolean {
-  const code = stripInterpreterLiteralAndCommentText(payload);
-  return hasInterpreterSessionEscapeSignal(code);
+function hasInterpreterProcessContainmentRisk(payload: string, commandName: string): boolean {
+  const code = stripInterpreterLiteralAndCommentText(payload, {
+    slashLineComments: hasSlashLineCommentSyntax(commandName)
+  });
+  return hasInterpreterSessionEscapeSignal(code, commandName);
 }
 
-function hasInterpreterSessionEscapeSignal(code: string): boolean {
+function hasInterpreterSessionEscapeSignal(code: string, commandName: string): boolean {
   return (
     /\b(?:os\.)?(?:setsid|setpgrp)\s*\(/.test(code) ||
     /\bProcess\.(?:daemon|setpgrp)(?:\s*\(|\b)/.test(code) ||
     /\bdaemonize\s*\(/.test(code) ||
-    /\bstart_new_session\s*=\s*True\b/.test(code) ||
-    /\bpreexec_fn\s*=\s*(?:os\.)?(?:setsid|setpgrp)\b/.test(code) ||
+    (isPythonCommand(commandName) && hasPythonProcessCreationSessionEscapeSignal(code)) ||
     /\b(?:spawn|exec|execFile|fork)\s*\([\s\S]*\bdetached\s*:\s*true\b/.test(code) ||
     /\bsystem(?:2)?\s*\([\s\S]*\bwait\s*=\s*FALSE\b/.test(code)
   );
 }
 
-function stripInterpreterLiteralAndCommentText(payload: string): string {
+function hasPythonProcessCreationSessionEscapeSignal(code: string): boolean {
+  const pythonProcessCreation = /\b(?:(?:subprocess|asyncio\.subprocess)\.)?(?:Popen|run|call|check_call|check_output|create_subprocess_exec|create_subprocess_shell)\b/;
+  for (const argsText of findCallArgumentLists(code, pythonProcessCreation)) {
+    if (
+      /\bstart_new_session\s*=\s*True\b/.test(argsText) ||
+      /\bpreexec_fn\s*=\s*(?:os\.)?(?:setsid|setpgrp)\b/.test(argsText)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isPythonCommand(commandName: string): boolean {
+  return /^python(?:\d+(?:\.\d+)?)?$/.test(commandName);
+}
+
+function hasSlashLineCommentSyntax(commandName: string): boolean {
+  return commandName === "node" || commandName === "bun";
+}
+
+function stripInterpreterLiteralAndCommentText(
+  payload: string,
+  options: { slashLineComments?: boolean } = {}
+): string {
   let output = "";
   let quote: "'" | '"' | "`" | undefined;
   let escaped = false;
@@ -3419,7 +3484,7 @@ function stripInterpreterLiteralAndCommentText(payload: string): string {
       continue;
     }
 
-    if (char === "/" && next === "/") {
+    if (options.slashLineComments && char === "/" && next === "/") {
       lineComment = "//";
       output += "  ";
       index += 1;
@@ -3436,18 +3501,26 @@ function hasUnwaitedBackgroundExecution(command: string): boolean {
   let current = "";
   let quote: "'" | '"' | undefined;
   let escaped = false;
+  let depth = 0;
   let hasPendingBackground = false;
   let sawBackground = false;
+  let previousSeparator: ShellSegmentSeparator = "start";
 
-  const consumeSegment = () => {
-    if (!current.trim()) {
+  const consumeSegment = (nextSeparator: ShellSegmentSeparator) => {
+    const segment = current.trim();
+    if (!segment) {
       current = "";
+      previousSeparator = nextSeparator;
       return;
     }
-    if (isStaticWaitSegment(current) && hasPendingBackground) {
+    if (
+      hasPendingBackground &&
+      isParentShellWaitSegment(segment, previousSeparator, nextSeparator)
+    ) {
       hasPendingBackground = false;
     }
     current = "";
+    previousSeparator = nextSeparator;
   };
 
   for (let index = 0; index < command.length; index += 1) {
@@ -3474,8 +3547,18 @@ function hasUnwaitedBackgroundExecution(command: string): boolean {
       current += char;
       continue;
     }
-    if (char === ";" || char === "\n" || char === "|") {
-      consumeSegment();
+    if (char === "(" || (char === "{" && command[index - 1] !== "$")) {
+      depth += 1;
+      current += char;
+      continue;
+    }
+    if (char === ")" || char === "}") {
+      depth = Math.max(0, depth - 1);
+      current += char;
+      continue;
+    }
+    if (depth === 0 && (char === ";" || char === "\n" || char === "|")) {
+      consumeSegment(char);
       continue;
     }
     if (char !== "&") {
@@ -3488,6 +3571,7 @@ function hasUnwaitedBackgroundExecution(command: string): boolean {
     if (
       next === "&" ||
       previous === "&" ||
+      previous === "<" ||
       previous === ">" ||
       next === ">" ||
       /\d/.test(next ?? "")
@@ -3496,17 +3580,31 @@ function hasUnwaitedBackgroundExecution(command: string): boolean {
       continue;
     }
 
-    consumeSegment();
+    if (depth > 0) {
+      current += char;
+      continue;
+    }
+
+    consumeSegment("&");
     hasPendingBackground = true;
     sawBackground = true;
   }
 
-  consumeSegment();
+  consumeSegment("end");
   return sawBackground && hasPendingBackground;
 }
 
-function isStaticWaitSegment(segment: string): boolean {
-  const tokens = commandTokensFromSegment(segment);
+type ShellSegmentSeparator = "start" | "end" | ";" | "\n" | "|" | "&";
+
+function isParentShellWaitSegment(
+  segment: string,
+  previousSeparator: ShellSegmentSeparator,
+  nextSeparator: ShellSegmentSeparator
+): boolean {
+  if (previousSeparator === "|" || nextSeparator === "|") {
+    return false;
+  }
+  const tokens = stripShellCommandPrefixes(tokenizeStaticShellSegment(segment));
   return tokens.length > 0 && normalizeCommandName(tokens[0]) === "wait";
 }
 
@@ -4022,8 +4120,18 @@ async function canonicalizeExistingPath(path: string): Promise<string> {
   return realpath(resolve(path));
 }
 
-async function cleanupRawDataSeatbeltProfileFile(profilePath: string): Promise<void> {
-  await rm(dirname(profilePath), { recursive: true, force: true });
+async function cleanupRawDataSeatbeltProfileFile(
+  ctx: ToolContext,
+  profilePath: string
+): Promise<void> {
+  try {
+    await rm(dirname(profilePath), { recursive: true, force: true });
+  } catch (error) {
+    ctx.logger.warn("raw_data_sandbox_profile_cleanup_failed", {
+      profile_path: profilePath,
+      error: errorMessage(error)
+    });
+  }
 }
 
 function quoteSeatbeltString(value: string): string {
