@@ -29,7 +29,10 @@ import {
   RawDataSandboxedBashTool,
   buildRawDataSeatbeltProfile,
   evaluateRawDataWriteAdvisory,
+  rawDataDenialPayloadToAuditRow,
+  rawDataDenialPayloadToToolFailedEventInput,
   rawDataSandboxProfileFileName,
+  rawDataWriteRemediation,
   scanProtectedHardlinks,
   type PolicyGateAuditRow,
   type RawDataDenialPayload
@@ -47,6 +50,40 @@ describe("raw data seatbelt sandbox", () => {
     const toolExports = await import("./index");
 
     expect("isLikelySandboxDenial" in toolExports).toBe(false);
+  });
+
+  test("public raw denial converters reject reserved sandbox authority payloads", () => {
+    const remediation = rawDataWriteRemediation();
+    const payload: RawDataDenialPayload = {
+      error: "raw_data_write_denied",
+      tool_id: "bash",
+      rule: RAW_DATA_WRITE_RULE_ID,
+      decision: "denied_by_sandbox",
+      guard_class: "authority",
+      reason: "reserved trusted OS denial",
+      remediation,
+      profile_id: "shud-raw-seatbelt-reserved",
+      invocation_id: "TOOL-CALL-RESERVED",
+      error_record: {
+        error_id: "raw-data-write:denied_by_sandbox:reserved",
+        category: "sandbox_error",
+        severity: "error",
+        message: "Reserved sandbox denial.",
+        user_message: "data/raw is protected evidence input and cannot be mutated by bash.",
+        evidence_refs: ["openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"],
+        retryable: false,
+        recommended_next_actions: [remediation.hint],
+        remediation,
+        created_at: "2026-07-04T00:00:00.000Z"
+      }
+    };
+
+    expect(() => rawDataDenialPayloadToAuditRow(payload as never)).toThrow(
+      "Reserved sandbox raw-denial"
+    );
+    expect(() => rawDataDenialPayloadToToolFailedEventInput(payload as never)).toThrow(
+      "Reserved sandbox raw-denial"
+    );
   });
 
   test("profile builder canonicalizes paths and returns stable profile identity", async () => {

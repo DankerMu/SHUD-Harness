@@ -6,6 +6,7 @@ import {
   type HarnessRole,
   type PolicyGateContext,
   type PolicyGateDecision,
+  type PolicyGateRemediation,
   type PolicyGateToolCall
 } from "./policy-gate-core";
 import {
@@ -266,6 +267,11 @@ function buildRawDataRuleMisconfiguredResult(
   toolId: string,
   decision: Extract<PolicyGateDecision, { decision: "deny" }>
 ): ToolResult {
+  const remediation: PolicyGateRemediation = {
+    next_action: "fix_and_retry",
+    hint: "Remove RAW_DATA_WRITE_RULE_ID from the outer policy evaluator and let RawDataSandboxedBashTool own raw advisory, audit reservation, and tool-failed evidence.",
+    ref: decision.remediation.ref
+  };
   const payload = {
     error: "policy_gate_raw_data_rule_misconfigured",
     tool_id: toolId,
@@ -273,11 +279,7 @@ function buildRawDataRuleMisconfiguredResult(
     reason:
       "Outer policy gate attempted to deny raw-data writes. Raw advisory and raw-denial evidence ownership belongs inside RawDataSandboxedBashTool.",
     outer_reason: decision.reason,
-    remediation: {
-      next_action: "fix_configuration",
-      hint: "Remove RAW_DATA_WRITE_RULE_ID from the outer policy evaluator and let RawDataSandboxedBashTool own raw advisory, audit reservation, and tool-failed evidence.",
-      ...(decision.remediation?.ref ? { ref: decision.remediation.ref } : {})
-    }
+    remediation
   };
 
   return {

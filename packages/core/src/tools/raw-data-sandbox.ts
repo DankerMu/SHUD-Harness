@@ -120,10 +120,14 @@ export interface RawDataDenialPayload {
   error_record: ErrorRecord;
 }
 
+export type RawDataAdvisoryDenialPayload = RawDataDenialPayload & {
+  decision: "denied_by_advisory";
+};
+
 export type RawDataGuardClass = "authority" | "capability";
 
 export interface RawDataDenialEvidence {
-  payload: RawDataDenialPayload;
+  payload: RawDataAdvisoryDenialPayload;
   toolResult: ToolResult;
   auditRow: PolicyGateAuditRow;
   toolFailedEventInput: RawDataToolFailedEventInput;
@@ -132,7 +136,7 @@ export interface RawDataDenialEvidence {
 export interface RawDataToolFailedEventInput {
   toolId: string;
   rule: typeof RAW_DATA_WRITE_RULE_ID;
-  decision: RawDataDenialPayload["decision"];
+  decision: RawDataAdvisoryDenialPayload["decision"];
   guardClass: RawDataGuardClass;
   profileId: string;
   invocationId?: string;
@@ -355,7 +359,6 @@ export class RawDataSandboxedBashTool extends BaseTool {
         if (advisory.decision === "deny") {
           const evidence = buildRawDataDenialEvidence({
             toolId: this.name,
-            decision: "denied_by_advisory",
             reason: advisory.reason,
             profile,
             profilePath,
@@ -672,33 +675,29 @@ export async function appendPolicyGateAuditRow(
 
 export function buildRawDataDeniedPayload(input: {
   toolId: string;
-  decision: "denied_by_advisory" | "denied_by_sandbox";
   reason: string;
   profile: RawDataSeatbeltProfile;
   profilePath?: string;
   underlyingOutput?: string;
   invocationId?: string;
   ts?: string;
-}): RawDataDenialPayload {
+}): RawDataAdvisoryDenialPayload {
   const ts = input.ts ?? new Date().toISOString();
   const remediation = rawDataWriteRemediation();
   const guardClass = rawDataGuardClassForRawData();
   const errorId = [
     RAW_DATA_WRITE_RULE_ID,
-    input.decision,
+    "denied_by_advisory",
     input.profile.profileId,
     ...(input.invocationId ? [input.invocationId] : [])
   ].join(":");
-  const message =
-    input.decision === "denied_by_sandbox"
-      ? "Raw data write denied by OS sandbox."
-      : "Raw data write denied by advisory policy gate.";
+  const message = "Raw data write denied by advisory policy gate.";
 
   return {
     error: "raw_data_write_denied",
     tool_id: input.toolId,
     rule: RAW_DATA_WRITE_RULE_ID,
-    decision: input.decision,
+    decision: "denied_by_advisory",
     guard_class: guardClass,
     reason: input.reason,
     remediation,
@@ -707,7 +706,7 @@ export function buildRawDataDeniedPayload(input: {
     ...(input.invocationId ? { invocation_id: input.invocationId } : {}),
     error_record: {
       error_id: errorId,
-      category: input.decision === "denied_by_sandbox" ? "sandbox_error" : "permission_error",
+      category: "permission_error",
       severity: "error",
       message,
       user_message: "data/raw is protected evidence input and cannot be mutated by bash.",
@@ -725,7 +724,6 @@ export function buildRawDataDeniedPayload(input: {
 
 export function buildRawDataDenialEvidence(input: {
   toolId: string;
-  decision: "denied_by_advisory" | "denied_by_sandbox";
   reason: string;
   profile: RawDataSeatbeltProfile;
   profilePath?: string;
@@ -752,7 +750,6 @@ export function buildRawDataDenialEvidence(input: {
 
 export function buildRawDataDeniedToolResult(input: {
   toolId: string;
-  decision: "denied_by_advisory" | "denied_by_sandbox";
   reason: string;
   profile: RawDataSeatbeltProfile;
   profilePath?: string;
@@ -768,9 +765,10 @@ export function buildRawDataDeniedToolResult(input: {
 }
 
 export function rawDataDenialPayloadToAuditRow(
-  payload: RawDataDenialPayload,
+  payload: RawDataAdvisoryDenialPayload,
   ts = payload.error_record.created_at
 ): PolicyGateAuditRow {
+  assertAdvisoryRawDataDenialPayload(payload);
   return {
     event: "tool.failed",
     tool_id: payload.tool_id,
@@ -789,8 +787,9 @@ export function rawDataDenialPayloadToAuditRow(
 }
 
 export function rawDataDenialPayloadToToolFailedEventInput(
-  payload: RawDataDenialPayload
+  payload: RawDataAdvisoryDenialPayload
 ): RawDataToolFailedEventInput {
+  assertAdvisoryRawDataDenialPayload(payload);
   return {
     toolId: payload.tool_id,
     rule: payload.rule,
@@ -800,6 +799,14 @@ export function rawDataDenialPayloadToToolFailedEventInput(
     ...(payload.invocation_id ? { invocationId: payload.invocation_id } : {}),
     error: payload.error_record
   };
+}
+
+function assertAdvisoryRawDataDenialPayload(
+  payload: RawDataDenialPayload
+): asserts payload is RawDataAdvisoryDenialPayload {
+  if (payload.decision !== "denied_by_advisory") {
+    throw new Error("Reserved sandbox raw-denial payloads require a trusted OS event source.");
+  }
 }
 
 export async function scanProtectedHardlinks(input: {

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BaseTool, BashTool, SpawnAgentTool, ToolRegistry } from "@zero-os/core";
 import type { ToolContext, ToolLogger, ToolResult } from "@zero-os/shared";
+import { PolicyGateRemediationSchema } from "./policy-gate-core";
 import {
   assertAllToolsPolicyGated,
   assertPolicyGatedToolRegistry,
@@ -477,8 +478,9 @@ function expectOuterRawRuleMisconfiguration(result: ToolResult | undefined): voi
   expect(payload.outer_reason).toBe("obvious static raw-data write target");
   expect(payload.profile_id).toBeUndefined();
   expect(payload.profile_path).toBeUndefined();
-  expect(payload.remediation?.next_action).toBe("fix_configuration");
+  expect(payload.remediation?.next_action).toBe("fix_and_retry");
   expect(payload.remediation?.hint).toContain("RawDataSandboxedBashTool");
+  expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
 }
 
 function createSpawnModelRouterStub(): ConstructorParameters<typeof SpawnAgentTool>[0] {
