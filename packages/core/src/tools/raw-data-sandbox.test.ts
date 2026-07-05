@@ -19,6 +19,7 @@ import type {
   RunningToolHandle,
   RunningToolRegistry,
   RunningToolTerminalMetadata,
+  SecretFilter,
   ToolContext,
   ToolLogger,
   ToolResult
@@ -1225,6 +1226,92 @@ describe("raw data seatbelt sandbox", () => {
     } finally {
       restoreEnv("BASH_ENV", originalBashEnv);
       restoreEnv("ENV", originalEnv);
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("sandboxed bash child environment does not inherit ambient host secrets", async () => {
+    const fixture = await createFixture();
+    const originalGlmApiKey = process.env.GLM_API_KEY;
+    const originalSmtpPassword = process.env.SMTP_PASSWORD;
+    const originalHome = process.env.HOME;
+    const originalUser = process.env.USER;
+    const originalLogname = process.env.LOGNAME;
+    const originalShell = process.env.SHELL;
+    try {
+      process.env.GLM_API_KEY = "ambient-glm-secret";
+      process.env.SMTP_PASSWORD = "ambient-smtp-secret";
+      process.env.HOME = "ambient-home-sentinel";
+      process.env.USER = "ambient-user-sentinel";
+      process.env.LOGNAME = "ambient-logname-sentinel";
+      process.env.SHELL = "ambient-shell-sentinel";
+
+      const result = await runSandboxed(
+        fixture,
+        'printf "glm=%s smtp=%s home=%s user=%s logname=%s shell=%s\\n" "$GLM_API_KEY" "$SMTP_PASSWORD" "$HOME" "$USER" "$LOGNAME" "$SHELL"; env'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.output).not.toContain("ambient-glm-secret");
+      expect(result.output).not.toContain("ambient-smtp-secret");
+      expect(result.output).not.toContain("ambient-home-sentinel");
+      expect(result.output).not.toContain("ambient-user-sentinel");
+      expect(result.output).not.toContain("ambient-logname-sentinel");
+      expect(result.output).not.toContain("ambient-shell-sentinel");
+      expect(result.output).not.toContain("GLM_API_KEY=");
+      expect(result.output).not.toContain("SMTP_PASSWORD=");
+      expect(result.output).toContain("ZERO_WORKSPACE=");
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
+      });
+    } finally {
+      restoreEnv("GLM_API_KEY", originalGlmApiKey);
+      restoreEnv("SMTP_PASSWORD", originalSmtpPassword);
+      restoreEnv("HOME", originalHome);
+      restoreEnv("USER", originalUser);
+      restoreEnv("LOGNAME", originalLogname);
+      restoreEnv("SHELL", originalShell);
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("explicit envSecrets reach sandboxed bash and are redacted from output", async () => {
+    const fixture = await createFixture();
+    try {
+      const secretFilter = new TestSecretFilter();
+      const tool = new RawDataSandboxedBashTool({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: []
+      });
+
+      const result = await tool.run(
+        {
+          ...fixture.context,
+          secretResolver: (ref) =>
+            ref === "env:SHUD_TEST_TOKEN" ? "explicit-secret-value" : undefined,
+          secretFilter
+        },
+        {
+          command: 'printf "token=%s" "$SHUD_TOKEN"',
+          timeout: 30_000,
+          envSecrets: {
+            SHUD_TOKEN: "env:SHUD_TEST_TOKEN"
+          }
+        }
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("token=[redacted:env:SHUD_TEST_TOKEN]");
+      expect(result.output).not.toContain("explicit-secret-value");
+      expect(secretFilter.registeredSecrets()).toEqual([
+        ["env:SHUD_TEST_TOKEN", "explicit-secret-value"]
+      ]);
+    } finally {
       await fixture.cleanup();
     }
   });
@@ -2814,6 +2901,29 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  pythonSeatbeltTest("un-awaited Python Popen workspace writer is rejected before delayed side effects", async () => {
+    const fixture = await createFixture();
+    try {
+      const leakPath = join(fixture.workspaceRoot, "unwaited-popen.txt");
+      const result = await runSandboxed(
+        fixture,
+        'python3 -c \'import subprocess; subprocess.Popen(["sh", "-c", "sleep 0.25; printf leaked > workspace/unwaited-popen.txt"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\''
+      );
+
+      expectProcessContainmentFailure(result);
+      await expectMissing(leakPath);
+      await Bun.sleep(400);
+      await expectMissing(leakPath);
+      const rows = await readAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.failed",
+        decision: "policy_gate_process_containment_unavailable"
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   pythonSeatbeltTest("over-budget process preflight fails open without scanning delayed interpreter payload", async () => {
     const fixture = await createFixture();
     try {
@@ -2846,7 +2956,7 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  pythonSeatbeltTest("dynamic Python Popen session escape is out of telemetry scope but cannot mutate raw bytes", async () => {
+  pythonSeatbeltTest("dynamic Python Popen kwargs are still rejected when the Popen is un-awaited", async () => {
     const fixture = await createFixture();
     try {
       const rawTarget = join(fixture.rawRoot, "popen-session-hidden.txt");
@@ -2856,17 +2966,15 @@ describe("raw data seatbelt sandbox", () => {
         { enableAdvisory: false }
       );
 
-      expect(result.success).toBe(true);
-      expectNoRawDataDenialClaim(result);
+      expectProcessContainmentFailure(result);
       await expectMissing(rawTarget);
       await Bun.sleep(400);
       await expectMissing(rawTarget);
       const rows = await readAuditRows(fixture.root);
       expect(rows.at(-1)).toMatchObject({
-        event: "tool.completed",
-        decision: "allowed"
+        event: "tool.failed",
+        decision: "policy_gate_process_containment_unavailable"
       });
-      expectNoSandboxDenialAudit(rows.at(-1));
     } finally {
       await fixture.cleanup();
     }
@@ -3212,6 +3320,35 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("snapshots fuse rule objects at sandboxed bash construction", async () => {
+    const fixture = await createFixture();
+    try {
+      const fuseRules: FuseRule[] = [
+        { pattern: "blocked-original-fuse", description: "original sentinel fuse" }
+      ];
+      const tool = new RawDataSandboxedBashTool({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules
+      });
+      fuseRules[0].pattern = "mutated-fuse";
+      fuseRules[0].description = "mutated sentinel";
+
+      const result = await tool.run(fixture.context, {
+        command: "printf blocked-original-fuse"
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Command blocked by fuse list");
+      expect(result.output).toContain("original sentinel fuse");
+      expect(result.output).not.toContain("mutated sentinel");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("audit reservation failure fails closed before bash execution", async () => {
     const fixture = await createFixture();
     try {
@@ -3425,6 +3562,51 @@ describe("raw data seatbelt sandbox", () => {
         success: false,
         outputSummary: result.outputSummary
       });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("stale protected raw root fails structurally and finalizes the running tool handle", async () => {
+    const fixture = await createFixture();
+    try {
+      const missingRawRoot = join(fixture.root, "data", "deleted-raw-root");
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const handle = runningToolRegistry.register({
+        toolUseId: "TOOL-CALL-1",
+        toolName: "bash",
+        abortable: true
+      });
+      const tool = new RawDataSandboxedBashTool({
+        protectedRawPaths: [missingRawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: []
+      });
+
+      const result = await tool.run(
+        {
+          ...fixture.context,
+          runningToolRegistry
+        },
+        {
+          command: "printf side-effect > workspace/stale-raw-root-side-effect.txt",
+          timeout: 30_000
+        }
+      );
+
+      expect(result.success).toBe(false);
+      expectProfileSetupFailure(result);
+      expect(result.output).toContain("Protected raw path unavailable");
+      expect(handle.getTerminalMetadata()).toMatchObject({
+        cause: "completed",
+        success: false,
+        outputSummary: result.outputSummary
+      });
+      await expectMissing(join(fixture.workspaceRoot, "stale-raw-root-side-effect.txt"));
+      await expect(readAuditRows(fixture.root)).rejects.toThrow();
+      expect(await readdir(fixture.profileRoot)).toEqual([]);
     } finally {
       await fixture.cleanup();
     }
@@ -4662,7 +4844,7 @@ function expectProfileSetupFailure(result: ToolResult): void {
   };
   expect(payload.error).toBe("raw_data_sandbox_profile_unavailable");
   expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
-  expect(payload.reason).toContain("protected raw data path");
+  expect(payload.reason).toMatch(/protected raw data path|Protected raw path unavailable/);
   expect(payload.remediation?.next_action).toBe("fix_and_retry");
   expect(payload.remediation?.hint).toContain("temp/profile roots");
   expect(payload.remediation?.ref).toContain("policy-gate-spike");
@@ -4940,6 +5122,30 @@ class TestRunningToolHandle implements RunningToolHandle {
     this.state = "finished";
     this.terminalMetadata = metadata;
     return true;
+  }
+}
+
+class TestSecretFilter implements SecretFilter {
+  private readonly secrets = new Map<string, string>();
+
+  filter(text: string): string {
+    let filtered = text;
+    for (const [key, value] of this.secrets) {
+      filtered = filtered.split(value).join(`[redacted:${key}]`);
+    }
+    return filtered;
+  }
+
+  addSecret(key: string, value: string): void {
+    this.secrets.set(key, value);
+  }
+
+  removeSecret(key: string): void {
+    this.secrets.delete(key);
+  }
+
+  registeredSecrets(): [string, string][] {
+    return [...this.secrets.entries()];
   }
 }
 

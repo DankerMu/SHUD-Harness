@@ -66,6 +66,7 @@ export function buildRawDataAdvisoryToolFailedWsEvent(
 
 function buildToolFailedWsEventUnchecked(input: ToolFailedWsEventInput): ToolFailedWsEvent {
   const timestamp = input.timestamp ?? new Date().toISOString();
+  const error = cloneErrorRecord(input.error);
   return {
     seq: input.seq,
     event_id: input.eventId ?? `tool.failed:${input.seq}`,
@@ -73,7 +74,7 @@ function buildToolFailedWsEventUnchecked(input: ToolFailedWsEventInput): ToolFai
     timestamp,
     payload: {
       tool_id: input.toolId,
-      error: input.error,
+      error,
       ...(input.rule ? { rule: input.rule } : {}),
       ...(input.decision ? { decision: input.decision } : {}),
       ...(input.guardClass ? { guard_class: input.guardClass } : {}),
@@ -117,4 +118,23 @@ function readRawDataAdvisoryToolFailedWsEventInput(
 
 function isRawDataDenialDecision(decision: string | undefined): boolean {
   return decision === "denied_by_advisory" || decision === "denied_by_sandbox";
+}
+
+function cloneErrorRecord(error: ErrorRecord): ErrorRecord {
+  return {
+    error_id: error.error_id,
+    category: error.category,
+    severity: error.severity,
+    ...(error.task_id !== undefined ? { task_id: error.task_id } : {}),
+    ...(error.job_id !== undefined ? { job_id: error.job_id } : {}),
+    ...(error.run_id !== undefined ? { run_id: error.run_id } : {}),
+    ...(error.report_id !== undefined ? { report_id: error.report_id } : {}),
+    message: error.message,
+    user_message: error.user_message,
+    evidence_refs: [...error.evidence_refs],
+    retryable: error.retryable,
+    recommended_next_actions: [...error.recommended_next_actions],
+    ...(error.remediation !== undefined ? { remediation: { ...error.remediation } } : {}),
+    created_at: error.created_at
+  };
 }

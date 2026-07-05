@@ -122,7 +122,7 @@ export function createShudSandboxedBashTool(
     auditWorkspaceRoot: options.auditWorkspaceRoot,
     auditTaskId: options.auditTaskId,
     toolId: "bash",
-    fuseRules: [...fuseRules]
+    fuseRules: cloneFuseRules(fuseRules)
   });
 }
 
@@ -323,14 +323,21 @@ function resolveShudBashFuseRules(options: ShudBashFuseSource): readonly FuseRul
     if (!Array.isArray(rawOptions.fuseRules)) {
       throw new Error("SHUD sandboxed bash fuseRules must be an array.");
     }
-    return rawOptions.fuseRules as readonly FuseRule[];
+    return cloneFuseRules(rawOptions.fuseRules as readonly FuseRule[]);
   }
 
   if (typeof rawOptions.fuseListPath !== "string" || rawOptions.fuseListPath.trim() === "") {
     throw new Error("SHUD sandboxed bash fuseListPath must be a non-empty string.");
   }
 
-  return loadFuseList(rawOptions.fuseListPath);
+  return cloneFuseRules(loadFuseList(rawOptions.fuseListPath));
+}
+
+function cloneFuseRules(rules: readonly FuseRule[]): FuseRule[] {
+  return rules.map((rule) => ({
+    pattern: rule.pattern,
+    description: rule.description
+  }));
 }
 
 function resolveRole(toolContext: ToolContext): HarnessRole | "unknown" {

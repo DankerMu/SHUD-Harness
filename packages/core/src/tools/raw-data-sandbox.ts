@@ -62,6 +62,17 @@ const PROCESS_PREFLIGHT_ANALYSIS_MAX_LENGTH = 32_000;
 const STREAM_CAPTURE_MAX_CHARS = 64_000;
 const DEFAULT_ABORT_MESSAGE = "Command aborted by user from Session Detail.";
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const SANDBOX_ENV_ALLOWLIST = new Set([
+  "PATH",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+  "TERM",
+  "COLORTERM"
+]);
 const RESERVED_RAW_DATA_DENIAL_ERROR_ID_PREFIXES = [
   `${RAW_DATA_WRITE_RULE_ID}:denied_by_advisory`,
   `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox`
@@ -487,8 +498,9 @@ export class RawDataSandboxedBashTool extends BaseTool {
   readonly parameters: Record<string, unknown>;
 
   private readonly fuseChecker: FuseListChecker;
+  private readonly options: RawDataSandboxedBashToolOptions;
 
-  constructor(private readonly options: RawDataSandboxedBashToolOptions) {
+  constructor(options: RawDataSandboxedBashToolOptions) {
     super();
     if ("innerTool" in (options as unknown as Record<string, unknown>)) {
       throw new Error(
@@ -498,8 +510,13 @@ export class RawDataSandboxedBashTool extends BaseTool {
     if (!Array.isArray(options.fuseRules)) {
       throw new Error("RawDataSandboxedBashTool requires explicit fuseRules.");
     }
-    const metadataTool = new BashTool([...options.fuseRules]);
-    this.fuseChecker = new FuseListChecker([...options.fuseRules]);
+    const fuseRules = cloneFuseRules(options.fuseRules);
+    this.options = {
+      ...options,
+      fuseRules
+    };
+    const metadataTool = new BashTool(cloneFuseRules(fuseRules));
+    this.fuseChecker = new FuseListChecker(cloneFuseRules(fuseRules));
     this.name = options.toolId ?? metadataTool.name;
     this.description = metadataTool.description;
     this.parameters = rawDataSandboxedBashParameters(metadataTool.parameters);
@@ -549,7 +566,18 @@ export class RawDataSandboxedBashTool extends BaseTool {
     }
 
     const profileOptions = runtimeRoots.profileOptions;
-    const protectedRawPaths = await canonicalizePathSet(profileOptions.protectedRawPaths);
+    let protectedRawPaths: string[];
+    try {
+      protectedRawPaths = await canonicalizePathSet(profileOptions.protectedRawPaths);
+    } catch (error) {
+      return this.finalizeToolResult(
+        ctx,
+        buildProfileSetupFailureResult({
+          toolId: this.name,
+          reason: `Protected raw path unavailable: ${errorMessage(error)}`
+        })
+      );
+    }
     const auditReservation = await this.reserveAuditEvidence(
       ctx,
       protectedRawPaths,
@@ -1950,13 +1978,14 @@ function resolveBashSecret(
 }
 
 function buildSanitizedToolProcessEnv(ctx: ToolContext): Record<string, string> {
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
-  );
+  const env: Record<string, string> = {};
 
-  for (const key of Object.keys(env)) {
-    if (isShellPreludeEnvName(key)) {
-      delete env[key];
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined || isShellPreludeEnvName(key)) {
+      continue;
+    }
+    if (SANDBOX_ENV_ALLOWLIST.has(key) || isLocaleEnvName(key)) {
+      env[key] = value;
     }
   }
 
@@ -1977,6 +2006,17 @@ function buildSanitizedToolProcessEnv(ctx: ToolContext): Record<string, string> 
 
 function isShellPreludeEnvName(name: string): boolean {
   return name === "BASH_ENV" || name === "ENV" || name.startsWith("BASH_FUNC_");
+}
+
+function isLocaleEnvName(name: string): boolean {
+  return /^LC_[A-Z_]+$/.test(name);
+}
+
+function cloneFuseRules(rules: readonly FuseRule[]): FuseRule[] {
+  return rules.map((rule) => ({
+    pattern: rule.pattern,
+    description: rule.description
+  }));
 }
 
 function commandLabel(command: string, usesSecretRefs: boolean): string {
@@ -3240,8 +3280,23 @@ function findCallArgumentLists(payload: string, calleePattern: RegExp): string[]
   return scanCallArgumentLists(payload, calleePattern).calls;
 }
 
+function findCallExpressionSpans(
+  payload: string,
+  calleePattern: RegExp
+): CallExpressionSpan[] {
+  return scanCallArgumentLists(payload, calleePattern).spans;
+}
+
+interface CallExpressionSpan {
+  calleeStart: number;
+  openIndex: number;
+  closeIndex: number;
+  argsText: string;
+}
+
 interface CallArgumentListScan {
   calls: string[];
+  spans: CallExpressionSpan[];
   truncated: boolean;
 }
 
@@ -3254,20 +3309,30 @@ function scanCallArgumentLists(
     : `${calleePattern.flags}g`;
   const regex = new RegExp(`${calleePattern.source}\\s*\\(`, flags);
   const calls: string[] = [];
+  const spans: CallExpressionSpan[] = [];
   let match = regex.exec(payload);
   while (match) {
     if (calls.length >= COMMAND_ANALYSIS_MAX_CALLS) {
-      return { calls, truncated: true };
+      return { calls, spans, truncated: true };
     }
     const openIndex = regex.lastIndex - 1;
     const argsText = extractCallArgumentsAtOpenParen(payload, openIndex);
+    const closeIndex =
+      argsText === undefined ? payload.length - 1 : openIndex + argsText.length + 1;
     const endIndex =
       argsText === undefined ? payload.length : openIndex + argsText.length + 1;
-    calls.push(argsText ?? payload.slice(openIndex + 1, endIndex));
+    const capturedArgsText = argsText ?? payload.slice(openIndex + 1, endIndex);
+    calls.push(capturedArgsText);
+    spans.push({
+      calleeStart: match.index,
+      openIndex,
+      closeIndex,
+      argsText: capturedArgsText
+    });
     regex.lastIndex = endIndex + 1;
     match = regex.exec(payload);
   }
-  return { calls, truncated: false };
+  return { calls, spans, truncated: false };
 }
 
 function extractCallArgumentsAtOpenParen(value: string, openIndex: number): string | undefined {
@@ -4187,7 +4252,9 @@ function hasInterpreterSessionEscapeSignal(code: string, commandName: string): b
     /\b(?:os\.)?(?:setsid|setpgrp)\s*\(/.test(code) ||
     /\bProcess\.(?:daemon|setpgrp)(?:\s*\(|\b)/.test(code) ||
     /\bdaemonize\s*\(/.test(code) ||
-    (isPythonCommand(commandName) && hasPythonProcessCreationSessionEscapeSignal(code)) ||
+    (isPythonCommand(commandName) &&
+      (hasPythonProcessCreationSessionEscapeSignal(code) ||
+        hasPythonUnwaitedPopenSignal(code))) ||
     /\b(?:spawn|exec|execFile|fork)\s*\([\s\S]*\bdetached\s*:\s*true\b/.test(code) ||
     /\bsystem(?:2)?\s*\([\s\S]*\bwait\s*=\s*FALSE\b/.test(code)
   );
@@ -4204,6 +4271,46 @@ function hasPythonProcessCreationSessionEscapeSignal(code: string): boolean {
     }
   }
   return false;
+}
+
+function hasPythonUnwaitedPopenSignal(code: string): boolean {
+  for (const call of findCallExpressionSpans(
+    code,
+    /\b(?:subprocess\.)?Popen\b/
+  )) {
+    if (!isPythonPopenCallStaticallyWaited(code, call)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isPythonPopenCallStaticallyWaited(
+  code: string,
+  call: CallExpressionSpan
+): boolean {
+  const afterCall = code.slice(call.closeIndex + 1);
+  if (/^\s*\.\s*(?:wait|communicate)\s*\(/.test(afterCall)) {
+    return true;
+  }
+
+  const assignedName = readPythonAssignmentTargetBeforeCall(code, call.calleeStart);
+  if (!assignedName) {
+    return false;
+  }
+
+  return new RegExp(
+    `\\b${escapeRegExp(assignedName)}\\s*\\.\\s*(?:wait|communicate)\\s*\\(`
+  ).test(afterCall);
+}
+
+function readPythonAssignmentTargetBeforeCall(
+  code: string,
+  calleeStart: number
+): string | undefined {
+  const beforeCall = code.slice(0, calleeStart);
+  const match = beforeCall.match(/(?:^|[;\n])\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*$/);
+  return match?.[1];
 }
 
 function isPythonCommand(commandName: string): boolean {

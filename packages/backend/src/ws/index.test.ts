@@ -254,6 +254,49 @@ describe("backend ws tool.failed skeleton", () => {
     });
   });
 
+  test("generic tool.failed builder snapshots mutable error payloads", () => {
+    const remediation = {
+      next_action: "fix_and_retry" as const,
+      hint: "Repair workspace state.",
+      ref: "docs/03_SPEC/WebSocket_Protocol.md"
+    };
+    const error: ErrorRecord = {
+      error_id: "workspace-quota:failed:lifecycle",
+      category: "workspace_error",
+      severity: "error",
+      message: "Workspace quota check failed.",
+      user_message: "Workspace quota check failed.",
+      evidence_refs: ["evidence:before"],
+      retryable: true,
+      recommended_next_actions: ["retry after cleanup"],
+      remediation,
+      created_at: "2026-07-04T00:00:00.000Z"
+    };
+    const expectedError = cloneErrorRecordForTest(error);
+
+    const event = buildToolFailedWsEvent({
+      seq: 19,
+      timestamp: "2026-07-04T00:00:00.000Z",
+      toolId: "bash",
+      rule: "workspace-quota",
+      decision: "failed",
+      error
+    });
+
+    error.error_id = "mutated-error";
+    error.message = "Mutated message.";
+    error.user_message = "Mutated user message.";
+    error.evidence_refs.push("evidence:after");
+    error.recommended_next_actions.push("mutated action");
+    remediation.hint = "Mutated remediation.";
+
+    expect(event.payload.error).toEqual(expectedError);
+    expect(event.payload.error).not.toBe(error);
+    expect(event.payload.error.evidence_refs).toEqual(["evidence:before"]);
+    expect(event.payload.error.recommended_next_actions).toEqual(["retry after cleanup"]);
+    expect(event.payload.error.remediation?.hint).toBe("Repair workspace state.");
+  });
+
   test("generic tool.failed builder rejects reserved raw-denial error IDs", () => {
     const remediation = rawDataWriteRemediation();
 
@@ -372,6 +415,15 @@ function cloneRawDataToolFailedEventInput(
       recommended_next_actions: [...input.error.recommended_next_actions],
       ...(input.error.remediation ? { remediation: { ...input.error.remediation } } : {})
     }
+  };
+}
+
+function cloneErrorRecordForTest(error: ErrorRecord): ErrorRecord {
+  return {
+    ...error,
+    evidence_refs: [...error.evidence_refs],
+    recommended_next_actions: [...error.recommended_next_actions],
+    ...(error.remediation ? { remediation: { ...error.remediation } } : {})
   };
 }
 

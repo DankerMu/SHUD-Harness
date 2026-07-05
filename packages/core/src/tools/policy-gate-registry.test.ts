@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BaseTool, BashTool, SpawnAgentTool, ToolRegistry } from "@zero-os/core";
-import type { ToolContext, ToolLogger, ToolResult } from "@zero-os/shared";
+import type { FuseRule, ToolContext, ToolLogger, ToolResult } from "@zero-os/shared";
 import { PolicyGateRemediationSchema } from "./policy-gate-core";
 import {
   assertAllToolsPolicyGated,
@@ -152,6 +152,35 @@ describe("policy-gated zero tool registry", () => {
       expect(result.success).toBe(false);
       expect(result.output).toContain("Command blocked by fuse list");
       expect(result.output).toContain("file sentinel");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD sandboxed bash snapshots inline fuse rule objects", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const fuseRules: FuseRule[] = [
+        { pattern: "blocked-inline-fuse", description: "inline sentinel" }
+      ];
+      const tool = createShudSandboxedBashTool({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules
+      });
+      fuseRules[0].pattern = "mutated-inline-fuse";
+      fuseRules[0].description = "mutated sentinel";
+
+      const result = await tool.run(fixture.context, {
+        command: "printf blocked-inline-fuse"
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Command blocked by fuse list");
+      expect(result.output).toContain("inline sentinel");
+      expect(result.output).not.toContain("mutated sentinel");
     } finally {
       await fixture.cleanup();
     }
