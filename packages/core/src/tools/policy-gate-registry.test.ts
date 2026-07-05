@@ -367,7 +367,7 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
-  test("outer raw deny root mismatch still prevents writes to the outer-denied path", async () => {
+  test("outer raw deny root mismatch returns generic policy denial without sandbox profile identity", async () => {
     const fixture = await createRawFixture();
     try {
       const outerRawRoot = join(fixture.root, "outer", "raw");
@@ -385,14 +385,22 @@ describe("policy-gated zero tool registry", () => {
       });
 
       const result = await registry.get("bash")?.run(fixture.context, {
-        command: `printf nope > ${join(outerRawRoot, "outer-denied.txt")}`
+        command: `printf side-effect > workspace/mismatch-side-effect.txt; printf nope > ${join(outerRawRoot, "outer-denied.txt")}`
       });
 
       expect(result?.success).toBe(false);
-      const payload = JSON.parse(result?.output ?? "{}") as RawDataDenialPayload;
-      expect(payload.error).toBe("raw_data_write_denied");
-      expect(payload.decision).toBe("denied_by_advisory");
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        error?: string;
+        ruleId?: string;
+        profile_id?: string;
+      };
+      expect(payload.error).toBe("policy_gate_denied");
+      expect(payload.ruleId).toBe(RAW_DATA_WRITE_RULE_ID);
+      expect(payload.profile_id).toBeUndefined();
+      expect(result?.output).not.toContain("raw_data_write_denied");
+      await expect(readFile(join(fixture.workspaceRoot, "mismatch-side-effect.txt"), "utf8")).rejects.toThrow();
       await expect(readFile(join(outerRawRoot, "outer-denied.txt"), "utf8")).rejects.toThrow();
+      await expect(readRawAuditRows(fixture.root)).rejects.toThrow();
     } finally {
       await fixture.cleanup();
     }

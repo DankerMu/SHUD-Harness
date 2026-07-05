@@ -503,6 +503,20 @@ export class RawDataSandboxedBashTool extends BaseTool {
     }
   }
 
+  async canAttributeOuterRawPolicyGateDeny(input: unknown): Promise<boolean> {
+    const command = readBashCommand(input);
+    if (!command) {
+      return false;
+    }
+
+    const protectedRawPaths = await canonicalizePathSet(this.options.protectedRawPaths);
+    const protectedRawPathSignals = rawDataSignalPaths(
+      this.options.protectedRawPaths,
+      protectedRawPaths
+    );
+    return evaluateRawDataWriteAdvisory(command, protectedRawPathSignals).decision === "deny";
+  }
+
   private async appendDenialAudit(
     ctx: ToolContext,
     reservation: PolicyGateAuditReservation,
@@ -3563,22 +3577,30 @@ async function isLikelySandboxDenialForCommand(
   options: { workDir: string }
 ): Promise<boolean> {
   const analysis = analyzeRawDataCommand(command, protectedRawPaths);
-  if (analysis.budgetExceeded) {
+  const denialLines = observableSandboxDenialLines(result.output);
+  if (denialLines.length === 0) {
     return false;
   }
 
-  const output = result.output;
-  const denialOutput =
-    isLikelySandboxDenial(output) || INTERPRETER_WRITE_DENIAL_PATTERN.test(output);
-  if (!denialOutput) {
-    return false;
-  }
-
-  if (analysis.hasKnownRawWriteTarget) {
+  const boundedCommand = analysis.budgetExceeded
+    ? command.slice(0, COMMAND_ANALYSIS_MAX_LENGTH)
+    : command;
+  const rawTargets = await collectObservableRawMutationTargets(
+    boundedCommand,
+    protectedRawPaths,
+    options
+  );
+  if (denialLines.some((line) => rawTargets.some((target) => lineMentionsTarget(line, target)))) {
     return true;
   }
 
-  return hasResolvableSymlinkRawDataWriteAlias(command, protectedRawPaths, options);
+  const boundedAnalysis =
+    boundedCommand === command ? analysis : analyzeRawDataCommand(boundedCommand, protectedRawPaths);
+  if (!analysis.hasKnownRawWriteTarget && !boundedAnalysis.hasKnownRawWriteTarget) {
+    return false;
+  }
+
+  return denialLines.some((line) => lineMentionsProtectedRawSignal(line, protectedRawPaths));
 }
 
 function hasKnownRawDataWriteTarget(
@@ -3593,33 +3615,112 @@ function hasKnownRawDataWriteTarget(
   );
 }
 
-async function hasResolvableSymlinkRawDataWriteAlias(
+interface ObservableRawMutationTarget {
+  token: string;
+  resolvedPath: string;
+  cwdCandidates: readonly string[];
+}
+
+async function collectObservableRawMutationTargets(
   command: string,
   protectedRawPaths: readonly string[],
   options: { workDir: string }
-): Promise<boolean> {
+): Promise<ObservableRawMutationTarget[]> {
+  const rawTargets: ObservableRawMutationTarget[] = [];
   const targets = collectLiteralWriteTargetCandidates(command, options.workDir);
   for (const target of targets.slice(0, SYMLINK_ALIAS_MAX_TARGETS)) {
     for (const candidate of resolveLiteralTargetPaths(target)) {
+      if (isAbsolutePathInsideProtectedRaw(candidate, protectedRawPaths)) {
+        rawTargets.push({
+          token: target.token,
+          resolvedPath: candidate,
+          cwdCandidates: target.cwdCandidates
+        });
+        continue;
+      }
       if (!isPathInsideOrEqual(candidate, options.workDir)) {
         continue;
       }
       const resolved = await resolvePathFollowingSymlinks(candidate);
       if (
         resolved?.followedSymlink &&
-        isAbsolutePathInsideProtectedRaw(resolved.path, protectedRawPaths)
+        isAbsolutePathInsideProtectedRaw(resolved.path, protectedRawPaths) &&
+        !(target.operation === "remove" && (await isSymlinkLeaf(candidate)))
       ) {
-        return true;
+        rawTargets.push({
+          token: target.token,
+          resolvedPath: resolved.path,
+          cwdCandidates: target.cwdCandidates
+        });
       }
     }
   }
 
-  return false;
+  return rawTargets;
+}
+
+function observableSandboxDenialLines(output: string): string[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line.length > 0 &&
+        (SANDBOX_DENIAL_PATTERN.test(line) || INTERPRETER_WRITE_DENIAL_PATTERN.test(line))
+    );
+}
+
+function lineMentionsTarget(line: string, target: ObservableRawMutationTarget): boolean {
+  const token = target.token.replace(/\/+$/, "");
+  const resolvedPath = normalize(resolve(target.resolvedPath)).replace(/\/+$/, "");
+  const variants = sortedUnique([
+    token,
+    normalize(token),
+    token.startsWith("./") ? token.slice(2) : token,
+    resolvedPath,
+    ...target.cwdCandidates.map((cwd) =>
+      normalize(resolve(cwd, target.token)).replace(/\/+$/, "")
+    ),
+    ...target.cwdCandidates.map((cwd) =>
+      normalize(resolve(cwd, target.token)).replace(/\/+$/, "").replace(`${normalize(resolve(cwd)).replace(/\/+$/, "")}/`, "")
+    )
+  ]).filter((value) => value.length > 0);
+
+  if (variants.some((variant) => line.includes(variant))) {
+    return true;
+  }
+
+  const name = basename(resolvedPath);
+  return name.length >= 4 && line.includes(name);
+}
+
+function lineMentionsProtectedRawSignal(
+  line: string,
+  protectedRawPaths: readonly string[]
+): boolean {
+  if (
+    protectedRawPaths.some((protectedRawPath) =>
+      line.includes(normalize(resolve(protectedRawPath)).replace(/\/+$/, ""))
+    )
+  ) {
+    return true;
+  }
+
+  return /(?:^|[^A-Za-z0-9_.-])(?:\.\/)?data\/raw(?:\/|[^A-Za-z0-9_.-]|$)/.test(line);
+}
+
+async function isSymlinkLeaf(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 interface LiteralWriteTargetCandidate {
   token: string;
   cwdCandidates: readonly string[];
+  operation?: "remove";
 }
 
 function collectLiteralWriteTargetCandidates(
@@ -3681,7 +3782,7 @@ function collectLiteralWriteTargetCandidates(
       continue;
     }
 
-    if (commandName === "cp" || commandName === "install") {
+    if (commandName === "cp" || commandName === "install" || commandName === "ln") {
       pushLiteralTarget(targets, operands.at(-1), cwdCandidates, cwdAmbiguous);
       continue;
     }
@@ -3692,6 +3793,20 @@ function collectLiteralWriteTargetCandidates(
         if (outputMatch) {
           pushLiteralTarget(targets, outputMatch[1], cwdCandidates, cwdAmbiguous);
         }
+      }
+      continue;
+    }
+
+    if (commandName === "mv" || commandName === "mkdir") {
+      for (const operand of operands) {
+        pushLiteralTarget(targets, operand, cwdCandidates, cwdAmbiguous);
+      }
+      continue;
+    }
+
+    if (commandName === "rm" || commandName === "unlink") {
+      for (const operand of operands) {
+        pushLiteralTarget(targets, operand, cwdCandidates, cwdAmbiguous, "remove");
       }
       continue;
     }
@@ -3718,7 +3833,8 @@ function pushLiteralTarget(
   targets: LiteralWriteTargetCandidate[],
   token: string | undefined,
   cwdCandidates: readonly string[],
-  cwdAmbiguous: boolean
+  cwdAmbiguous: boolean,
+  operation?: LiteralWriteTargetCandidate["operation"]
 ): void {
   if (
     !token ||
@@ -3730,7 +3846,8 @@ function pushLiteralTarget(
   }
   targets.push({
     token,
-    cwdCandidates: [...cwdCandidates]
+    cwdCandidates: [...cwdCandidates],
+    ...(operation ? { operation } : {})
   });
 }
 
