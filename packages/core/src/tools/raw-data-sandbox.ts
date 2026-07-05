@@ -41,6 +41,15 @@ const DEFAULT_SANDBOX_BASH = "/bin/bash";
 const PIPE_GRACE_MS = 1000;
 const FORCE_KILL_SETTLE_MS = 75;
 const DESCENDANT_SAMPLE_INTERVAL_MS = 100;
+const DESCENDANT_PERIODIC_SAMPLE_DELAYS_MS = [
+  DESCENDANT_SAMPLE_INTERVAL_MS,
+  250,
+  500,
+  1_000,
+  2_000,
+  4_000
+] as const;
+const DESCENDANT_MAX_PERIODIC_SAMPLE_COUNT = DESCENDANT_PERIODIC_SAMPLE_DELAYS_MS.length;
 const DESCENDANT_KILL_SETTLE_MS = 120;
 const COMMAND_ANALYSIS_MAX_LENGTH = 128_000;
 const INTERPRETER_PAYLOAD_ANALYSIS_MAX_LENGTH = 32_000;
@@ -1880,6 +1889,20 @@ interface InvocationDescendantTracker {
   sample(): Promise<void>;
 }
 
+/** @internal exported for focused scheduler regression coverage. */
+export function rawDataSandboxDescendantSampleDelayMs(
+  completedPeriodicSampleCount: number
+): number | undefined {
+  if (
+    !Number.isInteger(completedPeriodicSampleCount) ||
+    completedPeriodicSampleCount < 0 ||
+    completedPeriodicSampleCount >= DESCENDANT_MAX_PERIODIC_SAMPLE_COUNT
+  ) {
+    return undefined;
+  }
+  return DESCENDANT_PERIODIC_SAMPLE_DELAYS_MS[completedPeriodicSampleCount];
+}
+
 function createInvocationDescendantTracker(
   proc: ReturnType<typeof Bun.spawn>
 ): InvocationDescendantTracker {
@@ -1888,41 +1911,70 @@ function createInvocationDescendantTracker(
   if (rootPid) {
     knownPids.add(rootPid);
   }
-  let interval: ReturnType<typeof setInterval> | undefined;
-  let sampling = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let active = false;
+  let completedPeriodicSampleCount = 0;
+  let sampleInFlight: Promise<void> | undefined;
 
   const sample = async () => {
-    if (!rootPid || process.platform === "win32" || sampling) {
+    if (!rootPid || process.platform === "win32") {
       return;
     }
-    sampling = true;
-    try {
+    if (sampleInFlight) {
+      await sampleInFlight;
+      return;
+    }
+    sampleInFlight = (async () => {
       const descendants = await listDescendantPids(knownPids);
       for (const pid of descendants) {
         knownPids.add(pid);
       }
+    })();
+    try {
+      await sampleInFlight;
     } finally {
-      sampling = false;
+      sampleInFlight = undefined;
     }
+  };
+
+  const scheduleNextSample = () => {
+    if (!active || timer) {
+      return;
+    }
+    const delayMs = rawDataSandboxDescendantSampleDelayMs(completedPeriodicSampleCount);
+    if (delayMs === undefined) {
+      return;
+    }
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (!active) {
+        return;
+      }
+      completedPeriodicSampleCount += 1;
+      void sample()
+        .catch(() => undefined)
+        .finally(scheduleNextSample);
+    }, delayMs);
   };
 
   return {
     knownPids,
     start() {
-      if (!rootPid || interval) {
+      if (!rootPid || active) {
         return;
       }
-      void sample();
-      interval = setInterval(() => {
-        void sample();
-      }, DESCENDANT_SAMPLE_INTERVAL_MS);
+      active = true;
+      completedPeriodicSampleCount = 0;
+      void sample()
+        .catch(() => undefined)
+        .finally(scheduleNextSample);
     },
     stop() {
-      if (!interval) {
-        return;
+      active = false;
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
       }
-      clearInterval(interval);
-      interval = undefined;
     },
     sample
   };

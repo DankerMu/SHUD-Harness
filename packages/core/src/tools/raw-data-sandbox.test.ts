@@ -31,6 +31,7 @@ import {
   evaluateRawDataWriteAdvisory,
   rawDataDenialPayloadToAuditRow,
   rawDataDenialPayloadToToolFailedEventInput,
+  rawDataSandboxDescendantSampleDelayMs,
   rawDataSandboxProfileFileName,
   rawDataWriteRemediation,
   scanProtectedHardlinks,
@@ -47,6 +48,22 @@ const rubySeatbeltTest = hasSeatbelt && commandExistsSync("ruby") ? test : test.
 const rscriptSeatbeltTest = hasSeatbelt && commandExistsSync("Rscript") ? test : test.skip;
 
 describe("raw data seatbelt sandbox", () => {
+  test("descendant tracker periodic sampling uses a bounded backoff schedule", () => {
+    const delays: number[] = [];
+    for (let index = 0; ; index += 1) {
+      const delay = rawDataSandboxDescendantSampleDelayMs(index);
+      if (delay === undefined) {
+        break;
+      }
+      delays.push(delay);
+    }
+
+    expect(delays).toEqual([100, 250, 500, 1_000, 2_000, 4_000]);
+    expect(rawDataSandboxDescendantSampleDelayMs(delays.length)).toBeUndefined();
+    expect(rawDataSandboxDescendantSampleDelayMs(-1)).toBeUndefined();
+    expect(rawDataSandboxDescendantSampleDelayMs(1.5)).toBeUndefined();
+  });
+
   test("forgeable sandbox denial classifier is not exported as public authority", async () => {
     const toolExports = await import("./index");
 
