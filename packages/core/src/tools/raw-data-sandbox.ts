@@ -74,9 +74,18 @@ export interface RawDataSeatbeltProfile {
   metadata: RawDataSeatbeltProfileMetadata;
 }
 
+interface RawDataSeatbeltProfileFile {
+  profilePath: string;
+  runRoot: string;
+  runRootRealPath: string;
+  runRootDev: number;
+  runRootIno: number;
+}
+
 export type RawDataSandboxedBashToolOptions = RawDataSeatbeltProfileOptions & {
   toolId?: string;
   enableAdvisory?: boolean;
+  pathResolutionRoot?: string;
   auditWorkspaceRoot?: string;
   auditTaskId?: string;
   fuseRules: readonly FuseRule[];
@@ -244,6 +253,14 @@ export async function writeRawDataSeatbeltProfileFile(
   profile: RawDataSeatbeltProfile,
   profileRoot?: string
 ): Promise<string> {
+  const profileFile = await createRawDataSeatbeltProfileFile(profile, profileRoot);
+  return profileFile.profilePath;
+}
+
+async function createRawDataSeatbeltProfileFile(
+  profile: RawDataSeatbeltProfile,
+  profileRoot?: string
+): Promise<RawDataSeatbeltProfileFile> {
   const root = profileRoot ?? profile.metadata.profileRoot ?? profile.metadata.tempRoot;
   const protectedWriteDenyPaths = sortedUnique([
     ...profile.metadata.protectedRawPaths,
@@ -261,36 +278,88 @@ export async function writeRawDataSeatbeltProfileFile(
   if (!metadata.isFile()) {
     throw new Error(`Seatbelt profile path is not a regular file: ${profilePath}`);
   }
-  return canonicalizeExistingPath(profilePath);
+  const runRootMetadata = await lstat(runRoot);
+  if (runRootMetadata.isSymbolicLink() || !runRootMetadata.isDirectory()) {
+    throw new Error(`Seatbelt profile run directory is unsafe: ${runRoot}`);
+  }
+  return {
+    profilePath: await canonicalizeExistingPath(profilePath),
+    runRoot,
+    runRootRealPath: await canonicalizeExistingPath(runRoot),
+    runRootDev: runRootMetadata.dev,
+    runRootIno: runRootMetadata.ino
+  };
 }
 
-function bindSeatbeltProfileOptionsToWorkDir(
-  options: RawDataSeatbeltProfileOptions,
-  workDir: string
-): RawDataSeatbeltProfileOptions {
+interface ResolvedRawDataSandboxRuntimeRoots {
+  profileOptions: RawDataSeatbeltProfileOptions;
+  auditWorkspaceRoot?: string;
+}
+
+function resolveRawDataSandboxRuntimeRoots(
+  options: RawDataSandboxedBashToolOptions
+): ResolvedRawDataSandboxRuntimeRoots {
   return {
-    protectedRawPaths: options.protectedRawPaths.map((path) =>
-      bindPathToWorkDir(path, workDir)
-    ),
-    allowedWriteRoots: options.allowedWriteRoots.map((path) =>
-      bindPathToWorkDir(path, workDir)
-    ),
-    ...(options.protectedEvidencePaths
+    profileOptions: {
+      protectedRawPaths: options.protectedRawPaths.map((path) =>
+        resolveRuntimeRoot(path, "protectedRawPaths", options.pathResolutionRoot)
+      ),
+      allowedWriteRoots: options.allowedWriteRoots.map((path) =>
+        resolveRuntimeRoot(path, "allowedWriteRoots", options.pathResolutionRoot)
+      ),
+      ...(options.protectedEvidencePaths
+        ? {
+            protectedEvidencePaths: options.protectedEvidencePaths.map((path) =>
+              resolveRuntimeRoot(path, "protectedEvidencePaths", options.pathResolutionRoot)
+            )
+          }
+        : {}),
+      ...(options.tempRoot !== undefined
+        ? {
+            tempRoot: resolveRuntimeRoot(
+              options.tempRoot,
+              "tempRoot",
+              options.pathResolutionRoot
+            )
+          }
+        : {}),
+      ...(options.profileRoot !== undefined
+        ? {
+            profileRoot: resolveRuntimeRoot(
+              options.profileRoot,
+              "profileRoot",
+              options.pathResolutionRoot
+            )
+          }
+        : {})
+    },
+    ...(options.auditWorkspaceRoot !== undefined
       ? {
-          protectedEvidencePaths: options.protectedEvidencePaths.map((path) =>
-            bindPathToWorkDir(path, workDir)
+          auditWorkspaceRoot: resolveRuntimeRoot(
+            options.auditWorkspaceRoot,
+            "auditWorkspaceRoot",
+            options.pathResolutionRoot
           )
         }
-      : {}),
-    ...(options.tempRoot ? { tempRoot: bindPathToWorkDir(options.tempRoot, workDir) } : {}),
-    ...(options.profileRoot
-      ? { profileRoot: bindPathToWorkDir(options.profileRoot, workDir) }
       : {})
   };
 }
 
-function bindPathToWorkDir(path: string, workDir: string): string {
-  return isAbsolute(path) ? path : resolve(workDir, path);
+function resolveRuntimeRoot(
+  path: string,
+  label: string,
+  pathResolutionRoot: string | undefined
+): string {
+  if (isAbsolute(path)) {
+    return path;
+  }
+  if (!pathResolutionRoot) {
+    throw new Error(`Relative ${label} requires pathResolutionRoot: ${path}`);
+  }
+  if (!isAbsolute(pathResolutionRoot)) {
+    throw new Error(`pathResolutionRoot must be absolute to resolve relative ${label}.`);
+  }
+  return resolve(pathResolutionRoot, path);
 }
 
 function protectedEvidenceAncestorLiterals(
@@ -359,16 +428,31 @@ export class RawDataSandboxedBashTool extends BaseTool {
       });
     }
 
-    const profileOptions = bindSeatbeltProfileOptionsToWorkDir(
-      this.options,
-      ctx.workDir
-    );
+    let runtimeRoots: ResolvedRawDataSandboxRuntimeRoots;
+    try {
+      runtimeRoots = resolveRawDataSandboxRuntimeRoots(this.options);
+    } catch (error) {
+      return this.finalizeToolResult(
+        ctx,
+        buildPathResolutionFailureResult({
+          toolId: this.name,
+          reason: errorMessage(error)
+        })
+      );
+    }
+
+    const profileOptions = runtimeRoots.profileOptions;
     const protectedRawPaths = await canonicalizePathSet(profileOptions.protectedRawPaths);
-    const auditReservation = await this.reserveAuditEvidence(ctx, protectedRawPaths);
+    const auditReservation = await this.reserveAuditEvidence(
+      ctx,
+      protectedRawPaths,
+      runtimeRoots.auditWorkspaceRoot
+    );
     if ("toolResult" in auditReservation) {
       return this.finalizeToolResult(ctx, auditReservation.toolResult);
     }
 
+    let profileFile: RawDataSeatbeltProfileFile | undefined;
     let profilePath: string | undefined;
     try {
       const profile = await buildRawDataSeatbeltProfile({
@@ -381,7 +465,8 @@ export class RawDataSandboxedBashTool extends BaseTool {
           auditReservation.protectedEvidencePath
         ]
       });
-      profilePath = await writeRawDataSeatbeltProfileFile(profile, profileOptions.profileRoot);
+      profileFile = await createRawDataSeatbeltProfileFile(profile, profileOptions.profileRoot);
+      profilePath = profileFile.profilePath;
       const protectedRawPathSignals = rawDataSignalPaths(
         profileOptions.protectedRawPaths,
         profile.metadata.protectedRawPaths
@@ -462,8 +547,8 @@ export class RawDataSandboxedBashTool extends BaseTool {
       );
     } finally {
       await closePolicyGateAuditReservation(auditReservation);
-      if (profilePath) {
-        await cleanupRawDataSeatbeltProfileFile(ctx, profilePath);
+      if (profileFile) {
+        await cleanupRawDataSeatbeltProfileFile(ctx, profileFile);
       }
     }
   }
@@ -532,11 +617,12 @@ export class RawDataSandboxedBashTool extends BaseTool {
 
   private async reserveAuditEvidence(
     ctx: ToolContext,
-    protectedRawPaths: readonly string[]
+    protectedRawPaths: readonly string[],
+    auditWorkspaceRoot: string | undefined
   ): Promise<PolicyGateAuditReservation | PolicyGateAuditReservationFailure> {
     try {
       return await ensurePolicyGateAuditReservation(
-        resolve(this.options.auditWorkspaceRoot ?? ctx.workDir),
+        resolve(auditWorkspaceRoot ?? ctx.workDir),
         this.options.auditTaskId ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID,
         DEFAULT_AUDIT_FILE_NAME,
         protectedRawPaths
@@ -941,6 +1027,29 @@ function buildAuditReservationFailureResult(input: {
     success: false,
     output: JSON.stringify(payload),
     outputSummary: "Policy gate audit unavailable"
+  };
+}
+
+function buildPathResolutionFailureResult(input: {
+  toolId: string;
+  reason: string;
+}): ToolResult {
+  const payload = {
+    error: "raw_data_sandbox_path_resolution_failed",
+    tool_id: input.toolId,
+    rule: RAW_DATA_WRITE_RULE_ID,
+    reason: input.reason,
+    remediation: {
+      next_action: "fix_and_retry",
+      hint: "Provide an absolute pathResolutionRoot when configuring relative raw sandbox roots.",
+      ref: RAW_DATA_POLICY_REF
+    }
+  };
+
+  return {
+    success: false,
+    output: JSON.stringify(payload),
+    outputSummary: "Raw data sandbox path resolution failed"
   };
 }
 
@@ -4122,16 +4231,80 @@ async function canonicalizeExistingPath(path: string): Promise<string> {
 
 async function cleanupRawDataSeatbeltProfileFile(
   ctx: ToolContext,
-  profilePath: string
+  profileFile: RawDataSeatbeltProfileFile
 ): Promise<void> {
+  const check = await verifyProfileRunRootForCleanup(profileFile);
+  if (!check.ok) {
+    ctx.logger.warn("raw_data_sandbox_profile_cleanup_skipped", {
+      profile_path: profileFile.profilePath,
+      run_root: profileFile.runRoot,
+      original_run_root: profileFile.runRootRealPath,
+      reason: check.reason
+    });
+    return;
+  }
+
   try {
-    await rm(dirname(profilePath), { recursive: true, force: true });
+    await rm(profileFile.runRoot, { recursive: true, force: true });
   } catch (error) {
     ctx.logger.warn("raw_data_sandbox_profile_cleanup_failed", {
-      profile_path: profilePath,
+      profile_path: profileFile.profilePath,
+      run_root: profileFile.runRoot,
       error: errorMessage(error)
     });
   }
+}
+
+async function verifyProfileRunRootForCleanup(
+  profileFile: RawDataSeatbeltProfileFile
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  let metadata: Awaited<ReturnType<typeof lstat>>;
+  try {
+    metadata = await lstat(profileFile.runRoot);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `profile run directory cannot be inspected: ${errorMessage(error)}`
+    };
+  }
+
+  if (metadata.isSymbolicLink()) {
+    return {
+      ok: false,
+      reason: "profile run directory path is now a symlink"
+    };
+  }
+  if (!metadata.isDirectory()) {
+    return {
+      ok: false,
+      reason: "profile run directory path is no longer a directory"
+    };
+  }
+
+  let currentRealPath: string;
+  try {
+    currentRealPath = await canonicalizeExistingPath(profileFile.runRoot);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `profile run directory realpath cannot be proven: ${errorMessage(error)}`
+    };
+  }
+
+  if (currentRealPath !== profileFile.runRootRealPath) {
+    return {
+      ok: false,
+      reason: "profile run directory realpath drifted"
+    };
+  }
+  if (metadata.dev !== profileFile.runRootDev || metadata.ino !== profileFile.runRootIno) {
+    return {
+      ok: false,
+      reason: "profile run directory identity drifted"
+    };
+  }
+
+  return { ok: true };
 }
 
 function quoteSeatbeltString(value: string): string {

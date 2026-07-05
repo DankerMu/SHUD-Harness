@@ -149,41 +149,142 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  seatbeltTest("relative protected raw paths resolve against ctx workDir instead of process cwd", async () => {
+  seatbeltTest("relative protected raw paths resolve against stable pathResolutionRoot", async () => {
     const fixture = await createFixture();
-    const originalCwd = process.cwd();
-    const otherCwd = await mkdtemp(join(tmpdir(), "shud-raw-other-cwd-"));
     try {
-      await mkdir(join(otherCwd, "data", "raw"), { recursive: true });
-      process.chdir(otherCwd);
+      const nestedWorkDir = join(fixture.workspaceRoot, "nested");
+      await mkdir(nestedWorkDir, { recursive: true });
 
       const tool = new RawDataSandboxedBashTool({
         protectedRawPaths: ["data/raw"],
-        allowedWriteRoots: [fixture.root],
-        tempRoot: fixture.tempRoot,
-        profileRoot: fixture.profileRoot,
+        allowedWriteRoots: ["workspace"],
+        tempRoot: "workspace/tmp",
+        profileRoot: "workspace/profiles",
+        auditWorkspaceRoot: "workspace",
+        pathResolutionRoot: fixture.root,
         enableAdvisory: false,
         fuseRules: []
       });
       const result = await tool.run(
         {
           ...fixture.context,
-          workDir: fixture.root
+          workDir: nestedWorkDir
         },
         {
-          command: "printf x > data/raw/relative-blocked.txt",
+          command: `printf dotdot > ../../data/raw/stable-dotdot.txt; printf absolute > ${join(fixture.rawRoot, "stable-absolute.txt")}`,
           timeout: 30_000
         }
       );
 
-      expect(process.cwd()).not.toBe(fixture.root);
       expect(result.success).toBe(false);
-      await expectMissing(join(fixture.rawRoot, "relative-blocked.txt"));
+      await expectMissing(join(fixture.rawRoot, "stable-dotdot.txt"));
+      await expectMissing(join(fixture.rawRoot, "stable-absolute.txt"));
       await expectGenericSandboxLifecycle(fixture, result);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  seatbeltTest("relative auditWorkspaceRoot resolves against stable pathResolutionRoot", async () => {
+    const fixture = await createFixture();
+    const originalCwd = process.cwd();
+    const otherCwd = await mkdtemp(join(tmpdir(), "shud-raw-other-cwd-"));
+    try {
+      process.chdir(otherCwd);
+
+      const result = await runSandboxed(
+        fixture,
+        "printf ok > workspace/stable-audit-root.txt",
+        {
+          auditWorkspaceRoot: "workspace",
+          pathResolutionRoot: fixture.root
+        }
+      );
+
+      expect(result.success).toBe(true);
+      expect(await readFile(join(fixture.workspaceRoot, "stable-audit-root.txt"), "utf8")).toBe(
+        "ok"
+      );
+      const rows = await readAuditRowsFromWorkspaceRoot(fixture.workspaceRoot);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
+      });
+      await expectMissing(
+        join(otherCwd, "workspace", "tasks", "TASK-M1-SPIKE", "audit", "policy-gate.ndjson")
+      );
     } finally {
       process.chdir(originalCwd);
       await rm(otherCwd, { recursive: true, force: true });
       await fixture.cleanup();
+    }
+  });
+
+  test("relative runtime roots without pathResolutionRoot fail closed before execution", async () => {
+    const cases: readonly {
+      name: string;
+      options: Partial<ConstructorParameters<typeof RawDataSandboxedBashTool>[0]>;
+    }[] = [
+      {
+        name: "protectedRawPaths",
+        options: { protectedRawPaths: ["data/raw"] }
+      },
+      {
+        name: "protectedEvidencePaths",
+        options: { protectedEvidencePaths: ["workspace/evidence"] }
+      },
+      {
+        name: "allowedWriteRoots",
+        options: { allowedWriteRoots: ["workspace"] }
+      },
+      {
+        name: "tempRoot",
+        options: { tempRoot: "workspace/tmp" }
+      },
+      {
+        name: "profileRoot",
+        options: { profileRoot: "workspace/profiles" }
+      },
+      {
+        name: "auditWorkspaceRoot",
+        options: { auditWorkspaceRoot: "workspace" }
+      }
+    ];
+
+    for (const testCase of cases) {
+      const fixture = await createFixture();
+      try {
+        const tool = new RawDataSandboxedBashTool({
+          protectedRawPaths: [fixture.rawRoot],
+          allowedWriteRoots: [fixture.root],
+          tempRoot: fixture.tempRoot,
+          profileRoot: fixture.profileRoot,
+          enableAdvisory: false,
+          fuseRules: [],
+          ...testCase.options
+        });
+
+        const result = await tool.run(fixture.context, {
+          command: `printf side-effect > workspace/${testCase.name}-side-effect.txt`,
+          timeout: 30_000
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.output).toContain("pathResolutionRoot");
+        expect(result.outputSummary).toBe("Raw data sandbox path resolution failed");
+        await expectMissing(join(fixture.workspaceRoot, `${testCase.name}-side-effect.txt`));
+        await expectMissing(
+          join(
+            fixture.workspaceRoot,
+            "tasks",
+            "TASK-M1-SPIKE",
+            "audit",
+            "policy-gate.ndjson"
+          )
+        );
+      } finally {
+        await fixture.cleanup();
+      }
     }
   });
 
@@ -2708,6 +2809,61 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  seatbeltTest("profile cleanup skips substituted symlink target", async () => {
+    const fixture = await createFixture();
+    const victimRoot = join(fixture.workspaceRoot, "victim-profiles");
+    const warnings: { event: string; data?: Record<string, unknown> }[] = [];
+    const logger: ToolLogger = {
+      ...testLogger,
+      warn(event, data) {
+        warnings.push({ event, data });
+      }
+    };
+    try {
+      await mkdir(victimRoot, { recursive: true });
+
+      const result = await runSandboxed(
+        fixture,
+        [
+          'run_dir=$(basename "$(ls -d workspace/profiles/shud-raw-seatbelt-* | sed -n \'1p\')")',
+          'mkdir -p "workspace/victim-profiles/$run_dir"',
+          'printf victim > "workspace/victim-profiles/$run_dir/victim.txt"',
+          "mv workspace/profiles workspace/profiles.original",
+          "ln -s victim-profiles workspace/profiles",
+          "printf ok > workspace/profile-cleanup-symlink-result.txt"
+        ].join("; "),
+        {
+          context: {
+            ...fixture.context,
+            logger
+          }
+        }
+      );
+
+      expect(result.success).toBe(true);
+      expect(
+        await readFile(join(fixture.workspaceRoot, "profile-cleanup-symlink-result.txt"), "utf8")
+      ).toBe("ok");
+      const victimRunRoots = await readdir(victimRoot);
+      expect(victimRunRoots).toHaveLength(1);
+      expect(await readFile(join(victimRoot, victimRunRoots[0]!, "victim.txt"), "utf8")).toBe(
+        "victim"
+      );
+      expect(warnings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            event: "raw_data_sandbox_profile_cleanup_skipped",
+            data: expect.objectContaining({
+              reason: "profile run directory realpath drifted"
+            })
+          })
+        ])
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   seatbeltTest("profile cleanup failure is logged without replacing command result", async () => {
     const fixture = await createFixture();
     const warnings: { event: string; data?: Record<string, unknown> }[] = [];
@@ -3534,6 +3690,7 @@ async function runSandboxed(
   options: {
     enableAdvisory?: boolean;
     fuseRules?: readonly FuseRule[];
+    pathResolutionRoot?: string;
     auditWorkspaceRoot?: string;
     auditTaskId?: string;
     profileRoot?: string;
@@ -3548,6 +3705,7 @@ async function runSandboxed(
     tempRoot: options.tempRoot ?? fixture.tempRoot,
     profileRoot: options.profileRoot ?? fixture.profileRoot,
     enableAdvisory: options.enableAdvisory,
+    pathResolutionRoot: options.pathResolutionRoot,
     auditWorkspaceRoot: options.auditWorkspaceRoot,
     auditTaskId: options.auditTaskId,
     fuseRules: options.fuseRules ?? []

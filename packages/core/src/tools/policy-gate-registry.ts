@@ -48,6 +48,7 @@ export type ShudBashFuseSource =
 export type ShudSandboxedBashToolOptions = RawDataSeatbeltProfileOptions &
   ShudBashFuseSource & {
     enableAdvisory?: boolean;
+    pathResolutionRoot?: string;
     auditWorkspaceRoot?: string;
     auditTaskId?: string;
   };
@@ -117,6 +118,7 @@ export function createShudSandboxedBashTool(
     tempRoot: options.tempRoot,
     profileRoot: options.profileRoot,
     enableAdvisory: options.enableAdvisory,
+    pathResolutionRoot: options.pathResolutionRoot,
     auditWorkspaceRoot: options.auditWorkspaceRoot,
     auditTaskId: options.auditTaskId,
     toolId: "bash",

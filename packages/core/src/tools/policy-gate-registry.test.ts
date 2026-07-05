@@ -195,6 +195,41 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  seatbeltTest("SHUD runtime registry propagates pathResolutionRoot to sandboxed bash", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const nestedWorkDir = join(fixture.workspaceRoot, "nested");
+      await mkdir(nestedWorkDir, { recursive: true });
+      const registry = createShudRuntimeToolRegistry({
+        protectedRawPaths: ["data/raw"],
+        allowedWriteRoots: ["workspace"],
+        tempRoot: "workspace/tmp",
+        profileRoot: "workspace/profiles",
+        auditWorkspaceRoot: "workspace",
+        pathResolutionRoot: fixture.root,
+        fuseRules: []
+      });
+
+      const result = await registry.get("bash")?.run(
+        {
+          ...fixture.context,
+          workDir: nestedWorkDir
+        },
+        { command: "cat ../../data/raw/input.csv" }
+      );
+
+      expect(result?.success).toBe(true);
+      expect(result?.output).toContain("raw,input");
+      const rows = await readRawAuditRows(fixture.root);
+      expect(rows.at(-1)).toMatchObject({
+        event: "tool.completed",
+        decision: "allowed"
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime rebuilds spawn_agent so scoped registries inherit sandboxed bash", async () => {
     const fixture = await createRawFixture();
     try {
