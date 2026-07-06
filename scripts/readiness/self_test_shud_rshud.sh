@@ -6,6 +6,17 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 HELPER="$SCRIPT_DIR/check_shud_rshud.sh"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/shud-rshud-readiness-test.XXXXXX")
+REAL_GIT=$(command -v git)
+
+git() {
+  (
+    for git_env_name in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+      unset "$git_env_name"
+    done
+    command "$REAL_GIT" "$@"
+  )
+}
+
 LIVE_STATUS_BEFORE=$(git -C "$REPO_ROOT" status --short -- SHUD rSHUD workspace)
 
 cleanup() {
@@ -178,11 +189,34 @@ printf '%s\n' 'fake g++ 99.0.0'
 EOF
   chmod +x "$bin_dir/g++"
 
-  real_git=$(command -v git)
+  real_git=$REAL_GIT
   cat > "$bin_dir/git" <<EOF
 #!/usr/bin/env sh
 set -eu
 real_git='$real_git'
+if [ -n "\${FAKE_GIT_FAIL_STATUS_FOR:-}" ]; then
+  git_cwd=''
+  git_saw_status=''
+  git_previous=''
+  for git_arg in "\$@"; do
+    if [ "\$git_previous" = "-C" ]; then
+      git_cwd="\$git_arg"
+      git_previous=''
+      continue
+    fi
+    if [ "\$git_arg" = "-C" ]; then
+      git_previous='-C'
+      continue
+    fi
+    if [ "\$git_arg" = "status" ]; then
+      git_saw_status=1
+    fi
+  done
+  if [ "\$git_saw_status" = "1" ] && [ "\$git_cwd" = "\$FAKE_GIT_FAIL_STATUS_FOR" ]; then
+    printf '%s\n' "\${FAKE_GIT_FAIL_MESSAGE:-fake git status failure}" >&2
+    exit "\${FAKE_GIT_FAIL_STATUS_CODE:-128}"
+  fi
+fi
 if [ -n "\${FAKE_GIT_DELAY_ON_TRACKED_OUTPUT:-}" ] && [ -s "\$FAKE_GIT_DELAY_ON_TRACKED_OUTPUT" ]; then
   case " \$* " in
     *" status "*)
@@ -261,6 +295,9 @@ run_helper() {
   helper_fake_make_marker=${FAKE_MAKE_MARKER:-}
   helper_fake_git_delay_on_tracked_output=${FAKE_GIT_DELAY_ON_TRACKED_OUTPUT:-}
   helper_fake_git_delay_seconds=${FAKE_GIT_DELAY_SECONDS:-1}
+  helper_fake_git_fail_status_for=${FAKE_GIT_FAIL_STATUS_FOR:-}
+  helper_fake_git_fail_message=${FAKE_GIT_FAIL_MESSAGE:-}
+  helper_fake_git_fail_status_code=${FAKE_GIT_FAIL_STATUS_CODE:-128}
   helper_fake_make_honor_target_omp_on_clean=${FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN:-}
   helper_preserve_make_env=${PRESERVE_MAKE_ENV:-}
   set +e
@@ -272,6 +309,9 @@ run_helper() {
       FAKE_MAKE_MARKER="$helper_fake_make_marker" \
       FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
       FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
+      FAKE_GIT_FAIL_STATUS_FOR="$helper_fake_git_fail_status_for" \
+      FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
+      FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
       FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
       SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
       PATH="$TMP_ROOT/bin:$PATH" \
@@ -286,6 +326,9 @@ run_helper() {
         FAKE_MAKE_MARKER="$helper_fake_make_marker" \
         FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
         FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
+        FAKE_GIT_FAIL_STATUS_FOR="$helper_fake_git_fail_status_for" \
+        FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
+        FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
         FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
         SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
         PATH="$TMP_ROOT/bin:$PATH" \
@@ -295,8 +338,8 @@ run_helper() {
   fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env
   return "$helper_status"
 }
 
@@ -310,6 +353,9 @@ run_helper_default_output() {
   helper_fake_make_marker=${FAKE_MAKE_MARKER:-}
   helper_fake_git_delay_on_tracked_output=${FAKE_GIT_DELAY_ON_TRACKED_OUTPUT:-}
   helper_fake_git_delay_seconds=${FAKE_GIT_DELAY_SECONDS:-1}
+  helper_fake_git_fail_status_for=${FAKE_GIT_FAIL_STATUS_FOR:-}
+  helper_fake_git_fail_message=${FAKE_GIT_FAIL_MESSAGE:-}
+  helper_fake_git_fail_status_code=${FAKE_GIT_FAIL_STATUS_CODE:-128}
   helper_fake_make_honor_target_omp_on_clean=${FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN:-}
   helper_preserve_make_env=${PRESERVE_MAKE_ENV:-}
   set +e
@@ -321,6 +367,9 @@ run_helper_default_output() {
       FAKE_MAKE_MARKER="$helper_fake_make_marker" \
       FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
       FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
+      FAKE_GIT_FAIL_STATUS_FOR="$helper_fake_git_fail_status_for" \
+      FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
+      FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
       FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
       SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
       PATH="$TMP_ROOT/bin:$PATH" \
@@ -335,6 +384,9 @@ run_helper_default_output() {
         FAKE_MAKE_MARKER="$helper_fake_make_marker" \
         FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
         FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
+        FAKE_GIT_FAIL_STATUS_FOR="$helper_fake_git_fail_status_for" \
+        FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
+        FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
         FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
         SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
         PATH="$TMP_ROOT/bin:$PATH" \
@@ -344,8 +396,8 @@ run_helper_default_output() {
   fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env
   return "$helper_status"
 }
 
@@ -445,9 +497,16 @@ printf '%s\n' "tracked output must survive" > "$tracked_output_fixture/workspace
 git -C "$tracked_output_fixture" add -f workspace/readiness/shud_rshud_readiness.json
 git -C "$tracked_output_fixture" commit -q -m "track readiness output"
 tracked_output_before=$(cat "$tracked_output_fixture/workspace/readiness/shud_rshud_readiness.json")
-if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper_default_output "$tracked_output_fixture" >/dev/null 2>/dev/null; then
+hostile_git_worktree="$TMP_ROOT/hostile-git-worktree"
+mkdir -p "$hostile_git_worktree"
+if GIT_INDEX_FILE=/tmp/nonexistent-shud-readiness-index \
+  GIT_WORK_TREE="$hostile_git_worktree" \
+  FAKE_MAKE_MODE=success \
+  FAKE_RSHUD_VERSION=2.5.0 \
+  run_helper_default_output "$tracked_output_fixture" >/dev/null 2>/dev/null; then
   fail "tracked output fixture unexpectedly returned zero"
 fi
+unset GIT_INDEX_FILE GIT_WORK_TREE
 tracked_output_after=$(cat "$tracked_output_fixture/workspace/readiness/shud_rshud_readiness.json")
 if [ "$tracked_output_before" != "$tracked_output_after" ]; then
   fail "tracked readiness output was overwritten"
@@ -467,9 +526,15 @@ git -C "$tracked_sibling_fixture" commit -q -m "track stale readiness sibling"
 tracked_sibling_output="$tracked_sibling_fixture/workspace/readiness/alternate_selected.json"
 tracked_sibling_marker="$tracked_sibling_fixture/make.marker"
 tracked_sibling_stderr="$TMP_ROOT/tracked-sibling.stderr"
-if FAKE_MAKE_MARKER="$tracked_sibling_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$tracked_sibling_fixture" "$tracked_sibling_output" >/dev/null 2>"$tracked_sibling_stderr"; then
+if GIT_INDEX_FILE=/tmp/nonexistent-shud-readiness-index \
+  GIT_WORK_TREE="$hostile_git_worktree" \
+  FAKE_MAKE_MARKER="$tracked_sibling_marker" \
+  FAKE_MAKE_MODE=success \
+  FAKE_RSHUD_VERSION=2.5.0 \
+  run_helper "$tracked_sibling_fixture" "$tracked_sibling_output" >/dev/null 2>"$tracked_sibling_stderr"; then
   fail "tracked sibling fixture unexpectedly returned zero"
 fi
+unset GIT_INDEX_FILE GIT_WORK_TREE
 if ! grep -q "tracked readiness artifact(s) exist under workspace/readiness" "$tracked_sibling_stderr"; then
   cat "$tracked_sibling_stderr" >&2
   fail "tracked sibling fixture did not reject canonical tracked readiness artifact"
@@ -570,7 +635,34 @@ unset SUNDIALS_DIR
 assert_json "$sundials_conflict_output" incomplete -
 assert_json_expr "$sundials_conflict_output" 'data["sundials"]["selected"]["path"].endswith("/fake-home/sundials")'
 assert_json_expr "$sundials_conflict_output" 'data["sundials"]["selected"]["version"] == "6.0.0"'
-assert_json_expr "$sundials_conflict_output" 'any(candidate["path"].endswith("/alt-sundials") and candidate["version"] == "9.9.9" for candidate in data["sundials"]["candidates"])'
+assert_json_expr "$sundials_conflict_output" 'all("/alt-sundials" not in candidate["path"] for candidate in data["sundials"]["candidates"])'
+assert_json_expr "$sundials_conflict_output" 'any(item["name"] == "SUNDIALS_DIR" and "conflict" in item["reason"] for item in data["make_environment_guard"]["blocked_variables"])'
+
+sundials_secret_fixture="$TMP_ROOT/sundials-secret-fixture"
+make_fixture "$sundials_secret_fixture"
+sundials_secret_output="$sundials_secret_fixture/workspace/readiness/sundials_secret.json"
+sundials_secret_stderr="$TMP_ROOT/sundials-secret.stderr"
+sundials_secret_marker="$sundials_secret_fixture/make.marker"
+sundials_secret_value="/tmp/SHUDSECRET_SUNDIALS_DIR_DO_NOT_LEAK_15"
+if PRESERVE_MAKE_ENV=1 \
+  SUNDIALS_DIR="$sundials_secret_value" \
+  FAKE_MAKE_MARKER="$sundials_secret_marker" \
+  FAKE_MAKE_MODE=success \
+  FAKE_RSHUD_VERSION=2.5.0 \
+  run_helper "$sundials_secret_fixture" "$sundials_secret_output" >/dev/null 2>"$sundials_secret_stderr"; then
+  fail "secret SUNDIALS_DIR fixture unexpectedly returned zero"
+fi
+unset SUNDIALS_DIR
+assert_json "$sundials_secret_output" block "unsupported make environment overrides are set before SHUD build"
+if grep -q "$sundials_secret_value" "$sundials_secret_output" || grep -q "$sundials_secret_value" "$sundials_secret_stderr"; then
+  fail "secret-like SUNDIALS_DIR value leaked to output or stderr"
+fi
+assert_json_expr "$sundials_secret_output" 'data["make_environment_guard"]["present_variables"]["SUNDIALS_DIR"]["redacted"] is True'
+assert_json_expr "$sundials_secret_output" 'any(item["name"] == "SUNDIALS_DIR" and "conflict" in item["reason"] for item in data["make_environment_guard"]["blocked_variables"])'
+assert_json_expr "$sundials_secret_output" 'all("SHUDSECRET_SUNDIALS_DIR_DO_NOT_LEAK_15" not in candidate["path"] for candidate in data["sundials"]["candidates"])'
+if [ -e "$sundials_secret_marker" ]; then
+  fail "make executed for secret SUNDIALS_DIR fixture"
+fi
 
 dirty_shud_fixture="$TMP_ROOT/dirty-shud-fixture"
 make_fixture "$dirty_shud_fixture"
@@ -609,15 +701,17 @@ assert_json "$workspace_drift_output" block "workspace/SHUD/rSHUD source boundar
 
 status_failure_fixture="$TMP_ROOT/status-failure-fixture"
 make_fixture "$status_failure_fixture"
-rm -rf "$status_failure_fixture/rSHUD/.git"
 status_failure_output="$TMP_ROOT/status-failure-output.json"
-export GIT_CEILING_DIRECTORIES="$status_failure_fixture"
-if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$status_failure_fixture" "$status_failure_output" >/dev/null 2>/dev/null; then
-  unset GIT_CEILING_DIRECTORIES
+status_failure_rshud=$(CDPATH= cd -- "$status_failure_fixture/rSHUD" && pwd -P)
+if FAKE_GIT_FAIL_STATUS_FOR="$status_failure_rshud" \
+  FAKE_GIT_FAIL_MESSAGE="fake rSHUD status failure" \
+  FAKE_MAKE_MODE=success \
+  FAKE_RSHUD_VERSION=2.5.0 \
+  run_helper "$status_failure_fixture" "$status_failure_output" >/dev/null 2>/dev/null; then
   fail "status failure fixture unexpectedly returned zero"
 fi
-unset GIT_CEILING_DIRECTORIES
 assert_json "$status_failure_output" block "rSHUD checkout git status failed"
+assert_json_expr "$status_failure_output" '"fake rSHUD status failure" in data["source_boundary"]["preflight"]["rshud_status"]["stderr_tail"]'
 
 tracked_shud_fixture="$TMP_ROOT/tracked-shud-fixture"
 make_fixture "$tracked_shud_fixture"

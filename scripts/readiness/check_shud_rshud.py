@@ -154,7 +154,16 @@ def terminate_process_group(process: subprocess.Popen[Any]) -> None:
     process.wait()
 
 
-def run_command(args: list[str], cwd: Path | None = None, timeout: int | None = None) -> dict[str, Any]:
+def sanitized_git_environment() -> dict[str, str]:
+    return {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+
+
+def run_command(
+    args: list[str],
+    cwd: Path | None = None,
+    timeout: int | None = None,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
     result: dict[str, Any] = {
         "command": args,
         "cwd": str(cwd) if cwd else None,
@@ -172,6 +181,7 @@ def run_command(args: list[str], cwd: Path | None = None, timeout: int | None = 
         process = subprocess.Popen(
             args,
             cwd=str(cwd) if cwd else None,
+            env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -203,8 +213,12 @@ def run_command(args: list[str], cwd: Path | None = None, timeout: int | None = 
     return result
 
 
+def run_git_command(cwd: Path, args: list[str], timeout: int = 20) -> dict[str, Any]:
+    return run_command(["git", "-C", str(cwd), *args], timeout=timeout, env=sanitized_git_environment())
+
+
 def git_stdout(args: list[str], cwd: Path) -> tuple[str | None, str | None]:
-    result = run_command(["git", "-C", str(cwd), *args], timeout=20)
+    result = run_git_command(cwd, args)
     if result["exit_code"] != 0:
         detail = (result["stderr_tail"] or result["stdout_tail"] or result["error"] or "").strip()
         return None, detail or f"git {' '.join(args)} failed"
@@ -244,7 +258,7 @@ def check_git_ignored(repo_root: Path, output: Path) -> bool:
         rel = output.resolve(strict=False).relative_to(repo_root.resolve())
     except ValueError:
         return False
-    result = run_command(["git", "-C", str(repo_root), "check-ignore", "--no-index", "-q", str(rel)], timeout=20)
+    result = run_git_command(repo_root, ["check-ignore", "--no-index", "-q", str(rel)])
     return result["exit_code"] == 0
 
 
@@ -253,17 +267,14 @@ def check_git_tracked(repo_root: Path, output: Path) -> tuple[bool | None, str |
         rel = output.resolve(strict=False).relative_to(repo_root.resolve())
     except ValueError:
         return False, None
-    result = run_command(["git", "-C", str(repo_root), "ls-files", "--", rel.as_posix()], timeout=20)
+    result = run_git_command(repo_root, ["ls-files", "--", rel.as_posix()])
     if result["exit_code"] != 0:
         return None, command_failure_detail(result)
     return bool(str(result.get("stdout_tail") or "").strip()), None
 
 
 def tracked_runtime_readiness_artifacts(repo_root: Path) -> tuple[list[str] | None, str | None]:
-    result = run_command(
-        ["git", "-C", str(repo_root), "ls-files", "--", CANONICAL_READINESS_DIR.as_posix()],
-        timeout=20,
-    )
+    result = run_git_command(repo_root, ["ls-files", "--", CANONICAL_READINESS_DIR.as_posix()])
     if result["exit_code"] != 0:
         return None, command_failure_detail(result)
     paths = [line.strip() for line in str(result.get("stdout_tail") or "").splitlines() if line.strip()]
@@ -489,18 +500,22 @@ def collect_compiler(shud_dir: Path, errors: list[str], notes: list[str]) -> dic
 
 
 def sundials_candidates(shud_dir: Path) -> list[dict[str, Any]]:
-    env = os.environ
+    env = dict(os.environ)
     makefile_assignment = parse_make_assignment_detail(shud_dir / "Makefile", "SUNDIALS_DIR")
     makefile_value = makefile_assignment["value"] if makefile_assignment else None
     makefile_operator = makefile_assignment["operator"] if makefile_assignment else None
     selected_raw: str | None = None
     selected_source: str | None = None
     env_value = env.get("SUNDIALS_DIR")
+    env_value_blocked = bool(env_value and makefile_value and makefile_operator != "?=")
+    make_path_env = dict(env)
+    if env_value_blocked:
+        make_path_env.pop("SUNDIALS_DIR", None)
     if makefile_value and makefile_operator == "?=" and env_value:
         selected_raw = env_value
         selected_source = "environment SUNDIALS_DIR via Makefile ?="
     elif makefile_value:
-        selected_raw = expand_make_path(makefile_value, env)
+        selected_raw = expand_make_path(makefile_value, make_path_env)
         selected_source = f"SHUD Makefile SUNDIALS_DIR {makefile_operator}"
     elif env_value:
         selected_raw = env_value
@@ -512,16 +527,17 @@ def sundials_candidates(shud_dir: Path) -> list[dict[str, Any]]:
     raw_candidates = [
         (selected_raw, selected_source, True),
         (
-            expand_make_path(makefile_value, env) if makefile_value else None,
+            expand_make_path(makefile_value, make_path_env) if makefile_value else None,
             f"SHUD Makefile SUNDIALS_DIR {makefile_operator}" if makefile_value else None,
             False,
         ),
-        (env_value, "environment SUNDIALS_DIR", False),
         (str(Path.home() / "sundials"), "default ~/sundials fallback", False),
         ("/usr/local/sundials", "common local fallback", False),
         ("/usr/local/opt/sundials", "common local fallback", False),
         ("/opt/homebrew/opt/sundials", "Homebrew fallback", False),
     ]
+    if env_value and not env_value_blocked:
+        raw_candidates.insert(2, (env_value, "environment SUNDIALS_DIR", False))
     seen: set[str] = set()
     candidates: list[dict[str, Any]] = []
     for raw, source, build_selected in raw_candidates:
@@ -804,7 +820,7 @@ def run_make(shud_dir: Path, target: str, timeout_seconds: int) -> dict[str, Any
 
 
 def git_path_bool(git_dir: Path, args: list[str]) -> tuple[bool | None, str | None]:
-    result = run_command(["git", "-C", str(git_dir), *args], timeout=20)
+    result = run_git_command(git_dir, args)
     if result["exit_code"] == 0:
         return True, None
     if result["exit_code"] == 1:
@@ -816,7 +832,7 @@ def git_path_tracked(git_dir: Path, path_name: str) -> tuple[bool | None, str | 
     pathspecs = [path_name]
     if (git_dir / path_name).is_dir():
         pathspecs.extend([f"{path_name}/", f"{path_name}/**"])
-    result = run_command(["git", "-C", str(git_dir), "ls-files", "--", *pathspecs], timeout=20)
+    result = run_git_command(git_dir, ["ls-files", "--", *pathspecs])
     if result["exit_code"] != 0:
         return None, command_failure_detail(result)
     return bool(str(result.get("stdout_tail") or "").strip()), None
@@ -1082,9 +1098,9 @@ def append_status_errors(label: str, result: dict[str, Any], errors: list[str]) 
 
 def collect_source_boundary(repo_root: Path, errors: list[str], phase: str) -> dict[str, Any]:
     boundary_errors: list[str] = []
-    root_status = run_command(["git", "-C", str(repo_root), "status", "--short", "--", "SHUD", "rSHUD", "workspace"], timeout=20)
-    shud_status = run_command(["git", "-C", str(repo_root / "SHUD"), "status", "--short"], timeout=20)
-    rshud_status = run_command(["git", "-C", str(repo_root / "rSHUD"), "status", "--short"], timeout=20)
+    root_status = run_git_command(repo_root, ["status", "--short", "--", "SHUD", "rSHUD", "workspace"])
+    shud_status = run_git_command(repo_root / "SHUD", ["status", "--short"])
+    rshud_status = run_git_command(repo_root / "rSHUD", ["status", "--short"])
     append_status_errors("workspace/SHUD/rSHUD source boundary", root_status, boundary_errors)
     append_status_errors("SHUD checkout", shud_status, boundary_errors)
     append_status_errors("rSHUD checkout", rshud_status, boundary_errors)
