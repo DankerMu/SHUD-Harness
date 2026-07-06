@@ -196,6 +196,43 @@ describe("spawn profile subset policy rule", () => {
     });
   });
 
+  test("ignores hostile unknown spawn siblings without enumerating them", () => {
+    const target: Record<string, unknown> = {
+      instruction: "Run the delegated task.",
+      role: "worker",
+      tools: ["read"]
+    };
+    Object.defineProperty(target, "ignoredHostile", {
+      enumerable: true,
+      get() {
+        throw new Error("ignored sibling getter should not run");
+      }
+    });
+    let enumerated = false;
+    const input = new Proxy(target, {
+      ownKeys() {
+        enumerated = true;
+        throw new Error("ignored sibling keys should not be enumerated");
+      }
+    });
+
+    const normalized = normalizeSpawnAgentInput(spawnToolCallRaw(input));
+
+    expect(normalized).toMatchObject({
+      decision: "allow",
+      changed: true
+    });
+    if (normalized.decision === "allow") {
+      expect(normalized.input).toEqual({
+        instruction: "Run the delegated task.",
+        role: "worker",
+        tools: ["read"]
+      });
+      expect(normalized.input).not.toHaveProperty("ignoredHostile");
+    }
+    expect(enumerated).toBe(false);
+  });
+
   test("denies non-primitive spawn roles before role trimming", () => {
     const decision = evaluatePolicyGate(
       spawnToolCall({ role: new String("worker"), tools: ["edit"] }),

@@ -267,7 +267,28 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     const startTime = Date.now();
     let decision: PolicyGateDecision;
     const role = this.options.role ?? resolveRole(toolContext);
-    const preparedInput = this.preparePolicyGateInput(toolContext, role, input);
+    let preparedInput:
+      | {
+          decision: "allow";
+          executionInput: unknown;
+          evaluatorInput: unknown;
+        }
+      | Extract<PolicyGateDecision, { decision: "deny" }>;
+    try {
+      preparedInput = this.preparePolicyGateInput(toolContext, role, input);
+    } catch (error) {
+      const durationMs = Date.now() - startTime;
+      const errorMessage = toErrorMessage(error);
+      return this.finalizePolicyGateResult(
+        toolContext,
+        {
+          success: false,
+          output: errorMessage,
+          outputSummary: `Error: ${errorMessage.slice(0, 100)}`
+        },
+        durationMs
+      );
+    }
     if (preparedInput.decision === "deny") {
       const durationMs = Date.now() - startTime;
       return this.finalizePolicyGateResult(

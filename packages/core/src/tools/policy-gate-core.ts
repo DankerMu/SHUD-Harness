@@ -282,7 +282,17 @@ function parseSpawnAgentInputSnapshot(input: unknown): SpawnAgentInputSnapshotRe
 }
 
 function snapshotSpawnDataFields(input: unknown): SpawnFieldSnapshotResult {
-  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+  if (input === null || typeof input !== "object") {
+    return buildSpawnProfileUnsafeInputDeny("spawn_agent input must be a plain data record");
+  }
+
+  let isArrayInput: boolean;
+  try {
+    isArrayInput = Array.isArray(input);
+  } catch {
+    return buildSpawnProfileUnsafeInputDeny("spawn_agent input could not be safely inspected");
+  }
+  if (isArrayInput) {
     return buildSpawnProfileUnsafeInputDeny("spawn_agent input must be a plain data record");
   }
 
@@ -297,29 +307,20 @@ function snapshotSpawnDataFields(input: unknown): SpawnFieldSnapshotResult {
     return buildSpawnProfileUnsafeInputDeny("spawn_agent input must be a plain data record");
   }
 
-  let descriptors: Record<PropertyKey, PropertyDescriptor>;
-  try {
-    descriptors = Object.getOwnPropertyDescriptors(input) as Record<
-      PropertyKey,
-      PropertyDescriptor
-    >;
-  } catch {
-    return buildSpawnProfileUnsafeInputDeny("spawn_agent input could not be safely inspected");
-  }
-
-  for (const key of Reflect.ownKeys(descriptors)) {
-    const descriptor = descriptors[key];
-    if (descriptor && !("value" in descriptor)) {
-      return buildSpawnProfileUnsafeInputDeny("spawn_agent input must contain only data fields");
-    }
-  }
-
   const values: Partial<Record<SpawnAgentSnapshotField, unknown>> = {};
   const presentFields = new Set<SpawnAgentSnapshotField>();
   for (const field of SPAWN_AGENT_SNAPSHOT_FIELDS) {
-    const descriptor = descriptors[field];
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(input, field);
+    } catch {
+      return buildSpawnProfileUnsafeInputDeny("spawn_agent input could not be safely inspected");
+    }
     if (!descriptor) {
       continue;
+    }
+    if (!("value" in descriptor)) {
+      return buildSpawnProfileUnsafeInputDeny("spawn_agent input must contain only data fields");
     }
     values[field] = descriptor.value;
     presentFields.add(field);
@@ -447,13 +448,20 @@ function readSpawnAllowlistField(
   field: SpawnAllowlistField,
   value: unknown
 ): SpawnAllowlistRead {
-  if (!Array.isArray(value)) {
+  let isArrayValue: boolean;
+  try {
+    isArrayValue = Array.isArray(value);
+  } catch {
+    return { kind: "invalid", field };
+  }
+  if (!isArrayValue) {
     return { kind: "invalid", field };
   }
 
+  const arrayValue = value as readonly unknown[];
   let length: number;
   try {
-    length = value.length;
+    length = arrayValue.length;
   } catch {
     return { kind: "invalid", field };
   }
@@ -476,7 +484,7 @@ function readSpawnAllowlistField(
   for (let index = 0; index < length; index += 1) {
     let entry: unknown;
     try {
-      entry = value[index];
+      entry = arrayValue[index];
     } catch {
       return { kind: "invalid", field };
     }
