@@ -19,18 +19,25 @@ non-index properties, and evaluator-visible array prototypes exposed global
   only indices `0..length-1` are materialized, non-index own array properties
   are outside the contract and omitted without discovery, and sparse holes are
   preserved where possible.
-- Give plain object snapshots null prototypes recursively so evaluator
-  `Object.prototype` / inherited `constructor` mutation paths cannot affect the
-  inner execution input.
+- Reject live non-spawn arrays whose prototype is not the ordinary
+  `Array.prototype`, including array subclasses and custom-prototype arrays.
+- Preserve execution snapshots as structuredClone-like ordinary plain objects
+  and normal arrays, while keeping evaluator plain objects null-prototype and
+  hardened.
 - Preserve evaluator array read compatibility (`for...of`, spread, `.includes()`,
-  `.map()`, and `push`) through isolated array prototypes, null-prototype
-  exposed methods/iterators, and `.map()` results that do not expose global
-  `Array.prototype`.
+  `.map()`, and `push`) through frozen isolated array prototypes,
+  null-prototype frozen exposed methods/iterators, evaluator-local arrays, and
+  `.map()` results that do not expose global `Array.prototype`.
+- Guard non-spawn evaluator execution against input-derived global
+  `Object.prototype` / `Array.prototype` / `Function.prototype` residue,
+  including array reparent attempts that can only affect evaluator-local arrays.
 - Preserve fail-closed preparation errors, running metadata finalization, and
   the existing spawn_agent authority snapshot path.
 - Add regression tests for bounded-input rejection, hostile preparation
-  failures, evaluator/inner-tool isolation, structured-clone evaluator reads,
-  and unchanged spawn behavior.
+  failures, non-ordinary live input rejection, evaluator/inner-tool isolation,
+  execution plain-object compatibility, evaluator graph hardening,
+  cross-call residue isolation, structured-clone evaluator reads, and unchanged
+  spawn behavior.
 
 ## Capabilities
 

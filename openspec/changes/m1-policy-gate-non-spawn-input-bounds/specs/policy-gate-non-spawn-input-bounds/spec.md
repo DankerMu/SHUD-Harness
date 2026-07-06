@@ -8,7 +8,9 @@ that exceed the preparation budget or require unsafe/stability-unbounded
 inspection SHALL fail closed with the existing
 `policy_gate_input_preparation_failed` tool result, and the wrapped inner tool
 MUST NOT execute. Proxy-shaped and non-ordinary live inputs SHALL be rejected
-instead of treated as safely bounded structured data.
+instead of treated as safely bounded structured data. Non-ordinary live arrays,
+including array subclasses and custom-prototype arrays, SHALL be rejected under
+the same non-ordinary live input boundary.
 Accepted generic arrays SHALL be JSON-style numeric-index arrays: only numeric
 indices `0..length-1` are part of the accepted generic array contract,
 non-index own array properties are outside the contract and SHALL be omitted
@@ -24,6 +26,15 @@ semantics permit.
   before per-key descriptor/value reads
 - **AND** preparation fails closed before policy evaluation and before inner
   tool execution
+
+#### Scenario: non-ordinary live inputs fail closed
+
+- **WHEN** a non-spawn tool receives class-backed, `Date`, `Map`,
+  custom-prototype object, array subclass, or custom-prototype array input
+- **THEN** preparation fails closed before policy evaluation and before inner
+  tool execution
+- **AND** nested array subclasses and custom-prototype arrays fail under the
+  same boundary
 
 #### Scenario: ordinary array non-index properties are outside the contract
 
@@ -63,17 +74,36 @@ semantics permit.
 For tools other than `spawn_agent`, the policy-gate wrapper SHALL materialize
 accepted input once into a stable bounded canonical structured-data graph, then
 prepare separate execution and evaluator snapshots from that canonical graph.
-The evaluator snapshot SHALL be plain structured data, SHALL be
-structured-cloneable, SHALL use null prototypes recursively for plain objects,
-and SHALL preserve the explicitly supported evaluator array APIs: direct numeric
-indexing, `for...of`, spread, `.includes()`, `.map()`, and `push`. Supported
-array-returning evaluator methods, including `.map()`, SHALL return
-evaluator-isolated arrays rather than arrays linked to global `Array.prototype`.
-Evaluator-visible array prototype functions and iterator `next` functions
-SHOULD have null prototypes where the runtime permits, and evaluator arrays
-SHALL NOT expose a functional constructor path to global `Function.prototype`.
-Evaluator mutation attempts MUST NOT change the input later supplied to the
-inner tool or global prototypes through input-derived prototype paths.
+The execution snapshot SHALL preserve structuredClone-like plain-object
+compatibility for inner tools: plain objects SHALL be ordinary objects with
+`Object.prototype`, nested plain objects SHALL retain ordinary object
+compatibility, and arrays SHALL be normal arrays. The evaluator snapshot SHALL
+be plain structured data, SHALL be structured-cloneable, SHALL use null
+prototypes recursively for plain objects, SHALL make evaluator plain objects
+non-extensible after existing properties are installed, and SHALL preserve the
+explicitly supported evaluator array APIs: direct numeric indexing, `for...of`,
+spread, `.includes()`, `.map()`, and `push`. Supported array-returning
+evaluator methods, including `.map()`, SHALL return evaluator-isolated arrays
+rather than arrays linked to global `Array.prototype`. Evaluator-visible array
+prototype containers, array prototype functions, iterator objects, and iterator
+`next` functions SHALL be frozen or made non-extensible where the runtime
+permits, and evaluator arrays SHALL NOT expose a functional constructor path to
+global `Function.prototype`. Evaluator arrays MAY remain extensible to preserve
+`push` and direct index mutation; any evaluator-local array reparenting MUST
+NOT leave residue on global `Object.prototype`, `Array.prototype`, or
+`Function.prototype` before inner execution continues. Evaluator mutation
+attempts MUST NOT change the input later supplied to the inner tool or global
+prototypes through input-derived prototype paths.
+
+#### Scenario: execution snapshot preserves ordinary object compatibility
+
+- **WHEN** a non-spawn tool receives valid plain-object input and the evaluator
+  returns allow
+- **THEN** the inner tool receives ordinary plain objects for the execution
+  snapshot
+- **AND** `input.hasOwnProperty(...)` works on the execution snapshot
+- **AND** `input instanceof Object` is true for execution plain objects
+- **AND** evaluator plain objects remain null-prototype and hardened
 
 #### Scenario: evaluator mutation cannot affect inner execution
 
@@ -95,13 +125,24 @@ inner tool or global prototypes through input-derived prototype paths.
 #### Scenario: evaluator prototype mutation paths cannot affect execution
 
 - **WHEN** a custom evaluator attempts to mutate prototypes reachable from
-  `Object.getPrototypeOf(call.input)`, `Object.getPrototypeOf(values.constructor)`,
+  direct `Object.setPrototypeOf()` on evaluator top-level objects, nested
+  objects, evaluator arrays, isolated array prototypes, exposed array methods,
+  map-result arrays/prototypes/functions, iterator objects/functions,
+  `Object.getPrototypeOf(values.constructor)`,
   `Object.getPrototypeOf(Object.getPrototypeOf(values).map)`,
   `Object.getPrototypeOf(values.map(...))`, or a directly accessed
   `[Symbol.iterator]()` result
 - **THEN** the mutation fails closed or is isolated from the execution snapshot
 - **AND** input-derived prototype mutation paths do not leave global prototype
-  residue on `Function.prototype` or `Array.prototype`
+  residue on `Object.prototype`, `Function.prototype`, or `Array.prototype`
+
+#### Scenario: evaluator-visible graph does not retain cross-call residue
+
+- **WHEN** one non-spawn evaluator call attempts to write custom properties to
+  evaluator-visible array prototypes, exposed methods, iterator objects,
+  iterator functions, and map-result paths
+- **THEN** a later evaluator call MUST NOT observe those custom properties
+- **AND** the inner execution input remains isolated from both evaluator calls
 
 ### Requirement: Spawn authority preparation remains unchanged
 

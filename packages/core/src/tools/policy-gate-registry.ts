@@ -340,18 +340,28 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     }
 
     try {
-      const candidate = await this.options.evaluate(
-        {
-          toolId: this.policyGateToolId,
-          role,
-          input: preparedInput.evaluatorInput,
-          workDir: toolContext.workDir
-        },
-        {
-          tool: this.innerTool,
-          toolContext
+      const intrinsicResidueGuard =
+        this.policyGateToolId === "spawn_agent"
+          ? undefined
+          : createPolicyGateIntrinsicResidueGuard();
+      const candidate = await (async () => {
+        try {
+          return await this.options.evaluate(
+            {
+              toolId: this.policyGateToolId,
+              role,
+              input: preparedInput.evaluatorInput,
+              workDir: toolContext.workDir
+            },
+            {
+              tool: this.innerTool,
+              toolContext
+            }
+          );
+        } finally {
+          intrinsicResidueGuard?.restore();
         }
-      );
+      })();
       decision = validatePolicyGateDecision(this.policyGateToolId, candidate);
     } catch (error) {
       const durationMs = Date.now() - startTime;
@@ -740,6 +750,8 @@ type GenericPolicyGateDataDescriptor = PropertyDescriptor & {
   value: unknown;
 };
 
+type GenericPolicyGateCloneMode = "execution" | "evaluator";
+
 function prepareGenericPolicyGateInputSnapshots(value: unknown): {
   executionInput: unknown;
   evaluatorInput: unknown;
@@ -751,10 +763,10 @@ function prepareGenericPolicyGateInputSnapshots(value: unknown): {
   });
   return {
     executionInput: cloneGenericPolicyGateMaterializedInput(canonicalInput, {
-      isolateArrayPrototype: false
+      mode: "execution"
     }),
     evaluatorInput: cloneGenericPolicyGateMaterializedInput(canonicalInput, {
-      isolateArrayPrototype: true
+      mode: "evaluator"
     })
   };
 }
@@ -802,6 +814,7 @@ function materializeGenericPolicyGateInput(
   }
 
   if (Array.isArray(objectValue)) {
+    assertOrdinaryGenericPolicyGateArray(objectValue);
     return materializeGenericPolicyGateArray(objectValue, state, depth);
   }
 
@@ -811,6 +824,12 @@ function materializeGenericPolicyGateInput(
   }
 
   return materializeGenericPolicyGatePlainObject(objectValue, state, depth);
+}
+
+function assertOrdinaryGenericPolicyGateArray(value: readonly unknown[]): void {
+  if (Object.getPrototypeOf(value) !== Array.prototype) {
+    throw new Error("Policy gate input arrays must be ordinary structured data.");
+  }
 }
 
 function materializeGenericPolicyGateArray(
@@ -948,7 +967,7 @@ function addGenericPolicyGateStringBudget(
 
 function cloneGenericPolicyGateMaterializedInput(
   value: unknown,
-  options: { isolateArrayPrototype: boolean }
+  options: { mode: GenericPolicyGateCloneMode }
 ): unknown {
   return cloneGenericPolicyGateMaterializedValue(
     value,
@@ -964,7 +983,7 @@ function cloneGenericPolicyGateMaterializedInput(
 function cloneGenericPolicyGateMaterializedValue(
   value: unknown,
   state: GenericPolicyGateSnapshotState,
-  options: { isolateArrayPrototype: boolean },
+  options: { mode: GenericPolicyGateCloneMode },
   depth = 0
 ): unknown {
   if (depth > GENERIC_POLICY_GATE_INPUT_MAX_DEPTH) {
@@ -1014,7 +1033,7 @@ function cloneGenericPolicyGateMaterializedValue(
 function cloneGenericPolicyGateMaterializedArray(
   value: readonly unknown[],
   state: GenericPolicyGateSnapshotState,
-  options: { isolateArrayPrototype: boolean },
+  options: { mode: GenericPolicyGateCloneMode },
   depth: number
 ): unknown[] {
   const length = readGenericPolicyGateArrayLength(value);
@@ -1023,7 +1042,7 @@ function cloneGenericPolicyGateMaterializedArray(
   }
 
   const snapshot = new Array<unknown>(length);
-  if (options.isolateArrayPrototype) {
+  if (options.mode === "evaluator") {
     Object.setPrototypeOf(snapshot, createIsolatedArrayPrototype());
   }
   state.snapshots.set(value, snapshot);
@@ -1049,10 +1068,13 @@ function cloneGenericPolicyGateMaterializedArray(
 function cloneGenericPolicyGateMaterializedPlainObject(
   value: object,
   state: GenericPolicyGateSnapshotState,
-  options: { isolateArrayPrototype: boolean },
+  options: { mode: GenericPolicyGateCloneMode },
   depth: number
 ): Record<string, unknown> {
-  const snapshot = Object.create(null) as Record<string, unknown>;
+  const snapshot =
+    options.mode === "execution"
+      ? ({} as Record<string, unknown>)
+      : (Object.create(null) as Record<string, unknown>);
   state.snapshots.set(value, snapshot);
   const keys = getBoundedGenericPolicyGateObjectKeys(value);
 
@@ -1076,6 +1098,9 @@ function cloneGenericPolicyGateMaterializedPlainObject(
     });
   }
 
+  if (options.mode === "evaluator") {
+    Object.preventExtensions(snapshot);
+  }
   return snapshot;
 }
 
@@ -1085,6 +1110,7 @@ function createIsolatedArrayPrototype(): object {
   defineIsolatedArrayPrototypeMethod(prototype, "includes", isolatedArrayIncludes);
   defineIsolatedArrayPrototypeMethod(prototype, "map", isolatedArrayMap);
   defineIsolatedArrayPrototypeMethod(prototype, "push", isolatedArrayPush);
+  Object.freeze(prototype);
   return prototype;
 }
 
@@ -1198,6 +1224,7 @@ function createIsolatedArrayIterator(receiver: unknown[]): IterableIterator<unkn
     configurable: true,
     writable: true
   });
+  Object.freeze(iterator);
   return iterator;
 }
 
@@ -1253,7 +1280,104 @@ function sameValueZero(left: unknown, right: unknown): boolean {
 
 function isolateFunction<T extends (...args: unknown[]) => unknown>(value: T): T {
   Object.setPrototypeOf(value, null);
+  Object.freeze(value);
   return value;
+}
+
+interface PolicyGateIntrinsicResidueSnapshot {
+  target: object;
+  prototype: object | null;
+  descriptors: Map<PropertyKey, PropertyDescriptor>;
+}
+
+function createPolicyGateIntrinsicResidueGuard(): { restore: () => void } {
+  const snapshots = collectPolicyGateIntrinsicResidueTargets().map(
+    capturePolicyGateIntrinsicResidueSnapshot
+  );
+  return {
+    restore() {
+      const errors: unknown[] = [];
+      for (const snapshot of snapshots) {
+        try {
+          restorePolicyGateIntrinsicResidueSnapshot(snapshot);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length > 0) {
+        throw new Error("Policy gate evaluator could not restore intrinsic prototype state.");
+      }
+    }
+  };
+}
+
+function collectPolicyGateIntrinsicResidueTargets(): object[] {
+  const arrayIteratorPrototype = Object.getPrototypeOf([][Symbol.iterator]());
+  const candidates = [
+    Object,
+    Array,
+    Function,
+    Object.prototype,
+    Array.prototype,
+    Function.prototype,
+    Array.prototype.includes,
+    Array.prototype.map,
+    Array.prototype.push,
+    Array.prototype[Symbol.iterator],
+    arrayIteratorPrototype,
+    arrayIteratorPrototype
+      ? (arrayIteratorPrototype as { next?: unknown }).next
+      : undefined
+  ];
+  const targets: object[] = [];
+  const seen = new Set<object>();
+  for (const candidate of candidates) {
+    if ((typeof candidate === "object" && candidate !== null) || typeof candidate === "function") {
+      if (!seen.has(candidate)) {
+        seen.add(candidate);
+        targets.push(candidate);
+      }
+    }
+  }
+  return targets;
+}
+
+function capturePolicyGateIntrinsicResidueSnapshot(
+  target: object
+): PolicyGateIntrinsicResidueSnapshot {
+  return {
+    target,
+    prototype: Object.getPrototypeOf(target),
+    descriptors: new Map(
+      getPolicyGateIntrinsicOwnKeys(target).map((key) => [
+        key,
+        Object.getOwnPropertyDescriptor(target, key) as PropertyDescriptor
+      ])
+    )
+  };
+}
+
+function restorePolicyGateIntrinsicResidueSnapshot(
+  snapshot: PolicyGateIntrinsicResidueSnapshot
+): void {
+  const expectedKeys = new Set(snapshot.descriptors.keys());
+  for (const key of getPolicyGateIntrinsicOwnKeys(snapshot.target)) {
+    if (!expectedKeys.has(key)) {
+      delete (snapshot.target as Record<PropertyKey, unknown>)[key];
+    }
+  }
+
+  for (const [key, descriptor] of snapshot.descriptors) {
+    Object.defineProperty(snapshot.target, key, descriptor);
+  }
+
+  if (Object.getPrototypeOf(snapshot.target) !== snapshot.prototype) {
+    Object.setPrototypeOf(snapshot.target, snapshot.prototype);
+  }
+}
+
+function getPolicyGateIntrinsicOwnKeys(target: object): PropertyKey[] {
+  return [...Object.getOwnPropertyNames(target), ...Object.getOwnPropertySymbols(target)];
 }
 
 function clonePolicyGateInput(value: unknown): unknown {
