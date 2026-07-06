@@ -145,6 +145,7 @@ Must add/change:
 - Root `package.json` declares a fixed Bun `packageManager`.
 - Root Bun lockfile is committed and supports frozen install without drift.
 - Initial DependencyLock records package manager version, lockfile path and sha256, direct runtime/dev dependency versions, and four submodule commits.
+- Deterministic package-list validation under `scripts/dependency-lock/` derives direct external dependencies from root `bun.lock` workspace dependency sections, requires a non-empty DependencyLock `packages` array, and compares `name`, resolved `version`, `dependency_type`, and `source` without registry/network access.
 
 Risk packs considered:
 - Public API / CLI / script entry: not selected - no runtime entrypoint behavior changes.
@@ -167,7 +168,7 @@ Invariant Matrix:
 - Governing invariant: The initial DependencyLock must describe exactly the package-manager lockfile and submodule state inspected for this checkout, without changing source packages or submodules.
 - Source-of-truth identity/contract: `package.json#packageManager`, root `bun.lock` sha256, Dependency_Versioning_Policy §6, `.gitmodules`, `git submodule status`, and zero commit `13e25c1`.
 - Producers: Bun lockfile generation and DependencyLock record generation.
-- Validators/preflight: frozen install, lockfile sha check, DependencyLock JSON validation, `.gitmodules` parser check, submodule status check, zero diff/pin check.
+- Validators/preflight: frozen install, lockfile sha check, DependencyLock JSON validation, package-list validation against the root Bun lock graph, `.gitmodules` parser check, submodule status check, zero diff/pin check.
 - Storage/cache/query: committed root `bun.lock` and `dependency-lock.initial.json`; no runtime workspace state.
 - Public routes/entrypoints: none - #14 has no backend/API surface.
 - Frontend/downstream consumers: future release/readiness evidence consumes the DependencyLock file, not a runtime API.
@@ -175,6 +176,8 @@ Invariant Matrix:
 - Evidence/audit/readiness: PR evidence records frozen install, lockfile sha, submodule commits, zero diff, and clean package/submodule source status.
 - Regression rows:
   - Clean checkout with `bun@1.2.19` -> `bun install --frozen-lockfile` succeeds and `bun.lock` sha256 remains equal to DependencyLock.
+  - `node scripts/dependency-lock/validate.mjs` on clean checkout -> DependencyLock `packages` is non-empty and exactly matches the root Bun lock graph's direct external workspace dependencies by `name`, resolved `version`, `dependency_type`, and `source`.
+  - Negative package fixtures -> empty `packages`, deleting direct dependency `zod`, and changing the resolved `typescript` version all fail validation.
   - `.gitmodules` parse plus `git submodule status` -> four path/url entries exist and DependencyLock commits match SHUD, rSHUD, AutoSHUD, and zero with `dirty: false`.
   - `git -C zero rev-parse HEAD` and `git -C zero diff --quiet` -> zero remains `13e25c1` and source-clean.
   - `git status --short -- packages SHUD rSHUD AutoSHUD zero` -> empty, proving package and submodule source boundaries were not edited.
@@ -184,7 +187,7 @@ Non-goals:
 - Workspace/package initialization (#16), dependency upgrades, package source edits, submodule updates, DuckDB client selection, or CI frozen-install wiring beyond existing check coverage.
 
 Review focus:
-- DependencyLock schema fields, lockfile sha, packageManager version, submodule commits, dirty flags, and zero pin all match the inspected checkout.
+- DependencyLock schema fields, lockfile sha, packageManager version, package list, submodule commits, dirty flags, and zero pin all match the inspected checkout.
 - Frozen install produces no lockfile drift.
 - The PR contains only the #14 boundary files plus this workflow fixture update.
 

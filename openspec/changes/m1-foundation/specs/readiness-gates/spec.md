@@ -38,12 +38,17 @@ link check 脚本与 schema drift 检查 SHALL 入库 `scripts/` 并接入 CI；
 
 ### Requirement: 初始 DependencyLock 生成
 
-系统 SHALL 生成初始 DependencyLock 记录：四个 submodule（SHUD/rSHUD/AutoSHUD/zero）的 commit 与 dirty 状态、package manager/lockfile identity、关键运行时依赖版本。
+系统 SHALL 生成初始 DependencyLock 记录：四个 submodule（SHUD/rSHUD/AutoSHUD/zero）的 commit 与 dirty 状态、package manager/lockfile identity、关键运行时依赖版本。系统 SHALL 提供确定性校验脚本，从根 `bun.lock` workspace 直接依赖图推导非空外部依赖集合，并按 `name`、resolved `version`、`dependency_type`、`source` 精确验证 DependencyLock `packages`。
 
 #### Scenario: gitmodules 解析
 
 - **WHEN** 执行 `.gitmodules` path/url 解析检查与 `git submodule status`
 - **THEN** 四个 submodule 均返回 path/url，DependencyLock 中的 commit 与 `git submodule status` 一致，`dirty=false`，且 zero commit 为 `13e25c1`
+
+#### Scenario: DependencyLock package 列表校验
+
+- **WHEN** 执行 DependencyLock package-list 校验脚本
+- **THEN** `packages` 非空，且其 direct external dependency 条目与根 `bun.lock` workspace dependency sections 推导结果按 `name`、resolved `version`、`dependency_type`、`source` 完全一致；空列表、删除任一直连依赖、篡改 resolved version 的负例均失败
 
 #### Scenario: DependencyLock PR 边界
 

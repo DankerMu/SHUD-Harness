@@ -17,6 +17,8 @@
   - Evidence floor (#14):
     - `bun install --frozen-lockfile` succeeds and leaves root lockfile unchanged; lockfile sha256 equals DependencyLock `package_manager.lockfile_sha256`.
     - `.gitmodules` path/url parser check returns exactly SHUD/rSHUD/AutoSHUD/zero; DependencyLock commits match `git submodule status`.
+    - `node scripts/dependency-lock/validate.mjs` derives a non-empty direct external dependency set from root `bun.lock` workspace dependency sections and verifies DependencyLock `packages` exactly by `name`, resolved `version`, `dependency_type`, and `source`.
+    - `sh scripts/dependency-lock/self_test.sh` proves empty `packages`, a missing direct dependency, and a mismatched resolved version each fail validation.
     - DependencyLock records zero commit `13e25c1`, every submodule has `dirty: false`, and `git -C zero diff --quiet` passes.
     - `git status --short -- packages SHUD rSHUD AutoSHUD zero` is empty; PR changes stay inside root `package.json`, root lockfile, DependencyLock record, and workflow fixture.
     - Secret/token scan over the three lock artifacts reports no registry auth headers, API keys, or bearer tokens.
