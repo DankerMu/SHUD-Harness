@@ -262,6 +262,110 @@ describe("spawn profile subset policy rule", () => {
     }
   });
 
+  test("denies no-role malformed and over-budget explicit allowlists", () => {
+    const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
+    const tailSentinel = "tail-sentinel-that-must-not-appear";
+    const overCountTools = [
+      ...Array.from({ length: SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS }, () => "read"),
+      tailSentinel
+    ];
+    const overLengthToolId = `${"x".repeat(SPAWN_PROFILE_TOOL_ID_MAX_CHARS + 1)}${tailSentinel}`;
+
+    for (const input of [
+      { tools: "read" },
+      { tools: ["read", 1] },
+      { tools: [] },
+      { allowed_tools: "read" }
+    ]) {
+      const decision = evaluatePolicyGate(spawnToolCall(input), context);
+
+      expect(decision).toMatchObject({
+        decision: "deny",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        guardClass: "authority",
+        remediation: {
+          next_action: "adjust_scope"
+        }
+      });
+    }
+
+    expectSpawnBudgetDeny(
+      evaluatePolicyGate(spawnToolCall({ tools: overCountTools }), context),
+      "tool count",
+      tailSentinel
+    );
+    expectSpawnBudgetDeny(
+      evaluatePolicyGate(spawnToolCall({ allowed_tools: [overLengthToolId] }), context),
+      "per-tool id length",
+      tailSentinel
+    );
+  });
+
+  test("denies noncanonical role invalid and over-budget explicit allowlists", () => {
+    const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
+    const tailSentinel = "tail-sentinel-that-must-not-appear";
+    const overCountTools = [
+      ...Array.from({ length: SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS }, () => "read"),
+      tailSentinel
+    ];
+
+    for (const input of [
+      { role: "not_a_harness_role", tools: "read" },
+      { role: "not_a_harness_role", tools: [] },
+      { role: "not_a_harness_role", allowed_tools: ["read", 1] }
+    ]) {
+      const decision = evaluatePolicyGate(spawnToolCall(input), context);
+
+      expect(decision).toMatchObject({
+        decision: "deny",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        guardClass: "authority",
+        remediation: {
+          next_action: "adjust_scope"
+        }
+      });
+    }
+
+    expectSpawnBudgetDeny(
+      evaluatePolicyGate(
+        spawnToolCall({ role: "not_a_harness_role", tools: overCountTools }),
+        context
+      ),
+      "tool count",
+      tailSentinel
+    );
+  });
+
+  test("allows noncanonical role small valid explicit allowlists at this rule level", () => {
+    const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
+
+    expect(
+      evaluatePolicyGate(
+        spawnToolCall({ role: "not_a_harness_role", tools: ["read", "edit"] }),
+        context
+      )
+    ).toEqual({ decision: "allow" });
+
+    const normalized = normalizeSpawnAgentInput(
+      spawnToolCall({
+        role: "not_a_harness_role",
+        allowed_tools: [" read ", "edit", "read"]
+      })
+    );
+
+    expect(normalized).toMatchObject({
+      decision: "allow",
+      changed: true
+    });
+    if (normalized.decision === "allow") {
+      expect(normalized.input).toMatchObject({
+        role: "not_a_harness_role",
+        tools: ["read", "edit"]
+      });
+      expect(normalized.input).not.toHaveProperty("allowed_tools");
+    }
+  });
+
   test("allows unknown target roles at this rule level", () => {
     const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
 

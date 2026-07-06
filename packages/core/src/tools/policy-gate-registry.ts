@@ -267,14 +267,22 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     const startTime = Date.now();
     let decision: PolicyGateDecision;
     const role = this.options.role ?? resolveRole(toolContext);
-    const executionInput = clonePolicyGateInput(input);
-    const evaluatorInput = clonePolicyGateInput(executionInput);
+    const preparedInput = this.preparePolicyGateInput(toolContext, role, input);
+    if (preparedInput.decision === "deny") {
+      const durationMs = Date.now() - startTime;
+      return this.finalizePolicyGateResult(
+        toolContext,
+        buildPolicyGateDeniedResult(this.policyGateToolId, preparedInput),
+        durationMs
+      );
+    }
+
     try {
       const candidate = await this.options.evaluate(
         {
           toolId: this.policyGateToolId,
           role,
-          input: evaluatorInput,
+          input: preparedInput.evaluatorInput,
           workDir: toolContext.workDir
         },
         {
@@ -313,22 +321,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       );
     }
 
-    const normalizedInput = normalizeSpawnAgentInput({
-      toolId: this.policyGateToolId,
-      role,
-      input: executionInput,
-      workDir: toolContext.workDir
-    });
-    if (normalizedInput.decision === "deny") {
-      const durationMs = Date.now() - startTime;
-      return this.finalizePolicyGateResult(
-        toolContext,
-        buildPolicyGateDeniedResult(this.policyGateToolId, normalizedInput),
-        durationMs
-      );
-    }
-
-    return this.innerTool.run(toolContext, normalizedInput.input);
+    return this.innerTool.run(toolContext, preparedInput.executionInput);
   }
 
   protected async execute(): Promise<ToolResult> {
@@ -372,6 +365,43 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       success: result.success,
       outputSummary: result.outputSummary
     });
+  }
+
+  private preparePolicyGateInput(
+    toolContext: ToolContext,
+    role: HarnessRole | "unknown",
+    input: unknown
+  ):
+    | {
+        decision: "allow";
+        executionInput: unknown;
+        evaluatorInput: unknown;
+      }
+    | Extract<PolicyGateDecision, { decision: "deny" }> {
+    if (this.policyGateToolId === "spawn_agent") {
+      const normalizedInput = normalizeSpawnAgentInput({
+        toolId: this.policyGateToolId,
+        role,
+        input,
+        workDir: toolContext.workDir
+      });
+      if (normalizedInput.decision === "deny") {
+        return normalizedInput;
+      }
+
+      return {
+        decision: "allow",
+        executionInput: normalizedInput.input,
+        evaluatorInput: clonePolicyGateInput(normalizedInput.input)
+      };
+    }
+
+    const executionInput = clonePolicyGateInput(input);
+    return {
+      decision: "allow",
+      executionInput,
+      evaluatorInput: clonePolicyGateInput(executionInput)
+    };
   }
 }
 

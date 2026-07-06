@@ -125,26 +125,28 @@ export function evaluateSpawnProfileSubset(call: PolicyGateToolCall): PolicyRule
     return { decision: "allow" };
   }
 
-  const role = readTrimmedCanonicalRole(input.role);
-  if (!role) {
-    return { decision: "allow" };
-  }
-
+  const roleValue = readOwnDataValue(input, "role");
+  const role = roleValue.kind === "present" ? readTrimmedCanonicalRole(roleValue.value) : undefined;
+  const roleLabel = formatSpawnRoleLabel(roleValue);
   const allowlist = readSpawnAllowlist(input);
   if (allowlist.kind === "omitted") {
     return { decision: "allow" };
   }
 
   if (allowlist.kind === "invalid") {
-    return buildSpawnProfileMalformedDeny(role, allowlist.field);
+    return buildSpawnProfileMalformedDeny(roleLabel, allowlist.field);
   }
 
   if (allowlist.kind === "empty") {
-    return buildSpawnProfileEmptyDeny(role, allowlist.field);
+    return buildSpawnProfileEmptyDeny(roleLabel, allowlist.field);
   }
 
   if (allowlist.kind === "budget_exceeded") {
-    return buildSpawnProfileBudgetDeny(role, allowlist);
+    return buildSpawnProfileBudgetDeny(roleLabel, allowlist);
+  }
+
+  if (!role) {
+    return { decision: "allow" };
   }
 
   const requestedToolIds = allowlist.toolIds;
@@ -171,11 +173,6 @@ export function normalizeSpawnAgentInput(
     return { decision: "allow", input: call.input, changed: false };
   }
 
-  const role = readTrimmedCanonicalRole(input.role);
-  if (!role) {
-    return { decision: "allow", input: call.input, changed: false };
-  }
-
   const ruleDecision = evaluateSpawnProfileSubset(call);
   if (ruleDecision.decision === "deny") {
     return {
@@ -187,16 +184,33 @@ export function normalizeSpawnAgentInput(
     };
   }
 
-  const allowlist = readSpawnAllowlist(input);
-  const toolIds =
-    allowlist.kind === "valid" ? allowlist.toolIds : [...getRoleToolIds(role)];
+  const snapshot = snapshotSpawnInput(input);
+  if (snapshot.decision === "deny") {
+    return snapshot;
+  }
 
-  const normalizedInput: Record<string, unknown> & { tools: string[] } = {
-    ...input,
-    role,
-    tools: [...toolIds]
+  const roleValue = readOwnDataValue(input, "role");
+  const role = roleValue.kind === "present" ? readTrimmedCanonicalRole(roleValue.value) : undefined;
+  const allowlist = readSpawnAllowlist(input);
+  const hasExplicitAllowlist = allowlist.kind === "valid";
+  const toolIds = hasExplicitAllowlist
+    ? allowlist.toolIds
+    : role
+      ? [...getRoleToolIds(role)]
+      : undefined;
+
+  const normalizedInput: Record<string, unknown> = {
+    ...snapshot.input
   };
   delete normalizedInput.allowed_tools;
+  delete normalizedInput.tools;
+
+  if (role) {
+    normalizedInput.role = role;
+  }
+  if (toolIds) {
+    normalizedInput.tools = [...toolIds];
+  }
 
   return {
     decision: "allow",
@@ -210,6 +224,40 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
     return undefined;
   }
   return value as Record<string, unknown>;
+}
+
+type OwnDataValueRead =
+  | {
+      kind: "omitted";
+    }
+  | {
+      kind: "accessor";
+    }
+  | {
+      kind: "present";
+      value: unknown;
+    };
+
+function readOwnDataValue(input: Record<string, unknown>, key: string): OwnDataValueRead {
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(input, key);
+  } catch {
+    return { kind: "accessor" };
+  }
+
+  if (!descriptor) {
+    return { kind: "omitted" };
+  }
+
+  if (!("value" in descriptor)) {
+    return { kind: "accessor" };
+  }
+
+  return {
+    kind: "present",
+    value: descriptor.value
+  };
 }
 
 function readTrimmedCanonicalRole(value: unknown): HarnessRole | undefined {
@@ -247,15 +295,36 @@ type SpawnAllowlistRead =
     };
 
 function readSpawnAllowlist(input: Record<string, unknown>): SpawnAllowlistRead {
-  if (Object.prototype.hasOwnProperty.call(input, "tools")) {
-    return readSpawnAllowlistField("tools", input.tools);
+  const tools = readOwnDataValue(input, "tools");
+  const allowedTools = readOwnDataValue(input, "allowed_tools");
+
+  if (tools.kind === "omitted" && allowedTools.kind === "omitted") {
+    return { kind: "omitted" };
   }
 
-  if (Object.prototype.hasOwnProperty.call(input, "allowed_tools")) {
-    return readSpawnAllowlistField("allowed_tools", input.allowed_tools);
+  let toolsAllowlist: SpawnAllowlistRead | undefined;
+  if (tools.kind !== "omitted") {
+    toolsAllowlist =
+      tools.kind === "present"
+        ? readSpawnAllowlistField("tools", tools.value)
+        : { kind: "invalid", field: "tools" };
+    if (toolsAllowlist.kind !== "valid") {
+      return toolsAllowlist;
+    }
   }
 
-  return { kind: "omitted" };
+  let allowedToolsAllowlist: SpawnAllowlistRead | undefined;
+  if (allowedTools.kind !== "omitted") {
+    allowedToolsAllowlist =
+      allowedTools.kind === "present"
+        ? readSpawnAllowlistField("allowed_tools", allowedTools.value)
+        : { kind: "invalid", field: "allowed_tools" };
+    if (allowedToolsAllowlist.kind !== "valid") {
+      return allowedToolsAllowlist;
+    }
+  }
+
+  return toolsAllowlist ?? allowedToolsAllowlist ?? { kind: "omitted" };
 }
 
 function readSpawnAllowlistField(
@@ -266,23 +335,35 @@ function readSpawnAllowlistField(
     return { kind: "invalid", field };
   }
 
-  if (value.length > SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS) {
+  let length: number;
+  try {
+    length = value.length;
+  } catch {
+    return { kind: "invalid", field };
+  }
+  if (length > SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS) {
     return {
       kind: "budget_exceeded",
       field,
       budget: "item_count",
       limit: SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS,
-      actual: value.length
+      actual: length
     };
   }
 
-  if (value.length === 0) {
+  if (length === 0) {
     return { kind: "empty", field };
   }
 
   const rawToolIds: string[] = [];
   let totalCharacters = 0;
-  for (const entry of value) {
+  for (let index = 0; index < length; index += 1) {
+    let entry: unknown;
+    try {
+      entry = value[index];
+    } catch {
+      return { kind: "invalid", field };
+    }
     if (typeof entry !== "string") {
       return { kind: "invalid", field };
     }
@@ -320,12 +401,47 @@ function readSpawnAllowlistField(
   return { kind: "valid", field, toolIds: uniqueStrings(toolIds) };
 }
 
+function snapshotSpawnInput(
+  input: Record<string, unknown>
+):
+  | { decision: "allow"; input: Record<string, unknown> }
+  | Extract<PolicyGateDecision, { decision: "deny" }> {
+  let descriptors: PropertyDescriptorMap;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(input);
+  } catch {
+    return buildSpawnProfileUnsafeInputDeny("could not inspect own properties");
+  }
+
+  const snapshot: Record<string, unknown> = {};
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (!descriptor.enumerable || key === "tools" || key === "allowed_tools") {
+      continue;
+    }
+
+    if (!("value" in descriptor)) {
+      return buildSpawnProfileUnsafeInputDeny(`contains an accessor field: ${key}`);
+    }
+
+    snapshot[key] = descriptor.value;
+  }
+
+  try {
+    return {
+      decision: "allow",
+      input: structuredClone(snapshot) as Record<string, unknown>
+    };
+  } catch {
+    return buildSpawnProfileUnsafeInputDeny("contains non-cloneable enumerable data");
+  }
+}
+
 function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values)];
 }
 
 function buildSpawnProfileMalformedDeny(
-  role: HarnessRole,
+  role: string,
   field: "tools" | "allowed_tools"
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
@@ -341,7 +457,7 @@ function buildSpawnProfileMalformedDeny(
 }
 
 function buildSpawnProfileEmptyDeny(
-  role: HarnessRole,
+  role: string,
   field: "tools" | "allowed_tools"
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
@@ -357,7 +473,7 @@ function buildSpawnProfileEmptyDeny(
 }
 
 function buildSpawnProfileBudgetDeny(
-  role: HarnessRole,
+  role: string,
   allowlist: Extract<SpawnAllowlistRead, { kind: "budget_exceeded" }>
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   const budgetLabel = formatSpawnAllowlistBudget(allowlist);
@@ -371,6 +487,39 @@ function buildSpawnProfileBudgetDeny(
     },
     guardClass: "authority"
   };
+}
+
+function buildSpawnProfileUnsafeInputDeny(
+  detail: string
+): Extract<PolicyGateDecision, { decision: "deny" }> {
+  return {
+    decision: "deny",
+    ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+    reason: `spawn_agent input cannot be safely isolated before policy evaluation: ${detail}.`,
+    remediation: {
+      next_action: "adjust_scope",
+      hint: "Provide spawn_agent input as plain cloneable data with explicit tool ids when constraining sub-agent tools.",
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+    },
+    guardClass: "authority"
+  };
+}
+
+function formatSpawnRoleLabel(role: OwnDataValueRead): string {
+  if (role.kind !== "present" || typeof role.value !== "string") {
+    return "unspecified role";
+  }
+
+  const trimmedRole = role.value.trim();
+  if (trimmedRole.length === 0) {
+    return "unspecified role";
+  }
+
+  if (trimmedRole.length <= SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS) {
+    return trimmedRole;
+  }
+
+  return `${trimmedRole.slice(0, SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS - 3)}...`;
 }
 
 function formatSpawnAllowlistBudget(
