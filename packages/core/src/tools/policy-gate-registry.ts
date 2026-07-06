@@ -266,12 +266,15 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
   async run(toolContext: ToolContext, input: unknown): Promise<ToolResult> {
     const startTime = Date.now();
     let decision: PolicyGateDecision;
+    const role = this.options.role ?? resolveRole(toolContext);
+    const executionInput = clonePolicyGateInput(input);
+    const evaluatorInput = clonePolicyGateInput(executionInput);
     try {
       const candidate = await this.options.evaluate(
         {
           toolId: this.policyGateToolId,
-          role: this.options.role ?? resolveRole(toolContext),
-          input,
+          role,
+          input: evaluatorInput,
           workDir: toolContext.workDir
         },
         {
@@ -312,8 +315,8 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
 
     const normalizedInput = normalizeSpawnAgentInput({
       toolId: this.policyGateToolId,
-      role: this.options.role ?? resolveRole(toolContext),
-      input,
+      role,
+      input: executionInput,
       workDir: toolContext.workDir
     });
     if (normalizedInput.decision === "deny") {
@@ -536,6 +539,54 @@ function cloneFuseRules(rules: readonly FuseRule[]): FuseRule[] {
     pattern: rule.pattern,
     description: rule.description
   }));
+}
+
+function clonePolicyGateInput(value: unknown): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+
+  try {
+    return structuredClone(value);
+  } catch {
+    return clonePlainPolicyGateInput(value, new WeakMap<object, unknown>());
+  }
+}
+
+function clonePlainPolicyGateInput(
+  value: unknown,
+  seen: WeakMap<object, unknown>
+): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+
+  const objectValue = value as object;
+  const existing = seen.get(objectValue);
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  if (Array.isArray(value)) {
+    const clone: unknown[] = [];
+    seen.set(value, clone);
+    for (const entry of value) {
+      clone.push(clonePlainPolicyGateInput(entry, seen));
+    }
+    return clone;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return value;
+  }
+
+  const clone: Record<string, unknown> = {};
+  seen.set(objectValue, clone);
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    clone[key] = clonePlainPolicyGateInput(entry, seen);
+  }
+  return clone;
 }
 
 function resolveRole(toolContext: ToolContext): HarnessRole | "unknown" {

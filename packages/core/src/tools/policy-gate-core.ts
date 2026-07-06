@@ -22,6 +22,9 @@ export type PolicyGuardClass = z.infer<typeof PolicyGuardClassSchema>;
 export const SPAWN_PROFILE_SUBSET_RULE_ID = "spawn-profile-subset";
 export const SPAWN_PROFILE_SUBSET_POLICY_REF =
   "docs/02_ARCHITECTURE/Roles_and_Boundaries.md#0-canonical-agent-role-registry";
+export const SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS = 64;
+export const SPAWN_PROFILE_TOOL_ID_MAX_CHARS = 128;
+export const SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS = 4096;
 export const SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES = 5;
 export const SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS = 64;
 
@@ -122,8 +125,8 @@ export function evaluateSpawnProfileSubset(call: PolicyGateToolCall): PolicyRule
     return { decision: "allow" };
   }
 
-  const role = input.role;
-  if (!isCanonicalHarnessRole(role)) {
+  const role = readTrimmedCanonicalRole(input.role);
+  if (!role) {
     return { decision: "allow" };
   }
 
@@ -138,6 +141,10 @@ export function evaluateSpawnProfileSubset(call: PolicyGateToolCall): PolicyRule
 
   if (allowlist.kind === "empty") {
     return buildSpawnProfileEmptyDeny(role, allowlist.field);
+  }
+
+  if (allowlist.kind === "budget_exceeded") {
+    return buildSpawnProfileBudgetDeny(role, allowlist);
   }
 
   const requestedToolIds = allowlist.toolIds;
@@ -164,8 +171,8 @@ export function normalizeSpawnAgentInput(
     return { decision: "allow", input: call.input, changed: false };
   }
 
-  const role = input.role;
-  if (!isCanonicalHarnessRole(role)) {
+  const role = readTrimmedCanonicalRole(input.role);
+  if (!role) {
     return { decision: "allow", input: call.input, changed: false };
   }
 
@@ -186,6 +193,7 @@ export function normalizeSpawnAgentInput(
 
   const normalizedInput: Record<string, unknown> & { tools: string[] } = {
     ...input,
+    role,
     tools: [...toolIds]
   };
   delete normalizedInput.allowed_tools;
@@ -204,6 +212,15 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+function readTrimmedCanonicalRole(value: unknown): HarnessRole | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const role = value.trim();
+  return isCanonicalHarnessRole(role) ? role : undefined;
+}
+
 type SpawnAllowlistRead =
   | {
       kind: "omitted";
@@ -215,6 +232,13 @@ type SpawnAllowlistRead =
   | {
       kind: "empty";
       field: "tools" | "allowed_tools";
+    }
+  | {
+      kind: "budget_exceeded";
+      field: "tools" | "allowed_tools";
+      budget: "item_count" | "tool_id_length" | "total_characters";
+      limit: number;
+      actual: number;
     }
   | {
       kind: "valid";
@@ -242,15 +266,50 @@ function readSpawnAllowlistField(
     return { kind: "invalid", field };
   }
 
+  if (value.length > SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS) {
+    return {
+      kind: "budget_exceeded",
+      field,
+      budget: "item_count",
+      limit: SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS,
+      actual: value.length
+    };
+  }
+
   if (value.length === 0) {
     return { kind: "empty", field };
   }
 
-  const toolIds: string[] = [];
+  const rawToolIds: string[] = [];
+  let totalCharacters = 0;
   for (const entry of value) {
     if (typeof entry !== "string") {
       return { kind: "invalid", field };
     }
+    if (entry.length > SPAWN_PROFILE_TOOL_ID_MAX_CHARS) {
+      return {
+        kind: "budget_exceeded",
+        field,
+        budget: "tool_id_length",
+        limit: SPAWN_PROFILE_TOOL_ID_MAX_CHARS,
+        actual: entry.length
+      };
+    }
+    totalCharacters += entry.length;
+    if (totalCharacters > SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS) {
+      return {
+        kind: "budget_exceeded",
+        field,
+        budget: "total_characters",
+        limit: SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS,
+        actual: totalCharacters
+      };
+    }
+    rawToolIds.push(entry);
+  }
+
+  const toolIds: string[] = [];
+  for (const entry of rawToolIds) {
     const toolId = entry.trim();
     if (toolId.length === 0) {
       return { kind: "invalid", field };
@@ -295,6 +354,35 @@ function buildSpawnProfileEmptyDeny(
     },
     guardClass: "authority"
   };
+}
+
+function buildSpawnProfileBudgetDeny(
+  role: HarnessRole,
+  allowlist: Extract<SpawnAllowlistRead, { kind: "budget_exceeded" }>
+): Extract<PolicyRuleDecision, { decision: "deny" }> {
+  const budgetLabel = formatSpawnAllowlistBudget(allowlist);
+  return {
+    decision: "deny",
+    reason: `spawn_agent ${allowlist.field} for ${role} exceeds the ${budgetLabel} budget.`,
+    remediation: {
+      next_action: "adjust_scope",
+      hint: `Reduce ${allowlist.field} to fit within the ${budgetLabel} budget before spawning ${role}.`,
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+    },
+    guardClass: "authority"
+  };
+}
+
+function formatSpawnAllowlistBudget(
+  allowlist: Extract<SpawnAllowlistRead, { kind: "budget_exceeded" }>
+): string {
+  if (allowlist.budget === "item_count") {
+    return `tool count (${allowlist.actual}/${allowlist.limit})`;
+  }
+  if (allowlist.budget === "tool_id_length") {
+    return `per-tool id length (${allowlist.actual}/${allowlist.limit} characters)`;
+  }
+  return `total tool-id characters (${allowlist.actual}/${allowlist.limit})`;
 }
 
 function buildSpawnProfileExcessDeny(

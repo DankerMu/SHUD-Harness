@@ -220,7 +220,7 @@ Must preserve:
 
 Must add/change:
 - A reusable spawn profile subset rule rejects `spawn_agent` calls whose requested role's allowlist contains any tool id outside that role's canonical `ROLE_TOOL_MAP` entry.
-- Rejection payload uses `remediation.next_action=adjust_scope`, includes every excess tool id in the hint, and points `ref` to Roles_and_Boundaries §0.
+- Rejection payload uses `remediation.next_action=adjust_scope`, includes bounded representative excess tool examples plus total count in the hint, and points `ref` to Roles_and_Boundaries §0.
 - The rule is tagged with `guard_class=authority` in rule metadata or denial evidence available to this slice; if the #26 guard-class assembly lint is not yet merged, #20 leaves the concrete lint hook to #26 and records the marker on the rule.
 
 Risk packs considered:
@@ -255,9 +255,11 @@ Invariant Matrix:
   - Worker role spawn with a subset such as `tools=["read","sandbox.exec"]` -> allow at pure rule level.
   - Canonical-role spawn input without an explicit allowlist -> normalized before Zero execution to that role's #24 canonical profile, so Zero built-in or `.zero/roles` defaults cannot widen SHUD permissions.
   - Spec alias `allowed_tools` -> normalized to Zero's real `tools` input before execution; malformed or empty canonical-role allowlists -> fail closed with `remediation.next_action=adjust_scope`.
+  - Whitespace-padded canonical roles -> policy checks and normalized execution input use the same trimmed role identity as Zero, so `role="reviewer "` cannot bypass #24 role profiles.
   - Unknown target role -> allow at this rule level; role existence and non-canonical role schema handling remain owned by Zero spawn and future registry lint.
   - Custom runtime evaluators -> run after SHUD mandatory authority guards and may only add denials, not replace spawn profile subset enforcement.
-  - Oversized excess tool-id lists -> denial remains bounded, includes a small sample such as `edit` plus total count, and does not echo every untrusted id.
+  - Custom runtime evaluators receive an isolated policy input snapshot and cannot mutate the execution input after authority evaluation.
+  - Oversized or malformed tool-id lists -> processing fails closed under explicit count/length/total-character budgets; excess-tool denial remains bounded, includes a small sample such as `edit` plus total count, and does not echo every untrusted id.
   - `git -C zero diff --quiet` and HEAD `13e25c1` -> unchanged after implementation.
 
 Boundary-surface checklist:

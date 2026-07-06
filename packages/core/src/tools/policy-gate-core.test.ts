@@ -3,10 +3,13 @@ import {
   evaluatePolicyGate,
   normalizeSpawnAgentInput,
   PolicyGateRemediationSchema,
+  SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS,
+  SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS,
   SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
   SPAWN_PROFILE_SUBSET_POLICY_REF,
   SPAWN_PROFILE_SUBSET_RULE,
   SPAWN_PROFILE_SUBSET_RULE_ID,
+  SPAWN_PROFILE_TOOL_ID_MAX_CHARS,
   type PolicyGateToolCall
 } from "./policy-gate-core";
 import { getRoleToolIds } from "./role-tool-map";
@@ -133,6 +136,30 @@ describe("spawn profile subset policy rule", () => {
     }
   });
 
+  test("trims canonical spawn roles before applying the profile subset rule", () => {
+    const decision = evaluatePolicyGate(
+      spawnToolCall({ role: " reviewer ", tools: ["read", "bash"] }),
+      {
+        rules: [SPAWN_PROFILE_SUBSET_RULE]
+      }
+    );
+
+    expect(decision).toMatchObject({
+      decision: "deny",
+      ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+      guardClass: "authority",
+      remediation: {
+        next_action: "adjust_scope",
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      }
+    });
+    if (decision.decision === "deny") {
+      expect(decision.reason).toContain("reviewer");
+      expect(decision.reason).toContain("bash");
+      expect(decision.remediation.hint).toContain("bash");
+    }
+  });
+
   test("accepts the allowed_tools spec alias in pure policy tests", () => {
     const decision = evaluatePolicyGate(
       spawnToolCall({ role: "worker", allowed_tools: ["read", "edit"] }),
@@ -166,6 +193,21 @@ describe("spawn profile subset policy rule", () => {
 
   test("normalizes omitted canonical spawn tools to the role profile", () => {
     const normalized = normalizeSpawnAgentInput(spawnToolCall({ role: "reviewer" }));
+
+    expect(normalized).toMatchObject({
+      decision: "allow",
+      changed: true
+    });
+    if (normalized.decision === "allow") {
+      expect(normalized.input).toMatchObject({
+        role: "reviewer",
+        tools: [...getRoleToolIds("reviewer")]
+      });
+    }
+  });
+
+  test("normalizes padded canonical spawn roles before applying default tools", () => {
+    const normalized = normalizeSpawnAgentInput(spawnToolCall({ role: " reviewer " }));
 
     expect(normalized).toMatchObject({
       decision: "allow",
@@ -260,7 +302,78 @@ describe("spawn profile subset policy rule", () => {
       expect(combined.length).toBeLessThan(900);
     }
   });
+
+  test("denies over-count spawn tools before trim and dedup without echoing tail values", () => {
+    const tailSentinel = "tail-sentinel-that-must-not-appear";
+    const tools = [
+      ...Array.from({ length: SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS }, () => "read"),
+      tailSentinel
+    ];
+
+    const decision = evaluatePolicyGate(spawnToolCall({ role: "worker", tools }), {
+      rules: [SPAWN_PROFILE_SUBSET_RULE]
+    });
+
+    expectSpawnBudgetDeny(decision, "tool count", tailSentinel);
+  });
+
+  test("denies over-length allowed_tools before trim and dedup without echoing the value", () => {
+    const tailSentinel = "tail-sentinel-that-must-not-appear";
+    const overLengthToolId = `${"x".repeat(SPAWN_PROFILE_TOOL_ID_MAX_CHARS + 1)}${tailSentinel}`;
+
+    const decision = evaluatePolicyGate(
+      spawnToolCall({ role: "worker", allowed_tools: ["read", overLengthToolId] }),
+      {
+        rules: [SPAWN_PROFILE_SUBSET_RULE]
+      }
+    );
+
+    expectSpawnBudgetDeny(decision, "per-tool id length", tailSentinel);
+    if (decision.decision === "deny") {
+      expect(`${decision.reason}\n${decision.remediation.hint}`).not.toContain(overLengthToolId);
+    }
+  });
+
+  test("denies over-total-character spawn tools without echoing tail values", () => {
+    const tailSentinel = "tail-sentinel-that-must-not-appear";
+    const chunkLength = SPAWN_PROFILE_TOOL_ID_MAX_CHARS;
+    const toolCount = Math.ceil((SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS + 1) / chunkLength);
+    expect(toolCount).toBeLessThanOrEqual(SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS);
+    const tools = Array.from({ length: toolCount }, (_, index) =>
+      index === toolCount - 1
+        ? `${"z".repeat(chunkLength - tailSentinel.length)}${tailSentinel}`
+        : "x".repeat(chunkLength)
+    );
+
+    const decision = evaluatePolicyGate(spawnToolCall({ role: "worker", tools }), {
+      rules: [SPAWN_PROFILE_SUBSET_RULE]
+    });
+
+    expectSpawnBudgetDeny(decision, "total tool-id characters", tailSentinel);
+  });
 });
+
+function expectSpawnBudgetDeny(
+  decision: ReturnType<typeof evaluatePolicyGate>,
+  budgetLabel: string,
+  tailSentinel: string
+): void {
+  expect(decision).toMatchObject({
+    decision: "deny",
+    ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+    guardClass: "authority",
+    remediation: {
+      next_action: "adjust_scope",
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+    }
+  });
+  if (decision.decision === "deny") {
+    const combined = `${decision.reason}\n${decision.remediation.hint}`;
+    expect(combined).toContain(budgetLabel);
+    expect(combined).not.toContain(tailSentinel);
+    expect(combined.length).toBeLessThan(500);
+  }
+}
 
 function sampleToolCall(): PolicyGateToolCall {
   return {

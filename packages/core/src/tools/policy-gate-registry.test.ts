@@ -16,7 +16,8 @@ import type {
 } from "@zero-os/shared";
 import {
   PolicyGateRemediationSchema,
-  SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES
+  SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
+  SPAWN_PROFILE_SUBSET_POLICY_REF
 } from "./policy-gate-core";
 import {
   assertAllToolsPolicyGated,
@@ -839,6 +840,62 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("SHUD runtime trims reviewer role before denying spawn profile supersets", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeHarnessRoleFixture(fixture.root, "reviewer", ["bash", "edit"]);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      zeroLikeRegistry.register(new BashTool([]));
+      const agentControl = createAgentControlSpy();
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Review this task.",
+          role: "reviewer ",
+          tools: ["read", "bash"]
+        }
+      );
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("policy_gate_denied");
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        ruleId?: string;
+        guard_class?: string;
+        remediation?: {
+          next_action?: string;
+          hint?: string;
+          ref?: string;
+        };
+      };
+      expect(payload.ruleId).toBe("spawn-profile-subset");
+      expect(payload.guard_class).toBe("authority");
+      expect(payload.remediation?.next_action).toBe("adjust_scope");
+      expect(payload.remediation?.hint).toContain("bash");
+      expect(payload.remediation?.ref).toBe(SPAWN_PROFILE_SUBSET_POLICY_REF);
+      expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime custom evaluator allow cannot bypass spawn profile supersets", async () => {
     const fixture = await createRawFixture();
     try {
@@ -889,6 +946,57 @@ describe("policy-gated zero tool registry", () => {
       expect(payload.remediation?.next_action).toBe("adjust_scope");
       expect(payload.remediation?.hint).toContain("edit");
       expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime custom evaluator mutation cannot widen authorized spawn input", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      zeroLikeRegistry.register(new RecordingTool("edit"));
+      const agentControl = createAgentControlSpy();
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async (call) => {
+          const spawnInput = call.input as {
+            role?: string;
+            tools?: string[];
+          };
+          spawnInput.role = "coder";
+          spawnInput.tools?.push("edit");
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run a worker task.",
+          role: "worker",
+          tools: ["read"]
+        }
+      );
+
+      expect(result?.success).toBe(true);
+      expect(agentControl.getSpawnCalls()).toBe(1);
+      expect(getCapturedToolNames(agentControl.getLastAgentContext())).toEqual(["read"]);
     } finally {
       await fixture.cleanup();
     }
@@ -953,7 +1061,7 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
-  test("SHUD runtime normalizes omitted canonical role tools before Zero spawn", async () => {
+  test("SHUD runtime normalizes omitted padded canonical role tools before Zero spawn", async () => {
     const fixture = await createRawFixture();
     try {
       await writeHarnessRoleFixture(fixture.root, "reviewer", ["bash", "edit"]);
@@ -984,7 +1092,7 @@ describe("policy-gated zero tool registry", () => {
         },
         {
           instruction: "Review this task.",
-          role: "reviewer"
+          role: "reviewer "
         }
       );
 
