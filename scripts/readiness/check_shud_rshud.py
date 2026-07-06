@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-VERSION = "v0.2.1"
+VERSION = "v0.2.2"
 DEFAULT_OUTPUT_RELATIVE = Path("workspace/readiness/shud_rshud_readiness.json")
 CANONICAL_READINESS_DIR = Path("workspace/readiness")
 HERMETIC_GIT_CONFIG_ARGS = (
@@ -37,7 +37,22 @@ MIN_RSHUD_VERSION = "2.5.0"
 TEXT_TAIL_LIMIT = 12000
 COMMAND_TAIL_READ_BYTES = TEXT_TAIL_LIMIT * 4
 DEFAULT_MAKE_TIMEOUT_SECONDS = 300
+MAX_MAKE_TIMEOUT_SECONDS = 900
 MAKE_TIMEOUT_ENV = "SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS"
+SELF_TEST_TOOL_ALLOWANCE_DIR_ENV = "SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR"
+SELF_TEST_TOOL_ALLOWANCE_ENABLE_ENV = "SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE"
+SELF_TEST_TOOL_ALLOWANCE_TOKEN = "allow-fixture-tools"
+IDENTITY_GUARDED_TOOLS = {"git", "make", "Rscript"}
+TRUSTED_EXECUTABLE_PREFIXES = (
+    Path("/bin"),
+    Path("/usr/bin"),
+    Path("/usr/local/bin"),
+    Path("/usr/local/sbin"),
+    Path("/opt/homebrew/bin"),
+    Path("/opt/homebrew/sbin"),
+    Path("/Library/Apple/usr/bin"),
+    Path("/Library/Frameworks/R.framework/Resources/bin"),
+)
 UNSUPPORTED_MAKE_ENV_VARS = ("MAKEFLAGS", "GNUMAKEFLAGS", "MFLAGS", "MAKEFILES")
 MAKE_ENV_OVERRIDE_VARS = ("CC", "CXX", "SUNDIALS_DIR")
 SHUD_TARGET_ENV_OVERRIDE_VARS = (
@@ -78,6 +93,9 @@ REDACTED_ENV_VALUE = "[REDACTED]"
 ENV_VALUE_REDACTION_REASON = (
     "environment values may contain secrets or machine-local paths; readiness telemetry records names only"
 )
+BUILD_SOURCE_KEYS = ("MAIN_shud", "MAIN_OMP", "MAIN_DEBUG", "SRC", "SRC_H")
+BUILD_SOURCE_SUFFIXES = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
+MAX_BUILD_SOURCE_CANDIDATES = 10000
 
 
 class OutputSafetyError(Exception):
@@ -174,14 +192,183 @@ def sanitized_git_environment() -> dict[str, str]:
     return env
 
 
+def path_under_prefix(path: Path, prefix: Path) -> bool:
+    try:
+        path.relative_to(prefix)
+        return True
+    except ValueError:
+        return False
+
+
+def executable_path_trusted(path: Path) -> bool:
+    expanded = path.expanduser()
+    resolved = expanded.resolve(strict=False)
+    for prefix in TRUSTED_EXECUTABLE_PREFIXES:
+        resolved_prefix = prefix.resolve(strict=False)
+        if path_under_prefix(expanded, prefix) or path_under_prefix(resolved, resolved_prefix):
+            return True
+    return False
+
+
+def self_test_tool_allowance(path: Path) -> dict[str, Any]:
+    token = os.environ.get(SELF_TEST_TOOL_ALLOWANCE_ENABLE_ENV)
+    raw_dir = os.environ.get(SELF_TEST_TOOL_ALLOWANCE_DIR_ENV)
+    token_ok = token == SELF_TEST_TOOL_ALLOWANCE_TOKEN
+    dir_present = bool(raw_dir)
+    dir_matches = False
+    if raw_dir:
+        try:
+            dir_matches = path.parent.resolve(strict=False) == Path(raw_dir).expanduser().resolve(strict=False)
+        except OSError:
+            dir_matches = False
+    return {
+        "active": token_ok and dir_matches,
+        "enable_env": SELF_TEST_TOOL_ALLOWANCE_ENABLE_ENV,
+        "dir_env": SELF_TEST_TOOL_ALLOWANCE_DIR_ENV,
+        "token_present": token is not None,
+        "token_ok": token_ok,
+        "dir_present": dir_present,
+        "dir_matches_executable_parent": dir_matches,
+        "env_values_recorded": False,
+        "reason": (
+            "explicit self-test fixture executable allowance"
+            if token_ok and dir_matches
+            else "self-test executable allowance is absent or incomplete"
+        ),
+    }
+
+
+def executable_identity(command: str) -> dict[str, Any]:
+    command_path = Path(command)
+    explicit_path = command_path.name != command
+    discovered = str(command_path) if explicit_path else shutil.which(command)
+    identity: dict[str, Any] = {
+        "name": command_path.name,
+        "lookup": "explicit_path" if explicit_path else "PATH",
+        "path": discovered,
+        "realpath": None,
+        "exists": None,
+        "is_file": None,
+        "executable": None,
+        "trusted": False,
+        "self_test_allowance": None,
+        "ok": False,
+        "block_reason": None,
+        "selected_path": None,
+        "selected_realpath": None,
+        "selected_by_trusted_fallback": False,
+        "blocked_path": None,
+        "blocked_realpath": None,
+        "blocked_reason": None,
+        "trusted_fallback": None,
+        "executed_untrusted": False,
+    }
+    if not discovered:
+        identity["exists"] = False
+        identity["block_reason"] = "executable not found on PATH"
+        return identity
+
+    path = Path(discovered)
+    realpath = path.resolve(strict=False)
+    exists = path.exists()
+    is_file = path.is_file()
+    executable = os.access(path, os.X_OK)
+    trusted = executable_path_trusted(path)
+    allowance = self_test_tool_allowance(path)
+    ok = bool(exists and is_file and executable and (trusted or allowance["active"]))
+    identity.update(
+        {
+            "path": str(path),
+            "realpath": str(realpath),
+            "exists": exists,
+            "is_file": is_file,
+            "executable": executable,
+            "trusted": trusted,
+            "self_test_allowance": allowance,
+            "ok": ok,
+            "selected_path": str(path) if ok else None,
+            "selected_realpath": str(realpath) if ok else None,
+        }
+    )
+    if not exists:
+        identity["block_reason"] = "executable path does not exist"
+    elif not is_file:
+        identity["block_reason"] = "executable path is not a regular file"
+    elif not executable:
+        identity["block_reason"] = "executable path is not executable"
+    elif not ok:
+        identity["block_reason"] = "executable path is outside trusted tool prefixes and has no self-test allowance"
+    return identity
+
+
+def trusted_fallback_identity(command: str, blocked_path: str | None) -> dict[str, Any] | None:
+    if Path(command).name != command:
+        return None
+    blocked_resolved = Path(blocked_path).resolve(strict=False) if blocked_path else None
+    for directory in os.get_exec_path():
+        if not directory:
+            continue
+        candidate = Path(directory) / command
+        if not candidate.exists() or not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        if blocked_resolved and candidate.resolve(strict=False) == blocked_resolved:
+            continue
+        identity = executable_identity(str(candidate))
+        if identity["ok"] and identity["trusted"]:
+            identity["lookup"] = "trusted_fallback"
+            identity["selected_by_trusted_fallback"] = True
+            return identity
+    return None
+
+
+def apply_trusted_git_fallback(identity: dict[str, Any]) -> None:
+    if identity["ok"] or identity["name"] != "git":
+        return
+    fallback = trusted_fallback_identity(identity["name"], identity.get("path"))
+    if not fallback:
+        return
+    identity["blocked_path"] = identity.get("path")
+    identity["blocked_realpath"] = identity.get("realpath")
+    identity["blocked_reason"] = identity.get("block_reason")
+    identity["selected_path"] = fallback["selected_path"]
+    identity["selected_realpath"] = fallback["selected_realpath"]
+    identity["selected_by_trusted_fallback"] = True
+    identity["trusted_fallback"] = {
+        "path": fallback["path"],
+        "realpath": fallback["realpath"],
+        "trusted": fallback["trusted"],
+    }
+    identity["ok"] = True
+    identity["block_reason"] = None
+
+
+def command_identity_error(identity: dict[str, Any]) -> str:
+    path = identity.get("path") or identity.get("name")
+    reason = identity.get("block_reason") or "identity check failed"
+    return f"{identity.get('name')} executable identity is not trusted: {path}: {reason}"
+
+
 def run_command(
     args: list[str],
     cwd: Path | None = None,
     timeout: int | None = None,
     env: dict[str, str] | None = None,
+    allow_trusted_fallback_for_blocked_tool: bool = False,
 ) -> dict[str, Any]:
+    identity = executable_identity(args[0]) if args else None
+    execution_path = identity.get("selected_path") if identity else None
+    if (
+        identity
+        and not identity["ok"]
+        and allow_trusted_fallback_for_blocked_tool
+        and identity["name"] == "git"
+    ):
+        apply_trusted_git_fallback(identity)
+        execution_path = identity.get("selected_path")
+
     result: dict[str, Any] = {
         "command": args,
+        "executed_command": [execution_path, *args[1:]] if execution_path else None,
         "cwd": str(cwd) if cwd else None,
         "exit_code": None,
         "stdout_tail": "",
@@ -192,10 +379,19 @@ def run_command(
         "timed_out": False,
         "output_tail_limit_chars": TEXT_TAIL_LIMIT,
         "error": None,
+        "executable": identity,
     }
+    guarded_tool = bool(identity and identity.get("name") in IDENTITY_GUARDED_TOOLS)
+    if identity and guarded_tool and not identity["ok"] and not execution_path:
+        result["error"] = command_identity_error(identity)
+        return result
+    if identity and not identity["ok"] and not execution_path:
+        result["error"] = command_identity_error(identity)
+        return result
+
     try:
         process = subprocess.Popen(
-            args,
+            [execution_path, *args[1:]] if execution_path else args,
             cwd=str(cwd) if cwd else None,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -234,6 +430,7 @@ def run_git_command(cwd: Path, args: list[str], timeout: int = 20) -> dict[str, 
         ["git", *HERMETIC_GIT_CONFIG_ARGS, "-C", str(cwd), *args],
         timeout=timeout,
         env=sanitized_git_environment(),
+        allow_trusted_fallback_for_blocked_tool=True,
     )
 
 
@@ -618,6 +815,142 @@ def expand_make_path(value: str, env: dict[str, str]) -> str:
     return expanded
 
 
+def makefile_logical_lines(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    try:
+        physical_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    logical_lines: list[str] = []
+    current = ""
+    for raw_line in physical_lines:
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line and not current:
+            continue
+        if line.endswith("\\"):
+            current = f"{current}{line[:-1]} "
+            continue
+        logical = f"{current}{line}".strip()
+        current = ""
+        if logical:
+            logical_lines.append(logical)
+    if current.strip():
+        logical_lines.append(current.strip())
+    return logical_lines
+
+
+def parse_make_assignments(path: Path) -> dict[str, str]:
+    assignments: dict[str, str] = {}
+    pattern = re.compile(r"^\s*(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<operator>:=|\+=|\?=|=)\s*(?P<value>.*?)\s*$")
+    for line in makefile_logical_lines(path):
+        match = pattern.match(line)
+        if not match:
+            continue
+        key = match.group("key")
+        value = match.group("value").strip()
+        if match.group("operator") == "+=" and key in assignments:
+            assignments[key] = f"{assignments[key]} {value}".strip()
+        else:
+            assignments[key] = value
+    return assignments
+
+
+def expand_make_variables(value: str, assignments: dict[str, str], depth: int = 0) -> str:
+    if depth > 8:
+        return value
+
+    def replace_var(match: re.Match[str]) -> str:
+        name = match.group("paren") or match.group("brace") or ""
+        if name in assignments:
+            return expand_make_variables(assignments[name], assignments, depth + 1)
+        return os.environ.get(name, "")
+
+    return re.sub(r"\$\((?P<paren>[A-Za-z_][A-Za-z0-9_]*)\)|\$\{(?P<brace>[A-Za-z_][A-Za-z0-9_]*)\}", replace_var, value)
+
+
+def make_value_tokens(value: str) -> list[str]:
+    wildcard_pattern = re.compile(r"\$\(wildcard\s+([^)]+)\)")
+    value = wildcard_pattern.sub(r"\1", value)
+    try:
+        return shlex.split(value)
+    except ValueError:
+        return value.split()
+
+
+def build_source_specs(shud_dir: Path) -> list[dict[str, Any]]:
+    makefile = shud_dir / "Makefile"
+    assignments = parse_make_assignments(makefile)
+    specs: list[dict[str, Any]] = []
+    for key in BUILD_SOURCE_KEYS:
+        raw_value = assignments.get(key)
+        if not raw_value:
+            continue
+        expanded = expand_make_variables(raw_value, assignments)
+        for token in make_value_tokens(expanded):
+            if not token or token.startswith("-"):
+                continue
+            suffix = Path(token).suffix.lower()
+            has_glob = any(char in token for char in "*?[")
+            if not has_glob and suffix not in BUILD_SOURCE_SUFFIXES:
+                continue
+            token_path = Path(token)
+            if token_path.is_absolute():
+                continue
+            specs.append({"key": key, "pattern": token, "has_glob": has_glob})
+    return specs
+
+
+def ignored_build_source_scan(shud_dir: Path) -> dict[str, Any]:
+    specs = build_source_specs(shud_dir)
+    records: list[dict[str, Any]] = []
+    errors: list[str] = []
+    candidate_count = 0
+    for spec in specs:
+        pattern = spec["pattern"]
+        matches = sorted(shud_dir.glob(pattern), key=lambda candidate: candidate.as_posix())
+        candidate_count += len(matches)
+        if candidate_count > MAX_BUILD_SOURCE_CANDIDATES:
+            errors.append(
+                f"SHUD build source scan exceeded {MAX_BUILD_SOURCE_CANDIDATES} candidates; refusing readiness pass"
+            )
+            break
+        for path in matches:
+            if not path.is_file():
+                continue
+            try:
+                rel = path.resolve(strict=False).relative_to(shud_dir.resolve()).as_posix()
+            except ValueError:
+                continue
+            result = run_git_command(shud_dir, ["check-ignore", "-v", "--", rel])
+            if result["exit_code"] == 1:
+                continue
+            if result["exit_code"] != 0:
+                errors.append(f"SHUD build source ignore state could not be proven for {rel}: {command_failure_detail(result)}")
+                continue
+            verbose = parse_check_ignore_verbose(str(result.get("stdout_tail") or ""))
+            records.append(
+                {
+                    "path": rel,
+                    "spec": spec,
+                    "ignore": verbose,
+                    "command": result,
+                }
+            )
+    if records:
+        paths = ", ".join(record["path"] for record in records)
+        errors.append(f"SHUD build-glob source is ignored by git: {paths}")
+    return {
+        "ok": not errors,
+        "makefile": str(shud_dir / "Makefile"),
+        "specs": specs,
+        "candidate_count": candidate_count,
+        "candidate_limit": MAX_BUILD_SOURCE_CANDIDATES,
+        "ignored_sources": records,
+        "errors": errors,
+    }
+
+
 def collect_os() -> dict[str, Any]:
     info: dict[str, Any] = {
         "system": platform.system(),
@@ -899,19 +1232,59 @@ def command_failure_detail(result: dict[str, Any]) -> str:
     return detail.splitlines()[-1] if detail else "no detail"
 
 
-def make_timeout_seconds(notes: list[str]) -> int:
+def collect_tool_identity(errors: list[str]) -> dict[str, Any]:
+    tools = {name: executable_identity(name) for name in ("git", "make", "Rscript")}
+    apply_trusted_git_fallback(tools["git"])
+    for name, identity in tools.items():
+        if not identity["ok"]:
+            errors.append(command_identity_error(identity))
+    return tools
+
+
+def tool_identity_ok(tool_identity: dict[str, Any] | None, names: tuple[str, ...]) -> bool:
+    if not tool_identity:
+        return False
+    return all(bool(tool_identity.get(name, {}).get("ok")) for name in names)
+
+
+def make_timeout_policy(notes: list[str]) -> dict[str, Any]:
     raw_value = os.environ.get(MAKE_TIMEOUT_ENV)
+    policy: dict[str, Any] = {
+        "env_var": MAKE_TIMEOUT_ENV,
+        "raw_value": REDACTED_ENV_VALUE if raw_value else None,
+        "raw_value_redacted": bool(raw_value),
+        "raw_value_digits_only": bool(raw_value and raw_value.isdigit()),
+        "redaction_reason": ENV_VALUE_REDACTION_REASON if raw_value else None,
+        "default_seconds": DEFAULT_MAKE_TIMEOUT_SECONDS,
+        "max_seconds": MAX_MAKE_TIMEOUT_SECONDS,
+        "seconds": DEFAULT_MAKE_TIMEOUT_SECONDS,
+        "source": "default" if not raw_value else "environment",
+        "ok": True,
+        "reason": None,
+    }
     if not raw_value:
-        return DEFAULT_MAKE_TIMEOUT_SECONDS
+        return policy
     try:
         timeout = int(raw_value)
     except ValueError:
-        notes.append(f"Ignoring invalid {MAKE_TIMEOUT_ENV}={raw_value!r}; using default make timeout.")
-        return DEFAULT_MAKE_TIMEOUT_SECONDS
+        notes.append(f"Ignoring invalid {MAKE_TIMEOUT_ENV}; using default make timeout.")
+        policy["ok"] = False
+        policy["reason"] = "make timeout environment value is not an integer"
+        return policy
     if timeout <= 0:
-        notes.append(f"Ignoring non-positive {MAKE_TIMEOUT_ENV}={raw_value!r}; using default make timeout.")
-        return DEFAULT_MAKE_TIMEOUT_SECONDS
-    return timeout
+        notes.append(f"Ignoring non-positive {MAKE_TIMEOUT_ENV}; using default make timeout.")
+        policy["ok"] = False
+        policy["reason"] = "make timeout environment value is not positive"
+        return policy
+    if timeout > MAX_MAKE_TIMEOUT_SECONDS:
+        notes.append(
+            f"Rejecting {MAKE_TIMEOUT_ENV}; maximum supported make timeout is {MAX_MAKE_TIMEOUT_SECONDS}s."
+        )
+        policy["ok"] = False
+        policy["reason"] = "make timeout environment value exceeds maximum"
+        return policy
+    policy["seconds"] = timeout
+    return policy
 
 
 def redacted_environment_variable(name: str) -> dict[str, Any]:
@@ -1147,12 +1520,14 @@ def collect_shud(
     cleanup: bool,
     source_boundary_ok: bool,
     make_environment_guard: dict[str, Any] | None,
+    tool_identity: dict[str, Any] | None,
     errors: list[str],
     notes: list[str],
     incomplete_reasons: list[str],
 ) -> dict[str, Any]:
     shud_dir = repo_root / "SHUD"
-    timeout_seconds = make_timeout_seconds(notes)
+    timeout = make_timeout_policy(notes)
+    timeout_seconds = int(timeout["seconds"])
     shud: dict[str, Any] = {
         "path": str(shud_dir),
         "commit": None,
@@ -1162,6 +1537,7 @@ def collect_shud(
             "pre_clean": None,
             "command": ["make", "shud"],
             "timeout_seconds": timeout_seconds,
+            "timeout_policy": timeout,
             "exit_code": None,
             "result": None,
             "artifact": artifact_state(shud_dir / "shud"),
@@ -1190,6 +1566,19 @@ def collect_shud(
     if not source_boundary_ok:
         shud["build"]["blocked_before_make"] = True
         shud["build"]["block_reason"] = "source-boundary preflight did not pass"
+        shud["build"]["artifact_inventory_final"] = inventory_shud_artifacts(shud_dir)
+        return shud
+
+    if not timeout["ok"] and not skip_build:
+        errors.append(f"SHUD make timeout rejected: {timeout['reason']}")
+        shud["build"]["blocked_before_make"] = True
+        shud["build"]["block_reason"] = str(timeout["reason"])
+        shud["build"]["artifact_inventory_final"] = inventory_shud_artifacts(shud_dir)
+        return shud
+
+    if not tool_identity_ok(tool_identity, ("git", "make")) and not skip_build:
+        shud["build"]["blocked_before_make"] = True
+        shud["build"]["block_reason"] = "tool identity preflight did not pass"
         shud["build"]["artifact_inventory_final"] = inventory_shud_artifacts(shud_dir)
         return shud
 
@@ -1283,9 +1672,11 @@ def collect_source_boundary(repo_root: Path, errors: list[str], phase: str) -> d
     root_status = run_git_command(repo_root, [*status_args, "--", "SHUD", "rSHUD", "workspace"])
     shud_status = run_git_command(repo_root / "SHUD", status_args)
     rshud_status = run_git_command(repo_root / "rSHUD", status_args)
+    ignored_build_sources = ignored_build_source_scan(repo_root / "SHUD")
     append_status_errors("workspace/SHUD/rSHUD source boundary", root_status, boundary_errors)
     append_status_errors("SHUD checkout", shud_status, boundary_errors)
     append_status_errors("rSHUD checkout", rshud_status, boundary_errors)
+    boundary_errors.extend(ignored_build_sources["errors"])
     errors.extend(boundary_errors)
     return {
         "phase": phase,
@@ -1294,6 +1685,7 @@ def collect_source_boundary(repo_root: Path, errors: list[str], phase: str) -> d
         "repo_status_shud_rshud_workspace": root_status,
         "shud_status": shud_status,
         "rshud_status": rshud_status,
+        "ignored_build_sources": ignored_build_sources,
     }
 
 
@@ -1344,6 +1736,7 @@ def build_payload(repo_root: Path, output: Path, skip_build: bool, cleanup: bool
         },
         "os": collect_os(),
     }
+    payload["tool_identity"] = collect_tool_identity(errors)
     preflight = collect_source_boundary(repo_root, errors, "preflight")
     payload["source_boundary"] = {
         "preflight": preflight,
@@ -1367,6 +1760,7 @@ def build_payload(repo_root: Path, output: Path, skip_build: bool, cleanup: bool
         cleanup,
         source_boundary_ok,
         make_environment_guard,
+        payload.get("tool_identity"),
         errors,
         notes,
         incomplete_reasons,
@@ -1418,7 +1812,8 @@ def main(argv: list[str]) -> int:
 
     try:
         validate_output_write_scope()
-    except OutputSafetyError as exc:
+        validate_replacement_target(output)
+    except (OutputSafetyError, OSError) as exc:
         print(f"readiness output path rejected: {exc}", file=sys.stderr)
         return 2
 

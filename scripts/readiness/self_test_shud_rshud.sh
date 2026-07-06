@@ -7,6 +7,7 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 HELPER="$SCRIPT_DIR/check_shud_rshud.sh"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/shud-rshud-readiness-test.XXXXXX")
 REAL_GIT=$(command -v git)
+SELF_TEST_TOOL_ALLOWANCE_TOKEN=allow-fixture-tools
 
 git() {
   (
@@ -183,6 +184,10 @@ case "${FAKE_RSHUD_VERSION:-2.5.0}" in
     printf '%s\n' "there is no package called 'rSHUD'" >&2
     exit 1
     ;;
+  missing)
+    printf '%s\n' "Rscript command not found" >&2
+    exit 127
+    ;;
   noisy-stdout-low)
     printf '%s\n' "unrelated tool 9.9.9"
     printf '%s\n' "RSHUD_VERSION=2.4.9"
@@ -263,6 +268,12 @@ make_fixture() {
   cat > "$fixture/SHUD/Makefile" <<'EOF'
 SUNDIALS_DIR = $(HOME)/sundials
 CC = g++
+SRC_DIR = src
+MAIN_shud = ${SRC_DIR}/main.cpp
+MAIN_OMP = ${SRC_DIR}/main.cpp
+MAIN_DEBUG = ${SRC_DIR}/main.cpp
+SRC = ${SRC_DIR}/*.cpp
+SRC_H = ${SRC_DIR}/*.hpp
 TARGET_EXEC = ./shud
 TARGET_OMP = ./shud_omp
 TARGET_DEBUG = ./shud_debug
@@ -325,6 +336,13 @@ run_helper() {
   helper_fake_git_fail_status_code=${FAKE_GIT_FAIL_STATUS_CODE:-128}
   helper_fake_make_honor_target_omp_on_clean=${FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN:-}
   helper_preserve_make_env=${PRESERVE_MAKE_ENV:-}
+  helper_allow_self_test_tools=${ALLOW_SELF_TEST_TOOLS:-1}
+  helper_self_test_tool_dir=
+  helper_self_test_tool_token=
+  if [ "$helper_allow_self_test_tools" = "1" ]; then
+    helper_self_test_tool_dir="$TMP_ROOT/bin"
+    helper_self_test_tool_token="$SELF_TEST_TOOL_ALLOWANCE_TOKEN"
+  fi
   set +e
   if [ "$helper_preserve_make_env" = "1" ]; then
     export_make_environment
@@ -338,6 +356,8 @@ run_helper() {
       FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
       FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
       FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+      SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$helper_self_test_tool_dir" \
+      SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$helper_self_test_tool_token" \
       SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
       PATH="$TMP_ROOT/bin:$PATH" \
       HOME="$fixture/fake-home" \
@@ -355,6 +375,8 @@ run_helper() {
         FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
         FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
         FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+        SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$helper_self_test_tool_dir" \
+        SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$helper_self_test_tool_token" \
         SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
         PATH="$TMP_ROOT/bin:$PATH" \
         HOME="$fixture/fake-home" \
@@ -363,8 +385,8 @@ run_helper() {
   fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env helper_allow_self_test_tools helper_self_test_tool_dir helper_self_test_tool_token
   return "$helper_status"
 }
 
@@ -383,6 +405,13 @@ run_helper_default_output() {
   helper_fake_git_fail_status_code=${FAKE_GIT_FAIL_STATUS_CODE:-128}
   helper_fake_make_honor_target_omp_on_clean=${FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN:-}
   helper_preserve_make_env=${PRESERVE_MAKE_ENV:-}
+  helper_allow_self_test_tools=${ALLOW_SELF_TEST_TOOLS:-1}
+  helper_self_test_tool_dir=
+  helper_self_test_tool_token=
+  if [ "$helper_allow_self_test_tools" = "1" ]; then
+    helper_self_test_tool_dir="$TMP_ROOT/bin"
+    helper_self_test_tool_token="$SELF_TEST_TOOL_ALLOWANCE_TOKEN"
+  fi
   set +e
   if [ "$helper_preserve_make_env" = "1" ]; then
     export_make_environment
@@ -396,6 +425,8 @@ run_helper_default_output() {
       FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
       FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
       FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+      SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$helper_self_test_tool_dir" \
+      SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$helper_self_test_tool_token" \
       SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
       PATH="$TMP_ROOT/bin:$PATH" \
       HOME="$fixture/fake-home" \
@@ -413,6 +444,8 @@ run_helper_default_output() {
         FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
         FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
         FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+        SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$helper_self_test_tool_dir" \
+        SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$helper_self_test_tool_token" \
         SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
         PATH="$TMP_ROOT/bin:$PATH" \
         HOME="$fixture/fake-home" \
@@ -421,8 +454,8 @@ run_helper_default_output() {
   fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env helper_allow_self_test_tools helper_self_test_tool_dir helper_self_test_tool_token
   return "$helper_status"
 }
 
@@ -450,7 +483,7 @@ if expected_conclusion == "pass" and evidence_text:
     raise SystemExit(f"pass conclusion has errors/incomplete reasons: {evidence_text}")
 if data["rshud"]["submodule_description"].get("supporting_evidence_only") is not True:
     raise SystemExit("rSHUD DESCRIPTION is not marked supporting-only")
-if data["rshud"]["installed"].get("version") is None:
+if expected_conclusion == "pass" and data["rshud"]["installed"].get("version") is None:
     raise SystemExit("missing installed rSHUD version evidence")
 PY
 }
@@ -498,6 +531,8 @@ assert_json_expr "$pass_output" 'data["source_boundary"]["preflight"]["ok"] is T
 assert_json_expr "$pass_output" 'data["source_boundary"]["postflight_after_output_write"]["ok"] is True'
 assert_json_expr "$pass_output" 'data["make_environment_guard"]["ok"] is True'
 assert_json_expr "$pass_output" 'data["rshud"]["installed"]["parser"]["contract_ok"] is True'
+assert_json_expr "$pass_output" 'all(data["tool_identity"][name]["ok"] is True for name in ["git", "make", "Rscript"])'
+assert_json_expr "$pass_output" 'all(data["tool_identity"][name]["self_test_allowance"]["active"] is True for name in ["git", "make", "Rscript"])'
 assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["repo_owned"] is True'
 assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["source"]["relative_path"] == ".gitignore"'
 assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["source"]["tracked"] is True'
@@ -516,6 +551,52 @@ FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper_default_output "$defa
 assert_json "$default_wrapper_output" pass -
 assert_no_shud_artifacts "$default_wrapper_fixture"
 assert_json_expr "$default_wrapper_output" 'data["shud"]["build"]["cleanup_requested"] is True'
+
+fake_path_attack_fixture="$TMP_ROOT/fake-path-attack-fixture"
+make_fixture "$fake_path_attack_fixture"
+fake_path_attack_output="$fake_path_attack_fixture/workspace/readiness/fake_path_attack.json"
+fake_path_attack_marker="$fake_path_attack_fixture/make.marker"
+if ALLOW_SELF_TEST_TOOLS=0 FAKE_MAKE_MARKER="$fake_path_attack_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$fake_path_attack_fixture" "$fake_path_attack_output" >/dev/null 2>/dev/null; then
+  fail "fake PATH tool attack fixture unexpectedly returned zero"
+fi
+assert_json "$fake_path_attack_output" block "executable identity is not trusted"
+assert_json_expr "$fake_path_attack_output" 'data["tool_identity"]["git"]["ok"] is True'
+assert_json_expr "$fake_path_attack_output" 'data["tool_identity"]["git"]["selected_by_trusted_fallback"] is True'
+assert_json_expr "$fake_path_attack_output" 'data["tool_identity"]["git"]["blocked_path"] == data["tool_identity"]["git"]["path"]'
+assert_json_expr "$fake_path_attack_output" 'data["tool_identity"]["git"]["selected_path"] != data["tool_identity"]["git"]["path"]'
+assert_json_expr "$fake_path_attack_output" 'data["tool_identity"]["git"]["trusted"] is False'
+assert_json_expr "$fake_path_attack_output" 'data["tool_identity"]["git"]["trusted_fallback"]["trusted"] is True'
+assert_json_expr "$fake_path_attack_output" 'all(data["tool_identity"][name]["ok"] is False for name in ["make", "Rscript"])'
+assert_json_expr "$fake_path_attack_output" 'data["shud"]["build"]["blocked_before_make"] is True'
+assert_json_expr "$fake_path_attack_output" 'data["rshud"]["installed"]["ok"] is False'
+if [ -e "$fake_path_attack_marker" ]; then
+  fail "make executed for fake PATH attack fixture"
+fi
+
+hardlink_output_fixture="$TMP_ROOT/hardlink-output-fixture"
+make_fixture "$hardlink_output_fixture"
+mkdir -p "$hardlink_output_fixture/workspace/readiness"
+hardlink_output="$hardlink_output_fixture/workspace/readiness/hardlink_output.json"
+hardlink_peer="$hardlink_output_fixture/workspace/readiness/hardlink_peer.json"
+printf '%s\n' "original hardlink readiness content" > "$hardlink_output"
+ln "$hardlink_output" "$hardlink_peer"
+hardlink_before=$(cat "$hardlink_output")
+hardlink_stderr="$TMP_ROOT/hardlink-output.stderr"
+hardlink_marker="$hardlink_output_fixture/make.marker"
+if FAKE_MAKE_MARKER="$hardlink_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$hardlink_output_fixture" "$hardlink_output" >/dev/null 2>"$hardlink_stderr"; then
+  fail "hardlinked readiness output fixture unexpectedly returned zero"
+fi
+if ! grep -q "multiple hard links" "$hardlink_stderr"; then
+  cat "$hardlink_stderr" >&2
+  fail "hardlinked readiness output was not rejected"
+fi
+hardlink_after=$(cat "$hardlink_output")
+if [ "$hardlink_before" != "$hardlink_after" ]; then
+  fail "hardlinked readiness output content changed"
+fi
+if [ -e "$hardlink_marker" ]; then
+  fail "make executed for hardlinked readiness output fixture"
+fi
 
 untracked_gitignore_fixture="$TMP_ROOT/untracked-gitignore-fixture"
 make_fixture "$untracked_gitignore_fixture"
@@ -822,6 +903,24 @@ assert_json "$workspace_drift_output" block "workspace/SHUD/rSHUD source boundar
 assert_json_expr "$workspace_drift_output" '"workspace/readiness/visible.txt" in data["source_boundary"]["preflight"]["repo_status_shud_rshud_workspace"]["stdout_tail"]'
 assert_json_expr "$workspace_drift_output" '"--untracked-files=all" in data["source_boundary"]["preflight"]["repo_status_shud_rshud_workspace"]["command"]'
 
+hidden_build_source_fixture="$TMP_ROOT/hidden-build-source-fixture"
+make_fixture "$hidden_build_source_fixture"
+mkdir -p "$hidden_build_source_fixture/SHUD/src"
+printf '%s\n' "int hidden_build_source_fixture = 15;" > "$hidden_build_source_fixture/SHUD/src/hidden.cpp"
+printf '%s\n' 'src/*.cpp' >> "$hidden_build_source_fixture/SHUD/.git/info/exclude"
+hidden_build_source_output="$hidden_build_source_fixture/workspace/readiness/hidden_build_source.json"
+hidden_build_source_marker="$hidden_build_source_fixture/make.marker"
+if FAKE_MAKE_MARKER="$hidden_build_source_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$hidden_build_source_fixture" "$hidden_build_source_output" >/dev/null 2>/dev/null; then
+  fail ".git/info/exclude hidden build source fixture unexpectedly returned zero"
+fi
+assert_json "$hidden_build_source_output" block "SHUD build-glob source is ignored by git"
+assert_json_expr "$hidden_build_source_output" 'data["source_boundary"]["preflight"]["ignored_build_sources"]["ok"] is False'
+assert_json_expr "$hidden_build_source_output" 'any(record["path"] == "src/hidden.cpp" and ".git/info/exclude" in (record["ignore"]["source"] or "") for record in data["source_boundary"]["preflight"]["ignored_build_sources"]["ignored_sources"])'
+assert_json_expr "$hidden_build_source_output" 'data["shud"]["build"]["blocked_before_make"] is True'
+if [ -e "$hidden_build_source_marker" ]; then
+  fail "make executed for .git/info/exclude hidden build source fixture"
+fi
+
 status_failure_fixture="$TMP_ROOT/status-failure-fixture"
 make_fixture "$status_failure_fixture"
 status_failure_output="$TMP_ROOT/status-failure-output.json"
@@ -1033,6 +1132,21 @@ fi
 assert_json "$build_hang_output" block "SHUD build command failed"
 assert_json_expr "$build_hang_output" 'data["shud"]["build"]["result"]["timed_out"] is True'
 
+huge_timeout_fixture="$TMP_ROOT/huge-timeout-fixture"
+make_fixture "$huge_timeout_fixture"
+huge_timeout_output="$huge_timeout_fixture/workspace/readiness/huge_timeout.json"
+huge_timeout_marker="$huge_timeout_fixture/make.marker"
+if FAKE_MAKE_MARKER="$huge_timeout_marker" FAKE_MAKE_CLEAN_MODE=minimal FAKE_MAKE_MODE=hang SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS=999999999 FAKE_RSHUD_VERSION=2.5.0 run_helper "$huge_timeout_fixture" "$huge_timeout_output" >/dev/null 2>/dev/null; then
+  fail "huge make timeout fixture unexpectedly returned zero"
+fi
+assert_json "$huge_timeout_output" block "SHUD make timeout rejected"
+assert_json_expr "$huge_timeout_output" 'data["shud"]["build"]["timeout_policy"]["ok"] is False'
+assert_json_expr "$huge_timeout_output" 'data["shud"]["build"]["timeout_policy"]["reason"] == "make timeout environment value exceeds maximum"'
+assert_json_expr "$huge_timeout_output" 'data["shud"]["build"]["blocked_before_make"] is True'
+if [ -e "$huge_timeout_marker" ]; then
+  fail "make executed for huge make timeout fixture"
+fi
+
 large_output_fixture="$TMP_ROOT/large-output-fixture"
 make_fixture "$large_output_fixture"
 large_output_output="$large_output_fixture/workspace/readiness/large_output.json"
@@ -1073,6 +1187,19 @@ if FAKE_MAKE_CLEAN_MODE=minimal FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.4.9 
   fail "low rSHUD fixture unexpectedly returned zero"
 fi
 assert_json "$low_rshud_output" block "installed rSHUD version 2.4.9 is below required 2.5.0"
+
+rscript_failure_fixture="$TMP_ROOT/rscript-failure-fixture"
+make_fixture "$rscript_failure_fixture"
+rscript_failure_output="$rscript_failure_fixture/workspace/readiness/rscript_failure.json"
+if FAKE_MAKE_CLEAN_MODE=minimal FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=error run_helper "$rscript_failure_fixture" "$rscript_failure_output" >/dev/null 2>/dev/null; then
+  fail "Rscript failure fixture unexpectedly returned zero"
+fi
+assert_json "$rscript_failure_output" block "installed rSHUD version did not match the strict Rscript sentinel contract"
+assert_json_expr "$rscript_failure_output" 'data["rshud"]["installed"]["ok"] is False'
+assert_json_expr "$rscript_failure_output" 'data["rshud"]["installed"]["version"] is None'
+assert_json_expr "$rscript_failure_output" 'data["rshud"]["installed"]["meets_minimum"] is False'
+assert_json_expr "$rscript_failure_output" 'data["rshud"]["submodule_description"]["supporting_evidence_only"] is True'
+assert_json_expr "$rscript_failure_output" 'data["rshud"]["submodule_description"]["version"] == "2.5.0"'
 
 noisy_stdout_rshud_fixture="$TMP_ROOT/noisy-stdout-rshud-fixture"
 make_fixture "$noisy_stdout_rshud_fixture"
