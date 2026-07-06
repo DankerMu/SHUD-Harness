@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import ctypes
 import fnmatch
 import json
 import os
@@ -15,6 +16,7 @@ import shlex
 import shutil
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -103,6 +105,47 @@ ENV_VALUE_REDACTION_REASON = (
 BUILD_SOURCE_KEYS = ("MAIN_shud", "MAIN_OMP", "MAIN_DEBUG", "SRC", "SRC_H")
 BUILD_SOURCE_SUFFIXES = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
 MAX_BUILD_SOURCE_CANDIDATES = 10000
+WRAPPER_REALPATH_ENV = "SHUD_RSHUD_READINESS_WRAPPER_REALPATH"
+PYTHON_REALPATH_ENV = "SHUD_RSHUD_READINESS_PYTHON_REALPATH"
+WRAPPER_PARENT_PID_ENV = "SHUD_RSHUD_READINESS_WRAPPER_PARENT_PID"
+PYTHON_ISOLATED_ENV = "SHUD_RSHUD_READINESS_PYTHON_ISOLATED"
+PYTHON_IMPORT_ENV_SCRUBBED_ENV = "SHUD_RSHUD_READINESS_PYTHON_IMPORT_ENV_SCRUBBED"
+PYTHON_IMPORT_ENV_VARS = (
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PYTHONUSERBASE",
+    "PYTHONBREAKPOINT",
+)
+TRUSTED_MAKE_RECIPE_PATH_DIRS = (
+    Path("/usr/bin"),
+    Path("/bin"),
+    Path("/usr/sbin"),
+    Path("/sbin"),
+    Path("/usr/local/bin"),
+    Path("/usr/local/sbin"),
+    Path("/opt/homebrew/bin"),
+    Path("/opt/homebrew/sbin"),
+    Path("/Library/Apple/usr/bin"),
+    Path("/Library/Developer/CommandLineTools/usr/bin"),
+    Path("/Applications/Xcode.app/Contents/Developer/usr/bin"),
+)
+TRUSTED_WRAPPER_PARENT_SHELL_REALPATHS = (
+    Path("/bin/sh"),
+    Path("/usr/bin/sh"),
+    Path("/bin/bash"),
+    Path("/usr/bin/bash"),
+    Path("/bin/zsh"),
+    Path("/usr/bin/zsh"),
+    Path("/bin/dash"),
+    Path("/usr/bin/dash"),
+)
+RUNTIME_AUTHORITY_REASON = (
+    "trusted wrapper runtime identity is missing or incomplete; direct Python evidence is not consumable."
+)
+EXTERNAL_OUTPUT_REASON = (
+    "repo-external readiness output is debug/fixture evidence only and not a consumable readiness pass."
+)
 
 
 class OutputSafetyError(Exception):
@@ -688,6 +731,34 @@ def output_git_guard(repo_root: Path, output: Path) -> dict[str, Any]:
     }
 
 
+def output_consumption_boundary(repo_root: Path, output: Path) -> dict[str, Any]:
+    repo_resolved = repo_root.resolve()
+    output_resolved = output.resolve(strict=False)
+    try:
+        rel = output_resolved.relative_to(repo_resolved)
+    except ValueError:
+        return {
+            "ready_for_consumption": False,
+            "inside_repo": False,
+            "relative_path": None,
+            "required_directory": CANONICAL_READINESS_DIR.as_posix(),
+            "reason": EXTERNAL_OUTPUT_REASON,
+        }
+
+    repo_bound = len(rel.parts) >= 3 and rel.parts[0] == "workspace" and rel.parts[1] == "readiness"
+    return {
+        "ready_for_consumption": repo_bound,
+        "inside_repo": True,
+        "relative_path": rel.as_posix(),
+        "required_directory": CANONICAL_READINESS_DIR.as_posix(),
+        "reason": None if repo_bound else f"repo output must be under {CANONICAL_READINESS_DIR.as_posix()}",
+    }
+
+
+def output_resolves_inside_repo(repo_root: Path, output: Path) -> bool:
+    return is_relative_to(output.resolve(strict=False), repo_root.resolve())
+
+
 def temp_roots() -> tuple[Path, ...]:
     roots: list[Path] = []
     for raw in (tempfile.gettempdir(), os.environ.get("TMPDIR")):
@@ -911,16 +982,53 @@ def build_source_specs(shud_dir: Path) -> list[dict[str, Any]]:
     return specs
 
 
+def bounded_glob_matches(shud_dir: Path, pattern: str, remaining: int) -> tuple[list[Path], int, dict[str, Any] | None]:
+    if remaining <= 0:
+        return [], 0, {
+            "pattern": pattern,
+            "candidate_limit": MAX_BUILD_SOURCE_CANDIDATES,
+            "candidate_count_lower_bound": MAX_BUILD_SOURCE_CANDIDATES,
+            "recursive_pattern": "**" in pattern,
+            "reason": "candidate limit already exhausted before this pattern was evaluated",
+            "materialized_all_candidates": False,
+        }
+
+    matches: list[Path] = []
+    scanned = 0
+    for candidate in shud_dir.glob(pattern):
+        scanned += 1
+        if scanned > remaining:
+            return matches, scanned, {
+                "pattern": pattern,
+                "candidate_limit": MAX_BUILD_SOURCE_CANDIDATES,
+                "candidate_count_lower_bound": MAX_BUILD_SOURCE_CANDIDATES + 1,
+                "recursive_pattern": "**" in pattern,
+                "reason": "candidate limit exceeded before sorting or storing all glob matches",
+                "materialized_all_candidates": False,
+            }
+        matches.append(candidate)
+    return sorted(matches, key=lambda candidate: candidate.as_posix()), scanned, None
+
+
 def ignored_build_source_scan(shud_dir: Path) -> dict[str, Any]:
     specs = build_source_specs(shud_dir)
     records: list[dict[str, Any]] = []
     errors: list[str] = []
+    scan_blocks: list[dict[str, Any]] = []
     candidate_count = 0
     for spec in specs:
         pattern = spec["pattern"]
-        matches = sorted(shud_dir.glob(pattern), key=lambda candidate: candidate.as_posix())
-        candidate_count += len(matches)
-        if candidate_count > MAX_BUILD_SOURCE_CANDIDATES:
+        matches, scanned_count, scan_block = bounded_glob_matches(
+            shud_dir,
+            pattern,
+            MAX_BUILD_SOURCE_CANDIDATES - candidate_count,
+        )
+        candidate_count += scanned_count
+        if scan_block:
+            scan_block["spec"] = spec
+            scan_block["candidate_count_before_pattern"] = candidate_count - scanned_count
+            scan_block["candidate_count_after_stop"] = candidate_count
+            scan_blocks.append(scan_block)
             errors.append(
                 f"SHUD build source scan exceeded {MAX_BUILD_SOURCE_CANDIDATES} candidates; refusing readiness pass"
             )
@@ -956,6 +1064,8 @@ def ignored_build_source_scan(shud_dir: Path) -> dict[str, Any]:
         "specs": specs,
         "candidate_count": candidate_count,
         "candidate_limit": MAX_BUILD_SOURCE_CANDIDATES,
+        "scan_blocks": scan_blocks,
+        "materialized_all_candidates": not scan_blocks,
         "ignored_sources": records,
         "errors": errors,
     }
@@ -1380,7 +1490,14 @@ def collect_make_environment_guard(shud_dir: Path, skip_build: bool, errors: lis
 
 
 def run_make(shud_dir: Path, target: str, timeout_seconds: int) -> dict[str, Any]:
-    return run_command(["make", target], cwd=shud_dir, timeout=timeout_seconds)
+    result = run_command(
+        ["make", target],
+        cwd=shud_dir,
+        timeout=timeout_seconds,
+        env=sanitized_make_environment(),
+    )
+    result["recipe_environment"] = make_recipe_environment_record()
+    return result
 
 
 def git_path_bool(git_dir: Path, args: list[str]) -> tuple[bool | None, str | None]:
@@ -1548,6 +1665,7 @@ def collect_shud(
             "command": ["make", "shud"],
             "timeout_seconds": timeout_seconds,
             "timeout_policy": timeout,
+            "recipe_environment": make_recipe_environment_record(),
             "exit_code": None,
             "result": None,
             "artifact": artifact_state(shud_dir / "shud"),
@@ -1721,6 +1839,361 @@ def self_test_fixture_marker() -> dict[str, Any]:
     }
 
 
+def process_command_line(pid: int | None) -> dict[str, Any]:
+    if pid is None:
+        return {"ok": False, "pid": None, "command": None, "error": "missing pid"}
+    for ps_path in (Path("/bin/ps"), Path("/usr/bin/ps")):
+        if not ps_path.is_file():
+            continue
+        try:
+            result = subprocess.run(
+                [str(ps_path), "-p", str(pid), "-o", "command="],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=2,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "pid": pid, "command": None, "error": str(exc)}
+        command = result.stdout.strip()
+        if result.returncode == 0 and command:
+            return {
+                "ok": True,
+                "pid": pid,
+                "command": command,
+                "error": None,
+                "ps_path": str(ps_path),
+            }
+        return {
+            "ok": False,
+            "pid": pid,
+            "command": command or None,
+            "error": result.stderr.strip() or f"ps exited {result.returncode}",
+            "ps_path": str(ps_path),
+        }
+    return {"ok": False, "pid": pid, "command": None, "error": "no trusted ps executable found"}
+
+
+def linux_process_raw_identity(pid: int) -> dict[str, Any] | None:
+    proc_dir = Path("/proc") / str(pid)
+    cmdline_path = proc_dir / "cmdline"
+    exe_path = proc_dir / "exe"
+    if not cmdline_path.exists():
+        return None
+    try:
+        raw = cmdline_path.read_bytes()
+        argv = [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
+        executable = exe_path.resolve(strict=False) if exe_path.exists() else None
+    except OSError as exc:
+        return {"ok": False, "source": "procfs", "argv": [], "executable": None, "error": str(exc)}
+    return {
+        "ok": bool(argv),
+        "source": "procfs",
+        "argv": argv,
+        "executable": str(executable) if executable else None,
+        "error": None if argv else "empty process argv",
+    }
+
+
+def darwin_process_raw_identity(pid: int) -> dict[str, Any] | None:
+    if platform.system() != "Darwin":
+        return None
+    try:
+        arg_max = int(os.sysconf("SC_ARG_MAX"))
+    except (OSError, ValueError):
+        arg_max = 262144
+    libc = ctypes.CDLL(None, use_errno=True)
+    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
+    buf = ctypes.create_string_buffer(arg_max)
+    size = ctypes.c_size_t(arg_max)
+    if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+        err = ctypes.get_errno()
+        return {
+            "ok": False,
+            "source": "sysctl(KERN_PROCARGS2)",
+            "argv": [],
+            "executable": None,
+            "error": os.strerror(err),
+        }
+    data = bytes(buf.raw[: size.value])
+    if len(data) < 4:
+        return {
+            "ok": False,
+            "source": "sysctl(KERN_PROCARGS2)",
+            "argv": [],
+            "executable": None,
+            "error": "process args buffer too small",
+        }
+    argc = struct.unpack_from("i", data, 0)[0]
+    offset = 4
+    executable = None
+    end = data.find(b"\0", offset)
+    if end >= 0:
+        executable = data[offset:end].decode("utf-8", errors="replace")
+        offset = end
+    while offset < len(data) and data[offset] == 0:
+        offset += 1
+    argv: list[str] = []
+    for _ in range(max(argc, 0)):
+        if offset >= len(data):
+            break
+        end = data.find(b"\0", offset)
+        if end < 0:
+            break
+        argv.append(data[offset:end].decode("utf-8", errors="replace"))
+        offset = end + 1
+    return {
+        "ok": bool(argv),
+        "source": "sysctl(KERN_PROCARGS2)",
+        "argv": argv,
+        "executable": executable,
+        "error": None if argv else "empty process argv",
+    }
+
+
+def process_raw_identity(pid: int | None) -> dict[str, Any]:
+    display = process_command_line(pid)
+    if pid is None:
+        return {
+            "ok": False,
+            "pid": None,
+            "display": display,
+            "argv": [],
+            "executable": None,
+            "executable_realpath": None,
+            "trusted_shell": False,
+            "error": "missing pid",
+        }
+    identity = linux_process_raw_identity(pid) or darwin_process_raw_identity(pid)
+    if identity is None:
+        return {
+            "ok": False,
+            "pid": pid,
+            "display": display,
+            "argv": [],
+            "executable": None,
+            "executable_realpath": None,
+            "trusted_shell": False,
+            "error": "raw process argv is unavailable on this platform",
+        }
+    executable = identity.get("executable")
+    executable_realpath = str(Path(str(executable)).resolve(strict=False)) if executable else None
+    trusted_shell = bool(
+        executable_realpath
+        and any(
+            Path(executable_realpath) == trusted.expanduser().resolve(strict=False)
+            for trusted in TRUSTED_WRAPPER_PARENT_SHELL_REALPATHS
+        )
+    )
+    return {
+        "ok": bool(identity.get("ok")) and trusted_shell,
+        "pid": pid,
+        "display": display,
+        "source": identity.get("source"),
+        "argv": identity.get("argv", []),
+        "executable": executable,
+        "executable_realpath": executable_realpath,
+        "trusted_shell": trusted_shell,
+        "error": None
+        if identity.get("ok") and trusted_shell
+        else identity.get("error") or "parent executable is not a trusted shell",
+    }
+
+
+def command_references_wrapper(argv: list[str] | None, expected_wrapper: Path) -> dict[str, Any]:
+    if not argv:
+        return {
+            "matches_expected": False,
+            "candidate": None,
+            "candidate_realpath": None,
+            "error": "missing parent argv",
+        }
+    candidate_token = None
+    if argv:
+        launcher_token = argv[0]
+        if any(char.isspace() for char in launcher_token):
+            return {
+                "matches_expected": False,
+                "candidate": launcher_token,
+                "candidate_realpath": None,
+                "error": "parent shell argv0 contains whitespace and is not trusted",
+            }
+        launcher_name = Path(launcher_token).name
+        if launcher_name in {"sh", "bash", "zsh", "dash"}:
+            index = 1
+            if index < len(argv) and argv[index] == "--":
+                index += 1
+            elif index < len(argv) and argv[index].startswith("-"):
+                return {
+                    "matches_expected": False,
+                    "candidate": argv[index],
+                    "candidate_realpath": None,
+                    "error": "parent shell options are not accepted for wrapper authority",
+                }
+            if index < len(argv):
+                candidate_token = argv[index]
+        else:
+            return {
+                "matches_expected": False,
+                "candidate": launcher_token,
+                "candidate_realpath": None,
+                "error": "parent command is not a shell executing the trusted wrapper script",
+            }
+    if candidate_token:
+        token_path = Path(candidate_token)
+        if token_path.name == expected_wrapper.name:
+            candidate_path = token_path if token_path.is_absolute() else Path.cwd() / token_path
+            candidate_realpath = candidate_path.expanduser().resolve(strict=False)
+            if candidate_realpath == expected_wrapper.resolve(strict=False):
+                return {
+                    "matches_expected": True,
+                    "candidate": candidate_token,
+                    "candidate_realpath": str(candidate_realpath),
+                    "error": None,
+                }
+    return {
+        "matches_expected": False,
+        "candidate": candidate_token,
+        "candidate_realpath": None,
+        "error": "parent command does not reference the trusted wrapper path",
+    }
+
+
+def runtime_authority(repo_root: Path) -> dict[str, Any]:
+    repo_root_realpath = repo_root.resolve(strict=False)
+    expected_helper = (repo_root_realpath / "scripts" / "readiness" / "check_shud_rshud.py").resolve(
+        strict=False
+    )
+    expected_wrapper = (repo_root_realpath / "scripts" / "readiness" / "check_shud_rshud.sh").resolve(
+        strict=False
+    )
+    helper_realpath = Path(__file__).resolve(strict=False)
+    wrapper_raw = os.environ.get(WRAPPER_REALPATH_ENV)
+    python_raw = os.environ.get(PYTHON_REALPATH_ENV)
+    wrapper_pid_raw = os.environ.get(WRAPPER_PARENT_PID_ENV)
+    wrapper_realpath = Path(wrapper_raw).expanduser().resolve(strict=False) if wrapper_raw else None
+    selected_python_realpath = Path(python_raw).expanduser().resolve(strict=False) if python_raw else None
+    actual_python_realpath = Path(sys.executable).resolve(strict=False)
+
+    try:
+        wrapper_pid = int(wrapper_pid_raw) if wrapper_pid_raw else None
+    except ValueError:
+        wrapper_pid = None
+
+    python_import_environment = {
+        name: {
+            "present": name in os.environ,
+            "value_recorded": False,
+            "redaction_reason": ENV_VALUE_REDACTION_REASON if name in os.environ else None,
+        }
+        for name in PYTHON_IMPORT_ENV_VARS
+    }
+    import_env_absent = not any(item["present"] for item in python_import_environment.values())
+    isolated_ok = bool(getattr(sys.flags, "isolated", 0))
+    ignore_environment_ok = bool(getattr(sys.flags, "ignore_environment", 0))
+    no_user_site_ok = bool(getattr(sys.flags, "no_user_site", 0))
+    helper_matches_expected = helper_realpath == expected_helper
+    wrapper_matches_expected = bool(wrapper_realpath and wrapper_realpath == expected_wrapper.resolve(strict=False))
+    selected_python_matches_actual = bool(
+        selected_python_realpath and selected_python_realpath == actual_python_realpath
+    )
+    parent_pid = os.getppid()
+    wrapper_pid_matches_parent = wrapper_pid == parent_pid
+    parent_process = process_raw_identity(parent_pid)
+    parent_wrapper_reference = command_references_wrapper(
+        parent_process.get("argv") if isinstance(parent_process.get("argv"), list) else [],
+        expected_wrapper,
+    )
+    import_env_scrubbed = (
+        os.environ.get(PYTHON_IMPORT_ENV_SCRUBBED_ENV) == "1"
+        and os.environ.get(PYTHON_ISOLATED_ENV) == "1"
+        and import_env_absent
+    )
+
+    errors: list[str] = []
+    if not helper_matches_expected:
+        errors.append("executing helper realpath is not the canonical repo readiness helper")
+    if not wrapper_matches_expected:
+        errors.append("wrapper realpath was not produced by scripts/readiness/check_shud_rshud.sh")
+    if not selected_python_matches_actual:
+        errors.append("selected Python realpath does not match the executing interpreter")
+    if not wrapper_pid_matches_parent:
+        errors.append("wrapper parent pid does not match the Python parent process")
+    if not parent_process.get("ok") or not parent_wrapper_reference["matches_expected"]:
+        errors.append("Python parent process is not the trusted wrapper script")
+    if not isolated_ok or not ignore_environment_ok or not no_user_site_ok:
+        errors.append("Python interpreter is not running in isolated import mode")
+    if not import_env_scrubbed:
+        errors.append("Python import environment was not scrubbed by the wrapper")
+
+    return {
+        "ready_for_consumption": not errors,
+        "reason": None if not errors else RUNTIME_AUTHORITY_REASON,
+        "errors": errors,
+        "helper": {
+            "expected_realpath": str(expected_helper),
+            "actual_realpath": str(helper_realpath),
+            "matches_expected": helper_matches_expected,
+            "exists": helper_realpath.is_file(),
+            "expected_exists": expected_helper.is_file(),
+        },
+        "wrapper": {
+            "env_var": WRAPPER_REALPATH_ENV,
+            "realpath": str(wrapper_realpath) if wrapper_realpath else None,
+            "expected_realpath": str(expected_wrapper.resolve(strict=False)),
+            "matches_expected": wrapper_matches_expected,
+            "exists": wrapper_realpath.is_file() if wrapper_realpath else False,
+        },
+        "python": {
+            "env_var": PYTHON_REALPATH_ENV,
+            "selected_realpath": str(selected_python_realpath) if selected_python_realpath else None,
+            "actual_realpath": str(actual_python_realpath),
+            "matches_actual": selected_python_matches_actual,
+            "sys_executable": sys.executable,
+            "isolated": isolated_ok,
+            "ignore_environment": ignore_environment_ok,
+            "no_user_site": no_user_site_ok,
+        },
+        "wrapper_parent_pid": {
+            "env_var": WRAPPER_PARENT_PID_ENV,
+            "value": wrapper_pid,
+            "process_parent_pid": parent_pid,
+            "matches_parent": wrapper_pid_matches_parent,
+            "parent_process": parent_process,
+            "parent_wrapper_reference": parent_wrapper_reference,
+        },
+        "python_import_environment": {
+            "scrubbed_env_var": PYTHON_IMPORT_ENV_SCRUBBED_ENV,
+            "isolated_env_var": PYTHON_ISOLATED_ENV,
+            "scrubbed_env_value_ok": os.environ.get(PYTHON_IMPORT_ENV_SCRUBBED_ENV) == "1",
+            "isolated_env_value_ok": os.environ.get(PYTHON_ISOLATED_ENV) == "1",
+            "tracked_variables": python_import_environment,
+            "all_absent": import_env_absent,
+        },
+    }
+
+
+def trusted_make_recipe_path() -> str:
+    return os.pathsep.join(str(path) for path in TRUSTED_MAKE_RECIPE_PATH_DIRS)
+
+
+def make_recipe_environment_record() -> dict[str, Any]:
+    return {
+        "PATH": trusted_make_recipe_path(),
+        "path_entries": [str(path) for path in TRUSTED_MAKE_RECIPE_PATH_DIRS],
+        "caller_path_recorded": False,
+        "caller_path_redaction_reason": ENV_VALUE_REDACTION_REASON,
+        "reason": "make recipe commands run with a trusted PATH independent of caller PATH",
+    }
+
+
+def sanitized_make_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PATH"] = trusted_make_recipe_path()
+    return env
+
+
 def finalize_conclusion(payload: dict[str, Any], skip_build: bool) -> None:
     if skip_build:
         payload["conclusion"] = "incomplete"
@@ -1751,6 +2224,12 @@ def build_payload(repo_root: Path, output: Path, skip_build: bool, cleanup: bool
     incomplete_reasons: list[str] = []
     if SELF_TEST_FIXTURE_MODE:
         incomplete_reasons.append(SELF_TEST_FIXTURE_REASON)
+    authority = runtime_authority(repo_root)
+    if not authority["ready_for_consumption"]:
+        incomplete_reasons.append(str(authority["reason"]))
+    output_boundary = output_consumption_boundary(repo_root, output)
+    if not output_boundary["ready_for_consumption"]:
+        incomplete_reasons.append(str(output_boundary["reason"]))
     shud_dir = repo_root / "SHUD"
     payload: dict[str, Any] = {
         "readiness_check": "shud_rshud",
@@ -1761,9 +2240,11 @@ def build_payload(repo_root: Path, output: Path, skip_build: bool, cleanup: bool
             "path": str(output),
             "default_relative_path": str(DEFAULT_OUTPUT_RELATIVE),
             "git_guard": output_git_guard(repo_root, output),
+            "consumption_boundary": output_boundary,
         },
         "os": collect_os(),
         "self_test_fixture": self_test_fixture_marker(),
+        "runtime_authority": authority,
     }
     payload["tool_identity"] = collect_tool_identity(errors)
     preflight = collect_source_boundary(repo_root, errors, "preflight")
@@ -1840,6 +2321,7 @@ def main(argv: list[str]) -> int:
     repo_root = repo_root_input.resolve()
     output = output_path(repo_root_lexical, args.output)
     raw_output_is_absolute = bool(args.output and Path(args.output).is_absolute())
+    repo_external_output = not output_resolves_inside_repo(repo_root, output)
 
     def validate_output_write_scope() -> None:
         validate_output_scope(
@@ -1851,6 +2333,10 @@ def main(argv: list[str]) -> int:
 
     try:
         validate_output_write_scope()
+        if repo_external_output and (output.exists() or output.is_symlink()):
+            raise OutputSafetyError(
+                f"repo-external output path already exists; refusing to replace external file: {output}"
+            )
         validate_replacement_target(output)
     except (OutputSafetyError, OSError) as exc:
         print(f"readiness output path rejected: {exc}", file=sys.stderr)

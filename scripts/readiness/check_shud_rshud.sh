@@ -100,4 +100,26 @@ resolve_trusted_python3() {
 }
 
 PYTHON3=$(resolve_trusted_python3) || exit 127
-exec "$PYTHON3" "$SCRIPT_DIR/check_shud_rshud.py" "$@"
+WRAPPER_REALPATH=$(python_realpath "$SCRIPT_DIR/check_shud_rshud.sh") || {
+  printf '%s\n' 'check_shud_rshud.sh: failed to resolve wrapper realpath' >&2
+  exit 127
+}
+WRAPPER_NLINK=$(/usr/bin/env -u PYTHONHOME -u PYTHONPATH -u PYTHONSTARTUP -u PYTHONUSERBASE -u PYTHONBREAKPOINT "$PYTHON3" -I -c 'import os, sys; print(os.stat(sys.argv[1], follow_symlinks=True).st_nlink)' "$WRAPPER_REALPATH") || {
+  printf '%s\n' 'check_shud_rshud.sh: failed to inspect wrapper link count' >&2
+  exit 127
+}
+if [ "$WRAPPER_NLINK" != "1" ]; then
+  printf 'check_shud_rshud.sh: wrapper hardlink count must be 1, got %s\n' "$WRAPPER_NLINK" >&2
+  exit 126
+fi
+REAL_SCRIPT_DIR=${WRAPPER_REALPATH%/*}
+HELPER_REALPATH=$REAL_SCRIPT_DIR/check_shud_rshud.py
+
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE PYTHONBREAKPOINT
+export SHUD_RSHUD_READINESS_WRAPPER_REALPATH=$WRAPPER_REALPATH
+export SHUD_RSHUD_READINESS_PYTHON_REALPATH=$PYTHON3
+export SHUD_RSHUD_READINESS_WRAPPER_PARENT_PID=$$
+export SHUD_RSHUD_READINESS_PYTHON_ISOLATED=1
+export SHUD_RSHUD_READINESS_PYTHON_IMPORT_ENV_SCRUBBED=1
+
+"$PYTHON3" -I "$HELPER_REALPATH" "$@"

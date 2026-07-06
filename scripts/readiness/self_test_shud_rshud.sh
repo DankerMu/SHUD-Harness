@@ -7,6 +7,8 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 HELPER="$SCRIPT_DIR/check_shud_rshud.sh"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/shud-rshud-readiness-test.XXXXXX")
 REAL_GIT=$(command -v git)
+REAL_PYTHON=$(command -v python3)
+REAL_PYTHON_REALPATH=$("$REAL_PYTHON" -c 'from pathlib import Path; import sys; print(Path(sys.executable).resolve())')
 SELF_TEST_TOOL_ALLOWANCE_TOKEN=allow-fixture-tools
 
 git() {
@@ -176,6 +178,16 @@ esac
 EOF
   chmod +x "$bin_dir/make"
 
+  cat > "$bin_dir/rm" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+if [ -n "${FAKE_RM_MARKER:-}" ]; then
+  printf '%s\n' "fake rm invoked" >> "$FAKE_RM_MARKER"
+fi
+exit 64
+EOF
+  chmod +x "$bin_dir/rm"
+
   cat > "$bin_dir/Rscript" <<'EOF'
 #!/usr/bin/env sh
 set -eu
@@ -335,6 +347,7 @@ run_helper() {
   helper_fake_git_fail_message=${FAKE_GIT_FAIL_MESSAGE:-}
   helper_fake_git_fail_status_code=${FAKE_GIT_FAIL_STATUS_CODE:-128}
   helper_fake_make_honor_target_omp_on_clean=${FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN:-}
+  helper_fake_rm_marker=${FAKE_RM_MARKER:-}
   helper_preserve_make_env=${PRESERVE_MAKE_ENV:-}
   helper_allow_self_test_tools=${ALLOW_SELF_TEST_TOOLS:-1}
   helper_self_test_cli=${SELF_TEST_CLI:-1}
@@ -361,6 +374,7 @@ run_helper() {
       FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
       FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
       FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+      FAKE_RM_MARKER="$helper_fake_rm_marker" \
       SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$helper_self_test_tool_dir" \
       SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$helper_self_test_tool_token" \
       SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
@@ -380,6 +394,7 @@ run_helper() {
         FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
         FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
         FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+        FAKE_RM_MARKER="$helper_fake_rm_marker" \
         SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$helper_self_test_tool_dir" \
         SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$helper_self_test_tool_token" \
         SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
@@ -390,8 +405,8 @@ run_helper() {
   fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS SELF_TEST_CLI
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env helper_allow_self_test_tools helper_self_test_cli helper_self_test_tool_dir helper_self_test_tool_token helper_self_test_arg
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN FAKE_RM_MARKER SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS SELF_TEST_CLI
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_fake_rm_marker helper_preserve_make_env helper_allow_self_test_tools helper_self_test_cli helper_self_test_tool_dir helper_self_test_tool_token helper_self_test_arg
   return "$helper_status"
 }
 
@@ -409,6 +424,7 @@ run_helper_default_output() {
   helper_fake_git_fail_message=${FAKE_GIT_FAIL_MESSAGE:-}
   helper_fake_git_fail_status_code=${FAKE_GIT_FAIL_STATUS_CODE:-128}
   helper_fake_make_honor_target_omp_on_clean=${FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN:-}
+  helper_fake_rm_marker=${FAKE_RM_MARKER:-}
   helper_preserve_make_env=${PRESERVE_MAKE_ENV:-}
   helper_allow_self_test_tools=${ALLOW_SELF_TEST_TOOLS:-1}
   helper_self_test_cli=${SELF_TEST_CLI:-1}
@@ -435,6 +451,7 @@ run_helper_default_output() {
       FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
       FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
       FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+      FAKE_RM_MARKER="$helper_fake_rm_marker" \
       SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$helper_self_test_tool_dir" \
       SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$helper_self_test_tool_token" \
       SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
@@ -454,6 +471,7 @@ run_helper_default_output() {
         FAKE_GIT_FAIL_MESSAGE="$helper_fake_git_fail_message" \
         FAKE_GIT_FAIL_STATUS_CODE="$helper_fake_git_fail_status_code" \
         FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+        FAKE_RM_MARKER="$helper_fake_rm_marker" \
         SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$helper_self_test_tool_dir" \
         SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$helper_self_test_tool_token" \
         SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
@@ -464,8 +482,8 @@ run_helper_default_output() {
   fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS SELF_TEST_CLI
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env helper_allow_self_test_tools helper_self_test_cli helper_self_test_tool_dir helper_self_test_tool_token helper_self_test_arg
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN FAKE_RM_MARKER SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS SELF_TEST_CLI
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_fake_rm_marker helper_preserve_make_env helper_allow_self_test_tools helper_self_test_cli helper_self_test_tool_dir helper_self_test_tool_token helper_self_test_arg
   return "$helper_status"
 }
 
@@ -595,19 +613,33 @@ PY
 pass_fixture="$TMP_ROOT/pass-fixture"
 make_fixture "$pass_fixture"
 pass_output="$pass_fixture/workspace/readiness/shud_rshud_readiness.json"
-if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$pass_fixture" "$pass_output" --cleanup >/dev/null; then
+pass_fake_rm_marker="$pass_fixture/fake-rm.marker"
+if FAKE_RM_MARKER="$pass_fake_rm_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$pass_fixture" "$pass_output" --cleanup >/dev/null; then
   fail "self-test fake pass fixture unexpectedly returned zero"
+fi
+if [ -e "$pass_fake_rm_marker" ]; then
+  fail "fake rm from caller PATH was used by make recipe"
 fi
 assert_json "$pass_output" incomplete "self-test fixture mode"
 assert_no_shud_artifacts "$pass_fixture"
 assert_json_expr "$pass_output" 'data["conclusion"] != "pass"'
 assert_json_expr "$pass_output" 'data["self_test_fixture"]["active"] is True'
 assert_json_expr "$pass_output" 'data["self_test_fixture"]["ready_for_consumption"] is False'
+assert_json_expr "$pass_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
+assert_json_expr "$pass_output" 'data["runtime_authority"]["helper"]["matches_expected"] is False'
+assert_json_expr "$pass_output" 'data["runtime_authority"]["wrapper"]["matches_expected"] is False'
+assert_json_expr "$pass_output" 'data["runtime_authority"]["python"]["matches_actual"] is True'
+assert_json_expr "$pass_output" 'data["runtime_authority"]["python"]["isolated"] is True'
+assert_json_expr "$pass_output" 'data["runtime_authority"]["python_import_environment"]["all_absent"] is True'
 assert_json_expr "$pass_output" 'data["shud"]["build"]["cleanup_requested"] is True'
 assert_json_expr "$pass_output" 'data["shud"]["build"]["pre_clean"]["make_clean"]["timeout_seconds"] == 3'
 assert_json_expr "$pass_output" 'data["shud"]["build"]["result"]["timeout_seconds"] == 3'
 assert_json_expr "$pass_output" 'data["shud"]["build"]["cleanup"]["make_clean"]["timeout_seconds"] == 3'
+assert_json_expr "$pass_output" 'data["shud"]["build"]["pre_clean"]["make_clean"]["recipe_environment"]["PATH"] == data["shud"]["build"]["recipe_environment"]["PATH"]'
+assert_json_expr "$pass_output" '"/bin" in data["shud"]["build"]["recipe_environment"]["path_entries"]'
+assert_json_expr "$pass_output" 'all("shud-rshud-readiness-test" not in entry for entry in data["shud"]["build"]["recipe_environment"]["path_entries"])'
 assert_json_expr "$pass_output" 'data["output"]["git_guard"]["tracked"] is False'
+assert_json_expr "$pass_output" 'data["output"]["consumption_boundary"]["ready_for_consumption"] is True'
 assert_json_expr "$pass_output" 'data["source_boundary"]["preflight"]["ok"] is True'
 assert_json_expr "$pass_output" 'data["source_boundary"]["postflight_after_output_write"]["ok"] is True'
 assert_json_expr "$pass_output" 'data["make_environment_guard"]["ok"] is True'
@@ -782,6 +814,195 @@ assert_json_expr "$fake_python_attack_output" 'data["tool_identity"]["git"]["sel
 assert_json_expr "$fake_python_attack_output" 'all(data["tool_identity"][name]["ok"] is False for name in ["make", "Rscript"])'
 assert_json_expr "$fake_python_attack_output" 'data["conclusion"] != "pass"'
 
+python_import_poison_fixture="$TMP_ROOT/python-import-poison-fixture"
+make_fixture "$python_import_poison_fixture"
+python_import_poison_dir="$TMP_ROOT/python-import-poison"
+mkdir -p "$python_import_poison_dir"
+python_import_poison_output="$python_import_poison_fixture/workspace/readiness/python_import_poison.json"
+python_import_poison_marker="$python_import_poison_fixture/python-import-poison.marker"
+cat > "$python_import_poison_dir/argparse.py" <<'PY'
+import os
+from pathlib import Path
+
+marker = os.environ.get("PYTHON_IMPORT_POISON_MARKER")
+output = os.environ.get("PYTHON_IMPORT_POISON_OUTPUT")
+if marker:
+    Path(marker).write_text("poisoned argparse imported\n", encoding="utf-8")
+if output:
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    Path(output).write_text('{"readiness_check":"shud_rshud","conclusion":"pass","forged_by":"python-import-poison"}\n', encoding="utf-8")
+raise SystemExit(0)
+PY
+export PYTHONPATH="$python_import_poison_dir"
+export PYTHONHOME="$python_import_poison_dir/python-home"
+if PYTHON_IMPORT_POISON_MARKER="$python_import_poison_marker" \
+  PYTHON_IMPORT_POISON_OUTPUT="$python_import_poison_output" \
+  FAKE_MAKE_MODE=success \
+  FAKE_RSHUD_VERSION=2.5.0 \
+  run_helper "$python_import_poison_fixture" "$python_import_poison_output" >/dev/null 2>/dev/null; then
+  unset PYTHONPATH PYTHONHOME
+  fail "Python import poisoning fixture unexpectedly returned zero"
+fi
+unset PYTHONPATH PYTHONHOME
+if [ -e "$python_import_poison_marker" ]; then
+  fail "PYTHONPATH stdlib shadow executed before helper guards"
+fi
+if grep -q '"forged_by":"python-import-poison"' "$python_import_poison_output" \
+  || grep -q '"conclusion":"pass"' "$python_import_poison_output"; then
+  fail "Python import poisoning left pass-shaped forged output"
+fi
+assert_json "$python_import_poison_output" incomplete "self-test fixture mode"
+assert_json_expr "$python_import_poison_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
+assert_json_expr "$python_import_poison_output" 'data["runtime_authority"]["python"]["isolated"] is True'
+assert_json_expr "$python_import_poison_output" 'data["runtime_authority"]["python_import_environment"]["all_absent"] is True'
+
+wrapper_symlink_fixture="$TMP_ROOT/wrapper-symlink-fixture"
+make_fixture "$wrapper_symlink_fixture"
+wrapper_symlink_dir="$TMP_ROOT/wrapper-symlink-entrypoint"
+mkdir -p "$wrapper_symlink_dir"
+ln -s "$HELPER" "$wrapper_symlink_dir/check_shud_rshud.sh"
+wrapper_symlink_output="$wrapper_symlink_fixture/workspace/readiness/wrapper_symlink.json"
+wrapper_symlink_marker="$wrapper_symlink_fixture/wrapper-symlink-adjacent.marker"
+cat > "$wrapper_symlink_dir/check_shud_rshud.py" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+marker = os.environ.get("WRAPPER_SYMLINK_ADJACENT_MARKER")
+if marker:
+    Path(marker).write_text("adjacent fake helper ran\n", encoding="utf-8")
+output = Path(sys.argv[sys.argv.index("--output") + 1])
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text('{"readiness_check":"shud_rshud","conclusion":"pass","forged_by":"adjacent-fake-helper"}\n', encoding="utf-8")
+raise SystemExit(0)
+PY
+set +e
+(
+  clear_make_environment
+  WRAPPER_SYMLINK_ADJACENT_MARKER="$wrapper_symlink_marker" \
+    FAKE_MAKE_MODE=success \
+    FAKE_RSHUD_VERSION=2.5.0 \
+    SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$TMP_ROOT/bin" \
+    SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$SELF_TEST_TOOL_ALLOWANCE_TOKEN" \
+    SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS=3 \
+    PATH="$TMP_ROOT/bin:$PATH" \
+    HOME="$wrapper_symlink_fixture/fake-home" \
+    "$wrapper_symlink_dir/check_shud_rshud.sh" --repo-root "$wrapper_symlink_fixture" --output "$wrapper_symlink_output" --self-test >/dev/null 2>/dev/null
+)
+wrapper_symlink_status=$?
+set -e
+if [ "$wrapper_symlink_status" -eq 0 ]; then
+  fail "wrapper symlink adjacent-helper fixture unexpectedly returned zero"
+fi
+if [ -e "$wrapper_symlink_marker" ]; then
+  fail "wrapper symlink executed adjacent fake Python helper"
+fi
+if grep -q '"forged_by":"adjacent-fake-helper"' "$wrapper_symlink_output" \
+  || grep -q '"conclusion":"pass"' "$wrapper_symlink_output"; then
+  fail "wrapper symlink left adjacent fake pass-shaped output"
+fi
+assert_json "$wrapper_symlink_output" incomplete "self-test fixture mode"
+assert_json_expr "$wrapper_symlink_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
+assert_json_expr "$wrapper_symlink_output" 'data["runtime_authority"]["helper"]["matches_expected"] is False'
+assert_json_expr "$wrapper_symlink_output" 'data["runtime_authority"]["wrapper"]["matches_expected"] is False'
+assert_json_expr "$wrapper_symlink_output" 'data["runtime_authority"]["python"]["isolated"] is True'
+
+wrapper_hardlink_dir="$TMP_ROOT/wrapper-hardlink-entrypoint"
+mkdir -p "$wrapper_hardlink_dir"
+wrapper_hardlink_marker="$wrapper_symlink_fixture/wrapper-hardlink-adjacent.marker"
+wrapper_hardlink_stderr="$TMP_ROOT/wrapper-hardlink.stderr"
+wrapper_hardlink_output="$wrapper_symlink_fixture/workspace/readiness/wrapper_hardlink.json"
+if ln "$HELPER" "$wrapper_hardlink_dir/check_shud_rshud.sh" 2>/dev/null; then
+  cat > "$wrapper_hardlink_dir/check_shud_rshud.py" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+marker = os.environ.get("WRAPPER_HARDLINK_ADJACENT_MARKER")
+if marker:
+    Path(marker).write_text("hardlink adjacent fake helper ran\n", encoding="utf-8")
+output = Path(sys.argv[sys.argv.index("--output") + 1])
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text('{"readiness_check":"shud_rshud","conclusion":"pass","forged_by":"hardlink-adjacent-fake-helper"}\n', encoding="utf-8")
+raise SystemExit(0)
+PY
+  set +e
+  (
+    clear_make_environment
+    WRAPPER_HARDLINK_ADJACENT_MARKER="$wrapper_hardlink_marker" \
+      PATH="$TMP_ROOT/bin:$PATH" \
+      HOME="$wrapper_symlink_fixture/fake-home" \
+      "$wrapper_hardlink_dir/check_shud_rshud.sh" --repo-root "$wrapper_symlink_fixture" --output "$wrapper_hardlink_output" --self-test >/dev/null 2>"$wrapper_hardlink_stderr"
+  )
+  wrapper_hardlink_status=$?
+  set -e
+  rm -f "$wrapper_hardlink_dir/check_shud_rshud.sh"
+  if [ "$wrapper_hardlink_status" -eq 0 ]; then
+    fail "wrapper hardlink adjacent-helper fixture unexpectedly returned zero"
+  fi
+  if [ -e "$wrapper_hardlink_marker" ]; then
+    fail "wrapper hardlink executed adjacent fake Python helper"
+  fi
+  if [ -e "$wrapper_hardlink_output" ] && {
+    grep -q '"forged_by":"hardlink-adjacent-fake-helper"' "$wrapper_hardlink_output" \
+      || grep -q '"conclusion":"pass"' "$wrapper_hardlink_output"
+  }; then
+    fail "wrapper hardlink left adjacent fake pass-shaped output"
+  fi
+  if ! grep -q "wrapper hardlink count must be 1" "$wrapper_hardlink_stderr"; then
+    cat "$wrapper_hardlink_stderr" >&2
+    fail "wrapper hardlink was not rejected by link-count guard"
+  fi
+fi
+
+helper_copy_fixture="$TMP_ROOT/helper-copy-fixture"
+make_fixture "$helper_copy_fixture"
+helper_copy_dir="$TMP_ROOT/helper-copy-entrypoint"
+mkdir -p "$helper_copy_dir"
+cp "$SCRIPT_DIR/check_shud_rshud.py" "$helper_copy_dir/check_shud_rshud.py"
+helper_copy_output="$helper_copy_fixture/workspace/readiness/helper_copy_attack.json"
+cat > "$helper_copy_dir/check_shud_rshud.sh" <<EOF
+#!/bin/sh
+set -eu
+script_parent=\${0%/*}
+if [ "\$script_parent" = "\$0" ]; then
+  script_parent=.
+fi
+script_dir=\$(CDPATH= cd -P -- "\$script_parent" && pwd -P)
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE PYTHONBREAKPOINT
+export SHUD_RSHUD_READINESS_WRAPPER_REALPATH="\$script_dir/check_shud_rshud.sh"
+export SHUD_RSHUD_READINESS_PYTHON_REALPATH="$REAL_PYTHON_REALPATH"
+export SHUD_RSHUD_READINESS_WRAPPER_PARENT_PID=\$\$
+export SHUD_RSHUD_READINESS_PYTHON_ISOLATED=1
+export SHUD_RSHUD_READINESS_PYTHON_IMPORT_ENV_SCRUBBED=1
+"$REAL_PYTHON" -I "\$script_dir/check_shud_rshud.py" "\$@"
+EOF
+chmod +x "$helper_copy_dir/check_shud_rshud.sh"
+set +e
+(
+  clear_make_environment
+  FAKE_MAKE_MODE=success \
+    FAKE_RSHUD_VERSION=2.5.0 \
+    SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$TMP_ROOT/bin" \
+    SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$SELF_TEST_TOOL_ALLOWANCE_TOKEN" \
+    SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS=3 \
+    PATH="$TMP_ROOT/bin:$PATH" \
+    HOME="$helper_copy_fixture/fake-home" \
+    "$helper_copy_dir/check_shud_rshud.sh" --repo-root "$helper_copy_fixture" --output "$helper_copy_output" --self-test >/dev/null 2>/dev/null
+)
+helper_copy_status=$?
+set -e
+if [ "$helper_copy_status" -eq 0 ]; then
+  fail "copied-helper adjacent-wrapper fixture unexpectedly returned zero"
+fi
+assert_json "$helper_copy_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json_expr "$helper_copy_output" 'data["conclusion"] != "pass"'
+assert_json_expr "$helper_copy_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
+assert_json_expr "$helper_copy_output" 'data["runtime_authority"]["helper"]["matches_expected"] is False'
+assert_json_expr "$helper_copy_output" 'data["runtime_authority"]["helper"]["actual_realpath"] != data["runtime_authority"]["helper"]["expected_realpath"]'
+assert_json_expr "$helper_copy_output" 'data["runtime_authority"]["wrapper"]["matches_expected"] is False'
+assert_json_expr "$helper_copy_output" 'data["output"]["consumption_boundary"]["ready_for_consumption"] is True'
+
 if [ -x "$SCRIPT_DIR/check_shud_rshud.py" ]; then
   fail "Python readiness helper is executable; public entrypoint must be the trusted wrapper"
 fi
@@ -810,6 +1031,236 @@ if [ -e "$direct_python_attack_output" ]; then
     fail "direct Python helper execution left pass-shaped forged output"
   fi
 fi
+
+direct_python_consumable_fixture="$TMP_ROOT/direct-python-consumable-fixture"
+make_fixture "$direct_python_consumable_fixture"
+direct_python_consumable_output="$direct_python_consumable_fixture/workspace/readiness/direct_python_consumable.json"
+set +e
+(
+  clear_make_environment
+  FAKE_MAKE_MODE=success \
+    FAKE_RSHUD_VERSION=2.5.0 \
+    SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$TMP_ROOT/bin" \
+    SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$SELF_TEST_TOOL_ALLOWANCE_TOKEN" \
+    SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS=3 \
+    PATH="$TMP_ROOT/bin:$PATH" \
+    HOME="$direct_python_consumable_fixture/fake-home" \
+    "$REAL_PYTHON" "$SCRIPT_DIR/check_shud_rshud.py" --repo-root "$direct_python_consumable_fixture" --output "$direct_python_consumable_output" --self-test >/dev/null 2>/dev/null
+)
+direct_python_consumable_status=$?
+set -e
+if [ "$direct_python_consumable_status" -eq 0 ]; then
+  fail "direct python3 helper invocation unexpectedly returned zero"
+fi
+assert_json "$direct_python_consumable_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json_expr "$direct_python_consumable_output" 'data["conclusion"] != "pass"'
+assert_json_expr "$direct_python_consumable_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
+assert_json_expr "$direct_python_consumable_output" 'data["runtime_authority"]["helper"]["matches_expected"] is False'
+assert_json_expr "$direct_python_consumable_output" 'data["runtime_authority"]["wrapper"]["matches_expected"] is False'
+assert_json_expr "$direct_python_consumable_output" 'data["runtime_authority"]["python"]["isolated"] is False'
+assert_json_expr "$direct_python_consumable_output" 'data["output"]["consumption_boundary"]["ready_for_consumption"] is True'
+
+direct_python_spoof_fixture="$TMP_ROOT/direct-python-spoof-fixture"
+make_fixture "$direct_python_spoof_fixture"
+direct_python_spoof_output="$direct_python_spoof_fixture/workspace/readiness/direct_python_spoof.json"
+direct_python_spoof_parent="$TMP_ROOT/direct-python-spoof-parent.sh"
+cat > "$direct_python_spoof_parent" <<EOF
+#!/bin/sh
+set -eu
+export SHUD_RSHUD_READINESS_WRAPPER_REALPATH="$HELPER"
+export SHUD_RSHUD_READINESS_PYTHON_REALPATH="$REAL_PYTHON_REALPATH"
+export SHUD_RSHUD_READINESS_WRAPPER_PARENT_PID=\$\$
+export SHUD_RSHUD_READINESS_PYTHON_ISOLATED=1
+export SHUD_RSHUD_READINESS_PYTHON_IMPORT_ENV_SCRUBBED=1
+export SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$TMP_ROOT/bin"
+export SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$SELF_TEST_TOOL_ALLOWANCE_TOKEN"
+export SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS=3
+export FAKE_MAKE_MODE=success
+export FAKE_RSHUD_VERSION=2.5.0
+export PATH="$TMP_ROOT/bin:\$PATH"
+set +e
+"$REAL_PYTHON" -I "$SCRIPT_DIR/check_shud_rshud.py" --repo-root "$direct_python_spoof_fixture" --output "$direct_python_spoof_output" --self-test
+status=\$?
+exit "\$status"
+EOF
+chmod +x "$direct_python_spoof_parent"
+set +e
+(
+  clear_make_environment
+  HOME="$direct_python_spoof_fixture/fake-home" "$direct_python_spoof_parent" >/dev/null 2>/dev/null
+)
+direct_python_spoof_status=$?
+set -e
+if [ "$direct_python_spoof_status" -eq 0 ]; then
+  fail "direct python authority-spoof fixture unexpectedly returned zero"
+fi
+assert_json "$direct_python_spoof_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json_expr "$direct_python_spoof_output" 'data["conclusion"] != "pass"'
+assert_json_expr "$direct_python_spoof_output" 'data["runtime_authority"]["helper"]["matches_expected"] is False'
+assert_json_expr "$direct_python_spoof_output" 'data["runtime_authority"]["wrapper"]["matches_expected"] is False'
+assert_json_expr "$direct_python_spoof_output" 'data["runtime_authority"]["python"]["matches_actual"] is True'
+assert_json_expr "$direct_python_spoof_output" 'data["runtime_authority"]["python"]["isolated"] is True'
+assert_json_expr "$direct_python_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["matches_parent"] is True'
+assert_json_expr "$direct_python_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["parent_wrapper_reference"]["matches_expected"] is False'
+
+direct_python_argv0_spoof_output="$direct_python_spoof_fixture/workspace/readiness/direct_python_argv0_spoof.json"
+direct_python_argv0_spoof_parent="$TMP_ROOT/direct-python-argv0-spoof-parent.sh"
+cat > "$direct_python_argv0_spoof_parent" <<EOF
+#!/bin/bash
+set -eu
+exec -a "$HELPER" /bin/sh -c '
+  export SHUD_RSHUD_READINESS_WRAPPER_REALPATH="$HELPER"
+  export SHUD_RSHUD_READINESS_PYTHON_REALPATH="$REAL_PYTHON_REALPATH"
+  export SHUD_RSHUD_READINESS_WRAPPER_PARENT_PID=\$\$
+  export SHUD_RSHUD_READINESS_PYTHON_ISOLATED=1
+  export SHUD_RSHUD_READINESS_PYTHON_IMPORT_ENV_SCRUBBED=1
+  export SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$TMP_ROOT/bin"
+  export SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$SELF_TEST_TOOL_ALLOWANCE_TOKEN"
+  export SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS=3
+  export FAKE_MAKE_MODE=success
+  export FAKE_RSHUD_VERSION=2.5.0
+  export PATH="$TMP_ROOT/bin:\$PATH"
+  set +e
+  "$REAL_PYTHON" -I "$SCRIPT_DIR/check_shud_rshud.py" --repo-root "$direct_python_spoof_fixture" --output "$direct_python_argv0_spoof_output" --self-test
+  status=\$?
+  exit "\$status"
+'
+EOF
+chmod +x "$direct_python_argv0_spoof_parent"
+set +e
+(
+  clear_make_environment
+  HOME="$direct_python_spoof_fixture/fake-home" "$direct_python_argv0_spoof_parent" >/dev/null 2>/dev/null
+)
+direct_python_argv0_spoof_status=$?
+set -e
+if [ "$direct_python_argv0_spoof_status" -eq 0 ]; then
+  fail "direct python argv0-spoof fixture unexpectedly returned zero"
+fi
+assert_json "$direct_python_argv0_spoof_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json_expr "$direct_python_argv0_spoof_output" 'data["conclusion"] != "pass"'
+assert_json_expr "$direct_python_argv0_spoof_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
+assert_json_expr "$direct_python_argv0_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["matches_parent"] is True'
+assert_json_expr "$direct_python_argv0_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["parent_wrapper_reference"]["matches_expected"] is False'
+
+direct_python_space_argv0_spoof_output="$direct_python_spoof_fixture/workspace/readiness/direct_python_space_argv0_spoof.json"
+direct_python_space_argv0_spoof_parent="$TMP_ROOT/direct-python-space-argv0-spoof-parent.sh"
+cat > "$direct_python_space_argv0_spoof_parent" <<EOF
+#!/bin/bash
+set -eu
+exec -a "sh $HELPER" /bin/bash -c '
+  export SHUD_RSHUD_READINESS_WRAPPER_REALPATH="$HELPER"
+  export SHUD_RSHUD_READINESS_PYTHON_REALPATH="$REAL_PYTHON_REALPATH"
+  export SHUD_RSHUD_READINESS_WRAPPER_PARENT_PID=\$\$
+  export SHUD_RSHUD_READINESS_PYTHON_ISOLATED=1
+  export SHUD_RSHUD_READINESS_PYTHON_IMPORT_ENV_SCRUBBED=1
+  export SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$TMP_ROOT/bin"
+  export SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$SELF_TEST_TOOL_ALLOWANCE_TOKEN"
+  export SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS=3
+  export FAKE_MAKE_MODE=success
+  export FAKE_RSHUD_VERSION=2.5.0
+  export PATH="$TMP_ROOT/bin:\$PATH"
+  set +e
+  "$REAL_PYTHON" -I "$SCRIPT_DIR/check_shud_rshud.py" --repo-root "$direct_python_spoof_fixture" --output "$direct_python_space_argv0_spoof_output" --self-test
+  status=\$?
+  exit "\$status"
+'
+EOF
+chmod +x "$direct_python_space_argv0_spoof_parent"
+set +e
+(
+  clear_make_environment
+  HOME="$direct_python_spoof_fixture/fake-home" "$direct_python_space_argv0_spoof_parent" >/dev/null 2>/dev/null
+)
+direct_python_space_argv0_spoof_status=$?
+set -e
+if [ "$direct_python_space_argv0_spoof_status" -eq 0 ]; then
+  fail "direct python space-bearing argv0-spoof fixture unexpectedly returned zero"
+fi
+assert_json "$direct_python_space_argv0_spoof_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json_expr "$direct_python_space_argv0_spoof_output" 'data["conclusion"] != "pass"'
+assert_json_expr "$direct_python_space_argv0_spoof_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
+assert_json_expr "$direct_python_space_argv0_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["matches_parent"] is True'
+assert_json_expr "$direct_python_space_argv0_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["parent_wrapper_reference"]["matches_expected"] is False'
+assert_json_expr "$direct_python_space_argv0_spoof_output" '"whitespace" in data["runtime_authority"]["wrapper_parent_pid"]["parent_wrapper_reference"]["error"]'
+
+direct_python_stdin_spoof_output="$direct_python_spoof_fixture/workspace/readiness/direct_python_stdin_spoof.json"
+direct_python_stdin_spoof_driver="$TMP_ROOT/direct-python-stdin-spoof-driver.sh"
+cat > "$direct_python_stdin_spoof_driver" <<EOF
+#!/bin/sh
+set -eu
+/bin/sh -s "$HELPER" <<'INNER'
+export SHUD_RSHUD_READINESS_WRAPPER_REALPATH="$HELPER"
+export SHUD_RSHUD_READINESS_PYTHON_REALPATH="$REAL_PYTHON_REALPATH"
+export SHUD_RSHUD_READINESS_WRAPPER_PARENT_PID=\$\$
+export SHUD_RSHUD_READINESS_PYTHON_ISOLATED=1
+export SHUD_RSHUD_READINESS_PYTHON_IMPORT_ENV_SCRUBBED=1
+export SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$TMP_ROOT/bin"
+export SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$SELF_TEST_TOOL_ALLOWANCE_TOKEN"
+export SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS=3
+export FAKE_MAKE_MODE=success
+export FAKE_RSHUD_VERSION=2.5.0
+export PATH="$TMP_ROOT/bin:\$PATH"
+set +e
+"$REAL_PYTHON" -I "$SCRIPT_DIR/check_shud_rshud.py" --repo-root "$direct_python_spoof_fixture" --output "$direct_python_stdin_spoof_output" --self-test
+status=\$?
+exit "\$status"
+INNER
+EOF
+chmod +x "$direct_python_stdin_spoof_driver"
+set +e
+(
+  clear_make_environment
+  HOME="$direct_python_spoof_fixture/fake-home" "$direct_python_stdin_spoof_driver" >/dev/null 2>/dev/null
+)
+direct_python_stdin_spoof_status=$?
+set -e
+if [ "$direct_python_stdin_spoof_status" -eq 0 ]; then
+  fail "direct python stdin-script spoof fixture unexpectedly returned zero"
+fi
+assert_json "$direct_python_stdin_spoof_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json_expr "$direct_python_stdin_spoof_output" 'data["conclusion"] != "pass"'
+assert_json_expr "$direct_python_stdin_spoof_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
+assert_json_expr "$direct_python_stdin_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["parent_wrapper_reference"]["matches_expected"] is False'
+
+direct_python_option_arg_spoof_output="$direct_python_spoof_fixture/workspace/readiness/direct_python_option_arg_spoof.json"
+direct_python_option_arg_spoof_driver="$TMP_ROOT/direct-python-option-arg-spoof-driver.sh"
+cat > "$direct_python_option_arg_spoof_driver" <<EOF
+#!/bin/bash
+set -eu
+/bin/bash --init-file "$HELPER" -c '
+  export SHUD_RSHUD_READINESS_WRAPPER_REALPATH="$HELPER"
+  export SHUD_RSHUD_READINESS_PYTHON_REALPATH="$REAL_PYTHON_REALPATH"
+  export SHUD_RSHUD_READINESS_WRAPPER_PARENT_PID=\$\$
+  export SHUD_RSHUD_READINESS_PYTHON_ISOLATED=1
+  export SHUD_RSHUD_READINESS_PYTHON_IMPORT_ENV_SCRUBBED=1
+  export SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR="$TMP_ROOT/bin"
+  export SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE="$SELF_TEST_TOOL_ALLOWANCE_TOKEN"
+  export SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS=3
+  export FAKE_MAKE_MODE=success
+  export FAKE_RSHUD_VERSION=2.5.0
+  export PATH="$TMP_ROOT/bin:\$PATH"
+  set +e
+  "$REAL_PYTHON" -I "$SCRIPT_DIR/check_shud_rshud.py" --repo-root "$direct_python_spoof_fixture" --output "$direct_python_option_arg_spoof_output" --self-test
+  status=\$?
+  exit "\$status"
+'
+EOF
+chmod +x "$direct_python_option_arg_spoof_driver"
+set +e
+(
+  clear_make_environment
+  HOME="$direct_python_spoof_fixture/fake-home" "$direct_python_option_arg_spoof_driver" >/dev/null 2>/dev/null
+)
+direct_python_option_arg_spoof_status=$?
+set -e
+if [ "$direct_python_option_arg_spoof_status" -eq 0 ]; then
+  fail "direct python option-argument spoof fixture unexpectedly returned zero"
+fi
+assert_json "$direct_python_option_arg_spoof_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json_expr "$direct_python_option_arg_spoof_output" 'data["conclusion"] != "pass"'
+assert_json_expr "$direct_python_option_arg_spoof_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
+assert_json_expr "$direct_python_option_arg_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["parent_wrapper_reference"]["matches_expected"] is False'
 
 hardlink_output_fixture="$TMP_ROOT/hardlink-output-fixture"
 make_fixture "$hardlink_output_fixture"
@@ -1044,7 +1495,58 @@ fi
 assert_json "$external_temp_output" incomplete -
 assert_json_expr "$external_temp_output" 'data["errors"] == []'
 assert_json_expr "$external_temp_output" 'data["shud"]["build"]["skipped"] is True'
+assert_json_expr "$external_temp_output" 'data["output"]["consumption_boundary"]["ready_for_consumption"] is False'
 assert_json_expr "$external_temp_output" 'any("--skip-build" in reason for reason in data["incomplete_reasons"])'
+assert_json_expr "$external_temp_output" 'any("repo-external readiness output" in reason for reason in data["incomplete_reasons"])'
+
+external_temp_nonskip_fixture="$TMP_ROOT/external-temp-nonskip-fixture"
+make_fixture "$external_temp_nonskip_fixture"
+external_temp_nonskip_output="$TMP_ROOT/external-temp-nonskip-output.json"
+if SELF_TEST_CLI=0 FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$external_temp_nonskip_fixture" "$external_temp_nonskip_output" >/dev/null 2>/dev/null; then
+  fail "non-self-test external temp output fixture unexpectedly returned zero"
+fi
+assert_json_expr "$external_temp_nonskip_output" 'data["conclusion"] != "pass"'
+assert_json_expr "$external_temp_nonskip_output" 'data["self_test_fixture"]["active"] is False'
+assert_json_expr "$external_temp_nonskip_output" 'data["output"]["consumption_boundary"]["ready_for_consumption"] is False'
+assert_json_expr "$external_temp_nonskip_output" 'any("repo-external readiness output" in reason for reason in data["incomplete_reasons"])'
+
+poisoned_tmp_fixture="$TMP_ROOT/poisoned-tmp-fixture"
+make_fixture "$poisoned_tmp_fixture"
+poisoned_tmp_dir="$TMP_ROOT/poisoned-tmp"
+mkdir -p "$poisoned_tmp_dir"
+poisoned_tmp_victim="$poisoned_tmp_dir/victim.json"
+printf '%s\n' "victim must survive" > "$poisoned_tmp_victim"
+poisoned_tmp_before=$(cat "$poisoned_tmp_victim")
+poisoned_tmp_stderr="$TMP_ROOT/poisoned-tmp.stderr"
+saved_tmpdir_was_set=0
+saved_tmpdir=
+if [ "${TMPDIR+x}" = x ]; then
+  saved_tmpdir_was_set=1
+  saved_tmpdir=$TMPDIR
+fi
+export TMPDIR="$poisoned_tmp_dir"
+if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$poisoned_tmp_fixture" "$poisoned_tmp_victim" --skip-build >/dev/null 2>"$poisoned_tmp_stderr"; then
+  poisoned_tmp_status=0
+else
+  poisoned_tmp_status=$?
+fi
+if [ "$saved_tmpdir_was_set" = "1" ]; then
+  TMPDIR=$saved_tmpdir
+  export TMPDIR
+else
+  unset TMPDIR
+fi
+if [ "$poisoned_tmp_status" -eq 0 ]; then
+  fail "poisoned TMPDIR existing victim fixture unexpectedly returned zero"
+fi
+poisoned_tmp_after=$(cat "$poisoned_tmp_victim")
+if [ "$poisoned_tmp_before" != "$poisoned_tmp_after" ]; then
+  fail "poisoned TMPDIR victim content changed"
+fi
+if ! grep -q "repo-external output path already exists" "$poisoned_tmp_stderr"; then
+  cat "$poisoned_tmp_stderr" >&2
+  fail "poisoned TMPDIR victim was not rejected before write"
+fi
 
 skip_residue_fixture="$TMP_ROOT/skip-residue-fixture"
 make_fixture "$skip_residue_fixture"
@@ -1157,6 +1659,34 @@ assert_json_expr "$hidden_build_source_output" 'any(record["path"] == "src/hidde
 assert_json_expr "$hidden_build_source_output" 'data["shud"]["build"]["blocked_before_make"] is True'
 if [ -e "$hidden_build_source_marker" ]; then
   fail "make executed for .git/info/exclude hidden build source fixture"
+fi
+
+broad_source_cap_fixture="$TMP_ROOT/broad-source-cap-fixture"
+make_fixture "$broad_source_cap_fixture"
+"$REAL_PYTHON" - "$broad_source_cap_fixture" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]) / "SHUD" / "src" / "recursive"
+root.mkdir(parents=True, exist_ok=True)
+for index in range(10005):
+    (root / f"candidate_{index:05d}.cpp").write_text(f"int candidate_{index:05d} = {index};\n", encoding="utf-8")
+PY
+printf '%s\n' 'SRC = **/*.cpp' >> "$broad_source_cap_fixture/SHUD/Makefile"
+broad_source_cap_output="$broad_source_cap_fixture/workspace/readiness/broad_source_cap.json"
+broad_source_cap_marker="$broad_source_cap_fixture/make.marker"
+if FAKE_MAKE_MARKER="$broad_source_cap_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$broad_source_cap_fixture" "$broad_source_cap_output" >/dev/null 2>/dev/null; then
+  fail "broad recursive source cap fixture unexpectedly returned zero"
+fi
+assert_json "$broad_source_cap_output" block "SHUD build source scan exceeded 10000 candidates"
+assert_json_expr "$broad_source_cap_output" 'data["source_boundary"]["preflight"]["ignored_build_sources"]["ok"] is False'
+assert_json_expr "$broad_source_cap_output" 'data["source_boundary"]["preflight"]["ignored_build_sources"]["materialized_all_candidates"] is False'
+assert_json_expr "$broad_source_cap_output" 'len(data["source_boundary"]["preflight"]["ignored_build_sources"]["scan_blocks"]) == 1'
+assert_json_expr "$broad_source_cap_output" 'data["source_boundary"]["preflight"]["ignored_build_sources"]["scan_blocks"][0]["recursive_pattern"] is True'
+assert_json_expr "$broad_source_cap_output" '"before sorting or storing all glob matches" in data["source_boundary"]["preflight"]["ignored_build_sources"]["scan_blocks"][0]["reason"]'
+assert_json_expr "$broad_source_cap_output" 'data["shud"]["build"]["blocked_before_make"] is True'
+if [ -e "$broad_source_cap_marker" ]; then
+  fail "make executed for broad recursive source cap fixture"
 fi
 
 status_failure_fixture="$TMP_ROOT/status-failure-fixture"
