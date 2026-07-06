@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
   evaluatePolicyGate,
+  normalizeSpawnAgentInput,
   PolicyGateRemediationSchema,
+  SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
   SPAWN_PROFILE_SUBSET_POLICY_REF,
   SPAWN_PROFILE_SUBSET_RULE,
   SPAWN_PROFILE_SUBSET_RULE_ID,
   type PolicyGateToolCall
 } from "./policy-gate-core";
+import { getRoleToolIds } from "./role-tool-map";
 
 describe("policy gate pure evaluator", () => {
   test("allows by default and returns identical output for identical input", () => {
@@ -153,7 +156,7 @@ describe("spawn profile subset policy rule", () => {
     ).toEqual({ decision: "allow" });
   });
 
-  test("allows spawn without an explicit allowlist so Zero defaults remain unchanged", () => {
+  test("allows spawn without an explicit allowlist at pure rule level", () => {
     expect(
       evaluatePolicyGate(spawnToolCall({ role: "worker" }), {
         rules: [SPAWN_PROFILE_SUBSET_RULE]
@@ -161,17 +164,101 @@ describe("spawn profile subset policy rule", () => {
     ).toEqual({ decision: "allow" });
   });
 
-  test("allows unknown target roles and non-array allowlists at this rule level", () => {
+  test("normalizes omitted canonical spawn tools to the role profile", () => {
+    const normalized = normalizeSpawnAgentInput(spawnToolCall({ role: "reviewer" }));
+
+    expect(normalized).toMatchObject({
+      decision: "allow",
+      changed: true
+    });
+    if (normalized.decision === "allow") {
+      expect(normalized.input).toMatchObject({
+        role: "reviewer",
+        tools: [...getRoleToolIds("reviewer")]
+      });
+    }
+  });
+
+  test("normalizes the allowed_tools alias to Zero tools", () => {
+    const normalized = normalizeSpawnAgentInput(
+      spawnToolCall({ role: "worker", allowed_tools: [" read ", "sandbox.exec", "read"] })
+    );
+
+    expect(normalized).toMatchObject({
+      decision: "allow",
+      changed: true
+    });
+    if (normalized.decision === "allow") {
+      expect(normalized.input).toMatchObject({
+        role: "worker",
+        tools: ["read", "sandbox.exec"]
+      });
+      expect(normalized.input).not.toHaveProperty("allowed_tools");
+    }
+  });
+
+  test("denies explicit empty and malformed canonical allowlists", () => {
+    const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
+
+    for (const input of [
+      { role: "worker", tools: [] },
+      { role: "worker", tools: "edit" },
+      { role: "worker", tools: ["read", 1] },
+      { role: "worker", allowed_tools: [] },
+      { role: "worker", allowed_tools: "read" }
+    ]) {
+      const decision = evaluatePolicyGate(spawnToolCall(input), context);
+
+      expect(decision).toMatchObject({
+        decision: "deny",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        guardClass: "authority",
+        remediation: {
+          next_action: "adjust_scope"
+        }
+      });
+    }
+  });
+
+  test("allows unknown target roles at this rule level", () => {
     const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
 
     expect(
       evaluatePolicyGate(spawnToolCall({ role: "not_a_harness_role", tools: ["edit"] }), context)
     ).toEqual({ decision: "allow" });
-    expect(
-      evaluatePolicyGate(spawnToolCall({ role: "worker", tools: "edit" }), context)
-    ).toEqual({
-      decision: "allow"
-    });
+  });
+
+  test("bounds excess tool id denial output while keeping an edit example", () => {
+    const farTailSentinel = "tail-sentinel-that-must-not-appear";
+    const excessTools = [
+      "extra-0",
+      "extra-1",
+      "extra-2",
+      "extra-3",
+      "extra-4",
+      "edit",
+      "extra-5",
+      farTailSentinel
+    ];
+
+    const decision = evaluatePolicyGate(
+      spawnToolCall({ role: "worker", tools: ["read", ...excessTools] }),
+      {
+        rules: [SPAWN_PROFILE_SUBSET_RULE]
+      }
+    );
+
+    expect(decision.decision).toBe("deny");
+    if (decision.decision === "deny") {
+      const combined = `${decision.reason}\n${decision.remediation.hint}`;
+      expect(combined).toContain("edit");
+      expect(combined).toContain(`${excessTools.length} total`);
+      expect(combined).not.toContain(farTailSentinel);
+      expect(
+        excessTools.filter((toolId) => combined.includes(toolId)).length
+      ).toBeLessThanOrEqual(SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES);
+      expect(combined.length).toBeLessThan(900);
+    }
   });
 });
 

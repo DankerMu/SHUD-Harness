@@ -3,6 +3,7 @@ import { toErrorMessage } from "@zero-os/shared";
 import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
 import {
   evaluatePolicyGate,
+  normalizeSpawnAgentInput,
   PolicyGuardClassSchema,
   PolicyGateRemediationSchema,
   SPAWN_PROFILE_SUBSET_RULE,
@@ -79,6 +80,24 @@ export const DEFAULT_SHUD_POLICY_GATE_CONTEXT: PolicyGateContext = Object.freeze
   rules: Object.freeze([SPAWN_PROFILE_SUBSET_RULE])
 });
 
+export function createShudPolicyGateEvaluator(
+  customEvaluate?: PolicyGateEvaluator
+): PolicyGateEvaluator {
+  const authorityEvaluate = createPolicyGateEvaluator(DEFAULT_SHUD_POLICY_GATE_CONTEXT);
+  if (!customEvaluate) {
+    return authorityEvaluate;
+  }
+
+  return async (call, context) => {
+    const authorityDecision = await authorityEvaluate(call, context);
+    if (authorityDecision.decision === "deny") {
+      return authorityDecision;
+    }
+
+    return customEvaluate(call, context);
+  };
+}
+
 export function wrapToolWithPolicyGate(
   tool: BaseTool,
   options: PolicyGateWrapperOptions
@@ -138,8 +157,7 @@ export function createShudRuntimeToolRegistry(
   options: ShudRuntimeToolRegistryOptions
 ): ToolRegistry {
   const registry = new ToolRegistry();
-  const evaluate =
-    options.evaluate ?? createPolicyGateEvaluator(DEFAULT_SHUD_POLICY_GATE_CONTEXT);
+  const evaluate = createShudPolicyGateEvaluator(options.evaluate);
   let includesSpawnAgent = false;
 
   for (const tool of options.tools ?? []) {
@@ -292,7 +310,22 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       );
     }
 
-    return this.innerTool.run(toolContext, input);
+    const normalizedInput = normalizeSpawnAgentInput({
+      toolId: this.policyGateToolId,
+      role: this.options.role ?? resolveRole(toolContext),
+      input,
+      workDir: toolContext.workDir
+    });
+    if (normalizedInput.decision === "deny") {
+      const durationMs = Date.now() - startTime;
+      return this.finalizePolicyGateResult(
+        toolContext,
+        buildPolicyGateDeniedResult(this.policyGateToolId, normalizedInput),
+        durationMs
+      );
+    }
+
+    return this.innerTool.run(toolContext, normalizedInput.input);
   }
 
   protected async execute(): Promise<ToolResult> {

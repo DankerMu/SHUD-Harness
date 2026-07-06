@@ -253,8 +253,11 @@ Invariant Matrix:
 - Regression rows:
   - Worker role spawn with `tools=["read","edit"]` -> deny before spawn execution, `remediation.next_action=adjust_scope`, hint contains `edit`, ref points to Roles_and_Boundaries §0.
   - Worker role spawn with a subset such as `tools=["read","sandbox.exec"]` -> allow at pure rule level.
-  - Spawn input without an explicit allowlist -> allow at pure rule level so Zero's role/default tool narrowing remains unchanged.
-  - Unknown target role or non-array allowlist -> allow at this rule level; role existence and parameter schema errors remain owned by Zero spawn and future registry lint.
+  - Canonical-role spawn input without an explicit allowlist -> normalized before Zero execution to that role's #24 canonical profile, so Zero built-in or `.zero/roles` defaults cannot widen SHUD permissions.
+  - Spec alias `allowed_tools` -> normalized to Zero's real `tools` input before execution; malformed or empty canonical-role allowlists -> fail closed with `remediation.next_action=adjust_scope`.
+  - Unknown target role -> allow at this rule level; role existence and non-canonical role schema handling remain owned by Zero spawn and future registry lint.
+  - Custom runtime evaluators -> run after SHUD mandatory authority guards and may only add denials, not replace spawn profile subset enforcement.
+  - Oversized excess tool-id lists -> denial remains bounded, includes a small sample such as `edit` plus total count, and does not echo every untrusted id.
   - `git -C zero diff --quiet` and HEAD `13e25c1` -> unchanged after implementation.
 
 Boundary-surface checklist:
