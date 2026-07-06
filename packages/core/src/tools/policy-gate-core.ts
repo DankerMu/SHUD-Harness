@@ -250,14 +250,14 @@ function parseSpawnAgentInputSnapshot(input: unknown): SpawnAgentInputSnapshotRe
     return fieldSnapshot;
   }
 
+  const instruction = snapshotSpawnInstruction(fieldSnapshot);
+  if (instruction.decision === "deny") {
+    return instruction;
+  }
+
   const fields = snapshotSpawnStringFields(fieldSnapshot);
   if (fields.decision === "deny") {
     return fields;
-  }
-
-  const instruction = validateSpawnInstruction(fieldSnapshot, fields.fields);
-  if (instruction.decision === "deny") {
-    return instruction;
   }
 
   const mode = validateSpawnMode(fields.fields);
@@ -284,7 +284,10 @@ function parseSpawnAgentInputSnapshot(input: unknown): SpawnAgentInputSnapshotRe
   return {
     decision: "allow",
     snapshot: {
-      fields: fields.fields,
+      fields: new Map<SpawnAgentStringField, string>([
+        ["instruction", instruction.instruction],
+        ...fields.fields
+      ]),
       role: role.role,
       allowlist
     }
@@ -384,20 +387,29 @@ function validateSpawnMode(
   return buildSpawnProfileInvalidModeDeny(mode);
 }
 
-function validateSpawnInstruction(
-  snapshot: SpawnFieldSnapshot,
-  fields: ReadonlyMap<SpawnAgentStringField, string>
-): PolicyRuleDecision {
-  if (!snapshot.presentFields.has("instruction") || snapshot.values.instruction === undefined) {
+function snapshotSpawnInstruction(
+  snapshot: SpawnFieldSnapshot
+): { decision: "allow"; instruction: string } | SpawnProfileRuleDeny {
+  const value = snapshot.values.instruction;
+  if (!snapshot.presentFields.has("instruction") || value === undefined) {
     return buildSpawnProfileMissingInstructionDeny();
   }
 
-  const instruction = fields.get("instruction");
-  if (instruction === undefined || instruction.trim().length === 0) {
+  if (typeof value !== "string") {
+    return buildSpawnProfileMalformedInputDeny("spawn_agent instruction must be a string");
+  }
+
+  if (value.length > SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS) {
+    return buildSpawnProfileMalformedInputDeny(
+      `spawn_agent instruction exceeds the ${SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS} character budget`
+    );
+  }
+
+  if (value.trim().length === 0) {
     return buildSpawnProfileMissingInstructionDeny();
   }
 
-  return { decision: "allow" };
+  return { decision: "allow", instruction: value };
 }
 
 function snapshotSpawnRole(
@@ -443,8 +455,9 @@ function snapshotSpawnRole(
 }
 
 function readSpawnAllowlist(snapshot: SpawnFieldSnapshot): SpawnAllowlistRead {
-  const toolsPresent = snapshot.presentFields.has("tools");
-  const allowedToolsPresent = snapshot.presentFields.has("allowed_tools");
+  const toolsPresent = snapshot.presentFields.has("tools") && snapshot.values.tools !== undefined;
+  const allowedToolsPresent =
+    snapshot.presentFields.has("allowed_tools") && snapshot.values.allowed_tools !== undefined;
 
   if (!toolsPresent && !allowedToolsPresent) {
     return { kind: "omitted" };
@@ -522,12 +535,16 @@ function readSpawnAllowlistField(
   const rawToolIds: string[] = [];
   let totalCharacters = 0;
   for (let index = 0; index < length; index += 1) {
-    let entry: unknown;
+    let descriptor: PropertyDescriptor | undefined;
     try {
-      entry = arrayValue[index];
+      descriptor = Object.getOwnPropertyDescriptor(arrayValue, index);
     } catch {
       return { kind: "invalid", field };
     }
+    if (!descriptor || !("value" in descriptor)) {
+      return { kind: "invalid", field };
+    }
+    const entry = descriptor.value;
     if (typeof entry !== "string") {
       return { kind: "invalid", field };
     }

@@ -213,7 +213,8 @@ describe("spawn profile subset policy rule", () => {
     const inputs: unknown[] = [
       { role: "worker", tools: ["read"] },
       { instruction: undefined, role: "worker", tools: ["read"] },
-      { instruction: "   ", role: "worker", tools: ["read"] }
+      { instruction: "   ", role: "worker", tools: ["read"] },
+      { role: "worker", tools: ["read"], mode: 1 }
     ];
 
     for (const input of inputs) {
@@ -235,6 +236,59 @@ describe("spawn profile subset policy rule", () => {
           expect(result.remediation.hint).toContain("instruction");
         }
       }
+    }
+  });
+
+  test("treats explicit undefined spawn allowlists as omitted", () => {
+    const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
+
+    const omittedTools = normalizeSpawnAgentInput(
+      spawnToolCallRaw({
+        instruction: "Run the delegated task.",
+        role: "worker",
+        tools: undefined
+      })
+    );
+    expect(omittedTools).toMatchObject({
+      decision: "allow",
+      changed: true
+    });
+    if (omittedTools.decision === "allow") {
+      expect(omittedTools.input).toMatchObject({
+        instruction: "Run the delegated task.",
+        role: "worker",
+        tools: getRoleToolIds("worker")
+      });
+    }
+    expect(
+      evaluatePolicyGate(
+        spawnToolCallRaw({
+          instruction: "Run the delegated task.",
+          role: "worker",
+          allowed_tools: undefined
+        }),
+        context
+      )
+    ).toEqual({ decision: "allow" });
+
+    const alias = normalizeSpawnAgentInput(
+      spawnToolCallRaw({
+        instruction: "Run the delegated task.",
+        role: "worker",
+        tools: undefined,
+        allowed_tools: ["read"]
+      })
+    );
+    expect(alias).toMatchObject({
+      decision: "allow",
+      changed: true
+    });
+    if (alias.decision === "allow") {
+      expect(alias.input).toEqual({
+        instruction: "Run the delegated task.",
+        role: "worker",
+        tools: ["read"]
+      });
     }
   });
 
@@ -294,6 +348,68 @@ describe("spawn profile subset policy rule", () => {
       expect(normalized.input).not.toHaveProperty("ignoredHostile");
     }
     expect(enumerated).toBe(false);
+  });
+
+  test("denies accessor and proxy-backed spawn allowlist entries without executing them", () => {
+    let accessorReads = 0;
+    const accessorTools: unknown[] = [];
+    Object.defineProperty(accessorTools, "0", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        accessorReads += 1;
+        return "read";
+      }
+    });
+
+    const accessorDecision = normalizeSpawnAgentInput(
+      spawnToolCallRaw({
+        instruction: "Run the delegated task.",
+        role: "worker",
+        tools: accessorTools
+      })
+    );
+
+    expect(accessorDecision).toMatchObject({
+      decision: "deny",
+      ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+      guardClass: "authority"
+    });
+    expect(accessorReads).toBe(0);
+
+    let proxyElementReads = 0;
+    const proxyTools = new Proxy(["read"], {
+      get(target, property, receiver) {
+        if (property === "0") {
+          proxyElementReads += 1;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+      getOwnPropertyDescriptor(target, property) {
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      }
+    });
+
+    const proxyDecision = normalizeSpawnAgentInput(
+      spawnToolCallRaw({
+        instruction: "Run the delegated task.",
+        role: "worker",
+        tools: proxyTools
+      })
+    );
+
+    expect(proxyDecision).toMatchObject({
+      decision: "allow",
+      changed: true
+    });
+    if (proxyDecision.decision === "allow") {
+      expect(proxyDecision.input).toEqual({
+        instruction: "Run the delegated task.",
+        role: "worker",
+        tools: ["read"]
+      });
+    }
+    expect(proxyElementReads).toBe(0);
   });
 
   test("denies non-primitive spawn roles before role trimming", () => {
