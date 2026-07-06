@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shud-harness.local/generated/json-schema/lock-record.json",
+  "title": "LockRecord",
+  "type": "object",
+  "properties": {
+    "lock_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "task",
+        "job",
+        "run",
+        "report",
+        "workspace",
+        "worktree"
+      ]
+    },
+    "target_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "holder": {
+      "type": "string",
+      "minLength": 1
+    },
+    "acquired_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expires_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "held",
+        "released",
+        "expired",
+        "stolen_after_recovery"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "lock_id",
+    "scope",
+    "target_id",
+    "holder",
+    "acquired_at",
+    "expires_at",
+    "status",
+    "reason"
+  ],
+  "additionalProperties": false
+}

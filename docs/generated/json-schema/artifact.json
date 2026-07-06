@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shud-harness.local/generated/json-schema/artifact.json",
+  "title": "Artifact",
+  "type": "object",
+  "properties": {
+    "artifact_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "report_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "analysis_plan_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "log",
+        "metrics",
+        "figure",
+        "timeseries",
+        "report_markdown",
+        "report_export",
+        "patch",
+        "repo_context",
+        "toolcall",
+        "manifest",
+        "analysis_progress",
+        "error"
+      ]
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "media_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "sha256": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_by": {
+      "type": "string",
+      "enum": [
+        "system",
+        "agent",
+        "user"
+      ]
+    },
+    "evidence_usable": {
+      "type": "boolean"
+    },
+    "retention_class": {
+      "type": "string",
+      "enum": [
+        "ephemeral",
+        "debug",
+        "evidence",
+        "accepted_report",
+        "benchmark"
+      ]
+    },
+    "source_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "redaction_status": {
+      "type": "string",
+      "enum": [
+        "not_needed",
+        "redacted",
+        "unsafe"
+      ]
+    }
+  },
+  "required": [
+    "artifact_id",
+    "task_id",
+    "type",
+    "path",
+    "media_type",
+    "created_at",
+    "created_by",
+    "evidence_usable",
+    "retention_class",
+    "source_refs",
+    "redaction_status"
+  ],
+  "additionalProperties": false
+}
