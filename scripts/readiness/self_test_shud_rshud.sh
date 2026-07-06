@@ -500,6 +500,8 @@ assert_json_expr "$pass_output" 'data["make_environment_guard"]["ok"] is True'
 assert_json_expr "$pass_output" 'data["rshud"]["installed"]["parser"]["contract_ok"] is True'
 assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["repo_owned"] is True'
 assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["source"]["relative_path"] == ".gitignore"'
+assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["source"]["tracked"] is True'
+assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["source"]["clean"] is True'
 assert_repo_owned_ignore "$pass_fixture" workspace/readiness/shud_rshud_readiness.json "fixture default readiness output"
 fixture_workspace_status=$(git -C "$pass_fixture" status --short -- workspace)
 if [ -n "$fixture_workspace_status" ]; then
@@ -514,6 +516,72 @@ FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper_default_output "$defa
 assert_json "$default_wrapper_output" pass -
 assert_no_shud_artifacts "$default_wrapper_fixture"
 assert_json_expr "$default_wrapper_output" 'data["shud"]["build"]["cleanup_requested"] is True'
+
+untracked_gitignore_fixture="$TMP_ROOT/untracked-gitignore-fixture"
+make_fixture "$untracked_gitignore_fixture"
+git -C "$untracked_gitignore_fixture" rm -q .gitignore
+git -C "$untracked_gitignore_fixture" commit -q -m "remove tracked root gitignore"
+printf '%s\n' '/workspace/readiness/*.json' > "$untracked_gitignore_fixture/.gitignore"
+untracked_gitignore_output="$untracked_gitignore_fixture/workspace/readiness/untracked_gitignore.json"
+untracked_gitignore_stderr="$TMP_ROOT/untracked-gitignore.stderr"
+untracked_gitignore_make_marker="$TMP_ROOT/untracked-gitignore.make-marker"
+if FAKE_MAKE_MARKER="$untracked_gitignore_make_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$untracked_gitignore_fixture" "$untracked_gitignore_output" >/dev/null 2>"$untracked_gitignore_stderr"; then
+  fail "untracked .gitignore readiness output unexpectedly returned zero"
+fi
+if ! grep -q "output ignore source is not tracked-clean repo .gitignore" "$untracked_gitignore_stderr" \
+  || ! grep -q "not tracked" "$untracked_gitignore_stderr"; then
+  cat "$untracked_gitignore_stderr" >&2
+  fail "untracked .gitignore readiness output was not rejected by tracked-clean ignore guard"
+fi
+if [ -e "$untracked_gitignore_output" ]; then
+  fail "untracked .gitignore fixture wrote readiness output"
+fi
+if [ -e "$untracked_gitignore_make_marker" ]; then
+  fail "make executed for untracked .gitignore fixture"
+fi
+
+modified_gitignore_fixture="$TMP_ROOT/modified-gitignore-fixture"
+make_fixture "$modified_gitignore_fixture"
+printf '%s\n' 'workspace/readiness/*.json' > "$modified_gitignore_fixture/.gitignore"
+modified_gitignore_output="$modified_gitignore_fixture/workspace/readiness/modified_gitignore.json"
+modified_gitignore_stderr="$TMP_ROOT/modified-gitignore.stderr"
+modified_gitignore_make_marker="$TMP_ROOT/modified-gitignore.make-marker"
+if FAKE_MAKE_MARKER="$modified_gitignore_make_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$modified_gitignore_fixture" "$modified_gitignore_output" >/dev/null 2>"$modified_gitignore_stderr"; then
+  fail "modified .gitignore readiness output unexpectedly returned zero"
+fi
+if ! grep -q "output ignore source is not tracked-clean repo .gitignore" "$modified_gitignore_stderr" \
+  || ! grep -q "unstaged changes" "$modified_gitignore_stderr"; then
+  cat "$modified_gitignore_stderr" >&2
+  fail "modified .gitignore readiness output was not rejected by tracked-clean ignore guard"
+fi
+if [ -e "$modified_gitignore_output" ]; then
+  fail "modified .gitignore fixture wrote readiness output"
+fi
+if [ -e "$modified_gitignore_make_marker" ]; then
+  fail "make executed for modified .gitignore fixture"
+fi
+
+staged_gitignore_fixture="$TMP_ROOT/staged-gitignore-fixture"
+make_fixture "$staged_gitignore_fixture"
+printf '%s\n' 'workspace/readiness/*.json' > "$staged_gitignore_fixture/.gitignore"
+git -C "$staged_gitignore_fixture" add .gitignore
+staged_gitignore_output="$staged_gitignore_fixture/workspace/readiness/staged_gitignore.json"
+staged_gitignore_stderr="$TMP_ROOT/staged-gitignore.stderr"
+staged_gitignore_make_marker="$TMP_ROOT/staged-gitignore.make-marker"
+if FAKE_MAKE_MARKER="$staged_gitignore_make_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$staged_gitignore_fixture" "$staged_gitignore_output" >/dev/null 2>"$staged_gitignore_stderr"; then
+  fail "staged .gitignore readiness output unexpectedly returned zero"
+fi
+if ! grep -q "output ignore source is not tracked-clean repo .gitignore" "$staged_gitignore_stderr" \
+  || ! grep -q "staged changes" "$staged_gitignore_stderr"; then
+  cat "$staged_gitignore_stderr" >&2
+  fail "staged .gitignore readiness output was not rejected by tracked-clean ignore guard"
+fi
+if [ -e "$staged_gitignore_output" ]; then
+  fail "staged .gitignore fixture wrote readiness output"
+fi
+if [ -e "$staged_gitignore_make_marker" ]; then
+  fail "make executed for staged .gitignore fixture"
+fi
 
 global_excludes_only_fixture="$TMP_ROOT/global-excludes-only-fixture"
 make_fixture "$global_excludes_only_fixture"

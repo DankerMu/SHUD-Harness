@@ -313,9 +313,13 @@ def repo_owned_gitignore_source(repo_root: Path, source: str | None) -> dict[str
         "absolute_path": None,
         "relative_path": None,
         "under_worktree": False,
+        "tracked": None,
+        "clean": None,
+        "error": None,
         "repo_owned": False,
     }
     if not source:
+        proof["error"] = "ignore source is missing"
         return proof
     source_path = Path(source)
     absolute_source = source_path if source_path.is_absolute() else repo_root / source_path
@@ -323,10 +327,54 @@ def repo_owned_gitignore_source(repo_root: Path, source: str | None) -> dict[str
     try:
         relative_source = absolute_source.resolve(strict=False).relative_to(repo_root.resolve())
     except ValueError:
+        proof["error"] = "ignore source is outside the worktree"
         return proof
     proof["relative_path"] = relative_source.as_posix()
     proof["under_worktree"] = bool(relative_source.parts and relative_source.parts[0] != ".git")
-    proof["repo_owned"] = proof["under_worktree"] and absolute_source.name == ".gitignore"
+    if not proof["under_worktree"]:
+        proof["error"] = "ignore source is not under the worktree"
+        return proof
+    if absolute_source.name != ".gitignore":
+        proof["error"] = "ignore source is not a repo-owned .gitignore"
+        return proof
+
+    relative_posix = relative_source.as_posix()
+    tracked_result = run_git_command(repo_root, ["ls-files", "--error-unmatch", "--", relative_posix])
+    if tracked_result["exit_code"] == 0:
+        proof["tracked"] = True
+    elif tracked_result["exit_code"] == 1:
+        proof["tracked"] = False
+        proof["clean"] = False
+        proof["error"] = "ignore source is not tracked by HEAD/index"
+        return proof
+    else:
+        proof["tracked"] = None
+        proof["clean"] = None
+        proof["error"] = "ignore source tracked state could not be proven"
+        return proof
+
+    unstaged_result = run_git_command(repo_root, ["diff", "--quiet", "--", relative_posix])
+    if unstaged_result["exit_code"] == 1:
+        proof["clean"] = False
+        proof["error"] = "ignore source has unstaged changes"
+        return proof
+    if unstaged_result["exit_code"] != 0:
+        proof["clean"] = None
+        proof["error"] = "ignore source unstaged-clean state could not be proven"
+        return proof
+
+    staged_result = run_git_command(repo_root, ["diff", "--cached", "--quiet", "--", relative_posix])
+    if staged_result["exit_code"] == 1:
+        proof["clean"] = False
+        proof["error"] = "ignore source has staged changes"
+        return proof
+    if staged_result["exit_code"] != 0:
+        proof["clean"] = None
+        proof["error"] = "ignore source staged-clean state could not be proven"
+        return proof
+
+    proof["clean"] = True
+    proof["repo_owned"] = True
     return proof
 
 
@@ -360,6 +408,7 @@ def check_git_ignore_proof(repo_root: Path, output: Path) -> dict[str, Any]:
         }
     verbose = parse_check_ignore_verbose(str(result.get("stdout_tail") or ""))
     source = repo_owned_gitignore_source(repo_root, verbose.get("source"))
+    proof_error = source.get("error") if not source["repo_owned"] else None
     return {
         "ignored": True,
         "repo_owned": source["repo_owned"] and verbose.get("parse_error") is None,
@@ -370,7 +419,7 @@ def check_git_ignore_proof(repo_root: Path, output: Path) -> dict[str, Any]:
         "matched_path": verbose.get("matched_path"),
         "parse_error": verbose.get("parse_error"),
         "raw": verbose.get("raw"),
-        "error": None,
+        "error": verbose.get("parse_error") or proof_error,
     }
 
 
@@ -474,6 +523,10 @@ def validate_output_scope(
         if not ignore_proof["ignored"]:
             raise OutputSafetyError(f"output path is not ignored by git: {rel.as_posix()}")
         if not ignore_proof["repo_owned"]:
+            if ignore_proof.get("error"):
+                raise OutputSafetyError(
+                    f"output ignore source is not tracked-clean repo .gitignore: {ignore_proof['error']}"
+                )
             raise OutputSafetyError(
                 f"output path is not ignored by a repo-owned .gitignore: {rel.as_posix()}"
             )
