@@ -154,11 +154,12 @@ describe("policy-gated zero tool registry", () => {
         return { decision: "allow" };
       }
     });
+    const sentinel = "UNREGISTERED_SECRET_FROM_GETTER";
     const input: Record<string, unknown> = {};
     Object.defineProperty(input, "command", {
       enumerable: true,
       get() {
-        throw new Error("policy input preparation failed");
+        throw new Error(sentinel);
       }
     });
 
@@ -172,10 +173,22 @@ describe("policy-gated zero tool registry", () => {
     );
 
     expect(result.success).toBe(false);
-    expect(result.output).toContain("policy input preparation failed");
+    expect(result.output).toContain("policy_gate_input_preparation_failed");
+    expect(result.output).not.toContain(sentinel);
     expect(result.output).not.toContain("policy_gate_denied");
     expect(result.output).not.toContain("raw_data_write_denied");
-    expect(result.outputSummary).toContain("Error: policy input preparation failed");
+    expect(result.outputSummary).toBe("Policy gate input preparation failed for edit");
+    expect(result.outputSummary).not.toContain(sentinel);
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      tool_id?: string;
+      reason?: string;
+    };
+    expect(payload).toEqual({
+      error: "policy_gate_input_preparation_failed",
+      tool_id: "edit",
+      reason: "Policy gate could not safely prepare the tool input before evaluation."
+    });
     expect(customCalls).toBe(0);
     expect(editTool.calls).toBe(0);
     expect(handle.getState()).toBe("finished");
@@ -921,6 +934,7 @@ describe("policy-gated zero tool registry", () => {
       expect(payload.guard_class).toBe("authority");
       expect(payload.remediation?.next_action).toBe("adjust_scope");
       expect(payload.remediation?.hint).toContain("edit");
+      expect(payload.remediation?.hint).toContain("(1 total)");
       expect(payload.remediation?.ref).toContain(
         "docs/02_ARCHITECTURE/Roles_and_Boundaries.md#0-canonical-agent-role-registry"
       );

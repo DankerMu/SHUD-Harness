@@ -276,16 +276,11 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       | Extract<PolicyGateDecision, { decision: "deny" }>;
     try {
       preparedInput = this.preparePolicyGateInput(toolContext, role, input);
-    } catch (error) {
+    } catch {
       const durationMs = Date.now() - startTime;
-      const errorMessage = toErrorMessage(error);
       return this.finalizePolicyGateResult(
         toolContext,
-        {
-          success: false,
-          output: errorMessage,
-          outputSummary: `Error: ${errorMessage.slice(0, 100)}`
-        },
+        buildPolicyGatePreparationFailedResult(this.policyGateToolId),
         durationMs
       );
     }
@@ -539,6 +534,20 @@ function buildRawDataRuleMisconfiguredResult(
     success: false,
     output: JSON.stringify(payload),
     outputSummary: `Policy gate raw-data rule misconfigured for ${toolId}: ${decision.reason}`
+  };
+}
+
+function buildPolicyGatePreparationFailedResult(toolId: string): ToolResult {
+  const payload = {
+    error: "policy_gate_input_preparation_failed",
+    tool_id: toolId,
+    reason: "Policy gate could not safely prepare the tool input before evaluation."
+  };
+
+  return {
+    success: false,
+    output: JSON.stringify(payload),
+    outputSummary: `Policy gate input preparation failed for ${toolId}`
   };
 }
 

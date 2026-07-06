@@ -129,6 +129,7 @@ describe("spawn profile subset policy rule", () => {
     });
     if (decision.decision === "deny") {
       expect(decision.reason).toContain("edit");
+      expect(decision.remediation.hint).toContain("(1 total)");
       expect(decision.remediation.hint).toContain("edit");
       expect(decision.remediation.ref).toContain(
         "docs/02_ARCHITECTURE/Roles_and_Boundaries.md#0-canonical-agent-role-registry"
@@ -362,6 +363,45 @@ describe("spawn profile subset policy rule", () => {
           next_action: "adjust_scope"
         }
       });
+    }
+  });
+
+  test("denies proxy allowlists with invalid array lengths", () => {
+    const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
+    const invalidLengths: unknown[] = [Number.NaN, -1, 1.5, "x"];
+
+    for (const field of ["tools", "allowed_tools"] as const) {
+      for (const invalidLength of invalidLengths) {
+        const allowlist = new Proxy(["read"], {
+          get(target, property, receiver) {
+            if (property === "length") {
+              return invalidLength;
+            }
+            return Reflect.get(target, property, receiver);
+          }
+        });
+        const input = { role: "worker", [field]: allowlist };
+
+        const decision = evaluatePolicyGate(spawnToolCall(input), context);
+        const normalized = normalizeSpawnAgentInput(spawnToolCall(input));
+
+        expect(decision).toMatchObject({
+          decision: "deny",
+          ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+          guardClass: "authority",
+          remediation: {
+            next_action: "adjust_scope"
+          }
+        });
+        expect(normalized).toMatchObject({
+          decision: "deny",
+          ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+          guardClass: "authority",
+          remediation: {
+            next_action: "adjust_scope"
+          }
+        });
+      }
     }
   });
 

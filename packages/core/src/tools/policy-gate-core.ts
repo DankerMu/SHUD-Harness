@@ -459,10 +459,13 @@ function readSpawnAllowlistField(
   }
 
   const arrayValue = value as readonly unknown[];
-  let length: number;
+  let length: unknown;
   try {
     length = arrayValue.length;
   } catch {
+    return { kind: "invalid", field };
+  }
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
     return { kind: "invalid", field };
   }
   if (length > SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS) {
@@ -711,7 +714,9 @@ function buildSpawnProfileAmbiguousAllowlistDeny(
     ? uniqueStrings(allowlist.toolIds.filter((toolId) => !isRoleToolIdAllowed(role, toolId)))
     : [];
   const excessClause =
-    excessToolIds.length > 0 ? ` Excess examples: ${formatToolIdSummary(excessToolIds)}.` : "";
+    excessToolIds.length > 0
+      ? ` Excess examples: ${formatToolIdSummary(excessToolIds, { alwaysIncludeTotal: true })}.`
+      : "";
 
   return {
     decision: "deny",
@@ -729,7 +734,7 @@ function buildSpawnProfileExcessDeny(
   role: HarnessRole,
   excessToolIds: readonly string[]
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
-  const excessSummary = formatToolIdSummary(excessToolIds);
+  const excessSummary = formatToolIdSummary(excessToolIds, { alwaysIncludeTotal: true });
   const canonicalSummary = formatToolIdSummary(getRoleToolIds(role));
   return {
     decision: "deny",
@@ -743,10 +748,15 @@ function buildSpawnProfileExcessDeny(
   };
 }
 
-function formatToolIdSummary(toolIds: readonly string[]): string {
+function formatToolIdSummary(
+  toolIds: readonly string[],
+  options: { alwaysIncludeTotal?: boolean } = {}
+): string {
   const samples = selectToolIdSamples(toolIds).map(formatToolIdSample);
   const suffix =
-    toolIds.length > SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES ? ` (${toolIds.length} total)` : "";
+    options.alwaysIncludeTotal || toolIds.length > SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES
+      ? ` (${toolIds.length} total)`
+      : "";
   return `${samples.join(", ")}${suffix}`;
 }
 
