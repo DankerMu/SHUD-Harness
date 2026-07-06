@@ -13,7 +13,17 @@
     - Absent or preexisting `workspace/readiness/` -> helper creates/overwrites only `workspace/readiness/readiness_gate_v0_8_1.yaml`; `git status --short -- workspace` remains empty.
     - PR description or issue comment -> records per-gate input/result, command evidence, and downstream action: `block` freezes #16+ coding; `pass|pass_with_notes` unlocks downstream M1 coding.
 - [ ] 1.2 link check 脚本入库 `scripts/` + CI 工作流骨架（PR 触发：link check + 单测占位；schema drift 检查由 4.2 接入，PERF-API-001 冒烟由 6.5 接入）
-- [ ] 1.3 根 `package.json` 固定 packageManager + lockfile 入库 + 初始 DependencyLock（四 submodule commit + 运行时依赖版本）
+- [ ] 1.3 根 `package.json` 固定 packageManager + lockfile 入库 + 初始 DependencyLock（四 submodule commit + dirty 状态 + 运行时依赖版本）
+  - Evidence floor (#14):
+    - `bun install --frozen-lockfile` succeeds and leaves root lockfile unchanged; lockfile sha256 equals DependencyLock `package_manager.lockfile_sha256`.
+    - `.gitmodules` path/url parser check returns exactly SHUD/rSHUD/AutoSHUD/zero; DependencyLock submodules are the exact same set, commits match `git submodule status`, every recorded `dirty` flag is `false`, and zero is pinned to `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`.
+    - `node scripts/dependency-lock/validate.mjs` derives a non-empty direct external dependency set from root `bun.lock` workspace dependency sections and verifies DependencyLock `packages` exactly by `name`, resolved `version`, `dependency_type`, and `source`; it also validates `package_manager.name/version/lockfile_path/lockfile_sha256` against `package.json#packageManager` and the inspected root lockfile.
+    - `sh scripts/dependency-lock/self_test.sh` proves package negative fixtures fail validation: empty `packages`, a missing direct dependency, and a mismatched resolved version.
+    - `sh scripts/dependency-lock/self_test.sh` proves package-manager identity negative fixtures fail validation: stale `package_manager.version` and wrong `package_manager.lockfile_path`.
+    - `sh scripts/dependency-lock/self_test.sh` proves submodule negative fixtures fail validation: missing submodule, wrong submodule commit, dirty flag `true`, and wrong zero commit.
+    - DependencyLock records zero commit `13e25c1`, every submodule has `dirty: false`, and `git -C zero diff --quiet` passes.
+    - `git status --short -- packages SHUD rSHUD AutoSHUD zero` is empty; PR changes stay inside root `package.json`, root lockfile, DependencyLock record, and workflow fixture.
+    - Secret/token scan over the three lock artifacts reports no registry auth headers, API keys, or bearer tokens.
 - [ ] 1.4 SHUD `make` 复验（一次本机编译 + 环境快照记入 readiness notes）+ rSHUD ≥2.5.0 在位确认
 
 ## 2. Monorepo 骨架（monorepo-skeleton）

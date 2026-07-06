@@ -2,6 +2,7 @@
   "name": "shud-harness",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.2.19",
   "workspaces": [
     "packages/*",
     "zero/packages/*"
@@ -12,6 +13,8 @@
     "test:tool-registry-governance": "bun test ./packages/core/src/tools/role-tool-map.test.ts",
     "test:backend-ws": "bun test ./packages/backend/src/ws/index.test.ts",
     "test:schemas": "bun test ./packages/core/src/domain/schemas/core-schemas.test.ts",
+    "validate:dependency-lock": "node scripts/dependency-lock/validate.mjs",
+    "test:dependency-lock": "sh scripts/dependency-lock/self_test.sh",
     "check": "bun run typecheck && bun run test:policy-gate && bun run test:tool-registry-governance && bun run test:backend-ws && bun run test:schemas"
   },
   "devDependencies": {
