@@ -1043,48 +1043,6 @@ def effective_candidate_limit(default_limit: int) -> dict[str, Any]:
     return policy
 
 
-def bounded_glob_paths(base_dir: Path, pattern: str, default_limit: int, limit_reason: str) -> tuple[list[Path], dict[str, Any]]:
-    limit_policy = effective_candidate_limit(default_limit)
-    limit = int(limit_policy["limit"])
-    paths: list[Path] = []
-    scan: dict[str, Any] = {
-        "base_dir": str(base_dir),
-        "base_dir_exists": base_dir.is_dir(),
-        "pattern": pattern,
-        "candidate_limit": limit,
-        "candidate_limit_policy": limit_policy,
-        "candidate_count": 0,
-        "candidate_count_lower_bound": None,
-        "materialized_all_candidates": True,
-        "truncated": False,
-        "scan_blocks": [],
-        "reason": None,
-    }
-    if not base_dir.is_dir():
-        return paths, scan
-
-    for candidate in base_dir.glob(pattern):
-        scan["candidate_count"] += 1
-        if scan["candidate_count"] > limit:
-            scan["candidate_count_lower_bound"] = scan["candidate_count"]
-            scan["materialized_all_candidates"] = False
-            scan["truncated"] = True
-            scan["reason"] = limit_reason
-            scan["scan_blocks"].append(
-                {
-                    "base_dir": str(base_dir),
-                    "pattern": pattern,
-                    "candidate_limit": limit,
-                    "candidate_count_lower_bound": scan["candidate_count"],
-                    "materialized_all_candidates": False,
-                    "reason": limit_reason,
-                }
-            )
-            break
-        paths.append(candidate)
-    return sorted(paths, key=lambda candidate: candidate.as_posix()), scan
-
-
 def bounded_top_level_paths(base_dir: Path, default_limit: int, limit_reason: str) -> tuple[list[Path], dict[str, Any]]:
     limit_policy = effective_candidate_limit(default_limit)
     limit = int(limit_policy["limit"])
@@ -1324,31 +1282,28 @@ def parse_sundials_version(header: Path) -> str | None:
 
 
 def collect_sundials_libraries(lib_dir: Path, errors: list[str]) -> dict[str, Any]:
-    cvode_libraries, cvode_scan = bounded_glob_paths(
+    entries, directory_scan = bounded_top_level_paths(
         lib_dir,
-        "libsundials_cvode*",
         MAX_SUNDIALS_LIBRARY_CANDIDATES,
-        "SUNDIALS library scan limit exceeded before sorting or storing all cvode library candidates",
+        "SUNDIALS library scan limit exceeded before filtering all library directory entries",
     )
-    nvecserial_libraries, nvecserial_scan = bounded_glob_paths(
-        lib_dir,
-        "libsundials_nvecserial*",
-        MAX_SUNDIALS_LIBRARY_CANDIDATES,
-        "SUNDIALS library scan limit exceeded before sorting or storing all nvecserial library candidates",
+    cvode_libraries = sorted(str(path) for path in entries if fnmatch.fnmatch(path.name, "libsundials_cvode*"))
+    nvecserial_libraries = sorted(
+        str(path) for path in entries if fnmatch.fnmatch(path.name, "libsundials_nvecserial*")
     )
-    scan_blocks = [*cvode_scan["scan_blocks"], *nvecserial_scan["scan_blocks"]]
+    scan_blocks = list(directory_scan["scan_blocks"])
     if scan_blocks:
         errors.append("SUNDIALS library scan limit exceeded; refusing readiness pass")
     return {
-        "cvode_libraries": [str(path) for path in cvode_libraries],
-        "nvecserial_libraries": [str(path) for path in nvecserial_libraries],
+        "cvode_libraries": cvode_libraries,
+        "nvecserial_libraries": nvecserial_libraries,
         "scan": {
-            "candidate_limit": cvode_scan["candidate_limit"],
+            "candidate_limit": directory_scan["candidate_limit"],
             "materialized_all_candidates": not scan_blocks,
             "truncated": bool(scan_blocks),
             "scan_blocks": scan_blocks,
-            "cvode": cvode_scan,
-            "nvecserial": nvecserial_scan,
+            "directory": directory_scan,
+            "patterns": ["libsundials_cvode*", "libsundials_nvecserial*"],
         },
     }
 
@@ -2257,6 +2212,21 @@ def collect_path_identity(label: str, path: Path, inspected_repo_root: Path) -> 
     }
 
 
+def required_path_identity_errors(label: str, identity: dict[str, Any]) -> list[str]:
+    errors = list(identity.get("errors", []))
+    if identity.get("exists") is not True or identity.get("is_file") is not True:
+        errors.append(f"{label} readiness evidence producer is not a regular file")
+    if identity.get("worktree_root") is None:
+        errors.append(f"{label} readiness evidence producer is not inside a git worktree")
+    if identity.get("tracked") is not True:
+        errors.append(f"{label} readiness evidence producer is not tracked by git")
+    if identity.get("head_matches_current") is not True:
+        errors.append(f"{label} readiness evidence producer current blob does not match HEAD")
+    if identity.get("tracked_clean") is not True:
+        errors.append(f"{label} readiness evidence producer is not tracked clean at HEAD")
+    return errors
+
+
 def collect_checkout_identity(repo_root: Path, errors: list[str]) -> dict[str, Any]:
     root_status_paths = [
         "SHUD",
@@ -2270,6 +2240,8 @@ def collect_checkout_identity(repo_root: Path, errors: list[str]) -> dict[str, A
     identity_errors: list[str] = []
     if not root["ok"]:
         identity_errors.extend(root["errors"])
+    if root["dirty"] is True:
+        identity_errors.append("root checkout identity pathspecs have uncommitted or visible changes")
 
     for name in ("SHUD", "rSHUD"):
         gitlink = collect_parent_gitlink(repo_root, name)
@@ -2279,6 +2251,8 @@ def collect_checkout_identity(repo_root: Path, errors: list[str]) -> dict[str, A
             submodule_errors.append(f"{name} root gitlink identity could not be collected: {gitlink['error']}")
         if not checkout["ok"]:
             submodule_errors.extend(checkout["errors"])
+        if checkout["dirty"] is True:
+            submodule_errors.append(f"{name} checkout has uncommitted or visible changes")
         submodules[name] = {
             "root_gitlink": gitlink,
             "checkout": checkout,
@@ -2298,6 +2272,11 @@ def collect_checkout_identity(repo_root: Path, errors: list[str]) -> dict[str, A
         "helper": collect_path_identity("helper", helper_path, repo_root),
         "wrapper": collect_path_identity("wrapper", wrapper_path, repo_root),
     }
+    for label, identity in paths.items():
+        required_errors = required_path_identity_errors(label, identity)
+        identity["required_for_consumable_evidence"] = not required_errors
+        identity["required_for_consumable_evidence_errors"] = required_errors
+        identity_errors.extend(required_errors)
     extend_errors(errors, identity_errors)
     return {
         "ok": not identity_errors,

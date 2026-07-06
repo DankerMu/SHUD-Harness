@@ -4,7 +4,9 @@ umask 022
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-HELPER="$SCRIPT_DIR/check_shud_rshud.sh"
+SOURCE_HELPER="$SCRIPT_DIR/check_shud_rshud.sh"
+SOURCE_PY_HELPER="$SCRIPT_DIR/check_shud_rshud.py"
+HELPER="$SOURCE_HELPER"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/shud-rshud-readiness-test.XXXXXX")
 REAL_GIT=$(command -v git)
 REAL_PYTHON=$(command -v python3)
@@ -269,6 +271,17 @@ init_git_repo() {
   git -C "$repo" config user.name "readiness-test"
   git -C "$repo" config core.autocrlf false
   git -C "$repo" config advice.addEmbeddedRepo false
+}
+
+make_tool_repo() {
+  repo=$1
+  mkdir -p "$repo/scripts/readiness"
+  init_git_repo "$repo"
+  cp "$SOURCE_HELPER" "$repo/scripts/readiness/check_shud_rshud.sh"
+  cp "$SOURCE_PY_HELPER" "$repo/scripts/readiness/check_shud_rshud.py"
+  chmod +x "$repo/scripts/readiness/check_shud_rshud.sh"
+  git -C "$repo" add scripts/readiness/check_shud_rshud.sh scripts/readiness/check_shud_rshud.py
+  git -C "$repo" commit -q -m "fixture readiness tool"
 }
 
 make_fixture() {
@@ -542,6 +555,10 @@ assert_no_shud_artifacts() {
   fi
 }
 
+TOOL_REPO="$TMP_ROOT/readiness-tool-repo"
+make_tool_repo "$TOOL_REPO"
+HELPER="$TOOL_REPO/scripts/readiness/check_shud_rshud.sh"
+
 make_fake_bin "$TMP_ROOT/bin"
 
 trusted_symlink_prefix="$TMP_ROOT/test-trusted-prefix"
@@ -662,15 +679,46 @@ assert_json_expr "$pass_output" 'data["checkout_identity"]["submodules"]["rSHUD"
 assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["helper"]["tracked"] is True'
 assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["helper"]["head_blob_oid"] is not None'
 assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["helper"]["current_blob_oid"] is not None'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["helper"]["head_matches_current"] is True'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["helper"]["tracked_clean"] is True'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["helper"]["required_for_consumable_evidence"] is True'
 assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["wrapper"]["tracked"] is True'
 assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["wrapper"]["head_blob_oid"] is not None'
 assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["wrapper"]["current_blob_oid"] is not None'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["wrapper"]["head_matches_current"] is True'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["wrapper"]["tracked_clean"] is True'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["wrapper"]["required_for_consumable_evidence"] is True'
 assert_repo_owned_ignore "$pass_fixture" workspace/readiness/shud_rshud_readiness.json "fixture default readiness output"
 fixture_workspace_status=$(git -C "$pass_fixture" status --short -- workspace)
 if [ -n "$fixture_workspace_status" ]; then
   printf '%s\n' "$fixture_workspace_status" >&2
   fail "fixture workspace output is visible to git"
 fi
+
+dirty_tool_repo="$TMP_ROOT/dirty-readiness-tool-repo"
+make_tool_repo "$dirty_tool_repo"
+printf '%s\n' '# dirty helper fixture' >> "$dirty_tool_repo/scripts/readiness/check_shud_rshud.py"
+printf '%s\n' '# dirty wrapper fixture' >> "$dirty_tool_repo/scripts/readiness/check_shud_rshud.sh"
+dirty_helper_fixture="$TMP_ROOT/dirty-helper-fixture"
+make_fixture "$dirty_helper_fixture"
+dirty_helper_output="$dirty_helper_fixture/workspace/readiness/dirty_helper.json"
+clean_helper="$HELPER"
+HELPER="$dirty_tool_repo/scripts/readiness/check_shud_rshud.sh"
+if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$dirty_helper_fixture" "$dirty_helper_output" >/dev/null 2>/dev/null; then
+  HELPER="$clean_helper"
+  fail "dirty helper/wrapper fixture unexpectedly returned zero"
+fi
+HELPER="$clean_helper"
+assert_json "$dirty_helper_output" block "helper readiness evidence producer is not tracked clean at HEAD"
+assert_json_expr "$dirty_helper_output" 'data["checkout_identity"]["ok"] is False'
+assert_json_expr "$dirty_helper_output" 'data["checkout_identity"]["paths"]["helper"]["tracked"] is True'
+assert_json_expr "$dirty_helper_output" 'data["checkout_identity"]["paths"]["helper"]["head_matches_current"] is False'
+assert_json_expr "$dirty_helper_output" 'data["checkout_identity"]["paths"]["helper"]["tracked_clean"] is False'
+assert_json_expr "$dirty_helper_output" 'data["checkout_identity"]["paths"]["helper"]["required_for_consumable_evidence"] is False'
+assert_json_expr "$dirty_helper_output" 'data["checkout_identity"]["paths"]["wrapper"]["tracked"] is True'
+assert_json_expr "$dirty_helper_output" 'data["checkout_identity"]["paths"]["wrapper"]["head_matches_current"] is False'
+assert_json_expr "$dirty_helper_output" 'data["checkout_identity"]["paths"]["wrapper"]["tracked_clean"] is False'
+assert_json_expr "$dirty_helper_output" 'data["checkout_identity"]["paths"]["wrapper"]["required_for_consumable_evidence"] is False'
 
 default_wrapper_fixture="$TMP_ROOT/default-wrapper-fixture"
 make_fixture "$default_wrapper_fixture"
@@ -1010,7 +1058,7 @@ set -e
 if [ "$helper_copy_status" -eq 0 ]; then
   fail "copied-helper adjacent-wrapper fixture unexpectedly returned zero"
 fi
-assert_json "$helper_copy_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json "$helper_copy_output" block "helper readiness evidence producer is not inside a git worktree"
 assert_json_expr "$helper_copy_output" 'data["conclusion"] != "pass"'
 assert_json_expr "$helper_copy_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
 assert_json_expr "$helper_copy_output" 'data["runtime_authority"]["helper"]["matches_expected"] is False'
@@ -1070,7 +1118,7 @@ set -e
 if [ "$direct_python_consumable_status" -eq 0 ]; then
   fail "direct python3 helper invocation unexpectedly returned zero"
 fi
-assert_json "$direct_python_consumable_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json "$direct_python_consumable_output" block "helper readiness evidence producer is not tracked clean at HEAD"
 assert_json_expr "$direct_python_consumable_output" 'data["conclusion"] != "pass"'
 assert_json_expr "$direct_python_consumable_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
 assert_json_expr "$direct_python_consumable_output" 'data["runtime_authority"]["helper"]["matches_expected"] is False'
@@ -1112,7 +1160,7 @@ set -e
 if [ "$direct_python_spoof_status" -eq 0 ]; then
   fail "direct python authority-spoof fixture unexpectedly returned zero"
 fi
-assert_json "$direct_python_spoof_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json "$direct_python_spoof_output" block "helper readiness evidence producer is not tracked clean at HEAD"
 assert_json_expr "$direct_python_spoof_output" 'data["conclusion"] != "pass"'
 assert_json_expr "$direct_python_spoof_output" 'data["runtime_authority"]["helper"]["matches_expected"] is False'
 assert_json_expr "$direct_python_spoof_output" 'data["runtime_authority"]["wrapper"]["matches_expected"] is False'
@@ -1155,7 +1203,7 @@ set -e
 if [ "$direct_python_argv0_spoof_status" -eq 0 ]; then
   fail "direct python argv0-spoof fixture unexpectedly returned zero"
 fi
-assert_json "$direct_python_argv0_spoof_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json "$direct_python_argv0_spoof_output" block "helper readiness evidence producer is not tracked clean at HEAD"
 assert_json_expr "$direct_python_argv0_spoof_output" 'data["conclusion"] != "pass"'
 assert_json_expr "$direct_python_argv0_spoof_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
 assert_json_expr "$direct_python_argv0_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["matches_parent"] is True'
@@ -1195,7 +1243,7 @@ set -e
 if [ "$direct_python_space_argv0_spoof_status" -eq 0 ]; then
   fail "direct python space-bearing argv0-spoof fixture unexpectedly returned zero"
 fi
-assert_json "$direct_python_space_argv0_spoof_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json "$direct_python_space_argv0_spoof_output" block "helper readiness evidence producer is not tracked clean at HEAD"
 assert_json_expr "$direct_python_space_argv0_spoof_output" 'data["conclusion"] != "pass"'
 assert_json_expr "$direct_python_space_argv0_spoof_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
 assert_json_expr "$direct_python_space_argv0_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["matches_parent"] is True'
@@ -1236,7 +1284,7 @@ set -e
 if [ "$direct_python_stdin_spoof_status" -eq 0 ]; then
   fail "direct python stdin-script spoof fixture unexpectedly returned zero"
 fi
-assert_json "$direct_python_stdin_spoof_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json "$direct_python_stdin_spoof_output" block "helper readiness evidence producer is not tracked clean at HEAD"
 assert_json_expr "$direct_python_stdin_spoof_output" 'data["conclusion"] != "pass"'
 assert_json_expr "$direct_python_stdin_spoof_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
 assert_json_expr "$direct_python_stdin_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["parent_wrapper_reference"]["matches_expected"] is False'
@@ -1275,7 +1323,7 @@ set -e
 if [ "$direct_python_option_arg_spoof_status" -eq 0 ]; then
   fail "direct python option-argument spoof fixture unexpectedly returned zero"
 fi
-assert_json "$direct_python_option_arg_spoof_output" incomplete "trusted wrapper runtime identity is missing or incomplete"
+assert_json "$direct_python_option_arg_spoof_output" block "helper readiness evidence producer is not tracked clean at HEAD"
 assert_json_expr "$direct_python_option_arg_spoof_output" 'data["conclusion"] != "pass"'
 assert_json_expr "$direct_python_option_arg_spoof_output" 'data["runtime_authority"]["ready_for_consumption"] is False'
 assert_json_expr "$direct_python_option_arg_spoof_output" 'data["runtime_authority"]["wrapper_parent_pid"]["parent_wrapper_reference"]["matches_expected"] is False'
@@ -1716,7 +1764,7 @@ from pathlib import Path
 
 lib_dir = Path(sys.argv[1])
 for index in range(12):
-    (lib_dir / f"libsundials_cvode_cap_{index:02d}.dylib").write_text("", encoding="utf-8")
+    (lib_dir / f"unrelated_library_entry_{index:02d}.txt").write_text("not a sundials library\n", encoding="utf-8")
 PY
 sundials_lib_cap_output="$sundials_lib_cap_fixture/workspace/readiness/sundials_lib_cap.json"
 export SHUD_RSHUD_READINESS_SELF_TEST_CANDIDATE_LIMIT=8
