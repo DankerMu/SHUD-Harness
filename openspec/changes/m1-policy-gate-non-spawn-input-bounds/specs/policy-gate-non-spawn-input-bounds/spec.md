@@ -86,17 +86,19 @@ spread, `.includes()`, and `.map()`. Supported array-returning evaluator
 methods, including `.map()`, SHALL return evaluator-isolated non-extensible
 arrays rather than arrays linked to global `Array.prototype`.
 Evaluator-visible array prototype containers, array prototype functions,
-iterator objects, and iterator `next` functions SHALL be frozen or made
-non-extensible where the runtime permits, and evaluator arrays SHALL NOT expose
-a functional constructor path to global `Function.prototype`. Evaluator arrays
-SHALL be non-extensible after existing numeric indices are installed; direct
-assignment to existing indices MAY remain evaluator-local, but `push` and other
-array-growth APIs are outside the supported evaluator contract. Evaluator-local
-array reparenting MUST fail or remain isolated and MUST NOT leave residue on
-global `Object.prototype`, `Array.prototype`, or `Function.prototype` before
-inner execution continues. Evaluator mutation attempts MUST NOT change the input
-later supplied to the inner tool or global prototypes through input-derived
-prototype paths.
+iterator objects, iterator `next` functions, and iterator result objects SHALL
+be frozen or made non-extensible where the runtime permits, and evaluator arrays
+SHALL NOT expose a functional constructor path to global `Function.prototype`.
+Evaluator arrays SHALL be non-extensible after existing numeric indices are
+installed and SHALL keep their `length` control surface bounded for supported
+read APIs; direct assignment to existing indices MAY remain evaluator-local, but
+`push`, length growth, and other array-growth APIs are outside the supported
+evaluator contract. Evaluator-local array, iterator, or iterator-result
+reparenting MUST fail or remain isolated and MUST NOT leave residue on global
+`Object.prototype`, `Array.prototype`, or `Function.prototype` before inner
+execution continues. Evaluator mutation attempts MUST NOT change the input later
+supplied to the inner tool or global prototypes through input-derived prototype
+paths.
 
 #### Scenario: execution snapshot preserves ordinary object compatibility
 
@@ -130,11 +132,11 @@ prototype paths.
 - **WHEN** a custom evaluator attempts to mutate prototypes reachable from
   direct `Object.setPrototypeOf()` on evaluator top-level objects, nested
   objects, evaluator arrays, isolated array prototypes, exposed array methods,
-  map-result arrays/prototypes/functions, iterator objects/functions,
+  map-result arrays/prototypes/functions, iterator objects/functions/results,
   `Object.getPrototypeOf(values.constructor)`,
   `Object.getPrototypeOf(Object.getPrototypeOf(values).map)`,
   `Object.getPrototypeOf(values.map(...))`, or a directly accessed
-  `[Symbol.iterator]()` result
+  `[Symbol.iterator]()` result, or a directly accessed iterator `.next()` result
 - **THEN** the mutation fails closed or is isolated from the execution snapshot
 - **AND** input-derived prototype mutation paths do not leave global prototype
   residue on `Object.prototype`, `Function.prototype`, or `Array.prototype`
@@ -143,7 +145,7 @@ prototype paths.
 
 - **WHEN** one non-spawn evaluator call attempts to write custom properties to
   evaluator-visible array prototypes, exposed methods, iterator objects,
-  iterator functions, and map-result paths
+  iterator functions, iterator results, and map-result paths
 - **THEN** a later evaluator call MUST NOT observe those custom properties
 - **AND** the inner execution input remains isolated from both evaluator calls
 

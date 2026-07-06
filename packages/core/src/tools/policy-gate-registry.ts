@@ -1053,7 +1053,7 @@ function cloneGenericPolicyGateMaterializedArray(
   }
 
   if (options.mode === "evaluator") {
-    Object.preventExtensions(snapshot);
+    finalizeIsolatedEvaluatorArray(snapshot);
   }
   return snapshot;
 }
@@ -1150,8 +1150,7 @@ const isolatedArrayMap = isolateFunction(
         }
         result[index] = Reflect.apply(callback, thisArg, [receiver[index], index, receiver]);
       }
-      Object.preventExtensions(result);
-      return result;
+      return finalizeIsolatedEvaluatorArray(result);
     }
   }.map
 );
@@ -1167,6 +1166,14 @@ const isolatedArrayIterator = isolateFunction(
 function createIsolatedEvaluatorArray(length: number): unknown[] {
   const array = new Array<unknown>(length);
   Object.setPrototypeOf(array, createIsolatedArrayPrototype());
+  return array;
+}
+
+function finalizeIsolatedEvaluatorArray<T extends unknown[]>(array: T): T {
+  Object.preventExtensions(array);
+  Object.defineProperty(array, "length", {
+    writable: false
+  });
   return array;
 }
 
@@ -1217,6 +1224,7 @@ function createIsolatedArrayIteratorResult(value: unknown, done: boolean): Itera
     configurable: true,
     writable: true
   });
+  Object.freeze(result);
   return result;
 }
 

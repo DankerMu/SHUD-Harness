@@ -82,12 +82,14 @@ Non-Goals:
    Existing top-level/nested fields remain writable for evaluator-local
    assignment; adding new properties to evaluator plain objects is outside the
    supported contract because those objects are non-extensible. Isolated array
-   prototype containers, isolated method functions, iterator objects, and
-   iterator `next` functions are frozen or non-extensible after their desired
-   prototypes are set. Evaluator arrays are made non-extensible after existing
-   numeric indices are installed. This intentionally removes `push` and other
-   array-growth APIs from the supported evaluator contract so evaluator-local
-   arrays and `.map()` results cannot be reparented to global prototypes.
+   prototype containers, isolated method functions, iterator objects, iterator
+   `next` functions, and iterator result objects are frozen or non-extensible
+   after their desired properties are installed. Evaluator arrays are made
+   non-extensible and their `length` control surface is sealed after existing
+   numeric indices are installed. This intentionally removes `push`, length
+   growth, and other array-growth APIs from the supported evaluator contract so
+   evaluator-local arrays and `.map()` results cannot be reparented to global
+   prototypes or expanded beyond the bounded canonical input length.
    Prototype mutation
    attempts through `Object.setPrototypeOf(call.input, ...)`,
    `Object.setPrototypeOf(call.input.nested, ...)`,
@@ -182,12 +184,15 @@ Invariant Matrix:
     inner tool receives the expected execution snapshot.
   - Evaluator prototype mutation probes through direct object reparenting,
     array instance reparenting, isolated array prototype containers, array
-    constructor, array methods, map-result arrays/prototypes/functions, and
-    iterator objects/functions -> no `Object.prototype`, `Function.prototype`,
-    or `Array.prototype` residue and inner execution input remains unchanged.
+    constructor, array methods, map-result arrays/prototypes/functions, iterator
+    objects/functions/results, and evaluator-local length growth -> no
+    `Object.prototype`, `Function.prototype`, or `Array.prototype` residue, no
+    over-budget evaluator array reads, and inner execution input remains
+    unchanged.
   - Cross-call residue -> writing custom properties to evaluator-visible
-    prototypes, methods, iterator objects, iterator functions, and map-result
-    paths in one evaluator call is not observable by the next evaluator call.
+    prototypes, methods, iterator objects, iterator functions, iterator results,
+    and map-result paths in one evaluator call is not observable by the next
+    evaluator call.
   - Existing accessor/prototype-polluting/proxy-hostile/unsafe value input ->
     preparation still fails closed without leaking trap or getter text and
     without running the inner tool.
@@ -208,10 +213,12 @@ Boundary-surface checklist:
 ## Risks / Trade-offs
 
 - Evaluator snapshots allow direct assignment to existing fields and existing
-  array indices, but evaluator arrays are non-extensible. Trade-off: `push` and
-  array-growth APIs are no longer supported for evaluator snapshots. Mitigation:
-  this is a deliberate contract narrowing because preserving `push` required
-  extensible arrays and left input-derived paths to global `Array.prototype`.
+  array indices, but evaluator arrays are non-extensible and length growth is
+  unsupported. Trade-off: `push`, length growth, and array-growth APIs are no
+  longer supported for evaluator snapshots. Mitigation: this is a deliberate
+  contract narrowing because preserving array growth required extensible arrays
+  and left input-derived paths to global `Array.prototype` and unbounded
+  evaluator reads.
 - Budget constants can reject pathological but technically cloneable inputs.
   Mitigation: this boundary is a shared policy gate; safe, bounded preparation
   is preferred over unbounded execution.

@@ -18,7 +18,8 @@
 - [x] 1.6 Harden evaluator-visible graph after setup: evaluator plain objects
   are non-extensible, isolated array prototype containers and exposed method /
   iterator functions are frozen or non-extensible, evaluator arrays and map
-  results are non-extensible, and evaluator-local array reparent attempts fail
+  results are non-extensible with bounded `length`, iterator results are frozen
+  or non-extensible, and evaluator-local array/iterator reparent attempts fail
   before reaching global intrinsics.
 
 ## 2. Regression Tests
@@ -56,7 +57,7 @@
   receive evaluator-isolated non-extensible `.map()` results, and cannot mutate
   inner execution or global prototypes through direct object reparenting, array
   reparenting, array constructor, method,
-  map-result, or iterator paths.
+  map-result, iterator, or iterator-result paths.
 - [x] 2.5 Add tests that low-length ordinary arrays with over-budget non-index
   own properties do not trigger array `Reflect.ownKeys()`, do not read non-index
   descriptors, preserve sparse numeric-index holes, and omit non-index
@@ -85,13 +86,15 @@
 - [x] 2.10 Add tests that evaluator-visible graph hardening and residue cleanup
   cover direct `Object.setPrototypeOf()` probes against top object, nested
   object, evaluator arrays, isolated array prototype, isolated method function,
-  iterator object, iterator next function, map result array/prototype/function
-  paths, and global prototype residue. Evaluator array and map-result reparent
-  attempts must fail because those arrays are non-extensible.
+  iterator object, iterator next function, iterator result object, map result
+  array/prototype/function paths, and global prototype residue. Evaluator array
+  and map-result reparent attempts must fail because those arrays are
+  non-extensible; evaluator length-growth attempts must not make supported read
+  APIs exceed the bounded canonical array length.
 - [x] 2.11 Add a cross-call residue test proving custom properties written to
   evaluator-visible prototypes, exposed methods, iterators, iterator functions,
-  and map-result paths in one evaluator call are not observable by the next
-  evaluator call.
+  iterator results, and map-result paths in one evaluator call are not
+  observable by the next evaluator call.
 
 ## 3. Risk Pack Evidence Matrix
 
@@ -104,7 +107,9 @@
 - [x] 3.3 Concurrency / shared state / ordering: evaluator mutation tests prove
   evaluator code cannot mutate the execution snapshot observed by the inner
   tool, evaluator array reparenting cannot reach global intrinsics, and
-  evaluator-visible method/prototype residue cannot persist across calls.
+  evaluator-visible method/prototype/iterator-result residue cannot persist
+  across calls; supported evaluator read APIs remain bounded after
+  evaluator-local mutation.
 - [x] 3.4 Resource limits / large input / discovery: depth, array-length, and
   string-budget tests fail closed before evaluator execution; proxy tests prove
   key/descriptor traps are not reached; ordinary object tests prove over-wide

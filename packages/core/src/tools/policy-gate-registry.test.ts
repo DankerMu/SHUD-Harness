@@ -1041,6 +1041,8 @@ describe("policy-gated zero tool registry", () => {
     let evaluatorNestedExtensible: boolean | undefined;
     let evaluatorArrayExtensible: boolean | undefined;
     let evaluatorMapResultExtensible: boolean | undefined;
+    let evaluatorArrayLengthWritable: boolean | undefined;
+    let evaluatorMapResultLengthWritable: boolean | undefined;
     let evaluatorArrayPrototypeFrozen: boolean | undefined;
     let evaluatorArrayMapFunctionFrozen: boolean | undefined;
     let evaluatorIteratorFrozen: boolean | undefined;
@@ -1071,6 +1073,11 @@ describe("policy-gated zero tool registry", () => {
         evaluatorNestedExtensible = Object.isExtensible((call.input as { nested: object }).nested);
         evaluatorArrayExtensible = Object.isExtensible(values);
         evaluatorMapResultExtensible = Object.isExtensible(mapped);
+        evaluatorArrayLengthWritable = Object.getOwnPropertyDescriptor(values, "length")?.writable;
+        evaluatorMapResultLengthWritable = Object.getOwnPropertyDescriptor(
+          mapped,
+          "length"
+        )?.writable;
         evaluatorArrayPrototype = Object.getPrototypeOf(values);
         evaluatorArrayPrototypeFrozen =
           evaluatorArrayPrototype === null ? undefined : Object.isFrozen(evaluatorArrayPrototype);
@@ -1130,6 +1137,8 @@ describe("policy-gated zero tool registry", () => {
     expect(evaluatorNestedExtensible).toBe(false);
     expect(evaluatorArrayExtensible).toBe(false);
     expect(evaluatorMapResultExtensible).toBe(false);
+    expect(evaluatorArrayLengthWritable).toBe(false);
+    expect(evaluatorMapResultLengthWritable).toBe(false);
     expect(evaluatorArrayPrototype).not.toBeNull();
     expect(evaluatorArrayPrototype).not.toBe(Array.prototype);
     expect(evaluatorArrayPrototypeFrozen).toBe(true);
@@ -1158,6 +1167,109 @@ describe("policy-gated zero tool registry", () => {
     ).toBe(Object.prototype);
     expect(editTool.lastInput).not.toBe(input);
     expect((editTool.lastInput as { nested: unknown }).nested).not.toBe(input.nested);
+  });
+
+  test("non-spawn evaluator array length growth attempts keep supported reads bounded", async () => {
+    const editTool = new RecordingTool("edit");
+    const inflatedLength = 2_048;
+    let observation:
+      | {
+          valuesLengthSetSucceeded: boolean;
+          mappedLengthSetSucceeded: boolean;
+          valuesLength: number;
+          mappedLength: number;
+          valuesLengthWritable: boolean | undefined;
+          mappedLengthWritable: boolean | undefined;
+          valuesIncludesMissing: boolean;
+          mappedIncludesMissing: boolean;
+          valuesMapLength: number;
+          mappedMapLength: number;
+          valuesSpreadLength: number;
+          mappedSpreadLength: number;
+          valuesIteratorCount: number;
+          mappedIteratorCount: number;
+          valuesMapCallbacks: number;
+          mappedMapCallbacks: number;
+        }
+      | undefined;
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        const values = (call.input as { values: string[] }).values;
+        const mapped = values.map((value) => value);
+        values[0] = "evaluator-local";
+        mapped[0] = "mapped-local";
+
+        const valuesLengthSetSucceeded = attemptMutation(() => {
+          values.length = inflatedLength;
+        });
+        const mappedLengthSetSucceeded = attemptMutation(() => {
+          mapped.length = inflatedLength;
+        });
+
+        let valuesMapCallbacks = 0;
+        const valuesMappedAfterGrowth = values.map((value) => {
+          valuesMapCallbacks += 1;
+          return value;
+        });
+        let mappedMapCallbacks = 0;
+        const mappedAfterGrowth = mapped.map((value) => {
+          mappedMapCallbacks += 1;
+          return value;
+        });
+        let valuesIteratorCount = 0;
+        for (const _value of values) {
+          valuesIteratorCount += 1;
+        }
+        let mappedIteratorCount = 0;
+        for (const _value of mapped) {
+          mappedIteratorCount += 1;
+        }
+
+        observation = {
+          valuesLengthSetSucceeded,
+          mappedLengthSetSucceeded,
+          valuesLength: values.length,
+          mappedLength: mapped.length,
+          valuesLengthWritable: Object.getOwnPropertyDescriptor(values, "length")?.writable,
+          mappedLengthWritable: Object.getOwnPropertyDescriptor(mapped, "length")?.writable,
+          valuesIncludesMissing: values.includes("missing-after-growth"),
+          mappedIncludesMissing: mapped.includes("missing-after-growth"),
+          valuesMapLength: valuesMappedAfterGrowth.length,
+          mappedMapLength: mappedAfterGrowth.length,
+          valuesSpreadLength: [...values].length,
+          mappedSpreadLength: [...mapped].length,
+          valuesIteratorCount,
+          mappedIteratorCount,
+          valuesMapCallbacks,
+          mappedMapCallbacks
+        };
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { values: ["alpha", "beta"] });
+
+    expect(result.success).toBe(true);
+    expect(editTool.calls).toBe(1);
+    expect(observation).toEqual({
+      valuesLengthSetSucceeded: expect.any(Boolean),
+      mappedLengthSetSucceeded: expect.any(Boolean),
+      valuesLength: 2,
+      mappedLength: 2,
+      valuesLengthWritable: false,
+      mappedLengthWritable: false,
+      valuesIncludesMissing: false,
+      mappedIncludesMissing: false,
+      valuesMapLength: 2,
+      mappedMapLength: 2,
+      valuesSpreadLength: 2,
+      mappedSpreadLength: 2,
+      valuesIteratorCount: 2,
+      mappedIteratorCount: 2,
+      valuesMapCallbacks: 2,
+      mappedMapCallbacks: 2
+    });
+    expect((editTool.lastInput as { values?: string[] }).values).toEqual(["alpha", "beta"]);
   });
 
   test("non-spawn evaluator prototype mutation paths cannot affect inner execution", async () => {
@@ -1393,6 +1505,108 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("non-spawn evaluator iterator result objects cannot create global prototype residue", async () => {
+    const editTool = new RecordingTool("edit");
+    const iteratorResultSentinel = "__policyGateIteratorResultGlobalResidue";
+    const blockedReparents = {
+      object: false,
+      array: false,
+      function: false
+    };
+    let observation:
+      | {
+          valuesYieldedReparents: GlobalPrototypeReparentOutcomes;
+          valuesDoneReparents: GlobalPrototypeReparentOutcomes;
+          mappedYieldedReparents: GlobalPrototypeReparentOutcomes;
+          mappedDoneReparents: GlobalPrototypeReparentOutcomes;
+          valuesYieldedFrozen: boolean;
+          valuesDoneFrozen: boolean;
+          mappedYieldedFrozen: boolean;
+          mappedDoneFrozen: boolean;
+          valuesYieldedValue: unknown;
+          valuesDoneDone: boolean | undefined;
+          mappedYieldedValue: unknown;
+          mappedDoneDone: boolean | undefined;
+          residueBeforeAllow: GlobalPrototypeResidueObservation;
+        }
+      | undefined;
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        const values = (call.input as { values: string[] }).values;
+        const mapped = values.map((value) => value);
+        const valuesIterator = values[Symbol.iterator]();
+        const valuesYieldedResult = valuesIterator.next();
+        const valuesDoneResult = valuesIterator.next();
+        const mappedIterator = mapped[Symbol.iterator]();
+        const mappedYieldedResult = mappedIterator.next();
+        const mappedDoneResult = mappedIterator.next();
+
+        observation = {
+          valuesYieldedReparents: attemptGlobalPrototypeReparents(
+            valuesYieldedResult as object,
+            iteratorResultSentinel
+          ),
+          valuesDoneReparents: attemptGlobalPrototypeReparents(
+            valuesDoneResult as object,
+            iteratorResultSentinel
+          ),
+          mappedYieldedReparents: attemptGlobalPrototypeReparents(
+            mappedYieldedResult as object,
+            iteratorResultSentinel
+          ),
+          mappedDoneReparents: attemptGlobalPrototypeReparents(
+            mappedDoneResult as object,
+            iteratorResultSentinel
+          ),
+          valuesYieldedFrozen: Object.isFrozen(valuesYieldedResult as object),
+          valuesDoneFrozen: Object.isFrozen(valuesDoneResult as object),
+          mappedYieldedFrozen: Object.isFrozen(mappedYieldedResult as object),
+          mappedDoneFrozen: Object.isFrozen(mappedDoneResult as object),
+          valuesYieldedValue: valuesYieldedResult.value,
+          valuesDoneDone: valuesDoneResult.done,
+          mappedYieldedValue: mappedYieldedResult.value,
+          mappedDoneDone: mappedDoneResult.done,
+          residueBeforeAllow: readGlobalPrototypeResidue(iteratorResultSentinel)
+        };
+        return { decision: "allow" };
+      }
+    });
+
+    try {
+      const result = await wrapped.run(createToolContext("worker"), { values: ["original"] });
+
+      expect(result.success).toBe(true);
+      expect(editTool.calls).toBe(1);
+      expect(observation).toEqual({
+        valuesYieldedReparents: blockedReparents,
+        valuesDoneReparents: blockedReparents,
+        mappedYieldedReparents: blockedReparents,
+        mappedDoneReparents: blockedReparents,
+        valuesYieldedFrozen: true,
+        valuesDoneFrozen: true,
+        mappedYieldedFrozen: true,
+        mappedDoneFrozen: true,
+        valuesYieldedValue: "original",
+        valuesDoneDone: true,
+        mappedYieldedValue: "original",
+        mappedDoneDone: true,
+        residueBeforeAllow: {
+          object: undefined,
+          array: undefined,
+          function: undefined
+        }
+      });
+      expect(readGlobalPrototypeResidue(iteratorResultSentinel)).toEqual({
+        object: undefined,
+        array: undefined,
+        function: undefined
+      });
+      expect((editTool.lastInput as { values?: string[] }).values).toEqual(["original"]);
+    } finally {
+      deleteGlobalPrototypeResidue(iteratorResultSentinel);
+    }
+  });
+
   test("non-spawn evaluator arrays cannot create Array.prototype residue through reparenting", async () => {
     const editTool = new RecordingTool("edit");
     const arrayPrototypeSentinel = "__policyGateInputDerivedArrayPrototypeResidue";
@@ -1448,6 +1662,7 @@ describe("policy-gated zero tool registry", () => {
     const prototypeSentinel = "__policyGateCrossCallPrototypeResidue";
     const methodSentinel = "__policyGateCrossCallMethodResidue";
     const iteratorSentinel = "__policyGateCrossCallIteratorResidue";
+    const iteratorResultSentinel = "__policyGateCrossCallIteratorResultResidue";
     let evaluatorCalls = 0;
     let secondObservation:
       | {
@@ -1457,6 +1672,11 @@ describe("policy-gated zero tool registry", () => {
           mapResultMethodResidue: unknown;
           iteratorResidue: unknown;
           iteratorNextResidue: unknown;
+          iteratorResultResidue: unknown;
+          iteratorDoneResultResidue: unknown;
+          mapResultIteratorResultResidue: unknown;
+          mapResultIteratorDoneResultResidue: unknown;
+          globalIteratorResultResidue: GlobalPrototypeResidueObservation;
         }
       | undefined;
     const wrapped = wrapToolWithPolicyGate(editTool, {
@@ -1471,6 +1691,15 @@ describe("policy-gated zero tool registry", () => {
         const iterator = values[Symbol.iterator]() as IterableIterator<unknown> &
           Record<string, unknown>;
         const iteratorNext = iterator.next as unknown as Record<string, unknown>;
+        const iteratorYieldedResult = iterator.next() as IteratorResult<unknown> &
+          Record<string, unknown>;
+        const iteratorDoneResult = iterator.next() as IteratorResult<unknown> &
+          Record<string, unknown>;
+        const mapResultIterator = mapped[Symbol.iterator]() as IterableIterator<unknown>;
+        const mapResultIteratorYieldedResult = mapResultIterator.next() as IteratorResult<unknown> &
+          Record<string, unknown>;
+        const mapResultIteratorDoneResult = mapResultIterator.next() as IteratorResult<unknown> &
+          Record<string, unknown>;
 
         if (evaluatorCalls === 1) {
           attemptMutation(() => {
@@ -1491,6 +1720,28 @@ describe("policy-gated zero tool registry", () => {
           attemptMutation(() => {
             iteratorNext[iteratorSentinel] = "mutated";
           });
+          attemptMutation(() => {
+            iteratorYieldedResult[iteratorResultSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            iteratorDoneResult[iteratorResultSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            mapResultIteratorYieldedResult[iteratorResultSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            mapResultIteratorDoneResult[iteratorResultSentinel] = "mutated";
+          });
+          attemptGlobalPrototypeReparents(iteratorYieldedResult as object, iteratorResultSentinel);
+          attemptGlobalPrototypeReparents(iteratorDoneResult as object, iteratorResultSentinel);
+          attemptGlobalPrototypeReparents(
+            mapResultIteratorYieldedResult as object,
+            iteratorResultSentinel
+          );
+          attemptGlobalPrototypeReparents(
+            mapResultIteratorDoneResult as object,
+            iteratorResultSentinel
+          );
         } else {
           secondObservation = {
             arrayPrototypeResidue: arrayPrototype[prototypeSentinel],
@@ -1498,7 +1749,14 @@ describe("policy-gated zero tool registry", () => {
             mapResultPrototypeResidue: mapResultPrototype[prototypeSentinel],
             mapResultMethodResidue: mapResultMapMethod[methodSentinel],
             iteratorResidue: iterator[iteratorSentinel],
-            iteratorNextResidue: iteratorNext[iteratorSentinel]
+            iteratorNextResidue: iteratorNext[iteratorSentinel],
+            iteratorResultResidue: iteratorYieldedResult[iteratorResultSentinel],
+            iteratorDoneResultResidue: iteratorDoneResult[iteratorResultSentinel],
+            mapResultIteratorResultResidue:
+              mapResultIteratorYieldedResult[iteratorResultSentinel],
+            mapResultIteratorDoneResultResidue:
+              mapResultIteratorDoneResult[iteratorResultSentinel],
+            globalIteratorResultResidue: readGlobalPrototypeResidue(iteratorResultSentinel)
           };
         }
 
@@ -1506,20 +1764,33 @@ describe("policy-gated zero tool registry", () => {
       }
     });
 
-    const firstResult = await wrapped.run(createToolContext("worker"), { values: ["first"] });
-    const secondResult = await wrapped.run(createToolContext("worker"), { values: ["second"] });
+    try {
+      const firstResult = await wrapped.run(createToolContext("worker"), { values: ["first"] });
+      const secondResult = await wrapped.run(createToolContext("worker"), { values: ["second"] });
 
-    expect(firstResult.success).toBe(true);
-    expect(secondResult.success).toBe(true);
-    expect(editTool.calls).toBe(2);
-    expect(secondObservation).toEqual({
-      arrayPrototypeResidue: undefined,
-      arrayMethodResidue: undefined,
-      mapResultPrototypeResidue: undefined,
-      mapResultMethodResidue: undefined,
-      iteratorResidue: undefined,
-      iteratorNextResidue: undefined
-    });
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+      expect(editTool.calls).toBe(2);
+      expect(secondObservation).toEqual({
+        arrayPrototypeResidue: undefined,
+        arrayMethodResidue: undefined,
+        mapResultPrototypeResidue: undefined,
+        mapResultMethodResidue: undefined,
+        iteratorResidue: undefined,
+        iteratorNextResidue: undefined,
+        iteratorResultResidue: undefined,
+        iteratorDoneResultResidue: undefined,
+        mapResultIteratorResultResidue: undefined,
+        mapResultIteratorDoneResultResidue: undefined,
+        globalIteratorResultResidue: {
+          object: undefined,
+          array: undefined,
+          function: undefined
+        }
+      });
+    } finally {
+      deleteGlobalPrototypeResidue(iteratorResultSentinel);
+    }
   });
 
   test("malformed raw-rule deny from custom evaluator fails closed and finishes running handle", async () => {
@@ -4527,6 +4798,62 @@ function isExpectedNumericArrayDescriptorKey(propertyKey: PropertyKey, length: n
   }
   const index = Number(propertyKey);
   return Number.isInteger(index) && index >= 0 && index < length && String(index) === propertyKey;
+}
+
+type GlobalPrototypeReparentOutcomes = {
+  object: boolean;
+  array: boolean;
+  function: boolean;
+};
+
+type GlobalPrototypeResidueObservation = {
+  object: unknown;
+  array: unknown;
+  function: unknown;
+};
+
+function attemptGlobalPrototypeReparents(
+  value: object,
+  sentinel: string
+): GlobalPrototypeReparentOutcomes {
+  const outcomes: GlobalPrototypeReparentOutcomes = {
+    object: false,
+    array: false,
+    function: false
+  };
+  const probes: Array<[keyof GlobalPrototypeReparentOutcomes, object]> = [
+    ["object", Object.prototype],
+    ["array", Array.prototype],
+    ["function", Function.prototype]
+  ];
+
+  for (const [label, prototype] of probes) {
+    const succeeded = attemptMutation(() => {
+      Object.setPrototypeOf(value, prototype);
+    });
+    outcomes[label] = succeeded;
+    if (succeeded && Object.getPrototypeOf(value) === prototype) {
+      attemptMutation(() => {
+        (prototype as Record<string, unknown>)[sentinel] = "mutated";
+      });
+    }
+  }
+
+  return outcomes;
+}
+
+function readGlobalPrototypeResidue(sentinel: string): GlobalPrototypeResidueObservation {
+  return {
+    object: (Object.prototype as Record<string, unknown>)[sentinel],
+    array: (Array.prototype as Record<string, unknown>)[sentinel],
+    function: (Function.prototype as Record<string, unknown>)[sentinel]
+  };
+}
+
+function deleteGlobalPrototypeResidue(sentinel: string): void {
+  delete (Object.prototype as Record<string, unknown>)[sentinel];
+  delete (Array.prototype as Record<string, unknown>)[sentinel];
+  delete (Function.prototype as Record<string, unknown>)[sentinel];
 }
 
 function attemptMutation(mutator: () => void): boolean {
