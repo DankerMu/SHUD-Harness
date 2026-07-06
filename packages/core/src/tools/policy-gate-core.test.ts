@@ -175,6 +175,72 @@ describe("spawn profile subset policy rule", () => {
     }
   });
 
+  test("denies array spawn input with own authority fields", () => {
+    const input = ["not a spawn record"] as unknown[] & Record<string, unknown>;
+    input.instruction = "Run the delegated task.";
+    input.role = "worker";
+    input.tools = ["edit"];
+
+    const decision = evaluatePolicyGate(spawnToolCallRaw(input), {
+      rules: [SPAWN_PROFILE_SUBSET_RULE]
+    });
+
+    expect(decision).toMatchObject({
+      decision: "deny",
+      ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+      guardClass: "authority",
+      remediation: {
+        next_action: "adjust_scope",
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      }
+    });
+  });
+
+  test("denies non-primitive spawn roles before role trimming", () => {
+    const decision = evaluatePolicyGate(
+      spawnToolCall({ role: new String("worker"), tools: ["edit"] }),
+      {
+        rules: [SPAWN_PROFILE_SUBSET_RULE]
+      }
+    );
+
+    expect(decision).toMatchObject({
+      decision: "deny",
+      ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+      guardClass: "authority",
+      remediation: {
+        next_action: "adjust_scope",
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      }
+    });
+    if (decision.decision === "deny") {
+      expect(decision.reason).toContain("primitive string");
+    }
+  });
+
+  test("denies dual tools and allowed_tools fields as ambiguous", () => {
+    const decision = evaluatePolicyGate(
+      spawnToolCall({ role: "worker", tools: ["read"], allowed_tools: ["edit"] }),
+      {
+        rules: [SPAWN_PROFILE_SUBSET_RULE]
+      }
+    );
+
+    expect(decision).toMatchObject({
+      decision: "deny",
+      ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+      guardClass: "authority",
+      remediation: {
+        next_action: "adjust_scope",
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      }
+    });
+    if (decision.decision === "deny") {
+      expect(decision.reason).toContain("both tools and allowed_tools");
+      expect(decision.remediation.hint).toContain("edit");
+    }
+  });
+
   test("allows worker spawn when tools are a canonical subset", () => {
     expect(
       evaluatePolicyGate(spawnToolCall({ role: "worker", tools: ["read", "sandbox.exec"] }), {
@@ -346,6 +412,10 @@ describe("spawn profile subset policy rule", () => {
       )
     ).toEqual({ decision: "allow" });
 
+    expect(evaluatePolicyGate(spawnToolCall({ tools: ["read", "edit"] }), context)).toEqual({
+      decision: "allow"
+    });
+
     const normalized = normalizeSpawnAgentInput(
       spawnToolCall({
         role: "not_a_harness_role",
@@ -363,6 +433,24 @@ describe("spawn profile subset policy rule", () => {
         tools: ["read", "edit"]
       });
       expect(normalized.input).not.toHaveProperty("allowed_tools");
+    }
+
+    const normalizedNoRole = normalizeSpawnAgentInput(
+      spawnToolCall({
+        allowed_tools: [" read ", "edit", "read"]
+      })
+    );
+
+    expect(normalizedNoRole).toMatchObject({
+      decision: "allow",
+      changed: true
+    });
+    if (normalizedNoRole.decision === "allow") {
+      expect(normalizedNoRole.input).toMatchObject({
+        tools: ["read", "edit"]
+      });
+      expect(normalizedNoRole.input).not.toHaveProperty("role");
+      expect(normalizedNoRole.input).not.toHaveProperty("allowed_tools");
     }
   });
 
@@ -498,6 +586,15 @@ function spawnToolCall(input: Record<string, unknown>): PolicyGateToolCall {
       instruction: "Run the delegated task.",
       ...input
     },
+    workDir: "/workspace/tasks/TASK-M1-SPIKE"
+  };
+}
+
+function spawnToolCallRaw(input: unknown): PolicyGateToolCall {
+  return {
+    toolId: "spawn_agent",
+    role: "coordinator",
+    input,
     workDir: "/workspace/tasks/TASK-M1-SPIKE"
   };
 }

@@ -842,6 +842,63 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("SHUD runtime denies array spawn input before custom evaluator and spawn", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      zeroLikeRegistry.register(new RecordingTool("edit"));
+      const agentControl = createAgentControlSpy();
+      const input = ["not a spawn record"] as unknown[] & Record<string, unknown>;
+      input.instruction = "Run a worker task.";
+      input.role = "worker";
+      input.tools = ["edit"];
+      let customCalls = 0;
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async () => {
+          customCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        input
+      );
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("policy_gate_denied");
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        ruleId?: string;
+        guard_class?: string;
+        remediation?: {
+          next_action?: string;
+        };
+      };
+      expect(payload.ruleId).toBe(SPAWN_PROFILE_SUBSET_RULE_ID);
+      expect(payload.guard_class).toBe("authority");
+      expect(payload.remediation?.next_action).toBe("adjust_scope");
+      expect(customCalls).toBe(0);
+      expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime trims reviewer role before denying spawn profile supersets", async () => {
     const fixture = await createRawFixture();
     try {
@@ -892,6 +949,70 @@ describe("policy-gated zero tool registry", () => {
       expect(payload.remediation?.next_action).toBe("adjust_scope");
       expect(payload.remediation?.hint).toContain("bash");
       expect(payload.remediation?.ref).toBe(SPAWN_PROFILE_SUBSET_POLICY_REF);
+      expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime denies dual tools aliases before custom evaluator and spawn", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      zeroLikeRegistry.register(new RecordingTool("edit"));
+      const agentControl = createAgentControlSpy();
+      let customCalls = 0;
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async () => {
+          customCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run a worker task.",
+          role: "worker",
+          tools: ["read"],
+          allowed_tools: ["edit"]
+        }
+      );
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("policy_gate_denied");
+      expect(result?.output).toContain("edit");
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        ruleId?: string;
+        guard_class?: string;
+        remediation?: {
+          next_action?: string;
+          hint?: string;
+          ref?: string;
+        };
+      };
+      expect(payload.ruleId).toBe(SPAWN_PROFILE_SUBSET_RULE_ID);
+      expect(payload.guard_class).toBe("authority");
+      expect(payload.remediation?.next_action).toBe("adjust_scope");
+      expect(payload.remediation?.hint).toContain("edit");
+      expect(payload.remediation?.ref).toBe(SPAWN_PROFILE_SUBSET_POLICY_REF);
+      expect(customCalls).toBe(0);
       expect(agentControl.getSpawnCalls()).toBe(0);
     } finally {
       await fixture.cleanup();
@@ -953,6 +1074,96 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("SHUD runtime executes only the sanitized spawn snapshot for drifting proxy input", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      zeroLikeRegistry.register(new RecordingTool("edit"));
+      const agentControl = createAgentControlSpy();
+      let descriptorReads = 0;
+      const safeInput = {
+        instruction: "Run a worker task.",
+        role: "worker",
+        tools: ["read"]
+      };
+      const proxyInput = new Proxy(safeInput, {
+        ownKeys() {
+          return ["instruction", "role", "tools"];
+        },
+        getOwnPropertyDescriptor(_target, property) {
+          descriptorReads += 1;
+          const safePhase = descriptorReads <= 3;
+          if (property === "instruction") {
+            return {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: "Run a worker task."
+            };
+          }
+          if (property === "role") {
+            return {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: "worker"
+            };
+          }
+          if (property === "tools") {
+            return {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: safePhase ? ["read"] : ["read", "edit"]
+            };
+          }
+          return undefined;
+        },
+        get(_target, property) {
+          if (property === "tools") {
+            return ["read", "edit"];
+          }
+          return Reflect.get(safeInput, property);
+        }
+      });
+      let seenTools: unknown;
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async (call) => {
+          seenTools = (call.input as { tools?: unknown }).tools;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        proxyInput
+      );
+
+      expect(result?.success).toBe(true);
+      expect(seenTools).toEqual(["read"]);
+      expect(agentControl.getSpawnCalls()).toBe(1);
+      expect(getCapturedToolNames(agentControl.getLastAgentContext())).toEqual(["read"]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime denies oversized canonical tools before custom evaluator and spawn", async () => {
     const fixture = await createRawFixture();
     try {
@@ -1008,6 +1219,125 @@ describe("policy-gated zero tool registry", () => {
         };
       };
       expect(payload.error).toBe("policy_gate_denied");
+      expect(payload.ruleId).toBe(SPAWN_PROFILE_SUBSET_RULE_ID);
+      expect(payload.guard_class).toBe("authority");
+      expect(payload.remediation?.next_action).toBe("adjust_scope");
+      expect(customCalls).toBe(0);
+      expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime omits large ignored spawn fields from custom evaluator input", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+      const tailSentinel = "ignored-tail-sentinel-that-must-not-appear";
+      let customSawIgnoredField = false;
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async (call) => {
+          const input = call.input as Record<string, unknown>;
+          customSawIgnoredField = "ignoredBlob" in input || "ignoredFunction" in input;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run a worker task.",
+          role: "worker",
+          tools: ["read"],
+          ignoredBlob: `${"x".repeat(200_000)}${tailSentinel}`,
+          ignoredFunction: () => tailSentinel
+        }
+      );
+
+      expect(result?.success).toBe(true);
+      expect(result?.output).not.toContain(tailSentinel);
+      expect(customSawIgnoredField).toBe(false);
+      expect(agentControl.getSpawnCalls()).toBe(1);
+      expect(getCapturedToolNames(agentControl.getLastAgentContext())).toEqual(["read"]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime denies accessor spawn fields without echoing sensitive keys", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+      const tailSentinel = "sensitive-key-tail-that-must-not-appear";
+      const sensitiveKey = `ignored_${"x".repeat(128)}_${tailSentinel}`;
+      const input: Record<string, unknown> = {
+        instruction: "Run a worker task.",
+        role: "worker",
+        tools: ["read"]
+      };
+      Object.defineProperty(input, sensitiveKey, {
+        enumerable: true,
+        get() {
+          return tailSentinel;
+        }
+      });
+      let customCalls = 0;
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async () => {
+          customCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        input
+      );
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("policy_gate_denied");
+      expect(result?.output).not.toContain(sensitiveKey);
+      expect(result?.output).not.toContain(tailSentinel);
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        ruleId?: string;
+        guard_class?: string;
+        remediation?: {
+          next_action?: string;
+        };
+      };
       expect(payload.ruleId).toBe(SPAWN_PROFILE_SUBSET_RULE_ID);
       expect(payload.guard_class).toBe("authority");
       expect(payload.remediation?.next_action).toBe("adjust_scope");

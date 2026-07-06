@@ -27,6 +27,7 @@ export const SPAWN_PROFILE_TOOL_ID_MAX_CHARS = 128;
 export const SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS = 4096;
 export const SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES = 5;
 export const SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS = 64;
+export const SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS = 65536;
 
 export interface PolicyGateToolCall {
   toolId: string;
@@ -120,45 +121,12 @@ export function evaluateSpawnProfileSubset(call: PolicyGateToolCall): PolicyRule
     return { decision: "allow" };
   }
 
-  const input = readRecord(call.input);
-  if (!input) {
-    return { decision: "allow" };
+  const parsed = parseSpawnAgentInputSnapshot(call.input);
+  if (parsed.decision === "deny") {
+    return parsed;
   }
 
-  const roleValue = readOwnDataValue(input, "role");
-  const role = roleValue.kind === "present" ? readTrimmedCanonicalRole(roleValue.value) : undefined;
-  const roleLabel = formatSpawnRoleLabel(roleValue);
-  const allowlist = readSpawnAllowlist(input);
-  if (allowlist.kind === "omitted") {
-    return { decision: "allow" };
-  }
-
-  if (allowlist.kind === "invalid") {
-    return buildSpawnProfileMalformedDeny(roleLabel, allowlist.field);
-  }
-
-  if (allowlist.kind === "empty") {
-    return buildSpawnProfileEmptyDeny(roleLabel, allowlist.field);
-  }
-
-  if (allowlist.kind === "budget_exceeded") {
-    return buildSpawnProfileBudgetDeny(roleLabel, allowlist);
-  }
-
-  if (!role) {
-    return { decision: "allow" };
-  }
-
-  const requestedToolIds = allowlist.toolIds;
-  const excessToolIds = uniqueStrings(
-    requestedToolIds.filter((toolId) => !isRoleToolIdAllowed(role, toolId))
-  );
-
-  if (excessToolIds.length === 0) {
-    return { decision: "allow" };
-  }
-
-  return buildSpawnProfileExcessDeny(role, excessToolIds);
+  return evaluateSpawnProfileSubsetSnapshot(parsed.snapshot);
 }
 
 export function normalizeSpawnAgentInput(
@@ -168,106 +136,69 @@ export function normalizeSpawnAgentInput(
     return { decision: "allow", input: call.input, changed: false };
   }
 
-  const input = readRecord(call.input);
-  if (!input) {
-    return { decision: "allow", input: call.input, changed: false };
+  const parsed = parseSpawnAgentInputSnapshot(call.input);
+  if (parsed.decision === "deny") {
+    return toSpawnProfileGateDeny(parsed);
   }
 
-  const ruleDecision = evaluateSpawnProfileSubset(call);
+  const ruleDecision = evaluateSpawnProfileSubsetSnapshot(parsed.snapshot);
   if (ruleDecision.decision === "deny") {
-    return {
-      decision: "deny",
-      ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
-      reason: ruleDecision.reason,
-      remediation: ruleDecision.remediation,
-      guardClass: ruleDecision.guardClass ?? SPAWN_PROFILE_SUBSET_RULE.guardClass
-    };
-  }
-
-  const snapshot = snapshotSpawnInput(input);
-  if (snapshot.decision === "deny") {
-    return snapshot;
-  }
-
-  const roleValue = readOwnDataValue(input, "role");
-  const role = roleValue.kind === "present" ? readTrimmedCanonicalRole(roleValue.value) : undefined;
-  const allowlist = readSpawnAllowlist(input);
-  const hasExplicitAllowlist = allowlist.kind === "valid";
-  const toolIds = hasExplicitAllowlist
-    ? allowlist.toolIds
-    : role
-      ? [...getRoleToolIds(role)]
-      : undefined;
-
-  const normalizedInput: Record<string, unknown> = {
-    ...snapshot.input
-  };
-  delete normalizedInput.allowed_tools;
-  delete normalizedInput.tools;
-
-  if (role) {
-    normalizedInput.role = role;
-  }
-  if (toolIds) {
-    normalizedInput.tools = [...toolIds];
+    return toSpawnProfileGateDeny(ruleDecision);
   }
 
   return {
     decision: "allow",
-    input: normalizedInput,
+    input: buildSpawnExecutionInput(parsed.snapshot),
     changed: true
   };
 }
 
-function readRecord(value: unknown): Record<string, unknown> | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  return value as Record<string, unknown>;
-}
+type SpawnAllowlistField = "tools" | "allowed_tools";
 
-type OwnDataValueRead =
+const SPAWN_AGENT_STRING_FIELDS = Object.freeze([
+  "instruction",
+  "label",
+  "mode",
+  "agentInstruction",
+  "model"
+] as const);
+
+const SPAWN_AGENT_SNAPSHOT_FIELDS = Object.freeze([
+  ...SPAWN_AGENT_STRING_FIELDS,
+  "role",
+  "tools",
+  "allowed_tools"
+] as const);
+
+type SpawnAgentStringField = (typeof SPAWN_AGENT_STRING_FIELDS)[number];
+type SpawnAgentSnapshotField = (typeof SPAWN_AGENT_SNAPSHOT_FIELDS)[number];
+
+type SpawnProfileRuleDeny = Extract<PolicyRuleDecision, { decision: "deny" }>;
+
+type SpawnFieldSnapshot = {
+  values: Partial<Record<SpawnAgentSnapshotField, unknown>>;
+  presentFields: ReadonlySet<SpawnAgentSnapshotField>;
+};
+
+type SpawnFieldSnapshotResult =
+  | {
+      decision: "allow";
+      values: Partial<Record<SpawnAgentSnapshotField, unknown>>;
+      presentFields: ReadonlySet<SpawnAgentSnapshotField>;
+    }
+  | SpawnProfileRuleDeny;
+
+type SpawnRoleSnapshot =
   | {
       kind: "omitted";
-    }
-  | {
-      kind: "accessor";
+      label: string;
     }
   | {
       kind: "present";
-      value: unknown;
+      value: string;
+      label: string;
+      canonicalRole?: HarnessRole;
     };
-
-function readOwnDataValue(input: Record<string, unknown>, key: string): OwnDataValueRead {
-  let descriptor: PropertyDescriptor | undefined;
-  try {
-    descriptor = Object.getOwnPropertyDescriptor(input, key);
-  } catch {
-    return { kind: "accessor" };
-  }
-
-  if (!descriptor) {
-    return { kind: "omitted" };
-  }
-
-  if (!("value" in descriptor)) {
-    return { kind: "accessor" };
-  }
-
-  return {
-    kind: "present",
-    value: descriptor.value
-  };
-}
-
-function readTrimmedCanonicalRole(value: unknown): HarnessRole | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-
-  const role = value.trim();
-  return isCanonicalHarnessRole(role) ? role : undefined;
-}
 
 type SpawnAllowlistRead =
   | {
@@ -275,60 +206,245 @@ type SpawnAllowlistRead =
     }
   | {
       kind: "invalid";
-      field: "tools" | "allowed_tools";
+      field: SpawnAllowlistField;
     }
   | {
       kind: "empty";
-      field: "tools" | "allowed_tools";
+      field: SpawnAllowlistField;
     }
   | {
       kind: "budget_exceeded";
-      field: "tools" | "allowed_tools";
+      field: SpawnAllowlistField;
       budget: "item_count" | "tool_id_length" | "total_characters";
       limit: number;
       actual: number;
     }
   | {
       kind: "valid";
-      field: "tools" | "allowed_tools";
+      field: SpawnAllowlistField;
       toolIds: readonly string[];
+    }
+  | {
+      kind: "dual";
+      toolIds: readonly string[];
+      toolsToolIds: readonly string[];
+      allowedToolsToolIds: readonly string[];
     };
 
-function readSpawnAllowlist(input: Record<string, unknown>): SpawnAllowlistRead {
-  const tools = readOwnDataValue(input, "tools");
-  const allowedTools = readOwnDataValue(input, "allowed_tools");
+type SpawnAgentInputSnapshot = {
+  fields: ReadonlyMap<SpawnAgentStringField, string>;
+  role: SpawnRoleSnapshot;
+  allowlist: SpawnAllowlistRead;
+};
 
-  if (tools.kind === "omitted" && allowedTools.kind === "omitted") {
+type SpawnAgentInputSnapshotResult =
+  | {
+      decision: "allow";
+      snapshot: SpawnAgentInputSnapshot;
+    }
+  | SpawnProfileRuleDeny;
+
+function parseSpawnAgentInputSnapshot(input: unknown): SpawnAgentInputSnapshotResult {
+  const fieldSnapshot = snapshotSpawnDataFields(input);
+  if (fieldSnapshot.decision === "deny") {
+    return fieldSnapshot;
+  }
+
+  const fields = snapshotSpawnStringFields(fieldSnapshot);
+  if (fields.decision === "deny") {
+    return fields;
+  }
+
+  const role = snapshotSpawnRole(fieldSnapshot);
+  if (role.decision === "deny") {
+    return role;
+  }
+
+  const allowlist = readSpawnAllowlist(fieldSnapshot);
+  if (allowlist.kind === "invalid") {
+    return buildSpawnProfileMalformedDeny(role.role.label, allowlist.field);
+  }
+  if (allowlist.kind === "empty") {
+    return buildSpawnProfileEmptyDeny(role.role.label, allowlist.field);
+  }
+  if (allowlist.kind === "budget_exceeded") {
+    return buildSpawnProfileBudgetDeny(role.role.label, allowlist);
+  }
+
+  return {
+    decision: "allow",
+    snapshot: {
+      fields: fields.fields,
+      role: role.role,
+      allowlist
+    }
+  };
+}
+
+function snapshotSpawnDataFields(input: unknown): SpawnFieldSnapshotResult {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return buildSpawnProfileUnsafeInputDeny("spawn_agent input must be a plain data record");
+  }
+
+  let prototype: unknown;
+  try {
+    prototype = Object.getPrototypeOf(input);
+  } catch {
+    return buildSpawnProfileUnsafeInputDeny("spawn_agent input could not be safely inspected");
+  }
+
+  if (prototype !== Object.prototype && prototype !== null) {
+    return buildSpawnProfileUnsafeInputDeny("spawn_agent input must be a plain data record");
+  }
+
+  let descriptors: Record<PropertyKey, PropertyDescriptor>;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(input) as Record<
+      PropertyKey,
+      PropertyDescriptor
+    >;
+  } catch {
+    return buildSpawnProfileUnsafeInputDeny("spawn_agent input could not be safely inspected");
+  }
+
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key];
+    if (descriptor && !("value" in descriptor)) {
+      return buildSpawnProfileUnsafeInputDeny("spawn_agent input must contain only data fields");
+    }
+  }
+
+  const values: Partial<Record<SpawnAgentSnapshotField, unknown>> = {};
+  const presentFields = new Set<SpawnAgentSnapshotField>();
+  for (const field of SPAWN_AGENT_SNAPSHOT_FIELDS) {
+    const descriptor = descriptors[field];
+    if (!descriptor) {
+      continue;
+    }
+    values[field] = descriptor.value;
+    presentFields.add(field);
+  }
+
+  return {
+    decision: "allow",
+    values,
+    presentFields
+  };
+}
+
+function snapshotSpawnStringFields(
+  snapshot: SpawnFieldSnapshot
+): { decision: "allow"; fields: ReadonlyMap<SpawnAgentStringField, string> } | SpawnProfileRuleDeny {
+  const fields = new Map<SpawnAgentStringField, string>();
+  for (const field of SPAWN_AGENT_STRING_FIELDS) {
+    if (!snapshot.presentFields.has(field)) {
+      continue;
+    }
+
+    const value = snapshot.values[field];
+    if (value === undefined) {
+      continue;
+    }
+
+    if (typeof value !== "string") {
+      return buildSpawnProfileMalformedInputDeny(`spawn_agent ${field} must be a string`);
+    }
+
+    if (value.length > SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS) {
+      return buildSpawnProfileMalformedInputDeny(
+        `spawn_agent ${field} exceeds the ${SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS} character budget`
+      );
+    }
+
+    fields.set(field, value);
+  }
+
+  return { decision: "allow", fields };
+}
+
+function snapshotSpawnRole(
+  snapshot: SpawnFieldSnapshot
+): { decision: "allow"; role: SpawnRoleSnapshot } | SpawnProfileRuleDeny {
+  if (!snapshot.presentFields.has("role") || snapshot.values.role === undefined) {
+    return {
+      decision: "allow",
+      role: {
+        kind: "omitted",
+        label: "unspecified role"
+      }
+    };
+  }
+
+  const value = snapshot.values.role;
+  if (typeof value !== "string") {
+    return buildSpawnProfileMalformedInputDeny(
+      "spawn_agent role must be a primitive string when provided"
+    );
+  }
+
+  if (value.length > SPAWN_PROFILE_TOOL_ID_MAX_CHARS) {
+    return buildSpawnProfileMalformedInputDeny(
+      `spawn_agent role exceeds the ${SPAWN_PROFILE_TOOL_ID_MAX_CHARS} character budget`
+    );
+  }
+
+  const trimmedRole = value.trim();
+  const role: SpawnRoleSnapshot = {
+    kind: "present",
+    value: trimmedRole,
+    label: formatSpawnRoleLabel(trimmedRole)
+  };
+  if (isCanonicalHarnessRole(trimmedRole)) {
+    role.canonicalRole = trimmedRole;
+  }
+
+  return {
+    decision: "allow",
+    role
+  };
+}
+
+function readSpawnAllowlist(snapshot: SpawnFieldSnapshot): SpawnAllowlistRead {
+  const toolsPresent = snapshot.presentFields.has("tools");
+  const allowedToolsPresent = snapshot.presentFields.has("allowed_tools");
+
+  if (!toolsPresent && !allowedToolsPresent) {
     return { kind: "omitted" };
   }
 
   let toolsAllowlist: SpawnAllowlistRead | undefined;
-  if (tools.kind !== "omitted") {
-    toolsAllowlist =
-      tools.kind === "present"
-        ? readSpawnAllowlistField("tools", tools.value)
-        : { kind: "invalid", field: "tools" };
+  if (toolsPresent) {
+    toolsAllowlist = readSpawnAllowlistField("tools", snapshot.values.tools);
     if (toolsAllowlist.kind !== "valid") {
       return toolsAllowlist;
     }
   }
 
   let allowedToolsAllowlist: SpawnAllowlistRead | undefined;
-  if (allowedTools.kind !== "omitted") {
-    allowedToolsAllowlist =
-      allowedTools.kind === "present"
-        ? readSpawnAllowlistField("allowed_tools", allowedTools.value)
-        : { kind: "invalid", field: "allowed_tools" };
+  if (allowedToolsPresent) {
+    allowedToolsAllowlist = readSpawnAllowlistField(
+      "allowed_tools",
+      snapshot.values.allowed_tools
+    );
     if (allowedToolsAllowlist.kind !== "valid") {
       return allowedToolsAllowlist;
     }
+  }
+
+  if (toolsAllowlist?.kind === "valid" && allowedToolsAllowlist?.kind === "valid") {
+    return {
+      kind: "dual",
+      toolsToolIds: toolsAllowlist.toolIds,
+      allowedToolsToolIds: allowedToolsAllowlist.toolIds,
+      toolIds: uniqueStrings([...toolsAllowlist.toolIds, ...allowedToolsAllowlist.toolIds])
+    };
   }
 
   return toolsAllowlist ?? allowedToolsAllowlist ?? { kind: "omitted" };
 }
 
 function readSpawnAllowlistField(
-  field: "tools" | "allowed_tools",
+  field: SpawnAllowlistField,
   value: unknown
 ): SpawnAllowlistRead {
   if (!Array.isArray(value)) {
@@ -401,39 +517,74 @@ function readSpawnAllowlistField(
   return { kind: "valid", field, toolIds: uniqueStrings(toolIds) };
 }
 
-function snapshotSpawnInput(
-  input: Record<string, unknown>
-):
-  | { decision: "allow"; input: Record<string, unknown> }
-  | Extract<PolicyGateDecision, { decision: "deny" }> {
-  let descriptors: PropertyDescriptorMap;
-  try {
-    descriptors = Object.getOwnPropertyDescriptors(input);
-  } catch {
-    return buildSpawnProfileUnsafeInputDeny("could not inspect own properties");
+function evaluateSpawnProfileSubsetSnapshot(
+  snapshot: SpawnAgentInputSnapshot
+): PolicyRuleDecision {
+  const allowlist = snapshot.allowlist;
+  if (allowlist.kind === "omitted") {
+    return { decision: "allow" };
   }
 
-  const snapshot: Record<string, unknown> = {};
-  for (const [key, descriptor] of Object.entries(descriptors)) {
-    if (!descriptor.enumerable || key === "tools" || key === "allowed_tools") {
-      continue;
+  if (allowlist.kind === "dual") {
+    return buildSpawnProfileAmbiguousAllowlistDeny(
+      snapshot.role.label,
+      snapshot.role.kind === "present" ? snapshot.role.canonicalRole : undefined,
+      allowlist
+    );
+  }
+
+  if (allowlist.kind !== "valid") {
+    return { decision: "allow" };
+  }
+
+  const role = snapshot.role.kind === "present" ? snapshot.role.canonicalRole : undefined;
+  if (!role) {
+    return { decision: "allow" };
+  }
+
+  const excessToolIds = uniqueStrings(
+    allowlist.toolIds.filter((toolId) => !isRoleToolIdAllowed(role, toolId))
+  );
+
+  if (excessToolIds.length === 0) {
+    return { decision: "allow" };
+  }
+
+  return buildSpawnProfileExcessDeny(role, excessToolIds);
+}
+
+function buildSpawnExecutionInput(snapshot: SpawnAgentInputSnapshot): Record<string, unknown> {
+  const normalizedInput: Record<string, unknown> = {};
+  for (const [field, value] of snapshot.fields) {
+    normalizedInput[field] = value;
+  }
+
+  if (snapshot.role.kind === "present" && snapshot.role.value.length > 0) {
+    normalizedInput.role = snapshot.role.value;
+  }
+
+  if (snapshot.allowlist.kind === "valid") {
+    normalizedInput.tools = [...snapshot.allowlist.toolIds];
+  } else if (snapshot.allowlist.kind === "omitted" && snapshot.role.kind === "present") {
+    const role = snapshot.role.canonicalRole;
+    if (role) {
+      normalizedInput.tools = [...getRoleToolIds(role)];
     }
-
-    if (!("value" in descriptor)) {
-      return buildSpawnProfileUnsafeInputDeny(`contains an accessor field: ${key}`);
-    }
-
-    snapshot[key] = descriptor.value;
   }
 
-  try {
-    return {
-      decision: "allow",
-      input: structuredClone(snapshot) as Record<string, unknown>
-    };
-  } catch {
-    return buildSpawnProfileUnsafeInputDeny("contains non-cloneable enumerable data");
-  }
+  return normalizedInput;
+}
+
+function toSpawnProfileGateDeny(
+  decision: SpawnProfileRuleDeny
+): Extract<PolicyGateDecision, { decision: "deny" }> {
+  return {
+    decision: "deny",
+    ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+    reason: decision.reason,
+    remediation: decision.remediation,
+    guardClass: decision.guardClass ?? SPAWN_PROFILE_SUBSET_RULE.guardClass
+  };
 }
 
 function uniqueStrings(values: readonly string[]): string[] {
@@ -442,7 +593,7 @@ function uniqueStrings(values: readonly string[]): string[] {
 
 function buildSpawnProfileMalformedDeny(
   role: string,
-  field: "tools" | "allowed_tools"
+  field: SpawnAllowlistField
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
     decision: "deny",
@@ -458,7 +609,7 @@ function buildSpawnProfileMalformedDeny(
 
 function buildSpawnProfileEmptyDeny(
   role: string,
-  field: "tools" | "allowed_tools"
+  field: SpawnAllowlistField
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
     decision: "deny",
@@ -491,35 +642,44 @@ function buildSpawnProfileBudgetDeny(
 
 function buildSpawnProfileUnsafeInputDeny(
   detail: string
-): Extract<PolicyGateDecision, { decision: "deny" }> {
+): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
     decision: "deny",
-    ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
     reason: `spawn_agent input cannot be safely isolated before policy evaluation: ${detail}.`,
     remediation: {
       next_action: "adjust_scope",
-      hint: "Provide spawn_agent input as plain cloneable data with explicit tool ids when constraining sub-agent tools.",
+      hint: "Provide spawn_agent input as a plain data object with explicit tool ids when constraining sub-agent tools.",
       ref: SPAWN_PROFILE_SUBSET_POLICY_REF
     },
     guardClass: "authority"
   };
 }
 
-function formatSpawnRoleLabel(role: OwnDataValueRead): string {
-  if (role.kind !== "present" || typeof role.value !== "string") {
+function buildSpawnProfileMalformedInputDeny(
+  detail: string
+): Extract<PolicyRuleDecision, { decision: "deny" }> {
+  return {
+    decision: "deny",
+    reason: `${detail}.`,
+    remediation: {
+      next_action: "adjust_scope",
+      hint: "Provide spawn_agent input as plain JSON-compatible data matching the Zero spawn_agent schema.",
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+    },
+    guardClass: "authority"
+  };
+}
+
+function formatSpawnRoleLabel(role: string): string {
+  if (role.length === 0) {
     return "unspecified role";
   }
 
-  const trimmedRole = role.value.trim();
-  if (trimmedRole.length === 0) {
-    return "unspecified role";
+  if (role.length <= SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS) {
+    return role;
   }
 
-  if (trimmedRole.length <= SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS) {
-    return trimmedRole;
-  }
-
-  return `${trimmedRole.slice(0, SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS - 3)}...`;
+  return `${role.slice(0, SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS - 3)}...`;
 }
 
 function formatSpawnAllowlistBudget(
@@ -532,6 +692,29 @@ function formatSpawnAllowlistBudget(
     return `per-tool id length (${allowlist.actual}/${allowlist.limit} characters)`;
   }
   return `total tool-id characters (${allowlist.actual}/${allowlist.limit})`;
+}
+
+function buildSpawnProfileAmbiguousAllowlistDeny(
+  roleLabel: string,
+  role: HarnessRole | undefined,
+  allowlist: Extract<SpawnAllowlistRead, { kind: "dual" }>
+): Extract<PolicyRuleDecision, { decision: "deny" }> {
+  const excessToolIds = role
+    ? uniqueStrings(allowlist.toolIds.filter((toolId) => !isRoleToolIdAllowed(role, toolId)))
+    : [];
+  const excessClause =
+    excessToolIds.length > 0 ? ` Excess examples: ${formatToolIdSummary(excessToolIds)}.` : "";
+
+  return {
+    decision: "deny",
+    reason: `spawn_agent input supplies both tools and allowed_tools for ${roleLabel}; this is ambiguous and cannot be authorized.${excessClause}`,
+    remediation: {
+      next_action: "adjust_scope",
+      hint: `Provide exactly one spawn allowlist field, either tools or allowed_tools, after removing any excess tool ids.${excessClause}`,
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+    },
+    guardClass: "authority"
+  };
 }
 
 function buildSpawnProfileExcessDeny(
