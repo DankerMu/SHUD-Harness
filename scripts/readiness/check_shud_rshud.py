@@ -7,6 +7,7 @@ import argparse
 import copy
 import ctypes
 import fnmatch
+import hashlib
 import json
 import os
 import platform
@@ -105,6 +106,10 @@ ENV_VALUE_REDACTION_REASON = (
 BUILD_SOURCE_KEYS = ("MAIN_shud", "MAIN_OMP", "MAIN_DEBUG", "SRC", "SRC_H")
 BUILD_SOURCE_SUFFIXES = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx")
 MAX_BUILD_SOURCE_CANDIDATES = 10000
+MAX_SUNDIALS_LIBRARY_CANDIDATES = MAX_BUILD_SOURCE_CANDIDATES
+MAX_SHUD_ARTIFACT_INVENTORY_CANDIDATES = MAX_BUILD_SOURCE_CANDIDATES
+SELF_TEST_CANDIDATE_LIMIT_ENV = "SHUD_RSHUD_READINESS_SELF_TEST_CANDIDATE_LIMIT"
+MAX_IDENTITY_HASH_BYTES = 2_000_000
 WRAPPER_REALPATH_ENV = "SHUD_RSHUD_READINESS_WRAPPER_REALPATH"
 PYTHON_REALPATH_ENV = "SHUD_RSHUD_READINESS_PYTHON_REALPATH"
 WRAPPER_PARENT_PID_ENV = "SHUD_RSHUD_READINESS_WRAPPER_PARENT_PID"
@@ -1010,6 +1015,116 @@ def bounded_glob_matches(shud_dir: Path, pattern: str, remaining: int) -> tuple[
     return sorted(matches, key=lambda candidate: candidate.as_posix()), scanned, None
 
 
+def effective_candidate_limit(default_limit: int) -> dict[str, Any]:
+    raw_value = os.environ.get(SELF_TEST_CANDIDATE_LIMIT_ENV) if SELF_TEST_FIXTURE_MODE else None
+    policy: dict[str, Any] = {
+        "default_limit": default_limit,
+        "limit": default_limit,
+        "source": "default",
+        "env_var": SELF_TEST_CANDIDATE_LIMIT_ENV,
+        "self_test_only": True,
+        "env_present": raw_value is not None,
+        "env_value_recorded": False,
+        "env_value_digits_only": bool(raw_value and raw_value.isdigit()),
+        "ignored_reason": None,
+    }
+    if raw_value is None:
+        return policy
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        policy["ignored_reason"] = "self-test candidate limit is not an integer"
+        return policy
+    if parsed <= 0:
+        policy["ignored_reason"] = "self-test candidate limit is not positive"
+        return policy
+    policy["limit"] = parsed
+    policy["source"] = "self_test_environment"
+    return policy
+
+
+def bounded_glob_paths(base_dir: Path, pattern: str, default_limit: int, limit_reason: str) -> tuple[list[Path], dict[str, Any]]:
+    limit_policy = effective_candidate_limit(default_limit)
+    limit = int(limit_policy["limit"])
+    paths: list[Path] = []
+    scan: dict[str, Any] = {
+        "base_dir": str(base_dir),
+        "base_dir_exists": base_dir.is_dir(),
+        "pattern": pattern,
+        "candidate_limit": limit,
+        "candidate_limit_policy": limit_policy,
+        "candidate_count": 0,
+        "candidate_count_lower_bound": None,
+        "materialized_all_candidates": True,
+        "truncated": False,
+        "scan_blocks": [],
+        "reason": None,
+    }
+    if not base_dir.is_dir():
+        return paths, scan
+
+    for candidate in base_dir.glob(pattern):
+        scan["candidate_count"] += 1
+        if scan["candidate_count"] > limit:
+            scan["candidate_count_lower_bound"] = scan["candidate_count"]
+            scan["materialized_all_candidates"] = False
+            scan["truncated"] = True
+            scan["reason"] = limit_reason
+            scan["scan_blocks"].append(
+                {
+                    "base_dir": str(base_dir),
+                    "pattern": pattern,
+                    "candidate_limit": limit,
+                    "candidate_count_lower_bound": scan["candidate_count"],
+                    "materialized_all_candidates": False,
+                    "reason": limit_reason,
+                }
+            )
+            break
+        paths.append(candidate)
+    return sorted(paths, key=lambda candidate: candidate.as_posix()), scan
+
+
+def bounded_top_level_paths(base_dir: Path, default_limit: int, limit_reason: str) -> tuple[list[Path], dict[str, Any]]:
+    limit_policy = effective_candidate_limit(default_limit)
+    limit = int(limit_policy["limit"])
+    paths: list[Path] = []
+    scan: dict[str, Any] = {
+        "base_dir": str(base_dir),
+        "base_dir_exists": base_dir.is_dir(),
+        "candidate_limit": limit,
+        "candidate_limit_policy": limit_policy,
+        "candidate_count": 0,
+        "candidate_count_lower_bound": None,
+        "materialized_all_candidates": True,
+        "truncated": False,
+        "scan_blocks": [],
+        "reason": None,
+    }
+    if not base_dir.is_dir():
+        return paths, scan
+
+    for candidate in base_dir.iterdir():
+        scan["candidate_count"] += 1
+        if scan["candidate_count"] > limit:
+            scan["candidate_count_lower_bound"] = scan["candidate_count"]
+            scan["materialized_all_candidates"] = False
+            scan["truncated"] = True
+            scan["reason"] = limit_reason
+            scan["scan_blocks"].append(
+                {
+                    "base_dir": str(base_dir),
+                    "candidate_limit": limit,
+                    "candidate_count_lower_bound": scan["candidate_count"],
+                    "materialized_all_candidates": False,
+                    "reason": limit_reason,
+                }
+            )
+            break
+        paths.append(candidate)
+    return sorted(paths, key=lambda candidate: candidate.name), scan
+
+
 def ignored_build_source_scan(shud_dir: Path) -> dict[str, Any]:
     specs = build_source_specs(shud_dir)
     records: list[dict[str, Any]] = []
@@ -1208,6 +1323,36 @@ def parse_sundials_version(header: Path) -> str | None:
     return None
 
 
+def collect_sundials_libraries(lib_dir: Path, errors: list[str]) -> dict[str, Any]:
+    cvode_libraries, cvode_scan = bounded_glob_paths(
+        lib_dir,
+        "libsundials_cvode*",
+        MAX_SUNDIALS_LIBRARY_CANDIDATES,
+        "SUNDIALS library scan limit exceeded before sorting or storing all cvode library candidates",
+    )
+    nvecserial_libraries, nvecserial_scan = bounded_glob_paths(
+        lib_dir,
+        "libsundials_nvecserial*",
+        MAX_SUNDIALS_LIBRARY_CANDIDATES,
+        "SUNDIALS library scan limit exceeded before sorting or storing all nvecserial library candidates",
+    )
+    scan_blocks = [*cvode_scan["scan_blocks"], *nvecserial_scan["scan_blocks"]]
+    if scan_blocks:
+        errors.append("SUNDIALS library scan limit exceeded; refusing readiness pass")
+    return {
+        "cvode_libraries": [str(path) for path in cvode_libraries],
+        "nvecserial_libraries": [str(path) for path in nvecserial_libraries],
+        "scan": {
+            "candidate_limit": cvode_scan["candidate_limit"],
+            "materialized_all_candidates": not scan_blocks,
+            "truncated": bool(scan_blocks),
+            "scan_blocks": scan_blocks,
+            "cvode": cvode_scan,
+            "nvecserial": nvecserial_scan,
+        },
+    }
+
+
 def collect_sundials(shud_dir: Path, errors: list[str]) -> dict[str, Any]:
     candidate_records: list[dict[str, Any]] = []
     selected: dict[str, Any] | None = None
@@ -1215,8 +1360,7 @@ def collect_sundials(shud_dir: Path, errors: list[str]) -> dict[str, Any]:
         candidate = candidate_info["path"]
         header = candidate / "include" / "sundials" / "sundials_config.h"
         lib_dir = candidate / "lib"
-        cvode_libraries = sorted(str(path) for path in lib_dir.glob("libsundials_cvode*"))
-        nvecserial_libraries = sorted(str(path) for path in lib_dir.glob("libsundials_nvecserial*"))
+        libraries = collect_sundials_libraries(lib_dir, errors)
         version = parse_sundials_version(header) if header.is_file() else None
         record = {
             "path": str(candidate),
@@ -1225,9 +1369,15 @@ def collect_sundials(shud_dir: Path, errors: list[str]) -> dict[str, Any]:
             "version": version,
             "lib_dir": str(lib_dir),
             "lib_dir_exists": lib_dir.is_dir(),
-            "cvode_libraries": cvode_libraries,
-            "nvecserial_libraries": nvecserial_libraries,
-            "ok": bool(version and cvode_libraries and nvecserial_libraries),
+            "cvode_libraries": libraries["cvode_libraries"],
+            "nvecserial_libraries": libraries["nvecserial_libraries"],
+            "library_scan": libraries["scan"],
+            "ok": bool(
+                version
+                and libraries["cvode_libraries"]
+                and libraries["nvecserial_libraries"]
+                and libraries["scan"]["materialized_all_candidates"]
+            ),
             "source": candidate_info["source"],
             "build_selected": candidate_info["build_selected"],
             "makefile_operator": candidate_info["makefile_operator"],
@@ -1533,11 +1683,30 @@ def inventory_shud_artifacts(
     shud_dir: Path,
     removable_current_build_names: set[str] | None = None,
 ) -> list[dict[str, Any]]:
+    return inventory_shud_artifacts_report(shud_dir, removable_current_build_names)["artifacts"]
+
+
+def inventory_shud_artifacts_report(
+    shud_dir: Path,
+    removable_current_build_names: set[str] | None = None,
+) -> dict[str, Any]:
+    scan_reason = "SHUD artifact inventory limit exceeded before sorting or filtering all top-level entries"
+    paths, scan = bounded_top_level_paths(
+        shud_dir,
+        MAX_SHUD_ARTIFACT_INVENTORY_CANDIDATES,
+        scan_reason,
+    )
+    errors = ["SHUD artifact inventory limit exceeded; refusing readiness pass"] if scan["truncated"] else []
     if not shud_dir.is_dir():
-        return []
+        return {
+            "artifacts": [],
+            "artifact_count": 0,
+            "scan": scan,
+            "errors": errors,
+        }
     removable_current_build_names = removable_current_build_names or set()
     artifacts: list[dict[str, Any]] = []
-    for path in sorted(shud_dir.iterdir(), key=lambda candidate: candidate.name):
+    for path in paths:
         classification = classify_shud_artifact_name(path.name)
         if not classification:
             continue
@@ -1570,7 +1739,30 @@ def inventory_shud_artifacts(
                 "size_bytes": path.stat().st_size if path.is_file() else None,
             }
         )
-    return artifacts
+    return {
+        "artifacts": artifacts,
+        "artifact_count": len(artifacts),
+        "scan": scan,
+        "errors": errors,
+    }
+
+
+def artifact_inventory_scan(report: dict[str, Any]) -> dict[str, Any]:
+    scan = dict(report["scan"])
+    scan["artifact_count"] = report["artifact_count"]
+    scan["errors"] = list(report["errors"])
+    return scan
+
+
+def record_artifact_inventory(target: dict[str, Any], field: str, report: dict[str, Any]) -> None:
+    target[field] = report["artifacts"]
+    target[f"{field}_scan"] = artifact_inventory_scan(report)
+
+
+def extend_errors(errors: list[str], new_errors: list[str]) -> None:
+    for error in new_errors:
+        if error not in errors:
+            errors.append(error)
 
 
 def remove_shud_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1602,42 +1794,76 @@ def cleanup_shud_artifacts(
     removable_current_build_names: set[str] | None = None,
 ) -> dict[str, Any]:
     removable_current_build_names = removable_current_build_names or set()
-    before_inventory = inventory_shud_artifacts(shud_dir, removable_current_build_names)
+    before_report = inventory_shud_artifacts_report(shud_dir, removable_current_build_names)
+    before_inventory = before_report["artifacts"]
     blocking_inventory = [artifact for artifact in before_inventory if not artifact["removable"]]
-    if blocking_inventory:
+    if before_report["scan"]["truncated"] or blocking_inventory:
+        skip_reason = (
+            "SHUD artifact inventory limit exceeded before make clean"
+            if before_report["scan"]["truncated"]
+            else "unsafe SHUD artifact candidates were present before make clean"
+        )
         return {
             "make_clean": None,
             "make_clean_skipped": True,
-            "skip_reason": "unsafe SHUD artifact candidates were present before make clean",
+            "skip_reason": skip_reason,
             "artifact_inventory_before_cleanup": before_inventory,
+            "artifact_inventory_before_cleanup_scan": artifact_inventory_scan(before_report),
             "artifact_inventory_before_extra_cleanup": before_inventory,
+            "artifact_inventory_before_extra_cleanup_scan": artifact_inventory_scan(before_report),
             "extra_cleanup": [],
             "artifact_inventory_after_cleanup": before_inventory,
+            "artifact_inventory_after_cleanup_scan": artifact_inventory_scan(before_report),
+            "inventory_errors": list(before_report["errors"]),
         }
 
     make_result = run_make(shud_dir, "clean", timeout_seconds)
-    after_make_inventory = inventory_shud_artifacts(shud_dir, removable_current_build_names)
+    after_make_report = inventory_shud_artifacts_report(shud_dir, removable_current_build_names)
+    after_make_inventory = after_make_report["artifacts"]
     if make_result["exit_code"] != 0:
         return {
             "make_clean": make_result,
             "make_clean_skipped": False,
             "skip_reason": None,
             "artifact_inventory_before_cleanup": before_inventory,
+            "artifact_inventory_before_cleanup_scan": artifact_inventory_scan(before_report),
             "artifact_inventory_before_extra_cleanup": after_make_inventory,
+            "artifact_inventory_before_extra_cleanup_scan": artifact_inventory_scan(after_make_report),
             "extra_cleanup": [],
             "artifact_inventory_after_cleanup": after_make_inventory,
+            "artifact_inventory_after_cleanup_scan": artifact_inventory_scan(after_make_report),
+            "inventory_errors": [*before_report["errors"], *after_make_report["errors"]],
+        }
+    if after_make_report["scan"]["truncated"]:
+        return {
+            "make_clean": make_result,
+            "make_clean_skipped": False,
+            "skip_reason": "SHUD artifact inventory limit exceeded before extra cleanup",
+            "artifact_inventory_before_cleanup": before_inventory,
+            "artifact_inventory_before_cleanup_scan": artifact_inventory_scan(before_report),
+            "artifact_inventory_before_extra_cleanup": after_make_inventory,
+            "artifact_inventory_before_extra_cleanup_scan": artifact_inventory_scan(after_make_report),
+            "extra_cleanup": [],
+            "artifact_inventory_after_cleanup": after_make_inventory,
+            "artifact_inventory_after_cleanup_scan": artifact_inventory_scan(after_make_report),
+            "inventory_errors": [*before_report["errors"], *after_make_report["errors"]],
         }
 
     removals = remove_shud_artifacts(after_make_inventory)
-    after_inventory = inventory_shud_artifacts(shud_dir, removable_current_build_names)
+    after_report = inventory_shud_artifacts_report(shud_dir, removable_current_build_names)
+    after_inventory = after_report["artifacts"]
     return {
         "make_clean": make_result,
         "make_clean_skipped": False,
         "skip_reason": None,
         "artifact_inventory_before_cleanup": before_inventory,
+        "artifact_inventory_before_cleanup_scan": artifact_inventory_scan(before_report),
         "artifact_inventory_before_extra_cleanup": after_make_inventory,
+        "artifact_inventory_before_extra_cleanup_scan": artifact_inventory_scan(after_make_report),
         "extra_cleanup": removals,
         "artifact_inventory_after_cleanup": after_inventory,
+        "artifact_inventory_after_cleanup_scan": artifact_inventory_scan(after_report),
+        "inventory_errors": [*before_report["errors"], *after_make_report["errors"], *after_report["errors"]],
     }
 
 
@@ -1670,11 +1896,14 @@ def collect_shud(
             "result": None,
             "artifact": artifact_state(shud_dir / "shud"),
             "artifact_inventory_after_build": None,
+            "artifact_inventory_after_build_scan": None,
             "cleanup_requested": cleanup,
             "cleanup": None,
             "artifact_after_cleanup": None,
             "artifact_inventory_after_cleanup": None,
+            "artifact_inventory_after_cleanup_scan": None,
             "artifact_inventory_final": None,
+            "artifact_inventory_final_scan": None,
             "blocked_before_make": False,
             "block_reason": None,
             "make_environment_guard": make_environment_guard,
@@ -1694,61 +1923,77 @@ def collect_shud(
     if not source_boundary_ok:
         shud["build"]["blocked_before_make"] = True
         shud["build"]["block_reason"] = "source-boundary preflight did not pass"
-        shud["build"]["artifact_inventory_final"] = inventory_shud_artifacts(shud_dir)
+        final_report = inventory_shud_artifacts_report(shud_dir)
+        record_artifact_inventory(shud["build"], "artifact_inventory_final", final_report)
+        extend_errors(errors, final_report["errors"])
         return shud
 
     if not timeout["ok"] and not skip_build:
         errors.append(f"SHUD make timeout rejected: {timeout['reason']}")
         shud["build"]["blocked_before_make"] = True
         shud["build"]["block_reason"] = str(timeout["reason"])
-        shud["build"]["artifact_inventory_final"] = inventory_shud_artifacts(shud_dir)
+        final_report = inventory_shud_artifacts_report(shud_dir)
+        record_artifact_inventory(shud["build"], "artifact_inventory_final", final_report)
+        extend_errors(errors, final_report["errors"])
         return shud
 
     if not tool_identity_ok(tool_identity, ("git", "make")) and not skip_build:
         shud["build"]["blocked_before_make"] = True
         shud["build"]["block_reason"] = "tool identity preflight did not pass"
-        shud["build"]["artifact_inventory_final"] = inventory_shud_artifacts(shud_dir)
+        final_report = inventory_shud_artifacts_report(shud_dir)
+        record_artifact_inventory(shud["build"], "artifact_inventory_final", final_report)
+        extend_errors(errors, final_report["errors"])
         return shud
 
     if make_environment_guard and not make_environment_guard.get("ok", False) and not skip_build:
         shud["build"]["blocked_before_make"] = True
         shud["build"]["block_reason"] = "unsupported make environment overrides are set"
-        shud["build"]["artifact_inventory_final"] = inventory_shud_artifacts(shud_dir)
+        final_report = inventory_shud_artifacts_report(shud_dir)
+        record_artifact_inventory(shud["build"], "artifact_inventory_final", final_report)
+        extend_errors(errors, final_report["errors"])
         return shud
 
     if skip_build:
         reason = "SHUD build was skipped by --skip-build; evidence is environment-only and not a readiness pass."
         notes.append(reason)
         incomplete_reasons.append(reason)
-        final_inventory = inventory_shud_artifacts(shud_dir)
-        shud["build"]["artifact_inventory_final"] = final_inventory
+        final_report = inventory_shud_artifacts_report(shud_dir)
+        final_inventory = final_report["artifacts"]
+        record_artifact_inventory(shud["build"], "artifact_inventory_final", final_report)
+        extend_errors(errors, final_report["errors"])
         if final_inventory:
             errors.append("SHUD build artifacts are present while --skip-build collected env-only evidence")
         return shud
 
     pre_clean = cleanup_shud_artifacts(shud_dir, timeout_seconds)
     shud["build"]["pre_clean"] = pre_clean
+    extend_errors(errors, pre_clean.get("inventory_errors", []))
     if pre_clean["make_clean_skipped"]:
         errors.append("SHUD pre-build cleanup refused unsafe build artifacts in SHUD checkout before make clean")
         shud["build"]["artifact"] = artifact_state(shud_dir / "shud")
         shud["build"]["artifact_inventory_final"] = pre_clean["artifact_inventory_after_cleanup"]
+        shud["build"]["artifact_inventory_final_scan"] = pre_clean["artifact_inventory_after_cleanup_scan"]
         return shud
     if pre_clean["make_clean"]["exit_code"] != 0:
         errors.append(f"SHUD pre-build make clean failed: {command_failure_detail(pre_clean['make_clean'])}")
         shud["build"]["artifact"] = artifact_state(shud_dir / "shud")
         shud["build"]["artifact_inventory_final"] = pre_clean["artifact_inventory_after_cleanup"]
+        shud["build"]["artifact_inventory_final_scan"] = pre_clean["artifact_inventory_after_cleanup_scan"]
         return shud
     if pre_clean["artifact_inventory_after_cleanup"]:
         errors.append("SHUD pre-build cleanup left build artifacts in SHUD checkout")
         shud["build"]["artifact"] = artifact_state(shud_dir / "shud")
         shud["build"]["artifact_inventory_final"] = pre_clean["artifact_inventory_after_cleanup"]
+        shud["build"]["artifact_inventory_final_scan"] = pre_clean["artifact_inventory_after_cleanup_scan"]
         return shud
 
     build_result = run_make(shud_dir, "shud", timeout_seconds)
     shud["build"]["result"] = build_result
     shud["build"]["exit_code"] = build_result["exit_code"]
     shud["build"]["artifact"] = artifact_state(shud_dir / "shud")
-    shud["build"]["artifact_inventory_after_build"] = inventory_shud_artifacts(shud_dir)
+    after_build_report = inventory_shud_artifacts_report(shud_dir)
+    record_artifact_inventory(shud["build"], "artifact_inventory_after_build", after_build_report)
+    extend_errors(errors, after_build_report["errors"])
     if build_result["exit_code"] != 0:
         errors.append(f"SHUD build command failed: {command_text(build_result)}: {command_failure_detail(build_result)}")
     elif not shud["build"]["artifact"]["exists"]:
@@ -1764,8 +2009,12 @@ def collect_shud(
         }
         cleanup_result = cleanup_shud_artifacts(shud_dir, timeout_seconds, removable_current_build_names)
         shud["build"]["cleanup"] = cleanup_result
+        extend_errors(errors, cleanup_result.get("inventory_errors", []))
         shud["build"]["artifact_after_cleanup"] = artifact_state(shud_dir / "shud")
         shud["build"]["artifact_inventory_after_cleanup"] = cleanup_result["artifact_inventory_after_cleanup"]
+        shud["build"]["artifact_inventory_after_cleanup_scan"] = cleanup_result[
+            "artifact_inventory_after_cleanup_scan"
+        ]
         if cleanup_result["make_clean_skipped"]:
             errors.append("SHUD cleanup refused unsafe build artifacts in SHUD checkout before make clean")
         elif cleanup_result["make_clean"]["exit_code"] != 0:
@@ -1777,8 +2026,10 @@ def collect_shud(
     else:
         errors.append("SHUD cleanup was disabled; readiness requires post-build cleanup")
 
-    final_inventory = inventory_shud_artifacts(shud_dir)
-    shud["build"]["artifact_inventory_final"] = final_inventory
+    final_report = inventory_shud_artifacts_report(shud_dir)
+    final_inventory = final_report["artifacts"]
+    record_artifact_inventory(shud["build"], "artifact_inventory_final", final_report)
+    extend_errors(errors, final_report["errors"])
     if final_inventory:
         errors.append("SHUD build artifacts remain after helper completion")
 
@@ -1814,6 +2065,246 @@ def collect_source_boundary(repo_root: Path, errors: list[str], phase: str) -> d
         "shud_status": shud_status,
         "rshud_status": rshud_status,
         "ignored_build_sources": ignored_build_sources,
+    }
+
+
+def status_dirty(result: dict[str, Any]) -> bool | None:
+    if result["exit_code"] != 0:
+        return None
+    return bool(str(result.get("stdout_tail") or "").strip())
+
+
+def collect_git_repository_identity(
+    repo_dir: Path,
+    label: str,
+    status_pathspecs: list[str] | None = None,
+) -> dict[str, Any]:
+    status_args = ["status", "--short", "--untracked-files=all"]
+    if status_pathspecs is not None:
+        status_args.extend(["--", *status_pathspecs])
+    head_result = run_git_command(repo_dir, ["rev-parse", "--verify", "HEAD"])
+    branch_result = run_git_command(repo_dir, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    status_result = run_git_command(repo_dir, status_args)
+    head = str(head_result.get("stdout_tail") or "").strip() if head_result["exit_code"] == 0 else None
+    branch = str(branch_result.get("stdout_tail") or "").strip() if branch_result["exit_code"] == 0 else None
+    detached = branch_result["exit_code"] == 1
+    errors: list[str] = []
+    if head_result["exit_code"] != 0:
+        errors.append(f"{label} HEAD commit could not be collected: {command_failure_detail(head_result)}")
+    if branch_result["exit_code"] not in (0, 1):
+        errors.append(f"{label} branch state could not be collected: {command_failure_detail(branch_result)}")
+    if status_result["exit_code"] != 0:
+        errors.append(f"{label} git status could not be collected: {command_failure_detail(status_result)}")
+    return {
+        "path": str(repo_dir),
+        "head": head,
+        "branch": branch,
+        "detached": detached,
+        "dirty": status_dirty(status_result),
+        "status_pathspecs": status_pathspecs,
+        "head_command": head_result,
+        "branch_command": branch_result,
+        "status_command": status_result,
+        "errors": errors,
+        "ok": not errors,
+    }
+
+
+def collect_parent_gitlink(repo_root: Path, path_name: str) -> dict[str, Any]:
+    result = run_git_command(repo_root, ["rev-parse", "--verify", f"HEAD:{path_name}"])
+    gitlink = str(result.get("stdout_tail") or "").strip() if result["exit_code"] == 0 else None
+    error = None if result["exit_code"] == 0 else command_failure_detail(result)
+    return {
+        "path": path_name,
+        "gitlink_object": gitlink,
+        "command": result,
+        "error": error,
+        "ok": result["exit_code"] == 0 and bool(gitlink),
+    }
+
+
+def file_sha256(path: Path, size_bytes: int | None) -> dict[str, Any]:
+    if size_bytes is None:
+        return {"sha256": None, "ok": False, "error": "path is not a regular file", "skipped": False}
+    if size_bytes > MAX_IDENTITY_HASH_BYTES:
+        return {
+            "sha256": None,
+            "ok": False,
+            "error": f"file exceeds identity hash limit of {MAX_IDENTITY_HASH_BYTES} bytes",
+            "skipped": True,
+        }
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        return {"sha256": None, "ok": False, "error": str(exc), "skipped": False}
+    return {"sha256": digest.hexdigest(), "ok": True, "error": None, "skipped": False}
+
+
+def git_worktree_root_for_path(path: Path) -> tuple[Path | None, dict[str, Any] | None]:
+    cwd = path if path.is_dir() else path.parent
+    if not cwd.exists():
+        cwd = cwd.parent
+    result = run_git_command(cwd, ["rev-parse", "--show-toplevel"])
+    if result["exit_code"] != 0:
+        return None, result
+    root_text = str(result.get("stdout_tail") or "").strip()
+    return (Path(root_text).resolve(strict=False) if root_text else None), result
+
+
+def git_clean_state(worktree_root: Path, relative_path: str, args: list[str]) -> tuple[bool | None, dict[str, Any]]:
+    result = run_git_command(worktree_root, [*args, "--", relative_path])
+    if result["exit_code"] == 0:
+        return True, result
+    if result["exit_code"] == 1:
+        return False, result
+    return None, result
+
+
+def collect_path_identity(label: str, path: Path, inspected_repo_root: Path) -> dict[str, Any]:
+    realpath = path.expanduser().resolve(strict=False)
+    exists = realpath.exists()
+    is_file = realpath.is_file()
+    size_bytes = realpath.stat().st_size if is_file else None
+    relative_to_inspected_root = None
+    try:
+        relative_to_inspected_root = realpath.relative_to(inspected_repo_root.resolve(strict=False)).as_posix()
+    except ValueError:
+        pass
+
+    worktree_root, worktree_command = git_worktree_root_for_path(realpath)
+    relative_path = None
+    tracked: bool | None = False
+    tracked_command: dict[str, Any] | None = None
+    head_blob_oid = None
+    head_blob_command: dict[str, Any] | None = None
+    current_blob_oid = None
+    current_blob_command: dict[str, Any] | None = None
+    unstaged_clean: bool | None = None
+    staged_clean: bool | None = None
+    unstaged_command: dict[str, Any] | None = None
+    staged_command: dict[str, Any] | None = None
+    errors: list[str] = []
+
+    if worktree_root:
+        try:
+            relative_path = realpath.relative_to(worktree_root).as_posix()
+        except ValueError:
+            errors.append(f"{label} path is outside its detected git worktree")
+        if relative_path:
+            tracked_command = run_git_command(worktree_root, ["ls-files", "--error-unmatch", "--", relative_path])
+            if tracked_command["exit_code"] == 0:
+                tracked = True
+            elif tracked_command["exit_code"] == 1:
+                tracked = False
+            else:
+                tracked = None
+                errors.append(f"{label} tracked state could not be collected: {command_failure_detail(tracked_command)}")
+
+            if tracked:
+                head_blob_command = run_git_command(worktree_root, ["rev-parse", "--verify", f"HEAD:{relative_path}"])
+                if head_blob_command["exit_code"] == 0:
+                    head_blob_oid = str(head_blob_command.get("stdout_tail") or "").strip()
+                else:
+                    errors.append(f"{label} HEAD blob object id could not be collected: {command_failure_detail(head_blob_command)}")
+                unstaged_clean, unstaged_command = git_clean_state(worktree_root, relative_path, ["diff", "--quiet"])
+                staged_clean, staged_command = git_clean_state(worktree_root, relative_path, ["diff", "--cached", "--quiet"])
+                if unstaged_clean is None:
+                    errors.append(f"{label} unstaged clean state could not be collected: {command_failure_detail(unstaged_command)}")
+                if staged_clean is None:
+                    errors.append(f"{label} staged clean state could not be collected: {command_failure_detail(staged_command)}")
+
+            if is_file:
+                current_blob_command = run_git_command(worktree_root, ["hash-object", "--", relative_path])
+                if current_blob_command["exit_code"] == 0:
+                    current_blob_oid = str(current_blob_command.get("stdout_tail") or "").strip()
+                else:
+                    errors.append(f"{label} current blob object id could not be collected: {command_failure_detail(current_blob_command)}")
+    elif worktree_command is not None:
+        errors.append(f"{label} git worktree could not be collected: {command_failure_detail(worktree_command)}")
+
+    fallback_hash = file_sha256(realpath, size_bytes) if is_file and not current_blob_oid else None
+    head_matches_current = bool(head_blob_oid and current_blob_oid and head_blob_oid == current_blob_oid)
+    tracked_clean = bool(tracked and unstaged_clean is True and staged_clean is True and head_matches_current)
+    return {
+        "label": label,
+        "path": str(path),
+        "realpath": str(realpath),
+        "exists": exists,
+        "is_file": is_file,
+        "size_bytes": size_bytes,
+        "relative_path": relative_path,
+        "relative_to_inspected_repo_root": relative_to_inspected_root,
+        "worktree_root": str(worktree_root) if worktree_root else None,
+        "worktree_command": worktree_command,
+        "tracked": tracked,
+        "tracked_command": tracked_command,
+        "head_blob_oid": head_blob_oid,
+        "head_blob_command": head_blob_command,
+        "current_blob_oid": current_blob_oid,
+        "current_blob_command": current_blob_command,
+        "fallback_sha256": fallback_hash,
+        "head_matches_current": head_matches_current if head_blob_oid and current_blob_oid else None,
+        "unstaged_clean": unstaged_clean,
+        "unstaged_clean_command": unstaged_command,
+        "staged_clean": staged_clean,
+        "staged_clean_command": staged_command,
+        "tracked_clean": tracked_clean,
+        "errors": errors,
+        "ok": not errors,
+    }
+
+
+def collect_checkout_identity(repo_root: Path, errors: list[str]) -> dict[str, Any]:
+    root_status_paths = [
+        "SHUD",
+        "rSHUD",
+        "scripts/readiness/check_shud_rshud.py",
+        "scripts/readiness/check_shud_rshud.sh",
+        "workspace",
+    ]
+    root = collect_git_repository_identity(repo_root, "root repo", root_status_paths)
+    submodules: dict[str, Any] = {}
+    identity_errors: list[str] = []
+    if not root["ok"]:
+        identity_errors.extend(root["errors"])
+
+    for name in ("SHUD", "rSHUD"):
+        gitlink = collect_parent_gitlink(repo_root, name)
+        checkout = collect_git_repository_identity(repo_root / name, f"{name} checkout")
+        submodule_errors: list[str] = []
+        if not gitlink["ok"]:
+            submodule_errors.append(f"{name} root gitlink identity could not be collected: {gitlink['error']}")
+        if not checkout["ok"]:
+            submodule_errors.extend(checkout["errors"])
+        submodules[name] = {
+            "root_gitlink": gitlink,
+            "checkout": checkout,
+            "errors": submodule_errors,
+            "ok": not submodule_errors,
+        }
+        identity_errors.extend(submodule_errors)
+
+    helper_path = Path(__file__).resolve(strict=False)
+    wrapper_raw = os.environ.get(WRAPPER_REALPATH_ENV)
+    wrapper_path = (
+        Path(wrapper_raw).expanduser().resolve(strict=False)
+        if wrapper_raw
+        else (repo_root / "scripts" / "readiness" / "check_shud_rshud.sh").resolve(strict=False)
+    )
+    paths = {
+        "helper": collect_path_identity("helper", helper_path, repo_root),
+        "wrapper": collect_path_identity("wrapper", wrapper_path, repo_root),
+    }
+    extend_errors(errors, identity_errors)
+    return {
+        "ok": not identity_errors,
+        "errors": identity_errors,
+        "root": root,
+        "paths": paths,
+        "submodules": submodules,
     }
 
 
@@ -2236,6 +2727,7 @@ def build_payload(repo_root: Path, output: Path, skip_build: bool, cleanup: bool
         "version": VERSION,
         "checked_at": utc_now(),
         "repo_root": str(repo_root),
+        "checkout_identity": collect_checkout_identity(repo_root, errors),
         "output": {
             "path": str(output),
             "default_relative_path": str(DEFAULT_OUTPUT_RELATIVE),

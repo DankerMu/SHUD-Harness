@@ -405,7 +405,7 @@ run_helper() {
   fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN FAKE_RM_MARKER SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS SELF_TEST_CLI
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN FAKE_RM_MARKER SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS SHUD_RSHUD_READINESS_SELF_TEST_CANDIDATE_LIMIT PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS SELF_TEST_CLI
   unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_fake_rm_marker helper_preserve_make_env helper_allow_self_test_tools helper_self_test_cli helper_self_test_tool_dir helper_self_test_tool_token helper_self_test_arg
   return "$helper_status"
 }
@@ -482,7 +482,7 @@ run_helper_default_output() {
   fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN FAKE_RM_MARKER SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS SELF_TEST_CLI
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN FAKE_RM_MARKER SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS SHUD_RSHUD_READINESS_SELF_TEST_CANDIDATE_LIMIT PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS SELF_TEST_CLI
   unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_fake_rm_marker helper_preserve_make_env helper_allow_self_test_tools helper_self_test_cli helper_self_test_tool_dir helper_self_test_tool_token helper_self_test_arg
   return "$helper_status"
 }
@@ -650,6 +650,21 @@ assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]
 assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["source"]["relative_path"] == ".gitignore"'
 assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["source"]["tracked"] is True'
 assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["source"]["clean"] is True'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["ok"] is True'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["root"]["head"] is not None'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["root"]["dirty"] is False'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["submodules"]["SHUD"]["root_gitlink"]["gitlink_object"] is not None'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["submodules"]["SHUD"]["checkout"]["head"] is not None'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["submodules"]["SHUD"]["checkout"]["dirty"] is False'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["submodules"]["rSHUD"]["root_gitlink"]["gitlink_object"] is not None'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["submodules"]["rSHUD"]["checkout"]["head"] is not None'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["submodules"]["rSHUD"]["checkout"]["dirty"] is False'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["helper"]["tracked"] is True'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["helper"]["head_blob_oid"] is not None'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["helper"]["current_blob_oid"] is not None'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["wrapper"]["tracked"] is True'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["wrapper"]["head_blob_oid"] is not None'
+assert_json_expr "$pass_output" 'data["checkout_identity"]["paths"]["wrapper"]["current_blob_oid"] is not None'
 assert_repo_owned_ignore "$pass_fixture" workspace/readiness/shud_rshud_readiness.json "fixture default readiness output"
 fixture_workspace_status=$(git -C "$pass_fixture" status --short -- workspace)
 if [ -n "$fixture_workspace_status" ]; then
@@ -1002,6 +1017,9 @@ assert_json_expr "$helper_copy_output" 'data["runtime_authority"]["helper"]["mat
 assert_json_expr "$helper_copy_output" 'data["runtime_authority"]["helper"]["actual_realpath"] != data["runtime_authority"]["helper"]["expected_realpath"]'
 assert_json_expr "$helper_copy_output" 'data["runtime_authority"]["wrapper"]["matches_expected"] is False'
 assert_json_expr "$helper_copy_output" 'data["output"]["consumption_boundary"]["ready_for_consumption"] is True'
+assert_json_expr "$helper_copy_output" 'data["checkout_identity"]["paths"]["helper"]["tracked"] is False'
+assert_json_expr "$helper_copy_output" 'data["checkout_identity"]["paths"]["helper"]["tracked_clean"] is False'
+assert_json_expr "$helper_copy_output" 'data["checkout_identity"]["paths"]["helper"]["worktree_root"] is None'
 
 if [ -x "$SCRIPT_DIR/check_shud_rshud.py" ]; then
   fail "Python readiness helper is executable; public entrypoint must be the trusted wrapper"
@@ -1626,6 +1644,7 @@ if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$dirty_rshud_fixt
   fail "dirty rSHUD fixture unexpectedly returned zero"
 fi
 assert_json "$dirty_rshud_output" block "rSHUD checkout has uncommitted or visible changes"
+assert_json_expr "$dirty_rshud_output" 'data["checkout_identity"]["submodules"]["rSHUD"]["checkout"]["dirty"] is True'
 
 workspace_drift_fixture="$TMP_ROOT/workspace-drift-fixture"
 make_fixture "$workspace_drift_fixture"
@@ -1688,6 +1707,52 @@ assert_json_expr "$broad_source_cap_output" 'data["shud"]["build"]["blocked_befo
 if [ -e "$broad_source_cap_marker" ]; then
   fail "make executed for broad recursive source cap fixture"
 fi
+
+sundials_lib_cap_fixture="$TMP_ROOT/sundials-lib-cap-fixture"
+make_fixture "$sundials_lib_cap_fixture"
+"$REAL_PYTHON" - "$sundials_lib_cap_fixture/fake-home/sundials/lib" <<'PY'
+import sys
+from pathlib import Path
+
+lib_dir = Path(sys.argv[1])
+for index in range(12):
+    (lib_dir / f"libsundials_cvode_cap_{index:02d}.dylib").write_text("", encoding="utf-8")
+PY
+sundials_lib_cap_output="$sundials_lib_cap_fixture/workspace/readiness/sundials_lib_cap.json"
+export SHUD_RSHUD_READINESS_SELF_TEST_CANDIDATE_LIMIT=8
+if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$sundials_lib_cap_fixture" "$sundials_lib_cap_output" >/dev/null 2>/dev/null; then
+  unset SHUD_RSHUD_READINESS_SELF_TEST_CANDIDATE_LIMIT
+  fail "SUNDIALS library scan cap fixture unexpectedly returned zero"
+fi
+unset SHUD_RSHUD_READINESS_SELF_TEST_CANDIDATE_LIMIT
+assert_json "$sundials_lib_cap_output" block "SUNDIALS library scan limit"
+assert_json_expr "$sundials_lib_cap_output" 'data["sundials"]["selected"]["library_scan"]["materialized_all_candidates"] is False'
+assert_json_expr "$sundials_lib_cap_output" 'data["sundials"]["selected"]["library_scan"]["truncated"] is True'
+assert_json_expr "$sundials_lib_cap_output" 'len(data["sundials"]["selected"]["library_scan"]["scan_blocks"]) == 1'
+assert_json_expr "$sundials_lib_cap_output" '"SUNDIALS library scan limit" in data["sundials"]["selected"]["library_scan"]["scan_blocks"][0]["reason"]'
+
+artifact_inventory_cap_fixture="$TMP_ROOT/artifact-inventory-cap-fixture"
+make_fixture "$artifact_inventory_cap_fixture"
+"$REAL_PYTHON" - "$artifact_inventory_cap_fixture/SHUD" <<'PY'
+import sys
+from pathlib import Path
+
+shud_dir = Path(sys.argv[1])
+for index in range(12):
+    (shud_dir / f"shud.limit_{index:02d}").write_text("artifact inventory cap fixture\n", encoding="utf-8")
+PY
+artifact_inventory_cap_output="$artifact_inventory_cap_fixture/workspace/readiness/artifact_inventory_cap.json"
+export SHUD_RSHUD_READINESS_SELF_TEST_CANDIDATE_LIMIT=8
+if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$artifact_inventory_cap_fixture" "$artifact_inventory_cap_output" >/dev/null 2>/dev/null; then
+  unset SHUD_RSHUD_READINESS_SELF_TEST_CANDIDATE_LIMIT
+  fail "SHUD artifact inventory scan cap fixture unexpectedly returned zero"
+fi
+unset SHUD_RSHUD_READINESS_SELF_TEST_CANDIDATE_LIMIT
+assert_json "$artifact_inventory_cap_output" block "SHUD artifact inventory limit"
+assert_json_expr "$artifact_inventory_cap_output" 'data["shud"]["build"]["artifact_inventory_final_scan"]["materialized_all_candidates"] is False'
+assert_json_expr "$artifact_inventory_cap_output" 'data["shud"]["build"]["artifact_inventory_final_scan"]["truncated"] is True'
+assert_json_expr "$artifact_inventory_cap_output" 'len(data["shud"]["build"]["artifact_inventory_final_scan"]["scan_blocks"]) == 1'
+assert_json_expr "$artifact_inventory_cap_output" '"SHUD artifact inventory limit" in data["shud"]["build"]["artifact_inventory_final_scan"]["scan_blocks"][0]["reason"]'
 
 status_failure_fixture="$TMP_ROOT/status-failure-fixture"
 make_fixture "$status_failure_fixture"
