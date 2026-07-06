@@ -42,17 +42,24 @@ MAKE_TIMEOUT_ENV = "SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS"
 SELF_TEST_TOOL_ALLOWANCE_DIR_ENV = "SHUD_RSHUD_READINESS_SELF_TEST_TOOL_DIR"
 SELF_TEST_TOOL_ALLOWANCE_ENABLE_ENV = "SHUD_RSHUD_READINESS_ENABLE_SELF_TEST_TOOL_ALLOWANCE"
 SELF_TEST_TOOL_ALLOWANCE_TOKEN = "allow-fixture-tools"
+SELF_TEST_FIXTURE_REASON = (
+    "self-test fixture mode was requested by --self-test; evidence may use fixture tools and is not consumable."
+)
 IDENTITY_GUARDED_TOOLS = {"git", "make", "Rscript"}
-TRUSTED_EXECUTABLE_PREFIXES = (
+TRUSTED_EXECUTABLE_RESOLVED_PREFIXES = (
     Path("/bin"),
     Path("/usr/bin"),
     Path("/usr/local/bin"),
     Path("/usr/local/sbin"),
+    Path("/usr/local/Cellar"),
     Path("/opt/homebrew/bin"),
     Path("/opt/homebrew/sbin"),
+    Path("/opt/homebrew/Cellar"),
     Path("/Library/Apple/usr/bin"),
+    Path("/Library/Frameworks/R.framework"),
     Path("/Library/Frameworks/R.framework/Resources/bin"),
 )
+SELF_TEST_FIXTURE_MODE = False
 UNSUPPORTED_MAKE_ENV_VARS = ("MAKEFLAGS", "GNUMAKEFLAGS", "MFLAGS", "MAKEFILES")
 MAKE_ENV_OVERRIDE_VARS = ("CC", "CXX", "SUNDIALS_DIR")
 SHUD_TARGET_ENV_OVERRIDE_VARS = (
@@ -201,11 +208,10 @@ def path_under_prefix(path: Path, prefix: Path) -> bool:
 
 
 def executable_path_trusted(path: Path) -> bool:
-    expanded = path.expanduser()
-    resolved = expanded.resolve(strict=False)
-    for prefix in TRUSTED_EXECUTABLE_PREFIXES:
-        resolved_prefix = prefix.resolve(strict=False)
-        if path_under_prefix(expanded, prefix) or path_under_prefix(resolved, resolved_prefix):
+    resolved = path.expanduser().resolve(strict=False)
+    for prefix in TRUSTED_EXECUTABLE_RESOLVED_PREFIXES:
+        resolved_prefix = prefix.expanduser().resolve(strict=False)
+        if path_under_prefix(resolved, resolved_prefix):
             return True
     return False
 
@@ -221,8 +227,16 @@ def self_test_tool_allowance(path: Path) -> dict[str, Any]:
             dir_matches = path.parent.resolve(strict=False) == Path(raw_dir).expanduser().resolve(strict=False)
         except OSError:
             dir_matches = False
+    active = SELF_TEST_FIXTURE_MODE and token_ok and dir_matches
+    if active:
+        reason = "explicit --self-test fixture executable allowance"
+    elif not SELF_TEST_FIXTURE_MODE:
+        reason = "self-test executable allowance requires the --self-test CLI flag"
+    else:
+        reason = "self-test executable allowance is absent or incomplete"
     return {
-        "active": token_ok and dir_matches,
+        "active": active,
+        "self_test_flag": SELF_TEST_FIXTURE_MODE,
         "enable_env": SELF_TEST_TOOL_ALLOWANCE_ENABLE_ENV,
         "dir_env": SELF_TEST_TOOL_ALLOWANCE_DIR_ENV,
         "token_present": token is not None,
@@ -230,11 +244,7 @@ def self_test_tool_allowance(path: Path) -> dict[str, Any]:
         "dir_present": dir_present,
         "dir_matches_executable_parent": dir_matches,
         "env_values_recorded": False,
-        "reason": (
-            "explicit self-test fixture executable allowance"
-            if token_ok and dir_matches
-            else "self-test executable allowance is absent or incomplete"
-        ),
+        "reason": reason,
     }
 
 
@@ -1697,11 +1707,27 @@ def skipped_component(reason: str) -> dict[str, Any]:
     }
 
 
+def self_test_fixture_marker() -> dict[str, Any]:
+    return {
+        "active": SELF_TEST_FIXTURE_MODE,
+        "ready_for_consumption": not SELF_TEST_FIXTURE_MODE,
+        "reason": SELF_TEST_FIXTURE_REASON if SELF_TEST_FIXTURE_MODE else None,
+        "tool_allowance": {
+            "requires_cli_flag": "--self-test",
+            "enable_env": SELF_TEST_TOOL_ALLOWANCE_ENABLE_ENV,
+            "dir_env": SELF_TEST_TOOL_ALLOWANCE_DIR_ENV,
+            "env_values_recorded": False,
+        },
+    }
+
+
 def finalize_conclusion(payload: dict[str, Any], skip_build: bool) -> None:
-    if skip_build or payload["incomplete_reasons"]:
+    if skip_build:
         payload["conclusion"] = "incomplete"
     elif payload["errors"]:
         payload["conclusion"] = "block"
+    elif payload["incomplete_reasons"] or payload.get("self_test_fixture", {}).get("active"):
+        payload["conclusion"] = "incomplete"
     else:
         payload["conclusion"] = "pass"
 
@@ -1723,6 +1749,8 @@ def build_payload(repo_root: Path, output: Path, skip_build: bool, cleanup: bool
     notes: list[str] = []
     errors: list[str] = []
     incomplete_reasons: list[str] = []
+    if SELF_TEST_FIXTURE_MODE:
+        incomplete_reasons.append(SELF_TEST_FIXTURE_REASON)
     shud_dir = repo_root / "SHUD"
     payload: dict[str, Any] = {
         "readiness_check": "shud_rshud",
@@ -1735,6 +1763,7 @@ def build_payload(repo_root: Path, output: Path, skip_build: bool, cleanup: bool
             "git_guard": output_git_guard(repo_root, output),
         },
         "os": collect_os(),
+        "self_test_fixture": self_test_fixture_marker(),
     }
     payload["tool_identity"] = collect_tool_identity(errors)
     preflight = collect_source_boundary(repo_root, errors, "preflight")
@@ -1791,11 +1820,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Accepted for compatibility. Cleanup is always performed after a non-skipped build.",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help=(
+            "Enable internal fixture-tool allowance for this self-test run. "
+            "This mode always produces non-consumable readiness evidence."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str]) -> int:
+    global SELF_TEST_FIXTURE_MODE
     args = parse_args(argv)
+    SELF_TEST_FIXTURE_MODE = bool(args.self_test)
     repo_root_input = Path(args.repo_root) if args.repo_root else default_repo_root()
     repo_root_lexical = Path(os.path.abspath(repo_root_input))
     repo_root = repo_root_input.resolve()

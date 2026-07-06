@@ -337,11 +337,16 @@ run_helper() {
   helper_fake_make_honor_target_omp_on_clean=${FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN:-}
   helper_preserve_make_env=${PRESERVE_MAKE_ENV:-}
   helper_allow_self_test_tools=${ALLOW_SELF_TEST_TOOLS:-1}
+  helper_self_test_cli=${SELF_TEST_CLI:-1}
   helper_self_test_tool_dir=
   helper_self_test_tool_token=
+  helper_self_test_arg=
   if [ "$helper_allow_self_test_tools" = "1" ]; then
     helper_self_test_tool_dir="$TMP_ROOT/bin"
     helper_self_test_tool_token="$SELF_TEST_TOOL_ALLOWANCE_TOKEN"
+    if [ "$helper_self_test_cli" = "1" ]; then
+      helper_self_test_arg=--self-test
+    fi
   fi
   set +e
   if [ "$helper_preserve_make_env" = "1" ]; then
@@ -361,7 +366,7 @@ run_helper() {
       SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
       PATH="$TMP_ROOT/bin:$PATH" \
       HOME="$fixture/fake-home" \
-      "$HELPER" --repo-root "$fixture" --output "$output" "$@"
+      "$HELPER" --repo-root "$fixture" --output "$output" $helper_self_test_arg "$@"
   else
     (
       clear_make_environment
@@ -380,13 +385,13 @@ run_helper() {
         SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
         PATH="$TMP_ROOT/bin:$PATH" \
         HOME="$fixture/fake-home" \
-        "$HELPER" --repo-root "$fixture" --output "$output" "$@"
+        "$HELPER" --repo-root "$fixture" --output "$output" $helper_self_test_arg "$@"
     )
   fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env helper_allow_self_test_tools helper_self_test_tool_dir helper_self_test_tool_token
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS SELF_TEST_CLI
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env helper_allow_self_test_tools helper_self_test_cli helper_self_test_tool_dir helper_self_test_tool_token helper_self_test_arg
   return "$helper_status"
 }
 
@@ -406,11 +411,16 @@ run_helper_default_output() {
   helper_fake_make_honor_target_omp_on_clean=${FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN:-}
   helper_preserve_make_env=${PRESERVE_MAKE_ENV:-}
   helper_allow_self_test_tools=${ALLOW_SELF_TEST_TOOLS:-1}
+  helper_self_test_cli=${SELF_TEST_CLI:-1}
   helper_self_test_tool_dir=
   helper_self_test_tool_token=
+  helper_self_test_arg=
   if [ "$helper_allow_self_test_tools" = "1" ]; then
     helper_self_test_tool_dir="$TMP_ROOT/bin"
     helper_self_test_tool_token="$SELF_TEST_TOOL_ALLOWANCE_TOKEN"
+    if [ "$helper_self_test_cli" = "1" ]; then
+      helper_self_test_arg=--self-test
+    fi
   fi
   set +e
   if [ "$helper_preserve_make_env" = "1" ]; then
@@ -430,7 +440,7 @@ run_helper_default_output() {
       SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
       PATH="$TMP_ROOT/bin:$PATH" \
       HOME="$fixture/fake-home" \
-      "$HELPER" --repo-root "$fixture" "$@"
+      "$HELPER" --repo-root "$fixture" $helper_self_test_arg "$@"
   else
     (
       clear_make_environment
@@ -449,13 +459,13 @@ run_helper_default_output() {
         SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
         PATH="$TMP_ROOT/bin:$PATH" \
         HOME="$fixture/fake-home" \
-        "$HELPER" --repo-root "$fixture" "$@"
+        "$HELPER" --repo-root "$fixture" $helper_self_test_arg "$@"
     )
   fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env helper_allow_self_test_tools helper_self_test_tool_dir helper_self_test_tool_token
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_GIT_FAIL_STATUS_FOR FAKE_GIT_FAIL_MESSAGE FAKE_GIT_FAIL_STATUS_CODE FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV ALLOW_SELF_TEST_TOOLS SELF_TEST_CLI
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_git_fail_status_for helper_fake_git_fail_message helper_fake_git_fail_status_code helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env helper_allow_self_test_tools helper_self_test_cli helper_self_test_tool_dir helper_self_test_tool_token helper_self_test_arg
   return "$helper_status"
 }
 
@@ -516,12 +526,47 @@ assert_no_shud_artifacts() {
 
 make_fake_bin "$TMP_ROOT/bin"
 
+trusted_symlink_prefix="$TMP_ROOT/test-trusted-prefix"
+trusted_symlink_target_dir="$TMP_ROOT/test-untrusted-target"
+mkdir -p "$trusted_symlink_prefix" "$trusted_symlink_target_dir"
+cat > "$trusted_symlink_target_dir/make" <<'EOF'
+#!/usr/bin/env sh
+exit 0
+EOF
+chmod +x "$trusted_symlink_target_dir/make"
+ln -s "$trusted_symlink_target_dir/make" "$trusted_symlink_prefix/make"
+python3 - "$REPO_ROOT" "$trusted_symlink_prefix" "$trusted_symlink_prefix/make" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+trusted_prefix = Path(sys.argv[2])
+symlink_path = Path(sys.argv[3])
+module_path = repo_root / "scripts" / "readiness" / "check_shud_rshud.py"
+spec = importlib.util.spec_from_file_location("check_shud_rshud", module_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+module.TRUSTED_EXECUTABLE_RESOLVED_PREFIXES = (trusted_prefix,)
+identity = module.executable_identity(str(symlink_path))
+if identity["trusted"] or identity["ok"]:
+    raise SystemExit(f"trusted-prefix symlink to untrusted target was accepted: {identity}")
+if "outside trusted tool prefixes" not in (identity["block_reason"] or ""):
+    raise SystemExit(f"unexpected symlink rejection reason: {identity['block_reason']}")
+PY
+
 pass_fixture="$TMP_ROOT/pass-fixture"
 make_fixture "$pass_fixture"
 pass_output="$pass_fixture/workspace/readiness/shud_rshud_readiness.json"
-FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$pass_fixture" "$pass_output" --cleanup >/dev/null
-assert_json "$pass_output" pass -
+if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$pass_fixture" "$pass_output" --cleanup >/dev/null; then
+  fail "self-test fake pass fixture unexpectedly returned zero"
+fi
+assert_json "$pass_output" incomplete "self-test fixture mode"
 assert_no_shud_artifacts "$pass_fixture"
+assert_json_expr "$pass_output" 'data["conclusion"] != "pass"'
+assert_json_expr "$pass_output" 'data["self_test_fixture"]["active"] is True'
+assert_json_expr "$pass_output" 'data["self_test_fixture"]["ready_for_consumption"] is False'
 assert_json_expr "$pass_output" 'data["shud"]["build"]["cleanup_requested"] is True'
 assert_json_expr "$pass_output" 'data["shud"]["build"]["pre_clean"]["make_clean"]["timeout_seconds"] == 3'
 assert_json_expr "$pass_output" 'data["shud"]["build"]["result"]["timeout_seconds"] == 3'
@@ -547,10 +592,24 @@ fi
 default_wrapper_fixture="$TMP_ROOT/default-wrapper-fixture"
 make_fixture "$default_wrapper_fixture"
 default_wrapper_output="$default_wrapper_fixture/workspace/readiness/shud_rshud_readiness.json"
-FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper_default_output "$default_wrapper_fixture" >/dev/null
-assert_json "$default_wrapper_output" pass -
+if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper_default_output "$default_wrapper_fixture" >/dev/null; then
+  fail "self-test fake default-wrapper fixture unexpectedly returned zero"
+fi
+assert_json "$default_wrapper_output" incomplete "self-test fixture mode"
 assert_no_shud_artifacts "$default_wrapper_fixture"
 assert_json_expr "$default_wrapper_output" 'data["shud"]["build"]["cleanup_requested"] is True'
+
+ambient_allowance_fixture="$TMP_ROOT/ambient-allowance-fixture"
+make_fixture "$ambient_allowance_fixture"
+ambient_allowance_output="$ambient_allowance_fixture/workspace/readiness/ambient_allowance.json"
+if SELF_TEST_CLI=0 FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$ambient_allowance_fixture" "$ambient_allowance_output" >/dev/null 2>/dev/null; then
+  fail "ambient self-test allowance without --self-test unexpectedly returned zero"
+fi
+assert_json "$ambient_allowance_output" block "executable identity is not trusted"
+assert_json_expr "$ambient_allowance_output" 'data["conclusion"] != "pass"'
+assert_json_expr "$ambient_allowance_output" 'data["self_test_fixture"]["active"] is False'
+assert_json_expr "$ambient_allowance_output" 'all(data["tool_identity"][name]["self_test_allowance"]["token_ok"] is True for name in ["make", "Rscript"])'
+assert_json_expr "$ambient_allowance_output" 'all(data["tool_identity"][name]["self_test_allowance"]["active"] is False for name in ["make", "Rscript"])'
 
 fake_path_attack_fixture="$TMP_ROOT/fake-path-attack-fixture"
 make_fixture "$fake_path_attack_fixture"
@@ -1030,8 +1089,10 @@ assert_json_expr "$secret_env_output" 'any(item["name"] == "MAKEFLAGS" and "make
 residual_artifact_fixture="$TMP_ROOT/residual-artifact-fixture"
 make_fixture "$residual_artifact_fixture"
 residual_artifact_output="$residual_artifact_fixture/workspace/readiness/residual_artifact.json"
-FAKE_MAKE_MODE=residual FAKE_RSHUD_VERSION=2.5.0 run_helper "$residual_artifact_fixture" "$residual_artifact_output" >/dev/null
-assert_json "$residual_artifact_output" pass -
+if FAKE_MAKE_MODE=residual FAKE_RSHUD_VERSION=2.5.0 run_helper "$residual_artifact_fixture" "$residual_artifact_output" >/dev/null; then
+  fail "self-test fake residual artifact fixture unexpectedly returned zero"
+fi
+assert_json "$residual_artifact_output" incomplete "self-test fixture mode"
 assert_no_shud_artifacts "$residual_artifact_fixture"
 assert_json_expr "$residual_artifact_output" 'all(name in [artifact["name"] for artifact in data["shud"]["build"]["artifact_inventory_after_build"]] for name in ["shud_omp", "residual.o", "shud.cache", "shud.dSYM", "SHUD.build"])'
 assert_json_expr "$residual_artifact_output" 'all(artifact["git_ignored"] is True for artifact in data["shud"]["build"]["artifact_inventory_after_build"] if artifact["name"] in ["shud.cache", "SHUD.build"])'
@@ -1150,8 +1211,10 @@ fi
 large_output_fixture="$TMP_ROOT/large-output-fixture"
 make_fixture "$large_output_fixture"
 large_output_output="$large_output_fixture/workspace/readiness/large_output.json"
-FAKE_MAKE_CLEAN_MODE=minimal FAKE_MAKE_MODE=large-output FAKE_RSHUD_VERSION=2.5.0 run_helper "$large_output_fixture" "$large_output_output" >/dev/null
-assert_json "$large_output_output" pass -
+if FAKE_MAKE_CLEAN_MODE=minimal FAKE_MAKE_MODE=large-output FAKE_RSHUD_VERSION=2.5.0 run_helper "$large_output_fixture" "$large_output_output" >/dev/null; then
+  fail "self-test fake large-output fixture unexpectedly returned zero"
+fi
+assert_json "$large_output_output" incomplete "self-test fixture mode"
 assert_json_expr "$large_output_output" 'data["shud"]["build"]["result"]["stdout_truncated"] is True'
 assert_json_expr "$large_output_output" 'len(data["shud"]["build"]["result"]["stdout_tail"]) <= 12000'
 assert_no_shud_artifacts "$large_output_fixture"
@@ -1159,8 +1222,10 @@ assert_no_shud_artifacts "$large_output_fixture"
 large_clean_output_fixture="$TMP_ROOT/large-clean-output-fixture"
 make_fixture "$large_clean_output_fixture"
 large_clean_output="$large_clean_output_fixture/workspace/readiness/large_clean_output.json"
-FAKE_MAKE_CLEAN_MODE=large-output FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$large_clean_output_fixture" "$large_clean_output" >/dev/null
-assert_json "$large_clean_output" pass -
+if FAKE_MAKE_CLEAN_MODE=large-output FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$large_clean_output_fixture" "$large_clean_output" >/dev/null; then
+  fail "self-test fake large-clean-output fixture unexpectedly returned zero"
+fi
+assert_json "$large_clean_output" incomplete "self-test fixture mode"
 assert_json_expr "$large_clean_output" 'data["shud"]["build"]["pre_clean"]["make_clean"]["stdout_truncated"] is True'
 assert_json_expr "$large_clean_output" 'data["shud"]["build"]["cleanup"]["make_clean"]["stdout_truncated"] is True'
 
