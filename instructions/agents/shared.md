@@ -100,15 +100,21 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 - 执行编排：由 native 子代理（`implementer`/`reviewer`/`verifier`）执行，编排见 `subagent-workflow`
 - 设计与澄清：`clarify` · `grill-me` · `grill-with-docs` · `brainstorming` · `future-aware-architecture` · `implementation-planning`
 - 代码质量：`review` · `entropy-review` · `repo-entropy-audit` · `improve-codebase-architecture` · `control-plane-auditor`
-- 工具：`gh-create-issue` · `git-worktree-workflows` · `project-documentation` · `deep-research` · `codeagent`
+- 工具：`gh-create-issue` · `git-worktree-workflows` · `project-documentation`
 
-**Agents**（投影在 `.claude/agents/`（Claude）或 `.codex/agents/`（Codex））：`implementer` · `reviewer` · `verifier` · `explorer`
+**Agents**（投影在 `.claude/agents/`（Claude）或 `.codex/agents/`（Codex））：`implementer` · `reviewer` · `verifier` · `explorer` · `monitor`（CI 等 harness 外长等待交它看护，主线不空转）· `issue-scribe`（主线发现 follow-up 事项时调用：只读取证→按关键词和证据路径查重→落一条结构化 issue，绝不顺手修）
+
+**Hooks**（脚本投影在 `.claude/hooks/` 与 `.codex/hooks/`，条目并入 `.claude/settings.json` 与 `.codex/hooks.json`）：
+
+- `worktree-guard` — 并行 worktree 写围栏；仅当项目根存在 `.worktree-guard.json` 时激活，由 `subagent-workflow` 进出并行委派时自动写入/清除。
+- `large-file-guard` — `git commit` 前拦截本次触碰的 >1000 行文本文件（增量棘轮，存量不追溯）；`.large-file-guard.json` 可调阈值/排除/停用。
 
 ## 项目本地适配（living 文件，按需创建）
 
 - `openspec/project-profile.md` — workflow 适配（入口/契约/风险轴）；`subagent-workflow` 首次运行可自动 bootstrap。
 - `openspec/glossary.md` — 领域 ubiquitous language 单一来源（已创建：中英术语映射，grep 前先查两态关键词）；由 `grill-with-docs` / `improve-codebase-architecture` 维护。
 - `docs/adr/NNNN-slug.md` — 长期架构决策账本（三门槛：难回退 + 无背景会困惑 + 真实权衡）。
+- `.large-file-guard.json` — 大文件闸配置（阈值/排除/开关），仅在默认 1000 行不合适时创建。
 
 ## 反熵约定
 
