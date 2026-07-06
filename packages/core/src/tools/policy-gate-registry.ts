@@ -134,7 +134,8 @@ export function createPolicyGatedToolRegistry(
 }
 
 export function createShudSandboxedBashTool(
-  options: ShudSandboxedBashToolOptions
+  options: ShudSandboxedBashToolOptions,
+  toolId = "bash"
 ): RawDataSandboxedBashTool {
   const fuseRules = resolveShudBashFuseRules(options);
   const profileOptions = snapshotRawDataSeatbeltProfileOptions(options);
@@ -148,7 +149,7 @@ export function createShudSandboxedBashTool(
     pathResolutionRoot: options.pathResolutionRoot,
     auditWorkspaceRoot: options.auditWorkspaceRoot,
     auditTaskId: options.auditTaskId,
-    toolId: "bash",
+    toolId,
     fuseRules: cloneFuseRules(fuseRules)
   });
 }
@@ -166,7 +167,7 @@ export function createShudRuntimeToolRegistry(
       continue;
     }
 
-    if (tool.name === "bash") {
+    if (tool.name === "bash" || tool.name === "sandbox.exec") {
       continue;
     }
 
@@ -184,6 +185,13 @@ export function createShudRuntimeToolRegistry(
       evaluate,
       role: options.role,
       toolId: "bash"
+    })
+  );
+  registry.register(
+    wrapToolWithPolicyGate(createShudSandboxedBashTool(options, "sandbox.exec"), {
+      evaluate,
+      role: options.role,
+      toolId: "sandbox.exec"
     })
   );
 
@@ -608,6 +616,10 @@ function cloneFuseRules(rules: readonly FuseRule[]): FuseRule[] {
 }
 
 function clonePolicyGateInput(value: unknown): unknown {
+  if (typeof value === "function" || typeof value === "symbol") {
+    throw new Error("Policy gate input must be structured-cloneable data.");
+  }
+
   if (value === null || typeof value !== "object") {
     return value;
   }
@@ -615,44 +627,8 @@ function clonePolicyGateInput(value: unknown): unknown {
   try {
     return structuredClone(value);
   } catch {
-    return clonePlainPolicyGateInput(value, new WeakMap<object, unknown>());
+    throw new Error("Policy gate input must be structured-cloneable data.");
   }
-}
-
-function clonePlainPolicyGateInput(
-  value: unknown,
-  seen: WeakMap<object, unknown>
-): unknown {
-  if (value === null || typeof value !== "object") {
-    return value;
-  }
-
-  const objectValue = value as object;
-  const existing = seen.get(objectValue);
-  if (existing !== undefined) {
-    return existing;
-  }
-
-  if (Array.isArray(value)) {
-    const clone: unknown[] = [];
-    seen.set(value, clone);
-    for (const entry of value) {
-      clone.push(clonePlainPolicyGateInput(entry, seen));
-    }
-    return clone;
-  }
-
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    return value;
-  }
-
-  const clone: Record<string, unknown> = {};
-  seen.set(objectValue, clone);
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    clone[key] = clonePlainPolicyGateInput(entry, seen);
-  }
-  return clone;
 }
 
 function resolveRole(toolContext: ToolContext): HarnessRole | "unknown" {

@@ -252,7 +252,7 @@ Invariant Matrix:
 - Evidence/audit/readiness: unit tests, OpenSpec validation, zero diff check, and PR review evidence.
 - Regression rows:
   - Worker role spawn with `tools=["read","edit"]` -> deny before spawn execution, `remediation.next_action=adjust_scope`, hint contains `edit`, ref points to Roles_and_Boundaries §0.
-  - Worker role spawn with a subset such as `tools=["read","sandbox.exec"]` -> allow at pure rule level.
+  - Worker role spawn with a subset such as `tools=["read","sandbox.exec"]` -> allow at pure rule level; SHUD runtime registers the sandboxed command tool under canonical `sandbox.exec` as well as raw Zero `bash`, so exact Zero scoped-registry selection gives workers the executable sandbox tool instead of silently dropping it.
   - Canonical-role spawn input without an explicit allowlist -> normalized before Zero execution to that role's #24 canonical profile, so Zero built-in or `.zero/roles` defaults cannot widen SHUD permissions.
   - Spec alias `allowed_tools` -> normalized to Zero's real `tools` input before execution; malformed or empty canonical-role allowlists -> fail closed with `remediation.next_action=adjust_scope`.
   - Whitespace-padded canonical roles -> policy checks and normalized execution input use the same trimmed role identity as Zero, so `role="reviewer "` cannot bypass #24 role profiles.

@@ -207,6 +207,33 @@ describe("policy-gated zero tool registry", () => {
     });
   });
 
+  test("non-spawn input preparation rejects prototype-polluting fallback inputs", async () => {
+    const bashLikeTool = new RequiredCommandRecordingTool("bash");
+    const wrapped = wrapToolWithPolicyGate(bashLikeTool, {
+      evaluate: async () => {
+        throw new Error("custom evaluator must not run for unsafe input");
+      }
+    });
+    const input: Record<string, unknown> = {
+      forceStructuredCloneFailure: () => "not cloneable"
+    };
+    Object.defineProperty(input, "__proto__", {
+      configurable: true,
+      enumerable: true,
+      value: {
+        command: "printf inherited-command"
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), input);
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_input_preparation_failed");
+    expect(result.output).not.toContain("inherited-command");
+    expect(result.outputSummary).toBe("Policy gate input preparation failed for bash");
+    expect(bashLikeTool.calls).toBe(0);
+  });
+
   test("malformed raw-rule deny from custom evaluator fails closed and finishes running handle", async () => {
     const bashTool = new RecordingTool("bash");
     const runningToolRegistry = new TestRunningToolRegistry();
@@ -889,6 +916,17 @@ describe("policy-gated zero tool registry", () => {
       expect(isPolicyGatedTool(scopedRegistry.get("bash")!)).toBe(true);
       expect(
         isPolicyGatedTool(scopedRegistry.get("bash")!) && scopedRegistry.get("bash")!.innerTool
+      ).toBeInstanceOf(RawDataSandboxedBashTool);
+      const scopedSandboxRegistry = (
+        (isPolicyGatedTool(spawn!) ? spawn.innerTool : spawn) as SpawnAgentTool & {
+          buildScopedRegistry(toolNames?: string[]): ToolRegistry;
+        }
+      ).buildScopedRegistry(["sandbox.exec"]);
+      expect(scopedSandboxRegistry.get("sandbox.exec")).toBe(registry.get("sandbox.exec"));
+      expect(isPolicyGatedTool(scopedSandboxRegistry.get("sandbox.exec")!)).toBe(true);
+      expect(
+        isPolicyGatedTool(scopedSandboxRegistry.get("sandbox.exec")!) &&
+          scopedSandboxRegistry.get("sandbox.exec")!.innerTool
       ).toBeInstanceOf(RawDataSandboxedBashTool);
     } finally {
       await fixture.cleanup();
@@ -1903,7 +1941,6 @@ describe("policy-gated zero tool registry", () => {
       const zeroLikeRegistry = new ToolRegistry();
       zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
       zeroLikeRegistry.register(new RecordingTool("read"));
-      zeroLikeRegistry.register(new RecordingTool("sandbox.exec"));
       const agentControl = createAgentControlSpy();
       let seenTools: unknown;
       let seenAlias: unknown;
@@ -2539,6 +2576,19 @@ class RecordingTool extends BaseTool {
       outputSummary: `${this.name} executed`
     };
   }
+}
+
+class RequiredCommandRecordingTool extends RecordingTool {
+  parameters: Record<string, unknown> = {
+    type: "object",
+    properties: {
+      command: {
+        type: "string"
+      }
+    },
+    required: ["command"],
+    additionalProperties: true
+  };
 }
 
 function createToolContext(role: string): ToolContext & { role: string } {
