@@ -39,4 +39,5 @@ export {
   type RawDataSeatbeltProfileOptions,
   type RawDataToolFailedEventInput
 } from "./raw-data-sandbox";
+export * from "./role-tool-map";
 export * from "./zero-reference-shape";

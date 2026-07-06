@@ -6,17 +6,31 @@
 
 ### Requirement: role→tool_id canonical 映射表
 
-`packages/core` SHALL 提供常量形式的 role→tool_id 映射表：canonical 角色枚举（coordinator | repo_explorer | worker | coder | reviewer）每个角色映射到具体工具 id 集合（zero 原生 + 领域工具，id 以注册名为准）。本表是 Roles_and_Boundaries §0 权限类别散文的唯一具象化落点，也是 policy-gate-spike 条 3 子集校验的比对基准。各角色工具面已经 M1 grill PI 确认（[GRILL-2] 定案 2026-07-03），基准如下（工具 id 以注册名为准：zero 原生工具用 zero 注册名，领域工具用 Zero_Reuse_Matrix §10 点分注册名——后续里程碑才交付的领域工具以注册名预先入表）：
+`packages/core` SHALL 提供常量形式的 role→tool_id 映射表：canonical 角色枚举（coordinator | repo_explorer | worker | coder | reviewer）每个角色映射到具体工具 id 集合（zero 原生 + 领域工具，id 以注册名为准）。本表是 Roles_and_Boundaries §0 权限类别散文的唯一具象化落点，也是 policy-gate-spike 条 3 子集校验的比对基准。各角色工具面已经 M1 grill PI 确认（[GRILL-2] 定案 2026-07-03）。
 
-| 角色 | 工具面 | 明确排除 |
-|---|---|---|
-| coordinator | spawn/wait（zero 原生）、harness.job.submit、harness.job.collect、harness.report.generate、memory(draft)、file_read | bash、write/edit |
-| repo_explorer | file_read、search/glob/grep、git 只读诊断 | 一切写、spawn、job |
-| worker | sandbox.exec（sandbox bash）、artifact 写（workspaces/artifacts/runs）、file_read、shud.build、shud.run、rshud.read_output、rshud.compute_metrics、memory(draft) | 仓库源码写 |
-| coder | worktree 内 read/write/edit、patch 工具、worktree 内 bash（构建/自测）、memory(draft) | baseline/主分支写、spawn、job |
-| reviewer | file_read、确定性 validator、memory(draft) | 一切写 |
+映射表的可比较字段 MUST 只包含 exact `toolIds`。说明性能力边界（例如 `harness.memory.propose` 只能 draft/proposal-only、artifact 写入只限 workspace、git/search 只读）记录在 `permissionNotes`，MUST NOT 作为 tool id 参与 spawn `allowed_tools` 子集比较。基准如下（工具 id 以注册名为准：zero 原生工具用 zero 当前注册名，领域/SHUD-Harness 工具用点分注册名；后续里程碑才交付的领域工具以注册名预先入表）：
 
-工具 id 命名裁决：zero 原生工具（spawn/wait、file_read、search/glob/grep、write/edit、bash）以 zero 注册名为准；领域工具 id 一律以 [Zero_Reuse_Matrix §10](../../../../../docs/02_ARCHITECTURE/Zero_Reuse_Matrix.md) 点分命名空间为唯一注册名（早期占位 `shud-build/run` → `shud.build`/`shud.run`，`rshud-parse` → `rshud.read_output`，`water-balance` → `rshud.compute_metrics`，`sandbox bash` → `sandbox.exec`）。Zero_Reuse_Matrix §4 与 Repository_Layout §1 的连字符写法（`shud-build.ts` 等）是实现文件名，不是工具注册名。memory(draft) 的注册名随 M4 memory 交付定，表内暂记权限类别。
+| 角色 | `toolIds`（exact、排序后快照） | `permissionNotes` | 明确排除 |
+|---|---|---|---|
+| coordinator | `harness.job.collect`, `harness.job.submit`, `harness.memory.propose`, `harness.report.generate`, `read`, `spawn_agent`, `wait_agent` | `harness.memory.propose` 仅 draft/proposal-only；`read` 仅用于调度所需上下文读取；raw Zero `memory` 不授权 | `bash`, `write`, `edit`, `patch.apply`, `memory` |
+| repo_explorer | `git.inspect`, `read`, `repo.glob`, `repo.grep`, `repo.search` | git/search/glob/grep 均为只读诊断 | 一切写、spawn/job |
+| worker | `artifact.write`, `harness.memory.propose`, `read`, `rshud.compute_metrics`, `rshud.read_output`, `sandbox.exec`, `shud.build`, `shud.run` | `artifact.write` 仅限 `workspaces/artifacts/runs`；`harness.memory.propose` 仅 draft/proposal-only；`sandbox.exec` 是 sandbox bash，不是仓库源码编辑；raw Zero `memory` 不授权 | 仓库源码写、`memory` |
+| coder | `bash`, `edit`, `harness.memory.propose`, `patch.apply`, `read`, `write` | `bash`/`write`/`edit`/`patch.apply` 仅限 worktree；`harness.memory.propose` 仅 draft/proposal-only；raw Zero `memory` 不授权 | baseline/主分支写、spawn/job、`memory` |
+| reviewer | `harness.memory.propose`, `read`, `validator.run` | `validator.run` 为确定性只读 validator；`harness.memory.propose` 仅 draft/proposal-only；raw Zero `memory` 不授权 | 一切写、`memory` |
+
+工具 id 命名裁决：zero 当前原生工具以 zero 注册名为准（本 issue 用到的 exact ids：`spawn_agent`, `wait_agent`, `read`, `write`, `edit`, `bash`）。SHUD-Harness 领域/治理工具 id 一律用点分注册名：`harness.job.submit`, `harness.job.collect`, `harness.memory.propose`, `harness.report.generate`, `git.inspect`, `repo.search`, `repo.glob`, `repo.grep`, `artifact.write`, `sandbox.exec`, `shud.build`, `shud.run`, `rshud.read_output`, `rshud.compute_metrics`, `patch.apply`, `validator.run`。Zero_Reuse_Matrix §4 与 Repository_Layout §1 的连字符写法（`shud-build.ts` 等）是实现文件名，不是工具注册名。`harness.memory.propose` 是 M4 记忆封装前预留的未来 adapter 注册 id / proposal-only 占位，不是 raw Zero `memory`。raw Zero `memory` 在 M1 可比较 `toolIds` 中显式排除，直到 M4 通过 wrapper/adapter 收窄 create/update/delete/status 语义后再重新评估。
+
+快照 oracle MUST 为以下精确排序数组（实现可保留 `permissionNotes`，但快照至少覆盖 `toolIds`）：
+
+```json
+{
+  "coordinator": ["harness.job.collect", "harness.job.submit", "harness.memory.propose", "harness.report.generate", "read", "spawn_agent", "wait_agent"],
+  "repo_explorer": ["git.inspect", "read", "repo.glob", "repo.grep", "repo.search"],
+  "worker": ["artifact.write", "harness.memory.propose", "read", "rshud.compute_metrics", "rshud.read_output", "sandbox.exec", "shud.build", "shud.run"],
+  "coder": ["bash", "edit", "harness.memory.propose", "patch.apply", "read", "write"],
+  "reviewer": ["harness.memory.propose", "read", "validator.run"]
+}
+```
 
 冻结冲突裁决（本 change 显式记录）：[Roles_and_Boundaries §3](../../../../../docs/02_ARCHITECTURE/Roles_and_Boundaries.md) 散文「选择是否直接 bash、提交 RunJob、派 Worker」中的「直接 bash」已被 [ADR-0002](../../../../../docs/adr/0002-mvp-reality-anchoring.md) M1 开工三决②定案取代（2026-07-03 grill：coordinator 调度面含 file_read **无 bash**）——coordinator 的短命令执行一律经 spawn worker / 提交 RunJob。优先级：Roles_and_Boundaries §0 权限剖面 + ADR-0002 定案 + 本映射表 > §3 散文；§3 修订注按账本冻结例外流程另行补记（同 Config_Secrets §4 批次 4 做法，待办已列 proposal Impact），本 change 不改冻结正文。
 
@@ -27,7 +41,7 @@
 
 ### Requirement: 映射表语义不变式
 
-映射表 SHALL 满足并以单测断言以下不变式：repo_explorer 与 reviewer 的集合不含任何写类工具 id（write/edit/patch）；worker 的集合不含仓库源码编辑工具；仅 coordinator 含 spawn/wait 类调度工具；coordinator 的集合不含 bash 与 write/edit 类工具 id（ADR-0002 开工三决②）；coder 是唯一含 worktree 编辑与 patch 工具的角色。
+映射表 SHALL 满足并以单测断言以下不变式：repo_explorer 与 reviewer 的集合不含任何写类工具 id（`write`, `edit`, `patch.apply`, `artifact.write`, `sandbox.exec`, `bash`）；worker 的集合不含仓库源码编辑工具（`write`, `edit`, `patch.apply`）；仅 coordinator 含 spawn/wait 类调度工具（`spawn_agent`, `wait_agent`）；coordinator 的集合不含 `bash`, `write`, `edit`, `patch.apply`（ADR-0002 开工三决②）；coder 是唯一含 worktree 编辑与 patch 工具的角色（`write`, `edit`, `patch.apply`）。`harness.memory.propose` 在 M1 仅代表未来 proposal-only draft 记忆 adapter 占位，不计入写类工具 id；raw Zero `memory` MUST NOT 出现在任一角色可比较 `toolIds` 中。
 
 #### Scenario: 只读角色无写工具
 
