@@ -24,14 +24,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-VERSION = "v0.2.0"
+VERSION = "v0.2.1"
 DEFAULT_OUTPUT_RELATIVE = Path("workspace/readiness/shud_rshud_readiness.json")
+CANONICAL_READINESS_DIR = Path("workspace/readiness")
 MIN_RSHUD_VERSION = "2.5.0"
 TEXT_TAIL_LIMIT = 12000
 COMMAND_TAIL_READ_BYTES = TEXT_TAIL_LIMIT * 4
 DEFAULT_MAKE_TIMEOUT_SECONDS = 300
 MAKE_TIMEOUT_ENV = "SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS"
-UNSUPPORTED_MAKE_ENV_VARS = ("MAKEFLAGS", "MFLAGS", "MAKEFILES")
+UNSUPPORTED_MAKE_ENV_VARS = ("MAKEFLAGS", "GNUMAKEFLAGS", "MFLAGS", "MAKEFILES")
 MAKE_ENV_OVERRIDE_VARS = ("CC", "CXX", "SUNDIALS_DIR")
 SHUD_TARGET_ENV_OVERRIDE_VARS = (
     "STCFLAG",
@@ -40,8 +41,14 @@ SHUD_TARGET_ENV_OVERRIDE_VARS = (
     "LIBRARIES",
     "RPATH",
     "LK_FLAGS",
+    "LK_OMP",
+    "LK_DYLN",
     "TARGET_EXEC",
+    "TARGET_OMP",
+    "TARGET_DEBUG",
     "MAIN_shud",
+    "MAIN_OMP",
+    "MAIN_DEBUG",
     "SRC",
     "SRC_H",
     "BUILDDIR",
@@ -50,6 +57,8 @@ SHUD_TARGET_ENV_OVERRIDE_VARS = (
     "LIB_SYS",
     "INC_OMP",
     "LIB_OMP",
+    "INC_MPI",
+    "MPICC",
 )
 SHUD_EXACT_ARTIFACT_NAMES = {"shud", "shud_omp", "shud_debug", "shud.dSYM"}
 SHUD_CURRENT_BUILD_ARTIFACT_PATTERNS = ("*.o", "*.dSYM")
@@ -58,6 +67,10 @@ SHUD_ARTIFACT_PATTERNS = (*SHUD_CURRENT_BUILD_ARTIFACT_PATTERNS, *SHUD_BROAD_RES
 RSHUD_VERSION_PREFIX = "RSHUD_VERSION="
 PROVISIONAL_POSTFLIGHT_REASON = (
     "postflight source-boundary evidence is pending; provisional output is not a readiness pass."
+)
+REDACTED_ENV_VALUE = "[REDACTED]"
+ENV_VALUE_REDACTION_REASON = (
+    "environment values may contain secrets or machine-local paths; readiness telemetry records names only"
 )
 
 
@@ -246,6 +259,28 @@ def check_git_tracked(repo_root: Path, output: Path) -> tuple[bool | None, str |
     return bool(str(result.get("stdout_tail") or "").strip()), None
 
 
+def tracked_runtime_readiness_artifacts(repo_root: Path) -> tuple[list[str] | None, str | None]:
+    result = run_command(
+        ["git", "-C", str(repo_root), "ls-files", "--", CANONICAL_READINESS_DIR.as_posix()],
+        timeout=20,
+    )
+    if result["exit_code"] != 0:
+        return None, command_failure_detail(result)
+    paths = [line.strip() for line in str(result.get("stdout_tail") or "").splitlines() if line.strip()]
+    return paths, None
+
+
+def validate_no_tracked_runtime_readiness_artifacts(repo_root: Path) -> None:
+    tracked_paths, tracked_error = tracked_runtime_readiness_artifacts(repo_root)
+    if tracked_paths is None:
+        raise OutputSafetyError(f"canonical readiness tracked state could not be proven: {tracked_error}")
+    if tracked_paths:
+        paths = ", ".join(tracked_paths)
+        raise OutputSafetyError(
+            f"tracked readiness artifact(s) exist under {CANONICAL_READINESS_DIR.as_posix()}: {paths}"
+        )
+
+
 def output_git_guard(repo_root: Path, output: Path) -> dict[str, Any]:
     try:
         rel = output.resolve(strict=False).relative_to(repo_root.resolve())
@@ -303,6 +338,7 @@ def validate_output_scope(
             raise OutputSafetyError(f"output path is tracked by git: {rel.as_posix()}")
         if not check_git_ignored(repo_root, output):
             raise OutputSafetyError(f"output path is not ignored by git: {rel.as_posix()}")
+        validate_no_tracked_runtime_readiness_artifacts(repo_root)
         return
 
     if not raw_output_is_absolute:
@@ -311,6 +347,7 @@ def validate_output_scope(
     if not any(is_relative_to(output_resolved, temp_root) for temp_root in allowed_temp_roots):
         allowed = ", ".join(str(path) for path in allowed_temp_roots)
         raise OutputSafetyError(f"repo-external output path must be under a system temp directory: {allowed}")
+    validate_no_tracked_runtime_readiness_artifacts(repo_root)
 
 
 def ensure_no_symlink_parent(path: Path) -> None:
@@ -680,12 +717,26 @@ def make_timeout_seconds(notes: list[str]) -> int:
     return timeout
 
 
+def redacted_environment_variable(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "present": True,
+        "value": REDACTED_ENV_VALUE,
+        "redacted": True,
+        "redaction_reason": ENV_VALUE_REDACTION_REASON,
+    }
+
+
+def blocked_variables_summary(blocked: list[dict[str, str]]) -> str:
+    return "; ".join(f"{item['name']} ({item['reason']})" for item in blocked)
+
+
 def collect_make_environment_guard(shud_dir: Path, skip_build: bool, errors: list[str]) -> dict[str, Any]:
     makefile = shud_dir / "Makefile"
     cc_assignment = parse_make_assignment_detail(makefile, "CC")
     sundials_assignment = parse_make_assignment_detail(makefile, "SUNDIALS_DIR")
     present = {
-        name: os.environ[name]
+        name: redacted_environment_variable(name)
         for name in (*UNSUPPORTED_MAKE_ENV_VARS, *MAKE_ENV_OVERRIDE_VARS, *SHUD_TARGET_ENV_OVERRIDE_VARS)
         if os.environ.get(name)
     }
@@ -741,8 +792,10 @@ def collect_make_environment_guard(shud_dir: Path, skip_build: bool, errors: lis
         "ok": not blocked,
     }
     if blocked and not skip_build:
-        names = ", ".join(item["name"] for item in blocked)
-        errors.append(f"unsupported make environment overrides are set before SHUD build: {names}")
+        errors.append(
+            "unsupported make environment overrides are set before SHUD build: "
+            f"{blocked_variables_summary(blocked)}"
+        )
     return guard
 
 

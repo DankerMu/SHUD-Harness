@@ -18,6 +18,26 @@ fail() {
   exit 1
 }
 
+clear_make_environment() {
+  unset MAKEFLAGS GNUMAKEFLAGS MFLAGS MAKEFILES
+  unset CC CXX SUNDIALS_DIR
+  unset STCFLAG CFLAGS INCLUDES LIBRARIES RPATH LK_FLAGS LK_OMP LK_DYLN
+  unset TARGET_EXEC TARGET_OMP TARGET_DEBUG
+  unset MAIN_shud MAIN_OMP MAIN_DEBUG
+  unset SRC SRC_H BUILDDIR SRC_DIR
+  unset LIB_SUN LIB_SYS INC_OMP LIB_OMP INC_MPI MPICC
+}
+
+export_make_environment() {
+  export MAKEFLAGS GNUMAKEFLAGS MFLAGS MAKEFILES
+  export CC CXX SUNDIALS_DIR
+  export STCFLAG CFLAGS INCLUDES LIBRARIES RPATH LK_FLAGS LK_OMP LK_DYLN
+  export TARGET_EXEC TARGET_OMP TARGET_DEBUG
+  export MAIN_shud MAIN_OMP MAIN_DEBUG
+  export SRC SRC_H BUILDDIR SRC_DIR
+  export LIB_SUN LIB_SYS INC_OMP LIB_OMP INC_MPI MPICC
+}
+
 if ! git -C "$REPO_ROOT" check-ignore --no-index -q workspace/readiness/shud_rshud_readiness.json; then
   fail "root runtime shud/rshud readiness output is not ignored"
 fi
@@ -34,6 +54,9 @@ if [ -n "${FAKE_MAKE_MARKER:-}" ]; then
 fi
 case "$target" in
   clean)
+    if [ -n "${FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN:-}" ] && [ -n "${TARGET_OMP:-}" ]; then
+      rm -f "$TARGET_OMP"
+    fi
     case "${FAKE_MAKE_CLEAN_MODE:-minimal}" in
       fail)
         printf '%s\n' "fake make clean failure" >&2
@@ -190,6 +213,9 @@ make_fixture() {
   cat > "$fixture/SHUD/Makefile" <<'EOF'
 SUNDIALS_DIR = $(HOME)/sundials
 CC = g++
+TARGET_EXEC = ./shud
+TARGET_OMP = ./shud_omp
+TARGET_DEBUG = ./shud_debug
 shud:
 	@true
 clean:
@@ -235,21 +261,42 @@ run_helper() {
   helper_fake_make_marker=${FAKE_MAKE_MARKER:-}
   helper_fake_git_delay_on_tracked_output=${FAKE_GIT_DELAY_ON_TRACKED_OUTPUT:-}
   helper_fake_git_delay_seconds=${FAKE_GIT_DELAY_SECONDS:-1}
+  helper_fake_make_honor_target_omp_on_clean=${FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN:-}
+  helper_preserve_make_env=${PRESERVE_MAKE_ENV:-}
   set +e
-  FAKE_MAKE_MODE="$helper_fake_make_mode" \
-    FAKE_MAKE_CLEAN_MODE="$helper_fake_make_clean_mode" \
-    FAKE_RSHUD_VERSION="$helper_fake_rshud_version" \
-    FAKE_MAKE_MARKER="$helper_fake_make_marker" \
-    FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
-    FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
-    SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
-    PATH="$TMP_ROOT/bin:$PATH" \
-    HOME="$fixture/fake-home" \
-    "$HELPER" --repo-root "$fixture" --output "$output" "$@"
+  if [ "$helper_preserve_make_env" = "1" ]; then
+    export_make_environment
+    FAKE_MAKE_MODE="$helper_fake_make_mode" \
+      FAKE_MAKE_CLEAN_MODE="$helper_fake_make_clean_mode" \
+      FAKE_RSHUD_VERSION="$helper_fake_rshud_version" \
+      FAKE_MAKE_MARKER="$helper_fake_make_marker" \
+      FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
+      FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
+      FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+      SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
+      PATH="$TMP_ROOT/bin:$PATH" \
+      HOME="$fixture/fake-home" \
+      "$HELPER" --repo-root "$fixture" --output "$output" "$@"
+  else
+    (
+      clear_make_environment
+      FAKE_MAKE_MODE="$helper_fake_make_mode" \
+        FAKE_MAKE_CLEAN_MODE="$helper_fake_make_clean_mode" \
+        FAKE_RSHUD_VERSION="$helper_fake_rshud_version" \
+        FAKE_MAKE_MARKER="$helper_fake_make_marker" \
+        FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
+        FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
+        FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+        SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
+        PATH="$TMP_ROOT/bin:$PATH" \
+        HOME="$fixture/fake-home" \
+        "$HELPER" --repo-root "$fixture" --output "$output" "$@"
+    )
+  fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env
   return "$helper_status"
 }
 
@@ -263,21 +310,42 @@ run_helper_default_output() {
   helper_fake_make_marker=${FAKE_MAKE_MARKER:-}
   helper_fake_git_delay_on_tracked_output=${FAKE_GIT_DELAY_ON_TRACKED_OUTPUT:-}
   helper_fake_git_delay_seconds=${FAKE_GIT_DELAY_SECONDS:-1}
+  helper_fake_make_honor_target_omp_on_clean=${FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN:-}
+  helper_preserve_make_env=${PRESERVE_MAKE_ENV:-}
   set +e
-  FAKE_MAKE_MODE="$helper_fake_make_mode" \
-    FAKE_MAKE_CLEAN_MODE="$helper_fake_make_clean_mode" \
-    FAKE_RSHUD_VERSION="$helper_fake_rshud_version" \
-    FAKE_MAKE_MARKER="$helper_fake_make_marker" \
-    FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
-    FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
-    SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
-    PATH="$TMP_ROOT/bin:$PATH" \
-    HOME="$fixture/fake-home" \
-    "$HELPER" --repo-root "$fixture" "$@"
+  if [ "$helper_preserve_make_env" = "1" ]; then
+    export_make_environment
+    FAKE_MAKE_MODE="$helper_fake_make_mode" \
+      FAKE_MAKE_CLEAN_MODE="$helper_fake_make_clean_mode" \
+      FAKE_RSHUD_VERSION="$helper_fake_rshud_version" \
+      FAKE_MAKE_MARKER="$helper_fake_make_marker" \
+      FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
+      FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
+      FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+      SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
+      PATH="$TMP_ROOT/bin:$PATH" \
+      HOME="$fixture/fake-home" \
+      "$HELPER" --repo-root "$fixture" "$@"
+  else
+    (
+      clear_make_environment
+      FAKE_MAKE_MODE="$helper_fake_make_mode" \
+        FAKE_MAKE_CLEAN_MODE="$helper_fake_make_clean_mode" \
+        FAKE_RSHUD_VERSION="$helper_fake_rshud_version" \
+        FAKE_MAKE_MARKER="$helper_fake_make_marker" \
+        FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
+        FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
+        FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN="$helper_fake_make_honor_target_omp_on_clean" \
+        SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
+        PATH="$TMP_ROOT/bin:$PATH" \
+        HOME="$fixture/fake-home" \
+        "$HELPER" --repo-root "$fixture" "$@"
+    )
+  fi
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS PRESERVE_MAKE_ENV
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds helper_fake_make_honor_target_omp_on_clean helper_preserve_make_env
   return "$helper_status"
 }
 
@@ -390,6 +458,31 @@ if [ -n "$tracked_output_status" ]; then
   fail "tracked output fixture workspace status changed"
 fi
 
+tracked_sibling_fixture="$TMP_ROOT/tracked-sibling-fixture"
+make_fixture "$tracked_sibling_fixture"
+mkdir -p "$tracked_sibling_fixture/workspace/readiness"
+printf '%s\n' '{"readiness_check":"shud_rshud","conclusion":"pass"}' > "$tracked_sibling_fixture/workspace/readiness/shud_rshud_stale_pass.json"
+git -C "$tracked_sibling_fixture" add -f workspace/readiness/shud_rshud_stale_pass.json
+git -C "$tracked_sibling_fixture" commit -q -m "track stale readiness sibling"
+tracked_sibling_output="$tracked_sibling_fixture/workspace/readiness/alternate_selected.json"
+tracked_sibling_marker="$tracked_sibling_fixture/make.marker"
+tracked_sibling_stderr="$TMP_ROOT/tracked-sibling.stderr"
+if FAKE_MAKE_MARKER="$tracked_sibling_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$tracked_sibling_fixture" "$tracked_sibling_output" >/dev/null 2>"$tracked_sibling_stderr"; then
+  fail "tracked sibling fixture unexpectedly returned zero"
+fi
+if ! grep -q "tracked readiness artifact(s) exist under workspace/readiness" "$tracked_sibling_stderr"; then
+  cat "$tracked_sibling_stderr" >&2
+  fail "tracked sibling fixture did not reject canonical tracked readiness artifact"
+fi
+if [ -e "$tracked_sibling_output" ]; then
+  if grep -q '"conclusion": "pass"' "$tracked_sibling_output"; then
+    fail "tracked sibling fixture left pass-shaped selected output"
+  fi
+fi
+if [ -e "$tracked_sibling_marker" ]; then
+  fail "make executed for tracked sibling fixture"
+fi
+
 final_recheck_fixture="$TMP_ROOT/final-recheck-output-fixture"
 make_fixture "$final_recheck_fixture"
 final_recheck_rel="workspace/readiness/final_recheck.json"
@@ -469,7 +562,7 @@ EOF
 : > "$sundials_conflict_fixture/alt-sundials/lib/libsundials_nvecserial.dylib"
 sundials_conflict_output="$TMP_ROOT/sundials-conflict-output.json"
 export SUNDIALS_DIR="$sundials_conflict_fixture/alt-sundials"
-if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$sundials_conflict_fixture" "$sundials_conflict_output" --skip-build >/dev/null 2>/dev/null; then
+if PRESERVE_MAKE_ENV=1 FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$sundials_conflict_fixture" "$sundials_conflict_output" --skip-build >/dev/null 2>/dev/null; then
   unset SUNDIALS_DIR
   fail "SUNDIALS conflict skip-build fixture unexpectedly returned zero"
 fi
@@ -554,7 +647,7 @@ make_env_fixture="$TMP_ROOT/make-env-fixture"
 make_fixture "$make_env_fixture"
 make_env_output="$make_env_fixture/workspace/readiness/make_env.json"
 make_env_marker="$make_env_fixture/make.marker"
-if MAKEFLAGS=-e CC="$TMP_ROOT/bin/g++" FAKE_MAKE_MARKER="$make_env_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$make_env_fixture" "$make_env_output" >/dev/null 2>/dev/null; then
+if PRESERVE_MAKE_ENV=1 MAKEFLAGS=-e CC="$TMP_ROOT/bin/g++" FAKE_MAKE_MARKER="$make_env_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$make_env_fixture" "$make_env_output" >/dev/null 2>/dev/null; then
   fail "make environment override fixture unexpectedly returned zero"
 fi
 unset MAKEFLAGS CC
@@ -570,7 +663,7 @@ stcflag_env_fixture="$TMP_ROOT/stcflag-env-fixture"
 make_fixture "$stcflag_env_fixture"
 stcflag_env_output="$stcflag_env_fixture/workspace/readiness/stcflag_env.json"
 stcflag_env_marker="$stcflag_env_fixture/make.marker"
-if STCFLAG=-static FAKE_MAKE_MARKER="$stcflag_env_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$stcflag_env_fixture" "$stcflag_env_output" >/dev/null 2>/dev/null; then
+if PRESERVE_MAKE_ENV=1 STCFLAG=-static FAKE_MAKE_MARKER="$stcflag_env_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$stcflag_env_fixture" "$stcflag_env_output" >/dev/null 2>/dev/null; then
   fail "STCFLAG environment override fixture unexpectedly returned zero"
 fi
 unset STCFLAG
@@ -580,6 +673,43 @@ assert_json_expr "$stcflag_env_output" 'data["shud"]["build"]["blocked_before_ma
 if [ -e "$stcflag_env_marker" ]; then
   fail "make executed for STCFLAG environment override fixture"
 fi
+
+gnumakeflags_target_fixture="$TMP_ROOT/gnumakeflags-target-fixture"
+make_fixture "$gnumakeflags_target_fixture"
+gnumakeflags_target_output="$gnumakeflags_target_fixture/workspace/readiness/gnumakeflags_target.json"
+gnumakeflags_target_marker="$gnumakeflags_target_fixture/make.marker"
+printf '%s\n' "must survive" > "$gnumakeflags_target_fixture/must_survive"
+if PRESERVE_MAKE_ENV=1 GNUMAKEFLAGS=-e TARGET_OMP=../must_survive FAKE_MAKE_HONOR_TARGET_OMP_ON_CLEAN=1 FAKE_MAKE_MARKER="$gnumakeflags_target_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$gnumakeflags_target_fixture" "$gnumakeflags_target_output" >/dev/null 2>/dev/null; then
+  fail "GNUMAKEFLAGS TARGET_OMP fixture unexpectedly returned zero"
+fi
+unset GNUMAKEFLAGS TARGET_OMP
+assert_json "$gnumakeflags_target_output" block "unsupported make environment overrides are set before SHUD build"
+assert_json_expr "$gnumakeflags_target_output" 'any(item["name"] == "GNUMAKEFLAGS" for item in data["make_environment_guard"]["blocked_variables"])'
+assert_json_expr "$gnumakeflags_target_output" 'any(item["name"] == "TARGET_OMP" for item in data["make_environment_guard"]["blocked_variables"])'
+assert_json_expr "$gnumakeflags_target_output" 'data["shud"]["build"]["blocked_before_make"] is True'
+if [ -e "$gnumakeflags_target_marker" ]; then
+  fail "make executed for GNUMAKEFLAGS TARGET_OMP fixture"
+fi
+if [ ! -e "$gnumakeflags_target_fixture/must_survive" ]; then
+  fail "TARGET_OMP sentinel was removed"
+fi
+
+secret_env_fixture="$TMP_ROOT/secret-env-fixture"
+make_fixture "$secret_env_fixture"
+secret_env_output="$secret_env_fixture/workspace/readiness/secret_env.json"
+secret_env_stderr="$TMP_ROOT/secret-env.stderr"
+secret_value="SHUDSECRET_DO_NOT_LEAK_15"
+if PRESERVE_MAKE_ENV=1 MAKEFLAGS="$secret_value" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$secret_env_fixture" "$secret_env_output" >/dev/null 2>"$secret_env_stderr"; then
+  fail "secret environment override fixture unexpectedly returned zero"
+fi
+unset MAKEFLAGS
+assert_json "$secret_env_output" block "unsupported make environment overrides are set before SHUD build"
+if grep -q "$secret_value" "$secret_env_output" || grep -q "$secret_value" "$secret_env_stderr"; then
+  fail "secret-like make environment value leaked to output or stderr"
+fi
+assert_json_expr "$secret_env_output" 'data["make_environment_guard"]["present_variables"]["MAKEFLAGS"]["redacted"] is True'
+assert_json_expr "$secret_env_output" '"redaction_reason" in data["make_environment_guard"]["present_variables"]["MAKEFLAGS"]'
+assert_json_expr "$secret_env_output" 'any(item["name"] == "MAKEFLAGS" and "make control variable" in item["reason"] for item in data["make_environment_guard"]["blocked_variables"])'
 
 residual_artifact_fixture="$TMP_ROOT/residual-artifact-fixture"
 make_fixture "$residual_artifact_fixture"
