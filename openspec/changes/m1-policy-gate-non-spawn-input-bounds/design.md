@@ -1,9 +1,10 @@
 ## Context
 
 Issue #51 is a PR #52 invariant-closure follow-up for the shared policy-gate
-wrapper. The generic non-spawn path must reject pathological input before
-expensive descriptor materialization, give honest evaluators cloneable data, and
-keep evaluator mutation away from the input later supplied to the inner tool.
+wrapper. The generic non-spawn path must reject unstable live input, materialize
+accepted input once into a stable bounded graph, give honest evaluators cloneable
+data with ordinary array read APIs, and keep evaluator mutation away from the
+input later supplied to the inner tool.
 
 Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.
 
@@ -16,10 +17,13 @@ Expanded-trigger rationale:
 ## Goals / Non-Goals
 
 Goals:
-- Bound generic non-spawn preparation before expensive cloning.
-- Use separate execution and evaluator snapshots for generic non-spawn input.
+- Reject generic non-spawn proxies and non-ordinary objects whose discovery cost
+  or descriptor stability cannot be bounded.
+- Materialize accepted generic non-spawn input once into a stable canonical graph.
+- Use separate execution and evaluator snapshots derived from that canonical
+  graph for generic non-spawn input.
 - Make evaluator snapshots cloneable plain data, with recursive null prototypes
-  for plain objects.
+  for plain objects and compatible read APIs for arrays.
 - Isolate evaluator direct mutation and block input-derived prototype mutation
   paths from altering inner tool execution.
 - Preserve fail-closed behavior and running-tool metadata finalization.
@@ -33,29 +37,36 @@ Non-Goals:
 
 ## Decisions
 
-1. Generic non-spawn input gets cheap budget checks before descriptor reads.
-   Arrays reject over-length `length` before own-key or element-descriptor
-   enumeration. Plain objects reject over-budget own-key counts before per-key
-   descriptor reads. Accessors, functions, symbols, bigint values, symbol keys,
-   excessive depth, excessive node count, excessive array length, excessive
-   object key count, or excessive string budget fail closed as preparation
-   errors.
+1. Generic non-spawn input uses a conservative stable-materialization boundary.
+   Proxy inputs are rejected before key discovery or descriptor traps are
+   reached. Arrays reject over-length `length` before own-key or element
+   descriptor enumeration. For ordinary plain objects, JavaScript cannot count
+   keys without enumerating them, so the object key budget is checked after
+   `Reflect.ownKeys()` and before per-key descriptor/value reads. Accessors,
+   functions, symbols, bigint values, symbol keys, excessive depth, excessive
+   node count, excessive array length, excessive object key count, excessive
+   string budget, non-ordinary prototypes, or prototype-polluting keys fail
+   closed as preparation errors.
 
-2. Generic non-spawn input uses bounded twin snapshots.
-   After descriptor-safe inspection, the wrapper creates one execution snapshot
-   for the inner tool and one evaluator snapshot for policy evaluation. Both
-   snapshots are plain structured data. Plain object snapshots use null
-   prototypes recursively; evaluator arrays also use null prototypes so
-   input-derived array `constructor` / prototype paths cannot mutate shared
-   array prototypes.
+2. Generic non-spawn input uses one canonical materialization plus derived
+   snapshots. The wrapper materializes the accepted live input once into a
+   stable inert structured-data graph. It then creates one execution snapshot
+   for the inner tool and one evaluator snapshot for policy evaluation from
+   that canonical graph, so evaluator and execution preparation never reread a
+   live proxy/accessor source differently. Plain object snapshots use null
+   prototypes recursively. Evaluator arrays preserve ordinary read APIs through
+   isolated array prototypes that copy array methods without linking mutation
+   paths to global `Array.prototype`.
 
 3. Evaluator mutation is isolated by snapshot separation.
    Direct top-level or nested evaluator mutation may succeed on the evaluator
    snapshot, but the inner tool receives the original execution snapshot.
-   Honest evaluators can `structuredClone(call.input)` before returning allow.
+   Honest evaluators can `structuredClone(call.input)`, iterate array fields,
+   spread them, and call `.includes()` / `.map()` before returning allow.
    Prototype mutation attempts through `Object.getPrototypeOf(call.input)` or
-   `call.input.constructor?.prototype` either have no reachable prototype or do
-   not affect the execution snapshot.
+   `call.input.constructor?.prototype` either have no reachable shared prototype
+   or affect only the evaluator-local prototype, not execution input or global
+   prototypes.
 
 4. Spawn remains separate.
    `spawn_agent` keeps using `normalizeSpawnAgentInput()` plus its existing
@@ -92,15 +103,17 @@ Domain packs:
   shared Zero tool wrapper boundary.
 
 Invariant Matrix:
-- Governing invariant: Generic non-spawn policy-gate preparation must bound
-  untrusted input cost, preserve cloneable honest-evaluator read semantics, and
-  must not let evaluator mutation change the input that the inner tool executes.
+- Governing invariant: Generic non-spawn policy-gate preparation must
+  materialize untrusted input into one stable bounded source of truth, derive
+  evaluator/execution inputs from that source without rereading live input,
+  preserve cloneable honest-evaluator read semantics, and must not let evaluator
+  mutation change the input that the inner tool executes.
 - Source-of-truth identity/contract: issue #51 acceptance criteria,
   `PolicyGatedBaseToolAdapter.preparePolicyGateInput()`, and existing
   `policy_gate_input_preparation_failed` / evaluator-failure ToolResult shapes.
 - Producers: non-spawn tool callers and custom policy evaluators.
-- Validators/preflight: generic preparation budget check, descriptor-safe
-  inspection, and bounded snapshot creation.
+- Validators/preflight: proxy/non-ordinary rejection, generic preparation budget
+  checks, canonical materialization, and bounded snapshot cloning.
 - Storage/cache/query: none - no persisted runtime state.
 - Public routes/entrypoints: wrapped non-spawn `BaseTool.run()` path.
 - Frontend/downstream consumers: none in this slice.
@@ -112,13 +125,17 @@ Invariant Matrix:
 - Regression rows:
   - Oversized/deep non-spawn input -> preparation fails closed before evaluator
     and inner tool execution, with existing preparation failure payload.
-  - Over-length arrays and over-wide objects -> cheap budget rejection happens
-    before array own-key / element descriptor enumeration or per-key object
-    descriptor reads.
+  - Proxy or hostile key-discovery input -> preparation fails closed before
+    evaluator and inner tool execution, without trap text or trap calls.
+  - Over-length ordinary arrays -> cheap length rejection happens before array
+    own-key / element descriptor enumeration.
+  - Over-wide ordinary objects -> key-count rejection happens after ordinary
+    own-key enumeration and before per-key descriptor/value reads.
   - Evaluator mutates top-level or nested non-spawn input -> inner tool still
     receives the original execution snapshot.
-  - Honest evaluator snapshots valid non-spawn input with `structuredClone` ->
-    clone succeeds and inner tool receives the expected execution snapshot.
+  - Honest evaluator snapshots valid non-spawn input with `structuredClone` and
+    reads array fields via `for...of`, spread, `.includes()`, and `.map()` ->
+    reads succeed and inner tool receives the expected execution snapshot.
   - Existing accessor/prototype-polluting/proxy-hostile/unsafe value input ->
     preparation still fails closed without leaking trap or getter text and
     without running the inner tool.
@@ -142,5 +159,9 @@ Boundary-surface checklist:
   longer fail immediately. Mitigation: the execution snapshot is separate, and
   tests lock that the inner tool only sees the original values.
 - Budget constants can reject pathological but technically cloneable inputs.
-  Mitigation: this boundary is a shared policy gate; safe, bounded inspection is
-  preferred over unbounded preparation.
+  Mitigation: this boundary is a shared policy gate; safe, bounded preparation
+  is preferred over unbounded execution.
+- Ordinary object own-key enumeration itself cannot be pre-budgeted with native
+  JavaScript reflection. Mitigation: proxy-shaped inputs are rejected before key
+  discovery, and the contract only claims ordinary object rejection after
+  own-key enumeration and before per-key descriptor/value reads.

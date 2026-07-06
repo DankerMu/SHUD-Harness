@@ -1,10 +1,12 @@
 ## 1. Preparation Contract
 
-- [x] 1.1 Add generic non-spawn preparation budgets and descriptor-safe
-  inspection before structured cloning.
+- [x] 1.1 Add generic non-spawn preparation budgets and proxy/non-ordinary
+  fail-closed checks before live key discovery or evaluator execution.
 - [x] 1.2 Change generic non-spawn preparation to create separate execution and
-  evaluator snapshots after inspection, using cloneable plain data and recursive
-  null prototypes for plain object snapshots.
+  evaluator snapshots from one canonical materialized graph, using cloneable
+  plain data, recursive null prototypes for plain object snapshots, and
+  evaluator array prototypes that preserve read APIs without shared global
+  prototype mutation paths.
 - [x] 1.3 Preserve existing preparation failure payloads, evaluator failure
   behavior, and running-tool metadata finalization.
 - [x] 1.4 Audit and preserve the `spawn_agent` preparation path unchanged.
@@ -16,9 +18,10 @@
   - Inputs: object depth = generic max depth + 1; array length = generic max
     array length + 1; object key count = generic max key count + 1; total
     string budget = generic max string budget + 1.
-  - Ordering evidence: over-length dense arrays fail before array own-key /
-    element descriptor enumeration; over-wide objects fail before per-key
-    descriptor reads.
+  - Ordering evidence: proxy inputs fail before key/descriptor traps;
+    over-length dense arrays fail before array own-key / element descriptor
+    enumeration; over-wide ordinary objects fail after own-key enumeration and
+    before per-key value reads.
   - Expected: result contains `policy_gate_input_preparation_failed`, evaluator
     calls = 0, inner tool calls = 0, running handle finished with failed summary.
 - [x] 2.2 Add tests that evaluator top-level and nested mutation attempts cannot
@@ -33,8 +36,10 @@
   - Inputs: accessor-backed field, proxy-hostile own-key trap, function value,
     symbol value, bigint value, symbol key, own `__proto__` data key,
     `constructor` key, and `prototype` key.
-- [x] 2.4 Add tests that honest evaluators can `structuredClone(call.input)` and
-  that evaluator prototype mutation paths cannot affect inner execution.
+- [x] 2.4 Add tests that honest evaluators can `structuredClone(call.input)`,
+  iterate and spread evaluator array fields, call `.includes()` / `.map()`, and
+  that evaluator prototype mutation paths cannot affect inner execution or
+  global prototypes.
 - [x] 2.5 Add or preserve tests proving representative `spawn_agent` paths remain
   unchanged.
   - Valid input: `role="worker"`, `tools=["read"]`, non-empty instruction ->
@@ -55,8 +60,9 @@
   evaluator code cannot mutate the execution snapshot observed by the inner
   tool.
 - [x] 3.4 Resource limits / large input / discovery: depth, array-length, and
-  string-budget tests fail closed before evaluator execution; cheap array/object
-  ordering tests prove descriptor paths are not reached after budget rejection.
+  string-budget tests fail closed before evaluator execution; proxy tests prove
+  key/descriptor traps are not reached; ordinary object tests prove over-wide
+  inputs fail before per-key value reads.
 - [x] 3.5 Legacy compatibility / examples: existing non-spawn deny, preparation
   failure, raw-data wrapper, and spawn tests remain green under `bun run check`.
 - [x] 3.6 Error handling / rollback / partial outputs: preparation and evaluator
