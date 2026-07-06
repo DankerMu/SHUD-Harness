@@ -287,12 +287,44 @@ describe("spawn profile subset policy rule", () => {
     ).toEqual({ decision: "allow" });
   });
 
-  test("allows spawn without an explicit allowlist at pure rule level", () => {
+  test("allows canonical-role spawn without an explicit allowlist at pure rule level", () => {
     expect(
       evaluatePolicyGate(spawnToolCall({ role: "worker" }), {
         rules: [SPAWN_PROFILE_SUBSET_RULE]
       })
     ).toEqual({ decision: "allow" });
+  });
+
+  test("denies spawn without a canonical role profile or explicit allowlist", () => {
+    const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
+
+    for (const input of [{}, { role: "not_a_harness_role" }, { role: " " }]) {
+      const decision = evaluatePolicyGate(spawnToolCall(input), context);
+      const normalized = normalizeSpawnAgentInput(spawnToolCall(input));
+
+      expect(decision).toMatchObject({
+        decision: "deny",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        guardClass: "authority",
+        remediation: {
+          next_action: "adjust_scope",
+          ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+        }
+      });
+      expect(normalized).toMatchObject({
+        decision: "deny",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        guardClass: "authority",
+        remediation: {
+          next_action: "adjust_scope",
+          ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+        }
+      });
+      if (decision.decision === "deny") {
+        expect(decision.reason).toContain("omits tools/allowed_tools");
+        expect(decision.remediation.hint).toContain("canonical SHUD spawn role");
+      }
+    }
   });
 
   test("normalizes omitted canonical spawn tools to the role profile", () => {

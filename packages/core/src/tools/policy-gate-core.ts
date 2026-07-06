@@ -533,7 +533,12 @@ function evaluateSpawnProfileSubsetSnapshot(
 ): PolicyRuleDecision {
   const allowlist = snapshot.allowlist;
   if (allowlist.kind === "omitted") {
-    return { decision: "allow" };
+    const role = snapshot.role.kind === "present" ? snapshot.role.canonicalRole : undefined;
+    if (role) {
+      return { decision: "allow" };
+    }
+
+    return buildSpawnProfileMissingProfileDeny(snapshot.role.label);
   }
 
   if (allowlist.kind === "dual") {
@@ -645,6 +650,21 @@ function buildSpawnProfileBudgetDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: `Reduce ${allowlist.field} to fit within the ${budgetLabel} budget before spawning ${role}.`,
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+    },
+    guardClass: "authority"
+  };
+}
+
+function buildSpawnProfileMissingProfileDeny(
+  role: string
+): Extract<PolicyRuleDecision, { decision: "deny" }> {
+  return {
+    decision: "deny",
+    reason: `spawn_agent for ${role} omits tools/allowed_tools and has no canonical SHUD role profile to constrain Zero defaults.`,
+    remediation: {
+      next_action: "adjust_scope",
+      hint: `Provide a canonical SHUD spawn role or an explicit non-empty tools/allowed_tools subset before spawning ${role}.`,
       ref: SPAWN_PROFILE_SUBSET_POLICY_REF
     },
     guardClass: "authority"
