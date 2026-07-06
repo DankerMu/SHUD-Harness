@@ -2,6 +2,7 @@
   "name": "shud-harness",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.2.19",
   "workspaces": [
     "packages/*",
     "zero/packages/*"

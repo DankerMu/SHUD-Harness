@@ -29,21 +29,26 @@ link check 脚本与 schema drift 检查 SHALL 入库 `scripts/` 并接入 CI；
 
 ### Requirement: packageManager 与 lockfile 固定
 
-根 `package.json` SHALL 声明固定的 `packageManager`（Bun 版本），lockfile SHALL 入库；干净环境安装 MUST 可用冻结模式完成。
+根 `package.json` SHALL 声明固定的 `packageManager`（Bun 版本），lockfile SHALL 入库；干净环境安装 MUST 可用冻结模式完成，且不得修改 lockfile。
 
 #### Scenario: 冻结安装
 
 - **WHEN** 在干净 checkout 上执行 `bun install --frozen-lockfile`
-- **THEN** 安装成功且不修改 lockfile
+- **THEN** 安装成功且不修改 lockfile，lockfile sha256 与 DependencyLock 记录一致
 
 ### Requirement: 初始 DependencyLock 生成
 
-系统 SHALL 生成初始 DependencyLock 记录：四个 submodule（SHUD/rSHUD/AutoSHUD/zero）的 commit 与关键运行时依赖版本。
+系统 SHALL 生成初始 DependencyLock 记录：四个 submodule（SHUD/rSHUD/AutoSHUD/zero）的 commit 与 dirty 状态、package manager/lockfile identity、关键运行时依赖版本。
 
 #### Scenario: gitmodules 解析
 
-- **WHEN** 执行 `git config --file .gitmodules --get-regexp` 解析检查
-- **THEN** 四个 submodule 均返回 path/url，且 DependencyLock 中的 commit 与 `git submodule status` 一致
+- **WHEN** 执行 `.gitmodules` path/url 解析检查与 `git submodule status`
+- **THEN** 四个 submodule 均返回 path/url，DependencyLock 中的 commit 与 `git submodule status` 一致，`dirty=false`，且 zero commit 为 `13e25c1`
+
+#### Scenario: DependencyLock PR 边界
+
+- **WHEN** #14 PR 提交 DependencyLock
+- **THEN** 变更边界仅包含根 `package.json`、根 lockfile、DependencyLock 记录和 workflow fixture；不得修改 `packages/**`、SHUD/rSHUD/AutoSHUD/zero 源码或 submodule pointer
 
 ### Requirement: SHUD make 复验与 rSHUD 在位确认
 

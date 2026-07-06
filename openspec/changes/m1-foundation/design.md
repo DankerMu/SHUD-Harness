@@ -122,6 +122,72 @@ Review focus:
 - Runtime output cannot accidentally satisfy source-controlled evidence or enter git.
 - `decision` aggregation is conservative and cannot classify contract conflicts as pass.
 
+## Subagent Workflow Fixture - Issue #14
+
+Fixture level: expanded; repair intensity: medium. Project profile: SHUD-Harness.
+
+Expanded-trigger rationale:
+- Core triggers: package-manager lockfile source of truth, dependency/version evidence file, submodule commit compatibility, and release/dependency reproducibility.
+- Profile triggers: `lock`, `SHUD`, `rSHUD`, `AutoSHUD`, `Zero`, and evidence-chain correctness for readiness.
+
+Change surface:
+- Root `package.json` packageManager field.
+- Root `bun.lock`.
+- Initial `dependency-lock.initial.json` DependencyLock record.
+
+Must preserve:
+- `zero/` remains source-clean and pinned to `13e25c1`.
+- SHUD, rSHUD, AutoSHUD, and zero submodule worktrees are not edited and record `dirty: false`.
+- `packages/**`, submodule source files, and unrelated docs/instruction files remain outside this PR.
+- This issue does not upgrade dependencies; it records the current resolved lock graph and submodule commits.
+
+Must add/change:
+- Root `package.json` declares a fixed Bun `packageManager`.
+- Root Bun lockfile is committed and supports frozen install without drift.
+- Initial DependencyLock records package manager version, lockfile path and sha256, direct runtime/dev dependency versions, and four submodule commits.
+
+Risk packs considered:
+- Public API / CLI / script entry: not selected - no runtime entrypoint behavior changes.
+- Config / project setup: selected - package manager version, lockfile, and submodule baselines define install/setup reproducibility.
+- File IO / path safety / overwrite: selected - the committed lockfile and DependencyLock are source-controlled evidence files and must not imply runtime workspace writes.
+- Schema / columns / units / field names: selected - DependencyLock fields must follow Dependency_Versioning_Policy §6.
+- Auth / permissions / secrets: selected - generated lock artifacts must not contain registry auth headers, tokens, or API keys.
+- Concurrency / shared state / ordering: not selected - no runtime shared state or concurrent execution path changes.
+- Resource limits / large input / discovery: not selected - dependency discovery is bounded to the root lock graph and four known submodules.
+- Legacy compatibility / examples: selected - SHUD, rSHUD, AutoSHUD, and zero checkouts remain readable and unchanged.
+- Error handling / rollback / partial outputs: selected - lock drift or submodule dirty state must block acceptance rather than be silently recorded.
+- Release / packaging / dependency compatibility: selected - this is the initial package-manager and dependency baseline.
+- Documentation / migration notes: selected - PR evidence must state Bun version, lockfile sha, and submodule pinning.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - DependencyLock is readiness evidence bound to the exact checkout.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: selected - scientific submodule commits are recorded as the compatibility baseline.
+- Zero adapter / tool registry / agent role governance: selected - zero remains pinned and source-clean for ADR-0001 Trial work.
+
+Invariant Matrix:
+- Governing invariant: The initial DependencyLock must describe exactly the package-manager lockfile and submodule state inspected for this checkout, without changing source packages or submodules.
+- Source-of-truth identity/contract: `package.json#packageManager`, root `bun.lock` sha256, Dependency_Versioning_Policy §6, `.gitmodules`, `git submodule status`, and zero commit `13e25c1`.
+- Producers: Bun lockfile generation and DependencyLock record generation.
+- Validators/preflight: frozen install, lockfile sha check, DependencyLock JSON validation, `.gitmodules` parser check, submodule status check, zero diff/pin check.
+- Storage/cache/query: committed root `bun.lock` and `dependency-lock.initial.json`; no runtime workspace state.
+- Public routes/entrypoints: none - #14 has no backend/API surface.
+- Frontend/downstream consumers: future release/readiness evidence consumes the DependencyLock file, not a runtime API.
+- Failure paths/rollback/stale state: lockfile drift, wrong sha, dirty submodule, wrong zero commit, or out-of-bound changed file blocks merge.
+- Evidence/audit/readiness: PR evidence records frozen install, lockfile sha, submodule commits, zero diff, and clean package/submodule source status.
+- Regression rows:
+  - Clean checkout with `bun@1.2.19` -> `bun install --frozen-lockfile` succeeds and `bun.lock` sha256 remains equal to DependencyLock.
+  - `.gitmodules` parse plus `git submodule status` -> four path/url entries exist and DependencyLock commits match SHUD, rSHUD, AutoSHUD, and zero with `dirty: false`.
+  - `git -C zero rev-parse HEAD` and `git -C zero diff --quiet` -> zero remains `13e25c1` and source-clean.
+  - `git status --short -- packages SHUD rSHUD AutoSHUD zero` -> empty, proving package and submodule source boundaries were not edited.
+  - Secret scan over `package.json`, `bun.lock`, and `dependency-lock.initial.json` -> no registry auth, tokens, or API keys.
+
+Non-goals:
+- Workspace/package initialization (#16), dependency upgrades, package source edits, submodule updates, DuckDB client selection, or CI frozen-install wiring beyond existing check coverage.
+
+Review focus:
+- DependencyLock schema fields, lockfile sha, packageManager version, submodule commits, dirty flags, and zero pin all match the inspected checkout.
+- Frozen install produces no lockfile drift.
+- The PR contains only the #14 boundary files plus this workflow fixture update.
+
 ## Subagent Workflow Fixture — Issue #19
 
 Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.
