@@ -234,6 +234,168 @@ describe("policy-gated zero tool registry", () => {
     expect(bashLikeTool.calls).toBe(0);
   });
 
+  test("oversized non-spawn inputs fail closed before evaluator and inner tool execution", async () => {
+    const tailSentinel = "STRING_BUDGET_TAIL_SENTINEL";
+    const cases: Array<{ label: string; input: unknown }> = [
+      {
+        label: "deep",
+        input: createNestedPolicyGateInput(33)
+      },
+      {
+        label: "array-length",
+        input: {
+          values: Array.from({ length: 1_025 }, () => "x")
+        }
+      },
+      {
+        label: "object-key-count",
+        input: createObjectWithKeyCount(257)
+      },
+      {
+        label: "node-count",
+        input: createNodeDensePolicyGateInput()
+      },
+      {
+        label: "string-budget",
+        input: {
+          command: `${"x".repeat(131_073)}${tailSentinel}`
+        }
+      }
+    ];
+
+    for (const testCase of cases) {
+      const editTool = new RecordingTool("edit");
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const toolUseId = `POLICY-BUDGET-${testCase.label}`;
+      const handle = runningToolRegistry.register({
+        toolUseId,
+        toolName: "edit",
+        abortable: false
+      });
+      let evaluatorCalls = 0;
+      const wrapped = wrapToolWithPolicyGate(editTool, {
+        evaluate: async () => {
+          evaluatorCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await wrapped.run(
+        {
+          ...createToolContext("worker"),
+          currentToolUseId: toolUseId,
+          runningToolRegistry
+        },
+        testCase.input
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("policy_gate_input_preparation_failed");
+      expect(result.output).not.toContain(tailSentinel);
+      expect(result.outputSummary).toBe("Policy gate input preparation failed for edit");
+      expect(evaluatorCalls).toBe(0);
+      expect(editTool.calls).toBe(0);
+      expect(handle.getState()).toBe("finished");
+      expect(handle.getTerminalMetadata()).toMatchObject({
+        cause: "completed",
+        success: false,
+        outputSummary: result.outputSummary
+      });
+    }
+  });
+
+  test("non-spawn evaluator mutation attempts fail closed without reaching the inner tool", async () => {
+    const cases: Array<{ label: string; mutate: (input: unknown) => void }> = [
+      {
+        label: "top-level",
+        mutate(input) {
+          (input as { command: string }).command = "mutated";
+        }
+      },
+      {
+        label: "nested",
+        mutate(input) {
+          (input as { nested: { flag: string } }).nested.flag = "mutated";
+        }
+      },
+      {
+        label: "descriptor-nested",
+        mutate(input) {
+          const nested = Object.getOwnPropertyDescriptor(input as object, "nested")?.value as {
+            flag: string;
+          };
+          nested.flag = "mutated";
+        }
+      }
+    ];
+
+    for (const testCase of cases) {
+      const editTool = new RecordingTool("edit");
+      const input = {
+        command: "original",
+        nested: {
+          flag: "original"
+        }
+      };
+      const wrapped = wrapToolWithPolicyGate(editTool, {
+        evaluate: async (call) => {
+          testCase.mutate(call.input);
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), input);
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Policy gate evaluator input is read-only");
+      expect(result.outputSummary).toContain("Error: Policy gate evaluator input is read-only");
+      expect(editTool.calls).toBe(0);
+      expect(input).toEqual({
+        command: "original",
+        nested: {
+          flag: "original"
+        }
+      });
+    }
+  });
+
+  test("non-spawn evaluator reads a readonly view while inner tool receives the execution snapshot", async () => {
+    const editTool = new RecordingTool("edit");
+    const input = {
+      command: "original",
+      nested: {
+        flag: "original"
+      }
+    };
+    let evaluatorInput: unknown;
+    let evaluatorSawCommand: unknown;
+    let evaluatorSawNestedFlag: unknown;
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        evaluatorInput = call.input;
+        evaluatorSawCommand = (call.input as { command?: unknown }).command;
+        evaluatorSawNestedFlag = (call.input as { nested?: { flag?: unknown } }).nested?.flag;
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), input);
+
+    expect(result.success).toBe(true);
+    expect(evaluatorSawCommand).toBe("original");
+    expect(evaluatorSawNestedFlag).toBe("original");
+    expect(editTool.calls).toBe(1);
+    expect(editTool.lastInput).toEqual({
+      command: "original",
+      nested: {
+        flag: "original"
+      }
+    });
+    expect(editTool.lastInput).not.toBe(input);
+    expect((editTool.lastInput as { nested: unknown }).nested).not.toBe(input.nested);
+    expect(evaluatorInput).not.toBe(editTool.lastInput);
+  });
+
   test("malformed raw-rule deny from custom evaluator fails closed and finishes running handle", async () => {
     const bashTool = new RecordingTool("bash");
     const runningToolRegistry = new TestRunningToolRegistry();
@@ -3202,6 +3364,34 @@ class RequiredCommandRecordingTool extends RecordingTool {
     },
     required: ["command"],
     additionalProperties: true
+  };
+}
+
+function createNestedPolicyGateInput(depth: number): Record<string, unknown> {
+  let value: Record<string, unknown> = {
+    leaf: "value"
+  };
+  for (let index = 0; index < depth; index += 1) {
+    value = {
+      child: value
+    };
+  }
+  return value;
+}
+
+function createObjectWithKeyCount(count: number): Record<string, unknown> {
+  return Object.fromEntries(
+    Array.from({ length: count }, (_, index) => [`key_${index}`, "value"])
+  );
+}
+
+function createNodeDensePolicyGateInput(): Record<string, unknown> {
+  return {
+    batches: Array.from({ length: 10 }, () =>
+      Array.from({ length: 1_024 }, () => ({
+        value: "x"
+      }))
+    )
   };
 }
 
