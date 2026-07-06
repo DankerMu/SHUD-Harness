@@ -234,6 +234,208 @@ describe("policy-gated zero tool registry", () => {
     expect(bashLikeTool.calls).toBe(0);
   });
 
+  test("over-length dense arrays fail before array key or descriptor enumeration", async () => {
+    const editTool = new RecordingTool("edit");
+    let evaluatorCalls = 0;
+    let ownKeysCalls = 0;
+    let descriptorCalls = 0;
+    const input = new Proxy(Array.from({ length: 1_025 }, (_, index) => index), {
+      ownKeys(target) {
+        ownKeysCalls += 1;
+        return Reflect.ownKeys(target);
+      },
+      getOwnPropertyDescriptor(target, property) {
+        descriptorCalls += 1;
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      }
+    });
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), input);
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_input_preparation_failed");
+    expect(evaluatorCalls).toBe(0);
+    expect(editTool.calls).toBe(0);
+    expect(ownKeysCalls).toBe(0);
+    expect(descriptorCalls).toBe(0);
+  });
+
+  test("wide objects fail before per-key descriptor reads", async () => {
+    const editTool = new RecordingTool("edit");
+    let evaluatorCalls = 0;
+    let ownKeysCalls = 0;
+    let descriptorCalls = 0;
+    const target = createObjectWithKeyCount(257);
+    const input = new Proxy(target, {
+      ownKeys(proxyTarget) {
+        ownKeysCalls += 1;
+        return Reflect.ownKeys(proxyTarget);
+      },
+      getOwnPropertyDescriptor(proxyTarget, property) {
+        descriptorCalls += 1;
+        return Reflect.getOwnPropertyDescriptor(proxyTarget, property);
+      }
+    });
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), input);
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_input_preparation_failed");
+    expect(evaluatorCalls).toBe(0);
+    expect(editTool.calls).toBe(0);
+    expect(ownKeysCalls).toBe(1);
+    expect(descriptorCalls).toBe(0);
+  });
+
+  test("proxy-hostile non-spawn input fails closed without leaking trap text", async () => {
+    const editTool = new RecordingTool("edit");
+    const runningToolRegistry = new TestRunningToolRegistry();
+    const handle = runningToolRegistry.register({
+      toolUseId: "POLICY-HOSTILE-PROXY-1",
+      toolName: "edit",
+      abortable: false
+    });
+    let evaluatorCalls = 0;
+    const sentinel = "HOSTILE_PROXY_TRAP_SECRET";
+    const input = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error(sentinel);
+        }
+      }
+    );
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(
+      {
+        ...createToolContext("worker"),
+        currentToolUseId: "POLICY-HOSTILE-PROXY-1",
+        runningToolRegistry
+      },
+      input
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_input_preparation_failed");
+    expect(result.output).not.toContain(sentinel);
+    expect(result.outputSummary).toBe("Policy gate input preparation failed for edit");
+    expect(result.outputSummary).not.toContain(sentinel);
+    expect(evaluatorCalls).toBe(0);
+    expect(editTool.calls).toBe(0);
+    expect(handle.getState()).toBe("finished");
+    expect(handle.getTerminalMetadata()).toMatchObject({
+      cause: "completed",
+      success: false,
+      outputSummary: result.outputSummary
+    });
+  });
+
+  test("non-spawn input preparation rejects isolated unsafe generic inputs", async () => {
+    const symbolKey = Symbol("unsafe-key");
+    const protoDataKeyInput: Record<string, unknown> = {
+      command: "original"
+    };
+    Object.defineProperty(protoDataKeyInput, "__proto__", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: {
+        polluted: true
+      }
+    });
+    const cases: Array<{ label: string; input: unknown }> = [
+      {
+        label: "function value",
+        input: {
+          command: "original",
+          unsafe: () => "not cloneable"
+        }
+      },
+      {
+        label: "symbol value",
+        input: {
+          command: Symbol("unsafe-value")
+        }
+      },
+      {
+        label: "bigint value",
+        input: {
+          command: "original",
+          count: 1n
+        }
+      },
+      {
+        label: "symbol key",
+        input: {
+          command: "original",
+          [symbolKey]: "unsafe"
+        }
+      },
+      {
+        label: "own __proto__ data key",
+        input: protoDataKeyInput
+      },
+      {
+        label: "constructor key",
+        input: {
+          command: "original",
+          constructor: {
+            prototype: {
+              polluted: true
+            }
+          }
+        }
+      },
+      {
+        label: "prototype key",
+        input: {
+          command: "original",
+          prototype: {
+            polluted: true
+          }
+        }
+      }
+    ];
+
+    for (const testCase of cases) {
+      const editTool = new RecordingTool(`edit-${testCase.label}`);
+      let evaluatorCalls = 0;
+      const wrapped = wrapToolWithPolicyGate(editTool, {
+        toolId: "edit",
+        evaluate: async () => {
+          evaluatorCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), testCase.input);
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("policy_gate_input_preparation_failed");
+      expect(result.outputSummary).toBe("Policy gate input preparation failed for edit");
+      expect(evaluatorCalls).toBe(0);
+      expect(editTool.calls).toBe(0);
+    }
+  });
+
   test("oversized non-spawn inputs fail closed before evaluator and inner tool execution", async () => {
     const tailSentinel = "STRING_BUDGET_TAIL_SENTINEL";
     const cases: Array<{ label: string; input: unknown }> = [
@@ -304,7 +506,7 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
-  test("non-spawn evaluator mutation attempts fail closed without reaching the inner tool", async () => {
+  test("non-spawn evaluator direct mutations are isolated from inner execution", async () => {
     const cases: Array<{ label: string; mutate: (input: unknown) => void }> = [
       {
         label: "top-level",
@@ -346,10 +548,12 @@ describe("policy-gated zero tool registry", () => {
 
       const result = await wrapped.run(createToolContext("worker"), input);
 
-      expect(result.success).toBe(false);
-      expect(result.output).toContain("Policy gate evaluator input is read-only");
-      expect(result.outputSummary).toContain("Error: Policy gate evaluator input is read-only");
-      expect(editTool.calls).toBe(0);
+      expect(result.success).toBe(true);
+      expect(editTool.calls).toBe(1);
+      expect((editTool.lastInput as { command?: unknown }).command).toBe("original");
+      expect((editTool.lastInput as { nested?: { flag?: unknown } }).nested?.flag).toBe(
+        "original"
+      );
       expect(input).toEqual({
         command: "original",
         nested: {
@@ -359,22 +563,25 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
-  test("non-spawn evaluator reads a readonly view while inner tool receives the execution snapshot", async () => {
+  test("honest non-spawn evaluator can structuredClone input before allowing", async () => {
     const editTool = new RecordingTool("edit");
     const input = {
       command: "original",
       nested: {
         flag: "original"
-      }
+      },
+      values: ["alpha", "beta"]
     };
-    let evaluatorInput: unknown;
-    let evaluatorSawCommand: unknown;
-    let evaluatorSawNestedFlag: unknown;
+    let evaluatorClone: unknown;
+    let evaluatorInputPrototype: object | null | undefined;
+    let evaluatorNestedPrototype: object | null | undefined;
     const wrapped = wrapToolWithPolicyGate(editTool, {
       evaluate: async (call) => {
-        evaluatorInput = call.input;
-        evaluatorSawCommand = (call.input as { command?: unknown }).command;
-        evaluatorSawNestedFlag = (call.input as { nested?: { flag?: unknown } }).nested?.flag;
+        evaluatorClone = structuredClone(call.input);
+        evaluatorInputPrototype = Object.getPrototypeOf(call.input as object);
+        evaluatorNestedPrototype = Object.getPrototypeOf(
+          (call.input as { nested: object }).nested
+        );
         return { decision: "allow" };
       }
     });
@@ -382,18 +589,100 @@ describe("policy-gated zero tool registry", () => {
     const result = await wrapped.run(createToolContext("worker"), input);
 
     expect(result.success).toBe(true);
-    expect(evaluatorSawCommand).toBe("original");
-    expect(evaluatorSawNestedFlag).toBe("original");
-    expect(editTool.calls).toBe(1);
-    expect(editTool.lastInput).toEqual({
+    expect(evaluatorClone).toEqual({
       command: "original",
       nested: {
         flag: "original"
-      }
+      },
+      values: ["alpha", "beta"]
     });
+    expect(evaluatorInputPrototype).toBeNull();
+    expect(evaluatorNestedPrototype).toBeNull();
+    expect(editTool.calls).toBe(1);
+    expect((editTool.lastInput as { command?: unknown }).command).toBe("original");
+    expect((editTool.lastInput as { nested?: { flag?: unknown } }).nested?.flag).toBe("original");
+    expect((editTool.lastInput as { values?: string[] }).values?.[0]).toBe("alpha");
+    expect(Object.getPrototypeOf(editTool.lastInput as object)).toBeNull();
+    expect(
+      Object.getPrototypeOf((editTool.lastInput as { nested: object }).nested)
+    ).toBeNull();
     expect(editTool.lastInput).not.toBe(input);
     expect((editTool.lastInput as { nested: unknown }).nested).not.toBe(input.nested);
-    expect(evaluatorInput).not.toBe(editTool.lastInput);
+  });
+
+  test("non-spawn evaluator prototype mutation paths cannot affect inner execution", async () => {
+    const editTool = new RecordingTool("edit");
+    const objectPrototypeSentinel = "__policyGateObjectPrototypeResidue";
+    const constructorPrototypeSentinel = "__policyGateConstructorPrototypeResidue";
+    const arrayPrototypeSentinel = "__policyGateArrayPrototypeResidue";
+    const input = {
+      command: "original",
+      nested: {
+        flag: "original"
+      },
+      values: ["original"]
+    };
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        const topPrototype = Object.getPrototypeOf(call.input as object) as
+          | Record<string, unknown>
+          | null;
+        if (topPrototype) {
+          topPrototype[objectPrototypeSentinel] = "mutated";
+        }
+
+        const constructorPrototype = (call.input as {
+          constructor?: { prototype?: Record<string, unknown> };
+        }).constructor?.prototype;
+        if (constructorPrototype) {
+          constructorPrototype[constructorPrototypeSentinel] = "mutated";
+        }
+
+        const nestedPrototype = Object.getPrototypeOf(
+          (call.input as { nested: object }).nested
+        ) as Record<string, unknown> | null;
+        if (nestedPrototype) {
+          nestedPrototype[objectPrototypeSentinel] = "mutated";
+        }
+
+        const arrayPrototype = Object.getPrototypeOf(
+          (call.input as { values: unknown[] }).values
+        ) as Record<string, unknown> | null;
+        if (arrayPrototype) {
+          arrayPrototype[arrayPrototypeSentinel] = "mutated";
+        }
+
+        const arrayConstructorPrototype = (call.input as {
+          values: { constructor?: { prototype?: Record<string, unknown> } };
+        }).values.constructor?.prototype;
+        if (arrayConstructorPrototype) {
+          arrayConstructorPrototype[arrayPrototypeSentinel] = "mutated";
+        }
+
+        return { decision: "allow" };
+      }
+    });
+
+    try {
+      const result = await wrapped.run(createToolContext("worker"), input);
+
+      expect(result.success).toBe(true);
+      expect(editTool.calls).toBe(1);
+      expect((editTool.lastInput as { command?: unknown }).command).toBe("original");
+      expect((editTool.lastInput as { nested?: { flag?: unknown } }).nested?.flag).toBe(
+        "original"
+      );
+      expect((editTool.lastInput as { values?: string[] }).values?.[0]).toBe("original");
+      expect((Object.prototype as Record<string, unknown>)[objectPrototypeSentinel]).toBeUndefined();
+      expect(
+        (Object.prototype as Record<string, unknown>)[constructorPrototypeSentinel]
+      ).toBeUndefined();
+      expect((Array.prototype as Record<string, unknown>)[arrayPrototypeSentinel]).toBeUndefined();
+    } finally {
+      delete (Object.prototype as Record<string, unknown>)[objectPrototypeSentinel];
+      delete (Object.prototype as Record<string, unknown>)[constructorPrototypeSentinel];
+      delete (Array.prototype as Record<string, unknown>)[arrayPrototypeSentinel];
+    }
   });
 
   test("malformed raw-rule deny from custom evaluator fails closed and finishes running handle", async () => {

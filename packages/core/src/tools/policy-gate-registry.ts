@@ -457,12 +457,11 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       };
     }
 
-    assertGenericPolicyGateInputCanBeSafelyPrepared(input);
-    const executionInput = clonePolicyGateInput(input);
+    const { executionInput, evaluatorInput } = prepareGenericPolicyGateInputSnapshots(input);
     return {
       decision: "allow",
       executionInput,
-      evaluatorInput: createReadOnlyPolicyGateInputView(executionInput)
+      evaluatorInput
     };
   }
 }
@@ -733,7 +732,28 @@ interface GenericPolicyGateInputBudgetState {
   seenObjects: WeakSet<object>;
 }
 
-type GenericPolicyGateDescriptorRecord = Record<PropertyKey, PropertyDescriptor | undefined>;
+interface GenericPolicyGateSnapshotState extends GenericPolicyGateInputBudgetState {
+  snapshots: WeakMap<object, unknown>;
+}
+
+type GenericPolicyGateDataDescriptor = PropertyDescriptor & {
+  value: unknown;
+};
+
+function prepareGenericPolicyGateInputSnapshots(value: unknown): {
+  executionInput: unknown;
+  evaluatorInput: unknown;
+} {
+  assertGenericPolicyGateInputCanBeSafelyPrepared(value);
+  return {
+    executionInput: createGenericPolicyGateInputSnapshot(value, {
+      nullPrototypeArrays: false
+    }),
+    evaluatorInput: createGenericPolicyGateInputSnapshot(value, {
+      nullPrototypeArrays: true
+    })
+  };
+}
 
 function assertGenericPolicyGateInputCanBeSafelyPrepared(value: unknown): void {
   inspectGenericPolicyGateInput(value, {
@@ -791,15 +811,18 @@ function inspectGenericPolicyGateInput(
     throw new Error("Policy gate input must be plain structured data.");
   }
 
-  const descriptors = getGenericPolicyGateDescriptors(objectValue);
-  const keys = Reflect.ownKeys(descriptors);
+  const keys = getBoundedGenericPolicyGateObjectKeys(objectValue);
   if (keys.length > GENERIC_POLICY_GATE_INPUT_MAX_OBJECT_KEYS) {
     throw new Error("Policy gate input exceeds object key budget.");
   }
 
   for (const key of keys) {
     assertSafeGenericPolicyGatePropertyKey(key, state, true);
-    inspectGenericPolicyGateDescriptorValue(getDescriptorForKey(descriptors, key), state, depth);
+    inspectGenericPolicyGateDescriptorValue(
+      readGenericPolicyGateDataDescriptor(objectValue, key),
+      state,
+      depth
+    );
   }
 }
 
@@ -808,28 +831,21 @@ function inspectGenericPolicyGateArray(
   state: GenericPolicyGateInputBudgetState,
   depth: number
 ): void {
-  const descriptors = getGenericPolicyGateDescriptors(value);
-  const lengthDescriptor = descriptors.length;
-  if (
-    !lengthDescriptor ||
-    !("value" in lengthDescriptor) ||
-    typeof lengthDescriptor.value !== "number" ||
-    !Number.isSafeInteger(lengthDescriptor.value) ||
-    lengthDescriptor.value < 0
-  ) {
-    throw new Error("Policy gate input contains an unsafe array length.");
-  }
-  if (lengthDescriptor.value > GENERIC_POLICY_GATE_INPUT_MAX_ARRAY_LENGTH) {
+  const length = readGenericPolicyGateArrayLength(value);
+  if (length > GENERIC_POLICY_GATE_INPUT_MAX_ARRAY_LENGTH) {
     throw new Error("Policy gate input exceeds array length budget.");
   }
 
   let extraKeyCount = 0;
-  for (const key of Reflect.ownKeys(descriptors)) {
+  for (const key of Reflect.ownKeys(value)) {
     if (key === "length") {
       continue;
     }
 
     if (typeof key === "string" && isArrayIndexPropertyKey(key)) {
+      if (Number(key) >= length) {
+        throw new Error("Policy gate input contains an unsafe array length.");
+      }
       assertSafeGenericPolicyGatePropertyKey(key, state, false);
     } else {
       extraKeyCount += 1;
@@ -839,15 +855,48 @@ function inspectGenericPolicyGateArray(
       assertSafeGenericPolicyGatePropertyKey(key, state, true);
     }
 
-    inspectGenericPolicyGateDescriptorValue(getDescriptorForKey(descriptors, key), state, depth);
+    inspectGenericPolicyGateDescriptorValue(
+      readGenericPolicyGateDataDescriptor(value, key),
+      state,
+      depth
+    );
   }
 }
 
 function inspectGenericPolicyGateDescriptorValue(
-  descriptor: PropertyDescriptor | undefined,
+  descriptor: GenericPolicyGateDataDescriptor,
   state: GenericPolicyGateInputBudgetState,
   depth: number
 ): void {
+  inspectGenericPolicyGateInput(descriptor.value, state, depth + 1);
+}
+
+function readGenericPolicyGateArrayLength(value: readonly unknown[]): number {
+  const length = Reflect.get(value, "length");
+  if (
+    typeof length !== "number" ||
+    !Number.isSafeInteger(length) ||
+    length < 0 ||
+    length > 4_294_967_295
+  ) {
+    throw new Error("Policy gate input contains an unsafe array length.");
+  }
+  return length;
+}
+
+function getBoundedGenericPolicyGateObjectKeys(value: object): (string | symbol)[] {
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > GENERIC_POLICY_GATE_INPUT_MAX_OBJECT_KEYS) {
+    throw new Error("Policy gate input exceeds object key budget.");
+  }
+  return keys;
+}
+
+function readGenericPolicyGateDataDescriptor(
+  value: object,
+  key: string | symbol
+): GenericPolicyGateDataDescriptor {
+  const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
   if (
     !descriptor ||
     !("value" in descriptor) ||
@@ -856,19 +905,7 @@ function inspectGenericPolicyGateDescriptorValue(
   ) {
     throw new Error("Policy gate input contains unsafe accessors.");
   }
-
-  inspectGenericPolicyGateInput(descriptor.value, state, depth + 1);
-}
-
-function getDescriptorForKey(
-  descriptors: GenericPolicyGateDescriptorRecord,
-  key: string | symbol
-): PropertyDescriptor | undefined {
-  return descriptors[key];
-}
-
-function getGenericPolicyGateDescriptors(value: object): GenericPolicyGateDescriptorRecord {
-  return Object.getOwnPropertyDescriptors(value) as unknown as GenericPolicyGateDescriptorRecord;
+  return descriptor as GenericPolicyGateDataDescriptor;
 }
 
 function assertSafeGenericPolicyGatePropertyKey(
@@ -905,60 +942,166 @@ function isArrayIndexPropertyKey(key: string): boolean {
   return Number.isInteger(index) && index >= 0 && index < 4_294_967_295 && String(index) === key;
 }
 
-const READ_ONLY_POLICY_GATE_INPUT_ERROR = "Policy gate evaluator input is read-only.";
-
-function createReadOnlyPolicyGateInputView(
+function createGenericPolicyGateInputSnapshot(
   value: unknown,
-  seenObjects = new WeakMap<object, unknown>()
+  options: { nullPrototypeArrays: boolean }
 ): unknown {
-  if (value === null || typeof value !== "object") {
+  return snapshotGenericPolicyGateInput(
+    value,
+    {
+      nodes: 0,
+      stringChars: 0,
+      seenObjects: new WeakSet<object>(),
+      snapshots: new WeakMap<object, unknown>()
+    },
+    options
+  );
+}
+
+function snapshotGenericPolicyGateInput(
+  value: unknown,
+  state: GenericPolicyGateSnapshotState,
+  options: { nullPrototypeArrays: boolean },
+  depth = 0
+): unknown {
+  if (depth > GENERIC_POLICY_GATE_INPUT_MAX_DEPTH) {
+    throw new Error("Policy gate input exceeds depth budget.");
+  }
+
+  state.nodes += 1;
+  if (state.nodes > GENERIC_POLICY_GATE_INPUT_MAX_NODES) {
+    throw new Error("Policy gate input exceeds node budget.");
+  }
+
+  if (value === null) {
+    return null;
+  }
+  if (typeof value === "string") {
+    addGenericPolicyGateStringBudget(value.length, state);
     return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "undefined") {
+    return value;
+  }
+  if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+    throw new Error("Policy gate input contains unsafe value types.");
+  }
+  if (typeof value !== "object") {
+    throw new Error("Policy gate input contains unsupported value types.");
   }
 
   const objectValue = value as object;
-  const existingView = seenObjects.get(objectValue);
-  if (existingView) {
-    return existingView;
+  const existingSnapshot = state.snapshots.get(objectValue);
+  if (existingSnapshot) {
+    return existingSnapshot;
+  }
+  state.seenObjects.add(objectValue);
+
+  if (Array.isArray(objectValue)) {
+    return snapshotGenericPolicyGateArray(objectValue, state, options, depth);
   }
 
-  const proxy = new Proxy(objectValue, {
-    get(target, property, receiver) {
-      return createReadOnlyPolicyGateInputView(Reflect.get(target, property, receiver), seenObjects);
-    },
-    getOwnPropertyDescriptor(target, property) {
-      const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
-      if (!descriptor || !("value" in descriptor)) {
-        return descriptor;
-      }
+  const prototype = Object.getPrototypeOf(objectValue);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error("Policy gate input must be plain structured data.");
+  }
 
-      const readOnlyValue = createReadOnlyPolicyGateInputView(descriptor.value, seenObjects);
-      if (!descriptor.configurable && !descriptor.writable && readOnlyValue !== descriptor.value) {
-        return descriptor;
-      }
+  return snapshotGenericPolicyGatePlainObject(objectValue, state, options, depth);
+}
 
-      return {
-        ...descriptor,
-        value: readOnlyValue
-      };
-    },
-    set() {
-      throw new Error(READ_ONLY_POLICY_GATE_INPUT_ERROR);
-    },
-    deleteProperty() {
-      throw new Error(READ_ONLY_POLICY_GATE_INPUT_ERROR);
-    },
-    defineProperty() {
-      throw new Error(READ_ONLY_POLICY_GATE_INPUT_ERROR);
-    },
-    setPrototypeOf() {
-      throw new Error(READ_ONLY_POLICY_GATE_INPUT_ERROR);
-    },
-    preventExtensions() {
-      throw new Error(READ_ONLY_POLICY_GATE_INPUT_ERROR);
+function snapshotGenericPolicyGateArray(
+  value: readonly unknown[],
+  state: GenericPolicyGateSnapshotState,
+  options: { nullPrototypeArrays: boolean },
+  depth: number
+): unknown[] {
+  const length = readGenericPolicyGateArrayLength(value);
+  if (length > GENERIC_POLICY_GATE_INPUT_MAX_ARRAY_LENGTH) {
+    throw new Error("Policy gate input exceeds array length budget.");
+  }
+
+  const snapshot = new Array<unknown>(length);
+  if (options.nullPrototypeArrays) {
+    Object.setPrototypeOf(snapshot, null);
+  }
+  state.snapshots.set(value, snapshot);
+
+  let extraKeyCount = 0;
+  for (const key of Reflect.ownKeys(value)) {
+    if (key === "length") {
+      continue;
     }
-  });
-  seenObjects.set(objectValue, proxy);
-  return proxy;
+
+    const isArrayIndex = typeof key === "string" && isArrayIndexPropertyKey(key);
+    if (isArrayIndex) {
+      if (Number(key) >= length) {
+        throw new Error("Policy gate input contains an unsafe array length.");
+      }
+      assertSafeGenericPolicyGatePropertyKey(key, state, false);
+    } else {
+      extraKeyCount += 1;
+      if (extraKeyCount > GENERIC_POLICY_GATE_INPUT_MAX_OBJECT_KEYS) {
+        throw new Error("Policy gate input exceeds object key budget.");
+      }
+      assertSafeGenericPolicyGatePropertyKey(key, state, true);
+    }
+
+    const descriptor = readGenericPolicyGateDataDescriptor(value, key);
+    const snapshotValue = snapshotGenericPolicyGateInput(
+      descriptor.value,
+      state,
+      options,
+      depth + 1
+    );
+    if (!descriptor.enumerable) {
+      continue;
+    }
+    if (isArrayIndex) {
+      snapshot[Number(key)] = snapshotValue;
+    } else {
+      Object.defineProperty(snapshot, key, {
+        value: snapshotValue,
+        enumerable: true,
+        configurable: true,
+        writable: true
+      });
+    }
+  }
+
+  return snapshot;
+}
+
+function snapshotGenericPolicyGatePlainObject(
+  value: object,
+  state: GenericPolicyGateSnapshotState,
+  options: { nullPrototypeArrays: boolean },
+  depth: number
+): Record<string, unknown> {
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  state.snapshots.set(value, snapshot);
+  const keys = getBoundedGenericPolicyGateObjectKeys(value);
+
+  for (const key of keys) {
+    assertSafeGenericPolicyGatePropertyKey(key, state, true);
+    const descriptor = readGenericPolicyGateDataDescriptor(value, key);
+    const snapshotValue = snapshotGenericPolicyGateInput(
+      descriptor.value,
+      state,
+      options,
+      depth + 1
+    );
+    if (!descriptor.enumerable) {
+      continue;
+    }
+    Object.defineProperty(snapshot, key, {
+      value: snapshotValue,
+      enumerable: true,
+      configurable: true,
+      writable: true
+    });
+  }
+
+  return snapshot;
 }
 
 function clonePolicyGateInput(value: unknown): unknown {

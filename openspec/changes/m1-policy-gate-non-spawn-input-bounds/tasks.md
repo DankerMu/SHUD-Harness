@@ -2,8 +2,9 @@
 
 - [x] 1.1 Add generic non-spawn preparation budgets and descriptor-safe
   inspection before structured cloning.
-- [x] 1.2 Change generic non-spawn preparation to use one execution snapshot and
-  a mutation-blocking evaluator view.
+- [x] 1.2 Change generic non-spawn preparation to create separate execution and
+  evaluator snapshots after inspection, using cloneable plain data and recursive
+  null prototypes for plain object snapshots.
 - [x] 1.3 Preserve existing preparation failure payloads, evaluator failure
   behavior, and running-tool metadata finalization.
 - [x] 1.4 Audit and preserve the `spawn_agent` preparation path unchanged.
@@ -13,7 +14,11 @@
 - [x] 2.1 Add tests for oversized and deeply nested non-spawn inputs failing
   closed before evaluator and inner tool execution.
   - Inputs: object depth = generic max depth + 1; array length = generic max
-    array length + 1; total string budget = generic max string budget + 1.
+    array length + 1; object key count = generic max key count + 1; total
+    string budget = generic max string budget + 1.
+  - Ordering evidence: over-length dense arrays fail before array own-key /
+    element descriptor enumeration; over-wide objects fail before per-key
+    descriptor reads.
   - Expected: result contains `policy_gate_input_preparation_failed`, evaluator
     calls = 0, inner tool calls = 0, running handle finished with failed summary.
 - [x] 2.2 Add tests that evaluator top-level and nested mutation attempts cannot
@@ -21,11 +26,16 @@
   - Inputs: `{ command: "original", nested: { flag: "original" } }`.
   - Mutations attempted by evaluator: `input.command = "mutated"` and
     `input.nested.flag = "mutated"`.
-  - Expected: mutation returns a failed ToolResult before inner execution, or the
-    inner tool receives `command="original"` and `nested.flag="original"`; in no
-    case may the inner tool execute mutated input.
-- [x] 2.3 Keep hostile accessor/prototype-pollution preparation tests green.
-- [x] 2.4 Add or preserve tests proving representative `spawn_agent` paths remain
+  - Expected: evaluator returns allow and the inner tool receives
+    `command="original"` and `nested.flag="original"`.
+- [x] 2.3 Keep hostile accessor/proxy/prototype-pollution and unsafe value
+  preparation tests green.
+  - Inputs: accessor-backed field, proxy-hostile own-key trap, function value,
+    symbol value, bigint value, symbol key, own `__proto__` data key,
+    `constructor` key, and `prototype` key.
+- [x] 2.4 Add tests that honest evaluators can `structuredClone(call.input)` and
+  that evaluator prototype mutation paths cannot affect inner execution.
+- [x] 2.5 Add or preserve tests proving representative `spawn_agent` paths remain
   unchanged.
   - Valid input: `role="worker"`, `tools=["read"]`, non-empty instruction ->
     allow path preserves normalized execution input.
@@ -45,7 +55,8 @@
   evaluator code cannot mutate the execution snapshot observed by the inner
   tool.
 - [x] 3.4 Resource limits / large input / discovery: depth, array-length, and
-  string-budget tests fail closed before evaluator execution.
+  string-budget tests fail closed before evaluator execution; cheap array/object
+  ordering tests prove descriptor paths are not reached after budget rejection.
 - [x] 3.5 Legacy compatibility / examples: existing non-spawn deny, preparation
   failure, raw-data wrapper, and spawn tests remain green under `bun run check`.
 - [x] 3.6 Error handling / rollback / partial outputs: preparation and evaluator
