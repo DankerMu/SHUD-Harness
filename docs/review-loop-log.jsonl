@@ -1,2 +1,3 @@
 {"issue":19,"pr":48,"date":"2026-07-05","fixture":"high","rounds":25,"gate_net_catch":205,"verdicts":{"confirmed":197,"plausible":8,"refuted":5},"residual_deferred":3,"premerge_skip_blocks":0}
 {"issue":24,"pr":49,"date":"2026-07-06","fixture":"high","rounds":3,"gate_net_catch":2,"verdicts":{"confirmed":2,"plausible":0,"refuted":0},"residual_deferred":0,"premerge_skip_blocks":0}
+{"issue":20,"pr":50,"date":"2026-07-06","fixture":"high","rounds":14,"gate_net_catch":39,"verdicts":{"confirmed":39,"plausible":3,"refuted":3},"residual_deferred":3,"premerge_skip_blocks":0}
