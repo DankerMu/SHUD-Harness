@@ -639,6 +639,9 @@ mkdir -p "$fake_python_attack_bin"
 fake_python_attack_output="$fake_python_attack_fixture/workspace/readiness/fake_python_attack.json"
 fake_python_attack_marker="$fake_python_attack_fixture/fake-python.marker"
 fake_python_attack_stderr="$TMP_ROOT/fake-python-attack.stderr"
+fake_sh_attack_output="$fake_python_attack_fixture/workspace/readiness/fake_sh_attack.json"
+fake_sh_attack_marker="$fake_python_attack_fixture/fake-sh.marker"
+fake_sh_attack_stderr="$TMP_ROOT/fake-sh-attack.stderr"
 cat > "$fake_python_attack_bin/python3" <<'EOF'
 #!/usr/bin/env sh
 set -eu
@@ -665,6 +668,53 @@ fi
 exit 0
 EOF
 chmod +x "$fake_python_attack_bin/python3"
+cat > "$fake_python_attack_bin/sh" <<'EOF'
+#!/bin/sh
+set -eu
+if [ -n "${FAKE_SH_MARKER:-}" ]; then
+  printf '%s\n' "fake sh invoked" > "$FAKE_SH_MARKER"
+fi
+forged_output=${FAKE_SH_FORGED_OUTPUT:-}
+if [ -n "$forged_output" ]; then
+  forged_dir=${forged_output%/*}
+  if [ "$forged_dir" != "$forged_output" ]; then
+    mkdir -p "$forged_dir"
+  fi
+  printf '%s\n' '{"readiness_check":"shud_rshud","conclusion":"pass","forged_by":"fake-sh"}' > "$forged_output"
+fi
+exit 0
+EOF
+chmod +x "$fake_python_attack_bin/sh"
+set +e
+(
+  clear_make_environment
+  FAKE_SH_MARKER="$fake_sh_attack_marker" \
+    FAKE_SH_FORGED_OUTPUT="$fake_sh_attack_output" \
+    PATH="$fake_python_attack_bin:$TMP_ROOT/bin:$PATH" \
+    HOME="$fake_python_attack_fixture/fake-home" \
+    "$HELPER" --repo-root "$fake_python_attack_fixture" --output "$fake_sh_attack_output" >/dev/null 2>"$fake_sh_attack_stderr"
+)
+fake_sh_attack_status=$?
+set -e
+if [ "$fake_sh_attack_status" -eq 0 ]; then
+  fail "fake sh PATH attack fixture unexpectedly returned zero"
+fi
+if [ -e "$fake_sh_attack_marker" ]; then
+  fail "wrapper executed fake sh from PATH"
+fi
+if [ -e "$fake_sh_attack_output" ]; then
+  if grep -q '"forged_by":"fake-sh"' "$fake_sh_attack_output" \
+    || grep -q '"conclusion":"pass"' "$fake_sh_attack_output"; then
+    fail "fake sh PATH attack left pass-shaped forged output"
+  fi
+else
+  cat "$fake_sh_attack_stderr" >&2
+  fail "fake sh PATH attack did not reach the real helper"
+fi
+assert_json "$fake_sh_attack_output" block "executable identity is not trusted"
+assert_json_expr "$fake_sh_attack_output" 'data["tool_identity"]["git"]["ok"] is True'
+assert_json_expr "$fake_sh_attack_output" 'all(data["tool_identity"][name]["ok"] is False for name in ["make", "Rscript"])'
+assert_json_expr "$fake_sh_attack_output" 'data["conclusion"] != "pass"'
 set +e
 (
   clear_make_environment
