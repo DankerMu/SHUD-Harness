@@ -234,6 +234,1565 @@ describe("policy-gated zero tool registry", () => {
     expect(bashLikeTool.calls).toBe(0);
   });
 
+  test("proxy array inputs fail before array key or descriptor traps", async () => {
+    const editTool = new RecordingTool("edit");
+    let evaluatorCalls = 0;
+    let ownKeysCalls = 0;
+    let descriptorCalls = 0;
+    const input = new Proxy(Array.from({ length: 1_025 }, (_, index) => index), {
+      ownKeys(target) {
+        ownKeysCalls += 1;
+        return Reflect.ownKeys(target);
+      },
+      getOwnPropertyDescriptor(target, property) {
+        descriptorCalls += 1;
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      }
+    });
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), input);
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_input_preparation_failed");
+    expect(evaluatorCalls).toBe(0);
+    expect(editTool.calls).toBe(0);
+    expect(ownKeysCalls).toBe(0);
+    expect(descriptorCalls).toBe(0);
+  });
+
+  test("over-length ordinary arrays fail before array key discovery or numeric descriptor reads", async () => {
+    const editTool = new RecordingTool("edit");
+    const input = Array.from({ length: 1_025 }, (_, index) => index);
+    let evaluatorCalls = 0;
+    let arrayOwnKeysCalls = 0;
+    let arrayNumericDescriptorReads = 0;
+    const originalOwnKeys = Reflect.ownKeys;
+    const originalGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+    Reflect.ownKeys = ((target: object): (string | symbol)[] => {
+      if (Array.isArray(target)) {
+        arrayOwnKeysCalls += 1;
+        throw new Error("array ownKeys must not be called");
+      }
+      return originalOwnKeys(target);
+    }) as typeof Reflect.ownKeys;
+    Reflect.getOwnPropertyDescriptor = ((
+      target: object,
+      propertyKey: PropertyKey
+    ): PropertyDescriptor | undefined => {
+      if (Array.isArray(target) && isExpectedNumericArrayDescriptorKey(propertyKey, target.length)) {
+        arrayNumericDescriptorReads += 1;
+        throw new Error(`array numeric descriptor must not be read: ${String(propertyKey)}`);
+      }
+      return originalGetOwnPropertyDescriptor(target, propertyKey);
+    }) as typeof Reflect.getOwnPropertyDescriptor;
+
+    try {
+      const wrapped = wrapToolWithPolicyGate(editTool, {
+        evaluate: async () => {
+          evaluatorCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), input);
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("policy_gate_input_preparation_failed");
+    } finally {
+      Reflect.ownKeys = originalOwnKeys;
+      Reflect.getOwnPropertyDescriptor = originalGetOwnPropertyDescriptor;
+    }
+
+    expect(arrayOwnKeysCalls).toBe(0);
+    expect(arrayNumericDescriptorReads).toBe(0);
+    expect(evaluatorCalls).toBe(0);
+    expect(editTool.calls).toBe(0);
+  });
+
+  test("ordinary arrays ignore over-budget non-index own properties without array key discovery", async () => {
+    const editTool = new RecordingTool("edit");
+    const sentinel = "ARRAY_NON_INDEX_PROPERTY_SENTINEL";
+    const values = ["alpha", , "gamma"] as unknown[];
+    for (let index = 0; index < 300; index += 1) {
+      Object.defineProperty(values, `extra_${index}`, {
+        configurable: true,
+        enumerable: true,
+        get() {
+          throw new Error(`${sentinel}_${index}`);
+        }
+      });
+    }
+    Object.defineProperty(values, "callable", {
+      configurable: true,
+      enumerable: true,
+      value: () => sentinel
+    });
+    Object.defineProperty(values, "symbolValue", {
+      configurable: true,
+      enumerable: true,
+      value: Symbol(sentinel)
+    });
+    Object.defineProperty(values, "bigintValue", {
+      configurable: true,
+      enumerable: true,
+      value: 1n
+    });
+    Object.defineProperty(values, "__proto__", {
+      configurable: true,
+      enumerable: true,
+      value: {
+        polluted: true
+      }
+    });
+    Object.defineProperty(values, "constructor", {
+      configurable: true,
+      enumerable: true,
+      value: {
+        prototype: {
+          polluted: true
+        }
+      }
+    });
+    Object.defineProperty(values, "prototype", {
+      configurable: true,
+      enumerable: true,
+      value: {
+        polluted: true
+      }
+    });
+    Object.defineProperty(values, Symbol("ignored-array-extra"), {
+      configurable: true,
+      enumerable: true,
+      value: sentinel
+    });
+
+    let arrayOwnKeysCalls = 0;
+    let arrayNonIndexDescriptorReads = 0;
+    let evaluatorObservation:
+      | {
+          direct: unknown[];
+          hasSparseHole: boolean;
+          extraVisible: boolean;
+          unsafeVisible: boolean;
+          constructorValue: unknown;
+        }
+      | undefined;
+    const originalOwnKeys = Reflect.ownKeys;
+    const originalGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+    Reflect.ownKeys = ((target: object): (string | symbol)[] => {
+      if (Array.isArray(target)) {
+        arrayOwnKeysCalls += 1;
+        throw new Error("array ownKeys must not be called");
+      }
+      return originalOwnKeys(target);
+    }) as typeof Reflect.ownKeys;
+    Reflect.getOwnPropertyDescriptor = ((
+      target: object,
+      propertyKey: PropertyKey
+    ): PropertyDescriptor | undefined => {
+      if (Array.isArray(target) && !isExpectedNumericArrayDescriptorKey(propertyKey, target.length)) {
+        arrayNonIndexDescriptorReads += 1;
+        throw new Error(`array non-index descriptor must not be read: ${String(propertyKey)}`);
+      }
+      return originalGetOwnPropertyDescriptor(target, propertyKey);
+    }) as typeof Reflect.getOwnPropertyDescriptor;
+
+    try {
+      const wrapped = wrapToolWithPolicyGate(editTool, {
+        evaluate: async (call) => {
+          const evaluatorValues = (call.input as { values: unknown[] }).values;
+          evaluatorObservation = {
+            direct: [evaluatorValues[0], evaluatorValues[1], evaluatorValues[2]],
+            hasSparseHole: Object.prototype.hasOwnProperty.call(evaluatorValues, "1"),
+            extraVisible: Object.prototype.hasOwnProperty.call(evaluatorValues, "extra_0"),
+            unsafeVisible:
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "callable") ||
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "symbolValue") ||
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "bigintValue") ||
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "__proto__") ||
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "constructor") ||
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "prototype"),
+            constructorValue: (evaluatorValues as { constructor?: unknown }).constructor
+          };
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), { values });
+
+      expect(result.success).toBe(true);
+      expect(editTool.calls).toBe(1);
+    } finally {
+      Reflect.ownKeys = originalOwnKeys;
+      Reflect.getOwnPropertyDescriptor = originalGetOwnPropertyDescriptor;
+    }
+
+    expect(arrayOwnKeysCalls).toBe(0);
+    expect(arrayNonIndexDescriptorReads).toBe(0);
+    expect(evaluatorObservation).toEqual({
+      direct: ["alpha", undefined, "gamma"],
+      hasSparseHole: false,
+      extraVisible: false,
+      unsafeVisible: false,
+      constructorValue: undefined
+    });
+    const executionValues = (editTool.lastInput as { values?: unknown[] }).values;
+    expect(executionValues).toHaveLength(3);
+    expect(executionValues?.[0]).toBe("alpha");
+    expect(executionValues?.[1]).toBeUndefined();
+    expect(executionValues?.[2]).toBe("gamma");
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "1")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "extra_0")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "callable")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "symbolValue")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "bigintValue")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "__proto__")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "constructor")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "prototype")).toBe(false);
+  });
+
+  test("wide ordinary objects fail before per-key value reads", async () => {
+    const editTool = new RecordingTool("edit");
+    let evaluatorCalls = 0;
+    let hostileGetterReads = 0;
+    const sentinel = "WIDE_OBJECT_HOSTILE_GETTER_SECRET";
+    const input = createObjectWithKeyCount(257);
+    Object.defineProperty(input, "hostile", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        hostileGetterReads += 1;
+        throw new Error(sentinel);
+      }
+    });
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), input);
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_input_preparation_failed");
+    expect(result.output).not.toContain(sentinel);
+    expect(evaluatorCalls).toBe(0);
+    expect(editTool.calls).toBe(0);
+    expect(hostileGetterReads).toBe(0);
+  });
+
+  test("proxy-hostile non-spawn input fails closed without leaking trap text", async () => {
+    const editTool = new RecordingTool("edit");
+    const runningToolRegistry = new TestRunningToolRegistry();
+    const handle = runningToolRegistry.register({
+      toolUseId: "POLICY-HOSTILE-PROXY-1",
+      toolName: "edit",
+      abortable: false
+    });
+    let evaluatorCalls = 0;
+    const sentinel = "HOSTILE_PROXY_TRAP_SECRET";
+    let ownKeysCalls = 0;
+    let descriptorCalls = 0;
+    const input = new Proxy(
+      {},
+      {
+        ownKeys() {
+          ownKeysCalls += 1;
+          throw new Error(sentinel);
+        },
+        getOwnPropertyDescriptor(target, property) {
+          descriptorCalls += 1;
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        }
+      }
+    );
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(
+      {
+        ...createToolContext("worker"),
+        currentToolUseId: "POLICY-HOSTILE-PROXY-1",
+        runningToolRegistry
+      },
+      input
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_input_preparation_failed");
+    expect(result.output).not.toContain(sentinel);
+    expect(result.outputSummary).toBe("Policy gate input preparation failed for edit");
+    expect(result.outputSummary).not.toContain(sentinel);
+    expect(evaluatorCalls).toBe(0);
+    expect(editTool.calls).toBe(0);
+    expect(ownKeysCalls).toBe(0);
+    expect(descriptorCalls).toBe(0);
+    expect(handle.getState()).toBe("finished");
+    expect(handle.getTerminalMetadata()).toMatchObject({
+      cause: "completed",
+      success: false,
+      outputSummary: result.outputSummary
+    });
+  });
+
+  test("drifting proxy descriptors fail closed before evaluator or inner execution", async () => {
+    const editTool = new RecordingTool("edit");
+    let evaluatorCalls = 0;
+    let ownKeysCalls = 0;
+    let descriptorCalls = 0;
+    const sentinel = "DRIFTING_PROXY_DANGER_SECRET";
+    const input = new Proxy(
+      {
+        command: "safe"
+      },
+      {
+        ownKeys(target) {
+          ownKeysCalls += 1;
+          return Reflect.ownKeys(target);
+        },
+        getOwnPropertyDescriptor(_target, property) {
+          descriptorCalls += 1;
+          if (property === "command") {
+            return {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: descriptorCalls === 1 ? "safe" : sentinel
+            };
+          }
+          return undefined;
+        }
+      }
+    );
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), input);
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_input_preparation_failed");
+    expect(result.output).not.toContain(sentinel);
+    expect(result.outputSummary).toBe("Policy gate input preparation failed for edit");
+    expect(evaluatorCalls).toBe(0);
+    expect(editTool.calls).toBe(0);
+    expect(ownKeysCalls).toBe(0);
+    expect(descriptorCalls).toBe(0);
+  });
+
+  test("non-spawn input preparation rejects isolated unsafe generic inputs", async () => {
+    const symbolKey = Symbol("unsafe-key");
+    const protoDataKeyInput: Record<string, unknown> = {
+      command: "original"
+    };
+    Object.defineProperty(protoDataKeyInput, "__proto__", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: {
+        polluted: true
+      }
+    });
+    const cases: Array<{ label: string; input: unknown }> = [
+      {
+        label: "function value",
+        input: {
+          command: "original",
+          unsafe: () => "not cloneable"
+        }
+      },
+      {
+        label: "symbol value",
+        input: {
+          command: Symbol("unsafe-value")
+        }
+      },
+      {
+        label: "bigint value",
+        input: {
+          command: "original",
+          count: 1n
+        }
+      },
+      {
+        label: "symbol key",
+        input: {
+          command: "original",
+          [symbolKey]: "unsafe"
+        }
+      },
+      {
+        label: "own __proto__ data key",
+        input: protoDataKeyInput
+      },
+      {
+        label: "constructor key",
+        input: {
+          command: "original",
+          constructor: {
+            prototype: {
+              polluted: true
+            }
+          }
+        }
+      },
+      {
+        label: "prototype key",
+        input: {
+          command: "original",
+          prototype: {
+            polluted: true
+          }
+        }
+      }
+    ];
+
+    for (const testCase of cases) {
+      const editTool = new RecordingTool(`edit-${testCase.label}`);
+      let evaluatorCalls = 0;
+      const wrapped = wrapToolWithPolicyGate(editTool, {
+        toolId: "edit",
+        evaluate: async () => {
+          evaluatorCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), testCase.input);
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("policy_gate_input_preparation_failed");
+      expect(result.outputSummary).toBe("Policy gate input preparation failed for edit");
+      expect(evaluatorCalls).toBe(0);
+      expect(editTool.calls).toBe(0);
+    }
+  });
+
+  test("non-spawn input preparation rejects non-ordinary non-array inputs", async () => {
+    class ClassBackedInput {
+      command = "original";
+    }
+    const customPrototypeInput = Object.create({ inherited: true }) as Record<string, unknown>;
+    customPrototypeInput.command = "original";
+    const cases: Array<{ label: string; input: unknown }> = [
+      {
+        label: "class instance",
+        input: new ClassBackedInput()
+      },
+      {
+        label: "date",
+        input: new Date("2026-07-06T00:00:00.000Z")
+      },
+      {
+        label: "map",
+        input: new Map([["command", "original"]])
+      },
+      {
+        label: "custom prototype",
+        input: customPrototypeInput
+      }
+    ];
+
+    for (const testCase of cases) {
+      const editTool = new RecordingTool(`edit-${testCase.label}`);
+      let evaluatorCalls = 0;
+      const wrapped = wrapToolWithPolicyGate(editTool, {
+        toolId: "edit",
+        evaluate: async () => {
+          evaluatorCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), testCase.input);
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("policy_gate_input_preparation_failed");
+      expect(result.outputSummary).toBe("Policy gate input preparation failed for edit");
+      expect(evaluatorCalls).toBe(0);
+      expect(editTool.calls).toBe(0);
+    }
+  });
+
+  test("non-spawn input preparation rejects non-ordinary arrays", async () => {
+    class ArrayBackedInput extends Array<string> {}
+    const topLevelCustomPrototype = ["original"];
+    Object.setPrototypeOf(topLevelCustomPrototype, {
+      marker: "custom-array-prototype"
+    });
+    const nestedCustomPrototype = ["original"];
+    Object.setPrototypeOf(nestedCustomPrototype, {
+      marker: "nested-custom-array-prototype"
+    });
+    const cases: Array<{ label: string; input: unknown }> = [
+      {
+        label: "array subclass top-level",
+        input: new ArrayBackedInput("original")
+      },
+      {
+        label: "custom prototype top-level",
+        input: topLevelCustomPrototype
+      },
+      {
+        label: "array subclass nested",
+        input: {
+          values: new ArrayBackedInput("original")
+        }
+      },
+      {
+        label: "custom prototype nested",
+        input: {
+          values: nestedCustomPrototype
+        }
+      }
+    ];
+
+    for (const testCase of cases) {
+      const editTool = new RecordingTool(`edit-${testCase.label}`);
+      let evaluatorCalls = 0;
+      const wrapped = wrapToolWithPolicyGate(editTool, {
+        toolId: "edit",
+        evaluate: async () => {
+          evaluatorCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), testCase.input);
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("policy_gate_input_preparation_failed");
+      expect(result.outputSummary).toBe("Policy gate input preparation failed for edit");
+      expect(evaluatorCalls).toBe(0);
+      expect(editTool.calls).toBe(0);
+    }
+  });
+
+  test("oversized non-spawn inputs fail closed before evaluator and inner tool execution", async () => {
+    const tailSentinel = "STRING_BUDGET_TAIL_SENTINEL";
+    const cases: Array<{ label: string; input: unknown }> = [
+      {
+        label: "deep",
+        input: createNestedPolicyGateInput(33)
+      },
+      {
+        label: "array-length",
+        input: {
+          values: Array.from({ length: 1_025 }, () => "x")
+        }
+      },
+      {
+        label: "object-key-count",
+        input: createObjectWithKeyCount(257)
+      },
+      {
+        label: "node-count",
+        input: createNodeDensePolicyGateInput()
+      },
+      {
+        label: "string-budget",
+        input: {
+          command: `${"x".repeat(131_073)}${tailSentinel}`
+        }
+      }
+    ];
+
+    for (const testCase of cases) {
+      const editTool = new RecordingTool("edit");
+      const runningToolRegistry = new TestRunningToolRegistry();
+      const toolUseId = `POLICY-BUDGET-${testCase.label}`;
+      const handle = runningToolRegistry.register({
+        toolUseId,
+        toolName: "edit",
+        abortable: false
+      });
+      let evaluatorCalls = 0;
+      const wrapped = wrapToolWithPolicyGate(editTool, {
+        evaluate: async () => {
+          evaluatorCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await wrapped.run(
+        {
+          ...createToolContext("worker"),
+          currentToolUseId: toolUseId,
+          runningToolRegistry
+        },
+        testCase.input
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("policy_gate_input_preparation_failed");
+      expect(result.output).not.toContain(tailSentinel);
+      expect(result.outputSummary).toBe("Policy gate input preparation failed for edit");
+      expect(evaluatorCalls).toBe(0);
+      expect(editTool.calls).toBe(0);
+      expect(handle.getState()).toBe("finished");
+      expect(handle.getTerminalMetadata()).toMatchObject({
+        cause: "completed",
+        success: false,
+        outputSummary: result.outputSummary
+      });
+    }
+  });
+
+  test("non-spawn execution snapshots preserve ordinary plain-object compatibility", async () => {
+    const editTool = new RecordingTool("edit");
+    const input = {
+      command: "original",
+      nested: {
+        flag: "original"
+      },
+      values: ["alpha", "beta"]
+    };
+    let evaluatorInputPrototype: object | null | undefined;
+    let evaluatorNestedPrototype: object | null | undefined;
+    let evaluatorInputExtensible: boolean | undefined;
+    let evaluatorNestedExtensible: boolean | undefined;
+    let evaluatorArrayPrototype: object | null | undefined;
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        const evaluatorInput = call.input as { nested: object; values: unknown[] };
+        evaluatorInputPrototype = Object.getPrototypeOf(evaluatorInput);
+        evaluatorNestedPrototype = Object.getPrototypeOf(evaluatorInput.nested);
+        evaluatorInputExtensible = Object.isExtensible(evaluatorInput);
+        evaluatorNestedExtensible = Object.isExtensible(evaluatorInput.nested);
+        evaluatorArrayPrototype = Object.getPrototypeOf(evaluatorInput.values);
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), input);
+
+    expect(result.success).toBe(true);
+    expect(editTool.calls).toBe(1);
+    const executionInput = editTool.lastInput as {
+      command?: unknown;
+      nested?: { flag?: unknown; hasOwnProperty?: (key: string) => boolean };
+      values?: string[];
+      hasOwnProperty?: (key: string) => boolean;
+    };
+    expect(Object.getPrototypeOf(executionInput)).toBe(Object.prototype);
+    expect(executionInput instanceof Object).toBe(true);
+    expect(executionInput.hasOwnProperty?.("command")).toBe(true);
+    expect(Object.getPrototypeOf(executionInput.nested as object)).toBe(Object.prototype);
+    expect(executionInput.nested instanceof Object).toBe(true);
+    expect(executionInput.nested?.hasOwnProperty?.("flag")).toBe(true);
+    expect(Array.isArray(executionInput.values)).toBe(true);
+    expect(Object.getPrototypeOf(executionInput.values as object)).toBe(Array.prototype);
+    expect(evaluatorInputPrototype).toBeNull();
+    expect(evaluatorNestedPrototype).toBeNull();
+    expect(evaluatorInputExtensible).toBe(false);
+    expect(evaluatorNestedExtensible).toBe(false);
+    expect(evaluatorArrayPrototype).not.toBe(Array.prototype);
+  });
+
+  test("non-spawn evaluator direct mutations are isolated from inner execution", async () => {
+    const cases: Array<{ label: string; mutate: (input: unknown) => void }> = [
+      {
+        label: "top-level",
+        mutate(input) {
+          (input as { command: string }).command = "mutated";
+        }
+      },
+      {
+        label: "nested",
+        mutate(input) {
+          (input as { nested: { flag: string } }).nested.flag = "mutated";
+        }
+      },
+      {
+        label: "descriptor-nested",
+        mutate(input) {
+          const nested = Object.getOwnPropertyDescriptor(input as object, "nested")?.value as {
+            flag: string;
+          };
+          nested.flag = "mutated";
+        }
+      },
+      {
+        label: "array-element",
+        mutate(input) {
+          (input as { values: string[] }).values[0] = "mutated";
+        }
+      }
+    ];
+
+    for (const testCase of cases) {
+      const editTool = new RecordingTool("edit");
+      const input = {
+        command: "original",
+        nested: {
+          flag: "original"
+        },
+        values: ["original"]
+      };
+      const wrapped = wrapToolWithPolicyGate(editTool, {
+        evaluate: async (call) => {
+          testCase.mutate(call.input);
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), input);
+
+      expect(result.success).toBe(true);
+      expect(editTool.calls).toBe(1);
+      expect((editTool.lastInput as { command?: unknown }).command).toBe("original");
+      expect((editTool.lastInput as { nested?: { flag?: unknown } }).nested?.flag).toBe(
+        "original"
+      );
+      expect((editTool.lastInput as { values?: string[] }).values).toEqual(["original"]);
+      expect(input).toEqual({
+        command: "original",
+        nested: {
+          flag: "original"
+        },
+        values: ["original"]
+      });
+    }
+  });
+
+  test("unsupported non-spawn evaluator array push fails closed without inner execution", async () => {
+    const editTool = new RecordingTool("edit");
+    const runningToolRegistry = new TestRunningToolRegistry();
+    const handle = runningToolRegistry.register({
+      toolUseId: "POLICY-UNSUPPORTED-PUSH-1",
+      toolName: "edit",
+      abortable: false
+    });
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        (call.input as { values: string[] }).values.push("mutated");
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(
+      {
+        ...createToolContext("worker"),
+        currentToolUseId: "POLICY-UNSUPPORTED-PUSH-1",
+        runningToolRegistry
+      },
+      {
+        values: ["original"]
+      }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("push");
+    expect(result.outputSummary).toContain("Error:");
+    expect(editTool.calls).toBe(0);
+    expect(handle.getState()).toBe("finished");
+    expect(handle.getTerminalMetadata()).toMatchObject({
+      cause: "completed",
+      success: false,
+      outputSummary: result.outputSummary
+    });
+  });
+
+  test("honest non-spawn evaluator can structuredClone input before allowing", async () => {
+    const editTool = new RecordingTool("edit");
+    const input = {
+      command: "original",
+      nested: {
+        flag: "original"
+      },
+      values: ["alpha", "beta"]
+    };
+    let evaluatorClone: unknown;
+    let evaluatorArrayReads:
+      | {
+          iterated: string[];
+          spread: string[];
+          includesBeta: boolean;
+          mapped: string[];
+          pushValue: unknown;
+          filterValue: unknown;
+        }
+      | undefined;
+    let evaluatorInputPrototype: object | null | undefined;
+    let evaluatorNestedPrototype: object | null | undefined;
+    let evaluatorArrayPrototype: object | null | undefined;
+    let evaluatorArrayParentPrototype: object | null | undefined;
+    let evaluatorArrayConstructor: unknown;
+    let evaluatorArrayMapFunctionPrototype: object | null | undefined;
+    let evaluatorMapResultPrototype: object | null | undefined;
+    let evaluatorMapResultParentPrototype: object | null | undefined;
+    let evaluatorIteratorPrototype: object | null | undefined;
+    let evaluatorIteratorNextPrototype: object | null | undefined;
+    let evaluatorInputExtensible: boolean | undefined;
+    let evaluatorNestedExtensible: boolean | undefined;
+    let evaluatorArrayExtensible: boolean | undefined;
+    let evaluatorMapResultExtensible: boolean | undefined;
+    let evaluatorArrayLengthWritable: boolean | undefined;
+    let evaluatorMapResultLengthWritable: boolean | undefined;
+    let evaluatorArrayPrototypeFrozen: boolean | undefined;
+    let evaluatorArrayMapFunctionFrozen: boolean | undefined;
+    let evaluatorIteratorFrozen: boolean | undefined;
+    let evaluatorIteratorNextFunctionFrozen: boolean | undefined;
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        evaluatorClone = structuredClone(call.input);
+        const values = (call.input as { values: string[] }).values;
+        const iterated: string[] = [];
+        for (const value of values) {
+          iterated.push(value);
+        }
+        const mapped = values.map((value) => value.toUpperCase());
+        const iterator = values[Symbol.iterator]();
+        evaluatorArrayReads = {
+          iterated,
+          spread: [...values],
+          includesBeta: values.includes("beta"),
+          mapped,
+          pushValue: (values as { push?: unknown }).push,
+          filterValue: (values as { filter?: unknown }).filter
+        };
+        evaluatorInputPrototype = Object.getPrototypeOf(call.input as object);
+        evaluatorNestedPrototype = Object.getPrototypeOf(
+          (call.input as { nested: object }).nested
+        );
+        evaluatorInputExtensible = Object.isExtensible(call.input as object);
+        evaluatorNestedExtensible = Object.isExtensible((call.input as { nested: object }).nested);
+        evaluatorArrayExtensible = Object.isExtensible(values);
+        evaluatorMapResultExtensible = Object.isExtensible(mapped);
+        evaluatorArrayLengthWritable = Object.getOwnPropertyDescriptor(values, "length")?.writable;
+        evaluatorMapResultLengthWritable = Object.getOwnPropertyDescriptor(
+          mapped,
+          "length"
+        )?.writable;
+        evaluatorArrayPrototype = Object.getPrototypeOf(values);
+        evaluatorArrayPrototypeFrozen =
+          evaluatorArrayPrototype === null ? undefined : Object.isFrozen(evaluatorArrayPrototype);
+        evaluatorArrayParentPrototype =
+          evaluatorArrayPrototype === null ? null : Object.getPrototypeOf(evaluatorArrayPrototype);
+        evaluatorArrayConstructor = (values as { constructor?: unknown }).constructor;
+        evaluatorArrayMapFunctionPrototype =
+          evaluatorArrayPrototype === null
+            ? null
+            : Object.getPrototypeOf(
+                (evaluatorArrayPrototype as Record<PropertyKey, unknown>).map as object
+              );
+        evaluatorArrayMapFunctionFrozen =
+          evaluatorArrayPrototype === null
+            ? undefined
+            : Object.isFrozen(
+                (evaluatorArrayPrototype as Record<PropertyKey, unknown>).map as object
+              );
+        evaluatorMapResultPrototype = Object.getPrototypeOf(mapped);
+        evaluatorMapResultParentPrototype =
+          evaluatorMapResultPrototype === null
+            ? null
+            : Object.getPrototypeOf(evaluatorMapResultPrototype);
+        evaluatorIteratorPrototype = Object.getPrototypeOf(iterator as object);
+        evaluatorIteratorFrozen = Object.isFrozen(iterator as object);
+        evaluatorIteratorNextPrototype = Object.getPrototypeOf(
+          (iterator as { next: () => IteratorResult<string> }).next
+        );
+        evaluatorIteratorNextFunctionFrozen = Object.isFrozen(
+          (iterator as { next: () => IteratorResult<string> }).next
+        );
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), input);
+
+    expect(result.success).toBe(true);
+    expect(evaluatorClone).toEqual({
+      command: "original",
+      nested: {
+        flag: "original"
+      },
+      values: ["alpha", "beta"]
+    });
+    expect(evaluatorArrayReads).toEqual({
+      iterated: ["alpha", "beta"],
+      spread: ["alpha", "beta"],
+      includesBeta: true,
+      mapped: ["ALPHA", "BETA"],
+      pushValue: undefined,
+      filterValue: undefined
+    });
+    expect(evaluatorInputPrototype).toBeNull();
+    expect(evaluatorNestedPrototype).toBeNull();
+    expect(evaluatorInputExtensible).toBe(false);
+    expect(evaluatorNestedExtensible).toBe(false);
+    expect(evaluatorArrayExtensible).toBe(false);
+    expect(evaluatorMapResultExtensible).toBe(false);
+    expect(evaluatorArrayLengthWritable).toBe(false);
+    expect(evaluatorMapResultLengthWritable).toBe(false);
+    expect(evaluatorArrayPrototype).not.toBeNull();
+    expect(evaluatorArrayPrototype).not.toBe(Array.prototype);
+    expect(evaluatorArrayPrototypeFrozen).toBe(true);
+    expect(evaluatorArrayParentPrototype).toBeNull();
+    expect(evaluatorArrayConstructor).toBeUndefined();
+    expect(evaluatorArrayMapFunctionPrototype).toBeNull();
+    expect(evaluatorArrayMapFunctionFrozen).toBe(true);
+    expect(evaluatorMapResultPrototype).not.toBeNull();
+    expect(evaluatorMapResultPrototype).not.toBe(Array.prototype);
+    expect(evaluatorMapResultParentPrototype).toBeNull();
+    expect(evaluatorIteratorPrototype).toBeNull();
+    expect(evaluatorIteratorFrozen).toBe(true);
+    expect(evaluatorIteratorNextPrototype).toBeNull();
+    expect(evaluatorIteratorNextFunctionFrozen).toBe(true);
+    expect(editTool.calls).toBe(1);
+    expect((editTool.lastInput as { command?: unknown }).command).toBe("original");
+    expect((editTool.lastInput as { nested?: { flag?: unknown } }).nested?.flag).toBe("original");
+    const executionValues = (editTool.lastInput as { values?: string[] }).values;
+    expect(executionValues?.[0]).toBe("alpha");
+    expect(Array.isArray(executionValues)).toBe(true);
+    expect(executionValues?.includes("beta")).toBe(true);
+    expect(executionValues?.map((value) => value.toUpperCase())).toEqual(["ALPHA", "BETA"]);
+    expect(Object.getPrototypeOf(editTool.lastInput as object)).toBe(Object.prototype);
+    expect(
+      Object.getPrototypeOf((editTool.lastInput as { nested: object }).nested)
+    ).toBe(Object.prototype);
+    expect(editTool.lastInput).not.toBe(input);
+    expect((editTool.lastInput as { nested: unknown }).nested).not.toBe(input.nested);
+  });
+
+  test("non-spawn evaluator array length growth attempts keep supported reads bounded", async () => {
+    const editTool = new RecordingTool("edit");
+    const inflatedLength = 2_048;
+    let observation:
+      | {
+          valuesLengthSetSucceeded: boolean;
+          mappedLengthSetSucceeded: boolean;
+          valuesLength: number;
+          mappedLength: number;
+          valuesLengthWritable: boolean | undefined;
+          mappedLengthWritable: boolean | undefined;
+          valuesIncludesMissing: boolean;
+          mappedIncludesMissing: boolean;
+          valuesMapLength: number;
+          mappedMapLength: number;
+          valuesSpreadLength: number;
+          mappedSpreadLength: number;
+          valuesIteratorCount: number;
+          mappedIteratorCount: number;
+          valuesMapCallbacks: number;
+          mappedMapCallbacks: number;
+        }
+      | undefined;
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        const values = (call.input as { values: string[] }).values;
+        const mapped = values.map((value) => value);
+        values[0] = "evaluator-local";
+        mapped[0] = "mapped-local";
+
+        const valuesLengthSetSucceeded = attemptMutation(() => {
+          values.length = inflatedLength;
+        });
+        const mappedLengthSetSucceeded = attemptMutation(() => {
+          mapped.length = inflatedLength;
+        });
+
+        let valuesMapCallbacks = 0;
+        const valuesMappedAfterGrowth = values.map((value) => {
+          valuesMapCallbacks += 1;
+          return value;
+        });
+        let mappedMapCallbacks = 0;
+        const mappedAfterGrowth = mapped.map((value) => {
+          mappedMapCallbacks += 1;
+          return value;
+        });
+        let valuesIteratorCount = 0;
+        for (const _value of values) {
+          valuesIteratorCount += 1;
+        }
+        let mappedIteratorCount = 0;
+        for (const _value of mapped) {
+          mappedIteratorCount += 1;
+        }
+
+        observation = {
+          valuesLengthSetSucceeded,
+          mappedLengthSetSucceeded,
+          valuesLength: values.length,
+          mappedLength: mapped.length,
+          valuesLengthWritable: Object.getOwnPropertyDescriptor(values, "length")?.writable,
+          mappedLengthWritable: Object.getOwnPropertyDescriptor(mapped, "length")?.writable,
+          valuesIncludesMissing: values.includes("missing-after-growth"),
+          mappedIncludesMissing: mapped.includes("missing-after-growth"),
+          valuesMapLength: valuesMappedAfterGrowth.length,
+          mappedMapLength: mappedAfterGrowth.length,
+          valuesSpreadLength: [...values].length,
+          mappedSpreadLength: [...mapped].length,
+          valuesIteratorCount,
+          mappedIteratorCount,
+          valuesMapCallbacks,
+          mappedMapCallbacks
+        };
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { values: ["alpha", "beta"] });
+
+    expect(result.success).toBe(true);
+    expect(editTool.calls).toBe(1);
+    expect(observation).toEqual({
+      valuesLengthSetSucceeded: expect.any(Boolean),
+      mappedLengthSetSucceeded: expect.any(Boolean),
+      valuesLength: 2,
+      mappedLength: 2,
+      valuesLengthWritable: false,
+      mappedLengthWritable: false,
+      valuesIncludesMissing: false,
+      mappedIncludesMissing: false,
+      valuesMapLength: 2,
+      mappedMapLength: 2,
+      valuesSpreadLength: 2,
+      mappedSpreadLength: 2,
+      valuesIteratorCount: 2,
+      mappedIteratorCount: 2,
+      valuesMapCallbacks: 2,
+      mappedMapCallbacks: 2
+    });
+    expect((editTool.lastInput as { values?: string[] }).values).toEqual(["alpha", "beta"]);
+  });
+
+  test("non-spawn evaluator prototype mutation paths cannot affect inner execution", async () => {
+    const editTool = new RecordingTool("edit");
+    const objectPrototypeSentinel = "__policyGateObjectPrototypeResidue";
+    const functionPrototypeSentinel = "__policyGateFunctionPrototypeResidue";
+    const arrayPrototypeSentinel = "__policyGateArrayPrototypeResidue";
+    const arrayMethodSentinel = "__policyGateArrayMethodResidue";
+    const mapResultPrototypeSentinel = "__policyGateMapResultPrototypeResidue";
+    const iteratorPrototypeSentinel = "__policyGateIteratorPrototypeResidue";
+    const iteratorFunctionSentinel = "__policyGateIteratorFunctionResidue";
+    const arrayConstructorSentinel = "__policyGateArrayConstructorResidue";
+    let constructorPrototypePathReachable: boolean | undefined;
+    let topReparentSucceeded: boolean | undefined;
+    let nestedReparentSucceeded: boolean | undefined;
+    let arrayReparentSucceeded: boolean | undefined;
+    let arrayPrototypeReparentSucceeded: boolean | undefined;
+    let arrayMethodFunctionReparentSucceeded: boolean | undefined;
+    let iteratorReparentSucceeded: boolean | undefined;
+    let iteratorNextFunctionReparentSucceeded: boolean | undefined;
+    let mapResultArrayReparentSucceeded: boolean | undefined;
+    let mapResultPrototypeReparentSucceeded: boolean | undefined;
+    let mapResultMethodFunctionReparentSucceeded: boolean | undefined;
+    let arrayMethodFunctionPrototype: object | null | undefined;
+    let iteratorPrototype: object | null | undefined;
+    let iteratorNextFunctionPrototype: object | null | undefined;
+    const input = {
+      command: "original",
+      nested: {
+        flag: "original"
+      },
+      values: ["original"]
+    };
+    const originalArrayPrototypeMapPrototype = Object.getPrototypeOf(Array.prototype.map);
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        topReparentSucceeded = attemptMutation(() => {
+          Object.setPrototypeOf(call.input as object, Object.prototype);
+        });
+        const topPrototype = Object.getPrototypeOf(call.input as object) as
+          | Record<string, unknown>
+          | null;
+        if (topPrototype) {
+          topPrototype[objectPrototypeSentinel] = "mutated";
+        }
+
+        const values = (call.input as { values: unknown[] }).values;
+        const constructorValue = (values as { constructor?: unknown }).constructor;
+        constructorPrototypePathReachable = constructorValue !== undefined && constructorValue !== null;
+        if (constructorPrototypePathReachable) {
+          const constructorFunctionPrototype = Object.getPrototypeOf(constructorValue as object) as
+            | Record<string, unknown>
+            | null;
+          if (constructorFunctionPrototype) {
+            constructorFunctionPrototype[functionPrototypeSentinel] = "mutated";
+          }
+        }
+
+        const nestedPrototype = Object.getPrototypeOf(
+          (call.input as { nested: object }).nested
+        ) as Record<string, unknown> | null;
+        nestedReparentSucceeded = attemptMutation(() => {
+          Object.setPrototypeOf((call.input as { nested: object }).nested, Object.prototype);
+        });
+        if (nestedPrototype) {
+          nestedPrototype[objectPrototypeSentinel] = "mutated";
+        }
+
+        const arrayPrototype = Object.getPrototypeOf(values) as Record<PropertyKey, unknown> | null;
+        if (arrayPrototype) {
+          arrayPrototypeReparentSucceeded = attemptMutation(() => {
+            Object.setPrototypeOf(arrayPrototype, Array.prototype);
+          });
+          attemptMutation(() => {
+            arrayPrototype[arrayPrototypeSentinel] = "mutated";
+          });
+          const mapMethod = arrayPrototype.map as Record<string, unknown> | undefined;
+          if (mapMethod) {
+            attemptMutation(() => {
+              mapMethod[arrayMethodSentinel] = "mutated";
+            });
+            arrayMethodFunctionPrototype = Object.getPrototypeOf(mapMethod as object);
+            arrayMethodFunctionReparentSucceeded = attemptMutation(() => {
+              Object.setPrototypeOf(mapMethod as object, Function.prototype);
+            });
+            attemptMutation(() => {
+              if (arrayMethodFunctionPrototype) {
+                (arrayMethodFunctionPrototype as Record<string, unknown>)[
+                  functionPrototypeSentinel
+                ] = "mutated";
+              }
+            });
+          }
+        }
+
+        const mappedValues = values.map((value) => value);
+        const mappedPrototype = Object.getPrototypeOf(mappedValues) as
+          | Record<string, unknown>
+          | null;
+        mapResultArrayReparentSucceeded = attemptMutation(() => {
+          Object.setPrototypeOf(mappedValues, Array.prototype);
+        });
+        if (mappedPrototype) {
+          mapResultPrototypeReparentSucceeded = attemptMutation(() => {
+            Object.setPrototypeOf(mappedPrototype, Array.prototype);
+          });
+          attemptMutation(() => {
+            mappedPrototype[mapResultPrototypeSentinel] = "mutated";
+          });
+          const mappedMapMethod = mappedPrototype.map as object | undefined;
+          if (mappedMapMethod) {
+            mapResultMethodFunctionReparentSucceeded = attemptMutation(() => {
+              Object.setPrototypeOf(mappedMapMethod, Function.prototype);
+            });
+            attemptMutation(() => {
+              (mappedMapMethod as Record<string, unknown>)[arrayMethodSentinel] = "mutated";
+            });
+          }
+        }
+
+        const iterator = values[Symbol.iterator]();
+        iteratorPrototype = Object.getPrototypeOf(iterator as object);
+        iteratorReparentSucceeded = attemptMutation(() => {
+          Object.setPrototypeOf(iterator as object, Object.prototype);
+        });
+        if (iteratorPrototype) {
+          attemptMutation(() => {
+            (iteratorPrototype as Record<string, unknown>)[iteratorPrototypeSentinel] = "mutated";
+          });
+        }
+        iteratorNextFunctionPrototype = Object.getPrototypeOf(
+          (iterator as { next: () => IteratorResult<unknown> }).next
+        );
+        iteratorNextFunctionReparentSucceeded = attemptMutation(() => {
+          Object.setPrototypeOf(
+            (iterator as { next: () => IteratorResult<unknown> }).next,
+            Function.prototype
+          );
+        });
+        attemptMutation(() => {
+          (iterator as Record<PropertyKey, unknown>)[iteratorPrototypeSentinel] = "mutated";
+        });
+        attemptMutation(() => {
+          ((iterator as { next: () => IteratorResult<unknown> }).next as unknown as Record<
+            string,
+            unknown
+          >)[iteratorFunctionSentinel] = "mutated";
+        });
+        attemptMutation(() => {
+          if (iteratorNextFunctionPrototype) {
+            (iteratorNextFunctionPrototype as Record<string, unknown>)[
+              functionPrototypeSentinel
+            ] = "mutated";
+          }
+        });
+        arrayReparentSucceeded = attemptMutation(() => {
+          Object.setPrototypeOf(values, Array.prototype);
+        });
+        const reparentedArrayPrototype = Object.getPrototypeOf(values) as Record<
+          PropertyKey,
+          unknown
+        > | null;
+        if (reparentedArrayPrototype) {
+          attemptMutation(() => {
+            reparentedArrayPrototype[arrayPrototypeSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            (reparentedArrayPrototype.map as Record<string, unknown>)[arrayMethodSentinel] =
+              "mutated";
+          });
+        }
+        const reparentedConstructor = (values as { constructor?: unknown }).constructor;
+        if (typeof reparentedConstructor === "function") {
+          attemptMutation(() => {
+            (reparentedConstructor as unknown as Record<string, unknown>)[
+              arrayConstructorSentinel
+            ] = "mutated";
+          });
+          attemptMutation(() => {
+            (Object.getPrototypeOf(reparentedConstructor) as Record<string, unknown>)[
+              functionPrototypeSentinel
+            ] = "mutated";
+          });
+        }
+        return { decision: "allow" };
+      }
+    });
+
+    try {
+      const result = await wrapped.run(createToolContext("worker"), input);
+
+      expect(result.success).toBe(true);
+      expect(editTool.calls).toBe(1);
+      expect((editTool.lastInput as { command?: unknown }).command).toBe("original");
+      expect((editTool.lastInput as { nested?: { flag?: unknown } }).nested?.flag).toBe(
+        "original"
+      );
+      expect((editTool.lastInput as { values?: string[] }).values?.[0]).toBe("original");
+      expect((Object.prototype as Record<string, unknown>)[objectPrototypeSentinel]).toBeUndefined();
+      expect(
+        (Object.prototype as Record<string, unknown>)[functionPrototypeSentinel]
+      ).toBeUndefined();
+      expect((Array.prototype as Record<string, unknown>)[arrayPrototypeSentinel]).toBeUndefined();
+      expect(
+        (Array.prototype as Record<string, unknown>)[mapResultPrototypeSentinel]
+      ).toBeUndefined();
+      expect((Array.prototype.map as Record<string, unknown>)[arrayMethodSentinel]).toBeUndefined();
+      expect((Array as unknown as Record<string, unknown>)[arrayConstructorSentinel]).toBeUndefined();
+      expect((Function.prototype as Record<string, unknown>)[functionPrototypeSentinel]).toBeUndefined();
+      expect(constructorPrototypePathReachable).toBe(false);
+      expect(topReparentSucceeded).toBe(false);
+      expect(nestedReparentSucceeded).toBe(false);
+      expect(arrayReparentSucceeded).toBe(false);
+      expect(arrayPrototypeReparentSucceeded).toBe(false);
+      expect(arrayMethodFunctionReparentSucceeded).toBe(false);
+      expect(iteratorReparentSucceeded).toBe(false);
+      expect(iteratorNextFunctionReparentSucceeded).toBe(false);
+      expect(mapResultArrayReparentSucceeded).toBe(false);
+      expect(mapResultPrototypeReparentSucceeded).toBe(false);
+      expect(mapResultMethodFunctionReparentSucceeded).toBe(false);
+      expect(arrayMethodFunctionPrototype).toBeNull();
+      expect(iteratorPrototype).toBeNull();
+      expect(iteratorNextFunctionPrototype).toBeNull();
+      expect(Object.getPrototypeOf(Array.prototype.map)).toBe(originalArrayPrototypeMapPrototype);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>)[objectPrototypeSentinel];
+      delete (Object.prototype as Record<string, unknown>)[functionPrototypeSentinel];
+      delete (Array.prototype as Record<string, unknown>)[arrayPrototypeSentinel];
+      delete (Array.prototype as Record<string, unknown>)[mapResultPrototypeSentinel];
+      delete (Array.prototype.map as Record<string, unknown>)[arrayMethodSentinel];
+      delete (Array as unknown as Record<string, unknown>)[arrayConstructorSentinel];
+      delete (Function.prototype as Record<string, unknown>)[functionPrototypeSentinel];
+    }
+  });
+
+  test("non-spawn evaluator iterator result objects cannot create global prototype residue", async () => {
+    const editTool = new RecordingTool("edit");
+    const iteratorResultSentinel = "__policyGateIteratorResultGlobalResidue";
+    const blockedReparents = {
+      object: false,
+      array: false,
+      function: false
+    };
+    let observation:
+      | {
+          valuesYieldedReparents: GlobalPrototypeReparentOutcomes;
+          valuesDoneReparents: GlobalPrototypeReparentOutcomes;
+          mappedYieldedReparents: GlobalPrototypeReparentOutcomes;
+          mappedDoneReparents: GlobalPrototypeReparentOutcomes;
+          valuesYieldedFrozen: boolean;
+          valuesDoneFrozen: boolean;
+          mappedYieldedFrozen: boolean;
+          mappedDoneFrozen: boolean;
+          valuesYieldedValue: unknown;
+          valuesDoneDone: boolean | undefined;
+          mappedYieldedValue: unknown;
+          mappedDoneDone: boolean | undefined;
+          residueBeforeAllow: GlobalPrototypeResidueObservation;
+        }
+      | undefined;
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        const values = (call.input as { values: string[] }).values;
+        const mapped = values.map((value) => value);
+        const valuesIterator = values[Symbol.iterator]();
+        const valuesYieldedResult = valuesIterator.next();
+        const valuesDoneResult = valuesIterator.next();
+        const mappedIterator = mapped[Symbol.iterator]();
+        const mappedYieldedResult = mappedIterator.next();
+        const mappedDoneResult = mappedIterator.next();
+
+        observation = {
+          valuesYieldedReparents: attemptGlobalPrototypeReparents(
+            valuesYieldedResult as object,
+            iteratorResultSentinel
+          ),
+          valuesDoneReparents: attemptGlobalPrototypeReparents(
+            valuesDoneResult as object,
+            iteratorResultSentinel
+          ),
+          mappedYieldedReparents: attemptGlobalPrototypeReparents(
+            mappedYieldedResult as object,
+            iteratorResultSentinel
+          ),
+          mappedDoneReparents: attemptGlobalPrototypeReparents(
+            mappedDoneResult as object,
+            iteratorResultSentinel
+          ),
+          valuesYieldedFrozen: Object.isFrozen(valuesYieldedResult as object),
+          valuesDoneFrozen: Object.isFrozen(valuesDoneResult as object),
+          mappedYieldedFrozen: Object.isFrozen(mappedYieldedResult as object),
+          mappedDoneFrozen: Object.isFrozen(mappedDoneResult as object),
+          valuesYieldedValue: valuesYieldedResult.value,
+          valuesDoneDone: valuesDoneResult.done,
+          mappedYieldedValue: mappedYieldedResult.value,
+          mappedDoneDone: mappedDoneResult.done,
+          residueBeforeAllow: readGlobalPrototypeResidue(iteratorResultSentinel)
+        };
+        return { decision: "allow" };
+      }
+    });
+
+    try {
+      const result = await wrapped.run(createToolContext("worker"), { values: ["original"] });
+
+      expect(result.success).toBe(true);
+      expect(editTool.calls).toBe(1);
+      expect(observation).toEqual({
+        valuesYieldedReparents: blockedReparents,
+        valuesDoneReparents: blockedReparents,
+        mappedYieldedReparents: blockedReparents,
+        mappedDoneReparents: blockedReparents,
+        valuesYieldedFrozen: true,
+        valuesDoneFrozen: true,
+        mappedYieldedFrozen: true,
+        mappedDoneFrozen: true,
+        valuesYieldedValue: "original",
+        valuesDoneDone: true,
+        mappedYieldedValue: "original",
+        mappedDoneDone: true,
+        residueBeforeAllow: {
+          object: undefined,
+          array: undefined,
+          function: undefined
+        }
+      });
+      expect(readGlobalPrototypeResidue(iteratorResultSentinel)).toEqual({
+        object: undefined,
+        array: undefined,
+        function: undefined
+      });
+      expect((editTool.lastInput as { values?: string[] }).values).toEqual(["original"]);
+    } finally {
+      deleteGlobalPrototypeResidue(iteratorResultSentinel);
+    }
+  });
+
+  test("non-spawn evaluator arrays cannot create Array.prototype residue through reparenting", async () => {
+    const editTool = new RecordingTool("edit");
+    const arrayPrototypeSentinel = "__policyGateInputDerivedArrayPrototypeResidue";
+    let valuesReparentSucceeded: boolean | undefined;
+    let mapResultReparentSucceeded: boolean | undefined;
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        const values = (call.input as { values: string[] }).values;
+        valuesReparentSucceeded = attemptMutation(() => {
+          Object.setPrototypeOf(values, Array.prototype);
+        });
+        const valuesPrototype = Object.getPrototypeOf(values) as Record<PropertyKey, unknown> | null;
+        if (valuesPrototype) {
+          attemptMutation(() => {
+            valuesPrototype[arrayPrototypeSentinel] = "mutated";
+          });
+        }
+
+        const mappedValues = values.map((value) => value);
+        mapResultReparentSucceeded = attemptMutation(() => {
+          Object.setPrototypeOf(mappedValues, Array.prototype);
+        });
+        const mappedPrototype = Object.getPrototypeOf(mappedValues) as
+          | Record<PropertyKey, unknown>
+          | null;
+        if (mappedPrototype) {
+          attemptMutation(() => {
+            mappedPrototype[arrayPrototypeSentinel] = "mutated";
+          });
+        }
+
+        return { decision: "allow" };
+      }
+    });
+
+    try {
+      const result = await wrapped.run(createToolContext("worker"), { values: ["original"] });
+
+      expect(result.success).toBe(true);
+      expect(editTool.calls).toBe(1);
+      expect(valuesReparentSucceeded).toBe(false);
+      expect(mapResultReparentSucceeded).toBe(false);
+      expect(
+        (Array.prototype as Record<string, unknown>)[arrayPrototypeSentinel]
+      ).toBeUndefined();
+    } finally {
+      delete (Array.prototype as Record<string, unknown>)[arrayPrototypeSentinel];
+    }
+  });
+
+  test("non-spawn evaluator exposed methods and prototypes do not retain cross-call residue", async () => {
+    const editTool = new RecordingTool("edit");
+    const prototypeSentinel = "__policyGateCrossCallPrototypeResidue";
+    const methodSentinel = "__policyGateCrossCallMethodResidue";
+    const iteratorSentinel = "__policyGateCrossCallIteratorResidue";
+    const iteratorResultSentinel = "__policyGateCrossCallIteratorResultResidue";
+    let evaluatorCalls = 0;
+    let secondObservation:
+      | {
+          arrayPrototypeResidue: unknown;
+          arrayMethodResidue: unknown;
+          mapResultPrototypeResidue: unknown;
+          mapResultMethodResidue: unknown;
+          iteratorResidue: unknown;
+          iteratorNextResidue: unknown;
+          iteratorResultResidue: unknown;
+          iteratorDoneResultResidue: unknown;
+          mapResultIteratorResultResidue: unknown;
+          mapResultIteratorDoneResultResidue: unknown;
+          globalIteratorResultResidue: GlobalPrototypeResidueObservation;
+        }
+      | undefined;
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        evaluatorCalls += 1;
+        const values = (call.input as { values: unknown[] }).values;
+        const arrayPrototype = Object.getPrototypeOf(values) as Record<PropertyKey, unknown>;
+        const arrayMapMethod = arrayPrototype.map as Record<string, unknown>;
+        const mapped = values.map((value) => value);
+        const mapResultPrototype = Object.getPrototypeOf(mapped) as Record<PropertyKey, unknown>;
+        const mapResultMapMethod = mapResultPrototype.map as Record<string, unknown>;
+        const iterator = values[Symbol.iterator]() as IterableIterator<unknown> &
+          Record<string, unknown>;
+        const iteratorNext = iterator.next as unknown as Record<string, unknown>;
+        const iteratorYieldedResult = iterator.next() as IteratorResult<unknown> &
+          Record<string, unknown>;
+        const iteratorDoneResult = iterator.next() as IteratorResult<unknown> &
+          Record<string, unknown>;
+        const mapResultIterator = mapped[Symbol.iterator]() as IterableIterator<unknown>;
+        const mapResultIteratorYieldedResult = mapResultIterator.next() as IteratorResult<unknown> &
+          Record<string, unknown>;
+        const mapResultIteratorDoneResult = mapResultIterator.next() as IteratorResult<unknown> &
+          Record<string, unknown>;
+
+        if (evaluatorCalls === 1) {
+          attemptMutation(() => {
+            arrayPrototype[prototypeSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            arrayMapMethod[methodSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            mapResultPrototype[prototypeSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            mapResultMapMethod[methodSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            iterator[iteratorSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            iteratorNext[iteratorSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            iteratorYieldedResult[iteratorResultSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            iteratorDoneResult[iteratorResultSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            mapResultIteratorYieldedResult[iteratorResultSentinel] = "mutated";
+          });
+          attemptMutation(() => {
+            mapResultIteratorDoneResult[iteratorResultSentinel] = "mutated";
+          });
+          attemptGlobalPrototypeReparents(iteratorYieldedResult as object, iteratorResultSentinel);
+          attemptGlobalPrototypeReparents(iteratorDoneResult as object, iteratorResultSentinel);
+          attemptGlobalPrototypeReparents(
+            mapResultIteratorYieldedResult as object,
+            iteratorResultSentinel
+          );
+          attemptGlobalPrototypeReparents(
+            mapResultIteratorDoneResult as object,
+            iteratorResultSentinel
+          );
+        } else {
+          secondObservation = {
+            arrayPrototypeResidue: arrayPrototype[prototypeSentinel],
+            arrayMethodResidue: arrayMapMethod[methodSentinel],
+            mapResultPrototypeResidue: mapResultPrototype[prototypeSentinel],
+            mapResultMethodResidue: mapResultMapMethod[methodSentinel],
+            iteratorResidue: iterator[iteratorSentinel],
+            iteratorNextResidue: iteratorNext[iteratorSentinel],
+            iteratorResultResidue: iteratorYieldedResult[iteratorResultSentinel],
+            iteratorDoneResultResidue: iteratorDoneResult[iteratorResultSentinel],
+            mapResultIteratorResultResidue:
+              mapResultIteratorYieldedResult[iteratorResultSentinel],
+            mapResultIteratorDoneResultResidue:
+              mapResultIteratorDoneResult[iteratorResultSentinel],
+            globalIteratorResultResidue: readGlobalPrototypeResidue(iteratorResultSentinel)
+          };
+        }
+
+        return { decision: "allow" };
+      }
+    });
+
+    try {
+      const firstResult = await wrapped.run(createToolContext("worker"), { values: ["first"] });
+      const secondResult = await wrapped.run(createToolContext("worker"), { values: ["second"] });
+
+      expect(firstResult.success).toBe(true);
+      expect(secondResult.success).toBe(true);
+      expect(editTool.calls).toBe(2);
+      expect(secondObservation).toEqual({
+        arrayPrototypeResidue: undefined,
+        arrayMethodResidue: undefined,
+        mapResultPrototypeResidue: undefined,
+        mapResultMethodResidue: undefined,
+        iteratorResidue: undefined,
+        iteratorNextResidue: undefined,
+        iteratorResultResidue: undefined,
+        iteratorDoneResultResidue: undefined,
+        mapResultIteratorResultResidue: undefined,
+        mapResultIteratorDoneResultResidue: undefined,
+        globalIteratorResultResidue: {
+          object: undefined,
+          array: undefined,
+          function: undefined
+        }
+      });
+    } finally {
+      deleteGlobalPrototypeResidue(iteratorResultSentinel);
+    }
+  });
+
   test("malformed raw-rule deny from custom evaluator fails closed and finishes running handle", async () => {
     const bashTool = new RecordingTool("bash");
     const runningToolRegistry = new TestRunningToolRegistry();
@@ -3203,6 +4762,107 @@ class RequiredCommandRecordingTool extends RecordingTool {
     required: ["command"],
     additionalProperties: true
   };
+}
+
+function createNestedPolicyGateInput(depth: number): Record<string, unknown> {
+  let value: Record<string, unknown> = {
+    leaf: "value"
+  };
+  for (let index = 0; index < depth; index += 1) {
+    value = {
+      child: value
+    };
+  }
+  return value;
+}
+
+function createObjectWithKeyCount(count: number): Record<string, unknown> {
+  return Object.fromEntries(
+    Array.from({ length: count }, (_, index) => [`key_${index}`, "value"])
+  );
+}
+
+function createNodeDensePolicyGateInput(): Record<string, unknown> {
+  return {
+    batches: Array.from({ length: 10 }, () =>
+      Array.from({ length: 1_024 }, () => ({
+        value: "x"
+      }))
+    )
+  };
+}
+
+function isExpectedNumericArrayDescriptorKey(propertyKey: PropertyKey, length: number): boolean {
+  if (typeof propertyKey !== "string") {
+    return false;
+  }
+  const index = Number(propertyKey);
+  return Number.isInteger(index) && index >= 0 && index < length && String(index) === propertyKey;
+}
+
+type GlobalPrototypeReparentOutcomes = {
+  object: boolean;
+  array: boolean;
+  function: boolean;
+};
+
+type GlobalPrototypeResidueObservation = {
+  object: unknown;
+  array: unknown;
+  function: unknown;
+};
+
+function attemptGlobalPrototypeReparents(
+  value: object,
+  sentinel: string
+): GlobalPrototypeReparentOutcomes {
+  const outcomes: GlobalPrototypeReparentOutcomes = {
+    object: false,
+    array: false,
+    function: false
+  };
+  const probes: Array<[keyof GlobalPrototypeReparentOutcomes, object]> = [
+    ["object", Object.prototype],
+    ["array", Array.prototype],
+    ["function", Function.prototype]
+  ];
+
+  for (const [label, prototype] of probes) {
+    const succeeded = attemptMutation(() => {
+      Object.setPrototypeOf(value, prototype);
+    });
+    outcomes[label] = succeeded;
+    if (succeeded && Object.getPrototypeOf(value) === prototype) {
+      attemptMutation(() => {
+        (prototype as Record<string, unknown>)[sentinel] = "mutated";
+      });
+    }
+  }
+
+  return outcomes;
+}
+
+function readGlobalPrototypeResidue(sentinel: string): GlobalPrototypeResidueObservation {
+  return {
+    object: (Object.prototype as Record<string, unknown>)[sentinel],
+    array: (Array.prototype as Record<string, unknown>)[sentinel],
+    function: (Function.prototype as Record<string, unknown>)[sentinel]
+  };
+}
+
+function deleteGlobalPrototypeResidue(sentinel: string): void {
+  delete (Object.prototype as Record<string, unknown>)[sentinel];
+  delete (Array.prototype as Record<string, unknown>)[sentinel];
+  delete (Function.prototype as Record<string, unknown>)[sentinel];
+}
+
+function attemptMutation(mutator: () => void): boolean {
+  try {
+    mutator();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function createToolContext(role: string): ToolContext & { role: string } {
