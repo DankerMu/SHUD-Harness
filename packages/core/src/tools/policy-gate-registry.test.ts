@@ -1478,6 +1478,64 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("SHUD runtime snapshots proxy-backed spawn tools without direct get traps", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+      let customCalls = 0;
+      let proxyReads = 0;
+      const proxyTools = new Proxy(["read"], {
+        get(target, property, receiver) {
+          proxyReads += 1;
+          return Reflect.get(target, property, receiver);
+        },
+        getOwnPropertyDescriptor(target, property) {
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        }
+      });
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async () => {
+          customCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run a worker task.",
+          role: "worker",
+          tools: proxyTools
+        }
+      );
+
+      expect(result?.success).toBe(true);
+      expect(proxyReads).toBe(0);
+      expect(customCalls).toBe(1);
+      expect(agentControl.getSpawnCalls()).toBe(1);
+      expect(getCapturedToolNames(agentControl.getLastAgentContext())).toEqual(["read"]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime denies revoked spawn input before custom evaluator and spawn", async () => {
     const fixture = await createRawFixture();
     try {

@@ -509,12 +509,16 @@ function readSpawnAllowlistField(
   }
 
   const arrayValue = value as readonly unknown[];
-  let length: unknown;
+  let lengthDescriptor: PropertyDescriptor | undefined;
   try {
-    length = arrayValue.length;
+    lengthDescriptor = Object.getOwnPropertyDescriptor(arrayValue, "length");
   } catch {
     return { kind: "invalid", field };
   }
+  if (!lengthDescriptor || !("value" in lengthDescriptor)) {
+    return { kind: "invalid", field };
+  }
+  const length = lengthDescriptor.value;
   if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
     return { kind: "invalid", field };
   }

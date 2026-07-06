@@ -380,9 +380,7 @@ describe("spawn profile subset policy rule", () => {
     let proxyElementReads = 0;
     const proxyTools = new Proxy(["read"], {
       get(target, property, receiver) {
-        if (property === "0") {
-          proxyElementReads += 1;
-        }
+        proxyElementReads += 1;
         return Reflect.get(target, property, receiver);
       },
       getOwnPropertyDescriptor(target, property) {
@@ -576,42 +574,38 @@ describe("spawn profile subset policy rule", () => {
     }
   });
 
-  test("denies proxy allowlists with invalid array lengths", () => {
-    const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
-    const invalidLengths: unknown[] = [Number.NaN, -1, 1.5, "x"];
-
+  test("snapshots proxy allowlists without executing direct property gets", () => {
     for (const field of ["tools", "allowed_tools"] as const) {
-      for (const invalidLength of invalidLengths) {
-        const allowlist = new Proxy(["read"], {
-          get(target, property, receiver) {
-            if (property === "length") {
-              return invalidLength;
-            }
-            return Reflect.get(target, property, receiver);
-          }
-        });
-        const input = { role: "worker", [field]: allowlist };
+      let propertyGets = 0;
+      const allowlist = new Proxy(["read"], {
+        get(target, property, receiver) {
+          propertyGets += 1;
+          return Reflect.get(target, property, receiver);
+        },
+        getOwnPropertyDescriptor(target, property) {
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        }
+      });
+      const input = { role: "worker", [field]: allowlist };
 
-        const decision = evaluatePolicyGate(spawnToolCall(input), context);
-        const normalized = normalizeSpawnAgentInput(spawnToolCall(input));
+      const decision = evaluatePolicyGate(spawnToolCall(input), {
+        rules: [SPAWN_PROFILE_SUBSET_RULE]
+      });
+      const normalized = normalizeSpawnAgentInput(spawnToolCall(input));
 
-        expect(decision).toMatchObject({
-          decision: "deny",
-          ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
-          guardClass: "authority",
-          remediation: {
-            next_action: "adjust_scope"
-          }
-        });
-        expect(normalized).toMatchObject({
-          decision: "deny",
-          ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
-          guardClass: "authority",
-          remediation: {
-            next_action: "adjust_scope"
-          }
+      expect(decision).toEqual({ decision: "allow" });
+      expect(normalized).toMatchObject({
+        decision: "allow",
+        changed: true
+      });
+      if (normalized.decision === "allow") {
+        expect(normalized.input).toEqual({
+          instruction: "Run the delegated task.",
+          role: "worker",
+          tools: ["read"]
         });
       }
+      expect(propertyGets).toBe(0);
     }
   });
 
