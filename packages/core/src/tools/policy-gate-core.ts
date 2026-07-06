@@ -255,6 +255,11 @@ function parseSpawnAgentInputSnapshot(input: unknown): SpawnAgentInputSnapshotRe
     return fields;
   }
 
+  const mode = validateSpawnMode(fields.fields);
+  if (mode.decision === "deny") {
+    return mode;
+  }
+
   const role = snapshotSpawnRole(fieldSnapshot);
   if (role.decision === "deny") {
     return role;
@@ -361,6 +366,17 @@ function snapshotSpawnStringFields(
   }
 
   return { decision: "allow", fields };
+}
+
+function validateSpawnMode(
+  fields: ReadonlyMap<SpawnAgentStringField, string>
+): PolicyRuleDecision {
+  const mode = fields.get("mode");
+  if (mode === undefined || mode === "standard" || mode === "interactive") {
+    return { decision: "allow" };
+  }
+
+  return buildSpawnProfileInvalidModeDeny(mode);
 }
 
 function snapshotSpawnRole(
@@ -695,6 +711,22 @@ function buildSpawnProfileMalformedInputDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: "Provide spawn_agent input as plain JSON-compatible data matching the Zero spawn_agent schema.",
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+    },
+    guardClass: "authority"
+  };
+}
+
+function buildSpawnProfileInvalidModeDeny(
+  mode: string
+): Extract<PolicyRuleDecision, { decision: "deny" }> {
+  const modeLabel = formatToolIdSample(mode);
+  return {
+    decision: "deny",
+    reason: `spawn_agent mode must be omitted, standard, or interactive; received ${modeLabel}.`,
+    remediation: {
+      next_action: "adjust_scope",
+      hint: "Use spawn_agent mode standard or interactive, or omit mode, before spawning a SHUD role.",
       ref: SPAWN_PROFILE_SUBSET_POLICY_REF
     },
     guardClass: "authority"

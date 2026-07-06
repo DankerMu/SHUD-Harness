@@ -953,7 +953,7 @@ export function createRawDataWriteAdvisoryRule(
     description:
       "Advisory-only detection for obvious static writes to protected raw data paths.",
     evaluate(call: PolicyGateToolCall): PolicyRuleDecision {
-      if (call.toolId !== "bash") {
+      if (call.toolId !== "bash" && call.toolId !== "sandbox.exec") {
         return { decision: "allow" };
       }
 

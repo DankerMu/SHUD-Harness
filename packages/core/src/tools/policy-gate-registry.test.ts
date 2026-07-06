@@ -993,6 +993,73 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("SHUD runtime denies invalid spawn mode before custom evaluator and spawn", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+      let customCalls = 0;
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async () => {
+          customCalls += 1;
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run worker",
+          role: "worker",
+          tools: ["read"],
+          mode: "detached"
+        }
+      );
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("policy_gate_denied");
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        error?: string;
+        ruleId?: string;
+        guard_class?: string;
+        reason?: string;
+        remediation?: {
+          next_action?: string;
+          hint?: string;
+          ref?: string;
+        };
+      };
+      expect(payload.error).toBe("policy_gate_denied");
+      expect(payload.ruleId).toBe(SPAWN_PROFILE_SUBSET_RULE_ID);
+      expect(payload.guard_class).toBe("authority");
+      expect(payload.reason).toContain("mode");
+      expect(payload.reason).toContain("detached");
+      expect(payload.remediation?.next_action).toBe("adjust_scope");
+      expect(payload.remediation?.hint).toContain("standard");
+      expect(payload.remediation?.hint).toContain("interactive");
+      expect(payload.remediation?.ref).toBe(SPAWN_PROFILE_SUBSET_POLICY_REF);
+      expect(customCalls).toBe(0);
+      expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime denies spawn without a canonical role before Zero defaults or explicit tools", async () => {
     const fixture = await createRawFixture();
     try {
@@ -2472,6 +2539,39 @@ describe("policy-gated zero tool registry", () => {
       expect(result?.output).not.toContain("policy_gate_denied");
       await expect(readFile(join(fixture.workspaceRoot, "outer-disabled-side-effect.txt"), "utf8")).rejects.toThrow();
       await expect(readFile(join(fixture.rawRoot, "outer-disabled.txt"), "utf8")).rejects.toThrow();
+      await expect(readRawAuditRows(fixture.root)).rejects.toThrow();
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("outer raw deny with inner advisory disabled does not execute sandbox.exec side effects", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const registry = createShudRuntimeToolRegistry({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        enableAdvisory: false,
+        fuseRules: [],
+        evaluate: createPolicyGateEvaluator({
+          rules: [createRawDataWriteAdvisoryRule([fixture.rawRoot])]
+        })
+      });
+
+      const result = await registry.get("sandbox.exec")?.run(fixture.context, {
+        command:
+          "printf side-effect > workspace/outer-disabled-sandbox-side-effect.txt; printf nope > data/raw/outer-disabled-sandbox.txt"
+      });
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("policy_gate_raw_data_rule_misconfigured");
+      expectOuterRawRuleMisconfiguration(result);
+      expect(result?.output).not.toContain("raw_data_write_denied");
+      expect(result?.output).not.toContain("policy_gate_denied");
+      await expect(readFile(join(fixture.workspaceRoot, "outer-disabled-sandbox-side-effect.txt"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(fixture.rawRoot, "outer-disabled-sandbox.txt"), "utf8")).rejects.toThrow();
       await expect(readRawAuditRows(fixture.root)).rejects.toThrow();
     } finally {
       await fixture.cleanup();
