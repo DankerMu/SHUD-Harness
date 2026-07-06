@@ -193,6 +193,73 @@ Review focus:
 - Frozen install produces no lockfile drift.
 - The PR contains only the #14 boundary files plus this workflow fixture update.
 
+## Subagent Workflow Fixture - Issue #15
+
+Fixture level: expanded; repair intensity: medium. Project profile: SHUD-Harness.
+
+Expanded-trigger rationale:
+- Core triggers: local scientific toolchain execution, submodule build products, R package version evidence, runtime readiness notes, and environment snapshot correctness.
+- Profile triggers: `readiness`, `SHUD`, `rSHUD`, local Mac toolchain, SUNDIALS/CVODE, and ignored `workspace/readiness/` evidence.
+
+Change surface:
+- Deterministic readiness helper under `scripts/readiness/` for SHUD/rSHUD environment verification.
+- OpenSpec workflow fixture rows for #15.
+- PR/issue evidence comments carrying the actual local environment snapshot and command results.
+
+Must preserve:
+- SHUD and rSHUD submodule source files and pointers remain unchanged.
+- Build products are transient runtime evidence only; readiness notes are ignored runtime/PR evidence only; neither enters git.
+- Existing P0 readiness helper behavior and output schema remain unchanged.
+- #15 does not CI-ize SHUD compilation and does not install or upgrade rSHUD.
+
+Must add/change:
+- A repeatable helper records OS, compiler, and SUNDIALS evidence.
+- The helper runs the SHUD build command from `SHUD/`, verifies exit code 0 and `SHUD/shud` existence at verification time, and cleans runtime build outputs when requested by the workflow.
+- The helper checks local R `packageVersion("rSHUD") >= 2.5.0`; the submodule `DESCRIPTION` version may be recorded as supporting source evidence but cannot replace the installed-package check.
+- Self-test fixtures cover SHUD build failure, missing executable after success, and rSHUD below the minimum version without touching live submodules.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - new readiness helper is a developer-facing script entrypoint.
+- Config / project setup: selected - local compiler, SUNDIALS, and R package state are readiness inputs.
+- File IO / path safety / overwrite: selected - helper-authored readiness notes must stay under ignored `workspace/readiness/` or temporary fixture paths; real SHUD build products may appear transiently under `SHUD/` during build verification, but must be cleaned or proven absent from source control before merge.
+- Schema / columns / units / field names: selected - readiness note fields for environment/build/version evidence are reviewable evidence.
+- Auth / permissions / secrets: not selected - no credentials or network auth are read or emitted.
+- Concurrency / shared state / ordering: not selected - one-shot local readiness command, no server shared state.
+- Resource limits / large input / discovery: selected - helper must inspect fixed paths and avoid unbounded repository scans.
+- Legacy compatibility / examples: selected - SHUD/rSHUD submodules remain readable and source-clean.
+- Error handling / rollback / partial outputs: selected - failed build/version checks must return non-zero and leave no committed/runtime source drift.
+- Release / packaging / dependency compatibility: selected - this confirms local SHUD/SUNDIALS/rSHUD compatibility baseline.
+- Documentation / migration notes: selected - PR evidence must state actual environment snapshot and conclusions.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - local toolchain readiness is governance evidence for M1 entry.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: selected - SHUD compiler and rSHUD installed package are scientific runtime prerequisites.
+- Zero adapter / tool registry / agent role governance: not selected - no Zero runtime changes.
+
+Invariant Matrix:
+- Governing invariant: #15 readiness evidence must describe the actual local SHUD build and installed rSHUD version for this checkout while leaving SHUD/rSHUD sources, submodule pointers, build artifacts, and runtime notes out of git; transient SHUD build outputs are allowed only during verification and must be cleaned or proven source-control-invisible before merge.
+- Source-of-truth identity/contract: `openspec/changes/m1-foundation/specs/readiness-gates/spec.md` requirement "SHUD make 复验与 rSHUD 在位确认", ADR-0002 D2, SHUD `Makefile`, local R `packageVersion("rSHUD")`, rSHUD `DESCRIPTION`, and ignored `workspace/readiness/`.
+- Producers: readiness helper and PR/issue evidence comments.
+- Validators/preflight: helper self-test, actual helper run, `Rscript packageVersion("rSHUD")`, SHUD build exit code and executable existence, SUNDIALS evidence scan, `git status --short -- SHUD rSHUD workspace`.
+- Storage/cache/query: ignored `workspace/readiness/` note file and PR/issue evidence only; no source-controlled runtime notes.
+- Public routes/entrypoints: script CLI only; no backend/API surface.
+- Frontend/downstream consumers: #38 M1 acceptance consumes the PR/issue evidence and readiness notes.
+- Failure paths/rollback/stale state: build command failure, missing executable after success, rSHUD below 2.5.0, missing Rscript, or dirty SHUD/rSHUD/workspace state blocks #15.
+- Evidence/audit/readiness: PR evidence records OS, compiler, SUNDIALS version/path evidence, SHUD build command/exit/artifact observation, rSHUD installed and submodule versions, and cleanup/source-boundary status.
+- Regression rows:
+  - Real local run -> SHUD build exits 0, `SHUD/shud` exists during verification, rSHUD installed version is `>=2.5.0`, and readiness notes contain environment/build/version evidence.
+  - SHUD build failure fixture -> helper exits non-zero and records the failed build result without claiming readiness.
+  - Missing executable fixture after a successful build command -> helper exits non-zero.
+  - rSHUD version below `2.5.0` fixture -> helper exits non-zero.
+  - `git status --short -- SHUD rSHUD workspace` after helper/self-test -> empty.
+
+Non-goals:
+- Installing SUNDIALS, compiling SHUD in CI, installing/upgrading rSHUD, running SHUD examples, editing SHUD/rSHUD source, committing runtime notes, or modifying the #12 P0 YAML schema.
+
+Review focus:
+- The helper distinguishes installed rSHUD package evidence from submodule DESCRIPTION evidence.
+- Build artifact observation is real but artifacts are not committed or left as source drift.
+- Failure fixtures exercise the readiness claims without depending on live submodule mutation.
+
 ## Subagent Workflow Fixture — Issue #19
 
 Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.

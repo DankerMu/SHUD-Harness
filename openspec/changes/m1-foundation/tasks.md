@@ -25,6 +25,12 @@
     - `git status --short -- packages SHUD rSHUD AutoSHUD zero` is empty; PR changes stay inside root `package.json`, root lockfile, DependencyLock record, and workflow fixture.
     - Secret/token scan over the three lock artifacts reports no registry auth headers, API keys, or bearer tokens.
 - [ ] 1.4 SHUD `make` 复验（一次本机编译 + 环境快照记入 readiness notes）+ rSHUD ≥2.5.0 在位确认
+  - Evidence floor (#15):
+    - A deterministic readiness helper under `scripts/readiness/` records OS, compiler, and SUNDIALS evidence, runs the SHUD build command from the `SHUD/` checkout, observes exit code 0, and verifies the `SHUD/shud` executable exists before cleanup.
+    - rSHUD version evidence comes from the local R environment (`Rscript -e 'packageVersion("rSHUD")'`) and must be `>= 2.5.0`; the rSHUD submodule `DESCRIPTION` version is recorded as supporting source evidence, not as a substitute for the installed package check.
+    - Readiness notes are written only under ignored `workspace/readiness/` runtime paths or PR/issue evidence; SHUD build products may exist transiently during verification, but no build products, runtime notes, source edits, or submodule modifications are committed, and cleanup/source-boundary evidence is recorded.
+    - Failure fixtures cover SHUD build command failure, missing SHUD executable after a successful command, and rSHUD version below `2.5.0`.
+    - `git status --short -- SHUD rSHUD workspace` remains empty after the helper/self-test path, proving submodule source and runtime workspace boundaries are preserved.
 
 ## 2. Monorepo 骨架（monorepo-skeleton）
 
