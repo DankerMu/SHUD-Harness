@@ -632,6 +632,70 @@ if [ -e "$fake_path_attack_marker" ]; then
   fail "make executed for fake PATH attack fixture"
 fi
 
+fake_python_attack_fixture="$TMP_ROOT/fake-python-attack-fixture"
+make_fixture "$fake_python_attack_fixture"
+fake_python_attack_bin="$TMP_ROOT/fake-python-bin"
+mkdir -p "$fake_python_attack_bin"
+fake_python_attack_output="$fake_python_attack_fixture/workspace/readiness/fake_python_attack.json"
+fake_python_attack_marker="$fake_python_attack_fixture/fake-python.marker"
+fake_python_attack_stderr="$TMP_ROOT/fake-python-attack.stderr"
+cat > "$fake_python_attack_bin/python3" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+if [ -n "${FAKE_PYTHON_MARKER:-}" ]; then
+  printf '%s\n' "fake python invoked" > "$FAKE_PYTHON_MARKER"
+fi
+forged_output=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output)
+      shift
+      forged_output=${1:-}
+      ;;
+  esac
+  shift || break
+done
+if [ -n "$forged_output" ]; then
+  forged_dir=${forged_output%/*}
+  if [ "$forged_dir" != "$forged_output" ]; then
+    mkdir -p "$forged_dir"
+  fi
+  printf '%s\n' '{"readiness_check":"shud_rshud","conclusion":"pass","forged_by":"fake-python3"}' > "$forged_output"
+fi
+exit 0
+EOF
+chmod +x "$fake_python_attack_bin/python3"
+set +e
+(
+  clear_make_environment
+  FAKE_PYTHON_MARKER="$fake_python_attack_marker" \
+    PATH="$fake_python_attack_bin:$TMP_ROOT/bin:$PATH" \
+    HOME="$fake_python_attack_fixture/fake-home" \
+    "$HELPER" --repo-root "$fake_python_attack_fixture" --output "$fake_python_attack_output" >/dev/null 2>"$fake_python_attack_stderr"
+)
+fake_python_attack_status=$?
+set -e
+if [ "$fake_python_attack_status" -eq 0 ]; then
+  fail "fake python PATH attack fixture unexpectedly returned zero"
+fi
+if [ -e "$fake_python_attack_marker" ]; then
+  fail "wrapper executed fake python3 from PATH"
+fi
+if [ -e "$fake_python_attack_output" ]; then
+  if grep -q '"forged_by":"fake-python3"' "$fake_python_attack_output" \
+    || grep -q '"conclusion":"pass"' "$fake_python_attack_output"; then
+    fail "fake python PATH attack left pass-shaped forged output"
+  fi
+else
+  cat "$fake_python_attack_stderr" >&2
+  fail "fake python PATH attack did not reach the real helper"
+fi
+assert_json "$fake_python_attack_output" block "executable identity is not trusted"
+assert_json_expr "$fake_python_attack_output" 'data["tool_identity"]["git"]["ok"] is True'
+assert_json_expr "$fake_python_attack_output" 'data["tool_identity"]["git"]["selected_by_trusted_fallback"] is True'
+assert_json_expr "$fake_python_attack_output" 'all(data["tool_identity"][name]["ok"] is False for name in ["make", "Rscript"])'
+assert_json_expr "$fake_python_attack_output" 'data["conclusion"] != "pass"'
+
 hardlink_output_fixture="$TMP_ROOT/hardlink-output-fixture"
 make_fixture "$hardlink_output_fixture"
 mkdir -p "$hardlink_output_fixture/workspace/readiness"
