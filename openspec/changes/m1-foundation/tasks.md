@@ -16,9 +16,11 @@
 - [ ] 1.3 根 `package.json` 固定 packageManager + lockfile 入库 + 初始 DependencyLock（四 submodule commit + dirty 状态 + 运行时依赖版本）
   - Evidence floor (#14):
     - `bun install --frozen-lockfile` succeeds and leaves root lockfile unchanged; lockfile sha256 equals DependencyLock `package_manager.lockfile_sha256`.
-    - `.gitmodules` path/url parser check returns exactly SHUD/rSHUD/AutoSHUD/zero; DependencyLock commits match `git submodule status`.
-    - `node scripts/dependency-lock/validate.mjs` derives a non-empty direct external dependency set from root `bun.lock` workspace dependency sections and verifies DependencyLock `packages` exactly by `name`, resolved `version`, `dependency_type`, and `source`.
-    - `sh scripts/dependency-lock/self_test.sh` proves empty `packages`, a missing direct dependency, and a mismatched resolved version each fail validation.
+    - `.gitmodules` path/url parser check returns exactly SHUD/rSHUD/AutoSHUD/zero; DependencyLock submodules are the exact same set, commits match `git submodule status`, every recorded `dirty` flag is `false`, and zero is pinned to `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`.
+    - `node scripts/dependency-lock/validate.mjs` derives a non-empty direct external dependency set from root `bun.lock` workspace dependency sections and verifies DependencyLock `packages` exactly by `name`, resolved `version`, `dependency_type`, and `source`; it also validates `package_manager.name/version/lockfile_path/lockfile_sha256` against `package.json#packageManager` and the inspected root lockfile.
+    - `sh scripts/dependency-lock/self_test.sh` proves package negative fixtures fail validation: empty `packages`, a missing direct dependency, and a mismatched resolved version.
+    - `sh scripts/dependency-lock/self_test.sh` proves package-manager identity negative fixtures fail validation: stale `package_manager.version` and wrong `package_manager.lockfile_path`.
+    - `sh scripts/dependency-lock/self_test.sh` proves submodule negative fixtures fail validation: missing submodule, wrong submodule commit, dirty flag `true`, and wrong zero commit.
     - DependencyLock records zero commit `13e25c1`, every submodule has `dirty: false`, and `git -C zero diff --quiet` passes.
     - `git status --short -- packages SHUD rSHUD AutoSHUD zero` is empty; PR changes stay inside root `package.json`, root lockfile, DependencyLock record, and workflow fixture.
     - Secret/token scan over the three lock artifacts reports no registry auth headers, API keys, or bearer tokens.

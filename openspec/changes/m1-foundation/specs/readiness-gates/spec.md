@@ -38,12 +38,17 @@ link check 脚本与 schema drift 检查 SHALL 入库 `scripts/` 并接入 CI；
 
 ### Requirement: 初始 DependencyLock 生成
 
-系统 SHALL 生成初始 DependencyLock 记录：四个 submodule（SHUD/rSHUD/AutoSHUD/zero）的 commit 与 dirty 状态、package manager/lockfile identity、关键运行时依赖版本。系统 SHALL 提供确定性校验脚本，从根 `bun.lock` workspace 直接依赖图推导非空外部依赖集合，并按 `name`、resolved `version`、`dependency_type`、`source` 精确验证 DependencyLock `packages`。
+系统 SHALL 生成初始 DependencyLock 记录：四个 submodule（SHUD/rSHUD/AutoSHUD/zero）的 commit 与 dirty 状态、package manager/lockfile identity、关键运行时依赖版本。系统 SHALL 提供确定性校验脚本，从根 `bun.lock` workspace 直接依赖图推导非空外部依赖集合，并按 `name`、resolved `version`、`dependency_type`、`source` 精确验证 DependencyLock `packages`；同时 SHALL 精确验证 package-manager identity 与 submodule evidence set。
 
 #### Scenario: gitmodules 解析
 
 - **WHEN** 执行 `.gitmodules` path/url 解析检查与 `git submodule status`
-- **THEN** 四个 submodule 均返回 path/url，DependencyLock 中的 commit 与 `git submodule status` 一致，`dirty=false`，且 zero commit 为 `13e25c1`
+- **THEN** `.gitmodules` 与 DependencyLock 均恰好包含 SHUD/rSHUD/AutoSHUD/zero，无缺失/额外/重复；四个 submodule 均返回 path/url，DependencyLock 中的 commit 与 `git submodule status` 一致，`dirty=false`，且 zero commit 为 `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`；缺失 submodule、wrong commit、`dirty=true`、wrong zero commit 的负例均失败
+
+#### Scenario: DependencyLock package-manager identity 校验
+
+- **WHEN** 执行 DependencyLock package-manager identity 校验脚本
+- **THEN** `package_manager.name/version` 与 `package.json#packageManager` 一致，`package_manager.lockfile_path/lockfile_sha256` 与被检查的根 lockfile 一致；stale `package_manager.version` 与 wrong `package_manager.lockfile_path` 的负例均失败
 
 #### Scenario: DependencyLock package 列表校验
 

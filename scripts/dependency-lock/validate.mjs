@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -20,11 +21,15 @@ const TYPE_RANK = {
 
 const ALLOWED_TYPES = new Set(["runtime", "dev", "peer", "optional"]);
 const ALLOWED_SOURCES = new Set(["npm", "git", "local"]);
+const EXPECTED_SUBMODULES = ["SHUD", "rSHUD", "AutoSHUD", "zero"];
+const EXPECTED_SUBMODULE_SET = new Set(EXPECTED_SUBMODULES);
+const ZERO_COMMIT = "13e25c116c62411e6ee8a0ad67a6c53dc7c376c6";
 
 function usage() {
   return `Usage: node scripts/dependency-lock/validate.mjs [options]
 
-Validates dependency-lock.initial.json packages against the root Bun lock graph.
+Validates dependency-lock.initial.json against the root Bun lock graph,
+package-manager identity, and current submodule checkout evidence.
 
 Options:
   --repo-root <path>          Repository root. Defaults to this script's repo root.
@@ -39,6 +44,7 @@ Derivation:
   remaining direct external package is resolved through bun.lock's packages table.
   Repeated declarations use dependency_type precedence runtime > dev > peer > optional.
   Registry packages are source=npm; git/file-like specs resolve to git/local.
+  Submodule evidence is read from .gitmodules and git submodule status.
 `;
 }
 
@@ -426,6 +432,227 @@ function validateLockfileIdentity(dependencyLock, packageJson, repoRoot, lockfil
   return errors;
 }
 
+function parseGitmodules(text) {
+  const errors = [];
+  const entries = new Map();
+  let current = null;
+
+  for (const [lineIndex, rawLine] of text.split(/\r?\n/).entries()) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#") || line.startsWith(";")) {
+      continue;
+    }
+
+    const sectionMatch = line.match(/^\[submodule "(.+)"\]$/);
+    if (sectionMatch) {
+      const name = sectionMatch[1];
+      if (entries.has(name)) {
+        errors.push(`duplicate .gitmodules submodule section: ${name}`);
+      }
+      current = { name };
+      entries.set(name, current);
+      continue;
+    }
+
+    const assignmentMatch = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*(.*)$/);
+    if (!assignmentMatch) {
+      errors.push(`.gitmodules line ${lineIndex + 1} is not a supported assignment or submodule section`);
+      continue;
+    }
+    if (!current) {
+      errors.push(`.gitmodules line ${lineIndex + 1} appears before any submodule section`);
+      continue;
+    }
+
+    const [, key, value] = assignmentMatch;
+    if (key === "path" || key === "url") {
+      if (hasOwn(current, key)) {
+        errors.push(`.gitmodules submodule ${current.name} has duplicate ${key}`);
+      }
+      current[key] = value;
+    }
+  }
+
+  for (const name of EXPECTED_SUBMODULES) {
+    const entry = entries.get(name);
+    if (!entry) {
+      errors.push(`missing .gitmodules submodule: ${name}`);
+      continue;
+    }
+    if (typeof entry.path !== "string" || entry.path.length === 0) {
+      errors.push(`.gitmodules submodule ${name} must have a non-empty path`);
+    }
+    if (typeof entry.url !== "string" || entry.url.length === 0) {
+      errors.push(`.gitmodules submodule ${name} must have a non-empty url`);
+    }
+  }
+
+  for (const name of [...entries.keys()].sort()) {
+    if (!EXPECTED_SUBMODULE_SET.has(name)) {
+      errors.push(`extra .gitmodules submodule: ${name}`);
+    }
+  }
+
+  return { entries, errors };
+}
+
+function gitOutput(args, repoRoot) {
+  return execFileSync("git", ["-C", repoRoot, ...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function parseGitSubmoduleStatus(output) {
+  const errors = [];
+  const statusByPath = new Map();
+
+  for (const rawLine of output.split(/\r?\n/)) {
+    if (rawLine.trim().length === 0) {
+      continue;
+    }
+
+    const statusChar = [" ", "+", "-", "U"].includes(rawLine[0]) ? rawLine[0] : " ";
+    const rest = statusChar === " " && rawLine[0] !== " " ? rawLine : rawLine.slice(1);
+    const match = rest.trimStart().match(/^([0-9a-f]{40})\s+([^\s]+)(?:\s|$)/);
+    if (!match) {
+      errors.push(`git submodule status line is not parseable: ${rawLine}`);
+      continue;
+    }
+
+    const [, commit, submodulePath] = match;
+    if (statusByPath.has(submodulePath)) {
+      errors.push(`duplicate git submodule status path: ${submodulePath}`);
+      continue;
+    }
+    statusByPath.set(submodulePath, { commit, statusChar });
+  }
+
+  return { statusByPath, errors };
+}
+
+function collectDependencyLockSubmodules(dependencyLock) {
+  const errors = [];
+  if (!Array.isArray(dependencyLock.submodules)) {
+    return { submodules: new Map(), errors: ["DependencyLock.submodules must be an array"] };
+  }
+
+  const submodules = new Map();
+  dependencyLock.submodules.forEach((submodule, index) => {
+    const label = `DependencyLock.submodules[${index}]`;
+    if (!isRecord(submodule)) {
+      errors.push(`${label} must be an object`);
+      return;
+    }
+
+    for (const field of ["name", "commit"]) {
+      if (typeof submodule[field] !== "string" || submodule[field].length === 0) {
+        errors.push(`${label}.${field} must be a non-empty string`);
+      }
+    }
+    if (typeof submodule.commit === "string" && !/^[0-9a-f]{40}$/.test(submodule.commit)) {
+      errors.push(`${label}.commit must be a 40-character lowercase git commit`);
+    }
+    if (submodule.dirty !== false) {
+      const name = typeof submodule.name === "string" ? submodule.name : `<index ${index}>`;
+      errors.push(`DependencyLock.submodule ${name} dirty must be false`);
+    }
+
+    if (typeof submodule.name === "string") {
+      if (submodules.has(submodule.name)) {
+        errors.push(`duplicate DependencyLock submodule entry: ${submodule.name}`);
+      } else {
+        submodules.set(submodule.name, {
+          name: submodule.name,
+          commit: submodule.commit,
+          dirty: submodule.dirty,
+        });
+      }
+    }
+  });
+
+  for (const name of EXPECTED_SUBMODULES) {
+    if (!submodules.has(name)) {
+      errors.push(`missing submodule: ${name}`);
+    }
+  }
+
+  for (const name of [...submodules.keys()].sort()) {
+    if (!EXPECTED_SUBMODULE_SET.has(name)) {
+      errors.push(`extra submodule: ${name}`);
+    }
+  }
+
+  return { submodules, errors };
+}
+
+function submoduleWorktreeIsDirty(repoRoot, submodulePath) {
+  const status = gitOutput(["status", "--porcelain=v1", "--untracked-files=all"], path.join(repoRoot, submodulePath));
+  return status.trim().length > 0;
+}
+
+function validateSubmodules(dependencyLock, repoRoot) {
+  const errors = [];
+  const dependencyLockResult = collectDependencyLockSubmodules(dependencyLock);
+  errors.push(...dependencyLockResult.errors);
+
+  const gitmodulesPath = path.join(repoRoot, ".gitmodules");
+  const gitmodulesResult = parseGitmodules(readFileSync(gitmodulesPath, "utf8"));
+  errors.push(...gitmodulesResult.errors);
+
+  let statusResult = { statusByPath: new Map(), errors: [] };
+  try {
+    statusResult = parseGitSubmoduleStatus(gitOutput(["submodule", "status"], repoRoot));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    errors.push(`git submodule status failed: ${message}`);
+  }
+  errors.push(...statusResult.errors);
+
+  for (const name of EXPECTED_SUBMODULES) {
+    const record = dependencyLockResult.submodules.get(name);
+    const gitmodule = gitmodulesResult.entries.get(name);
+    if (!record || !gitmodule || typeof gitmodule.path !== "string" || gitmodule.path.length === 0) {
+      continue;
+    }
+
+    const status = statusResult.statusByPath.get(gitmodule.path);
+    if (!status) {
+      errors.push(`git submodule status missing path for ${name}: ${gitmodule.path}`);
+      continue;
+    }
+    if (status.statusChar !== " ") {
+      errors.push(`git submodule status for ${name} must be clean at ${gitmodule.path}, got ${status.statusChar}`);
+    }
+    if (record.commit !== status.commit) {
+      errors.push(`submodule commit mismatch for ${name}: expected ${status.commit} from git submodule status, got ${record.commit}`);
+    }
+
+    try {
+      if (submoduleWorktreeIsDirty(repoRoot, gitmodule.path)) {
+        errors.push(`submodule worktree is dirty for ${name}: ${gitmodule.path}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`git status failed for submodule ${name} at ${gitmodule.path}: ${message}`);
+    }
+  }
+
+  for (const submodulePath of [...statusResult.statusByPath.keys()].sort()) {
+    const matchingEntry = [...gitmodulesResult.entries.values()].find((entry) => entry.path === submodulePath);
+    if (!matchingEntry) {
+      errors.push(`git submodule status has path not declared in .gitmodules: ${submodulePath}`);
+    }
+  }
+
+  const zero = dependencyLockResult.submodules.get("zero");
+  if (zero && zero.commit !== ZERO_COMMIT) {
+    errors.push(`zero submodule commit must be ${ZERO_COMMIT}, got ${zero.commit}`);
+  }
+
+  return errors;
+}
+
 function main() {
   const scriptPath = fileURLToPath(import.meta.url);
   const defaultRepoRoot = path.resolve(path.dirname(scriptPath), "..", "..");
@@ -447,11 +674,12 @@ function main() {
   const expectedResult = collectExpectedPackages(lock);
   const actualResult = collectActualPackages(dependencyLock);
   const identityErrors = validateLockfileIdentity(dependencyLock, packageJson, repoRoot, lockfilePath);
+  const submoduleErrors = validateSubmodules(dependencyLock, repoRoot);
   const compareErrors = comparePackages(expectedResult.expected, actualResult.actual);
-  const errors = [...expectedResult.errors, ...actualResult.errors, ...identityErrors, ...compareErrors];
+  const errors = [...expectedResult.errors, ...actualResult.errors, ...identityErrors, ...submoduleErrors, ...compareErrors];
 
   if (errors.length > 0) {
-    console.error("DependencyLock package validation failed:");
+    console.error("DependencyLock validation failed:");
     for (const error of errors) {
       console.error(`- ${error}`);
     }
@@ -464,6 +692,7 @@ function main() {
       dependencyLockPath,
     )}.`,
   );
+  console.log(`DependencyLock submodules valid: ${EXPECTED_SUBMODULES.join(", ")} match .gitmodules and git submodule status.`);
   console.log(
     "Derivation: bun.lock workspaces direct dependency sections -> ignore workspace-local deps -> resolve versions from bun.lock packages table.",
   );
