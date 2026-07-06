@@ -29,6 +29,24 @@ fail() {
   exit 1
 }
 
+assert_repo_owned_ignore() {
+  repo=$1
+  path=$2
+  label=$3
+  ignore_output=$(git -C "$repo" -c core.excludesFile=/dev/null check-ignore -v --no-index -- "$path" 2>/dev/null) || {
+    fail "$label is not ignored by repo-owned rules"
+  }
+  ignore_source=${ignore_output%%:*}
+  case "$ignore_source" in
+    .gitignore|*/.gitignore)
+      ;;
+    *)
+      printf '%s\n' "$ignore_output" >&2
+      fail "$label ignore source is not a repo-owned .gitignore"
+      ;;
+  esac
+}
+
 clear_make_environment() {
   unset MAKEFLAGS GNUMAKEFLAGS MFLAGS MAKEFILES
   unset CC CXX SUNDIALS_DIR
@@ -49,9 +67,7 @@ export_make_environment() {
   export LIB_SUN LIB_SYS INC_OMP LIB_OMP INC_MPI MPICC
 }
 
-if ! git -C "$REPO_ROOT" check-ignore --no-index -q workspace/readiness/shud_rshud_readiness.json; then
-  fail "root runtime shud/rshud readiness output is not ignored"
-fi
+assert_repo_owned_ignore "$REPO_ROOT" workspace/readiness/shud_rshud_readiness.json "root runtime shud/rshud readiness output"
 
 make_fake_bin() {
   bin_dir=$1
@@ -284,6 +300,15 @@ EOF
   : > "$fixture/fake-home/sundials/lib/libsundials_nvecserial.dylib"
 }
 
+install_hostile_git_config() {
+  fixture=$1
+  hostile_excludes="$fixture/hostile-global-excludes"
+  printf '%s\n' 'workspace/readiness/*.json' > "$hostile_excludes"
+  HOME="$fixture/fake-home" git config --global status.showUntrackedFiles no
+  HOME="$fixture/fake-home" git config --global core.excludesFile "$hostile_excludes"
+  git -C "$fixture" config status.showUntrackedFiles no
+}
+
 run_helper() {
   fixture=$1
   output=$2
@@ -473,9 +498,9 @@ assert_json_expr "$pass_output" 'data["source_boundary"]["preflight"]["ok"] is T
 assert_json_expr "$pass_output" 'data["source_boundary"]["postflight_after_output_write"]["ok"] is True'
 assert_json_expr "$pass_output" 'data["make_environment_guard"]["ok"] is True'
 assert_json_expr "$pass_output" 'data["rshud"]["installed"]["parser"]["contract_ok"] is True'
-if ! git -C "$pass_fixture" check-ignore --no-index -q workspace/readiness/shud_rshud_readiness.json; then
-  fail "fixture default readiness output is not ignored"
-fi
+assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["repo_owned"] is True'
+assert_json_expr "$pass_output" 'data["output"]["git_guard"]["git_ignore_proof"]["source"]["relative_path"] == ".gitignore"'
+assert_repo_owned_ignore "$pass_fixture" workspace/readiness/shud_rshud_readiness.json "fixture default readiness output"
 fixture_workspace_status=$(git -C "$pass_fixture" status --short -- workspace)
 if [ -n "$fixture_workspace_status" ]; then
   printf '%s\n' "$fixture_workspace_status" >&2
@@ -490,8 +515,34 @@ assert_json "$default_wrapper_output" pass -
 assert_no_shud_artifacts "$default_wrapper_fixture"
 assert_json_expr "$default_wrapper_output" 'data["shud"]["build"]["cleanup_requested"] is True'
 
+global_excludes_only_fixture="$TMP_ROOT/global-excludes-only-fixture"
+make_fixture "$global_excludes_only_fixture"
+: > "$global_excludes_only_fixture/.gitignore"
+git -C "$global_excludes_only_fixture" add .gitignore
+git -C "$global_excludes_only_fixture" commit -q -m "remove readiness ignore"
+global_excludes_only_file="$global_excludes_only_fixture/global-readiness-excludes"
+printf '%s\n' 'workspace/readiness/*.json' > "$global_excludes_only_file"
+HOME="$global_excludes_only_fixture/fake-home" git config --global core.excludesFile "$global_excludes_only_file"
+global_excludes_only_output="$global_excludes_only_fixture/workspace/readiness/global_only.json"
+global_excludes_only_stderr="$TMP_ROOT/global-excludes-only.stderr"
+if ! HOME="$global_excludes_only_fixture/fake-home" git -C "$global_excludes_only_fixture" check-ignore --no-index -q workspace/readiness/global_only.json; then
+  fail "global excludes fixture does not reproduce ambient ignore"
+fi
+if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$global_excludes_only_fixture" "$global_excludes_only_output" >/dev/null 2>"$global_excludes_only_stderr"; then
+  fail "global excludes-only readiness output unexpectedly returned zero"
+fi
+if ! grep -q "output path is not ignored" "$global_excludes_only_stderr" \
+  && ! grep -q "repo-owned .gitignore" "$global_excludes_only_stderr"; then
+  cat "$global_excludes_only_stderr" >&2
+  fail "global excludes-only readiness output was not rejected by repo-owned ignore guard"
+fi
+if [ -e "$global_excludes_only_output" ]; then
+  fail "global excludes-only fixture wrote readiness output"
+fi
+
 tracked_output_fixture="$TMP_ROOT/tracked-output-fixture"
 make_fixture "$tracked_output_fixture"
+install_hostile_git_config "$tracked_output_fixture"
 mkdir -p "$tracked_output_fixture/workspace/readiness"
 printf '%s\n' "tracked output must survive" > "$tracked_output_fixture/workspace/readiness/shud_rshud_readiness.json"
 git -C "$tracked_output_fixture" add -f workspace/readiness/shud_rshud_readiness.json
@@ -519,6 +570,7 @@ fi
 
 tracked_sibling_fixture="$TMP_ROOT/tracked-sibling-fixture"
 make_fixture "$tracked_sibling_fixture"
+install_hostile_git_config "$tracked_sibling_fixture"
 mkdir -p "$tracked_sibling_fixture/workspace/readiness"
 printf '%s\n' '{"readiness_check":"shud_rshud","conclusion":"pass"}' > "$tracked_sibling_fixture/workspace/readiness/shud_rshud_stale_pass.json"
 git -C "$tracked_sibling_fixture" add -f workspace/readiness/shud_rshud_stale_pass.json
@@ -691,6 +743,7 @@ make_fixture "$workspace_drift_fixture"
 : > "$workspace_drift_fixture/.gitignore"
 git -C "$workspace_drift_fixture" add .gitignore
 git -C "$workspace_drift_fixture" commit -q -m "make workspace visible"
+install_hostile_git_config "$workspace_drift_fixture"
 mkdir -p "$workspace_drift_fixture/workspace/readiness"
 printf '%s\n' "visible workspace drift" > "$workspace_drift_fixture/workspace/readiness/visible.txt"
 workspace_drift_output="$TMP_ROOT/workspace-drift-output.json"
@@ -698,6 +751,8 @@ if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$workspace_drift_
   fail "visible workspace drift fixture unexpectedly returned zero"
 fi
 assert_json "$workspace_drift_output" block "workspace/SHUD/rSHUD source boundary has uncommitted or visible changes"
+assert_json_expr "$workspace_drift_output" '"workspace/readiness/visible.txt" in data["source_boundary"]["preflight"]["repo_status_shud_rshud_workspace"]["stdout_tail"]'
+assert_json_expr "$workspace_drift_output" '"--untracked-files=all" in data["source_boundary"]["preflight"]["repo_status_shud_rshud_workspace"]["command"]'
 
 status_failure_fixture="$TMP_ROOT/status-failure-fixture"
 make_fixture "$status_failure_fixture"

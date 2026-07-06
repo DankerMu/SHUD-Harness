@@ -27,6 +27,12 @@ from typing import Any, Callable
 VERSION = "v0.2.1"
 DEFAULT_OUTPUT_RELATIVE = Path("workspace/readiness/shud_rshud_readiness.json")
 CANONICAL_READINESS_DIR = Path("workspace/readiness")
+HERMETIC_GIT_CONFIG_ARGS = (
+    "-c",
+    "core.excludesFile=/dev/null",
+    "-c",
+    "status.showUntrackedFiles=all",
+)
 MIN_RSHUD_VERSION = "2.5.0"
 TEXT_TAIL_LIMIT = 12000
 COMMAND_TAIL_READ_BYTES = TEXT_TAIL_LIMIT * 4
@@ -155,7 +161,17 @@ def terminate_process_group(process: subprocess.Popen[Any]) -> None:
 
 
 def sanitized_git_environment() -> dict[str, str]:
-    return {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    env.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_ATTR_NOSYSTEM": "1",
+            "HOME": "/nonexistent/shud-rshud-readiness-home",
+            "XDG_CONFIG_HOME": "/nonexistent/shud-rshud-readiness-xdg",
+        }
+    )
+    return env
 
 
 def run_command(
@@ -214,7 +230,11 @@ def run_command(
 
 
 def run_git_command(cwd: Path, args: list[str], timeout: int = 20) -> dict[str, Any]:
-    return run_command(["git", "-C", str(cwd), *args], timeout=timeout, env=sanitized_git_environment())
+    return run_command(
+        ["git", *HERMETIC_GIT_CONFIG_ARGS, "-C", str(cwd), *args],
+        timeout=timeout,
+        env=sanitized_git_environment(),
+    )
 
 
 def git_stdout(args: list[str], cwd: Path) -> tuple[str | None, str | None]:
@@ -253,13 +273,109 @@ def output_path(repo_root: Path, raw_output: str | None) -> Path:
     return repo_root / DEFAULT_OUTPUT_RELATIVE
 
 
-def check_git_ignored(repo_root: Path, output: Path) -> bool:
+def parse_check_ignore_verbose(stdout: str) -> dict[str, Any]:
+    line = stdout.strip().splitlines()[-1] if stdout.strip() else ""
+    proof: dict[str, Any] = {
+        "raw": line or None,
+        "source": None,
+        "line_number": None,
+        "pattern": None,
+        "matched_path": None,
+        "parse_error": None,
+    }
+    if not line:
+        proof["parse_error"] = "git check-ignore -v produced no stdout"
+        return proof
+    if "\t" not in line:
+        proof["parse_error"] = "git check-ignore -v output did not contain a tab separator"
+        return proof
+    source_pattern, matched_path = line.split("\t", 1)
+    source_parts = source_pattern.split(":", 2)
+    if len(source_parts) != 3:
+        proof["parse_error"] = "git check-ignore -v source metadata did not contain source:line:pattern"
+        proof["matched_path"] = matched_path
+        return proof
+    source, line_number, pattern = source_parts
+    proof.update(
+        {
+            "source": source,
+            "line_number": line_number,
+            "pattern": pattern,
+            "matched_path": matched_path,
+        }
+    )
+    return proof
+
+
+def repo_owned_gitignore_source(repo_root: Path, source: str | None) -> dict[str, Any]:
+    proof = {
+        "path": source,
+        "absolute_path": None,
+        "relative_path": None,
+        "under_worktree": False,
+        "repo_owned": False,
+    }
+    if not source:
+        return proof
+    source_path = Path(source)
+    absolute_source = source_path if source_path.is_absolute() else repo_root / source_path
+    proof["absolute_path"] = str(absolute_source)
+    try:
+        relative_source = absolute_source.resolve(strict=False).relative_to(repo_root.resolve())
+    except ValueError:
+        return proof
+    proof["relative_path"] = relative_source.as_posix()
+    proof["under_worktree"] = bool(relative_source.parts and relative_source.parts[0] != ".git")
+    proof["repo_owned"] = proof["under_worktree"] and absolute_source.name == ".gitignore"
+    return proof
+
+
+def check_git_ignore_proof(repo_root: Path, output: Path) -> dict[str, Any]:
     try:
         rel = output.resolve(strict=False).relative_to(repo_root.resolve())
     except ValueError:
-        return False
-    result = run_git_command(repo_root, ["check-ignore", "--no-index", "-q", str(rel)])
-    return result["exit_code"] == 0
+        return {
+            "ignored": False,
+            "repo_owned": False,
+            "relative_path": None,
+            "source": None,
+            "error": None,
+        }
+    result = run_git_command(repo_root, ["check-ignore", "-v", "--no-index", "--", rel.as_posix()])
+    if result["exit_code"] == 1:
+        return {
+            "ignored": False,
+            "repo_owned": False,
+            "relative_path": rel.as_posix(),
+            "source": None,
+            "error": None,
+        }
+    if result["exit_code"] != 0:
+        return {
+            "ignored": None,
+            "repo_owned": False,
+            "relative_path": rel.as_posix(),
+            "source": None,
+            "error": command_failure_detail(result),
+        }
+    verbose = parse_check_ignore_verbose(str(result.get("stdout_tail") or ""))
+    source = repo_owned_gitignore_source(repo_root, verbose.get("source"))
+    return {
+        "ignored": True,
+        "repo_owned": source["repo_owned"] and verbose.get("parse_error") is None,
+        "relative_path": rel.as_posix(),
+        "source": source,
+        "line_number": verbose.get("line_number"),
+        "pattern": verbose.get("pattern"),
+        "matched_path": verbose.get("matched_path"),
+        "parse_error": verbose.get("parse_error"),
+        "raw": verbose.get("raw"),
+        "error": None,
+    }
+
+
+def check_git_ignored(repo_root: Path, output: Path) -> bool:
+    return check_git_ignore_proof(repo_root, output)["ignored"] is True
 
 
 def check_git_tracked(repo_root: Path, output: Path) -> tuple[bool | None, str | None]:
@@ -302,14 +418,17 @@ def output_git_guard(repo_root: Path, output: Path) -> dict[str, Any]:
             "tracked": None,
             "tracked_error": None,
             "git_ignored": None,
+            "git_ignore_proof": None,
         }
     tracked, tracked_error = check_git_tracked(repo_root, output)
+    git_ignore_proof = check_git_ignore_proof(repo_root, output)
     return {
         "inside_repo": True,
         "relative_path": rel.as_posix(),
         "tracked": tracked,
         "tracked_error": tracked_error,
-        "git_ignored": check_git_ignored(repo_root, output),
+        "git_ignored": git_ignore_proof["ignored"],
+        "git_ignore_proof": git_ignore_proof,
     }
 
 
@@ -347,8 +466,17 @@ def validate_output_scope(
             raise OutputSafetyError(f"output tracked state could not be proven: {tracked_error}")
         if tracked:
             raise OutputSafetyError(f"output path is tracked by git: {rel.as_posix()}")
-        if not check_git_ignored(repo_root, output):
+        ignore_proof = check_git_ignore_proof(repo_root, output)
+        if ignore_proof["ignored"] is None:
+            raise OutputSafetyError(
+                f"output git ignore state could not be proven: {ignore_proof['error']}"
+            )
+        if not ignore_proof["ignored"]:
             raise OutputSafetyError(f"output path is not ignored by git: {rel.as_posix()}")
+        if not ignore_proof["repo_owned"]:
+            raise OutputSafetyError(
+                f"output path is not ignored by a repo-owned .gitignore: {rel.as_posix()}"
+            )
         validate_no_tracked_runtime_readiness_artifacts(repo_root)
         return
 
@@ -1098,9 +1226,10 @@ def append_status_errors(label: str, result: dict[str, Any], errors: list[str]) 
 
 def collect_source_boundary(repo_root: Path, errors: list[str], phase: str) -> dict[str, Any]:
     boundary_errors: list[str] = []
-    root_status = run_git_command(repo_root, ["status", "--short", "--", "SHUD", "rSHUD", "workspace"])
-    shud_status = run_git_command(repo_root / "SHUD", ["status", "--short"])
-    rshud_status = run_git_command(repo_root / "rSHUD", ["status", "--short"])
+    status_args = ["status", "--short", "--untracked-files=all"]
+    root_status = run_git_command(repo_root, [*status_args, "--", "SHUD", "rSHUD", "workspace"])
+    shud_status = run_git_command(repo_root / "SHUD", status_args)
+    rshud_status = run_git_command(repo_root / "rSHUD", status_args)
     append_status_errors("workspace/SHUD/rSHUD source boundary", root_status, boundary_errors)
     append_status_errors("SHUD checkout", shud_status, boundary_errors)
     append_status_errors("rSHUD checkout", rshud_status, boundary_errors)
