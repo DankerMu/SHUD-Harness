@@ -556,6 +556,42 @@ if "outside trusted tool prefixes" not in (identity["block_reason"] or ""):
     raise SystemExit(f"unexpected symlink rejection reason: {identity['block_reason']}")
 PY
 
+trusted_execution_target="$TMP_ROOT/trusted-execution-target"
+untrusted_execution_link_dir="$TMP_ROOT/untrusted-execution-link"
+mkdir -p "$trusted_execution_target" "$untrusted_execution_link_dir"
+cat > "$trusted_execution_target/make" <<'EOF'
+#!/bin/sh
+printf '%s\n' "trusted execution target"
+EOF
+chmod +x "$trusted_execution_target/make"
+ln -s "$trusted_execution_target/make" "$untrusted_execution_link_dir/make"
+python3 - "$REPO_ROOT" "$trusted_execution_target" "$untrusted_execution_link_dir/make" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+trusted_root = Path(sys.argv[2])
+symlink_path = Path(sys.argv[3])
+module_path = repo_root / "scripts" / "readiness" / "check_shud_rshud.py"
+spec = importlib.util.spec_from_file_location("check_shud_rshud", module_path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+module.TRUSTED_EXECUTABLE_RESOLVED_PREFIXES = (trusted_root,)
+result = module.run_command([str(symlink_path)], timeout=5)
+if result["exit_code"] != 0:
+    raise SystemExit(f"trusted symlink target command failed: {result}")
+executed = result["executed_command"][0]
+expected = str((trusted_root / "make").resolve())
+if executed != expected:
+    raise SystemExit(f"expected realpath execution {expected}, got {executed}; result={result}")
+if result["executable"]["path"] == result["executable"]["selected_realpath"]:
+    raise SystemExit(f"fixture did not exercise symlink path: {result}")
+if "trusted execution target" not in result["stdout_tail"]:
+    raise SystemExit(f"trusted realpath command did not execute: {result}")
+PY
+
 pass_fixture="$TMP_ROOT/pass-fixture"
 make_fixture "$pass_fixture"
 pass_output="$pass_fixture/workspace/readiness/shud_rshud_readiness.json"

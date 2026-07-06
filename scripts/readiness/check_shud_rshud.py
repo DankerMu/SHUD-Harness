@@ -366,7 +366,7 @@ def run_command(
     allow_trusted_fallback_for_blocked_tool: bool = False,
 ) -> dict[str, Any]:
     identity = executable_identity(args[0]) if args else None
-    execution_path = identity.get("selected_path") if identity else None
+    execution_path = identity.get("selected_realpath") if identity else None
     if (
         identity
         and not identity["ok"]
@@ -374,7 +374,7 @@ def run_command(
         and identity["name"] == "git"
     ):
         apply_trusted_git_fallback(identity)
-        execution_path = identity.get("selected_path")
+        execution_path = identity.get("selected_realpath")
 
     result: dict[str, Any] = {
         "command": args,
