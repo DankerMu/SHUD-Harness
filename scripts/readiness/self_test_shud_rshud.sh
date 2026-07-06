@@ -696,6 +696,35 @@ assert_json_expr "$fake_python_attack_output" 'data["tool_identity"]["git"]["sel
 assert_json_expr "$fake_python_attack_output" 'all(data["tool_identity"][name]["ok"] is False for name in ["make", "Rscript"])'
 assert_json_expr "$fake_python_attack_output" 'data["conclusion"] != "pass"'
 
+if [ -x "$SCRIPT_DIR/check_shud_rshud.py" ]; then
+  fail "Python readiness helper is executable; public entrypoint must be the trusted wrapper"
+fi
+direct_python_attack_output="$fake_python_attack_fixture/workspace/readiness/direct_python_attack.json"
+direct_python_attack_marker="$fake_python_attack_fixture/direct-python.marker"
+direct_python_attack_stderr="$TMP_ROOT/direct-python-attack.stderr"
+set +e
+(
+  clear_make_environment
+  FAKE_PYTHON_MARKER="$direct_python_attack_marker" \
+    PATH="$fake_python_attack_bin:$TMP_ROOT/bin:$PATH" \
+    HOME="$fake_python_attack_fixture/fake-home" \
+    "$SCRIPT_DIR/check_shud_rshud.py" --repo-root "$fake_python_attack_fixture" --output "$direct_python_attack_output" >/dev/null 2>"$direct_python_attack_stderr"
+)
+direct_python_attack_status=$?
+set -e
+if [ "$direct_python_attack_status" -eq 0 ]; then
+  fail "direct Python helper execution unexpectedly returned zero"
+fi
+if [ -e "$direct_python_attack_marker" ]; then
+  fail "direct Python helper execution invoked fake python3 from PATH"
+fi
+if [ -e "$direct_python_attack_output" ]; then
+  if grep -q '"forged_by":"fake-python3"' "$direct_python_attack_output" \
+    || grep -q '"conclusion":"pass"' "$direct_python_attack_output"; then
+    fail "direct Python helper execution left pass-shaped forged output"
+  fi
+fi
+
 hardlink_output_fixture="$TMP_ROOT/hardlink-output-fixture"
 make_fixture "$hardlink_output_fixture"
 mkdir -p "$hardlink_output_fixture/workspace/readiness"
