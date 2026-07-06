@@ -198,3 +198,76 @@ Review focus:
 - Child process inheritance, path alias behavior, and raw-read compatibility are covered by tests.
 - Denial evidence is synchronized across tool result, WS skeleton event, and audit row only for trusted raw-denial sources; process-result-only failures stay synchronized as generic lifecycle facts.
 - Hardlink residual is demonstrated honestly and the reusable nlink helper detects it.
+
+## Subagent Workflow Fixture - Issue #20
+
+Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.
+
+Expanded-trigger rationale:
+- Core triggers: spawn tool entrypoint, permissions/profile enforcement, ErrorRecord remediation contract, and Zero adapter/tool registry governance.
+- Profile triggers: `remediation`, `guard_class`, `Zero`, `ToolBase`, `beforeExecute`, and role/tool governance.
+
+Change surface:
+- `packages/core` policy-gate pure rule for spawn profile subset validation.
+- SHUD runtime tool registry default evaluator wiring for `spawn_agent`.
+- Focused unit/runtime tests for the Zero spawn parameter `tools`; spec term `allowed_tools` maps to Zero's `tools` allowlist input.
+
+Must preserve:
+- `zero/` remains source-clean and pinned to `13e25c1`; no Zero spawn implementation edits.
+- Existing policy-gate wrapper behavior for bash/edit/spawn denials remains stable.
+- #24 role-to-tool map remains the only comparable profile source; this issue must not copy a second tool profile table.
+- Spawn depth and concurrent subagent limits remain out of scope for #20 and stay assigned to #27.
+
+Must add/change:
+- A reusable spawn profile subset rule rejects `spawn_agent` calls whose requested role's allowlist contains any tool id outside that role's canonical `ROLE_TOOL_MAP` entry.
+- Rejection payload uses `remediation.next_action=adjust_scope`, includes every excess tool id in the hint, and points `ref` to Roles_and_Boundaries §0.
+- The rule is tagged with `guard_class=authority` in rule metadata or denial evidence available to this slice; if the #26 guard-class assembly lint is not yet merged, #20 leaves the concrete lint hook to #26 and records the marker on the rule.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - `spawn_agent` is a tool-call entrypoint and must be guarded before execution.
+- Config / project setup: not selected - no package manager, provider, or environment setup changes.
+- File IO / path safety / overwrite: not selected - this slice does not read/write files at runtime beyond tests.
+- Schema / columns / units / field names: selected - remediation and rule metadata are contract-shaped.
+- Auth / permissions / secrets: selected - role permission profile enforcement is the core authority boundary.
+- Concurrency / shared state / ordering: not selected - depth/concurrency are #27 non-goals.
+- Resource limits / large input / discovery: not selected - allowlist input is a bounded array in focused tests; no discovery behavior.
+- Legacy compatibility / examples: selected - existing Zero `tools` allowlist behavior and role-map tests must remain compatible.
+- Error handling / rollback / partial outputs: selected - denial must happen before the underlying spawn executes and must be navigable.
+- Release / packaging / dependency compatibility: selected - no new runtime dependency and zero source diff stays 0.
+- Documentation / migration notes: selected - PR evidence must state the `allowed_tools` to `tools` terminology bridge and #27 split.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: not selected - no scientific evidence or PI-gated model decision changes.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no solver or hydrology runtime behavior changes.
+- Zero adapter / tool registry / agent role governance: selected - this is the governing boundary under test.
+
+Invariant Matrix:
+- Governing invariant: A spawn request may reduce a target role's tool allowlist, but must never add a tool id outside that role's canonical profile.
+- Source-of-truth identity/contract: Roles_and_Boundaries §0 role registry, #24 `ROLE_TOOL_MAP`, policy-gate-spike 条 3, and Control_Kernel §5.
+- Producers: spawn policy rule and SHUD runtime registry evaluator composition.
+- Validators/preflight: pure policy-gate unit tests and wrapped `spawn_agent` runtime tests.
+- Storage/cache/query: none - no persisted runtime state in this slice.
+- Public routes/entrypoints: wrapped `spawn_agent.run()` only.
+- Frontend/downstream consumers: none - M1 has no spawn UI surface.
+- Failure paths/rollback/stale state: denied spawn returns a stable policy-gate error without invoking the underlying spawn tool.
+- Evidence/audit/readiness: unit tests, OpenSpec validation, zero diff check, and PR review evidence.
+- Regression rows:
+  - Worker role spawn with `tools=["read","edit"]` -> deny before spawn execution, `remediation.next_action=adjust_scope`, hint contains `edit`, ref points to Roles_and_Boundaries §0.
+  - Worker role spawn with a subset such as `tools=["read","sandbox.exec"]` -> allow at pure rule level.
+  - Spawn input without an explicit allowlist -> allow at pure rule level so Zero's role/default tool narrowing remains unchanged.
+  - Unknown target role or non-array allowlist -> allow at this rule level; role existence and parameter schema errors remain owned by Zero spawn and future registry lint.
+  - `git -C zero diff --quiet` and HEAD `13e25c1` -> unchanged after implementation.
+
+Boundary-surface checklist:
+- Shared helper roots: `packages/core/src/tools/policy-gate-core.ts`, `policy-gate-registry.ts`, and `role-tool-map.ts`.
+- Public entrypoints: wrapped `spawn_agent.run()` path only.
+- Producer/consumer evidence boundaries: #24 role map constants -> spawn subset rule -> policy-gate denial JSON.
+- Unchanged downstream consumers: Zero `SpawnAgentTool`, role-map snapshot tests, bash sandbox wrapper, and future #27 depth/concurrency checks.
+
+Non-goals:
+- Spawn depth limit, concurrent subagent limit, true M3 spawn scheduling, role-file loading, and guard-class assembly lint.
+- Changing the canonical role map contents.
+
+Review focus:
+- The comparison directly references #24 constants and never duplicates the profile table.
+- Runtime tests exercise Zero's real `tools` input name, while PR evidence states it is the implementation of spec `allowed_tools`.
+- Denial occurs before the underlying spawn tool can create a subagent and gives an actionable `adjust_scope` remediation.

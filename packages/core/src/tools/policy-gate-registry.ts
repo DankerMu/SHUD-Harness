@@ -2,9 +2,10 @@ import { BaseTool, SpawnAgentTool, ToolRegistry, loadFuseList } from "@zero-os/c
 import { toErrorMessage } from "@zero-os/shared";
 import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
 import {
-  EMPTY_POLICY_GATE_CONTEXT,
   evaluatePolicyGate,
+  PolicyGuardClassSchema,
   PolicyGateRemediationSchema,
+  SPAWN_PROFILE_SUBSET_RULE,
   type HarnessRole,
   type PolicyGateContext,
   type PolicyGateDecision,
@@ -74,6 +75,10 @@ export function createPolicyGateEvaluator(context: PolicyGateContext): PolicyGat
   return (call) => evaluatePolicyGate(call, context);
 }
 
+export const DEFAULT_SHUD_POLICY_GATE_CONTEXT: PolicyGateContext = Object.freeze({
+  rules: Object.freeze([SPAWN_PROFILE_SUBSET_RULE])
+});
+
 export function wrapToolWithPolicyGate(
   tool: BaseTool,
   options: PolicyGateWrapperOptions
@@ -133,7 +138,8 @@ export function createShudRuntimeToolRegistry(
   options: ShudRuntimeToolRegistryOptions
 ): ToolRegistry {
   const registry = new ToolRegistry();
-  const evaluate = options.evaluate ?? createPolicyGateEvaluator(EMPTY_POLICY_GATE_CONTEXT);
+  const evaluate =
+    options.evaluate ?? createPolicyGateEvaluator(DEFAULT_SHUD_POLICY_GATE_CONTEXT);
   let includesSpawnAgent = false;
 
   for (const tool of options.tools ?? []) {
@@ -349,6 +355,7 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
 
   const ruleId = rawDecision.ruleId;
   const reason = rawDecision.reason;
+  const rawGuardClass = rawDecision.guardClass ?? rawDecision.guard_class;
   const validRuleId = typeof ruleId === "string" ? ruleId : undefined;
   const validReason = typeof reason === "string" ? reason : undefined;
   const issuePaths: string[] = [];
@@ -371,6 +378,12 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
     remediation = parsedRemediation.data;
   }
 
+  const parsedGuardClass =
+    rawGuardClass === undefined ? undefined : PolicyGuardClassSchema.safeParse(rawGuardClass);
+  if (parsedGuardClass && !parsedGuardClass.success) {
+    issuePaths.push("guardClass");
+  }
+
   if (
     issuePaths.length > 0 ||
     validRuleId === undefined ||
@@ -388,7 +401,8 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
     decision: "deny",
     ruleId: validRuleId,
     reason: validReason,
-    remediation
+    remediation,
+    ...(parsedGuardClass?.success ? { guardClass: parsedGuardClass.data } : {})
   };
 }
 
@@ -450,6 +464,7 @@ function buildPolicyGateDeniedResult(
     tool_id: toolId,
     reason: decision.reason,
     ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
+    ...(decision.guardClass ? { guard_class: decision.guardClass } : {}),
     ...(decision.remediation ? { remediation: decision.remediation } : {})
   };
 
