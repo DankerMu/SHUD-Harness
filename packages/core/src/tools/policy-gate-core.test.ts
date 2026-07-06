@@ -208,6 +208,36 @@ describe("spawn profile subset policy rule", () => {
     }
   });
 
+  test("denies missing and blank spawn instructions before normalized input can reach execution", () => {
+    const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
+    const inputs: unknown[] = [
+      { role: "worker", tools: ["read"] },
+      { instruction: undefined, role: "worker", tools: ["read"] },
+      { instruction: "   ", role: "worker", tools: ["read"] }
+    ];
+
+    for (const input of inputs) {
+      const decision = evaluatePolicyGate(spawnToolCallRaw(input), context);
+      const normalized = normalizeSpawnAgentInput(spawnToolCallRaw(input));
+
+      for (const result of [decision, normalized]) {
+        expect(result).toMatchObject({
+          decision: "deny",
+          ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+          guardClass: "authority",
+          remediation: {
+            next_action: "adjust_scope",
+            ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+          }
+        });
+        if (result.decision === "deny") {
+          expect(result.reason).toContain("instruction");
+          expect(result.remediation.hint).toContain("instruction");
+        }
+      }
+    }
+  });
+
   test("denies array spawn input with own authority fields", () => {
     const input = ["not a spawn record"] as unknown[] & Record<string, unknown>;
     input.instruction = "Run the delegated task.";

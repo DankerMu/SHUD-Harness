@@ -89,6 +89,14 @@ export const DEFAULT_SHUD_POLICY_GATE_CONTEXT: PolicyGateContext = Object.freeze
   rules: Object.freeze([SPAWN_PROFILE_SUBSET_RULE])
 });
 
+// Mirrors Zero's sub-agent hard filter at the pinned zero submodule boundary.
+const ZERO_SUB_AGENT_BLOCKED_TOOL_IDS = new Set([
+  "spawn_agent",
+  "wait_agent",
+  "close_agent",
+  "send_input"
+]);
+
 export function createShudPolicyGateEvaluator(
   customEvaluate?: PolicyGateEvaluator
 ): PolicyGateEvaluator {
@@ -466,12 +474,14 @@ function validateSpawnAgentToolAvailability(
     return undefined;
   }
 
-  const missingToolIds = uniqueStrings(toolIds.filter((toolId) => !registry.get(toolId)));
-  if (missingToolIds.length === 0) {
+  const unavailableToolIds = uniqueStrings(
+    toolIds.filter((toolId) => !registry.get(toolId) || ZERO_SUB_AGENT_BLOCKED_TOOL_IDS.has(toolId))
+  );
+  if (unavailableToolIds.length === 0) {
     return undefined;
   }
 
-  return buildSpawnToolAvailabilityDeny(missingToolIds);
+  return buildSpawnToolAvailabilityDeny(unavailableToolIds);
 }
 
 function readNormalizedSpawnToolIds(input: unknown): string[] {
@@ -488,16 +498,16 @@ function readNormalizedSpawnToolIds(input: unknown): string[] {
 }
 
 function buildSpawnToolAvailabilityDeny(
-  missingToolIds: readonly string[]
+  unavailableToolIds: readonly string[]
 ): Extract<PolicyGateDecision, { decision: "deny" }> {
-  const missingSummary = formatToolIdSummary(missingToolIds);
+  const unavailableSummary = formatToolIdSummary(unavailableToolIds);
   return {
     decision: "deny",
     ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
-    reason: `spawn_agent normalized tool contract includes ${missingToolIds.length} tool id(s) unavailable in the SHUD runtime registry; examples: ${missingSummary}.`,
+    reason: `spawn_agent normalized tool contract includes ${unavailableToolIds.length} tool id(s) unavailable in the spawned scoped registry; examples: ${unavailableSummary}.`,
     remediation: {
       next_action: "adjust_scope",
-      hint: `Register the missing SHUD runtime tools or request only available spawn tools; missing examples: ${missingSummary}.`,
+      hint: `Register missing SHUD runtime tools or remove Zero-blocked spawn tools before spawning; unavailable examples: ${unavailableSummary}.`,
       ref: SPAWN_PROFILE_SUBSET_POLICY_REF
     },
     guardClass: "authority"

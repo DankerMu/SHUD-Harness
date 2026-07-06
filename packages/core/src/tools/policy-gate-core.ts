@@ -255,6 +255,11 @@ function parseSpawnAgentInputSnapshot(input: unknown): SpawnAgentInputSnapshotRe
     return fields;
   }
 
+  const instruction = validateSpawnInstruction(fieldSnapshot, fields.fields);
+  if (instruction.decision === "deny") {
+    return instruction;
+  }
+
   const mode = validateSpawnMode(fields.fields);
   if (mode.decision === "deny") {
     return mode;
@@ -377,6 +382,22 @@ function validateSpawnMode(
   }
 
   return buildSpawnProfileInvalidModeDeny(mode);
+}
+
+function validateSpawnInstruction(
+  snapshot: SpawnFieldSnapshot,
+  fields: ReadonlyMap<SpawnAgentStringField, string>
+): PolicyRuleDecision {
+  if (!snapshot.presentFields.has("instruction") || snapshot.values.instruction === undefined) {
+    return buildSpawnProfileMissingInstructionDeny();
+  }
+
+  const instruction = fields.get("instruction");
+  if (instruction === undefined || instruction.trim().length === 0) {
+    return buildSpawnProfileMissingInstructionDeny();
+  }
+
+  return { decision: "allow" };
 }
 
 function snapshotSpawnRole(
@@ -711,6 +732,22 @@ function buildSpawnProfileMalformedInputDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: "Provide spawn_agent input as plain JSON-compatible data matching the Zero spawn_agent schema.",
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+    },
+    guardClass: "authority"
+  };
+}
+
+function buildSpawnProfileMissingInstructionDeny(): Extract<
+  PolicyRuleDecision,
+  { decision: "deny" }
+> {
+  return {
+    decision: "deny",
+    reason: "spawn_agent instruction must be a non-empty string before policy-gated execution.",
+    remediation: {
+      next_action: "adjust_scope",
+      hint: "Provide a non-empty spawn_agent instruction before spawning a SHUD role.",
       ref: SPAWN_PROFILE_SUBSET_POLICY_REF
     },
     guardClass: "authority"
