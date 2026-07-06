@@ -17,8 +17,8 @@ export const ROLE_TOOL_IDS = Object.freeze([
   "git.inspect",
   "harness.job.collect",
   "harness.job.submit",
+  "harness.memory.propose",
   "harness.report.generate",
-  "memory",
   "patch.apply",
   "read",
   "repo.glob",
@@ -55,13 +55,16 @@ export const ROLE_TOOL_MAP = Object.freeze({
     [
       "harness.job.collect",
       "harness.job.submit",
+      "harness.memory.propose",
       "harness.report.generate",
-      "memory",
       "read",
       "spawn_agent",
       "wait_agent"
     ],
-    ["memory is draft/proposal-only.", "read is limited to scheduling context."]
+    [
+      "harness.memory.propose is a future proposal-only draft memory adapter; raw Zero memory is not authorized.",
+      "read is limited to scheduling context."
+    ]
   ),
   repo_explorer: defineRoleToolProfile(
     ["git.inspect", "read", "repo.glob", "repo.grep", "repo.search"],
@@ -70,7 +73,7 @@ export const ROLE_TOOL_MAP = Object.freeze({
   worker: defineRoleToolProfile(
     [
       "artifact.write",
-      "memory",
+      "harness.memory.propose",
       "read",
       "rshud.compute_metrics",
       "rshud.read_output",
@@ -80,20 +83,23 @@ export const ROLE_TOOL_MAP = Object.freeze({
     ],
     [
       "artifact.write is limited to workspaces/artifacts/runs.",
-      "memory is draft/proposal-only.",
+      "harness.memory.propose is a future proposal-only draft memory adapter; raw Zero memory is not authorized.",
       "sandbox.exec is sandbox bash, not repository source editing."
     ]
   ),
   coder: defineRoleToolProfile(
-    ["bash", "edit", "memory", "patch.apply", "read", "write"],
+    ["bash", "edit", "harness.memory.propose", "patch.apply", "read", "write"],
     [
       "bash, write, edit, and patch.apply are limited to the task worktree.",
-      "memory is draft/proposal-only."
+      "harness.memory.propose is a future proposal-only draft memory adapter; raw Zero memory is not authorized."
     ]
   ),
   reviewer: defineRoleToolProfile(
-    ["memory", "read", "validator.run"],
-    ["validator.run is deterministic and read-only.", "memory is draft/proposal-only."]
+    ["harness.memory.propose", "read", "validator.run"],
+    [
+      "validator.run is deterministic and read-only.",
+      "harness.memory.propose is a future proposal-only draft memory adapter; raw Zero memory is not authorized."
+    ]
   )
 } satisfies RoleToolMap);
 

@@ -10,11 +10,11 @@ Depends on #16
 
 ## In Scope
 - 常量映射表：canonical 五角色（coordinator | repo_explorer | worker | coder | reviewer）→ exact `toolIds` 集合，基准照 spec 附表（PI 确认版 + 2026-07-05 fixture clarification）。
-- `toolIds` 是唯一可参与 spawn `allowed_tools` 子集比较的注册名数组；`permissionNotes` 只解释 draft memory、artifact 写入范围、git/search 只读等语义，不进入子集比较。
+- `toolIds` 是唯一可参与 spawn `allowed_tools` 子集比较的注册名数组；`permissionNotes` 只解释 `harness.memory.propose` proposal-only draft memory、artifact 写入范围、git/search 只读等语义，不进入子集比较。
 - 工具 id 命名裁决：
-  - Zero 当前原生注册名：`spawn_agent`, `wait_agent`, `read`, `write`, `edit`, `bash`, `memory`。
-  - SHUD-Harness 点分注册名：`harness.job.submit`, `harness.job.collect`, `harness.report.generate`, `git.inspect`, `repo.search`, `repo.glob`, `repo.grep`, `artifact.write`, `sandbox.exec`, `shud.build`, `shud.run`, `rshud.read_output`, `rshud.compute_metrics`, `patch.apply`, `validator.run`。
-  - `memory(draft)` 在 M1 表内使用 exact id `memory`，draft/proposal-only 语义只写入 `permissionNotes`。
+  - Zero 当前原生注册名：`spawn_agent`, `wait_agent`, `read`, `write`, `edit`, `bash`。
+  - SHUD-Harness 点分注册名：`harness.job.submit`, `harness.job.collect`, `harness.memory.propose`, `harness.report.generate`, `git.inspect`, `repo.search`, `repo.glob`, `repo.grep`, `artifact.write`, `sandbox.exec`, `shud.build`, `shud.run`, `rshud.read_output`, `rshud.compute_metrics`, `patch.apply`, `validator.run`。
+  - `harness.memory.propose` 是 M4 记忆封装前预留的未来 adapter 注册 id / proposal-only 占位，不是 raw Zero `memory`；raw Zero `memory` 在 M1 可比较 `toolIds` 中显式排除。
 - 快照测试：映射变更必须显式更新快照。
 - 语义不变式单测：repo_explorer/reviewer 无写类工具；worker 无仓库源码编辑工具；spawn/wait 唯一归 coordinator；coordinator 无 bash/write/edit/patch；coder 独占 worktree edit+patch。
 
@@ -22,11 +22,11 @@ Depends on #16
 
 ```json
 {
-  "coordinator": ["harness.job.collect", "harness.job.submit", "harness.report.generate", "memory", "read", "spawn_agent", "wait_agent"],
+  "coordinator": ["harness.job.collect", "harness.job.submit", "harness.memory.propose", "harness.report.generate", "read", "spawn_agent", "wait_agent"],
   "repo_explorer": ["git.inspect", "read", "repo.glob", "repo.grep", "repo.search"],
-  "worker": ["artifact.write", "memory", "read", "rshud.compute_metrics", "rshud.read_output", "sandbox.exec", "shud.build", "shud.run"],
-  "coder": ["bash", "edit", "memory", "patch.apply", "read", "write"],
-  "reviewer": ["memory", "read", "validator.run"]
+  "worker": ["artifact.write", "harness.memory.propose", "read", "rshud.compute_metrics", "rshud.read_output", "sandbox.exec", "shud.build", "shud.run"],
+  "coder": ["bash", "edit", "harness.memory.propose", "patch.apply", "read", "write"],
+  "reviewer": ["harness.memory.propose", "read", "validator.run"]
 }
 ```
 
