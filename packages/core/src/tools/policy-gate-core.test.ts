@@ -321,7 +321,7 @@ describe("spawn profile subset policy rule", () => {
         }
       });
       if (decision.decision === "deny") {
-        expect(decision.reason).toContain("omits tools/allowed_tools");
+        expect(decision.reason).toContain("no canonical SHUD role profile");
         expect(decision.remediation.hint).toContain("canonical SHUD spawn role");
       }
     }
@@ -511,64 +511,41 @@ describe("spawn profile subset policy rule", () => {
     );
   });
 
-  test("allows noncanonical role small valid explicit allowlists at this rule level", () => {
+  test("denies roleless and noncanonical explicit allowlists without a comparable profile", () => {
     const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
 
-    expect(
-      evaluatePolicyGate(
-        spawnToolCall({ role: "not_a_harness_role", tools: ["read", "edit"] }),
-        context
-      )
-    ).toEqual({ decision: "allow" });
+    for (const input of [
+      { tools: ["read", "edit"] },
+      { allowed_tools: [" read ", "edit", "read"] },
+      { role: "not_a_harness_role", tools: ["read", "edit"] },
+      { role: "not_a_harness_role", allowed_tools: ["read"] }
+    ]) {
+      const decision = evaluatePolicyGate(spawnToolCall(input), context);
+      const normalized = normalizeSpawnAgentInput(spawnToolCall(input));
 
-    expect(evaluatePolicyGate(spawnToolCall({ tools: ["read", "edit"] }), context)).toEqual({
-      decision: "allow"
-    });
-
-    const normalized = normalizeSpawnAgentInput(
-      spawnToolCall({
-        role: "not_a_harness_role",
-        allowed_tools: [" read ", "edit", "read"]
-      })
-    );
-
-    expect(normalized).toMatchObject({
-      decision: "allow",
-      changed: true
-    });
-    if (normalized.decision === "allow") {
-      expect(normalized.input).toMatchObject({
-        role: "not_a_harness_role",
-        tools: ["read", "edit"]
+      expect(decision).toMatchObject({
+        decision: "deny",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        guardClass: "authority",
+        remediation: {
+          next_action: "adjust_scope",
+          ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+        }
       });
-      expect(normalized.input).not.toHaveProperty("allowed_tools");
-    }
-
-    const normalizedNoRole = normalizeSpawnAgentInput(
-      spawnToolCall({
-        allowed_tools: [" read ", "edit", "read"]
-      })
-    );
-
-    expect(normalizedNoRole).toMatchObject({
-      decision: "allow",
-      changed: true
-    });
-    if (normalizedNoRole.decision === "allow") {
-      expect(normalizedNoRole.input).toMatchObject({
-        tools: ["read", "edit"]
+      expect(normalized).toMatchObject({
+        decision: "deny",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        guardClass: "authority",
+        remediation: {
+          next_action: "adjust_scope",
+          ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+        }
       });
-      expect(normalizedNoRole.input).not.toHaveProperty("role");
-      expect(normalizedNoRole.input).not.toHaveProperty("allowed_tools");
+      if (decision.decision === "deny") {
+        expect(decision.reason).toContain("no canonical SHUD role profile");
+        expect(decision.remediation.hint).toContain("canonical SHUD spawn role");
+      }
     }
-  });
-
-  test("allows unknown target roles at this rule level", () => {
-    const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
-
-    expect(
-      evaluatePolicyGate(spawnToolCall({ role: "not_a_harness_role", tools: ["edit"] }), context)
-    ).toEqual({ decision: "allow" });
   });
 
   test("bounds excess tool id denial output while keeping an edit example", () => {

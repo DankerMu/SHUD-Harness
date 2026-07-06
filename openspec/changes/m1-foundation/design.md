@@ -256,7 +256,7 @@ Invariant Matrix:
   - Canonical-role spawn input without an explicit allowlist -> normalized before Zero execution to that role's #24 canonical profile, so Zero built-in or `.zero/roles` defaults cannot widen SHUD permissions.
   - Spec alias `allowed_tools` -> normalized to Zero's real `tools` input before execution; malformed or empty canonical-role allowlists -> fail closed with `remediation.next_action=adjust_scope`.
   - Whitespace-padded canonical roles -> policy checks and normalized execution input use the same trimmed role identity as Zero, so `role="reviewer "` cannot bypass #24 role profiles.
-  - Unknown target role -> small valid explicit allowlists remain outside #24 role-profile subset enforcement; explicit allowlist shape and resource budgets still fail closed before Zero, while role existence and non-canonical role schema handling remain owned by Zero spawn and future registry lint.
+  - Missing or non-canonical target role -> fail closed before Zero execution, because there is no #24 canonical profile to prove an explicit allowlist is only a subset; future registry lint may add richer role-schema diagnostics but cannot re-open roleless/custom-role authority.
   - Custom runtime evaluators -> run after SHUD mandatory authority guards and may only add denials, not replace spawn profile subset enforcement.
   - Custom runtime evaluators receive an isolated policy input snapshot and cannot mutate the execution input after authority evaluation.
   - Oversized or malformed tool-id lists -> processing fails closed under explicit count/length/total-character budgets; excess-tool denial remains bounded, includes a small sample such as `edit` plus total count, and does not echo every untrusted id.

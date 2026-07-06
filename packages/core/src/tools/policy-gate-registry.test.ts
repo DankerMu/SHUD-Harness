@@ -183,12 +183,19 @@ describe("policy-gated zero tool registry", () => {
       error?: string;
       tool_id?: string;
       reason?: string;
+      remediation?: unknown;
     };
-    expect(payload).toEqual({
+    expect(payload).toMatchObject({
       error: "policy_gate_input_preparation_failed",
       tool_id: "edit",
-      reason: "Policy gate could not safely prepare the tool input before evaluation."
+      reason: "Policy gate could not safely prepare the tool input before evaluation.",
+      remediation: {
+        next_action: "fix_and_retry",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      }
     });
+    expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+    expect(JSON.stringify(payload.remediation)).not.toContain(sentinel);
     expect(customCalls).toBe(0);
     expect(editTool.calls).toBe(0);
     expect(handle.getState()).toBe("finished");
@@ -948,7 +955,7 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
-  test("SHUD runtime denies spawn without role or allowlist before Zero default tools", async () => {
+  test("SHUD runtime denies spawn without a canonical role before Zero defaults or explicit tools", async () => {
     const fixture = await createRawFixture();
     try {
       const modelRouter = createSpawnModelRouterStub();
@@ -974,35 +981,52 @@ describe("policy-gated zero tool registry", () => {
         }
       });
 
-      const result = await registry.get("spawn_agent")?.run(
-        {
-          ...fixture.context,
-          agentControl: agentControl.control,
-          projectRoot: fixture.root
-        },
+      for (const input of [
         {
           instruction: "Run a task with default tools."
+        },
+        {
+          instruction: "Run a task with explicit edit.",
+          tools: ["edit"]
+        },
+        {
+          instruction: "Run a task with an allowed_tools alias.",
+          allowed_tools: ["edit"]
+        },
+        {
+          instruction: "Run a task with a noncanonical role.",
+          role: "custom_role",
+          tools: ["edit"]
         }
-      );
+      ]) {
+        const result = await registry.get("spawn_agent")?.run(
+          {
+            ...fixture.context,
+            agentControl: agentControl.control,
+            projectRoot: fixture.root
+          },
+          input
+        );
 
-      expect(result?.success).toBe(false);
-      expect(result?.output).toContain("policy_gate_denied");
-      const payload = JSON.parse(result?.output ?? "{}") as {
-        error?: string;
-        ruleId?: string;
-        guard_class?: string;
-        remediation?: {
-          next_action?: string;
-          hint?: string;
-          ref?: string;
+        expect(result?.success).toBe(false);
+        expect(result?.output).toContain("policy_gate_denied");
+        const payload = JSON.parse(result?.output ?? "{}") as {
+          error?: string;
+          ruleId?: string;
+          guard_class?: string;
+          remediation?: {
+            next_action?: string;
+            hint?: string;
+            ref?: string;
+          };
         };
-      };
-      expect(payload.error).toBe("policy_gate_denied");
-      expect(payload.ruleId).toBe(SPAWN_PROFILE_SUBSET_RULE_ID);
-      expect(payload.guard_class).toBe("authority");
-      expect(payload.remediation?.next_action).toBe("adjust_scope");
-      expect(payload.remediation?.hint).toContain("canonical SHUD spawn role");
-      expect(payload.remediation?.ref).toBe(SPAWN_PROFILE_SUBSET_POLICY_REF);
+        expect(payload.error).toBe("policy_gate_denied");
+        expect(payload.ruleId).toBe(SPAWN_PROFILE_SUBSET_RULE_ID);
+        expect(payload.guard_class).toBe("authority");
+        expect(payload.remediation?.next_action).toBe("adjust_scope");
+        expect(payload.remediation?.hint).toContain("canonical SHUD spawn role");
+        expect(payload.remediation?.ref).toBe(SPAWN_PROFILE_SUBSET_POLICY_REF);
+      }
       expect(customCalls).toBe(0);
       expect(agentControl.getSpawnCalls()).toBe(0);
     } finally {

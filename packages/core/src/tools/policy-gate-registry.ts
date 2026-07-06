@@ -538,10 +538,16 @@ function buildRawDataRuleMisconfiguredResult(
 }
 
 function buildPolicyGatePreparationFailedResult(toolId: string): ToolResult {
+  const remediation: PolicyGateRemediation = {
+    next_action: "fix_and_retry",
+    hint: "Provide plain JSON-compatible tool input so the policy gate can safely inspect it before execution.",
+    ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+  };
   const payload = {
     error: "policy_gate_input_preparation_failed",
     tool_id: toolId,
-    reason: "Policy gate could not safely prepare the tool input before evaluation."
+    reason: "Policy gate could not safely prepare the tool input before evaluation.",
+    remediation
   };
 
   return {

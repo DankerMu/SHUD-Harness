@@ -555,7 +555,7 @@ function evaluateSpawnProfileSubsetSnapshot(
 
   const role = snapshot.role.kind === "present" ? snapshot.role.canonicalRole : undefined;
   if (!role) {
-    return { decision: "allow" };
+    return buildSpawnProfileMissingProfileDeny(snapshot.role.label);
   }
 
   const excessToolIds = uniqueStrings(
@@ -661,10 +661,10 @@ function buildSpawnProfileMissingProfileDeny(
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
     decision: "deny",
-    reason: `spawn_agent for ${role} omits tools/allowed_tools and has no canonical SHUD role profile to constrain Zero defaults.`,
+    reason: `spawn_agent for ${role} has no canonical SHUD role profile to constrain Zero tools.`,
     remediation: {
       next_action: "adjust_scope",
-      hint: `Provide a canonical SHUD spawn role or an explicit non-empty tools/allowed_tools subset before spawning ${role}.`,
+      hint: `Provide a canonical SHUD spawn role and, when constraining tools, a non-empty tools/allowed_tools subset of that role's profile before spawning ${role}.`,
       ref: SPAWN_PROFILE_SUBSET_POLICY_REF
     },
     guardClass: "authority"
