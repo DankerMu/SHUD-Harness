@@ -358,18 +358,69 @@ function sha256(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
 
-function validateLockfileIdentity(dependencyLock, lockfilePath) {
+function toPosixRelativePath(fromPath, toPath) {
+  return path.relative(fromPath, toPath).split(path.sep).join("/");
+}
+
+function parsePackageManager(packageJson) {
+  if (!isRecord(packageJson)) {
+    return { errors: ["package.json root must be an object"] };
+  }
+
+  const packageManager = packageJson.packageManager;
+  if (typeof packageManager !== "string" || packageManager.length === 0) {
+    return { errors: ["package.json#packageManager must be a non-empty string"] };
+  }
+
+  const separatorIndex = packageManager.lastIndexOf("@");
+  if (separatorIndex <= 0 || separatorIndex === packageManager.length - 1) {
+    return { errors: [`package.json#packageManager must use <name>@<version>, got ${packageManager}`] };
+  }
+
+  return {
+    packageManager: {
+      name: packageManager.slice(0, separatorIndex),
+      version: packageManager.slice(separatorIndex + 1),
+    },
+    errors: [],
+  };
+}
+
+function validateLockfileIdentity(dependencyLock, packageJson, repoRoot, lockfilePath) {
   const errors = [];
+  const parsedPackageManager = parsePackageManager(packageJson);
+  errors.push(...parsedPackageManager.errors);
+
   const packageManager = dependencyLock.package_manager;
   if (!isRecord(packageManager)) {
-    return ["DependencyLock.package_manager must be an object"];
+    errors.push("DependencyLock.package_manager must be an object");
+    return errors;
   }
-  if (packageManager.name !== "bun") {
-    errors.push(`DependencyLock.package_manager.name must be bun, got ${packageManager.name}`);
+
+  if (parsedPackageManager.packageManager) {
+    if (packageManager.name !== parsedPackageManager.packageManager.name) {
+      errors.push(
+        `DependencyLock.package_manager.name mismatch: expected ${parsedPackageManager.packageManager.name} from package.json#packageManager, got ${packageManager.name}`,
+      );
+    }
+    if (packageManager.version !== parsedPackageManager.packageManager.version) {
+      errors.push(
+        `DependencyLock.package_manager.version mismatch: expected ${parsedPackageManager.packageManager.version} from package.json#packageManager, got ${packageManager.version}`,
+      );
+    }
   }
-  if (packageManager.lockfile_sha256 !== sha256(lockfilePath)) {
+
+  const expectedLockfilePath = toPosixRelativePath(repoRoot, lockfilePath);
+  if (packageManager.lockfile_path !== expectedLockfilePath) {
     errors.push(
-      `DependencyLock.package_manager.lockfile_sha256 mismatch: expected ${sha256(lockfilePath)}, got ${packageManager.lockfile_sha256}`,
+      `DependencyLock.package_manager.lockfile_path mismatch: expected ${expectedLockfilePath}, got ${packageManager.lockfile_path}`,
+    );
+  }
+
+  const expectedLockfileSha256 = sha256(lockfilePath);
+  if (packageManager.lockfile_sha256 !== expectedLockfileSha256) {
+    errors.push(
+      `DependencyLock.package_manager.lockfile_sha256 mismatch: expected ${expectedLockfileSha256}, got ${packageManager.lockfile_sha256}`,
     );
   }
   return errors;
@@ -387,13 +438,15 @@ function main() {
   const repoRoot = path.resolve(options.repo_root ?? defaultRepoRoot);
   const lockfilePath = path.resolve(options.lockfile ?? path.join(repoRoot, "bun.lock"));
   const dependencyLockPath = path.resolve(options.dependency_lock ?? path.join(repoRoot, "dependency-lock.initial.json"));
+  const packageJsonPath = path.join(repoRoot, "package.json");
 
   const lock = readBunLock(lockfilePath);
   const dependencyLock = readJson(dependencyLockPath);
+  const packageJson = readJson(packageJsonPath);
 
   const expectedResult = collectExpectedPackages(lock);
   const actualResult = collectActualPackages(dependencyLock);
-  const identityErrors = validateLockfileIdentity(dependencyLock, lockfilePath);
+  const identityErrors = validateLockfileIdentity(dependencyLock, packageJson, repoRoot, lockfilePath);
   const compareErrors = comparePackages(expectedResult.expected, actualResult.actual);
   const errors = [...expectedResult.errors, ...actualResult.errors, ...identityErrors, ...compareErrors];
 

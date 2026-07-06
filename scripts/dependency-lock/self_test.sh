@@ -20,11 +20,14 @@ fail() {
 EMPTY_LOCK="$TMP_ROOT/empty-packages.json"
 MISSING_LOCK="$TMP_ROOT/missing-direct-dependency.json"
 MISMATCH_LOCK="$TMP_ROOT/mismatched-version.json"
+STALE_PACKAGE_MANAGER_VERSION_LOCK="$TMP_ROOT/stale-package-manager-version.json"
+STALE_LOCKFILE_PATH_LOCK="$TMP_ROOT/stale-lockfile-path.json"
 
-node --input-type=module - "$BASE_LOCK" "$EMPTY_LOCK" "$MISSING_LOCK" "$MISMATCH_LOCK" <<'JS'
+node --input-type=module - "$BASE_LOCK" "$EMPTY_LOCK" "$MISSING_LOCK" "$MISMATCH_LOCK" "$STALE_PACKAGE_MANAGER_VERSION_LOCK" "$STALE_LOCKFILE_PATH_LOCK" <<'JS'
 import { readFileSync, writeFileSync } from "node:fs";
 
-const [basePath, emptyPath, missingPath, mismatchPath] = process.argv.slice(2);
+const [basePath, emptyPath, missingPath, mismatchPath, stalePackageManagerVersionPath, staleLockfilePathPath] =
+  process.argv.slice(2);
 const base = JSON.parse(readFileSync(basePath, "utf8"));
 const writeFixture = (target, value) => {
   writeFileSync(target, `${JSON.stringify(value, null, 2)}\n`);
@@ -49,6 +52,14 @@ if (!typescript) {
 }
 typescript.version = "0.0.0-self-test";
 writeFixture(mismatchPath, mismatch);
+
+const stalePackageManagerVersion = structuredClone(base);
+stalePackageManagerVersion.package_manager.version = "0.0.0-self-test";
+writeFixture(stalePackageManagerVersionPath, stalePackageManagerVersion);
+
+const staleLockfilePath = structuredClone(base);
+staleLockfilePath.package_manager.lockfile_path = "stale/bun.lock";
+writeFixture(staleLockfilePathPath, staleLockfilePath);
 JS
 
 node "$VALIDATOR" > "$TMP_ROOT/positive.out" 2>&1 || {
@@ -76,5 +87,7 @@ expect_failure() {
 expect_failure "empty-packages" "$EMPTY_LOCK" "DependencyLock.packages must be a non-empty array"
 expect_failure "missing-direct-dependency" "$MISSING_LOCK" "missing package: zod"
 expect_failure "mismatched-version" "$MISMATCH_LOCK" "version mismatch for typescript"
+expect_failure "stale-package-manager-version" "$STALE_PACKAGE_MANAGER_VERSION_LOCK" "DependencyLock.package_manager.version mismatch"
+expect_failure "stale-lockfile-path" "$STALE_LOCKFILE_PATH_LOCK" "DependencyLock.package_manager.lockfile_path mismatch"
 
-printf 'dependency-lock self-test passed: positive validation plus empty/missing/version negative fixtures\n'
+printf 'dependency-lock self-test passed: positive validation plus package and identity negative fixtures\n'
