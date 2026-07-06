@@ -24,6 +24,10 @@ const ALLOWED_SOURCES = new Set(["npm", "git", "local"]);
 const EXPECTED_SUBMODULES = ["SHUD", "rSHUD", "AutoSHUD", "zero"];
 const EXPECTED_SUBMODULE_SET = new Set(EXPECTED_SUBMODULES);
 const ZERO_COMMIT = "13e25c116c62411e6ee8a0ad67a6c53dc7c376c6";
+const READ_ONLY_GIT_ENV = {
+  GIT_OPTIONAL_LOCKS: "0",
+  GIT_NO_LAZY_FETCH: "1",
+};
 
 function usage() {
   return `Usage: node scripts/dependency-lock/validate.mjs [options]
@@ -499,6 +503,10 @@ function parseGitmodules(text) {
 function gitOutput(args, repoRoot) {
   return execFileSync("git", ["-C", repoRoot, ...args], {
     encoding: "utf8",
+    env: {
+      ...process.env,
+      ...READ_ONLY_GIT_ENV,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
