@@ -931,12 +931,6 @@ describe("policy-gated zero tool registry", () => {
         mutate(input) {
           (input as { values: string[] }).values[0] = "mutated";
         }
-      },
-      {
-        label: "array-push",
-        mutate(input) {
-          (input as { values: string[] }).values.push("mutated");
-        }
       }
     ];
 
@@ -975,6 +969,44 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("unsupported non-spawn evaluator array push fails closed without inner execution", async () => {
+    const editTool = new RecordingTool("edit");
+    const runningToolRegistry = new TestRunningToolRegistry();
+    const handle = runningToolRegistry.register({
+      toolUseId: "POLICY-UNSUPPORTED-PUSH-1",
+      toolName: "edit",
+      abortable: false
+    });
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        (call.input as { values: string[] }).values.push("mutated");
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(
+      {
+        ...createToolContext("worker"),
+        currentToolUseId: "POLICY-UNSUPPORTED-PUSH-1",
+        runningToolRegistry
+      },
+      {
+        values: ["original"]
+      }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("push");
+    expect(result.outputSummary).toContain("Error:");
+    expect(editTool.calls).toBe(0);
+    expect(handle.getState()).toBe("finished");
+    expect(handle.getTerminalMetadata()).toMatchObject({
+      cause: "completed",
+      success: false,
+      outputSummary: result.outputSummary
+    });
+  });
+
   test("honest non-spawn evaluator can structuredClone input before allowing", async () => {
     const editTool = new RecordingTool("edit");
     const input = {
@@ -991,8 +1023,8 @@ describe("policy-gated zero tool registry", () => {
           spread: string[];
           includesBeta: boolean;
           mapped: string[];
-          pushedLength: number;
-          afterPush: string[];
+          pushValue: unknown;
+          filterValue: unknown;
         }
       | undefined;
     let evaluatorInputPrototype: object | null | undefined;
@@ -1007,6 +1039,8 @@ describe("policy-gated zero tool registry", () => {
     let evaluatorIteratorNextPrototype: object | null | undefined;
     let evaluatorInputExtensible: boolean | undefined;
     let evaluatorNestedExtensible: boolean | undefined;
+    let evaluatorArrayExtensible: boolean | undefined;
+    let evaluatorMapResultExtensible: boolean | undefined;
     let evaluatorArrayPrototypeFrozen: boolean | undefined;
     let evaluatorArrayMapFunctionFrozen: boolean | undefined;
     let evaluatorIteratorFrozen: boolean | undefined;
@@ -1026,8 +1060,8 @@ describe("policy-gated zero tool registry", () => {
           spread: [...values],
           includesBeta: values.includes("beta"),
           mapped,
-          pushedLength: values.push("gamma"),
-          afterPush: [...values]
+          pushValue: (values as { push?: unknown }).push,
+          filterValue: (values as { filter?: unknown }).filter
         };
         evaluatorInputPrototype = Object.getPrototypeOf(call.input as object);
         evaluatorNestedPrototype = Object.getPrototypeOf(
@@ -1035,6 +1069,8 @@ describe("policy-gated zero tool registry", () => {
         );
         evaluatorInputExtensible = Object.isExtensible(call.input as object);
         evaluatorNestedExtensible = Object.isExtensible((call.input as { nested: object }).nested);
+        evaluatorArrayExtensible = Object.isExtensible(values);
+        evaluatorMapResultExtensible = Object.isExtensible(mapped);
         evaluatorArrayPrototype = Object.getPrototypeOf(values);
         evaluatorArrayPrototypeFrozen =
           evaluatorArrayPrototype === null ? undefined : Object.isFrozen(evaluatorArrayPrototype);
@@ -1085,13 +1121,15 @@ describe("policy-gated zero tool registry", () => {
       spread: ["alpha", "beta"],
       includesBeta: true,
       mapped: ["ALPHA", "BETA"],
-      pushedLength: 3,
-      afterPush: ["alpha", "beta", "gamma"]
+      pushValue: undefined,
+      filterValue: undefined
     });
     expect(evaluatorInputPrototype).toBeNull();
     expect(evaluatorNestedPrototype).toBeNull();
     expect(evaluatorInputExtensible).toBe(false);
     expect(evaluatorNestedExtensible).toBe(false);
+    expect(evaluatorArrayExtensible).toBe(false);
+    expect(evaluatorMapResultExtensible).toBe(false);
     expect(evaluatorArrayPrototype).not.toBeNull();
     expect(evaluatorArrayPrototype).not.toBe(Array.prototype);
     expect(evaluatorArrayPrototypeFrozen).toBe(true);
@@ -1332,12 +1370,12 @@ describe("policy-gated zero tool registry", () => {
       expect(constructorPrototypePathReachable).toBe(false);
       expect(topReparentSucceeded).toBe(false);
       expect(nestedReparentSucceeded).toBe(false);
-      expect(arrayReparentSucceeded).toBe(true);
+      expect(arrayReparentSucceeded).toBe(false);
       expect(arrayPrototypeReparentSucceeded).toBe(false);
       expect(arrayMethodFunctionReparentSucceeded).toBe(false);
       expect(iteratorReparentSucceeded).toBe(false);
       expect(iteratorNextFunctionReparentSucceeded).toBe(false);
-      expect(mapResultArrayReparentSucceeded).toBe(true);
+      expect(mapResultArrayReparentSucceeded).toBe(false);
       expect(mapResultPrototypeReparentSucceeded).toBe(false);
       expect(mapResultMethodFunctionReparentSucceeded).toBe(false);
       expect(arrayMethodFunctionPrototype).toBeNull();
@@ -1352,6 +1390,56 @@ describe("policy-gated zero tool registry", () => {
       delete (Array.prototype.map as Record<string, unknown>)[arrayMethodSentinel];
       delete (Array as unknown as Record<string, unknown>)[arrayConstructorSentinel];
       delete (Function.prototype as Record<string, unknown>)[functionPrototypeSentinel];
+    }
+  });
+
+  test("non-spawn evaluator arrays cannot create Array.prototype residue through reparenting", async () => {
+    const editTool = new RecordingTool("edit");
+    const arrayPrototypeSentinel = "__policyGateInputDerivedArrayPrototypeResidue";
+    let valuesReparentSucceeded: boolean | undefined;
+    let mapResultReparentSucceeded: boolean | undefined;
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        const values = (call.input as { values: string[] }).values;
+        valuesReparentSucceeded = attemptMutation(() => {
+          Object.setPrototypeOf(values, Array.prototype);
+        });
+        const valuesPrototype = Object.getPrototypeOf(values) as Record<PropertyKey, unknown> | null;
+        if (valuesPrototype) {
+          attemptMutation(() => {
+            valuesPrototype[arrayPrototypeSentinel] = "mutated";
+          });
+        }
+
+        const mappedValues = values.map((value) => value);
+        mapResultReparentSucceeded = attemptMutation(() => {
+          Object.setPrototypeOf(mappedValues, Array.prototype);
+        });
+        const mappedPrototype = Object.getPrototypeOf(mappedValues) as
+          | Record<PropertyKey, unknown>
+          | null;
+        if (mappedPrototype) {
+          attemptMutation(() => {
+            mappedPrototype[arrayPrototypeSentinel] = "mutated";
+          });
+        }
+
+        return { decision: "allow" };
+      }
+    });
+
+    try {
+      const result = await wrapped.run(createToolContext("worker"), { values: ["original"] });
+
+      expect(result.success).toBe(true);
+      expect(editTool.calls).toBe(1);
+      expect(valuesReparentSucceeded).toBe(false);
+      expect(mapResultReparentSucceeded).toBe(false);
+      expect(
+        (Array.prototype as Record<string, unknown>)[arrayPrototypeSentinel]
+      ).toBeUndefined();
+    } finally {
+      delete (Array.prototype as Record<string, unknown>)[arrayPrototypeSentinel];
     }
   });
 

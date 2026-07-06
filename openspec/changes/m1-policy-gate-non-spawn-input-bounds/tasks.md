@@ -17,9 +17,9 @@
   while leaving materialized canonical arrays and execution arrays ordinary.
 - [x] 1.6 Harden evaluator-visible graph after setup: evaluator plain objects
   are non-extensible, isolated array prototype containers and exposed method /
-  iterator functions are frozen or non-extensible, and non-spawn evaluator
-  execution restores input-derived intrinsic residue after evaluator-local
-  array reparent attempts.
+  iterator functions are frozen or non-extensible, evaluator arrays and map
+  results are non-extensible, and evaluator-local array reparent attempts fail
+  before reaching global intrinsics.
 
 ## 2. Regression Tests
 
@@ -52,9 +52,10 @@
     `constructor` key, and `prototype` key.
 - [x] 2.4 Add tests that honest evaluators can `structuredClone(call.input)`,
   use direct numeric indexing, iterate and spread evaluator array fields, call
-  `.includes()` / `.map()`, use `push`, receive evaluator-isolated `.map()`
-  results, and cannot mutate inner execution or global prototypes through direct
-  object reparenting, array reparenting, array constructor, method,
+  `.includes()` / `.map()`, mutate existing evaluator-local numeric indices,
+  receive evaluator-isolated non-extensible `.map()` results, and cannot mutate
+  inner execution or global prototypes through direct object reparenting, array
+  reparenting, array constructor, method,
   map-result, or iterator paths.
 - [x] 2.5 Add tests that low-length ordinary arrays with over-budget non-index
   own properties do not trigger array `Reflect.ownKeys()`, do not read non-index
@@ -85,7 +86,8 @@
   cover direct `Object.setPrototypeOf()` probes against top object, nested
   object, evaluator arrays, isolated array prototype, isolated method function,
   iterator object, iterator next function, map result array/prototype/function
-  paths, and global prototype residue.
+  paths, and global prototype residue. Evaluator array and map-result reparent
+  attempts must fail because those arrays are non-extensible.
 - [x] 2.11 Add a cross-call residue test proving custom properties written to
   evaluator-visible prototypes, exposed methods, iterators, iterator functions,
   and map-result paths in one evaluator call are not observable by the next
@@ -101,8 +103,8 @@
   `guard_class=authority`.
 - [x] 3.3 Concurrency / shared state / ordering: evaluator mutation tests prove
   evaluator code cannot mutate the execution snapshot observed by the inner
-  tool, and evaluator-visible method/prototype residue cannot persist across
-  calls.
+  tool, evaluator array reparenting cannot reach global intrinsics, and
+  evaluator-visible method/prototype residue cannot persist across calls.
 - [x] 3.4 Resource limits / large input / discovery: depth, array-length, and
   string-budget tests fail closed before evaluator execution; proxy tests prove
   key/descriptor traps are not reached; ordinary object tests prove over-wide

@@ -82,18 +82,21 @@ be plain structured data, SHALL be structured-cloneable, SHALL use null
 prototypes recursively for plain objects, SHALL make evaluator plain objects
 non-extensible after existing properties are installed, and SHALL preserve the
 explicitly supported evaluator array APIs: direct numeric indexing, `for...of`,
-spread, `.includes()`, `.map()`, and `push`. Supported array-returning
-evaluator methods, including `.map()`, SHALL return evaluator-isolated arrays
-rather than arrays linked to global `Array.prototype`. Evaluator-visible array
-prototype containers, array prototype functions, iterator objects, and iterator
-`next` functions SHALL be frozen or made non-extensible where the runtime
-permits, and evaluator arrays SHALL NOT expose a functional constructor path to
-global `Function.prototype`. Evaluator arrays MAY remain extensible to preserve
-`push` and direct index mutation; any evaluator-local array reparenting MUST
-NOT leave residue on global `Object.prototype`, `Array.prototype`, or
-`Function.prototype` before inner execution continues. Evaluator mutation
-attempts MUST NOT change the input later supplied to the inner tool or global
-prototypes through input-derived prototype paths.
+spread, `.includes()`, and `.map()`. Supported array-returning evaluator
+methods, including `.map()`, SHALL return evaluator-isolated non-extensible
+arrays rather than arrays linked to global `Array.prototype`.
+Evaluator-visible array prototype containers, array prototype functions,
+iterator objects, and iterator `next` functions SHALL be frozen or made
+non-extensible where the runtime permits, and evaluator arrays SHALL NOT expose
+a functional constructor path to global `Function.prototype`. Evaluator arrays
+SHALL be non-extensible after existing numeric indices are installed; direct
+assignment to existing indices MAY remain evaluator-local, but `push` and other
+array-growth APIs are outside the supported evaluator contract. Evaluator-local
+array reparenting MUST fail or remain isolated and MUST NOT leave residue on
+global `Object.prototype`, `Array.prototype`, or `Function.prototype` before
+inner execution continues. Evaluator mutation attempts MUST NOT change the input
+later supplied to the inner tool or global prototypes through input-derived
+prototype paths.
 
 #### Scenario: execution snapshot preserves ordinary object compatibility
 
@@ -116,11 +119,11 @@ prototypes through input-derived prototype paths.
 
 - **WHEN** a custom evaluator snapshots a valid non-spawn input with
   `structuredClone(call.input)`, reads array fields with direct numeric
-  indexing, `for...of`, spread, `.includes()`, and `.map()`, uses evaluator-local
-  `push`, and returns allow
+  indexing, `for...of`, spread, `.includes()`, and `.map()`, mutates an existing
+  evaluator-local numeric index, and returns allow
 - **THEN** the inner tool executes with the expected cloned input value
-- **AND** `.map()` results are evaluator-isolated arrays, not arrays linked to
-  global `Array.prototype`
+- **AND** `.map()` results are evaluator-isolated non-extensible arrays, not
+  arrays linked to global `Array.prototype`
 
 #### Scenario: evaluator prototype mutation paths cannot affect execution
 

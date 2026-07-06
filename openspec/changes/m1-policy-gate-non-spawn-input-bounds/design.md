@@ -67,29 +67,28 @@ Non-Goals:
    compatibility, and arrays are normal arrays. Evaluator snapshots use
    null-prototype plain objects recursively, make those plain objects
    non-extensible after existing properties are installed, and preserve the
-   explicitly supported array read/mutation APIs (`for...of`, spread,
-   `.includes()`, `.map()`, direct numeric indexing, and `push`) through
-   isolated array prototypes with no functional `constructor`, null-prototype
-   frozen exposed methods/iterators, and `.map()` results that are
-   evaluator-isolated arrays rather than ordinary `Array.prototype` arrays.
+   explicitly supported array read APIs (`for...of`, spread, `.includes()`,
+   `.map()`, and direct numeric indexing) through isolated array prototypes with
+   no functional `constructor`, null-prototype frozen exposed methods/iterators,
+   and `.map()` results that are evaluator-isolated non-extensible arrays rather
+   than ordinary `Array.prototype` arrays.
 
 3. Evaluator mutation is isolated by snapshot separation.
    Direct top-level or nested evaluator mutation may succeed on the evaluator
    snapshot, but the inner tool receives the original execution snapshot.
    Honest evaluators can `structuredClone(call.input)`, read array fields with
    direct numeric indexing, iterate and spread them, call `.includes()` /
-   `.map()`, and use `push` on the evaluator-local array before returning allow.
+   `.map()`, mutate existing numeric indices evaluator-locally, and return allow.
    Existing top-level/nested fields remain writable for evaluator-local
    assignment; adding new properties to evaluator plain objects is outside the
    supported contract because those objects are non-extensible. Isolated array
    prototype containers, isolated method functions, iterator objects, and
    iterator `next` functions are frozen or non-extensible after their desired
-   prototypes are set. Evaluator arrays remain extensible so `push` and direct
-   element writes work; if evaluator code reparents such an evaluator-local
-   array or a `.map()` result to a global prototype, the wrapper restores
-   input-derived intrinsic residue on `Object.prototype`, `Array.prototype`,
-   `Function.prototype`, global array method functions, constructors, and array
-   iterator prototypes before inner execution continues. Prototype mutation
+   prototypes are set. Evaluator arrays are made non-extensible after existing
+   numeric indices are installed. This intentionally removes `push` and other
+   array-growth APIs from the supported evaluator contract so evaluator-local
+   arrays and `.map()` results cannot be reparented to global prototypes.
+   Prototype mutation
    attempts through `Object.setPrototypeOf(call.input, ...)`,
    `Object.setPrototypeOf(call.input.nested, ...)`,
    `Object.setPrototypeOf(values, Array.prototype)`,
@@ -178,9 +177,9 @@ Invariant Matrix:
     receives the original execution snapshot.
   - Honest evaluator snapshots valid non-spawn input with `structuredClone` and
     reads array fields via direct numeric indexing, `for...of`, spread,
-    `.includes()`, `.map()`, and evaluator-local `push` -> reads succeed, map
-    results stay evaluator-isolated, and inner tool receives the expected
-    execution snapshot.
+    `.includes()`, `.map()`, plus evaluator-local existing-index assignment ->
+    reads succeed, map results stay evaluator-isolated and non-extensible, and
+    inner tool receives the expected execution snapshot.
   - Evaluator prototype mutation probes through direct object reparenting,
     array instance reparenting, isolated array prototype containers, array
     constructor, array methods, map-result arrays/prototypes/functions, and
@@ -208,15 +207,11 @@ Boundary-surface checklist:
 
 ## Risks / Trade-offs
 
-- Evaluator snapshots allow direct assignment to existing fields and evaluator
-  arrays remain extensible so `push` keeps working. Mitigation: the execution
-  snapshot is separate, evaluator plain objects are non-extensible to block
-  reparenting/new-property residue, isolated prototypes/functions/iterators are
-  frozen, and tests lock that the inner tool only sees the original values.
-- Evaluator array instances cannot be made non-extensible without breaking
-  supported `push`. Mitigation: array instance reparenting is evaluator-local,
-  and the non-spawn wrapper restores input-derived intrinsic residue before
-  continuing to inner execution.
+- Evaluator snapshots allow direct assignment to existing fields and existing
+  array indices, but evaluator arrays are non-extensible. Trade-off: `push` and
+  array-growth APIs are no longer supported for evaluator snapshots. Mitigation:
+  this is a deliberate contract narrowing because preserving `push` required
+  extensible arrays and left input-derived paths to global `Array.prototype`.
 - Budget constants can reject pathological but technically cloneable inputs.
   Mitigation: this boundary is a shared policy gate; safe, bounded preparation
   is preferred over unbounded execution.

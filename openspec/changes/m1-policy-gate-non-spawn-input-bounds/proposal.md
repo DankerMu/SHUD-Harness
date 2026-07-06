@@ -25,12 +25,12 @@ non-index properties, and evaluator-visible array prototypes exposed global
   and normal arrays, while keeping evaluator plain objects null-prototype and
   hardened.
 - Preserve evaluator array read compatibility (`for...of`, spread, `.includes()`,
-  `.map()`, and `push`) through frozen isolated array prototypes,
+  and `.map()`) through frozen isolated array prototypes,
   null-prototype frozen exposed methods/iterators, evaluator-local arrays, and
   `.map()` results that do not expose global `Array.prototype`.
-- Guard non-spawn evaluator execution against input-derived global
-  `Object.prototype` / `Array.prototype` / `Function.prototype` residue,
-  including array reparent attempts that can only affect evaluator-local arrays.
+- Prevent input-derived global `Object.prototype` / `Array.prototype` /
+  `Function.prototype` residue by making evaluator arrays and `.map()` results
+  non-extensible rather than attempting same-realm global intrinsic repair.
 - Preserve fail-closed preparation errors, running metadata finalization, and
   the existing spawn_agent authority snapshot path.
 - Add regression tests for bounded-input rejection, hostile preparation
