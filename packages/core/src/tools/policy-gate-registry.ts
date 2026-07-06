@@ -826,41 +826,13 @@ function materializeGenericPolicyGateArray(
   const snapshot = new Array<unknown>(length);
   state.snapshots.set(value, snapshot);
 
-  let extraKeyCount = 0;
-  for (const key of Reflect.ownKeys(value)) {
-    if (key === "length") {
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = readGenericPolicyGateArrayIndexDataDescriptor(value, index);
+    if (!descriptor) {
       continue;
     }
 
-    const isArrayIndex = typeof key === "string" && isArrayIndexPropertyKey(key);
-    if (isArrayIndex) {
-      if (Number(key) >= length) {
-        throw new Error("Policy gate input contains an unsafe array length.");
-      }
-      assertSafeGenericPolicyGatePropertyKey(key, state, false);
-    } else {
-      extraKeyCount += 1;
-      if (extraKeyCount > GENERIC_POLICY_GATE_INPUT_MAX_OBJECT_KEYS) {
-        throw new Error("Policy gate input exceeds object key budget.");
-      }
-      assertSafeGenericPolicyGatePropertyKey(key, state, true);
-    }
-
-    const descriptor = readGenericPolicyGateDataDescriptor(value, key);
-    const snapshotValue = materializeGenericPolicyGateInput(descriptor.value, state, depth + 1);
-    if (!descriptor.enumerable) {
-      continue;
-    }
-    if (isArrayIndex) {
-      snapshot[Number(key)] = snapshotValue;
-    } else {
-      Object.defineProperty(snapshot, key, {
-        value: snapshotValue,
-        enumerable: true,
-        configurable: true,
-        writable: true
-      });
-    }
+    snapshot[index] = materializeGenericPolicyGateInput(descriptor.value, state, depth + 1);
   }
 
   return snapshot;
@@ -930,6 +902,24 @@ function readGenericPolicyGateDataDescriptor(
   return descriptor as GenericPolicyGateDataDescriptor;
 }
 
+function readGenericPolicyGateArrayIndexDataDescriptor(
+  value: readonly unknown[],
+  index: number
+): GenericPolicyGateDataDescriptor | undefined {
+  const descriptor = Reflect.getOwnPropertyDescriptor(value, String(index));
+  if (!descriptor) {
+    return undefined;
+  }
+  if (
+    !("value" in descriptor) ||
+    descriptor.get !== undefined ||
+    descriptor.set !== undefined
+  ) {
+    throw new Error("Policy gate input contains unsafe accessors.");
+  }
+  return descriptor as GenericPolicyGateDataDescriptor;
+}
+
 function assertSafeGenericPolicyGatePropertyKey(
   key: string | symbol,
   state: GenericPolicyGateInputBudgetState,
@@ -954,14 +944,6 @@ function addGenericPolicyGateStringBudget(
   if (state.stringChars > GENERIC_POLICY_GATE_INPUT_MAX_STRING_CHARS) {
     throw new Error("Policy gate input exceeds string budget.");
   }
-}
-
-function isArrayIndexPropertyKey(key: string): boolean {
-  if (key.trim() === "" || key === "4294967295") {
-    return false;
-  }
-  const index = Number(key);
-  return Number.isInteger(index) && index >= 0 && index < 4_294_967_295 && String(index) === key;
 }
 
 function cloneGenericPolicyGateMaterializedInput(
@@ -1046,46 +1028,19 @@ function cloneGenericPolicyGateMaterializedArray(
   }
   state.snapshots.set(value, snapshot);
 
-  let extraKeyCount = 0;
-  for (const key of Reflect.ownKeys(value)) {
-    if (key === "length") {
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = readGenericPolicyGateArrayIndexDataDescriptor(value, index);
+    if (!descriptor) {
       continue;
     }
 
-    const isArrayIndex = typeof key === "string" && isArrayIndexPropertyKey(key);
-    if (isArrayIndex) {
-      if (Number(key) >= length) {
-        throw new Error("Policy gate input contains an unsafe array length.");
-      }
-      assertSafeGenericPolicyGatePropertyKey(key, state, false);
-    } else {
-      extraKeyCount += 1;
-      if (extraKeyCount > GENERIC_POLICY_GATE_INPUT_MAX_OBJECT_KEYS) {
-        throw new Error("Policy gate input exceeds object key budget.");
-      }
-      assertSafeGenericPolicyGatePropertyKey(key, state, true);
-    }
-
-    const descriptor = readGenericPolicyGateDataDescriptor(value, key);
     const snapshotValue = cloneGenericPolicyGateMaterializedValue(
       descriptor.value,
       state,
       options,
       depth + 1
     );
-    if (!descriptor.enumerable) {
-      continue;
-    }
-    if (isArrayIndex) {
-      snapshot[Number(key)] = snapshotValue;
-    } else {
-      Object.defineProperty(snapshot, key, {
-        value: snapshotValue,
-        enumerable: true,
-        configurable: true,
-        writable: true
-      });
-    }
+    snapshot[index] = snapshotValue;
   }
 
   return snapshot;
@@ -1126,45 +1081,178 @@ function cloneGenericPolicyGateMaterializedPlainObject(
 
 function createIsolatedArrayPrototype(): object {
   const prototype = Object.create(null) as Record<PropertyKey, unknown>;
-  for (const key of Reflect.ownKeys(Array.prototype)) {
-    const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, key);
-    if (!descriptor) {
-      continue;
-    }
-    if ("value" in descriptor) {
-      Object.defineProperty(prototype, key, {
-        ...descriptor,
-        value: createIsolatedArrayPrototypeValue(descriptor.value)
-      });
-      continue;
-    }
-    Object.defineProperty(prototype, key, descriptor);
-  }
-  function PolicyGateEvaluatorArray(): void {}
-  Object.defineProperty(PolicyGateEvaluatorArray, "prototype", {
-    value: prototype,
-    configurable: false,
-    writable: false
-  });
-  Object.defineProperty(prototype, "constructor", {
-    value: PolicyGateEvaluatorArray,
+  defineIsolatedArrayPrototypeMethod(prototype, Symbol.iterator, isolatedArrayIterator);
+  defineIsolatedArrayPrototypeMethod(prototype, "includes", isolatedArrayIncludes);
+  defineIsolatedArrayPrototypeMethod(prototype, "map", isolatedArrayMap);
+  defineIsolatedArrayPrototypeMethod(prototype, "push", isolatedArrayPush);
+  return prototype;
+}
+
+function defineIsolatedArrayPrototypeMethod(
+  prototype: Record<PropertyKey, unknown>,
+  key: PropertyKey,
+  method: (...args: unknown[]) => unknown
+): void {
+  Object.defineProperty(prototype, key, {
+    value: method,
     enumerable: false,
     configurable: true,
     writable: true
   });
-  return prototype;
 }
 
-function createIsolatedArrayPrototypeValue(value: unknown): unknown {
-  if (typeof value === "function") {
-    const arrayMethod = value;
-    return function isolatedArrayMethod(this: unknown, ...args: unknown[]): unknown {
-      return Reflect.apply(arrayMethod, this, args);
-    };
+const isolatedArrayIncludes = isolateFunction(
+  {
+    includes(this: unknown, searchElement: unknown, fromIndex?: unknown): boolean {
+      const receiver = requireIsolatedArrayReceiver(this);
+      const length = readGenericPolicyGateArrayLength(receiver);
+      const start = normalizeArrayStartIndex(length, fromIndex);
+      for (let index = start; index < length; index += 1) {
+        if (sameValueZero(receiver[index], searchElement)) {
+          return true;
+        }
+      }
+      return false;
+    }
+  }.includes
+);
+
+const isolatedArrayMap = isolateFunction(
+  {
+    map(this: unknown, callback: unknown, thisArg?: unknown): unknown[] {
+      const receiver = requireIsolatedArrayReceiver(this);
+      if (typeof callback !== "function") {
+        throw new TypeError("Array map callback must be a function.");
+      }
+      const length = readGenericPolicyGateArrayLength(receiver);
+      const result = createIsolatedEvaluatorArray(length);
+      for (let index = 0; index < length; index += 1) {
+        if (!Object.prototype.hasOwnProperty.call(receiver, index)) {
+          continue;
+        }
+        result[index] = Reflect.apply(callback, thisArg, [receiver[index], index, receiver]);
+      }
+      return result;
+    }
+  }.map
+);
+
+const isolatedArrayPush = isolateFunction(
+  {
+    push(this: unknown, ...items: unknown[]): number {
+      const receiver = requireIsolatedArrayReceiver(this);
+      const length = readGenericPolicyGateArrayLength(receiver);
+      const newLength = length + items.length;
+      if (newLength > 4_294_967_295) {
+        throw new RangeError("Invalid array length.");
+      }
+      for (let offset = 0; offset < items.length; offset += 1) {
+        receiver[length + offset] = items[offset];
+      }
+      receiver.length = newLength;
+      return newLength;
+    }
+  }.push
+);
+
+const isolatedArrayIterator = isolateFunction(
+  {
+    [Symbol.iterator](this: unknown): IterableIterator<unknown> {
+      return createIsolatedArrayIterator(requireIsolatedArrayReceiver(this));
+    }
+  }[Symbol.iterator]
+);
+
+function createIsolatedEvaluatorArray(length: number): unknown[] {
+  const array = new Array<unknown>(length);
+  Object.setPrototypeOf(array, createIsolatedArrayPrototype());
+  return array;
+}
+
+function createIsolatedArrayIterator(receiver: unknown[]): IterableIterator<unknown> {
+  let index = 0;
+  const iterator = Object.create(null) as IterableIterator<unknown>;
+  Object.defineProperty(iterator, "next", {
+    value: isolateFunction({
+      next(): IteratorResult<unknown> {
+        const length = readGenericPolicyGateArrayLength(receiver);
+        if (index >= length) {
+          return createIsolatedArrayIteratorResult(undefined, true);
+        }
+        const valueAtIndex = receiver[index];
+        index += 1;
+        return createIsolatedArrayIteratorResult(valueAtIndex, false);
+      }
+    }.next),
+    enumerable: false,
+    configurable: true,
+    writable: true
+  });
+  Object.defineProperty(iterator, Symbol.iterator, {
+    value: isolateFunction({
+      [Symbol.iterator](this: IterableIterator<unknown>): IterableIterator<unknown> {
+        return this;
+      }
+    }[Symbol.iterator]),
+    enumerable: false,
+    configurable: true,
+    writable: true
+  });
+  return iterator;
+}
+
+function createIsolatedArrayIteratorResult(value: unknown, done: boolean): IteratorResult<unknown> {
+  const result = Object.create(null) as IteratorResult<unknown>;
+  Object.defineProperty(result, "value", {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true
+  });
+  Object.defineProperty(result, "done", {
+    value: done,
+    enumerable: true,
+    configurable: true,
+    writable: true
+  });
+  return result;
+}
+
+function requireIsolatedArrayReceiver(value: unknown): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError("Policy gate evaluator array method called on incompatible receiver.");
   }
-  if (value !== null && typeof value === "object") {
-    return Object.assign(Object.create(null), value);
+  return value;
+}
+
+function normalizeArrayStartIndex(length: number, fromIndex: unknown): number {
+  const integer = toIntegerOrInfinity(fromIndex);
+  if (integer === Number.POSITIVE_INFINITY) {
+    return length;
   }
+  if (integer >= 0) {
+    return Math.min(integer, length);
+  }
+  return Math.max(length + integer, 0);
+}
+
+function toIntegerOrInfinity(value: unknown): number {
+  const number = value === undefined ? 0 : Number(value);
+  if (Number.isNaN(number) || number === 0) {
+    return 0;
+  }
+  if (!Number.isFinite(number)) {
+    return number;
+  }
+  return Math.trunc(number);
+}
+
+function sameValueZero(left: unknown, right: unknown): boolean {
+  return left === right || (left !== left && right !== right);
+}
+
+function isolateFunction<T extends (...args: unknown[]) => unknown>(value: T): T {
+  Object.setPrototypeOf(value, null);
   return value;
 }
 

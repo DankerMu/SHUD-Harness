@@ -266,6 +266,148 @@ describe("policy-gated zero tool registry", () => {
     expect(descriptorCalls).toBe(0);
   });
 
+  test("ordinary arrays ignore over-budget non-index own properties without array key discovery", async () => {
+    const editTool = new RecordingTool("edit");
+    const sentinel = "ARRAY_NON_INDEX_PROPERTY_SENTINEL";
+    const values = ["alpha", , "gamma"] as unknown[];
+    for (let index = 0; index < 300; index += 1) {
+      Object.defineProperty(values, `extra_${index}`, {
+        configurable: true,
+        enumerable: true,
+        get() {
+          throw new Error(`${sentinel}_${index}`);
+        }
+      });
+    }
+    Object.defineProperty(values, "callable", {
+      configurable: true,
+      enumerable: true,
+      value: () => sentinel
+    });
+    Object.defineProperty(values, "symbolValue", {
+      configurable: true,
+      enumerable: true,
+      value: Symbol(sentinel)
+    });
+    Object.defineProperty(values, "bigintValue", {
+      configurable: true,
+      enumerable: true,
+      value: 1n
+    });
+    Object.defineProperty(values, "__proto__", {
+      configurable: true,
+      enumerable: true,
+      value: {
+        polluted: true
+      }
+    });
+    Object.defineProperty(values, "constructor", {
+      configurable: true,
+      enumerable: true,
+      value: {
+        prototype: {
+          polluted: true
+        }
+      }
+    });
+    Object.defineProperty(values, "prototype", {
+      configurable: true,
+      enumerable: true,
+      value: {
+        polluted: true
+      }
+    });
+    Object.defineProperty(values, Symbol("ignored-array-extra"), {
+      configurable: true,
+      enumerable: true,
+      value: sentinel
+    });
+
+    let arrayOwnKeysCalls = 0;
+    let arrayNonIndexDescriptorReads = 0;
+    let evaluatorObservation:
+      | {
+          direct: unknown[];
+          hasSparseHole: boolean;
+          extraVisible: boolean;
+          unsafeVisible: boolean;
+          constructorValue: unknown;
+        }
+      | undefined;
+    const originalOwnKeys = Reflect.ownKeys;
+    const originalGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+    Reflect.ownKeys = ((target: object): (string | symbol)[] => {
+      if (Array.isArray(target)) {
+        arrayOwnKeysCalls += 1;
+        throw new Error("array ownKeys must not be called");
+      }
+      return originalOwnKeys(target);
+    }) as typeof Reflect.ownKeys;
+    Reflect.getOwnPropertyDescriptor = ((
+      target: object,
+      propertyKey: PropertyKey
+    ): PropertyDescriptor | undefined => {
+      if (Array.isArray(target) && !isExpectedNumericArrayDescriptorKey(propertyKey, target.length)) {
+        arrayNonIndexDescriptorReads += 1;
+        throw new Error(`array non-index descriptor must not be read: ${String(propertyKey)}`);
+      }
+      return originalGetOwnPropertyDescriptor(target, propertyKey);
+    }) as typeof Reflect.getOwnPropertyDescriptor;
+
+    try {
+      const wrapped = wrapToolWithPolicyGate(editTool, {
+        evaluate: async (call) => {
+          const evaluatorValues = (call.input as { values: unknown[] }).values;
+          evaluatorObservation = {
+            direct: [evaluatorValues[0], evaluatorValues[1], evaluatorValues[2]],
+            hasSparseHole: Object.prototype.hasOwnProperty.call(evaluatorValues, "1"),
+            extraVisible: Object.prototype.hasOwnProperty.call(evaluatorValues, "extra_0"),
+            unsafeVisible:
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "callable") ||
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "symbolValue") ||
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "bigintValue") ||
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "__proto__") ||
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "constructor") ||
+              Object.prototype.hasOwnProperty.call(evaluatorValues, "prototype"),
+            constructorValue: (evaluatorValues as { constructor?: unknown }).constructor
+          };
+          return { decision: "allow" };
+        }
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), { values });
+
+      expect(result.success).toBe(true);
+      expect(editTool.calls).toBe(1);
+    } finally {
+      Reflect.ownKeys = originalOwnKeys;
+      Reflect.getOwnPropertyDescriptor = originalGetOwnPropertyDescriptor;
+    }
+
+    expect(arrayOwnKeysCalls).toBe(0);
+    expect(arrayNonIndexDescriptorReads).toBe(0);
+    expect(evaluatorObservation).toEqual({
+      direct: ["alpha", undefined, "gamma"],
+      hasSparseHole: false,
+      extraVisible: false,
+      unsafeVisible: false,
+      constructorValue: undefined
+    });
+    const executionValues = (editTool.lastInput as { values?: unknown[] }).values;
+    expect(executionValues).toHaveLength(3);
+    expect(executionValues?.[0]).toBe("alpha");
+    expect(executionValues?.[1]).toBeUndefined();
+    expect(executionValues?.[2]).toBe("gamma");
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "1")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "extra_0")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "callable")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "symbolValue")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "bigintValue")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "__proto__")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "constructor")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(executionValues, "prototype")).toBe(false);
+  });
+
   test("wide ordinary objects fail before per-key value reads", async () => {
     const editTool = new RecordingTool("edit");
     let evaluatorCalls = 0;
@@ -649,12 +791,20 @@ describe("policy-gated zero tool registry", () => {
           spread: string[];
           includesBeta: boolean;
           mapped: string[];
+          pushedLength: number;
+          afterPush: string[];
         }
       | undefined;
     let evaluatorInputPrototype: object | null | undefined;
     let evaluatorNestedPrototype: object | null | undefined;
     let evaluatorArrayPrototype: object | null | undefined;
     let evaluatorArrayParentPrototype: object | null | undefined;
+    let evaluatorArrayConstructor: unknown;
+    let evaluatorArrayMapFunctionPrototype: object | null | undefined;
+    let evaluatorMapResultPrototype: object | null | undefined;
+    let evaluatorMapResultParentPrototype: object | null | undefined;
+    let evaluatorIteratorPrototype: object | null | undefined;
+    let evaluatorIteratorNextPrototype: object | null | undefined;
     const wrapped = wrapToolWithPolicyGate(editTool, {
       evaluate: async (call) => {
         evaluatorClone = structuredClone(call.input);
@@ -663,11 +813,15 @@ describe("policy-gated zero tool registry", () => {
         for (const value of values) {
           iterated.push(value);
         }
+        const mapped = values.map((value) => value.toUpperCase());
+        const iterator = values[Symbol.iterator]();
         evaluatorArrayReads = {
           iterated,
           spread: [...values],
           includesBeta: values.includes("beta"),
-          mapped: values.map((value) => value.toUpperCase())
+          mapped,
+          pushedLength: values.push("gamma"),
+          afterPush: [...values]
         };
         evaluatorInputPrototype = Object.getPrototypeOf(call.input as object);
         evaluatorNestedPrototype = Object.getPrototypeOf(
@@ -676,6 +830,22 @@ describe("policy-gated zero tool registry", () => {
         evaluatorArrayPrototype = Object.getPrototypeOf(values);
         evaluatorArrayParentPrototype =
           evaluatorArrayPrototype === null ? null : Object.getPrototypeOf(evaluatorArrayPrototype);
+        evaluatorArrayConstructor = (values as { constructor?: unknown }).constructor;
+        evaluatorArrayMapFunctionPrototype =
+          evaluatorArrayPrototype === null
+            ? null
+            : Object.getPrototypeOf(
+                (evaluatorArrayPrototype as Record<PropertyKey, unknown>).map as object
+              );
+        evaluatorMapResultPrototype = Object.getPrototypeOf(mapped);
+        evaluatorMapResultParentPrototype =
+          evaluatorMapResultPrototype === null
+            ? null
+            : Object.getPrototypeOf(evaluatorMapResultPrototype);
+        evaluatorIteratorPrototype = Object.getPrototypeOf(iterator as object);
+        evaluatorIteratorNextPrototype = Object.getPrototypeOf(
+          (iterator as { next: () => IteratorResult<string> }).next
+        );
         return { decision: "allow" };
       }
     });
@@ -694,13 +864,22 @@ describe("policy-gated zero tool registry", () => {
       iterated: ["alpha", "beta"],
       spread: ["alpha", "beta"],
       includesBeta: true,
-      mapped: ["ALPHA", "BETA"]
+      mapped: ["ALPHA", "BETA"],
+      pushedLength: 3,
+      afterPush: ["alpha", "beta", "gamma"]
     });
     expect(evaluatorInputPrototype).toBeNull();
     expect(evaluatorNestedPrototype).toBeNull();
     expect(evaluatorArrayPrototype).not.toBeNull();
     expect(evaluatorArrayPrototype).not.toBe(Array.prototype);
     expect(evaluatorArrayParentPrototype).toBeNull();
+    expect(evaluatorArrayConstructor).toBeUndefined();
+    expect(evaluatorArrayMapFunctionPrototype).toBeNull();
+    expect(evaluatorMapResultPrototype).not.toBeNull();
+    expect(evaluatorMapResultPrototype).not.toBe(Array.prototype);
+    expect(evaluatorMapResultParentPrototype).toBeNull();
+    expect(evaluatorIteratorPrototype).toBeNull();
+    expect(evaluatorIteratorNextPrototype).toBeNull();
     expect(editTool.calls).toBe(1);
     expect((editTool.lastInput as { command?: unknown }).command).toBe("original");
     expect((editTool.lastInput as { nested?: { flag?: unknown } }).nested?.flag).toBe("original");
@@ -720,10 +899,15 @@ describe("policy-gated zero tool registry", () => {
   test("non-spawn evaluator prototype mutation paths cannot affect inner execution", async () => {
     const editTool = new RecordingTool("edit");
     const objectPrototypeSentinel = "__policyGateObjectPrototypeResidue";
-    const constructorPrototypeSentinel = "__policyGateConstructorPrototypeResidue";
+    const functionPrototypeSentinel = "__policyGateFunctionPrototypeResidue";
     const arrayPrototypeSentinel = "__policyGateArrayPrototypeResidue";
     const arrayMethodSentinel = "__policyGateArrayMethodResidue";
-    const arrayUnscopablesSentinel = "__policyGateArrayUnscopablesResidue";
+    const mapResultPrototypeSentinel = "__policyGateMapResultPrototypeResidue";
+    const iteratorPrototypeSentinel = "__policyGateIteratorPrototypeResidue";
+    let constructorPrototypePathReachable: boolean | undefined;
+    let arrayMethodFunctionPrototype: object | null | undefined;
+    let iteratorPrototype: object | null | undefined;
+    let iteratorNextFunctionPrototype: object | null | undefined;
     const input = {
       command: "original",
       nested: {
@@ -740,11 +924,16 @@ describe("policy-gated zero tool registry", () => {
           topPrototype[objectPrototypeSentinel] = "mutated";
         }
 
-        const constructorPrototype = (call.input as {
-          constructor?: { prototype?: Record<string, unknown> };
-        }).constructor?.prototype;
-        if (constructorPrototype) {
-          constructorPrototype[constructorPrototypeSentinel] = "mutated";
+        const values = (call.input as { values: unknown[] }).values;
+        const constructorValue = (values as { constructor?: unknown }).constructor;
+        constructorPrototypePathReachable = constructorValue !== undefined && constructorValue !== null;
+        if (constructorPrototypePathReachable) {
+          const constructorFunctionPrototype = Object.getPrototypeOf(constructorValue as object) as
+            | Record<string, unknown>
+            | null;
+          if (constructorFunctionPrototype) {
+            constructorFunctionPrototype[functionPrototypeSentinel] = "mutated";
+          }
         }
 
         const nestedPrototype = Object.getPrototypeOf(
@@ -754,25 +943,40 @@ describe("policy-gated zero tool registry", () => {
           nestedPrototype[objectPrototypeSentinel] = "mutated";
         }
 
-        const arrayPrototype = Object.getPrototypeOf(
-          (call.input as { values: unknown[] }).values
-        ) as Record<PropertyKey, unknown> | null;
+        const arrayPrototype = Object.getPrototypeOf(values) as Record<PropertyKey, unknown> | null;
         if (arrayPrototype) {
           arrayPrototype[arrayPrototypeSentinel] = "mutated";
-          (arrayPrototype.map as Record<string, unknown> | undefined)![arrayMethodSentinel] =
+          const mapMethod = arrayPrototype.map as Record<string, unknown> | undefined;
+          if (mapMethod) {
+            mapMethod[arrayMethodSentinel] = "mutated";
+            arrayMethodFunctionPrototype = Object.getPrototypeOf(mapMethod as object);
+            if (arrayMethodFunctionPrototype) {
+              (arrayMethodFunctionPrototype as Record<string, unknown>)[functionPrototypeSentinel] =
+                "mutated";
+            }
+          }
+        }
+
+        const mappedValues = values.map((value) => value);
+        const mappedPrototype = Object.getPrototypeOf(mappedValues) as
+          | Record<string, unknown>
+          | null;
+        if (mappedPrototype) {
+          mappedPrototype[mapResultPrototypeSentinel] = "mutated";
+        }
+
+        const iterator = values[Symbol.iterator]();
+        iteratorPrototype = Object.getPrototypeOf(iterator as object);
+        if (iteratorPrototype) {
+          (iteratorPrototype as Record<string, unknown>)[iteratorPrototypeSentinel] = "mutated";
+        }
+        iteratorNextFunctionPrototype = Object.getPrototypeOf(
+          (iterator as { next: () => IteratorResult<unknown> }).next
+        );
+        if (iteratorNextFunctionPrototype) {
+          (iteratorNextFunctionPrototype as Record<string, unknown>)[functionPrototypeSentinel] =
             "mutated";
-          (arrayPrototype[Symbol.unscopables] as Record<string, unknown> | undefined)![
-            arrayUnscopablesSentinel
-          ] = "mutated";
         }
-
-        const arrayConstructorPrototype = (call.input as {
-          values: { constructor?: { prototype?: Record<string, unknown> } };
-        }).values.constructor?.prototype;
-        if (arrayConstructorPrototype) {
-          arrayConstructorPrototype[arrayPrototypeSentinel] = "mutated";
-        }
-
         return { decision: "allow" };
       }
     });
@@ -789,25 +993,25 @@ describe("policy-gated zero tool registry", () => {
       expect((editTool.lastInput as { values?: string[] }).values?.[0]).toBe("original");
       expect((Object.prototype as Record<string, unknown>)[objectPrototypeSentinel]).toBeUndefined();
       expect(
-        (Object.prototype as Record<string, unknown>)[constructorPrototypeSentinel]
+        (Object.prototype as Record<string, unknown>)[functionPrototypeSentinel]
       ).toBeUndefined();
       expect((Array.prototype as Record<string, unknown>)[arrayPrototypeSentinel]).toBeUndefined();
-      expect((Array.prototype.map as Record<string, unknown>)[arrayMethodSentinel]).toBeUndefined();
       expect(
-        ((Array.prototype as Record<symbol, unknown>)[Symbol.unscopables] as Record<
-          string,
-          unknown
-        >)[arrayUnscopablesSentinel]
+        (Array.prototype as Record<string, unknown>)[mapResultPrototypeSentinel]
       ).toBeUndefined();
+      expect((Array.prototype.map as Record<string, unknown>)[arrayMethodSentinel]).toBeUndefined();
+      expect((Function.prototype as Record<string, unknown>)[functionPrototypeSentinel]).toBeUndefined();
+      expect(constructorPrototypePathReachable).toBe(false);
+      expect(arrayMethodFunctionPrototype).toBeNull();
+      expect(iteratorPrototype).toBeNull();
+      expect(iteratorNextFunctionPrototype).toBeNull();
     } finally {
       delete (Object.prototype as Record<string, unknown>)[objectPrototypeSentinel];
-      delete (Object.prototype as Record<string, unknown>)[constructorPrototypeSentinel];
+      delete (Object.prototype as Record<string, unknown>)[functionPrototypeSentinel];
       delete (Array.prototype as Record<string, unknown>)[arrayPrototypeSentinel];
+      delete (Array.prototype as Record<string, unknown>)[mapResultPrototypeSentinel];
       delete (Array.prototype.map as Record<string, unknown>)[arrayMethodSentinel];
-      delete ((Array.prototype as Record<symbol, unknown>)[Symbol.unscopables] as Record<
-        string,
-        unknown
-      >)[arrayUnscopablesSentinel];
+      delete (Function.prototype as Record<string, unknown>)[functionPrototypeSentinel];
     }
   });
 
@@ -3808,6 +4012,14 @@ function createNodeDensePolicyGateInput(): Record<string, unknown> {
       }))
     )
   };
+}
+
+function isExpectedNumericArrayDescriptorKey(propertyKey: PropertyKey, length: number): boolean {
+  if (typeof propertyKey !== "string") {
+    return false;
+  }
+  const index = Number(propertyKey);
+  return Number.isInteger(index) && index >= 0 && index < length && String(index) === propertyKey;
 }
 
 function createToolContext(role: string): ToolContext & { role: string } {

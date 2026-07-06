@@ -39,14 +39,18 @@ Non-Goals:
 
 1. Generic non-spawn input uses a conservative stable-materialization boundary.
    Proxy inputs are rejected before key discovery or descriptor traps are
-   reached. Arrays reject over-length `length` before own-key or element
-   descriptor enumeration. For ordinary plain objects, JavaScript cannot count
-   keys without enumerating them, so the object key budget is checked after
+   reached. Arrays reject over-length `length` before any index descriptor
+   reads and are accepted only as JSON-style numeric-index arrays: preparation
+   reads bounded descriptors for indices `0..length-1`, preserves sparse holes
+   where possible, rejects unsafe accessors/functions/symbols/bigints in
+   numeric indices, and omits non-index own array properties without discovering
+   them. For ordinary plain objects, JavaScript cannot count keys without
+   enumerating them, so the object key budget is checked after
    `Reflect.ownKeys()` and before per-key descriptor/value reads. Accessors,
    functions, symbols, bigint values, symbol keys, excessive depth, excessive
    node count, excessive array length, excessive object key count, excessive
-   string budget, non-ordinary prototypes, or prototype-polluting keys fail
-   closed as preparation errors.
+   string budget, non-ordinary prototypes, or prototype-polluting keys on
+   ordinary object properties fail closed as preparation errors.
 
 2. Generic non-spawn input uses one canonical materialization plus derived
    snapshots. The wrapper materializes the accepted live input once into a
@@ -54,19 +58,25 @@ Non-Goals:
    for the inner tool and one evaluator snapshot for policy evaluation from
    that canonical graph, so evaluator and execution preparation never reread a
    live proxy/accessor source differently. Plain object snapshots use null
-   prototypes recursively. Evaluator arrays preserve ordinary read APIs through
-   isolated array prototypes that copy array methods without linking mutation
-   paths to global `Array.prototype`.
+   prototypes recursively. Evaluator arrays preserve the explicitly supported
+   read/mutation APIs (`for...of`, spread, `.includes()`, `.map()`, direct
+   numeric indexing, and `push`) through isolated array prototypes with no
+   functional `constructor`, null-prototype exposed methods/iterators, and
+   `.map()` results that are evaluator-isolated arrays rather than ordinary
+   `Array.prototype` arrays.
 
 3. Evaluator mutation is isolated by snapshot separation.
    Direct top-level or nested evaluator mutation may succeed on the evaluator
    snapshot, but the inner tool receives the original execution snapshot.
-   Honest evaluators can `structuredClone(call.input)`, iterate array fields,
-   spread them, and call `.includes()` / `.map()` before returning allow.
-   Prototype mutation attempts through `Object.getPrototypeOf(call.input)` or
-   `call.input.constructor?.prototype` either have no reachable shared prototype
-   or affect only the evaluator-local prototype, not execution input or global
-   prototypes.
+   Honest evaluators can `structuredClone(call.input)`, read array fields with
+   direct numeric indexing, iterate and spread them, call `.includes()` /
+   `.map()`, and use `push` on the evaluator-local array before returning allow.
+   Prototype mutation attempts through `Object.getPrototypeOf(call.input)`,
+   `Object.getPrototypeOf(values.constructor)`,
+   `Object.getPrototypeOf(Object.getPrototypeOf(values).map)`,
+   `Object.getPrototypeOf(values.map(...))`, or a directly accessed iterator
+   either have no reachable shared prototype or affect only evaluator-local
+   objects, not execution input, `Function.prototype`, or `Array.prototype`.
 
 4. Spawn remains separate.
    `spawn_agent` keeps using `normalizeSpawnAgentInput()` plus its existing
@@ -128,14 +138,23 @@ Invariant Matrix:
   - Proxy or hostile key-discovery input -> preparation fails closed before
     evaluator and inner tool execution, without trap text or trap calls.
   - Over-length ordinary arrays -> cheap length rejection happens before array
-    own-key / element descriptor enumeration.
+    own-key discovery or numeric index descriptor reads.
+  - Low-length ordinary arrays with over-budget or unsafe non-index own
+    properties -> preparation does not call array `Reflect.ownKeys()`, omits
+    those properties from evaluator/execution snapshots, and still materializes
+    safe numeric indices.
   - Over-wide ordinary objects -> key-count rejection happens after ordinary
     own-key enumeration and before per-key descriptor/value reads.
   - Evaluator mutates top-level or nested non-spawn input -> inner tool still
     receives the original execution snapshot.
   - Honest evaluator snapshots valid non-spawn input with `structuredClone` and
-    reads array fields via `for...of`, spread, `.includes()`, and `.map()` ->
-    reads succeed and inner tool receives the expected execution snapshot.
+    reads array fields via direct numeric indexing, `for...of`, spread,
+    `.includes()`, `.map()`, and evaluator-local `push` -> reads succeed, map
+    results stay evaluator-isolated, and inner tool receives the expected
+    execution snapshot.
+  - Evaluator prototype mutation probes through array constructor, array method,
+    map-result, and iterator paths -> no `Function.prototype` or
+    `Array.prototype` residue and inner execution input remains unchanged.
   - Existing accessor/prototype-polluting/proxy-hostile/unsafe value input ->
     preparation still fails closed without leaking trap or getter text and
     without running the inner tool.

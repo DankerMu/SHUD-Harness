@@ -9,16 +9,31 @@ inspection SHALL fail closed with the existing
 `policy_gate_input_preparation_failed` tool result, and the wrapped inner tool
 MUST NOT execute. Proxy-shaped and non-ordinary live inputs SHALL be rejected
 instead of treated as safely bounded structured data.
+Accepted generic arrays SHALL be JSON-style numeric-index arrays: only numeric
+indices `0..length-1` are part of the accepted generic array contract,
+non-index own array properties are outside the contract and SHALL be omitted
+without discovery, and sparse holes SHOULD be preserved where JavaScript array
+semantics permit.
 
 #### Scenario: ordinary array and object budgets reject before value expansion
 
 - **WHEN** a non-spawn tool receives an over-length array or over-wide object
-- **THEN** ordinary array length is checked before array own-key / element
-  descriptor enumeration
+- **THEN** ordinary array length is checked before array own-key discovery or
+  numeric index descriptor reads
 - **AND** ordinary object own-key count is checked after own-key enumeration and
   before per-key descriptor/value reads
 - **AND** preparation fails closed before policy evaluation and before inner
   tool execution
+
+#### Scenario: ordinary array non-index properties are outside the contract
+
+- **WHEN** a non-spawn tool receives a low-length ordinary array with
+  over-budget non-index own properties
+- **THEN** preparation does not call array own-key discovery
+- **AND** preparation does not read non-index own array descriptors
+- **AND** non-index own array properties containing functions, symbols, bigints,
+  or prototype-polluting keys are omitted from evaluator and execution snapshots
+- **AND** safe numeric indices remain available and sparse holes are preserved
 
 #### Scenario: proxy key discovery fails closed
 
@@ -50,10 +65,15 @@ accepted input once into a stable bounded canonical structured-data graph, then
 prepare separate execution and evaluator snapshots from that canonical graph.
 The evaluator snapshot SHALL be plain structured data, SHALL be
 structured-cloneable, SHALL use null prototypes recursively for plain objects,
-and SHALL preserve ordinary array read APIs including iteration, spread,
-`.includes()`, and `.map()`. Evaluator mutation attempts MUST NOT change the
-input later supplied to the inner tool or global prototypes through
-input-derived prototype paths.
+and SHALL preserve the explicitly supported evaluator array APIs: direct numeric
+indexing, `for...of`, spread, `.includes()`, `.map()`, and `push`. Supported
+array-returning evaluator methods, including `.map()`, SHALL return
+evaluator-isolated arrays rather than arrays linked to global `Array.prototype`.
+Evaluator-visible array prototype functions and iterator `next` functions
+SHOULD have null prototypes where the runtime permits, and evaluator arrays
+SHALL NOT expose a functional constructor path to global `Function.prototype`.
+Evaluator mutation attempts MUST NOT change the input later supplied to the
+inner tool or global prototypes through input-derived prototype paths.
 
 #### Scenario: evaluator mutation cannot affect inner execution
 
@@ -65,17 +85,23 @@ input-derived prototype paths.
 #### Scenario: honest evaluator preserves normal execution
 
 - **WHEN** a custom evaluator snapshots a valid non-spawn input with
-  `structuredClone(call.input)`, reads array fields with `for...of`, spread,
-  `.includes()`, and `.map()`, and returns allow
+  `structuredClone(call.input)`, reads array fields with direct numeric
+  indexing, `for...of`, spread, `.includes()`, and `.map()`, uses evaluator-local
+  `push`, and returns allow
 - **THEN** the inner tool executes with the expected cloned input value
+- **AND** `.map()` results are evaluator-isolated arrays, not arrays linked to
+  global `Array.prototype`
 
 #### Scenario: evaluator prototype mutation paths cannot affect execution
 
 - **WHEN** a custom evaluator attempts to mutate prototypes reachable from
-  `Object.getPrototypeOf(call.input)` or `call.input.constructor?.prototype`
+  `Object.getPrototypeOf(call.input)`, `Object.getPrototypeOf(values.constructor)`,
+  `Object.getPrototypeOf(Object.getPrototypeOf(values).map)`,
+  `Object.getPrototypeOf(values.map(...))`, or a directly accessed
+  `[Symbol.iterator]()` result
 - **THEN** the mutation fails closed or is isolated from the execution snapshot
 - **AND** input-derived prototype mutation paths do not leave global prototype
-  residue
+  residue on `Function.prototype` or `Array.prototype`
 
 ### Requirement: Spawn authority preparation remains unchanged
 

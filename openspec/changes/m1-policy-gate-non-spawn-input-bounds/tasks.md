@@ -5,8 +5,9 @@
 - [x] 1.2 Change generic non-spawn preparation to create separate execution and
   evaluator snapshots from one canonical materialized graph, using cloneable
   plain data, recursive null prototypes for plain object snapshots, and
-  evaluator array prototypes that preserve read APIs without shared global
-  prototype mutation paths.
+  JSON-style numeric-index array materialization plus evaluator array
+  prototypes that preserve supported APIs without shared global prototype
+  mutation paths.
 - [x] 1.3 Preserve existing preparation failure payloads, evaluator failure
   behavior, and running-tool metadata finalization.
 - [x] 1.4 Audit and preserve the `spawn_agent` preparation path unchanged.
@@ -19,9 +20,9 @@
     array length + 1; object key count = generic max key count + 1; total
     string budget = generic max string budget + 1.
   - Ordering evidence: proxy inputs fail before key/descriptor traps;
-    over-length dense arrays fail before array own-key / element descriptor
-    enumeration; over-wide ordinary objects fail after own-key enumeration and
-    before per-key value reads.
+    over-length dense arrays fail before array own-key discovery or numeric
+    index descriptor reads; over-wide ordinary objects fail after own-key
+    enumeration and before per-key value reads.
   - Expected: result contains `policy_gate_input_preparation_failed`, evaluator
     calls = 0, inner tool calls = 0, running handle finished with failed summary.
 - [x] 2.2 Add tests that evaluator top-level and nested mutation attempts cannot
@@ -37,10 +38,16 @@
     symbol value, bigint value, symbol key, own `__proto__` data key,
     `constructor` key, and `prototype` key.
 - [x] 2.4 Add tests that honest evaluators can `structuredClone(call.input)`,
-  iterate and spread evaluator array fields, call `.includes()` / `.map()`, and
-  that evaluator prototype mutation paths cannot affect inner execution or
-  global prototypes.
-- [x] 2.5 Add or preserve tests proving representative `spawn_agent` paths remain
+  use direct numeric indexing, iterate and spread evaluator array fields, call
+  `.includes()` / `.map()`, use `push`, receive evaluator-isolated `.map()`
+  results, and cannot mutate inner execution or global prototypes through array
+  constructor, method, map-result, or iterator paths.
+- [x] 2.5 Add tests that low-length ordinary arrays with over-budget non-index
+  own properties do not trigger array `Reflect.ownKeys()`, do not read non-index
+  descriptors, preserve sparse numeric-index holes, and omit non-index
+  function/symbol/bigint/prototype-polluting properties from evaluator and
+  execution snapshots.
+- [x] 2.6 Add or preserve tests proving representative `spawn_agent` paths remain
   unchanged.
   - Valid input: `role="worker"`, `tools=["read"]`, non-empty instruction ->
     allow path preserves normalized execution input.
