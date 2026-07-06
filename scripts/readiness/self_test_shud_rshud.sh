@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 set -eu
+umask 022
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
@@ -28,6 +29,9 @@ make_fake_bin() {
 #!/usr/bin/env sh
 set -eu
 target=${1:-}
+if [ -n "${FAKE_MAKE_MARKER:-}" ]; then
+  printf '%s\n' "$target" >> "$FAKE_MAKE_MARKER"
+fi
 case "$target" in
   clean)
     case "${FAKE_MAKE_CLEAN_MODE:-minimal}" in
@@ -124,11 +128,23 @@ EOF
   cat > "$bin_dir/Rscript" <<'EOF'
 #!/usr/bin/env sh
 set -eu
-if [ "${FAKE_RSHUD_VERSION:-2.5.0}" = "error" ]; then
-  printf '%s\n' "there is no package called 'rSHUD'" >&2
-  exit 1
-fi
-printf '%s' "${FAKE_RSHUD_VERSION:-2.5.0}"
+case "${FAKE_RSHUD_VERSION:-2.5.0}" in
+  error)
+    printf '%s\n' "there is no package called 'rSHUD'" >&2
+    exit 1
+    ;;
+  noisy-stdout-low)
+    printf '%s\n' "unrelated tool 9.9.9"
+    printf '%s\n' "RSHUD_VERSION=2.4.9"
+    ;;
+  stderr-high-low)
+    printf '%s\n' "RSHUD_VERSION=2.4.9"
+    printf '%s\n' "loaded dependency 9.9.9" >&2
+    ;;
+  *)
+    printf 'RSHUD_VERSION=%s\n' "${FAKE_RSHUD_VERSION:-2.5.0}"
+    ;;
+esac
 EOF
   chmod +x "$bin_dir/Rscript"
 
@@ -138,6 +154,22 @@ set -eu
 printf '%s\n' 'fake g++ 99.0.0'
 EOF
   chmod +x "$bin_dir/g++"
+
+  real_git=$(command -v git)
+  cat > "$bin_dir/git" <<EOF
+#!/usr/bin/env sh
+set -eu
+real_git='$real_git'
+if [ -n "\${FAKE_GIT_DELAY_ON_TRACKED_OUTPUT:-}" ] && [ -s "\$FAKE_GIT_DELAY_ON_TRACKED_OUTPUT" ]; then
+  case " \$* " in
+    *" status "*)
+      sleep "\${FAKE_GIT_DELAY_SECONDS:-1}"
+      ;;
+  esac
+fi
+exec "\$real_git" "\$@"
+EOF
+  chmod +x "$bin_dir/git"
 }
 
 init_git_repo() {
@@ -200,18 +232,24 @@ run_helper() {
   helper_fake_make_clean_mode=${FAKE_MAKE_CLEAN_MODE:-minimal}
   helper_fake_rshud_version=${FAKE_RSHUD_VERSION:-2.5.0}
   helper_make_timeout=${SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS:-3}
+  helper_fake_make_marker=${FAKE_MAKE_MARKER:-}
+  helper_fake_git_delay_on_tracked_output=${FAKE_GIT_DELAY_ON_TRACKED_OUTPUT:-}
+  helper_fake_git_delay_seconds=${FAKE_GIT_DELAY_SECONDS:-1}
   set +e
   FAKE_MAKE_MODE="$helper_fake_make_mode" \
     FAKE_MAKE_CLEAN_MODE="$helper_fake_make_clean_mode" \
     FAKE_RSHUD_VERSION="$helper_fake_rshud_version" \
+    FAKE_MAKE_MARKER="$helper_fake_make_marker" \
+    FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
+    FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
     SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
     PATH="$TMP_ROOT/bin:$PATH" \
     HOME="$fixture/fake-home" \
     "$HELPER" --repo-root "$fixture" --output "$output" "$@"
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds
   return "$helper_status"
 }
 
@@ -222,18 +260,24 @@ run_helper_default_output() {
   helper_fake_make_clean_mode=${FAKE_MAKE_CLEAN_MODE:-minimal}
   helper_fake_rshud_version=${FAKE_RSHUD_VERSION:-2.5.0}
   helper_make_timeout=${SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS:-3}
+  helper_fake_make_marker=${FAKE_MAKE_MARKER:-}
+  helper_fake_git_delay_on_tracked_output=${FAKE_GIT_DELAY_ON_TRACKED_OUTPUT:-}
+  helper_fake_git_delay_seconds=${FAKE_GIT_DELAY_SECONDS:-1}
   set +e
   FAKE_MAKE_MODE="$helper_fake_make_mode" \
     FAKE_MAKE_CLEAN_MODE="$helper_fake_make_clean_mode" \
     FAKE_RSHUD_VERSION="$helper_fake_rshud_version" \
+    FAKE_MAKE_MARKER="$helper_fake_make_marker" \
+    FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$helper_fake_git_delay_on_tracked_output" \
+    FAKE_GIT_DELAY_SECONDS="$helper_fake_git_delay_seconds" \
     SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS="$helper_make_timeout" \
     PATH="$TMP_ROOT/bin:$PATH" \
     HOME="$fixture/fake-home" \
     "$HELPER" --repo-root "$fixture" "$@"
   helper_status=$?
   set -e
-  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS
-  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout
+  unset FAKE_MAKE_MODE FAKE_MAKE_CLEAN_MODE FAKE_RSHUD_VERSION FAKE_MAKE_MARKER FAKE_GIT_DELAY_ON_TRACKED_OUTPUT FAKE_GIT_DELAY_SECONDS SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS
+  unset helper_fake_make_mode helper_fake_make_clean_mode helper_fake_rshud_version helper_make_timeout helper_fake_make_marker helper_fake_git_delay_on_tracked_output helper_fake_git_delay_seconds
   return "$helper_status"
 }
 
@@ -304,6 +348,11 @@ assert_json_expr "$pass_output" 'data["shud"]["build"]["cleanup_requested"] is T
 assert_json_expr "$pass_output" 'data["shud"]["build"]["pre_clean"]["make_clean"]["timeout_seconds"] == 3'
 assert_json_expr "$pass_output" 'data["shud"]["build"]["result"]["timeout_seconds"] == 3'
 assert_json_expr "$pass_output" 'data["shud"]["build"]["cleanup"]["make_clean"]["timeout_seconds"] == 3'
+assert_json_expr "$pass_output" 'data["output"]["git_guard"]["tracked"] is False'
+assert_json_expr "$pass_output" 'data["source_boundary"]["preflight"]["ok"] is True'
+assert_json_expr "$pass_output" 'data["source_boundary"]["postflight_after_output_write"]["ok"] is True'
+assert_json_expr "$pass_output" 'data["make_environment_guard"]["ok"] is True'
+assert_json_expr "$pass_output" 'data["rshud"]["installed"]["parser"]["contract_ok"] is True'
 if ! git -C "$pass_fixture" check-ignore --no-index -q workspace/readiness/shud_rshud_readiness.json; then
   fail "fixture default readiness output is not ignored"
 fi
@@ -320,6 +369,74 @@ FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper_default_output "$defa
 assert_json "$default_wrapper_output" pass -
 assert_no_shud_artifacts "$default_wrapper_fixture"
 assert_json_expr "$default_wrapper_output" 'data["shud"]["build"]["cleanup_requested"] is True'
+
+tracked_output_fixture="$TMP_ROOT/tracked-output-fixture"
+make_fixture "$tracked_output_fixture"
+mkdir -p "$tracked_output_fixture/workspace/readiness"
+printf '%s\n' "tracked output must survive" > "$tracked_output_fixture/workspace/readiness/shud_rshud_readiness.json"
+git -C "$tracked_output_fixture" add -f workspace/readiness/shud_rshud_readiness.json
+git -C "$tracked_output_fixture" commit -q -m "track readiness output"
+tracked_output_before=$(cat "$tracked_output_fixture/workspace/readiness/shud_rshud_readiness.json")
+if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper_default_output "$tracked_output_fixture" >/dev/null 2>/dev/null; then
+  fail "tracked output fixture unexpectedly returned zero"
+fi
+tracked_output_after=$(cat "$tracked_output_fixture/workspace/readiness/shud_rshud_readiness.json")
+if [ "$tracked_output_before" != "$tracked_output_after" ]; then
+  fail "tracked readiness output was overwritten"
+fi
+tracked_output_status=$(git -C "$tracked_output_fixture" status --short -- workspace)
+if [ -n "$tracked_output_status" ]; then
+  printf '%s\n' "$tracked_output_status" >&2
+  fail "tracked output fixture workspace status changed"
+fi
+
+final_recheck_fixture="$TMP_ROOT/final-recheck-output-fixture"
+make_fixture "$final_recheck_fixture"
+final_recheck_rel="workspace/readiness/final_recheck.json"
+final_recheck_output="$final_recheck_fixture/$final_recheck_rel"
+final_recheck_stderr="$TMP_ROOT/final-recheck-output.stderr"
+(
+  i=0
+  while [ "$i" -lt 200 ]; do
+    if [ -s "$final_recheck_output" ] && python3 - "$final_recheck_output" >/dev/null 2>/dev/null <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    json.load(handle)
+PY
+    then
+      git -C "$final_recheck_fixture" add -f "$final_recheck_rel"
+      exit 0
+    fi
+    i=$((i + 1))
+    sleep 0.02
+  done
+  exit 1
+) &
+final_recheck_watcher=$!
+if FAKE_GIT_DELAY_ON_TRACKED_OUTPUT="$final_recheck_output" FAKE_GIT_DELAY_SECONDS=1 FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$final_recheck_fixture" "$final_recheck_output" >/dev/null 2>"$final_recheck_stderr"; then
+  final_recheck_status=0
+else
+  final_recheck_status=$?
+fi
+if ! wait "$final_recheck_watcher"; then
+  fail "final output recheck watcher did not track the first write"
+fi
+if [ "$final_recheck_status" -eq 0 ]; then
+  fail "final output recheck fixture unexpectedly returned zero"
+fi
+if ! grep -q "output path is tracked by git: $final_recheck_rel" "$final_recheck_stderr"; then
+  cat "$final_recheck_stderr" >&2
+  fail "final output recheck fixture did not reject tracked output"
+fi
+assert_json "$final_recheck_output" incomplete "postflight source-boundary evidence is pending"
+assert_json_expr "$final_recheck_output" 'data["conclusion"] != "pass"'
+assert_json_expr "$final_recheck_output" 'data["source_boundary"]["postflight_after_output_write"] is None'
+assert_json_expr "$final_recheck_output" 'data["provisional"]["ready_for_consumption"] is False'
+if ! git -C "$final_recheck_fixture" ls-files --error-unmatch "$final_recheck_rel" >/dev/null 2>/dev/null; then
+  fail "final output recheck fixture did not make output tracked"
+fi
 
 external_temp_fixture="$TMP_ROOT/external-temp-fixture"
 make_fixture "$external_temp_fixture"
@@ -366,10 +483,14 @@ dirty_shud_fixture="$TMP_ROOT/dirty-shud-fixture"
 make_fixture "$dirty_shud_fixture"
 printf '%s\n' "# dirty SHUD fixture" >> "$dirty_shud_fixture/SHUD/Makefile"
 dirty_shud_output="$TMP_ROOT/dirty-shud-output.json"
-if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$dirty_shud_fixture" "$dirty_shud_output" >/dev/null 2>/dev/null; then
+dirty_shud_marker="$dirty_shud_fixture/make.marker"
+if FAKE_MAKE_MARKER="$dirty_shud_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$dirty_shud_fixture" "$dirty_shud_output" >/dev/null 2>/dev/null; then
   fail "dirty SHUD fixture unexpectedly returned zero"
 fi
 assert_json "$dirty_shud_output" block "SHUD checkout has uncommitted or visible changes"
+if [ -e "$dirty_shud_marker" ]; then
+  fail "make executed for dirty SHUD preflight fixture"
+fi
 
 dirty_rshud_fixture="$TMP_ROOT/dirty-rshud-fixture"
 make_fixture "$dirty_rshud_fixture"
@@ -405,6 +526,61 @@ fi
 unset GIT_CEILING_DIRECTORIES
 assert_json "$status_failure_output" block "rSHUD checkout git status failed"
 
+tracked_shud_fixture="$TMP_ROOT/tracked-shud-fixture"
+make_fixture "$tracked_shud_fixture"
+printf '%s\n' '#!/usr/bin/env sh' > "$tracked_shud_fixture/SHUD/shud"
+printf '%s\n' 'exit 0' >> "$tracked_shud_fixture/SHUD/shud"
+chmod +x "$tracked_shud_fixture/SHUD/shud"
+git -C "$tracked_shud_fixture/SHUD" add -f shud
+git -C "$tracked_shud_fixture/SHUD" commit -q -m "track shud executable"
+git -C "$tracked_shud_fixture" -c advice.addEmbeddedRepo=false add SHUD >/dev/null 2>/dev/null
+git -C "$tracked_shud_fixture" commit -q -m "advance shud gitlink for tracked shud"
+tracked_shud_output="$tracked_shud_fixture/workspace/readiness/tracked_shud.json"
+tracked_shud_marker="$tracked_shud_fixture/make.marker"
+if FAKE_MAKE_MARKER="$tracked_shud_marker" FAKE_MAKE_CLEAN_MODE=full FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$tracked_shud_fixture" "$tracked_shud_output" >/dev/null 2>/dev/null; then
+  fail "tracked SHUD/shud fixture unexpectedly returned zero"
+fi
+assert_json "$tracked_shud_output" block "SHUD pre-build cleanup refused unsafe build artifacts"
+assert_json_expr "$tracked_shud_output" 'data["shud"]["build"]["pre_clean"]["make_clean_skipped"] is True'
+assert_json_expr "$tracked_shud_output" 'any(artifact["name"] == "shud" and artifact["tracked"] is True and artifact["removable"] is False for artifact in data["shud"]["build"]["pre_clean"]["artifact_inventory_before_cleanup"])'
+if [ ! -e "$tracked_shud_fixture/SHUD/shud" ]; then
+  fail "tracked SHUD/shud was removed"
+fi
+if [ -e "$tracked_shud_marker" ]; then
+  fail "make clean executed for tracked SHUD/shud fixture"
+fi
+
+make_env_fixture="$TMP_ROOT/make-env-fixture"
+make_fixture "$make_env_fixture"
+make_env_output="$make_env_fixture/workspace/readiness/make_env.json"
+make_env_marker="$make_env_fixture/make.marker"
+if MAKEFLAGS=-e CC="$TMP_ROOT/bin/g++" FAKE_MAKE_MARKER="$make_env_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$make_env_fixture" "$make_env_output" >/dev/null 2>/dev/null; then
+  fail "make environment override fixture unexpectedly returned zero"
+fi
+unset MAKEFLAGS CC
+assert_json "$make_env_output" block "unsupported make environment overrides are set before SHUD build"
+assert_json_expr "$make_env_output" 'any(item["name"] == "MAKEFLAGS" for item in data["make_environment_guard"]["blocked_variables"])'
+assert_json_expr "$make_env_output" 'any(item["name"] == "CC" for item in data["make_environment_guard"]["blocked_variables"])'
+assert_json_expr "$make_env_output" 'data["shud"]["build"]["blocked_before_make"] is True'
+if [ -e "$make_env_marker" ]; then
+  fail "make executed for make environment override fixture"
+fi
+
+stcflag_env_fixture="$TMP_ROOT/stcflag-env-fixture"
+make_fixture "$stcflag_env_fixture"
+stcflag_env_output="$stcflag_env_fixture/workspace/readiness/stcflag_env.json"
+stcflag_env_marker="$stcflag_env_fixture/make.marker"
+if STCFLAG=-static FAKE_MAKE_MARKER="$stcflag_env_marker" FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$stcflag_env_fixture" "$stcflag_env_output" >/dev/null 2>/dev/null; then
+  fail "STCFLAG environment override fixture unexpectedly returned zero"
+fi
+unset STCFLAG
+assert_json "$stcflag_env_output" block "unsupported make environment overrides are set before SHUD build"
+assert_json_expr "$stcflag_env_output" 'any(item["name"] == "STCFLAG" for item in data["make_environment_guard"]["blocked_variables"])'
+assert_json_expr "$stcflag_env_output" 'data["shud"]["build"]["blocked_before_make"] is True'
+if [ -e "$stcflag_env_marker" ]; then
+  fail "make executed for STCFLAG environment override fixture"
+fi
+
 residual_artifact_fixture="$TMP_ROOT/residual-artifact-fixture"
 make_fixture "$residual_artifact_fixture"
 residual_artifact_output="$residual_artifact_fixture/workspace/readiness/residual_artifact.json"
@@ -413,6 +589,61 @@ assert_json "$residual_artifact_output" pass -
 assert_no_shud_artifacts "$residual_artifact_fixture"
 assert_json_expr "$residual_artifact_output" 'all(name in [artifact["name"] for artifact in data["shud"]["build"]["artifact_inventory_after_build"]] for name in ["shud_omp", "residual.o", "shud.cache", "shud.dSYM", "SHUD.build"])'
 assert_json_expr "$residual_artifact_output" 'all(artifact["git_ignored"] is True for artifact in data["shud"]["build"]["artifact_inventory_after_build"] if artifact["name"] in ["shud.cache", "SHUD.build"])'
+
+broad_residue_fixture="$TMP_ROOT/broad-residue-fixture"
+make_fixture "$broad_residue_fixture"
+printf '%s\n' "local notes must survive" > "$broad_residue_fixture/SHUD/shud.notes"
+broad_residue_output="$broad_residue_fixture/workspace/readiness/broad_residue.json"
+broad_residue_marker="$broad_residue_fixture/make.marker"
+if FAKE_MAKE_MARKER="$broad_residue_marker" FAKE_MAKE_CLEAN_MODE=full FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$broad_residue_fixture" "$broad_residue_output" >/dev/null 2>/dev/null; then
+  fail "broad residue fixture unexpectedly returned zero"
+fi
+assert_json "$broad_residue_output" block "SHUD pre-build cleanup refused unsafe build artifacts"
+assert_json_expr "$broad_residue_output" 'data["shud"]["build"]["pre_clean"]["make_clean_skipped"] is True'
+assert_json_expr "$broad_residue_output" 'any(artifact["name"] == "shud.notes" and artifact["classification"] == "broad_residue_pattern" and artifact["removable"] is False for artifact in data["shud"]["build"]["pre_clean"]["artifact_inventory_before_cleanup"])'
+if [ ! -e "$broad_residue_fixture/SHUD/shud.notes" ]; then
+  fail "broad SHUD residue was removed"
+fi
+if [ -e "$broad_residue_marker" ]; then
+  fail "make clean executed for broad residue fixture"
+fi
+
+wildcard_object_fixture="$TMP_ROOT/wildcard-object-fixture"
+make_fixture "$wildcard_object_fixture"
+printf '%s\n' "local object notes must survive" > "$wildcard_object_fixture/SHUD/local_notes.o"
+wildcard_object_output="$wildcard_object_fixture/workspace/readiness/wildcard_object.json"
+wildcard_object_marker="$wildcard_object_fixture/make.marker"
+if FAKE_MAKE_MARKER="$wildcard_object_marker" FAKE_MAKE_CLEAN_MODE=full FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$wildcard_object_fixture" "$wildcard_object_output" >/dev/null 2>/dev/null; then
+  fail "wildcard object fixture unexpectedly returned zero"
+fi
+assert_json "$wildcard_object_output" block "SHUD pre-build cleanup refused unsafe build artifacts"
+assert_json_expr "$wildcard_object_output" 'data["shud"]["build"]["pre_clean"]["make_clean_skipped"] is True'
+assert_json_expr "$wildcard_object_output" 'any(artifact["name"] == "local_notes.o" and artifact["classification"] == "current_build_artifact_pattern" and artifact["removable"] is False for artifact in data["shud"]["build"]["pre_clean"]["artifact_inventory_before_cleanup"])'
+if [ ! -e "$wildcard_object_fixture/SHUD/local_notes.o" ]; then
+  fail "pre-existing wildcard object artifact was removed"
+fi
+if [ -e "$wildcard_object_marker" ]; then
+  fail "make clean executed for wildcard object fixture"
+fi
+
+wildcard_dsym_fixture="$TMP_ROOT/wildcard-dsym-fixture"
+make_fixture "$wildcard_dsym_fixture"
+mkdir -p "$wildcard_dsym_fixture/SHUD/local_debug.dSYM"
+printf '%s\n' "local debug bundle must survive" > "$wildcard_dsym_fixture/SHUD/local_debug.dSYM/marker"
+wildcard_dsym_output="$wildcard_dsym_fixture/workspace/readiness/wildcard_dsym.json"
+wildcard_dsym_marker="$wildcard_dsym_fixture/make.marker"
+if FAKE_MAKE_MARKER="$wildcard_dsym_marker" FAKE_MAKE_CLEAN_MODE=full FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$wildcard_dsym_fixture" "$wildcard_dsym_output" >/dev/null 2>/dev/null; then
+  fail "wildcard dSYM fixture unexpectedly returned zero"
+fi
+assert_json "$wildcard_dsym_output" block "SHUD pre-build cleanup refused unsafe build artifacts"
+assert_json_expr "$wildcard_dsym_output" 'data["shud"]["build"]["pre_clean"]["make_clean_skipped"] is True'
+assert_json_expr "$wildcard_dsym_output" 'any(artifact["name"] == "local_debug.dSYM" and artifact["classification"] == "current_build_artifact_pattern" and artifact["kind"] == "directory" and artifact["removable"] is False for artifact in data["shud"]["build"]["pre_clean"]["artifact_inventory_before_cleanup"])'
+if [ ! -e "$wildcard_dsym_fixture/SHUD/local_debug.dSYM/marker" ]; then
+  fail "pre-existing wildcard dSYM directory was removed"
+fi
+if [ -e "$wildcard_dsym_marker" ]; then
+  fail "make clean executed for wildcard dSYM fixture"
+fi
 
 tracked_residue_fixture="$TMP_ROOT/tracked-residue-fixture"
 make_fixture "$tracked_residue_fixture"
@@ -429,10 +660,11 @@ tracked_residue_output="$tracked_residue_fixture/workspace/readiness/tracked_res
 if FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.5.0 run_helper "$tracked_residue_fixture" "$tracked_residue_output" >/dev/null 2>/dev/null; then
   fail "tracked residue fixture unexpectedly returned zero"
 fi
-assert_json "$tracked_residue_output" block "SHUD pre-build cleanup left build artifacts in SHUD checkout"
+assert_json "$tracked_residue_output" block "SHUD pre-build cleanup refused unsafe build artifacts"
 if [ ! -e "$tracked_residue_fixture/SHUD/shud.dSYM/marker" ] || [ ! -e "$tracked_residue_fixture/SHUD/shud.tracked" ] || [ ! -e "$tracked_residue_fixture/SHUD/SHUD.keep/marker" ]; then
   fail "tracked matching SHUD artifacts were removed"
 fi
+assert_json_expr "$tracked_residue_output" 'data["shud"]["build"]["pre_clean"]["make_clean_skipped"] is True'
 assert_json_expr "$tracked_residue_output" 'all(name in [artifact["name"] for artifact in data["shud"]["build"]["pre_clean"]["artifact_inventory_after_cleanup"]] for name in ["shud.dSYM", "shud.tracked", "SHUD.keep"])'
 assert_json_expr "$tracked_residue_output" 'all(artifact["tracked"] is True and artifact["removable"] is False for artifact in data["shud"]["build"]["pre_clean"]["artifact_inventory_after_cleanup"] if artifact["name"] in ["shud.dSYM", "shud.tracked", "SHUD.keep"])'
 
@@ -494,6 +726,26 @@ if FAKE_MAKE_CLEAN_MODE=minimal FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=2.4.9 
   fail "low rSHUD fixture unexpectedly returned zero"
 fi
 assert_json "$low_rshud_output" block "installed rSHUD version 2.4.9 is below required 2.5.0"
+
+noisy_stdout_rshud_fixture="$TMP_ROOT/noisy-stdout-rshud-fixture"
+make_fixture "$noisy_stdout_rshud_fixture"
+noisy_stdout_rshud_output="$noisy_stdout_rshud_fixture/workspace/readiness/noisy_stdout_rshud.json"
+if FAKE_MAKE_CLEAN_MODE=minimal FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=noisy-stdout-low run_helper "$noisy_stdout_rshud_fixture" "$noisy_stdout_rshud_output" >/dev/null 2>/dev/null; then
+  fail "noisy stdout rSHUD fixture unexpectedly returned zero"
+fi
+assert_json "$noisy_stdout_rshud_output" block "installed rSHUD version 2.4.9 is below required 2.5.0"
+assert_json_expr "$noisy_stdout_rshud_output" 'data["rshud"]["installed"]["version"] == "2.4.9"'
+assert_json_expr "$noisy_stdout_rshud_output" 'data["rshud"]["installed"]["parser"]["contract_ok"] is False'
+
+stderr_noise_rshud_fixture="$TMP_ROOT/stderr-noise-rshud-fixture"
+make_fixture "$stderr_noise_rshud_fixture"
+stderr_noise_rshud_output="$stderr_noise_rshud_fixture/workspace/readiness/stderr_noise_rshud.json"
+if FAKE_MAKE_CLEAN_MODE=minimal FAKE_MAKE_MODE=success FAKE_RSHUD_VERSION=stderr-high-low run_helper "$stderr_noise_rshud_fixture" "$stderr_noise_rshud_output" >/dev/null 2>/dev/null; then
+  fail "stderr noise rSHUD fixture unexpectedly returned zero"
+fi
+assert_json "$stderr_noise_rshud_output" block "installed rSHUD version 2.4.9 is below required 2.5.0"
+assert_json_expr "$stderr_noise_rshud_output" 'data["rshud"]["installed"]["version"] == "2.4.9"'
+assert_json_expr "$stderr_noise_rshud_output" 'data["rshud"]["installed"]["parser"]["contract_ok"] is True'
 
 bad_output_fixture="$TMP_ROOT/bad-output-fixture"
 make_fixture "$bad_output_fixture"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import fnmatch
 import json
 import os
@@ -20,7 +21,7 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 VERSION = "v0.2.0"
@@ -30,8 +31,34 @@ TEXT_TAIL_LIMIT = 12000
 COMMAND_TAIL_READ_BYTES = TEXT_TAIL_LIMIT * 4
 DEFAULT_MAKE_TIMEOUT_SECONDS = 300
 MAKE_TIMEOUT_ENV = "SHUD_RSHUD_READINESS_MAKE_TIMEOUT_SECONDS"
-SHUD_ARTIFACT_NAMES = {"shud", "shud_omp", "shud_debug", "shud.dSYM"}
-SHUD_ARTIFACT_PATTERNS = ("*.o", "*.dSYM", "shud.*", "SHUD.*")
+UNSUPPORTED_MAKE_ENV_VARS = ("MAKEFLAGS", "MFLAGS", "MAKEFILES")
+MAKE_ENV_OVERRIDE_VARS = ("CC", "CXX", "SUNDIALS_DIR")
+SHUD_TARGET_ENV_OVERRIDE_VARS = (
+    "STCFLAG",
+    "CFLAGS",
+    "INCLUDES",
+    "LIBRARIES",
+    "RPATH",
+    "LK_FLAGS",
+    "TARGET_EXEC",
+    "MAIN_shud",
+    "SRC",
+    "SRC_H",
+    "BUILDDIR",
+    "SRC_DIR",
+    "LIB_SUN",
+    "LIB_SYS",
+    "INC_OMP",
+    "LIB_OMP",
+)
+SHUD_EXACT_ARTIFACT_NAMES = {"shud", "shud_omp", "shud_debug", "shud.dSYM"}
+SHUD_CURRENT_BUILD_ARTIFACT_PATTERNS = ("*.o", "*.dSYM")
+SHUD_BROAD_RESIDUE_PATTERNS = ("shud.*", "SHUD.*")
+SHUD_ARTIFACT_PATTERNS = (*SHUD_CURRENT_BUILD_ARTIFACT_PATTERNS, *SHUD_BROAD_RESIDUE_PATTERNS)
+RSHUD_VERSION_PREFIX = "RSHUD_VERSION="
+PROVISIONAL_POSTFLIGHT_REASON = (
+    "postflight source-boundary evidence is pending; provisional output is not a readiness pass."
+)
 
 
 class OutputSafetyError(Exception):
@@ -208,6 +235,38 @@ def check_git_ignored(repo_root: Path, output: Path) -> bool:
     return result["exit_code"] == 0
 
 
+def check_git_tracked(repo_root: Path, output: Path) -> tuple[bool | None, str | None]:
+    try:
+        rel = output.resolve(strict=False).relative_to(repo_root.resolve())
+    except ValueError:
+        return False, None
+    result = run_command(["git", "-C", str(repo_root), "ls-files", "--", rel.as_posix()], timeout=20)
+    if result["exit_code"] != 0:
+        return None, command_failure_detail(result)
+    return bool(str(result.get("stdout_tail") or "").strip()), None
+
+
+def output_git_guard(repo_root: Path, output: Path) -> dict[str, Any]:
+    try:
+        rel = output.resolve(strict=False).relative_to(repo_root.resolve())
+    except ValueError:
+        return {
+            "inside_repo": False,
+            "relative_path": None,
+            "tracked": None,
+            "tracked_error": None,
+            "git_ignored": None,
+        }
+    tracked, tracked_error = check_git_tracked(repo_root, output)
+    return {
+        "inside_repo": True,
+        "relative_path": rel.as_posix(),
+        "tracked": tracked,
+        "tracked_error": tracked_error,
+        "git_ignored": check_git_ignored(repo_root, output),
+    }
+
+
 def temp_roots() -> tuple[Path, ...]:
     roots: list[Path] = []
     for raw in (tempfile.gettempdir(), os.environ.get("TMPDIR")):
@@ -237,6 +296,11 @@ def validate_output_scope(
             raise OutputSafetyError(
                 f"output path inside repo must be under workspace/readiness: {rel.as_posix()}"
             )
+        tracked, tracked_error = check_git_tracked(repo_root, output)
+        if tracked is None:
+            raise OutputSafetyError(f"output tracked state could not be proven: {tracked_error}")
+        if tracked:
+            raise OutputSafetyError(f"output path is tracked by git: {rel.as_posix()}")
         if not check_git_ignored(repo_root, output):
             raise OutputSafetyError(f"output path is not ignored by git: {rel.as_posix()}")
         return
@@ -254,9 +318,7 @@ def ensure_no_symlink_parent(path: Path) -> None:
         raise OutputSafetyError(f"output parent is a symlink: {path.parent}")
 
 
-def write_json_safely(path: Path, payload: dict[str, Any]) -> None:
-    ensure_no_symlink_parent(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def validate_replacement_target(path: Path) -> None:
     ensure_no_symlink_parent(path)
     if path.is_symlink():
         raise OutputSafetyError(f"output file is a symlink: {path}")
@@ -267,6 +329,15 @@ def write_json_safely(path: Path, payload: dict[str, Any]) -> None:
         if file_stat.st_nlink > 1:
             raise OutputSafetyError(f"output file has multiple hard links: {path}")
 
+
+def write_json_safely(
+    path: Path,
+    payload: dict[str, Any],
+    validate_before_replace: Callable[[], None] | None = None,
+) -> None:
+    ensure_no_symlink_parent(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    validate_replacement_target(path)
     temp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{secrets.token_hex(8)}")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
@@ -276,6 +347,9 @@ def write_json_safely(path: Path, payload: dict[str, Any]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
+        validate_replacement_target(path)
+        if validate_before_replace:
+            validate_before_replace()
         os.replace(temp, path)
     finally:
         try:
@@ -331,11 +405,25 @@ def collect_os() -> dict[str, Any]:
 
 def collect_compiler(shud_dir: Path, errors: list[str], notes: list[str]) -> dict[str, Any]:
     makefile = shud_dir / "Makefile"
-    cc_value = parse_make_assignment(makefile, "CC")
-    source = "SHUD Makefile CC" if cc_value else "PATH fallback"
+    cc_assignment = parse_make_assignment_detail(makefile, "CC")
+    cc_value = cc_assignment["value"] if cc_assignment else None
+    cc_operator = cc_assignment["operator"] if cc_assignment else None
+    env_cc = os.environ.get("CC")
+    selected_cc: str | None = None
+    if cc_value and cc_operator == "?=" and env_cc:
+        selected_cc = env_cc
+        source = "environment CC via SHUD Makefile ?="
+    elif cc_value:
+        selected_cc = cc_value
+        source = f"SHUD Makefile CC {cc_operator}"
+    elif env_cc:
+        selected_cc = env_cc
+        source = "environment CC"
+    else:
+        source = "PATH fallback"
     command: list[str] | None = None
-    if cc_value:
-        command = shlex.split(expand_make_path(cc_value, os.environ))
+    if selected_cc:
+        command = shlex.split(expand_make_path(selected_cc, os.environ))
     else:
         for candidate in ("g++", "clang++", "c++", "cc"):
             found = shutil.which(candidate)
@@ -352,6 +440,8 @@ def collect_compiler(shud_dir: Path, errors: list[str], notes: list[str]) -> dic
 
     compiler = {
         "source": source,
+        "makefile_operator": cc_operator,
+        "environment_cc_present": bool(env_cc),
         "command": command,
         "version_command": result,
         "ok": ok,
@@ -472,9 +562,27 @@ def collect_sundials(shud_dir: Path, errors: list[str]) -> dict[str, Any]:
     }
 
 
-def parse_version_text(text: str) -> str | None:
-    match = re.search(r"(\d+(?:\.\d+)+)", text)
-    return match.group(1) if match else None
+def parse_rshud_version_stdout(stdout: str, stdout_truncated: bool) -> dict[str, Any]:
+    sentinel_pattern = re.compile(rf"^{re.escape(RSHUD_VERSION_PREFIX)}(?P<version>\d+(?:\.\d+)+)\n?$")
+    exact_match = sentinel_pattern.fullmatch(stdout)
+    sentinel_lines = re.findall(
+        rf"(?m)^{re.escape(RSHUD_VERSION_PREFIX)}(?P<version>\d+(?:\.\d+)+)\s*$",
+        stdout,
+    )
+    version = exact_match.group("version") if exact_match else (sentinel_lines[0] if len(sentinel_lines) == 1 else None)
+    errors: list[str] = []
+    if stdout_truncated:
+        errors.append("stdout was truncated")
+    if not exact_match:
+        errors.append(f"stdout must contain exactly {RSHUD_VERSION_PREFIX}<version> and a trailing newline")
+    if len(sentinel_lines) > 1:
+        errors.append("stdout contained multiple rSHUD version sentinels")
+    return {
+        "version": version,
+        "contract_ok": bool(exact_match and not stdout_truncated),
+        "errors": errors,
+        "sentinel_prefix": RSHUD_VERSION_PREFIX,
+    }
 
 
 def version_tuple(version: str) -> tuple[int, ...]:
@@ -499,19 +607,30 @@ def parse_description_version(description: Path) -> tuple[str | None, str | None
     return match.group("version"), None
 
 
-def collect_rshud(repo_root: Path, errors: list[str]) -> dict[str, Any]:
-    command = ["Rscript", "-e", 'cat(as.character(packageVersion("rSHUD")))']
+def collect_rshud(repo_root: Path, errors: list[str], include_description: bool = True) -> dict[str, Any]:
+    command = [
+        "Rscript",
+        "--vanilla",
+        "-e",
+        'cat("RSHUD_VERSION=", as.character(packageVersion("rSHUD")), "\\n", sep="")',
+    ]
     result = run_command(command, timeout=30)
-    version = parse_version_text(f"{result['stdout_tail']}\n{result['stderr_tail']}")
-    command_ok = result["exit_code"] == 0 and version is not None
+    parser = parse_rshud_version_stdout(str(result["stdout_tail"]), bool(result["stdout_truncated"]))
+    version = parser["version"]
+    command_ok = result["exit_code"] == 0 and parser["contract_ok"] and version is not None
     meets_minimum = bool(version and version_at_least(version, MIN_RSHUD_VERSION))
     if not command_ok:
-        errors.append("installed rSHUD version could not be read from local Rscript packageVersion")
-    elif not meets_minimum:
+        detail = "; ".join(parser["errors"]) or command_failure_detail(result)
+        errors.append(f"installed rSHUD version did not match the strict Rscript sentinel contract: {detail}")
+    if version and not meets_minimum:
         errors.append(f"installed rSHUD version {version} is below required {MIN_RSHUD_VERSION}")
 
     description = repo_root / "rSHUD" / "DESCRIPTION"
-    description_version, description_error = parse_description_version(description)
+    if include_description:
+        description_version, description_error = parse_description_version(description)
+    else:
+        description_version = None
+        description_error = "skipped because source-boundary preflight did not pass"
     return {
         "minimum_version": MIN_RSHUD_VERSION,
         "installed": {
@@ -519,6 +638,7 @@ def collect_rshud(repo_root: Path, errors: list[str]) -> dict[str, Any]:
             "version": version,
             "ok": command_ok,
             "meets_minimum": meets_minimum,
+            "parser": parser,
         },
         "submodule_description": {
             "path": str(description),
@@ -560,6 +680,72 @@ def make_timeout_seconds(notes: list[str]) -> int:
     return timeout
 
 
+def collect_make_environment_guard(shud_dir: Path, skip_build: bool, errors: list[str]) -> dict[str, Any]:
+    makefile = shud_dir / "Makefile"
+    cc_assignment = parse_make_assignment_detail(makefile, "CC")
+    sundials_assignment = parse_make_assignment_detail(makefile, "SUNDIALS_DIR")
+    present = {
+        name: os.environ[name]
+        for name in (*UNSUPPORTED_MAKE_ENV_VARS, *MAKE_ENV_OVERRIDE_VARS, *SHUD_TARGET_ENV_OVERRIDE_VARS)
+        if os.environ.get(name)
+    }
+    blocked: list[dict[str, str]] = []
+    for name in UNSUPPORTED_MAKE_ENV_VARS:
+        if name in present:
+            blocked.append(
+                {
+                    "name": name,
+                    "reason": "make control variable could alter Makefile evaluation",
+                }
+            )
+    if "CC" in present and (not cc_assignment or cc_assignment["operator"] != "?="):
+        blocked.append(
+            {
+                "name": "CC",
+                "reason": "environment CC is not selected by the recorded SHUD Makefile CC evidence",
+            }
+        )
+    if "CXX" in present:
+        blocked.append(
+            {
+                "name": "CXX",
+                "reason": "environment CXX is not part of the recorded SHUD build identity",
+            }
+        )
+    if (
+        "SUNDIALS_DIR" in present
+        and sundials_assignment
+        and sundials_assignment["operator"] != "?="
+    ):
+        blocked.append(
+            {
+                "name": "SUNDIALS_DIR",
+                "reason": "environment SUNDIALS_DIR would conflict with the SHUD Makefile-selected SUNDIALS_DIR",
+            }
+        )
+    for name in SHUD_TARGET_ENV_OVERRIDE_VARS:
+        if name in present:
+            blocked.append(
+                {
+                    "name": name,
+                    "reason": "environment variable is consumed by the SHUD Makefile shud target but is not part of the recorded build identity",
+                }
+            )
+
+    guard = {
+        "skipped_build": skip_build,
+        "present_variables": present,
+        "blocked_variables": blocked,
+        "makefile_cc_operator": cc_assignment["operator"] if cc_assignment else None,
+        "makefile_sundials_dir_operator": sundials_assignment["operator"] if sundials_assignment else None,
+        "ok": not blocked,
+    }
+    if blocked and not skip_build:
+        names = ", ".join(item["name"] for item in blocked)
+        errors.append(f"unsupported make environment overrides are set before SHUD build: {names}")
+    return guard
+
+
 def run_make(shud_dir: Path, target: str, timeout_seconds: int) -> dict[str, Any]:
     return run_command(["make", target], cwd=shud_dir, timeout=timeout_seconds)
 
@@ -583,31 +769,54 @@ def git_path_tracked(git_dir: Path, path_name: str) -> tuple[bool | None, str | 
     return bool(str(result.get("stdout_tail") or "").strip()), None
 
 
-def is_shud_artifact_name(name: str) -> bool:
-    return name in SHUD_ARTIFACT_NAMES or any(fnmatch.fnmatch(name, pattern) for pattern in SHUD_ARTIFACT_PATTERNS)
+def classify_shud_artifact_name(name: str) -> str | None:
+    if name in SHUD_EXACT_ARTIFACT_NAMES:
+        return "explicit_build_product"
+    if any(fnmatch.fnmatch(name, pattern) for pattern in SHUD_CURRENT_BUILD_ARTIFACT_PATTERNS):
+        return "current_build_artifact_pattern"
+    if any(fnmatch.fnmatch(name, pattern) for pattern in SHUD_BROAD_RESIDUE_PATTERNS):
+        return "broad_residue_pattern"
+    return None
 
 
-def inventory_shud_artifacts(shud_dir: Path) -> list[dict[str, Any]]:
+def inventory_shud_artifacts(
+    shud_dir: Path,
+    removable_current_build_names: set[str] | None = None,
+) -> list[dict[str, Any]]:
     if not shud_dir.is_dir():
         return []
+    removable_current_build_names = removable_current_build_names or set()
     artifacts: list[dict[str, Any]] = []
     for path in sorted(shud_dir.iterdir(), key=lambda candidate: candidate.name):
-        if not is_shud_artifact_name(path.name):
+        classification = classify_shud_artifact_name(path.name)
+        if not classification:
             continue
         tracked, tracked_error = git_path_tracked(shud_dir, path.name)
         ignored, ignored_error = git_path_bool(shud_dir, ["check-ignore", "-q", "--", path.name])
-        removable = tracked is False
+        removable = tracked is False and (
+            classification == "explicit_build_product" or path.name in removable_current_build_names
+        )
+        block_reason = None
+        if tracked is None:
+            block_reason = "tracking state could not be proven"
+        elif tracked:
+            block_reason = "path is tracked by git"
+        elif classification != "explicit_build_product" and path.name not in removable_current_build_names:
+            block_reason = "artifact pattern match was not created by the current build flow"
         artifacts.append(
             {
                 "path": str(path),
                 "name": path.name,
                 "exists": path.exists() or path.is_symlink(),
                 "kind": "directory" if path.is_dir() and not path.is_symlink() else "file",
+                "classification": classification,
                 "tracked": tracked,
                 "tracked_error": tracked_error,
                 "git_ignored": ignored,
                 "git_ignored_error": ignored_error,
+                "created_by_current_build_flow": path.name in removable_current_build_names,
                 "removable": removable,
+                "block_reason": block_reason,
                 "size_bytes": path.stat().st_size if path.is_file() else None,
             }
         )
@@ -637,14 +846,46 @@ def remove_shud_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any
     return removals
 
 
-def cleanup_shud_artifacts(shud_dir: Path, timeout_seconds: int) -> dict[str, Any]:
+def cleanup_shud_artifacts(
+    shud_dir: Path,
+    timeout_seconds: int,
+    removable_current_build_names: set[str] | None = None,
+) -> dict[str, Any]:
+    removable_current_build_names = removable_current_build_names or set()
+    before_inventory = inventory_shud_artifacts(shud_dir, removable_current_build_names)
+    blocking_inventory = [artifact for artifact in before_inventory if not artifact["removable"]]
+    if blocking_inventory:
+        return {
+            "make_clean": None,
+            "make_clean_skipped": True,
+            "skip_reason": "unsafe SHUD artifact candidates were present before make clean",
+            "artifact_inventory_before_cleanup": before_inventory,
+            "artifact_inventory_before_extra_cleanup": before_inventory,
+            "extra_cleanup": [],
+            "artifact_inventory_after_cleanup": before_inventory,
+        }
+
     make_result = run_make(shud_dir, "clean", timeout_seconds)
-    before_inventory = inventory_shud_artifacts(shud_dir)
-    removals = remove_shud_artifacts(before_inventory)
-    after_inventory = inventory_shud_artifacts(shud_dir)
+    after_make_inventory = inventory_shud_artifacts(shud_dir, removable_current_build_names)
+    if make_result["exit_code"] != 0:
+        return {
+            "make_clean": make_result,
+            "make_clean_skipped": False,
+            "skip_reason": None,
+            "artifact_inventory_before_cleanup": before_inventory,
+            "artifact_inventory_before_extra_cleanup": after_make_inventory,
+            "extra_cleanup": [],
+            "artifact_inventory_after_cleanup": after_make_inventory,
+        }
+
+    removals = remove_shud_artifacts(after_make_inventory)
+    after_inventory = inventory_shud_artifacts(shud_dir, removable_current_build_names)
     return {
         "make_clean": make_result,
-        "artifact_inventory_before_extra_cleanup": before_inventory,
+        "make_clean_skipped": False,
+        "skip_reason": None,
+        "artifact_inventory_before_cleanup": before_inventory,
+        "artifact_inventory_before_extra_cleanup": after_make_inventory,
         "extra_cleanup": removals,
         "artifact_inventory_after_cleanup": after_inventory,
     }
@@ -654,6 +895,8 @@ def collect_shud(
     repo_root: Path,
     skip_build: bool,
     cleanup: bool,
+    source_boundary_ok: bool,
+    make_environment_guard: dict[str, Any] | None,
     errors: list[str],
     notes: list[str],
     incomplete_reasons: list[str],
@@ -678,6 +921,9 @@ def collect_shud(
             "artifact_after_cleanup": None,
             "artifact_inventory_after_cleanup": None,
             "artifact_inventory_final": None,
+            "blocked_before_make": False,
+            "block_reason": None,
+            "make_environment_guard": make_environment_guard,
         },
     }
 
@@ -691,6 +937,18 @@ def collect_shud(
     if commit_error:
         notes.append(f"SHUD commit could not be read: {commit_error}")
 
+    if not source_boundary_ok:
+        shud["build"]["blocked_before_make"] = True
+        shud["build"]["block_reason"] = "source-boundary preflight did not pass"
+        shud["build"]["artifact_inventory_final"] = inventory_shud_artifacts(shud_dir)
+        return shud
+
+    if make_environment_guard and not make_environment_guard.get("ok", False) and not skip_build:
+        shud["build"]["blocked_before_make"] = True
+        shud["build"]["block_reason"] = "unsupported make environment overrides are set"
+        shud["build"]["artifact_inventory_final"] = inventory_shud_artifacts(shud_dir)
+        return shud
+
     if skip_build:
         reason = "SHUD build was skipped by --skip-build; evidence is environment-only and not a readiness pass."
         notes.append(reason)
@@ -703,13 +961,20 @@ def collect_shud(
 
     pre_clean = cleanup_shud_artifacts(shud_dir, timeout_seconds)
     shud["build"]["pre_clean"] = pre_clean
+    if pre_clean["make_clean_skipped"]:
+        errors.append("SHUD pre-build cleanup refused unsafe build artifacts in SHUD checkout before make clean")
+        shud["build"]["artifact"] = artifact_state(shud_dir / "shud")
+        shud["build"]["artifact_inventory_final"] = pre_clean["artifact_inventory_after_cleanup"]
+        return shud
     if pre_clean["make_clean"]["exit_code"] != 0:
         errors.append(f"SHUD pre-build make clean failed: {command_failure_detail(pre_clean['make_clean'])}")
         shud["build"]["artifact"] = artifact_state(shud_dir / "shud")
+        shud["build"]["artifact_inventory_final"] = pre_clean["artifact_inventory_after_cleanup"]
         return shud
     if pre_clean["artifact_inventory_after_cleanup"]:
         errors.append("SHUD pre-build cleanup left build artifacts in SHUD checkout")
         shud["build"]["artifact"] = artifact_state(shud_dir / "shud")
+        shud["build"]["artifact_inventory_final"] = pre_clean["artifact_inventory_after_cleanup"]
         return shud
 
     build_result = run_make(shud_dir, "shud", timeout_seconds)
@@ -725,11 +990,18 @@ def collect_shud(
         errors.append("SHUD build command exited 0 but SHUD/shud is not executable")
 
     if cleanup:
-        cleanup_result = cleanup_shud_artifacts(shud_dir, timeout_seconds)
+        removable_current_build_names = {
+            artifact["name"]
+            for artifact in (shud["build"]["artifact_inventory_after_build"] or [])
+            if artifact["classification"] != "explicit_build_product" and artifact["tracked"] is False
+        }
+        cleanup_result = cleanup_shud_artifacts(shud_dir, timeout_seconds, removable_current_build_names)
         shud["build"]["cleanup"] = cleanup_result
         shud["build"]["artifact_after_cleanup"] = artifact_state(shud_dir / "shud")
         shud["build"]["artifact_inventory_after_cleanup"] = cleanup_result["artifact_inventory_after_cleanup"]
-        if cleanup_result["make_clean"]["exit_code"] != 0:
+        if cleanup_result["make_clean_skipped"]:
+            errors.append("SHUD cleanup refused unsafe build artifacts in SHUD checkout before make clean")
+        elif cleanup_result["make_clean"]["exit_code"] != 0:
             errors.append(f"SHUD cleanup make clean failed: {command_failure_detail(cleanup_result['make_clean'])}")
         elif shud["build"]["artifact_after_cleanup"]["exists"]:
             errors.append("SHUD cleanup completed but SHUD/shud still exists")
@@ -755,18 +1027,53 @@ def append_status_errors(label: str, result: dict[str, Any], errors: list[str]) 
         errors.append(f"{label} has uncommitted or visible changes: {status}")
 
 
-def collect_source_boundary(repo_root: Path, errors: list[str]) -> dict[str, Any]:
+def collect_source_boundary(repo_root: Path, errors: list[str], phase: str) -> dict[str, Any]:
+    boundary_errors: list[str] = []
     root_status = run_command(["git", "-C", str(repo_root), "status", "--short", "--", "SHUD", "rSHUD", "workspace"], timeout=20)
     shud_status = run_command(["git", "-C", str(repo_root / "SHUD"), "status", "--short"], timeout=20)
     rshud_status = run_command(["git", "-C", str(repo_root / "rSHUD"), "status", "--short"], timeout=20)
-    append_status_errors("workspace/SHUD/rSHUD source boundary", root_status, errors)
-    append_status_errors("SHUD checkout", shud_status, errors)
-    append_status_errors("rSHUD checkout", rshud_status, errors)
+    append_status_errors("workspace/SHUD/rSHUD source boundary", root_status, boundary_errors)
+    append_status_errors("SHUD checkout", shud_status, boundary_errors)
+    append_status_errors("rSHUD checkout", rshud_status, boundary_errors)
+    errors.extend(boundary_errors)
     return {
+        "phase": phase,
+        "ok": not boundary_errors,
+        "errors": boundary_errors,
         "repo_status_shud_rshud_workspace": root_status,
         "shud_status": shud_status,
         "rshud_status": rshud_status,
     }
+
+
+def skipped_component(reason: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "skipped": True,
+        "skip_reason": reason,
+    }
+
+
+def finalize_conclusion(payload: dict[str, Any], skip_build: bool) -> None:
+    if skip_build or payload["incomplete_reasons"]:
+        payload["conclusion"] = "incomplete"
+    elif payload["errors"]:
+        payload["conclusion"] = "block"
+    else:
+        payload["conclusion"] = "pass"
+
+
+def provisional_output_payload(payload: dict[str, Any], skip_build: bool) -> dict[str, Any]:
+    provisional = copy.deepcopy(payload)
+    provisional["provisional"] = {
+        "status": "postflight_pending",
+        "ready_for_consumption": False,
+        "reason": PROVISIONAL_POSTFLIGHT_REASON,
+    }
+    if PROVISIONAL_POSTFLIGHT_REASON not in provisional["incomplete_reasons"]:
+        provisional["incomplete_reasons"].append(PROVISIONAL_POSTFLIGHT_REASON)
+    finalize_conclusion(provisional, skip_build)
+    return provisional
 
 
 def build_payload(repo_root: Path, output: Path, skip_build: bool, cleanup: bool) -> dict[str, Any]:
@@ -782,23 +1089,42 @@ def build_payload(repo_root: Path, output: Path, skip_build: bool, cleanup: bool
         "output": {
             "path": str(output),
             "default_relative_path": str(DEFAULT_OUTPUT_RELATIVE),
+            "git_guard": output_git_guard(repo_root, output),
         },
         "os": collect_os(),
     }
-    payload["compiler"] = collect_compiler(shud_dir, errors, notes)
-    payload["sundials"] = collect_sundials(shud_dir, errors)
-    payload["shud"] = collect_shud(repo_root, skip_build, cleanup, errors, notes, incomplete_reasons)
-    payload["rshud"] = collect_rshud(repo_root, errors)
-    payload["source_boundary"] = collect_source_boundary(repo_root, errors)
+    preflight = collect_source_boundary(repo_root, errors, "preflight")
+    payload["source_boundary"] = {
+        "preflight": preflight,
+        "postflight_after_output_write": None,
+    }
+    source_boundary_ok = preflight["ok"]
+    if source_boundary_ok:
+        make_environment_guard = collect_make_environment_guard(shud_dir, skip_build, errors)
+        payload["make_environment_guard"] = make_environment_guard
+        payload["compiler"] = collect_compiler(shud_dir, errors, notes)
+        payload["sundials"] = collect_sundials(shud_dir, errors)
+    else:
+        reason = "source-boundary preflight did not pass; skipped SHUD Makefile-derived evidence"
+        make_environment_guard = None
+        payload["make_environment_guard"] = skipped_component(reason)
+        payload["compiler"] = skipped_component(reason)
+        payload["sundials"] = skipped_component(reason)
+    payload["shud"] = collect_shud(
+        repo_root,
+        skip_build,
+        cleanup,
+        source_boundary_ok,
+        make_environment_guard,
+        errors,
+        notes,
+        incomplete_reasons,
+    )
+    payload["rshud"] = collect_rshud(repo_root, errors, include_description=source_boundary_ok)
     payload["notes"] = notes
     payload["errors"] = errors
     payload["incomplete_reasons"] = incomplete_reasons
-    if skip_build or incomplete_reasons:
-        payload["conclusion"] = "incomplete"
-    elif errors:
-        payload["conclusion"] = "block"
-    else:
-        payload["conclusion"] = "pass"
+    finalize_conclusion(payload, skip_build)
     return payload
 
 
@@ -829,13 +1155,18 @@ def main(argv: list[str]) -> int:
     repo_root_lexical = Path(os.path.abspath(repo_root_input))
     repo_root = repo_root_input.resolve()
     output = output_path(repo_root_lexical, args.output)
-    try:
+    raw_output_is_absolute = bool(args.output and Path(args.output).is_absolute())
+
+    def validate_output_write_scope() -> None:
         validate_output_scope(
             repo_root,
             output,
             repo_root_lexical,
-            raw_output_is_absolute=bool(args.output and Path(args.output).is_absolute()),
+            raw_output_is_absolute=raw_output_is_absolute,
         )
+
+    try:
+        validate_output_write_scope()
     except OutputSafetyError as exc:
         print(f"readiness output path rejected: {exc}", file=sys.stderr)
         return 2
@@ -843,7 +1174,28 @@ def main(argv: list[str]) -> int:
     cleanup = not args.skip_build
     payload = build_payload(repo_root, output, args.skip_build, cleanup)
     try:
-        write_json_safely(output, payload)
+        write_json_safely(
+            output,
+            provisional_output_payload(payload, args.skip_build),
+            validate_before_replace=validate_output_write_scope,
+        )
+    except OutputSafetyError as exc:
+        print(f"readiness output write rejected: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"readiness output write failed: {exc}", file=sys.stderr)
+        return 2
+
+    postflight_errors: list[str] = []
+    payload["source_boundary"]["postflight_after_output_write"] = collect_source_boundary(
+        repo_root,
+        postflight_errors,
+        "postflight_after_output_write",
+    )
+    payload["errors"].extend(postflight_errors)
+    finalize_conclusion(payload, args.skip_build)
+    try:
+        write_json_safely(output, payload, validate_before_replace=validate_output_write_scope)
     except OutputSafetyError as exc:
         print(f"readiness output write rejected: {exc}", file=sys.stderr)
         return 2
