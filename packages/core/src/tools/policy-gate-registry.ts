@@ -6,7 +6,11 @@ import {
   normalizeSpawnAgentInput,
   PolicyGuardClassSchema,
   PolicyGateRemediationSchema,
+  SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
+  SPAWN_PROFILE_SUBSET_POLICY_REF,
   SPAWN_PROFILE_SUBSET_RULE,
+  SPAWN_PROFILE_SUBSET_RULE_ID,
+  SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS,
   type HarnessRole,
   type PolicyGateContext,
   type PolicyGateDecision,
@@ -39,10 +43,15 @@ export type PolicyGateEvaluator = (
   context: PolicyGateEvaluationContext
 ) => PolicyGateDecision | Promise<PolicyGateDecision>;
 
+export type PolicyGateExecutionInputValidator = (
+  input: unknown
+) => Extract<PolicyGateDecision, { decision: "deny" }> | undefined;
+
 export interface PolicyGateWrapperOptions {
   toolId?: string;
   role?: HarnessRole;
   evaluate: PolicyGateEvaluator;
+  validateExecutionInput?: PolicyGateExecutionInputValidator;
 }
 
 export type ShudBashFuseSource =
@@ -205,7 +214,8 @@ export function createShudRuntimeToolRegistry(
       wrapToolWithPolicyGate(new SpawnAgentTool(options.modelRouter, registry, options.metrics), {
         evaluate,
         role: options.role,
-        toolId: "spawn_agent"
+        toolId: "spawn_agent",
+        validateExecutionInput: createSpawnAgentToolAvailabilityValidator(registry)
       })
     );
   }
@@ -297,6 +307,18 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       return this.finalizePolicyGateResult(
         toolContext,
         buildPolicyGateDeniedResult(this.policyGateToolId, preparedInput),
+        durationMs
+      );
+    }
+
+    const executionValidationDecision = this.options.validateExecutionInput?.(
+      preparedInput.executionInput
+    );
+    if (executionValidationDecision) {
+      const durationMs = Date.now() - startTime;
+      return this.finalizePolicyGateResult(
+        toolContext,
+        buildPolicyGateDeniedResult(this.policyGateToolId, executionValidationDecision),
         durationMs
       );
     }
@@ -427,6 +449,78 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       evaluatorInput: clonePolicyGateInput(executionInput)
     };
   }
+}
+
+function createSpawnAgentToolAvailabilityValidator(
+  registry: ToolRegistry
+): PolicyGateExecutionInputValidator {
+  return (input) => validateSpawnAgentToolAvailability(input, registry);
+}
+
+function validateSpawnAgentToolAvailability(
+  input: unknown,
+  registry: ToolRegistry
+): Extract<PolicyGateDecision, { decision: "deny" }> | undefined {
+  const toolIds = readNormalizedSpawnToolIds(input);
+  if (toolIds.length === 0) {
+    return undefined;
+  }
+
+  const missingToolIds = uniqueStrings(toolIds.filter((toolId) => !registry.get(toolId)));
+  if (missingToolIds.length === 0) {
+    return undefined;
+  }
+
+  return buildSpawnToolAvailabilityDeny(missingToolIds);
+}
+
+function readNormalizedSpawnToolIds(input: unknown): string[] {
+  if (input === null || typeof input !== "object") {
+    return [];
+  }
+
+  const tools = (input as { tools?: unknown }).tools;
+  if (!Array.isArray(tools)) {
+    return [];
+  }
+
+  return tools.filter((toolId): toolId is string => typeof toolId === "string");
+}
+
+function buildSpawnToolAvailabilityDeny(
+  missingToolIds: readonly string[]
+): Extract<PolicyGateDecision, { decision: "deny" }> {
+  const missingSummary = formatToolIdSummary(missingToolIds);
+  return {
+    decision: "deny",
+    ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+    reason: `spawn_agent normalized tool contract includes ${missingToolIds.length} tool id(s) unavailable in the SHUD runtime registry; examples: ${missingSummary}.`,
+    remediation: {
+      next_action: "adjust_scope",
+      hint: `Register the missing SHUD runtime tools or request only available spawn tools; missing examples: ${missingSummary}.`,
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+    },
+    guardClass: "authority"
+  };
+}
+
+function formatToolIdSummary(toolIds: readonly string[]): string {
+  const samples = toolIds.slice(0, SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES).map(formatToolIdSample);
+  const suffix =
+    toolIds.length > SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES ? ` (${toolIds.length} total)` : "";
+  return `${samples.join(", ")}${suffix}`;
+}
+
+function formatToolIdSample(toolId: string): string {
+  if (toolId.length <= SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS) {
+    return toolId;
+  }
+
+  return `${toolId.slice(0, SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS - 3)}...`;
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }
 
 function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyGateDecision {
