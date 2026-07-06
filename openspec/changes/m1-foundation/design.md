@@ -230,7 +230,7 @@ Risk packs considered:
 - Schema / columns / units / field names: selected - remediation and rule metadata are contract-shaped.
 - Auth / permissions / secrets: selected - role permission profile enforcement is the core authority boundary.
 - Concurrency / shared state / ordering: not selected - depth/concurrency are #27 non-goals.
-- Resource limits / large input / discovery: not selected - allowlist input is a bounded array in focused tests; no discovery behavior.
+- Resource limits / large input / discovery: selected - spawn allowlists are untrusted tool-call input and must be bounded before trim/dedup/filter processing.
 - Legacy compatibility / examples: selected - existing Zero `tools` allowlist behavior and role-map tests must remain compatible.
 - Error handling / rollback / partial outputs: selected - denial must happen before the underlying spawn executes and must be navigable.
 - Release / packaging / dependency compatibility: selected - no new runtime dependency and zero source diff stays 0.
