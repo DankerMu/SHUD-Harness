@@ -29,6 +29,7 @@ import {
   RAW_DATA_WRITE_RULE_ID,
   RawDataSandboxedBashTool,
   buildRawDataSeatbeltProfile,
+  createRawDataWriteAdvisoryRule,
   evaluateRawDataWriteAdvisory,
   rawDataSandboxProfileFileName,
   rawDataWriteRemediation,
@@ -142,6 +143,10 @@ describe("raw data seatbelt sandbox", () => {
         import.meta.dir
       )
     ).toThrow();
+  });
+
+  test("raw data advisory rule carries authority guard classification", () => {
+    expect(createRawDataWriteAdvisoryRule(["/tmp/raw"]).guardClass).toBe("authority");
   });
 
   test("normal completion cleanup does not sample or signal a reused root PID", async () => {

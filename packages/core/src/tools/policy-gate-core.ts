@@ -70,7 +70,7 @@ export type PolicyGateInputNormalization =
 export interface PolicyRule {
   ruleId: string;
   description: string;
-  guardClass?: PolicyGuardClass;
+  guardClass: PolicyGuardClass;
   evaluate(call: PolicyGateToolCall, context: PolicyGateContext): PolicyRuleDecision;
 }
 
@@ -86,6 +86,8 @@ export function evaluatePolicyGate(
   call: PolicyGateToolCall,
   context: PolicyGateContext = EMPTY_POLICY_GATE_CONTEXT
 ): PolicyGateDecision {
+  assertPolicyGateContextGuardClasses(context);
+
   for (const rule of context.rules) {
     const result = rule.evaluate(call, context);
     if (result.decision === "allow") {
@@ -104,6 +106,31 @@ export function evaluatePolicyGate(
   }
 
   return { decision: "allow" };
+}
+
+export function assertPolicyGateContextGuardClasses(context: PolicyGateContext): void {
+  const failures: string[] = [];
+
+  context.rules.forEach((rule, index) => {
+    const ruleId = formatPolicyRuleId(rule, index);
+    const parsedGuardClass = PolicyGuardClassSchema.safeParse(
+      (rule as PolicyRule & { guard_class?: unknown }).guardClass ??
+        (rule as PolicyRule & { guard_class?: unknown }).guard_class
+    );
+    if (!parsedGuardClass.success) {
+      failures.push(`${ruleId}: missing or invalid guardClass/guard_class`);
+    }
+  });
+
+  if (failures.length > 0) {
+    throw new Error(`Policy gate guard_class lint failed: ${failures.join("; ")}.`);
+  }
+}
+
+function formatPolicyRuleId(rule: Pick<PolicyRule, "ruleId">, index: number): string {
+  return typeof rule.ruleId === "string" && rule.ruleId.trim() !== ""
+    ? rule.ruleId
+    : `<rule-${index}>`;
 }
 
 export const SPAWN_PROFILE_SUBSET_RULE: PolicyRule = Object.freeze({

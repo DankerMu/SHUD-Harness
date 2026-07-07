@@ -66,6 +66,22 @@ if (requireSeatbeltTests) {
 const seatbeltTest = hasSeatbelt ? test : test.skip;
 
 describe("policy-gated zero tool registry", () => {
+  test("policy gate evaluator assembly rejects unclassified hard guard rules", () => {
+    expect(() =>
+      createPolicyGateEvaluator({
+        rules: [
+          {
+            ruleId: "registry-unclassified-guard",
+            description: "Missing guard_class metadata.",
+            evaluate: () => ({ decision: "allow" })
+          } as never
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: registry-unclassified-guard: missing or invalid guardClass\/guard_class/
+    );
+  });
+
   test("denies before executing the underlying bash BaseTool", async () => {
     const bashTool = new RecordingTool("bash");
     const registry = createPolicyGatedToolRegistry([bashTool], {
@@ -74,6 +90,7 @@ describe("policy-gated zero tool registry", () => {
           {
             ruleId: "workspace-write-deny",
             description: "Reject writes to raw data.",
+            guardClass: "authority",
             evaluate: () => ({
               decision: "deny",
               reason: "raw data writes are blocked",
@@ -1900,6 +1917,7 @@ describe("policy-gated zero tool registry", () => {
           {
             ruleId: "invalid-remediation-rule",
             description: "Returns invalid remediation.",
+            guardClass: "authority",
             evaluate: () => ({
               decision: "deny",
               reason: "invalid remediation",
@@ -1937,6 +1955,7 @@ describe("policy-gated zero tool registry", () => {
           {
             ruleId: "workspace-write-deny",
             description: "Reject writes to raw data.",
+            guardClass: "authority",
             evaluate: () => ({
               decision: "deny",
               reason: `blocked because ${secret}`,

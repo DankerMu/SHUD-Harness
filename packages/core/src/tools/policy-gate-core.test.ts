@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  assertPolicyGateContextGuardClasses,
   evaluatePolicyGate,
   normalizeSpawnAgentInput,
   PolicyGateRemediationSchema,
@@ -32,6 +33,7 @@ describe("policy gate pure evaluator", () => {
         {
           ruleId: "raw-data-write",
           description: "Reject writes to data/raw.",
+          guardClass: "authority",
           evaluate: () => ({
             decision: "deny" as const,
             reason: "data/raw is protected",
@@ -57,8 +59,42 @@ describe("policy gate pure evaluator", () => {
         next_action: "adjust_scope",
         hint: "Write generated files under workspace/tasks instead.",
         ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-      }
+      },
+      guardClass: "authority"
     });
+  });
+
+  test("guard_class lint rejects unclassified hard guard rules", () => {
+    expect(() =>
+      assertPolicyGateContextGuardClasses({
+        rules: [
+          {
+            ruleId: "unclassified-hard-guard",
+            description: "Missing guard_class metadata.",
+            evaluate: () => ({ decision: "allow" })
+          } as never
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: unclassified-hard-guard: missing or invalid guardClass\/guard_class/
+    );
+  });
+
+  test("guard_class lint rejects invalid hard guard classifications", () => {
+    expect(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "invalid-guard-class",
+            description: "Invalid guard_class metadata.",
+            guardClass: "temporary",
+            evaluate: () => ({ decision: "allow" })
+          } as never
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: invalid-guard-class: missing or invalid guardClass\/guard_class/
+    );
   });
 
   test("remediation payload requires legal next_action plus hint and ref", () => {
@@ -91,6 +127,7 @@ describe("policy gate pure evaluator", () => {
           {
             ruleId: "bad-rule",
             description: "Returns invalid remediation.",
+            guardClass: "authority",
             evaluate: () => ({
               decision: "deny",
               reason: "invalid",

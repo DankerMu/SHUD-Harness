@@ -13,6 +13,7 @@ import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os
 import { types as nodeUtilTypes } from "node:util";
 import { ZodType } from "zod";
 import {
+  assertPolicyGateContextGuardClasses,
   evaluatePolicyGate,
   normalizeSpawnAgentInput,
   PolicyGuardClassSchema,
@@ -154,6 +155,7 @@ const SHUD_WAIT_AGENT_DESCRIPTION = [
 ].join("\n");
 
 export function createPolicyGateEvaluator(context: PolicyGateContext): PolicyGateEvaluator {
+  assertPolicyGateContextGuardClasses(context);
   return (call) => evaluatePolicyGate(call, context);
 }
 
