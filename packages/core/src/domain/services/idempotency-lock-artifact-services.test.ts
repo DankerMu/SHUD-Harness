@@ -450,6 +450,95 @@ describe("idempotency, lock, and artifact services", () => {
     expect(JSON.parse(await readFile(recordPath, "utf8"))).toEqual(completedRecord);
   });
 
+  test("IdempotencyRecord storeRecord rejects public completed bypasses", async () => {
+    const fresh = await createTempWorkspacePath();
+    tempRoots.push(fresh.tempRoot);
+    const freshService = createIdempotencyRecordService({ workspaceRoot: fresh.workspaceRoot });
+    const freshError = await captureTaskServiceError(() =>
+      freshService.storeRecord(validIdempotencyRecord())
+    );
+
+    expect(freshError.code).toBe("record_schema_error");
+    expect(freshError.category).toBe("schema_error");
+    await expectPathMissing(join(fresh.workspaceRoot, "tasks"));
+
+    const started = await createTempWorkspacePath();
+    tempRoots.push(started.tempRoot);
+    const startedService = createIdempotencyRecordService({
+      workspaceRoot: started.workspaceRoot,
+      now: () => new Date("2026-07-07T13:31:10.000Z")
+    });
+    const startedBegin = await startedService.beginRecord({
+      scope: "task",
+      key: "task:create:started-bypass",
+      requestDigest: "digest-started-bypass"
+    });
+    const startedError = await captureTaskServiceError(() =>
+      startedService.storeRecord({
+        ...startedBegin.record,
+        status: "completed",
+        result_ref: "TASK-started-bypass"
+      })
+    );
+
+    expect(startedBegin.status).toBe("acquired");
+    expect(startedError.code).toBe("record_schema_error");
+    expect(await startedService.getRecord("task", "task:create:started-bypass")).toEqual(
+      startedBegin.record
+    );
+
+    const failed = await createTempWorkspacePath();
+    tempRoots.push(failed.tempRoot);
+    const failedService = createIdempotencyRecordService({
+      workspaceRoot: failed.workspaceRoot,
+      now: () => new Date("2026-07-07T13:31:20.000Z")
+    });
+    const failedBegin = await failedService.beginRecord({
+      scope: "task",
+      key: "task:create:failed-bypass",
+      requestDigest: "digest-failed-bypass"
+    });
+    const failedRecord = await failedService.failRecord({
+      scope: "task",
+      key: "task:create:failed-bypass",
+      requestDigest: "digest-failed-bypass"
+    });
+    const failedError = await captureTaskServiceError(() =>
+      failedService.storeRecord({
+        ...failedRecord,
+        status: "completed",
+        result_ref: "TASK-failed-bypass"
+      })
+    );
+
+    expect(failedBegin.status).toBe("acquired");
+    expect(failedError.code).toBe("record_schema_error");
+    expect(await failedService.getRecord("task", "task:create:failed-bypass")).toEqual(
+      failedRecord
+    );
+
+    const guarded = await createTempWorkspacePath();
+    tempRoots.push(guarded.tempRoot);
+    const guardedService = createIdempotencyRecordService({
+      workspaceRoot: guarded.workspaceRoot,
+      now: () => new Date("2026-07-07T13:31:30.000Z")
+    });
+    await guardedService.beginRecord({
+      scope: "task",
+      key: "task:create:guarded-complete",
+      requestDigest: "digest-guarded-complete"
+    });
+    const completed = await guardedService.completeRecord({
+      scope: "task",
+      key: "task:create:guarded-complete",
+      requestDigest: "digest-guarded-complete",
+      resultRef: "TASK-guarded-complete"
+    });
+
+    expect(completed.status).toBe("completed");
+    expect(completed.result_ref).toBe("TASK-guarded-complete");
+  });
+
   test("IdempotencyRecord storeRecord preserves same-key digest immutability before completion", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -547,6 +636,54 @@ describe("idempotency, lock, and artifact services", () => {
     expect(error.code).toBe("record_malformed");
     expect(error.category).toBe("workspace_error");
     expect(error.evidenceRefs).toEqual([idempotencyRecordEvidenceRef("task", rawKey)]);
+    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+  });
+
+  test("IdempotencyRecord rollback recovery preserves a valid busy transition guard", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:35:30.000Z")
+    });
+    const rawKey = "task:create:busy-guard-rollback-recovery";
+    const requestDigest = "digest-busy-guard-rollback";
+    const begin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const guardPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      `${sha256Hex(`transition:${rawKey}`)}.guard.json`
+    );
+    const guard = {
+      guard_id: "rollback-recovery-busy-guard",
+      owner_pid: process.pid,
+      acquired_at_ms: Date.now(),
+      acquired_at: new Date().toISOString()
+    };
+    await writeFile(guardPath, `${JSON.stringify(guard)}\n`, { flag: "wx" });
+
+    const error = await captureTaskServiceError(() =>
+      Promise.race([
+        service.recoverFailedRecordAfterRollback({
+          scope: "task",
+          key: rawKey,
+          requestDigest
+        }),
+        timeoutAfter(1_000, "recoverFailedRecordAfterRollback hung on valid busy guard")
+      ])
+    );
+
+    expect(begin.status).toBe("acquired");
+    expect(error.code).toBe("record_malformed");
+    expect(error.retryable).toBe(true);
+    expect(error.evidenceRefs).toEqual([idempotencyRecordEvidenceRef("task", rawKey)]);
+    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(guard);
     expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
   });
 
@@ -876,6 +1013,101 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(pathError.code).toBe("record_id_not_safe");
     await expectPathMissing(join(invalidPath.workspaceRoot, "artifacts"));
+  });
+
+  test("LockRecord and Artifact lookups fail closed on stored identity mismatch", async () => {
+    const lockCase = await createTempWorkspacePath();
+    tempRoots.push(lockCase.tempRoot);
+    const lockService = createLockRecordService({ workspaceRoot: lockCase.workspaceRoot });
+    const lookupLock = validLockRecord();
+    const storedLock = {
+      ...lookupLock,
+      lock_id: "LOCK-secret-foreign",
+      scope: "job"
+    } satisfies LockRecord;
+    const lockPath = join(
+      lockCase.workspaceRoot,
+      "locks",
+      "task",
+      `${lookupLock.lock_id}.json`
+    );
+    await mkdir(join(lockCase.workspaceRoot, "locks", "task"), { recursive: true });
+    await writeFile(lockPath, `${JSON.stringify(storedLock)}\n`, { flag: "wx" });
+
+    const lockError = await captureTaskServiceError(() =>
+      lockService.getLock("task", lookupLock.lock_id)
+    );
+
+    expect(lockError.code).toBe("record_malformed");
+    expect(lockError.category).toBe("workspace_error");
+    expect(lockError.evidenceRefs).toEqual([
+      "workspace/locks/task/LOCK-0001.json",
+      "lock.scope",
+      "lock.lock_id"
+    ]);
+    expectErrorNotToLeakRecordContent(lockError, storedLock.lock_id);
+    expect(await readFile(lockPath, "utf8")).toBe(`${JSON.stringify(storedLock)}\n`);
+
+    const artifactCase = await createTempWorkspacePath();
+    tempRoots.push(artifactCase.tempRoot);
+    const artifactService = createArtifactRegistryService({
+      workspaceRoot: artifactCase.workspaceRoot
+    });
+    const lookupArtifact = validArtifact();
+    const storedArtifact = {
+      ...lookupArtifact,
+      artifact_id: "ART-secret-foreign"
+    } satisfies Artifact;
+    const artifactPath = join(
+      artifactCase.workspaceRoot,
+      "artifacts",
+      "manifests",
+      `${lookupArtifact.artifact_id}.json`
+    );
+    await mkdir(join(artifactCase.workspaceRoot, "artifacts", "manifests"), {
+      recursive: true
+    });
+    await writeFile(artifactPath, `${JSON.stringify(storedArtifact)}\n`, { flag: "wx" });
+
+    const artifactError = await captureTaskServiceError(() =>
+      artifactService.getArtifact(lookupArtifact.artifact_id)
+    );
+
+    expect(artifactError.code).toBe("record_malformed");
+    expect(artifactError.category).toBe("workspace_error");
+    expect(artifactError.evidenceRefs).toEqual([
+      "workspace/artifacts/manifests/ART-0001.json",
+      "artifact.artifact_id"
+    ]);
+    expectErrorNotToLeakRecordContent(artifactError, storedArtifact.artifact_id);
+    expect(await readFile(artifactPath, "utf8")).toBe(`${JSON.stringify(storedArtifact)}\n`);
+  });
+
+  test("Artifact registry rejects divergent duplicate manifests and preserves the first", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createArtifactRegistryService({ workspaceRoot });
+    const artifact = validArtifact();
+    const manifestPath = join(
+      workspaceRoot,
+      "artifacts",
+      "manifests",
+      `${artifact.artifact_id}.json`
+    );
+
+    await expect(service.registerArtifact(artifact)).resolves.toEqual(artifact);
+    await expect(service.registerArtifact({ ...artifact })).resolves.toEqual(artifact);
+    const divergentError = await captureTaskServiceError(() =>
+      service.registerArtifact({
+        ...artifact,
+        media_type: "application/json"
+      })
+    );
+
+    expect(divergentError.code).toBe("record_schema_error");
+    expect(divergentError.category).toBe("schema_error");
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(artifact);
+    expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(artifact);
   });
 });
 

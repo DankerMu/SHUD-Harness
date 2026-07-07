@@ -9,7 +9,7 @@ import {
   type IdempotencyRecord,
   type IdempotencyScope
 } from "../schemas/idempotency";
-import { TaskServiceError } from "./task-card-service";
+import { TaskServiceError, isSafeTaskId } from "./task-card-service";
 import {
   createJsonRecordIfAbsent,
   readJsonRecord,
@@ -70,6 +70,12 @@ export interface IdempotencyRecordService {
   lookupReplay: (input: IdempotencyRecordLookupInput) => Promise<IdempotencyReplayLookup>;
   completeRecord: (input: CompleteIdempotencyRecordInput) => Promise<IdempotencyRecord>;
   failRecord: (input: FailIdempotencyRecordInput) => Promise<IdempotencyRecord>;
+  recoverFailedRecordAfterRollback: (
+    input: FailIdempotencyRecordInput
+  ) => Promise<IdempotencyRecord>;
+  recoverCompletedRecordAfterRollbackFailure: (
+    input: CompleteIdempotencyRecordInput
+  ) => Promise<IdempotencyRecord>;
 }
 
 export function createIdempotencyRecordService(
@@ -78,43 +84,97 @@ export function createIdempotencyRecordService(
   const workspaceRoot = resolve(options.workspaceRoot);
   const now = options.now ?? (() => new Date());
 
-  const service: IdempotencyRecordService = {
-    async storeRecord(record: IdempotencyRecord): Promise<IdempotencyRecord> {
-      const parsedRecord = IdempotencyRecordSchema.safeParse(record);
-      if (!parsedRecord.success) {
-        return await writeJsonRecord(
-          workspaceRoot,
-          idempotencyRecordDirectorySegments("task"),
-          "invalid.json",
-          record,
-          "workspace/tasks/_idempotency",
-          IdempotencyRecordSchema
-        );
-      }
-      assertPersistableIdempotencyRecord(
-        parsedRecord.data,
-        idempotencyRecordEvidenceRef(parsedRecord.data.scope, parsedRecord.data.key)
-      );
-      const existing = await service.getRecord(parsedRecord.data.scope, parsedRecord.data.key);
-      if (existing && existing.request_digest !== parsedRecord.data.request_digest) {
-        throw createIdempotencyMismatchError();
-      }
-      if (existing?.status === "completed") {
-        return assertCompletedRecordStoreAllowed(
-          existing,
-          parsedRecord.data,
-          idempotencyRecordEvidenceRef(parsedRecord.data.scope, parsedRecord.data.key)
-        );
-      }
-
+  async function storeRecordInternal(
+    record: IdempotencyRecord,
+    options: { allowCompletedWrite: boolean }
+  ): Promise<IdempotencyRecord> {
+    const parsedRecord = IdempotencyRecordSchema.safeParse(record);
+    if (!parsedRecord.success) {
       return await writeJsonRecord(
         workspaceRoot,
-        idempotencyRecordDirectorySegments(parsedRecord.data.scope),
-        idempotencyRecordFileName(parsedRecord.data.key),
-        parsedRecord.data,
-        idempotencyRecordEvidenceRef(parsedRecord.data.scope, parsedRecord.data.key),
+        idempotencyRecordDirectorySegments("task"),
+        "invalid.json",
+        record,
+        "workspace/tasks/_idempotency",
         IdempotencyRecordSchema
       );
+    }
+    const evidenceRef = idempotencyRecordEvidenceRef(
+      parsedRecord.data.scope,
+      parsedRecord.data.key
+    );
+    assertPersistableIdempotencyRecord(parsedRecord.data, evidenceRef);
+    assertTaskScopeResultRef(parsedRecord.data, evidenceRef);
+    const existing = await service.getRecord(parsedRecord.data.scope, parsedRecord.data.key);
+    if (existing && existing.request_digest !== parsedRecord.data.request_digest) {
+      throw createIdempotencyMismatchError();
+    }
+    if (parsedRecord.data.status === "completed" && !options.allowCompletedWrite) {
+      if (existing?.status === "completed") {
+        return assertCompletedRecordStoreAllowed(existing, parsedRecord.data, evidenceRef);
+      }
+      throw completedRecordStoreBypassError(evidenceRef);
+    }
+    if (existing?.status === "completed") {
+      return assertCompletedRecordStoreAllowed(existing, parsedRecord.data, evidenceRef);
+    }
+
+    return await writeJsonRecord(
+      workspaceRoot,
+      idempotencyRecordDirectorySegments(parsedRecord.data.scope),
+      idempotencyRecordFileName(parsedRecord.data.key),
+      parsedRecord.data,
+      evidenceRef,
+      IdempotencyRecordSchema
+    );
+  }
+
+  async function recoverRecordAfterRollback(
+    input: IdempotencyRecordLookupInput,
+    transition: () => Promise<IdempotencyRecord>
+  ): Promise<IdempotencyRecord> {
+    try {
+      return await transition();
+    } catch (error) {
+      if (!(error instanceof TaskServiceError) || error.code !== "record_malformed") {
+        throw error;
+      }
+    }
+
+    const parsedScope = assertIdempotencyScope(input.scope);
+    assertNonblankIdempotencyKey(input.key);
+    const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
+    const current = await lookupExistingRecordForBegin(
+      service,
+      { ...input, scope: parsedScope },
+      evidenceRef
+    );
+    if (current.status === "mismatch") {
+      throw createIdempotencyMismatchError();
+    }
+    if (current.status === "completed") {
+      return current.record;
+    }
+    if (current.record.status === "failed") {
+      return current.record;
+    }
+    if (current.record.request_digest !== input.requestDigest) {
+      throw createIdempotencyMismatchError();
+    }
+
+    await removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
+      workspaceRoot,
+      parsedScope,
+      input.key,
+      evidenceRef,
+      "fail"
+    );
+    return await transition();
+  }
+
+  const service: IdempotencyRecordService = {
+    async storeRecord(record: IdempotencyRecord): Promise<IdempotencyRecord> {
+      return await storeRecordInternal(record, { allowCompletedWrite: false });
     },
 
     async getRecord(
@@ -216,7 +276,7 @@ export function createIdempotencyRecordService(
             return beginResultFromReplayLookup(retryExisting);
           }
 
-          const stored = await service.storeRecord(record);
+          const stored = await storeRecordInternal(record, { allowCompletedWrite: false });
           return beginResultFromStoredRecord(stored, input.requestDigest, parsedScope, input.key);
         } finally {
           await guard.release();
@@ -240,6 +300,11 @@ export function createIdempotencyRecordService(
         if (!record.result_ref) {
           throw completedRecordMissingResultRefError(parsedScope, input.key);
         }
+        assertTaskScopeCompletedResultRef(
+          record as IdempotencyRecord & { result_ref: string },
+          parsedScope,
+          input.key
+        );
 
         return { status: "completed", record: record as IdempotencyRecord & { result_ref: string } };
       }
@@ -250,6 +315,7 @@ export function createIdempotencyRecordService(
     async completeRecord(input: CompleteIdempotencyRecordInput): Promise<IdempotencyRecord> {
       const parsedScope = assertIdempotencyScope(input.scope);
       assertNonblankIdempotencyKey(input.key);
+      assertTaskScopeInputResultRef(parsedScope, input.key, input.resultRef);
       const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
       const observed = await service.lookupReplay({ ...input, scope: parsedScope });
       if (observed.status === "mismatch") {
@@ -306,7 +372,7 @@ export function createIdempotencyRecordService(
         }
 
         const timestamp = now().toISOString();
-        return await service.storeRecord({
+        return await storeRecordInternal({
           key: input.key,
           scope: parsedScope,
           request_digest: input.requestDigest,
@@ -314,7 +380,7 @@ export function createIdempotencyRecordService(
           result_ref: input.resultRef,
           created_at: existing.record.created_at,
           updated_at: timestamp
-        });
+        }, { allowCompletedWrite: true });
       } finally {
         await guard.release();
       }
@@ -383,14 +449,57 @@ export function createIdempotencyRecordService(
 
         const recordWithoutResultRef = { ...existing.record };
         delete recordWithoutResultRef.result_ref;
-        return await service.storeRecord({
+        return await storeRecordInternal({
           ...recordWithoutResultRef,
           status: "failed",
           updated_at: now().toISOString()
-        });
+        }, { allowCompletedWrite: false });
       } finally {
         await guard.release();
       }
+    },
+
+    async recoverFailedRecordAfterRollback(
+      input: FailIdempotencyRecordInput
+    ): Promise<IdempotencyRecord> {
+      return await recoverRecordAfterRollback(input, async () => service.failRecord(input));
+    },
+
+    async recoverCompletedRecordAfterRollbackFailure(
+      input: CompleteIdempotencyRecordInput
+    ): Promise<IdempotencyRecord> {
+      const parsedScope = assertIdempotencyScope(input.scope);
+      assertNonblankIdempotencyKey(input.key);
+      assertTaskScopeInputResultRef(parsedScope, input.key, input.resultRef);
+      const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
+      const current = await lookupExistingRecordForBegin(
+        service,
+        { ...input, scope: parsedScope },
+        evidenceRef
+      );
+      if (current.status === "mismatch") {
+        throw createIdempotencyMismatchError();
+      }
+      if (current.status === "completed") {
+        return current.record;
+      }
+      if (current.record.request_digest !== input.requestDigest) {
+        throw createIdempotencyMismatchError();
+      }
+
+      await removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
+        workspaceRoot,
+        parsedScope,
+        input.key,
+        evidenceRef,
+        "complete"
+      );
+      return await storeRecordInternal({
+        ...current.record,
+        status: "completed",
+        result_ref: input.resultRef,
+        updated_at: now().toISOString()
+      }, { allowCompletedWrite: true });
     }
   };
 
@@ -499,6 +608,84 @@ async function removeStaleIdempotencyTransitionGuard(
   return true;
 }
 
+async function removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
+  workspaceRoot: string,
+  scope: IdempotencyScope,
+  key: string,
+  evidenceRef: string,
+  transition: "complete" | "fail"
+): Promise<void> {
+  const guardPath = workspaceRecordPath(
+    workspaceRoot,
+    [...idempotencyRecordDirectorySegments(scope), idempotencyTransitionGuardFileName(key)],
+    evidenceRef
+  );
+
+  let guard: IdempotencyTransitionGuard | undefined;
+  try {
+    guard = await readJsonRecord(
+      guardPath,
+      evidenceRef,
+      IdempotencyTransitionGuardSchema
+    );
+  } catch (error) {
+    if (!isRecoverableTransitionGuardRecordError(error)) {
+      throw error;
+    }
+
+    await unlinkIdempotencyTransitionGuardForRollbackRecovery(guardPath, evidenceRef);
+    return;
+  }
+
+  if (!guard) {
+    return;
+  }
+
+  if (isIdempotencyTransitionGuardStale(guard)) {
+    await unlinkIdempotencyTransitionGuardForRollbackRecovery(guardPath, evidenceRef);
+    return;
+  }
+
+  throw transitionGuardBusyError(scope, key, transition);
+}
+
+async function unlinkIdempotencyTransitionGuardForRollbackRecovery(
+  guardPath: string,
+  evidenceRef: string
+): Promise<void> {
+  try {
+    await unlink(guardPath);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return;
+    }
+
+    throw new TaskServiceError({
+      code: "workspace_path_not_safe",
+      status: 500,
+      category: "workspace_error",
+      message: "Failed to remove idempotency transition guard during rollback recovery.",
+      userMessage: "The idempotency record could not be recovered safely.",
+      evidenceRefs: [evidenceRef],
+      retryable: false,
+      recommendedNextActions: ["Inspect the idempotency transition guard before retrying."]
+    });
+  }
+}
+
+function isIdempotencyTransitionGuardStale(guard: IdempotencyTransitionGuard): boolean {
+  const ageMs = Date.now() - guard.acquired_at_ms;
+  const ownerIsGone = guard.owner_pid !== process.pid && !isProcessLikelyAlive(guard.owner_pid);
+  return ageMs >= IDEMPOTENCY_TRANSITION_GUARD_STALE_MS || ownerIsGone;
+}
+
+function isRecoverableTransitionGuardRecordError(error: unknown): boolean {
+  return (
+    error instanceof TaskServiceError &&
+    (error.code === "record_malformed" || error.code === "record_schema_error")
+  );
+}
+
 function isProcessLikelyAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -541,6 +728,69 @@ function assertPersistableIdempotencyRecord(
     userMessage: "A completed idempotency record must include its result reference.",
     evidenceRefs: [evidenceRef, "idempotency.result_ref"],
     recommendedNextActions: ["Set result_ref before storing a completed idempotency record."]
+  });
+}
+
+function assertTaskScopeResultRef(record: IdempotencyRecord, evidenceRef: string): void {
+  if (
+    record.scope !== "task" ||
+    record.status !== "completed" ||
+    typeof record.result_ref !== "string" ||
+    isSafeTaskId(record.result_ref)
+  ) {
+    return;
+  }
+
+  throw unsafeTaskResultRefError(evidenceRef);
+}
+
+function assertTaskScopeInputResultRef(
+  scope: IdempotencyScope,
+  key: string,
+  resultRef: string
+): void {
+  if (scope !== "task" || isSafeTaskId(resultRef)) {
+    return;
+  }
+
+  throw unsafeTaskResultRefError(idempotencyRecordEvidenceRef(scope, key));
+}
+
+function assertTaskScopeCompletedResultRef(
+  record: IdempotencyRecord & { result_ref: string },
+  scope: IdempotencyScope,
+  key: string
+): void {
+  if (scope !== "task" || isSafeTaskId(record.result_ref)) {
+    return;
+  }
+
+  throw unsafeTaskResultRefError(idempotencyRecordEvidenceRef(scope, key));
+}
+
+function unsafeTaskResultRefError(evidenceRef: string): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 500,
+    category: "workspace_error",
+    message: "Completed task idempotency result_ref is not a safe TaskCard id.",
+    userMessage: "The idempotency result reference cannot be used safely.",
+    evidenceRefs: [evidenceRef, "idempotency.result_ref"],
+    retryable: false,
+    recommendedNextActions: ["Inspect and repair the idempotency result reference before retrying."]
+  });
+}
+
+function completedRecordStoreBypassError(evidenceRef: string): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_schema_error",
+    status: 400,
+    category: "schema_error",
+    message: "Completed idempotency records must be written through completeRecord.",
+    userMessage: "A completed idempotency record cannot be stored directly.",
+    evidenceRefs: [evidenceRef, "idempotency.status"],
+    retryable: false,
+    recommendedNextActions: ["Use beginRecord and completeRecord to finish an idempotency claim."]
   });
 }
 
@@ -711,6 +961,11 @@ function beginResultFromStoredRecord(
     if (!record.result_ref) {
       throw completedRecordMissingResultRefError(scope, key);
     }
+    assertTaskScopeCompletedResultRef(
+      record as IdempotencyRecord & { result_ref: string },
+      scope,
+      key
+    );
 
     return {
       status: "completed",

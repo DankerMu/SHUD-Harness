@@ -53,11 +53,16 @@ export function createLockRecordService(options: LockRecordServiceOptions): Lock
         lockRecordEvidenceRef(parsedScope, lockId)
       );
 
-      return await readJsonRecord(
+      const record = await readJsonRecord(
         recordPath,
         lockRecordEvidenceRef(parsedScope, lockId),
         LockRecordSchema
       );
+      if (!record) {
+        return undefined;
+      }
+      assertLockLookupIdentity(record, parsedScope, lockId);
+      return record;
     }
   };
 }
@@ -89,5 +94,26 @@ function assertLockScope(scope: LockScope): LockScope {
     userMessage: "The lock scope is not supported.",
     evidenceRefs: ["lock.scope"],
     recommendedNextActions: ["Use a supported lock scope."]
+  });
+}
+
+function assertLockLookupIdentity(
+  record: LockRecord,
+  scope: LockScope,
+  lockId: string
+): void {
+  if (record.scope === scope && record.lock_id === lockId) {
+    return;
+  }
+
+  throw new TaskServiceError({
+    code: "record_malformed",
+    status: 500,
+    category: "workspace_error",
+    message: "Lock record identity does not match its lookup path.",
+    userMessage: "The lock record cannot be used safely.",
+    evidenceRefs: [lockRecordEvidenceRef(scope, lockId), "lock.scope", "lock.lock_id"],
+    retryable: false,
+    recommendedNextActions: ["Inspect and repair the lock record before retrying."]
   });
 }

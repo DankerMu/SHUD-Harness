@@ -139,6 +139,7 @@ export interface TaskSnapshotWriteHookInput {
 
 export interface TaskSnapshotWriteHooks {
   beforeSnapshotWrite?: (input: TaskSnapshotWriteHookInput) => Promise<void> | void;
+  afterSnapshotWrite?: (input: TaskSnapshotWriteHookInput) => Promise<void> | void;
 }
 
 export function createTaskCardService(options: TaskCardServiceOptions): TaskCardService {
@@ -288,7 +289,6 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
     },
 
     async getTaskFromSnapshot(taskId: string): Promise<TaskCard> {
-      await ensureHydrated();
       const task = await readTaskCardFromSnapshot(workspaceRoot, taskId, snapshotReadHooks);
       tasks.set(task.task_id, task);
       return task;
@@ -791,6 +791,15 @@ async function persistTaskSnapshot(
       );
     }
     await rename(temporaryPath, snapshotPath);
+    if (!(await isSafeExistingDirectoryPath(taskDirectory))) {
+      throw workspaceError(
+        "task_lane_not_directory",
+        `Task lane is not a safe directory: ${task.task_id}`,
+        "A task snapshot lane is blocked by a non-directory filesystem entry.",
+        [`workspace/tasks/${task.task_id}`]
+      );
+    }
+    await snapshotWriteHooks?.afterSnapshotWrite?.({ taskDirectory, taskId: task.task_id });
     if (!(await isSafeExistingDirectoryPath(taskDirectory))) {
       throw workspaceError(
         "task_lane_not_directory",
