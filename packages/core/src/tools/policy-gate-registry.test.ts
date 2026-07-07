@@ -2900,6 +2900,57 @@ describe("policy-gated zero tool registry", () => {
     expect(zodTool.calls).toBe(0);
   });
 
+  test("wrapped Zod schema validation ignores retained def shape mutation", async () => {
+    const schema = z.object({
+      command: z.string()
+    });
+    const zodTool = new ZodRecordingTool("zod.def.patch.wrap", schema);
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    attemptZodCommandShapeMutationToAcceptNumber(schema);
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expectToolParameterSchemaValidationDenial(result);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
+  test("factory-returned registry Zod validation ignores retained def shape mutation", async () => {
+    const schema = z.object({
+      command: z.string()
+    });
+    const zodTool = new ZodRecordingTool("zod.def.patch.registry", schema);
+    let evaluatorCalls = 0;
+    const registry = createPolicyGatedToolRegistry([zodTool], {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    attemptZodCommandShapeMutationToAcceptNumber(schema);
+
+    const result = await registry.get("zod.def.patch.registry")?.run(
+      createToolContext("worker"),
+      {
+        command: 42
+      }
+    );
+
+    expectToolParameterSchemaValidationDenial(result);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
   test("Zod parameter schema rejection survives a throwing evaluator", async () => {
     const zodTool = new ZodRecordingTool(
       "zod.invalid.throwing.evaluator",
@@ -6108,14 +6159,58 @@ function monkeyPatchZodSafeParseToAccept(schema: unknown, data: unknown): void {
   const mutableSchema = schema as {
     safeParse(input: unknown): unknown;
   };
-  mutableSchema.safeParse = () => ({
+  const replacement = () => ({
     success: true,
     data
   });
-  expect(mutableSchema.safeParse({ command: 42 })).toEqual({
-    success: true,
-    data
+  const patched = attemptMutation(() => {
+    mutableSchema.safeParse = replacement;
   });
+  if (patched) {
+    expect(mutableSchema.safeParse({ command: 42 })).toEqual({
+      success: true,
+      data
+    });
+  }
+}
+
+function attemptZodCommandShapeMutationToAcceptNumber(schema: unknown): void {
+  const mutableSchema = schema as {
+    def?: unknown;
+    _def?: unknown;
+  };
+  let attemptedMutations = 0;
+
+  for (const def of [mutableSchema.def, mutableSchema._def]) {
+    if (!isRecordLike(def)) {
+      continue;
+    }
+
+    const shape = def.shape;
+    if (!isRecordLike(shape)) {
+      continue;
+    }
+
+    attemptedMutations += 1;
+    attemptMutation(() => {
+      shape.command = z.unknown();
+    });
+    attemptedMutations += 1;
+    attemptMutation(() => {
+      Object.defineProperty(shape, "command", {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: z.unknown()
+      });
+    });
+  }
+
+  expect(attemptedMutations).toBeGreaterThan(0);
+}
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
 }
 
 function createCompleteToolDescription(name: string): string {

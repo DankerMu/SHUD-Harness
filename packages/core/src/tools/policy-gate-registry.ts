@@ -643,8 +643,8 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     this.#validateExecutionInput = options.validateExecutionInput;
     this.#nameSnapshot = innerTool.name;
     this.#descriptionSnapshot = innerTool.description;
-    this.#parametersSnapshot = snapshotToolParameters(innerTool.parameters);
     this.#zodParameterValidatorSnapshot = createStableToolZodParameterValidator(innerTool);
+    this.#parametersSnapshot = snapshotToolParameters(innerTool.parameters);
     Object.defineProperties(this, {
       name: {
         configurable: false,
@@ -1110,7 +1110,12 @@ function createStableToolZodParameterValidator(
   tool: BaseTool
 ): ToolZodParameterValidator | undefined {
   const schema = resolveToolZodParameterSchema(tool);
-  return schema ? schema.safeParse.bind(schema) : undefined;
+  if (!schema) {
+    return undefined;
+  }
+
+  const hardenedSchema = hardenToolZodParameterSchema(schema);
+  return hardenedSchema.safeParse.bind(hardenedSchema);
 }
 
 function resolveToolZodParameterSchema(tool: BaseTool): ToolZodParameterSchema | undefined {
@@ -1145,7 +1150,7 @@ function cloneToolParameterMetadata(
     return value;
   }
   if (isToolZodParameterSchema(value)) {
-    return value;
+    return hardenToolZodParameterSchema(value);
   }
 
   const objectValue = value as object;
@@ -1182,6 +1187,138 @@ function cloneToolParameterMetadata(
 
 function isToolZodParameterSchema(value: unknown): value is ToolZodParameterSchema {
   return isPlainRecord(value) && typeof value.safeParse === "function";
+}
+
+function hardenToolZodParameterSchema<T extends ToolZodParameterSchema>(schema: T): T {
+  // Zod v4 keeps validation authority in mutable def/_def/shape slots; freeze the
+  // registration-time graph so retained schema references cannot rewrite it later.
+  materializeKnownZodLazyDataProperties(schema, new WeakSet<object>());
+  deepFreezeOwnDataPropertyGraph(schema, new WeakSet<object>());
+  return schema;
+}
+
+function materializeKnownZodLazyDataProperties(value: unknown, seen: WeakSet<object>): void {
+  if (!isObjectRecord(value) || seen.has(value)) {
+    return;
+  }
+
+  seen.add(value);
+  const zodDef = resolveZodV4SchemaDef(value);
+  if (zodDef) {
+    materializeZodV4ObjectShape(value, zodDef);
+  }
+
+  for (const key of Reflect.ownKeys(value)) {
+    if (key === "_zod") {
+      continue;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) {
+      continue;
+    }
+    materializeKnownZodLazyDataProperties(descriptor.value, seen);
+  }
+}
+
+function materializeZodV4ObjectShape(schema: object, zodDef: object): void {
+  const typeDescriptor = Object.getOwnPropertyDescriptor(zodDef, "type");
+  if (!typeDescriptor || !("value" in typeDescriptor) || typeDescriptor.value !== "object") {
+    return;
+  }
+
+  const defShapeDescriptor = Object.getOwnPropertyDescriptor(zodDef, "shape");
+  if (
+    defShapeDescriptor &&
+    !("value" in defShapeDescriptor) &&
+    typeof defShapeDescriptor.get === "function"
+  ) {
+    void (zodDef as { shape: unknown }).shape;
+  }
+
+  const schemaShapeDescriptor = Object.getOwnPropertyDescriptor(schema, "shape");
+  if (
+    schemaShapeDescriptor &&
+    !("value" in schemaShapeDescriptor) &&
+    typeof schemaShapeDescriptor.get === "function"
+  ) {
+    void (schema as { shape: unknown }).shape;
+  }
+}
+
+function deepFreezeOwnDataPropertyGraph(value: unknown, seen: WeakSet<object>): void {
+  if (!isObjectRecord(value) || seen.has(value)) {
+    return;
+  }
+
+  seen.add(value);
+  hardenZodV4RuntimeAuthoritySlots(value);
+  for (const key of Reflect.ownKeys(value)) {
+    if (key === "_zod") {
+      continue;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) {
+      continue;
+    }
+    deepFreezeOwnDataPropertyGraph(descriptor.value, seen);
+  }
+  Object.freeze(value);
+}
+
+function hardenZodV4RuntimeAuthoritySlots(value: object): void {
+  const runtimeDescriptor = Object.getOwnPropertyDescriptor(value, "_zod");
+  if (
+    !runtimeDescriptor ||
+    !("value" in runtimeDescriptor) ||
+    !isObjectRecord(runtimeDescriptor.value)
+  ) {
+    return;
+  }
+
+  for (const key of ["def", "parse", "run"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(runtimeDescriptor.value, key);
+    if (!descriptor || !("value" in descriptor)) {
+      continue;
+    }
+    Object.defineProperty(runtimeDescriptor.value, key, {
+      value: descriptor.value,
+      enumerable: descriptor.enumerable,
+      configurable: false,
+      writable: false
+    });
+  }
+}
+
+function resolveZodV4SchemaDef(value: object): object | undefined {
+  const runtimeDescriptor = Object.getOwnPropertyDescriptor(value, "_zod");
+  if (
+    !runtimeDescriptor ||
+    !("value" in runtimeDescriptor) ||
+    !isObjectRecord(runtimeDescriptor.value)
+  ) {
+    return undefined;
+  }
+
+  const defDescriptor =
+    Object.getOwnPropertyDescriptor(value, "def") ?? Object.getOwnPropertyDescriptor(value, "_def");
+  if (!defDescriptor || !("value" in defDescriptor) || !isObjectRecord(defDescriptor.value)) {
+    return undefined;
+  }
+
+  const runtimeDefDescriptor = Object.getOwnPropertyDescriptor(runtimeDescriptor.value, "def");
+  if (
+    !runtimeDefDescriptor ||
+    !("value" in runtimeDefDescriptor) ||
+    runtimeDefDescriptor.value !== defDescriptor.value
+  ) {
+    return undefined;
+  }
+
+  return defDescriptor.value;
+}
+
+function isObjectRecord(value: unknown): value is object {
+  return value !== null && typeof value === "object";
 }
 
 function summarizeToolZodValidationError(error: unknown): string {
