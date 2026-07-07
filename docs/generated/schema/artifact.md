@@ -36,3 +36,49 @@ Required is evaluated within the immediate parent object.
 | created_by | `system`, `agent`, `user` |
 | retention_class | `ephemeral`, `debug`, `evidence`, `accepted_report`, `benchmark` |
 | redaction_status | `not_needed`, `redacted`, `unsafe` |
+
+## Example YAML
+
+```yaml
+artifact_id: "example"
+task_id: "example"
+run_id: "example"
+job_id: "example"
+report_id: "example"
+analysis_plan_id: "example"
+type: "log"
+path: "example"
+media_type: "example"
+size_bytes: 0
+sha256: "example"
+created_at: "example"
+created_by: "system"
+evidence_usable: false
+retention_class: "ephemeral"
+source_refs:
+  - "example"
+redaction_status: "not_needed"
+```
+
+## Changelog Diff
+
+```diff
++ schema Artifact sha256:87d28bfb56c166d15d5fa48779f4d9adc4101f3238db6839dcfdaea3d5f3e194
++ field artifact_id required=yes nullable=no type=string constraints=minLength=1
++ field task_id required=yes nullable=no type=string constraints=minLength=1
++ field run_id required=no nullable=no type=string constraints=minLength=1
++ field job_id required=no nullable=no type=string constraints=minLength=1
++ field report_id required=no nullable=no type=string constraints=minLength=1
++ field analysis_plan_id required=no nullable=no type=string constraints=minLength=1
++ field type required=yes nullable=no type=enum<string> constraints=values: `log`, `metrics`, `figure`, `timeseries`, `report_markdown`, `report_export`, `patch`, `repo_context`, `toolcall`, `manifest`, `analysis_progress`, `error`
++ field path required=yes nullable=no type=string constraints=minLength=1
++ field media_type required=yes nullable=no type=string constraints=minLength=1
++ field size_bytes required=no nullable=no type=integer constraints=minimum=0; maximum=9007199254740991
++ field sha256 required=no nullable=no type=string constraints=minLength=1
++ field created_at required=yes nullable=no type=string constraints=minLength=1
++ field created_by required=yes nullable=no type=enum<string> constraints=values: `system`, `agent`, `user`
++ field evidence_usable required=yes nullable=no type=boolean constraints=-
++ field retention_class required=yes nullable=no type=enum<string> constraints=values: `ephemeral`, `debug`, `evidence`, `accepted_report`, `benchmark`
++ field source_refs required=yes nullable=no type=array<string> constraints=-
++ field redaction_status required=yes nullable=no type=enum<string> constraints=values: `not_needed`, `redacted`, `unsafe`
+```

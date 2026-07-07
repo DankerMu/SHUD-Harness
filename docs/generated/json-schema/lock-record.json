@@ -58,6 +58,5 @@
     "expires_at",
     "status",
     "reason"
-  ],
-  "additionalProperties": false
+  ]
 }

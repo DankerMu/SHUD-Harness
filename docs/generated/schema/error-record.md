@@ -22,7 +22,7 @@ Required is evaluated within the immediate parent object.
 | evidence_refs | yes | no | array<string> | - |
 | retryable | yes | no | boolean | - |
 | recommended_next_actions | yes | no | array<string> | - |
-| remediation | no | no | object | additionalProperties=false |
+| remediation | no | no | object | - |
 | remediation.next_action | yes | no | enum<string> | values: `escalate_to_pi`, `open_gate`, `adjust_scope`, `fix_and_retry`, `abort` |
 | remediation.hint | yes | no | string | minLength=1 |
 | remediation.ref | no | no | string | minLength=1 |
@@ -35,3 +35,50 @@ Required is evaluated within the immediate parent object.
 | category | `schema_error`, `permission_error`, `workspace_error`, `sandbox_error`, `build_error`, `runtime_error`, `numerical_error`, `parser_error`, `report_error`, `agent_error`, `notification_error` |
 | severity | `info`, `warn`, `error`, `critical` |
 | remediation.next_action | `escalate_to_pi`, `open_gate`, `adjust_scope`, `fix_and_retry`, `abort` |
+
+## Example YAML
+
+```yaml
+error_id: "example"
+category: "schema_error"
+severity: "info"
+task_id: "example"
+job_id: "example"
+run_id: "example"
+report_id: "example"
+message: "example"
+user_message: "example"
+evidence_refs:
+  - "example"
+retryable: false
+recommended_next_actions:
+  - "example"
+remediation:
+  next_action: "escalate_to_pi"
+  hint: "example"
+  ref: "example"
+created_at: "example"
+```
+
+## Changelog Diff
+
+```diff
++ schema ErrorRecord sha256:7a34c91b168b09a602949b0766bb2e35d2caee02390fd2ec8935576797d08f78
++ field error_id required=yes nullable=no type=string constraints=minLength=1
++ field category required=yes nullable=no type=enum<string> constraints=values: `schema_error`, `permission_error`, `workspace_error`, `sandbox_error`, `build_error`, `runtime_error`, `numerical_error`, `parser_error`, `report_error`, `agent_error`, `notification_error`
++ field severity required=yes nullable=no type=enum<string> constraints=values: `info`, `warn`, `error`, `critical`
++ field task_id required=no nullable=no type=string constraints=minLength=1
++ field job_id required=no nullable=no type=string constraints=minLength=1
++ field run_id required=no nullable=no type=string constraints=minLength=1
++ field report_id required=no nullable=no type=string constraints=minLength=1
++ field message required=yes nullable=no type=string constraints=minLength=1
++ field user_message required=yes nullable=no type=string constraints=minLength=1
++ field evidence_refs required=yes nullable=no type=array<string> constraints=-
++ field retryable required=yes nullable=no type=boolean constraints=-
++ field recommended_next_actions required=yes nullable=no type=array<string> constraints=-
++ field remediation required=no nullable=no type=object constraints=-
++ field remediation.next_action required=yes nullable=no type=enum<string> constraints=values: `escalate_to_pi`, `open_gate`, `adjust_scope`, `fix_and_retry`, `abort`
++ field remediation.hint required=yes nullable=no type=string constraints=minLength=1
++ field remediation.ref required=no nullable=no type=string constraints=minLength=1
++ field created_at required=yes nullable=no type=string constraints=minLength=1
+```

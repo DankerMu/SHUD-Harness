@@ -25,3 +25,30 @@ Required is evaluated within the immediate parent object.
 |---|---|
 | scope | `task`, `job`, `report`, `notification`, `pi_gate`, `export` |
 | status | `started`, `completed`, `failed` |
+
+## Example YAML
+
+```yaml
+key: "example"
+scope: "task"
+request_digest: "example"
+status: "started"
+result_ref: "example"
+created_at: "example"
+updated_at: "example"
+expires_at: "example"
+```
+
+## Changelog Diff
+
+```diff
++ schema IdempotencyRecord sha256:035f0129651241301efa2e338bf113681d71506729235303fe33e3186b7551c6
++ field key required=yes nullable=no type=string constraints=minLength=1
++ field scope required=yes nullable=no type=enum<string> constraints=values: `task`, `job`, `report`, `notification`, `pi_gate`, `export`
++ field request_digest required=yes nullable=no type=string constraints=minLength=1
++ field status required=yes nullable=no type=enum<string> constraints=values: `started`, `completed`, `failed`
++ field result_ref required=no nullable=no type=string constraints=minLength=1
++ field created_at required=yes nullable=no type=string constraints=minLength=1
++ field updated_at required=yes nullable=no type=string constraints=minLength=1
++ field expires_at required=no nullable=no type=string constraints=minLength=1
+```

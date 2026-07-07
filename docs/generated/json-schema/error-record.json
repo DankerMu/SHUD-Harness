@@ -97,8 +97,7 @@
       "required": [
         "next_action",
         "hint"
-      ],
-      "additionalProperties": false
+      ]
     },
     "created_at": {
       "type": "string",
@@ -115,6 +114,5 @@
     "retryable",
     "recommended_next_actions",
     "created_at"
-  ],
-  "additionalProperties": false
+  ]
 }

@@ -100,8 +100,7 @@
       },
       "required": [
         "mode"
-      ],
-      "additionalProperties": false
+      ]
     },
     "linked_jobs": {
       "type": "array",
@@ -147,6 +146,5 @@
     "linked_reports",
     "created_at",
     "updated_at"
-  ],
-  "additionalProperties": false
+  ]
 }

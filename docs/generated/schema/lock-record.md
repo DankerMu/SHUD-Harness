@@ -25,3 +25,30 @@ Required is evaluated within the immediate parent object.
 |---|---|
 | scope | `task`, `job`, `run`, `report`, `workspace`, `worktree` |
 | status | `held`, `released`, `expired`, `stolen_after_recovery` |
+
+## Example YAML
+
+```yaml
+lock_id: "example"
+scope: "task"
+target_id: "example"
+holder: "example"
+acquired_at: "example"
+expires_at: "example"
+status: "held"
+reason: "example"
+```
+
+## Changelog Diff
+
+```diff
++ schema LockRecord sha256:f583f20eeccf6620e4ea40ddbe20cf64a8a7900c255745f56f045a256f112bb0
++ field lock_id required=yes nullable=no type=string constraints=minLength=1
++ field scope required=yes nullable=no type=enum<string> constraints=values: `task`, `job`, `run`, `report`, `workspace`, `worktree`
++ field target_id required=yes nullable=no type=string constraints=minLength=1
++ field holder required=yes nullable=no type=string constraints=minLength=1
++ field acquired_at required=yes nullable=no type=string constraints=minLength=1
++ field expires_at required=yes nullable=no type=string constraints=minLength=1
++ field status required=yes nullable=no type=enum<string> constraints=values: `held`, `released`, `expired`, `stolen_after_recovery`
++ field reason required=yes nullable=no type=string constraints=minLength=1
+```

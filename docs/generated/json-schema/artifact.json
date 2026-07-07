@@ -114,6 +114,5 @@
     "retention_class",
     "source_refs",
     "redaction_status"
-  ],
-  "additionalProperties": false
+  ]
 }
