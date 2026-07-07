@@ -19,6 +19,7 @@ import {
   isReservedAuthorityPolicyRuleId,
   normalizeSpawnAgentInput,
   MAX_CONCURRENT_SUBAGENTS,
+  MAX_SPAWN_DEPTH,
   PolicyGateDecisionValidationError,
   PolicyGuardClassSchema,
   PolicyGateRemediationSchema,
@@ -1174,6 +1175,20 @@ function reserveSpawnAgentCapacity(
     return { status: "not_applicable" };
   }
 
+  const spawnDepth = resolveTrustedSpawnDepth(toolContext);
+  if (spawnDepth !== undefined && spawnDepth >= MAX_SPAWN_DEPTH) {
+    return {
+      status: "deny",
+      decision: buildSpawnAgentDepthReservationDeny(
+        toolId,
+        toolContext,
+        role,
+        evaluatorInput,
+        spawnDepth
+      )
+    };
+  }
+
   const agentControl = toolContext.agentControl;
   let activeCount: number | undefined;
   try {
@@ -1211,6 +1226,40 @@ function reserveSpawnAgentCapacity(
 
   spawnAgentCapacityReservations.set(agentControl, reservedCount + 1);
   return { status: "reserved", agentControl };
+}
+
+function buildSpawnAgentDepthReservationDeny(
+  toolId: string,
+  toolContext: ToolContext,
+  role: HarnessRole | "unknown",
+  evaluatorInput: unknown,
+  spawnDepth: number
+): Extract<PolicyGateDecision, { decision: "deny" }> {
+  const decision = evaluatePolicyGate(
+    {
+      toolId,
+      role,
+      input: evaluatorInput,
+      workDir: toolContext.workDir,
+      spawnDepth
+    },
+    { rules: [SPAWN_DEPTH_LIMIT_RULE] }
+  );
+
+  if (decision.decision === "deny") {
+    return decision;
+  }
+
+  return evaluatePolicyGate(
+    {
+      toolId: "spawn_agent",
+      role,
+      input: evaluatorInput,
+      workDir: toolContext.workDir,
+      spawnDepth: MAX_SPAWN_DEPTH
+    },
+    { rules: [SPAWN_DEPTH_LIMIT_RULE] }
+  ) as Extract<PolicyGateDecision, { decision: "deny" }>;
 }
 
 function releaseSpawnAgentCapacity(reservation: SpawnAgentCapacityReservation): void {

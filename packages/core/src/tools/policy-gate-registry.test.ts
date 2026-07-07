@@ -5588,6 +5588,64 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("SHUD runtime keeps spawn depth priority when nested spawn is also at active limit", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+      agentControl.control.activeAgentCount = MAX_CONCURRENT_SUBAGENTS;
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          spawnedByRequestId: "REQ-PARENT-1",
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run a worker task.",
+          role: "worker",
+          tools: ["read"]
+        }
+      );
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("policy_gate_denied");
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        error?: string;
+        ruleId?: string;
+        guard_class?: string;
+        remediation?: {
+          next_action?: string;
+          ref?: string;
+        };
+      };
+      expect(payload.error).toBe("policy_gate_denied");
+      expect(payload.ruleId).toBe(SPAWN_DEPTH_LIMIT_RULE_ID);
+      expect(payload.guard_class).toBe("authority");
+      expect(payload.remediation?.next_action).toBe("adjust_scope");
+      expect(payload.remediation?.ref).toBe(SPAWN_LIMITS_POLICY_REF);
+      expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+      expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime denies spawn_agent at trusted max active subagents before execution", async () => {
     const fixture = await createRawFixture();
     try {
