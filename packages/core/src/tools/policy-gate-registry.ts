@@ -73,6 +73,16 @@ export interface PolicyGatedToolRegistryAssertionOptions {
   role?: HarnessRole;
 }
 
+interface LintEnforcingPolicyGatedToolRegistryOptions
+  extends PolicyGatedToolRegistryAssertionOptions {
+  evaluate: PolicyGateEvaluator;
+  validateExecutionInput?: PolicyGateExecutionInputValidator;
+  resolveValidateExecutionInput?: (
+    tool: BaseTool
+  ) => PolicyGateExecutionInputValidator | undefined;
+  normalizeTool?: (tool: BaseTool) => BaseTool;
+}
+
 export interface ToolZodParameterSchemaCarrier {
   readonly parameterSchema?: unknown;
   readonly zodParameters?: unknown;
@@ -218,15 +228,8 @@ export function createPolicyGatedToolRegistry(
     role: options.role,
     requireDescriptionSections: true
   });
-  const registry = new LintEnforcingPolicyGatedToolRegistry({ role: options.role });
-  const wrappedTools = tools.map((tool) =>
-    wrapToolWithPolicyGate(tool, {
-      ...options,
-      toolId: tool.name
-    })
-  );
-  assertAllToolsPolicyGated(wrappedTools);
-  for (const tool of wrappedTools) {
+  const registry = new LintEnforcingPolicyGatedToolRegistry(options);
+  for (const tool of tools) {
     registry.register(tool);
   }
   assertPolicyGatedToolRegistry(registry, { role: options.role });
@@ -257,12 +260,18 @@ export function createShudSandboxedBashTool(
 export function createShudRuntimeToolRegistry(
   options: ShudRuntimeToolRegistryOptions
 ): ToolRegistry {
-  const registry = new LintEnforcingPolicyGatedToolRegistry({ role: options.role });
   const evaluate = createShudPolicyGateEvaluator(options.evaluate);
+  let registry: LintEnforcingPolicyGatedToolRegistry;
+  registry = new LintEnforcingPolicyGatedToolRegistry({
+    role: options.role,
+    evaluate,
+    normalizeTool: adaptShudRuntimeToolDescription,
+    resolveValidateExecutionInput: (tool) =>
+      tool.name === "spawn_agent" ? createSpawnAgentToolAvailabilityValidator(registry) : undefined
+  });
   let includesSpawnAgent = false;
   const registrations: Array<{
     tool: BaseTool;
-    validateExecutionInput?: PolicyGateExecutionInputValidator;
   }> = [];
 
   for (const candidateTool of options.tools ?? []) {
@@ -289,8 +298,7 @@ export function createShudRuntimeToolRegistry(
       );
     }
     registrations.push({
-      tool: new ShudSpawnAgentTool(options.modelRouter, registry, options.metrics),
-      validateExecutionInput: createSpawnAgentToolAvailabilityValidator(registry)
+      tool: new ShudSpawnAgentTool(options.modelRouter, registry, options.metrics)
     });
   }
 
@@ -303,14 +311,7 @@ export function createShudRuntimeToolRegistry(
   );
 
   for (const registration of registrations) {
-    registry.register(
-      wrapToolWithPolicyGate(registration.tool, {
-        evaluate,
-        role: options.role,
-        toolId: registration.tool.name,
-        validateExecutionInput: registration.validateExecutionInput
-      })
-    );
+    registry.register(registration.tool);
   }
 
   assertPolicyGatedToolRegistry(registry, { role: options.role });
@@ -498,18 +499,36 @@ class ShudSpawnAgentTool extends SpawnAgentTool {
 }
 
 class LintEnforcingPolicyGatedToolRegistry extends ToolRegistry {
-  constructor(private readonly assertionOptions: PolicyGatedToolRegistryAssertionOptions = {}) {
+  private readonly options: LintEnforcingPolicyGatedToolRegistryOptions;
+
+  constructor(options: LintEnforcingPolicyGatedToolRegistryOptions) {
     super();
+    this.options = { ...options };
   }
 
   override register(tool: BaseTool): void {
-    const candidateTools = buildRegistrationCandidateTools(this.list(), tool);
+    const ownedTool = this.wrapWithRegistryAuthority(tool);
+    const candidateTools = buildRegistrationCandidateTools(this.list(), ownedTool);
     assertAllToolsPolicyGated(candidateTools);
     assertPolicyGatedToolRegistrationLint(candidateTools, {
-      role: this.assertionOptions.role,
+      role: this.options.role,
       requireDescriptionSections: true
     });
-    super.register(tool);
+    super.register(ownedTool);
+  }
+
+  private wrapWithRegistryAuthority(tool: BaseTool): PolicyGatedTool {
+    const unwrappedTool = unwrapPolicyGatedTool(tool);
+    const normalizedTool = this.options.normalizeTool?.(unwrappedTool) ?? unwrappedTool;
+    const validateExecutionInput =
+      this.options.resolveValidateExecutionInput?.(normalizedTool) ??
+      this.options.validateExecutionInput;
+    return wrapToolWithPolicyGate(normalizedTool, {
+      evaluate: this.options.evaluate,
+      role: this.options.role,
+      toolId: normalizedTool.name,
+      validateExecutionInput
+    });
   }
 }
 
@@ -601,7 +620,13 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
   }
 
   toDefinition(): ToolDefinition {
-    return this.innerTool.toDefinition();
+    return {
+      ...this.innerTool.toDefinition(),
+      name: this.name,
+      description: this.description,
+      parameters: this.parameters,
+      kind: this.kind
+    };
   }
 
   async run(toolContext: ToolContext, input: unknown): Promise<ToolResult> {
@@ -645,11 +670,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
           role,
           preparedInput.evaluatorInput
         );
-        if (evaluation.status === "error") {
-          const durationMs = Date.now() - startTime;
-          return this.finalizePolicyGateResult(toolContext, evaluation.result, durationMs);
-        }
-        if (evaluation.decision.decision === "deny") {
+        if (evaluation.status === "decision" && evaluation.decision.decision === "deny") {
           const durationMs = Date.now() - startTime;
           return this.finalizePolicyGateResult(
             toolContext,

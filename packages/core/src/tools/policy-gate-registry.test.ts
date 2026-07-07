@@ -20,6 +20,7 @@ import type {
   RunningToolTerminalMetadata,
   SecretFilter,
   ToolContext,
+  ToolDefinition,
   ToolLogger,
   ToolResult
 } from "@zero-os/shared";
@@ -2053,6 +2054,46 @@ describe("policy-gated zero tool registry", () => {
     expect(tools.map((tool) => tool.calls)).toEqual([1, 1, 1]);
   });
 
+  test("factory-returned registry owns model-visible definitions when inner toDefinition diverges", () => {
+    const tool = new DivergentDefinitionTool(
+      "generic.definition",
+      "generic.leaked.definition",
+      "Leaked definition description without required governance sections."
+    );
+    const registry = createPolicyGatedToolRegistry([tool], {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    let definition = registry
+      .getDefinitions()
+      .find((candidate) => candidate.name === "generic.definition");
+    expect(definition).toBeDefined();
+    expect(definition?.name).toBe("generic.definition");
+    expect(definition?.description).toBe(tool.description);
+    expect(definition?.description).toContain("何时该用:");
+    expect(definition?.parameters).toBe(tool.parameters);
+    expect(definition?.parameters).not.toEqual({ leaked: true });
+
+    const replacement = new DivergentDefinitionTool(
+      "generic.definition",
+      "generic.replacement.leaked",
+      "Replacement leaked definition description without required sections."
+    );
+    registry.register(
+      wrapToolWithPolicyGate(replacement, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    );
+
+    definition = registry
+      .getDefinitions()
+      .find((candidate) => candidate.name === "generic.definition");
+    expect(definition?.name).toBe("generic.definition");
+    expect(definition?.description).toBe(replacement.description);
+    expect(definition?.description).toContain("何时不该用:");
+    expect(definition?.parameters).toBe(replacement.parameters);
+  });
+
   test("generic registry lint rejects the 21st visible tool without a role", () => {
     const tools = Array.from({ length: 21 }, (_, index) => new RecordingTool(`generic.${index}`));
 
@@ -2114,27 +2155,62 @@ describe("policy-gated zero tool registry", () => {
       role: "worker",
       evaluate: async () => ({ decision: "allow" })
     });
-    const replacementTool = wrapToolWithPolicyGate(new RecordingTool("generic.19"), {
+    const replacementInnerTool = new RecordingTool("generic.19");
+    const replacementTool = wrapToolWithPolicyGate(replacementInnerTool, {
       evaluate: async () => ({ decision: "allow" })
     });
 
     expect(() => registry.register(replacementTool)).not.toThrow();
     expect(registry.list()).toHaveLength(20);
-    expect(registry.get("generic.19")).toBe(replacementTool);
+    const registeredReplacement = registry.get("generic.19");
+    expect(registeredReplacement).not.toBe(replacementTool);
+    expect(isPolicyGatedTool(registeredReplacement!)).toBe(true);
+    if (!isPolicyGatedTool(registeredReplacement!)) {
+      throw new Error("replacement should be wrapped by registry authority");
+    }
+    expect(registeredReplacement.innerTool).toBe(replacementInnerTool);
     expect(() => assertPolicyGatedToolRegistry(registry, { role: "worker" })).not.toThrow();
   });
 
-  test("factory-returned registry rejects post-return unwrapped tool registration", () => {
+  test("factory-returned registry rewraps stale post-return replacements with current evaluator", async () => {
+    const registry = createPolicyGatedToolRegistry([new RecordingTool("edit")], {
+      evaluate: async () => ({
+        decision: "deny",
+        ruleId: "registry-owned-deny",
+        reason: "blocked by registry-owned evaluator",
+        remediation: {
+          next_action: "adjust_scope",
+          hint: "Use a tool allowed by the registry owner.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        }
+      })
+    });
+    const staleReplacementInnerTool = new RecordingTool("edit");
+    const staleAllowReplacement = wrapToolWithPolicyGate(staleReplacementInnerTool, {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    expect(() => registry.register(staleAllowReplacement)).not.toThrow();
+    const registeredReplacement = registry.get("edit");
+    expect(registeredReplacement).not.toBe(staleAllowReplacement);
+    expect(isPolicyGatedTool(registeredReplacement!)).toBe(true);
+
+    const result = await registeredReplacement?.run(createToolContext("coder"), {});
+
+    expect(result?.success).toBe(false);
+    expect(result?.output).toContain("policy_gate_denied");
+    expect(result?.output).toContain("registry-owned-deny");
+    expect(staleReplacementInnerTool.calls).toBe(0);
+  });
+
+  test("factory-returned registry wraps post-return unwrapped tool registration", () => {
     const registry = createPolicyGatedToolRegistry([new RecordingTool("generic.good")], {
       evaluate: async () => ({ decision: "allow" })
     });
 
-    expect(() => registry.register(new RecordingTool("generic.unwrapped"))).toThrow(
-      /Policy-gated tool assembly failed; unwrapped tool ids: generic\.unwrapped/
-    );
-    expect(registry.get("generic.unwrapped")).toBeUndefined();
-    expect(registry.list().map((tool) => tool.name)).not.toContain("generic.unwrapped");
-    expect(registry.getDefinitions().map((definition) => definition.name)).not.toContain(
+    expect(() => registry.register(new RecordingTool("generic.unwrapped"))).not.toThrow();
+    expect(isPolicyGatedTool(registry.get("generic.unwrapped")!)).toBe(true);
+    expect(registry.getDefinitions().map((definition) => definition.name)).toContain(
       "generic.unwrapped"
     );
   });
@@ -2400,6 +2476,50 @@ describe("policy-gated zero tool registry", () => {
       success: false,
       outputSummary: result.outputSummary
     });
+  });
+
+  test("Zod parameter schema rejection survives a throwing evaluator", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.invalid.throwing.evaluator",
+      z.object({
+        command: z.string()
+      })
+    );
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        throw new Error("throwing evaluator must not replace schema denial");
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_denied");
+    expect(result.output).toContain("tool-parameter-schema-validation");
+    expect(result.output).not.toContain("throwing evaluator");
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      ruleId?: string;
+      remediation?: {
+        next_action?: string;
+        hint?: string;
+        ref?: string;
+      };
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.remediation?.next_action).toBe("fix_and_retry");
+    expect(payload.remediation?.hint).toContain("Zod parameter schema");
+    expect(payload.remediation?.ref).toBe(
+      "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+    );
+    expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
   });
 
   test("policy evaluator denial wins before invalid Zod schema details", async () => {
@@ -5168,6 +5288,48 @@ describe("policy-gated zero tool registry", () => {
       await fixture.cleanup();
     }
   });
+
+  test("SHUD runtime rewraps stale post-return replacements with the current evaluator", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const registry = createShudRuntimeToolRegistry({
+        tools: [new RecordingTool("edit")],
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        evaluate: async () => ({
+          decision: "deny",
+          ruleId: "runtime-owned-deny",
+          reason: "blocked by current runtime evaluator",
+          remediation: {
+            next_action: "adjust_scope",
+            hint: "Use an allowed tool for this runtime role.",
+            ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+          }
+        })
+      });
+      const staleReplacementInnerTool = new RecordingTool("edit");
+      const staleAllowReplacement = wrapToolWithPolicyGate(staleReplacementInnerTool, {
+        evaluate: async () => ({ decision: "allow" })
+      });
+
+      expect(() => registry.register(staleAllowReplacement)).not.toThrow();
+      const registeredReplacement = registry.get("edit");
+      expect(registeredReplacement).not.toBe(staleAllowReplacement);
+      expect(isPolicyGatedTool(registeredReplacement!)).toBe(true);
+
+      const result = await registeredReplacement?.run(fixture.context, {});
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("policy_gate_denied");
+      expect(result?.output).toContain("runtime-owned-deny");
+      expect(staleReplacementInnerTool.calls).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
 });
 
 class RecordingTool extends BaseTool {
@@ -5191,6 +5353,25 @@ class RecordingTool extends BaseTool {
       success: true,
       output: `${this.name} executed`,
       outputSummary: `${this.name} executed`
+    };
+  }
+}
+
+class DivergentDefinitionTool extends RecordingTool {
+  constructor(
+    name: string,
+    private readonly definitionName: string,
+    private readonly definitionDescription: string
+  ) {
+    super(name);
+  }
+
+  override toDefinition(): ToolDefinition {
+    return {
+      ...super.toDefinition(),
+      name: this.definitionName,
+      description: this.definitionDescription,
+      parameters: { leaked: true }
     };
   }
 }
