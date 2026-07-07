@@ -28,6 +28,10 @@ import type {
   PolicyRule,
   PolicyRuleDecision
 } from "./policy-gate-core";
+import {
+  isReservedAuthorityPolicyEvidenceId,
+  PolicyGuardClassSchema
+} from "./policy-gate-core";
 
 export const RAW_DATA_WRITE_RULE_ID = "raw-data-write";
 export const RAW_DATA_SANDBOX_PROFILE_VERSION = "raw-data-seatbelt-v1";
@@ -1122,11 +1126,7 @@ function snapshotAuditValue(
 }
 
 function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
-  if (isRawDataAuthorityAuditRowWithoutAuthorityGuard(row)) {
-    throw new Error(
-      "Raw-data authority audit rows require guard_class authority."
-    );
-  }
+  const guardClass = readPolicyGateAuditGuardClass(row.guard_class);
   if (isRawDataDenialDecision(row.decision)) {
     throw new Error(
       "Raw-data denial audit rows require RawDataSandboxedBashTool trusted evidence."
@@ -1137,19 +1137,37 @@ function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
       "Reserved raw-data denial error_id values require RawDataSandboxedBashTool trusted evidence."
     );
   }
-}
-
-function isRawDataAuthorityAuditRowWithoutAuthorityGuard(
-  row: PolicyGateAuditRow
-): boolean {
-  return (
-    isRawDataAuthorityAuditRow(row) &&
-    row.guard_class !== rawDataGuardClassForRawData()
-  );
+  if (!isReservedAuthorityPolicyAuditRow(row) || guardClass === rawDataGuardClassForRawData()) {
+    return;
+  }
+  if (isRawDataAuthorityAuditRow(row)) {
+    throw new Error("Raw-data authority audit rows require guard_class authority.");
+  }
+  throw new Error("Reserved authority policy audit rows require guard_class authority.");
 }
 
 function isRawDataAuthorityAuditRow(row: PolicyGateAuditRow): boolean {
   return row.rule === RAW_DATA_WRITE_RULE_ID || isRawDataAuthorityErrorId(row.error_id);
+}
+
+function isReservedAuthorityPolicyAuditRow(row: PolicyGateAuditRow): boolean {
+  return (
+    isReservedAuthorityPolicyEvidenceId(row.rule) ||
+    isReservedAuthorityPolicyEvidenceId(row.error_id)
+  );
+}
+
+function readPolicyGateAuditGuardClass(
+  guardClass: PolicyGateAuditRow["guard_class"]
+): RawDataGuardClass | undefined {
+  if (guardClass === undefined) {
+    return undefined;
+  }
+  const parsed = PolicyGuardClassSchema.safeParse(guardClass);
+  if (!parsed.success) {
+    throw new Error("Policy gate audit rows guard_class must be authority or capability.");
+  }
+  return parsed.data;
 }
 
 function isRawDataAuthorityErrorId(errorId: string | undefined): boolean {

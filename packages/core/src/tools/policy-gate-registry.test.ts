@@ -3894,6 +3894,45 @@ describe("policy-gated zero tool registry", () => {
     expect(zodTool.calls).toBe(0);
   });
 
+  test("SHUD evaluator decision validation errors win before invalid Zod schema denial", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.invalid.shud.decision.validation",
+      z.object({
+        command: z.string()
+      })
+    );
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: createShudPolicyGateEvaluator(async () => {
+        evaluatorCalls += 1;
+        return {
+          decision: "deny",
+          ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+          reason: "custom evaluator attempted to downgrade spawn-profile authority",
+          remediation: {
+            next_action: "adjust_scope",
+            hint: "Keep spawn-profile-subset classified as authority.",
+            ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+          },
+          guardClass: "capability"
+        };
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain(SPAWN_PROFILE_SUBSET_RULE_ID);
+    expect(result.output).toContain("guardClass");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.output).not.toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
   test("policy evaluator denial wins before invalid Zod schema details", async () => {
     const zodTool = new ZodRecordingTool(
       "zod.denied.first",

@@ -219,6 +219,20 @@ const ZOD_PARAMETER_SCHEMA_MAX_NODES = 20_000;
 const ZOD_PARAMETER_SCHEMA_MAX_OWN_KEYS = 512;
 const ZOD_PARAMETER_SCHEMA_MAX_PROPERTIES = 50_000;
 const PROTOTYPE_POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+class PolicyGateDecisionValidationError extends Error {
+  constructor(error: unknown) {
+    super(toErrorMessage(error));
+    this.name = "PolicyGateDecisionValidationError";
+  }
+}
+
+function isPolicyGateDecisionValidationError(
+  error: unknown
+): error is PolicyGateDecisionValidationError {
+  return error instanceof PolicyGateDecisionValidationError;
+}
+
 export function createShudPolicyGateEvaluator(
   customEvaluate?: PolicyGateEvaluator
 ): PolicyGateEvaluator {
@@ -233,7 +247,12 @@ export function createShudPolicyGateEvaluator(
       return authorityDecision;
     }
 
-    return validatePolicyGateDecision(call.toolId, await customEvaluate(call, context));
+    const customDecision = await customEvaluate(call, context);
+    try {
+      return validatePolicyGateDecision(call.toolId, customDecision);
+    } catch (error) {
+      throw new PolicyGateDecisionValidationError(error);
+    }
   });
 }
 
@@ -1055,7 +1074,9 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     } catch (error) {
       return {
         status: "error",
-        source: "evaluation",
+        source: isPolicyGateDecisionValidationError(error)
+          ? "decision_validation"
+          : "evaluation",
         result: policyGateErrorToolResult(error)
       };
     }

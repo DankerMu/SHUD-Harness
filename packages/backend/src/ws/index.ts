@@ -1,6 +1,6 @@
 import {
   assertTrustedRawDataToolFailedEventInput,
-  isReservedAuthorityPolicyRuleId,
+  isReservedAuthorityPolicyEvidenceId,
   isReservedRawDataDenialErrorId,
   PolicyGuardClassSchema,
   rawDataDeniedToolResultToToolFailedEventInput,
@@ -99,14 +99,13 @@ function assertPublicToolFailedWsEventInput(input: ToolFailedWsEventInput): void
     );
   }
   const guardClass = readToolFailedGuardClass(input.guardClass);
-  if (isRawDataAuthorityToolFailedEvent(input) && guardClass !== "authority") {
-    throw new Error("Raw-data authority tool.failed events require guardClass authority.");
-  }
   if (
-    input.rule &&
-    isReservedAuthorityPolicyRuleId(input.rule) &&
+    isReservedAuthorityPolicyToolFailedEvent(input) &&
     guardClass !== "authority"
   ) {
+    if (isRawDataAuthorityToolFailedEvent(input)) {
+      throw new Error("Raw-data authority tool.failed events require guardClass authority.");
+    }
     throw new Error(
       "Reserved authority policy rule tool.failed events require guardClass authority."
     );
@@ -150,6 +149,13 @@ function readToolFailedGuardClass(guardClass: unknown): PolicyGuardClass | undef
 function isRawDataAuthorityToolFailedEvent(input: ToolFailedWsEventInput): boolean {
   return (
     input.rule === RAW_DATA_WRITE_RULE_ID || isRawDataAuthorityErrorId(input.error.error_id)
+  );
+}
+
+function isReservedAuthorityPolicyToolFailedEvent(input: ToolFailedWsEventInput): boolean {
+  return (
+    isReservedAuthorityPolicyEvidenceId(input.rule) ||
+    isReservedAuthorityPolicyEvidenceId(input.error.error_id)
   );
 }
 

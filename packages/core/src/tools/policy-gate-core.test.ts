@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   assertPolicyGateContextGuardClasses,
   evaluatePolicyGate,
+  isReservedAuthorityPolicyEvidenceId,
   isReservedAuthorityPolicyRuleId,
   normalizeSpawnAgentInput,
   PolicyGateRemediationSchema,
@@ -158,6 +159,21 @@ describe("policy gate pure evaluator", () => {
         `Policy gate guard_class lint failed: ${TOOL_PARAMETER_SCHEMA_RULE_ID}: known authority rule cannot be classified as capability`
       )
     );
+  });
+
+  test("reserved authority evidence helper matches exact rule ids and error-id prefixes", () => {
+    for (const ruleId of RESERVED_AUTHORITY_POLICY_RULE_IDS) {
+      expect(isReservedAuthorityPolicyEvidenceId(ruleId)).toBe(true);
+      expect(isReservedAuthorityPolicyEvidenceId(`${ruleId}:failed:tool-call-1`)).toBe(true);
+    }
+
+    expect(isReservedAuthorityPolicyEvidenceId(undefined)).toBe(false);
+    expect(isReservedAuthorityPolicyEvidenceId("spawn-profile-subset-extra")).toBe(false);
+    expect(isReservedAuthorityPolicyEvidenceId("tool-parameter-schema-validation-extra")).toBe(
+      false
+    );
+    expect(isReservedAuthorityPolicyEvidenceId("raw-data-write-extra")).toBe(false);
+    expect(isReservedAuthorityPolicyEvidenceId("workspace-quota:raw-data-write")).toBe(false);
   });
 
   test("guard_class lint rejects unclassified hard guard rules", () => {

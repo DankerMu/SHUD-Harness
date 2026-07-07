@@ -142,6 +142,15 @@ export function isReservedAuthorityPolicyRuleId(ruleId: string): boolean {
   return KNOWN_AUTHORITY_POLICY_RULE_IDS.has(ruleId);
 }
 
+export function isReservedAuthorityPolicyEvidenceId(id: string | undefined): boolean {
+  return (
+    id !== undefined &&
+    RESERVED_AUTHORITY_POLICY_RULE_IDS.some(
+      (ruleId) => id === ruleId || id.startsWith(`${ruleId}:`)
+    )
+  );
+}
+
 export function evaluatePolicyGate(
   call: PolicyGateToolCall,
   context: PolicyGateContext = EMPTY_POLICY_GATE_CONTEXT

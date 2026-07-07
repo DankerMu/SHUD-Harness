@@ -38,7 +38,11 @@ import {
   type PolicyGateAuditRow,
   type RawDataDenialPayload
 } from "./raw-data-sandbox";
-import { evaluatePolicyGate } from "./policy-gate-core";
+import {
+  evaluatePolicyGate,
+  SPAWN_PROFILE_SUBSET_RULE_ID,
+  TOOL_PARAMETER_SCHEMA_RULE_ID
+} from "./policy-gate-core";
 import {
   completeRawDataSandboxInvocationProcessesForTest,
   createRawDataSandboxInvocationDescendantTrackerForTest,
@@ -554,6 +558,215 @@ describe("raw data seatbelt sandbox", () => {
           "policy-gate.ndjson"
         )
       );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append rejects reserved non-raw rules without authority guard_class", async () => {
+    const fixture = await createFixture();
+    try {
+      const cases = [
+        {
+          name: "spawn-missing",
+          rule: SPAWN_PROFILE_SUBSET_RULE_ID,
+          row: auditRowWithGuardClass(
+            reservedNonRawAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
+            undefined
+          ),
+          expected: "Reserved authority policy audit rows require guard_class authority"
+        },
+        {
+          name: "spawn-capability",
+          rule: SPAWN_PROFILE_SUBSET_RULE_ID,
+          row: auditRowWithGuardClass(
+            reservedNonRawAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
+            "capability"
+          ),
+          expected: "Reserved authority policy audit rows require guard_class authority"
+        },
+        {
+          name: "spawn-invalid",
+          rule: SPAWN_PROFILE_SUBSET_RULE_ID,
+          row: auditRowWithGuardClass(
+            reservedNonRawAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
+            "temporary" as never
+          ),
+          expected: "Policy gate audit rows guard_class must be authority or capability"
+        },
+        {
+          name: "schema-missing",
+          rule: TOOL_PARAMETER_SCHEMA_RULE_ID,
+          row: auditRowWithGuardClass(
+            reservedNonRawAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
+            undefined
+          ),
+          expected: "Reserved authority policy audit rows require guard_class authority"
+        },
+        {
+          name: "schema-capability",
+          rule: TOOL_PARAMETER_SCHEMA_RULE_ID,
+          row: auditRowWithGuardClass(
+            reservedNonRawAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
+            "capability"
+          ),
+          expected: "Reserved authority policy audit rows require guard_class authority"
+        },
+        {
+          name: "schema-invalid",
+          rule: TOOL_PARAMETER_SCHEMA_RULE_ID,
+          row: auditRowWithGuardClass(
+            reservedNonRawAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
+            "temporary" as never
+          ),
+          expected: "Policy gate audit rows guard_class must be authority or capability"
+        }
+      ] as const;
+
+      for (const testCase of cases) {
+        await expect(
+          appendPolicyGateAuditRow({
+            workspaceRoot: fixture.root,
+            protectedRawPaths: [fixture.rawRoot],
+            fileName: `reserved-rule-${testCase.name}.ndjson`,
+            row: testCase.row
+          })
+        ).rejects.toThrow(testCase.expected);
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append rejects reserved non-raw error_id prefixes without authority guard_class", async () => {
+    const fixture = await createFixture();
+    try {
+      const cases = [
+        {
+          name: "spawn-missing",
+          row: auditRowWithGuardClass(
+            reservedNonRawErrorIdAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
+            undefined
+          ),
+          expected: "Reserved authority policy audit rows require guard_class authority"
+        },
+        {
+          name: "spawn-capability",
+          row: auditRowWithGuardClass(
+            reservedNonRawErrorIdAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
+            "capability"
+          ),
+          expected: "Reserved authority policy audit rows require guard_class authority"
+        },
+        {
+          name: "spawn-invalid",
+          row: auditRowWithGuardClass(
+            reservedNonRawErrorIdAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
+            "temporary" as never
+          ),
+          expected: "Policy gate audit rows guard_class must be authority or capability"
+        },
+        {
+          name: "schema-missing",
+          row: auditRowWithGuardClass(
+            reservedNonRawErrorIdAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
+            undefined
+          ),
+          expected: "Reserved authority policy audit rows require guard_class authority"
+        },
+        {
+          name: "schema-capability",
+          row: auditRowWithGuardClass(
+            reservedNonRawErrorIdAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
+            "capability"
+          ),
+          expected: "Reserved authority policy audit rows require guard_class authority"
+        },
+        {
+          name: "schema-invalid",
+          row: auditRowWithGuardClass(
+            reservedNonRawErrorIdAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
+            "temporary" as never
+          ),
+          expected: "Policy gate audit rows guard_class must be authority or capability"
+        }
+      ] as const;
+
+      for (const testCase of cases) {
+        await expect(
+          appendPolicyGateAuditRow({
+            workspaceRoot: fixture.root,
+            protectedRawPaths: [fixture.rawRoot],
+            fileName: `reserved-error-${testCase.name}.ndjson`,
+            row: testCase.row
+          })
+        ).rejects.toThrow(testCase.expected);
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append accepts reserved non-raw authority guard_class", async () => {
+    const fixture = await createFixture();
+    try {
+      for (const rule of [SPAWN_PROFILE_SUBSET_RULE_ID, TOOL_PARAMETER_SCHEMA_RULE_ID]) {
+        const ruleAuditPath = await appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          fileName: `reserved-authority-${rule}.ndjson`,
+          row: reservedNonRawAuditRow(rule)
+        });
+        const ruleContent = await readFile(ruleAuditPath, "utf8");
+        expect(ruleContent).toContain(`"rule":"${rule}"`);
+        expect(ruleContent).toContain('"guard_class":"authority"');
+
+        const errorIdAuditPath = await appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          fileName: `reserved-error-authority-${rule}.ndjson`,
+          row: reservedNonRawErrorIdAuditRow(rule)
+        });
+        const errorIdContent = await readFile(errorIdAuditPath, "utf8");
+        expect(errorIdContent).toContain('"rule":"workspace-quota"');
+        expect(errorIdContent).toContain(`"error_id":"${rule}:failed:test"`);
+        expect(errorIdContent).toContain('"guard_class":"authority"');
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append preserves non-reserved guard_class compatibility", async () => {
+    const fixture = await createFixture();
+    try {
+      const missingGuardPath = await appendPolicyGateAuditRow({
+        workspaceRoot: fixture.root,
+        protectedRawPaths: [fixture.rawRoot],
+        fileName: "non-reserved-missing-guard.ndjson",
+        row: auditRowWithGuardClass(nonReservedAuditRow(), undefined)
+      });
+      expect(await readFile(missingGuardPath, "utf8")).toContain('"rule":"workspace-quota"');
+      expect(await readFile(missingGuardPath, "utf8")).not.toContain('"guard_class"');
+
+      for (const guardClass of ["capability", "authority"] as const) {
+        const auditPath = await appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          fileName: `non-reserved-${guardClass}.ndjson`,
+          row: auditRowWithGuardClass(nonReservedAuditRow(), guardClass)
+        });
+        expect(await readFile(auditPath, "utf8")).toContain(`"guard_class":"${guardClass}"`);
+      }
+
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          fileName: "non-reserved-invalid.ndjson",
+          row: auditRowWithGuardClass(nonReservedAuditRow(), "temporary" as never)
+        })
+      ).rejects.toThrow("Policy gate audit rows guard_class must be authority or capability");
     } finally {
       await fixture.cleanup();
     }
@@ -5342,6 +5555,48 @@ function minimalAuditRow(): PolicyGateAuditRow {
     guard_class: "authority",
     ts: "2026-07-04T00:00:00.000Z"
   };
+}
+
+function reservedNonRawAuditRow(rule: string): PolicyGateAuditRow {
+  return {
+    ...minimalAuditRow(),
+    rule,
+    decision: "failed",
+    guard_class: "authority"
+  };
+}
+
+function reservedNonRawErrorIdAuditRow(rule: string): PolicyGateAuditRow {
+  return {
+    ...minimalAuditRow(),
+    rule: "workspace-quota",
+    decision: "failed",
+    guard_class: "authority",
+    error_id: `${rule}:failed:test`
+  };
+}
+
+function nonReservedAuditRow(): PolicyGateAuditRow {
+  return {
+    ...minimalAuditRow(),
+    rule: "workspace-quota",
+    decision: "failed",
+    guard_class: "authority",
+    error_id: "workspace-quota:failed:test"
+  };
+}
+
+function auditRowWithGuardClass(
+  row: PolicyGateAuditRow,
+  guardClass: PolicyGateAuditRow["guard_class"]
+): PolicyGateAuditRow {
+  const copy = { ...row } as Partial<PolicyGateAuditRow>;
+  if (guardClass === undefined) {
+    delete copy.guard_class;
+  } else {
+    copy.guard_class = guardClass;
+  }
+  return copy as PolicyGateAuditRow;
 }
 
 function rawDataAuditRowWithoutGuard(): PolicyGateAuditRow {
