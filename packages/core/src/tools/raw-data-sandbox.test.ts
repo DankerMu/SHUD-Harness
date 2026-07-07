@@ -40,8 +40,7 @@ import {
 } from "./raw-data-sandbox";
 import {
   evaluatePolicyGate,
-  SPAWN_PROFILE_SUBSET_RULE_ID,
-  TOOL_PARAMETER_SCHEMA_RULE_ID
+  RESERVED_AUTHORITY_POLICY_RULE_IDS
 } from "./policy-gate-core";
 import {
   completeRawDataSandboxInvocationProcessesForTest,
@@ -55,6 +54,9 @@ import {
 const requireSeatbeltTests = process.env.SHUD_REQUIRE_SEATBELT_TESTS === "1";
 const hasSeatbelt = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
 const hasPython3 = commandExistsSync("python3");
+const RESERVED_NON_RAW_AUTHORITY_POLICY_RULE_IDS = RESERVED_AUTHORITY_POLICY_RULE_IDS.filter(
+  (ruleId) => ruleId !== RAW_DATA_WRITE_RULE_ID
+);
 if (requireSeatbeltTests) {
   if (process.platform !== "darwin") {
     throw new Error("SHUD_REQUIRE_SEATBELT_TESTS requires macOS.");
@@ -566,62 +568,23 @@ describe("raw data seatbelt sandbox", () => {
   test("public audit append rejects reserved non-raw rules without authority guard_class", async () => {
     const fixture = await createFixture();
     try {
-      const cases = [
+      const cases = RESERVED_NON_RAW_AUTHORITY_POLICY_RULE_IDS.flatMap((rule) => [
         {
-          name: "spawn-missing",
-          rule: SPAWN_PROFILE_SUBSET_RULE_ID,
-          row: auditRowWithGuardClass(
-            reservedNonRawAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
-            undefined
-          ),
+          name: `${rule}-missing`,
+          row: auditRowWithGuardClass(reservedNonRawAuditRow(rule), undefined),
           expected: "Reserved authority policy audit rows require guard_class authority"
         },
         {
-          name: "spawn-capability",
-          rule: SPAWN_PROFILE_SUBSET_RULE_ID,
-          row: auditRowWithGuardClass(
-            reservedNonRawAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
-            "capability"
-          ),
+          name: `${rule}-capability`,
+          row: auditRowWithGuardClass(reservedNonRawAuditRow(rule), "capability"),
           expected: "Reserved authority policy audit rows require guard_class authority"
         },
         {
-          name: "spawn-invalid",
-          rule: SPAWN_PROFILE_SUBSET_RULE_ID,
-          row: auditRowWithGuardClass(
-            reservedNonRawAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
-            "temporary" as never
-          ),
-          expected: "Policy gate audit rows guard_class must be authority or capability"
-        },
-        {
-          name: "schema-missing",
-          rule: TOOL_PARAMETER_SCHEMA_RULE_ID,
-          row: auditRowWithGuardClass(
-            reservedNonRawAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
-            undefined
-          ),
-          expected: "Reserved authority policy audit rows require guard_class authority"
-        },
-        {
-          name: "schema-capability",
-          rule: TOOL_PARAMETER_SCHEMA_RULE_ID,
-          row: auditRowWithGuardClass(
-            reservedNonRawAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
-            "capability"
-          ),
-          expected: "Reserved authority policy audit rows require guard_class authority"
-        },
-        {
-          name: "schema-invalid",
-          rule: TOOL_PARAMETER_SCHEMA_RULE_ID,
-          row: auditRowWithGuardClass(
-            reservedNonRawAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
-            "temporary" as never
-          ),
+          name: `${rule}-invalid`,
+          row: auditRowWithGuardClass(reservedNonRawAuditRow(rule), "temporary" as never),
           expected: "Policy gate audit rows guard_class must be authority or capability"
         }
-      ] as const;
+      ]);
 
       for (const testCase of cases) {
         await expect(
@@ -641,56 +604,23 @@ describe("raw data seatbelt sandbox", () => {
   test("public audit append rejects reserved non-raw error_id prefixes without authority guard_class", async () => {
     const fixture = await createFixture();
     try {
-      const cases = [
+      const cases = RESERVED_NON_RAW_AUTHORITY_POLICY_RULE_IDS.flatMap((rule) => [
         {
-          name: "spawn-missing",
-          row: auditRowWithGuardClass(
-            reservedNonRawErrorIdAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
-            undefined
-          ),
+          name: `${rule}-missing`,
+          row: auditRowWithGuardClass(reservedNonRawErrorIdAuditRow(rule), undefined),
           expected: "Reserved authority policy audit rows require guard_class authority"
         },
         {
-          name: "spawn-capability",
-          row: auditRowWithGuardClass(
-            reservedNonRawErrorIdAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
-            "capability"
-          ),
+          name: `${rule}-capability`,
+          row: auditRowWithGuardClass(reservedNonRawErrorIdAuditRow(rule), "capability"),
           expected: "Reserved authority policy audit rows require guard_class authority"
         },
         {
-          name: "spawn-invalid",
-          row: auditRowWithGuardClass(
-            reservedNonRawErrorIdAuditRow(SPAWN_PROFILE_SUBSET_RULE_ID),
-            "temporary" as never
-          ),
-          expected: "Policy gate audit rows guard_class must be authority or capability"
-        },
-        {
-          name: "schema-missing",
-          row: auditRowWithGuardClass(
-            reservedNonRawErrorIdAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
-            undefined
-          ),
-          expected: "Reserved authority policy audit rows require guard_class authority"
-        },
-        {
-          name: "schema-capability",
-          row: auditRowWithGuardClass(
-            reservedNonRawErrorIdAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
-            "capability"
-          ),
-          expected: "Reserved authority policy audit rows require guard_class authority"
-        },
-        {
-          name: "schema-invalid",
-          row: auditRowWithGuardClass(
-            reservedNonRawErrorIdAuditRow(TOOL_PARAMETER_SCHEMA_RULE_ID),
-            "temporary" as never
-          ),
+          name: `${rule}-invalid`,
+          row: auditRowWithGuardClass(reservedNonRawErrorIdAuditRow(rule), "temporary" as never),
           expected: "Policy gate audit rows guard_class must be authority or capability"
         }
-      ] as const;
+      ]);
 
       for (const testCase of cases) {
         await expect(
@@ -710,7 +640,7 @@ describe("raw data seatbelt sandbox", () => {
   test("public audit append rejects reserved non-raw authority guard_class", async () => {
     const fixture = await createFixture();
     try {
-      for (const rule of [SPAWN_PROFILE_SUBSET_RULE_ID, TOOL_PARAMETER_SCHEMA_RULE_ID]) {
+      for (const rule of RESERVED_NON_RAW_AUTHORITY_POLICY_RULE_IDS) {
         await expect(
           appendPolicyGateAuditRow({
             workspaceRoot: fixture.root,
@@ -741,11 +671,7 @@ describe("raw data seatbelt sandbox", () => {
   test("public audit append rejects reserved rule prefix impersonation", async () => {
     const fixture = await createFixture();
     try {
-      for (const rule of [
-        RAW_DATA_WRITE_RULE_ID,
-        SPAWN_PROFILE_SUBSET_RULE_ID,
-        TOOL_PARAMETER_SCHEMA_RULE_ID
-      ]) {
+      for (const rule of RESERVED_AUTHORITY_POLICY_RULE_IDS) {
         await expect(
           appendPolicyGateAuditRow({
             workspaceRoot: fixture.root,
@@ -768,11 +694,7 @@ describe("raw data seatbelt sandbox", () => {
   test("public audit append rejects exact reserved rules and reserved error_id prefixes", async () => {
     const fixture = await createFixture();
     try {
-      for (const rule of [
-        RAW_DATA_WRITE_RULE_ID,
-        SPAWN_PROFILE_SUBSET_RULE_ID,
-        TOOL_PARAMETER_SCHEMA_RULE_ID
-      ]) {
+      for (const rule of RESERVED_AUTHORITY_POLICY_RULE_IDS) {
         const expected =
           rule === RAW_DATA_WRITE_RULE_ID
             ? "Raw-data authority audit rows require trusted producer evidence"
