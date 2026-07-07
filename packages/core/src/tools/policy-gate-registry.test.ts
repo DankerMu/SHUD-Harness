@@ -37,6 +37,7 @@ import {
   assertPolicyGatedToolRegistry,
   createPolicyGateEvaluator,
   createPolicyGatedToolRegistry,
+  createShudPolicyGateEvaluator,
   createShudRuntimeToolRegistry,
   createShudSandboxedBashTool,
   isPolicyGatedTool,
@@ -1944,6 +1945,257 @@ describe("policy-gated zero tool registry", () => {
       success: false,
       outputSummary: result.outputSummary
     });
+  });
+
+  test("SHUD policy evaluator rejects direct custom missing guardClass", async () => {
+    const tool = new RecordingTool("direct.missing.guard");
+    const evaluator = createShudPolicyGateEvaluator(async () =>
+      ({
+        decision: "deny",
+        ruleId: "direct-missing-guard-class",
+        reason: "direct custom evaluator denied without classification",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Classify the direct custom denial before returning it.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        }
+      }) as never
+    );
+
+    await expect(
+      evaluator(
+        {
+          toolId: tool.name,
+          role: "worker",
+          input: { blocked: true },
+          workDir: "/tmp/shud-harness-test"
+        },
+        { tool, toolContext: createToolContext("worker") }
+      )
+    ).rejects.toThrow(/Invalid policy gate decision.*direct-missing-guard-class.*guardClass/);
+    expect(tool.calls).toBe(0);
+  });
+
+  test("SHUD policy evaluator rejects direct custom invalid guardClass", async () => {
+    const tool = new RecordingTool("direct.invalid.guard");
+    const evaluator = createShudPolicyGateEvaluator(async () =>
+      ({
+        decision: "deny",
+        ruleId: "direct-invalid-guard-class",
+        reason: "direct custom evaluator denied with invalid classification",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Classify the direct custom denial as authority or capability.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "temporary"
+      }) as never
+    );
+
+    await expect(
+      evaluator(
+        {
+          toolId: tool.name,
+          role: "worker",
+          input: { blocked: true },
+          workDir: "/tmp/shud-harness-test"
+        },
+        { tool, toolContext: createToolContext("worker") }
+      )
+    ).rejects.toThrow(/Invalid policy gate decision.*direct-invalid-guard-class.*guardClass/);
+    expect(tool.calls).toBe(0);
+  });
+
+  test("SHUD policy evaluator rejects direct custom conflicting guard aliases", async () => {
+    const tool = new RecordingTool("direct.conflicting.guard");
+    const evaluator = createShudPolicyGateEvaluator(async () =>
+      ({
+        decision: "deny",
+        ruleId: "direct-conflicting-guard-class",
+        reason: "direct custom evaluator denied with conflicting classifications",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Return one consistent guard classification before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "authority",
+        guard_class: "capability"
+      }) as never
+    );
+
+    await expect(
+      evaluator(
+        {
+          toolId: tool.name,
+          role: "worker",
+          input: { blocked: true },
+          workDir: "/tmp/shud-harness-test"
+        },
+        { tool, toolContext: createToolContext("worker") }
+      )
+    ).rejects.toThrow(/Invalid policy gate decision.*direct-conflicting-guard-class.*guardClass/);
+    expect(tool.calls).toBe(0);
+  });
+
+  test("missing guardClass from execution validator fails closed without policy_gate_denied payload", async () => {
+    const tool = new RecordingTool("validator.missing.guard");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () =>
+        ({
+          decision: "deny",
+          ruleId: "validator-missing-guard-class",
+          reason: "validator denied without classification",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Classify the validator denial before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          }
+        }) as never
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain("validator-missing-guard-class");
+    expect(result.output).toContain("guardClass");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+    expect(tool.calls).toBe(0);
+  });
+
+  test("invalid guardClass from execution validator fails closed without policy_gate_denied payload", async () => {
+    const tool = new RecordingTool("validator.invalid.guard");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () =>
+        ({
+          decision: "deny",
+          ruleId: "validator-invalid-guard-class",
+          reason: "validator denied with an invalid classification",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Classify the validator denial as authority or capability before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "temporary"
+        }) as never
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain("validator-invalid-guard-class");
+    expect(result.output).toContain("guardClass");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+    expect(tool.calls).toBe(0);
+  });
+
+  test("conflicting guard aliases from execution validator fail closed without policy_gate_denied payload", async () => {
+    const tool = new RecordingTool("validator.conflicting.guard");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () =>
+        ({
+          decision: "deny",
+          ruleId: "validator-conflicting-guard-class",
+          reason: "validator denied with conflicting classifications",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Return matching guardClass and guard_class values before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "authority",
+          guard_class: "capability"
+        }) as never
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain("validator-conflicting-guard-class");
+    expect(result.output).toContain("guardClass");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+    expect(tool.calls).toBe(0);
+  });
+
+  test("matching guard aliases from execution validator emit classified policy_gate_denied", async () => {
+    const tool = new RecordingTool("validator.matching.guard");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () =>
+        ({
+          decision: "deny",
+          ruleId: "validator-matching-guard-class",
+          reason: "validator denied with matching classifications",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Fix the validator-owned input contract before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "capability",
+          guard_class: "capability"
+        }) as never
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(tool.calls).toBe(0);
+    expect(result.output).toContain("policy_gate_denied");
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      ruleId?: string;
+      guard_class?: string;
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("validator-matching-guard-class");
+    expect(payload.guard_class).toBe("capability");
+  });
+
+  test("classified execution validator denial emits policy_gate_denied with guard_class", async () => {
+    const tool = new RecordingTool("validator.classified.guard");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: "validator-classified-guard-class",
+        reason: "validator denied with a valid classification",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Fix the validator-owned input contract before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "capability"
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(tool.calls).toBe(0);
+    expect(result.output).toContain("policy_gate_denied");
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      ruleId?: string;
+      guard_class?: string;
+      reason?: string;
+      remediation?: {
+        next_action?: string;
+        hint?: string;
+        ref?: string;
+      };
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("validator-classified-guard-class");
+    expect(payload.guard_class).toBe("capability");
+    expect(payload.reason).toBe("validator denied with a valid classification");
+    expect(payload.remediation?.next_action).toBe("fix_and_retry");
   });
 
   test("invalid remediation from policy evaluator returns failed ToolResult", async () => {

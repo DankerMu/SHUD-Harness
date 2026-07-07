@@ -24,6 +24,7 @@ import {
   SPAWN_PROFILE_SUBSET_RULE_ID,
   SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS,
   type HarnessRole,
+  type PolicyGuardClass,
   type PolicyGateContext,
   type PolicyGateDecision,
   type PolicyGateRemediation,
@@ -196,7 +197,7 @@ export function createShudPolicyGateEvaluator(
       return authorityDecision;
     }
 
-    return customEvaluate(call, context);
+    return validatePolicyGateDecision(call.toolId, await customEvaluate(call, context));
   };
 }
 
@@ -818,14 +819,18 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
         );
       }
 
-      const executionValidationDecision = this.#validateExecutionInput?.(
+      const executionValidation = this.validatePolicyGateExecutionInput(
         parsedPreparedInput.executionInput
       );
-      if (executionValidationDecision) {
+      if (executionValidation.status === "error") {
+        const durationMs = Date.now() - startTime;
+        return this.finalizePolicyGateResult(toolContext, executionValidation.result, durationMs);
+      }
+      if (executionValidation.status === "decision") {
         const durationMs = Date.now() - startTime;
         return this.finalizePolicyGateResult(
           toolContext,
-          buildPolicyGateDeniedResult(this.#policyGateToolId, executionValidationDecision),
+          buildPolicyGateDeniedResult(this.#policyGateToolId, executionValidation.decision),
           durationMs
         );
       }
@@ -833,14 +838,16 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       return this.#innerTool.run(toolContext, parsedPreparedInput.executionInput);
     }
 
-    const executionValidationDecision = this.#validateExecutionInput?.(
-      preparedInput.executionInput
-    );
-    if (executionValidationDecision) {
+    const executionValidation = this.validatePolicyGateExecutionInput(preparedInput.executionInput);
+    if (executionValidation.status === "error") {
+      const durationMs = Date.now() - startTime;
+      return this.finalizePolicyGateResult(toolContext, executionValidation.result, durationMs);
+    }
+    if (executionValidation.status === "decision") {
       const durationMs = Date.now() - startTime;
       return this.finalizePolicyGateResult(
         toolContext,
-        buildPolicyGateDeniedResult(this.#policyGateToolId, executionValidationDecision),
+        buildPolicyGateDeniedResult(this.#policyGateToolId, executionValidation.decision),
         durationMs
       );
     }
@@ -868,6 +875,35 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
 
   protected async execute(): Promise<ToolResult> {
     throw new Error("PolicyGatedBaseToolAdapter delegates through run().");
+  }
+
+  private validatePolicyGateExecutionInput(
+    executionInput: unknown
+  ):
+    | { status: "allow" }
+    | { status: "decision"; decision: Extract<PolicyGateDecision, { decision: "deny" }> }
+    | { status: "error"; result: ToolResult } {
+    try {
+      const candidate = this.#validateExecutionInput?.(executionInput);
+      if (!candidate) {
+        return { status: "allow" };
+      }
+
+      return {
+        status: "decision",
+        decision: validatePolicyGateDenyDecision(this.#policyGateToolId, candidate)
+      };
+    } catch (error) {
+      const errorMessage = toErrorMessage(error);
+      return {
+        status: "error",
+        result: {
+          success: false,
+          output: errorMessage,
+          outputSummary: `Error: ${errorMessage.slice(0, 100)}`
+        }
+      };
+    }
   }
 
   private async finalizePolicyGateResult(
@@ -1501,7 +1537,6 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
 
   const ruleId = rawDecision.ruleId;
   const reason = rawDecision.reason;
-  const rawGuardClass = rawDecision.guardClass ?? rawDecision.guard_class;
   const validRuleId = typeof ruleId === "string" ? ruleId : undefined;
   const validReason = typeof reason === "string" ? reason : undefined;
   const issuePaths: string[] = [];
@@ -1524,12 +1559,7 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
     remediation = parsedRemediation.data;
   }
 
-  const parsedGuardClass =
-    rawGuardClass === undefined ? undefined : PolicyGuardClassSchema.safeParse(rawGuardClass);
-  const guardClass = parsedGuardClass?.success ? parsedGuardClass.data : undefined;
-  if (!guardClass) {
-    issuePaths.push("guardClass");
-  }
+  const guardClass = readPolicyGateDecisionGuardClass(rawDecision, issuePaths);
 
   if (
     issuePaths.length > 0 ||
@@ -1552,6 +1582,71 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
     remediation,
     guardClass
   };
+}
+
+type PolicyGateDecisionGuardClassAlias =
+  | { state: "missing" }
+  | { state: "invalid" }
+  | { state: "valid"; guardClass: PolicyGuardClass };
+
+function readPolicyGateDecisionGuardClass(
+  rawDecision: Record<string, unknown>,
+  issuePaths: string[]
+): PolicyGuardClass | undefined {
+  const camelGuardClass = parsePolicyGateDecisionGuardClassAlias(rawDecision.guardClass);
+  const snakeGuardClass = parsePolicyGateDecisionGuardClassAlias(rawDecision.guard_class);
+
+  if (camelGuardClass.state === "invalid") {
+    issuePaths.push("guardClass");
+  }
+  if (snakeGuardClass.state === "invalid") {
+    issuePaths.push("guard_class");
+  }
+  if (camelGuardClass.state === "invalid" || snakeGuardClass.state === "invalid") {
+    return undefined;
+  }
+
+  if (camelGuardClass.state === "valid" && snakeGuardClass.state === "valid") {
+    if (camelGuardClass.guardClass !== snakeGuardClass.guardClass) {
+      issuePaths.push("guardClass", "guard_class");
+      return undefined;
+    }
+    return camelGuardClass.guardClass;
+  }
+
+  if (camelGuardClass.state === "valid") {
+    return camelGuardClass.guardClass;
+  }
+  if (snakeGuardClass.state === "valid") {
+    return snakeGuardClass.guardClass;
+  }
+
+  issuePaths.push("guardClass");
+  return undefined;
+}
+
+function parsePolicyGateDecisionGuardClassAlias(
+  value: unknown
+): PolicyGateDecisionGuardClassAlias {
+  if (value === undefined) {
+    return { state: "missing" };
+  }
+  const parsed = PolicyGuardClassSchema.safeParse(value);
+  if (!parsed.success) {
+    return { state: "invalid" };
+  }
+  return { state: "valid", guardClass: parsed.data };
+}
+
+function validatePolicyGateDenyDecision(
+  toolId: string,
+  candidate: unknown
+): Extract<PolicyGateDecision, { decision: "deny" }> {
+  const decision = validatePolicyGateDecision(toolId, candidate);
+  if (decision.decision !== "deny") {
+    throw new Error(`Invalid policy gate decision for ${toolId}: execution validator must deny`);
+  }
+  return decision;
 }
 
 function snapshotRawDataSeatbeltProfileOptions(
@@ -1631,9 +1726,9 @@ function buildPolicyGateDeniedResult(
     error: "policy_gate_denied",
     tool_id: toolId,
     reason: decision.reason,
-    ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
-    ...(decision.guardClass ? { guard_class: decision.guardClass } : {}),
-    ...(decision.remediation ? { remediation: decision.remediation } : {})
+    ruleId: decision.ruleId,
+    guard_class: decision.guardClass,
+    remediation: decision.remediation
   };
 
   return {

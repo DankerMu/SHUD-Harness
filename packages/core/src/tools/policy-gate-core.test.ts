@@ -97,6 +97,58 @@ describe("policy gate pure evaluator", () => {
     );
   });
 
+  test("guard_class lint rejects invalid deny result classifications", () => {
+    expect(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "invalid-result-guard-class",
+            description: "Valid rule metadata with an invalid result-level classification.",
+            guardClass: "authority",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "result guard class is invalid",
+              remediation: {
+                next_action: "adjust_scope",
+                hint: "Use a valid guard class.",
+                ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+              },
+              guardClass: "temporary"
+            })
+          } as never
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: invalid-result-guard-class: invalid result guardClass/
+    );
+  });
+
+  test("guard_class lint rejects deny result classifications that conflict with rule metadata", () => {
+    expect(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "conflicting-result-guard-class",
+            description: "Valid rule metadata with a conflicting result-level classification.",
+            guardClass: "authority",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "result guard class conflicts with the rule source of truth",
+              remediation: {
+                next_action: "adjust_scope",
+                hint: "Align the result guard class with the owning rule.",
+                ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+              },
+              guardClass: "capability"
+            })
+          }
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: conflicting-result-guard-class: result guardClass capability conflicts with rule guardClass authority/
+    );
+  });
+
   test("snake_case guard_class metadata propagates into deny decisions", () => {
     const decision = evaluatePolicyGate(sampleToolCall(), {
       rules: [

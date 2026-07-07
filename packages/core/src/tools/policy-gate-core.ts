@@ -100,12 +100,7 @@ export function evaluatePolicyGate(
     }
 
     validatePolicyGateRemediation(rule.ruleId, result.remediation);
-    const guardClass = result.guardClass ?? readPolicyRuleGuardClass(rule);
-    if (!guardClass) {
-      throw new Error(
-        `Policy gate guard_class lint failed: ${formatPolicyRuleId(rule, index)}: missing or invalid guardClass/guard_class.`
-      );
-    }
+    const guardClass = normalizePolicyRuleDenyGuardClass(rule, index, result);
     return {
       decision: "deny",
       ruleId: rule.ruleId,
@@ -116,6 +111,39 @@ export function evaluatePolicyGate(
   }
 
   return { decision: "allow" };
+}
+
+function normalizePolicyRuleDenyGuardClass(
+  rule: PolicyRuleGuardClassCarrier,
+  index: number,
+  result: Extract<PolicyRuleDecision, { decision: "deny" }>
+): PolicyGuardClass {
+  const ruleGuardClass = readPolicyRuleGuardClass(rule);
+  const ruleId = formatPolicyRuleId(rule, index);
+  if (!ruleGuardClass) {
+    throw new Error(
+      `Policy gate guard_class lint failed: ${ruleId}: missing or invalid guardClass/guard_class.`
+    );
+  }
+
+  if (result.guardClass === undefined) {
+    return ruleGuardClass;
+  }
+
+  const parsedResultGuardClass = PolicyGuardClassSchema.safeParse(result.guardClass);
+  if (!parsedResultGuardClass.success) {
+    throw new Error(
+      `Policy gate guard_class lint failed: ${ruleId}: invalid result guardClass.`
+    );
+  }
+
+  if (parsedResultGuardClass.data !== ruleGuardClass) {
+    throw new Error(
+      `Policy gate guard_class lint failed: ${ruleId}: result guardClass ${parsedResultGuardClass.data} conflicts with rule guardClass ${ruleGuardClass}.`
+    );
+  }
+
+  return ruleGuardClass;
 }
 
 export function assertPolicyGateContextGuardClasses(context: PolicyGateContext): void {
