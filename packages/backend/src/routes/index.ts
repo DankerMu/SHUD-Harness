@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Hono } from "hono";
 
@@ -51,12 +51,22 @@ export type WorkspaceWritableProbe = (
   input: WorkspaceWritableProbeInput
 ) => Promise<boolean> | boolean;
 
+export interface WorkspaceSnapshotReadableProbeInput {
+  workspaceRoot: string;
+  snapshotsPath: string;
+}
+
+export type WorkspaceSnapshotReadableProbe = (
+  input: WorkspaceSnapshotReadableProbeInput
+) => Promise<boolean> | boolean;
+
 export interface BackendApiOptions {
   workspaceRoot?: string;
   version?: string;
   startTimeMs?: number;
   now?: () => Date;
   writableProbe?: WorkspaceWritableProbe;
+  snapshotReadableProbe?: WorkspaceSnapshotReadableProbe;
 }
 
 export interface WorkspaceInitResponse {
@@ -114,19 +124,19 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
 export function createWorkspaceRoutesService(
   options: BackendApiOptions = {}
 ): WorkspaceRoutesService {
-  const workspaceRoot = resolve(
-    options.workspaceRoot ?? process.env.SHUD_HARNESS_WORKSPACE_ROOT ?? "workspace"
-  );
+  const workspaceRoot = resolveWorkspaceRoot(options);
   const version = options.version ?? process.env.npm_package_version ?? "0.0.0";
   const now = options.now ?? (() => new Date());
   const startTimeMs = options.startTimeMs ?? Date.now();
   const writableProbe = options.writableProbe ?? defaultWorkspaceWritableProbe;
+  const snapshotReadableProbe =
+    options.snapshotReadableProbe ?? defaultSnapshotReadableProbe;
 
   return {
     async initWorkspace(): Promise<WorkspaceInitResponse> {
-      await mkdir(workspaceRoot, { recursive: true });
+      await ensureWorkspaceRootDirectory(workspaceRoot);
       for (const relativeDir of WORKSPACE_CANONICAL_DIRECTORIES) {
-        await mkdir(join(workspaceRoot, relativeDir), { recursive: true });
+        await ensureSafeWorkspaceDirectory(workspaceRoot, relativeDir);
       }
 
       return {
@@ -148,7 +158,10 @@ export function createWorkspaceRoutesService(
 
     async ready(): Promise<WorkspaceReadyResponse> {
       const missingDirectories = await findMissingWorkspaceDirectories(workspaceRoot);
-      const snapshotReadable = await isReadableDirectory(join(workspaceRoot, "snapshots"));
+      const snapshotReadable = await probeSnapshotReadable(
+        workspaceRoot,
+        snapshotReadableProbe
+      );
       const workspaceWritable = await probeWorkspaceWritable(workspaceRoot, writableProbe);
       const checks = {
         directory_tree: statusFromBoolean(missingDirectories.length === 0),
@@ -167,13 +180,39 @@ export function createWorkspaceRoutesService(
   };
 }
 
+function resolveWorkspaceRoot(options: BackendApiOptions): string {
+  return resolve(
+    firstNonBlankString(
+      options.workspaceRoot,
+      process.env.HARNESS_WORKSPACE_DIR,
+      process.env.SHUD_HARNESS_WORKSPACE_ROOT,
+      "workspace"
+    )
+  );
+}
+
+function firstNonBlankString(...values: Array<string | undefined>): string {
+  for (const value of values) {
+    if (typeof value !== "string") {
+      continue;
+    }
+
+    const trimmedValue = value.trim();
+    if (trimmedValue.length > 0) {
+      return trimmedValue;
+    }
+  }
+
+  return "workspace";
+}
+
 async function findMissingWorkspaceDirectories(
   workspaceRoot: string
 ): Promise<WorkspaceCanonicalDirectory[]> {
   const missingDirectories: WorkspaceCanonicalDirectory[] = [];
 
   for (const relativeDir of WORKSPACE_CANONICAL_DIRECTORIES) {
-    if (!(await isDirectory(join(workspaceRoot, relativeDir)))) {
+    if (!(await isSafeWorkspaceDirectory(workspaceRoot, relativeDir))) {
       missingDirectories.push(relativeDir);
     }
   }
@@ -181,24 +220,107 @@ async function findMissingWorkspaceDirectories(
   return missingDirectories;
 }
 
-async function isReadableDirectory(directoryPath: string): Promise<boolean> {
-  if (!(await isDirectory(directoryPath))) {
+async function ensureWorkspaceRootDirectory(workspaceRoot: string): Promise<void> {
+  const existingRoot = await maybeLstat(workspaceRoot);
+  if (existingRoot) {
+    if (!existingRoot.isDirectory() || existingRoot.isSymbolicLink()) {
+      throw new Error("workspace_root_not_safe");
+    }
+    return;
+  }
+
+  await mkdir(workspaceRoot, { recursive: true });
+
+  const createdRoot = await maybeLstat(workspaceRoot);
+  if (!createdRoot?.isDirectory() || createdRoot.isSymbolicLink()) {
+    throw new Error("workspace_root_not_safe");
+  }
+}
+
+async function ensureSafeWorkspaceDirectory(
+  workspaceRoot: string,
+  relativeDir: WorkspaceCanonicalDirectory
+): Promise<void> {
+  await ensureWorkspaceRootDirectory(workspaceRoot);
+
+  let currentPath = workspaceRoot;
+  for (const segment of relativeDir.split("/")) {
+    currentPath = join(currentPath, segment);
+    const existingEntry = await maybeLstat(currentPath);
+
+    if (existingEntry) {
+      if (!existingEntry.isDirectory() || existingEntry.isSymbolicLink()) {
+        throw new Error("workspace_directory_not_safe");
+      }
+      continue;
+    }
+
+    await mkdir(currentPath);
+
+    const createdEntry = await maybeLstat(currentPath);
+    if (!createdEntry?.isDirectory() || createdEntry.isSymbolicLink()) {
+      throw new Error("workspace_directory_not_safe");
+    }
+  }
+}
+
+async function probeSnapshotReadable(
+  workspaceRoot: string,
+  snapshotReadableProbe: WorkspaceSnapshotReadableProbe
+): Promise<boolean> {
+  const snapshotsPath = join(workspaceRoot, "snapshots");
+  if (!(await isSafeWorkspaceDirectory(workspaceRoot, "snapshots"))) {
     return false;
   }
 
   try {
-    await readdir(directoryPath);
+    return await snapshotReadableProbe({ workspaceRoot, snapshotsPath });
+  } catch {
+    return false;
+  }
+}
+
+async function defaultSnapshotReadableProbe(
+  input: WorkspaceSnapshotReadableProbeInput
+): Promise<boolean> {
+  try {
+    await readdir(input.snapshotsPath);
     return true;
   } catch {
     return false;
   }
 }
 
-async function isDirectory(directoryPath: string): Promise<boolean> {
-  try {
-    return (await stat(directoryPath)).isDirectory();
-  } catch {
+async function isSafeWorkspaceDirectory(
+  workspaceRoot: string,
+  relativeDir: WorkspaceCanonicalDirectory
+): Promise<boolean> {
+  if (!(await isAcceptedWorkspaceRootDirectory(workspaceRoot))) {
     return false;
+  }
+
+  let currentPath = workspaceRoot;
+  for (const segment of relativeDir.split("/")) {
+    currentPath = join(currentPath, segment);
+    const entry = await maybeLstat(currentPath);
+    if (!entry?.isDirectory() || entry.isSymbolicLink()) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function isAcceptedWorkspaceRootDirectory(workspaceRoot: string): Promise<boolean> {
+  const entry = await maybeLstat(workspaceRoot);
+  return Boolean(entry?.isDirectory() && !entry.isSymbolicLink());
+}
+
+async function maybeLstat(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
+  try {
+    return await lstat(path);
+  } catch {
+    return undefined;
   }
 }
 
@@ -206,6 +328,10 @@ async function probeWorkspaceWritable(
   workspaceRoot: string,
   writableProbe: WorkspaceWritableProbe
 ): Promise<boolean> {
+  if (!(await isAcceptedWorkspaceRootDirectory(workspaceRoot))) {
+    return false;
+  }
+
   try {
     return await writableProbe({ workspaceRoot });
   } catch {
@@ -218,7 +344,7 @@ function statusFromBoolean(value: boolean): WorkspaceHealthCheckStatus {
 }
 
 async function defaultWorkspaceWritableProbe(input: WorkspaceWritableProbeInput): Promise<boolean> {
-  if (!(await isDirectory(input.workspaceRoot))) {
+  if (!(await isAcceptedWorkspaceRootDirectory(input.workspaceRoot))) {
     return false;
   }
 
