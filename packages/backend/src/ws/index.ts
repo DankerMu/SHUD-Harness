@@ -1,9 +1,12 @@
 import {
   assertTrustedRawDataToolFailedEventInput,
+  isReservedAuthorityPolicyRuleId,
   isReservedRawDataDenialErrorId,
+  PolicyGuardClassSchema,
   rawDataDeniedToolResultToToolFailedEventInput,
   RAW_DATA_WRITE_RULE_ID,
   type ErrorRecord,
+  type PolicyGuardClass,
   type RawDataToolFailedEventInput
 } from "@shud-harness/core";
 
@@ -17,7 +20,7 @@ export interface ToolFailedWsEventInput {
   error: ErrorRecord;
   rule?: string;
   decision?: string;
-  guardClass?: string;
+  guardClass?: PolicyGuardClass;
   profileId?: string;
   invocationId?: string;
   eventId?: string;
@@ -41,7 +44,7 @@ export interface ToolFailedWsEvent {
     error: ErrorRecord;
     rule?: string;
     decision?: string;
-    guard_class?: string;
+    guard_class?: PolicyGuardClass;
     profile_id?: string;
     invocation_id?: string;
   };
@@ -95,8 +98,18 @@ function assertPublicToolFailedWsEventInput(input: ToolFailedWsEventInput): void
       "Reserved raw-data denial error_id values require the trusted raw-data advisory event builder."
     );
   }
-  if (isRawDataAuthorityToolFailedEvent(input) && input.guardClass !== "authority") {
+  const guardClass = readToolFailedGuardClass(input.guardClass);
+  if (isRawDataAuthorityToolFailedEvent(input) && guardClass !== "authority") {
     throw new Error("Raw-data authority tool.failed events require guardClass authority.");
+  }
+  if (
+    input.rule &&
+    isReservedAuthorityPolicyRuleId(input.rule) &&
+    guardClass !== "authority"
+  ) {
+    throw new Error(
+      "Reserved authority policy rule tool.failed events require guardClass authority."
+    );
   }
 }
 
@@ -121,6 +134,17 @@ function readRawDataAdvisoryToolFailedWsEventInput(
 
 function isRawDataDenialDecision(decision: string | undefined): boolean {
   return decision === "denied_by_advisory" || decision === "denied_by_sandbox";
+}
+
+function readToolFailedGuardClass(guardClass: unknown): PolicyGuardClass | undefined {
+  if (guardClass === undefined) {
+    return undefined;
+  }
+  const parsed = PolicyGuardClassSchema.safeParse(guardClass);
+  if (!parsed.success) {
+    throw new Error("tool.failed guardClass must be authority or capability.");
+  }
+  return parsed.data;
 }
 
 function isRawDataAuthorityToolFailedEvent(input: ToolFailedWsEventInput): boolean {
