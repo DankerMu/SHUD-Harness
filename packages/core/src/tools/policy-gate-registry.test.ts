@@ -2136,6 +2136,41 @@ describe("policy-gated zero tool registry", () => {
     expect(definitions.map((candidate) => candidate.name)).not.toContain("generic.snapshot.leaked");
   });
 
+  test("factory-returned registry owns wrapper kind and capability snapshots", () => {
+    const tool = new RecordingTool("generic.wrapper.snapshot");
+    const originalKind: BaseTool["kind"] = "tool";
+    const originalCapabilities = Object.freeze(["vision"]);
+    tool.kind = originalKind;
+    tool.requiredModelCapabilities = originalCapabilities;
+    const registry = createPolicyGatedToolRegistry([tool], {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    const registered = registry.get("generic.wrapper.snapshot");
+    expect(registered).toBeDefined();
+    if (!registered) {
+      throw new Error("generic.wrapper.snapshot should be registered");
+    }
+
+    attemptRegisteredWrapperFieldMutation(registered, {
+      kind: "mcp",
+      requiredModelCapabilities: ["mutated-capability"]
+    });
+
+    const listed = registry.list().find((candidate) => candidate.name === "generic.wrapper.snapshot");
+    const definition = registry
+      .getDefinitions()
+      .find((candidate) => candidate.name === "generic.wrapper.snapshot");
+    expect(listed).toBe(registered);
+    expect(definition?.kind).toBe(originalKind);
+    expect(registered.kind).toBe(originalKind);
+    expect(listed?.kind).toBe(originalKind);
+    expect(registered.requiredModelCapabilities).toEqual(originalCapabilities);
+    expect(registered.requiredModelCapabilities).not.toBe(originalCapabilities);
+    expect(listed?.requiredModelCapabilities).toEqual(originalCapabilities);
+    expect(Object.isFrozen(registered.requiredModelCapabilities)).toBe(true);
+  });
+
   test("generic registry lint rejects the 21st visible tool without a role", () => {
     const tools = Array.from({ length: 21 }, (_, index) => new RecordingTool(`generic.${index}`));
 
@@ -5367,6 +5402,49 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("SHUD runtime registry owns wrapper kind and capability snapshots", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const edit = new RecordingTool("edit");
+      const originalKind: BaseTool["kind"] = "built-in";
+      const originalCapabilities = Object.freeze(["vision"]);
+      edit.kind = originalKind;
+      edit.requiredModelCapabilities = originalCapabilities;
+      const registry = createShudRuntimeToolRegistry({
+        tools: [edit],
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: []
+      });
+
+      const registered = registry.get("edit");
+      expect(registered).toBeDefined();
+      if (!registered) {
+        throw new Error("edit should be registered in the SHUD runtime registry");
+      }
+
+      attemptRegisteredWrapperFieldMutation(registered, {
+        kind: "mcp",
+        requiredModelCapabilities: ["mutated-capability"]
+      });
+
+      const listed = registry.list().find((candidate) => candidate.name === "edit");
+      const definition = registry.getDefinitions().find((candidate) => candidate.name === "edit");
+      expect(listed).toBe(registered);
+      expect(definition?.kind).toBe(originalKind);
+      expect(registered.kind).toBe(originalKind);
+      expect(listed?.kind).toBe(originalKind);
+      expect(registered.requiredModelCapabilities).toEqual(originalCapabilities);
+      expect(registered.requiredModelCapabilities).not.toBe(originalCapabilities);
+      expect(listed?.requiredModelCapabilities).toEqual(originalCapabilities);
+      expect(Object.isFrozen(registered.requiredModelCapabilities)).toBe(true);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime rewraps prewrapped tools with the current evaluator", async () => {
     const fixture = await createRawFixture();
     try {
@@ -5513,6 +5591,31 @@ class ZodRecordingTool extends RecordingTool {
     readonly parameterSchema: unknown
   ) {
     super(name);
+  }
+}
+
+function attemptRegisteredWrapperFieldMutation(
+  tool: BaseTool,
+  replacement: {
+    kind: BaseTool["kind"];
+    requiredModelCapabilities: readonly string[];
+  }
+): void {
+  const mutations: Array<() => void> = [
+    () => {
+      tool.kind = replacement.kind;
+    },
+    () => {
+      tool.requiredModelCapabilities = replacement.requiredModelCapabilities;
+    }
+  ];
+
+  for (const mutate of mutations) {
+    try {
+      mutate();
+    } catch (error) {
+      expect(error).toBeInstanceOf(TypeError);
+    }
   }
 }
 

@@ -611,8 +611,18 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     this.descriptionSnapshot = innerTool.description;
     this.parametersSnapshot = snapshotToolParameters(innerTool.parameters);
     this.zodParameterSchemaSnapshot = resolveToolZodParameterSchema(innerTool);
-    this.kind = innerTool.kind;
-    this.requiredModelCapabilities = Object.freeze([...innerTool.requiredModelCapabilities]);
+    Object.defineProperty(this, "kind", {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: innerTool.kind
+    });
+    Object.defineProperty(this, "requiredModelCapabilities", {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: Object.freeze([...innerTool.requiredModelCapabilities])
+    });
   }
 
   get name(): string {
