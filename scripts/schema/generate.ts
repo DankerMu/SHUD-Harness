@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { rm, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { z, type ZodType } from "zod";
 
 import { ArtifactSchema } from "../../packages/core/src/domain/schemas/artifact";
@@ -49,10 +50,22 @@ type FieldRow = {
 type ObjectSchemaExport = {
   exportName: string;
   sourcePath: string;
+  schema: ZodType;
+};
+
+type IgnoredObjectSchemaExport = {
+  exportName: string;
+  sourcePath: string;
+  reason: string;
+};
+
+type GeneratedPathContext = {
+  generatedRootPath: string;
 };
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const schemaSourceDir = join(repoRoot, "packages/core/src/domain/schemas");
+const generatedRoot = join(repoRoot, "docs/generated");
 const markdownDir = join(repoRoot, "docs/generated/schema");
 const jsonSchemaDir = join(repoRoot, "docs/generated/json-schema");
 
@@ -94,34 +107,56 @@ const schemaDefinitions: SchemaDefinition[] = [
   }
 ];
 
-const nestedObjectSchemaExports = new Set(["ErrorRemediationSchema", "InferenceBudgetSchema"]);
+const ignoredNestedObjectSchemaExports: IgnoredObjectSchemaExport[] = [
+  {
+    exportName: "ErrorRemediationSchema",
+    sourcePath: "packages/core/src/domain/schemas/error.ts",
+    reason: "nested helper for ErrorRecordSchema.remediation"
+  },
+  {
+    exportName: "InferenceBudgetSchema",
+    sourcePath: "packages/core/src/domain/schemas/task.ts",
+    reason: "nested helper for TaskCardSchema.inference_budget"
+  }
+];
+
+const generatedPathContext: GeneratedPathContext = {
+  generatedRootPath: generatedRoot
+};
 
 async function main(): Promise<void> {
   if (process.argv.includes("--self-test")) {
-    runSelfTest();
+    await runSelfTest();
     return;
   }
 
   await assertSchemaRegistryComplete();
-  await recreateDirectory(markdownDir);
-  await recreateDirectory(jsonSchemaDir);
+  await recreateGeneratedDirectory(markdownDir);
+  await recreateGeneratedDirectory(jsonSchemaDir);
 
   for (const definition of schemaDefinitions) {
     const jsonSchema = buildJsonSchema(definition);
     const markdown = buildMarkdown(definition, jsonSchema);
 
-    await writeFile(
+    await writeGeneratedFile(
       join(jsonSchemaDir, `${definition.slug}.json`),
       `${JSON.stringify(jsonSchema, null, 2)}\n`,
-      "utf8"
+      generatedPathContext
     );
-    await writeFile(join(markdownDir, `${definition.slug}.md`), markdown, "utf8");
+    await writeGeneratedFile(join(markdownDir, `${definition.slug}.md`), markdown, generatedPathContext);
   }
 }
 
-async function recreateDirectory(path: string): Promise<void> {
+async function recreateGeneratedDirectory(path: string, context = generatedPathContext): Promise<void> {
+  await assertGeneratedPathSafe(path, context);
   await rm(path, { recursive: true, force: true });
+  await assertGeneratedPathSafe(path, context);
   await mkdir(path, { recursive: true });
+}
+
+async function writeGeneratedFile(path: string, content: string, context = generatedPathContext): Promise<void> {
+  await assertGeneratedPathSafe(path, context);
+  await writeFile(path, content, "utf8");
 }
 
 function buildJsonSchema(definition: SchemaDefinition): JsonSchema {
@@ -194,7 +229,7 @@ function buildMarkdown(definition: SchemaDefinition, jsonSchema: JsonSchema): st
 
 async function assertSchemaRegistryComplete(): Promise<void> {
   const sourceExports = await discoverObjectSchemaExports();
-  validateSchemaRegistryCoverage(sourceExports, schemaDefinitions, nestedObjectSchemaExports);
+  validateSchemaRegistryCoverage(sourceExports, schemaDefinitions, ignoredNestedObjectSchemaExports);
 }
 
 async function discoverObjectSchemaExports(): Promise<ObjectSchemaExport[]> {
@@ -205,38 +240,200 @@ async function discoverObjectSchemaExports(): Promise<ObjectSchemaExport[]> {
 
   for (const file of files) {
     const sourcePath = `packages/core/src/domain/schemas/${file}`;
-    const source = await readFile(join(schemaSourceDir, file), "utf8");
-    const exportRegex = /export\s+const\s+([A-Za-z0-9_]+Schema)\s*=\s*z\.object\s*\(/g;
-    for (const match of source.matchAll(exportRegex)) {
-      exports.push({ exportName: match[1], sourcePath });
-    }
+    const moduleExports = (await import(pathToFileURL(join(schemaSourceDir, file)).href)) as Record<string, unknown>;
+
+    exports.push(...discoverObjectSchemaExportsFromModule(sourcePath, moduleExports));
   }
 
   return exports.sort((left, right) => left.exportName.localeCompare(right.exportName));
 }
 
+function discoverObjectSchemaExportsFromModule(
+  sourcePath: string,
+  moduleExports: Record<string, unknown>
+): ObjectSchemaExport[] {
+  const discovered: ObjectSchemaExport[] = [];
+
+  for (const [exportName, value] of Object.entries(moduleExports)) {
+    if (exportName.endsWith("Schema") && isZodObjectSchema(value)) {
+      discovered.push({ exportName, sourcePath, schema: value });
+    }
+  }
+
+  return discovered;
+}
+
+function isZodObjectSchema(value: unknown): value is ZodType {
+  return value instanceof z.ZodObject;
+}
+
 function validateSchemaRegistryCoverage(
   sourceExports: ObjectSchemaExport[],
   definitions: SchemaDefinition[],
-  ignoredNestedExports: Set<string>
+  ignoredNestedExports: IgnoredObjectSchemaExport[]
 ): void {
-  const sourceByName = new Map(sourceExports.map((sourceExport) => [sourceExport.exportName, sourceExport]));
-  const generatedNames = new Set(definitions.map((definition) => definition.exportName));
-  const missing = sourceExports.filter(
-    (sourceExport) => !ignoredNestedExports.has(sourceExport.exportName) && !generatedNames.has(sourceExport.exportName)
-  );
-  const stale = definitions.filter((definition) => !sourceByName.has(definition.exportName));
+  const details: string[] = [];
+  const sourceByName = new Map<string, ObjectSchemaExport>();
+  const sourceKeys = new Set(sourceExports.map((sourceExport) => objectExportKey(sourceExport)));
+  const ignoredKeys = new Set(ignoredNestedExports.map((sourceExport) => objectExportKey(sourceExport)));
+  const definitionsByName = new Map<string, SchemaDefinition>();
 
-  if (missing.length > 0 || stale.length > 0) {
-    const details = [
-      ...missing.map(
-        (sourceExport) =>
-          `missing generated schema registry entry for ${sourceExport.exportName} from ${sourceExport.sourcePath}`
-      ),
-      ...stale.map((definition) => `stale generated schema registry entry ${definition.exportName}`)
-    ];
+  for (const sourceExport of sourceExports) {
+    const existing = sourceByName.get(sourceExport.exportName);
+    if (existing !== undefined) {
+      details.push(
+        `duplicate exported object schema name ${sourceExport.exportName} in ${existing.sourcePath} and ${sourceExport.sourcePath}`
+      );
+      continue;
+    }
+    sourceByName.set(sourceExport.exportName, sourceExport);
+  }
+
+  for (const definition of definitions) {
+    const existing = definitionsByName.get(definition.exportName);
+    if (existing !== undefined) {
+      details.push(
+        `duplicate generated schema registry entry ${definition.exportName} in ${existing.sourcePath} and ${definition.sourcePath}`
+      );
+      continue;
+    }
+    definitionsByName.set(definition.exportName, definition);
+
+    if (!isZodObjectSchema(definition.schema)) {
+      details.push(`generated schema registry entry ${definition.exportName} is not a Zod object schema`);
+    }
+  }
+
+  const missing = sourceExports.filter(
+    (sourceExport) =>
+      !ignoredKeys.has(objectExportKey(sourceExport)) && !definitionsByName.has(sourceExport.exportName)
+  );
+  const staleIgnored = ignoredNestedExports.filter((ignoredExport) => !sourceKeys.has(objectExportKey(ignoredExport)));
+
+  details.push(
+    ...missing.map(
+      (sourceExport) =>
+        `missing generated schema registry entry for ${sourceExport.exportName} from ${sourceExport.sourcePath}`
+    ),
+    ...staleIgnored.map(
+      (ignoredExport) =>
+        `stale ignored nested schema entry ${ignoredExport.exportName} from ${ignoredExport.sourcePath}`
+    )
+  );
+
+  for (const definition of definitions) {
+    const sourceExport = sourceByName.get(definition.exportName);
+
+    if (sourceExport === undefined) {
+      details.push(`stale generated schema registry entry ${definition.exportName}`);
+      continue;
+    }
+
+    if (sourceExport.sourcePath !== definition.sourcePath) {
+      details.push(
+        `wrong sourcePath for ${definition.exportName}: registry has ${definition.sourcePath}, actual export is ${sourceExport.sourcePath}`
+      );
+    }
+
+    if (sourceExport.schema !== definition.schema) {
+      details.push(
+        `schema object mismatch for ${definition.exportName}: registry schema is not identical to ${sourceExport.sourcePath} export`
+      );
+    }
+  }
+
+  if (details.length > 0) {
     throw new Error(`Schema registry coverage failed:\n${details.join("\n")}`);
   }
+}
+
+function objectExportKey(sourceExport: Pick<ObjectSchemaExport, "sourcePath" | "exportName">): string {
+  return `${sourceExport.sourcePath}#${sourceExport.exportName}`;
+}
+
+async function assertGeneratedPathSafe(path: string, context = generatedPathContext): Promise<void> {
+  const rootPath = resolve(context.generatedRootPath);
+  const targetPath = resolve(path);
+
+  if (!isPathInsideOrEqual(targetPath, rootPath)) {
+    throw new Error(`Generated output path is unsafe: ${targetPath} is outside ${rootPath}`);
+  }
+
+  await assertExistingPathSegmentsNotSymlinks(rootPath);
+  await assertExistingPathSegmentsNotSymlinks(targetPath);
+
+  const rootStats = await lstat(rootPath);
+  if (!rootStats.isDirectory()) {
+    throw new Error(`Generated output path is unsafe: ${rootPath} must be a directory`);
+  }
+
+  const realRootPath = await realpath(rootPath);
+  const existingTargetPath = await nearestExistingPath(targetPath);
+  const realExistingTargetPath = await realpath(existingTargetPath);
+
+  if (!isPathInsideOrEqual(realExistingTargetPath, realRootPath)) {
+    throw new Error(`Generated output path is unsafe: ${realExistingTargetPath} resolves outside ${realRootPath}`);
+  }
+}
+
+async function assertExistingPathSegmentsNotSymlinks(path: string): Promise<void> {
+  const segments: string[] = [];
+  let current = resolve(path);
+
+  while (true) {
+    segments.push(current);
+    const parent = dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+
+  for (const segment of segments.reverse()) {
+    let stats;
+    try {
+      stats = await lstat(segment);
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return;
+      }
+      throw error;
+    }
+
+    if (stats.isSymbolicLink()) {
+      throw new Error(`Generated output path is unsafe: ${segment} must not be a symlink`);
+    }
+  }
+}
+
+async function nearestExistingPath(path: string): Promise<string> {
+  let current = resolve(path);
+
+  while (true) {
+    try {
+      await lstat(current);
+      return current;
+    } catch (error) {
+      if (!isNotFoundError(error)) {
+        throw error;
+      }
+    }
+
+    const parent = dirname(current);
+    if (parent === current) {
+      throw new Error(`Generated output path is unsafe: no existing ancestor for ${path}`);
+    }
+    current = parent;
+  }
+}
+
+function isPathInsideOrEqual(path: string, rootPath: string): boolean {
+  const pathRelativeToRoot = relative(rootPath, path);
+  return pathRelativeToRoot === "" || (!pathRelativeToRoot.startsWith("..") && !isAbsolute(pathRelativeToRoot));
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
 function flattenFields(schema: JsonSchema, parentPath = ""): FieldRow[] {
@@ -454,8 +651,9 @@ function buildChangelogDiff(definition: SchemaDefinition, jsonSchema: JsonSchema
   ];
 }
 
-function runSelfTest(): void {
+async function runSelfTest(): Promise<void> {
   const mockSchema = z.object({});
+  const wrongMockSchema = z.object({ wrong: z.string() });
   const mockDefinitions: SchemaDefinition[] = [
     {
       name: "TaskCard",
@@ -465,23 +663,48 @@ function runSelfTest(): void {
       schema: mockSchema
     }
   ];
-  const ignored = new Set(["InferenceBudgetSchema"]);
+  const ignored: IgnoredObjectSchemaExport[] = [
+    {
+      exportName: "InferenceBudgetSchema",
+      sourcePath: "packages/core/src/domain/schemas/task.ts",
+      reason: "nested helper for TaskCardSchema.inference_budget"
+    }
+  ];
 
   validateSchemaRegistryCoverage(
     [
-      { exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts" },
-      { exportName: "InferenceBudgetSchema", sourcePath: "packages/core/src/domain/schemas/task.ts" }
+      { exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts", schema: mockSchema },
+      {
+        exportName: "InferenceBudgetSchema",
+        sourcePath: "packages/core/src/domain/schemas/task.ts",
+        schema: z.object({})
+      }
     ],
     mockDefinitions,
     ignored
   );
 
+  const discoveredFromSyntheticModule = discoverObjectSchemaExportsFromModule(
+    "packages/core/src/domain/schemas/run-job.ts",
+    {
+      RunJobSchema: z.object({ run_id: z.string() }).extend({ status: z.string() }),
+      helperObject: z.object({ ignored: z.string() }),
+      RunJobStatusSchema: z.enum(["created"])
+    }
+  );
+  if (
+    discoveredFromSyntheticModule.length !== 1 ||
+    discoveredFromSyntheticModule[0]?.exportName !== "RunJobSchema"
+  ) {
+    throw new Error("object schema discovery should include composed *Schema exports and ignore non-schema helpers");
+  }
+
   assertThrows(
     () =>
       validateSchemaRegistryCoverage(
         [
-          { exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts" },
-          { exportName: "RunJobSchema", sourcePath: "packages/core/src/domain/schemas/run-job.ts" }
+          { exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts", schema: mockSchema },
+          { exportName: "RunJobSchema", sourcePath: "packages/core/src/domain/schemas/run-job.ts", schema: z.object({}) }
         ],
         mockDefinitions,
         ignored
@@ -491,16 +714,94 @@ function runSelfTest(): void {
 
   assertThrows(
     () =>
-      validateSchemaRegistryCoverage([], mockDefinitions, ignored),
+      validateSchemaRegistryCoverage([], mockDefinitions, []),
     "stale generated schema registry entry TaskCardSchema"
   );
 
+  assertThrows(
+    () =>
+      validateSchemaRegistryCoverage(
+        [{ exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts", schema: mockSchema }],
+        [
+          {
+            ...mockDefinitions[0],
+            sourcePath: "packages/core/src/domain/schemas/wrong.ts"
+          }
+        ],
+        []
+      ),
+    "wrong sourcePath for TaskCardSchema"
+  );
+
+  assertThrows(
+    () =>
+      validateSchemaRegistryCoverage(
+        [{ exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts", schema: mockSchema }],
+        [
+          {
+            ...mockDefinitions[0],
+            schema: wrongMockSchema
+          }
+        ],
+        []
+      ),
+    "schema object mismatch for TaskCardSchema"
+  );
+
+  assertThrows(
+    () =>
+      validateSchemaRegistryCoverage(
+        [{ exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts", schema: mockSchema }],
+        [
+          mockDefinitions[0],
+          {
+            ...mockDefinitions[0],
+            name: "TaskCardDuplicate",
+            slug: "task-card-duplicate"
+          }
+        ],
+        []
+      ),
+    "duplicate generated schema registry entry TaskCardSchema"
+  );
+
+  await assertGeneratedPathRejectsSymlinkAncestor();
   assertTaskCardUnknownKeyParity();
   for (const definition of schemaDefinitions) {
     assertNoAdditionalPropertiesFalse(buildJsonSchema(definition), definition.name);
   }
 
   console.log("schema generator self-test passed");
+}
+
+async function assertGeneratedPathRejectsSymlinkAncestor(): Promise<void> {
+  const tempRoot = await mkdtemp(join(tmpdir(), "schema-generator-path-"));
+  const fakeRepoRoot = join(tempRoot, "repo");
+  const outsideGeneratedRoot = join(tempRoot, "outside-generated");
+  const outsideSchemaDir = join(outsideGeneratedRoot, "schema");
+  const sentinelPath = join(outsideSchemaDir, "sentinel.txt");
+
+  try {
+    await mkdir(join(fakeRepoRoot, "docs"), { recursive: true });
+    await mkdir(outsideSchemaDir, { recursive: true });
+    await writeFile(sentinelPath, "untouched\n", "utf8");
+    await symlink(outsideGeneratedRoot, join(fakeRepoRoot, "docs/generated"), "dir");
+
+    await assertRejects(
+      () =>
+        recreateGeneratedDirectory(join(fakeRepoRoot, "docs/generated/schema"), {
+          generatedRootPath: join(fakeRepoRoot, "docs/generated")
+        }),
+      "must not be a symlink"
+    );
+
+    const sentinel = await readFile(sentinelPath, "utf8");
+    if (sentinel !== "untouched\n") {
+      throw new Error("symlink ancestor validation mutated the outside generated target");
+    }
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
 }
 
 function assertTaskCardUnknownKeyParity(): void {
@@ -573,6 +874,19 @@ function assertNoAdditionalPropertiesFalse(schema: JsonSchema, path: string): vo
 function assertThrows(callback: () => void, expectedMessage: string): void {
   try {
     callback();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes(expectedMessage)) {
+      return;
+    }
+    throw new Error(`Expected error containing ${expectedMessage}, got ${message}`);
+  }
+  throw new Error(`Expected error containing ${expectedMessage}`);
+}
+
+async function assertRejects(callback: () => Promise<void>, expectedMessage: string): Promise<void> {
+  try {
+    await callback();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes(expectedMessage)) {
