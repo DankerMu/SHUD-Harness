@@ -737,6 +737,75 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("public audit append rejects reserved rule prefix impersonation", async () => {
+    const fixture = await createFixture();
+    try {
+      for (const rule of [
+        RAW_DATA_WRITE_RULE_ID,
+        SPAWN_PROFILE_SUBSET_RULE_ID,
+        TOOL_PARAMETER_SCHEMA_RULE_ID
+      ]) {
+        await expect(
+          appendPolicyGateAuditRow({
+            workspaceRoot: fixture.root,
+            protectedRawPaths: [fixture.rawRoot],
+            fileName: `reserved-rule-prefix-${rule}.ndjson`,
+            row: {
+              ...minimalAuditRow(),
+              rule: `${rule}:failed:caller-minted`,
+              decision: "failed",
+              guard_class: "authority"
+            }
+          })
+        ).rejects.toThrow("Reserved authority policy rule prefixes are reserved for error_id");
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append accepts exact reserved rules and legal reserved error_id prefixes", async () => {
+    const fixture = await createFixture();
+    try {
+      for (const rule of [
+        RAW_DATA_WRITE_RULE_ID,
+        SPAWN_PROFILE_SUBSET_RULE_ID,
+        TOOL_PARAMETER_SCHEMA_RULE_ID
+      ]) {
+        const exactRulePath = await appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          fileName: `reserved-exact-rule-${rule}.ndjson`,
+          row: {
+            ...minimalAuditRow(),
+            rule,
+            decision: "failed",
+            guard_class: "authority"
+          }
+        });
+        expect(await readFile(exactRulePath, "utf8")).toContain(`"rule":"${rule}"`);
+
+        const errorIdPath = await appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          fileName: `reserved-error-prefix-${rule}.ndjson`,
+          row: {
+            ...minimalAuditRow(),
+            rule: "workspace-quota",
+            decision: "failed",
+            guard_class: "authority",
+            error_id: `${rule}:failed:legal-prefix`
+          }
+        });
+        expect(await readFile(errorIdPath, "utf8")).toContain(
+          `"error_id":"${rule}:failed:legal-prefix"`
+        );
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("public audit append preserves non-reserved guard_class compatibility", async () => {
     const fixture = await createFixture();
     try {
@@ -841,6 +910,42 @@ describe("raw data seatbelt sandbox", () => {
       expect(content).toContain('"decision":"failed"');
       expect(content).not.toContain('"decision":"denied_by_sandbox"');
       expect(content).not.toContain(`${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox`);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append rejects enumerable toJSON forgery before writing", async () => {
+    const fixture = await createFixture();
+    try {
+      const row = {
+        ...nonReservedAuditRow(),
+        toJSON() {
+          return {
+            ...minimalAuditRow(),
+            decision: "denied_by_sandbox",
+            error_id: `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox:reserved-profile:TOOL-CALL-1`
+          };
+        }
+      } as PolicyGateAuditRow;
+
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          fileName: "to-json-forgery.ndjson",
+          row
+        })
+      ).rejects.toThrow("Policy gate audit rows must not define enumerable toJSON");
+      await expectMissing(
+        join(
+          fixture.workspaceRoot,
+          "tasks",
+          "TASK-M1-SPIKE",
+          "audit",
+          "to-json-forgery.ndjson"
+        )
+      );
     } finally {
       await fixture.cleanup();
     }

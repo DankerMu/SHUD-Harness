@@ -1,6 +1,8 @@
 import {
   assertTrustedRawDataToolFailedEventInput,
-  isReservedAuthorityPolicyEvidenceId,
+  isReservedAuthorityPolicyErrorId,
+  isReservedAuthorityPolicyRuleId,
+  isReservedAuthorityPolicyRuleIdPrefixImpersonation,
   isReservedRawDataDenialErrorId,
   PolicyGuardClassSchema,
   rawDataDeniedToolResultToToolFailedEventInput,
@@ -98,6 +100,9 @@ function assertPublicToolFailedWsEventInput(input: ToolFailedWsEventInput): void
       "Reserved raw-data denial error_id values require the trusted raw-data advisory event builder."
     );
   }
+  if (isReservedAuthorityPolicyRuleIdPrefixImpersonation(input.rule)) {
+    throw new Error("Reserved authority policy rule prefixes are reserved for error_id.");
+  }
   const guardClass = readToolFailedGuardClass(input.guardClass);
   if (
     isReservedAuthorityPolicyToolFailedEvent(input) &&
@@ -154,8 +159,8 @@ function isRawDataAuthorityToolFailedEvent(input: ToolFailedWsEventInput): boole
 
 function isReservedAuthorityPolicyToolFailedEvent(input: ToolFailedWsEventInput): boolean {
   return (
-    isReservedAuthorityPolicyEvidenceId(input.rule) ||
-    isReservedAuthorityPolicyEvidenceId(input.error.error_id)
+    isReservedAuthorityPolicyRuleId(input.rule ?? "") ||
+    isReservedAuthorityPolicyErrorId(input.error.error_id)
   );
 }
 

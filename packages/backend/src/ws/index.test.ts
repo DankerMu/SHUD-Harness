@@ -458,6 +458,76 @@ describe("backend ws tool.failed skeleton", () => {
     }
   });
 
+  test("generic tool.failed builder rejects reserved rule prefix impersonation", () => {
+    for (const [index, rule] of [
+      RAW_DATA_WRITE_RULE_ID,
+      SPAWN_PROFILE_SUBSET_RULE_ID,
+      TOOL_PARAMETER_SCHEMA_RULE_ID
+    ].entries()) {
+      expect(() =>
+        buildToolFailedWsEvent({
+          seq: 60 + index,
+          timestamp: "2026-07-04T00:00:00.000Z",
+          toolId: "bash",
+          rule: `${rule}:failed:caller-minted`,
+          decision: "failed",
+          guardClass: "authority",
+          error: sampleGenericToolFailedError(`workspace-quota:failed:rule-prefix-${index}`)
+        })
+      ).toThrow("Reserved authority policy rule prefixes are reserved for error_id");
+    }
+  });
+
+  test("generic tool.failed builder accepts exact reserved rules with authority guard", () => {
+    for (const [index, rule] of [
+      RAW_DATA_WRITE_RULE_ID,
+      SPAWN_PROFILE_SUBSET_RULE_ID,
+      TOOL_PARAMETER_SCHEMA_RULE_ID
+    ].entries()) {
+      const event = buildToolFailedWsEvent({
+        seq: 70 + index,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule,
+        decision: "failed",
+        guardClass: "authority",
+        error: sampleGenericToolFailedError(`workspace-quota:failed:exact-rule-${index}`)
+      });
+
+      expect(event.payload).toMatchObject({
+        tool_id: "bash",
+        rule,
+        decision: "failed",
+        guard_class: "authority"
+      });
+    }
+  });
+
+  test("generic tool.failed builder accepts legal reserved error_id prefixes with authority guard", () => {
+    for (const [index, rule] of [
+      RAW_DATA_WRITE_RULE_ID,
+      SPAWN_PROFILE_SUBSET_RULE_ID,
+      TOOL_PARAMETER_SCHEMA_RULE_ID
+    ].entries()) {
+      const event = buildToolFailedWsEvent({
+        seq: 80 + index,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        decision: "failed",
+        guardClass: "authority",
+        error: sampleGenericToolFailedError(`${rule}:failed:error-id-authority`)
+      });
+
+      expect(event.payload).toMatchObject({
+        tool_id: "bash",
+        decision: "failed",
+        guard_class: "authority"
+      });
+      expect(event.payload.rule).toBeUndefined();
+      expect(event.payload.error.error_id).toBe(`${rule}:failed:error-id-authority`);
+    }
+  });
+
   test("generic tool.failed builder accepts non-reserved generic failures without guardClass", () => {
     const event = buildToolFailedWsEvent({
       seq: 27,

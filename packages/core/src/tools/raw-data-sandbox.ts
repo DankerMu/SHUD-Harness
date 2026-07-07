@@ -29,7 +29,9 @@ import type {
   PolicyRuleDecision
 } from "./policy-gate-core";
 import {
-  isReservedAuthorityPolicyEvidenceId,
+  isReservedAuthorityPolicyErrorId,
+  isReservedAuthorityPolicyRuleId,
+  isReservedAuthorityPolicyRuleIdPrefixImpersonation,
   PolicyGuardClassSchema
 } from "./policy-gate-core";
 
@@ -1087,41 +1089,86 @@ export async function appendPolicyGateAuditRow(
   }
 }
 
+type JsonAuditValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonAuditValue[]
+  | { [key: string]: JsonAuditValue };
+
+const OMIT_JSON_AUDIT_PROPERTY = Symbol("omit-json-audit-property");
+
 function snapshotPolicyGateAuditRow(row: PolicyGateAuditRow): PolicyGateAuditRow {
   return snapshotAuditValue(row) as PolicyGateAuditRow;
 }
 
 function snapshotAuditValue(
   value: unknown,
-  seen = new WeakMap<object, unknown>()
-): unknown {
-  if (value === null || typeof value !== "object") {
+  seen = new WeakSet<object>()
+): JsonAuditValue | typeof OMIT_JSON_AUDIT_PROPERTY {
+  if (value === undefined) {
+    return OMIT_JSON_AUDIT_PROPERTY;
+  }
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
     return value;
   }
-
-  const existing = seen.get(value);
-  if (existing !== undefined) {
-    return existing;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error("Policy gate audit rows must contain only finite JSON numbers.");
+    }
+    return value;
+  }
+  if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+    throw new Error("Policy gate audit rows must contain only JSON-compatible data.");
+  }
+  if (typeof value !== "object") {
+    throw new Error("Policy gate audit rows must contain only JSON-compatible data.");
   }
 
   if (value instanceof Date) {
-    return new Date(value.getTime());
+    return value.toISOString();
   }
 
+  if (seen.has(value)) {
+    throw new Error("Policy gate audit rows must not contain cyclic data.");
+  }
+  seen.add(value);
+
   if (Array.isArray(value)) {
-    const copy: unknown[] = [];
-    seen.set(value, copy);
+    const copy: JsonAuditValue[] = [];
     for (const item of value) {
-      copy.push(snapshotAuditValue(item, seen));
+      const snapshot = snapshotAuditValue(item, seen);
+      if (snapshot === OMIT_JSON_AUDIT_PROPERTY) {
+        throw new Error("Policy gate audit row arrays must not contain undefined values.");
+      }
+      copy.push(snapshot);
     }
+    seen.delete(value);
     return copy;
   }
 
-  const copy: Record<string, unknown> = {};
-  seen.set(value, copy);
-  for (const [key, item] of Object.entries(value)) {
-    copy[key] = snapshotAuditValue(item, seen);
+  const copy = Object.create(null) as { [key: string]: JsonAuditValue };
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable) {
+      continue;
+    }
+    if (typeof key === "symbol") {
+      throw new Error("Policy gate audit rows must not contain enumerable symbol keys.");
+    }
+    if (key === "toJSON") {
+      throw new Error("Policy gate audit rows must not define enumerable toJSON.");
+    }
+    if (!("value" in descriptor)) {
+      throw new Error("Policy gate audit rows must contain only data fields.");
+    }
+    const snapshot = snapshotAuditValue(descriptor.value, seen);
+    if (snapshot !== OMIT_JSON_AUDIT_PROPERTY) {
+      copy[key] = snapshot;
+    }
   }
+  seen.delete(value);
   return copy;
 }
 
@@ -1136,6 +1183,9 @@ function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
     throw new Error(
       "Reserved raw-data denial error_id values require RawDataSandboxedBashTool trusted evidence."
     );
+  }
+  if (isReservedAuthorityPolicyRuleIdPrefixImpersonation(row.rule)) {
+    throw new Error("Reserved authority policy rule prefixes are reserved for error_id.");
   }
   if (!isReservedAuthorityPolicyAuditRow(row) || guardClass === rawDataGuardClassForRawData()) {
     return;
@@ -1152,8 +1202,8 @@ function isRawDataAuthorityAuditRow(row: PolicyGateAuditRow): boolean {
 
 function isReservedAuthorityPolicyAuditRow(row: PolicyGateAuditRow): boolean {
   return (
-    isReservedAuthorityPolicyEvidenceId(row.rule) ||
-    isReservedAuthorityPolicyEvidenceId(row.error_id)
+    isReservedAuthorityPolicyRuleId(row.rule ?? "") ||
+    isReservedAuthorityPolicyErrorId(row.error_id)
   );
 }
 
@@ -5115,7 +5165,27 @@ async function appendReservedPolicyGateAuditRow(
   row: PolicyGateAuditRow
 ): Promise<void> {
   await assertAuditPathIdentity(reservation);
-  await appendAuditHandle(reservation.handle, reservation.auditPath, `${JSON.stringify(row)}\n`);
+  await appendAuditHandle(
+    reservation.handle,
+    reservation.auditPath,
+    `${stringifyJsonAuditValue(row as JsonAuditValue)}\n`
+  );
+}
+
+function stringifyJsonAuditValue(value: JsonAuditValue): string {
+  if (value === null) {
+    return "null";
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stringifyJsonAuditValue(item)).join(",")}]`;
+  }
+
+  return `{${Object.keys(value)
+    .map((key) => `${JSON.stringify(key)}:${stringifyJsonAuditValue(value[key])}`)
+    .join(",")}}`;
 }
 
 async function appendAuditHandle(handle: FileHandle, path: string, line: string): Promise<void> {

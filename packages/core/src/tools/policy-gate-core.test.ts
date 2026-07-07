@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   assertPolicyGateContextGuardClasses,
   evaluatePolicyGate,
-  isReservedAuthorityPolicyEvidenceId,
+  isReservedAuthorityPolicyErrorId,
+  isReservedAuthorityPolicyRuleIdPrefixImpersonation,
   isReservedAuthorityPolicyRuleId,
   normalizeSpawnAgentInput,
   PolicyGateRemediationSchema,
@@ -161,19 +162,37 @@ describe("policy gate pure evaluator", () => {
     );
   });
 
-  test("reserved authority evidence helper matches exact rule ids and error-id prefixes", () => {
+  test("reserved authority identity helpers are field-specific", () => {
     for (const ruleId of RESERVED_AUTHORITY_POLICY_RULE_IDS) {
-      expect(isReservedAuthorityPolicyEvidenceId(ruleId)).toBe(true);
-      expect(isReservedAuthorityPolicyEvidenceId(`${ruleId}:failed:tool-call-1`)).toBe(true);
+      expect(isReservedAuthorityPolicyRuleId(ruleId)).toBe(true);
+      expect(isReservedAuthorityPolicyErrorId(ruleId)).toBe(true);
+      expect(isReservedAuthorityPolicyErrorId(`${ruleId}:failed:tool-call-1`)).toBe(true);
+      expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation(`${ruleId}:failed`)).toBe(
+        true
+      );
+      expect(isReservedAuthorityPolicyRuleId(`${ruleId}:failed`)).toBe(false);
     }
 
-    expect(isReservedAuthorityPolicyEvidenceId(undefined)).toBe(false);
-    expect(isReservedAuthorityPolicyEvidenceId("spawn-profile-subset-extra")).toBe(false);
-    expect(isReservedAuthorityPolicyEvidenceId("tool-parameter-schema-validation-extra")).toBe(
+    expect(isReservedAuthorityPolicyErrorId(undefined)).toBe(false);
+    expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation(undefined)).toBe(false);
+    expect(isReservedAuthorityPolicyErrorId("spawn-profile-subset-extra")).toBe(false);
+    expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation("spawn-profile-subset-extra")).toBe(
       false
     );
-    expect(isReservedAuthorityPolicyEvidenceId("raw-data-write-extra")).toBe(false);
-    expect(isReservedAuthorityPolicyEvidenceId("workspace-quota:raw-data-write")).toBe(false);
+    expect(isReservedAuthorityPolicyErrorId("tool-parameter-schema-validation-extra")).toBe(
+      false
+    );
+    expect(
+      isReservedAuthorityPolicyRuleIdPrefixImpersonation(
+        "tool-parameter-schema-validation-extra"
+      )
+    ).toBe(false);
+    expect(isReservedAuthorityPolicyErrorId("raw-data-writeish")).toBe(false);
+    expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation("raw-data-writeish")).toBe(false);
+    expect(isReservedAuthorityPolicyErrorId("workspace-quota:raw-data-write")).toBe(false);
+    expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation("workspace-quota:raw-data-write")).toBe(
+      false
+    );
   });
 
   test("guard_class lint rejects unclassified hard guard rules", () => {

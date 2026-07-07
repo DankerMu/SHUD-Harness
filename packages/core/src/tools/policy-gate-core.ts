@@ -138,18 +138,58 @@ export const EMPTY_POLICY_GATE_CONTEXT: PolicyGateContext = {
 
 const KNOWN_AUTHORITY_POLICY_RULE_IDS = new Set<string>(RESERVED_AUTHORITY_POLICY_RULE_IDS);
 
+export class PolicyGateDecisionValidationError extends Error {
+  constructor(error: unknown) {
+    super(formatPolicyGateDecisionValidationErrorMessage(error));
+    this.name = "PolicyGateDecisionValidationError";
+  }
+}
+
+export function isPolicyGateDecisionValidationError(
+  error: unknown
+): error is PolicyGateDecisionValidationError {
+  return error instanceof PolicyGateDecisionValidationError;
+}
+
+function policyGateDecisionValidationError(message: string): PolicyGateDecisionValidationError {
+  return new PolicyGateDecisionValidationError(message);
+}
+
+function formatPolicyGateDecisionValidationErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  return String(error);
+}
+
 export function isReservedAuthorityPolicyRuleId(ruleId: string): boolean {
   return KNOWN_AUTHORITY_POLICY_RULE_IDS.has(ruleId);
 }
 
-export function isReservedAuthorityPolicyEvidenceId(id: string | undefined): boolean {
+export function isReservedAuthorityPolicyErrorId(errorId: string | undefined): boolean {
   return (
-    id !== undefined &&
+    errorId !== undefined &&
     RESERVED_AUTHORITY_POLICY_RULE_IDS.some(
-      (ruleId) => id === ruleId || id.startsWith(`${ruleId}:`)
+      (ruleId) => errorId === ruleId || errorId.startsWith(`${ruleId}:`)
     )
   );
 }
+
+export function isReservedAuthorityPolicyRuleIdPrefixImpersonation(
+  ruleId: string | undefined
+): boolean {
+  return (
+    ruleId !== undefined &&
+    RESERVED_AUTHORITY_POLICY_RULE_IDS.some(
+      (reservedRuleId) => ruleId.startsWith(`${reservedRuleId}:`)
+    )
+  );
+}
+
+export const isReservedAuthorityPolicyEvidenceId = isReservedAuthorityPolicyErrorId;
 
 export function evaluatePolicyGate(
   call: PolicyGateToolCall,
@@ -191,17 +231,17 @@ function normalizePolicyRuleDenyGuardClass(
     return ruleGuardClass;
   }
   if (resultGuardClass.state === "invalid") {
-    throw new Error(
+    throw policyGateDecisionValidationError(
       `Policy gate guard_class lint failed: ${ruleId}: invalid result ${resultGuardClass.fields.join(", ")}.`
     );
   }
   if (resultGuardClass.state === "conflicting") {
-    throw new Error(
+    throw policyGateDecisionValidationError(
       `Policy gate guard_class lint failed: ${ruleId}: conflicting result ${resultGuardClass.fields.join(", ")}.`
     );
   }
   if (resultGuardClass.guardClass !== ruleGuardClass) {
-    throw new Error(
+    throw policyGateDecisionValidationError(
       `Policy gate guard_class lint failed: ${ruleId}: result ${resultGuardClass.field} ${resultGuardClass.guardClass} conflicts with rule guardClass ${ruleGuardClass}.`
     );
   }
@@ -283,11 +323,13 @@ function validatePolicyGateContextMetadata(
   });
 
   if (ruleIdFailures.length > 0) {
-    throw new Error(`Policy gate ruleId lint failed: ${ruleIdFailures.join("; ")}.`);
+    throw policyGateDecisionValidationError(
+      `Policy gate ruleId lint failed: ${ruleIdFailures.join("; ")}.`
+    );
   }
 
   if (guardClassFailures.length > 0) {
-    throw new Error(
+    throw policyGateDecisionValidationError(
       `Policy gate guard_class lint failed: ${guardClassFailures.join("; ")}.`
     );
   }
@@ -1159,5 +1201,7 @@ function validatePolicyGateRemediation(ruleId: string, remediation: PolicyGateRe
     .filter((path) => path.length > 0)
     .join(", ");
 
-  throw new Error(`Invalid policy gate remediation for ${ruleId}: ${fieldPaths || "remediation"}`);
+  throw policyGateDecisionValidationError(
+    `Invalid policy gate remediation for ${ruleId}: ${fieldPaths || "remediation"}`
+  );
 }
