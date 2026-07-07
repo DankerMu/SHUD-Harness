@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, unlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, parse, resolve, sep } from "node:path";
 import { Hono } from "hono";
 
 export const BACKEND_ROUTES_NAMESPACE = "backend/routes" as const;
@@ -221,20 +221,7 @@ async function findMissingWorkspaceDirectories(
 }
 
 async function ensureWorkspaceRootDirectory(workspaceRoot: string): Promise<void> {
-  const existingRoot = await maybeLstat(workspaceRoot);
-  if (existingRoot) {
-    if (!existingRoot.isDirectory() || existingRoot.isSymbolicLink()) {
-      throw new Error("workspace_root_not_safe");
-    }
-    return;
-  }
-
-  await mkdir(workspaceRoot, { recursive: true });
-
-  const createdRoot = await maybeLstat(workspaceRoot);
-  if (!createdRoot?.isDirectory() || createdRoot.isSymbolicLink()) {
-    throw new Error("workspace_root_not_safe");
-  }
+  await ensureSafeDirectoryPath(workspaceRoot, "workspace_root_not_safe");
 }
 
 async function ensureSafeWorkspaceDirectory(
@@ -246,21 +233,7 @@ async function ensureSafeWorkspaceDirectory(
   let currentPath = workspaceRoot;
   for (const segment of relativeDir.split("/")) {
     currentPath = join(currentPath, segment);
-    const existingEntry = await maybeLstat(currentPath);
-
-    if (existingEntry) {
-      if (!existingEntry.isDirectory() || existingEntry.isSymbolicLink()) {
-        throw new Error("workspace_directory_not_safe");
-      }
-      continue;
-    }
-
-    await mkdir(currentPath);
-
-    const createdEntry = await maybeLstat(currentPath);
-    if (!createdEntry?.isDirectory() || createdEntry.isSymbolicLink()) {
-      throw new Error("workspace_directory_not_safe");
-    }
+    await ensureSafeDirectorySegment(currentPath, "workspace_directory_not_safe");
   }
 }
 
@@ -274,7 +247,8 @@ async function probeSnapshotReadable(
   }
 
   try {
-    return await snapshotReadableProbe({ workspaceRoot, snapshotsPath });
+    const readable = await snapshotReadableProbe({ workspaceRoot, snapshotsPath });
+    return Boolean(readable) && (await isSafeWorkspaceDirectory(workspaceRoot, "snapshots"));
   } catch {
     return false;
   }
@@ -295,25 +269,11 @@ async function isSafeWorkspaceDirectory(
   workspaceRoot: string,
   relativeDir: WorkspaceCanonicalDirectory
 ): Promise<boolean> {
-  if (!(await isAcceptedWorkspaceRootDirectory(workspaceRoot))) {
-    return false;
-  }
-
-  let currentPath = workspaceRoot;
-  for (const segment of relativeDir.split("/")) {
-    currentPath = join(currentPath, segment);
-    const entry = await maybeLstat(currentPath);
-    if (!entry?.isDirectory() || entry.isSymbolicLink()) {
-      return false;
-    }
-  }
-
-  return true;
+  return await isSafeExistingDirectoryPath(join(workspaceRoot, relativeDir));
 }
 
 async function isAcceptedWorkspaceRootDirectory(workspaceRoot: string): Promise<boolean> {
-  const entry = await maybeLstat(workspaceRoot);
-  return Boolean(entry?.isDirectory() && !entry.isSymbolicLink());
+  return await isSafeExistingDirectoryPath(workspaceRoot);
 }
 
 async function maybeLstat(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
@@ -333,7 +293,8 @@ async function probeWorkspaceWritable(
   }
 
   try {
-    return await writableProbe({ workspaceRoot });
+    const writable = await writableProbe({ workspaceRoot });
+    return Boolean(writable) && (await isAcceptedWorkspaceRootDirectory(workspaceRoot));
   } catch {
     return false;
   }
@@ -353,12 +314,100 @@ async function defaultWorkspaceWritableProbe(input: WorkspaceWritableProbeInput)
     `.health-write-probe-${process.pid}-${randomUUID()}`
   );
 
+  let createdProbe = false;
   try {
     await writeFile(probePath, "", { flag: "wx" });
-    return true;
+    createdProbe = true;
+    return await isAcceptedWorkspaceRootDirectory(input.workspaceRoot);
   } catch {
     return false;
   } finally {
-    await unlink(probePath).catch(() => undefined);
+    if (createdProbe && (await isAcceptedWorkspaceRootDirectory(input.workspaceRoot))) {
+      await unlink(probePath).catch(() => undefined);
+    }
   }
+}
+
+async function ensureSafeDirectoryPath(path: string, errorCode: string): Promise<void> {
+  const { rootPath, segments } = getPathParts(path);
+  const rootEntry = await maybeLstat(rootPath);
+  if (!isSafeDirectoryEntry(rootEntry)) {
+    throw new Error(errorCode);
+  }
+
+  let currentPath = rootPath;
+  for (const segment of segments) {
+    currentPath = join(currentPath, segment);
+    await ensureSafeDirectorySegment(currentPath, errorCode);
+  }
+}
+
+async function ensureSafeDirectorySegment(path: string, errorCode: string): Promise<void> {
+  const existingEntry = await maybeLstat(path);
+  if (existingEntry) {
+    if (!(await isSafeExistingDirectoryPath(path))) {
+      throw new Error(errorCode);
+    }
+    return;
+  }
+
+  const parentPath = dirname(path);
+  if (parentPath !== path && !(await isSafeExistingDirectoryPath(parentPath))) {
+    throw new Error(errorCode);
+  }
+
+  try {
+    await mkdir(path);
+  } catch (error) {
+    if (!hasErrorCode(error, "EEXIST")) {
+      throw error;
+    }
+  }
+
+  if (!(await isSafeExistingDirectoryPath(path))) {
+    throw new Error(errorCode);
+  }
+}
+
+async function isSafeExistingDirectoryPath(path: string): Promise<boolean> {
+  const { rootPath, segments } = getPathParts(path);
+  const rootEntry = await maybeLstat(rootPath);
+  if (!isSafeDirectoryEntry(rootEntry)) {
+    return false;
+  }
+
+  let currentPath = rootPath;
+  for (const segment of segments) {
+    currentPath = join(currentPath, segment);
+    const entry = await maybeLstat(currentPath);
+    if (!isSafeDirectoryEntry(entry)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function getPathParts(path: string): { rootPath: string; segments: string[] } {
+  const resolvedPath = resolve(path);
+  const rootPath = parse(resolvedPath).root;
+  return {
+    rootPath,
+    segments: resolvedPath.slice(rootPath.length).split(sep).filter(Boolean)
+  };
+}
+
+function isSafeDirectoryEntry(
+  entry: Awaited<ReturnType<typeof lstat>> | undefined
+): boolean {
+  return Boolean(entry?.isDirectory() && !entry.isSymbolicLink());
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === code
+  );
 }

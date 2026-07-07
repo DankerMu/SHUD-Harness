@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -109,6 +110,23 @@ describe("backend workspace and health routes", () => {
     expect(await readFile(sentinelPath, "utf8")).toBe("preserve me");
   });
 
+  test("POST /api/workspace/init tolerates concurrent duplicate requests", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({ workspaceRoot });
+
+    const responses = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        app.request("/api/workspace/init", { method: "POST" })
+      )
+    );
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200, 200, 200]);
+    for (const relativeDir of EXPECTED_M1_RUNTIME_DIRECTORIES) {
+      expect((await stat(join(workspaceRoot, relativeDir))).isDirectory()).toBe(true);
+    }
+  });
+
   test("GET /api/health/live returns OBS-HEALTH-001 fields without workspace readiness", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -192,7 +210,7 @@ describe("backend workspace and health routes", () => {
   });
 
   test("blank workspace option and env values fall back to workspace under the current cwd", async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), "shud-harness-backend-routes-cwd-"));
+    const tempRoot = await createTempRoot("shud-harness-backend-routes-cwd-");
     tempRoots.push(tempRoot);
     process.chdir(tempRoot);
     process.env.HARNESS_WORKSPACE_DIR = "   ";
@@ -208,7 +226,7 @@ describe("backend workspace and health routes", () => {
   });
 
   test("HARNESS_WORKSPACE_DIR configures workspace root and takes precedence over the legacy env", async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), "shud-harness-backend-routes-env-"));
+    const tempRoot = await createTempRoot("shud-harness-backend-routes-env-");
     tempRoots.push(tempRoot);
     const workspaceRoot = join(tempRoot, "canonical-workspace");
     const legacyRoot = join(tempRoot, "legacy-workspace");
@@ -246,6 +264,47 @@ describe("backend workspace and health routes", () => {
     expect(readyBody.checks.directory_tree).toBe("fail");
   });
 
+  test("POST /api/workspace/init rejects a symlinked configured ancestor without writing outside", async () => {
+    const tempRoot = await createTempRoot("shud-harness-backend-routes-link-");
+    tempRoots.push(tempRoot);
+    const baseRoot = join(tempRoot, "base");
+    const outsideRoot = join(tempRoot, "outside");
+    const linkPath = join(baseRoot, "link");
+    const workspaceRoot = join(linkPath, "workspace");
+    await mkdir(baseRoot);
+    await mkdir(outsideRoot);
+    await symlink(outsideRoot, linkPath, "dir");
+    const app = createBackendApi({ workspaceRoot });
+
+    const response = await app.request("/api/workspace/init", { method: "POST" });
+    const readyResponse = await app.request("/api/health/ready");
+    const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
+
+    expect(response.status).toBe(500);
+    await expectPathMissing(join(outsideRoot, "workspace", "readiness"));
+    expect(readyResponse.status).toBe(503);
+    expect(readyBody.status).toBe("not_ready");
+    expect(readyBody.checks).toEqual({
+      directory_tree: "fail",
+      snapshot_readable: "fail",
+      workspace_writable: "fail"
+    });
+  });
+
+  test("POST /api/workspace/init rejects a symlinked workspace root without writing outside", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const outsideRoot = join(tempRoot, "outside-root");
+    await mkdir(outsideRoot);
+    await symlink(outsideRoot, workspaceRoot, "dir");
+    const app = createBackendApi({ workspaceRoot });
+
+    const response = await app.request("/api/workspace/init", { method: "POST" });
+
+    expect(response.status).toBe(500);
+    await expectPathMissing(join(outsideRoot, "readiness"));
+  });
+
   test("GET /api/health/ready rejects a symlinked canonical leaf as not readable", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -263,6 +322,33 @@ describe("backend workspace and health routes", () => {
     expect(readyBody.checks.directory_tree).toBe("fail");
     expect(readyBody.checks.snapshot_readable).toBe("fail");
     expect(readyBody.checks.workspace_writable).toBe("ok");
+  });
+
+  test("GET /api/health/ready revalidates a snapshot symlink swap after probing", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const outsideSnapshots = join(tempRoot, "outside-snapshots");
+    await mkdir(outsideSnapshots, { recursive: true });
+    await createExpectedRuntimeTree(workspaceRoot);
+    const app = createBackendApi({
+      workspaceRoot,
+      snapshotReadableProbe: async ({ snapshotsPath }) => {
+        await rm(snapshotsPath, { recursive: true, force: true });
+        await symlink(outsideSnapshots, snapshotsPath, "dir");
+        return true;
+      }
+    });
+
+    const readyResponse = await app.request("/api/health/ready");
+    const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
+
+    expect(readyResponse.status).toBe(503);
+    expect(readyBody.status).toBe("not_ready");
+    expect(readyBody.checks).toEqual({
+      directory_tree: "ok",
+      snapshot_readable: "fail",
+      workspace_writable: "ok"
+    });
   });
 
   test("GET /api/health/ready does not run the writable probe for a symlinked workspace root", async () => {
@@ -312,11 +398,15 @@ describe("backend workspace and health routes", () => {
 });
 
 async function createTempWorkspacePath(): Promise<{ tempRoot: string; workspaceRoot: string }> {
-  const tempRoot = await mkdtemp(join(tmpdir(), "shud-harness-backend-routes-"));
+  const tempRoot = await createTempRoot("shud-harness-backend-routes-");
   return {
     tempRoot,
     workspaceRoot: join(tempRoot, "workspace")
   };
+}
+
+async function createTempRoot(prefix: string): Promise<string> {
+  return await realpath(await mkdtemp(join(tmpdir(), prefix)));
 }
 
 async function createExpectedRuntimeTree(
