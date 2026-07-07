@@ -117,6 +117,7 @@ export interface TaskCardService {
   rollbackTaskForIdempotency: (taskId: string) => Promise<void>;
   listTasks: () => Promise<TaskCard[]>;
   getTask: (taskId: string) => Promise<TaskCard>;
+  getTaskFromSnapshot: (taskId: string) => Promise<TaskCard>;
 }
 
 type FileStat = Awaited<ReturnType<typeof lstat>>;
@@ -238,16 +239,6 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         );
       }
 
-      const entries = await readRollbackTaskLaneEntries(taskDirectory, taskId);
-      if (entries.length !== 1 || entries[0]?.name !== "snapshot.json" || !entries[0].isFile()) {
-        throw workspaceError(
-          "task_snapshot_mismatch",
-          "Task rollback lane contains unexpected entries.",
-          "The task snapshot lane is not safe to roll back automatically.",
-          [`workspace/tasks/${taskId}`]
-        );
-      }
-
       const snapshotPath = join(taskDirectory, "snapshot.json");
       const snapshot = await readTaskSnapshot(
         snapshotPath,
@@ -266,18 +257,18 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
 
       try {
         await unlink(snapshotPath);
-        await rmdir(taskDirectory);
       } catch (error) {
         throw workspaceError(
           "workspace_path_not_safe",
-          "Failed to remove idempotency rollback task lane.",
-          "The task snapshot lane could not be rolled back safely.",
-          [`workspace/tasks/${taskId}`],
+          "Failed to remove idempotency rollback task snapshot.",
+          "The task snapshot could not be rolled back safely.",
+          [taskSnapshotEvidenceRef(taskId)],
           error
         );
       }
 
       tasks.delete(taskId);
+      await removeEmptyTaskLaneAfterRollback(taskDirectory, taskId);
     },
 
     async listTasks(): Promise<TaskCard[]> {
@@ -290,17 +281,16 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       assertSafeTaskId(taskId, `path.task_id:${taskId}`);
       const task = tasks.get(taskId);
       if (!task) {
-        throw new TaskServiceError({
-          code: "task_not_found",
-          status: 404,
-          category: "not_found",
-          message: `Task not found: ${taskId}`,
-          userMessage: "The requested task does not exist.",
-          evidenceRefs: [`path.task_id:${taskId}`],
-          recommendedNextActions: ["Refresh the task list and choose an existing task."]
-        });
+        throw taskNotFoundError(taskId);
       }
 
+      return task;
+    },
+
+    async getTaskFromSnapshot(taskId: string): Promise<TaskCard> {
+      await ensureHydrated();
+      const task = await readTaskCardFromSnapshot(workspaceRoot, taskId, snapshotReadHooks);
+      tasks.set(task.task_id, task);
       return task;
     }
   };
@@ -411,6 +401,85 @@ async function hydrateTasksFromDisk(
   return tasks;
 }
 
+async function readTaskCardFromSnapshot(
+  workspaceRoot: string,
+  taskId: string,
+  snapshotReadHooks?: TaskSnapshotReadHooks
+): Promise<TaskCard> {
+  assertSafeTaskId(taskId, `path.task_id:${taskId}`);
+  const workspaceEntry = await maybeLstat(workspaceRoot);
+  if (!workspaceEntry) {
+    throw taskNotFoundError(taskId);
+  }
+  if (!(await isSafeExistingDirectoryPath(workspaceRoot))) {
+    throw workspaceError(
+      "workspace_path_not_safe",
+      "Configured workspace root is not a safe directory.",
+      "The configured workspace root is not usable.",
+      ["workspace"]
+    );
+  }
+
+  const tasksRoot = join(workspaceRoot, "tasks");
+  const tasksRootEntry = await maybeLstat(tasksRoot);
+  if (!tasksRootEntry) {
+    throw taskNotFoundError(taskId);
+  }
+  if (!(await isSafeExistingDirectoryPath(tasksRoot))) {
+    throw workspaceError(
+      "workspace_path_not_safe",
+      "Workspace tasks root is not a safe directory.",
+      "The workspace tasks directory is not usable.",
+      ["workspace/tasks"]
+    );
+  }
+
+  const lanePath = join(tasksRoot, taskId);
+  assertPathInsideWorkspace(workspaceRoot, lanePath, `workspace/tasks/${taskId}`);
+  const laneEntry = await maybeLstat(lanePath);
+  if (!laneEntry) {
+    throw taskNotFoundError(taskId);
+  }
+  if (!laneEntry.isDirectory() || laneEntry.isSymbolicLink()) {
+    throw workspaceError(
+      "task_lane_not_directory",
+      `Task lane is not a safe directory: ${taskId}`,
+      "A task snapshot lane is blocked by a non-directory filesystem entry.",
+      [`workspace/tasks/${taskId}`]
+    );
+  }
+  if (!(await isSafeExistingDirectoryPath(lanePath))) {
+    throw workspaceError(
+      "task_lane_not_directory",
+      `Task lane is not a safe directory: ${taskId}`,
+      "A task snapshot lane is blocked by a non-directory filesystem entry.",
+      [`workspace/tasks/${taskId}`]
+    );
+  }
+
+  const snapshotPath = join(lanePath, "snapshot.json");
+  if (!(await maybeLstat(snapshotPath))) {
+    throw taskNotFoundError(taskId);
+  }
+  await snapshotReadHooks?.beforeSnapshotOpen?.({ snapshotPath, laneTaskId: taskId });
+  if (!(await isSafeExistingDirectoryPath(lanePath))) {
+    throw workspaceError(
+      "task_lane_not_directory",
+      `Task lane is not a safe directory: ${taskId}`,
+      "A task snapshot lane is blocked by a non-directory filesystem entry.",
+      [`workspace/tasks/${taskId}`]
+    );
+  }
+
+  const snapshot = await readTaskSnapshot(
+    snapshotPath,
+    taskId,
+    lanePath,
+    taskSnapshotEvidenceRef(taskId)
+  );
+  return snapshot.task_card;
+}
+
 async function readBoundedTaskEntries(tasksRoot: string): Promise<Dirent[]> {
   const entries: Dirent[] = [];
   let entryCount = 0;
@@ -445,25 +514,24 @@ async function readBoundedTaskEntries(tasksRoot: string): Promise<Dirent[]> {
   return entries;
 }
 
-async function readRollbackTaskLaneEntries(
+async function removeEmptyTaskLaneAfterRollback(
   taskDirectory: string,
   taskId: string
-): Promise<Dirent[]> {
+): Promise<void> {
   try {
-    const directory = await opendir(taskDirectory);
-    const entries: Dirent[] = [];
-    for await (const entry of directory) {
-      entries.push(entry);
-      if (entries.length > 1) {
-        break;
-      }
-    }
-    return entries;
+    await rmdir(taskDirectory);
   } catch (error) {
+    if (hasErrorCode(error, "ENOTEMPTY") || hasErrorCode(error, "EEXIST")) {
+      return;
+    }
+    if (hasErrorCode(error, "ENOENT")) {
+      return;
+    }
+
     throw workspaceError(
       "workspace_path_not_safe",
-      "Task rollback lane cannot be scanned safely.",
-      "The task snapshot lane is not safe to roll back automatically.",
+      "Failed to remove empty idempotency rollback task lane.",
+      "The task snapshot lane could not be rolled back safely.",
       [`workspace/tasks/${taskId}`],
       error
     );
@@ -894,6 +962,18 @@ function assertSafeTaskId(taskId: string, evidenceRef: string): void {
     message: `Task id is not safe: ${taskId}`,
     userMessage: "The requested task id is not valid.",
     evidenceRefs: [evidenceRef],
+    recommendedNextActions: ["Refresh the task list and choose an existing task."]
+  });
+}
+
+function taskNotFoundError(taskId: string): TaskServiceError {
+  return new TaskServiceError({
+    code: "task_not_found",
+    status: 404,
+    category: "not_found",
+    message: `Task not found: ${taskId}`,
+    userMessage: "The requested task does not exist.",
+    evidenceRefs: [`path.task_id:${taskId}`],
     recommendedNextActions: ["Refresh the task list and choose an existing task."]
   });
 }

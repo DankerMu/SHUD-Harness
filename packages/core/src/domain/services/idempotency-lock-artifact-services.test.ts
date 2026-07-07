@@ -20,6 +20,7 @@ import {
   createLockRecordService,
   idempotencyRecordEvidenceRef,
   idempotencyRecordFileName,
+  sha256Hex,
   type Artifact,
   type IdempotencyRecord,
   type IdempotencyRecordService,
@@ -449,6 +450,106 @@ describe("idempotency, lock, and artifact services", () => {
     expect(JSON.parse(await readFile(recordPath, "utf8"))).toEqual(completedRecord);
   });
 
+  test("IdempotencyRecord storeRecord preserves same-key digest immutability before completion", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    let currentTime = "2026-07-07T13:32:00.000Z";
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date(currentTime)
+    });
+    const rawKey = "task:create:store-digest-immutable";
+    const requestDigest = "digest-original-body";
+    const started = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+
+    const startedMismatch = await captureTaskServiceError(() =>
+      service.storeRecord({
+        ...started.record,
+        request_digest: "digest-different-body",
+        updated_at: "2026-07-07T13:32:01.000Z"
+      })
+    );
+    currentTime = "2026-07-07T13:33:00.000Z";
+    const failed = await service.failRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const failedMismatch = await captureTaskServiceError(() =>
+      service.storeRecord({
+        ...failed,
+        request_digest: "digest-other-after-failure",
+        updated_at: "2026-07-07T13:33:01.000Z"
+      })
+    );
+    const retryStarted = await service.storeRecord({
+      ...failed,
+      status: "started",
+      created_at: "2026-07-07T13:34:00.000Z",
+      updated_at: "2026-07-07T13:34:00.000Z"
+    });
+
+    expect(started.status).toBe("acquired");
+    expect(startedMismatch.code).toBe("idempotency_mismatch");
+    expect(startedMismatch.status).toBe(422);
+    expect(failed.status).toBe("failed");
+    expect(failedMismatch.code).toBe("idempotency_mismatch");
+    expect(failedMismatch.status).toBe(422);
+    expect(retryStarted).toEqual({
+      ...failed,
+      status: "started",
+      created_at: "2026-07-07T13:34:00.000Z",
+      updated_at: "2026-07-07T13:34:00.000Z"
+    });
+    expect(await service.getRecord("task", rawKey)).toEqual(retryStarted);
+  });
+
+  test("IdempotencyRecord malformed transition guard fails bounded without completing", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:35:00.000Z")
+    });
+    const rawKey = "task:create:malformed-transition-guard";
+    const requestDigest = "digest-guard-body";
+    const begin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const guardPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      `${sha256Hex(`transition:${rawKey}`)}.guard.json`
+    );
+    await writeFile(guardPath, "{", { flag: "wx" });
+
+    const error = await captureTaskServiceError(() =>
+      Promise.race([
+        service.completeRecord({
+          scope: "task",
+          key: rawKey,
+          requestDigest,
+          resultRef: "TASK-guard-should-not-complete"
+        }),
+        timeoutAfter(1_000, "completeRecord hung on malformed transition guard")
+      ])
+    );
+
+    expect(begin.status).toBe("acquired");
+    expect(error.code).toBe("record_malformed");
+    expect(error.category).toBe("workspace_error");
+    expect(error.evidenceRefs).toEqual([idempotencyRecordEvidenceRef("task", rawKey)]);
+    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+  });
+
   test("IdempotencyRecord invalid schema is rejected without workspace files", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -506,6 +607,47 @@ describe("idempotency, lock, and artifact services", () => {
     expect(error.category).toBe("workspace_error");
     expect(error.evidenceRefs).toEqual([idempotencyRecordEvidenceRef("task", rawKey)]);
     expectErrorNotToLeakRecordContent(error, secret);
+  });
+
+  test("small IdempotencyRecord reads allocate by record size instead of the full service cap", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:36:00.000Z")
+    });
+    const rawKey = "task:create:small-record-allocation";
+    const requestDigest = "digest-small-record";
+    await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const completed = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef: "TASK-small-record"
+    });
+    const allocations: number[] = [];
+    const mutableBuffer = Buffer as typeof Buffer & {
+      allocUnsafe: typeof Buffer.allocUnsafe;
+    };
+    const originalAllocUnsafe = mutableBuffer.allocUnsafe;
+    mutableBuffer.allocUnsafe = ((size: number) => {
+      allocations.push(size);
+      return originalAllocUnsafe(size);
+    }) as typeof Buffer.allocUnsafe;
+
+    try {
+      expect(await service.getRecord("task", rawKey)).toEqual(completed);
+    } finally {
+      mutableBuffer.allocUnsafe = originalAllocUnsafe;
+    }
+
+    expect(allocations.length).toBeGreaterThan(0);
+    expect(allocations).not.toContain(MAX_SERVICE_RECORD_BYTES + 1);
+    expect(Math.max(...allocations)).toBeLessThan(4096);
   });
 
   test("symlinked IdempotencyRecord leaf fails closed without hydrating outside record", async () => {
@@ -732,6 +874,11 @@ async function expectPathMissing(path: string): Promise<void> {
   }
 
   throw new Error(`Expected path to be missing: ${path}`);
+}
+
+async function timeoutAfter(milliseconds: number, message: string): Promise<never> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+  throw new Error(message);
 }
 
 function validIdempotencyRecord(): IdempotencyRecord {

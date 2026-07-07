@@ -96,6 +96,9 @@ export function createIdempotencyRecordService(
         idempotencyRecordEvidenceRef(parsedRecord.data.scope, parsedRecord.data.key)
       );
       const existing = await service.getRecord(parsedRecord.data.scope, parsedRecord.data.key);
+      if (existing && existing.request_digest !== parsedRecord.data.request_digest) {
+        throw createIdempotencyMismatchError();
+      }
       if (existing?.status === "completed") {
         return assertCompletedRecordStoreAllowed(
           existing,
@@ -470,7 +473,7 @@ async function removeStaleIdempotencyTransitionGuard(
     guardPath,
     evidenceRef,
     IdempotencyTransitionGuardSchema
-  ).catch(() => undefined);
+  );
   if (!existing) {
     return true;
   }

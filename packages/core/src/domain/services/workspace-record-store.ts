@@ -9,6 +9,7 @@ export const MAX_SERVICE_RECORD_BYTES = 1024 * 1024;
 
 const SAFE_RECORD_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 const SERVICE_RECORD_OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+const SERVICE_RECORD_READ_CHUNK_BYTES = 64 * 1024;
 
 type FileStat = Awaited<ReturnType<typeof lstat>>;
 type RecordFileHandle = Awaited<ReturnType<typeof open>>;
@@ -167,7 +168,7 @@ export async function readJsonRecord<T>(
       );
     }
 
-    rawText = await readBoundedJsonRecord(recordFile, evidenceRef);
+    rawText = await readBoundedJsonRecord(recordFile, evidenceRef, recordEntry.size);
   } finally {
     await recordFile.close().catch(() => undefined);
   }
@@ -203,18 +204,31 @@ export async function readJsonRecord<T>(
 
 async function readBoundedJsonRecord(
   recordFile: RecordFileHandle,
-  evidenceRef: string
+  evidenceRef: string,
+  checkedSize: number
 ): Promise<string> {
-  const buffer = Buffer.allocUnsafe(MAX_SERVICE_RECORD_BYTES + 1);
+  const chunks: Buffer[] = [];
   let offset = 0;
 
   try {
-    while (offset < buffer.length) {
-      const { bytesRead } = await recordFile.read(buffer, offset, buffer.length - offset, offset);
+    for (;;) {
+      const remainingBytes = MAX_SERVICE_RECORD_BYTES + 1 - offset;
+      if (remainingBytes <= 0) {
+        break;
+      }
+
+      const buffer = Buffer.allocUnsafe(
+        nextBoundedReadSize(checkedSize, offset, remainingBytes)
+      );
+      const { bytesRead } = await recordFile.read(buffer, 0, buffer.length, offset);
       if (bytesRead === 0) {
         break;
       }
+      chunks.push(buffer.subarray(0, bytesRead));
       offset += bytesRead;
+      if (offset > MAX_SERVICE_RECORD_BYTES || bytesRead < buffer.length) {
+        break;
+      }
     }
   } catch (error) {
     throw serviceWorkspaceError(
@@ -235,7 +249,22 @@ async function readBoundedJsonRecord(
     );
   }
 
-  return buffer.subarray(0, offset).toString("utf8");
+  return Buffer.concat(chunks, offset).toString("utf8");
+}
+
+function nextBoundedReadSize(
+  checkedSize: number,
+  offset: number,
+  remainingBytes: number
+): number {
+  if (offset === 0) {
+    return Math.max(
+      1,
+      Math.min(remainingBytes, checkedSize + 1, SERVICE_RECORD_READ_CHUNK_BYTES)
+    );
+  }
+
+  return Math.min(remainingBytes, SERVICE_RECORD_READ_CHUNK_BYTES);
 }
 
 export async function writeJsonRecord<T>(

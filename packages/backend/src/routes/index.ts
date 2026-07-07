@@ -316,7 +316,7 @@ async function createIdempotentTaskCard(
   }
   if (begin.status === "completed") {
     return {
-      task: await input.taskService.getTask(begin.record.result_ref),
+      task: await getIdempotentTaskResult(input.taskService, begin.record.result_ref),
       created: false
     };
   }
@@ -346,7 +346,12 @@ async function createIdempotentTaskCard(
       resultRef: task.task_id
     });
   } catch (error) {
-    await input.taskService.rollbackTaskForIdempotency(task.task_id);
+    let rollbackError: unknown;
+    try {
+      await input.taskService.rollbackTaskForIdempotency(task.task_id);
+    } catch (caughtError) {
+      rollbackError = caughtError;
+    }
     await input.idempotencyService
       .failRecord({
         scope: "task",
@@ -354,6 +359,9 @@ async function createIdempotentTaskCard(
         requestDigest: input.requestDigest
       })
       .catch(() => undefined);
+    if (rollbackError) {
+      throw rollbackError;
+    }
     throw error;
   }
 
@@ -377,7 +385,7 @@ async function waitForIdempotentTaskCompletion(
     }
     if (replay.status === "completed") {
       return {
-        task: await input.taskService.getTask(replay.record.result_ref),
+        task: await getIdempotentTaskResult(input.taskService, replay.record.result_ref),
         created: false
       };
     }
@@ -396,6 +404,21 @@ async function waitForIdempotentTaskCompletion(
     }
 
     await sleep(IDEMPOTENCY_REPLAY_POLL_INTERVAL_MS);
+  }
+}
+
+async function getIdempotentTaskResult(
+  taskService: TaskCardService,
+  taskId: string
+): Promise<TaskCard> {
+  try {
+    return await taskService.getTask(taskId);
+  } catch (error) {
+    if (error instanceof TaskServiceError && error.code === "task_not_found") {
+      return await taskService.getTaskFromSnapshot(taskId);
+    }
+
+    throw error;
   }
 }
 
