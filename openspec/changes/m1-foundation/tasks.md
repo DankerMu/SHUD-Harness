@@ -66,6 +66,15 @@
     - Existing policy-gated registry, spawn subset, and raw sandbox tests remain compatible; `git -C zero diff --quiet` still passes.
 - [ ] 5.3 硬护栏 guard_class 标注（authority|capability）+ 未标注装配失败负例——依赖: 3.1
 - [ ] 5.4 spawn depth/并发上限 kernel 硬校验（Control_Kernel §5：depth >1 拒绝且含 remediation 三字段；活跃子代理 =3 时新 spawn 非 allow——纯函数负例，真实排队调度随 M3 spawn 接线）+ guard_class 标注——依赖: 3.2
+  - Follow-up evidence floor (#61):
+    - Two concurrent direct `spawn_agent.run()` calls sharing one trusted `agentControl` with `activeAgentCount=2` and canonical worker subset `tools=["read"]` cannot both pass; exactly one inner spawn occurs and the other returns `policy_gate_denied` with `ruleId=spawn-concurrency-limit`, `guard_class=authority`, and schema-valid `remediation{next_action,hint,ref}` where `next_action=adjust_scope` and `ref=SPAWN_LIMITS_POLICY_REF`.
+    - A later serialized `spawn_agent.run()` using the same `agentControl`, active count below max, and canonical worker subset `tools=["read"]` succeeds and records exactly one additional inner spawn, proving the concurrent reservation was released and standard Zero-style serialized execution remains compatible.
+    - Validation-denied path: a reserved `spawn_agent.run()` that fails post-normalization tool-availability validation returns the existing structured denial without inner spawn, then a later serialized canonical worker spawn succeeds, proving no reservation leak on validation denial.
+    - Inner-tool failure path: a reserved `spawn_agent.run()` whose underlying spawn tool rejects or returns failure unwinds the reservation, then a later serialized canonical worker spawn succeeds, proving no reservation leak on inner failure.
+    - Existing max-active (`activeAgentCount=3`) and malformed trusted active-count denial tests remain unchanged.
+    - Existing spawn subset, spawn depth, tool-availability, zod parameter validation, and raw sandbox compatibility tests remain green.
+    - `bun run test:policy-gate`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`.
+    - PR evidence states #61 is #27/#60 direct-entrypoint hardening, not M3 queue scheduling, and does not alter the pure #27 policy-gate rule.
 
 ## 6. 后端骨架（task-api）
 

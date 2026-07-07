@@ -558,3 +558,87 @@ Review focus:
 - Stable validation errors do not contain untrusted trap text.
 - The custom evaluator, execution-validator, and rule-based evaluator paths are covered.
 - Existing policy-gate denial payloads remain compatible for ordinary plain objects.
+
+## Subagent Workflow Fixture - Issue #61
+
+Fixture level: expanded; repair intensity: high
+Project profile: SHUD-Harness
+
+Expanded-trigger rationale:
+- Core triggers: concurrency, shared runtime state, public tool entrypoint, and error/remediation contract.
+- Profile triggers: `Zero`, tool registry governance, `remediation`, and `guard_class`.
+
+Change surface:
+- `packages/core/src/tools/policy-gate-registry.ts`
+- `packages/core/src/tools/policy-gate-registry.test.ts`
+
+Must preserve:
+- #27 pure policy-gate contract: `activeSubagentCount >= 3` denies before `spawn_agent` execution with rule id `spawn-concurrency-limit`.
+- Standard Zero session serialized execution remains compatible; no M3 queue scheduler is introduced.
+- `zero/` remains source-clean and pinned; no Zero source edits.
+- Existing spawn profile subset, spawn depth, zod parameter validation, and tool-availability denials keep their policy identity and remediation.
+
+Must add/change:
+- Direct concurrent `spawn_agent.run()` calls sharing the same trusted `agentControl` must not both pass admission when `activeAgentCount=2` and max concurrent subagents is 3.
+- Admission ownership sits in the SHUD policy-gated adapter layer as a per-`agentControl` reservation/recheck around spawn execution; the pure rule stays unchanged.
+- Reservation is released on success, denial, validation failure, or inner tool failure, so serialized follow-up calls are not permanently blocked.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - `spawn_agent.run()` is a direct public tool entrypoint.
+- Config / project setup: not selected - no package manager, provider, or environment setup changes.
+- File IO / path safety / overwrite: not selected - no file mutation behavior beyond tests.
+- Schema / columns / units / field names: selected - denial payload identity and remediation are structured contracts.
+- Auth / permissions / secrets: selected - spawn admission is an authority boundary for subagent capability creation.
+- Concurrency / shared state / ordering: selected - this is the defect class.
+- Resource limits / large input / discovery: selected - max concurrent subagents is an explicit runtime resource limit.
+- Legacy compatibility / examples: selected - existing policy-gate, spawn profile, depth, and raw sandbox tests must remain green.
+- Error handling / rollback / partial outputs: selected - denied admission must not invoke the inner spawn tool and reservations must unwind on all early exits.
+- Release / packaging / dependency compatibility: selected - no new dependency; Bun/TypeScript checks must remain compatible.
+- Documentation / migration notes: selected - PR evidence must state this is a #27/#60 follow-up and not M3 scheduling.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: not selected - no scientific decision or evidence claim changes.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no solver/runtime behavior changes.
+- Zero adapter / tool registry / agent role governance: selected - admission sits at the SHUD wrapper boundary over Zero tools.
+
+Invariant Matrix:
+- Governing invariant: Every direct `spawn_agent` admission for the same trusted `agentControl` must reserve capacity before any async gap, so observed active subagents plus reservations never exceeds `MAX_CONCURRENT_SUBAGENTS`.
+- Source-of-truth identity/contract: Control_Kernel §5 max concurrent subagents, `MAX_CONCURRENT_SUBAGENTS`, `SPAWN_CONCURRENCY_LIMIT_RULE_ID`, and `SPAWN_LIMITS_POLICY_REF`.
+- Producers: `agentControl.activeAgentCount` and the adapter-owned in-memory reservation map.
+- Validators/preflight: wrapped `spawn_agent.run()` admission and existing spawn concurrency policy-gate rule.
+- Storage/cache/query: per-process WeakMap keyed by trusted `agentControl`; no persisted runtime state.
+- Public routes/entrypoints: direct wrapped `spawn_agent.run()` calls and standard Zero serialized tool execution.
+- Frontend/downstream consumers: `ToolResult.output` `policy_gate_denied` payloads and spawn caller expectations.
+- Failure paths/rollback/stale state: reservation releases in a `finally` path for denials, validation errors, successful spawn, and inner-tool failures.
+- Evidence/audit/readiness: focused Bun concurrency tests, OpenSpec validation, zero diff check, and PR review evidence.
+- Regression rows:
+  - Two concurrent direct `spawn_agent.run()` calls with shared `agentControl.activeAgentCount=2` -> exactly one inner spawn call, one denial with `spawn-concurrency-limit`, `guard_class=authority`, and `remediation.next_action=adjust_scope`.
+  - A later serialized spawn after the first call completes and active count stays below max -> allowed, proving reservation release.
+  - Existing trusted `activeAgentCount=3` single call -> denied before inner execution with unchanged remediation payload.
+  - Malformed trusted `activeAgentCount` -> fail closed with `spawn-concurrency-limit` and no reservation leak.
+  - Standard Zero serialized call with `activeAgentCount=0` and canonical worker tool subset -> remains compatible and spawns once.
+  - `git -C zero diff --quiet` -> unchanged after implementation.
+
+Boundary-surface checklist:
+- Shared helper roots: `policy-gate-registry.ts` spawn adapter admission helpers.
+- Public entrypoints: wrapped `spawn_agent.run()` only.
+- Producer/consumer evidence boundaries: `agentControl.activeAgentCount` plus reservation count -> policy-gate denial JSON.
+- Stale-state/idempotency boundaries: reservation lifetime is per call and must not leak after early return or thrown inner tool.
+- Unchanged downstream consumers: pure `policy-gate-core` spawn rules, Zero `SpawnAgentTool`, role-map snapshot tests, bash/raw sandbox wrapper, and future M3 queue scheduling.
+
+Required evidence:
+- Barrier-style Bun test for concurrent direct `spawn_agent.run()` calls with `activeAgentCount=2`: one success, one `spawn-concurrency-limit` denial, one inner spawn call total.
+- Follow-up serialized call after the concurrent pair proves reservation release.
+- Existing max-active and malformed-active tests still pass with unchanged rule id and remediation.
+- Existing spawn subset/depth/tool-availability tests remain green.
+- PR evidence states this is a #27/#60 direct-entrypoint hardening, not full M3 queue scheduling.
+- `bun run test:policy-gate`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`.
+
+Non-goals:
+- Implementing a queue, retry scheduler, cancellation semantics, or cross-process/distributed spawn reservations.
+- Changing pure policy-gate rule semantics, max constants, role tool profiles, or Zero source.
+
+Review focus:
+- Reservation happens before any awaited operation and is scoped to trusted `agentControl`, not model-controlled input.
+- Denial uses the existing spawn concurrency policy identity/remediation.
+- Reservation release is covered for success and early-failure paths.
+- Existing serialized Zero behavior and #20/#27 spawn guard behavior remain compatible.

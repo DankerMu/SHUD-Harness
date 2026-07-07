@@ -18,6 +18,7 @@ import {
   isReservedAuthorityPolicyRuleIdPrefixImpersonation,
   isReservedAuthorityPolicyRuleId,
   normalizeSpawnAgentInput,
+  MAX_CONCURRENT_SUBAGENTS,
   PolicyGateDecisionValidationError,
   PolicyGuardClassSchema,
   PolicyGateRemediationSchema,
@@ -130,6 +131,10 @@ const policyGatedTools = new WeakSet<BaseTool>();
 const reservedAuthorityPolicyGateEvaluators = new WeakSet<PolicyGateEvaluator>();
 const reservedAuthorityPolicyGateExecutionValidators =
   new WeakSet<PolicyGateExecutionInputValidator>();
+const spawnAgentCapacityReservations = new WeakMap<
+  NonNullable<ToolContext["agentControl"]>,
+  number
+>();
 const ROLE_VISIBLE_TOOL_COUNT_LIMIT = 20;
 const CONTROL_KERNEL_TOOL_GOVERNANCE_REF =
   "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定";
@@ -228,6 +233,17 @@ const ZOD_PARAMETER_SCHEMA_MAX_NODES = 20_000;
 const ZOD_PARAMETER_SCHEMA_MAX_OWN_KEYS = 512;
 const ZOD_PARAMETER_SCHEMA_MAX_PROPERTIES = 50_000;
 const PROTOTYPE_POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+type PreparedPolicyGateInput = {
+  decision: "allow";
+  executionInput: unknown;
+  evaluatorInput: unknown;
+};
+
+type SpawnAgentCapacityReservation =
+  | { status: "not_applicable" }
+  | { status: "reserved"; agentControl: NonNullable<ToolContext["agentControl"]> }
+  | { status: "deny"; decision: Extract<PolicyGateDecision, { decision: "deny" }> };
 
 export function createShudPolicyGateEvaluator(
   customEvaluate?: PolicyGateEvaluator
@@ -823,6 +839,34 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       );
     }
 
+    const reservation = reserveSpawnAgentCapacity(
+      this.#policyGateToolId,
+      toolContext,
+      role,
+      preparedInput.evaluatorInput
+    );
+    if (reservation.status === "deny") {
+      const durationMs = Date.now() - startTime;
+      return this.finalizePolicyGateResult(
+        toolContext,
+        buildPolicyGateDeniedToolResult(this.#policyGateToolId, reservation.decision),
+        durationMs
+      );
+    }
+
+    try {
+      return await this.runPreparedPolicyGateInput(toolContext, role, preparedInput, startTime);
+    } finally {
+      releaseSpawnAgentCapacity(reservation);
+    }
+  }
+
+  private async runPreparedPolicyGateInput(
+    toolContext: ToolContext,
+    role: HarnessRole | "unknown",
+    preparedInput: PreparedPolicyGateInput,
+    startTime: number
+  ): Promise<ToolResult> {
     if (this.#zodParameterValidatorSnapshot) {
       const parsedInput = parseToolZodParameters(
         this.#policyGateToolId,
@@ -905,7 +949,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
         );
       }
 
-      return this.#innerTool.run(toolContext, parsedPreparedInput.executionInput);
+      return await this.#innerTool.run(toolContext, parsedPreparedInput.executionInput);
     }
 
     const executionValidation = this.validatePolicyGateExecutionInput(preparedInput.executionInput);
@@ -951,7 +995,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       );
     }
 
-    return this.#innerTool.run(toolContext, preparedInput.executionInput);
+    return await this.#innerTool.run(toolContext, preparedInput.executionInput);
   }
 
   protected async execute(): Promise<ToolResult> {
@@ -1118,6 +1162,103 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       };
     }
   }
+}
+
+function reserveSpawnAgentCapacity(
+  toolId: string,
+  toolContext: ToolContext,
+  role: HarnessRole | "unknown",
+  evaluatorInput: unknown
+): SpawnAgentCapacityReservation {
+  if (toolId !== "spawn_agent" || !toolContext.agentControl) {
+    return { status: "not_applicable" };
+  }
+
+  const agentControl = toolContext.agentControl;
+  let activeCount: number | undefined;
+  try {
+    activeCount = readTrustedNonNegativeInteger(agentControl.activeAgentCount);
+  } catch {
+    activeCount = undefined;
+  }
+  if (activeCount === undefined) {
+    return {
+      status: "deny",
+      decision: buildSpawnAgentConcurrencyReservationDeny(
+        toolId,
+        toolContext,
+        role,
+        evaluatorInput,
+        MAX_CONCURRENT_SUBAGENTS
+      )
+    };
+  }
+
+  const reservedCount = spawnAgentCapacityReservations.get(agentControl) ?? 0;
+  const observedActiveAndReservedCount = activeCount + reservedCount;
+  if (observedActiveAndReservedCount >= MAX_CONCURRENT_SUBAGENTS) {
+    return {
+      status: "deny",
+      decision: buildSpawnAgentConcurrencyReservationDeny(
+        toolId,
+        toolContext,
+        role,
+        evaluatorInput,
+        observedActiveAndReservedCount
+      )
+    };
+  }
+
+  spawnAgentCapacityReservations.set(agentControl, reservedCount + 1);
+  return { status: "reserved", agentControl };
+}
+
+function releaseSpawnAgentCapacity(reservation: SpawnAgentCapacityReservation): void {
+  if (reservation.status !== "reserved") {
+    return;
+  }
+
+  const reservedCount = spawnAgentCapacityReservations.get(reservation.agentControl) ?? 0;
+  if (reservedCount <= 1) {
+    spawnAgentCapacityReservations.delete(reservation.agentControl);
+    return;
+  }
+
+  spawnAgentCapacityReservations.set(reservation.agentControl, reservedCount - 1);
+}
+
+function buildSpawnAgentConcurrencyReservationDeny(
+  toolId: string,
+  toolContext: ToolContext,
+  role: HarnessRole | "unknown",
+  evaluatorInput: unknown,
+  activeSubagentCount: number
+): Extract<PolicyGateDecision, { decision: "deny" }> {
+  const decision = evaluatePolicyGate(
+    {
+      toolId,
+      role,
+      input: evaluatorInput,
+      workDir: toolContext.workDir,
+      activeSubagentCount
+    },
+    { rules: [SPAWN_CONCURRENCY_LIMIT_RULE] }
+  );
+
+  if (decision.decision === "deny") {
+    return decision;
+  }
+
+  return evaluatePolicyGate(
+    {
+      toolId: "spawn_agent",
+      role,
+      input: evaluatorInput,
+      workDir: toolContext.workDir,
+      activeSubagentCount: MAX_CONCURRENT_SUBAGENTS
+    },
+    { rules: [SPAWN_CONCURRENCY_LIMIT_RULE] }
+  ) as Extract<PolicyGateDecision, { decision: "deny" }>;
 }
 
 function buildPolicyGateToolCall(

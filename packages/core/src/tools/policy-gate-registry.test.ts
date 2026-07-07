@@ -5703,6 +5703,198 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("SHUD runtime reserves spawn capacity for concurrent direct spawn calls", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+      agentControl.control.activeAgentCount = MAX_CONCURRENT_SUBAGENTS - 1;
+      let releaseEvaluation: () => void = () => {};
+      let evaluatorCalls = 0;
+      const evaluationBarrier = new Promise<void>((resolve) => {
+        releaseEvaluation = resolve;
+      });
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async () => {
+          evaluatorCalls += 1;
+          await evaluationBarrier;
+          return { decision: "allow" };
+        }
+      });
+      const spawn = registry.get("spawn_agent");
+      if (!spawn) {
+        throw new Error("spawn_agent should be registered");
+      }
+      const context = {
+        ...fixture.context,
+        agentControl: agentControl.control,
+        projectRoot: fixture.root
+      };
+      const input = {
+        instruction: "Run a worker task.",
+        role: "worker",
+        tools: ["read"]
+      };
+
+      const first = spawn.run(context, input);
+      expect(evaluatorCalls).toBe(1);
+      const second = spawn.run(context, input);
+      releaseEvaluation();
+      const results = await Promise.all([first, second]);
+
+      const successes = results.filter((result) => result.success);
+      const denials = results.filter((result) => !result.success);
+      expect(successes).toHaveLength(1);
+      expect(denials).toHaveLength(1);
+      expectSpawnConcurrencyLimitDenial(denials[0]);
+      expect(evaluatorCalls).toBe(1);
+      expect(agentControl.getSpawnCalls()).toBe(1);
+
+      const later = await spawn.run(context, input);
+      expect(later.success).toBe(true);
+      expect(agentControl.getSpawnCalls()).toBe(2);
+      expect(getCapturedToolNames(agentControl.getLastAgentContext())).toEqual(["read"]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime releases reserved spawn capacity after tool-availability validation denial", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+      agentControl.control.activeAgentCount = MAX_CONCURRENT_SUBAGENTS - 1;
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter
+      });
+      const spawn = registry.get("spawn_agent");
+      if (!spawn) {
+        throw new Error("spawn_agent should be registered");
+      }
+      const context = {
+        ...fixture.context,
+        agentControl: agentControl.control,
+        projectRoot: fixture.root
+      };
+
+      const denied = await spawn.run(context, {
+        instruction: "Coordinate a task.",
+        role: "coordinator",
+        tools: ["spawn_agent"]
+      });
+
+      expect(denied.success).toBe(false);
+      expect(denied.output).toContain("policy_gate_denied");
+      const payload = JSON.parse(denied.output) as {
+        error?: string;
+        ruleId?: string;
+        guard_class?: string;
+        reason?: string;
+        remediation?: {
+          next_action?: string;
+          hint?: string;
+          ref?: string;
+        };
+      };
+      expect(payload.error).toBe("policy_gate_denied");
+      expect(payload.ruleId).toBe(SPAWN_PROFILE_SUBSET_RULE_ID);
+      expect(payload.guard_class).toBe("authority");
+      expect(payload.reason).toContain("spawn_agent");
+      expect(payload.remediation?.next_action).toBe("adjust_scope");
+      expect(payload.remediation?.hint).toContain("spawn_agent");
+      expect(payload.remediation?.ref).toBe(SPAWN_PROFILE_SUBSET_POLICY_REF);
+      expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+      expect(agentControl.getSpawnCalls()).toBe(0);
+
+      const later = await spawn.run(context, {
+        instruction: "Run a worker task.",
+        role: "worker",
+        tools: ["read"]
+      });
+      expect(later.success).toBe(true);
+      expect(agentControl.getSpawnCalls()).toBe(1);
+      expect(getCapturedToolNames(agentControl.getLastAgentContext())).toEqual(["read"]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime releases reserved spawn capacity after inner spawn failure", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy({
+        spawn: () => ({ error: "spawn failed for reservation release test" })
+      });
+      agentControl.control.activeAgentCount = MAX_CONCURRENT_SUBAGENTS - 1;
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter
+      });
+      const spawn = registry.get("spawn_agent");
+      if (!spawn) {
+        throw new Error("spawn_agent should be registered");
+      }
+      const context = {
+        ...fixture.context,
+        agentControl: agentControl.control,
+        projectRoot: fixture.root
+      };
+      const input = {
+        instruction: "Run a worker task.",
+        role: "worker",
+        tools: ["read"]
+      };
+
+      const failed = await spawn.run(context, input);
+      expect(failed.success).toBe(false);
+      expect(failed.output).toContain("spawn failed for reservation release test");
+      expect(agentControl.getSpawnCalls()).toBe(1);
+
+      agentControl.setSpawnImplementation(undefined);
+      const later = await spawn.run(context, input);
+      expect(later.success).toBe(true);
+      expect(agentControl.getSpawnCalls()).toBe(2);
+      expect(getCapturedToolNames(agentControl.getLastAgentContext())).toEqual(["read"]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime ignores model-controlled spawn limit fields below trusted limits", async () => {
     const fixture = await createRawFixture();
     try {
@@ -8684,6 +8876,30 @@ function expectToolParameterSchemaValidationDenial(result: ToolResult | undefine
   expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
 }
 
+function expectSpawnConcurrencyLimitDenial(result: ToolResult | undefined): void {
+  expect(result?.success).toBe(false);
+  expect(result?.output).toContain("policy_gate_denied");
+  const payload = JSON.parse(result?.output ?? "{}") as {
+    error?: string;
+    ruleId?: string;
+    guard_class?: string;
+    reason?: string;
+    remediation?: {
+      next_action?: string;
+      hint?: string;
+      ref?: string;
+    };
+  };
+  expect(payload.error).toBe("policy_gate_denied");
+  expect(payload.ruleId).toBe(SPAWN_CONCURRENCY_LIMIT_RULE_ID);
+  expect(payload.guard_class).toBe("authority");
+  expect(payload.reason).toContain("max_concurrent_subagents");
+  expect(payload.remediation?.next_action).toBe("adjust_scope");
+  expect(payload.remediation?.hint).toContain("Wait for an active subagent");
+  expect(payload.remediation?.ref).toBe(SPAWN_LIMITS_POLICY_REF);
+  expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+}
+
 function createSpawnModelRouterStub(): ConstructorParameters<typeof SpawnAgentTool>[0] {
   return {
     getRegistry: () => ({ listModels: () => [] }),
@@ -8695,25 +8911,31 @@ function createSpawnModelRouterStub(): ConstructorParameters<typeof SpawnAgentTo
 }
 
 type AgentControl = NonNullable<ToolContext["agentControl"]>;
+type AgentControlSpawnImplementation = AgentControl["spawn"];
 
-function createAgentControlSpy(): {
+function createAgentControlSpy(options: { spawn?: AgentControlSpawnImplementation } = {}): {
   control: AgentControl;
   getSpawnCalls(): number;
   getLastAgentContext(): unknown;
+  setSpawnImplementation(spawn: AgentControlSpawnImplementation | undefined): void;
 } {
   let spawnCalls = 0;
   let lastAgentContext: unknown;
+  let spawnImplementation = options.spawn;
   const waitResult = async () => ({ statuses: {}, timedOut: false });
   const control: AgentControl = {
     spawn(
-      _agent: unknown,
+      agent: unknown,
       context: unknown,
-      _instruction: string,
-      options?: Parameters<AgentControl["spawn"]>[3]
+      instruction: string,
+      spawnOptions?: Parameters<AgentControl["spawn"]>[3]
     ) {
       spawnCalls += 1;
       lastAgentContext = context;
-      return { agentId: `agent-${spawnCalls}`, label: options?.label ?? "SubAgent" };
+      if (spawnImplementation) {
+        return spawnImplementation(agent, context, instruction, spawnOptions);
+      }
+      return { agentId: `agent-${spawnCalls}`, label: spawnOptions?.label ?? "SubAgent" };
     },
     waitAny: waitResult,
     waitAll: waitResult,
@@ -8733,7 +8955,10 @@ function createAgentControlSpy(): {
   return {
     control,
     getSpawnCalls: () => spawnCalls,
-    getLastAgentContext: () => lastAgentContext
+    getLastAgentContext: () => lastAgentContext,
+    setSpawnImplementation(spawn: AgentControlSpawnImplementation | undefined) {
+      spawnImplementation = spawn;
+    }
   };
 }
 
