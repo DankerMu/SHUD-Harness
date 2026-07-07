@@ -520,7 +520,7 @@ describe("raw data seatbelt sandbox", () => {
           workspaceRoot: fixture.root,
           protectedRawPaths: [fixture.rawRoot],
           row: {
-            ...minimalAuditRow(),
+            ...rawDataAuditRow(),
             guard_class: "capability"
           }
         })
@@ -707,30 +707,31 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  test("public audit append accepts reserved non-raw authority guard_class", async () => {
+  test("public audit append rejects reserved non-raw authority guard_class", async () => {
     const fixture = await createFixture();
     try {
       for (const rule of [SPAWN_PROFILE_SUBSET_RULE_ID, TOOL_PARAMETER_SCHEMA_RULE_ID]) {
-        const ruleAuditPath = await appendPolicyGateAuditRow({
-          workspaceRoot: fixture.root,
-          protectedRawPaths: [fixture.rawRoot],
-          fileName: `reserved-authority-${rule}.ndjson`,
-          row: reservedNonRawAuditRow(rule)
-        });
-        const ruleContent = await readFile(ruleAuditPath, "utf8");
-        expect(ruleContent).toContain(`"rule":"${rule}"`);
-        expect(ruleContent).toContain('"guard_class":"authority"');
+        await expect(
+          appendPolicyGateAuditRow({
+            workspaceRoot: fixture.root,
+            protectedRawPaths: [fixture.rawRoot],
+            fileName: `reserved-authority-${rule}.ndjson`,
+            row: reservedNonRawAuditRow(rule)
+          })
+        ).rejects.toThrow(
+          "Reserved authority policy audit rows require trusted producer evidence"
+        );
 
-        const errorIdAuditPath = await appendPolicyGateAuditRow({
-          workspaceRoot: fixture.root,
-          protectedRawPaths: [fixture.rawRoot],
-          fileName: `reserved-error-authority-${rule}.ndjson`,
-          row: reservedNonRawErrorIdAuditRow(rule)
-        });
-        const errorIdContent = await readFile(errorIdAuditPath, "utf8");
-        expect(errorIdContent).toContain('"rule":"workspace-quota"');
-        expect(errorIdContent).toContain(`"error_id":"${rule}:failed:test"`);
-        expect(errorIdContent).toContain('"guard_class":"authority"');
+        await expect(
+          appendPolicyGateAuditRow({
+            workspaceRoot: fixture.root,
+            protectedRawPaths: [fixture.rawRoot],
+            fileName: `reserved-error-authority-${rule}.ndjson`,
+            row: reservedNonRawErrorIdAuditRow(rule)
+          })
+        ).rejects.toThrow(
+          "Reserved authority policy audit rows require trusted producer evidence"
+        );
       }
     } finally {
       await fixture.cleanup();
@@ -764,7 +765,7 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  test("public audit append accepts exact reserved rules and legal reserved error_id prefixes", async () => {
+  test("public audit append rejects exact reserved rules and reserved error_id prefixes", async () => {
     const fixture = await createFixture();
     try {
       for (const rule of [
@@ -772,34 +773,39 @@ describe("raw data seatbelt sandbox", () => {
         SPAWN_PROFILE_SUBSET_RULE_ID,
         TOOL_PARAMETER_SCHEMA_RULE_ID
       ]) {
-        const exactRulePath = await appendPolicyGateAuditRow({
-          workspaceRoot: fixture.root,
-          protectedRawPaths: [fixture.rawRoot],
-          fileName: `reserved-exact-rule-${rule}.ndjson`,
-          row: {
-            ...minimalAuditRow(),
-            rule,
-            decision: "failed",
-            guard_class: "authority"
-          }
-        });
-        expect(await readFile(exactRulePath, "utf8")).toContain(`"rule":"${rule}"`);
+        const expected =
+          rule === RAW_DATA_WRITE_RULE_ID
+            ? "Raw-data authority audit rows require trusted producer evidence"
+            : "Reserved authority policy audit rows require trusted producer evidence";
 
-        const errorIdPath = await appendPolicyGateAuditRow({
-          workspaceRoot: fixture.root,
-          protectedRawPaths: [fixture.rawRoot],
-          fileName: `reserved-error-prefix-${rule}.ndjson`,
-          row: {
-            ...minimalAuditRow(),
-            rule: "workspace-quota",
-            decision: "failed",
-            guard_class: "authority",
-            error_id: `${rule}:failed:legal-prefix`
-          }
-        });
-        expect(await readFile(errorIdPath, "utf8")).toContain(
-          `"error_id":"${rule}:failed:legal-prefix"`
-        );
+        await expect(
+          appendPolicyGateAuditRow({
+            workspaceRoot: fixture.root,
+            protectedRawPaths: [fixture.rawRoot],
+            fileName: `reserved-exact-rule-${rule}.ndjson`,
+            row: {
+              ...minimalAuditRow(),
+              rule,
+              decision: "failed",
+              guard_class: "authority"
+            }
+          })
+        ).rejects.toThrow(expected);
+
+        await expect(
+          appendPolicyGateAuditRow({
+            workspaceRoot: fixture.root,
+            protectedRawPaths: [fixture.rawRoot],
+            fileName: `reserved-error-prefix-${rule}.ndjson`,
+            row: {
+              ...minimalAuditRow(),
+              rule: "workspace-quota",
+              decision: "failed",
+              guard_class: "authority",
+              error_id: `${rule}:failed:legal-prefix`
+            }
+          })
+        ).rejects.toThrow(expected);
       }
     } finally {
       await fixture.cleanup();
@@ -850,7 +856,7 @@ describe("raw data seatbelt sandbox", () => {
         fileName: "lifecycle.ndjson",
         row: {
           ...minimalAuditRow(),
-          error_id: `${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle`
+          error_id: "workspace-quota:failed:lifecycle"
         }
       });
       const lifecycleWithoutRulePath = await appendPolicyGateAuditRow({
@@ -859,7 +865,7 @@ describe("raw data seatbelt sandbox", () => {
         fileName: "lifecycle-without-rule.ndjson",
         row: auditRowWithoutRule({
           ...minimalAuditRow(),
-          error_id: `${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle-without-rule`
+          error_id: "workspace-quota:failed:lifecycle-without-rule"
         })
       });
       const nonRawPath = await appendPolicyGateAuditRow({
@@ -875,10 +881,10 @@ describe("raw data seatbelt sandbox", () => {
 
       expect(await readFile(lifecyclePath, "utf8")).toContain('"decision":"failed"');
       expect(await readFile(lifecyclePath, "utf8")).toContain(
-        `"error_id":"${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle"`
+        '"error_id":"workspace-quota:failed:lifecycle"'
       );
       expect(await readFile(lifecycleWithoutRulePath, "utf8")).toContain(
-        `"error_id":"${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle-without-rule"`
+        '"error_id":"workspace-quota:failed:lifecycle-without-rule"'
       );
       expect(await readFile(lifecycleWithoutRulePath, "utf8")).toContain(
         '"guard_class":"authority"'
@@ -946,6 +952,222 @@ describe("raw data seatbelt sandbox", () => {
           "to-json-forgery.ndjson"
         )
       );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append validates cheap options before reading hostile rows", async () => {
+    const fixture = await createFixture();
+    try {
+      let rowReads = 0;
+      let traps = 0;
+      const hostileRow = new Proxy(nonReservedAuditRow(), {
+        get() {
+          traps += 1;
+          throw new Error("audit row trap secret get");
+        },
+        ownKeys() {
+          traps += 1;
+          throw new Error("audit row trap secret ownKeys");
+        }
+      });
+      const makeOptions = (
+        overrides: Partial<Parameters<typeof appendPolicyGateAuditRow>[0]>
+      ) =>
+        ({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          get row() {
+            rowReads += 1;
+            return hostileRow;
+          },
+          ...overrides
+        }) as Parameters<typeof appendPolicyGateAuditRow>[0];
+
+      await expect(
+        appendPolicyGateAuditRow(makeOptions({ protectedRawPaths: undefined as never }))
+      ).rejects.toThrow("protectedRawPaths is required");
+      await expect(
+        appendPolicyGateAuditRow(makeOptions({ workspaceRoot: "workspace" }))
+      ).rejects.toThrow("workspaceRoot must be absolute");
+      await expect(
+        appendPolicyGateAuditRow(makeOptions({ protectedRawPaths: ["data/raw"] }))
+      ).rejects.toThrow("protectedRawPaths must be absolute");
+      await expect(
+        appendPolicyGateAuditRow(makeOptions({ taskId: ".." }))
+      ).rejects.toThrow("Invalid audit task id");
+      await expect(
+        appendPolicyGateAuditRow(makeOptions({ fileName: "../policy-gate.ndjson" }))
+      ).rejects.toThrow("Invalid audit file name");
+
+      expect(rowReads).toBe(0);
+      expect(traps).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append normalizes row option getter traps", async () => {
+    const fixture = await createFixture();
+    try {
+      const secret = "audit row option getter secret";
+      let reads = 0;
+      const options = {
+        workspaceRoot: fixture.root,
+        protectedRawPaths: [fixture.rawRoot],
+        fileName: "row-option-getter.ndjson",
+        get row() {
+          reads += 1;
+          throw new Error(secret);
+        }
+      } as Parameters<typeof appendPolicyGateAuditRow>[0];
+
+      let message = "";
+      try {
+        await appendPolicyGateAuditRow(options);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+
+      expect(reads).toBe(1);
+      expect(message).toContain(
+        "Policy gate audit rows must be stable ordinary structured data"
+      );
+      expect(message).not.toContain(secret);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append rejects proxy rows without leaking trap text", async () => {
+    const fixture = await createFixture();
+    try {
+      const secret = "audit row trap secret";
+      let traps = 0;
+      const row = new Proxy(nonReservedAuditRow(), {
+        get() {
+          traps += 1;
+          throw new Error(`${secret}: get`);
+        },
+        ownKeys() {
+          traps += 1;
+          throw new Error(`${secret}: ownKeys`);
+        },
+        getOwnPropertyDescriptor() {
+          traps += 1;
+          throw new Error(`${secret}: descriptor`);
+        }
+      });
+
+      let message = "";
+      try {
+        await appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          fileName: "proxy-row.ndjson",
+          row
+        });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+
+      expect(message).toContain(
+        "Policy gate audit rows must be stable ordinary structured data"
+      );
+      expect(message).not.toContain(secret);
+      expect(traps).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append rejects accessor audit row data", async () => {
+    const fixture = await createFixture();
+    try {
+      const row = nonReservedAuditRow();
+      let reads = 0;
+      Object.defineProperty(row, "reason", {
+        enumerable: true,
+        get() {
+          reads += 1;
+          return "accessor secret";
+        }
+      });
+
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          fileName: "accessor-row.ndjson",
+          row
+        })
+      ).rejects.toThrow("Policy gate audit rows must contain only data fields");
+      expect(reads).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append rejects audit rows that exceed snapshot budgets", async () => {
+    const fixture = await createFixture();
+    try {
+      const deepRow = nonReservedAuditRow();
+      let cursor = deepRow as Record<string, unknown>;
+      for (let index = 0; index < 40; index += 1) {
+        const next: Record<string, unknown> = {};
+        cursor[`level${index}`] = next;
+        cursor = next;
+      }
+
+      const wideRow = {
+        ...nonReservedAuditRow(),
+        details: Object.fromEntries(
+          Array.from({ length: 300 }, (_, index) => [`key${index}`, "value"])
+        )
+      };
+      const bigArrayRow = {
+        ...nonReservedAuditRow(),
+        values: Array.from({ length: 1_100 }, () => "value")
+      };
+      const longStringRow = {
+        ...nonReservedAuditRow(),
+        reason: "x".repeat(140_000)
+      };
+
+      const cases = [
+        {
+          fileName: "over-depth.ndjson",
+          row: deepRow,
+          expected: "Policy gate audit row exceeds depth budget"
+        },
+        {
+          fileName: "over-wide.ndjson",
+          row: wideRow,
+          expected: "Policy gate audit row exceeds object key budget"
+        },
+        {
+          fileName: "big-array.ndjson",
+          row: bigArrayRow,
+          expected: "Policy gate audit row exceeds array length budget"
+        },
+        {
+          fileName: "long-string.ndjson",
+          row: longStringRow,
+          expected: "Policy gate audit row exceeds string budget"
+        }
+      ] as const;
+
+      for (const testCase of cases) {
+        await expect(
+          appendPolicyGateAuditRow({
+            workspaceRoot: fixture.root,
+            protectedRawPaths: [fixture.rawRoot],
+            fileName: testCase.fileName,
+            row: testCase.row
+          })
+        ).rejects.toThrow(testCase.expected);
+      }
     } finally {
       await fixture.cleanup();
     }
@@ -5655,10 +5877,18 @@ function minimalAuditRow(): PolicyGateAuditRow {
   return {
     event: "tool.failed",
     tool_id: "bash",
-    rule: RAW_DATA_WRITE_RULE_ID,
+    rule: "workspace-quota",
     decision: "failed",
     guard_class: "authority",
     ts: "2026-07-04T00:00:00.000Z"
+  };
+}
+
+function rawDataAuditRow(): PolicyGateAuditRow {
+  return {
+    ...minimalAuditRow(),
+    rule: RAW_DATA_WRITE_RULE_ID,
+    guard_class: "authority"
   };
 }
 
@@ -5705,7 +5935,7 @@ function auditRowWithGuardClass(
 }
 
 function rawDataAuditRowWithoutGuard(): PolicyGateAuditRow {
-  const copy = { ...minimalAuditRow() } as Partial<PolicyGateAuditRow>;
+  const copy = { ...rawDataAuditRow() } as Partial<PolicyGateAuditRow>;
   delete copy.guard_class;
   return copy as PolicyGateAuditRow;
 }

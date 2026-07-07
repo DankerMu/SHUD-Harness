@@ -896,13 +896,16 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       role,
       preparedInput.evaluatorInput
     );
+    if (evaluation.status === "error" && evaluation.source === "decision_validation") {
+      const durationMs = Date.now() - startTime;
+      return this.finalizePolicyGateResult(toolContext, evaluation.result, durationMs);
+    }
     if (executionValidation.status !== "allow") {
-      if (evaluation.status === "error" && evaluation.source === "decision_validation") {
-        const durationMs = Date.now() - startTime;
-        return this.finalizePolicyGateResult(toolContext, evaluation.result, durationMs);
+      const durationMs = Date.now() - startTime;
+      if (executionValidation.status === "error") {
+        return this.finalizePolicyGateResult(toolContext, executionValidation.result, durationMs);
       }
       if (evaluation.status === "decision" && evaluation.decision.decision === "deny") {
-        const durationMs = Date.now() - startTime;
         return this.finalizePolicyGateResult(
           toolContext,
           buildPolicyGateDeniedToolResult(this.#policyGateToolId, evaluation.decision),
@@ -910,10 +913,6 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
         );
       }
 
-      const durationMs = Date.now() - startTime;
-      if (executionValidation.status === "error") {
-        return this.finalizePolicyGateResult(toolContext, executionValidation.result, durationMs);
-      }
       return this.finalizePolicyGateResult(
         toolContext,
         buildPolicyGateDeniedToolResult(this.#policyGateToolId, executionValidation.decision),

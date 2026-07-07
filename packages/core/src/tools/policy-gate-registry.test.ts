@@ -4116,6 +4116,102 @@ describe("policy-gated zero tool registry", () => {
     expect(tool.calls).toBe(0);
   });
 
+  test("non-Zod execution validator errors win over evaluator denial", async () => {
+    const cases = [
+      {
+        name: "missing-guard",
+        decision: {
+          decision: "deny",
+          ruleId: "validator-missing-guard-class",
+          reason: "validator denied without classification",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Classify the validator denial before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          }
+        },
+        expectedRule: "validator-missing-guard-class",
+        expectedField: "guardClass"
+      },
+      {
+        name: "invalid-guard",
+        decision: {
+          decision: "deny",
+          ruleId: "validator-invalid-guard-class",
+          reason: "validator denied with an invalid classification",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Classify the validator denial as authority or capability before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "temporary"
+        },
+        expectedRule: "validator-invalid-guard-class",
+        expectedField: "guardClass"
+      },
+      {
+        name: "reserved-rule",
+        decision: {
+          decision: "deny",
+          ruleId: RAW_DATA_WRITE_RULE_ID,
+          reason: "validator attempted to mint exact reserved authority evidence",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Use a validator-owned policy rule id.",
+            ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+          },
+          guardClass: "authority"
+        },
+        expectedRule: RAW_DATA_WRITE_RULE_ID,
+        expectedField: "ruleId"
+      },
+      {
+        name: "reserved-prefix",
+        decision: {
+          decision: "deny",
+          ruleId: `${RAW_DATA_WRITE_RULE_ID}:caller-minted`,
+          reason: "validator attempted to mint reserved authority prefix evidence",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Use a validator-owned policy rule id.",
+            ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+          },
+          guardClass: "authority"
+        },
+        expectedRule: `${RAW_DATA_WRITE_RULE_ID}:caller-minted`,
+        expectedField: "ruleId"
+      }
+    ] as const;
+
+    for (const testCase of cases) {
+      const tool = new RecordingTool(`non-zod.validator.error.before.evaluator.${testCase.name}`);
+      const wrapped = wrapToolWithPolicyGate(tool, {
+        evaluate: async () => ({
+          decision: "deny",
+          ruleId: "evaluator-capability-denial",
+          reason: "legal evaluator denial should not mask validator validation errors",
+          remediation: {
+            next_action: "adjust_scope",
+            hint: "Use a tool input allowed by the evaluator policy.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "capability"
+        }),
+        validateExecutionInput: () => testCase.decision as never
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Invalid policy gate decision");
+      expect(result.output).toContain(testCase.expectedRule);
+      expect(result.output).toContain(testCase.expectedField);
+      expect(result.output).not.toContain("evaluator-capability-denial");
+      expect(result.output).not.toContain("policy_gate_denied");
+      expect(tool.calls).toBe(0);
+    }
+  });
+
   test("non-Zod evaluator denials win over execution validator denial", async () => {
     const tool = new RecordingTool("non-zod.evaluator.denial.before.validator");
     const wrapped = wrapToolWithPolicyGate(tool, {

@@ -131,15 +131,20 @@ function assertPublicToolFailedWsEventInput(input: ToolFailedWsEventInput): void
     throw new Error("Reserved authority policy rule prefixes are reserved for error_id.");
   }
   const guardClass = readToolFailedGuardClass(input.guardClass);
-  if (
-    isReservedAuthorityPolicyToolFailedEvent(input) &&
-    guardClass !== "authority"
-  ) {
+  if (isReservedAuthorityPolicyToolFailedEvent(input)) {
+    if (guardClass !== "authority") {
+      if (isRawDataAuthorityToolFailedEvent(input)) {
+        throw new Error("Raw-data authority tool.failed events require guardClass authority.");
+      }
+      throw new Error(
+        "Reserved authority policy rule tool.failed events require guardClass authority."
+      );
+    }
     if (isRawDataAuthorityToolFailedEvent(input)) {
-      throw new Error("Raw-data authority tool.failed events require guardClass authority.");
+      throw new Error("Raw-data authority tool.failed events require trusted producer evidence.");
     }
     throw new Error(
-      "Reserved authority policy rule tool.failed events require guardClass authority."
+      "Reserved authority policy tool.failed events require trusted producer evidence."
     );
   }
 }
