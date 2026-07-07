@@ -3,7 +3,16 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BaseTool, BashTool, SpawnAgentTool, ToolRegistry } from "@zero-os/core";
+import {
+  BaseTool,
+  BashTool,
+  EditTool,
+  ReadTool,
+  SpawnAgentTool,
+  ToolRegistry,
+  WaitAgentTool,
+  WriteTool
+} from "@zero-os/core";
 import type {
   FuseRule,
   RunningToolHandle,
@@ -11,9 +20,11 @@ import type {
   RunningToolTerminalMetadata,
   SecretFilter,
   ToolContext,
+  ToolDefinition,
   ToolLogger,
   ToolResult
 } from "@zero-os/shared";
+import { z } from "zod";
 import {
   PolicyGateRemediationSchema,
   SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS,
@@ -29,6 +40,7 @@ import {
   createShudRuntimeToolRegistry,
   createShudSandboxedBashTool,
   isPolicyGatedTool,
+  wrapAllRegisteredTools,
   wrapToolWithPolicyGate
 } from "./policy-gate-registry";
 import {
@@ -2042,6 +2054,540 @@ describe("policy-gated zero tool registry", () => {
     expect(tools.map((tool) => tool.calls)).toEqual([1, 1, 1]);
   });
 
+  test("factory-returned registry owns model-visible definitions when inner toDefinition diverges", () => {
+    const tool = new DivergentDefinitionTool(
+      "generic.definition",
+      "generic.leaked.definition",
+      "Leaked definition description without required governance sections."
+    );
+    const registry = createPolicyGatedToolRegistry([tool], {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    let definition = registry
+      .getDefinitions()
+      .find((candidate) => candidate.name === "generic.definition");
+    expect(definition).toBeDefined();
+    expect(definition?.name).toBe("generic.definition");
+    expect(definition?.description).toBe(tool.description);
+    expect(definition?.description).toContain("何时该用:");
+    expect(definition?.parameters).toEqual(tool.parameters);
+    expect(definition?.parameters).not.toBe(tool.parameters);
+    expect(definition?.parameters).not.toEqual({ leaked: true });
+
+    const replacement = new DivergentDefinitionTool(
+      "generic.definition",
+      "generic.replacement.leaked",
+      "Replacement leaked definition description without required sections."
+    );
+    registry.register(
+      wrapToolWithPolicyGate(replacement, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    );
+
+    definition = registry
+      .getDefinitions()
+      .find((candidate) => candidate.name === "generic.definition");
+    expect(definition?.name).toBe("generic.definition");
+    expect(definition?.description).toBe(replacement.description);
+    expect(definition?.description).toContain("何时不该用:");
+    expect(definition?.parameters).toEqual(replacement.parameters);
+    expect(definition?.parameters).not.toBe(replacement.parameters);
+  });
+
+  test("factory-returned registry snapshots metadata against retained inner tool mutation", () => {
+    const tool = new RecordingTool("generic.snapshot");
+    const originalName = tool.name;
+    const originalDescription = tool.description;
+    const originalParameters = tool.parameters;
+    const leakedParameters = {
+      type: "object",
+      properties: {
+        leaked: {
+          type: "string"
+        }
+      },
+      additionalProperties: false
+    };
+    const registry = createPolicyGatedToolRegistry([tool], {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    (tool as unknown as { name: string }).name = "generic.snapshot.leaked";
+    tool.description = "何时该用: This mutated description intentionally drops governance sections.";
+    tool.parameters = leakedParameters;
+
+    const definitions = registry.getDefinitions();
+    const definition = definitions.find((candidate) => candidate.name === originalName);
+
+    expect(registry.get(originalName)).toBeDefined();
+    expect(registry.get("generic.snapshot.leaked")).toBeUndefined();
+    expect(definition).toBeDefined();
+    expect(definition?.name).toBe(originalName);
+    expect(definition?.description).toBe(originalDescription);
+    expect(definition?.description).toContain("何时该用:");
+    expect(definition?.description).toContain("何时不该用:");
+    expect(definition?.description).toContain("成功与失败样态:");
+    expect(definition?.description).not.toContain("mutated description");
+    expect(definition?.parameters).toEqual(originalParameters);
+    expect(definition?.parameters).not.toBe(originalParameters);
+    expect(definition?.parameters).not.toEqual(leakedParameters);
+    expect(definitions.map((candidate) => candidate.name)).not.toContain("generic.snapshot.leaked");
+  });
+
+  test("factory-returned registry owns wrapper kind and capability snapshots", () => {
+    const tool = new RecordingTool("generic.wrapper.snapshot");
+    const originalKind: BaseTool["kind"] = "tool";
+    const originalCapabilities = Object.freeze(["vision"]);
+    tool.kind = originalKind;
+    tool.requiredModelCapabilities = originalCapabilities;
+    const registry = createPolicyGatedToolRegistry([tool], {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    const registered = registry.get("generic.wrapper.snapshot");
+    expect(registered).toBeDefined();
+    if (!registered) {
+      throw new Error("generic.wrapper.snapshot should be registered");
+    }
+
+    attemptRegisteredWrapperFieldMutation(registered, {
+      kind: "mcp",
+      requiredModelCapabilities: ["mutated-capability"]
+    });
+
+    const listed = registry.list().find((candidate) => candidate.name === "generic.wrapper.snapshot");
+    const definition = registry
+      .getDefinitions()
+      .find((candidate) => candidate.name === "generic.wrapper.snapshot");
+    expect(listed).toBe(registered);
+    expect(definition?.kind).toBe(originalKind);
+    expect(registered.kind).toBe(originalKind);
+    expect(listed?.kind).toBe(originalKind);
+    expect(registered.requiredModelCapabilities).toEqual(originalCapabilities);
+    expect(registered.requiredModelCapabilities).not.toBe(originalCapabilities);
+    expect(listed?.requiredModelCapabilities).toEqual(originalCapabilities);
+    expect(Object.isFrozen(registered.requiredModelCapabilities)).toBe(true);
+  });
+
+  test("factory-returned registry rejects exposed wrapper authority shadowing", async () => {
+    const tool = new RecordingTool("generic.wrapper.authority");
+    const originalDescription = tool.description;
+    const originalParameters = tool.parameters;
+    const replacementInnerTool = new RecordingTool("generic.wrapper.shadow.inner");
+    const shadowParameters = {
+      type: "object",
+      properties: {
+        leaked: {
+          type: "boolean"
+        }
+      },
+      additionalProperties: false
+    };
+    let evaluatorCalls = 0;
+    const registry = createPolicyGatedToolRegistry([tool], {
+      evaluate: async (call) => {
+        evaluatorCalls += 1;
+        if ((call.input as { blocked?: unknown }).blocked === true) {
+          return {
+            decision: "deny",
+            ruleId: "registry-owned-deny",
+            reason: "blocked by registry-owned evaluator",
+            remediation: {
+              next_action: "adjust_scope",
+              hint: "Use a registry-authorized input.",
+              ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+            }
+          };
+        }
+        return { decision: "allow" };
+      }
+    });
+
+    const registered = registry.get("generic.wrapper.authority");
+    expect(registered).toBeDefined();
+    if (!registered) {
+      throw new Error("generic.wrapper.authority should be registered");
+    }
+    const listed = registry
+      .list()
+      .find((candidate) => candidate.name === "generic.wrapper.authority");
+    expect(listed).toBe(registered);
+
+    attemptRegisteredWrapperAuthorityMutation(registered, {
+      name: "generic.wrapper.shadowed",
+      description: "Shadowed description without governance sections.",
+      parameters: shadowParameters,
+      innerTool: replacementInnerTool,
+      policyGateToolId: "spawn_agent",
+      options: {
+        evaluate: async () => ({ decision: "allow" }),
+        validateExecutionInput: () => ({
+          decision: "deny",
+          ruleId: "shadow-validator-deny",
+          reason: "shadow validator should not run",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "This mutated validator must not control execution.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          }
+        })
+      }
+    });
+
+    expectWrapperAuthorityPropertiesHardened(registered);
+    expect(registered.name).toBe("generic.wrapper.authority");
+    expect(registered.description).toBe(originalDescription);
+    expect(registered.parameters).toEqual(originalParameters);
+    expect(registered.parameters).not.toBe(originalParameters);
+    expect(isPolicyGatedTool(registered) && registered.innerTool).toBe(tool);
+    expect(isPolicyGatedTool(registered) && registered.policyGateToolId).toBe(
+      "generic.wrapper.authority"
+    );
+    expect((registered as unknown as { options?: unknown }).options).toBeUndefined();
+
+    const definition = registry
+      .getDefinitions()
+      .find((candidate) => candidate.name === "generic.wrapper.authority");
+    expect(definition?.name).toBe("generic.wrapper.authority");
+    expect(definition?.description).toBe(originalDescription);
+    expect(definition?.parameters).toEqual(originalParameters);
+    expect(definition?.parameters).not.toEqual(shadowParameters);
+    expect(registry.get("generic.wrapper.shadowed")).toBeUndefined();
+    expect(registry.getDefinitions().map((candidate) => candidate.name)).not.toContain(
+      "generic.wrapper.shadowed"
+    );
+
+    const denied = await registered.run(createToolContext("worker"), { blocked: true });
+    expect(denied.success).toBe(false);
+    expect(denied.output).toContain("registry-owned-deny");
+
+    const allowed = await registered.run(createToolContext("worker"), { blocked: false });
+    expect(allowed).toEqual({
+      success: true,
+      output: "generic.wrapper.authority executed",
+      outputSummary: "generic.wrapper.authority executed"
+    });
+    expect(evaluatorCalls).toBe(2);
+    expect(tool.calls).toBe(1);
+    expect(tool.lastInput).toEqual({ blocked: false });
+    expect(replacementInnerTool.calls).toBe(0);
+  });
+
+  test("generic registry lint rejects the 21st visible tool without a role", () => {
+    const tools = Array.from({ length: 21 }, (_, index) => new RecordingTool(`generic.${index}`));
+
+    expect(() =>
+      createPolicyGatedToolRegistry(tools, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(
+      /Policy-gated tool registration lint failed for role unknown-role: visible tool count 21 exceeds 20; excess count 1/
+    );
+  });
+
+  test("factory-returned registry rejects post-return 21st wrapped tool registration", () => {
+    const tools = Array.from({ length: 20 }, (_, index) => new RecordingTool(`generic.${index}`));
+    const registry = createPolicyGatedToolRegistry(tools, {
+      role: "worker",
+      evaluate: async () => ({ decision: "allow" })
+    });
+    const extraTool = wrapToolWithPolicyGate(new RecordingTool("generic.20"), {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    expect(() => registry.register(extraTool)).toThrow(
+      /Policy-gated tool registration lint failed for role worker: visible tool count 21 exceeds 20; excess count 1/
+    );
+    expect(registry.get("generic.20")).toBeUndefined();
+    expect(registry.list().map((tool) => tool.name)).not.toContain("generic.20");
+    expect(registry.getDefinitions().map((definition) => definition.name)).not.toContain(
+      "generic.20"
+    );
+  });
+
+  test("factory-returned registry rejects post-return wrapped tools with bad descriptions", () => {
+    const registry = createPolicyGatedToolRegistry([new RecordingTool("generic.good")], {
+      evaluate: async () => ({ decision: "allow" })
+    });
+    const badTool = new RecordingTool("generic.bad.description");
+    badTool.description = [
+      "何时该用: Use this fixture for mutation-boundary description lint.",
+      "成功与失败样态: Success should never pass registry mutation validation."
+    ].join("\n");
+    const wrappedBadTool = wrapToolWithPolicyGate(badTool, {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    expect(() => registry.register(wrappedBadTool)).toThrow(
+      /generic\.bad\.description: missing 何时不该用/
+    );
+    expect(registry.get("generic.bad.description")).toBeUndefined();
+    expect(registry.list().map((tool) => tool.name)).not.toContain("generic.bad.description");
+    expect(registry.getDefinitions().map((definition) => definition.name)).not.toContain(
+      "generic.bad.description"
+    );
+  });
+
+  test("factory-returned registry replacements use Zero same-name semantics without double-counting", () => {
+    const tools = Array.from({ length: 20 }, (_, index) => new RecordingTool(`generic.${index}`));
+    const registry = createPolicyGatedToolRegistry(tools, {
+      role: "worker",
+      evaluate: async () => ({ decision: "allow" })
+    });
+    const replacementInnerTool = new RecordingTool("generic.19");
+    const replacementTool = wrapToolWithPolicyGate(replacementInnerTool, {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    expect(() => registry.register(replacementTool)).not.toThrow();
+    expect(registry.list()).toHaveLength(20);
+    const registeredReplacement = registry.get("generic.19");
+    expect(registeredReplacement).not.toBe(replacementTool);
+    expect(isPolicyGatedTool(registeredReplacement!)).toBe(true);
+    if (!isPolicyGatedTool(registeredReplacement!)) {
+      throw new Error("replacement should be wrapped by registry authority");
+    }
+    expect(registeredReplacement.innerTool).toBe(replacementInnerTool);
+    expect(() => assertPolicyGatedToolRegistry(registry, { role: "worker" })).not.toThrow();
+
+    const originalReplacementDescription = replacementInnerTool.description;
+    const originalReplacementParameters = replacementInnerTool.parameters;
+    const leakedReplacementParameters = {
+      type: "object",
+      properties: {
+        replacementLeak: {
+          type: "boolean"
+        }
+      },
+      additionalProperties: false
+    };
+    (replacementInnerTool as unknown as { name: string }).name = "generic.19.leaked";
+    replacementInnerTool.description = "何时该用: Replacement mutation drops required sections.";
+    replacementInnerTool.parameters = leakedReplacementParameters;
+
+    const replacementDefinition = registry
+      .getDefinitions()
+      .find((candidate) => candidate.name === "generic.19");
+    expect(registry.get("generic.19")).toBe(registeredReplacement);
+    expect(registry.get("generic.19.leaked")).toBeUndefined();
+    expect(replacementDefinition?.name).toBe("generic.19");
+    expect(replacementDefinition?.description).toBe(originalReplacementDescription);
+    expect(replacementDefinition?.description).toContain("何时不该用:");
+    expect(replacementDefinition?.parameters).toEqual(originalReplacementParameters);
+    expect(replacementDefinition?.parameters).not.toBe(originalReplacementParameters);
+    expect(replacementDefinition?.parameters).not.toEqual(leakedReplacementParameters);
+  });
+
+  test("factory-returned registry rewraps stale post-return replacements with current evaluator", async () => {
+    const registry = createPolicyGatedToolRegistry([new RecordingTool("edit")], {
+      evaluate: async () => ({
+        decision: "deny",
+        ruleId: "registry-owned-deny",
+        reason: "blocked by registry-owned evaluator",
+        remediation: {
+          next_action: "adjust_scope",
+          hint: "Use a tool allowed by the registry owner.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        }
+      })
+    });
+    const staleReplacementInnerTool = new RecordingTool("edit");
+    const staleAllowReplacement = wrapToolWithPolicyGate(staleReplacementInnerTool, {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    expect(() => registry.register(staleAllowReplacement)).not.toThrow();
+    const registeredReplacement = registry.get("edit");
+    expect(registeredReplacement).not.toBe(staleAllowReplacement);
+    expect(isPolicyGatedTool(registeredReplacement!)).toBe(true);
+
+    const result = await registeredReplacement?.run(createToolContext("coder"), {});
+
+    expect(result?.success).toBe(false);
+    expect(result?.output).toContain("policy_gate_denied");
+    expect(result?.output).toContain("registry-owned-deny");
+    expect(staleReplacementInnerTool.calls).toBe(0);
+  });
+
+  test("factory-returned registry keeps evaluator authority after visible options mutation", async () => {
+    const registry = createPolicyGatedToolRegistry([new RecordingTool("generic.authority")], {
+      evaluate: async () => ({
+        decision: "deny",
+        ruleId: "registry-owned-deny",
+        reason: "blocked by registry-owned evaluator",
+        remediation: {
+          next_action: "adjust_scope",
+          hint: "Use a registry-authorized input.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        }
+      })
+    });
+    const fakeOptions = {
+      evaluate: async () => ({ decision: "allow" as const })
+    };
+    const mutableRegistry = registry as unknown as {
+      options?: typeof fakeOptions;
+    };
+
+    if (mutableRegistry.options && typeof mutableRegistry.options === "object") {
+      attemptMutation(() => {
+        mutableRegistry.options!.evaluate = fakeOptions.evaluate;
+      });
+    }
+    attemptMutation(() => {
+      mutableRegistry.options = fakeOptions;
+    });
+    attemptMutation(() => {
+      Object.defineProperty(mutableRegistry, "options", {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: fakeOptions
+      });
+    });
+
+    const replacementTool = new RecordingTool("generic.authority");
+    expect(() => registry.register(replacementTool)).not.toThrow();
+    const registeredReplacement = registry.get("generic.authority");
+    expect(isPolicyGatedTool(registeredReplacement!)).toBe(true);
+    expect(isPolicyGatedTool(registeredReplacement!) && registeredReplacement.innerTool).toBe(
+      replacementTool
+    );
+    expect((registry as unknown as { options?: unknown }).options).toBeUndefined();
+
+    const result = await registeredReplacement?.run(createToolContext("worker"), {});
+
+    expect(result?.success).toBe(false);
+    expect(result?.output).toContain("policy_gate_denied");
+    expect(result?.output).toContain("registry-owned-deny");
+    expect(replacementTool.calls).toBe(0);
+  });
+
+  test("factory-returned registry public methods ignore inherited tools map mutation", async () => {
+    const originalTool = new RecordingTool("generic.tools.authority");
+    const registry = createPolicyGatedToolRegistry([originalTool], {
+      evaluate: async () => ({
+        decision: "deny",
+        ruleId: "registry-owned-deny",
+        reason: "blocked by registry-owned evaluator",
+        remediation: {
+          next_action: "adjust_scope",
+          hint: "Use a registry-authorized input.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        }
+      })
+    });
+    const registeredTool = registry.get("generic.tools.authority");
+    const attackerTool = new RecordingTool("generic.tools.authority");
+    const injectedTool = new RecordingTool("generic.tools.injected");
+    const mutableRegistry = registry as unknown as {
+      tools?: Map<string, BaseTool>;
+    };
+
+    if (mutableRegistry.tools instanceof Map) {
+      mutableRegistry.tools.set("generic.tools.authority", attackerTool);
+      mutableRegistry.tools.set("generic.tools.injected", injectedTool);
+      mutableRegistry.tools.delete("generic.tools.authority");
+      mutableRegistry.tools.clear();
+    }
+    attemptMutation(() => {
+      mutableRegistry.tools = new Map([
+        ["generic.tools.authority", attackerTool],
+        ["generic.tools.injected", injectedTool]
+      ]);
+    });
+
+    expect(registry.get("generic.tools.authority")).toBe(registeredTool);
+    expect(registry.get("generic.tools.injected")).toBeUndefined();
+    expect(registry.has("generic.tools.authority")).toBe(true);
+    expect(registry.has("generic.tools.injected")).toBe(false);
+    expect(registry.list()).toEqual([registeredTool]);
+    expect(registry.getDefinitions().map((definition) => definition.name)).toEqual([
+      "generic.tools.authority"
+    ]);
+    expect(isPolicyGatedTool(registeredTool!)).toBe(true);
+
+    const result = await registry
+      .get("generic.tools.authority")
+      ?.run(createToolContext("worker"), {});
+
+    expect(result?.success).toBe(false);
+    expect(result?.output).toContain("policy_gate_denied");
+    expect(result?.output).toContain("registry-owned-deny");
+    expect(originalTool.calls).toBe(0);
+    expect(attackerTool.calls).toBe(0);
+    expect(injectedTool.calls).toBe(0);
+  });
+
+  test("factory-returned registry wraps post-return unwrapped tool registration", () => {
+    const registry = createPolicyGatedToolRegistry([new RecordingTool("generic.good")], {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    expect(() => registry.register(new RecordingTool("generic.unwrapped"))).not.toThrow();
+    expect(isPolicyGatedTool(registry.get("generic.unwrapped")!)).toBe(true);
+    expect(registry.getDefinitions().map((definition) => definition.name)).toContain(
+      "generic.unwrapped"
+    );
+  });
+
+  test("generic wrap seam rejects descriptions missing required section headings", () => {
+    const badTool = new RecordingTool("generic.bad.description");
+    badTool.description = [
+      "何时该用: Use this fixture for generic wrap lint.",
+      "成功与失败样态: Success returns a fixture result."
+    ].join("\n");
+
+    expect(() =>
+      wrapAllRegisteredTools([badTool], {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/generic\.bad\.description: missing 何时不该用/);
+  });
+
+  test("generic wrap seam lints final wrappers after stale prewrapped inner mutation", () => {
+    const innerTool = new RecordingTool("generic.stale.inner.description");
+    const prewrappedTool = wrapToolWithPolicyGate(innerTool, {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    innerTool.description = [
+      "何时该用: Use this fixture after stale prewrapped mutation.",
+      "成功与失败样态: Success should never pass final wrapper lint."
+    ].join("\n");
+
+    expect(() =>
+      wrapAllRegisteredTools([prewrappedTool], {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/generic\.stale\.inner\.description: missing 何时不该用/);
+  });
+
+  test("generic wrap seam lints final visible count after stale prewrapped inner name drift", () => {
+    const innerTools = Array.from(
+      { length: 21 },
+      (_, index) => new RecordingTool(`generic.stale.count.${Math.min(index, 19)}`)
+    );
+    const prewrappedTools = innerTools.map((tool) =>
+      wrapToolWithPolicyGate(tool, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    );
+
+    (innerTools[20] as unknown as { name: string }).name = "generic.stale.count.20";
+
+    expect(() =>
+      wrapAllRegisteredTools(prewrappedTools, {
+        role: "worker",
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(
+      /Policy-gated tool registration lint failed for role worker: visible tool count 21 exceeds 20; excess count 1/
+    );
+  });
+
   test("direct spawn wrapper executes only sanitized spawn input", async () => {
     const spawnTool = new RecordingTool("spawn_agent");
     const tailSentinel = "ignored-tail-sentinel-that-must-not-appear";
@@ -2080,6 +2626,613 @@ describe("policy-gated zero tool registry", () => {
     expect(spawnTool.lastInput).not.toHaveProperty("allowed_tools");
     expect(spawnTool.lastInput).not.toHaveProperty("ignoredBlob");
     expect(spawnTool.lastInput).not.toHaveProperty("ignoredFunction");
+  });
+
+  test("SHUD runtime assembly rejects the 21st role-visible tool", () => {
+    const tools = Array.from({ length: 19 }, (_, index) => new RecordingTool(`extra.${index}`));
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          role: "worker",
+          tools
+        })
+      )
+    ).toThrow(
+      /Policy-gated tool registration lint failed for role worker: visible tool count 21 exceeds 20; excess count 1/
+    );
+  });
+
+  test("SHUD runtime assembly rejects the 21st visible tool when role is omitted", () => {
+    const tools = Array.from({ length: 19 }, (_, index) => new RecordingTool(`extra.${index}`));
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          tools
+        })
+      )
+    ).toThrow(
+      /Policy-gated tool registration lint failed for role unknown-role: visible tool count 21 exceeds 20; excess count 1/
+    );
+  });
+
+  test("SHUD runtime adapts real Zero native tool descriptions before strict lint", () => {
+    const registry = createShudRuntimeToolRegistry(
+      createMinimalShudRuntimeRegistryOptions({
+        tools: [new ReadTool(), new WriteTool(), new EditTool(), new WaitAgentTool()]
+      })
+    );
+
+    assertPolicyGatedToolRegistry(registry);
+    for (const toolId of ["read", "write", "edit", "wait_agent"] as const) {
+      const definition = registry.getDefinitions().find((candidate) => candidate.name === toolId);
+      expect(definition?.description).toContain("何时该用:");
+      expect(definition?.description).toContain("何时不该用:");
+      expect(definition?.description).toContain("成功与失败样态:");
+    }
+  });
+
+  test("SHUD runtime assembly rejects tool descriptions missing required sections", () => {
+    const badTool = new RecordingTool("bad.description");
+    badTool.description = [
+      "何时该用: Use this fixture for description lint tests.",
+      "成功与失败样态: Success returns a fixture result; failure throws during assembly."
+    ].join("\n");
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          tools: [badTool]
+        })
+      )
+    ).toThrow(/bad\.description: missing 何时不该用/);
+  });
+
+  test("description lint rejects section labels without bodies", () => {
+    const badTool = new RecordingTool("bad.empty.sections");
+    badTool.description = ["何时该用:", "何时不该用:", "成功与失败样态:"].join("\n");
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          tools: [badTool]
+        })
+      )
+    ).toThrow(/bad\.empty\.sections: empty 何时该用, 何时不该用, 成功与失败样态/);
+  });
+
+  test("description lint rejects mid-sentence section-label stuffing", () => {
+    const badTool = new RecordingTool("bad.stuffed.sections");
+    badTool.description =
+      "This sentence mentions 何时该用, 何时不该用, and 成功与失败样态 without section headings.";
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          tools: [badTool]
+        })
+      )
+    ).toThrow(/bad\.stuffed\.sections: missing 何时该用, 何时不该用, 成功与失败样态/);
+  });
+
+  test("description lint accepts multiline section bodies", () => {
+    const tool = new RecordingTool("good.multiline.description");
+    tool.description = [
+      "何时该用:",
+      "Use this fixture when the body is on the next line.",
+      "何时不该用：",
+      "Do not use it as a real tool.",
+      "成功与失败样态:",
+      "Success assembles the registry; failure belongs to the lint harness."
+    ].join("\n");
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          tools: [tool]
+        })
+      )
+    ).not.toThrow();
+  });
+
+  test("manual registry assertion rejects direct-wrapped tools above the visible count limit", () => {
+    const registry = new ToolRegistry();
+    const tools = Array.from(
+      { length: 21 },
+      (_, index) => new RecordingTool(`manual.${index}`)
+    );
+    for (const tool of tools) {
+      registry.register(
+        wrapToolWithPolicyGate(tool, {
+          evaluate: async () => ({ decision: "allow" })
+        })
+      );
+    }
+
+    expect(() => assertPolicyGatedToolRegistry(registry, { role: "worker" })).toThrow(
+      /Policy-gated tool registration lint failed for role worker: visible tool count 21 exceeds 20; excess count 1/
+    );
+  });
+
+  test("manual registry assertion rejects direct-wrapped tools with bad descriptions", () => {
+    const badTool = new RecordingTool("manual.bad.description");
+    badTool.description = [
+      "何时该用: Use this fixture for manual registry lint.",
+      "成功与失败样态: Success should never pass final registry validation."
+    ].join("\n");
+    const registry = new ToolRegistry();
+    registry.register(
+      wrapToolWithPolicyGate(badTool, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    );
+
+    expect(() => assertPolicyGatedToolRegistry(registry)).toThrow(
+      /manual\.bad\.description: missing 何时不该用/
+    );
+  });
+
+  test("Zod parameter schema rejection finalizes without executing the inner tool", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.parameters",
+      z.object({
+        command: z.string()
+      })
+    );
+    const runningToolRegistry = new TestRunningToolRegistry();
+    const handle = runningToolRegistry.register({
+      toolUseId: "POLICY-ZOD-1",
+      toolName: "zod.parameters",
+      abortable: false
+    });
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(
+      {
+        ...createToolContext("worker"),
+        currentToolUseId: "POLICY-ZOD-1",
+        runningToolRegistry
+      },
+      {
+        command: 42
+      }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_denied");
+    expect(result.output).toContain("tool-parameter-schema-validation");
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      ruleId?: string;
+      reason?: string;
+      remediation?: {
+        next_action?: string;
+        hint?: string;
+        ref?: string;
+      };
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.reason).toContain("command");
+    expect(payload.remediation?.next_action).toBe("fix_and_retry");
+    expect(payload.remediation?.hint).toContain("Zod parameter schema");
+    expect(payload.remediation?.ref).toBe(
+      "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+    );
+    expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+    expect(handle.getState()).toBe("finished");
+    expect(handle.getTerminalMetadata()).toMatchObject({
+      cause: "completed",
+      success: false,
+      outputSummary: result.outputSummary
+    });
+  });
+
+  test("factory-returned registry snapshots Zod schema carrier against retained inner mutation", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.schema.snapshot",
+      z.object({
+        command: z.string()
+      })
+    );
+    let evaluatorCalls = 0;
+    const registry = createPolicyGatedToolRegistry([zodTool], {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    (zodTool as unknown as { parameterSchema: unknown }).parameterSchema = z.object({
+      command: z.unknown()
+    });
+
+    const result = await registry.get("zod.schema.snapshot")?.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expect(result?.success).toBe(false);
+    expect(result?.output).toContain("policy_gate_denied");
+    expect(result?.output).toContain("tool-parameter-schema-validation");
+    const payload = JSON.parse(result?.output ?? "{}") as {
+      error?: string;
+      ruleId?: string;
+      reason?: string;
+      remediation?: {
+        next_action?: string;
+        hint?: string;
+        ref?: string;
+      };
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.reason).toContain("command");
+    expect(payload.remediation?.next_action).toBe("fix_and_retry");
+    expect(payload.remediation?.hint).toContain("Zod parameter schema");
+    expect(payload.remediation?.ref).toBe(
+      "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+    );
+    expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
+  test("wrapped Zod schema validation ignores retained safeParse monkey-patches", async () => {
+    const schema = z.object({
+      command: z.string()
+    });
+    const zodTool = new ZodRecordingTool("zod.safeparse.patch.wrap", schema);
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    monkeyPatchZodSafeParseToAccept(schema, {
+      command: "patched-valid"
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expectToolParameterSchemaValidationDenial(result);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
+  test("factory-returned registry Zod validation ignores retained safeParse monkey-patches", async () => {
+    const schema = z.object({
+      command: z.string()
+    });
+    const zodTool = new ZodRecordingTool("zod.safeparse.patch.registry", schema);
+    let evaluatorCalls = 0;
+    const registry = createPolicyGatedToolRegistry([zodTool], {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    monkeyPatchZodSafeParseToAccept(schema, {
+      command: "patched-valid"
+    });
+
+    const result = await registry.get("zod.safeparse.patch.registry")?.run(
+      createToolContext("worker"),
+      {
+        command: 42
+      }
+    );
+
+    expectToolParameterSchemaValidationDenial(result);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
+  test("wrapped Zod schema validation ignores retained def shape mutation", async () => {
+    const schema = z.object({
+      command: z.string()
+    });
+    const zodTool = new ZodRecordingTool("zod.def.patch.wrap", schema);
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    attemptZodCommandShapeMutationToAcceptNumber(schema);
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expectToolParameterSchemaValidationDenial(result);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
+  test("factory-returned registry Zod validation ignores retained def shape mutation", async () => {
+    const schema = z.object({
+      command: z.string()
+    });
+    const zodTool = new ZodRecordingTool("zod.def.patch.registry", schema);
+    let evaluatorCalls = 0;
+    const registry = createPolicyGatedToolRegistry([zodTool], {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    attemptZodCommandShapeMutationToAcceptNumber(schema);
+
+    const result = await registry.get("zod.def.patch.registry")?.run(
+      createToolContext("worker"),
+      {
+        command: 42
+      }
+    );
+
+    expectToolParameterSchemaValidationDenial(result);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
+  test("Zod schema hardening rejects fake safeParse carriers without deep traversal", () => {
+    const fakeSchema = createDeepFakeZodLikeSchema(256);
+    const zodTool = new ZodRecordingTool("zod.fake.deep", fakeSchema);
+
+    expect(() =>
+      wrapToolWithPolicyGate(zodTool, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/Tool Zod parameter schema must be a real Zod v4 schema/);
+  });
+
+  test("Zod schema hardening rejects Proxy-backed schema carriers before trap traversal", () => {
+    let traps = 0;
+    const target = {
+      safeParse: () => ({
+        success: true,
+        data: {
+          command: "proxy"
+        }
+      })
+    };
+    const proxySchema = new Proxy(target, {
+      get(targetValue, key, receiver) {
+        traps += 1;
+        return Reflect.get(targetValue, key, receiver);
+      },
+      getOwnPropertyDescriptor(targetValue, key) {
+        traps += 1;
+        return Reflect.getOwnPropertyDescriptor(targetValue, key);
+      },
+      ownKeys(targetValue) {
+        traps += 1;
+        return Reflect.ownKeys(targetValue);
+      }
+    });
+    const zodTool = new ZodRecordingTool("zod.proxy", proxySchema);
+
+    expect(() =>
+      wrapToolWithPolicyGate(zodTool, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/Tool Zod parameter schema must be a real Zod v4 schema/);
+    expect(traps).toBe(0);
+  });
+
+  test("Zod schema hardening fails closed on over-depth real schema side graphs", () => {
+    const schema = z.object({
+      command: z.string()
+    });
+    (schema as unknown as { retainedSideGraph: unknown }).retainedSideGraph =
+      createNestedRecord(140);
+    const zodTool = new ZodRecordingTool("zod.deep.budget", schema);
+
+    expect(() =>
+      wrapToolWithPolicyGate(zodTool, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/Zod parameter schema exceeds hardening depth budget/);
+  });
+
+  test("Zod schema hardening fails closed on over-wide real schema side graphs", () => {
+    const schema = z.object({
+      command: z.string()
+    });
+    (schema as unknown as { retainedSideGraph: unknown }).retainedSideGraph =
+      createWideRecord(600);
+    const zodTool = new ZodRecordingTool("zod.wide.budget", schema);
+
+    expect(() =>
+      createPolicyGatedToolRegistry([zodTool], {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/Zod parameter schema exceeds hardening property budget/);
+  });
+
+  test("Zod parameter schema rejection survives a throwing evaluator", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.invalid.throwing.evaluator",
+      z.object({
+        command: z.string()
+      })
+    );
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        throw new Error("throwing evaluator must not replace schema denial");
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_denied");
+    expect(result.output).toContain("tool-parameter-schema-validation");
+    expect(result.output).not.toContain("throwing evaluator");
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      ruleId?: string;
+      remediation?: {
+        next_action?: string;
+        hint?: string;
+        ref?: string;
+      };
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.remediation?.next_action).toBe("fix_and_retry");
+    expect(payload.remediation?.hint).toContain("Zod parameter schema");
+    expect(payload.remediation?.ref).toBe(
+      "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+    );
+    expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
+  test("policy evaluator denial wins before invalid Zod schema details", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.denied.first",
+      z.object({
+        command: z.string()
+      })
+    );
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return {
+          decision: "deny",
+          ruleId: "authorization-deny",
+          reason: "role is not authorized for this tool",
+          remediation: {
+            next_action: "adjust_scope",
+            hint: "Use a tool allowed for this role.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          }
+        };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("authorization-deny");
+    expect(result.output).not.toContain("tool-parameter-schema-validation");
+    expect(result.output).not.toContain("Expected string");
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
+  test("valid Zod path runs evaluator once and executes with parsed input", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.valid.parsed",
+      z.object({
+        count: z.coerce.number().default(1).transform((value) => value + 1),
+        label: z.string().default("default-label")
+      })
+    );
+    let evaluatorCalls = 0;
+    let evaluatorInput: unknown;
+    let validatorInput: unknown;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async (call) => {
+        evaluatorCalls += 1;
+        evaluatorInput = call.input;
+        return { decision: "allow" };
+      },
+      validateExecutionInput: (input) => {
+        validatorInput = input;
+        return undefined;
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      count: "4"
+    });
+
+    expect(result).toEqual({
+      success: true,
+      output: "zod.valid.parsed executed",
+      outputSummary: "zod.valid.parsed executed"
+    });
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(1);
+    expect(zodTool.lastInput).toEqual({
+      count: 5,
+      label: "default-label"
+    });
+    expect(evaluatorInput).toEqual(zodTool.lastInput);
+    expect(validatorInput).toBe(zodTool.lastInput);
+  });
+
+  test("valid Zod parsed-only values can be denied by the evaluator", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.parsed.denied",
+      z.object({
+        count: z.coerce.number().default(1).transform((value) => value + 1),
+        label: z.string().default("default-label")
+      })
+    );
+    let evaluatorInput: unknown;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async (call) => {
+        evaluatorInput = call.input;
+        const input = call.input as { count?: unknown; label?: unknown };
+        if (input.count === 5 && input.label === "default-label") {
+          return {
+            decision: "deny",
+            ruleId: "parsed-zod-deny",
+            reason: "parsed count crossed the evaluator threshold",
+            remediation: {
+              next_action: "adjust_scope",
+              hint: "Lower the parsed count before retrying.",
+              ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+            }
+          };
+        }
+        return { decision: "allow" };
+      },
+      validateExecutionInput: () => {
+        throw new Error("validator must not run after evaluator denial");
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      count: "4"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("parsed-zod-deny");
+    expect(result.output).toContain("parsed count crossed the evaluator threshold");
+    expect(evaluatorInput).toEqual({
+      count: 5,
+      label: "default-label"
+    });
+    expect(zodTool.calls).toBe(0);
   });
 
   test("assembly fails when any registered zero tool bypasses the wrapper", () => {
@@ -4685,6 +5838,120 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("SHUD runtime registry owns wrapper kind and capability snapshots", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const edit = new RecordingTool("edit");
+      const originalKind: BaseTool["kind"] = "built-in";
+      const originalCapabilities = Object.freeze(["vision"]);
+      edit.kind = originalKind;
+      edit.requiredModelCapabilities = originalCapabilities;
+      const registry = createShudRuntimeToolRegistry({
+        tools: [edit],
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: []
+      });
+
+      const registered = registry.get("edit");
+      expect(registered).toBeDefined();
+      if (!registered) {
+        throw new Error("edit should be registered in the SHUD runtime registry");
+      }
+
+      attemptRegisteredWrapperFieldMutation(registered, {
+        kind: "mcp",
+        requiredModelCapabilities: ["mutated-capability"]
+      });
+
+      const listed = registry.list().find((candidate) => candidate.name === "edit");
+      const definition = registry.getDefinitions().find((candidate) => candidate.name === "edit");
+      expect(listed).toBe(registered);
+      expect(definition?.kind).toBe(originalKind);
+      expect(registered.kind).toBe(originalKind);
+      expect(listed?.kind).toBe(originalKind);
+      expect(registered.requiredModelCapabilities).toEqual(originalCapabilities);
+      expect(registered.requiredModelCapabilities).not.toBe(originalCapabilities);
+      expect(listed?.requiredModelCapabilities).toEqual(originalCapabilities);
+      expect(Object.isFrozen(registered.requiredModelCapabilities)).toBe(true);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime registry rejects model-visible wrapper shadowing", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const edit = new RecordingTool("edit");
+      const originalDescription = edit.description;
+      const originalParameters = edit.parameters;
+      const replacementInnerTool = new RecordingTool("edit.shadow.inner");
+      const shadowParameters = {
+        type: "object",
+        properties: {
+          leaked: {
+            type: "boolean"
+          }
+        },
+        additionalProperties: false
+      };
+      const registry = createShudRuntimeToolRegistry({
+        tools: [edit],
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: []
+      });
+
+      const registered = registry.get("edit");
+      expect(registered).toBeDefined();
+      if (!registered) {
+        throw new Error("edit should be registered in the SHUD runtime registry");
+      }
+
+      attemptRegisteredWrapperAuthorityMutation(registered, {
+        name: "edit.shadowed",
+        description: "Shadowed runtime description without governance sections.",
+        parameters: shadowParameters,
+        innerTool: replacementInnerTool,
+        policyGateToolId: "spawn_agent",
+        options: {
+          evaluate: async () => ({ decision: "allow" })
+        }
+      });
+
+      expectWrapperAuthorityPropertiesHardened(registered);
+      const listed = registry.list().find((candidate) => candidate.name === "edit");
+      const definition = registry.getDefinitions().find((candidate) => candidate.name === "edit");
+      expect(listed).toBe(registered);
+      expect(registered.name).toBe("edit");
+      expect(registered.description).toBe(originalDescription);
+      expect(registered.parameters).toEqual(originalParameters);
+      expect(definition?.name).toBe("edit");
+      expect(definition?.description).toBe(originalDescription);
+      expect(definition?.parameters).toEqual(originalParameters);
+      expect(definition?.parameters).not.toEqual(shadowParameters);
+      expect(registry.get("edit.shadowed")).toBeUndefined();
+      expect(registry.getDefinitions().map((candidate) => candidate.name)).not.toContain(
+        "edit.shadowed"
+      );
+
+      const result = await registered.run(fixture.context, {});
+      expect(result).toEqual({
+        success: true,
+        output: "edit executed",
+        outputSummary: "edit executed"
+      });
+      expect(edit.calls).toBe(1);
+      expect(replacementInnerTool.calls).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime rewraps prewrapped tools with the current evaluator", async () => {
     const fixture = await createRawFixture();
     try {
@@ -4724,6 +5991,108 @@ describe("policy-gated zero tool registry", () => {
       await fixture.cleanup();
     }
   });
+
+  test("SHUD runtime rewraps stale post-return replacements with the current evaluator", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const registry = createShudRuntimeToolRegistry({
+        tools: [new RecordingTool("edit")],
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        evaluate: async () => ({
+          decision: "deny",
+          ruleId: "runtime-owned-deny",
+          reason: "blocked by current runtime evaluator",
+          remediation: {
+            next_action: "adjust_scope",
+            hint: "Use an allowed tool for this runtime role.",
+            ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+          }
+        })
+      });
+      const staleReplacementInnerTool = new RecordingTool("edit");
+      const staleAllowReplacement = wrapToolWithPolicyGate(staleReplacementInnerTool, {
+        evaluate: async () => ({ decision: "allow" })
+      });
+
+      expect(() => registry.register(staleAllowReplacement)).not.toThrow();
+      const registeredReplacement = registry.get("edit");
+      expect(registeredReplacement).not.toBe(staleAllowReplacement);
+      expect(isPolicyGatedTool(registeredReplacement!)).toBe(true);
+
+      const result = await registeredReplacement?.run(fixture.context, {});
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("policy_gate_denied");
+      expect(result?.output).toContain("runtime-owned-deny");
+      expect(staleReplacementInnerTool.calls).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime registry public methods ignore inherited tools map mutation for edit", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const edit = new RecordingTool("edit");
+      const registry = createShudRuntimeToolRegistry({
+        tools: [edit],
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: []
+      });
+      const registeredEdit = registry.get("edit");
+      if (!registeredEdit) {
+        throw new Error("edit should be registered in the SHUD runtime registry");
+      }
+      const attackerEdit = new RecordingTool("edit");
+      const injectedTool = new RecordingTool("runtime.injected");
+      const mutableRegistry = registry as unknown as {
+        tools?: Map<string, BaseTool>;
+      };
+
+      if (mutableRegistry.tools instanceof Map) {
+        mutableRegistry.tools.set("edit", attackerEdit);
+        mutableRegistry.tools.set("runtime.injected", injectedTool);
+        mutableRegistry.tools.delete("edit");
+        mutableRegistry.tools.clear();
+      }
+      attemptMutation(() => {
+        mutableRegistry.tools = new Map([
+          ["edit", attackerEdit],
+          ["runtime.injected", injectedTool]
+        ]);
+      });
+
+      expect(registry.get("edit")).toBe(registeredEdit);
+      expect(registry.get("runtime.injected")).toBeUndefined();
+      expect(registry.has("edit")).toBe(true);
+      expect(registry.has("runtime.injected")).toBe(false);
+      expect(registry.list().find((tool) => tool.name === "edit")).toBe(registeredEdit);
+      expect(
+        registry.getDefinitions().filter((definition) => definition.name === "edit")
+      ).toHaveLength(1);
+      expect(isPolicyGatedTool(registeredEdit)).toBe(true);
+
+      const result = await registry.get("edit")?.run(fixture.context, {});
+
+      expect(result).toEqual({
+        success: true,
+        output: "edit executed",
+        outputSummary: "edit executed"
+      });
+      expect(edit.calls).toBe(1);
+      expect(attackerEdit.calls).toBe(0);
+      expect(injectedTool.calls).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
 });
 
 class RecordingTool extends BaseTool {
@@ -4737,7 +6106,7 @@ class RecordingTool extends BaseTool {
 
   constructor(readonly name: string) {
     super();
-    this.description = `Test tool ${name}`;
+    this.description = createCompleteToolDescription(name);
   }
 
   protected async execute(_ctx: ToolContext, input: unknown): Promise<ToolResult> {
@@ -4747,6 +6116,25 @@ class RecordingTool extends BaseTool {
       success: true,
       output: `${this.name} executed`,
       outputSummary: `${this.name} executed`
+    };
+  }
+}
+
+class DivergentDefinitionTool extends RecordingTool {
+  constructor(
+    name: string,
+    private readonly definitionName: string,
+    private readonly definitionDescription: string
+  ) {
+    super(name);
+  }
+
+  override toDefinition(): ToolDefinition {
+    return {
+      ...super.toDefinition(),
+      name: this.definitionName,
+      description: this.definitionDescription,
+      parameters: { leaked: true }
     };
   }
 }
@@ -4761,6 +6149,243 @@ class RequiredCommandRecordingTool extends RecordingTool {
     },
     required: ["command"],
     additionalProperties: true
+  };
+}
+
+class ZodRecordingTool extends RecordingTool {
+  constructor(
+    name: string,
+    readonly parameterSchema: unknown
+  ) {
+    super(name);
+  }
+}
+
+function attemptRegisteredWrapperFieldMutation(
+  tool: BaseTool,
+  replacement: {
+    kind: BaseTool["kind"];
+    requiredModelCapabilities: readonly string[];
+  }
+): void {
+  const mutations: Array<() => void> = [
+    () => {
+      tool.kind = replacement.kind;
+    },
+    () => {
+      tool.requiredModelCapabilities = replacement.requiredModelCapabilities;
+    }
+  ];
+
+  for (const mutate of mutations) {
+    try {
+      mutate();
+    } catch (error) {
+      expect(error).toBeInstanceOf(TypeError);
+    }
+  }
+}
+
+function attemptRegisteredWrapperAuthorityMutation(
+  tool: BaseTool,
+  replacement: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    innerTool: BaseTool;
+    policyGateToolId: string;
+    options: Record<string, unknown>;
+  }
+): void {
+  const mutableTool = tool as BaseTool & {
+    innerTool?: BaseTool;
+    policyGateToolId?: string;
+    options?: unknown;
+  };
+  const exposedOptions = mutableTool.options;
+  if (exposedOptions !== null && typeof exposedOptions === "object") {
+    const mutableOptions = exposedOptions as Record<string, unknown>;
+    attemptMutation(() => {
+      mutableOptions.evaluate = replacement.options.evaluate;
+    });
+    attemptMutation(() => {
+      Object.defineProperty(mutableOptions, "evaluate", {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: replacement.options.evaluate
+      });
+    });
+  }
+
+  const replacements: Record<string, unknown> = {
+    name: replacement.name,
+    description: replacement.description,
+    parameters: replacement.parameters,
+    innerTool: replacement.innerTool,
+    policyGateToolId: replacement.policyGateToolId,
+    options: replacement.options
+  };
+
+  for (const [field, value] of Object.entries(replacements)) {
+    attemptMutation(() => {
+      (mutableTool as unknown as Record<string, unknown>)[field] = value;
+    });
+    attemptMutation(() => {
+      Object.defineProperty(mutableTool, field, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value
+      });
+    });
+  }
+}
+
+function expectWrapperAuthorityPropertiesHardened(tool: BaseTool): void {
+  expect(Object.isExtensible(tool)).toBe(false);
+  for (const field of [
+    "name",
+    "description",
+    "parameters",
+    "innerTool",
+    "policyGateToolId"
+  ] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(tool, field);
+    expect(descriptor).toBeDefined();
+    if (!descriptor || !("get" in descriptor)) {
+      throw new Error(`${field} should be a hardened accessor property`);
+    }
+    expect(descriptor.configurable).toBe(false);
+    expect(descriptor.set).toBeUndefined();
+  }
+  for (const field of ["kind", "requiredModelCapabilities"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(tool, field);
+    expect(descriptor).toBeDefined();
+    if (!descriptor || !("writable" in descriptor)) {
+      throw new Error(`${field} should be a hardened data property`);
+    }
+    expect(descriptor.configurable).toBe(false);
+    expect(descriptor.writable).toBe(false);
+  }
+  expect(Object.prototype.hasOwnProperty.call(tool, "options")).toBe(false);
+}
+
+function monkeyPatchZodSafeParseToAccept(schema: unknown, data: unknown): void {
+  const mutableSchema = schema as {
+    safeParse(input: unknown): unknown;
+  };
+  const replacement = () => ({
+    success: true,
+    data
+  });
+  const patched = attemptMutation(() => {
+    mutableSchema.safeParse = replacement;
+  });
+  if (patched) {
+    expect(mutableSchema.safeParse({ command: 42 })).toEqual({
+      success: true,
+      data
+    });
+  }
+}
+
+function createDeepFakeZodLikeSchema(depth: number): unknown {
+  const root: Record<string, unknown> = {
+    safeParse: () => ({
+      success: true,
+      data: {
+        command: "fake"
+      }
+    })
+  };
+  let current = root;
+  for (let index = 0; index < depth; index += 1) {
+    const child: Record<string, unknown> = {};
+    current.child = child;
+    current = child;
+  }
+  return root;
+}
+
+function createNestedRecord(depth: number): Record<string, unknown> {
+  let current: Record<string, unknown> = {
+    leaf: true
+  };
+  for (let index = 0; index < depth; index += 1) {
+    current = {
+      child: current
+    };
+  }
+  return current;
+}
+
+function createWideRecord(width: number): Record<string, unknown> {
+  return Object.fromEntries(
+    Array.from({ length: width }, (_, index) => [`field${index}`, index])
+  );
+}
+
+function attemptZodCommandShapeMutationToAcceptNumber(schema: unknown): void {
+  const mutableSchema = schema as {
+    def?: unknown;
+    _def?: unknown;
+  };
+  let attemptedMutations = 0;
+
+  for (const def of [mutableSchema.def, mutableSchema._def]) {
+    if (!isRecordLike(def)) {
+      continue;
+    }
+
+    const shape = def.shape;
+    if (!isRecordLike(shape)) {
+      continue;
+    }
+
+    attemptedMutations += 1;
+    attemptMutation(() => {
+      shape.command = z.unknown();
+    });
+    attemptedMutations += 1;
+    attemptMutation(() => {
+      Object.defineProperty(shape, "command", {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: z.unknown()
+      });
+    });
+  }
+
+  expect(attemptedMutations).toBeGreaterThan(0);
+}
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function createCompleteToolDescription(name: string): string {
+  return [
+    `何时该用: Use ${name} when a test needs a policy-gated tool fixture.`,
+    `何时不该用: Do not use ${name} to exercise real filesystem, model, or SHUD solver behavior.`,
+    `成功与失败样态: Success records the input and returns a fixture result; failure is injected by the wrapper or test harness.`
+  ].join("\n");
+}
+
+function createMinimalShudRuntimeRegistryOptions(
+  overrides: Partial<{
+    tools: readonly BaseTool[];
+    role: "coordinator" | "repo_explorer" | "worker" | "coder" | "reviewer";
+  }> = {}
+) {
+  return {
+    protectedRawPaths: ["/tmp/shud-harness-test/data/raw"],
+    allowedWriteRoots: ["/tmp/shud-harness-test/workspace"],
+    tempRoot: "/tmp/shud-harness-test/tmp",
+    profileRoot: "/tmp/shud-harness-test/profiles",
+    fuseRules: [],
+    ...overrides
   };
 }
 
@@ -4897,6 +6522,31 @@ function expectOuterRawRuleMisconfiguration(result: ToolResult | undefined): voi
   expect(payload.profile_path).toBeUndefined();
   expect(payload.remediation?.next_action).toBe("fix_and_retry");
   expect(payload.remediation?.hint).toContain("RawDataSandboxedBashTool");
+  expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+}
+
+function expectToolParameterSchemaValidationDenial(result: ToolResult | undefined): void {
+  expect(result?.success).toBe(false);
+  expect(result?.output).toContain("policy_gate_denied");
+  expect(result?.output).toContain("tool-parameter-schema-validation");
+  const payload = JSON.parse(result?.output ?? "{}") as {
+    error?: string;
+    ruleId?: string;
+    reason?: string;
+    remediation?: {
+      next_action?: string;
+      hint?: string;
+      ref?: string;
+    };
+  };
+  expect(payload.error).toBe("policy_gate_denied");
+  expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+  expect(payload.reason).toContain("command");
+  expect(payload.remediation?.next_action).toBe("fix_and_retry");
+  expect(payload.remediation?.hint).toContain("Zod parameter schema");
+  expect(payload.remediation?.ref).toBe(
+    "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+  );
   expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
 }
 

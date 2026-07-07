@@ -61,6 +61,11 @@ const COMMAND_ANALYSIS_MAX_CALLS = 512;
 const PROCESS_PREFLIGHT_ANALYSIS_MAX_LENGTH = 32_000;
 const STREAM_CAPTURE_MAX_CHARS = 64_000;
 const DEFAULT_ABORT_MESSAGE = "Command aborted by user from Session Detail.";
+const RAW_DATA_SANDBOXED_BASH_DESCRIPTION = [
+  "何时该用: 在 SHUD runtime 中执行需要 shell 的本机命令，并让 raw/evidence 写保护与 fuse 规则生效。",
+  "何时不该用: 不用于修改受保护 raw data 或 evidence 路径，不用于替代结构化领域工具和 PI 审批。",
+  "成功与失败样态: 成功时返回命令输出和摘要；失败时返回 fuse 拒绝、sandbox 拒绝、超时、路径解析或命令退出错误。"
+].join("\n");
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SANDBOX_ENV_ALLOWLIST = new Set([
   "PATH",
@@ -519,7 +524,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
     const metadataTool = new BashTool(cloneFuseRules(fuseRules));
     this.fuseChecker = new FuseListChecker(cloneFuseRules(fuseRules));
     this.name = options.toolId ?? metadataTool.name;
-    this.description = metadataTool.description;
+    this.description = RAW_DATA_SANDBOXED_BASH_DESCRIPTION;
     this.parameters = rawDataSandboxedBashParameters(metadataTool.parameters);
     this.kind = metadataTool.kind;
     this.requiredModelCapabilities = metadataTool.requiredModelCapabilities;
