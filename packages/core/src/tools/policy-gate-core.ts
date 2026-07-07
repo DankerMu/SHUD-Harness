@@ -56,7 +56,7 @@ export type PolicyGateDecision =
       ruleId: string;
       reason: string;
       remediation: PolicyGateRemediation;
-      guardClass?: PolicyGuardClass;
+      guardClass: PolicyGuardClass;
     };
 
 export type PolicyGateInputNormalization =
@@ -74,6 +74,11 @@ export interface PolicyRule {
   evaluate(call: PolicyGateToolCall, context: PolicyGateContext): PolicyRuleDecision;
 }
 
+type PolicyRuleGuardClassCarrier = Pick<PolicyRule, "ruleId"> & {
+  guardClass?: unknown;
+  guard_class?: unknown;
+};
+
 export interface PolicyGateContext {
   rules: readonly PolicyRule[];
 }
@@ -88,20 +93,25 @@ export function evaluatePolicyGate(
 ): PolicyGateDecision {
   assertPolicyGateContextGuardClasses(context);
 
-  for (const rule of context.rules) {
+  for (const [index, rule] of context.rules.entries()) {
     const result = rule.evaluate(call, context);
     if (result.decision === "allow") {
       continue;
     }
 
     validatePolicyGateRemediation(rule.ruleId, result.remediation);
-    const guardClass = result.guardClass ?? rule.guardClass;
+    const guardClass = result.guardClass ?? readPolicyRuleGuardClass(rule);
+    if (!guardClass) {
+      throw new Error(
+        `Policy gate guard_class lint failed: ${formatPolicyRuleId(rule, index)}: missing or invalid guardClass/guard_class.`
+      );
+    }
     return {
       decision: "deny",
       ruleId: rule.ruleId,
       reason: result.reason,
       remediation: result.remediation,
-      ...(guardClass ? { guardClass } : {})
+      guardClass
     };
   }
 
@@ -113,11 +123,7 @@ export function assertPolicyGateContextGuardClasses(context: PolicyGateContext):
 
   context.rules.forEach((rule, index) => {
     const ruleId = formatPolicyRuleId(rule, index);
-    const parsedGuardClass = PolicyGuardClassSchema.safeParse(
-      (rule as PolicyRule & { guard_class?: unknown }).guardClass ??
-        (rule as PolicyRule & { guard_class?: unknown }).guard_class
-    );
-    if (!parsedGuardClass.success) {
+    if (!readPolicyRuleGuardClass(rule)) {
       failures.push(`${ruleId}: missing or invalid guardClass/guard_class`);
     }
   });
@@ -125,6 +131,30 @@ export function assertPolicyGateContextGuardClasses(context: PolicyGateContext):
   if (failures.length > 0) {
     throw new Error(`Policy gate guard_class lint failed: ${failures.join("; ")}.`);
   }
+}
+
+function readPolicyRuleGuardClass(rule: PolicyRuleGuardClassCarrier): PolicyGuardClass | undefined {
+  const parsedGuardClass = parsePolicyRuleGuardClassValue(rule.guardClass);
+  const parsedSnakeGuardClass = parsePolicyRuleGuardClassValue(rule.guard_class);
+
+  if (parsedGuardClass && parsedSnakeGuardClass) {
+    return parsedGuardClass === parsedSnakeGuardClass ? parsedGuardClass : undefined;
+  }
+  if (parsedGuardClass) {
+    return rule.guard_class === undefined ? parsedGuardClass : undefined;
+  }
+  if (parsedSnakeGuardClass) {
+    return rule.guardClass === undefined ? parsedSnakeGuardClass : undefined;
+  }
+  return undefined;
+}
+
+function parsePolicyRuleGuardClassValue(value: unknown): PolicyGuardClass | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = PolicyGuardClassSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function formatPolicyRuleId(rule: Pick<PolicyRule, "ruleId">, index: number): string {

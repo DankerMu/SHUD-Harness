@@ -1476,7 +1476,8 @@ function buildToolParameterSchemaValidationDeny(
       next_action: "fix_and_retry",
       hint: `Adjust the tool input to match its Zod parameter schema before retrying; ${issueSummary}.`,
       ref: CONTROL_KERNEL_TOOL_GOVERNANCE_REF
-    }
+    },
+    guardClass: "authority"
   };
 }
 
@@ -1525,7 +1526,8 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
 
   const parsedGuardClass =
     rawGuardClass === undefined ? undefined : PolicyGuardClassSchema.safeParse(rawGuardClass);
-  if (parsedGuardClass && !parsedGuardClass.success) {
+  const guardClass = parsedGuardClass?.success ? parsedGuardClass.data : undefined;
+  if (!guardClass) {
     issuePaths.push("guardClass");
   }
 
@@ -1533,7 +1535,8 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
     issuePaths.length > 0 ||
     validRuleId === undefined ||
     validReason === undefined ||
-    !remediation
+    !remediation ||
+    !guardClass
   ) {
     const ruleLabel = validRuleId && validRuleId.trim() !== "" ? validRuleId : "<missing>";
     const invalidFields = issuePaths.length > 0 ? issuePaths : ["decision"];
@@ -1547,7 +1550,7 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
     ruleId: validRuleId,
     reason: validReason,
     remediation,
-    ...(parsedGuardClass?.success ? { guardClass: parsedGuardClass.data } : {})
+    guardClass
   };
 }
 

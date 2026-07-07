@@ -82,6 +82,43 @@ describe("policy-gated zero tool registry", () => {
     );
   });
 
+  test("policy gate evaluator propagates snake_case rule guard_class to denial payloads", async () => {
+    const bashTool = new RecordingTool("bash");
+    const registry = createPolicyGatedToolRegistry([bashTool], {
+      evaluate: createPolicyGateEvaluator({
+        rules: [
+          {
+            ruleId: "registry-snake-guard",
+            description: "Uses spec-shaped guard_class metadata.",
+            guard_class: "authority",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "snake_case rule metadata denied",
+              remediation: {
+                next_action: "adjust_scope",
+                hint: "Use a governed tool input.",
+                ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+              }
+            })
+          } as never
+        ]
+      })
+    });
+
+    const result = await registry.get("bash")?.run(createToolContext("worker"), {
+      command: "printf nope > workspace/out.txt"
+    });
+
+    expect(result?.success).toBe(false);
+    expect(bashTool.calls).toBe(0);
+    const payload = JSON.parse(result?.output ?? "{}") as {
+      ruleId?: string;
+      guard_class?: string;
+    };
+    expect(payload.ruleId).toBe("registry-snake-guard");
+    expect(payload.guard_class).toBe("authority");
+  });
+
   test("denies before executing the underlying bash BaseTool", async () => {
     const bashTool = new RecordingTool("bash");
     const registry = createPolicyGatedToolRegistry([bashTool], {
@@ -2012,7 +2049,8 @@ describe("policy-gated zero tool registry", () => {
           next_action: "fix_and_retry",
           hint: `Remove the outer raw rule containing ${secret}.`,
           ref: `openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md#${secret}`
-        }
+        },
+        guardClass: "authority"
       })
     });
 
@@ -2217,7 +2255,8 @@ describe("policy-gated zero tool registry", () => {
               next_action: "adjust_scope",
               hint: "Use a registry-authorized input.",
               ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-            }
+            },
+            guardClass: "authority"
           };
         }
         return { decision: "allow" };
@@ -2409,7 +2448,8 @@ describe("policy-gated zero tool registry", () => {
           next_action: "adjust_scope",
           hint: "Use a tool allowed by the registry owner.",
           ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-        }
+        },
+        guardClass: "authority"
       })
     });
     const staleReplacementInnerTool = new RecordingTool("edit");
@@ -2440,7 +2480,8 @@ describe("policy-gated zero tool registry", () => {
           next_action: "adjust_scope",
           hint: "Use a registry-authorized input.",
           ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-        }
+        },
+        guardClass: "authority"
       })
     });
     const fakeOptions = {
@@ -2495,7 +2536,8 @@ describe("policy-gated zero tool registry", () => {
           next_action: "adjust_scope",
           hint: "Use a registry-authorized input.",
           ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-        }
+        },
+        guardClass: "authority"
       })
     });
     const registeredTool = registry.get("generic.tools.authority");
@@ -3149,7 +3191,8 @@ describe("policy-gated zero tool registry", () => {
             next_action: "adjust_scope",
             hint: "Use a tool allowed for this role.",
             ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-          }
+          },
+          guardClass: "authority"
         };
       }
     });
@@ -3230,7 +3273,8 @@ describe("policy-gated zero tool registry", () => {
               next_action: "adjust_scope",
               hint: "Lower the parsed count before retrying.",
               ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-            }
+            },
+            guardClass: "authority"
           };
         }
         return { decision: "allow" };
@@ -5039,7 +5083,8 @@ describe("policy-gated zero tool registry", () => {
                 next_action: "adjust_scope",
                 hint: "Use a different reviewer delegation path.",
                 ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-              }
+              },
+              guardClass: "authority"
             };
           }
           return { decision: "allow" };
@@ -5341,7 +5386,8 @@ describe("policy-gated zero tool registry", () => {
             next_action: "adjust_scope",
             hint: "Use a different canonical subset for this task.",
             ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-          }
+          },
+          guardClass: "authority"
         })
       });
 
@@ -5366,8 +5412,63 @@ describe("policy-gated zero tool registry", () => {
         reason?: string;
       };
       expect(payload.ruleId).toBe("custom-canonical-subset-deny");
-      expect(payload.guard_class).toBeUndefined();
+      expect(payload.guard_class).toBe("authority");
       expect(payload.reason).toBe("custom evaluator denied canonical subset");
+      expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime custom evaluator deny requires guard classification", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async () =>
+          ({
+            decision: "deny",
+            ruleId: "custom-unclassified-deny",
+            reason: "custom evaluator denied without classification",
+            remediation: {
+              next_action: "adjust_scope",
+              hint: "Add guardClass before returning a policy denial.",
+              ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+            }
+          }) as never
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run a worker task.",
+          role: "worker",
+          tools: ["read"]
+        }
+      );
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("Invalid policy gate decision");
+      expect(result?.output).toContain("custom-unclassified-deny");
+      expect(result?.output).toContain("guardClass");
+      expect(result?.output).not.toContain("policy_gate_denied");
       expect(agentControl.getSpawnCalls()).toBe(0);
     } finally {
       await fixture.cleanup();
@@ -5703,7 +5804,8 @@ describe("policy-gated zero tool registry", () => {
             next_action: "adjust_scope",
             hint: "Use an allowed tool for this role.",
             ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-          }
+          },
+          guardClass: "authority"
         })
       });
 
@@ -5994,7 +6096,8 @@ describe("policy-gated zero tool registry", () => {
             next_action: "adjust_scope",
             hint: "Use an allowed tool for this role.",
             ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-          }
+          },
+          guardClass: "authority"
         })
       });
 
@@ -6029,7 +6132,8 @@ describe("policy-gated zero tool registry", () => {
             next_action: "adjust_scope",
             hint: "Use an allowed tool for this runtime role.",
             ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-          }
+          },
+          guardClass: "authority"
         })
       });
       const staleReplacementInnerTool = new RecordingTool("edit");

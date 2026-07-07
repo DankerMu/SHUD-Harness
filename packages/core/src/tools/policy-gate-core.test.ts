@@ -97,6 +97,39 @@ describe("policy gate pure evaluator", () => {
     );
   });
 
+  test("snake_case guard_class metadata propagates into deny decisions", () => {
+    const decision = evaluatePolicyGate(sampleToolCall(), {
+      rules: [
+        {
+          ruleId: "snake-case-guard",
+          description: "Uses spec-shaped guard_class metadata.",
+          guard_class: "authority",
+          evaluate: () => ({
+            decision: "deny",
+            reason: "snake_case guard denied",
+            remediation: {
+              next_action: "adjust_scope",
+              hint: "Use a governed scope.",
+              ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+            }
+          })
+        } as never
+      ]
+    });
+
+    expect(decision).toEqual({
+      decision: "deny",
+      ruleId: "snake-case-guard",
+      reason: "snake_case guard denied",
+      remediation: {
+        next_action: "adjust_scope",
+        hint: "Use a governed scope.",
+        ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+      },
+      guardClass: "authority"
+    });
+  });
+
   test("remediation payload requires legal next_action plus hint and ref", () => {
     const valid = PolicyGateRemediationSchema.safeParse({
       next_action: "fix_and_retry",
