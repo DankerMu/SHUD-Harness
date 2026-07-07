@@ -499,11 +499,14 @@ class ShudSpawnAgentTool extends SpawnAgentTool {
 }
 
 class LintEnforcingPolicyGatedToolRegistry extends ToolRegistry {
-  private readonly options: LintEnforcingPolicyGatedToolRegistryOptions;
+  #options: LintEnforcingPolicyGatedToolRegistryOptions;
+  #tools = new Map<string, PolicyGatedTool>();
 
   constructor(options: LintEnforcingPolicyGatedToolRegistryOptions) {
     super();
-    this.options = { ...options };
+    this.#options = { ...options };
+    hardenInheritedZeroToolMap(this);
+    Object.preventExtensions(this);
   }
 
   override register(tool: BaseTool): void {
@@ -511,25 +514,51 @@ class LintEnforcingPolicyGatedToolRegistry extends ToolRegistry {
     const candidateTools = buildRegistrationCandidateTools(this.list(), ownedTool);
     assertAllToolsPolicyGated(candidateTools);
     assertPolicyGatedToolRegistrationLint(candidateTools, {
-      role: this.options.role,
+      role: this.#options.role,
       requireDescriptionSections: true
     });
-    super.register(ownedTool);
+    this.#tools.set(ownedTool.name, ownedTool);
+  }
+
+  override get(name: string): BaseTool | undefined {
+    return this.#tools.get(name);
+  }
+
+  override list(): BaseTool[] {
+    return Array.from(this.#tools.values());
+  }
+
+  override getDefinitions(): ToolDefinition[] {
+    return this.list().map((tool) => tool.toDefinition());
+  }
+
+  override has(name: string): boolean {
+    return this.#tools.has(name);
   }
 
   private wrapWithRegistryAuthority(tool: BaseTool): PolicyGatedTool {
     const unwrappedTool = unwrapPolicyGatedTool(tool);
-    const normalizedTool = this.options.normalizeTool?.(unwrappedTool) ?? unwrappedTool;
+    const normalizedTool = this.#options.normalizeTool?.(unwrappedTool) ?? unwrappedTool;
     const validateExecutionInput =
-      this.options.resolveValidateExecutionInput?.(normalizedTool) ??
-      this.options.validateExecutionInput;
+      this.#options.resolveValidateExecutionInput?.(normalizedTool) ??
+      this.#options.validateExecutionInput;
     return wrapToolWithPolicyGate(normalizedTool, {
-      evaluate: this.options.evaluate,
-      role: this.options.role,
+      evaluate: this.#options.evaluate,
+      role: this.#options.role,
       toolId: normalizedTool.name,
       validateExecutionInput
     });
   }
+}
+
+function hardenInheritedZeroToolMap(registry: ToolRegistry): void {
+  const inheritedTools = (registry as unknown as { tools?: unknown }).tools;
+  Object.defineProperty(registry, "tools", {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: inheritedTools instanceof Map ? inheritedTools : new Map<string, BaseTool>()
+  });
 }
 
 function buildRegistrationCandidateTools(

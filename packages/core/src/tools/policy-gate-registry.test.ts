@@ -2411,6 +2411,116 @@ describe("policy-gated zero tool registry", () => {
     expect(staleReplacementInnerTool.calls).toBe(0);
   });
 
+  test("factory-returned registry keeps evaluator authority after visible options mutation", async () => {
+    const registry = createPolicyGatedToolRegistry([new RecordingTool("generic.authority")], {
+      evaluate: async () => ({
+        decision: "deny",
+        ruleId: "registry-owned-deny",
+        reason: "blocked by registry-owned evaluator",
+        remediation: {
+          next_action: "adjust_scope",
+          hint: "Use a registry-authorized input.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        }
+      })
+    });
+    const fakeOptions = {
+      evaluate: async () => ({ decision: "allow" as const })
+    };
+    const mutableRegistry = registry as unknown as {
+      options?: typeof fakeOptions;
+    };
+
+    if (mutableRegistry.options && typeof mutableRegistry.options === "object") {
+      attemptMutation(() => {
+        mutableRegistry.options!.evaluate = fakeOptions.evaluate;
+      });
+    }
+    attemptMutation(() => {
+      mutableRegistry.options = fakeOptions;
+    });
+    attemptMutation(() => {
+      Object.defineProperty(mutableRegistry, "options", {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: fakeOptions
+      });
+    });
+
+    const replacementTool = new RecordingTool("generic.authority");
+    expect(() => registry.register(replacementTool)).not.toThrow();
+    const registeredReplacement = registry.get("generic.authority");
+    expect(isPolicyGatedTool(registeredReplacement!)).toBe(true);
+    expect(isPolicyGatedTool(registeredReplacement!) && registeredReplacement.innerTool).toBe(
+      replacementTool
+    );
+    expect((registry as unknown as { options?: unknown }).options).toBeUndefined();
+
+    const result = await registeredReplacement?.run(createToolContext("worker"), {});
+
+    expect(result?.success).toBe(false);
+    expect(result?.output).toContain("policy_gate_denied");
+    expect(result?.output).toContain("registry-owned-deny");
+    expect(replacementTool.calls).toBe(0);
+  });
+
+  test("factory-returned registry public methods ignore inherited tools map mutation", async () => {
+    const originalTool = new RecordingTool("generic.tools.authority");
+    const registry = createPolicyGatedToolRegistry([originalTool], {
+      evaluate: async () => ({
+        decision: "deny",
+        ruleId: "registry-owned-deny",
+        reason: "blocked by registry-owned evaluator",
+        remediation: {
+          next_action: "adjust_scope",
+          hint: "Use a registry-authorized input.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        }
+      })
+    });
+    const registeredTool = registry.get("generic.tools.authority");
+    const attackerTool = new RecordingTool("generic.tools.authority");
+    const injectedTool = new RecordingTool("generic.tools.injected");
+    const mutableRegistry = registry as unknown as {
+      tools?: Map<string, BaseTool>;
+    };
+
+    if (mutableRegistry.tools instanceof Map) {
+      mutableRegistry.tools.set("generic.tools.authority", attackerTool);
+      mutableRegistry.tools.set("generic.tools.injected", injectedTool);
+      mutableRegistry.tools.delete("generic.tools.authority");
+      mutableRegistry.tools.clear();
+    }
+    attemptMutation(() => {
+      mutableRegistry.tools = new Map([
+        ["generic.tools.authority", attackerTool],
+        ["generic.tools.injected", injectedTool]
+      ]);
+    });
+
+    expect(registry.get("generic.tools.authority")).toBe(registeredTool);
+    expect(registry.get("generic.tools.injected")).toBeUndefined();
+    expect(registry.has("generic.tools.authority")).toBe(true);
+    expect(registry.has("generic.tools.injected")).toBe(false);
+    expect(registry.list()).toEqual([registeredTool]);
+    expect(registry.getDefinitions().map((definition) => definition.name)).toEqual([
+      "generic.tools.authority"
+    ]);
+    expect(isPolicyGatedTool(registeredTool!)).toBe(true);
+
+    const result = await registry
+      .get("generic.tools.authority")
+      ?.run(createToolContext("worker"), {});
+
+    expect(result?.success).toBe(false);
+    expect(result?.output).toContain("policy_gate_denied");
+    expect(result?.output).toContain("registry-owned-deny");
+    expect(originalTool.calls).toBe(0);
+    expect(attackerTool.calls).toBe(0);
+    expect(injectedTool.calls).toBe(0);
+  });
+
   test("factory-returned registry wraps post-return unwrapped tool registration", () => {
     const registry = createPolicyGatedToolRegistry([new RecordingTool("generic.good")], {
       evaluate: async () => ({ decision: "allow" })
@@ -5752,6 +5862,66 @@ describe("policy-gated zero tool registry", () => {
       expect(result?.output).toContain("policy_gate_denied");
       expect(result?.output).toContain("runtime-owned-deny");
       expect(staleReplacementInnerTool.calls).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime registry public methods ignore inherited tools map mutation for edit", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const edit = new RecordingTool("edit");
+      const registry = createShudRuntimeToolRegistry({
+        tools: [edit],
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: []
+      });
+      const registeredEdit = registry.get("edit");
+      if (!registeredEdit) {
+        throw new Error("edit should be registered in the SHUD runtime registry");
+      }
+      const attackerEdit = new RecordingTool("edit");
+      const injectedTool = new RecordingTool("runtime.injected");
+      const mutableRegistry = registry as unknown as {
+        tools?: Map<string, BaseTool>;
+      };
+
+      if (mutableRegistry.tools instanceof Map) {
+        mutableRegistry.tools.set("edit", attackerEdit);
+        mutableRegistry.tools.set("runtime.injected", injectedTool);
+        mutableRegistry.tools.delete("edit");
+        mutableRegistry.tools.clear();
+      }
+      attemptMutation(() => {
+        mutableRegistry.tools = new Map([
+          ["edit", attackerEdit],
+          ["runtime.injected", injectedTool]
+        ]);
+      });
+
+      expect(registry.get("edit")).toBe(registeredEdit);
+      expect(registry.get("runtime.injected")).toBeUndefined();
+      expect(registry.has("edit")).toBe(true);
+      expect(registry.has("runtime.injected")).toBe(false);
+      expect(registry.list().find((tool) => tool.name === "edit")).toBe(registeredEdit);
+      expect(
+        registry.getDefinitions().filter((definition) => definition.name === "edit")
+      ).toHaveLength(1);
+      expect(isPolicyGatedTool(registeredEdit)).toBe(true);
+
+      const result = await registry.get("edit")?.run(fixture.context, {});
+
+      expect(result).toEqual({
+        success: true,
+        output: "edit executed",
+        outputSummary: "edit executed"
+      });
+      expect(edit.calls).toBe(1);
+      expect(attackerEdit.calls).toBe(0);
+      expect(injectedTool.calls).toBe(0);
     } finally {
       await fixture.cleanup();
     }
