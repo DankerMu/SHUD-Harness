@@ -414,3 +414,59 @@ Review focus:
 - The comparison directly references #24 constants and never duplicates the profile table.
 - Runtime tests exercise Zero's real `tools` input name, while PR evidence states it is the implementation of spec `allowed_tools`.
 - Denial occurs before the underlying spawn tool can create a subagent and gives an actionable `adjust_scope` remediation.
+
+## Subagent Workflow Fixture - Issue #25
+
+Fixture level: expanded
+Project profile: SHUD-Harness
+Change surface:
+- `packages/core/src/tools/policy-gate-registry.ts`
+- `packages/core/src/tools/policy-gate-registry.test.ts`
+
+Must preserve:
+- Existing policy-gated wrapper behavior: evaluator denials and input-preparation failures happen before inner tool execution and return structured payloads.
+- Existing spawn profile subset behavior and #24 role-map comparison semantics.
+- Existing raw-data sandbox registry behavior, including `bash` / `sandbox.exec` wrapping and raw-denial ownership.
+- `zero/` remains source-clean and pinned; no Zero source edits.
+
+Must add/change:
+- Register-time lint at the #17 tool registration/wrap seam.
+- Per-role visible tool count budget: `<= 20`; the 21st visible tool is rejected with role and excess count.
+- Tool description completeness check for the three Control_Kernel §5.3 sections: `何时该用`, `何时不该用`, `成功与失败样态`.
+- Zod parameter schema validation before inner tool execution; validation failure returns structured rejection payload with `remediation{next_action,hint,ref}`.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - tool registration and wrapped tool execution are shared entrypoints.
+- Config / project setup: not selected - no package manager, provider, or environment setup changes.
+- File IO / path safety / overwrite: not selected - no file mutation behavior beyond tests.
+- Schema / columns / units / field names: selected - tool parameter schema and rejection payload shape are contracts.
+- Auth / permissions / secrets: selected - role-visible tool budgets enforce the tool authority surface.
+- Concurrency / shared state / ordering: not selected - no shared runtime state or scheduling changes.
+- Resource limits / large input / discovery: selected - per-role tool count is an explicit resource/cognitive budget.
+- Legacy compatibility / examples: selected - existing policy-gate, spawn subset, and raw sandbox tests must remain green.
+- Error handling / rollback / partial outputs: selected - schema validation failure must be non-silent and pre-execution.
+- Release / packaging / dependency compatibility: selected - no new dependency; Bun/TypeScript checks must remain compatible.
+- Documentation / migration notes: selected - PR evidence must call out the lint boundary and non-goals.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: not selected - no scientific decision or evidence claim changes.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no solver/runtime behavior changes.
+- Zero adapter / tool registry / agent role governance: selected - this is the core shared boundary.
+
+Required evidence:
+- Focused Bun tests: 21st role-visible tool registration -> assembly failure with role and excess count.
+- Focused Bun tests: missing `何时不该用` description section -> assembly failure with missing section.
+- Focused Bun tests: Zod parameter schema failure -> inner tool not executed and structured rejection payload includes remediation three fields.
+- Compatibility: `bun run test:policy-gate` and `bun run check`.
+- `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`.
+
+Non-goals:
+- Changing `ROLE_TOOL_MAP` contents or #24 snapshot oracle.
+- `guard_class` assembly lint; remains #26.
+- Spawn depth/concurrency hard limits; remain #27.
+- Adding new runtime dependencies or editing Zero source.
+
+Review focus:
+- Lint is applied at registry assembly/wrap time, not as a late runtime note.
+- The description-section check is exact enough to fail missing required sections while preserving existing valid tools.
+- Zod validation failures are returned as structured policy-gate-style denials and do not execute inner tools.
+- Existing registry and sandbox behavior remains compatible.

@@ -59,6 +59,11 @@
 
 - [ ] 5.1 [GRILL-2] role→tool_id canonical 映射表常量（领域工具 id 遵 Zero_Reuse_Matrix §10 点分注册名）+ 快照测试 + 语义不变式单测（只读角色无写工具 / spawn 权唯一 / coordinator 无 bash / coder 独占 edit+patch）——依赖: 2.1
 - [ ] 5.2 注册期 lint（≤20/角色 + 描述三节完整性 + Zod 参数校验回吐）+ 负例测试（挂 3.1 横切点）——依赖: 3.1
+  - Evidence floor (#25):
+    - Registering a role-visible tool set with 21 tools fails during registry assembly and reports the role plus the excess count.
+    - Registering a tool whose description lacks `何时不该用` fails during registry assembly and reports the missing section.
+    - A Zod parameter schema validation failure prevents inner tool execution and returns a structured rejection payload containing `remediation{next_action,hint,ref}`.
+    - Existing policy-gated registry, spawn subset, and raw sandbox tests remain compatible; `git -C zero diff --quiet` still passes.
 - [ ] 5.3 硬护栏 guard_class 标注（authority|capability）+ 未标注装配失败负例——依赖: 3.1
 - [ ] 5.4 spawn depth/并发上限 kernel 硬校验（Control_Kernel §5：depth >1 拒绝且含 remediation 三字段；活跃子代理 =3 时新 spawn 非 allow——纯函数负例，真实排队调度随 M3 spawn 接线）+ guard_class 标注——依赖: 3.2
 

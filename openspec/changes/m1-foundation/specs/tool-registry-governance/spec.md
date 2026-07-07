@@ -81,6 +81,11 @@
 - **WHEN** 注册的工具描述缺少"何时不该用"节
 - **THEN** 注册期 lint 失败并指出缺失节
 
+#### Scenario: 参数 schema 校验失败回吐拒绝载荷
+
+- **WHEN** 注册工具的 Zod 参数 schema 校验调用输入失败
+- **THEN** 工具不会执行，返回结构化拒绝载荷，且载荷包含 `remediation.next_action`、`remediation.hint`、`remediation.ref`
+
 ### Requirement: 硬护栏 guard_class 标注
 
 M1 落地的每条硬护栏——路径写禁区（policy-gate-spike 条 2'，执行层沙箱护栏与其 advisory 层均须标注）、spawn 剖面子集校验（policy-gate-spike 条 3）、spawn depth 上限与并发上限（本 spec「spawn depth 与并发上限硬校验」requirement）——SHALL 标注 `guard_class ∈ {authority, capability}`（Control_Kernel §5.2 分类），为换代减重审查留数据基础；存在未标注护栏时装配或 lint MUST 失败。

@@ -14,6 +14,7 @@ import type {
   ToolLogger,
   ToolResult
 } from "@zero-os/shared";
+import { z } from "zod";
 import {
   PolicyGateRemediationSchema,
   SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS,
@@ -2080,6 +2081,101 @@ describe("policy-gated zero tool registry", () => {
     expect(spawnTool.lastInput).not.toHaveProperty("allowed_tools");
     expect(spawnTool.lastInput).not.toHaveProperty("ignoredBlob");
     expect(spawnTool.lastInput).not.toHaveProperty("ignoredFunction");
+  });
+
+  test("SHUD runtime assembly rejects the 21st role-visible tool", () => {
+    const tools = Array.from({ length: 19 }, (_, index) => new RecordingTool(`extra.${index}`));
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          role: "worker",
+          tools
+        })
+      )
+    ).toThrow(
+      /Policy-gated tool registration lint failed for role worker: visible tool count 21 exceeds 20; excess count 1/
+    );
+  });
+
+  test("SHUD runtime assembly rejects tool descriptions missing required sections", () => {
+    const badTool = new RecordingTool("bad.description");
+    badTool.description = [
+      "何时该用: Use this fixture for description lint tests.",
+      "成功与失败样态: Success returns a fixture result; failure throws during assembly."
+    ].join("\n");
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          tools: [badTool]
+        })
+      )
+    ).toThrow(/bad\.description: missing 何时不该用/);
+  });
+
+  test("Zod parameter schema rejection finalizes without executing the inner tool", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.parameters",
+      z.object({
+        command: z.string()
+      })
+    );
+    const runningToolRegistry = new TestRunningToolRegistry();
+    const handle = runningToolRegistry.register({
+      toolUseId: "POLICY-ZOD-1",
+      toolName: "zod.parameters",
+      abortable: false
+    });
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(
+      {
+        ...createToolContext("worker"),
+        currentToolUseId: "POLICY-ZOD-1",
+        runningToolRegistry
+      },
+      {
+        command: 42
+      }
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_denied");
+    expect(result.output).toContain("tool-parameter-schema-validation");
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      ruleId?: string;
+      reason?: string;
+      remediation?: {
+        next_action?: string;
+        hint?: string;
+        ref?: string;
+      };
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.reason).toContain("command");
+    expect(payload.remediation?.next_action).toBe("fix_and_retry");
+    expect(payload.remediation?.hint).toContain("Zod parameter schema");
+    expect(payload.remediation?.ref).toBe(
+      "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+    );
+    expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+    expect(evaluatorCalls).toBe(0);
+    expect(zodTool.calls).toBe(0);
+    expect(handle.getState()).toBe("finished");
+    expect(handle.getTerminalMetadata()).toMatchObject({
+      cause: "completed",
+      success: false,
+      outputSummary: result.outputSummary
+    });
   });
 
   test("assembly fails when any registered zero tool bypasses the wrapper", () => {
@@ -4737,7 +4833,7 @@ class RecordingTool extends BaseTool {
 
   constructor(readonly name: string) {
     super();
-    this.description = `Test tool ${name}`;
+    this.description = createCompleteToolDescription(name);
   }
 
   protected async execute(_ctx: ToolContext, input: unknown): Promise<ToolResult> {
@@ -4761,6 +4857,39 @@ class RequiredCommandRecordingTool extends RecordingTool {
     },
     required: ["command"],
     additionalProperties: true
+  };
+}
+
+class ZodRecordingTool extends RecordingTool {
+  constructor(
+    name: string,
+    readonly parameterSchema: unknown
+  ) {
+    super(name);
+  }
+}
+
+function createCompleteToolDescription(name: string): string {
+  return [
+    `何时该用: Use ${name} when a test needs a policy-gated tool fixture.`,
+    `何时不该用: Do not use ${name} to exercise real filesystem, model, or SHUD solver behavior.`,
+    `成功与失败样态: Success records the input and returns a fixture result; failure is injected by the wrapper or test harness.`
+  ].join("\n");
+}
+
+function createMinimalShudRuntimeRegistryOptions(
+  overrides: Partial<{
+    tools: readonly BaseTool[];
+    role: "coordinator" | "repo_explorer" | "worker" | "coder" | "reviewer";
+  }> = {}
+) {
+  return {
+    protectedRawPaths: ["/tmp/shud-harness-test/data/raw"],
+    allowedWriteRoots: ["/tmp/shud-harness-test/workspace"],
+    tempRoot: "/tmp/shud-harness-test/tmp",
+    profileRoot: "/tmp/shud-harness-test/profiles",
+    fuseRules: [],
+    ...overrides
   };
 }
 
