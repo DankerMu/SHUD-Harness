@@ -2097,6 +2097,500 @@ describe("policy-gated zero tool registry", () => {
     });
   });
 
+  test("custom evaluator decision snapshot rejects Proxy and accessor candidates without leaking trap text", async () => {
+    const proxySentinel = "EVALUATOR_PROXY_DECISION_TRAP_SECRET";
+    let proxyGetCalls = 0;
+    let proxyDescriptorCalls = 0;
+    const proxyTool = new RecordingTool("decision.proxy.evaluator");
+    const proxyDecision = new Proxy(
+      {
+        decision: "deny" as const,
+        ruleId: "proxy-evaluator-decision",
+        reason: "proxy evaluator decision should fail before property reads",
+        remediation: {
+          next_action: "fix_and_retry" as const,
+          hint: "Return a plain decision object before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "capability" as const
+      },
+      {
+        get() {
+          proxyGetCalls += 1;
+          throw new Error(proxySentinel);
+        },
+        getOwnPropertyDescriptor() {
+          proxyDescriptorCalls += 1;
+          throw new Error(proxySentinel);
+        }
+      }
+    );
+    const proxyWrapped = wrapToolWithPolicyGate(proxyTool, {
+      evaluate: () => proxyDecision
+    });
+
+    const proxyResult = await proxyWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(proxyResult, proxySentinel);
+    expect(proxyGetCalls).toBe(0);
+    expect(proxyDescriptorCalls).toBe(0);
+    expect(proxyTool.calls).toBe(0);
+
+    const accessorSentinel = "EVALUATOR_ACCESSOR_DECISION_SECRET";
+    let accessorReads = 0;
+    const accessorTool = new RecordingTool("decision.accessor.evaluator");
+    const accessorDecision: Record<string, unknown> = {
+      ruleId: "accessor-evaluator-decision",
+      reason: "accessor evaluator decision should fail before getter reads",
+      remediation: {
+        next_action: "fix_and_retry",
+        hint: "Return a data-property decision before retrying.",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      },
+      guardClass: "capability"
+    };
+    Object.defineProperty(accessorDecision, "decision", {
+      enumerable: true,
+      get() {
+        accessorReads += 1;
+        throw new Error(accessorSentinel);
+      }
+    });
+    const accessorWrapped = wrapToolWithPolicyGate(accessorTool, {
+      evaluate: () => accessorDecision as never
+    });
+
+    const accessorResult = await accessorWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(accessorResult, accessorSentinel);
+    expect(accessorReads).toBe(0);
+    expect(accessorTool.calls).toBe(0);
+  });
+
+  test("execution validator decision snapshot rejects Proxy and accessor denies without leaking trap text", async () => {
+    const proxySentinel = "VALIDATOR_PROXY_DECISION_TRAP_SECRET";
+    let proxyGetCalls = 0;
+    let proxyDescriptorCalls = 0;
+    const proxyTool = new RecordingTool("decision.proxy.validator");
+    const proxyDecision = new Proxy(
+      {
+        decision: "deny" as const,
+        ruleId: "proxy-validator-decision",
+        reason: "proxy validator decision should fail before property reads",
+        remediation: {
+          next_action: "fix_and_retry" as const,
+          hint: "Return a plain deny decision before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "capability" as const
+      },
+      {
+        get() {
+          proxyGetCalls += 1;
+          throw new Error(proxySentinel);
+        },
+        getOwnPropertyDescriptor() {
+          proxyDescriptorCalls += 1;
+          throw new Error(proxySentinel);
+        }
+      }
+    );
+    const proxyWrapped = wrapToolWithPolicyGate(proxyTool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () => proxyDecision
+    });
+
+    const proxyResult = await proxyWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(proxyResult, proxySentinel);
+    expect(proxyGetCalls).toBe(0);
+    expect(proxyDescriptorCalls).toBe(0);
+    expect(proxyTool.calls).toBe(0);
+
+    const accessorSentinel = "VALIDATOR_ACCESSOR_DECISION_SECRET";
+    let accessorReads = 0;
+    const accessorTool = new RecordingTool("decision.accessor.validator");
+    const accessorDecision: Record<string, unknown> = {
+      decision: "deny",
+      reason: "accessor validator decision should fail before getter reads",
+      remediation: {
+        next_action: "fix_and_retry",
+        hint: "Return data properties for validator denies before retrying.",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      },
+      guardClass: "capability"
+    };
+    Object.defineProperty(accessorDecision, "ruleId", {
+      enumerable: true,
+      get() {
+        accessorReads += 1;
+        throw new Error(accessorSentinel);
+      }
+    });
+    const accessorWrapped = wrapToolWithPolicyGate(accessorTool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () => accessorDecision as never
+    });
+
+    const accessorResult = await accessorWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(accessorResult, accessorSentinel);
+    expect(accessorReads).toBe(0);
+    expect(accessorTool.calls).toBe(0);
+  });
+
+  test("custom evaluator decision snapshot rejects hostile remediation without leaking trap text", async () => {
+    const proxySentinel = "EVALUATOR_REMEDIATION_PROXY_SECRET";
+    let proxyGetCalls = 0;
+    let proxyDescriptorCalls = 0;
+    const proxyTool = new RecordingTool("decision.proxy-remediation.evaluator");
+    const proxyRemediation = new Proxy(
+      {
+        next_action: "fix_and_retry" as const,
+        hint: "Return plain remediation before retrying.",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      },
+      {
+        get() {
+          proxyGetCalls += 1;
+          throw new Error(proxySentinel);
+        },
+        getOwnPropertyDescriptor() {
+          proxyDescriptorCalls += 1;
+          throw new Error(proxySentinel);
+        }
+      }
+    );
+    const proxyWrapped = wrapToolWithPolicyGate(proxyTool, {
+      evaluate: () => ({
+        decision: "deny",
+        ruleId: "proxy-remediation-evaluator",
+        reason: "proxy remediation should fail closed",
+        remediation: proxyRemediation,
+        guardClass: "capability"
+      })
+    });
+
+    const proxyResult = await proxyWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(proxyResult, proxySentinel);
+    expect(proxyResult.output).toContain("remediation");
+    expect(proxyGetCalls).toBe(0);
+    expect(proxyDescriptorCalls).toBe(0);
+    expect(proxyTool.calls).toBe(0);
+
+    const accessorSentinel = "EVALUATOR_REMEDIATION_ACCESSOR_SECRET";
+    let nextActionReads = 0;
+    const accessorTool = new RecordingTool("decision.accessor-remediation.evaluator");
+    const accessorRemediation: Record<string, unknown> = {
+      hint: "Use data-property remediation fields before retrying.",
+      ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+    };
+    Object.defineProperty(accessorRemediation, "next_action", {
+      enumerable: true,
+      get() {
+        nextActionReads += 1;
+        throw new Error(accessorSentinel);
+      }
+    });
+    const accessorWrapped = wrapToolWithPolicyGate(accessorTool, {
+      evaluate: () => ({
+        decision: "deny",
+        ruleId: "accessor-remediation-evaluator",
+        reason: "accessor remediation should fail closed",
+        remediation: accessorRemediation,
+        guardClass: "capability"
+      })
+    });
+
+    const accessorResult = await accessorWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(accessorResult, accessorSentinel);
+    expect(accessorResult.output).toContain("remediation.next_action");
+    expect(nextActionReads).toBe(0);
+    expect(accessorTool.calls).toBe(0);
+  });
+
+  test("execution validator decision snapshot rejects hostile remediation without leaking trap text", async () => {
+    const proxySentinel = "VALIDATOR_REMEDIATION_PROXY_SECRET";
+    let proxyGetCalls = 0;
+    let proxyDescriptorCalls = 0;
+    const proxyTool = new RecordingTool("decision.proxy-remediation.validator");
+    const proxyRemediation = new Proxy(
+      {
+        next_action: "fix_and_retry" as const,
+        hint: "Return plain validator remediation before retrying.",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      },
+      {
+        get() {
+          proxyGetCalls += 1;
+          throw new Error(proxySentinel);
+        },
+        getOwnPropertyDescriptor() {
+          proxyDescriptorCalls += 1;
+          throw new Error(proxySentinel);
+        }
+      }
+    );
+    const proxyWrapped = wrapToolWithPolicyGate(proxyTool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: "proxy-remediation-validator",
+        reason: "proxy remediation should fail closed",
+        remediation: proxyRemediation,
+        guardClass: "capability"
+      })
+    });
+
+    const proxyResult = await proxyWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(proxyResult, proxySentinel);
+    expect(proxyResult.output).toContain("remediation");
+    expect(proxyGetCalls).toBe(0);
+    expect(proxyDescriptorCalls).toBe(0);
+    expect(proxyTool.calls).toBe(0);
+
+    const accessorSentinel = "VALIDATOR_REMEDIATION_ACCESSOR_SECRET";
+    let nextActionReads = 0;
+    const accessorTool = new RecordingTool("decision.accessor-remediation.validator");
+    const accessorRemediation: Record<string, unknown> = {
+      hint: "Use data-property validator remediation fields before retrying.",
+      ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+    };
+    Object.defineProperty(accessorRemediation, "next_action", {
+      enumerable: true,
+      get() {
+        nextActionReads += 1;
+        throw new Error(accessorSentinel);
+      }
+    });
+    const accessorWrapped = wrapToolWithPolicyGate(accessorTool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: "accessor-remediation-validator",
+        reason: "accessor remediation should fail closed",
+        remediation: accessorRemediation,
+        guardClass: "capability"
+      })
+    });
+
+    const accessorResult = await accessorWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(accessorResult, accessorSentinel);
+    expect(accessorResult.output).toContain("remediation.next_action");
+    expect(nextActionReads).toBe(0);
+    expect(accessorTool.calls).toBe(0);
+  });
+
+  test("rule-based evaluator decision snapshot fails closed through policy wrapper", async () => {
+    const sentinel = "WRAPPED_RULE_DECISION_PROXY_SECRET";
+    let proxyGetCalls = 0;
+    let proxyDescriptorCalls = 0;
+    const tool = new RecordingTool("decision.rule-proxy.wrapper");
+    const proxyDecision = new Proxy(
+      {
+        decision: "deny" as const,
+        reason: "proxy rule decision should fail before wrapper denial serialization",
+        remediation: {
+          next_action: "fix_and_retry" as const,
+          hint: "Return a plain rule decision before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        }
+      },
+      {
+        get() {
+          proxyGetCalls += 1;
+          throw new Error(sentinel);
+        },
+        getOwnPropertyDescriptor() {
+          proxyDescriptorCalls += 1;
+          throw new Error(sentinel);
+        }
+      }
+    );
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: createPolicyGateEvaluator({
+        rules: [
+          {
+            ruleId: "wrapped-proxy-rule-decision",
+            description: "Returns a proxy-backed rule decision.",
+            guardClass: "capability",
+            evaluate: () => proxyDecision as never
+          }
+        ]
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(result, sentinel);
+    expect(result.output).toContain("wrapped-proxy-rule-decision");
+    expect(proxyGetCalls).toBe(0);
+    expect(proxyDescriptorCalls).toBe(0);
+    expect(tool.calls).toBe(0);
+  });
+
+  test("decision snapshot rejects enumerable toJSON without invoking it and keeps plain deny behavior", async () => {
+    const sentinel = "DECISION_TO_JSON_SECRET";
+    let toJsonCalls = 0;
+    const toJsonTool = new RecordingTool("decision.enumerable.tojson");
+    const toJsonWrapped = wrapToolWithPolicyGate(toJsonTool, {
+      evaluate: async () => ({
+        decision: "deny" as const,
+        ruleId: "enumerable-tojson-decision",
+        reason: "enumerable toJSON should be rejected before serialization",
+        remediation: {
+          next_action: "fix_and_retry" as const,
+          hint: "Return a decision object without enumerable toJSON.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "capability" as const,
+        toJSON() {
+          toJsonCalls += 1;
+          throw new Error(sentinel);
+        }
+      })
+    });
+
+    const toJsonResult = await toJsonWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(toJsonResult, sentinel);
+    expect(toJsonResult.output).toContain("toJSON");
+    expect(toJsonCalls).toBe(0);
+    expect(toJsonTool.calls).toBe(0);
+
+    const plainTool = new RecordingTool("decision.plain.valid");
+    const plainWrapped = wrapToolWithPolicyGate(plainTool, {
+      evaluate: async () => ({
+        decision: "deny",
+        ruleId: "plain-valid-decision",
+        reason: "plain valid decision remains a policy denial",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Fix the plain-object policy denial input.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "capability"
+      })
+    });
+
+    const plainResult = await plainWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expect(plainResult.success).toBe(false);
+    expect(plainResult.output).toContain("policy_gate_denied");
+    const payload = JSON.parse(plainResult.output) as {
+      error?: string;
+      ruleId?: string;
+      guard_class?: string;
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("plain-valid-decision");
+    expect(payload.guard_class).toBe("capability");
+    expect(plainTool.calls).toBe(0);
+  });
+
+  test("decision snapshot ignores non-consumed nested accessor and proxy payloads", async () => {
+    const sentinel = "DECISION_EXTRA_PAYLOAD_SECRET";
+    let extraAccessorReads = 0;
+    let proxyGetCalls = 0;
+    let proxyOwnKeysCalls = 0;
+    let proxyDescriptorCalls = 0;
+    const nestedExtra: Record<string, unknown> = {};
+    Object.defineProperty(nestedExtra, "secret", {
+      enumerable: true,
+      get() {
+        extraAccessorReads += 1;
+        throw new Error(sentinel);
+      }
+    });
+    const proxyExtra = new Proxy(
+      { secret: sentinel },
+      {
+        get() {
+          proxyGetCalls += 1;
+          throw new Error(sentinel);
+        },
+        ownKeys() {
+          proxyOwnKeysCalls += 1;
+          throw new Error(sentinel);
+        },
+        getOwnPropertyDescriptor() {
+          proxyDescriptorCalls += 1;
+          throw new Error(sentinel);
+        }
+      }
+    );
+    const decision: Record<string, unknown> = {
+      decision: "deny",
+      ruleId: "bounded-decision-snapshot",
+      reason: "non-consumed fields should not be traversed",
+      remediation: {
+        next_action: "fix_and_retry",
+        hint: "Only consume the decision contract fields.",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      },
+      guardClass: "capability",
+      nestedExtra,
+      proxyExtra
+    };
+    Object.defineProperty(decision, "extraAccessor", {
+      enumerable: true,
+      get() {
+        extraAccessorReads += 1;
+        throw new Error(sentinel);
+      }
+    });
+    const tool = new RecordingTool("decision.bounded.extra");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => decision as never
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("policy_gate_denied");
+    expect(result.output).not.toContain(sentinel);
+    expect(result.outputSummary).not.toContain(sentinel);
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      ruleId?: string;
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("bounded-decision-snapshot");
+    expect(extraAccessorReads).toBe(0);
+    expect(proxyGetCalls).toBe(0);
+    expect(proxyOwnKeysCalls).toBe(0);
+    expect(proxyDescriptorCalls).toBe(0);
+    expect(tool.calls).toBe(0);
+  });
+
   test("spawn-profile authority impersonation from custom evaluator fails closed", async () => {
     const bashTool = new RecordingTool("bash");
     const wrapped = wrapToolWithPolicyGate(bashTool, {
@@ -8152,6 +8646,15 @@ function expectReservedRawRuleProducerRejected(result: ToolResult | undefined): 
   expect(result?.output).toContain("ruleId");
   expect(result?.output).not.toContain("policy_gate_raw_data_rule_misconfigured");
   expect(result?.output).not.toContain("raw_data_write_denied");
+}
+
+function expectInvalidPolicyGateDecisionFailure(result: ToolResult, sentinel: string): void {
+  expect(result.success).toBe(false);
+  expect(result.output).toContain("Invalid policy gate decision");
+  expect(result.output).not.toContain(sentinel);
+  expect(result.output).not.toContain("policy_gate_denied");
+  expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+  expect(result.outputSummary).not.toContain(sentinel);
 }
 
 function expectToolParameterSchemaValidationDenial(result: ToolResult | undefined): void {

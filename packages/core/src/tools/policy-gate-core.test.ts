@@ -8,6 +8,7 @@ import {
   MAX_CONCURRENT_SUBAGENTS,
   MAX_SPAWN_DEPTH,
   normalizeSpawnAgentInput,
+  PolicyGateDecisionValidationError,
   PolicyGateRemediationSchema,
   RESERVED_AUTHORITY_POLICY_RULE_IDS,
   SPAWN_CONCURRENCY_LIMIT_RULE,
@@ -565,6 +566,199 @@ describe("policy gate pure evaluator", () => {
         ]
       })
     ).toThrow("next_action");
+  });
+
+  test("rule decision snapshot rejects proxy results without reading traps", () => {
+    const sentinel = "RULE_DECISION_PROXY_SECRET";
+    let getCalls = 0;
+    let descriptorCalls = 0;
+    const proxyDecision = new Proxy(
+      {
+        decision: "deny" as const,
+        reason: "proxy-backed rule decisions should be rejected",
+        remediation: sampleRemediation()
+      },
+      {
+        get() {
+          getCalls += 1;
+          throw new Error(sentinel);
+        },
+        getOwnPropertyDescriptor() {
+          descriptorCalls += 1;
+          throw new Error(sentinel);
+        }
+      }
+    );
+
+    const error = capturePolicyGateError(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "proxy-rule-decision",
+            description: "Returns a proxy-backed decision.",
+            guardClass: "capability",
+            evaluate: () => proxyDecision as never
+          }
+        ]
+      })
+    );
+
+    expect(error).toBeInstanceOf(PolicyGateDecisionValidationError);
+    expect((error as Error).message).toBe(
+      "Invalid policy gate decision for proxy-rule-decision: decision"
+    );
+    expect((error as Error).message).not.toContain(sentinel);
+    expect(getCalls).toBe(0);
+    expect(descriptorCalls).toBe(0);
+  });
+
+  test("rule decision snapshot rejects accessor result fields without invoking getters", () => {
+    const sentinel = "RULE_DECISION_ACCESSOR_SECRET";
+    let decisionReads = 0;
+    const accessorDecision: Record<string, unknown> = {
+      reason: "accessor-backed decision fields should be rejected",
+      remediation: sampleRemediation()
+    };
+    Object.defineProperty(accessorDecision, "decision", {
+      enumerable: true,
+      get() {
+        decisionReads += 1;
+        throw new Error(sentinel);
+      }
+    });
+
+    const error = capturePolicyGateError(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "accessor-rule-decision",
+            description: "Returns an accessor-backed decision.",
+            guardClass: "capability",
+            evaluate: () => accessorDecision as never
+          }
+        ]
+      })
+    );
+
+    expect(error).toBeInstanceOf(PolicyGateDecisionValidationError);
+    expect((error as Error).message).toBe(
+      "Invalid policy gate decision for accessor-rule-decision: decision"
+    );
+    expect((error as Error).message).not.toContain(sentinel);
+    expect(decisionReads).toBe(0);
+  });
+
+  test("rule decision snapshot rejects enumerable toJSON without invoking it", () => {
+    const sentinel = "RULE_DECISION_TO_JSON_SECRET";
+    let toJsonCalls = 0;
+    const decision = {
+      decision: "deny" as const,
+      reason: "enumerable toJSON should be rejected",
+      remediation: sampleRemediation(),
+      toJSON() {
+        toJsonCalls += 1;
+        throw new Error(sentinel);
+      }
+    };
+
+    const error = capturePolicyGateError(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "tojson-rule-decision",
+            description: "Returns a decision with enumerable toJSON.",
+            guardClass: "capability",
+            evaluate: () => decision
+          }
+        ]
+      })
+    );
+
+    expect(error).toBeInstanceOf(PolicyGateDecisionValidationError);
+    expect((error as Error).message).toBe(
+      "Invalid policy gate decision for tojson-rule-decision: toJSON"
+    );
+    expect((error as Error).message).not.toContain(sentinel);
+    expect(toJsonCalls).toBe(0);
+  });
+
+  test("rule decision snapshot rejects hostile remediation fields before schema parsing", () => {
+    const proxySentinel = "RULE_REMEDIATION_PROXY_SECRET";
+    let proxyGetCalls = 0;
+    let proxyDescriptorCalls = 0;
+    const proxyRemediation = new Proxy(sampleRemediation(), {
+      get() {
+        proxyGetCalls += 1;
+        throw new Error(proxySentinel);
+      },
+      getOwnPropertyDescriptor() {
+        proxyDescriptorCalls += 1;
+        throw new Error(proxySentinel);
+      }
+    });
+
+    const proxyError = capturePolicyGateError(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "proxy-remediation-rule-decision",
+            description: "Returns proxy-backed remediation.",
+            guardClass: "capability",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "proxy remediation should be rejected",
+              remediation: proxyRemediation
+            })
+          }
+        ]
+      })
+    );
+
+    expect(proxyError).toBeInstanceOf(PolicyGateDecisionValidationError);
+    expect((proxyError as Error).message).toBe(
+      "Invalid policy gate decision for proxy-remediation-rule-decision: remediation"
+    );
+    expect((proxyError as Error).message).not.toContain(proxySentinel);
+    expect(proxyGetCalls).toBe(0);
+    expect(proxyDescriptorCalls).toBe(0);
+
+    const accessorSentinel = "RULE_REMEDIATION_ACCESSOR_SECRET";
+    let nextActionReads = 0;
+    const accessorRemediation: Record<string, unknown> = {
+      hint: "Use data descriptors for remediation fields.",
+      ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+    };
+    Object.defineProperty(accessorRemediation, "next_action", {
+      enumerable: true,
+      get() {
+        nextActionReads += 1;
+        throw new Error(accessorSentinel);
+      }
+    });
+
+    const accessorError = capturePolicyGateError(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "accessor-remediation-rule-decision",
+            description: "Returns accessor-backed remediation.",
+            guardClass: "capability",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "accessor remediation should be rejected",
+              remediation: accessorRemediation
+            })
+          }
+        ]
+      })
+    );
+
+    expect(accessorError).toBeInstanceOf(PolicyGateDecisionValidationError);
+    expect((accessorError as Error).message).toBe(
+      "Invalid policy gate decision for accessor-remediation-rule-decision: remediation.next_action"
+    );
+    expect((accessorError as Error).message).not.toContain(accessorSentinel);
+    expect(nextActionReads).toBe(0);
   });
 });
 
@@ -1427,6 +1621,15 @@ function expectSpawnBudgetDeny(
     expect(combined).not.toContain(tailSentinel);
     expect(combined.length).toBeLessThan(500);
   }
+}
+
+function capturePolicyGateError(action: () => void): unknown {
+  try {
+    action();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected policy gate evaluation to throw.");
 }
 
 function sampleToolCall(): PolicyGateToolCall {
