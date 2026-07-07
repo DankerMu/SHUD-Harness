@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shud-harness.local/generated/json-schema/error-record.json",
+  "title": "ErrorRecord",
+  "type": "object",
+  "properties": {
+    "error_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "schema_error",
+        "permission_error",
+        "workspace_error",
+        "sandbox_error",
+        "build_error",
+        "runtime_error",
+        "numerical_error",
+        "parser_error",
+        "report_error",
+        "agent_error",
+        "notification_error"
+      ]
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warn",
+        "error",
+        "critical"
+      ]
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "report_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "user_message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "recommended_next_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "remediation": {
+      "type": "object",
+      "properties": {
+        "next_action": {
+          "type": "string",
+          "enum": [
+            "escalate_to_pi",
+            "open_gate",
+            "adjust_scope",
+            "fix_and_retry",
+            "abort"
+          ]
+        },
+        "hint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "next_action",
+        "hint"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "error_id",
+    "category",
+    "severity",
+    "message",
+    "user_message",
+    "evidence_refs",
+    "retryable",
+    "recommended_next_actions",
+    "created_at"
+  ]
+}
