@@ -596,6 +596,10 @@ class ShudRuntimeToolDescriptionAdapter extends BaseTool {
 
 class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
   readonly policyGateToolId: string;
+  private readonly nameSnapshot: string;
+  private readonly descriptionSnapshot: string;
+  private readonly parametersSnapshot: Record<string, unknown>;
+  private readonly zodParameterSchemaSnapshot: ToolZodParameterSchema | undefined;
 
   constructor(
     readonly innerTool: BaseTool,
@@ -603,25 +607,28 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
   ) {
     super();
     this.policyGateToolId = options.toolId ?? innerTool.name;
+    this.nameSnapshot = innerTool.name;
+    this.descriptionSnapshot = innerTool.description;
+    this.parametersSnapshot = snapshotToolParameters(innerTool.parameters);
+    this.zodParameterSchemaSnapshot = resolveToolZodParameterSchema(innerTool);
     this.kind = innerTool.kind;
-    this.requiredModelCapabilities = innerTool.requiredModelCapabilities;
+    this.requiredModelCapabilities = Object.freeze([...innerTool.requiredModelCapabilities]);
   }
 
   get name(): string {
-    return this.innerTool.name;
+    return this.nameSnapshot;
   }
 
   get description(): string {
-    return this.innerTool.description;
+    return this.descriptionSnapshot;
   }
 
   get parameters(): Record<string, unknown> {
-    return this.innerTool.parameters;
+    return this.parametersSnapshot;
   }
 
   toDefinition(): ToolDefinition {
     return {
-      ...this.innerTool.toDefinition(),
       name: this.name,
       description: this.description,
       parameters: this.parameters,
@@ -658,10 +665,10 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       );
     }
 
-    if (resolveToolZodParameterSchema(this.innerTool)) {
+    if (this.zodParameterSchemaSnapshot) {
       const parsedInput = parseToolZodParameters(
         this.policyGateToolId,
-        this.innerTool,
+        this.zodParameterSchemaSnapshot,
         preparedInput.executionInput
       );
       if (parsedInput.decision === "deny") {
@@ -865,7 +872,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
           workDir: toolContext.workDir
         },
         {
-          tool: this.innerTool,
+          tool: this,
           toolContext
         }
       );
@@ -992,16 +999,11 @@ type ToolZodIssue = {
 
 function parseToolZodParameters(
   toolId: string,
-  tool: BaseTool,
+  schema: ToolZodParameterSchema,
   input: unknown
 ):
   | { decision: "allow"; executionInput: unknown }
   | Extract<PolicyGateDecision, { decision: "deny" }> {
-  const schema = resolveToolZodParameterSchema(tool);
-  if (!schema) {
-    return { decision: "allow", executionInput: input };
-  }
-
   let result: ToolZodSafeParseResult;
   try {
     result = schema.safeParse(input);
@@ -1037,6 +1039,56 @@ function resolveToolZodParameterSchema(tool: BaseTool): ToolZodParameterSchema |
   ];
 
   return candidates.find(isToolZodParameterSchema);
+}
+
+function snapshotToolParameters(parameters: Record<string, unknown>): Record<string, unknown> {
+  return cloneToolParameterMetadata(parameters, new WeakMap<object, unknown>()) as Record<
+    string,
+    unknown
+  >;
+}
+
+function cloneToolParameterMetadata(
+  value: unknown,
+  snapshots: WeakMap<object, unknown>
+): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (isToolZodParameterSchema(value)) {
+    return value;
+  }
+
+  const objectValue = value as object;
+  const existingSnapshot = snapshots.get(objectValue);
+  if (existingSnapshot) {
+    return existingSnapshot;
+  }
+
+  if (Array.isArray(value)) {
+    const snapshot: unknown[] = [];
+    snapshots.set(objectValue, snapshot);
+    for (const item of value) {
+      snapshot.push(cloneToolParameterMetadata(item, snapshots));
+    }
+    return Object.freeze(snapshot);
+  }
+
+  const snapshot: Record<string, unknown> = {};
+  snapshots.set(objectValue, snapshot);
+  for (const key of Object.keys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable || !("value" in descriptor)) {
+      continue;
+    }
+    Object.defineProperty(snapshot, key, {
+      value: cloneToolParameterMetadata(descriptor.value, snapshots),
+      enumerable: true,
+      configurable: false,
+      writable: false
+    });
+  }
+  return Object.freeze(snapshot);
 }
 
 function isToolZodParameterSchema(value: unknown): value is ToolZodParameterSchema {

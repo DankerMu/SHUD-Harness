@@ -2071,7 +2071,8 @@ describe("policy-gated zero tool registry", () => {
     expect(definition?.name).toBe("generic.definition");
     expect(definition?.description).toBe(tool.description);
     expect(definition?.description).toContain("何时该用:");
-    expect(definition?.parameters).toBe(tool.parameters);
+    expect(definition?.parameters).toEqual(tool.parameters);
+    expect(definition?.parameters).not.toBe(tool.parameters);
     expect(definition?.parameters).not.toEqual({ leaked: true });
 
     const replacement = new DivergentDefinitionTool(
@@ -2091,7 +2092,48 @@ describe("policy-gated zero tool registry", () => {
     expect(definition?.name).toBe("generic.definition");
     expect(definition?.description).toBe(replacement.description);
     expect(definition?.description).toContain("何时不该用:");
-    expect(definition?.parameters).toBe(replacement.parameters);
+    expect(definition?.parameters).toEqual(replacement.parameters);
+    expect(definition?.parameters).not.toBe(replacement.parameters);
+  });
+
+  test("factory-returned registry snapshots metadata against retained inner tool mutation", () => {
+    const tool = new RecordingTool("generic.snapshot");
+    const originalName = tool.name;
+    const originalDescription = tool.description;
+    const originalParameters = tool.parameters;
+    const leakedParameters = {
+      type: "object",
+      properties: {
+        leaked: {
+          type: "string"
+        }
+      },
+      additionalProperties: false
+    };
+    const registry = createPolicyGatedToolRegistry([tool], {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    (tool as unknown as { name: string }).name = "generic.snapshot.leaked";
+    tool.description = "何时该用: This mutated description intentionally drops governance sections.";
+    tool.parameters = leakedParameters;
+
+    const definitions = registry.getDefinitions();
+    const definition = definitions.find((candidate) => candidate.name === originalName);
+
+    expect(registry.get(originalName)).toBeDefined();
+    expect(registry.get("generic.snapshot.leaked")).toBeUndefined();
+    expect(definition).toBeDefined();
+    expect(definition?.name).toBe(originalName);
+    expect(definition?.description).toBe(originalDescription);
+    expect(definition?.description).toContain("何时该用:");
+    expect(definition?.description).toContain("何时不该用:");
+    expect(definition?.description).toContain("成功与失败样态:");
+    expect(definition?.description).not.toContain("mutated description");
+    expect(definition?.parameters).toEqual(originalParameters);
+    expect(definition?.parameters).not.toBe(originalParameters);
+    expect(definition?.parameters).not.toEqual(leakedParameters);
+    expect(definitions.map((candidate) => candidate.name)).not.toContain("generic.snapshot.leaked");
   });
 
   test("generic registry lint rejects the 21st visible tool without a role", () => {
@@ -2170,6 +2212,33 @@ describe("policy-gated zero tool registry", () => {
     }
     expect(registeredReplacement.innerTool).toBe(replacementInnerTool);
     expect(() => assertPolicyGatedToolRegistry(registry, { role: "worker" })).not.toThrow();
+
+    const originalReplacementDescription = replacementInnerTool.description;
+    const originalReplacementParameters = replacementInnerTool.parameters;
+    const leakedReplacementParameters = {
+      type: "object",
+      properties: {
+        replacementLeak: {
+          type: "boolean"
+        }
+      },
+      additionalProperties: false
+    };
+    (replacementInnerTool as unknown as { name: string }).name = "generic.19.leaked";
+    replacementInnerTool.description = "何时该用: Replacement mutation drops required sections.";
+    replacementInnerTool.parameters = leakedReplacementParameters;
+
+    const replacementDefinition = registry
+      .getDefinitions()
+      .find((candidate) => candidate.name === "generic.19");
+    expect(registry.get("generic.19")).toBe(registeredReplacement);
+    expect(registry.get("generic.19.leaked")).toBeUndefined();
+    expect(replacementDefinition?.name).toBe("generic.19");
+    expect(replacementDefinition?.description).toBe(originalReplacementDescription);
+    expect(replacementDefinition?.description).toContain("何时不该用:");
+    expect(replacementDefinition?.parameters).toEqual(originalReplacementParameters);
+    expect(replacementDefinition?.parameters).not.toBe(originalReplacementParameters);
+    expect(replacementDefinition?.parameters).not.toEqual(leakedReplacementParameters);
   });
 
   test("factory-returned registry rewraps stale post-return replacements with current evaluator", async () => {
@@ -2476,6 +2545,55 @@ describe("policy-gated zero tool registry", () => {
       success: false,
       outputSummary: result.outputSummary
     });
+  });
+
+  test("factory-returned registry snapshots Zod schema carrier against retained inner mutation", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.schema.snapshot",
+      z.object({
+        command: z.string()
+      })
+    );
+    let evaluatorCalls = 0;
+    const registry = createPolicyGatedToolRegistry([zodTool], {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      }
+    });
+
+    (zodTool as unknown as { parameterSchema: unknown }).parameterSchema = z.object({
+      command: z.unknown()
+    });
+
+    const result = await registry.get("zod.schema.snapshot")?.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expect(result?.success).toBe(false);
+    expect(result?.output).toContain("policy_gate_denied");
+    expect(result?.output).toContain("tool-parameter-schema-validation");
+    const payload = JSON.parse(result?.output ?? "{}") as {
+      error?: string;
+      ruleId?: string;
+      reason?: string;
+      remediation?: {
+        next_action?: string;
+        hint?: string;
+        ref?: string;
+      };
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.reason).toContain("command");
+    expect(payload.remediation?.next_action).toBe("fix_and_retry");
+    expect(payload.remediation?.hint).toContain("Zod parameter schema");
+    expect(payload.remediation?.ref).toBe(
+      "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+    );
+    expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
   });
 
   test("Zod parameter schema rejection survives a throwing evaluator", async () => {
