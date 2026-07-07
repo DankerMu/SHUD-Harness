@@ -108,6 +108,113 @@ describe("backend ws tool.failed skeleton", () => {
     expect(event.payload.error.user_message).toBe(originalInput.error.user_message);
   });
 
+  test("raw-data advisory builder rejects unstable envelope fields", async () => {
+    const trusted = await sampleTrustedRawDataAdvisoryToolFailedEvent();
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: Number.NaN,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: trusted.toolResult
+      })
+    ).toThrow("raw-data advisory tool.failed seq must be a finite number");
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 17,
+        eventId: {
+          toJSON: () => "evt-forged"
+        } as never,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: trusted.toolResult
+      })
+    ).toThrow("raw-data advisory tool.failed eventId must be a string");
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 18,
+        eventId: "evt-18",
+        timestamp: 0 as never,
+        toolResult: trusted.toolResult
+      })
+    ).toThrow("raw-data advisory tool.failed timestamp must be a string");
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 19,
+        eventId: "evt-19",
+        timestamp: "x".repeat(140_000),
+        toolResult: trusted.toolResult
+      })
+    ).toThrow("tool.failed input exceeds string budget");
+  });
+
+  test("raw-data advisory builder rejects envelope accessors without executing them", async () => {
+    const trusted = await sampleTrustedRawDataAdvisoryToolFailedEvent();
+    const reads = {
+      toolResult: 0,
+      seq: 0,
+      eventId: 0
+    };
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 20,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        get toolResult() {
+          reads.toolResult += 1;
+          return trusted.toolResult;
+        }
+      } as never)
+    ).toThrow("raw-data advisory tool.failed toolResult must be a data field");
+    expect(reads.toolResult).toBe(0);
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        get seq() {
+          reads.seq += 1;
+          return 21;
+        },
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: trusted.toolResult
+      } as never)
+    ).toThrow("raw-data advisory tool.failed seq must be a data field");
+    expect(reads.seq).toBe(0);
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 22,
+        get eventId() {
+          reads.eventId += 1;
+          return "evt-22";
+        },
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: trusted.toolResult
+      } as never)
+    ).toThrow("raw-data advisory tool.failed eventId must be a data field");
+    expect(reads.eventId).toBe(0);
+  });
+
+  test("raw-data advisory builder rejects proxy envelopes before reading traps", async () => {
+    const trusted = await sampleTrustedRawDataAdvisoryToolFailedEvent();
+    const proxy = new Proxy(
+      {
+        seq: 23,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: trusted.toolResult
+      },
+      {
+        get() {
+          throw new Error("proxy trap secret");
+        }
+      }
+    );
+
+    expect(() => buildRawDataAdvisoryToolFailedWsEvent(proxy)).toThrow(
+      "raw-data advisory tool.failed input must be stable structured data"
+    );
+  });
+
   test("raw-data advisory builder rejects caller-authored structural payloads", async () => {
     const advisory = await sampleRawDataAdvisoryDenialPayload();
 

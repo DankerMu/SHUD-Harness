@@ -81,11 +81,12 @@ export function buildToolFailedWsEvent(input: ToolFailedWsEventInput): ToolFaile
 export function buildRawDataAdvisoryToolFailedWsEvent(
   input: RawDataAdvisoryToolFailedWsEventInput
 ): ToolFailedWsEvent {
-  const trustedInput = readRawDataAdvisoryToolFailedWsEventInput(input);
+  const snapshot = snapshotRawDataAdvisoryToolFailedWsEventInput(input);
+  const trustedInput = readRawDataAdvisoryToolFailedWsEventInput(snapshot.toolResult);
   return buildToolFailedWsEventUnchecked({
-    seq: input.seq,
-    eventId: input.eventId,
-    timestamp: input.timestamp,
+    seq: snapshot.seq,
+    eventId: snapshot.eventId,
+    timestamp: snapshot.timestamp,
     ...trustedInput
   });
 }
@@ -172,6 +173,47 @@ function snapshotToolFailedWsEventInput(input: ToolFailedWsEventInput): ToolFail
   return snapshot;
 }
 
+function snapshotRawDataAdvisoryToolFailedWsEventInput(
+  input: RawDataAdvisoryToolFailedWsEventInput
+): RawDataAdvisoryToolFailedWsEventInput {
+  const state: ToolFailedWsSnapshotState = { stringChars: 0 };
+  const inputRecord = readToolFailedWsRecord(input, "raw-data advisory tool.failed input");
+  const toolResult = readOptionalToolFailedWsDataField(
+    inputRecord,
+    "toolResult",
+    "raw-data advisory tool.failed toolResult"
+  ) as RawDataAdvisoryToolFailedWsEventInput["toolResult"];
+  if (toolResult === undefined) {
+    throw new Error(
+      "Raw-data advisory tool.failed events require RawDataSandboxedBashTool trusted evidence."
+    );
+  }
+  const seq = readRequiredToolFailedWsNumberField(
+    inputRecord,
+    "seq",
+    "raw-data advisory tool.failed seq"
+  );
+  const eventId = readOptionalToolFailedWsStringField(
+    inputRecord,
+    "eventId",
+    "raw-data advisory tool.failed eventId",
+    state
+  );
+  const timestamp = readOptionalToolFailedWsStringField(
+    inputRecord,
+    "timestamp",
+    "raw-data advisory tool.failed timestamp",
+    state
+  );
+
+  return {
+    seq,
+    toolResult,
+    ...(eventId !== undefined ? { eventId } : {}),
+    ...(timestamp !== undefined ? { timestamp } : {})
+  };
+}
+
 function snapshotToolFailedWsEventIdentity(
   input: object,
   error: object,
@@ -244,9 +286,9 @@ function assertPublicToolFailedWsEventIdentity(identity: ToolFailedWsEventIdenti
 }
 
 function readRawDataAdvisoryToolFailedWsEventInput(
-  input: RawDataAdvisoryToolFailedWsEventInput
+  toolResult: RawDataAdvisoryToolFailedWsEventInput["toolResult"]
 ): RawDataToolFailedEventInput {
-  const trustedInput = rawDataDeniedToolResultToToolFailedEventInput(input.toolResult);
+  const trustedInput = rawDataDeniedToolResultToToolFailedEventInput(toolResult);
   if (!trustedInput) {
     throw new Error(
       "Raw-data advisory tool.failed events require RawDataSandboxedBashTool trusted evidence."
