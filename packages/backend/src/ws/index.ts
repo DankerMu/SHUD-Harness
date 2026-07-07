@@ -95,6 +95,9 @@ function assertPublicToolFailedWsEventInput(input: ToolFailedWsEventInput): void
       "Reserved raw-data denial error_id values require the trusted raw-data advisory event builder."
     );
   }
+  if (isRawDataAuthorityToolFailedEvent(input) && input.guardClass !== "authority") {
+    throw new Error("Raw-data authority tool.failed events require guardClass authority.");
+  }
 }
 
 function readRawDataAdvisoryToolFailedWsEventInput(
@@ -118,6 +121,19 @@ function readRawDataAdvisoryToolFailedWsEventInput(
 
 function isRawDataDenialDecision(decision: string | undefined): boolean {
   return decision === "denied_by_advisory" || decision === "denied_by_sandbox";
+}
+
+function isRawDataAuthorityToolFailedEvent(input: ToolFailedWsEventInput): boolean {
+  return (
+    input.rule === RAW_DATA_WRITE_RULE_ID || isRawDataAuthorityErrorId(input.error.error_id)
+  );
+}
+
+function isRawDataAuthorityErrorId(errorId: string | undefined): boolean {
+  return (
+    errorId === RAW_DATA_WRITE_RULE_ID ||
+    errorId?.startsWith(`${RAW_DATA_WRITE_RULE_ID}:`) === true
+  );
 }
 
 function cloneErrorRecord(error: ErrorRecord): ErrorRecord {

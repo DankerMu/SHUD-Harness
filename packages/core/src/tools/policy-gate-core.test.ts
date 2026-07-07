@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   assertPolicyGateContextGuardClasses,
   evaluatePolicyGate,
+  isReservedAuthorityPolicyRuleId,
   normalizeSpawnAgentInput,
   PolicyGateRemediationSchema,
+  RESERVED_AUTHORITY_POLICY_RULE_IDS,
   SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS,
   SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS,
   SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
@@ -11,6 +13,7 @@ import {
   SPAWN_PROFILE_SUBSET_RULE,
   SPAWN_PROFILE_SUBSET_RULE_ID,
   SPAWN_PROFILE_TOOL_ID_MAX_CHARS,
+  TOOL_PARAMETER_SCHEMA_RULE_ID,
   type PolicyGateToolCall,
   type PolicyRule
 } from "./policy-gate-core";
@@ -132,6 +135,28 @@ describe("policy gate pure evaluator", () => {
       })
     ).toThrow(
       /Policy gate guard_class lint failed: spawn-profile-subset: known authority rule cannot be classified as capability/
+    );
+  });
+
+  test("guard_class lint treats Zod schema validation as reserved authority", () => {
+    expect(RESERVED_AUTHORITY_POLICY_RULE_IDS).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
+    expect(isReservedAuthorityPolicyRuleId(TOOL_PARAMETER_SCHEMA_RULE_ID)).toBe(true);
+
+    expect(() =>
+      assertPolicyGateContextGuardClasses({
+        rules: [
+          {
+            ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+            description: "Attempts to downgrade built-in Zod parameter schema authority.",
+            guardClass: "capability",
+            evaluate: () => ({ decision: "allow" })
+          }
+        ]
+      })
+    ).toThrow(
+      new RegExp(
+        `Policy gate guard_class lint failed: ${TOOL_PARAMETER_SCHEMA_RULE_ID}: known authority rule cannot be classified as capability`
+      )
     );
   });
 

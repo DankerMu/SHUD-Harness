@@ -225,32 +225,76 @@ describe("backend ws tool.failed skeleton", () => {
     ).toThrow("Raw-data denial tool.failed events require");
   });
 
-  test("generic tool.failed builder still accepts raw lifecycle failures", () => {
-    const remediation = rawDataWriteRemediation();
+  test("generic tool.failed builder rejects raw lifecycle rule without authority guard", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 10,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: RAW_DATA_WRITE_RULE_ID,
+        decision: "failed",
+        error: sampleRawLifecycleError()
+      })
+    ).toThrow("Raw-data authority tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder rejects raw lifecycle rule downgraded to capability", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 10,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: RAW_DATA_WRITE_RULE_ID,
+        decision: "failed",
+        guardClass: "capability",
+        error: sampleRawLifecycleError()
+      })
+    ).toThrow("Raw-data authority tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder rejects raw lifecycle error_id without authority guard", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 10,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        error: sampleRawLifecycleError()
+      })
+    ).toThrow("Raw-data authority tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder rejects raw lifecycle error_id downgraded to capability", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 10,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        guardClass: "capability",
+        error: sampleRawLifecycleError()
+      })
+    ).toThrow("Raw-data authority tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder accepts raw lifecycle failures with authority guard", () => {
     const event = buildToolFailedWsEvent({
       seq: 10,
       timestamp: "2026-07-04T00:00:00.000Z",
       toolId: "bash",
       rule: RAW_DATA_WRITE_RULE_ID,
       decision: "failed",
-      error: {
-        error_id: "raw-data-write:failed:lifecycle",
-        category: "sandbox_error",
-        severity: "error",
-        message: "Bash command failed.",
-        user_message: "Bash command failed.",
-        evidence_refs: [],
-        retryable: false,
-        recommended_next_actions: [remediation.hint],
-        remediation,
-        created_at: "2026-07-04T00:00:00.000Z"
-      }
+      guardClass: "authority",
+      error: sampleRawLifecycleError()
     });
 
     expect(event.payload).toMatchObject({
       tool_id: "bash",
       rule: RAW_DATA_WRITE_RULE_ID,
-      decision: "failed"
+      decision: "failed",
+      guard_class: "authority"
     });
   });
 
@@ -424,6 +468,22 @@ function cloneErrorRecordForTest(error: ErrorRecord): ErrorRecord {
     evidence_refs: [...error.evidence_refs],
     recommended_next_actions: [...error.recommended_next_actions],
     ...(error.remediation ? { remediation: { ...error.remediation } } : {})
+  };
+}
+
+function sampleRawLifecycleError(): ErrorRecord {
+  const remediation = rawDataWriteRemediation();
+  return {
+    error_id: `${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle`,
+    category: "sandbox_error",
+    severity: "error",
+    message: "Bash command failed.",
+    user_message: "Bash command failed.",
+    evidence_refs: [],
+    retryable: false,
+    recommended_next_actions: [remediation.hint],
+    remediation,
+    created_at: "2026-07-04T00:00:00.000Z"
   };
 }
 

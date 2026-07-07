@@ -30,7 +30,8 @@ import {
   SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS,
   SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
   SPAWN_PROFILE_SUBSET_POLICY_REF,
-  SPAWN_PROFILE_SUBSET_RULE_ID
+  SPAWN_PROFILE_SUBSET_RULE_ID,
+  TOOL_PARAMETER_SCHEMA_RULE_ID
 } from "./policy-gate-core";
 import {
   assertAllToolsPolicyGated,
@@ -2068,6 +2069,36 @@ describe("policy-gated zero tool registry", () => {
     expect(bashTool.calls).toBe(0);
   });
 
+  test("schema validation authority impersonation from custom evaluator fails closed", async () => {
+    for (const guardClass of ["authority", "capability"] as const) {
+      const tool = new RecordingTool(`custom.schema.${guardClass}`);
+      const wrapped = wrapToolWithPolicyGate(tool, {
+        evaluate: async () => ({
+          decision: "deny",
+          ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+          reason: "custom evaluator attempted to impersonate built-in schema validation",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Use a custom evaluator-owned policy rule id.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+          },
+          guardClass
+        })
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), {
+        command: "printf nope > workspace/out.txt"
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Invalid policy gate decision");
+      expect(result.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
+      expect(result.output).toContain("ruleId");
+      expect(result.output).not.toContain("policy_gate_denied");
+      expect(tool.calls).toBe(0);
+    }
+  });
+
   test("empty ruleId from custom evaluator fails without policy_gate_denied payload", async () => {
     const bashTool = new RecordingTool("bash");
     const wrapped = wrapToolWithPolicyGate(bashTool, {
@@ -2275,6 +2306,38 @@ describe("policy-gated zero tool registry", () => {
     expect(tool.calls).toBe(0);
   });
 
+  test("SHUD policy evaluator rejects direct custom schema validation authority downgrade", async () => {
+    const tool = new RecordingTool("direct.schema.downgrade");
+    const evaluator = createShudPolicyGateEvaluator(async () =>
+      ({
+        decision: "deny",
+        ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+        reason: "direct custom evaluator attempted to downgrade schema validation authority",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Keep built-in schema validation classified as authority.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+        },
+        guardClass: "capability"
+      }) as never
+    );
+
+    await expect(
+      evaluator(
+        {
+          toolId: tool.name,
+          role: "worker",
+          input: { blocked: true },
+          workDir: "/tmp/shud-harness-test"
+        },
+        { tool, toolContext: createToolContext("worker") }
+      )
+    ).rejects.toThrow(
+      new RegExp(`Invalid policy gate decision.*${TOOL_PARAMETER_SCHEMA_RULE_ID}.*guardClass`)
+    );
+    expect(tool.calls).toBe(0);
+  });
+
   test("SHUD policy evaluator rejects direct custom reserved authority rule ids", async () => {
     const cases = [
       {
@@ -2286,6 +2349,11 @@ describe("policy-gated zero tool registry", () => {
         name: "raw",
         ruleId: RAW_DATA_WRITE_RULE_ID,
         ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+      },
+      {
+        name: "schema",
+        ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
       }
     ] as const;
 
@@ -2494,6 +2562,35 @@ describe("policy-gated zero tool registry", () => {
     expect(result.output).toContain("ruleId");
     expect(result.output).not.toContain("policy_gate_denied");
     expect(tool.calls).toBe(0);
+  });
+
+  test("schema validation authority impersonation from execution validator fails closed", async () => {
+    for (const guardClass of ["authority", "capability"] as const) {
+      const tool = new RecordingTool(`validator.schema.${guardClass}`);
+      const wrapped = wrapToolWithPolicyGate(tool, {
+        evaluate: async () => ({ decision: "allow" }),
+        validateExecutionInput: () => ({
+          decision: "deny",
+          ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+          reason: "execution validator attempted to impersonate built-in schema validation",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Use a validator-owned policy rule id.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+          },
+          guardClass
+        })
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Invalid policy gate decision");
+      expect(result.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
+      expect(result.output).toContain("ruleId");
+      expect(result.output).not.toContain("policy_gate_denied");
+      expect(tool.calls).toBe(0);
+    }
   });
 
   test("matching guard aliases from execution validator emit classified policy_gate_denied", async () => {
@@ -3487,10 +3584,11 @@ describe("policy-gated zero tool registry", () => {
 
     expect(result.success).toBe(false);
     expect(result.output).toContain("policy_gate_denied");
-    expect(result.output).toContain("tool-parameter-schema-validation");
+    expect(result.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
     const payload = JSON.parse(result.output) as {
       error?: string;
       ruleId?: string;
+      guard_class?: string;
       reason?: string;
       remediation?: {
         next_action?: string;
@@ -3499,7 +3597,8 @@ describe("policy-gated zero tool registry", () => {
       };
     };
     expect(payload.error).toBe("policy_gate_denied");
-    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.ruleId).toBe(TOOL_PARAMETER_SCHEMA_RULE_ID);
+    expect(payload.guard_class).toBe("authority");
     expect(payload.reason).toContain("command");
     expect(payload.remediation?.next_action).toBe("fix_and_retry");
     expect(payload.remediation?.hint).toContain("Zod parameter schema");
@@ -3542,10 +3641,11 @@ describe("policy-gated zero tool registry", () => {
 
     expect(result?.success).toBe(false);
     expect(result?.output).toContain("policy_gate_denied");
-    expect(result?.output).toContain("tool-parameter-schema-validation");
+    expect(result?.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
     const payload = JSON.parse(result?.output ?? "{}") as {
       error?: string;
       ruleId?: string;
+      guard_class?: string;
       reason?: string;
       remediation?: {
         next_action?: string;
@@ -3554,7 +3654,8 @@ describe("policy-gated zero tool registry", () => {
       };
     };
     expect(payload.error).toBe("policy_gate_denied");
-    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.ruleId).toBe(TOOL_PARAMETER_SCHEMA_RULE_ID);
+    expect(payload.guard_class).toBe("authority");
     expect(payload.reason).toContain("command");
     expect(payload.remediation?.next_action).toBe("fix_and_retry");
     expect(payload.remediation?.hint).toContain("Zod parameter schema");
@@ -3768,11 +3869,12 @@ describe("policy-gated zero tool registry", () => {
 
     expect(result.success).toBe(false);
     expect(result.output).toContain("policy_gate_denied");
-    expect(result.output).toContain("tool-parameter-schema-validation");
+    expect(result.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
     expect(result.output).not.toContain("throwing evaluator");
     const payload = JSON.parse(result.output) as {
       error?: string;
       ruleId?: string;
+      guard_class?: string;
       remediation?: {
         next_action?: string;
         hint?: string;
@@ -3780,7 +3882,8 @@ describe("policy-gated zero tool registry", () => {
       };
     };
     expect(payload.error).toBe("policy_gate_denied");
-    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.ruleId).toBe(TOOL_PARAMETER_SCHEMA_RULE_ID);
+    expect(payload.guard_class).toBe("authority");
     expect(payload.remediation?.next_action).toBe("fix_and_retry");
     expect(payload.remediation?.hint).toContain("Zod parameter schema");
     expect(payload.remediation?.ref).toBe(
@@ -3822,7 +3925,7 @@ describe("policy-gated zero tool registry", () => {
 
     expect(result.success).toBe(false);
     expect(result.output).toContain("authorization-deny");
-    expect(result.output).not.toContain("tool-parameter-schema-validation");
+    expect(result.output).not.toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
     expect(result.output).not.toContain("Expected string");
     expect(evaluatorCalls).toBe(1);
     expect(zodTool.calls).toBe(0);
@@ -3901,7 +4004,7 @@ describe("policy-gated zero tool registry", () => {
       expect(result.output).toContain("Invalid policy gate decision");
       expect(result.output).toContain(testCase.expectedRuleId);
       expect(result.output).toContain("guardClass");
-      expect(result.output).not.toContain("tool-parameter-schema-validation");
+      expect(result.output).not.toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
       expect(result.output).not.toContain("policy_gate_denied");
       expect(zodTool.calls).toBe(0);
     }
@@ -7370,10 +7473,11 @@ function expectReservedRawRuleProducerRejected(result: ToolResult | undefined): 
 function expectToolParameterSchemaValidationDenial(result: ToolResult | undefined): void {
   expect(result?.success).toBe(false);
   expect(result?.output).toContain("policy_gate_denied");
-  expect(result?.output).toContain("tool-parameter-schema-validation");
+  expect(result?.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
   const payload = JSON.parse(result?.output ?? "{}") as {
     error?: string;
     ruleId?: string;
+    guard_class?: string;
     reason?: string;
     remediation?: {
       next_action?: string;
@@ -7382,7 +7486,8 @@ function expectToolParameterSchemaValidationDenial(result: ToolResult | undefine
     };
   };
   expect(payload.error).toBe("policy_gate_denied");
-  expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+  expect(payload.ruleId).toBe(TOOL_PARAMETER_SCHEMA_RULE_ID);
+  expect(payload.guard_class).toBe("authority");
   expect(payload.reason).toContain("command");
   expect(payload.remediation?.next_action).toBe("fix_and_retry");
   expect(payload.remediation?.hint).toContain("Zod parameter schema");

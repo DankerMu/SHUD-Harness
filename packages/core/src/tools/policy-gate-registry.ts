@@ -24,6 +24,7 @@ import {
   SPAWN_PROFILE_SUBSET_RULE_ID,
   SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS,
   snapshotPolicyGateContext,
+  TOOL_PARAMETER_SCHEMA_RULE_ID,
   type HarnessRole,
   type PolicyGuardClass,
   type PolicyGateContext,
@@ -127,7 +128,6 @@ const reservedAuthorityPolicyGateExecutionValidators =
 const ROLE_VISIBLE_TOOL_COUNT_LIMIT = 20;
 const CONTROL_KERNEL_TOOL_GOVERNANCE_REF =
   "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定";
-const TOOL_PARAMETER_SCHEMA_RULE_ID = "tool-parameter-schema-validation";
 const TOOL_PARAMETER_SCHEMA_MAX_ISSUES = 3;
 const TOOL_PARAMETER_SCHEMA_ISSUE_MAX_CHARS = 240;
 const SHUD_TOOL_DESCRIPTION_REQUIRED_SECTIONS = Object.freeze([

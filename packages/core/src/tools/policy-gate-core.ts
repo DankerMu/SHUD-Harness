@@ -20,6 +20,7 @@ export const PolicyGuardClassSchema = z.enum(["authority", "capability"]);
 export type PolicyGuardClass = z.infer<typeof PolicyGuardClassSchema>;
 
 export const SPAWN_PROFILE_SUBSET_RULE_ID = "spawn-profile-subset";
+export const TOOL_PARAMETER_SCHEMA_RULE_ID = "tool-parameter-schema-validation";
 export const SPAWN_PROFILE_SUBSET_POLICY_REF =
   "docs/02_ARCHITECTURE/Roles_and_Boundaries.md#0-canonical-agent-role-registry";
 export const SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS = 64;
@@ -30,7 +31,8 @@ export const SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS = 64;
 export const SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS = 65536;
 export const RESERVED_AUTHORITY_POLICY_RULE_IDS = Object.freeze([
   "raw-data-write",
-  SPAWN_PROFILE_SUBSET_RULE_ID
+  SPAWN_PROFILE_SUBSET_RULE_ID,
+  TOOL_PARAMETER_SCHEMA_RULE_ID
 ] as const);
 
 export interface PolicyGateToolCall {
