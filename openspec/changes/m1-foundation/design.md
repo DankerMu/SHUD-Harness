@@ -642,3 +642,89 @@ Review focus:
 - Denial uses the existing spawn concurrency policy identity/remediation.
 - Reservation release is covered for success and early-failure paths.
 - Existing serialized Zero behavior and #20/#27 spawn guard behavior remain compatible.
+
+## Subagent Workflow Fixture - Issue #28
+
+Fixture level: expanded; repair intensity: high
+Project profile: SHUD-Harness
+
+Expanded-trigger rationale:
+- Core triggers: public REST API entrypoints, workspace directory writes, path/schema/field contracts, readiness state, and error/status compatibility.
+- Profile triggers: `workspace`, `readiness`, snapshot/readiness directories, and API evidence-chain correctness.
+
+Change surface:
+- `packages/backend/src/routes/**` and any backend app/test helpers needed to exercise routes.
+- `packages/core/src/**` workspace directory constants/helpers if implementation shares workspace tree logic.
+- Backend package scripts/tests for workspace init and health endpoints.
+
+Must preserve:
+- Runtime workspace assets remain outside tracked source; tests use temp workspaces only.
+- `workspace/` source-controlled ignore behavior and `zero/` source cleanliness remain unchanged.
+- #29 owns TaskCard creation/snapshot restore; #30 owns idempotency/lock skeleton; #31 owns structured logs; #32 owns perf smoke; #33 owns general path safety helper.
+- Health endpoint paths follow `Schemas_APIs_CLIs.md`: `GET /api/health/live`, `GET /api/health/ready`, and workspace init is `POST /api/workspace/init`.
+
+Must add/change:
+- `POST /api/workspace/init` creates the canonical M1 workspace directory tree, including `readiness/`, and is safe to call repeatedly without overwriting existing files.
+- Live health returns 2xx with `status`, `version`, `uptime_seconds`, and `timestamp`.
+- Ready health returns non-2xx before workspace initialization, and after initialization reports checks including directory tree presence, `snapshot_readable`, and `workspace_writable`.
+- Workspace-not-writable readiness reports `status=not_ready` and `workspace_writable=fail` without attempting unrelated write locations.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - three REST endpoints are public backend entrypoints.
+- Config / project setup: selected - workspace root configuration/defaulting affects local runtime setup.
+- File IO / path safety / overwrite: selected - init creates directories and readiness probes perform write checks.
+- Schema / columns / units / field names: selected - health response fields and check names are contract fields.
+- Auth / permissions / secrets: not selected - no authenticated route or secret handling in #28; deep health auth is M3+.
+- Concurrency / shared state / ordering: selected - repeated init and ready-before/after-init state transitions must be stable.
+- Resource limits / large input / discovery: selected - directory creation/probing is bounded to the canonical workspace tree.
+- Legacy compatibility / examples: selected - existing backend/ws and package typecheck/check scripts must remain green.
+- Error handling / rollback / partial outputs: selected - failed init/ready must return stable responses and not leave misleading readiness.
+- Release / packaging / dependency compatibility: selected - any backend dependency/script change must remain Bun workspace compatible.
+- Documentation / migration notes: selected - PR evidence must state M1 health skeleton scope and deferred OBS-HEALTH-003/004.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: not selected - no scientific decision/evidence claim changes.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no solver/runtime repo behavior changes.
+- Zero adapter / tool registry / agent role governance: not selected - no Zero adapter/tool governance changes.
+
+Invariant Matrix:
+- Governing invariant: Workspace init and readiness must report only the temp/configured workspace root's actual directory/write state and must never create, overwrite, or probe outside that root.
+- Source-of-truth identity/contract: `Workspace_Conventions.md` canonical runtime directory list, `Schemas_APIs_CLIs.md` endpoint paths, task-api spec workspace/health requirements, and OBS-HEALTH-001/002 field sets.
+- Producers: workspace root resolver/config, init route, and readiness route.
+- Validators/preflight: request method/path routing, workspace root absolute-path validation, directory existence checks, and writable probe.
+- Storage/cache/query: filesystem directories under the configured workspace root; no database or task snapshot persistence in #28.
+- Public routes/entrypoints: `POST /api/workspace/init`, `GET /api/health/live`, `GET /api/health/ready`.
+- Frontend/downstream consumers: future Dashboard/Workbench and M1 acceptance use health/status fields, but no UI data wiring in #28.
+- Failure paths/rollback/stale state: uninitialized, not-writable, and partial-directory states must produce stable not-ready responses; repeated init must be idempotent.
+- Evidence/audit/readiness: focused backend route tests, OpenSpec validation, typecheck/check, diff check, zero diff, and PR evidence.
+- Regression rows:
+  - Fresh temp workspace root -> `POST /api/workspace/init` creates canonical dirs including `readiness/` and `snapshots/`, returns success, and `GET /api/health/ready` returns 2xx with directory tree, `snapshot_readable=ok`, and `workspace_writable=ok`.
+  - Temp workspace already initialized with an existing sentinel file -> second init returns success and does not overwrite or delete the sentinel.
+  - Workspace root absent/uninitialized -> `GET /api/health/ready` returns non-2xx/not_ready while `GET /api/health/live` still returns 2xx with OBS-HEALTH-001 fields.
+  - Workspace root not writable, or writable probe failure injected where chmod is unreliable -> ready returns not_ready and `workspace_writable=fail`.
+  - Unknown or wrong method for these endpoints -> stable API-style 404/405 behavior if route helper exposes it; no framework default HTML leak.
+
+Boundary-surface checklist:
+- Public entrypoints: `POST /api/workspace/init`, `GET /api/health/live`, `GET /api/health/ready`.
+- Write/overwrite surfaces: `mkdir` for canonical workspace dirs and readiness writable probe.
+- Read surfaces: directory existence/readability checks under workspace root.
+- Producer/consumer evidence boundaries: `workspace_writable` check object and health response fields.
+- Stale-state/idempotency boundaries: repeated init, partial existing directories, and ready before/after init.
+- Unchanged downstream consumers: TaskCard API, idempotency/lock service, artifact registry, structured logs, perf smoke, frontend route data wiring.
+
+Required evidence:
+- Backend tests for init idempotency, canonical directory creation including `readiness/`, and existing-file preservation.
+- Backend tests for live health OBS-HEALTH-001 fields and ready health OBS-HEALTH-002 `workspace_writable` ok/fail states.
+- Backend tests prove ready checks include directory tree presence and `snapshot_readable`; #28 checks `snapshots/` directory readability only and does not implement TaskCard snapshot persistence.
+- Backend tests for ready-before-init non-2xx/not_ready with live still 2xx.
+- Evidence that tests use temp workspaces and do not create tracked `workspace/` assets.
+- Existing backend ws tests, typecheck, and package check remain green.
+- `bun run test:backend-api` or focused backend route test command; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`.
+
+Non-goals:
+- TaskCard create/list/detail, task snapshot persistence/restart restore, idempotency key skeleton, artifact registry, path safety helper, structured API logs, perf smoke, deep health auth, disk critical behavior, and ops dashboard.
+
+Review focus:
+- Directory creation is bounded and idempotent; no overwrite/delete of existing workspace content.
+- Health response fields match OBS-HEALTH-001/002 and path registry.
+- Ready failure states are explicit and stable rather than relying on thrown framework errors.
+- Scope stays in #28 and does not pre-implement #29/#31/#32/#33.

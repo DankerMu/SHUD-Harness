@@ -79,6 +79,16 @@
 ## 6. 后端骨架（task-api）
 
 - [ ] 6.1 `POST /api/workspace/init` 幂等目录树生成（含 `readiness/`）+ health live/ready skeleton（live 响应含 status/version/uptime_seconds/timestamp，OBS-HEALTH-001；ready 检查含 workspace_writable，OBS-HEALTH-002；路径遵 Schemas_APIs_CLIs 注册表）——依赖: 2.1
+  - Evidence floor (#28):
+    - `POST /api/workspace/init` against a fresh temp workspace creates the canonical M1 runtime directory tree from Workspace_Conventions, including `readiness/`, without creating tracked root `workspace/` assets.
+    - Repeating `POST /api/workspace/init` against an already initialized temp workspace succeeds and preserves a pre-existing sentinel file, proving no overwrite/delete behavior.
+    - `GET /api/health/live` returns 2xx with `status`, `version`, `uptime_seconds`, and `timestamp` (OBS-HEALTH-001), and does not depend on workspace readiness.
+    - `GET /api/health/ready` before workspace init returns non-2xx/not_ready while live remains 2xx.
+    - `GET /api/health/ready` after init returns 2xx/ok with checks including directory tree presence, `snapshot_readable=ok`, and `workspace_writable=ok`; #28 checks `snapshots/` directory readability only and does not implement TaskCard snapshot persistence.
+    - A non-writable workspace, or an injected writable-probe failure for platforms where chmod is unreliable, returns not_ready with `workspace_writable=fail` and does not probe outside the configured workspace root.
+    - Endpoint paths follow Schemas_APIs_CLIs: `POST /api/workspace/init`, `GET /api/health/live`, `GET /api/health/ready`.
+    - Existing backend WebSocket tests, typecheck, and package check remain green; #29/#31/#32/#33 surfaces are not pre-implemented.
+    - `bun run test:backend-api` or focused backend route test command; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`.
 - [ ] 6.2 TaskCard 最小链路：`POST/GET /api/tasks`、`GET /api/tasks/:id` + 统一错误 envelope（含 404 路由兜底）+ task snapshot 落盘/重启恢复——依赖: 4.1
 - [ ] 6.3 幂等/锁 service skeleton（相同 Idempotency-Key + 相同 request_digest 重放返回同一对象；相同 key + 不同 digest → 422 标准 envelope；M1 验证载体 = `POST /api/tasks`，key/digest 配方为 change-scoped，见 task-api spec 与 proposal Impact 账本待办）+ Artifact registry skeleton（注册/按 id 查询/落盘）——依赖: 4.1（IdempotencyRecord/LockRecord schema）
 - [ ] 6.4 结构化 NDJSON API 请求日志中间件（OBS-LOG-001 八字段：ts/level/service/event/request_id/route/status/duration_ms；secret 仅以 ref/[REDACTED] 形式出现，OBS-LOG-002）
