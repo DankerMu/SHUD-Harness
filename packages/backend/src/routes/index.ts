@@ -3,10 +3,19 @@ import { constants } from "node:fs";
 import { access, lstat, mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, parse, resolve, sep } from "node:path";
 import {
+  DEFAULT_TASK_CREATED_BY,
   CreateTaskInputSchema,
   TaskServiceError,
+  canonicalJson,
+  createIdempotencyMismatchError,
+  createIdempotencyRecordService,
   createTaskCardService,
-  isSafeTaskId
+  isSafeTaskId,
+  sha256Hex,
+  type CreateTaskInput,
+  type IdempotencyRecordService,
+  type TaskCard,
+  type TaskCardService
 } from "@shud-harness/core";
 import { Hono, type Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -131,6 +140,11 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
     now: options.now,
     taskIdFactory: options.taskIdFactory
   });
+  const idempotencyService = createIdempotencyRecordService({
+    workspaceRoot,
+    now: options.now
+  });
+  const taskCreateIdempotencyInflight = new Map<string, TaskCreateIdempotencyInflight>();
 
   app.post("/api/workspace/init", async (c) => {
     try {
@@ -184,10 +198,49 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
       );
     }
 
+    const idempotencyKey = nonblankIdempotencyKey(c);
+    if (!idempotencyKey) {
+      try {
+        return c.json(await taskService.createTask(parsedBody.data), 201);
+      } catch (error) {
+        return jsonTaskServiceError(c, error);
+      }
+    }
+
+    const requestDigest = taskCreateRequestDigest(parsedBody.data);
+    const inflightKey = `task:${sha256Hex(idempotencyKey)}`;
+    const existingInflight = taskCreateIdempotencyInflight.get(inflightKey);
+    if (existingInflight) {
+      if (existingInflight.requestDigest !== requestDigest) {
+        return jsonTaskServiceError(c, createIdempotencyMismatchError());
+      }
+
+      try {
+        const result = await existingInflight.promise;
+        return c.json(result.task, 200);
+      } catch (error) {
+        return jsonTaskServiceError(c, error);
+      }
+    }
+
+    const promise = createIdempotentTaskCard({
+      input: parsedBody.data,
+      idempotencyKey,
+      requestDigest,
+      taskService,
+      idempotencyService
+    });
+    taskCreateIdempotencyInflight.set(inflightKey, { requestDigest, promise });
+
     try {
-      return c.json(await taskService.createTask(parsedBody.data), 201);
+      const result = await promise;
+      return c.json(result.task, result.created ? 201 : 200);
     } catch (error) {
       return jsonTaskServiceError(c, error);
+    } finally {
+      if (taskCreateIdempotencyInflight.get(inflightKey)?.promise === promise) {
+        taskCreateIdempotencyInflight.delete(inflightKey);
+      }
     }
   });
 
@@ -246,6 +299,73 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
   });
 
   return app;
+}
+
+interface TaskCreateIdempotencyInflight {
+  requestDigest: string;
+  promise: Promise<IdempotentTaskCreateResult>;
+}
+
+interface IdempotentTaskCreateResult {
+  task: TaskCard;
+  created: boolean;
+}
+
+interface CreateIdempotentTaskCardInput {
+  input: CreateTaskInput;
+  idempotencyKey: string;
+  requestDigest: string;
+  taskService: TaskCardService;
+  idempotencyService: IdempotencyRecordService;
+}
+
+async function createIdempotentTaskCard(
+  input: CreateIdempotentTaskCardInput
+): Promise<IdempotentTaskCreateResult> {
+  const replay = await input.idempotencyService.lookupReplay({
+    scope: "task",
+    key: input.idempotencyKey,
+    requestDigest: input.requestDigest
+  });
+
+  if (replay.status === "mismatch") {
+    throw createIdempotencyMismatchError();
+  }
+  if (replay.status === "completed") {
+    return {
+      task: await input.taskService.getTask(replay.record.result_ref),
+      created: false
+    };
+  }
+
+  const task = await input.taskService.createTask(input.input);
+  await input.idempotencyService.completeRecord({
+    scope: "task",
+    key: input.idempotencyKey,
+    requestDigest: input.requestDigest,
+    resultRef: task.task_id
+  });
+
+  return { task, created: true };
+}
+
+function taskCreateRequestDigest(input: CreateTaskInput): string {
+  return sha256Hex(
+    canonicalJson({
+      ...input,
+      created_by: input.created_by ?? DEFAULT_TASK_CREATED_BY
+    })
+  );
+}
+
+function nonblankIdempotencyKey(c: Context): string | undefined {
+  const header = c.req.header("Idempotency-Key");
+  if (typeof header !== "string") {
+    return undefined;
+  }
+
+  const trimmedHeader = header.trim();
+  return trimmedHeader.length > 0 ? trimmedHeader : undefined;
 }
 
 function jsonTaskServiceError(c: Context, error: unknown): Response {

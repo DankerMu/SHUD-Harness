@@ -133,6 +133,42 @@
       - #29 does not implement Idempotency-Key handling, shared path helper, structured request logging, PERF-API-001, frontend Dashboard, or Workbench task navigation.
       - `bun run test:backend-api`; `bun run test:backend-ws`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 6.3 幂等/锁 service skeleton（相同 Idempotency-Key + 相同 request_digest 重放返回同一对象；相同 key + 不同 digest → 422 标准 envelope；M1 验证载体 = `POST /api/tasks`，key/digest 配方为 change-scoped，见 task-api spec 与 proposal Impact 账本待办）+ Artifact registry skeleton（注册/按 id 查询/落盘）——依赖: 4.1（IdempotencyRecord/LockRecord schema）
+  - Fixture (#30): expanded / high
+    - Change surface: `packages/core/src/domain/services/**` idempotency/lock/artifact registry services; `packages/backend/src/routes/**` `POST /api/tasks` Idempotency-Key handling; backend/core tests.
+    - Must preserve: #28 workspace/health behavior, #29 task create/list/detail/snapshot/recovery shapes, unknown-route envelope, backend WS tests, frozen canonical docs, untracked `workspace/`, and `zero/` source diff=0.
+    - Must add/change: optional `Idempotency-Key` on `POST /api/tasks`; `scope=task`; `request_digest = sha256(canonical JSON)` over sorted validated create input including defaulted `created_by`; same key+digest replay returns the first TaskCard; same key+different digest returns 422 canonical envelope; core IdempotencyRecord/LockRecord file services; Artifact registry register/get file skeleton.
+    - Risk packs considered:
+      - Public API / CLI / script entry: selected - `POST /api/tasks` write behavior changes when `Idempotency-Key` is present.
+      - Config / project setup: selected - records are rooted in configured workspace.
+      - File IO / path safety / overwrite: selected - idempotency, lock, and artifact metadata files are written/read under workspace paths.
+      - Schema / columns / units / field names: selected - IdempotencyRecord, LockRecord, Artifact, digest, and error envelope fields are structured contracts.
+      - Auth / permissions / secrets: selected - caller-provided key must not become a raw filename or leak as an unsafe path/evidence value.
+      - Concurrency / shared state / ordering: selected - concurrent same-key creates must converge on one completed TaskCard result.
+      - Resource limits / large input / discovery: selected - digesting uses the bounded accepted request body and direct lookup paths; no broad scans.
+      - Legacy compatibility / examples: selected - #28/#29 route contracts and generated schema checks remain compatible.
+      - Error handling / rollback / partial outputs: selected - mismatch/invalid/failed create paths leave no duplicate accepted task or poisoned completed record.
+      - Release / packaging / dependency compatibility: selected - no non-M1 runtime dependency.
+      - Documentation / migration notes: selected - PR evidence states `POST /api/tasks` remains change-scoped, not canonical §4.
+      - Scientific governance / PI gate / evidence lineage: selected - Artifact metadata is future evidence plumbing; no M2 evidence_usable semantics or scientific claims.
+      - Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no solver/runtime behavior changes.
+      - Zero adapter / tool registry / agent role governance: not selected - no Zero/tool governance changes.
+    - Invariant Matrix:
+      - Governing invariant: a nonblank Idempotency-Key on `POST /api/tasks` binds `scope=task` to one canonical request digest and one completed TaskCard result; replay returns that result, mismatch fails with 422, and Artifact/Lock records remain schema-valid workspace-local files retrievable by id.
+      - Source-of-truth identity/contract: `Idempotency-Key`, `scope=task`, canonical JSON digest, IdempotencyRecord.result_ref, TaskCard schema, API error envelope, Artifact/LockRecord schemas, configured workspace root, and deterministic record paths.
+      - Producers: backend `POST /api/tasks`, idempotency service, task service, artifact registry service, lock service.
+      - Validators/preflight: create-body schema validation, nonblank header validation, sorted canonical JSON digest, digest comparison, schema validation before record writes, safe derived filename/id segments.
+      - Storage/cache/query: task snapshots, idempotency records, lock records, and artifact metadata under configured workspace paths.
+      - Public routes/entrypoints: `POST /api/tasks`; no artifact/lock REST route in #30.
+      - Frontend/downstream consumers: #35 Dashboard keeps the #29 create/list shape; future retry UI consumes replay/422 semantics.
+      - Failure paths/stale state: missing/blank key, invalid body, digest mismatch, task persistence failure after key reservation, concurrent duplicate same-key create, invalid artifact/lock record, service re-instantiation.
+      - Evidence/readiness: backend route tests, core service tests, schema tests, root checks, OpenSpec validation, diff check, zero diff, no tracked workspace assets.
+    - Evidence floor (#30):
+      - Backend route tests cover same key + same body replay, reordered JSON key digest stability, omitted `created_by` followed by explicit `created_by="pi"` replaying the same TaskCard, same key + changed `created_by` returning 422, same key + different body 422 envelope, absent-key #29 compatibility with no idempotency record, concurrent same-key create producing one TaskCard/result_ref, and failed-create retry without a completed poisoned IdempotencyRecord.
+      - 422 tests assert every canonical envelope field under `error`: `error_id`, `category`, `severity`, `message`, `user_message`, `evidence_refs`, `retryable`, `recommended_next_actions`; error JSON must not expose the raw `Idempotency-Key` value or absolute workspace paths.
+      - Core service tests cover IdempotencyRecord store/get/replay lookup, LockRecord store/get, Artifact register/get, schema-invalid rejection without files, safe deterministic filenames that do not use raw `Idempotency-Key`, and direct lookup paths rather than broad workspace scans.
+      - Artifact registry test uses a valid Artifact type from `Artifact_Registry_Spec`, returns the same record by id, and persists metadata under `workspace/artifacts/manifests/`; M1 does not create/serve the payload file or implement full manifest/evidence_usable semantics.
+      - PR evidence states the `POST /api/tasks` idempotency carrier is change-scoped only and does not modify canonical frozen spec applicability lists.
+      - `bun run test:backend-api`; `bun run test:backend-ws`; `bun run test:schemas`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 6.4 结构化 NDJSON API 请求日志中间件（OBS-LOG-001 八字段：ts/level/service/event/request_id/route/status/duration_ms；secret 仅以 ref/[REDACTED] 形式出现，OBS-LOG-002）
 - [ ] 6.5 PERF-API-001 冒烟脚本 `bun run test:perf:api`（fixture = mock workspace + 100 tasks；GET /api/tasks、GET /api/tasks/:id、health ready P95 ≤ 300ms）+ 接入 1.2 的 PR CI——依赖: 1.2
 - [ ] 6.6 路径安全 helper（packages/core 共享 service，遵 Workspace_Conventions §9：resolve 规范化 → workspace 边界校验 → 拒 symlink escape → 记录规范化路径）+ Artifact registry 落盘与 task snapshot 写入两处接线 + 正负例单测（`../` 穿越拒绝、symlink escape 拒绝、合法路径规范化记录；承接 Test_Plan W1 Unit「path normalization」）——依赖: 6.2、6.3（两处落盘写入面在位）

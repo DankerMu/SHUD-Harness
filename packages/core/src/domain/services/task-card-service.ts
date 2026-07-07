@@ -54,6 +54,11 @@ export type TaskSnapshot = z.infer<typeof TaskSnapshotSchema>;
 
 export type TaskServiceErrorCode =
   | "schema_error"
+  | "record_schema_error"
+  | "record_id_not_safe"
+  | "record_not_found"
+  | "record_malformed"
+  | "idempotency_mismatch"
   | "task_not_found"
   | "task_id_not_safe"
   | "workspace_path_not_safe"
@@ -68,7 +73,7 @@ export interface TaskServiceErrorOptions {
   code: TaskServiceErrorCode;
   message: string;
   userMessage: string;
-  status: 400 | 404 | 500;
+  status: 400 | 404 | 422 | 500;
   category: string;
   evidenceRefs?: string[];
   retryable?: boolean;
@@ -77,7 +82,7 @@ export interface TaskServiceErrorOptions {
 
 export class TaskServiceError extends Error {
   readonly code: TaskServiceErrorCode;
-  readonly status: 400 | 404 | 500;
+  readonly status: 400 | 404 | 422 | 500;
   readonly category: string;
   readonly userMessage: string;
   readonly evidenceRefs: string[];
