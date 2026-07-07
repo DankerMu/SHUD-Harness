@@ -2065,6 +2065,80 @@ describe("policy-gated zero tool registry", () => {
     );
   });
 
+  test("factory-returned registry rejects post-return 21st wrapped tool registration", () => {
+    const tools = Array.from({ length: 20 }, (_, index) => new RecordingTool(`generic.${index}`));
+    const registry = createPolicyGatedToolRegistry(tools, {
+      role: "worker",
+      evaluate: async () => ({ decision: "allow" })
+    });
+    const extraTool = wrapToolWithPolicyGate(new RecordingTool("generic.20"), {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    expect(() => registry.register(extraTool)).toThrow(
+      /Policy-gated tool registration lint failed for role worker: visible tool count 21 exceeds 20; excess count 1/
+    );
+    expect(registry.get("generic.20")).toBeUndefined();
+    expect(registry.list().map((tool) => tool.name)).not.toContain("generic.20");
+    expect(registry.getDefinitions().map((definition) => definition.name)).not.toContain(
+      "generic.20"
+    );
+  });
+
+  test("factory-returned registry rejects post-return wrapped tools with bad descriptions", () => {
+    const registry = createPolicyGatedToolRegistry([new RecordingTool("generic.good")], {
+      evaluate: async () => ({ decision: "allow" })
+    });
+    const badTool = new RecordingTool("generic.bad.description");
+    badTool.description = [
+      "何时该用: Use this fixture for mutation-boundary description lint.",
+      "成功与失败样态: Success should never pass registry mutation validation."
+    ].join("\n");
+    const wrappedBadTool = wrapToolWithPolicyGate(badTool, {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    expect(() => registry.register(wrappedBadTool)).toThrow(
+      /generic\.bad\.description: missing 何时不该用/
+    );
+    expect(registry.get("generic.bad.description")).toBeUndefined();
+    expect(registry.list().map((tool) => tool.name)).not.toContain("generic.bad.description");
+    expect(registry.getDefinitions().map((definition) => definition.name)).not.toContain(
+      "generic.bad.description"
+    );
+  });
+
+  test("factory-returned registry replacements use Zero same-name semantics without double-counting", () => {
+    const tools = Array.from({ length: 20 }, (_, index) => new RecordingTool(`generic.${index}`));
+    const registry = createPolicyGatedToolRegistry(tools, {
+      role: "worker",
+      evaluate: async () => ({ decision: "allow" })
+    });
+    const replacementTool = wrapToolWithPolicyGate(new RecordingTool("generic.19"), {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    expect(() => registry.register(replacementTool)).not.toThrow();
+    expect(registry.list()).toHaveLength(20);
+    expect(registry.get("generic.19")).toBe(replacementTool);
+    expect(() => assertPolicyGatedToolRegistry(registry, { role: "worker" })).not.toThrow();
+  });
+
+  test("factory-returned registry rejects post-return unwrapped tool registration", () => {
+    const registry = createPolicyGatedToolRegistry([new RecordingTool("generic.good")], {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    expect(() => registry.register(new RecordingTool("generic.unwrapped"))).toThrow(
+      /Policy-gated tool assembly failed; unwrapped tool ids: generic\.unwrapped/
+    );
+    expect(registry.get("generic.unwrapped")).toBeUndefined();
+    expect(registry.list().map((tool) => tool.name)).not.toContain("generic.unwrapped");
+    expect(registry.getDefinitions().map((definition) => definition.name)).not.toContain(
+      "generic.unwrapped"
+    );
+  });
+
   test("generic wrap seam rejects descriptions missing required section headings", () => {
     const badTool = new RecordingTool("generic.bad.description");
     badTool.description = [

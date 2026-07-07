@@ -218,7 +218,7 @@ export function createPolicyGatedToolRegistry(
     role: options.role,
     requireDescriptionSections: true
   });
-  const registry = new ToolRegistry();
+  const registry = new LintEnforcingPolicyGatedToolRegistry({ role: options.role });
   const wrappedTools = tools.map((tool) =>
     wrapToolWithPolicyGate(tool, {
       ...options,
@@ -257,7 +257,7 @@ export function createShudSandboxedBashTool(
 export function createShudRuntimeToolRegistry(
   options: ShudRuntimeToolRegistryOptions
 ): ToolRegistry {
-  const registry = new ToolRegistry();
+  const registry = new LintEnforcingPolicyGatedToolRegistry({ role: options.role });
   const evaluate = createShudPolicyGateEvaluator(options.evaluate);
   let includesSpawnAgent = false;
   const registrations: Array<{
@@ -495,6 +495,43 @@ function resolveShudZeroNativeToolDescription(tool: BaseTool): string | undefine
 
 class ShudSpawnAgentTool extends SpawnAgentTool {
   override description = SHUD_SPAWN_AGENT_DESCRIPTION;
+}
+
+class LintEnforcingPolicyGatedToolRegistry extends ToolRegistry {
+  constructor(private readonly assertionOptions: PolicyGatedToolRegistryAssertionOptions = {}) {
+    super();
+  }
+
+  override register(tool: BaseTool): void {
+    const candidateTools = buildRegistrationCandidateTools(this.list(), tool);
+    assertAllToolsPolicyGated(candidateTools);
+    assertPolicyGatedToolRegistrationLint(candidateTools, {
+      role: this.assertionOptions.role,
+      requireDescriptionSections: true
+    });
+    super.register(tool);
+  }
+}
+
+function buildRegistrationCandidateTools(
+  currentTools: readonly BaseTool[],
+  tool: BaseTool
+): BaseTool[] {
+  let replacedExistingTool = false;
+  const candidateTools = currentTools.map((currentTool) => {
+    if (currentTool.name !== tool.name) {
+      return currentTool;
+    }
+
+    replacedExistingTool = true;
+    return tool;
+  });
+
+  if (!replacedExistingTool) {
+    candidateTools.push(tool);
+  }
+
+  return candidateTools;
 }
 
 class ShudRuntimeToolDescriptionAdapter extends BaseTool {
