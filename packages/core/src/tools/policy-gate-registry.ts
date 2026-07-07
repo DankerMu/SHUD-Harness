@@ -22,6 +22,8 @@ import {
   PolicyGuardClassSchema,
   PolicyGateRemediationSchema,
   SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
+  SPAWN_CONCURRENCY_LIMIT_RULE,
+  SPAWN_DEPTH_LIMIT_RULE,
   SPAWN_PROFILE_SUBSET_POLICY_REF,
   SPAWN_PROFILE_SUBSET_RULE,
   SPAWN_PROFILE_SUBSET_RULE_ID,
@@ -201,7 +203,11 @@ function canExecutionValidatorReturnReservedAuthorityDecision(
 }
 
 export const DEFAULT_SHUD_POLICY_GATE_CONTEXT: PolicyGateContext = Object.freeze({
-  rules: Object.freeze([SPAWN_PROFILE_SUBSET_RULE])
+  rules: Object.freeze([
+    SPAWN_PROFILE_SUBSET_RULE,
+    SPAWN_DEPTH_LIMIT_RULE,
+    SPAWN_CONCURRENCY_LIMIT_RULE
+  ])
 });
 
 // Mirrors Zero's sub-agent hard filter at the pinned zero submodule boundary.
@@ -1064,12 +1070,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     let candidate: PolicyGateDecisionInput;
     try {
       candidate = await this.#evaluate(
-        {
-          toolId: this.#policyGateToolId,
-          role,
-          input: evaluatorInput,
-          workDir: toolContext.workDir
-        },
+        buildPolicyGateToolCall(this.#policyGateToolId, role, evaluatorInput, toolContext),
         {
           tool: this,
           toolContext
@@ -1102,6 +1103,48 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       };
     }
   }
+}
+
+function buildPolicyGateToolCall(
+  toolId: string,
+  role: HarnessRole | "unknown",
+  input: unknown,
+  toolContext: ToolContext
+): PolicyGateToolCall {
+  const baseCall: PolicyGateToolCall = {
+    toolId,
+    role,
+    input,
+    workDir: toolContext.workDir
+  };
+
+  if (toolId !== "spawn_agent") {
+    return baseCall;
+  }
+
+  return {
+    ...baseCall,
+    spawnDepth: resolveTrustedSpawnDepth(toolContext),
+    activeSubagentCount: resolveTrustedActiveSubagentCount(toolContext)
+  };
+}
+
+function resolveTrustedSpawnDepth(toolContext: ToolContext): number | undefined {
+  return toolContext.spawnedByRequestId !== undefined ? 1 : undefined;
+}
+
+function resolveTrustedActiveSubagentCount(toolContext: ToolContext): number | undefined {
+  if (!toolContext.agentControl) {
+    return undefined;
+  }
+  const count = toolContext.agentControl.activeAgentCount;
+  return readTrustedNonNegativeInteger(count) ?? Number.MAX_SAFE_INTEGER;
+}
+
+function readTrustedNonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 function policyGateErrorToolResult(error: unknown): ToolResult {

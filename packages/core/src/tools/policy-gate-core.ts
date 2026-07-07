@@ -20,9 +20,15 @@ export const PolicyGuardClassSchema = z.enum(["authority", "capability"]);
 export type PolicyGuardClass = z.infer<typeof PolicyGuardClassSchema>;
 
 export const SPAWN_PROFILE_SUBSET_RULE_ID = "spawn-profile-subset";
+export const SPAWN_DEPTH_LIMIT_RULE_ID = "spawn-depth-limit";
+export const SPAWN_CONCURRENCY_LIMIT_RULE_ID = "spawn-concurrency-limit";
 export const TOOL_PARAMETER_SCHEMA_RULE_ID = "tool-parameter-schema-validation";
 export const SPAWN_PROFILE_SUBSET_POLICY_REF =
   "docs/02_ARCHITECTURE/Roles_and_Boundaries.md#0-canonical-agent-role-registry";
+export const SPAWN_LIMITS_POLICY_REF =
+  "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定";
+export const MAX_SPAWN_DEPTH = 1;
+export const MAX_CONCURRENT_SUBAGENTS = 3;
 export const SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS = 64;
 export const SPAWN_PROFILE_TOOL_ID_MAX_CHARS = 128;
 export const SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS = 4096;
@@ -32,6 +38,8 @@ export const SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS = 65536;
 export const RESERVED_AUTHORITY_POLICY_RULE_IDS = Object.freeze([
   "raw-data-write",
   SPAWN_PROFILE_SUBSET_RULE_ID,
+  SPAWN_DEPTH_LIMIT_RULE_ID,
+  SPAWN_CONCURRENCY_LIMIT_RULE_ID,
   TOOL_PARAMETER_SCHEMA_RULE_ID
 ] as const);
 
@@ -40,6 +48,8 @@ export interface PolicyGateToolCall {
   role: HarnessRole | "unknown";
   input: unknown;
   workDir?: string;
+  spawnDepth?: number;
+  activeSubagentCount?: number;
 }
 
 export type PolicyRuleDecision =
@@ -421,6 +431,25 @@ export const SPAWN_PROFILE_SUBSET_RULE: PolicyRule = Object.freeze({
   }
 });
 
+export const SPAWN_DEPTH_LIMIT_RULE: PolicyRule = Object.freeze({
+  ruleId: SPAWN_DEPTH_LIMIT_RULE_ID,
+  description: "Reject spawn_agent calls that would exceed Control_Kernel max_spawn_depth.",
+  guardClass: "authority",
+  evaluate(call: PolicyGateToolCall): PolicyRuleDecision {
+    return evaluateSpawnDepthLimit(call);
+  }
+});
+
+export const SPAWN_CONCURRENCY_LIMIT_RULE: PolicyRule = Object.freeze({
+  ruleId: SPAWN_CONCURRENCY_LIMIT_RULE_ID,
+  description:
+    "Reject spawn_agent calls when active subagents already meet max_concurrent_subagents.",
+  guardClass: "authority",
+  evaluate(call: PolicyGateToolCall): PolicyRuleDecision {
+    return evaluateSpawnConcurrencyLimit(call);
+  }
+});
+
 export function evaluateSpawnProfileSubset(call: PolicyGateToolCall): PolicyRuleDecision {
   if (call.toolId !== "spawn_agent") {
     return { decision: "allow" };
@@ -432,6 +461,44 @@ export function evaluateSpawnProfileSubset(call: PolicyGateToolCall): PolicyRule
   }
 
   return evaluateSpawnProfileSubsetSnapshot(parsed.snapshot);
+}
+
+export function evaluateSpawnDepthLimit(call: PolicyGateToolCall): PolicyRuleDecision {
+  if (call.toolId !== "spawn_agent") {
+    return { decision: "allow" };
+  }
+
+  const spawnDepth = readTrustedSpawnLimitCount(call.spawnDepth);
+  if (spawnDepth.kind === "missing") {
+    return { decision: "allow" };
+  }
+  if (spawnDepth.kind === "invalid") {
+    return buildSpawnDepthLimitDeny(MAX_SPAWN_DEPTH);
+  }
+  if (spawnDepth.value < MAX_SPAWN_DEPTH) {
+    return { decision: "allow" };
+  }
+
+  return buildSpawnDepthLimitDeny(spawnDepth.value);
+}
+
+export function evaluateSpawnConcurrencyLimit(call: PolicyGateToolCall): PolicyRuleDecision {
+  if (call.toolId !== "spawn_agent") {
+    return { decision: "allow" };
+  }
+
+  const activeSubagentCount = readTrustedSpawnLimitCount(call.activeSubagentCount);
+  if (activeSubagentCount.kind === "missing") {
+    return { decision: "allow" };
+  }
+  if (activeSubagentCount.kind === "invalid") {
+    return buildSpawnConcurrencyLimitDeny(MAX_CONCURRENT_SUBAGENTS);
+  }
+  if (activeSubagentCount.value < MAX_CONCURRENT_SUBAGENTS) {
+    return { decision: "allow" };
+  }
+
+  return buildSpawnConcurrencyLimitDeny(activeSubagentCount.value);
 }
 
 export function normalizeSpawnAgentInput(
@@ -966,8 +1033,51 @@ function toSpawnProfileGateDeny(
   };
 }
 
+function readTrustedSpawnLimitCount(
+  value: number | undefined
+): { kind: "missing" } | { kind: "invalid" } | { kind: "valid"; value: number } {
+  if (value === undefined) {
+    return { kind: "missing" };
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    return { kind: "invalid" };
+  }
+  return { kind: "valid", value };
+}
+
 function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values)];
+}
+
+function buildSpawnDepthLimitDeny(
+  currentDepth: number
+): Extract<PolicyRuleDecision, { decision: "deny" }> {
+  const requestedDepth = currentDepth + 1;
+  return {
+    decision: "deny",
+    reason: `spawn_agent would create spawn depth ${requestedDepth}, exceeding max_spawn_depth=${MAX_SPAWN_DEPTH}.`,
+    remediation: {
+      next_action: "adjust_scope",
+      hint: "Do not chain spawn_agent from an existing subagent; return the work to the coordinator or handle it within the current delegated scope.",
+      ref: SPAWN_LIMITS_POLICY_REF
+    },
+    guardClass: "authority"
+  };
+}
+
+function buildSpawnConcurrencyLimitDeny(
+  activeSubagentCount: number
+): Extract<PolicyRuleDecision, { decision: "deny" }> {
+  return {
+    decision: "deny",
+    reason: `spawn_agent requested while ${activeSubagentCount} subagent(s) are already active, meeting max_concurrent_subagents=${MAX_CONCURRENT_SUBAGENTS}.`,
+    remediation: {
+      next_action: "adjust_scope",
+      hint: "Wait for an active subagent to finish before spawning another one; M1 denies instead of scheduling a queue.",
+      ref: SPAWN_LIMITS_POLICY_REF
+    },
+    guardClass: "authority"
+  };
 }
 
 function buildSpawnProfileMalformedDeny(

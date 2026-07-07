@@ -26,12 +26,17 @@ import type {
 } from "@zero-os/shared";
 import { z } from "zod";
 import {
+  MAX_CONCURRENT_SUBAGENTS,
+  MAX_SPAWN_DEPTH,
   PolicyGateRemediationSchema,
   RESERVED_AUTHORITY_POLICY_RULE_IDS,
+  SPAWN_CONCURRENCY_LIMIT_RULE_ID,
+  SPAWN_DEPTH_LIMIT_RULE_ID,
   SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS,
   SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
   SPAWN_PROFILE_SUBSET_POLICY_REF,
   SPAWN_PROFILE_SUBSET_RULE_ID,
+  SPAWN_LIMITS_POLICY_REF,
   TOOL_PARAMETER_SCHEMA_RULE_ID
 } from "./policy-gate-core";
 import {
@@ -299,6 +304,56 @@ describe("policy-gated zero tool registry", () => {
       success: false,
       outputSummary: result.outputSummary
     });
+  });
+
+  test("non-spawn policy calls do not read trusted spawn metadata getters", async () => {
+    const editTool = new RecordingTool("edit");
+    const agentControl = createAgentControlSpy();
+    let activeCountReads = 0;
+    let spawnedByRequestIdReads = 0;
+    let capturedCall: unknown;
+    Object.defineProperty(agentControl.control, "activeAgentCount", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        activeCountReads += 1;
+        throw new Error("activeAgentCount should not be read for edit");
+      }
+    });
+    const toolContext = {
+      ...createToolContext("worker"),
+      agentControl: agentControl.control
+    };
+    Object.defineProperty(toolContext, "spawnedByRequestId", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        spawnedByRequestIdReads += 1;
+        throw new Error("spawnedByRequestId should not be read for edit");
+      }
+    });
+    const wrapped = wrapToolWithPolicyGate(editTool, {
+      evaluate: async (call) => {
+        capturedCall = call;
+        return { decision: "allow" };
+      }
+    });
+
+    const result = await wrapped.run(toolContext, {});
+
+    expect(result.success).toBe(true);
+    expect(result.output).toBe("edit executed");
+    expect(editTool.calls).toBe(1);
+    expect(activeCountReads).toBe(0);
+    expect(spawnedByRequestIdReads).toBe(0);
+    const call = capturedCall as {
+      toolId?: string;
+      spawnDepth?: unknown;
+      activeSubagentCount?: unknown;
+    };
+    expect(call.toolId).toBe("edit");
+    expect(call).not.toHaveProperty("spawnDepth");
+    expect(call).not.toHaveProperty("activeSubagentCount");
   });
 
   test("non-spawn input preparation failures finalize without executing the inner tool", async () => {
@@ -3994,6 +4049,16 @@ describe("policy-gated zero tool registry", () => {
         ref: SPAWN_PROFILE_SUBSET_POLICY_REF
       },
       {
+        name: "spawn-depth",
+        ruleId: SPAWN_DEPTH_LIMIT_RULE_ID,
+        ref: SPAWN_LIMITS_POLICY_REF
+      },
+      {
+        name: "spawn-concurrency",
+        ruleId: SPAWN_CONCURRENCY_LIMIT_RULE_ID,
+        ref: SPAWN_LIMITS_POLICY_REF
+      },
+      {
         name: "schema",
         ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
         ref: "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
@@ -4042,6 +4107,16 @@ describe("policy-gated zero tool registry", () => {
         name: "spawn",
         ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
         ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      },
+      {
+        name: "spawn-depth",
+        ruleId: SPAWN_DEPTH_LIMIT_RULE_ID,
+        ref: SPAWN_LIMITS_POLICY_REF
+      },
+      {
+        name: "spawn-concurrency",
+        ruleId: SPAWN_CONCURRENCY_LIMIT_RULE_ID,
+        ref: SPAWN_LIMITS_POLICY_REF
       },
       {
         name: "schema",
@@ -4957,6 +5032,222 @@ describe("policy-gated zero tool registry", () => {
         "docs/02_ARCHITECTURE/Roles_and_Boundaries.md#0-canonical-agent-role-registry"
       );
       expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime denies spawn_agent from Zero subagent context before execution", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          spawnedByRequestId: "REQ-PARENT-1",
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run a worker task.",
+          role: "worker",
+          tools: ["read"]
+        }
+      );
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("policy_gate_denied");
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        error?: string;
+        ruleId?: string;
+        guard_class?: string;
+        remediation?: {
+          next_action?: string;
+          ref?: string;
+        };
+      };
+      expect(payload.error).toBe("policy_gate_denied");
+      expect(payload.ruleId).toBe(SPAWN_DEPTH_LIMIT_RULE_ID);
+      expect(payload.guard_class).toBe("authority");
+      expect(payload.remediation?.next_action).toBe("adjust_scope");
+      expect(payload.remediation?.ref).toBe(SPAWN_LIMITS_POLICY_REF);
+      expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+      expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime denies spawn_agent at trusted max active subagents before execution", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+      let activeCountReads = 0;
+      Object.defineProperty(agentControl.control, "activeAgentCount", {
+        configurable: true,
+        enumerable: true,
+        get() {
+          activeCountReads += 1;
+          return MAX_CONCURRENT_SUBAGENTS;
+        }
+      });
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run a worker task.",
+          role: "worker",
+          tools: ["read"]
+        }
+      );
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("policy_gate_denied");
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        error?: string;
+        ruleId?: string;
+        guard_class?: string;
+        remediation?: {
+          next_action?: string;
+          ref?: string;
+        };
+      };
+      expect(payload.error).toBe("policy_gate_denied");
+      expect(payload.ruleId).toBe(SPAWN_CONCURRENCY_LIMIT_RULE_ID);
+      expect(payload.guard_class).toBe("authority");
+      expect(payload.remediation?.next_action).toBe("adjust_scope");
+      expect(payload.remediation?.ref).toBe(SPAWN_LIMITS_POLICY_REF);
+      expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+      expect(activeCountReads).toBe(1);
+      expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime denies malformed trusted active subagent count before execution", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+      agentControl.control.activeAgentCount = "3" as unknown as number;
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run a worker task.",
+          role: "worker",
+          tools: ["read"]
+        }
+      );
+
+      expect(result?.success).toBe(false);
+      const payload = JSON.parse(result?.output ?? "{}") as {
+        error?: string;
+        ruleId?: string;
+        guard_class?: string;
+      };
+      expect(payload.error).toBe("policy_gate_denied");
+      expect(payload.ruleId).toBe(SPAWN_CONCURRENCY_LIMIT_RULE_ID);
+      expect(payload.guard_class).toBe("authority");
+      expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime ignores model-controlled spawn limit fields below trusted limits", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run a worker task.",
+          role: "worker",
+          tools: ["read"],
+          spawnDepth: MAX_SPAWN_DEPTH,
+          activeSubagentCount: MAX_CONCURRENT_SUBAGENTS
+        }
+      );
+
+      expect(result?.success).toBe(true);
+      expect(result?.output).not.toContain("policy_gate_denied");
+      expect(agentControl.getSpawnCalls()).toBe(1);
+      expect(getCapturedToolNames(agentControl.getLastAgentContext())).toEqual(["read"]);
     } finally {
       await fixture.cleanup();
     }
