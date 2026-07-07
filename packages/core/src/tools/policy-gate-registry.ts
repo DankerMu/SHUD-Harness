@@ -595,46 +595,87 @@ class ShudRuntimeToolDescriptionAdapter extends BaseTool {
 }
 
 class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
-  readonly policyGateToolId: string;
-  private readonly nameSnapshot: string;
-  private readonly descriptionSnapshot: string;
-  private readonly parametersSnapshot: Record<string, unknown>;
-  private readonly zodParameterSchemaSnapshot: ToolZodParameterSchema | undefined;
+  #innerTool: BaseTool;
+  #policyGateToolId: string;
+  #evaluate: PolicyGateEvaluator;
+  #role: HarnessRole | undefined;
+  #validateExecutionInput: PolicyGateExecutionInputValidator | undefined;
+  #nameSnapshot: string;
+  #descriptionSnapshot: string;
+  #parametersSnapshot: Record<string, unknown>;
+  #zodParameterValidatorSnapshot: ToolZodParameterValidator | undefined;
 
-  constructor(
-    readonly innerTool: BaseTool,
-    private readonly options: PolicyGateWrapperOptions
-  ) {
+  constructor(innerTool: BaseTool, options: PolicyGateWrapperOptions) {
     super();
-    this.policyGateToolId = options.toolId ?? innerTool.name;
-    this.nameSnapshot = innerTool.name;
-    this.descriptionSnapshot = innerTool.description;
-    this.parametersSnapshot = snapshotToolParameters(innerTool.parameters);
-    this.zodParameterSchemaSnapshot = resolveToolZodParameterSchema(innerTool);
-    Object.defineProperty(this, "kind", {
-      configurable: false,
-      enumerable: true,
-      writable: false,
-      value: innerTool.kind
+    this.#innerTool = innerTool;
+    this.#policyGateToolId = options.toolId ?? innerTool.name;
+    this.#evaluate = options.evaluate;
+    this.#role = options.role;
+    this.#validateExecutionInput = options.validateExecutionInput;
+    this.#nameSnapshot = innerTool.name;
+    this.#descriptionSnapshot = innerTool.description;
+    this.#parametersSnapshot = snapshotToolParameters(innerTool.parameters);
+    this.#zodParameterValidatorSnapshot = createStableToolZodParameterValidator(innerTool);
+    Object.defineProperties(this, {
+      name: {
+        configurable: false,
+        enumerable: true,
+        get: () => this.#nameSnapshot
+      },
+      description: {
+        configurable: false,
+        enumerable: true,
+        get: () => this.#descriptionSnapshot
+      },
+      parameters: {
+        configurable: false,
+        enumerable: true,
+        get: () => this.#parametersSnapshot
+      },
+      innerTool: {
+        configurable: false,
+        enumerable: true,
+        get: () => this.#innerTool
+      },
+      policyGateToolId: {
+        configurable: false,
+        enumerable: true,
+        get: () => this.#policyGateToolId
+      },
+      kind: {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: innerTool.kind
+      },
+      requiredModelCapabilities: {
+        configurable: false,
+        enumerable: true,
+        writable: false,
+        value: Object.freeze([...innerTool.requiredModelCapabilities])
+      }
     });
-    Object.defineProperty(this, "requiredModelCapabilities", {
-      configurable: false,
-      enumerable: true,
-      writable: false,
-      value: Object.freeze([...innerTool.requiredModelCapabilities])
-    });
+    Object.preventExtensions(this);
+  }
+
+  get innerTool(): BaseTool {
+    return this.#innerTool;
+  }
+
+  get policyGateToolId(): string {
+    return this.#policyGateToolId;
   }
 
   get name(): string {
-    return this.nameSnapshot;
+    return this.#nameSnapshot;
   }
 
   get description(): string {
-    return this.descriptionSnapshot;
+    return this.#descriptionSnapshot;
   }
 
   get parameters(): Record<string, unknown> {
-    return this.parametersSnapshot;
+    return this.#parametersSnapshot;
   }
 
   toDefinition(): ToolDefinition {
@@ -648,7 +689,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
 
   async run(toolContext: ToolContext, input: unknown): Promise<ToolResult> {
     const startTime = Date.now();
-    const role = this.options.role ?? resolveRole(toolContext);
+    const role = this.#role ?? resolveRole(toolContext);
     let preparedInput:
       | {
           decision: "allow";
@@ -662,7 +703,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       const durationMs = Date.now() - startTime;
       return this.finalizePolicyGateResult(
         toolContext,
-        buildPolicyGatePreparationFailedResult(this.policyGateToolId),
+        buildPolicyGatePreparationFailedResult(this.#policyGateToolId),
         durationMs
       );
     }
@@ -670,15 +711,15 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       const durationMs = Date.now() - startTime;
       return this.finalizePolicyGateResult(
         toolContext,
-        buildPolicyGateDeniedResult(this.policyGateToolId, preparedInput),
+        buildPolicyGateDeniedResult(this.#policyGateToolId, preparedInput),
         durationMs
       );
     }
 
-    if (this.zodParameterSchemaSnapshot) {
+    if (this.#zodParameterValidatorSnapshot) {
       const parsedInput = parseToolZodParameters(
-        this.policyGateToolId,
-        this.zodParameterSchemaSnapshot,
+        this.#policyGateToolId,
+        this.#zodParameterValidatorSnapshot,
         preparedInput.executionInput
       );
       if (parsedInput.decision === "deny") {
@@ -691,7 +732,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
           const durationMs = Date.now() - startTime;
           return this.finalizePolicyGateResult(
             toolContext,
-            buildPolicyGateDeniedToolResult(this.policyGateToolId, evaluation.decision),
+            buildPolicyGateDeniedToolResult(this.#policyGateToolId, evaluation.decision),
             durationMs
           );
         }
@@ -699,7 +740,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
         const durationMs = Date.now() - startTime;
         return this.finalizePolicyGateResult(
           toolContext,
-          buildPolicyGateDeniedResult(this.policyGateToolId, parsedInput),
+          buildPolicyGateDeniedResult(this.#policyGateToolId, parsedInput),
           durationMs
         );
       }
@@ -714,7 +755,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
         const durationMs = Date.now() - startTime;
         return this.finalizePolicyGateResult(
           toolContext,
-          buildPolicyGatePreparationFailedResult(this.policyGateToolId),
+          buildPolicyGatePreparationFailedResult(this.#policyGateToolId),
           durationMs
         );
       }
@@ -732,34 +773,34 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
         const durationMs = Date.now() - startTime;
         return this.finalizePolicyGateResult(
           toolContext,
-          buildPolicyGateDeniedToolResult(this.policyGateToolId, evaluation.decision),
+          buildPolicyGateDeniedToolResult(this.#policyGateToolId, evaluation.decision),
           durationMs
         );
       }
 
-      const executionValidationDecision = this.options.validateExecutionInput?.(
+      const executionValidationDecision = this.#validateExecutionInput?.(
         parsedPreparedInput.executionInput
       );
       if (executionValidationDecision) {
         const durationMs = Date.now() - startTime;
         return this.finalizePolicyGateResult(
           toolContext,
-          buildPolicyGateDeniedResult(this.policyGateToolId, executionValidationDecision),
+          buildPolicyGateDeniedResult(this.#policyGateToolId, executionValidationDecision),
           durationMs
         );
       }
 
-      return this.innerTool.run(toolContext, parsedPreparedInput.executionInput);
+      return this.#innerTool.run(toolContext, parsedPreparedInput.executionInput);
     }
 
-    const executionValidationDecision = this.options.validateExecutionInput?.(
+    const executionValidationDecision = this.#validateExecutionInput?.(
       preparedInput.executionInput
     );
     if (executionValidationDecision) {
       const durationMs = Date.now() - startTime;
       return this.finalizePolicyGateResult(
         toolContext,
-        buildPolicyGateDeniedResult(this.policyGateToolId, executionValidationDecision),
+        buildPolicyGateDeniedResult(this.#policyGateToolId, executionValidationDecision),
         durationMs
       );
     }
@@ -777,12 +818,12 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       const durationMs = Date.now() - startTime;
       return this.finalizePolicyGateResult(
         toolContext,
-        buildPolicyGateDeniedToolResult(this.policyGateToolId, evaluation.decision),
+        buildPolicyGateDeniedToolResult(this.#policyGateToolId, evaluation.decision),
         durationMs
       );
     }
 
-    return this.innerTool.run(toolContext, preparedInput.executionInput);
+    return this.#innerTool.run(toolContext, preparedInput.executionInput);
   }
 
   protected async execute(): Promise<ToolResult> {
@@ -839,9 +880,9 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
         evaluatorInput: unknown;
       }
     | Extract<PolicyGateDecision, { decision: "deny" }> {
-    if (this.policyGateToolId === "spawn_agent") {
+    if (this.#policyGateToolId === "spawn_agent") {
       const normalizedInput = normalizeSpawnAgentInput({
-        toolId: this.policyGateToolId,
+        toolId: this.#policyGateToolId,
         role,
         input,
         workDir: toolContext.workDir
@@ -874,9 +915,9 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     | { status: "error"; result: ToolResult }
   > {
     try {
-      const candidate = await this.options.evaluate(
+      const candidate = await this.#evaluate(
         {
-          toolId: this.policyGateToolId,
+          toolId: this.#policyGateToolId,
           role,
           input: evaluatorInput,
           workDir: toolContext.workDir
@@ -888,7 +929,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       );
       return {
         status: "decision",
-        decision: validatePolicyGateDecision(this.policyGateToolId, candidate)
+        decision: validatePolicyGateDecision(this.#policyGateToolId, candidate)
       };
     } catch (error) {
       const errorMessage = toErrorMessage(error);
@@ -992,6 +1033,8 @@ type ToolZodParameterSchema = {
   safeParse(input: unknown): ToolZodSafeParseResult;
 };
 
+type ToolZodParameterValidator = (input: unknown) => ToolZodSafeParseResult;
+
 type ToolZodSafeParseResult =
   | {
       success: true;
@@ -1009,14 +1052,14 @@ type ToolZodIssue = {
 
 function parseToolZodParameters(
   toolId: string,
-  schema: ToolZodParameterSchema,
+  safeParse: ToolZodParameterValidator,
   input: unknown
 ):
   | { decision: "allow"; executionInput: unknown }
   | Extract<PolicyGateDecision, { decision: "deny" }> {
   let result: ToolZodSafeParseResult;
   try {
-    result = schema.safeParse(input);
+    result = safeParse(input);
   } catch {
     return buildToolParameterSchemaValidationDeny(
       toolId,
@@ -1032,6 +1075,13 @@ function parseToolZodParameters(
     toolId,
     summarizeToolZodValidationError(result.error)
   );
+}
+
+function createStableToolZodParameterValidator(
+  tool: BaseTool
+): ToolZodParameterValidator | undefined {
+  const schema = resolveToolZodParameterSchema(tool);
+  return schema ? schema.safeParse.bind(schema) : undefined;
 }
 
 function resolveToolZodParameterSchema(tool: BaseTool): ToolZodParameterSchema | undefined {
