@@ -471,3 +471,84 @@ Review focus:
 - The description-section check is exact enough to fail missing required sections while preserving existing valid tools.
 - Zod validation failures are returned as structured policy-gate-style denials and do not execute inner tools.
 - Existing registry and sandbox behavior remains compatible.
+
+## Subagent Workflow Fixture - Issue #59
+
+Fixture level: expanded; repair intensity: high
+Project profile: SHUD-Harness
+Change surface:
+- `packages/core/src/tools/policy-gate-registry.ts`
+- `packages/core/src/tools/policy-gate-registry.test.ts`
+
+Must preserve:
+- Existing evaluator and execution-validator allow/deny semantics.
+- Reserved authority `ruleId` and `guard_class` fail-closed behavior from #26/#27.
+- Inner tools are not executed when decision validation fails.
+- `zero/` remains source-clean and pinned; no Zero source edits.
+
+Must add/change:
+- Policy-gate decision candidates from custom evaluators and execution validators are snapshotted as plain data before validation reads identity fields.
+- Proxy-backed, accessor-backed, or enumerable-`toJSON` decision objects fail closed with a stable policy-gate validation error.
+- Trap text or accessor-thrown sentinel text is not echoed through `ToolResult.output` or `outputSummary`.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - custom evaluators and execution validators are public extension seams for wrapped tools.
+- Config / project setup: not selected - no package manager, provider, or environment setup changes.
+- File IO / path safety / overwrite: not selected - no file mutation behavior beyond tests.
+- Schema / columns / units / field names: selected - policy decision payload shape is a structured contract.
+- Auth / permissions / secrets: selected - reserved authority decisions must not be spoofed or downgraded through malformed payloads.
+- Concurrency / shared state / ordering: not selected - no shared runtime state or scheduling changes.
+- Resource limits / large input / discovery: selected - snapshotting must bound traversal and reject hostile objects without executing traps.
+- Legacy compatibility / examples: selected - existing policy-gate, spawn subset, and raw sandbox tests must remain green.
+- Error handling / rollback / partial outputs: selected - invalid decisions must fail closed before side effects and with stable error text.
+- Release / packaging / dependency compatibility: selected - no new dependency; Bun/TypeScript checks must remain compatible.
+- Documentation / migration notes: selected - PR evidence must explain this is a #26 review follow-up and not a policy semantic change.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: not selected - no scientific decision or evidence claim changes.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no solver/runtime behavior changes.
+- Zero adapter / tool registry / agent role governance: selected - policy-gate wrapper authority is the shared governance boundary.
+
+Invariant Matrix:
+- Governing invariant: Policy-gate decisions from extension seams must be validated only from bounded, plain-data snapshots, so hostile objects cannot execute code during validation or control stable error text.
+- Source-of-truth identity/contract: `PolicyGateDecision` / `PolicyGateDecisionInput`, `PolicyGateRemediationSchema`, reserved authority rule id helpers, and `PolicyGateDecisionValidationError`.
+- Producers: custom policy evaluators and execution validators.
+- Validators/preflight: `validatePolicyGateDecision`, `validatePolicyGateDenyDecision`, and the decision-candidate snapshot helper.
+- Storage/cache/query: none - decisions are per-call in-memory payloads.
+- Public routes/entrypoints: `wrapToolWithPolicyGate(...).run(...)`, `createShudPolicyGateEvaluator(...)`, and execution-validator paths.
+- Frontend/downstream consumers: `ToolResult.output`, `ToolResult.outputSummary`, `policy_gate_denied` payload consumers, and running-tool terminal metadata.
+- Failure paths/rollback/stale state: malformed/proxy/accessor/toJSON decision candidates fail closed before inner execution and without untrusted trap text.
+- Evidence/audit/readiness: PR evidence and review-loop log record #59 as a #26 follow-up hardening, not a policy semantic change.
+- Regression rows:
+  - Plain valid allow/deny decision -> existing allow/deny semantics and structured `policy_gate_denied` payloads are preserved.
+  - Evaluator proxy/accessor decision -> `success=false`, stable `Invalid policy gate decision...` in `output` and `outputSummary`, sentinel/trap text absent from both, no `policy_gate_denied`, inner tool call count `0`.
+  - Execution-validator proxy/accessor deny decision -> same stable failure contract and inner tool call count `0`.
+  - Enumerable `toJSON` decision candidate -> rejected or ignored without invoking `toJSON`, without sentinel text leak, and without changing validation semantics.
+  - Over-depth or over-wide decision object -> bounded fail-closed validation result or explicit non-goal rationale; no unbounded traversal.
+
+Boundary-surface checklist:
+- Shared helper roots: `policy-gate-registry.ts` decision validation helpers and policy wrapper error-result builders.
+- Public entrypoints: custom evaluator path, execution-validator path, and direct `createShudPolicyGateEvaluator` custom path.
+- Read surfaces: decision candidate own descriptors only; no accessor/proxy trap execution.
+- Write/delete/overwrite surfaces: none.
+- Producer/consumer evidence boundaries: candidate decision object -> validation snapshot -> `PolicyGateDecision` or stable failed `ToolResult`.
+- Stale-state/idempotency boundaries: none - per-call validation only.
+- Unchanged downstream consumers: ordinary plain-object allow/deny decisions, reserved authority validation tests, raw-data sandbox policy-gate composition tests, and running tool handle finalization.
+
+Required evidence:
+- Evaluator returns proxy/accessor decision -> `success=false`, stable `Invalid policy gate decision...` in `output`/`outputSummary`, sentinel trap text absent from both, no `policy_gate_denied`, inner tool call count `0`.
+- Execution validator returns proxy/accessor deny decision -> `success=false`, stable `Invalid policy gate decision...` in `output`/`outputSummary`, sentinel trap text absent from both, no `policy_gate_denied`, inner tool call count `0`.
+- Enumerable `toJSON` on a decision candidate -> rejected or ignored without invoking `toJSON`, without sentinel text leak, and without affecting valid plain-object decision behavior.
+- Resource-boundary evidence: snapshotting rejects or bounds over-depth/over-wide decision candidates, or records a precise non-goal if the snapshot only reads the first-level decision contract by descriptor.
+- Existing reserved authority decision validation tests remain green.
+- PR evidence states #59 is a #26 review follow-up and not a policy semantic change.
+- `bun run test:policy-gate`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`.
+
+Non-goals:
+- WebSocket and audit public-input snapshots already covered by #26.
+- Changing policy rule semantics, reserved rule ids, `guard_class` taxonomy, or raw-data sandbox behavior.
+
+Review focus:
+- Decision validation reads only a stable, plain-data snapshot and never invokes user-supplied getters, proxies, or `toJSON`.
+- Stable validation errors do not contain untrusted trap text.
+- The evaluator and execution-validator paths are both covered.
+- Existing policy-gate denial payloads remain compatible for ordinary plain objects.

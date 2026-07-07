@@ -238,12 +238,18 @@ export function createShudPolicyGateEvaluator(
   }
 
   return trustReservedAuthorityPolicyGateEvaluator(async (call, context) => {
-    const authorityDecision = await authorityEvaluate(call, context);
+    const authorityResult = authorityEvaluate(call, context);
+    const authorityDecision = isPolicyGateDecisionInputPromise(authorityResult)
+      ? await authorityResult
+      : authorityResult;
     if (authorityDecision.decision === "deny") {
       return authorityDecision;
     }
 
-    const customDecision = await customEvaluate(call, context);
+    const customResult = customEvaluate(call, context);
+    const customDecision = isPolicyGateDecisionInputPromise(customResult)
+      ? await customResult
+      : customResult;
     try {
       return validatePolicyGateDecision(call.toolId, customDecision);
     } catch (error) {
@@ -253,6 +259,12 @@ export function createShudPolicyGateEvaluator(
       throw new PolicyGateDecisionValidationError(error);
     }
   });
+}
+
+function isPolicyGateDecisionInputPromise(
+  result: PolicyGateDecisionInput | Promise<PolicyGateDecisionInput>
+): result is Promise<PolicyGateDecisionInput> {
+  return nodeUtilTypes.isPromise(result);
 }
 
 export function wrapToolWithPolicyGate(
@@ -1069,13 +1081,16 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
   > {
     let candidate: PolicyGateDecisionInput;
     try {
-      candidate = await this.#evaluate(
+      const candidateResult = this.#evaluate(
         buildPolicyGateToolCall(this.#policyGateToolId, role, evaluatorInput, toolContext),
         {
           tool: this,
           toolContext
         }
       );
+      candidate = isPolicyGateDecisionInputPromise(candidateResult)
+        ? await candidateResult
+        : candidateResult;
     } catch (error) {
       return {
         status: "error",
@@ -1662,18 +1677,29 @@ interface PolicyGateDecisionValidationOptions {
   allowReservedAuthorityRuleIds?: boolean;
 }
 
+type PolicyGateDecisionDataDescriptor = PropertyDescriptor & {
+  value: unknown;
+};
+
+const POLICY_GATE_DENY_DECISION_SNAPSHOT_KEYS = Object.freeze([
+  "ruleId",
+  "reason",
+  "remediation",
+  "guardClass",
+  "guard_class"
+] as const);
+const POLICY_GATE_REMEDIATION_SNAPSHOT_KEYS = Object.freeze([
+  "next_action",
+  "hint",
+  "ref"
+] as const);
+
 function validatePolicyGateDecision(
   toolId: string,
   candidate: unknown,
   options: PolicyGateDecisionValidationOptions = {}
 ): PolicyGateDecision {
-  if (candidate === null || typeof candidate !== "object") {
-    throw new PolicyGateDecisionValidationError(
-      `Invalid policy gate decision for ${toolId}: decision`
-    );
-  }
-
-  const rawDecision = candidate as Record<string, unknown>;
+  const rawDecision = snapshotPolicyGateDecisionCandidate(toolId, candidate);
   if (rawDecision.decision === "allow") {
     return { decision: "allow" };
   }
@@ -1737,6 +1763,128 @@ function validatePolicyGateDecision(
     remediation,
     guardClass
   };
+}
+
+function snapshotPolicyGateDecisionCandidate(
+  toolId: string,
+  candidate: unknown
+): Record<string, unknown> {
+  if (candidate === null || typeof candidate !== "object") {
+    throw invalidPolicyGateDecisionSnapshot(toolId, "decision");
+  }
+
+  const objectCandidate = candidate as object;
+  if (nodeUtilTypes.isProxy(objectCandidate)) {
+    throw invalidPolicyGateDecisionSnapshot(toolId, "decision");
+  }
+
+  assertNoEnumerablePolicyGateDecisionToJson(toolId, objectCandidate);
+
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  snapshotPolicyGateDecisionField(toolId, objectCandidate, snapshot, "decision", "decision");
+  if (snapshot.decision !== "deny") {
+    return snapshot;
+  }
+
+  for (const key of POLICY_GATE_DENY_DECISION_SNAPSHOT_KEYS) {
+    snapshotPolicyGateDecisionField(toolId, objectCandidate, snapshot, key, key);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(snapshot, "remediation")) {
+    snapshot.remediation = snapshotPolicyGateRemediationCandidate(
+      toolId,
+      snapshot.remediation
+    );
+  }
+
+  return snapshot;
+}
+
+function assertNoEnumerablePolicyGateDecisionToJson(
+  toolId: string,
+  candidate: object
+): void {
+  const descriptor = readPolicyGateDecisionOwnDescriptor(toolId, candidate, "toJSON", "toJSON");
+  if (descriptor?.enumerable) {
+    throw invalidPolicyGateDecisionSnapshot(toolId, "toJSON");
+  }
+}
+
+function snapshotPolicyGateDecisionField(
+  toolId: string,
+  candidate: object,
+  snapshot: Record<string, unknown>,
+  key: string,
+  fieldPath: string
+): void {
+  const descriptor = readPolicyGateDecisionOwnDescriptor(toolId, candidate, key, fieldPath);
+  if (!descriptor) {
+    return;
+  }
+  assertPolicyGateDecisionDataDescriptor(toolId, descriptor, fieldPath);
+  snapshot[key] = descriptor.value;
+}
+
+function snapshotPolicyGateRemediationCandidate(
+  toolId: string,
+  remediation: unknown
+): unknown {
+  if (remediation === null || typeof remediation !== "object") {
+    return remediation;
+  }
+
+  const objectRemediation = remediation as object;
+  if (nodeUtilTypes.isProxy(objectRemediation)) {
+    throw invalidPolicyGateDecisionSnapshot(toolId, "remediation");
+  }
+
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  for (const key of POLICY_GATE_REMEDIATION_SNAPSHOT_KEYS) {
+    snapshotPolicyGateDecisionField(
+      toolId,
+      objectRemediation,
+      snapshot,
+      key,
+      `remediation.${key}`
+    );
+  }
+  return snapshot;
+}
+
+function readPolicyGateDecisionOwnDescriptor(
+  toolId: string,
+  candidate: object,
+  key: string,
+  fieldPath: string
+): PropertyDescriptor | undefined {
+  try {
+    return Object.getOwnPropertyDescriptor(candidate, key);
+  } catch {
+    throw invalidPolicyGateDecisionSnapshot(toolId, fieldPath);
+  }
+}
+
+function assertPolicyGateDecisionDataDescriptor(
+  toolId: string,
+  descriptor: PropertyDescriptor,
+  fieldPath: string
+): asserts descriptor is PolicyGateDecisionDataDescriptor {
+  if (
+    !("value" in descriptor) ||
+    descriptor.get !== undefined ||
+    descriptor.set !== undefined
+  ) {
+    throw invalidPolicyGateDecisionSnapshot(toolId, fieldPath);
+  }
+}
+
+function invalidPolicyGateDecisionSnapshot(
+  toolId: string,
+  fieldPath: string
+): PolicyGateDecisionValidationError {
+  return new PolicyGateDecisionValidationError(
+    `Invalid policy gate decision for ${toolId}: ${fieldPath}`
+  );
 }
 
 function normalizePolicyGateDecisionRuleId(ruleId: unknown): string | undefined {
