@@ -11,6 +11,7 @@ import {
 import { toErrorMessage } from "@zero-os/shared";
 import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
 import { types as nodeUtilTypes } from "node:util";
+import { ZodType } from "zod";
 import {
   evaluatePolicyGate,
   normalizeSpawnAgentInput,
@@ -173,6 +174,10 @@ const GENERIC_POLICY_GATE_INPUT_MAX_NODES = 10_000;
 const GENERIC_POLICY_GATE_INPUT_MAX_ARRAY_LENGTH = 1_024;
 const GENERIC_POLICY_GATE_INPUT_MAX_OBJECT_KEYS = 256;
 const GENERIC_POLICY_GATE_INPUT_MAX_STRING_CHARS = 131_072;
+const ZOD_PARAMETER_SCHEMA_MAX_DEPTH = 128;
+const ZOD_PARAMETER_SCHEMA_MAX_NODES = 20_000;
+const ZOD_PARAMETER_SCHEMA_MAX_OWN_KEYS = 512;
+const ZOD_PARAMETER_SCHEMA_MAX_PROPERTIES = 50_000;
 const PROTOTYPE_POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 export function createShudPolicyGateEvaluator(
@@ -217,6 +222,10 @@ export function wrapAllRegisteredTools(
     })
   );
   assertAllToolsPolicyGated(wrappedTools);
+  assertPolicyGatedToolRegistrationLint(wrappedTools, {
+    role: options.role,
+    requireDescriptionSections: true
+  });
   return wrappedTools;
 }
 
@@ -1058,9 +1067,7 @@ function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values)];
 }
 
-type ToolZodParameterSchema = {
-  safeParse(input: unknown): ToolZodSafeParseResult;
-};
+type ToolZodParameterSchema = ZodType;
 
 type ToolZodParameterValidator = (input: unknown) => ToolZodSafeParseResult;
 
@@ -1077,6 +1084,12 @@ type ToolZodSafeParseResult =
 type ToolZodIssue = {
   path?: readonly unknown[];
   message?: unknown;
+};
+
+type ZodParameterSchemaHardeningState = {
+  seen: WeakSet<object>;
+  nodes: number;
+  properties: number;
 };
 
 function parseToolZodParameters(
@@ -1132,7 +1145,19 @@ function resolveToolZodParameterSchema(tool: BaseTool): ToolZodParameterSchema |
     parameters
   ];
 
-  return candidates.find(isToolZodParameterSchema);
+  for (const candidate of candidates) {
+    if (candidate === undefined) {
+      continue;
+    }
+    if (isToolZodParameterSchema(candidate)) {
+      return candidate;
+    }
+    if (isRejectedToolZodParameterSchemaCandidate(candidate)) {
+      throw new Error("Tool Zod parameter schema must be a real Zod v4 schema.");
+    }
+  }
+
+  return undefined;
 }
 
 function snapshotToolParameters(parameters: Record<string, unknown>): Record<string, unknown> {
@@ -1186,37 +1211,62 @@ function cloneToolParameterMetadata(
 }
 
 function isToolZodParameterSchema(value: unknown): value is ToolZodParameterSchema {
-  return isPlainRecord(value) && typeof value.safeParse === "function";
+  return (
+    isObjectRecord(value) &&
+    !nodeUtilTypes.isProxy(value) &&
+    value instanceof ZodType &&
+    resolveZodV4SchemaDef(value) !== undefined
+  );
+}
+
+function isRejectedToolZodParameterSchemaCandidate(value: unknown): boolean {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+  if (nodeUtilTypes.isProxy(value)) {
+    return true;
+  }
+  return "safeParse" in value || "_zod" in value;
 }
 
 function hardenToolZodParameterSchema<T extends ToolZodParameterSchema>(schema: T): T {
   // Zod v4 keeps validation authority in mutable def/_def/shape slots; freeze the
   // registration-time graph so retained schema references cannot rewrite it later.
-  materializeKnownZodLazyDataProperties(schema, new WeakSet<object>());
-  deepFreezeOwnDataPropertyGraph(schema, new WeakSet<object>());
+  materializeKnownZodLazyDataProperties(schema, createZodParameterSchemaHardeningState());
+  deepFreezeOwnDataPropertyGraph(schema, createZodParameterSchemaHardeningState());
   return schema;
 }
 
-function materializeKnownZodLazyDataProperties(value: unknown, seen: WeakSet<object>): void {
-  if (!isObjectRecord(value) || seen.has(value)) {
+function createZodParameterSchemaHardeningState(): ZodParameterSchemaHardeningState {
+  return {
+    seen: new WeakSet<object>(),
+    nodes: 0,
+    properties: 0
+  };
+}
+
+function materializeKnownZodLazyDataProperties(
+  value: unknown,
+  state: ZodParameterSchemaHardeningState,
+  depth = 0
+): void {
+  if (!reserveZodParameterSchemaHardeningNode(value, state, depth)) {
     return;
   }
 
-  seen.add(value);
-  const zodDef = resolveZodV4SchemaDef(value);
-  if (zodDef) {
-    materializeZodV4ObjectShape(value, zodDef);
+  const objectValue = value as object;
+  if (objectValue instanceof ZodType) {
+    const zodDef = resolveZodV4SchemaDef(objectValue);
+    if (zodDef) {
+      materializeZodV4ObjectShape(objectValue, zodDef);
+    }
   }
 
-  for (const key of Reflect.ownKeys(value)) {
+  for (const { key, value: childValue } of readZodParameterSchemaOwnDataProperties(objectValue, state)) {
     if (key === "_zod") {
       continue;
     }
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor || !("value" in descriptor)) {
-      continue;
-    }
-    materializeKnownZodLazyDataProperties(descriptor.value, seen);
+    materializeKnownZodLazyDataProperties(childValue, state, depth + 1);
   }
 }
 
@@ -1245,24 +1295,76 @@ function materializeZodV4ObjectShape(schema: object, zodDef: object): void {
   }
 }
 
-function deepFreezeOwnDataPropertyGraph(value: unknown, seen: WeakSet<object>): void {
-  if (!isObjectRecord(value) || seen.has(value)) {
+function deepFreezeOwnDataPropertyGraph(
+  value: unknown,
+  state: ZodParameterSchemaHardeningState,
+  depth = 0
+): void {
+  if (!reserveZodParameterSchemaHardeningNode(value, state, depth)) {
     return;
   }
 
-  seen.add(value);
-  hardenZodV4RuntimeAuthoritySlots(value);
-  for (const key of Reflect.ownKeys(value)) {
+  const objectValue = value as object;
+  if (objectValue instanceof ZodType) {
+    hardenZodV4RuntimeAuthoritySlots(objectValue);
+  }
+  for (const { key, value: childValue } of readZodParameterSchemaOwnDataProperties(objectValue, state)) {
     if (key === "_zod") {
       continue;
     }
+    deepFreezeOwnDataPropertyGraph(childValue, state, depth + 1);
+  }
+  Object.freeze(objectValue);
+}
+
+function reserveZodParameterSchemaHardeningNode(
+  value: unknown,
+  state: ZodParameterSchemaHardeningState,
+  depth: number
+): boolean {
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+  if (depth > ZOD_PARAMETER_SCHEMA_MAX_DEPTH) {
+    throw new Error("Zod parameter schema exceeds hardening depth budget.");
+  }
+  if (nodeUtilTypes.isProxy(value)) {
+    throw new Error("Zod parameter schema must not contain Proxy-backed objects.");
+  }
+  if (state.seen.has(value)) {
+    return false;
+  }
+
+  state.seen.add(value);
+  state.nodes += 1;
+  if (state.nodes > ZOD_PARAMETER_SCHEMA_MAX_NODES) {
+    throw new Error("Zod parameter schema exceeds hardening node budget.");
+  }
+  return true;
+}
+
+function readZodParameterSchemaOwnDataProperties(
+  value: object,
+  state: ZodParameterSchemaHardeningState
+): Array<{ key: PropertyKey; value: unknown }> {
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > ZOD_PARAMETER_SCHEMA_MAX_OWN_KEYS) {
+    throw new Error("Zod parameter schema exceeds hardening property budget.");
+  }
+  state.properties += keys.length;
+  if (state.properties > ZOD_PARAMETER_SCHEMA_MAX_PROPERTIES) {
+    throw new Error("Zod parameter schema exceeds hardening property budget.");
+  }
+
+  const properties: Array<{ key: PropertyKey; value: unknown }> = [];
+  for (const key of keys) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (!descriptor || !("value" in descriptor)) {
       continue;
     }
-    deepFreezeOwnDataPropertyGraph(descriptor.value, seen);
+    properties.push({ key, value: descriptor.value });
   }
-  Object.freeze(value);
+  return properties;
 }
 
 function hardenZodV4RuntimeAuthoritySlots(value: object): void {

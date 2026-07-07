@@ -2547,6 +2547,47 @@ describe("policy-gated zero tool registry", () => {
     ).toThrow(/generic\.bad\.description: missing 何时不该用/);
   });
 
+  test("generic wrap seam lints final wrappers after stale prewrapped inner mutation", () => {
+    const innerTool = new RecordingTool("generic.stale.inner.description");
+    const prewrappedTool = wrapToolWithPolicyGate(innerTool, {
+      evaluate: async () => ({ decision: "allow" })
+    });
+
+    innerTool.description = [
+      "何时该用: Use this fixture after stale prewrapped mutation.",
+      "成功与失败样态: Success should never pass final wrapper lint."
+    ].join("\n");
+
+    expect(() =>
+      wrapAllRegisteredTools([prewrappedTool], {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/generic\.stale\.inner\.description: missing 何时不该用/);
+  });
+
+  test("generic wrap seam lints final visible count after stale prewrapped inner name drift", () => {
+    const innerTools = Array.from(
+      { length: 21 },
+      (_, index) => new RecordingTool(`generic.stale.count.${Math.min(index, 19)}`)
+    );
+    const prewrappedTools = innerTools.map((tool) =>
+      wrapToolWithPolicyGate(tool, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    );
+
+    (innerTools[20] as unknown as { name: string }).name = "generic.stale.count.20";
+
+    expect(() =>
+      wrapAllRegisteredTools(prewrappedTools, {
+        role: "worker",
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(
+      /Policy-gated tool registration lint failed for role worker: visible tool count 21 exceeds 20; excess count 1/
+    );
+  });
+
   test("direct spawn wrapper executes only sanitized spawn input", async () => {
     const spawnTool = new RecordingTool("spawn_agent");
     const tailSentinel = "ignored-tail-sentinel-that-must-not-appear";
@@ -2949,6 +2990,81 @@ describe("policy-gated zero tool registry", () => {
     expectToolParameterSchemaValidationDenial(result);
     expect(evaluatorCalls).toBe(1);
     expect(zodTool.calls).toBe(0);
+  });
+
+  test("Zod schema hardening rejects fake safeParse carriers without deep traversal", () => {
+    const fakeSchema = createDeepFakeZodLikeSchema(256);
+    const zodTool = new ZodRecordingTool("zod.fake.deep", fakeSchema);
+
+    expect(() =>
+      wrapToolWithPolicyGate(zodTool, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/Tool Zod parameter schema must be a real Zod v4 schema/);
+  });
+
+  test("Zod schema hardening rejects Proxy-backed schema carriers before trap traversal", () => {
+    let traps = 0;
+    const target = {
+      safeParse: () => ({
+        success: true,
+        data: {
+          command: "proxy"
+        }
+      })
+    };
+    const proxySchema = new Proxy(target, {
+      get(targetValue, key, receiver) {
+        traps += 1;
+        return Reflect.get(targetValue, key, receiver);
+      },
+      getOwnPropertyDescriptor(targetValue, key) {
+        traps += 1;
+        return Reflect.getOwnPropertyDescriptor(targetValue, key);
+      },
+      ownKeys(targetValue) {
+        traps += 1;
+        return Reflect.ownKeys(targetValue);
+      }
+    });
+    const zodTool = new ZodRecordingTool("zod.proxy", proxySchema);
+
+    expect(() =>
+      wrapToolWithPolicyGate(zodTool, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/Tool Zod parameter schema must be a real Zod v4 schema/);
+    expect(traps).toBe(0);
+  });
+
+  test("Zod schema hardening fails closed on over-depth real schema side graphs", () => {
+    const schema = z.object({
+      command: z.string()
+    });
+    (schema as unknown as { retainedSideGraph: unknown }).retainedSideGraph =
+      createNestedRecord(140);
+    const zodTool = new ZodRecordingTool("zod.deep.budget", schema);
+
+    expect(() =>
+      wrapToolWithPolicyGate(zodTool, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/Zod parameter schema exceeds hardening depth budget/);
+  });
+
+  test("Zod schema hardening fails closed on over-wide real schema side graphs", () => {
+    const schema = z.object({
+      command: z.string()
+    });
+    (schema as unknown as { retainedSideGraph: unknown }).retainedSideGraph =
+      createWideRecord(600);
+    const zodTool = new ZodRecordingTool("zod.wide.budget", schema);
+
+    expect(() =>
+      createPolicyGatedToolRegistry([zodTool], {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/Zod parameter schema exceeds hardening property budget/);
   });
 
   test("Zod parameter schema rejection survives a throwing evaluator", async () => {
@@ -6172,6 +6288,42 @@ function monkeyPatchZodSafeParseToAccept(schema: unknown, data: unknown): void {
       data
     });
   }
+}
+
+function createDeepFakeZodLikeSchema(depth: number): unknown {
+  const root: Record<string, unknown> = {
+    safeParse: () => ({
+      success: true,
+      data: {
+        command: "fake"
+      }
+    })
+  };
+  let current = root;
+  for (let index = 0; index < depth; index += 1) {
+    const child: Record<string, unknown> = {};
+    current.child = child;
+    current = child;
+  }
+  return root;
+}
+
+function createNestedRecord(depth: number): Record<string, unknown> {
+  let current: Record<string, unknown> = {
+    leaf: true
+  };
+  for (let index = 0; index < depth; index += 1) {
+    current = {
+      child: current
+    };
+  }
+  return current;
+}
+
+function createWideRecord(width: number): Record<string, unknown> {
+  return Object.fromEntries(
+    Array.from({ length: width }, (_, index) => [`field${index}`, index])
+  );
 }
 
 function attemptZodCommandShapeMutationToAcceptNumber(schema: unknown): void {
