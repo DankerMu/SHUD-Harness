@@ -72,6 +72,8 @@ const POLICY_GATE_AUDIT_ROW_MAX_NODES = 10_000;
 const POLICY_GATE_AUDIT_ROW_MAX_ARRAY_LENGTH = 1_024;
 const POLICY_GATE_AUDIT_ROW_MAX_OBJECT_KEYS = 256;
 const POLICY_GATE_AUDIT_ROW_MAX_STRING_CHARS = 131_072;
+const POLICY_GATE_AUDIT_OPTIONS_MAX_PROTECTED_ROOTS = 1_024;
+const POLICY_GATE_AUDIT_OPTIONS_MAX_STRING_CHARS = 131_072;
 const DEFAULT_ABORT_MESSAGE = "Command aborted by user from Session Detail.";
 const RAW_DATA_SANDBOXED_BASH_DESCRIPTION = [
   "何时该用: 在 SHUD runtime 中执行需要 shell 的本机命令，并让 raw/evidence 写保护与 fuse 规则生效。",
@@ -1070,23 +1072,47 @@ function evaluateCommandAnalysisBudget(
 export async function appendPolicyGateAuditRow(
   options: AppendPolicyGateAuditRowOptions
 ): Promise<string> {
-  assertProtectedRawPathsProvided(options.protectedRawPaths);
-  assertAbsoluteRoot(options.workspaceRoot, "workspaceRoot");
-  assertAbsoluteRoots(options.protectedRawPaths, "protectedRawPaths");
-  const taskId = options.taskId ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID;
+  const optionRecord = readPolicyGateAuditOptionsRecord(options);
+  const optionState = { stringChars: 0 };
+  const protectedRawPaths = readPolicyGateAuditProtectedRawPathsOption(
+    optionRecord,
+    optionState
+  );
+  const workspaceRoot = readRequiredPolicyGateAuditOptionString(
+    optionRecord,
+    "workspaceRoot",
+    "workspaceRoot",
+    optionState
+  );
+  assertProtectedRawPathsProvided(protectedRawPaths);
+  assertAbsoluteRoot(workspaceRoot, "workspaceRoot");
+  assertAbsoluteRoots(protectedRawPaths, "protectedRawPaths");
+  const taskId =
+    readOptionalPolicyGateAuditOptionString(
+      optionRecord,
+      "taskId",
+      "audit task id",
+      optionState
+    ) ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID;
   assertSafePathSegment(taskId, "audit task id");
 
-  const fileName = options.fileName ?? DEFAULT_AUDIT_FILE_NAME;
+  const fileName =
+    readOptionalPolicyGateAuditOptionString(
+      optionRecord,
+      "fileName",
+      "audit file name",
+      optionState
+    ) ?? DEFAULT_AUDIT_FILE_NAME;
   assertSafePathSegment(fileName, "audit file name");
 
-  const row = snapshotPolicyGateAuditRow(readPolicyGateAuditRowOption(options));
+  const row = snapshotPolicyGateAuditRow(readPolicyGateAuditRowOption(optionRecord));
   assertPublicPolicyGateAuditRow(row);
 
   const reservation = await ensurePolicyGateAuditReservation(
-    resolve(options.workspaceRoot),
+    resolve(workspaceRoot),
     taskId,
     fileName,
-    options.protectedRawPaths
+    protectedRawPaths
   );
   try {
     await appendReservedPolicyGateAuditRow(reservation, row);
@@ -1127,16 +1153,165 @@ function policyGateAuditRowSnapshotError(message: string): PolicyGateAuditRowSna
   return new PolicyGateAuditRowSnapshotError(message);
 }
 
-function readPolicyGateAuditRowOption(
+function policyGateAuditOptionSnapshotError(message: string): Error {
+  return new Error(message);
+}
+
+function readPolicyGateAuditOptionsRecord(
   options: AppendPolicyGateAuditRowOptions
-): PolicyGateAuditRow {
-  try {
-    return options.row;
-  } catch {
-    throw policyGateAuditRowSnapshotError(
-      "Policy gate audit rows must be stable ordinary structured data."
+): object {
+  if (typeof options !== "object" || options === null || Array.isArray(options)) {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options must be stable ordinary structured data."
     );
   }
+  if (nodeUtilTypes.isProxy(options)) {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options must be stable ordinary structured data."
+    );
+  }
+  const prototype = Object.getPrototypeOf(options);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options must be plain structured data."
+    );
+  }
+  return options;
+}
+
+function readPolicyGateAuditProtectedRawPathsOption(
+  options: object,
+  state: { stringChars: number }
+): readonly string[] | undefined {
+  const value = readPolicyGateAuditOptionDataField(
+    options,
+    "protectedRawPaths",
+    "protectedRawPaths"
+  );
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("protectedRawPaths is required for policy gate audit writes.");
+  }
+  if (nodeUtilTypes.isProxy(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    throw policyGateAuditOptionSnapshotError(
+      "protectedRawPaths must be an ordinary string array."
+    );
+  }
+  if (value.length > POLICY_GATE_AUDIT_OPTIONS_MAX_PROTECTED_ROOTS) {
+    throw policyGateAuditOptionSnapshotError(
+      "protectedRawPaths exceeds array length budget."
+    );
+  }
+
+  const copy: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = readPolicyGateAuditOptionDataDescriptor(
+      value,
+      String(index),
+      "protectedRawPaths"
+    );
+    if (!descriptor || typeof descriptor.value !== "string") {
+      throw policyGateAuditOptionSnapshotError(
+        "protectedRawPaths must contain only strings."
+      );
+    }
+    addPolicyGateAuditOptionStringBudget(descriptor.value.length, state);
+    copy.push(descriptor.value);
+  }
+  return copy;
+}
+
+function readRequiredPolicyGateAuditOptionString(
+  options: object,
+  key: string,
+  label: string,
+  state: { stringChars: number }
+): string {
+  const value = readPolicyGateAuditOptionDataField(options, key, label);
+  if (typeof value !== "string") {
+    throw policyGateAuditOptionSnapshotError(`${label} must be a string.`);
+  }
+  addPolicyGateAuditOptionStringBudget(value.length, state);
+  return value;
+}
+
+function readOptionalPolicyGateAuditOptionString(
+  options: object,
+  key: string,
+  label: string,
+  state: { stringChars: number }
+): string | undefined {
+  const value = readPolicyGateAuditOptionDataField(options, key, label);
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw policyGateAuditOptionSnapshotError(`${label} must be a string.`);
+  }
+  addPolicyGateAuditOptionStringBudget(value.length, state);
+  return value;
+}
+
+function readPolicyGateAuditOptionDataField(
+  options: object,
+  key: string,
+  label: string
+): unknown {
+  return readPolicyGateAuditOptionDataDescriptor(options, key, label)?.value;
+}
+
+function readPolicyGateAuditOptionDataDescriptor(
+  options: object,
+  key: string,
+  label: string
+): JsonAuditDataDescriptor | undefined {
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(options, key);
+  } catch {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options must be stable ordinary structured data."
+    );
+  }
+  if (!descriptor) {
+    return undefined;
+  }
+  if (!("value" in descriptor) || descriptor.get !== undefined || descriptor.set !== undefined) {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options must contain only data fields."
+    );
+  }
+  return descriptor as JsonAuditDataDescriptor;
+}
+
+function addPolicyGateAuditOptionStringBudget(
+  length: number,
+  state: { stringChars: number }
+): void {
+  state.stringChars += length;
+  if (state.stringChars > POLICY_GATE_AUDIT_OPTIONS_MAX_STRING_CHARS) {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options exceed string budget."
+    );
+  }
+}
+
+function readPolicyGateAuditRowOption(
+  options: object
+): PolicyGateAuditRow {
+  const descriptor = readPolicyGateAuditOptionDataDescriptor(
+    options,
+    "row",
+    "Policy gate audit row"
+  );
+  if (!descriptor) {
+    throw policyGateAuditRowSnapshotError(
+      "Policy gate audit row is required."
+    );
+  }
+  return descriptor.value as PolicyGateAuditRow;
 }
 
 function snapshotPolicyGateAuditRow(row: PolicyGateAuditRow): PolicyGateAuditRow {

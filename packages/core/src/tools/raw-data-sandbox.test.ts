@@ -1008,7 +1008,141 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
-  test("public audit append normalizes row option getter traps", async () => {
+  test("public audit append rejects option proxies without reading traps", async () => {
+    const fixture = await createFixture();
+    try {
+      let traps = 0;
+      const options = new Proxy(
+        {
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          fileName: "proxy-options.ndjson",
+          row: nonReservedAuditRow()
+        },
+        {
+          get() {
+            traps += 1;
+            throw new Error("audit option proxy secret get");
+          },
+          getOwnPropertyDescriptor() {
+            traps += 1;
+            throw new Error("audit option proxy secret descriptor");
+          }
+        }
+      );
+
+      let message = "";
+      try {
+        await appendPolicyGateAuditRow(options);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+
+      expect(message).toContain(
+        "Policy gate audit options must be stable ordinary structured data"
+      );
+      expect(message).not.toContain("audit option proxy secret");
+      expect(traps).toBe(0);
+      await expectMissing(
+        join(
+          fixture.workspaceRoot,
+          "tasks",
+          "TASK-M1-SPIKE",
+          "audit",
+          "proxy-options.ndjson"
+        )
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append rejects option accessors without reading them", async () => {
+    const fixture = await createFixture();
+    try {
+      for (const field of [
+        "workspaceRoot",
+        "protectedRawPaths",
+        "taskId",
+        "fileName",
+        "row"
+      ] as const) {
+        let fieldReads = 0;
+        let rowReads = 0;
+        const options = {
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          fileName: `accessor-${field}.ndjson`,
+          get row() {
+            rowReads += 1;
+            return nonReservedAuditRow();
+          }
+        };
+        Object.defineProperty(options, field, {
+          enumerable: true,
+          configurable: true,
+          get() {
+            fieldReads += 1;
+            throw new Error(`audit option ${field} secret`);
+          }
+        });
+
+        let message = "";
+        try {
+          await appendPolicyGateAuditRow(options as never);
+        } catch (error) {
+          message = error instanceof Error ? error.message : String(error);
+        }
+
+        expect(message).toContain("Policy gate audit options must contain only data fields");
+        expect(message).not.toContain(`audit option ${field} secret`);
+        expect(fieldReads).toBe(0);
+        if (field !== "row") {
+          expect(rowReads).toBe(0);
+        }
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append bounds protected raw path options before reading row", async () => {
+    const fixture = await createFixture();
+    try {
+      let rowReads = 0;
+      const row = {
+        get event() {
+          rowReads += 1;
+          throw new Error("audit row trap secret");
+        }
+      } as never;
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: Array.from({ length: 1_100 }, () => fixture.rawRoot),
+          fileName: "over-root-budget.ndjson",
+          row
+        })
+      ).rejects.toThrow("protectedRawPaths exceeds array length budget");
+      expect(rowReads).toBe(0);
+
+      const sparseRoots = new Array<string>(2);
+      sparseRoots[0] = fixture.rawRoot;
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: sparseRoots,
+          fileName: "sparse-root-budget.ndjson",
+          row
+        })
+      ).rejects.toThrow("protectedRawPaths must contain only strings");
+      expect(rowReads).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("public audit append rejects row option accessors without executing them", async () => {
     const fixture = await createFixture();
     try {
       const secret = "audit row option getter secret";
@@ -1030,10 +1164,8 @@ describe("raw data seatbelt sandbox", () => {
         message = error instanceof Error ? error.message : String(error);
       }
 
-      expect(reads).toBe(1);
-      expect(message).toContain(
-        "Policy gate audit rows must be stable ordinary structured data"
-      );
+      expect(reads).toBe(0);
+      expect(message).toContain("Policy gate audit options must contain only data fields");
       expect(message).not.toContain(secret);
     } finally {
       await fixture.cleanup();
