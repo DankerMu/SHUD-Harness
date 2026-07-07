@@ -500,6 +500,65 @@ describe("raw data seatbelt sandbox", () => {
     }
   });
 
+  test("public audit append rejects missing or downgraded raw-data authority guard_class", async () => {
+    const fixture = await createFixture();
+    try {
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          row: rawDataAuditRowWithoutGuard()
+        })
+      ).rejects.toThrow("Raw-data authority audit rows require guard_class authority");
+
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          row: {
+            ...minimalAuditRow(),
+            guard_class: "capability"
+          }
+        })
+      ).rejects.toThrow("Raw-data authority audit rows require guard_class authority");
+
+      const missingGuardByErrorId = auditRowWithoutRule(rawDataAuditRowWithoutGuard());
+      missingGuardByErrorId.error_id = `${RAW_DATA_WRITE_RULE_ID}:failed:public-lifecycle`;
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          row: missingGuardByErrorId
+        })
+      ).rejects.toThrow("Raw-data authority audit rows require guard_class authority");
+
+      await expect(
+        appendPolicyGateAuditRow({
+          workspaceRoot: fixture.root,
+          protectedRawPaths: [fixture.rawRoot],
+          row: {
+            ...minimalAuditRow(),
+            rule: "workspace-quota",
+            guard_class: "capability",
+            error_id: `${RAW_DATA_WRITE_RULE_ID}:failed:other-rule`
+          }
+        })
+      ).rejects.toThrow("Raw-data authority audit rows require guard_class authority");
+
+      await expectMissing(
+        join(
+          fixture.workspaceRoot,
+          "tasks",
+          "TASK-M1-SPIKE",
+          "audit",
+          "policy-gate.ndjson"
+        )
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("public audit append keeps lifecycle and non-raw denial rows available", async () => {
     const fixture = await createFixture();
     try {
@@ -511,6 +570,15 @@ describe("raw data seatbelt sandbox", () => {
           ...minimalAuditRow(),
           error_id: `${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle`
         }
+      });
+      const lifecycleWithoutRulePath = await appendPolicyGateAuditRow({
+        workspaceRoot: fixture.root,
+        protectedRawPaths: [fixture.rawRoot],
+        fileName: "lifecycle-without-rule.ndjson",
+        row: auditRowWithoutRule({
+          ...minimalAuditRow(),
+          error_id: `${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle-without-rule`
+        })
       });
       const nonRawPath = await appendPolicyGateAuditRow({
         workspaceRoot: fixture.root,
@@ -526,6 +594,12 @@ describe("raw data seatbelt sandbox", () => {
       expect(await readFile(lifecyclePath, "utf8")).toContain('"decision":"failed"');
       expect(await readFile(lifecyclePath, "utf8")).toContain(
         `"error_id":"${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle"`
+      );
+      expect(await readFile(lifecycleWithoutRulePath, "utf8")).toContain(
+        `"error_id":"${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle-without-rule"`
+      );
+      expect(await readFile(lifecycleWithoutRulePath, "utf8")).toContain(
+        '"guard_class":"authority"'
       );
       expect(await readFile(nonRawPath, "utf8")).toContain('"rule":"workspace-quota"');
       expect(await readFile(nonRawPath, "utf8")).toContain('"decision":"quota_rejected"');
@@ -835,6 +909,14 @@ describe("raw data seatbelt sandbox", () => {
         expect(result.success).toBe(false);
         expect(result.output).toContain("pathResolutionRoot");
         expect(result.outputSummary).toBe("Raw data sandbox path resolution failed");
+        const payload = JSON.parse(result.output) as {
+          error?: string;
+          rule?: string;
+          guard_class?: string;
+        };
+        expect(payload.error).toBe("raw_data_sandbox_path_resolution_failed");
+        expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
+        expect(payload.guard_class).toBe("authority");
         await expectMissing(join(fixture.workspaceRoot, `${testCase.name}-side-effect.txt`));
         await expectMissing(
           join(
@@ -2097,6 +2179,7 @@ describe("raw data seatbelt sandbox", () => {
       expect(rows.at(-1)).toMatchObject({
         event: "tool.completed",
         decision: "allowed",
+        guard_class: "authority",
         profile_id: expect.stringMatching(/^shud-raw-seatbelt-/),
         profile_path: expect.stringContaining(".sb")
       });
@@ -5117,6 +5200,7 @@ function expectAuditReservationFailure(result: ToolResult): void {
   const payload = JSON.parse(result.output) as {
     error?: string;
     rule?: string;
+    guard_class?: string;
     remediation?: {
       next_action?: string;
       hint?: string;
@@ -5125,6 +5209,7 @@ function expectAuditReservationFailure(result: ToolResult): void {
   };
   expect(payload.error).toBe("policy_gate_audit_unavailable");
   expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
+  expect(payload.guard_class).toBe("authority");
   expect(payload.remediation?.next_action).toBe("fix_and_retry");
   expect(payload.remediation?.hint).toContain("audit path");
   expect(payload.remediation?.ref).toContain("policy-gate-spike");
@@ -5135,6 +5220,7 @@ function expectInvalidTimeoutFailure(result: ToolResult): void {
   const payload = JSON.parse(result.output) as {
     error?: string;
     rule?: string;
+    guard_class?: string;
     remediation?: {
       next_action?: string;
       hint?: string;
@@ -5143,6 +5229,7 @@ function expectInvalidTimeoutFailure(result: ToolResult): void {
   };
   expect(payload.error).toBe("raw_data_sandbox_invalid_timeout");
   expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
+  expect(payload.guard_class).toBe("authority");
   expect(payload.remediation?.next_action).toBe("fix_and_retry");
   expect(payload.remediation?.hint).toContain("timeout");
   expect(payload.remediation?.ref).toContain("policy-gate-spike");
@@ -5153,6 +5240,7 @@ function expectProfileSetupFailure(result: ToolResult): void {
   const payload = JSON.parse(result.output) as {
     error?: string;
     rule?: string;
+    guard_class?: string;
     reason?: string;
     remediation?: {
       next_action?: string;
@@ -5162,6 +5250,7 @@ function expectProfileSetupFailure(result: ToolResult): void {
   };
   expect(payload.error).toBe("raw_data_sandbox_profile_unavailable");
   expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
+  expect(payload.guard_class).toBe("authority");
   expect(payload.reason).toMatch(/protected raw data path|Protected raw path unavailable/);
   expect(payload.remediation?.next_action).toBe("fix_and_retry");
   expect(payload.remediation?.hint).toContain("temp/profile roots");
@@ -5173,6 +5262,7 @@ function expectProcessContainmentFailure(result: ToolResult): void {
   const payload = JSON.parse(result.output) as {
     error?: string;
     rule?: string;
+    guard_class?: string;
     remediation?: {
       next_action?: string;
       hint?: string;
@@ -5181,6 +5271,7 @@ function expectProcessContainmentFailure(result: ToolResult): void {
   };
   expect(payload.error).toBe("policy_gate_process_containment_unavailable");
   expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
+  expect(payload.guard_class).toBe("authority");
   expect(payload.remediation?.next_action).toBe("fix_and_retry");
   expect(payload.remediation?.hint).toContain("foreground");
   expect(payload.remediation?.ref).toContain("policy-gate-spike");
@@ -5209,6 +5300,7 @@ async function expectGenericSandboxLifecycle(
     event: result.success ? "tool.completed" : "tool.failed",
     decision: result.success ? "allowed" : "failed"
   });
+  expect(rows.at(-1)?.guard_class).toBe("authority");
   expectNoSandboxDenialAudit(rows.at(-1));
 }
 
@@ -5247,8 +5339,15 @@ function minimalAuditRow(): PolicyGateAuditRow {
     tool_id: "bash",
     rule: RAW_DATA_WRITE_RULE_ID,
     decision: "failed",
+    guard_class: "authority",
     ts: "2026-07-04T00:00:00.000Z"
   };
+}
+
+function rawDataAuditRowWithoutGuard(): PolicyGateAuditRow {
+  const copy = { ...minimalAuditRow() } as Partial<PolicyGateAuditRow>;
+  delete copy.guard_class;
+  return copy as PolicyGateAuditRow;
 }
 
 function auditRowWithoutRule(row: PolicyGateAuditRow): PolicyGateAuditRow {

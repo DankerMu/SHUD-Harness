@@ -28,6 +28,10 @@ export const SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS = 4096;
 export const SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES = 5;
 export const SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS = 64;
 export const SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS = 65536;
+export const RESERVED_AUTHORITY_POLICY_RULE_IDS = Object.freeze([
+  "raw-data-write",
+  SPAWN_PROFILE_SUBSET_RULE_ID
+] as const);
 
 export interface PolicyGateToolCall {
   toolId: string;
@@ -59,6 +63,27 @@ export type PolicyGateDecision =
       remediation: PolicyGateRemediation;
       guardClass: PolicyGuardClass;
     };
+
+type PolicyGateDenyGuardClassInput =
+  | {
+      guardClass: PolicyGuardClass;
+      guard_class?: PolicyGuardClass;
+    }
+  | {
+      guardClass?: PolicyGuardClass;
+      guard_class: PolicyGuardClass;
+    };
+
+export type PolicyGateDecisionInput =
+  | {
+      decision: "allow";
+    }
+  | ({
+      decision: "deny";
+      ruleId: string;
+      reason: string;
+      remediation: PolicyGateRemediation;
+    } & PolicyGateDenyGuardClassInput);
 
 export type PolicyGateInputNormalization =
   | {
@@ -109,7 +134,11 @@ export const EMPTY_POLICY_GATE_CONTEXT: PolicyGateContext = {
   rules: []
 };
 
-const KNOWN_AUTHORITY_POLICY_RULE_IDS = new Set(["raw-data-write"]);
+const KNOWN_AUTHORITY_POLICY_RULE_IDS = new Set<string>(RESERVED_AUTHORITY_POLICY_RULE_IDS);
+
+export function isReservedAuthorityPolicyRuleId(ruleId: string): boolean {
+  return KNOWN_AUTHORITY_POLICY_RULE_IDS.has(ruleId);
+}
 
 export function evaluatePolicyGate(
   call: PolicyGateToolCall,
@@ -228,7 +257,7 @@ function validatePolicyGateContextMetadata(
 
     if (
       ruleId &&
-      KNOWN_AUTHORITY_POLICY_RULE_IDS.has(ruleId) &&
+      isReservedAuthorityPolicyRuleId(ruleId) &&
       guardClass.guardClass !== "authority"
     ) {
       guardClassFailures.push(

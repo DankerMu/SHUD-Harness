@@ -767,6 +767,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
           tool_id: this.name,
           rule: RAW_DATA_WRITE_RULE_ID,
           decision: input.decision,
+          guard_class: rawDataGuardClassForRawData(),
           ts: new Date().toISOString(),
           profile_id: input.profile.profileId,
           profile_path: input.profilePath
@@ -1121,6 +1122,11 @@ function snapshotAuditValue(
 }
 
 function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
+  if (isRawDataAuthorityAuditRowWithoutAuthorityGuard(row)) {
+    throw new Error(
+      "Raw-data authority audit rows require guard_class authority."
+    );
+  }
   if (isRawDataDenialDecision(row.decision)) {
     throw new Error(
       "Raw-data denial audit rows require RawDataSandboxedBashTool trusted evidence."
@@ -1131,6 +1137,23 @@ function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
       "Reserved raw-data denial error_id values require RawDataSandboxedBashTool trusted evidence."
     );
   }
+}
+
+function isRawDataAuthorityAuditRowWithoutAuthorityGuard(
+  row: PolicyGateAuditRow
+): boolean {
+  return (
+    isRawDataAuthorityAuditRow(row) &&
+    row.guard_class !== rawDataGuardClassForRawData()
+  );
+}
+
+function isRawDataAuthorityAuditRow(row: PolicyGateAuditRow): boolean {
+  return row.rule === RAW_DATA_WRITE_RULE_ID || isRawDataAuthorityErrorId(row.error_id);
+}
+
+function isRawDataAuthorityErrorId(errorId: string | undefined): boolean {
+  return errorId === RAW_DATA_WRITE_RULE_ID || errorId?.startsWith(`${RAW_DATA_WRITE_RULE_ID}:`) === true;
 }
 
 export function buildRawDataDeniedPayload(input: {
@@ -1144,7 +1167,6 @@ export function buildRawDataDeniedPayload(input: {
 }): RawDataAdvisoryDenialPayload {
   const ts = input.ts ?? new Date().toISOString();
   const remediation = rawDataWriteRemediation();
-  const guardClass = rawDataGuardClassForRawData();
   const errorId = [
     RAW_DATA_WRITE_RULE_ID,
     "denied_by_advisory",
@@ -1156,9 +1178,8 @@ export function buildRawDataDeniedPayload(input: {
   return {
     error: "raw_data_write_denied",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     decision: "denied_by_advisory",
-    guard_class: guardClass,
     reason: input.reason,
     remediation,
     profile_id: input.profile.profileId,
@@ -1504,7 +1525,7 @@ function buildAuditReservationFailureResult(input: {
   const payload = {
     error: "policy_gate_audit_unavailable",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     reason: input.reason,
     remediation: {
       next_action: "fix_and_retry",
@@ -1527,7 +1548,7 @@ function buildPathResolutionFailureResult(input: {
   const payload = {
     error: "raw_data_sandbox_path_resolution_failed",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     reason: input.reason,
     remediation: {
       next_action: "fix_and_retry",
@@ -1550,7 +1571,7 @@ function buildInvalidTimeoutFailureResult(input: {
   const payload = {
     error: "raw_data_sandbox_invalid_timeout",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     reason: input.reason,
     remediation: {
       next_action: "fix_and_retry",
@@ -1573,7 +1594,7 @@ function buildProfileSetupFailureResult(input: {
   const payload = {
     error: "raw_data_sandbox_profile_unavailable",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     reason: input.reason,
     remediation: {
       next_action: "fix_and_retry",
@@ -1596,7 +1617,7 @@ function buildProcessContainmentFailureResult(input: {
   const payload = {
     error: "policy_gate_process_containment_unavailable",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     reason: input.reason,
     remediation: {
       next_action: "fix_and_retry",
@@ -4605,6 +4626,16 @@ function isParentShellWaitSegment(
 
 function rawDataGuardClassForRawData(): RawDataGuardClass {
   return "authority";
+}
+
+function rawDataAuthorityEvidenceFields(): {
+  rule: typeof RAW_DATA_WRITE_RULE_ID;
+  guard_class: RawDataGuardClass;
+} {
+  return {
+    rule: RAW_DATA_WRITE_RULE_ID,
+    guard_class: rawDataGuardClassForRawData()
+  };
 }
 
 function hasKnownRawDataWriteTarget(

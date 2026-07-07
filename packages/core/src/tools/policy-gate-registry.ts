@@ -14,6 +14,7 @@ import { types as nodeUtilTypes } from "node:util";
 import { ZodType } from "zod";
 import {
   evaluatePolicyGate,
+  isReservedAuthorityPolicyRuleId,
   normalizeSpawnAgentInput,
   PolicyGuardClassSchema,
   PolicyGateRemediationSchema,
@@ -27,6 +28,7 @@ import {
   type PolicyGuardClass,
   type PolicyGateContext,
   type PolicyGateDecision,
+  type PolicyGateDecisionInput,
   type PolicyGateRemediation,
   type PolicyGateToolCall
 } from "./policy-gate-core";
@@ -40,6 +42,7 @@ export type {
   HarnessRole,
   PolicyGateContext,
   PolicyGateDecision,
+  PolicyGateDecisionInput,
   PolicyGateRemediation,
   PolicyGateToolCall,
   PolicyRule,
@@ -54,11 +57,11 @@ export interface PolicyGateEvaluationContext {
 export type PolicyGateEvaluator = (
   call: PolicyGateToolCall,
   context: PolicyGateEvaluationContext
-) => PolicyGateDecision | Promise<PolicyGateDecision>;
+) => PolicyGateDecisionInput | Promise<PolicyGateDecisionInput>;
 
 export type PolicyGateExecutionInputValidator = (
   input: unknown
-) => Extract<PolicyGateDecision, { decision: "deny" }> | undefined;
+) => Extract<PolicyGateDecisionInput, { decision: "deny" }> | undefined;
 
 export interface PolicyGateWrapperOptions {
   toolId?: string;
@@ -118,6 +121,9 @@ export type PolicyGatedTool = BaseTool & {
 };
 
 const policyGatedTools = new WeakSet<BaseTool>();
+const reservedAuthorityPolicyGateEvaluators = new WeakSet<PolicyGateEvaluator>();
+const reservedAuthorityPolicyGateExecutionValidators =
+  new WeakSet<PolicyGateExecutionInputValidator>();
 const ROLE_VISIBLE_TOOL_COUNT_LIMIT = 20;
 const CONTROL_KERNEL_TOOL_GOVERNANCE_REF =
   "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定";
@@ -157,7 +163,38 @@ const SHUD_WAIT_AGENT_DESCRIPTION = [
 
 export function createPolicyGateEvaluator(context: PolicyGateContext): PolicyGateEvaluator {
   const contextSnapshot = snapshotPolicyGateContext(context);
-  return (call) => evaluatePolicyGate(call, contextSnapshot);
+  const evaluator: PolicyGateEvaluator = (call) => evaluatePolicyGate(call, contextSnapshot);
+  return context === DEFAULT_SHUD_POLICY_GATE_CONTEXT
+    ? trustReservedAuthorityPolicyGateEvaluator(evaluator)
+    : evaluator;
+}
+
+function trustReservedAuthorityPolicyGateEvaluator(
+  evaluator: PolicyGateEvaluator
+): PolicyGateEvaluator {
+  reservedAuthorityPolicyGateEvaluators.add(evaluator);
+  return evaluator;
+}
+
+function canEvaluatorReturnReservedAuthorityDecision(
+  evaluator: PolicyGateEvaluator
+): boolean {
+  return reservedAuthorityPolicyGateEvaluators.has(evaluator);
+}
+
+function trustReservedAuthorityPolicyGateExecutionValidator(
+  validator: PolicyGateExecutionInputValidator
+): PolicyGateExecutionInputValidator {
+  reservedAuthorityPolicyGateExecutionValidators.add(validator);
+  return validator;
+}
+
+function canExecutionValidatorReturnReservedAuthorityDecision(
+  validator: PolicyGateExecutionInputValidator | undefined
+): boolean {
+  return validator
+    ? reservedAuthorityPolicyGateExecutionValidators.has(validator)
+    : false;
 }
 
 export const DEFAULT_SHUD_POLICY_GATE_CONTEXT: PolicyGateContext = Object.freeze({
@@ -182,24 +219,22 @@ const ZOD_PARAMETER_SCHEMA_MAX_NODES = 20_000;
 const ZOD_PARAMETER_SCHEMA_MAX_OWN_KEYS = 512;
 const ZOD_PARAMETER_SCHEMA_MAX_PROPERTIES = 50_000;
 const PROTOTYPE_POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
-const KNOWN_AUTHORITY_POLICY_GATE_DECISION_RULE_IDS = new Set([RAW_DATA_WRITE_RULE_ID]);
-
 export function createShudPolicyGateEvaluator(
   customEvaluate?: PolicyGateEvaluator
 ): PolicyGateEvaluator {
   const authorityEvaluate = createPolicyGateEvaluator(DEFAULT_SHUD_POLICY_GATE_CONTEXT);
   if (!customEvaluate) {
-    return authorityEvaluate;
+    return trustReservedAuthorityPolicyGateEvaluator(authorityEvaluate);
   }
 
-  return async (call, context) => {
+  return trustReservedAuthorityPolicyGateEvaluator(async (call, context) => {
     const authorityDecision = await authorityEvaluate(call, context);
     if (authorityDecision.decision === "deny") {
       return authorityDecision;
     }
 
     return validatePolicyGateDecision(call.toolId, await customEvaluate(call, context));
-  };
+  });
 }
 
 export function wrapToolWithPolicyGate(
@@ -770,6 +805,10 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
           role,
           preparedInput.evaluatorInput
         );
+        if (evaluation.status === "error" && evaluation.source === "decision_validation") {
+          const durationMs = Date.now() - startTime;
+          return this.finalizePolicyGateResult(toolContext, evaluation.result, durationMs);
+        }
         if (evaluation.status === "decision" && evaluation.decision.decision === "deny") {
           const durationMs = Date.now() - startTime;
           return this.finalizePolicyGateResult(
@@ -831,7 +870,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
         const durationMs = Date.now() - startTime;
         return this.finalizePolicyGateResult(
           toolContext,
-          buildPolicyGateDeniedResult(this.#policyGateToolId, executionValidation.decision),
+          buildPolicyGateDeniedToolResult(this.#policyGateToolId, executionValidation.decision),
           durationMs
         );
       }
@@ -848,7 +887,7 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       const durationMs = Date.now() - startTime;
       return this.finalizePolicyGateResult(
         toolContext,
-        buildPolicyGateDeniedResult(this.#policyGateToolId, executionValidation.decision),
+        buildPolicyGateDeniedToolResult(this.#policyGateToolId, executionValidation.decision),
         durationMs
       );
     }
@@ -892,7 +931,11 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
 
       return {
         status: "decision",
-        decision: validatePolicyGateDenyDecision(this.#policyGateToolId, candidate)
+        decision: validatePolicyGateDenyDecision(this.#policyGateToolId, candidate, {
+          allowReservedAuthorityRuleIds: canExecutionValidatorReturnReservedAuthorityDecision(
+            this.#validateExecutionInput
+          )
+        })
       };
     } catch (error) {
       const errorMessage = toErrorMessage(error);
@@ -989,10 +1032,15 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     evaluatorInput: unknown
   ): Promise<
     | { status: "decision"; decision: PolicyGateDecision }
-    | { status: "error"; result: ToolResult }
+    | {
+        status: "error";
+        source: "evaluation" | "decision_validation";
+        result: ToolResult;
+      }
   > {
+    let candidate: PolicyGateDecisionInput;
     try {
-      const candidate = await this.#evaluate(
+      candidate = await this.#evaluate(
         {
           toolId: this.#policyGateToolId,
           role,
@@ -1004,22 +1052,40 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
           toolContext
         }
       );
-      return {
-        status: "decision",
-        decision: validatePolicyGateDecision(this.#policyGateToolId, candidate)
-      };
     } catch (error) {
-      const errorMessage = toErrorMessage(error);
       return {
         status: "error",
-        result: {
-          success: false,
-          output: errorMessage,
-          outputSummary: `Error: ${errorMessage.slice(0, 100)}`
-        }
+        source: "evaluation",
+        result: policyGateErrorToolResult(error)
+      };
+    }
+
+    try {
+      return {
+        status: "decision",
+        decision: validatePolicyGateDecision(this.#policyGateToolId, candidate, {
+          allowReservedAuthorityRuleIds: canEvaluatorReturnReservedAuthorityDecision(
+            this.#evaluate
+          )
+        })
+      };
+    } catch (error) {
+      return {
+        status: "error",
+        source: "decision_validation",
+        result: policyGateErrorToolResult(error)
       };
     }
   }
+}
+
+function policyGateErrorToolResult(error: unknown): ToolResult {
+  const errorMessage = toErrorMessage(error);
+  return {
+    success: false,
+    output: errorMessage,
+    outputSummary: `Error: ${errorMessage.slice(0, 100)}`
+  };
 }
 
 function buildPolicyGateDeniedToolResult(
@@ -1035,7 +1101,9 @@ function buildPolicyGateDeniedToolResult(
 function createSpawnAgentToolAvailabilityValidator(
   registry: ToolRegistry
 ): PolicyGateExecutionInputValidator {
-  return (input) => validateSpawnAgentToolAvailability(input, registry);
+  return trustReservedAuthorityPolicyGateExecutionValidator((input) =>
+    validateSpawnAgentToolAvailability(input, registry)
+  );
 }
 
 function validateSpawnAgentToolAvailability(
@@ -1522,7 +1590,15 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyGateDecision {
+interface PolicyGateDecisionValidationOptions {
+  allowReservedAuthorityRuleIds?: boolean;
+}
+
+function validatePolicyGateDecision(
+  toolId: string,
+  candidate: unknown,
+  options: PolicyGateDecisionValidationOptions = {}
+): PolicyGateDecision {
   if (candidate === null || typeof candidate !== "object") {
     throw new Error(`Invalid policy gate decision for ${toolId}: decision`);
   }
@@ -1561,7 +1637,12 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
   }
 
   const guardClass = readPolicyGateDecisionGuardClass(rawDecision, issuePaths);
-  validateKnownAuthorityPolicyGateDecisionGuardClass(validRuleId, guardClass, issuePaths);
+  validateReservedAuthorityPolicyGateDecisionProducer(
+    validRuleId,
+    guardClass,
+    issuePaths,
+    options
+  );
 
   if (
     issuePaths.length > 0 ||
@@ -1594,17 +1675,25 @@ function normalizePolicyGateDecisionRuleId(ruleId: unknown): string | undefined 
   return trimmedRuleId === "" ? undefined : trimmedRuleId;
 }
 
-function validateKnownAuthorityPolicyGateDecisionGuardClass(
+function validateReservedAuthorityPolicyGateDecisionProducer(
   ruleId: string | undefined,
   guardClass: PolicyGuardClass | undefined,
-  issuePaths: string[]
+  issuePaths: string[],
+  options: PolicyGateDecisionValidationOptions
 ): void {
-  if (
-    ruleId &&
-    guardClass &&
-    KNOWN_AUTHORITY_POLICY_GATE_DECISION_RULE_IDS.has(ruleId) &&
-    guardClass !== "authority"
-  ) {
+  if (!ruleId || !guardClass || !isReservedAuthorityPolicyRuleId(ruleId)) {
+    return;
+  }
+
+  if (!options.allowReservedAuthorityRuleIds) {
+    issuePaths.push("ruleId");
+    if (guardClass !== "authority") {
+      issuePaths.push("guardClass");
+    }
+    return;
+  }
+
+  if (guardClass !== "authority") {
     issuePaths.push("guardClass");
   }
 }
@@ -1665,9 +1754,10 @@ function parsePolicyGateDecisionGuardClassAlias(
 
 function validatePolicyGateDenyDecision(
   toolId: string,
-  candidate: unknown
+  candidate: unknown,
+  options?: PolicyGateDecisionValidationOptions
 ): Extract<PolicyGateDecision, { decision: "deny" }> {
-  const decision = validatePolicyGateDecision(toolId, candidate);
+  const decision = validatePolicyGateDecision(toolId, candidate, options);
   if (decision.decision !== "deny") {
     throw new Error(`Invalid policy gate decision for ${toolId}: execution validator must deny`);
   }

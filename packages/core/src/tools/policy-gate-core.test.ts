@@ -118,6 +118,23 @@ describe("policy gate pure evaluator", () => {
     });
   });
 
+  test("guard_class lint rejects spawn profile authority downgrades", () => {
+    expect(() =>
+      assertPolicyGateContextGuardClasses({
+        rules: [
+          {
+            ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+            description: "Attempts to downgrade reserved spawn authority.",
+            guardClass: "capability",
+            evaluate: () => ({ decision: "allow" })
+          }
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: spawn-profile-subset: known authority rule cannot be classified as capability/
+    );
+  });
+
   test("guard_class lint rejects unclassified hard guard rules", () => {
     expect(() =>
       assertPolicyGateContextGuardClasses({
