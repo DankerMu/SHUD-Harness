@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { constants, type Dirent } from "node:fs";
+import { lstat, mkdir, open, opendir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import {
@@ -21,7 +21,7 @@ const TASK_ID_PATTERN = /^TASK-[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const MAX_TASK_ID_ATTEMPTS = 20;
 // M1 skeleton bound: cap workspace/tasks fan-out before opening any task snapshots.
 const MAX_TASK_HYDRATION_ENTRIES = 1024;
-const MAX_TASK_SNAPSHOT_BYTES = 1024 * 1024;
+export const MAX_TASK_SNAPSHOT_BYTES = 1024 * 1024;
 const TASK_SNAPSHOT_OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
 export const CreateTaskInputSchema = z.object({
@@ -61,6 +61,7 @@ export type TaskServiceErrorCode =
   | "task_snapshot_malformed"
   | "task_snapshot_mismatch"
   | "task_snapshot_missing_card"
+  | "task_snapshot_too_large"
   | "task_id_generation_failed";
 
 export interface TaskServiceErrorOptions {
@@ -103,6 +104,7 @@ export interface TaskCardServiceOptions {
   now?: () => Date;
   taskIdFactory?: () => string;
   snapshotReadHooks?: TaskSnapshotReadHooks;
+  snapshotWriteHooks?: TaskSnapshotWriteHooks;
 }
 
 export interface TaskCardService {
@@ -123,18 +125,39 @@ export interface TaskSnapshotReadHooks {
   beforeSnapshotOpen?: (input: TaskSnapshotReadHookInput) => Promise<void> | void;
 }
 
+export interface TaskSnapshotWriteHookInput {
+  taskDirectory: string;
+  taskId: string;
+}
+
+export interface TaskSnapshotWriteHooks {
+  beforeSnapshotWrite?: (input: TaskSnapshotWriteHookInput) => Promise<void> | void;
+}
+
 export function createTaskCardService(options: TaskCardServiceOptions): TaskCardService {
   const workspaceRoot = resolve(options.workspaceRoot);
   const now = options.now ?? (() => new Date());
   const taskIdFactory = options.taskIdFactory ?? (() => `TASK-${randomUUID()}`);
   const snapshotReadHooks = options.snapshotReadHooks;
+  const snapshotWriteHooks = options.snapshotWriteHooks;
   const tasks = new Map<string, TaskCard>();
   const reservedTaskIds = new Set<string>();
   let hydration: Promise<void> | undefined;
 
   async function ensureHydrated(): Promise<void> {
-    hydration ??= hydrateTasksFromDisk(workspaceRoot, tasks, snapshotReadHooks);
-    await hydration;
+    hydration ??= hydrateTasksFromDisk(workspaceRoot, snapshotReadHooks).then((hydratedTasks) => {
+      tasks.clear();
+      for (const [taskId, task] of hydratedTasks) {
+        tasks.set(taskId, task);
+      }
+    });
+
+    try {
+      await hydration;
+    } catch (error) {
+      hydration = undefined;
+      throw error;
+    }
   }
 
   return {
@@ -174,7 +197,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           updated_at: timestamp
         });
 
-        await persistTaskSnapshot(workspaceRoot, task);
+        await persistTaskSnapshot(workspaceRoot, task, snapshotWriteHooks);
         tasks.set(task.task_id, task);
         return task;
       } finally {
@@ -237,12 +260,12 @@ function nextTaskId(
 
 async function hydrateTasksFromDisk(
   workspaceRoot: string,
-  tasks: Map<string, TaskCard>,
   snapshotReadHooks?: TaskSnapshotReadHooks
-): Promise<void> {
+): Promise<Map<string, TaskCard>> {
+  const tasks = new Map<string, TaskCard>();
   const workspaceEntry = await maybeLstat(workspaceRoot);
   if (!workspaceEntry) {
-    return;
+    return tasks;
   }
   if (!(await isSafeExistingDirectoryPath(workspaceRoot))) {
     throw workspaceError(
@@ -256,7 +279,7 @@ async function hydrateTasksFromDisk(
   const tasksRoot = join(workspaceRoot, "tasks");
   const tasksRootEntry = await maybeLstat(tasksRoot);
   if (!tasksRootEntry) {
-    return;
+    return tasks;
   }
   if (!(await isSafeExistingDirectoryPath(tasksRoot))) {
     throw workspaceError(
@@ -267,15 +290,7 @@ async function hydrateTasksFromDisk(
     );
   }
 
-  const entries = await readdir(tasksRoot, { withFileTypes: true });
-  if (entries.length > MAX_TASK_HYDRATION_ENTRIES) {
-    throw workspaceError(
-      "workspace_path_not_safe",
-      `Workspace tasks root contains ${entries.length} entries, exceeding the M1 hydration limit of ${MAX_TASK_HYDRATION_ENTRIES}.`,
-      "The workspace tasks directory has too many entries to hydrate safely.",
-      ["workspace/tasks", "workspace/tasks:entry_count"]
-    );
-  }
+  const entries = await readBoundedTaskEntries(tasksRoot);
 
   for (const entry of entries) {
     if (!isSafeTaskId(entry.name)) {
@@ -283,7 +298,8 @@ async function hydrateTasksFromDisk(
     }
 
     const lanePath = join(tasksRoot, entry.name);
-    if (!entry.isDirectory() || entry.isSymbolicLink() || !(await isSafeExistingDirectoryPath(lanePath))) {
+    assertSafeTaskLaneEntry(entry, lanePath);
+    if (!(await isSafeExistingDirectoryPath(lanePath))) {
       throw workspaceError(
         "task_lane_not_directory",
         `Task lane is not a safe directory: ${entry.name}`,
@@ -293,20 +309,88 @@ async function hydrateTasksFromDisk(
     }
 
     const snapshotPath = join(lanePath, "snapshot.json");
+    const snapshotEvidenceRef = taskSnapshotEvidenceRef(entry.name);
     if (!(await maybeLstat(snapshotPath))) {
       continue;
     }
 
     await snapshotReadHooks?.beforeSnapshotOpen?.({ snapshotPath, laneTaskId: entry.name });
-    const snapshot = await readTaskSnapshot(snapshotPath, entry.name);
+    if (!(await isSafeExistingDirectoryPath(lanePath))) {
+      throw workspaceError(
+        "task_lane_not_directory",
+        `Task lane is not a safe directory: ${entry.name}`,
+        "A task snapshot lane is blocked by a non-directory filesystem entry.",
+        [`workspace/tasks/${entry.name}`]
+      );
+    }
+
+    const snapshot = await readTaskSnapshot(
+      snapshotPath,
+      entry.name,
+      lanePath,
+      snapshotEvidenceRef
+    );
     tasks.set(snapshot.task_id, snapshot.task_card);
   }
+
+  return tasks;
+}
+
+async function readBoundedTaskEntries(tasksRoot: string): Promise<Dirent[]> {
+  const entries: Dirent[] = [];
+  let entryCount = 0;
+
+  try {
+    const directory = await opendir(tasksRoot);
+    for await (const entry of directory) {
+      entryCount += 1;
+      if (entryCount > MAX_TASK_HYDRATION_ENTRIES) {
+        throw workspaceError(
+          "workspace_path_not_safe",
+          `Workspace tasks root contains more than ${MAX_TASK_HYDRATION_ENTRIES} entries, exceeding the M1 hydration limit.`,
+          "The workspace tasks directory has too many entries to hydrate safely.",
+          ["workspace/tasks", "workspace/tasks:entry_count"]
+        );
+      }
+      entries.push(entry);
+    }
+  } catch (error) {
+    if (error instanceof TaskServiceError) {
+      throw error;
+    }
+    throw workspaceError(
+      "workspace_path_not_safe",
+      "Workspace tasks root cannot be scanned safely.",
+      "The workspace tasks directory is not usable.",
+      ["workspace/tasks"],
+      error
+    );
+  }
+
+  return entries;
+}
+
+function assertSafeTaskLaneEntry(entry: Dirent, lanePath: string): void {
+  if (entry.isDirectory() && !entry.isSymbolicLink()) {
+    return;
+  }
+
+  throw workspaceError(
+    "task_lane_not_directory",
+    `Task lane is not a safe directory: ${entry.name}`,
+    "A task snapshot lane is blocked by a non-directory filesystem entry.",
+    [taskLaneEvidenceRef(lanePath)]
+  );
 }
 
 async function readTaskSnapshot(
   snapshotPath: string,
-  laneTaskId: string
+  laneTaskId: string,
+  lanePath: string,
+  evidenceRef: string
 ): Promise<TaskSnapshot & { task_card: TaskCard }> {
+  await assertSafeSnapshotLeaf(snapshotPath, evidenceRef);
+
   let snapshotFile: SnapshotFileHandle;
   try {
     snapshotFile = await open(snapshotPath, TASK_SNAPSHOT_OPEN_FLAGS);
@@ -315,18 +399,27 @@ async function readTaskSnapshot(
       "task_snapshot_malformed",
       "Task snapshot cannot be opened safely.",
       "A task snapshot cannot be read safely.",
-      [snapshotPath],
+      [evidenceRef],
       error
     );
   }
 
   try {
+    if (!(await isSafeExistingDirectoryPath(lanePath))) {
+      throw workspaceError(
+        "task_lane_not_directory",
+        `Task lane is not a safe directory: ${laneTaskId}`,
+        "A task snapshot lane is blocked by a non-directory filesystem entry.",
+        [`workspace/tasks/${laneTaskId}`]
+      );
+    }
+
     const snapshotEntry = await snapshotFile.stat().catch((error: unknown) => {
       throw workspaceError(
         "task_snapshot_malformed",
         "Task snapshot cannot be inspected.",
         "A task snapshot cannot be read safely.",
-        [snapshotPath],
+        [evidenceRef],
         error
       );
     });
@@ -335,7 +428,7 @@ async function readTaskSnapshot(
         "task_snapshot_malformed",
         "Task snapshot is not a safe regular file.",
         "A task snapshot cannot be read safely.",
-        [snapshotPath]
+        [evidenceRef]
       );
     }
     if (snapshotEntry.size > MAX_TASK_SNAPSHOT_BYTES) {
@@ -343,11 +436,11 @@ async function readTaskSnapshot(
         "task_snapshot_malformed",
         "Task snapshot exceeds the M1 bounded read size.",
         "A task snapshot is too large to load safely.",
-        [snapshotPath]
+        [evidenceRef]
       );
     }
 
-    const rawSnapshotText = await readBoundedTaskSnapshot(snapshotFile, snapshotPath);
+    const rawSnapshotText = await readBoundedTaskSnapshot(snapshotFile, evidenceRef);
     let rawSnapshot: unknown;
     try {
       rawSnapshot = JSON.parse(rawSnapshotText) as unknown;
@@ -356,7 +449,7 @@ async function readTaskSnapshot(
         "task_snapshot_malformed",
         "Task snapshot is not valid JSON.",
         "A task snapshot is malformed and recovery has been stopped.",
-        [snapshotPath],
+        [evidenceRef],
         error
       );
     }
@@ -367,11 +460,19 @@ async function readTaskSnapshot(
         "task_snapshot_malformed",
         "Task snapshot failed schema validation.",
         "A task snapshot is malformed and recovery has been stopped.",
-        [snapshotPath, ...toSchemaEvidenceRefs(parsedSnapshot.error, "snapshot")]
+        [evidenceRef, ...toSchemaEvidenceRefs(parsedSnapshot.error, "snapshot")]
       );
     }
 
-    assertSafeTaskId(parsedSnapshot.data.task_id, `snapshot.task_id:${parsedSnapshot.data.task_id}`);
+    if (!isSafeTaskId(parsedSnapshot.data.task_id)) {
+      throw workspaceError(
+        "task_snapshot_malformed",
+        "Task snapshot id is not safe.",
+        "A task snapshot is malformed and recovery has been stopped.",
+        [evidenceRef, "snapshot.task_id"]
+      );
+    }
+
     if (parsedSnapshot.data.task_id !== laneTaskId) {
       throw workspaceError(
         "task_snapshot_mismatch",
@@ -384,25 +485,62 @@ async function readTaskSnapshot(
       );
     }
 
+    if (parsedSnapshot.data.latest_seq !== TASK_SNAPSHOT_LATEST_SEQ) {
+      throw workspaceError(
+        "task_snapshot_mismatch",
+        "Task snapshot latest sequence is not supported by M1 recovery.",
+        "A task snapshot is inconsistent and recovery has been stopped.",
+        [evidenceRef, "snapshot.latest_seq"]
+      );
+    }
+
     if (!parsedSnapshot.data.task_card) {
       throw workspaceError(
         "task_snapshot_missing_card",
         "Task snapshot does not include the M1 task_card recovery payload.",
         "A task snapshot is missing the data needed for recovery.",
-        [`workspace/tasks/${laneTaskId}/snapshot.json`]
+        [evidenceRef]
       );
     }
 
-    validateSnapshotTaskCardConsistency(parsedSnapshot.data, snapshotPath);
+    validateSnapshotTaskCardConsistency(parsedSnapshot.data, evidenceRef);
     return parsedSnapshot.data as TaskSnapshot & { task_card: TaskCard };
   } finally {
     await snapshotFile.close().catch(() => undefined);
   }
 }
 
+async function assertSafeSnapshotLeaf(snapshotPath: string, evidenceRef: string): Promise<void> {
+  const snapshotEntry = await maybeLstat(snapshotPath);
+  if (!snapshotEntry) {
+    throw workspaceError(
+      "task_snapshot_malformed",
+      "Task snapshot cannot be inspected.",
+      "A task snapshot cannot be read safely.",
+      [evidenceRef]
+    );
+  }
+  if (!snapshotEntry.isFile() || snapshotEntry.isSymbolicLink()) {
+    throw workspaceError(
+      "task_snapshot_malformed",
+      "Task snapshot is not a safe regular file.",
+      "A task snapshot cannot be read safely.",
+      [evidenceRef]
+    );
+  }
+  if (snapshotEntry.size > MAX_TASK_SNAPSHOT_BYTES) {
+    throw workspaceError(
+      "task_snapshot_malformed",
+      "Task snapshot exceeds the M1 bounded read size.",
+      "A task snapshot is too large to load safely.",
+      [evidenceRef]
+    );
+  }
+}
+
 async function readBoundedTaskSnapshot(
   snapshotFile: SnapshotFileHandle,
-  snapshotPath: string
+  evidenceRef: string
 ): Promise<string> {
   const buffer = Buffer.allocUnsafe(MAX_TASK_SNAPSHOT_BYTES + 1);
   let offset = 0;
@@ -420,7 +558,7 @@ async function readBoundedTaskSnapshot(
       "task_snapshot_malformed",
       "Task snapshot cannot be read safely.",
       "A task snapshot cannot be read safely.",
-      [snapshotPath],
+      [evidenceRef],
       error
     );
   }
@@ -430,16 +568,42 @@ async function readBoundedTaskSnapshot(
       "task_snapshot_malformed",
       "Task snapshot exceeds the M1 bounded read size.",
       "A task snapshot is too large to load safely.",
-      [snapshotPath]
+      [evidenceRef]
     );
   }
 
   return buffer.subarray(0, offset).toString("utf8");
 }
 
-async function persistTaskSnapshot(workspaceRoot: string, task: TaskCard): Promise<void> {
-  const taskDirectory = await ensureTaskDirectory(workspaceRoot, task.task_id);
+async function persistTaskSnapshot(
+  workspaceRoot: string,
+  task: TaskCard,
+  snapshotWriteHooks?: TaskSnapshotWriteHooks
+): Promise<void> {
   const snapshot = createTaskSnapshot(task);
+  const snapshotText = `${JSON.stringify(snapshot, null, 2)}\n`;
+  if (Buffer.byteLength(snapshotText, "utf8") > MAX_TASK_SNAPSHOT_BYTES) {
+    throw new TaskServiceError({
+      code: "task_snapshot_too_large",
+      status: 400,
+      category: "schema_error",
+      message: "Task snapshot would exceed the M1 bounded recovery size.",
+      userMessage: "The task request is too large to persist safely.",
+      evidenceRefs: ["request.body"],
+      recommendedNextActions: ["Shorten the task title, goal, or creator fields and submit again."]
+    });
+  }
+
+  const taskDirectory = await ensureTaskDirectory(workspaceRoot, task.task_id);
+  await snapshotWriteHooks?.beforeSnapshotWrite?.({ taskDirectory, taskId: task.task_id });
+  if (!(await isSafeExistingDirectoryPath(taskDirectory))) {
+    throw workspaceError(
+      "task_lane_not_directory",
+      `Task lane is not a safe directory: ${task.task_id}`,
+      "A task snapshot lane is blocked by a non-directory filesystem entry.",
+      [`workspace/tasks/${task.task_id}`]
+    );
+  }
   const snapshotPath = join(taskDirectory, "snapshot.json");
   assertPathInsideWorkspace(workspaceRoot, snapshotPath, `workspace/tasks/${task.task_id}/snapshot.json`);
 
@@ -448,9 +612,25 @@ async function persistTaskSnapshot(workspaceRoot: string, task: TaskCard): Promi
 
   let wroteTemporary = false;
   try {
-    await writeFile(temporaryPath, `${JSON.stringify(snapshot, null, 2)}\n`, { flag: "wx" });
+    await writeFile(temporaryPath, snapshotText, { flag: "wx" });
     wroteTemporary = true;
+    if (!(await isSafeExistingDirectoryPath(taskDirectory))) {
+      throw workspaceError(
+        "task_lane_not_directory",
+        `Task lane is not a safe directory: ${task.task_id}`,
+        "A task snapshot lane is blocked by a non-directory filesystem entry.",
+        [`workspace/tasks/${task.task_id}`]
+      );
+    }
     await rename(temporaryPath, snapshotPath);
+    if (!(await isSafeExistingDirectoryPath(taskDirectory))) {
+      throw workspaceError(
+        "task_lane_not_directory",
+        `Task lane is not a safe directory: ${task.task_id}`,
+        "A task snapshot lane is blocked by a non-directory filesystem entry.",
+        [`workspace/tasks/${task.task_id}`]
+      );
+    }
     wroteTemporary = false;
   } catch (error) {
     throw workspaceError(
@@ -486,31 +666,32 @@ function createTaskSnapshot(task: TaskCard): TaskSnapshot & { task_card: TaskCar
 
 async function ensureTaskDirectory(workspaceRoot: string, taskId: string): Promise<string> {
   assertSafeTaskId(taskId, `task.task_id:${taskId}`);
-  await ensureSafeDirectory(workspaceRoot, "workspace_path_not_safe");
+  await ensureSafeDirectory(workspaceRoot, "workspace_path_not_safe", "workspace");
 
   const tasksRoot = join(workspaceRoot, "tasks");
   assertPathInsideWorkspace(workspaceRoot, tasksRoot, "workspace/tasks");
-  await ensureSafeDirectory(tasksRoot, "workspace_path_not_safe");
+  await ensureSafeDirectory(tasksRoot, "workspace_path_not_safe", "workspace/tasks");
 
   const taskDirectory = join(tasksRoot, taskId);
   assertPathInsideWorkspace(workspaceRoot, taskDirectory, `workspace/tasks/${taskId}`);
-  await ensureSafeDirectory(taskDirectory, "task_lane_not_directory");
+  await ensureSafeDirectory(taskDirectory, "task_lane_not_directory", `workspace/tasks/${taskId}`);
 
   return taskDirectory;
 }
 
 async function ensureSafeDirectory(
   path: string,
-  errorCode: Extract<TaskServiceErrorCode, "workspace_path_not_safe" | "task_lane_not_directory">
+  errorCode: Extract<TaskServiceErrorCode, "workspace_path_not_safe" | "task_lane_not_directory">,
+  evidenceRef: string
 ): Promise<void> {
   const existingEntry = await maybeLstat(path);
   if (existingEntry) {
     if (!(await isSafeExistingDirectoryPath(path))) {
       throw workspaceError(
         errorCode,
-        `Path is not a safe directory: ${path}`,
+        "Path is not a safe directory.",
         "A required workspace path is not a safe directory.",
-        [path]
+        [evidenceRef]
       );
     }
     return;
@@ -520,9 +701,9 @@ async function ensureSafeDirectory(
   if (parentPath === path || !(await isSafeExistingDirectoryPath(parentPath))) {
     throw workspaceError(
       errorCode,
-      `Parent path is not a safe directory: ${parentPath}`,
+      "Parent path is not a safe directory.",
       "A required workspace parent path is not a safe directory.",
-      [parentPath]
+      [`${evidenceRef}:parent`]
     );
   }
 
@@ -535,18 +716,18 @@ async function ensureSafeDirectory(
       }
       throw workspaceError(
         errorCode,
-        `Existing path is not a safe directory: ${path}`,
+        "Existing path is not a safe directory.",
         "A required workspace path is not a safe directory.",
-        [path],
+        [evidenceRef],
         error
       );
     }
 
     throw workspaceError(
       errorCode,
-      `Failed to create workspace directory: ${path}`,
+      "Failed to create workspace directory.",
       "A required workspace directory could not be created safely.",
-      [path],
+      [evidenceRef],
       error
     );
   }
@@ -554,9 +735,9 @@ async function ensureSafeDirectory(
   if (!(await isSafeExistingDirectoryPath(path))) {
     throw workspaceError(
       errorCode,
-      `Created path is not a safe directory: ${path}`,
+      "Created path is not a safe directory.",
       "A required workspace path is not a safe directory.",
-      [path]
+      [evidenceRef]
     );
   }
 }
@@ -635,7 +816,7 @@ function assertPathInsideWorkspace(
   );
 }
 
-function validateSnapshotTaskCardConsistency(snapshot: TaskSnapshot, snapshotPath: string): void {
+function validateSnapshotTaskCardConsistency(snapshot: TaskSnapshot, evidenceRef: string): void {
   const taskCard = snapshot.task_card;
   if (!taskCard) {
     return;
@@ -672,7 +853,7 @@ function validateSnapshotTaskCardConsistency(snapshot: TaskSnapshot, snapshotPat
       "task_snapshot_mismatch",
       "Task snapshot outer fields do not match nested task_card.",
       "A task snapshot is inconsistent and recovery has been stopped.",
-      [snapshotPath, ...mismatches.map((field) => `snapshot.${field}`)]
+      [evidenceRef, ...mismatches.map((field) => `snapshot.${field}`)]
     );
   }
 }
@@ -720,6 +901,15 @@ function workspaceError(
   }
 
   return error;
+}
+
+function taskSnapshotEvidenceRef(taskId: string): string {
+  return `workspace/tasks/${taskId}/snapshot.json`;
+}
+
+function taskLaneEvidenceRef(path: string): string {
+  const name = parse(path).base;
+  return isSafeTaskId(name) ? `workspace/tasks/${name}` : "workspace/tasks";
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {

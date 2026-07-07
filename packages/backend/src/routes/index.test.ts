@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFile as execFileWithCallback } from "node:child_process";
 import {
   access,
   readdir,
@@ -13,7 +14,9 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import {
+  MAX_TASK_SNAPSHOT_BYTES,
   TaskServiceError,
   createTaskCardService,
   type CreateTaskInput,
@@ -27,6 +30,7 @@ const originalCwd = process.cwd();
 const originalHarnessWorkspaceDir = process.env.HARNESS_WORKSPACE_DIR;
 const originalLegacyWorkspaceRoot = process.env.SHUD_HARNESS_WORKSPACE_ROOT;
 const TASK_HYDRATION_ENTRY_LIMIT = 1024;
+const execFile = promisify(execFileWithCallback);
 
 const EXPECTED_M1_RUNTIME_DIRECTORIES = [
   "repos",
@@ -627,6 +631,83 @@ describe("backend workspace and health routes", () => {
     expect(body.error.evidence_refs).toEqual(["request.body"]);
   });
 
+  test("POST /api/tasks rejects invalid enum values without creating task state", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-invalid-enum"
+    });
+
+    const response = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...validTaskCreateBody(),
+        type: "unsupported"
+      })
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(400);
+    expectCanonicalError(body, "schema_error");
+    expect(body.error.evidence_refs).toContain("request.body.type");
+    await expectPathMissing(join(workspaceRoot, "tasks"));
+  });
+
+  test("POST /api/tasks rejects oversized task snapshots before accepting state", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-too-large"
+    });
+
+    const response = await postTask(
+      app,
+      validTaskCreateBody({
+        question_or_goal: "x".repeat(MAX_TASK_SNAPSHOT_BYTES + 1)
+      })
+    );
+    const body = (await response.json()) as ApiErrorResponse;
+    const freshApp = createBackendApi({ workspaceRoot });
+    const listResponse = await freshApp.request("/api/tasks");
+
+    expect(response.status).toBe(400);
+    expectCanonicalError(body, "schema_error");
+    expect(body.error.evidence_refs).toEqual(["request.body"]);
+    await expectPathMissing(join(workspaceRoot, "tasks"));
+    expect(listResponse.status).toBe(200);
+    expect(await listResponse.json()).toEqual({ tasks: [] });
+  });
+
+  test("POST /api/tasks accepts and recovers large snapshots below the M1 byte cap", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:04:30.000Z"),
+      taskIdFactory: () => "TASK-large-under-cap"
+    });
+
+    const response = await postTask(
+      app,
+      validTaskCreateBody({
+        question_or_goal: "x".repeat(900_000)
+      })
+    );
+    const task = (await response.json()) as TaskCard;
+    const freshApp = createBackendApi({ workspaceRoot });
+    const listResponse = await freshApp.request("/api/tasks");
+
+    expect(response.status).toBe(201);
+    expect((await stat(join(workspaceRoot, "tasks", task.task_id, "snapshot.json"))).size).toBeLessThanOrEqual(
+      MAX_TASK_SNAPSHOT_BYTES
+    );
+    expect(listResponse.status).toBe(200);
+    expect(await listResponse.json()).toEqual({ tasks: [task] });
+  });
+
   test("unknown API paths and missing task ids return canonical 404 envelopes", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -659,9 +740,8 @@ describe("backend workspace and health routes", () => {
 
     expect(response.status).toBe(500);
     expectCanonicalError(body, "workspace_error");
-    expect(body.error.evidence_refs.some((ref) => ref.endsWith("TASK-malformed/snapshot.json"))).toBe(
-      true
-    );
+    expect(body.error.evidence_refs).toContain("workspace/tasks/TASK-malformed/snapshot.json");
+    expectNoAbsoluteWorkspacePath(body, tempRoot, workspaceRoot);
   });
 
   test("symlinked task snapshots fail closed without reading outside the workspace", async () => {
@@ -684,9 +764,8 @@ describe("backend workspace and health routes", () => {
 
     expect(response.status).toBe(500);
     expectCanonicalError(body, "workspace_error");
-    expect(body.error.evidence_refs.some((ref) => ref.endsWith("TASK-symlink-snapshot/snapshot.json"))).toBe(
-      true
-    );
+    expect(body.error.evidence_refs).toContain("workspace/tasks/TASK-symlink-snapshot/snapshot.json");
+    expectNoAbsoluteWorkspacePath(body, tempRoot, workspaceRoot);
   });
 
   test("task snapshot leaf swaps during recovery fail closed without hydrating outside snapshots", async () => {
@@ -726,9 +805,198 @@ describe("backend workspace and health routes", () => {
       expect(error).toBeInstanceOf(TaskServiceError);
       const taskError = error as TaskServiceError;
       expect(taskError.code).toBe("task_snapshot_malformed");
-      expect(taskError.evidenceRefs).toEqual([snapshotPath]);
+      expect(taskError.evidenceRefs).toEqual(["workspace/tasks/TASK-leaf-swap/snapshot.json"]);
     }
     expect(swapped).toBe(true);
+  });
+
+  test("task snapshot parent-lane swaps during recovery fail closed without outside hydration", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const laneTaskId = "TASK-parent-swap";
+    const taskLane = join(workspaceRoot, "tasks", laneTaskId);
+    const snapshotPath = join(taskLane, "snapshot.json");
+    const outsideLane = join(tempRoot, "outside-parent-swap");
+    await mkdir(taskLane, { recursive: true });
+    await mkdir(outsideLane);
+    await writeTaskSnapshotFixture(
+      snapshotPath,
+      taskCardFixture(laneTaskId, { title: "Original workspace snapshot" })
+    );
+    await writeTaskSnapshotFixture(
+      join(outsideLane, "snapshot.json"),
+      taskCardFixture(laneTaskId, { title: "Outside parent swap must not hydrate" })
+    );
+    let swapped = false;
+    const service = createTaskCardService({
+      workspaceRoot,
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async () => {
+          swapped = true;
+          await rm(taskLane, { recursive: true, force: true });
+          await symlink(outsideLane, taskLane, "dir");
+        }
+      }
+    });
+
+    try {
+      await service.listTasks();
+      throw new Error("Expected snapshot parent swap to fail closed.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(TaskServiceError);
+      const taskError = error as TaskServiceError;
+      expect(taskError.code).toBe("task_lane_not_directory");
+      expect(taskError.evidenceRefs).toEqual(["workspace/tasks/TASK-parent-swap"]);
+      expect(JSON.stringify(error)).not.toContain("Outside parent swap must not hydrate");
+    }
+    expect(swapped).toBe(true);
+  });
+
+  test("task snapshot writes reject parent-lane swaps before writing outside", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const outsideLane = join(tempRoot, "outside-write-swap");
+    await mkdir(outsideLane);
+    let swapped = false;
+    const service = createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-write-parent-swap",
+      snapshotWriteHooks: {
+        beforeSnapshotWrite: async ({ taskDirectory }) => {
+          swapped = true;
+          await rm(taskDirectory, { recursive: true, force: true });
+          await symlink(outsideLane, taskDirectory, "dir");
+        }
+      }
+    });
+
+    try {
+      await service.createTask(validTaskCreateBody());
+      throw new Error("Expected snapshot write parent swap to fail closed.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(TaskServiceError);
+      const taskError = error as TaskServiceError;
+      expect(taskError.code).toBe("task_lane_not_directory");
+      expect(taskError.evidenceRefs).toEqual(["workspace/tasks/TASK-write-parent-swap"]);
+    }
+    expect(swapped).toBe(true);
+    await expectPathMissing(join(outsideLane, "snapshot.json"));
+  });
+
+  test("special-file task snapshots fail closed before opening", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const snapshotPath = join(workspaceRoot, "tasks", "TASK-fifo", "snapshot.json");
+    await mkdir(join(workspaceRoot, "tasks", "TASK-fifo"), { recursive: true });
+    await execFile("mkfifo", [snapshotPath]);
+    const app = createBackendApi({ workspaceRoot });
+
+    const response = await Promise.race([
+      app.request("/api/tasks"),
+      timeoutAfter(1_000, "GET /api/tasks hung on a special snapshot file")
+    ]);
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(500);
+    expectCanonicalError(body, "workspace_error");
+    expect(body.error.evidence_refs).toContain("workspace/tasks/TASK-fifo/snapshot.json");
+  });
+
+  test("task snapshot recovery rejects unsafe and mismatched task ids with workspace envelopes", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const tasksRoot = join(workspaceRoot, "tasks");
+    await mkdir(join(tasksRoot, "TASK-unsafe-snapshot-id"), { recursive: true });
+    await writeTaskSnapshotFixture(
+      join(tasksRoot, "TASK-unsafe-snapshot-id", "snapshot.json"),
+      taskCardFixture("bad")
+    );
+    const unsafeApp = createBackendApi({ workspaceRoot });
+
+    const unsafeResponse = await unsafeApp.request("/api/tasks");
+    const unsafeBody = (await unsafeResponse.json()) as ApiErrorResponse;
+
+    expect(unsafeResponse.status).toBe(500);
+    expectCanonicalError(unsafeBody, "workspace_error");
+    expect(unsafeBody.error.evidence_refs).toContain(
+      "workspace/tasks/TASK-unsafe-snapshot-id/snapshot.json"
+    );
+    expect(unsafeBody.error.evidence_refs).toContain("snapshot.task_id");
+
+    await rm(join(tasksRoot, "TASK-unsafe-snapshot-id"), { recursive: true, force: true });
+    await mkdir(join(tasksRoot, "TASK-lane-mismatch"), { recursive: true });
+    await writeTaskSnapshotFixture(
+      join(tasksRoot, "TASK-lane-mismatch", "snapshot.json"),
+      taskCardFixture("TASK-other")
+    );
+    const mismatchApp = createBackendApi({ workspaceRoot });
+
+    const mismatchResponse = await mismatchApp.request("/api/tasks");
+    const mismatchBody = (await mismatchResponse.json()) as ApiErrorResponse;
+
+    expect(mismatchResponse.status).toBe(500);
+    expectCanonicalError(mismatchBody, "workspace_error");
+    expect(mismatchBody.error.evidence_refs).toContain(
+      "workspace/tasks/TASK-lane-mismatch/snapshot.json"
+    );
+    expect(mismatchBody.error.evidence_refs).toContain("snapshot.task_id:TASK-other");
+  });
+
+  test("task snapshot recovery rejects nested task_card mismatches and nonzero latest_seq", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const tasksRoot = join(workspaceRoot, "tasks");
+    const nestedMismatchTask = taskCardFixture("TASK-nested-mismatch");
+    await mkdir(join(tasksRoot, nestedMismatchTask.task_id), { recursive: true });
+    await writeTaskSnapshotFixture(
+      join(tasksRoot, nestedMismatchTask.task_id, "snapshot.json"),
+      nestedMismatchTask,
+      {
+        task_card: taskCardFixture(nestedMismatchTask.task_id, { status: "done" })
+      }
+    );
+    const nestedMismatchApp = createBackendApi({ workspaceRoot });
+
+    const nestedMismatchResponse = await nestedMismatchApp.request("/api/tasks");
+    const nestedMismatchBody = (await nestedMismatchResponse.json()) as ApiErrorResponse;
+
+    expect(nestedMismatchResponse.status).toBe(500);
+    expectCanonicalError(nestedMismatchBody, "workspace_error");
+    expect(nestedMismatchBody.error.evidence_refs).toContain("snapshot.status");
+
+    await rm(join(tasksRoot, nestedMismatchTask.task_id), { recursive: true, force: true });
+    const latestSeqTask = taskCardFixture("TASK-latest-seq");
+    await mkdir(join(tasksRoot, latestSeqTask.task_id), { recursive: true });
+    await writeTaskSnapshotFixture(
+      join(tasksRoot, latestSeqTask.task_id, "snapshot.json"),
+      latestSeqTask,
+      { latest_seq: 1 }
+    );
+    const latestSeqApp = createBackendApi({ workspaceRoot });
+
+    const latestSeqResponse = await latestSeqApp.request("/api/tasks");
+    const latestSeqBody = (await latestSeqResponse.json()) as ApiErrorResponse;
+
+    expect(latestSeqResponse.status).toBe(500);
+    expectCanonicalError(latestSeqBody, "workspace_error");
+    expect(latestSeqBody.error.evidence_refs).toContain("snapshot.latest_seq");
+  });
+
+  test("oversized existing task snapshots fail closed without leaking task content", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const snapshotPath = join(workspaceRoot, "tasks", "TASK-oversized-read", "snapshot.json");
+    await mkdir(join(workspaceRoot, "tasks", "TASK-oversized-read"), { recursive: true });
+    await writeFile(snapshotPath, "x".repeat(MAX_TASK_SNAPSHOT_BYTES + 1), { flag: "wx" });
+    const app = createBackendApi({ workspaceRoot });
+
+    const response = await app.request("/api/tasks");
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(500);
+    expectCanonicalError(body, "workspace_error");
+    expect(body.error.evidence_refs).toContain("workspace/tasks/TASK-oversized-read/snapshot.json");
+    expect(JSON.stringify(body)).not.toContain("Recovered task fixture");
   });
 
   test("regular-file task lanes fail closed with a canonical envelope", async () => {
@@ -746,6 +1014,7 @@ describe("backend workspace and health routes", () => {
     expect(response.status).toBe(500);
     expectCanonicalError(body, "workspace_error");
     expect(body.error.evidence_refs).toContain("workspace/tasks/TASK-file-lane");
+    expectNoAbsoluteWorkspacePath(body, tempRoot, workspaceRoot);
   });
 
   test("startup hydration ignores unrelated files and only reads bounded task snapshot candidates", async () => {
@@ -801,6 +1070,64 @@ describe("backend workspace and health routes", () => {
     expect(body.error.evidence_refs).toContain("workspace/tasks:entry_count");
     expect(body.error.message).toContain("exceeding the M1 hydration limit");
     expect(JSON.stringify(body)).not.toContain(hiddenTask.title);
+  });
+
+  test("duplicate generated task ids retry safely and fail without adding accepted state", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const generatedIds = ["TASK-duplicate", "TASK-duplicate", "TASK-retry"];
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:05:30.000Z"),
+      taskIdFactory: () => generatedIds.shift() ?? "TASK-retry"
+    });
+
+    const firstResponse = await postTask(app, validTaskCreateBody({ title: "First task" }));
+    const secondResponse = await postTask(app, validTaskCreateBody({ title: "Second task" }));
+    const firstTask = (await firstResponse.json()) as TaskCard;
+    const secondTask = (await secondResponse.json()) as TaskCard;
+
+    expect(firstResponse.status).toBe(201);
+    expect(secondResponse.status).toBe(201);
+    expect(firstTask.task_id).toBe("TASK-duplicate");
+    expect(secondTask.task_id).toBe("TASK-retry");
+
+    const failingApp = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-duplicate"
+    });
+    const failureResponse = await postTask(failingApp, validTaskCreateBody({ title: "Third task" }));
+    const failureBody = (await failureResponse.json()) as ApiErrorResponse;
+
+    expect(failureResponse.status).toBe(500);
+    expectCanonicalError(failureBody, "workspace_error");
+    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+      tasks: [firstTask, secondTask]
+    });
+    expect((await readdir(join(workspaceRoot, "tasks"))).filter((entry) => entry.startsWith("TASK-")).sort()).toEqual(
+      ["TASK-duplicate", "TASK-retry"]
+    );
+  });
+
+  test("task hydration failures can be repaired and retried in the same service", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const snapshotPath = join(workspaceRoot, "tasks", "TASK-repairable", "snapshot.json");
+    const repairedTask = taskCardFixture("TASK-repairable");
+    await mkdir(join(workspaceRoot, "tasks", repairedTask.task_id), { recursive: true });
+    await writeFile(snapshotPath, "{", { flag: "wx" });
+    const app = createBackendApi({ workspaceRoot });
+
+    const failedResponse = await app.request("/api/tasks");
+    const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+    await rm(snapshotPath);
+    await writeTaskSnapshotFixture(snapshotPath, repairedTask);
+    const repairedResponse = await app.request("/api/tasks");
+
+    expect(failedResponse.status).toBe(500);
+    expectCanonicalError(failedBody, "workspace_error");
+    expect(repairedResponse.status).toBe(200);
+    expect(await repairedResponse.json()).toEqual({ tasks: [repairedTask] });
   });
 
   test("concurrent task creates keep unique ids, coherent list/detail, and one snapshot per task", async () => {
@@ -932,7 +1259,11 @@ function taskCardFixture(taskId: string, overrides: Partial<TaskCard> = {}): Tas
   };
 }
 
-async function writeTaskSnapshotFixture(snapshotPath: string, task: TaskCard): Promise<void> {
+async function writeTaskSnapshotFixture(
+  snapshotPath: string,
+  task: TaskCard,
+  overrides: Partial<TaskSnapshot & { task_card: TaskCard }> = {}
+): Promise<void> {
   const snapshot: TaskSnapshot & { task_card: TaskCard } = {
     task_id: task.task_id,
     status: task.status,
@@ -947,7 +1278,8 @@ async function writeTaskSnapshotFixture(snapshotPath: string, task: TaskCard): P
     pending_pi_gates: [],
     latest_seq: 0,
     updated_at: task.updated_at,
-    task_card: task
+    task_card: task,
+    ...overrides
   };
   await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`, { flag: "wx" });
 }
@@ -999,6 +1331,21 @@ function expectCanonicalError(body: ApiErrorResponse, category: string): void {
   expect(typeof body.error.retryable).toBe("boolean");
   expect(Array.isArray(body.error.recommended_next_actions)).toBe(true);
   expect(body.error.recommended_next_actions.length).toBeGreaterThan(0);
+}
+
+function expectNoAbsoluteWorkspacePath(
+  body: ApiErrorResponse,
+  tempRoot: string,
+  workspaceRoot: string
+): void {
+  const serialized = JSON.stringify(body);
+  expect(serialized).not.toContain(tempRoot);
+  expect(serialized).not.toContain(workspaceRoot);
+}
+
+async function timeoutAfter(milliseconds: number, message: string): Promise<never> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+  throw new Error(message);
 }
 
 function restoreEnv(name: string, value: string | undefined): void {
