@@ -11,6 +11,7 @@
       "name": "@shud-harness/backend",
       "dependencies": {
         "@shud-harness/core": "workspace:*",
+        "hono": "^4.7.0",
       },
     },
     "packages/core": {
