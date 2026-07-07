@@ -3,7 +3,14 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BaseTool, BashTool, SpawnAgentTool, ToolRegistry } from "@zero-os/core";
+import {
+  BaseTool,
+  BashTool,
+  ReadTool,
+  SpawnAgentTool,
+  ToolRegistry,
+  WaitAgentTool
+} from "@zero-os/core";
 import type {
   FuseRule,
   RunningToolHandle,
@@ -30,6 +37,7 @@ import {
   createShudRuntimeToolRegistry,
   createShudSandboxedBashTool,
   isPolicyGatedTool,
+  wrapAllRegisteredTools,
   wrapToolWithPolicyGate
 } from "./policy-gate-registry";
 import {
@@ -2043,6 +2051,32 @@ describe("policy-gated zero tool registry", () => {
     expect(tools.map((tool) => tool.calls)).toEqual([1, 1, 1]);
   });
 
+  test("generic registry lint rejects the 21st visible tool without a role", () => {
+    const tools = Array.from({ length: 21 }, (_, index) => new RecordingTool(`generic.${index}`));
+
+    expect(() =>
+      createPolicyGatedToolRegistry(tools, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(
+      /Policy-gated tool registration lint failed for role unknown-role: visible tool count 21 exceeds 20; excess count 1/
+    );
+  });
+
+  test("generic wrap seam rejects descriptions missing required section headings", () => {
+    const badTool = new RecordingTool("generic.bad.description");
+    badTool.description = [
+      "何时该用: Use this fixture for generic wrap lint.",
+      "成功与失败样态: Success returns a fixture result."
+    ].join("\n");
+
+    expect(() =>
+      wrapAllRegisteredTools([badTool], {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    ).toThrow(/generic\.bad\.description: missing 何时不该用/);
+  });
+
   test("direct spawn wrapper executes only sanitized spawn input", async () => {
     const spawnTool = new RecordingTool("spawn_agent");
     const tailSentinel = "ignored-tail-sentinel-that-must-not-appear";
@@ -2098,6 +2132,36 @@ describe("policy-gated zero tool registry", () => {
     );
   });
 
+  test("SHUD runtime assembly rejects the 21st visible tool when role is omitted", () => {
+    const tools = Array.from({ length: 19 }, (_, index) => new RecordingTool(`extra.${index}`));
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          tools
+        })
+      )
+    ).toThrow(
+      /Policy-gated tool registration lint failed for role unknown-role: visible tool count 21 exceeds 20; excess count 1/
+    );
+  });
+
+  test("SHUD runtime adapts real Zero native tool descriptions before strict lint", () => {
+    const registry = createShudRuntimeToolRegistry(
+      createMinimalShudRuntimeRegistryOptions({
+        tools: [new ReadTool(), new WaitAgentTool()]
+      })
+    );
+
+    assertPolicyGatedToolRegistry(registry);
+    for (const toolId of ["read", "wait_agent"] as const) {
+      const definition = registry.getDefinitions().find((candidate) => candidate.name === toolId);
+      expect(definition?.description).toContain("何时该用:");
+      expect(definition?.description).toContain("何时不该用:");
+      expect(definition?.description).toContain("成功与失败样态:");
+    }
+  });
+
   test("SHUD runtime assembly rejects tool descriptions missing required sections", () => {
     const badTool = new RecordingTool("bad.description");
     badTool.description = [
@@ -2112,6 +2176,53 @@ describe("policy-gated zero tool registry", () => {
         })
       )
     ).toThrow(/bad\.description: missing 何时不该用/);
+  });
+
+  test("description lint rejects section labels without bodies", () => {
+    const badTool = new RecordingTool("bad.empty.sections");
+    badTool.description = ["何时该用:", "何时不该用:", "成功与失败样态:"].join("\n");
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          tools: [badTool]
+        })
+      )
+    ).toThrow(/bad\.empty\.sections: empty 何时该用, 何时不该用, 成功与失败样态/);
+  });
+
+  test("description lint rejects mid-sentence section-label stuffing", () => {
+    const badTool = new RecordingTool("bad.stuffed.sections");
+    badTool.description =
+      "This sentence mentions 何时该用, 何时不该用, and 成功与失败样态 without section headings.";
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          tools: [badTool]
+        })
+      )
+    ).toThrow(/bad\.stuffed\.sections: missing 何时该用, 何时不该用, 成功与失败样态/);
+  });
+
+  test("description lint accepts multiline section bodies", () => {
+    const tool = new RecordingTool("good.multiline.description");
+    tool.description = [
+      "何时该用:",
+      "Use this fixture when the body is on the next line.",
+      "何时不该用：",
+      "Do not use it as a real tool.",
+      "成功与失败样态:",
+      "Success assembles the registry; failure belongs to the lint harness."
+    ].join("\n");
+
+    expect(() =>
+      createShudRuntimeToolRegistry(
+        createMinimalShudRuntimeRegistryOptions({
+          tools: [tool]
+        })
+      )
+    ).not.toThrow();
   });
 
   test("Zod parameter schema rejection finalizes without executing the inner tool", async () => {
@@ -2168,7 +2279,7 @@ describe("policy-gated zero tool registry", () => {
       "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
     );
     expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
-    expect(evaluatorCalls).toBe(0);
+    expect(evaluatorCalls).toBe(1);
     expect(zodTool.calls).toBe(0);
     expect(handle.getState()).toBe("finished");
     expect(handle.getTerminalMetadata()).toMatchObject({
@@ -2176,6 +2287,81 @@ describe("policy-gated zero tool registry", () => {
       success: false,
       outputSummary: result.outputSummary
     });
+  });
+
+  test("policy evaluator denial wins before invalid Zod schema details", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.denied.first",
+      z.object({
+        command: z.string()
+      })
+    );
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return {
+          decision: "deny",
+          ruleId: "authorization-deny",
+          reason: "role is not authorized for this tool",
+          remediation: {
+            next_action: "adjust_scope",
+            hint: "Use a tool allowed for this role.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          }
+        };
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("authorization-deny");
+    expect(result.output).not.toContain("tool-parameter-schema-validation");
+    expect(result.output).not.toContain("Expected string");
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
+  test("valid Zod path runs evaluator once and executes with parsed input", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.valid.parsed",
+      z.object({
+        count: z.coerce.number().default(1).transform((value) => value + 1),
+        label: z.string().default("default-label")
+      })
+    );
+    let evaluatorCalls = 0;
+    let validatorInput: unknown;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        return { decision: "allow" };
+      },
+      validateExecutionInput: (input) => {
+        validatorInput = input;
+        return undefined;
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      count: "4"
+    });
+
+    expect(result).toEqual({
+      success: true,
+      output: "zod.valid.parsed executed",
+      outputSummary: "zod.valid.parsed executed"
+    });
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(1);
+    expect(zodTool.lastInput).toEqual({
+      count: 5,
+      label: "default-label"
+    });
+    expect(validatorInput).toBe(zodTool.lastInput);
   });
 
   test("assembly fails when any registered zero tool bypasses the wrapper", () => {

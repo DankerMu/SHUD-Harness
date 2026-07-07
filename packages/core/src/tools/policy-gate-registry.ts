@@ -1,4 +1,13 @@
-import { BaseTool, SpawnAgentTool, ToolRegistry, loadFuseList } from "@zero-os/core";
+import {
+  BaseTool,
+  EditTool,
+  ReadTool,
+  SpawnAgentTool,
+  ToolRegistry,
+  WaitAgentTool,
+  WriteTool,
+  loadFuseList
+} from "@zero-os/core";
 import { toErrorMessage } from "@zero-os/shared";
 import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os/shared";
 import { types as nodeUtilTypes } from "node:util";
@@ -108,6 +117,26 @@ const SHUD_SPAWN_AGENT_DESCRIPTION = [
   "何时不该用: 不用于绕过当前角色权限、创建嵌套委派链，或替代 PI 科学判断。",
   "成功与失败样态: 成功时返回 agent_id 并由后续 wait_agent 收集结果；失败时返回策略门拒绝、未知角色、模型或工具剖面错误。"
 ].join("\n");
+const SHUD_READ_TOOL_DESCRIPTION = [
+  "何时该用: 在 SHUD runtime 中读取调度、审查或执行所需的文件内容，并保持只读边界。",
+  "何时不该用: 不用于写入、编辑、删除文件，也不用于读取超出当前任务权限的敏感数据。",
+  "成功与失败样态: 成功时返回文件内容和摘要；失败时返回文件缺失、权限或参数错误。"
+].join("\n");
+const SHUD_WRITE_TOOL_DESCRIPTION = [
+  "何时该用: 在 coder worktree 边界内创建或覆盖明确授权的源码、测试或配置文件。",
+  "何时不该用: 不用于修改 raw data、baseline、主分支状态或缺少任务授权的路径。",
+  "成功与失败样态: 成功时写入目标文件；失败时返回权限、路径、参数或策略门拒绝错误。"
+].join("\n");
+const SHUD_EDIT_TOOL_DESCRIPTION = [
+  "何时该用: 在 coder worktree 边界内对已存在文件做小范围、可审查的编辑。",
+  "何时不该用: 不用于批量重写无关文件、修改 raw data，或替代明确的 patch.apply 流程。",
+  "成功与失败样态: 成功时应用目标编辑；失败时返回匹配失败、权限、路径或策略门拒绝错误。"
+].join("\n");
+const SHUD_WAIT_AGENT_DESCRIPTION = [
+  "何时该用: 当 coordinator 需要等待已派发子代理完成或进入可观察状态时使用。",
+  "何时不该用: 不用于创建新子代理、绕过 spawn 剖面校验，或等待非本会话拥有的 agent id。",
+  "成功与失败样态: 成功时返回子代理状态快照；失败时返回 agent control 不可用、超时或未知 agent id。"
+].join("\n");
 
 export function createPolicyGateEvaluator(context: PolicyGateContext): PolicyGateEvaluator {
   return (call) => evaluatePolicyGate(call, context);
@@ -164,7 +193,8 @@ export function wrapAllRegisteredTools(
   options: Omit<PolicyGateWrapperOptions, "toolId">
 ): PolicyGatedTool[] {
   assertPolicyGatedToolRegistrationLint(tools, {
-    role: options.role
+    role: options.role,
+    requireDescriptionSections: true
   });
   const wrappedTools = tools.map((tool) =>
     wrapToolWithPolicyGate(tool, {
@@ -181,7 +211,8 @@ export function createPolicyGatedToolRegistry(
   options: Omit<PolicyGateWrapperOptions, "toolId">
 ): ToolRegistry {
   assertPolicyGatedToolRegistrationLint(tools, {
-    role: options.role
+    role: options.role,
+    requireDescriptionSections: true
   });
   const registry = new ToolRegistry();
   const wrappedTools = tools.map((tool) =>
@@ -230,7 +261,8 @@ export function createShudRuntimeToolRegistry(
     validateExecutionInput?: PolicyGateExecutionInputValidator;
   }> = [];
 
-  for (const tool of options.tools ?? []) {
+  for (const candidateTool of options.tools ?? []) {
+    const tool = unwrapPolicyGatedTool(candidateTool);
     if (tool.name === "spawn_agent") {
       includesSpawnAgent = true;
       continue;
@@ -240,7 +272,7 @@ export function createShudRuntimeToolRegistry(
       continue;
     }
 
-    registrations.push({ tool });
+    registrations.push({ tool: adaptShudRuntimeToolDescription(tool) });
   }
 
   registrations.push({ tool: createShudSandboxedBashTool(options) });
@@ -315,10 +347,6 @@ function assertRoleVisibleToolCountLimit(
   tools: readonly BaseTool[],
   role: HarnessRole | undefined
 ): void {
-  if (!isHarnessRole(role)) {
-    return;
-  }
-
   const visibleToolCount = new Set(tools.map((tool) => tool.name)).size;
   if (visibleToolCount <= ROLE_VISIBLE_TOOL_COUNT_LIMIT) {
     return;
@@ -326,19 +354,23 @@ function assertRoleVisibleToolCountLimit(
 
   const excessCount = visibleToolCount - ROLE_VISIBLE_TOOL_COUNT_LIMIT;
   throw new Error(
-    `Policy-gated tool registration lint failed for role ${role}: visible tool count ${visibleToolCount} exceeds ${ROLE_VISIBLE_TOOL_COUNT_LIMIT}; excess count ${excessCount}.`
+    `Policy-gated tool registration lint failed for role ${formatRegistrationLintRole(role)}: visible tool count ${visibleToolCount} exceeds ${ROLE_VISIBLE_TOOL_COUNT_LIMIT}; excess count ${excessCount}.`
   );
 }
 
 function assertToolDescriptionsIncludeRequiredSections(tools: readonly BaseTool[]): void {
   const failures: string[] = [];
   for (const tool of tools) {
-    const description = tool.description;
-    const missingSections = SHUD_TOOL_DESCRIPTION_REQUIRED_SECTIONS.filter(
-      (section) => !description.includes(section)
-    );
+    const { missingSections, emptySections } = inspectToolDescriptionSections(tool.description);
+    const details: string[] = [];
     if (missingSections.length > 0) {
-      failures.push(`${tool.name}: missing ${missingSections.join(", ")}`);
+      details.push(`missing ${missingSections.join(", ")}`);
+    }
+    if (emptySections.length > 0) {
+      details.push(`empty ${emptySections.join(", ")}`);
+    }
+    if (details.length > 0) {
+      failures.push(`${tool.name}: ${details.join("; ")}`);
     }
   }
 
@@ -349,6 +381,74 @@ function assertToolDescriptionsIncludeRequiredSections(tools: readonly BaseTool[
   }
 }
 
+function formatRegistrationLintRole(role: HarnessRole | undefined): HarnessRole | "unknown-role" {
+  return isHarnessRole(role) ? role : "unknown-role";
+}
+
+function inspectToolDescriptionSections(description: string): {
+  missingSections: string[];
+  emptySections: string[];
+} {
+  const sectionState = new Map<
+    (typeof SHUD_TOOL_DESCRIPTION_REQUIRED_SECTIONS)[number],
+    { present: boolean; hasBody: boolean }
+  >(
+    SHUD_TOOL_DESCRIPTION_REQUIRED_SECTIONS.map((section) => [
+      section,
+      { present: false, hasBody: false }
+    ])
+  );
+  let currentSection: (typeof SHUD_TOOL_DESCRIPTION_REQUIRED_SECTIONS)[number] | undefined;
+
+  for (const line of description.split(/\r?\n/)) {
+    const heading = parseToolDescriptionSectionHeading(line);
+    if (heading) {
+      currentSection = heading.section;
+      const state = sectionState.get(currentSection)!;
+      state.present = true;
+      if (heading.inlineBody.trim() !== "") {
+        state.hasBody = true;
+      }
+      continue;
+    }
+
+    if (currentSection && line.trim() !== "") {
+      sectionState.get(currentSection)!.hasBody = true;
+    }
+  }
+
+  const missingSections: string[] = [];
+  const emptySections: string[] = [];
+  for (const section of SHUD_TOOL_DESCRIPTION_REQUIRED_SECTIONS) {
+    const state = sectionState.get(section)!;
+    if (!state.present) {
+      missingSections.push(section);
+    } else if (!state.hasBody) {
+      emptySections.push(section);
+    }
+  }
+
+  return { missingSections, emptySections };
+}
+
+function parseToolDescriptionSectionHeading(
+  line: string
+):
+  | {
+      section: (typeof SHUD_TOOL_DESCRIPTION_REQUIRED_SECTIONS)[number];
+      inlineBody: string;
+    }
+  | undefined {
+  const match = /^\s*(何时该用|何时不该用|成功与失败样态)\s*[:：]\s*(.*)$/u.exec(line);
+  if (!match) {
+    return undefined;
+  }
+  return {
+    section: match[1] as (typeof SHUD_TOOL_DESCRIPTION_REQUIRED_SECTIONS)[number],
+    inlineBody: match[2]
+  };
+}
+
 function unwrapPolicyGatedTool(tool: BaseTool): BaseTool {
   let current = tool;
   while (isPolicyGatedTool(current)) {
@@ -357,8 +457,73 @@ function unwrapPolicyGatedTool(tool: BaseTool): BaseTool {
   return current;
 }
 
+function adaptShudRuntimeToolDescription(tool: BaseTool): BaseTool {
+  const description = resolveShudZeroNativeToolDescription(tool);
+  if (!description) {
+    return tool;
+  }
+  return new ShudRuntimeToolDescriptionAdapter(tool, description);
+}
+
+function resolveShudZeroNativeToolDescription(tool: BaseTool): string | undefined {
+  if (tool instanceof ReadTool) {
+    return SHUD_READ_TOOL_DESCRIPTION;
+  }
+  if (tool instanceof WriteTool) {
+    return SHUD_WRITE_TOOL_DESCRIPTION;
+  }
+  if (tool instanceof EditTool) {
+    return SHUD_EDIT_TOOL_DESCRIPTION;
+  }
+  if (tool instanceof WaitAgentTool) {
+    return SHUD_WAIT_AGENT_DESCRIPTION;
+  }
+  return undefined;
+}
+
 class ShudSpawnAgentTool extends SpawnAgentTool {
   override description = SHUD_SPAWN_AGENT_DESCRIPTION;
+}
+
+class ShudRuntimeToolDescriptionAdapter extends BaseTool {
+  constructor(
+    readonly innerTool: BaseTool,
+    private readonly shudDescription: string
+  ) {
+    super();
+    this.kind = innerTool.kind;
+    this.requiredModelCapabilities = innerTool.requiredModelCapabilities;
+  }
+
+  get name(): string {
+    return this.innerTool.name;
+  }
+
+  get description(): string {
+    return this.shudDescription;
+  }
+
+  get parameters(): Record<string, unknown> {
+    return this.innerTool.parameters;
+  }
+
+  toDefinition(): ToolDefinition {
+    return {
+      ...this.innerTool.toDefinition(),
+      name: this.name,
+      description: this.description,
+      parameters: this.parameters,
+      kind: this.kind
+    };
+  }
+
+  async run(toolContext: ToolContext, input: unknown): Promise<ToolResult> {
+    return this.innerTool.run(toolContext, input);
+  }
+
+  protected async execute(): Promise<ToolResult> {
+    throw new Error("ShudRuntimeToolDescriptionAdapter delegates through run().");
+  }
 }
 
 class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
@@ -420,30 +585,19 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       );
     }
 
-    const parameterValidationDecision = validateToolZodParameters(
-      this.policyGateToolId,
-      this.innerTool,
-      preparedInput.executionInput
-    );
-    if (parameterValidationDecision) {
-      const durationMs = Date.now() - startTime;
-      return this.finalizePolicyGateResult(
-        toolContext,
-        buildPolicyGateDeniedResult(this.policyGateToolId, parameterValidationDecision),
-        durationMs
+    const hasZodParameterSchema = resolveToolZodParameterSchema(this.innerTool) !== undefined;
+    if (!hasZodParameterSchema) {
+      const executionValidationDecision = this.options.validateExecutionInput?.(
+        preparedInput.executionInput
       );
-    }
-
-    const executionValidationDecision = this.options.validateExecutionInput?.(
-      preparedInput.executionInput
-    );
-    if (executionValidationDecision) {
-      const durationMs = Date.now() - startTime;
-      return this.finalizePolicyGateResult(
-        toolContext,
-        buildPolicyGateDeniedResult(this.policyGateToolId, executionValidationDecision),
-        durationMs
-      );
+      if (executionValidationDecision) {
+        const durationMs = Date.now() - startTime;
+        return this.finalizePolicyGateResult(
+          toolContext,
+          buildPolicyGateDeniedResult(this.policyGateToolId, executionValidationDecision),
+          durationMs
+        );
+      }
     }
 
     try {
@@ -490,7 +644,33 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       );
     }
 
-    return this.innerTool.run(toolContext, preparedInput.executionInput);
+    const parsedInput = hasZodParameterSchema
+      ? parseToolZodParameters(this.policyGateToolId, this.innerTool, preparedInput.executionInput)
+      : { decision: "allow" as const, executionInput: preparedInput.executionInput };
+    if (parsedInput.decision === "deny") {
+      const durationMs = Date.now() - startTime;
+      return this.finalizePolicyGateResult(
+        toolContext,
+        buildPolicyGateDeniedResult(this.policyGateToolId, parsedInput),
+        durationMs
+      );
+    }
+
+    if (hasZodParameterSchema) {
+      const executionValidationDecision = this.options.validateExecutionInput?.(
+        parsedInput.executionInput
+      );
+      if (executionValidationDecision) {
+        const durationMs = Date.now() - startTime;
+        return this.finalizePolicyGateResult(
+          toolContext,
+          buildPolicyGateDeniedResult(this.policyGateToolId, executionValidationDecision),
+          durationMs
+        );
+      }
+    }
+
+    return this.innerTool.run(toolContext, parsedInput.executionInput);
   }
 
   protected async execute(): Promise<ToolResult> {
@@ -667,14 +847,16 @@ type ToolZodIssue = {
   message?: unknown;
 };
 
-function validateToolZodParameters(
+function parseToolZodParameters(
   toolId: string,
   tool: BaseTool,
   input: unknown
-): Extract<PolicyGateDecision, { decision: "deny" }> | undefined {
+):
+  | { decision: "allow"; executionInput: unknown }
+  | Extract<PolicyGateDecision, { decision: "deny" }> {
   const schema = resolveToolZodParameterSchema(tool);
   if (!schema) {
-    return undefined;
+    return { decision: "allow", executionInput: input };
   }
 
   let result: ToolZodSafeParseResult;
@@ -688,7 +870,7 @@ function validateToolZodParameters(
   }
 
   if (result.success) {
-    return undefined;
+    return { decision: "allow", executionInput: result.data };
   }
 
   return buildToolParameterSchemaValidationDeny(

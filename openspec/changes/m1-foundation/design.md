@@ -422,6 +422,7 @@ Project profile: SHUD-Harness
 Change surface:
 - `packages/core/src/tools/policy-gate-registry.ts`
 - `packages/core/src/tools/policy-gate-registry.test.ts`
+- `packages/core/src/tools/raw-data-sandbox.ts`
 
 Must preserve:
 - Existing policy-gated wrapper behavior: evaluator denials and input-preparation failures happen before inner tool execution and return structured payloads.
