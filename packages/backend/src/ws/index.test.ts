@@ -565,47 +565,41 @@ describe("backend ws tool.failed skeleton", () => {
     }
   });
 
-  test("generic tool.failed builder snapshots top-level identity getters", () => {
+  test("generic tool.failed builder rejects top-level identity accessors", () => {
     const reads = {
       rule: 0,
       decision: 0,
       guardClass: 0
     };
-    const event = buildToolFailedWsEvent({
-      seq: 90,
-      timestamp: "2026-07-04T00:00:00.000Z",
-      toolId: "bash",
-      get rule() {
-        reads.rule += 1;
-        return reads.rule === 1
-          ? "workspace-quota"
-          : `${RAW_DATA_WRITE_RULE_ID}:failed:caller-minted`;
-      },
-      get decision() {
-        reads.decision += 1;
-        return reads.decision === 1 ? "failed" : "denied_by_advisory";
-      },
-      get guardClass() {
-        reads.guardClass += 1;
-        return reads.guardClass === 1 ? "authority" : "capability";
-      },
-      error: sampleGenericToolFailedError("workspace-quota:failed:getter-top")
-    });
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 90,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        get rule() {
+          reads.rule += 1;
+          return "workspace-quota";
+        },
+        get decision() {
+          reads.decision += 1;
+          return "failed";
+        },
+        get guardClass() {
+          reads.guardClass += 1;
+          return "authority";
+        },
+        error: sampleGenericToolFailedError("workspace-quota:failed:getter-top")
+      })
+    ).toThrow("tool.failed rule must be a data field");
 
     expect(reads).toEqual({
-      rule: 1,
-      decision: 1,
-      guardClass: 1
-    });
-    expect(event.payload).toMatchObject({
-      tool_id: "bash",
-      rule: "workspace-quota",
-      decision: "failed",
-      guard_class: "authority"
+      rule: 0,
+      decision: 0,
+      guardClass: 0
     });
   });
 
-  test("generic tool.failed builder snapshots nested error_id getters", () => {
+  test("generic tool.failed builder rejects nested error_id accessors", () => {
     const benignErrorId = "workspace-quota:failed:getter-error";
     const reservedErrorId = `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox:reserved-profile:TOOL-CALL-WS-GETTER`;
     let errorIdReads = 0;
@@ -624,18 +618,19 @@ describe("backend ws tool.failed skeleton", () => {
       created_at: "2026-07-04T00:00:00.000Z"
     } as ErrorRecord;
 
-    const event = buildToolFailedWsEvent({
-      seq: 91,
-      timestamp: "2026-07-04T00:00:00.000Z",
-      toolId: "bash",
-      rule: "workspace-quota",
-      decision: "failed",
-      guardClass: "authority",
-      error
-    });
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 91,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        guardClass: "authority",
+        error
+      })
+    ).toThrow("tool.failed error.error_id must be a data field");
 
-    expect(errorIdReads).toBe(1);
-    expect(event.payload.error.error_id).toBe(benignErrorId);
+    expect(errorIdReads).toBe(0);
   });
 
   test("generic tool.failed builder snapshots mutable error payloads", () => {
@@ -679,6 +674,77 @@ describe("backend ws tool.failed skeleton", () => {
     expect(event.payload.error.evidence_refs).toEqual(["evidence:before"]);
     expect(event.payload.error.recommended_next_actions).toEqual(["retry after cleanup"]);
     expect(event.payload.error.remediation?.hint).toBe("Repair workspace state.");
+  });
+
+  test("generic tool.failed builder rejects toJSON identity forgery", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 92,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: {
+          toJSON: () => SPAWN_PROFILE_SUBSET_RULE_ID
+        } as never,
+        decision: "failed",
+        error: sampleGenericToolFailedError("workspace-quota:failed:rule-to-json")
+      })
+    ).toThrow("tool.failed rule must be a string");
+
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 93,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: {
+          toJSON: () => "denied_by_sandbox"
+        } as never,
+        error: sampleGenericToolFailedError("workspace-quota:failed:decision-to-json")
+      })
+    ).toThrow("tool.failed decision must be a string");
+
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 94,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        error: {
+          ...sampleGenericToolFailedError("workspace-quota:failed:error-id-to-json"),
+          error_id: {
+            startsWith: () => false,
+            toJSON: () => `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox:profile:call`
+          }
+        } as never
+      })
+    ).toThrow("tool.failed error.error_id must be a string");
+  });
+
+  test("generic tool.failed builder rejects reserved error IDs before cloning arrays", () => {
+    const error = sampleGenericToolFailedError(
+      `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox:reserved-profile:TOOL-CALL-WS-2`
+    );
+    let evidenceRefsReads = 0;
+    Object.defineProperty(error, "evidence_refs", {
+      enumerable: true,
+      get() {
+        evidenceRefsReads += 1;
+        throw new Error("evidence_refs trap secret");
+      }
+    });
+
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 95,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        error
+      })
+    ).toThrow("Reserved raw-data denial error_id values require");
+    expect(evidenceRefsReads).toBe(0);
   });
 
   test("generic tool.failed builder rejects reserved raw-denial error IDs", () => {

@@ -1134,6 +1134,15 @@ describe("raw data seatbelt sandbox", () => {
         ...nonReservedAuditRow(),
         reason: "x".repeat(140_000)
       };
+      const nodeBudgetRow = {
+        ...nonReservedAuditRow(),
+        details: Object.fromEntries(
+          Array.from({ length: 101 }, (_, index) => [
+            `group${index}`,
+            Array.from({ length: 100 }, () => 0)
+          ])
+        )
+      };
 
       const cases = [
         {
@@ -1155,6 +1164,11 @@ describe("raw data seatbelt sandbox", () => {
           fileName: "long-string.ndjson",
           row: longStringRow,
           expected: "Policy gate audit row exceeds string budget"
+        },
+        {
+          fileName: "node-budget.ndjson",
+          row: nodeBudgetRow,
+          expected: "Policy gate audit row exceeds node budget"
         }
       ] as const;
 
