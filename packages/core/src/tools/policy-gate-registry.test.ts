@@ -6,10 +6,12 @@ import { join } from "node:path";
 import {
   BaseTool,
   BashTool,
+  EditTool,
   ReadTool,
   SpawnAgentTool,
   ToolRegistry,
-  WaitAgentTool
+  WaitAgentTool,
+  WriteTool
 } from "@zero-os/core";
 import type {
   FuseRule,
@@ -2149,12 +2151,12 @@ describe("policy-gated zero tool registry", () => {
   test("SHUD runtime adapts real Zero native tool descriptions before strict lint", () => {
     const registry = createShudRuntimeToolRegistry(
       createMinimalShudRuntimeRegistryOptions({
-        tools: [new ReadTool(), new WaitAgentTool()]
+        tools: [new ReadTool(), new WriteTool(), new EditTool(), new WaitAgentTool()]
       })
     );
 
     assertPolicyGatedToolRegistry(registry);
-    for (const toolId of ["read", "wait_agent"] as const) {
+    for (const toolId of ["read", "write", "edit", "wait_agent"] as const) {
       const definition = registry.getDefinitions().find((candidate) => candidate.name === toolId);
       expect(definition?.description).toContain("何时该用:");
       expect(definition?.description).toContain("何时不该用:");
@@ -2223,6 +2225,43 @@ describe("policy-gated zero tool registry", () => {
         })
       )
     ).not.toThrow();
+  });
+
+  test("manual registry assertion rejects direct-wrapped tools above the visible count limit", () => {
+    const registry = new ToolRegistry();
+    const tools = Array.from(
+      { length: 21 },
+      (_, index) => new RecordingTool(`manual.${index}`)
+    );
+    for (const tool of tools) {
+      registry.register(
+        wrapToolWithPolicyGate(tool, {
+          evaluate: async () => ({ decision: "allow" })
+        })
+      );
+    }
+
+    expect(() => assertPolicyGatedToolRegistry(registry, { role: "worker" })).toThrow(
+      /Policy-gated tool registration lint failed for role worker: visible tool count 21 exceeds 20; excess count 1/
+    );
+  });
+
+  test("manual registry assertion rejects direct-wrapped tools with bad descriptions", () => {
+    const badTool = new RecordingTool("manual.bad.description");
+    badTool.description = [
+      "何时该用: Use this fixture for manual registry lint.",
+      "成功与失败样态: Success should never pass final registry validation."
+    ].join("\n");
+    const registry = new ToolRegistry();
+    registry.register(
+      wrapToolWithPolicyGate(badTool, {
+        evaluate: async () => ({ decision: "allow" })
+      })
+    );
+
+    expect(() => assertPolicyGatedToolRegistry(registry)).toThrow(
+      /manual\.bad\.description: missing 何时不该用/
+    );
   });
 
   test("Zod parameter schema rejection finalizes without executing the inner tool", async () => {
@@ -2334,10 +2373,12 @@ describe("policy-gated zero tool registry", () => {
       })
     );
     let evaluatorCalls = 0;
+    let evaluatorInput: unknown;
     let validatorInput: unknown;
     const wrapped = wrapToolWithPolicyGate(zodTool, {
-      evaluate: async () => {
+      evaluate: async (call) => {
         evaluatorCalls += 1;
+        evaluatorInput = call.input;
         return { decision: "allow" };
       },
       validateExecutionInput: (input) => {
@@ -2361,7 +2402,54 @@ describe("policy-gated zero tool registry", () => {
       count: 5,
       label: "default-label"
     });
+    expect(evaluatorInput).toEqual(zodTool.lastInput);
     expect(validatorInput).toBe(zodTool.lastInput);
+  });
+
+  test("valid Zod parsed-only values can be denied by the evaluator", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.parsed.denied",
+      z.object({
+        count: z.coerce.number().default(1).transform((value) => value + 1),
+        label: z.string().default("default-label")
+      })
+    );
+    let evaluatorInput: unknown;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: async (call) => {
+        evaluatorInput = call.input;
+        const input = call.input as { count?: unknown; label?: unknown };
+        if (input.count === 5 && input.label === "default-label") {
+          return {
+            decision: "deny",
+            ruleId: "parsed-zod-deny",
+            reason: "parsed count crossed the evaluator threshold",
+            remediation: {
+              next_action: "adjust_scope",
+              hint: "Lower the parsed count before retrying.",
+              ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+            }
+          };
+        }
+        return { decision: "allow" };
+      },
+      validateExecutionInput: () => {
+        throw new Error("validator must not run after evaluator denial");
+      }
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      count: "4"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("parsed-zod-deny");
+    expect(result.output).toContain("parsed count crossed the evaluator threshold");
+    expect(evaluatorInput).toEqual({
+      count: 5,
+      label: "default-label"
+    });
+    expect(zodTool.calls).toBe(0);
   });
 
   test("assembly fails when any registered zero tool bypasses the wrapper", () => {

@@ -69,6 +69,10 @@ export interface PolicyGatedToolRegistrationLintOptions {
   requireDescriptionSections?: boolean;
 }
 
+export interface PolicyGatedToolRegistryAssertionOptions {
+  role?: HarnessRole;
+}
+
 export interface ToolZodParameterSchemaCarrier {
   readonly parameterSchema?: unknown;
   readonly zodParameters?: unknown;
@@ -225,7 +229,7 @@ export function createPolicyGatedToolRegistry(
   for (const tool of wrappedTools) {
     registry.register(tool);
   }
-  assertPolicyGatedToolRegistry(registry);
+  assertPolicyGatedToolRegistry(registry, { role: options.role });
   return registry;
 }
 
@@ -309,7 +313,7 @@ export function createShudRuntimeToolRegistry(
     );
   }
 
-  assertPolicyGatedToolRegistry(registry);
+  assertPolicyGatedToolRegistry(registry, { role: options.role });
   return registry;
 }
 
@@ -323,8 +327,16 @@ export function assertPolicyGatedToolRegistrationLint(
   }
 }
 
-export function assertPolicyGatedToolRegistry(registry: ToolRegistry): void {
-  assertAllToolsPolicyGated(registry.list());
+export function assertPolicyGatedToolRegistry(
+  registry: ToolRegistry,
+  options: PolicyGatedToolRegistryAssertionOptions = {}
+): void {
+  const tools = registry.list();
+  assertAllToolsPolicyGated(tools);
+  assertPolicyGatedToolRegistrationLint(tools, {
+    role: options.role,
+    requireDescriptionSections: true
+  });
 }
 
 export function assertAllToolsPolicyGated(tools: readonly BaseTool[]): void {
@@ -557,7 +569,6 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
 
   async run(toolContext: ToolContext, input: unknown): Promise<ToolResult> {
     const startTime = Date.now();
-    let decision: PolicyGateDecision;
     const role = this.options.role ?? resolveRole(toolContext);
     let preparedInput:
       | {
@@ -585,80 +596,74 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       );
     }
 
-    const hasZodParameterSchema = resolveToolZodParameterSchema(this.innerTool) !== undefined;
-    if (!hasZodParameterSchema) {
-      const executionValidationDecision = this.options.validateExecutionInput?.(
+    if (resolveToolZodParameterSchema(this.innerTool)) {
+      const parsedInput = parseToolZodParameters(
+        this.policyGateToolId,
+        this.innerTool,
         preparedInput.executionInput
       );
-      if (executionValidationDecision) {
-        const durationMs = Date.now() - startTime;
-        return this.finalizePolicyGateResult(
+      if (parsedInput.decision === "deny") {
+        const evaluation = await this.evaluatePolicyGateInput(
           toolContext,
-          buildPolicyGateDeniedResult(this.policyGateToolId, executionValidationDecision),
-          durationMs
-        );
-      }
-    }
-
-    try {
-      const candidate = await this.options.evaluate(
-        {
-          toolId: this.policyGateToolId,
           role,
-          input: preparedInput.evaluatorInput,
-          workDir: toolContext.workDir
-        },
-        {
-          tool: this.innerTool,
-          toolContext
+          preparedInput.evaluatorInput
+        );
+        if (evaluation.status === "error") {
+          const durationMs = Date.now() - startTime;
+          return this.finalizePolicyGateResult(toolContext, evaluation.result, durationMs);
         }
-      );
-      decision = validatePolicyGateDecision(this.policyGateToolId, candidate);
-    } catch (error) {
-      const durationMs = Date.now() - startTime;
-      const errorMessage = toErrorMessage(error);
-      return this.finalizePolicyGateResult(
-        toolContext,
-        {
-          success: false,
-          output: errorMessage,
-          outputSummary: `Error: ${errorMessage.slice(0, 100)}`
-        },
-        durationMs
-      );
-    }
+        if (evaluation.decision.decision === "deny") {
+          const durationMs = Date.now() - startTime;
+          return this.finalizePolicyGateResult(
+            toolContext,
+            buildPolicyGateDeniedToolResult(this.policyGateToolId, evaluation.decision),
+            durationMs
+          );
+        }
 
-    if (decision.decision === "deny") {
-      const durationMs = Date.now() - startTime;
-      if (decision.ruleId === RAW_DATA_WRITE_RULE_ID) {
+        const durationMs = Date.now() - startTime;
         return this.finalizePolicyGateResult(
           toolContext,
-          buildRawDataRuleMisconfiguredResult(this.policyGateToolId, decision),
+          buildPolicyGateDeniedResult(this.policyGateToolId, parsedInput),
           durationMs
         );
       }
-      return this.finalizePolicyGateResult(
-        toolContext,
-        buildPolicyGateDeniedResult(this.policyGateToolId, decision),
-        durationMs
-      );
-    }
 
-    const parsedInput = hasZodParameterSchema
-      ? parseToolZodParameters(this.policyGateToolId, this.innerTool, preparedInput.executionInput)
-      : { decision: "allow" as const, executionInput: preparedInput.executionInput };
-    if (parsedInput.decision === "deny") {
-      const durationMs = Date.now() - startTime;
-      return this.finalizePolicyGateResult(
-        toolContext,
-        buildPolicyGateDeniedResult(this.policyGateToolId, parsedInput),
-        durationMs
-      );
-    }
+      let parsedPreparedInput: {
+        executionInput: unknown;
+        evaluatorInput: unknown;
+      };
+      try {
+        parsedPreparedInput = prepareGenericPolicyGateInputSnapshots(parsedInput.executionInput);
+      } catch {
+        const durationMs = Date.now() - startTime;
+        return this.finalizePolicyGateResult(
+          toolContext,
+          buildPolicyGatePreparationFailedResult(this.policyGateToolId),
+          durationMs
+        );
+      }
 
-    if (hasZodParameterSchema) {
+      const evaluation = await this.evaluatePolicyGateInput(
+        toolContext,
+        role,
+        parsedPreparedInput.evaluatorInput
+      );
+      if (evaluation.status === "error") {
+        const durationMs = Date.now() - startTime;
+        return this.finalizePolicyGateResult(toolContext, evaluation.result, durationMs);
+      }
+      if (evaluation.decision.decision === "deny") {
+        const durationMs = Date.now() - startTime;
+        return this.finalizePolicyGateResult(
+          toolContext,
+          buildPolicyGateDeniedToolResult(this.policyGateToolId, evaluation.decision),
+          durationMs
+        );
+      }
+
       const executionValidationDecision = this.options.validateExecutionInput?.(
-        parsedInput.executionInput
+        parsedPreparedInput.executionInput
       );
       if (executionValidationDecision) {
         const durationMs = Date.now() - startTime;
@@ -668,9 +673,41 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
           durationMs
         );
       }
+
+      return this.innerTool.run(toolContext, parsedPreparedInput.executionInput);
     }
 
-    return this.innerTool.run(toolContext, parsedInput.executionInput);
+    const executionValidationDecision = this.options.validateExecutionInput?.(
+      preparedInput.executionInput
+    );
+    if (executionValidationDecision) {
+      const durationMs = Date.now() - startTime;
+      return this.finalizePolicyGateResult(
+        toolContext,
+        buildPolicyGateDeniedResult(this.policyGateToolId, executionValidationDecision),
+        durationMs
+      );
+    }
+
+    const evaluation = await this.evaluatePolicyGateInput(
+      toolContext,
+      role,
+      preparedInput.evaluatorInput
+    );
+    if (evaluation.status === "error") {
+      const durationMs = Date.now() - startTime;
+      return this.finalizePolicyGateResult(toolContext, evaluation.result, durationMs);
+    }
+    if (evaluation.decision.decision === "deny") {
+      const durationMs = Date.now() - startTime;
+      return this.finalizePolicyGateResult(
+        toolContext,
+        buildPolicyGateDeniedToolResult(this.policyGateToolId, evaluation.decision),
+        durationMs
+      );
+    }
+
+    return this.innerTool.run(toolContext, preparedInput.executionInput);
   }
 
   protected async execute(): Promise<ToolResult> {
@@ -752,6 +789,54 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       evaluatorInput
     };
   }
+
+  private async evaluatePolicyGateInput(
+    toolContext: ToolContext,
+    role: HarnessRole | "unknown",
+    evaluatorInput: unknown
+  ): Promise<
+    | { status: "decision"; decision: PolicyGateDecision }
+    | { status: "error"; result: ToolResult }
+  > {
+    try {
+      const candidate = await this.options.evaluate(
+        {
+          toolId: this.policyGateToolId,
+          role,
+          input: evaluatorInput,
+          workDir: toolContext.workDir
+        },
+        {
+          tool: this.innerTool,
+          toolContext
+        }
+      );
+      return {
+        status: "decision",
+        decision: validatePolicyGateDecision(this.policyGateToolId, candidate)
+      };
+    } catch (error) {
+      const errorMessage = toErrorMessage(error);
+      return {
+        status: "error",
+        result: {
+          success: false,
+          output: errorMessage,
+          outputSummary: `Error: ${errorMessage.slice(0, 100)}`
+        }
+      };
+    }
+  }
+}
+
+function buildPolicyGateDeniedToolResult(
+  toolId: string,
+  decision: Extract<PolicyGateDecision, { decision: "deny" }>
+): ToolResult {
+  if (decision.ruleId === RAW_DATA_WRITE_RULE_ID) {
+    return buildRawDataRuleMisconfiguredResult(toolId, decision);
+  }
+  return buildPolicyGateDeniedResult(toolId, decision);
 }
 
 function createSpawnAgentToolAvailabilityValidator(
