@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { TaskServiceError, type TaskServiceErrorCode } from "./task-card-service";
@@ -246,47 +246,19 @@ export async function writeJsonRecord<T>(
   evidenceRef: string,
   schema: z.ZodType<T>
 ): Promise<T> {
-  const parsedRecord = schema.safeParse(record);
-  if (!parsedRecord.success) {
-    throw new TaskServiceError({
-      code: "record_schema_error",
-      status: 400,
-      category: "schema_error",
-      message: "Workspace record failed schema validation.",
-      userMessage: "The record is missing required fields or contains invalid values.",
-      evidenceRefs: toSchemaEvidenceRefs(parsedRecord.error, evidenceRef),
-      recommendedNextActions: ["Fix the record fields and retry."]
-    });
-  }
-
-  assertSafeRecordSegment(fileName.replace(/\.json$/, ""), `${evidenceRef}:file`);
-
-  const directoryPath = await ensureWorkspaceRecordDirectory(
+  const { data, directoryPath, recordPath, recordText } = await prepareJsonRecordWrite(
     workspaceRoot,
     relativeDirectorySegments,
-    evidenceRef
+    fileName,
+    record,
+    evidenceRef,
+    schema
   );
-  const recordPath = join(directoryPath, fileName);
-  assertPathInsideWorkspace(resolve(workspaceRoot), recordPath, evidenceRef);
-
-  const recordText = `${JSON.stringify(parsedRecord.data, null, 2)}\n`;
-  if (Buffer.byteLength(recordText, "utf8") > MAX_SERVICE_RECORD_BYTES) {
-    throw new TaskServiceError({
-      code: "record_schema_error",
-      status: 400,
-      category: "schema_error",
-      message: "Workspace record would exceed the M1 bounded size.",
-      userMessage: "The record is too large to persist safely.",
-      evidenceRefs: [evidenceRef],
-      recommendedNextActions: ["Reduce record field sizes and retry."]
-    });
-  }
 
   const temporaryPath = join(directoryPath, `.${fileName}-${process.pid}-${randomUUID()}.tmp`);
   let wroteTemporary = false;
   try {
-    await writeFile(temporaryPath, recordText, { flag: "wx" });
-    wroteTemporary = true;
+    wroteTemporary = await writeTemporaryRecordFile(temporaryPath, recordText, evidenceRef);
     if (!(await isSafeExistingDirectoryPath(directoryPath))) {
       throw serviceWorkspaceError(
         "workspace_path_not_safe",
@@ -314,7 +286,125 @@ export async function writeJsonRecord<T>(
     }
   }
 
-  return parsedRecord.data;
+  return data;
+}
+
+export type CreateJsonRecordResult<T> =
+  | { status: "created"; record: T }
+  | { status: "exists" };
+
+export async function createJsonRecordIfAbsent<T>(
+  workspaceRoot: string,
+  relativeDirectorySegments: readonly string[],
+  fileName: string,
+  record: T,
+  evidenceRef: string,
+  schema: z.ZodType<T>
+): Promise<CreateJsonRecordResult<T>> {
+  const { data, directoryPath, recordPath, recordText } = await prepareJsonRecordWrite(
+    workspaceRoot,
+    relativeDirectorySegments,
+    fileName,
+    record,
+    evidenceRef,
+    schema
+  );
+
+  const temporaryPath = join(directoryPath, `.${fileName}-${process.pid}-${randomUUID()}.tmp`);
+  let wroteTemporary = false;
+  try {
+    if (!(await isSafeExistingDirectoryPath(directoryPath))) {
+      throw serviceWorkspaceError(
+        "workspace_path_not_safe",
+        "Record directory is not a safe directory.",
+        "A workspace record directory is not usable.",
+        [evidenceRef]
+      );
+    }
+    wroteTemporary = await writeTemporaryRecordFile(temporaryPath, recordText, evidenceRef);
+    if (!(await isSafeExistingDirectoryPath(directoryPath))) {
+      throw serviceWorkspaceError(
+        "workspace_path_not_safe",
+        "Record directory is not a safe directory.",
+        "A workspace record directory is not usable.",
+        [evidenceRef]
+      );
+    }
+  } catch (error) {
+    if (error instanceof TaskServiceError) {
+      throw error;
+    }
+    throw serviceWorkspaceError(
+      "workspace_path_not_safe",
+      "Failed to prepare workspace record claim.",
+      "The workspace record could not be written safely.",
+      [evidenceRef],
+      error
+    );
+  }
+
+  try {
+    await link(temporaryPath, recordPath);
+  } catch (error) {
+    if (hasErrorCode(error, "EEXIST")) {
+      return { status: "exists" };
+    }
+    throw serviceWorkspaceError(
+      "workspace_path_not_safe",
+      "Failed to publish workspace record claim.",
+      "The workspace record could not be written safely.",
+      [evidenceRef],
+      error
+    );
+  } finally {
+    if (wroteTemporary) {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
+  }
+
+  if (!(await isSafeExistingDirectoryPath(directoryPath))) {
+    throw serviceWorkspaceError(
+      "workspace_path_not_safe",
+      "Record directory is not a safe directory.",
+      "A workspace record directory is not usable.",
+      [evidenceRef]
+    );
+  }
+
+  return { status: "created", record: data };
+}
+
+async function writeTemporaryRecordFile(
+  temporaryPath: string,
+  recordText: string,
+  evidenceRef: string
+): Promise<boolean> {
+  let temporaryFile: RecordFileHandle | undefined;
+  let shouldCleanup = false;
+  let completed = false;
+  try {
+    temporaryFile = await open(
+      temporaryPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY
+    );
+    shouldCleanup = true;
+    await temporaryFile.writeFile(recordText, "utf8");
+    completed = true;
+    return shouldCleanup;
+  } catch (error) {
+    throw serviceWorkspaceError(
+      "workspace_path_not_safe",
+      "Failed to write workspace record temporary file.",
+      "The workspace record could not be written safely.",
+      [evidenceRef],
+      error
+    );
+  } finally {
+    await temporaryFile?.close().catch(() => undefined);
+    if (shouldCleanup && !completed) {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
+  }
 }
 
 export function assertPathInsideWorkspace(
@@ -361,6 +451,63 @@ function serviceWorkspaceError(
   }
 
   return error;
+}
+
+async function prepareJsonRecordWrite<T>(
+  workspaceRoot: string,
+  relativeDirectorySegments: readonly string[],
+  fileName: string,
+  record: T,
+  evidenceRef: string,
+  schema: z.ZodType<T>
+): Promise<{
+  data: T;
+  directoryPath: string;
+  recordPath: string;
+  recordText: string;
+}> {
+  const parsedRecord = schema.safeParse(record);
+  if (!parsedRecord.success) {
+    throw new TaskServiceError({
+      code: "record_schema_error",
+      status: 400,
+      category: "schema_error",
+      message: "Workspace record failed schema validation.",
+      userMessage: "The record is missing required fields or contains invalid values.",
+      evidenceRefs: toSchemaEvidenceRefs(parsedRecord.error, evidenceRef),
+      recommendedNextActions: ["Fix the record fields and retry."]
+    });
+  }
+
+  assertSafeRecordSegment(fileName.replace(/\.json$/, ""), `${evidenceRef}:file`);
+
+  const directoryPath = await ensureWorkspaceRecordDirectory(
+    workspaceRoot,
+    relativeDirectorySegments,
+    evidenceRef
+  );
+  const recordPath = join(directoryPath, fileName);
+  assertPathInsideWorkspace(resolve(workspaceRoot), recordPath, evidenceRef);
+
+  const recordText = `${JSON.stringify(parsedRecord.data, null, 2)}\n`;
+  if (Buffer.byteLength(recordText, "utf8") > MAX_SERVICE_RECORD_BYTES) {
+    throw new TaskServiceError({
+      code: "record_schema_error",
+      status: 400,
+      category: "schema_error",
+      message: "Workspace record would exceed the M1 bounded size.",
+      userMessage: "The record is too large to persist safely.",
+      evidenceRefs: [evidenceRef],
+      recommendedNextActions: ["Reduce record field sizes and retry."]
+    });
+  }
+
+  return {
+    data: parsedRecord.data,
+    directoryPath,
+    recordPath,
+    recordText
+  };
 }
 
 async function ensureSafeDirectory(path: string, evidenceRef: string): Promise<void> {

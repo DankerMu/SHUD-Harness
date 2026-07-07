@@ -3,6 +3,7 @@ import {
   access,
   mkdir,
   mkdtemp,
+  readFile,
   readdir,
   realpath,
   rm,
@@ -21,6 +22,7 @@ import {
   idempotencyRecordFileName,
   type Artifact,
   type IdempotencyRecord,
+  type IdempotencyRecordService,
   type LockRecord
 } from "./index";
 import { MAX_SERVICE_RECORD_BYTES } from "./workspace-record-store";
@@ -44,6 +46,11 @@ describe("idempotency, lock, and artifact services", () => {
     const rawKey = "raw/secret:idempotency key";
     const requestDigest = "digest-same-body";
 
+    const begin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
     const record = await service.completeRecord({
       scope: "task",
       key: rawKey,
@@ -62,6 +69,7 @@ describe("idempotency, lock, and artifact services", () => {
       created_at: "2026-07-07T13:00:00.000Z",
       updated_at: "2026-07-07T13:00:00.000Z"
     });
+    expect(begin.status).toBe("acquired");
     expect(files).toHaveLength(1);
     expect(files[0]).toMatch(/^[a-f0-9]{64}\.json$/);
     expect(files[0]).not.toContain("raw");
@@ -89,6 +97,358 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await service.getRecord("task", rawKey)).toEqual(record);
   });
 
+  test("IdempotencyRecord completeRecord rejects a missing record without writing files", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:05:00.000Z")
+    });
+    const rawKey = "task:create:missing-complete";
+
+    const error = await captureTaskServiceError(() =>
+      service.completeRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest: "digest-missing-complete",
+        resultRef: "TASK-missing-complete"
+      })
+    );
+
+    expect(error.code).toBe("record_malformed");
+    expect(error.category).toBe("workspace_error");
+    await expectPathMissing(join(workspaceRoot, "tasks"));
+    expect(await service.getRecord("task", rawKey)).toBeUndefined();
+  });
+
+  test("IdempotencyRecord beginRecord preserves started, mismatch, and completed states", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    let currentTime = "2026-07-07T13:10:00.000Z";
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date(currentTime)
+    });
+    const rawKey = "raw/secret:started idempotency key";
+    const requestDigest = "digest-started-body";
+    const startedRecord = {
+      key: rawKey,
+      scope: "task",
+      request_digest: requestDigest,
+      status: "started",
+      created_at: "2026-07-07T13:10:00.000Z",
+      updated_at: "2026-07-07T13:10:00.000Z"
+    };
+
+    const firstBegin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const idempotencyDirectory = join(workspaceRoot, "tasks", "_idempotency", "task");
+    const files = await readdir(idempotencyDirectory);
+
+    expect(firstBegin).toEqual({ status: "acquired", record: startedRecord });
+    expect(await service.getRecord("task", rawKey)).toEqual(startedRecord);
+    expect(files).toEqual([idempotencyRecordFileName(rawKey)]);
+    expect(files[0]).toMatch(/^[a-f0-9]{64}\.json$/);
+    expect(files[0]).not.toContain("raw");
+    expect(files[0]).not.toContain("secret");
+
+    currentTime = "2026-07-07T13:11:00.000Z";
+    const secondBegin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const mismatchBegin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest: "digest-different-body"
+    });
+
+    expect(secondBegin).toEqual({ status: "incomplete", record: startedRecord });
+    expect(mismatchBegin).toEqual({ status: "mismatch", record: startedRecord });
+    expect(await service.getRecord("task", rawKey)).toEqual(startedRecord);
+
+    currentTime = "2026-07-07T13:12:00.000Z";
+    const completedRecord = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef: "TASK-begin-record-completed"
+    });
+    const completedBegin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+
+    expect(completedRecord).toEqual({
+      ...startedRecord,
+      status: "completed",
+      result_ref: "TASK-begin-record-completed",
+      updated_at: "2026-07-07T13:12:00.000Z"
+    });
+    expect(completedBegin).toEqual({ status: "completed", record: completedRecord });
+  });
+
+  test("IdempotencyRecord failed same-digest beginRecord reacquires while different digest mismatches", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    let currentTime = "2026-07-07T13:20:00.000Z";
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date(currentTime)
+    });
+    const rawKey = "task:create:failed-retry";
+    const requestDigest = "digest-retry-body";
+    const firstBegin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+
+    currentTime = "2026-07-07T13:21:00.000Z";
+    const failedRecord = await service.failRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const mismatchBegin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest: "digest-different-body"
+    });
+
+    currentTime = "2026-07-07T13:22:00.000Z";
+    const retryBegin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+
+    expect(firstBegin.status).toBe("acquired");
+    expect(failedRecord).toEqual({
+      ...firstBegin.record,
+      status: "failed",
+      updated_at: "2026-07-07T13:21:00.000Z"
+    });
+    expect(failedRecord.result_ref).toBeUndefined();
+    expect(mismatchBegin).toEqual({ status: "mismatch", record: failedRecord });
+    expect(retryBegin).toEqual({
+      status: "acquired",
+      record: {
+        key: rawKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "started",
+        created_at: "2026-07-07T13:22:00.000Z",
+        updated_at: "2026-07-07T13:22:00.000Z"
+      }
+    });
+    expect(await service.getRecord("task", rawKey)).toEqual(retryBegin.record);
+  });
+
+  test("IdempotencyRecord failed retry acquisition is atomic across service instances", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:failed-concurrent-retry";
+    const requestDigest = "digest-concurrent-retry-body";
+    const seedService = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:25:00.000Z")
+    });
+    const firstBegin = await seedService.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const failedRecord = await createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:26:00.000Z")
+    }).failRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const firstRetryService = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:27:00.000Z")
+    });
+    const secondRetryService = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:27:01.000Z")
+    });
+    let failedObservationCount = 0;
+    let releaseFailedObservations = () => undefined;
+    const bothRetryServicesObservedFailed = new Promise<void>((resolve) => {
+      releaseFailedObservations = resolve;
+    });
+    for (const service of [firstRetryService, secondRetryService]) {
+      holdFailedLookupUntilBothRetryServicesObserveIt(
+        service,
+        () => {
+          failedObservationCount += 1;
+          if (failedObservationCount === 2) {
+            releaseFailedObservations();
+          }
+        },
+        bothRetryServicesObservedFailed
+      );
+    }
+
+    const results = await Promise.all([
+      firstRetryService.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      }),
+      secondRetryService.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      })
+    ]);
+    const acquiredResults = results.filter((result) => result.status === "acquired");
+    const incompleteResults = results.filter((result) => result.status === "incomplete");
+    const finalRecord = await seedService.getRecord("task", rawKey);
+    const idempotencyDirectory = join(workspaceRoot, "tasks", "_idempotency", "task");
+    const files = (await readdir(idempotencyDirectory)).sort();
+
+    expect(firstBegin.status).toBe("acquired");
+    expect(failedRecord.status).toBe("failed");
+    expect(failedObservationCount).toBe(2);
+    expect(acquiredResults).toHaveLength(1);
+    expect(incompleteResults).toHaveLength(1);
+    expect(incompleteResults[0]?.record).toEqual(acquiredResults[0]?.record);
+    expect(incompleteResults[0]?.record.status).toBe("started");
+    expect(finalRecord).toEqual(acquiredResults[0]?.record);
+    expect(finalRecord?.status).toBe("started");
+    expect(finalRecord?.request_digest).toBe(requestDigest);
+    expect(files).toEqual([idempotencyRecordFileName(rawKey)]);
+  });
+
+  test("IdempotencyRecord concurrent divergent completions converge without overwrite", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:divergent-complete";
+    const requestDigest = "digest-divergent-complete";
+    const seedService = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:28:00.000Z")
+    });
+    const started = await seedService.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const firstCompleteService = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:28:01.000Z")
+    });
+    const secondCompleteService = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:28:02.000Z")
+    });
+    let startedObservationCount = 0;
+    let releaseStartedObservations = () => undefined;
+    const bothCompleteServicesObservedStarted = new Promise<void>((resolve) => {
+      releaseStartedObservations = resolve;
+    });
+    for (const service of [firstCompleteService, secondCompleteService]) {
+      holdStartedLookupUntilBothCompleteServicesObserveIt(
+        service,
+        () => {
+          startedObservationCount += 1;
+          if (startedObservationCount === 2) {
+            releaseStartedObservations();
+          }
+        },
+        bothCompleteServicesObservedStarted
+      );
+    }
+
+    const results = await Promise.all([
+      firstCompleteService.completeRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        resultRef: "TASK-divergent-a"
+      }),
+      secondCompleteService.completeRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        resultRef: "TASK-divergent-b"
+      })
+    ]);
+    const finalRecord = await seedService.getRecord("task", rawKey);
+    const resultRefs = results.map((result) => result.result_ref);
+
+    expect(started.status).toBe("acquired");
+    expect(startedObservationCount).toBe(2);
+    expect(new Set(resultRefs).size).toBe(1);
+    expect(finalRecord?.status).toBe("completed");
+    expect(finalRecord?.result_ref).toBe(resultRefs[0]);
+    expect(["TASK-divergent-a", "TASK-divergent-b"]).toContain(finalRecord?.result_ref);
+  });
+
+  test("IdempotencyRecord storeRecord cannot overwrite completed result_ref", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:30:00.000Z")
+    });
+    const rawKey = "task:create:completed-immutable";
+    const requestDigest = "digest-completed-body";
+    const begin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const completedRecord = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef: "TASK-original-result"
+    });
+    const recordPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      idempotencyRecordFileName(rawKey)
+    );
+
+    const sameRecord = await service.storeRecord({
+      ...completedRecord,
+      updated_at: "2026-07-07T13:31:00.000Z"
+    });
+    const overwriteError = await captureTaskServiceError(() =>
+      service.storeRecord({
+        ...completedRecord,
+        result_ref: "TASK-overwritten-result",
+        updated_at: "2026-07-07T13:32:00.000Z"
+      })
+    );
+    const completedAgain = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef: "TASK-overwritten-result"
+    });
+
+    expect(begin.status).toBe("acquired");
+    expect(sameRecord).toEqual(completedRecord);
+    expect(overwriteError.code).toBe("record_schema_error");
+    expect(overwriteError.category).toBe("schema_error");
+    expect(completedAgain).toEqual(completedRecord);
+    expect(await service.getRecord("task", rawKey)).toEqual(completedRecord);
+    expect(JSON.parse(await readFile(recordPath, "utf8"))).toEqual(completedRecord);
+  });
+
   test("IdempotencyRecord invalid schema is rejected without workspace files", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -102,6 +462,20 @@ describe("idempotency, lock, and artifact services", () => {
     );
 
     expect(error.code).toBe("record_schema_error");
+    await expectPathMissing(join(workspaceRoot, "tasks"));
+  });
+
+  test("IdempotencyRecord completed status without result_ref is rejected without workspace files", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    const record = validIdempotencyRecord();
+    delete record.result_ref;
+
+    const error = await captureTaskServiceError(() => service.storeRecord(record));
+
+    expect(error.code).toBe("record_schema_error");
+    expect(error.category).toBe("schema_error");
     await expectPathMissing(join(workspaceRoot, "tasks"));
   });
 
@@ -272,6 +646,52 @@ describe("idempotency, lock, and artifact services", () => {
     await expectPathMissing(join(invalidPath.workspaceRoot, "artifacts"));
   });
 });
+
+function holdFailedLookupUntilBothRetryServicesObserveIt(
+  service: IdempotencyRecordService,
+  onFailedObserved: () => void,
+  bothRetryServicesObservedFailed: Promise<void>
+): void {
+  const originalLookupReplay = service.lookupReplay;
+  let hasHeldFailedLookup = false;
+  service.lookupReplay = async (input) => {
+    const result = await originalLookupReplay(input);
+    if (
+      !hasHeldFailedLookup &&
+      result.status === "incomplete" &&
+      result.record.status === "failed"
+    ) {
+      hasHeldFailedLookup = true;
+      onFailedObserved();
+      await bothRetryServicesObservedFailed;
+    }
+
+    return result;
+  };
+}
+
+function holdStartedLookupUntilBothCompleteServicesObserveIt(
+  service: IdempotencyRecordService,
+  onStartedObserved: () => void,
+  bothCompleteServicesObservedStarted: Promise<void>
+): void {
+  const originalLookupReplay = service.lookupReplay;
+  let hasHeldStartedLookup = false;
+  service.lookupReplay = async (input) => {
+    const result = await originalLookupReplay(input);
+    if (
+      !hasHeldStartedLookup &&
+      result.status === "incomplete" &&
+      result.record.status === "started"
+    ) {
+      hasHeldStartedLookup = true;
+      onStartedObserved();
+      await bothCompleteServicesObservedStarted;
+    }
+
+    return result;
+  };
+}
 
 async function createTempWorkspacePath(): Promise<{ tempRoot: string; workspaceRoot: string }> {
   const tempRoot = await realpath(await mkdtemp(join(tmpdir(), "shud-harness-core-services-")));

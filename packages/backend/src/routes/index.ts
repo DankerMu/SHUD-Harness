@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, lstat, mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, parse, resolve, sep } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   DEFAULT_TASK_CREATED_BY,
   CreateTaskInputSchema,
@@ -144,7 +145,6 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
     workspaceRoot,
     now: options.now
   });
-  const taskCreateIdempotencyInflight = new Map<string, TaskCreateIdempotencyInflight>();
 
   app.post("/api/workspace/init", async (c) => {
     try {
@@ -198,8 +198,13 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
       );
     }
 
-    const idempotencyKey = nonblankIdempotencyKey(c);
-    if (!idempotencyKey) {
+    let idempotencyKey: ParsedIdempotencyKey;
+    try {
+      idempotencyKey = parseIdempotencyKey(c);
+    } catch (error) {
+      return jsonTaskServiceError(c, error);
+    }
+    if (idempotencyKey.status === "absent") {
       try {
         return c.json(await taskService.createTask(parsedBody.data), 201);
       } catch (error) {
@@ -208,39 +213,17 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
     }
 
     const requestDigest = taskCreateRequestDigest(parsedBody.data);
-    const inflightKey = `task:${sha256Hex(idempotencyKey)}`;
-    const existingInflight = taskCreateIdempotencyInflight.get(inflightKey);
-    if (existingInflight) {
-      if (existingInflight.requestDigest !== requestDigest) {
-        return jsonTaskServiceError(c, createIdempotencyMismatchError());
-      }
-
-      try {
-        const result = await existingInflight.promise;
-        return c.json(result.task, 200);
-      } catch (error) {
-        return jsonTaskServiceError(c, error);
-      }
-    }
-
-    const promise = createIdempotentTaskCard({
-      input: parsedBody.data,
-      idempotencyKey,
-      requestDigest,
-      taskService,
-      idempotencyService
-    });
-    taskCreateIdempotencyInflight.set(inflightKey, { requestDigest, promise });
-
     try {
-      const result = await promise;
+      const result = await createIdempotentTaskCard({
+        input: parsedBody.data,
+        idempotencyKey: idempotencyKey.key,
+        requestDigest,
+        taskService,
+        idempotencyService
+      });
       return c.json(result.task, result.created ? 201 : 200);
     } catch (error) {
       return jsonTaskServiceError(c, error);
-    } finally {
-      if (taskCreateIdempotencyInflight.get(inflightKey)?.promise === promise) {
-        taskCreateIdempotencyInflight.delete(inflightKey);
-      }
     }
   });
 
@@ -301,10 +284,10 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
   return app;
 }
 
-interface TaskCreateIdempotencyInflight {
-  requestDigest: string;
-  promise: Promise<IdempotentTaskCreateResult>;
-}
+const IDEMPOTENCY_REPLAY_WAIT_TIMEOUT_MS = 1000;
+const IDEMPOTENCY_REPLAY_POLL_INTERVAL_MS = 10;
+
+type ParsedIdempotencyKey = { status: "absent" } | { status: "present"; key: string };
 
 interface IdempotentTaskCreateResult {
   task: TaskCard;
@@ -322,31 +305,98 @@ interface CreateIdempotentTaskCardInput {
 async function createIdempotentTaskCard(
   input: CreateIdempotentTaskCardInput
 ): Promise<IdempotentTaskCreateResult> {
-  const replay = await input.idempotencyService.lookupReplay({
+  const begin = await input.idempotencyService.beginRecord({
     scope: "task",
     key: input.idempotencyKey,
     requestDigest: input.requestDigest
   });
 
-  if (replay.status === "mismatch") {
+  if (begin.status === "mismatch") {
     throw createIdempotencyMismatchError();
   }
-  if (replay.status === "completed") {
+  if (begin.status === "completed") {
     return {
-      task: await input.taskService.getTask(replay.record.result_ref),
+      task: await input.taskService.getTask(begin.record.result_ref),
       created: false
     };
   }
+  if (begin.status === "incomplete") {
+    return await waitForIdempotentTaskCompletion(input);
+  }
 
-  const task = await input.taskService.createTask(input.input);
-  await input.idempotencyService.completeRecord({
-    scope: "task",
-    key: input.idempotencyKey,
-    requestDigest: input.requestDigest,
-    resultRef: task.task_id
-  });
+  let task: TaskCard;
+  try {
+    task = await input.taskService.createTask(input.input);
+  } catch (error) {
+    await input.idempotencyService
+      .failRecord({
+        scope: "task",
+        key: input.idempotencyKey,
+        requestDigest: input.requestDigest
+      })
+      .catch(() => undefined);
+    throw error;
+  }
+
+  try {
+    await input.idempotencyService.completeRecord({
+      scope: "task",
+      key: input.idempotencyKey,
+      requestDigest: input.requestDigest,
+      resultRef: task.task_id
+    });
+  } catch (error) {
+    await input.taskService.rollbackTaskForIdempotency(task.task_id);
+    await input.idempotencyService
+      .failRecord({
+        scope: "task",
+        key: input.idempotencyKey,
+        requestDigest: input.requestDigest
+      })
+      .catch(() => undefined);
+    throw error;
+  }
 
   return { task, created: true };
+}
+
+async function waitForIdempotentTaskCompletion(
+  input: CreateIdempotentTaskCardInput
+): Promise<IdempotentTaskCreateResult> {
+  const deadline = Date.now() + IDEMPOTENCY_REPLAY_WAIT_TIMEOUT_MS;
+
+  for (;;) {
+    const replay = await input.idempotencyService.lookupReplay({
+      scope: "task",
+      key: input.idempotencyKey,
+      requestDigest: input.requestDigest
+    });
+
+    if (replay.status === "mismatch") {
+      throw createIdempotencyMismatchError();
+    }
+    if (replay.status === "completed") {
+      return {
+        task: await input.taskService.getTask(replay.record.result_ref),
+        created: false
+      };
+    }
+
+    if (Date.now() >= deadline) {
+      throw new TaskServiceError({
+        code: "record_malformed",
+        status: 500,
+        category: "workspace_error",
+        message: "Idempotency record did not complete before replay timeout.",
+        userMessage: "The task create request is still pending idempotency completion.",
+        evidenceRefs: ["workspace/tasks/_idempotency/task"],
+        retryable: true,
+        recommendedNextActions: ["Retry after the in-progress task create request finishes."]
+      });
+    }
+
+    await sleep(IDEMPOTENCY_REPLAY_POLL_INTERVAL_MS);
+  }
 }
 
 function taskCreateRequestDigest(input: CreateTaskInput): string {
@@ -358,14 +408,27 @@ function taskCreateRequestDigest(input: CreateTaskInput): string {
   );
 }
 
-function nonblankIdempotencyKey(c: Context): string | undefined {
+function parseIdempotencyKey(c: Context): ParsedIdempotencyKey {
   const header = c.req.header("Idempotency-Key");
   if (typeof header !== "string") {
-    return undefined;
+    return { status: "absent" };
   }
 
   const trimmedHeader = header.trim();
-  return trimmedHeader.length > 0 ? trimmedHeader : undefined;
+  if (trimmedHeader.length > 0) {
+    return { status: "present", key: trimmedHeader };
+  }
+
+  throw new TaskServiceError({
+    code: "schema_error",
+    status: 400,
+    category: "schema_error",
+    message: "Idempotency-Key header must be nonblank when provided.",
+    userMessage: "The idempotency key must be nonblank when provided.",
+    evidenceRefs: ["request.headers.Idempotency-Key"],
+    retryable: false,
+    recommendedNextActions: ["Provide a nonblank idempotency key or omit the header."]
+  });
 }
 
 function jsonTaskServiceError(c: Context, error: unknown): Response {
