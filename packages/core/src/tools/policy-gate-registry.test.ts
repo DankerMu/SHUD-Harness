@@ -2247,6 +2247,210 @@ describe("policy-gated zero tool registry", () => {
     expect(accessorTool.calls).toBe(0);
   });
 
+  test("custom evaluator decision snapshot rejects hostile remediation without leaking trap text", async () => {
+    const proxySentinel = "EVALUATOR_REMEDIATION_PROXY_SECRET";
+    let proxyGetCalls = 0;
+    let proxyDescriptorCalls = 0;
+    const proxyTool = new RecordingTool("decision.proxy-remediation.evaluator");
+    const proxyRemediation = new Proxy(
+      {
+        next_action: "fix_and_retry" as const,
+        hint: "Return plain remediation before retrying.",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      },
+      {
+        get() {
+          proxyGetCalls += 1;
+          throw new Error(proxySentinel);
+        },
+        getOwnPropertyDescriptor() {
+          proxyDescriptorCalls += 1;
+          throw new Error(proxySentinel);
+        }
+      }
+    );
+    const proxyWrapped = wrapToolWithPolicyGate(proxyTool, {
+      evaluate: () => ({
+        decision: "deny",
+        ruleId: "proxy-remediation-evaluator",
+        reason: "proxy remediation should fail closed",
+        remediation: proxyRemediation,
+        guardClass: "capability"
+      })
+    });
+
+    const proxyResult = await proxyWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(proxyResult, proxySentinel);
+    expect(proxyResult.output).toContain("remediation");
+    expect(proxyGetCalls).toBe(0);
+    expect(proxyDescriptorCalls).toBe(0);
+    expect(proxyTool.calls).toBe(0);
+
+    const accessorSentinel = "EVALUATOR_REMEDIATION_ACCESSOR_SECRET";
+    let nextActionReads = 0;
+    const accessorTool = new RecordingTool("decision.accessor-remediation.evaluator");
+    const accessorRemediation: Record<string, unknown> = {
+      hint: "Use data-property remediation fields before retrying.",
+      ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+    };
+    Object.defineProperty(accessorRemediation, "next_action", {
+      enumerable: true,
+      get() {
+        nextActionReads += 1;
+        throw new Error(accessorSentinel);
+      }
+    });
+    const accessorWrapped = wrapToolWithPolicyGate(accessorTool, {
+      evaluate: () => ({
+        decision: "deny",
+        ruleId: "accessor-remediation-evaluator",
+        reason: "accessor remediation should fail closed",
+        remediation: accessorRemediation,
+        guardClass: "capability"
+      })
+    });
+
+    const accessorResult = await accessorWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(accessorResult, accessorSentinel);
+    expect(accessorResult.output).toContain("remediation.next_action");
+    expect(nextActionReads).toBe(0);
+    expect(accessorTool.calls).toBe(0);
+  });
+
+  test("execution validator decision snapshot rejects hostile remediation without leaking trap text", async () => {
+    const proxySentinel = "VALIDATOR_REMEDIATION_PROXY_SECRET";
+    let proxyGetCalls = 0;
+    let proxyDescriptorCalls = 0;
+    const proxyTool = new RecordingTool("decision.proxy-remediation.validator");
+    const proxyRemediation = new Proxy(
+      {
+        next_action: "fix_and_retry" as const,
+        hint: "Return plain validator remediation before retrying.",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      },
+      {
+        get() {
+          proxyGetCalls += 1;
+          throw new Error(proxySentinel);
+        },
+        getOwnPropertyDescriptor() {
+          proxyDescriptorCalls += 1;
+          throw new Error(proxySentinel);
+        }
+      }
+    );
+    const proxyWrapped = wrapToolWithPolicyGate(proxyTool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: "proxy-remediation-validator",
+        reason: "proxy remediation should fail closed",
+        remediation: proxyRemediation,
+        guardClass: "capability"
+      })
+    });
+
+    const proxyResult = await proxyWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(proxyResult, proxySentinel);
+    expect(proxyResult.output).toContain("remediation");
+    expect(proxyGetCalls).toBe(0);
+    expect(proxyDescriptorCalls).toBe(0);
+    expect(proxyTool.calls).toBe(0);
+
+    const accessorSentinel = "VALIDATOR_REMEDIATION_ACCESSOR_SECRET";
+    let nextActionReads = 0;
+    const accessorTool = new RecordingTool("decision.accessor-remediation.validator");
+    const accessorRemediation: Record<string, unknown> = {
+      hint: "Use data-property validator remediation fields before retrying.",
+      ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+    };
+    Object.defineProperty(accessorRemediation, "next_action", {
+      enumerable: true,
+      get() {
+        nextActionReads += 1;
+        throw new Error(accessorSentinel);
+      }
+    });
+    const accessorWrapped = wrapToolWithPolicyGate(accessorTool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: "accessor-remediation-validator",
+        reason: "accessor remediation should fail closed",
+        remediation: accessorRemediation,
+        guardClass: "capability"
+      })
+    });
+
+    const accessorResult = await accessorWrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(accessorResult, accessorSentinel);
+    expect(accessorResult.output).toContain("remediation.next_action");
+    expect(nextActionReads).toBe(0);
+    expect(accessorTool.calls).toBe(0);
+  });
+
+  test("rule-based evaluator decision snapshot fails closed through policy wrapper", async () => {
+    const sentinel = "WRAPPED_RULE_DECISION_PROXY_SECRET";
+    let proxyGetCalls = 0;
+    let proxyDescriptorCalls = 0;
+    const tool = new RecordingTool("decision.rule-proxy.wrapper");
+    const proxyDecision = new Proxy(
+      {
+        decision: "deny" as const,
+        reason: "proxy rule decision should fail before wrapper denial serialization",
+        remediation: {
+          next_action: "fix_and_retry" as const,
+          hint: "Return a plain rule decision before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        }
+      },
+      {
+        get() {
+          proxyGetCalls += 1;
+          throw new Error(sentinel);
+        },
+        getOwnPropertyDescriptor() {
+          proxyDescriptorCalls += 1;
+          throw new Error(sentinel);
+        }
+      }
+    );
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: createPolicyGateEvaluator({
+        rules: [
+          {
+            ruleId: "wrapped-proxy-rule-decision",
+            description: "Returns a proxy-backed rule decision.",
+            guardClass: "capability",
+            evaluate: () => proxyDecision as never
+          }
+        ]
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      blocked: true
+    });
+
+    expectInvalidPolicyGateDecisionFailure(result, sentinel);
+    expect(result.output).toContain("wrapped-proxy-rule-decision");
+    expect(proxyGetCalls).toBe(0);
+    expect(proxyDescriptorCalls).toBe(0);
+    expect(tool.calls).toBe(0);
+  });
+
   test("decision snapshot rejects enumerable toJSON without invoking it and keeps plain deny behavior", async () => {
     const sentinel = "DECISION_TO_JSON_SECRET";
     let toJsonCalls = 0;

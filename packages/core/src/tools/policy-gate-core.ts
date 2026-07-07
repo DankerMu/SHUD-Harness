@@ -1,3 +1,4 @@
+import { types as nodeUtilTypes } from "node:util";
 import { z } from "zod";
 import { RemediationNextActionSchema } from "../domain/schemas";
 import {
@@ -138,6 +139,18 @@ type ValidatedPolicyRuleMetadata = {
   guardClass: PolicyGuardClass;
 };
 
+type PolicyRuleDecisionDataDescriptor = PropertyDescriptor & {
+  value: unknown;
+};
+
+type PolicyRuleDecisionSnapshot = Record<string, unknown> & {
+  decision?: unknown;
+  reason?: unknown;
+  remediation?: unknown;
+  guardClass?: unknown;
+  guard_class?: unknown;
+};
+
 export interface PolicyGateContext {
   rules: readonly PolicyRule[];
 }
@@ -208,12 +221,16 @@ export function evaluatePolicyGate(
   const metadata = validatePolicyGateContextMetadata(context);
 
   for (const { rule, ruleId, guardClass } of metadata) {
-    const result = rule.evaluate(call, context);
+    const result = snapshotPolicyRuleDecisionResult(ruleId, rule.evaluate(call, context));
     if (result.decision === "allow") {
       continue;
     }
+    if (result.decision !== "deny") {
+      throw invalidPolicyRuleDecisionSnapshot(ruleId, "decision");
+    }
 
-    validatePolicyGateRemediation(ruleId, result.remediation);
+    const reason = validatePolicyRuleDenyReason(ruleId, result.reason);
+    const remediation = validatePolicyGateRemediation(ruleId, result.remediation);
     const normalizedGuardClass = normalizePolicyRuleDenyGuardClass(
       ruleId,
       guardClass,
@@ -222,8 +239,8 @@ export function evaluatePolicyGate(
     return {
       decision: "deny",
       ruleId,
-      reason: result.reason,
-      remediation: result.remediation,
+      reason,
+      remediation,
       guardClass: normalizedGuardClass
     };
   }
@@ -231,10 +248,145 @@ export function evaluatePolicyGate(
   return { decision: "allow" };
 }
 
+const POLICY_RULE_DENY_DECISION_SNAPSHOT_KEYS = Object.freeze([
+  "reason",
+  "remediation",
+  "guardClass",
+  "guard_class"
+] as const);
+const POLICY_RULE_REMEDIATION_SNAPSHOT_KEYS = Object.freeze([
+  "next_action",
+  "hint",
+  "ref"
+] as const);
+
+function snapshotPolicyRuleDecisionResult(
+  ruleId: string,
+  result: unknown
+): PolicyRuleDecisionSnapshot {
+  if (result === null || typeof result !== "object") {
+    throw invalidPolicyRuleDecisionSnapshot(ruleId, "decision");
+  }
+
+  const objectResult = result as object;
+  if (nodeUtilTypes.isProxy(objectResult)) {
+    throw invalidPolicyRuleDecisionSnapshot(ruleId, "decision");
+  }
+
+  assertNoEnumerablePolicyRuleDecisionToJson(ruleId, objectResult);
+
+  const snapshot = Object.create(null) as PolicyRuleDecisionSnapshot;
+  snapshotPolicyRuleDecisionField(ruleId, objectResult, snapshot, "decision", "decision");
+  if (snapshot.decision !== "deny") {
+    return snapshot;
+  }
+
+  for (const key of POLICY_RULE_DENY_DECISION_SNAPSHOT_KEYS) {
+    snapshotPolicyRuleDecisionField(ruleId, objectResult, snapshot, key, key);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(snapshot, "remediation")) {
+    snapshot.remediation = snapshotPolicyRuleRemediationCandidate(
+      ruleId,
+      snapshot.remediation
+    );
+  }
+
+  return snapshot;
+}
+
+function assertNoEnumerablePolicyRuleDecisionToJson(ruleId: string, result: object): void {
+  const descriptor = readPolicyRuleDecisionOwnDescriptor(ruleId, result, "toJSON", "toJSON");
+  if (descriptor?.enumerable) {
+    throw invalidPolicyRuleDecisionSnapshot(ruleId, "toJSON");
+  }
+}
+
+function snapshotPolicyRuleDecisionField(
+  ruleId: string,
+  source: object,
+  snapshot: PolicyRuleDecisionSnapshot | Record<string, unknown>,
+  key: string,
+  fieldPath: string
+): void {
+  const descriptor = readPolicyRuleDecisionOwnDescriptor(ruleId, source, key, fieldPath);
+  if (!descriptor) {
+    return;
+  }
+  assertPolicyRuleDecisionDataDescriptor(ruleId, descriptor, fieldPath);
+  snapshot[key] = descriptor.value;
+}
+
+function snapshotPolicyRuleRemediationCandidate(ruleId: string, remediation: unknown): unknown {
+  if (remediation === null || typeof remediation !== "object") {
+    return remediation;
+  }
+
+  const objectRemediation = remediation as object;
+  if (nodeUtilTypes.isProxy(objectRemediation)) {
+    throw invalidPolicyRuleDecisionSnapshot(ruleId, "remediation");
+  }
+
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  for (const key of POLICY_RULE_REMEDIATION_SNAPSHOT_KEYS) {
+    snapshotPolicyRuleDecisionField(
+      ruleId,
+      objectRemediation,
+      snapshot,
+      key,
+      `remediation.${key}`
+    );
+  }
+  return snapshot;
+}
+
+function readPolicyRuleDecisionOwnDescriptor(
+  ruleId: string,
+  source: object,
+  key: string,
+  fieldPath: string
+): PropertyDescriptor | undefined {
+  try {
+    return Object.getOwnPropertyDescriptor(source, key);
+  } catch {
+    throw invalidPolicyRuleDecisionSnapshot(ruleId, fieldPath);
+  }
+}
+
+function assertPolicyRuleDecisionDataDescriptor(
+  ruleId: string,
+  descriptor: PropertyDescriptor,
+  fieldPath: string
+): asserts descriptor is PolicyRuleDecisionDataDescriptor {
+  if (
+    !("value" in descriptor) ||
+    descriptor.get !== undefined ||
+    descriptor.set !== undefined
+  ) {
+    throw invalidPolicyRuleDecisionSnapshot(ruleId, fieldPath);
+  }
+}
+
+function validatePolicyRuleDenyReason(ruleId: string, reason: unknown): string {
+  if (typeof reason !== "string") {
+    throw invalidPolicyRuleDecisionSnapshot(ruleId, "reason");
+  }
+  return reason;
+}
+
+function invalidPolicyRuleDecisionSnapshot(
+  ruleId: string,
+  fieldPath: string
+): PolicyGateDecisionValidationError {
+  return policyGateDecisionValidationError(
+    `Invalid policy gate decision for ${ruleId}: ${fieldPath}`
+  );
+}
+
 function normalizePolicyRuleDenyGuardClass(
   ruleId: string,
   ruleGuardClass: PolicyGuardClass,
-  result: Extract<PolicyRuleDecision, { decision: "deny" }>
+  result: Pick<PolicyRuleDecisionSnapshot, "guardClass" | "guard_class">
 ): PolicyGuardClass {
   const resultGuardClass = readPolicyGuardClassAliases(result);
   if (resultGuardClass.state === "missing") {
@@ -1305,10 +1457,13 @@ function formatToolIdSample(toolId: string): string {
   return `${toolId.slice(0, SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS - 3)}...`;
 }
 
-function validatePolicyGateRemediation(ruleId: string, remediation: PolicyGateRemediation): void {
+function validatePolicyGateRemediation(
+  ruleId: string,
+  remediation: unknown
+): PolicyGateRemediation {
   const parsed = PolicyGateRemediationSchema.safeParse(remediation);
   if (parsed.success) {
-    return;
+    return parsed.data;
   }
 
   const fieldPaths = parsed.error.issues

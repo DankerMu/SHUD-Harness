@@ -477,6 +477,8 @@ Review focus:
 Fixture level: expanded; repair intensity: high
 Project profile: SHUD-Harness
 Change surface:
+- `packages/core/src/tools/policy-gate-core.ts`
+- `packages/core/src/tools/policy-gate-core.test.ts`
 - `packages/core/src/tools/policy-gate-registry.ts`
 - `packages/core/src/tools/policy-gate-registry.test.ts`
 
@@ -488,6 +490,7 @@ Must preserve:
 
 Must add/change:
 - Policy-gate decision candidates from custom evaluators and execution validators are snapshotted as plain data before validation reads identity fields.
+- Rule decisions returned by `PolicyRule.evaluate()` through `createPolicyGateEvaluator(...)` are snapshotted as plain data before `evaluatePolicyGate(...)` reads identity fields.
 - Proxy-backed, accessor-backed, or enumerable-`toJSON` decision objects fail closed with a stable policy-gate validation error.
 - Trap text or accessor-thrown sentinel text is not echoed through `ToolResult.output` or `outputSummary`.
 
@@ -511,8 +514,8 @@ Domain packs:
 Invariant Matrix:
 - Governing invariant: Policy-gate decisions from extension seams must be validated only from bounded, plain-data snapshots, so hostile objects cannot execute code during validation or control stable error text.
 - Source-of-truth identity/contract: `PolicyGateDecision` / `PolicyGateDecisionInput`, `PolicyGateRemediationSchema`, reserved authority rule id helpers, and `PolicyGateDecisionValidationError`.
-- Producers: custom policy evaluators and execution validators.
-- Validators/preflight: `validatePolicyGateDecision`, `validatePolicyGateDenyDecision`, and the decision-candidate snapshot helper.
+- Producers: custom policy evaluators, execution validators, and custom `PolicyRule.evaluate()` functions.
+- Validators/preflight: `evaluatePolicyGate`, `validatePolicyGateDecision`, `validatePolicyGateDenyDecision`, and the decision-candidate snapshot helpers.
 - Storage/cache/query: none - decisions are per-call in-memory payloads.
 - Public routes/entrypoints: `wrapToolWithPolicyGate(...).run(...)`, `createShudPolicyGateEvaluator(...)`, and execution-validator paths.
 - Frontend/downstream consumers: `ToolResult.output`, `ToolResult.outputSummary`, `policy_gate_denied` payload consumers, and running-tool terminal metadata.
@@ -522,12 +525,13 @@ Invariant Matrix:
   - Plain valid allow/deny decision -> existing allow/deny semantics and structured `policy_gate_denied` payloads are preserved.
   - Evaluator proxy/accessor decision -> `success=false`, stable `Invalid policy gate decision...` in `output` and `outputSummary`, sentinel/trap text absent from both, no `policy_gate_denied`, inner tool call count `0`.
   - Execution-validator proxy/accessor deny decision -> same stable failure contract and inner tool call count `0`.
+  - Rule-based evaluator proxy/accessor decision via `createPolicyGateEvaluator(...)` -> same stable failure contract and inner tool call count `0` when wrapped.
   - Enumerable `toJSON` decision candidate -> rejected or ignored without invoking `toJSON`, without sentinel text leak, and without changing validation semantics.
   - Over-depth or over-wide decision object -> bounded fail-closed validation result or explicit non-goal rationale; no unbounded traversal.
 
 Boundary-surface checklist:
-- Shared helper roots: `policy-gate-registry.ts` decision validation helpers and policy wrapper error-result builders.
-- Public entrypoints: custom evaluator path, execution-validator path, and direct `createShudPolicyGateEvaluator` custom path.
+- Shared helper roots: `policy-gate-core.ts` rule evaluation helpers, `policy-gate-registry.ts` decision validation helpers, and policy wrapper error-result builders.
+- Public entrypoints: custom evaluator path, execution-validator path, direct `createShudPolicyGateEvaluator` custom path, and `createPolicyGateEvaluator(...)` rule-based custom context path.
 - Read surfaces: decision candidate own descriptors only; no accessor/proxy trap execution.
 - Write/delete/overwrite surfaces: none.
 - Producer/consumer evidence boundaries: candidate decision object -> validation snapshot -> `PolicyGateDecision` or stable failed `ToolResult`.
@@ -537,6 +541,8 @@ Boundary-surface checklist:
 Required evidence:
 - Evaluator returns proxy/accessor decision -> `success=false`, stable `Invalid policy gate decision...` in `output`/`outputSummary`, sentinel trap text absent from both, no `policy_gate_denied`, inner tool call count `0`.
 - Execution validator returns proxy/accessor deny decision -> `success=false`, stable `Invalid policy gate decision...` in `output`/`outputSummary`, sentinel trap text absent from both, no `policy_gate_denied`, inner tool call count `0`.
+- Custom `PolicyRule.evaluate()` returns proxy/accessor decision through `createPolicyGateEvaluator(...)` -> stable `PolicyGateDecisionValidationError`; when wrapped, sentinel trap text absent from `output`/`outputSummary`, no `policy_gate_denied`, and inner tool call count `0`.
+- Consumed nested `remediation` proxy/accessor fields in evaluator and execution-validator decisions -> stable invalid-decision failure without sentinel leak and without inner execution.
 - Enumerable `toJSON` on a decision candidate -> rejected or ignored without invoking `toJSON`, without sentinel text leak, and without affecting valid plain-object decision behavior.
 - Resource-boundary evidence: snapshotting rejects or bounds over-depth/over-wide decision candidates, or records a precise non-goal if the snapshot only reads the first-level decision contract by descriptor.
 - Existing reserved authority decision validation tests remain green.
@@ -550,5 +556,5 @@ Non-goals:
 Review focus:
 - Decision validation reads only a stable, plain-data snapshot and never invokes user-supplied getters, proxies, or `toJSON`.
 - Stable validation errors do not contain untrusted trap text.
-- The evaluator and execution-validator paths are both covered.
+- The custom evaluator, execution-validator, and rule-based evaluator paths are covered.
 - Existing policy-gate denial payloads remain compatible for ordinary plain objects.
