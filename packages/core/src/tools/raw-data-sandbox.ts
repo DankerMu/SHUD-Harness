@@ -953,7 +953,8 @@ interface PolicyGateAuditReservationFailure {
 export function createRawDataWriteAdvisoryRule(
   protectedRawPaths: readonly string[]
 ): PolicyRule {
-  return {
+  const protectedRawPathSnapshot = Object.freeze([...protectedRawPaths]);
+  return Object.freeze({
     ruleId: RAW_DATA_WRITE_RULE_ID,
     description:
       "Advisory-only detection for obvious static writes to protected raw data paths.",
@@ -968,9 +969,9 @@ export function createRawDataWriteAdvisoryRule(
         return { decision: "allow" };
       }
 
-      return evaluateRawDataWriteAdvisory(command, protectedRawPaths);
+      return evaluateRawDataWriteAdvisory(command, protectedRawPathSnapshot);
     }
-  };
+  });
 }
 
 export function evaluateRawDataWriteAdvisory(

@@ -13,7 +13,6 @@ import type { FuseRule, ToolContext, ToolDefinition, ToolResult } from "@zero-os
 import { types as nodeUtilTypes } from "node:util";
 import { ZodType } from "zod";
 import {
-  assertPolicyGateContextGuardClasses,
   evaluatePolicyGate,
   normalizeSpawnAgentInput,
   PolicyGuardClassSchema,
@@ -23,6 +22,7 @@ import {
   SPAWN_PROFILE_SUBSET_RULE,
   SPAWN_PROFILE_SUBSET_RULE_ID,
   SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS,
+  snapshotPolicyGateContext,
   type HarnessRole,
   type PolicyGuardClass,
   type PolicyGateContext,
@@ -156,8 +156,8 @@ const SHUD_WAIT_AGENT_DESCRIPTION = [
 ].join("\n");
 
 export function createPolicyGateEvaluator(context: PolicyGateContext): PolicyGateEvaluator {
-  assertPolicyGateContextGuardClasses(context);
-  return (call) => evaluatePolicyGate(call, context);
+  const contextSnapshot = snapshotPolicyGateContext(context);
+  return (call) => evaluatePolicyGate(call, contextSnapshot);
 }
 
 export const DEFAULT_SHUD_POLICY_GATE_CONTEXT: PolicyGateContext = Object.freeze({
@@ -182,6 +182,7 @@ const ZOD_PARAMETER_SCHEMA_MAX_NODES = 20_000;
 const ZOD_PARAMETER_SCHEMA_MAX_OWN_KEYS = 512;
 const ZOD_PARAMETER_SCHEMA_MAX_PROPERTIES = 50_000;
 const PROTOTYPE_POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const KNOWN_AUTHORITY_POLICY_GATE_DECISION_RULE_IDS = new Set([RAW_DATA_WRITE_RULE_ID]);
 
 export function createShudPolicyGateEvaluator(
   customEvaluate?: PolicyGateEvaluator
@@ -1537,7 +1538,7 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
 
   const ruleId = rawDecision.ruleId;
   const reason = rawDecision.reason;
-  const validRuleId = typeof ruleId === "string" ? ruleId : undefined;
+  const validRuleId = normalizePolicyGateDecisionRuleId(ruleId);
   const validReason = typeof reason === "string" ? reason : undefined;
   const issuePaths: string[] = [];
   if (validRuleId === undefined) {
@@ -1560,6 +1561,7 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
   }
 
   const guardClass = readPolicyGateDecisionGuardClass(rawDecision, issuePaths);
+  validateKnownAuthorityPolicyGateDecisionGuardClass(validRuleId, guardClass, issuePaths);
 
   if (
     issuePaths.length > 0 ||
@@ -1582,6 +1584,29 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
     remediation,
     guardClass
   };
+}
+
+function normalizePolicyGateDecisionRuleId(ruleId: unknown): string | undefined {
+  if (typeof ruleId !== "string") {
+    return undefined;
+  }
+  const trimmedRuleId = ruleId.trim();
+  return trimmedRuleId === "" ? undefined : trimmedRuleId;
+}
+
+function validateKnownAuthorityPolicyGateDecisionGuardClass(
+  ruleId: string | undefined,
+  guardClass: PolicyGuardClass | undefined,
+  issuePaths: string[]
+): void {
+  if (
+    ruleId &&
+    guardClass &&
+    KNOWN_AUTHORITY_POLICY_GATE_DECISION_RULE_IDS.has(ruleId) &&
+    guardClass !== "authority"
+  ) {
+    issuePaths.push("guardClass");
+  }
 }
 
 type PolicyGateDecisionGuardClassAlias =
@@ -1685,6 +1710,7 @@ function buildRawDataRuleMisconfiguredResult(
     error: "policy_gate_raw_data_rule_misconfigured",
     tool_id: toolId,
     rule: RAW_DATA_WRITE_RULE_ID,
+    guard_class: decision.guardClass,
     reason:
       "Outer policy gate attempted to deny raw-data writes. Raw advisory and raw-denial evidence ownership belongs inside RawDataSandboxedBashTool.",
     outer_reason: decision.reason,

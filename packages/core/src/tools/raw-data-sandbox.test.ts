@@ -38,6 +38,7 @@ import {
   type PolicyGateAuditRow,
   type RawDataDenialPayload
 } from "./raw-data-sandbox";
+import { evaluatePolicyGate } from "./policy-gate-core";
 import {
   completeRawDataSandboxInvocationProcessesForTest,
   createRawDataSandboxInvocationDescendantTrackerForTest,
@@ -147,6 +148,44 @@ describe("raw data seatbelt sandbox", () => {
 
   test("raw data advisory rule carries authority guard classification", () => {
     expect(createRawDataWriteAdvisoryRule(["/tmp/raw"]).guardClass).toBe("authority");
+  });
+
+  test("raw data advisory rule guard classification is immutable", () => {
+    const rule = createRawDataWriteAdvisoryRule(["/tmp/raw"]);
+    let mutationThrew = false;
+
+    try {
+      rule.guardClass = "capability";
+    } catch {
+      mutationThrew = true;
+    }
+
+    expect(Object.isFrozen(rule)).toBe(true);
+    expect(mutationThrew || rule.guardClass === "authority").toBe(true);
+    expect(rule.guardClass).toBe("authority");
+  });
+
+  test("raw data write rule id cannot be reclassified as capability", () => {
+    expect(() =>
+      evaluatePolicyGate(
+        {
+          toolId: "bash",
+          role: "worker",
+          input: { command: "printf ok" },
+          workDir: "/tmp/shud-harness-test"
+        },
+        {
+          rules: [
+            {
+              ruleId: RAW_DATA_WRITE_RULE_ID,
+              description: "Misclassified raw data authority rule.",
+              guardClass: "capability",
+              evaluate: () => ({ decision: "allow" })
+            }
+          ]
+        }
+      )
+    ).toThrow(/known authority rule cannot be classified as capability/);
   });
 
   test("normal completion cleanup does not sample or signal a reused root PID", async () => {
