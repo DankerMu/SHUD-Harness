@@ -129,11 +129,22 @@ export function createIdempotencyRecordService(
         idempotencyRecordEvidenceRef(parsedScope, key)
       );
 
-      return await readJsonRecord(
+      const record = await readJsonRecord(
         recordPath,
         idempotencyRecordEvidenceRef(parsedScope, key),
         IdempotencyRecordSchema
       );
+      if (!record) {
+        return undefined;
+      }
+
+      assertIdempotencyRecordLookupIdentity(
+        record,
+        parsedScope,
+        key,
+        idempotencyRecordEvidenceRef(parsedScope, key)
+      );
+      return record;
     },
 
     async beginRecord(
@@ -574,6 +585,28 @@ function completedRecordMissingResultRefError(
     message: "Completed idempotency record is missing result_ref.",
     userMessage: "A completed idempotency record is missing its result reference.",
     evidenceRefs: [idempotencyRecordEvidenceRef(scope, key), "idempotency.result_ref"],
+    recommendedNextActions: ["Inspect and repair the idempotency record before retrying."]
+  });
+}
+
+function assertIdempotencyRecordLookupIdentity(
+  record: IdempotencyRecord,
+  scope: IdempotencyScope,
+  key: string,
+  evidenceRef: string
+): void {
+  if (record.scope === scope && record.key === key) {
+    return;
+  }
+
+  throw new TaskServiceError({
+    code: "record_malformed",
+    status: 500,
+    category: "workspace_error",
+    message: "Idempotency record identity does not match its lookup path.",
+    userMessage: "The idempotency record cannot be used safely.",
+    evidenceRefs: [evidenceRef, "idempotency.key", "idempotency.scope"],
+    retryable: false,
     recommendedNextActions: ["Inspect and repair the idempotency record before retrying."]
   });
 }

@@ -23,6 +23,7 @@ import {
   canonicalJson,
   createIdempotencyRecordService,
   createTaskCardService,
+  idempotencyRecordEvidenceRef,
   idempotencyRecordFileName,
   sha256Hex,
   type CreateTaskInput,
@@ -654,6 +655,74 @@ describe("backend workspace and health routes", () => {
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([firstTask.task_id]);
     expect(await staleApp.request("/api/tasks").then((response) => response.json())).toEqual({
       tasks: [firstTask]
+    });
+  });
+
+  test("POST /api/tasks fails closed when idempotency record key does not match the lookup path", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:path-key-a";
+    const storedKey = "task:create:path-key-b-secret";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = sha256Hex(
+      canonicalJson({
+        ...taskBody,
+        created_by: taskBody.created_by ?? DEFAULT_TASK_CREATED_BY
+      })
+    );
+    const existingTask = await createTaskCardService({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:31.500Z"),
+      taskIdFactory: () => "TASK-poisoned-idempotency-result"
+    }).createTask(taskBody);
+    const idempotencyDirectory = join(workspaceRoot, "tasks", "_idempotency", "task");
+    const recordPath = join(idempotencyDirectory, idempotencyRecordFileName(idempotencyKey));
+    let taskIdFactoryCalls = 0;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:31.750Z"),
+      taskIdFactory: () => {
+        taskIdFactoryCalls += 1;
+        return "TASK-duplicate-should-not-create";
+      }
+    });
+
+    await mkdir(idempotencyDirectory, { recursive: true });
+    await writeFile(
+      recordPath,
+      `${JSON.stringify({
+        key: storedKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        result_ref: existingTask.task_id,
+        created_at: "2026-07-07T12:03:31.750Z",
+        updated_at: "2026-07-07T12:03:31.750Z"
+      })}\n`,
+      { flag: "wx" }
+    );
+
+    const response = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(500);
+    expectCanonicalError(body, "workspace_error");
+    expect(body.error.message).toBe(
+      "Idempotency record identity does not match its lookup path."
+    );
+    expect(body.error.evidence_refs).toEqual([
+      idempotencyRecordEvidenceRef("task", idempotencyKey),
+      "idempotency.key",
+      "idempotency.scope"
+    ]);
+    expect(JSON.stringify(body)).not.toContain(idempotencyKey);
+    expect(JSON.stringify(body)).not.toContain(storedKey);
+    expect(JSON.stringify(body)).not.toContain(existingTask.task_id);
+    expectNoAbsoluteWorkspacePath(body, tempRoot, workspaceRoot);
+    expect(taskIdFactoryCalls).toBe(0);
+    expect(await taskSnapshotIds(workspaceRoot)).toEqual([existingTask.task_id]);
+    expect(await app.request("/api/tasks").then((listResponse) => listResponse.json())).toEqual({
+      tasks: [existingTask]
     });
   });
 

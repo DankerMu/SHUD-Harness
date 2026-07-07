@@ -681,6 +681,96 @@ describe("idempotency, lock, and artifact services", () => {
     expectErrorNotToLeakRecordContent(error, secret);
   });
 
+  test("IdempotencyRecord lookup fails closed when stored key does not match the lookup path", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    const lookupKey = "task:create:path-key-a";
+    const storedKey = "task:create:path-key-b-secret";
+    const requestDigest = "digest-record-key-mismatch";
+    const idempotencyDirectory = join(workspaceRoot, "tasks", "_idempotency", "task");
+    const recordPath = join(idempotencyDirectory, idempotencyRecordFileName(lookupKey));
+
+    await mkdir(idempotencyDirectory, { recursive: true });
+    await writeFile(
+      recordPath,
+      `${JSON.stringify({
+        key: storedKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        result_ref: "TASK-wrong-key-replay",
+        created_at: "2026-07-07T13:37:00.000Z",
+        updated_at: "2026-07-07T13:37:00.000Z"
+      })}\n`,
+      { flag: "wx" }
+    );
+
+    const error = await captureTaskServiceError(() =>
+      service.lookupReplay({
+        scope: "task",
+        key: lookupKey,
+        requestDigest
+      })
+    );
+
+    expect(error.code).toBe("record_malformed");
+    expect(error.status).toBe(500);
+    expect(error.category).toBe("workspace_error");
+    expect(error.evidenceRefs).toEqual([
+      idempotencyRecordEvidenceRef("task", lookupKey),
+      "idempotency.key",
+      "idempotency.scope"
+    ]);
+    expectErrorNotToLeakRecordContent(error, lookupKey);
+    expectErrorNotToLeakRecordContent(error, storedKey);
+    expectErrorNotToLeakRecordContent(error, "TASK-wrong-key-replay");
+  });
+
+  test("IdempotencyRecord lookup fails closed when stored scope does not match the lookup path", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    const lookupKey = "task:create:path-scope-a";
+    const requestDigest = "digest-record-scope-mismatch";
+    const idempotencyDirectory = join(workspaceRoot, "tasks", "_idempotency", "task");
+    const recordPath = join(idempotencyDirectory, idempotencyRecordFileName(lookupKey));
+
+    await mkdir(idempotencyDirectory, { recursive: true });
+    await writeFile(
+      recordPath,
+      `${JSON.stringify({
+        key: lookupKey,
+        scope: "job",
+        request_digest: requestDigest,
+        status: "completed",
+        result_ref: "TASK-wrong-scope-replay",
+        created_at: "2026-07-07T13:38:00.000Z",
+        updated_at: "2026-07-07T13:38:00.000Z"
+      })}\n`,
+      { flag: "wx" }
+    );
+
+    const error = await captureTaskServiceError(() =>
+      service.lookupReplay({
+        scope: "task",
+        key: lookupKey,
+        requestDigest
+      })
+    );
+
+    expect(error.code).toBe("record_malformed");
+    expect(error.status).toBe(500);
+    expect(error.category).toBe("workspace_error");
+    expect(error.evidenceRefs).toEqual([
+      idempotencyRecordEvidenceRef("task", lookupKey),
+      "idempotency.key",
+      "idempotency.scope"
+    ]);
+    expectErrorNotToLeakRecordContent(error, lookupKey);
+    expectErrorNotToLeakRecordContent(error, "TASK-wrong-scope-replay");
+  });
+
   test("LockRecord store/get validates schema and uses direct lookup paths", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
