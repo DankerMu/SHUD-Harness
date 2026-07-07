@@ -14,6 +14,7 @@ import {
 import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, parse, resolve } from "node:path";
+import { types as nodeUtilTypes } from "node:util";
 import { BaseTool, BashTool, FuseListChecker } from "@zero-os/core";
 import type {
   FuseRule,
@@ -27,6 +28,12 @@ import type {
   PolicyGateToolCall,
   PolicyRule,
   PolicyRuleDecision
+} from "./policy-gate-core";
+import {
+  isReservedAuthorityPolicyErrorId,
+  isReservedAuthorityPolicyRuleId,
+  isReservedAuthorityPolicyRuleIdPrefixImpersonation,
+  PolicyGuardClassSchema
 } from "./policy-gate-core";
 
 export const RAW_DATA_WRITE_RULE_ID = "raw-data-write";
@@ -60,6 +67,13 @@ const COMMAND_ANALYSIS_MAX_SEGMENTS = 512;
 const COMMAND_ANALYSIS_MAX_CALLS = 512;
 const PROCESS_PREFLIGHT_ANALYSIS_MAX_LENGTH = 32_000;
 const STREAM_CAPTURE_MAX_CHARS = 64_000;
+const POLICY_GATE_AUDIT_ROW_MAX_DEPTH = 32;
+const POLICY_GATE_AUDIT_ROW_MAX_NODES = 10_000;
+const POLICY_GATE_AUDIT_ROW_MAX_ARRAY_LENGTH = 1_024;
+const POLICY_GATE_AUDIT_ROW_MAX_OBJECT_KEYS = 256;
+const POLICY_GATE_AUDIT_ROW_MAX_STRING_CHARS = 131_072;
+const POLICY_GATE_AUDIT_OPTIONS_MAX_PROTECTED_ROOTS = 1_024;
+const POLICY_GATE_AUDIT_OPTIONS_MAX_STRING_CHARS = 131_072;
 const DEFAULT_ABORT_MESSAGE = "Command aborted by user from Session Detail.";
 const RAW_DATA_SANDBOXED_BASH_DESCRIPTION = [
   "何时该用: 在 SHUD runtime 中执行需要 shell 的本机命令，并让 raw/evidence 写保护与 fuse 规则生效。",
@@ -767,6 +781,7 @@ export class RawDataSandboxedBashTool extends BaseTool {
           tool_id: this.name,
           rule: RAW_DATA_WRITE_RULE_ID,
           decision: input.decision,
+          guard_class: rawDataGuardClassForRawData(),
           ts: new Date().toISOString(),
           profile_id: input.profile.profileId,
           profile_path: input.profilePath
@@ -953,10 +968,12 @@ interface PolicyGateAuditReservationFailure {
 export function createRawDataWriteAdvisoryRule(
   protectedRawPaths: readonly string[]
 ): PolicyRule {
-  return {
+  const protectedRawPathSnapshot = Object.freeze([...protectedRawPaths]);
+  return Object.freeze({
     ruleId: RAW_DATA_WRITE_RULE_ID,
     description:
       "Advisory-only detection for obvious static writes to protected raw data paths.",
+    guardClass: "authority",
     evaluate(call: PolicyGateToolCall): PolicyRuleDecision {
       if (call.toolId !== "bash" && call.toolId !== "sandbox.exec") {
         return { decision: "allow" };
@@ -967,9 +984,9 @@ export function createRawDataWriteAdvisoryRule(
         return { decision: "allow" };
       }
 
-      return evaluateRawDataWriteAdvisory(command, protectedRawPaths);
+      return evaluateRawDataWriteAdvisory(command, protectedRawPathSnapshot);
     }
-  };
+  });
 }
 
 export function evaluateRawDataWriteAdvisory(
@@ -1055,22 +1072,47 @@ function evaluateCommandAnalysisBudget(
 export async function appendPolicyGateAuditRow(
   options: AppendPolicyGateAuditRowOptions
 ): Promise<string> {
-  const row = snapshotPolicyGateAuditRow(options.row);
-  assertProtectedRawPathsProvided(options.protectedRawPaths);
-  assertAbsoluteRoot(options.workspaceRoot, "workspaceRoot");
-  assertAbsoluteRoots(options.protectedRawPaths, "protectedRawPaths");
-  assertPublicPolicyGateAuditRow(row);
-  const taskId = options.taskId ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID;
+  const optionRecord = readPolicyGateAuditOptionsRecord(options);
+  const optionState = { stringChars: 0 };
+  const protectedRawPaths = readPolicyGateAuditProtectedRawPathsOption(
+    optionRecord,
+    optionState
+  );
+  const workspaceRoot = readRequiredPolicyGateAuditOptionString(
+    optionRecord,
+    "workspaceRoot",
+    "workspaceRoot",
+    optionState
+  );
+  assertProtectedRawPathsProvided(protectedRawPaths);
+  assertAbsoluteRoot(workspaceRoot, "workspaceRoot");
+  assertAbsoluteRoots(protectedRawPaths, "protectedRawPaths");
+  const taskId =
+    readOptionalPolicyGateAuditOptionString(
+      optionRecord,
+      "taskId",
+      "audit task id",
+      optionState
+    ) ?? DEFAULT_POLICY_GATE_AUDIT_TASK_ID;
   assertSafePathSegment(taskId, "audit task id");
 
-  const fileName = options.fileName ?? DEFAULT_AUDIT_FILE_NAME;
+  const fileName =
+    readOptionalPolicyGateAuditOptionString(
+      optionRecord,
+      "fileName",
+      "audit file name",
+      optionState
+    ) ?? DEFAULT_AUDIT_FILE_NAME;
   assertSafePathSegment(fileName, "audit file name");
 
+  const row = snapshotPolicyGateAuditRow(readPolicyGateAuditRowOption(optionRecord));
+  assertPublicPolicyGateAuditRow(row);
+
   const reservation = await ensurePolicyGateAuditReservation(
-    resolve(options.workspaceRoot),
+    resolve(workspaceRoot),
     taskId,
     fileName,
-    options.protectedRawPaths
+    protectedRawPaths
   );
   try {
     await appendReservedPolicyGateAuditRow(reservation, row);
@@ -1080,45 +1122,420 @@ export async function appendPolicyGateAuditRow(
   }
 }
 
-function snapshotPolicyGateAuditRow(row: PolicyGateAuditRow): PolicyGateAuditRow {
-  return snapshotAuditValue(row) as PolicyGateAuditRow;
+type JsonAuditValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonAuditValue[]
+  | { [key: string]: JsonAuditValue };
+
+const OMIT_JSON_AUDIT_PROPERTY = Symbol("omit-json-audit-property");
+
+type PolicyGateAuditSnapshotState = {
+  seen: WeakSet<object>;
+  nodes: number;
+  stringChars: number;
+};
+
+type JsonAuditDataDescriptor = PropertyDescriptor & {
+  value: unknown;
+};
+
+class PolicyGateAuditRowSnapshotError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PolicyGateAuditRowSnapshotError";
+  }
 }
 
-function snapshotAuditValue(
-  value: unknown,
-  seen = new WeakMap<object, unknown>()
-): unknown {
-  if (value === null || typeof value !== "object") {
-    return value;
+function policyGateAuditRowSnapshotError(message: string): PolicyGateAuditRowSnapshotError {
+  return new PolicyGateAuditRowSnapshotError(message);
+}
+
+function policyGateAuditOptionSnapshotError(message: string): Error {
+  return new Error(message);
+}
+
+function readPolicyGateAuditOptionsRecord(
+  options: AppendPolicyGateAuditRowOptions
+): object {
+  if (typeof options !== "object" || options === null || Array.isArray(options)) {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options must be stable ordinary structured data."
+    );
+  }
+  if (nodeUtilTypes.isProxy(options)) {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options must be stable ordinary structured data."
+    );
+  }
+  const prototype = Object.getPrototypeOf(options);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options must be plain structured data."
+    );
+  }
+  return options;
+}
+
+function readPolicyGateAuditProtectedRawPathsOption(
+  options: object,
+  state: { stringChars: number }
+): readonly string[] | undefined {
+  const value = readPolicyGateAuditOptionDataField(
+    options,
+    "protectedRawPaths",
+    "protectedRawPaths"
+  );
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("protectedRawPaths is required for policy gate audit writes.");
+  }
+  if (nodeUtilTypes.isProxy(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    throw policyGateAuditOptionSnapshotError(
+      "protectedRawPaths must be an ordinary string array."
+    );
+  }
+  if (value.length > POLICY_GATE_AUDIT_OPTIONS_MAX_PROTECTED_ROOTS) {
+    throw policyGateAuditOptionSnapshotError(
+      "protectedRawPaths exceeds array length budget."
+    );
   }
 
-  const existing = seen.get(value);
-  if (existing !== undefined) {
-    return existing;
-  }
-
-  if (value instanceof Date) {
-    return new Date(value.getTime());
-  }
-
-  if (Array.isArray(value)) {
-    const copy: unknown[] = [];
-    seen.set(value, copy);
-    for (const item of value) {
-      copy.push(snapshotAuditValue(item, seen));
+  const copy: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = readPolicyGateAuditOptionDataDescriptor(
+      value,
+      String(index),
+      "protectedRawPaths"
+    );
+    if (!descriptor || typeof descriptor.value !== "string") {
+      throw policyGateAuditOptionSnapshotError(
+        "protectedRawPaths must contain only strings."
+      );
     }
-    return copy;
-  }
-
-  const copy: Record<string, unknown> = {};
-  seen.set(value, copy);
-  for (const [key, item] of Object.entries(value)) {
-    copy[key] = snapshotAuditValue(item, seen);
+    addPolicyGateAuditOptionStringBudget(descriptor.value.length, state);
+    copy.push(descriptor.value);
   }
   return copy;
 }
 
+function readRequiredPolicyGateAuditOptionString(
+  options: object,
+  key: string,
+  label: string,
+  state: { stringChars: number }
+): string {
+  const value = readPolicyGateAuditOptionDataField(options, key, label);
+  if (typeof value !== "string") {
+    throw policyGateAuditOptionSnapshotError(`${label} must be a string.`);
+  }
+  addPolicyGateAuditOptionStringBudget(value.length, state);
+  return value;
+}
+
+function readOptionalPolicyGateAuditOptionString(
+  options: object,
+  key: string,
+  label: string,
+  state: { stringChars: number }
+): string | undefined {
+  const value = readPolicyGateAuditOptionDataField(options, key, label);
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw policyGateAuditOptionSnapshotError(`${label} must be a string.`);
+  }
+  addPolicyGateAuditOptionStringBudget(value.length, state);
+  return value;
+}
+
+function readPolicyGateAuditOptionDataField(
+  options: object,
+  key: string,
+  label: string
+): unknown {
+  return readPolicyGateAuditOptionDataDescriptor(options, key, label)?.value;
+}
+
+function readPolicyGateAuditOptionDataDescriptor(
+  options: object,
+  key: string,
+  label: string
+): JsonAuditDataDescriptor | undefined {
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(options, key);
+  } catch {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options must be stable ordinary structured data."
+    );
+  }
+  if (!descriptor) {
+    return undefined;
+  }
+  if (!("value" in descriptor) || descriptor.get !== undefined || descriptor.set !== undefined) {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options must contain only data fields."
+    );
+  }
+  return descriptor as JsonAuditDataDescriptor;
+}
+
+function addPolicyGateAuditOptionStringBudget(
+  length: number,
+  state: { stringChars: number }
+): void {
+  state.stringChars += length;
+  if (state.stringChars > POLICY_GATE_AUDIT_OPTIONS_MAX_STRING_CHARS) {
+    throw policyGateAuditOptionSnapshotError(
+      "Policy gate audit options exceed string budget."
+    );
+  }
+}
+
+function readPolicyGateAuditRowOption(
+  options: object
+): PolicyGateAuditRow {
+  const descriptor = readPolicyGateAuditOptionDataDescriptor(
+    options,
+    "row",
+    "Policy gate audit row"
+  );
+  if (!descriptor) {
+    throw policyGateAuditRowSnapshotError(
+      "Policy gate audit row is required."
+    );
+  }
+  return descriptor.value as PolicyGateAuditRow;
+}
+
+function snapshotPolicyGateAuditRow(row: PolicyGateAuditRow): PolicyGateAuditRow {
+  try {
+    return snapshotAuditValue(row, {
+      seen: new WeakSet<object>(),
+      nodes: 0,
+      stringChars: 0
+    }) as PolicyGateAuditRow;
+  } catch (error) {
+    if (error instanceof PolicyGateAuditRowSnapshotError) {
+      throw error;
+    }
+    throw policyGateAuditRowSnapshotError(
+      "Policy gate audit rows must be stable ordinary structured data."
+    );
+  }
+}
+
+function snapshotAuditValue(
+  value: unknown,
+  state: PolicyGateAuditSnapshotState,
+  depth = 0
+): JsonAuditValue | typeof OMIT_JSON_AUDIT_PROPERTY {
+  if (depth > POLICY_GATE_AUDIT_ROW_MAX_DEPTH) {
+    throw policyGateAuditRowSnapshotError("Policy gate audit row exceeds depth budget.");
+  }
+
+  state.nodes += 1;
+  if (state.nodes > POLICY_GATE_AUDIT_ROW_MAX_NODES) {
+    throw policyGateAuditRowSnapshotError("Policy gate audit row exceeds node budget.");
+  }
+
+  if (value === undefined) {
+    return OMIT_JSON_AUDIT_PROPERTY;
+  }
+  if (value === null || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    addPolicyGateAuditStringBudget(value.length, state);
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw policyGateAuditRowSnapshotError(
+        "Policy gate audit rows must contain only finite JSON numbers."
+      );
+    }
+    return value;
+  }
+  if (typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+    throw policyGateAuditRowSnapshotError(
+      "Policy gate audit rows must contain only JSON-compatible data."
+    );
+  }
+  if (typeof value !== "object") {
+    throw policyGateAuditRowSnapshotError(
+      "Policy gate audit rows must contain only JSON-compatible data."
+    );
+  }
+
+  if (nodeUtilTypes.isProxy(value)) {
+    throw policyGateAuditRowSnapshotError(
+      "Policy gate audit rows must be stable ordinary structured data."
+    );
+  }
+
+  if (value instanceof Date) {
+    let timestamp: string;
+    try {
+      timestamp = Date.prototype.toISOString.call(value);
+    } catch {
+      throw policyGateAuditRowSnapshotError(
+        "Policy gate audit rows must contain only valid Date values."
+      );
+    }
+    addPolicyGateAuditStringBudget(timestamp.length, state);
+    return timestamp;
+  }
+
+  if (state.seen.has(value)) {
+    throw policyGateAuditRowSnapshotError("Policy gate audit rows must not contain cyclic data.");
+  }
+  state.seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      assertOrdinaryPolicyGateAuditArray(value);
+      return snapshotAuditArray(value, state, depth);
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw policyGateAuditRowSnapshotError(
+        "Policy gate audit rows must be plain structured data."
+      );
+    }
+
+    return snapshotAuditPlainObject(value, state, depth);
+  } finally {
+    state.seen.delete(value);
+  }
+}
+
+function assertOrdinaryPolicyGateAuditArray(value: readonly unknown[]): void {
+  if (Object.getPrototypeOf(value) !== Array.prototype) {
+    throw policyGateAuditRowSnapshotError(
+      "Policy gate audit row arrays must be ordinary structured data."
+    );
+  }
+}
+
+function snapshotAuditArray(
+  value: readonly unknown[],
+  state: PolicyGateAuditSnapshotState,
+  depth: number
+): JsonAuditValue[] {
+  const length = readPolicyGateAuditArrayLength(value);
+  if (length > POLICY_GATE_AUDIT_ROW_MAX_ARRAY_LENGTH) {
+    throw policyGateAuditRowSnapshotError("Policy gate audit row exceeds array length budget.");
+  }
+
+  const copy = new Array<JsonAuditValue>(length);
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = readPolicyGateAuditArrayIndexDataDescriptor(value, index);
+    if (!descriptor) {
+      throw policyGateAuditRowSnapshotError(
+        "Policy gate audit row arrays must not contain undefined values."
+      );
+    }
+    const snapshot = snapshotAuditValue(descriptor.value, state, depth + 1);
+    if (snapshot === OMIT_JSON_AUDIT_PROPERTY) {
+      throw policyGateAuditRowSnapshotError(
+        "Policy gate audit row arrays must not contain undefined values."
+      );
+    }
+    copy[index] = snapshot;
+  }
+  return copy;
+}
+
+function snapshotAuditPlainObject(
+  value: object,
+  state: PolicyGateAuditSnapshotState,
+  depth: number
+): { [key: string]: JsonAuditValue } {
+  const keys = Reflect.ownKeys(value);
+  if (keys.length > POLICY_GATE_AUDIT_ROW_MAX_OBJECT_KEYS) {
+    throw policyGateAuditRowSnapshotError("Policy gate audit row exceeds object key budget.");
+  }
+
+  const copy = Object.create(null) as { [key: string]: JsonAuditValue };
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor?.enumerable) {
+      continue;
+    }
+    if (typeof key === "symbol") {
+      throw policyGateAuditRowSnapshotError(
+        "Policy gate audit rows must not contain enumerable symbol keys."
+      );
+    }
+    addPolicyGateAuditStringBudget(key.length, state);
+    if (key === "toJSON") {
+      throw policyGateAuditRowSnapshotError(
+        "Policy gate audit rows must not define enumerable toJSON."
+      );
+    }
+    if (!("value" in descriptor) || descriptor.get !== undefined || descriptor.set !== undefined) {
+      throw policyGateAuditRowSnapshotError(
+        "Policy gate audit rows must contain only data fields."
+      );
+    }
+    const snapshot = snapshotAuditValue(descriptor.value, state, depth + 1);
+    if (snapshot !== OMIT_JSON_AUDIT_PROPERTY) {
+      copy[key] = snapshot;
+    }
+  }
+  return copy;
+}
+
+function readPolicyGateAuditArrayLength(value: readonly unknown[]): number {
+  const length = Reflect.get(value, "length");
+  if (
+    typeof length !== "number" ||
+    !Number.isSafeInteger(length) ||
+    length < 0 ||
+    length > 4_294_967_295
+  ) {
+    throw policyGateAuditRowSnapshotError(
+      "Policy gate audit rows contain an unsafe array length."
+    );
+  }
+  return length;
+}
+
+function readPolicyGateAuditArrayIndexDataDescriptor(
+  value: readonly unknown[],
+  index: number
+): JsonAuditDataDescriptor | undefined {
+  const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+  if (!descriptor) {
+    return undefined;
+  }
+  if (!("value" in descriptor) || descriptor.get !== undefined || descriptor.set !== undefined) {
+    throw policyGateAuditRowSnapshotError(
+      "Policy gate audit rows must contain only data fields."
+    );
+  }
+  return descriptor as JsonAuditDataDescriptor;
+}
+
+function addPolicyGateAuditStringBudget(
+  length: number,
+  state: Pick<PolicyGateAuditSnapshotState, "stringChars">
+): void {
+  state.stringChars += length;
+  if (state.stringChars > POLICY_GATE_AUDIT_ROW_MAX_STRING_CHARS) {
+    throw policyGateAuditRowSnapshotError("Policy gate audit row exceeds string budget.");
+  }
+}
+
 function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
+  const guardClass = readPolicyGateAuditGuardClass(row.guard_class);
   if (isRawDataDenialDecision(row.decision)) {
     throw new Error(
       "Raw-data denial audit rows require RawDataSandboxedBashTool trusted evidence."
@@ -1129,6 +1546,50 @@ function assertPublicPolicyGateAuditRow(row: PolicyGateAuditRow): void {
       "Reserved raw-data denial error_id values require RawDataSandboxedBashTool trusted evidence."
     );
   }
+  if (isReservedAuthorityPolicyRuleIdPrefixImpersonation(row.rule)) {
+    throw new Error("Reserved authority policy rule prefixes are reserved for error_id.");
+  }
+  if (!isReservedAuthorityPolicyAuditRow(row)) {
+    return;
+  }
+  if (guardClass !== rawDataGuardClassForRawData()) {
+    if (isRawDataAuthorityAuditRow(row)) {
+      throw new Error("Raw-data authority audit rows require guard_class authority.");
+    }
+    throw new Error("Reserved authority policy audit rows require guard_class authority.");
+  }
+  if (isRawDataAuthorityAuditRow(row)) {
+    throw new Error("Raw-data authority audit rows require trusted producer evidence.");
+  }
+  throw new Error("Reserved authority policy audit rows require trusted producer evidence.");
+}
+
+function isRawDataAuthorityAuditRow(row: PolicyGateAuditRow): boolean {
+  return row.rule === RAW_DATA_WRITE_RULE_ID || isRawDataAuthorityErrorId(row.error_id);
+}
+
+function isReservedAuthorityPolicyAuditRow(row: PolicyGateAuditRow): boolean {
+  return (
+    isReservedAuthorityPolicyRuleId(row.rule ?? "") ||
+    isReservedAuthorityPolicyErrorId(row.error_id)
+  );
+}
+
+function readPolicyGateAuditGuardClass(
+  guardClass: PolicyGateAuditRow["guard_class"]
+): RawDataGuardClass | undefined {
+  if (guardClass === undefined) {
+    return undefined;
+  }
+  const parsed = PolicyGuardClassSchema.safeParse(guardClass);
+  if (!parsed.success) {
+    throw new Error("Policy gate audit rows guard_class must be authority or capability.");
+  }
+  return parsed.data;
+}
+
+function isRawDataAuthorityErrorId(errorId: string | undefined): boolean {
+  return errorId === RAW_DATA_WRITE_RULE_ID || errorId?.startsWith(`${RAW_DATA_WRITE_RULE_ID}:`) === true;
 }
 
 export function buildRawDataDeniedPayload(input: {
@@ -1142,7 +1603,6 @@ export function buildRawDataDeniedPayload(input: {
 }): RawDataAdvisoryDenialPayload {
   const ts = input.ts ?? new Date().toISOString();
   const remediation = rawDataWriteRemediation();
-  const guardClass = rawDataGuardClassForRawData();
   const errorId = [
     RAW_DATA_WRITE_RULE_ID,
     "denied_by_advisory",
@@ -1154,9 +1614,8 @@ export function buildRawDataDeniedPayload(input: {
   return {
     error: "raw_data_write_denied",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     decision: "denied_by_advisory",
-    guard_class: guardClass,
     reason: input.reason,
     remediation,
     profile_id: input.profile.profileId,
@@ -1502,7 +1961,7 @@ function buildAuditReservationFailureResult(input: {
   const payload = {
     error: "policy_gate_audit_unavailable",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     reason: input.reason,
     remediation: {
       next_action: "fix_and_retry",
@@ -1525,7 +1984,7 @@ function buildPathResolutionFailureResult(input: {
   const payload = {
     error: "raw_data_sandbox_path_resolution_failed",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     reason: input.reason,
     remediation: {
       next_action: "fix_and_retry",
@@ -1548,7 +2007,7 @@ function buildInvalidTimeoutFailureResult(input: {
   const payload = {
     error: "raw_data_sandbox_invalid_timeout",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     reason: input.reason,
     remediation: {
       next_action: "fix_and_retry",
@@ -1571,7 +2030,7 @@ function buildProfileSetupFailureResult(input: {
   const payload = {
     error: "raw_data_sandbox_profile_unavailable",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     reason: input.reason,
     remediation: {
       next_action: "fix_and_retry",
@@ -1594,7 +2053,7 @@ function buildProcessContainmentFailureResult(input: {
   const payload = {
     error: "policy_gate_process_containment_unavailable",
     tool_id: input.toolId,
-    rule: RAW_DATA_WRITE_RULE_ID,
+    ...rawDataAuthorityEvidenceFields(),
     reason: input.reason,
     remediation: {
       next_action: "fix_and_retry",
@@ -4605,6 +5064,16 @@ function rawDataGuardClassForRawData(): RawDataGuardClass {
   return "authority";
 }
 
+function rawDataAuthorityEvidenceFields(): {
+  rule: typeof RAW_DATA_WRITE_RULE_ID;
+  guard_class: RawDataGuardClass;
+} {
+  return {
+    rule: RAW_DATA_WRITE_RULE_ID,
+    guard_class: rawDataGuardClassForRawData()
+  };
+}
+
 function hasKnownRawDataWriteTarget(
   command: string,
   protectedRawPaths: readonly string[],
@@ -5064,7 +5533,27 @@ async function appendReservedPolicyGateAuditRow(
   row: PolicyGateAuditRow
 ): Promise<void> {
   await assertAuditPathIdentity(reservation);
-  await appendAuditHandle(reservation.handle, reservation.auditPath, `${JSON.stringify(row)}\n`);
+  await appendAuditHandle(
+    reservation.handle,
+    reservation.auditPath,
+    `${stringifyJsonAuditValue(row as JsonAuditValue)}\n`
+  );
+}
+
+function stringifyJsonAuditValue(value: JsonAuditValue): string {
+  if (value === null) {
+    return "null";
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stringifyJsonAuditValue(item)).join(",")}]`;
+  }
+
+  return `{${Object.keys(value)
+    .map((key) => `${JSON.stringify(key)}:${stringifyJsonAuditValue(value[key])}`)
+    .join(",")}}`;
 }
 
 async function appendAuditHandle(handle: FileHandle, path: string, line: string): Promise<void> {

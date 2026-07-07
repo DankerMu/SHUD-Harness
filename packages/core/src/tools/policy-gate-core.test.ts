@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  assertPolicyGateContextGuardClasses,
   evaluatePolicyGate,
+  isReservedAuthorityPolicyErrorId,
+  isReservedAuthorityPolicyRuleIdPrefixImpersonation,
+  isReservedAuthorityPolicyRuleId,
   normalizeSpawnAgentInput,
   PolicyGateRemediationSchema,
+  RESERVED_AUTHORITY_POLICY_RULE_IDS,
   SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS,
   SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS,
   SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
@@ -10,8 +15,11 @@ import {
   SPAWN_PROFILE_SUBSET_RULE,
   SPAWN_PROFILE_SUBSET_RULE_ID,
   SPAWN_PROFILE_TOOL_ID_MAX_CHARS,
-  type PolicyGateToolCall
+  TOOL_PARAMETER_SCHEMA_RULE_ID,
+  type PolicyGateToolCall,
+  type PolicyRule
 } from "./policy-gate-core";
+import { RAW_DATA_WRITE_RULE_ID } from "./raw-data-sandbox";
 import { getRoleToolIds } from "./role-tool-map";
 
 describe("policy gate pure evaluator", () => {
@@ -32,6 +40,7 @@ describe("policy gate pure evaluator", () => {
         {
           ruleId: "raw-data-write",
           description: "Reject writes to data/raw.",
+          guardClass: "authority",
           evaluate: () => ({
             decision: "deny" as const,
             reason: "data/raw is protected",
@@ -57,7 +66,450 @@ describe("policy gate pure evaluator", () => {
         next_action: "adjust_scope",
         hint: "Write generated files under workspace/tasks instead.",
         ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+      },
+      guardClass: "authority"
+    });
+  });
+
+  test("returns trimmed ruleId from padded rule metadata", () => {
+    const decision = evaluatePolicyGate(sampleToolCall(), {
+      rules: [
+        {
+          ruleId: " padded ",
+          description: "Uses padded source metadata.",
+          guardClass: "authority",
+          evaluate: () => ({
+            decision: "deny",
+            reason: "padded rule metadata denied",
+            remediation: sampleRemediation()
+          })
+        }
+      ]
+    });
+
+    expect(decision).toEqual({
+      decision: "deny",
+      ruleId: "padded",
+      reason: "padded rule metadata denied",
+      remediation: sampleRemediation(),
+      guardClass: "authority"
+    });
+  });
+
+  test("uses validated guard metadata when a raw data rule mutates during evaluation", () => {
+    const rule: PolicyRule = {
+      ruleId: RAW_DATA_WRITE_RULE_ID,
+      description: "Mutates guardClass after context validation.",
+      guardClass: "authority",
+      evaluate: () => {
+        rule.guardClass = "capability";
+        return {
+          decision: "deny",
+          reason: "raw data write denied after mutation",
+          remediation: sampleRemediation()
+        };
       }
+    };
+
+    const decision = evaluatePolicyGate(sampleToolCall(), { rules: [rule] });
+
+    expect(rule.guardClass).toBe("capability");
+    expect(decision).toEqual({
+      decision: "deny",
+      ruleId: RAW_DATA_WRITE_RULE_ID,
+      reason: "raw data write denied after mutation",
+      remediation: sampleRemediation(),
+      guardClass: "authority"
+    });
+  });
+
+  test("guard_class lint rejects spawn profile authority downgrades", () => {
+    expect(() =>
+      assertPolicyGateContextGuardClasses({
+        rules: [
+          {
+            ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+            description: "Attempts to downgrade reserved spawn authority.",
+            guardClass: "capability",
+            evaluate: () => ({ decision: "allow" })
+          }
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: spawn-profile-subset: known authority rule cannot be classified as capability/
+    );
+  });
+
+  test("guard_class lint treats Zod schema validation as reserved authority", () => {
+    expect(RESERVED_AUTHORITY_POLICY_RULE_IDS).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
+    expect(isReservedAuthorityPolicyRuleId(TOOL_PARAMETER_SCHEMA_RULE_ID)).toBe(true);
+
+    expect(() =>
+      assertPolicyGateContextGuardClasses({
+        rules: [
+          {
+            ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+            description: "Attempts to downgrade built-in Zod parameter schema authority.",
+            guardClass: "capability",
+            evaluate: () => ({ decision: "allow" })
+          }
+        ]
+      })
+    ).toThrow(
+      new RegExp(
+        `Policy gate guard_class lint failed: ${TOOL_PARAMETER_SCHEMA_RULE_ID}: known authority rule cannot be classified as capability`
+      )
+    );
+  });
+
+  test("ruleId lint rejects reserved authority rule prefix impersonation for every guard class", () => {
+    for (const reservedRuleId of RESERVED_AUTHORITY_POLICY_RULE_IDS) {
+      for (const guardClass of ["authority", "capability"] as const) {
+        const impersonatedRuleId = `${reservedRuleId}:caller-minted`;
+
+        expect(() =>
+          assertPolicyGateContextGuardClasses({
+            rules: [
+              {
+                ruleId: impersonatedRuleId,
+                description: "Attempts to mint a reserved authority rule prefix.",
+                guardClass,
+                evaluate: () => ({ decision: "allow" })
+              }
+            ]
+          })
+        ).toThrow(
+          `Policy gate ruleId lint failed: ${impersonatedRuleId}: reserved authority policy rule prefixes are reserved for error_id`
+        );
+      }
+    }
+  });
+
+  test("evaluatePolicyGate rejects reserved authority rule prefix impersonation for every guard class", () => {
+    for (const reservedRuleId of RESERVED_AUTHORITY_POLICY_RULE_IDS) {
+      for (const guardClass of ["authority", "capability"] as const) {
+        const impersonatedRuleId = `${reservedRuleId}:caller-minted`;
+
+        expect(() =>
+          evaluatePolicyGate(sampleToolCall(), {
+            rules: [
+              {
+                ruleId: impersonatedRuleId,
+                description: "Attempts to mint a reserved authority rule prefix.",
+                guardClass,
+                evaluate: () => ({ decision: "allow" })
+              }
+            ]
+          })
+        ).toThrow(
+          `Policy gate ruleId lint failed: ${impersonatedRuleId}: reserved authority policy rule prefixes are reserved for error_id`
+        );
+      }
+    }
+  });
+
+  test("reserved authority identity helpers are field-specific", () => {
+    for (const ruleId of RESERVED_AUTHORITY_POLICY_RULE_IDS) {
+      expect(isReservedAuthorityPolicyRuleId(ruleId)).toBe(true);
+      expect(isReservedAuthorityPolicyErrorId(ruleId)).toBe(true);
+      expect(isReservedAuthorityPolicyErrorId(`${ruleId}:failed:tool-call-1`)).toBe(true);
+      expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation(`${ruleId}:failed`)).toBe(
+        true
+      );
+      expect(isReservedAuthorityPolicyRuleId(`${ruleId}:failed`)).toBe(false);
+    }
+
+    expect(isReservedAuthorityPolicyErrorId(undefined)).toBe(false);
+    expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation(undefined)).toBe(false);
+    expect(isReservedAuthorityPolicyErrorId("spawn-profile-subset-extra")).toBe(false);
+    expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation("spawn-profile-subset-extra")).toBe(
+      false
+    );
+    expect(isReservedAuthorityPolicyErrorId("tool-parameter-schema-validation-extra")).toBe(
+      false
+    );
+    expect(
+      isReservedAuthorityPolicyRuleIdPrefixImpersonation(
+        "tool-parameter-schema-validation-extra"
+      )
+    ).toBe(false);
+    expect(isReservedAuthorityPolicyErrorId("raw-data-writeish")).toBe(false);
+    expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation("raw-data-writeish")).toBe(false);
+    expect(isReservedAuthorityPolicyErrorId("workspace-quota:raw-data-write")).toBe(false);
+    expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation("workspace-quota:raw-data-write")).toBe(
+      false
+    );
+  });
+
+  test("guard_class lint rejects unclassified hard guard rules", () => {
+    expect(() =>
+      assertPolicyGateContextGuardClasses({
+        rules: [
+          {
+            ruleId: "unclassified-hard-guard",
+            description: "Missing guard_class metadata.",
+            evaluate: () => ({ decision: "allow" })
+          } as never
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: unclassified-hard-guard: missing or invalid guardClass\/guard_class/
+    );
+  });
+
+  test("guard_class lint rejects invalid hard guard classifications", () => {
+    expect(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "invalid-guard-class",
+            description: "Invalid guard_class metadata.",
+            guardClass: "temporary",
+            evaluate: () => ({ decision: "allow" })
+          } as never
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: invalid-guard-class: missing or invalid guardClass\/guard_class/
+    );
+  });
+
+  test("guard_class lint rejects invalid deny result classifications", () => {
+    expect(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "invalid-result-guard-class",
+            description: "Valid rule metadata with an invalid result-level classification.",
+            guardClass: "authority",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "result guard class is invalid",
+              remediation: {
+                next_action: "adjust_scope",
+                hint: "Use a valid guard class.",
+                ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+              },
+              guardClass: "temporary"
+            })
+          } as never
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: invalid-result-guard-class: invalid result guardClass/
+    );
+  });
+
+  test("guard_class lint rejects deny result classifications that conflict with rule metadata", () => {
+    expect(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "conflicting-result-guard-class",
+            description: "Valid rule metadata with a conflicting result-level classification.",
+            guardClass: "authority",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "result guard class conflicts with the rule source of truth",
+              remediation: {
+                next_action: "adjust_scope",
+                hint: "Align the result guard class with the owning rule.",
+                ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+              },
+              guardClass: "capability"
+            })
+          }
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: conflicting-result-guard-class: result guardClass capability conflicts with rule guardClass authority/
+    );
+  });
+
+  test("snake_case deny result guard_class matching rule metadata is accepted", () => {
+    const decision = evaluatePolicyGate(sampleToolCall(), {
+      rules: [
+        {
+          ruleId: "result-snake-case-guard",
+          description: "Returns a spec-shaped result-level classification.",
+          guardClass: "authority",
+          evaluate: () => ({
+            decision: "deny",
+            reason: "snake_case result guard denied",
+            remediation: sampleRemediation(),
+            guard_class: "authority"
+          })
+        }
+      ]
+    });
+
+    expect(decision).toMatchObject({
+      decision: "deny",
+      ruleId: "result-snake-case-guard",
+      guardClass: "authority"
+    });
+  });
+
+  test("guard_class lint rejects invalid snake_case deny result classifications", () => {
+    expect(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "invalid-result-snake-guard-class",
+            description: "Valid rule metadata with an invalid snake_case result classification.",
+            guardClass: "authority",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "result guard_class is invalid",
+              remediation: sampleRemediation(),
+              guard_class: "temporary"
+            })
+          } as never
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: invalid-result-snake-guard-class: invalid result guard_class/
+    );
+  });
+
+  test("guard_class lint rejects snake_case deny result classifications that conflict with rule metadata", () => {
+    expect(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "conflicting-result-snake-guard-class",
+            description: "Valid rule metadata with a conflicting snake_case result classification.",
+            guardClass: "authority",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "result guard_class conflicts with the rule source of truth",
+              remediation: sampleRemediation(),
+              guard_class: "capability"
+            })
+          }
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: conflicting-result-snake-guard-class: result guard_class capability conflicts with rule guardClass authority/
+    );
+  });
+
+  test("matching deny result guard aliases are accepted and normalized", () => {
+    const decision = evaluatePolicyGate(sampleToolCall(), {
+      rules: [
+        {
+          ruleId: "matching-result-guard-aliases",
+          description: "Returns matching result guard aliases.",
+          guardClass: "capability",
+          evaluate: () => ({
+            decision: "deny",
+            reason: "matching result guard aliases denied",
+            remediation: sampleRemediation(),
+            guardClass: "capability",
+            guard_class: "capability"
+          })
+        }
+      ]
+    });
+
+    expect(decision).toMatchObject({
+      decision: "deny",
+      ruleId: "matching-result-guard-aliases",
+      guardClass: "capability"
+    });
+  });
+
+  test("guard_class lint rejects conflicting deny result guard aliases", () => {
+    expect(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "conflicting-result-guard-aliases",
+            description: "Returns conflicting result guard aliases.",
+            guardClass: "authority",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "conflicting result guard aliases denied",
+              remediation: sampleRemediation(),
+              guardClass: "authority",
+              guard_class: "capability"
+            })
+          }
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: conflicting-result-guard-aliases: conflicting result guardClass, guard_class/
+    );
+  });
+
+  test("ruleId lint rejects empty and whitespace context rule identities", () => {
+    expect(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: " ",
+            description: "Missing stable identity.",
+            guardClass: "authority",
+            evaluate: () => ({ decision: "allow" })
+          }
+        ]
+      })
+    ).toThrow(/Policy gate ruleId lint failed: <rule-0>: ruleId must be a non-empty string/);
+  });
+
+  test("ruleId lint rejects duplicate context rule identities after trimming", () => {
+    expect(() =>
+      evaluatePolicyGate(sampleToolCall(), {
+        rules: [
+          {
+            ruleId: "duplicate-rule",
+            description: "First identity.",
+            guardClass: "authority",
+            evaluate: () => ({ decision: "allow" })
+          },
+          {
+            ruleId: " duplicate-rule ",
+            description: "Duplicate identity.",
+            guardClass: "authority",
+            evaluate: () => ({ decision: "allow" })
+          }
+        ]
+      })
+    ).toThrow(
+      /Policy gate ruleId lint failed: duplicate-rule: duplicate ruleId also used by duplicate-rule/
+    );
+  });
+
+  test("snake_case guard_class metadata propagates into deny decisions", () => {
+    const decision = evaluatePolicyGate(sampleToolCall(), {
+      rules: [
+        {
+          ruleId: "snake-case-guard",
+          description: "Uses spec-shaped guard_class metadata.",
+          guard_class: "authority",
+          evaluate: () => ({
+            decision: "deny",
+            reason: "snake_case guard denied",
+            remediation: {
+              next_action: "adjust_scope",
+              hint: "Use a governed scope.",
+              ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+            }
+          })
+        }
+      ]
+    });
+
+    expect(decision).toEqual({
+      decision: "deny",
+      ruleId: "snake-case-guard",
+      reason: "snake_case guard denied",
+      remediation: {
+        next_action: "adjust_scope",
+        hint: "Use a governed scope.",
+        ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+      },
+      guardClass: "authority"
     });
   });
 
@@ -91,6 +543,7 @@ describe("policy gate pure evaluator", () => {
           {
             ruleId: "bad-rule",
             description: "Returns invalid remediation.",
+            guardClass: "authority",
             evaluate: () => ({
               decision: "deny",
               reason: "invalid",
@@ -833,6 +1286,14 @@ function sampleToolCall(): PolicyGateToolCall {
       command: "printf nope > data/raw/input.csv"
     },
     workDir: "/workspace/tasks/TASK-M1-SPIKE"
+  };
+}
+
+function sampleRemediation() {
+  return {
+    next_action: "adjust_scope" as const,
+    hint: "Use a governed scope.",
+    ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
   };
 }
 

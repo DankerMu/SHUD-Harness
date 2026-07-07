@@ -8,6 +8,8 @@ import {
   rawDataWriteRemediation,
   RawDataSandboxedBashTool,
   RAW_DATA_WRITE_RULE_ID,
+  SPAWN_PROFILE_SUBSET_RULE_ID,
+  TOOL_PARAMETER_SCHEMA_RULE_ID,
   type ErrorRecord,
   type RawDataToolFailedEventInput,
   type RawDataDenialPayload
@@ -104,6 +106,113 @@ describe("backend ws tool.failed skeleton", () => {
 
     mutableInput.error.user_message = "Mutated after emit.";
     expect(event.payload.error.user_message).toBe(originalInput.error.user_message);
+  });
+
+  test("raw-data advisory builder rejects unstable envelope fields", async () => {
+    const trusted = await sampleTrustedRawDataAdvisoryToolFailedEvent();
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: Number.NaN,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: trusted.toolResult
+      })
+    ).toThrow("raw-data advisory tool.failed seq must be a finite number");
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 17,
+        eventId: {
+          toJSON: () => "evt-forged"
+        } as never,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: trusted.toolResult
+      })
+    ).toThrow("raw-data advisory tool.failed eventId must be a string");
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 18,
+        eventId: "evt-18",
+        timestamp: 0 as never,
+        toolResult: trusted.toolResult
+      })
+    ).toThrow("raw-data advisory tool.failed timestamp must be a string");
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 19,
+        eventId: "evt-19",
+        timestamp: "x".repeat(140_000),
+        toolResult: trusted.toolResult
+      })
+    ).toThrow("tool.failed input exceeds string budget");
+  });
+
+  test("raw-data advisory builder rejects envelope accessors without executing them", async () => {
+    const trusted = await sampleTrustedRawDataAdvisoryToolFailedEvent();
+    const reads = {
+      toolResult: 0,
+      seq: 0,
+      eventId: 0
+    };
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 20,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        get toolResult() {
+          reads.toolResult += 1;
+          return trusted.toolResult;
+        }
+      } as never)
+    ).toThrow("raw-data advisory tool.failed toolResult must be a data field");
+    expect(reads.toolResult).toBe(0);
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        get seq() {
+          reads.seq += 1;
+          return 21;
+        },
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: trusted.toolResult
+      } as never)
+    ).toThrow("raw-data advisory tool.failed seq must be a data field");
+    expect(reads.seq).toBe(0);
+
+    expect(() =>
+      buildRawDataAdvisoryToolFailedWsEvent({
+        seq: 22,
+        get eventId() {
+          reads.eventId += 1;
+          return "evt-22";
+        },
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: trusted.toolResult
+      } as never)
+    ).toThrow("raw-data advisory tool.failed eventId must be a data field");
+    expect(reads.eventId).toBe(0);
+  });
+
+  test("raw-data advisory builder rejects proxy envelopes before reading traps", async () => {
+    const trusted = await sampleTrustedRawDataAdvisoryToolFailedEvent();
+    const proxy = new Proxy(
+      {
+        seq: 23,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolResult: trusted.toolResult
+      },
+      {
+        get() {
+          throw new Error("proxy trap secret");
+        }
+      }
+    );
+
+    expect(() => buildRawDataAdvisoryToolFailedWsEvent(proxy)).toThrow(
+      "raw-data advisory tool.failed input must be stable structured data"
+    );
   });
 
   test("raw-data advisory builder rejects caller-authored structural payloads", async () => {
@@ -225,33 +334,410 @@ describe("backend ws tool.failed skeleton", () => {
     ).toThrow("Raw-data denial tool.failed events require");
   });
 
-  test("generic tool.failed builder still accepts raw lifecycle failures", () => {
-    const remediation = rawDataWriteRemediation();
+  test("generic tool.failed builder rejects raw lifecycle rule without authority guard", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 10,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: RAW_DATA_WRITE_RULE_ID,
+        decision: "failed",
+        error: sampleRawLifecycleError()
+      })
+    ).toThrow("Raw-data authority tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder rejects raw lifecycle rule downgraded to capability", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 10,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: RAW_DATA_WRITE_RULE_ID,
+        decision: "failed",
+        guardClass: "capability",
+        error: sampleRawLifecycleError()
+      })
+    ).toThrow("Raw-data authority tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder rejects raw lifecycle error_id without authority guard", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 10,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        error: sampleRawLifecycleError()
+      })
+    ).toThrow("Raw-data authority tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder rejects raw lifecycle error_id downgraded to capability", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 10,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        guardClass: "capability",
+        error: sampleRawLifecycleError()
+      })
+    ).toThrow("Raw-data authority tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder rejects raw lifecycle failures with authority guard", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 10,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: RAW_DATA_WRITE_RULE_ID,
+        decision: "failed",
+        guardClass: "authority",
+        error: sampleRawLifecycleError()
+      })
+    ).toThrow("Raw-data authority tool.failed events require trusted producer evidence");
+  });
+
+  test("generic tool.failed builder rejects invalid guardClass on non-raw rules", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 20,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        guardClass: "temporary" as never,
+        error: sampleGenericToolFailedError("workspace-quota:failed:invalid-guard")
+      })
+    ).toThrow("tool.failed guardClass must be authority or capability");
+  });
+
+  test("generic tool.failed builder rejects spawn-profile-subset without guardClass", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 21,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: SPAWN_PROFILE_SUBSET_RULE_ID,
+        decision: "failed",
+        error: sampleGenericToolFailedError("spawn-profile-subset:failed:missing-guard")
+      })
+    ).toThrow("Reserved authority policy rule tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder rejects spawn-profile-subset downgraded to capability", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 22,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: SPAWN_PROFILE_SUBSET_RULE_ID,
+        decision: "failed",
+        guardClass: "capability",
+        error: sampleGenericToolFailedError("spawn-profile-subset:failed:capability-guard")
+      })
+    ).toThrow("Reserved authority policy rule tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder rejects tool-parameter-schema-validation without guardClass", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 23,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: TOOL_PARAMETER_SCHEMA_RULE_ID,
+        decision: "failed",
+        error: sampleGenericToolFailedError(
+          "tool-parameter-schema-validation:failed:missing-guard"
+        )
+      })
+    ).toThrow("Reserved authority policy rule tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder rejects tool-parameter-schema-validation downgraded to capability", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 24,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: TOOL_PARAMETER_SCHEMA_RULE_ID,
+        decision: "failed",
+        guardClass: "capability",
+        error: sampleGenericToolFailedError(
+          "tool-parameter-schema-validation:failed:capability-guard"
+        )
+      })
+    ).toThrow("Reserved authority policy rule tool.failed events require guardClass authority");
+  });
+
+  test("generic tool.failed builder rejects reserved non-raw error_id prefixes without authority guard", () => {
+    const cases = [
+      {
+        seq: 30,
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        guardClass: undefined
+      },
+      {
+        seq: 31,
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        guardClass: "capability" as const
+      },
+      {
+        seq: 32,
+        ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+        guardClass: undefined
+      },
+      {
+        seq: 33,
+        ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+        guardClass: "capability" as const
+      }
+    ];
+
+    for (const testCase of cases) {
+      expect(() =>
+        buildToolFailedWsEvent({
+          seq: testCase.seq,
+          timestamp: "2026-07-04T00:00:00.000Z",
+          toolId: "bash",
+          decision: "failed",
+          ...(testCase.guardClass ? { guardClass: testCase.guardClass } : {}),
+          error: sampleGenericToolFailedError(`${testCase.ruleId}:failed:error-id-only`)
+        })
+      ).toThrow("Reserved authority policy rule tool.failed events require guardClass authority");
+    }
+  });
+
+  test("generic tool.failed builder rejects reserved non-raw error_id prefixes with authority guard", () => {
+    for (const [index, ruleId] of [
+      SPAWN_PROFILE_SUBSET_RULE_ID,
+      TOOL_PARAMETER_SCHEMA_RULE_ID
+    ].entries()) {
+      expect(() =>
+        buildToolFailedWsEvent({
+          seq: 34 + index,
+          timestamp: "2026-07-04T00:00:00.000Z",
+          toolId: "bash",
+          decision: "failed",
+          guardClass: "authority",
+          error: sampleGenericToolFailedError(`${ruleId}:failed:error-id-only-authority`)
+        })
+      ).toThrow("Reserved authority policy tool.failed events require trusted producer evidence");
+    }
+  });
+
+  test("generic tool.failed builder rejects reserved non-raw authority rules with authority guard", () => {
+    for (const [index, rule] of [
+      SPAWN_PROFILE_SUBSET_RULE_ID,
+      TOOL_PARAMETER_SCHEMA_RULE_ID
+    ].entries()) {
+      expect(() =>
+        buildToolFailedWsEvent({
+          seq: 25 + index,
+          timestamp: "2026-07-04T00:00:00.000Z",
+          toolId: "bash",
+          rule,
+          decision: "failed",
+          guardClass: "authority",
+          error: sampleGenericToolFailedError(`${rule}:failed:authority-guard`)
+        })
+      ).toThrow("Reserved authority policy tool.failed events require trusted producer evidence");
+    }
+  });
+
+  test("generic tool.failed builder rejects reserved rule prefix impersonation", () => {
+    for (const [index, rule] of [
+      RAW_DATA_WRITE_RULE_ID,
+      SPAWN_PROFILE_SUBSET_RULE_ID,
+      TOOL_PARAMETER_SCHEMA_RULE_ID
+    ].entries()) {
+      expect(() =>
+        buildToolFailedWsEvent({
+          seq: 60 + index,
+          timestamp: "2026-07-04T00:00:00.000Z",
+          toolId: "bash",
+          rule: `${rule}:failed:caller-minted`,
+          decision: "failed",
+          guardClass: "authority",
+          error: sampleGenericToolFailedError(`workspace-quota:failed:rule-prefix-${index}`)
+        })
+      ).toThrow("Reserved authority policy rule prefixes are reserved for error_id");
+    }
+  });
+
+  test("generic tool.failed builder rejects exact reserved rules with authority guard", () => {
+    for (const [index, rule] of [
+      RAW_DATA_WRITE_RULE_ID,
+      SPAWN_PROFILE_SUBSET_RULE_ID,
+      TOOL_PARAMETER_SCHEMA_RULE_ID
+    ].entries()) {
+      const expected =
+        rule === RAW_DATA_WRITE_RULE_ID
+          ? "Raw-data authority tool.failed events require trusted producer evidence"
+          : "Reserved authority policy tool.failed events require trusted producer evidence";
+      expect(() =>
+        buildToolFailedWsEvent({
+          seq: 70 + index,
+          timestamp: "2026-07-04T00:00:00.000Z",
+          toolId: "bash",
+          rule,
+          decision: "failed",
+          guardClass: "authority",
+          error: sampleGenericToolFailedError(`workspace-quota:failed:exact-rule-${index}`)
+        })
+      ).toThrow(expected);
+    }
+  });
+
+  test("generic tool.failed builder rejects caller-minted reserved error_id prefixes with authority guard", () => {
+    for (const [index, rule] of [
+      RAW_DATA_WRITE_RULE_ID,
+      SPAWN_PROFILE_SUBSET_RULE_ID,
+      TOOL_PARAMETER_SCHEMA_RULE_ID
+    ].entries()) {
+      const expected =
+        rule === RAW_DATA_WRITE_RULE_ID
+          ? "Raw-data authority tool.failed events require trusted producer evidence"
+          : "Reserved authority policy tool.failed events require trusted producer evidence";
+      expect(() =>
+        buildToolFailedWsEvent({
+          seq: 80 + index,
+          timestamp: "2026-07-04T00:00:00.000Z",
+          toolId: "bash",
+          decision: "failed",
+          guardClass: "authority",
+          error: sampleGenericToolFailedError(`${rule}:failed:error-id-authority`)
+        })
+      ).toThrow(expected);
+    }
+  });
+
+  test("generic tool.failed builder accepts non-reserved generic failures without guardClass", () => {
     const event = buildToolFailedWsEvent({
-      seq: 10,
+      seq: 27,
       timestamp: "2026-07-04T00:00:00.000Z",
       toolId: "bash",
-      rule: RAW_DATA_WRITE_RULE_ID,
+      rule: "workspace-quota",
       decision: "failed",
-      error: {
-        error_id: "raw-data-write:failed:lifecycle",
-        category: "sandbox_error",
-        severity: "error",
-        message: "Bash command failed.",
-        user_message: "Bash command failed.",
-        evidence_refs: [],
-        retryable: false,
-        recommended_next_actions: [remediation.hint],
-        remediation,
-        created_at: "2026-07-04T00:00:00.000Z"
-      }
+      error: sampleGenericToolFailedError("workspace-quota:failed:no-guard")
     });
 
     expect(event.payload).toMatchObject({
       tool_id: "bash",
-      rule: RAW_DATA_WRITE_RULE_ID,
+      rule: "workspace-quota",
       decision: "failed"
     });
+    expect(event.payload.guard_class).toBeUndefined();
+  });
+
+  test("generic tool.failed builder accepts non-reserved error_id without guardClass", () => {
+    const event = buildToolFailedWsEvent({
+      seq: 37,
+      timestamp: "2026-07-04T00:00:00.000Z",
+      toolId: "bash",
+      decision: "failed",
+      error: sampleGenericToolFailedError("workspace-quota:failed:error-id-only")
+    });
+
+    expect(event.payload).toMatchObject({
+      tool_id: "bash",
+      decision: "failed"
+    });
+    expect(event.payload.rule).toBeUndefined();
+    expect(event.payload.guard_class).toBeUndefined();
+  });
+
+  test("generic tool.failed builder accepts non-reserved generic failures with legal guardClass", () => {
+    for (const guardClass of ["capability", "authority"] as const) {
+      const event = buildToolFailedWsEvent({
+        seq: guardClass === "capability" ? 28 : 29,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        guardClass,
+        error: sampleGenericToolFailedError(`workspace-quota:failed:${guardClass}-guard`)
+      });
+
+      expect(event.payload).toMatchObject({
+        tool_id: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        guard_class: guardClass
+      });
+    }
+  });
+
+  test("generic tool.failed builder rejects top-level identity accessors", () => {
+    const reads = {
+      rule: 0,
+      decision: 0,
+      guardClass: 0
+    };
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 90,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        get rule() {
+          reads.rule += 1;
+          return "workspace-quota";
+        },
+        get decision() {
+          reads.decision += 1;
+          return "failed";
+        },
+        get guardClass() {
+          reads.guardClass += 1;
+          return "authority";
+        },
+        error: sampleGenericToolFailedError("workspace-quota:failed:getter-top")
+      })
+    ).toThrow("tool.failed rule must be a data field");
+
+    expect(reads).toEqual({
+      rule: 0,
+      decision: 0,
+      guardClass: 0
+    });
+  });
+
+  test("generic tool.failed builder rejects nested error_id accessors", () => {
+    const benignErrorId = "workspace-quota:failed:getter-error";
+    const reservedErrorId = `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox:reserved-profile:TOOL-CALL-WS-GETTER`;
+    let errorIdReads = 0;
+    const error = {
+      get error_id() {
+        errorIdReads += 1;
+        return errorIdReads === 1 ? benignErrorId : reservedErrorId;
+      },
+      category: "workspace_error",
+      severity: "error",
+      message: "Workspace quota check failed.",
+      user_message: "Workspace quota check failed.",
+      evidence_refs: [],
+      retryable: true,
+      recommended_next_actions: ["retry after cleanup"],
+      created_at: "2026-07-04T00:00:00.000Z"
+    } as ErrorRecord;
+
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 91,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        guardClass: "authority",
+        error
+      })
+    ).toThrow("tool.failed error.error_id must be a data field");
+
+    expect(errorIdReads).toBe(0);
   });
 
   test("generic tool.failed builder snapshots mutable error payloads", () => {
@@ -295,6 +781,77 @@ describe("backend ws tool.failed skeleton", () => {
     expect(event.payload.error.evidence_refs).toEqual(["evidence:before"]);
     expect(event.payload.error.recommended_next_actions).toEqual(["retry after cleanup"]);
     expect(event.payload.error.remediation?.hint).toBe("Repair workspace state.");
+  });
+
+  test("generic tool.failed builder rejects toJSON identity forgery", () => {
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 92,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: {
+          toJSON: () => SPAWN_PROFILE_SUBSET_RULE_ID
+        } as never,
+        decision: "failed",
+        error: sampleGenericToolFailedError("workspace-quota:failed:rule-to-json")
+      })
+    ).toThrow("tool.failed rule must be a string");
+
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 93,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: {
+          toJSON: () => "denied_by_sandbox"
+        } as never,
+        error: sampleGenericToolFailedError("workspace-quota:failed:decision-to-json")
+      })
+    ).toThrow("tool.failed decision must be a string");
+
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 94,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        error: {
+          ...sampleGenericToolFailedError("workspace-quota:failed:error-id-to-json"),
+          error_id: {
+            startsWith: () => false,
+            toJSON: () => `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox:profile:call`
+          }
+        } as never
+      })
+    ).toThrow("tool.failed error.error_id must be a string");
+  });
+
+  test("generic tool.failed builder rejects reserved error IDs before cloning arrays", () => {
+    const error = sampleGenericToolFailedError(
+      `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox:reserved-profile:TOOL-CALL-WS-2`
+    );
+    let evidenceRefsReads = 0;
+    Object.defineProperty(error, "evidence_refs", {
+      enumerable: true,
+      get() {
+        evidenceRefsReads += 1;
+        throw new Error("evidence_refs trap secret");
+      }
+    });
+
+    expect(() =>
+      buildToolFailedWsEvent({
+        seq: 95,
+        timestamp: "2026-07-04T00:00:00.000Z",
+        toolId: "bash",
+        rule: "workspace-quota",
+        decision: "failed",
+        error
+      })
+    ).toThrow("Reserved raw-data denial error_id values require");
+    expect(evidenceRefsReads).toBe(0);
   });
 
   test("generic tool.failed builder rejects reserved raw-denial error IDs", () => {
@@ -424,6 +981,36 @@ function cloneErrorRecordForTest(error: ErrorRecord): ErrorRecord {
     evidence_refs: [...error.evidence_refs],
     recommended_next_actions: [...error.recommended_next_actions],
     ...(error.remediation ? { remediation: { ...error.remediation } } : {})
+  };
+}
+
+function sampleRawLifecycleError(): ErrorRecord {
+  const remediation = rawDataWriteRemediation();
+  return {
+    error_id: `${RAW_DATA_WRITE_RULE_ID}:failed:lifecycle`,
+    category: "sandbox_error",
+    severity: "error",
+    message: "Bash command failed.",
+    user_message: "Bash command failed.",
+    evidence_refs: [],
+    retryable: false,
+    recommended_next_actions: [remediation.hint],
+    remediation,
+    created_at: "2026-07-04T00:00:00.000Z"
+  };
+}
+
+function sampleGenericToolFailedError(errorId: string): ErrorRecord {
+  return {
+    error_id: errorId,
+    category: "workspace_error",
+    severity: "error",
+    message: "Workspace quota check failed.",
+    user_message: "Workspace quota check failed.",
+    evidence_refs: [],
+    retryable: true,
+    recommended_next_actions: ["retry after cleanup"],
+    created_at: "2026-07-04T00:00:00.000Z"
   };
 }
 

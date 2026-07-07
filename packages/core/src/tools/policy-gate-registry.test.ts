@@ -27,21 +27,26 @@ import type {
 import { z } from "zod";
 import {
   PolicyGateRemediationSchema,
+  RESERVED_AUTHORITY_POLICY_RULE_IDS,
   SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS,
   SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
   SPAWN_PROFILE_SUBSET_POLICY_REF,
-  SPAWN_PROFILE_SUBSET_RULE_ID
+  SPAWN_PROFILE_SUBSET_RULE_ID,
+  TOOL_PARAMETER_SCHEMA_RULE_ID
 } from "./policy-gate-core";
 import {
   assertAllToolsPolicyGated,
   assertPolicyGatedToolRegistry,
   createPolicyGateEvaluator,
   createPolicyGatedToolRegistry,
+  createShudPolicyGateEvaluator,
   createShudRuntimeToolRegistry,
   createShudSandboxedBashTool,
   isPolicyGatedTool,
   wrapAllRegisteredTools,
-  wrapToolWithPolicyGate
+  wrapToolWithPolicyGate,
+  type PolicyGateEvaluator,
+  type PolicyGateExecutionInputValidator
 } from "./policy-gate-registry";
 import {
   RAW_DATA_WRITE_RULE_ID,
@@ -66,6 +71,150 @@ if (requireSeatbeltTests) {
 const seatbeltTest = hasSeatbelt ? test : test.skip;
 
 describe("policy-gated zero tool registry", () => {
+  test("policy gate evaluator assembly rejects unclassified hard guard rules", () => {
+    expect(() =>
+      createPolicyGateEvaluator({
+        rules: [
+          {
+            ruleId: "registry-unclassified-guard",
+            description: "Missing guard_class metadata.",
+            evaluate: () => ({ decision: "allow" })
+          } as never
+        ]
+      })
+    ).toThrow(
+      /Policy gate guard_class lint failed: registry-unclassified-guard: missing or invalid guardClass\/guard_class/
+    );
+  });
+
+  test("policy gate evaluator propagates snake_case rule guard_class to denial payloads", async () => {
+    const bashTool = new RecordingTool("bash");
+    const registry = createPolicyGatedToolRegistry([bashTool], {
+      evaluate: createPolicyGateEvaluator({
+        rules: [
+          {
+            ruleId: "registry-snake-guard",
+            description: "Uses spec-shaped guard_class metadata.",
+            guard_class: "authority",
+            evaluate: () => ({
+              decision: "deny",
+              reason: "snake_case rule metadata denied",
+              remediation: {
+                next_action: "adjust_scope",
+                hint: "Use a governed tool input.",
+                ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+              }
+            })
+          }
+        ]
+      })
+    });
+
+    const result = await registry.get("bash")?.run(createToolContext("worker"), {
+      command: "printf nope > workspace/out.txt"
+    });
+
+    expect(result?.success).toBe(false);
+    expect(bashTool.calls).toBe(0);
+    const payload = JSON.parse(result?.output ?? "{}") as {
+      ruleId?: string;
+      guard_class?: string;
+    };
+    expect(payload.ruleId).toBe("registry-snake-guard");
+    expect(payload.guard_class).toBe("authority");
+  });
+
+  test("policy gate producer types accept snake_case and matching guard aliases", () => {
+    const snakeCaseOnlyEvaluator = (() => ({
+      decision: "deny" as const,
+      ruleId: "typed-snake-evaluator",
+      reason: "typed evaluator deny uses spec-shaped guard_class only",
+      remediation: {
+        next_action: "fix_and_retry" as const,
+        hint: "Fix the evaluator-owned input before retrying.",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      },
+      guard_class: "capability" as const
+    })) satisfies PolicyGateEvaluator;
+    const matchingAliasEvaluator = (() => ({
+      decision: "deny" as const,
+      ruleId: "typed-matching-evaluator",
+      reason: "typed evaluator deny uses matching aliases",
+      remediation: {
+        next_action: "fix_and_retry" as const,
+        hint: "Fix the evaluator-owned input before retrying.",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      },
+      guardClass: "capability" as const,
+      guard_class: "capability" as const
+    })) satisfies PolicyGateEvaluator;
+    const snakeCaseOnlyValidator = (() => ({
+      decision: "deny" as const,
+      ruleId: "typed-snake-validator",
+      reason: "typed validator deny uses spec-shaped guard_class only",
+      remediation: {
+        next_action: "fix_and_retry" as const,
+        hint: "Fix the validator-owned input before retrying.",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      },
+      guard_class: "capability" as const
+    })) satisfies PolicyGateExecutionInputValidator;
+    const matchingAliasValidator = (() => ({
+      decision: "deny" as const,
+      ruleId: "typed-matching-validator",
+      reason: "typed validator deny uses matching aliases",
+      remediation: {
+        next_action: "fix_and_retry" as const,
+        hint: "Fix the validator-owned input before retrying.",
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      },
+      guardClass: "capability" as const,
+      guard_class: "capability" as const
+    })) satisfies PolicyGateExecutionInputValidator;
+
+    expect(typeof snakeCaseOnlyEvaluator).toBe("function");
+    expect(typeof matchingAliasEvaluator).toBe("function");
+    expect(typeof snakeCaseOnlyValidator).toBe("function");
+    expect(typeof matchingAliasValidator).toBe("function");
+  });
+
+  test("policy gate evaluator snapshots retained context guard metadata", async () => {
+    const bashTool = new RecordingTool("bash");
+    const rule = {
+      ruleId: "registry-retained-context-guard",
+      description: "Denies with metadata captured at evaluator construction.",
+      guardClass: "authority" as "authority" | "capability",
+      evaluate: () => ({
+        decision: "deny" as const,
+        reason: "retained context denied",
+        remediation: {
+          next_action: "adjust_scope" as const,
+          hint: "Use a governed input.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        }
+      })
+    };
+    const context = { rules: [rule] };
+    const evaluate = createPolicyGateEvaluator(context);
+    rule.guardClass = "capability";
+    const registry = createPolicyGatedToolRegistry([bashTool], { evaluate });
+
+    const result = await registry.get("bash")?.run(createToolContext("worker"), {
+      command: "printf nope > workspace/out.txt"
+    });
+
+    expect(result?.success).toBe(false);
+    expect(bashTool.calls).toBe(0);
+    const payload = JSON.parse(result?.output ?? "{}") as {
+      error?: string;
+      ruleId?: string;
+      guard_class?: string;
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("registry-retained-context-guard");
+    expect(payload.guard_class).toBe("authority");
+  });
+
   test("denies before executing the underlying bash BaseTool", async () => {
     const bashTool = new RecordingTool("bash");
     const registry = createPolicyGatedToolRegistry([bashTool], {
@@ -74,6 +223,7 @@ describe("policy-gated zero tool registry", () => {
           {
             ruleId: "workspace-write-deny",
             description: "Reject writes to raw data.",
+            guardClass: "authority",
             evaluate: () => ({
               decision: "deny",
               reason: "raw data writes are blocked",
@@ -1892,6 +2042,631 @@ describe("policy-gated zero tool registry", () => {
     });
   });
 
+  test("spawn-profile authority impersonation from custom evaluator fails closed", async () => {
+    const bashTool = new RecordingTool("bash");
+    const wrapped = wrapToolWithPolicyGate(bashTool, {
+      evaluate: async () => ({
+        decision: "deny",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        reason: "custom evaluator attempted to impersonate spawn-profile authority",
+        remediation: {
+          next_action: "adjust_scope",
+          hint: "Use a custom evaluator-owned policy rule id.",
+          ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+        },
+        guardClass: "authority"
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: "printf nope > workspace/out.txt"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain(SPAWN_PROFILE_SUBSET_RULE_ID);
+    expect(result.output).toContain("ruleId");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(bashTool.calls).toBe(0);
+  });
+
+  test("schema validation authority impersonation from custom evaluator fails closed", async () => {
+    for (const guardClass of ["authority", "capability"] as const) {
+      const tool = new RecordingTool(`custom.schema.${guardClass}`);
+      const wrapped = wrapToolWithPolicyGate(tool, {
+        evaluate: async () => ({
+          decision: "deny",
+          ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+          reason: "custom evaluator attempted to impersonate built-in schema validation",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Use a custom evaluator-owned policy rule id.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+          },
+          guardClass
+        })
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), {
+        command: "printf nope > workspace/out.txt"
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Invalid policy gate decision");
+      expect(result.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
+      expect(result.output).toContain("ruleId");
+      expect(result.output).not.toContain("policy_gate_denied");
+      expect(tool.calls).toBe(0);
+    }
+  });
+
+  test("empty ruleId from custom evaluator fails without policy_gate_denied payload", async () => {
+    const bashTool = new RecordingTool("bash");
+    const wrapped = wrapToolWithPolicyGate(bashTool, {
+      evaluate: async () =>
+        ({
+          decision: "deny",
+          ruleId: "   ",
+          reason: "bad generic deny",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Return a stable rule identity before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "authority"
+        }) as never
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: "printf nope > workspace/out.txt"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain("ruleId");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+    expect(bashTool.calls).toBe(0);
+  });
+
+  test("empty ruleId from execution validator fails without policy_gate_denied payload", async () => {
+    const tool = new RecordingTool("validator.empty.rule");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () =>
+        ({
+          decision: "deny",
+          ruleId: "\t",
+          reason: "validator denied without stable identity",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Return a stable validator rule identity before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "capability"
+        }) as never
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain("ruleId");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+    expect(tool.calls).toBe(0);
+  });
+
+  test("SHUD policy evaluator rejects direct custom empty ruleId", async () => {
+    const tool = new RecordingTool("direct.empty.rule");
+    const evaluator = createShudPolicyGateEvaluator(async () =>
+      ({
+        decision: "deny",
+        ruleId: "",
+        reason: "direct custom evaluator denied without stable identity",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Return a stable rule identity before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "authority"
+      }) as never
+    );
+
+    await expect(
+      evaluator(
+        {
+          toolId: tool.name,
+          role: "worker",
+          input: { blocked: true },
+          workDir: "/tmp/shud-harness-test"
+        },
+        { tool, toolContext: createToolContext("worker") }
+      )
+    ).rejects.toThrow(/Invalid policy gate decision.*ruleId/);
+    expect(tool.calls).toBe(0);
+  });
+
+  test("SHUD policy evaluator rejects direct custom missing guardClass", async () => {
+    const tool = new RecordingTool("direct.missing.guard");
+    const evaluator = createShudPolicyGateEvaluator(async () =>
+      ({
+        decision: "deny",
+        ruleId: "direct-missing-guard-class",
+        reason: "direct custom evaluator denied without classification",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Classify the direct custom denial before returning it.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        }
+      }) as never
+    );
+
+    await expect(
+      evaluator(
+        {
+          toolId: tool.name,
+          role: "worker",
+          input: { blocked: true },
+          workDir: "/tmp/shud-harness-test"
+        },
+        { tool, toolContext: createToolContext("worker") }
+      )
+    ).rejects.toThrow(/Invalid policy gate decision.*direct-missing-guard-class.*guardClass/);
+    expect(tool.calls).toBe(0);
+  });
+
+  test("SHUD policy evaluator rejects direct custom invalid guardClass", async () => {
+    const tool = new RecordingTool("direct.invalid.guard");
+    const evaluator = createShudPolicyGateEvaluator(async () =>
+      ({
+        decision: "deny",
+        ruleId: "direct-invalid-guard-class",
+        reason: "direct custom evaluator denied with invalid classification",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Classify the direct custom denial as authority or capability.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "temporary"
+      }) as never
+    );
+
+    await expect(
+      evaluator(
+        {
+          toolId: tool.name,
+          role: "worker",
+          input: { blocked: true },
+          workDir: "/tmp/shud-harness-test"
+        },
+        { tool, toolContext: createToolContext("worker") }
+      )
+    ).rejects.toThrow(/Invalid policy gate decision.*direct-invalid-guard-class.*guardClass/);
+    expect(tool.calls).toBe(0);
+  });
+
+  test("SHUD policy evaluator rejects direct custom conflicting guard aliases", async () => {
+    const tool = new RecordingTool("direct.conflicting.guard");
+    const evaluator = createShudPolicyGateEvaluator(async () =>
+      ({
+        decision: "deny",
+        ruleId: "direct-conflicting-guard-class",
+        reason: "direct custom evaluator denied with conflicting classifications",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Return one consistent guard classification before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "authority",
+        guard_class: "capability"
+      }) as never
+    );
+
+    await expect(
+      evaluator(
+        {
+          toolId: tool.name,
+          role: "worker",
+          input: { blocked: true },
+          workDir: "/tmp/shud-harness-test"
+        },
+        { tool, toolContext: createToolContext("worker") }
+      )
+    ).rejects.toThrow(/Invalid policy gate decision.*direct-conflicting-guard-class.*guardClass/);
+    expect(tool.calls).toBe(0);
+  });
+
+  test("SHUD policy evaluator rejects direct custom raw-data authority downgrade", async () => {
+    const tool = new RecordingTool("direct.raw.downgrade");
+    const evaluator = createShudPolicyGateEvaluator(async () =>
+      ({
+        decision: "deny",
+        ruleId: RAW_DATA_WRITE_RULE_ID,
+        reason: "direct custom evaluator attempted to downgrade raw-data authority",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Keep raw-data-write classified as authority.",
+          ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+        },
+        guardClass: "capability"
+      }) as never
+    );
+
+    await expect(
+      evaluator(
+        {
+          toolId: tool.name,
+          role: "worker",
+          input: { blocked: true },
+          workDir: "/tmp/shud-harness-test"
+        },
+        { tool, toolContext: createToolContext("worker") }
+      )
+    ).rejects.toThrow(/Invalid policy gate decision.*raw-data-write.*guardClass/);
+    expect(tool.calls).toBe(0);
+  });
+
+  test("SHUD policy evaluator rejects direct custom schema validation authority downgrade", async () => {
+    const tool = new RecordingTool("direct.schema.downgrade");
+    const evaluator = createShudPolicyGateEvaluator(async () =>
+      ({
+        decision: "deny",
+        ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+        reason: "direct custom evaluator attempted to downgrade schema validation authority",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Keep built-in schema validation classified as authority.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+        },
+        guardClass: "capability"
+      }) as never
+    );
+
+    await expect(
+      evaluator(
+        {
+          toolId: tool.name,
+          role: "worker",
+          input: { blocked: true },
+          workDir: "/tmp/shud-harness-test"
+        },
+        { tool, toolContext: createToolContext("worker") }
+      )
+    ).rejects.toThrow(
+      new RegExp(`Invalid policy gate decision.*${TOOL_PARAMETER_SCHEMA_RULE_ID}.*guardClass`)
+    );
+    expect(tool.calls).toBe(0);
+  });
+
+  test("SHUD policy evaluator rejects direct custom reserved authority rule ids", async () => {
+    const cases = [
+      {
+        name: "spawn",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      },
+      {
+        name: "raw",
+        ruleId: RAW_DATA_WRITE_RULE_ID,
+        ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+      },
+      {
+        name: "schema",
+        ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+      }
+    ] as const;
+
+    for (const testCase of cases) {
+      const tool = new RecordingTool(`direct.${testCase.name}.authority`);
+      const evaluator = createShudPolicyGateEvaluator(async () => ({
+        decision: "deny",
+        ruleId: testCase.ruleId,
+        reason: "direct custom evaluator attempted to impersonate reserved authority",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Use a custom evaluator-owned policy rule id.",
+          ref: testCase.ref
+        },
+        guardClass: "authority"
+      }));
+
+      await expect(
+        evaluator(
+          {
+            toolId: tool.name,
+            role: "worker",
+            input: { blocked: true },
+            workDir: "/tmp/shud-harness-test"
+          },
+          { tool, toolContext: createToolContext("worker") }
+        )
+      ).rejects.toThrow(new RegExp(`Invalid policy gate decision.*${testCase.ruleId}.*ruleId`));
+      expect(tool.calls).toBe(0);
+    }
+  });
+
+  test("missing guardClass from execution validator fails closed without policy_gate_denied payload", async () => {
+    const tool = new RecordingTool("validator.missing.guard");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () =>
+        ({
+          decision: "deny",
+          ruleId: "validator-missing-guard-class",
+          reason: "validator denied without classification",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Classify the validator denial before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          }
+        }) as never
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain("validator-missing-guard-class");
+    expect(result.output).toContain("guardClass");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+    expect(tool.calls).toBe(0);
+  });
+
+  test("invalid guardClass from execution validator fails closed without policy_gate_denied payload", async () => {
+    const tool = new RecordingTool("validator.invalid.guard");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () =>
+        ({
+          decision: "deny",
+          ruleId: "validator-invalid-guard-class",
+          reason: "validator denied with an invalid classification",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Classify the validator denial as authority or capability before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "temporary"
+        }) as never
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain("validator-invalid-guard-class");
+    expect(result.output).toContain("guardClass");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+    expect(tool.calls).toBe(0);
+  });
+
+  test("conflicting guard aliases from execution validator fail closed without policy_gate_denied payload", async () => {
+    const tool = new RecordingTool("validator.conflicting.guard");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () =>
+        ({
+          decision: "deny",
+          ruleId: "validator-conflicting-guard-class",
+          reason: "validator denied with conflicting classifications",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Return matching guardClass and guard_class values before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "authority",
+          guard_class: "capability"
+        }) as never
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain("validator-conflicting-guard-class");
+    expect(result.output).toContain("guardClass");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+    expect(tool.calls).toBe(0);
+  });
+
+  test("raw-data authority downgrade from execution validator fails closed without policy payload", async () => {
+    const tool = new RecordingTool("validator.raw.downgrade");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () =>
+        ({
+          decision: "deny",
+          ruleId: RAW_DATA_WRITE_RULE_ID,
+          reason: "execution validator attempted to downgrade raw-data authority",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Keep raw-data-write classified as authority.",
+            ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+          },
+          guardClass: "capability"
+        }) as never
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: "printf nope > data/raw/input.csv"
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain(RAW_DATA_WRITE_RULE_ID);
+    expect(result.output).toContain("guardClass");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.output).not.toContain("policy_gate_raw_data_rule_misconfigured");
+    expect(result.output).not.toContain("raw_data_write_denied");
+    expect(result.outputSummary).toContain("Error: Invalid policy gate decision");
+    expect(tool.calls).toBe(0);
+  });
+
+  test("raw-data authority impersonation from execution validator fails closed", async () => {
+    const tool = new RecordingTool("validator.raw.authority");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: RAW_DATA_WRITE_RULE_ID,
+        reason: "execution validator attempted to own raw-data write evidence",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Let RawDataSandboxedBashTool own raw-data write evidence.",
+          ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+        },
+        guardClass: "authority"
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: "printf nope > data/raw/input.csv"
+    });
+
+    expect(result.success).toBe(false);
+    expect(tool.calls).toBe(0);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain(RAW_DATA_WRITE_RULE_ID);
+    expect(result.output).toContain("ruleId");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.output).not.toContain("policy_gate_raw_data_rule_misconfigured");
+    expect(result.output).not.toContain("raw_data_write_denied");
+  });
+
+  test("spawn-profile authority impersonation from execution validator fails closed", async () => {
+    const tool = new RecordingTool("validator.spawn.authority");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        reason: "execution validator attempted to impersonate spawn authority",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Use a validator-owned policy rule id.",
+          ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+        },
+        guardClass: "authority"
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain(SPAWN_PROFILE_SUBSET_RULE_ID);
+    expect(result.output).toContain("ruleId");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(tool.calls).toBe(0);
+  });
+
+  test("schema validation authority impersonation from execution validator fails closed", async () => {
+    for (const guardClass of ["authority", "capability"] as const) {
+      const tool = new RecordingTool(`validator.schema.${guardClass}`);
+      const wrapped = wrapToolWithPolicyGate(tool, {
+        evaluate: async () => ({ decision: "allow" }),
+        validateExecutionInput: () => ({
+          decision: "deny",
+          ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+          reason: "execution validator attempted to impersonate built-in schema validation",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Use a validator-owned policy rule id.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+          },
+          guardClass
+        })
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Invalid policy gate decision");
+      expect(result.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
+      expect(result.output).toContain("ruleId");
+      expect(result.output).not.toContain("policy_gate_denied");
+      expect(tool.calls).toBe(0);
+    }
+  });
+
+  test("matching guard aliases from execution validator emit classified policy_gate_denied", async () => {
+    const tool = new RecordingTool("validator.matching.guard");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: "validator-matching-guard-class",
+        reason: "validator denied with matching classifications",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Fix the validator-owned input contract before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "capability",
+        guard_class: "capability"
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(tool.calls).toBe(0);
+    expect(result.output).toContain("policy_gate_denied");
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      ruleId?: string;
+      guard_class?: string;
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("validator-matching-guard-class");
+    expect(payload.guard_class).toBe("capability");
+  });
+
+  test("classified execution validator denial emits policy_gate_denied with guard_class", async () => {
+    const tool = new RecordingTool("validator.classified.guard");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({ decision: "allow" }),
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: "validator-classified-guard-class",
+        reason: "validator denied with a valid classification",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Fix the validator-owned input contract before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "capability"
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(tool.calls).toBe(0);
+    expect(result.output).toContain("policy_gate_denied");
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      ruleId?: string;
+      guard_class?: string;
+      reason?: string;
+      remediation?: {
+        next_action?: string;
+        hint?: string;
+        ref?: string;
+      };
+    };
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("validator-classified-guard-class");
+    expect(payload.guard_class).toBe("capability");
+    expect(payload.reason).toBe("validator denied with a valid classification");
+    expect(payload.remediation?.next_action).toBe("fix_and_retry");
+  });
+
   test("invalid remediation from policy evaluator returns failed ToolResult", async () => {
     const bashTool = new RecordingTool("bash");
     const wrapped = wrapToolWithPolicyGate(bashTool, {
@@ -1900,6 +2675,7 @@ describe("policy-gated zero tool registry", () => {
           {
             ruleId: "invalid-remediation-rule",
             description: "Returns invalid remediation.",
+            guardClass: "authority",
             evaluate: () => ({
               decision: "deny",
               reason: "invalid remediation",
@@ -1937,6 +2713,7 @@ describe("policy-gated zero tool registry", () => {
           {
             ruleId: "workspace-write-deny",
             description: "Reject writes to raw data.",
+            guardClass: "authority",
             evaluate: () => ({
               decision: "deny",
               reason: `blocked because ${secret}`,
@@ -1979,7 +2756,7 @@ describe("policy-gated zero tool registry", () => {
     expect(bashTool.calls).toBe(0);
   });
 
-  test("raw-data rule misconfiguration deny redacts registered secrets before returning", async () => {
+  test("reserved raw-data custom deny fails closed without leaking registered secrets", async () => {
     const secret = "fake-raw-rule-secret";
     const secretFilter = new TestSecretFilter();
     secretFilter.addSecret("raw-rule-secret", secret);
@@ -1993,7 +2770,8 @@ describe("policy-gated zero tool registry", () => {
           next_action: "fix_and_retry",
           hint: `Remove the outer raw rule containing ${secret}.`,
           ref: `openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md#${secret}`
-        }
+        },
+        guardClass: "authority"
       })
     });
 
@@ -2010,16 +2788,12 @@ describe("policy-gated zero tool registry", () => {
     expect(result.success).toBe(false);
     expect(result.output).not.toContain(secret);
     expect(result.outputSummary).not.toContain(secret);
-    expect(result.output).toContain("[redacted:raw-rule-secret]");
-    expect(result.outputSummary).toContain("[redacted:raw-rule-secret]");
-    const payload = JSON.parse(result.output) as {
-      outer_reason?: string;
-      remediation?: {
-        ref?: string;
-      };
-    };
-    expect(payload.outer_reason).toContain("[redacted:raw-rule-secret]");
-    expect(payload.remediation?.ref).toContain("[redacted:raw-rule-secret]");
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain(RAW_DATA_WRITE_RULE_ID);
+    expect(result.output).toContain("ruleId");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.output).not.toContain("policy_gate_raw_data_rule_misconfigured");
+    expect(result.output).not.toContain("raw_data_write_denied");
     expect(bashTool.calls).toBe(0);
   });
 
@@ -2198,7 +2972,8 @@ describe("policy-gated zero tool registry", () => {
               next_action: "adjust_scope",
               hint: "Use a registry-authorized input.",
               ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-            }
+            },
+            guardClass: "authority"
           };
         }
         return { decision: "allow" };
@@ -2390,7 +3165,8 @@ describe("policy-gated zero tool registry", () => {
           next_action: "adjust_scope",
           hint: "Use a tool allowed by the registry owner.",
           ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-        }
+        },
+        guardClass: "authority"
       })
     });
     const staleReplacementInnerTool = new RecordingTool("edit");
@@ -2421,7 +3197,8 @@ describe("policy-gated zero tool registry", () => {
           next_action: "adjust_scope",
           hint: "Use a registry-authorized input.",
           ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-        }
+        },
+        guardClass: "authority"
       })
     });
     const fakeOptions = {
@@ -2476,7 +3253,8 @@ describe("policy-gated zero tool registry", () => {
           next_action: "adjust_scope",
           hint: "Use a registry-authorized input.",
           ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-        }
+        },
+        guardClass: "authority"
       })
     });
     const registeredTool = registry.get("generic.tools.authority");
@@ -2807,10 +3585,11 @@ describe("policy-gated zero tool registry", () => {
 
     expect(result.success).toBe(false);
     expect(result.output).toContain("policy_gate_denied");
-    expect(result.output).toContain("tool-parameter-schema-validation");
+    expect(result.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
     const payload = JSON.parse(result.output) as {
       error?: string;
       ruleId?: string;
+      guard_class?: string;
       reason?: string;
       remediation?: {
         next_action?: string;
@@ -2819,7 +3598,8 @@ describe("policy-gated zero tool registry", () => {
       };
     };
     expect(payload.error).toBe("policy_gate_denied");
-    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.ruleId).toBe(TOOL_PARAMETER_SCHEMA_RULE_ID);
+    expect(payload.guard_class).toBe("authority");
     expect(payload.reason).toContain("command");
     expect(payload.remediation?.next_action).toBe("fix_and_retry");
     expect(payload.remediation?.hint).toContain("Zod parameter schema");
@@ -2862,10 +3642,11 @@ describe("policy-gated zero tool registry", () => {
 
     expect(result?.success).toBe(false);
     expect(result?.output).toContain("policy_gate_denied");
-    expect(result?.output).toContain("tool-parameter-schema-validation");
+    expect(result?.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
     const payload = JSON.parse(result?.output ?? "{}") as {
       error?: string;
       ruleId?: string;
+      guard_class?: string;
       reason?: string;
       remediation?: {
         next_action?: string;
@@ -2874,7 +3655,8 @@ describe("policy-gated zero tool registry", () => {
       };
     };
     expect(payload.error).toBe("policy_gate_denied");
-    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.ruleId).toBe(TOOL_PARAMETER_SCHEMA_RULE_ID);
+    expect(payload.guard_class).toBe("authority");
     expect(payload.reason).toContain("command");
     expect(payload.remediation?.next_action).toBe("fix_and_retry");
     expect(payload.remediation?.hint).toContain("Zod parameter schema");
@@ -3088,11 +3870,12 @@ describe("policy-gated zero tool registry", () => {
 
     expect(result.success).toBe(false);
     expect(result.output).toContain("policy_gate_denied");
-    expect(result.output).toContain("tool-parameter-schema-validation");
+    expect(result.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
     expect(result.output).not.toContain("throwing evaluator");
     const payload = JSON.parse(result.output) as {
       error?: string;
       ruleId?: string;
+      guard_class?: string;
       remediation?: {
         next_action?: string;
         hint?: string;
@@ -3100,7 +3883,8 @@ describe("policy-gated zero tool registry", () => {
       };
     };
     expect(payload.error).toBe("policy_gate_denied");
-    expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+    expect(payload.ruleId).toBe(TOOL_PARAMETER_SCHEMA_RULE_ID);
+    expect(payload.guard_class).toBe("authority");
     expect(payload.remediation?.next_action).toBe("fix_and_retry");
     expect(payload.remediation?.hint).toContain("Zod parameter schema");
     expect(payload.remediation?.ref).toBe(
@@ -3109,6 +3893,398 @@ describe("policy-gated zero tool registry", () => {
     expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
     expect(evaluatorCalls).toBe(1);
     expect(zodTool.calls).toBe(0);
+  });
+
+  test("SHUD evaluator decision validation errors win before invalid Zod schema denial", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.invalid.shud.decision.validation",
+      z.object({
+        command: z.string()
+      })
+    );
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: createShudPolicyGateEvaluator(async () => {
+        evaluatorCalls += 1;
+        return {
+          decision: "deny",
+          ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+          reason: "custom evaluator attempted to downgrade spawn-profile authority",
+          remediation: {
+            next_action: "adjust_scope",
+            hint: "Keep spawn-profile-subset classified as authority.",
+            ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+          },
+          guardClass: "capability"
+        };
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain(SPAWN_PROFILE_SUBSET_RULE_ID);
+    expect(result.output).toContain("guardClass");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.output).not.toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
+  test("core evaluator guard lint errors win before invalid Zod schema denial", async () => {
+    const zodTool = new ZodRecordingTool(
+      "zod.invalid.core.guard.lint",
+      z.object({
+        command: z.string()
+      })
+    );
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(zodTool, {
+      evaluate: createPolicyGateEvaluator({
+        rules: [
+          {
+            ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+            description: "Attempts to downgrade reserved spawn authority at deny time.",
+            guardClass: "authority",
+            evaluate: () => {
+              evaluatorCalls += 1;
+              return {
+                decision: "deny",
+                reason: "core evaluator attempted to downgrade spawn-profile authority",
+                remediation: {
+                  next_action: "adjust_scope",
+                  hint: "Keep spawn-profile-subset classified as authority.",
+                  ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+                },
+                guardClass: "capability"
+              };
+            }
+          }
+        ]
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), {
+      command: 42
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Policy gate guard_class lint failed");
+    expect(result.output).toContain(SPAWN_PROFILE_SUBSET_RULE_ID);
+    expect(result.output).toContain("guardClass");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(result.output).not.toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
+    expect(evaluatorCalls).toBe(1);
+    expect(zodTool.calls).toBe(0);
+  });
+
+  test("reserved ruleId prefixes from custom evaluators fail as invalid decisions", async () => {
+    const cases = [
+      {
+        name: "raw",
+        ruleId: RAW_DATA_WRITE_RULE_ID,
+        ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+      },
+      {
+        name: "spawn",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      },
+      {
+        name: "schema",
+        ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+      }
+    ] as const;
+
+    expect(cases.map((testCase) => testCase.ruleId).sort()).toEqual(
+      [...RESERVED_AUTHORITY_POLICY_RULE_IDS].sort()
+    );
+
+    for (const testCase of cases) {
+      const tool = new RecordingTool(`evaluator.prefix.${testCase.name}`);
+      const wrapped = wrapToolWithPolicyGate(tool, {
+        evaluate: async () => ({
+          decision: "deny",
+          ruleId: `${testCase.ruleId}:caller-minted`,
+          reason: "custom evaluator attempted to mint reserved authority prefix evidence",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Use an evaluator-owned policy rule id.",
+            ref: testCase.ref
+          },
+          guardClass: "authority"
+        })
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Invalid policy gate decision");
+      expect(result.output).toContain(`${testCase.ruleId}:caller-minted`);
+      expect(result.output).toContain("ruleId");
+      expect(result.output).not.toContain("policy_gate_denied");
+      expect(tool.calls).toBe(0);
+    }
+  });
+
+  test("reserved ruleId prefixes from execution validators fail as invalid decisions", async () => {
+    const cases = [
+      {
+        name: "raw",
+        ruleId: RAW_DATA_WRITE_RULE_ID,
+        ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+      },
+      {
+        name: "spawn",
+        ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      },
+      {
+        name: "schema",
+        ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定"
+      }
+    ] as const;
+
+    for (const testCase of cases) {
+      const tool = new RecordingTool(`validator.prefix.${testCase.name}`);
+      const wrapped = wrapToolWithPolicyGate(tool, {
+        evaluate: async () => ({ decision: "allow" }),
+        validateExecutionInput: () => ({
+          decision: "deny",
+          ruleId: `${testCase.ruleId}:caller-minted`,
+          reason: "execution validator attempted to mint reserved authority prefix evidence",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Use a validator-owned policy rule id.",
+            ref: testCase.ref
+          },
+          guardClass: "authority"
+        })
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Invalid policy gate decision");
+      expect(result.output).toContain(`${testCase.ruleId}:caller-minted`);
+      expect(result.output).toContain("ruleId");
+      expect(result.output).not.toContain("policy_gate_denied");
+      expect(tool.calls).toBe(0);
+    }
+  });
+
+  test("non-Zod evaluator decision validation errors win over execution validator denial", async () => {
+    const tool = new RecordingTool("non-zod.validator.masked.invalid.evaluator");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({
+        decision: "deny",
+        ruleId: RAW_DATA_WRITE_RULE_ID,
+        reason: "custom evaluator attempted to downgrade raw-data authority",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Keep raw-data-write classified as authority.",
+          ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+        },
+        guardClass: "capability"
+      }),
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: "validator-capability-denial",
+        reason: "validator would deny with a non-reserved capability rule",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Fix the validator-owned input before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "capability"
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("Invalid policy gate decision");
+    expect(result.output).toContain(RAW_DATA_WRITE_RULE_ID);
+    expect(result.output).toContain("guardClass");
+    expect(result.output).not.toContain("validator-capability-denial");
+    expect(result.output).not.toContain("policy_gate_denied");
+    expect(tool.calls).toBe(0);
+  });
+
+  test("non-Zod execution validator errors win over evaluator denial", async () => {
+    const cases = [
+      {
+        name: "missing-guard",
+        decision: {
+          decision: "deny",
+          ruleId: "validator-missing-guard-class",
+          reason: "validator denied without classification",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Classify the validator denial before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          }
+        },
+        expectedRule: "validator-missing-guard-class",
+        expectedField: "guardClass"
+      },
+      {
+        name: "invalid-guard",
+        decision: {
+          decision: "deny",
+          ruleId: "validator-invalid-guard-class",
+          reason: "validator denied with an invalid classification",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Classify the validator denial as authority or capability before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "temporary"
+        },
+        expectedRule: "validator-invalid-guard-class",
+        expectedField: "guardClass"
+      },
+      {
+        name: "reserved-rule",
+        decision: {
+          decision: "deny",
+          ruleId: RAW_DATA_WRITE_RULE_ID,
+          reason: "validator attempted to mint exact reserved authority evidence",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Use a validator-owned policy rule id.",
+            ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+          },
+          guardClass: "authority"
+        },
+        expectedRule: RAW_DATA_WRITE_RULE_ID,
+        expectedField: "ruleId"
+      },
+      {
+        name: "reserved-prefix",
+        decision: {
+          decision: "deny",
+          ruleId: `${RAW_DATA_WRITE_RULE_ID}:caller-minted`,
+          reason: "validator attempted to mint reserved authority prefix evidence",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Use a validator-owned policy rule id.",
+            ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+          },
+          guardClass: "authority"
+        },
+        expectedRule: `${RAW_DATA_WRITE_RULE_ID}:caller-minted`,
+        expectedField: "ruleId"
+      }
+    ] as const;
+
+    for (const testCase of cases) {
+      const tool = new RecordingTool(`non-zod.validator.error.before.evaluator.${testCase.name}`);
+      const wrapped = wrapToolWithPolicyGate(tool, {
+        evaluate: async () => ({
+          decision: "deny",
+          ruleId: "evaluator-capability-denial",
+          reason: "legal evaluator denial should not mask validator validation errors",
+          remediation: {
+            next_action: "adjust_scope",
+            hint: "Use a tool input allowed by the evaluator policy.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "capability"
+        }),
+        validateExecutionInput: () => testCase.decision as never
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Invalid policy gate decision");
+      expect(result.output).toContain(testCase.expectedRule);
+      expect(result.output).toContain(testCase.expectedField);
+      expect(result.output).not.toContain("evaluator-capability-denial");
+      expect(result.output).not.toContain("policy_gate_denied");
+      expect(tool.calls).toBe(0);
+    }
+  });
+
+  test("non-Zod evaluator denials win over execution validator denial", async () => {
+    const tool = new RecordingTool("non-zod.evaluator.denial.before.validator");
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => ({
+        decision: "deny",
+        ruleId: "evaluator-authority-denial",
+        reason: "evaluator denial should win before validator denial",
+        remediation: {
+          next_action: "adjust_scope",
+          hint: "Use a tool input allowed by the evaluator policy.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "authority"
+      }),
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: "validator-capability-denial",
+        reason: "validator would deny after evaluator policy",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Fix the validator-owned input before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "capability"
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      ruleId?: string;
+    };
+
+    expect(result.success).toBe(false);
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("evaluator-authority-denial");
+    expect(result.output).not.toContain("validator-capability-denial");
+    expect(tool.calls).toBe(0);
+  });
+
+  test("non-Zod execution validator denial survives an ordinary throwing evaluator", async () => {
+    const tool = new RecordingTool("non-zod.validator.denial.throwing.evaluator");
+    let evaluatorCalls = 0;
+    const wrapped = wrapToolWithPolicyGate(tool, {
+      evaluate: async () => {
+        evaluatorCalls += 1;
+        throw new Error("ordinary evaluator failure should not replace validator denial");
+      },
+      validateExecutionInput: () => ({
+        decision: "deny",
+        ruleId: "validator-capability-denial",
+        reason: "validator denied before evaluator execution completed",
+        remediation: {
+          next_action: "fix_and_retry",
+          hint: "Fix the validator-owned input before retrying.",
+          ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+        },
+        guardClass: "capability"
+      })
+    });
+
+    const result = await wrapped.run(createToolContext("worker"), { blocked: true });
+    const payload = JSON.parse(result.output) as {
+      error?: string;
+      ruleId?: string;
+    };
+
+    expect(result.success).toBe(false);
+    expect(payload.error).toBe("policy_gate_denied");
+    expect(payload.ruleId).toBe("validator-capability-denial");
+    expect(result.output).not.toContain("ordinary evaluator failure should not replace");
+    expect(evaluatorCalls).toBe(1);
+    expect(tool.calls).toBe(0);
   });
 
   test("policy evaluator denial wins before invalid Zod schema details", async () => {
@@ -3130,7 +4306,8 @@ describe("policy-gated zero tool registry", () => {
             next_action: "adjust_scope",
             hint: "Use a tool allowed for this role.",
             ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-          }
+          },
+          guardClass: "authority"
         };
       }
     });
@@ -3141,10 +4318,89 @@ describe("policy-gated zero tool registry", () => {
 
     expect(result.success).toBe(false);
     expect(result.output).toContain("authorization-deny");
-    expect(result.output).not.toContain("tool-parameter-schema-validation");
+    expect(result.output).not.toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
     expect(result.output).not.toContain("Expected string");
     expect(evaluatorCalls).toBe(1);
     expect(zodTool.calls).toBe(0);
+  });
+
+  test("policy evaluator metadata errors win before invalid Zod schema details", async () => {
+    const cases: Array<{
+      name: string;
+      evaluate: PolicyGateEvaluator;
+      expectedRuleId: string;
+    }> = [
+      {
+        name: "missing-guard-class",
+        evaluate: async () =>
+          ({
+            decision: "deny",
+            ruleId: "zod-evaluator-missing-guard-class",
+            reason: "evaluator denied without guard identity",
+            remediation: {
+              next_action: "adjust_scope",
+              hint: "Add guardClass before returning a policy denial.",
+              ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+            }
+          }) as never,
+        expectedRuleId: "zod-evaluator-missing-guard-class"
+      },
+      {
+        name: "conflicting-aliases",
+        evaluate: async () => ({
+          decision: "deny",
+          ruleId: "zod-evaluator-conflicting-guard-aliases",
+          reason: "evaluator denied with conflicting guard identity aliases",
+          remediation: {
+            next_action: "adjust_scope",
+            hint: "Return matching guardClass and guard_class values before retrying.",
+            ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+          },
+          guardClass: "authority",
+          guard_class: "capability"
+        }),
+        expectedRuleId: "zod-evaluator-conflicting-guard-aliases"
+      },
+      {
+        name: "reserved-authority-downgrade",
+        evaluate: async () => ({
+          decision: "deny",
+          ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
+          reason: "evaluator attempted to downgrade spawn-profile authority",
+          remediation: {
+            next_action: "adjust_scope",
+            hint: "Keep spawn-profile-subset classified as authority.",
+            ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+          },
+          guardClass: "capability"
+        }),
+        expectedRuleId: SPAWN_PROFILE_SUBSET_RULE_ID
+      }
+    ];
+
+    for (const testCase of cases) {
+      const zodTool = new ZodRecordingTool(
+        `zod.invalid.${testCase.name}`,
+        z.object({
+          command: z.string()
+        })
+      );
+      const wrapped = wrapToolWithPolicyGate(zodTool, {
+        evaluate: testCase.evaluate
+      });
+
+      const result = await wrapped.run(createToolContext("worker"), {
+        command: 42
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Invalid policy gate decision");
+      expect(result.output).toContain(testCase.expectedRuleId);
+      expect(result.output).toContain("guardClass");
+      expect(result.output).not.toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
+      expect(result.output).not.toContain("policy_gate_denied");
+      expect(zodTool.calls).toBe(0);
+    }
   });
 
   test("valid Zod path runs evaluator once and executes with parsed input", async () => {
@@ -3211,7 +4467,8 @@ describe("policy-gated zero tool registry", () => {
               next_action: "adjust_scope",
               hint: "Lower the parsed count before retrying.",
               ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-            }
+            },
+            guardClass: "authority"
           };
         }
         return { decision: "allow" };
@@ -3705,7 +4962,7 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
-  test("SHUD runtime denies missing explicit spawn tools before custom evaluator and spawn", async () => {
+  test("SHUD runtime denies missing explicit spawn tools after custom evaluator allow", async () => {
     const fixture = await createRawFixture();
     try {
       const modelRouter = createSpawnModelRouterStub();
@@ -3762,14 +5019,14 @@ describe("policy-gated zero tool registry", () => {
       expect(payload.remediation?.next_action).toBe("adjust_scope");
       expect(payload.remediation?.hint).toContain("shud.run");
       expect(payload.remediation?.ref).toBe(SPAWN_PROFILE_SUBSET_POLICY_REF);
-      expect(customCalls).toBe(0);
+      expect(customCalls).toBe(1);
       expect(agentControl.getSpawnCalls()).toBe(0);
     } finally {
       await fixture.cleanup();
     }
   });
 
-  test("SHUD runtime denies missing injected canonical spawn tools before custom evaluator and spawn", async () => {
+  test("SHUD runtime denies missing injected canonical spawn tools after custom evaluator allow", async () => {
     const fixture = await createRawFixture();
     try {
       const modelRouter = createSpawnModelRouterStub();
@@ -3827,7 +5084,7 @@ describe("policy-gated zero tool registry", () => {
       expect(payload.remediation?.hint).toContain("artifact.write");
       expect(payload.remediation?.ref).toBe(SPAWN_PROFILE_SUBSET_POLICY_REF);
       expect(result?.output.length).toBeLessThan(900);
-      expect(customCalls).toBe(0);
+      expect(customCalls).toBe(1);
       expect(agentControl.getSpawnCalls()).toBe(0);
     } finally {
       await fixture.cleanup();
@@ -5020,7 +6277,8 @@ describe("policy-gated zero tool registry", () => {
                 next_action: "adjust_scope",
                 hint: "Use a different reviewer delegation path.",
                 ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-              }
+              },
+              guardClass: "authority"
             };
           }
           return { decision: "allow" };
@@ -5322,7 +6580,8 @@ describe("policy-gated zero tool registry", () => {
             next_action: "adjust_scope",
             hint: "Use a different canonical subset for this task.",
             ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-          }
+          },
+          guardClass: "authority"
         })
       });
 
@@ -5347,8 +6606,63 @@ describe("policy-gated zero tool registry", () => {
         reason?: string;
       };
       expect(payload.ruleId).toBe("custom-canonical-subset-deny");
-      expect(payload.guard_class).toBeUndefined();
+      expect(payload.guard_class).toBe("authority");
       expect(payload.reason).toBe("custom evaluator denied canonical subset");
+      expect(agentControl.getSpawnCalls()).toBe(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("SHUD runtime custom evaluator deny requires guard classification", async () => {
+    const fixture = await createRawFixture();
+    try {
+      await writeWorkerRoleFixture(fixture.root);
+      const modelRouter = createSpawnModelRouterStub();
+      const zeroLikeRegistry = new ToolRegistry();
+      zeroLikeRegistry.register(new RecordingTool("spawn_agent"));
+      zeroLikeRegistry.register(new RecordingTool("read"));
+      const agentControl = createAgentControlSpy();
+
+      const registry = createShudRuntimeToolRegistry({
+        tools: zeroLikeRegistry.list(),
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        modelRouter,
+        evaluate: async () =>
+          ({
+            decision: "deny",
+            ruleId: "custom-unclassified-deny",
+            reason: "custom evaluator denied without classification",
+            remediation: {
+              next_action: "adjust_scope",
+              hint: "Add guardClass before returning a policy denial.",
+              ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+            }
+          }) as never
+      });
+
+      const result = await registry.get("spawn_agent")?.run(
+        {
+          ...fixture.context,
+          agentControl: agentControl.control,
+          projectRoot: fixture.root
+        },
+        {
+          instruction: "Run a worker task.",
+          role: "worker",
+          tools: ["read"]
+        }
+      );
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("Invalid policy gate decision");
+      expect(result?.output).toContain("custom-unclassified-deny");
+      expect(result?.output).toContain("guardClass");
+      expect(result?.output).not.toContain("policy_gate_denied");
       expect(agentControl.getSpawnCalls()).toBe(0);
     } finally {
       await fixture.cleanup();
@@ -5402,7 +6716,7 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
-  test("SHUD runtime denies Zero-blocked canonical spawn tools before custom evaluator and spawn", async () => {
+  test("SHUD runtime denies Zero-blocked canonical spawn tools after custom evaluator allow", async () => {
     const fixture = await createRawFixture();
     try {
       await writeHarnessRoleFixture(fixture.root, "coordinator", ["read"]);
@@ -5495,7 +6809,7 @@ describe("policy-gated zero tool registry", () => {
         expect(payload.remediation?.hint).toContain(expectedToolId);
         expect(payload.remediation?.ref).toBe(SPAWN_PROFILE_SUBSET_POLICY_REF);
       }
-      expect(customCalls).toBe(0);
+      expect(customCalls).toBe(4);
       expect(agentControl.getSpawnCalls()).toBe(0);
     } finally {
       await fixture.cleanup();
@@ -5684,7 +6998,8 @@ describe("policy-gated zero tool registry", () => {
             next_action: "adjust_scope",
             hint: "Use an allowed tool for this role.",
             ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-          }
+          },
+          guardClass: "authority"
         })
       });
 
@@ -5710,6 +7025,46 @@ describe("policy-gated zero tool registry", () => {
     }
   });
 
+  test("SHUD runtime rejects custom raw-data authority downgrade before raw telemetry", async () => {
+    const fixture = await createRawFixture();
+    try {
+      const registry = createShudRuntimeToolRegistry({
+        protectedRawPaths: [fixture.rawRoot],
+        allowedWriteRoots: [fixture.root],
+        tempRoot: fixture.tempRoot,
+        profileRoot: fixture.profileRoot,
+        fuseRules: [],
+        evaluate: async () => ({
+          decision: "deny",
+          ruleId: RAW_DATA_WRITE_RULE_ID,
+          reason: "custom evaluator attempted to downgrade raw-data authority",
+          remediation: {
+            next_action: "fix_and_retry",
+            hint: "Keep raw-data-write classified as authority.",
+            ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+          },
+          guardClass: "capability"
+        })
+      });
+
+      const result = await registry.get("bash")?.run(fixture.context, {
+        command: "printf nope > data/raw/downgraded-raw.txt"
+      });
+
+      expect(result?.success).toBe(false);
+      expect(result?.output).toContain("Invalid policy gate decision");
+      expect(result?.output).toContain(RAW_DATA_WRITE_RULE_ID);
+      expect(result?.output).toContain("guardClass");
+      expect(result?.output).not.toContain("policy_gate_denied");
+      expect(result?.output).not.toContain("policy_gate_raw_data_rule_misconfigured");
+      expect(result?.output).not.toContain("raw_data_write_denied");
+      await expect(readFile(join(fixture.rawRoot, "downgraded-raw.txt"), "utf8")).rejects.toThrow();
+      await expect(readRawAuditRows(fixture.root)).rejects.toThrow();
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("SHUD runtime fails closed when custom outer evaluator owns raw advisory composition", async () => {
     const fixture = await createRawFixture();
     try {
@@ -5729,7 +7084,7 @@ describe("policy-gated zero tool registry", () => {
       });
 
       expect(result?.success).toBe(false);
-      expectOuterRawRuleMisconfiguration(result);
+      expectReservedRawRuleProducerRejected(result);
       expect(result?.output).not.toContain("raw_data_write_denied");
       expect(result?.output).not.toContain("policy_gate_denied");
       await expect(readFile(join(fixture.rawRoot, "outer-raw-advisory.txt"), "utf8")).rejects.toThrow();
@@ -5760,7 +7115,7 @@ describe("policy-gated zero tool registry", () => {
       });
 
       expect(result?.success).toBe(false);
-      expectOuterRawRuleMisconfiguration(result);
+      expectReservedRawRuleProducerRejected(result);
       expect(result?.output).not.toContain("raw_data_write_denied");
       expect(result?.output).not.toContain("policy_gate_denied");
       await expect(readFile(join(fixture.workspaceRoot, "outer-disabled-side-effect.txt"), "utf8")).rejects.toThrow();
@@ -5792,8 +7147,7 @@ describe("policy-gated zero tool registry", () => {
       });
 
       expect(result?.success).toBe(false);
-      expect(result?.output).toContain("policy_gate_raw_data_rule_misconfigured");
-      expectOuterRawRuleMisconfiguration(result);
+      expectReservedRawRuleProducerRejected(result);
       expect(result?.output).not.toContain("raw_data_write_denied");
       expect(result?.output).not.toContain("policy_gate_denied");
       await expect(readFile(join(fixture.workspaceRoot, "outer-disabled-sandbox-side-effect.txt"), "utf8")).rejects.toThrow();
@@ -5826,7 +7180,7 @@ describe("policy-gated zero tool registry", () => {
       });
 
       expect(result?.success).toBe(false);
-      expectOuterRawRuleMisconfiguration(result);
+      expectReservedRawRuleProducerRejected(result);
       expect(result?.output).not.toContain("raw_data_write_denied");
       expect(result?.output).not.toContain("policy_gate_denied");
       await expect(readFile(join(fixture.workspaceRoot, "mismatch-side-effect.txt"), "utf8")).rejects.toThrow();
@@ -5975,7 +7329,8 @@ describe("policy-gated zero tool registry", () => {
             next_action: "adjust_scope",
             hint: "Use an allowed tool for this role.",
             ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-          }
+          },
+          guardClass: "authority"
         })
       });
 
@@ -6010,7 +7365,8 @@ describe("policy-gated zero tool registry", () => {
             next_action: "adjust_scope",
             hint: "Use an allowed tool for this runtime role.",
             ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-          }
+          },
+          guardClass: "authority"
         })
       });
       const staleReplacementInnerTool = new RecordingTool("edit");
@@ -6499,39 +7855,22 @@ function createToolContext(role: string): ToolContext & { role: string } {
   };
 }
 
-function expectOuterRawRuleMisconfiguration(result: ToolResult | undefined): void {
-  const payload = JSON.parse(result?.output ?? "{}") as {
-    error?: string;
-    rule?: string;
-    reason?: string;
-    outer_reason?: string;
-    profile_id?: string;
-    profile_path?: string;
-    remediation?: {
-      next_action?: string;
-      hint?: string;
-      ref?: string;
-    };
-  };
-
-  expect(payload.error).toBe("policy_gate_raw_data_rule_misconfigured");
-  expect(payload.rule).toBe(RAW_DATA_WRITE_RULE_ID);
-  expect(payload.reason).toContain("RawDataSandboxedBashTool");
-  expect(payload.outer_reason).toBe("obvious static raw-data write target");
-  expect(payload.profile_id).toBeUndefined();
-  expect(payload.profile_path).toBeUndefined();
-  expect(payload.remediation?.next_action).toBe("fix_and_retry");
-  expect(payload.remediation?.hint).toContain("RawDataSandboxedBashTool");
-  expect(PolicyGateRemediationSchema.safeParse(payload.remediation).success).toBe(true);
+function expectReservedRawRuleProducerRejected(result: ToolResult | undefined): void {
+  expect(result?.output).toContain("Invalid policy gate decision");
+  expect(result?.output).toContain(RAW_DATA_WRITE_RULE_ID);
+  expect(result?.output).toContain("ruleId");
+  expect(result?.output).not.toContain("policy_gate_raw_data_rule_misconfigured");
+  expect(result?.output).not.toContain("raw_data_write_denied");
 }
 
 function expectToolParameterSchemaValidationDenial(result: ToolResult | undefined): void {
   expect(result?.success).toBe(false);
   expect(result?.output).toContain("policy_gate_denied");
-  expect(result?.output).toContain("tool-parameter-schema-validation");
+  expect(result?.output).toContain(TOOL_PARAMETER_SCHEMA_RULE_ID);
   const payload = JSON.parse(result?.output ?? "{}") as {
     error?: string;
     ruleId?: string;
+    guard_class?: string;
     reason?: string;
     remediation?: {
       next_action?: string;
@@ -6540,7 +7879,8 @@ function expectToolParameterSchemaValidationDenial(result: ToolResult | undefine
     };
   };
   expect(payload.error).toBe("policy_gate_denied");
-  expect(payload.ruleId).toBe("tool-parameter-schema-validation");
+  expect(payload.ruleId).toBe(TOOL_PARAMETER_SCHEMA_RULE_ID);
+  expect(payload.guard_class).toBe("authority");
   expect(payload.reason).toContain("command");
   expect(payload.remediation?.next_action).toBe("fix_and_retry");
   expect(payload.remediation?.hint).toContain("Zod parameter schema");

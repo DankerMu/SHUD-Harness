@@ -20,6 +20,7 @@ export const PolicyGuardClassSchema = z.enum(["authority", "capability"]);
 export type PolicyGuardClass = z.infer<typeof PolicyGuardClassSchema>;
 
 export const SPAWN_PROFILE_SUBSET_RULE_ID = "spawn-profile-subset";
+export const TOOL_PARAMETER_SCHEMA_RULE_ID = "tool-parameter-schema-validation";
 export const SPAWN_PROFILE_SUBSET_POLICY_REF =
   "docs/02_ARCHITECTURE/Roles_and_Boundaries.md#0-canonical-agent-role-registry";
 export const SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS = 64;
@@ -28,6 +29,11 @@ export const SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS = 4096;
 export const SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES = 5;
 export const SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS = 64;
 export const SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS = 65536;
+export const RESERVED_AUTHORITY_POLICY_RULE_IDS = Object.freeze([
+  "raw-data-write",
+  SPAWN_PROFILE_SUBSET_RULE_ID,
+  TOOL_PARAMETER_SCHEMA_RULE_ID
+] as const);
 
 export interface PolicyGateToolCall {
   toolId: string;
@@ -45,6 +51,7 @@ export type PolicyRuleDecision =
       reason: string;
       remediation: PolicyGateRemediation;
       guardClass?: PolicyGuardClass;
+      guard_class?: PolicyGuardClass;
     };
 
 export type PolicyGateDecision =
@@ -56,8 +63,29 @@ export type PolicyGateDecision =
       ruleId: string;
       reason: string;
       remediation: PolicyGateRemediation;
-      guardClass?: PolicyGuardClass;
+      guardClass: PolicyGuardClass;
     };
+
+type PolicyGateDenyGuardClassInput =
+  | {
+      guardClass: PolicyGuardClass;
+      guard_class?: PolicyGuardClass;
+    }
+  | {
+      guardClass?: PolicyGuardClass;
+      guard_class: PolicyGuardClass;
+    };
+
+export type PolicyGateDecisionInput =
+  | {
+      decision: "allow";
+    }
+  | ({
+      decision: "deny";
+      ruleId: string;
+      reason: string;
+      remediation: PolicyGateRemediation;
+    } & PolicyGateDenyGuardClassInput);
 
 export type PolicyGateInputNormalization =
   | {
@@ -67,12 +95,38 @@ export type PolicyGateInputNormalization =
     }
   | Extract<PolicyGateDecision, { decision: "deny" }>;
 
-export interface PolicyRule {
+type PolicyRuleGuardClassMetadata =
+  | {
+      guardClass: PolicyGuardClass;
+      guard_class?: PolicyGuardClass;
+    }
+  | {
+      guardClass?: PolicyGuardClass;
+      guard_class: PolicyGuardClass;
+    };
+
+export type PolicyRule = {
   ruleId: string;
   description: string;
-  guardClass?: PolicyGuardClass;
   evaluate(call: PolicyGateToolCall, context: PolicyGateContext): PolicyRuleDecision;
-}
+} & PolicyRuleGuardClassMetadata;
+
+type PolicyGuardClassAliasRead =
+  | { state: "missing" }
+  | { state: "invalid"; fields: readonly string[] }
+  | { state: "conflicting"; fields: readonly string[] }
+  | { state: "valid"; guardClass: PolicyGuardClass; field: string };
+
+type PolicyGuardClassAliasValueRead =
+  | { state: "missing" }
+  | { state: "invalid" }
+  | { state: "valid"; guardClass: PolicyGuardClass };
+
+type ValidatedPolicyRuleMetadata = {
+  rule: PolicyRule;
+  ruleId: string;
+  guardClass: PolicyGuardClass;
+};
 
 export interface PolicyGateContext {
   rules: readonly PolicyRule[];
@@ -82,28 +136,279 @@ export const EMPTY_POLICY_GATE_CONTEXT: PolicyGateContext = {
   rules: []
 };
 
+const KNOWN_AUTHORITY_POLICY_RULE_IDS = new Set<string>(RESERVED_AUTHORITY_POLICY_RULE_IDS);
+
+export class PolicyGateDecisionValidationError extends Error {
+  constructor(error: unknown) {
+    super(formatPolicyGateDecisionValidationErrorMessage(error));
+    this.name = "PolicyGateDecisionValidationError";
+  }
+}
+
+export function isPolicyGateDecisionValidationError(
+  error: unknown
+): error is PolicyGateDecisionValidationError {
+  return error instanceof PolicyGateDecisionValidationError;
+}
+
+function policyGateDecisionValidationError(message: string): PolicyGateDecisionValidationError {
+  return new PolicyGateDecisionValidationError(message);
+}
+
+function formatPolicyGateDecisionValidationErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  return String(error);
+}
+
+export function isReservedAuthorityPolicyRuleId(ruleId: string): boolean {
+  return KNOWN_AUTHORITY_POLICY_RULE_IDS.has(ruleId);
+}
+
+export function isReservedAuthorityPolicyErrorId(errorId: string | undefined): boolean {
+  return (
+    errorId !== undefined &&
+    RESERVED_AUTHORITY_POLICY_RULE_IDS.some(
+      (ruleId) => errorId === ruleId || errorId.startsWith(`${ruleId}:`)
+    )
+  );
+}
+
+export function isReservedAuthorityPolicyRuleIdPrefixImpersonation(
+  ruleId: string | undefined
+): boolean {
+  return (
+    ruleId !== undefined &&
+    RESERVED_AUTHORITY_POLICY_RULE_IDS.some(
+      (reservedRuleId) => ruleId.startsWith(`${reservedRuleId}:`)
+    )
+  );
+}
+
+export const isReservedAuthorityPolicyEvidenceId = isReservedAuthorityPolicyErrorId;
+
 export function evaluatePolicyGate(
   call: PolicyGateToolCall,
   context: PolicyGateContext = EMPTY_POLICY_GATE_CONTEXT
 ): PolicyGateDecision {
-  for (const rule of context.rules) {
+  const metadata = validatePolicyGateContextMetadata(context);
+
+  for (const { rule, ruleId, guardClass } of metadata) {
     const result = rule.evaluate(call, context);
     if (result.decision === "allow") {
       continue;
     }
 
-    validatePolicyGateRemediation(rule.ruleId, result.remediation);
-    const guardClass = result.guardClass ?? rule.guardClass;
+    validatePolicyGateRemediation(ruleId, result.remediation);
+    const normalizedGuardClass = normalizePolicyRuleDenyGuardClass(
+      ruleId,
+      guardClass,
+      result
+    );
     return {
       decision: "deny",
-      ruleId: rule.ruleId,
+      ruleId,
       reason: result.reason,
       remediation: result.remediation,
-      ...(guardClass ? { guardClass } : {})
+      guardClass: normalizedGuardClass
     };
   }
 
   return { decision: "allow" };
+}
+
+function normalizePolicyRuleDenyGuardClass(
+  ruleId: string,
+  ruleGuardClass: PolicyGuardClass,
+  result: Extract<PolicyRuleDecision, { decision: "deny" }>
+): PolicyGuardClass {
+  const resultGuardClass = readPolicyGuardClassAliases(result);
+  if (resultGuardClass.state === "missing") {
+    return ruleGuardClass;
+  }
+  if (resultGuardClass.state === "invalid") {
+    throw policyGateDecisionValidationError(
+      `Policy gate guard_class lint failed: ${ruleId}: invalid result ${resultGuardClass.fields.join(", ")}.`
+    );
+  }
+  if (resultGuardClass.state === "conflicting") {
+    throw policyGateDecisionValidationError(
+      `Policy gate guard_class lint failed: ${ruleId}: conflicting result ${resultGuardClass.fields.join(", ")}.`
+    );
+  }
+  if (resultGuardClass.guardClass !== ruleGuardClass) {
+    throw policyGateDecisionValidationError(
+      `Policy gate guard_class lint failed: ${ruleId}: result ${resultGuardClass.field} ${resultGuardClass.guardClass} conflicts with rule guardClass ${ruleGuardClass}.`
+    );
+  }
+
+  return ruleGuardClass;
+}
+
+export function assertPolicyGateContextGuardClasses(context: PolicyGateContext): void {
+  validatePolicyGateContextMetadata(context);
+}
+
+export function snapshotPolicyGateContext(context: PolicyGateContext): PolicyGateContext {
+  const metadata = validatePolicyGateContextMetadata(context);
+  const rules = metadata.map(({ rule, ruleId, guardClass }) => {
+    const evaluate = rule.evaluate.bind(rule);
+    return Object.freeze({
+      ruleId,
+      description: rule.description,
+      guardClass,
+      evaluate(call: PolicyGateToolCall, snapshotContext: PolicyGateContext): PolicyRuleDecision {
+        return evaluate(call, snapshotContext);
+      }
+    });
+  });
+
+  return Object.freeze({
+    rules: Object.freeze(rules)
+  });
+}
+
+function validatePolicyGateContextMetadata(
+  context: PolicyGateContext
+): ValidatedPolicyRuleMetadata[] {
+  const ruleIdFailures: string[] = [];
+  const guardClassFailures: string[] = [];
+  const metadata: ValidatedPolicyRuleMetadata[] = [];
+  const seenRuleIds = new Map<string, string>();
+
+  context.rules.forEach((rule, index) => {
+    const ruleLabel = formatPolicyRuleId(rule, index);
+    const ruleId = normalizePolicyRuleId(rule.ruleId);
+    if (!ruleId) {
+      ruleIdFailures.push(`${ruleLabel}: ruleId must be a non-empty string`);
+    } else {
+      const previousRuleLabel = seenRuleIds.get(ruleId);
+      if (previousRuleLabel) {
+        ruleIdFailures.push(
+          `${ruleId}: duplicate ruleId also used by ${previousRuleLabel}`
+        );
+      } else {
+        seenRuleIds.set(ruleId, ruleLabel);
+      }
+      if (isReservedAuthorityPolicyRuleIdPrefixImpersonation(ruleId)) {
+        ruleIdFailures.push(
+          `${ruleId}: reserved authority policy rule prefixes are reserved for error_id`
+        );
+      }
+    }
+
+    const guardClass = readPolicyGuardClassAliases(rule);
+    if (guardClass.state === "missing" || guardClass.state === "invalid") {
+      guardClassFailures.push(`${ruleLabel}: missing or invalid guardClass/guard_class`);
+      return;
+    }
+    if (guardClass.state === "conflicting") {
+      guardClassFailures.push(`${ruleLabel}: conflicting guardClass/guard_class`);
+      return;
+    }
+
+    if (
+      ruleId &&
+      isReservedAuthorityPolicyRuleId(ruleId) &&
+      guardClass.guardClass !== "authority"
+    ) {
+      guardClassFailures.push(
+        `${ruleId}: known authority rule cannot be classified as ${guardClass.guardClass}`
+      );
+      return;
+    }
+
+    if (ruleId) {
+      metadata.push({ rule, ruleId, guardClass: guardClass.guardClass });
+    }
+  });
+
+  if (ruleIdFailures.length > 0) {
+    throw policyGateDecisionValidationError(
+      `Policy gate ruleId lint failed: ${ruleIdFailures.join("; ")}.`
+    );
+  }
+
+  if (guardClassFailures.length > 0) {
+    throw policyGateDecisionValidationError(
+      `Policy gate guard_class lint failed: ${guardClassFailures.join("; ")}.`
+    );
+  }
+
+  return metadata;
+}
+
+function readPolicyGuardClassAliases(carrier: {
+  guardClass?: unknown;
+  guard_class?: unknown;
+}): PolicyGuardClassAliasRead {
+  const camelGuardClass = parsePolicyRuleGuardClassValue(carrier.guardClass);
+  const snakeGuardClass = parsePolicyRuleGuardClassValue(carrier.guard_class);
+  const invalidFields: string[] = [];
+  if (camelGuardClass.state === "invalid") {
+    invalidFields.push("guardClass");
+  }
+  if (snakeGuardClass.state === "invalid") {
+    invalidFields.push("guard_class");
+  }
+  if (invalidFields.length > 0) {
+    return { state: "invalid", fields: invalidFields };
+  }
+
+  if (camelGuardClass.state === "valid" && snakeGuardClass.state === "valid") {
+    if (camelGuardClass.guardClass !== snakeGuardClass.guardClass) {
+      return { state: "conflicting", fields: ["guardClass", "guard_class"] };
+    }
+    return {
+      state: "valid",
+      guardClass: camelGuardClass.guardClass,
+      field: "guardClass/guard_class"
+    };
+  }
+  if (camelGuardClass.state === "valid") {
+    return {
+      state: "valid",
+      guardClass: camelGuardClass.guardClass,
+      field: "guardClass"
+    };
+  }
+  if (snakeGuardClass.state === "valid") {
+    return {
+      state: "valid",
+      guardClass: snakeGuardClass.guardClass,
+      field: "guard_class"
+    };
+  }
+
+  return { state: "missing" };
+}
+
+function parsePolicyRuleGuardClassValue(value: unknown): PolicyGuardClassAliasValueRead {
+  if (value === undefined) {
+    return { state: "missing" };
+  }
+  const parsed = PolicyGuardClassSchema.safeParse(value);
+  return parsed.success
+    ? { state: "valid", guardClass: parsed.data }
+    : { state: "invalid" };
+}
+
+function normalizePolicyRuleId(ruleId: unknown): string | undefined {
+  if (typeof ruleId !== "string") {
+    return undefined;
+  }
+  const trimmedRuleId = ruleId.trim();
+  return trimmedRuleId === "" ? undefined : trimmedRuleId;
+}
+
+function formatPolicyRuleId(rule: Pick<PolicyRule, "ruleId">, index: number): string {
+  return typeof rule.ruleId === "string" && rule.ruleId.trim() !== ""
+    ? rule.ruleId
+    : `<rule-${index}>`;
 }
 
 export const SPAWN_PROFILE_SUBSET_RULE: PolicyRule = Object.freeze({
@@ -657,7 +962,7 @@ function toSpawnProfileGateDeny(
     ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
     reason: decision.reason,
     remediation: decision.remediation,
-    guardClass: decision.guardClass ?? SPAWN_PROFILE_SUBSET_RULE.guardClass
+    guardClass: decision.guardClass ?? "authority"
   };
 }
 
@@ -901,5 +1206,7 @@ function validatePolicyGateRemediation(ruleId: string, remediation: PolicyGateRe
     .filter((path) => path.length > 0)
     .join(", ");
 
-  throw new Error(`Invalid policy gate remediation for ${ruleId}: ${fieldPaths || "remediation"}`);
+  throw policyGateDecisionValidationError(
+    `Invalid policy gate remediation for ${ruleId}: ${fieldPaths || "remediation"}`
+  );
 }

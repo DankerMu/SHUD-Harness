@@ -14,7 +14,11 @@ import { types as nodeUtilTypes } from "node:util";
 import { ZodType } from "zod";
 import {
   evaluatePolicyGate,
+  isPolicyGateDecisionValidationError,
+  isReservedAuthorityPolicyRuleIdPrefixImpersonation,
+  isReservedAuthorityPolicyRuleId,
   normalizeSpawnAgentInput,
+  PolicyGateDecisionValidationError,
   PolicyGuardClassSchema,
   PolicyGateRemediationSchema,
   SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
@@ -22,9 +26,13 @@ import {
   SPAWN_PROFILE_SUBSET_RULE,
   SPAWN_PROFILE_SUBSET_RULE_ID,
   SPAWN_PROFILE_TOOL_ID_SAMPLE_MAX_CHARS,
+  snapshotPolicyGateContext,
+  TOOL_PARAMETER_SCHEMA_RULE_ID,
   type HarnessRole,
+  type PolicyGuardClass,
   type PolicyGateContext,
   type PolicyGateDecision,
+  type PolicyGateDecisionInput,
   type PolicyGateRemediation,
   type PolicyGateToolCall
 } from "./policy-gate-core";
@@ -38,6 +46,7 @@ export type {
   HarnessRole,
   PolicyGateContext,
   PolicyGateDecision,
+  PolicyGateDecisionInput,
   PolicyGateRemediation,
   PolicyGateToolCall,
   PolicyRule,
@@ -52,11 +61,11 @@ export interface PolicyGateEvaluationContext {
 export type PolicyGateEvaluator = (
   call: PolicyGateToolCall,
   context: PolicyGateEvaluationContext
-) => PolicyGateDecision | Promise<PolicyGateDecision>;
+) => PolicyGateDecisionInput | Promise<PolicyGateDecisionInput>;
 
 export type PolicyGateExecutionInputValidator = (
   input: unknown
-) => Extract<PolicyGateDecision, { decision: "deny" }> | undefined;
+) => Extract<PolicyGateDecisionInput, { decision: "deny" }> | undefined;
 
 export interface PolicyGateWrapperOptions {
   toolId?: string;
@@ -116,10 +125,12 @@ export type PolicyGatedTool = BaseTool & {
 };
 
 const policyGatedTools = new WeakSet<BaseTool>();
+const reservedAuthorityPolicyGateEvaluators = new WeakSet<PolicyGateEvaluator>();
+const reservedAuthorityPolicyGateExecutionValidators =
+  new WeakSet<PolicyGateExecutionInputValidator>();
 const ROLE_VISIBLE_TOOL_COUNT_LIMIT = 20;
 const CONTROL_KERNEL_TOOL_GOVERNANCE_REF =
   "docs/02_ARCHITECTURE/Control_Kernel.md#53-工具面治理约定";
-const TOOL_PARAMETER_SCHEMA_RULE_ID = "tool-parameter-schema-validation";
 const TOOL_PARAMETER_SCHEMA_MAX_ISSUES = 3;
 const TOOL_PARAMETER_SCHEMA_ISSUE_MAX_CHARS = 240;
 const SHUD_TOOL_DESCRIPTION_REQUIRED_SECTIONS = Object.freeze([
@@ -154,7 +165,39 @@ const SHUD_WAIT_AGENT_DESCRIPTION = [
 ].join("\n");
 
 export function createPolicyGateEvaluator(context: PolicyGateContext): PolicyGateEvaluator {
-  return (call) => evaluatePolicyGate(call, context);
+  const contextSnapshot = snapshotPolicyGateContext(context);
+  const evaluator: PolicyGateEvaluator = (call) => evaluatePolicyGate(call, contextSnapshot);
+  return context === DEFAULT_SHUD_POLICY_GATE_CONTEXT
+    ? trustReservedAuthorityPolicyGateEvaluator(evaluator)
+    : evaluator;
+}
+
+function trustReservedAuthorityPolicyGateEvaluator(
+  evaluator: PolicyGateEvaluator
+): PolicyGateEvaluator {
+  reservedAuthorityPolicyGateEvaluators.add(evaluator);
+  return evaluator;
+}
+
+function canEvaluatorReturnReservedAuthorityDecision(
+  evaluator: PolicyGateEvaluator
+): boolean {
+  return reservedAuthorityPolicyGateEvaluators.has(evaluator);
+}
+
+function trustReservedAuthorityPolicyGateExecutionValidator(
+  validator: PolicyGateExecutionInputValidator
+): PolicyGateExecutionInputValidator {
+  reservedAuthorityPolicyGateExecutionValidators.add(validator);
+  return validator;
+}
+
+function canExecutionValidatorReturnReservedAuthorityDecision(
+  validator: PolicyGateExecutionInputValidator | undefined
+): boolean {
+  return validator
+    ? reservedAuthorityPolicyGateExecutionValidators.has(validator)
+    : false;
 }
 
 export const DEFAULT_SHUD_POLICY_GATE_CONTEXT: PolicyGateContext = Object.freeze({
@@ -185,17 +228,25 @@ export function createShudPolicyGateEvaluator(
 ): PolicyGateEvaluator {
   const authorityEvaluate = createPolicyGateEvaluator(DEFAULT_SHUD_POLICY_GATE_CONTEXT);
   if (!customEvaluate) {
-    return authorityEvaluate;
+    return trustReservedAuthorityPolicyGateEvaluator(authorityEvaluate);
   }
 
-  return async (call, context) => {
+  return trustReservedAuthorityPolicyGateEvaluator(async (call, context) => {
     const authorityDecision = await authorityEvaluate(call, context);
     if (authorityDecision.decision === "deny") {
       return authorityDecision;
     }
 
-    return customEvaluate(call, context);
-  };
+    const customDecision = await customEvaluate(call, context);
+    try {
+      return validatePolicyGateDecision(call.toolId, customDecision);
+    } catch (error) {
+      if (isPolicyGateDecisionValidationError(error)) {
+        throw error;
+      }
+      throw new PolicyGateDecisionValidationError(error);
+    }
+  });
 }
 
 export function wrapToolWithPolicyGate(
@@ -766,6 +817,10 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
           role,
           preparedInput.evaluatorInput
         );
+        if (evaluation.status === "error" && evaluation.source === "decision_validation") {
+          const durationMs = Date.now() - startTime;
+          return this.finalizePolicyGateResult(toolContext, evaluation.result, durationMs);
+        }
         if (evaluation.status === "decision" && evaluation.decision.decision === "deny") {
           const durationMs = Date.now() - startTime;
           return this.finalizePolicyGateResult(
@@ -816,14 +871,18 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
         );
       }
 
-      const executionValidationDecision = this.#validateExecutionInput?.(
+      const executionValidation = this.validatePolicyGateExecutionInput(
         parsedPreparedInput.executionInput
       );
-      if (executionValidationDecision) {
+      if (executionValidation.status === "error") {
+        const durationMs = Date.now() - startTime;
+        return this.finalizePolicyGateResult(toolContext, executionValidation.result, durationMs);
+      }
+      if (executionValidation.status === "decision") {
         const durationMs = Date.now() - startTime;
         return this.finalizePolicyGateResult(
           toolContext,
-          buildPolicyGateDeniedResult(this.#policyGateToolId, executionValidationDecision),
+          buildPolicyGateDeniedToolResult(this.#policyGateToolId, executionValidation.decision),
           durationMs
         );
       }
@@ -831,23 +890,36 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
       return this.#innerTool.run(toolContext, parsedPreparedInput.executionInput);
     }
 
-    const executionValidationDecision = this.#validateExecutionInput?.(
-      preparedInput.executionInput
-    );
-    if (executionValidationDecision) {
-      const durationMs = Date.now() - startTime;
-      return this.finalizePolicyGateResult(
-        toolContext,
-        buildPolicyGateDeniedResult(this.#policyGateToolId, executionValidationDecision),
-        durationMs
-      );
-    }
-
+    const executionValidation = this.validatePolicyGateExecutionInput(preparedInput.executionInput);
     const evaluation = await this.evaluatePolicyGateInput(
       toolContext,
       role,
       preparedInput.evaluatorInput
     );
+    if (evaluation.status === "error" && evaluation.source === "decision_validation") {
+      const durationMs = Date.now() - startTime;
+      return this.finalizePolicyGateResult(toolContext, evaluation.result, durationMs);
+    }
+    if (executionValidation.status !== "allow") {
+      const durationMs = Date.now() - startTime;
+      if (executionValidation.status === "error") {
+        return this.finalizePolicyGateResult(toolContext, executionValidation.result, durationMs);
+      }
+      if (evaluation.status === "decision" && evaluation.decision.decision === "deny") {
+        return this.finalizePolicyGateResult(
+          toolContext,
+          buildPolicyGateDeniedToolResult(this.#policyGateToolId, evaluation.decision),
+          durationMs
+        );
+      }
+
+      return this.finalizePolicyGateResult(
+        toolContext,
+        buildPolicyGateDeniedToolResult(this.#policyGateToolId, executionValidation.decision),
+        durationMs
+      );
+    }
+
     if (evaluation.status === "error") {
       const durationMs = Date.now() - startTime;
       return this.finalizePolicyGateResult(toolContext, evaluation.result, durationMs);
@@ -866,6 +938,39 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
 
   protected async execute(): Promise<ToolResult> {
     throw new Error("PolicyGatedBaseToolAdapter delegates through run().");
+  }
+
+  private validatePolicyGateExecutionInput(
+    executionInput: unknown
+  ):
+    | { status: "allow" }
+    | { status: "decision"; decision: Extract<PolicyGateDecision, { decision: "deny" }> }
+    | { status: "error"; result: ToolResult } {
+    try {
+      const candidate = this.#validateExecutionInput?.(executionInput);
+      if (!candidate) {
+        return { status: "allow" };
+      }
+
+      return {
+        status: "decision",
+        decision: validatePolicyGateDenyDecision(this.#policyGateToolId, candidate, {
+          allowReservedAuthorityRuleIds: canExecutionValidatorReturnReservedAuthorityDecision(
+            this.#validateExecutionInput
+          )
+        })
+      };
+    } catch (error) {
+      const errorMessage = toErrorMessage(error);
+      return {
+        status: "error",
+        result: {
+          success: false,
+          output: errorMessage,
+          outputSummary: `Error: ${errorMessage.slice(0, 100)}`
+        }
+      };
+    }
   }
 
   private async finalizePolicyGateResult(
@@ -950,10 +1055,15 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
     evaluatorInput: unknown
   ): Promise<
     | { status: "decision"; decision: PolicyGateDecision }
-    | { status: "error"; result: ToolResult }
+    | {
+        status: "error";
+        source: "evaluation" | "decision_validation";
+        result: ToolResult;
+      }
   > {
+    let candidate: PolicyGateDecisionInput;
     try {
-      const candidate = await this.#evaluate(
+      candidate = await this.#evaluate(
         {
           toolId: this.#policyGateToolId,
           role,
@@ -965,22 +1075,42 @@ class PolicyGatedBaseToolAdapter extends BaseTool implements PolicyGatedTool {
           toolContext
         }
       );
-      return {
-        status: "decision",
-        decision: validatePolicyGateDecision(this.#policyGateToolId, candidate)
-      };
     } catch (error) {
-      const errorMessage = toErrorMessage(error);
       return {
         status: "error",
-        result: {
-          success: false,
-          output: errorMessage,
-          outputSummary: `Error: ${errorMessage.slice(0, 100)}`
-        }
+        source: isPolicyGateDecisionValidationError(error)
+          ? "decision_validation"
+          : "evaluation",
+        result: policyGateErrorToolResult(error)
+      };
+    }
+
+    try {
+      return {
+        status: "decision",
+        decision: validatePolicyGateDecision(this.#policyGateToolId, candidate, {
+          allowReservedAuthorityRuleIds: canEvaluatorReturnReservedAuthorityDecision(
+            this.#evaluate
+          )
+        })
+      };
+    } catch (error) {
+      return {
+        status: "error",
+        source: "decision_validation",
+        result: policyGateErrorToolResult(error)
       };
     }
   }
+}
+
+function policyGateErrorToolResult(error: unknown): ToolResult {
+  const errorMessage = toErrorMessage(error);
+  return {
+    success: false,
+    output: errorMessage,
+    outputSummary: `Error: ${errorMessage.slice(0, 100)}`
+  };
 }
 
 function buildPolicyGateDeniedToolResult(
@@ -996,7 +1126,9 @@ function buildPolicyGateDeniedToolResult(
 function createSpawnAgentToolAvailabilityValidator(
   registry: ToolRegistry
 ): PolicyGateExecutionInputValidator {
-  return (input) => validateSpawnAgentToolAvailability(input, registry);
+  return trustReservedAuthorityPolicyGateExecutionValidator((input) =>
+    validateSpawnAgentToolAvailability(input, registry)
+  );
 }
 
 function validateSpawnAgentToolAvailability(
@@ -1474,7 +1606,8 @@ function buildToolParameterSchemaValidationDeny(
       next_action: "fix_and_retry",
       hint: `Adjust the tool input to match its Zod parameter schema before retrying; ${issueSummary}.`,
       ref: CONTROL_KERNEL_TOOL_GOVERNANCE_REF
-    }
+    },
+    guardClass: "authority"
   };
 }
 
@@ -1482,9 +1615,19 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyGateDecision {
+interface PolicyGateDecisionValidationOptions {
+  allowReservedAuthorityRuleIds?: boolean;
+}
+
+function validatePolicyGateDecision(
+  toolId: string,
+  candidate: unknown,
+  options: PolicyGateDecisionValidationOptions = {}
+): PolicyGateDecision {
   if (candidate === null || typeof candidate !== "object") {
-    throw new Error(`Invalid policy gate decision for ${toolId}: decision`);
+    throw new PolicyGateDecisionValidationError(
+      `Invalid policy gate decision for ${toolId}: decision`
+    );
   }
 
   const rawDecision = candidate as Record<string, unknown>;
@@ -1493,13 +1636,14 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
   }
 
   if (rawDecision.decision !== "deny") {
-    throw new Error(`Invalid policy gate decision for ${toolId}: decision`);
+    throw new PolicyGateDecisionValidationError(
+      `Invalid policy gate decision for ${toolId}: decision`
+    );
   }
 
   const ruleId = rawDecision.ruleId;
   const reason = rawDecision.reason;
-  const rawGuardClass = rawDecision.guardClass ?? rawDecision.guard_class;
-  const validRuleId = typeof ruleId === "string" ? ruleId : undefined;
+  const validRuleId = normalizePolicyGateDecisionRuleId(ruleId);
   const validReason = typeof reason === "string" ? reason : undefined;
   const issuePaths: string[] = [];
   if (validRuleId === undefined) {
@@ -1521,21 +1665,24 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
     remediation = parsedRemediation.data;
   }
 
-  const parsedGuardClass =
-    rawGuardClass === undefined ? undefined : PolicyGuardClassSchema.safeParse(rawGuardClass);
-  if (parsedGuardClass && !parsedGuardClass.success) {
-    issuePaths.push("guardClass");
-  }
+  const guardClass = readPolicyGateDecisionGuardClass(rawDecision, issuePaths);
+  validateReservedAuthorityPolicyGateDecisionProducer(
+    validRuleId,
+    guardClass,
+    issuePaths,
+    options
+  );
 
   if (
     issuePaths.length > 0 ||
     validRuleId === undefined ||
     validReason === undefined ||
-    !remediation
+    !remediation ||
+    !guardClass
   ) {
     const ruleLabel = validRuleId && validRuleId.trim() !== "" ? validRuleId : "<missing>";
     const invalidFields = issuePaths.length > 0 ? issuePaths : ["decision"];
-    throw new Error(
+    throw new PolicyGateDecisionValidationError(
       `Invalid policy gate decision for ${toolId} (rule ${ruleLabel}): ${invalidFields.join(", ")}`
     );
   }
@@ -1545,8 +1692,119 @@ function validatePolicyGateDecision(toolId: string, candidate: unknown): PolicyG
     ruleId: validRuleId,
     reason: validReason,
     remediation,
-    ...(parsedGuardClass?.success ? { guardClass: parsedGuardClass.data } : {})
+    guardClass
   };
+}
+
+function normalizePolicyGateDecisionRuleId(ruleId: unknown): string | undefined {
+  if (typeof ruleId !== "string") {
+    return undefined;
+  }
+  const trimmedRuleId = ruleId.trim();
+  return trimmedRuleId === "" ? undefined : trimmedRuleId;
+}
+
+function validateReservedAuthorityPolicyGateDecisionProducer(
+  ruleId: string | undefined,
+  guardClass: PolicyGuardClass | undefined,
+  issuePaths: string[],
+  options: PolicyGateDecisionValidationOptions
+): void {
+  if (!ruleId) {
+    return;
+  }
+
+  if (isReservedAuthorityPolicyRuleIdPrefixImpersonation(ruleId)) {
+    issuePaths.push("ruleId");
+    if (guardClass !== undefined && guardClass !== "authority") {
+      issuePaths.push("guardClass");
+    }
+    return;
+  }
+
+  if (!isReservedAuthorityPolicyRuleId(ruleId)) {
+    return;
+  }
+
+  if (!options.allowReservedAuthorityRuleIds) {
+    issuePaths.push("ruleId");
+    if (guardClass && guardClass !== "authority") {
+      issuePaths.push("guardClass");
+    }
+    return;
+  }
+
+  if (guardClass !== "authority") {
+    issuePaths.push("guardClass");
+  }
+}
+
+type PolicyGateDecisionGuardClassAlias =
+  | { state: "missing" }
+  | { state: "invalid" }
+  | { state: "valid"; guardClass: PolicyGuardClass };
+
+function readPolicyGateDecisionGuardClass(
+  rawDecision: Record<string, unknown>,
+  issuePaths: string[]
+): PolicyGuardClass | undefined {
+  const camelGuardClass = parsePolicyGateDecisionGuardClassAlias(rawDecision.guardClass);
+  const snakeGuardClass = parsePolicyGateDecisionGuardClassAlias(rawDecision.guard_class);
+
+  if (camelGuardClass.state === "invalid") {
+    issuePaths.push("guardClass");
+  }
+  if (snakeGuardClass.state === "invalid") {
+    issuePaths.push("guard_class");
+  }
+  if (camelGuardClass.state === "invalid" || snakeGuardClass.state === "invalid") {
+    return undefined;
+  }
+
+  if (camelGuardClass.state === "valid" && snakeGuardClass.state === "valid") {
+    if (camelGuardClass.guardClass !== snakeGuardClass.guardClass) {
+      issuePaths.push("guardClass", "guard_class");
+      return undefined;
+    }
+    return camelGuardClass.guardClass;
+  }
+
+  if (camelGuardClass.state === "valid") {
+    return camelGuardClass.guardClass;
+  }
+  if (snakeGuardClass.state === "valid") {
+    return snakeGuardClass.guardClass;
+  }
+
+  issuePaths.push("guardClass");
+  return undefined;
+}
+
+function parsePolicyGateDecisionGuardClassAlias(
+  value: unknown
+): PolicyGateDecisionGuardClassAlias {
+  if (value === undefined) {
+    return { state: "missing" };
+  }
+  const parsed = PolicyGuardClassSchema.safeParse(value);
+  if (!parsed.success) {
+    return { state: "invalid" };
+  }
+  return { state: "valid", guardClass: parsed.data };
+}
+
+function validatePolicyGateDenyDecision(
+  toolId: string,
+  candidate: unknown,
+  options?: PolicyGateDecisionValidationOptions
+): Extract<PolicyGateDecision, { decision: "deny" }> {
+  const decision = validatePolicyGateDecision(toolId, candidate, options);
+  if (decision.decision !== "deny") {
+    throw new PolicyGateDecisionValidationError(
+      `Invalid policy gate decision for ${toolId}: execution validator must deny`
+    );
+  }
+  return decision;
 }
 
 function snapshotRawDataSeatbeltProfileOptions(
@@ -1585,6 +1843,7 @@ function buildRawDataRuleMisconfiguredResult(
     error: "policy_gate_raw_data_rule_misconfigured",
     tool_id: toolId,
     rule: RAW_DATA_WRITE_RULE_ID,
+    guard_class: decision.guardClass,
     reason:
       "Outer policy gate attempted to deny raw-data writes. Raw advisory and raw-denial evidence ownership belongs inside RawDataSandboxedBashTool.",
     outer_reason: decision.reason,
@@ -1626,9 +1885,9 @@ function buildPolicyGateDeniedResult(
     error: "policy_gate_denied",
     tool_id: toolId,
     reason: decision.reason,
-    ...(decision.ruleId ? { ruleId: decision.ruleId } : {}),
-    ...(decision.guardClass ? { guard_class: decision.guardClass } : {}),
-    ...(decision.remediation ? { remediation: decision.remediation } : {})
+    ruleId: decision.ruleId,
+    guard_class: decision.guardClass,
+    remediation: decision.remediation
   };
 
   return {
