@@ -53,8 +53,9 @@ export interface ToolFailedWsEvent {
 }
 
 export function buildToolFailedWsEvent(input: ToolFailedWsEventInput): ToolFailedWsEvent {
-  assertPublicToolFailedWsEventInput(input);
-  return buildToolFailedWsEventUnchecked(input);
+  const snapshot = snapshotToolFailedWsEventInput(input);
+  assertPublicToolFailedWsEventInput(snapshot);
+  return buildToolFailedWsEventUnchecked(snapshot);
 }
 
 export function buildRawDataAdvisoryToolFailedWsEvent(
@@ -86,6 +87,32 @@ function buildToolFailedWsEventUnchecked(input: ToolFailedWsEventInput): ToolFai
       ...(input.profileId ? { profile_id: input.profileId } : {}),
       ...(input.invocationId ? { invocation_id: input.invocationId } : {})
     }
+  };
+}
+
+function snapshotToolFailedWsEventInput(input: ToolFailedWsEventInput): ToolFailedWsEventInput {
+  const seq = input.seq;
+  const toolId = input.toolId;
+  const error = cloneErrorRecord(input.error);
+  const rule = input.rule;
+  const decision = input.decision;
+  const guardClass = input.guardClass;
+  const profileId = input.profileId;
+  const invocationId = input.invocationId;
+  const eventId = input.eventId;
+  const timestamp = input.timestamp;
+
+  return {
+    seq,
+    toolId,
+    error,
+    ...(rule !== undefined ? { rule } : {}),
+    ...(decision !== undefined ? { decision } : {}),
+    ...(guardClass !== undefined ? { guardClass } : {}),
+    ...(profileId !== undefined ? { profileId } : {}),
+    ...(invocationId !== undefined ? { invocationId } : {}),
+    ...(eventId !== undefined ? { eventId } : {}),
+    ...(timestamp !== undefined ? { timestamp } : {})
   };
 }
 

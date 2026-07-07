@@ -584,6 +584,79 @@ describe("backend ws tool.failed skeleton", () => {
     }
   });
 
+  test("generic tool.failed builder snapshots top-level identity getters", () => {
+    const reads = {
+      rule: 0,
+      decision: 0,
+      guardClass: 0
+    };
+    const event = buildToolFailedWsEvent({
+      seq: 90,
+      timestamp: "2026-07-04T00:00:00.000Z",
+      toolId: "bash",
+      get rule() {
+        reads.rule += 1;
+        return reads.rule === 1
+          ? RAW_DATA_WRITE_RULE_ID
+          : `${RAW_DATA_WRITE_RULE_ID}:failed:caller-minted`;
+      },
+      get decision() {
+        reads.decision += 1;
+        return reads.decision === 1 ? "failed" : "denied_by_advisory";
+      },
+      get guardClass() {
+        reads.guardClass += 1;
+        return reads.guardClass === 1 ? "authority" : "capability";
+      },
+      error: sampleRawLifecycleError()
+    });
+
+    expect(reads).toEqual({
+      rule: 1,
+      decision: 1,
+      guardClass: 1
+    });
+    expect(event.payload).toMatchObject({
+      tool_id: "bash",
+      rule: RAW_DATA_WRITE_RULE_ID,
+      decision: "failed",
+      guard_class: "authority"
+    });
+  });
+
+  test("generic tool.failed builder snapshots nested error_id getters", () => {
+    const benignErrorId = "workspace-quota:failed:getter-error";
+    const reservedErrorId = `${RAW_DATA_WRITE_RULE_ID}:denied_by_sandbox:reserved-profile:TOOL-CALL-WS-GETTER`;
+    let errorIdReads = 0;
+    const error = {
+      get error_id() {
+        errorIdReads += 1;
+        return errorIdReads === 1 ? benignErrorId : reservedErrorId;
+      },
+      category: "workspace_error",
+      severity: "error",
+      message: "Workspace quota check failed.",
+      user_message: "Workspace quota check failed.",
+      evidence_refs: [],
+      retryable: true,
+      recommended_next_actions: ["retry after cleanup"],
+      created_at: "2026-07-04T00:00:00.000Z"
+    } as ErrorRecord;
+
+    const event = buildToolFailedWsEvent({
+      seq: 91,
+      timestamp: "2026-07-04T00:00:00.000Z",
+      toolId: "bash",
+      rule: "workspace-quota",
+      decision: "failed",
+      guardClass: "authority",
+      error
+    });
+
+    expect(errorIdReads).toBe(1);
+    expect(event.payload.error.error_id).toBe(benignErrorId);
+  });
+
   test("generic tool.failed builder snapshots mutable error payloads", () => {
     const remediation = {
       next_action: "fix_and_retry" as const,

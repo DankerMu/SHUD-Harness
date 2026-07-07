@@ -162,6 +162,29 @@ describe("policy gate pure evaluator", () => {
     );
   });
 
+  test("ruleId lint rejects reserved authority rule prefix impersonation for every guard class", () => {
+    for (const reservedRuleId of RESERVED_AUTHORITY_POLICY_RULE_IDS) {
+      for (const guardClass of ["authority", "capability"] as const) {
+        const impersonatedRuleId = `${reservedRuleId}:caller-minted`;
+
+        expect(() =>
+          assertPolicyGateContextGuardClasses({
+            rules: [
+              {
+                ruleId: impersonatedRuleId,
+                description: "Attempts to mint a reserved authority rule prefix.",
+                guardClass,
+                evaluate: () => ({ decision: "allow" })
+              }
+            ]
+          })
+        ).toThrow(
+          `Policy gate ruleId lint failed: ${impersonatedRuleId}: reserved authority policy rule prefixes are reserved for error_id`
+        );
+      }
+    }
+  });
+
   test("reserved authority identity helpers are field-specific", () => {
     for (const ruleId of RESERVED_AUTHORITY_POLICY_RULE_IDS) {
       expect(isReservedAuthorityPolicyRuleId(ruleId)).toBe(true);

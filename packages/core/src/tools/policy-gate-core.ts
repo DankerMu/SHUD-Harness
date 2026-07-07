@@ -294,6 +294,11 @@ function validatePolicyGateContextMetadata(
       } else {
         seenRuleIds.set(ruleId, ruleLabel);
       }
+      if (isReservedAuthorityPolicyRuleIdPrefixImpersonation(ruleId)) {
+        ruleIdFailures.push(
+          `${ruleId}: reserved authority policy rule prefixes are reserved for error_id`
+        );
+      }
     }
 
     const guardClass = readPolicyGuardClassAliases(rule);
