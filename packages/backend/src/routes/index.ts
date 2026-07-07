@@ -2,7 +2,15 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, lstat, mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, parse, resolve, sep } from "node:path";
-import { Hono } from "hono";
+import {
+  CreateTaskInputSchema,
+  TaskServiceError,
+  createTaskCardService,
+  isSafeTaskId
+} from "@shud-harness/core";
+import { Hono, type Context } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
+import type { ZodError } from "zod";
 
 export const BACKEND_ROUTES_NAMESPACE = "backend/routes" as const;
 
@@ -66,6 +74,7 @@ export interface BackendApiOptions {
   version?: string;
   startTimeMs?: number;
   now?: () => Date;
+  taskIdFactory?: () => string;
   writableProbe?: WorkspaceWritableProbe;
   snapshotReadableProbe?: WorkspaceSnapshotReadableProbe;
 }
@@ -100,9 +109,28 @@ interface WorkspaceRoutesService {
   ready: () => Promise<WorkspaceReadyResponse>;
 }
 
+export interface ApiErrorResponse {
+  error: {
+    error_id: string;
+    category: string;
+    severity: "info" | "warn" | "error" | "critical";
+    message: string;
+    user_message: string;
+    evidence_refs: string[];
+    retryable: boolean;
+    recommended_next_actions: string[];
+  };
+}
+
 export function createBackendApi(options: BackendApiOptions = {}): Hono {
   const app = new Hono();
-  const service = createWorkspaceRoutesService(options);
+  const workspaceRoot = resolveWorkspaceRoot(options);
+  const service = createWorkspaceRoutesService({ ...options, workspaceRoot });
+  const taskService = createTaskCardService({
+    workspaceRoot,
+    now: options.now,
+    taskIdFactory: options.taskIdFactory
+  });
 
   app.post("/api/workspace/init", async (c) => {
     try {
@@ -119,7 +147,173 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
     return c.json(readiness, readiness.status === "ok" ? 200 : 503);
   });
 
+  app.post("/api/tasks", async (c) => {
+    let rawBody: unknown;
+    try {
+      rawBody = await c.req.json();
+    } catch {
+      return jsonApiError(
+        c,
+        {
+          category: "schema_error",
+          severity: "error",
+          message: "Request body is not valid JSON.",
+          userMessage: "The task request body must be valid JSON.",
+          evidenceRefs: ["request.body"],
+          retryable: false,
+          recommendedNextActions: ["Submit a JSON body matching the TaskCard create schema."]
+        },
+        400
+      );
+    }
+
+    const parsedBody = CreateTaskInputSchema.safeParse(rawBody);
+    if (!parsedBody.success) {
+      return jsonApiError(
+        c,
+        {
+          category: "schema_error",
+          severity: "error",
+          message: "Task create request failed schema validation.",
+          userMessage: "The task request is missing required fields or contains invalid values.",
+          evidenceRefs: zodEvidenceRefs(parsedBody.error),
+          retryable: false,
+          recommendedNextActions: ["Fix the highlighted request fields and submit again."]
+        },
+        400
+      );
+    }
+
+    try {
+      return c.json(await taskService.createTask(parsedBody.data), 201);
+    } catch (error) {
+      return jsonTaskServiceError(c, error);
+    }
+  });
+
+  app.get("/api/tasks", async (c) => {
+    try {
+      return c.json({ tasks: await taskService.listTasks() }, 200);
+    } catch (error) {
+      return jsonTaskServiceError(c, error);
+    }
+  });
+
+  app.get("/api/tasks/:id", async (c) => {
+    const taskId = c.req.param("id");
+    if (!isSafeTaskId(taskId)) {
+      return jsonApiError(
+        c,
+        {
+          category: "not_found",
+          severity: "error",
+          message: `Task not found: ${taskId}`,
+          userMessage: "The requested task does not exist.",
+          evidenceRefs: [`path.task_id:${taskId}`],
+          retryable: false,
+          recommendedNextActions: ["Refresh the task list and choose an existing task."]
+        },
+        404
+      );
+    }
+
+    try {
+      return c.json(await taskService.getTask(taskId), 200);
+    } catch (error) {
+      return jsonTaskServiceError(c, error);
+    }
+  });
+
+  app.notFound((c) => {
+    const pathname = new URL(c.req.url).pathname;
+    if (pathname.startsWith("/api/")) {
+      return jsonApiError(
+        c,
+        {
+          category: "not_found",
+          severity: "error",
+          message: `API route not found: ${pathname}`,
+          userMessage: "The requested API route does not exist.",
+          evidenceRefs: [`path:${pathname}`],
+          retryable: false,
+          recommendedNextActions: ["Use one of the registered API routes."]
+        },
+        404
+      );
+    }
+
+    return c.text("Not Found", 404);
+  });
+
   return app;
+}
+
+function jsonTaskServiceError(c: Context, error: unknown): Response {
+  if (error instanceof TaskServiceError) {
+    return jsonApiError(
+      c,
+      {
+        category: error.category,
+        severity: "error",
+        message: error.message,
+        userMessage: error.userMessage,
+        evidenceRefs: error.evidenceRefs,
+        retryable: error.retryable,
+        recommendedNextActions: error.recommendedNextActions
+      },
+      error.status
+    );
+  }
+
+  return jsonApiError(
+    c,
+    {
+      category: "workspace_error",
+      severity: "error",
+      message: "Unexpected backend route failure.",
+      userMessage: "The backend could not complete the request.",
+      evidenceRefs: ["backend/routes"],
+      retryable: false,
+      recommendedNextActions: ["Inspect backend logs before retrying."]
+    },
+    500
+  );
+}
+
+function jsonApiError(
+  c: Context,
+  input: Omit<ApiErrorResponse["error"], "error_id" | "user_message" | "evidence_refs" | "recommended_next_actions"> & {
+    userMessage: string;
+    evidenceRefs: string[];
+    recommendedNextActions: string[];
+  },
+  status: ContentfulStatusCode
+): Response {
+  return c.json(
+    {
+      error: {
+        error_id: `api_error_${randomUUID()}`,
+        category: input.category,
+        severity: input.severity,
+        message: input.message,
+        user_message: input.userMessage,
+        evidence_refs: input.evidenceRefs,
+        retryable: input.retryable,
+        recommended_next_actions: input.recommendedNextActions
+      }
+    } satisfies ApiErrorResponse,
+    status
+  );
+}
+
+function zodEvidenceRefs(error: ZodError): string[] {
+  return Array.from(
+    new Set(
+      error.issues.map((issue) =>
+        issue.path.length > 0 ? `request.body.${issue.path.join(".")}` : "request.body"
+      )
+    )
+  );
 }
 
 export function createWorkspaceRoutesService(

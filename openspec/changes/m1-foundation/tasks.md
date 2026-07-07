@@ -90,6 +90,48 @@
     - Existing backend WebSocket tests, typecheck, and package check remain green; #29/#31/#32/#33 surfaces are not pre-implemented.
     - `bun run test:backend-api` or focused backend route test command; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`.
 - [ ] 6.2 TaskCard 最小链路：`POST/GET /api/tasks`、`GET /api/tasks/:id` + 统一错误 envelope（含 404 路由兜底）+ task snapshot 落盘/重启恢复——依赖: 4.1
+  - Fixture (#29): expanded / high
+    - Change surface: `packages/core/src/domain/services/**` TaskCard file service + `packages/backend/src/routes/**` task routes and API fallback; `packages/core/src/domain/schemas/task.ts` is the validation source of truth.
+    - Must preserve: #28 workspace init/health endpoints and tests, fallback ordering for existing routes, backend WebSocket tests, root package check, `workspace/` runtime assets untracked, and `zero/` source diff=0.
+    - Must add/change: `POST /api/tasks`, `GET /api/tasks`, `GET /api/tasks/:id`, standard error envelope for schema errors and 404, task snapshot persistence under the configured workspace, and restart/list recovery.
+    - Create input contract: accepted M1 body contains `type`, `title`, `question_or_goal`, `inference_budget`, and optional `created_by`; stored TaskCard must generate/normalize `task_id`, `status="created"`, `created_by`, `current_owner`, `reviewer`, empty `linked_jobs`, empty `linked_reports`, ISO `created_at`, and ISO `updated_at`.
+    - Snapshot contract: `workspace/tasks/<task_id>/snapshot.json` contains required TaskSnapshot fields (`task_id`, `status`, optional/nullable `runtime_phase`, optional `stack_id`/`data_id`, `linked_jobs`, `linked_runs`, `linked_reports`, `pending_pi_gates`, `latest_seq=0`, `updated_at`) and may include nested full `task_card`; recovery validates TaskSnapshot plus nested `TaskCardSchema` when present and rejects mismatches.
+    - Risk packs considered:
+      - Public API / CLI / script entry: selected - new task endpoints plus API fallback.
+      - Config / project setup: selected - configured workspace root controls persistence/recovery.
+      - File IO / path safety / overwrite: selected - snapshot writes/reads under `workspace/tasks/<task_id>/snapshot.json`, with no overwrite of unrelated lanes.
+      - Schema / columns / units / field names: selected - create body, TaskCard, TaskSnapshot carrier, and envelope fields.
+      - Auth / permissions / secrets: not selected - unauthenticated M1 skeleton; no secret handling.
+      - Concurrency / shared state / ordering: selected - sequential/concurrent creates must keep in-memory list/detail and snapshots coherent.
+      - Resource limits / large input / discovery: selected - startup hydration must scan only bounded `workspace/tasks/*/snapshot.json` candidates and bounded JSON bytes.
+      - Legacy compatibility / examples: selected - API registry example shape and existing #28/backend WS behavior remain compatible.
+      - Error handling / rollback / partial outputs: selected - rejected create/recovery states use envelope and leave no accepted task state.
+      - Release / packaging / dependency compatibility: selected - no new non-M1 runtime dependency; Bun workspace checks remain green.
+      - Documentation / migration notes: selected - PR evidence states response shape, snapshot shape, and deferred #30/#33/#35 boundaries.
+    - Invariant Matrix:
+      - Governing invariant: every accepted TaskCard is schema-valid, queryable by id/list, and represented by exactly one workspace-local snapshot; rejected requests and unknown routes return envelope errors without creating accepted task state.
+      - Source-of-truth identity/contract: `task_id`, create-body schema, TaskCard Zod schema, TaskSnapshot carrier fields, API error envelope fields, configured workspace root, snapshot path `workspace/tasks/<task_id>/snapshot.json`.
+      - Producers: `POST /api/tasks` and TaskCard service create path.
+      - Validators/preflight: request-body validation, task-id/path-segment validation, service-level TaskCard schema validation before persistence, and TaskSnapshot parse validation during recovery.
+      - Storage/cache/query: in-memory task index hydrated from snapshot files plus workspace task snapshot JSON files.
+      - Public routes/entrypoints: `POST /api/tasks`, `GET /api/tasks`, `GET /api/tasks/:id`, API 404 fallback.
+      - Frontend/downstream consumers: Dashboard #35 consumes exact list/create response shapes and refresh recovery; Workbench navigation remains out of scope.
+      - Failure paths/stale state: missing required field, invalid enum, unknown task id, unknown API route, malformed/stale snapshot, existing regular-file task lane, duplicate generated id collision, unrelated task lanes, and service re-instantiation after create.
+      - Evidence/readiness: backend route tests, `test:backend-api`, root `check`, OpenSpec strict validate, diff check, and zero diff.
+      - Regression rows:
+        - Valid create body (`type/title/question_or_goal/inference_budget/created_by`) -> 201 TaskCard status=`created`, generated/default fields present, list/detail return same object, snapshot file exists.
+        - Missing required field, invalid enum, or malformed JSON -> 400 envelope with all canonical `error` fields and field-level evidence; no task snapshot is written.
+        - Unknown `/api/*` path or missing task id -> 404 envelope with all canonical `error` fields, not Hono default body.
+        - Recreated app/service over same workspace -> `GET /api/tasks` includes prior TaskCard from snapshot.
+        - Existing non-directory task lane or malformed/mismatched snapshot -> stable envelope or documented fail-closed recovery result; no alternate accepted task and no workspace outside configured root touched.
+        - Concurrent/sequential valid creates -> unique task ids, coherent list/detail responses, and one snapshot per accepted task.
+        - Startup hydration with unrelated task lanes -> reads only bounded `*/snapshot.json` candidates and preserves unrelated files.
+    - Evidence floor (#29):
+      - Backend route tests cover create/detail/list with exact input and generated/default TaskCard fields, invalid request 400 schema_error with field-level evidence, unknown API path 404 envelope, missing task id 404 envelope, snapshot file creation under `tasks/<task_id>/snapshot.json`, restart recovery by constructing a fresh app over the same temp workspace, malformed/existing-lane recovery behavior, and sequential/concurrent multi-create coherence.
+      - 400/404 tests assert every canonical envelope field under `error`: `error_id`, `category`, `severity`, `message`, `user_message`, `evidence_refs`, `retryable`, `recommended_next_actions`.
+      - Snapshot write uses atomic/no-clobber-or-replace semantics only for the current task snapshot; unrelated existing files under the task lane are preserved; startup hydration is bounded to `workspace/tasks/*/snapshot.json`.
+      - #29 does not implement Idempotency-Key handling, shared path helper, structured request logging, PERF-API-001, frontend Dashboard, or Workbench task navigation.
+      - `bun run test:backend-api`; `bun run test:backend-ws`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 6.3 幂等/锁 service skeleton（相同 Idempotency-Key + 相同 request_digest 重放返回同一对象；相同 key + 不同 digest → 422 标准 envelope；M1 验证载体 = `POST /api/tasks`，key/digest 配方为 change-scoped，见 task-api spec 与 proposal Impact 账本待办）+ Artifact registry skeleton（注册/按 id 查询/落盘）——依赖: 4.1（IdempotencyRecord/LockRecord schema）
 - [ ] 6.4 结构化 NDJSON API 请求日志中间件（OBS-LOG-001 八字段：ts/level/service/event/request_id/route/status/duration_ms；secret 仅以 ref/[REDACTED] 形式出现，OBS-LOG-002）
 - [ ] 6.5 PERF-API-001 冒烟脚本 `bun run test:perf:api`（fixture = mock workspace + 100 tasks；GET /api/tasks、GET /api/tasks/:id、health ready P95 ≤ 300ms）+ 接入 1.2 的 PR CI——依赖: 1.2

@@ -728,3 +728,112 @@ Review focus:
 - Health response fields match OBS-HEALTH-001/002 and path registry.
 - Ready failure states are explicit and stable rather than relying on thrown framework errors.
 - Scope stays in #28 and does not pre-implement #29/#31/#32/#33.
+
+## Subagent Workflow Fixture - Issue #29
+
+Fixture level: expanded; repair intensity: high
+Project profile: SHUD-Harness
+
+Expanded-trigger rationale:
+- Core triggers: public REST API entrypoints, TaskCard schema/field contract, persisted snapshot file output, configured workspace path boundary, API error envelope, and service restart recovery.
+- Profile triggers: `workspace`, `snapshot`, `idempotency` boundary split, and API evidence-chain correctness.
+
+Change surface:
+- `packages/core/src/domain/services/**` TaskCard service/snapshot persistence.
+- `packages/backend/src/routes/**` task routes, shared API error envelope helper, and API 404 fallback.
+- Backend route tests and package scripts needed to exercise task-api behavior.
+
+Must preserve:
+- #28 workspace init and health endpoints remain unchanged in route path, response shape, and temp-workspace test behavior.
+- Runtime workspace assets remain outside tracked source; `test -z "$(git ls-files workspace)"` stays true.
+- `zero/` remains source-clean.
+- API fallback must not shadow existing registered routes.
+- #30 owns `Idempotency-Key`, idempotency/lock service, and Artifact registry; #33 owns shared path helper wiring; #31 owns structured logs; #32 owns perf smoke; #35 owns frontend Dashboard.
+
+Must add/change:
+- `POST /api/tasks` accepts the M1 create input body:
+  ```json
+  {
+    "type": "engineering",
+    "title": "Add optional event diagnostics",
+    "question_or_goal": "Add event_flux output without breaking old rSHUD readers",
+    "inference_budget": { "mode": "normal" },
+    "created_by": "pi"
+  }
+  ```
+  `created_by` may default to a deterministic M1 actor only when omitted if tests document the default; the stored TaskCard must include `task_id`, `status="created"`, `created_by`, `current_owner`, `reviewer`, empty `linked_jobs`, empty `linked_reports`, and ISO `created_at`/`updated_at`.
+- `GET /api/tasks` returns the list/create shape that #35 Dashboard can consume: an array or object wrapper must be stable and documented in tests; #29 tests become the downstream oracle.
+- `GET /api/tasks/:id` returns the same stored TaskCard by `task_id`.
+- Standard error envelope is used for schema errors, missing task id, malformed snapshots that block recovery, existing non-directory task lanes, and unknown `/api/*` paths.
+- Task persistence writes a workspace-local task snapshot at `workspace/tasks/<task_id>/snapshot.json` plus enough data to reconstruct the full TaskCard after service re-instantiation.
+
+Snapshot shape and recovery source of truth:
+- #29 snapshot file is the M1 task-lane snapshot carrier at the canonical path `workspace/tasks/<task_id>/snapshot.json`.
+- The file must contain canonical TaskSnapshot fields from `Workspace_Snapshot_And_Recovery_Spec.md`: `task_id`, `status`, optional/nullable `runtime_phase`, optional `stack_id`/`data_id`, `linked_jobs`, `linked_runs`, `linked_reports`, `pending_pi_gates`, `latest_seq`, and `updated_at`.
+- Because #29 must restore the TaskCard list before the full M3 event bus exists, the M1 snapshot may also include a nested full `task_card` object. If present, recovery validates `task_card` with `TaskCardSchema` and validates that `task_card.task_id`, `status`, linked jobs/reports, and `updated_at` agree with the outer snapshot fields.
+- `latest_seq` is `0` in M1 skeleton snapshots because the event bus critical section is out of scope.
+- Malformed snapshot JSON, schema-mismatched snapshot fields, task-id mismatches, or an existing regular file where `workspace/tasks/<task_id>/` is needed must fail with a stable envelope and must not silently create a different accepted task. Recovery may skip malformed snapshots only if an explicit test proves the list remains stable and the error is reported through the public endpoint or service result; default preference is fail closed for M1.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - `POST /api/tasks`, `GET /api/tasks`, `GET /api/tasks/:id`, and API fallback are public backend entrypoints.
+- Config / project setup: selected - all persistence and recovery depends on the configured workspace root and its default/env resolution inherited from #28.
+- File IO / path safety / overwrite: selected - snapshots are written/read under `workspace/tasks/<task_id>/snapshot.json`; task lanes must not overwrite unrelated files or escape the configured root.
+- Schema / columns / units / field names: selected - create body, stored TaskCard, TaskSnapshot carrier, and error envelope fields are structured contracts.
+- Auth / permissions / secrets: not selected - M1 task endpoints are unauthenticated skeletons and must not handle or log secrets.
+- Concurrency / shared state / ordering: selected - create/list/detail state and snapshot writes must remain coherent across sequential and concurrent creates in one process.
+- Resource limits / large input / discovery: selected - startup hydration must scan only `workspace/tasks/*/snapshot.json` and use bounded JSON reads.
+- Legacy compatibility / examples: selected - the API registry example create body and existing #28/#20 backend/ws tests remain compatible.
+- Error handling / rollback / partial outputs: selected - invalid requests and failed persistence/recovery must return canonical envelope and not leave accepted task state behind.
+- Release / packaging / dependency compatibility: selected - no new non-M1 runtime dependency; Bun workspace typecheck/check remain green.
+- Documentation / migration notes: selected - PR body/evidence must state exact #29 response shape, snapshot shape, and deferred #30/#33/#35 boundaries.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - TaskCard is the PI-visible unit of work; no scientific claims or PI decisions are made in this slice.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no solver/runtime behavior changes.
+- Zero adapter / tool registry / agent role governance: not selected - no Zero/tool governance changes.
+
+Invariant Matrix:
+- Governing invariant: Every accepted TaskCard is schema-valid, queryable by id/list, and represented by exactly one workspace-local snapshot; rejected requests, malformed recovery state, and unknown API paths return canonical envelope errors without creating or switching accepted task state.
+- Source-of-truth identity/contract: `task_id`, `TaskCardSchema`, create-body schema, API error envelope fields, configured workspace root, and `workspace/tasks/<task_id>/snapshot.json`.
+- Producers: `POST /api/tasks`, task service create path, task snapshot writer.
+- Validators/preflight: create-body validation, TaskCard schema validation before persistence, TaskSnapshot parse validation during recovery, safe task-id/path-segment validation.
+- Storage/cache/query: in-memory task index hydrated from workspace task snapshots; task snapshot JSON files under configured workspace root.
+- Public routes/entrypoints: `POST /api/tasks`, `GET /api/tasks`, `GET /api/tasks/:id`, API 404 fallback.
+- Frontend/downstream consumers: #35 Dashboard consumes list/create response shapes and refresh recovery; Workbench task-context navigation remains out of scope.
+- Failure paths/rollback/stale state: missing required field, invalid enum, unknown task id, unknown API route, malformed/stale snapshot, existing regular-file task lane, duplicate generated id collision, and service re-instantiation after create.
+- Evidence/audit/readiness: backend route tests, focused core service tests if needed, `test:backend-api`, backend/ws tests, root `check`, OpenSpec validation, diff check, zero diff, and PR evidence.
+- Regression rows:
+  - Valid create body above -> 201 stored TaskCard with generated `task_id`, `status="created"`, default/generated owner fields, empty link arrays, timestamps, and no idempotency record.
+  - Created task -> `GET /api/tasks/:id` and `GET /api/tasks` return the same TaskCard shape; #28 health/live/ready tests still pass.
+  - Created task -> snapshot exists at `workspace/tasks/<task_id>/snapshot.json`, contains required TaskSnapshot fields, and nested `task_card` if used; unrelated files in the task lane survive snapshot rewrite.
+  - Fresh app/service over same workspace -> `GET /api/tasks` includes the prior TaskCard from snapshot.
+  - Missing required field, invalid enum, or malformed JSON -> 400 envelope containing all canonical fields under `error` plus field-level `evidence_refs`; no task snapshot is written.
+  - Unknown `/api/*` path or missing task id -> 404 envelope containing all canonical fields, not a Hono/framework default body.
+  - Malformed snapshot JSON, task-id mismatch, or existing regular file where a task directory is needed -> stable envelope or documented fail-closed recovery result; no alternate task id is created and no workspace outside configured root is touched.
+  - Concurrent or sequential valid creates in one process -> unique task ids, coherent list/detail responses, and one snapshot per accepted task.
+  - Startup hydration with unrelated files/directories under `workspace/tasks/` -> reads only bounded `*/snapshot.json` candidates and ignores/handles unrelated lanes without broad traversal.
+
+Boundary-surface checklist:
+- Public entrypoints: `POST /api/tasks`, `GET /api/tasks`, `GET /api/tasks/:id`, API 404 fallback.
+- Read surfaces: request JSON body, snapshot JSON files under `workspace/tasks/*/snapshot.json`.
+- Write/delete/overwrite surfaces: task lane directory creation and current task snapshot replace/write only; no delete behavior.
+- Producer/consumer evidence boundaries: create body -> stored TaskCard -> TaskSnapshot JSON -> hydrated in-memory list/detail -> #35 Dashboard shape.
+- Stale-state/idempotency boundaries: service restart hydration and explicit non-goal for `Idempotency-Key`.
+- Unchanged downstream consumers: #28 health/workspace routes, backend WS tool.failed tests, future #30 idempotency/locks, #33 path helper, and #35 Dashboard.
+
+Required evidence:
+- Backend route tests for create/list/detail, with exact create input and exact generated/default TaskCard fields asserted.
+- Backend tests for 400 schema error and 404 fallback/missing task id that assert every canonical envelope field: `error_id`, `category`, `severity`, `message`, `user_message`, `evidence_refs`, `retryable`, `recommended_next_actions`.
+- Backend or core tests for snapshot write shape, restart recovery from the same workspace, malformed snapshot handling, existing regular-file task lane, unrelated lane preservation, and bounded hydration scope.
+- Backend tests for concurrent or sequential multi-create coherence and unique `task_id` values.
+- Compatibility: #28 route tests, backend ws tests, typecheck, root check, OpenSpec validation, diff check, zero diff, and no tracked `workspace`.
+
+Non-goals:
+- `Idempotency-Key`, request digest, LockRecord, and Artifact registry (#30).
+- Shared path safety helper and wiring (#33); #29 still keeps task snapshot writes workspace-bounded with route-local checks.
+- Structured API request logging (#31), PERF-API-001 (#32), frontend Dashboard (#35), Workbench navigation, full event bus/latest_seq critical section, task execution/planning, and scientific PI decisions.
+
+Review focus:
+- Create-input schema, generated/default stored fields, TaskCard schema, and TaskSnapshot carrier are internally consistent.
+- Error envelope tests assert the full canonical shape and no framework default error body leaks.
+- Snapshot persistence/recovery is bounded to configured workspace task lanes and does not silently accept malformed state.
+- Existing #28 routes remain reachable and unchanged; fallback ordering does not shadow real routes.
