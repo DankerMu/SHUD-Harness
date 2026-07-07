@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, unlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, lstat, mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, parse, resolve, sep } from "node:path";
 import { Hono } from "hono";
 
@@ -221,7 +222,30 @@ async function findMissingWorkspaceDirectories(
 }
 
 async function ensureWorkspaceRootDirectory(workspaceRoot: string): Promise<void> {
-  await ensureSafeDirectoryPath(workspaceRoot, "workspace_root_not_safe");
+  const existingEntry = await maybeLstat(workspaceRoot);
+  if (existingEntry) {
+    if (!(await isSafeExistingDirectoryPath(workspaceRoot))) {
+      throw new Error("workspace_root_not_safe");
+    }
+    return;
+  }
+
+  const parentPath = dirname(workspaceRoot);
+  if (parentPath === workspaceRoot || !(await isSafeExistingDirectoryPath(parentPath))) {
+    throw new Error("workspace_root_not_safe");
+  }
+
+  try {
+    await mkdir(workspaceRoot);
+  } catch (error) {
+    if (!hasErrorCode(error, "EEXIST")) {
+      throw error;
+    }
+  }
+
+  if (!(await isSafeExistingDirectoryPath(workspaceRoot))) {
+    throw new Error("workspace_root_not_safe");
+  }
 }
 
 async function ensureSafeWorkspaceDirectory(
@@ -258,7 +282,7 @@ async function defaultSnapshotReadableProbe(
   input: WorkspaceSnapshotReadableProbeInput
 ): Promise<boolean> {
   try {
-    await readdir(input.snapshotsPath);
+    await access(input.snapshotsPath, constants.R_OK);
     return true;
   } catch {
     return false;
@@ -325,20 +349,6 @@ async function defaultWorkspaceWritableProbe(input: WorkspaceWritableProbeInput)
     if (createdProbe && (await isAcceptedWorkspaceRootDirectory(input.workspaceRoot))) {
       await unlink(probePath).catch(() => undefined);
     }
-  }
-}
-
-async function ensureSafeDirectoryPath(path: string, errorCode: string): Promise<void> {
-  const { rootPath, segments } = getPathParts(path);
-  const rootEntry = await maybeLstat(rootPath);
-  if (!isSafeDirectoryEntry(rootEntry)) {
-    throw new Error(errorCode);
-  }
-
-  let currentPath = rootPath;
-  for (const segment of segments) {
-    currentPath = join(currentPath, segment);
-    await ensureSafeDirectorySegment(currentPath, errorCode);
   }
 }
 

@@ -67,6 +67,7 @@ describe("backend workspace and health routes", () => {
     tempRoots.push(tempRoot);
     const app = createBackendApi({ workspaceRoot });
 
+    await expectPathMissing(workspaceRoot);
     const response = await app.request("/api/workspace/init", { method: "POST" });
     const body = await response.json();
 
@@ -93,6 +94,21 @@ describe("backend workspace and health routes", () => {
       snapshot_readable: "ok",
       workspace_writable: "ok"
     });
+  });
+
+  test("POST /api/workspace/init creates an absent workspace root leaf when its parent is safe", async () => {
+    const tempRoot = await createTempRoot("shud-harness-backend-routes-leaf-");
+    tempRoots.push(tempRoot);
+    const workspaceRoot = join(tempRoot, "workspace");
+    const app = createBackendApi({ workspaceRoot });
+
+    await expectPathMissing(workspaceRoot);
+    const response = await app.request("/api/workspace/init", { method: "POST" });
+
+    expect(response.status).toBe(200);
+    expect((await stat(workspaceRoot)).isDirectory()).toBe(true);
+    expect((await stat(join(workspaceRoot, "snapshots"))).isDirectory()).toBe(true);
+    expect((await stat(join(workspaceRoot, "readiness"))).isDirectory()).toBe(true);
   });
 
   test("POST /api/workspace/init is idempotent and preserves existing files", async () => {
@@ -242,6 +258,19 @@ describe("backend workspace and health routes", () => {
     expect(readyBody.status).toBe("ok");
     expect((await stat(join(workspaceRoot, "readiness"))).isDirectory()).toBe(true);
     await expectPathMissing(join(legacyRoot, "readiness"));
+  });
+
+  test("POST /api/workspace/init rejects a missing parent outside the configured root leaf", async () => {
+    const tempRoot = await createTempRoot("shud-harness-backend-routes-missing-parent-");
+    tempRoots.push(tempRoot);
+    const missingParent = join(tempRoot, "missing-parent");
+    const workspaceRoot = join(missingParent, "workspace");
+    const app = createBackendApi({ workspaceRoot });
+
+    const response = await app.request("/api/workspace/init", { method: "POST" });
+
+    expect(response.status).toBe(500);
+    await expectPathMissing(missingParent);
   });
 
   test("POST /api/workspace/init rejects a symlinked canonical parent without writing outside", async () => {
@@ -394,6 +423,26 @@ describe("backend workspace and health routes", () => {
       snapshot_readable: "fail",
       workspace_writable: "ok"
     });
+  });
+
+  test("GET /api/health/ready accepts a default snapshot readability probe with many entries", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({ workspaceRoot });
+
+    expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
+    await Promise.all(
+      Array.from({ length: 512 }, (_, index) =>
+        writeFile(join(workspaceRoot, "snapshots", `snapshot-${index}.json`), "{}")
+      )
+    );
+
+    const readyResponse = await app.request("/api/health/ready");
+    const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
+
+    expect(readyResponse.status).toBe(200);
+    expect(readyBody.status).toBe("ok");
+    expect(readyBody.checks.snapshot_readable).toBe("ok");
   });
 });
 
