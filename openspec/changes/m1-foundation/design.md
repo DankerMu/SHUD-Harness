@@ -927,3 +927,85 @@ Review focus:
 - Idempotency mismatch and failed create paths do not create duplicate TaskCards or poisoned completed records.
 - Workspace record paths use safe derived segments and API error JSON never exposes raw caller headers or absolute workspace paths.
 - Artifact/Lock services stay skeleton-sized but schema-valid, workspace-local, directly queryable, and compatible with later #33 path helper wiring.
+
+## Subagent Workflow Fixture - Issue #33
+
+Fixture level: expanded; repair intensity: high
+Project profile: SHUD-Harness
+
+Expanded-trigger rationale:
+- Core triggers: shared path helper, persisted workspace writes, normalized path field storage, symlink/traversal rejection, and fail-closed no-write behavior.
+- Profile triggers: `workspace`, `artifact`, `snapshot`, path/workspace containment, and evidence-chain correctness.
+
+Change surface:
+- `packages/core/src/domain/services/workspace-path-safety.ts` shared path resolution helper.
+- Artifact registry manifest write path in `packages/core/src/domain/services/artifact-registry-service.ts`.
+- Task snapshot write path in `packages/core/src/domain/services/task-card-service.ts`.
+- Workspace JSON record write preparation in `packages/core/src/domain/services/workspace-record-store.ts`.
+
+Must preserve:
+- #29 TaskCard create/list/detail response shape, snapshot filename, restart recovery, bounded hydration, and existing workspace error envelopes.
+- #30 IdempotencyRecord, LockRecord, and Artifact schema validation, direct lookup behavior, immutable manifest semantics, and no raw caller segment leaks.
+- Runtime `workspace/` assets remain untracked; `zero/` remains source-clean.
+- No bash/sandbox behavior and no workspace allowlist expansion beyond explicit read-only root support in the helper.
+
+Must add/change:
+- A shared helper resolves input paths, normalizes them, checks workspace or allowed read-only boundaries, rejects symlink crossings and non-directory ancestors, and returns the normalized path.
+- Artifact registry normalizes `artifact.path` before manifest storage and rejects unsafe paths before writing manifests.
+- Task snapshot write surfaces resolve the task root, task lane, snapshot path, and temporary path through the helper before writing.
+- Workspace JSON record writes use the shared helper at the point of write preparation.
+
+Risk packs considered:
+- Public API / CLI / script entry: not selected - no route or CLI contract changes.
+- Config / project setup: selected - all behavior is rooted in the configured workspace root and optional allowed read-only roots.
+- File IO / path safety / overwrite: selected - this issue owns traversal, symlink, boundary, and no-write regression coverage for workspace write surfaces.
+- Schema / columns / units / field names: selected - Artifact manifest `path` is normalized before storage.
+- Auth / permissions / secrets: not selected - no credential or permission model changes.
+- Concurrency / shared state / ordering: selected - helper checks are applied immediately before write preparation and preserve existing atomic/no-clobber paths.
+- Resource limits / large input / discovery: selected - helper walks only path ancestors and stops at the first missing segment; no broad workspace scan is introduced.
+- Legacy compatibility / examples: selected - existing #29/#30/#31/#32 tests and response/storage behavior remain compatible.
+- Error handling / rollback / partial outputs: selected - rejected paths fail closed and must not create workspace-external files or partial manifests/snapshots.
+- Release / packaging / dependency compatibility: not selected - no new dependency.
+- Documentation / migration notes: selected - PR evidence states helper boundaries and out-of-scope bash/sandbox behavior.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - Artifact paths are future evidence references and must not be silently rewritten outside the workspace.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no solver/runtime behavior changes.
+- Zero adapter / tool registry / agent role governance: not selected - no Zero/tool governance changes.
+
+Invariant Matrix:
+- Governing invariant: Every M1 workspace write surface introduced by #29/#30 records only normalized paths inside the configured workspace, or rejects before write when a path traverses outside, crosses a symlink, targets a read-only boundary for write, or encounters a non-directory ancestor.
+- Source-of-truth identity/contract: configured `workspaceRoot`, optional `allowedReadonlyRoots`, normalized workspace-relative path, `Artifact.path`, task snapshot paths, and `workspace_path_not_safe` evidence refs.
+- Producers: Artifact registry `registerArtifact`, TaskCard snapshot persistence, Workspace JSON record write preparation, and the shared helper.
+- Validators/preflight: segment/id validators from #29/#30 plus shared `resolveWorkspacePath` boundary and symlink checks.
+- Storage/cache/query: task snapshots under `workspace/tasks/<task_id>/snapshot.json`, temporary snapshot files, and Artifact manifests under `workspace/artifacts/manifests/`.
+- Public routes/entrypoints: none directly - #29/#30 backend routes consume these services indirectly.
+- Frontend/downstream consumers: #35 Dashboard and future artifact/evidence consumers read normalized stored paths without API shape changes.
+- Failure paths/rollback/stale state: traversal, absolute path outside workspace, symlinked ancestor/leaf, write under allowed read-only root, missing parent segments, existing regular-file lanes, and existing rollback/cleanup paths.
+- Evidence/audit/readiness: core service tests, root check, OpenSpec validation, diff check, zero diff, and no tracked `workspace`.
+- Regression rows:
+  - Legal relative Artifact path with `./` -> stored manifest path is normalized workspace-relative and `getArtifact(id)` returns the normalized record.
+  - `../` traversal or absolute outside workspace -> helper throws `WorkspacePathSafetyError`/mapped `workspace_path_not_safe` before any outside file exists.
+  - Workspace symlink ancestor pointing outside -> Artifact registry and TaskCard snapshot writes reject before writing a manifest or snapshot outside.
+  - Allowed read-only root with `access=read` -> helper returns boundary `allowed_readonly`; same root with `access=write` -> rejection.
+  - Existing #29/#30 service tests -> snapshot recovery, idempotency, lock, artifact lookup, and immutable duplicate behavior remain green.
+
+Boundary-surface checklist:
+- Shared helper roots: `resolveWorkspacePath`, `assertPathInsideWorkspace`, and existing local workspace guards.
+- Read surfaces: helper read-only resolution for allowed read-only roots; existing snapshot/record reads are compatibility surfaces.
+- Write/delete/overwrite surfaces: Artifact manifest writes, Task snapshot writes, temporary snapshot publish, and JSON record writes.
+- Staging/publish/rollback surfaces: snapshot temp-file write/rename/unlink and existing record no-clobber writes.
+- Producer/consumer evidence boundaries: Artifact input path -> normalized manifest path; TaskCard id -> normalized snapshot lane.
+- Stale-state/idempotency boundaries: existing #30 idempotency/lock behavior; no new cross-process locking.
+- Unchanged downstream consumers: backend task routes, idempotency/lock services, structured logging, perf smoke, and future Dashboard.
+
+Required evidence:
+- Core service tests for traversal rejection, symlink escape rejection, legal path normalization, allowed read-only read/write split, normalized Artifact manifest storage, Artifact symlink no-write, and Task snapshot normalized/no-write cases.
+- Gate commands: `bun run test:core-services`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
+
+Non-goals:
+- Bash/sandbox execution path controls, M3 executor behavior, raw-data write denial telemetry, artifact payload serving/download APIs, and expanding workspace external allowlists.
+
+Review focus:
+- Helper boundary checks are centralized and fail closed before writes.
+- Artifact and Task snapshot write surfaces actually call the helper and persist normalized paths where applicable.
+- Tests prove no outside file/manifest/snapshot is created on traversal or symlink escape.

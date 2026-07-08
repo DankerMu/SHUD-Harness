@@ -22,10 +22,12 @@ import {
   idempotencyRecordEvidenceRef,
   idempotencyRecordFileName,
   sha256Hex,
+  resolveWorkspacePath,
   type Artifact,
   type IdempotencyRecord,
   type IdempotencyRecordService,
-  type LockRecord
+  type LockRecord,
+  WorkspacePathSafetyError
 } from "./index";
 import { MAX_SERVICE_RECORD_BYTES } from "./workspace-record-store";
 
@@ -1168,6 +1170,174 @@ describe("idempotency, lock, and artifact services", () => {
     await expectPathMissing(join(invalidId.workspaceRoot, "locks"));
   });
 
+  test("workspace path helper rejects traversal and symlink escape while normalizing legal paths", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+
+    const traversalError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: "../outside/report.md",
+        evidenceRef: "artifact.path"
+      })
+    );
+
+    expect(traversalError.evidenceRef).toBe("artifact.path");
+    await expectPathMissing(join(tempRoot, "outside", "report.md"));
+
+    await mkdir(join(workspaceRoot, "artifacts"), { recursive: true });
+    const outsideRoot = join(tempRoot, "outside-artifacts");
+    await mkdir(outsideRoot, { recursive: true });
+    await symlink(outsideRoot, join(workspaceRoot, "artifacts", "reports"), "dir");
+
+    const symlinkError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: "artifacts/reports/report.md",
+        evidenceRef: "artifact.path"
+      })
+    );
+
+    expect(symlinkError.evidenceRef).toBe("artifact.path");
+    await expectPathMissing(join(outsideRoot, "report.md"));
+
+    await rm(join(workspaceRoot, "artifacts", "reports"), { force: true });
+    const resolved = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: "artifacts/reports/./TASK-0001/report.md",
+      evidenceRef: "artifact.path"
+    });
+
+    expect(resolved.absolutePath).toBe(
+      join(workspaceRoot, "artifacts", "reports", "TASK-0001", "report.md")
+    );
+    expect(resolved.normalizedPath).toBe("artifacts/reports/TASK-0001/report.md");
+
+    const readonlyRoot = join(tempRoot, "readonly-source");
+    await mkdir(readonlyRoot, { recursive: true });
+    const readonlyResolution = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: join(readonlyRoot, "input.dat"),
+      evidenceRef: "readonly.path",
+      access: "read",
+      allowedReadonlyRoots: [readonlyRoot]
+    });
+    expect(readonlyResolution.boundary).toBe("allowed_readonly");
+    expect(readonlyResolution.normalizedPath).toBe(join(readonlyRoot, "input.dat"));
+
+    const readonlyWriteError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: join(readonlyRoot, "input.dat"),
+        evidenceRef: "readonly.path",
+        access: "write",
+        allowedReadonlyRoots: [readonlyRoot]
+      })
+    );
+    expect(readonlyWriteError.evidenceRef).toBe("readonly.path");
+  });
+
+  test("TaskCard snapshot writes expose normalized task directories and reject symlink escape", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const observedTaskDirectories: string[] = [];
+    const service = createTaskCardService({
+      workspaceRoot: join(workspaceRoot, "."),
+      now: () => new Date("2026-07-07T13:40:00.000Z"),
+      taskIdFactory: () => "TASK-path-normalized",
+      snapshotWriteHooks: {
+        beforeSnapshotWrite: ({ taskDirectory }) => {
+          observedTaskDirectories.push(taskDirectory);
+        }
+      }
+    });
+
+    const task = await service.createTask({
+      type: "engineering",
+      title: "Normalize task path",
+      question_or_goal: "Write a task snapshot through normalized workspace paths.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+
+    expect(observedTaskDirectories).toEqual([
+      join(workspaceRoot, "tasks", "TASK-path-normalized")
+    ]);
+    expect((await stat(join(workspaceRoot, "tasks", task.task_id, "snapshot.json"))).isFile()).toBe(
+      true
+    );
+
+    const escapeCase = await createTempWorkspacePath();
+    tempRoots.push(escapeCase.tempRoot);
+    const outsideTasksRoot = join(escapeCase.tempRoot, "outside-tasks");
+    await mkdir(escapeCase.workspaceRoot, { recursive: true });
+    await mkdir(outsideTasksRoot, { recursive: true });
+    await symlink(outsideTasksRoot, join(escapeCase.workspaceRoot, "tasks"), "dir");
+    const escapeService = createTaskCardService({
+      workspaceRoot: escapeCase.workspaceRoot,
+      taskIdFactory: () => "TASK-symlink-escape"
+    });
+
+    const escapeError = await captureTaskServiceError(() =>
+      escapeService.createTask({
+        type: "engineering",
+        title: "Reject task symlink",
+        question_or_goal: "Do not write a task snapshot outside the workspace.",
+        inference_budget: { mode: "normal" },
+        created_by: "pi"
+      })
+    );
+
+    expect(escapeError.code).toBe("workspace_path_not_safe");
+    await expectPathMissing(join(outsideTasksRoot, "TASK-symlink-escape", "snapshot.json"));
+  });
+
+  test("Artifact registry normalizes artifact paths in stored manifests", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createArtifactRegistryService({ workspaceRoot });
+    const artifact = {
+      ...validArtifact(),
+      path: "artifacts/reports/./TASK-0001/report.md"
+    };
+    const expectedArtifact = {
+      ...artifact,
+      path: "artifacts/reports/TASK-0001/report.md"
+    };
+    const manifestPath = join(
+      workspaceRoot,
+      "artifacts",
+      "manifests",
+      `${artifact.artifact_id}.json`
+    );
+
+    await expect(service.registerArtifact(artifact)).resolves.toEqual(expectedArtifact);
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(expectedArtifact);
+    expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(expectedArtifact);
+  });
+
+  test("Artifact registry rejects symlink escapes before writing manifests", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createArtifactRegistryService({ workspaceRoot });
+    const outsideRoot = join(tempRoot, "outside-artifacts");
+    await mkdir(join(workspaceRoot, "artifacts"), { recursive: true });
+    await mkdir(outsideRoot, { recursive: true });
+    await symlink(outsideRoot, join(workspaceRoot, "artifacts", "reports"), "dir");
+
+    const error = await captureTaskServiceError(() =>
+      service.registerArtifact({
+        ...validArtifact(),
+        path: "artifacts/reports/TASK-0001/report.md"
+      })
+    );
+
+    expect(error.code).toBe("workspace_path_not_safe");
+    expect(error.evidenceRefs).toEqual(["artifact.path"]);
+    await expectPathMissing(join(workspaceRoot, "artifacts", "manifests"));
+    await expectPathMissing(join(outsideRoot, "TASK-0001", "report.md"));
+  });
+
   test("Artifact registry register/get persists metadata under manifests only", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1402,6 +1572,19 @@ async function captureTaskServiceError(action: () => Promise<unknown>): Promise<
   }
 
   throw new Error("Expected TaskServiceError.");
+}
+
+async function captureWorkspacePathSafetyError(
+  action: () => Promise<unknown>
+): Promise<WorkspacePathSafetyError> {
+  try {
+    await action();
+  } catch (error) {
+    expect(error).toBeInstanceOf(WorkspacePathSafetyError);
+    return error as WorkspacePathSafetyError;
+  }
+
+  throw new Error("Expected WorkspacePathSafetyError.");
 }
 
 function expectErrorNotToLeakRecordContent(error: TaskServiceError, content: string): void {

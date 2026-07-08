@@ -6,3 +6,4 @@ export * from "./artifact-registry-service";
 export * from "./idempotency-service";
 export * from "./lock-service";
 export * from "./task-card-service";
+export * from "./workspace-path-safety";
