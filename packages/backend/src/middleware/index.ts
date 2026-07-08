@@ -71,11 +71,13 @@ export function createApiRequestLoggerMiddleware(
 }
 
 function emitApiRequestLogLine(sink: ApiRequestLogSink, line: string): void {
-  try {
-    void Promise.resolve(sink(line)).catch(() => undefined);
-  } catch {
-    // Request logging is best-effort; sink failures must not change API responses.
-  }
+  setTimeout(() => {
+    try {
+      void Promise.resolve(sink(line)).catch(() => undefined);
+    } catch {
+      // Request logging is best-effort; sink failures must not change API responses.
+    }
+  }, 0);
 }
 
 export function apiRoutePatternFor(method: string, path: string): string {

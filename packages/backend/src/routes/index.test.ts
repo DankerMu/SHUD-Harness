@@ -207,7 +207,7 @@ describe("backend workspace and health routes", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-success");
-    expect(logs).toHaveLength(1);
+    await waitFor(() => logs.length === 1, "Success request log was not emitted");
     const log = parseApiRequestLogLine(logs[0] as string);
     expect(log).toMatchObject({
       ts: "2026-07-07T12:02:00.000Z",
@@ -245,7 +245,7 @@ describe("backend workspace and health routes", () => {
     expect(response.status).toBe(400);
     expect(response.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-error");
     expectCanonicalError(body, "schema_error");
-    expect(logs).toHaveLength(1);
+    await waitFor(() => logs.length === 1, "Error request log was not emitted");
     const log = parseApiRequestLogLine(logs[0] as string);
     expect(log.request_id).toBe("REQ-log-error");
     expect(log.level).toBe("warn");
@@ -280,7 +280,7 @@ describe("backend workspace and health routes", () => {
 
     expect(response.status).toBe(400);
     expectCanonicalError(body, "schema_error");
-    expect(logs).toHaveLength(1);
+    await waitFor(() => logs.length === 1, "Secret-redaction request log was not emitted");
     const serializedLog = logs[0] as string;
     const log = parseApiRequestLogLine(serializedLog);
     expect(log.route).toBe("/api/tasks");
@@ -313,7 +313,7 @@ describe("backend workspace and health routes", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-delayed-sink");
-    expect(delayedLogs).toHaveLength(1);
+    await waitFor(() => delayedLogs.length === 1, "Delayed sink did not receive a log line");
     expect(delayedSinkResolved).toBe(false);
 
     const rejectingLogs: string[] = [];
@@ -330,7 +330,7 @@ describe("backend workspace and health routes", () => {
 
     expect(rejectingResponse.status).toBe(200);
     expect(rejectingResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-rejecting-sink");
-    expect(rejectingLogs).toHaveLength(1);
+    await waitFor(() => rejectingLogs.length === 1, "Rejecting sink did not receive a log line");
 
     const throwingLogs: string[] = [];
     const throwingApp = createBackendApi({
@@ -346,7 +346,31 @@ describe("backend workspace and health routes", () => {
 
     expect(throwingResponse.status).toBe(200);
     expect(throwingResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-throwing-sink");
-    expect(throwingLogs).toHaveLength(1);
+    await waitFor(() => throwingLogs.length === 1, "Throwing sink did not receive a log line");
+
+    const synchronousLogs: string[] = [];
+    let synchronousSinkFinished = false;
+    const synchronousApp = createBackendApi({
+      workspaceRoot,
+      requestIdFactory: () => "REQ-log-sync-sink",
+      requestLogSink: (line) => {
+        synchronousLogs.push(line);
+        busyWaitFor(120);
+        synchronousSinkFinished = true;
+      }
+    });
+
+    const synchronousResponse = await Promise.race([
+      synchronousApp.request("/api/health/live"),
+      timeoutAfter(50, "API response waited for synchronous request log sink work")
+    ]);
+
+    expect(synchronousResponse.status).toBe(200);
+    expect(synchronousResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-sync-sink");
+    expect(synchronousLogs).toHaveLength(0);
+    expect(synchronousSinkFinished).toBe(false);
+    await waitFor(() => synchronousSinkFinished, "Synchronous sink did not run after response");
+    expect(synchronousLogs).toHaveLength(1);
   });
 
   test("GET /api/health/ready is not_ready before init while live stays ok", async () => {
@@ -2390,7 +2414,7 @@ describe("backend workspace and health routes", () => {
     expect(apiRootBody.error.message).toContain("API route not found");
     expect(unknownRouteBody.error.message).toContain("API route not found");
     expect(missingTaskBody.error.message).toContain("Task not found");
-    expect(logs).toHaveLength(3);
+    await waitFor(() => logs.length === 3, "404 request logs were not emitted");
     const apiRootLog = parseApiRequestLogLine(logs[0] as string);
     expect(apiRootLog).toMatchObject({
       request_id: "REQ-api-root-not-found",
@@ -3084,6 +3108,25 @@ function parseApiRequestLogLine(line: string): ApiRequestLogLine {
 async function timeoutAfter(milliseconds: number, message: string): Promise<never> {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
   throw new Error(message);
+}
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  throw new Error(message);
+}
+
+function busyWaitFor(milliseconds: number): void {
+  const deadline = Date.now() + milliseconds;
+  while (Date.now() < deadline) {
+    // Intentionally block to prove log sink work is no longer on the response path.
+  }
 }
 
 function restoreEnv(name: string, value: string | undefined): void {
