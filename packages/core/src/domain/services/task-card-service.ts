@@ -241,12 +241,27 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       }
 
       const snapshotPath = join(taskDirectory, "snapshot.json");
-      const snapshot = await readTaskSnapshot(
-        snapshotPath,
-        taskId,
-        taskDirectory,
-        taskSnapshotEvidenceRef(taskId)
-      );
+      if (!(await maybeLstat(snapshotPath))) {
+        await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
+        return;
+      }
+      let snapshot: TaskSnapshot;
+      try {
+        await snapshotReadHooks?.beforeSnapshotOpen?.({ snapshotPath, laneTaskId: taskId });
+        snapshot = await readTaskSnapshot(
+          snapshotPath,
+          taskId,
+          taskDirectory,
+          taskSnapshotEvidenceRef(taskId)
+        );
+      } catch (error) {
+        if (await isMissingRollbackSnapshotError(error, snapshotPath)) {
+          await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
+          return;
+        }
+
+        throw error;
+      }
       if (JSON.stringify(snapshot.task_card) !== JSON.stringify(task)) {
         throw workspaceError(
           "task_snapshot_mismatch",
@@ -259,6 +274,11 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       try {
         await unlink(snapshotPath);
       } catch (error) {
+        if (await isMissingRollbackSnapshotError(error, snapshotPath)) {
+          await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
+          return;
+        }
+
         throw workspaceError(
           "workspace_path_not_safe",
           "Failed to remove idempotency rollback task snapshot.",
@@ -268,8 +288,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         );
       }
 
-      tasks.delete(taskId);
-      await removeEmptyTaskLaneAfterRollback(taskDirectory, taskId);
+      await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
     },
 
     async listTasks(): Promise<TaskCard[]> {
@@ -538,6 +557,39 @@ async function removeEmptyTaskLaneAfterRollback(
   }
 }
 
+async function evictTaskAfterMissingRollbackSnapshot(
+  tasks: Map<string, TaskCard>,
+  taskDirectory: string,
+  taskId: string
+): Promise<void> {
+  tasks.delete(taskId);
+  await removeEmptyTaskLaneAfterRollback(taskDirectory, taskId);
+}
+
+async function isMissingRollbackSnapshotError(
+  error: unknown,
+  snapshotPath: string
+): Promise<boolean> {
+  if (hasErrorCode(error, "ENOENT")) {
+    return true;
+  }
+  if (!(error instanceof TaskServiceError)) {
+    return false;
+  }
+
+  if (error.code === "task_not_found") {
+    return true;
+  }
+  if (
+    (error.code === "task_snapshot_malformed" || error.code === "workspace_path_not_safe") &&
+    !(await maybeLstat(snapshotPath))
+  ) {
+    return true;
+  }
+
+  return hasErrorCode(error.cause, "ENOENT");
+}
+
 function assertSafeTaskLaneEntry(entry: Dirent, lanePath: string): void {
   if (entry.isDirectory() && !entry.isSymbolicLink()) {
     return;
@@ -779,6 +831,7 @@ async function persistTaskSnapshot(
   assertPathInsideWorkspace(workspaceRoot, temporaryPath, `workspace/tasks/${task.task_id}/snapshot.tmp`);
 
   let wroteTemporary = false;
+  let publishedSnapshot = false;
   try {
     await writeFile(temporaryPath, snapshotText, { flag: "wx" });
     wroteTemporary = true;
@@ -791,25 +844,37 @@ async function persistTaskSnapshot(
       );
     }
     await rename(temporaryPath, snapshotPath);
-    if (!(await isSafeExistingDirectoryPath(taskDirectory))) {
-      throw workspaceError(
-        "task_lane_not_directory",
-        `Task lane is not a safe directory: ${task.task_id}`,
-        "A task snapshot lane is blocked by a non-directory filesystem entry.",
-        [`workspace/tasks/${task.task_id}`]
-      );
-    }
-    await snapshotWriteHooks?.afterSnapshotWrite?.({ taskDirectory, taskId: task.task_id });
-    if (!(await isSafeExistingDirectoryPath(taskDirectory))) {
-      throw workspaceError(
-        "task_lane_not_directory",
-        `Task lane is not a safe directory: ${task.task_id}`,
-        "A task snapshot lane is blocked by a non-directory filesystem entry.",
-        [`workspace/tasks/${task.task_id}`]
-      );
-    }
     wroteTemporary = false;
+    publishedSnapshot = true;
+    if (!(await isSafeExistingDirectoryPath(taskDirectory))) {
+      throw workspaceError(
+        "task_lane_not_directory",
+        `Task lane is not a safe directory: ${task.task_id}`,
+        "A task snapshot lane is blocked by a non-directory filesystem entry.",
+        [`workspace/tasks/${task.task_id}`]
+      );
+    }
+    try {
+      await snapshotWriteHooks?.afterSnapshotWrite?.({ taskDirectory, taskId: task.task_id });
+    } catch (error) {
+      await unlink(snapshotPath).catch(() => undefined);
+      publishedSnapshot = false;
+      await removeEmptyTaskLaneAfterRollback(taskDirectory, task.task_id);
+      throw error;
+    }
+    if (!(await isSafeExistingDirectoryPath(taskDirectory))) {
+      throw workspaceError(
+        "task_lane_not_directory",
+        `Task lane is not a safe directory: ${task.task_id}`,
+        "A task snapshot lane is blocked by a non-directory filesystem entry.",
+        [`workspace/tasks/${task.task_id}`]
+      );
+    }
   } catch (error) {
+    if (publishedSnapshot) {
+      await unlink(snapshotPath).catch(() => undefined);
+      await removeEmptyTaskLaneAfterRollback(taskDirectory, task.task_id);
+    }
     throw workspaceError(
       "workspace_path_not_safe",
       "Failed to persist task snapshot under the configured workspace.",

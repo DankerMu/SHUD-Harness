@@ -18,6 +18,7 @@ import {
   type IdempotencyRecordService,
   type TaskCard,
   type TaskCardService,
+  type TaskSnapshotReadHooks,
   type TaskSnapshotWriteHooks
 } from "@shud-harness/core";
 import { Hono, type Context } from "hono";
@@ -87,6 +88,7 @@ export interface BackendApiOptions {
   startTimeMs?: number;
   now?: () => Date;
   taskIdFactory?: () => string;
+  taskSnapshotReadHooks?: TaskSnapshotReadHooks;
   taskSnapshotWriteHooks?: TaskSnapshotWriteHooks;
   writableProbe?: WorkspaceWritableProbe;
   snapshotReadableProbe?: WorkspaceSnapshotReadableProbe;
@@ -143,6 +145,7 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
     workspaceRoot,
     now: options.now,
     taskIdFactory: options.taskIdFactory,
+    snapshotReadHooks: options.taskSnapshotReadHooks,
     snapshotWriteHooks: options.taskSnapshotWriteHooks
   });
   const idempotencyService = createIdempotencyRecordService({
@@ -166,10 +169,24 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
   });
 
   app.post("/api/tasks", async (c) => {
+    let idempotencyKey: ParsedIdempotencyKey;
+    try {
+      idempotencyKey = parseIdempotencyKey(c);
+    } catch (error) {
+      return jsonTaskServiceError(c, error);
+    }
+
     let rawBody: unknown;
     try {
-      rawBody = await c.req.json();
-    } catch {
+      rawBody =
+        idempotencyKey.status === "present"
+          ? parseJsonRequestText(await readBoundedKeyedTaskCreateRequestText(c))
+          : await c.req.json();
+    } catch (error) {
+      if (error instanceof TaskServiceError) {
+        return jsonTaskServiceError(c, error);
+      }
+
       return jsonApiError(
         c,
         {
@@ -202,12 +219,6 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
       );
     }
 
-    let idempotencyKey: ParsedIdempotencyKey;
-    try {
-      idempotencyKey = parseIdempotencyKey(c);
-    } catch (error) {
-      return jsonTaskServiceError(c, error);
-    }
     if (idempotencyKey.status === "absent") {
       try {
         return c.json(await taskService.createTask(parsedBody.data), 201);
@@ -321,7 +332,11 @@ async function createIdempotentTaskCard(
   }
   if (begin.status === "completed") {
     return {
-      task: await getIdempotentTaskResult(input.taskService, begin.record.result_ref),
+      task: await getIdempotentTaskResult(
+        input.taskService,
+        begin.record.result_ref,
+        input.requestDigest
+      ),
       created: false
     };
   }
@@ -341,8 +356,9 @@ async function createIdempotentTaskCard(
     throw error;
   }
 
+  let completedRecord: Awaited<ReturnType<IdempotencyRecordService["completeRecord"]>>;
   try {
-    await input.idempotencyService.completeRecord({
+    completedRecord = await input.idempotencyService.completeRecord({
       scope: "task",
       key: input.idempotencyKey,
       requestDigest: input.requestDigest,
@@ -379,11 +395,10 @@ async function createIdempotentTaskCard(
         throw error;
       }
 
-      await input.idempotencyService.recoverCompletedRecordAfterRollbackFailure({
+      await input.idempotencyService.quarantineRecordAfterUnsafeRollback({
         scope: "task",
         key: input.idempotencyKey,
-        requestDigest: input.requestDigest,
-        resultRef: task.task_id
+        requestDigest: input.requestDigest
       });
       throw rollbackError;
     }
@@ -394,6 +409,33 @@ async function createIdempotentTaskCard(
       requestDigest: input.requestDigest
     });
     throw error;
+  }
+
+  if (completedRecord.status !== "completed" || !completedRecord.result_ref) {
+    throw idempotencyResultBindingError();
+  }
+  if (completedRecord.result_ref !== task.task_id) {
+    const authoritativeTask = await getIdempotentTaskResult(
+      input.taskService,
+      completedRecord.result_ref,
+      input.requestDigest
+    );
+    let convergenceRollbackError: unknown;
+    try {
+      await input.taskService.rollbackTaskForIdempotency(task.task_id);
+    } catch (caughtError) {
+      convergenceRollbackError = caughtError;
+    }
+    if (convergenceRollbackError) {
+      const remainingSnapshot = await inspectRemainingRollbackTaskSnapshot(
+        input.taskService,
+        task
+      );
+      if (remainingSnapshot.status !== "missing") {
+        throw convergenceRollbackError;
+      }
+    }
+    return { task: authoritativeTask, created: false };
   }
 
   return { task, created: true };
@@ -441,7 +483,11 @@ async function waitForIdempotentTaskCompletion(
     }
     if (replay.status === "completed") {
       return {
-        task: await getIdempotentTaskResult(input.taskService, replay.record.result_ref),
+        task: await getIdempotentTaskResult(
+          input.taskService,
+          replay.record.result_ref,
+          input.requestDigest
+        ),
         created: false
       };
     }
@@ -465,7 +511,8 @@ async function waitForIdempotentTaskCompletion(
 
 async function getIdempotentTaskResult(
   taskService: TaskCardService,
-  taskId: string
+  taskId: string,
+  requestDigest: string
 ): Promise<TaskCard> {
   if (!isSafeTaskId(taskId)) {
     throw new TaskServiceError({
@@ -480,7 +527,67 @@ async function getIdempotentTaskResult(
     });
   }
 
-  return await taskService.getTaskFromSnapshot(taskId);
+  let task: TaskCard;
+  try {
+    task = await taskService.getTaskFromSnapshot(taskId);
+  } catch (error) {
+    if (error instanceof TaskServiceError) {
+      throw idempotencyResultBindingError();
+    }
+
+    throw error;
+  }
+
+  if (taskCreateRequestDigestFromTask(task) !== requestDigest) {
+    throw idempotencyResultBindingError();
+  }
+
+  return task;
+}
+
+async function readBoundedKeyedTaskCreateRequestText(c: Context): Promise<string> {
+  const contentLength = c.req.header("content-length");
+  if (typeof contentLength === "string" && contentLength.trim().length > 0) {
+    const parsedLength = Number(contentLength);
+    if (Number.isFinite(parsedLength) && parsedLength > MAX_TASK_SNAPSHOT_BYTES) {
+      throw oversizedTaskCreateRequestError(["request.body"]);
+    }
+  }
+
+  const body = c.req.raw.body;
+  if (!body) {
+    return "";
+  }
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let decoded = "";
+  let totalBytes = 0;
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_TASK_SNAPSHOT_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw oversizedTaskCreateRequestError(["request.body"]);
+      }
+
+      decoded += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    decoded += decoder.decode();
+  }
+
+  return decoded;
+}
+
+function parseJsonRequestText(rawText: string): unknown {
+  return JSON.parse(rawText) as unknown;
 }
 
 function assertKeyedTaskCreateRequestWithinDigestBounds(input: CreateTaskInput): void {
@@ -521,6 +628,31 @@ function taskCreateRequestDigest(input: CreateTaskInput): string {
       created_by: input.created_by ?? DEFAULT_TASK_CREATED_BY
     })
   );
+}
+
+function taskCreateRequestDigestFromTask(task: TaskCard): string {
+  return sha256Hex(
+    canonicalJson({
+      type: task.type,
+      title: task.title,
+      question_or_goal: task.question_or_goal,
+      inference_budget: task.inference_budget,
+      created_by: task.created_by
+    })
+  );
+}
+
+function idempotencyResultBindingError(): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 500,
+    category: "workspace_error",
+    message: "Completed idempotency result is not bound to the task create request.",
+    userMessage: "The idempotency result cannot be used safely.",
+    evidenceRefs: ["workspace/tasks/_idempotency/task", "idempotency.result_ref"],
+    retryable: false,
+    recommendedNextActions: ["Inspect and repair the idempotency record before retrying."]
+  });
 }
 
 function parseIdempotencyKey(c: Context): ParsedIdempotencyKey {

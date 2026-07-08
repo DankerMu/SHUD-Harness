@@ -423,10 +423,12 @@ describe("idempotency, lock, and artifact services", () => {
       idempotencyRecordFileName(rawKey)
     );
 
-    const sameRecord = await service.storeRecord({
-      ...completedRecord,
-      updated_at: "2026-07-07T13:31:00.000Z"
-    });
+    const sameRecordError = await captureTaskServiceError(() =>
+      service.storeRecord({
+        ...completedRecord,
+        updated_at: "2026-07-07T13:31:00.000Z"
+      })
+    );
     const overwriteError = await captureTaskServiceError(() =>
       service.storeRecord({
         ...completedRecord,
@@ -442,7 +444,8 @@ describe("idempotency, lock, and artifact services", () => {
     });
 
     expect(begin.status).toBe("acquired");
-    expect(sameRecord).toEqual(completedRecord);
+    expect(sameRecordError.code).toBe("record_schema_error");
+    expect(sameRecordError.category).toBe("schema_error");
     expect(overwriteError.code).toBe("record_schema_error");
     expect(overwriteError.category).toBe("schema_error");
     expect(completedAgain).toEqual(completedRecord);
@@ -539,7 +542,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(completed.result_ref).toBe("TASK-guarded-complete");
   });
 
-  test("IdempotencyRecord storeRecord preserves same-key digest immutability before completion", async () => {
+  test("IdempotencyRecord storeRecord rejects direct nonterminal transitions and preserves records", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     let currentTime = "2026-07-07T13:32:00.000Z";
@@ -555,6 +558,12 @@ describe("idempotency, lock, and artifact services", () => {
       requestDigest
     });
 
+    const sameDigestStartedOverwrite = await captureTaskServiceError(() =>
+      service.storeRecord({
+        ...started.record,
+        updated_at: "2026-07-07T13:32:01.000Z"
+      })
+    );
     const startedMismatch = await captureTaskServiceError(() =>
       service.storeRecord({
         ...started.record,
@@ -562,6 +571,15 @@ describe("idempotency, lock, and artifact services", () => {
         updated_at: "2026-07-07T13:32:01.000Z"
       })
     );
+    const startedToFailed = await captureTaskServiceError(() =>
+      service.storeRecord({
+        ...started.record,
+        status: "failed",
+        updated_at: "2026-07-07T13:32:02.000Z"
+      })
+    );
+    expect(await service.getRecord("task", rawKey)).toEqual(started.record);
+
     currentTime = "2026-07-07T13:33:00.000Z";
     const failed = await service.failRecord({
       scope: "task",
@@ -575,26 +593,38 @@ describe("idempotency, lock, and artifact services", () => {
         updated_at: "2026-07-07T13:33:01.000Z"
       })
     );
-    const retryStarted = await service.storeRecord({
-      ...failed,
+    const failedToStarted = await captureTaskServiceError(() =>
+      service.storeRecord({
+        ...failed,
+        status: "started",
+        created_at: "2026-07-07T13:34:00.000Z",
+        updated_at: "2026-07-07T13:34:00.000Z"
+      })
+    );
+
+    const seedService = createIdempotencyRecordService({ workspaceRoot });
+    const seeded = await seedService.storeRecord({
+      key: "task:create:seed-started",
+      scope: "task",
+      request_digest: "digest-seeded",
       status: "started",
-      created_at: "2026-07-07T13:34:00.000Z",
-      updated_at: "2026-07-07T13:34:00.000Z"
+      created_at: "2026-07-07T13:35:00.000Z",
+      updated_at: "2026-07-07T13:35:00.000Z"
     });
 
     expect(started.status).toBe("acquired");
+    expect(sameDigestStartedOverwrite.code).toBe("record_schema_error");
+    expect(sameDigestStartedOverwrite.status).toBe(400);
     expect(startedMismatch.code).toBe("idempotency_mismatch");
     expect(startedMismatch.status).toBe(422);
+    expect(startedToFailed.code).toBe("record_schema_error");
     expect(failed.status).toBe("failed");
     expect(failedMismatch.code).toBe("idempotency_mismatch");
     expect(failedMismatch.status).toBe(422);
-    expect(retryStarted).toEqual({
-      ...failed,
-      status: "started",
-      created_at: "2026-07-07T13:34:00.000Z",
-      updated_at: "2026-07-07T13:34:00.000Z"
-    });
-    expect(await service.getRecord("task", rawKey)).toEqual(retryStarted);
+    expect(failedToStarted.code).toBe("record_schema_error");
+    expect(await service.getRecord("task", rawKey)).toEqual(failed);
+    expect(seeded.status).toBe("started");
+    expect(await seedService.getRecord("task", "task:create:seed-started")).toEqual(seeded);
   });
 
   test("IdempotencyRecord malformed transition guard fails bounded without completing", async () => {
@@ -684,6 +714,160 @@ describe("idempotency, lock, and artifact services", () => {
     expect(error.retryable).toBe(true);
     expect(error.evidenceRefs).toEqual([idempotencyRecordEvidenceRef("task", rawKey)]);
     expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(guard);
+    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+  });
+
+  test("IdempotencyRecord stale transition guard cleanup preserves a fresh replacement guard", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:stale-guard-fresh-replacement";
+    const requestDigest = "digest-stale-guard-fresh";
+    const seedService = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:35:40.000Z")
+    });
+    const begin = await seedService.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const failed = await seedService.failRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const guardPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      `${sha256Hex(`transition:${rawKey}`)}.guard.json`
+    );
+    const staleGuard = {
+      guard_id: "stale-observed-guard",
+      owner_pid: 9_999_999,
+      acquired_at_ms: Date.now() - 31_000,
+      acquired_at: "2026-07-07T13:34:00.000Z"
+    };
+    const freshGuard = {
+      guard_id: "fresh-replacement-guard",
+      owner_pid: process.pid,
+      acquired_at_ms: Date.now(),
+      acquired_at: new Date().toISOString()
+    };
+    await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, { flag: "wx" });
+    let cleanupHookCalls = 0;
+    const retryService = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:35:41.000Z"),
+      transitionGuardHooks: {
+        beforeStaleGuardCleanup: async ({ guardPath: observedPath, observedGuard }) => {
+          cleanupHookCalls += 1;
+          expect(observedPath).toBe(guardPath);
+          expect(observedGuard).toEqual(staleGuard);
+          await rm(observedPath, { force: true });
+          await writeFile(observedPath, `${JSON.stringify(freshGuard)}\n`, { flag: "wx" });
+        }
+      }
+    });
+
+    const retry = await Promise.race([
+      retryService.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      }),
+      timeoutAfter(1_000, "beginRecord hung while preserving a fresh replacement guard")
+    ]);
+
+    expect(begin.status).toBe("acquired");
+    expect(failed.status).toBe("failed");
+    expect(cleanupHookCalls).toBe(1);
+    expect(retry).toEqual({ status: "incomplete", record: failed });
+    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(freshGuard);
+    expect(await seedService.getRecord("task", rawKey)).toEqual(failed);
+  });
+
+  test("IdempotencyRecord stale transition cleanup lock is recoverable before completion", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:stale-cleanup-lock-complete";
+    const requestDigest = "digest-stale-cleanup-lock";
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:35:50.000Z")
+    });
+    const begin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+    const staleCleanupLock = {
+      guard_id: "stale-cleanup-lock",
+      owner_pid: 9_999_999,
+      acquired_at_ms: Date.now() - 31_000,
+      acquired_at: "2026-07-07T13:34:30.000Z"
+    };
+    await writeFile(cleanupLockPath, `${JSON.stringify(staleCleanupLock)}\n`, { flag: "wx" });
+
+    const completed = await Promise.race([
+      service.completeRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        resultRef: "TASK-cleanup-lock-recovered"
+      }),
+      timeoutAfter(1_000, "completeRecord hung on stale transition cleanup lock")
+    ]);
+
+    expect(begin.status).toBe("acquired");
+    expect(completed.status).toBe("completed");
+    expect(completed.result_ref).toBe("TASK-cleanup-lock-recovered");
+    await expectPathMissing(cleanupLockPath);
+    expect(await service.getRecord("task", rawKey)).toEqual(completed);
+  });
+
+  test("IdempotencyRecord live transition cleanup lock stays busy and is not deleted", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:live-cleanup-lock-complete";
+    const requestDigest = "digest-live-cleanup-lock";
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:35:55.000Z")
+    });
+    const begin = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+    const liveCleanupLock = {
+      guard_id: "live-cleanup-lock",
+      owner_pid: process.pid,
+      acquired_at_ms: Date.now(),
+      acquired_at: new Date().toISOString()
+    };
+    await writeFile(cleanupLockPath, `${JSON.stringify(liveCleanupLock)}\n`, { flag: "wx" });
+
+    const error = await captureTaskServiceError(() =>
+      Promise.race([
+        service.completeRecord({
+          scope: "task",
+          key: rawKey,
+          requestDigest,
+          resultRef: "TASK-cleanup-lock-live"
+        }),
+        timeoutAfter(1_000, "completeRecord hung on live transition cleanup lock")
+      ])
+    );
+
+    expect(begin.status).toBe("acquired");
+    expect(error.code).toBe("record_malformed");
+    expect(error.retryable).toBe(true);
+    expect(error.evidenceRefs).toEqual([idempotencyRecordEvidenceRef("task", rawKey)]);
+    expect(JSON.parse(await readFile(cleanupLockPath, "utf8"))).toEqual(liveCleanupLock);
     expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
   });
 
@@ -1013,6 +1197,21 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(pathError.code).toBe("record_id_not_safe");
     await expectPathMissing(join(invalidPath.workspaceRoot, "artifacts"));
+
+    const interiorTraversal = await createTempWorkspacePath();
+    tempRoots.push(interiorTraversal.tempRoot);
+    const interiorPathService = createArtifactRegistryService({
+      workspaceRoot: interiorTraversal.workspaceRoot
+    });
+    const interiorPathError = await captureTaskServiceError(() =>
+      interiorPathService.registerArtifact({
+        ...validArtifact(),
+        path: "artifacts/reports/TASK-0001/../report.md"
+      })
+    );
+
+    expect(interiorPathError.code).toBe("record_id_not_safe");
+    await expectPathMissing(join(interiorTraversal.workspaceRoot, "artifacts"));
   });
 
   test("LockRecord and Artifact lookups fail closed on stored identity mismatch", async () => {
@@ -1196,6 +1395,16 @@ async function expectPathMissing(path: string): Promise<void> {
   }
 
   throw new Error(`Expected path to be missing: ${path}`);
+}
+
+function idempotencyTransitionCleanupLockPath(workspaceRoot: string, key: string): string {
+  return join(
+    workspaceRoot,
+    "tasks",
+    "_idempotency",
+    "task",
+    `${sha256Hex(`transition-cleanup:${key}`)}.guard-cleanup`
+  );
 }
 
 async function timeoutAfter(milliseconds: number, message: string): Promise<never> {

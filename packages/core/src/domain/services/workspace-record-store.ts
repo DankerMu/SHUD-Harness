@@ -31,11 +31,13 @@ export function assertSafeRecordSegment(segment: string, evidenceRef: string): v
 }
 
 export function assertSafeRelativeRecordPath(path: string, evidenceRef: string): void {
+  const rawSegments = path.split(/[\\/]+/).filter(Boolean);
   const normalizedPath = normalize(path);
   const segments = normalizedPath.split(sep).filter(Boolean);
   if (
     path.trim().length > 0 &&
     !isAbsolute(path) &&
+    !rawSegments.includes("..") &&
     normalizedPath !== "." &&
     normalizedPath !== ".." &&
     !normalizedPath.startsWith(`..${sep}`) &&
