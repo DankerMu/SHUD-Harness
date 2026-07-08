@@ -1,66 +1,52 @@
 {
   "schema_version": "m1.glm-provider.v1",
   "default_provider": "glm-dmxapi",
+  "default_model": "glm-dmxapi/target",
+  "fallback_chain": [
+    "glm-dmxapi/target",
+    "glm-dmxapi/smoke"
+  ],
+  "task_closure_model": "glm-dmxapi/target",
+  "context_compaction_model": "glm-dmxapi/target",
+  "fallback_smoke_model": "glm-dmxapi/smoke",
+  "smoke_model": "deepseek-v4-pro-guan",
+  "target_model_id": "glm-5.2",
   "providers": {
     "glm-dmxapi": {
       "api_type": "openai_chat_completions",
       "base_url": "https://www.dmxapi.cn/v1",
-      "api_key_ref": "env:GLM_API_KEY",
-      "fallback_chain": [
-        "glm-dmxapi.target",
-        "glm-dmxapi.smoke"
-      ],
-      "smoke_model": "deepseek-v4-pro-guan",
-      "target_model_id": "glm-5.2",
+      "auth": {
+        "type": "api_key",
+        "api_key_ref": "env:GLM_API_KEY"
+      },
       "models": {
         "smoke": {
           "model_id": "deepseek-v4-pro-guan",
+          "max_context": 128000,
+          "max_output": 1024,
+          "capabilities": [
+            "chat"
+          ],
+          "tags": [
+            "m1-smoke",
+            "carrier"
+          ],
           "purpose": "m1_connectivity_smoke",
           "admission": false
         },
         "target": {
           "model_id": "glm-5.2",
+          "max_context": 128000,
+          "max_output": 4096,
+          "capabilities": [
+            "chat"
+          ],
+          "tags": [
+            "target",
+            "placeholder"
+          ],
           "purpose": "runtime_target_placeholder",
           "admission": false
-        }
-      },
-      "model_placeholders": {
-        "task_closure_model": "glm-dmxapi.target",
-        "context_compaction_model": "glm-dmxapi.target",
-        "fallback_smoke_model": "glm-dmxapi.smoke"
-      },
-      "zero_adapter": {
-        "apiType": "openai_chat_completions",
-        "baseUrl": "https://www.dmxapi.cn/v1",
-        "auth": {
-          "type": "api_key",
-          "apiKeyRef": "env:GLM_API_KEY"
-        },
-        "models": {
-          "smoke": {
-            "modelId": "deepseek-v4-pro-guan",
-            "maxContext": 128000,
-            "maxOutput": 1024,
-            "capabilities": [
-              "chat"
-            ],
-            "tags": [
-              "m1-smoke",
-              "carrier"
-            ]
-          },
-          "target": {
-            "modelId": "glm-5.2",
-            "maxContext": 128000,
-            "maxOutput": 4096,
-            "capabilities": [
-              "chat"
-            ],
-            "tags": [
-              "target",
-              "placeholder"
-            ]
-          }
         }
       }
     }

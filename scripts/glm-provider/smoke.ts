@@ -1,4 +1,5 @@
-import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,7 +9,14 @@ export const API_TYPE = "openai_chat_completions";
 export const DEFAULT_CONFIG_RELATIVE_PATH = "config/providers/glm.dmxapi.json";
 export const DEFAULT_READINESS_NOTE_NAME = "glm_provider_smoke.json";
 export const DEFAULT_TIMEOUT_MS = 15000;
+export const MAX_RESPONSE_BYTES = 16 * 1024;
 export const MAX_RETRIES = 1;
+export const CANONICAL_PROVIDER_NAME = "glm-dmxapi";
+export const CANONICAL_BASE_URL = "https://www.dmxapi.cn/v1";
+export const CANONICAL_SMOKE_MODEL = "deepseek-v4-pro-guan";
+export const CANONICAL_TARGET_MODEL = "glm-5.2";
+export const CANONICAL_TARGET_MODEL_REF = "glm-dmxapi/target";
+export const CANONICAL_SMOKE_MODEL_REF = "glm-dmxapi/smoke";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_REPO_ROOT = resolve(scriptDirectory, "..", "..");
@@ -50,6 +58,7 @@ export type SmokeFailureCategory =
   | "http_error"
   | "invalid_response"
   | "empty_completion"
+  | "oversized_response"
   | "timeout"
   | "network_error";
 
@@ -74,7 +83,6 @@ export interface ReadinessNote {
   attempts: number;
   configured_base_url_hit: boolean;
   completion_nonempty: boolean;
-  response_model?: string;
   failure?: SmokeFailure;
 }
 
@@ -114,7 +122,6 @@ export interface RunSmokeOptions {
 interface AttemptSuccess {
   ok: true;
   completion: string;
-  responseModel?: string;
 }
 
 interface AttemptFailure {
@@ -138,31 +145,59 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
 
   const apiType = readString(provider, "api_type", defaultProvider);
   const baseUrl = normalizeBaseUrl(readString(provider, "base_url", defaultProvider));
-  const apiKeyRef = readString(provider, "api_key_ref", defaultProvider);
-  const fallbackChain = readStringArray(provider.fallback_chain, `${defaultProvider}.fallback_chain`);
-  const smokeModel = readString(provider, "smoke_model", defaultProvider);
-  const targetModelId = readString(provider, "target_model_id", defaultProvider);
-  const modelPlaceholders = readStringRecord(
-    provider.model_placeholders,
-    `${defaultProvider}.model_placeholders`
-  );
+  const auth = readRecord(provider.auth, `${defaultProvider}.auth`);
+  const apiKeyRef = readString(auth, "api_key_ref", `${defaultProvider}.auth`);
+  const fallbackChain = readStringArray(document.fallback_chain, "provider config.fallback_chain");
+  const smokeModel = readString(document, "smoke_model", "provider config");
+  const targetModelId = readString(document, "target_model_id", "provider config");
+  const taskClosureModel = readString(document, "task_closure_model", "provider config");
+  const contextCompactionModel = readString(document, "context_compaction_model", "provider config");
+  const fallbackSmokeModel = readString(document, "fallback_smoke_model", "provider config");
+  const modelPlaceholders = {
+    task_closure_model: taskClosureModel,
+    context_compaction_model: contextCompactionModel,
+    fallback_smoke_model: fallbackSmokeModel
+  };
   const models = readRecord(provider.models, `${defaultProvider}.models`);
   const smoke = readRecord(models.smoke, `${defaultProvider}.models.smoke`);
   const target = readRecord(models.target, `${defaultProvider}.models.target`);
-  const zeroAdapter = readRecord(provider.zero_adapter, `${defaultProvider}.zero_adapter`);
-  const zeroAuth = readRecord(zeroAdapter.auth, `${defaultProvider}.zero_adapter.auth`);
-  const zeroModels = readRecord(zeroAdapter.models, `${defaultProvider}.zero_adapter.models`);
-  const zeroSmoke = readRecord(zeroModels.smoke, `${defaultProvider}.zero_adapter.models.smoke`);
-  const zeroTarget = readRecord(zeroModels.target, `${defaultProvider}.zero_adapter.models.target`);
 
+  if (defaultProvider !== CANONICAL_PROVIDER_NAME) {
+    throw new Error(`Invalid provider default_provider: expected ${CANONICAL_PROVIDER_NAME}.`);
+  }
   if (apiType !== API_TYPE) {
     throw new Error(`Invalid provider api_type: expected ${API_TYPE}.`);
   }
-  if (apiKeyRef !== GLM_API_KEY_REF) {
-    throw new Error(`Invalid provider api_key_ref: expected ${GLM_API_KEY_REF}.`);
+  if (baseUrl !== CANONICAL_BASE_URL) {
+    throw new Error(`Invalid provider base_url: expected ${CANONICAL_BASE_URL}.`);
   }
-  if (fallbackChain.length === 0) {
-    throw new Error("Provider fallback_chain must not be empty.");
+  if (readString(auth, "type", `${defaultProvider}.auth`) !== "api_key") {
+    throw new Error("Provider auth.type must be api_key.");
+  }
+  if (apiKeyRef !== GLM_API_KEY_REF) {
+    throw new Error(`Invalid provider auth.api_key_ref: expected ${GLM_API_KEY_REF}.`);
+  }
+  if (
+    fallbackChain.length !== 2 ||
+    fallbackChain[0] !== CANONICAL_TARGET_MODEL_REF ||
+    fallbackChain[1] !== CANONICAL_SMOKE_MODEL_REF
+  ) {
+    throw new Error("Provider fallback_chain must target the canonical GLM DMXAPI model refs.");
+  }
+  if (taskClosureModel !== CANONICAL_TARGET_MODEL_REF) {
+    throw new Error("Provider task_closure_model must target the canonical GLM target ref.");
+  }
+  if (contextCompactionModel !== CANONICAL_TARGET_MODEL_REF) {
+    throw new Error("Provider context_compaction_model must target the canonical GLM target ref.");
+  }
+  if (fallbackSmokeModel !== CANONICAL_SMOKE_MODEL_REF) {
+    throw new Error("Provider fallback_smoke_model must target the canonical GLM smoke ref.");
+  }
+  if (smokeModel !== CANONICAL_SMOKE_MODEL) {
+    throw new Error(`Invalid provider smoke_model: expected ${CANONICAL_SMOKE_MODEL}.`);
+  }
+  if (targetModelId !== CANONICAL_TARGET_MODEL) {
+    throw new Error(`Invalid provider target_model_id: expected ${CANONICAL_TARGET_MODEL}.`);
   }
   if (readString(smoke, "model_id", `${defaultProvider}.models.smoke`) !== smokeModel) {
     throw new Error("Provider smoke model fields do not agree.");
@@ -170,24 +205,8 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
   if (readString(target, "model_id", `${defaultProvider}.models.target`) !== targetModelId) {
     throw new Error("Provider target model fields do not agree.");
   }
-  if (readString(zeroAdapter, "apiType", `${defaultProvider}.zero_adapter`) !== API_TYPE) {
-    throw new Error("Zero adapter apiType does not match provider api_type.");
-  }
-  if (normalizeBaseUrl(readString(zeroAdapter, "baseUrl", `${defaultProvider}.zero_adapter`)) !== baseUrl) {
-    throw new Error("Zero adapter baseUrl does not match provider base_url.");
-  }
-  if (readString(zeroAuth, "type", `${defaultProvider}.zero_adapter.auth`) !== "api_key") {
-    throw new Error("Zero adapter auth.type must be api_key.");
-  }
-  if (readString(zeroAuth, "apiKeyRef", `${defaultProvider}.zero_adapter.auth`) !== GLM_API_KEY_REF) {
-    throw new Error("Zero adapter apiKeyRef does not match provider api_key_ref.");
-  }
-  if (readString(zeroSmoke, "modelId", `${defaultProvider}.zero_adapter.models.smoke`) !== smokeModel) {
-    throw new Error("Zero adapter smoke model does not match provider smoke_model.");
-  }
-  if (readString(zeroTarget, "modelId", `${defaultProvider}.zero_adapter.models.target`) !== targetModelId) {
-    throw new Error("Zero adapter target model does not match provider target_model_id.");
-  }
+  readExactlyFalse(smoke, "admission", `${defaultProvider}.models.smoke`);
+  readExactlyFalse(target, "admission", `${defaultProvider}.models.target`);
 
   return {
     providerName: defaultProvider,
@@ -309,7 +328,6 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
         attempts: attempt,
         configuredBaseUrlHit,
         completionNonempty: true,
-        responseModel: result.responseModel,
         now
       });
       const readinessNotePath = writeReadiness
@@ -395,7 +413,6 @@ export function createReadinessNote(input: {
   attempts: number;
   configuredBaseUrlHit: boolean;
   completionNonempty: boolean;
-  responseModel?: string;
   now: () => Date;
   failure?: SmokeFailure;
 }): ReadinessNote {
@@ -415,7 +432,6 @@ export function createReadinessNote(input: {
     attempts: input.attempts,
     configured_base_url_hit: input.configuredBaseUrlHit,
     completion_nonempty: input.completionNonempty,
-    ...(input.responseModel ? { response_model: input.responseModel } : {}),
     ...(input.failure ? { failure: input.failure } : {})
   };
 }
@@ -434,83 +450,223 @@ async function sendChatCompletion(input: {
       "content-type": "application/json",
       authorization: `Bearer ${input.apiKey}`
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    redirect: "error"
   };
 
-  let response: Response;
   try {
-    response = await fetchWithTimeout(input.fetchImpl, input.endpoint, requestInit, input.timeoutMs);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
+    try {
+      const response = await withAbort(
+        input.fetchImpl(input.endpoint, {
+          ...requestInit,
+          signal: controller.signal
+        }),
+        controller.signal
+      );
+      const redirectFailure = validateResponseEndpoint(response, input.endpoint);
+      if (redirectFailure) {
+        return {
+          ok: false,
+          failure: redirectFailure
+        };
+      }
+      const responseText = await readResponseTextWithLimit(
+        response,
+        MAX_RESPONSE_BYTES,
+        controller.signal
+      );
+      if (!response.ok) {
+        const snippet = responseText.trim().slice(0, 300);
+        return {
+          ok: false,
+          failure: {
+            category: "http_error",
+            message: snippet
+              ? `HTTP ${response.status} from configured endpoint: ${snippet}`
+              : `HTTP ${response.status} from configured endpoint.`
+          }
+        };
+      }
+
+      let responseJson: unknown;
+      try {
+        responseJson = JSON.parse(responseText) as unknown;
+      } catch {
+        return {
+          ok: false,
+          failure: {
+            category: "invalid_response",
+            message: "Provider response was not valid JSON."
+          }
+        };
+      }
+
+      const completion = extractCompletionText(responseJson).trim();
+      if (completion.length === 0) {
+        return {
+          ok: false,
+          failure: {
+            category: "empty_completion",
+            message: "Provider response did not contain a nonempty completion."
+          }
+        };
+      }
+
+      return {
+        ok: true,
+        completion
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch (error) {
     return {
       ok: false,
-      failure: {
-        category: isAbortError(error) ? "timeout" : "network_error",
-        message: failureMessage(error)
-      }
+      failure: failureFromError(error)
     };
   }
+}
 
-  const responseText = await response.text();
-  if (!response.ok) {
-    const snippet = responseText.trim().slice(0, 300);
+function validateResponseEndpoint(response: Response, endpoint: string): SmokeFailure | undefined {
+  if (response.redirected) {
     return {
-      ok: false,
-      failure: {
-        category: "http_error",
-        message: snippet
-          ? `HTTP ${response.status} from configured endpoint: ${snippet}`
-          : `HTTP ${response.status} from configured endpoint.`
-      }
+      category: "base_url_mismatch",
+      message: "Provider response was redirected away from the configured endpoint."
     };
   }
 
-  let responseJson: unknown;
+  if (!response.url) {
+    return undefined;
+  }
+
   try {
-    responseJson = JSON.parse(responseText) as unknown;
+    if (new URL(response.url).toString() === new URL(endpoint).toString()) {
+      return undefined;
+    }
   } catch {
     return {
-      ok: false,
-      failure: {
-        category: "invalid_response",
-        message: "Provider response was not valid JSON."
-      }
-    };
-  }
-
-  const completion = extractCompletionText(responseJson).trim();
-  if (completion.length === 0) {
-    return {
-      ok: false,
-      failure: {
-        category: "empty_completion",
-        message: "Provider response did not contain a nonempty completion."
-      }
+      category: "base_url_mismatch",
+      message: "Provider response URL could not be validated against the configured endpoint."
     };
   }
 
   return {
-    ok: true,
-    completion,
-    responseModel: extractResponseModel(responseJson)
+    category: "base_url_mismatch",
+    message: "Provider response URL did not match the configured endpoint."
   };
 }
 
-async function fetchWithTimeout(
-  fetchImpl: SmokeFetch,
-  endpoint: string,
-  init: RequestInit,
-  timeoutMs: number
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetchImpl(endpoint, {
-      ...init,
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timeout);
+async function readResponseTextWithLimit(
+  response: Response,
+  maxBytes: number,
+  signal: AbortSignal
+): Promise<string> {
+  if (!response.body) {
+    const text = await withAbort(response.text(), signal);
+    if (new TextEncoder().encode(text).byteLength > maxBytes) {
+      throw new OversizedResponseError(maxBytes);
+    }
+    return text;
   }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytesRead = 0;
+  let text = "";
+
+  try {
+    for (;;) {
+      const { done, value } = await readChunkWithAbort(reader, signal);
+      if (done) {
+        break;
+      }
+      if (!value) {
+        continue;
+      }
+      bytesRead += value.byteLength;
+      if (bytesRead > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new OversizedResponseError(maxBytes);
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    return `${text}${decoder.decode()}`;
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // The reader may already be released after an abort/cancel path.
+    }
+  }
+}
+
+async function readChunkWithAbort(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (signal.aborted) {
+    throw createAbortError();
+  }
+
+  return await new Promise<ReadableStreamReadResult<Uint8Array>>((resolvePromise, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reader.cancel().catch(() => undefined);
+      reject(createAbortError());
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    reader.read().then(resolvePromise, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
+async function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    throw createAbortError();
+  }
+
+  return await new Promise<T>((resolvePromise, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(createAbortError());
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolvePromise, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
+function failureFromError(error: unknown): SmokeFailure {
+  if (error instanceof OversizedResponseError) {
+    return {
+      category: "oversized_response",
+      message: `Provider response exceeded ${error.maxBytes} bytes.`
+    };
+  }
+
+  return {
+    category: isAbortError(error) ? "timeout" : "network_error",
+    message: failureMessage(error)
+  };
+}
+
+class OversizedResponseError extends Error {
+  constructor(readonly maxBytes: number) {
+    super(`Provider response exceeded ${maxBytes} bytes.`);
+    this.name = "OversizedResponseError";
+  }
+}
+
+function createAbortError(): Error {
+  const error = new Error("Provider request timed out.");
+  error.name = "AbortError";
+  return error;
 }
 
 async function writeReadinessNote(
@@ -534,11 +690,33 @@ async function writeReadinessNote(
   }
 
   const notePath = join(readinessDir, noteName);
-  await writeFile(notePath, `${JSON.stringify(note, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600
-  });
+  await assertSafeReadinessNoteTarget(notePath);
+  const tempPath = join(readinessDir, `.${noteName}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(tempPath, `${JSON.stringify(note, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx"
+    });
+    await rename(tempPath, notePath);
+  } catch (error) {
+    await unlink(tempPath).catch(() => undefined);
+    throw error;
+  }
   return notePath;
+}
+
+async function assertSafeReadinessNoteTarget(path: string): Promise<void> {
+  try {
+    const stat = await lstat(path);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink > 1) {
+      throw new Error("Readiness note path must be an owned regular file.");
+    }
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, "ENOENT")) {
+      throw error;
+    }
+  }
 }
 
 async function ensureOwnedDirectory(path: string, label: string): Promise<void> {
@@ -612,11 +790,6 @@ function extractCompletionText(raw: unknown): string {
   return typeof text === "string" ? text : "";
 }
 
-function extractResponseModel(raw: unknown): string | undefined {
-  const response = readOptionalRecord(raw);
-  return typeof response?.model === "string" ? response.model : undefined;
-}
-
 function redactFailure(failure: SmokeFailure, apiKey: string): SmokeFailure {
   return {
     category: failure.category,
@@ -657,6 +830,13 @@ function readString(record: Record<string, unknown>, key: string, context: strin
   return value;
 }
 
+function readExactlyFalse(record: Record<string, unknown>, key: string, context: string): false {
+  if (record[key] !== false) {
+    throw new Error(`Expected false at ${context}.${key}.`);
+  }
+  return false;
+}
+
 function readStringArray(value: unknown, context: string): string[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error(`Expected nonempty string array at ${context}.`);
@@ -668,18 +848,6 @@ function readStringArray(value: unknown, context: string): string[] {
     return item;
   });
   return strings;
-}
-
-function readStringRecord(value: unknown, context: string): Record<string, string> {
-  const record = readRecord(value, context);
-  const result: Record<string, string> = {};
-  for (const [key, item] of Object.entries(record)) {
-    if (typeof item !== "string" || item.trim().length === 0) {
-      throw new Error(`Expected nonempty string at ${context}.${key}.`);
-    }
-    result[key] = item;
-  }
-  return result;
 }
 
 function parseCliArgs(args: string[]): {
