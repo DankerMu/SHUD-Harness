@@ -232,6 +232,25 @@
       - User-visible placeholder copy is Chinese-first while preserving canonical code identifiers where needed.
       - `bun run test:frontend`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 7.2 Dashboard 页（GET /api/tasks 列表 + 建卡表单 + 刷新恢复）——依赖: 6.2
+  - Fixture (#35): expanded / medium
+    - Change surface: `packages/frontend/src/pages/**`, frontend page exports, frontend smoke tests, and OpenSpec fixture evidence. Any fetch helper must be page-local under `pages/**`; do not introduce a new `src/api/**` surface in #35.
+    - Must preserve: existing backend `GET /api/tasks` and `POST /api/tasks` contracts, #34 Workbench `/workbench` renderer and four-panel CSS, no Dashboard→Workbench task-context navigation, no backend/static-serving changes, no `zero/` source diff, and no tracked runtime `workspace/` assets.
+    - Must add/change: Dashboard renderer/page skeleton, page-local typed task API helpers for list/create, create-task form markup, status-bearing task list markup, refresh-recovery render path from server-provided tasks, and tests proving the list updates after create and can be reconstructed from a fresh `GET /api/tasks` result.
+    - Risk packs considered:
+      - Public page / route skeleton: selected - Dashboard becomes the M1 browser-openable task list/create entry representation inside the frontend package.
+      - Public API consumption: selected - frontend must consume the existing `{ tasks: TaskCard[] }` list shape and `TaskCard` create response without mutating backend contracts.
+      - Schema / field names: selected - visible rows must use shared `TaskCard`/`CreateTaskInput` fields and show `status=created` for a newly created task.
+      - Error handling / visible failure: selected - failed list/create responses must render stable Chinese-first error state and must not add optimistic phantom tasks.
+      - Refresh / recovered state: selected - a fresh render from `GET /api/tasks` output must reproduce the accepted task list without relying on frontend memory.
+      - Dependency / build compatibility: selected - no unresolved browser/runtime dependency or bundler assumption may break `bun install`/`check`.
+      - Backend behavior, idempotency header frontend wiring, Dashboard→Workbench navigation, auth/secrets, hydrology runtime, and Zero governance: not selected - explicitly outside #35.
+    - Evidence floor (#35):
+      - Page-local Dashboard API helper serializes the exact documented create payload keys `type`, `title`, `question_or_goal`, and `inference_budget: { mode }`; parses `GET /api/tasks -> { tasks }` plus `POST /api/tasks -> TaskCard`.
+      - Dashboard renderer shows every provided TaskCard id/title/status exactly once and includes a create form with task type, title, goal, and budget mode controls.
+      - Create-flow test uses a fake fetch client: initial list empty -> outbound `POST /api/tasks` body equals the exact create payload keys above -> POST returns a `TaskCard` with matching rendered `task_id`, `title`, and `status=created` -> follow-up list contains that TaskCard and renders status `created`.
+      - Refresh-recovery test renders the Dashboard from a fresh `GET /api/tasks` result containing a previously created TaskCard; no in-memory carryover is required.
+      - Error tests cover list failure and create failure with Chinese-first error copy and no phantom task row.
+      - `bun run test:frontend`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 7.3 ExperimentHeader + StatusBar 占位组件（task 上下文 props）
 
 ## 8. GLM provider（glm-provider）
