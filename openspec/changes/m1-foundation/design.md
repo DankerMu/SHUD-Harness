@@ -950,7 +950,7 @@ Must preserve:
 - No bash/sandbox behavior and no workspace allowlist expansion beyond explicit read-only root support in the helper.
 
 Must add/change:
-- A shared helper resolves input paths, normalizes them, checks workspace or allowed read-only boundaries, rejects symlink crossings and non-directory ancestors, and returns the normalized path.
+- A shared helper resolves input paths against the currently observed path tree, normalizes them, checks workspace or allowed read-only boundaries, rejects pre-existing symlink crossings and non-directory ancestors, and returns the normalized path.
 - Artifact registry normalizes `artifact.path` before manifest storage and rejects unsafe paths before writing manifests.
 - Task snapshot write surfaces resolve the task root, task lane, snapshot path, and temporary path through the helper before writing.
 - Workspace JSON record writes use the shared helper at the point of write preparation.
@@ -958,13 +958,13 @@ Must add/change:
 Risk packs considered:
 - Public API / CLI / script entry: not selected - no route or CLI contract changes.
 - Config / project setup: selected - all behavior is rooted in the configured workspace root and optional allowed read-only roots.
-- File IO / path safety / overwrite: selected - this issue owns traversal, symlink, boundary, and no-write regression coverage for workspace write surfaces.
+- File IO / path safety / overwrite: selected - this issue owns static/pre-existing traversal, symlink, boundary, and no-write regression coverage for workspace write surfaces.
 - Schema / columns / units / field names: selected - Artifact manifest `path` is normalized before storage.
 - Auth / permissions / secrets: not selected - no credential or permission model changes.
-- Concurrency / shared state / ordering: selected - helper checks are applied immediately before write preparation and preserve existing atomic/no-clobber paths.
+- Concurrency / shared state / ordering: selected - helper checks are applied immediately before write preparation and preserve existing atomic/no-clobber paths; M1 remains ADR-0002 single-user/cooperative workspace and does not add cross-process locking or directory-fd anchoring.
 - Resource limits / large input / discovery: selected - helper walks only path ancestors and stops at the first missing segment; no broad workspace scan is introduced.
 - Legacy compatibility / examples: selected - existing #29/#30/#31/#32 tests and response/storage behavior remain compatible.
-- Error handling / rollback / partial outputs: selected - rejected paths fail closed and must not create workspace-external files or partial manifests/snapshots.
+- Error handling / rollback / partial outputs: selected - rejected pre-existing/static unsafe paths fail closed and must not create workspace-external files or partial manifests/snapshots.
 - Release / packaging / dependency compatibility: not selected - no new dependency.
 - Documentation / migration notes: selected - PR evidence states helper boundaries and out-of-scope bash/sandbox behavior.
 Domain packs:
@@ -973,19 +973,19 @@ Domain packs:
 - Zero adapter / tool registry / agent role governance: not selected - no Zero/tool governance changes.
 
 Invariant Matrix:
-- Governing invariant: Every M1 workspace write surface introduced by #29/#30 records only normalized paths inside the configured workspace, or rejects before write when a path traverses outside, crosses a symlink, targets a read-only boundary for write, or encounters a non-directory ancestor.
+- Governing invariant: Every M1 workspace write surface introduced by #29/#30 records only normalized paths inside the configured workspace, or rejects before write when the currently observed path tree traverses outside, crosses a pre-existing symlink, targets a read-only boundary for write, or encounters a non-directory ancestor.
 - Source-of-truth identity/contract: configured `workspaceRoot`, optional `allowedReadonlyRoots`, normalized workspace-relative path, `Artifact.path`, task snapshot paths, and `workspace_path_not_safe` evidence refs.
 - Producers: Artifact registry `registerArtifact`, TaskCard snapshot persistence, Workspace JSON record write preparation, and the shared helper.
 - Validators/preflight: segment/id validators from #29/#30 plus shared `resolveWorkspacePath` boundary and symlink checks.
 - Storage/cache/query: task snapshots under `workspace/tasks/<task_id>/snapshot.json`, temporary snapshot files, and Artifact manifests under `workspace/artifacts/manifests/`.
 - Public routes/entrypoints: none directly - #29/#30 backend routes consume these services indirectly.
 - Frontend/downstream consumers: #35 Dashboard and future artifact/evidence consumers read normalized stored paths without API shape changes.
-- Failure paths/rollback/stale state: traversal, absolute path outside workspace, symlinked ancestor/leaf, write under allowed read-only root, missing parent segments, existing regular-file lanes, and existing rollback/cleanup paths.
+- Failure paths/rollback/stale state: traversal, absolute path outside workspace, pre-existing symlinked ancestor/leaf, write under allowed read-only root, missing parent segments, existing regular-file lanes, and existing rollback/cleanup paths. External concurrent directory swaps between helper validation and the filesystem syscall are outside #33's M1 authority boundary by ADR-0002 D1/D6 and this fixture's "no new cross-process locking" constraint; any future race-resilient guarantee belongs with M3 executor/workspace locking or an OS/native directory-fd boundary.
 - Evidence/audit/readiness: core service tests, root check, OpenSpec validation, diff check, zero diff, and no tracked `workspace`.
 - Regression rows:
   - Legal relative Artifact path with `./` -> stored manifest path is normalized workspace-relative and `getArtifact(id)` returns the normalized record.
   - `../` traversal or absolute outside workspace -> helper throws `WorkspacePathSafetyError`/mapped `workspace_path_not_safe` before any outside file exists.
-  - Workspace symlink ancestor pointing outside -> Artifact registry and TaskCard snapshot writes reject before writing a manifest or snapshot outside.
+  - Pre-existing workspace symlink ancestor pointing outside -> Artifact registry and TaskCard snapshot writes reject before writing a manifest or snapshot outside.
   - Allowed read-only root with `access=read` -> helper returns boundary `allowed_readonly`; same root with `access=write` -> rejection.
   - Existing #29/#30 service tests -> snapshot recovery, idempotency, lock, artifact lookup, and immutable duplicate behavior remain green.
 
@@ -995,7 +995,7 @@ Boundary-surface checklist:
 - Write/delete/overwrite surfaces: Artifact manifest writes, Task snapshot writes, temporary snapshot publish, and JSON record writes.
 - Staging/publish/rollback surfaces: snapshot temp-file write/rename/unlink and existing record no-clobber writes.
 - Producer/consumer evidence boundaries: Artifact input path -> normalized manifest path; TaskCard id -> normalized snapshot lane.
-- Stale-state/idempotency boundaries: existing #30 idempotency/lock behavior; no new cross-process locking.
+- Stale-state/idempotency boundaries: existing #30 idempotency/lock behavior; no new cross-process locking, external-mutator race defense, or directory-fd/openat-style anchoring.
 - Unchanged downstream consumers: backend task routes, idempotency/lock services, structured logging, perf smoke, and future Dashboard.
 
 Required evidence:
@@ -1003,7 +1003,7 @@ Required evidence:
 - Gate commands: `bun run test:core-services`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 
 Non-goals:
-- Bash/sandbox execution path controls, M3 executor behavior, raw-data write denial telemetry, artifact payload serving/download APIs, and expanding workspace external allowlists.
+- Bash/sandbox execution path controls, M3 executor behavior, raw-data write denial telemetry, race-resilient directory-fd/openat-style write anchoring, artifact payload serving/download APIs, and expanding workspace external allowlists.
 
 Review focus:
 - Helper boundary checks are centralized and fail closed before writes.

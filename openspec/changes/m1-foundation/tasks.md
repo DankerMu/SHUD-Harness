@@ -201,15 +201,15 @@
     - `bun run test:perf:api`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 6.6 路径安全 helper（packages/core 共享 service，遵 Workspace_Conventions §9：resolve 规范化 → workspace 边界校验 → 拒 symlink escape → 记录规范化路径）+ Artifact registry 落盘与 task snapshot 写入两处接线 + 正负例单测（`../` 穿越拒绝、symlink escape 拒绝、合法路径规范化记录；承接 Test_Plan W1 Unit「path normalization」）——依赖: 6.2、6.3（两处落盘写入面在位）
   - Risk packs (#33):
-    - Workspace path safety / filesystem writes: selected - introduces shared path resolution and rewires two write surfaces.
-    - Error handling / fail-closed behavior: selected - rejected paths must not create or mutate workspace-external files.
+    - Workspace path safety / filesystem writes: selected - introduces shared path resolution and rewires two write surfaces for static/pre-existing traversal, symlink, and boundary escapes.
+    - Error handling / fail-closed behavior: selected - rejected pre-existing/static unsafe paths must not create or mutate workspace-external files.
     - Schema / record fields: selected - Artifact manifest `path` is normalized before storage.
     - Other packs: not selected - no API route, frontend, observability, performance, hydrology runtime, or Zero governance behavior changes.
   - Evidence floor (#33):
-    - `packages/core/src/domain/services/workspace-path-safety.ts` resolves paths, enforces workspace/read-only boundaries, rejects symlink crossings, and returns normalized workspace-relative paths.
+    - `packages/core/src/domain/services/workspace-path-safety.ts` resolves paths against the currently observed path tree, enforces workspace/read-only boundaries, rejects pre-existing symlink crossings, and returns normalized workspace-relative paths.
     - Artifact registry normalizes `artifact.path` before manifest storage and rejects symlink escapes before writing manifests.
     - Task snapshot writes resolve `tasks/`, task lane, snapshot, and temporary paths through the shared helper.
-    - Core service tests cover traversal rejection, symlink escape rejection, legal normalized paths, Artifact manifest normalized storage, Artifact symlink no-write, and Task snapshot normalized path/no-write cases.
+    - Core service tests cover traversal rejection, pre-existing symlink escape rejection, legal normalized paths, allowed read-only read/write split, Artifact manifest normalized storage, Artifact symlink no-write, and Task snapshot normalized path/no-write cases. Race-resilient protection against external concurrent directory swaps between validation and syscall is outside #33's M1 authority boundary and belongs with later executor/workspace-locking work.
     - `bun run test:core-services`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 
 ## 7. 四栏壳（workbench-shell）
