@@ -1068,3 +1068,61 @@ Review focus:
 - Four panel slots are present exactly once and exported through the expected frontend boundaries.
 - The shell stays deterministic, dependency-light, and compatible with existing `bun install`/`check`.
 - Visible placeholder copy is operational state, not explanatory product marketing.
+
+## Subagent Workflow Fixture - Issue #35
+
+Fixture level: expanded; repair intensity: medium
+Project profile: SHUD-Harness
+
+Expanded-trigger rationale:
+- Core triggers: frontend public page skeleton, existing public API consumption, schema field display, create/list failure states, and refresh recovery.
+- Profile triggers: `TaskCard`, `snapshot`, M1 acceptance evidence, and frontend/backend contract drift risk.
+
+Change surface:
+- `packages/frontend/src/pages/**` Dashboard route/page renderer, page-local typed task API helper, and frontend smoke tests.
+- Frontend export boundaries needed by downstream #36 and M1 acceptance.
+
+Must preserve:
+- Backend `GET /api/tasks -> { tasks: TaskCard[] }` and `POST /api/tasks -> TaskCard` contracts remain unchanged.
+- #34 Workbench `/workbench` route renderer, four canonical panel slots, CSS fallback behavior, and preview entry remain compatible.
+- Dashboard-to-Workbench task context navigation, idempotency header UI wiring, backend static serving, auth/permissions, WebSocket updates, runtime `workspace/`, and `zero/` source remain unchanged.
+
+Must add/change:
+- Deterministic Dashboard route/page renderer with Chinese-first task list, create form, loading/empty/error states, and status-bearing rows.
+- Page-local typed task API helpers that call the existing backend contracts and surface stable errors without introducing a new `src/api/**` surface in #35.
+- Create flow state transition: initial list -> successful create -> list contains new `TaskCard` with `status=created`.
+- Refresh recovery path: a fresh render from server-provided `GET /api/tasks` data reproduces the persisted task list without relying on frontend memory.
+
+Risk packs considered:
+- Public page / route skeleton: selected - Dashboard is the M1 browser-visible task management entry representation.
+- Public API consumption: selected - frontend consumes existing task list/create endpoints and must not drift from their shapes.
+- Schema / field names: selected - UI and tests bind to shared `TaskCard` and `CreateTaskInput` fields.
+- Error handling / visible failure: selected - failed list/create must not render stale success or phantom rows.
+- Refresh / shared state ordering: selected - recovered server snapshot is the source of truth after browser refresh.
+- Dependency / build compatibility: selected - no unresolved runtime dependency or serving assumption may enter #35.
+- Backend behavior / idempotency header UI / Dashboard-to-Workbench navigation / auth / hydrology runtime / Zero governance: not selected - outside #35 by issue and M1 fixture.
+
+Invariant Matrix:
+- Governing invariant: Dashboard renders task list and create-result state from backend `TaskCard` data only; refresh recovery comes from `GET /api/tasks`, not frontend memory.
+- Source-of-truth identity/contract: `TaskCard.task_id`, `TaskCard.status`, `TaskCard.title`, `CreateTaskInput`, and backend task endpoints.
+- Producers: page-local Dashboard API helper and Dashboard page renderer.
+- Validators/preflight: frontend smoke tests, typecheck, root check, OpenSpec validation, diff check, zero/workspace boundary checks.
+- Storage/cache/query: browser memory may hold transient render state, but persisted truth is backend snapshot behind `GET /api/tasks`.
+- Public routes/entrypoints: frontend Dashboard route representation; backend HTTP route implementation is not changed in #35.
+- Frontend/downstream consumers: #36 can receive selected task context props later without changing Dashboard API helper semantics.
+- Failure paths/rollback/stale state: list/create failures render stable Chinese-first error copy and do not add optimistic phantom tasks.
+- Evidence/audit/readiness: PR evidence records `test:frontend`, `typecheck`, `check`, OpenSpec validation, diff check, and zero/workspace checks.
+- Regression rows:
+  - `GET /api/tasks -> { tasks: [] }` -> Dashboard renders an empty state and create form.
+  - Outbound `POST /api/tasks` body includes exactly the documented create payload keys `type`, `title`, `question_or_goal`, and `inference_budget: { mode }`; `POST /api/tasks -> TaskCard(status=created)` followed by `GET /api/tasks -> { tasks: [task] }` -> Dashboard row shows that task id/title/status exactly once.
+  - Fresh render from `GET /api/tasks -> { tasks: [previouslyCreated] }` -> Dashboard includes the previously created TaskCard without any prior in-memory state.
+  - List or create non-2xx / malformed response -> Dashboard renders an error state and no phantom created row.
+  - Existing `/workbench` renderer and preview tests continue to pass unchanged.
+
+Non-goals:
+- Dashboard-to-Workbench task context navigation, SideNav task-list wiring, real backend static serving, WebSocket live updates, idempotency-key UI, authentication/authorization, and full React runtime/router setup.
+
+Review focus:
+- Page-local API helper matches backend task endpoint shapes and exact create payload keys without changing backend contracts.
+- Dashboard state is server-sourced on refresh and does not fabricate success rows on failure.
+- The implementation remains dependency-light and compatible with #34 Workbench exports/tests.
