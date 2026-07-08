@@ -24,6 +24,10 @@ import {
 import { Hono, type Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ZodError } from "zod";
+import {
+  createApiRequestLoggerMiddleware,
+  type ApiRequestLogSink
+} from "../middleware";
 
 export const BACKEND_ROUTES_NAMESPACE = "backend/routes" as const;
 
@@ -90,6 +94,8 @@ export interface BackendApiOptions {
   taskIdFactory?: () => string;
   taskSnapshotReadHooks?: TaskSnapshotReadHooks;
   taskSnapshotWriteHooks?: TaskSnapshotWriteHooks;
+  requestIdFactory?: () => string;
+  requestLogSink?: ApiRequestLogSink;
   writableProbe?: WorkspaceWritableProbe;
   snapshotReadableProbe?: WorkspaceSnapshotReadableProbe;
 }
@@ -152,6 +158,15 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
     workspaceRoot,
     now: options.now
   });
+
+  app.use(
+    "*",
+    createApiRequestLoggerMiddleware({
+      now: options.now,
+      requestIdFactory: options.requestIdFactory,
+      sink: options.requestLogSink
+    })
+  );
 
   app.post("/api/workspace/init", async (c) => {
     try {
@@ -278,7 +293,7 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
 
   app.notFound((c) => {
     const pathname = new URL(c.req.url).pathname;
-    if (pathname.startsWith("/api/")) {
+    if (pathname === "/api" || pathname.startsWith("/api/")) {
       return jsonApiError(
         c,
         {

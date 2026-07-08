@@ -31,6 +31,11 @@ import {
   type TaskSnapshot
 } from "@shud-harness/core";
 import { createBackendApi, type ApiErrorResponse, type WorkspaceReadyResponse } from "./index";
+import {
+  API_REQUEST_ID_HEADER,
+  redactApiLogValue,
+  type ApiRequestLogLine
+} from "../middleware";
 
 const tempRoots: string[] = [];
 const originalCwd = process.cwd();
@@ -183,6 +188,227 @@ describe("backend workspace and health routes", () => {
       uptime_seconds: 3.5,
       timestamp: "2026-07-07T00:00:03.500Z"
     });
+  });
+
+  test("API requests emit one OBS-LOG-001 NDJSON line with the response request id", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const logs: string[] = [];
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:02:00.000Z"),
+      requestIdFactory: () => "REQ-log-success",
+      requestLogSink: (line) => {
+        logs.push(line);
+      }
+    });
+
+    const response = await app.request("/api/health/live");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-success");
+    await waitFor(() => logs.length === 1, "Success request log was not emitted");
+    const log = parseApiRequestLogLine(logs[0] as string);
+    expect(log).toMatchObject({
+      ts: "2026-07-07T12:02:00.000Z",
+      level: "info",
+      service: "shud-harness-backend",
+      event: "api.request.completed",
+      request_id: "REQ-log-success",
+      route: "/api/health/live",
+      status: 200
+    });
+    expect(Number.isFinite(log.duration_ms)).toBe(true);
+    expect(log.duration_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  test("HEAD API requests use their GET-backed route patterns in request logs", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const requestIds = ["REQ-log-head-live", "REQ-log-head-ready"];
+    const logs: string[] = [];
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:02:00.500Z"),
+      requestIdFactory: () => requestIds.shift() ?? "REQ-log-head-extra",
+      requestLogSink: (line) => {
+        logs.push(line);
+      }
+    });
+
+    const liveResponse = await app.request("/api/health/live", { method: "HEAD" });
+    const readyResponse = await app.request("/api/health/ready", { method: "HEAD" });
+
+    expect(liveResponse.status).toBe(200);
+    expect(liveResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-head-live");
+    expect(readyResponse.status).toBe(503);
+    expect(readyResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-head-ready");
+    await waitFor(() => logs.length === 2, "HEAD request logs were not emitted");
+    const liveLog = parseApiRequestLogLine(logs[0] as string);
+    expect(liveLog).toMatchObject({
+      request_id: "REQ-log-head-live",
+      route: "/api/health/live",
+      status: 200,
+      level: "info"
+    });
+    const readyLog = parseApiRequestLogLine(logs[1] as string);
+    expect(readyLog).toMatchObject({
+      request_id: "REQ-log-head-ready",
+      route: "/api/health/ready",
+      status: 503,
+      level: "error"
+    });
+  });
+
+  test("API error responses share a request id with the structured request log", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const logs: string[] = [];
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:02:01.000Z"),
+      requestIdFactory: () => "REQ-log-error",
+      requestLogSink: (line) => {
+        logs.push(line);
+      }
+    });
+
+    const response = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Missing required fields" })
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-error");
+    expectCanonicalError(body, "schema_error");
+    await waitFor(() => logs.length === 1, "Error request log was not emitted");
+    const log = parseApiRequestLogLine(logs[0] as string);
+    expect(log.request_id).toBe("REQ-log-error");
+    expect(log.level).toBe("warn");
+    expect(log.route).toBe("/api/tasks");
+    expect(log.status).toBe(400);
+  });
+
+  test("API request logs redact secret-like values and preserve secret refs", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const fakeSecret = "sk-test-secret-value";
+    const logs: string[] = [];
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:02:02.000Z"),
+      requestIdFactory: () => "REQ-log-secret",
+      requestLogSink: (line) => {
+        logs.push(line);
+      }
+    });
+
+    const response = await app.request(`/api/tasks?api_key=${fakeSecret}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${fakeSecret}`,
+        "x-secret-ref": "env:GLM_API_KEY"
+      },
+      body: `{"title":"${fakeSecret}"`
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(400);
+    expectCanonicalError(body, "schema_error");
+    await waitFor(() => logs.length === 1, "Secret-redaction request log was not emitted");
+    const serializedLog = logs[0] as string;
+    const log = parseApiRequestLogLine(serializedLog);
+    expect(log.route).toBe("/api/tasks");
+    expect(serializedLog).not.toContain(fakeSecret);
+    expect(serializedLog).not.toContain("authorization");
+    expect(serializedLog).not.toContain("api_key");
+    expect(redactApiLogValue(fakeSecret)).toBe("[REDACTED]");
+    expect(redactApiLogValue("env:GLM_API_KEY")).toBe("env:GLM_API_KEY");
+  });
+
+  test("API request logging does not wait for delayed or failing sinks", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    let delayedSinkResolved = false;
+    const delayedLogs: string[] = [];
+    const delayedApp = createBackendApi({
+      workspaceRoot,
+      requestIdFactory: () => "REQ-log-delayed-sink",
+      requestLogSink: async (line) => {
+        delayedLogs.push(line);
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        delayedSinkResolved = true;
+      }
+    });
+
+    const response = await Promise.race([
+      delayedApp.request("/api/health/live"),
+      timeoutAfter(50, "API response waited for delayed request log sink")
+    ]);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-delayed-sink");
+    await waitFor(() => delayedLogs.length === 1, "Delayed sink did not receive a log line");
+    expect(delayedSinkResolved).toBe(false);
+
+    const rejectingLogs: string[] = [];
+    const rejectingApp = createBackendApi({
+      workspaceRoot,
+      requestIdFactory: () => "REQ-log-rejecting-sink",
+      requestLogSink: (line) => {
+        rejectingLogs.push(line);
+        return Promise.reject(new Error("sink unavailable"));
+      }
+    });
+
+    const rejectingResponse = await rejectingApp.request("/api/health/live");
+
+    expect(rejectingResponse.status).toBe(200);
+    expect(rejectingResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-rejecting-sink");
+    await waitFor(() => rejectingLogs.length === 1, "Rejecting sink did not receive a log line");
+
+    const throwingLogs: string[] = [];
+    const throwingApp = createBackendApi({
+      workspaceRoot,
+      requestIdFactory: () => "REQ-log-throwing-sink",
+      requestLogSink: (line) => {
+        throwingLogs.push(line);
+        throw new Error("sink threw synchronously");
+      }
+    });
+
+    const throwingResponse = await throwingApp.request("/api/health/live");
+
+    expect(throwingResponse.status).toBe(200);
+    expect(throwingResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-throwing-sink");
+    await waitFor(() => throwingLogs.length === 1, "Throwing sink did not receive a log line");
+
+    const synchronousLogs: string[] = [];
+    let synchronousSinkFinished = false;
+    const synchronousApp = createBackendApi({
+      workspaceRoot,
+      requestIdFactory: () => "REQ-log-sync-sink",
+      requestLogSink: (line) => {
+        synchronousLogs.push(line);
+        busyWaitFor(120);
+        synchronousSinkFinished = true;
+      }
+    });
+
+    const synchronousResponse = await Promise.race([
+      synchronousApp.request("/api/health/live"),
+      timeoutAfter(50, "API response waited for synchronous request log sink work")
+    ]);
+
+    expect(synchronousResponse.status).toBe(200);
+    expect(synchronousResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-sync-sink");
+    expect(synchronousLogs).toHaveLength(0);
+    expect(synchronousSinkFinished).toBe(false);
+    await waitFor(() => synchronousSinkFinished, "Synchronous sink did not run after response");
+    expect(synchronousLogs).toHaveLength(1);
   });
 
   test("GET /api/health/ready is not_ready before init while live stays ok", async () => {
@@ -2200,19 +2426,40 @@ describe("backend workspace and health routes", () => {
   test("unknown API paths and missing task ids return canonical 404 envelopes", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
-    const app = createBackendApi({ workspaceRoot });
+    const logs: string[] = [];
+    const app = createBackendApi({
+      workspaceRoot,
+      requestIdFactory: () => "REQ-api-root-not-found",
+      requestLogSink: (line) => {
+        logs.push(line);
+      }
+    });
 
+    const apiRootResponse = await app.request("/api");
     const unknownRouteResponse = await app.request("/api/not-registered");
     const missingTaskResponse = await app.request("/api/tasks/TASK-missing");
+    const apiRootBody = (await apiRootResponse.json()) as ApiErrorResponse;
     const unknownRouteBody = (await unknownRouteResponse.json()) as ApiErrorResponse;
     const missingTaskBody = (await missingTaskResponse.json()) as ApiErrorResponse;
 
+    expect(apiRootResponse.status).toBe(404);
+    expect(apiRootResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-api-root-not-found");
     expect(unknownRouteResponse.status).toBe(404);
     expect(missingTaskResponse.status).toBe(404);
+    expectCanonicalError(apiRootBody, "not_found");
     expectCanonicalError(unknownRouteBody, "not_found");
     expectCanonicalError(missingTaskBody, "not_found");
+    expect(apiRootBody.error.message).toContain("API route not found");
     expect(unknownRouteBody.error.message).toContain("API route not found");
     expect(missingTaskBody.error.message).toContain("Task not found");
+    await waitFor(() => logs.length === 3, "404 request logs were not emitted");
+    const apiRootLog = parseApiRequestLogLine(logs[0] as string);
+    expect(apiRootLog).toMatchObject({
+      request_id: "REQ-api-root-not-found",
+      route: "/api/*",
+      status: 404,
+      level: "warn"
+    });
   });
 
   test("malformed task snapshots fail closed with a canonical envelope", async () => {
@@ -2871,9 +3118,53 @@ function expectNoAbsoluteWorkspacePath(
   expect(serialized).not.toContain(workspaceRoot);
 }
 
+function parseApiRequestLogLine(line: string): ApiRequestLogLine {
+  expect(line.endsWith("\n")).toBe(true);
+  const parsed = JSON.parse(line) as ApiRequestLogLine;
+  expect(Object.keys(parsed).sort()).toEqual(
+    [
+      "duration_ms",
+      "event",
+      "level",
+      "request_id",
+      "route",
+      "service",
+      "status",
+      "ts"
+    ].sort()
+  );
+  expect(typeof parsed.ts).toBe("string");
+  expect(["info", "warn", "error"]).toContain(parsed.level);
+  expect(typeof parsed.request_id).toBe("string");
+  expect(typeof parsed.route).toBe("string");
+  expect(typeof parsed.status).toBe("number");
+  expect(typeof parsed.duration_ms).toBe("number");
+
+  return parsed;
+}
+
 async function timeoutAfter(milliseconds: number, message: string): Promise<never> {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
   throw new Error(message);
+}
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  throw new Error(message);
+}
+
+function busyWaitFor(milliseconds: number): void {
+  const deadline = Date.now() + milliseconds;
+  while (Date.now() < deadline) {
+    // Intentionally block to prove log sink work is no longer on the response path.
+  }
 }
 
 function restoreEnv(name: string, value: string | undefined): void {
