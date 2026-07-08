@@ -195,7 +195,7 @@
     - Workspace fixture / repeatability: selected - fixture generation must be scripted and use a disposable mock workspace with 100 tasks.
     - Other packs: not selected - no API implementation, schema, auth, hydrology runtime, frontend, or Zero governance behavior changes.
   - Evidence floor (#32):
-    - `scripts/perf/api.ts` creates a disposable workspace, initializes it through the backend API, creates exactly 100 TaskCards through `POST /api/tasks`, then samples `GET /api/tasks`, `GET /api/tasks/:id`, and `GET /api/health/ready`.
+    - `scripts/perf/api.ts` creates a disposable workspace, initializes it through the backend API, creates exactly 100 TaskCards through `POST /api/tasks`, verifies `GET /api/tasks` lists exactly 100 tasks, then samples `GET /api/tasks`, `GET /api/tasks/:id`, and `GET /api/health/ready`.
     - `bun run test:perf:api` fails if any endpoint P95 exceeds 300ms and prints each measured P95 with the limit.
     - PR CI `linux-base` runs `bun run test:perf:api` after schema drift check.
     - `bun run test:perf:api`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.

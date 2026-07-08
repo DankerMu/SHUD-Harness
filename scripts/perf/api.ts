@@ -18,6 +18,10 @@ type EndpointMeasurement = {
   p95Ms: number;
 };
 
+type TaskListResponse = {
+  tasks: TaskCard[];
+};
+
 async function main(): Promise<void> {
   const tempRoot = await realpath(await mkdtemp(join(tmpdir(), "shud-harness-perf-api-")));
   try {
@@ -38,6 +42,7 @@ async function main(): Promise<void> {
     if (!targetTask) {
       throw new Error("PERF-API-001 fixture did not create a target task.");
     }
+    await expectTaskListCount(app, TASK_COUNT);
 
     const measurements: EndpointMeasurement[] = [
       await measureEndpoint(app, "GET /api/tasks", "/api/tasks", 200),
@@ -84,6 +89,20 @@ async function createTaskFixture(app: ReturnType<typeof createBackendApi>): Prom
   return tasks;
 }
 
+async function expectTaskListCount(
+  app: ReturnType<typeof createBackendApi>,
+  expectedCount: number
+): Promise<void> {
+  const response = await expectStatus(app.request("/api/tasks"), 200, "GET /api/tasks", false);
+  const body = (await response.json()) as TaskListResponse;
+  if (!Array.isArray(body.tasks) || body.tasks.length !== expectedCount) {
+    const actualCount = Array.isArray(body.tasks) ? body.tasks.length : "non-array";
+    throw new Error(
+      `PERF-API-001 fixture listed ${actualCount} tasks, expected ${expectedCount}.`
+    );
+  }
+}
+
 async function measureEndpoint(
   app: ReturnType<typeof createBackendApi>,
   label: string,
@@ -112,13 +131,16 @@ async function measureEndpoint(
 async function expectStatus(
   responsePromise: Response | Promise<Response>,
   expectedStatus: number,
-  label: string
+  label: string,
+  consumeBody = true
 ): Promise<Response> {
   const response = await responsePromise;
   if (response.status !== expectedStatus) {
     throw new Error(`${label} returned HTTP ${response.status}, expected ${expectedStatus}.`);
   }
-  await response.arrayBuffer();
+  if (consumeBody) {
+    await response.arrayBuffer();
+  }
   return response;
 }
 
