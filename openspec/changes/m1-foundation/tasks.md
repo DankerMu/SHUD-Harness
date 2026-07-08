@@ -274,7 +274,51 @@
 
 ## 8. GLM provider（glm-provider）
 
-- [ ] 8.1 [GRILL-3] zero `providers:` 配置（api_type/base_url/`api_key_ref: env:GLM_API_KEY`/fallback_chain + 按功能选模型占位）+ 连通冒烟脚本（非空 completion + 命中 base_url + exit 0；key 缺失明确报错；结论入 readiness notes）——依赖: 2.1
+- [x] 8.1 [GRILL-3] zero `providers:` 配置（api_type/base_url/`api_key_ref: env:GLM_API_KEY`/fallback_chain + 按功能选模型占位）+ 连通冒烟脚本（非空 completion + 命中 base_url + exit 0；key 缺失明确报错；结论入 readiness notes）——依赖: 2.1
+  - Fixture (#37): expanded / high
+    - Expanded trigger: provider config, external network script entry, secret reference handling, readiness evidence, and M1 model-debt boundary.
+    - 2026-07-08 user裁决: DMXAPI endpoint is `https://www.dmxapi.cn/v1/chat/completions`; M1 smoke carrier model is `deepseek-v4-pro-guan`; later replacement target remains `glm-5.2`.
+    - Change surface: provider config file under source control, deterministic smoke script under `scripts/**`, focused script/config tests, and #37 OpenSpec fixture evidence. Runtime readiness notes are written under ignored `workspace/readiness/`.
+    - Must preserve: `api_key_ref` / persisted SecretRef remains `env:GLM_API_KEY`; no secret value in config, logs, tests, notes, PR body, or committed artifacts; no `zero/` source diff; no AgentLoop business-flow wiring; no StackLock/model admission record.
+    - Must add/change: DMXAPI OpenAI-compatible provider config with `api_type=openai_chat_completions`, `base_url=https://www.dmxapi.cn/v1`, `api_key_ref=env:GLM_API_KEY`, fallback/model placeholders, `smoke_model=deepseek-v4-pro-guan`, `target_model_id=glm-5.2`; smoke script that runs one non-stream chat completion, retries once on failure, asserts nonempty completion and configured base URL, writes redacted readiness notes, and has a missing-key negative path.
+    - Risk packs considered:
+      - Public API / CLI / script entry: selected - smoke script is a user/CI-invoked deterministic entrypoint.
+      - Config / project setup: selected - provider config and environment variable mapping determine runtime connectivity.
+      - File IO / path safety / overwrite: selected - readiness notes are written under `workspace/readiness/` only and must not enter git.
+      - Schema / columns / units / field names: selected - config keys, SecretRef shape, model ids, and readiness note fields are structured contracts.
+      - Auth / permissions / secrets: selected - script consumes a real API key and must never echo or persist it.
+      - Error handling / rollback / partial outputs: selected - missing key and provider failure produce stable nonzero exits and redacted notes.
+      - Resource limits / large input / discovery: selected - network call uses bounded prompt, timeout, retry count, and response parsing.
+      - Legacy compatibility / examples: selected - existing checks and task-api secret redaction behavior remain compatible.
+      - Release / packaging / dependency compatibility: selected - no new runtime dependency beyond existing Bun/Node fetch, or any manifest-only script change must leave lockfile unchanged.
+      - Documentation / migration notes: selected - PR evidence states carrier model vs `glm-5.2` replacement debt.
+      - Scientific governance / PI gate / evidence lineage: selected - readiness/PR evidence must state carrier smoke is not model admission, include both `smoke_model=deepseek-v4-pro-guan` and `target_model_id=glm-5.2`, and produce no StackLock/admission record.
+      - Concurrency/shared state, Hydrology runtime, and Zero tool governance: not selected - no shared mutable state, solver runtime, or Zero tool registry behavior changes.
+    - Invariant Matrix:
+      - Governing invariant: #37 may prove only redacted OpenAI-compatible provider connectivity at the configured DMXAPI base URL, never model admission and never secret disclosure.
+      - Source-of-truth identity/contract: provider name, `base_url`, `api_key_ref=env:GLM_API_KEY`, `smoke_model=deepseek-v4-pro-guan`, `target_model_id=glm-5.2`, readiness note path, and script exit code.
+      - Producers: provider config file and smoke script.
+      - Validators/preflight: config parser/validator, missing-key check, URL normalization, nonempty completion assertion, response bounded parse.
+      - Storage/cache/query: ignored `workspace/readiness/` note only; no StackLock/admission record.
+      - Public routes/entrypoints: smoke script CLI/package script.
+      - Frontend/downstream consumers: #38 acceptance consumes the redacted readiness note and PR evidence only.
+      - Failure paths/rollback/stale state: missing key/provider failure exits nonzero with redacted message; failed smoke must not write a passing readiness note.
+      - Evidence/audit/readiness: PR summary and readiness note include endpoint/base URL, model id, status, timestamp, and SecretRef only.
+      - Regression rows:
+        - Valid `GLM_API_KEY` (locally mapped from `DMXAPI_KEY`) + DMXAPI endpoint -> nonempty completion, configured base URL assertion passes, exit 0, redacted readiness note says smoke passed.
+        - Missing `GLM_API_KEY` -> nonzero exit, message names `GLM_API_KEY`, no key value, no passing note.
+        - Provider returns non-2xx or empty completion twice -> nonzero exit with redacted failure summary and no passing note.
+        - Fake fetch timeout/AbortError -> bounded timeout, at most one retry, nonzero exit, redacted failure summary, and no passing readiness note.
+        - Inspect config/log/readiness note/script output/committed test artifacts -> only `env:GLM_API_KEY` SecretRef or non-secret environment variable names appear, and no secret value is persisted.
+        - Post-smoke repo state -> readiness note/PR evidence contain `smoke_model=deepseek-v4-pro-guan`, `target_model_id=glm-5.2`, and `model_admission=false`; no StackLock/admission record, `git -C zero diff --quiet`, `test -z "$(git ls-files workspace)"`.
+        - Dependency compatibility -> package manifests and lockfile prove no new runtime dependency beyond existing Bun/Node fetch; any script-only manifest change has no lockfile drift.
+    - Evidence floor (#37):
+      - Config test parses provider config and asserts `api_type=openai_chat_completions`, `base_url=https://www.dmxapi.cn/v1`, `api_key_ref=env:GLM_API_KEY`, `smoke_model=deepseek-v4-pro-guan`, and `target_model_id=glm-5.2`.
+      - Smoke self-test covers missing `GLM_API_KEY`, fake fetch success/failure, and fake fetch timeout/AbortError without network or secret leakage; timeout path proves bounded timeout plus at most one retry.
+      - Real local smoke command runs with `GLM_API_KEY="$DMXAPI_KEY"` and records only redacted evidence: nonempty completion, base URL hit, exit 0.
+      - Readiness note parse test confirms no secret value and no noncanonical key ref, both carrier/target model ids are explicit, `model_admission=false`, and no model-admission/StackLock record.
+      - Dependency compatibility proof checks `git diff -- package.json bun.lock packages/*/package.json` (or equivalent) to confirm no new runtime dependency / no lockfile drift beyond an optional script entry.
+      - `bun run test:glm-provider` or focused equivalent; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 
 ## 9. M1 验收门走查
 

@@ -16,13 +16,15 @@
     "test:frontend": "bun test ./packages/frontend/src/**/*.test.ts ./packages/frontend/src/**/*.test.tsx",
     "test:schemas": "bun test ./packages/core/src/domain/schemas/core-schemas.test.ts",
     "test:core-services": "bun test ./packages/core/src/domain/services/*.test.ts",
+    "test:glm-provider": "bun test ./scripts/glm-provider/smoke.test.ts",
+    "smoke:glm-provider": "bun scripts/glm-provider/smoke.ts",
     "test:perf:api": "bun scripts/perf/api.ts",
     "schema:generate": "bun scripts/schema/generate.ts",
     "test:schema-generation": "bun scripts/schema/generate.ts --self-test",
     "schema:check": "sh scripts/schema/check.sh",
     "validate:dependency-lock": "node scripts/dependency-lock/validate.mjs",
     "test:dependency-lock": "sh scripts/dependency-lock/self_test.sh",
-    "check": "bun run typecheck && bun run test:policy-gate && bun run test:tool-registry-governance && bun run test:backend-api && bun run test:backend-ws && bun run test:frontend && bun run test:schemas && bun run test:core-services"
+    "check": "bun run typecheck && bun run test:policy-gate && bun run test:tool-registry-governance && bun run test:backend-api && bun run test:backend-ws && bun run test:frontend && bun run test:schemas && bun run test:core-services && bun run test:glm-provider"
   },
   "devDependencies": {
     "typescript": "5.8.3"
