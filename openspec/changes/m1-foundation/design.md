@@ -950,7 +950,7 @@ Must preserve:
 - No bash/sandbox behavior and no workspace allowlist expansion beyond explicit read-only root support in the helper.
 
 Must add/change:
-- A shared helper resolves input paths against the currently observed path tree, normalizes them, checks workspace or allowed read-only boundaries, rejects pre-existing symlink crossings and non-directory ancestors, and returns the normalized path.
+- A shared helper requires absolute stable `workspaceRoot` / `allowedReadonlyRoots`, resolves input paths against the currently observed path tree, normalizes them, checks workspace or allowed read-only boundaries, rejects pre-existing symlink crossings and non-directory ancestors, and returns the normalized path.
 - Artifact registry normalizes `artifact.path` before manifest storage and rejects unsafe paths before writing manifests.
 - Task snapshot write surfaces resolve the task root, task lane, snapshot path, and temporary path through the helper before writing.
 - Workspace JSON record writes use the shared helper at the point of write preparation.
@@ -973,8 +973,8 @@ Domain packs:
 - Zero adapter / tool registry / agent role governance: not selected - no Zero/tool governance changes.
 
 Invariant Matrix:
-- Governing invariant: Every M1 workspace write surface introduced by #29/#30 records only normalized paths inside the configured workspace, or rejects before write when the currently observed path tree traverses outside, crosses a pre-existing symlink, targets a read-only boundary for write, or encounters a non-directory ancestor.
-- Source-of-truth identity/contract: configured `workspaceRoot`, optional `allowedReadonlyRoots`, normalized workspace-relative path, `Artifact.path`, task snapshot paths, and `workspace_path_not_safe` evidence refs.
+- Governing invariant: Every M1 workspace write surface introduced by #29/#30 records only normalized paths inside the configured workspace, or rejects before write when roots are relative, the currently observed path tree traverses outside, crosses a pre-existing symlink, targets a read-only boundary for write, or encounters a non-directory ancestor.
+- Source-of-truth identity/contract: configured absolute `workspaceRoot`, optional absolute `allowedReadonlyRoots`, normalized workspace-relative path, `Artifact.path`, task snapshot paths, and `workspace_path_not_safe` evidence refs.
 - Producers: Artifact registry `registerArtifact`, TaskCard snapshot persistence, Workspace JSON record write preparation, and the shared helper.
 - Validators/preflight: segment/id validators from #29/#30 plus shared `resolveWorkspacePath` boundary and symlink checks.
 - Storage/cache/query: task snapshots under `workspace/tasks/<task_id>/snapshot.json`, temporary snapshot files, and Artifact manifests under `workspace/artifacts/manifests/`.
@@ -987,6 +987,7 @@ Invariant Matrix:
   - `../` traversal or absolute outside workspace -> helper throws `WorkspacePathSafetyError`/mapped `workspace_path_not_safe` before any outside file exists.
   - Pre-existing workspace symlink ancestor pointing outside -> Artifact registry and TaskCard snapshot writes reject before writing a manifest or snapshot outside.
   - Allowed read-only root with `access=read` -> helper returns boundary `allowed_readonly`; same root with `access=write` -> rejection.
+  - Relative `workspaceRoot` or `allowedReadonlyRoots` -> helper rejects instead of resolving against process cwd.
   - Existing #29/#30 service tests -> snapshot recovery, idempotency, lock, artifact lookup, and immutable duplicate behavior remain green.
 
 Boundary-surface checklist:
@@ -999,7 +1000,7 @@ Boundary-surface checklist:
 - Unchanged downstream consumers: backend task routes, idempotency/lock services, structured logging, perf smoke, and future Dashboard.
 
 Required evidence:
-- Core service tests for traversal rejection, symlink escape rejection, legal path normalization, allowed read-only read/write split, normalized Artifact manifest storage, Artifact symlink no-write, and Task snapshot normalized/no-write cases.
+- Core service tests for traversal rejection, symlink escape rejection, legal path normalization, absolute root enforcement/cwd-drift rejection, allowed read-only read/write split, normalized Artifact manifest storage, Artifact symlink no-write, and Task snapshot normalized/no-write cases.
 - Gate commands: `bun run test:core-services`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 
 Non-goals:

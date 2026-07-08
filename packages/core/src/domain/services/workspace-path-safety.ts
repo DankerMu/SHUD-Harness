@@ -39,6 +39,11 @@ type FileStat = Awaited<ReturnType<typeof lstat>>;
 export async function resolveWorkspacePath(
   input: ResolveWorkspacePathInput
 ): Promise<WorkspacePathResolution> {
+  assertAbsolutePath(input.workspaceRoot, "workspaceRoot", input.evidenceRef);
+  for (const readonlyRoot of input.allowedReadonlyRoots ?? []) {
+    assertAbsolutePath(readonlyRoot, "allowedReadonlyRoots", input.evidenceRef);
+  }
+
   const workspaceRoot = resolve(input.workspaceRoot);
   const rawPath = input.inputPath;
   if (rawPath.trim().length === 0) {
@@ -79,6 +84,9 @@ export function assertPathInsideWorkspace(
   targetPath: string,
   evidenceRef: string
 ): void {
+  assertAbsolutePath(workspaceRoot, "workspaceRoot", evidenceRef);
+  assertAbsolutePath(targetPath, "targetPath", evidenceRef);
+
   if (isPathInsideBoundary(resolve(workspaceRoot), resolve(targetPath))) {
     return;
   }
@@ -134,6 +142,14 @@ function matchingBoundary(
   if (isPathInsideBoundary(workspaceBoundary.root, targetPath)) {
     return workspaceBoundary;
   }
+}
+
+function assertAbsolutePath(path: string, label: string, evidenceRef: string): void {
+  if (isAbsolute(path)) {
+    return;
+  }
+
+  throw new WorkspacePathSafetyError(`${label} must be absolute.`, evidenceRef);
 }
 
 async function rejectSymlinkEscape(path: string, evidenceRef: string): Promise<void> {

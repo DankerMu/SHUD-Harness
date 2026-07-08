@@ -22,6 +22,7 @@ import {
   idempotencyRecordEvidenceRef,
   idempotencyRecordFileName,
   sha256Hex,
+  assertPathInsideWorkspace,
   resolveWorkspacePath,
   type Artifact,
   type IdempotencyRecord,
@@ -1298,6 +1299,44 @@ describe("idempotency, lock, and artifact services", () => {
       })
     );
     expect(nestedReadonlyWriteError.evidenceRef).toBe("nested-readonly.path");
+
+    const otherCwd = join(tempRoot, "other-cwd");
+    await mkdir(otherCwd, { recursive: true });
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(otherCwd);
+
+      const relativeWorkspaceRootError = await captureWorkspacePathSafetyError(() =>
+        resolveWorkspacePath({
+          workspaceRoot: "workspace",
+          inputPath: "data/raw/out.csv",
+          evidenceRef: "workspace.root"
+        })
+      );
+      expect(relativeWorkspaceRootError.message).toBe("workspaceRoot must be absolute.");
+      expect(relativeWorkspaceRootError.evidenceRef).toBe("workspace.root");
+
+      const relativeReadonlyRootError = await captureWorkspacePathSafetyError(() =>
+        resolveWorkspacePath({
+          workspaceRoot,
+          inputPath: "data/raw/out.csv",
+          evidenceRef: "readonly.root",
+          access: "read",
+          allowedReadonlyRoots: ["data/raw"]
+        })
+      );
+      expect(relativeReadonlyRootError.message).toBe("allowedReadonlyRoots must be absolute.");
+      expect(relativeReadonlyRootError.evidenceRef).toBe("readonly.root");
+
+      expect(() =>
+        assertPathInsideWorkspace("workspace", join(workspaceRoot, "data", "raw"), "workspace.root")
+      ).toThrow(WorkspacePathSafetyError);
+      expect(() =>
+        assertPathInsideWorkspace(workspaceRoot, "data/raw/out.csv", "workspace.target")
+      ).toThrow(WorkspacePathSafetyError);
+    } finally {
+      process.chdir(originalCwd);
+    }
   });
 
   test("workspace path helper accepts dot-prefixed names and rejects unsafe boundaries", async () => {

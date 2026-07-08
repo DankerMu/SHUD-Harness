@@ -206,10 +206,10 @@
     - Schema / record fields: selected - Artifact manifest `path` is normalized before storage.
     - Other packs: not selected - no API route, frontend, observability, performance, hydrology runtime, or Zero governance behavior changes.
   - Evidence floor (#33):
-    - `packages/core/src/domain/services/workspace-path-safety.ts` resolves paths against the currently observed path tree, enforces workspace/read-only boundaries, rejects pre-existing symlink crossings, and returns normalized workspace-relative paths.
+    - `packages/core/src/domain/services/workspace-path-safety.ts` requires absolute stable `workspaceRoot` / `allowedReadonlyRoots`, resolves paths against the currently observed path tree, enforces workspace/read-only boundaries, rejects pre-existing symlink crossings, and returns normalized workspace-relative paths.
     - Artifact registry normalizes `artifact.path` before manifest storage and rejects symlink escapes before writing manifests.
     - Task snapshot writes resolve `tasks/`, task lane, snapshot, and temporary paths through the shared helper.
-    - Core service tests cover traversal rejection, pre-existing symlink escape rejection, legal normalized paths, allowed read-only read/write split, Artifact manifest normalized storage, Artifact symlink no-write, and Task snapshot normalized path/no-write cases. Race-resilient protection against external concurrent directory swaps between validation and syscall is outside #33's M1 authority boundary and belongs with later executor/workspace-locking work.
+    - Core service tests cover traversal rejection, pre-existing symlink escape rejection, legal normalized paths, absolute root enforcement/cwd-drift rejection, allowed read-only read/write split, Artifact manifest normalized storage, Artifact symlink no-write, and Task snapshot normalized path/no-write cases. Race-resilient protection against external concurrent directory swaps between validation and syscall is outside #33's M1 authority boundary and belongs with later executor/workspace-locking work.
     - `bun run test:core-services`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 
 ## 7. 四栏壳（workbench-shell）
