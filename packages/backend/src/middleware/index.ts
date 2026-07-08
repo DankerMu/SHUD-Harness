@@ -82,22 +82,23 @@ function emitApiRequestLogLine(sink: ApiRequestLogSink, line: string): void {
 
 export function apiRoutePatternFor(method: string, path: string): string {
   const normalizedMethod = method.toUpperCase();
-  if (normalizedMethod === "POST" && path === "/api/workspace/init") {
+  const routeMethod = normalizedMethod === "HEAD" ? "GET" : normalizedMethod;
+  if (routeMethod === "POST" && path === "/api/workspace/init") {
     return "/api/workspace/init";
   }
-  if (normalizedMethod === "GET" && path === "/api/health/live") {
+  if (routeMethod === "GET" && path === "/api/health/live") {
     return "/api/health/live";
   }
-  if (normalizedMethod === "GET" && path === "/api/health/ready") {
+  if (routeMethod === "GET" && path === "/api/health/ready") {
     return "/api/health/ready";
   }
-  if (normalizedMethod === "POST" && path === "/api/tasks") {
+  if (routeMethod === "POST" && path === "/api/tasks") {
     return "/api/tasks";
   }
-  if (normalizedMethod === "GET" && path === "/api/tasks") {
+  if (routeMethod === "GET" && path === "/api/tasks") {
     return "/api/tasks";
   }
-  if (normalizedMethod === "GET" && /^\/api\/tasks\/[^/]+$/.test(path)) {
+  if (routeMethod === "GET" && /^\/api\/tasks\/[^/]+$/.test(path)) {
     return "/api/tasks/:id";
   }
   if (path === "/api" || path.startsWith("/api/")) {

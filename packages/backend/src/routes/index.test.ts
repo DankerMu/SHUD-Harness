@@ -222,6 +222,44 @@ describe("backend workspace and health routes", () => {
     expect(log.duration_ms).toBeGreaterThanOrEqual(0);
   });
 
+  test("HEAD API requests use their GET-backed route patterns in request logs", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const requestIds = ["REQ-log-head-live", "REQ-log-head-ready"];
+    const logs: string[] = [];
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:02:00.500Z"),
+      requestIdFactory: () => requestIds.shift() ?? "REQ-log-head-extra",
+      requestLogSink: (line) => {
+        logs.push(line);
+      }
+    });
+
+    const liveResponse = await app.request("/api/health/live", { method: "HEAD" });
+    const readyResponse = await app.request("/api/health/ready", { method: "HEAD" });
+
+    expect(liveResponse.status).toBe(200);
+    expect(liveResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-head-live");
+    expect(readyResponse.status).toBe(503);
+    expect(readyResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-head-ready");
+    await waitFor(() => logs.length === 2, "HEAD request logs were not emitted");
+    const liveLog = parseApiRequestLogLine(logs[0] as string);
+    expect(liveLog).toMatchObject({
+      request_id: "REQ-log-head-live",
+      route: "/api/health/live",
+      status: 200,
+      level: "info"
+    });
+    const readyLog = parseApiRequestLogLine(logs[1] as string);
+    expect(readyLog).toMatchObject({
+      request_id: "REQ-log-head-ready",
+      route: "/api/health/ready",
+      status: 503,
+      level: "error"
+    });
+  });
+
   test("API error responses share a request id with the structured request log", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);

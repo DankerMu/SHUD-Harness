@@ -182,7 +182,7 @@
       - Legacy compatibility / examples: selected - existing response bodies and canonical error envelope remain unchanged.
       - Other core/domain packs: not selected - no workspace file IO, config, concurrency state, release dependency, hydrology runtime, or Zero governance behavior changes.
     - Evidence floor (#31):
-      - Backend route tests cover `GET /api/health/live` -> 200 with exactly one newline-terminated NDJSON object containing all eight OBS-LOG-001 fields, `route="/api/health/live"`, `status=200`, `level=info`, and response `x-request-id` equal to logged `request_id`.
+      - Backend route tests cover `GET /api/health/live` -> 200 with exactly one newline-terminated NDJSON object containing all eight OBS-LOG-001 fields, `route="/api/health/live"`, `status=200`, `level=info`, and response `x-request-id` equal to logged `request_id`; `HEAD` requests to GET-backed health routes keep the same route-pattern classification.
       - Backend route tests cover `POST /api/tasks` with JSON body `{ "title": "Missing required fields" }` -> 400 schema_error whose response `x-request-id` matches the logged `request_id`, while `ApiErrorResponse` keeps the canonical body fields and the log records `route="/api/tasks"`, `status=400`, `level=warn`.
       - Backend route tests cover `GET /api` -> 404 canonical error envelope plus a matching request log, proving API-boundary classification stays consistent between logging and fallback errors.
       - Backend route tests cover delayed, rejected, synchronously throwing, and synchronously slow log sinks so logging remains best-effort and cannot delay or replace API responses.
