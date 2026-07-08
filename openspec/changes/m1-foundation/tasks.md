@@ -252,6 +252,25 @@
       - Error tests cover list failure and create failure with Chinese-first error copy and no phantom task row.
       - `bun run test:frontend`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 7.3 ExperimentHeader + StatusBar 占位组件（task 上下文 props）
+  - Fixture (#36): expanded / medium
+    - Expanded trigger: shared schema/field binding. The new component props intentionally bind to shared core `TaskCard` / `TaskStatus` fields, so schema/field-name drift and downstream component import compatibility are review-relevant even though the runtime behavior is placeholder-depth.
+    - Change surface: `packages/frontend/src/components/**`, component exports, and focused frontend smoke tests.
+    - Must preserve: #34 Workbench four-panel layout contract and CSS grid, #35 Dashboard routes/list/create behavior, no backend/static-serving/API changes, no soft-monitoring data wiring, no Dashboard→Workbench task-context navigation, no `zero/` source diff, and no tracked runtime `workspace/` assets.
+    - Must add/change: `ExperimentHeader` placeholder component, `StatusBar` placeholder component, task-context props typed from shared core `TaskCard`/`TaskStatus`, and tests proving selected TaskCard id/status are rendered.
+    - Risk packs considered:
+      - Public page/component entry: selected - components become exported frontend building blocks.
+      - Schema / field names: selected - props must use shared `TaskCard`/`TaskStatus` fields and render canonical `task_id`/`status`.
+      - Legacy compatibility / examples: selected - existing Workbench and Dashboard renderer/tests are unchanged sibling consumers that must keep passing.
+      - Release / packaging / dependency compatibility: selected - no unresolved runtime/bundler dependency may break frontend package checks.
+      - Error handling / empty state: selected - placeholders must render stable Chinese-first empty copy when no task context is provided.
+      - Config, File IO/path safety, Auth/secrets, Concurrency/shared state, Resource limits/discovery, Documentation/migration, Scientific governance, Hydrology runtime, and Zero governance: not selected - no config, file IO, secret, shared mutable state, external discovery, docs migration, scientific runtime, or Zero/tool behavior changes.
+    - Evidence floor (#36):
+      - Frontend test imports `ExperimentHeader` and `StatusBar` from the intended `packages/frontend/src/components` export boundary.
+      - Frontend test renders `ExperimentHeader` with a TaskCard fixture whose `task_id` is exactly `TASK-M1-36-HEADER` and `status` is exactly `running`, then observes both exact values.
+      - Frontend test renders `StatusBar` with the same TaskCard fixture and observes exact `TASK-M1-36-HEADER` plus canonical `running`.
+      - Frontend test renders `ExperimentHeader` without task context and observes exact empty copy `未选择任务`; renders `StatusBar` without task context and observes exact empty copy `等待任务上下文`; neither output contains `undefined` or `[object Object]`.
+      - Existing Workbench and Dashboard frontend tests remain compatible, proving #34/#35 sibling surfaces did not drift.
+      - `bun run test:frontend`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 
 ## 8. GLM provider（glm-provider）
 
