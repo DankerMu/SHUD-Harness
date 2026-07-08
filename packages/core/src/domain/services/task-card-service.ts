@@ -73,7 +73,7 @@ export interface TaskServiceErrorOptions {
   code: TaskServiceErrorCode;
   message: string;
   userMessage: string;
-  status: 400 | 404 | 422 | 500;
+  status: 400 | 404 | 409 | 422 | 500;
   category: string;
   evidenceRefs?: string[];
   retryable?: boolean;
@@ -82,7 +82,7 @@ export interface TaskServiceErrorOptions {
 
 export class TaskServiceError extends Error {
   readonly code: TaskServiceErrorCode;
-  readonly status: 400 | 404 | 422 | 500;
+  readonly status: 400 | 404 | 409 | 422 | 500;
   readonly category: string;
   readonly userMessage: string;
   readonly evidenceRefs: string[];
@@ -231,7 +231,16 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
 
       const taskDirectory = join(workspaceRoot, "tasks", taskId);
       assertPathInsideWorkspace(workspaceRoot, taskDirectory, `workspace/tasks/${taskId}`);
-      if (!(await isSafeExistingDirectoryPath(taskDirectory))) {
+      const taskDirectoryEntry = await maybeLstat(taskDirectory);
+      if (!taskDirectoryEntry) {
+        await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
+        return;
+      }
+      if (
+        !taskDirectoryEntry.isDirectory() ||
+        taskDirectoryEntry.isSymbolicLink() ||
+        !(await isSafeExistingDirectoryPath(taskDirectory))
+      ) {
         throw workspaceError(
           "task_lane_not_directory",
           `Task lane is not a safe directory: ${taskId}`,
@@ -795,6 +804,40 @@ async function readBoundedTaskSnapshot(
   return buffer.subarray(0, offset).toString("utf8");
 }
 
+async function cleanupPublishedTaskSnapshotAfterFailedWrite(
+  taskDirectory: string,
+  snapshotPath: string,
+  taskId: string
+): Promise<void> {
+  const taskDirectoryEntry = await maybeLstat(taskDirectory);
+  if (!taskDirectoryEntry) {
+    return;
+  }
+  if (
+    !taskDirectoryEntry.isDirectory() ||
+    taskDirectoryEntry.isSymbolicLink() ||
+    !(await isSafeExistingDirectoryPath(taskDirectory))
+  ) {
+    return;
+  }
+
+  try {
+    await unlink(snapshotPath);
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT")) {
+      throw workspaceError(
+        "workspace_path_not_safe",
+        "Failed to clean up published task snapshot after a failed write.",
+        "The task snapshot could not be cleaned up safely.",
+        [taskSnapshotEvidenceRef(taskId)],
+        error
+      );
+    }
+  }
+
+  await removeEmptyTaskLaneAfterRollback(taskDirectory, taskId);
+}
+
 async function persistTaskSnapshot(
   workspaceRoot: string,
   task: TaskCard,
@@ -857,9 +900,8 @@ async function persistTaskSnapshot(
     try {
       await snapshotWriteHooks?.afterSnapshotWrite?.({ taskDirectory, taskId: task.task_id });
     } catch (error) {
-      await unlink(snapshotPath).catch(() => undefined);
+      await cleanupPublishedTaskSnapshotAfterFailedWrite(taskDirectory, snapshotPath, task.task_id);
       publishedSnapshot = false;
-      await removeEmptyTaskLaneAfterRollback(taskDirectory, task.task_id);
       throw error;
     }
     if (!(await isSafeExistingDirectoryPath(taskDirectory))) {
@@ -872,8 +914,7 @@ async function persistTaskSnapshot(
     }
   } catch (error) {
     if (publishedSnapshot) {
-      await unlink(snapshotPath).catch(() => undefined);
-      await removeEmptyTaskLaneAfterRollback(taskDirectory, task.task_id);
+      await cleanupPublishedTaskSnapshotAfterFailedWrite(taskDirectory, snapshotPath, task.task_id);
     }
     throw workspaceError(
       "workspace_path_not_safe",

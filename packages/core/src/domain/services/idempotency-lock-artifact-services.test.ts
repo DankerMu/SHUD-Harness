@@ -17,6 +17,7 @@ import {
   TaskServiceError,
   createArtifactRegistryService,
   createIdempotencyRecordService,
+  createTaskCardService,
   createLockRecordService,
   idempotencyRecordEvidenceRef,
   idempotencyRecordFileName,
@@ -711,6 +712,7 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(begin.status).toBe("acquired");
     expect(error.code).toBe("record_malformed");
+    expect(error.status).toBe(409);
     expect(error.retryable).toBe(true);
     expect(error.evidenceRefs).toEqual([idempotencyRecordEvidenceRef("task", rawKey)]);
     expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(guard);
@@ -865,10 +867,37 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(begin.status).toBe("acquired");
     expect(error.code).toBe("record_malformed");
+    expect(error.status).toBe(409);
     expect(error.retryable).toBe(true);
     expect(error.evidenceRefs).toEqual([idempotencyRecordEvidenceRef("task", rawKey)]);
     expect(JSON.parse(await readFile(cleanupLockPath, "utf8"))).toEqual(liveCleanupLock);
     expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+  });
+
+  test("TaskCard rollback evicts cached task when the durable lane is missing", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:35:58.000Z"),
+      taskIdFactory: () => "TASK-missing-lane-rollback"
+    });
+    const task = await service.createTask({
+      type: "engineering",
+      title: "Rollback missing lane",
+      question_or_goal: "Ensure rollback removes stale in-memory task state.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+
+    await rm(join(workspaceRoot, "tasks", task.task_id), { recursive: true, force: true });
+    await service.rollbackTaskForIdempotency(task.task_id);
+    const detailError = await captureTaskServiceError(() => service.getTask(task.task_id));
+
+    expect(await service.listTasks()).toEqual([]);
+    expect(detailError.code).toBe("task_not_found");
+    expect(detailError.status).toBe(404);
+    await expectPathMissing(join(workspaceRoot, "tasks", task.task_id));
   });
 
   test("IdempotencyRecord invalid schema is rejected without workspace files", async () => {

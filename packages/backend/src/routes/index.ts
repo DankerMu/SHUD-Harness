@@ -415,11 +415,6 @@ async function createIdempotentTaskCard(
     throw idempotencyResultBindingError();
   }
   if (completedRecord.result_ref !== task.task_id) {
-    const authoritativeTask = await getIdempotentTaskResult(
-      input.taskService,
-      completedRecord.result_ref,
-      input.requestDigest
-    );
     let convergenceRollbackError: unknown;
     try {
       await input.taskService.rollbackTaskForIdempotency(task.task_id);
@@ -435,6 +430,12 @@ async function createIdempotentTaskCard(
         throw convergenceRollbackError;
       }
     }
+
+    const authoritativeTask = await getIdempotentTaskResult(
+      input.taskService,
+      completedRecord.result_ref,
+      input.requestDigest
+    );
     return { task: authoritativeTask, created: false };
   }
 
@@ -495,7 +496,7 @@ async function waitForIdempotentTaskCompletion(
     if (Date.now() >= deadline) {
       throw new TaskServiceError({
         code: "record_malformed",
-        status: 500,
+        status: 409,
         category: "workspace_error",
         message: "Idempotency record did not complete before replay timeout.",
         userMessage: "The task create request is still pending idempotency completion.",

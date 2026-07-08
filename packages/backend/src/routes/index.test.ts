@@ -767,6 +767,71 @@ describe("backend workspace and health routes", () => {
     await expectPathMissing(join(workspaceRoot, "tasks", "TASK-local-unbound", "snapshot.json"));
   });
 
+  test("POST /api/tasks rolls back the local task when authoritative convergence is not request-bound", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:completion-converges-unbound";
+    const taskBody = validTaskCreateBody();
+    const foreignTaskBody = validTaskCreateBody({
+      title: "Foreign authoritative task",
+      question_or_goal: "This task should not satisfy the original request digest"
+    });
+    const requestDigest = sha256Hex(
+      canonicalJson({
+        ...taskBody,
+        created_by: taskBody.created_by ?? DEFAULT_TASK_CREATED_BY
+      })
+    );
+    const foreignTask = await createTaskCardService({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:31.450Z"),
+      taskIdFactory: () => "TASK-foreign-unbound-convergence"
+    }).createTask(foreignTaskBody);
+    let hookCompletions = 0;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:31.475Z"),
+      taskIdFactory: () => "TASK-local-unbound-convergence",
+      taskSnapshotWriteHooks: {
+        afterSnapshotWrite: async () => {
+          if (hookCompletions > 0) {
+            return;
+          }
+          hookCompletions += 1;
+          await createIdempotencyRecordService({ workspaceRoot }).completeRecord({
+            scope: "task",
+            key: idempotencyKey,
+            requestDigest,
+            resultRef: foreignTask.task_id
+          });
+        }
+      }
+    });
+
+    const response = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    const body = (await response.json()) as ApiErrorResponse;
+    const listResponse = await app.request("/api/tasks");
+    const localDetailResponse = await app.request("/api/tasks/TASK-local-unbound-convergence");
+    const localDetailBody = (await localDetailResponse.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(500);
+    expectCanonicalError(body, "workspace_error");
+    expect(body.error.evidence_refs).toEqual([
+      "workspace/tasks/_idempotency/task",
+      "idempotency.result_ref"
+    ]);
+    expectNoAbsoluteWorkspacePath(body, tempRoot, workspaceRoot);
+    expect(hookCompletions).toBe(1);
+    expect(listResponse.status).toBe(200);
+    expect(await listResponse.json()).toEqual({ tasks: [foreignTask] });
+    expect(localDetailResponse.status).toBe(404);
+    expectCanonicalError(localDetailBody, "not_found");
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([foreignTask.task_id]);
+    await expectPathMissing(
+      join(workspaceRoot, "tasks", "TASK-local-unbound-convergence", "snapshot.json")
+    );
+  });
+
   test("POST /api/tasks evicts local cache when authoritative convergence finds the local snapshot missing", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1102,7 +1167,7 @@ describe("backend workspace and health routes", () => {
     const recordAfterReplay = await idempotencyService.getRecord("task", idempotencyKey);
 
     expect(seededBegin.status).toBe("acquired");
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(409);
     expectCanonicalError(body, "workspace_error");
     expect(body.error.message).toBe("Idempotency record did not complete before replay timeout.");
     expect(body.error.retryable).toBe(true);
@@ -1492,6 +1557,49 @@ describe("backend workspace and health routes", () => {
     expect(await freshListResponse.json()).toEqual({ tasks: [retryTask] });
   });
 
+  test("POST /api/tasks does not follow a swapped task lane symlink during failed snapshot cleanup", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:after-snapshot-hook-swaps-lane";
+    const outsideLane = join(tempRoot, "outside-lane");
+    const outsideSnapshot = join(outsideLane, "snapshot.json");
+    const outsideSnapshotText = "outside snapshot must survive\n";
+    let swappedLane = false;
+    await mkdir(outsideLane, { recursive: true });
+    await writeFile(outsideSnapshot, outsideSnapshotText, { flag: "wx" });
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:57.610Z"),
+      taskIdFactory: () => "TASK-hook-swaps-lane",
+      taskSnapshotWriteHooks: {
+        afterSnapshotWrite: async ({ taskDirectory }) => {
+          if (swappedLane) {
+            return;
+          }
+          swappedLane = true;
+          await rm(taskDirectory, { recursive: true, force: true });
+          await symlink(outsideLane, taskDirectory);
+          throw new Error("after snapshot publish lane swap");
+        }
+      }
+    });
+
+    const failedResponse = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+    const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+    const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
+
+    expect(failedResponse.status).toBe(500);
+    expectCanonicalError(failedBody, "workspace_error");
+    expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+    expect(swappedLane).toBe(true);
+    expect(recordAfterFailure?.status).toBe("failed");
+    expect(recordAfterFailure?.result_ref).toBeUndefined();
+    expect(await readFile(outsideSnapshot, "utf8")).toBe(outsideSnapshotText);
+  });
+
   test("POST /api/tasks rolls back snapshot when idempotency completion fails", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1693,7 +1801,7 @@ describe("backend workspace and health routes", () => {
     expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
     expect(recordAfterFailure?.status).toBe("started");
     expect(recordAfterFailure?.result_ref).toBeUndefined();
-    expect(retryResponse.status).toBe(500);
+    expect(retryResponse.status).toBe(409);
     expectCanonicalError(retryBody, "workspace_error");
     expectNoAbsoluteWorkspacePath(retryBody, tempRoot, workspaceRoot);
     expect(recordAfterRetry?.status).toBe("started");

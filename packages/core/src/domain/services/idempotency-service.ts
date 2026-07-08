@@ -1263,7 +1263,7 @@ function transitionGuardBusyError(
 ): TaskServiceError {
   return new TaskServiceError({
     code: "record_malformed",
-    status: 500,
+    status: 409,
     category: "workspace_error",
     message: `Idempotency record ${transition} transition is already in progress.`,
     userMessage: "The idempotency record is being updated by another request.",
