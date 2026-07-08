@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants, type Dirent } from "node:fs";
 import { lstat, mkdir, open, opendir, rename, rmdir, unlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { dirname, join, parse, resolve, sep } from "node:path";
 import { z } from "zod";
 import {
   InferenceBudgetSchema,
@@ -11,6 +11,11 @@ import {
   TaskTypeSchema,
   type TaskCard
 } from "../schemas/task";
+import {
+  WorkspacePathSafetyError,
+  isPathInsideBoundary,
+  resolveWorkspacePath
+} from "./workspace-path-safety";
 
 export const DEFAULT_TASK_CREATED_BY = "pi" as const;
 export const DEFAULT_TASK_CURRENT_OWNER = "coordinator" as const;
@@ -867,11 +872,17 @@ async function persistTaskSnapshot(
       [`workspace/tasks/${task.task_id}`]
     );
   }
-  const snapshotPath = join(taskDirectory, "snapshot.json");
-  assertPathInsideWorkspace(workspaceRoot, snapshotPath, `workspace/tasks/${task.task_id}/snapshot.json`);
+  const snapshotPath = await resolveTaskWorkspacePath(
+    workspaceRoot,
+    join(taskDirectory, "snapshot.json"),
+    `workspace/tasks/${task.task_id}/snapshot.json`
+  );
 
-  const temporaryPath = join(taskDirectory, `.snapshot-${process.pid}-${randomUUID()}.tmp`);
-  assertPathInsideWorkspace(workspaceRoot, temporaryPath, `workspace/tasks/${task.task_id}/snapshot.tmp`);
+  const temporaryPath = await resolveTaskWorkspacePath(
+    workspaceRoot,
+    join(taskDirectory, `.snapshot-${process.pid}-${randomUUID()}.tmp`),
+    `workspace/tasks/${task.task_id}/snapshot.tmp`
+  );
 
   let wroteTemporary = false;
   let publishedSnapshot = false;
@@ -951,15 +962,45 @@ async function ensureTaskDirectory(workspaceRoot: string, taskId: string): Promi
   assertSafeTaskId(taskId, `task.task_id:${taskId}`);
   await ensureSafeDirectory(workspaceRoot, "workspace_path_not_safe", "workspace");
 
-  const tasksRoot = join(workspaceRoot, "tasks");
-  assertPathInsideWorkspace(workspaceRoot, tasksRoot, "workspace/tasks");
+  const tasksRoot = await resolveTaskWorkspacePath(workspaceRoot, "tasks", "workspace/tasks");
   await ensureSafeDirectory(tasksRoot, "workspace_path_not_safe", "workspace/tasks");
 
-  const taskDirectory = join(tasksRoot, taskId);
-  assertPathInsideWorkspace(workspaceRoot, taskDirectory, `workspace/tasks/${taskId}`);
+  const taskDirectory = await resolveTaskWorkspacePath(
+    workspaceRoot,
+    join("tasks", taskId),
+    `workspace/tasks/${taskId}`
+  );
   await ensureSafeDirectory(taskDirectory, "task_lane_not_directory", `workspace/tasks/${taskId}`);
 
   return taskDirectory;
+}
+
+async function resolveTaskWorkspacePath(
+  workspaceRoot: string,
+  path: string,
+  evidenceRef: string
+): Promise<string> {
+  try {
+    return (
+      await resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: path,
+        evidenceRef,
+        access: "write"
+      })
+    ).absolutePath;
+  } catch (error) {
+    if (error instanceof WorkspacePathSafetyError) {
+      throw workspaceError(
+        "workspace_path_not_safe",
+        error.message,
+        "The task snapshot path is not safe to write.",
+        [error.evidenceRef],
+        error
+      );
+    }
+    throw error;
+  }
 }
 
 async function ensureSafeDirectory(
@@ -1098,8 +1139,7 @@ function assertPathInsideWorkspace(
   targetPath: string,
   evidenceRef: string
 ): void {
-  const relativePath = relative(workspaceRoot, resolve(targetPath));
-  if (relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath))) {
+  if (isPathInsideBoundary(workspaceRoot, targetPath)) {
     return;
   }
 

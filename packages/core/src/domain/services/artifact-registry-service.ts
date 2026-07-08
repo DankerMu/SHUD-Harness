@@ -9,6 +9,7 @@ import {
   workspaceRecordPath,
   writeJsonRecord
 } from "./workspace-record-store";
+import { WorkspacePathSafetyError, resolveWorkspacePath } from "./workspace-path-safety";
 
 export interface ArtifactRegistryServiceOptions {
   workspaceRoot: string;
@@ -31,25 +32,26 @@ export function createArtifactRegistryService(
         assertSafeRecordSegment(parsedArtifact.data.artifact_id, "artifact.artifact_id");
         assertSafeRelativeRecordPath(parsedArtifact.data.path, "artifact.path");
         ArtifactTypeSchema.parse(parsedArtifact.data.type);
+        const artifact = await normalizeArtifactPath(workspaceRoot, parsedArtifact.data);
 
         const created = await createJsonRecordIfAbsent(
           workspaceRoot,
           artifactManifestDirectorySegments(),
-          artifactManifestFileName(parsedArtifact.data.artifact_id),
-          parsedArtifact.data,
-          artifactManifestEvidenceRef(parsedArtifact.data.artifact_id),
+          artifactManifestFileName(artifact.artifact_id),
+          artifact,
+          artifactManifestEvidenceRef(artifact.artifact_id),
           ArtifactSchema
         );
         if (created.status === "created") {
           return created.record;
         }
 
-        const existing = await readArtifactManifest(workspaceRoot, parsedArtifact.data.artifact_id);
-        if (existing && canonicalJson(existing) === canonicalJson(parsedArtifact.data)) {
+        const existing = await readArtifactManifest(workspaceRoot, artifact.artifact_id);
+        if (existing && (await artifactsMatchForDuplicate(workspaceRoot, existing, artifact))) {
           return existing;
         }
 
-        throw artifactManifestImmutableError(parsedArtifact.data.artifact_id);
+        throw artifactManifestImmutableError(artifact.artifact_id);
       }
 
       return await writeJsonRecord(
@@ -71,6 +73,56 @@ export function createArtifactRegistryService(
       return artifact;
     }
   };
+}
+
+async function normalizeArtifactPath(workspaceRoot: string, artifact: Artifact): Promise<Artifact> {
+  try {
+    const resolvedPath = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: artifact.path,
+      evidenceRef: "artifact.path",
+      access: "write"
+    });
+    return { ...artifact, path: resolvedPath.normalizedPath };
+  } catch (error) {
+    if (error instanceof WorkspacePathSafetyError) {
+      throw new TaskServiceError({
+        code: "workspace_path_not_safe",
+        status: 500,
+        category: "workspace_error",
+        message: error.message,
+        userMessage: "The artifact path is not safe to write.",
+        evidenceRefs: [error.evidenceRef],
+        retryable: false,
+        recommendedNextActions: ["Choose an artifact path inside the workspace."]
+      });
+    }
+    throw error;
+  }
+}
+
+async function artifactsMatchForDuplicate(
+  workspaceRoot: string,
+  existing: Artifact,
+  candidate: Artifact
+): Promise<boolean> {
+  if (canonicalJson(existing) === canonicalJson(candidate)) {
+    return true;
+  }
+
+  try {
+    assertSafeRelativeRecordPath(existing.path, "artifact.path");
+    const normalizedExisting = await normalizeArtifactPath(workspaceRoot, existing);
+    return canonicalJson(normalizedExisting) === canonicalJson(candidate);
+  } catch (error) {
+    if (
+      error instanceof TaskServiceError &&
+      (error.code === "workspace_path_not_safe" || error.code === "record_id_not_safe")
+    ) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 export function artifactManifestDirectorySegments(): readonly string[] {

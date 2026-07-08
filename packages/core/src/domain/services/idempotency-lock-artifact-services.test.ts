@@ -22,12 +22,15 @@ import {
   idempotencyRecordEvidenceRef,
   idempotencyRecordFileName,
   sha256Hex,
+  assertPathInsideWorkspace,
+  resolveWorkspacePath,
   type Artifact,
   type IdempotencyRecord,
   type IdempotencyRecordService,
-  type LockRecord
+  type LockRecord,
+  WorkspacePathSafetyError
 } from "./index";
-import { MAX_SERVICE_RECORD_BYTES } from "./workspace-record-store";
+import { MAX_SERVICE_RECORD_BYTES, workspaceRecordPath } from "./workspace-record-store";
 
 const tempRoots: string[] = [];
 
@@ -1168,6 +1171,366 @@ describe("idempotency, lock, and artifact services", () => {
     await expectPathMissing(join(invalidId.workspaceRoot, "locks"));
   });
 
+  test("LockRecord write preparation rejects unsafe record directories before partial writes", async () => {
+    const nonDirectoryCase = await createTempWorkspacePath();
+    tempRoots.push(nonDirectoryCase.tempRoot);
+    const nonDirectoryService = createLockRecordService({
+      workspaceRoot: nonDirectoryCase.workspaceRoot
+    });
+    await mkdir(nonDirectoryCase.workspaceRoot, { recursive: true });
+    await writeFile(join(nonDirectoryCase.workspaceRoot, "locks"), "not a directory", {
+      flag: "wx"
+    });
+
+    const nonDirectoryError = await captureTaskServiceError(() =>
+      nonDirectoryService.storeLock(validLockRecord())
+    );
+
+    expect(nonDirectoryError.code).toBe("workspace_path_not_safe");
+    expect(nonDirectoryError.category).toBe("workspace_error");
+    await expectPathMissing(
+      join(nonDirectoryCase.workspaceRoot, "locks", "task", "LOCK-0001.json")
+    );
+
+    const symlinkCase = await createTempWorkspacePath();
+    tempRoots.push(symlinkCase.tempRoot);
+    const symlinkService = createLockRecordService({ workspaceRoot: symlinkCase.workspaceRoot });
+    const outsideLocksRoot = join(symlinkCase.tempRoot, "outside-locks");
+    await mkdir(symlinkCase.workspaceRoot, { recursive: true });
+    await mkdir(outsideLocksRoot, { recursive: true });
+    await symlink(outsideLocksRoot, join(symlinkCase.workspaceRoot, "locks"), "dir");
+
+    const symlinkError = await captureTaskServiceError(() =>
+      symlinkService.storeLock(validLockRecord())
+    );
+
+    expect(symlinkError.code).toBe("workspace_path_not_safe");
+    expect(symlinkError.category).toBe("workspace_error");
+    expect(await readdir(outsideLocksRoot)).toEqual([]);
+    await expectPathMissing(join(outsideLocksRoot, "task", "LOCK-0001.json"));
+  });
+
+  test("workspace path helper rejects traversal and symlink escape while normalizing legal paths", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+
+    const traversalError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: "../outside/report.md",
+        evidenceRef: "artifact.path"
+      })
+    );
+
+    expect(traversalError.evidenceRef).toBe("artifact.path");
+    await expectPathMissing(join(tempRoot, "outside", "report.md"));
+
+    await mkdir(join(workspaceRoot, "artifacts"), { recursive: true });
+    const outsideRoot = join(tempRoot, "outside-artifacts");
+    await mkdir(outsideRoot, { recursive: true });
+    await symlink(outsideRoot, join(workspaceRoot, "artifacts", "reports"), "dir");
+
+    const symlinkError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: "artifacts/reports/report.md",
+        evidenceRef: "artifact.path"
+      })
+    );
+
+    expect(symlinkError.evidenceRef).toBe("artifact.path");
+    await expectPathMissing(join(outsideRoot, "report.md"));
+
+    await rm(join(workspaceRoot, "artifacts", "reports"), { force: true });
+    const resolved = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: "artifacts/reports/./TASK-0001/report.md",
+      evidenceRef: "artifact.path"
+    });
+
+    expect(resolved.absolutePath).toBe(
+      join(workspaceRoot, "artifacts", "reports", "TASK-0001", "report.md")
+    );
+    expect(resolved.normalizedPath).toBe("artifacts/reports/TASK-0001/report.md");
+
+    const readonlyRoot = join(tempRoot, "readonly-source");
+    await mkdir(readonlyRoot, { recursive: true });
+    const readonlyResolution = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: join(readonlyRoot, "input.dat"),
+      evidenceRef: "readonly.path",
+      access: "read",
+      allowedReadonlyRoots: [readonlyRoot]
+    });
+    expect(readonlyResolution.boundary).toBe("allowed_readonly");
+    expect(readonlyResolution.normalizedPath).toBe(join(readonlyRoot, "input.dat"));
+
+    const readonlyWriteError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: join(readonlyRoot, "input.dat"),
+        evidenceRef: "readonly.path",
+        access: "write",
+        allowedReadonlyRoots: [readonlyRoot]
+      })
+    );
+    expect(readonlyWriteError.evidenceRef).toBe("readonly.path");
+
+    const nestedReadonlyRoot = join(workspaceRoot, "data", "raw");
+    await mkdir(nestedReadonlyRoot, { recursive: true });
+    const nestedReadonlyResolution = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: "data/raw/out.csv",
+      evidenceRef: "nested-readonly.path",
+      access: "read",
+      allowedReadonlyRoots: [nestedReadonlyRoot]
+    });
+    expect(nestedReadonlyResolution.boundary).toBe("allowed_readonly");
+    expect(nestedReadonlyResolution.boundaryRoot).toBe(nestedReadonlyRoot);
+    expect(nestedReadonlyResolution.normalizedPath).toBe(join(nestedReadonlyRoot, "out.csv"));
+
+    const nestedReadonlyWriteError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: "data/raw/out.csv",
+        evidenceRef: "nested-readonly.path",
+        access: "write",
+        allowedReadonlyRoots: [nestedReadonlyRoot]
+      })
+    );
+    expect(nestedReadonlyWriteError.evidenceRef).toBe("nested-readonly.path");
+
+    const otherCwd = join(tempRoot, "other-cwd");
+    await mkdir(otherCwd, { recursive: true });
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(otherCwd);
+
+      const relativeWorkspaceRootError = await captureWorkspacePathSafetyError(() =>
+        resolveWorkspacePath({
+          workspaceRoot: "workspace",
+          inputPath: "data/raw/out.csv",
+          evidenceRef: "workspace.root"
+        })
+      );
+      expect(relativeWorkspaceRootError.message).toBe("workspaceRoot must be absolute.");
+      expect(relativeWorkspaceRootError.evidenceRef).toBe("workspace.root");
+
+      const relativeReadonlyRootError = await captureWorkspacePathSafetyError(() =>
+        resolveWorkspacePath({
+          workspaceRoot,
+          inputPath: "data/raw/out.csv",
+          evidenceRef: "readonly.root",
+          access: "read",
+          allowedReadonlyRoots: ["data/raw"]
+        })
+      );
+      expect(relativeReadonlyRootError.message).toBe("allowedReadonlyRoots must be absolute.");
+      expect(relativeReadonlyRootError.evidenceRef).toBe("readonly.root");
+
+      expect(() =>
+        assertPathInsideWorkspace("workspace", join(workspaceRoot, "data", "raw"), "workspace.root")
+      ).toThrow(WorkspacePathSafetyError);
+      expect(() =>
+        assertPathInsideWorkspace(workspaceRoot, "data/raw/out.csv", "workspace.target")
+      ).toThrow(WorkspacePathSafetyError);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  test("workspace path helper accepts dot-prefixed names and rejects unsafe boundaries", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+
+    const dotPrefixedResolution = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: "..draft/report.md",
+      evidenceRef: "artifact.path"
+    });
+
+    expect(dotPrefixedResolution.absolutePath).toBe(join(workspaceRoot, "..draft", "report.md"));
+    expect(dotPrefixedResolution.normalizedPath).toBe("..draft/report.md");
+    expect(
+      workspaceRecordPath(
+        workspaceRoot,
+        ["..draft", "record.json"],
+        "workspace/..draft/record.json"
+      )
+    ).toBe(join(workspaceRoot, "..draft", "record.json"));
+
+    const outsidePath = join(tempRoot, "outside", "report.md");
+    const absoluteOutsideError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: outsidePath,
+        evidenceRef: "artifact.path"
+      })
+    );
+
+    expect(absoluteOutsideError.evidenceRef).toBe("artifact.path");
+    await expectPathMissing(outsidePath);
+
+    await mkdir(workspaceRoot, { recursive: true });
+    await writeFile(join(workspaceRoot, "artifacts"), "not a directory", { flag: "wx" });
+
+    const nonDirectoryAncestorError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: "artifacts/reports/report.md",
+        evidenceRef: "artifact.path"
+      })
+    );
+
+    expect(nonDirectoryAncestorError.evidenceRef).toBe("artifact.path");
+    await expectPathMissing(join(workspaceRoot, "artifacts", "reports", "report.md"));
+  });
+
+  test("TaskCard snapshot writes expose normalized task directories and reject symlink escape", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const observedTaskDirectories: string[] = [];
+    const service = createTaskCardService({
+      workspaceRoot: join(workspaceRoot, "."),
+      now: () => new Date("2026-07-07T13:40:00.000Z"),
+      taskIdFactory: () => "TASK-path-normalized",
+      snapshotWriteHooks: {
+        beforeSnapshotWrite: ({ taskDirectory }) => {
+          observedTaskDirectories.push(taskDirectory);
+        }
+      }
+    });
+
+    const task = await service.createTask({
+      type: "engineering",
+      title: "Normalize task path",
+      question_or_goal: "Write a task snapshot through normalized workspace paths.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+
+    expect(observedTaskDirectories).toEqual([
+      join(workspaceRoot, "tasks", "TASK-path-normalized")
+    ]);
+    expect((await stat(join(workspaceRoot, "tasks", task.task_id, "snapshot.json"))).isFile()).toBe(
+      true
+    );
+
+    const escapeCase = await createTempWorkspacePath();
+    tempRoots.push(escapeCase.tempRoot);
+    const outsideTasksRoot = join(escapeCase.tempRoot, "outside-tasks");
+    await mkdir(escapeCase.workspaceRoot, { recursive: true });
+    await mkdir(outsideTasksRoot, { recursive: true });
+    await symlink(outsideTasksRoot, join(escapeCase.workspaceRoot, "tasks"), "dir");
+    const escapeService = createTaskCardService({
+      workspaceRoot: escapeCase.workspaceRoot,
+      taskIdFactory: () => "TASK-symlink-escape"
+    });
+
+    const escapeError = await captureTaskServiceError(() =>
+      escapeService.createTask({
+        type: "engineering",
+        title: "Reject task symlink",
+        question_or_goal: "Do not write a task snapshot outside the workspace.",
+        inference_budget: { mode: "normal" },
+        created_by: "pi"
+      })
+    );
+
+    expect(escapeError.code).toBe("workspace_path_not_safe");
+    await expectPathMissing(join(outsideTasksRoot, "TASK-symlink-escape", "snapshot.json"));
+  });
+
+  test("Artifact registry normalizes artifact paths in stored manifests", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createArtifactRegistryService({ workspaceRoot });
+    const artifact = {
+      ...validArtifact(),
+      path: "artifacts/reports/./TASK-0001/report.md"
+    };
+    const expectedArtifact = {
+      ...artifact,
+      path: "artifacts/reports/TASK-0001/report.md"
+    };
+    const manifestPath = join(
+      workspaceRoot,
+      "artifacts",
+      "manifests",
+      `${artifact.artifact_id}.json`
+    );
+
+    await expect(service.registerArtifact(artifact)).resolves.toEqual(expectedArtifact);
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(expectedArtifact);
+    expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(expectedArtifact);
+  });
+
+  test("Artifact registry preserves trailing-space artifact path identity", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createArtifactRegistryService({ workspaceRoot });
+    const artifact = {
+      ...validArtifact(),
+      path: "artifacts/reports/TASK-0001/report.md "
+    };
+    const manifestPath = join(
+      workspaceRoot,
+      "artifacts",
+      "manifests",
+      `${artifact.artifact_id}.json`
+    );
+
+    await expect(service.registerArtifact(artifact)).resolves.toEqual(artifact);
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(artifact);
+    expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(artifact);
+  });
+
+  test("Artifact registry treats legacy dot-segment manifests as equivalent duplicates", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createArtifactRegistryService({ workspaceRoot });
+    const artifact = validArtifact();
+    const legacyArtifact = {
+      ...artifact,
+      path: "artifacts/reports/./TASK-0001/report.md"
+    };
+    const manifestPath = join(
+      workspaceRoot,
+      "artifacts",
+      "manifests",
+      `${artifact.artifact_id}.json`
+    );
+    const legacyManifestText = `${JSON.stringify(legacyArtifact)}\n`;
+    await mkdir(join(workspaceRoot, "artifacts", "manifests"), { recursive: true });
+    await writeFile(manifestPath, legacyManifestText, { flag: "wx" });
+
+    await expect(service.registerArtifact(artifact)).resolves.toEqual(legacyArtifact);
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(legacyArtifact);
+    expect(await readFile(manifestPath, "utf8")).toBe(legacyManifestText);
+  });
+
+  test("Artifact registry rejects symlink escapes before writing manifests", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createArtifactRegistryService({ workspaceRoot });
+    const outsideRoot = join(tempRoot, "outside-artifacts");
+    await mkdir(join(workspaceRoot, "artifacts"), { recursive: true });
+    await mkdir(outsideRoot, { recursive: true });
+    await symlink(outsideRoot, join(workspaceRoot, "artifacts", "reports"), "dir");
+
+    const error = await captureTaskServiceError(() =>
+      service.registerArtifact({
+        ...validArtifact(),
+        path: "artifacts/reports/TASK-0001/report.md"
+      })
+    );
+
+    expect(error.code).toBe("workspace_path_not_safe");
+    expect(error.evidenceRefs).toEqual(["artifact.path"]);
+    await expectPathMissing(join(workspaceRoot, "artifacts", "manifests"));
+    await expectPathMissing(join(outsideRoot, "TASK-0001", "report.md"));
+  });
+
   test("Artifact registry register/get persists metadata under manifests only", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1402,6 +1765,19 @@ async function captureTaskServiceError(action: () => Promise<unknown>): Promise<
   }
 
   throw new Error("Expected TaskServiceError.");
+}
+
+async function captureWorkspacePathSafetyError(
+  action: () => Promise<unknown>
+): Promise<WorkspacePathSafetyError> {
+  try {
+    await action();
+  } catch (error) {
+    expect(error).toBeInstanceOf(WorkspacePathSafetyError);
+    return error as WorkspacePathSafetyError;
+  }
+
+  throw new Error("Expected WorkspacePathSafetyError.");
 }
 
 function expectErrorNotToLeakRecordContent(error: TaskServiceError, content: string): void {

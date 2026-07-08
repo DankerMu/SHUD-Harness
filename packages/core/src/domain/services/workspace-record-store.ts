@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, parse, resolve, sep } from "node:path";
 import { z } from "zod";
 import { TaskServiceError, type TaskServiceErrorCode } from "./task-card-service";
+import {
+  WorkspacePathSafetyError,
+  isPathInsideBoundary,
+  resolveWorkspacePath
+} from "./workspace-path-safety";
 
 export const MAX_SERVICE_RECORD_BYTES = 1024 * 1024;
 
@@ -443,8 +448,7 @@ export function assertPathInsideWorkspace(
   targetPath: string,
   evidenceRef: string
 ): void {
-  const relativePath = relative(resolve(workspaceRoot), resolve(targetPath));
-  if (relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath))) {
+  if (isPathInsideBoundary(workspaceRoot, targetPath)) {
     return;
   }
 
@@ -517,8 +521,11 @@ async function prepareJsonRecordWrite<T>(
     relativeDirectorySegments,
     evidenceRef
   );
-  const recordPath = join(directoryPath, fileName);
-  assertPathInsideWorkspace(resolve(workspaceRoot), recordPath, evidenceRef);
+  const recordPath = await resolveWorkspaceRecordPath(
+    workspaceRoot,
+    join(directoryPath, fileName),
+    evidenceRef
+  );
 
   const recordText = `${JSON.stringify(parsedRecord.data, null, 2)}\n`;
   if (Buffer.byteLength(recordText, "utf8") > MAX_SERVICE_RECORD_BYTES) {
@@ -539,6 +546,34 @@ async function prepareJsonRecordWrite<T>(
     recordPath,
     recordText
   };
+}
+
+async function resolveWorkspaceRecordPath(
+  workspaceRoot: string,
+  path: string,
+  evidenceRef: string
+): Promise<string> {
+  try {
+    return (
+      await resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: path,
+        evidenceRef,
+        access: "write"
+      })
+    ).absolutePath;
+  } catch (error) {
+    if (error instanceof WorkspacePathSafetyError) {
+      throw serviceWorkspaceError(
+        "workspace_path_not_safe",
+        error.message,
+        "The workspace record path is not safe to write.",
+        [error.evidenceRef],
+        error
+      );
+    }
+    throw error;
+  }
 }
 
 async function ensureSafeDirectory(path: string, evidenceRef: string): Promise<void> {
