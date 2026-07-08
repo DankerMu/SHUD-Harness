@@ -1170,6 +1170,45 @@ describe("idempotency, lock, and artifact services", () => {
     await expectPathMissing(join(invalidId.workspaceRoot, "locks"));
   });
 
+  test("LockRecord write preparation rejects unsafe record directories before partial writes", async () => {
+    const nonDirectoryCase = await createTempWorkspacePath();
+    tempRoots.push(nonDirectoryCase.tempRoot);
+    const nonDirectoryService = createLockRecordService({
+      workspaceRoot: nonDirectoryCase.workspaceRoot
+    });
+    await mkdir(nonDirectoryCase.workspaceRoot, { recursive: true });
+    await writeFile(join(nonDirectoryCase.workspaceRoot, "locks"), "not a directory", {
+      flag: "wx"
+    });
+
+    const nonDirectoryError = await captureTaskServiceError(() =>
+      nonDirectoryService.storeLock(validLockRecord())
+    );
+
+    expect(nonDirectoryError.code).toBe("workspace_path_not_safe");
+    expect(nonDirectoryError.category).toBe("workspace_error");
+    await expectPathMissing(
+      join(nonDirectoryCase.workspaceRoot, "locks", "task", "LOCK-0001.json")
+    );
+
+    const symlinkCase = await createTempWorkspacePath();
+    tempRoots.push(symlinkCase.tempRoot);
+    const symlinkService = createLockRecordService({ workspaceRoot: symlinkCase.workspaceRoot });
+    const outsideLocksRoot = join(symlinkCase.tempRoot, "outside-locks");
+    await mkdir(symlinkCase.workspaceRoot, { recursive: true });
+    await mkdir(outsideLocksRoot, { recursive: true });
+    await symlink(outsideLocksRoot, join(symlinkCase.workspaceRoot, "locks"), "dir");
+
+    const symlinkError = await captureTaskServiceError(() =>
+      symlinkService.storeLock(validLockRecord())
+    );
+
+    expect(symlinkError.code).toBe("workspace_path_not_safe");
+    expect(symlinkError.category).toBe("workspace_error");
+    expect(await readdir(outsideLocksRoot)).toEqual([]);
+    await expectPathMissing(join(outsideLocksRoot, "task", "LOCK-0001.json"));
+  });
+
   test("workspace path helper rejects traversal and symlink escape while normalizing legal paths", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1235,6 +1274,46 @@ describe("idempotency, lock, and artifact services", () => {
       })
     );
     expect(readonlyWriteError.evidenceRef).toBe("readonly.path");
+  });
+
+  test("workspace path helper accepts dot-prefixed names and rejects unsafe boundaries", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+
+    const dotPrefixedResolution = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: "..draft/report.md",
+      evidenceRef: "artifact.path"
+    });
+
+    expect(dotPrefixedResolution.absolutePath).toBe(join(workspaceRoot, "..draft", "report.md"));
+    expect(dotPrefixedResolution.normalizedPath).toBe("..draft/report.md");
+
+    const outsidePath = join(tempRoot, "outside", "report.md");
+    const absoluteOutsideError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: outsidePath,
+        evidenceRef: "artifact.path"
+      })
+    );
+
+    expect(absoluteOutsideError.evidenceRef).toBe("artifact.path");
+    await expectPathMissing(outsidePath);
+
+    await mkdir(workspaceRoot, { recursive: true });
+    await writeFile(join(workspaceRoot, "artifacts"), "not a directory", { flag: "wx" });
+
+    const nonDirectoryAncestorError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: "artifacts/reports/report.md",
+        evidenceRef: "artifact.path"
+      })
+    );
+
+    expect(nonDirectoryAncestorError.evidenceRef).toBe("artifact.path");
+    await expectPathMissing(join(workspaceRoot, "artifacts", "reports", "report.md"));
   });
 
   test("TaskCard snapshot writes expose normalized task directories and reject symlink escape", async () => {
@@ -1314,6 +1393,50 @@ describe("idempotency, lock, and artifact services", () => {
     await expect(service.registerArtifact(artifact)).resolves.toEqual(expectedArtifact);
     expect(await service.getArtifact(artifact.artifact_id)).toEqual(expectedArtifact);
     expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(expectedArtifact);
+  });
+
+  test("Artifact registry preserves trailing-space artifact path identity", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createArtifactRegistryService({ workspaceRoot });
+    const artifact = {
+      ...validArtifact(),
+      path: "artifacts/reports/TASK-0001/report.md "
+    };
+    const manifestPath = join(
+      workspaceRoot,
+      "artifacts",
+      "manifests",
+      `${artifact.artifact_id}.json`
+    );
+
+    await expect(service.registerArtifact(artifact)).resolves.toEqual(artifact);
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(artifact);
+    expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(artifact);
+  });
+
+  test("Artifact registry treats legacy dot-segment manifests as equivalent duplicates", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createArtifactRegistryService({ workspaceRoot });
+    const artifact = validArtifact();
+    const legacyArtifact = {
+      ...artifact,
+      path: "artifacts/reports/./TASK-0001/report.md"
+    };
+    const manifestPath = join(
+      workspaceRoot,
+      "artifacts",
+      "manifests",
+      `${artifact.artifact_id}.json`
+    );
+    const legacyManifestText = `${JSON.stringify(legacyArtifact)}\n`;
+    await mkdir(join(workspaceRoot, "artifacts", "manifests"), { recursive: true });
+    await writeFile(manifestPath, legacyManifestText, { flag: "wx" });
+
+    await expect(service.registerArtifact(artifact)).resolves.toEqual(legacyArtifact);
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(legacyArtifact);
+    expect(await readFile(manifestPath, "utf8")).toBe(legacyManifestText);
   });
 
   test("Artifact registry rejects symlink escapes before writing manifests", async () => {

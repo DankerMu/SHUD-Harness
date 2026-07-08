@@ -47,7 +47,7 @@ export function createArtifactRegistryService(
         }
 
         const existing = await readArtifactManifest(workspaceRoot, artifact.artifact_id);
-        if (existing && canonicalJson(existing) === canonicalJson(artifact)) {
+        if (existing && (await artifactsMatchForDuplicate(workspaceRoot, existing, artifact))) {
           return existing;
         }
 
@@ -96,6 +96,30 @@ async function normalizeArtifactPath(workspaceRoot: string, artifact: Artifact):
         retryable: false,
         recommendedNextActions: ["Choose an artifact path inside the workspace."]
       });
+    }
+    throw error;
+  }
+}
+
+async function artifactsMatchForDuplicate(
+  workspaceRoot: string,
+  existing: Artifact,
+  candidate: Artifact
+): Promise<boolean> {
+  if (canonicalJson(existing) === canonicalJson(candidate)) {
+    return true;
+  }
+
+  try {
+    assertSafeRelativeRecordPath(existing.path, "artifact.path");
+    const normalizedExisting = await normalizeArtifactPath(workspaceRoot, existing);
+    return canonicalJson(normalizedExisting) === canonicalJson(candidate);
+  } catch (error) {
+    if (
+      error instanceof TaskServiceError &&
+      (error.code === "workspace_path_not_safe" || error.code === "record_id_not_safe")
+    ) {
+      return false;
     }
     throw error;
   }

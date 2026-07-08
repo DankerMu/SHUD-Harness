@@ -40,8 +40,8 @@ export async function resolveWorkspacePath(
   input: ResolveWorkspacePathInput
 ): Promise<WorkspacePathResolution> {
   const workspaceRoot = resolve(input.workspaceRoot);
-  const rawPath = input.inputPath.trim();
-  if (rawPath.length === 0) {
+  const rawPath = input.inputPath;
+  if (rawPath.trim().length === 0) {
     throw new WorkspacePathSafetyError("Workspace path is blank.", input.evidenceRef);
   }
 
@@ -91,7 +91,12 @@ export function assertPathInsideWorkspace(
 
 export function isPathInsideBoundary(boundaryRoot: string, targetPath: string): boolean {
   const relativePath = relative(resolve(boundaryRoot), resolve(targetPath));
-  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+  return (
+    relativePath === "" ||
+    (!isAbsolute(relativePath) &&
+      relativePath !== ".." &&
+      !relativePath.startsWith(`..${sep}`))
+  );
 }
 
 export async function isSafeExistingDirectoryPath(path: string): Promise<boolean> {
@@ -135,7 +140,7 @@ async function rejectSymlinkEscape(path: string, evidenceRef: string): Promise<v
 
   for (const segment of segments) {
     currentPath = join(currentPath, segment);
-    const entry = await maybeLstat(currentPath);
+    const entry = await lstatExistingPath(currentPath, evidenceRef);
     if (!entry) {
       return;
     }
@@ -175,4 +180,30 @@ async function maybeLstat(path: string): Promise<FileStat | undefined> {
   } catch {
     return undefined;
   }
+}
+
+async function lstatExistingPath(
+  path: string,
+  evidenceRef: string
+): Promise<FileStat | undefined> {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) {
+      return undefined;
+    }
+    throw new WorkspacePathSafetyError(
+      "Workspace path cannot be inspected safely.",
+      evidenceRef
+    );
+  }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === code
+  );
 }
