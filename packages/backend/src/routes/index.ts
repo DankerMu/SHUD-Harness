@@ -293,7 +293,7 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
 
   app.notFound((c) => {
     const pathname = new URL(c.req.url).pathname;
-    if (pathname.startsWith("/api/")) {
+    if (pathname === "/api" || pathname.startsWith("/api/")) {
       return jsonApiError(
         c,
         {

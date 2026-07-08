@@ -291,6 +291,64 @@ describe("backend workspace and health routes", () => {
     expect(redactApiLogValue("env:GLM_API_KEY")).toBe("env:GLM_API_KEY");
   });
 
+  test("API request logging does not wait for delayed or failing sinks", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    let delayedSinkResolved = false;
+    const delayedLogs: string[] = [];
+    const delayedApp = createBackendApi({
+      workspaceRoot,
+      requestIdFactory: () => "REQ-log-delayed-sink",
+      requestLogSink: async (line) => {
+        delayedLogs.push(line);
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        delayedSinkResolved = true;
+      }
+    });
+
+    const response = await Promise.race([
+      delayedApp.request("/api/health/live"),
+      timeoutAfter(50, "API response waited for delayed request log sink")
+    ]);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-delayed-sink");
+    expect(delayedLogs).toHaveLength(1);
+    expect(delayedSinkResolved).toBe(false);
+
+    const rejectingLogs: string[] = [];
+    const rejectingApp = createBackendApi({
+      workspaceRoot,
+      requestIdFactory: () => "REQ-log-rejecting-sink",
+      requestLogSink: (line) => {
+        rejectingLogs.push(line);
+        return Promise.reject(new Error("sink unavailable"));
+      }
+    });
+
+    const rejectingResponse = await rejectingApp.request("/api/health/live");
+
+    expect(rejectingResponse.status).toBe(200);
+    expect(rejectingResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-rejecting-sink");
+    expect(rejectingLogs).toHaveLength(1);
+
+    const throwingLogs: string[] = [];
+    const throwingApp = createBackendApi({
+      workspaceRoot,
+      requestIdFactory: () => "REQ-log-throwing-sink",
+      requestLogSink: (line) => {
+        throwingLogs.push(line);
+        throw new Error("sink threw synchronously");
+      }
+    });
+
+    const throwingResponse = await throwingApp.request("/api/health/live");
+
+    expect(throwingResponse.status).toBe(200);
+    expect(throwingResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-throwing-sink");
+    expect(throwingLogs).toHaveLength(1);
+  });
+
   test("GET /api/health/ready is not_ready before init while live stays ok", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -2306,19 +2364,40 @@ describe("backend workspace and health routes", () => {
   test("unknown API paths and missing task ids return canonical 404 envelopes", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
-    const app = createBackendApi({ workspaceRoot });
+    const logs: string[] = [];
+    const app = createBackendApi({
+      workspaceRoot,
+      requestIdFactory: () => "REQ-api-root-not-found",
+      requestLogSink: (line) => {
+        logs.push(line);
+      }
+    });
 
+    const apiRootResponse = await app.request("/api");
     const unknownRouteResponse = await app.request("/api/not-registered");
     const missingTaskResponse = await app.request("/api/tasks/TASK-missing");
+    const apiRootBody = (await apiRootResponse.json()) as ApiErrorResponse;
     const unknownRouteBody = (await unknownRouteResponse.json()) as ApiErrorResponse;
     const missingTaskBody = (await missingTaskResponse.json()) as ApiErrorResponse;
 
+    expect(apiRootResponse.status).toBe(404);
+    expect(apiRootResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-api-root-not-found");
     expect(unknownRouteResponse.status).toBe(404);
     expect(missingTaskResponse.status).toBe(404);
+    expectCanonicalError(apiRootBody, "not_found");
     expectCanonicalError(unknownRouteBody, "not_found");
     expectCanonicalError(missingTaskBody, "not_found");
+    expect(apiRootBody.error.message).toContain("API route not found");
     expect(unknownRouteBody.error.message).toContain("API route not found");
     expect(missingTaskBody.error.message).toContain("Task not found");
+    expect(logs).toHaveLength(3);
+    const apiRootLog = parseApiRequestLogLine(logs[0] as string);
+    expect(apiRootLog).toMatchObject({
+      request_id: "REQ-api-root-not-found",
+      route: "/api/*",
+      status: 404,
+      level: "warn"
+    });
   });
 
   test("malformed task snapshots fail closed with a canonical envelope", async () => {

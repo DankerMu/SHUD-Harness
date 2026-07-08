@@ -184,6 +184,8 @@
     - Evidence floor (#31):
       - Backend route tests cover `GET /api/health/live` -> 200 with exactly one newline-terminated NDJSON object containing all eight OBS-LOG-001 fields, `route="/api/health/live"`, `status=200`, `level=info`, and response `x-request-id` equal to logged `request_id`.
       - Backend route tests cover `POST /api/tasks` with JSON body `{ "title": "Missing required fields" }` -> 400 schema_error whose response `x-request-id` matches the logged `request_id`, while `ApiErrorResponse` keeps the canonical body fields and the log records `route="/api/tasks"`, `status=400`, `level=warn`.
+      - Backend route tests cover `GET /api` -> 404 canonical error envelope plus a matching request log, proving API-boundary classification stays consistent between logging and fallback errors.
+      - Backend route tests cover delayed, rejected, and synchronously throwing log sinks so logging remains best-effort and cannot delay or replace API responses.
       - Secret redaction tests send fake secret `sk-test-secret-value` through query (`api_key`), `authorization` header, and malformed JSON body; the serialized log omits the plaintext, `authorization`, and `api_key`, while the redaction helper preserves `env:GLM_API_KEY` ref form and redacts the fake secret to `[REDACTED]`.
       - `bun run test:backend-api`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 6.5 PERF-API-001 冒烟脚本 `bun run test:perf:api`（fixture = mock workspace + 100 tasks；GET /api/tasks、GET /api/tasks/:id、health ready P95 ≤ 300ms）+ 接入 1.2 的 PR CI——依赖: 1.2

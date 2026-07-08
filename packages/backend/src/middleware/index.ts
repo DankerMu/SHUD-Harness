@@ -65,9 +65,17 @@ export function createApiRequestLoggerMiddleware(
         status,
         duration_ms: Math.max(0, Date.now() - startedAtMs)
       };
-      await Promise.resolve(sink(`${JSON.stringify(logLine)}\n`)).catch(() => undefined);
+      emitApiRequestLogLine(sink, `${JSON.stringify(logLine)}\n`);
     }
   };
+}
+
+function emitApiRequestLogLine(sink: ApiRequestLogSink, line: string): void {
+  try {
+    void Promise.resolve(sink(line)).catch(() => undefined);
+  } catch {
+    // Request logging is best-effort; sink failures must not change API responses.
+  }
 }
 
 export function apiRoutePatternFor(method: string, path: string): string {
