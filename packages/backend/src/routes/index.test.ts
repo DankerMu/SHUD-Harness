@@ -31,6 +31,11 @@ import {
   type TaskSnapshot
 } from "@shud-harness/core";
 import { createBackendApi, type ApiErrorResponse, type WorkspaceReadyResponse } from "./index";
+import {
+  API_REQUEST_ID_HEADER,
+  redactApiLogValue,
+  type ApiRequestLogLine
+} from "../middleware";
 
 const tempRoots: string[] = [];
 const originalCwd = process.cwd();
@@ -183,6 +188,107 @@ describe("backend workspace and health routes", () => {
       uptime_seconds: 3.5,
       timestamp: "2026-07-07T00:00:03.500Z"
     });
+  });
+
+  test("API requests emit one OBS-LOG-001 NDJSON line with the response request id", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const logs: string[] = [];
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:02:00.000Z"),
+      requestIdFactory: () => "REQ-log-success",
+      requestLogSink: (line) => {
+        logs.push(line);
+      }
+    });
+
+    const response = await app.request("/api/health/live");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-success");
+    expect(logs).toHaveLength(1);
+    const log = parseApiRequestLogLine(logs[0] as string);
+    expect(log).toMatchObject({
+      ts: "2026-07-07T12:02:00.000Z",
+      level: "info",
+      service: "shud-harness-backend",
+      event: "api.request.completed",
+      request_id: "REQ-log-success",
+      route: "/api/health/live",
+      status: 200
+    });
+    expect(Number.isFinite(log.duration_ms)).toBe(true);
+    expect(log.duration_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  test("API error responses share a request id with the structured request log", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const logs: string[] = [];
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:02:01.000Z"),
+      requestIdFactory: () => "REQ-log-error",
+      requestLogSink: (line) => {
+        logs.push(line);
+      }
+    });
+
+    const response = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Missing required fields" })
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-error");
+    expectCanonicalError(body, "schema_error");
+    expect(logs).toHaveLength(1);
+    const log = parseApiRequestLogLine(logs[0] as string);
+    expect(log.request_id).toBe("REQ-log-error");
+    expect(log.level).toBe("warn");
+    expect(log.route).toBe("/api/tasks");
+    expect(log.status).toBe(400);
+  });
+
+  test("API request logs redact secret-like values and preserve secret refs", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const fakeSecret = "sk-test-secret-value";
+    const logs: string[] = [];
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:02:02.000Z"),
+      requestIdFactory: () => "REQ-log-secret",
+      requestLogSink: (line) => {
+        logs.push(line);
+      }
+    });
+
+    const response = await app.request(`/api/tasks?api_key=${fakeSecret}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${fakeSecret}`,
+        "x-secret-ref": "env:GLM_API_KEY"
+      },
+      body: `{"title":"${fakeSecret}"`
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(400);
+    expectCanonicalError(body, "schema_error");
+    expect(logs).toHaveLength(1);
+    const serializedLog = logs[0] as string;
+    const log = parseApiRequestLogLine(serializedLog);
+    expect(log.route).toBe("/api/tasks");
+    expect(serializedLog).not.toContain(fakeSecret);
+    expect(serializedLog).not.toContain("authorization");
+    expect(serializedLog).not.toContain("api_key");
+    expect(redactApiLogValue(fakeSecret)).toBe("[REDACTED]");
+    expect(redactApiLogValue("env:GLM_API_KEY")).toBe("env:GLM_API_KEY");
   });
 
   test("GET /api/health/ready is not_ready before init while live stays ok", async () => {
@@ -2869,6 +2975,31 @@ function expectNoAbsoluteWorkspacePath(
   const serialized = JSON.stringify(body);
   expect(serialized).not.toContain(tempRoot);
   expect(serialized).not.toContain(workspaceRoot);
+}
+
+function parseApiRequestLogLine(line: string): ApiRequestLogLine {
+  expect(line.endsWith("\n")).toBe(true);
+  const parsed = JSON.parse(line) as ApiRequestLogLine;
+  expect(Object.keys(parsed).sort()).toEqual(
+    [
+      "duration_ms",
+      "event",
+      "level",
+      "request_id",
+      "route",
+      "service",
+      "status",
+      "ts"
+    ].sort()
+  );
+  expect(typeof parsed.ts).toBe("string");
+  expect(["info", "warn", "error"]).toContain(parsed.level);
+  expect(typeof parsed.request_id).toBe("string");
+  expect(typeof parsed.route).toBe("string");
+  expect(typeof parsed.status).toBe("number");
+  expect(typeof parsed.duration_ms).toBe("number");
+
+  return parsed;
 }
 
 async function timeoutAfter(milliseconds: number, message: string): Promise<never> {

@@ -170,6 +170,22 @@
       - PR evidence states the `POST /api/tasks` idempotency carrier is change-scoped only and does not modify canonical frozen spec applicability lists.
       - `bun run test:backend-api`; `bun run test:backend-ws`; `bun run test:schemas`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 6.4 结构化 NDJSON API 请求日志中间件（OBS-LOG-001 八字段：ts/level/service/event/request_id/route/status/duration_ms；secret 仅以 ref/[REDACTED] 形式出现，OBS-LOG-002）
+  - Fixture (#31): expanded / medium
+    - Change surface: `packages/backend/src/middleware/**` request logging middleware and backend route tests that instantiate `createBackendApi`.
+    - Must preserve: #28 health responses, #29/#30 task create/list/detail/idempotency behavior, canonical error envelope fields, no raw query/header/body values in logs, no metrics/alerts/ops dashboard/log aggregation implementation.
+    - Must add/change: every `/api` request emits exactly one newline-terminated JSON object with OBS-LOG-001 fields `ts`, `level`, `service`, `event`, `request_id`, `route`, `status`, `duration_ms`; the response carries the same `request_id` via `x-request-id` so error responses can correlate without changing the canonical envelope body.
+    - Risk packs considered:
+      - Public API / CLI / script entry: selected - middleware wraps all API routes and adds an HTTP response header.
+      - Schema / columns / units / field names: selected - NDJSON field names and types are a structured observability contract.
+      - Auth / permissions / secrets: selected - logs must not emit secret-like query/header/body values; SecretRef strings such as `env:GLM_API_KEY` remain representable.
+      - Error handling / rollback / partial outputs: selected - failed requests still emit one completion log with the final status/level.
+      - Legacy compatibility / examples: selected - existing response bodies and canonical error envelope remain unchanged.
+      - Other core/domain packs: not selected - no workspace file IO, config, concurrency state, release dependency, hydrology runtime, or Zero governance behavior changes.
+    - Evidence floor (#31):
+      - Backend route tests cover `GET /api/health/live` -> 200 with exactly one newline-terminated NDJSON object containing all eight OBS-LOG-001 fields, `route="/api/health/live"`, `status=200`, `level=info`, and response `x-request-id` equal to logged `request_id`.
+      - Backend route tests cover `POST /api/tasks` with JSON body `{ "title": "Missing required fields" }` -> 400 schema_error whose response `x-request-id` matches the logged `request_id`, while `ApiErrorResponse` keeps the canonical body fields and the log records `route="/api/tasks"`, `status=400`, `level=warn`.
+      - Secret redaction tests send fake secret `sk-test-secret-value` through query (`api_key`), `authorization` header, and malformed JSON body; the serialized log omits the plaintext, `authorization`, and `api_key`, while the redaction helper preserves `env:GLM_API_KEY` ref form and redacts the fake secret to `[REDACTED]`.
+      - `bun run test:backend-api`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 6.5 PERF-API-001 冒烟脚本 `bun run test:perf:api`（fixture = mock workspace + 100 tasks；GET /api/tasks、GET /api/tasks/:id、health ready P95 ≤ 300ms）+ 接入 1.2 的 PR CI——依赖: 1.2
 - [ ] 6.6 路径安全 helper（packages/core 共享 service，遵 Workspace_Conventions §9：resolve 规范化 → workspace 边界校验 → 拒 symlink escape → 记录规范化路径）+ Artifact registry 落盘与 task snapshot 写入两处接线 + 正负例单测（`../` 穿越拒绝、symlink escape 拒绝、合法路径规范化记录；承接 Test_Plan W1 Unit「path normalization」）——依赖: 6.2、6.3（两处落盘写入面在位）
 
