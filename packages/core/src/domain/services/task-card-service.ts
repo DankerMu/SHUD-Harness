@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants, type Dirent } from "node:fs";
 import { lstat, mkdir, open, opendir, rename, rmdir, unlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { dirname, join, parse, resolve, sep } from "node:path";
 import { z } from "zod";
 import {
   InferenceBudgetSchema,
@@ -11,7 +11,11 @@ import {
   TaskTypeSchema,
   type TaskCard
 } from "../schemas/task";
-import { WorkspacePathSafetyError, resolveWorkspacePath } from "./workspace-path-safety";
+import {
+  WorkspacePathSafetyError,
+  isPathInsideBoundary,
+  resolveWorkspacePath
+} from "./workspace-path-safety";
 
 export const DEFAULT_TASK_CREATED_BY = "pi" as const;
 export const DEFAULT_TASK_CURRENT_OWNER = "coordinator" as const;
@@ -1135,8 +1139,7 @@ function assertPathInsideWorkspace(
   targetPath: string,
   evidenceRef: string
 ): void {
-  const relativePath = relative(workspaceRoot, resolve(targetPath));
-  if (relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath))) {
+  if (isPathInsideBoundary(workspaceRoot, targetPath)) {
     return;
   }
 

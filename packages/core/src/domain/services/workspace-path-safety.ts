@@ -123,14 +123,17 @@ function matchingBoundary(
   allowedReadonlyRoots: readonly string[],
   targetPath: string
 ): BoundaryCandidate | undefined {
+  const readonlyBoundary = allowedReadonlyRoots
+    .map((root) => ({ kind: "allowed_readonly" as const, root: resolve(root) }))
+    .find((boundary) => isPathInsideBoundary(boundary.root, targetPath));
+  if (readonlyBoundary) {
+    return readonlyBoundary;
+  }
+
   const workspaceBoundary = { kind: "workspace" as const, root: workspaceRoot };
   if (isPathInsideBoundary(workspaceBoundary.root, targetPath)) {
     return workspaceBoundary;
   }
-
-  return allowedReadonlyRoots
-    .map((root) => ({ kind: "allowed_readonly" as const, root: resolve(root) }))
-    .find((boundary) => isPathInsideBoundary(boundary.root, targetPath));
 }
 
 async function rejectSymlinkEscape(path: string, evidenceRef: string): Promise<void> {

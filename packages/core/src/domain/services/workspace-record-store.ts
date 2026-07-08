@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, parse, resolve, sep } from "node:path";
 import { z } from "zod";
 import { TaskServiceError, type TaskServiceErrorCode } from "./task-card-service";
-import { WorkspacePathSafetyError, resolveWorkspacePath } from "./workspace-path-safety";
+import {
+  WorkspacePathSafetyError,
+  isPathInsideBoundary,
+  resolveWorkspacePath
+} from "./workspace-path-safety";
 
 export const MAX_SERVICE_RECORD_BYTES = 1024 * 1024;
 
@@ -444,8 +448,7 @@ export function assertPathInsideWorkspace(
   targetPath: string,
   evidenceRef: string
 ): void {
-  const relativePath = relative(resolve(workspaceRoot), resolve(targetPath));
-  if (relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath))) {
+  if (isPathInsideBoundary(workspaceRoot, targetPath)) {
     return;
   }
 

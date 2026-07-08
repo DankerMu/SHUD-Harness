@@ -29,7 +29,7 @@ import {
   type LockRecord,
   WorkspacePathSafetyError
 } from "./index";
-import { MAX_SERVICE_RECORD_BYTES } from "./workspace-record-store";
+import { MAX_SERVICE_RECORD_BYTES, workspaceRecordPath } from "./workspace-record-store";
 
 const tempRoots: string[] = [];
 
@@ -1274,6 +1274,30 @@ describe("idempotency, lock, and artifact services", () => {
       })
     );
     expect(readonlyWriteError.evidenceRef).toBe("readonly.path");
+
+    const nestedReadonlyRoot = join(workspaceRoot, "data", "raw");
+    await mkdir(nestedReadonlyRoot, { recursive: true });
+    const nestedReadonlyResolution = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: "data/raw/out.csv",
+      evidenceRef: "nested-readonly.path",
+      access: "read",
+      allowedReadonlyRoots: [nestedReadonlyRoot]
+    });
+    expect(nestedReadonlyResolution.boundary).toBe("allowed_readonly");
+    expect(nestedReadonlyResolution.boundaryRoot).toBe(nestedReadonlyRoot);
+    expect(nestedReadonlyResolution.normalizedPath).toBe(join(nestedReadonlyRoot, "out.csv"));
+
+    const nestedReadonlyWriteError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: "data/raw/out.csv",
+        evidenceRef: "nested-readonly.path",
+        access: "write",
+        allowedReadonlyRoots: [nestedReadonlyRoot]
+      })
+    );
+    expect(nestedReadonlyWriteError.evidenceRef).toBe("nested-readonly.path");
   });
 
   test("workspace path helper accepts dot-prefixed names and rejects unsafe boundaries", async () => {
@@ -1288,6 +1312,13 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(dotPrefixedResolution.absolutePath).toBe(join(workspaceRoot, "..draft", "report.md"));
     expect(dotPrefixedResolution.normalizedPath).toBe("..draft/report.md");
+    expect(
+      workspaceRecordPath(
+        workspaceRoot,
+        ["..draft", "record.json"],
+        "workspace/..draft/record.json"
+      )
+    ).toBe(join(workspaceRoot, "..draft", "record.json"));
 
     const outsidePath = join(tempRoot, "outside", "report.md");
     const absoluteOutsideError = await captureWorkspacePathSafetyError(() =>
