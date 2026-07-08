@@ -215,6 +215,22 @@
 ## 7. 四栏壳（workbench-shell）
 
 - [ ] 7.1 WorkbenchLayout 四栏骨架（SideNav + AgentFeed + Experiment + Results 占位；SideNav 任务列表与 Dashboard→Workbench 任务上下文导航接线 deferred M2，见 design Non-Goals）——依赖: 2.1
+  - Fixture (#34): expanded / medium
+    - Change surface: `packages/frontend/src/components/**`, `packages/frontend/src/layouts/**`, `packages/frontend/src/pages/**`, root frontend test script/check wiring, and OpenSpec fixture evidence.
+    - Must preserve: no backend API/static-serving changes, no task data wiring, no Dashboard→Workbench context navigation, no SideNav task-list integration, no `zero/` source diff, and no tracked runtime `workspace/` assets.
+    - Must add/change: Workbench page route skeleton (`/workbench`), WorkbenchLayout four-panel renderer, SideNav/AgentFeed/Experiment/Results placeholder components, browser-openable HTML document renderer plus stdout preview entry, and frontend smoke tests proving all four panels render without console errors.
+    - Risk packs considered:
+      - Frontend shell / route skeleton: selected - this issue owns the direct Workbench page skeleton for M1 browser-openable acceptance.
+      - Layout / responsive behavior: selected - four-panel desktop grid must keep stable column proportions and avoid text overlap.
+      - Dependency / build compatibility: selected - no new unresolved runtime dependency or bundler assumption may break `bun install`/`check`.
+      - Data/API integration: not selected - task list, create form, and refresh recovery belong to #35; Dashboard→Workbench navigation is deferred M2.
+    - Evidence floor (#34):
+      - Workbench renderer returns a full HTML document for `/workbench` with exactly one `side-nav`, `agent-feed`, `experiment`, and `results` panel.
+      - `bun packages/frontend/src/pages/Workbench.preview.ts > /tmp/workbench.html` emits a directly openable HTML document without backend/static-serving changes.
+      - Frontend smoke test captures render-time `console.error` and observes none.
+      - Layout CSS keeps the desktop four-column grid `240px minmax(320px, 1fr) minmax(400px, 1.5fr) minmax(280px, 1fr)`, includes bounded narrower-viewport fallbacks without hiding any canonical panel, and wraps long task ids without text overflow.
+      - User-visible placeholder copy is Chinese-first while preserving canonical code identifiers where needed.
+      - `bun run test:frontend`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 7.2 Dashboard 页（GET /api/tasks 列表 + 建卡表单 + 刷新恢复）——依赖: 6.2
 - [ ] 7.3 ExperimentHeader + StatusBar 占位组件（task 上下文 props）
 

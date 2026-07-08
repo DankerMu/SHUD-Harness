@@ -1010,3 +1010,61 @@ Review focus:
 - Helper boundary checks are centralized and fail closed before writes.
 - Artifact and Task snapshot write surfaces actually call the helper and persist normalized paths where applicable.
 - Tests prove no outside file/manifest/snapshot is created on traversal or symlink escape.
+
+## Subagent Workflow Fixture - Issue #34
+
+Fixture level: expanded; repair intensity: medium
+Project profile: SHUD-Harness
+
+Expanded-trigger rationale:
+- Core triggers: frontend page route skeleton, visible four-panel layout, package check wiring, and browser-openable static document rendering.
+- Profile triggers: `workbench`, `frontend`, `TaskCard`, and M1 acceptance evidence.
+
+Change surface:
+- `packages/frontend/src/pages/Workbench.ts` Workbench route/document renderer.
+- `packages/frontend/src/pages/Workbench.preview.ts` deterministic stdout preview entry for manual browser opening.
+- `packages/frontend/src/layouts/WorkbenchLayout.ts` four-panel layout shell and CSS contract.
+- `packages/frontend/src/components/{SideNav,AgentActivityFeed,ExperimentPanel,ResultsPanel}.ts` placeholder panel producers.
+- Frontend smoke tests plus root `test:frontend` check wiring.
+
+Must preserve:
+- #35 Dashboard list/create/recovery remains unimplemented.
+- Dashboard-to-Workbench task context navigation and SideNav task-list data wiring remain deferred M2 per design Non-Goals.
+- Backend routes/static serving, WebSocket behavior, runtime `workspace/`, and `zero/` source remain unchanged.
+
+Must add/change:
+- A deterministic Workbench route skeleton at `/workbench`.
+- A browser-openable HTML document renderer and stdout preview entry that include SideNav, AgentFeed, Experiment, and Results exactly once.
+- A stable four-column desktop grid matching UI_Implementation_Spec column proportions, with bounded fallbacks for narrower viewports.
+- Chinese-first visible placeholder copy and explicit text wrapping for long task identifiers.
+
+Risk packs considered:
+- Public page/route skeleton: selected - `/workbench` becomes the M1 browser-openable Workbench entry representation inside the frontend package.
+- Layout/responsive behavior: selected - panel dimensions must be stable enough for smoke acceptance and future hydration.
+- Dependency/build compatibility: selected - #34 must not introduce an unresolved bundler/runtime dependency; React runtime and router/static serving can be connected by later frontend wiring issues when package-manager behavior and serving surface are explicit.
+- Data/API integration: not selected - no task fetch, create, refresh recovery, or route context transfer in #34.
+- Error handling / visible shell failure: selected - render-time smoke test captures `console.error` and fails on a noisy shell.
+
+Invariant Matrix:
+- Governing invariant: Opening/rendering the M1 Workbench shell yields exactly the four canonical panels without depending on backend data or runtime workspace state.
+- Source-of-truth identity/contract: route `/workbench`, panel slots `side-nav | agent-feed | experiment | results`, UI_Implementation_Spec grid proportions, and workbench-shell spec scenario "四栏可见".
+- Producers: Workbench page renderer and WorkbenchLayout renderer.
+- Validators/preflight: frontend smoke test, typecheck, root check, OpenSpec validation, diff check, zero/workspace boundary checks.
+- Storage/cache/query: none - #34 has no persistence or backend fetch.
+- Public routes/entrypoints: frontend route skeleton `/workbench`; backend HTTP serving is not introduced in #34.
+- Frontend/downstream consumers: #35 Dashboard and #36 ExperimentHeader/StatusBar can import/extend the shell without changing the four panel slots.
+- Failure paths/rollback/stale state: unknown route returns no Workbench document; render-time console errors fail the smoke test.
+- Evidence/audit/readiness: PR evidence records `test:frontend`, `typecheck`, `check`, OpenSpec validation, diff check, and zero/workspace checks.
+- Regression rows:
+  - `renderWorkbenchDocument({ activeTaskId })` -> full HTML document includes the active task id, `data-workbench-layout="four-column"`, and exactly one instance of each panel slot.
+  - `bun packages/frontend/src/pages/Workbench.preview.ts` -> stdout begins with `<!doctype html>` and can be redirected to a browser-openable HTML file.
+  - `renderWorkbenchRoute("/workbench")` -> document; `renderWorkbenchRoute("/")` -> `undefined`, proving Dashboard navigation is not silently implemented.
+  - Layout CSS includes the canonical four-column grid, narrower viewport fallbacks that keep every canonical panel reachable, and `overflow-wrap` protection for long identifiers.
+
+Non-goals:
+- Dashboard list/create/recovery (#35), ExperimentHeader/StatusBar (#36), backend static serving, router integration, WebSocket/data wiring, PI actions, report rendering, and full React runtime/bundler setup.
+
+Review focus:
+- Four panel slots are present exactly once and exported through the expected frontend boundaries.
+- The shell stays deterministic, dependency-light, and compatible with existing `bun install`/`check`.
+- Visible placeholder copy is operational state, not explanatory product marketing.

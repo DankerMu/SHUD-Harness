@@ -13,6 +13,7 @@
     "test:tool-registry-governance": "bun test ./packages/core/src/tools/role-tool-map.test.ts",
     "test:backend-api": "bun test ./packages/backend/src/routes/*.test.ts",
     "test:backend-ws": "bun test ./packages/backend/src/ws/index.test.ts",
+    "test:frontend": "bun test ./packages/frontend/src/**/*.test.ts ./packages/frontend/src/**/*.test.tsx",
     "test:schemas": "bun test ./packages/core/src/domain/schemas/core-schemas.test.ts",
     "test:core-services": "bun test ./packages/core/src/domain/services/*.test.ts",
     "test:perf:api": "bun scripts/perf/api.ts",
@@ -21,7 +22,7 @@
     "schema:check": "sh scripts/schema/check.sh",
     "validate:dependency-lock": "node scripts/dependency-lock/validate.mjs",
     "test:dependency-lock": "sh scripts/dependency-lock/self_test.sh",
-    "check": "bun run typecheck && bun run test:policy-gate && bun run test:tool-registry-governance && bun run test:backend-api && bun run test:backend-ws && bun run test:schemas && bun run test:core-services"
+    "check": "bun run typecheck && bun run test:policy-gate && bun run test:tool-registry-governance && bun run test:backend-api && bun run test:backend-ws && bun run test:frontend && bun run test:schemas && bun run test:core-services"
   },
   "devDependencies": {
     "typescript": "5.8.3"
