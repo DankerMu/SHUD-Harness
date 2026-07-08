@@ -58,7 +58,8 @@ jobs:
       - name: Check generated schema drift
         run: bun run schema:check
 
-      # Future hook (#32): PERF-API-001 smoke plugs in here after the API fixture lands.
+      - name: PERF-API-001 API metadata smoke
+        run: bun run test:perf:api
 
       # 项目铁律：zero 作为 root submodule 钉住不 fork，spike 条 5 要求 diff 为零。
       - name: Verify zero submodule unchanged

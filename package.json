@@ -15,6 +15,7 @@
     "test:backend-ws": "bun test ./packages/backend/src/ws/index.test.ts",
     "test:schemas": "bun test ./packages/core/src/domain/schemas/core-schemas.test.ts",
     "test:core-services": "bun test ./packages/core/src/domain/services/*.test.ts",
+    "test:perf:api": "bun scripts/perf/api.ts",
     "schema:generate": "bun scripts/schema/generate.ts",
     "test:schema-generation": "bun scripts/schema/generate.ts --self-test",
     "schema:check": "sh scripts/schema/check.sh",

@@ -189,6 +189,16 @@
       - Secret redaction tests send fake secret `sk-test-secret-value` through query (`api_key`), `authorization` header, and malformed JSON body; the serialized log omits the plaintext, `authorization`, and `api_key`, while the redaction helper preserves `env:GLM_API_KEY` ref form and redacts the fake secret to `[REDACTED]`.
       - `bun run test:backend-api`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 6.5 PERF-API-001 冒烟脚本 `bun run test:perf:api`（fixture = mock workspace + 100 tasks；GET /api/tasks、GET /api/tasks/:id、health ready P95 ≤ 300ms）+ 接入 1.2 的 PR CI——依赖: 1.2
+  - Risk packs (#32):
+    - Public API / CLI / script entry: selected - adds the canonical `bun run test:perf:api` command and PR CI step.
+    - Performance / timing: selected - enforces PERF-API-001 P95 thresholds and must print measured P95 on failure.
+    - Workspace fixture / repeatability: selected - fixture generation must be scripted and use a disposable mock workspace with 100 tasks.
+    - Other packs: not selected - no API implementation, schema, auth, hydrology runtime, frontend, or Zero governance behavior changes.
+  - Evidence floor (#32):
+    - `scripts/perf/api.ts` creates a disposable workspace, initializes it through the backend API, creates exactly 100 TaskCards through `POST /api/tasks`, then samples `GET /api/tasks`, `GET /api/tasks/:id`, and `GET /api/health/ready`.
+    - `bun run test:perf:api` fails if any endpoint P95 exceeds 300ms and prints each measured P95 with the limit.
+    - PR CI `linux-base` runs `bun run test:perf:api` after schema drift check.
+    - `bun run test:perf:api`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
 - [ ] 6.6 路径安全 helper（packages/core 共享 service，遵 Workspace_Conventions §9：resolve 规范化 → workspace 边界校验 → 拒 symlink escape → 记录规范化路径）+ Artifact registry 落盘与 task snapshot 写入两处接线 + 正负例单测（`../` 穿越拒绝、symlink escape 拒绝、合法路径规范化记录；承接 Test_Plan W1 Unit「path normalization」）——依赖: 6.2、6.3（两处落盘写入面在位）
 
 ## 7. 四栏壳（workbench-shell）
