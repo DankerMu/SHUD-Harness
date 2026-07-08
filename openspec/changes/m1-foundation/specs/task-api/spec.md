@@ -38,7 +38,7 @@ Hono 后端骨架：workspace init、TaskCard 最小链路、错误 envelope、�
 
 ### Requirement: 幂等与锁 service skeleton
 
-写端点 SHALL 接受 `Idempotency-Key` 头；`packages/core` SHALL 提供 IdempotencyRecord / LockRecord 的存取 service skeleton（文件级实现即可，契约遵 Idempotency_Concurrency_Locking_Spec §2/§3——IdempotencyRecord 含 `request_digest`，key mismatch 按 API_Error_And_Idempotency_Contracts §2 映射 422）。
+M1 变更范围内，`POST /api/tasks` SHALL 接受可选 `Idempotency-Key` 头作为 skeleton 验证载体；`packages/core` SHALL 提供 IdempotencyRecord / LockRecord 的存取 service skeleton（文件级实现即可，契约遵 Idempotency_Concurrency_Locking_Spec §2/§3——IdempotencyRecord 含 `request_digest`，key mismatch 按 API_Error_And_Idempotency_Contracts §2 映射 422）。
 
 M1 以 `POST /api/tasks` 作为 skeleton 的验证载体，属 change-scoped 约定：该端点不在 Idempotency_Concurrency_Locking_Spec §4「必须幂等的操作」表与 API_Error_And_Idempotency_Contracts §3 适用清单内，本 requirement 不以验收断言扩张 canonical 契约——纳入 canonical 适用清单按账本冻结规则以 spec bug 修正单独记录（待办见 proposal Impact）。change-scoped key/digest 配方：`Idempotency-Key` 由客户端提供，`scope=task`（IdempotencyRecord scope 枚举既有值），`request_digest` = 规范化 JSON 请求体（键排序；至少覆盖 title、created_by 与全部业务字段）的 sha256。
 
