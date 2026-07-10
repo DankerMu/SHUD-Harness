@@ -370,16 +370,21 @@ async function createIdempotentTaskCard(
   }
 
   if (inFlightIdempotentTaskCreates.size >= MAX_IN_FLIGHT_IDEMPOTENT_TASK_CREATES) {
-    throw new TaskServiceError({
-      code: "record_malformed",
-      status: 409,
-      category: "workspace_error",
-      message: "Too many task idempotency requests are active in this process.",
-      userMessage: "The backend is already processing too many idempotent task creates.",
-      evidenceRefs: ["workspace/tasks/_idempotency/task"],
-      retryable: true,
-      recommendedNextActions: ["Retry after active task create requests finish."]
-    });
+    const durableResult = await resolveIdempotentTaskCreateWithoutOwner(input);
+    if (durableResult !== undefined) {
+      return durableResult;
+    }
+
+    const racedEntry = inFlightIdempotentTaskCreates.get(inFlightIdentity);
+    if (racedEntry) {
+      if (racedEntry.requestDigest !== input.requestDigest) {
+        throw createIdempotencyMismatchError();
+      }
+      return await waitForInFlightIdempotentTaskCreate(input, racedEntry);
+    }
+    if (inFlightIdempotentTaskCreates.size >= MAX_IN_FLIGHT_IDEMPOTENT_TASK_CREATES) {
+      throw idempotencyInFlightCapacityError();
+    }
   }
 
   const owner = createDeferred<void>();
@@ -565,6 +570,32 @@ async function canonicalInFlightWorkspaceIdentity(workspaceRoot: string): Promis
   return firstPhysicalRoot;
 }
 
+async function resolveIdempotentTaskCreateWithoutOwner(
+  input: CreateIdempotentTaskCardInput
+): Promise<IdempotentTaskCreateResult | undefined> {
+  const replay = await input.idempotencyService.lookupReplay({
+    scope: "task",
+    key: input.idempotencyKey,
+    requestDigest: input.requestDigest
+  });
+  if (replay.status === "mismatch") {
+    throw createIdempotencyMismatchError();
+  }
+  if (replay.status === "invalid_completed") {
+    return await invalidateInvalidCompletedTaskAuthority(input, replay);
+  }
+  if (replay.status === "completed") {
+    return completedTaskCreateResultWithoutLocal(
+      await classifyCompletedTaskAuthority(input, replay.record.result_ref)
+    );
+  }
+  if (replay.status === "incomplete" && replay.record.status === "started") {
+    return await waitForIdempotentTaskCompletion(input);
+  }
+
+  return undefined;
+}
+
 async function waitForInFlightIdempotentTaskCreate(
   input: CreateIdempotentTaskCardInput,
   entry: InFlightIdempotentTaskCreateEntry
@@ -623,7 +654,12 @@ async function assertTaskSnapshotBindsRequest(
 type ObservedCompletedTaskAuthorityClassification =
   | { status: "valid"; task: TaskCard; resultRef: string }
   | { status: "repairable"; error: TaskServiceError; resultRef: string }
-  | { status: "invalid" };
+  | {
+      status: "invalid";
+      reason: "invalid_durable_task_authority";
+      error: TaskServiceError;
+      resultRef: string;
+    };
 
 type CompletedTaskAuthorityClassification =
   | ObservedCompletedTaskAuthorityClassification
@@ -669,13 +705,19 @@ async function classifyCompletedTaskAuthority(
       return { status: "repairable", error, resultRef };
     }
 
+    const authorityError = invalidDurableTaskAuthorityError();
     await input.idempotencyService.invalidateCompletedRecord({
       scope: "task",
       key: input.idempotencyKey,
       requestDigest: input.requestDigest,
       resultRef
     });
-    return { status: "invalid" };
+    return {
+      status: "invalid",
+      reason: "invalid_durable_task_authority",
+      error: authorityError,
+      resultRef
+    };
   }
 }
 
@@ -689,7 +731,7 @@ function completedTaskCreateResultWithoutLocal(
     throw authority.error;
   }
 
-  throw idempotencyResultBindingError();
+  throw authority.error;
 }
 
 async function settleLocalTaskAgainstCompletedAuthority(
@@ -714,7 +756,7 @@ async function settleLocalTaskAgainstCompletedAuthority(
     key: input.idempotencyKey,
     requestDigest: input.requestDigest
   });
-  throw idempotencyResultBindingError();
+  throw authority.error;
 }
 
 async function rollbackLocalTaskAfterAuthorityFailure(
@@ -937,6 +979,19 @@ function idempotencyResultBindingError(): TaskServiceError {
   });
 }
 
+function invalidDurableTaskAuthorityError(): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 500,
+    category: "workspace_error",
+    message: "Completed task idempotency authority is invalid and was quarantined.",
+    userMessage: "The completed task result could not be verified and was quarantined.",
+    evidenceRefs: ["workspace/tasks/_idempotency/task", "idempotency.result_ref"],
+    retryable: true,
+    recommendedNextActions: ["Repair the task workspace state and retry the same request."]
+  });
+}
+
 function invalidCompletedTaskAuthorityError(
   reason: InvalidCompletedIdempotencyRecordLookup["reason"]
 ): TaskServiceError {
@@ -965,6 +1020,19 @@ function idempotencyInFlightCompletionError(): TaskServiceError {
     evidenceRefs: ["workspace/tasks/_idempotency/task"],
     retryable: true,
     recommendedNextActions: ["Retry after repairing the task snapshot or idempotency record state."]
+  });
+}
+
+function idempotencyInFlightCapacityError(): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 409,
+    category: "workspace_error",
+    message: "Too many task idempotency requests are active in this process.",
+    userMessage: "The backend is already processing too many idempotent task creates.",
+    evidenceRefs: ["workspace/tasks/_idempotency/task"],
+    retryable: true,
+    recommendedNextActions: ["Retry after active task create requests finish."]
   });
 }
 

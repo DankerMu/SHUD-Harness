@@ -655,37 +655,7 @@ export function createIdempotencyRecordService(
     async quarantineRecordAfterUnsafeRollback(
       input: FailIdempotencyRecordInput
     ): Promise<IdempotencyRecord> {
-      const parsedScope = assertIdempotencyScope(input.scope);
-      assertNonblankIdempotencyKey(input.key);
-      const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
-      const current = await lookupExistingRecordForBegin(
-        service,
-        { ...input, scope: parsedScope },
-        evidenceRef
-      );
-      if (current.status === "mismatch") {
-        throw createIdempotencyMismatchError();
-      }
-      if (current.status === "completed") {
-        return current.record;
-      }
-      if (current.status === "invalid_completed") {
-        throw invalidCompletedRecordAuthorityError(current.reason, evidenceRef);
-      }
-      if (current.record.status === "failed") {
-        return current.record;
-      }
-      if (current.record.request_digest !== input.requestDigest) {
-        throw createIdempotencyMismatchError();
-      }
-
-      const recordWithoutResultRef = { ...current.record };
-      delete recordWithoutResultRef.result_ref;
-      return await storeRecordInternal({
-        ...recordWithoutResultRef,
-        status: "started",
-        updated_at: now().toISOString()
-      }, { allowCompletedWrite: false, allowExistingMutation: true });
+      return await recoverRecordAfterRollback(input, async () => service.failRecord(input));
     }
   };
 

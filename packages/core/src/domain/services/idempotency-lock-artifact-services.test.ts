@@ -852,6 +852,69 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await seedService.getRecord("task", "task:create:seed-started")).toEqual(seeded);
   });
 
+  test("IdempotencyRecord unsafe rollback quarantine fails the claim and preserves completed authority", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:34:30.000Z")
+    });
+    const retryableKey = "task:create:unsafe-rollback-retryable";
+    const retryableDigest = "digest-unsafe-rollback-retryable";
+    const completedKey = "task:create:unsafe-rollback-completed";
+    const completedDigest = "digest-unsafe-rollback-completed";
+
+    const started = await service.beginRecord({
+      scope: "task",
+      key: retryableKey,
+      requestDigest: retryableDigest
+    });
+    const failed = await service.quarantineRecordAfterUnsafeRollback({
+      scope: "task",
+      key: retryableKey,
+      requestDigest: retryableDigest
+    });
+    const reacquired = await service.beginRecord({
+      scope: "task",
+      key: retryableKey,
+      requestDigest: retryableDigest
+    });
+
+    await service.beginRecord({
+      scope: "task",
+      key: completedKey,
+      requestDigest: completedDigest
+    });
+    const completed = await service.completeRecord({
+      scope: "task",
+      key: completedKey,
+      requestDigest: completedDigest,
+      resultRef: "TASK-unsafe-rollback-authority"
+    });
+    const preserved = await service.quarantineRecordAfterUnsafeRollback({
+      scope: "task",
+      key: completedKey,
+      requestDigest: completedDigest
+    });
+    const mismatch = await captureTaskServiceError(() =>
+      service.quarantineRecordAfterUnsafeRollback({
+        scope: "task",
+        key: completedKey,
+        requestDigest: "digest-unsafe-rollback-foreign"
+      })
+    );
+
+    expect(started.status).toBe("acquired");
+    expect(failed.status).toBe("failed");
+    expect(failed.result_ref).toBeUndefined();
+    expect(reacquired.status).toBe("acquired");
+    expect(reacquired.record.status).toBe("started");
+    expect(preserved).toEqual(completed);
+    expect(await service.getRecord("task", completedKey)).toEqual(completed);
+    expect(mismatch.code).toBe("idempotency_mismatch");
+    expect(mismatch.status).toBe(422);
+  });
+
   test("IdempotencyRecord malformed transition guard fails bounded without completing", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
