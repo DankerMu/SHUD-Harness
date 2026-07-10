@@ -133,25 +133,6 @@ export function readinessNotePath(
   return join(repoRoot, "workspace", "readiness", noteName);
 }
 
-export async function seedPassingReadinessNote(
-  repoRoot: string,
-  noteName = DEFAULT_READINESS_NOTE_NAME,
-  extra: Record<string, unknown> = {}
-): Promise<void> {
-  await mkdir(dirname(readinessNotePath(repoRoot, noteName)), { recursive: true });
-  await writeFile(readinessNotePath(repoRoot, noteName), passingReadinessNoteText(extra), "utf8");
-}
-
-export function passingReadinessNoteText(extra: Record<string, unknown> = {}): string {
-  return `${JSON.stringify({
-    schema_version: "m1.glm-provider-smoke.v1",
-    kind: "glm_provider_smoke",
-    evidence_scope: "canonical",
-    status: "passed",
-    ...extra
-  })}\n`;
-}
-
 export function makeFakeSecret(): string {
   return ["unit", "redaction", "secret"].join("-");
 }

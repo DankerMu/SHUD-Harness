@@ -1,201 +1,93 @@
-import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import type { GlmProviderConfig } from "./smoke-core";
 
 export const DEFAULT_READINESS_NOTE_NAME = "glm_provider_smoke.json";
 export const FIXTURE_READINESS_NOTE_NAME = "glm_provider_smoke.fixture.json";
 export const MAX_PRIOR_READINESS_NOTE_BYTES = 64 * 1024;
-const CANONICAL_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-interface ReadinessNoteDocument {
-  status: string;
+export type SmokeStatus = "passed" | "failed";
+
+export type SmokeFailureCategory =
+  | "missing_key"
+  | "base_url_mismatch"
+  | "http_error"
+  | "invalid_response"
+  | "empty_completion"
+  | "oversized_response"
+  | "timeout"
+  | "network_error";
+
+export interface SmokeFailure {
+  category: SmokeFailureCategory;
+  message: string;
+  http_status?: number;
 }
 
-export async function writeCanonicalReadinessNote(note: ReadinessNoteDocument): Promise<string> {
-  return await writeOwnedReadinessNote(CANONICAL_REPO_ROOT, note, DEFAULT_READINESS_NOTE_NAME);
+interface BaseReadinessNote {
+  checked_at: string;
+  provider_name: "glm-dmxapi";
+  api_type: "openai_chat_completions";
+  base_url: "https://www.dmxapi.cn/v1";
+  endpoint: "https://www.dmxapi.cn/v1/chat/completions";
+  smoke_model: "deepseek-v4-pro-guan";
+  target_model_id: "glm-5.2";
+  status: SmokeStatus;
+  model_admission: false;
+  secret_ref: "env:GLM_API_KEY";
+  attempts: number;
+  configured_base_url_hit: boolean;
+  completion_nonempty: boolean;
+  response_url?: "https://www.dmxapi.cn/v1/chat/completions";
+  failure?: SmokeFailure;
 }
 
-export async function writeFixtureReadinessNote(
-  repoRoot: string,
-  note: ReadinessNoteDocument
-): Promise<string> {
-  return await writeOwnedReadinessNote(repoRoot, note, FIXTURE_READINESS_NOTE_NAME);
+export interface CanonicalReadinessNote extends BaseReadinessNote {
+  schema_version: "m1.glm-provider-smoke.v1";
+  kind: "glm_provider_smoke";
+  evidence_scope: "canonical";
 }
 
-export async function invalidatePassingReadinessNote(repoRoot: string): Promise<void> {
-  const realRepoRoot = await realpath(repoRoot);
-  const workspaceDir = join(realRepoRoot, "workspace");
-  const readinessDir = join(workspaceDir, "readiness");
-  if (!(await existingOwnedDirectory(workspaceDir, "workspace"))) {
-    return;
-  }
-  if (!(await existingOwnedDirectory(readinessDir, "workspace/readiness"))) {
-    return;
-  }
-
-  const realReadinessDir = await realpath(readinessDir);
-  const expectedReadinessDir = join(realRepoRoot, "workspace", "readiness");
-  if (realReadinessDir !== expectedReadinessDir) {
-    throw new Error("Readiness note directory must resolve under workspace/readiness.");
-  }
-
-  const notePath = join(readinessDir, DEFAULT_READINESS_NOTE_NAME);
-  if (!(await prepareReadinessNoteForInvalidation(notePath))) {
-    return;
-  }
-
-  let raw: string;
-  try {
-    raw = await readFile(notePath, "utf8");
-  } catch (error) {
-    if (isNodeErrorWithCode(error, "ENOENT")) {
-      return;
-    }
-    throw error;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw) as unknown;
-  } catch {
-    return;
-  }
-
-  const note = readOptionalRecord(parsed);
-  if (note?.status !== "passed") {
-    return;
-  }
-
-  await assertSafeReadinessNoteTarget(notePath);
-  try {
-    await unlink(notePath);
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT")) {
-      throw error;
-    }
-  }
+export interface FixtureReadinessNote extends BaseReadinessNote {
+  schema_version: "m1.glm-provider-smoke.fixture.v1";
+  kind: "glm_provider_smoke_fixture";
+  evidence_scope: "fixture";
 }
 
-async function writeOwnedReadinessNote(
-  repoRoot: string,
-  note: ReadinessNoteDocument,
-  noteName: typeof DEFAULT_READINESS_NOTE_NAME | typeof FIXTURE_READINESS_NOTE_NAME
-): Promise<string> {
-  const realRepoRoot = await realpath(repoRoot);
-  const workspaceDir = join(realRepoRoot, "workspace");
-  const readinessDir = join(workspaceDir, "readiness");
-  await ensureOwnedDirectory(workspaceDir, "workspace");
-  await ensureOwnedDirectory(readinessDir, "workspace/readiness");
-  const realReadinessDir = await realpath(readinessDir);
-  const expectedReadinessDir = join(realRepoRoot, "workspace", "readiness");
-  if (realReadinessDir !== expectedReadinessDir) {
-    throw new Error("Readiness note directory must resolve under workspace/readiness.");
-  }
+export type ReadinessNote = CanonicalReadinessNote;
 
-  const notePath = join(readinessDir, noteName);
-  await assertSafeReadinessNoteTarget(notePath);
-  const tempPath = join(readinessDir, `.${noteName}.${process.pid}.${randomUUID()}.tmp`);
-  try {
-    await writeFile(tempPath, `${JSON.stringify(note, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx"
-    });
-    await rename(tempPath, notePath);
-  } catch (error) {
-    await unlink(tempPath).catch(() => undefined);
-    throw error;
-  }
-  return notePath;
-}
+export type ReadinessNoteNameFor<Scope extends "canonical" | "fixture"> = Scope extends "canonical"
+  ? typeof DEFAULT_READINESS_NOTE_NAME
+  : typeof FIXTURE_READINESS_NOTE_NAME;
 
-async function prepareReadinessNoteForInvalidation(path: string): Promise<boolean> {
-  let stat: Awaited<ReturnType<typeof lstat>>;
-  try {
-    stat = await lstat(path);
-  } catch (error) {
-    if (isNodeErrorWithCode(error, "ENOENT")) {
-      return false;
+export type SmokeRunResultFor<
+  Note extends CanonicalReadinessNote | FixtureReadinessNote,
+  Scope extends "canonical" | "fixture"
+> =
+  | {
+      ok: true;
+      evidenceScope: Scope;
+      readinessNoteName: ReadinessNoteNameFor<Scope>;
+      status: "passed";
+      config: GlmProviderConfig;
+      endpoint: "https://www.dmxapi.cn/v1/chat/completions";
+      attempts: number;
+      responseUrl: "https://www.dmxapi.cn/v1/chat/completions";
+      completionNonempty: true;
+      readinessNotePath: string;
+      note: Note;
     }
-    throw error;
-  }
+  | {
+      ok: false;
+      evidenceScope: Scope;
+      readinessNoteName: ReadinessNoteNameFor<Scope>;
+      status: "failed";
+      config: GlmProviderConfig;
+      endpoint: "https://www.dmxapi.cn/v1/chat/completions";
+      attempts: number;
+      error: SmokeFailure;
+      readinessNotePath: string;
+      note: Note;
+    };
 
-  if (stat.isDirectory()) {
-    throw new Error("Readiness note path must be an owned regular file.");
-  }
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink > 1) {
-    try {
-      await unlink(path);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, "ENOENT")) {
-        throw error;
-      }
-    }
-    return false;
-  }
-  if (stat.size > MAX_PRIOR_READINESS_NOTE_BYTES) {
-    try {
-      await unlink(path);
-    } catch (error) {
-      if (!isNodeErrorWithCode(error, "ENOENT")) {
-        throw error;
-      }
-    }
-    return false;
-  }
-  return true;
-}
-
-async function assertSafeReadinessNoteTarget(path: string): Promise<void> {
-  try {
-    const stat = await lstat(path);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink > 1) {
-      throw new Error("Readiness note path must be an owned regular file.");
-    }
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT")) {
-      throw error;
-    }
-  }
-}
-
-async function existingOwnedDirectory(path: string, label: string): Promise<boolean> {
-  try {
-    const stat = await lstat(path);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      throw new Error(`Readiness ${label} path must be an owned directory.`);
-    }
-    return true;
-  } catch (error) {
-    if (isNodeErrorWithCode(error, "ENOENT")) {
-      return false;
-    }
-    throw error;
-  }
-}
-
-async function ensureOwnedDirectory(path: string, label: string): Promise<void> {
-  try {
-    const stat = await lstat(path);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      throw new Error(`Readiness ${label} path must be an owned directory.`);
-    }
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT")) {
-      throw error;
-    }
-    await mkdir(path, { mode: 0o700 });
-  }
-}
-
-function readOptionalRecord(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return undefined;
-  }
-  return value as Record<string, unknown>;
-}
-
-function isNodeErrorWithCode(error: unknown, code: string): error is Error & { code: string } {
-  return error instanceof Error && "code" in error && (error as Error & { code?: string }).code === code;
-}
+export type CanonicalSmokeRunResult = SmokeRunResultFor<CanonicalReadinessNote, "canonical">;
+export type FixtureSmokeRunResult = SmokeRunResultFor<FixtureReadinessNote, "fixture">;
+export type SmokeRunResult = CanonicalSmokeRunResult;

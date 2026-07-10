@@ -2,8 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmod,
   link,
+  lstat,
   mkdir,
+  mkdtemp,
   readFile,
+  rename,
   rm,
   symlink,
   truncate,
@@ -16,6 +19,10 @@ import {
   MAX_PRIOR_READINESS_NOTE_BYTES
 } from "./readiness-note";
 import {
+  API_TYPE,
+  CANONICAL_BASE_URL,
+  CANONICAL_SMOKE_MODEL,
+  CANONICAL_TARGET_MODEL,
   CLI_UNSUPPORTED_ARGUMENT_MESSAGE,
   DEFAULT_REPO_ROOT,
   DEFAULT_TIMEOUT_MS,
@@ -32,11 +39,9 @@ import {
   fixedNow,
   jsonResponse,
   makeFakeSecret,
-  passingReadinessNoteText,
   readReadinessNote,
   readReadinessStatus,
   readinessNotePath,
-  seedPassingReadinessNote,
   withCanonicalReadinessBackup
 } from "./test-helpers";
 
@@ -55,6 +60,40 @@ describe("glm provider canonical authority boundaries", () => {
   test("canonical public surface has no authority override options", () => {
     expect(runGlmProviderSmoke.length).toBe(0);
     expect(runGlmProviderSmokeFixture.length).toBe(1);
+  });
+
+  test("production exports expose no direct canonical writer and core has no write surface", async () => {
+    const productionNamespaces = [
+      await import("./smoke"),
+      await import("./canonical-smoke"),
+      await import("./fixture-smoke"),
+      await import("./readiness-note"),
+      await import("./smoke-core")
+    ];
+    for (const namespace of productionNamespaces) {
+      const forbiddenExports = Object.keys(namespace).filter((name) =>
+        /write.*canonical|canonical.*writer|writecanonical|seedpassingreadiness|passingreadinessnotetext/i.test(name)
+      );
+      expect(forbiddenExports).toEqual([]);
+    }
+
+    const testHelpers = await import("./test-helpers");
+    expect("seedPassingReadinessNote" in testHelpers).toBe(false);
+    expect("passingReadinessNoteText" in testHelpers).toBe(false);
+
+    const coreSource = await readFile(join(import.meta.dir, "smoke-core.ts"), "utf8");
+    for (const forbidden of [
+      "writeFile",
+      "appendFile",
+      "rename",
+      "unlink",
+      "mkdir",
+      "rm(",
+      "rmdir",
+      "createWriteStream"
+    ]) {
+      expect(coreSource.includes(forbidden)).toBe(false);
+    }
   });
 
   test("fixture smoke writes only fixture readiness evidence", async () => {
@@ -184,6 +223,124 @@ describe("glm provider canonical authority boundaries", () => {
     });
   });
 
+  test("unsupported CLI removes symlinked canonical workspace without mutating external pass", async () => {
+    await withCanonicalWorkspaceEntryBackup(async () => {
+      const externalWorkspace = await tempRoots.createTempRepo();
+      const externalNote = join(externalWorkspace.repoRoot, "readiness", DEFAULT_READINESS_NOTE_NAME);
+      const externalContent = passingReadinessNoteText();
+      await mkdir(join(externalWorkspace.repoRoot, "readiness"), { recursive: true });
+      await writeFile(externalNote, externalContent, "utf8");
+      await symlink(externalWorkspace.repoRoot, join(DEFAULT_REPO_ROOT, "workspace"));
+
+      const child = runSmokeCli(["--repo-root", externalWorkspace.repoRoot], {
+        ...process.env,
+        [GLM_API_KEY_ENV]: makeFakeSecret()
+      });
+      const { exitCode, stdout, stderr } = await collectChild(child);
+
+      expect(exitCode).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toBe(`GLM provider smoke failed: ${CLI_UNSUPPORTED_ARGUMENT_MESSAGE}\n`);
+      expectNoExternalText(`${stdout}${stderr}`, ["--repo-root", externalWorkspace.repoRoot]);
+      expect(await pathExists(join(DEFAULT_REPO_ROOT, "workspace"))).toBe(false);
+      expect(await readFile(externalNote, "utf8")).toBe(externalContent);
+      expect(await readReadinessStatus(DEFAULT_REPO_ROOT)).not.toBe("passed");
+    });
+  });
+
+  test("missing-key CLI replaces symlinked canonical workspace with current failed note", async () => {
+    await withCanonicalWorkspaceEntryBackup(async () => {
+      const externalWorkspace = await tempRoots.createTempRepo();
+      const externalNote = join(externalWorkspace.repoRoot, "readiness", DEFAULT_READINESS_NOTE_NAME);
+      const externalContent = passingReadinessNoteText();
+      await mkdir(join(externalWorkspace.repoRoot, "readiness"), { recursive: true });
+      await writeFile(externalNote, externalContent, "utf8");
+      await symlink(externalWorkspace.repoRoot, join(DEFAULT_REPO_ROOT, "workspace"));
+
+      const child = runSmokeCli([], envWithoutGlmKey());
+      const { exitCode, stdout, stderr } = await collectChild(child);
+      const note = await readReadinessNote(DEFAULT_REPO_ROOT);
+
+      expect(exitCode).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain(`Missing required environment variable ${GLM_API_KEY_ENV}.`);
+      expect(await isLocalDirectory(join(DEFAULT_REPO_ROOT, "workspace"))).toBe(true);
+      expect(await isLocalDirectory(join(DEFAULT_REPO_ROOT, "workspace", "readiness"))).toBe(true);
+      expect(note.status).toBe("failed");
+      expect(note.failure).toMatchObject({ category: "missing_key" });
+      expect(await readFile(externalNote, "utf8")).toBe(externalContent);
+    });
+  });
+
+  test("unsupported CLI removes symlinked canonical readiness directory without mutating external pass", async () => {
+    await withCanonicalWorkspaceEntryBackup(async () => {
+      const externalReadiness = await tempRoots.createTempRepo();
+      const externalNote = join(externalReadiness.repoRoot, DEFAULT_READINESS_NOTE_NAME);
+      const externalContent = passingReadinessNoteText();
+      await mkdir(join(DEFAULT_REPO_ROOT, "workspace"), { recursive: true });
+      await writeFile(externalNote, externalContent, "utf8");
+      await symlink(externalReadiness.repoRoot, join(DEFAULT_REPO_ROOT, "workspace", "readiness"));
+
+      const child = runSmokeCli(["--config", "/tmp/ignored.json"], {
+        ...process.env,
+        [GLM_API_KEY_ENV]: makeFakeSecret()
+      });
+      const { exitCode, stdout, stderr } = await collectChild(child);
+
+      expect(exitCode).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toBe(`GLM provider smoke failed: ${CLI_UNSUPPORTED_ARGUMENT_MESSAGE}\n`);
+      expectNoExternalText(`${stdout}${stderr}`, ["--config", "/tmp/ignored.json"]);
+      expect(await isLocalDirectory(join(DEFAULT_REPO_ROOT, "workspace"))).toBe(true);
+      expect(await pathExists(join(DEFAULT_REPO_ROOT, "workspace", "readiness"))).toBe(false);
+      expect(await readFile(externalNote, "utf8")).toBe(externalContent);
+      expect(await readReadinessStatus(DEFAULT_REPO_ROOT)).not.toBe("passed");
+    });
+  });
+
+  test("missing-key CLI replaces symlinked canonical readiness directory with current failed note", async () => {
+    await withCanonicalWorkspaceEntryBackup(async () => {
+      const externalReadiness = await tempRoots.createTempRepo();
+      const externalNote = join(externalReadiness.repoRoot, DEFAULT_READINESS_NOTE_NAME);
+      const externalContent = passingReadinessNoteText();
+      await mkdir(join(DEFAULT_REPO_ROOT, "workspace"), { recursive: true });
+      await writeFile(externalNote, externalContent, "utf8");
+      await symlink(externalReadiness.repoRoot, join(DEFAULT_REPO_ROOT, "workspace", "readiness"));
+
+      const child = runSmokeCli([], envWithoutGlmKey());
+      const { exitCode } = await collectChild(child);
+      const note = await readReadinessNote(DEFAULT_REPO_ROOT);
+
+      expect(exitCode).toBe(1);
+      expect(await isLocalDirectory(join(DEFAULT_REPO_ROOT, "workspace", "readiness"))).toBe(true);
+      expect(note.status).toBe("failed");
+      expect(note.failure).toMatchObject({ category: "missing_key" });
+      expect(await readFile(externalNote, "utf8")).toBe(externalContent);
+    });
+  });
+
+  test("missing-key CLI replaces local non-directory canonical ancestors with owned dirs", async () => {
+    await withCanonicalWorkspaceEntryBackup(async () => {
+      await writeFile(join(DEFAULT_REPO_ROOT, "workspace"), "not a directory", "utf8");
+
+      const workspaceFileChild = runSmokeCli([], envWithoutGlmKey());
+      const first = await collectChild(workspaceFileChild);
+      expect(first.exitCode).toBe(1);
+      expect(await isLocalDirectory(join(DEFAULT_REPO_ROOT, "workspace"))).toBe(true);
+      expect((await readReadinessNote(DEFAULT_REPO_ROOT)).status).toBe("failed");
+
+      await rm(join(DEFAULT_REPO_ROOT, "workspace"), { recursive: true, force: true });
+      await mkdir(join(DEFAULT_REPO_ROOT, "workspace"), { recursive: true });
+      await writeFile(join(DEFAULT_REPO_ROOT, "workspace", "readiness"), "not a directory", "utf8");
+
+      const readinessFileChild = runSmokeCli([], envWithoutGlmKey());
+      const second = await collectChild(readinessFileChild);
+      expect(second.exitCode).toBe(1);
+      expect(await isLocalDirectory(join(DEFAULT_REPO_ROOT, "workspace", "readiness"))).toBe(true);
+      expect((await readReadinessNote(DEFAULT_REPO_ROOT)).status).toBe("failed");
+    });
+  });
+
   test("canonical CLI provider failure omits provider body, status text, headers, and secrets", async () => {
     await withCanonicalReadinessBackup(async () => {
       const fakeSecret = makeFakeSecret();
@@ -307,4 +464,78 @@ function envWithoutGlmKey(): Record<string, string | undefined> {
   const env = { ...process.env };
   delete env[GLM_API_KEY_ENV];
   return env;
+}
+
+async function seedPassingReadinessNote(repoRoot: string): Promise<void> {
+  await mkdir(join(repoRoot, "workspace", "readiness"), { recursive: true });
+  await writeFile(readinessNotePath(repoRoot), passingReadinessNoteText(), "utf8");
+}
+
+function passingReadinessNoteText(): string {
+  return `${JSON.stringify({
+    schema_version: "m1.glm-provider-smoke.v1",
+    kind: "glm_provider_smoke",
+    evidence_scope: "canonical",
+    checked_at: "2026-07-08T10:00:00.000Z",
+    provider_name: "glm-dmxapi",
+    api_type: API_TYPE,
+    base_url: CANONICAL_BASE_URL,
+    endpoint: "https://www.dmxapi.cn/v1/chat/completions",
+    smoke_model: CANONICAL_SMOKE_MODEL,
+    target_model_id: CANONICAL_TARGET_MODEL,
+    status: "passed",
+    model_admission: false,
+    secret_ref: GLM_API_KEY_REF,
+    attempts: 1,
+    configured_base_url_hit: true,
+    completion_nonempty: true,
+    response_url: "https://www.dmxapi.cn/v1/chat/completions"
+  })}\n`;
+}
+
+async function withCanonicalWorkspaceEntryBackup<T>(run: () => Promise<T>): Promise<T> {
+  const workspacePath = join(DEFAULT_REPO_ROOT, "workspace");
+  const backupParent = await mkdtemp(join(DEFAULT_REPO_ROOT, ".glm-provider-workspace-backup-"));
+  const backupPath = join(backupParent, "workspace");
+  let hadOriginal = false;
+  try {
+    await rename(workspacePath, backupPath);
+    hadOriginal = true;
+  } catch (error) {
+    if (!isNodeErrorWithCode(error, "ENOENT")) {
+      await rm(backupParent, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  try {
+    return await run();
+  } finally {
+    await rm(workspacePath, { recursive: true, force: true });
+    if (hadOriginal) {
+      await rename(backupPath, workspacePath);
+    }
+    await rm(backupParent, { recursive: true, force: true });
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT")) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function isLocalDirectory(path: string): Promise<boolean> {
+  const stat = await lstat(path);
+  return stat.isDirectory() && !stat.isSymbolicLink();
+}
+
+function isNodeErrorWithCode(error: unknown, code: string): error is Error & { code: string } {
+  return error instanceof Error && "code" in error && (error as Error & { code?: string }).code === code;
 }

@@ -3,7 +3,6 @@ import { link, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/prom
 import { join } from "node:path";
 import { loadConfig as loadZeroConfig } from "../../zero/packages/core/src/config/loader";
 import { ModelRouter } from "../../zero/packages/model/src/router";
-import { writeFixtureReadinessNote } from "./readiness-note";
 import {
   API_TYPE,
   DEFAULT_PROVIDER_CONFIG_PATH,
@@ -737,32 +736,40 @@ describe("glm provider config and smoke", () => {
     expect(await readdir(outsideWorkspace)).toEqual([]);
   });
 
-  test("direct readiness writer rejects final note symlink without touching the target", async () => {
-    const repo = await tempRoots.createTempRepo();
+  test("fixture readiness storage rejects final note symlink without touching the target", async () => {
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     const outsideWorkspace = (await tempRoots.createTempRepo()).repoRoot;
     const externalNote = join(outsideWorkspace, "external-note.json");
     await writeFile(externalNote, "unchanged", "utf8");
     await mkdir(join(repo.repoRoot, "workspace", "readiness"), { recursive: true });
     await symlink(externalNote, fixtureNotePath(repo.repoRoot));
 
-    await expect(writeFixtureReadinessNote(repo.repoRoot, { status: "failed" })).rejects.toThrow(
-      "Readiness note path must be an owned regular file."
-    );
+    await expect(
+      runGlmProviderSmokeFixture({
+        repoRoot: repo.repoRoot,
+        env: {},
+        now: fixedNow
+      })
+    ).rejects.toThrow("Readiness note path must be an owned regular file.");
 
     expect(await readFile(externalNote, "utf8")).toBe("unchanged");
   });
 
-  test("direct readiness writer rejects final note hardlink without touching the target", async () => {
-    const repo = await tempRoots.createTempRepo();
+  test("fixture readiness storage rejects final note hardlink without touching the target", async () => {
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     const outsideWorkspace = (await tempRoots.createTempRepo()).repoRoot;
     const externalNote = join(outsideWorkspace, "external-note.json");
     await writeFile(externalNote, "unchanged", "utf8");
     await mkdir(join(repo.repoRoot, "workspace", "readiness"), { recursive: true });
     await link(externalNote, fixtureNotePath(repo.repoRoot));
 
-    await expect(writeFixtureReadinessNote(repo.repoRoot, { status: "failed" })).rejects.toThrow(
-      "Readiness note path must be an owned regular file."
-    );
+    await expect(
+      runGlmProviderSmokeFixture({
+        repoRoot: repo.repoRoot,
+        env: {},
+        now: fixedNow
+      })
+    ).rejects.toThrow("Readiness note path must be an owned regular file.");
 
     expect(await readFile(externalNote, "utf8")).toBe("unchanged");
   });
