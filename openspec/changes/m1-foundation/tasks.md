@@ -287,7 +287,7 @@
       - File IO / path safety / overwrite: selected - readiness notes are written under `workspace/readiness/` only and must not enter git.
       - Schema / columns / units / field names: selected - config keys, SecretRef shape, model ids, and readiness note fields are structured contracts.
       - Auth / permissions / secrets: selected - script consumes a real API key and must never echo or persist it.
-      - Error handling / rollback / partial outputs: selected - missing key and provider failure produce stable nonzero exits and redacted notes.
+      - Error handling / rollback / partial outputs: selected - missing key and provider failure produce stable nonzero exits; result/readiness/CLI failure evidence contains only locally constructed structured facts and excludes provider response body, status text, headers, and external exception text.
       - Resource limits / large input / discovery: selected - network call uses bounded prompt, timeout, retry count, and response parsing.
       - Legacy compatibility / examples: selected - existing checks and task-api secret redaction behavior remain compatible.
       - Release / packaging / dependency compatibility: selected - no new runtime dependency beyond existing Bun/Node fetch, or any manifest-only script change must leave lockfile unchanged.
@@ -302,12 +302,12 @@
       - Storage/cache/query: ignored `workspace/readiness/` note only; no StackLock/admission record.
       - Public routes/entrypoints: smoke script CLI/package script.
       - Frontend/downstream consumers: #38 acceptance consumes the redacted readiness note and PR evidence only.
-      - Failure paths/rollback/stale state: missing key/provider failure exits nonzero with redacted message; failed smoke must not write or preserve a passing readiness note; owned final-entry symlink/hardlink is unlinked without following/mutating its external target.
-      - Evidence/audit/readiness: PR summary and readiness note include endpoint/base URL, model id, status, timestamp, and SecretRef only.
+      - Failure paths/rollback/stale state: missing key/provider failure exits nonzero with a locally constructed structured message; failed smoke must not write or preserve a passing readiness note; owned final-entry symlink/hardlink is unlinked without following/mutating its external target.
+      - Evidence/audit/readiness: PR summary and readiness note include endpoint/base URL, model id, status, timestamp, SecretRef, and bounded local failure facts only; provider response body, status text, headers, and external exception text never enter result/readiness/CLI evidence.
       - Regression rows:
         - Valid `GLM_API_KEY` (locally mapped from `DMXAPI_KEY`) + DMXAPI endpoint -> nonempty completion, configured base URL assertion passes, exit 0, redacted readiness note says smoke passed.
         - Missing `GLM_API_KEY` -> nonzero exit, message names `GLM_API_KEY`, no key value, no passing note.
-        - Provider returns non-2xx or empty completion twice -> nonzero exit with redacted failure summary and no passing note.
+        - Provider returns non-2xx twice with a non-secret sentinel plus secret/control-looking body text -> nonzero exit; result/readiness/stdout/stderr omit all provider text while retaining local category, numeric status, attempts, endpoint facts, and no passing note. Empty completion twice follows the same local-facts-only evidence rule.
         - Fake fetch timeout/AbortError -> bounded timeout, at most one retry, nonzero exit, redacted failure summary, and no passing readiness note.
         - Inspect config/log/readiness note/script output/committed test artifacts -> only `env:GLM_API_KEY` SecretRef or non-secret environment variable names appear, and no secret value is persisted.
         - Post-smoke repo state -> readiness note/PR evidence contain `smoke_model=deepseek-v4-pro-guan`, `target_model_id=glm-5.2`, and `model_admission=false`; no StackLock/admission record, `git -C zero diff --quiet`, `test -z "$(git ls-files workspace)"`.
@@ -317,7 +317,7 @@
         - Dependency compatibility -> package manifests and lockfile prove no new runtime dependency beyond existing Bun/Node fetch; any script-only manifest change has no lockfile drift.
     - Evidence floor (#37):
       - Config test parses provider config and asserts `api_type=openai_chat_completions`, `base_url=https://www.dmxapi.cn/v1`, `api_key_ref=env:GLM_API_KEY`, target-only provider model table/runtime `fallback_chain`, raw `smoke_model=fallback_smoke_model=deepseek-v4-pro-guan`, and `target_model_id=glm-5.2`; Zero loader/registry/router fixtures prove the carrier is absent from list/resolve/switch/fallback.
-      - Smoke self-test covers missing `GLM_API_KEY`, fake fetch success/failure, and fake fetch timeout/AbortError without network or secret leakage; timeout path proves bounded timeout plus at most one retry.
+      - Smoke self-test covers missing `GLM_API_KEY`, fake fetch success/failure, and fake fetch timeout/AbortError without network or secret leakage; HTTP failure uses a provider-body sentinel and proves result/readiness/stdout/stderr omit response body, status text, headers, and external exception text; timeout path proves bounded timeout plus at most one retry.
       - Real local smoke command runs with `GLM_API_KEY="$DMXAPI_KEY"` and records only redacted evidence: nonempty completion, base URL hit, exit 0.
       - Readiness note parse test confirms no secret value and no noncanonical key ref, both carrier/target model ids are explicit, `model_admission=false`, and no model-admission/StackLock record.
       - Dependency compatibility proof checks `git diff -- package.json bun.lock packages/*/package.json` (or equivalent) to confirm no new runtime dependency / no lockfile drift beyond an optional script entry.

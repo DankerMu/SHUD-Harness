@@ -73,6 +73,7 @@ export type SmokeFailureCategory =
 export interface SmokeFailure {
   category: SmokeFailureCategory;
   message: string;
+  http_status?: number;
 }
 
 export interface ReadinessNote {
@@ -140,9 +141,26 @@ interface AttemptFailure {
 
 type AttemptResult = AttemptSuccess | AttemptFailure;
 
+class LocalSmokeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LocalSmokeError";
+  }
+}
+
 export async function loadProviderConfig(providerPath = DEFAULT_PROVIDER_CONFIG_PATH) {
-  const raw = await readFile(providerPath, "utf8");
-  const parsed = JSON.parse(raw) as unknown;
+  let raw: string;
+  try {
+    raw = await readFile(providerPath, "utf8");
+  } catch {
+    throw new LocalSmokeError("Provider config could not be read.");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new LocalSmokeError("Provider config was not valid JSON.");
+  }
   return parseProviderConfig(parsed);
 }
 
@@ -151,15 +169,15 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
   const defaultProvider = readString(document, "default_provider", "provider config");
   const defaultModel = readString(document, "default_model", "provider config");
   if (defaultProvider !== CANONICAL_PROVIDER_NAME) {
-    throw new Error(`Invalid provider default_provider: expected ${CANONICAL_PROVIDER_NAME}.`);
+    throw new LocalSmokeError(`Invalid provider default_provider: expected ${CANONICAL_PROVIDER_NAME}.`);
   }
   const providers = readRecord(document.providers, "provider config.providers");
   const providerNames = Object.keys(providers);
   if (providerNames.length !== 1 || providerNames[0] !== CANONICAL_PROVIDER_NAME) {
-    throw new Error("Provider config.providers must contain only the canonical GLM provider.");
+    throw new LocalSmokeError("Provider config.providers must contain only the canonical GLM provider.");
   }
   if (document.model_pools !== undefined) {
-    throw new Error("Provider config must not define Zero model pools.");
+    throw new LocalSmokeError("Provider config must not define Zero model pools.");
   }
   const provider = readRecord(providers[CANONICAL_PROVIDER_NAME], `provider ${defaultProvider}`);
 
@@ -181,48 +199,48 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
   const models = readRecord(provider.models, `${defaultProvider}.models`);
   const modelNames = Object.keys(models);
   if (modelNames.length !== 1 || modelNames[0] !== "target") {
-    throw new Error("Provider models must contain only the canonical GLM target model.");
+    throw new LocalSmokeError("Provider models must contain only the canonical GLM target model.");
   }
   const target = readRecord(models.target, `${defaultProvider}.models.target`);
 
   if (defaultModel !== CANONICAL_TARGET_MODEL_REF) {
-    throw new Error("Provider default_model must target the canonical GLM target ref.");
+    throw new LocalSmokeError("Provider default_model must target the canonical GLM target ref.");
   }
   if (apiType !== API_TYPE) {
-    throw new Error(`Invalid provider api_type: expected ${API_TYPE}.`);
+    throw new LocalSmokeError(`Invalid provider api_type: expected ${API_TYPE}.`);
   }
   if (baseUrl !== CANONICAL_BASE_URL) {
-    throw new Error(`Invalid provider base_url: expected ${CANONICAL_BASE_URL}.`);
+    throw new LocalSmokeError(`Invalid provider base_url: expected ${CANONICAL_BASE_URL}.`);
   }
   if (readString(auth, "type", `${defaultProvider}.auth`) !== "api_key") {
-    throw new Error("Provider auth.type must be api_key.");
+    throw new LocalSmokeError("Provider auth.type must be api_key.");
   }
   if (apiKeyRef !== GLM_API_KEY_REF) {
-    throw new Error(`Invalid provider auth.api_key_ref: expected ${GLM_API_KEY_REF}.`);
+    throw new LocalSmokeError(`Invalid provider auth.api_key_ref: expected ${GLM_API_KEY_REF}.`);
   }
   if (
     fallbackChain.length !== 1 ||
     fallbackChain[0] !== CANONICAL_TARGET_MODEL_REF
   ) {
-    throw new Error("Provider fallback_chain must contain only the canonical GLM target ref.");
+    throw new LocalSmokeError("Provider fallback_chain must contain only the canonical GLM target ref.");
   }
   if (taskClosureModel !== CANONICAL_TARGET_MODEL_REF) {
-    throw new Error("Provider task_closure_model must target the canonical GLM target ref.");
+    throw new LocalSmokeError("Provider task_closure_model must target the canonical GLM target ref.");
   }
   if (contextCompactionModel !== CANONICAL_TARGET_MODEL_REF) {
-    throw new Error("Provider context_compaction_model must target the canonical GLM target ref.");
+    throw new LocalSmokeError("Provider context_compaction_model must target the canonical GLM target ref.");
   }
   if (fallbackSmokeModel !== CANONICAL_SMOKE_MODEL) {
-    throw new Error("Provider fallback_smoke_model must be the raw smoke carrier model id.");
+    throw new LocalSmokeError("Provider fallback_smoke_model must be the raw smoke carrier model id.");
   }
   if (smokeModel !== CANONICAL_SMOKE_MODEL) {
-    throw new Error(`Invalid provider smoke_model: expected ${CANONICAL_SMOKE_MODEL}.`);
+    throw new LocalSmokeError(`Invalid provider smoke_model: expected ${CANONICAL_SMOKE_MODEL}.`);
   }
   if (targetModelId !== CANONICAL_TARGET_MODEL) {
-    throw new Error(`Invalid provider target_model_id: expected ${CANONICAL_TARGET_MODEL}.`);
+    throw new LocalSmokeError(`Invalid provider target_model_id: expected ${CANONICAL_TARGET_MODEL}.`);
   }
   if (readString(target, "model_id", `${defaultProvider}.models.target`) !== targetModelId) {
-    throw new Error("Provider target model fields do not agree.");
+    throw new LocalSmokeError("Provider target model fields do not agree.");
   }
   readExactlyFalse(target, "admission", `${defaultProvider}.models.target`);
 
@@ -371,7 +389,7 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
       };
     }
 
-    lastFailure = redactFailure(result.failure, apiKey);
+    lastFailure = result.failure;
   }
 
   const note = createReadinessNote({
@@ -422,16 +440,6 @@ export function buildChatCompletionPayload(config: GlmProviderConfig): Record<st
     temperature: 0,
     stream: false
   };
-}
-
-export function redactText(text: string, secrets: string[]): string {
-  let redacted = text;
-  for (const secret of secrets) {
-    if (secret.length > 0) {
-      redacted = redacted.split(secret).join("[REDACTED]");
-    }
-  }
-  return redacted.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [REDACTED]");
 }
 
 export function createReadinessNote(input: {
@@ -502,23 +510,21 @@ async function sendChatCompletion(input: {
           failure: endpointValidation.failure
         };
       }
+      if (!response.ok) {
+        return {
+          ok: false,
+          failure: {
+            category: "http_error",
+            message: `Provider returned HTTP ${response.status} from configured endpoint.`,
+            http_status: response.status
+          }
+        };
+      }
       const responseText = await readResponseTextWithLimit(
         response,
         MAX_RESPONSE_BYTES,
         controller.signal
       );
-      if (!response.ok) {
-        const snippet = responseText.trim().slice(0, 300);
-        return {
-          ok: false,
-          failure: {
-            category: "http_error",
-            message: snippet
-              ? `HTTP ${response.status} from configured endpoint: ${snippet}`
-              : `HTTP ${response.status} from configured endpoint.`
-          }
-        };
-      }
 
       let responseJson: unknown;
       try {
@@ -703,9 +709,16 @@ function failureFromError(error: unknown): SmokeFailure {
     };
   }
 
+  if (isAbortError(error)) {
+    return {
+      category: "timeout",
+      message: "Provider request timed out."
+    };
+  }
+
   return {
-    category: isAbortError(error) ? "timeout" : "network_error",
-    message: failureMessage(error)
+    category: "network_error",
+    message: "Provider request failed before a valid response was received."
   };
 }
 
@@ -724,9 +737,14 @@ function createAbortError(): Error {
 
 function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
-  const url = new URL(trimmed);
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new LocalSmokeError("Provider base_url must be a valid URL.");
+  }
   if (url.protocol !== "https:") {
-    throw new Error("Provider base_url must use https.");
+    throw new LocalSmokeError("Provider base_url must use https.");
   }
   return url.toString().replace(/\/+$/, "");
 }
@@ -752,27 +770,13 @@ function extractCompletionText(raw: unknown): string {
   return "";
 }
 
-function redactFailure(failure: SmokeFailure, apiKey: string): SmokeFailure {
-  return {
-    category: failure.category,
-    message: redactText(failure.message, [apiKey])
-  };
-}
-
-function failureMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.name === "AbortError" ? "Provider request timed out." : error.message;
-  }
-  return "Provider request failed.";
-}
-
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
 function readRecord(value: unknown, context: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`Expected object at ${context}.`);
+    throw new LocalSmokeError(`Expected object at ${context}.`);
   }
   return value as Record<string, unknown>;
 }
@@ -787,25 +791,25 @@ function readOptionalRecord(value: unknown): Record<string, unknown> | undefined
 function readString(record: Record<string, unknown>, key: string, context: string): string {
   const value = record[key];
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`Expected nonempty string at ${context}.${key}.`);
+    throw new LocalSmokeError(`Expected nonempty string at ${context}.${key}.`);
   }
   return value;
 }
 
 function readExactlyFalse(record: Record<string, unknown>, key: string, context: string): false {
   if (record[key] !== false) {
-    throw new Error(`Expected false at ${context}.${key}.`);
+    throw new LocalSmokeError(`Expected false at ${context}.${key}.`);
   }
   return false;
 }
 
 function readStringArray(value: unknown, context: string): string[] {
   if (!Array.isArray(value) || value.length === 0) {
-    throw new Error(`Expected nonempty string array at ${context}.`);
+    throw new LocalSmokeError(`Expected nonempty string array at ${context}.`);
   }
   const strings = value.map((item, index) => {
     if (typeof item !== "string" || item.trim().length === 0) {
-      throw new Error(`Expected nonempty string at ${context}[${index}].`);
+      throw new LocalSmokeError(`Expected nonempty string at ${context}[${index}].`);
     }
     return item;
   });
@@ -834,12 +838,12 @@ function parseCliArgs(args: string[]): {
       printHelp();
       process.exit(0);
     } else {
-      throw new Error(`Unknown or incomplete argument: ${arg}`);
+      throw new LocalSmokeError(`Unknown or incomplete argument: ${arg}`);
     }
   }
 
   if (parsed.timeoutMs !== undefined && (!Number.isFinite(parsed.timeoutMs) || parsed.timeoutMs <= 0)) {
-    throw new Error("--timeout-ms must be a positive integer.");
+    throw new LocalSmokeError("--timeout-ms must be a positive integer.");
   }
 
   return parsed;
@@ -887,8 +891,10 @@ async function main(): Promise<void> {
     console.error(`GLM provider smoke failed: ${result.error.message}`);
     process.exitCode = 1;
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown smoke failure.";
-    console.error(`GLM provider smoke failed: ${redactText(message, [])}`);
+    const message = error instanceof LocalSmokeError
+      ? error.message
+      : "Smoke command failed before provider readiness could be recorded.";
+    console.error(`GLM provider smoke failed: ${message}`);
     process.exitCode = 1;
   }
 }

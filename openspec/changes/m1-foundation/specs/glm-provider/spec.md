@@ -34,7 +34,7 @@ Canonical readiness evidence MUST load exactly `<repoRoot>/config/providers/glm.
 
 ### Requirement: 连通冒烟
 
-系统 SHALL 提供冒烟脚本：以最小 prompt 经配置的 provider 完成一次往返，得到非空 completion，且请求实际命中配置的 `base_url`，脚本 exit 0。失败允许重试一次并记录。
+系统 SHALL 提供冒烟脚本：以最小 prompt 经配置的 provider 完成一次往返，得到非空 completion，且请求实际命中配置的 `base_url`，脚本 exit 0。失败允许重试一次并记录。失败结果、readiness note 与 CLI 输出 MUST 仅包含本地构造的结构化事实，MUST NOT 持久化或输出 provider response body、status text、headers 或外部异常原文。
 
 每次运行前 SHALL 使旧 passing note 失效。若 owned `workspace/readiness` 下的 canonical final entry 是 symlink、hardlink 或其他不安全非目录项，失效逻辑 SHALL 仅移除该目录项、MUST NOT 跟随或改写外部 target；随后发布当前结果或保持 canonical path 不可读为 pass。
 

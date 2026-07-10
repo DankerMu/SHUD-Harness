@@ -291,13 +291,22 @@ describe("glm provider config and smoke", () => {
     ]);
   });
 
-  test("http failure retries once, redacts provider text, and does not write a passing note", async () => {
+  test("http failure retries once, omits provider text, and does not write a passing note", async () => {
     const repo = await createTempRepoWithProviderConfig();
     const fakeSecret = makeFakeSecret();
+    const providerSentinel = "ROUND4_PROVIDER_SENTINEL";
+    const forbiddenEvidence = [providerSentinel, fakeSecret, "BEGIN PRIVATE KEY"];
     let attempts = 0;
     const fetchImpl: SmokeFetch = async () => {
       attempts += 1;
-      return textResponse(`provider echoed ${fakeSecret}`, { status: 502 });
+      return textResponse(
+        `provider body ${providerSentinel} ${fakeSecret} -----BEGIN PRIVATE KEY-----`,
+        {
+          status: 502,
+          statusText: `${providerSentinel} status text`,
+          headers: { "x-provider-debug": providerSentinel }
+        }
+      );
     };
 
     const result = await runGlmProviderSmoke({
@@ -311,15 +320,86 @@ describe("glm provider config and smoke", () => {
     expect(attempts).toBe(2);
     expect(result.attempts).toBe(2);
     if (!result.ok) {
-      expect(result.error.category).toBe("http_error");
-      expect(result.error.message).toContain("HTTP 502");
-      expect(result.error.message).not.toContain(fakeSecret);
-      expect(result.error.message).toContain("[REDACTED]");
+      expect(result.error).toEqual({
+        category: "http_error",
+        message: "Provider returned HTTP 502 from configured endpoint.",
+        http_status: 502
+      });
     }
+    expectNoExternalText(JSON.stringify(result), forbiddenEvidence);
     const noteText = await readFile(readinessNotePath(repo.repoRoot), "utf8");
     const note = JSON.parse(noteText) as Record<string, unknown>;
     expect(note.status).toBe("failed");
-    expect(noteText).not.toContain(fakeSecret);
+    expect(note).toMatchObject({
+      endpoint: CANONICAL_ENDPOINT,
+      attempts: MAX_RETRIES + 1,
+      failure: {
+        category: "http_error",
+        message: "Provider returned HTTP 502 from configured endpoint.",
+        http_status: 502
+      }
+    });
+    expectNoExternalText(noteText, forbiddenEvidence);
+
+    const cliRepo = await createTempRepoWithProviderConfig();
+    const preloadPath = join(cliRepo.repoRoot, "fetch-preload.ts");
+    await writeFile(preloadPath, cliFetchPreload(providerSentinel, fakeSecret), "utf8");
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--preload",
+        preloadPath,
+        join(import.meta.dir, "smoke.ts"),
+        "--repo-root",
+        cliRepo.repoRoot
+      ],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, [GLM_API_KEY_ENV]: fakeSecret }
+      }
+    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text()
+    ]);
+    expect(exitCode).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("GLM provider smoke failed: Provider returned HTTP 503");
+    expectNoExternalText(`${stdout}${stderr}`, forbiddenEvidence);
+    const cliNoteText = await readFile(readinessNotePath(cliRepo.repoRoot), "utf8");
+    expect(cliNoteText).toContain('"http_status": 503');
+    expectNoExternalText(cliNoteText, forbiddenEvidence);
+  });
+
+  test("hostile external fetch exceptions use stable local failure evidence", async () => {
+    const repo = await createTempRepoWithProviderConfig();
+    const fakeSecret = makeFakeSecret();
+    const providerSentinel = "ROUND4_EXCEPTION_SENTINEL";
+    const fetchImpl: SmokeFetch = async () => {
+      throw new Error(`external ${providerSentinel} Authorization: Bearer ${fakeSecret}`);
+    };
+
+    const result = await runGlmProviderSmoke({
+      repoRoot: repo.repoRoot,
+      env: { [GLM_API_KEY_ENV]: fakeSecret },
+      fetchImpl,
+      now: fixedNow
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toEqual({
+        category: "network_error",
+        message: "Provider request failed before a valid response was received."
+      });
+    }
+    expectNoExternalText(JSON.stringify(result), [providerSentinel, fakeSecret]);
+    expectNoExternalText(await readFile(readinessNotePath(repo.repoRoot), "utf8"), [
+      providerSentinel,
+      fakeSecret
+    ]);
   });
 
   test("redirected provider response cannot produce a passing readiness note", async () => {
@@ -443,109 +523,61 @@ describe("glm provider config and smoke", () => {
     expect(note.model_admission).toBe(false);
   });
 
-  test("reasoning_content alone is not a Zero-visible completion", async () => {
-    const repo = await createTempRepoWithProviderConfig();
-    let attempts = 0;
-    const fetchImpl: SmokeFetch = async () => {
-      attempts += 1;
-      return jsonResponse({
+  for (const fixture of [
+    {
+      name: "reasoning_content alone",
+      body: {
         id: "chatcmpl-reasoning-only",
         model: "deepseek-v4-pro-guan",
-        choices: [
-          {
-            message: {
-              role: "assistant",
-              content: "",
-              reasoning_content: "ready via reasoning field"
-            },
-            finish_reason: "stop"
-          }
-        ]
-      });
-    };
-
-    const result = await runGlmProviderSmoke({
-      repoRoot: repo.repoRoot,
-      env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
-      fetchImpl,
-      now: fixedNow
-    });
-
-    expect(result.ok).toBe(false);
-    expect(attempts).toBe(MAX_RETRIES + 1);
-    if (!result.ok) {
-      expect(result.error.category).toBe("empty_completion");
-    }
-    const note = await readReadinessNote(repo.repoRoot);
-    expect(note.status).toBe("failed");
-    expect(note.completion_nonempty).toBe(false);
-  });
-
-  test("legacy choice.text alone is not a Zero-visible completion", async () => {
-    const repo = await createTempRepoWithProviderConfig();
-    let attempts = 0;
-    const fetchImpl: SmokeFetch = async () => {
-      attempts += 1;
-      return jsonResponse({
+        choices: [{
+          message: { role: "assistant", content: "", reasoning_content: "ready via reasoning" },
+          finish_reason: "stop"
+        }]
+      }
+    },
+    {
+      name: "legacy choice.text alone",
+      body: {
         id: "chatcmpl-legacy-text",
         model: "deepseek-v4-pro-guan",
         choices: [{ text: "ready via legacy text", finish_reason: "stop" }]
-      });
-    };
-
-    const result = await runGlmProviderSmoke({
-      repoRoot: repo.repoRoot,
-      env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
-      fetchImpl,
-      now: fixedNow
-    });
-
-    expect(result.ok).toBe(false);
-    expect(attempts).toBe(MAX_RETRIES + 1);
-    if (!result.ok) {
-      expect(result.error.category).toBe("empty_completion");
-    }
-    const note = await readReadinessNote(repo.repoRoot);
-    expect(note.status).toBe("failed");
-    expect(note.completion_nonempty).toBe(false);
-  });
-
-  test("content array response is not accepted as Zero-visible text", async () => {
-    const repo = await createTempRepoWithProviderConfig();
-    let attempts = 0;
-    const fetchImpl: SmokeFetch = async () => {
-      attempts += 1;
-      return jsonResponse({
+      }
+    },
+    {
+      name: "content array response",
+      body: {
         id: "chatcmpl-content-array",
         model: "deepseek-v4-pro-guan",
-        choices: [
-          {
-            message: {
-              role: "assistant",
-              content: [{ type: "text", text: "ready via content array" }]
-            },
-            finish_reason: "stop"
-          }
-        ]
-      });
-    };
-
-    const result = await runGlmProviderSmoke({
-      repoRoot: repo.repoRoot,
-      env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
-      fetchImpl,
-      now: fixedNow
-    });
-
-    expect(result.ok).toBe(false);
-    expect(attempts).toBe(MAX_RETRIES + 1);
-    if (!result.ok) {
-      expect(result.error.category).toBe("empty_completion");
+        choices: [{
+          message: { role: "assistant", content: [{ type: "text", text: "ready" }] },
+          finish_reason: "stop"
+        }]
+      }
     }
-    const note = await readReadinessNote(repo.repoRoot);
-    expect(note.status).toBe("failed");
-    expect(note.completion_nonempty).toBe(false);
-  });
+  ]) {
+    test(`${fixture.name} is not a Zero-visible completion`, async () => {
+      const repo = await createTempRepoWithProviderConfig();
+      let attempts = 0;
+      const result = await runGlmProviderSmoke({
+        repoRoot: repo.repoRoot,
+        env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+        fetchImpl: async () => {
+          attempts += 1;
+          return jsonResponse(fixture.body);
+        },
+        now: fixedNow
+      });
+
+      expect(result.ok).toBe(false);
+      expect(attempts).toBe(MAX_RETRIES + 1);
+      if (!result.ok) {
+        expect(result.error.category).toBe("empty_completion");
+      }
+      const note = await readReadinessNote(repo.repoRoot);
+      expect(note.status).toBe("failed");
+      expect(note.completion_nonempty).toBe(false);
+    });
+  }
 
   test("timeout aborts each bounded attempt and retries at most once", async () => {
     const repo = await createTempRepoWithProviderConfig();
@@ -901,8 +933,16 @@ function bareJsonResponse(value: unknown): Response {
   });
 }
 
-function textResponse(text: string, options: { status?: number; url?: string } = {}): Response {
-  return responseWithFinalUrl(new Response(text, { status: options.status ?? 200 }), options.url);
+function textResponse(
+  text: string,
+  options: { status?: number; statusText?: string; headers?: HeadersInit; url?: string } = {}
+): Response {
+  const response = new Response(text, {
+    status: options.status ?? 200,
+    statusText: options.statusText,
+    headers: options.headers
+  });
+  return responseWithFinalUrl(response, options.url);
 }
 
 function responseWithFinalUrl(response: Response, url = CANONICAL_ENDPOINT): Response {
@@ -935,13 +975,24 @@ async function seedPassingReadinessNote(repoRoot: string): Promise<void> {
 }
 
 function passingReadinessNoteText(): string {
-  return `${JSON.stringify({
-    schema_version: "m1.glm-provider-smoke.v1",
-    kind: "glm_provider_smoke",
-    status: "passed"
-  })}\n`;
+  return `${JSON.stringify({ schema_version: "m1.glm-provider-smoke.v1", kind: "glm_provider_smoke", status: "passed" })}\n`;
 }
 
-function makeFakeSecret(): string {
-  return ["unit", "redaction", "secret"].join("-");
+function makeFakeSecret(): string { return ["unit", "redaction", "secret"].join("-"); }
+
+function expectNoExternalText(text: string, forbidden: string[]): void {
+  for (const value of forbidden) expect(text).not.toContain(value);
+}
+
+function cliFetchPreload(providerSentinel: string, fakeSecret: string): string {
+  const body = `provider body ${providerSentinel} ${fakeSecret} -----BEGIN PRIVATE KEY-----`;
+  return `globalThis.fetch = async () => {
+  const response = new Response(${JSON.stringify(body)}, {
+    status: 503,
+    statusText: ${JSON.stringify(`${providerSentinel} status text`)},
+    headers: { "x-provider-debug": ${JSON.stringify(providerSentinel)} }
+  });
+  Object.defineProperty(response, "url", { value: ${JSON.stringify(CANONICAL_ENDPOINT)}, configurable: true });
+  return response;
+};`;
 }
