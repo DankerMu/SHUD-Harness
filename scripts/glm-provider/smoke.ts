@@ -1,13 +1,10 @@
 import { resolve } from "node:path";
 import {
-  invalidateCanonicalReadinessForCliPreflightFailure,
-  runCanonicalGlmProviderSmoke
+  runCanonicalGlmProviderSmoke,
+  runCanonicalGlmProviderSmokeCommand
 } from "./canonical-smoke";
 import {
   DEFAULT_REPO_ROOT,
-  DEFAULT_TIMEOUT_MS,
-  GLM_API_KEY_ENV,
-  GLM_API_KEY_REF,
   LocalSmokeError
 } from "./smoke-core";
 import type { SmokeRunResult } from "./readiness-note";
@@ -53,24 +50,12 @@ export {
   runGlmProviderSmokeFixture,
   type RunSmokeFixtureOptions
 } from "./fixture-smoke";
+export {
+  CLI_UNSUPPORTED_ARGUMENT_MESSAGE,
+  runCanonicalGlmProviderSmokeCommand,
+  type CanonicalSmokeCommandOutcome
+} from "./canonical-smoke";
 export { runCanonicalGlmProviderSmoke as runGlmProviderSmoke };
-
-export const CLI_UNSUPPORTED_ARGUMENT_MESSAGE = "Unsupported or incomplete CLI argument.";
-
-function isHelpInvocation(args: string[]): boolean {
-  return args.length === 1 && args[0] === "--help";
-}
-
-function printHelp(): void {
-  console.log([
-    "Usage: bun scripts/glm-provider/smoke.ts [--help]",
-    "",
-    "Runs one non-stream OpenAI-compatible chat-completions smoke against the configured GLM provider.",
-    `The canonical checkout is ${DEFAULT_REPO_ROOT}.`,
-    `Each provider attempt uses a fixed ${DEFAULT_TIMEOUT_MS} ms timeout.`,
-    `The API key must be provided through ${GLM_API_KEY_ENV}; only ${GLM_API_KEY_REF} is persisted.`
-  ].join("\n"));
-}
 
 export function formatSmokeSuccessCliOutput(
   result: Extract<SmokeRunResult, { ok: true }>
@@ -92,19 +77,19 @@ export function formatSmokeSuccessCliOutput(
 
 async function main(): Promise<void> {
   try {
-    const args = process.argv.slice(2);
-    if (isHelpInvocation(args)) {
-      printHelp();
-      return;
-    }
-    if (args.length > 0) {
-      await invalidateCanonicalReadinessForCliPreflightFailure();
-      console.error(`GLM provider smoke failed: ${CLI_UNSUPPORTED_ARGUMENT_MESSAGE}`);
-      process.exitCode = 1;
+    const outcome = await runCanonicalGlmProviderSmokeCommand(process.argv.slice(2));
+    if (outcome.kind === "help") {
+      console.log(outcome.stdout);
       return;
     }
 
-    const result = await runCanonicalGlmProviderSmoke();
+    if (outcome.kind === "unsupported") {
+      console.error(outcome.stderr);
+      process.exitCode = outcome.exitCode;
+      return;
+    }
+
+    const { result } = outcome;
     if (result.ok) {
       console.log(formatSmokeSuccessCliOutput(result));
       return;

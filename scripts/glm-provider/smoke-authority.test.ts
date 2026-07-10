@@ -62,7 +62,7 @@ describe("glm provider canonical authority boundaries", () => {
     expect(runGlmProviderSmokeFixture.length).toBe(1);
   });
 
-  test("production exports expose no direct canonical writer and core has no write surface", async () => {
+  test("production exports and facade imports expose no standalone canonical mutator", async () => {
     const productionNamespaces = [
       await import("./smoke"),
       await import("./canonical-smoke"),
@@ -70,9 +70,11 @@ describe("glm provider canonical authority boundaries", () => {
       await import("./readiness-note"),
       await import("./smoke-core")
     ];
+    const forbiddenCanonicalMutationSurface = /invalidate|delete|remove|unlink|tombstone/i;
     for (const namespace of productionNamespaces) {
       const forbiddenExports = Object.keys(namespace).filter((name) =>
-        /write.*canonical|canonical.*writer|writecanonical|seedpassingreadiness|passingreadinessnotetext/i.test(name)
+        /write.*canonical|canonical.*writer|writecanonical|seedpassingreadiness|passingreadinessnotetext/i.test(name) ||
+        forbiddenCanonicalMutationSurface.test(name)
       );
       expect(forbiddenExports).toEqual([]);
     }
@@ -81,6 +83,12 @@ describe("glm provider canonical authority boundaries", () => {
     expect("withCanonicalReadinessBackup" in testHelpers).toBe(false);
     expect("seedPassingReadinessNote" in testHelpers).toBe(false);
     expect("passingReadinessNoteText" in testHelpers).toBe(false);
+
+    const smokeFacadeSource = await readFile(join(import.meta.dir, "smoke.ts"), "utf8");
+    expect(smokeFacadeSource).toContain("runCanonicalGlmProviderSmokeCommand");
+    expect(smokeFacadeSource).not.toMatch(forbiddenCanonicalMutationSurface);
+    expect(smokeFacadeSource).not.toContain("--help");
+    expect(smokeFacadeSource).not.toContain("args.length");
 
     const coreSource = await readFile(join(import.meta.dir, "smoke-core.ts"), "utf8");
     for (const forbidden of [
@@ -213,14 +221,28 @@ describe("glm provider canonical authority boundaries", () => {
   test("CLI help is static and does not invalidate or mint readiness evidence", async () => {
     await withCanonicalReadinessBackup(async () => {
       await seedPassingReadinessNote(DEFAULT_REPO_ROOT);
-      const child = runSmokeCli(["--help"], { ...process.env });
+      const beforeBytes = await readFile(readinessNotePath(DEFAULT_REPO_ROOT));
+      const preloadRoot = await tempRoots.createTempRepo();
+      const preloadPath = join(preloadRoot.repoRoot, "help-fetch-preload.ts");
+      await writeFile(
+        preloadPath,
+        "globalThis.fetch = async () => { throw new Error('HELP_FETCH_SHOULD_NOT_RUN'); };",
+        "utf8"
+      );
+      const child = runSmokeCli(["--help"], {
+        ...process.env,
+        [GLM_API_KEY_ENV]: "HELP_SECRET_SENTINEL"
+      }, preloadPath);
       const { exitCode, stdout, stderr } = await collectChild(child);
 
       expect(exitCode).toBe(0);
       expect(stderr).toBe("");
       expect(stdout).toContain("Usage: bun scripts/glm-provider/smoke.ts [--help]");
       expect(stdout).not.toContain("smoke passed");
+      expect(stdout).not.toContain("HELP_SECRET_SENTINEL");
+      expect(stdout).not.toContain("HELP_FETCH_SHOULD_NOT_RUN");
       expect(await readReadinessStatus(DEFAULT_REPO_ROOT)).toBe("passed");
+      expect(Buffer.compare(await readFile(readinessNotePath(DEFAULT_REPO_ROOT)), beforeBytes)).toBe(0);
     });
   });
 
@@ -413,6 +435,48 @@ describe("glm provider canonical authority boundaries", () => {
             await expectNoDarwinDenyAcl(aclPath, permission);
           });
         }
+      }
+    });
+  });
+
+  darwinTest("Darwin parent delete_child ACL tombstones a current-owned read-only stale pass", async () => {
+    await withCanonicalWorkspaceEntryBackup(async () => {
+      for (const flow of ["unsupported", "missing-key"] as const) {
+        await withDarwinDeleteAclCanonicalWorkspace(
+          "parent-delete-child",
+          async ({
+            aclPath,
+            permission,
+            siblingPath,
+            siblingContent
+          }) => {
+            expect(await modeOf(readinessNotePath(DEFAULT_REPO_ROOT))).toBe(0o444);
+            const child = flow === "unsupported"
+              ? runSmokeCli(["--repo-root", "/tmp/ignored"], {
+                  ...process.env,
+                  [GLM_API_KEY_ENV]: makeFakeSecret()
+                })
+              : runSmokeCli([], envWithoutGlmKey());
+            const { exitCode, stdout, stderr } = await collectChild(child);
+
+            expect(exitCode).toBe(1);
+            expect(stdout).toBe("");
+            if (flow === "unsupported") {
+              expect(stderr).toBe(`GLM provider smoke failed: ${CLI_UNSUPPORTED_ARGUMENT_MESSAGE}\n`);
+            } else {
+              expect(stderr).toMatch(
+                /GLM provider smoke failed: (Missing required environment variable GLM_API_KEY|Smoke command failed before provider readiness could be recorded)\./
+              );
+            }
+            await expectDarwinDenyAcl(aclPath, permission);
+            await expectCanonicalTombstoneStillPresent();
+            expect(await readReadinessStatus(DEFAULT_REPO_ROOT)).not.toBe("passed");
+            expect(Buffer.compare(await readFile(siblingPath), siblingContent)).toBe(0);
+            await clearDarwinAcl(aclPath);
+            await expectNoDarwinDenyAcl(aclPath, permission);
+          },
+          { noteMode: 0o444 }
+        );
       }
     });
   });
@@ -655,7 +719,8 @@ async function withDarwinDeleteAclCanonicalWorkspace<T>(
     permission: "delete" | "delete_child";
     siblingPath: string;
     siblingContent: Buffer;
-  }) => Promise<T>
+  }) => Promise<T>,
+  options: { noteMode?: number } = {}
 ): Promise<T> {
   const workspaceDir = join(DEFAULT_REPO_ROOT, "workspace");
   const readinessDir = join(workspaceDir, "readiness");
@@ -669,11 +734,15 @@ async function withDarwinDeleteAclCanonicalWorkspace<T>(
   await mkdir(readinessDir, { recursive: true });
   await writeFile(siblingPath, siblingContent);
   await writeFile(notePath, passingReadinessNoteText(), "utf8");
+  if (options.noteMode !== undefined) {
+    await chmod(notePath, options.noteMode);
+  }
   await addDarwinDenyAcl(aclPath, permission);
   try {
     return await run({ aclPath, permission, siblingPath, siblingContent });
   } finally {
     await clearDarwinAcl(aclPath).catch(() => undefined);
+    await chmod(notePath, 0o600).catch(() => undefined);
     await rm(workspaceDir, { recursive: true, force: true });
   }
 }

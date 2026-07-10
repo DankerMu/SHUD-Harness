@@ -30,11 +30,37 @@ import {
   type SmokeFailureCategory
 } from "./readiness-note";
 
+type FileHandle = Awaited<ReturnType<typeof open>>;
+type FsStats = Awaited<ReturnType<typeof lstat>>;
+
+export type CanonicalSmokeCommandOutcome =
+  | {
+      kind: "help";
+      exitCode: 0;
+      stdout: string;
+      stderr: "";
+    }
+  | {
+      kind: "unsupported";
+      exitCode: 1;
+      stdout: "";
+      stderr: string;
+      message: typeof CLI_UNSUPPORTED_ARGUMENT_MESSAGE;
+    }
+  | {
+      kind: "smoke";
+      result: CanonicalSmokeRunResult;
+    };
+
 const OWNER_RWX_BITS = 0o700;
+const OWNER_RW_BITS = 0o600;
+export const CLI_UNSUPPORTED_ARGUMENT_MESSAGE = "Unsupported or incomplete CLI argument.";
 const AUTHORITY_UNSUPPORTED_UID_MESSAGE =
   "Canonical readiness authority requires a local uid.";
 const AUTHORITY_NOT_OWNED_MESSAGE =
   "Canonical readiness directory is not owned by the current uid.";
+const AUTHORITY_LEAF_NOT_OWNED_MESSAGE =
+  "Canonical readiness leaf is not owned by the current uid.";
 const AUTHORITY_REALPATH_MESSAGE =
   "Canonical readiness directory did not resolve to its expected local path.";
 const AUTHORITY_IN_PLACE_INVALIDATION_MESSAGE =
@@ -48,6 +74,43 @@ const STALE_PASS_TOMBSTONE_TEXT = `${JSON.stringify({
 })}\n`;
 
 export async function runCanonicalGlmProviderSmoke(): Promise<CanonicalSmokeRunResult> {
+  const outcome = await runCanonicalGlmProviderSmokeCommand([]);
+  if (outcome.kind !== "smoke") {
+    throw new LocalSmokeError("Canonical smoke command returned a non-smoke outcome.");
+  }
+  return outcome.result;
+}
+
+export async function runCanonicalGlmProviderSmokeCommand(
+  args: readonly string[]
+): Promise<CanonicalSmokeCommandOutcome> {
+  if (isHelpInvocation(args)) {
+    return {
+      kind: "help",
+      exitCode: 0,
+      stdout: canonicalSmokeHelpText(),
+      stderr: ""
+    };
+  }
+
+  if (args.length > 0) {
+    await invalidatePassingCanonicalReadinessNote();
+    return {
+      kind: "unsupported",
+      exitCode: 1,
+      stdout: "",
+      stderr: `GLM provider smoke failed: ${CLI_UNSUPPORTED_ARGUMENT_MESSAGE}`,
+      message: CLI_UNSUPPORTED_ARGUMENT_MESSAGE
+    };
+  }
+
+  return {
+    kind: "smoke",
+    result: await executeCanonicalGlmProviderSmoke()
+  };
+}
+
+async function executeCanonicalGlmProviderSmoke(): Promise<CanonicalSmokeRunResult> {
   await invalidatePassingCanonicalReadinessNote();
   const coreResult = await runSmokeCore({
     configPath: DEFAULT_PROVIDER_CONFIG_PATH,
@@ -61,8 +124,19 @@ export async function runCanonicalGlmProviderSmoke(): Promise<CanonicalSmokeRunR
   return canonicalResultFromCore(coreResult, note, readinessNotePath);
 }
 
-export async function invalidateCanonicalReadinessForCliPreflightFailure(): Promise<void> {
-  await invalidatePassingCanonicalReadinessNote();
+function isHelpInvocation(args: readonly string[]): boolean {
+  return args.length === 1 && args[0] === "--help";
+}
+
+function canonicalSmokeHelpText(): string {
+  return [
+    "Usage: bun scripts/glm-provider/smoke.ts [--help]",
+    "",
+    "Runs one non-stream OpenAI-compatible chat-completions smoke against the configured GLM provider.",
+    `The canonical checkout is ${DEFAULT_REPO_ROOT}.`,
+    `Each provider attempt uses a fixed ${DEFAULT_TIMEOUT_MS} ms timeout.`,
+    `The API key must be provided through ${GLM_API_KEY_ENV}; only ${GLM_API_KEY_REF} is persisted.`
+  ].join("\n");
 }
 
 async function invalidatePassingCanonicalReadinessNote(): Promise<void> {
@@ -77,7 +151,7 @@ async function invalidatePassingCanonicalReadinessNote(): Promise<void> {
 }
 
 async function invalidateCanonicalReadinessLeaf(path: string): Promise<void> {
-  let stat: Awaited<ReturnType<typeof lstat>>;
+  let stat: FsStats;
   try {
     stat = await lstat(path);
   } catch (error) {
@@ -99,65 +173,53 @@ async function invalidateCanonicalReadinessLeaf(path: string): Promise<void> {
     return;
   }
 
-  const handle = await openCanonicalReadinessLeaf(path);
-  if (!handle) {
+  await invalidateBoundCanonicalReadinessLeaf(path, stat);
+}
+
+async function invalidateBoundCanonicalReadinessLeaf(path: string, initialStat: FsStats): Promise<void> {
+  const readHandle = await openCanonicalReadinessLeafReadOnly(path);
+  if (!readHandle) {
     return;
   }
-  let closeHandle = true;
   try {
-    const fdStat = await handle.stat();
-    if (!fdStat.isFile() || fdStat.nlink > 1) {
-      await handle.close();
-      closeHandle = false;
-      await unlinkLocalEntry(path);
-      return;
-    }
-    if (fdStat.size > MAX_PRIOR_READINESS_NOTE_BYTES) {
-      await handle.close();
-      closeHandle = false;
-      await unlinkLocalEntry(path);
-      return;
-    }
+    const fdStat = await readHandle.stat();
+    assertCurrentOwnedBoundCanonicalLeaf(initialStat, fdStat);
+    await restoreOwnerReadWriteOnBoundLeaf(readHandle, fdStat);
+  } finally {
+    await readHandle.close().catch(() => undefined);
+  }
 
-    let raw: string;
-    try {
-      raw = await handle.readFile({ encoding: "utf8" });
-    } catch (error) {
-      if (isNodeErrorWithCode(error, "EACCES") || isNodeErrorWithCode(error, "EPERM")) {
-        throw new LocalSmokeError(AUTHORITY_IN_PLACE_INVALIDATION_MESSAGE);
-      }
-      throw error;
-    }
+  const writeHandle = await openCanonicalReadinessLeafReadWrite(path);
+  if (!writeHandle) {
+    return;
+  }
+  let wroteTombstone = false;
+  try {
+    const fdStat = await writeHandle.stat();
+    assertCurrentOwnedBoundCanonicalLeaf(initialStat, fdStat);
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw) as unknown;
-    } catch {
-      return;
-    }
-
-    const note = readOptionalRecord(parsed);
+    const note = await readBoundReadinessNote(writeHandle);
     if (note?.status !== "passed") {
       return;
     }
 
-    await writeStalePassTombstone(handle);
-    await handle.close();
-    closeHandle = false;
+    await writeStalePassTombstone(writeHandle);
+    wroteTombstone = true;
+  } finally {
+    await writeHandle.close().catch(() => undefined);
+  }
+
+  if (wroteTombstone) {
     if (await canonicalPathParsesAsPassed(path)) {
       throw new LocalSmokeError(AUTHORITY_IN_PLACE_INVALIDATION_MESSAGE);
     }
     await unlinkLocalEntryAfterVerifiedInvalidation(path);
-  } finally {
-    if (closeHandle) {
-      await handle.close().catch(() => undefined);
-    }
   }
 }
 
-async function openCanonicalReadinessLeaf(path: string): Promise<Awaited<ReturnType<typeof open>> | undefined> {
+async function openCanonicalReadinessLeafReadOnly(path: string): Promise<FileHandle | undefined> {
   try {
-    return await open(path, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+    return await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   } catch (error) {
     if (isNodeErrorWithCode(error, "ENOENT")) {
       return undefined;
@@ -167,23 +229,112 @@ async function openCanonicalReadinessLeaf(path: string): Promise<Awaited<ReturnT
       return undefined;
     }
     if (isNodeErrorWithCode(error, "EACCES") || isNodeErrorWithCode(error, "EPERM")) {
-      try {
-        await unlinkLocalEntry(path);
-      } catch (unlinkError) {
-        if (isNodeErrorWithCode(unlinkError, "EACCES") || isNodeErrorWithCode(unlinkError, "EPERM")) {
-          throw new LocalSmokeError(AUTHORITY_IN_PLACE_INVALIDATION_MESSAGE);
-        }
-        throw unlinkError;
-      }
+      await unlinkDeniedReadLeaf(path);
       return undefined;
     }
     throw error;
   }
 }
 
-async function writeStalePassTombstone(
-  handle: Awaited<ReturnType<typeof open>>
-): Promise<void> {
+async function openCanonicalReadinessLeafReadWrite(path: string): Promise<FileHandle | undefined> {
+  try {
+    return await open(path, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT")) {
+      return undefined;
+    }
+    if (
+      isNodeErrorWithCode(error, "ELOOP") ||
+      isNodeErrorWithCode(error, "EACCES") ||
+      isNodeErrorWithCode(error, "EPERM")
+    ) {
+      throw new LocalSmokeError(AUTHORITY_IN_PLACE_INVALIDATION_MESSAGE);
+    }
+    throw error;
+  }
+}
+
+async function unlinkDeniedReadLeaf(path: string): Promise<void> {
+  try {
+    await unlinkLocalEntry(path);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "EACCES") || isNodeErrorWithCode(error, "EPERM")) {
+      throw new LocalSmokeError(AUTHORITY_IN_PLACE_INVALIDATION_MESSAGE);
+    }
+    throw error;
+  }
+}
+
+function assertCurrentOwnedBoundCanonicalLeaf(initialStat: FsStats, fdStat: FsStats): void {
+  if (
+    !initialStat.isFile() ||
+    initialStat.nlink !== 1 ||
+    initialStat.size > MAX_PRIOR_READINESS_NOTE_BYTES ||
+    !fdStat.isFile() ||
+    fdStat.nlink !== 1 ||
+    fdStat.size > MAX_PRIOR_READINESS_NOTE_BYTES
+  ) {
+    throw new LocalSmokeError(AUTHORITY_IN_PLACE_INVALIDATION_MESSAGE);
+  }
+  if (
+    typeof initialStat.uid !== "number" ||
+    typeof initialStat.mode !== "number" ||
+    typeof fdStat.uid !== "number" ||
+    typeof fdStat.mode !== "number"
+  ) {
+    throw new LocalSmokeError(AUTHORITY_UNSUPPORTED_UID_MESSAGE);
+  }
+  const uid = currentUid();
+  if (initialStat.uid !== uid || fdStat.uid !== uid) {
+    throw new LocalSmokeError(AUTHORITY_LEAF_NOT_OWNED_MESSAGE);
+  }
+  if (!sameFileIdentity(initialStat, fdStat)) {
+    throw new LocalSmokeError(AUTHORITY_IN_PLACE_INVALIDATION_MESSAGE);
+  }
+}
+
+function sameFileIdentity(left: FsStats, right: FsStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function restoreOwnerReadWriteOnBoundLeaf(handle: FileHandle, fdStat: FsStats): Promise<void> {
+  if (typeof fdStat.mode !== "number") {
+    throw new LocalSmokeError(AUTHORITY_UNSUPPORTED_UID_MESSAGE);
+  }
+  const permissionBits = fdStat.mode & 0o7777;
+  if ((permissionBits & OWNER_RW_BITS) === OWNER_RW_BITS) {
+    return;
+  }
+
+  try {
+    await handle.chmod(permissionBits | OWNER_RW_BITS);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "EACCES") || isNodeErrorWithCode(error, "EPERM")) {
+      throw new LocalSmokeError(AUTHORITY_IN_PLACE_INVALIDATION_MESSAGE);
+    }
+    throw error;
+  }
+}
+
+async function readBoundReadinessNote(handle: FileHandle): Promise<Record<string, unknown> | undefined> {
+  let raw: string;
+  try {
+    raw = await handle.readFile({ encoding: "utf8" });
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "EACCES") || isNodeErrorWithCode(error, "EPERM")) {
+      throw new LocalSmokeError(AUTHORITY_IN_PLACE_INVALIDATION_MESSAGE);
+    }
+    throw error;
+  }
+
+  try {
+    return readOptionalRecord(JSON.parse(raw) as unknown);
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeStalePassTombstone(handle: FileHandle): Promise<void> {
   const tombstone = Buffer.from(STALE_PASS_TOMBSTONE_TEXT, "utf8");
   try {
     await handle.truncate(0);
