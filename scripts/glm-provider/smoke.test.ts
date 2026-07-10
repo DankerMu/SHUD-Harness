@@ -1,37 +1,56 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { link, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig as loadZeroConfig } from "../../zero/packages/core/src/config/loader";
 import { ModelRouter } from "../../zero/packages/model/src/router";
-import { writeReadinessNote } from "./readiness-note";
+import { writeFixtureReadinessNote } from "./readiness-note";
 import {
   API_TYPE,
-  DEFAULT_CONFIG_RELATIVE_PATH,
   DEFAULT_PROVIDER_CONFIG_PATH,
-  DEFAULT_READINESS_NOTE_NAME,
+  FIXTURE_READINESS_NOTE_NAME,
   GLM_API_KEY_ENV,
   GLM_API_KEY_REF,
   MAX_RESPONSE_BYTES,
   MAX_RETRIES,
   buildChatCompletionPayload,
   chatCompletionsEndpoint,
-  formatSmokeSuccessCliOutput,
   loadProviderConfig,
   parseProviderConfig,
-  runGlmProviderSmoke,
+  runGlmProviderSmokeFixture,
   type SmokeFetch
 } from "./smoke";
+import {
+  CANONICAL_ENDPOINT,
+  bareJsonResponse,
+  createTempRootTracker,
+  expectNoExternalText,
+  fixedNow,
+  jsonResponse,
+  makeFakeSecret,
+  readReadinessNote,
+  readReadinessStatus,
+  readinessNotePath,
+  responseWithFinalUrl,
+  textResponse
+} from "./test-helpers";
 
-const tempRoots: string[] = [];
-const fixedNow = () => new Date("2026-07-08T10:00:00.000Z");
-const CANONICAL_ENDPOINT = "https://www.dmxapi.cn/v1/chat/completions";
+const tempRoots = createTempRootTracker();
+
+function fixtureNotePath(repoRoot: string): string {
+  return readinessNotePath(repoRoot, FIXTURE_READINESS_NOTE_NAME);
+}
+
+async function readFixtureNote(repoRoot: string): Promise<Record<string, unknown>> {
+  return await readReadinessNote(repoRoot, FIXTURE_READINESS_NOTE_NAME);
+}
+
+async function readFixtureStatus(repoRoot: string): Promise<unknown> {
+  return await readReadinessStatus(repoRoot, FIXTURE_READINESS_NOTE_NAME);
+}
 
 describe("glm provider config and smoke", () => {
   afterEach(async () => {
-    await Promise.all(
-      tempRoots.splice(0).map((tempRoot) => rm(tempRoot, { recursive: true, force: true }))
-    );
+    await tempRoots.cleanup();
   });
 
   test("parses source-controlled provider config contract", async () => {
@@ -183,14 +202,14 @@ describe("glm provider config and smoke", () => {
   });
 
   test("missing key fails without fetch and writes a failed readiness note", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     let fetchCalls = 0;
     const fetchImpl: SmokeFetch = async () => {
       fetchCalls += 1;
       return jsonResponse({ choices: [{ message: { content: "ready" } }] });
     };
 
-    const result = await runGlmProviderSmoke({
+    const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: {},
       fetchImpl,
@@ -206,7 +225,7 @@ describe("glm provider config and smoke", () => {
         message: `Missing required environment variable ${GLM_API_KEY_ENV}.`
       });
     }
-    const note = await readReadinessNote(repo.repoRoot);
+    const note = await readFixtureNote(repo.repoRoot);
     expect(note.status).toBe("failed");
     expect(note.failure).toEqual({
       category: "missing_key",
@@ -217,7 +236,7 @@ describe("glm provider config and smoke", () => {
   });
 
   test("fake fetch success sends non-stream chat completion and writes redacted readiness note", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     const fakeSecret = makeFakeSecret();
     const seenRequests: Array<{
       url: string;
@@ -237,7 +256,7 @@ describe("glm provider config and smoke", () => {
       });
     };
 
-    const result = await runGlmProviderSmoke({
+    const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: { [GLM_API_KEY_ENV]: fakeSecret },
       fetchImpl,
@@ -250,8 +269,9 @@ describe("glm provider config and smoke", () => {
       expect(result.responseUrl).toBe(CANONICAL_ENDPOINT);
       expect(result.completionNonempty).toBe(true);
       expect(result).not.toHaveProperty("completion");
-      expect(formatSmokeSuccessCliOutput(result, repo.repoRoot)).not.toContain(fakeSecret);
     }
+    expect(result.evidenceScope).toBe("fixture");
+    expect(result.readinessNoteName).toBe(FIXTURE_READINESS_NOTE_NAME);
     expect(seenRequests).toHaveLength(1);
     expect(seenRequests[0].url).toBe(CANONICAL_ENDPOINT);
     expect(seenRequests[0].authorization).toBe(`Bearer ${fakeSecret}`);
@@ -262,11 +282,12 @@ describe("glm provider config and smoke", () => {
       stream: false
     });
 
-    const noteText = await readFile(readinessNotePath(repo.repoRoot), "utf8");
+    const noteText = await readFile(fixtureNotePath(repo.repoRoot), "utf8");
     const note = JSON.parse(noteText) as Record<string, unknown>;
     expect(note).toMatchObject({
-      schema_version: "m1.glm-provider-smoke.v1",
-      kind: "glm_provider_smoke",
+      schema_version: "m1.glm-provider-smoke.fixture.v1",
+      kind: "glm_provider_smoke_fixture",
+      evidence_scope: "fixture",
       checked_at: "2026-07-08T10:00:00.000Z",
       provider_name: "glm-dmxapi",
       api_type: API_TYPE,
@@ -287,12 +308,12 @@ describe("glm provider config and smoke", () => {
     expect(JSON.stringify(result)).not.toContain(fakeSecret);
     expect(await readdir(join(repo.repoRoot, "workspace"))).toEqual(["readiness"]);
     expect(await readdir(join(repo.repoRoot, "workspace", "readiness"))).toEqual([
-      DEFAULT_READINESS_NOTE_NAME
+      FIXTURE_READINESS_NOTE_NAME
     ]);
   });
 
   test("http failure retries once, omits provider text, and does not write a passing note", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     const fakeSecret = makeFakeSecret();
     const providerSentinel = "ROUND4_PROVIDER_SENTINEL";
     const forbiddenEvidence = [providerSentinel, fakeSecret, "BEGIN PRIVATE KEY"];
@@ -309,7 +330,7 @@ describe("glm provider config and smoke", () => {
       );
     };
 
-    const result = await runGlmProviderSmoke({
+    const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: { [GLM_API_KEY_ENV]: fakeSecret },
       fetchImpl,
@@ -327,7 +348,7 @@ describe("glm provider config and smoke", () => {
       });
     }
     expectNoExternalText(JSON.stringify(result), forbiddenEvidence);
-    const noteText = await readFile(readinessNotePath(repo.repoRoot), "utf8");
+    const noteText = await readFile(fixtureNotePath(repo.repoRoot), "utf8");
     const note = JSON.parse(noteText) as Record<string, unknown>;
     expect(note.status).toBe("failed");
     expect(note).toMatchObject({
@@ -340,48 +361,17 @@ describe("glm provider config and smoke", () => {
       }
     });
     expectNoExternalText(noteText, forbiddenEvidence);
-
-    const cliRepo = await createTempRepoWithProviderConfig();
-    const preloadPath = join(cliRepo.repoRoot, "fetch-preload.ts");
-    await writeFile(preloadPath, cliFetchPreload(providerSentinel, fakeSecret), "utf8");
-    const child = Bun.spawn(
-      [
-        process.execPath,
-        "--preload",
-        preloadPath,
-        join(import.meta.dir, "smoke.ts"),
-        "--repo-root",
-        cliRepo.repoRoot
-      ],
-      {
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...process.env, [GLM_API_KEY_ENV]: fakeSecret }
-      }
-    );
-    const [exitCode, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text()
-    ]);
-    expect(exitCode).toBe(1);
-    expect(stdout).toBe("");
-    expect(stderr).toContain("GLM provider smoke failed: Provider returned HTTP 503");
-    expectNoExternalText(`${stdout}${stderr}`, forbiddenEvidence);
-    const cliNoteText = await readFile(readinessNotePath(cliRepo.repoRoot), "utf8");
-    expect(cliNoteText).toContain('"http_status": 503');
-    expectNoExternalText(cliNoteText, forbiddenEvidence);
   });
 
   test("hostile external fetch exceptions use stable local failure evidence", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     const fakeSecret = makeFakeSecret();
     const providerSentinel = "ROUND4_EXCEPTION_SENTINEL";
     const fetchImpl: SmokeFetch = async () => {
       throw new Error(`external ${providerSentinel} Authorization: Bearer ${fakeSecret}`);
     };
 
-    const result = await runGlmProviderSmoke({
+    const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: { [GLM_API_KEY_ENV]: fakeSecret },
       fetchImpl,
@@ -396,14 +386,14 @@ describe("glm provider config and smoke", () => {
       });
     }
     expectNoExternalText(JSON.stringify(result), [providerSentinel, fakeSecret]);
-    expectNoExternalText(await readFile(readinessNotePath(repo.repoRoot), "utf8"), [
+    expectNoExternalText(await readFile(fixtureNotePath(repo.repoRoot), "utf8"), [
       providerSentinel,
       fakeSecret
     ]);
   });
 
   test("redirected provider response cannot produce a passing readiness note", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     let attempts = 0;
     const fetchImpl: SmokeFetch = async (_url, init) => {
       attempts += 1;
@@ -421,7 +411,7 @@ describe("glm provider config and smoke", () => {
       } as Response;
     };
 
-    const result = await runGlmProviderSmoke({
+    const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
       fetchImpl,
@@ -433,13 +423,13 @@ describe("glm provider config and smoke", () => {
     if (!result.ok) {
       expect(result.error.category).toBe("base_url_mismatch");
     }
-    const note = await readReadinessNote(repo.repoRoot);
+    const note = await readFixtureNote(repo.repoRoot);
     expect(note.status).toBe("failed");
     expect(note.configured_base_url_hit).toBe(true);
   });
 
   test("missing provider response URL cannot produce a passing readiness note", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     let attempts = 0;
     const fetchImpl: SmokeFetch = async () => {
       attempts += 1;
@@ -448,7 +438,7 @@ describe("glm provider config and smoke", () => {
       });
     };
 
-    const result = await runGlmProviderSmoke({
+    const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
       fetchImpl,
@@ -460,13 +450,13 @@ describe("glm provider config and smoke", () => {
     if (!result.ok) {
       expect(result.error.category).toBe("base_url_mismatch");
     }
-    const note = await readReadinessNote(repo.repoRoot);
+    const note = await readFixtureNote(repo.repoRoot);
     expect(note.status).toBe("failed");
     expect(note.completion_nonempty).toBe(false);
   });
 
   test("mismatched provider response URL cannot produce a passing readiness note", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     let attempts = 0;
     const fetchImpl: SmokeFetch = async () => {
       attempts += 1;
@@ -478,7 +468,7 @@ describe("glm provider config and smoke", () => {
       );
     };
 
-    const result = await runGlmProviderSmoke({
+    const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
       fetchImpl,
@@ -490,13 +480,13 @@ describe("glm provider config and smoke", () => {
     if (!result.ok) {
       expect(result.error.category).toBe("base_url_mismatch");
     }
-    const note = await readReadinessNote(repo.repoRoot);
+    const note = await readFixtureNote(repo.repoRoot);
     expect(note.status).toBe("failed");
     expect(note.completion_nonempty).toBe(false);
   });
 
   test("empty completion assertion fails after one retry", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     let attempts = 0;
     const fetchImpl: SmokeFetch = async () => {
       attempts += 1;
@@ -505,7 +495,7 @@ describe("glm provider config and smoke", () => {
       });
     };
 
-    const result = await runGlmProviderSmoke({
+    const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
       fetchImpl,
@@ -517,7 +507,7 @@ describe("glm provider config and smoke", () => {
     if (!result.ok) {
       expect(result.error.category).toBe("empty_completion");
     }
-    const note = await readReadinessNote(repo.repoRoot);
+    const note = await readFixtureNote(repo.repoRoot);
     expect(note.status).toBe("failed");
     expect(note.completion_nonempty).toBe(false);
     expect(note.model_admission).toBe(false);
@@ -556,9 +546,9 @@ describe("glm provider config and smoke", () => {
     }
   ]) {
     test(`${fixture.name} is not a Zero-visible completion`, async () => {
-      const repo = await createTempRepoWithProviderConfig();
+      const repo = await tempRoots.createTempRepoWithProviderConfig();
       let attempts = 0;
-      const result = await runGlmProviderSmoke({
+      const result = await runGlmProviderSmokeFixture({
         repoRoot: repo.repoRoot,
         env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
         fetchImpl: async () => {
@@ -573,14 +563,14 @@ describe("glm provider config and smoke", () => {
       if (!result.ok) {
         expect(result.error.category).toBe("empty_completion");
       }
-      const note = await readReadinessNote(repo.repoRoot);
+      const note = await readFixtureNote(repo.repoRoot);
       expect(note.status).toBe("failed");
       expect(note.completion_nonempty).toBe(false);
     });
   }
 
   test("timeout aborts each bounded attempt and retries at most once", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     let attempts = 0;
     const fetchImpl: SmokeFetch = async (_url, init) =>
       new Promise<Response>(() => {
@@ -589,7 +579,7 @@ describe("glm provider config and smoke", () => {
       });
     const startedAt = Date.now();
 
-    const result = await runGlmProviderSmoke({
+    const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
       fetchImpl,
@@ -606,13 +596,13 @@ describe("glm provider config and smoke", () => {
         message: "Provider request timed out."
       });
     }
-    const note = await readReadinessNote(repo.repoRoot);
+    const note = await readFixtureNote(repo.repoRoot);
     expect(note.status).toBe("failed");
     expect(note.attempts).toBe(2);
   });
 
   test("stalled response body shares the attempt deadline and writes a failed note", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     let attempts = 0;
     const fetchImpl: SmokeFetch = async () => {
       attempts += 1;
@@ -629,7 +619,7 @@ describe("glm provider config and smoke", () => {
     };
     const startedAt = Date.now();
 
-    const result = await runGlmProviderSmoke({
+    const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
       fetchImpl,
@@ -647,14 +637,14 @@ describe("glm provider config and smoke", () => {
         message: "Provider request timed out."
       });
     }
-    const note = await readReadinessNote(repo.repoRoot);
+    const note = await readFixtureNote(repo.repoRoot);
     expect(note.status).toBe("failed");
     expect(note.attempts).toBe(MAX_RETRIES + 1);
     expect(note.completion_nonempty).toBe(false);
   });
 
   test("oversized response body fails before parsing and writes no stale pass note", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
     let attempts = 0;
     const fetchImpl: SmokeFetch = async () => {
       attempts += 1;
@@ -664,7 +654,7 @@ describe("glm provider config and smoke", () => {
       });
     };
 
-    const result = await runGlmProviderSmoke({
+    const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
       fetchImpl,
@@ -680,7 +670,7 @@ describe("glm provider config and smoke", () => {
         message: `Provider response exceeded ${MAX_RESPONSE_BYTES} bytes.`
       });
     }
-    const note = await readReadinessNote(repo.repoRoot);
+    const note = await readFixtureNote(repo.repoRoot);
     expect(note.status).toBe("failed");
     expect(note.failure).toEqual({
       category: "oversized_response",
@@ -689,117 +679,55 @@ describe("glm provider config and smoke", () => {
     expect(note.completion_nonempty).toBe(false);
   });
 
-  test("runtime configPath input cannot bypass a missing canonical config", async () => {
-    const repo = await createTempRepo();
-    const externalRepo = await createTempRepoWithProviderConfig();
-    await seedPassingReadinessNote(repo.repoRoot);
+  test("fixture missing config rejects before fetch or note write", async () => {
+    const repo = await tempRoots.createTempRepo();
     let fetchCalls = 0;
-    const runtimeOptions = {
-      repoRoot: repo.repoRoot,
-      configPath: join(externalRepo.repoRoot, DEFAULT_CONFIG_RELATIVE_PATH),
-      env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
-      fetchImpl: async () => {
-        fetchCalls += 1;
-        throw new Error("Fetch must not run without the canonical config.");
-      },
-      now: fixedNow
-    } as Parameters<typeof runGlmProviderSmoke>[0];
-
-    await expect(runGlmProviderSmoke(runtimeOptions)).rejects.toThrow();
-
-    expect(fetchCalls).toBe(0);
-    expect(await readReadinessStatus(repo.repoRoot)).not.toBe("passed");
-  });
-
-  test("CLI rejects unsupported args without echoing raw argv evidence", async () => {
-    const externalRepo = await createTempRepoWithProviderConfig();
-    const externalConfigPath = join(externalRepo.repoRoot, DEFAULT_CONFIG_RELATIVE_PATH);
-    const secretSentinel = "ROUND4_CLI_SENTINEL_SECRET";
-    for (const fixture of [
-      { args: ["--config", externalConfigPath], forbidden: ["--config", externalConfigPath] },
-      { args: [`--api-key=${secretSentinel}`], forbidden: ["--api-key", secretSentinel] }
-    ]) {
-      const repo = await createTempRepo();
-      await seedPassingReadinessNote(repo.repoRoot);
-      const child = Bun.spawn(
-        [process.execPath, join(import.meta.dir, "smoke.ts"), "--repo-root", repo.repoRoot, ...fixture.args],
-        { stdout: "pipe", stderr: "pipe", env: { ...process.env, [GLM_API_KEY_ENV]: secretSentinel } }
-      );
-      const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
-      const forbidden = [...fixture.forbidden, secretSentinel];
-      expect(exitCode).toBe(1);
-      expect(stdout).toBe("");
-      expect(stderr).toContain("GLM provider smoke failed: Unsupported or incomplete CLI argument.");
-      expectNoExternalText(`${stdout}${stderr}`, forbidden);
-      expect(await readReadinessStatus(repo.repoRoot)).toBe("passed");
-      expectNoExternalText(await readFile(readinessNotePath(repo.repoRoot), "utf8"), forbidden);
-    }
-  });
-
-  test("missing config invalidates a prior passing readiness note before failing", async () => {
-    const repo = await createTempRepo();
-    await seedPassingReadinessNote(repo.repoRoot);
 
     await expect(
-      runGlmProviderSmoke({
+      runGlmProviderSmokeFixture({
         repoRoot: repo.repoRoot,
         env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          throw new Error("Fetch must not run without a fixture config.");
+        },
         now: fixedNow
       })
     ).rejects.toThrow();
 
-    expect(await readReadinessStatus(repo.repoRoot)).not.toBe("passed");
+    expect(fetchCalls).toBe(0);
+    expect(await readFixtureStatus(repo.repoRoot)).toBeUndefined();
   });
 
-  test("malformed config invalidates a prior passing readiness note before failing", async () => {
-    const repo = await createTempRepo();
-    await seedPassingReadinessNote(repo.repoRoot);
+  test("fixture malformed config rejects before fetch or note write", async () => {
+    const repo = await tempRoots.createTempRepo();
+    let fetchCalls = 0;
     await mkdir(join(repo.repoRoot, "config", "providers"), { recursive: true });
     await writeFile(join(repo.repoRoot, "config", "providers", "glm.dmxapi.json"), "{", "utf8");
 
     await expect(
-      runGlmProviderSmoke({
+      runGlmProviderSmokeFixture({
         repoRoot: repo.repoRoot,
         env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          throw new Error("Fetch must not run with a malformed fixture config.");
+        },
         now: fixedNow
       })
     ).rejects.toThrow();
 
-    expect(await readReadinessStatus(repo.repoRoot)).not.toBe("passed");
-  });
-
-  test("prior passing readiness transitions to the current ordinary failure note", async () => {
-    const repo = await createTempRepoWithProviderConfig();
-    await seedPassingReadinessNote(repo.repoRoot);
-
-    const result = await runGlmProviderSmoke({
-      repoRoot: repo.repoRoot,
-      env: {},
-      now: fixedNow
-    });
-
-    expect(result.ok).toBe(false);
-    expect(
-      result.readinessNotePath.endsWith(
-        join("workspace", "readiness", DEFAULT_READINESS_NOTE_NAME)
-      )
-    ).toBe(true);
-    const note = await readReadinessNote(repo.repoRoot);
-    expect(note.status).toBe("failed");
-    expect(note.failure).toEqual({
-      category: "missing_key",
-      message: `Missing required environment variable ${GLM_API_KEY_ENV}.`
-    });
+    expect(fetchCalls).toBe(0);
+    expect(await readFixtureStatus(repo.repoRoot)).toBeUndefined();
   });
 
   test("readiness note writer rejects a symlinked workspace before external writes", async () => {
-    const repo = await createTempRepoWithProviderConfig();
-    const outsideWorkspace = await mkdtemp(join(tmpdir(), "shud-glm-provider-outside-"));
-    tempRoots.push(outsideWorkspace);
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
+    const outsideWorkspace = (await tempRoots.createTempRepo()).repoRoot;
     await symlink(outsideWorkspace, join(repo.repoRoot, "workspace"));
 
     await expect(
-      runGlmProviderSmoke({
+      runGlmProviderSmokeFixture({
         repoRoot: repo.repoRoot,
         env: {},
         now: fixedNow
@@ -809,43 +737,15 @@ describe("glm provider config and smoke", () => {
     expect(await readdir(outsideWorkspace)).toEqual([]);
   });
 
-  test("passing symlink and hardlink entries are replaced without mutating targets", async () => {
-    for (const entryKind of ["symlink", "hardlink"] as const) {
-      const repo = await createTempRepoWithProviderConfig();
-      const outsideWorkspace = await mkdtemp(join(tmpdir(), "shud-glm-provider-outside-"));
-      tempRoots.push(outsideWorkspace);
-      const externalNote = join(outsideWorkspace, `${entryKind}-pass.json`);
-      const externalContent = passingReadinessNoteText();
-      await writeFile(externalNote, externalContent, "utf8");
-      await mkdir(join(repo.repoRoot, "workspace", "readiness"), { recursive: true });
-      if (entryKind === "symlink") {
-        await symlink(externalNote, readinessNotePath(repo.repoRoot));
-      } else {
-        await link(externalNote, readinessNotePath(repo.repoRoot));
-      }
-
-      const result = await runGlmProviderSmoke({
-        repoRoot: repo.repoRoot,
-        env: {},
-        now: fixedNow
-      });
-
-      expect(result.ok).toBe(false);
-      expect(await readFile(externalNote, "utf8")).toBe(externalContent);
-      expect(await readReadinessStatus(repo.repoRoot)).toBe("failed");
-    }
-  });
-
   test("direct readiness writer rejects final note symlink without touching the target", async () => {
-    const repo = await createTempRepo();
-    const outsideWorkspace = await mkdtemp(join(tmpdir(), "shud-glm-provider-outside-"));
-    tempRoots.push(outsideWorkspace);
+    const repo = await tempRoots.createTempRepo();
+    const outsideWorkspace = (await tempRoots.createTempRepo()).repoRoot;
     const externalNote = join(outsideWorkspace, "external-note.json");
     await writeFile(externalNote, "unchanged", "utf8");
     await mkdir(join(repo.repoRoot, "workspace", "readiness"), { recursive: true });
-    await symlink(externalNote, readinessNotePath(repo.repoRoot));
+    await symlink(externalNote, fixtureNotePath(repo.repoRoot));
 
-    await expect(writeReadinessNote(repo.repoRoot, { status: "failed" })).rejects.toThrow(
+    await expect(writeFixtureReadinessNote(repo.repoRoot, { status: "failed" })).rejects.toThrow(
       "Readiness note path must be an owned regular file."
     );
 
@@ -853,30 +753,18 @@ describe("glm provider config and smoke", () => {
   });
 
   test("direct readiness writer rejects final note hardlink without touching the target", async () => {
-    const repo = await createTempRepo();
-    const outsideWorkspace = await mkdtemp(join(tmpdir(), "shud-glm-provider-outside-"));
-    tempRoots.push(outsideWorkspace);
+    const repo = await tempRoots.createTempRepo();
+    const outsideWorkspace = (await tempRoots.createTempRepo()).repoRoot;
     const externalNote = join(outsideWorkspace, "external-note.json");
     await writeFile(externalNote, "unchanged", "utf8");
     await mkdir(join(repo.repoRoot, "workspace", "readiness"), { recursive: true });
-    await link(externalNote, readinessNotePath(repo.repoRoot));
+    await link(externalNote, fixtureNotePath(repo.repoRoot));
 
-    await expect(writeReadinessNote(repo.repoRoot, { status: "failed" })).rejects.toThrow(
+    await expect(writeFixtureReadinessNote(repo.repoRoot, { status: "failed" })).rejects.toThrow(
       "Readiness note path must be an owned regular file."
     );
 
     expect(await readFile(externalNote, "utf8")).toBe("unchanged");
-  });
-
-  test("readiness invalidation fails closed on a directory final entry", async () => {
-    const repo = await createTempRepoWithProviderConfig();
-    await mkdir(readinessNotePath(repo.repoRoot), { recursive: true });
-
-    await expect(
-      runGlmProviderSmoke({ repoRoot: repo.repoRoot, env: {}, now: fixedNow })
-    ).rejects.toThrow("Readiness note path must be an owned regular file.");
-
-    expect(await readdir(readinessNotePath(repo.repoRoot))).toEqual([]);
   });
 
   test("request helpers bind endpoint, payload model, and non-admission target fields", async () => {
@@ -894,106 +782,3 @@ describe("glm provider config and smoke", () => {
     expect(config.targetModelId).toBe("glm-5.2");
   });
 });
-
-async function createTempRepoWithProviderConfig(): Promise<{ repoRoot: string }> {
-  const repo = await createTempRepo();
-  const configDir = join(repo.repoRoot, "config", "providers");
-  await mkdir(configDir, { recursive: true });
-  await writeFile(
-    join(configDir, "glm.dmxapi.json"),
-    await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8"),
-    "utf8"
-  );
-  return repo;
-}
-
-async function createTempRepo(): Promise<{ repoRoot: string }> {
-  const repoRoot = await mkdtemp(join(tmpdir(), "shud-glm-provider-"));
-  tempRoots.push(repoRoot);
-  return { repoRoot };
-}
-
-function jsonResponse(value: unknown, options: { status?: number; url?: string } = {}): Response {
-  return responseWithFinalUrl(
-    new Response(JSON.stringify(value), {
-      status: options.status ?? 200,
-      headers: {
-        "content-type": "application/json"
-      }
-    }),
-    options.url
-  );
-}
-
-function bareJsonResponse(value: unknown): Response {
-  return new Response(JSON.stringify(value), {
-    status: 200,
-    headers: {
-      "content-type": "application/json"
-    }
-  });
-}
-
-function textResponse(
-  text: string,
-  options: { status?: number; statusText?: string; headers?: HeadersInit; url?: string } = {}
-): Response {
-  const response = new Response(text, {
-    status: options.status ?? 200,
-    statusText: options.statusText,
-    headers: options.headers
-  });
-  return responseWithFinalUrl(response, options.url);
-}
-
-function responseWithFinalUrl(response: Response, url = CANONICAL_ENDPOINT): Response {
-  Object.defineProperty(response, "url", {
-    value: url,
-    configurable: true
-  });
-  return response;
-}
-
-async function readReadinessNote(repoRoot: string): Promise<Record<string, unknown>> {
-  return JSON.parse(await readFile(readinessNotePath(repoRoot), "utf8")) as Record<string, unknown>;
-}
-
-async function readReadinessStatus(repoRoot: string): Promise<unknown> {
-  try {
-    return (await readReadinessNote(repoRoot)).status;
-  } catch {
-    return undefined;
-  }
-}
-
-function readinessNotePath(repoRoot: string): string {
-  return join(repoRoot, "workspace", "readiness", DEFAULT_READINESS_NOTE_NAME);
-}
-
-async function seedPassingReadinessNote(repoRoot: string): Promise<void> {
-  await mkdir(join(repoRoot, "workspace", "readiness"), { recursive: true });
-  await writeFile(readinessNotePath(repoRoot), passingReadinessNoteText(), "utf8");
-}
-
-function passingReadinessNoteText(): string {
-  return `${JSON.stringify({ schema_version: "m1.glm-provider-smoke.v1", kind: "glm_provider_smoke", status: "passed" })}\n`;
-}
-
-function makeFakeSecret(): string { return ["unit", "redaction", "secret"].join("-"); }
-
-function expectNoExternalText(text: string, forbidden: string[]): void {
-  for (const value of forbidden) expect(text).not.toContain(value);
-}
-
-function cliFetchPreload(providerSentinel: string, fakeSecret: string): string {
-  const body = `provider body ${providerSentinel} ${fakeSecret} -----BEGIN PRIVATE KEY-----`;
-  return `globalThis.fetch = async () => {
-  const response = new Response(${JSON.stringify(body)}, {
-    status: 503,
-    statusText: ${JSON.stringify(`${providerSentinel} status text`)},
-    headers: { "x-provider-debug": ${JSON.stringify(providerSentinel)} }
-  });
-  Object.defineProperty(response, "url", { value: ${JSON.stringify(CANONICAL_ENDPOINT)}, configurable: true });
-  return response;
-};`;
-}

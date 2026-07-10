@@ -1,13 +1,9 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  DEFAULT_READINESS_NOTE_NAME,
-  invalidatePassingReadinessNote,
-  writeReadinessNote
-} from "./readiness-note";
+import { DEFAULT_READINESS_NOTE_NAME, FIXTURE_READINESS_NOTE_NAME, invalidatePassingReadinessNote, writeCanonicalReadinessNote, writeFixtureReadinessNote } from "./readiness-note";
 
-export { DEFAULT_READINESS_NOTE_NAME } from "./readiness-note";
+export { DEFAULT_READINESS_NOTE_NAME, FIXTURE_READINESS_NOTE_NAME } from "./readiness-note";
 
 export const GLM_API_KEY_ENV = "GLM_API_KEY";
 export const GLM_API_KEY_REF = "env:GLM_API_KEY";
@@ -25,15 +21,9 @@ export const CANONICAL_TARGET_MODEL_REF = "glm-dmxapi/target";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_REPO_ROOT = resolve(scriptDirectory, "..", "..");
-export const DEFAULT_PROVIDER_CONFIG_PATH = join(
-  DEFAULT_REPO_ROOT,
-  DEFAULT_CONFIG_RELATIVE_PATH
-);
+export const DEFAULT_PROVIDER_CONFIG_PATH = join(DEFAULT_REPO_ROOT, DEFAULT_CONFIG_RELATIVE_PATH);
 
-export type SmokeFetch = (
-  input: string,
-  init: RequestInit & { signal: AbortSignal }
-) => Promise<Response>;
+export type SmokeFetch = (input: string, init: RequestInit & { signal: AbortSignal }) => Promise<Response>;
 
 export interface GlmProviderConfig {
   providerName: string;
@@ -76,9 +66,7 @@ export interface SmokeFailure {
   http_status?: number;
 }
 
-export interface ReadinessNote {
-  schema_version: "m1.glm-provider-smoke.v1";
-  kind: "glm_provider_smoke";
+interface BaseReadinessNote {
   checked_at: string;
   provider_name: string;
   api_type: typeof API_TYPE;
@@ -96,9 +84,31 @@ export interface ReadinessNote {
   failure?: SmokeFailure;
 }
 
-export type SmokeRunResult =
+export interface CanonicalReadinessNote extends BaseReadinessNote {
+  schema_version: "m1.glm-provider-smoke.v1";
+  kind: "glm_provider_smoke";
+  evidence_scope: "canonical";
+}
+
+export interface FixtureReadinessNote extends BaseReadinessNote {
+  schema_version: "m1.glm-provider-smoke.fixture.v1";
+  kind: "glm_provider_smoke_fixture";
+  evidence_scope: "fixture";
+}
+
+export type ReadinessNote = CanonicalReadinessNote;
+type ReadinessNoteNameFor<Scope extends "canonical" | "fixture"> = Scope extends "canonical"
+  ? typeof DEFAULT_READINESS_NOTE_NAME
+  : typeof FIXTURE_READINESS_NOTE_NAME;
+
+type SmokeRunResultFor<
+  Note extends CanonicalReadinessNote | FixtureReadinessNote,
+  Scope extends "canonical" | "fixture"
+> =
   | {
       ok: true;
+      evidenceScope: Scope;
+      readinessNoteName: ReadinessNoteNameFor<Scope>;
       status: "passed";
       config: GlmProviderConfig;
       endpoint: string;
@@ -106,22 +116,28 @@ export type SmokeRunResult =
       responseUrl: string;
       completionNonempty: true;
       readinessNotePath: string;
-      note: ReadinessNote;
+      note: Note;
     }
   | {
       ok: false;
+      evidenceScope: Scope;
+      readinessNoteName: ReadinessNoteNameFor<Scope>;
       status: "failed";
       config: GlmProviderConfig;
       endpoint: string;
       attempts: number;
       error: SmokeFailure;
       readinessNotePath: string;
-      note: ReadinessNote;
+      note: Note;
     };
 
-export interface RunSmokeOptions {
-  repoRoot?: string;
-  readinessNoteName?: string;
+export type CanonicalSmokeRunResult = SmokeRunResultFor<CanonicalReadinessNote, "canonical">;
+export type FixtureSmokeRunResult = SmokeRunResultFor<FixtureReadinessNote, "fixture">;
+export type SmokeRunResult = CanonicalSmokeRunResult;
+type EngineSmokeRunResult = SmokeRunResultFor<CanonicalReadinessNote | FixtureReadinessNote, "canonical" | "fixture">;
+
+export interface RunSmokeFixtureOptions {
+  repoRoot: string;
   env?: Record<string, string | undefined>;
   fetchImpl?: SmokeFetch;
   timeoutMs?: number;
@@ -142,10 +158,7 @@ interface AttemptFailure {
 type AttemptResult = AttemptSuccess | AttemptFailure;
 
 class LocalSmokeError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "LocalSmokeError";
-  }
+  constructor(message: string) { super(message); this.name = "LocalSmokeError"; }
 }
 
 export async function loadProviderConfig(providerPath = DEFAULT_PROVIDER_CONFIG_PATH) {
@@ -268,39 +281,80 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
   };
 }
 
-export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promise<SmokeRunResult> {
-  const repoRoot = resolve(options.repoRoot ?? DEFAULT_REPO_ROOT);
-  await invalidatePassingReadinessNote(repoRoot, options.readinessNoteName);
+export async function runGlmProviderSmoke(): Promise<CanonicalSmokeRunResult> {
+  const result = await runSmokeEngine({
+    evidenceScope: "canonical",
+    repoRoot: DEFAULT_REPO_ROOT,
+    configPath: DEFAULT_PROVIDER_CONFIG_PATH,
+    env: process.env,
+    fetchImpl: globalThis.fetch.bind(globalThis),
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+    now: () => new Date()
+  });
+  return result as CanonicalSmokeRunResult;
+}
 
-  const config = await loadProviderConfig(join(repoRoot, DEFAULT_CONFIG_RELATIVE_PATH));
+export async function runGlmProviderSmokeFixture(
+  options: RunSmokeFixtureOptions
+): Promise<FixtureSmokeRunResult> {
+  const repoRoot = resolveFixtureRepoRoot(options);
+  await assertFixtureRepoRoot(repoRoot);
+  const timeoutMs = readFixtureTimeoutMs(options.timeoutMs);
+  const result = await runSmokeEngine({
+    evidenceScope: "fixture",
+    repoRoot,
+    configPath: join(repoRoot, DEFAULT_CONFIG_RELATIVE_PATH),
+    env: options.env ?? process.env,
+    fetchImpl: options.fetchImpl ?? globalThis.fetch.bind(globalThis),
+    timeoutMs,
+    now: options.now ?? (() => new Date())
+  });
+  return result as FixtureSmokeRunResult;
+}
+
+interface SmokeEngineInput {
+  evidenceScope: "canonical" | "fixture";
+  repoRoot: string;
+  configPath: string;
+  env: Record<string, string | undefined>;
+  fetchImpl: SmokeFetch;
+  timeoutMs: number;
+  now: () => Date;
+}
+
+async function runSmokeEngine(
+  options: SmokeEngineInput
+): Promise<EngineSmokeRunResult> {
+  if (options.evidenceScope === "canonical") {
+    await invalidatePassingReadinessNote(options.repoRoot);
+  }
+
+  const config = await loadProviderConfig(options.configPath);
   const endpoint = chatCompletionsEndpoint(config.baseUrl);
   const configuredBaseUrlHit = endpointHitsConfiguredBaseUrl(endpoint, config.baseUrl);
-  const env = options.env ?? process.env;
-  const apiKey = env[GLM_API_KEY_ENV];
-  const now = options.now ?? (() => new Date());
+  const apiKey = options.env[GLM_API_KEY_ENV];
 
   if (!configuredBaseUrlHit) {
     const error = {
       category: "base_url_mismatch",
       message: "Computed chat completions endpoint does not use the configured base URL."
     } satisfies SmokeFailure;
-    const note = createReadinessNote({
+    const note = createSmokeReadinessNote({
       config,
       endpoint,
       status: "failed",
       attempts: 0,
       configuredBaseUrlHit,
       completionNonempty: false,
-      now,
+      evidenceScope: options.evidenceScope,
+      now: options.now,
       failure: error
     });
-    const readinessNotePath = await writeReadinessNote(
-      repoRoot,
-      note,
-      options.readinessNoteName
-    );
+    const readinessNotePath = await writeSmokeReadinessNote(options, note);
     return {
       ok: false,
+      evidenceScope: options.evidenceScope,
+      readinessNoteName: readinessNoteNameForScope(options.evidenceScope),
       status: "failed",
       config,
       endpoint,
@@ -316,23 +370,22 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
       category: "missing_key",
       message: `Missing required environment variable ${GLM_API_KEY_ENV}.`
     } satisfies SmokeFailure;
-    const note = createReadinessNote({
+    const note = createSmokeReadinessNote({
       config,
       endpoint,
       status: "failed",
       attempts: 0,
       configuredBaseUrlHit,
       completionNonempty: false,
-      now,
+      evidenceScope: options.evidenceScope,
+      now: options.now,
       failure: error
     });
-    const readinessNotePath = await writeReadinessNote(
-      repoRoot,
-      note,
-      options.readinessNoteName
-    );
+    const readinessNotePath = await writeSmokeReadinessNote(options, note);
     return {
       ok: false,
+      evidenceScope: options.evidenceScope,
+      readinessNoteName: readinessNoteNameForScope(options.evidenceScope),
       status: "failed",
       config,
       endpoint,
@@ -343,8 +396,6 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
     };
   }
 
-  const fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const totalAttempts = MAX_RETRIES + 1;
   let lastFailure: SmokeFailure = {
     category: "network_error",
@@ -356,12 +407,12 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
       config,
       endpoint,
       apiKey,
-      fetchImpl,
-      timeoutMs
+      fetchImpl: options.fetchImpl,
+      timeoutMs: options.timeoutMs
     });
 
     if (result.ok) {
-      const note = createReadinessNote({
+      const note = createSmokeReadinessNote({
         config,
         endpoint,
         status: "passed",
@@ -369,15 +420,14 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
         configuredBaseUrlHit,
         completionNonempty: true,
         responseUrl: result.responseUrl,
-        now
+        evidenceScope: options.evidenceScope,
+        now: options.now
       });
-      const readinessNotePath = await writeReadinessNote(
-        repoRoot,
-        note,
-        options.readinessNoteName
-      );
+      const readinessNotePath = await writeSmokeReadinessNote(options, note);
       return {
         ok: true,
+        evidenceScope: options.evidenceScope,
+        readinessNoteName: readinessNoteNameForScope(options.evidenceScope),
         status: "passed",
         config,
         endpoint,
@@ -392,23 +442,22 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
     lastFailure = result.failure;
   }
 
-  const note = createReadinessNote({
+  const note = createSmokeReadinessNote({
     config,
     endpoint,
     status: "failed",
     attempts: totalAttempts,
     configuredBaseUrlHit,
     completionNonempty: false,
-    now,
+    evidenceScope: options.evidenceScope,
+    now: options.now,
     failure: lastFailure
   });
-  const readinessNotePath = await writeReadinessNote(
-    repoRoot,
-    note,
-    options.readinessNoteName
-  );
+  const readinessNotePath = await writeSmokeReadinessNote(options, note);
   return {
     ok: false,
+    evidenceScope: options.evidenceScope,
+    readinessNoteName: readinessNoteNameForScope(options.evidenceScope),
     status: "failed",
     config,
     endpoint,
@@ -417,6 +466,57 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
     note,
     readinessNotePath
   };
+}
+
+function resolveFixtureRepoRoot(options: RunSmokeFixtureOptions): string {
+  if (!options || typeof options.repoRoot !== "string" || options.repoRoot.trim().length === 0) {
+    throw new LocalSmokeError("Fixture smoke requires a noncanonical repo root.");
+  }
+  return resolve(options.repoRoot);
+}
+
+async function assertFixtureRepoRoot(repoRoot: string): Promise<void> {
+  const [fixtureRoot, canonicalRoot] = await Promise.all([
+    realpath(repoRoot),
+    realpath(DEFAULT_REPO_ROOT)
+  ]);
+  if (fixtureRoot === canonicalRoot) {
+    throw new LocalSmokeError("Fixture smoke repo root must not resolve to the canonical repository root.");
+  }
+}
+
+function readFixtureTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) {
+    return DEFAULT_TIMEOUT_MS;
+  }
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs <= 0 ||
+    timeoutMs > DEFAULT_TIMEOUT_MS
+  ) {
+    throw new LocalSmokeError(
+      `Fixture smoke timeout must be a safe integer from 1 to ${DEFAULT_TIMEOUT_MS} ms.`
+    );
+  }
+  return timeoutMs;
+}
+
+async function writeSmokeReadinessNote(
+  options: SmokeEngineInput,
+  note: CanonicalReadinessNote | FixtureReadinessNote
+): Promise<string> {
+  if (options.evidenceScope === "canonical") {
+    return await writeCanonicalReadinessNote(note as CanonicalReadinessNote);
+  }
+  return await writeFixtureReadinessNote(options.repoRoot, note as FixtureReadinessNote);
+}
+
+function readinessNoteNameForScope(
+  evidenceScope: "canonical" | "fixture"
+): typeof DEFAULT_READINESS_NOTE_NAME | typeof FIXTURE_READINESS_NOTE_NAME {
+  return evidenceScope === "canonical"
+    ? DEFAULT_READINESS_NOTE_NAME
+    : FIXTURE_READINESS_NOTE_NAME;
 }
 
 export function chatCompletionsEndpoint(baseUrl: string): string {
@@ -442,7 +542,7 @@ export function buildChatCompletionPayload(config: GlmProviderConfig): Record<st
   };
 }
 
-export function createReadinessNote(input: {
+function createSmokeReadinessNote(input: {
   config: GlmProviderConfig;
   endpoint: string;
   status: SmokeStatus;
@@ -452,10 +552,9 @@ export function createReadinessNote(input: {
   responseUrl?: string;
   now: () => Date;
   failure?: SmokeFailure;
-}): ReadinessNote {
-  return {
-    schema_version: "m1.glm-provider-smoke.v1",
-    kind: "glm_provider_smoke",
+  evidenceScope: "canonical" | "fixture";
+}): CanonicalReadinessNote | FixtureReadinessNote {
+  const base = {
     checked_at: input.now().toISOString(),
     provider_name: input.config.providerName,
     api_type: input.config.apiType,
@@ -464,13 +563,27 @@ export function createReadinessNote(input: {
     smoke_model: input.config.smokeModel,
     target_model_id: input.config.targetModelId,
     status: input.status,
-    model_admission: false,
+    model_admission: false as false,
     secret_ref: input.config.apiKeyRef,
     attempts: input.attempts,
     configured_base_url_hit: input.configuredBaseUrlHit,
     completion_nonempty: input.completionNonempty,
     ...(input.responseUrl ? { response_url: input.responseUrl } : {}),
     ...(input.failure ? { failure: input.failure } : {})
+  };
+  if (input.evidenceScope === "canonical") {
+    return {
+      schema_version: "m1.glm-provider-smoke.v1",
+      kind: "glm_provider_smoke",
+      evidence_scope: "canonical",
+      ...base
+    };
+  }
+  return {
+    schema_version: "m1.glm-provider-smoke.fixture.v1",
+    kind: "glm_provider_smoke_fixture",
+    evidence_scope: "fixture",
+    ...base
   };
 }
 
@@ -816,48 +929,21 @@ function readStringArray(value: unknown, context: string): string[] {
   return strings;
 }
 
-function parseCliArgs(args: string[]): {
-  repoRoot?: string;
-  timeoutMs?: number;
-} {
-  const parsed: {
-    repoRoot?: string;
-    timeoutMs?: number;
-  } = {};
+export const CLI_UNSUPPORTED_ARGUMENT_MESSAGE = "Unsupported or incomplete CLI argument.";
 
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    const next = args[index + 1];
-    if (arg === "--repo-root" && next) {
-      parsed.repoRoot = next;
-      index += 1;
-    } else if (arg === "--timeout-ms" && next) {
-      parsed.timeoutMs = Number.parseInt(next, 10);
-      index += 1;
-    } else if (arg === "--help") {
-      printHelp();
-      process.exit(0);
-    } else {
-      throw new LocalSmokeError("Unsupported or incomplete CLI argument.");
-    }
-  }
-
-  if (parsed.timeoutMs !== undefined && (!Number.isFinite(parsed.timeoutMs) || parsed.timeoutMs <= 0)) {
-    throw new LocalSmokeError("--timeout-ms must be a positive integer.");
-  }
-
-  return parsed;
+function isHelpInvocation(args: string[]): boolean {
+  return args.length === 1 && args[0] === "--help";
 }
 
 function printHelp(): void {
-  console.log(
-    [
-      "Usage: bun scripts/glm-provider/smoke.ts [--repo-root <path>] [--timeout-ms <ms>]",
-      "",
-      "Runs one non-stream OpenAI-compatible chat-completions smoke against the configured GLM provider.",
-      `The API key must be provided through ${GLM_API_KEY_ENV}; only ${GLM_API_KEY_REF} is persisted.`
-    ].join("\n")
-  );
+  console.log([
+    "Usage: bun scripts/glm-provider/smoke.ts [--help]",
+    "",
+    "Runs one non-stream OpenAI-compatible chat-completions smoke against the configured GLM provider.",
+    `The canonical checkout is ${DEFAULT_REPO_ROOT}.`,
+    `Each provider attempt uses a fixed ${DEFAULT_TIMEOUT_MS} ms timeout.`,
+    `The API key must be provided through ${GLM_API_KEY_ENV}; only ${GLM_API_KEY_REF} is persisted.`
+  ].join("\n"));
 }
 
 export function formatSmokeSuccessCliOutput(
@@ -881,19 +967,28 @@ export function formatSmokeSuccessCliOutput(
 
 async function main(): Promise<void> {
   try {
-    const cliOptions = parseCliArgs(process.argv.slice(2));
-    const result = await runGlmProviderSmoke(cliOptions);
+    const args = process.argv.slice(2);
+    if (isHelpInvocation(args)) {
+      printHelp();
+      return;
+    }
+    if (args.length > 0) {
+      await invalidatePassingReadinessNote(DEFAULT_REPO_ROOT);
+      console.error(`GLM provider smoke failed: ${CLI_UNSUPPORTED_ARGUMENT_MESSAGE}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const result = await runGlmProviderSmoke();
     if (result.ok) {
-      console.log(formatSmokeSuccessCliOutput(result, cliOptions.repoRoot ?? DEFAULT_REPO_ROOT));
+      console.log(formatSmokeSuccessCliOutput(result));
       return;
     }
 
     console.error(`GLM provider smoke failed: ${result.error.message}`);
     process.exitCode = 1;
   } catch (error) {
-    const message = error instanceof LocalSmokeError
-      ? error.message
-      : "Smoke command failed before provider readiness could be recorded.";
+    const message = error instanceof LocalSmokeError ? error.message : "Smoke command failed before provider readiness could be recorded.";
     console.error(`GLM provider smoke failed: ${message}`);
     process.exitCode = 1;
   }

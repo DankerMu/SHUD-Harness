@@ -1,52 +1,29 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const DEFAULT_READINESS_NOTE_NAME = "glm_provider_smoke.json";
+export const FIXTURE_READINESS_NOTE_NAME = "glm_provider_smoke.fixture.json";
+export const MAX_PRIOR_READINESS_NOTE_BYTES = 64 * 1024;
+const CANONICAL_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 interface ReadinessNoteDocument {
   status: string;
 }
 
-export async function writeReadinessNote(
-  repoRoot: string,
-  note: ReadinessNoteDocument,
-  noteName = DEFAULT_READINESS_NOTE_NAME
-): Promise<string> {
-  assertCanonicalReadinessNoteName(noteName);
-  const realRepoRoot = await realpath(repoRoot);
-  const workspaceDir = join(realRepoRoot, "workspace");
-  const readinessDir = join(workspaceDir, "readiness");
-  await ensureOwnedDirectory(workspaceDir, "workspace");
-  await ensureOwnedDirectory(readinessDir, "workspace/readiness");
-  const realReadinessDir = await realpath(readinessDir);
-  const expectedReadinessDir = join(realRepoRoot, "workspace", "readiness");
-  if (realReadinessDir !== expectedReadinessDir) {
-    throw new Error("Readiness note directory must resolve under workspace/readiness.");
-  }
-
-  const notePath = join(readinessDir, noteName);
-  await assertSafeReadinessNoteTarget(notePath);
-  const tempPath = join(readinessDir, `.${noteName}.${process.pid}.${randomUUID()}.tmp`);
-  try {
-    await writeFile(tempPath, `${JSON.stringify(note, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx"
-    });
-    await rename(tempPath, notePath);
-  } catch (error) {
-    await unlink(tempPath).catch(() => undefined);
-    throw error;
-  }
-  return notePath;
+export async function writeCanonicalReadinessNote(note: ReadinessNoteDocument): Promise<string> {
+  return await writeOwnedReadinessNote(CANONICAL_REPO_ROOT, note, DEFAULT_READINESS_NOTE_NAME);
 }
 
-export async function invalidatePassingReadinessNote(
+export async function writeFixtureReadinessNote(
   repoRoot: string,
-  noteName = DEFAULT_READINESS_NOTE_NAME
-): Promise<void> {
-  assertCanonicalReadinessNoteName(noteName);
+  note: ReadinessNoteDocument
+): Promise<string> {
+  return await writeOwnedReadinessNote(repoRoot, note, FIXTURE_READINESS_NOTE_NAME);
+}
+
+export async function invalidatePassingReadinessNote(repoRoot: string): Promise<void> {
   const realRepoRoot = await realpath(repoRoot);
   const workspaceDir = join(realRepoRoot, "workspace");
   const readinessDir = join(workspaceDir, "readiness");
@@ -63,7 +40,7 @@ export async function invalidatePassingReadinessNote(
     throw new Error("Readiness note directory must resolve under workspace/readiness.");
   }
 
-  const notePath = join(readinessDir, noteName);
+  const notePath = join(readinessDir, DEFAULT_READINESS_NOTE_NAME);
   if (!(await prepareReadinessNoteForInvalidation(notePath))) {
     return;
   }
@@ -100,6 +77,39 @@ export async function invalidatePassingReadinessNote(
   }
 }
 
+async function writeOwnedReadinessNote(
+  repoRoot: string,
+  note: ReadinessNoteDocument,
+  noteName: typeof DEFAULT_READINESS_NOTE_NAME | typeof FIXTURE_READINESS_NOTE_NAME
+): Promise<string> {
+  const realRepoRoot = await realpath(repoRoot);
+  const workspaceDir = join(realRepoRoot, "workspace");
+  const readinessDir = join(workspaceDir, "readiness");
+  await ensureOwnedDirectory(workspaceDir, "workspace");
+  await ensureOwnedDirectory(readinessDir, "workspace/readiness");
+  const realReadinessDir = await realpath(readinessDir);
+  const expectedReadinessDir = join(realRepoRoot, "workspace", "readiness");
+  if (realReadinessDir !== expectedReadinessDir) {
+    throw new Error("Readiness note directory must resolve under workspace/readiness.");
+  }
+
+  const notePath = join(readinessDir, noteName);
+  await assertSafeReadinessNoteTarget(notePath);
+  const tempPath = join(readinessDir, `.${noteName}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(tempPath, `${JSON.stringify(note, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx"
+    });
+    await rename(tempPath, notePath);
+  } catch (error) {
+    await unlink(tempPath).catch(() => undefined);
+    throw error;
+  }
+  return notePath;
+}
+
 async function prepareReadinessNoteForInvalidation(path: string): Promise<boolean> {
   let stat: Awaited<ReturnType<typeof lstat>>;
   try {
@@ -124,17 +134,17 @@ async function prepareReadinessNoteForInvalidation(path: string): Promise<boolea
     }
     return false;
   }
-  return true;
-}
-
-function assertCanonicalReadinessNoteName(noteName: string): void {
-  if (
-    noteName !== DEFAULT_READINESS_NOTE_NAME ||
-    noteName.includes("/") ||
-    noteName.includes("\\")
-  ) {
-    throw new Error(`Readiness note name must be ${DEFAULT_READINESS_NOTE_NAME}.`);
+  if (stat.size > MAX_PRIOR_READINESS_NOTE_BYTES) {
+    try {
+      await unlink(path);
+    } catch (error) {
+      if (!isNodeErrorWithCode(error, "ENOENT")) {
+        throw error;
+      }
+    }
+    return false;
   }
+  return true;
 }
 
 async function assertSafeReadinessNoteTarget(path: string): Promise<void> {

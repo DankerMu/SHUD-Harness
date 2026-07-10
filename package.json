@@ -16,7 +16,7 @@
     "test:frontend": "bun test ./packages/frontend/src/**/*.test.ts ./packages/frontend/src/**/*.test.tsx",
     "test:schemas": "bun test ./packages/core/src/domain/schemas/core-schemas.test.ts",
     "test:core-services": "bun test ./packages/core/src/domain/services/*.test.ts",
-    "test:glm-provider": "bun test ./scripts/glm-provider/smoke.test.ts",
+    "test:glm-provider": "bun test ./scripts/glm-provider/*.test.ts",
     "smoke:glm-provider": "bun scripts/glm-provider/smoke.ts",
     "test:perf:api": "bun scripts/perf/api.ts",
     "schema:generate": "bun scripts/schema/generate.ts",
