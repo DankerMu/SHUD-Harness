@@ -601,20 +601,28 @@ describe("glm provider config and smoke", () => {
     expect(await readReadinessStatus(repo.repoRoot)).not.toBe("passed");
   });
 
-  test("writeReadinessNote false preserves no-write behavior before config failure", async () => {
-    const repo = await createTempRepo();
+  test("prior passing readiness transitions to the current ordinary failure note", async () => {
+    const repo = await createTempRepoWithProviderConfig();
     await seedPassingReadinessNote(repo.repoRoot);
 
-    await expect(
-      runGlmProviderSmoke({
-        repoRoot: repo.repoRoot,
-        env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
-        now: fixedNow,
-        writeReadinessNote: false
-      })
-    ).rejects.toThrow();
+    const result = await runGlmProviderSmoke({
+      repoRoot: repo.repoRoot,
+      env: {},
+      now: fixedNow
+    });
 
-    expect(await readReadinessStatus(repo.repoRoot)).toBe("passed");
+    expect(result.ok).toBe(false);
+    expect(
+      result.readinessNotePath.endsWith(
+        join("workspace", "readiness", DEFAULT_READINESS_NOTE_NAME)
+      )
+    ).toBe(true);
+    const note = await readReadinessNote(repo.repoRoot);
+    expect(note.status).toBe("failed");
+    expect(note.failure).toEqual({
+      category: "missing_key",
+      message: `Missing required environment variable ${GLM_API_KEY_ENV}.`
+    });
   });
 
   test("readiness note writer rejects a symlinked workspace before external writes", async () => {

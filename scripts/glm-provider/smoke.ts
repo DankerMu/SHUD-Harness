@@ -103,7 +103,7 @@ export type SmokeRunResult =
       attempts: number;
       responseUrl: string;
       completionNonempty: true;
-      readinessNotePath?: string;
+      readinessNotePath: string;
       note: ReadinessNote;
     }
   | {
@@ -113,7 +113,7 @@ export type SmokeRunResult =
       endpoint: string;
       attempts: number;
       error: SmokeFailure;
-      readinessNotePath?: string;
+      readinessNotePath: string;
       note: ReadinessNote;
     };
 
@@ -125,7 +125,6 @@ export interface RunSmokeOptions {
   fetchImpl?: SmokeFetch;
   timeoutMs?: number;
   now?: () => Date;
-  writeReadinessNote?: boolean;
 }
 
 interface AttemptSuccess {
@@ -249,10 +248,7 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
 
 export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promise<SmokeRunResult> {
   const repoRoot = resolve(options.repoRoot ?? DEFAULT_REPO_ROOT);
-  const writeReadiness = options.writeReadinessNote ?? true;
-  if (writeReadiness) {
-    await invalidatePassingReadinessNote(repoRoot, options.readinessNoteName);
-  }
+  await invalidatePassingReadinessNote(repoRoot, options.readinessNoteName);
 
   const configPath = resolveConfigPath(repoRoot, options.configPath);
   const config = await loadProviderConfig(configPath);
@@ -277,9 +273,11 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
       now,
       failure: error
     });
-    const readinessNotePath = writeReadiness
-      ? await writeReadinessNote(repoRoot, note, options.readinessNoteName)
-      : undefined;
+    const readinessNotePath = await writeReadinessNote(
+      repoRoot,
+      note,
+      options.readinessNoteName
+    );
     return {
       ok: false,
       status: "failed",
@@ -307,9 +305,11 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
       now,
       failure: error
     });
-    const readinessNotePath = writeReadiness
-      ? await writeReadinessNote(repoRoot, note, options.readinessNoteName)
-      : undefined;
+    const readinessNotePath = await writeReadinessNote(
+      repoRoot,
+      note,
+      options.readinessNoteName
+    );
     return {
       ok: false,
       status: "failed",
@@ -350,9 +350,11 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
         responseUrl: result.responseUrl,
         now
       });
-      const readinessNotePath = writeReadiness
-        ? await writeReadinessNote(repoRoot, note, options.readinessNoteName)
-        : undefined;
+      const readinessNotePath = await writeReadinessNote(
+        repoRoot,
+        note,
+        options.readinessNoteName
+      );
       return {
         ok: true,
         status: "passed",
@@ -379,9 +381,11 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
     now,
     failure: lastFailure
   });
-  const readinessNotePath = writeReadiness
-    ? await writeReadinessNote(repoRoot, note, options.readinessNoteName)
-    : undefined;
+  const readinessNotePath = await writeReadinessNote(
+    repoRoot,
+    note,
+    options.readinessNoteName
+  );
   return {
     ok: false,
     status: "failed",
@@ -865,9 +869,7 @@ export function formatSmokeSuccessCliOutput(
   result: Extract<SmokeRunResult, { ok: true }>,
   repoRoot = DEFAULT_REPO_ROOT
 ): string {
-  const notePath = result.readinessNotePath
-    ? result.readinessNotePath.replace(`${resolve(repoRoot)}/`, "")
-    : "not-written";
+  const notePath = result.readinessNotePath.replace(`${resolve(repoRoot)}/`, "");
   return [
     "GLM provider smoke passed",
     `provider=${result.config.providerName}`,
