@@ -10,7 +10,7 @@ zero `providers:` 配置块 SHALL 配置 GLM 5.2 第三方 OpenAI 兼容端点�
 
 M1 临时 carrier `deepseek-v4-pro-guan` MUST NOT 出现在 Zero 消费的 `providers.*.models`、运行时 `default_model`、`fallback_chain`、`task_closure_model` 或 `context_compaction_model` 中；Zero provider 模型表与运行时 selector 仅保留/指向 `glm-dmxapi/target`。顶层 `smoke_model` 与 `fallback_smoke_model` 仅保存 raw carrier model id，供 smoke/后续迁移使用，不是 Zero model ref，不构成运行时准入。
 
-Canonical readiness evidence MUST load exactly `<canonicalRepoRoot>/config/providers/glm.dmxapi.json`, where `canonicalRepoRoot` is resolved from the source checkout rather than caller input. Canonical CLI/API MUST NOT accept repo root, config path, fetch transport, environment, clock, or timeout overrides that can mint the same readiness note. The canonical storage writer and full canonical schema validation MUST be private to the fixed-authority canonical engine; no exported non-smoke function may write `glm_provider_smoke.json`. Test-only dependency injection MUST use an explicitly noncanonical fixture entrypoint, MUST NOT target `canonicalRepoRoot`, and MUST write a different note filename carrying `evidence_scope: fixture` so #38 cannot consume it as canonical readiness.
+Canonical readiness evidence MUST load exactly `<canonicalRepoRoot>/config/providers/glm.dmxapi.json`, where `canonicalRepoRoot` is resolved from the source checkout rather than caller input. Canonical CLI/API MUST NOT accept repo root, config path, fetch transport, environment, clock, or timeout overrides that can mint the same readiness note. The canonical storage writer and full canonical schema validation MUST be private to the fixed-authority canonical engine; no exported non-smoke function or exported test helper may write, seed, back up, or restore `glm_provider_smoke.json`. Test-only dependency injection MUST use an explicitly noncanonical fixture entrypoint, MUST NOT target `canonicalRepoRoot`, and MUST write a different note filename carrying `evidence_scope: fixture` so #38 cannot consume it as canonical readiness. Canonical-path tests MUST leave the note absent/current failed after a failing invocation; only a fresh successful canonical smoke may mint or restore a passing note.
 
 #### Scenario: secret 不落盘
 
@@ -39,9 +39,9 @@ Canonical readiness evidence MUST load exactly `<canonicalRepoRoot>/config/provi
 
 ### Requirement: 连通冒烟
 
-系统 SHALL 提供冒烟脚本：以最小 prompt 经配置的 provider 完成一次往返，得到非空 completion，且请求实际命中配置的 `base_url`，脚本 exit 0。每次 attempt timeout 固定为 15000ms，失败允许重试一次并记录；canonical CLI/API 不提供 timeout override。取得 Response 后若因 endpoint validation 或 non-2xx 提前失败，系统 MUST 在同一 attempt deadline 内取消未读 body 并 abort request，MUST NOT 为清理读取 provider 内容。失败结果、readiness note 与 CLI 输出 MUST 仅包含本地构造的结构化事实，MUST NOT 持久化或输出 provider response body、status text、headers 或外部异常原文。
+系统 SHALL 提供冒烟脚本：以最小 prompt 经配置的 provider 完成一次往返，得到非空 completion，且请求实际命中配置的 `base_url`，脚本 exit 0。每次 attempt timeout 固定为 15000ms，失败允许重试一次并记录；canonical CLI/API 不提供 timeout override。取得 Response 后，未读 body、oversized consumed body 及其他 early-return cleanup MUST 共用受当前 attempt signal/controller 约束的 cancellation primitive，在同一 deadline 内 cancel/abort；系统 MUST NOT 为清理读取 provider 内容，也 MUST NOT 在 deadline 外等待 provider-controlled cancellation。Fetch 暴露的 exact-URL numeric non-2xx status `300..599` MUST 由 producer 与 canonical validator 以同一契约接受为本地 `http_error` 事实。失败结果、readiness note 与 CLI 输出 MUST 仅包含本地构造的结构化事实，MUST NOT 持久化或输出 provider response body、status text、headers 或外部异常原文。
 
-每次 canonical 运行前 SHALL 使旧 passing note 失效，包含 CLI unsupported/incomplete/invalid preflight 失败。若 canonical `workspace`、`workspace/readiness` ancestor 或 final entry 是 symlink / 非预期类型，失效逻辑 SHALL 仅移除 canonical checkout 下的本地不安全目录项、MUST NOT 跟随或改写外部 target；随后发布当前结果或保持 canonical path 不可读为 pass。若 expected realpath/type 的 ancestor 由当前 uid 拥有但 mode 缺少 owner rwx，canonical authority SHALL 恢复 owner rwx 后再失效/发布，不得删除目录或改写 sibling readiness notes；非当前 uid 所有的目录仍为 authority error。final hardlink 采用同样的 external-target 不变规则。单链接 regular 旧 note 在读取前 MUST 以 metadata size 上限检查；超限文件 MUST 在不读取内容的前提下安全移除/替换；size 内但因权限不可读的 leaf MUST 在目录 authority 恢复后按不可信旧证据移除，不能保留可能的 pass。
+每次 canonical 运行前 SHALL 使旧 passing note 失效，包含 CLI unsupported/incomplete/invalid preflight 失败。若 canonical `workspace`、`workspace/readiness` ancestor 或 final entry 是 symlink / 非预期类型，失效逻辑 SHALL 仅移除 canonical checkout 下的本地不安全目录项、MUST NOT 跟随或改写外部 target；随后发布当前结果或保持 canonical path 不可读为 pass。若 expected realpath/type 的 ancestor 由当前 uid 拥有但 mode 缺少 owner rwx，canonical authority SHALL 恢复 owner rwx 后再失效/发布，不得删除目录或改写 sibling readiness notes；非当前 uid 所有的目录仍为 authority error。Darwin ACL 的 `delete` / `delete_child` deny 可能在 owner mode 已恢复后继续阻止 unlink；对已证明安全的单链接 regular passing note，authority MUST 先原位写入有界、本地构造且不可解释为 pass 的 tombstone，再 best-effort unlink，并回读证明 canonical path 不可消费为 pass。若 ACL 同时阻止原位失效，系统 MUST 报明确 authority failure，不能宣称失效成功。final hardlink 采用同样的 external-target 不变规则且不得原位改写。单链接 regular 旧 note 在读取前 MUST 以 metadata size 上限检查；超限文件 MUST 在不读取内容的前提下安全移除/替换；size 内但因权限不可读的 leaf MUST 在目录 authority 恢复后按不可信旧证据移除，不能保留可能的 pass。
 
 #### Scenario: 冒烟通过
 
@@ -82,6 +82,26 @@ Canonical readiness evidence MUST load exactly `<canonicalRepoRoot>/config/provi
 
 - **WHEN** provider 返回 non-2xx 或 final URL validation 失败且 body 是未结束 stream
 - **THEN** body cancellation/request abort 在 15000ms attempt deadline 内发生，不读取/落盘 body 内容，最多重试一次
+
+#### Scenario: oversized body cancellation 不越过 deadline
+
+- **WHEN** response stream 超过 size cap 且其 `cancel()` promise 永不 settle
+- **THEN** attempt signal/controller 在 deadline 内终止等待并返回本地 `oversized_response` failure，不泄露 provider 内容且不保留旧 pass
+
+#### Scenario: exact-URL 3xx 与 canonical validator 同契约
+
+- **WHEN** Fetch 暴露 exact request URL、`redirected=false`、`ok=false` 的 304 response
+- **THEN** producer 生成 numeric `http_error`，canonical validator 接受并发布当前 redacted failed note；redirect/mismatched URL 仍按 endpoint/network 契约失败
+
+#### Scenario: Darwin delete ACL 不保留旧 pass
+
+- **WHEN** 安全单链接 regular passing note 或其 parent 带当前用户 `deny delete` / `deny delete_child` ACL，随后 unsupported CLI 或 missing-key smoke 失败
+- **THEN** note bytes 在 unlink 前先转为 non-pass tombstone，sibling notes byte-identical；unlink 被拒也不能留下可消费的 pass，若原位失效也被拒则返回 authority failure
+
+#### Scenario: 测试清理不复活 canonical pass
+
+- **WHEN** canonical-path test 在 seeded pass 后执行失败/unsupported invocation 并进入 teardown
+- **THEN** 不存在 exported backup/restore writer，teardown 不恢复旧 pass；只有后续 fresh successful canonical smoke 可重新发布 passed note
 
 ### Requirement: 冒烟不等于准入
 
