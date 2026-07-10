@@ -41,8 +41,7 @@ import {
   makeFakeSecret,
   readReadinessNote,
   readReadinessStatus,
-  readinessNotePath,
-  withCanonicalReadinessBackup
+  readinessNotePath
 } from "./test-helpers";
 
 if (false) {
@@ -51,6 +50,7 @@ if (false) {
 }
 
 const tempRoots = createTempRootTracker();
+const darwinTest = process.platform === "darwin" ? test : test.skip;
 
 describe("glm provider canonical authority boundaries", () => {
   afterEach(async () => {
@@ -78,6 +78,7 @@ describe("glm provider canonical authority boundaries", () => {
     }
 
     const testHelpers = await import("./test-helpers");
+    expect("withCanonicalReadinessBackup" in testHelpers).toBe(false);
     expect("seedPassingReadinessNote" in testHelpers).toBe(false);
     expect("passingReadinessNoteText" in testHelpers).toBe(false);
 
@@ -377,6 +378,45 @@ describe("glm provider canonical authority boundaries", () => {
     });
   });
 
+  darwinTest("Darwin delete ACL denial tombstones a stale pass before cleanup", async () => {
+    await withCanonicalWorkspaceEntryBackup(async () => {
+      for (const aclKind of ["parent-delete-child", "leaf-delete"] as const) {
+        for (const flow of ["unsupported", "missing-key"] as const) {
+          await withDarwinDeleteAclCanonicalWorkspace(aclKind, async ({
+            aclPath,
+            permission,
+            siblingPath,
+            siblingContent
+          }) => {
+            const child = flow === "unsupported"
+              ? runSmokeCli(["--repo-root", "/tmp/ignored"], {
+                  ...process.env,
+                  [GLM_API_KEY_ENV]: makeFakeSecret()
+                })
+              : runSmokeCli([], envWithoutGlmKey());
+            const { exitCode, stdout, stderr } = await collectChild(child);
+
+            expect(exitCode).toBe(1);
+            expect(stdout).toBe("");
+            if (flow === "unsupported") {
+              expect(stderr).toBe(`GLM provider smoke failed: ${CLI_UNSUPPORTED_ARGUMENT_MESSAGE}\n`);
+            } else {
+              expect(stderr).toMatch(
+                /GLM provider smoke failed: (Missing required environment variable GLM_API_KEY|Smoke command failed before provider readiness could be recorded)\./
+              );
+            }
+            await expectDarwinDenyAcl(aclPath, permission);
+            await expectCanonicalTombstoneStillPresent();
+            expect(await readReadinessStatus(DEFAULT_REPO_ROOT)).not.toBe("passed");
+            expect(Buffer.compare(await readFile(siblingPath), siblingContent)).toBe(0);
+            await clearDarwinAcl(aclPath);
+            await expectNoDarwinDenyAcl(aclPath, permission);
+          });
+        }
+      }
+    });
+  });
+
   test("canonical CLI provider failure omits provider body, status text, headers, and secrets", async () => {
     await withCanonicalReadinessBackup(async () => {
       const fakeSecret = makeFakeSecret();
@@ -400,6 +440,39 @@ describe("glm provider canonical authority boundaries", () => {
       const noteText = await readFile(readinessNotePath(DEFAULT_REPO_ROOT), "utf8");
       expect(noteText).toContain('"http_status": 503');
       expectNoExternalText(noteText, forbidden);
+    });
+  });
+
+  test("canonical exact-URL 304 publishes current redacted failed note", async () => {
+    await withCanonicalReadinessBackup(async () => {
+      await seedPassingReadinessNote(DEFAULT_REPO_ROOT);
+      const fakeSecret = makeFakeSecret();
+      const providerSentinel = "HTTP_304_PROVIDER_SENTINEL";
+      const preloadRoot = await tempRoots.createTempRepo();
+      const preloadPath = join(preloadRoot.repoRoot, "fetch-304-preload.ts");
+      await writeFile(preloadPath, httpStatusPreload(304, providerSentinel), "utf8");
+
+      const child = runSmokeCli([], {
+        ...process.env,
+        [GLM_API_KEY_ENV]: fakeSecret
+      }, preloadPath);
+      const { exitCode, stdout, stderr } = await collectChild(child);
+      const note = await readReadinessNote(DEFAULT_REPO_ROOT);
+      const serialized = JSON.stringify(note);
+
+      expect(exitCode).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("GLM provider smoke failed: Provider returned HTTP 304");
+      expect(note.status).toBe("failed");
+      expect(note.failure).toEqual({
+        category: "http_error",
+        message: "Provider returned HTTP 304 from configured endpoint.",
+        http_status: 304
+      });
+      expectNoExternalText(`${stdout}${stderr}${serialized}`, [
+        providerSentinel,
+        fakeSecret
+      ]);
     });
   });
 
@@ -538,6 +611,16 @@ async function seedPassingReadinessNote(repoRoot: string): Promise<void> {
   await writeFile(readinessNotePath(repoRoot), passingReadinessNoteText(), "utf8");
 }
 
+async function withCanonicalReadinessBackup<T>(run: () => Promise<T>): Promise<T> {
+  const notePath = readinessNotePath(DEFAULT_REPO_ROOT);
+  await rm(notePath, { force: true, recursive: true });
+  try {
+    return await run();
+  } finally {
+    await rm(notePath, { force: true, recursive: true });
+  }
+}
+
 async function withModeRestrictedCanonicalWorkspace<T>(run: (paths: {
   workspaceDir: string;
   readinessDir: string;
@@ -561,6 +644,36 @@ async function withModeRestrictedCanonicalWorkspace<T>(run: (paths: {
   } finally {
     await chmod(workspaceDir, 0o700).catch(() => undefined);
     await chmod(readinessDir, 0o700).catch(() => undefined);
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+}
+
+async function withDarwinDeleteAclCanonicalWorkspace<T>(
+  aclKind: "parent-delete-child" | "leaf-delete",
+  run: (paths: {
+    aclPath: string;
+    permission: "delete" | "delete_child";
+    siblingPath: string;
+    siblingContent: Buffer;
+  }) => Promise<T>
+): Promise<T> {
+  const workspaceDir = join(DEFAULT_REPO_ROOT, "workspace");
+  const readinessDir = join(workspaceDir, "readiness");
+  const notePath = readinessNotePath(DEFAULT_REPO_ROOT);
+  const siblingPath = join(readinessDir, "darwin-acl-sibling-note.txt");
+  const siblingContent = Buffer.from("darwin acl sibling remains byte-identical\n");
+  const aclPath = aclKind === "parent-delete-child" ? readinessDir : notePath;
+  const permission = aclKind === "parent-delete-child" ? "delete_child" : "delete";
+
+  await rm(workspaceDir, { recursive: true, force: true });
+  await mkdir(readinessDir, { recursive: true });
+  await writeFile(siblingPath, siblingContent);
+  await writeFile(notePath, passingReadinessNoteText(), "utf8");
+  await addDarwinDenyAcl(aclPath, permission);
+  try {
+    return await run({ aclPath, permission, siblingPath, siblingContent });
+  } finally {
+    await clearDarwinAcl(aclPath).catch(() => undefined);
     await rm(workspaceDir, { recursive: true, force: true });
   }
 }
@@ -595,6 +708,21 @@ function passingReadinessNoteText(): string {
   })}\n`;
 }
 
+function httpStatusPreload(status: number, sentinel: string): string {
+  return `globalThis.fetch = async () => {
+  const response = new Response(null, {
+    status: ${status},
+    statusText: ${JSON.stringify(`${sentinel} status text`)},
+    headers: { "x-provider-debug": ${JSON.stringify(sentinel)} }
+  });
+  Object.defineProperty(response, "url", {
+    value: "https://www.dmxapi.cn/v1/chat/completions",
+    configurable: true
+  });
+  return response;
+};`;
+}
+
 async function withCanonicalWorkspaceEntryBackup<T>(run: () => Promise<T>): Promise<T> {
   const workspacePath = join(DEFAULT_REPO_ROOT, "workspace");
   const backupParent = await mkdtemp(join(DEFAULT_REPO_ROOT, ".glm-provider-workspace-backup-"));
@@ -617,8 +745,81 @@ async function withCanonicalWorkspaceEntryBackup<T>(run: () => Promise<T>): Prom
     if (hadOriginal) {
       await rename(backupPath, workspacePath);
     }
+    await removeCanonicalPassingReadinessNote();
     await rm(backupParent, { recursive: true, force: true });
   }
+}
+
+async function removeCanonicalPassingReadinessNote(): Promise<void> {
+  if (await readReadinessStatus(DEFAULT_REPO_ROOT) === "passed") {
+    await rm(readinessNotePath(DEFAULT_REPO_ROOT), { force: true, recursive: true });
+  }
+}
+
+async function addDarwinDenyAcl(
+  path: string,
+  permission: "delete" | "delete_child"
+): Promise<void> {
+  const user = (await runDarwinCommand(["id", "-un"])).stdout.trim();
+  await runDarwinCommand(["chmod", "+a", `user:${user} deny ${permission}`, path]);
+}
+
+async function clearDarwinAcl(path: string): Promise<void> {
+  await runDarwinCommand(["chmod", "-N", path]);
+}
+
+async function expectDarwinDenyAcl(
+  path: string,
+  permission: "delete" | "delete_child"
+): Promise<void> {
+  expect(await pathExists(path)).toBe(true);
+  const listing = await runDarwinCommand(["ls", "-lde", path]);
+  expect(hasDarwinDenyAcl(listing.stdout, permission)).toBe(true);
+}
+
+async function expectNoDarwinDenyAcl(
+  path: string,
+  permission: "delete" | "delete_child"
+): Promise<void> {
+  expect(await pathExists(path)).toBe(true);
+  const listing = await runDarwinCommand(["ls", "-lde", path]);
+  expect(hasDarwinDenyAcl(listing.stdout, permission)).toBe(false);
+}
+
+async function expectCanonicalTombstoneStillPresent(): Promise<void> {
+  const notePath = readinessNotePath(DEFAULT_REPO_ROOT);
+  expect(await pathExists(notePath)).toBe(true);
+  const noteBytes = await readFile(notePath);
+  expect(JSON.parse(noteBytes.toString("utf8"))).toEqual({
+    schema_version: "m1.glm-provider-smoke.tombstone.v1",
+    kind: "glm_provider_smoke_tombstone",
+    evidence_scope: "canonical",
+    status: "failed",
+    reason: "stale_pass_invalidated"
+  });
+}
+
+function hasDarwinDenyAcl(
+  listing: string,
+  permission: "delete" | "delete_child"
+): boolean {
+  return new RegExp(`\\bdeny\\s+${permission}\\b`).test(listing);
+}
+
+async function runDarwinCommand(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  const child = Bun.spawn(args, {
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout as ReadableStream<Uint8Array>).text(),
+    new Response(child.stderr as ReadableStream<Uint8Array>).text()
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(`Darwin ACL command failed: ${args[0]}`);
+  }
+  return { stdout, stderr };
 }
 
 async function pathExists(path: string): Promise<boolean> {

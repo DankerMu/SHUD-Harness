@@ -1,5 +1,4 @@
 import {
-  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -7,7 +6,7 @@ import {
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
   DEFAULT_CONFIG_RELATIVE_PATH,
   DEFAULT_PROVIDER_CONFIG_PATH,
@@ -156,35 +155,6 @@ export function cliFetchPreload(providerSentinel: string, fakeSecret: string): s
   Object.defineProperty(response, "url", { value: ${JSON.stringify(CANONICAL_ENDPOINT)}, configurable: true });
   return response;
 };`;
-}
-
-export async function withCanonicalReadinessBackup<T>(run: () => Promise<T>): Promise<T> {
-  const notePath = readinessNotePath(DEFAULT_REPO_ROOT);
-  let original: { data: Buffer; mode: number } | undefined;
-  try {
-    const stat = await lstat(notePath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink > 1) {
-      throw new Error("Refusing to overwrite an unsafe canonical readiness note during tests.");
-    }
-    original = {
-      data: Buffer.from(await readFile(notePath)),
-      mode: stat.mode & 0o777
-    };
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT")) {
-      throw error;
-    }
-  }
-
-  try {
-    return await run();
-  } finally {
-    await rm(notePath, { force: true, recursive: true });
-    if (original) {
-      await mkdir(dirname(notePath), { recursive: true });
-      await writeFile(notePath, original.data, { mode: original.mode });
-    }
-  }
 }
 
 export function canonicalConfigPathFor(repoRoot: string): string {

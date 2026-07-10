@@ -690,16 +690,16 @@ describe("glm provider config and smoke", () => {
       }
     },
     {
-      name: "non-2xx status",
+      name: "exact-URL 304 status",
       response: (cancel: () => Promise<void>) => noReadResponse({
         ok: false,
-        status: 503,
+        status: 304,
         cancel
       }),
       expectedError: {
         category: "http_error",
-        message: "Provider returned HTTP 503 from configured endpoint.",
-        http_status: 503
+        message: "Provider returned HTTP 304 from configured endpoint.",
+        http_status: 304
       }
     }
   ] satisfies Array<{
@@ -788,27 +788,49 @@ describe("glm provider config and smoke", () => {
     });
   });
 
-  test("oversized response body fails before parsing and writes no stale pass note", async () => {
+  test("oversized response body cancel remains bounded and writes no stale pass note", async () => {
     const repo = await tempRoots.createTempRepoWithProviderConfig();
+    const providerSentinel = "OVERSIZED_CANCEL_PROVIDER_SENTINEL";
+    const signals: AbortSignal[] = [];
     let attempts = 0;
-    const fetchImpl: SmokeFetch = async () => {
+    let cancelCount = 0;
+    const startedAt = Date.now();
+    const fetchImpl: SmokeFetch = async (_url, init) => {
       attempts += 1;
-      return jsonResponse({
-        choices: [{ message: { role: "assistant", content: "ready" }, finish_reason: "stop" }],
-        padding: "x".repeat(MAX_RESPONSE_BYTES + 1)
-      });
+      signals.push(init.signal);
+      const oversizedChunk = new TextEncoder().encode(
+        `${providerSentinel}${"x".repeat(MAX_RESPONSE_BYTES + 1)}`
+      );
+      return responseWithFinalUrl(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(oversizedChunk);
+            },
+            cancel() {
+              cancelCount += 1;
+              return new Promise<void>(() => undefined);
+            }
+          }),
+          { status: 200 }
+        )
+      );
     };
 
     const result = await runGlmProviderSmokeFixture({
       repoRoot: repo.repoRoot,
       env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
       fetchImpl,
+      timeoutMs: 5,
       now: fixedNow
     });
 
     expect(result.ok).toBe(false);
-    expect(attempts).toBeLessThanOrEqual(MAX_RETRIES + 1);
+    expect(attempts).toBe(MAX_RETRIES + 1);
+    expect(cancelCount).toBe(MAX_RETRIES + 1);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
     expect(result.attempts).toBe(MAX_RETRIES + 1);
+    expect(Date.now() - startedAt).toBeLessThan(1000);
     if (!result.ok) {
       expect(result.error).toEqual({
         category: "oversized_response",
@@ -822,6 +844,8 @@ describe("glm provider config and smoke", () => {
       message: `Provider response exceeded ${MAX_RESPONSE_BYTES} bytes.`
     });
     expect(note.completion_nonempty).toBe(false);
+    expectNoExternalText(JSON.stringify(result), [providerSentinel]);
+    expectNoExternalText(JSON.stringify(note), [providerSentinel]);
   });
 
   test("fixture missing config rejects before fetch or note write", async () => {

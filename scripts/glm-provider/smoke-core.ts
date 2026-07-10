@@ -21,6 +21,11 @@ export const CANONICAL_TARGET_MODEL_REF = "glm-dmxapi/target";
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_REPO_ROOT = resolve(scriptDirectory, "..", "..");
 export const DEFAULT_PROVIDER_CONFIG_PATH = join(DEFAULT_REPO_ROOT, DEFAULT_CONFIG_RELATIVE_PATH);
+export type ReachableHttpErrorStatus = number;
+
+export function isReachableHttpErrorStatus(status: unknown): status is ReachableHttpErrorStatus {
+  return Number.isInteger(status) && Number(status) >= 300 && Number(status) <= 599;
+}
 
 export type SmokeFetch = (input: string, init: RequestInit & { signal: AbortSignal }) => Promise<Response>;
 
@@ -380,6 +385,17 @@ async function sendChatCompletion(input: {
         });
       }
       if (!response.ok) {
+        if (!isReachableHttpErrorStatus(response.status)) {
+          return await failWithoutReadingResponse({
+            response,
+            failure: {
+              category: "network_error",
+              message: "Provider request failed before a valid response was received."
+            },
+            controller,
+            signal: controller.signal
+          });
+        }
         return await failWithoutReadingResponse({
           response,
           failure: {
@@ -394,7 +410,7 @@ async function sendChatCompletion(input: {
       const responseText = await readResponseTextWithLimit(
         response,
         MAX_RESPONSE_BYTES,
-        controller.signal
+        controller
       );
 
       let responseJson: unknown;
@@ -443,17 +459,11 @@ async function failWithoutReadingResponse(input: {
   controller: AbortController;
   signal: AbortSignal;
 }): Promise<AttemptFailure> {
-  let cancelPromise: Promise<unknown> | undefined;
-  try {
-    cancelPromise = input.response.body?.cancel().catch(() => undefined);
-  } catch {
-    cancelPromise = undefined;
-  }
-
-  input.controller.abort();
-  if (cancelPromise) {
-    await withAbort(cancelPromise, input.signal).catch(() => undefined);
-  }
+  await cancelBodyWithinAttempt({
+    cancel: () => input.response.body?.cancel(),
+    controller: input.controller,
+    signal: input.signal
+  });
 
   return {
     ok: false,
@@ -515,8 +525,9 @@ function validateResponseEndpoint(
 async function readResponseTextWithLimit(
   response: Response,
   maxBytes: number,
-  signal: AbortSignal
+  controller: AbortController
 ): Promise<string> {
+  const signal = controller.signal;
   if (!response.body) {
     const text = await withAbort(response.text(), signal);
     if (new TextEncoder().encode(text).byteLength > maxBytes) {
@@ -541,7 +552,11 @@ async function readResponseTextWithLimit(
       }
       bytesRead += value.byteLength;
       if (bytesRead > maxBytes) {
-        await reader.cancel().catch(() => undefined);
+        await cancelBodyWithinAttempt({
+          cancel: () => reader.cancel(),
+          controller,
+          signal
+        });
         throw new OversizedResponseError(maxBytes);
       }
       text += decoder.decode(value, { stream: true });
@@ -553,6 +568,24 @@ async function readResponseTextWithLimit(
     } catch {
       // The reader may already be released after an abort/cancel path.
     }
+  }
+}
+
+async function cancelBodyWithinAttempt(input: {
+  cancel: () => Promise<unknown> | undefined;
+  controller: AbortController;
+  signal: AbortSignal;
+}): Promise<void> {
+  let cancelPromise: Promise<unknown> | undefined;
+  try {
+    cancelPromise = input.cancel()?.catch(() => undefined);
+  } catch {
+    cancelPromise = undefined;
+  }
+
+  input.controller.abort();
+  if (cancelPromise) {
+    await withAbort(cancelPromise, input.signal).catch(() => undefined);
   }
 }
 
