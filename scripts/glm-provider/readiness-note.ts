@@ -64,7 +64,9 @@ export async function invalidatePassingReadinessNote(
   }
 
   const notePath = join(readinessDir, noteName);
-  await assertSafeReadinessNoteTarget(notePath);
+  if (!(await prepareReadinessNoteForInvalidation(notePath))) {
+    return;
+  }
 
   let raw: string;
   try {
@@ -96,6 +98,33 @@ export async function invalidatePassingReadinessNote(
       throw error;
     }
   }
+}
+
+async function prepareReadinessNoteForInvalidation(path: string): Promise<boolean> {
+  let stat: Awaited<ReturnType<typeof lstat>>;
+  try {
+    stat = await lstat(path);
+  } catch (error) {
+    if (isNodeErrorWithCode(error, "ENOENT")) {
+      return false;
+    }
+    throw error;
+  }
+
+  if (stat.isDirectory()) {
+    throw new Error("Readiness note path must be an owned regular file.");
+  }
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink > 1) {
+    try {
+      await unlink(path);
+    } catch (error) {
+      if (!isNodeErrorWithCode(error, "ENOENT")) {
+        throw error;
+      }
+    }
+    return false;
+  }
+  return true;
 }
 
 function assertCanonicalReadinessNoteName(noteName: string): void {

@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig as loadZeroConfig } from "../../zero/packages/core/src/config/loader";
 import { ModelRouter } from "../../zero/packages/model/src/router";
+import { writeReadinessNote } from "./readiness-note";
 import {
   API_TYPE,
+  DEFAULT_CONFIG_RELATIVE_PATH,
   DEFAULT_PROVIDER_CONFIG_PATH,
   DEFAULT_READINESS_NOTE_NAME,
   GLM_API_KEY_ENV,
@@ -36,6 +38,8 @@ describe("glm provider config and smoke", () => {
     const config = await loadProviderConfig(DEFAULT_PROVIDER_CONFIG_PATH);
     const raw = JSON.parse(await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8")) as {
       default_model: unknown;
+      fallback_smoke_model: unknown;
+      smoke_model: unknown;
       providers: Record<string, { models: Record<string, { admission: unknown }> }>;
     };
 
@@ -47,14 +51,16 @@ describe("glm provider config and smoke", () => {
     expect(config.fallbackChain).toEqual(["glm-dmxapi/target"]);
     expect(config.modelPlaceholders.task_closure_model).toBe("glm-dmxapi/target");
     expect(config.modelPlaceholders.context_compaction_model).toBe("glm-dmxapi/target");
-    expect(config.modelPlaceholders.fallback_smoke_model).toBe("glm-dmxapi/smoke");
+    expect(config.modelPlaceholders.fallback_smoke_model).toBe("deepseek-v4-pro-guan");
     expect(config.smokeModel).toBe("deepseek-v4-pro-guan");
     expect(config.targetModelId).toBe("glm-5.2");
     expect(config.zeroAdapter.auth.apiKeyRef).toBe(GLM_API_KEY_REF);
-    expect(config.zeroAdapter.models.smoke.modelId).toBe("deepseek-v4-pro-guan");
+    expect(Object.keys(config.zeroAdapter.models)).toEqual(["target"]);
     expect(config.zeroAdapter.models.target.modelId).toBe("glm-5.2");
     expect(raw.default_model).toBe("glm-dmxapi/target");
-    expect(raw.providers["glm-dmxapi"].models.smoke.admission).toBe(false);
+    expect(raw.fallback_smoke_model).toBe("deepseek-v4-pro-guan");
+    expect(raw.smoke_model).toBe("deepseek-v4-pro-guan");
+    expect(Object.keys(raw.providers["glm-dmxapi"].models)).toEqual(["target"]);
     expect(raw.providers["glm-dmxapi"].models.target.admission).toBe(false);
   });
 
@@ -66,51 +72,89 @@ describe("glm provider config and smoke", () => {
     expect(zeroConfig.fallbackChain).toEqual(["glm-dmxapi/target"]);
     expect(zeroConfig.taskClosureModel).toBe("glm-dmxapi/target");
     expect(zeroConfig.contextCompactionModel).toBe("glm-dmxapi/target");
-    expect(zeroConfig.providers["glm-dmxapi"].models.smoke.modelId).toBe(
-      "deepseek-v4-pro-guan"
-    );
+    expect(Object.keys(zeroConfig.providers["glm-dmxapi"].models)).toEqual(["target"]);
     expect(zeroConfig.providers["glm-dmxapi"].models.target.modelId).toBe("glm-5.2");
   });
 
-  test("Zero ModelRouter never falls back to the smoke carrier", async () => {
+  test("Zero registry and router cannot expose or select the smoke carrier", async () => {
     const zeroConfig = loadZeroConfig(DEFAULT_PROVIDER_CONFIG_PATH);
     const router = new ModelRouter(
       zeroConfig,
       new Map([[GLM_API_KEY_REF, makeFakeSecret()]])
     );
+    const listedModels = router.getRegistry().listModels();
     const target = router.resolveModel("glm-dmxapi/target");
-    const smoke = router.resolveModel("glm-dmxapi/smoke");
-    if (!target || !smoke) {
-      throw new Error("Expected Zero to resolve both configured GLM model adapters.");
+    if (!target) {
+      throw new Error("Expected Zero to resolve the configured GLM target adapter.");
     }
 
     let targetHealthChecks = 0;
-    let smokeHealthChecks = 0;
     target.adapter.healthCheck = async () => {
       targetHealthChecks += 1;
       return false;
     };
-    smoke.adapter.healthCheck = async () => {
-      smokeHealthChecks += 1;
-      return true;
-    };
 
-    const result = await router.fallback();
+    const carrierSwitch = router.switchModel("deepseek-v4-pro-guan");
+    const fallbackResult = await router.fallback();
 
-    expect(result.success).toBe(false);
-    expect(result.model).toBeUndefined();
+    expect(listedModels).toHaveLength(1);
+    expect(listedModels[0]).toMatchObject({
+      providerName: "glm-dmxapi",
+      modelName: "target",
+      modelId: "glm-5.2"
+    });
+    expect(router.resolveModel("deepseek-v4-pro-guan")).toBeUndefined();
+    expect(router.resolveModel("glm-dmxapi/smoke")).toBeUndefined();
+    expect(carrierSwitch.success).toBe(false);
+    expect(fallbackResult.success).toBe(false);
+    expect(fallbackResult.model).toBeUndefined();
     expect(targetHealthChecks).toBe(1);
-    expect(smokeHealthChecks).toBe(0);
   });
 
-  test("provider config rejects model admission drift", async () => {
+  test("provider config rejects target admission drift", async () => {
     const raw = JSON.parse(await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8")) as {
       providers: Record<string, { models: Record<string, { admission: boolean }> }>;
     };
 
-    raw.providers["glm-dmxapi"].models.smoke.admission = true;
+    raw.providers["glm-dmxapi"].models.target.admission = true;
     expect(() => parseProviderConfig(raw)).toThrow(
-      "Expected false at glm-dmxapi.models.smoke.admission."
+      "Expected false at glm-dmxapi.models.target.admission."
+    );
+  });
+
+  test("provider config rejects smoke and extra Zero provider models", async () => {
+    for (const modelName of ["smoke", "extra"]) {
+      const raw = JSON.parse(await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8")) as {
+        providers: Record<string, { models: Record<string, unknown> }>;
+      };
+      raw.providers["glm-dmxapi"].models[modelName] = {
+        model_id: modelName === "smoke" ? "deepseek-v4-pro-guan" : "other-runtime-model",
+        admission: false
+      };
+
+      expect(() => parseProviderConfig(raw)).toThrow(
+        "Provider models must contain only the canonical GLM target model."
+      );
+    }
+  });
+
+  test("provider config rejects extra provider and model-pool registry surfaces", async () => {
+    const extraProvider = JSON.parse(
+      await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8")
+    ) as Record<string, unknown> & { providers: Record<string, unknown> };
+    extraProvider.providers.other = {};
+    expect(() => parseProviderConfig(extraProvider)).toThrow(
+      "Provider config.providers must contain only the canonical GLM provider."
+    );
+
+    const modelPool = JSON.parse(
+      await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8")
+    ) as Record<string, unknown>;
+    modelPool.model_pools = {
+      "glm-dmxapi/smoke": { members: [{ model: "glm-dmxapi/target" }] }
+    };
+    expect(() => parseProviderConfig(modelPool)).toThrow(
+      "Provider config must not define Zero model pools."
     );
   });
 
@@ -613,6 +657,52 @@ describe("glm provider config and smoke", () => {
     expect(note.completion_nonempty).toBe(false);
   });
 
+  test("runtime configPath input cannot bypass a missing canonical config", async () => {
+    const repo = await createTempRepo();
+    const externalRepo = await createTempRepoWithProviderConfig();
+    await seedPassingReadinessNote(repo.repoRoot);
+    let fetchCalls = 0;
+    const runtimeOptions = {
+      repoRoot: repo.repoRoot,
+      configPath: join(externalRepo.repoRoot, DEFAULT_CONFIG_RELATIVE_PATH),
+      env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        throw new Error("Fetch must not run without the canonical config.");
+      },
+      now: fixedNow
+    } as Parameters<typeof runGlmProviderSmoke>[0];
+
+    await expect(runGlmProviderSmoke(runtimeOptions)).rejects.toThrow();
+
+    expect(fetchCalls).toBe(0);
+    expect(await readReadinessStatus(repo.repoRoot)).not.toBe("passed");
+  });
+
+  test("CLI rejects --config before reading config or calling the provider", async () => {
+    const repo = await createTempRepo();
+    const externalRepo = await createTempRepoWithProviderConfig();
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "smoke.ts"),
+        "--repo-root",
+        repo.repoRoot,
+        "--config",
+        join(externalRepo.repoRoot, DEFAULT_CONFIG_RELATIVE_PATH)
+      ],
+      { stdout: "ignore", stderr: "pipe" }
+    );
+    const [exitCode, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stderr).text()
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Unknown or incomplete argument: --config");
+    expect(await readReadinessStatus(repo.repoRoot)).toBeUndefined();
+  });
+
   test("missing config invalidates a prior passing readiness note before failing", async () => {
     const repo = await createTempRepo();
     await seedPassingReadinessNote(repo.repoRoot);
@@ -686,8 +776,35 @@ describe("glm provider config and smoke", () => {
     expect(await readdir(outsideWorkspace)).toEqual([]);
   });
 
-  test("readiness note writer rejects final note symlink without touching the target", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+  test("passing symlink and hardlink entries are replaced without mutating targets", async () => {
+    for (const entryKind of ["symlink", "hardlink"] as const) {
+      const repo = await createTempRepoWithProviderConfig();
+      const outsideWorkspace = await mkdtemp(join(tmpdir(), "shud-glm-provider-outside-"));
+      tempRoots.push(outsideWorkspace);
+      const externalNote = join(outsideWorkspace, `${entryKind}-pass.json`);
+      const externalContent = passingReadinessNoteText();
+      await writeFile(externalNote, externalContent, "utf8");
+      await mkdir(join(repo.repoRoot, "workspace", "readiness"), { recursive: true });
+      if (entryKind === "symlink") {
+        await symlink(externalNote, readinessNotePath(repo.repoRoot));
+      } else {
+        await link(externalNote, readinessNotePath(repo.repoRoot));
+      }
+
+      const result = await runGlmProviderSmoke({
+        repoRoot: repo.repoRoot,
+        env: {},
+        now: fixedNow
+      });
+
+      expect(result.ok).toBe(false);
+      expect(await readFile(externalNote, "utf8")).toBe(externalContent);
+      expect(await readReadinessStatus(repo.repoRoot)).toBe("failed");
+    }
+  });
+
+  test("direct readiness writer rejects final note symlink without touching the target", async () => {
+    const repo = await createTempRepo();
     const outsideWorkspace = await mkdtemp(join(tmpdir(), "shud-glm-provider-outside-"));
     tempRoots.push(outsideWorkspace);
     const externalNote = join(outsideWorkspace, "external-note.json");
@@ -695,19 +812,15 @@ describe("glm provider config and smoke", () => {
     await mkdir(join(repo.repoRoot, "workspace", "readiness"), { recursive: true });
     await symlink(externalNote, readinessNotePath(repo.repoRoot));
 
-    await expect(
-      runGlmProviderSmoke({
-        repoRoot: repo.repoRoot,
-        env: {},
-        now: fixedNow
-      })
-    ).rejects.toThrow("Readiness note path must be an owned regular file.");
+    await expect(writeReadinessNote(repo.repoRoot, { status: "failed" })).rejects.toThrow(
+      "Readiness note path must be an owned regular file."
+    );
 
     expect(await readFile(externalNote, "utf8")).toBe("unchanged");
   });
 
-  test("readiness note writer rejects final note hardlink without truncating the target", async () => {
-    const repo = await createTempRepoWithProviderConfig();
+  test("direct readiness writer rejects final note hardlink without touching the target", async () => {
+    const repo = await createTempRepo();
     const outsideWorkspace = await mkdtemp(join(tmpdir(), "shud-glm-provider-outside-"));
     tempRoots.push(outsideWorkspace);
     const externalNote = join(outsideWorkspace, "external-note.json");
@@ -715,23 +828,27 @@ describe("glm provider config and smoke", () => {
     await mkdir(join(repo.repoRoot, "workspace", "readiness"), { recursive: true });
     await link(externalNote, readinessNotePath(repo.repoRoot));
 
-    await expect(
-      runGlmProviderSmoke({
-        repoRoot: repo.repoRoot,
-        env: {},
-        now: fixedNow
-      })
-    ).rejects.toThrow("Readiness note path must be an owned regular file.");
+    await expect(writeReadinessNote(repo.repoRoot, { status: "failed" })).rejects.toThrow(
+      "Readiness note path must be an owned regular file."
+    );
 
     expect(await readFile(externalNote, "utf8")).toBe("unchanged");
+  });
+
+  test("readiness invalidation fails closed on a directory final entry", async () => {
+    const repo = await createTempRepoWithProviderConfig();
+    await mkdir(readinessNotePath(repo.repoRoot), { recursive: true });
+
+    await expect(
+      runGlmProviderSmoke({ repoRoot: repo.repoRoot, env: {}, now: fixedNow })
+    ).rejects.toThrow("Readiness note path must be an owned regular file.");
+
+    expect(await readdir(readinessNotePath(repo.repoRoot))).toEqual([]);
   });
 
   test("request helpers bind endpoint, payload model, and non-admission target fields", async () => {
     const config = await loadProviderConfig(DEFAULT_PROVIDER_CONFIG_PATH);
     const payload = buildChatCompletionPayload(config);
-    const raw = JSON.parse(await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8")) as {
-      providers: Record<string, { models: Record<string, { max_output: number }> }>;
-    };
 
     expect(chatCompletionsEndpoint(config.baseUrl)).toBe(
       "https://www.dmxapi.cn/v1/chat/completions"
@@ -741,9 +858,6 @@ describe("glm provider config and smoke", () => {
       max_tokens: 512,
       stream: false
     });
-    expect(payload.max_tokens as number).toBeLessThanOrEqual(
-      raw.providers[config.providerName].models.smoke.max_output
-    );
     expect(config.targetModelId).toBe("glm-5.2");
   });
 });
@@ -817,15 +931,15 @@ function readinessNotePath(repoRoot: string): string {
 
 async function seedPassingReadinessNote(repoRoot: string): Promise<void> {
   await mkdir(join(repoRoot, "workspace", "readiness"), { recursive: true });
-  await writeFile(
-    readinessNotePath(repoRoot),
-    `${JSON.stringify({
-      schema_version: "m1.glm-provider-smoke.v1",
-      kind: "glm_provider_smoke",
-      status: "passed"
-    })}\n`,
-    "utf8"
-  );
+  await writeFile(readinessNotePath(repoRoot), passingReadinessNoteText(), "utf8");
+}
+
+function passingReadinessNoteText(): string {
+  return `${JSON.stringify({
+    schema_version: "m1.glm-provider-smoke.v1",
+    kind: "glm_provider_smoke",
+    status: "passed"
+  })}\n`;
 }
 
 function makeFakeSecret(): string {

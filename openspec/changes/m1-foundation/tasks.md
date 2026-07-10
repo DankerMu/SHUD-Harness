@@ -279,8 +279,8 @@
     - Expanded trigger: provider config, external network script entry, secret reference handling, readiness evidence, and M1 model-debt boundary.
     - 2026-07-08 user裁决: DMXAPI endpoint is `https://www.dmxapi.cn/v1/chat/completions`; M1 smoke carrier model is `deepseek-v4-pro-guan`; later replacement target remains `glm-5.2`.
     - Change surface: provider config file under source control, deterministic smoke script under `scripts/**`, focused script/config tests, and #37 OpenSpec fixture evidence. Runtime readiness notes are written under ignored `workspace/readiness/`.
-    - Must preserve: `api_key_ref` / persisted SecretRef remains `env:GLM_API_KEY`; no secret value in config, logs, tests, notes, PR body, or committed artifacts; no `zero/` source diff; no AgentLoop business-flow wiring; no StackLock/model admission record; the temporary smoke carrier is absent from Zero-consumed runtime selectors.
-    - Must add/change: DMXAPI OpenAI-compatible provider config with `api_type=openai_chat_completions`, `base_url=https://www.dmxapi.cn/v1`, `api_key_ref=env:GLM_API_KEY`, runtime `fallback_chain=[glm-dmxapi/target]`, smoke-only/model placeholders, `smoke_model=deepseek-v4-pro-guan`, `target_model_id=glm-5.2`; smoke script that runs one non-stream chat completion, retries once on failure, asserts nonempty completion and configured base URL, writes redacted readiness notes, and has a missing-key negative path.
+    - Must preserve: `api_key_ref` / persisted SecretRef remains `env:GLM_API_KEY`; no secret value in config, logs, tests, notes, PR body, or committed artifacts; no `zero/` source diff; no AgentLoop business-flow wiring; no StackLock/model admission record; the temporary smoke carrier is absent from Zero provider models and every Zero-consumed runtime selector; canonical readiness is bound to the tracked config path.
+    - Must add/change: DMXAPI OpenAI-compatible provider config with `api_type=openai_chat_completions`, `base_url=https://www.dmxapi.cn/v1`, `api_key_ref=env:GLM_API_KEY`, Zero provider model table containing target only, runtime `fallback_chain=[glm-dmxapi/target]`, top-level raw smoke-only placeholders `smoke_model=fallback_smoke_model=deepseek-v4-pro-guan`, `target_model_id=glm-5.2`; smoke script that always loads `<repoRoot>/config/providers/glm.dmxapi.json`, runs one non-stream chat completion, retries once on failure, asserts nonempty completion and configured base URL, writes redacted/current readiness notes, and has missing-key/config-identity/unsafe-final-entry negative paths.
     - Risk packs considered:
       - Public API / CLI / script entry: selected - smoke script is a user/CI-invoked deterministic entrypoint.
       - Config / project setup: selected - provider config and environment variable mapping determine runtime connectivity.
@@ -296,13 +296,13 @@
       - Concurrency/shared state, Hydrology runtime, and Zero tool governance: not selected - no shared mutable state, solver runtime, or Zero tool registry behavior changes.
     - Invariant Matrix:
       - Governing invariant: #37 may prove only redacted OpenAI-compatible provider connectivity at the configured DMXAPI base URL, never model admission and never secret disclosure.
-      - Source-of-truth identity/contract: provider name, `base_url`, `api_key_ref=env:GLM_API_KEY`, runtime `fallback_chain=[glm-dmxapi/target]`, `smoke_model=deepseek-v4-pro-guan`, `target_model_id=glm-5.2`, readiness note path, and script exit code.
+      - Source-of-truth identity/contract: canonical tracked config path, provider name, `base_url`, `api_key_ref=env:GLM_API_KEY`, target-only provider model table, runtime `fallback_chain=[glm-dmxapi/target]`, raw `smoke_model=fallback_smoke_model=deepseek-v4-pro-guan`, `target_model_id=glm-5.2`, readiness note path, and script exit code.
       - Producers: provider config file and smoke script.
-      - Validators/preflight: config parser/validator, missing-key check, URL normalization, nonempty completion assertion, response bounded parse.
+      - Validators/preflight: canonical config-path binding, config parser/validator, missing-key check, URL normalization, nonempty completion assertion, response bounded parse.
       - Storage/cache/query: ignored `workspace/readiness/` note only; no StackLock/admission record.
       - Public routes/entrypoints: smoke script CLI/package script.
       - Frontend/downstream consumers: #38 acceptance consumes the redacted readiness note and PR evidence only.
-      - Failure paths/rollback/stale state: missing key/provider failure exits nonzero with redacted message; failed smoke must not write a passing readiness note.
+      - Failure paths/rollback/stale state: missing key/provider failure exits nonzero with redacted message; failed smoke must not write or preserve a passing readiness note; owned final-entry symlink/hardlink is unlinked without following/mutating its external target.
       - Evidence/audit/readiness: PR summary and readiness note include endpoint/base URL, model id, status, timestamp, and SecretRef only.
       - Regression rows:
         - Valid `GLM_API_KEY` (locally mapped from `DMXAPI_KEY`) + DMXAPI endpoint -> nonempty completion, configured base URL assertion passes, exit 0, redacted readiness note says smoke passed.
@@ -311,10 +311,12 @@
         - Fake fetch timeout/AbortError -> bounded timeout, at most one retry, nonzero exit, redacted failure summary, and no passing readiness note.
         - Inspect config/log/readiness note/script output/committed test artifacts -> only `env:GLM_API_KEY` SecretRef or non-secret environment variable names appear, and no secret value is persisted.
         - Post-smoke repo state -> readiness note/PR evidence contain `smoke_model=deepseek-v4-pro-guan`, `target_model_id=glm-5.2`, and `model_admission=false`; no StackLock/admission record, `git -C zero diff --quiet`, `test -z "$(git ls-files workspace)"`.
-        - Target unavailable + smoke carrier healthy in a Zero ModelRouter fixture -> fallback does not select `glm-dmxapi/smoke` because the runtime chain contains target only.
+        - Zero loader/registry/router over source config -> carrier is absent from model list/resolve/switch/fallback while target remains available; smoke script still uses the top-level raw carrier id.
+        - Alternate `--config` / API config path -> rejected and cannot mint canonical passing readiness evidence.
+        - Canonical note symlink/hardlink to external passing JSON + current failure -> external target unchanged; canonical path absent or current failed note, never passed; direct writer still rejects unsafe final entries.
         - Dependency compatibility -> package manifests and lockfile prove no new runtime dependency beyond existing Bun/Node fetch; any script-only manifest change has no lockfile drift.
     - Evidence floor (#37):
-      - Config test parses provider config and asserts `api_type=openai_chat_completions`, `base_url=https://www.dmxapi.cn/v1`, `api_key_ref=env:GLM_API_KEY`, runtime `fallback_chain=[glm-dmxapi/target]`, `smoke_model=deepseek-v4-pro-guan`, and `target_model_id=glm-5.2`; a Zero ModelRouter fixture proves the carrier is not selected as runtime fallback.
+      - Config test parses provider config and asserts `api_type=openai_chat_completions`, `base_url=https://www.dmxapi.cn/v1`, `api_key_ref=env:GLM_API_KEY`, target-only provider model table/runtime `fallback_chain`, raw `smoke_model=fallback_smoke_model=deepseek-v4-pro-guan`, and `target_model_id=glm-5.2`; Zero loader/registry/router fixtures prove the carrier is absent from list/resolve/switch/fallback.
       - Smoke self-test covers missing `GLM_API_KEY`, fake fetch success/failure, and fake fetch timeout/AbortError without network or secret leakage; timeout path proves bounded timeout plus at most one retry.
       - Real local smoke command runs with `GLM_API_KEY="$DMXAPI_KEY"` and records only redacted evidence: nonempty completion, base URL hit, exit 0.
       - Readiness note parse test confirms no secret value and no noncanonical key ref, both carrier/target model ids are explicit, `model_admission=false`, and no model-admission/StackLock record.

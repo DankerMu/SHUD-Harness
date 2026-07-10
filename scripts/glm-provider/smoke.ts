@@ -22,7 +22,6 @@ export const CANONICAL_BASE_URL = "https://www.dmxapi.cn/v1";
 export const CANONICAL_SMOKE_MODEL = "deepseek-v4-pro-guan";
 export const CANONICAL_TARGET_MODEL = "glm-5.2";
 export const CANONICAL_TARGET_MODEL_REF = "glm-dmxapi/target";
-export const CANONICAL_SMOKE_MODEL_REF = "glm-dmxapi/smoke";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_REPO_ROOT = resolve(scriptDirectory, "..", "..");
@@ -53,7 +52,9 @@ export interface GlmProviderConfig {
       type: "api_key";
       apiKeyRef: typeof GLM_API_KEY_REF;
     };
-    models: Record<string, { modelId: string }>;
+    models: {
+      target: { modelId: string };
+    };
   };
 }
 
@@ -119,7 +120,6 @@ export type SmokeRunResult =
 
 export interface RunSmokeOptions {
   repoRoot?: string;
-  configPath?: string;
   readinessNoteName?: string;
   env?: Record<string, string | undefined>;
   fetchImpl?: SmokeFetch;
@@ -140,8 +140,8 @@ interface AttemptFailure {
 
 type AttemptResult = AttemptSuccess | AttemptFailure;
 
-export async function loadProviderConfig(configPath = DEFAULT_PROVIDER_CONFIG_PATH) {
-  const raw = await readFile(configPath, "utf8");
+export async function loadProviderConfig(providerPath = DEFAULT_PROVIDER_CONFIG_PATH) {
+  const raw = await readFile(providerPath, "utf8");
   const parsed = JSON.parse(raw) as unknown;
   return parseProviderConfig(parsed);
 }
@@ -150,8 +150,18 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
   const document = readRecord(raw, "provider config");
   const defaultProvider = readString(document, "default_provider", "provider config");
   const defaultModel = readString(document, "default_model", "provider config");
+  if (defaultProvider !== CANONICAL_PROVIDER_NAME) {
+    throw new Error(`Invalid provider default_provider: expected ${CANONICAL_PROVIDER_NAME}.`);
+  }
   const providers = readRecord(document.providers, "provider config.providers");
-  const provider = readRecord(providers[defaultProvider], `provider ${defaultProvider}`);
+  const providerNames = Object.keys(providers);
+  if (providerNames.length !== 1 || providerNames[0] !== CANONICAL_PROVIDER_NAME) {
+    throw new Error("Provider config.providers must contain only the canonical GLM provider.");
+  }
+  if (document.model_pools !== undefined) {
+    throw new Error("Provider config must not define Zero model pools.");
+  }
+  const provider = readRecord(providers[CANONICAL_PROVIDER_NAME], `provider ${defaultProvider}`);
 
   const apiType = readString(provider, "api_type", defaultProvider);
   const baseUrl = normalizeBaseUrl(readString(provider, "base_url", defaultProvider));
@@ -169,12 +179,12 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
     fallback_smoke_model: fallbackSmokeModel
   };
   const models = readRecord(provider.models, `${defaultProvider}.models`);
-  const smoke = readRecord(models.smoke, `${defaultProvider}.models.smoke`);
+  const modelNames = Object.keys(models);
+  if (modelNames.length !== 1 || modelNames[0] !== "target") {
+    throw new Error("Provider models must contain only the canonical GLM target model.");
+  }
   const target = readRecord(models.target, `${defaultProvider}.models.target`);
 
-  if (defaultProvider !== CANONICAL_PROVIDER_NAME) {
-    throw new Error(`Invalid provider default_provider: expected ${CANONICAL_PROVIDER_NAME}.`);
-  }
   if (defaultModel !== CANONICAL_TARGET_MODEL_REF) {
     throw new Error("Provider default_model must target the canonical GLM target ref.");
   }
@@ -202,8 +212,8 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
   if (contextCompactionModel !== CANONICAL_TARGET_MODEL_REF) {
     throw new Error("Provider context_compaction_model must target the canonical GLM target ref.");
   }
-  if (fallbackSmokeModel !== CANONICAL_SMOKE_MODEL_REF) {
-    throw new Error("Provider fallback_smoke_model must target the canonical GLM smoke ref.");
+  if (fallbackSmokeModel !== CANONICAL_SMOKE_MODEL) {
+    throw new Error("Provider fallback_smoke_model must be the raw smoke carrier model id.");
   }
   if (smokeModel !== CANONICAL_SMOKE_MODEL) {
     throw new Error(`Invalid provider smoke_model: expected ${CANONICAL_SMOKE_MODEL}.`);
@@ -211,13 +221,9 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
   if (targetModelId !== CANONICAL_TARGET_MODEL) {
     throw new Error(`Invalid provider target_model_id: expected ${CANONICAL_TARGET_MODEL}.`);
   }
-  if (readString(smoke, "model_id", `${defaultProvider}.models.smoke`) !== smokeModel) {
-    throw new Error("Provider smoke model fields do not agree.");
-  }
   if (readString(target, "model_id", `${defaultProvider}.models.target`) !== targetModelId) {
     throw new Error("Provider target model fields do not agree.");
   }
-  readExactlyFalse(smoke, "admission", `${defaultProvider}.models.smoke`);
   readExactlyFalse(target, "admission", `${defaultProvider}.models.target`);
 
   return {
@@ -238,7 +244,6 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
         apiKeyRef
       },
       models: {
-        smoke: { modelId: smokeModel },
         target: { modelId: targetModelId }
       }
     }
@@ -249,8 +254,7 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
   const repoRoot = resolve(options.repoRoot ?? DEFAULT_REPO_ROOT);
   await invalidatePassingReadinessNote(repoRoot, options.readinessNoteName);
 
-  const configPath = resolveConfigPath(repoRoot, options.configPath);
-  const config = await loadProviderConfig(configPath);
+  const config = await loadProviderConfig(join(repoRoot, DEFAULT_CONFIG_RELATIVE_PATH));
   const endpoint = chatCompletionsEndpoint(config.baseUrl);
   const configuredBaseUrlHit = endpointHitsConfiguredBaseUrl(endpoint, config.baseUrl);
   const env = options.env ?? process.env;
@@ -718,13 +722,6 @@ function createAbortError(): Error {
   return error;
 }
 
-function resolveConfigPath(repoRoot: string, configPath?: string): string {
-  if (!configPath) {
-    return join(repoRoot, DEFAULT_CONFIG_RELATIVE_PATH);
-  }
-  return resolve(repoRoot, configPath);
-}
-
 function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
   const url = new URL(trimmed);
@@ -817,12 +814,10 @@ function readStringArray(value: unknown, context: string): string[] {
 
 function parseCliArgs(args: string[]): {
   repoRoot?: string;
-  configPath?: string;
   timeoutMs?: number;
 } {
   const parsed: {
     repoRoot?: string;
-    configPath?: string;
     timeoutMs?: number;
   } = {};
 
@@ -831,9 +826,6 @@ function parseCliArgs(args: string[]): {
     const next = args[index + 1];
     if (arg === "--repo-root" && next) {
       parsed.repoRoot = next;
-      index += 1;
-    } else if (arg === "--config" && next) {
-      parsed.configPath = next;
       index += 1;
     } else if (arg === "--timeout-ms" && next) {
       parsed.timeoutMs = Number.parseInt(next, 10);
@@ -856,7 +848,7 @@ function parseCliArgs(args: string[]): {
 function printHelp(): void {
   console.log(
     [
-      "Usage: bun scripts/glm-provider/smoke.ts [--config <path>] [--repo-root <path>] [--timeout-ms <ms>]",
+      "Usage: bun scripts/glm-provider/smoke.ts [--repo-root <path>] [--timeout-ms <ms>]",
       "",
       "Runs one non-stream OpenAI-compatible chat-completions smoke against the configured GLM provider.",
       `The API key must be provided through ${GLM_API_KEY_ENV}; only ${GLM_API_KEY_REF} is persisted.`
