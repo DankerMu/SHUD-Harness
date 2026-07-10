@@ -13,6 +13,7 @@ import {
   MAX_RETRIES,
   buildChatCompletionPayload,
   chatCompletionsEndpoint,
+  formatSmokeSuccessCliOutput,
   loadProviderConfig,
   parseProviderConfig,
   runGlmProviderSmoke,
@@ -21,6 +22,7 @@ import {
 
 const tempRoots: string[] = [];
 const fixedNow = () => new Date("2026-07-08T10:00:00.000Z");
+const CANONICAL_ENDPOINT = "https://www.dmxapi.cn/v1/chat/completions";
 
 describe("glm provider config and smoke", () => {
   afterEach(async () => {
@@ -32,10 +34,12 @@ describe("glm provider config and smoke", () => {
   test("parses source-controlled provider config contract", async () => {
     const config = await loadProviderConfig(DEFAULT_PROVIDER_CONFIG_PATH);
     const raw = JSON.parse(await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8")) as {
+      default_model: unknown;
       providers: Record<string, { models: Record<string, { admission: unknown }> }>;
     };
 
     expect(config.providerName).toBe("glm-dmxapi");
+    expect(config.defaultModel).toBe("glm-dmxapi/target");
     expect(config.apiType).toBe(API_TYPE);
     expect(config.baseUrl).toBe("https://www.dmxapi.cn/v1");
     expect(config.apiKeyRef).toBe(GLM_API_KEY_REF);
@@ -48,6 +52,7 @@ describe("glm provider config and smoke", () => {
     expect(config.zeroAdapter.auth.apiKeyRef).toBe(GLM_API_KEY_REF);
     expect(config.zeroAdapter.models.smoke.modelId).toBe("deepseek-v4-pro-guan");
     expect(config.zeroAdapter.models.target.modelId).toBe("glm-5.2");
+    expect(raw.default_model).toBe("glm-dmxapi/target");
     expect(raw.providers["glm-dmxapi"].models.smoke.admission).toBe(false);
     expect(raw.providers["glm-dmxapi"].models.target.admission).toBe(false);
   });
@@ -56,6 +61,7 @@ describe("glm provider config and smoke", () => {
     const zeroConfig = loadZeroConfig(DEFAULT_PROVIDER_CONFIG_PATH);
 
     expect(zeroConfig.providers["glm-dmxapi"].auth.apiKeyRef).toBe(GLM_API_KEY_REF);
+    expect(zeroConfig.defaultModel).toBe("glm-dmxapi/target");
     expect(zeroConfig.fallbackChain).toEqual(["glm-dmxapi/target", "glm-dmxapi/smoke"]);
     expect(zeroConfig.taskClosureModel).toBe("glm-dmxapi/target");
     expect(zeroConfig.contextCompactionModel).toBe("glm-dmxapi/target");
@@ -73,6 +79,18 @@ describe("glm provider config and smoke", () => {
     raw.providers["glm-dmxapi"].models.smoke.admission = true;
     expect(() => parseProviderConfig(raw)).toThrow(
       "Expected false at glm-dmxapi.models.smoke.admission."
+    );
+  });
+
+  test("provider config rejects default_model drift to the smoke carrier", async () => {
+    const raw = JSON.parse(await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8")) as Record<
+      string,
+      unknown
+    >;
+
+    raw.default_model = "glm-dmxapi/smoke";
+    expect(() => parseProviderConfig(raw)).toThrow(
+      "Provider default_model must target the canonical GLM target ref."
     );
   });
 
@@ -113,7 +131,11 @@ describe("glm provider config and smoke", () => {
   test("fake fetch success sends non-stream chat completion and writes redacted readiness note", async () => {
     const repo = await createTempRepoWithProviderConfig();
     const fakeSecret = makeFakeSecret();
-    const seenRequests: Array<{ url: string; body: Record<string, unknown>; authorization?: string }> = [];
+    const seenRequests: Array<{
+      url: string;
+      body: Record<string, unknown>;
+      authorization?: string;
+    }> = [];
     const fetchImpl: SmokeFetch = async (url, init) => {
       seenRequests.push({
         url,
@@ -123,7 +145,7 @@ describe("glm provider config and smoke", () => {
       return jsonResponse({
         id: "chatcmpl-unit",
         model: `deepseek-v4-pro-guan-${fakeSecret}`,
-        choices: [{ message: { role: "assistant", content: "ready" }, finish_reason: "stop" }]
+        choices: [{ message: { role: "assistant", content: fakeSecret }, finish_reason: "stop" }]
       });
     };
 
@@ -136,12 +158,18 @@ describe("glm provider config and smoke", () => {
 
     expect(result.ok).toBe(true);
     expect(result.attempts).toBe(1);
+    if (result.ok) {
+      expect(result.responseUrl).toBe(CANONICAL_ENDPOINT);
+      expect(result.completionNonempty).toBe(true);
+      expect(result).not.toHaveProperty("completion");
+      expect(formatSmokeSuccessCliOutput(result, repo.repoRoot)).not.toContain(fakeSecret);
+    }
     expect(seenRequests).toHaveLength(1);
-    expect(seenRequests[0].url).toBe("https://www.dmxapi.cn/v1/chat/completions");
+    expect(seenRequests[0].url).toBe(CANONICAL_ENDPOINT);
     expect(seenRequests[0].authorization).toBe(`Bearer ${fakeSecret}`);
     expect(seenRequests[0].body).toMatchObject({
       model: "deepseek-v4-pro-guan",
-      max_tokens: 64,
+      max_tokens: 512,
       temperature: 0,
       stream: false
     });
@@ -155,7 +183,8 @@ describe("glm provider config and smoke", () => {
       provider_name: "glm-dmxapi",
       api_type: API_TYPE,
       base_url: "https://www.dmxapi.cn/v1",
-      endpoint: "https://www.dmxapi.cn/v1/chat/completions",
+      endpoint: CANONICAL_ENDPOINT,
+      response_url: CANONICAL_ENDPOINT,
       smoke_model: "deepseek-v4-pro-guan",
       target_model_id: "glm-5.2",
       status: "passed",
@@ -180,7 +209,7 @@ describe("glm provider config and smoke", () => {
     let attempts = 0;
     const fetchImpl: SmokeFetch = async () => {
       attempts += 1;
-      return new Response(`provider echoed ${fakeSecret}`, { status: 502 });
+      return textResponse(`provider echoed ${fakeSecret}`, { status: 502 });
     };
 
     const result = await runGlmProviderSmoke({
@@ -241,6 +270,63 @@ describe("glm provider config and smoke", () => {
     expect(note.configured_base_url_hit).toBe(true);
   });
 
+  test("missing provider response URL cannot produce a passing readiness note", async () => {
+    const repo = await createTempRepoWithProviderConfig();
+    let attempts = 0;
+    const fetchImpl: SmokeFetch = async () => {
+      attempts += 1;
+      return bareJsonResponse({
+        choices: [{ message: { role: "assistant", content: "ready" }, finish_reason: "stop" }]
+      });
+    };
+
+    const result = await runGlmProviderSmoke({
+      repoRoot: repo.repoRoot,
+      env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+      fetchImpl,
+      now: fixedNow
+    });
+
+    expect(result.ok).toBe(false);
+    expect(attempts).toBe(MAX_RETRIES + 1);
+    if (!result.ok) {
+      expect(result.error.category).toBe("base_url_mismatch");
+    }
+    const note = await readReadinessNote(repo.repoRoot);
+    expect(note.status).toBe("failed");
+    expect(note.completion_nonempty).toBe(false);
+  });
+
+  test("mismatched provider response URL cannot produce a passing readiness note", async () => {
+    const repo = await createTempRepoWithProviderConfig();
+    let attempts = 0;
+    const fetchImpl: SmokeFetch = async () => {
+      attempts += 1;
+      return jsonResponse(
+        {
+          choices: [{ message: { role: "assistant", content: "ready" }, finish_reason: "stop" }]
+        },
+        { url: "https://example.invalid/v1/chat/completions" }
+      );
+    };
+
+    const result = await runGlmProviderSmoke({
+      repoRoot: repo.repoRoot,
+      env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+      fetchImpl,
+      now: fixedNow
+    });
+
+    expect(result.ok).toBe(false);
+    expect(attempts).toBe(MAX_RETRIES + 1);
+    if (!result.ok) {
+      expect(result.error.category).toBe("base_url_mismatch");
+    }
+    const note = await readReadinessNote(repo.repoRoot);
+    expect(note.status).toBe("failed");
+    expect(note.completion_nonempty).toBe(false);
+  });
+
   test("empty completion assertion fails after one retry", async () => {
     const repo = await createTempRepoWithProviderConfig();
     let attempts = 0;
@@ -269,10 +355,12 @@ describe("glm provider config and smoke", () => {
     expect(note.model_admission).toBe(false);
   });
 
-  test("reasoning_content is accepted when provider content is empty", async () => {
+  test("reasoning_content alone is not a Zero-visible completion", async () => {
     const repo = await createTempRepoWithProviderConfig();
-    const fetchImpl: SmokeFetch = async () =>
-      jsonResponse({
+    let attempts = 0;
+    const fetchImpl: SmokeFetch = async () => {
+      attempts += 1;
+      return jsonResponse({
         id: "chatcmpl-reasoning-only",
         model: "deepseek-v4-pro-guan",
         choices: [
@@ -286,6 +374,7 @@ describe("glm provider config and smoke", () => {
           }
         ]
       });
+    };
 
     const result = await runGlmProviderSmoke({
       repoRoot: repo.repoRoot,
@@ -294,14 +383,80 @@ describe("glm provider config and smoke", () => {
       now: fixedNow
     });
 
-    expect(result.ok).toBe(true);
-    expect(result.attempts).toBe(1);
-    if (result.ok) {
-      expect(result.completion).toBe("ready via reasoning field");
+    expect(result.ok).toBe(false);
+    expect(attempts).toBe(MAX_RETRIES + 1);
+    if (!result.ok) {
+      expect(result.error.category).toBe("empty_completion");
     }
     const note = await readReadinessNote(repo.repoRoot);
-    expect(note.status).toBe("passed");
-    expect(note.completion_nonempty).toBe(true);
+    expect(note.status).toBe("failed");
+    expect(note.completion_nonempty).toBe(false);
+  });
+
+  test("legacy choice.text alone is not a Zero-visible completion", async () => {
+    const repo = await createTempRepoWithProviderConfig();
+    let attempts = 0;
+    const fetchImpl: SmokeFetch = async () => {
+      attempts += 1;
+      return jsonResponse({
+        id: "chatcmpl-legacy-text",
+        model: "deepseek-v4-pro-guan",
+        choices: [{ text: "ready via legacy text", finish_reason: "stop" }]
+      });
+    };
+
+    const result = await runGlmProviderSmoke({
+      repoRoot: repo.repoRoot,
+      env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+      fetchImpl,
+      now: fixedNow
+    });
+
+    expect(result.ok).toBe(false);
+    expect(attempts).toBe(MAX_RETRIES + 1);
+    if (!result.ok) {
+      expect(result.error.category).toBe("empty_completion");
+    }
+    const note = await readReadinessNote(repo.repoRoot);
+    expect(note.status).toBe("failed");
+    expect(note.completion_nonempty).toBe(false);
+  });
+
+  test("content array response is not accepted as Zero-visible text", async () => {
+    const repo = await createTempRepoWithProviderConfig();
+    let attempts = 0;
+    const fetchImpl: SmokeFetch = async () => {
+      attempts += 1;
+      return jsonResponse({
+        id: "chatcmpl-content-array",
+        model: "deepseek-v4-pro-guan",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "ready via content array" }]
+            },
+            finish_reason: "stop"
+          }
+        ]
+      });
+    };
+
+    const result = await runGlmProviderSmoke({
+      repoRoot: repo.repoRoot,
+      env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+      fetchImpl,
+      now: fixedNow
+    });
+
+    expect(result.ok).toBe(false);
+    expect(attempts).toBe(MAX_RETRIES + 1);
+    if (!result.ok) {
+      expect(result.error.category).toBe("empty_completion");
+    }
+    const note = await readReadinessNote(repo.repoRoot);
+    expect(note.status).toBe("failed");
+    expect(note.completion_nonempty).toBe(false);
   });
 
   test("timeout aborts each bounded attempt and retries at most once", async () => {
@@ -341,13 +496,15 @@ describe("glm provider config and smoke", () => {
     let attempts = 0;
     const fetchImpl: SmokeFetch = async () => {
       attempts += 1;
-      return new Response(
-        new ReadableStream<Uint8Array>({
-          start() {
-            // Leave the body open so the smoke must rely on the shared attempt deadline.
-          }
-        }),
-        { status: 200 }
+      return responseWithFinalUrl(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start() {
+              // Leave the body open so the smoke must rely on the shared attempt deadline.
+            }
+          }),
+          { status: 200 }
+        )
       );
     };
     const startedAt = Date.now();
@@ -412,6 +569,54 @@ describe("glm provider config and smoke", () => {
     expect(note.completion_nonempty).toBe(false);
   });
 
+  test("missing config invalidates a prior passing readiness note before failing", async () => {
+    const repo = await createTempRepo();
+    await seedPassingReadinessNote(repo.repoRoot);
+
+    await expect(
+      runGlmProviderSmoke({
+        repoRoot: repo.repoRoot,
+        env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+        now: fixedNow
+      })
+    ).rejects.toThrow();
+
+    expect(await readReadinessStatus(repo.repoRoot)).not.toBe("passed");
+  });
+
+  test("malformed config invalidates a prior passing readiness note before failing", async () => {
+    const repo = await createTempRepo();
+    await seedPassingReadinessNote(repo.repoRoot);
+    await mkdir(join(repo.repoRoot, "config", "providers"), { recursive: true });
+    await writeFile(join(repo.repoRoot, "config", "providers", "glm.dmxapi.json"), "{", "utf8");
+
+    await expect(
+      runGlmProviderSmoke({
+        repoRoot: repo.repoRoot,
+        env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+        now: fixedNow
+      })
+    ).rejects.toThrow();
+
+    expect(await readReadinessStatus(repo.repoRoot)).not.toBe("passed");
+  });
+
+  test("writeReadinessNote false preserves no-write behavior before config failure", async () => {
+    const repo = await createTempRepo();
+    await seedPassingReadinessNote(repo.repoRoot);
+
+    await expect(
+      runGlmProviderSmoke({
+        repoRoot: repo.repoRoot,
+        env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+        now: fixedNow,
+        writeReadinessNote: false
+      })
+    ).rejects.toThrow();
+
+    expect(await readReadinessStatus(repo.repoRoot)).toBe("passed");
+  });
+
   test("readiness note writer rejects a symlinked workspace before external writes", async () => {
     const repo = await createTempRepoWithProviderConfig();
     const outsideWorkspace = await mkdtemp(join(tmpdir(), "shud-glm-provider-outside-"));
@@ -472,32 +677,56 @@ describe("glm provider config and smoke", () => {
   test("request helpers bind endpoint, payload model, and non-admission target fields", async () => {
     const config = await loadProviderConfig(DEFAULT_PROVIDER_CONFIG_PATH);
     const payload = buildChatCompletionPayload(config);
+    const raw = JSON.parse(await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8")) as {
+      providers: Record<string, { models: Record<string, { max_output: number }> }>;
+    };
 
     expect(chatCompletionsEndpoint(config.baseUrl)).toBe(
       "https://www.dmxapi.cn/v1/chat/completions"
     );
     expect(payload).toMatchObject({
       model: "deepseek-v4-pro-guan",
+      max_tokens: 512,
       stream: false
     });
+    expect(payload.max_tokens as number).toBeLessThanOrEqual(
+      raw.providers[config.providerName].models.smoke.max_output
+    );
     expect(config.targetModelId).toBe("glm-5.2");
   });
 });
 
 async function createTempRepoWithProviderConfig(): Promise<{ repoRoot: string }> {
-  const repoRoot = await mkdtemp(join(tmpdir(), "shud-glm-provider-"));
-  tempRoots.push(repoRoot);
-  const configDir = join(repoRoot, "config", "providers");
+  const repo = await createTempRepo();
+  const configDir = join(repo.repoRoot, "config", "providers");
   await mkdir(configDir, { recursive: true });
   await writeFile(
     join(configDir, "glm.dmxapi.json"),
     await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8"),
     "utf8"
   );
+  return repo;
+}
+
+async function createTempRepo(): Promise<{ repoRoot: string }> {
+  const repoRoot = await mkdtemp(join(tmpdir(), "shud-glm-provider-"));
+  tempRoots.push(repoRoot);
   return { repoRoot };
 }
 
-function jsonResponse(value: unknown): Response {
+function jsonResponse(value: unknown, options: { status?: number; url?: string } = {}): Response {
+  return responseWithFinalUrl(
+    new Response(JSON.stringify(value), {
+      status: options.status ?? 200,
+      headers: {
+        "content-type": "application/json"
+      }
+    }),
+    options.url
+  );
+}
+
+function bareJsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
     status: 200,
     headers: {
@@ -506,12 +735,45 @@ function jsonResponse(value: unknown): Response {
   });
 }
 
+function textResponse(text: string, options: { status?: number; url?: string } = {}): Response {
+  return responseWithFinalUrl(new Response(text, { status: options.status ?? 200 }), options.url);
+}
+
+function responseWithFinalUrl(response: Response, url = CANONICAL_ENDPOINT): Response {
+  Object.defineProperty(response, "url", {
+    value: url,
+    configurable: true
+  });
+  return response;
+}
+
 async function readReadinessNote(repoRoot: string): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(readinessNotePath(repoRoot), "utf8")) as Record<string, unknown>;
 }
 
+async function readReadinessStatus(repoRoot: string): Promise<unknown> {
+  try {
+    return (await readReadinessNote(repoRoot)).status;
+  } catch {
+    return undefined;
+  }
+}
+
 function readinessNotePath(repoRoot: string): string {
   return join(repoRoot, "workspace", "readiness", DEFAULT_READINESS_NOTE_NAME);
+}
+
+async function seedPassingReadinessNote(repoRoot: string): Promise<void> {
+  await mkdir(join(repoRoot, "workspace", "readiness"), { recursive: true });
+  await writeFile(
+    readinessNotePath(repoRoot),
+    `${JSON.stringify({
+      schema_version: "m1.glm-provider-smoke.v1",
+      kind: "glm_provider_smoke",
+      status: "passed"
+    })}\n`,
+    "utf8"
+  );
 }
 
 function makeFakeSecret(): string {

@@ -1,16 +1,22 @@
-import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  DEFAULT_READINESS_NOTE_NAME,
+  invalidatePassingReadinessNote,
+  writeReadinessNote
+} from "./readiness-note";
+
+export { DEFAULT_READINESS_NOTE_NAME } from "./readiness-note";
 
 export const GLM_API_KEY_ENV = "GLM_API_KEY";
 export const GLM_API_KEY_REF = "env:GLM_API_KEY";
 export const API_TYPE = "openai_chat_completions";
 export const DEFAULT_CONFIG_RELATIVE_PATH = "config/providers/glm.dmxapi.json";
-export const DEFAULT_READINESS_NOTE_NAME = "glm_provider_smoke.json";
 export const DEFAULT_TIMEOUT_MS = 15000;
 export const MAX_RESPONSE_BYTES = 16 * 1024;
 export const MAX_RETRIES = 1;
+const SMOKE_MAX_TOKENS = 512;
 export const CANONICAL_PROVIDER_NAME = "glm-dmxapi";
 export const CANONICAL_BASE_URL = "https://www.dmxapi.cn/v1";
 export const CANONICAL_SMOKE_MODEL = "deepseek-v4-pro-guan";
@@ -32,6 +38,7 @@ export type SmokeFetch = (
 
 export interface GlmProviderConfig {
   providerName: string;
+  defaultModel: typeof CANONICAL_TARGET_MODEL_REF;
   apiType: typeof API_TYPE;
   baseUrl: string;
   apiKeyRef: typeof GLM_API_KEY_REF;
@@ -83,6 +90,7 @@ export interface ReadinessNote {
   attempts: number;
   configured_base_url_hit: boolean;
   completion_nonempty: boolean;
+  response_url?: string;
   failure?: SmokeFailure;
 }
 
@@ -93,7 +101,8 @@ export type SmokeRunResult =
       config: GlmProviderConfig;
       endpoint: string;
       attempts: number;
-      completion: string;
+      responseUrl: string;
+      completionNonempty: true;
       readinessNotePath?: string;
       note: ReadinessNote;
     }
@@ -121,7 +130,8 @@ export interface RunSmokeOptions {
 
 interface AttemptSuccess {
   ok: true;
-  completion: string;
+  responseUrl: string;
+  completionNonempty: true;
 }
 
 interface AttemptFailure {
@@ -140,6 +150,7 @@ export async function loadProviderConfig(configPath = DEFAULT_PROVIDER_CONFIG_PA
 export function parseProviderConfig(raw: unknown): GlmProviderConfig {
   const document = readRecord(raw, "provider config");
   const defaultProvider = readString(document, "default_provider", "provider config");
+  const defaultModel = readString(document, "default_model", "provider config");
   const providers = readRecord(document.providers, "provider config.providers");
   const provider = readRecord(providers[defaultProvider], `provider ${defaultProvider}`);
 
@@ -164,6 +175,9 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
 
   if (defaultProvider !== CANONICAL_PROVIDER_NAME) {
     throw new Error(`Invalid provider default_provider: expected ${CANONICAL_PROVIDER_NAME}.`);
+  }
+  if (defaultModel !== CANONICAL_TARGET_MODEL_REF) {
+    throw new Error("Provider default_model must target the canonical GLM target ref.");
   }
   if (apiType !== API_TYPE) {
     throw new Error(`Invalid provider api_type: expected ${API_TYPE}.`);
@@ -210,6 +224,7 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
 
   return {
     providerName: defaultProvider,
+    defaultModel,
     apiType,
     baseUrl,
     apiKeyRef,
@@ -234,6 +249,11 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
 
 export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promise<SmokeRunResult> {
   const repoRoot = resolve(options.repoRoot ?? DEFAULT_REPO_ROOT);
+  const writeReadiness = options.writeReadinessNote ?? true;
+  if (writeReadiness) {
+    await invalidatePassingReadinessNote(repoRoot, options.readinessNoteName);
+  }
+
   const configPath = resolveConfigPath(repoRoot, options.configPath);
   const config = await loadProviderConfig(configPath);
   const endpoint = chatCompletionsEndpoint(config.baseUrl);
@@ -241,7 +261,6 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
   const env = options.env ?? process.env;
   const apiKey = env[GLM_API_KEY_ENV];
   const now = options.now ?? (() => new Date());
-  const writeReadiness = options.writeReadinessNote ?? true;
 
   if (!configuredBaseUrlHit) {
     const error = {
@@ -328,6 +347,7 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
         attempts: attempt,
         configuredBaseUrlHit,
         completionNonempty: true,
+        responseUrl: result.responseUrl,
         now
       });
       const readinessNotePath = writeReadiness
@@ -339,7 +359,8 @@ export async function runGlmProviderSmoke(options: RunSmokeOptions = {}): Promis
         config,
         endpoint,
         attempts: attempt,
-        completion: result.completion,
+        responseUrl: result.responseUrl,
+        completionNonempty: true,
         note,
         readinessNotePath
       };
@@ -390,7 +411,7 @@ export function buildChatCompletionPayload(config: GlmProviderConfig): Record<st
         content: "Reply with a nonempty readiness token."
       }
     ],
-    max_tokens: 64,
+    max_tokens: SMOKE_MAX_TOKENS,
     temperature: 0,
     stream: false
   };
@@ -413,6 +434,7 @@ export function createReadinessNote(input: {
   attempts: number;
   configuredBaseUrlHit: boolean;
   completionNonempty: boolean;
+  responseUrl?: string;
   now: () => Date;
   failure?: SmokeFailure;
 }): ReadinessNote {
@@ -432,6 +454,7 @@ export function createReadinessNote(input: {
     attempts: input.attempts,
     configured_base_url_hit: input.configuredBaseUrlHit,
     completion_nonempty: input.completionNonempty,
+    ...(input.responseUrl ? { response_url: input.responseUrl } : {}),
     ...(input.failure ? { failure: input.failure } : {})
   };
 }
@@ -465,11 +488,11 @@ async function sendChatCompletion(input: {
         }),
         controller.signal
       );
-      const redirectFailure = validateResponseEndpoint(response, input.endpoint);
-      if (redirectFailure) {
+      const endpointValidation = validateResponseEndpoint(response, input.endpoint);
+      if (!endpointValidation.ok) {
         return {
           ok: false,
-          failure: redirectFailure
+          failure: endpointValidation.failure
         };
       }
       const responseText = await readResponseTextWithLimit(
@@ -516,7 +539,8 @@ async function sendChatCompletion(input: {
 
       return {
         ok: true,
-        completion
+        responseUrl: endpointValidation.responseUrl,
+        completionNonempty: true
       };
     } finally {
       clearTimeout(timeout);
@@ -529,32 +553,54 @@ async function sendChatCompletion(input: {
   }
 }
 
-function validateResponseEndpoint(response: Response, endpoint: string): SmokeFailure | undefined {
+function validateResponseEndpoint(
+  response: Response,
+  endpoint: string
+): { ok: true; responseUrl: string } | { ok: false; failure: SmokeFailure } {
   if (response.redirected) {
     return {
-      category: "base_url_mismatch",
-      message: "Provider response was redirected away from the configured endpoint."
+      ok: false,
+      failure: {
+        category: "base_url_mismatch",
+        message: "Provider response was redirected away from the configured endpoint."
+      }
     };
   }
 
   if (!response.url) {
-    return undefined;
+    return {
+      ok: false,
+      failure: {
+        category: "base_url_mismatch",
+        message: "Provider response did not expose a final URL for configured endpoint validation."
+      }
+    };
   }
 
   try {
-    if (new URL(response.url).toString() === new URL(endpoint).toString()) {
-      return undefined;
+    const responseUrl = new URL(response.url).toString();
+    if (responseUrl === new URL(endpoint).toString()) {
+      return {
+        ok: true,
+        responseUrl
+      };
     }
   } catch {
     return {
-      category: "base_url_mismatch",
-      message: "Provider response URL could not be validated against the configured endpoint."
+      ok: false,
+      failure: {
+        category: "base_url_mismatch",
+        message: "Provider response URL could not be validated against the configured endpoint."
+      }
     };
   }
 
   return {
-    category: "base_url_mismatch",
-    message: "Provider response URL did not match the configured endpoint."
+    ok: false,
+    failure: {
+      category: "base_url_mismatch",
+      message: "Provider response URL did not match the configured endpoint."
+    }
   };
 }
 
@@ -669,74 +715,6 @@ function createAbortError(): Error {
   return error;
 }
 
-async function writeReadinessNote(
-  repoRoot: string,
-  note: ReadinessNote,
-  noteName = DEFAULT_READINESS_NOTE_NAME
-): Promise<string> {
-  if (noteName !== DEFAULT_READINESS_NOTE_NAME || noteName.includes("/") || noteName.includes("\\")) {
-    throw new Error(`Readiness note name must be ${DEFAULT_READINESS_NOTE_NAME}.`);
-  }
-
-  const realRepoRoot = await realpath(repoRoot);
-  const workspaceDir = join(realRepoRoot, "workspace");
-  const readinessDir = join(workspaceDir, "readiness");
-  await ensureOwnedDirectory(workspaceDir, "workspace");
-  await ensureOwnedDirectory(readinessDir, "workspace/readiness");
-  const realReadinessDir = await realpath(readinessDir);
-  const expectedReadinessDir = join(realRepoRoot, "workspace", "readiness");
-  if (realReadinessDir !== expectedReadinessDir) {
-    throw new Error("Readiness note directory must resolve under workspace/readiness.");
-  }
-
-  const notePath = join(readinessDir, noteName);
-  await assertSafeReadinessNoteTarget(notePath);
-  const tempPath = join(readinessDir, `.${noteName}.${process.pid}.${randomUUID()}.tmp`);
-  try {
-    await writeFile(tempPath, `${JSON.stringify(note, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx"
-    });
-    await rename(tempPath, notePath);
-  } catch (error) {
-    await unlink(tempPath).catch(() => undefined);
-    throw error;
-  }
-  return notePath;
-}
-
-async function assertSafeReadinessNoteTarget(path: string): Promise<void> {
-  try {
-    const stat = await lstat(path);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink > 1) {
-      throw new Error("Readiness note path must be an owned regular file.");
-    }
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT")) {
-      throw error;
-    }
-  }
-}
-
-async function ensureOwnedDirectory(path: string, label: string): Promise<void> {
-  try {
-    const stat = await lstat(path);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      throw new Error(`Readiness ${label} path must be an owned directory.`);
-    }
-  } catch (error) {
-    if (!isNodeErrorWithCode(error, "ENOENT")) {
-      throw error;
-    }
-    await mkdir(path, { mode: 0o700 });
-  }
-}
-
-function isNodeErrorWithCode(error: unknown, code: string): error is Error & { code: string } {
-  return error instanceof Error && "code" in error && (error as Error & { code?: string }).code === code;
-}
-
 function resolveConfigPath(repoRoot: string, configPath?: string): string {
   if (!configPath) {
     return join(repoRoot, DEFAULT_CONFIG_RELATIVE_PATH);
@@ -771,23 +749,7 @@ function extractCompletionText(raw: unknown): string {
       return content;
     }
   }
-  if (Array.isArray(content)) {
-    const textParts = content
-      .map((part) => {
-        const record = readOptionalRecord(part);
-        return typeof record?.text === "string" ? record.text : "";
-      })
-      .join("");
-    if (textParts.trim().length > 0) {
-      return textParts;
-    }
-  }
-  const reasoningContent = message?.reasoning_content;
-  if (typeof reasoningContent === "string" && reasoningContent.trim().length > 0) {
-    return reasoningContent;
-  }
-  const text = firstChoice?.text;
-  return typeof text === "string" ? text : "";
+  return "";
 }
 
 function redactFailure(failure: SmokeFailure, apiKey: string): SmokeFailure {
@@ -899,27 +861,33 @@ function printHelp(): void {
   );
 }
 
+export function formatSmokeSuccessCliOutput(
+  result: Extract<SmokeRunResult, { ok: true }>,
+  repoRoot = DEFAULT_REPO_ROOT
+): string {
+  const notePath = result.readinessNotePath
+    ? result.readinessNotePath.replace(`${resolve(repoRoot)}/`, "")
+    : "not-written";
+  return [
+    "GLM provider smoke passed",
+    `provider=${result.config.providerName}`,
+    `smoke_model=${result.config.smokeModel}`,
+    `target_model_id=${result.config.targetModelId}`,
+    `base_url=${result.config.baseUrl}`,
+    `endpoint=${result.endpoint}`,
+    `response_url=${result.responseUrl}`,
+    `secret_ref=${result.config.apiKeyRef}`,
+    "model_admission=false",
+    `readiness_note=${notePath}`
+  ].join(" ");
+}
+
 async function main(): Promise<void> {
   try {
     const cliOptions = parseCliArgs(process.argv.slice(2));
     const result = await runGlmProviderSmoke(cliOptions);
-    const notePath = result.readinessNotePath
-      ? result.readinessNotePath.replace(`${resolve(cliOptions.repoRoot ?? DEFAULT_REPO_ROOT)}/`, "")
-      : "not-written";
     if (result.ok) {
-      console.log(
-        [
-          "GLM provider smoke passed",
-          `provider=${result.config.providerName}`,
-          `smoke_model=${result.config.smokeModel}`,
-          `target_model_id=${result.config.targetModelId}`,
-          `base_url=${result.config.baseUrl}`,
-          `endpoint=${result.endpoint}`,
-          `secret_ref=${result.config.apiKeyRef}`,
-          "model_admission=false",
-          `readiness_note=${notePath}`
-        ].join(" ")
-      );
+      console.log(formatSmokeSuccessCliOutput(result, cliOptions.repoRoot ?? DEFAULT_REPO_ROOT));
       return;
     }
 
