@@ -711,28 +711,29 @@ describe("glm provider config and smoke", () => {
     expect(await readReadinessStatus(repo.repoRoot)).not.toBe("passed");
   });
 
-  test("CLI rejects --config before reading config or calling the provider", async () => {
-    const repo = await createTempRepo();
+  test("CLI rejects unsupported args without echoing raw argv evidence", async () => {
     const externalRepo = await createTempRepoWithProviderConfig();
-    const child = Bun.spawn(
-      [
-        process.execPath,
-        join(import.meta.dir, "smoke.ts"),
-        "--repo-root",
-        repo.repoRoot,
-        "--config",
-        join(externalRepo.repoRoot, DEFAULT_CONFIG_RELATIVE_PATH)
-      ],
-      { stdout: "ignore", stderr: "pipe" }
-    );
-    const [exitCode, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stderr).text()
-    ]);
-
-    expect(exitCode).toBe(1);
-    expect(stderr).toContain("Unknown or incomplete argument: --config");
-    expect(await readReadinessStatus(repo.repoRoot)).toBeUndefined();
+    const externalConfigPath = join(externalRepo.repoRoot, DEFAULT_CONFIG_RELATIVE_PATH);
+    const secretSentinel = "ROUND4_CLI_SENTINEL_SECRET";
+    for (const fixture of [
+      { args: ["--config", externalConfigPath], forbidden: ["--config", externalConfigPath] },
+      { args: [`--api-key=${secretSentinel}`], forbidden: ["--api-key", secretSentinel] }
+    ]) {
+      const repo = await createTempRepo();
+      await seedPassingReadinessNote(repo.repoRoot);
+      const child = Bun.spawn(
+        [process.execPath, join(import.meta.dir, "smoke.ts"), "--repo-root", repo.repoRoot, ...fixture.args],
+        { stdout: "pipe", stderr: "pipe", env: { ...process.env, [GLM_API_KEY_ENV]: secretSentinel } }
+      );
+      const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+      const forbidden = [...fixture.forbidden, secretSentinel];
+      expect(exitCode).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("GLM provider smoke failed: Unsupported or incomplete CLI argument.");
+      expectNoExternalText(`${stdout}${stderr}`, forbidden);
+      expect(await readReadinessStatus(repo.repoRoot)).toBe("passed");
+      expectNoExternalText(await readFile(readinessNotePath(repo.repoRoot), "utf8"), forbidden);
+    }
   });
 
   test("missing config invalidates a prior passing readiness note before failing", async () => {

@@ -838,7 +838,7 @@ function parseCliArgs(args: string[]): {
       printHelp();
       process.exit(0);
     } else {
-      throw new LocalSmokeError(`Unknown or incomplete argument: ${arg}`);
+      throw new LocalSmokeError("Unsupported or incomplete CLI argument.");
     }
   }
 
