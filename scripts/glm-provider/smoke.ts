@@ -191,11 +191,10 @@ export function parseProviderConfig(raw: unknown): GlmProviderConfig {
     throw new Error(`Invalid provider auth.api_key_ref: expected ${GLM_API_KEY_REF}.`);
   }
   if (
-    fallbackChain.length !== 2 ||
-    fallbackChain[0] !== CANONICAL_TARGET_MODEL_REF ||
-    fallbackChain[1] !== CANONICAL_SMOKE_MODEL_REF
+    fallbackChain.length !== 1 ||
+    fallbackChain[0] !== CANONICAL_TARGET_MODEL_REF
   ) {
-    throw new Error("Provider fallback_chain must target the canonical GLM DMXAPI model refs.");
+    throw new Error("Provider fallback_chain must contain only the canonical GLM target ref.");
   }
   if (taskClosureModel !== CANONICAL_TARGET_MODEL_REF) {
     throw new Error("Provider task_closure_model must target the canonical GLM target ref.");

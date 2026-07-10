@@ -8,10 +8,17 @@ GLM 5.2 运行时模型 providers 配置与连通冒烟（ADR-0002 D9）。权�
 
 zero `providers:` 配置块 SHALL 配置 GLM 5.2 第三方 OpenAI 兼容端点：`api_type: openai_chat_completions`、`base_url`、`api_key_ref`、`fallback_chain`，并按功能选模型（task_closure_model 等占位）。`api_key_ref` MUST 为 SecretRef 形态 `env:GLM_API_KEY`（provider=env，purpose=llm；[GRILL-3] 已定案 2026-07-03，Config_Secrets §4 已补行），配置、日志与任何落盘对象 MUST NOT 出现 secret 明文。
 
+M1 临时 carrier `glm-dmxapi/smoke` MUST NOT 出现在 Zero 消费的运行时 `default_model`、`fallback_chain`、`task_closure_model` 或 `context_compaction_model` 中；运行时 selector 仅指向 `glm-dmxapi/target`。`smoke_model` 与 `fallback_smoke_model` 仅为 smoke/后续迁移占位，不构成运行时准入。
+
 #### Scenario: secret 不落盘
 
 - **WHEN** 加载 providers 配置并运行冒烟
 - **THEN** 所有日志、配置快照与产物中仅出现 `env:GLM_API_KEY` 形式的 ref，无 key 明文
+
+#### Scenario: 临时 carrier 不进入运行时 fallback
+
+- **WHEN** Zero loader 加载 M1 provider 配置且 target 不可用
+- **THEN** 运行时 `fallback_chain` 不包含 `glm-dmxapi/smoke`，ModelRouter 不会选择临时 carrier
 
 ### Requirement: 连通冒烟
 

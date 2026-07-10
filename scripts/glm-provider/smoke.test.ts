@@ -3,6 +3,7 @@ import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig as loadZeroConfig } from "../../zero/packages/core/src/config/loader";
+import { ModelRouter } from "../../zero/packages/model/src/router";
 import {
   API_TYPE,
   DEFAULT_PROVIDER_CONFIG_PATH,
@@ -43,7 +44,7 @@ describe("glm provider config and smoke", () => {
     expect(config.apiType).toBe(API_TYPE);
     expect(config.baseUrl).toBe("https://www.dmxapi.cn/v1");
     expect(config.apiKeyRef).toBe(GLM_API_KEY_REF);
-    expect(config.fallbackChain).toEqual(["glm-dmxapi/target", "glm-dmxapi/smoke"]);
+    expect(config.fallbackChain).toEqual(["glm-dmxapi/target"]);
     expect(config.modelPlaceholders.task_closure_model).toBe("glm-dmxapi/target");
     expect(config.modelPlaceholders.context_compaction_model).toBe("glm-dmxapi/target");
     expect(config.modelPlaceholders.fallback_smoke_model).toBe("glm-dmxapi/smoke");
@@ -62,13 +63,44 @@ describe("glm provider config and smoke", () => {
 
     expect(zeroConfig.providers["glm-dmxapi"].auth.apiKeyRef).toBe(GLM_API_KEY_REF);
     expect(zeroConfig.defaultModel).toBe("glm-dmxapi/target");
-    expect(zeroConfig.fallbackChain).toEqual(["glm-dmxapi/target", "glm-dmxapi/smoke"]);
+    expect(zeroConfig.fallbackChain).toEqual(["glm-dmxapi/target"]);
     expect(zeroConfig.taskClosureModel).toBe("glm-dmxapi/target");
     expect(zeroConfig.contextCompactionModel).toBe("glm-dmxapi/target");
     expect(zeroConfig.providers["glm-dmxapi"].models.smoke.modelId).toBe(
       "deepseek-v4-pro-guan"
     );
     expect(zeroConfig.providers["glm-dmxapi"].models.target.modelId).toBe("glm-5.2");
+  });
+
+  test("Zero ModelRouter never falls back to the smoke carrier", async () => {
+    const zeroConfig = loadZeroConfig(DEFAULT_PROVIDER_CONFIG_PATH);
+    const router = new ModelRouter(
+      zeroConfig,
+      new Map([[GLM_API_KEY_REF, makeFakeSecret()]])
+    );
+    const target = router.resolveModel("glm-dmxapi/target");
+    const smoke = router.resolveModel("glm-dmxapi/smoke");
+    if (!target || !smoke) {
+      throw new Error("Expected Zero to resolve both configured GLM model adapters.");
+    }
+
+    let targetHealthChecks = 0;
+    let smokeHealthChecks = 0;
+    target.adapter.healthCheck = async () => {
+      targetHealthChecks += 1;
+      return false;
+    };
+    smoke.adapter.healthCheck = async () => {
+      smokeHealthChecks += 1;
+      return true;
+    };
+
+    const result = await router.fallback();
+
+    expect(result.success).toBe(false);
+    expect(result.model).toBeUndefined();
+    expect(targetHealthChecks).toBe(1);
+    expect(smokeHealthChecks).toBe(0);
   });
 
   test("provider config rejects model admission drift", async () => {
@@ -91,6 +123,18 @@ describe("glm provider config and smoke", () => {
     raw.default_model = "glm-dmxapi/smoke";
     expect(() => parseProviderConfig(raw)).toThrow(
       "Provider default_model must target the canonical GLM target ref."
+    );
+  });
+
+  test("provider config rejects the smoke carrier in runtime fallback_chain", async () => {
+    const raw = JSON.parse(await readFile(DEFAULT_PROVIDER_CONFIG_PATH, "utf8")) as Record<
+      string,
+      unknown
+    >;
+
+    raw.fallback_chain = ["glm-dmxapi/target", "glm-dmxapi/smoke"];
+    expect(() => parseProviderConfig(raw)).toThrow(
+      "Provider fallback_chain must contain only the canonical GLM target ref."
     );
   });
 

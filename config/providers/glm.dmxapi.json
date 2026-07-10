@@ -3,8 +3,7 @@
   "default_provider": "glm-dmxapi",
   "default_model": "glm-dmxapi/target",
   "fallback_chain": [
-    "glm-dmxapi/target",
-    "glm-dmxapi/smoke"
+    "glm-dmxapi/target"
   ],
   "task_closure_model": "glm-dmxapi/target",
   "context_compaction_model": "glm-dmxapi/target",
