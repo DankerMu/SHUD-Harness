@@ -185,7 +185,7 @@ describe("glm provider config and smoke", () => {
 
     raw.default_model = "glm-dmxapi/smoke";
     expect(() => parseProviderConfig(raw)).toThrow(
-      "Provider default_model must target the canonical GLM target ref."
+      "Invalid provider config.default_model."
     );
   });
 
@@ -197,7 +197,7 @@ describe("glm provider config and smoke", () => {
 
     raw.fallback_chain = ["glm-dmxapi/target", "glm-dmxapi/smoke"];
     expect(() => parseProviderConfig(raw)).toThrow(
-      "Provider fallback_chain must contain only the canonical GLM target ref."
+      "Invalid provider config.fallback_chain."
     );
   });
 

@@ -17,6 +17,35 @@ export const CANONICAL_ENDPOINT = "https://www.dmxapi.cn/v1/chat/completions";
 export const CANONICAL_SMOKE_MODEL = "deepseek-v4-pro-guan";
 export const CANONICAL_TARGET_MODEL = "glm-5.2";
 export const CANONICAL_TARGET_MODEL_REF = "glm-dmxapi/target";
+const CONFIG_SCHEMA_VERSION = "m1.glm-provider.v1";
+const CANONICAL_TARGET_MAX_CONTEXT = 128000;
+const CANONICAL_TARGET_MAX_OUTPUT = 4096;
+const CANONICAL_TARGET_CAPABILITIES = ["chat"] as const;
+const CANONICAL_TARGET_TAGS = ["target", "placeholder"] as const;
+const CANONICAL_TARGET_PURPOSE = "runtime_target_placeholder";
+const CONFIG_DOCUMENT_KEYS = [
+  "schema_version",
+  "default_provider",
+  "default_model",
+  "fallback_chain",
+  "task_closure_model",
+  "context_compaction_model",
+  "fallback_smoke_model",
+  "smoke_model",
+  "target_model_id",
+  "providers"
+] as const;
+const PROVIDER_KEYS = ["api_type", "base_url", "auth", "models"] as const;
+const AUTH_KEYS = ["type", "api_key_ref"] as const;
+const TARGET_KEYS = [
+  "model_id",
+  "max_context",
+  "max_output",
+  "capabilities",
+  "tags",
+  "purpose",
+  "admission"
+] as const;
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_REPO_ROOT = resolve(scriptDirectory, "..", "..");
@@ -122,79 +151,108 @@ export async function loadProviderConfig(providerPath = DEFAULT_PROVIDER_CONFIG_
 
 export function parseProviderConfig(raw: unknown): GlmProviderConfig {
   const document = readRecord(raw, "provider config");
-  const defaultProvider = readString(document, "default_provider", "provider config");
-  const defaultModel = readString(document, "default_model", "provider config");
-  if (defaultProvider !== CANONICAL_PROVIDER_NAME) {
-    throw new LocalSmokeError(`Invalid provider default_provider: expected ${CANONICAL_PROVIDER_NAME}.`);
-  }
-  const providers = readRecord(document.providers, "provider config.providers");
-  const providerNames = Object.keys(providers);
-  if (providerNames.length !== 1 || providerNames[0] !== CANONICAL_PROVIDER_NAME) {
-    throw new LocalSmokeError("Provider config.providers must contain only the canonical GLM provider.");
-  }
   if (document.model_pools !== undefined) {
     throw new LocalSmokeError("Provider config must not define Zero model pools.");
   }
+  assertExactKeys(document, CONFIG_DOCUMENT_KEYS, "Provider config document");
+  readExactString(document, "schema_version", CONFIG_SCHEMA_VERSION, "provider config");
+  const defaultProvider = readExactString(
+    document,
+    "default_provider",
+    CANONICAL_PROVIDER_NAME,
+    "provider config"
+  );
+  const defaultModel = readExactString(
+    document,
+    "default_model",
+    CANONICAL_TARGET_MODEL_REF,
+    "provider config"
+  );
+  const providers = readRecord(document.providers, "provider config.providers");
+  assertExactSingleKey(
+    providers,
+    CANONICAL_PROVIDER_NAME,
+    "Provider config.providers must contain only the canonical GLM provider."
+  );
   const provider = readRecord(providers[CANONICAL_PROVIDER_NAME], `provider ${defaultProvider}`);
+  assertExactKeys(provider, PROVIDER_KEYS, "Provider config provider");
 
-  const apiType = readString(provider, "api_type", defaultProvider);
-  const baseUrl = normalizeBaseUrl(readString(provider, "base_url", defaultProvider));
+  const apiType = readExactString(provider, "api_type", API_TYPE, defaultProvider);
+  const baseUrl = readExactString(provider, "base_url", CANONICAL_BASE_URL, defaultProvider);
   const auth = readRecord(provider.auth, `${defaultProvider}.auth`);
-  const apiKeyRef = readString(auth, "api_key_ref", `${defaultProvider}.auth`);
-  const fallbackChain = readStringArray(document.fallback_chain, "provider config.fallback_chain");
-  const smokeModel = readString(document, "smoke_model", "provider config");
-  const targetModelId = readString(document, "target_model_id", "provider config");
-  const taskClosureModel = readString(document, "task_closure_model", "provider config");
-  const contextCompactionModel = readString(document, "context_compaction_model", "provider config");
-  const fallbackSmokeModel = readString(document, "fallback_smoke_model", "provider config");
+  assertExactKeys(auth, AUTH_KEYS, "Provider config auth");
+  readExactString(auth, "type", "api_key", `${defaultProvider}.auth`);
+  const apiKeyRef = readExactString(auth, "api_key_ref", GLM_API_KEY_REF, `${defaultProvider}.auth`);
+  const fallbackChain = readExactStringArray(
+    document,
+    "fallback_chain",
+    [CANONICAL_TARGET_MODEL_REF],
+    "provider config"
+  );
+  const smokeModel = readExactString(document, "smoke_model", CANONICAL_SMOKE_MODEL, "provider config");
+  const targetModelId = readExactString(document, "target_model_id", CANONICAL_TARGET_MODEL, "provider config");
+  const taskClosureModel = readExactString(
+    document,
+    "task_closure_model",
+    CANONICAL_TARGET_MODEL_REF,
+    "provider config"
+  );
+  const contextCompactionModel = readExactString(
+    document,
+    "context_compaction_model",
+    CANONICAL_TARGET_MODEL_REF,
+    "provider config"
+  );
+  const fallbackSmokeModel = readExactString(
+    document,
+    "fallback_smoke_model",
+    CANONICAL_SMOKE_MODEL,
+    "provider config"
+  );
   const modelPlaceholders = {
     task_closure_model: taskClosureModel,
     context_compaction_model: contextCompactionModel,
     fallback_smoke_model: fallbackSmokeModel
   };
   const models = readRecord(provider.models, `${defaultProvider}.models`);
-  const modelNames = Object.keys(models);
-  if (modelNames.length !== 1 || modelNames[0] !== "target") {
-    throw new LocalSmokeError("Provider models must contain only the canonical GLM target model.");
-  }
+  assertExactSingleKey(
+    models,
+    "target",
+    "Provider models must contain only the canonical GLM target model."
+  );
   const target = readRecord(models.target, `${defaultProvider}.models.target`);
-
-  if (defaultModel !== CANONICAL_TARGET_MODEL_REF) {
-    throw new LocalSmokeError("Provider default_model must target the canonical GLM target ref.");
-  }
-  if (apiType !== API_TYPE) {
-    throw new LocalSmokeError(`Invalid provider api_type: expected ${API_TYPE}.`);
-  }
-  if (baseUrl !== CANONICAL_BASE_URL) {
-    throw new LocalSmokeError(`Invalid provider base_url: expected ${CANONICAL_BASE_URL}.`);
-  }
-  if (readString(auth, "type", `${defaultProvider}.auth`) !== "api_key") {
-    throw new LocalSmokeError("Provider auth.type must be api_key.");
-  }
-  if (apiKeyRef !== GLM_API_KEY_REF) {
-    throw new LocalSmokeError(`Invalid provider auth.api_key_ref: expected ${GLM_API_KEY_REF}.`);
-  }
-  if (fallbackChain.length !== 1 || fallbackChain[0] !== CANONICAL_TARGET_MODEL_REF) {
-    throw new LocalSmokeError("Provider fallback_chain must contain only the canonical GLM target ref.");
-  }
-  if (taskClosureModel !== CANONICAL_TARGET_MODEL_REF) {
-    throw new LocalSmokeError("Provider task_closure_model must target the canonical GLM target ref.");
-  }
-  if (contextCompactionModel !== CANONICAL_TARGET_MODEL_REF) {
-    throw new LocalSmokeError("Provider context_compaction_model must target the canonical GLM target ref.");
-  }
-  if (fallbackSmokeModel !== CANONICAL_SMOKE_MODEL) {
-    throw new LocalSmokeError("Provider fallback_smoke_model must be the raw smoke carrier model id.");
-  }
-  if (smokeModel !== CANONICAL_SMOKE_MODEL) {
-    throw new LocalSmokeError(`Invalid provider smoke_model: expected ${CANONICAL_SMOKE_MODEL}.`);
-  }
-  if (targetModelId !== CANONICAL_TARGET_MODEL) {
-    throw new LocalSmokeError(`Invalid provider target_model_id: expected ${CANONICAL_TARGET_MODEL}.`);
-  }
-  if (readString(target, "model_id", `${defaultProvider}.models.target`) !== targetModelId) {
-    throw new LocalSmokeError("Provider target model fields do not agree.");
-  }
+  assertExactKeys(target, TARGET_KEYS, "Provider config target model");
+  readExactString(target, "model_id", CANONICAL_TARGET_MODEL, `${defaultProvider}.models.target`);
+  readExactNumber(
+    target,
+    "max_context",
+    CANONICAL_TARGET_MAX_CONTEXT,
+    `${defaultProvider}.models.target`
+  );
+  readExactNumber(
+    target,
+    "max_output",
+    CANONICAL_TARGET_MAX_OUTPUT,
+    `${defaultProvider}.models.target`
+  );
+  readExactStringArray(
+    target,
+    "capabilities",
+    CANONICAL_TARGET_CAPABILITIES,
+    `${defaultProvider}.models.target`
+  );
+  readExactStringArray(
+    target,
+    "tags",
+    CANONICAL_TARGET_TAGS,
+    `${defaultProvider}.models.target`
+  );
+  readExactString(
+    target,
+    "purpose",
+    CANONICAL_TARGET_PURPOSE,
+    `${defaultProvider}.models.target`
+  );
   readExactlyFalse(target, "admission", `${defaultProvider}.models.target`);
 
   return {
@@ -724,11 +782,53 @@ function readString(record: Record<string, unknown>, key: string, context: strin
   return value;
 }
 
+function readExactString<Expected extends string>(
+  record: Record<string, unknown>,
+  key: string,
+  expected: Expected,
+  context: string
+): Expected {
+  if (record[key] !== expected) {
+    throw new LocalSmokeError(`Invalid ${context}.${key}.`);
+  }
+  return expected;
+}
+
+function readExactNumber<Expected extends number>(
+  record: Record<string, unknown>,
+  key: string,
+  expected: Expected,
+  context: string
+): Expected {
+  if (record[key] !== expected) {
+    throw new LocalSmokeError(`Invalid ${context}.${key}.`);
+  }
+  return expected;
+}
+
 function readExactlyFalse(record: Record<string, unknown>, key: string, context: string): false {
   if (record[key] !== false) {
     throw new LocalSmokeError(`Expected false at ${context}.${key}.`);
   }
   return false;
+}
+
+function readExactStringArray<Expected extends string>(
+  record: Record<string, unknown>,
+  key: string,
+  expected: readonly Expected[],
+  context: string
+): Expected[] {
+  const value = record[key];
+  if (!Array.isArray(value) || value.length !== expected.length) {
+    throw new LocalSmokeError(`Invalid ${context}.${key}.`);
+  }
+  for (const [index, expectedValue] of expected.entries()) {
+    if (value[index] !== expectedValue) {
+      throw new LocalSmokeError(`Invalid ${context}.${key}.`);
+    }
+  }
+  return [...expected];
 }
 
 function readStringArray(value: unknown, context: string): string[] {
@@ -742,4 +842,27 @@ function readStringArray(value: unknown, context: string): string[] {
     return item;
   });
   return strings;
+}
+
+function assertExactKeys(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+  label: string
+): void {
+  const actual = Object.keys(record).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new LocalSmokeError(`${label} keys must match the canonical provider schema.`);
+  }
+}
+
+function assertExactSingleKey(
+  record: Record<string, unknown>,
+  expectedKey: string,
+  message: string
+): void {
+  const actual = Object.keys(record);
+  if (actual.length !== 1 || actual[0] !== expectedKey) {
+    throw new LocalSmokeError(message);
+  }
 }

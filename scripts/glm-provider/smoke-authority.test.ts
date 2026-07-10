@@ -595,6 +595,64 @@ describe("glm provider canonical authority boundaries", () => {
     });
   });
 
+  darwinTest("unsafe final link delete_child denial returns fixed local authority failure", async () => {
+    await withCanonicalWorkspaceEntryBackup(async () => {
+      for (const entryKind of ["symlink", "hardlink"] as const) {
+        for (const flow of ["unsupported", "missing-key"] as const) {
+          const workspaceDir = join(DEFAULT_REPO_ROOT, "workspace");
+          const readinessDir = join(workspaceDir, "readiness");
+          const notePath = readinessNotePath(DEFAULT_REPO_ROOT);
+          const externalRoot = await mkdtemp(join(DEFAULT_REPO_ROOT, ".glm-provider-external-note-"));
+          const externalNote = join(externalRoot, `${entryKind}-pass.json`);
+          const externalContent = passingReadinessNoteText();
+          const siblingPath = join(readinessDir, "darwin-wall-sibling-note.txt");
+          const siblingContent = Buffer.from("darwin wall sibling remains byte-identical\n");
+          await rm(workspaceDir, { recursive: true, force: true });
+          await mkdir(readinessDir, { recursive: true });
+          await writeFile(externalNote, externalContent, "utf8");
+          await writeFile(siblingPath, siblingContent);
+          if (entryKind === "symlink") {
+            await symlink(externalNote, notePath);
+          } else {
+            await link(externalNote, notePath);
+          }
+          await addDarwinDenyAcl(readinessDir, "delete_child");
+          try {
+            await expectDarwinDenyAcl(readinessDir, "delete_child");
+            await expectUnsafeFinalEntryMetadata(notePath, entryKind);
+            const child = flow === "unsupported"
+              ? runSmokeCli(["--repo-root", "/tmp/ignored"], {
+                  ...process.env,
+                  [GLM_API_KEY_ENV]: makeFakeSecret()
+                })
+              : runSmokeCli([], envWithoutGlmKey());
+            const { exitCode, stdout, stderr } = await collectChild(child);
+
+            expect(exitCode).toBe(1);
+            expect(stdout).toBe("");
+            expect(stderr).toBe(
+              "GLM provider smoke failed: Canonical readiness unsafe final entry could not be removed by local authority.\n"
+            );
+            const output = `${stdout}${stderr}`;
+            expect(output).not.toContain("GLM provider smoke passed");
+            expect(output).not.toContain("readiness_note=");
+            expect(output).not.toContain("stale_pass_invalidated");
+            await expectDarwinDenyAcl(readinessDir, "delete_child");
+            await expectUnsafeFinalEntryMetadata(notePath, entryKind);
+            expect(await readReadinessStatus(DEFAULT_REPO_ROOT)).toBe("passed");
+            expect(await readFile(externalNote, "utf8")).toBe(externalContent);
+            expect(Buffer.compare(await readFile(siblingPath), siblingContent)).toBe(0);
+            expect(await pathExists(readinessDir)).toBe(true);
+          } finally {
+            await clearDarwinAcl(readinessDir).catch(() => undefined);
+            await rm(workspaceDir, { recursive: true, force: true });
+            await rm(externalRoot, { recursive: true, force: true });
+          }
+        }
+      }
+    });
+  });
+
   test("canonical directory final entry fails closed without preserving a pass", async () => {
     await withCanonicalReadinessBackup(async () => {
       await rm(readinessNotePath(DEFAULT_REPO_ROOT), { force: true, recursive: true });
@@ -866,6 +924,19 @@ async function expectCanonicalTombstoneStillPresent(): Promise<void> {
     status: "failed",
     reason: "stale_pass_invalidated"
   });
+}
+
+async function expectUnsafeFinalEntryMetadata(
+  notePath: string,
+  entryKind: "symlink" | "hardlink"
+): Promise<void> {
+  const stat = await lstat(notePath);
+  if (entryKind === "symlink") {
+    expect(stat.isSymbolicLink()).toBe(true);
+    return;
+  }
+  expect(stat.isFile()).toBe(true);
+  expect(stat.nlink).toBeGreaterThan(1);
 }
 
 function hasDarwinDenyAcl(

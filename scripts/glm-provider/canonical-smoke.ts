@@ -65,6 +65,8 @@ const AUTHORITY_REALPATH_MESSAGE =
   "Canonical readiness directory did not resolve to its expected local path.";
 const AUTHORITY_IN_PLACE_INVALIDATION_MESSAGE =
   "Canonical readiness pass could not be invalidated in place.";
+const AUTHORITY_UNSAFE_FINAL_ENTRY_MESSAGE =
+  "Canonical readiness unsafe final entry could not be removed by local authority.";
 const STALE_PASS_TOMBSTONE_TEXT = `${JSON.stringify({
   schema_version: "m1.glm-provider-smoke.tombstone.v1",
   kind: "glm_provider_smoke_tombstone",
@@ -165,7 +167,7 @@ async function invalidateCanonicalReadinessLeaf(path: string): Promise<void> {
     return;
   }
   if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink > 1) {
-    await unlinkLocalEntry(path);
+    await unlinkUnsafeFinalEntry(path);
     return;
   }
   if (stat.size > MAX_PRIOR_READINESS_NOTE_BYTES) {
@@ -776,6 +778,21 @@ async function unlinkLocalEntry(path: string): Promise<void> {
       throw error;
     }
   }
+}
+
+async function unlinkUnsafeFinalEntry(path: string): Promise<void> {
+  try {
+    await unlinkLocalEntry(path);
+  } catch (error) {
+    if (isLocalAuthorityDenied(error)) {
+      throw new LocalSmokeError(AUTHORITY_UNSAFE_FINAL_ENTRY_MESSAGE);
+    }
+    throw error;
+  }
+}
+
+function isLocalAuthorityDenied(error: unknown): boolean {
+  return isNodeErrorWithCode(error, "EACCES") || isNodeErrorWithCode(error, "EPERM");
 }
 
 function isNodeErrorWithCode(error: unknown, code: string): error is Error & { code: string } {
