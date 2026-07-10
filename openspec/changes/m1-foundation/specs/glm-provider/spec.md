@@ -39,9 +39,9 @@ Canonical readiness evidence MUST load exactly `<canonicalRepoRoot>/config/provi
 
 ### Requirement: 连通冒烟
 
-系统 SHALL 提供冒烟脚本：以最小 prompt 经配置的 provider 完成一次往返，得到非空 completion，且请求实际命中配置的 `base_url`，脚本 exit 0。每次 attempt timeout 固定为 15000ms，失败允许重试一次并记录；canonical CLI/API 不提供 timeout override。失败结果、readiness note 与 CLI 输出 MUST 仅包含本地构造的结构化事实，MUST NOT 持久化或输出 provider response body、status text、headers 或外部异常原文。
+系统 SHALL 提供冒烟脚本：以最小 prompt 经配置的 provider 完成一次往返，得到非空 completion，且请求实际命中配置的 `base_url`，脚本 exit 0。每次 attempt timeout 固定为 15000ms，失败允许重试一次并记录；canonical CLI/API 不提供 timeout override。取得 Response 后若因 endpoint validation 或 non-2xx 提前失败，系统 MUST 在同一 attempt deadline 内取消未读 body 并 abort request，MUST NOT 为清理读取 provider 内容。失败结果、readiness note 与 CLI 输出 MUST 仅包含本地构造的结构化事实，MUST NOT 持久化或输出 provider response body、status text、headers 或外部异常原文。
 
-每次 canonical 运行前 SHALL 使旧 passing note 失效，包含 CLI unsupported/incomplete/invalid preflight 失败。若 canonical `workspace`、`workspace/readiness` ancestor 或 final entry 是 symlink / 非预期类型，失效逻辑 SHALL 仅移除 canonical checkout 下的本地不安全目录项、MUST NOT 跟随或改写外部 target；随后发布当前结果或保持 canonical path 不可读为 pass。final hardlink 采用同样的 external-target 不变规则。单链接 regular 旧 note 在读取前 MUST 以 metadata size 上限检查；超限文件 MUST 在不读取内容的前提下安全移除/替换。
+每次 canonical 运行前 SHALL 使旧 passing note 失效，包含 CLI unsupported/incomplete/invalid preflight 失败。若 canonical `workspace`、`workspace/readiness` ancestor 或 final entry 是 symlink / 非预期类型，失效逻辑 SHALL 仅移除 canonical checkout 下的本地不安全目录项、MUST NOT 跟随或改写外部 target；随后发布当前结果或保持 canonical path 不可读为 pass。若 expected realpath/type 的 ancestor 由当前 uid 拥有但 mode 缺少 owner rwx，canonical authority SHALL 恢复 owner rwx 后再失效/发布，不得删除目录或改写 sibling readiness notes；非当前 uid 所有的目录仍为 authority error。final hardlink 采用同样的 external-target 不变规则。单链接 regular 旧 note 在读取前 MUST 以 metadata size 上限检查；超限文件 MUST 在不读取内容的前提下安全移除/替换；size 内但因权限不可读的 leaf MUST 在目录 authority 恢复后按不可信旧证据移除，不能保留可能的 pass。
 
 #### Scenario: 冒烟通过
 
@@ -72,6 +72,16 @@ Canonical readiness evidence MUST load exactly `<canonicalRepoRoot>/config/provi
 
 - **WHEN** canonical `workspace` 或 `workspace/readiness` 是指向含 passing note 外部目录的 symlink，随后 unsupported CLI 或 missing-key canonical smoke 失败
 - **THEN** 仅本地 symlink 被移除，外部目录/note 内容不变，canonical path 不存在或为当前 failed note，绝不仍可读为 passed
+
+#### Scenario: owned 目录权限不足不保留旧 pass
+
+- **WHEN** 当前 uid 所有的 canonical `workspace` / `workspace/readiness` 缺少 owner 写/执行权限，或 canonical regular leaf 在 size cap 内但不可读，随后 unsupported CLI 或 missing-key smoke 失败
+- **THEN** authority 恢复 owned ancestor 的 owner rwx、保留 sibling notes，移除不可信 leaf 或发布当前 failed note，canonical path 绝不仍为 passed
+
+#### Scenario: no-read 失败关闭 response body
+
+- **WHEN** provider 返回 non-2xx 或 final URL validation 失败且 body 是未结束 stream
+- **THEN** body cancellation/request abort 在 15000ms attempt deadline 内发生，不读取/落盘 body 内容，最多重试一次
 
 ### Requirement: 冒烟不等于准入
 

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   CANONICAL_BASE_URL,
@@ -12,6 +12,7 @@ import {
   DEFAULT_TIMEOUT_MS,
   GLM_API_KEY_ENV,
   GLM_API_KEY_REF,
+  LocalSmokeError,
   MAX_RETRIES,
   MAX_RESPONSE_BYTES,
   runSmokeCore,
@@ -26,6 +27,14 @@ import {
   type SmokeFailure,
   type SmokeFailureCategory
 } from "./readiness-note";
+
+const OWNER_RWX_BITS = 0o700;
+const AUTHORITY_UNSUPPORTED_UID_MESSAGE =
+  "Canonical readiness authority requires a local uid.";
+const AUTHORITY_NOT_OWNED_MESSAGE =
+  "Canonical readiness directory is not owned by the current uid.";
+const AUTHORITY_REALPATH_MESSAGE =
+  "Canonical readiness directory did not resolve to its expected local path.";
 
 export async function runCanonicalGlmProviderSmoke(): Promise<CanonicalSmokeRunResult> {
   await invalidatePassingCanonicalReadinessNote();
@@ -64,6 +73,10 @@ async function invalidatePassingCanonicalReadinessNote(): Promise<void> {
     if (isNodeErrorWithCode(error, "ENOENT")) {
       return;
     }
+    if (isNodeErrorWithCode(error, "EACCES") || isNodeErrorWithCode(error, "EPERM")) {
+      await unlinkLocalEntry(notePath);
+      return;
+    }
     throw error;
   }
 
@@ -87,22 +100,26 @@ async function sanitizeCanonicalAncestorsForInvalidation(
 ): Promise<string | undefined> {
   const workspaceDir = join(realRepoRoot, "workspace");
   const readinessDir = join(workspaceDir, "readiness");
-  if (!(await keepOwnedDirectoryOrRemoveLocalEntry(workspaceDir))) {
+  if (!(await keepOwnedDirectoryOrRemoveLocalEntry(workspaceDir, workspaceDir))) {
     return undefined;
   }
-  if (!(await keepOwnedDirectoryOrRemoveLocalEntry(readinessDir))) {
+  if (!(await keepOwnedDirectoryOrRemoveLocalEntry(readinessDir, readinessDir))) {
     return undefined;
   }
   return readinessDir;
 }
 
-async function keepOwnedDirectoryOrRemoveLocalEntry(path: string): Promise<boolean> {
+async function keepOwnedDirectoryOrRemoveLocalEntry(
+  path: string,
+  expectedRealPath: string
+): Promise<boolean> {
   try {
     const stat = await lstat(path);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       await unlinkLocalEntry(path);
       return false;
     }
+    await assertAndRestoreOwnedDirectoryAuthority(path, expectedRealPath, stat);
     return true;
   } catch (error) {
     if (isNodeErrorWithCode(error, "ENOENT")) {
@@ -161,8 +178,8 @@ async function writeCanonicalReadinessNote(note: CanonicalReadinessNote): Promis
 async function ensureCanonicalAncestorsForPublish(realRepoRoot: string): Promise<string> {
   const workspaceDir = join(realRepoRoot, "workspace");
   const readinessDir = join(workspaceDir, "readiness");
-  await ensureOwnedDirectoryReplacingLocalEntry(workspaceDir);
-  await ensureOwnedDirectoryReplacingLocalEntry(readinessDir);
+  await ensureOwnedDirectoryReplacingLocalEntry(workspaceDir, workspaceDir);
+  await ensureOwnedDirectoryReplacingLocalEntry(readinessDir, readinessDir);
   const realReadinessDir = await realpath(readinessDir);
   const expectedReadinessDir = join(realRepoRoot, "workspace", "readiness");
   if (realReadinessDir !== expectedReadinessDir) {
@@ -171,19 +188,59 @@ async function ensureCanonicalAncestorsForPublish(realRepoRoot: string): Promise
   return readinessDir;
 }
 
-async function ensureOwnedDirectoryReplacingLocalEntry(path: string): Promise<void> {
+async function ensureOwnedDirectoryReplacingLocalEntry(
+  path: string,
+  expectedRealPath: string
+): Promise<void> {
   try {
     const stat = await lstat(path);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       await unlinkLocalEntry(path);
       await mkdir(path, { mode: 0o700 });
+      await assertAndRestoreOwnedDirectoryAuthority(path, expectedRealPath);
+      return;
     }
+    await assertAndRestoreOwnedDirectoryAuthority(path, expectedRealPath, stat);
   } catch (error) {
     if (!isNodeErrorWithCode(error, "ENOENT")) {
       throw error;
     }
     await mkdir(path, { mode: 0o700 });
+    await assertAndRestoreOwnedDirectoryAuthority(path, expectedRealPath);
   }
+}
+
+async function assertAndRestoreOwnedDirectoryAuthority(
+  path: string,
+  expectedRealPath: string,
+  existingStat?: Awaited<ReturnType<typeof lstat>>
+): Promise<void> {
+  const uid = currentUid();
+  const stat = existingStat ?? await lstat(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new LocalSmokeError(AUTHORITY_REALPATH_MESSAGE);
+  }
+  if (typeof stat.uid !== "number" || typeof stat.mode !== "number") {
+    throw new LocalSmokeError(AUTHORITY_UNSUPPORTED_UID_MESSAGE);
+  }
+  if (stat.uid !== uid) {
+    throw new LocalSmokeError(AUTHORITY_NOT_OWNED_MESSAGE);
+  }
+  const permissionBits = stat.mode & 0o7777;
+  if ((permissionBits & OWNER_RWX_BITS) !== OWNER_RWX_BITS) {
+    await chmod(path, permissionBits | OWNER_RWX_BITS);
+  }
+  const actualRealPath = await realpath(path);
+  if (actualRealPath !== expectedRealPath) {
+    throw new LocalSmokeError(AUTHORITY_REALPATH_MESSAGE);
+  }
+}
+
+function currentUid(): number {
+  if (typeof process.getuid !== "function") {
+    throw new LocalSmokeError(AUTHORITY_UNSUPPORTED_UID_MESSAGE);
+  }
+  return process.getuid();
 }
 
 async function assertSafeCanonicalFinalEntry(path: string): Promise<void> {

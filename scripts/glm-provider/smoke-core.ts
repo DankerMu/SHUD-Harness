@@ -372,20 +372,24 @@ async function sendChatCompletion(input: {
       );
       const endpointValidation = validateResponseEndpoint(response, input.endpoint);
       if (!endpointValidation.ok) {
-        return {
-          ok: false,
-          failure: endpointValidation.failure
-        };
+        return await failWithoutReadingResponse({
+          response,
+          failure: endpointValidation.failure,
+          controller,
+          signal: controller.signal
+        });
       }
       if (!response.ok) {
-        return {
-          ok: false,
+        return await failWithoutReadingResponse({
+          response,
           failure: {
             category: "http_error",
             message: `Provider returned HTTP ${response.status} from configured endpoint.`,
             http_status: response.status
-          }
-        };
+          },
+          controller,
+          signal: controller.signal
+        });
       }
       const responseText = await readResponseTextWithLimit(
         response,
@@ -431,6 +435,30 @@ async function sendChatCompletion(input: {
       failure: failureFromError(error)
     };
   }
+}
+
+async function failWithoutReadingResponse(input: {
+  response: Response;
+  failure: SmokeFailure;
+  controller: AbortController;
+  signal: AbortSignal;
+}): Promise<AttemptFailure> {
+  let cancelPromise: Promise<unknown> | undefined;
+  try {
+    cancelPromise = input.response.body?.cancel().catch(() => undefined);
+  } catch {
+    cancelPromise = undefined;
+  }
+
+  input.controller.abort();
+  if (cancelPromise) {
+    await withAbort(cancelPromise, input.signal).catch(() => undefined);
+  }
+
+  return {
+    ok: false,
+    failure: input.failure
+  };
 }
 
 function validateResponseEndpoint(

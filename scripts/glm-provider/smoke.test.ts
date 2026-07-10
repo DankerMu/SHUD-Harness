@@ -16,6 +16,7 @@ import {
   loadProviderConfig,
   parseProviderConfig,
   runGlmProviderSmokeFixture,
+  type SmokeFailure,
   type SmokeFetch
 } from "./smoke";
 import {
@@ -642,6 +643,151 @@ describe("glm provider config and smoke", () => {
     expect(note.completion_nonempty).toBe(false);
   });
 
+  for (const fixture of [
+    {
+      name: "redirected final URL",
+      response: (cancel: () => Promise<void>) => noReadResponse({
+        redirected: true,
+        url: "https://example.invalid/v1/chat/completions",
+        cancel
+      }),
+      expectedError: {
+        category: "base_url_mismatch",
+        message: "Provider response was redirected away from the configured endpoint."
+      }
+    },
+    {
+      name: "missing final URL",
+      response: (cancel: () => Promise<void>) => noReadResponse({
+        url: "",
+        cancel
+      }),
+      expectedError: {
+        category: "base_url_mismatch",
+        message: "Provider response did not expose a final URL for configured endpoint validation."
+      }
+    },
+    {
+      name: "invalid final URL",
+      response: (cancel: () => Promise<void>) => noReadResponse({
+        url: "://invalid-url",
+        cancel
+      }),
+      expectedError: {
+        category: "base_url_mismatch",
+        message: "Provider response URL could not be validated against the configured endpoint."
+      }
+    },
+    {
+      name: "mismatched final URL",
+      response: (cancel: () => Promise<void>) => noReadResponse({
+        url: "https://example.invalid/v1/chat/completions",
+        cancel
+      }),
+      expectedError: {
+        category: "base_url_mismatch",
+        message: "Provider response URL did not match the configured endpoint."
+      }
+    },
+    {
+      name: "non-2xx status",
+      response: (cancel: () => Promise<void>) => noReadResponse({
+        ok: false,
+        status: 503,
+        cancel
+      }),
+      expectedError: {
+        category: "http_error",
+        message: "Provider returned HTTP 503 from configured endpoint.",
+        http_status: 503
+      }
+    }
+  ] satisfies Array<{
+    name: string;
+    response: (cancel: () => Promise<void>) => Response;
+    expectedError: SmokeFailure;
+  }>) {
+    test(`${fixture.name} no-read failure cancels body and aborts every attempt`, async () => {
+      const repo = await tempRoots.createTempRepoWithProviderConfig();
+      const cancelSentinel = `cancel sentinel ${fixture.name}`;
+      const signals: AbortSignal[] = [];
+      let attempts = 0;
+      let cancelCount = 0;
+      const fetchImpl: SmokeFetch = async (_url, init) => {
+        attempts += 1;
+        signals.push(init.signal);
+        return fixture.response(() => {
+          cancelCount += 1;
+          return Promise.reject(new Error(cancelSentinel));
+        });
+      };
+
+      const result = await runGlmProviderSmokeFixture({
+        repoRoot: repo.repoRoot,
+        env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+        fetchImpl,
+        now: fixedNow
+      });
+
+      expect(result.ok).toBe(false);
+      expect(attempts).toBe(MAX_RETRIES + 1);
+      expect(cancelCount).toBe(MAX_RETRIES + 1);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      if (!result.ok) {
+        expect(result.error).toEqual(fixture.expectedError);
+      }
+      const noteText = await readFile(fixtureNotePath(repo.repoRoot), "utf8");
+      expectNoExternalText(JSON.stringify(result), [cancelSentinel]);
+      expectNoExternalText(noteText, [cancelSentinel]);
+    });
+  }
+
+  test("never-settling no-read cancellation remains bounded with stable local failure", async () => {
+    const repo = await tempRoots.createTempRepoWithProviderConfig();
+    const signals: AbortSignal[] = [];
+    let attempts = 0;
+    let cancelCount = 0;
+    const startedAt = Date.now();
+
+    const result = await runGlmProviderSmokeFixture({
+      repoRoot: repo.repoRoot,
+      env: { [GLM_API_KEY_ENV]: makeFakeSecret() },
+      timeoutMs: 5,
+      now: fixedNow,
+      fetchImpl: async (_url, init) => {
+        attempts += 1;
+        signals.push(init.signal);
+        return noReadResponse({
+          ok: false,
+          status: 503,
+          cancel: () => {
+            cancelCount += 1;
+            return new Promise<void>(() => undefined);
+          }
+        });
+      }
+    });
+
+    expect(result.ok).toBe(false);
+    expect(attempts).toBe(MAX_RETRIES + 1);
+    expect(cancelCount).toBe(MAX_RETRIES + 1);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+    if (!result.ok) {
+      expect(result.error).toEqual({
+        category: "http_error",
+        message: "Provider returned HTTP 503 from configured endpoint.",
+        http_status: 503
+      });
+    }
+    const note = await readFixtureNote(repo.repoRoot);
+    expect(note.failure).toEqual({
+      category: "http_error",
+      message: "Provider returned HTTP 503 from configured endpoint.",
+      http_status: 503
+    });
+  });
+
   test("oversized response body fails before parsing and writes no stale pass note", async () => {
     const repo = await tempRoots.createTempRepoWithProviderConfig();
     let attempts = 0;
@@ -789,3 +935,28 @@ describe("glm provider config and smoke", () => {
     expect(config.targetModelId).toBe("glm-5.2");
   });
 });
+
+function noReadResponse(options: {
+  redirected?: boolean;
+  url?: string;
+  ok?: boolean;
+  status?: number;
+  cancel: () => Promise<void>;
+}): Response {
+  return {
+    redirected: options.redirected ?? false,
+    url: options.url ?? CANONICAL_ENDPOINT,
+    ok: options.ok ?? true,
+    status: options.status ?? 200,
+    body: { cancel: options.cancel } as unknown as ReadableStream<Uint8Array>,
+    get headers(): Headers {
+      throw new Error("Provider response headers must not be read.");
+    },
+    get statusText(): string {
+      throw new Error("Provider response status text must not be read.");
+    },
+    text: async () => {
+      throw new Error("Provider response body must not be read.");
+    }
+  } as unknown as Response;
+}

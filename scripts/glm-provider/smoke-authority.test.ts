@@ -341,6 +341,42 @@ describe("glm provider canonical authority boundaries", () => {
     });
   });
 
+  test("owned mode-restricted canonical directories are restored before stale pass invalidation", async () => {
+    await withCanonicalWorkspaceEntryBackup(async () => {
+      for (const flow of ["unsupported", "missing-key"] as const) {
+        await withModeRestrictedCanonicalWorkspace(async ({
+          workspaceDir,
+          readinessDir,
+          siblingPath,
+          siblingContent
+        }) => {
+          const child = flow === "unsupported"
+            ? runSmokeCli(["--timeout-ms", "999999"], {
+                ...process.env,
+                [GLM_API_KEY_ENV]: makeFakeSecret()
+              })
+            : runSmokeCli([], envWithoutGlmKey());
+          const { exitCode, stdout, stderr } = await collectChild(child);
+
+          expect(exitCode).toBe(1);
+          expect(stdout).toBe("");
+          if (flow === "unsupported") {
+            expect(stderr).toBe(`GLM provider smoke failed: ${CLI_UNSUPPORTED_ARGUMENT_MESSAGE}\n`);
+            expect(await pathExists(readinessNotePath(DEFAULT_REPO_ROOT))).toBe(false);
+          } else {
+            const note = await readReadinessNote(DEFAULT_REPO_ROOT);
+            expect(note.status).toBe("failed");
+            expect(note.failure).toMatchObject({ category: "missing_key" });
+          }
+          expect(await readReadinessStatus(DEFAULT_REPO_ROOT)).not.toBe("passed");
+          expect(Buffer.compare(await readFile(siblingPath), siblingContent)).toBe(0);
+          expect(restoredOwnerRwxPreservingOtherBits(await modeOf(workspaceDir))).toBe(true);
+          expect(restoredOwnerRwxPreservingOtherBits(await modeOf(readinessDir))).toBe(true);
+        });
+      }
+    });
+  });
+
   test("canonical CLI provider failure omits provider body, status text, headers, and secrets", async () => {
     await withCanonicalReadinessBackup(async () => {
       const fakeSecret = makeFakeSecret();
@@ -364,6 +400,37 @@ describe("glm provider canonical authority boundaries", () => {
       const noteText = await readFile(readinessNotePath(DEFAULT_REPO_ROOT), "utf8");
       expect(noteText).toContain('"http_status": 503');
       expectNoExternalText(noteText, forbidden);
+    });
+  });
+
+  test("in-cap unreadable canonical pass leaf is removed or replaced without preserving pass", async () => {
+    await withCanonicalReadinessBackup(async () => {
+      for (const flow of ["unsupported", "missing-key"] as const) {
+        await seedPassingReadinessNote(DEFAULT_REPO_ROOT);
+        const notePath = readinessNotePath(DEFAULT_REPO_ROOT);
+        await chmod(notePath, 0o000);
+        try {
+          const child = flow === "unsupported"
+            ? runSmokeCli(["--repo-root", "/tmp/ignored"], {
+                ...process.env,
+                [GLM_API_KEY_ENV]: makeFakeSecret()
+              })
+            : runSmokeCli([], envWithoutGlmKey());
+          const { exitCode } = await collectChild(child);
+
+          expect(exitCode).toBe(1);
+          if (flow === "unsupported") {
+            expect(await pathExists(notePath)).toBe(false);
+          } else {
+            const note = await readReadinessNote(DEFAULT_REPO_ROOT);
+            expect(note.status).toBe("failed");
+            expect(note.failure).toMatchObject({ category: "missing_key" });
+          }
+          expect(await readReadinessStatus(DEFAULT_REPO_ROOT)).not.toBe("passed");
+        } finally {
+          await chmod(notePath, 0o600).catch(() => undefined);
+        }
+      }
     });
   });
 
@@ -469,6 +536,41 @@ function envWithoutGlmKey(): Record<string, string | undefined> {
 async function seedPassingReadinessNote(repoRoot: string): Promise<void> {
   await mkdir(join(repoRoot, "workspace", "readiness"), { recursive: true });
   await writeFile(readinessNotePath(repoRoot), passingReadinessNoteText(), "utf8");
+}
+
+async function withModeRestrictedCanonicalWorkspace<T>(run: (paths: {
+  workspaceDir: string;
+  readinessDir: string;
+  siblingPath: string;
+  siblingContent: Buffer;
+}) => Promise<T>): Promise<T> {
+  const workspaceDir = join(DEFAULT_REPO_ROOT, "workspace");
+  const readinessDir = join(workspaceDir, "readiness");
+  const siblingPath = join(readinessDir, "sibling-note.txt");
+  const siblingContent = Buffer.from("sibling readiness note remains byte-identical\n");
+  await rm(workspaceDir, { recursive: true, force: true });
+  await mkdir(readinessDir, { recursive: true });
+  await chmod(workspaceDir, 0o700);
+  await chmod(readinessDir, 0o700);
+  await writeFile(siblingPath, siblingContent);
+  await writeFile(readinessNotePath(DEFAULT_REPO_ROOT), passingReadinessNoteText(), "utf8");
+  await chmod(readinessDir, 0o055);
+  await chmod(workspaceDir, 0o055);
+  try {
+    return await run({ workspaceDir, readinessDir, siblingPath, siblingContent });
+  } finally {
+    await chmod(workspaceDir, 0o700).catch(() => undefined);
+    await chmod(readinessDir, 0o700).catch(() => undefined);
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+}
+
+async function modeOf(path: string): Promise<number> {
+  return (await lstat(path)).mode & 0o777;
+}
+
+function restoredOwnerRwxPreservingOtherBits(mode: number): boolean {
+  return (mode & 0o700) === 0o700 && (mode & 0o077) === 0o055;
 }
 
 function passingReadinessNoteText(): string {
