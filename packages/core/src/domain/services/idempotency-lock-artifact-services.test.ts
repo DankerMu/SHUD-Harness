@@ -1441,6 +1441,54 @@ describe("idempotency, lock, and artifact services", () => {
     await expectPathMissing(join(outsideTasksRoot, "TASK-symlink-escape", "snapshot.json"));
   });
 
+  test("TaskCard snapshot writes revalidate after post-write hook before caching no-key creates", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskIds = ["TASK-post-hook-delete", "TASK-post-hook-retry"];
+    let shouldDeleteSnapshot = true;
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:05.000Z"),
+      taskIdFactory: () => taskIds.shift() ?? "TASK-unexpected-post-hook-extra",
+      snapshotWriteHooks: {
+        afterSnapshotWrite: async ({ taskDirectory }) => {
+          if (!shouldDeleteSnapshot) {
+            return;
+          }
+          shouldDeleteSnapshot = false;
+          await rm(join(taskDirectory, "snapshot.json"));
+        }
+      }
+    });
+
+    const error = await captureTaskServiceError(() =>
+      service.createTask({
+        type: "engineering",
+        title: "Reject deleted post-hook snapshot",
+        question_or_goal: "Do not cache a task whose durable snapshot was deleted by a hook.",
+        inference_budget: { mode: "normal" },
+        created_by: "pi"
+      })
+    );
+    const listAfterFailure = await service.listTasks();
+    const retryTask = await service.createTask({
+      type: "engineering",
+      title: "Retry after post-hook repair",
+      question_or_goal: "Retry succeeds after the snapshot hook stops deleting the file.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+
+    expect(error.code).toBe("workspace_path_not_safe");
+    expect(listAfterFailure).toEqual([]);
+    expect(retryTask.task_id).toBe("TASK-post-hook-retry");
+    expect(await service.listTasks()).toEqual([retryTask]);
+    await expectPathMissing(join(workspaceRoot, "tasks", "TASK-post-hook-delete", "snapshot.json"));
+    expect((await stat(join(workspaceRoot, "tasks", retryTask.task_id, "snapshot.json"))).isFile()).toBe(
+      true
+    );
+  });
+
   test("Artifact registry normalizes artifact paths in stored manifests", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);

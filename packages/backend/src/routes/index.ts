@@ -247,6 +247,7 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
       const requestDigest = taskCreateRequestDigest(parsedBody.data);
       const result = await createIdempotentTaskCard({
         input: parsedBody.data,
+        workspaceRoot,
         idempotencyKey: idempotencyKey.key,
         requestDigest,
         taskService,
@@ -317,6 +318,7 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
 
 const IDEMPOTENCY_REPLAY_WAIT_TIMEOUT_MS = 1000;
 const IDEMPOTENCY_REPLAY_POLL_INTERVAL_MS = 10;
+const MAX_IN_FLIGHT_IDEMPOTENT_TASK_CREATES = 1024;
 
 type ParsedIdempotencyKey = { status: "absent" } | { status: "present"; key: string };
 
@@ -327,13 +329,67 @@ interface IdempotentTaskCreateResult {
 
 interface CreateIdempotentTaskCardInput {
   input: CreateTaskInput;
+  workspaceRoot: string;
   idempotencyKey: string;
   requestDigest: string;
   taskService: TaskCardService;
   idempotencyService: IdempotencyRecordService;
 }
 
+interface InFlightIdempotentTaskCreateEntry {
+  done: Promise<void>;
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+}
+
+const inFlightIdempotentTaskCreates = new Map<string, InFlightIdempotentTaskCreateEntry>();
+
 async function createIdempotentTaskCard(
+  input: CreateIdempotentTaskCardInput
+): Promise<IdempotentTaskCreateResult> {
+  const inFlightIdentity = idempotentTaskCreateInFlightIdentity(input);
+  const existingEntry = inFlightIdempotentTaskCreates.get(inFlightIdentity);
+  if (existingEntry) {
+    return await waitForInFlightIdempotentTaskCreate(input, existingEntry);
+  }
+
+  if (inFlightIdempotentTaskCreates.size >= MAX_IN_FLIGHT_IDEMPOTENT_TASK_CREATES) {
+    throw new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "workspace_error",
+      message: "Too many task idempotency requests are active in this process.",
+      userMessage: "The backend is already processing too many idempotent task creates.",
+      evidenceRefs: ["workspace/tasks/_idempotency/task"],
+      retryable: true,
+      recommendedNextActions: ["Retry after active task create requests finish."]
+    });
+  }
+
+  const owner = createDeferred<void>();
+  owner.promise.catch(() => undefined);
+  const entry: InFlightIdempotentTaskCreateEntry = { done: owner.promise };
+  inFlightIdempotentTaskCreates.set(inFlightIdentity, entry);
+
+  try {
+    const result = await createOwnedIdempotentTaskCard(input);
+    owner.resolve();
+    return result;
+  } catch (error) {
+    owner.reject(error);
+    throw error;
+  } finally {
+    if (inFlightIdempotentTaskCreates.get(inFlightIdentity) === entry) {
+      inFlightIdempotentTaskCreates.delete(inFlightIdentity);
+    }
+  }
+}
+
+async function createOwnedIdempotentTaskCard(
   input: CreateIdempotentTaskCardInput
 ): Promise<IdempotentTaskCreateResult> {
   const begin = await input.idempotencyService.beginRecord({
@@ -373,6 +429,17 @@ async function createIdempotentTaskCard(
 
   let completedRecord: Awaited<ReturnType<IdempotencyRecordService["completeRecord"]>>;
   try {
+    const replayBeforeCompletion = await input.idempotencyService.lookupReplay({
+      scope: "task",
+      key: input.idempotencyKey,
+      requestDigest: input.requestDigest
+    });
+    if (replayBeforeCompletion.status === "mismatch") {
+      throw createIdempotencyMismatchError();
+    }
+    if (replayBeforeCompletion.status !== "completed") {
+      await assertTaskSnapshotBindsRequest(input.taskService, task, input.requestDigest);
+    }
     completedRecord = await input.idempotencyService.completeRecord({
       scope: "task",
       key: input.idempotencyKey,
@@ -455,6 +522,74 @@ async function createIdempotentTaskCard(
   }
 
   return { task, created: true };
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolveDeferred!: (value: T | PromiseLike<T>) => void;
+  let rejectDeferred!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolve, reject) => {
+    resolveDeferred = resolve;
+    rejectDeferred = reject;
+  });
+
+  return {
+    promise,
+    resolve: resolveDeferred,
+    reject: rejectDeferred
+  };
+}
+
+function idempotentTaskCreateInFlightIdentity(input: CreateIdempotentTaskCardInput): string {
+  return sha256Hex(
+    canonicalJson({
+      workspace: sha256Hex(resolve(input.workspaceRoot)),
+      scope: "task",
+      key: sha256Hex(input.idempotencyKey),
+      request_digest: input.requestDigest
+    })
+  );
+}
+
+async function waitForInFlightIdempotentTaskCreate(
+  input: CreateIdempotentTaskCardInput,
+  entry: InFlightIdempotentTaskCreateEntry
+): Promise<IdempotentTaskCreateResult> {
+  await entry.done;
+  const replay = await input.idempotencyService.lookupReplay({
+    scope: "task",
+    key: input.idempotencyKey,
+    requestDigest: input.requestDigest
+  });
+
+  if (replay.status === "mismatch") {
+    throw createIdempotencyMismatchError();
+  }
+  if (replay.status !== "completed") {
+    throw idempotencyInFlightCompletionError();
+  }
+
+  return {
+    task: await getIdempotentTaskResult(
+      input.taskService,
+      replay.record.result_ref,
+      input.requestDigest
+    ),
+    created: false
+  };
+}
+
+async function assertTaskSnapshotBindsRequest(
+  taskService: TaskCardService,
+  task: TaskCard,
+  requestDigest: string
+): Promise<void> {
+  const snapshotTask = await taskService.getTaskFromSnapshot(task.task_id);
+  if (JSON.stringify(snapshotTask) !== JSON.stringify(task)) {
+    throw idempotencyResultBindingError();
+  }
+  if (taskCreateRequestDigestFromTask(snapshotTask) !== requestDigest) {
+    throw idempotencyResultBindingError();
+  }
 }
 
 type RemainingRollbackTaskSnapshot =
@@ -548,6 +683,9 @@ async function getIdempotentTaskResult(
     task = await taskService.getTaskFromSnapshot(taskId);
   } catch (error) {
     if (error instanceof TaskServiceError) {
+      if (error.code === "task_snapshot_missing_card") {
+        throw error;
+      }
       throw idempotencyResultBindingError();
     }
 
@@ -668,6 +806,19 @@ function idempotencyResultBindingError(): TaskServiceError {
     evidenceRefs: ["workspace/tasks/_idempotency/task", "idempotency.result_ref"],
     retryable: false,
     recommendedNextActions: ["Inspect and repair the idempotency record before retrying."]
+  });
+}
+
+function idempotencyInFlightCompletionError(): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 409,
+    category: "workspace_error",
+    message: "Active idempotent task create finished without a completed durable result.",
+    userMessage: "The task create request did not publish a replayable idempotency result.",
+    evidenceRefs: ["workspace/tasks/_idempotency/task"],
+    retryable: true,
+    recommendedNextActions: ["Retry after repairing the task snapshot or idempotency record state."]
   });
 }
 

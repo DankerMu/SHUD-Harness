@@ -923,6 +923,20 @@ async function persistTaskSnapshot(
         [`workspace/tasks/${task.task_id}`]
       );
     }
+    const verifiedSnapshot = await readTaskSnapshot(
+      snapshotPath,
+      task.task_id,
+      taskDirectory,
+      taskSnapshotEvidenceRef(task.task_id)
+    );
+    if (JSON.stringify(verifiedSnapshot.task_card) !== JSON.stringify(task)) {
+      throw workspaceError(
+        "task_snapshot_mismatch",
+        "Published task snapshot does not match the created TaskCard.",
+        "The task snapshot is inconsistent and cannot be used for recovery.",
+        [taskSnapshotEvidenceRef(task.task_id), "snapshot.task_card"]
+      );
+    }
   } catch (error) {
     if (publishedSnapshot) {
       await cleanupPublishedTaskSnapshotAfterFailedWrite(taskDirectory, snapshotPath, task.task_id);
