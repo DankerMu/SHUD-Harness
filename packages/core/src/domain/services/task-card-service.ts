@@ -826,13 +826,17 @@ async function cleanupPublishedTaskSnapshotAfterFailedWrite(
     return;
   }
 
+  const quarantinePath = join(
+    taskDirectory,
+    `.snapshot-failed-${process.pid}-${randomUUID()}.quarantine`
+  );
   try {
-    await unlink(snapshotPath);
+    await rename(snapshotPath, quarantinePath);
   } catch (error) {
     if (!hasErrorCode(error, "ENOENT")) {
       throw workspaceError(
         "workspace_path_not_safe",
-        "Failed to clean up published task snapshot after a failed write.",
+        "Failed to quarantine published task snapshot after a failed write.",
         "The task snapshot could not be cleaned up safely.",
         [taskSnapshotEvidenceRef(taskId)],
         error
@@ -840,7 +844,26 @@ async function cleanupPublishedTaskSnapshotAfterFailedWrite(
     }
   }
 
+  await bestEffortCleanupQuarantinedTaskSnapshot(quarantinePath);
   await removeEmptyTaskLaneAfterRollback(taskDirectory, taskId);
+}
+
+async function bestEffortCleanupQuarantinedTaskSnapshot(quarantinePath: string): Promise<void> {
+  try {
+    const quarantineEntry = await maybeLstat(quarantinePath);
+    if (!quarantineEntry) {
+      return;
+    }
+
+    if (quarantineEntry.isDirectory() && !quarantineEntry.isSymbolicLink()) {
+      await rmdir(quarantinePath);
+      return;
+    }
+
+    await unlink(quarantinePath);
+  } catch {
+    // The canonical snapshot leaf is already absent; never recurse into quarantined content.
+  }
 }
 
 async function persistTaskSnapshot(
@@ -929,12 +952,12 @@ async function persistTaskSnapshot(
       taskDirectory,
       taskSnapshotEvidenceRef(task.task_id)
     );
-    if (JSON.stringify(verifiedSnapshot.task_card) !== JSON.stringify(task)) {
+    if (JSON.stringify(verifiedSnapshot) !== JSON.stringify(snapshot)) {
       throw workspaceError(
         "task_snapshot_mismatch",
-        "Published task snapshot does not match the created TaskCard.",
+        "Published task snapshot does not match the canonical task snapshot.",
         "The task snapshot is inconsistent and cannot be used for recovery.",
-        [taskSnapshotEvidenceRef(task.task_id), "snapshot.task_card"]
+        [taskSnapshotEvidenceRef(task.task_id), "snapshot"]
       );
     }
   } catch (error) {

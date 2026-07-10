@@ -1489,6 +1489,98 @@ describe("idempotency, lock, and artifact services", () => {
     );
   });
 
+  test("TaskCard snapshot writes reject schema-valid outer snapshot drift before caching", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskIds = ["TASK-post-hook-outer-drift", "TASK-post-hook-outer-retry"];
+    let shouldDriftSnapshot = true;
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:06.000Z"),
+      taskIdFactory: () => taskIds.shift() ?? "TASK-unexpected-post-hook-outer-extra",
+      snapshotWriteHooks: {
+        afterSnapshotWrite: async ({ taskDirectory }) => {
+          if (!shouldDriftSnapshot) {
+            return;
+          }
+          shouldDriftSnapshot = false;
+          const snapshotPath = join(taskDirectory, "snapshot.json");
+          const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<
+            string,
+            unknown
+          >;
+          snapshot.pending_pi_gates = ["GATE-hook-outer-drift"];
+          await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+        }
+      }
+    });
+    const input = {
+      type: "engineering" as const,
+      title: "Reject outer snapshot drift",
+      question_or_goal: "Do not cache a task whose canonical outer snapshot fields changed.",
+      inference_budget: { mode: "normal" as const },
+      created_by: "pi"
+    };
+
+    const error = await captureTaskServiceError(() => service.createTask(input));
+    const listAfterFailure = await service.listTasks();
+    const retryTask = await service.createTask(input);
+
+    expect(error.code).toBe("workspace_path_not_safe");
+    expect(listAfterFailure).toEqual([]);
+    await expectPathMissing(
+      join(workspaceRoot, "tasks", "TASK-post-hook-outer-drift", "snapshot.json")
+    );
+    expect(retryTask.task_id).toBe("TASK-post-hook-outer-retry");
+    expect(await service.listTasks()).toEqual([retryTask]);
+  });
+
+  test("TaskCard snapshot writes quarantine directory leaf replacements before hydration", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskIds = ["TASK-post-hook-directory", "TASK-post-hook-directory-retry"];
+    let shouldReplaceSnapshot = true;
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:07.000Z"),
+      taskIdFactory: () => taskIds.shift() ?? "TASK-unexpected-post-hook-directory-extra",
+      snapshotWriteHooks: {
+        afterSnapshotWrite: async ({ taskDirectory }) => {
+          if (!shouldReplaceSnapshot) {
+            return;
+          }
+          shouldReplaceSnapshot = false;
+          const snapshotPath = join(taskDirectory, "snapshot.json");
+          await rm(snapshotPath);
+          await mkdir(snapshotPath);
+          await writeFile(join(snapshotPath, "nested.txt"), "untrusted replacement");
+        }
+      }
+    });
+    const input = {
+      type: "engineering" as const,
+      title: "Reject directory snapshot replacement",
+      question_or_goal: "Keep hydration usable after a hook replaces the snapshot leaf.",
+      inference_budget: { mode: "normal" as const },
+      created_by: "pi"
+    };
+
+    const error = await captureTaskServiceError(() => service.createTask(input));
+    const listAfterFailure = await service.listTasks();
+    const freshService = createTaskCardService({ workspaceRoot });
+    const freshListAfterFailure = await freshService.listTasks();
+    const retryTask = await service.createTask(input);
+
+    expect(error.code).toBe("workspace_path_not_safe");
+    expect(listAfterFailure).toEqual([]);
+    expect(freshListAfterFailure).toEqual([]);
+    await expectPathMissing(
+      join(workspaceRoot, "tasks", "TASK-post-hook-directory", "snapshot.json")
+    );
+    expect(retryTask.task_id).toBe("TASK-post-hook-directory-retry");
+    expect(await service.listTasks()).toEqual([retryTask]);
+  });
+
   test("Artifact registry normalizes artifact paths in stored manifests", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);

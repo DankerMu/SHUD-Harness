@@ -318,6 +318,7 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
 
 const IDEMPOTENCY_REPLAY_WAIT_TIMEOUT_MS = 1000;
 const IDEMPOTENCY_REPLAY_POLL_INTERVAL_MS = 10;
+const IN_FLIGHT_FOLLOWER_WAIT_TIMEOUT_MS = 5000;
 const MAX_IN_FLIGHT_IDEMPOTENT_TASK_CREATES = 1024;
 
 type ParsedIdempotencyKey = { status: "absent" } | { status: "present"; key: string };
@@ -554,7 +555,22 @@ async function waitForInFlightIdempotentTaskCreate(
   input: CreateIdempotentTaskCardInput,
   entry: InFlightIdempotentTaskCreateEntry
 ): Promise<IdempotentTaskCreateResult> {
-  await entry.done;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const followerTimeout = new Promise<never>((_resolve, reject) => {
+    timeoutHandle = setTimeout(
+      () => reject(idempotencyInFlightWaitTimeoutError()),
+      IN_FLIGHT_FOLLOWER_WAIT_TIMEOUT_MS
+    );
+  });
+
+  try {
+    await Promise.race([entry.done, followerTimeout]);
+  } finally {
+    if (timeoutHandle !== undefined) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+
   const replay = await input.idempotencyService.lookupReplay({
     scope: "task",
     key: input.idempotencyKey,
@@ -819,6 +835,19 @@ function idempotencyInFlightCompletionError(): TaskServiceError {
     evidenceRefs: ["workspace/tasks/_idempotency/task"],
     retryable: true,
     recommendedNextActions: ["Retry after repairing the task snapshot or idempotency record state."]
+  });
+}
+
+function idempotencyInFlightWaitTimeoutError(): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 409,
+    category: "workspace_error",
+    message: "Active idempotent task create did not finish before the follower wait timeout.",
+    userMessage: "The task create request is still being processed by an active owner.",
+    evidenceRefs: ["workspace/tasks/_idempotency/task"],
+    retryable: true,
+    recommendedNextActions: ["Retry after the active task create request finishes."]
   });
 }
 

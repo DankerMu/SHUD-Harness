@@ -1764,6 +1764,94 @@ describe("backend workspace and health routes", () => {
     expect(idempotencyRecord?.result_ref).toBe(tasks[0].task_id);
   });
 
+  test(
+    "POST /api/tasks bounds an active same-key follower without releasing the owner",
+    async () => {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const idempotencyKey = "task:create:bounded-active-follower";
+      let releaseOwner!: () => void;
+      const ownerRelease = new Promise<void>((resolveRelease) => {
+        releaseOwner = resolveRelease;
+      });
+      let resolveHookStarted!: () => void;
+      const hookStarted = new Promise<void>((resolveStarted) => {
+        resolveHookStarted = resolveStarted;
+      });
+      let taskIdFactoryCalls = 0;
+      const app = createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:56.150Z"),
+        taskIdFactory: () => {
+          taskIdFactoryCalls += 1;
+          return `TASK-bounded-active-follower-${taskIdFactoryCalls}`;
+        },
+        taskSnapshotWriteHooks: {
+          afterSnapshotWrite: async () => {
+            resolveHookStarted();
+            await ownerRelease;
+          }
+        }
+      });
+
+      const ownerRequest = postTask(app, validTaskCreateBody(), {
+        "Idempotency-Key": idempotencyKey
+      });
+      await hookStarted;
+
+      try {
+        const followerResponse = await Promise.race([
+          postTask(app, validTaskCreateBody(), { "Idempotency-Key": idempotencyKey }),
+          timeoutAfter(7_000, "active same-key follower exceeded its bounded wait")
+        ]);
+        const followerBody = (await followerResponse.json()) as ApiErrorResponse;
+        const activeRecord = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+          "task",
+          idempotencyKey
+        );
+
+        expect(followerResponse.status).toBe(409);
+        expectCanonicalError(followerBody, "workspace_error");
+        expect(followerBody.error.message).toBe(
+          "Active idempotent task create did not finish before the follower wait timeout."
+        );
+        expect(followerBody.error.retryable).toBe(true);
+        expect(followerBody.error.evidence_refs).toEqual([
+          "workspace/tasks/_idempotency/task"
+        ]);
+        expectNoAbsoluteWorkspacePath(followerBody, tempRoot, workspaceRoot);
+        expect(taskIdFactoryCalls).toBe(1);
+        expect(activeRecord?.status).toBe("started");
+        expect(activeRecord?.result_ref).toBeUndefined();
+        expect(await taskSnapshotIds(workspaceRoot)).toEqual([
+          "TASK-bounded-active-follower-1"
+        ]);
+      } finally {
+        releaseOwner();
+      }
+
+      const ownerResponse = await ownerRequest;
+      const ownerTask = (await ownerResponse.json()) as TaskCard;
+      const replayResponse = await postTask(app, validTaskCreateBody(), {
+        "Idempotency-Key": idempotencyKey
+      });
+      const replayTask = (await replayResponse.json()) as TaskCard;
+      const completedRecord = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+        "task",
+        idempotencyKey
+      );
+
+      expect(ownerResponse.status).toBe(201);
+      expect(replayResponse.status).toBe(200);
+      expect(replayTask).toEqual(ownerTask);
+      expect(taskIdFactoryCalls).toBe(1);
+      expect(completedRecord?.status).toBe("completed");
+      expect(completedRecord?.result_ref).toBe(ownerTask.task_id);
+      expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([ownerTask.task_id]);
+    },
+    12_000
+  );
+
   test("POST /api/tasks active same-key create delayed past replay timeout converges across app instances", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -2277,6 +2365,115 @@ describe("backend workspace and health routes", () => {
     expect(retryResponse.status).toBe(201);
     expect(retryTask.task_id).toBe("TASK-hook-corrupts-retry");
     expect(taskIds).toEqual([]);
+    expect(recordAfterRetry?.status).toBe("completed");
+    expect(recordAfterRetry?.result_ref).toBe(retryTask.task_id);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([retryTask.task_id]);
+  });
+
+  test("POST /api/tasks rejects schema-valid outer snapshot drift before idempotency completion", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:after-snapshot-outer-drift";
+    const taskIds = ["TASK-hook-outer-drift", "TASK-hook-outer-drift-retry"];
+    let shouldDriftSnapshot = true;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:57.607Z"),
+      taskIdFactory: () => taskIds.shift() ?? "TASK-unexpected-outer-drift-extra",
+      taskSnapshotWriteHooks: {
+        afterSnapshotWrite: async ({ taskDirectory }) => {
+          if (!shouldDriftSnapshot) {
+            return;
+          }
+          shouldDriftSnapshot = false;
+          const snapshotPath = join(taskDirectory, "snapshot.json");
+          const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as TaskSnapshot;
+          snapshot.linked_runs = ["RUN-hook-outer-drift"];
+          await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+        }
+      }
+    });
+
+    const failedResponse = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+    const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+    const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
+    const listAfterFailure = await app.request("/api/tasks");
+
+    expect(failedResponse.status).toBe(500);
+    expectCanonicalError(failedBody, "workspace_error");
+    expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+    expect(recordAfterFailure?.status).toBe("failed");
+    expect(recordAfterFailure?.result_ref).toBeUndefined();
+    expect(listAfterFailure.status).toBe(200);
+    expect(await listAfterFailure.json()).toEqual({ tasks: [] });
+    await expectPathMissing(join(workspaceRoot, "tasks", "TASK-hook-outer-drift", "snapshot.json"));
+
+    const retryResponse = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const retryTask = (await retryResponse.json()) as TaskCard;
+    const recordAfterRetry = await idempotencyService.getRecord("task", idempotencyKey);
+
+    expect(retryResponse.status).toBe(201);
+    expect(retryTask.task_id).toBe("TASK-hook-outer-drift-retry");
+    expect(recordAfterRetry?.status).toBe("completed");
+    expect(recordAfterRetry?.result_ref).toBe(retryTask.task_id);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([retryTask.task_id]);
+  });
+
+  test("POST /api/tasks quarantines a directory replacement at the snapshot leaf", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:after-snapshot-directory";
+    const taskIds = ["TASK-hook-directory", "TASK-hook-directory-retry"];
+    let shouldReplaceSnapshot = true;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:57.608Z"),
+      taskIdFactory: () => taskIds.shift() ?? "TASK-unexpected-directory-extra",
+      taskSnapshotWriteHooks: {
+        afterSnapshotWrite: async ({ taskDirectory }) => {
+          if (!shouldReplaceSnapshot) {
+            return;
+          }
+          shouldReplaceSnapshot = false;
+          const snapshotPath = join(taskDirectory, "snapshot.json");
+          await rm(snapshotPath);
+          await mkdir(snapshotPath);
+          await writeFile(join(snapshotPath, "nested.txt"), "untrusted replacement");
+        }
+      }
+    });
+
+    const failedResponse = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+    const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+    const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
+    const freshApp = createBackendApi({ workspaceRoot });
+    const freshListResponse = await freshApp.request("/api/tasks");
+
+    expect(failedResponse.status).toBe(500);
+    expectCanonicalError(failedBody, "workspace_error");
+    expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+    expect(recordAfterFailure?.status).toBe("failed");
+    expect(recordAfterFailure?.result_ref).toBeUndefined();
+    await expectPathMissing(join(workspaceRoot, "tasks", "TASK-hook-directory", "snapshot.json"));
+    expect(freshListResponse.status).toBe(200);
+    expect(await freshListResponse.json()).toEqual({ tasks: [] });
+
+    const retryResponse = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const retryTask = (await retryResponse.json()) as TaskCard;
+    const recordAfterRetry = await idempotencyService.getRecord("task", idempotencyKey);
+
+    expect(retryResponse.status).toBe(201);
+    expect(retryTask.task_id).toBe("TASK-hook-directory-retry");
     expect(recordAfterRetry?.status).toBe("completed");
     expect(recordAfterRetry?.result_ref).toBe(retryTask.task_id);
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([retryTask.task_id]);
