@@ -15,6 +15,8 @@ import {
   isSafeTaskId,
   sha256Hex,
   type CreateTaskInput,
+  type InvalidCompletedIdempotencyRecordLookup,
+  type IdempotencyRecordServiceOptions,
   type IdempotencyRecordService,
   type TaskCard,
   type TaskCardService,
@@ -86,6 +88,10 @@ export type WorkspaceSnapshotReadableProbe = (
   input: WorkspaceSnapshotReadableProbeInput
 ) => Promise<boolean> | boolean;
 
+export type IdempotencyRecordServiceFactory = (
+  options: IdempotencyRecordServiceOptions
+) => IdempotencyRecordService;
+
 export interface BackendApiOptions {
   workspaceRoot?: string;
   version?: string;
@@ -94,6 +100,7 @@ export interface BackendApiOptions {
   taskIdFactory?: () => string;
   taskSnapshotReadHooks?: TaskSnapshotReadHooks;
   taskSnapshotWriteHooks?: TaskSnapshotWriteHooks;
+  idempotencyServiceFactory?: IdempotencyRecordServiceFactory;
   requestIdFactory?: () => string;
   requestLogSink?: ApiRequestLogSink;
   writableProbe?: WorkspaceWritableProbe;
@@ -154,7 +161,7 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
     snapshotReadHooks: options.taskSnapshotReadHooks,
     snapshotWriteHooks: options.taskSnapshotWriteHooks
   });
-  const idempotencyService = createIdempotencyRecordService({
+  const idempotencyService = (options.idempotencyServiceFactory ?? createIdempotencyRecordService)({
     workspaceRoot,
     now: options.now
   });
@@ -339,6 +346,7 @@ interface CreateIdempotentTaskCardInput {
 
 interface InFlightIdempotentTaskCreateEntry {
   done: Promise<void>;
+  requestDigest: string;
 }
 
 interface Deferred<T> {
@@ -355,6 +363,9 @@ async function createIdempotentTaskCard(
   const inFlightIdentity = idempotentTaskCreateInFlightIdentity(input);
   const existingEntry = inFlightIdempotentTaskCreates.get(inFlightIdentity);
   if (existingEntry) {
+    if (existingEntry.requestDigest !== input.requestDigest) {
+      throw createIdempotencyMismatchError();
+    }
     return await waitForInFlightIdempotentTaskCreate(input, existingEntry);
   }
 
@@ -373,7 +384,10 @@ async function createIdempotentTaskCard(
 
   const owner = createDeferred<void>();
   owner.promise.catch(() => undefined);
-  const entry: InFlightIdempotentTaskCreateEntry = { done: owner.promise };
+  const entry: InFlightIdempotentTaskCreateEntry = {
+    done: owner.promise,
+    requestDigest: input.requestDigest
+  };
   inFlightIdempotentTaskCreates.set(inFlightIdentity, entry);
 
   try {
@@ -402,6 +416,9 @@ async function createOwnedIdempotentTaskCard(
   if (begin.status === "mismatch") {
     throw createIdempotencyMismatchError();
   }
+  if (begin.status === "invalid_completed") {
+    return await invalidateInvalidCompletedTaskAuthority(input, begin);
+  }
   if (begin.status === "completed") {
     return {
       task: await getIdempotentTaskResult(
@@ -420,6 +437,14 @@ async function createOwnedIdempotentTaskCard(
   try {
     task = await input.taskService.createTask(input.input);
   } catch (error) {
+    const authority = await reconcileCompletedTaskAuthorityIfPresent(input);
+    if (authority.status === "valid") {
+      return { task: authority.task, created: false };
+    }
+    if (authority.status === "repairable") {
+      throw authority.error;
+    }
+
     await input.idempotencyService.recoverFailedRecordAfterRollback({
       scope: "task",
       key: input.idempotencyKey,
@@ -438,52 +463,55 @@ async function createOwnedIdempotentTaskCard(
     if (replayBeforeCompletion.status === "mismatch") {
       throw createIdempotencyMismatchError();
     }
-    if (replayBeforeCompletion.status !== "completed") {
-      await assertTaskSnapshotBindsRequest(input.taskService, task, input.requestDigest);
+    if (replayBeforeCompletion.status === "invalid_completed") {
+      return await invalidateInvalidCompletedTaskAuthority(input, replayBeforeCompletion);
     }
-    completedRecord = await input.idempotencyService.completeRecord({
-      scope: "task",
-      key: input.idempotencyKey,
-      requestDigest: input.requestDigest,
-      resultRef: task.task_id
-    });
+    if (replayBeforeCompletion.status === "completed") {
+      completedRecord = replayBeforeCompletion.record;
+    } else {
+      await assertTaskSnapshotBindsRequest(input.taskService, task, input.requestDigest);
+      completedRecord = await input.idempotencyService.completeRecord({
+        scope: "task",
+        key: input.idempotencyKey,
+        requestDigest: input.requestDigest,
+        resultRef: task.task_id
+      });
+    }
   } catch (error) {
-    let rollbackError: unknown;
+    let authority: CompletedTaskAuthorityReconciliation = { status: "absent" };
+    let authorityError: unknown;
+    try {
+      authority = await reconcileCompletedTaskAuthorityIfPresent(input);
+    } catch (reconciliationError) {
+      authorityError = reconciliationError;
+    }
+    if (
+      authorityError === undefined &&
+      authority.status === "valid" &&
+      authority.resultRef === task.task_id
+    ) {
+      return { task: authority.task, created: true };
+    }
+
     try {
       await input.taskService.rollbackTaskForIdempotency(task.task_id);
-    } catch (caughtError) {
-      rollbackError = caughtError;
-    }
-
-    if (rollbackError) {
-      const remainingSnapshot = await inspectRemainingRollbackTaskSnapshot(
-        input.taskService,
-        task
-      );
-      if (remainingSnapshot.status === "matched") {
-        await input.idempotencyService.recoverCompletedRecordAfterRollbackFailure({
-          scope: "task",
-          key: input.idempotencyKey,
-          requestDigest: input.requestDigest,
-          resultRef: task.task_id
-        });
-        return { task: remainingSnapshot.task, created: true };
-      }
-      if (remainingSnapshot.status === "missing") {
-        await input.idempotencyService.recoverFailedRecordAfterRollback({
-          scope: "task",
-          key: input.idempotencyKey,
-          requestDigest: input.requestDigest
-        });
-        throw error;
-      }
-
+    } catch (rollbackError) {
       await input.idempotencyService.quarantineRecordAfterUnsafeRollback({
         scope: "task",
         key: input.idempotencyKey,
         requestDigest: input.requestDigest
       });
       throw rollbackError;
+    }
+
+    if (authorityError !== undefined) {
+      throw authorityError;
+    }
+    if (authority.status === "repairable") {
+      throw authority.error;
+    }
+    if (authority.status === "valid") {
+      return { task: authority.task, created: false };
     }
 
     await input.idempotencyService.recoverFailedRecordAfterRollback({
@@ -498,28 +526,50 @@ async function createOwnedIdempotentTaskCard(
     throw idempotencyResultBindingError();
   }
   if (completedRecord.result_ref !== task.task_id) {
-    let convergenceRollbackError: unknown;
+    let authority: ObservedCompletedTaskAuthorityReconciliation;
     try {
-      await input.taskService.rollbackTaskForIdempotency(task.task_id);
-    } catch (caughtError) {
-      convergenceRollbackError = caughtError;
-    }
-    if (convergenceRollbackError) {
-      const remainingSnapshot = await inspectRemainingRollbackTaskSnapshot(
-        input.taskService,
-        task
+      authority = await reconcileObservedCompletedTaskAuthority(
+        input,
+        completedRecord.result_ref
       );
-      if (remainingSnapshot.status !== "missing") {
-        throw convergenceRollbackError;
+    } catch (error) {
+      try {
+        await input.taskService.rollbackTaskForIdempotency(task.task_id);
+      } catch (rollbackError) {
+        await input.idempotencyService.quarantineRecordAfterUnsafeRollback({
+          scope: "task",
+          key: input.idempotencyKey,
+          requestDigest: input.requestDigest
+        });
+        throw rollbackError;
       }
+      throw error;
     }
 
-    const authoritativeTask = await getIdempotentTaskResult(
-      input.taskService,
-      completedRecord.result_ref,
-      input.requestDigest
-    );
-    return { task: authoritativeTask, created: false };
+    try {
+      await input.taskService.rollbackTaskForIdempotency(task.task_id);
+    } catch (rollbackError) {
+      await input.idempotencyService.quarantineRecordAfterUnsafeRollback({
+        scope: "task",
+        key: input.idempotencyKey,
+        requestDigest: input.requestDigest
+      });
+      throw rollbackError;
+    }
+
+    if (authority.status === "repairable") {
+      throw authority.error;
+    }
+    if (authority.status === "invalid") {
+      await input.idempotencyService.recoverFailedRecordAfterRollback({
+        scope: "task",
+        key: input.idempotencyKey,
+        requestDigest: input.requestDigest
+      });
+      throw idempotencyResultBindingError();
+    }
+
+    return { task: authority.task, created: false };
   }
 
   return { task, created: true };
@@ -545,8 +595,7 @@ function idempotentTaskCreateInFlightIdentity(input: CreateIdempotentTaskCardInp
     canonicalJson({
       workspace: sha256Hex(resolve(input.workspaceRoot)),
       scope: "task",
-      key: sha256Hex(input.idempotencyKey),
-      request_digest: input.requestDigest
+      key: sha256Hex(input.idempotencyKey)
     })
   );
 }
@@ -580,6 +629,9 @@ async function waitForInFlightIdempotentTaskCreate(
   if (replay.status === "mismatch") {
     throw createIdempotencyMismatchError();
   }
+  if (replay.status === "invalid_completed") {
+    return await invalidateInvalidCompletedTaskAuthority(input, replay);
+  }
   if (replay.status !== "completed") {
     throw idempotencyInFlightCompletionError();
   }
@@ -608,29 +660,77 @@ async function assertTaskSnapshotBindsRequest(
   }
 }
 
-type RemainingRollbackTaskSnapshot =
-  | { status: "matched"; task: TaskCard }
-  | { status: "missing" }
-  | { status: "unsafe" };
+type ObservedCompletedTaskAuthorityReconciliation =
+  | { status: "valid"; task: TaskCard; resultRef: string }
+  | { status: "repairable"; error: TaskServiceError; resultRef: string }
+  | { status: "invalid" };
 
-async function inspectRemainingRollbackTaskSnapshot(
-  taskService: TaskCardService,
-  task: TaskCard
-): Promise<RemainingRollbackTaskSnapshot> {
-  try {
-    const remainingTask = await taskService.getTaskFromSnapshot(task.task_id);
-    if (JSON.stringify(remainingTask) === JSON.stringify(task)) {
-      return { status: "matched", task: remainingTask };
-    }
+type CompletedTaskAuthorityReconciliation =
+  | ObservedCompletedTaskAuthorityReconciliation
+  | { status: "absent" };
 
-    return { status: "unsafe" };
-  } catch (error) {
-    if (error instanceof TaskServiceError && error.code === "task_not_found") {
-      return { status: "missing" };
-    }
-
-    return { status: "unsafe" };
+async function reconcileCompletedTaskAuthorityIfPresent(
+  input: CreateIdempotentTaskCardInput
+): Promise<CompletedTaskAuthorityReconciliation> {
+  const replay = await input.idempotencyService.lookupReplay({
+    scope: "task",
+    key: input.idempotencyKey,
+    requestDigest: input.requestDigest
+  });
+  if (replay.status === "mismatch") {
+    throw createIdempotencyMismatchError();
   }
+  if (replay.status === "invalid_completed") {
+    return await invalidateInvalidCompletedTaskAuthority(input, replay);
+  }
+  if (replay.status !== "completed") {
+    return { status: "absent" };
+  }
+
+  return await reconcileObservedCompletedTaskAuthority(input, replay.record.result_ref);
+}
+
+async function reconcileObservedCompletedTaskAuthority(
+  input: CreateIdempotentTaskCardInput,
+  resultRef: string
+): Promise<ObservedCompletedTaskAuthorityReconciliation> {
+  try {
+    return {
+      status: "valid",
+      task: await getIdempotentTaskResult(input.taskService, resultRef, input.requestDigest),
+      resultRef
+    };
+  } catch (error) {
+    if (
+      isSafeTaskId(resultRef) &&
+      error instanceof TaskServiceError &&
+      error.code === "task_snapshot_missing_card"
+    ) {
+      return { status: "repairable", error, resultRef };
+    }
+
+    await input.idempotencyService.invalidateCompletedRecord({
+      scope: "task",
+      key: input.idempotencyKey,
+      requestDigest: input.requestDigest,
+      resultRef
+    });
+    return { status: "invalid" };
+  }
+}
+
+async function invalidateInvalidCompletedTaskAuthority(
+  input: CreateIdempotentTaskCardInput,
+  authority: InvalidCompletedIdempotencyRecordLookup
+): Promise<never> {
+  const error = invalidCompletedTaskAuthorityError(authority.reason);
+  await input.idempotencyService.invalidateCompletedRecord({
+    scope: "task",
+    key: input.idempotencyKey,
+    requestDigest: input.requestDigest,
+    resultRef: authority.observedResultRef
+  });
+  throw error;
 }
 
 async function waitForIdempotentTaskCompletion(
@@ -647,6 +747,9 @@ async function waitForIdempotentTaskCompletion(
 
     if (replay.status === "mismatch") {
       throw createIdempotencyMismatchError();
+    }
+    if (replay.status === "invalid_completed") {
+      return await invalidateInvalidCompletedTaskAuthority(input, replay);
     }
     if (replay.status === "completed") {
       return {
@@ -822,6 +925,24 @@ function idempotencyResultBindingError(): TaskServiceError {
     evidenceRefs: ["workspace/tasks/_idempotency/task", "idempotency.result_ref"],
     retryable: false,
     recommendedNextActions: ["Inspect and repair the idempotency record before retrying."]
+  });
+}
+
+function invalidCompletedTaskAuthorityError(
+  reason: InvalidCompletedIdempotencyRecordLookup["reason"]
+): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 500,
+    category: "workspace_error",
+    message:
+      reason === "missing_result_ref"
+        ? "Completed idempotency record is missing result_ref."
+        : "Completed task idempotency result_ref is not a safe TaskCard id.",
+    userMessage: "The completed idempotency result cannot be used safely.",
+    evidenceRefs: ["workspace/tasks/_idempotency/task", "idempotency.result_ref"],
+    retryable: false,
+    recommendedNextActions: ["Retry after the invalid completed authority is quarantined."]
   });
 }
 

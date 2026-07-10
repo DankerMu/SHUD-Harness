@@ -58,20 +58,38 @@ export interface IdempotencyRecordLookupInput {
   requestDigest: string;
 }
 
+export type InvalidCompletedIdempotencyRecordReason =
+  | "missing_result_ref"
+  | "unsafe_result_ref";
+
+export interface InvalidCompletedIdempotencyRecordLookup {
+  status: "invalid_completed";
+  reason: InvalidCompletedIdempotencyRecordReason;
+  record: IdempotencyRecord;
+  observedResultRef: string | undefined;
+}
+
 export type IdempotencyReplayLookup =
   | { status: "missing" }
   | { status: "mismatch"; record: IdempotencyRecord }
   | { status: "incomplete"; record: IdempotencyRecord }
-  | { status: "completed"; record: IdempotencyRecord & { result_ref: string } };
+  | { status: "completed"; record: IdempotencyRecord & { result_ref: string } }
+  | InvalidCompletedIdempotencyRecordLookup;
 
 export type BeginIdempotencyRecordResult =
   | { status: "acquired"; record: IdempotencyRecord }
   | { status: "mismatch"; record: IdempotencyRecord }
   | { status: "incomplete"; record: IdempotencyRecord }
-  | { status: "completed"; record: IdempotencyRecord & { result_ref: string } };
+  | { status: "completed"; record: IdempotencyRecord & { result_ref: string } }
+  | InvalidCompletedIdempotencyRecordLookup;
 
 export interface CompleteIdempotencyRecordInput extends IdempotencyRecordLookupInput {
   resultRef: string;
+}
+
+export interface InvalidateCompletedIdempotencyRecordInput
+  extends IdempotencyRecordLookupInput {
+  resultRef: string | undefined;
 }
 
 export type FailIdempotencyRecordInput = IdempotencyRecordLookupInput;
@@ -82,6 +100,9 @@ export interface IdempotencyRecordService {
   beginRecord: (input: IdempotencyRecordLookupInput) => Promise<BeginIdempotencyRecordResult>;
   lookupReplay: (input: IdempotencyRecordLookupInput) => Promise<IdempotencyReplayLookup>;
   completeRecord: (input: CompleteIdempotencyRecordInput) => Promise<IdempotencyRecord>;
+  invalidateCompletedRecord: (
+    input: InvalidateCompletedIdempotencyRecordInput
+  ) => Promise<IdempotencyRecord>;
   failRecord: (input: FailIdempotencyRecordInput) => Promise<IdempotencyRecord>;
   recoverFailedRecordAfterRollback: (
     input: FailIdempotencyRecordInput
@@ -187,6 +208,9 @@ export function createIdempotencyRecordService(
     }
     if (current.status === "completed") {
       return current.record;
+    }
+    if (current.status === "invalid_completed") {
+      throw invalidCompletedRecordAuthorityError(current.reason, evidenceRef);
     }
     if (current.record.status === "failed") {
       return current.record;
@@ -317,7 +341,7 @@ export function createIdempotencyRecordService(
             allowCompletedWrite: false,
             allowExistingMutation: true
           });
-          return beginResultFromStoredRecord(stored, input.requestDigest, parsedScope, input.key);
+          return beginResultFromStoredRecord(stored, input.requestDigest, parsedScope);
         } finally {
           await guard.release();
         }
@@ -338,13 +362,21 @@ export function createIdempotencyRecordService(
       }
       if (record.status === "completed") {
         if (!record.result_ref) {
-          throw completedRecordMissingResultRefError(parsedScope, input.key);
+          return {
+            status: "invalid_completed",
+            reason: "missing_result_ref",
+            record,
+            observedResultRef: undefined
+          };
         }
-        assertTaskScopeCompletedResultRef(
-          record as IdempotencyRecord & { result_ref: string },
-          parsedScope,
-          input.key
-        );
+        if (parsedScope === "task" && !isSafeTaskId(record.result_ref)) {
+          return {
+            status: "invalid_completed",
+            reason: "unsafe_result_ref",
+            record,
+            observedResultRef: record.result_ref
+          };
+        }
 
         return { status: "completed", record: record as IdempotencyRecord & { result_ref: string } };
       }
@@ -371,6 +403,9 @@ export function createIdempotencyRecordService(
       if (observed.status === "completed") {
         return observed.record;
       }
+      if (observed.status === "invalid_completed") {
+        throw invalidCompletedRecordAuthorityError(observed.reason, evidenceRef);
+      }
 
       const guard = await acquireIdempotencyTransitionGuard(
         workspaceRoot,
@@ -383,6 +418,9 @@ export function createIdempotencyRecordService(
         const current = await service.lookupReplay({ ...input, scope: parsedScope });
         if (current.status === "completed") {
           return current.record;
+        }
+        if (current.status === "invalid_completed") {
+          throw invalidCompletedRecordAuthorityError(current.reason, evidenceRef);
         }
         throw transitionGuardBusyError(parsedScope, input.key, "complete");
       }
@@ -401,6 +439,9 @@ export function createIdempotencyRecordService(
         }
         if (existing.status === "completed") {
           return existing.record;
+        }
+        if (existing.status === "invalid_completed") {
+          throw invalidCompletedRecordAuthorityError(existing.reason, evidenceRef);
         }
         if (existing.record.status !== "started") {
           throw invalidTransitionStateError(
@@ -427,6 +468,61 @@ export function createIdempotencyRecordService(
       }
     },
 
+    async invalidateCompletedRecord(
+      input: InvalidateCompletedIdempotencyRecordInput
+    ): Promise<IdempotencyRecord> {
+      const parsedScope = assertIdempotencyScope(input.scope);
+      assertNonblankIdempotencyKey(input.key);
+      const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
+      const guard = await acquireIdempotencyTransitionGuard(
+        workspaceRoot,
+        parsedScope,
+        input.key,
+        evidenceRef,
+        transitionGuardHooks
+      );
+      if (guard.status === "busy") {
+        throw transitionGuardBusyError(parsedScope, input.key, "fail");
+      }
+
+      try {
+        const existing = await service.getRecord(parsedScope, input.key);
+        if (!existing) {
+          throw missingTransitionRecordError(
+            parsedScope,
+            input.key,
+            "Idempotency record was missing when invalidating the completed result."
+          );
+        }
+        if (existing.request_digest !== input.requestDigest) {
+          throw createIdempotencyMismatchError();
+        }
+        if (existing.status !== "completed") {
+          throw completedRecordInvalidationStateError(evidenceRef);
+        }
+        if (existing.result_ref !== input.resultRef) {
+          throw completedRecordInvalidationIdentityError(evidenceRef);
+        }
+
+        const failedRecord: IdempotencyRecord = { ...existing };
+        delete failedRecord.result_ref;
+        return await writeJsonRecord(
+          workspaceRoot,
+          idempotencyRecordDirectorySegments(parsedScope),
+          idempotencyRecordFileName(input.key),
+          {
+            ...failedRecord,
+            status: "failed",
+            updated_at: now().toISOString()
+          },
+          evidenceRef,
+          IdempotencyRecordSchema
+        );
+      } finally {
+        await guard.release();
+      }
+    },
+
     async failRecord(input: FailIdempotencyRecordInput): Promise<IdempotencyRecord> {
       const parsedScope = assertIdempotencyScope(input.scope);
       assertNonblankIdempotencyKey(input.key);
@@ -441,6 +537,9 @@ export function createIdempotencyRecordService(
           input.key,
           "Idempotency record was missing when marking the claim failed."
         );
+      }
+      if (observed.status === "invalid_completed") {
+        throw invalidCompletedRecordAuthorityError(observed.reason, evidenceRef);
       }
       if (observed.status === "completed" || observed.record.status === "failed") {
         return observed.record;
@@ -461,6 +560,9 @@ export function createIdempotencyRecordService(
         ) {
           return current.record;
         }
+        if (current.status === "invalid_completed") {
+          throw invalidCompletedRecordAuthorityError(current.reason, evidenceRef);
+        }
         throw transitionGuardBusyError(parsedScope, input.key, "fail");
       }
 
@@ -475,6 +577,9 @@ export function createIdempotencyRecordService(
             input.key,
             "Idempotency record was missing when marking the claim failed."
           );
+        }
+        if (existing.status === "invalid_completed") {
+          throw invalidCompletedRecordAuthorityError(existing.reason, evidenceRef);
         }
         if (existing.status === "completed" || existing.record.status === "failed") {
           return existing.record;
@@ -525,6 +630,9 @@ export function createIdempotencyRecordService(
       if (current.status === "completed") {
         return current.record;
       }
+      if (current.status === "invalid_completed") {
+        throw invalidCompletedRecordAuthorityError(current.reason, evidenceRef);
+      }
       if (current.record.request_digest !== input.requestDigest) {
         throw createIdempotencyMismatchError();
       }
@@ -559,6 +667,12 @@ export function createIdempotencyRecordService(
         throw createIdempotencyMismatchError();
       }
       if (current.status === "completed") {
+        return current.record;
+      }
+      if (current.status === "invalid_completed") {
+        throw invalidCompletedRecordAuthorityError(current.reason, evidenceRef);
+      }
+      if (current.record.status === "failed") {
         return current.record;
       }
       if (current.record.request_digest !== input.requestDigest) {
@@ -1102,18 +1216,6 @@ function assertTaskScopeInputResultRef(
   throw unsafeTaskResultRefError(idempotencyRecordEvidenceRef(scope, key));
 }
 
-function assertTaskScopeCompletedResultRef(
-  record: IdempotencyRecord & { result_ref: string },
-  scope: IdempotencyScope,
-  key: string
-): void {
-  if (scope !== "task" || isSafeTaskId(record.result_ref)) {
-    return;
-  }
-
-  throw unsafeTaskResultRefError(idempotencyRecordEvidenceRef(scope, key));
-}
-
 function unsafeTaskResultRefError(evidenceRef: string): TaskServiceError {
   return new TaskServiceError({
     code: "record_malformed",
@@ -1124,6 +1226,25 @@ function unsafeTaskResultRefError(evidenceRef: string): TaskServiceError {
     evidenceRefs: [evidenceRef, "idempotency.result_ref"],
     retryable: false,
     recommendedNextActions: ["Inspect and repair the idempotency result reference before retrying."]
+  });
+}
+
+function invalidCompletedRecordAuthorityError(
+  reason: InvalidCompletedIdempotencyRecordReason,
+  evidenceRef: string
+): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 500,
+    category: "workspace_error",
+    message:
+      reason === "missing_result_ref"
+        ? "Completed idempotency record is missing result_ref."
+        : "Completed task idempotency result_ref is not a safe TaskCard id.",
+    userMessage: "The completed idempotency result cannot be used safely.",
+    evidenceRefs: [evidenceRef, "idempotency.result_ref"],
+    retryable: false,
+    recommendedNextActions: ["Retry after the invalid completed authority is quarantined."]
   });
 }
 
@@ -1150,6 +1271,32 @@ function idempotencyRecordStoreExistingError(evidenceRef: string): TaskServiceEr
     evidenceRefs: [evidenceRef, "idempotency.status"],
     retryable: false,
     recommendedNextActions: ["Use beginRecord, completeRecord, or failRecord for state transitions."]
+  });
+}
+
+function completedRecordInvalidationStateError(evidenceRef: string): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 409,
+    category: "workspace_error",
+    message: "Only the exact observed completed idempotency record can be invalidated.",
+    userMessage: "The idempotency result changed before it could be invalidated safely.",
+    evidenceRefs: [evidenceRef, "idempotency.status"],
+    retryable: true,
+    recommendedNextActions: ["Retry after inspecting the current idempotency record state."]
+  });
+}
+
+function completedRecordInvalidationIdentityError(evidenceRef: string): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 409,
+    category: "workspace_error",
+    message: "Completed idempotency result changed before exact invalidation.",
+    userMessage: "The idempotency result changed before it could be invalidated safely.",
+    evidenceRefs: [evidenceRef, "idempotency.result_ref"],
+    retryable: true,
+    recommendedNextActions: ["Retry after inspecting the current idempotency result."]
   });
 }
 
@@ -1303,6 +1450,9 @@ function beginResultFromReplayLookup(
   if (lookup.status === "completed") {
     return { status: "completed", record: lookup.record };
   }
+  if (lookup.status === "invalid_completed") {
+    return lookup;
+  }
 
   return { status: "incomplete", record: lookup.record };
 }
@@ -1310,21 +1460,28 @@ function beginResultFromReplayLookup(
 function beginResultFromStoredRecord(
   record: IdempotencyRecord,
   requestDigest: string,
-  scope: IdempotencyScope,
-  key: string
+  scope: IdempotencyScope
 ): BeginIdempotencyRecordResult {
   if (record.request_digest !== requestDigest) {
     return { status: "mismatch", record };
   }
   if (record.status === "completed") {
     if (!record.result_ref) {
-      throw completedRecordMissingResultRefError(scope, key);
+      return {
+        status: "invalid_completed",
+        reason: "missing_result_ref",
+        record,
+        observedResultRef: undefined
+      };
     }
-    assertTaskScopeCompletedResultRef(
-      record as IdempotencyRecord & { result_ref: string },
-      scope,
-      key
-    );
+    if (scope === "task" && !isSafeTaskId(record.result_ref)) {
+      return {
+        status: "invalid_completed",
+        reason: "unsafe_result_ref",
+        record,
+        observedResultRef: record.result_ref
+      };
+    }
 
     return {
       status: "completed",

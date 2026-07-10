@@ -807,6 +807,59 @@ describe("backend workspace and health routes", () => {
     expect(await detailResponse.json()).toEqual(createdTask);
   });
 
+  test("fresh app list and detail reject unknown top-level and task_card snapshot fields", async () => {
+    for (const location of ["top_level", "task_card"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = `TASK-fresh-unknown-${location.replace("_", "-")}`;
+      const creatingApp = createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:10.000Z"),
+        taskIdFactory: () => taskId
+      });
+      const createResponse = await postTask(creatingApp, validTaskCreateBody());
+      const createdTask = (await createResponse.json()) as TaskCard;
+      const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+      const canonicalSnapshotText = await readFile(snapshotPath, "utf8");
+      const poisonedSnapshot = JSON.parse(canonicalSnapshotText) as Record<string, unknown>;
+      const unknownContent = `private-fresh-unknown-${location}`;
+      if (location === "top_level") {
+        poisonedSnapshot.unknown_top_level = unknownContent;
+      } else {
+        (poisonedSnapshot.task_card as Record<string, unknown>).unknown_nested = unknownContent;
+      }
+      await writeFile(snapshotPath, `${JSON.stringify(poisonedSnapshot)}\n`);
+      const freshApp = createBackendApi({ workspaceRoot });
+
+      const listResponse = await freshApp.request("/api/tasks");
+      const listBody = (await listResponse.json()) as ApiErrorResponse;
+      const detailResponse = await freshApp.request(`/api/tasks/${taskId}`);
+      const detailBody = (await detailResponse.json()) as ApiErrorResponse;
+
+      expect(listResponse.status).toBe(500);
+      expect(detailResponse.status).toBe(500);
+      expectCanonicalError(listBody, "workspace_error");
+      expectCanonicalError(detailBody, "workspace_error");
+      expect(listBody.error.message).toBe(
+        "Task snapshot contains fields outside the canonical durable shape."
+      );
+      expect(detailBody.error.message).toBe(listBody.error.message);
+      expect(JSON.stringify(listBody)).not.toContain(unknownContent);
+      expect(JSON.stringify(detailBody)).not.toContain(unknownContent);
+      expectNoAbsoluteWorkspacePath(listBody, tempRoot, workspaceRoot);
+      expectNoAbsoluteWorkspacePath(detailBody, tempRoot, workspaceRoot);
+
+      await writeFile(snapshotPath, canonicalSnapshotText);
+      const repairedListResponse = await freshApp.request("/api/tasks");
+      const repairedDetailResponse = await freshApp.request(`/api/tasks/${taskId}`);
+
+      expect(repairedListResponse.status).toBe(200);
+      expect(await repairedListResponse.json()).toEqual({ tasks: [createdTask] });
+      expect(repairedDetailResponse.status).toBe(200);
+      expect(await repairedDetailResponse.json()).toEqual(createdTask);
+    }
+  });
+
   test("POST /api/tasks replays same Idempotency-Key and body without duplicate snapshots", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -843,6 +896,82 @@ describe("backend workspace and health routes", () => {
     expect((await readdir(join(workspaceRoot, "tasks", "_idempotency", "task")))).toHaveLength(1);
     expect(idempotencyRecord?.status).toBe("completed");
     expect(idempotencyRecord?.result_ref).toBe(firstTask.task_id);
+  });
+
+  test("completed replay rejects unknown top-level and task_card snapshot fields until repaired", async () => {
+    for (const location of ["top_level", "task_card"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskBody = validTaskCreateBody();
+      const taskId = `TASK-replay-unknown-${location.replace("_", "-")}`;
+      const idempotencyKey = `task:create:replay-unknown-${location}`;
+      const requestDigest = sha256Hex(
+        canonicalJson({
+          ...taskBody,
+          created_by: taskBody.created_by ?? DEFAULT_TASK_CREATED_BY
+        })
+      );
+      const task = await createTaskCardService({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:30.250Z"),
+        taskIdFactory: () => taskId
+      }).createTask(taskBody);
+      const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+      await idempotencyService.beginRecord({
+        scope: "task",
+        key: idempotencyKey,
+        requestDigest
+      });
+      await idempotencyService.completeRecord({
+        scope: "task",
+        key: idempotencyKey,
+        requestDigest,
+        resultRef: taskId
+      });
+      const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+      const canonicalSnapshotText = await readFile(snapshotPath, "utf8");
+      const poisonedSnapshot = JSON.parse(canonicalSnapshotText) as Record<string, unknown>;
+      const unknownContent = `private-replay-unknown-${location}`;
+      if (location === "top_level") {
+        poisonedSnapshot.unknown_top_level = unknownContent;
+      } else {
+        (poisonedSnapshot.task_card as Record<string, unknown>).unknown_nested = unknownContent;
+      }
+      await writeFile(snapshotPath, `${JSON.stringify(poisonedSnapshot)}\n`);
+      let taskIdFactoryCalls = 0;
+      const replayApp = createBackendApi({
+        workspaceRoot,
+        taskIdFactory: () => {
+          taskIdFactoryCalls += 1;
+          return "TASK-replay-unknown-duplicate";
+        }
+      });
+
+      const failedResponse = await postTask(replayApp, taskBody, {
+        "Idempotency-Key": idempotencyKey
+      });
+      const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+
+      expect(failedResponse.status).toBe(500);
+      expectCanonicalError(failedBody, "workspace_error");
+      expect(failedBody.error.message).toBe(
+        "Completed idempotency result is not bound to the task create request."
+      );
+      expect(JSON.stringify(failedBody)).not.toContain(unknownContent);
+      expect(JSON.stringify(failedBody)).not.toContain(idempotencyKey);
+      expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+      expect(taskIdFactoryCalls).toBe(0);
+
+      await writeFile(snapshotPath, canonicalSnapshotText);
+      const repairedReplayResponse = await postTask(replayApp, taskBody, {
+        "Idempotency-Key": idempotencyKey
+      });
+
+      expect(repairedReplayResponse.status).toBe(200);
+      expect(await repairedReplayResponse.json()).toEqual(task);
+      expect(taskIdFactoryCalls).toBe(0);
+      expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([taskId]);
+    }
   });
 
   test("POST /api/tasks completed idempotency replay resolves a stale task cache from durable snapshot", async () => {
@@ -993,6 +1122,172 @@ describe("backend workspace and health routes", () => {
     expect(idempotencyRecord?.result_ref).toBe(authoritativeTask.task_id);
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([authoritativeTask.task_id]);
     await expectPathMissing(join(workspaceRoot, "tasks", "TASK-local-unbound", "snapshot.json"));
+  });
+
+  test("POST /api/tasks preserves repairable missing-card authority after local rollback", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:repairable-missing-card-convergence";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = sha256Hex(
+      canonicalJson({
+        ...taskBody,
+        created_by: taskBody.created_by ?? DEFAULT_TASK_CREATED_BY
+      })
+    );
+    const authoritativeTask = await createTaskCardService({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:31.410Z"),
+      taskIdFactory: () => "TASK-repairable-missing-card-authority"
+    }).createTask(taskBody);
+    const authoritativeSnapshotPath = join(
+      workspaceRoot,
+      "tasks",
+      authoritativeTask.task_id,
+      "snapshot.json"
+    );
+    const canonicalAuthoritativeSnapshotText = await readFile(
+      authoritativeSnapshotPath,
+      "utf8"
+    );
+    let hookCompletions = 0;
+    let taskIdFactoryCalls = 0;
+    const localTaskId = "TASK-repairable-missing-card-local";
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:31.415Z"),
+      taskIdFactory: () => {
+        taskIdFactoryCalls += 1;
+        return localTaskId;
+      },
+      taskSnapshotWriteHooks: {
+        afterSnapshotWrite: async () => {
+          if (hookCompletions > 0) {
+            return;
+          }
+          hookCompletions += 1;
+          await createIdempotencyRecordService({ workspaceRoot }).completeRecord({
+            scope: "task",
+            key: idempotencyKey,
+            requestDigest,
+            resultRef: authoritativeTask.task_id
+          });
+        }
+      }
+    });
+    const primedListResponse = await app.request("/api/tasks");
+    const snapshotWithoutTaskCard = JSON.parse(
+      canonicalAuthoritativeSnapshotText
+    ) as Record<string, unknown>;
+    delete snapshotWithoutTaskCard.task_card;
+    await writeFile(authoritativeSnapshotPath, `${JSON.stringify(snapshotWithoutTaskCard)}\n`);
+
+    const failedResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+    const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+    const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
+    const localDetailResponse = await app.request(`/api/tasks/${localTaskId}`);
+
+    expect(primedListResponse.status).toBe(200);
+    expect(await primedListResponse.json()).toEqual({ tasks: [authoritativeTask] });
+    expect(failedResponse.status).toBe(500);
+    expectCanonicalError(failedBody, "workspace_error");
+    expect(failedBody.error.message).toBe(
+      "Task snapshot does not include the M1 task_card recovery payload."
+    );
+    expect(failedBody.error.evidence_refs).toEqual([
+      `workspace/tasks/${authoritativeTask.task_id}/snapshot.json`
+    ]);
+    expect(JSON.stringify(failedBody)).not.toContain(idempotencyKey);
+    expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+    expect(recordAfterFailure?.status).toBe("completed");
+    expect(recordAfterFailure?.result_ref).toBe(authoritativeTask.task_id);
+    expect(hookCompletions).toBe(1);
+    expect(taskIdFactoryCalls).toBe(1);
+    expect(localDetailResponse.status).toBe(404);
+    await expectPathMissing(join(workspaceRoot, "tasks", localTaskId, "snapshot.json"));
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([authoritativeTask.task_id]);
+
+    await writeFile(authoritativeSnapshotPath, canonicalAuthoritativeSnapshotText);
+    const replayResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const replayTask = (await replayResponse.json()) as TaskCard;
+    const recordAfterRepair = await idempotencyService.getRecord("task", idempotencyKey);
+
+    expect(replayResponse.status).toBe(200);
+    expect(replayTask).toEqual(authoritativeTask);
+    expect(recordAfterRepair).toEqual(recordAfterFailure);
+    expect(taskIdFactoryCalls).toBe(1);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([authoritativeTask.task_id]);
+  });
+
+  test("POST /api/tasks invalidates complete-then-delete authority and permits repaired retry", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:complete-then-delete";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = sha256Hex(
+      canonicalJson({
+        ...taskBody,
+        created_by: taskBody.created_by ?? DEFAULT_TASK_CREATED_BY
+      })
+    );
+    const taskIds = ["TASK-complete-then-delete", "TASK-complete-then-delete-retry"];
+    let shouldPoisonCompletedResult = true;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:31.425Z"),
+      taskIdFactory: () => taskIds.shift() ?? "TASK-unexpected-complete-delete-extra",
+      taskSnapshotWriteHooks: {
+        afterSnapshotWrite: async ({ taskDirectory, taskId }) => {
+          if (!shouldPoisonCompletedResult) {
+            return;
+          }
+          shouldPoisonCompletedResult = false;
+          await createIdempotencyRecordService({ workspaceRoot }).completeRecord({
+            scope: "task",
+            key: idempotencyKey,
+            requestDigest,
+            resultRef: taskId
+          });
+          await rm(join(taskDirectory, "snapshot.json"));
+        }
+      }
+    });
+
+    const failedResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+    const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+    const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
+    const listAfterFailure = await app.request("/api/tasks");
+    const freshListAfterFailure = await createBackendApi({ workspaceRoot }).request("/api/tasks");
+
+    expect(failedResponse.status).toBe(500);
+    expectCanonicalError(failedBody, "workspace_error");
+    expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+    expect(JSON.stringify(failedBody)).not.toContain(idempotencyKey);
+    expect(recordAfterFailure?.status).toBe("failed");
+    expect(recordAfterFailure?.result_ref).toBeUndefined();
+    expect(listAfterFailure.status).toBe(200);
+    expect(await listAfterFailure.json()).toEqual({ tasks: [] });
+    expect(freshListAfterFailure.status).toBe(200);
+    expect(await freshListAfterFailure.json()).toEqual({ tasks: [] });
+
+    const retryResponse = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    const retryTask = (await retryResponse.json()) as TaskCard;
+    const recordAfterRetry = await idempotencyService.getRecord("task", idempotencyKey);
+
+    expect(retryResponse.status).toBe(201);
+    expect(retryTask.task_id).toBe("TASK-complete-then-delete-retry");
+    expect(taskIds).toEqual([]);
+    expect(recordAfterRetry?.status).toBe("completed");
+    expect(recordAfterRetry?.result_ref).toBe(retryTask.task_id);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([retryTask.task_id]);
   });
 
   test("POST /api/tasks rolls back the local task when authoritative convergence is not request-bound", async () => {
@@ -1198,7 +1493,83 @@ describe("backend workspace and health routes", () => {
     });
   });
 
-  test("POST /api/tasks fails closed when completed idempotency result_ref is unsafe", async () => {
+  test("POST /api/tasks invalidates completed idempotency missing result_ref before repaired retry", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:completed-missing-result-ref";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = sha256Hex(
+      canonicalJson({
+        ...taskBody,
+        created_by: taskBody.created_by ?? DEFAULT_TASK_CREATED_BY
+      })
+    );
+    const idempotencyDirectory = join(workspaceRoot, "tasks", "_idempotency", "task");
+    const recordPath = join(idempotencyDirectory, idempotencyRecordFileName(idempotencyKey));
+    let taskIdFactoryCalls = 0;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:31.850Z"),
+      taskIdFactory: () => {
+        taskIdFactoryCalls += 1;
+        return "TASK-repaired-missing-result-ref";
+      }
+    });
+    await mkdir(idempotencyDirectory, { recursive: true });
+    await writeFile(
+      recordPath,
+      `${JSON.stringify({
+        key: idempotencyKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        created_at: "2026-07-07T12:03:31.850Z",
+        updated_at: "2026-07-07T12:03:31.850Z"
+      })}\n`,
+      { flag: "wx" }
+    );
+
+    const failedResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+    const recordAfterFailure = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+
+    expect(failedResponse.status).toBe(500);
+    expectCanonicalError(failedBody, "workspace_error");
+    expect(failedBody.error.message).toBe(
+      "Completed idempotency record is missing result_ref."
+    );
+    expect(JSON.stringify(failedBody)).not.toContain(idempotencyKey);
+    expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+    expect(recordAfterFailure?.status).toBe("failed");
+    expect(recordAfterFailure?.result_ref).toBeUndefined();
+    expect(taskIdFactoryCalls).toBe(0);
+    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+      tasks: []
+    });
+
+    const retryResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const repairedTask = (await retryResponse.json()) as TaskCard;
+    const recordAfterRetry = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+
+    expect(retryResponse.status).toBe(201);
+    expect(repairedTask.task_id).toBe("TASK-repaired-missing-result-ref");
+    expect(taskIdFactoryCalls).toBe(1);
+    expect(recordAfterRetry?.status).toBe("completed");
+    expect(recordAfterRetry?.result_ref).toBe(repairedTask.task_id);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([repairedTask.task_id]);
+  });
+
+  test("POST /api/tasks invalidates completed idempotency with unsafe result_ref before repaired retry", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const idempotencyKey = "task:create:unsafe-result-ref";
@@ -1215,9 +1586,10 @@ describe("backend workspace and health routes", () => {
     let taskIdFactoryCalls = 0;
     const app = createBackendApi({
       workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:31.875Z"),
       taskIdFactory: () => {
         taskIdFactoryCalls += 1;
-        return "TASK-unsafe-result-ref-duplicate";
+        return "TASK-repaired-unsafe-result-ref";
       }
     });
 
@@ -1238,17 +1610,43 @@ describe("backend workspace and health routes", () => {
 
     const response = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
     const body = (await response.json()) as ApiErrorResponse;
+    const recordAfterFailure = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
 
     expect(response.status).toBe(500);
     expectCanonicalError(body, "workspace_error");
     expect(body.error.evidence_refs).toEqual([
-      idempotencyRecordEvidenceRef("task", idempotencyKey),
+      "workspace/tasks/_idempotency/task",
       "idempotency.result_ref"
     ]);
+    expect(JSON.stringify(body)).not.toContain(idempotencyKey);
     expect(JSON.stringify(body)).not.toContain(unsafeResultRef);
     expectNoAbsoluteWorkspacePath(body, tempRoot, workspaceRoot);
     expect(taskIdFactoryCalls).toBe(0);
-    await expectPathMissing(join(workspaceRoot, "tasks", "TASK-unsafe-result-ref-duplicate"));
+    expect(recordAfterFailure?.status).toBe("failed");
+    expect(recordAfterFailure?.result_ref).toBeUndefined();
+    expect(await app.request("/api/tasks").then((listResponse) => listResponse.json())).toEqual({
+      tasks: []
+    });
+    await expectPathMissing(join(workspaceRoot, "tasks", "TASK-repaired-unsafe-result-ref"));
+
+    const retryResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const repairedTask = (await retryResponse.json()) as TaskCard;
+    const recordAfterRetry = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+
+    expect(retryResponse.status).toBe(201);
+    expect(repairedTask.task_id).toBe("TASK-repaired-unsafe-result-ref");
+    expect(taskIdFactoryCalls).toBe(1);
+    expect(recordAfterRetry?.status).toBe("completed");
+    expect(recordAfterRetry?.result_ref).toBe(repairedTask.task_id);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([repairedTask.task_id]);
   });
 
   test("POST /api/tasks fails closed when completed idempotency result_ref points to a foreign task", async () => {
@@ -1706,6 +2104,87 @@ describe("backend workspace and health routes", () => {
     expect(await taskSnapshotIds(workspaceRoot)).toEqual([tasks[0].task_id]);
     expect(idempotencyRecord?.status).toBe("completed");
     expect(idempotencyRecord?.result_ref).toBe(tasks[0].task_id);
+  });
+
+  test("POST /api/tasks rejects a different digest before the first owner publishes its record", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:pre-durable-owner";
+    let releaseFirstBegin!: () => void;
+    const firstBeginRelease = new Promise<void>((resolveRelease) => {
+      releaseFirstBegin = resolveRelease;
+    });
+    let resolveFirstBeginEntered!: () => void;
+    const firstBeginEntered = new Promise<void>((resolveEntered) => {
+      resolveFirstBeginEntered = resolveEntered;
+    });
+    let shouldBlockFirstBegin = true;
+    let taskIdFactoryCalls = 0;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:56.050Z"),
+      taskIdFactory: () => {
+        taskIdFactoryCalls += 1;
+        return `TASK-pre-durable-owner-${taskIdFactoryCalls}`;
+      },
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        return {
+          ...service,
+          beginRecord: async (input) => {
+            if (shouldBlockFirstBegin) {
+              shouldBlockFirstBegin = false;
+              resolveFirstBeginEntered();
+              await firstBeginRelease;
+            }
+            return await service.beginRecord(input);
+          }
+        };
+      }
+    });
+
+    const ownerRequest = postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    await firstBeginEntered;
+
+    try {
+      const mismatchResponse = await Promise.race([
+        postTask(app, validTaskCreateBody({ title: "Different pre-durable digest" }), {
+          "Idempotency-Key": idempotencyKey
+        }),
+        timeoutAfter(1_000, "pre-durable digest mismatch waited for the active owner")
+      ]);
+      const mismatchBody = (await mismatchResponse.json()) as ApiErrorResponse;
+
+      expect(mismatchResponse.status).toBe(422);
+      expectCanonicalError(mismatchBody, "idempotency_mismatch");
+      expectNoAbsoluteWorkspacePath(mismatchBody, tempRoot, workspaceRoot);
+      expect(JSON.stringify(mismatchBody)).not.toContain(idempotencyKey);
+      expect(taskIdFactoryCalls).toBe(0);
+      await expectPathMissing(join(workspaceRoot, "tasks"));
+    } finally {
+      releaseFirstBegin();
+    }
+
+    const ownerResponse = await ownerRequest;
+    const ownerTask = (await ownerResponse.json()) as TaskCard;
+    const replayResponse = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const replayTask = (await replayResponse.json()) as TaskCard;
+    const record = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+
+    expect(ownerResponse.status).toBe(201);
+    expect(replayResponse.status).toBe(200);
+    expect(replayTask).toEqual(ownerTask);
+    expect(taskIdFactoryCalls).toBe(1);
+    expect(record?.status).toBe("completed");
+    expect(record?.result_ref).toBe(ownerTask.task_id);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([ownerTask.task_id]);
   });
 
   test("POST /api/tasks active same-key create delayed past replay timeout converges in one app", async () => {
@@ -2424,6 +2903,63 @@ describe("backend workspace and health routes", () => {
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([retryTask.task_id]);
   });
 
+  test("POST /api/tasks rejects unknown top-level fields added to producer snapshot bytes", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:after-snapshot-unknown-top-level";
+    const taskIds = ["TASK-hook-unknown-top", "TASK-hook-unknown-top-retry"];
+    let shouldAddUnknownField = true;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:57.6075Z"),
+      taskIdFactory: () => taskIds.shift() ?? "TASK-unexpected-unknown-top-extra",
+      taskSnapshotWriteHooks: {
+        afterSnapshotWrite: async ({ taskDirectory }) => {
+          if (!shouldAddUnknownField) {
+            return;
+          }
+          shouldAddUnknownField = false;
+          const snapshotPath = join(taskDirectory, "snapshot.json");
+          const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<
+            string,
+            unknown
+          >;
+          snapshot.unknown_producer_field = "must not be stripped before verification";
+          await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+        }
+      }
+    });
+
+    const failedResponse = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+    const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+    const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
+
+    expect(failedResponse.status).toBe(500);
+    expectCanonicalError(failedBody, "workspace_error");
+    expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+    expect(recordAfterFailure?.status).toBe("failed");
+    expect(recordAfterFailure?.result_ref).toBeUndefined();
+    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+      tasks: []
+    });
+    await expectPathMissing(join(workspaceRoot, "tasks", "TASK-hook-unknown-top", "snapshot.json"));
+
+    const retryResponse = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const retryTask = (await retryResponse.json()) as TaskCard;
+    const recordAfterRetry = await idempotencyService.getRecord("task", idempotencyKey);
+
+    expect(retryResponse.status).toBe(201);
+    expect(retryTask.task_id).toBe("TASK-hook-unknown-top-retry");
+    expect(recordAfterRetry?.status).toBe("completed");
+    expect(recordAfterRetry?.result_ref).toBe(retryTask.task_id);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([retryTask.task_id]);
+  });
+
   test("POST /api/tasks quarantines a directory replacement at the snapshot leaf", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -2720,23 +3256,36 @@ describe("backend workspace and health routes", () => {
     const failedBody = (await failedResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
+    const listAfterFailure = await app.request("/api/tasks");
+    const detailAfterFailure = await app.request(
+      "/api/tasks/TASK-rollback-failure-original"
+    );
+    const detailBody = (await detailAfterFailure.json()) as ApiErrorResponse;
+    const freshListAfterFailure = await createBackendApi({ workspaceRoot }).request("/api/tasks");
     const retryResponse = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
-    const retryBody = (await retryResponse.json()) as ApiErrorResponse;
+    const retryTask = (await retryResponse.json()) as TaskCard;
     const recordAfterRetry = await idempotencyService.getRecord("task", idempotencyKey);
 
-    expect(failedResponse.status).toBe(500);
-    expectCanonicalError(failedBody, "workspace_error");
+    expect(failedResponse.status).toBe(400);
+    expectCanonicalError(failedBody, "schema_error");
     expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
-    expect(recordAfterFailure?.status).toBe("started");
+    expect(recordAfterFailure?.status).toBe("failed");
     expect(recordAfterFailure?.result_ref).toBeUndefined();
-    expect(retryResponse.status).toBe(409);
-    expectCanonicalError(retryBody, "workspace_error");
-    expectNoAbsoluteWorkspacePath(retryBody, tempRoot, workspaceRoot);
-    expect(recordAfterRetry?.status).toBe("started");
-    expect(recordAfterRetry?.result_ref).toBeUndefined();
-    expect(taskIdFactoryCalls).toBe(1);
-    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([]);
-    await expectPathMissing(join(workspaceRoot, "tasks", "TASK-rollback-failure-duplicate"));
+    expect(listAfterFailure.status).toBe(200);
+    expect(await listAfterFailure.json()).toEqual({ tasks: [] });
+    expect(detailAfterFailure.status).toBe(404);
+    expectCanonicalError(detailBody, "not_found");
+    expect(freshListAfterFailure.status).toBe(200);
+    expect(await freshListAfterFailure.json()).toEqual({ tasks: [] });
+    await expectPathMissing(
+      join(workspaceRoot, "tasks", "TASK-rollback-failure-original", "snapshot.json")
+    );
+    expect(retryResponse.status).toBe(201);
+    expect(retryTask.task_id).toBe("TASK-rollback-failure-duplicate");
+    expect(recordAfterRetry?.status).toBe("completed");
+    expect(recordAfterRetry?.result_ref).toBe(retryTask.task_id);
+    expect(taskIdFactoryCalls).toBe(2);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([retryTask.task_id]);
   });
 
   test("POST /api/tasks rollback preserves existing lane files and leaves failed claim retryable", async () => {

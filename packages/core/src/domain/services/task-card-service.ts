@@ -234,75 +234,93 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         });
       }
 
-      const taskDirectory = join(workspaceRoot, "tasks", taskId);
-      assertPathInsideWorkspace(workspaceRoot, taskDirectory, `workspace/tasks/${taskId}`);
-      const taskDirectoryEntry = await maybeLstat(taskDirectory);
-      if (!taskDirectoryEntry) {
-        await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
-        return;
-      }
-      if (
-        !taskDirectoryEntry.isDirectory() ||
-        taskDirectoryEntry.isSymbolicLink() ||
-        !(await isSafeExistingDirectoryPath(taskDirectory))
-      ) {
-        throw workspaceError(
-          "task_lane_not_directory",
-          `Task lane is not a safe directory: ${taskId}`,
-          "A task snapshot lane is blocked by a non-directory filesystem entry.",
-          [`workspace/tasks/${taskId}`]
-        );
-      }
-
-      const snapshotPath = join(taskDirectory, "snapshot.json");
-      if (!(await maybeLstat(snapshotPath))) {
-        await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
-        return;
-      }
-      let snapshot: TaskSnapshot;
       try {
-        await snapshotReadHooks?.beforeSnapshotOpen?.({ snapshotPath, laneTaskId: taskId });
-        snapshot = await readTaskSnapshot(
-          snapshotPath,
-          taskId,
+        const taskDirectory = join(workspaceRoot, "tasks", taskId);
+        assertPathInsideWorkspace(workspaceRoot, taskDirectory, `workspace/tasks/${taskId}`);
+        const taskDirectoryEntry = await maybeLstat(taskDirectory);
+        if (!taskDirectoryEntry) {
+          await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
+          return;
+        }
+        if (
+          !taskDirectoryEntry.isDirectory() ||
+          taskDirectoryEntry.isSymbolicLink() ||
+          !(await isSafeExistingDirectoryPath(taskDirectory))
+        ) {
+          throw workspaceError(
+            "task_lane_not_directory",
+            `Task lane is not a safe directory: ${taskId}`,
+            "A task snapshot lane is blocked by a non-directory filesystem entry.",
+            [`workspace/tasks/${taskId}`]
+          );
+        }
+
+        const snapshotPath = join(taskDirectory, "snapshot.json");
+        if (!(await maybeLstat(snapshotPath))) {
+          await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
+          return;
+        }
+        let snapshot: TaskSnapshot;
+        try {
+          await snapshotReadHooks?.beforeSnapshotOpen?.({ snapshotPath, laneTaskId: taskId });
+          snapshot = await readTaskSnapshot(
+            snapshotPath,
+            taskId,
+            taskDirectory,
+            taskSnapshotEvidenceRef(taskId)
+          );
+        } catch (error) {
+          if (await isMissingRollbackSnapshotError(error, snapshotPath)) {
+            await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
+            return;
+          }
+
+          const quarantineResult = await cleanupPublishedTaskSnapshotAfterFailedWrite(
+            taskDirectory,
+            snapshotPath,
+            taskId
+          );
+          if (quarantineResult !== "unsafe") {
+            return;
+          }
+
+          throw error;
+        }
+        if (JSON.stringify(snapshot.task_card) !== JSON.stringify(task)) {
+          const mismatchError = workspaceError(
+            "task_snapshot_mismatch",
+            "Task rollback snapshot does not match the in-memory task.",
+            "The task snapshot lane is not safe to roll back automatically.",
+            [taskSnapshotEvidenceRef(taskId), "snapshot.task_card"]
+          );
+          const quarantineResult = await cleanupPublishedTaskSnapshotAfterFailedWrite(
+            taskDirectory,
+            snapshotPath,
+            taskId
+          );
+          if (quarantineResult !== "unsafe") {
+            return;
+          }
+
+          throw mismatchError;
+        }
+
+        const quarantineResult = await cleanupPublishedTaskSnapshotAfterFailedWrite(
           taskDirectory,
-          taskSnapshotEvidenceRef(taskId)
+          snapshotPath,
+          taskId
         );
-      } catch (error) {
-        if (await isMissingRollbackSnapshotError(error, snapshotPath)) {
-          await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
-          return;
+        if (quarantineResult === "unsafe") {
+          throw workspaceError(
+            "task_lane_not_directory",
+            `Task lane is not a safe directory: ${taskId}`,
+            "The task snapshot lane could not be rolled back safely.",
+            [`workspace/tasks/${taskId}`]
+          );
         }
-
-        throw error;
+      } finally {
+        tasks.delete(taskId);
       }
-      if (JSON.stringify(snapshot.task_card) !== JSON.stringify(task)) {
-        throw workspaceError(
-          "task_snapshot_mismatch",
-          "Task rollback snapshot does not match the in-memory task.",
-          "The task snapshot lane is not safe to roll back automatically.",
-          [taskSnapshotEvidenceRef(taskId), "snapshot.task_card"]
-        );
-      }
-
-      try {
-        await unlink(snapshotPath);
-      } catch (error) {
-        if (await isMissingRollbackSnapshotError(error, snapshotPath)) {
-          await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
-          return;
-        }
-
-        throw workspaceError(
-          "workspace_path_not_safe",
-          "Failed to remove idempotency rollback task snapshot.",
-          "The task snapshot could not be rolled back safely.",
-          [taskSnapshotEvidenceRef(taskId)],
-          error
-        );
-      }
-
-      await evictTaskAfterMissingRollbackSnapshot(tasks, taskDirectory, taskId);
     },
 
     async listTasks(): Promise<TaskCard[]> {
@@ -621,7 +639,8 @@ async function readTaskSnapshot(
   snapshotPath: string,
   laneTaskId: string,
   lanePath: string,
-  evidenceRef: string
+  evidenceRef: string,
+  expectedSnapshotText?: string
 ): Promise<TaskSnapshot & { task_card: TaskCard }> {
   await assertSafeSnapshotLeaf(snapshotPath, evidenceRef);
 
@@ -674,7 +693,19 @@ async function readTaskSnapshot(
       );
     }
 
-    const rawSnapshotText = await readBoundedTaskSnapshot(snapshotFile, evidenceRef);
+    const rawSnapshotBytes = await readBoundedTaskSnapshot(snapshotFile, evidenceRef);
+    if (
+      expectedSnapshotText !== undefined &&
+      !rawSnapshotBytes.equals(Buffer.from(expectedSnapshotText, "utf8"))
+    ) {
+      throw workspaceError(
+        "task_snapshot_mismatch",
+        "Published task snapshot bytes do not match the canonical snapshot.",
+        "The task snapshot changed during publication and cannot be accepted.",
+        [evidenceRef, "snapshot.bytes"]
+      );
+    }
+    const rawSnapshotText = rawSnapshotBytes.toString("utf8");
     let rawSnapshot: unknown;
     try {
       rawSnapshot = JSON.parse(rawSnapshotText) as unknown;
@@ -695,6 +726,16 @@ async function readTaskSnapshot(
         "Task snapshot failed schema validation.",
         "A task snapshot is malformed and recovery has been stopped.",
         [evidenceRef, ...toSchemaEvidenceRefs(parsedSnapshot.error, "snapshot")]
+      );
+    }
+    if (
+      canonicalSnapshotJson(rawSnapshot) !== canonicalSnapshotJson(parsedSnapshot.data)
+    ) {
+      throw workspaceError(
+        "task_snapshot_malformed",
+        "Task snapshot contains fields outside the canonical durable shape.",
+        "A task snapshot has unsupported fields and recovery has been stopped.",
+        [evidenceRef, "snapshot"]
       );
     }
 
@@ -744,6 +785,22 @@ async function readTaskSnapshot(
   }
 }
 
+function canonicalSnapshotJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalSnapshotJson(item)).join(",")}]`;
+  }
+
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).filter((key) => record[key] !== undefined).sort();
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${canonicalSnapshotJson(record[key])}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
 async function assertSafeSnapshotLeaf(snapshotPath: string, evidenceRef: string): Promise<void> {
   const snapshotEntry = await maybeLstat(snapshotPath);
   if (!snapshotEntry) {
@@ -775,7 +832,7 @@ async function assertSafeSnapshotLeaf(snapshotPath: string, evidenceRef: string)
 async function readBoundedTaskSnapshot(
   snapshotFile: SnapshotFileHandle,
   evidenceRef: string
-): Promise<string> {
+): Promise<Buffer> {
   const buffer = Buffer.allocUnsafe(MAX_TASK_SNAPSHOT_BYTES + 1);
   let offset = 0;
 
@@ -806,24 +863,26 @@ async function readBoundedTaskSnapshot(
     );
   }
 
-  return buffer.subarray(0, offset).toString("utf8");
+  return buffer.subarray(0, offset);
 }
+
+type TaskSnapshotQuarantineResult = "quarantined" | "missing" | "unsafe";
 
 async function cleanupPublishedTaskSnapshotAfterFailedWrite(
   taskDirectory: string,
   snapshotPath: string,
   taskId: string
-): Promise<void> {
+): Promise<TaskSnapshotQuarantineResult> {
   const taskDirectoryEntry = await maybeLstat(taskDirectory);
   if (!taskDirectoryEntry) {
-    return;
+    return "missing";
   }
   if (
     !taskDirectoryEntry.isDirectory() ||
     taskDirectoryEntry.isSymbolicLink() ||
     !(await isSafeExistingDirectoryPath(taskDirectory))
   ) {
-    return;
+    return "unsafe";
   }
 
   const quarantinePath = join(
@@ -833,19 +892,23 @@ async function cleanupPublishedTaskSnapshotAfterFailedWrite(
   try {
     await rename(snapshotPath, quarantinePath);
   } catch (error) {
-    if (!hasErrorCode(error, "ENOENT")) {
-      throw workspaceError(
-        "workspace_path_not_safe",
-        "Failed to quarantine published task snapshot after a failed write.",
-        "The task snapshot could not be cleaned up safely.",
-        [taskSnapshotEvidenceRef(taskId)],
-        error
-      );
+    if (hasErrorCode(error, "ENOENT")) {
+      await removeEmptyTaskLaneAfterRollback(taskDirectory, taskId);
+      return "missing";
     }
+
+    throw workspaceError(
+      "workspace_path_not_safe",
+      "Failed to quarantine published task snapshot after a failed write.",
+      "The task snapshot could not be cleaned up safely.",
+      [taskSnapshotEvidenceRef(taskId)],
+      error
+    );
   }
 
   await bestEffortCleanupQuarantinedTaskSnapshot(quarantinePath);
   await removeEmptyTaskLaneAfterRollback(taskDirectory, taskId);
+  return "quarantined";
 }
 
 async function bestEffortCleanupQuarantinedTaskSnapshot(quarantinePath: string): Promise<void> {
@@ -950,7 +1013,8 @@ async function persistTaskSnapshot(
       snapshotPath,
       task.task_id,
       taskDirectory,
-      taskSnapshotEvidenceRef(task.task_id)
+      taskSnapshotEvidenceRef(task.task_id),
+      snapshotText
     );
     if (JSON.stringify(verifiedSnapshot) !== JSON.stringify(snapshot)) {
       throw workspaceError(

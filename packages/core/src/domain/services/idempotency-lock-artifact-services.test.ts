@@ -457,6 +457,227 @@ describe("idempotency, lock, and artifact services", () => {
     expect(JSON.parse(await readFile(recordPath, "utf8"))).toEqual(completedRecord);
   });
 
+  test("IdempotencyRecord exact completed invalidation removes result_ref and permits reacquisition", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    let currentTime = "2026-07-07T13:30:10.000Z";
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date(currentTime)
+    });
+    const rawKey = "task:create:invalidate-exact-completed";
+    const requestDigest = "digest-invalidate-exact";
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const completed = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef: "TASK-invalidate-exact"
+    });
+
+    currentTime = "2026-07-07T13:30:11.000Z";
+    const invalidated = await service.invalidateCompletedRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef: "TASK-invalidate-exact"
+    });
+    currentTime = "2026-07-07T13:30:12.000Z";
+    const reacquired = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+
+    expect(completed.status).toBe("completed");
+    expect(completed.result_ref).toBe("TASK-invalidate-exact");
+    expect(invalidated.status).toBe("failed");
+    expect(invalidated.result_ref).toBeUndefined();
+    expect(reacquired.status).toBe("acquired");
+    expect(reacquired.record.status).toBe("started");
+    expect(reacquired.record.result_ref).toBeUndefined();
+  });
+
+  test("IdempotencyRecord completed invalidation requires exact digest and result_ref", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:30:20.000Z")
+    });
+    const rawKey = "task:create:invalidate-exact-guard";
+    const requestDigest = "digest-invalidate-guard";
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const completed = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef: "TASK-invalidate-guard"
+    });
+
+    const resultMismatch = await captureTaskServiceError(() =>
+      service.invalidateCompletedRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        resultRef: "TASK-invalidate-other"
+      })
+    );
+    const digestMismatch = await captureTaskServiceError(() =>
+      service.invalidateCompletedRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest: "digest-invalidate-other",
+        resultRef: "TASK-invalidate-guard"
+      })
+    );
+
+    expect(resultMismatch.code).toBe("record_malformed");
+    expect(resultMismatch.status).toBe(409);
+    expect(resultMismatch.retryable).toBe(true);
+    expect(digestMismatch.code).toBe("idempotency_mismatch");
+    expect(JSON.stringify(resultMismatch)).not.toContain(rawKey);
+    expect(JSON.stringify(digestMismatch)).not.toContain(rawKey);
+    expect(await service.getRecord("task", rawKey)).toEqual(completed);
+  });
+
+  test("IdempotencyRecord invalidates a completed record missing result_ref", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:invalidate-missing-result";
+    const requestDigest = "digest-invalidate-missing-result";
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      idempotencyRecordEvidenceRef("task", rawKey)
+    );
+    const poisonedRecord: IdempotencyRecord = {
+      key: rawKey,
+      scope: "task",
+      request_digest: requestDigest,
+      status: "completed",
+      created_at: "2026-07-07T13:30:30.000Z",
+      updated_at: "2026-07-07T13:30:30.000Z"
+    };
+    await mkdir(join(workspaceRoot, "tasks", "_idempotency", "task"), { recursive: true });
+    await writeFile(recordPath, `${JSON.stringify(poisonedRecord)}\n`, { flag: "wx" });
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:30:31.000Z")
+    });
+
+    const observed = await service.lookupReplay({ scope: "task", key: rawKey, requestDigest });
+    expect(observed.status).toBe("invalid_completed");
+    if (observed.status !== "invalid_completed") {
+      throw new Error("Expected invalid completed authority.");
+    }
+    expect(observed.reason).toBe("missing_result_ref");
+    expect(observed.observedResultRef).toBeUndefined();
+
+    const failed = await service.invalidateCompletedRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef: observed.observedResultRef
+    });
+    const reacquired = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+
+    expect(failed.status).toBe("failed");
+    expect(failed.result_ref).toBeUndefined();
+    expect(reacquired.status).toBe("acquired");
+  });
+
+  test("IdempotencyRecord invalidates an unsafe completed task result_ref without using it as a path", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:invalidate-unsafe-result";
+    const requestDigest = "digest-invalidate-unsafe-result";
+    const unsafeResultRef = "../outside/TASK-private-result";
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      idempotencyRecordEvidenceRef("task", rawKey)
+    );
+    const poisonedRecord: IdempotencyRecord = {
+      key: rawKey,
+      scope: "task",
+      request_digest: requestDigest,
+      status: "completed",
+      result_ref: unsafeResultRef,
+      created_at: "2026-07-07T13:30:40.000Z",
+      updated_at: "2026-07-07T13:30:40.000Z"
+    };
+    await mkdir(join(workspaceRoot, "tasks", "_idempotency", "task"), { recursive: true });
+    await writeFile(recordPath, `${JSON.stringify(poisonedRecord)}\n`, { flag: "wx" });
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:30:41.000Z")
+    });
+
+    const observed = await service.lookupReplay({ scope: "task", key: rawKey, requestDigest });
+    expect(observed.status).toBe("invalid_completed");
+    if (observed.status !== "invalid_completed") {
+      throw new Error("Expected invalid completed authority.");
+    }
+    expect(observed.reason).toBe("unsafe_result_ref");
+
+    const failed = await service.invalidateCompletedRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef: observed.observedResultRef
+    });
+
+    expect(failed.status).toBe("failed");
+    expect(failed.result_ref).toBeUndefined();
+    await expectPathMissing(join(tempRoot, "outside"));
+  });
+
+  test("IdempotencyRecord invalidation preserves a completed authority changed after observation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:invalidate-observed-race";
+    const requestDigest = "digest-invalidate-observed-race";
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      idempotencyRecordEvidenceRef("task", rawKey)
+    );
+    const poisonedRecord: IdempotencyRecord = {
+      key: rawKey,
+      scope: "task",
+      request_digest: requestDigest,
+      status: "completed",
+      result_ref: "../outside/TASK-stale-observation",
+      created_at: "2026-07-07T13:30:50.000Z",
+      updated_at: "2026-07-07T13:30:50.000Z"
+    };
+    await mkdir(join(workspaceRoot, "tasks", "_idempotency", "task"), { recursive: true });
+    await writeFile(recordPath, `${JSON.stringify(poisonedRecord)}\n`, { flag: "wx" });
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    const observed = await service.lookupReplay({ scope: "task", key: rawKey, requestDigest });
+    if (observed.status !== "invalid_completed") {
+      throw new Error("Expected invalid completed authority.");
+    }
+    const repairedRecord: IdempotencyRecord = {
+      ...poisonedRecord,
+      result_ref: "TASK-valid-concurrent-authority",
+      updated_at: "2026-07-07T13:30:51.000Z"
+    };
+    await writeFile(recordPath, `${JSON.stringify(repairedRecord)}\n`);
+
+    const error = await captureTaskServiceError(() =>
+      service.invalidateCompletedRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        resultRef: observed.observedResultRef
+      })
+    );
+
+    expect(error.code).toBe("record_malformed");
+    expect(error.status).toBe(409);
+    expect(await service.getRecord("task", rawKey)).toEqual(repairedRecord);
+    expect(JSON.stringify(error)).not.toContain(rawKey);
+    expect(JSON.stringify(error)).not.toContain(poisonedRecord.result_ref);
+  });
+
   test("IdempotencyRecord storeRecord rejects public completed bypasses", async () => {
     const fresh = await createTempWorkspacePath();
     tempRoots.push(fresh.tempRoot);
@@ -901,6 +1122,40 @@ describe("idempotency, lock, and artifact services", () => {
     expect(detailError.code).toBe("task_not_found");
     expect(detailError.status).toBe(404);
     await expectPathMissing(join(workspaceRoot, "tasks", task.task_id));
+  });
+
+  test("TaskCard unsafe rollback evicts cache without following a replaced lane", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:35:59.000Z"),
+      taskIdFactory: () => "TASK-unsafe-lane-rollback"
+    });
+    const task = await service.createTask({
+      type: "engineering",
+      title: "Rollback unsafe lane",
+      question_or_goal: "Evict cache without following a replacement task lane.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const taskLane = join(workspaceRoot, "tasks", task.task_id);
+    const outsideLane = join(tempRoot, "outside-task-lane");
+    const outsideSentinel = join(outsideLane, "snapshot.json");
+    await mkdir(outsideLane, { recursive: true });
+    await writeFile(outsideSentinel, "external bytes must survive", { flag: "wx" });
+    await rm(taskLane, { recursive: true, force: true });
+    await symlink(outsideLane, taskLane, "dir");
+
+    const rollbackError = await captureTaskServiceError(() =>
+      service.rollbackTaskForIdempotency(task.task_id)
+    );
+    const detailError = await captureTaskServiceError(() => service.getTask(task.task_id));
+
+    expect(rollbackError.code).toBe("task_lane_not_directory");
+    expect(await service.listTasks()).toEqual([]);
+    expect(detailError.code).toBe("task_not_found");
+    expect(await readFile(outsideSentinel, "utf8")).toBe("external bytes must survive");
   });
 
   test("IdempotencyRecord invalid schema is rejected without workspace files", async () => {
@@ -1533,6 +1788,102 @@ describe("idempotency, lock, and artifact services", () => {
     );
     expect(retryTask.task_id).toBe("TASK-post-hook-outer-retry");
     expect(await service.listTasks()).toEqual([retryTask]);
+  });
+
+  test("TaskCard snapshot writes reject unknown nested task_card fields in producer bytes", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskIds = ["TASK-post-hook-unknown-nested", "TASK-post-hook-unknown-retry"];
+    let shouldAddUnknownField = true;
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:06.500Z"),
+      taskIdFactory: () => taskIds.shift() ?? "TASK-unexpected-post-hook-unknown-extra",
+      snapshotWriteHooks: {
+        afterSnapshotWrite: async ({ taskDirectory }) => {
+          if (!shouldAddUnknownField) {
+            return;
+          }
+          shouldAddUnknownField = false;
+          const snapshotPath = join(taskDirectory, "snapshot.json");
+          const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<
+            string,
+            unknown
+          >;
+          const taskCard = snapshot.task_card as Record<string, unknown>;
+          taskCard.unknown_nested_field = "must not be stripped before verification";
+          await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+        }
+      }
+    });
+    const input = {
+      type: "engineering" as const,
+      title: "Reject unknown nested producer bytes",
+      question_or_goal: "Require the exact canonical TaskSnapshot bytes after producer hooks.",
+      inference_budget: { mode: "normal" as const },
+      created_by: "pi"
+    };
+
+    const error = await captureTaskServiceError(() => service.createTask(input));
+    const listAfterFailure = await service.listTasks();
+    const retryTask = await service.createTask(input);
+
+    expect(error.code).toBe("workspace_path_not_safe");
+    expect(listAfterFailure).toEqual([]);
+    await expectPathMissing(
+      join(workspaceRoot, "tasks", "TASK-post-hook-unknown-nested", "snapshot.json")
+    );
+    expect(retryTask.task_id).toBe("TASK-post-hook-unknown-retry");
+    expect(await service.listTasks()).toEqual([retryTask]);
+  });
+
+  test("TaskCard durable reads reject unknown fields and accept canonical data with reordered JSON", async () => {
+    for (const location of ["top_level", "task_card"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = `TASK-durable-unknown-${location.replace("_", "-")}`;
+      const task = await createTaskCardService({
+        workspaceRoot,
+        now: () => new Date("2026-07-07T13:40:06.750Z"),
+        taskIdFactory: () => taskId
+      }).createTask({
+        type: "engineering",
+        title: "Reject unknown durable snapshot fields",
+        question_or_goal: "Treat the complete raw snapshot shape as durable authority.",
+        inference_budget: { mode: "normal" },
+        created_by: "pi"
+      });
+      const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+      const canonicalSnapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      const unknownContent = `private-unknown-${location}`;
+      const poisonedSnapshot = structuredClone(canonicalSnapshot);
+      if (location === "top_level") {
+        poisonedSnapshot.unknown_top_level = unknownContent;
+      } else {
+        (poisonedSnapshot.task_card as Record<string, unknown>).unknown_nested = unknownContent;
+      }
+      await writeFile(snapshotPath, `${JSON.stringify(poisonedSnapshot)}\n`);
+      const reader = createTaskCardService({ workspaceRoot });
+
+      const listError = await captureTaskServiceError(() => reader.listTasks());
+      const detailError = await captureTaskServiceError(() => reader.getTaskFromSnapshot(taskId));
+
+      expect(listError.code).toBe("task_snapshot_malformed");
+      expect(detailError.code).toBe("task_snapshot_malformed");
+      expectErrorNotToLeakRecordContent(listError, unknownContent);
+      expectErrorNotToLeakRecordContent(detailError, unknownContent);
+
+      const reorderedSnapshot = Object.fromEntries(
+        Object.entries(canonicalSnapshot).reverse()
+      );
+      await writeFile(snapshotPath, `${JSON.stringify(reorderedSnapshot, null, 2)}\n`);
+
+      expect(await reader.listTasks()).toEqual([task]);
+      expect(await reader.getTaskFromSnapshot(taskId)).toEqual(task);
+    }
   });
 
   test("TaskCard snapshot writes quarantine directory leaf replacements before hydration", async () => {
