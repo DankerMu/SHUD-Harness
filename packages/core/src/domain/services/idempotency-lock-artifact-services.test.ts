@@ -1949,6 +1949,54 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("TaskCard failed durable reads evict only the requested cached task", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskIds = ["TASK-cache-evict-target", "TASK-cache-evict-sibling"];
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:06.875Z"),
+      taskIdFactory: () => taskIds.shift() ?? "TASK-cache-evict-unexpected"
+    });
+    const targetTask = await service.createTask({
+      type: "engineering",
+      title: "Evict invalid durable target",
+      question_or_goal: "Remove only the cache entry whose durable authority failed.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const siblingTask = await service.createTask({
+      type: "engineering",
+      title: "Preserve valid cached sibling",
+      question_or_goal: "Keep unrelated valid TaskCards available after a durable read failure.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", targetTask.task_id, "snapshot.json");
+    const canonicalSnapshotText = await readFile(snapshotPath, "utf8");
+    const poisonedSnapshot = JSON.parse(canonicalSnapshotText) as Record<string, unknown>;
+    poisonedSnapshot.unknown_cached_authority = "must remain on disk until external repair";
+    const poisonedSnapshotText = `${JSON.stringify(poisonedSnapshot)}\n`;
+    await writeFile(snapshotPath, poisonedSnapshotText);
+
+    const durableError = await captureTaskServiceError(() =>
+      service.getTaskFromSnapshot(targetTask.task_id)
+    );
+    const targetDetailError = await captureTaskServiceError(() =>
+      service.getTask(targetTask.task_id)
+    );
+
+    expect(durableError.code).toBe("task_snapshot_malformed");
+    expect(targetDetailError.code).toBe("task_not_found");
+    expect(await service.listTasks()).toEqual([siblingTask]);
+    expect(await service.getTask(siblingTask.task_id)).toEqual(siblingTask);
+    expect(await readFile(snapshotPath, "utf8")).toBe(poisonedSnapshotText);
+
+    await writeFile(snapshotPath, canonicalSnapshotText);
+    expect(await service.getTaskFromSnapshot(targetTask.task_id)).toEqual(targetTask);
+    expect(await service.listTasks()).toEqual([siblingTask, targetTask]);
+  });
+
   test("TaskCard snapshot writes quarantine directory leaf replacements before hydration", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);

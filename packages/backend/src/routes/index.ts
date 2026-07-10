@@ -764,7 +764,7 @@ async function rollbackLocalTaskAfterAuthorityFailure(
   localTask: TaskCard
 ): Promise<void> {
   try {
-    await input.taskService.rollbackTaskForIdempotency(localTask.task_id);
+    await input.taskService.rollbackTaskForIdempotency(localTask.task_id, localTask);
   } catch (rollbackError) {
     await input.idempotencyService.quarantineRecordAfterUnsafeRollback({
       scope: "task",
@@ -1005,7 +1005,7 @@ function invalidCompletedTaskAuthorityError(
         : "Completed task idempotency result_ref is not a safe TaskCard id.",
     userMessage: "The completed idempotency result cannot be used safely.",
     evidenceRefs: ["workspace/tasks/_idempotency/task", "idempotency.result_ref"],
-    retryable: false,
+    retryable: true,
     recommendedNextActions: ["Retry after the invalid completed authority is quarantined."]
   });
 }

@@ -119,7 +119,7 @@ export interface TaskCardServiceOptions {
 
 export interface TaskCardService {
   createTask: (input: CreateTaskInput) => Promise<TaskCard>;
-  rollbackTaskForIdempotency: (taskId: string) => Promise<void>;
+  rollbackTaskForIdempotency: (taskId: string, expectedTask?: TaskCard) => Promise<void>;
   listTasks: () => Promise<TaskCard[]>;
   getTask: (taskId: string) => Promise<TaskCard>;
   getTaskFromSnapshot: (taskId: string) => Promise<TaskCard>;
@@ -218,10 +218,34 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       }
     },
 
-    async rollbackTaskForIdempotency(taskId: string): Promise<void> {
+    async rollbackTaskForIdempotency(
+      taskId: string,
+      expectedTask?: TaskCard
+    ): Promise<void> {
       await ensureHydrated();
       assertSafeTaskId(taskId, `path.task_id:${taskId}`);
-      const task = tasks.get(taskId);
+      if (expectedTask && expectedTask.task_id !== taskId) {
+        throw workspaceError(
+          "task_snapshot_mismatch",
+          "Task rollback authority does not match the requested task id.",
+          "The task snapshot lane is not safe to roll back automatically.",
+          [`workspace/tasks/${taskId}`, "snapshot.task_card"]
+        );
+      }
+      const cachedTask = tasks.get(taskId);
+      if (
+        cachedTask &&
+        expectedTask &&
+        JSON.stringify(cachedTask) !== JSON.stringify(expectedTask)
+      ) {
+        throw workspaceError(
+          "task_snapshot_mismatch",
+          "Task rollback authority does not match the in-memory task.",
+          "The task snapshot lane is not safe to roll back automatically.",
+          [`workspace/tasks/${taskId}`, "snapshot.task_card"]
+        );
+      }
+      const task = expectedTask ?? cachedTask;
       if (!task) {
         throw new TaskServiceError({
           code: "task_not_found",
@@ -340,9 +364,14 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
     },
 
     async getTaskFromSnapshot(taskId: string): Promise<TaskCard> {
-      const task = await readTaskCardFromSnapshot(workspaceRoot, taskId, snapshotReadHooks);
-      tasks.set(task.task_id, task);
-      return task;
+      try {
+        const task = await readTaskCardFromSnapshot(workspaceRoot, taskId, snapshotReadHooks);
+        tasks.set(task.task_id, task);
+        return task;
+      } catch (error) {
+        tasks.delete(taskId);
+        throw error;
+      }
     }
   };
 }
