@@ -665,6 +665,13 @@ type CompletedTaskAuthorityClassification =
   | ObservedCompletedTaskAuthorityClassification
   | { status: "absent" };
 
+class CompletedTaskSnapshotAuthorityReadError extends Error {
+  constructor() {
+    super("Completed task snapshot durable authority could not be read.");
+    this.name = "CompletedTaskSnapshotAuthorityReadError";
+  }
+}
+
 async function classifyCompletedTaskAuthorityIfPresent(
   input: CreateIdempotentTaskCardInput
 ): Promise<CompletedTaskAuthorityClassification> {
@@ -712,6 +719,9 @@ async function classifyCompletedTaskAuthority(
       requestDigest: input.requestDigest,
       resultRef
     });
+    if (error instanceof CompletedTaskSnapshotAuthorityReadError) {
+      await input.taskService.quarantineInvalidTaskSnapshot(resultRef);
+    }
     return {
       status: "invalid",
       reason: "invalid_durable_task_authority",
@@ -856,7 +866,7 @@ async function getIdempotentTaskResult(
       if (error.code === "task_snapshot_missing_card") {
         throw error;
       }
-      throw idempotencyResultBindingError();
+      throw new CompletedTaskSnapshotAuthorityReadError();
     }
 
     throw error;

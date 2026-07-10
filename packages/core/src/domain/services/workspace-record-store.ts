@@ -5,6 +5,10 @@ import { dirname, isAbsolute, join, normalize, parse, resolve, sep } from "node:
 import { z } from "zod";
 import { TaskServiceError, type TaskServiceErrorCode } from "./task-card-service";
 import {
+  readDurableSingleLinkFile,
+  type DurableSingleLinkReadFailureReason
+} from "./durable-single-link-reader";
+import {
   WorkspacePathSafetyError,
   isPathInsideBoundary,
   resolveWorkspacePath
@@ -13,8 +17,6 @@ import {
 export const MAX_SERVICE_RECORD_BYTES = 1024 * 1024;
 
 const SAFE_RECORD_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
-const SERVICE_RECORD_OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
-const SERVICE_RECORD_READ_CHUNK_BYTES = 64 * 1024;
 
 type FileStat = Awaited<ReturnType<typeof lstat>>;
 type RecordFileHandle = Awaited<ReturnType<typeof open>>;
@@ -96,89 +98,18 @@ export async function readJsonRecord<T>(
   evidenceRef: string,
   schema: z.ZodType<T>
 ): Promise<T | undefined> {
-  const existingEntry = await maybeLstat(path);
-  if (!existingEntry) {
+  const durableRead = await readDurableSingleLinkFile({
+    path,
+    maxBytes: MAX_SERVICE_RECORD_BYTES,
+    validateParentPath: async () => await isSafeExistingDirectoryPath(dirname(path))
+  });
+  if (durableRead.status === "missing") {
     return undefined;
   }
-  if (!existingEntry.isFile() || existingEntry.isSymbolicLink()) {
-    throw serviceWorkspaceError(
-      "record_malformed",
-      "Record path is not a safe regular file.",
-      "A workspace record cannot be read safely.",
-      [evidenceRef]
-    );
+  if (durableRead.status === "invalid") {
+    throw recordDurableReadError(durableRead.reason, evidenceRef, durableRead.cause);
   }
-  if (existingEntry.size > MAX_SERVICE_RECORD_BYTES) {
-    throw serviceWorkspaceError(
-      "record_malformed",
-      "Record exceeds the M1 bounded read size.",
-      "A workspace record is too large to read safely.",
-      [evidenceRef]
-    );
-  }
-  if (!(await isSafeExistingDirectoryPath(dirname(path)))) {
-    throw serviceWorkspaceError(
-      "record_malformed",
-      "Record parent path is not a safe directory.",
-      "A workspace record cannot be read safely.",
-      [evidenceRef]
-    );
-  }
-
-  let recordFile: RecordFileHandle;
-  try {
-    recordFile = await open(path, SERVICE_RECORD_OPEN_FLAGS);
-  } catch (error) {
-    throw serviceWorkspaceError(
-      "record_malformed",
-      "Record cannot be opened safely.",
-      "A workspace record cannot be read safely.",
-      [evidenceRef],
-      error
-    );
-  }
-
-  let rawText: string;
-  try {
-    if (!(await isSafeExistingDirectoryPath(dirname(path)))) {
-      throw serviceWorkspaceError(
-        "record_malformed",
-        "Record parent path is not a safe directory.",
-        "A workspace record cannot be read safely.",
-        [evidenceRef]
-      );
-    }
-
-    const recordEntry = await recordFile.stat().catch((error: unknown) => {
-      throw serviceWorkspaceError(
-        "record_malformed",
-        "Record cannot be inspected.",
-        "A workspace record cannot be read safely.",
-        [evidenceRef],
-        error
-      );
-    });
-    if (!recordEntry.isFile() || recordEntry.isSymbolicLink()) {
-      throw serviceWorkspaceError(
-        "record_malformed",
-        "Record path is not a safe regular file.",
-        "A workspace record cannot be read safely.",
-        [evidenceRef]
-      );
-    }
-    if (recordEntry.size > MAX_SERVICE_RECORD_BYTES) {
-      throw serviceWorkspaceError(
-        "record_malformed",
-        "Record exceeds the M1 bounded read size.",
-        "A workspace record is too large to read safely.",
-        [evidenceRef]
-      );
-    }
-
-    rawText = await readBoundedJsonRecord(recordFile, evidenceRef, recordEntry.size);
-  } finally {
-    await recordFile.close().catch(() => undefined);
-  }
+  const rawText = durableRead.bytes.toString("utf8");
 
   let rawRecord: unknown;
   try {
@@ -207,71 +138,6 @@ export async function readJsonRecord<T>(
   }
 
   return parsedRecord.data;
-}
-
-async function readBoundedJsonRecord(
-  recordFile: RecordFileHandle,
-  evidenceRef: string,
-  checkedSize: number
-): Promise<string> {
-  const chunks: Buffer[] = [];
-  let offset = 0;
-
-  try {
-    for (;;) {
-      const remainingBytes = MAX_SERVICE_RECORD_BYTES + 1 - offset;
-      if (remainingBytes <= 0) {
-        break;
-      }
-
-      const buffer = Buffer.allocUnsafe(
-        nextBoundedReadSize(checkedSize, offset, remainingBytes)
-      );
-      const { bytesRead } = await recordFile.read(buffer, 0, buffer.length, offset);
-      if (bytesRead === 0) {
-        break;
-      }
-      chunks.push(buffer.subarray(0, bytesRead));
-      offset += bytesRead;
-      if (offset > MAX_SERVICE_RECORD_BYTES || bytesRead < buffer.length) {
-        break;
-      }
-    }
-  } catch (error) {
-    throw serviceWorkspaceError(
-      "record_malformed",
-      "Record cannot be read safely.",
-      "A workspace record cannot be read safely.",
-      [evidenceRef],
-      error
-    );
-  }
-
-  if (offset > MAX_SERVICE_RECORD_BYTES) {
-    throw serviceWorkspaceError(
-      "record_malformed",
-      "Record exceeds the M1 bounded read size.",
-      "A workspace record is too large to read safely.",
-      [evidenceRef]
-    );
-  }
-
-  return Buffer.concat(chunks, offset).toString("utf8");
-}
-
-function nextBoundedReadSize(
-  checkedSize: number,
-  offset: number,
-  remainingBytes: number
-): number {
-  if (offset === 0) {
-    return Math.max(
-      1,
-      Math.min(remainingBytes, checkedSize + 1, SERVICE_RECORD_READ_CHUNK_BYTES)
-    );
-  }
-
-  return Math.min(remainingBytes, SERVICE_RECORD_READ_CHUNK_BYTES);
 }
 
 export async function writeJsonRecord<T>(
@@ -457,6 +323,66 @@ export function assertPathInsideWorkspace(
     "Resolved path escapes the configured workspace.",
     "A workspace path resolved outside the configured workspace.",
     [evidenceRef]
+  );
+}
+
+function recordDurableReadError(
+  reason: DurableSingleLinkReadFailureReason,
+  evidenceRef: string,
+  cause?: unknown
+): TaskServiceError {
+  if (reason === "not_regular_file" || reason === "multiple_links") {
+    return serviceWorkspaceError(
+      "record_malformed",
+      "Record path is not a safe regular file.",
+      "A workspace record cannot be read safely.",
+      [evidenceRef],
+      cause
+    );
+  }
+  if (reason === "too_large") {
+    return serviceWorkspaceError(
+      "record_malformed",
+      "Record exceeds the M1 bounded read size.",
+      "A workspace record is too large to read safely.",
+      [evidenceRef],
+      cause
+    );
+  }
+  if (reason === "parent_not_safe") {
+    return serviceWorkspaceError(
+      "record_malformed",
+      "Record parent path is not a safe directory.",
+      "A workspace record cannot be read safely.",
+      [evidenceRef],
+      cause
+    );
+  }
+  if (reason === "open_failed") {
+    return serviceWorkspaceError(
+      "record_malformed",
+      "Record cannot be opened safely.",
+      "A workspace record cannot be read safely.",
+      [evidenceRef],
+      cause
+    );
+  }
+  if (reason === "read_failed") {
+    return serviceWorkspaceError(
+      "record_malformed",
+      "Record cannot be read safely.",
+      "A workspace record cannot be read safely.",
+      [evidenceRef],
+      cause
+    );
+  }
+
+  return serviceWorkspaceError(
+    "record_malformed",
+    "Record cannot be inspected.",
+    "A workspace record cannot be read safely.",
+    [evidenceRef],
+    cause
   );
 }
 

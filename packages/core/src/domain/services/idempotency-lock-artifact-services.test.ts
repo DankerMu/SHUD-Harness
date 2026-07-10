@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   access,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -1352,6 +1353,105 @@ describe("idempotency, lock, and artifact services", () => {
     expectErrorNotToLeakRecordContent(error, secret);
   });
 
+  test("shared durable record reads reject hardlinked records and preserve regular siblings", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+
+    const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+    const targetKey = "task:create:hardlinked-record";
+    const siblingKey = "task:create:single-link-sibling";
+    const targetBegin = await idempotencyService.beginRecord({
+      scope: "task",
+      key: targetKey,
+      requestDigest: "digest-hardlinked-record"
+    });
+    const siblingBegin = await idempotencyService.beginRecord({
+      scope: "task",
+      key: siblingKey,
+      requestDigest: "digest-single-link-sibling"
+    });
+    const idempotencyPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      idempotencyRecordFileName(targetKey)
+    );
+    const idempotencyAlias = join(tempRoot, "outside-idempotency-hardlink.json");
+    const idempotencyBytes = await readFile(idempotencyPath);
+    await link(idempotencyPath, idempotencyAlias);
+
+    const idempotencyError = await captureTaskServiceError(() =>
+      idempotencyService.getRecord("task", targetKey)
+    );
+
+    expect(idempotencyError.code).toBe("record_malformed");
+    expect(idempotencyError.evidenceRefs).toEqual([
+      idempotencyRecordEvidenceRef("task", targetKey)
+    ]);
+    expect(await idempotencyService.getRecord("task", siblingKey)).toEqual(
+      siblingBegin.record
+    );
+    expect(targetBegin.status).toBe("acquired");
+    expect(await readFile(idempotencyAlias)).toEqual(idempotencyBytes);
+    expect((await stat(idempotencyAlias)).nlink).toBe(2);
+
+    const lockService = createLockRecordService({ workspaceRoot });
+    const targetLock = validLockRecord();
+    const siblingLock = { ...validLockRecord(), lock_id: "LOCK-single-link-sibling" };
+    await lockService.storeLock(targetLock);
+    await lockService.storeLock(siblingLock);
+    const lockPath = join(
+      workspaceRoot,
+      "locks",
+      targetLock.scope,
+      `${targetLock.lock_id}.json`
+    );
+    const lockAlias = join(tempRoot, "outside-lock-hardlink.json");
+    const lockBytes = await readFile(lockPath);
+    await link(lockPath, lockAlias);
+
+    const lockError = await captureTaskServiceError(() =>
+      lockService.getLock(targetLock.scope, targetLock.lock_id)
+    );
+
+    expect(lockError.code).toBe("record_malformed");
+    expect(await lockService.getLock(siblingLock.scope, siblingLock.lock_id)).toEqual(
+      siblingLock
+    );
+    expect(await readFile(lockAlias)).toEqual(lockBytes);
+    expect((await stat(lockAlias)).nlink).toBe(2);
+
+    const artifactService = createArtifactRegistryService({ workspaceRoot });
+    const targetArtifact = validArtifact();
+    const siblingArtifact = {
+      ...validArtifact(),
+      artifact_id: "ART-single-link-sibling"
+    };
+    await artifactService.registerArtifact(targetArtifact);
+    await artifactService.registerArtifact(siblingArtifact);
+    const artifactPath = join(
+      workspaceRoot,
+      "artifacts",
+      "manifests",
+      `${targetArtifact.artifact_id}.json`
+    );
+    const artifactAlias = join(tempRoot, "outside-artifact-hardlink.json");
+    const artifactBytes = await readFile(artifactPath);
+    await link(artifactPath, artifactAlias);
+
+    const artifactError = await captureTaskServiceError(() =>
+      artifactService.getArtifact(targetArtifact.artifact_id)
+    );
+
+    expect(artifactError.code).toBe("record_malformed");
+    expect(await artifactService.getArtifact(siblingArtifact.artifact_id)).toEqual(
+      siblingArtifact
+    );
+    expect(await readFile(artifactAlias)).toEqual(artifactBytes);
+    expect((await stat(artifactAlias)).nlink).toBe(2);
+  });
+
   test("IdempotencyRecord lookup fails closed when stored key does not match the lookup path", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1947,6 +2047,38 @@ describe("idempotency, lock, and artifact services", () => {
       expect(await reader.listTasks()).toEqual([task]);
       expect(await reader.getTaskFromSnapshot(taskId)).toEqual(task);
     }
+  });
+
+  test("TaskCard startup hydration rejects hardlinked snapshots without quarantining them", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-startup-hardlinked-snapshot";
+    await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    }).createTask({
+      type: "engineering",
+      title: "Reject hardlinked startup snapshot",
+      question_or_goal: "Do not accept or mutate a multiply linked durable snapshot.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const outsideAlias = join(tempRoot, "outside-task-snapshot.json");
+    const snapshotBytes = await readFile(snapshotPath);
+    await link(snapshotPath, outsideAlias);
+    const reader = createTaskCardService({ workspaceRoot });
+
+    const hydrationError = await captureTaskServiceError(() => reader.listTasks());
+
+    expect(hydrationError.code).toBe("task_snapshot_malformed");
+    expect(hydrationError.evidenceRefs).toEqual([
+      `workspace/tasks/${taskId}/snapshot.json`
+    ]);
+    expect(await readFile(snapshotPath)).toEqual(snapshotBytes);
+    expect(await readFile(outsideAlias)).toEqual(snapshotBytes);
+    expect((await stat(snapshotPath)).nlink).toBe(2);
+    expect((await stat(outsideAlias)).nlink).toBe(2);
   });
 
   test("TaskCard failed durable reads evict only the requested cached task", async () => {

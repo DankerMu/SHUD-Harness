@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { constants, type Dirent } from "node:fs";
-import { lstat, mkdir, open, opendir, rename, rmdir, unlink, writeFile } from "node:fs/promises";
+import { type Dirent } from "node:fs";
+import { lstat, mkdir, opendir, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, parse, resolve, sep } from "node:path";
 import { z } from "zod";
 import {
@@ -16,6 +16,10 @@ import {
   isPathInsideBoundary,
   resolveWorkspacePath
 } from "./workspace-path-safety";
+import {
+  readDurableSingleLinkFile,
+  type DurableSingleLinkReadFailureReason
+} from "./durable-single-link-reader";
 
 export const DEFAULT_TASK_CREATED_BY = "pi" as const;
 export const DEFAULT_TASK_CURRENT_OWNER = "coordinator" as const;
@@ -27,7 +31,6 @@ const MAX_TASK_ID_ATTEMPTS = 20;
 // M1 skeleton bound: cap workspace/tasks fan-out before opening any task snapshots.
 const MAX_TASK_HYDRATION_ENTRIES = 1024;
 export const MAX_TASK_SNAPSHOT_BYTES = 1024 * 1024;
-const TASK_SNAPSHOT_OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
 export const CreateTaskInputSchema = z.object({
   type: TaskTypeSchema,
@@ -120,13 +123,13 @@ export interface TaskCardServiceOptions {
 export interface TaskCardService {
   createTask: (input: CreateTaskInput) => Promise<TaskCard>;
   rollbackTaskForIdempotency: (taskId: string, expectedTask?: TaskCard) => Promise<void>;
+  quarantineInvalidTaskSnapshot: (taskId: string) => Promise<void>;
   listTasks: () => Promise<TaskCard[]>;
   getTask: (taskId: string) => Promise<TaskCard>;
   getTaskFromSnapshot: (taskId: string) => Promise<TaskCard>;
 }
 
 type FileStat = Awaited<ReturnType<typeof lstat>>;
-type SnapshotFileHandle = Awaited<ReturnType<typeof open>>;
 
 export interface TaskSnapshotReadHookInput {
   snapshotPath: string;
@@ -344,6 +347,28 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         }
       } finally {
         tasks.delete(taskId);
+      }
+    },
+
+    async quarantineInvalidTaskSnapshot(taskId: string): Promise<void> {
+      assertSafeTaskId(taskId, `path.task_id:${taskId}`);
+      tasks.delete(taskId);
+
+      const taskDirectory = join(workspaceRoot, "tasks", taskId);
+      assertPathInsideWorkspace(workspaceRoot, taskDirectory, `workspace/tasks/${taskId}`);
+      const snapshotPath = join(taskDirectory, "snapshot.json");
+      const quarantineResult = await cleanupPublishedTaskSnapshotAfterFailedWrite(
+        taskDirectory,
+        snapshotPath,
+        taskId
+      );
+      if (quarantineResult === "unsafe") {
+        throw workspaceError(
+          "task_lane_not_directory",
+          `Task lane is not a safe directory: ${taskId}`,
+          "The invalid task snapshot could not be quarantined safely.",
+          [`workspace/tasks/${taskId}`]
+        );
       }
     },
 
@@ -671,147 +696,113 @@ async function readTaskSnapshot(
   evidenceRef: string,
   expectedSnapshotText?: string
 ): Promise<TaskSnapshot & { task_card: TaskCard }> {
-  await assertSafeSnapshotLeaf(snapshotPath, evidenceRef);
+  const durableRead = await readDurableSingleLinkFile({
+    path: snapshotPath,
+    maxBytes: MAX_TASK_SNAPSHOT_BYTES,
+    validateParentPath: async () => await isSafeExistingDirectoryPath(lanePath)
+  });
+  if (durableRead.status === "missing") {
+    throw workspaceError(
+      "task_snapshot_malformed",
+      "Task snapshot cannot be inspected.",
+      "A task snapshot cannot be read safely.",
+      [evidenceRef]
+    );
+  }
+  if (durableRead.status === "invalid") {
+    throw taskSnapshotDurableReadError(
+      durableRead.reason,
+      laneTaskId,
+      evidenceRef,
+      durableRead.cause
+    );
+  }
 
-  let snapshotFile: SnapshotFileHandle;
+  const rawSnapshotBytes = durableRead.bytes;
+  if (
+    expectedSnapshotText !== undefined &&
+    !rawSnapshotBytes.equals(Buffer.from(expectedSnapshotText, "utf8"))
+  ) {
+    throw workspaceError(
+      "task_snapshot_mismatch",
+      "Published task snapshot bytes do not match the canonical snapshot.",
+      "The task snapshot changed during publication and cannot be accepted.",
+      [evidenceRef, "snapshot.bytes"]
+    );
+  }
+  const rawSnapshotText = rawSnapshotBytes.toString("utf8");
+  let rawSnapshot: unknown;
   try {
-    snapshotFile = await open(snapshotPath, TASK_SNAPSHOT_OPEN_FLAGS);
+    rawSnapshot = JSON.parse(rawSnapshotText) as unknown;
   } catch (error) {
     throw workspaceError(
       "task_snapshot_malformed",
-      "Task snapshot cannot be opened safely.",
-      "A task snapshot cannot be read safely.",
+      "Task snapshot is not valid JSON.",
+      "A task snapshot is malformed and recovery has been stopped.",
       [evidenceRef],
       error
     );
   }
 
-  try {
-    if (!(await isSafeExistingDirectoryPath(lanePath))) {
-      throw workspaceError(
-        "task_lane_not_directory",
-        `Task lane is not a safe directory: ${laneTaskId}`,
-        "A task snapshot lane is blocked by a non-directory filesystem entry.",
-        [`workspace/tasks/${laneTaskId}`]
-      );
-    }
-
-    const snapshotEntry = await snapshotFile.stat().catch((error: unknown) => {
-      throw workspaceError(
-        "task_snapshot_malformed",
-        "Task snapshot cannot be inspected.",
-        "A task snapshot cannot be read safely.",
-        [evidenceRef],
-        error
-      );
-    });
-    if (!snapshotEntry.isFile() || snapshotEntry.isSymbolicLink()) {
-      throw workspaceError(
-        "task_snapshot_malformed",
-        "Task snapshot is not a safe regular file.",
-        "A task snapshot cannot be read safely.",
-        [evidenceRef]
-      );
-    }
-    if (snapshotEntry.size > MAX_TASK_SNAPSHOT_BYTES) {
-      throw workspaceError(
-        "task_snapshot_malformed",
-        "Task snapshot exceeds the M1 bounded read size.",
-        "A task snapshot is too large to load safely.",
-        [evidenceRef]
-      );
-    }
-
-    const rawSnapshotBytes = await readBoundedTaskSnapshot(snapshotFile, evidenceRef);
-    if (
-      expectedSnapshotText !== undefined &&
-      !rawSnapshotBytes.equals(Buffer.from(expectedSnapshotText, "utf8"))
-    ) {
-      throw workspaceError(
-        "task_snapshot_mismatch",
-        "Published task snapshot bytes do not match the canonical snapshot.",
-        "The task snapshot changed during publication and cannot be accepted.",
-        [evidenceRef, "snapshot.bytes"]
-      );
-    }
-    const rawSnapshotText = rawSnapshotBytes.toString("utf8");
-    let rawSnapshot: unknown;
-    try {
-      rawSnapshot = JSON.parse(rawSnapshotText) as unknown;
-    } catch (error) {
-      throw workspaceError(
-        "task_snapshot_malformed",
-        "Task snapshot is not valid JSON.",
-        "A task snapshot is malformed and recovery has been stopped.",
-        [evidenceRef],
-        error
-      );
-    }
-
-    const parsedSnapshot = TaskSnapshotSchema.safeParse(rawSnapshot);
-    if (!parsedSnapshot.success) {
-      throw workspaceError(
-        "task_snapshot_malformed",
-        "Task snapshot failed schema validation.",
-        "A task snapshot is malformed and recovery has been stopped.",
-        [evidenceRef, ...toSchemaEvidenceRefs(parsedSnapshot.error, "snapshot")]
-      );
-    }
-    if (
-      canonicalSnapshotJson(rawSnapshot) !== canonicalSnapshotJson(parsedSnapshot.data)
-    ) {
-      throw workspaceError(
-        "task_snapshot_malformed",
-        "Task snapshot contains fields outside the canonical durable shape.",
-        "A task snapshot has unsupported fields and recovery has been stopped.",
-        [evidenceRef, "snapshot"]
-      );
-    }
-
-    if (!isSafeTaskId(parsedSnapshot.data.task_id)) {
-      throw workspaceError(
-        "task_snapshot_malformed",
-        "Task snapshot id is not safe.",
-        "A task snapshot is malformed and recovery has been stopped.",
-        [evidenceRef, "snapshot.task_id"]
-      );
-    }
-
-    if (parsedSnapshot.data.task_id !== laneTaskId) {
-      throw workspaceError(
-        "task_snapshot_mismatch",
-        "Task snapshot id does not match its lane.",
-        "A task snapshot does not match its task directory.",
-        [
-          `workspace/tasks/${laneTaskId}/snapshot.json`,
-          `snapshot.task_id:${parsedSnapshot.data.task_id}`
-        ]
-      );
-    }
-
-    if (parsedSnapshot.data.latest_seq !== TASK_SNAPSHOT_LATEST_SEQ) {
-      throw workspaceError(
-        "task_snapshot_mismatch",
-        "Task snapshot latest sequence is not supported by M1 recovery.",
-        "A task snapshot is inconsistent and recovery has been stopped.",
-        [evidenceRef, "snapshot.latest_seq"]
-      );
-    }
-
-    if (!parsedSnapshot.data.task_card) {
-      throw workspaceError(
-        "task_snapshot_missing_card",
-        "Task snapshot does not include the M1 task_card recovery payload.",
-        "A task snapshot is missing the data needed for recovery.",
-        [evidenceRef]
-      );
-    }
-
-    validateSnapshotTaskCardConsistency(parsedSnapshot.data, evidenceRef);
-    return parsedSnapshot.data as TaskSnapshot & { task_card: TaskCard };
-  } finally {
-    await snapshotFile.close().catch(() => undefined);
+  const parsedSnapshot = TaskSnapshotSchema.safeParse(rawSnapshot);
+  if (!parsedSnapshot.success) {
+    throw workspaceError(
+      "task_snapshot_malformed",
+      "Task snapshot failed schema validation.",
+      "A task snapshot is malformed and recovery has been stopped.",
+      [evidenceRef, ...toSchemaEvidenceRefs(parsedSnapshot.error, "snapshot")]
+    );
   }
+  if (canonicalSnapshotJson(rawSnapshot) !== canonicalSnapshotJson(parsedSnapshot.data)) {
+    throw workspaceError(
+      "task_snapshot_malformed",
+      "Task snapshot contains fields outside the canonical durable shape.",
+      "A task snapshot has unsupported fields and recovery has been stopped.",
+      [evidenceRef, "snapshot"]
+    );
+  }
+
+  if (!isSafeTaskId(parsedSnapshot.data.task_id)) {
+    throw workspaceError(
+      "task_snapshot_malformed",
+      "Task snapshot id is not safe.",
+      "A task snapshot is malformed and recovery has been stopped.",
+      [evidenceRef, "snapshot.task_id"]
+    );
+  }
+
+  if (parsedSnapshot.data.task_id !== laneTaskId) {
+    throw workspaceError(
+      "task_snapshot_mismatch",
+      "Task snapshot id does not match its lane.",
+      "A task snapshot does not match its task directory.",
+      [
+        `workspace/tasks/${laneTaskId}/snapshot.json`,
+        `snapshot.task_id:${parsedSnapshot.data.task_id}`
+      ]
+    );
+  }
+
+  if (parsedSnapshot.data.latest_seq !== TASK_SNAPSHOT_LATEST_SEQ) {
+    throw workspaceError(
+      "task_snapshot_mismatch",
+      "Task snapshot latest sequence is not supported by M1 recovery.",
+      "A task snapshot is inconsistent and recovery has been stopped.",
+      [evidenceRef, "snapshot.latest_seq"]
+    );
+  }
+
+  if (!parsedSnapshot.data.task_card) {
+    throw workspaceError(
+      "task_snapshot_missing_card",
+      "Task snapshot does not include the M1 task_card recovery payload.",
+      "A task snapshot is missing the data needed for recovery.",
+      [evidenceRef]
+    );
+  }
+
+  validateSnapshotTaskCardConsistency(parsedSnapshot.data, evidenceRef);
+  return parsedSnapshot.data as TaskSnapshot & { task_card: TaskCard };
 }
 
 function canonicalSnapshotJson(value: unknown): string {
@@ -830,69 +821,65 @@ function canonicalSnapshotJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-async function assertSafeSnapshotLeaf(snapshotPath: string, evidenceRef: string): Promise<void> {
-  const snapshotEntry = await maybeLstat(snapshotPath);
-  if (!snapshotEntry) {
-    throw workspaceError(
-      "task_snapshot_malformed",
-      "Task snapshot cannot be inspected.",
-      "A task snapshot cannot be read safely.",
-      [evidenceRef]
+function taskSnapshotDurableReadError(
+  reason: DurableSingleLinkReadFailureReason,
+  laneTaskId: string,
+  evidenceRef: string,
+  cause?: unknown
+): TaskServiceError {
+  if (reason === "parent_not_safe") {
+    return workspaceError(
+      "task_lane_not_directory",
+      `Task lane is not a safe directory: ${laneTaskId}`,
+      "A task snapshot lane is blocked by a non-directory filesystem entry.",
+      [`workspace/tasks/${laneTaskId}`],
+      cause
     );
   }
-  if (!snapshotEntry.isFile() || snapshotEntry.isSymbolicLink()) {
-    throw workspaceError(
+  if (reason === "not_regular_file" || reason === "multiple_links") {
+    return workspaceError(
       "task_snapshot_malformed",
       "Task snapshot is not a safe regular file.",
       "A task snapshot cannot be read safely.",
-      [evidenceRef]
+      [evidenceRef],
+      cause
     );
   }
-  if (snapshotEntry.size > MAX_TASK_SNAPSHOT_BYTES) {
-    throw workspaceError(
+  if (reason === "too_large") {
+    return workspaceError(
       "task_snapshot_malformed",
       "Task snapshot exceeds the M1 bounded read size.",
       "A task snapshot is too large to load safely.",
-      [evidenceRef]
+      [evidenceRef],
+      cause
     );
   }
-}
-
-async function readBoundedTaskSnapshot(
-  snapshotFile: SnapshotFileHandle,
-  evidenceRef: string
-): Promise<Buffer> {
-  const buffer = Buffer.allocUnsafe(MAX_TASK_SNAPSHOT_BYTES + 1);
-  let offset = 0;
-
-  try {
-    while (offset < buffer.length) {
-      const { bytesRead } = await snapshotFile.read(buffer, offset, buffer.length - offset, offset);
-      if (bytesRead === 0) {
-        break;
-      }
-      offset += bytesRead;
-    }
-  } catch (error) {
-    throw workspaceError(
+  if (reason === "open_failed") {
+    return workspaceError(
+      "task_snapshot_malformed",
+      "Task snapshot cannot be opened safely.",
+      "A task snapshot cannot be read safely.",
+      [evidenceRef],
+      cause
+    );
+  }
+  if (reason === "read_failed") {
+    return workspaceError(
       "task_snapshot_malformed",
       "Task snapshot cannot be read safely.",
       "A task snapshot cannot be read safely.",
       [evidenceRef],
-      error
+      cause
     );
   }
 
-  if (offset > MAX_TASK_SNAPSHOT_BYTES) {
-    throw workspaceError(
-      "task_snapshot_malformed",
-      "Task snapshot exceeds the M1 bounded read size.",
-      "A task snapshot is too large to load safely.",
-      [evidenceRef]
-    );
-  }
-
-  return buffer.subarray(0, offset);
+  return workspaceError(
+    "task_snapshot_malformed",
+    "Task snapshot cannot be inspected.",
+    "A task snapshot cannot be read safely.",
+    [evidenceRef],
+    cause
+  );
 }
 
 type TaskSnapshotQuarantineResult = "quarantined" | "missing" | "unsafe";
