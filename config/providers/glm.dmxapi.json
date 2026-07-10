@@ -1,0 +1,39 @@
+{
+  "schema_version": "m1.glm-provider.v1",
+  "default_provider": "glm-dmxapi",
+  "default_model": "glm-dmxapi/target",
+  "fallback_chain": [
+    "glm-dmxapi/target"
+  ],
+  "task_closure_model": "glm-dmxapi/target",
+  "context_compaction_model": "glm-dmxapi/target",
+  "fallback_smoke_model": "deepseek-v4-pro-guan",
+  "smoke_model": "deepseek-v4-pro-guan",
+  "target_model_id": "glm-5.2",
+  "providers": {
+    "glm-dmxapi": {
+      "api_type": "openai_chat_completions",
+      "base_url": "https://www.dmxapi.cn/v1",
+      "auth": {
+        "type": "api_key",
+        "api_key_ref": "env:GLM_API_KEY"
+      },
+      "models": {
+        "target": {
+          "model_id": "glm-5.2",
+          "max_context": 128000,
+          "max_output": 4096,
+          "capabilities": [
+            "chat"
+          ],
+          "tags": [
+            "target",
+            "placeholder"
+          ],
+          "purpose": "runtime_target_placeholder",
+          "admission": false
+        }
+      }
+    }
+  }
+}
