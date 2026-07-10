@@ -14,3 +14,4 @@
 {"issue":34,"pr":70,"date":"2026-07-08","fixture":"expanded/medium","rounds":2,"gate_net_catch":6,"verdicts":{"confirmed":6,"plausible":0,"refuted":0},"residual_deferred":0,"premerge_skip_blocks":0}
 {"issue":35,"pr":71,"date":"2026-07-08","fixture":"expanded/medium","rounds":2,"gate_net_catch":4,"verdicts":{"confirmed":4,"plausible":0,"refuted":0},"residual_deferred":0,"premerge_skip_blocks":0}
 {"issue":36,"pr":72,"date":"2026-07-08","fixture":"expanded/medium","rounds":1,"gate_net_catch":0,"verdicts":{"confirmed":0,"plausible":0,"refuted":0},"residual_deferred":0,"premerge_skip_blocks":0}
+{"issue":37,"pr":73,"date":"2026-07-10","fixture":"expanded/high","rounds":10,"gate_net_catch":30,"verdicts":{"confirmed":29,"plausible":1,"refuted":3},"residual_deferred":1,"premerge_skip_blocks":0}
