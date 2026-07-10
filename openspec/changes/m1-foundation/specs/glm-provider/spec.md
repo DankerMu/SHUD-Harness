@@ -10,7 +10,7 @@ zero `providers:` 配置块 SHALL 配置 GLM 5.2 第三方 OpenAI 兼容端点�
 
 M1 临时 carrier `deepseek-v4-pro-guan` MUST NOT 出现在 Zero 消费的 `providers.*.models`、运行时 `default_model`、`fallback_chain`、`task_closure_model` 或 `context_compaction_model` 中；Zero provider 模型表与运行时 selector 仅保留/指向 `glm-dmxapi/target`。顶层 `smoke_model` 与 `fallback_smoke_model` 仅保存 raw carrier model id，供 smoke/后续迁移使用，不是 Zero model ref，不构成运行时准入。
 
-Canonical readiness evidence MUST load exactly `<canonicalRepoRoot>/config/providers/glm.dmxapi.json`, where `canonicalRepoRoot` is resolved from the source checkout rather than caller input. Canonical CLI/API MUST NOT accept repo root, config path, fetch transport, environment, clock, or timeout overrides that can mint the same readiness note. The canonical storage writer and full canonical schema validation MUST be private to the fixed-authority canonical engine; no exported non-smoke function or exported test helper may write, seed, back up, or restore `glm_provider_smoke.json`. Test-only dependency injection MUST use an explicitly noncanonical fixture entrypoint, MUST NOT target `canonicalRepoRoot`, and MUST write a different note filename carrying `evidence_scope: fixture` so #38 cannot consume it as canonical readiness. Canonical-path tests MUST leave the note absent/current failed after a failing invocation; only a fresh successful canonical smoke may mint or restore a passing note.
+Canonical readiness evidence MUST load exactly `<canonicalRepoRoot>/config/providers/glm.dmxapi.json`, where `canonicalRepoRoot` is resolved from the source checkout rather than caller input. Canonical CLI/API MUST NOT accept repo root, config path, fetch transport, environment, clock, or timeout overrides that can mint the same readiness note. One fixed-authority canonical command operation MUST own argument classification, CLI-preflight stale-pass invalidation, fixed runtime selection, smoke execution, and publication; its facade MUST NOT import a standalone canonical invalidator. The canonical storage writer and full canonical schema validation MUST be private to that engine; no exported non-smoke function or exported test helper may write, seed, back up, restore, invalidate, delete, remove, unlink, or tombstone `glm_provider_smoke.json`. Test-only dependency injection MUST use an explicitly noncanonical fixture entrypoint, MUST NOT target `canonicalRepoRoot`, and MUST write a different note filename carrying `evidence_scope: fixture` so #38 cannot consume it as canonical readiness. Canonical-path tests MUST leave the note absent/current failed after a failing invocation; only a fresh successful canonical smoke may mint or restore a passing note. Arbitrary same-process local code injection (including Bun preload replacement of globals) is outside the ADR-0002 trusted local single-user threat model; this requirement MUST NOT claim resistance through incomplete runtime-argument heuristics.
 
 #### Scenario: secret 不落盘
 
@@ -41,7 +41,7 @@ Canonical readiness evidence MUST load exactly `<canonicalRepoRoot>/config/provi
 
 系统 SHALL 提供冒烟脚本：以最小 prompt 经配置的 provider 完成一次往返，得到非空 completion，且请求实际命中配置的 `base_url`，脚本 exit 0。每次 attempt timeout 固定为 15000ms，失败允许重试一次并记录；canonical CLI/API 不提供 timeout override。取得 Response 后，未读 body、oversized consumed body 及其他 early-return cleanup MUST 共用受当前 attempt signal/controller 约束的 cancellation primitive，在同一 deadline 内 cancel/abort；系统 MUST NOT 为清理读取 provider 内容，也 MUST NOT 在 deadline 外等待 provider-controlled cancellation。Fetch 暴露的 exact-URL numeric non-2xx status `300..599` MUST 由 producer 与 canonical validator 以同一契约接受为本地 `http_error` 事实。失败结果、readiness note 与 CLI 输出 MUST 仅包含本地构造的结构化事实，MUST NOT 持久化或输出 provider response body、status text、headers 或外部异常原文。
 
-每次 canonical 运行前 SHALL 使旧 passing note 失效，包含 CLI unsupported/incomplete/invalid preflight 失败。若 canonical `workspace`、`workspace/readiness` ancestor 或 final entry 是 symlink / 非预期类型，失效逻辑 SHALL 仅移除 canonical checkout 下的本地不安全目录项、MUST NOT 跟随或改写外部 target；随后发布当前结果或保持 canonical path 不可读为 pass。若 expected realpath/type 的 ancestor 由当前 uid 拥有但 mode 缺少 owner rwx，canonical authority SHALL 恢复 owner rwx 后再失效/发布，不得删除目录或改写 sibling readiness notes；非当前 uid 所有的目录仍为 authority error。Darwin ACL 的 `delete` / `delete_child` deny 可能在 owner mode 已恢复后继续阻止 unlink；对已证明安全的单链接 regular passing note，authority MUST 先原位写入有界、本地构造且不可解释为 pass 的 tombstone，再 best-effort unlink，并回读证明 canonical path 不可消费为 pass。若 ACL 同时阻止原位失效，系统 MUST 报明确 authority failure，不能宣称失效成功。final hardlink 采用同样的 external-target 不变规则且不得原位改写。单链接 regular 旧 note 在读取前 MUST 以 metadata size 上限检查；超限文件 MUST 在不读取内容的前提下安全移除/替换；size 内但因权限不可读的 leaf MUST 在目录 authority 恢复后按不可信旧证据移除，不能保留可能的 pass。
+每次 canonical 运行前 SHALL 使旧 passing note 失效，包含 CLI unsupported/incomplete/invalid preflight 失败。若 canonical `workspace`、`workspace/readiness` ancestor 或 final entry 是 symlink / 非预期类型，失效逻辑 SHALL 仅移除 canonical checkout 下的本地不安全目录项、MUST NOT 跟随或改写外部 target；随后发布当前结果或保持 canonical path 不可读为 pass。若 expected realpath/type 的 ancestor 由当前 uid 拥有但 mode 缺少 owner rwx，canonical authority SHALL 恢复 owner rwx 后再失效/发布，不得删除目录或改写 sibling readiness notes；非当前 uid 所有的目录仍为 authority error。Darwin ACL 的 `delete` / `delete_child` deny 可能在 owner mode 已恢复后继续阻止 unlink；对 metadata 证明为 regular、单链接、size-capped 的 leaf，authority MUST 先以 no-follow read fd 绑定并以 fstat 复核 type/nlink/uid/dev/ino。仅当 bound leaf 由当前 uid 所有时，authority MAY 通过该 fd 恢复所需 owner read/write mode，且 MUST 保留其他 mode bits；随后以 no-follow read/write fd 重新打开并复核同一 dev/ino、regular、nlink=1、current uid、size cap，确认是 passing note 后原位写入有界、本地构造且不可解释为 pass 的 tombstone，再 best-effort unlink，并回读证明 canonical path 不可消费为 pass。若 leaf 被替换、非当前 uid 所有，或 ACL 阻止 fd 权限修复/原位失效，系统 MUST 报明确 authority failure，不能 chmod/改写该 leaf 或宣称失效成功。final symlink/hardlink 采用 external-target 不变规则且不得原位 chmod/改写。单链接 regular 旧 note 在读取前 MUST 以 metadata size 上限检查；超限文件 MUST 在不读取内容的前提下安全移除/替换；size 内但因权限不可读的 leaf MUST 在目录 authority 恢复后按不可信旧证据移除或明确 authority failure，不能保留可消费的 pass。
 
 #### Scenario: 冒烟通过
 
@@ -62,6 +62,11 @@ Canonical readiness evidence MUST load exactly `<canonicalRepoRoot>/config/provi
 
 - **WHEN** 已有 passing note 后以 unsupported、incomplete 或 invalid 参数调用 canonical CLI
 - **THEN** CLI 以固定本地错误退出且不回显 raw argv，canonical note 不存在或为当前 failed note，绝不仍为 passed
+
+#### Scenario: CLI help 不改变 readiness
+
+- **WHEN** 已有 passing note 后以唯一合法 no-op 参数 `--help` 调用 canonical CLI
+- **THEN** CLI 输出固定 help、exit 0、不触发 provider 请求、不回显 raw argv/secret，canonical note bytes 与调用前完全相同
 
 #### Scenario: oversized 旧 note 有界失效
 
@@ -102,6 +107,16 @@ Canonical readiness evidence MUST load exactly `<canonicalRepoRoot>/config/provi
 
 - **WHEN** canonical-path test 在 seeded pass 后执行失败/unsupported invocation 并进入 teardown
 - **THEN** 不存在 exported backup/restore writer，teardown 不恢复旧 pass；只有后续 fresh successful canonical smoke 可重新发布 passed note
+
+#### Scenario: 只读 leaf 与 Darwin delete ACL 组合不保留 pass
+
+- **WHEN** current-uid-owned safe single-link passing note mode 为 `0444` 且 parent 带当前用户 `deny delete_child`，随后 unsupported CLI 或 missing-key smoke 失败
+- **THEN** authority 仅通过 bound fd 恢复 owner read/write、复核同一 dev/ino 后写入 non-pass tombstone；ACL 生效期间 note 仍在但不可消费为 pass，sibling byte-identical
+
+#### Scenario: canonical facade 不暴露 standalone mutator
+
+- **WHEN** 检查 `scripts/glm-provider` production exports 与 CLI facade imports
+- **THEN** argument classification 与 preflight invalidation 只存在于单一 canonical command operation 内，不存在 exported/imported standalone invalidate/delete/remove/unlink/tombstone readiness mutator
 
 ### Requirement: 冒烟不等于准入
 
