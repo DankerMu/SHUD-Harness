@@ -15,8 +15,10 @@ import {
   createJsonRecordIfAbsent,
   createJsonRecordIfAbsentWithCleanupPermit,
   readJsonRecord,
+  runWithWorkspaceRecordAuthorityDeadline,
   workspaceRecordPath,
   writeJsonRecord,
+  WorkspaceRecordConditionalDeleteError,
   type WorkspaceRecordCleanupPermit
 } from "./workspace-record-store";
 
@@ -325,7 +327,11 @@ export function createIdempotencyRecordService(
             )
           );
         }
-        try {
+        return await withTransitionGuard(
+          guard,
+          guardPathFor(workspaceRoot, parsedScope, input.key),
+          transitionGuardHooks,
+          async () => {
           const retryExisting = await service.lookupReplay({
             ...input,
             scope: parsedScope
@@ -350,9 +356,8 @@ export function createIdempotencyRecordService(
             allowExistingMutation: true
           });
           return beginResultFromStoredRecord(stored, input.requestDigest, parsedScope);
-        } finally {
-          await releaseTransitionGuard(guard, guardPathFor(workspaceRoot, parsedScope, input.key), transitionGuardHooks);
-        }
+          }
+        );
       }
 
       return existing;
@@ -442,7 +447,11 @@ export function createIdempotencyRecordService(
         throw transitionGuardBusyError(parsedScope, input.key, "complete");
       }
 
-      try {
+      return await withTransitionGuard(
+        guard,
+        guardPathFor(workspaceRoot, parsedScope, input.key),
+        transitionGuardHooks,
+        async () => {
         const existing = await service.lookupReplay({
           ...input,
           scope: parsedScope
@@ -486,9 +495,8 @@ export function createIdempotencyRecordService(
           },
           { allowCompletedWrite: true, allowExistingMutation: true }
         );
-      } finally {
-        await releaseTransitionGuard(guard, guardPathFor(workspaceRoot, parsedScope, input.key), transitionGuardHooks);
-      }
+        }
+      );
     },
 
     async invalidateCompletedRecord(
@@ -508,7 +516,11 @@ export function createIdempotencyRecordService(
         throw transitionGuardBusyError(parsedScope, input.key, "fail");
       }
 
-      try {
+      return await withTransitionGuard(
+        guard,
+        guardPathFor(workspaceRoot, parsedScope, input.key),
+        transitionGuardHooks,
+        async () => {
         const existing = await service.getRecord(parsedScope, input.key);
         if (!existing) {
           throw missingTransitionRecordError(
@@ -541,9 +553,8 @@ export function createIdempotencyRecordService(
           evidenceRef,
           IdempotencyRecordSchema
         );
-      } finally {
-        await releaseTransitionGuard(guard, guardPathFor(workspaceRoot, parsedScope, input.key), transitionGuardHooks);
-      }
+        }
+      );
     },
 
     async failRecord(input: FailIdempotencyRecordInput): Promise<IdempotencyRecord> {
@@ -595,7 +606,11 @@ export function createIdempotencyRecordService(
         throw transitionGuardBusyError(parsedScope, input.key, "fail");
       }
 
-      try {
+      return await withTransitionGuard(
+        guard,
+        guardPathFor(workspaceRoot, parsedScope, input.key),
+        transitionGuardHooks,
+        async () => {
         const existing = await service.lookupReplay({
           ...input,
           scope: parsedScope
@@ -636,9 +651,8 @@ export function createIdempotencyRecordService(
           },
           { allowCompletedWrite: false, allowExistingMutation: true }
         );
-      } finally {
-        await releaseTransitionGuard(guard, guardPathFor(workspaceRoot, parsedScope, input.key), transitionGuardHooks);
-      }
+        }
+      );
     },
 
     async recoverFailedRecordAfterRollback(
@@ -727,6 +741,27 @@ async function acquireIdempotencyTransitionGuard(
   evidenceRef: string,
   transitionGuardHooks?: IdempotencyTransitionGuardHooks
 ): Promise<IdempotencyTransitionGuardAcquire> {
+  const deadline = Date.now() + IDEMPOTENCY_TRANSITION_GUARD_WAIT_MS;
+  return await runWithWorkspaceRecordAuthorityDeadline(deadline, async () =>
+    await acquireIdempotencyTransitionGuardBeforeDeadline(
+      workspaceRoot,
+      scope,
+      key,
+      evidenceRef,
+      deadline,
+      transitionGuardHooks
+    )
+  );
+}
+
+async function acquireIdempotencyTransitionGuardBeforeDeadline(
+  workspaceRoot: string,
+  scope: IdempotencyScope,
+  key: string,
+  evidenceRef: string,
+  deadline: number,
+  transitionGuardHooks?: IdempotencyTransitionGuardHooks
+): Promise<IdempotencyTransitionGuardAcquire> {
   const directorySegments = idempotencyRecordDirectorySegments(scope);
   const guardFileName = idempotencyTransitionGuardFileName(key);
   const guardPath = workspaceRecordPath(
@@ -739,9 +774,12 @@ async function acquireIdempotencyTransitionGuard(
     [...directorySegments, idempotencyTransitionCleanupLockFileName(key)],
     evidenceRef
   );
-  const deadline = Date.now() + IDEMPOTENCY_TRANSITION_GUARD_WAIT_MS;
-
+  let attempted = false;
   for (;;) {
+    if (attempted && Date.now() >= deadline - IDEMPOTENCY_TRANSITION_GUARD_POLL_MS) {
+      return { status: "busy" };
+    }
+    attempted = true;
     const guard: IdempotencyTransitionGuard = {
       guard_id: randomUUID(),
       owner_pid: process.pid,
@@ -752,13 +790,14 @@ async function acquireIdempotencyTransitionGuard(
       workspaceRoot,
       scope,
       key,
-      evidenceRef
+      evidenceRef,
+      deadline
     );
     if (publishLock.status === "busy") {
       if (Date.now() >= deadline) {
         return { status: "busy" };
       }
-      await sleep(IDEMPOTENCY_TRANSITION_GUARD_POLL_MS);
+      await sleepForRemainingGuardDeadline(deadline);
       continue;
     }
 
@@ -838,7 +877,8 @@ async function acquireIdempotencyTransitionGuard(
         key,
         guardPath,
         evidenceRef,
-        transitionGuardHooks
+        transitionGuardHooks,
+        deadline
       )
     ) {
       continue;
@@ -847,7 +887,7 @@ async function acquireIdempotencyTransitionGuard(
       return { status: "busy" };
     }
 
-    await sleep(IDEMPOTENCY_TRANSITION_GUARD_POLL_MS);
+    await sleepForRemainingGuardDeadline(deadline);
   }
 }
 
@@ -857,7 +897,8 @@ async function removeStaleIdempotencyTransitionGuard(
   key: string,
   guardPath: string,
   evidenceRef: string,
-  transitionGuardHooks?: IdempotencyTransitionGuardHooks
+  transitionGuardHooks?: IdempotencyTransitionGuardHooks,
+  deadline?: number
 ): Promise<boolean> {
   const existing = await readJsonRecord(guardPath, evidenceRef, IdempotencyTransitionGuardSchema);
   if (!existing) {
@@ -872,7 +913,8 @@ async function removeStaleIdempotencyTransitionGuard(
     workspaceRoot,
     scope,
     key,
-    evidenceRef
+    evidenceRef,
+    deadline
   );
   if (cleanupLock.status === "busy") {
     return false;
@@ -1045,7 +1087,27 @@ async function acquireIdempotencyTransitionCleanupLock(
   workspaceRoot: string,
   scope: IdempotencyScope,
   key: string,
-  evidenceRef: string
+  evidenceRef: string,
+  requestedDeadline?: number
+): Promise<IdempotencyTransitionGuardAcquire> {
+  const deadline = requestedDeadline ?? Date.now() + IDEMPOTENCY_TRANSITION_GUARD_WAIT_MS;
+  return await runWithWorkspaceRecordAuthorityDeadline(deadline, async () =>
+    await acquireIdempotencyTransitionCleanupLockBeforeDeadline(
+      workspaceRoot,
+      scope,
+      key,
+      evidenceRef,
+      deadline
+    )
+  );
+}
+
+async function acquireIdempotencyTransitionCleanupLockBeforeDeadline(
+  workspaceRoot: string,
+  scope: IdempotencyScope,
+  key: string,
+  evidenceRef: string,
+  deadline: number
 ): Promise<IdempotencyTransitionGuardAcquire> {
   const directorySegments = idempotencyRecordDirectorySegments(scope);
   const cleanupLockFileName = idempotencyTransitionCleanupLockFileName(key);
@@ -1055,8 +1117,12 @@ async function acquireIdempotencyTransitionCleanupLock(
     evidenceRef
   );
 
-  const deadline = Date.now() + IDEMPOTENCY_TRANSITION_GUARD_WAIT_MS;
+  let attempted = false;
   for (;;) {
+    if (attempted && Date.now() >= deadline - IDEMPOTENCY_TRANSITION_GUARD_POLL_MS) {
+      return { status: "busy" };
+    }
+    attempted = true;
     const cleanupLock: IdempotencyTransitionGuard = {
       guard_id: randomUUID(),
       owner_pid: process.pid,
@@ -1091,7 +1157,7 @@ async function acquireIdempotencyTransitionCleanupLock(
       return { status: "busy" };
     }
 
-    await sleep(IDEMPOTENCY_TRANSITION_GUARD_POLL_MS);
+    await sleepForRemainingGuardDeadline(deadline);
   }
 }
 
@@ -1178,6 +1244,13 @@ function createIdempotencyTransitionGuardRelease(
     } catch (permitError) {
       if (!cleanupPermit) throw permitError;
       cleanupPermit = undefined;
+      if (
+        !(permitError instanceof WorkspaceRecordConditionalDeleteError) ||
+        permitError.mutationPhase !== "pre_mutation" ||
+        permitError.failureStage !== "permit_admission"
+      ) {
+        throw permitError;
+      }
       try {
         result = await conditionalDeleteIdempotencyTransitionGuard(
           path,
@@ -1233,6 +1306,38 @@ async function releaseTransitionGuard(
     }
   }
   if (primaryError !== undefined) throw primaryError;
+}
+
+async function withTransitionGuard<T>(
+  guard: Extract<IdempotencyTransitionGuardAcquire, { status: "acquired" }>,
+  path: string,
+  hooks: IdempotencyTransitionGuardHooks | undefined,
+  mutation: () => Promise<T>
+): Promise<T> {
+  let result: T | undefined;
+  let mutationError: unknown;
+  try {
+    result = await mutation();
+  } catch (error) {
+    mutationError = error;
+  }
+
+  try {
+    await releaseTransitionGuard(guard, path, hooks);
+  } catch (releaseError) {
+    if (mutationError !== undefined) {
+      throw preservePrimaryAndCompensationErrors(mutationError, releaseError);
+    }
+    throw releaseError;
+  }
+  if (mutationError !== undefined) throw mutationError;
+  return result as T;
+}
+
+async function sleepForRemainingGuardDeadline(deadline: number): Promise<void> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) return;
+  await sleep(Math.min(IDEMPOTENCY_TRANSITION_GUARD_POLL_MS, remainingMs));
 }
 
 function guardPathFor(

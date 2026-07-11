@@ -158,7 +158,17 @@ export async function physicalCanonicalPath(path: string, evidenceRef: string): 
         );
       }
       try {
-        return join(await realpath(candidatePath), ...missingSegments.reverse());
+        if (missingSegments.length === 0 && !entry.isDirectory()) {
+          const physicalPath = await realpath(candidatePath);
+          return join(
+            parse(physicalPath).dir,
+            conservativeMissingPathIdentitySegment(parse(physicalPath).base)
+          );
+        }
+        return join(
+          await realpath(candidatePath),
+          ...missingSegments.reverse().map(conservativeMissingPathIdentitySegment)
+        );
       } catch {
         throw new WorkspacePathSafetyError(
           "Workspace path cannot be canonicalized safely.",
@@ -177,6 +187,10 @@ export async function physicalCanonicalPath(path: string, evidenceRef: string): 
     missingSegments.push(parse(candidatePath).base);
     candidatePath = parentPath;
   }
+}
+
+function conservativeMissingPathIdentitySegment(segment: string): string {
+  return /^[\x00-\x7f]+$/.test(segment) ? segment.toLowerCase() : segment;
 }
 
 function matchingBoundary(
