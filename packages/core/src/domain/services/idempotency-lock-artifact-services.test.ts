@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { fstat } from "node:fs";
+import { fstat, fstatSync, type BigIntStats } from "node:fs";
 import {
   access,
   chmod,
@@ -2297,6 +2297,8 @@ describe("idempotency, lock, and artifact services", () => {
       record: { id: string };
       permit: WorkspaceRecordCleanupPermit;
     }> = [];
+    const closedPinnedFileDescriptors = new Set<number>();
+    const pinnedHandleClosedByPath = new Map<string, ReturnType<typeof createSignal>>();
     let pinnedHandleClosures = 0;
 
     try {
@@ -2306,8 +2308,22 @@ describe("idempotency, lock, and artifact services", () => {
         const evidenceRef = `permit.capacity.${index}`;
         const result = await runWithWorkspaceRecordPublicationHooks(
           {
-            afterCleanupPermitPinnedHandleClosed: () => {
+            afterCleanupPermitPinnedHandleClosed: (input) => {
+              let descriptorError: unknown;
+              try {
+                fstatSync(input.fd);
+              } catch (error) {
+                descriptorError = error;
+              }
+              expect(descriptorError).toMatchObject({ code: "EBADF" });
+              expect(closedPinnedFileDescriptors.has(input.fd)).toBe(false);
+              const pinnedHandleClosed = pinnedHandleClosedByPath.get(input.path);
+              if (!pinnedHandleClosed) {
+                throw new Error(`Unexpected cleanup permit pinned handle path: ${input.path}`);
+              }
+              closedPinnedFileDescriptors.add(input.fd);
               pinnedHandleClosures += 1;
+              pinnedHandleClosed.resolve();
             }
           },
           () =>
@@ -2321,8 +2337,14 @@ describe("idempotency, lock, and artifact services", () => {
             )
         );
         if (result.status !== "created") throw new Error("Expected cleanup permit capacity fixture.");
+        const path = workspaceRecordPath(
+          workspaceRoot,
+          ["permit-capacity", fileName],
+          evidenceRef
+        );
+        pinnedHandleClosedByPath.set(path, createSignal());
         created.push({
-          path: workspaceRecordPath(workspaceRoot, ["permit-capacity", fileName], evidenceRef),
+          path,
           evidenceRef,
           record,
           permit: result.cleanupPermit
@@ -2346,23 +2368,62 @@ describe("idempotency, lock, and artifact services", () => {
       expect(overflow.evidenceRefs).toEqual([overflowEvidenceRef]);
       expect(overflow.message).toBe("Workspace record authority coordination is at capacity.");
     } finally {
-      await Promise.all(
-        created.map(({ path, evidenceRef, record, permit }) =>
-          conditionalDeleteJsonRecordWithCleanupPermit(
-            permit,
-            path,
-            evidenceRef,
+      await Promise.race([
+        (async () => {
+          for (const { path, evidenceRef, record, permit } of created) {
+            await conditionalDeleteJsonRecordWithCleanupPermit(
+              permit,
+              path,
+              evidenceRef,
+              schema,
+              {
+                kind: "record",
+                expected: record,
+                matches: (current, expected) => current.id === expected.id
+              }
+            );
+            const pinnedHandleClosed = pinnedHandleClosedByPath.get(path);
+            if (!pinnedHandleClosed) throw new Error(`Missing pinned handle signal: ${path}`);
+            await pinnedHandleClosed.promise;
+          }
+        })(),
+        timeoutAfter(10_000, "cleanup permit pinned handles did not all close")
+      ]);
+      expect(pinnedHandleClosures).toBe(1024);
+      expect(closedPinnedFileDescriptors.size).toBe(1024);
+      expect(closedPinnedFileDescriptors.size).toBe(created.length);
+
+      const recoveryEvidenceRef = "permit.capacity.recovered";
+      const recoveryPath = workspaceRecordPath(
+        workspaceRoot,
+        ["permit-capacity", "permit-capacity-recovered.json"],
+        recoveryEvidenceRef
+      );
+      const recoveryRecord = { id: "permit-capacity-recovered" };
+      const recovery = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        ["permit-capacity"],
+        "permit-capacity-recovered.json",
+        recoveryRecord,
+        recoveryEvidenceRef,
+        schema
+      );
+      expect(recovery.status).toBe("created");
+      if (recovery.status === "created") {
+        expect(
+          await conditionalDeleteJsonRecordWithCleanupPermit(
+            recovery.cleanupPermit,
+            recoveryPath,
+            recoveryEvidenceRef,
             schema,
             {
               kind: "record",
-              expected: record,
+              expected: recoveryRecord,
               matches: (current, expected) => current.id === expected.id
             }
           )
-        )
-      );
-      await delay(0);
-      expect(pinnedHandleClosures).toBe(created.length);
+        ).toEqual({ status: "deleted" });
+      }
     }
   }, 20_000);
 
@@ -3502,6 +3563,7 @@ describe("idempotency, lock, and artifact services", () => {
       let expectedIdentity: { dev: bigint; ino: bigint } | undefined;
       let isolatedPath: string | undefined;
       let replacementIdentity: { dev: bigint; ino: bigint } | undefined;
+      let pinnedDescriptor: number | undefined;
 
       const failure = await captureTaskServiceError(() =>
         runWithWorkspaceRecordCompensationTestHooks(
@@ -3509,6 +3571,7 @@ describe("idempotency, lock, and artifact services", () => {
             beforeOwnedTemporaryRecordWrite: async (input) => {
               temporaryPath = input.path;
               expectedIdentity = input.identity;
+              pinnedDescriptor = input.fd;
               await writeFile(input.path, partialBytes);
               throw primaryError;
             },
@@ -3520,6 +3583,10 @@ describe("idempotency, lock, and artifact services", () => {
                 await writeFile(input.isolatedPath, replacementBytes, { flag: "wx" });
                 replacementIdentity = await stat(input.isolatedPath, { bigint: true });
               }
+              const pinnedIdentity = await readFileDescriptorIdentity(pinnedDescriptor!);
+              expect(workspaceRecordPhysicalIdentityMatches(pinnedIdentity, expectedIdentity!)).toBe(
+                true
+              );
               throw isolationError;
             },
             beforeOwnedPathCompensationStateInspection: ({ site }) => {
@@ -3548,6 +3615,8 @@ describe("idempotency, lock, and artifact services", () => {
       expect(temporaryPath).toBeDefined();
       expect(expectedIdentity).toBeDefined();
       expect(isolatedPath).toBeDefined();
+      expect(pinnedDescriptor).toBeDefined();
+      await expectFileDescriptorClosed(pinnedDescriptor!);
 
       if (outcome === "restore_exact") {
         await expectPrivateAuthorityDirectory(dirname(temporaryPath!));
@@ -8116,6 +8185,20 @@ async function expectFileDescriptorClosed(fd: number): Promise<void> {
       })
   );
   expect(error).toMatchObject({ code: "EBADF" });
+}
+
+async function readFileDescriptorIdentity(
+  fd: number
+): Promise<{ dev: bigint; ino: bigint }> {
+  const entry = await new Promise<BigIntStats>(
+    (resolvePromise, rejectPromise) => {
+      fstat(fd, { bigint: true }, (statError, descriptorStat) => {
+        if (statError) rejectPromise(statError);
+        else resolvePromise(descriptorStat);
+      });
+    }
+  );
+  return { dev: entry.dev, ino: entry.ino };
 }
 
 function aggregateErrorMessages(value: unknown, ancestors = new Set<unknown>()): string[] {
