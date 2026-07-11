@@ -22,7 +22,8 @@ export const MAX_SERVICE_RECORD_BYTES = 1024 * 1024;
 const SAFE_RECORD_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 const MAX_RECORD_AUTHORITY_RESERVATIONS = 1024;
 const MAX_RECORD_AUTHORITY_RESERVATIONS_PER_PATH = 64;
-const MAX_RECORD_AUTHORITY_ALIASES_PER_MUTEX = 64;
+// One shared filesystem-aware alias plus 64 exact observed spellings.
+const MAX_RECORD_AUTHORITY_ALIASES_PER_MUTEX = 65;
 const RECORD_AUTHORITY_ACQUISITION_TIMEOUT_MS = 5_000;
 const RECORD_TEMP_CLEANUP_ATTEMPTS = 3;
 const RECORD_TEMP_CLEANUP_RETRY_MS = 5;
@@ -229,6 +230,9 @@ export interface WorkspaceRecordCompensationTestHooks {
       path: string;
       identity: WorkspaceRecordPhysicalIdentity;
     }>
+  ) => Promise<void> | void;
+  beforeOwnedPathIsolation?: (
+    input: Readonly<{ path: string; isolatedPath: string; site: WorkspaceRecordPostIsolationSite }>
   ) => Promise<void> | void;
   afterOwnedPathIsolation?: (
     input: Readonly<{ path: string; isolatedPath: string; site: WorkspaceRecordPostIsolationSite }>
@@ -524,6 +528,9 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     if (!workspaceRecordPhysicalIdentityMatches(finalPublicIdentity, observedIdentity)) {
       throw recordChangedBeforeConditionalRemovalError(evidenceRef);
     }
+    await compensationTestHookStorage.getStore()?.beforeOwnedPathIsolation?.(
+      Object.freeze({ path, isolatedPath: quarantinePath, site: "conditional_delete" })
+    );
     await rename(path, quarantinePath);
     if (mutationState) mutationState.started = true;
   } catch (error) {
@@ -1372,6 +1379,9 @@ async function conditionalUnlinkOwnedPath(
     if (!workspaceRecordPhysicalIdentityMatches(finalPublicIdentity, expected)) {
       throw publicationStateError(evidenceRef);
     }
+    await compensationTestHookStorage.getStore()?.beforeOwnedPathIsolation?.(
+      Object.freeze({ path, isolatedPath, site: "conditional_unlink_owned_path" })
+    );
     await rename(path, isolatedPath);
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) {
@@ -1580,6 +1590,9 @@ async function removeOwnedPathWithoutHooks(
     if (!workspaceRecordPhysicalIdentityMatches(finalPublicIdentity, expectedIdentity)) {
       throw publicationStateError(evidenceRef);
     }
+    await compensationTestHookStorage.getStore()?.beforeOwnedPathIsolation?.(
+      Object.freeze({ path, isolatedPath, site })
+    );
     await rename(path, isolatedPath);
   } catch (error) {
     const cleanupErrors: unknown[] = [];
@@ -1619,7 +1632,7 @@ async function removeOwnedPathWithoutHooks(
       path,
       mutationNamespace,
       expectedIdentity,
-      requireExpectedBytes ? expectedBytes : undefined,
+      expectedBytes,
       evidenceRef,
       site,
       namespaceCleanupAttempted
@@ -1633,7 +1646,7 @@ async function compensateOwnedIsolatedPath(
   publicPath: string,
   mutationNamespace: string,
   expectedIdentity: OwnedTemporaryRecordIdentity,
-  expectedBytes: Buffer | undefined,
+  expectedBytes: Buffer,
   evidenceRef: string,
   site: WorkspaceRecordPostIsolationSite,
   namespaceCleanupAlreadyAttempted = false
@@ -1678,36 +1691,85 @@ async function restoreOwnedIsolatedPath(
   isolatedPath: string,
   publicPath: string,
   expectedIdentity: OwnedTemporaryRecordIdentity,
-  expectedBytes: Buffer | undefined,
+  expectedBytes: Buffer,
   evidenceRef: string,
   site: WorkspaceRecordPostIsolationSite
 ): Promise<void> {
   try {
-    const identity = await readRegularFilePathIdentity(isolatedPath, evidenceRef);
     if (
-      !identity ||
-      !workspaceRecordPhysicalIdentityMatches(identity, expectedIdentity) ||
-      (expectedBytes !== undefined &&
-        !(await ownedGenerationBytesEqual(
-          isolatedPath,
-          expectedIdentity,
-          expectedBytes,
-          evidenceRef
-        )))
+      !(await ownedGenerationStateMatches(
+        isolatedPath,
+        expectedIdentity,
+        expectedBytes,
+        1n,
+        evidenceRef
+      ))
     ) {
-      throw publicationStateError(evidenceRef);
+      const cleanupErrors = await removeUnsafeOwnedIsolatedSource(
+        isolatedPath,
+        expectedIdentity,
+        expectedBytes,
+        evidenceRef
+      );
+      throw preserveWorkspacePrimaryError(publicationStateError(evidenceRef), cleanupErrors);
     }
+
     await link(isolatedPath, publicPath);
     const sourceUnlinkErrors: unknown[] = [];
     for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
+      let commitProofFailed = false;
       try {
         await compensationTestHookStorage.getStore()?.beforeOwnedIsolatedSourceUnlink?.(
           Object.freeze({ path: publicPath, isolatedPath, site, attempt })
         );
+        if (
+          !(await restoredLinkedGenerationMatches(
+            publicPath,
+            isolatedPath,
+            expectedIdentity,
+            expectedBytes,
+            evidenceRef
+          ))
+        ) {
+          commitProofFailed = true;
+          const cleanupErrors = await rollbackUnsafeRestoredLink(
+            publicPath,
+            isolatedPath,
+            expectedIdentity,
+            expectedBytes,
+            evidenceRef
+          );
+          throw preserveWorkspacePrimaryError(
+            publicationStateError(evidenceRef),
+            cleanupErrors
+          );
+        }
         await unlink(isolatedPath);
+        if (
+          !(await ownedGenerationStateMatches(
+            publicPath,
+            expectedIdentity,
+            expectedBytes,
+            1n,
+            evidenceRef
+          ))
+        ) {
+          commitProofFailed = true;
+          const cleanupErrors = await removeExactOwnedPublicLink(
+            publicPath,
+            expectedIdentity,
+            evidenceRef
+          );
+          throw preserveWorkspacePrimaryError(
+            publicationStateError(evidenceRef),
+            cleanupErrors
+          );
+        }
         return;
       } catch (error) {
         sourceUnlinkErrors.push(error);
+        if (commitProofFailed) break;
+        if (!(await recordPathEntryExists(isolatedPath, evidenceRef))) break;
         if (attempt < RECORD_TEMP_CLEANUP_ATTEMPTS) {
           await sleep(RECORD_TEMP_CLEANUP_RETRY_MS);
         }
@@ -1718,42 +1780,13 @@ async function restoreOwnedIsolatedPath(
       sourceUnlinkErrors[0],
       sourceUnlinkErrors.slice(1)
     );
-    const rollbackErrors: unknown[] = [];
-    try {
-      const [publicIdentity, privateIdentity] = await Promise.all([
-        lstat(publicPath, { bigint: true }),
-        lstat(isolatedPath, { bigint: true })
-      ]);
-      if (
-        !publicIdentity.isFile() ||
-        publicIdentity.isSymbolicLink() ||
-        !privateIdentity.isFile() ||
-        privateIdentity.isSymbolicLink() ||
-        publicIdentity.nlink !== 2n ||
-        privateIdentity.nlink !== 2n ||
-        !workspaceRecordPhysicalIdentityMatches(publicIdentity, expectedIdentity) ||
-        !workspaceRecordPhysicalIdentityMatches(privateIdentity, expectedIdentity) ||
-        !workspaceRecordPhysicalIdentityMatches(publicIdentity, privateIdentity) ||
-        (expectedBytes !== undefined &&
-          (!(await ownedGenerationBytesEqual(
-              publicPath,
-              expectedIdentity,
-              expectedBytes,
-              evidenceRef
-            )) ||
-            !(await ownedGenerationBytesEqual(
-              isolatedPath,
-              expectedIdentity,
-              expectedBytes,
-              evidenceRef
-            ))))
-      ) {
-        throw publicationStateError(evidenceRef);
-      }
-      await unlink(publicPath);
-    } catch (error) {
-      rollbackErrors.push(error);
-    }
+    const rollbackErrors = await rollbackUnsafeRestoredLink(
+      publicPath,
+      isolatedPath,
+      expectedIdentity,
+      expectedBytes,
+      evidenceRef
+    );
     throw preserveWorkspacePrimaryError(primary, rollbackErrors);
   } catch (error) {
     throw serviceWorkspaceError(
@@ -1763,6 +1796,143 @@ async function restoreOwnedIsolatedPath(
       [evidenceRef],
       error
     );
+  }
+}
+
+async function restoredLinkedGenerationMatches(
+  publicPath: string,
+  isolatedPath: string,
+  expectedIdentity: OwnedTemporaryRecordIdentity,
+  expectedBytes: Buffer,
+  evidenceRef: string
+): Promise<boolean> {
+  return (
+    (await ownedGenerationStateMatches(
+      publicPath,
+      expectedIdentity,
+      expectedBytes,
+      2n,
+      evidenceRef
+    )) &&
+    (await ownedGenerationStateMatches(
+      isolatedPath,
+      expectedIdentity,
+      expectedBytes,
+      2n,
+      evidenceRef
+    ))
+  );
+}
+
+async function rollbackUnsafeRestoredLink(
+  publicPath: string,
+  isolatedPath: string,
+  expectedIdentity: OwnedTemporaryRecordIdentity,
+  expectedBytes: Buffer,
+  evidenceRef: string
+): Promise<unknown[]> {
+  const cleanupErrors = await removeExactOwnedPublicLink(
+    publicPath,
+    expectedIdentity,
+    evidenceRef
+  );
+  cleanupErrors.push(
+    ...(await removeUnsafeOwnedIsolatedSource(
+      isolatedPath,
+      expectedIdentity,
+      expectedBytes,
+      evidenceRef
+    ))
+  );
+  return cleanupErrors;
+}
+
+async function removeExactOwnedPublicLink(
+  publicPath: string,
+  expectedIdentity: OwnedTemporaryRecordIdentity,
+  evidenceRef: string
+): Promise<unknown[]> {
+  const cleanupErrors: unknown[] = [];
+  try {
+    const publicIdentity = await readRegularFilePathIdentity(publicPath, evidenceRef);
+    if (publicIdentity) {
+      if (workspaceRecordPhysicalIdentityMatches(publicIdentity, expectedIdentity)) {
+        await unlink(publicPath);
+      } else {
+        cleanupErrors.push(publicationStateError(evidenceRef));
+      }
+    }
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  return cleanupErrors;
+}
+
+async function removeUnsafeOwnedIsolatedSource(
+  isolatedPath: string,
+  expectedIdentity: OwnedTemporaryRecordIdentity,
+  expectedBytes: Buffer,
+  evidenceRef: string
+): Promise<unknown[]> {
+  const cleanupErrors: unknown[] = [];
+  try {
+    const identity = await lstat(isolatedPath, { bigint: true });
+    if (
+      identity.isFile() &&
+      !identity.isSymbolicLink() &&
+      identity.nlink > 1n &&
+      workspaceRecordPhysicalIdentityMatches(identity, expectedIdentity) &&
+      (await ownedGenerationBytesEqual(
+        isolatedPath,
+        expectedIdentity,
+        expectedBytes,
+        evidenceRef
+      ))
+    ) {
+      await unlink(isolatedPath);
+    }
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
+      cleanupErrors.push(error);
+    }
+  }
+  return cleanupErrors;
+}
+
+async function ownedGenerationStateMatches(
+  path: string,
+  expectedIdentity: OwnedTemporaryRecordIdentity,
+  expectedBytes: Buffer,
+  expectedLinkCount: bigint,
+  evidenceRef: string
+): Promise<boolean> {
+  let file: RecordFileHandle | undefined;
+  try {
+    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = await file.stat({ bigint: true });
+    if (
+      !before.isFile() ||
+      before.nlink !== expectedLinkCount ||
+      !workspaceRecordPhysicalIdentityMatches(before, expectedIdentity) ||
+      before.size !== BigInt(expectedBytes.length) ||
+      before.size > BigInt(MAX_SERVICE_RECORD_BYTES)
+    ) {
+      return false;
+    }
+    const bytes = await readBoundedOpenFileBytes(file);
+    const after = await file.stat({ bigint: true });
+    return (
+      bytes.equals(expectedBytes) &&
+      after.dev === before.dev &&
+      after.ino === before.ino &&
+      after.size === before.size &&
+      after.nlink === expectedLinkCount
+    );
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) return false;
+    throw publicationStateError(evidenceRef);
+  } finally {
+    await file?.close();
   }
 }
 

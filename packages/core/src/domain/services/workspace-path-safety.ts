@@ -50,6 +50,11 @@ interface PhysicalCanonicalExactObservation {
   targetExists: boolean;
 }
 
+interface FilesystemCaseObservation {
+  semantics: FilesystemCaseSemantics;
+  deviceRoot: string;
+}
+
 class AuthorityObservationHookError {
   readonly cause: unknown;
 
@@ -276,13 +281,19 @@ async function observePhysicalAuthorityPathIdentityCandidates(
       targetPath,
       observation.missingSegments.length
     );
-    const semantics = await authorityExistingPathCaseSemantics(observation.exact, evidenceRef);
+    const caseObservation = await authorityExistingPathCaseObservation(
+      observation.exact,
+      evidenceRef
+    );
     const aliases =
-      semantics === "case_sensitive"
+      caseObservation.semantics === "case_sensitive"
         ? [observation.exact]
-        : Array.from(
-            new Set([observation.exact, unicodeCaseFoldPath(observation.exact)])
-          );
+        : [
+            composeDeviceBoundedCaseAlias(
+              caseObservation.deviceRoot,
+              observation.exact
+            )
+          ];
     return Object.freeze({ exact: observation.exact, aliases: Object.freeze(aliases) });
   }
 
@@ -323,18 +334,19 @@ async function observePhysicalAuthorityPathIdentityCandidates(
   }
   if (targetEntry) throw new AuthorityObservationChangedError();
 
-  if (
-    (await authorityExistingPathCaseSemantics(observation.physicalAncestor, evidenceRef)) ===
-    "case_sensitive"
-  ) {
+  const caseObservation = await authorityExistingPathCaseObservation(
+    observation.physicalAncestor,
+    evidenceRef
+  );
+  if (caseObservation.semantics === "case_sensitive") {
     return Object.freeze({
       exact: observation.exact,
       aliases: Object.freeze([observation.exact])
     });
   }
-  const conservative = join(
-    observation.physicalAncestor,
-    ...observation.missingSegments.map(unicodeCaseFoldSegment)
+  const conservative = composeDeviceBoundedCaseAlias(
+    caseObservation.deviceRoot,
+    observation.exact
   );
   return Object.freeze({
     exact: observation.exact,
@@ -361,12 +373,12 @@ async function invokeAuthorityCandidateLstatHook(
   }
 }
 
-async function authorityExistingPathCaseSemantics(
+async function authorityExistingPathCaseObservation(
   path: string,
   evidenceRef: string
-): Promise<FilesystemCaseSemantics> {
+): Promise<FilesystemCaseObservation> {
   try {
-    return await existingPathCaseSemantics(path);
+    return await existingPathCaseObservation(path);
   } catch (error) {
     if (error instanceof AuthorityObservationHookError) throw error;
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) throw error;
@@ -572,22 +584,35 @@ function unicodeCaseFoldSegment(segment: string): string {
   return segment.normalize("NFC").toUpperCase().toLowerCase().normalize("NFC");
 }
 
-function unicodeCaseFoldPath(path: string): string {
-  const { rootPath, segments } = pathParts(path);
-  return join(rootPath, ...segments.map(unicodeCaseFoldSegment));
+export function composeDeviceBoundedCaseAlias(deviceRoot: string, path: string): string {
+  const exactDeviceRoot = resolve(deviceRoot);
+  const exactPath = resolve(path);
+  const insideDevice = relative(exactDeviceRoot, exactPath);
+  if (
+    insideDevice === "" ||
+    isAbsolute(insideDevice) ||
+    insideDevice === ".." ||
+    insideDevice.startsWith(`..${sep}`)
+  ) {
+    return exactPath;
+  }
+  return join(
+    exactDeviceRoot,
+    ...insideDevice.split(sep).filter(Boolean).map(unicodeCaseFoldSegment)
+  );
 }
 
 async function canonicalMissingPathIdentitySegments(
   physicalAncestor: string,
   segments: readonly string[]
 ): Promise<string[]> {
-  if ((await existingPathCaseSemantics(physicalAncestor)) === "case_sensitive") {
+  if ((await existingPathCaseObservation(physicalAncestor)).semantics === "case_sensitive") {
     return [...segments];
   }
   return segments.map(conservativeMissingPathIdentitySegment);
 }
 
-async function existingPathCaseSemantics(path: string): Promise<FilesystemCaseSemantics> {
+async function existingPathCaseObservation(path: string): Promise<FilesystemCaseObservation> {
   const expectedPhysicalPath = await realpath(path);
   let injectedSemantics: FilesystemCaseSemantics | undefined;
   try {
@@ -597,9 +622,9 @@ async function existingPathCaseSemantics(path: string): Promise<FilesystemCaseSe
   } catch (error) {
     throw new AuthorityObservationHookError(error);
   }
-  if (injectedSemantics !== undefined) return injectedSemantics;
   const targetDevice = (await lstat(expectedPhysicalPath, { bigint: true })).dev;
   let candidatePath = expectedPhysicalPath;
+  let observedSemantics = injectedSemantics ?? "unknown";
   for (;;) {
     const parsed = parse(candidatePath);
     const [candidateEntry, parentEntry] = await Promise.all([
@@ -607,19 +632,21 @@ async function existingPathCaseSemantics(path: string): Promise<FilesystemCaseSe
       lstat(parsed.dir, { bigint: true })
     ]);
     if (!filesystemDeviceIdentityMatches(candidateEntry.dev, targetDevice)) {
-      return "unknown";
+      return Object.freeze({ semantics: "unknown", deviceRoot: expectedPhysicalPath });
     }
-    const componentSemantics = await existingEntryCaseSemantics(
-      parsed.dir,
-      parsed.base,
-      candidatePath
-    );
-    if (componentSemantics !== "unknown") return componentSemantics;
+    if (observedSemantics === "unknown") {
+      const componentSemantics = await existingEntryCaseSemantics(
+        parsed.dir,
+        parsed.base,
+        candidatePath
+      );
+      if (componentSemantics !== "unknown") observedSemantics = componentSemantics;
+    }
     if (
       parsed.dir === candidatePath ||
       !filesystemDeviceIdentityMatches(parentEntry.dev, targetDevice)
     ) {
-      return "unknown";
+      return Object.freeze({ semantics: observedSemantics, deviceRoot: candidatePath });
     }
     candidatePath = parsed.dir;
   }

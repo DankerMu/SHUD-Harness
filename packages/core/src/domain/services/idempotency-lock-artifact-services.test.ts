@@ -63,6 +63,7 @@ import {
   type WorkspaceRecordCleanupPermit
 } from "./workspace-record-store";
 import {
+  composeDeviceBoundedCaseAlias,
   filesystemDeviceIdentityMatches,
   physicalAuthorityPathIdentity,
   physicalCanonicalPath,
@@ -616,6 +617,28 @@ describe("idempotency, lock, and artifact services", () => {
     const device = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
     expect(filesystemDeviceIdentityMatches(device, device)).toBe(true);
     expect(filesystemDeviceIdentityMatches(device, device + 1n)).toBe(false);
+  });
+
+  test("device-bounded case aliases preserve exact mount prefixes and fold only within each device", () => {
+    const upperMount = join("/case-sensitive-parent", "Foo");
+    const lowerMount = join("/case-sensitive-parent", "foo");
+    const upperAlias = composeDeviceBoundedCaseAlias(
+      upperMount,
+      join(upperMount, "Records", "ENTRY.json")
+    );
+    const upperCaseVariant = composeDeviceBoundedCaseAlias(
+      upperMount,
+      join(upperMount, "records", "entry.JSON")
+    );
+    const lowerAlias = composeDeviceBoundedCaseAlias(
+      lowerMount,
+      join(lowerMount, "records", "entry.json")
+    );
+
+    expect(upperAlias).toBe(upperCaseVariant);
+    expect(upperAlias).not.toBe(lowerAlias);
+    expect(upperAlias.startsWith(`${upperMount}/`)).toBe(true);
+    expect(lowerAlias.startsWith(`${lowerMount}/`)).toBe(true);
   });
 
   test("same-path followers retain missing-to-existing authority through publication", async () => {
@@ -3867,6 +3890,300 @@ describe("idempotency, lock, and artifact services", () => {
       expect(restoredPath).toBeDefined();
       expect((await stat(restoredPath!, { bigint: true })).nlink).toBe(1n);
       await expectPathMissing(isolatedPath!);
+      if (temporaryPath) await chmod(dirname(temporaryPath), 0o700).catch(() => undefined);
+    }
+  });
+
+  test("all restore sites reject nonthrowing shared-inode mutation and preserve public replacements", async () => {
+    for (const fixture of [
+      "conditional_delete",
+      "conditional_delete_cleanup_permit",
+      "conditional_unlink_owned_path",
+      "published_rollback",
+      "temporary_generation_compensation"
+    ] as const) {
+      const site = fixture === "conditional_delete_cleanup_permit"
+        ? "conditional_delete"
+        : fixture;
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `restore-mutation-${fixture}` };
+      const replacement = { id: `restore-replacement-${fixture}` };
+      const evidenceRef = `restore.mutation.${fixture}`;
+      const directorySegments = ["restore-mutation-sites"] as const;
+      const fileName = `${fixture}.json`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const expectedBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+      const replacementBytes = Buffer.from(`${JSON.stringify(replacement, null, 2)}\n`);
+      const mutatedBytes = Buffer.from(`mutated restore generation ${fixture}\n`);
+      const primary = new Error(`restore mutation primary ${fixture}`);
+      const isolationFailure = new Error(`restore mutation isolation ${fixture}`);
+      let cleanupPermit: WorkspaceRecordCleanupPermit | undefined;
+      let temporaryPath: string | undefined;
+      let isolatedPath: string | undefined;
+      let restoredPublicPath: string | undefined;
+      let hookCount = 0;
+
+      if (site === "conditional_delete") {
+        const created = await createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          directorySegments,
+          fileName,
+          record,
+          evidenceRef,
+          schema
+        );
+        if (created.status !== "created") throw new Error("Expected mutation fixture.");
+        cleanupPermit = created.cleanupPermit;
+      }
+
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            beforeOwnedTemporaryRecordWrite: async (input) => {
+              if (site !== "conditional_unlink_owned_path") return;
+              temporaryPath = input.path;
+              await writeFile(input.path, expectedBytes);
+              throw primary;
+            },
+            afterOwnedPathIsolation: (input) => {
+              if (input.site !== site) return;
+              isolatedPath = input.isolatedPath;
+              throw isolationFailure;
+            },
+            beforeOwnedIsolatedSourceUnlink: async (input) => {
+              if (input.site !== site) return;
+              hookCount += 1;
+              restoredPublicPath = input.path;
+              await writeFile(input.isolatedPath, mutatedBytes);
+              await rm(input.path);
+              await writeFile(input.path, replacementBytes, { flag: "wx" });
+            }
+          },
+          async () => {
+            if (site === "conditional_delete") {
+              const condition = {
+                kind: "record" as const,
+                expected: record,
+                matches: (current: { id: string }, expected: { id: string }) =>
+                  current.id === expected.id
+              };
+              return fixture === "conditional_delete_cleanup_permit"
+                ? await conditionalDeleteJsonRecordWithCleanupPermit(
+                    cleanupPermit!, path, evidenceRef, schema, condition
+                  )
+                : await conditionalDeleteJsonRecord(path, evidenceRef, schema, condition);
+            }
+            return await runWithWorkspaceRecordPublicationHooks(
+              {
+                afterTemporaryFileWritten: (input) => {
+                  temporaryPath = input.temporaryPath;
+                  if (site === "temporary_generation_compensation") throw primary;
+                },
+                afterCanonicalLink: () => {
+                  if (site === "published_rollback") throw primary;
+                },
+                beforeTemporaryUnlink: async ({ temporaryPath: candidatePath }) => {
+                  if (site !== "temporary_generation_compensation") return;
+                  await chmod(dirname(candidatePath), 0o500);
+                  throw new Error("retain temporary generation for mutation compensation");
+                },
+                beforePublicationCompensationStateInspection: async ({ site: inspectionSite }) => {
+                  if (
+                    site === "temporary_generation_compensation" &&
+                    inspectionSite === "unpublished_cleanup" &&
+                    temporaryPath
+                  ) {
+                    await chmod(dirname(temporaryPath), 0o700);
+                  }
+                }
+              },
+              () => createJsonRecordIfAbsent(
+                workspaceRoot,
+                directorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                schema
+              )
+            );
+          }
+        )
+      );
+
+      expect(aggregateErrorMessages(failure)).toContain(isolationFailure.message);
+      expect(aggregateErrorMessages(failure)).toContain(
+        "Workspace record publication authority could not be verified."
+      );
+      expect(hookCount).toBe(1);
+      expect(restoredPublicPath).toBeDefined();
+      expect(await readFile(restoredPublicPath!)).toEqual(replacementBytes);
+      expect((await stat(restoredPublicPath!, { bigint: true })).nlink).toBe(1n);
+      expect(isolatedPath).toBeDefined();
+      expect(await readFile(isolatedPath!)).toEqual(mutatedBytes);
+      expect((await stat(isolatedPath!, { bigint: true })).nlink).toBe(1n);
+
+      await rm(restoredPublicPath!);
+      const retried = await createJsonRecordIfAbsent(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      );
+      expect(retried).toEqual({ status: "created", record });
+      expect(
+        await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.id === expected.id
+        })
+      ).toEqual({ status: "deleted" });
+      if (temporaryPath) await chmod(dirname(temporaryPath), 0o700).catch(() => undefined);
+    }
+  });
+
+  test("all restore sites remove residual private sources when an external hardlink appears before isolation", async () => {
+    for (const fixture of [
+      "conditional_delete",
+      "conditional_delete_cleanup_permit",
+      "conditional_unlink_owned_path",
+      "published_rollback",
+      "temporary_generation_compensation"
+    ] as const) {
+      const site = fixture === "conditional_delete_cleanup_permit"
+        ? "conditional_delete"
+        : fixture;
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `restore-external-link-${fixture}` };
+      const evidenceRef = `restore.external-link.${fixture}`;
+      const directorySegments = ["restore-external-link-sites"] as const;
+      const fileName = `${fixture}.json`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const expectedBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+      const externalAlias = join(tempRoot, `external-${fixture}.json`);
+      const primary = new Error(`restore external-link primary ${fixture}`);
+      const isolationFailure = new Error(`restore external-link isolation ${fixture}`);
+      let cleanupPermit: WorkspaceRecordCleanupPermit | undefined;
+      let temporaryPath: string | undefined;
+      let isolatedPath: string | undefined;
+
+      if (site === "conditional_delete") {
+        const created = await createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          directorySegments,
+          fileName,
+          record,
+          evidenceRef,
+          schema
+        );
+        if (created.status !== "created") throw new Error("Expected hardlink fixture.");
+        cleanupPermit = created.cleanupPermit;
+      }
+
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            beforeOwnedTemporaryRecordWrite: async (input) => {
+              if (site !== "conditional_unlink_owned_path") return;
+              temporaryPath = input.path;
+              await writeFile(input.path, expectedBytes);
+              throw primary;
+            },
+            beforeOwnedPathIsolation: async (input) => {
+              if (input.site === site) await link(input.path, externalAlias);
+            },
+            afterOwnedPathIsolation: (input) => {
+              if (input.site !== site) return;
+              isolatedPath = input.isolatedPath;
+              throw isolationFailure;
+            }
+          },
+          async () => {
+            if (site === "conditional_delete") {
+              const condition = {
+                kind: "record" as const,
+                expected: record,
+                matches: (current: { id: string }, expected: { id: string }) =>
+                  current.id === expected.id
+              };
+              return fixture === "conditional_delete_cleanup_permit"
+                ? await conditionalDeleteJsonRecordWithCleanupPermit(
+                    cleanupPermit!, path, evidenceRef, schema, condition
+                  )
+                : await conditionalDeleteJsonRecord(path, evidenceRef, schema, condition);
+            }
+            return await runWithWorkspaceRecordPublicationHooks(
+              {
+                afterTemporaryFileWritten: (input) => {
+                  temporaryPath = input.temporaryPath;
+                  if (site === "temporary_generation_compensation") throw primary;
+                },
+                afterCanonicalLink: () => {
+                  if (site === "published_rollback") throw primary;
+                },
+                beforeTemporaryUnlink: async ({ temporaryPath: candidatePath }) => {
+                  if (site !== "temporary_generation_compensation") return;
+                  await chmod(dirname(candidatePath), 0o500);
+                  throw new Error("retain temporary generation for hardlink compensation");
+                },
+                beforePublicationCompensationStateInspection: async ({ site: inspectionSite }) => {
+                  if (
+                    site === "temporary_generation_compensation" &&
+                    inspectionSite === "unpublished_cleanup" &&
+                    temporaryPath
+                  ) {
+                    await chmod(dirname(temporaryPath), 0o700);
+                  }
+                }
+              },
+              () => createJsonRecordIfAbsent(
+                workspaceRoot,
+                directorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                schema
+              )
+            );
+          }
+        )
+      );
+
+      expect(aggregateErrorMessages(failure)).toContain(isolationFailure.message);
+      await expectPathMissing(path);
+      expect(await readFile(externalAlias)).toEqual(expectedBytes);
+      expect((await stat(externalAlias, { bigint: true })).nlink).toBe(1n);
+      if (isolatedPath) await expectPathMissing(isolatedPath);
+
+      const retried = await createJsonRecordIfAbsent(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      );
+      expect(retried).toEqual({ status: "created", record });
+      expect(
+        await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.id === expected.id
+        })
+      ).toEqual({ status: "deleted" });
       if (temporaryPath) await chmod(dirname(temporaryPath), 0o700).catch(() => undefined);
     }
   });
