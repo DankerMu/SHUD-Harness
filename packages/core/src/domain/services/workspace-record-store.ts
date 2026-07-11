@@ -22,6 +22,7 @@ export const MAX_SERVICE_RECORD_BYTES = 1024 * 1024;
 const SAFE_RECORD_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 const MAX_RECORD_AUTHORITY_RESERVATIONS = 1024;
 const MAX_RECORD_AUTHORITY_RESERVATIONS_PER_PATH = 64;
+const MAX_RECORD_AUTHORITY_ALIASES_PER_MUTEX = 64;
 const RECORD_AUTHORITY_ACQUISITION_TIMEOUT_MS = 5_000;
 const RECORD_TEMP_CLEANUP_ATTEMPTS = 3;
 const RECORD_TEMP_CLEANUP_RETRY_MS = 5;
@@ -2196,7 +2197,9 @@ function bindRecordAuthorityAliases(
   aliases: readonly string[],
   evidenceRef: string
 ): void {
-  for (const alias of aliases) {
+  const uniqueAliases = new Set(aliases);
+  let additionalAliasCount = 0;
+  for (const alias of uniqueAliases) {
     const existing = activeRecordAuthorityMutexes.get(alias);
     if (existing && existing !== mutex) {
       throw authorityCoordinationError(
@@ -2204,8 +2207,17 @@ function bindRecordAuthorityAliases(
         evidenceRef
       );
     }
+    if (!mutex.aliases.has(alias)) {
+      additionalAliasCount += 1;
+    }
   }
-  for (const alias of aliases) {
+  if (
+    mutex.aliases.size + additionalAliasCount >
+    MAX_RECORD_AUTHORITY_ALIASES_PER_MUTEX
+  ) {
+    throw authorityCapacityError(evidenceRef);
+  }
+  for (const alias of uniqueAliases) {
     activeRecordAuthorityMutexes.set(alias, mutex);
     mutex.aliases.add(alias);
   }

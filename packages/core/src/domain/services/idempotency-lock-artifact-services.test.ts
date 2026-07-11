@@ -304,6 +304,109 @@ describe("idempotency, lock, and artifact services", () => {
     expect(aliasResult.status).toBe("exists");
   });
 
+  test.skipIf(!caseAliasWorkspaceSupported)("retained cleanup permits bound cumulative case aliases and recover after terminal admission", async () => {
+    const aliasWorkspace = await createCaseAliasWorkspacePath();
+    if (!aliasWorkspace) {
+      throw new Error("Expected case-insensitive workspace aliases to be supported.");
+    }
+    const { tempRoot, workspaceRoot } = aliasWorkspace;
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "bounded-case-aliases" };
+    const directorySegments = ["alias-capacity"] as const;
+    const lowerCaseFileName = "aliascapacity.json";
+    const originalEvidenceRef = "authority.alias-capacity.original";
+    const originalPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, lowerCaseFileName],
+      originalEvidenceRef
+    );
+    const created = await createJsonRecordIfAbsentWithCleanupPermit(
+      workspaceRoot,
+      directorySegments,
+      lowerCaseFileName,
+      record,
+      originalEvidenceRef,
+      schema
+    );
+    if (created.status !== "created") {
+      throw new Error("Expected a retained cleanup permit fixture.");
+    }
+    await rm(originalPath);
+
+    for (let variant = 1; variant < 64; variant += 1) {
+      const fileName = asciiCaseVariant(lowerCaseFileName, variant);
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        `authority.alias-capacity.admitted.${variant}`
+      );
+      expect(
+        await readJsonRecord(
+          path,
+          `authority.alias-capacity.admitted.${variant}`,
+          schema
+        )
+      ).toBeUndefined();
+    }
+
+    const overflowFileName = asciiCaseVariant(lowerCaseFileName, 64);
+    const overflowEvidenceRef = "authority.alias-capacity.overflow";
+    const overflowPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, overflowFileName],
+      overflowEvidenceRef
+    );
+    const overflow = await captureTaskServiceError(() =>
+      readJsonRecord(overflowPath, overflowEvidenceRef, schema)
+    );
+    expect(overflow.code).toBe("record_malformed");
+    expect(overflow.status).toBe(409);
+    expect(overflow.retryable).toBe(true);
+    expect(overflow.evidenceRefs).toEqual([overflowEvidenceRef]);
+    expect(overflow.message).toBe("Workspace record authority coordination is at capacity.");
+    expectErrorNotToLeakRecordContent(overflow, overflowFileName);
+    expectErrorNotToLeakRecordContent(overflow, tempRoot);
+
+    const retryEvidenceRef = "authority.alias-capacity.overflow-retry";
+    const retry = await captureTaskServiceError(() =>
+      readJsonRecord(overflowPath, retryEvidenceRef, schema)
+    );
+    expect(retry.retryable).toBe(true);
+    expect(retry.evidenceRefs).toEqual([retryEvidenceRef]);
+    expect(retry.message).toBe("Workspace record authority coordination is at capacity.");
+
+    expect(
+      await readJsonRecord(
+        workspaceRecordPath(
+          workspaceRoot,
+          [...directorySegments, asciiCaseVariant(lowerCaseFileName, 63)],
+          "authority.alias-capacity.still-admitted"
+        ),
+        "authority.alias-capacity.still-admitted",
+        schema
+      )
+    ).toBeUndefined();
+
+    const terminalPermitError = await captureConditionalDeleteError(() =>
+      conditionalDeleteJsonRecordWithCleanupPermit(
+        created.cleanupPermit,
+        originalPath,
+        originalEvidenceRef,
+        schema,
+        {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.id === expected.id
+        }
+      )
+    );
+    expect(terminalPermitError.mutationPhase).toBe("pre_mutation");
+    expect(terminalPermitError.failureStage).toBe("permit_admission");
+
+    expect(await readJsonRecord(overflowPath, overflowEvidenceRef, schema)).toBeUndefined();
+  });
+
   test.skipIf(!distinctCaseEntriesSupported)("coexisting case-sensitive leaves keep distinct authority and reject cross-path permits", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -5839,6 +5942,18 @@ async function createCaseAliasWorkspacePath(): Promise<
     throw error;
   }
   return { tempRoot, workspaceRoot, aliasRoot };
+}
+
+function asciiCaseVariant(lowerCaseName: string, variant: number): string {
+  let letterIndex = 0;
+  return Array.from(lowerCaseName, (character) => {
+    if (character < "a" || character > "z") return character;
+    const transformed = (variant & (1 << letterIndex)) === 0
+      ? character
+      : character.toUpperCase();
+    letterIndex += 1;
+    return transformed;
+  }).join("");
 }
 
 async function supportsDistinctCaseEntries(directoryPath: string): Promise<boolean> {
