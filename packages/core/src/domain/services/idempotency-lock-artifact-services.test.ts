@@ -40,13 +40,16 @@ import {
 import {
   MAX_SERVICE_RECORD_BYTES,
   conditionalDeleteJsonRecord,
+  conditionalDeleteJsonRecordWithCleanupPermit,
   createJsonRecordIfAbsent,
+  createJsonRecordIfAbsentWithCleanupPermit,
   readJsonRecord,
   runWithWorkspaceRecordPublicationHooks,
   workspaceRecordPath,
   writeJsonRecord,
   type WorkspaceRecordPublicationHookInput,
-  type WorkspaceRecordPublicationHooks
+  type WorkspaceRecordPublicationHooks,
+  type WorkspaceRecordCleanupPermit
 } from "./workspace-record-store";
 
 const tempRoots: string[] = [];
@@ -281,6 +284,43 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(await writer).toEqual(after);
     expect(await reader).toEqual(after);
+  });
+
+  test("rename writer rejects schema-valid and malformed temp generation replacement without clobbering canonical", async () => {
+    for (const replacementKind of ["schema-valid", "malformed"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const service = createLockRecordService({ workspaceRoot });
+      const before = {
+        ...validLockRecord(),
+        lock_id: `LOCK-rename-generation-${replacementKind}`
+      };
+      const intended = { ...before, holder: "intended-open-handle-generation" };
+      const replacementBytes =
+        replacementKind === "schema-valid"
+          ? Buffer.from(`${JSON.stringify({ ...before, holder: "replacement-generation" }, null, 2)}\n`)
+          : Buffer.from("{ malformed replacement\n");
+      await service.storeLock(before);
+      let temporaryPath = "";
+
+      const error = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: async (publication) => {
+              temporaryPath = publication.temporaryPath;
+              const replacementPath = `${temporaryPath}.replacement`;
+              await writeFile(replacementPath, replacementBytes, { flag: "wx" });
+              await rename(replacementPath, temporaryPath);
+            }
+          },
+          () => service.storeLock(intended)
+        )
+      );
+
+      expect(error.code).toBe("workspace_path_not_safe");
+      expect(await service.getLock(before.scope, before.lock_id)).toEqual(before);
+      expect(await readFile(temporaryPath)).toEqual(replacementBytes);
+    }
   });
 
   test("Artifact duplicate registration converges across the owned publication window", async () => {
@@ -651,6 +691,123 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await service.getLock(record.scope, record.lock_id)).toEqual(record);
   });
 
+  test("conditional delete and restore cleanup preserve exact replacement generations at final mutation hooks", async () => {
+    for (const phase of ["isolation", "restore_cleanup"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const service = createLockRecordService({ workspaceRoot });
+      const original = {
+        ...validLockRecord(),
+        lock_id: `LOCK-delete-generation-${phase}`
+      };
+      const replacement = { ...original, holder: "replacement-before-isolation" };
+      const finalReplacement = { ...original, holder: "replacement-during-restore-cleanup" };
+      await service.storeLock(original);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        [...lockRecordDirectorySegments(original.scope), lockRecordFileName(original.lock_id)],
+        lockRecordEvidenceRef(original.scope, original.lock_id)
+      );
+      let replacementBytes = Buffer.from(`${JSON.stringify(replacement, null, 2)}\n`);
+
+      const error = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            beforeGenerationIsolation: async ({ path, operation }) => {
+              if (operation !== "conditional_delete") return;
+              const candidate = `${path}.replacement`;
+              await writeFile(candidate, replacementBytes, { flag: "wx" });
+              await rename(candidate, path);
+            },
+            beforeAuthorityOwnedUnlink: async ({ path, operation }) => {
+              if (phase !== "restore_cleanup" || operation !== "restore_cleanup") return;
+              const candidate = `${path}.final-replacement`;
+              await writeFile(candidate, `${JSON.stringify(finalReplacement, null, 2)}\n`, {
+                flag: "wx"
+              });
+              await rename(candidate, path);
+            }
+          },
+          () =>
+            conditionalDeleteJsonRecord(recordPath, "lock.delete-generation", LockRecordSchema, {
+              kind: "record",
+              expected: original,
+              matches: (current, expected) => current.lock_id === expected.lock_id
+            })
+        )
+      );
+
+      expect(error.code).toBe("record_malformed");
+      if (phase === "isolation") {
+        expect(await readFile(recordPath)).toEqual(replacementBytes);
+      } else {
+        expect(await service.getLock(original.scope, original.lock_id)).toEqual(finalReplacement);
+        const directoryPath = join(workspaceRoot, "locks", original.scope);
+        const authorityDirectory = (await readdir(directoryPath)).find((name) =>
+          name.endsWith(".authority")
+        );
+        expect(authorityDirectory).toBeDefined();
+        expect(await readFile(join(directoryPath, authorityDirectory!, "generation"))).toEqual(
+          replacementBytes
+        );
+      }
+    }
+  });
+
+  test("rename and hardlink temp cleanup preserve replacements introduced at the final unlink hook", async () => {
+    for (const writer of ["rename", "hardlink"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const record = {
+        ...validLockRecord(),
+        lock_id: `LOCK-final-temp-cleanup-${writer}`
+      };
+      if (writer === "rename") {
+        await createLockRecordService({ workspaceRoot }).storeLock(record);
+      }
+      const intended = { ...record, holder: `intended-${writer}` };
+      const replacementBytes = Buffer.from(`replacement-${writer}\n`);
+      let temporaryPath = "";
+
+      const error = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: ({ temporaryPath: observed }) => {
+              temporaryPath = observed;
+            },
+            beforeAuthorityOwnedUnlink: async ({ path, operation }) => {
+              const expectedOperation =
+                writer === "rename" ? "rename_temp_cleanup" : "hardlink_temp_cleanup";
+              if (operation !== expectedOperation) return;
+              await writeFile(path, replacementBytes, { flag: "wx" });
+            }
+          },
+          () =>
+            writer === "rename"
+              ? writeJsonRecord(
+                  workspaceRoot,
+                  lockRecordDirectorySegments(record.scope),
+                  lockRecordFileName(record.lock_id),
+                  intended,
+                  lockRecordEvidenceRef(record.scope, record.lock_id),
+                  LockRecordSchema
+                )
+              : createJsonRecordIfAbsent(
+                  workspaceRoot,
+                  lockRecordDirectorySegments(record.scope),
+                  lockRecordFileName(record.lock_id),
+                  intended,
+                  lockRecordEvidenceRef(record.scope, record.lock_id),
+                  LockRecordSchema
+                )
+        )
+      );
+
+      expect(error.code).toBe("workspace_path_not_safe");
+      expect(await readFile(temporaryPath)).toEqual(replacementBytes);
+    }
+  });
+
   test("recreated transition guard and cleanup-lock generations serialize queued strict readers", async () => {
     for (const targetPublication of [1, 2] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -862,6 +1019,178 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("cleanup permits cancel atomically on identity and contention hook failures", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+
+    for (const failure of ["identity", "contention"] as const) {
+      const record = { id: `permit-${failure}` };
+      const fileName = `${record.id}.json`;
+      const evidenceRef = `permit.${failure}`;
+      const path = workspaceRecordPath(workspaceRoot, ["permit-tests", fileName], evidenceRef);
+      const created = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        ["permit-tests"],
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      );
+      if (created.status !== "created") throw new Error("Expected a cleanup permit fixture.");
+
+      let releaseHolder: (() => void) | undefined;
+      let holder: Promise<unknown> | undefined;
+      if (failure === "contention") {
+        const gate = createAsyncGate();
+        const acquired = createSignal();
+        releaseHolder = gate.open;
+        holder = runWithWorkspaceRecordPublicationHooks(
+          {
+            afterAuthorityLeaseAcquired: async () => {
+              acquired.resolve();
+              await gate.wait;
+            }
+          },
+          () => readJsonRecord(path, evidenceRef, schema)
+        );
+        await acquired.promise;
+      }
+
+      const permitDirectory = join(workspaceRoot, "permit-tests");
+      const originalDirectory = join(workspaceRoot, "permit-tests-original");
+      const failedDelete = runWithWorkspaceRecordPublicationHooks(
+        failure === "identity"
+          ? {
+              beforeCleanupPermitIdentityResolution: async () => {
+                await rename(permitDirectory, originalDirectory);
+                await symlink(originalDirectory, permitDirectory);
+              }
+            }
+          : {
+              onAuthorityContention: () => {
+                throw new Error("injected cleanup permit contention failure");
+              }
+            },
+        () =>
+          conditionalDeleteJsonRecordWithCleanupPermit(
+            created.cleanupPermit,
+            path,
+            evidenceRef,
+            schema,
+            {
+              kind: "record",
+              expected: record,
+              matches: (current, expected) => current.id === expected.id
+            }
+          )
+      );
+      if (failure === "identity") {
+        const identityError = await captureTaskServiceError(() => failedDelete);
+        expect(identityError.code).toBe("workspace_path_not_safe");
+        await rm(permitDirectory);
+        await rename(originalDirectory, permitDirectory);
+      } else {
+        await expect(failedDelete).rejects.toThrow("injected cleanup permit contention failure");
+      }
+
+      releaseHolder?.();
+      await holder;
+      expect(
+        await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.id === expected.id
+        })
+      ).toEqual({ status: "deleted" });
+    }
+  });
+
+  test("semantic release retries after a cleanup permit identity hook failure", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const key = "task:create:permit-identity-retry";
+    let identityFailures = 0;
+
+    const seedService = createIdempotencyRecordService({ workspaceRoot });
+    await seedService.beginRecord({
+      scope: "task",
+      key,
+      requestDigest: "digest-permit-identity-retry"
+    });
+    const result = await runWithWorkspaceRecordPublicationHooks(
+      {
+        beforeCleanupPermitIdentityResolution: () => {
+          identityFailures += 1;
+          if (identityFailures === 1) {
+            throw new Error("injected one-shot semantic identity failure");
+          }
+        }
+      },
+      () =>
+        createIdempotencyRecordService({ workspaceRoot }).completeRecord({
+          scope: "task",
+          key,
+          requestDigest: "digest-permit-identity-retry",
+          resultRef: "TASK-permit-identity-retry"
+        })
+    );
+
+    expect(result.status).toBe("completed");
+    expect(identityFailures).toBeGreaterThanOrEqual(2);
+    await expectPathMissing(idempotencyTransitionGuardPath(workspaceRoot, key));
+    await expectPathMissing(idempotencyTransitionCleanupLockPath(workspaceRoot, key));
+  });
+
+  test("parent cleanup-lock release failure compensates the child guard before ownership transfer", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const key = "task:create:parent-release-compensation";
+    const cleanupPath = idempotencyTransitionCleanupLockPath(workspaceRoot, key);
+    let cleanupReleaseFailures = 0;
+    await createIdempotencyRecordService({ workspaceRoot }).beginRecord({
+      scope: "task",
+      key,
+      requestDigest: "digest-parent-release-compensation"
+    });
+
+    const error = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeConditionalDelete: ({ path }) => {
+            if (path === cleanupPath && cleanupReleaseFailures < 2) {
+              cleanupReleaseFailures += 1;
+              throw new TaskServiceError({
+                code: "record_malformed",
+                status: 500,
+                category: "workspace_error",
+                message: "Injected parent cleanup-lock release failure.",
+                userMessage: "Injected parent cleanup-lock release failure.",
+                evidenceRefs: [idempotencyRecordEvidenceRef("task", key)],
+                retryable: true,
+                recommendedNextActions: ["Retry."]
+              });
+            }
+          }
+        },
+        () =>
+          createIdempotencyRecordService({ workspaceRoot }).completeRecord({
+            scope: "task",
+            key,
+            requestDigest: "digest-parent-release-compensation",
+            resultRef: "TASK-parent-release-compensation"
+          })
+      )
+    );
+
+    expect(error.message).toBe("Injected parent cleanup-lock release failure.");
+    expect(cleanupReleaseFailures).toBe(2);
+    expect(error.cause).toBeInstanceOf(AggregateError);
+    await expectPathMissing(idempotencyTransitionGuardPath(workspaceRoot, key));
+    expect(await readJsonRecord(cleanupPath, idempotencyRecordEvidenceRef("task", key), z.unknown()))
+      .toBeDefined();
+  });
+
   test("authority path capacity is bounded, retryable, and released after holders finish", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -922,6 +1251,156 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await Promise.all(holders)).toEqual(Array.from({ length: 1024 }, () => undefined));
     expect(await service.getLock("task", "LOCK-capacity-overflow")).toBeUndefined();
   });
+
+  test("cleanup permit global capacity reports the structured retryable authority error", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const created: Array<{
+      path: string;
+      evidenceRef: string;
+      record: { id: string };
+      permit: WorkspaceRecordCleanupPermit;
+    }> = [];
+
+    try {
+      for (let index = 0; index < 1024; index += 1) {
+        const record = { id: `permit-capacity-${index}` };
+        const fileName = `${record.id}.json`;
+        const evidenceRef = `permit.capacity.${index}`;
+        const result = await createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          ["permit-capacity"],
+          fileName,
+          record,
+          evidenceRef,
+          schema
+        );
+        if (result.status !== "created") throw new Error("Expected cleanup permit capacity fixture.");
+        created.push({
+          path: workspaceRecordPath(workspaceRoot, ["permit-capacity", fileName], evidenceRef),
+          evidenceRef,
+          record,
+          permit: result.cleanupPermit
+        });
+      }
+
+      const overflowEvidenceRef = "permit.capacity.overflow";
+      const overflow = await captureTaskServiceError(() =>
+        createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          ["permit-capacity"],
+          "permit-capacity-overflow.json",
+          { id: "permit-capacity-overflow" },
+          overflowEvidenceRef,
+          schema
+        )
+      );
+      expect(overflow.code).toBe("record_malformed");
+      expect(overflow.status).toBe(409);
+      expect(overflow.retryable).toBe(true);
+      expect(overflow.evidenceRefs).toEqual([overflowEvidenceRef]);
+      expect(overflow.message).toBe("Workspace record authority coordination is at capacity.");
+    } finally {
+      await Promise.all(
+        created.map(({ path, evidenceRef, record, permit }) =>
+          conditionalDeleteJsonRecordWithCleanupPermit(
+            permit,
+            path,
+            evidenceRef,
+            schema,
+            {
+              kind: "record",
+              expected: record,
+              matches: (current, expected) => current.id === expected.id
+            }
+          )
+        )
+      );
+    }
+  }, 20_000);
+
+  test("guard and cleanup-lock semantic releases bypass global ordinary capacity", async () => {
+    for (const targetKind of ["guard", "cleanup"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const key = `task:create:global-semantic-release-${targetKind}`;
+      const requestDigest = `digest-global-semantic-release-${targetKind}`;
+      const seedService = createIdempotencyRecordService({ workspaceRoot });
+      await seedService.beginRecord({ scope: "task", key, requestDigest });
+      if (targetKind === "cleanup") {
+        await seedService.failRecord({ scope: "task", key, requestDigest });
+      }
+      const targetPath =
+        targetKind === "guard"
+          ? idempotencyTransitionGuardPath(workspaceRoot, key)
+          : idempotencyTransitionCleanupLockPath(workspaceRoot, key);
+      const allowSemanticRelease = createAsyncGate();
+      const allowTransitionContinuation = createAsyncGate();
+      const transitionReached = createSignal();
+      const semanticReleased = createSignal();
+      const transitionService = createIdempotencyRecordService({
+        workspaceRoot,
+        transitionGuardHooks:
+          targetKind === "guard"
+            ? {
+                beforeTransitionGuardRelease: async () => {
+                  transitionReached.resolve();
+                  await allowSemanticRelease.wait;
+                },
+                afterTransitionGuardRelease: async () => {
+                  semanticReleased.resolve();
+                  await allowTransitionContinuation.wait;
+                }
+              }
+            : {
+                beforeCleanupLockRelease: async () => {
+                  transitionReached.resolve();
+                  await allowSemanticRelease.wait;
+                },
+                afterCleanupLockRelease: async () => {
+                  semanticReleased.resolve();
+                  await allowTransitionContinuation.wait;
+                }
+              }
+      });
+      const transition =
+        targetKind === "guard"
+          ? transitionService.completeRecord({
+              scope: "task",
+              key,
+              requestDigest,
+              resultRef: `TASK-global-semantic-release-${targetKind}`
+            })
+          : transitionService.beginRecord({ scope: "task", key, requestDigest });
+      await transitionReached.promise;
+      const saturation = await saturateGlobalRecordAuthority(
+        workspaceRoot,
+        `LOCK-global-semantic-${targetKind}`
+      );
+      const overflow = await captureTaskServiceError(() =>
+        createLockRecordService({ workspaceRoot }).getLock(
+          "task",
+          `LOCK-global-semantic-${targetKind}-overflow`
+        )
+      );
+      expect(overflow.message).toBe("Workspace record authority coordination is at capacity.");
+
+      allowSemanticRelease.open();
+      await Promise.race([
+        semanticReleased.promise,
+        timeoutAfter(2_000, `${targetKind} semantic release was blocked by global capacity`)
+      ]);
+      await expectPathMissing(targetPath);
+      saturation.release();
+      allowTransitionContinuation.open();
+      const transitionResult = await transition;
+      await saturation.completed;
+      expect(transitionResult.status).toBe(targetKind === "guard" ? "completed" : "acquired");
+      await expectPathMissing(idempotencyTransitionGuardPath(workspaceRoot, key));
+      await expectPathMissing(idempotencyTransitionCleanupLockPath(workspaceRoot, key));
+    }
+  }, 15_000);
 
   test("authority acquisition keeps one total five-second deadline across queued holder churn", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -3810,6 +4289,40 @@ async function saturateRecordAuthorityPath(
       holderGate.open();
       void holder;
     }
+  };
+}
+
+async function saturateGlobalRecordAuthority(
+  workspaceRoot: string,
+  lockIdPrefix: string
+): Promise<{
+  completed: Promise<Array<LockRecord | undefined>>;
+  release: () => void;
+}> {
+  const hold = createAsyncGate();
+  const allAcquired = createSignal();
+  let acquired = 0;
+  const service = createLockRecordService({ workspaceRoot });
+  const holders = Array.from({ length: 1024 }, (_, index) =>
+    runWithWorkspaceRecordPublicationHooks(
+      {
+        afterAuthorityLeaseAcquired: async ({ operation }) => {
+          expect(operation).toBe("read");
+          acquired += 1;
+          if (acquired === 1024) allAcquired.resolve();
+          await hold.wait;
+        }
+      },
+      () => service.getLock("task", `${lockIdPrefix}-${index}`)
+    )
+  );
+  await Promise.race([
+    allAcquired.promise,
+    timeoutAfter(2_000, "global authority holders did not acquire")
+  ]);
+  return {
+    completed: Promise.all(holders),
+    release: hold.open
   };
 }
 
