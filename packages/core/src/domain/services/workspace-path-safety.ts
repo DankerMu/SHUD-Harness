@@ -413,7 +413,7 @@ function conservativeMissingPathIdentitySegment(segment: string): string {
 }
 
 function unicodeCaseFoldSegment(segment: string): string {
-  return segment.normalize("NFC").toLowerCase();
+  return segment.normalize("NFC").toUpperCase().toLowerCase().normalize("NFC");
 }
 
 function unicodeCaseFoldPath(path: string): string {
@@ -437,15 +437,15 @@ async function existingPathCaseSemantics(path: string): Promise<FilesystemCaseSe
     .getStore()
     ?.filesystemCaseSemantics?.(Object.freeze({ existingPath: expectedPhysicalPath }));
   if (injectedSemantics !== undefined) return injectedSemantics;
-  const targetDevice = (await lstat(expectedPhysicalPath)).dev;
+  const targetDevice = (await lstat(expectedPhysicalPath, { bigint: true })).dev;
   let candidatePath = expectedPhysicalPath;
   for (;;) {
     const parsed = parse(candidatePath);
     const [candidateEntry, parentEntry] = await Promise.all([
-      lstat(candidatePath),
-      lstat(parsed.dir)
+      lstat(candidatePath, { bigint: true }),
+      lstat(parsed.dir, { bigint: true })
     ]);
-    if (candidateEntry.dev !== targetDevice) {
+    if (!filesystemDeviceIdentityMatches(candidateEntry.dev, targetDevice)) {
       return "unknown";
     }
     const componentSemantics = await existingEntryCaseSemantics(
@@ -454,9 +454,18 @@ async function existingPathCaseSemantics(path: string): Promise<FilesystemCaseSe
       candidatePath
     );
     if (componentSemantics !== "unknown") return componentSemantics;
-    if (parsed.dir === candidatePath || parentEntry.dev !== targetDevice) return "unknown";
+    if (
+      parsed.dir === candidatePath ||
+      !filesystemDeviceIdentityMatches(parentEntry.dev, targetDevice)
+    ) {
+      return "unknown";
+    }
     candidatePath = parsed.dir;
   }
+}
+
+export function filesystemDeviceIdentityMatches(left: bigint, right: bigint): boolean {
+  return left === right;
 }
 
 async function existingEntryCaseSemantics(

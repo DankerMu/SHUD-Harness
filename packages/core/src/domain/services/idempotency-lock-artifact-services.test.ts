@@ -60,6 +60,7 @@ import {
   type WorkspaceRecordCleanupPermit
 } from "./workspace-record-store";
 import {
+  filesystemDeviceIdentityMatches,
   physicalAuthorityPathIdentity,
   physicalCanonicalPath,
   runWithWorkspacePathSafetyHooks
@@ -69,6 +70,13 @@ import { readDurableSingleLinkFile } from "./durable-single-link-reader";
 const tempRoots: string[] = [];
 const distinctCaseEntriesSupported = await detectDistinctCaseEntriesSupport();
 const caseAliasWorkspaceSupported = await detectCaseAliasWorkspaceSupport();
+const unicodeAuthorityPairs = Object.freeze({
+  normalization: Object.freeze(["\u00c9vidence.json", "e\u0301VIDENCE.json"] as const),
+  sigma: Object.freeze(["\u03a3igma.json", "\u03c2IGMA.json"] as const),
+  sharpS: Object.freeze(["Stra\u00dfe.json", "STRASSE.json"] as const)
+});
+const unicodeCaseAliasCapabilities = await detectUnicodeCaseAliasCapabilities();
+const unicodeDistinctEntryCapabilities = await detectUnicodeDistinctEntryCapabilities();
 
 describe("idempotency, lock, and artifact services", () => {
   afterEach(async () => {
@@ -362,48 +370,75 @@ describe("idempotency, lock, and artifact services", () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     await mkdir(workspaceRoot, { recursive: true });
-    const composed = join(workspaceRoot, "\u00c9vidence.json");
-    const decomposed = join(workspaceRoot, "e\u0301VIDENCE.json");
+    for (const [label, [firstName, secondName]] of Object.entries(unicodeAuthorityPairs)) {
+      const first = join(workspaceRoot, firstName);
+      const second = join(workspaceRoot, secondName);
+      const [firstUnknown, secondUnknown] = await runWithWorkspacePathSafetyHooks(
+        { filesystemCaseSemantics: () => "unknown" },
+        () => Promise.all([
+          physicalAuthorityPathIdentity(first, `unicode.unknown.${label}.first`),
+          physicalAuthorityPathIdentity(second, `unicode.unknown.${label}.second`)
+        ])
+      );
+      expect(firstUnknown).toBe(secondUnknown);
 
-    const [composedUnknown, decomposedUnknown] = await runWithWorkspacePathSafetyHooks(
-      { filesystemCaseSemantics: () => "unknown" },
-      () => Promise.all([
-        physicalAuthorityPathIdentity(composed, "unicode.unknown.composed"),
-        physicalAuthorityPathIdentity(decomposed, "unicode.unknown.decomposed")
-      ])
-    );
-    expect(composedUnknown).toBe(decomposedUnknown);
-
-    const [composedSensitive, decomposedSensitive] = await runWithWorkspacePathSafetyHooks(
-      { filesystemCaseSemantics: () => "case_sensitive" },
-      () => Promise.all([
-        physicalAuthorityPathIdentity(composed, "unicode.sensitive.composed"),
-        physicalAuthorityPathIdentity(decomposed, "unicode.sensitive.decomposed")
-      ])
-    );
-    expect(composedSensitive).not.toBe(decomposedSensitive);
+      const [firstSensitive, secondSensitive] = await runWithWorkspacePathSafetyHooks(
+        { filesystemCaseSemantics: () => "case_sensitive" },
+        () => Promise.all([
+          physicalAuthorityPathIdentity(first, `unicode.sensitive.${label}.first`),
+          physicalAuthorityPathIdentity(second, `unicode.sensitive.${label}.second`)
+        ])
+      );
+      expect(firstSensitive).not.toBe(secondSensitive);
+    }
   });
 
-  test.skipIf(!caseAliasWorkspaceSupported)("missing Unicode aliases converge on a visible case-insensitive workspace", async () => {
-    const aliasWorkspace = await createCaseAliasWorkspacePath();
-    if (!aliasWorkspace) {
-      throw new Error("Expected case-insensitive workspace aliases to be supported.");
+  test.skipIf(!caseAliasWorkspaceSupported || !unicodeCaseAliasCapabilities.normalization)(
+    "normalization aliases converge on a visible case-insensitive workspace",
+    async () => {
+      await expectUnicodeAuthorityPairOnCaseInsensitiveWorkspace("normalization");
     }
-    const { tempRoot, workspaceRoot, aliasRoot } = aliasWorkspace;
-    tempRoots.push(tempRoot);
-    const directoryPath = join(workspaceRoot, "UnicodeAuthority");
-    await mkdir(directoryPath);
-    const [composed, decomposed] = await Promise.all([
-      physicalAuthorityPathIdentity(
-        join(workspaceRoot, "UnicodeAuthority", "\u00c9vidence.json"),
-        "unicode.visible.composed"
-      ),
-      physicalAuthorityPathIdentity(
-        join(aliasRoot, "unicodeauthority", "e\u0301VIDENCE.json"),
-        "unicode.visible.decomposed"
-      )
-    ]);
-    expect(composed).toBe(decomposed);
+  );
+
+  test.skipIf(!caseAliasWorkspaceSupported || !unicodeCaseAliasCapabilities.sigma)(
+    "sigma and final-sigma aliases converge on a visible case-insensitive workspace",
+    async () => {
+      await expectUnicodeAuthorityPairOnCaseInsensitiveWorkspace("sigma");
+    }
+  );
+
+  test.skipIf(!caseAliasWorkspaceSupported || !unicodeCaseAliasCapabilities.sharpS)(
+    "sharp-s and SS aliases converge on a visible case-insensitive workspace",
+    async () => {
+      await expectUnicodeAuthorityPairOnCaseInsensitiveWorkspace("sharpS");
+    }
+  );
+
+  test.skipIf(!unicodeDistinctEntryCapabilities.normalization)(
+    "normalization aliases stay distinct on a supporting case-sensitive workspace",
+    async () => {
+      await expectUnicodeAuthorityPairOnCaseSensitiveWorkspace("normalization");
+    }
+  );
+
+  test.skipIf(!unicodeDistinctEntryCapabilities.sigma)(
+    "sigma and final-sigma aliases stay distinct on a supporting case-sensitive workspace",
+    async () => {
+      await expectUnicodeAuthorityPairOnCaseSensitiveWorkspace("sigma");
+    }
+  );
+
+  test.skipIf(!unicodeDistinctEntryCapabilities.sharpS)(
+    "sharp-s and SS aliases stay distinct on a supporting case-sensitive workspace",
+    async () => {
+      await expectUnicodeAuthorityPairOnCaseSensitiveWorkspace("sharpS");
+    }
+  );
+
+  test("bigint device boundary comparison preserves adjacent unsafe integer identities", () => {
+    const device = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+    expect(filesystemDeviceIdentityMatches(device, device)).toBe(true);
+    expect(filesystemDeviceIdentityMatches(device, device + 1n)).toBe(false);
   });
 
   test("same-path followers retain missing-to-existing authority through publication", async () => {
@@ -1730,6 +1765,190 @@ describe("idempotency, lock, and artifact services", () => {
       );
     }
   }, 20_000);
+
+  test("claimed cleanup identity placeholders retain bounded capacity until terminal timeout", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const fixtures: Array<{
+      path: string;
+      evidenceRef: string;
+      record: { id: string };
+      permit: WorkspaceRecordCleanupPermit;
+    }> = [];
+    const identityGate = createAsyncGate();
+    const allIdentityPlaceholdersEntered = createSignal();
+    const cleanupAttempts: Promise<WorkspaceRecordConditionalDeleteError>[] = [];
+    let identityPlaceholderCount = 0;
+
+    try {
+      for (let index = 0; index < 1024; index += 1) {
+        const record = { id: `claimed-capacity-${index}` };
+        const fileName = `${record.id}.json`;
+        const evidenceRef = `permit.claimed-capacity.${index}`;
+        const result = await createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          ["claimed-permit-capacity"],
+          fileName,
+          record,
+          evidenceRef,
+          schema
+        );
+        if (result.status !== "created") {
+          throw new Error("Expected claimed cleanup capacity fixture.");
+        }
+        fixtures.push({
+          path: workspaceRecordPath(
+            workspaceRoot,
+            ["claimed-permit-capacity", fileName],
+            evidenceRef
+          ),
+          evidenceRef,
+          record,
+          permit: result.cleanupPermit
+        });
+      }
+
+      const deadline = Date.now() + 1_500;
+      for (const fixture of fixtures) {
+        cleanupAttempts.push(
+          captureConditionalDeleteError(() =>
+            runWithWorkspaceRecordAuthorityDeadline(deadline, () =>
+              runWithWorkspaceRecordPublicationHooks(
+                {
+                  beforeCleanupPermitIdentityResolution: async () => {
+                    identityPlaceholderCount += 1;
+                    if (identityPlaceholderCount === 1024) {
+                      allIdentityPlaceholdersEntered.resolve();
+                    }
+                    await identityGate.wait;
+                  }
+                },
+                () =>
+                  conditionalDeleteJsonRecordWithCleanupPermit(
+                    fixture.permit,
+                    fixture.path,
+                    fixture.evidenceRef,
+                    schema,
+                    {
+                      kind: "record",
+                      expected: fixture.record,
+                      matches: (current, expected) => current.id === expected.id
+                    }
+                  )
+              )
+            )
+          )
+        );
+      }
+
+      await Promise.race([
+        allIdentityPlaceholdersEntered.promise,
+        timeoutAfter(2_000, "claimed cleanup identity placeholders did not all enter")
+      ]);
+
+      const overflowEvidenceRef = "permit.claimed-capacity.overflow";
+      const overflowRecord = { id: "claimed-capacity-overflow" };
+      const overflowFileName = `${overflowRecord.id}.json`;
+      const overflowPath = workspaceRecordPath(
+        workspaceRoot,
+        ["claimed-permit-capacity", overflowFileName],
+        overflowEvidenceRef
+      );
+      const capacityError = await captureTaskServiceError(() =>
+        createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          ["claimed-permit-capacity"],
+          overflowFileName,
+          overflowRecord,
+          overflowEvidenceRef,
+          schema
+        )
+      );
+      expect(capacityError.code).toBe("record_malformed");
+      expect(capacityError.status).toBe(409);
+      expect(capacityError.retryable).toBe(true);
+      expect(capacityError.evidenceRefs).toEqual([overflowEvidenceRef]);
+      expect(capacityError.message).toBe(
+        "Workspace record authority coordination is at capacity."
+      );
+
+      await delay(Math.max(0, deadline - Date.now() + 100));
+      const recovered = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        ["claimed-permit-capacity"],
+        overflowFileName,
+        overflowRecord,
+        overflowEvidenceRef,
+        schema
+      );
+      expect(recovered.status).toBe("created");
+      if (recovered.status !== "created") {
+        throw new Error("Expected cleanup capacity to recover after claimed admission timeout.");
+      }
+
+      identityGate.open();
+      const timeoutErrors = await Promise.all(cleanupAttempts);
+      expect(timeoutErrors).toHaveLength(1024);
+      for (const error of timeoutErrors) {
+        expect(error.mutationPhase).toBe("pre_mutation");
+        expect(error.failureStage).toBe("permit_admission");
+        expect(error.cause).toBeInstanceOf(TaskServiceError);
+        expect((error.cause as TaskServiceError).retryable).toBe(true);
+      }
+
+      await Promise.all(
+        fixtures.map(({ path, evidenceRef, record }) =>
+          conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+            kind: "record",
+            expected: record,
+            matches: (current, expected) => current.id === expected.id
+          })
+        )
+      );
+      expect(
+        await conditionalDeleteJsonRecordWithCleanupPermit(
+          recovered.cleanupPermit,
+          overflowPath,
+          overflowEvidenceRef,
+          schema,
+          {
+            kind: "record",
+            expected: overflowRecord,
+            matches: (current, expected) => current.id === expected.id
+          }
+        )
+      ).toEqual({ status: "deleted" });
+
+      const aliasRecovery = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        ["claimed-permit-capacity"],
+        "claimed-capacity-0.json",
+        fixtures[0]!.record,
+        "permit.claimed-capacity.alias-recovery",
+        schema
+      );
+      expect(aliasRecovery.status).toBe("created");
+      if (aliasRecovery.status === "created") {
+        expect(
+          await conditionalDeleteJsonRecordWithCleanupPermit(
+            aliasRecovery.cleanupPermit,
+            fixtures[0]!.path,
+            "permit.claimed-capacity.alias-recovery",
+            schema,
+            {
+              kind: "record",
+              expected: fixtures[0]!.record,
+              matches: (current, expected) => current.id === expected.id
+            }
+          )
+        ).toEqual({ status: "deleted" });
+      }
+    } finally {
+      identityGate.open();
+      await Promise.allSettled(cleanupAttempts);
+    }
+  }, 30_000);
 
   test("authority acquisition keeps one total five-second deadline across queued holder churn", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -5655,6 +5874,124 @@ async function detectCaseAliasWorkspaceSupport(): Promise<boolean> {
   } finally {
     await rm(aliasWorkspace.tempRoot, { recursive: true, force: true });
   }
+}
+
+type UnicodeAuthorityPairName = keyof typeof unicodeAuthorityPairs;
+type UnicodeAuthorityCapabilities = Record<UnicodeAuthorityPairName, boolean>;
+
+async function detectUnicodeCaseAliasCapabilities(): Promise<UnicodeAuthorityCapabilities> {
+  const probeRoot = await realpath(await mkdtemp(join(tmpdir(), "shud-harness-unicode-alias-")));
+  try {
+    return {
+      normalization: await supportsUnicodePathAlias(probeRoot, "normalization"),
+      sigma: await supportsUnicodePathAlias(probeRoot, "sigma"),
+      sharpS: await supportsUnicodePathAlias(probeRoot, "sharpS")
+    };
+  } finally {
+    await rm(probeRoot, { recursive: true, force: true });
+  }
+}
+
+async function detectUnicodeDistinctEntryCapabilities(): Promise<UnicodeAuthorityCapabilities> {
+  const probeRoot = await realpath(await mkdtemp(join(tmpdir(), "shud-harness-unicode-distinct-")));
+  try {
+    return {
+      normalization: await supportsDistinctUnicodeEntries(probeRoot, "normalization"),
+      sigma: await supportsDistinctUnicodeEntries(probeRoot, "sigma"),
+      sharpS: await supportsDistinctUnicodeEntries(probeRoot, "sharpS")
+    };
+  } finally {
+    await rm(probeRoot, { recursive: true, force: true });
+  }
+}
+
+async function supportsUnicodePathAlias(
+  probeRoot: string,
+  pairName: UnicodeAuthorityPairName
+): Promise<boolean> {
+  const pairRoot = join(probeRoot, pairName);
+  await mkdir(pairRoot);
+  const [firstName, secondName] = unicodeAuthorityPairs[pairName];
+  const firstPath = join(pairRoot, firstName);
+  const secondPath = join(pairRoot, secondName);
+  await writeFile(firstPath, pairName, { flag: "wx" });
+  try {
+    const [firstEntry, secondEntry] = await Promise.all([
+      lstat(firstPath, { bigint: true }),
+      lstat(secondPath, { bigint: true })
+    ]);
+    return firstEntry.dev === secondEntry.dev && firstEntry.ino === secondEntry.ino;
+  } catch (error) {
+    if (hasTestErrorCode(error, "ENOENT") || hasTestErrorCode(error, "ENOTDIR")) return false;
+    throw error;
+  }
+}
+
+async function supportsDistinctUnicodeEntries(
+  probeRoot: string,
+  pairName: UnicodeAuthorityPairName
+): Promise<boolean> {
+  const pairRoot = join(probeRoot, pairName);
+  await mkdir(pairRoot);
+  const [firstName, secondName] = unicodeAuthorityPairs[pairName];
+  const firstPath = join(pairRoot, firstName);
+  const secondPath = join(pairRoot, secondName);
+  await writeFile(firstPath, "first", { flag: "wx" });
+  try {
+    await writeFile(secondPath, "second", { flag: "wx" });
+    const [firstEntry, secondEntry] = await Promise.all([
+      lstat(firstPath, { bigint: true }),
+      lstat(secondPath, { bigint: true })
+    ]);
+    return firstEntry.dev !== secondEntry.dev || firstEntry.ino !== secondEntry.ino;
+  } catch (error) {
+    if (hasTestErrorCode(error, "EEXIST")) return false;
+    throw error;
+  }
+}
+
+async function expectUnicodeAuthorityPairOnCaseInsensitiveWorkspace(
+  pairName: UnicodeAuthorityPairName
+): Promise<void> {
+  const aliasWorkspace = await createCaseAliasWorkspacePath();
+  if (!aliasWorkspace) {
+    throw new Error("Expected case-insensitive workspace aliases to be supported.");
+  }
+  const { tempRoot, workspaceRoot, aliasRoot } = aliasWorkspace;
+  tempRoots.push(tempRoot);
+  await mkdir(join(workspaceRoot, "UnicodeAuthority"));
+  const [firstName, secondName] = unicodeAuthorityPairs[pairName];
+  const [firstIdentity, secondIdentity] = await Promise.all([
+    physicalAuthorityPathIdentity(
+      join(workspaceRoot, "UnicodeAuthority", firstName),
+      `unicode.visible.${pairName}.first`
+    ),
+    physicalAuthorityPathIdentity(
+      join(aliasRoot, "unicodeauthority", secondName),
+      `unicode.visible.${pairName}.second`
+    )
+  ]);
+  expect(firstIdentity).toBe(secondIdentity);
+}
+
+async function expectUnicodeAuthorityPairOnCaseSensitiveWorkspace(
+  pairName: UnicodeAuthorityPairName
+): Promise<void> {
+  const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+  tempRoots.push(tempRoot);
+  await mkdir(workspaceRoot);
+  const [firstName, secondName] = unicodeAuthorityPairs[pairName];
+  const [firstIdentity, secondIdentity] = await Promise.all([
+    physicalAuthorityPathIdentity(
+      join(workspaceRoot, firstName),
+      `unicode.sensitive.visible.${pairName}.first`
+    ),
+    physicalAuthorityPathIdentity(
+      join(workspaceRoot, secondName),
+      `unicode.sensitive.visible.${pairName}.second`
+    )
+  ]);
+  expect(firstIdentity).not.toBe(secondIdentity);
 }
 
 async function readFileWithIdentity(path: string): Promise<{ bytes: Buffer; dev: number; ino: number }> {

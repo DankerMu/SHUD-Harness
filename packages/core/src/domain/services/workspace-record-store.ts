@@ -80,6 +80,7 @@ interface RecordAuthorityWaiter {
   kind: "ordinary" | "cleanup";
   exactPath: string;
   ready: boolean;
+  cleanupPermit?: WorkspaceRecordCleanupPermit;
 }
 
 interface RecordAuthorityMutex {
@@ -110,6 +111,7 @@ const cleanupPermitState = new WeakMap<
     publicPath: string;
     generation?: OwnedTemporaryRecordIdentity;
     status: "outstanding" | "claimed" | "settled";
+    capacityActive: boolean;
   }
 >();
 
@@ -1870,7 +1872,8 @@ async function acquireRecordAuthorityWithCleanupPermit(
       evidenceRef,
       kind: "cleanup",
       exactPath: state.publicPath,
-      ready: false
+      ready: false,
+      cleanupPermit: permit
     };
     state.mutex.waiters.add(waiter);
   });
@@ -1920,7 +1923,8 @@ async function acquireRecordAuthorityWithCleanupPermit(
 function createRecordAuthorityLease(
   mutex: RecordAuthorityMutex,
   exactPath: string,
-  consumesReservation = true
+  consumesReservation = true,
+  cleanupPermit?: WorkspaceRecordCleanupPermit
 ): RecordAuthorityLease {
   let released = false;
   return {
@@ -1938,7 +1942,8 @@ function createRecordAuthorityLease(
       cleanupPermitState.set(permit, {
         mutex,
         publicPath: exactPath,
-        status: "outstanding"
+        status: "outstanding",
+        capacityActive: true
       });
       return permit;
     },
@@ -1954,6 +1959,7 @@ function createRecordAuthorityLease(
       if (consumesReservation) {
         releaseRecordAuthorityReservation(mutex);
       }
+      settleRecordAuthorityCleanupAdmission(cleanupPermit);
       if (handoffRecordAuthorityLease(mutex)) {
         return;
       }
@@ -1977,12 +1983,23 @@ function handoffRecordAuthorityLease(
     next.active = false;
     clearTimeout(next.timeout);
     if (Date.now() >= next.deadline) {
-      if (next.kind === "ordinary") releaseRecordAuthorityReservation(mutex);
+      if (next.kind === "ordinary") {
+        releaseRecordAuthorityReservation(mutex);
+      } else {
+        settleRecordAuthorityCleanupAdmission(next.cleanupPermit);
+      }
       next.reject(authorityWaitError(next.evidenceRef));
       continue;
     }
     mutex.ownerActive = true;
-    next.resolve(createRecordAuthorityLease(mutex, next.exactPath, next.kind === "ordinary"));
+    next.resolve(
+      createRecordAuthorityLease(
+        mutex,
+        next.exactPath,
+        next.kind === "ordinary",
+        next.cleanupPermit
+      )
+    );
     return true;
   }
 }
@@ -1994,6 +2011,7 @@ function cancelRecordAuthorityCleanupWaiter(
   if (!waiter.active || waiter.kind !== "cleanup" || !mutex.waiters.delete(waiter)) return false;
   waiter.active = false;
   clearTimeout(waiter.timeout);
+  settleRecordAuthorityCleanupAdmission(waiter.cleanupPermit);
   if (!mutex.ownerActive) handoffRecordAuthorityLease(mutex);
   removeUnusedRecordAuthorityMutex(mutex);
   return true;
@@ -2028,14 +2046,18 @@ function cancelRecordAuthorityCleanupPermit(
   if (!permit) return;
   const state = cleanupPermitState.get(permit);
   if (!state || state.status !== "outstanding") return;
-  settleRecordAuthorityCleanupPermitState(permit, state, "settled");
+  settleRecordAuthorityCleanupPermitState(permit, state);
 }
 
 function claimRecordAuthorityCleanupPermit(
   permit: WorkspaceRecordCleanupPermit,
   state: NonNullable<ReturnType<typeof cleanupPermitState.get>>
 ): void {
-  settleRecordAuthorityCleanupPermitState(permit, state, "claimed", false);
+  if (state.status !== "outstanding") return;
+  state.status = "claimed";
+  if (state.mutex.outstandingCleanupPermit === permit) {
+    state.mutex.outstandingCleanupPermit = undefined;
+  }
 }
 
 function settleRecordAuthorityCleanupPermit(
@@ -2052,23 +2074,38 @@ function settleRecordAuthorityCleanupPermit(
   ) {
     return;
   }
-  settleRecordAuthorityCleanupPermitState(permit, state, "settled");
+  settleRecordAuthorityCleanupPermitState(permit, state);
 }
 
 function settleRecordAuthorityCleanupPermitState(
   permit: WorkspaceRecordCleanupPermit,
-  state: NonNullable<ReturnType<typeof cleanupPermitState.get>>,
-  terminalStatus: "claimed" | "settled",
-  retireMutex = true
+  state: NonNullable<ReturnType<typeof cleanupPermitState.get>>
 ): void {
   if (state.status !== "outstanding") return;
-  state.status = terminalStatus;
+  state.status = "settled";
   if (state.mutex.outstandingCleanupPermit === permit) {
     state.mutex.outstandingCleanupPermit = undefined;
   }
+  settleRecordAuthorityCleanupAdmissionState(state);
+}
+
+function settleRecordAuthorityCleanupAdmission(
+  permit: WorkspaceRecordCleanupPermit | undefined
+): void {
+  if (!permit) return;
+  const state = cleanupPermitState.get(permit);
+  if (!state) return;
+  settleRecordAuthorityCleanupAdmissionState(state);
+}
+
+function settleRecordAuthorityCleanupAdmissionState(
+  state: NonNullable<ReturnType<typeof cleanupPermitState.get>>
+): void {
+  if (!state.capacityActive) return;
+  state.capacityActive = false;
   state.mutex.cleanupPermits -= 1;
   activeRecordAuthorityCleanupPermits -= 1;
-  if (retireMutex) removeUnusedRecordAuthorityMutex(state.mutex);
+  removeUnusedRecordAuthorityMutex(state.mutex);
 }
 
 function cancelRecordAuthorityWaiter(
