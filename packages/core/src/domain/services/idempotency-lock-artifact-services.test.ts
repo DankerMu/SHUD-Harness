@@ -19,6 +19,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import ts from "typescript";
 import { z } from "zod";
 import { LockRecordSchema } from "../schemas/lock";
 import {
@@ -83,6 +84,45 @@ describe("idempotency, lock, and artifact services", () => {
     await Promise.all(
       tempRoots.splice(0).map((tempRoot) => rm(tempRoot, { recursive: true, force: true }))
     );
+  });
+
+  test("package root exposes production path-safety APIs without local test hooks", async () => {
+    const coreExports = await import("@shud-harness/core");
+    const packageRootEntry = join(import.meta.dir, "../../index.ts");
+    const program = ts.createProgram({
+      rootNames: [packageRootEntry],
+      options: {
+        module: ts.ModuleKind.ESNext,
+        moduleResolution: ts.ModuleResolutionKind.Bundler,
+        noEmit: true,
+        skipLibCheck: true,
+        target: ts.ScriptTarget.ES2022
+      }
+    });
+    const packageRootSource = program.getSourceFile(packageRootEntry);
+    expect(packageRootSource).toBeDefined();
+    const packageRootSymbol = packageRootSource
+      ? program.getTypeChecker().getSymbolAtLocation(packageRootSource)
+      : undefined;
+    expect(packageRootSymbol).toBeDefined();
+    const packageRootTypeExports = new Set(
+      packageRootSymbol
+        ? program
+            .getTypeChecker()
+            .getExportsOfModule(packageRootSymbol)
+            .map((symbol) => symbol.getName())
+        : []
+    );
+
+    expect(packageRootTypeExports.has("WorkspacePathSafetyHooks")).toBe(false);
+    expect(packageRootTypeExports.has("runWithWorkspacePathSafetyHooks")).toBe(false);
+    expect("runWithWorkspacePathSafetyHooks" in coreExports).toBe(false);
+    expect(packageRootTypeExports.has("WorkspacePathSafetyError")).toBe(true);
+    expect(packageRootTypeExports.has("WorkspacePathResolution")).toBe(true);
+    expect("WorkspacePathSafetyError" in coreExports).toBe(true);
+    expect("resolveWorkspacePath" in coreExports).toBe(true);
+    expect("physicalAuthorityPathIdentity" in coreExports).toBe(true);
+    expect("filesystemDeviceIdentityMatches" in coreExports).toBe(true);
   });
 
   test("IdempotencyRecord store/get/replay uses safe deterministic direct paths", async () => {
