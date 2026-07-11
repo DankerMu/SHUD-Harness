@@ -115,7 +115,9 @@ describe("idempotency, lock, and artifact services", () => {
     });
     expect(mismatch.status).toBe("mismatch");
 
-    await writeFile(join(idempotencyDirectory, `${"0".repeat(64)}.json`), "{", { flag: "wx" });
+    await writeFile(join(idempotencyDirectory, `${"0".repeat(64)}.json`), "{", {
+      flag: "wx"
+    });
     expect(await service.getRecord("task", rawKey)).toEqual(record);
   });
 
@@ -160,7 +162,11 @@ describe("idempotency, lock, and artifact services", () => {
     });
     await Promise.resolve();
     expect(replaySettled).toBe(false);
-    const follower = followerService.beginRecord({ scope: "task", key, requestDigest });
+    const follower = followerService.beginRecord({
+      scope: "task",
+      key,
+      requestDigest
+    });
     hold.release();
     const [ownerResult, replayResult, followerResult] = await Promise.all([
       owner,
@@ -176,8 +182,14 @@ describe("idempotency, lock, and artifact services", () => {
     );
 
     expect(ownerResult.status).toBe("acquired");
-    expect(replayResult).toEqual({ status: "incomplete", record: ownerResult.record });
-    expect(followerResult).toEqual({ status: "incomplete", record: ownerResult.record });
+    expect(replayResult).toEqual({
+      status: "incomplete",
+      record: ownerResult.record
+    });
+    expect(followerResult).toEqual({
+      status: "incomplete",
+      record: ownerResult.record
+    });
     expect(readerLeaseNlink).toBe(1);
     expect((await stat(recordPath)).nlink).toBe(1);
     await expectPathMissing(publication.temporaryPath);
@@ -287,7 +299,9 @@ describe("idempotency, lock, and artifact services", () => {
     const follower = followerService.registerArtifact({ ...artifact });
     hold.release();
     const [ownerArtifact, followerArtifact] = await Promise.all([owner, follower]);
-    const replayedArtifact = await ownerService.registerArtifact({ ...artifact });
+    const replayedArtifact = await ownerService.registerArtifact({
+      ...artifact
+    });
 
     expect(ownerArtifact).toEqual(artifact);
     expect(followerArtifact).toEqual(artifact);
@@ -307,7 +321,9 @@ describe("idempotency, lock, and artifact services", () => {
     const key = "task:create:case-alias-authority";
     const requestDigest = "digest-case-alias-authority";
     const writerService = createIdempotencyRecordService({ workspaceRoot });
-    const aliasReaderService = createIdempotencyRecordService({ workspaceRoot: aliasRoot });
+    const aliasReaderService = createIdempotencyRecordService({
+      workspaceRoot: aliasRoot
+    });
     const hardlinkHold = createRecordPublicationHold(1);
     const writer = runWithWorkspaceRecordPublicationHooks(hardlinkHold.hooks, () =>
       writerService.beginRecord({ scope: "task", key, requestDigest })
@@ -343,7 +359,10 @@ describe("idempotency, lock, and artifact services", () => {
           artifactContention.resolve();
         }
       },
-      () => createArtifactRegistryService({ workspaceRoot: aliasRoot }).registerArtifact(artifact)
+      () =>
+        createArtifactRegistryService({
+          workspaceRoot: aliasRoot
+        }).registerArtifact(artifact)
     );
     await artifactContention.promise;
     artifactHold.release();
@@ -351,7 +370,9 @@ describe("idempotency, lock, and artifact services", () => {
 
     const lock = validLockRecord();
     const physicalLockService = createLockRecordService({ workspaceRoot });
-    const aliasLockService = createLockRecordService({ workspaceRoot: aliasRoot });
+    const aliasLockService = createLockRecordService({
+      workspaceRoot: aliasRoot
+    });
     await physicalLockService.storeLock(lock);
     const renameHold = createAsyncGate();
     const renameAcquired = createSignal();
@@ -506,6 +527,51 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await service.getLock(record.scope, record.lock_id)).toBeDefined();
   });
 
+  test("oversized rename and hardlink records fail before authority admission or workspace mutation", async () => {
+    const { tempRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const oversizedSchema = z.object({ payload: z.string() });
+    const oversizedRecord = { payload: "x".repeat(MAX_SERVICE_RECORD_BYTES) };
+    let authorityAdmissions = 0;
+
+    for (const writer of ["rename", "hardlink"] as const) {
+      const workspaceRoot = join(tempRoot, writer);
+      const error = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterAuthorityLeaseAcquired: () => {
+              authorityAdmissions += 1;
+            }
+          },
+          () =>
+            writer === "rename"
+              ? writeJsonRecord(
+                  workspaceRoot,
+                  ["records"],
+                  "oversized.json",
+                  oversizedRecord,
+                  `oversized.${writer}`,
+                  oversizedSchema
+                )
+              : createJsonRecordIfAbsent(
+                  workspaceRoot,
+                  ["records"],
+                  "oversized.json",
+                  oversizedRecord,
+                  `oversized.${writer}`,
+                  oversizedSchema
+                )
+        )
+      );
+
+      expect(error.code).toBe("record_schema_error");
+      expect(error.message).toBe("Workspace record would exceed the M1 bounded size.");
+      await expectPathMissing(workspaceRoot);
+    }
+
+    expect(authorityAdmissions).toBe(0);
+  });
+
   test("conditional delete serializes readers and immediate recreation without transient read errors", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -593,7 +659,11 @@ describe("idempotency, lock, and artifact services", () => {
       const requestDigest = `digest-guard-generation-${targetPublication}`;
       const seedService = createIdempotencyRecordService({ workspaceRoot });
       await seedService.beginRecord({ scope: "task", key, requestDigest });
-      const generationA = await seedService.failRecord({ scope: "task", key, requestDigest });
+      const generationA = await seedService.failRecord({
+        scope: "task",
+        key,
+        requestDigest
+      });
       const transitionPath = idempotencyTransitionGuardPath(workspaceRoot, key);
       const cleanupPath = idempotencyTransitionCleanupLockPath(workspaceRoot, key);
       await expectPathMissing(transitionPath);
@@ -706,6 +776,92 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("transition guard and cleanup-lock releases retain reserved authority at one holder plus 63 waiters", async () => {
+    for (const targetKind of ["guard", "cleanup"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const key = `task:create:reserved-release-${targetKind}`;
+      const requestDigest = `digest-reserved-release-${targetKind}`;
+      const seedService = createIdempotencyRecordService({ workspaceRoot });
+      await seedService.beginRecord({ scope: "task", key, requestDigest });
+      if (targetKind === "cleanup") {
+        await seedService.failRecord({ scope: "task", key, requestDigest });
+      }
+      const targetPath =
+        targetKind === "guard"
+          ? idempotencyTransitionGuardPath(workspaceRoot, key)
+          : idempotencyTransitionCleanupLockPath(workspaceRoot, key);
+      const transitionPause = createAsyncGate();
+      const transitionReached = createSignal();
+      const cleanupQueued = createSignal();
+      let hardlinkAdmissions = 0;
+      const transitionService = createIdempotencyRecordService({
+        workspaceRoot
+      });
+      const transition = runWithWorkspaceRecordPublicationHooks(
+        {
+          afterAuthorityLeaseAcquired: async ({ operation }) => {
+            if (targetKind === "guard" && operation === "rename") {
+              transitionReached.resolve();
+              await transitionPause.wait;
+            }
+            if (targetKind === "cleanup" && operation === "hardlink") {
+              hardlinkAdmissions += 1;
+              if (hardlinkAdmissions === 3) {
+                transitionReached.resolve();
+                await transitionPause.wait;
+              }
+            }
+          },
+          onAuthorityContention: ({ operation }) => {
+            if (operation === "delete") cleanupQueued.resolve();
+          }
+        },
+        () =>
+          targetKind === "guard"
+            ? transitionService.completeRecord({
+                scope: "task",
+                key,
+                requestDigest,
+                resultRef: `TASK-reserved-release-${targetKind}`
+              })
+            : transitionService.beginRecord({
+                scope: "task",
+                key,
+                requestDigest
+              })
+      );
+      await transitionReached.promise;
+
+      const saturation = await saturateRecordAuthorityPath(
+        targetPath,
+        idempotencyRecordEvidenceRef("task", key)
+      );
+      const overflow = await captureTaskServiceError(() =>
+        readJsonRecord(targetPath, idempotencyRecordEvidenceRef("task", key), z.unknown())
+      );
+      expect(overflow.message).toBe("Workspace record authority coordination is at capacity.");
+
+      transitionPause.open();
+      await Promise.race([
+        cleanupQueued.promise,
+        timeoutAfter(1_000, `${targetKind} reserved cleanup did not queue`)
+      ]);
+      saturation.release();
+      const [transitionResult, queuedResults] = await Promise.race([
+        Promise.all([transition, saturation.completed]),
+        timeoutAfter(2_000, `${targetKind} reserved cleanup did not complete`)
+      ]);
+
+      expect(transitionResult.status).toBe(targetKind === "guard" ? "completed" : "acquired");
+      expect(queuedResults).toEqual(Array.from({ length: 63 }, () => undefined));
+      expect(saturation.acquisitionOrder).toEqual(saturation.queueOrder);
+      await expectPathMissing(targetPath);
+      await expectPathMissing(idempotencyTransitionGuardPath(workspaceRoot, key));
+      await expectPathMissing(idempotencyTransitionCleanupLockPath(workspaceRoot, key));
+    }
+  });
+
   test("authority path capacity is bounded, retryable, and released after holders finish", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -757,9 +913,7 @@ describe("idempotency, lock, and artifact services", () => {
       expect(capacityError.code).toBe("record_malformed");
       expect(capacityError.status).toBe(409);
       expect(capacityError.retryable).toBe(true);
-      expect(capacityError.message).toBe(
-        "Workspace record authority coordination is at capacity."
-      );
+      expect(capacityError.message).toBe("Workspace record authority coordination is at capacity.");
       expectErrorNotToLeakRecordContent(capacityError, tempRoot);
     } finally {
       releaseHolders.open();
@@ -861,6 +1015,42 @@ describe("idempotency, lock, and artifact services", () => {
     await expectPathMissing(publication!.temporaryPath);
   });
 
+  test("project-owned temp cleanup uses the open-file identity and preserves an outside hardlink", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const outsideAlias = join(tempRoot, "outside-temp-alias.json");
+    const record = { ...validLockRecord(), lock_id: "LOCK-temp-open-identity" };
+    let publication: WorkspaceRecordPublicationHookInput | undefined;
+
+    const error = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: async (input) => {
+            publication = input;
+            await link(input.temporaryPath, outsideAlias);
+          }
+        },
+        () =>
+          createJsonRecordIfAbsent(
+            workspaceRoot,
+            lockRecordDirectorySegments(record.scope),
+            lockRecordFileName(record.lock_id),
+            record,
+            lockRecordEvidenceRef(record.scope, record.lock_id),
+            LockRecordSchema
+          )
+      )
+    );
+
+    expect(error.code).toBe("workspace_path_not_safe");
+    expect(publication).toBeDefined();
+    await expectPathMissing(publication!.temporaryPath);
+    const expectedBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+    expect(await readFile(outsideAlias)).toEqual(expectedBytes);
+    expect(await readFile(publication!.canonicalPath)).toEqual(expectedBytes);
+    expect((await stat(outsideAlias)).nlink).toBe(2);
+  });
+
   test("persistent publication temp unlink failure fails closed without deleting aliases", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -889,9 +1079,7 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(publication).toBeDefined();
     expect(error.code).toBe("workspace_path_not_safe");
-    expect(error.message).toBe(
-      "Workspace record publication temporary cleanup did not complete."
-    );
+    expect(error.message).toBe("Workspace record publication temporary cleanup did not complete.");
     expect(error.evidenceRefs).toEqual([idempotencyRecordEvidenceRef("task", key)]);
     expectErrorNotToLeakRecordContent(error, tempRoot);
     expect(attempts).toEqual([1, 2, 3]);
@@ -902,15 +1090,17 @@ describe("idempotency, lock, and artifact services", () => {
     expect((await stat(publication!.temporaryPath)).nlink).toBe(3);
     expect((await stat(outsideAlias)).nlink).toBe(3);
 
-    const poisonedRead = await captureTaskServiceError(() =>
-      service.getRecord("task", key)
-    );
+    const poisonedRead = await captureTaskServiceError(() => service.getRecord("task", key));
     expect(poisonedRead.code).toBe("record_malformed");
     expect(await readFile(outsideAlias)).toEqual(canonicalBytes);
 
     await rm(publication!.temporaryPath);
     await rm(outsideAlias);
-    const repaired = await service.beginRecord({ scope: "task", key, requestDigest });
+    const repaired = await service.beginRecord({
+      scope: "task",
+      key,
+      requestDigest
+    });
 
     expect(repaired.status).toBe("incomplete");
     expect(repaired.record.status).toBe("started");
@@ -987,8 +1177,14 @@ describe("idempotency, lock, and artifact services", () => {
       requestDigest: "digest-different-body"
     });
 
-    expect(secondBegin).toEqual({ status: "incomplete", record: startedRecord });
-    expect(mismatchBegin).toEqual({ status: "mismatch", record: startedRecord });
+    expect(secondBegin).toEqual({
+      status: "incomplete",
+      record: startedRecord
+    });
+    expect(mismatchBegin).toEqual({
+      status: "mismatch",
+      record: startedRecord
+    });
     expect(await service.getRecord("task", rawKey)).toEqual(startedRecord);
 
     currentTime = "2026-07-07T13:12:00.000Z";
@@ -1010,7 +1206,10 @@ describe("idempotency, lock, and artifact services", () => {
       result_ref: "TASK-begin-record-completed",
       updated_at: "2026-07-07T13:12:00.000Z"
     });
-    expect(completedBegin).toEqual({ status: "completed", record: completedRecord });
+    expect(completedBegin).toEqual({
+      status: "completed",
+      record: completedRecord
+    });
   });
 
   test("IdempotencyRecord failed same-digest beginRecord reacquires while different digest mismatches", async () => {
@@ -1298,7 +1497,11 @@ describe("idempotency, lock, and artifact services", () => {
       resultRef: "TASK-invalidate-exact"
     });
     currentTime = "2026-07-07T13:30:12.000Z";
-    const reacquired = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const reacquired = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
 
     expect(completed.status).toBe("completed");
     expect(completed.result_ref).toBe("TASK-invalidate-exact");
@@ -1370,14 +1573,22 @@ describe("idempotency, lock, and artifact services", () => {
       created_at: "2026-07-07T13:30:30.000Z",
       updated_at: "2026-07-07T13:30:30.000Z"
     };
-    await mkdir(join(workspaceRoot, "tasks", "_idempotency", "task"), { recursive: true });
-    await writeFile(recordPath, `${JSON.stringify(poisonedRecord)}\n`, { flag: "wx" });
+    await mkdir(join(workspaceRoot, "tasks", "_idempotency", "task"), {
+      recursive: true
+    });
+    await writeFile(recordPath, `${JSON.stringify(poisonedRecord)}\n`, {
+      flag: "wx"
+    });
     const service = createIdempotencyRecordService({
       workspaceRoot,
       now: () => new Date("2026-07-07T13:30:31.000Z")
     });
 
-    const observed = await service.lookupReplay({ scope: "task", key: rawKey, requestDigest });
+    const observed = await service.lookupReplay({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
     expect(observed.status).toBe("invalid_completed");
     if (observed.status !== "invalid_completed") {
       throw new Error("Expected invalid completed authority.");
@@ -1391,7 +1602,11 @@ describe("idempotency, lock, and artifact services", () => {
       requestDigest,
       resultRef: observed.observedResultRef
     });
-    const reacquired = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const reacquired = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
 
     expect(failed.status).toBe("failed");
     expect(failed.result_ref).toBeUndefined();
@@ -1418,14 +1633,22 @@ describe("idempotency, lock, and artifact services", () => {
       created_at: "2026-07-07T13:30:40.000Z",
       updated_at: "2026-07-07T13:30:40.000Z"
     };
-    await mkdir(join(workspaceRoot, "tasks", "_idempotency", "task"), { recursive: true });
-    await writeFile(recordPath, `${JSON.stringify(poisonedRecord)}\n`, { flag: "wx" });
+    await mkdir(join(workspaceRoot, "tasks", "_idempotency", "task"), {
+      recursive: true
+    });
+    await writeFile(recordPath, `${JSON.stringify(poisonedRecord)}\n`, {
+      flag: "wx"
+    });
     const service = createIdempotencyRecordService({
       workspaceRoot,
       now: () => new Date("2026-07-07T13:30:41.000Z")
     });
 
-    const observed = await service.lookupReplay({ scope: "task", key: rawKey, requestDigest });
+    const observed = await service.lookupReplay({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
     expect(observed.status).toBe("invalid_completed");
     if (observed.status !== "invalid_completed") {
       throw new Error("Expected invalid completed authority.");
@@ -1463,10 +1686,18 @@ describe("idempotency, lock, and artifact services", () => {
       created_at: "2026-07-07T13:30:50.000Z",
       updated_at: "2026-07-07T13:30:50.000Z"
     };
-    await mkdir(join(workspaceRoot, "tasks", "_idempotency", "task"), { recursive: true });
-    await writeFile(recordPath, `${JSON.stringify(poisonedRecord)}\n`, { flag: "wx" });
+    await mkdir(join(workspaceRoot, "tasks", "_idempotency", "task"), {
+      recursive: true
+    });
+    await writeFile(recordPath, `${JSON.stringify(poisonedRecord)}\n`, {
+      flag: "wx"
+    });
     const service = createIdempotencyRecordService({ workspaceRoot });
-    const observed = await service.lookupReplay({ scope: "task", key: rawKey, requestDigest });
+    const observed = await service.lookupReplay({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
     if (observed.status !== "invalid_completed") {
       throw new Error("Expected invalid completed authority.");
     }
@@ -1496,7 +1727,9 @@ describe("idempotency, lock, and artifact services", () => {
   test("IdempotencyRecord storeRecord rejects public completed bypasses", async () => {
     const fresh = await createTempWorkspacePath();
     tempRoots.push(fresh.tempRoot);
-    const freshService = createIdempotencyRecordService({ workspaceRoot: fresh.workspaceRoot });
+    const freshService = createIdempotencyRecordService({
+      workspaceRoot: fresh.workspaceRoot
+    });
     const freshError = await captureTaskServiceError(() =>
       freshService.storeRecord(validIdempotencyRecord())
     );
@@ -1859,7 +2092,9 @@ describe("idempotency, lock, and artifact services", () => {
       acquired_at_ms: Date.now(),
       acquired_at: new Date().toISOString()
     };
-    await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, { flag: "wx" });
+    await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, {
+      flag: "wx"
+    });
     let cleanupHookCalls = 0;
     const retryService = createIdempotencyRecordService({
       workspaceRoot,
@@ -1870,7 +2105,9 @@ describe("idempotency, lock, and artifact services", () => {
           expect(observedPath).toBe(guardPath);
           expect(observedGuard).toEqual(staleGuard);
           await rm(observedPath, { force: true });
-          await writeFile(observedPath, `${JSON.stringify(freshGuard)}\n`, { flag: "wx" });
+          await writeFile(observedPath, `${JSON.stringify(freshGuard)}\n`, {
+            flag: "wx"
+          });
         }
       }
     });
@@ -1913,7 +2150,9 @@ describe("idempotency, lock, and artifact services", () => {
       acquired_at_ms: Date.now(),
       acquired_at: new Date().toISOString()
     };
-    await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, { flag: "wx" });
+    await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, {
+      flag: "wx"
+    });
     const replacementPath = `${guardPath}.replacement`;
     let replacementCount = 0;
     const error = await captureTaskServiceError(() =>
@@ -1942,6 +2181,12 @@ describe("idempotency, lock, and artifact services", () => {
     expect(error.code).toBe("record_malformed");
     expect(error.message).toBe("Workspace record changed before conditional removal.");
     expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(replacementGuard);
+    expect((await stat(guardPath)).nlink).toBe(1);
+    expect(
+      (await readdir(join(workspaceRoot, "tasks", "_idempotency", "task"))).filter((entry) =>
+        entry.endsWith(".delete-quarantine")
+      )
+    ).toEqual([]);
   });
 
   test("rollback recovery conditionally removes malformed guards and releases authority", async () => {
@@ -1950,12 +2195,20 @@ describe("idempotency, lock, and artifact services", () => {
     const key = "task:create:malformed-rollback-recovery";
     const requestDigest = "digest-malformed-rollback-recovery";
     const service = createIdempotencyRecordService({ workspaceRoot });
-    const begin = await service.beginRecord({ scope: "task", key, requestDigest });
+    const begin = await service.beginRecord({
+      scope: "task",
+      key,
+      requestDigest
+    });
     const guardPath = idempotencyTransitionGuardPath(workspaceRoot, key);
     await writeFile(guardPath, "{", { flag: "wx" });
 
     const recovered = await Promise.race([
-      service.recoverFailedRecordAfterRollback({ scope: "task", key, requestDigest }),
+      service.recoverFailedRecordAfterRollback({
+        scope: "task",
+        key,
+        requestDigest
+      }),
       timeoutAfter(1_000, "malformed guard rollback recovery deadlocked")
     ]);
 
@@ -1986,7 +2239,9 @@ describe("idempotency, lock, and artifact services", () => {
       acquired_at_ms: Date.now() - 31_000,
       acquired_at: "2026-07-07T13:34:30.000Z"
     };
-    await writeFile(cleanupLockPath, `${JSON.stringify(staleCleanupLock)}\n`, { flag: "wx" });
+    await writeFile(cleanupLockPath, `${JSON.stringify(staleCleanupLock)}\n`, {
+      flag: "wx"
+    });
 
     const completed = await Promise.race([
       service.completeRecord({
@@ -2026,7 +2281,9 @@ describe("idempotency, lock, and artifact services", () => {
       acquired_at_ms: Date.now(),
       acquired_at: new Date().toISOString()
     };
-    await writeFile(cleanupLockPath, `${JSON.stringify(liveCleanupLock)}\n`, { flag: "wx" });
+    await writeFile(cleanupLockPath, `${JSON.stringify(liveCleanupLock)}\n`, {
+      flag: "wx"
+    });
 
     const error = await captureTaskServiceError(() =>
       Promise.race([
@@ -2065,7 +2322,10 @@ describe("idempotency, lock, and artifact services", () => {
       created_by: "pi"
     });
 
-    await rm(join(workspaceRoot, "tasks", task.task_id), { recursive: true, force: true });
+    await rm(join(workspaceRoot, "tasks", task.task_id), {
+      recursive: true,
+      force: true
+    });
     await service.rollbackTaskForIdempotency(task.task_id);
     const detailError = await captureTaskServiceError(() => service.getTask(task.task_id));
 
@@ -2094,7 +2354,9 @@ describe("idempotency, lock, and artifact services", () => {
     const outsideLane = join(tempRoot, "outside-task-lane");
     const outsideSentinel = join(outsideLane, "snapshot.json");
     await mkdir(outsideLane, { recursive: true });
-    await writeFile(outsideSentinel, "external bytes must survive", { flag: "wx" });
+    await writeFile(outsideSentinel, "external bytes must survive", {
+      flag: "wx"
+    });
     await rm(taskLane, { recursive: true, force: true });
     await symlink(outsideLane, taskLane, "dir");
 
@@ -2244,7 +2506,9 @@ describe("idempotency, lock, and artifact services", () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
 
-    const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+    const idempotencyService = createIdempotencyRecordService({
+      workspaceRoot
+    });
     const targetKey = "task:create:hardlinked-record";
     const siblingKey = "task:create:single-link-sibling";
     const targetBegin = await idempotencyService.beginRecord({
@@ -2276,24 +2540,20 @@ describe("idempotency, lock, and artifact services", () => {
     expect(idempotencyError.evidenceRefs).toEqual([
       idempotencyRecordEvidenceRef("task", targetKey)
     ]);
-    expect(await idempotencyService.getRecord("task", siblingKey)).toEqual(
-      siblingBegin.record
-    );
+    expect(await idempotencyService.getRecord("task", siblingKey)).toEqual(siblingBegin.record);
     expect(targetBegin.status).toBe("acquired");
     expect(await readFile(idempotencyAlias)).toEqual(idempotencyBytes);
     expect((await stat(idempotencyAlias)).nlink).toBe(2);
 
     const lockService = createLockRecordService({ workspaceRoot });
     const targetLock = validLockRecord();
-    const siblingLock = { ...validLockRecord(), lock_id: "LOCK-single-link-sibling" };
+    const siblingLock = {
+      ...validLockRecord(),
+      lock_id: "LOCK-single-link-sibling"
+    };
     await lockService.storeLock(targetLock);
     await lockService.storeLock(siblingLock);
-    const lockPath = join(
-      workspaceRoot,
-      "locks",
-      targetLock.scope,
-      `${targetLock.lock_id}.json`
-    );
+    const lockPath = join(workspaceRoot, "locks", targetLock.scope, `${targetLock.lock_id}.json`);
     const lockAlias = join(tempRoot, "outside-lock-hardlink.json");
     const lockBytes = await readFile(lockPath);
     await link(lockPath, lockAlias);
@@ -2303,9 +2563,7 @@ describe("idempotency, lock, and artifact services", () => {
     );
 
     expect(lockError.code).toBe("record_malformed");
-    expect(await lockService.getLock(siblingLock.scope, siblingLock.lock_id)).toEqual(
-      siblingLock
-    );
+    expect(await lockService.getLock(siblingLock.scope, siblingLock.lock_id)).toEqual(siblingLock);
     expect(await readFile(lockAlias)).toEqual(lockBytes);
     expect((await stat(lockAlias)).nlink).toBe(2);
 
@@ -2332,9 +2590,7 @@ describe("idempotency, lock, and artifact services", () => {
     );
 
     expect(artifactError.code).toBe("record_malformed");
-    expect(await artifactService.getArtifact(siblingArtifact.artifact_id)).toEqual(
-      siblingArtifact
-    );
+    expect(await artifactService.getArtifact(siblingArtifact.artifact_id)).toEqual(siblingArtifact);
     expect(await readFile(artifactAlias)).toEqual(artifactBytes);
     expect((await stat(artifactAlias)).nlink).toBe(2);
   });
@@ -2437,9 +2693,9 @@ describe("idempotency, lock, and artifact services", () => {
 
     await expect(service.storeLock(lock)).resolves.toEqual(lock);
     expect(await service.getLock("task", lock.lock_id)).toEqual(lock);
-    expect((await stat(join(workspaceRoot, "locks", "task", `${lock.lock_id}.json`))).isFile()).toBe(
-      true
-    );
+    expect(
+      (await stat(join(workspaceRoot, "locks", "task", `${lock.lock_id}.json`))).isFile()
+    ).toBe(true);
 
     await writeFile(join(workspaceRoot, "locks", "task", "LOCK-bad-sibling.json"), "{", {
       flag: "wx"
@@ -2450,7 +2706,9 @@ describe("idempotency, lock, and artifact services", () => {
   test("LockRecord invalid schema or id is rejected without lock files", async () => {
     const invalidSchema = await createTempWorkspacePath();
     tempRoots.push(invalidSchema.tempRoot);
-    const schemaService = createLockRecordService({ workspaceRoot: invalidSchema.workspaceRoot });
+    const schemaService = createLockRecordService({
+      workspaceRoot: invalidSchema.workspaceRoot
+    });
 
     const schemaError = await captureTaskServiceError(() =>
       schemaService.storeLock({
@@ -2464,7 +2722,9 @@ describe("idempotency, lock, and artifact services", () => {
 
     const invalidId = await createTempWorkspacePath();
     tempRoots.push(invalidId.tempRoot);
-    const idService = createLockRecordService({ workspaceRoot: invalidId.workspaceRoot });
+    const idService = createLockRecordService({
+      workspaceRoot: invalidId.workspaceRoot
+    });
     const idError = await captureTaskServiceError(() =>
       idService.storeLock({
         ...validLockRecord(),
@@ -2499,7 +2759,9 @@ describe("idempotency, lock, and artifact services", () => {
 
     const symlinkCase = await createTempWorkspacePath();
     tempRoots.push(symlinkCase.tempRoot);
-    const symlinkService = createLockRecordService({ workspaceRoot: symlinkCase.workspaceRoot });
+    const symlinkService = createLockRecordService({
+      workspaceRoot: symlinkCase.workspaceRoot
+    });
     const outsideLocksRoot = join(symlinkCase.tempRoot, "outside-locks");
     await mkdir(symlinkCase.workspaceRoot, { recursive: true });
     await mkdir(outsideLocksRoot, { recursive: true });
@@ -2677,7 +2939,9 @@ describe("idempotency, lock, and artifact services", () => {
     await expectPathMissing(outsidePath);
 
     await mkdir(workspaceRoot, { recursive: true });
-    await writeFile(join(workspaceRoot, "artifacts"), "not a directory", { flag: "wx" });
+    await writeFile(join(workspaceRoot, "artifacts"), "not a directory", {
+      flag: "wx"
+    });
 
     const nonDirectoryAncestorError = await captureWorkspacePathSafetyError(() =>
       resolveWorkspacePath({
@@ -2714,9 +2978,7 @@ describe("idempotency, lock, and artifact services", () => {
       created_by: "pi"
     });
 
-    expect(observedTaskDirectories).toEqual([
-      join(workspaceRoot, "tasks", "TASK-path-normalized")
-    ]);
+    expect(observedTaskDirectories).toEqual([join(workspaceRoot, "tasks", "TASK-path-normalized")]);
     expect((await stat(join(workspaceRoot, "tasks", task.task_id, "snapshot.json"))).isFile()).toBe(
       true
     );
@@ -2789,9 +3051,9 @@ describe("idempotency, lock, and artifact services", () => {
     expect(retryTask.task_id).toBe("TASK-post-hook-retry");
     expect(await service.listTasks()).toEqual([retryTask]);
     await expectPathMissing(join(workspaceRoot, "tasks", "TASK-post-hook-delete", "snapshot.json"));
-    expect((await stat(join(workspaceRoot, "tasks", retryTask.task_id, "snapshot.json"))).isFile()).toBe(
-      true
-    );
+    expect(
+      (await stat(join(workspaceRoot, "tasks", retryTask.task_id, "snapshot.json"))).isFile()
+    ).toBe(true);
   });
 
   test("TaskCard snapshot writes reject schema-valid outer snapshot drift before caching", async () => {
@@ -2926,9 +3188,7 @@ describe("idempotency, lock, and artifact services", () => {
       expectErrorNotToLeakRecordContent(listError, unknownContent);
       expectErrorNotToLeakRecordContent(detailError, unknownContent);
 
-      const reorderedSnapshot = Object.fromEntries(
-        Object.entries(canonicalSnapshot).reverse()
-      );
+      const reorderedSnapshot = Object.fromEntries(Object.entries(canonicalSnapshot).reverse());
       await writeFile(snapshotPath, `${JSON.stringify(reorderedSnapshot, null, 2)}\n`);
 
       expect(await reader.listTasks()).toEqual([task]);
@@ -2959,9 +3219,7 @@ describe("idempotency, lock, and artifact services", () => {
     const hydrationError = await captureTaskServiceError(() => reader.listTasks());
 
     expect(hydrationError.code).toBe("task_snapshot_malformed");
-    expect(hydrationError.evidenceRefs).toEqual([
-      `workspace/tasks/${taskId}/snapshot.json`
-    ]);
+    expect(hydrationError.evidenceRefs).toEqual([`workspace/tasks/${taskId}/snapshot.json`]);
     expect(await readFile(snapshotPath)).toEqual(snapshotBytes);
     expect(await readFile(outsideAlias)).toEqual(snapshotBytes);
     expect((await stat(snapshotPath)).nlink).toBe(2);
@@ -3122,7 +3380,9 @@ describe("idempotency, lock, and artifact services", () => {
       `${artifact.artifact_id}.json`
     );
     const legacyManifestText = `${JSON.stringify(legacyArtifact)}\n`;
-    await mkdir(join(workspaceRoot, "artifacts", "manifests"), { recursive: true });
+    await mkdir(join(workspaceRoot, "artifacts", "manifests"), {
+      recursive: true
+    });
     await writeFile(manifestPath, legacyManifestText, { flag: "wx" });
 
     await expect(service.registerArtifact(artifact)).resolves.toEqual(legacyArtifact);
@@ -3161,7 +3421,9 @@ describe("idempotency, lock, and artifact services", () => {
     await expect(service.registerArtifact(artifact)).resolves.toEqual(artifact);
     expect(await service.getArtifact(artifact.artifact_id)).toEqual(artifact);
     expect(
-      (await stat(join(workspaceRoot, "artifacts", "manifests", `${artifact.artifact_id}.json`))).isFile()
+      (
+        await stat(join(workspaceRoot, "artifacts", "manifests", `${artifact.artifact_id}.json`))
+      ).isFile()
     ).toBe(true);
     await expectPathMissing(join(workspaceRoot, artifact.path));
 
@@ -3174,7 +3436,9 @@ describe("idempotency, lock, and artifact services", () => {
   test("Artifact registry rejects invalid type, id, and path without manifest files", async () => {
     const invalidType = await createTempWorkspacePath();
     tempRoots.push(invalidType.tempRoot);
-    const typeService = createArtifactRegistryService({ workspaceRoot: invalidType.workspaceRoot });
+    const typeService = createArtifactRegistryService({
+      workspaceRoot: invalidType.workspaceRoot
+    });
     const typeError = await captureTaskServiceError(() =>
       typeService.registerArtifact({
         ...validArtifact(),
@@ -3187,7 +3451,9 @@ describe("idempotency, lock, and artifact services", () => {
 
     const invalidId = await createTempWorkspacePath();
     tempRoots.push(invalidId.tempRoot);
-    const idService = createArtifactRegistryService({ workspaceRoot: invalidId.workspaceRoot });
+    const idService = createArtifactRegistryService({
+      workspaceRoot: invalidId.workspaceRoot
+    });
     const idError = await captureTaskServiceError(() =>
       idService.registerArtifact({
         ...validArtifact(),
@@ -3200,7 +3466,9 @@ describe("idempotency, lock, and artifact services", () => {
 
     const invalidPath = await createTempWorkspacePath();
     tempRoots.push(invalidPath.tempRoot);
-    const pathService = createArtifactRegistryService({ workspaceRoot: invalidPath.workspaceRoot });
+    const pathService = createArtifactRegistryService({
+      workspaceRoot: invalidPath.workspaceRoot
+    });
     const pathError = await captureTaskServiceError(() =>
       pathService.registerArtifact({
         ...validArtifact(),
@@ -3230,21 +3498,22 @@ describe("idempotency, lock, and artifact services", () => {
   test("LockRecord and Artifact lookups fail closed on stored identity mismatch", async () => {
     const lockCase = await createTempWorkspacePath();
     tempRoots.push(lockCase.tempRoot);
-    const lockService = createLockRecordService({ workspaceRoot: lockCase.workspaceRoot });
+    const lockService = createLockRecordService({
+      workspaceRoot: lockCase.workspaceRoot
+    });
     const lookupLock = validLockRecord();
     const storedLock = {
       ...lookupLock,
       lock_id: "LOCK-secret-foreign",
       scope: "job"
     } satisfies LockRecord;
-    const lockPath = join(
-      lockCase.workspaceRoot,
-      "locks",
-      "task",
-      `${lookupLock.lock_id}.json`
-    );
-    await mkdir(join(lockCase.workspaceRoot, "locks", "task"), { recursive: true });
-    await writeFile(lockPath, `${JSON.stringify(storedLock)}\n`, { flag: "wx" });
+    const lockPath = join(lockCase.workspaceRoot, "locks", "task", `${lookupLock.lock_id}.json`);
+    await mkdir(join(lockCase.workspaceRoot, "locks", "task"), {
+      recursive: true
+    });
+    await writeFile(lockPath, `${JSON.stringify(storedLock)}\n`, {
+      flag: "wx"
+    });
 
     const lockError = await captureTaskServiceError(() =>
       lockService.getLock("task", lookupLock.lock_id)
@@ -3279,7 +3548,9 @@ describe("idempotency, lock, and artifact services", () => {
     await mkdir(join(artifactCase.workspaceRoot, "artifacts", "manifests"), {
       recursive: true
     });
-    await writeFile(artifactPath, `${JSON.stringify(storedArtifact)}\n`, { flag: "wx" });
+    await writeFile(artifactPath, `${JSON.stringify(storedArtifact)}\n`, {
+      flag: "wx"
+    });
 
     const artifactError = await captureTaskServiceError(() =>
       artifactService.getArtifact(lookupArtifact.artifact_id)
@@ -3485,7 +3756,67 @@ function createAuthorityReadHold(
   };
 }
 
-async function createTempWorkspacePath(): Promise<{ tempRoot: string; workspaceRoot: string }> {
+async function saturateRecordAuthorityPath(
+  path: string,
+  evidenceRef: string
+): Promise<{
+  acquisitionOrder: number[];
+  queueOrder: number[];
+  completed: Promise<Array<unknown>>;
+  release: () => void;
+}> {
+  const holderGate = createAsyncGate();
+  const holderAcquired = createSignal();
+  const holder = runWithWorkspaceRecordPublicationHooks(
+    {
+      afterAuthorityLeaseAcquired: async ({ operation }) => {
+        expect(operation).toBe("read");
+        holderAcquired.resolve();
+        await holderGate.wait;
+      }
+    },
+    () => readJsonRecord(path, evidenceRef, z.unknown())
+  );
+  await holderAcquired.promise;
+
+  const acquisitionOrder: number[] = [];
+  const queueOrder: number[] = [];
+  let contentionCount = 0;
+  const allQueued = createSignal();
+  const queued = Array.from({ length: 63 }, (_, index) =>
+    runWithWorkspaceRecordPublicationHooks(
+      {
+        onAuthorityContention: ({ operation }) => {
+          expect(operation).toBe("read");
+          queueOrder.push(index);
+          contentionCount += 1;
+          if (contentionCount === 63) allQueued.resolve();
+        },
+        afterAuthorityLeaseAcquired: ({ operation }) => {
+          expect(operation).toBe("read");
+          acquisitionOrder.push(index);
+        }
+      },
+      () => readJsonRecord(path, evidenceRef, z.unknown())
+    )
+  );
+  await allQueued.promise;
+
+  return {
+    acquisitionOrder,
+    queueOrder,
+    completed: Promise.all(queued),
+    release: () => {
+      holderGate.open();
+      void holder;
+    }
+  };
+}
+
+async function createTempWorkspacePath(): Promise<{
+  tempRoot: string;
+  workspaceRoot: string;
+}> {
   const tempRoot = await realpath(await mkdtemp(join(tmpdir(), "shud-harness-core-services-")));
   return {
     tempRoot,
