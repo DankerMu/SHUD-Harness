@@ -139,7 +139,8 @@ describe("idempotency, lock, and artifact services", () => {
       "WorkspaceRecordPublicationHooks",
       "runWithWorkspaceRecordPublicationHooks",
       "WorkspaceRecordCompensationTestHooks",
-      "runWithWorkspaceRecordCompensationTestHooks"
+      "runWithWorkspaceRecordCompensationTestHooks",
+      "preservePrimaryAndCompensationErrors"
     ];
     const runtimeExports = new Set(Object.keys(coreExports));
     const requiredRuntimeExports = [
@@ -219,6 +220,332 @@ describe("idempotency, lock, and artifact services", () => {
 
     await writeFile(join(idempotencyDirectory, `${"0".repeat(64)}.json`), "{", { flag: "wx" });
     expect(await service.getRecord("task", rawKey)).toEqual(record);
+  });
+
+  test("mutable create and update hold shared authority against reads and conditional deletes", async () => {
+    for (const mode of ["create", "update"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const service = createLockRecordService({ workspaceRoot });
+      const before = { ...validLockRecord(), lock_id: `LOCK-mutable-authority-${mode}` };
+      const after = { ...before, holder: `mutable-authority-${mode}-after` };
+      if (mode === "update") await service.storeLock(before);
+      const evidenceRef = lockRecordEvidenceRef(after.scope, after.lock_id);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        [...lockRecordDirectorySegments(after.scope), lockRecordFileName(after.lock_id)],
+        evidenceRef
+      );
+      const writerGate = createAsyncGate();
+      const writerReady = createSignal();
+      const readerContended = createSignal();
+      const deleteContended = createSignal();
+
+      const writer = runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: async () => {
+            writerReady.resolve();
+            await writerGate.wait;
+          }
+        },
+        () => service.storeLock(after)
+      );
+      await writerReady.promise;
+      const reader = runWithWorkspaceRecordPublicationHooks(
+        {
+          onAuthorityContention: ({ operation }) => {
+            expect(operation).toBe("read");
+            readerContended.resolve();
+          }
+        },
+        () => service.getLock(after.scope, after.lock_id)
+      );
+      const conditionalDelete = runWithWorkspaceRecordPublicationHooks(
+        {
+          onAuthorityContention: ({ operation }) => {
+            expect(operation).toBe("delete");
+            deleteContended.resolve();
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecord(recordPath, evidenceRef, LockRecordSchema, {
+            kind: "record",
+            expected: before,
+            matches: (current, expected) => current.holder === expected.holder
+          })
+      );
+      await Promise.all([readerContended.promise, deleteContended.promise]);
+      writerGate.open();
+
+      const [written, observed, deletion] = await Promise.all([
+        writer,
+        reader,
+        conditionalDelete
+      ]);
+      expect(written).toEqual(after);
+      expect(observed).toEqual(after);
+      expect(deletion).toEqual({ status: "condition_not_met" });
+      expect(await service.getLock(after.scope, after.lock_id)).toEqual(after);
+      expect((await stat(recordPath)).nlink).toBe(1);
+    }
+  });
+
+  test("mutable generation is private from creation and exact immediately before commit", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createLockRecordService({ workspaceRoot });
+    const record = { ...validLockRecord(), lock_id: "LOCK-mutable-private-generation" };
+    const expectedBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+    let temporaryPath = "";
+    let namespacePath = "";
+    let temporaryIdentity: { dev: number; ino: number } | undefined;
+    let authorityAcquired = false;
+    let closedObserved = false;
+
+    await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterAuthorityLeaseAcquired: ({ operation }) => {
+          expect(operation).toBe("rename");
+          authorityAcquired = true;
+        },
+        afterTemporaryFileWritten: async (input) => {
+          expect(authorityAcquired).toBe(true);
+          temporaryPath = input.temporaryPath;
+          namespacePath = dirname(temporaryPath);
+          const [namespace, generation, directoryNames] = await Promise.all([
+            stat(namespacePath),
+            stat(temporaryPath),
+            readdir(dirname(namespacePath))
+          ]);
+          expect(namespace.mode & 0o777).toBe(0o700);
+          expect(generation.mode & 0o777).toBe(0o600);
+          expect(generation.uid).toBe(namespace.uid);
+          expect(generation.gid).toBe(namespace.gid);
+          expect(generation.nlink).toBe(1);
+          expect(temporaryPath.endsWith("/generation")).toBe(true);
+          expect(directoryNames.some((name) => name.endsWith(".tmp"))).toBe(false);
+          expect(await readFile(temporaryPath)).toEqual(expectedBytes);
+          temporaryIdentity = { dev: generation.dev, ino: generation.ino };
+        },
+        beforeGenerationIsolation: async ({ path, operation }) => {
+          if (operation !== "rename_publication") return;
+          expect(path).toBe(temporaryPath);
+          const rebound = await stat(path);
+          expect(rebound).toMatchObject({ ...temporaryIdentity!, nlink: 1 });
+          expect(await readFile(path)).toEqual(expectedBytes);
+        },
+        afterTemporaryFileClosed: async ({ descriptor }) => {
+          await expectFileDescriptorClosed(descriptor.fd);
+          closedObserved = true;
+        }
+      },
+      () => service.storeLock(record)
+    );
+
+    expect(closedObserved).toBe(true);
+    await expectPathMissing(namespacePath);
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      [...lockRecordDirectorySegments(record.scope), lockRecordFileName(record.lock_id)],
+      lockRecordEvidenceRef(record.scope, record.lock_id)
+    );
+    expect(await readFile(recordPath)).toEqual(expectedBytes);
+    expect(await stat(recordPath)).toMatchObject({ ...temporaryIdentity!, nlink: 1 });
+  });
+
+  test("mutable close failures prove fallback close and reject before create or update commit", async () => {
+    for (const mode of ["create", "update"] as const) {
+      for (const failureSite of ["pre-close", "close-observer"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const service = createLockRecordService({ workspaceRoot });
+        const before = {
+          ...validLockRecord(),
+          lock_id: `LOCK-mutable-close-${mode}-${failureSite}`
+        };
+        const after = { ...before, holder: `after-${failureSite}` };
+        if (mode === "update") await service.storeLock(before);
+        const evidenceRef = lockRecordEvidenceRef(after.scope, after.lock_id);
+        const recordPath = workspaceRecordPath(
+          workspaceRoot,
+          [...lockRecordDirectorySegments(after.scope), lockRecordFileName(after.lock_id)],
+          evidenceRef
+        );
+        const beforeBytes = mode === "update" ? await readFile(recordPath) : undefined;
+        let temporaryPath = "";
+        let descriptorClosed = false;
+
+        const error = await captureError(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              afterTemporaryFileWritten: (input) => {
+                temporaryPath = input.temporaryPath;
+              },
+              beforeTemporaryFileClose: () => {
+                if (failureSite === "pre-close") throw new Error(`pre-close ${mode}`);
+              },
+              afterTemporaryFileClosed: async ({ descriptor }) => {
+                await expectFileDescriptorClosed(descriptor.fd);
+                descriptorClosed = true;
+                if (failureSite === "close-observer") {
+                  throw new Error(`close observer ${mode}`);
+                }
+              }
+            },
+            () => service.storeLock(after)
+          )
+        );
+
+        expect(error.message).toBe(
+          failureSite === "pre-close" ? `pre-close ${mode}` : `close observer ${mode}`
+        );
+        expect(descriptorClosed).toBe(true);
+        if (beforeBytes) expect(await readFile(recordPath)).toEqual(beforeBytes);
+        else await expectPathMissing(recordPath);
+        await expectPathMissing(temporaryPath);
+        expect(
+          (await readdir(join(workspaceRoot, "locks", after.scope))).some(isOwnedRecordPath)
+        ).toBe(false);
+      }
+    }
+  });
+
+  test("mutable replacement and same-length drift preserve the old generation and cleanly retry", async () => {
+    for (const failure of ["replacement", "same-length-drift"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const service = createLockRecordService({ workspaceRoot });
+      const before = { ...validLockRecord(), lock_id: `LOCK-mutable-rebind-${failure}` };
+      const after = { ...before, holder: `after-${failure}` };
+      await service.storeLock(before);
+      const evidenceRef = lockRecordEvidenceRef(after.scope, after.lock_id);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        [...lockRecordDirectorySegments(after.scope), lockRecordFileName(after.lock_id)],
+        evidenceRef
+      );
+      const beforeGeneration = await readFileWithIdentity(recordPath);
+      let temporaryPath = "";
+      let ownedTemporaryIdentity: { dev: number; ino: number } | undefined;
+      let replacementGeneration: { bytes: Buffer; dev: number; ino: number } | undefined;
+
+      await expect(
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: async (input) => {
+              temporaryPath = input.temporaryPath;
+              const owned = await stat(temporaryPath);
+              ownedTemporaryIdentity = { dev: owned.dev, ino: owned.ino };
+            },
+            beforeGenerationIsolation: async ({ path, operation }) => {
+              if (operation !== "rename_publication") return;
+              if (failure === "replacement") {
+                const replacementPath = join(dirname(path), "replacement");
+                const replacementBytes = Buffer.from("unowned mutable replacement\n");
+                await writeFile(replacementPath, replacementBytes, { flag: "wx", mode: 0o600 });
+                await rename(replacementPath, path);
+                replacementGeneration = await readFileWithIdentity(path);
+                expect(replacementGeneration.bytes).toEqual(replacementBytes);
+                expect(
+                  replacementGeneration.dev === ownedTemporaryIdentity!.dev &&
+                    replacementGeneration.ino === ownedTemporaryIdentity!.ino
+                ).toBe(false);
+                return;
+              }
+              const bytes = await readFile(path);
+              bytes[0] = bytes[0] === 0x7b ? 0x5b : 0x7b;
+              const handle = await open(path, "r+");
+              try {
+                await handle.write(bytes, 0, bytes.length, 0);
+                await handle.sync();
+              } finally {
+                await handle.close();
+              }
+            }
+          },
+          () => service.storeLock(after)
+        )
+      ).rejects.toBeInstanceOf(TaskServiceError);
+
+      expect(await readFileWithIdentity(recordPath)).toEqual(beforeGeneration);
+      if (failure === "replacement") {
+        expect(await readFileWithIdentity(temporaryPath)).toEqual(replacementGeneration!);
+        await expectPrivateAuthorityDirectory(dirname(temporaryPath));
+        expect(
+          (await readdir(join(workspaceRoot, "locks", after.scope))).filter(isOwnedRecordPath)
+        ).toHaveLength(1);
+      } else {
+        await expectPathMissing(temporaryPath);
+        expect(
+          (await readdir(join(workspaceRoot, "locks", after.scope))).some(isOwnedRecordPath)
+        ).toBe(false);
+      }
+
+      expect(await service.storeLock(after)).toEqual(after);
+      const expectedBytes = Buffer.from(`${JSON.stringify(after, null, 2)}\n`);
+      expect(await readFile(recordPath)).toEqual(expectedBytes);
+      expect((await stat(recordPath)).nlink).toBe(1);
+      if (failure === "replacement") {
+        expect(await readFileWithIdentity(temporaryPath)).toEqual(replacementGeneration!);
+        await expectPrivateAuthorityDirectory(dirname(temporaryPath));
+      }
+    }
+  });
+
+  test("mutable compensation preserves a frozen custom error contract and aggregates once", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const record = { ...validLockRecord(), lock_id: "LOCK-mutable-custom-primary" };
+    const priorCause = new Error("mutable custom prior cause");
+    const primary = new StructuredServiceError(
+      "mutable custom primary",
+      "E_MUTABLE_CUSTOM",
+      Object.freeze({ surface: "workspace", immutability: "frozen" }),
+      priorCause
+    );
+    Object.freeze(primary);
+    const descriptors = Object.getOwnPropertyDescriptors(primary);
+    const compensation = new Error("mutable close compensation");
+    let temporaryPath = "";
+
+    const error = await captureError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: (input) => {
+            temporaryPath = input.temporaryPath;
+            throw primary;
+          },
+          beforeTemporaryFileClose: () => {
+            throw compensation;
+          },
+          afterTemporaryFileClosed: async ({ descriptor }) => {
+            await expectFileDescriptorClosed(descriptor.fd);
+          }
+        },
+        () =>
+          writeJsonRecord(
+            workspaceRoot,
+            lockRecordDirectorySegments(record.scope),
+            lockRecordFileName(record.lock_id),
+            record,
+            lockRecordEvidenceRef(record.scope, record.lock_id),
+            LockRecordSchema
+          )
+      )
+    );
+
+    expect(error).toBeInstanceOf(StructuredServiceError);
+    expect(Object.getPrototypeOf(error)).toBe(Object.getPrototypeOf(primary));
+    expect((error as StructuredServiceError).code).toBe(primary.code);
+    expect((error as StructuredServiceError).details).toBe(primary.details);
+    expectPreservedOwnDescriptors(error, descriptors);
+    const messages = aggregateErrorMessages(error.cause);
+    expect(messages.filter((message) => message === priorCause.message)).toHaveLength(1);
+    expect(messages.filter((message) => message === compensation.message)).toHaveLength(1);
+    await expectPathMissing(temporaryPath);
+    expect(
+      (await readdir(join(workspaceRoot, "locks", record.scope))).some(isOwnedRecordPath)
+    ).toBe(false);
   });
 
   test("Artifact duplicate registration converges across the owned publication window", async () => {
