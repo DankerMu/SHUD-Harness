@@ -289,7 +289,41 @@ describe("idempotency, lock, and artifact services", () => {
     expect(aliasResult.status).toBe("exists");
   });
 
-  test("physical authority identity survives deterministic existing-missing-existing follower windows", async () => {
+  test("coexisting case-sensitive leaves keep distinct authority and reject cross-path permits", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    await mkdir(workspaceRoot);
+    if (!(await supportsDistinctCaseEntries(workspaceRoot))) return;
+    const schema = z.object({ id: z.string() });
+    const upper = { id: "upper" };
+    const lower = { id: "lower" };
+    const directorySegments = ["case-sensitive-authority"] as const;
+    const upperPath = workspaceRecordPath(workspaceRoot, [...directorySegments, "Foo.json"], "case-sensitive.upper");
+    const lowerPath = workspaceRecordPath(workspaceRoot, [...directorySegments, "foo.json"], "case-sensitive.lower");
+    const upperCreated = await createJsonRecordIfAbsentWithCleanupPermit(workspaceRoot, directorySegments, "Foo.json", upper, "case-sensitive.upper", schema);
+    const lowerCreated = await createJsonRecordIfAbsentWithCleanupPermit(workspaceRoot, directorySegments, "foo.json", lower, "case-sensitive.lower", schema);
+    if (upperCreated.status !== "created" || lowerCreated.status !== "created") throw new Error("Expected distinct case-sensitive records.");
+    const upperHold = createAsyncGate();
+    const upperAcquired = createSignal();
+    const upperRead = runWithWorkspaceRecordPublicationHooks({ afterAuthorityLeaseAcquired: async () => { upperAcquired.resolve(); await upperHold.wait; } }, () => readJsonRecord(upperPath, "case-sensitive.upper", schema));
+    await upperAcquired.promise;
+    const lowerAcquired = createSignal();
+    const lowerRead = runWithWorkspaceRecordPublicationHooks({ afterAuthorityLeaseAcquired: () => lowerAcquired.resolve(), onAuthorityContention: () => { throw new Error("Distinct case-sensitive leaves must not share authority."); } }, () => readJsonRecord(lowerPath, "case-sensitive.lower", schema));
+    await Promise.race([lowerAcquired.promise, timeoutAfter(500, "distinct case-sensitive leaf was incorrectly serialized")]);
+    upperHold.open();
+    expect(await Promise.all([upperRead, lowerRead])).toEqual([upper, lower]);
+    const upperBefore = await readFileWithIdentity(upperPath);
+    const lowerBefore = await readFileWithIdentity(lowerPath);
+    const crossUse = await captureConditionalDeleteError(() => conditionalDeleteJsonRecordWithCleanupPermit(upperCreated.cleanupPermit, lowerPath, "case-sensitive.cross-use", schema, { kind: "record", expected: lower, matches: (current, expected) => current.id === expected.id }));
+    expect(crossUse.mutationPhase).toBe("pre_mutation");
+    expect(crossUse.failureStage).toBe("permit_admission");
+    expect(await readFileWithIdentity(upperPath)).toEqual(upperBefore);
+    expect(await readFileWithIdentity(lowerPath)).toEqual(lowerBefore);
+    expect(await conditionalDeleteJsonRecordWithCleanupPermit(lowerCreated.cleanupPermit, lowerPath, "case-sensitive.lower", schema, { kind: "record", expected: lower, matches: (current, expected) => current.id === expected.id })).toEqual({ status: "deleted" });
+    expect(await conditionalDeleteJsonRecord(upperPath, "case-sensitive.upper", schema, { kind: "record", expected: upper, matches: (current, expected) => current.id === expected.id })).toEqual({ status: "deleted" });
+  });
+
+  test("physical canonical paths preserve existing spelling across follower restart windows", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     await mkdir(workspaceRoot);
@@ -297,9 +331,9 @@ describe("idempotency, lock, and artifact services", () => {
     const leafBytes = Buffer.from("authority-window\n");
     await writeFile(leafPath, leafBytes, { flag: "wx" });
     const existingIdentity = await physicalCanonicalPath(leafPath, "authority.window.existing");
+    expect(existingIdentity).toBe(leafPath);
     await rm(leafPath);
     const missingIdentity = await physicalCanonicalPath(leafPath, "authority.window.missing");
-    expect(missingIdentity).toBe(existingIdentity);
 
     for (let window = 0; window < 12; window += 1) {
       await writeFile(leafPath, leafBytes, { flag: "wx" });
@@ -323,7 +357,7 @@ describe("idempotency, lock, and artifact services", () => {
 
       expect(observedStates).toEqual([true, false]);
       expect(await readFile(leafPath)).toEqual(leafBytes);
-      expect(followerIdentity).toBe(existingIdentity);
+      expect([existingIdentity, missingIdentity]).toContain(followerIdentity);
       await rm(leafPath);
     }
   });
@@ -657,84 +691,45 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
-  test("hardlink temp cleanup preserves replacements introduced at the final unlink hook", async () => {
-    for (const writer of ["hardlink"] as const) {
+  test("hardlink producer generation exists only inside its fresh private namespace", async () => {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
       tempRoots.push(tempRoot);
-      const record = {
-        ...validLockRecord(),
-        lock_id: `LOCK-final-temp-cleanup-${writer}`
-      };
-      const intended = { ...record, holder: `intended-${writer}` };
-      const expectedBytes = Buffer.from(`${JSON.stringify(intended, null, 2)}\n`);
-      const replacementBytes = Buffer.from(`replacement-${writer}\n`);
+      const record = { ...validLockRecord(), lock_id: "LOCK-private-producer-generation" };
+      const expectedBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
       let publication: WorkspaceRecordPublicationHookInput | undefined;
-      let retryPublication: WorkspaceRecordPublicationHookInput | undefined;
-      let replacementIdentity: { dev: number; ino: number } | undefined;
+      let producerIdentity: { dev: number; ino: number } | undefined;
 
-      const error = await captureTaskServiceError(() =>
+      const result = await
         runWithWorkspaceRecordPublicationHooks(
           {
-            afterTemporaryFileWritten: (input) => {
+            afterTemporaryFileWritten: async (input) => {
               publication = input;
-            },
-            beforeAuthorityOwnedUnlink: async ({ path, operation }) => {
-              const expectedOperation = "hardlink_temp_cleanup";
-              if (operation !== expectedOperation) return;
-              await writeFile(path, replacementBytes, { flag: "wx" });
-              const replacement = await stat(path);
-              replacementIdentity = { dev: replacement.dev, ino: replacement.ino };
+              const namespacePath = join(input.temporaryPath, "..");
+              await expectPrivateAuthorityDirectory(namespacePath);
+              expect(input.temporaryPath).toBe(join(namespacePath, "generation"));
+              producerIdentity = await stat(input.temporaryPath);
+              const publicEntries = await readdir(join(namespacePath, ".."));
+              expect(publicEntries.filter((name) => name.endsWith(".tmp"))).toEqual([]);
+              expect(publicEntries.filter((name) => name.endsWith(".authority"))).toHaveLength(1);
             }
           },
           () =>
             createJsonRecordIfAbsent(
-                  workspaceRoot,
-                  lockRecordDirectorySegments(record.scope),
-                  lockRecordFileName(record.lock_id),
-                  intended,
-                  lockRecordEvidenceRef(record.scope, record.lock_id),
-                  LockRecordSchema
-                )
-        )
-      );
+              workspaceRoot,
+              lockRecordDirectorySegments(record.scope),
+              lockRecordFileName(record.lock_id),
+              record,
+              lockRecordEvidenceRef(record.scope, record.lock_id),
+              LockRecordSchema
+            )
+        );
 
-      expect(error.code).toBe("workspace_path_not_safe");
+      expect(result.status).toBe("created");
       expect(publication).toBeDefined();
-      await expectPathMissing(publication!.canonicalPath);
-      expect(await readFile(publication!.temporaryPath)).toEqual(replacementBytes);
-      expect(await stat(publication!.temporaryPath)).toMatchObject(replacementIdentity!);
-      expect(
-        (await readdir(join(workspaceRoot, "locks", record.scope))).some((name) =>
-          name.endsWith(".authority")
-        )
-      ).toBe(false);
-
-      await rm(publication!.temporaryPath);
-      expect(
-        (await readdir(join(workspaceRoot, "locks", record.scope))).some(isOwnedRecordPath)
-      ).toBe(false);
-      const retried = await runWithWorkspaceRecordPublicationHooks(
-        {
-          afterCanonicalLink: (input) => {
-            retryPublication = input;
-          }
-        },
-        () =>
-          createJsonRecordIfAbsent(
-            workspaceRoot,
-            lockRecordDirectorySegments(record.scope),
-            lockRecordFileName(record.lock_id),
-            intended,
-            lockRecordEvidenceRef(record.scope, record.lock_id),
-            LockRecordSchema
-          )
-      );
-      expect(retried.status).toBe("created");
-      expect(retryPublication?.canonicalPath).toBe(publication!.canonicalPath);
       expect(await readFile(publication!.canonicalPath)).toEqual(expectedBytes);
-      expect((await stat(publication!.canonicalPath)).nlink).toBe(1);
-      await expectPathMissing(retryPublication!.temporaryPath);
-    }
+      expect(await stat(publication!.canonicalPath)).toMatchObject({ ino: producerIdentity!.ino, nlink: 1 });
+      await expectPathMissing(publication!.temporaryPath);
+      expect((await readdir(join(publication!.canonicalPath, ".."))).some(isOwnedRecordPath)).toBe(false);
   });
 
   test("cleanup permits cancel atomically on identity and contention hook failures", async () => {
@@ -1214,6 +1209,93 @@ describe("idempotency, lock, and artifact services", () => {
       expected: record,
       matches: (current, expected) => current.id === expected.id
     })).toEqual({ status: "deleted" });
+  });
+
+  test("ordinary then cleanup waiters acquire in one cross-class FIFO order", async () => {
+    const fixture = await createCleanupPermitQueueFixture("ordinary-cleanup");
+    tempRoots.push(fixture.tempRoot);
+    const holder = fixture.holdAuthority();
+    await holder.acquired;
+    const order: string[] = [];
+    const ordinaryGate = createAsyncGate();
+    const ordinaryContended = createSignal();
+    const ordinaryAcquired = createSignal();
+    const ordinary = runWithWorkspaceRecordPublicationHooks({
+      onAuthorityContention: () => ordinaryContended.resolve(),
+      afterAuthorityLeaseAcquired: async () => {
+        order.push("ordinary"); ordinaryAcquired.resolve(); await ordinaryGate.wait;
+      }
+    }, () => readJsonRecord(fixture.path, fixture.evidenceRef, fixture.schema));
+    await ordinaryContended.promise;
+    const cleanupContended = createSignal();
+    const cleanup = runWithWorkspaceRecordPublicationHooks({
+      onAuthorityContention: () => cleanupContended.resolve(),
+      beforeConditionalDelete: () => order.push("cleanup")
+    }, () => fixture.cleanup());
+    await cleanupContended.promise;
+    holder.release();
+    await ordinaryAcquired.promise;
+    expect(order).toEqual(["ordinary"]);
+    ordinaryGate.open();
+    expect(await ordinary).toEqual(fixture.record);
+    expect(await cleanup).toEqual({ status: "deleted" });
+    expect(order).toEqual(["ordinary", "cleanup"]);
+    await holder.completed;
+  });
+
+  test("cleanup then ordinary waiters acquire in one cross-class FIFO order", async () => {
+    const fixture = await createCleanupPermitQueueFixture("cleanup-ordinary");
+    tempRoots.push(fixture.tempRoot);
+    const holder = fixture.holdAuthority();
+    await holder.acquired;
+    const order: string[] = [];
+    const cleanupContended = createSignal();
+    const cleanup = runWithWorkspaceRecordPublicationHooks({
+      onAuthorityContention: () => cleanupContended.resolve(),
+      beforeConditionalDelete: () => order.push("cleanup")
+    }, () => fixture.cleanup());
+    await cleanupContended.promise;
+    const ordinaryContended = createSignal();
+    const ordinary = runWithWorkspaceRecordPublicationHooks({
+      onAuthorityContention: () => ordinaryContended.resolve(),
+      afterAuthorityLeaseAcquired: () => order.push("ordinary")
+    }, () => readJsonRecord(fixture.path, fixture.evidenceRef, fixture.schema));
+    await ordinaryContended.promise;
+    holder.release();
+    expect(await cleanup).toEqual({ status: "deleted" });
+    expect(await ordinary).toBeUndefined();
+    expect(order).toEqual(["cleanup", "ordinary"]);
+    await holder.completed;
+  });
+
+  test("expired ordinary ahead of cleanup is cancelled and cross-class handoff converges", async () => {
+    const fixture = await createCleanupPermitQueueFixture("expired-ordinary-cleanup");
+    tempRoots.push(fixture.tempRoot);
+    const holder = fixture.holdAuthority();
+    await holder.acquired;
+    const ordinaryContended = createSignal();
+    const deadline = Date.now() + 30;
+    const ordinary = captureTaskServiceError(() =>
+      runWithWorkspaceRecordAuthorityDeadline(deadline, () =>
+        runWithWorkspaceRecordPublicationHooks(
+          { onAuthorityContention: () => ordinaryContended.resolve() },
+          () => readJsonRecord(fixture.path, fixture.evidenceRef, fixture.schema)
+        )
+      )
+    );
+    await ordinaryContended.promise;
+    const cleanupContended = createSignal();
+    const cleanup = runWithWorkspaceRecordPublicationHooks(
+      { onAuthorityContention: () => cleanupContended.resolve() },
+      () => fixture.cleanup()
+    );
+    await cleanupContended.promise;
+    while (Date.now() <= deadline) {}
+    holder.release();
+    expect((await ordinary).retryable).toBe(true);
+    expect(await cleanup).toEqual({ status: "deleted" });
+    expect(await readJsonRecord(fixture.path, fixture.evidenceRef, fixture.schema)).toBeUndefined();
+    await holder.completed;
   });
 
   test("transient publication temp unlink failure retries to a single-link canonical record", async () => {
@@ -1739,10 +1821,14 @@ describe("idempotency, lock, and artifact services", () => {
           )
       )
     );
-    const cleanupMessages = aggregateErrorMessages(persistentError);
     expect(persistentAttempts).toEqual([1, 2, 3]);
-    expect(cleanupMessages).toContain("persistent namespace cleanup failure 1");
-    expect(cleanupMessages).toContain("persistent namespace cleanup failure 3");
+    expect(aggregateErrorMessages(persistentError)).toEqual([
+      "Workspace mutation namespace cleanup did not complete.",
+      "persistent namespace cleanup failure 1",
+      "Workspace record publication compensation failed.",
+      "persistent namespace cleanup failure 2",
+      "persistent namespace cleanup failure 3"
+    ]);
     await expectPathMissing(persistentPath);
     const residualNamespace = await findOnlyAuthorityNamespace(directoryPath);
     await rm(residualNamespace, { recursive: true });
@@ -1815,7 +1901,7 @@ describe("idempotency, lock, and artifact services", () => {
           },
           beforeTemporaryUnlink: ({ attempt }) => {
             attempts.push(attempt);
-            throw new Error("injected persistent cleanup failure");
+            throw new Error(`injected persistent cleanup failure ${attempt}`);
           }
         },
         () =>
@@ -1836,6 +1922,13 @@ describe("idempotency, lock, and artifact services", () => {
     expect(error.evidenceRefs).toEqual([evidenceRef]);
     expectErrorNotToLeakRecordContent(error, tempRoot);
     expect(attempts).toEqual([1, 2, 3]);
+    expect(aggregateErrorMessages(error)).toEqual([
+      "Workspace record publication temporary cleanup did not complete.",
+      "Workspace record publication compensation failed.",
+      "injected persistent cleanup failure 1",
+      "injected persistent cleanup failure 2",
+      "injected persistent cleanup failure 3"
+    ]);
     await expectPathMissing(publication!.canonicalPath);
     await expectPathMissing(publication!.temporaryPath);
     expect((await stat(outsideAlias)).nlink).toBe(1);
@@ -4483,6 +4576,34 @@ async function createTempWorkspacePath(): Promise<{
   };
 }
 
+async function createCleanupPermitQueueFixture(label: string) {
+  const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+  const schema = z.object({ id: z.string() });
+  const record = { id: label };
+  const evidenceRef = `cross-class-fifo.${label}`;
+  const fileName = `${label}.json`;
+  const path = workspaceRecordPath(workspaceRoot, ["cross-class-fifo", fileName], evidenceRef);
+  const created = await createJsonRecordIfAbsentWithCleanupPermit(
+    workspaceRoot, ["cross-class-fifo"], fileName, record, evidenceRef, schema
+  );
+  if (created.status !== "created") throw new Error("Expected cleanup permit queue fixture.");
+  return {
+    tempRoot, path, evidenceRef, schema, record,
+    holdAuthority: () => {
+      const gate = createAsyncGate();
+      const acquired = createSignal();
+      const completed = runWithWorkspaceRecordPublicationHooks({
+        afterAuthorityLeaseAcquired: async () => { acquired.resolve(); await gate.wait; }
+      }, () => readJsonRecord(path, evidenceRef, schema));
+      return { acquired: acquired.promise, completed, release: () => gate.open() };
+    },
+    cleanup: () => conditionalDeleteJsonRecordWithCleanupPermit(
+      created.cleanupPermit, path, evidenceRef, schema,
+      { kind: "record", expected: record, matches: (current, expected) => current.id === expected.id }
+    )
+  };
+}
+
 async function createCaseAliasWorkspacePath(): Promise<
   { tempRoot: string; workspaceRoot: string; aliasRoot: string } | undefined
 > {
@@ -4502,6 +4623,27 @@ async function createCaseAliasWorkspacePath(): Promise<
     throw error;
   }
   return { tempRoot, workspaceRoot, aliasRoot };
+}
+
+async function supportsDistinctCaseEntries(directoryPath: string): Promise<boolean> {
+  const upperPath = join(directoryPath, "CaseSensitivityProbe");
+  const lowerPath = join(directoryPath, "casesensitivityprobe");
+  await writeFile(upperPath, "upper", { flag: "wx" });
+  try {
+    await writeFile(lowerPath, "lower", { flag: "wx" });
+    const [upperIdentity, lowerIdentity] = await Promise.all([stat(upperPath), stat(lowerPath)]);
+    return upperIdentity.ino !== lowerIdentity.ino;
+  } catch (error) {
+    if (hasTestErrorCode(error, "EEXIST")) return false;
+    throw error;
+  } finally {
+    await Promise.all([rm(upperPath, { force: true }), rm(lowerPath, { force: true })]);
+  }
+}
+
+async function readFileWithIdentity(path: string): Promise<{ bytes: Buffer; dev: number; ino: number }> {
+  const [bytes, identity] = await Promise.all([readFile(path), stat(path)]);
+  return { bytes, dev: identity.dev, ino: identity.ino };
 }
 
 function hasTestErrorCode(error: unknown, code: string): boolean {

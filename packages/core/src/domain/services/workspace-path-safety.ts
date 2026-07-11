@@ -165,6 +165,23 @@ export async function physicalCanonicalPath(path: string, evidenceRef: string): 
   return await physicalCanonicalUnresolvedPath(targetPath, evidenceRef);
 }
 
+export async function physicalAuthorityPathIdentity(
+  path: string,
+  evidenceRef: string
+): Promise<string> {
+  const canonicalPath = await physicalCanonicalPath(path, evidenceRef);
+  let existingAncestor = canonicalPath;
+  for (;;) {
+    if (await maybeLstat(existingAncestor)) break;
+    const parentPath = parse(existingAncestor).dir;
+    if (parentPath === existingAncestor) return canonicalPath;
+    existingAncestor = parentPath;
+  }
+  return (await existingPathHasCaseInsensitiveAliases(existingAncestor))
+    ? canonicalPath.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+    : canonicalPath;
+}
+
 async function tryPhysicalCanonicalPath(
   targetPath: string,
   evidenceRef: string
@@ -203,15 +220,15 @@ async function tryPhysicalCanonicalPath(
       }
       try {
         if (missingSegments.length === 0 && !entry.isDirectory()) {
-          const physicalPath = await realpath(candidatePath);
-          return join(
-            parse(physicalPath).dir,
-            conservativeMissingPathIdentitySegment(parse(physicalPath).base)
-          );
+          return await realpath(candidatePath);
         }
+        const physicalAncestor = await realpath(candidatePath);
         return join(
-          await realpath(candidatePath),
-          ...missingSegments.reverse().map(conservativeMissingPathIdentitySegment)
+          physicalAncestor,
+          ...(await canonicalMissingPathIdentitySegments(
+            physicalAncestor,
+            missingSegments.reverse()
+          ))
         );
       } catch (error) {
         if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
@@ -264,9 +281,13 @@ async function physicalCanonicalUnresolvedPath(
         );
       }
       try {
+        const physicalAncestor = await realpath(candidatePath);
         return join(
-          await realpath(candidatePath),
-          ...unresolvedSegments.reverse().map(conservativeMissingPathIdentitySegment)
+          physicalAncestor,
+          ...(await canonicalMissingPathIdentitySegments(
+            physicalAncestor,
+            unresolvedSegments.reverse()
+          ))
         );
       } catch (error) {
         if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
@@ -292,6 +313,44 @@ async function physicalCanonicalUnresolvedPath(
 
 function conservativeMissingPathIdentitySegment(segment: string): string {
   return /^[\x00-\x7f]+$/.test(segment) ? segment.toLowerCase() : segment;
+}
+
+async function canonicalMissingPathIdentitySegments(
+  physicalAncestor: string,
+  segments: readonly string[]
+): Promise<string[]> {
+  if (!(await existingPathHasCaseInsensitiveAliases(physicalAncestor))) {
+    return [...segments];
+  }
+  return segments.map(conservativeMissingPathIdentitySegment);
+}
+
+async function existingPathHasCaseInsensitiveAliases(path: string): Promise<boolean> {
+  const expectedPhysicalPath = await realpath(path);
+  let candidatePath = expectedPhysicalPath;
+  for (;;) {
+    const parsed = parse(candidatePath);
+    const alternateBase = swapFirstAsciiLetterCase(parsed.base);
+    if (alternateBase !== parsed.base) {
+      try {
+        if (await realpath(join(parsed.dir, alternateBase)) === candidatePath) return true;
+      } catch (error) {
+        if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
+          throw error;
+        }
+      }
+    }
+    if (parsed.dir === candidatePath) return false;
+    candidatePath = parsed.dir;
+  }
+}
+
+function swapFirstAsciiLetterCase(segment: string): string {
+  const index = segment.search(/[A-Za-z]/);
+  if (index < 0) return segment;
+  const letter = segment[index]!;
+  const replacement = letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase();
+  return `${segment.slice(0, index)}${replacement}${segment.slice(index + 1)}`;
 }
 
 function matchingBoundary(
