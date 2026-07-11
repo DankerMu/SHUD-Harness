@@ -82,6 +82,7 @@ interface RecordAuthorityWaiter {
   exactPath: string;
   ready: boolean;
   cleanupPermit?: WorkspaceRecordCleanupPermit;
+  expectedCleanupGeneration?: WorkspaceRecordPhysicalIdentity;
 }
 
 interface RecordAuthorityMutex {
@@ -95,6 +96,7 @@ interface RecordAuthorityMutex {
 }
 
 interface RecordAuthorityLease {
+  expectedCleanupGeneration?: WorkspaceRecordPhysicalIdentity;
   release: () => void;
   reserveCleanupPermit: (
     publicPath: string,
@@ -356,7 +358,8 @@ export async function conditionalDeleteJsonRecordWithCleanupPermit<T>(
         schema,
         condition,
         hooks,
-        mutationState
+        mutationState,
+        authorityLease.expectedCleanupGeneration
       );
     } catch (error) {
       throw new WorkspaceRecordConditionalDeleteError(
@@ -413,11 +416,18 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   mutationState?: {
     started: boolean;
     deletedGeneration?: WorkspaceRecordPhysicalIdentity;
-  }
+  },
+  expectedGeneration?: WorkspaceRecordPhysicalIdentity
 ): Promise<ConditionalDeleteJsonRecordResult> {
   const observedIdentity = await readRecordPathIdentity(path, evidenceRef);
   if (!observedIdentity) {
     return { status: "missing" };
+  }
+  if (
+    expectedGeneration &&
+    !workspaceRecordPhysicalIdentityMatches(observedIdentity, expectedGeneration)
+  ) {
+    throw publicationStateError(evidenceRef);
   }
 
   const observation = await inspectJsonRecordUnderAuthority(path, evidenceRef, schema);
@@ -1856,6 +1866,10 @@ async function acquireRecordAuthorityWithCleanupPermit(
   if (!state || state.status !== "outstanding" || !state.generation) {
     throw publicationStateError(evidenceRef);
   }
+  const expectedCleanupGeneration = Object.freeze({
+    dev: state.generation.dev,
+    ino: state.generation.ino
+  });
   claimRecordAuthorityCleanupPermit(permit, state);
   const wasContended = state.mutex.ownerActive || state.mutex.waiters.size > 0;
   let waiter!: RecordAuthorityWaiter;
@@ -1874,7 +1888,8 @@ async function acquireRecordAuthorityWithCleanupPermit(
       kind: "cleanup",
       exactPath: state.publicPath,
       ready: false,
-      cleanupPermit: permit
+      cleanupPermit: permit,
+      expectedCleanupGeneration
     };
     state.mutex.waiters.add(waiter);
   });
@@ -1891,7 +1906,7 @@ async function acquireRecordAuthorityWithCleanupPermit(
       identity.exactPath !== state.publicPath ||
       candidateMutex !== state.mutex ||
       !generation ||
-      !workspaceRecordPhysicalIdentityMatches(generation, state.generation)
+      !workspaceRecordPhysicalIdentityMatches(generation, expectedCleanupGeneration)
     ) {
       throw publicationStateError(evidenceRef);
     }
@@ -1925,10 +1940,12 @@ function createRecordAuthorityLease(
   mutex: RecordAuthorityMutex,
   exactPath: string,
   consumesReservation = true,
-  cleanupPermit?: WorkspaceRecordCleanupPermit
+  cleanupPermit?: WorkspaceRecordCleanupPermit,
+  expectedCleanupGeneration?: WorkspaceRecordPhysicalIdentity
 ): RecordAuthorityLease {
   let released = false;
   return {
+    expectedCleanupGeneration,
     reserveCleanupPermit: (_publicPath, evidenceRef) => {
       if (released || mutex.cleanupPermits >= 1) {
         throw authorityCapacityError(evidenceRef);
@@ -1998,7 +2015,8 @@ function handoffRecordAuthorityLease(
         mutex,
         next.exactPath,
         next.kind === "ordinary",
-        next.cleanupPermit
+        next.cleanupPermit,
+        next.expectedCleanupGeneration
       )
     );
     return true;

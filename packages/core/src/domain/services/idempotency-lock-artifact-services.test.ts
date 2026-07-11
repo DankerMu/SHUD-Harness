@@ -2304,6 +2304,70 @@ describe("idempotency, lock, and artifact services", () => {
     await holder.completed;
   });
 
+  test("queued cleanup rejects a same-content replacement generation before mutation and releases its lane", async () => {
+    const fixture = await createCleanupPermitQueueFixture("queued-generation-replacement");
+    tempRoots.push(fixture.tempRoot);
+    const holder = fixture.holdAuthority();
+    await holder.acquired;
+    const generationOne = await readFileWithIdentity(fixture.path);
+    const cleanupContended = createSignal();
+    let mutationAdmissions = 0;
+    const cleanup = captureConditionalDeleteError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          onAuthorityContention: () => cleanupContended.resolve(),
+          beforeConditionalDelete: () => {
+            mutationAdmissions += 1;
+          }
+        },
+        () => fixture.cleanup()
+      )
+    );
+    await cleanupContended.promise;
+
+    const displacedPath = join(fixture.tempRoot, "queued-generation-one.json");
+    await rename(fixture.path, displacedPath);
+    await writeFile(fixture.path, generationOne.bytes, { flag: "wx" });
+    const generationTwo = await readFileWithIdentity(fixture.path);
+    expect(
+      generationTwo.dev === generationOne.dev && generationTwo.ino === generationOne.ino
+    ).toBe(false);
+
+    const ordinaryContended = createSignal();
+    const followingOrdinary = runWithWorkspaceRecordPublicationHooks(
+      { onAuthorityContention: () => ordinaryContended.resolve() },
+      () => readJsonRecord(fixture.path, fixture.evidenceRef, fixture.schema)
+    );
+    await ordinaryContended.promise;
+    holder.release();
+
+    const error = await cleanup;
+    expect(error.mutationPhase).toBe("pre_mutation");
+    expect(error.failureStage).toBe("operation");
+    expect(mutationAdmissions).toBe(0);
+    expect(await followingOrdinary).toEqual(fixture.record);
+    await holder.completed;
+    expect(await readFileWithIdentity(fixture.path)).toEqual(generationTwo);
+    expect((await readdir(join(fixture.path, ".."))).some(isOwnedRecordPath)).toBe(false);
+
+    const reusedPermit = await captureConditionalDeleteError(() => fixture.cleanup());
+    expect(reusedPermit.mutationPhase).toBe("pre_mutation");
+    expect(reusedPermit.failureStage).toBe("permit_admission");
+    expect(await readFileWithIdentity(fixture.path)).toEqual(generationTwo);
+    expect(
+      await conditionalDeleteJsonRecord(
+        fixture.path,
+        fixture.evidenceRef,
+        fixture.schema,
+        {
+          kind: "record",
+          expected: fixture.record,
+          matches: (current, expected) => current.id === expected.id
+        }
+      )
+    ).toEqual({ status: "deleted" });
+  });
+
   test("cleanup identity placeholders retain their exact FIFO position on free and contended lanes", async () => {
     for (const lane of ["free", "contended"] as const) {
       const fixture = await createCleanupPermitQueueFixture(`identity-placeholder-${lane}`);
