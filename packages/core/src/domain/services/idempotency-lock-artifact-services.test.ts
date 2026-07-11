@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -14,6 +15,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
+import { LockRecordSchema } from "../schemas/lock";
 import {
   TaskServiceError,
   createArtifactRegistryService,
@@ -22,6 +25,9 @@ import {
   createLockRecordService,
   idempotencyRecordEvidenceRef,
   idempotencyRecordFileName,
+  lockRecordDirectorySegments,
+  lockRecordEvidenceRef,
+  lockRecordFileName,
   sha256Hex,
   assertPathInsideWorkspace,
   resolveWorkspacePath,
@@ -31,7 +37,17 @@ import {
   type LockRecord,
   WorkspacePathSafetyError
 } from "./index";
-import { MAX_SERVICE_RECORD_BYTES, workspaceRecordPath } from "./workspace-record-store";
+import {
+  MAX_SERVICE_RECORD_BYTES,
+  conditionalDeleteJsonRecord,
+  createJsonRecordIfAbsent,
+  readJsonRecord,
+  runWithWorkspaceRecordPublicationHooks,
+  workspaceRecordPath,
+  writeJsonRecord,
+  type WorkspaceRecordPublicationHookInput,
+  type WorkspaceRecordPublicationHooks
+} from "./workspace-record-store";
 
 const tempRoots: string[] = [];
 
@@ -101,6 +117,804 @@ describe("idempotency, lock, and artifact services", () => {
 
     await writeFile(join(idempotencyDirectory, `${"0".repeat(64)}.json`), "{", { flag: "wx" });
     expect(await service.getRecord("task", rawKey)).toEqual(record);
+  });
+
+  test("IdempotencyRecord follower converges across the owned hardlink publication window", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const key = "task:create:publication-window";
+    const requestDigest = "digest-publication-window";
+    const ownerService = createIdempotencyRecordService({ workspaceRoot });
+    const followerService = createIdempotencyRecordService({ workspaceRoot });
+    const hold = createRecordPublicationHold(1);
+    const owner = runWithWorkspaceRecordPublicationHooks(hold.hooks, () =>
+      ownerService.beginRecord({ scope: "task", key, requestDigest })
+    );
+    const publication = await hold.waitUntilLinked();
+
+    expect((await stat(publication.canonicalPath)).nlink).toBe(2);
+    expect((await stat(publication.temporaryPath)).nlink).toBe(2);
+
+    let resolveReaderContended!: () => void;
+    const readerContended = new Promise<void>((resolvePromise) => {
+      resolveReaderContended = resolvePromise;
+    });
+    let readerLeaseNlink: number | undefined;
+    const replay = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterAuthorityLeaseAcquired: async ({ operation }) => {
+          expect(operation).toBe("read");
+          readerLeaseNlink = (await stat(publication.canonicalPath)).nlink;
+        },
+        onAuthorityContention: ({ operation }) => {
+          expect(operation).toBe("read");
+          resolveReaderContended();
+        }
+      },
+      () => followerService.lookupReplay({ scope: "task", key, requestDigest })
+    );
+    await readerContended;
+    let replaySettled = false;
+    void replay.finally(() => {
+      replaySettled = true;
+    });
+    await Promise.resolve();
+    expect(replaySettled).toBe(false);
+    const follower = followerService.beginRecord({ scope: "task", key, requestDigest });
+    hold.release();
+    const [ownerResult, replayResult, followerResult] = await Promise.all([
+      owner,
+      replay,
+      follower
+    ]);
+    const recordPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      idempotencyRecordFileName(key)
+    );
+
+    expect(ownerResult.status).toBe("acquired");
+    expect(replayResult).toEqual({ status: "incomplete", record: ownerResult.record });
+    expect(followerResult).toEqual({ status: "incomplete", record: ownerResult.record });
+    expect(readerLeaseNlink).toBe(1);
+    expect((await stat(recordPath)).nlink).toBe(1);
+    await expectPathMissing(publication.temporaryPath);
+  });
+
+  test("same-path reader lease returns stable pre-write authority before rename writer publishes", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const readerService = createLockRecordService({ workspaceRoot });
+    const writerService = createLockRecordService({ workspaceRoot });
+    const before = validLockRecord();
+    const after = { ...before, holder: "coordinator-renamed" };
+    await readerService.storeLock(before);
+    const readerHold = createAsyncGate();
+    let resolveReaderAcquired!: () => void;
+    const readerAcquired = new Promise<void>((resolvePromise) => {
+      resolveReaderAcquired = resolvePromise;
+    });
+    const reader = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterAuthorityLeaseAcquired: async ({ operation }) => {
+          expect(operation).toBe("read");
+          resolveReaderAcquired();
+          await readerHold.wait;
+        }
+      },
+      () => readerService.getLock(before.scope, before.lock_id)
+    );
+    await readerAcquired;
+    let resolveWriterContended!: () => void;
+    const writerContended = new Promise<void>((resolvePromise) => {
+      resolveWriterContended = resolvePromise;
+    });
+    const writer = runWithWorkspaceRecordPublicationHooks(
+      {
+        onAuthorityContention: ({ operation }) => {
+          expect(operation).toBe("rename");
+          resolveWriterContended();
+        }
+      },
+      () => writerService.storeLock(after)
+    );
+    await writerContended;
+    readerHold.open();
+
+    expect(await reader).toEqual(before);
+    expect(await writer).toEqual(after);
+    expect(await readerService.getLock(before.scope, before.lock_id)).toEqual(after);
+  });
+
+  test("rename writer excludes same-path reader until atomic publication completes", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createLockRecordService({ workspaceRoot });
+    const before = validLockRecord();
+    const after = { ...before, holder: "worker-after-rename" };
+    await service.storeLock(before);
+    const writerHold = createAsyncGate();
+    let resolveWriterAcquired!: () => void;
+    const writerAcquired = new Promise<void>((resolvePromise) => {
+      resolveWriterAcquired = resolvePromise;
+    });
+    const writer = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterAuthorityLeaseAcquired: async ({ operation }) => {
+          expect(operation).toBe("rename");
+          resolveWriterAcquired();
+          await writerHold.wait;
+        }
+      },
+      () => service.storeLock(after)
+    );
+    await writerAcquired;
+    let resolveReaderContended!: () => void;
+    const readerContended = new Promise<void>((resolvePromise) => {
+      resolveReaderContended = resolvePromise;
+    });
+    const reader = runWithWorkspaceRecordPublicationHooks(
+      {
+        onAuthorityContention: ({ operation }) => {
+          expect(operation).toBe("read");
+          resolveReaderContended();
+        }
+      },
+      () => service.getLock(after.scope, after.lock_id)
+    );
+    await readerContended;
+    writerHold.open();
+
+    expect(await writer).toEqual(after);
+    expect(await reader).toEqual(after);
+  });
+
+  test("Artifact duplicate registration converges across the owned publication window", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const artifact = validArtifact();
+    const ownerService = createArtifactRegistryService({ workspaceRoot });
+    const followerService = createArtifactRegistryService({ workspaceRoot });
+    const hold = createRecordPublicationHold(1);
+    const owner = runWithWorkspaceRecordPublicationHooks(hold.hooks, () =>
+      ownerService.registerArtifact(artifact)
+    );
+    const publication = await hold.waitUntilLinked();
+
+    expect((await stat(publication.canonicalPath)).nlink).toBe(2);
+    const follower = followerService.registerArtifact({ ...artifact });
+    hold.release();
+    const [ownerArtifact, followerArtifact] = await Promise.all([owner, follower]);
+    const replayedArtifact = await ownerService.registerArtifact({ ...artifact });
+
+    expect(ownerArtifact).toEqual(artifact);
+    expect(followerArtifact).toEqual(artifact);
+    expect(replayedArtifact).toEqual(artifact);
+    expect((await stat(publication.canonicalPath)).nlink).toBe(1);
+    await expectPathMissing(publication.temporaryPath);
+  });
+
+  test("physical authority identity converges across filesystem case aliases and isolates workspaces", async () => {
+    const aliasWorkspace = await createCaseAliasWorkspacePath();
+    if (!aliasWorkspace) {
+      return;
+    }
+    const { tempRoot, workspaceRoot, aliasRoot } = aliasWorkspace;
+    tempRoots.push(tempRoot);
+
+    const key = "task:create:case-alias-authority";
+    const requestDigest = "digest-case-alias-authority";
+    const writerService = createIdempotencyRecordService({ workspaceRoot });
+    const aliasReaderService = createIdempotencyRecordService({ workspaceRoot: aliasRoot });
+    const hardlinkHold = createRecordPublicationHold(1);
+    const writer = runWithWorkspaceRecordPublicationHooks(hardlinkHold.hooks, () =>
+      writerService.beginRecord({ scope: "task", key, requestDigest })
+    );
+    await hardlinkHold.waitUntilLinked();
+    const readerContention = createSignal();
+    const aliasReader = runWithWorkspaceRecordPublicationHooks(
+      {
+        onAuthorityContention: ({ operation }) => {
+          expect(operation).toBe("read");
+          readerContention.resolve();
+        }
+      },
+      () => aliasReaderService.lookupReplay({ scope: "task", key, requestDigest })
+    );
+    await readerContention.promise;
+    hardlinkHold.release();
+    const [ownerResult, replayResult] = await Promise.all([writer, aliasReader]);
+    expect(ownerResult.status).toBe("acquired");
+    expect(replayResult.status).toBe("incomplete");
+
+    const artifact = validArtifact();
+    const artifactHold = createRecordPublicationHold(1);
+    const artifactOwner = runWithWorkspaceRecordPublicationHooks(artifactHold.hooks, () =>
+      createArtifactRegistryService({ workspaceRoot }).registerArtifact(artifact)
+    );
+    await artifactHold.waitUntilLinked();
+    const artifactContention = createSignal();
+    const artifactAlias = runWithWorkspaceRecordPublicationHooks(
+      {
+        onAuthorityContention: ({ operation }) => {
+          expect(operation).toBe("hardlink");
+          artifactContention.resolve();
+        }
+      },
+      () => createArtifactRegistryService({ workspaceRoot: aliasRoot }).registerArtifact(artifact)
+    );
+    await artifactContention.promise;
+    artifactHold.release();
+    expect(await Promise.all([artifactOwner, artifactAlias])).toEqual([artifact, artifact]);
+
+    const lock = validLockRecord();
+    const physicalLockService = createLockRecordService({ workspaceRoot });
+    const aliasLockService = createLockRecordService({ workspaceRoot: aliasRoot });
+    await physicalLockService.storeLock(lock);
+    const renameHold = createAsyncGate();
+    const renameAcquired = createSignal();
+    const renamed = { ...lock, holder: "case-alias-renamed" };
+    const renameWriter = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterAuthorityLeaseAcquired: async ({ operation }) => {
+          expect(operation).toBe("rename");
+          renameAcquired.resolve();
+          await renameHold.wait;
+        }
+      },
+      () => physicalLockService.storeLock(renamed)
+    );
+    await renameAcquired.promise;
+    const renameReaderContention = createSignal();
+    const renameReader = runWithWorkspaceRecordPublicationHooks(
+      {
+        onAuthorityContention: ({ operation }) => {
+          expect(operation).toBe("read");
+          renameReaderContention.resolve();
+        }
+      },
+      () => aliasLockService.getLock(lock.scope, lock.lock_id)
+    );
+    await renameReaderContention.promise;
+    renameHold.open();
+    expect(await Promise.all([renameWriter, renameReader])).toEqual([renamed, renamed]);
+
+    const otherWorkspaceRoot = join(tempRoot, "PhysicallyDistinctWorkspace");
+    await mkdir(otherWorkspaceRoot);
+    const isolationHold = createAsyncGate();
+    const isolatedHolderAcquired = createSignal();
+    const isolatedHolder = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterAuthorityLeaseAcquired: async () => {
+          isolatedHolderAcquired.resolve();
+          await isolationHold.wait;
+        }
+      },
+      () => physicalLockService.getLock("task", "LOCK-distinct-isolation")
+    );
+    await isolatedHolderAcquired.promise;
+    const distinctAcquired = createSignal();
+    const distinctRead = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterAuthorityLeaseAcquired: ({ operation }) => {
+          expect(operation).toBe("read");
+          distinctAcquired.resolve();
+        },
+        onAuthorityContention: () => {
+          throw new Error("distinct physical workspaces must not contend");
+        }
+      },
+      () =>
+        createLockRecordService({ workspaceRoot: otherWorkspaceRoot }).getLock(
+          "task",
+          "LOCK-distinct-isolation"
+        )
+    );
+    await Promise.race([
+      distinctAcquired.promise,
+      timeoutAfter(500, "distinct physical workspace authority was not isolated")
+    ]);
+    isolationHold.open();
+    expect(await Promise.all([isolatedHolder, distinctRead])).toEqual([undefined, undefined]);
+  });
+
+  test("same-path authority admission is bounded before temp creation and hands off FIFO", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createLockRecordService({ workspaceRoot });
+    const record = { ...validLockRecord(), lock_id: "LOCK-same-path-capacity" };
+    await service.storeLock(record);
+    const directoryPath = join(workspaceRoot, "locks", "task");
+    const beforeFiles = await readdir(directoryPath);
+    const holder = createAuthorityReadHold(service, record.lock_id);
+    const heldRead = holder.start();
+    await holder.acquired;
+
+    await expect(
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          onAuthorityContention: () => {
+            throw new Error("injected authority contention hook failure");
+          }
+        },
+        () => service.getLock(record.scope, record.lock_id)
+      )
+    ).rejects.toThrow("injected authority contention hook failure");
+
+    const acquisitionOrder: number[] = [];
+    const queueOrder: number[] = [];
+    let contentionCount = 0;
+    let resolveCapMinusOne!: () => void;
+    let resolveCap!: () => void;
+    const capMinusOne = new Promise<void>((resolvePromise) => {
+      resolveCapMinusOne = resolvePromise;
+    });
+    const cap = new Promise<void>((resolvePromise) => {
+      resolveCap = resolvePromise;
+    });
+    const queued = Array.from({ length: 63 }, (_, index) =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          onAuthorityContention: () => {
+            queueOrder.push(index);
+            contentionCount += 1;
+            if (contentionCount === 62) resolveCapMinusOne();
+            if (contentionCount === 63) resolveCap();
+          },
+          afterAuthorityLeaseAcquired: ({ operation }) => {
+            expect(operation).toBe(["read", "rename", "hardlink"][index % 3]);
+            acquisitionOrder.push(index);
+          }
+        },
+        () => runMixedLockAuthorityOperation(workspaceRoot, record, index)
+      )
+    );
+    await capMinusOne;
+    expect(contentionCount).toBe(62);
+    await cap;
+    expect(contentionCount).toBe(63);
+
+    const overflowActions = [
+      () => service.getLock(record.scope, record.lock_id),
+      () => service.storeLock({ ...record, holder: "over-cap-rename" }),
+      () =>
+        createJsonRecordIfAbsent(
+          workspaceRoot,
+          lockRecordDirectorySegments(record.scope),
+          lockRecordFileName(record.lock_id),
+          record,
+          lockRecordEvidenceRef(record.scope, record.lock_id),
+          LockRecordSchema
+        )
+    ];
+    for (const action of overflowActions) {
+      const overflow = await captureTaskServiceError(action);
+      expect(overflow.status).toBe(409);
+      expect(overflow.retryable).toBe(true);
+      expect(overflow.message).toBe("Workspace record authority coordination is at capacity.");
+    }
+    expect(await readdir(directoryPath)).toEqual(beforeFiles);
+
+    holder.release();
+    await Promise.race([
+      Promise.all([heldRead, ...queued]),
+      timeoutAfter(2_000, "same-path FIFO authority handoff deadlocked")
+    ]);
+    expect(acquisitionOrder).toEqual(queueOrder);
+    expect(await service.getLock(record.scope, record.lock_id)).toBeDefined();
+  });
+
+  test("conditional delete serializes readers and immediate recreation without transient read errors", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createLockRecordService({ workspaceRoot });
+    const record = { ...validLockRecord(), lock_id: "LOCK-conditional-delete" };
+    await service.storeLock(record);
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      [...lockRecordDirectorySegments(record.scope), lockRecordFileName(record.lock_id)],
+      lockRecordEvidenceRef(record.scope, record.lock_id)
+    );
+    const deleteHold = createAsyncGate();
+    const deleteReady = createSignal();
+    const deletion = runWithWorkspaceRecordPublicationHooks(
+      {
+        beforeConditionalDelete: async ({ path, conditionStatus }) => {
+          expect(path).toBe(recordPath);
+          expect(conditionStatus).toBe("matched");
+          deleteReady.resolve();
+          await deleteHold.wait;
+        }
+      },
+      () =>
+        conditionalDeleteJsonRecord(recordPath, "lock.conditional-delete", LockRecordSchema, {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.lock_id === expected.lock_id
+        })
+    );
+    await deleteReady.promise;
+    const order: string[] = [];
+    const readerQueued = createSignal();
+    const reader = runWithWorkspaceRecordPublicationHooks(
+      {
+        onAuthorityContention: () => {
+          order.push("reader-queued");
+          readerQueued.resolve();
+        },
+        afterAuthorityLeaseAcquired: () => order.push("reader-acquired")
+      },
+      () => service.getLock(record.scope, record.lock_id)
+    );
+    const recreateQueued = createSignal();
+    const recreation = runWithWorkspaceRecordPublicationHooks(
+      {
+        onAuthorityContention: () => {
+          order.push("recreate-queued");
+          recreateQueued.resolve();
+        },
+        afterAuthorityLeaseAcquired: () => order.push("recreate-acquired")
+      },
+      () =>
+        createJsonRecordIfAbsent(
+          workspaceRoot,
+          lockRecordDirectorySegments(record.scope),
+          lockRecordFileName(record.lock_id),
+          record,
+          lockRecordEvidenceRef(record.scope, record.lock_id),
+          LockRecordSchema
+        )
+    );
+    await Promise.all([readerQueued.promise, recreateQueued.promise]);
+    deleteHold.open();
+    const [deleted, readAfterDelete, recreated] = await Promise.race([
+      Promise.all([deletion, reader, recreation]),
+      timeoutAfter(1_500, "conditional delete/recreate authority deadlocked")
+    ]);
+    expect(deleted.status).toBe("deleted");
+    expect(readAfterDelete).toBeUndefined();
+    expect(recreated.status).toBe("created");
+    expect(order).toEqual([
+      "reader-queued",
+      "recreate-queued",
+      "reader-acquired",
+      "recreate-acquired"
+    ]);
+    expect(await service.getLock(record.scope, record.lock_id)).toEqual(record);
+  });
+
+  test("recreated transition guard and cleanup-lock generations serialize queued strict readers", async () => {
+    for (const targetPublication of [1, 2] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const key = `task:create:guard-generation-${targetPublication}`;
+      const requestDigest = `digest-guard-generation-${targetPublication}`;
+      const seedService = createIdempotencyRecordService({ workspaceRoot });
+      await seedService.beginRecord({ scope: "task", key, requestDigest });
+      const generationA = await seedService.failRecord({ scope: "task", key, requestDigest });
+      const transitionPath = idempotencyTransitionGuardPath(workspaceRoot, key);
+      const cleanupPath = idempotencyTransitionCleanupLockPath(workspaceRoot, key);
+      await expectPathMissing(transitionPath);
+      await expectPathMissing(cleanupPath);
+
+      const writerService = createIdempotencyRecordService({ workspaceRoot });
+      const hold = createRecordPublicationHold(targetPublication);
+      const writerB = runWithWorkspaceRecordPublicationHooks(hold.hooks, () =>
+        writerService.beginRecord({ scope: "task", key, requestDigest })
+      );
+      const publication = await hold.waitUntilLinked();
+      expect(publication.canonicalPath).toBe(
+        targetPublication === 1 ? cleanupPath : transitionPath
+      );
+      expect((await stat(publication.canonicalPath)).nlink).toBe(2);
+      let resolveReaderContended!: () => void;
+      const readerContended = new Promise<void>((resolvePromise) => {
+        resolveReaderContended = resolvePromise;
+      });
+      const queuedReader = runWithWorkspaceRecordPublicationHooks(
+        {
+          onAuthorityContention: ({ operation }) => {
+            expect(operation).toBe("read");
+            resolveReaderContended();
+          }
+        },
+        () =>
+          readJsonRecord(
+            publication.canonicalPath,
+            idempotencyRecordEvidenceRef("task", key),
+            z.unknown()
+          )
+      );
+      await readerContended;
+      hold.release();
+      const [writerResult, observedTransientRecord] = await Promise.race([
+        Promise.all([writerB, queuedReader]),
+        timeoutAfter(1_500, "recreated transition authority operations deadlocked")
+      ]);
+
+      expect(generationA.status).toBe("failed");
+      expect(writerResult.status).toBe("acquired");
+      expect(writerResult.record.status).toBe("started");
+      expect(observedTransientRecord).toBeDefined();
+      await expectPathMissing(publication.temporaryPath);
+      await expectPathMissing(transitionPath);
+      await expectPathMissing(cleanupPath);
+      expect(await seedService.getRecord("task", key)).toEqual(writerResult.record);
+    }
+  });
+
+  test("transition guard and cleanup-lock release serialize queued readers through deletion", async () => {
+    for (const targetKind of ["cleanup", "guard"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const key = `task:create:delete-reader-${targetKind}`;
+      const evidenceRef = idempotencyRecordEvidenceRef("task", key);
+      const requestDigest = `digest-delete-reader-${targetKind}`;
+      const seedService = createIdempotencyRecordService({ workspaceRoot });
+      await seedService.beginRecord({ scope: "task", key, requestDigest });
+      await seedService.failRecord({ scope: "task", key, requestDigest });
+      const targetPath =
+        targetKind === "cleanup"
+          ? idempotencyTransitionCleanupLockPath(workspaceRoot, key)
+          : idempotencyTransitionGuardPath(workspaceRoot, key);
+      const deleteHold = createAsyncGate();
+      const deleteReady = createSignal();
+      let deleteAuthorityCount = 0;
+      const begin = runWithWorkspaceRecordPublicationHooks(
+        {
+          afterAuthorityLeaseAcquired: async ({ operation }) => {
+            if (operation !== "delete") return;
+            deleteAuthorityCount += 1;
+            const targetDelete = targetKind === "cleanup" ? 1 : 2;
+            if (deleteAuthorityCount !== targetDelete) return;
+            deleteReady.resolve();
+            await deleteHold.wait;
+          }
+        },
+        () =>
+          createIdempotencyRecordService({ workspaceRoot }).beginRecord({
+            scope: "task",
+            key,
+            requestDigest
+          })
+      );
+      await Promise.race([
+        deleteReady.promise,
+        timeoutAfter(1_000, `${targetKind} conditional release was not reached`)
+      ]);
+      const readerContended = createSignal();
+      const reader = runWithWorkspaceRecordPublicationHooks(
+        {
+          onAuthorityContention: ({ operation }) => {
+            expect(operation).toBe("read");
+            readerContended.resolve();
+          }
+        },
+        () => readJsonRecord(targetPath, evidenceRef, z.unknown())
+      );
+      await readerContended.promise;
+      deleteHold.open();
+      const [beginResult, readResult] = await Promise.race([
+        Promise.all([begin, reader]),
+        timeoutAfter(1_500, `${targetKind} release and queued read deadlocked`)
+      ]);
+      expect(beginResult.status).toBe("acquired");
+      expect(readResult).toBeUndefined();
+      await expectPathMissing(targetPath);
+    }
+  });
+
+  test("authority path capacity is bounded, retryable, and released after holders finish", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createLockRecordService({ workspaceRoot });
+    const releaseHolders = createAsyncGate();
+    let acquiredCount = 0;
+    let resolveCapMinusOne!: () => void;
+    let resolveAllAcquired!: () => void;
+    const capMinusOne = new Promise<void>((resolvePromise) => {
+      resolveCapMinusOne = resolvePromise;
+    });
+    const allAcquired = new Promise<void>((resolvePromise) => {
+      resolveAllAcquired = resolvePromise;
+    });
+    const startHolder = (index: number) =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterAuthorityLeaseAcquired: async ({ operation }) => {
+            expect(operation).toBe("read");
+            acquiredCount += 1;
+            if (acquiredCount === 1023) {
+              resolveCapMinusOne();
+            }
+            if (acquiredCount === 1024) {
+              resolveAllAcquired();
+            }
+            await releaseHolders.wait;
+          }
+        },
+        () => service.getLock("task", `LOCK-capacity-${index}`)
+      );
+    const holders = Array.from({ length: 1023 }, (_, index) => startHolder(index));
+
+    await Promise.race([
+      capMinusOne,
+      timeoutAfter(2_000, "authority cap-1 holders did not acquire")
+    ]);
+    expect(acquiredCount).toBe(1023);
+    holders.push(startHolder(1023));
+
+    await Promise.race([
+      allAcquired,
+      timeoutAfter(2_000, "authority capacity holders did not acquire")
+    ]);
+    try {
+      const capacityError = await captureTaskServiceError(() =>
+        service.getLock("task", "LOCK-capacity-overflow")
+      );
+      expect(capacityError.code).toBe("record_malformed");
+      expect(capacityError.status).toBe(409);
+      expect(capacityError.retryable).toBe(true);
+      expect(capacityError.message).toBe(
+        "Workspace record authority coordination is at capacity."
+      );
+      expectErrorNotToLeakRecordContent(capacityError, tempRoot);
+    } finally {
+      releaseHolders.open();
+    }
+
+    expect(await Promise.all(holders)).toEqual(Array.from({ length: 1024 }, () => undefined));
+    expect(await service.getLock("task", "LOCK-capacity-overflow")).toBeUndefined();
+  });
+
+  test("authority acquisition keeps one total five-second deadline across queued holder churn", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createLockRecordService({ workspaceRoot });
+    const lockId = "LOCK-total-authority-deadline";
+    const first = createAuthorityReadHold(service, lockId);
+    const second = createAuthorityReadHold(service, lockId);
+    const third = createAuthorityReadHold(service, lockId);
+
+    const firstRead = first.start();
+    await first.acquired;
+    const secondRead = second.start();
+    await second.contended;
+    const thirdRead = third.start();
+    await third.contended;
+
+    let resolveTargetContended!: () => void;
+    const targetContended = new Promise<void>((resolvePromise) => {
+      resolveTargetContended = resolvePromise;
+    });
+    const startedAt = Date.now();
+    const target = captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          onAuthorityContention: ({ operation }) => {
+            expect(operation).toBe("read");
+            resolveTargetContended();
+          }
+        },
+        () => service.getLock("task", lockId)
+      )
+    );
+    await targetContended;
+
+    await delay(1_800);
+    first.release();
+    await second.acquired;
+    await delay(1_800);
+    second.release();
+    await third.acquired;
+    const deadlineError = await target;
+    const elapsedMs = Date.now() - startedAt;
+    third.release();
+    await Promise.all([firstRead, secondRead, thirdRead]);
+
+    expect(deadlineError.code).toBe("record_malformed");
+    expect(deadlineError.status).toBe(409);
+    expect(deadlineError.retryable).toBe(true);
+    expect(deadlineError.message).toBe(
+      "Workspace record authority lease was not acquired before the bounded deadline."
+    );
+    expect(elapsedMs).toBeGreaterThanOrEqual(4_800);
+    expect(elapsedMs).toBeLessThan(6_500);
+    expectErrorNotToLeakRecordContent(deadlineError, tempRoot);
+    expect(await service.getLock("task", lockId)).toBeUndefined();
+  }, 10_000);
+
+  test("transient publication temp unlink failure retries to a single-link canonical record", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    const key = "task:create:transient-temp-cleanup";
+    const attempts: number[] = [];
+    let publication: WorkspaceRecordPublicationHookInput | undefined;
+
+    const result = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterCanonicalLink: (input) => {
+          publication = input;
+        },
+        beforeTemporaryUnlink: ({ attempt }) => {
+          attempts.push(attempt);
+          if (attempt === 1) {
+            throw new Error("injected transient cleanup failure");
+          }
+        }
+      },
+      () =>
+        service.beginRecord({
+          scope: "task",
+          key,
+          requestDigest: "digest-transient-temp-cleanup"
+        })
+    );
+
+    expect(result.status).toBe("acquired");
+    expect(attempts).toEqual([1, 2]);
+    expect(publication).toBeDefined();
+    expect((await stat(publication!.canonicalPath)).nlink).toBe(1);
+    await expectPathMissing(publication!.temporaryPath);
+  });
+
+  test("persistent publication temp unlink failure fails closed without deleting aliases", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    const key = "task:create:persistent-temp-cleanup";
+    const requestDigest = "digest-persistent-temp-cleanup";
+    const outsideAlias = join(tempRoot, "outside-persistent-publication.json");
+    let publication: WorkspaceRecordPublicationHookInput | undefined;
+    const attempts: number[] = [];
+
+    const error = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterCanonicalLink: async (input) => {
+            publication = input;
+            await link(input.canonicalPath, outsideAlias);
+          },
+          beforeTemporaryUnlink: ({ attempt }) => {
+            attempts.push(attempt);
+            throw new Error("injected persistent cleanup failure");
+          }
+        },
+        () => service.beginRecord({ scope: "task", key, requestDigest })
+      )
+    );
+
+    expect(publication).toBeDefined();
+    expect(error.code).toBe("workspace_path_not_safe");
+    expect(error.message).toBe(
+      "Workspace record publication temporary cleanup did not complete."
+    );
+    expect(error.evidenceRefs).toEqual([idempotencyRecordEvidenceRef("task", key)]);
+    expectErrorNotToLeakRecordContent(error, tempRoot);
+    expect(attempts).toEqual([1, 2, 3]);
+    const canonicalBytes = await readFile(publication!.canonicalPath);
+    expect(await readFile(publication!.temporaryPath)).toEqual(canonicalBytes);
+    expect(await readFile(outsideAlias)).toEqual(canonicalBytes);
+    expect((await stat(publication!.canonicalPath)).nlink).toBe(3);
+    expect((await stat(publication!.temporaryPath)).nlink).toBe(3);
+    expect((await stat(outsideAlias)).nlink).toBe(3);
+
+    const poisonedRead = await captureTaskServiceError(() =>
+      service.getRecord("task", key)
+    );
+    expect(poisonedRead.code).toBe("record_malformed");
+    expect(await readFile(outsideAlias)).toEqual(canonicalBytes);
+
+    await rm(publication!.temporaryPath);
+    await rm(outsideAlias);
+    const repaired = await service.beginRecord({ scope: "task", key, requestDigest });
+
+    expect(repaired.status).toBe("incomplete");
+    expect(repaired.record.status).toBe("started");
+    expect((await stat(publication!.canonicalPath)).nlink).toBe(1);
   });
 
   test("IdempotencyRecord completeRecord rejects a missing record without writing files", async () => {
@@ -1076,6 +1890,79 @@ describe("idempotency, lock, and artifact services", () => {
     expect(retry).toEqual({ status: "incomplete", record: failed });
     expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(freshGuard);
     expect(await seedService.getRecord("task", rawKey)).toEqual(failed);
+  });
+
+  test("conditional stale guard cleanup never deletes a replacement published after comparison", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const key = "task:create:conditional-delete-replacement";
+    const requestDigest = "digest-conditional-delete-replacement";
+    const seedService = createIdempotencyRecordService({ workspaceRoot });
+    await seedService.beginRecord({ scope: "task", key, requestDigest });
+    await seedService.failRecord({ scope: "task", key, requestDigest });
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, key);
+    const staleGuard = {
+      guard_id: "stale-before-conditional-delete",
+      owner_pid: 9_999_999,
+      acquired_at_ms: Date.now() - 31_000,
+      acquired_at: "2026-07-07T13:34:00.000Z"
+    };
+    const replacementGuard = {
+      guard_id: "replacement-after-conditional-compare",
+      owner_pid: process.pid,
+      acquired_at_ms: Date.now(),
+      acquired_at: new Date().toISOString()
+    };
+    await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, { flag: "wx" });
+    const replacementPath = `${guardPath}.replacement`;
+    let replacementCount = 0;
+    const error = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeConditionalDelete: async ({ path, conditionStatus }) => {
+            if (path !== guardPath) return;
+            expect(conditionStatus).toBe("matched");
+            replacementCount += 1;
+            await writeFile(replacementPath, `${JSON.stringify(replacementGuard)}\n`, {
+              flag: "wx"
+            });
+            await rename(replacementPath, guardPath);
+          }
+        },
+        () =>
+          createIdempotencyRecordService({ workspaceRoot }).beginRecord({
+            scope: "task",
+            key,
+            requestDigest
+          })
+      )
+    );
+
+    expect(replacementCount).toBe(1);
+    expect(error.code).toBe("record_malformed");
+    expect(error.message).toBe("Workspace record changed before conditional removal.");
+    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(replacementGuard);
+  });
+
+  test("rollback recovery conditionally removes malformed guards and releases authority", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const key = "task:create:malformed-rollback-recovery";
+    const requestDigest = "digest-malformed-rollback-recovery";
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    const begin = await service.beginRecord({ scope: "task", key, requestDigest });
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, key);
+    await writeFile(guardPath, "{", { flag: "wx" });
+
+    const recovered = await Promise.race([
+      service.recoverFailedRecordAfterRollback({ scope: "task", key, requestDigest }),
+      timeoutAfter(1_000, "malformed guard rollback recovery deadlocked")
+    ]);
+
+    expect(begin.status).toBe("acquired");
+    expect(recovered.status).toBe("failed");
+    await expectPathMissing(guardPath);
+    expect(await service.getRecord("task", key)).toEqual(recovered);
   });
 
   test("IdempotencyRecord stale transition cleanup lock is recoverable before completion", async () => {
@@ -2482,12 +3369,158 @@ function holdStartedLookupUntilBothCompleteServicesObserveIt(
   };
 }
 
+function createRecordPublicationHold(targetPublication: number): {
+  hooks: WorkspaceRecordPublicationHooks;
+  waitUntilLinked: () => Promise<WorkspaceRecordPublicationHookInput>;
+  release: () => void;
+} {
+  let publicationCount = 0;
+  let resolveLinked!: (input: WorkspaceRecordPublicationHookInput) => void;
+  let resolveRelease!: () => void;
+  const linked = new Promise<WorkspaceRecordPublicationHookInput>((resolvePromise) => {
+    resolveLinked = resolvePromise;
+  });
+  const released = new Promise<void>((resolvePromise) => {
+    resolveRelease = resolvePromise;
+  });
+
+  return {
+    hooks: {
+      afterCanonicalLink: async (input) => {
+        publicationCount += 1;
+        if (publicationCount !== targetPublication) {
+          return;
+        }
+        resolveLinked(input);
+        await released;
+      }
+    },
+    waitUntilLinked: async () => await linked,
+    release: () => resolveRelease()
+  };
+}
+
+function createAsyncGate(): { wait: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const wait = new Promise<void>((resolvePromise) => {
+    open = resolvePromise;
+  });
+  return { wait, open };
+}
+
+function createSignal(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+async function runMixedLockAuthorityOperation(
+  workspaceRoot: string,
+  record: LockRecord,
+  index: number
+): Promise<unknown> {
+  if (index % 3 === 0) {
+    return await createLockRecordService({ workspaceRoot }).getLock(record.scope, record.lock_id);
+  }
+  if (index % 3 === 1) {
+    return await writeJsonRecord(
+      workspaceRoot,
+      lockRecordDirectorySegments(record.scope),
+      lockRecordFileName(record.lock_id),
+      { ...record, holder: `fifo-holder-${index}` },
+      lockRecordEvidenceRef(record.scope, record.lock_id),
+      LockRecordSchema
+    );
+  }
+  return await createJsonRecordIfAbsent(
+    workspaceRoot,
+    lockRecordDirectorySegments(record.scope),
+    lockRecordFileName(record.lock_id),
+    record,
+    lockRecordEvidenceRef(record.scope, record.lock_id),
+    LockRecordSchema
+  );
+}
+
+function createAuthorityReadHold(
+  service: ReturnType<typeof createLockRecordService>,
+  lockId: string
+): {
+  acquired: Promise<void>;
+  contended: Promise<void>;
+  start: () => Promise<LockRecord | undefined>;
+  release: () => void;
+} {
+  const hold = createAsyncGate();
+  let resolveAcquired!: () => void;
+  let resolveContended!: () => void;
+  const acquired = new Promise<void>((resolvePromise) => {
+    resolveAcquired = resolvePromise;
+  });
+  const contended = new Promise<void>((resolvePromise) => {
+    resolveContended = resolvePromise;
+  });
+
+  return {
+    acquired,
+    contended,
+    start: () =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterAuthorityLeaseAcquired: async ({ operation }) => {
+            expect(operation).toBe("read");
+            resolveAcquired();
+            await hold.wait;
+          },
+          onAuthorityContention: ({ operation }) => {
+            expect(operation).toBe("read");
+            resolveContended();
+          }
+        },
+        () => service.getLock("task", lockId)
+      ),
+    release: hold.open
+  };
+}
+
 async function createTempWorkspacePath(): Promise<{ tempRoot: string; workspaceRoot: string }> {
   const tempRoot = await realpath(await mkdtemp(join(tmpdir(), "shud-harness-core-services-")));
   return {
     tempRoot,
     workspaceRoot: join(tempRoot, "workspace")
   };
+}
+
+async function createCaseAliasWorkspacePath(): Promise<
+  { tempRoot: string; workspaceRoot: string; aliasRoot: string } | undefined
+> {
+  const tempRoot = await realpath(await mkdtemp(join(tmpdir(), "shud-harness-case-alias-")));
+  const workspaceRoot = join(tempRoot, "AuthorityWorkspace");
+  const aliasRoot = join(tempRoot, "aUTHORITYwORKSPACE");
+  await mkdir(workspaceRoot);
+  try {
+    if ((await realpath(aliasRoot)) !== (await realpath(workspaceRoot))) {
+      throw new Error("Filesystem case alias resolved to a different physical workspace.");
+    }
+  } catch (error) {
+    await rm(tempRoot, { recursive: true, force: true });
+    if (hasTestErrorCode(error, "ENOENT")) {
+      return undefined;
+    }
+    throw error;
+  }
+  return { tempRoot, workspaceRoot, aliasRoot };
+}
+
+function hasTestErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === code
+  );
 }
 
 async function captureTaskServiceError(action: () => Promise<unknown>): Promise<TaskServiceError> {
@@ -2536,6 +3569,16 @@ async function expectPathMissing(path: string): Promise<void> {
   throw new Error(`Expected path to be missing: ${path}`);
 }
 
+function idempotencyTransitionGuardPath(workspaceRoot: string, key: string): string {
+  return join(
+    workspaceRoot,
+    "tasks",
+    "_idempotency",
+    "task",
+    `${sha256Hex(`transition:${key}`)}.guard.json`
+  );
+}
+
 function idempotencyTransitionCleanupLockPath(workspaceRoot: string, key: string): string {
   return join(
     workspaceRoot,
@@ -2544,6 +3587,10 @@ function idempotencyTransitionCleanupLockPath(workspaceRoot: string, key: string
     "task",
     `${sha256Hex(`transition-cleanup:${key}`)}.guard-cleanup`
   );
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
 async function timeoutAfter(milliseconds: number, message: string): Promise<never> {

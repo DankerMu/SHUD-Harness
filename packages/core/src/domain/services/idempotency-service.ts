@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
@@ -11,6 +10,7 @@ import {
 } from "../schemas/idempotency";
 import { TaskServiceError, isSafeTaskId } from "./task-card-service";
 import {
+  conditionalDeleteJsonRecord,
   createJsonRecordIfAbsent,
   readJsonRecord,
   workspaceRecordPath,
@@ -738,14 +738,11 @@ async function acquireIdempotencyTransitionGuard(
       return {
         status: "acquired",
         release: async () => {
-          const current = await readJsonRecord(
+          await conditionalDeleteIdempotencyTransitionGuard(
             guardPath,
             evidenceRef,
-            IdempotencyTransitionGuardSchema
+            guard
           ).catch(() => undefined);
-          if (current?.guard_id === guard.guard_id) {
-            await unlink(guardPath).catch(() => undefined);
-          }
         }
       };
     }
@@ -870,30 +867,6 @@ async function removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
   throw transitionGuardBusyError(scope, key, transition);
 }
 
-async function unlinkIdempotencyTransitionGuardForRollbackRecovery(
-  guardPath: string,
-  evidenceRef: string
-): Promise<void> {
-  try {
-    await unlink(guardPath);
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return;
-    }
-
-    throw new TaskServiceError({
-      code: "workspace_path_not_safe",
-      status: 500,
-      category: "workspace_error",
-      message: "Failed to remove idempotency transition guard during rollback recovery.",
-      userMessage: "The idempotency record could not be recovered safely.",
-      evidenceRefs: [evidenceRef],
-      retryable: false,
-      recommendedNextActions: ["Inspect the idempotency transition guard before retrying."]
-    });
-  }
-}
-
 async function unlinkObservedIdempotencyTransitionGuardForRollbackRecovery(
   workspaceRoot: string,
   scope: IdempotencyScope,
@@ -913,6 +886,8 @@ async function unlinkObservedIdempotencyTransitionGuardForRollbackRecovery(
     throw transitionGuardBusyError(scope, key, transition);
   }
 
+  // Lock order is semantic cleanup lock first, then guard-path authority.
+  // Cleanup-lock records themselves are removed under their own path authority only.
   try {
     if (await unlinkObservedIdempotencyTransitionGuard(guardPath, evidenceRef, observed)) {
       return;
@@ -938,20 +913,12 @@ async function unlinkObservedIdempotencyTransitionGuard(
   evidenceRef: string,
   observed: IdempotencyTransitionGuard
 ): Promise<boolean> {
-  const current = await readJsonRecord(
+  const result = await conditionalDeleteIdempotencyTransitionGuard(
     guardPath,
     evidenceRef,
-    IdempotencyTransitionGuardSchema
+    observed
   );
-  if (!current) {
-    return true;
-  }
-  if (!isSameIdempotencyTransitionGuard(current, observed)) {
-    return false;
-  }
-
-  await unlinkIdempotencyTransitionGuardForRollbackRecovery(guardPath, evidenceRef);
-  return true;
+  return result.status !== "condition_not_met";
 }
 
 async function unlinkRecoverableMalformedIdempotencyTransitionGuardForRollbackRecovery(
@@ -973,22 +940,14 @@ async function unlinkRecoverableMalformedIdempotencyTransitionGuardForRollbackRe
   }
 
   try {
-    try {
-      const current = await readJsonRecord(
-        guardPath,
-        evidenceRef,
-        IdempotencyTransitionGuardSchema
-      );
-      if (!current) {
-        return;
-      }
-    } catch (error) {
-      if (isRecoverableTransitionGuardRecordError(error)) {
-        await unlinkIdempotencyTransitionGuardForRollbackRecovery(guardPath, evidenceRef);
-        return;
-      }
-
-      throw error;
+    const result = await conditionalDeleteJsonRecord(
+      guardPath,
+      evidenceRef,
+      IdempotencyTransitionGuardSchema,
+      { kind: "malformed" }
+    );
+    if (result.status !== "condition_not_met") {
+      return;
     }
   } finally {
     await cleanupLock.release();
@@ -1040,14 +999,11 @@ async function acquireIdempotencyTransitionCleanupLock(
       return {
         status: "acquired",
         release: async () => {
-          const current = await readJsonRecord(
+          await conditionalDeleteIdempotencyTransitionGuard(
             cleanupLockPath,
             evidenceRef,
-            IdempotencyTransitionGuardSchema
+            cleanupLock
           ).catch(() => undefined);
-          if (current && isSameIdempotencyTransitionGuard(current, cleanupLock)) {
-            await unlink(cleanupLockPath).catch(() => undefined);
-          }
         }
       };
     }
@@ -1100,6 +1056,23 @@ function isSameIdempotencyTransitionGuard(
     left.owner_pid === right.owner_pid &&
     left.acquired_at_ms === right.acquired_at_ms &&
     left.acquired_at === right.acquired_at
+  );
+}
+
+async function conditionalDeleteIdempotencyTransitionGuard(
+  path: string,
+  evidenceRef: string,
+  expected: IdempotencyTransitionGuard
+) {
+  return await conditionalDeleteJsonRecord(
+    path,
+    evidenceRef,
+    IdempotencyTransitionGuardSchema,
+    {
+      kind: "record",
+      expected,
+      matches: isSameIdempotencyTransitionGuard
+    }
   );
 }
 

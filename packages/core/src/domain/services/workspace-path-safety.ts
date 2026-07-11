@@ -1,4 +1,4 @@
-import { lstat } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
 export type WorkspacePathBoundary = "workspace" | "allowed_readonly";
@@ -124,6 +124,59 @@ export async function isSafeExistingDirectoryPath(path: string): Promise<boolean
   }
 
   return true;
+}
+
+/**
+ * Returns one filesystem-aware name for a path without treating that name as a
+ * safety decision. Existing leaves use their physical path. Missing leaves are
+ * anchored at the nearest existing physical directory so case aliases of the
+ * same workspace converge while separate workspaces remain isolated.
+ */
+export async function physicalCanonicalPath(path: string, evidenceRef: string): Promise<string> {
+  const targetPath = resolve(path);
+  const missingSegments: string[] = [];
+  let candidatePath = targetPath;
+
+  for (;;) {
+    let entry: FileStat | undefined;
+    try {
+      entry = await lstat(candidatePath);
+    } catch (error) {
+      if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
+        throw new WorkspacePathSafetyError(
+          "Workspace path cannot be canonicalized safely.",
+          evidenceRef
+        );
+      }
+    }
+
+    if (entry) {
+      if (missingSegments.length > 0 && !entry.isDirectory()) {
+        throw new WorkspacePathSafetyError(
+          "Workspace path crosses a non-directory ancestor.",
+          evidenceRef
+        );
+      }
+      try {
+        return join(await realpath(candidatePath), ...missingSegments.reverse());
+      } catch {
+        throw new WorkspacePathSafetyError(
+          "Workspace path cannot be canonicalized safely.",
+          evidenceRef
+        );
+      }
+    }
+
+    const parentPath = parse(candidatePath).dir;
+    if (parentPath === candidatePath) {
+      throw new WorkspacePathSafetyError(
+        "Workspace path has no canonical physical ancestor.",
+        evidenceRef
+      );
+    }
+    missingSegments.push(parse(candidatePath).base);
+    candidatePath = parentPath;
+  }
 }
 
 function matchingBoundary(
