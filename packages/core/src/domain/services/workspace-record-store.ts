@@ -229,6 +229,7 @@ export interface WorkspaceRecordCompensationTestHooks {
     input: Readonly<{
       path: string;
       identity: WorkspaceRecordPhysicalIdentity;
+      fd: number;
     }>
   ) => Promise<void> | void;
   beforeOwnedPathIsolation?: (
@@ -1310,7 +1311,7 @@ async function writeOwnedTemporaryRecordFile(
     }
     temporaryIdentity = { dev: entry.dev, ino: entry.ino };
     await compensationTestHookStorage.getStore()?.beforeOwnedTemporaryRecordWrite?.(
-      Object.freeze({ path: temporaryPath, identity: temporaryIdentity })
+      Object.freeze({ path: temporaryPath, identity: temporaryIdentity, fd: temporaryFile.fd })
     );
     await temporaryFile.writeFile(recordText, "utf8");
     return { identity: temporaryIdentity, file: temporaryFile, handleClosed: false };
@@ -1333,11 +1334,6 @@ async function writeOwnedTemporaryRecordFile(
       } catch (error) {
         cleanupErrors.push(error);
       }
-      try {
-        await temporaryFile.close();
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
     }
     if (temporaryIdentity && observedBytes) {
       try {
@@ -1347,6 +1343,13 @@ async function writeOwnedTemporaryRecordFile(
           observedBytes,
           evidenceRef
         );
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (temporaryFile) {
+      try {
+        await temporaryFile.close();
       } catch (error) {
         cleanupErrors.push(error);
       }
