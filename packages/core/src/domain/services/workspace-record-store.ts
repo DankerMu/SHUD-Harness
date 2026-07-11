@@ -40,6 +40,24 @@ interface OwnedTemporaryRecord {
   file: RecordFileHandle;
 }
 
+interface OwnedIsolatedGeneration {
+  namespacePath: string;
+  path: string;
+  identity: OwnedTemporaryRecordIdentity;
+}
+
+interface HardlinkPublicationOwnedResources {
+  temporaryPath: string;
+  canonicalPath: string;
+  expectedBytes: Buffer;
+  temporaryRecord?: OwnedTemporaryRecord;
+  temporaryIdentity?: OwnedTemporaryRecordIdentity;
+  isolatedGeneration?: OwnedIsolatedGeneration;
+  canonicalIdentity?: OwnedTemporaryRecordIdentity;
+  handleClosed: boolean;
+  compensationErrors: unknown[];
+}
+
 type WorkspaceRecordAuthorityOperation = "read" | "rename" | "hardlink" | "delete";
 
 interface RecordAuthorityWaiter {
@@ -47,6 +65,8 @@ interface RecordAuthorityWaiter {
   reject: (error: unknown) => void;
   timeout: ReturnType<typeof setTimeout>;
   active: boolean;
+  deadline: number;
+  evidenceRef: string;
 }
 
 interface RecordAuthorityCleanupWaiter {
@@ -54,6 +74,8 @@ interface RecordAuthorityCleanupWaiter {
   reject: (error: unknown) => void;
   timeout: ReturnType<typeof setTimeout>;
   active: boolean;
+  deadline: number;
+  evidenceRef: string;
 }
 
 interface RecordAuthorityMutex {
@@ -89,12 +111,18 @@ export interface WorkspaceRecordPublicationHooks {
   afterCanonicalLink?: (input: WorkspaceRecordPublicationHookInput) => Promise<void> | void;
   beforeTemporaryUnlink?: (input: WorkspaceRecordTemporaryCleanupHookInput) => Promise<void> | void;
   afterTemporaryFileWritten?: (input: WorkspaceRecordPublicationHookInput) => Promise<void> | void;
+  afterTemporaryFileClosed?: (
+    input: WorkspaceRecordPublicationHookInput
+  ) => Promise<void> | void;
   afterAuthorityLeaseAcquired?: (
     input: Readonly<{ operation: WorkspaceRecordAuthorityOperation }>
   ) => Promise<void> | void;
   onAuthorityContention?: (
-    input: Readonly<{ operation: WorkspaceRecordAuthorityOperation }>
+    input: Readonly<{ operation: WorkspaceRecordAuthorityOperation; deadline: number }>
   ) => void;
+  beforePublishedRecordFinalValidation?: (
+    input: Readonly<{ path: string }>
+  ) => Promise<void> | void;
   beforeCleanupPermitIdentityResolution?: (
     input: Readonly<{ path: string }>
   ) => Promise<void> | void;
@@ -712,6 +740,7 @@ export async function writeJsonRecord<T>(
   let authorityLease: RecordAuthorityLease | undefined;
   let published = false;
   let operationError: unknown;
+  const compensationErrors: unknown[] = [];
   const hooks = publicationHookStorage.getStore();
   try {
     try {
@@ -750,8 +779,13 @@ export async function writeJsonRecord<T>(
     if (temporaryRecord) {
       try {
         await temporaryRecord.file.close();
+        await hooks?.afterTemporaryFileClosed?.({
+          canonicalPath: recordPath,
+          temporaryPath
+        });
       } catch (cleanupError) {
-        operationError ??= cleanupError;
+        if (operationError === undefined) operationError = cleanupError;
+        else compensationErrors.push(cleanupError);
       }
       if (!published && (await recordPathEntryExists(temporaryPath, evidenceRef))) {
         try {
@@ -765,18 +799,20 @@ export async function writeJsonRecord<T>(
             "rename_temp_cleanup"
           );
         } catch (cleanupError) {
-          operationError ??= cleanupError;
+          if (operationError === undefined) operationError = cleanupError;
+          else compensationErrors.push(cleanupError);
         }
       }
     }
     if (operationError !== undefined) {
-      if (operationError instanceof TaskServiceError) throw operationError;
+      const settledError = preserveWorkspacePrimaryError(operationError, compensationErrors);
+      if (settledError instanceof TaskServiceError) throw settledError;
       throw serviceWorkspaceError(
         "workspace_path_not_safe",
         "Failed to persist workspace record.",
         "The workspace record could not be written safely.",
         [evidenceRef],
-        operationError
+        settledError
       );
     }
   } finally {
@@ -882,10 +918,17 @@ async function createJsonRecordIfAbsentInternal<T>(
 
   const temporaryPath = join(directoryPath, `.${fileName}-${process.pid}-${randomUUID()}.tmp`);
   const hooks = publicationHookStorage.getStore();
+  const ownedResources: HardlinkPublicationOwnedResources = {
+    temporaryPath,
+    canonicalPath: recordPath,
+    expectedBytes: Buffer.from(recordText, "utf8"),
+    handleClosed: false,
+    compensationErrors: []
+  };
   let authorityLease: RecordAuthorityLease | undefined;
-  let temporaryIdentity: OwnedTemporaryRecordIdentity | undefined;
   let publicationOutcome: "published" | "exists" | undefined;
   let operationError: unknown;
+  const compensationErrors = ownedResources.compensationErrors;
   let cleanupPermit: WorkspaceRecordCleanupPermit | undefined;
   try {
     try {
@@ -907,21 +950,25 @@ async function createJsonRecordIfAbsentInternal<T>(
       if (publicationOutcome === "exists") {
         return { status: "exists" };
       }
-      const temporaryRecord = await writeTemporaryRecordFile(
+      ownedResources.temporaryRecord = await writeTemporaryRecordFile(
         temporaryPath,
         recordText,
         evidenceRef
       );
-      temporaryIdentity = temporaryRecord.identity;
+      ownedResources.temporaryIdentity = ownedResources.temporaryRecord.identity;
       await hooks?.afterTemporaryFileWritten?.({
         canonicalPath: recordPath,
         temporaryPath
       });
-      await temporaryRecord.file.close();
-      await assertOwnedTemporaryRecordPath(temporaryPath, temporaryIdentity, evidenceRef);
+      await assertOwnedTemporaryRecordPath(
+        temporaryPath,
+        ownedResources.temporaryIdentity,
+        evidenceRef
+      );
       try {
         await link(temporaryPath, recordPath);
         publicationOutcome = "published";
+        ownedResources.canonicalIdentity = ownedResources.temporaryIdentity;
         await hooks?.afterCanonicalLink?.({
           canonicalPath: recordPath,
           temporaryPath
@@ -943,19 +990,30 @@ async function createJsonRecordIfAbsentInternal<T>(
       operationError = error;
     }
 
-    if (temporaryIdentity) {
+    if (ownedResources.temporaryRecord && !ownedResources.handleClosed) {
+      try {
+        await closeOwnedTemporaryRecord(ownedResources, hooks);
+      } catch (cleanupError) {
+        if (operationError === undefined) operationError = cleanupError;
+        else compensationErrors.push(cleanupError);
+      }
+    }
+
+    if (ownedResources.temporaryIdentity) {
       try {
         await removeOwnedPublicationTemporaryPath(
           temporaryPath,
-          temporaryIdentity,
-          Buffer.from(recordText, "utf8"),
+          ownedResources.temporaryIdentity,
+          ownedResources.expectedBytes,
           recordPath,
           evidenceRef,
           hooks,
-          "hardlink_temp_cleanup"
+          "hardlink_temp_cleanup",
+          ownedResources
         );
       } catch (cleanupError) {
-        operationError ??= cleanupError;
+        if (operationError === undefined) operationError = cleanupError;
+        else compensationErrors.push(cleanupError);
       }
     }
 
@@ -966,42 +1024,65 @@ async function createJsonRecordIfAbsentInternal<T>(
           directoryPath,
           recordText,
           evidenceRef,
-          temporaryIdentity
+          ownedResources.canonicalIdentity,
+          hooks
         );
       } catch (error) {
         operationError = error;
       }
     }
 
-    if (publicationOutcome === "published" && operationError !== undefined && temporaryIdentity) {
-      const compensationErrors: unknown[] = [];
+    if (
+      publicationOutcome === "published" &&
+      operationError !== undefined &&
+      ownedResources.canonicalIdentity
+    ) {
       try {
         await rollbackPublishedRecordClaim(
           recordPath,
-          temporaryIdentity,
-          Buffer.from(recordText, "utf8"),
+          ownedResources.canonicalIdentity,
+          ownedResources.expectedBytes,
           evidenceRef
         );
       } catch (error) {
         compensationErrors.push(error);
       }
+      if (await recordPathEntryExists(temporaryPath, evidenceRef)) {
+        try {
+          await removeOwnedPathWithoutHooks(
+            temporaryPath,
+            ownedResources.temporaryIdentity ?? ownedResources.canonicalIdentity,
+            ownedResources.expectedBytes,
+            evidenceRef
+          );
+        } catch (error) {
+          compensationErrors.push(error);
+        }
+      }
+      publicationOutcome = undefined;
+    }
+
+    if (
+      publicationOutcome !== "published" &&
+      operationError !== undefined &&
+      ownedResources.temporaryIdentity &&
+      (await recordPathEntryExists(temporaryPath, evidenceRef))
+    ) {
       try {
         await removeOwnedPathWithoutHooks(
           temporaryPath,
-          temporaryIdentity,
-          Buffer.from(recordText, "utf8"),
+          ownedResources.temporaryIdentity,
+          ownedResources.expectedBytes,
           evidenceRef
         );
       } catch (error) {
         compensationErrors.push(error);
       }
-      operationError = preserveWorkspacePrimaryError(operationError, compensationErrors);
-      publicationOutcome = undefined;
     }
 
     if (operationError !== undefined) {
       cancelRecordAuthorityCleanupPermit(cleanupPermit);
-      throw operationError;
+      throw preserveWorkspacePrimaryError(operationError, compensationErrors);
     }
 
     if (publicationOutcome === "exists") {
@@ -1017,6 +1098,25 @@ async function createJsonRecordIfAbsentInternal<T>(
       : { status: "created", record: data };
   } finally {
     authorityLease?.release();
+  }
+}
+
+async function closeOwnedTemporaryRecord(
+  ownedResources: HardlinkPublicationOwnedResources,
+  hooks: WorkspaceRecordPublicationHooks | undefined
+): Promise<void> {
+  const temporaryRecord = ownedResources.temporaryRecord;
+  if (!temporaryRecord || ownedResources.handleClosed) return;
+  try {
+    await temporaryRecord.file.close();
+    ownedResources.handleClosed = true;
+  } finally {
+    if (ownedResources.handleClosed) {
+      await hooks?.afterTemporaryFileClosed?.({
+        canonicalPath: ownedResources.canonicalPath,
+        temporaryPath: ownedResources.temporaryPath
+      });
+    }
   }
 }
 
@@ -1040,7 +1140,7 @@ async function writeTemporaryRecordFile(
   let temporaryFile: RecordFileHandle | undefined;
   let temporaryIdentity: OwnedTemporaryRecordIdentity | undefined;
   let shouldCleanup = false;
-  let completed = false;
+  let operationError: unknown;
   try {
     temporaryFile = await open(
       temporaryPath,
@@ -1053,37 +1153,46 @@ async function writeTemporaryRecordFile(
     }
     temporaryIdentity = { dev: entry.dev, ino: entry.ino };
     await temporaryFile.writeFile(recordText, "utf8");
-    completed = true;
     return { identity: temporaryIdentity, file: temporaryFile };
   } catch (error) {
-    throw serviceWorkspaceError(
+    operationError = serviceWorkspaceError(
       "workspace_path_not_safe",
       "Failed to write workspace record temporary file.",
       "The workspace record could not be written safely.",
       [evidenceRef],
       error
     );
-  } finally {
-    if (shouldCleanup && !completed) {
-      let observedBytes: Buffer | undefined;
-      if (temporaryFile) {
-        try {
-          observedBytes = await readBoundedOpenFileBytes(temporaryFile);
-        } catch {
-          observedBytes = undefined;
-        }
+  }
+
+  const cleanupErrors: unknown[] = [];
+  if (shouldCleanup) {
+    let observedBytes: Buffer | undefined;
+    if (temporaryFile) {
+      try {
+        observedBytes = await readBoundedOpenFileBytes(temporaryFile);
+      } catch (error) {
+        cleanupErrors.push(error);
       }
-      await temporaryFile?.close().catch(() => undefined);
-      if (temporaryIdentity && observedBytes) {
+      try {
+        await temporaryFile.close();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (temporaryIdentity && observedBytes) {
+      try {
         await conditionalUnlinkOwnedPath(
           temporaryPath,
           temporaryIdentity,
           observedBytes,
           evidenceRef
-        ).catch(() => undefined);
+        );
+      } catch (error) {
+        cleanupErrors.push(error);
       }
     }
   }
+  throw preserveWorkspacePrimaryError(operationError, cleanupErrors);
 }
 
 async function conditionalUnlinkOwnedPath(
@@ -1150,10 +1259,13 @@ async function removeOwnedPublicationTemporaryPath(
   recordPath: string,
   evidenceRef: string,
   hooks: WorkspaceRecordPublicationHooks | undefined,
-  operation: "rename_temp_cleanup" | "hardlink_temp_cleanup"
+  operation: "rename_temp_cleanup" | "hardlink_temp_cleanup",
+  ownedResources?: HardlinkPublicationOwnedResources
 ): Promise<void> {
+  const attemptErrors: unknown[] = [];
   for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
     let mutationNamespace: string | undefined;
+    let namespaceCleanupAttempted = false;
     try {
       await hooks?.beforeTemporaryUnlink?.({
         canonicalPath: recordPath,
@@ -1180,6 +1292,13 @@ async function removeOwnedPublicationTemporaryPath(
       ) {
         throw publicationStateError(evidenceRef);
       }
+      if (ownedResources) {
+        ownedResources.isolatedGeneration = {
+          namespacePath: mutationNamespace,
+          path: isolatedPath,
+          identity: isolatedIdentity
+        };
+      }
       await hooks?.beforeAuthorityOwnedUnlink?.(
         Object.freeze({ path: temporaryPath, operation })
       );
@@ -1193,26 +1312,57 @@ async function removeOwnedPublicationTemporaryPath(
       ) {
         throw publicationStateError(evidenceRef);
       }
-      if (await recordPathEntryExists(temporaryPath, evidenceRef)) {
+      const publicReplacementExists = await recordPathEntryExists(
+        temporaryPath,
+        evidenceRef
+      );
+      await unlink(isolatedPath);
+      namespaceCleanupAttempted = true;
+      await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
+      if (ownedResources) ownedResources.isolatedGeneration = undefined;
+      if (publicReplacementExists) {
         throw publicationStateError(evidenceRef);
       }
-      await unlink(isolatedPath);
-      await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
       return;
     } catch (error) {
+      const cleanupErrors: unknown[] = [];
       if (mutationNamespace) {
         const isolatedPath = join(mutationNamespace, "generation");
         if (await recordPathEntryExists(isolatedPath, evidenceRef)) {
-          await restoreOwnedIsolatedPath(isolatedPath, temporaryPath, evidenceRef);
+          try {
+            if (
+              await ownedGenerationBytesEqual(
+                isolatedPath,
+                temporaryIdentity,
+                expectedBytes,
+                evidenceRef
+              )
+            ) {
+              await unlink(isolatedPath);
+            } else {
+              await restoreOwnedIsolatedPath(isolatedPath, temporaryPath, evidenceRef);
+            }
+          } catch (cleanupError) {
+            cleanupErrors.push(cleanupError);
+          }
         }
-        await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
+        if (!namespaceCleanupAttempted) {
+          try {
+            await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
+            if (ownedResources) ownedResources.isolatedGeneration = undefined;
+          } catch (cleanupError) {
+            cleanupErrors.push(cleanupError);
+          }
+        }
       }
-      if (hasErrorCode(error, "ENOENT")) {
+      const settledError = preserveWorkspacePrimaryError(error, cleanupErrors);
+      if (hasErrorCode(error, "ENOENT") && cleanupErrors.length === 0) {
         return;
       }
-      if (error instanceof TaskServiceError) {
-        throw error;
+      if (settledError instanceof TaskServiceError) {
+        throw settledError;
       }
+      attemptErrors.push(settledError);
       if (attempt < RECORD_TEMP_CLEANUP_ATTEMPTS) {
         await sleep(RECORD_TEMP_CLEANUP_RETRY_MS);
         continue;
@@ -1220,7 +1370,10 @@ async function removeOwnedPublicationTemporaryPath(
     }
   }
 
-  throw publicationTemporaryCleanupError(evidenceRef);
+  throw preserveWorkspacePrimaryError(
+    publicationTemporaryCleanupError(evidenceRef),
+    attemptErrors
+  );
 }
 
 async function rollbackPublishedRecordClaim(
@@ -1240,12 +1393,18 @@ async function removeOwnedPathWithoutHooks(
 ): Promise<void> {
   const mutationNamespace = await createAuthorityOwnedMutationNamespace(path, evidenceRef);
   const isolatedPath = join(mutationNamespace, "generation");
+  let namespaceCleanupAttempted = false;
   try {
     await rename(path, isolatedPath);
   } catch (error) {
-    await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
-    if (hasErrorCode(error, "ENOENT")) return;
-    throw error;
+    const cleanupErrors: unknown[] = [];
+    try {
+      await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    if (hasErrorCode(error, "ENOENT") && cleanupErrors.length === 0) return;
+    throw preserveWorkspacePrimaryError(error, cleanupErrors);
   }
 
   try {
@@ -1264,13 +1423,25 @@ async function removeOwnedPathWithoutHooks(
       throw publicationStateError(evidenceRef);
     }
     await unlink(isolatedPath);
+    namespaceCleanupAttempted = true;
     await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
   } catch (error) {
+    const cleanupErrors: unknown[] = [];
     if (await recordPathEntryExists(isolatedPath, evidenceRef)) {
-      await restoreOwnedIsolatedPath(isolatedPath, path, evidenceRef);
+      try {
+        await restoreOwnedIsolatedPath(isolatedPath, path, evidenceRef);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
     }
-    await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
-    throw error;
+    if (!namespaceCleanupAttempted) {
+      try {
+        await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    throw preserveWorkspacePrimaryError(error, cleanupErrors);
   }
 }
 
@@ -1342,7 +1513,6 @@ function preserveWorkspacePrimaryError(primary: unknown, compensations: unknown[
     priorCause === undefined ? compensations : [priorCause, ...compensations],
     "Workspace record publication compensation failed."
   );
-  if (trySetErrorCause(primary, aggregateCause)) return primary;
   return cloneErrorWithCause(primary, aggregateCause);
 }
 
@@ -1413,7 +1583,8 @@ async function assertPublishedRecordAuthority(
   directoryPath: string,
   recordText: string,
   evidenceRef: string,
-  expectedIdentity?: OwnedTemporaryRecordIdentity
+  expectedIdentity?: OwnedTemporaryRecordIdentity,
+  hooks?: WorkspaceRecordPublicationHooks
 ): Promise<void> {
   if (!(await isSafeExistingDirectoryPath(directoryPath))) {
     throw publicationStateError(evidenceRef);
@@ -1422,17 +1593,16 @@ async function assertPublishedRecordAuthority(
   const published = await readDurableSingleLinkFile({
     path: recordPath,
     maxBytes: MAX_SERVICE_RECORD_BYTES,
-    validateParentPath: async () => await isSafeExistingDirectoryPath(directoryPath)
+    validateParentPath: async () => await isSafeExistingDirectoryPath(directoryPath),
+    beforeFinalValidation: hooks?.beforePublishedRecordFinalValidation
   });
   if (published.status !== "read" || !published.bytes.equals(Buffer.from(recordText, "utf8"))) {
     throw publicationStateError(evidenceRef);
   }
   if (expectedIdentity) {
-    const publishedIdentity = await readRecordPathIdentity(recordPath, evidenceRef);
     if (
-      !publishedIdentity ||
-      publishedIdentity.dev !== expectedIdentity.dev ||
-      publishedIdentity.ino !== expectedIdentity.ino
+      published.identity.dev !== BigInt(expectedIdentity.dev) ||
+      published.identity.ino !== BigInt(expectedIdentity.ino)
     ) {
       throw publicationStateError(evidenceRef);
     }
@@ -1533,13 +1703,17 @@ async function acquireRecordAuthority(
           rejectLease(authorityWaitError(evidenceRef));
         }
       }, waitMs),
-      active: true
+      active: true,
+      deadline: acquisitionDeadline,
+      evidenceRef
     };
     existing.waiters.add(waiter);
   });
 
   try {
-    hooks?.onAuthorityContention?.(Object.freeze({ operation }));
+    hooks?.onAuthorityContention?.(
+      Object.freeze({ operation, deadline: acquisitionDeadline })
+    );
   } catch (error) {
     if (cancelRecordAuthorityWaiter(identity, existing, waiter)) {
       waiter.reject(error);
@@ -1572,7 +1746,9 @@ async function acquireRecordAuthorityWithCleanupPermit(
       throw authorityWaitError(evidenceRef);
     }
     if (state.mutex.ownerActive) {
-      hooks?.onAuthorityContention?.(Object.freeze({ operation: "delete" }));
+      hooks?.onAuthorityContention?.(
+        Object.freeze({ operation: "delete", deadline: acquisitionDeadline })
+      );
     }
   } catch (error) {
     cancelRecordAuthorityCleanupPermit(permit);
@@ -1598,7 +1774,9 @@ async function acquireRecordAuthorityWithCleanupPermit(
           rejectLease(authorityWaitError(evidenceRef));
         }
       }, waitMs),
-      active: true
+      active: true,
+      deadline: acquisitionDeadline,
+      evidenceRef
     };
     state.mutex.cleanupWaiters.add(waiter);
   });
@@ -1633,27 +1811,49 @@ function createRecordAuthorityLease(
       if (consumesReservation) {
         releaseRecordAuthorityReservation(identity, mutex);
       }
-      const cleanupNext = mutex.cleanupWaiters.values().next().value as
-        RecordAuthorityCleanupWaiter | undefined;
-      if (cleanupNext) {
-        mutex.cleanupWaiters.delete(cleanupNext);
-        cleanupNext.active = false;
-        clearTimeout(cleanupNext.timeout);
-        cleanupNext.resolve(createRecordAuthorityLease(identity, mutex, false));
-        return;
-      }
-      const next = mutex.waiters.values().next().value as RecordAuthorityWaiter | undefined;
-      if (next) {
-        mutex.waiters.delete(next);
-        next.active = false;
-        clearTimeout(next.timeout);
-        next.resolve(createRecordAuthorityLease(identity, mutex));
+      if (handoffRecordAuthorityLease(identity, mutex)) {
         return;
       }
       mutex.ownerActive = false;
       removeUnusedRecordAuthorityMutex(identity, mutex);
     }
   };
+}
+
+function handoffRecordAuthorityLease(
+  identity: string,
+  mutex: RecordAuthorityMutex
+): boolean {
+  for (;;) {
+    const cleanupNext = mutex.cleanupWaiters.values().next().value as
+      | RecordAuthorityCleanupWaiter
+      | undefined;
+    if (!cleanupNext) break;
+    mutex.cleanupWaiters.delete(cleanupNext);
+    cleanupNext.active = false;
+    clearTimeout(cleanupNext.timeout);
+    if (Date.now() >= cleanupNext.deadline) {
+      cleanupNext.reject(authorityWaitError(cleanupNext.evidenceRef));
+      continue;
+    }
+    cleanupNext.resolve(createRecordAuthorityLease(identity, mutex, false));
+    return true;
+  }
+
+  for (;;) {
+    const next = mutex.waiters.values().next().value as RecordAuthorityWaiter | undefined;
+    if (!next) return false;
+    mutex.waiters.delete(next);
+    next.active = false;
+    clearTimeout(next.timeout);
+    if (Date.now() >= next.deadline) {
+      releaseRecordAuthorityReservation(identity, mutex);
+      next.reject(authorityWaitError(next.evidenceRef));
+      continue;
+    }
+    next.resolve(createRecordAuthorityLease(identity, mutex));
+    return true;
+  }
 }
 
 function cancelRecordAuthorityCleanupWaiter(

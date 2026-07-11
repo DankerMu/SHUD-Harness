@@ -1,10 +1,21 @@
-import { constants } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, type FileHandle } from "node:fs/promises";
 
 const DURABLE_READ_CHUNK_BYTES = 64 * 1024;
 const DURABLE_READ_OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
-type DurableFileStat = Awaited<ReturnType<typeof lstat>>;
+type DurableFileStat = BigIntStats;
+
+export interface DurableSingleLinkObservation {
+  bytes: Buffer;
+  identity: Readonly<{ dev: bigint; ino: bigint }>;
+  linkCount: bigint;
+  size: bigint;
+  mutation: Readonly<{
+    ctimeNs: bigint;
+    mtimeNs: bigint;
+  }>;
+}
 
 export type DurableSingleLinkReadFailureReason =
   | "inspect_failed"
@@ -18,7 +29,7 @@ export type DurableSingleLinkReadFailureReason =
   | "changed_during_read";
 
 export type DurableSingleLinkReadResult =
-  | { status: "read"; bytes: Buffer }
+  | ({ status: "read" } & DurableSingleLinkObservation)
   | { status: "missing"; reason: "missing" }
   | {
       status: "invalid";
@@ -30,6 +41,7 @@ export interface ReadDurableSingleLinkFileOptions {
   path: string;
   maxBytes: number;
   validateParentPath?: () => Promise<boolean> | boolean;
+  beforeFinalValidation?: (input: Readonly<{ path: string }>) => Promise<void> | void;
 }
 
 export async function readDurableSingleLinkFile(
@@ -39,7 +51,7 @@ export async function readDurableSingleLinkFile(
 
   let pathEntry: DurableFileStat;
   try {
-    pathEntry = await lstat(options.path);
+    pathEntry = await lstat(options.path, { bigint: true });
   } catch (error) {
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return { status: "missing", reason: "missing" };
@@ -72,7 +84,7 @@ export async function readDurableSingleLinkFile(
 
     let beforeRead: DurableFileStat;
     try {
-      beforeRead = await file.stat();
+      beforeRead = await file.stat({ bigint: true });
     } catch (error) {
       return invalidRead("inspect_failed", error);
     }
@@ -91,9 +103,15 @@ export async function readDurableSingleLinkFile(
       return invalidRead("read_failed", error);
     }
 
+    try {
+      await options.beforeFinalValidation?.(Object.freeze({ path: options.path }));
+    } catch (error) {
+      return invalidRead("changed_during_read", error);
+    }
+
     let afterRead: DurableFileStat;
     try {
-      afterRead = await file.stat();
+      afterRead = await file.stat({ bigint: true });
     } catch (error) {
       return invalidRead("inspect_failed", error);
     }
@@ -108,9 +126,27 @@ export async function readDurableSingleLinkFile(
       return invalidRead("identity_changed");
     }
     if (
+      !sameMutationMetadata(beforeRead, afterRead) ||
       pathEntry.size !== beforeRead.size ||
       beforeRead.size !== afterRead.size ||
-      bytes.length !== afterRead.size
+      BigInt(bytes.length) !== afterRead.size
+    ) {
+      return invalidRead("changed_during_read");
+    }
+
+    let finalPathEntry: DurableFileStat;
+    try {
+      finalPathEntry = await lstat(options.path, { bigint: true });
+    } catch (error) {
+      return invalidRead("identity_changed", error);
+    }
+    const finalPathFailure = validateBoundedSingleLinkFile(finalPathEntry, options.maxBytes);
+    if (finalPathFailure) {
+      return invalidRead(finalPathFailure);
+    }
+    if (
+      !sameFileIdentity(afterRead, finalPathEntry) ||
+      !sameMutationMetadata(afterRead, finalPathEntry)
     ) {
       return invalidRead("changed_during_read");
     }
@@ -120,7 +156,14 @@ export async function readDurableSingleLinkFile(
       return parentAfterRead;
     }
 
-    return { status: "read", bytes };
+    return {
+      status: "read",
+      bytes,
+      identity: Object.freeze({ dev: afterRead.dev, ino: afterRead.ino }),
+      linkCount: afterRead.nlink,
+      size: afterRead.size,
+      mutation: Object.freeze({ ctimeNs: afterRead.ctimeNs, mtimeNs: afterRead.mtimeNs })
+    };
   } finally {
     await file.close().catch(() => undefined);
   }
@@ -133,10 +176,10 @@ function validateBoundedSingleLinkFile(
   if (!entry.isFile() || entry.isSymbolicLink()) {
     return "not_regular_file";
   }
-  if (entry.nlink !== 1) {
+  if (entry.nlink !== 1n) {
     return "multiple_links";
   }
-  if (entry.size > maxBytes) {
+  if (entry.size > BigInt(maxBytes)) {
     return "too_large";
   }
   return undefined;
@@ -145,7 +188,7 @@ function validateBoundedSingleLinkFile(
 async function readBoundedChunks(
   file: FileHandle,
   maxBytes: number,
-  checkedSize: number
+  checkedSize: bigint
 ): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let offset = 0;
@@ -157,7 +200,10 @@ async function readBoundedChunks(
     }
     const chunkSize =
       offset === 0
-        ? Math.max(1, Math.min(remaining, checkedSize + 1, DURABLE_READ_CHUNK_BYTES))
+        ? Math.max(
+            1,
+            Math.min(remaining, Number(checkedSize) + 1, DURABLE_READ_CHUNK_BYTES)
+          )
         : Math.min(remaining, DURABLE_READ_CHUNK_BYTES);
     const chunk = Buffer.allocUnsafe(chunkSize);
     const { bytesRead } = await file.read(chunk, 0, chunk.length, offset);
@@ -200,6 +246,15 @@ function invalidRead(
 
 function sameFileIdentity(left: DurableFileStat, right: DurableFileStat): boolean {
   return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameMutationMetadata(left: DurableFileStat, right: DurableFileStat): boolean {
+  return (
+    left.size === right.size &&
+    left.nlink === right.nlink &&
+    left.ctimeNs === right.ctimeNs &&
+    left.mtimeNs === right.mtimeNs
+  );
 }
 
 function assertTrustedMaxBytes(maxBytes: number): void {

@@ -5,6 +5,7 @@ import {
   link,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -58,6 +59,7 @@ import {
   physicalCanonicalPath,
   runWithWorkspacePathSafetyHooks
 } from "./workspace-path-safety";
+import { readDurableSingleLinkFile } from "./durable-single-link-reader";
 
 const tempRoots: string[] = [];
 
@@ -1009,6 +1011,7 @@ describe("idempotency, lock, and artifact services", () => {
       const intended = { ...record, holder: `intended-${writer}` };
       const replacementBytes = Buffer.from(`replacement-${writer}\n`);
       let temporaryPath = "";
+      let replacementIdentity: { dev: number; ino: number } | undefined;
 
       const error = await captureTaskServiceError(() =>
         runWithWorkspaceRecordPublicationHooks(
@@ -1020,6 +1023,8 @@ describe("idempotency, lock, and artifact services", () => {
               const expectedOperation = "hardlink_temp_cleanup";
               if (operation !== expectedOperation) return;
               await writeFile(path, replacementBytes, { flag: "wx" });
+              const replacement = await stat(path);
+              replacementIdentity = { dev: replacement.dev, ino: replacement.ino };
             }
           },
           () =>
@@ -1034,8 +1039,14 @@ describe("idempotency, lock, and artifact services", () => {
         )
       );
 
-      expect(error.code).toBe("record_malformed");
+      expect(error.code).toBe("workspace_path_not_safe");
       expect(await readFile(temporaryPath)).toEqual(replacementBytes);
+      expect(await stat(temporaryPath)).toMatchObject(replacementIdentity!);
+      expect(
+        (await readdir(join(workspaceRoot, "locks", record.scope))).some((name) =>
+          name.endsWith(".authority")
+        )
+      ).toBe(false);
     }
   });
 
@@ -1773,6 +1784,143 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await service.getLock("task", lockId)).toBeUndefined();
   }, 10_000);
 
+  test("expired ordinary waiter is rejected at handoff before its operation and the queue converges", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "expired-ordinary-handoff" };
+    const evidenceRef = "waiter.handoff.ordinary";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      ["waiter-handoff", "ordinary.json"],
+      evidenceRef
+    );
+    await writeJsonRecord(
+      workspaceRoot,
+      ["waiter-handoff"],
+      "ordinary.json",
+      record,
+      evidenceRef,
+      schema
+    );
+    const holderGate = createAsyncGate();
+    const holderAcquired = createSignal();
+    const contended = createSignal();
+    const holder = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterAuthorityLeaseAcquired: async () => {
+          holderAcquired.resolve();
+          await holderGate.wait;
+          throw new Error("ordinary holder released");
+        }
+      },
+      () => readJsonRecord(path, evidenceRef, schema)
+    ).catch(() => undefined);
+    await holderAcquired.promise;
+    let operationAdmissions = 0;
+    const deadline = Date.now() + 30;
+    const waiter = captureTaskServiceError(() =>
+      runWithWorkspaceRecordAuthorityDeadline(deadline, () =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            onAuthorityContention: () => contended.resolve(),
+            afterAuthorityLeaseAcquired: () => {
+              operationAdmissions += 1;
+            }
+          },
+          () => readJsonRecord(path, evidenceRef, schema)
+        )
+      )
+    );
+    await contended.promise;
+    while (Date.now() <= deadline) {}
+    holderGate.open();
+    await holder;
+
+    const error = await waiter;
+    expect(error.status).toBe(409);
+    expect(error.retryable).toBe(true);
+    expect(operationAdmissions).toBe(0);
+    expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(record);
+  });
+
+  test("expired cleanup waiter is rejected at handoff before mutation and the queue converges", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "expired-cleanup-handoff" };
+    const evidenceRef = "waiter.handoff.cleanup";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      ["waiter-handoff", "cleanup.json"],
+      evidenceRef
+    );
+    const created = await createJsonRecordIfAbsentWithCleanupPermit(
+      workspaceRoot,
+      ["waiter-handoff"],
+      "cleanup.json",
+      record,
+      evidenceRef,
+      schema
+    );
+    if (created.status !== "created") throw new Error("Expected cleanup waiter fixture.");
+    const holderGate = createAsyncGate();
+    const holderAcquired = createSignal();
+    const contended = createSignal();
+    const holder = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterAuthorityLeaseAcquired: async () => {
+          holderAcquired.resolve();
+          await holderGate.wait;
+          throw new Error("cleanup holder released");
+        }
+      },
+      () => readJsonRecord(path, evidenceRef, schema)
+    ).catch(() => undefined);
+    await holderAcquired.promise;
+    let mutationAdmissions = 0;
+    const deadline = Date.now() + 30;
+    const waiter = captureConditionalDeleteError(() =>
+      runWithWorkspaceRecordAuthorityDeadline(deadline, () =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            onAuthorityContention: () => contended.resolve(),
+            beforeConditionalDelete: () => {
+              mutationAdmissions += 1;
+            }
+          },
+          () => conditionalDeleteJsonRecordWithCleanupPermit(
+            created.cleanupPermit,
+            path,
+            evidenceRef,
+            schema,
+            {
+              kind: "record",
+              expected: record,
+              matches: (current, expected) => current.id === expected.id
+            }
+          )
+        )
+      )
+    );
+    await contended.promise;
+    while (Date.now() <= deadline) {}
+    holderGate.open();
+    await holder;
+
+    const error = await waiter;
+    expect(error.mutationPhase).toBe("pre_mutation");
+    expect(error.failureStage).toBe("permit_admission");
+    expect(error.cause).toBeInstanceOf(TaskServiceError);
+    expect((error.cause as TaskServiceError).status).toBe(409);
+    expect(mutationAdmissions).toBe(0);
+    expect(await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+      kind: "record",
+      expected: record,
+      matches: (current, expected) => current.id === expected.id
+    })).toEqual({ status: "deleted" });
+  });
+
   test("expired cleanup-permit identity resolution fails before mutation and compensates both transition paths", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1868,12 +2016,14 @@ describe("idempotency, lock, and artifact services", () => {
       const cleanupContended = createSignal();
       const guardContended = createSignal();
       let contentionPhases = 0;
+      const contentionDeadlines: number[] = [];
       const startedAt = Date.now();
       transition = captureTaskServiceError(() =>
         runWithWorkspaceRecordPublicationHooks(
           {
-            onAuthorityContention: ({ operation }) => {
+            onAuthorityContention: ({ operation, deadline }) => {
               expect(operation).toBe("hardlink");
+              contentionDeadlines.push(deadline);
               contentionPhases += 1;
               if (contentionPhases === 1) cleanupContended.resolve();
               if (contentionPhases === 2) guardContended.resolve();
@@ -1903,6 +2053,8 @@ describe("idempotency, lock, and artifact services", () => {
       expect(error.status).toBe(409);
       expect(error.retryable).toBe(true);
       expect(contentionPhases).toBe(2);
+      expect(contentionDeadlines).toHaveLength(2);
+      expect(contentionDeadlines[1]).toBe(contentionDeadlines[0]);
       expect(elapsedMs).toBeGreaterThanOrEqual(200);
       expect(elapsedMs).toBeLessThan(1_000);
       await expectPathMissing(guardPath);
@@ -2121,6 +2273,189 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("repeated pre-close publication failures explicitly close every temporary handle", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    let closeObservations = 0;
+    const observedTemporaryPaths: string[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      const record = { ...validLockRecord(), lock_id: `LOCK-pre-close-${index}` };
+      await expect(
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: ({ temporaryPath }) => {
+              observedTemporaryPaths.push(temporaryPath);
+              throw new TaskServiceError({
+                code: "workspace_path_not_safe",
+                status: 500,
+                category: "workspace_error",
+                message: `pre-close failure ${index}`,
+                userMessage: "Injected pre-close failure.",
+                evidenceRefs: [lockRecordEvidenceRef(record.scope, record.lock_id)],
+                recommendedNextActions: ["Inspect the fixture."]
+              });
+            },
+            afterTemporaryFileClosed: () => {
+              closeObservations += 1;
+            }
+          },
+          () => createJsonRecordIfAbsent(
+            workspaceRoot,
+            lockRecordDirectorySegments(record.scope),
+            lockRecordFileName(record.lock_id),
+            record,
+            lockRecordEvidenceRef(record.scope, record.lock_id),
+            LockRecordSchema
+          )
+        )
+      ).rejects.toBeInstanceOf(TaskServiceError);
+    }
+
+    expect(closeObservations).toBe(12);
+    for (const temporaryPath of observedTemporaryPaths) await expectPathMissing(temporaryPath);
+    expect((await readdir(join(workspaceRoot, "locks", "task"))).some(isOwnedRecordPath)).toBe(false);
+  });
+
+  test("immutable primary aggregates each close-safe cleanup failure once and removes owned residue", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const record = { ...validLockRecord(), lock_id: "LOCK-primary-cleanup-aggregate" };
+    const evidenceRef = lockRecordEvidenceRef(record.scope, record.lock_id);
+    const priorCause = new Error("combined prior cause");
+    const primary = new TaskServiceError({
+      code: "record_schema_error",
+      status: 400,
+      category: "schema_error",
+      message: "combined immutable primary",
+      userMessage: "Combined immutable primary.",
+      evidenceRefs: [evidenceRef],
+      recommendedNextActions: ["Inspect the fixture."]
+    });
+    primary.cause = priorCause;
+    Object.freeze(primary);
+    const cleanupAttempts: number[] = [];
+    let closeObservations = 0;
+    let temporaryPath = "";
+
+    const error = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: (input) => {
+            temporaryPath = input.temporaryPath;
+            throw primary;
+          },
+          afterTemporaryFileClosed: () => {
+            closeObservations += 1;
+          },
+          beforeTemporaryUnlink: ({ attempt }) => {
+            cleanupAttempts.push(attempt);
+            throw new Error(`combined cleanup failure ${attempt}`);
+          }
+        },
+        () => createJsonRecordIfAbsent(
+          workspaceRoot,
+          lockRecordDirectorySegments(record.scope),
+          lockRecordFileName(record.lock_id),
+          record,
+          evidenceRef,
+          LockRecordSchema
+        )
+      )
+    );
+
+    expect(error.code).toBe("record_schema_error");
+    expect(error.status).toBe(400);
+    expect(error.message).toBe("combined immutable primary");
+    expect(error.evidenceRefs).toEqual([evidenceRef]);
+    expect(error.cause).toBeInstanceOf(AggregateError);
+    const messages = aggregateErrorMessages(error.cause);
+    expect(messages.filter((message) => message === "combined prior cause")).toHaveLength(1);
+    for (const attempt of [1, 2, 3]) {
+      expect(
+        messages.filter((message) => message === `combined cleanup failure ${attempt}`)
+      ).toHaveLength(1);
+    }
+    expect(cleanupAttempts).toEqual([1, 2, 3]);
+    expect(closeObservations).toBe(1);
+    await expectPathMissing(temporaryPath);
+    await expectPathMissing(workspaceRecordPath(
+      workspaceRoot,
+      [...lockRecordDirectorySegments(record.scope), lockRecordFileName(record.lock_id)],
+      evidenceRef
+    ));
+    expect(
+      (await readdir(join(workspaceRoot, "locks", record.scope))).some(isOwnedRecordPath)
+    ).toBe(false);
+  });
+
+  test("final hardlink acceptance rejects same-length inode mutation through a pre-opened descriptor", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const record = { ...validLockRecord(), lock_id: "LOCK-final-bound-observation" };
+    const evidenceRef = lockRecordEvidenceRef(record.scope, record.lock_id);
+    let canonicalHandle: Awaited<ReturnType<typeof open>> | undefined;
+    let publication: WorkspaceRecordPublicationHookInput | undefined;
+    let mutationRan = false;
+    try {
+      const error = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterCanonicalLink: async (input) => {
+              publication = input;
+              canonicalHandle = await open(input.canonicalPath, "r+");
+            },
+            beforePublishedRecordFinalValidation: async () => {
+              if (!canonicalHandle || mutationRan) return;
+              mutationRan = true;
+              const expectedBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+              const mutatedBytes = Buffer.from(expectedBytes);
+              mutatedBytes[0] = mutatedBytes[0] === 0x7b ? 0x5b : 0x7b;
+              await canonicalHandle.write(mutatedBytes, 0, mutatedBytes.length, 0);
+              await canonicalHandle.sync();
+            }
+          },
+          () => createJsonRecordIfAbsentWithCleanupPermit(
+            workspaceRoot,
+            lockRecordDirectorySegments(record.scope),
+            lockRecordFileName(record.lock_id),
+            record,
+            evidenceRef,
+            LockRecordSchema
+          )
+        )
+      );
+      expect(error.code).toBe("workspace_path_not_safe");
+      expect(mutationRan).toBe(true);
+      expect(publication).toBeDefined();
+      await expectPathMissing(publication!.temporaryPath);
+    } finally {
+      await canonicalHandle?.close();
+    }
+  });
+
+  test("durable single-link observation binds bytes, identity, links, size, and mutation metadata", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    await mkdir(workspaceRoot);
+    const path = join(workspaceRoot, "durable-observation.json");
+    const bytes = Buffer.from("durable-observation\n");
+    await writeFile(path, bytes, { flag: "wx" });
+    const expected = await lstat(path, { bigint: true });
+
+    const observed = await readDurableSingleLinkFile({ path, maxBytes: 1024 });
+
+    expect(observed.status).toBe("read");
+    if (observed.status !== "read") throw new Error("Expected durable observation.");
+    expect(observed.bytes).toEqual(bytes);
+    expect(observed.identity).toEqual({ dev: expected.dev, ino: expected.ino });
+    expect(observed.linkCount).toBe(1n);
+    expect(observed.size).toBe(BigInt(bytes.length));
+    expect(observed.mutation).toEqual({
+      ctimeNs: expected.ctimeNs,
+      mtimeNs: expected.mtimeNs
+    });
+  });
+
   test("hardlink temp cleanup rejects an identical-byte canonical replacement without transferring its permit", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -2244,7 +2579,16 @@ describe("idempotency, lock, and artifact services", () => {
     expect(error.status).toBe(500);
     expect(error.message).toBe("immutable publication primary");
     expect(error.cause).toBeInstanceOf(AggregateError);
-    expect(aggregateErrorMessages(error.cause)).toContain("publication prior cause");
+    const publicationCompensationMessages = aggregateErrorMessages(error.cause);
+    expect(
+      publicationCompensationMessages.filter((message) => message === "publication prior cause")
+    ).toHaveLength(1);
+    expect(
+      publicationCompensationMessages.filter(
+        (message) =>
+          message === "Workspace record publication authority could not be verified."
+      )
+    ).toHaveLength(1);
     expect(publication).toBeDefined();
     expect(ownedIdentity).toBeDefined();
     expect(replacementIdentity).toBeDefined();
@@ -2435,10 +2779,12 @@ describe("idempotency, lock, and artifact services", () => {
       schema
     );
     const persistentPath = join(directoryPath, "persistent.json");
+    const persistentAttempts: number[] = [];
     const persistentError = await captureTaskServiceError(() =>
       runWithWorkspaceRecordPublicationHooks(
         {
           beforeAuthorityNamespaceRemoval: ({ attempt }) => {
+            persistentAttempts.push(attempt);
             throw new Error(`persistent namespace cleanup failure ${attempt}`);
           }
         },
@@ -2456,6 +2802,7 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
     const cleanupMessages = aggregateErrorMessages(persistentError);
+    expect(persistentAttempts).toEqual([1, 2, 3]);
     expect(cleanupMessages).toContain("persistent namespace cleanup failure 1");
     expect(cleanupMessages).toContain("persistent namespace cleanup failure 3");
     await expectPathMissing(persistentPath);
