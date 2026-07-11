@@ -625,6 +625,7 @@ async function existingPathCaseObservation(path: string): Promise<FilesystemCase
   const targetDevice = (await lstat(expectedPhysicalPath, { bigint: true })).dev;
   let candidatePath = expectedPhysicalPath;
   let observedSemantics = injectedSemantics ?? "unknown";
+  let semanticsResolved = injectedSemantics !== undefined;
   for (;;) {
     const parsed = parse(candidatePath);
     const [candidateEntry, parentEntry] = await Promise.all([
@@ -634,13 +635,16 @@ async function existingPathCaseObservation(path: string): Promise<FilesystemCase
     if (!filesystemDeviceIdentityMatches(candidateEntry.dev, targetDevice)) {
       return Object.freeze({ semantics: "unknown", deviceRoot: expectedPhysicalPath });
     }
-    if (observedSemantics === "unknown") {
+    if (!semanticsResolved) {
       const componentSemantics = await existingEntryCaseSemantics(
         parsed.dir,
         parsed.base,
         candidatePath
       );
-      if (componentSemantics !== "unknown") observedSemantics = componentSemantics;
+      if (componentSemantics !== "unknown") {
+        observedSemantics = componentSemantics;
+        semanticsResolved = true;
+      }
     }
     if (
       parsed.dir === candidatePath ||
