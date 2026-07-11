@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { fstat } from "node:fs";
 import {
   access,
   lstat,
@@ -371,6 +372,47 @@ describe("idempotency, lock, and artifact services", () => {
       expect((await readdir(join(workspaceRoot, "locks", "task"))).some(isOwnedRecordPath)).toBe(
         false
       );
+    }
+  });
+
+  test("mutable close observers reject before update or create commit with zero owned residue", async () => {
+    for (const mode of ["update", "create"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const service = createLockRecordService({ workspaceRoot });
+      const before = { ...validLockRecord(), lock_id: `LOCK-mutable-close-${mode}` };
+      const after = { ...before, holder: `after-close-${mode}` };
+      if (mode === "update") await service.storeLock(before);
+      const evidenceRef = lockRecordEvidenceRef(after.scope, after.lock_id);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        [...lockRecordDirectorySegments(after.scope), lockRecordFileName(after.lock_id)],
+        evidenceRef
+      );
+      const beforeBytes = mode === "update" ? await readFile(recordPath) : undefined;
+      let temporaryPath = "";
+
+      await expect(
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: (input) => {
+              temporaryPath = input.temporaryPath;
+            },
+            afterTemporaryFileClosed: async ({ descriptor }) => {
+              await expectFileDescriptorClosed(descriptor.fd);
+              throw new Error(`mutable close observer ${mode}`);
+            }
+          },
+          () => service.storeLock(after)
+        )
+      ).rejects.toBeInstanceOf(TaskServiceError);
+
+      if (beforeBytes) expect(await readFile(recordPath)).toEqual(beforeBytes);
+      else await expectPathMissing(recordPath);
+      await expectPathMissing(temporaryPath);
+      expect(
+        (await readdir(join(workspaceRoot, "locks", after.scope))).some(isOwnedRecordPath)
+      ).toBe(false);
     }
   });
 
@@ -1009,15 +1051,17 @@ describe("idempotency, lock, and artifact services", () => {
         lock_id: `LOCK-final-temp-cleanup-${writer}`
       };
       const intended = { ...record, holder: `intended-${writer}` };
+      const expectedBytes = Buffer.from(`${JSON.stringify(intended, null, 2)}\n`);
       const replacementBytes = Buffer.from(`replacement-${writer}\n`);
-      let temporaryPath = "";
+      let publication: WorkspaceRecordPublicationHookInput | undefined;
+      let retryPublication: WorkspaceRecordPublicationHookInput | undefined;
       let replacementIdentity: { dev: number; ino: number } | undefined;
 
       const error = await captureTaskServiceError(() =>
         runWithWorkspaceRecordPublicationHooks(
           {
-            afterTemporaryFileWritten: ({ temporaryPath: observed }) => {
-              temporaryPath = observed;
+            afterTemporaryFileWritten: (input) => {
+              publication = input;
             },
             beforeAuthorityOwnedUnlink: async ({ path, operation }) => {
               const expectedOperation = "hardlink_temp_cleanup";
@@ -1040,13 +1084,41 @@ describe("idempotency, lock, and artifact services", () => {
       );
 
       expect(error.code).toBe("workspace_path_not_safe");
-      expect(await readFile(temporaryPath)).toEqual(replacementBytes);
-      expect(await stat(temporaryPath)).toMatchObject(replacementIdentity!);
+      expect(publication).toBeDefined();
+      await expectPathMissing(publication!.canonicalPath);
+      expect(await readFile(publication!.temporaryPath)).toEqual(replacementBytes);
+      expect(await stat(publication!.temporaryPath)).toMatchObject(replacementIdentity!);
       expect(
         (await readdir(join(workspaceRoot, "locks", record.scope))).some((name) =>
           name.endsWith(".authority")
         )
       ).toBe(false);
+
+      await rm(publication!.temporaryPath);
+      expect(
+        (await readdir(join(workspaceRoot, "locks", record.scope))).some(isOwnedRecordPath)
+      ).toBe(false);
+      const retried = await runWithWorkspaceRecordPublicationHooks(
+        {
+          afterCanonicalLink: (input) => {
+            retryPublication = input;
+          }
+        },
+        () =>
+          createJsonRecordIfAbsent(
+            workspaceRoot,
+            lockRecordDirectorySegments(record.scope),
+            lockRecordFileName(record.lock_id),
+            intended,
+            lockRecordEvidenceRef(record.scope, record.lock_id),
+            LockRecordSchema
+          )
+      );
+      expect(retried.status).toBe("created");
+      expect(retryPublication?.canonicalPath).toBe(publication!.canonicalPath);
+      expect(await readFile(publication!.canonicalPath)).toEqual(expectedBytes);
+      expect((await stat(publication!.canonicalPath)).nlink).toBe(1);
+      await expectPathMissing(retryPublication!.temporaryPath);
     }
   });
 
@@ -2183,6 +2255,100 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("workspace and idempotency compensation preserve frozen and sealed custom error contracts", async () => {
+    for (const surface of ["workspace", "idempotency"] as const) {
+      for (const immutability of ["frozen", "sealed"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const priorCause = new Error(`${surface} ${immutability} prior cause`);
+        const primary = new StructuredServiceError(
+          `${surface} ${immutability} primary`,
+          `E_${surface.toUpperCase()}_${immutability.toUpperCase()}`,
+          Object.freeze({ surface, immutability }),
+          priorCause
+        );
+        if (immutability === "frozen") Object.freeze(primary);
+        else Object.seal(primary);
+        const originalDescriptors = Object.getOwnPropertyDescriptors(primary);
+        const compensationMessage = `${surface} ${immutability} compensation`;
+
+        let error: Error;
+        if (surface === "workspace") {
+          const record = {
+            ...validLockRecord(),
+            lock_id: `LOCK-custom-primary-${immutability}`
+          };
+          error = await captureError(() =>
+            runWithWorkspaceRecordPublicationHooks(
+              {
+                afterTemporaryFileWritten: () => {
+                  throw primary;
+                },
+                beforeTemporaryFileClose: () => {
+                  throw new Error(compensationMessage);
+                }
+              },
+              () =>
+                createJsonRecordIfAbsent(
+                  workspaceRoot,
+                  lockRecordDirectorySegments(record.scope),
+                  lockRecordFileName(record.lock_id),
+                  record,
+                  lockRecordEvidenceRef(record.scope, record.lock_id),
+                  LockRecordSchema
+                )
+            )
+          );
+          const directoryPath = join(workspaceRoot, "locks", record.scope);
+          expect((await readdir(directoryPath)).some(isOwnedRecordPath)).toBe(false);
+        } else {
+          const key = `task:create:custom-primary-${immutability}`;
+          const requestDigest = `digest-custom-primary-${immutability}`;
+          const service = createIdempotencyRecordService({
+            workspaceRoot,
+            transitionGuardHooks: {
+              beforeTransitionGuardRelease: () => {
+                throw new Error(compensationMessage);
+              }
+            }
+          });
+          await service.beginRecord({ scope: "task", key, requestDigest });
+          const originalLookup = service.lookupReplay;
+          let lookupCount = 0;
+          service.lookupReplay = async (input) => {
+            lookupCount += 1;
+            if (lookupCount === 2) throw primary;
+            return await originalLookup(input);
+          };
+          error = await captureError(() =>
+            service.completeRecord({
+              scope: "task",
+              key,
+              requestDigest,
+              resultRef: `TASK-custom-primary-${immutability}`
+            })
+          );
+          await expectPathMissing(idempotencyTransitionGuardPath(workspaceRoot, key));
+          await expectPathMissing(idempotencyTransitionCleanupLockPath(workspaceRoot, key));
+        }
+
+        expect(error).toBeInstanceOf(StructuredServiceError);
+        expect(Object.getPrototypeOf(error)).toBe(Object.getPrototypeOf(primary));
+        expect((error as StructuredServiceError).code).toBe(primary.code);
+        expect((error as StructuredServiceError).details).toBe(primary.details);
+        expectPreservedOwnDescriptors(error, originalDescriptors);
+        expect(error.cause).toBeInstanceOf(AggregateError);
+        const messages = aggregateErrorMessages(error.cause);
+        expect(
+          messages.filter((message) => message === priorCause.message)
+        ).toHaveLength(1);
+        expect(
+          messages.filter((message) => message === compensationMessage)
+        ).toHaveLength(1);
+      }
+    }
+  });
+
   test("transient publication temp unlink failure retries to a single-link canonical record", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -2273,14 +2439,14 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
-  test("repeated pre-close publication failures explicitly close every temporary handle", async () => {
+  test("repeated pre-close failures still close every descriptor and preserve close compensation once", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     let closeObservations = 0;
     const observedTemporaryPaths: string[] = [];
     for (let index = 0; index < 12; index += 1) {
       const record = { ...validLockRecord(), lock_id: `LOCK-pre-close-${index}` };
-      await expect(
+      const error = await captureTaskServiceError(() =>
         runWithWorkspaceRecordPublicationHooks(
           {
             afterTemporaryFileWritten: ({ temporaryPath }) => {
@@ -2295,7 +2461,11 @@ describe("idempotency, lock, and artifact services", () => {
                 recommendedNextActions: ["Inspect the fixture."]
               });
             },
-            afterTemporaryFileClosed: () => {
+            beforeTemporaryFileClose: () => {
+              throw new Error(`injected close failure ${index}`);
+            },
+            afterTemporaryFileClosed: async ({ descriptor }) => {
+              await expectFileDescriptorClosed(descriptor.fd);
               closeObservations += 1;
             }
           },
@@ -2308,7 +2478,12 @@ describe("idempotency, lock, and artifact services", () => {
             LockRecordSchema
           )
         )
-      ).rejects.toBeInstanceOf(TaskServiceError);
+      );
+      expect(
+        aggregateErrorMessages(error.cause).filter(
+          (message) => message === `injected close failure ${index}`
+        )
+      ).toHaveLength(1);
     }
 
     expect(closeObservations).toBe(12);
@@ -2395,6 +2570,7 @@ describe("idempotency, lock, and artifact services", () => {
     const evidenceRef = lockRecordEvidenceRef(record.scope, record.lock_id);
     let canonicalHandle: Awaited<ReturnType<typeof open>> | undefined;
     let publication: WorkspaceRecordPublicationHookInput | undefined;
+    let retryPublication: WorkspaceRecordPublicationHookInput | undefined;
     let mutationRan = false;
     try {
       const error = await captureTaskServiceError(() =>
@@ -2427,7 +2603,35 @@ describe("idempotency, lock, and artifact services", () => {
       expect(error.code).toBe("workspace_path_not_safe");
       expect(mutationRan).toBe(true);
       expect(publication).toBeDefined();
+      await expectPathMissing(publication!.canonicalPath);
       await expectPathMissing(publication!.temporaryPath);
+      expect(
+        (await readdir(join(workspaceRoot, "locks", record.scope))).some(isOwnedRecordPath)
+      ).toBe(false);
+
+      const retried = await runWithWorkspaceRecordPublicationHooks(
+        {
+          afterCanonicalLink: (input) => {
+            retryPublication = input;
+          }
+        },
+        () =>
+          createJsonRecordIfAbsent(
+            workspaceRoot,
+            lockRecordDirectorySegments(record.scope),
+            lockRecordFileName(record.lock_id),
+            record,
+            evidenceRef,
+            LockRecordSchema
+          )
+      );
+      expect(retried.status).toBe("created");
+      expect(retryPublication?.canonicalPath).toBe(publication!.canonicalPath);
+      expect(await readFile(publication!.canonicalPath)).toEqual(
+        Buffer.from(`${JSON.stringify(record, null, 2)}\n`)
+      );
+      expect((await stat(publication!.canonicalPath)).nlink).toBe(1);
+      await expectPathMissing(retryPublication!.temporaryPath);
     } finally {
       await canonicalHandle?.close();
     }
@@ -2670,12 +2874,13 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
-  test("temp cleanup preserves a same-inode byte mutation and removes private namespaces", async () => {
+  test("temp cleanup removes a mutated owned inode, rolls back canonical, and permits retry", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const record = { ...validLockRecord(), lock_id: "LOCK-temp-same-inode" };
     const modifiedBytes = Buffer.from("same-inode-temp-modification\n");
     let publication: WorkspaceRecordPublicationHookInput | undefined;
+    let retryPublication: WorkspaceRecordPublicationHookInput | undefined;
     const error = await captureTaskServiceError(() =>
       runWithWorkspaceRecordPublicationHooks(
         {
@@ -2707,13 +2912,35 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(error.code).toBe("workspace_path_not_safe");
     expect(publication).toBeDefined();
-    expect(await readFile(publication!.canonicalPath)).toEqual(modifiedBytes);
-    expect(await readFile(publication!.temporaryPath)).toEqual(modifiedBytes);
+    await expectPathMissing(publication!.canonicalPath);
+    await expectPathMissing(publication!.temporaryPath);
     expect(
-      (await readdir(join(workspaceRoot, "locks", "task"))).some((name) =>
-        name.endsWith(".authority")
-      )
+      (await readdir(join(workspaceRoot, "locks", "task"))).some(isOwnedRecordPath)
     ).toBe(false);
+
+    const retried = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterCanonicalLink: (input) => {
+          retryPublication = input;
+        }
+      },
+      () =>
+        createJsonRecordIfAbsent(
+          workspaceRoot,
+          lockRecordDirectorySegments(record.scope),
+          lockRecordFileName(record.lock_id),
+          record,
+          lockRecordEvidenceRef(record.scope, record.lock_id),
+          LockRecordSchema
+        )
+    );
+    expect(retried.status).toBe("created");
+    expect(retryPublication?.canonicalPath).toBe(publication!.canonicalPath);
+    expect(await readFile(publication!.canonicalPath)).toEqual(
+      Buffer.from(`${JSON.stringify(record, null, 2)}\n`)
+    );
+    expect((await stat(publication!.canonicalPath)).nlink).toBe(1);
+    await expectPathMissing(retryPublication!.temporaryPath);
   });
 
   test("generation unlink retries known-empty namespace cleanup and preserves bounded cleanup failures", async () => {
@@ -5718,6 +5945,64 @@ function hasTestErrorCode(error: unknown, code: string): boolean {
   );
 }
 
+class StructuredServiceError extends Error {
+  readonly code: string;
+  readonly details: Readonly<{ surface: string; immutability: string }>;
+
+  constructor(
+    message: string,
+    code: string,
+    details: Readonly<{ surface: string; immutability: string }>,
+    cause: unknown
+  ) {
+    super(message, { cause });
+    this.name = "StructuredServiceError";
+    Object.defineProperty(this, "code", {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: code
+    });
+    Object.defineProperty(this, "details", {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: details
+    });
+  }
+}
+
+async function captureError(action: () => Promise<unknown>): Promise<Error> {
+  try {
+    await action();
+  } catch (error) {
+    expect(error).toBeInstanceOf(Error);
+    return error as Error;
+  }
+
+  throw new Error("Expected an error.");
+}
+
+function expectPreservedOwnDescriptors(
+  error: Error,
+  expected: Record<PropertyKey, PropertyDescriptor>
+): void {
+  const actual = Object.getOwnPropertyDescriptors(error);
+  expect(Reflect.ownKeys(actual)).toEqual(Reflect.ownKeys(expected));
+  for (const key of Reflect.ownKeys(expected)) {
+    const expectedDescriptor = expected[key]!;
+    const actualDescriptor = actual[key]!;
+    if (key === "cause") {
+      expect({ ...actualDescriptor, value: undefined }).toEqual({
+        ...expectedDescriptor,
+        value: undefined
+      });
+    } else {
+      expect(actualDescriptor).toEqual(expectedDescriptor);
+    }
+  }
+}
+
 async function captureTaskServiceError(action: () => Promise<unknown>): Promise<TaskServiceError> {
   try {
     await action();
@@ -5727,6 +6012,19 @@ async function captureTaskServiceError(action: () => Promise<unknown>): Promise<
   }
 
   throw new Error("Expected TaskServiceError.");
+}
+
+async function expectFileDescriptorClosed(fd: number): Promise<void> {
+  const error = await captureError(
+    () =>
+      new Promise<void>((resolvePromise, rejectPromise) => {
+        fstat(fd, (statError) => {
+          if (statError) rejectPromise(statError);
+          else resolvePromise();
+        });
+      })
+  );
+  expect(error).toMatchObject({ code: "EBADF" });
 }
 
 function aggregateErrorMessages(value: unknown, seen = new Set<unknown>()): string[] {

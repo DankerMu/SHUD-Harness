@@ -8,6 +8,9 @@ import {
   type IdempotencyRecord,
   type IdempotencyScope
 } from "../schemas/idempotency";
+import {
+  preservePrimaryAndCompensationErrors as preservePrimaryWithCompensations
+} from "./compensation-error-preservation";
 import { TaskServiceError, isSafeTaskId } from "./task-card-service";
 import {
   conditionalDeleteJsonRecord,
@@ -1374,15 +1377,11 @@ function preservePrimaryAndCompensationErrors(
   primary: unknown,
   ...compensations: unknown[]
 ): unknown {
-  const failures = compensations.filter((error) => error !== undefined);
-  if (failures.length === 0 || !(primary instanceof Error)) return primary;
-  const priorCause = primary.cause;
-  const aggregateCause = new AggregateError(
-    priorCause === undefined ? failures : [priorCause, ...failures],
+  return preservePrimaryWithCompensations(
+    primary,
+    compensations,
     "Idempotency transition compensation failed."
   );
-  if (trySetErrorCause(primary, aggregateCause)) return primary;
-  return cloneErrorWithCause(primary, aggregateCause);
 }
 
 function transitionGuardAdmissionDeadlineError(evidenceRef: string): TaskServiceError {
@@ -1396,43 +1395,6 @@ function transitionGuardAdmissionDeadlineError(evidenceRef: string): TaskService
     retryable: true,
     recommendedNextActions: ["Retry after the in-progress idempotency transition finishes."]
   });
-}
-
-function trySetErrorCause(error: Error, cause: unknown): boolean {
-  try {
-    Object.defineProperty(error, "cause", {
-      configurable: true,
-      enumerable: false,
-      writable: true,
-      value: cause
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function cloneErrorWithCause(primary: Error, cause: unknown): Error {
-  if (primary instanceof TaskServiceError) {
-    const clone = new TaskServiceError({
-      code: primary.code,
-      status: primary.status,
-      category: primary.category,
-      message: primary.message,
-      userMessage: primary.userMessage,
-      evidenceRefs: [...primary.evidenceRefs],
-      retryable: primary.retryable,
-      recommendedNextActions: [...primary.recommendedNextActions]
-    });
-    clone.stack = primary.stack;
-    trySetErrorCause(clone, cause);
-    return clone;
-  }
-
-  const clone = new Error(primary.message, { cause });
-  clone.name = primary.name;
-  clone.stack = primary.stack;
-  return clone;
 }
 
 function isIdempotencyTransitionGuardStale(guard: IdempotencyTransitionGuard): boolean {

@@ -5,11 +5,12 @@ import { link, lstat, mkdir, open, rename, rmdir, unlink } from "node:fs/promise
 import { dirname, isAbsolute, join, normalize, parse, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import { TaskServiceError, type TaskServiceErrorCode } from "./task-card-service";
+import { preservePrimaryAndCompensationErrors } from "./compensation-error-preservation";
 import {
   readDurableSingleLinkFile,
   type DurableSingleLinkReadFailureReason
 } from "./durable-single-link-reader";
+import { TaskServiceError, type TaskServiceErrorCode } from "./task-card-service";
 import {
   WorkspacePathSafetyError,
   isPathInsideBoundary,
@@ -38,6 +39,7 @@ interface OwnedTemporaryRecordIdentity {
 interface OwnedTemporaryRecord {
   identity: OwnedTemporaryRecordIdentity;
   file: RecordFileHandle;
+  handleClosed: boolean;
 }
 
 interface OwnedIsolatedGeneration {
@@ -103,6 +105,15 @@ export interface WorkspaceRecordPublicationHookInput {
   temporaryPath: string;
 }
 
+export interface WorkspaceRecordTemporaryHandleHookInput
+  extends WorkspaceRecordPublicationHookInput {
+  descriptor: Readonly<{
+    fd: number;
+    dev: number;
+    ino: number;
+  }>;
+}
+
 export interface WorkspaceRecordTemporaryCleanupHookInput extends WorkspaceRecordPublicationHookInput {
   attempt: number;
 }
@@ -111,8 +122,11 @@ export interface WorkspaceRecordPublicationHooks {
   afterCanonicalLink?: (input: WorkspaceRecordPublicationHookInput) => Promise<void> | void;
   beforeTemporaryUnlink?: (input: WorkspaceRecordTemporaryCleanupHookInput) => Promise<void> | void;
   afterTemporaryFileWritten?: (input: WorkspaceRecordPublicationHookInput) => Promise<void> | void;
+  beforeTemporaryFileClose?: (
+    input: WorkspaceRecordTemporaryHandleHookInput
+  ) => Promise<void> | void;
   afterTemporaryFileClosed?: (
-    input: WorkspaceRecordPublicationHookInput
+    input: WorkspaceRecordTemporaryHandleHookInput
   ) => Promise<void> | void;
   afterAuthorityLeaseAcquired?: (
     input: Readonly<{ operation: WorkspaceRecordAuthorityOperation }>
@@ -776,32 +790,32 @@ export async function writeJsonRecord<T>(
       operationError = error;
     }
 
-    if (temporaryRecord) {
+    if (temporaryRecord && !temporaryRecord.handleClosed) {
       try {
-        await temporaryRecord.file.close();
-        await hooks?.afterTemporaryFileClosed?.({
-          canonicalPath: recordPath,
-          temporaryPath
-        });
+        await closeTemporaryRecord(temporaryRecord, recordPath, temporaryPath, hooks);
       } catch (cleanupError) {
         if (operationError === undefined) operationError = cleanupError;
         else compensationErrors.push(cleanupError);
       }
-      if (!published && (await recordPathEntryExists(temporaryPath, evidenceRef))) {
-        try {
-          await removeOwnedPublicationTemporaryPath(
-            temporaryPath,
-            temporaryRecord.identity,
-            Buffer.from(recordText, "utf8"),
-            recordPath,
-            evidenceRef,
-            hooks,
-            "rename_temp_cleanup"
-          );
-        } catch (cleanupError) {
-          if (operationError === undefined) operationError = cleanupError;
-          else compensationErrors.push(cleanupError);
-        }
+    }
+    if (
+      temporaryRecord &&
+      !published &&
+      (await recordPathEntryExists(temporaryPath, evidenceRef))
+    ) {
+      try {
+        await removeOwnedPublicationTemporaryPath(
+          temporaryPath,
+          temporaryRecord.identity,
+          Buffer.from(recordText, "utf8"),
+          recordPath,
+          evidenceRef,
+          hooks,
+          "rename_temp_cleanup"
+        );
+      } catch (cleanupError) {
+        if (operationError === undefined) operationError = cleanupError;
+        else compensationErrors.push(cleanupError);
       }
     }
     if (operationError !== undefined) {
@@ -837,6 +851,13 @@ async function publishOwnedMutableRecord(
   );
   await assertOwnedTemporaryRecordPath(temporaryPath, temporaryRecord.identity, evidenceRef);
   await assertOpenRecordAuthority(temporaryRecord, recordText, 1, evidenceRef);
+  await closeTemporaryRecord(temporaryRecord, recordPath, temporaryPath, hooks);
+  temporaryRecord.identity = await assertClosedTemporaryRecordAuthority(
+    temporaryPath,
+    temporaryRecord.identity,
+    Buffer.from(recordText, "utf8"),
+    evidenceRef
+  );
   try {
     await rename(temporaryPath, recordPath);
   } catch (error) {
@@ -1108,15 +1129,61 @@ async function closeOwnedTemporaryRecord(
   const temporaryRecord = ownedResources.temporaryRecord;
   if (!temporaryRecord || ownedResources.handleClosed) return;
   try {
-    await temporaryRecord.file.close();
-    ownedResources.handleClosed = true;
+    await closeTemporaryRecord(
+      temporaryRecord,
+      ownedResources.canonicalPath,
+      ownedResources.temporaryPath,
+      hooks
+    );
   } finally {
-    if (ownedResources.handleClosed) {
-      await hooks?.afterTemporaryFileClosed?.({
-        canonicalPath: ownedResources.canonicalPath,
-        temporaryPath: ownedResources.temporaryPath
-      });
+    ownedResources.handleClosed = temporaryRecord.handleClosed;
+  }
+}
+
+async function closeTemporaryRecord(
+  temporaryRecord: OwnedTemporaryRecord,
+  canonicalPath: string,
+  temporaryPath: string,
+  hooks: WorkspaceRecordPublicationHooks | undefined
+): Promise<void> {
+  if (temporaryRecord.handleClosed) return;
+
+  const hookInput = Object.freeze({
+    canonicalPath,
+    temporaryPath,
+    descriptor: Object.freeze({
+      fd: temporaryRecord.file.fd,
+      dev: temporaryRecord.identity.dev,
+      ino: temporaryRecord.identity.ino
+    })
+  });
+  let primaryError: unknown;
+  const compensationErrors: unknown[] = [];
+  try {
+    await hooks?.beforeTemporaryFileClose?.(hookInput);
+  } catch (error) {
+    primaryError = error;
+  }
+
+  try {
+    await temporaryRecord.file.close();
+    temporaryRecord.handleClosed = true;
+  } catch (error) {
+    if (primaryError === undefined) primaryError = error;
+    else compensationErrors.push(error);
+  }
+
+  if (temporaryRecord.handleClosed) {
+    try {
+      await hooks?.afterTemporaryFileClosed?.(hookInput);
+    } catch (error) {
+      if (primaryError === undefined) primaryError = error;
+      else compensationErrors.push(error);
     }
+  }
+
+  if (primaryError !== undefined) {
+    throw preserveWorkspacePrimaryError(primaryError, compensationErrors);
   }
 }
 
@@ -1153,7 +1220,7 @@ async function writeTemporaryRecordFile(
     }
     temporaryIdentity = { dev: entry.dev, ino: entry.ino };
     await temporaryFile.writeFile(recordText, "utf8");
-    return { identity: temporaryIdentity, file: temporaryFile };
+    return { identity: temporaryIdentity, file: temporaryFile, handleClosed: false };
   } catch (error) {
     operationError = serviceWorkspaceError(
       "workspace_path_not_safe",
@@ -1330,13 +1397,13 @@ async function removeOwnedPublicationTemporaryPath(
         const isolatedPath = join(mutationNamespace, "generation");
         if (await recordPathEntryExists(isolatedPath, evidenceRef)) {
           try {
+            const isolatedIdentity = await readRegularFilePathIdentity(
+              isolatedPath,
+              evidenceRef
+            );
             if (
-              await ownedGenerationBytesEqual(
-                isolatedPath,
-                temporaryIdentity,
-                expectedBytes,
-                evidenceRef
-              )
+              isolatedIdentity?.dev === temporaryIdentity.dev &&
+              isolatedIdentity.ino === temporaryIdentity.ino
             ) {
               await unlink(isolatedPath);
             } else {
@@ -1382,14 +1449,21 @@ async function rollbackPublishedRecordClaim(
   expectedBytes: Buffer,
   evidenceRef: string
 ): Promise<void> {
-  await removeOwnedPathWithoutHooks(recordPath, expectedIdentity, expectedBytes, evidenceRef);
+  await removeOwnedPathWithoutHooks(
+    recordPath,
+    expectedIdentity,
+    expectedBytes,
+    evidenceRef,
+    false
+  );
 }
 
 async function removeOwnedPathWithoutHooks(
   path: string,
   expectedIdentity: OwnedTemporaryRecordIdentity,
   expectedBytes: Buffer,
-  evidenceRef: string
+  evidenceRef: string,
+  requireExpectedBytes = true
 ): Promise<void> {
   const mutationNamespace = await createAuthorityOwnedMutationNamespace(path, evidenceRef);
   const isolatedPath = join(mutationNamespace, "generation");
@@ -1413,12 +1487,13 @@ async function removeOwnedPathWithoutHooks(
       !identity ||
       identity.dev !== expectedIdentity.dev ||
       identity.ino !== expectedIdentity.ino ||
-      !(await ownedGenerationBytesEqual(
-        isolatedPath,
-        expectedIdentity,
-        expectedBytes,
-        evidenceRef
-      ))
+      (requireExpectedBytes &&
+        !(await ownedGenerationBytesEqual(
+          isolatedPath,
+          expectedIdentity,
+          expectedBytes,
+          evidenceRef
+        )))
     ) {
       throw publicationStateError(evidenceRef);
     }
@@ -1507,50 +1582,11 @@ async function ownedGenerationBytesEqual(
 }
 
 function preserveWorkspacePrimaryError(primary: unknown, compensations: unknown[]): unknown {
-  if (!(primary instanceof Error) || compensations.length === 0) return primary;
-  const priorCause = primary.cause;
-  const aggregateCause = new AggregateError(
-    priorCause === undefined ? compensations : [priorCause, ...compensations],
+  return preservePrimaryAndCompensationErrors(
+    primary,
+    compensations,
     "Workspace record publication compensation failed."
   );
-  return cloneErrorWithCause(primary, aggregateCause);
-}
-
-function trySetErrorCause(error: Error, cause: unknown): boolean {
-  try {
-    Object.defineProperty(error, "cause", {
-      configurable: true,
-      enumerable: false,
-      writable: true,
-      value: cause
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function cloneErrorWithCause(primary: Error, cause: unknown): Error {
-  if (primary instanceof TaskServiceError) {
-    const clone = new TaskServiceError({
-      code: primary.code,
-      status: primary.status,
-      category: primary.category,
-      message: primary.message,
-      userMessage: primary.userMessage,
-      evidenceRefs: [...primary.evidenceRefs],
-      retryable: primary.retryable,
-      recommendedNextActions: [...primary.recommendedNextActions]
-    });
-    clone.stack = primary.stack;
-    trySetErrorCause(clone, cause);
-    return clone;
-  }
-
-  const clone = new Error(primary.message, { cause });
-  clone.name = primary.name;
-  clone.stack = primary.stack;
-  return clone;
 }
 
 async function assertOwnedTemporaryRecordPath(
@@ -1607,6 +1643,31 @@ async function assertPublishedRecordAuthority(
       throw publicationStateError(evidenceRef);
     }
   }
+}
+
+async function assertClosedTemporaryRecordAuthority(
+  temporaryPath: string,
+  expectedIdentity: OwnedTemporaryRecordIdentity,
+  expectedBytes: Buffer,
+  evidenceRef: string
+): Promise<OwnedTemporaryRecordIdentity> {
+  const observed = await readDurableSingleLinkFile({
+    path: temporaryPath,
+    maxBytes: MAX_SERVICE_RECORD_BYTES
+  });
+  if (
+    observed.status !== "read" ||
+    observed.identity.dev !== BigInt(expectedIdentity.dev) ||
+    observed.identity.ino !== BigInt(expectedIdentity.ino) ||
+    !observed.bytes.equals(expectedBytes)
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+
+  return {
+    dev: Number(observed.identity.dev),
+    ino: Number(observed.identity.ino)
+  };
 }
 
 async function assertOpenRecordAuthority(
