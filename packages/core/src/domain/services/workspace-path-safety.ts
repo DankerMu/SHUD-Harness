@@ -43,6 +43,23 @@ export interface PhysicalAuthorityPathIdentityCandidates {
   aliases: readonly string[];
 }
 
+interface PhysicalCanonicalExactObservation {
+  exact: string;
+  physicalAncestor: string;
+  missingSegments: readonly string[];
+  targetExists: boolean;
+}
+
+class AuthorityObservationHookError {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    this.cause = cause;
+  }
+}
+
+class AuthorityObservationChangedError {}
+
 const PHYSICAL_CANONICAL_PATH_RESTARTS = 3;
 
 export interface WorkspacePathSafetyHooks {
@@ -187,46 +204,172 @@ export async function physicalAuthorityPathIdentityCandidates(
   evidenceRef: string
 ): Promise<PhysicalAuthorityPathIdentityCandidates> {
   const targetPath = resolve(path);
-  const exact = await physicalCanonicalExactPath(targetPath, evidenceRef);
-  const targetEntry = await maybeLstat(targetPath);
-  if (targetEntry) {
-    const semantics = await existingPathCaseSemantics(exact);
-    const aliases =
-      semantics === "case_sensitive"
-        ? [exact]
-        : Array.from(new Set([exact, unicodeCaseFoldPath(exact)]));
-    return Object.freeze({ exact, aliases: Object.freeze(aliases) });
+  for (let attempt = 0; attempt < PHYSICAL_CANONICAL_PATH_RESTARTS; attempt += 1) {
+    try {
+      return await observePhysicalAuthorityPathIdentityCandidates(targetPath, evidenceRef);
+    } catch (error) {
+      if (error instanceof AuthorityObservationHookError) throw error.cause;
+      const observationChanged =
+        error instanceof AuthorityObservationChangedError ||
+        hasErrorCode(error, "ENOENT") ||
+        hasErrorCode(error, "ENOTDIR");
+      if (observationChanged && attempt + 1 < PHYSICAL_CANONICAL_PATH_RESTARTS) {
+        continue;
+      }
+      if (observationChanged) {
+        throw new WorkspacePathSafetyError(
+          "Workspace path authority identity could not be observed safely.",
+          evidenceRef
+        );
+      }
+      throw error;
+    }
   }
 
-  let existingAncestor = exact;
-  const missingSegments: string[] = [];
-  for (;;) {
-    if (await maybeLstat(existingAncestor)) break;
-    const parsed = parse(existingAncestor);
-    if (parsed.dir === existingAncestor) {
-      return Object.freeze({ exact, aliases: Object.freeze([exact]) });
+  throw new WorkspacePathSafetyError(
+    "Workspace path authority identity could not be observed safely.",
+    evidenceRef
+  );
+}
+
+async function observePhysicalAuthorityPathIdentityCandidates(
+  targetPath: string,
+  evidenceRef: string
+): Promise<PhysicalAuthorityPathIdentityCandidates> {
+  const observation = await physicalCanonicalExactPathObservation(targetPath, evidenceRef);
+  let targetEntry: FileStat | undefined;
+  try {
+    targetEntry = await lstat(targetPath);
+  } catch (error) {
+    if (
+      !observation.targetExists &&
+      (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR"))
+    ) {
+      targetEntry = undefined;
+    } else if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+      throw error;
+    } else {
+      throw new WorkspacePathSafetyError(
+        "Workspace path authority identity could not be observed safely.",
+        evidenceRef
+      );
     }
-    missingSegments.unshift(parsed.base);
-    existingAncestor = parsed.dir;
   }
-  if ((await existingPathCaseSemantics(existingAncestor)) === "case_sensitive") {
-    return Object.freeze({ exact, aliases: Object.freeze([exact]) });
+
+  if (Boolean(targetEntry) !== observation.targetExists) {
+    throw new AuthorityObservationChangedError();
+  }
+
+  if (targetEntry) {
+    await invokeAuthorityCandidateLstatHook(
+      targetPath,
+      targetPath,
+      observation.missingSegments.length
+    );
+    const semantics = await authorityExistingPathCaseSemantics(observation.exact, evidenceRef);
+    const aliases =
+      semantics === "case_sensitive"
+        ? [observation.exact]
+        : Array.from(
+            new Set([observation.exact, unicodeCaseFoldPath(observation.exact)])
+          );
+    return Object.freeze({ exact: observation.exact, aliases: Object.freeze(aliases) });
+  }
+
+  try {
+    const ancestorEntry = await lstat(observation.physicalAncestor);
+    if (!ancestorEntry.isDirectory()) {
+      throw new WorkspacePathSafetyError(
+        "Workspace path crosses a non-directory ancestor.",
+        evidenceRef
+      );
+    }
+  } catch (error) {
+    if (error instanceof WorkspacePathSafetyError) throw error;
+    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) throw error;
+    throw new WorkspacePathSafetyError(
+      "Workspace path authority identity could not be observed safely.",
+      evidenceRef
+    );
+  }
+
+  await invokeAuthorityCandidateLstatHook(
+    observation.physicalAncestor,
+    targetPath,
+    observation.missingSegments.length
+  );
+
+  try {
+    targetEntry = await lstat(targetPath);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+      targetEntry = undefined;
+    } else {
+      throw new WorkspacePathSafetyError(
+        "Workspace path authority identity could not be observed safely.",
+        evidenceRef
+      );
+    }
+  }
+  if (targetEntry) throw new AuthorityObservationChangedError();
+
+  if (
+    (await authorityExistingPathCaseSemantics(observation.physicalAncestor, evidenceRef)) ===
+    "case_sensitive"
+  ) {
+    return Object.freeze({
+      exact: observation.exact,
+      aliases: Object.freeze([observation.exact])
+    });
   }
   const conservative = join(
-    existingAncestor,
-    ...missingSegments.map(unicodeCaseFoldSegment)
+    observation.physicalAncestor,
+    ...observation.missingSegments.map(unicodeCaseFoldSegment)
   );
   return Object.freeze({
-    exact,
-    aliases: Object.freeze(Array.from(new Set([exact, conservative])))
+    exact: observation.exact,
+    aliases: Object.freeze(Array.from(new Set([observation.exact, conservative])))
   });
 }
 
-async function physicalCanonicalExactPath(
+async function invokeAuthorityCandidateLstatHook(
+  candidatePath: string,
   targetPath: string,
-  evidenceRef: string,
-  attempt = 0
-): Promise<string> {
+  missingSegmentCount: number
+): Promise<void> {
+  try {
+    await workspacePathSafetyHookStorage.getStore()?.afterPhysicalCandidateLstat?.(
+      Object.freeze({
+        candidatePath,
+        targetPath,
+        exists: true,
+        missingSegmentCount
+      })
+    );
+  } catch (error) {
+    throw new AuthorityObservationHookError(error);
+  }
+}
+
+async function authorityExistingPathCaseSemantics(
+  path: string,
+  evidenceRef: string
+): Promise<FilesystemCaseSemantics> {
+  try {
+    return await existingPathCaseSemantics(path);
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) throw error;
+    throw new WorkspacePathSafetyError(
+      "Workspace path authority identity could not be observed safely.",
+      evidenceRef
+    );
+  }
+}
+
+async function physicalCanonicalExactPathObservation(
+  targetPath: string,
+  evidenceRef: string
+): Promise<PhysicalCanonicalExactObservation> {
   const missingSegments: string[] = [];
   let candidatePath = targetPath;
   for (;;) {
@@ -250,16 +393,16 @@ async function physicalCanonicalExactPath(
       }
       try {
         const physicalPath = await realpath(candidatePath);
-        return join(physicalPath, ...missingSegments.reverse());
+        const orderedMissingSegments = missingSegments.reverse();
+        return Object.freeze({
+          exact: join(physicalPath, ...orderedMissingSegments),
+          physicalAncestor: physicalPath,
+          missingSegments: Object.freeze(orderedMissingSegments),
+          targetExists: orderedMissingSegments.length === 0
+        });
       } catch (error) {
         if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
-          if (attempt + 1 < PHYSICAL_CANONICAL_PATH_RESTARTS) {
-            return await physicalCanonicalExactPath(targetPath, evidenceRef, attempt + 1);
-          }
-          throw new WorkspacePathSafetyError(
-            "Workspace path cannot be canonicalized safely.",
-            evidenceRef
-          );
+          throw error;
         }
         throw new WorkspacePathSafetyError(
           "Workspace path cannot be canonicalized safely.",
@@ -477,9 +620,15 @@ async function existingEntryCaseSemantics(
   if (alternateBase === base) return "unknown";
   const expectedPath = join(parentPath, base);
   const alternatePath = join(parentPath, alternateBase);
+  let expectedEntry: Awaited<ReturnType<typeof lstat>>;
   try {
-    const [expectedEntry, alternateEntry, alternatePhysicalPath] = await Promise.all([
-      lstat(expectedPath, { bigint: true }),
+    expectedEntry = await lstat(expectedPath, { bigint: true });
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) throw error;
+    return "unknown";
+  }
+  try {
+    const [alternateEntry, alternatePhysicalPath] = await Promise.all([
       lstat(alternatePath, { bigint: true }),
       realpath(alternatePath)
     ]);
@@ -491,6 +640,17 @@ async function existingEntryCaseSemantics(
       : "case_sensitive";
   } catch (error) {
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+      try {
+        await lstat(expectedPath);
+      } catch (expectedError) {
+        if (
+          hasErrorCode(expectedError, "ENOENT") ||
+          hasErrorCode(expectedError, "ENOTDIR")
+        ) {
+          throw expectedError;
+        }
+        return "unknown";
+      }
       return "case_sensitive";
     }
     return "unknown";

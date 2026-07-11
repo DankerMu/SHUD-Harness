@@ -975,6 +975,231 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("ordinary record admission restarts authority observation when an existing leaf disappears", async () => {
+    for (const semantics of ["case_sensitive", "case_insensitive", "unknown"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `ordinary-authority-race-${semantics}` };
+      const evidenceRef = `authority.race.ordinary.${semantics}`;
+      const fileName = `${semantics}.json`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        ["authority-race-ordinary", fileName],
+        evidenceRef
+      );
+      expect(
+        await createJsonRecordIfAbsent(
+          workspaceRoot,
+          ["authority-race-ordinary"],
+          fileName,
+          record,
+          evidenceRef,
+          schema
+        )
+      ).toEqual({ status: "created", record });
+      const observedCandidates: Array<{
+        candidatePath: string;
+        exists: boolean;
+        missingSegmentCount: number;
+      }> = [];
+      const semanticsPaths: string[] = [];
+
+      const result = await runWithWorkspacePathSafetyHooks(
+        {
+          afterPhysicalCandidateLstat: async (input) => {
+            observedCandidates.push({
+              candidatePath: input.candidatePath,
+              exists: input.exists,
+              missingSegmentCount: input.missingSegmentCount
+            });
+            if (observedCandidates.length === 1) {
+              expect(input.candidatePath).toBe(path);
+              expect(input.exists).toBe(true);
+              await rm(path);
+            }
+          },
+          filesystemCaseSemantics: ({ existingPath }) => {
+            semanticsPaths.push(existingPath);
+            return semantics;
+          }
+        },
+        () => readJsonRecord(path, evidenceRef, schema)
+      );
+
+      expect(result).toBeUndefined();
+      expect(observedCandidates).toEqual([
+        { candidatePath: path, exists: true, missingSegmentCount: 0 },
+        { candidatePath: join(path, ".."), exists: true, missingSegmentCount: 1 }
+      ]);
+      expect(semanticsPaths).toEqual([join(path, "..")]);
+      await expectPathMissing(path);
+      expect(await readdir(join(path, ".."))).toEqual([]);
+    }
+  });
+
+  test("ordinary record admission restarts authority observation when a missing leaf appears", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "ordinary-authority-race-created" };
+    const evidenceRef = "authority.race.ordinary.created";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      ["authority-race-ordinary", "created.json"],
+      evidenceRef
+    );
+    await mkdir(join(path, ".."), { recursive: true });
+    const observedCandidates: Array<{
+      candidatePath: string;
+      exists: boolean;
+      missingSegmentCount: number;
+    }> = [];
+    const semanticsPaths: string[] = [];
+
+    const result = await runWithWorkspacePathSafetyHooks(
+      {
+        afterPhysicalCandidateLstat: async (input) => {
+          observedCandidates.push({
+            candidatePath: input.candidatePath,
+            exists: input.exists,
+            missingSegmentCount: input.missingSegmentCount
+          });
+          if (observedCandidates.length === 1) {
+            expect(input.candidatePath).toBe(join(path, ".."));
+            expect(input.missingSegmentCount).toBe(1);
+            await writeFile(path, `${JSON.stringify(record)}\n`, { flag: "wx" });
+          }
+        },
+        filesystemCaseSemantics: ({ existingPath }) => {
+          semanticsPaths.push(existingPath);
+          return "case_sensitive";
+        }
+      },
+      () => readJsonRecord(path, evidenceRef, schema)
+    );
+
+    expect(result).toEqual(record);
+    expect(observedCandidates).toEqual([
+      { candidatePath: join(path, ".."), exists: true, missingSegmentCount: 1 },
+      { candidatePath: path, exists: true, missingSegmentCount: 0 }
+    ]);
+    expect(semanticsPaths).toEqual([path]);
+    await rm(path);
+    expect(await readdir(join(path, ".."))).toEqual([]);
+  });
+
+  test("cleanup permit authority races fail structurally and release terminal admission state", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "cleanup-authority-race-private-content" };
+    const evidenceRef = "authority.race.cleanup";
+    const directorySegments = ["authority-race-cleanup", "level-one", "level-two"] as const;
+    const fileName = "record.json";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const created = await createJsonRecordIfAbsentWithCleanupPermit(
+      workspaceRoot,
+      directorySegments,
+      fileName,
+      record,
+      evidenceRef,
+      schema
+    );
+    if (created.status !== "created") throw new Error("Expected a cleanup permit race fixture.");
+    const observedCandidates: Array<{
+      candidatePath: string;
+      exists: boolean;
+      missingSegmentCount: number;
+    }> = [];
+
+    const failure = await captureConditionalDeleteError(() =>
+      runWithWorkspacePathSafetyHooks(
+        {
+          afterPhysicalCandidateLstat: async (input) => {
+            observedCandidates.push({
+              candidatePath: input.candidatePath,
+              exists: input.exists,
+              missingSegmentCount: input.missingSegmentCount
+            });
+            await rm(input.candidatePath, { recursive: true });
+          },
+          filesystemCaseSemantics: () => "unknown"
+        },
+        () =>
+          conditionalDeleteJsonRecordWithCleanupPermit(
+            created.cleanupPermit,
+            path,
+            evidenceRef,
+            schema,
+            {
+              kind: "record",
+              expected: record,
+              matches: (current, expected) => current.id === expected.id
+            }
+          )
+      )
+    );
+
+    expect(observedCandidates).toEqual([
+      { candidatePath: path, exists: true, missingSegmentCount: 0 },
+      { candidatePath: join(path, ".."), exists: true, missingSegmentCount: 1 },
+      { candidatePath: join(path, "..", ".."), exists: true, missingSegmentCount: 2 }
+    ]);
+    expect(failure.mutationPhase).toBe("pre_mutation");
+    expect(failure.failureStage).toBe("permit_admission");
+    expect(failure.cause).toBeInstanceOf(TaskServiceError);
+    const serviceCause = failure.cause as TaskServiceError;
+    expect(serviceCause.code).toBe("workspace_path_not_safe");
+    expect(serviceCause.evidenceRefs).toEqual([evidenceRef]);
+    expect(serviceCause.cause).toBeInstanceOf(WorkspacePathSafetyError);
+    expect((serviceCause.cause as WorkspacePathSafetyError).evidenceRef).toBe(evidenceRef);
+    expect((serviceCause.cause as { code?: unknown }).code).toBeUndefined();
+    expectErrorNotToLeakRecordContent(serviceCause, tempRoot);
+    expectErrorNotToLeakRecordContent(serviceCause, path);
+    expectErrorNotToLeakRecordContent(serviceCause, record.id);
+
+    const reusedPermit = await captureConditionalDeleteError(() =>
+      conditionalDeleteJsonRecordWithCleanupPermit(
+        created.cleanupPermit,
+        path,
+        evidenceRef,
+        schema,
+        {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.id === expected.id
+        }
+      )
+    );
+    expect(reusedPermit.mutationPhase).toBe("pre_mutation");
+    expect(reusedPermit.failureStage).toBe("permit_admission");
+
+    await mkdir(join(path, ".."), { recursive: true });
+    expect(
+      await createJsonRecordIfAbsent(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        `${evidenceRef}.retry`,
+        schema
+      )
+    ).toEqual({ status: "created", record });
+    expect(
+      await conditionalDeleteJsonRecord(path, `${evidenceRef}.retry`, schema, {
+        kind: "record",
+        expected: record,
+        matches: (current, expected) => current.id === expected.id
+      })
+    ).toEqual({ status: "deleted" });
+    expect(await readdir(join(path, ".."))).toEqual([]);
+  });
+
   test("same-path authority admission is bounded before temp creation and hands off FIFO", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
