@@ -184,11 +184,21 @@ export async function isSafeExistingDirectoryPath(path: string): Promise<boolean
 export async function physicalCanonicalPath(path: string, evidenceRef: string): Promise<string> {
   const targetPath = resolve(path);
   for (let attempt = 0; attempt < PHYSICAL_CANONICAL_PATH_RESTARTS; attempt += 1) {
-    const canonicalPath = await tryPhysicalCanonicalPath(targetPath, evidenceRef);
-    if (canonicalPath !== undefined) return canonicalPath;
+    try {
+      const canonicalPath = await tryPhysicalCanonicalPath(targetPath, evidenceRef);
+      if (canonicalPath !== undefined) return canonicalPath;
+    } catch (error) {
+      if (error instanceof AuthorityObservationHookError) throw error.cause;
+      throw error;
+    }
   }
 
-  return await physicalCanonicalUnresolvedPath(targetPath, evidenceRef);
+  try {
+    return await physicalCanonicalUnresolvedPath(targetPath, evidenceRef);
+  } catch (error) {
+    if (error instanceof AuthorityObservationHookError) throw error.cause;
+    throw error;
+  }
 }
 
 export async function physicalAuthorityPathIdentity(
@@ -358,6 +368,7 @@ async function authorityExistingPathCaseSemantics(
   try {
     return await existingPathCaseSemantics(path);
   } catch (error) {
+    if (error instanceof AuthorityObservationHookError) throw error;
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) throw error;
     throw new WorkspacePathSafetyError(
       "Workspace path authority identity could not be observed safely.",
@@ -471,6 +482,7 @@ async function tryPhysicalCanonicalPath(
           ))
         );
       } catch (error) {
+        if (error instanceof AuthorityObservationHookError) throw error;
         if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
           return undefined;
         }
@@ -530,6 +542,7 @@ async function physicalCanonicalUnresolvedPath(
           ))
         );
       } catch (error) {
+        if (error instanceof AuthorityObservationHookError) throw error;
         if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
           throw new WorkspacePathSafetyError(
             "Workspace path cannot be canonicalized safely.",
@@ -576,9 +589,14 @@ async function canonicalMissingPathIdentitySegments(
 
 async function existingPathCaseSemantics(path: string): Promise<FilesystemCaseSemantics> {
   const expectedPhysicalPath = await realpath(path);
-  const injectedSemantics = workspacePathSafetyHookStorage
-    .getStore()
-    ?.filesystemCaseSemantics?.(Object.freeze({ existingPath: expectedPhysicalPath }));
+  let injectedSemantics: FilesystemCaseSemantics | undefined;
+  try {
+    injectedSemantics = workspacePathSafetyHookStorage
+      .getStore()
+      ?.filesystemCaseSemantics?.(Object.freeze({ existingPath: expectedPhysicalPath }));
+  } catch (error) {
+    throw new AuthorityObservationHookError(error);
+  }
   if (injectedSemantics !== undefined) return injectedSemantics;
   const targetDevice = (await lstat(expectedPhysicalPath, { bigint: true })).dev;
   let candidatePath = expectedPhysicalPath;

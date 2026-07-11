@@ -975,6 +975,62 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("filesystem case-semantics hook failures preserve identity without race retries", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    await mkdir(workspaceRoot);
+    const existingPath = join(workspaceRoot, "existing");
+    const missingPath = join(workspaceRoot, "missing");
+    await mkdir(existingPath);
+
+    const failures = [
+      new Error("case-semantics plain failure"),
+      Object.assign(new Error("case-semantics ENOENT failure"), { code: "ENOENT" }),
+      Object.assign(new Error("case-semantics ENOTDIR failure"), { code: "ENOTDIR" })
+    ];
+    const operations = [
+      {
+        name: "authority-existing",
+        path: existingPath,
+        action: (path: string) => physicalAuthorityPathIdentity(path, "hook.authority.existing")
+      },
+      {
+        name: "authority-missing",
+        path: missingPath,
+        action: (path: string) => physicalAuthorityPathIdentity(path, "hook.authority.missing")
+      },
+      {
+        name: "canonical-existing",
+        path: existingPath,
+        action: (path: string) => physicalCanonicalPath(path, "hook.canonical.existing")
+      },
+      {
+        name: "canonical-missing",
+        path: missingPath,
+        action: (path: string) => physicalCanonicalPath(path, "hook.canonical.missing")
+      }
+    ];
+
+    for (const operation of operations) {
+      for (const failure of failures) {
+        let invocations = 0;
+        const observed = await captureError(() =>
+          runWithWorkspacePathSafetyHooks(
+            {
+              filesystemCaseSemantics: () => {
+                invocations += 1;
+                throw failure;
+              }
+            },
+            () => operation.action(operation.path)
+          )
+        );
+        expect(observed, operation.name).toBe(failure);
+        expect(invocations, operation.name).toBe(1);
+      }
+    }
+  });
+
   test("ordinary record admission restarts authority observation when an existing leaf disappears", async () => {
     for (const semantics of ["case_sensitive", "case_insensitive", "unknown"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -2876,6 +2932,153 @@ describe("idempotency, lock, and artifact services", () => {
     );
     expect(reusedPermit.mutationPhase).toBe("pre_mutation");
     expect(reusedPermit.failureStage).toBe("permit_admission");
+  });
+
+  test("cleanup permit ownership survives both compensation-state inspection failures", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+
+    for (const site of ["published_rollback", "unpublished_cleanup"] as const) {
+      const record = { id: `inspection-${site}` };
+      const fileName = `${record.id}.json`;
+      const evidenceRef = `permit.inspection.${site}`;
+      const directorySegments = ["permit-inspection"] as const;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const primaryError = new Error(`primary ${site} failure`);
+      const inspectionError = Object.assign(new Error(`inspection ${site} failure`), {
+        code: "EIO"
+      });
+      const trailingInspectionError =
+        site === "published_rollback"
+          ? Object.assign(new Error("inspection unpublished cleanup failure"), { code: "EIO" })
+          : undefined;
+      const inspectionSites: string[] = [];
+
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: () => {
+              if (site === "unpublished_cleanup") throw primaryError;
+            },
+            afterCanonicalLink: () => {
+              if (site === "published_rollback") throw primaryError;
+            },
+            beforePublicationCompensationStateInspection: (input) => {
+              inspectionSites.push(input.site);
+              expect(input.activeCleanupPermitCount).toBe(1);
+              if (input.site === site) throw inspectionError;
+              if (input.site === "unpublished_cleanup" && trailingInspectionError) {
+                throw trailingInspectionError;
+              }
+            }
+          },
+          () =>
+            createJsonRecordIfAbsentWithCleanupPermit(
+              workspaceRoot,
+              directorySegments,
+              fileName,
+              record,
+              evidenceRef,
+              schema
+            )
+        )
+      );
+
+      expect(failure.message).toBe(
+        site === "published_rollback"
+          ? "Failed to publish workspace record claim."
+          : primaryError.message
+      );
+      expect(failure.cause).toBeInstanceOf(AggregateError);
+      const aggregatedErrors = (failure.cause as AggregateError).errors;
+      expect(aggregatedErrors).toContain(inspectionError);
+      if (trailingInspectionError) expect(aggregatedErrors).toContain(trailingInspectionError);
+      if (site === "published_rollback") expect(aggregatedErrors).toContain(primaryError);
+      expect(inspectionSites).toEqual(
+        site === "published_rollback"
+          ? ["published_rollback", "unpublished_cleanup"]
+          : ["unpublished_cleanup"]
+      );
+      await expectPathMissing(path);
+      expect((await readdir(join(path, ".."))).some(isOwnedRecordPath)).toBe(false);
+
+      const retried = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      );
+      if (retried.status !== "created") throw new Error("Expected inspection failure retry.");
+      expect(
+        await conditionalDeleteJsonRecordWithCleanupPermit(
+          retried.cleanupPermit,
+          path,
+          evidenceRef,
+          schema,
+          {
+            kind: "record",
+            expected: record,
+            matches: (current, expected) => current.id === expected.id
+          }
+        )
+      ).toEqual({ status: "deleted" });
+      await expectPathMissing(path);
+      expect((await readdir(join(path, ".."))).some(isOwnedRecordPath)).toBe(false);
+    }
+  });
+
+  test("repeated distinct-path compensation inspection failures retain global permit capacity", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const directorySegments = ["permit-inspection-capacity"] as const;
+
+    for (let index = 0; index < 8; index += 1) {
+      const record = { id: `inspection-capacity-${index}` };
+      const fileName = `${record.id}.json`;
+      const evidenceRef = `permit.inspection.capacity.${index}`;
+      const primaryError = new Error(`primary capacity failure ${index}`);
+      const inspectionError = Object.assign(new Error(`inspection capacity failure ${index}`), {
+        code: "EIO"
+      });
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: () => {
+              throw primaryError;
+            },
+            beforePublicationCompensationStateInspection: (input) => {
+              expect(input.site).toBe("unpublished_cleanup");
+              expect(input.activeCleanupPermitCount).toBe(1);
+              throw inspectionError;
+            }
+          },
+          () =>
+            createJsonRecordIfAbsentWithCleanupPermit(
+              workspaceRoot,
+              directorySegments,
+              fileName,
+              record,
+              evidenceRef,
+              schema
+            )
+        )
+      );
+      expect(failure.message).toBe(primaryError.message);
+      expect(failure.cause).toBeInstanceOf(AggregateError);
+      expect((failure.cause as AggregateError).errors).toContain(inspectionError);
+    }
+
+    expect((await readdir(join(workspaceRoot, ...directorySegments))).some(isOwnedRecordPath)).toBe(
+      false
+    );
   });
 
   test("post-link failures roll back the exact claim and permit an immediate clean retry", async () => {

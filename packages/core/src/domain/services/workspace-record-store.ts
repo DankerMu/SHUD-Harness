@@ -155,6 +155,13 @@ export interface WorkspaceRecordPublicationHooks {
   beforePublishedRecordFinalValidation?: (
     input: Readonly<{ path: string }>
   ) => Promise<void> | void;
+  beforePublicationCompensationStateInspection?: (
+    input: Readonly<{
+      path: string;
+      site: "published_rollback" | "unpublished_cleanup";
+      activeCleanupPermitCount: number;
+    }>
+  ) => Promise<void> | void;
   beforeCleanupPermitIdentityResolution?: (
     input: Readonly<{ path: string }>
   ) => Promise<void> | void;
@@ -931,6 +938,7 @@ async function createJsonRecordIfAbsentInternal<T>(
   let operationError: unknown;
   const compensationErrors = ownedResources.compensationErrors;
   let cleanupPermit: WorkspaceRecordCleanupPermit | undefined;
+  let cleanupPermitOwnership: "none" | "owned" | "transferred" = "none";
   try {
     try {
       authorityLease = await acquireRecordAuthority(recordPath, evidenceRef, "hardlink", hooks);
@@ -951,6 +959,7 @@ async function createJsonRecordIfAbsentInternal<T>(
           recordPath,
           evidenceRef
         );
+        cleanupPermitOwnership = "owned";
       }
       if (publicationOutcome === "exists") {
         return { status: "exists" };
@@ -1061,17 +1070,24 @@ async function createJsonRecordIfAbsentInternal<T>(
       } catch (error) {
         compensationErrors.push(error);
       }
-      if (await recordPathEntryExists(temporaryPath, evidenceRef)) {
-        try {
+      try {
+        await hooks?.beforePublicationCompensationStateInspection?.(
+          Object.freeze({
+            path: temporaryPath,
+            site: "published_rollback",
+            activeCleanupPermitCount: activeRecordAuthorityCleanupPermits
+          })
+        );
+        if (await recordPathEntryExists(temporaryPath, evidenceRef)) {
           await removeOwnedPathWithoutHooks(
             temporaryPath,
             ownedResources.temporaryIdentity ?? ownedResources.canonicalIdentity,
             ownedResources.expectedBytes,
             evidenceRef
           );
-        } catch (error) {
-          compensationErrors.push(error);
         }
+      } catch (error) {
+        compensationErrors.push(error);
       }
       publicationOutcome = undefined;
     }
@@ -1079,38 +1095,50 @@ async function createJsonRecordIfAbsentInternal<T>(
     if (
       publicationOutcome !== "published" &&
       operationError !== undefined &&
-      ownedResources.temporaryIdentity &&
-      (await recordPathEntryExists(temporaryPath, evidenceRef))
+      ownedResources.temporaryIdentity
     ) {
       try {
-        await removeOwnedPathWithoutHooks(
-          temporaryPath,
-          ownedResources.temporaryIdentity,
-          ownedResources.expectedBytes,
-          evidenceRef
+        await hooks?.beforePublicationCompensationStateInspection?.(
+          Object.freeze({
+            path: temporaryPath,
+            site: "unpublished_cleanup",
+            activeCleanupPermitCount: activeRecordAuthorityCleanupPermits
+          })
         );
+        if (await recordPathEntryExists(temporaryPath, evidenceRef)) {
+          await removeOwnedPathWithoutHooks(
+            temporaryPath,
+            ownedResources.temporaryIdentity,
+            ownedResources.expectedBytes,
+            evidenceRef
+          );
+        }
       } catch (error) {
         compensationErrors.push(error);
       }
     }
 
     if (operationError !== undefined) {
-      cancelRecordAuthorityCleanupPermit(cleanupPermit);
       throw preserveWorkspacePrimaryError(operationError, compensationErrors);
     }
 
     if (publicationOutcome === "exists") {
-      cancelRecordAuthorityCleanupPermit(cleanupPermit);
       return { status: "exists" };
     }
     if (publicationOutcome !== "published") {
       throw publicationStateError(evidenceRef);
     }
 
-    return cleanupPermit
-      ? { status: "created", record: data, cleanupPermit }
-      : { status: "created", record: data };
+    if (cleanupPermit) {
+      cleanupPermitOwnership = "transferred";
+      return { status: "created", record: data, cleanupPermit };
+    }
+    return { status: "created", record: data };
   } finally {
+    if (cleanupPermitOwnership === "owned") {
+      cleanupPermitOwnership = "none";
+      cancelRecordAuthorityCleanupPermit(cleanupPermit);
+    }
     authorityLease?.release();
   }
 }
