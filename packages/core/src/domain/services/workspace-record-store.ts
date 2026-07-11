@@ -25,6 +25,7 @@ const MAX_RECORD_AUTHORITY_RESERVATIONS_PER_PATH = 64;
 const RECORD_AUTHORITY_ACQUISITION_TIMEOUT_MS = 5_000;
 const RECORD_TEMP_CLEANUP_ATTEMPTS = 3;
 const RECORD_TEMP_CLEANUP_RETRY_MS = 5;
+const RECORD_NAMESPACE_CLEANUP_ATTEMPTS = 3;
 
 type FileStat = Awaited<ReturnType<typeof lstat>>;
 type RecordFileHandle = Awaited<ReturnType<typeof open>>;
@@ -123,6 +124,9 @@ export interface WorkspaceRecordPublicationHooks {
         | "rename_temp_cleanup"
         | "hardlink_temp_cleanup";
     }>
+  ) => Promise<void> | void;
+  beforeAuthorityNamespaceRemoval?: (
+    input: Readonly<{ path: string; attempt: number }>
   ) => Promise<void> | void;
 }
 
@@ -658,17 +662,32 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
   namespacePath: string,
   evidenceRef: string
 ): Promise<void> {
-  try {
-    await rmdir(namespacePath);
-  } catch (error) {
-    throw serviceWorkspaceError(
-      "workspace_path_not_safe",
-      "Workspace mutation namespace cleanup did not complete.",
-      "The workspace record mutation could not be finalized safely.",
-      [evidenceRef],
-      error
-    );
+  let primaryError: unknown;
+  const compensationErrors: unknown[] = [];
+  for (let attempt = 1; attempt <= RECORD_NAMESPACE_CLEANUP_ATTEMPTS; attempt += 1) {
+    try {
+      await publicationHookStorage
+        .getStore()
+        ?.beforeAuthorityNamespaceRemoval?.(Object.freeze({ path: namespacePath, attempt }));
+      await rmdir(namespacePath);
+      return;
+    } catch (error) {
+      if (hasErrorCode(error, "ENOENT")) return;
+      if (primaryError === undefined) primaryError = error;
+      else compensationErrors.push(error);
+      if (attempt < RECORD_NAMESPACE_CLEANUP_ATTEMPTS) {
+        await sleep(RECORD_TEMP_CLEANUP_RETRY_MS);
+      }
+    }
   }
+
+  throw serviceWorkspaceError(
+    "workspace_path_not_safe",
+    "Workspace mutation namespace cleanup did not complete.",
+    "The workspace record mutation could not be finalized safely.",
+    [evidenceRef],
+    preserveWorkspacePrimaryError(primaryError, compensationErrors)
+  );
 }
 
 export async function writeJsonRecord<T>(
@@ -942,7 +961,13 @@ async function createJsonRecordIfAbsentInternal<T>(
 
     if (publicationOutcome === "published" && operationError === undefined) {
       try {
-        await assertPublishedRecordAuthority(recordPath, directoryPath, recordText, evidenceRef);
+        await assertPublishedRecordAuthority(
+          recordPath,
+          directoryPath,
+          recordText,
+          evidenceRef,
+          temporaryIdentity
+        );
       } catch (error) {
         operationError = error;
       }
@@ -1313,11 +1338,49 @@ async function ownedGenerationBytesEqual(
 function preserveWorkspacePrimaryError(primary: unknown, compensations: unknown[]): unknown {
   if (!(primary instanceof Error) || compensations.length === 0) return primary;
   const priorCause = primary.cause;
-  primary.cause = new AggregateError(
+  const aggregateCause = new AggregateError(
     priorCause === undefined ? compensations : [priorCause, ...compensations],
     "Workspace record publication compensation failed."
   );
-  return primary;
+  if (trySetErrorCause(primary, aggregateCause)) return primary;
+  return cloneErrorWithCause(primary, aggregateCause);
+}
+
+function trySetErrorCause(error: Error, cause: unknown): boolean {
+  try {
+    Object.defineProperty(error, "cause", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: cause
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function cloneErrorWithCause(primary: Error, cause: unknown): Error {
+  if (primary instanceof TaskServiceError) {
+    const clone = new TaskServiceError({
+      code: primary.code,
+      status: primary.status,
+      category: primary.category,
+      message: primary.message,
+      userMessage: primary.userMessage,
+      evidenceRefs: [...primary.evidenceRefs],
+      retryable: primary.retryable,
+      recommendedNextActions: [...primary.recommendedNextActions]
+    });
+    clone.stack = primary.stack;
+    trySetErrorCause(clone, cause);
+    return clone;
+  }
+
+  const clone = new Error(primary.message, { cause });
+  clone.name = primary.name;
+  clone.stack = primary.stack;
+  return clone;
 }
 
 async function assertOwnedTemporaryRecordPath(
@@ -1505,10 +1568,10 @@ async function acquireRecordAuthorityWithCleanupPermit(
     if (identity !== state.identity || activeRecordAuthorityMutexes.get(identity) !== state.mutex) {
       throw publicationStateError(evidenceRef);
     }
+    if (Date.now() >= acquisitionDeadline) {
+      throw authorityWaitError(evidenceRef);
+    }
     if (state.mutex.ownerActive) {
-      if (Date.now() >= acquisitionDeadline) {
-        throw authorityWaitError(evidenceRef);
-      }
       hooks?.onAuthorityContention?.(Object.freeze({ operation: "delete" }));
     }
   } catch (error) {

@@ -859,6 +859,20 @@ async function acquireIdempotencyTransitionGuardBeforeDeadline(
     if (createError !== undefined) throw createError;
     if (!created) throw new Error("Idempotency transition guard creation did not settle.");
     if (created.status === "created") {
+      if (Date.now() >= deadline) {
+        const deadlineError = transitionGuardAdmissionDeadlineError(evidenceRef);
+        try {
+          await createIdempotencyTransitionGuardRelease(
+            guardPath,
+            evidenceRef,
+            guard,
+            created.cleanupPermit
+          )();
+        } catch (compensationError) {
+          throw preservePrimaryAndCompensationErrors(deadlineError, compensationError);
+        }
+        return { status: "busy" };
+      }
       return {
         status: "acquired",
         release: createIdempotencyTransitionGuardRelease(
@@ -1252,10 +1266,14 @@ function createIdempotencyTransitionGuardRelease(
         throw permitError;
       }
       try {
-        result = await conditionalDeleteIdempotencyTransitionGuard(
-          path,
-          evidenceRef,
-          expected
+        result = await runWithWorkspaceRecordAuthorityDeadline(
+          Date.now() + IDEMPOTENCY_TRANSITION_GUARD_WAIT_MS,
+          async () =>
+            await conditionalDeleteIdempotencyTransitionGuard(
+              path,
+              evidenceRef,
+              expected
+            )
         );
       } catch (retryError) {
         throw preservePrimaryAndCompensationErrors(permitError, retryError);
@@ -1359,11 +1377,62 @@ function preservePrimaryAndCompensationErrors(
   const failures = compensations.filter((error) => error !== undefined);
   if (failures.length === 0 || !(primary instanceof Error)) return primary;
   const priorCause = primary.cause;
-  primary.cause = new AggregateError(
+  const aggregateCause = new AggregateError(
     priorCause === undefined ? failures : [priorCause, ...failures],
     "Idempotency transition compensation failed."
   );
-  return primary;
+  if (trySetErrorCause(primary, aggregateCause)) return primary;
+  return cloneErrorWithCause(primary, aggregateCause);
+}
+
+function transitionGuardAdmissionDeadlineError(evidenceRef: string): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 409,
+    category: "workspace_error",
+    message: "Idempotency transition authority was not acquired before the bounded deadline.",
+    userMessage: "The idempotency record is currently busy.",
+    evidenceRefs: [evidenceRef],
+    retryable: true,
+    recommendedNextActions: ["Retry after the in-progress idempotency transition finishes."]
+  });
+}
+
+function trySetErrorCause(error: Error, cause: unknown): boolean {
+  try {
+    Object.defineProperty(error, "cause", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: cause
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function cloneErrorWithCause(primary: Error, cause: unknown): Error {
+  if (primary instanceof TaskServiceError) {
+    const clone = new TaskServiceError({
+      code: primary.code,
+      status: primary.status,
+      category: primary.category,
+      message: primary.message,
+      userMessage: primary.userMessage,
+      evidenceRefs: [...primary.evidenceRefs],
+      retryable: primary.retryable,
+      recommendedNextActions: [...primary.recommendedNextActions]
+    });
+    clone.stack = primary.stack;
+    trySetErrorCause(clone, cause);
+    return clone;
+  }
+
+  const clone = new Error(primary.message, { cause });
+  clone.name = primary.name;
+  clone.stack = primary.stack;
+  return clone;
 }
 
 function isIdempotencyTransitionGuardStale(guard: IdempotencyTransitionGuard): boolean {

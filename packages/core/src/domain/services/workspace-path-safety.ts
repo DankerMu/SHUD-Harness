@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
@@ -35,6 +36,28 @@ type BoundaryCandidate = {
 };
 
 type FileStat = Awaited<ReturnType<typeof lstat>>;
+
+const PHYSICAL_CANONICAL_PATH_RESTARTS = 3;
+
+export interface WorkspacePathSafetyHooks {
+  afterPhysicalCandidateLstat?: (
+    input: Readonly<{
+      candidatePath: string;
+      targetPath: string;
+      exists: boolean;
+      missingSegmentCount: number;
+    }>
+  ) => Promise<void> | void;
+}
+
+const workspacePathSafetyHookStorage = new AsyncLocalStorage<WorkspacePathSafetyHooks>();
+
+export async function runWithWorkspacePathSafetyHooks<T>(
+  hooks: WorkspacePathSafetyHooks,
+  action: () => Promise<T>
+): Promise<T> {
+  return await workspacePathSafetyHookStorage.run(hooks, action);
+}
 
 export async function resolveWorkspacePath(
   input: ResolveWorkspacePathInput
@@ -134,6 +157,18 @@ export async function isSafeExistingDirectoryPath(path: string): Promise<boolean
  */
 export async function physicalCanonicalPath(path: string, evidenceRef: string): Promise<string> {
   const targetPath = resolve(path);
+  for (let attempt = 0; attempt < PHYSICAL_CANONICAL_PATH_RESTARTS; attempt += 1) {
+    const canonicalPath = await tryPhysicalCanonicalPath(targetPath, evidenceRef);
+    if (canonicalPath !== undefined) return canonicalPath;
+  }
+
+  return await physicalCanonicalUnresolvedPath(targetPath, evidenceRef);
+}
+
+async function tryPhysicalCanonicalPath(
+  targetPath: string,
+  evidenceRef: string
+): Promise<string | undefined> {
   const missingSegments: string[] = [];
   let candidatePath = targetPath;
 
@@ -149,6 +184,15 @@ export async function physicalCanonicalPath(path: string, evidenceRef: string): 
         );
       }
     }
+
+    await workspacePathSafetyHookStorage.getStore()?.afterPhysicalCandidateLstat?.(
+      Object.freeze({
+        candidatePath,
+        targetPath,
+        exists: entry !== undefined,
+        missingSegmentCount: missingSegments.length
+      })
+    );
 
     if (entry) {
       if (missingSegments.length > 0 && !entry.isDirectory()) {
@@ -169,7 +213,10 @@ export async function physicalCanonicalPath(path: string, evidenceRef: string): 
           await realpath(candidatePath),
           ...missingSegments.reverse().map(conservativeMissingPathIdentitySegment)
         );
-      } catch {
+      } catch (error) {
+        if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+          return undefined;
+        }
         throw new WorkspacePathSafetyError(
           "Workspace path cannot be canonicalized safely.",
           evidenceRef
@@ -185,6 +232,60 @@ export async function physicalCanonicalPath(path: string, evidenceRef: string): 
       );
     }
     missingSegments.push(parse(candidatePath).base);
+    candidatePath = parentPath;
+  }
+}
+
+async function physicalCanonicalUnresolvedPath(
+  targetPath: string,
+  evidenceRef: string
+): Promise<string> {
+  const unresolvedSegments = [parse(targetPath).base];
+  let candidatePath = parse(targetPath).dir;
+
+  for (;;) {
+    let entry: FileStat | undefined;
+    try {
+      entry = await lstat(candidatePath);
+    } catch (error) {
+      if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
+        throw new WorkspacePathSafetyError(
+          "Workspace path cannot be canonicalized safely.",
+          evidenceRef
+        );
+      }
+    }
+
+    if (entry) {
+      if (!entry.isDirectory()) {
+        throw new WorkspacePathSafetyError(
+          "Workspace path crosses a non-directory ancestor.",
+          evidenceRef
+        );
+      }
+      try {
+        return join(
+          await realpath(candidatePath),
+          ...unresolvedSegments.reverse().map(conservativeMissingPathIdentitySegment)
+        );
+      } catch (error) {
+        if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
+          throw new WorkspacePathSafetyError(
+            "Workspace path cannot be canonicalized safely.",
+            evidenceRef
+          );
+        }
+      }
+    }
+
+    const parentPath = parse(candidatePath).dir;
+    if (parentPath === candidatePath) {
+      throw new WorkspacePathSafetyError(
+        "Workspace path has no canonical physical ancestor.",
+        evidenceRef
+      );
+    }
+    unresolvedSegments.push(parse(candidatePath).base);
     candidatePath = parentPath;
   }
 }
