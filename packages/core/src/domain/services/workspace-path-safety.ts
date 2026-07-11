@@ -635,6 +635,12 @@ async function existingPathCaseObservation(path: string): Promise<FilesystemCase
     if (!filesystemDeviceIdentityMatches(candidateEntry.dev, targetDevice)) {
       return Object.freeze({ semantics: "unknown", deviceRoot: expectedPhysicalPath });
     }
+    if (
+      parsed.dir === candidatePath ||
+      !filesystemDeviceIdentityMatches(parentEntry.dev, targetDevice)
+    ) {
+      return Object.freeze({ semantics: observedSemantics, deviceRoot: candidatePath });
+    }
     if (!semanticsResolved) {
       const componentSemantics = await existingEntryCaseSemantics(
         parsed.dir,
@@ -645,12 +651,6 @@ async function existingPathCaseObservation(path: string): Promise<FilesystemCase
         observedSemantics = componentSemantics;
         semanticsResolved = true;
       }
-    }
-    if (
-      parsed.dir === candidatePath ||
-      !filesystemDeviceIdentityMatches(parentEntry.dev, targetDevice)
-    ) {
-      return Object.freeze({ semantics: observedSemantics, deviceRoot: candidatePath });
     }
     candidatePath = parsed.dir;
   }
