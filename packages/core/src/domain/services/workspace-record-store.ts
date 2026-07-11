@@ -187,7 +187,6 @@ export interface WorkspaceRecordPublicationHooks {
       path: string;
       operation:
         | "conditional_delete"
-        | "restore_cleanup"
         | "hardlink_temp_cleanup";
     }>
   ) => Promise<void> | void;
@@ -210,6 +209,12 @@ type WorkspaceRecordPostIsolationSite =
   | "temporary_generation_compensation";
 
 export interface WorkspaceRecordCompensationTestHooks {
+  beforeOwnedTemporaryRecordWrite?: (
+    input: Readonly<{
+      path: string;
+      identity: WorkspaceRecordPhysicalIdentity;
+    }>
+  ) => Promise<void> | void;
   afterOwnedPathIsolation?: (
     input: Readonly<{ path: string; isolatedPath: string; site: WorkspaceRecordPostIsolationSite }>
   ) => Promise<void> | void;
@@ -554,9 +559,6 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       return { status: "deleted" };
     }
 
-    await restoreQuarantinedRecordNoClobber(quarantinePath, path, evidenceRef, hooks);
-    namespaceCleanupAttempted = true;
-    await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
     throw recordChangedBeforeConditionalRemovalError(evidenceRef);
   } catch (error) {
     const compensationErrors = await compensateOwnedIsolatedPath(
@@ -577,49 +579,6 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       "The workspace record could not be removed safely.",
       [evidenceRef],
       primary
-    );
-  }
-}
-
-async function restoreQuarantinedRecordNoClobber(
-  quarantinePath: string,
-  canonicalPath: string,
-  evidenceRef: string,
-  hooks?: WorkspaceRecordPublicationHooks
-): Promise<void> {
-  try {
-    await link(quarantinePath, canonicalPath);
-  } catch (error) {
-    throw serviceWorkspaceError(
-      "record_malformed",
-      "Workspace record changed before conditional removal and its replacement was preserved in quarantine.",
-      "The workspace record changed before it could be removed safely.",
-      [evidenceRef],
-      error
-    );
-  }
-
-  try {
-    await hooks?.beforeAuthorityOwnedUnlink?.(
-      Object.freeze({ path: canonicalPath, operation: "restore_cleanup" })
-    );
-    const restoredIdentity = await readRegularFilePathIdentity(canonicalPath, evidenceRef);
-    const quarantinedIdentity = await readRegularFilePathIdentity(quarantinePath, evidenceRef);
-    if (
-      !restoredIdentity ||
-      !quarantinedIdentity ||
-      !workspaceRecordPhysicalIdentityMatches(restoredIdentity, quarantinedIdentity)
-    ) {
-      throw recordChangedBeforeConditionalRemovalError(evidenceRef);
-    }
-    await unlink(quarantinePath);
-  } catch (error) {
-    throw serviceWorkspaceError(
-      "record_malformed",
-      "Workspace record replacement was restored but its quarantine alias could not be removed.",
-      "The workspace record changed before it could be removed safely.",
-      [evidenceRef],
-      error
     );
   }
 }
@@ -1317,6 +1276,9 @@ async function writeOwnedTemporaryRecordFile(
       throw publicationStateError(evidenceRef);
     }
     temporaryIdentity = { dev: entry.dev, ino: entry.ino };
+    await compensationTestHookStorage.getStore()?.beforeOwnedTemporaryRecordWrite?.(
+      Object.freeze({ path: temporaryPath, identity: temporaryIdentity })
+    );
     await temporaryFile.writeFile(recordText, "utf8");
     return { identity: temporaryIdentity, file: temporaryFile, handleClosed: false };
   } catch (error) {
@@ -1934,16 +1896,70 @@ async function acquireRecordAuthority(
 ): Promise<RecordAuthorityLease> {
   const acquisitionDeadline =
     authorityDeadlineStorage.getStore() ?? Date.now() + RECORD_AUTHORITY_ACQUISITION_TIMEOUT_MS;
-  const identity = await recordAuthorityIdentityCandidates(recordPath, evidenceRef);
+  if (activeRecordAuthorityReservations >= MAX_RECORD_AUTHORITY_RESERVATIONS) {
+    throw authorityCapacityError(evidenceRef);
+  }
+  activeRecordAuthorityReservations += 1;
+
+  let preIdentityReservationActive = true;
+  const releasePreIdentityReservation = () => {
+    if (!preIdentityReservationActive) return;
+    preIdentityReservationActive = false;
+    activeRecordAuthorityReservations -= 1;
+  };
   if (Date.now() >= acquisitionDeadline) {
+    releasePreIdentityReservation();
     throw authorityWaitError(evidenceRef);
   }
-  const existing = findRecordAuthorityMutex(identity.aliases, evidenceRef);
-  if (
-    activeRecordAuthorityReservations >= MAX_RECORD_AUTHORITY_RESERVATIONS ||
-    (existing?.reservations ?? 0) >= MAX_RECORD_AUTHORITY_RESERVATIONS_PER_PATH
-  ) {
-    throw authorityCapacityError(evidenceRef);
+
+  let identitySettled = false;
+  const identityWork = recordAuthorityIdentityCandidates(recordPath, evidenceRef).then(
+    (identity) => {
+      identitySettled = true;
+      return identity;
+    },
+    (error: unknown) => {
+      identitySettled = true;
+      throw error;
+    }
+  );
+  let deadlineTimeout: ReturnType<typeof setTimeout> | undefined;
+  let identity: Awaited<ReturnType<typeof recordAuthorityIdentityCandidates>>;
+  try {
+    identity = await Promise.race([
+      identityWork,
+      new Promise<never>((_resolve, reject) => {
+        deadlineTimeout = setTimeout(
+          () => reject(authorityWaitError(evidenceRef)),
+          Math.max(0, acquisitionDeadline - Date.now())
+        );
+      })
+    ]);
+  } catch (error) {
+    if (identitySettled) {
+      releasePreIdentityReservation();
+    } else {
+      void identityWork.then(releasePreIdentityReservation, releasePreIdentityReservation);
+    }
+    throw error;
+  } finally {
+    if (deadlineTimeout) clearTimeout(deadlineTimeout);
+  }
+
+  if (Date.now() >= acquisitionDeadline) {
+    releasePreIdentityReservation();
+    throw authorityWaitError(evidenceRef);
+  }
+
+  let existing: RecordAuthorityMutex | undefined;
+  try {
+    existing = findRecordAuthorityMutex(identity.aliases, evidenceRef);
+    if ((existing?.reservations ?? 0) >= MAX_RECORD_AUTHORITY_RESERVATIONS_PER_PATH) {
+      throw authorityCapacityError(evidenceRef);
+    }
+  } catch (error) {
+    releasePreIdentityReservation();
+    throw error;
   }
 
   if (!existing) {
@@ -1955,15 +1971,28 @@ async function acquireRecordAuthority(
       cleanupPermits: 0,
       ownerActive: true
     };
-    activeRecordAuthorityReservations += 1;
-    bindRecordAuthorityAliases(mutex, identity.aliases, evidenceRef);
+    try {
+      bindRecordAuthorityAliases(mutex, identity.aliases, evidenceRef);
+    } catch (error) {
+      mutex.ownerActive = false;
+      mutex.reservations = 0;
+      releasePreIdentityReservation();
+      removeUnusedRecordAuthorityMutex(mutex);
+      throw error;
+    }
+    preIdentityReservationActive = false;
     return createRecordAuthorityLease(mutex, identity.exactPath);
   }
 
-  bindRecordAuthorityAliases(existing, identity.aliases, evidenceRef);
+  try {
+    bindRecordAuthorityAliases(existing, identity.aliases, evidenceRef);
+  } catch (error) {
+    releasePreIdentityReservation();
+    throw error;
+  }
 
   existing.reservations += 1;
-  activeRecordAuthorityReservations += 1;
+  preIdentityReservationActive = false;
   if (!existing.ownerActive && existing.waiters.size === 0) {
     existing.ownerActive = true;
     return createRecordAuthorityLease(existing, identity.exactPath);

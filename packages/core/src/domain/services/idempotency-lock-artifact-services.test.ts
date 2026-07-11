@@ -1475,8 +1475,8 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await service.getLock(record.scope, record.lock_id)).toEqual(record);
   });
 
-  test("conditional delete and restore cleanup preserve exact replacement generations at final mutation hooks", async () => {
-    for (const phase of ["isolation", "restore_cleanup"] as const) {
+  test("conditional delete preserves pre-isolation replacements and privatizes same-inode byte drift", async () => {
+    for (const phase of ["replacement_inode", "same_inode_bytes"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
       tempRoots.push(tempRoot);
       const service = createLockRecordService({ workspaceRoot });
@@ -1485,7 +1485,6 @@ describe("idempotency, lock, and artifact services", () => {
         lock_id: `LOCK-delete-generation-${phase}`
       };
       const replacement = { ...original, holder: "replacement-before-isolation" };
-      const finalReplacement = { ...original, holder: "replacement-during-restore-cleanup" };
       await service.storeLock(original);
       const recordPath = workspaceRecordPath(
         workspaceRoot,
@@ -1499,21 +1498,13 @@ describe("idempotency, lock, and artifact services", () => {
           {
             beforeGenerationIsolation: async ({ path, operation }) => {
               if (operation !== "conditional_delete") return;
-              if (phase === "isolation") {
+              if (phase === "replacement_inode") {
                 const candidate = `${path}.replacement`;
                 await writeFile(candidate, replacementBytes, { flag: "wx" });
                 await rename(candidate, path);
               } else {
                 await writeFile(path, replacementBytes);
               }
-            },
-            beforeAuthorityOwnedUnlink: async ({ path, operation }) => {
-              if (phase !== "restore_cleanup" || operation !== "restore_cleanup") return;
-              const candidate = `${path}.final-replacement`;
-              await writeFile(candidate, `${JSON.stringify(finalReplacement, null, 2)}\n`, {
-                flag: "wx"
-              });
-              await rename(candidate, path);
             }
           },
           () =>
@@ -1526,10 +1517,10 @@ describe("idempotency, lock, and artifact services", () => {
       );
 
       expect(error.code).toBe("record_malformed");
-      if (phase === "isolation") {
+      if (phase === "replacement_inode") {
         expect(await readFile(recordPath)).toEqual(replacementBytes);
       } else {
-        expect(await service.getLock(original.scope, original.lock_id)).toEqual(finalReplacement);
+        await expectPathMissing(recordPath);
         const directoryPath = join(workspaceRoot, "locks", original.scope);
         const authorityDirectory = (await readdir(directoryPath)).find((name) =>
           name.endsWith(".authority")
@@ -2152,6 +2143,110 @@ describe("idempotency, lock, and artifact services", () => {
     } finally {
       releaseHolders.open();
       await Promise.allSettled(holders);
+    }
+  });
+
+  test("ordinary pre-identity admission is globally bounded and retains timed-out slots until identity settles", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createLockRecordService({ workspaceRoot });
+    const identityGate = createAsyncGate();
+    const allIdentityCallsEntered = createSignal();
+    const allIdentityCallsCompleted = createSignal();
+    const blockedTargets = new Set<string>();
+    let identityAdmissions = 0;
+    let identityCompletions = 0;
+    let saturation: Awaited<ReturnType<typeof saturateGlobalRecordAuthority>> | undefined;
+
+    try {
+      await runWithWorkspacePathSafetyHooks(
+        {
+          afterPhysicalCandidateLstat: async ({ targetPath }) => {
+            if (blockedTargets.has(targetPath)) return;
+            blockedTargets.add(targetPath);
+            identityAdmissions += 1;
+            if (identityAdmissions === 1024) allIdentityCallsEntered.resolve();
+            await identityGate.wait;
+          },
+          filesystemCaseSemantics: () => {
+            identityCompletions += 1;
+            if (identityCompletions === 1024) allIdentityCallsCompleted.resolve();
+            return "case_sensitive";
+          }
+        },
+        async () => {
+          const deadline = Date.now() + 1_000;
+          const blockedCalls = Array.from({ length: 1024 }, (_, index) =>
+            runWithWorkspaceRecordAuthorityDeadline(deadline, () =>
+              service.getLock("task", `LOCK-pre-identity-${index}`)
+            ).then(
+              () => {
+                throw new Error("Expected blocked identity acquisition to time out.");
+              },
+              (error: unknown) => error
+            )
+          );
+
+          await Promise.race([
+            allIdentityCallsEntered.promise,
+            timeoutAfter(2_000, "ordinary pre-identity calls did not all enter")
+          ]);
+          expect(identityAdmissions).toBe(1024);
+
+          const overflow = await captureTaskServiceError(() =>
+            service.getLock("task", "LOCK-pre-identity-overflow")
+          );
+          expect(overflow.message).toBe(
+            "Workspace record authority coordination is at capacity."
+          );
+          expect(overflow.retryable).toBe(true);
+          expect(identityAdmissions).toBe(1024);
+
+          const timedOut = await Promise.race([
+            Promise.all(blockedCalls),
+            timeoutAfter(2_000, "ordinary pre-identity callers did not settle by deadline")
+          ]);
+          expect(timedOut).toHaveLength(1024);
+          for (const error of timedOut) {
+            expect(error).toBeInstanceOf(TaskServiceError);
+            expect((error as TaskServiceError).retryable).toBe(true);
+            expect((error as TaskServiceError).message).toBe(
+              "Workspace record authority lease was not acquired before the bounded deadline."
+            );
+          }
+
+          const retainedCapacity = await captureTaskServiceError(() =>
+            service.getLock("task", "LOCK-pre-identity-retained")
+          );
+          expect(retainedCapacity.message).toBe(
+            "Workspace record authority coordination is at capacity."
+          );
+          expect(identityAdmissions).toBe(1024);
+
+          identityGate.open();
+          await Promise.race([
+            allIdentityCallsCompleted.promise,
+            timeoutAfter(2_000, "ordinary background identity work did not complete")
+          ]);
+          await delay(0);
+
+          saturation = await saturateGlobalRecordAuthority(
+            workspaceRoot,
+            "LOCK-pre-identity-released"
+          );
+          saturation.release();
+          expect(await saturation.completed).toEqual(
+            Array.from({ length: 1024 }, () => undefined)
+          );
+          expect(
+            await service.getLock("task", "LOCK-pre-identity-fresh")
+          ).toBeUndefined();
+        }
+      );
+    } finally {
+      identityGate.open();
+      saturation?.release();
+      await saturation?.completed.catch(() => undefined);
     }
   });
 
@@ -3084,6 +3179,226 @@ describe("idempotency, lock, and artifact services", () => {
     expect((await readdir(join(workspaceRoot, ...directorySegments))).some(isOwnedRecordPath)).toBe(
       false
     );
+  });
+
+  test("conditional delete keeps unproven post-isolation generations private", async () => {
+    for (const authority of ["ordinary", "cleanup_permit"] as const) {
+      for (const drift of ["same_inode_bytes", "replacement_inode"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const schema = z.object({ id: z.string() });
+        const record = { id: `unproven-${authority}-${drift}` };
+        const evidenceRef = `conditional.unproven.${authority}.${drift}`;
+        const directorySegments = ["conditional-unproven"] as const;
+        const fileName = `${authority}-${drift}.json`;
+        const path = workspaceRecordPath(
+          workspaceRoot,
+          [...directorySegments, fileName],
+          evidenceRef
+        );
+        const created = await createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          directorySegments,
+          fileName,
+          record,
+          evidenceRef,
+          schema
+        );
+        if (created.status !== "created") throw new Error("Expected unproven delete fixture.");
+        const before = await readFileWithIdentity(path);
+        const unprovenBytes = Buffer.from(`unproven-${authority}-${drift}\n`);
+        let isolatedPath: string | undefined;
+        let replacementIdentity: { dev: bigint; ino: bigint } | undefined;
+
+        const failure = await captureError(() =>
+          runWithWorkspaceRecordCompensationTestHooks(
+            {
+              afterOwnedPathIsolation: async (input) => {
+                if (input.site !== "conditional_delete") return;
+                isolatedPath = input.isolatedPath;
+                if (drift === "same_inode_bytes") {
+                  await writeFile(input.isolatedPath, unprovenBytes);
+                } else {
+                  await rm(input.isolatedPath);
+                  await writeFile(input.isolatedPath, unprovenBytes, { flag: "wx" });
+                  replacementIdentity = await stat(input.isolatedPath, { bigint: true });
+                }
+              }
+            },
+            () =>
+              authority === "ordinary"
+                ? conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+                    kind: "record",
+                    expected: record,
+                    matches: (current, expected) => current.id === expected.id
+                  })
+                : conditionalDeleteJsonRecordWithCleanupPermit(
+                    created.cleanupPermit,
+                    path,
+                    evidenceRef,
+                    schema,
+                    {
+                      kind: "record",
+                      expected: record,
+                      matches: (current, expected) => current.id === expected.id
+                    }
+                  )
+          )
+        );
+
+        const operationFailure =
+          authority === "ordinary"
+            ? failure
+            : (failure as WorkspaceRecordConditionalDeleteError).cause;
+        if (authority === "ordinary") {
+          expect(failure).not.toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+        } else {
+          expect(failure).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+          expect((failure as WorkspaceRecordConditionalDeleteError).mutationPhase).toBe(
+            "post_mutation"
+          );
+          expect((failure as WorkspaceRecordConditionalDeleteError).failureStage).toBe(
+            "operation"
+          );
+        }
+        expect(operationFailure).toBeInstanceOf(TaskServiceError);
+        expect((operationFailure as TaskServiceError).code).toBe("record_malformed");
+        expect((operationFailure as TaskServiceError).message).toBe(
+          "Workspace record changed before conditional removal."
+        );
+        expect((operationFailure as TaskServiceError).cause).toBeInstanceOf(AggregateError);
+        await expectPathMissing(path);
+        expect(isolatedPath).toBeDefined();
+        expect(await readFile(isolatedPath!)).toEqual(unprovenBytes);
+        const privateIdentity = await stat(isolatedPath!);
+        if (drift === "same_inode_bytes") {
+          expect(privateIdentity.dev).toBe(before.dev);
+          expect(privateIdentity.ino).toBe(before.ino);
+        } else {
+          expect(BigInt(privateIdentity.dev)).toBe(replacementIdentity!.dev);
+          expect(BigInt(privateIdentity.ino)).toBe(replacementIdentity!.ino);
+          expect(privateIdentity.dev === before.dev && privateIdentity.ino === before.ino).toBe(
+            false
+          );
+        }
+
+        expect(await readJsonRecord(path, evidenceRef, schema)).toBeUndefined();
+        const retry = await createJsonRecordIfAbsent(
+          workspaceRoot,
+          directorySegments,
+          fileName,
+          record,
+          evidenceRef,
+          schema
+        );
+        expect(retry).toEqual({ status: "created", record });
+        expect(
+          await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+            kind: "record",
+            expected: record,
+            matches: (current, expected) => current.id === expected.id
+          })
+        ).toEqual({ status: "deleted" });
+        expect(await readFile(isolatedPath!)).toEqual(unprovenBytes);
+      }
+    }
+  });
+
+  test("partial owned temporary writes preserve compensation errors and only restore the proven generation", async () => {
+    for (const outcome of ["restore_exact", "quarantine_replacement"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `partial-owned-temporary-${outcome}` };
+      const evidenceRef = `temporary.partial.${outcome}`;
+      const directorySegments = ["partial-owned-temporary"] as const;
+      const fileName = `${outcome}.json`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const partialBytes = Buffer.from(`partial-${outcome}\n`);
+      const replacementBytes = Buffer.from(`replacement-${outcome}\n`);
+      const primaryError = new Error(`partial write primary ${outcome}`);
+      const isolationError = new Error(`conditional unlink isolation ${outcome}`);
+      const inspectionError = Object.assign(
+        new Error(`conditional unlink inspection ${outcome}`),
+        { code: "EIO" }
+      );
+      let temporaryPath: string | undefined;
+      let expectedIdentity: { dev: bigint; ino: bigint } | undefined;
+      let isolatedPath: string | undefined;
+      let replacementIdentity: { dev: bigint; ino: bigint } | undefined;
+
+      const failure = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            beforeOwnedTemporaryRecordWrite: async (input) => {
+              temporaryPath = input.path;
+              expectedIdentity = input.identity;
+              await writeFile(input.path, partialBytes);
+              throw primaryError;
+            },
+            afterOwnedPathIsolation: async (input) => {
+              if (input.site !== "conditional_unlink_owned_path") return;
+              isolatedPath = input.isolatedPath;
+              if (outcome === "quarantine_replacement") {
+                await rm(input.isolatedPath);
+                await writeFile(input.isolatedPath, replacementBytes, { flag: "wx" });
+                replacementIdentity = await stat(input.isolatedPath, { bigint: true });
+              }
+              throw isolationError;
+            },
+            beforeOwnedPathCompensationStateInspection: ({ site }) => {
+              if (site === "conditional_unlink_owned_path") throw inspectionError;
+            }
+          },
+          () =>
+            createJsonRecordIfAbsent(
+              workspaceRoot,
+              directorySegments,
+              fileName,
+              record,
+              evidenceRef,
+              schema
+            )
+        )
+      );
+
+      expect(failure.code).toBe("workspace_path_not_safe");
+      expect(failure.message).toBe("Failed to write workspace record temporary file.");
+      expect(failure.cause).toBeInstanceOf(AggregateError);
+      expect(errorTreeContains(failure, primaryError)).toBe(true);
+      expect(aggregateErrorMessages(failure)).toContain(isolationError.message);
+      expect(errorTreeContains(failure, inspectionError)).toBe(true);
+      await expectPathMissing(path);
+      expect(temporaryPath).toBeDefined();
+      expect(expectedIdentity).toBeDefined();
+      expect(isolatedPath).toBeDefined();
+
+      if (outcome === "restore_exact") {
+        await expectPrivateAuthorityDirectory(dirname(temporaryPath!));
+        expect(await readFile(temporaryPath!)).toEqual(partialBytes);
+        const restoredIdentity = await stat(temporaryPath!, { bigint: true });
+        expect(workspaceRecordPhysicalIdentityMatches(restoredIdentity, expectedIdentity!)).toBe(
+          true
+        );
+        await expectPathMissing(isolatedPath!);
+        expect((await readdir(dirname(temporaryPath!))).some(isOwnedRecordPath)).toBe(false);
+      } else {
+        await expectPrivateAuthorityDirectory(dirname(temporaryPath!));
+        await expectPrivateAuthorityDirectory(dirname(isolatedPath!));
+        await expectPathMissing(temporaryPath!);
+        expect(await readFile(isolatedPath!)).toEqual(replacementBytes);
+        const privateIdentity = await stat(isolatedPath!, { bigint: true });
+        expect(privateIdentity.dev).toBe(replacementIdentity!.dev);
+        expect(privateIdentity.ino).toBe(replacementIdentity!.ino);
+        expect(
+          workspaceRecordPhysicalIdentityMatches(privateIdentity, expectedIdentity!)
+        ).toBe(false);
+      }
+    }
   });
 
   test("conditional delete keeps its post-isolation primary while inspection fails and restoration continues", async () => {
