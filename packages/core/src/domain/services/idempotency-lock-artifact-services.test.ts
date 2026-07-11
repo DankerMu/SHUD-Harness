@@ -113,16 +113,44 @@ describe("idempotency, lock, and artifact services", () => {
             .map((symbol) => symbol.getName())
         : []
     );
+    const requiredTypeExports = [
+      "WorkspacePathBoundary",
+      "WorkspacePathAccess",
+      "WorkspacePathResolution",
+      "ResolveWorkspacePathInput",
+      "FilesystemCaseSemantics",
+      "PhysicalAuthorityPathIdentityCandidates",
+      "WorkspacePathSafetyError",
+      "resolveWorkspacePath",
+      "assertPathInsideWorkspace",
+      "isPathInsideBoundary",
+      "isSafeExistingDirectoryPath",
+      "physicalCanonicalPath",
+      "physicalAuthorityPathIdentity",
+      "physicalAuthorityPathIdentityCandidates",
+      "filesystemDeviceIdentityMatches"
+    ];
+    const forbiddenTypeExports = [
+      "WorkspacePathSafetyHooks",
+      "runWithWorkspacePathSafetyHooks"
+    ];
+    const runtimeExports = new Set(Object.keys(coreExports));
+    const requiredRuntimeExports = [
+      "WorkspacePathSafetyError",
+      "resolveWorkspacePath",
+      "assertPathInsideWorkspace",
+      "isPathInsideBoundary",
+      "isSafeExistingDirectoryPath",
+      "physicalCanonicalPath",
+      "physicalAuthorityPathIdentity",
+      "physicalAuthorityPathIdentityCandidates",
+      "filesystemDeviceIdentityMatches"
+    ];
 
-    expect(packageRootTypeExports.has("WorkspacePathSafetyHooks")).toBe(false);
-    expect(packageRootTypeExports.has("runWithWorkspacePathSafetyHooks")).toBe(false);
-    expect("runWithWorkspacePathSafetyHooks" in coreExports).toBe(false);
-    expect(packageRootTypeExports.has("WorkspacePathSafetyError")).toBe(true);
-    expect(packageRootTypeExports.has("WorkspacePathResolution")).toBe(true);
-    expect("WorkspacePathSafetyError" in coreExports).toBe(true);
-    expect("resolveWorkspacePath" in coreExports).toBe(true);
-    expect("physicalAuthorityPathIdentity" in coreExports).toBe(true);
-    expect("filesystemDeviceIdentityMatches" in coreExports).toBe(true);
+    expect(requiredTypeExports.filter((name) => !packageRootTypeExports.has(name))).toEqual([]);
+    expect(forbiddenTypeExports.filter((name) => packageRootTypeExports.has(name))).toEqual([]);
+    expect(requiredRuntimeExports.filter((name) => !runtimeExports.has(name))).toEqual([]);
+    expect(runtimeExports.has("runWithWorkspacePathSafetyHooks")).toBe(false);
   });
 
   test("IdempotencyRecord store/get/replay uses safe deterministic direct paths", async () => {
