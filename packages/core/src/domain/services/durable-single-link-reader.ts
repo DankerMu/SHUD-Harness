@@ -42,6 +42,9 @@ export interface ReadDurableSingleLinkFileOptions {
   maxBytes: number;
   validateParentPath?: () => Promise<boolean> | boolean;
   beforeFinalValidation?: (input: Readonly<{ path: string }>) => Promise<void> | void;
+  beforeFinalParentValidation?: (
+    input: Readonly<{ path: string }>
+  ) => Promise<void> | void;
 }
 
 export async function readDurableSingleLinkFile(
@@ -75,6 +78,7 @@ export async function readDurableSingleLinkFile(
   } catch (error) {
     return invalidRead("open_failed", error);
   }
+  let fileClosed = false;
 
   try {
     const parentBeforeRead = await validateParentPath(options.validateParentPath);
@@ -134,6 +138,23 @@ export async function readDurableSingleLinkFile(
       return invalidRead("changed_during_read");
     }
 
+    try {
+      await file.close();
+      fileClosed = true;
+    } catch (error) {
+      return invalidRead("inspect_failed", error);
+    }
+
+    try {
+      await options.beforeFinalParentValidation?.(Object.freeze({ path: options.path }));
+    } catch (error) {
+      return invalidRead("parent_not_safe", error);
+    }
+    const parentAfterRead = await validateParentPath(options.validateParentPath);
+    if (parentAfterRead.status === "invalid") {
+      return parentAfterRead;
+    }
+
     let finalPathEntry: DurableFileStat;
     try {
       finalPathEntry = await lstat(options.path, { bigint: true });
@@ -151,11 +172,6 @@ export async function readDurableSingleLinkFile(
       return invalidRead("changed_during_read");
     }
 
-    const parentAfterRead = await validateParentPath(options.validateParentPath);
-    if (parentAfterRead.status === "invalid") {
-      return parentAfterRead;
-    }
-
     return {
       status: "read",
       bytes,
@@ -165,7 +181,9 @@ export async function readDurableSingleLinkFile(
       mutation: Object.freeze({ ctimeNs: afterRead.ctimeNs, mtimeNs: afterRead.mtimeNs })
     };
   } finally {
-    await file.close().catch(() => undefined);
+    if (!fileClosed) {
+      await file.close().catch(() => undefined);
+    }
   }
 }
 

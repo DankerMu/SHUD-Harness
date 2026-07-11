@@ -13,7 +13,7 @@ import { TaskServiceError, type TaskServiceErrorCode } from "./task-card-service
 import {
   WorkspacePathSafetyError,
   isPathInsideBoundary,
-  physicalAuthorityPathIdentity,
+  physicalAuthorityPathIdentityCandidates,
   resolveWorkspacePath
 } from "./workspace-path-safety";
 
@@ -78,10 +78,14 @@ interface RecordAuthorityWaiter {
   deadline: number;
   evidenceRef: string;
   kind: "ordinary" | "cleanup";
+  exactPath: string;
+  ready: boolean;
 }
 
 interface RecordAuthorityMutex {
   waiters: Set<RecordAuthorityWaiter>;
+  aliases: Set<string>;
+  sequence: number;
   reservations: number;
   cleanupPermits: number;
   outstandingCleanupPermit?: WorkspaceRecordCleanupPermit;
@@ -90,8 +94,11 @@ interface RecordAuthorityMutex {
 
 interface RecordAuthorityLease {
   release: () => void;
-  reserveCleanupPermit: (evidenceRef: string) => WorkspaceRecordCleanupPermit;
-  settleOutstandingCleanupPermit: () => void;
+  reserveCleanupPermit: (
+    publicPath: string,
+    evidenceRef: string
+  ) => WorkspaceRecordCleanupPermit;
+  settleOutstandingCleanupPermit: (generation: WorkspaceRecordPhysicalIdentity) => void;
 }
 
 export interface WorkspaceRecordCleanupPermit {}
@@ -99,8 +106,9 @@ export interface WorkspaceRecordCleanupPermit {}
 const cleanupPermitState = new WeakMap<
   WorkspaceRecordCleanupPermit,
   {
-    identity: string;
     mutex: RecordAuthorityMutex;
+    publicPath: string;
+    generation?: OwnedTemporaryRecordIdentity;
     status: "outstanding" | "claimed" | "settled";
   }
 >();
@@ -177,6 +185,7 @@ export interface WorkspaceRecordPublicationHooks {
 }
 
 const activeRecordAuthorityMutexes = new Map<string, RecordAuthorityMutex>();
+let nextRecordAuthorityMutexSequence = 1;
 let activeRecordAuthorityReservations = 0;
 let activeRecordAuthorityCleanupPermits = 0;
 const publicationHookStorage = new AsyncLocalStorage<WorkspaceRecordPublicationHooks>();
@@ -370,7 +379,10 @@ export async function conditionalDeleteJsonRecord<T>(
 ): Promise<ConditionalDeleteJsonRecordResult> {
   const hooks = publicationHookStorage.getStore();
   const authorityLease = await acquireRecordAuthority(path, evidenceRef, "delete", hooks);
-  const mutationState = { started: false, deleted: false };
+  const mutationState: {
+    started: boolean;
+    deletedGeneration?: WorkspaceRecordPhysicalIdentity;
+  } = { started: false };
   try {
     await hooks?.afterAuthorityLeaseAcquired?.(Object.freeze({ operation: "delete" }));
     return await conditionalDeleteJsonRecordUnderAuthority(
@@ -382,8 +394,8 @@ export async function conditionalDeleteJsonRecord<T>(
       mutationState
     );
   } finally {
-    if (mutationState.deleted) {
-      authorityLease.settleOutstandingCleanupPermit();
+    if (mutationState.deletedGeneration) {
+      authorityLease.settleOutstandingCleanupPermit(mutationState.deletedGeneration);
     }
     authorityLease.release();
   }
@@ -395,7 +407,10 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   schema: z.ZodType<T>,
   condition: ConditionalDeleteJsonRecordCondition<T>,
   hooks?: WorkspaceRecordPublicationHooks,
-  mutationState?: { started: boolean; deleted?: boolean }
+  mutationState?: {
+    started: boolean;
+    deletedGeneration?: WorkspaceRecordPhysicalIdentity;
+  }
 ): Promise<ConditionalDeleteJsonRecordResult> {
   const observedIdentity = await readRecordPathIdentity(path, evidenceRef);
   if (!observedIdentity) {
@@ -427,6 +442,14 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     await hooks?.beforeGenerationIsolation?.(
       Object.freeze({ path, operation: "conditional_delete" })
     );
+    const finalPublicIdentity = await readRegularFilePathIdentity(path, evidenceRef);
+    if (!finalPublicIdentity) {
+      await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
+      return { status: "missing" };
+    }
+    if (!workspaceRecordPhysicalIdentityMatches(finalPublicIdentity, observedIdentity)) {
+      throw recordChangedBeforeConditionalRemovalError(evidenceRef);
+    }
     await rename(path, quarantinePath);
     if (mutationState) mutationState.started = true;
   } catch (error) {
@@ -435,6 +458,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       return { status: "missing" };
     }
     await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
+    if (error instanceof TaskServiceError) throw error;
     throw serviceWorkspaceError(
       "workspace_path_not_safe",
       "Failed to conditionally remove workspace record.",
@@ -466,7 +490,12 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
         throw recordChangedBeforeConditionalRemovalError(evidenceRef);
       }
       await unlink(quarantinePath);
-      if (mutationState) mutationState.deleted = true;
+      if (mutationState) {
+        mutationState.deletedGeneration = Object.freeze({
+          dev: quarantinedIdentity.dev,
+          ino: quarantinedIdentity.ino
+        });
+      }
       await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
       return { status: "deleted" };
     }
@@ -904,7 +933,11 @@ async function createJsonRecordIfAbsentInternal<T>(
       if (reserveCleanupPermit && (await recordPathEntryExists(recordPath, evidenceRef))) {
         publicationOutcome = "exists";
       } else if (reserveCleanupPermit) {
-        cleanupPermit = reserveRecordAuthorityCleanupPermit(authorityLease, evidenceRef);
+        cleanupPermit = reserveRecordAuthorityCleanupPermit(
+          authorityLease,
+          recordPath,
+          evidenceRef
+        );
       }
       if (publicationOutcome === "exists") {
         return { status: "exists" };
@@ -988,6 +1021,13 @@ async function createJsonRecordIfAbsentInternal<T>(
           ownedResources.canonicalIdentity,
           hooks
         );
+        if (cleanupPermit && ownedResources.canonicalIdentity) {
+          bindRecordAuthorityCleanupPermitGeneration(
+            cleanupPermit,
+            ownedResources.canonicalIdentity,
+            evidenceRef
+          );
+        }
       } catch (error) {
         operationError = error;
       }
@@ -1255,6 +1295,14 @@ async function conditionalUnlinkOwnedPath(
   const mutationNamespace = await createAuthorityOwnedMutationNamespace(path, evidenceRef);
   const isolatedPath = join(mutationNamespace, "generation");
   try {
+    const finalPublicIdentity = await readRegularFilePathIdentity(path, evidenceRef);
+    if (!finalPublicIdentity) {
+      await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
+      return;
+    }
+    if (!workspaceRecordPhysicalIdentityMatches(finalPublicIdentity, expected)) {
+      throw publicationStateError(evidenceRef);
+    }
     await rename(path, isolatedPath);
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) {
@@ -1434,6 +1482,14 @@ async function removeOwnedPathWithoutHooks(
   const isolatedPath = join(mutationNamespace, "generation");
   let namespaceCleanupAttempted = false;
   try {
+    const finalPublicIdentity = await readRegularFilePathIdentity(path, evidenceRef);
+    if (!finalPublicIdentity) {
+      await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
+      return;
+    }
+    if (!workspaceRecordPhysicalIdentityMatches(finalPublicIdentity, expectedIdentity)) {
+      throw publicationStateError(evidenceRef);
+    }
     await rename(path, isolatedPath);
   } catch (error) {
     const cleanupErrors: unknown[] = [];
@@ -1631,7 +1687,7 @@ async function assertPublishedRecordAuthority(
     path: recordPath,
     maxBytes: MAX_SERVICE_RECORD_BYTES,
     validateParentPath: async () => await isSafeExistingDirectoryPath(directoryPath),
-    beforeFinalValidation: hooks?.beforePublishedRecordFinalValidation
+    beforeFinalParentValidation: hooks?.beforePublishedRecordFinalValidation
   });
   if (published.status !== "read" || !published.bytes.equals(Buffer.from(recordText, "utf8"))) {
     throw publicationStateError(evidenceRef);
@@ -1717,11 +1773,11 @@ async function acquireRecordAuthority(
 ): Promise<RecordAuthorityLease> {
   const acquisitionDeadline =
     authorityDeadlineStorage.getStore() ?? Date.now() + RECORD_AUTHORITY_ACQUISITION_TIMEOUT_MS;
-  const identity = await recordAuthorityIdentity(recordPath, evidenceRef);
+  const identity = await recordAuthorityIdentityCandidates(recordPath, evidenceRef);
   if (Date.now() >= acquisitionDeadline) {
     throw authorityWaitError(evidenceRef);
   }
-  const existing = activeRecordAuthorityMutexes.get(identity);
+  const existing = findRecordAuthorityMutex(identity.aliases, evidenceRef);
   if (
     activeRecordAuthorityReservations >= MAX_RECORD_AUTHORITY_RESERVATIONS ||
     (existing?.reservations ?? 0) >= MAX_RECORD_AUTHORITY_RESERVATIONS_PER_PATH
@@ -1732,20 +1788,24 @@ async function acquireRecordAuthority(
   if (!existing) {
     const mutex: RecordAuthorityMutex = {
       waiters: new Set(),
+      aliases: new Set(),
+      sequence: nextRecordAuthorityMutexSequence++,
       reservations: 1,
       cleanupPermits: 0,
       ownerActive: true
     };
     activeRecordAuthorityReservations += 1;
-    activeRecordAuthorityMutexes.set(identity, mutex);
-    return createRecordAuthorityLease(identity, mutex);
+    bindRecordAuthorityAliases(mutex, identity.aliases, evidenceRef);
+    return createRecordAuthorityLease(mutex, identity.exactPath);
   }
+
+  bindRecordAuthorityAliases(existing, identity.aliases, evidenceRef);
 
   existing.reservations += 1;
   activeRecordAuthorityReservations += 1;
-  if (!existing.ownerActive) {
+  if (!existing.ownerActive && existing.waiters.size === 0) {
     existing.ownerActive = true;
-    return createRecordAuthorityLease(identity, existing);
+    return createRecordAuthorityLease(existing, identity.exactPath);
   }
   const waitMs = Math.max(0, acquisitionDeadline - Date.now());
   let waiter!: RecordAuthorityWaiter;
@@ -1754,14 +1814,16 @@ async function acquireRecordAuthority(
       resolve: resolveLease,
       reject: rejectLease,
       timeout: setTimeout(() => {
-        if (cancelRecordAuthorityWaiter(identity, existing, waiter)) {
+        if (cancelRecordAuthorityWaiter(existing, waiter)) {
           rejectLease(authorityWaitError(evidenceRef));
         }
       }, waitMs),
       active: true,
       deadline: acquisitionDeadline,
       evidenceRef,
-      kind: "ordinary"
+      kind: "ordinary",
+      exactPath: identity.exactPath,
+      ready: true
     };
     existing.waiters.add(waiter);
   });
@@ -1771,7 +1833,7 @@ async function acquireRecordAuthority(
       Object.freeze({ operation, deadline: acquisitionDeadline })
     );
   } catch (error) {
-    if (cancelRecordAuthorityWaiter(identity, existing, waiter)) {
+    if (cancelRecordAuthorityWaiter(existing, waiter)) {
       waiter.reject(error);
     }
   }
@@ -1788,63 +1850,81 @@ async function acquireRecordAuthorityWithCleanupPermit(
   const acquisitionDeadline =
     authorityDeadlineStorage.getStore() ?? Date.now() + RECORD_AUTHORITY_ACQUISITION_TIMEOUT_MS;
   const state = cleanupPermitState.get(permit);
-  if (!state || state.status !== "outstanding") {
+  if (!state || state.status !== "outstanding" || !state.generation) {
     throw publicationStateError(evidenceRef);
   }
   claimRecordAuthorityCleanupPermit(permit, state);
-  let identity: string;
+  const wasContended = state.mutex.ownerActive || state.mutex.waiters.size > 0;
+  let waiter!: RecordAuthorityWaiter;
+  const lease = new Promise<RecordAuthorityLease>((resolveLease, rejectLease) => {
+    waiter = {
+      resolve: resolveLease,
+      reject: rejectLease,
+      timeout: setTimeout(() => {
+        if (cancelRecordAuthorityCleanupWaiter(state.mutex, waiter)) {
+          rejectLease(authorityWaitError(evidenceRef));
+        }
+      }, Math.max(0, acquisitionDeadline - Date.now())),
+      active: true,
+      deadline: acquisitionDeadline,
+      evidenceRef,
+      kind: "cleanup",
+      exactPath: state.publicPath,
+      ready: false
+    };
+    state.mutex.waiters.add(waiter);
+  });
+  void lease.catch(() => undefined);
+
   try {
     await hooks?.beforeCleanupPermitIdentityResolution?.(Object.freeze({ path: recordPath }));
-    identity = await recordAuthorityIdentity(recordPath, evidenceRef);
-    if (identity !== state.identity || activeRecordAuthorityMutexes.get(identity) !== state.mutex) {
+    if (!waiter.active) return await lease;
+    const identity = await recordAuthorityIdentityCandidates(recordPath, evidenceRef);
+    const candidateMutex = findRecordAuthorityMutex(identity.aliases, evidenceRef);
+    const generation = await readRegularFilePathIdentity(recordPath, evidenceRef);
+    if (!waiter.active) return await lease;
+    if (
+      identity.exactPath !== state.publicPath ||
+      candidateMutex !== state.mutex ||
+      !generation ||
+      !workspaceRecordPhysicalIdentityMatches(generation, state.generation)
+    ) {
       throw publicationStateError(evidenceRef);
     }
+    bindRecordAuthorityAliases(state.mutex, identity.aliases, evidenceRef);
     if (Date.now() >= acquisitionDeadline) {
       throw authorityWaitError(evidenceRef);
     }
-    if (state.mutex.ownerActive) {
+    if (wasContended) {
       hooks?.onAuthorityContention?.(
         Object.freeze({ operation: "delete", deadline: acquisitionDeadline })
       );
     }
   } catch (error) {
-    removeUnusedRecordAuthorityMutex(state.identity, state.mutex);
-    throw error;
+    if (cancelRecordAuthorityCleanupWaiter(state.mutex, waiter)) {
+      waiter.reject(error);
+    }
+    return await lease;
   }
 
+  if (!waiter.active) {
+    return await lease;
+  }
+  waiter.ready = true;
   if (!state.mutex.ownerActive) {
-    state.mutex.ownerActive = true;
-    return createRecordAuthorityLease(state.identity, state.mutex, false);
+    handoffRecordAuthorityLease(state.mutex);
   }
-
-  const waitMs = Math.max(0, acquisitionDeadline - Date.now());
-  return await new Promise<RecordAuthorityLease>((resolveLease, rejectLease) => {
-    let waiter!: RecordAuthorityWaiter;
-    waiter = {
-      resolve: resolveLease,
-      reject: rejectLease,
-      timeout: setTimeout(() => {
-        if (cancelRecordAuthorityCleanupWaiter(state.identity, state.mutex, waiter)) {
-          rejectLease(authorityWaitError(evidenceRef));
-        }
-      }, waitMs),
-      active: true,
-      deadline: acquisitionDeadline,
-      evidenceRef,
-      kind: "cleanup"
-    };
-    state.mutex.waiters.add(waiter);
-  });
+  return await lease;
 }
 
 function createRecordAuthorityLease(
-  identity: string,
   mutex: RecordAuthorityMutex,
+  exactPath: string,
   consumesReservation = true
 ): RecordAuthorityLease {
   let released = false;
   return {
-    reserveCleanupPermit: (evidenceRef) => {
+    reserveCleanupPermit: (_publicPath, evidenceRef) => {
       if (released || mutex.cleanupPermits >= 1) {
         throw authorityCapacityError(evidenceRef);
       }
@@ -1855,11 +1935,15 @@ function createRecordAuthorityLease(
       mutex.cleanupPermits += 1;
       activeRecordAuthorityCleanupPermits += 1;
       mutex.outstandingCleanupPermit = permit;
-      cleanupPermitState.set(permit, { identity, mutex, status: "outstanding" });
+      cleanupPermitState.set(permit, {
+        mutex,
+        publicPath: exactPath,
+        status: "outstanding"
+      });
       return permit;
     },
-    settleOutstandingCleanupPermit: () => {
-      settleRecordAuthorityCleanupPermit(mutex.outstandingCleanupPermit);
+    settleOutstandingCleanupPermit: (generation) => {
+      settleRecordAuthorityCleanupPermit(mutex.outstandingCleanupPermit, generation);
     },
     release: () => {
       if (released) {
@@ -1868,57 +1952,74 @@ function createRecordAuthorityLease(
       released = true;
 
       if (consumesReservation) {
-        releaseRecordAuthorityReservation(identity, mutex);
+        releaseRecordAuthorityReservation(mutex);
       }
-      if (handoffRecordAuthorityLease(identity, mutex)) {
+      if (handoffRecordAuthorityLease(mutex)) {
         return;
       }
       mutex.ownerActive = false;
-      removeUnusedRecordAuthorityMutex(identity, mutex);
+      removeUnusedRecordAuthorityMutex(mutex);
     }
   };
 }
 
 function handoffRecordAuthorityLease(
-  identity: string,
   mutex: RecordAuthorityMutex
 ): boolean {
   for (;;) {
     const next = mutex.waiters.values().next().value as RecordAuthorityWaiter | undefined;
     if (!next) return false;
+    if (!next.ready) {
+      mutex.ownerActive = false;
+      return true;
+    }
     mutex.waiters.delete(next);
     next.active = false;
     clearTimeout(next.timeout);
     if (Date.now() >= next.deadline) {
-      if (next.kind === "ordinary") releaseRecordAuthorityReservation(identity, mutex);
+      if (next.kind === "ordinary") releaseRecordAuthorityReservation(mutex);
       next.reject(authorityWaitError(next.evidenceRef));
       continue;
     }
-    next.resolve(createRecordAuthorityLease(identity, mutex, next.kind === "ordinary"));
+    mutex.ownerActive = true;
+    next.resolve(createRecordAuthorityLease(mutex, next.exactPath, next.kind === "ordinary"));
     return true;
   }
 }
 
 function cancelRecordAuthorityCleanupWaiter(
-  identity: string,
   mutex: RecordAuthorityMutex,
   waiter: RecordAuthorityWaiter
 ): boolean {
   if (!waiter.active || waiter.kind !== "cleanup" || !mutex.waiters.delete(waiter)) return false;
   waiter.active = false;
   clearTimeout(waiter.timeout);
-  removeUnusedRecordAuthorityMutex(identity, mutex);
+  if (!mutex.ownerActive) handoffRecordAuthorityLease(mutex);
+  removeUnusedRecordAuthorityMutex(mutex);
   return true;
 }
 
 function reserveRecordAuthorityCleanupPermit(
   authorityLease: RecordAuthorityLease | undefined,
+  publicPath: string,
   evidenceRef: string
 ): WorkspaceRecordCleanupPermit {
   if (!authorityLease) {
     throw authorityCapacityError(evidenceRef);
   }
-  return authorityLease.reserveCleanupPermit(evidenceRef);
+  return authorityLease.reserveCleanupPermit(publicPath, evidenceRef);
+}
+
+function bindRecordAuthorityCleanupPermitGeneration(
+  permit: WorkspaceRecordCleanupPermit,
+  generation: OwnedTemporaryRecordIdentity,
+  evidenceRef: string
+): void {
+  const state = cleanupPermitState.get(permit);
+  if (!state || state.status !== "outstanding" || state.generation) {
+    throw publicationStateError(evidenceRef);
+  }
+  state.generation = Object.freeze({ dev: generation.dev, ino: generation.ino });
 }
 
 function cancelRecordAuthorityCleanupPermit(
@@ -1938,11 +2039,19 @@ function claimRecordAuthorityCleanupPermit(
 }
 
 function settleRecordAuthorityCleanupPermit(
-  permit: WorkspaceRecordCleanupPermit | undefined
+  permit: WorkspaceRecordCleanupPermit | undefined,
+  generation: WorkspaceRecordPhysicalIdentity
 ): void {
   if (!permit) return;
   const state = cleanupPermitState.get(permit);
-  if (!state || state.status !== "outstanding") return;
+  if (
+    !state ||
+    state.status !== "outstanding" ||
+    !state.generation ||
+    !workspaceRecordPhysicalIdentityMatches(state.generation, generation)
+  ) {
+    return;
+  }
   settleRecordAuthorityCleanupPermitState(permit, state, "settled");
 }
 
@@ -1959,11 +2068,10 @@ function settleRecordAuthorityCleanupPermitState(
   }
   state.mutex.cleanupPermits -= 1;
   activeRecordAuthorityCleanupPermits -= 1;
-  if (retireMutex) removeUnusedRecordAuthorityMutex(state.identity, state.mutex);
+  if (retireMutex) removeUnusedRecordAuthorityMutex(state.mutex);
 }
 
 function cancelRecordAuthorityWaiter(
-  identity: string,
   mutex: RecordAuthorityMutex,
   waiter: RecordAuthorityWaiter
 ): boolean {
@@ -1972,32 +2080,42 @@ function cancelRecordAuthorityWaiter(
   }
   waiter.active = false;
   clearTimeout(waiter.timeout);
-  releaseRecordAuthorityReservation(identity, mutex);
+  releaseRecordAuthorityReservation(mutex);
   return true;
 }
 
-function releaseRecordAuthorityReservation(identity: string, mutex: RecordAuthorityMutex): void {
+function releaseRecordAuthorityReservation(mutex: RecordAuthorityMutex): void {
   mutex.reservations -= 1;
   activeRecordAuthorityReservations -= 1;
-  removeUnusedRecordAuthorityMutex(identity, mutex);
+  removeUnusedRecordAuthorityMutex(mutex);
 }
 
-function removeUnusedRecordAuthorityMutex(identity: string, mutex: RecordAuthorityMutex): void {
+function removeUnusedRecordAuthorityMutex(mutex: RecordAuthorityMutex): void {
   if (
     !mutex.ownerActive &&
     mutex.reservations === 0 &&
     mutex.waiters.size === 0 &&
-    mutex.cleanupPermits === 0 &&
-    activeRecordAuthorityMutexes.get(identity) === mutex
+    mutex.cleanupPermits === 0
   ) {
-    activeRecordAuthorityMutexes.delete(identity);
+    for (const alias of mutex.aliases) {
+      if (activeRecordAuthorityMutexes.get(alias) === mutex) {
+        activeRecordAuthorityMutexes.delete(alias);
+      }
+    }
+    mutex.aliases.clear();
   }
 }
 
-async function recordAuthorityIdentity(recordPath: string, evidenceRef: string): Promise<string> {
+async function recordAuthorityIdentityCandidates(
+  recordPath: string,
+  evidenceRef: string
+): Promise<{ exactPath: string; aliases: readonly string[] }> {
   try {
-    const canonicalPath = await physicalAuthorityPathIdentity(recordPath, evidenceRef);
-    return createHash("sha256").update(canonicalPath).digest("hex");
+    const candidates = await physicalAuthorityPathIdentityCandidates(recordPath, evidenceRef);
+    return {
+      exactPath: candidates.exact,
+      aliases: Object.freeze(candidates.aliases.map(hashRecordAuthorityAlias))
+    };
   } catch (error) {
     if (error instanceof WorkspacePathSafetyError) {
       throw serviceWorkspaceError(
@@ -2009,6 +2127,50 @@ async function recordAuthorityIdentity(recordPath: string, evidenceRef: string):
       );
     }
     throw error;
+  }
+}
+
+function hashRecordAuthorityAlias(path: string): string {
+  return createHash("sha256").update(path).digest("hex");
+}
+
+function findRecordAuthorityMutex(
+  aliases: readonly string[],
+  evidenceRef: string
+): RecordAuthorityMutex | undefined {
+  const matches = Array.from(
+    new Set(
+      aliases
+        .map((alias) => activeRecordAuthorityMutexes.get(alias))
+        .filter((mutex): mutex is RecordAuthorityMutex => mutex !== undefined)
+    )
+  ).sort((left, right) => left.sequence - right.sequence);
+  if (matches.length > 1) {
+    throw authorityCoordinationError(
+      "Workspace record authority aliases collided across active lanes.",
+      evidenceRef
+    );
+  }
+  return matches[0];
+}
+
+function bindRecordAuthorityAliases(
+  mutex: RecordAuthorityMutex,
+  aliases: readonly string[],
+  evidenceRef: string
+): void {
+  for (const alias of aliases) {
+    const existing = activeRecordAuthorityMutexes.get(alias);
+    if (existing && existing !== mutex) {
+      throw authorityCoordinationError(
+        "Workspace record authority aliases collided across active lanes.",
+        evidenceRef
+      );
+    }
+  }
+  for (const alias of aliases) {
+    activeRecordAuthorityMutexes.set(alias, mutex);
+    mutex.aliases.add(alias);
   }
 }
 

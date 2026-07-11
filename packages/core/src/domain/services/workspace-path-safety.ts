@@ -38,6 +38,11 @@ type BoundaryCandidate = {
 type FileStat = Awaited<ReturnType<typeof lstat>>;
 export type FilesystemCaseSemantics = "case_sensitive" | "case_insensitive" | "unknown";
 
+export interface PhysicalAuthorityPathIdentityCandidates {
+  exact: string;
+  aliases: readonly string[];
+}
+
 const PHYSICAL_CANONICAL_PATH_RESTARTS = 3;
 
 export interface WorkspacePathSafetyHooks {
@@ -173,17 +178,105 @@ export async function physicalAuthorityPathIdentity(
   path: string,
   evidenceRef: string
 ): Promise<string> {
-  const canonicalPath = await physicalCanonicalPath(path, evidenceRef);
-  let existingAncestor = canonicalPath;
+  const candidates = await physicalAuthorityPathIdentityCandidates(path, evidenceRef);
+  return candidates.aliases.at(-1) ?? candidates.exact;
+}
+
+export async function physicalAuthorityPathIdentityCandidates(
+  path: string,
+  evidenceRef: string
+): Promise<PhysicalAuthorityPathIdentityCandidates> {
+  const targetPath = resolve(path);
+  const exact = await physicalCanonicalExactPath(targetPath, evidenceRef);
+  const targetEntry = await maybeLstat(targetPath);
+  if (targetEntry) {
+    const semantics = await existingPathCaseSemantics(exact);
+    const aliases =
+      semantics === "case_sensitive"
+        ? [exact]
+        : Array.from(new Set([exact, unicodeCaseFoldPath(exact)]));
+    return Object.freeze({ exact, aliases: Object.freeze(aliases) });
+  }
+
+  let existingAncestor = exact;
+  const missingSegments: string[] = [];
   for (;;) {
     if (await maybeLstat(existingAncestor)) break;
-    const parentPath = parse(existingAncestor).dir;
-    if (parentPath === existingAncestor) return canonicalPath;
-    existingAncestor = parentPath;
+    const parsed = parse(existingAncestor);
+    if (parsed.dir === existingAncestor) {
+      return Object.freeze({ exact, aliases: Object.freeze([exact]) });
+    }
+    missingSegments.unshift(parsed.base);
+    existingAncestor = parsed.dir;
   }
-  return (await existingPathCaseSemantics(existingAncestor)) === "case_insensitive"
-    ? canonicalPath.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
-    : canonicalPath;
+  if ((await existingPathCaseSemantics(existingAncestor)) === "case_sensitive") {
+    return Object.freeze({ exact, aliases: Object.freeze([exact]) });
+  }
+  const conservative = join(
+    existingAncestor,
+    ...missingSegments.map(unicodeCaseFoldSegment)
+  );
+  return Object.freeze({
+    exact,
+    aliases: Object.freeze(Array.from(new Set([exact, conservative])))
+  });
+}
+
+async function physicalCanonicalExactPath(
+  targetPath: string,
+  evidenceRef: string,
+  attempt = 0
+): Promise<string> {
+  const missingSegments: string[] = [];
+  let candidatePath = targetPath;
+  for (;;) {
+    let entry: FileStat | undefined;
+    try {
+      entry = await lstat(candidatePath);
+    } catch (error) {
+      if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
+        throw new WorkspacePathSafetyError(
+          "Workspace path cannot be canonicalized safely.",
+          evidenceRef
+        );
+      }
+    }
+    if (entry) {
+      if (missingSegments.length > 0 && !entry.isDirectory()) {
+        throw new WorkspacePathSafetyError(
+          "Workspace path crosses a non-directory ancestor.",
+          evidenceRef
+        );
+      }
+      try {
+        const physicalPath = await realpath(candidatePath);
+        return join(physicalPath, ...missingSegments.reverse());
+      } catch (error) {
+        if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+          if (attempt + 1 < PHYSICAL_CANONICAL_PATH_RESTARTS) {
+            return await physicalCanonicalExactPath(targetPath, evidenceRef, attempt + 1);
+          }
+          throw new WorkspacePathSafetyError(
+            "Workspace path cannot be canonicalized safely.",
+            evidenceRef
+          );
+        }
+        throw new WorkspacePathSafetyError(
+          "Workspace path cannot be canonicalized safely.",
+          evidenceRef
+        );
+      }
+    }
+    const parsed = parse(candidatePath);
+    if (parsed.dir === candidatePath) {
+      throw new WorkspacePathSafetyError(
+        "Workspace path has no canonical physical ancestor.",
+        evidenceRef
+      );
+    }
+    missingSegments.push(parsed.base);
+    candidatePath = parsed.dir;
+  }
 }
 
 async function tryPhysicalCanonicalPath(
@@ -316,7 +409,16 @@ async function physicalCanonicalUnresolvedPath(
 }
 
 function conservativeMissingPathIdentitySegment(segment: string): string {
-  return /^[\x00-\x7f]+$/.test(segment) ? segment.toLowerCase() : segment;
+  return unicodeCaseFoldSegment(segment);
+}
+
+function unicodeCaseFoldSegment(segment: string): string {
+  return segment.normalize("NFC").toLowerCase();
+}
+
+function unicodeCaseFoldPath(path: string): string {
+  const { rootPath, segments } = pathParts(path);
+  return join(rootPath, ...segments.map(unicodeCaseFoldSegment));
 }
 
 async function canonicalMissingPathIdentitySegments(
