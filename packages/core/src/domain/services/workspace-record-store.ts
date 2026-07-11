@@ -144,6 +144,9 @@ export interface WorkspaceRecordPublicationHooks {
         | "hardlink_temp_cleanup";
     }>
   ) => Promise<void> | void;
+  beforeAuthorityNamespaceCreation?: (
+    input: Readonly<{ path: string }>
+  ) => Promise<void> | void;
   beforeAuthorityOwnedUnlink?: (
     input: Readonly<{
       path: string;
@@ -398,7 +401,6 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     return { status: "condition_not_met" };
   }
 
-  if (mutationState) mutationState.started = true;
   const mutationNamespace = await createAuthorityOwnedMutationNamespace(path, evidenceRef);
   const quarantinePath = join(mutationNamespace, "generation");
   try {
@@ -406,6 +408,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       Object.freeze({ path, operation: "conditional_delete" })
     );
     await rename(path, quarantinePath);
+    if (mutationState) mutationState.started = true;
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) {
       await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
@@ -666,6 +669,9 @@ async function createAuthorityOwnedMutationNamespace(
     dirname(publicPath),
     `.${parse(publicPath).base}-${process.pid}-${randomUUID()}.authority`
   );
+  await publicationHookStorage
+    .getStore()
+    ?.beforeAuthorityNamespaceCreation?.(Object.freeze({ path: namespacePath }));
   await createPrivateAuthorityNamespaceAt(namespacePath, evidenceRef);
   return namespacePath;
 }

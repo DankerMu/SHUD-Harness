@@ -327,9 +327,17 @@ async function canonicalMissingPathIdentitySegments(
 
 async function existingPathHasCaseInsensitiveAliases(path: string): Promise<boolean> {
   const expectedPhysicalPath = await realpath(path);
+  const targetDevice = (await lstat(expectedPhysicalPath)).dev;
   let candidatePath = expectedPhysicalPath;
   for (;;) {
     const parsed = parse(candidatePath);
+    const [candidateEntry, parentEntry] = await Promise.all([
+      lstat(candidatePath),
+      lstat(parsed.dir)
+    ]);
+    if (candidateEntry.dev !== targetDevice || parentEntry.dev !== targetDevice) {
+      return false;
+    }
     const alternateBase = swapFirstAsciiLetterCase(parsed.base);
     if (alternateBase !== parsed.base) {
       try {

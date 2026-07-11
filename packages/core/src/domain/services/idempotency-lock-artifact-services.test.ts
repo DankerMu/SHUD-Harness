@@ -11,6 +11,7 @@ import {
   readdir,
   realpath,
   rename,
+  rmdir,
   rm,
   stat,
   symlink,
@@ -64,6 +65,7 @@ import {
 import { readDurableSingleLinkFile } from "./durable-single-link-reader";
 
 const tempRoots: string[] = [];
+const distinctCaseEntriesSupported = await detectDistinctCaseEntriesSupport();
 
 describe("idempotency, lock, and artifact services", () => {
   afterEach(async () => {
@@ -289,11 +291,10 @@ describe("idempotency, lock, and artifact services", () => {
     expect(aliasResult.status).toBe("exists");
   });
 
-  test("coexisting case-sensitive leaves keep distinct authority and reject cross-path permits", async () => {
+  test.skipIf(!distinctCaseEntriesSupported)("coexisting case-sensitive leaves keep distinct authority and reject cross-path permits", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     await mkdir(workspaceRoot);
-    if (!(await supportsDistinctCaseEntries(workspaceRoot))) return;
     const schema = z.object({ id: z.string() });
     const upper = { id: "upper" };
     const lower = { id: "lower" };
@@ -321,6 +322,169 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await readFileWithIdentity(lowerPath)).toEqual(lowerBefore);
     expect(await conditionalDeleteJsonRecordWithCleanupPermit(lowerCreated.cleanupPermit, lowerPath, "case-sensitive.lower", schema, { kind: "record", expected: lower, matches: (current, expected) => current.id === expected.id })).toEqual({ status: "deleted" });
     expect(await conditionalDeleteJsonRecord(upperPath, "case-sensitive.upper", schema, { kind: "record", expected: upper, matches: (current, expected) => current.id === expected.id })).toEqual({ status: "deleted" });
+  });
+
+  test("cleanup-permit deletion keeps namespace and pre-rename failures pre-mutation", async () => {
+    for (const failure of ["namespace", "pre_isolation", "rename"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: failure };
+      const evidenceRef = `conditional-delete.pre-mutation.${failure}`;
+      const directorySegments = ["conditional-delete-pre-mutation"] as const;
+      const fileName = `${failure}.json`;
+      const path = workspaceRecordPath(workspaceRoot, [...directorySegments, fileName], evidenceRef);
+      const created = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      );
+      if (created.status !== "created") throw new Error("Expected a cleanup-permit fixture.");
+      const before = await readFileWithIdentity(path);
+      let blockingNamespacePath: string | undefined;
+
+      const error = await captureConditionalDeleteError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          failure === "namespace"
+            ? {
+                beforeAuthorityNamespaceCreation: async ({ path: namespacePath }) => {
+                  blockingNamespacePath = namespacePath;
+                  await writeFile(namespacePath, "namespace creation blocker", { flag: "wx" });
+                }
+              }
+            : {
+                beforeGenerationIsolation: async () => {
+                  if (failure === "pre_isolation") {
+                    throw new Error("injected pre-isolation failure");
+                  }
+                  blockingNamespacePath = await findOnlyAuthorityNamespace(join(path, ".."));
+                  await rmdir(blockingNamespacePath);
+                  await writeFile(blockingNamespacePath, "rename blocker", { flag: "wx" });
+                }
+              },
+          () =>
+            conditionalDeleteJsonRecordWithCleanupPermit(
+              created.cleanupPermit,
+              path,
+              evidenceRef,
+              schema,
+              {
+                kind: "record",
+                expected: record,
+                matches: (current, expected) => current.id === expected.id
+              }
+            )
+        )
+      );
+
+      expect(error.mutationPhase).toBe("pre_mutation");
+      expect(error.failureStage).toBe("operation");
+      expect(await readFileWithIdentity(path)).toEqual(before);
+      if (blockingNamespacePath) await rm(blockingNamespacePath, { force: true });
+      expect((await readdir(join(path, ".."))).some(isOwnedRecordPath)).toBe(false);
+
+      const reusedPermit = await captureConditionalDeleteError(() =>
+        conditionalDeleteJsonRecordWithCleanupPermit(
+          created.cleanupPermit,
+          path,
+          evidenceRef,
+          schema,
+          {
+            kind: "record",
+            expected: record,
+            matches: (current, expected) => current.id === expected.id
+          }
+        )
+      );
+      expect(reusedPermit.mutationPhase).toBe("pre_mutation");
+      expect(reusedPermit.failureStage).toBe("permit_admission");
+      expect(await readFileWithIdentity(path)).toEqual(before);
+      expect(
+        await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.id === expected.id
+        })
+      ).toEqual({ status: "deleted" });
+    }
+  });
+
+  test("cleanup-permit deletion marks failures after canonical isolation post-mutation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "post-rename" };
+    const evidenceRef = "conditional-delete.post-mutation";
+    const directorySegments = ["conditional-delete-post-mutation"] as const;
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "record.json"],
+      evidenceRef
+    );
+    const created = await createJsonRecordIfAbsentWithCleanupPermit(
+      workspaceRoot,
+      directorySegments,
+      "record.json",
+      record,
+      evidenceRef,
+      schema
+    );
+    if (created.status !== "created") throw new Error("Expected a cleanup-permit fixture.");
+    const before = await readFileWithIdentity(path);
+
+    const error = await captureConditionalDeleteError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeAuthorityOwnedUnlink: ({ operation }) => {
+            if (operation === "conditional_delete") {
+              throw new Error("injected post-rename failure");
+            }
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecordWithCleanupPermit(
+            created.cleanupPermit,
+            path,
+            evidenceRef,
+            schema,
+            {
+              kind: "record",
+              expected: record,
+              matches: (current, expected) => current.id === expected.id
+            }
+          )
+      )
+    );
+
+    expect(error.mutationPhase).toBe("post_mutation");
+    expect(error.failureStage).toBe("operation");
+    expect(await readFileWithIdentity(path)).toEqual(before);
+    expect((await readdir(join(path, ".."))).some(isOwnedRecordPath)).toBe(false);
+    const reusedPermit = await captureConditionalDeleteError(() =>
+      conditionalDeleteJsonRecordWithCleanupPermit(
+        created.cleanupPermit,
+        path,
+        evidenceRef,
+        schema,
+        {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.id === expected.id
+        }
+      )
+    );
+    expect(reusedPermit.mutationPhase).toBe("pre_mutation");
+    expect(reusedPermit.failureStage).toBe("permit_admission");
+    expect(
+      await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+        kind: "record",
+        expected: record,
+        matches: (current, expected) => current.id === expected.id
+      })
+    ).toEqual({ status: "deleted" });
   });
 
   test("physical canonical paths preserve existing spelling across follower restart windows", async () => {
@@ -1845,6 +2009,56 @@ describe("idempotency, lock, and artifact services", () => {
         }
       )
     ).toEqual({ status: "missing" });
+
+    const repeated = { id: "repeated" };
+    await createJsonRecordIfAbsent(
+      workspaceRoot,
+      directorySegments,
+      "repeated.json",
+      repeated,
+      "namespace.cleanup.repeated",
+      schema
+    );
+    const repeatedPath = join(directoryPath, "repeated.json");
+    const repeatedFailure = new Error("same namespace cleanup failure");
+    const repeatedError = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeAuthorityNamespaceRemoval: () => {
+            throw repeatedFailure;
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecord(
+            repeatedPath,
+            "namespace.cleanup.repeated",
+            schema,
+            {
+              kind: "record",
+              expected: repeated,
+              matches: (current, expected) => current.id === expected.id
+            }
+          )
+      )
+    );
+    expect(repeatedError.cause).toBeInstanceOf(Error);
+    expect((repeatedError.cause as Error).cause).toBeInstanceOf(AggregateError);
+    const repeatedAggregate = (repeatedError.cause as Error).cause as AggregateError;
+    expect(repeatedAggregate.errors).toHaveLength(2);
+    expect(repeatedAggregate.errors).toEqual([repeatedFailure, repeatedFailure]);
+    expect(aggregateErrorMessages(repeatedError)).toEqual([
+      "Workspace mutation namespace cleanup did not complete.",
+      "same namespace cleanup failure",
+      "Workspace record publication compensation failed.",
+      "same namespace cleanup failure",
+      "same namespace cleanup failure"
+    ]);
+    await expectPathMissing(repeatedPath);
+    await rm(await findOnlyAuthorityNamespace(directoryPath), { recursive: true });
+
+    const cyclic = new AggregateError([], "cyclic compensation");
+    Object.defineProperty(cyclic, "cause", { value: cyclic });
+    expect(aggregateErrorMessages(cyclic)).toEqual(["cyclic compensation"]);
   });
 
   test("project-owned temp cleanup uses the open-file identity and preserves an outside hardlink", async () => {
@@ -4641,6 +4855,15 @@ async function supportsDistinctCaseEntries(directoryPath: string): Promise<boole
   }
 }
 
+async function detectDistinctCaseEntriesSupport(): Promise<boolean> {
+  const probeRoot = await realpath(await mkdtemp(join(tmpdir(), "shud-harness-case-capability-")));
+  try {
+    return await supportsDistinctCaseEntries(probeRoot);
+  } finally {
+    await rm(probeRoot, { recursive: true, force: true });
+  }
+}
+
 async function readFileWithIdentity(path: string): Promise<{ bytes: Buffer; dev: number; ino: number }> {
   const [bytes, identity] = await Promise.all([readFile(path), stat(path)]);
   return { bytes, dev: identity.dev, ino: identity.ino };
@@ -4737,14 +4960,17 @@ async function expectFileDescriptorClosed(fd: number): Promise<void> {
   expect(error).toMatchObject({ code: "EBADF" });
 }
 
-function aggregateErrorMessages(value: unknown, seen = new Set<unknown>()): string[] {
-  if (!(value instanceof Error) || seen.has(value)) return [];
-  seen.add(value);
+function aggregateErrorMessages(value: unknown, ancestors = new Set<unknown>()): string[] {
+  if (!(value instanceof Error) || ancestors.has(value)) return [];
+  ancestors.add(value);
   const messages = [value.message];
   if (value instanceof AggregateError) {
-    for (const error of value.errors) messages.push(...aggregateErrorMessages(error, seen));
+    for (const error of value.errors) {
+      messages.push(...aggregateErrorMessages(error, ancestors));
+    }
   }
-  messages.push(...aggregateErrorMessages(value.cause, seen));
+  messages.push(...aggregateErrorMessages(value.cause, ancestors));
+  ancestors.delete(value);
   return messages;
 }
 
