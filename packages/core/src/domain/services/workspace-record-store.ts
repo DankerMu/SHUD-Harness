@@ -30,9 +30,18 @@ const RECORD_NAMESPACE_CLEANUP_ATTEMPTS = 3;
 type FileStat = Awaited<ReturnType<typeof lstat>>;
 type RecordFileHandle = Awaited<ReturnType<typeof open>>;
 
-interface OwnedTemporaryRecordIdentity {
-  dev: number;
-  ino: number;
+export interface WorkspaceRecordPhysicalIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
+interface OwnedTemporaryRecordIdentity extends WorkspaceRecordPhysicalIdentity {}
+
+export function workspaceRecordPhysicalIdentityMatches(
+  observed: WorkspaceRecordPhysicalIdentity,
+  expected: WorkspaceRecordPhysicalIdentity
+): boolean {
+  return observed.dev === expected.dev && observed.ino === expected.ino;
 }
 
 interface OwnedTemporaryRecord {
@@ -75,19 +84,25 @@ interface RecordAuthorityMutex {
   waiters: Set<RecordAuthorityWaiter>;
   reservations: number;
   cleanupPermits: number;
+  outstandingCleanupPermit?: WorkspaceRecordCleanupPermit;
   ownerActive: boolean;
 }
 
 interface RecordAuthorityLease {
   release: () => void;
   reserveCleanupPermit: (evidenceRef: string) => WorkspaceRecordCleanupPermit;
+  settleOutstandingCleanupPermit: () => void;
 }
 
 export interface WorkspaceRecordCleanupPermit {}
 
 const cleanupPermitState = new WeakMap<
   WorkspaceRecordCleanupPermit,
-  { identity: string; mutex: RecordAuthorityMutex; used: boolean }
+  {
+    identity: string;
+    mutex: RecordAuthorityMutex;
+    status: "outstanding" | "claimed" | "settled";
+  }
 >();
 
 export interface WorkspaceRecordPublicationHookInput {
@@ -99,8 +114,8 @@ export interface WorkspaceRecordTemporaryHandleHookInput
   extends WorkspaceRecordPublicationHookInput {
   descriptor: Readonly<{
     fd: number;
-    dev: number;
-    ino: number;
+    dev: bigint;
+    ino: bigint;
   }>;
 }
 
@@ -355,6 +370,7 @@ export async function conditionalDeleteJsonRecord<T>(
 ): Promise<ConditionalDeleteJsonRecordResult> {
   const hooks = publicationHookStorage.getStore();
   const authorityLease = await acquireRecordAuthority(path, evidenceRef, "delete", hooks);
+  const mutationState = { started: false, deleted: false };
   try {
     await hooks?.afterAuthorityLeaseAcquired?.(Object.freeze({ operation: "delete" }));
     return await conditionalDeleteJsonRecordUnderAuthority(
@@ -362,9 +378,13 @@ export async function conditionalDeleteJsonRecord<T>(
       evidenceRef,
       schema,
       condition,
-      hooks
+      hooks,
+      mutationState
     );
   } finally {
+    if (mutationState.deleted) {
+      authorityLease.settleOutstandingCleanupPermit();
+    }
     authorityLease.release();
   }
 }
@@ -375,7 +395,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   schema: z.ZodType<T>,
   condition: ConditionalDeleteJsonRecordCondition<T>,
   hooks?: WorkspaceRecordPublicationHooks,
-  mutationState?: { started: boolean }
+  mutationState?: { started: boolean; deleted?: boolean }
 ): Promise<ConditionalDeleteJsonRecordResult> {
   const observedIdentity = await readRecordPathIdentity(path, evidenceRef);
   if (!observedIdentity) {
@@ -428,8 +448,8 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   try {
     quarantinedIdentity = await readRegularFilePathIdentity(quarantinePath, evidenceRef);
     if (
-      quarantinedIdentity?.dev === observedIdentity.dev &&
-      quarantinedIdentity.ino === observedIdentity.ino &&
+      quarantinedIdentity &&
+      workspaceRecordPhysicalIdentityMatches(quarantinedIdentity, observedIdentity) &&
       (await isolatedBytesEqual(quarantinePath, observation.bytes, evidenceRef))
     ) {
       await hooks?.beforeAuthorityOwnedUnlink?.(
@@ -446,6 +466,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
         throw recordChangedBeforeConditionalRemovalError(evidenceRef);
       }
       await unlink(quarantinePath);
+      if (mutationState) mutationState.deleted = true;
       await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
       return { status: "deleted" };
     }
@@ -502,8 +523,7 @@ async function restoreQuarantinedRecordNoClobber(
     if (
       !restoredIdentity ||
       !quarantinedIdentity ||
-      restoredIdentity.dev !== quarantinedIdentity.dev ||
-      restoredIdentity.ino !== quarantinedIdentity.ino
+      !workspaceRecordPhysicalIdentityMatches(restoredIdentity, quarantinedIdentity)
     ) {
       throw recordChangedBeforeConditionalRemovalError(evidenceRef);
     }
@@ -623,11 +643,11 @@ async function readRecordPathIdentity(
   evidenceRef: string
 ): Promise<OwnedTemporaryRecordIdentity | undefined> {
   try {
-    const entry = await lstat(path);
+    const entry = await lstat(path, { bigint: true });
     if (!entry.isFile() || entry.isSymbolicLink()) {
       throw recordDurableReadError("not_regular_file", evidenceRef);
     }
-    if (entry.nlink !== 1) {
+    if (entry.nlink !== 1n) {
       throw recordDurableReadError("multiple_links", evidenceRef);
     }
     return { dev: entry.dev, ino: entry.ino };
@@ -647,7 +667,7 @@ async function readRegularFilePathIdentity(
   evidenceRef: string
 ): Promise<OwnedTemporaryRecordIdentity | undefined> {
   try {
-    const entry = await lstat(path);
+    const entry = await lstat(path, { bigint: true });
     if (!entry.isFile() || entry.isSymbolicLink()) {
       throw recordDurableReadError("not_regular_file", evidenceRef);
     }
@@ -1171,7 +1191,7 @@ async function writeOwnedTemporaryRecordFile(
       constants.O_CREAT | constants.O_EXCL | constants.O_RDWR
     );
     shouldCleanup = true;
-    const entry = await temporaryFile.stat();
+    const entry = await temporaryFile.stat({ bigint: true });
     if (!entry.isFile()) {
       throw publicationStateError(evidenceRef);
     }
@@ -1247,8 +1267,7 @@ async function conditionalUnlinkOwnedPath(
   const isolatedIdentity = await readRegularFilePathIdentity(isolatedPath, evidenceRef);
   if (
     !isolatedIdentity ||
-    isolatedIdentity.dev !== expected.dev ||
-    isolatedIdentity.ino !== expected.ino ||
+    !workspaceRecordPhysicalIdentityMatches(isolatedIdentity, expected) ||
     !(await ownedGenerationBytesEqual(isolatedPath, expected, expectedBytes, evidenceRef))
   ) {
     await restoreQuarantinedRecordNoClobber(isolatedPath, path, evidenceRef);
@@ -1265,18 +1284,18 @@ async function conditionalUnlinkOwnedPath(
 }
 
 async function readBoundedOpenFileBytes(file: RecordFileHandle): Promise<Buffer> {
-  const before = await file.stat();
-  if (!before.isFile() || before.size > MAX_SERVICE_RECORD_BYTES) {
+  const before = await file.stat({ bigint: true });
+  if (!before.isFile() || before.size > BigInt(MAX_SERVICE_RECORD_BYTES)) {
     throw new Error("Temporary record bytes are not bounded.");
   }
-  const bytes = Buffer.alloc(before.size);
+  const bytes = Buffer.alloc(Number(before.size));
   let offset = 0;
   while (offset < bytes.length) {
     const result = await file.read(bytes, offset, bytes.length - offset, offset);
     if (result.bytesRead === 0) break;
     offset += result.bytesRead;
   }
-  const after = await file.stat();
+  const after = await file.stat({ bigint: true });
   if (offset !== bytes.length || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size) {
     throw new Error("Temporary record bytes changed while observed.");
   }
@@ -1308,8 +1327,7 @@ async function removeOwnedPublicationTemporaryPath(
       const isolatedIdentity = await readRegularFilePathIdentity(temporaryPath, evidenceRef);
       if (
         !isolatedIdentity ||
-        isolatedIdentity.dev !== temporaryIdentity.dev ||
-        isolatedIdentity.ino !== temporaryIdentity.ino ||
+        !workspaceRecordPhysicalIdentityMatches(isolatedIdentity, temporaryIdentity) ||
         !(await ownedGenerationBytesEqual(
           temporaryPath,
           temporaryIdentity,
@@ -1432,8 +1450,7 @@ async function removeOwnedPathWithoutHooks(
     const identity = await readRegularFilePathIdentity(isolatedPath, evidenceRef);
     if (
       !identity ||
-      identity.dev !== expectedIdentity.dev ||
-      identity.ino !== expectedIdentity.ino ||
+      !workspaceRecordPhysicalIdentityMatches(identity, expectedIdentity) ||
       (requireExpectedBytes &&
         !(await ownedGenerationBytesEqual(
           isolatedPath,
@@ -1495,24 +1512,23 @@ async function ownedGenerationBytesEqual(
   let file: RecordFileHandle | undefined;
   try {
     file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const before = await file.stat();
+    const before = await file.stat({ bigint: true });
     if (
       !before.isFile() ||
-      before.dev !== expectedIdentity.dev ||
-      before.ino !== expectedIdentity.ino ||
-      before.size !== expectedBytes.length ||
-      before.size > MAX_SERVICE_RECORD_BYTES
+      !workspaceRecordPhysicalIdentityMatches(before, expectedIdentity) ||
+      before.size !== BigInt(expectedBytes.length) ||
+      before.size > BigInt(MAX_SERVICE_RECORD_BYTES)
     ) {
       return false;
     }
-    const bytes = Buffer.alloc(before.size);
+    const bytes = Buffer.alloc(Number(before.size));
     let offset = 0;
     while (offset < bytes.length) {
       const result = await file.read(bytes, offset, bytes.length - offset, offset);
       if (result.bytesRead === 0) break;
       offset += result.bytesRead;
     }
-    const after = await file.stat();
+    const after = await file.stat({ bigint: true });
     return (
       offset === expectedBytes.length &&
       bytes.equals(expectedBytes) &&
@@ -1582,7 +1598,7 @@ async function assertOwnedTemporaryRecordPath(
 ): Promise<void> {
   let entry: FileStat;
   try {
-    entry = await lstat(temporaryPath);
+    entry = await lstat(temporaryPath, { bigint: true });
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) {
       throw error;
@@ -1593,8 +1609,7 @@ async function assertOwnedTemporaryRecordPath(
   if (
     !entry.isFile() ||
     entry.isSymbolicLink() ||
-    entry.dev !== expected.dev ||
-    entry.ino !== expected.ino
+    !workspaceRecordPhysicalIdentityMatches(entry, expected)
   ) {
     throw publicationStateError(evidenceRef);
   }
@@ -1623,8 +1638,7 @@ async function assertPublishedRecordAuthority(
   }
   if (expectedIdentity) {
     if (
-      published.identity.dev !== BigInt(expectedIdentity.dev) ||
-      published.identity.ino !== BigInt(expectedIdentity.ino)
+      !workspaceRecordPhysicalIdentityMatches(published.identity, expectedIdentity)
     ) {
       throw publicationStateError(evidenceRef);
     }
@@ -1643,17 +1657,13 @@ async function assertClosedTemporaryRecordAuthority(
   });
   if (
     observed.status !== "read" ||
-    observed.identity.dev !== BigInt(expectedIdentity.dev) ||
-    observed.identity.ino !== BigInt(expectedIdentity.ino) ||
+    !workspaceRecordPhysicalIdentityMatches(observed.identity, expectedIdentity) ||
     !observed.bytes.equals(expectedBytes)
   ) {
     throw publicationStateError(evidenceRef);
   }
 
-  return {
-    dev: Number(observed.identity.dev),
-    ino: Number(observed.identity.ino)
-  };
+  return observed.identity;
 }
 
 async function assertOpenRecordAuthority(
@@ -1663,19 +1673,18 @@ async function assertOpenRecordAuthority(
   evidenceRef: string
 ): Promise<void> {
   const expectedBytes = Buffer.from(recordText, "utf8");
-  const before = await temporaryRecord.file.stat();
+  const before = await temporaryRecord.file.stat({ bigint: true });
   if (
     !before.isFile() ||
-    before.dev !== temporaryRecord.identity.dev ||
-    before.ino !== temporaryRecord.identity.ino ||
-    before.nlink !== expectedLinks ||
-    before.size !== expectedBytes.length ||
-    before.size > MAX_SERVICE_RECORD_BYTES
+    !workspaceRecordPhysicalIdentityMatches(before, temporaryRecord.identity) ||
+    before.nlink !== BigInt(expectedLinks) ||
+    before.size !== BigInt(expectedBytes.length) ||
+    before.size > BigInt(MAX_SERVICE_RECORD_BYTES)
   ) {
     throw publicationStateError(evidenceRef);
   }
 
-  const observedBytes = Buffer.allocUnsafe(before.size);
+  const observedBytes = Buffer.allocUnsafe(Number(before.size));
   let offset = 0;
   while (offset < observedBytes.length) {
     const { bytesRead } = await temporaryRecord.file.read(
@@ -1687,13 +1696,13 @@ async function assertOpenRecordAuthority(
     if (bytesRead === 0) break;
     offset += bytesRead;
   }
-  const after = await temporaryRecord.file.stat();
+  const after = await temporaryRecord.file.stat({ bigint: true });
   if (
     offset !== expectedBytes.length ||
     !observedBytes.equals(expectedBytes) ||
     after.dev !== before.dev ||
     after.ino !== before.ino ||
-    after.nlink !== expectedLinks ||
+    after.nlink !== BigInt(expectedLinks) ||
     after.size !== before.size
   ) {
     throw publicationStateError(evidenceRef);
@@ -1779,9 +1788,10 @@ async function acquireRecordAuthorityWithCleanupPermit(
   const acquisitionDeadline =
     authorityDeadlineStorage.getStore() ?? Date.now() + RECORD_AUTHORITY_ACQUISITION_TIMEOUT_MS;
   const state = cleanupPermitState.get(permit);
-  if (!state || state.used) {
+  if (!state || state.status !== "outstanding") {
     throw publicationStateError(evidenceRef);
   }
+  claimRecordAuthorityCleanupPermit(permit, state);
   let identity: string;
   try {
     await hooks?.beforeCleanupPermitIdentityResolution?.(Object.freeze({ path: recordPath }));
@@ -1798,13 +1808,10 @@ async function acquireRecordAuthorityWithCleanupPermit(
       );
     }
   } catch (error) {
-    cancelRecordAuthorityCleanupPermit(permit);
+    removeUnusedRecordAuthorityMutex(state.identity, state.mutex);
     throw error;
   }
 
-  state.used = true;
-  state.mutex.cleanupPermits -= 1;
-  activeRecordAuthorityCleanupPermits -= 1;
   if (!state.mutex.ownerActive) {
     state.mutex.ownerActive = true;
     return createRecordAuthorityLease(state.identity, state.mutex, false);
@@ -1839,7 +1846,7 @@ function createRecordAuthorityLease(
   return {
     reserveCleanupPermit: (evidenceRef) => {
       if (released || mutex.cleanupPermits >= 1) {
-        throw new Error("Workspace record cleanup authority permit is unavailable.");
+        throw authorityCapacityError(evidenceRef);
       }
       if (activeRecordAuthorityCleanupPermits >= MAX_RECORD_AUTHORITY_RESERVATIONS) {
         throw authorityCapacityError(evidenceRef);
@@ -1847,8 +1854,12 @@ function createRecordAuthorityLease(
       const permit = Object.freeze({}) as WorkspaceRecordCleanupPermit;
       mutex.cleanupPermits += 1;
       activeRecordAuthorityCleanupPermits += 1;
-      cleanupPermitState.set(permit, { identity, mutex, used: false });
+      mutex.outstandingCleanupPermit = permit;
+      cleanupPermitState.set(permit, { identity, mutex, status: "outstanding" });
       return permit;
+    },
+    settleOutstandingCleanupPermit: () => {
+      settleRecordAuthorityCleanupPermit(mutex.outstandingCleanupPermit);
     },
     release: () => {
       if (released) {
@@ -1905,7 +1916,7 @@ function reserveRecordAuthorityCleanupPermit(
   evidenceRef: string
 ): WorkspaceRecordCleanupPermit {
   if (!authorityLease) {
-    throw new Error("Workspace record authority lease is unavailable.");
+    throw authorityCapacityError(evidenceRef);
   }
   return authorityLease.reserveCleanupPermit(evidenceRef);
 }
@@ -1915,11 +1926,40 @@ function cancelRecordAuthorityCleanupPermit(
 ): void {
   if (!permit) return;
   const state = cleanupPermitState.get(permit);
-  if (!state || state.used) return;
-  state.used = true;
+  if (!state || state.status !== "outstanding") return;
+  settleRecordAuthorityCleanupPermitState(permit, state, "settled");
+}
+
+function claimRecordAuthorityCleanupPermit(
+  permit: WorkspaceRecordCleanupPermit,
+  state: NonNullable<ReturnType<typeof cleanupPermitState.get>>
+): void {
+  settleRecordAuthorityCleanupPermitState(permit, state, "claimed", false);
+}
+
+function settleRecordAuthorityCleanupPermit(
+  permit: WorkspaceRecordCleanupPermit | undefined
+): void {
+  if (!permit) return;
+  const state = cleanupPermitState.get(permit);
+  if (!state || state.status !== "outstanding") return;
+  settleRecordAuthorityCleanupPermitState(permit, state, "settled");
+}
+
+function settleRecordAuthorityCleanupPermitState(
+  permit: WorkspaceRecordCleanupPermit,
+  state: NonNullable<ReturnType<typeof cleanupPermitState.get>>,
+  terminalStatus: "claimed" | "settled",
+  retireMutex = true
+): void {
+  if (state.status !== "outstanding") return;
+  state.status = terminalStatus;
+  if (state.mutex.outstandingCleanupPermit === permit) {
+    state.mutex.outstandingCleanupPermit = undefined;
+  }
   state.mutex.cleanupPermits -= 1;
   activeRecordAuthorityCleanupPermits -= 1;
-  removeUnusedRecordAuthorityMutex(state.identity, state.mutex);
+  if (retireMutex) removeUnusedRecordAuthorityMutex(state.identity, state.mutex);
 }
 
 function cancelRecordAuthorityWaiter(

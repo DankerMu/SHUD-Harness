@@ -36,6 +36,7 @@ type BoundaryCandidate = {
 };
 
 type FileStat = Awaited<ReturnType<typeof lstat>>;
+export type FilesystemCaseSemantics = "case_sensitive" | "case_insensitive" | "unknown";
 
 const PHYSICAL_CANONICAL_PATH_RESTARTS = 3;
 
@@ -48,6 +49,9 @@ export interface WorkspacePathSafetyHooks {
       missingSegmentCount: number;
     }>
   ) => Promise<void> | void;
+  filesystemCaseSemantics?: (
+    input: Readonly<{ existingPath: string }>
+  ) => FilesystemCaseSemantics | undefined;
 }
 
 const workspacePathSafetyHookStorage = new AsyncLocalStorage<WorkspacePathSafetyHooks>();
@@ -177,7 +181,7 @@ export async function physicalAuthorityPathIdentity(
     if (parentPath === existingAncestor) return canonicalPath;
     existingAncestor = parentPath;
   }
-  return (await existingPathHasCaseInsensitiveAliases(existingAncestor))
+  return (await existingPathCaseSemantics(existingAncestor)) === "case_insensitive"
     ? canonicalPath.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
     : canonicalPath;
 }
@@ -319,14 +323,18 @@ async function canonicalMissingPathIdentitySegments(
   physicalAncestor: string,
   segments: readonly string[]
 ): Promise<string[]> {
-  if (!(await existingPathHasCaseInsensitiveAliases(physicalAncestor))) {
+  if ((await existingPathCaseSemantics(physicalAncestor)) === "case_sensitive") {
     return [...segments];
   }
   return segments.map(conservativeMissingPathIdentitySegment);
 }
 
-async function existingPathHasCaseInsensitiveAliases(path: string): Promise<boolean> {
+async function existingPathCaseSemantics(path: string): Promise<FilesystemCaseSemantics> {
   const expectedPhysicalPath = await realpath(path);
+  const injectedSemantics = workspacePathSafetyHookStorage
+    .getStore()
+    ?.filesystemCaseSemantics?.(Object.freeze({ existingPath: expectedPhysicalPath }));
+  if (injectedSemantics !== undefined) return injectedSemantics;
   const targetDevice = (await lstat(expectedPhysicalPath)).dev;
   let candidatePath = expectedPhysicalPath;
   for (;;) {
@@ -335,21 +343,46 @@ async function existingPathHasCaseInsensitiveAliases(path: string): Promise<bool
       lstat(candidatePath),
       lstat(parsed.dir)
     ]);
-    if (candidateEntry.dev !== targetDevice || parentEntry.dev !== targetDevice) {
-      return false;
+    if (candidateEntry.dev !== targetDevice) {
+      return "unknown";
     }
-    const alternateBase = swapFirstAsciiLetterCase(parsed.base);
-    if (alternateBase !== parsed.base) {
-      try {
-        if (await realpath(join(parsed.dir, alternateBase)) === candidatePath) return true;
-      } catch (error) {
-        if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
-          throw error;
-        }
-      }
-    }
-    if (parsed.dir === candidatePath) return false;
+    const componentSemantics = await existingEntryCaseSemantics(
+      parsed.dir,
+      parsed.base,
+      candidatePath
+    );
+    if (componentSemantics !== "unknown") return componentSemantics;
+    if (parsed.dir === candidatePath || parentEntry.dev !== targetDevice) return "unknown";
     candidatePath = parsed.dir;
+  }
+}
+
+async function existingEntryCaseSemantics(
+  parentPath: string,
+  base: string,
+  expectedPhysicalPath: string
+): Promise<FilesystemCaseSemantics> {
+  const alternateBase = swapFirstAsciiLetterCase(base);
+  if (alternateBase === base) return "unknown";
+  const expectedPath = join(parentPath, base);
+  const alternatePath = join(parentPath, alternateBase);
+  try {
+    const [expectedEntry, alternateEntry, alternatePhysicalPath] = await Promise.all([
+      lstat(expectedPath, { bigint: true }),
+      lstat(alternatePath, { bigint: true }),
+      realpath(alternatePath)
+    ]);
+    if (expectedEntry.isSymbolicLink() || alternateEntry.isSymbolicLink()) return "unknown";
+    return expectedEntry.dev === alternateEntry.dev &&
+      expectedEntry.ino === alternateEntry.ino &&
+      alternatePhysicalPath === expectedPhysicalPath
+      ? "case_insensitive"
+      : "case_sensitive";
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+      return "case_sensitive";
+    }
+    return "unknown";
   }
 }
 
