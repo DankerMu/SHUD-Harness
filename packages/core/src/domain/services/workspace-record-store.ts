@@ -5,7 +5,6 @@ import { link, lstat, mkdir, open, rename, rmdir, unlink } from "node:fs/promise
 import { dirname, isAbsolute, join, normalize, parse, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import { preservePrimaryAndCompensationErrors } from "./compensation-error-preservation";
 import {
   readDurableSingleLinkFile,
   type DurableSingleLinkReadFailureReason
@@ -60,7 +59,7 @@ interface HardlinkPublicationOwnedResources {
   compensationErrors: unknown[];
 }
 
-type WorkspaceRecordAuthorityOperation = "read" | "rename" | "hardlink" | "delete";
+type WorkspaceRecordAuthorityOperation = "read" | "hardlink" | "delete";
 
 interface RecordAuthorityWaiter {
   resolve: (lease: RecordAuthorityLease) => void;
@@ -151,8 +150,6 @@ export interface WorkspaceRecordPublicationHooks {
       path: string;
       operation:
         | "conditional_delete"
-        | "rename_publication"
-        | "rename_temp_cleanup"
         | "hardlink_temp_cleanup";
     }>
   ) => Promise<void> | void;
@@ -162,8 +159,6 @@ export interface WorkspaceRecordPublicationHooks {
       operation:
         | "conditional_delete"
         | "restore_cleanup"
-        | "rename_prior_cleanup"
-        | "rename_temp_cleanup"
         | "hardlink_temp_cleanup";
     }>
   ) => Promise<void> | void;
@@ -750,125 +745,37 @@ export async function writeJsonRecord<T>(
   );
 
   const temporaryPath = join(directoryPath, `.${fileName}-${process.pid}-${randomUUID()}.tmp`);
-  let temporaryRecord: OwnedTemporaryRecord | undefined;
-  let authorityLease: RecordAuthorityLease | undefined;
-  let published = false;
-  let operationError: unknown;
-  const compensationErrors: unknown[] = [];
-  const hooks = publicationHookStorage.getStore();
+  let wroteTemporary = false;
   try {
-    try {
-      authorityLease = await acquireRecordAuthority(recordPath, evidenceRef, "rename", hooks);
-      await hooks?.afterAuthorityLeaseAcquired?.(Object.freeze({ operation: "rename" }));
-      temporaryRecord = await writeTemporaryRecordFile(
-        temporaryPath,
-        recordText,
-        evidenceRef
-      );
-      await hooks?.afterTemporaryFileWritten?.({
-        canonicalPath: recordPath,
-        temporaryPath
-      });
-      if (!(await isSafeExistingDirectoryPath(directoryPath))) {
-        throw serviceWorkspaceError(
-          "workspace_path_not_safe",
-          "Record directory is not a safe directory.",
-          "A workspace record directory is not usable.",
-          [evidenceRef]
-        );
-      }
-      await publishOwnedMutableRecord(
-        temporaryPath,
-        temporaryRecord,
-        recordPath,
-        recordText,
-        evidenceRef,
-        hooks
-      );
-      published = true;
-    } catch (error) {
-      operationError = error;
-    }
-
-    if (temporaryRecord && !temporaryRecord.handleClosed) {
-      try {
-        await closeTemporaryRecord(temporaryRecord, recordPath, temporaryPath, hooks);
-      } catch (cleanupError) {
-        if (operationError === undefined) operationError = cleanupError;
-        else compensationErrors.push(cleanupError);
-      }
-    }
-    if (
-      temporaryRecord &&
-      !published &&
-      (await recordPathEntryExists(temporaryPath, evidenceRef))
-    ) {
-      try {
-        await removeOwnedPublicationTemporaryPath(
-          temporaryPath,
-          temporaryRecord.identity,
-          Buffer.from(recordText, "utf8"),
-          recordPath,
-          evidenceRef,
-          hooks,
-          "rename_temp_cleanup"
-        );
-      } catch (cleanupError) {
-        if (operationError === undefined) operationError = cleanupError;
-        else compensationErrors.push(cleanupError);
-      }
-    }
-    if (operationError !== undefined) {
-      const settledError = preserveWorkspacePrimaryError(operationError, compensationErrors);
-      if (settledError instanceof TaskServiceError) throw settledError;
+    wroteTemporary = await writeTemporaryRecordFile(temporaryPath, recordText, evidenceRef);
+    if (!(await isSafeExistingDirectoryPath(directoryPath))) {
       throw serviceWorkspaceError(
         "workspace_path_not_safe",
-        "Failed to persist workspace record.",
-        "The workspace record could not be written safely.",
-        [evidenceRef],
-        settledError
+        "Record directory is not a safe directory.",
+        "A workspace record directory is not usable.",
+        [evidenceRef]
       );
     }
-  } finally {
-    authorityLease?.release();
-  }
-
-  return data;
-}
-
-async function publishOwnedMutableRecord(
-  temporaryPath: string,
-  temporaryRecord: OwnedTemporaryRecord,
-  recordPath: string,
-  recordText: string,
-  evidenceRef: string,
-  hooks?: WorkspaceRecordPublicationHooks
-): Promise<void> {
-  await assertOwnedTemporaryRecordPath(temporaryPath, temporaryRecord.identity, evidenceRef);
-  await assertOpenRecordAuthority(temporaryRecord, recordText, 1, evidenceRef);
-  await hooks?.beforeGenerationIsolation?.(
-    Object.freeze({ path: temporaryPath, operation: "rename_publication" })
-  );
-  await assertOwnedTemporaryRecordPath(temporaryPath, temporaryRecord.identity, evidenceRef);
-  await assertOpenRecordAuthority(temporaryRecord, recordText, 1, evidenceRef);
-  await closeTemporaryRecord(temporaryRecord, recordPath, temporaryPath, hooks);
-  temporaryRecord.identity = await assertClosedTemporaryRecordAuthority(
-    temporaryPath,
-    temporaryRecord.identity,
-    Buffer.from(recordText, "utf8"),
-    evidenceRef
-  );
-  try {
     await rename(temporaryPath, recordPath);
+    wroteTemporary = false;
   } catch (error) {
+    if (error instanceof TaskServiceError) {
+      throw error;
+    }
     throw serviceWorkspaceError(
       "workspace_path_not_safe",
-      "Failed to publish the captured workspace record generation.",
-      "The workspace record could not be published safely.",
+      "Failed to persist workspace record.",
+      "The workspace record could not be written safely.",
       [evidenceRef],
       error
     );
+  } finally {
+    if (wroteTemporary) {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
   }
+
+  return data;
 }
 
 export type CreateJsonRecordResult<T> = { status: "created"; record: T } | { status: "exists" };
@@ -971,7 +878,7 @@ async function createJsonRecordIfAbsentInternal<T>(
       if (publicationOutcome === "exists") {
         return { status: "exists" };
       }
-      ownedResources.temporaryRecord = await writeTemporaryRecordFile(
+      ownedResources.temporaryRecord = await writeOwnedTemporaryRecordFile(
         temporaryPath,
         recordText,
         evidenceRef
@@ -1203,6 +1110,39 @@ async function writeTemporaryRecordFile(
   temporaryPath: string,
   recordText: string,
   evidenceRef: string
+): Promise<boolean> {
+  let temporaryFile: RecordFileHandle | undefined;
+  let shouldCleanup = false;
+  let completed = false;
+  try {
+    temporaryFile = await open(
+      temporaryPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY
+    );
+    shouldCleanup = true;
+    await temporaryFile.writeFile(recordText, "utf8");
+    completed = true;
+    return shouldCleanup;
+  } catch (error) {
+    throw serviceWorkspaceError(
+      "workspace_path_not_safe",
+      "Failed to write workspace record temporary file.",
+      "The workspace record could not be written safely.",
+      [evidenceRef],
+      error
+    );
+  } finally {
+    await temporaryFile?.close().catch(() => undefined);
+    if (shouldCleanup && !completed) {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
+  }
+}
+
+async function writeOwnedTemporaryRecordFile(
+  temporaryPath: string,
+  recordText: string,
+  evidenceRef: string
 ): Promise<OwnedTemporaryRecord> {
   let temporaryFile: RecordFileHandle | undefined;
   let temporaryIdentity: OwnedTemporaryRecordIdentity | undefined;
@@ -1326,7 +1266,7 @@ async function removeOwnedPublicationTemporaryPath(
   recordPath: string,
   evidenceRef: string,
   hooks: WorkspaceRecordPublicationHooks | undefined,
-  operation: "rename_temp_cleanup" | "hardlink_temp_cleanup",
+  operation: "hardlink_temp_cleanup",
   ownedResources?: HardlinkPublicationOwnedResources
 ): Promise<void> {
   const attemptErrors: unknown[] = [];
@@ -1582,11 +1522,50 @@ async function ownedGenerationBytesEqual(
 }
 
 function preserveWorkspacePrimaryError(primary: unknown, compensations: unknown[]): unknown {
-  return preservePrimaryAndCompensationErrors(
-    primary,
-    compensations,
+  if (!(primary instanceof Error) || compensations.length === 0) return primary;
+  const priorCause = primary.cause;
+  const aggregateCause = new AggregateError(
+    priorCause === undefined ? compensations : [priorCause, ...compensations],
     "Workspace record publication compensation failed."
   );
+  return cloneErrorWithCause(primary, aggregateCause);
+}
+
+function trySetErrorCause(error: Error, cause: unknown): boolean {
+  try {
+    Object.defineProperty(error, "cause", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: cause
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function cloneErrorWithCause(primary: Error, cause: unknown): Error {
+  if (primary instanceof TaskServiceError) {
+    const clone = new TaskServiceError({
+      code: primary.code,
+      status: primary.status,
+      category: primary.category,
+      message: primary.message,
+      userMessage: primary.userMessage,
+      evidenceRefs: [...primary.evidenceRefs],
+      retryable: primary.retryable,
+      recommendedNextActions: [...primary.recommendedNextActions]
+    });
+    clone.stack = primary.stack;
+    trySetErrorCause(clone, cause);
+    return clone;
+  }
+
+  const clone = new Error(primary.message, { cause });
+  clone.name = primary.name;
+  clone.stack = primary.stack;
+  return clone;
 }
 
 async function assertOwnedTemporaryRecordPath(
