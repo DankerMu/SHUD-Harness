@@ -279,6 +279,7 @@ const cleanupPermitState = new WeakMap<
     capacityActive: boolean;
   }
 >();
+const pendingCleanupPermitFileCloses = new Set<Promise<void>>();
 
 export interface WorkspaceRecordPublicationHookInput {
   canonicalPath: string;
@@ -875,18 +876,18 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
           }
         : undefined)
   };
-  await runAuthorityMutatingCallbackBoundary(
-    hooks?.beforeConditionalDelete
-      ? () =>
-          hooks.beforeConditionalDelete!(
-            Object.freeze({
-              path,
-              conditionStatus: matched ? "matched" : "not_matched"
-            })
-          )
-      : undefined,
-    async () => await assertOwnedGenerationCheckpoint(admittedGenerationCheckpoint, evidenceRef)
-  );
+  if (hooks?.beforeConditionalDelete) {
+    await runAuthorityMutatingCallbackBoundary(
+      () =>
+        hooks.beforeConditionalDelete!(
+          Object.freeze({
+            path,
+            conditionStatus: matched ? "matched" : "not_matched"
+          })
+        ),
+      async () => await assertOwnedGenerationCheckpoint(admittedGenerationCheckpoint, evidenceRef)
+    );
+  }
   if (!matched) {
     return { status: "condition_not_met" };
   }
@@ -909,8 +910,6 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       evidenceRef
     );
   }
-
-  await assertOwnedGenerationCheckpoint(admittedGenerationCheckpoint, evidenceRef);
 
   const mutationNamespace = await createAuthorityOwnedMutationNamespace(
     path,
@@ -1117,26 +1116,14 @@ async function assertConditionalDeleteGenerationCheckpoint(
       checkpoint.path,
       checkpoint.generation,
       checkpoint.generation.nlink,
-      evidenceRef
+      evidenceRef,
+      checkpoint.pathnameBinding
     );
   } catch {
     throw recordChangedBeforeConditionalRemovalError(evidenceRef);
   }
   if (!generationMatches) {
     throw recordChangedBeforeConditionalRemovalError(evidenceRef);
-  }
-  if (checkpoint.pathnameBinding) {
-    try {
-      await assertCanonicalPathnameBinding(
-        checkpoint.path,
-        checkpoint.pathnameBinding,
-        checkpoint.generation,
-        checkpoint.generation.nlink,
-        evidenceRef
-      );
-    } catch {
-      throw recordChangedBeforeConditionalRemovalError(evidenceRef);
-    }
   }
   await assertAuthorityNamespaceOwnership(checkpoint.namespace, evidenceRef);
 }
@@ -1236,25 +1223,25 @@ async function inspectJsonRecordUnderAuthority<T>(
   const durableFailure = durableRead.status === "invalid"
     ? recordDurableReadError(durableRead.reason, evidenceRef, durableRead.cause)
     : undefined;
-  const callbackOutcome = await captureAuthorityMutatingCallbackBoundary(
-    afterDurableObservation
-      ? () => afterDurableObservation(Object.freeze({ path, status: durableRead.status }))
-      : undefined,
-    async () =>
-      await assertJsonRecordReadAuthority(
-        path,
-        durableRead,
-        admittedParentBaseline,
-        canonicalBaseline,
-        evidenceRef
-      ),
-    durableFailure ? [durableFailure] : []
-  );
-  if (callbackOutcome.status === "callback_failed") {
-    if (durableFailure) {
-      throw preserveWorkspacePrimaryError(durableFailure, [callbackOutcome.error]);
+  if (afterDurableObservation) {
+    const callbackOutcome = await captureAuthorityMutatingCallbackBoundary(
+      () => afterDurableObservation(Object.freeze({ path, status: durableRead.status })),
+      async () =>
+        await assertJsonRecordReadAuthority(
+          path,
+          durableRead,
+          admittedParentBaseline,
+          canonicalBaseline,
+          evidenceRef
+        ),
+      durableFailure ? [durableFailure] : []
+    );
+    if (callbackOutcome.status === "callback_failed") {
+      if (durableFailure) {
+        throw preserveWorkspacePrimaryError(durableFailure, [callbackOutcome.error]);
+      }
+      throw callbackOutcome.error;
     }
-    throw callbackOutcome.error;
   }
   if (durableRead.status === "missing") {
     return { status: "missing", authorityObservation: durableRead };
@@ -2015,33 +2002,33 @@ async function createJsonRecordIfAbsentInternal<T>(
       if (linkCreated) {
         publicationOutcome = "published";
         ownedResources.canonicalIdentity = ownedResources.temporaryIdentity;
-        const canonicalPathnameBinding = await captureCanonicalPathnameBinding(
-          recordPath,
-          ownedResources.temporaryExpectation,
-          2n,
-          evidenceRef
-        );
         ownedResources.canonicalPathnameBindingRetained = true;
-        const callbackOutcome = await captureAuthorityMutatingCallbackBoundary(
-          hooks?.afterCanonicalLink
-            ? () => hooks.afterCanonicalLink!({ canonicalPath: recordPath, temporaryPath })
-            : undefined,
-          async () => {
-            try {
-              await assertHardlinkPublicationCheckpoint(
-                hardlinkCheckpoint,
-                recordPath,
-                canonicalPathnameBinding,
-                evidenceRef
-              );
-            } catch (error) {
-              ownedResources.canonicalPathnameBindingRetained = false;
-              throw error;
+        if (hooks?.afterCanonicalLink) {
+          const canonicalPathnameBinding = await captureCanonicalPathnameBinding(
+            recordPath,
+            ownedResources.temporaryExpectation,
+            2n,
+            evidenceRef
+          );
+          const callbackOutcome = await captureAuthorityMutatingCallbackBoundary(
+            () => hooks.afterCanonicalLink!({ canonicalPath: recordPath, temporaryPath }),
+            async () => {
+              try {
+                await assertHardlinkPublicationCheckpoint(
+                  hardlinkCheckpoint,
+                  recordPath,
+                  canonicalPathnameBinding,
+                  evidenceRef
+                );
+              } catch (error) {
+                ownedResources.canonicalPathnameBindingRetained = false;
+                throw error;
+              }
             }
+          );
+          if (callbackOutcome.status === "callback_failed") {
+            throw callbackOutcome.error;
           }
-        );
-        if (callbackOutcome.status === "callback_failed") {
-          throw callbackOutcome.error;
         }
         ownedResources.namespaceAuthorityAdmitted = true;
       }
@@ -3781,7 +3768,8 @@ async function ownedGenerationStateMatches(
   path: string,
   expectedGeneration: OwnedGenerationExpectation,
   expectedLinkCount: bigint,
-  evidenceRef: string
+  evidenceRef: string,
+  pathnameBinding?: CanonicalPathnameBinding
 ): Promise<boolean> {
   let file: RecordFileHandle | undefined;
   try {
@@ -3792,6 +3780,10 @@ async function ownedGenerationStateMatches(
       before.nlink !== expectedLinkCount ||
       before.mode !== expectedGeneration.mode ||
       !workspaceRecordPhysicalIdentityMatches(before, expectedGeneration.identity) ||
+      (pathnameBinding !== undefined &&
+        (!workspaceRecordPhysicalIdentityMatches(before, pathnameBinding.identity) ||
+          before.ctimeNs !== pathnameBinding.ctimeNs ||
+          before.mtimeNs !== pathnameBinding.mtimeNs)) ||
       before.size !== BigInt(expectedGeneration.bytes.length) ||
       before.size > BigInt(MAX_SERVICE_RECORD_BYTES)
     ) {
@@ -3804,7 +3796,10 @@ async function ownedGenerationStateMatches(
       after.ino === before.ino &&
       after.size === before.size &&
       after.mode === before.mode &&
-      after.nlink === expectedLinkCount
+      after.nlink === expectedLinkCount &&
+      (pathnameBinding === undefined ||
+        (after.ctimeNs === pathnameBinding.ctimeNs &&
+          after.mtimeNs === pathnameBinding.mtimeNs))
     );
   } catch (error) {
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) return false;
@@ -3945,19 +3940,11 @@ async function assertOwnedGenerationCheckpoint(
       checkpoint.path,
       checkpoint.generation,
       expectedLinkCount,
-      evidenceRef
+      evidenceRef,
+      checkpoint.pathnameBinding
     ))
   ) {
     throw publicationStateError(evidenceRef);
-  }
-  if (checkpoint.pathnameBinding) {
-    await assertCanonicalPathnameBinding(
-      checkpoint.path,
-      checkpoint.pathnameBinding,
-      checkpoint.generation,
-      expectedLinkCount,
-      evidenceRef
-    );
   }
   if (checkpoint.namespace) {
     await assertAuthorityNamespaceOwnership(checkpoint.namespace, evidenceRef);
@@ -3996,6 +3983,9 @@ async function assertHardlinkPublicationCheckpoint(
     canonical.mode !== generation.mode ||
     canonical.size !== BigInt(generation.bytes.length) ||
     !workspaceRecordPhysicalIdentityMatches(canonical, generation.identity) ||
+    !workspaceRecordPhysicalIdentityMatches(canonical, canonicalPathnameBinding.identity) ||
+    canonical.ctimeNs !== canonicalPathnameBinding.ctimeNs ||
+    canonical.mtimeNs !== canonicalPathnameBinding.mtimeNs ||
     !temporary.isFile() ||
     temporary.isSymbolicLink() ||
     temporary.nlink !== 2n ||
@@ -4007,13 +3997,6 @@ async function assertHardlinkPublicationCheckpoint(
   ) {
     throw publicationStateError(evidenceRef);
   }
-  await assertCanonicalPathnameBinding(
-    canonicalPath,
-    canonicalPathnameBinding,
-    generation,
-    2n,
-    evidenceRef
-  );
 }
 
 async function captureCanonicalPathnameBinding(
@@ -4836,12 +4819,12 @@ async function acquireRecordAuthorityWithCleanupPermit(
   void lease.catch(() => undefined);
   const setup = (async () => {
     try {
-      await runAuthorityMutatingCallbackBoundary(
-        hooks?.beforeCleanupPermitIdentityResolution
-          ? () => hooks.beforeCleanupPermitIdentityResolution!(Object.freeze({ path: recordPath }))
-          : undefined,
-        async () => await assertCleanupPermitPinnedGeneration(state, recordPath, evidenceRef)
-      );
+      if (hooks?.beforeCleanupPermitIdentityResolution) {
+        await runAuthorityMutatingCallbackBoundary(
+          () => hooks.beforeCleanupPermitIdentityResolution!(Object.freeze({ path: recordPath })),
+          async () => await assertCleanupPermitPinnedGeneration(state, recordPath, evidenceRef)
+        );
+      }
       if (!waiter.active) return;
       const identity = await recordAuthorityIdentityCandidates(recordPath, evidenceRef);
       if (!waiter.active) return;
@@ -5040,6 +5023,9 @@ async function bindRecordAuthorityCleanupPermitGeneration(
   }
   let pinnedFile: RecordFileHandle | undefined;
   try {
+    if (pendingCleanupPermitFileCloses.size > 0) {
+      await Promise.all([...pendingCleanupPermitFileCloses]);
+    }
     // assertPublishedRecordAuthority returns with this admitted parent proven.
     // No hook or mutation occurs before this descriptor is opened.
     pinnedFile = await open(state.publicPath, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -5138,13 +5124,7 @@ async function assertCleanupPermitPinnedGeneration(
       pinnedIdentity.mode !== generationExpectation.mode ||
       pinnedIdentity.nlink !== generationExpectation.nlink ||
       !observedBytes.bytes.equals(expectedBytes) ||
-      !workspaceRecordPhysicalIdentityMatches(pinnedIdentity, generation) ||
-      !(await ownedGenerationStateMatches(
-        path,
-        generationExpectation,
-        generationExpectation.nlink,
-        evidenceRef
-      ))
+      !workspaceRecordPhysicalIdentityMatches(pinnedIdentity, generation)
     ) {
       throw publicationStateError(evidenceRef);
     }
@@ -5240,13 +5220,17 @@ function closeRecordAuthorityCleanupPermitPinnedFile(
   state.pinnedFile = undefined;
   if (!pinnedFile) return;
   const input = Object.freeze({ path: state.publicPath, fd: pinnedFile.fd });
-  void (async () => {
-    try {
-      await pinnedFile.close();
-    } finally {
-      await state.afterPinnedFileClosed?.(input);
-    }
-  })().catch(() => undefined);
+  const closeSettled = pinnedFile.close().then(
+    () => undefined,
+    () => undefined
+  );
+  pendingCleanupPermitFileCloses.add(closeSettled);
+  void closeSettled.finally(() => {
+    pendingCleanupPermitFileCloses.delete(closeSettled);
+  });
+  void closeSettled
+    .then(async () => await state.afterPinnedFileClosed?.(input))
+    .catch(() => undefined);
 }
 
 function cancelRecordAuthorityWaiter(
