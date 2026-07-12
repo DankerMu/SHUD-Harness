@@ -80,10 +80,15 @@ function appendSequentialFailure(
   return { value };
 }
 
-async function runAuthorityMutatingCallbackBoundary(
+type AuthorityMutatingCallbackOutcome =
+  | { readonly status: "succeeded" }
+  | { readonly status: "callback_failed"; readonly error: unknown };
+
+async function captureAuthorityMutatingCallbackBoundary(
   callback: (() => Promise<void> | void) | undefined,
-  proveAuthority: () => Promise<void>
-): Promise<void> {
+  proveAuthority: () => Promise<void>,
+  proofCompensations: readonly unknown[] = []
+): Promise<AuthorityMutatingCallbackOutcome> {
   let callbackFailure: PresentFailure | undefined;
   try {
     await callback?.();
@@ -96,11 +101,29 @@ async function runAuthorityMutatingCallbackBoundary(
   } catch (proofError) {
     throw preserveWorkspacePrimaryError(
       proofError,
-      callbackFailure ? [callbackFailure.value] : []
+      [
+        ...(callbackFailure ? [callbackFailure.value] : []),
+        ...proofCompensations
+      ]
     );
   }
 
-  if (callbackFailure) throw callbackFailure.value;
+  return callbackFailure
+    ? { status: "callback_failed", error: callbackFailure.value }
+    : { status: "succeeded" };
+}
+
+async function runAuthorityMutatingCallbackBoundary(
+  callback: (() => Promise<void> | void) | undefined,
+  proveAuthority: () => Promise<void>,
+  proofCompensations: readonly unknown[] = []
+): Promise<void> {
+  const outcome = await captureAuthorityMutatingCallbackBoundary(
+    callback,
+    proveAuthority,
+    proofCompensations
+  );
+  if (outcome.status === "callback_failed") throw outcome.error;
 }
 
 interface OwnedAuthorityNamespace {
@@ -137,6 +160,8 @@ type MutableCanonicalBaseline =
       nlink: bigint;
       mode: bigint;
       bytes: Buffer;
+      ctimeNs?: bigint;
+      mtimeNs?: bigint;
     };
 
 type CanonicalAuthorityBaseline =
@@ -984,7 +1009,29 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
         });
       }
       namespaceCleanupAttempted = true;
-      await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
+      let namespaceCleanupFailure: PresentFailure | undefined;
+      let namespaceCleanupCompensations: readonly unknown[] = [];
+      try {
+        namespaceCleanupCompensations = await removeEmptyAuthorityOwnedMutationNamespace(
+          mutationNamespace,
+          evidenceRef
+        );
+      } catch (error) {
+        namespaceCleanupFailure = { value: error };
+      }
+      try {
+        await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef);
+        await assertMutableCanonicalBaseline(path, { status: "absent" }, evidenceRef);
+      } catch (proofError) {
+        throw preserveWorkspacePrimaryError(
+          proofError,
+          [
+            ...(namespaceCleanupFailure ? [namespaceCleanupFailure.value] : []),
+            ...namespaceCleanupCompensations
+          ]
+        );
+      }
+      if (namespaceCleanupFailure) throw namespaceCleanupFailure.value;
       return { status: "deleted" };
     }
 
@@ -1137,6 +1184,9 @@ async function inspectJsonRecordUnderAuthority<T>(
   });
   const afterDurableObservation = publicationHookStorage.getStore()
     ?.afterDurableRecordObservation;
+  const durableFailure = durableRead.status === "invalid"
+    ? recordDurableReadError(durableRead.reason, evidenceRef, durableRead.cause)
+    : undefined;
   await runAuthorityMutatingCallbackBoundary(
     afterDurableObservation
       ? () => afterDurableObservation(Object.freeze({ path, status: durableRead.status }))
@@ -1148,13 +1198,14 @@ async function inspectJsonRecordUnderAuthority<T>(
         admittedParentBaseline,
         canonicalBaseline,
         evidenceRef
-      )
+      ),
+    durableFailure ? [durableFailure] : []
   );
   if (durableRead.status === "missing") {
     return { status: "missing", authorityObservation: durableRead };
   }
   if (durableRead.status === "invalid") {
-    throw recordDurableReadError(durableRead.reason, evidenceRef, durableRead.cause);
+    throw durableFailure!;
   }
 
   let rawRecord: unknown;
@@ -1271,10 +1322,11 @@ async function assertDurableReadMatchesCanonicalBaseline(
   evidenceRef: string
 ): Promise<void> {
   if (!expected) return;
-  // Preserve the durable reader's more specific semantic error for an invalid
-  // observation; this helper only rejects authority drift that still produced
-  // an otherwise admissible durable result.
-  if (observed.status === "invalid") return;
+  if (observed.status === "invalid") {
+    if (expected.status !== "invalid") throw publicationStateError(evidenceRef);
+    await assertCanonicalAuthorityBaseline(path, expected, evidenceRef);
+    return;
+  }
   if (expected.status === "absent") {
     if (observed.status !== "missing") throw publicationStateError(evidenceRef);
     await assertMutableCanonicalBaseline(path, expected, evidenceRef);
@@ -1410,7 +1462,7 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
   ownership: OwnedAuthorityNamespace,
   evidenceRef: string,
   invokeHooks = true
-): Promise<void> {
+): Promise<readonly unknown[]> {
   let primaryFailure: PresentFailure | undefined;
   const compensationErrors: unknown[] = [];
   for (let attempt = 1; attempt <= RECORD_NAMESPACE_CLEANUP_ATTEMPTS; attempt += 1) {
@@ -1450,9 +1502,15 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
     }
     try {
       await rmdir(ownership.path);
-      return;
+      return primaryFailure
+        ? [primaryFailure.value, ...compensationErrors]
+        : [];
     } catch (error) {
-      if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) return;
+      if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+        return primaryFailure
+          ? [primaryFailure.value, ...compensationErrors]
+          : [];
+      }
       primaryFailure = appendSequentialFailure(
         primaryFailure,
         compensationErrors,
@@ -1672,18 +1730,55 @@ async function publishOwnedMutableRecord(
     );
   }
 
+  const committedBaseline = await captureMutableCanonicalBaseline(recordPath, evidenceRef);
+  if (
+    committedBaseline.status !== "existing" ||
+    !workspaceRecordPhysicalIdentityMatches(
+      committedBaseline.identity,
+      temporaryRecord.identity
+    ) ||
+    committedBaseline.nlink !== 1n ||
+    !hasExactPrivatePermissions(committedBaseline.mode, PRIVATE_GENERATION_MODE) ||
+    !committedBaseline.bytes.equals(expectedBytes)
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+
   // The rename above is the commit point. The final validation-to-rename external
-  // race is the accepted M1 residual. Postcommit cleanup is non-rejecting, but it
-  // remains bound to the captured physical directory and namespace identities.
-  await removeEmptyAuthorityOwnedMutationNamespace(
-    {
-      path: dirname(temporaryPath),
-      parentPath: directoryPath,
-      parentIdentity: recordDirectoryIdentity,
-      identity: temporaryRecord.namespaceIdentity
-    },
-    evidenceRef
-  ).catch(() => undefined);
+  // race is the accepted M1 residual. Namespace cleanup remains non-rejecting,
+  // but no callback or cleanup failure can bypass the caller-altitude committed
+  // generation checkpoint.
+  let namespaceCleanupFailure: PresentFailure | undefined;
+  let namespaceCleanupCompensations: readonly unknown[] = [];
+  try {
+    namespaceCleanupCompensations = await removeEmptyAuthorityOwnedMutationNamespace(
+      {
+        path: dirname(temporaryPath),
+        parentPath: directoryPath,
+        parentIdentity: recordDirectoryIdentity,
+        identity: temporaryRecord.namespaceIdentity
+      },
+      evidenceRef
+    );
+  } catch (error) {
+    namespaceCleanupFailure = { value: error };
+  }
+  try {
+    await assertRecordDirectoryIdentity(
+      directoryPath,
+      recordDirectoryIdentity,
+      evidenceRef
+    );
+    await assertMutableCanonicalBaseline(recordPath, committedBaseline, evidenceRef);
+  } catch (proofError) {
+    throw preserveWorkspacePrimaryError(
+      proofError,
+      [
+        ...(namespaceCleanupFailure ? [namespaceCleanupFailure.value] : []),
+        ...namespaceCleanupCompensations
+      ]
+    );
+  }
 }
 
 export type CreateJsonRecordResult<T> = { status: "created"; record: T } | { status: "exists" };
@@ -1860,27 +1955,19 @@ async function createJsonRecordIfAbsentInternal<T>(
       if (linkCreated) {
         publicationOutcome = "published";
         ownedResources.canonicalIdentity = ownedResources.temporaryIdentity;
-        try {
-          await runAuthorityMutatingCallbackBoundary(
-            hooks?.afterCanonicalLink
-              ? () => hooks.afterCanonicalLink!({ canonicalPath: recordPath, temporaryPath })
-              : undefined,
-            async () =>
-              await assertHardlinkPublicationCheckpoint(
-                hardlinkCheckpoint,
-                recordPath,
-                evidenceRef
-              )
-          );
-        } catch (error) {
-          if (semanticPrimaryError(error) instanceof TaskServiceError) throw error;
-          throw serviceWorkspaceError(
-            "workspace_path_not_safe",
-            "Failed to publish workspace record claim.",
-            "The workspace record could not be written safely.",
-            [evidenceRef],
-            error
-          );
+        const callbackOutcome = await captureAuthorityMutatingCallbackBoundary(
+          hooks?.afterCanonicalLink
+            ? () => hooks.afterCanonicalLink!({ canonicalPath: recordPath, temporaryPath })
+            : undefined,
+          async () =>
+            await assertHardlinkPublicationCheckpoint(
+              hardlinkCheckpoint,
+              recordPath,
+              evidenceRef
+            )
+        );
+        if (callbackOutcome.status === "callback_failed") {
+          throw callbackOutcome.error;
         }
         ownedResources.namespaceAuthorityAdmitted = true;
       }
@@ -3093,25 +3180,40 @@ async function restoreOwnedIsolatedPath(
     let firstProofRollbackAttempted = false;
     for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
       try {
-        await compensationTestHookStorage.getStore()?.beforeOwnedIsolatedSourceUnlink?.(
-          Object.freeze({ path: publicPath, isolatedPath, site, attempt })
-        );
-        await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
-        // A failure between the two proofs requires the single rollback below. It can only be
-        // induced by an external race in production because no test hook runs in this window.
-        if (
-          !(await restoredLinkedGenerationMatches(
-            publicPath,
-            isolatedPath,
-            mutationNamespace,
-            expectedGeneration,
-            evidenceRef,
-            publicLinkBinding!
-          ))
-        ) {
-          await compensationTestHookStorage.getStore()?.beforeUnsafeRestoredLinkRollback?.(
-            Object.freeze({ path: publicPath, isolatedPath, site })
+        let sourceUnlinkCallbackOutcome: AuthorityMutatingCallbackOutcome;
+        try {
+          const beforeSourceUnlink = compensationTestHookStorage.getStore()
+            ?.beforeOwnedIsolatedSourceUnlink;
+          sourceUnlinkCallbackOutcome = await captureAuthorityMutatingCallbackBoundary(
+            beforeSourceUnlink
+              ? () =>
+                  beforeSourceUnlink(
+                    Object.freeze({ path: publicPath, isolatedPath, site, attempt })
+                  )
+              : undefined,
+            async () => {
+              await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
+              if (
+                !(await restoredLinkedGenerationMatches(
+                  publicPath,
+                  isolatedPath,
+                  mutationNamespace,
+                  expectedGeneration,
+                  evidenceRef,
+                  publicLinkBinding!
+                ))
+              ) throw publicationStateError(evidenceRef);
+            }
           );
+        } catch (authorityDrift) {
+          let unsafeRollbackCallbackFailure: PresentFailure | undefined;
+          try {
+            await compensationTestHookStorage.getStore()?.beforeUnsafeRestoredLinkRollback?.(
+              Object.freeze({ path: publicPath, isolatedPath, site })
+            );
+          } catch (error) {
+            unsafeRollbackCallbackFailure = { value: error };
+          }
           firstProofRollbackAttempted = true;
           const rollback = await rollbackUnsafeRestoredLink(
             publicPath,
@@ -3128,13 +3230,24 @@ async function restoreOwnedIsolatedPath(
           } catch (error) {
             rollback.cleanupErrors.push(error);
           }
+          const priorNoDriftCallbackFailures = sourceUnlinkErrors.splice(0);
           sourceUnlinkErrors.push(
-            publicationStateError(evidenceRef),
-            ...rollback.cleanupErrors
+            preserveWorkspacePrimaryError(authorityDrift, [
+              ...priorNoDriftCallbackFailures,
+              ...(unsafeRollbackCallbackFailure
+                ? [unsafeRollbackCallbackFailure.value]
+                : []),
+              ...rollback.cleanupErrors
+            ])
           );
           publicOwnership = rollback.publicOwnership;
           break;
         }
+        if (sourceUnlinkCallbackOutcome.status === "callback_failed") {
+          throw sourceUnlinkCallbackOutcome.error;
+        }
+        // A failure between the two exact proofs can only be induced by the
+        // accepted external race because no callback runs in this window.
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
         if (
           !(await restoredLinkedGenerationMatches(
@@ -3939,21 +4052,19 @@ async function assertPublishedRecordAuthority(
       ) throw publicationStateError(evidenceRef);
     }
   };
-  try {
-    if (hooks?.beforePublishedRecordFinalValidation) {
-      await runAuthorityMutatingCallbackBoundary(
+  if (hooks?.beforePublishedRecordFinalValidation) {
+    const callbackOutcome = await captureAuthorityMutatingCallbackBoundary(
         () =>
-            hooks.beforePublishedRecordFinalValidation!(
-              Object.freeze({ path: recordPath })
-            ),
-        async () => await provePublishedAuthority(true)
-      );
-    } else {
-      await provePublishedAuthority(false);
+          hooks.beforePublishedRecordFinalValidation!(
+            Object.freeze({ path: recordPath })
+          ),
+      async () => await provePublishedAuthority(true)
+    );
+    if (callbackOutcome.status === "callback_failed") {
+      throw callbackOutcome.error;
     }
-  } catch (error) {
-    if (semanticPrimaryError(error) instanceof TaskServiceError) throw error;
-    throw publicationStateError(evidenceRef, error);
+  } else {
+    await provePublishedAuthority(false);
   }
 }
 
@@ -4202,7 +4313,9 @@ async function captureMutableCanonicalBaseline(
       after.ino !== before.ino ||
       after.nlink !== before.nlink ||
       after.mode !== before.mode ||
-      after.size !== before.size
+      after.size !== before.size ||
+      after.ctimeNs !== before.ctimeNs ||
+      after.mtimeNs !== before.mtimeNs
     ) {
       throw publicationStateError(evidenceRef);
     }
@@ -4211,7 +4324,9 @@ async function captureMutableCanonicalBaseline(
       identity: { dev: before.dev, ino: before.ino },
       nlink: before.nlink,
       mode: before.mode,
-      bytes
+      bytes,
+      ctimeNs: before.ctimeNs,
+      mtimeNs: before.mtimeNs
     };
   } catch (error) {
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
@@ -4273,8 +4388,8 @@ async function assertCanonicalAuthorityBaseline(
     observed.mode !== expected.mode ||
     observed.nlink !== expected.nlink ||
     observed.size !== expected.size ||
-    observed.ctimeNs !== expected.ctimeNs ||
-    observed.mtimeNs !== expected.mtimeNs
+    (expected.ctimeNs !== undefined && observed.ctimeNs !== expected.ctimeNs) ||
+    (expected.mtimeNs !== undefined && observed.mtimeNs !== expected.mtimeNs)
   ) {
     throw publicationStateError(evidenceRef);
   }
@@ -4295,7 +4410,9 @@ async function assertMutableCanonicalBaseline(
     !workspaceRecordPhysicalIdentityMatches(observed.identity, expected.identity) ||
     observed.nlink !== expected.nlink ||
     observed.mode !== expected.mode ||
-    !observed.bytes.equals(expected.bytes)
+    !observed.bytes.equals(expected.bytes) ||
+    observed.ctimeNs !== expected.ctimeNs ||
+    observed.mtimeNs !== expected.mtimeNs
   ) {
     throw publicationStateError(evidenceRef);
   }
