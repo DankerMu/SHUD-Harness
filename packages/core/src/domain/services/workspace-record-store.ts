@@ -2263,12 +2263,15 @@ async function restoreOwnedIsolatedPath(
     await link(isolatedPath, publicPath);
     await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
     const sourceUnlinkErrors: unknown[] = [];
+    let restoredLinkRolledBack = false;
     for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
       try {
         await compensationTestHookStorage.getStore()?.beforeOwnedIsolatedSourceUnlink?.(
           Object.freeze({ path: publicPath, isolatedPath, site, attempt })
         );
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
+        // A failure between the two proofs requires the single rollback below. It can only be
+        // induced by an external race in production because no test hook runs in this window.
         if (
           !(await restoredLinkedGenerationMatches(
             publicPath,
@@ -2286,6 +2289,7 @@ async function restoreOwnedIsolatedPath(
             evidenceRef
           );
           sourceUnlinkErrors.push(publicationStateError(evidenceRef), ...cleanupErrors);
+          restoredLinkRolledBack = true;
           break;
         }
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
@@ -2330,7 +2334,8 @@ async function restoreOwnedIsolatedPath(
         sourceUnlinkErrors.push(error);
         try {
           await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
-        } catch {
+        } catch (authorityError) {
+          sourceUnlinkErrors.push(authorityError);
           break;
         }
         if (!(await recordPathEntryExists(isolatedPath, evidenceRef))) break;
@@ -2340,13 +2345,22 @@ async function restoreOwnedIsolatedPath(
       }
     }
 
-    const rollbackErrors = await rollbackUnsafeRestoredLink(
-      publicPath,
-      isolatedPath,
-      mutationNamespace,
-      expectedGeneration,
-      evidenceRef
-    );
+    const rollbackErrors = restoredLinkRolledBack
+      ? await removeExactOwnedPublicLink(
+          publicPath,
+          mutationNamespace,
+          expectedGeneration,
+          expectedGeneration.nlink + 1n,
+          evidenceRef,
+          false
+        )
+      : await rollbackUnsafeRestoredLink(
+          publicPath,
+          isolatedPath,
+          mutationNamespace,
+          expectedGeneration,
+          evidenceRef
+        );
     throw preserveWorkspacePrimaryError(sourceUnlinkErrors[0], [
       ...sourceUnlinkErrors.slice(1),
       ...rollbackErrors
@@ -2416,7 +2430,8 @@ async function removeExactOwnedPublicLink(
   mutationNamespace: OwnedAuthorityNamespace,
   expectedGeneration: OwnedGenerationExpectation,
   expectedLinkCount: bigint,
-  evidenceRef: string
+  evidenceRef: string,
+  reportMismatch = true
 ): Promise<unknown[]> {
   const cleanupErrors: unknown[] = [];
   try {
@@ -2448,7 +2463,7 @@ async function removeExactOwnedPublicLink(
         }
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
         await unlink(publicPath);
-      } else {
+      } else if (reportMismatch) {
         cleanupErrors.push(publicationStateError(evidenceRef));
       }
     }

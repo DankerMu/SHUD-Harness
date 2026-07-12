@@ -1,3 +1,11 @@
+interface PreservedErrorProvenance {
+  readonly primary: Error;
+  readonly observedCauses: readonly unknown[];
+  readonly rawCompensations: readonly unknown[];
+}
+
+const preservedErrorProvenance = new WeakMap<Error, PreservedErrorProvenance>();
+
 export function preservePrimaryAndCompensationErrors(
   primary: unknown,
   compensations: readonly unknown[],
@@ -5,19 +13,54 @@ export function preservePrimaryAndCompensationErrors(
 ): unknown {
   if (!(primary instanceof Error) || compensations.length === 0) return primary;
 
-  const descriptors = Object.getOwnPropertyDescriptors(primary);
-  const integrityLevel = captureIntegrityLevel(primary, descriptors);
+  const priorProvenance = preservedErrorProvenance.get(primary);
+  const semanticPrimary = priorProvenance?.primary ?? primary;
+  const descriptors = Object.getOwnPropertyDescriptors(semanticPrimary);
+  const integrityLevel = captureIntegrityLevel(semanticPrimary, descriptors);
   const priorCauseDescriptor = descriptors.cause;
-  const observedCauses = safelyObservePriorCause(primary, priorCauseDescriptor);
+  const observedCauses = priorProvenance?.observedCauses ??
+    safelyObservePriorCause(semanticPrimary, priorCauseDescriptor);
+  const rawCompensations = [
+    ...(priorProvenance?.rawCompensations ?? []),
+    ...canonicalizeCompensations(compensations)
+  ];
   const aggregateCause = new AggregateError(
-    [...observedCauses, ...compensations],
+    [...observedCauses, ...rawCompensations],
     aggregateMessage
   );
   descriptors.cause = aggregateCauseDescriptor(aggregateCause, priorCauseDescriptor);
 
-  const clone = Object.create(Object.getPrototypeOf(primary)) as Error;
+  const clone = Object.create(Object.getPrototypeOf(semanticPrimary)) as Error;
   Object.defineProperties(clone, descriptors);
-  return restoreIntegrityLevel(clone, integrityLevel);
+  const restoredClone = restoreIntegrityLevel(clone, integrityLevel);
+  preservedErrorProvenance.set(restoredClone, {
+    primary: semanticPrimary,
+    observedCauses,
+    rawCompensations
+  });
+  return restoredClone;
+}
+
+function canonicalizeCompensations(compensations: readonly unknown[]): unknown[] {
+  const canonical: unknown[] = [];
+  for (const compensation of compensations) {
+    if (!(compensation instanceof Error)) {
+      canonical.push(compensation);
+      continue;
+    }
+
+    const provenance = preservedErrorProvenance.get(compensation);
+    if (!provenance) {
+      canonical.push(compensation);
+      continue;
+    }
+
+    canonical.push(
+      provenance.primary,
+      ...canonicalizeCompensations(provenance.rawCompensations)
+    );
+  }
+  return canonical;
 }
 
 type IntegrityLevel = "frozen" | "sealed" | "non-extensible" | "extensible";

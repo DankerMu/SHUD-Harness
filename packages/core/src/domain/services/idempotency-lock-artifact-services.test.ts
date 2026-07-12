@@ -557,6 +557,146 @@ describe("idempotency, lock, and artifact services", () => {
     ).toBe(false);
   });
 
+  test("mutable and hardlink close compensation remains flat through later cleanup failure", async () => {
+    for (const surface of ["mutable-create", "mutable-update", "hardlink"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string(), value: z.string() });
+      const before = { id: `flat-close-${surface}`, value: "before" };
+      const after = { ...before, value: "after" };
+      const directorySegments = ["flat-close-compensation"] as const;
+      const fileName = `${surface}.json`;
+      const evidenceRef = `flat.close.${surface}`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      if (surface === "mutable-update") {
+        await writeJsonRecord(
+          workspaceRoot,
+          directorySegments,
+          fileName,
+          before,
+          evidenceRef,
+          schema
+        );
+      }
+      const baseline = surface === "mutable-update" ? await readFileWithIdentity(path) : undefined;
+      const primary = new StructuredServiceError(
+        `flat close primary ${surface}`,
+        `E_FLAT_CLOSE_${surface.toUpperCase().replace("-", "_")}`,
+        Object.freeze({ surface, immutability: "frozen" }),
+        undefined
+      );
+      Object.freeze(primary);
+      const descriptors = Object.getOwnPropertyDescriptors(primary);
+      const closeObserverFailure = new Error(`flat close observer ${surface}`);
+      const cleanupFailure = new Error(`flat later cleanup ${surface}`);
+      let temporaryPath = "";
+      let closeObserverCalls = 0;
+      let cleanupCalls = 0;
+
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: (input) => {
+              temporaryPath = input.temporaryPath;
+            },
+            beforeTemporaryFileClose: () => {
+              throw primary;
+            },
+            afterTemporaryFileClosed: async ({ descriptor }) => {
+              closeObserverCalls += 1;
+              await expectFileDescriptorClosed(descriptor.fd);
+              throw closeObserverFailure;
+            },
+            beforeAuthorityOwnedUnlink: () => {
+              cleanupCalls += 1;
+              throw cleanupFailure;
+            }
+          },
+          () =>
+            surface === "hardlink"
+              ? createJsonRecordIfAbsent(
+                  workspaceRoot,
+                  directorySegments,
+                  fileName,
+                  after,
+                  evidenceRef,
+                  schema
+                )
+              : writeJsonRecord(
+                  workspaceRoot,
+                  directorySegments,
+                  fileName,
+                  after,
+                  evidenceRef,
+                  schema
+                )
+        )
+      );
+
+      expect(failure).toBeInstanceOf(StructuredServiceError);
+      expect(Object.getPrototypeOf(failure)).toBe(Object.getPrototypeOf(primary));
+      expect((failure as StructuredServiceError).code).toBe(primary.code);
+      expect((failure as StructuredServiceError).details).toBe(primary.details);
+      expectPreservedOwnDescriptors(failure, descriptors);
+      expect(Object.isFrozen(failure)).toBe(true);
+      expect(Object.isSealed(failure)).toBe(true);
+      expect(Object.isExtensible(failure)).toBe(false);
+      expect(failure.cause).toBeInstanceOf(AggregateError);
+      const rawSlots = (failure.cause as AggregateError).errors;
+      expect(rawSlots).toHaveLength(surface === "hardlink" ? 5 : 6);
+      expect(rawSlots[0]).toBe(closeObserverFailure);
+      expect(rawSlots[1]).toBeInstanceOf(TaskServiceError);
+      expect(rawSlots[1]).toMatchObject({
+        code: "workspace_path_not_safe",
+        message: "Workspace record publication temporary cleanup did not complete."
+      });
+      expect(rawSlots.slice(2, 5)).toEqual([cleanupFailure, cleanupFailure, cleanupFailure]);
+      if (surface !== "hardlink") {
+        expect(rawSlots[5]).toMatchObject({
+          code: "workspace_path_not_safe",
+          message: "Workspace record publication authority could not be verified."
+        });
+      }
+      expect(countErrorNodes(failure, (error) => error instanceof AggregateError)).toBe(1);
+      expect(closeObserverCalls).toBe(1);
+      expect(cleanupCalls).toBe(3);
+      await expectPathMissing(temporaryPath);
+      expect((await readdir(join(workspaceRoot, ...directorySegments))).some(isOwnedRecordPath)).toBe(
+        false
+      );
+      if (baseline) expect(await readFileWithIdentity(path)).toEqual(baseline);
+      else await expectPathMissing(path);
+
+      const retried =
+        surface === "hardlink"
+          ? await createJsonRecordIfAbsent(
+              workspaceRoot,
+              directorySegments,
+              fileName,
+              after,
+              evidenceRef,
+              schema
+            )
+          : await writeJsonRecord(
+              workspaceRoot,
+              directorySegments,
+              fileName,
+              after,
+              evidenceRef,
+              schema
+            );
+      expect(retried).toEqual(
+        surface === "hardlink" ? { status: "created", record: after } : after
+      );
+      expect(await readFile(path)).toEqual(Buffer.from(`${JSON.stringify(after, null, 2)}\n`));
+      expect((await stat(path, { bigint: true })).nlink).toBe(1n);
+    }
+  });
+
   test("publication compensation retains an undefined cleanup failure on a frozen primary", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1726,6 +1866,140 @@ describe("idempotency, lock, and artifact services", () => {
     expect(preservePrimaryAndCompensationErrors(emptyPrimary, [], "empty aggregate")).toBe(
       emptyPrimary
     );
+  });
+
+  test("compensation preservation flattens only helper-owned clones by provenance", () => {
+    const semanticPriorCause = new Error("provenance semantic prior cause");
+    const semanticPrimary = new StructuredServiceError(
+      "provenance semantic primary",
+      "E_PROVENANCE_PRIMARY",
+      Object.freeze({ surface: "helper", immutability: "frozen" }),
+      semanticPriorCause
+    );
+    Object.freeze(semanticPrimary);
+    const semanticDescriptors = Object.getOwnPropertyDescriptors(semanticPrimary);
+    const firstFailure = new Error("provenance first compensation");
+    const laterFailure = new Error("provenance later compensation");
+    const firstClone = preservePrimaryAndCompensationErrors(
+      semanticPrimary,
+      [firstFailure],
+      "first provenance aggregate"
+    ) as StructuredServiceError;
+    const laterClone = preservePrimaryAndCompensationErrors(
+      firstClone,
+      [laterFailure],
+      "later provenance aggregate"
+    ) as StructuredServiceError;
+
+    expect(laterClone).toBeInstanceOf(StructuredServiceError);
+    expect(Object.getPrototypeOf(laterClone)).toBe(Object.getPrototypeOf(semanticPrimary));
+    expect(laterClone.code).toBe(semanticPrimary.code);
+    expect(laterClone.details).toBe(semanticPrimary.details);
+    expectPreservedOwnDescriptors(laterClone, semanticDescriptors);
+    expect(Object.isFrozen(laterClone)).toBe(true);
+    expect(Object.isSealed(laterClone)).toBe(true);
+    expect(Object.isExtensible(laterClone)).toBe(false);
+    expect(laterClone.cause).toBeInstanceOf(AggregateError);
+    expect((laterClone.cause as AggregateError).message).toBe("later provenance aggregate");
+    expect((laterClone.cause as AggregateError).errors).toEqual([
+      semanticPriorCause,
+      firstFailure,
+      laterFailure
+    ]);
+    expect(countErrorNodes(laterClone, (error) => error instanceof AggregateError)).toBe(1);
+
+    const differentPrimary = new Error("different semantic primary");
+    const trailingFailure = new Error("different trailing compensation");
+    const compensationClone = preservePrimaryAndCompensationErrors(
+      differentPrimary,
+      [firstClone, trailingFailure],
+      "compensation provenance aggregate"
+    ) as Error;
+    expect((compensationClone.cause as AggregateError).errors).toEqual([
+      semanticPrimary,
+      firstFailure,
+      trailingFailure
+    ]);
+    expect((compensationClone.cause as AggregateError).errors).not.toContain(semanticPriorCause);
+    expect(semanticPrimary.cause).toBe(semanticPriorCause);
+    expect(countErrorNodes(compensationClone, (error) => error === semanticPriorCause)).toBe(1);
+    expect(countErrorNodes(compensationClone, (error) => error instanceof AggregateError)).toBe(1);
+
+    const accessorPriorCause = new Error("accessor provenance prior cause");
+    const accessorPrimary = new Error("accessor provenance semantic primary");
+    let accessorCauseReads = 0;
+    Object.defineProperty(accessorPrimary, "cause", {
+      configurable: true,
+      enumerable: false,
+      get: () => {
+        accessorCauseReads += 1;
+        return accessorPriorCause;
+      }
+    });
+    const accessorRawCompensation = new Error("accessor provenance raw compensation");
+    const accessorSecondCompensation = new Error("accessor provenance second compensation");
+    const accessorThirdCompensation = new Error("accessor provenance third compensation");
+    const accessorFirstClone = preservePrimaryAndCompensationErrors(
+      accessorPrimary,
+      [accessorRawCompensation],
+      "accessor first aggregate"
+    ) as Error;
+    expect(accessorCauseReads).toBe(1);
+    const accessorSecondClone = preservePrimaryAndCompensationErrors(
+      accessorFirstClone,
+      [accessorSecondCompensation],
+      "accessor second aggregate"
+    ) as Error;
+    const accessorFinalClone = preservePrimaryAndCompensationErrors(
+      accessorSecondClone,
+      [accessorThirdCompensation],
+      "accessor final aggregate"
+    ) as Error;
+    expect(accessorCauseReads).toBe(1);
+    expect((accessorFinalClone.cause as AggregateError).errors).toEqual([
+      accessorPriorCause,
+      accessorRawCompensation,
+      accessorSecondCompensation,
+      accessorThirdCompensation
+    ]);
+
+    const accessorTrailingCompensation = new Error("accessor provenance trailing compensation");
+    const accessorOuterPrimary = new Error("accessor provenance outer primary");
+    const accessorOuterClone = preservePrimaryAndCompensationErrors(
+      accessorOuterPrimary,
+      [accessorFirstClone, accessorTrailingCompensation],
+      "accessor outer aggregate"
+    ) as Error;
+    expect(accessorCauseReads).toBe(1);
+    expect((accessorOuterClone.cause as AggregateError).errors).toEqual([
+      accessorPrimary,
+      accessorRawCompensation,
+      accessorTrailingCompensation
+    ]);
+    expect((accessorOuterClone.cause as AggregateError).errors).not.toContain(
+      accessorPriorCause
+    );
+    expect(Object.getOwnPropertyDescriptor(accessorPrimary, "cause")?.get).toBeFunction();
+
+    const userPriorLeaf = new Error("user prior leaf");
+    const userPriorAggregate = new AggregateError([userPriorLeaf], "user prior aggregate");
+    const userCompensationLeaf = new Error("user compensation leaf");
+    const userCompensationAggregate = new AggregateError(
+      [userCompensationLeaf],
+      "user compensation aggregate"
+    );
+    const userPrimary = new Error("user aggregate primary", { cause: userPriorAggregate });
+    const userResult = preservePrimaryAndCompensationErrors(
+      userPrimary,
+      [userCompensationAggregate],
+      "user aggregate preservation"
+    ) as Error;
+    expect((userResult.cause as AggregateError).errors).toEqual([
+      userPriorAggregate,
+      userCompensationAggregate
+    ]);
+    expect((userResult.cause as AggregateError).errors[0]).toBe(userPriorAggregate);
+    expect((userResult.cause as AggregateError).errors[1]).toBe(userCompensationAggregate);
   });
 
   test("Artifact duplicate registration converges across the owned publication window", async () => {
@@ -5393,6 +5667,95 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("first restore commit proof rolls back a displaced public link exactly once", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "restore-first-proof-owned" };
+    const replacement = { id: "restore-first-proof-replacement" };
+    const expectedBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+    const replacementBytes = Buffer.from(`${JSON.stringify(replacement, null, 2)}\n`);
+    const evidenceRef = "restore.first-proof.single-rollback";
+    const directorySegments = ["restore-first-proof"] as const;
+    const fileName = "record.json";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    expect(
+      await createJsonRecordIfAbsent(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      )
+    ).toEqual({ status: "created", record });
+    const ownedBefore = await readFileWithIdentity(path);
+    const isolationFailure = new Error("force first restore commit proof");
+    let isolatedPath = "";
+    let sourceUnlinkHookCalls = 0;
+    let replacementIdentity: { bytes: Buffer; dev: number; ino: number } | undefined;
+
+    const failure = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterOwnedPathIsolation: (input) => {
+            if (input.site !== "conditional_delete") return;
+            isolatedPath = input.isolatedPath;
+            throw isolationFailure;
+          },
+          beforeOwnedIsolatedSourceUnlink: async (input) => {
+            sourceUnlinkHookCalls += 1;
+            await rm(input.path);
+            await writeFile(input.path, replacementBytes, { flag: "wx", mode: 0o600 });
+            replacementIdentity = await readFileWithIdentity(input.path);
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+            kind: "record",
+            expected: record,
+            matches: (current, expected) => current.id === expected.id
+          })
+      )
+    );
+
+    expect(sourceUnlinkHookCalls).toBe(1);
+    const restoreFailure = findErrorNode(
+      failure,
+      (error) =>
+        error instanceof TaskServiceError &&
+        error.message === "Workspace record generation could not be restored after a failed mutation."
+    );
+    expect(restoreFailure).toBeDefined();
+    const proofFailure = restoreFailure!.cause as TaskServiceError;
+    expect(proofFailure).toMatchObject({
+      code: "workspace_path_not_safe",
+      message: "Workspace record publication authority could not be verified."
+    });
+    expect(proofFailure.cause).toBeInstanceOf(AggregateError);
+    const rollbackFailures = (proofFailure.cause as AggregateError).errors;
+    expect(rollbackFailures).toHaveLength(1);
+    expect(rollbackFailures[0]).toMatchObject({
+      code: "workspace_path_not_safe",
+      message: "Workspace record publication authority could not be verified."
+    });
+    expect(countErrorNodes(restoreFailure, (error) => error instanceof AggregateError)).toBe(1);
+    expect(await readFileWithIdentity(path)).toEqual(replacementIdentity!);
+    expect(replacementIdentity!.bytes).toEqual(replacementBytes);
+    expect(replacementIdentity!.dev === ownedBefore.dev && replacementIdentity!.ino === ownedBefore.ino).toBe(
+      false
+    );
+    expect((await stat(path, { bigint: true })).nlink).toBe(1n);
+    expect(await readFile(isolatedPath)).toEqual(expectedBytes);
+    const isolatedIdentity = await stat(isolatedPath, { bigint: true });
+    expect(isolatedIdentity).toMatchObject({ dev: BigInt(ownedBefore.dev), ino: BigInt(ownedBefore.ino) });
+    expect(isolatedIdentity.nlink).toBe(1n);
+  });
+
   test("all post-isolation sites restore through the shared source-unlink helper", async () => {
     for (const site of [
       "conditional_delete",
@@ -5821,6 +6184,7 @@ describe("idempotency, lock, and artifact services", () => {
       )
     ).toEqual({ status: "created", record });
     const replacementBytes = Buffer.from("foreign restore source namespace\n");
+    const sourceUnlinkFailure = new Error("restore source unlink namespace rebound trigger");
     let displacedNamespace: string | undefined;
     let foreignNamespace: string | undefined;
     let displacedIdentity: { dev: number; ino: number } | undefined;
@@ -5844,6 +6208,7 @@ describe("idempotency, lock, and artifact services", () => {
               mode: 0o600
             });
             await symlink(foreignNamespace, namespacePath);
+            throw sourceUnlinkFailure;
           }
         },
         () =>
@@ -5858,6 +6223,29 @@ describe("idempotency, lock, and artifact services", () => {
     expect(aggregateErrorMessages(failure)).toContain(
       "Workspace record publication authority could not be verified."
     );
+    const restoreFailure = findErrorNode(
+      failure,
+      (error) =>
+        error instanceof TaskServiceError &&
+        error.message === "Workspace record generation could not be restored after a failed mutation."
+    );
+    expect(restoreFailure).toBeDefined();
+    expect(restoreFailure!.cause).toBeInstanceOf(Error);
+    expect((restoreFailure!.cause as Error).message).toBe(sourceUnlinkFailure.message);
+    expect((restoreFailure!.cause as Error).cause).toBeInstanceOf(AggregateError);
+    const retryThenRollbackFailures = ((restoreFailure!.cause as Error).cause as AggregateError)
+      .errors;
+    expect(retryThenRollbackFailures).toHaveLength(3);
+    for (const retainedFailure of retryThenRollbackFailures) {
+      expect(retainedFailure).toMatchObject({
+        code: "workspace_path_not_safe",
+        message: "Workspace record publication authority could not be verified."
+      });
+      expect(
+        retryThenRollbackFailures.filter((candidate) => candidate === retainedFailure)
+      ).toHaveLength(1);
+    }
+    expect(countErrorNodes(restoreFailure, (error) => error instanceof AggregateError)).toBe(1);
     expect(await stat(join(displacedNamespace!, "generation"))).toMatchObject(
       displacedIdentity!
     );
