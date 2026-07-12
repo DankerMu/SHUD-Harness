@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 import { chmod, link, lstat, mkdir, open, rename, rmdir, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, parse, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -1338,12 +1338,14 @@ async function createJsonRecordIfAbsentInternal<T>(
         directoryPath,
         evidenceRef
       );
-      await hooks?.afterAuthorityLeaseAcquired?.(Object.freeze({ operation: "hardlink" }));
-      await assertRecordDirectoryIdentity(
-        directoryPath,
-        ownedResources.directoryIdentity,
-        evidenceRef
-      );
+      if (hooks?.afterAuthorityLeaseAcquired) {
+        await hooks.afterAuthorityLeaseAcquired(Object.freeze({ operation: "hardlink" }));
+        await assertRecordDirectoryIdentity(
+          directoryPath,
+          ownedResources.directoryIdentity,
+          evidenceRef
+        );
+      }
       if (reserveCleanupPermit && (await recordPathEntryExists(recordPath, evidenceRef))) {
         publicationOutcome = "exists";
       } else if (reserveCleanupPermit) {
@@ -1366,6 +1368,13 @@ async function createJsonRecordIfAbsentInternal<T>(
         ownedResources.directoryIdentity
       );
       ownedResources.temporaryIdentity = ownedResources.temporaryRecord.identity;
+      const temporaryNamespace = hardlinkTemporaryNamespaceOwnership(
+        ownedResources,
+        producerNamespacePath,
+        directoryPath,
+        evidenceRef
+      );
+      await assertAuthorityNamespaceOwnership(temporaryNamespace, evidenceRef);
       ownedResources.temporaryExpectation = await captureOwnedGenerationExpectation(
         temporaryPath,
         ownedResources.temporaryIdentity,
@@ -1374,23 +1383,21 @@ async function createJsonRecordIfAbsentInternal<T>(
         evidenceRef,
         PRIVATE_GENERATION_MODE
       );
+      await assertAuthorityNamespaceOwnership(temporaryNamespace, evidenceRef);
       const hardlinkCheckpoint: OwnedGenerationCheckpoint = {
         parentPath: directoryPath,
         parentIdentity: ownedResources.directoryIdentity,
-        namespace: hardlinkTemporaryNamespaceOwnership(
-          ownedResources,
-          producerNamespacePath,
-          directoryPath,
-          evidenceRef
-        ),
+        namespace: temporaryNamespace,
         path: temporaryPath,
         generation: ownedResources.temporaryExpectation
       };
-      await hooks?.afterTemporaryFileWritten?.({
-        canonicalPath: recordPath,
-        temporaryPath
-      });
-      await assertOwnedGenerationCheckpoint(hardlinkCheckpoint, evidenceRef);
+      if (hooks?.afterTemporaryFileWritten) {
+        await hooks.afterTemporaryFileWritten({
+          canonicalPath: recordPath,
+          temporaryPath
+        });
+        await assertOwnedGenerationCheckpoint(hardlinkCheckpoint, evidenceRef);
+      }
       try {
         await link(temporaryPath, recordPath);
         publicationOutcome = "published";
@@ -1740,7 +1747,7 @@ async function writeOwnedTemporaryRecordFile(
     let observedBytes: Buffer | undefined;
     if (temporaryFile) {
       try {
-        observedBytes = await readBoundedOpenFileBytes(temporaryFile);
+        observedBytes = (await readBoundedOpenFile(temporaryFile)).bytes;
       } catch (error) {
         cleanupErrors.push(error);
       }
@@ -1978,8 +1985,17 @@ async function conditionalUnlinkOwnedPath(
   }
 }
 
-async function readBoundedOpenFileBytes(file: RecordFileHandle): Promise<Buffer> {
-  const before = await file.stat({ bigint: true });
+interface BoundedOpenFileObservation {
+  bytes: Buffer;
+  before: BigIntStats;
+  after: BigIntStats;
+}
+
+async function readBoundedOpenFile(
+  file: RecordFileHandle,
+  admittedBefore?: BigIntStats
+): Promise<BoundedOpenFileObservation> {
+  const before = admittedBefore ?? (await file.stat({ bigint: true }));
   if (!before.isFile() || before.size > BigInt(MAX_SERVICE_RECORD_BYTES)) {
     throw new Error("Temporary record bytes are not bounded.");
   }
@@ -1994,7 +2010,7 @@ async function readBoundedOpenFileBytes(file: RecordFileHandle): Promise<Buffer>
   if (offset !== bytes.length || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size) {
     throw new Error("Temporary record bytes changed while observed.");
   }
-  return bytes;
+  return { bytes, before, after };
 }
 
 async function removeOwnedPublicationTemporaryPath(
@@ -2033,21 +2049,22 @@ async function removeOwnedPublicationTemporaryPath(
   }
   for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
     try {
-      await hooks?.beforeTemporaryUnlink?.({
-        canonicalPath: recordPath,
-        temporaryPath,
-        attempt
-      });
+      if (hooks?.beforeTemporaryUnlink) {
+        await hooks.beforeTemporaryUnlink({
+          canonicalPath: recordPath,
+          temporaryPath,
+          attempt
+        });
+      }
       await assertAuthorityNamespaceOwnership(namespaceOwnership, evidenceRef);
-      await hooks?.beforeGenerationIsolation?.(
-        Object.freeze({ path: temporaryPath, operation })
-      );
-      await assertAuthorityNamespaceOwnership(namespaceOwnership, evidenceRef);
+      if (hooks?.beforeGenerationIsolation) {
+        await hooks.beforeGenerationIsolation(
+          Object.freeze({ path: temporaryPath, operation })
+        );
+        await assertAuthorityNamespaceOwnership(namespaceOwnership, evidenceRef);
+      }
       if (!generationExpectation) throw generationExpectationFailure!.value;
-      const isolatedIdentity = await readRegularFilePathIdentity(temporaryPath, evidenceRef);
       if (
-        !isolatedIdentity ||
-        !workspaceRecordPhysicalIdentityMatches(isolatedIdentity, temporaryIdentity) ||
         !(await ownedGenerationStateMatches(
           temporaryPath,
           generationExpectation,
@@ -2061,22 +2078,24 @@ async function removeOwnedPublicationTemporaryPath(
         ownedResources.isolatedGeneration = {
           namespacePath,
           path: temporaryPath,
-          identity: isolatedIdentity
+          identity: temporaryIdentity
         };
       }
-      await hooks?.beforeAuthorityOwnedUnlink?.(
-        Object.freeze({ path: temporaryPath, operation })
-      );
-      await assertAuthorityNamespaceOwnership(namespaceOwnership, evidenceRef);
-      if (
-        !(await ownedGenerationStateMatches(
-          temporaryPath,
-          generationExpectation,
-          generationExpectation.nlink,
-          evidenceRef
-        ))
-      ) {
-        throw publicationStateError(evidenceRef);
+      if (hooks?.beforeAuthorityOwnedUnlink) {
+        await hooks.beforeAuthorityOwnedUnlink(
+          Object.freeze({ path: temporaryPath, operation })
+        );
+        await assertAuthorityNamespaceOwnership(namespaceOwnership, evidenceRef);
+        if (
+          !(await ownedGenerationStateMatches(
+            temporaryPath,
+            generationExpectation,
+            generationExpectation.nlink,
+            evidenceRef
+          ))
+        ) {
+          throw publicationStateError(evidenceRef);
+        }
       }
       await assertAuthorityNamespaceOwnership(namespaceOwnership, evidenceRef);
       await unlink(temporaryPath);
@@ -2743,8 +2762,7 @@ async function ownedGenerationStateMatches(
     ) {
       return false;
     }
-    const bytes = await readBoundedOpenFileBytes(file);
-    const after = await file.stat({ bigint: true });
+    const { bytes, after } = await readBoundedOpenFile(file, before);
     return (
       bytes.equals(expectedGeneration.bytes) &&
       after.dev === before.dev &&
@@ -2783,8 +2801,7 @@ async function captureOwnedGenerationExpectation(
     ) {
       throw publicationStateError(evidenceRef);
     }
-    const bytes = await readBoundedOpenFileBytes(file);
-    const after = await file.stat({ bigint: true });
+    const { bytes, after } = await readBoundedOpenFile(file, before);
     if (
       !bytes.equals(expectedBytes) ||
       after.dev !== before.dev ||
@@ -2814,13 +2831,14 @@ async function assertOwnedGenerationCheckpoint(
   evidenceRef: string,
   expectedLinkCount = checkpoint.generation.nlink
 ): Promise<void> {
-  await assertRecordDirectoryIdentity(
-    checkpoint.parentPath,
-    checkpoint.parentIdentity,
-    evidenceRef
-  );
   if (checkpoint.namespace) {
     await assertAuthorityNamespaceOwnership(checkpoint.namespace, evidenceRef);
+  } else {
+    await assertRecordDirectoryIdentity(
+      checkpoint.parentPath,
+      checkpoint.parentIdentity,
+      evidenceRef
+    );
   }
   if (
     !(await ownedGenerationStateMatches(
@@ -2848,15 +2866,38 @@ async function assertHardlinkPublicationCheckpoint(
   canonicalPath: string,
   evidenceRef: string
 ): Promise<void> {
-  await assertOwnedGenerationCheckpoint(temporaryCheckpoint, evidenceRef, 2n);
-  const canonicalCheckpoint: OwnedGenerationCheckpoint = {
-    parentPath: temporaryCheckpoint.parentPath,
-    parentIdentity: temporaryCheckpoint.parentIdentity,
-    path: canonicalPath,
-    generation: temporaryCheckpoint.generation
-  };
-  await assertOwnedGenerationCheckpoint(canonicalCheckpoint, evidenceRef, 2n);
-  await assertOwnedGenerationCheckpoint(temporaryCheckpoint, evidenceRef, 2n);
+  const namespace = temporaryCheckpoint.namespace;
+  if (!namespace) throw publicationStateError(evidenceRef);
+
+  await assertAuthorityNamespaceOwnership(namespace, evidenceRef);
+  if (
+    !(await ownedGenerationStateMatches(
+      temporaryCheckpoint.path,
+      temporaryCheckpoint.generation,
+      2n,
+      evidenceRef
+    ))
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  await assertAuthorityNamespaceOwnership(namespace, evidenceRef);
+  if (
+    !(await ownedGenerationStateMatches(
+      canonicalPath,
+      temporaryCheckpoint.generation,
+      2n,
+      evidenceRef
+    )) ||
+    !(await ownedGenerationStateMatches(
+      temporaryCheckpoint.path,
+      temporaryCheckpoint.generation,
+      2n,
+      evidenceRef
+    ))
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  await assertAuthorityNamespaceOwnership(namespace, evidenceRef);
 }
 
 function preserveWorkspacePrimaryError(primary: unknown, compensations: unknown[]): unknown {
@@ -2960,17 +3001,25 @@ async function assertPublishedRecordAuthority(
     evidenceRef
   );
   if (expectedGeneration) {
+    let finalPath: BigIntStats;
+    try {
+      finalPath = await lstat(recordPath, { bigint: true });
+    } catch {
+      throw publicationStateError(evidenceRef);
+    }
     if (
       !workspaceRecordPhysicalIdentityMatches(
         published.identity,
         expectedGeneration.identity
       ) ||
-      !(await ownedGenerationStateMatches(
-        recordPath,
-        expectedGeneration,
-        1n,
-        evidenceRef
-      ))
+      !finalPath.isFile() ||
+      finalPath.isSymbolicLink() ||
+      finalPath.nlink !== 1n ||
+      finalPath.mode !== expectedGeneration.mode ||
+      finalPath.size !== BigInt(expectedGeneration.bytes.length) ||
+      !workspaceRecordPhysicalIdentityMatches(finalPath, published.identity) ||
+      finalPath.ctimeNs !== published.mutation.ctimeNs ||
+      finalPath.mtimeNs !== published.mutation.mtimeNs
     ) {
       throw publicationStateError(evidenceRef);
     }
@@ -3223,8 +3272,7 @@ async function captureMutableCanonicalBaseline(
     ) {
       throw publicationStateError(evidenceRef);
     }
-    const bytes = await readBoundedOpenFileBytes(file);
-    const after = await file.stat({ bigint: true });
+    const { bytes, after } = await readBoundedOpenFile(file, before);
     if (
       after.dev !== before.dev ||
       after.ino !== before.ino ||
@@ -3822,12 +3870,22 @@ async function bindRecordAuthorityCleanupPermitGeneration(
       admittedParentIdentity,
       evidenceRef
     );
-    const observedBytes = await readBoundedOpenFileBytes(pinnedFile);
-    const after = await pinnedFile.stat({ bigint: true });
+    const {
+      bytes: observedBytes,
+      before: beforeRead,
+      after
+    } = await readBoundedOpenFile(pinnedFile);
     if (
       !observedBytes.equals(expectedBytes) ||
+      !beforeRead.isFile() ||
+      beforeRead.nlink !== 1n ||
+      beforeRead.mode !== generation.mode ||
+      beforeRead.dev !== before.dev ||
+      beforeRead.ino !== before.ino ||
+      beforeRead.size !== before.size ||
       !after.isFile() ||
       after.nlink !== 1n ||
+      after.mode !== beforeRead.mode ||
       after.dev !== before.dev ||
       after.ino !== before.ino ||
       after.size !== before.size
@@ -3877,7 +3935,7 @@ async function assertCleanupPermitPinnedGeneration(
     const [pinnedIdentity, pathIdentity, observedBytes, pathStateMatches] = await Promise.all([
       pinnedFile.stat({ bigint: true }),
       readRegularFilePathIdentity(path, evidenceRef),
-      readBoundedOpenFileBytes(pinnedFile),
+      readBoundedOpenFile(pinnedFile),
       ownedGenerationStateMatches(
         path,
         generationExpectation,
@@ -3891,7 +3949,7 @@ async function assertCleanupPermitPinnedGeneration(
       pinnedIdentity.size !== BigInt(expectedBytes.length) ||
       pinnedIdentity.mode !== generationExpectation.mode ||
       pinnedIdentity.nlink !== generationExpectation.nlink ||
-      !observedBytes.equals(expectedBytes) ||
+      !observedBytes.bytes.equals(expectedBytes) ||
       !workspaceRecordPhysicalIdentityMatches(pinnedIdentity, generation) ||
       !pathIdentity ||
       !pathStateMatches ||
