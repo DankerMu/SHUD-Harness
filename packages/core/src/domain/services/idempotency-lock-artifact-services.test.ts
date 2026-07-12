@@ -5,6 +5,7 @@ import {
   mkdirSync,
   renameSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
   type BigIntStats
 } from "node:fs";
@@ -1836,6 +1837,329 @@ describe("idempotency, lock, and artifact services", () => {
       thrownValue = error;
     }
     expect(thrownValue).toBe(exactMarker);
+  });
+
+  test("conditional-delete schema and condition callbacks share one admitted authority epoch", async () => {
+    const cases = [
+      { exit: "schema_success", drift: "parent_symlink" },
+      { exit: "schema_invalid", drift: "parent_rebind" },
+      { exit: "schema_throw", drift: "leaf_replacement" },
+      { exit: "condition_true", drift: "same_inode" },
+      { exit: "condition_false", drift: "leaf_replacement" },
+      { exit: "condition_throw", drift: "parent_rebind" },
+      { exit: "callback_missing", drift: "missing" }
+    ] as const;
+
+    for (const authority of ["ordinary", "cleanup-permit"] as const) {
+      for (const callbackCase of cases) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const record = { id: `${authority}-${callbackCase.exit}` };
+        const replacement = { id: `${authority}-${callbackCase.exit}-replacement` };
+        const evidenceRef = `conditional.callback.${authority}.${callbackCase.exit}`;
+        const directorySegments = ["conditional-callback", authority, callbackCase.exit] as const;
+        const fileName = "record.json";
+        const path = workspaceRecordPath(
+          workspaceRoot,
+          [...directorySegments, fileName],
+          evidenceRef
+        );
+        const baseSchema = z.object({ id: z.string() });
+        const created =
+          authority === "cleanup-permit"
+            ? await createJsonRecordIfAbsentWithCleanupPermit(
+                workspaceRoot,
+                directorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                baseSchema
+              )
+            : await createJsonRecordIfAbsent(
+                workspaceRoot,
+                directorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                baseSchema
+              );
+        if (created.status !== "created") throw new Error("Expected callback fixture.");
+        const original = await readFileWithIdentity(path);
+        const parentPath = dirname(path);
+        const displacedParent = `${parentPath}.displaced`;
+        const displacedLeaf = `${path}.displaced`;
+        const replacementBytes = Buffer.from(`${JSON.stringify(replacement, null, 2)}\n`);
+        const callbackMarker = new Error(
+          `callback marker ${authority} ${callbackCase.exit}`
+        );
+        let mutated = false;
+        const mutate = () => {
+          if (mutated) return;
+          mutated = true;
+          switch (callbackCase.drift) {
+            case "parent_symlink":
+              renameSync(parentPath, displacedParent);
+              symlinkSync(displacedParent, parentPath, "dir");
+              break;
+            case "parent_rebind":
+              renameSync(parentPath, displacedParent);
+              mkdirSync(parentPath);
+              renameSync(join(displacedParent, fileName), path);
+              break;
+            case "leaf_replacement":
+              renameSync(path, displacedLeaf);
+              writeFileSync(path, replacementBytes, { flag: "wx", mode: 0o600 });
+              break;
+            case "same_inode":
+              writeFileSync(path, replacementBytes);
+              break;
+            case "missing":
+              unlinkSync(path);
+              break;
+          }
+        };
+        const schema = baseSchema.superRefine((_value, context) => {
+          if (!callbackCase.exit.startsWith("schema_")) return;
+          mutate();
+          if (callbackCase.exit === "schema_invalid") {
+            context.addIssue({ code: "custom", message: "injected schema issue" });
+          } else if (callbackCase.exit === "schema_throw") {
+            throw callbackMarker;
+          }
+        });
+        const condition =
+          callbackCase.exit === "schema_invalid"
+            ? ({ kind: "malformed" } as const)
+            : {
+                kind: "record" as const,
+                expected: record,
+                matches: (current: { id: string }, expected: { id: string }) => {
+                  if (callbackCase.exit.startsWith("condition_") ||
+                      callbackCase.exit === "callback_missing") {
+                    mutate();
+                  }
+                  if (callbackCase.exit === "condition_throw") throw callbackMarker;
+                  if (callbackCase.exit === "condition_false") return false;
+                  return current.id === expected.id;
+                }
+              };
+        const action = () =>
+          authority === "cleanup-permit"
+            ? conditionalDeleteJsonRecordWithCleanupPermit(
+                created.cleanupPermit,
+                path,
+                evidenceRef,
+                schema,
+                condition
+              )
+            : conditionalDeleteJsonRecord(path, evidenceRef, schema, condition);
+
+        const failure = await captureError(action);
+
+        expect(mutated).toBe(true);
+        expect(
+          findErrorNode(
+            failure,
+            (error) =>
+              error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
+          )
+        ).toBeInstanceOf(TaskServiceError);
+        if (callbackCase.exit === "schema_invalid") {
+          expect(
+            findErrorNode(
+              failure,
+              (error) => error instanceof TaskServiceError && error.code === "record_schema_error"
+            )
+          ).toBeInstanceOf(TaskServiceError);
+        }
+        if (callbackCase.exit === "schema_throw" || callbackCase.exit === "condition_throw") {
+          expect(errorTreeContains(failure, callbackMarker)).toBe(true);
+        }
+        if (callbackCase.drift === "leaf_replacement" || callbackCase.drift === "same_inode") {
+          expect(await readFile(path)).toEqual(replacementBytes);
+        } else if (callbackCase.drift !== "missing") {
+          expect(await readFileWithIdentity(path)).toEqual(original);
+        } else {
+          await expectPathMissing(path);
+        }
+        if (callbackCase.drift === "leaf_replacement") {
+          expect(await readFileWithIdentity(displacedLeaf)).toEqual(original);
+        }
+        if (callbackCase.drift === "same_inode") {
+          expect((await stat(path)).ino).toBe(original.ino);
+        }
+        expect((await readdir(parentPath)).some(isOwnedRecordPath)).toBe(false);
+
+        if (authority === "cleanup-permit") {
+          const reusedPermit = await captureConditionalDeleteError(() =>
+            conditionalDeleteJsonRecordWithCleanupPermit(
+              created.cleanupPermit,
+              path,
+              `${evidenceRef}.reused`,
+              baseSchema,
+              { kind: "malformed" }
+            )
+          );
+          expect(reusedPermit.failureStage).toBe("permit_admission");
+        }
+      }
+    }
+  });
+
+  test("conditional-delete callbacks preserve no-drift results and thrown identities", async () => {
+    for (const authority of ["ordinary", "cleanup-permit"] as const) {
+      for (const exit of [
+        "schema_success",
+        "schema_invalid",
+        "schema_throw",
+        "condition_true",
+        "condition_false",
+        "condition_throw"
+      ] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const record = { id: `compatible-${authority}-${exit}` };
+        const evidenceRef = `conditional.compatible.${authority}.${exit}`;
+        const directorySegments = ["conditional-compatible", authority, exit] as const;
+        const fileName = "record.json";
+        const path = workspaceRecordPath(
+          workspaceRoot,
+          [...directorySegments, fileName],
+          evidenceRef
+        );
+        const baseSchema = z.object({ id: z.string() });
+        const created =
+          authority === "cleanup-permit"
+            ? await createJsonRecordIfAbsentWithCleanupPermit(
+                workspaceRoot,
+                directorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                baseSchema
+              )
+            : await createJsonRecordIfAbsent(
+                workspaceRoot,
+                directorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                baseSchema
+              );
+        if (created.status !== "created") throw new Error("Expected compatible fixture.");
+        const marker = new Error(`exact callback marker ${authority} ${exit}`);
+        const schema = baseSchema.superRefine((_value, context) => {
+          if (exit === "schema_invalid") {
+            context.addIssue({ code: "custom", message: "compatible schema issue" });
+          } else if (exit === "schema_throw") {
+            throw marker;
+          }
+        });
+        const condition =
+          exit === "schema_invalid"
+            ? ({ kind: "malformed" } as const)
+            : {
+                kind: "record" as const,
+                expected: record,
+                matches: (current: { id: string }, expected: { id: string }) => {
+                  if (exit === "condition_throw") throw marker;
+                  if (exit === "condition_false") return false;
+                  return current.id === expected.id;
+                }
+              };
+        const action = () =>
+          authority === "cleanup-permit"
+            ? conditionalDeleteJsonRecordWithCleanupPermit(
+                created.cleanupPermit,
+                path,
+                evidenceRef,
+                schema,
+                condition
+              )
+            : conditionalDeleteJsonRecord(path, evidenceRef, schema, condition);
+
+        if (exit === "schema_throw" || exit === "condition_throw") {
+          let thrown: unknown;
+          try {
+            await action();
+          } catch (error) {
+            thrown = error;
+          }
+          if (authority === "ordinary") {
+            expect(thrown).toBe(marker);
+          } else {
+            expect(thrown).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+            expect((thrown as WorkspaceRecordConditionalDeleteError).cause).toBe(marker);
+          }
+          expect(await readFile(path)).toEqual(
+            Buffer.from(`${JSON.stringify(record, null, 2)}\n`)
+          );
+        } else {
+          expect(await action()).toEqual(
+            exit === "condition_false"
+              ? { status: "condition_not_met" }
+              : { status: "deleted" }
+          );
+        }
+
+        if (authority === "cleanup-permit" &&
+            (exit === "schema_throw" || exit === "condition_throw" ||
+             exit === "condition_false")) {
+          const reusedPermit = await captureConditionalDeleteError(() =>
+            conditionalDeleteJsonRecordWithCleanupPermit(
+              created.cleanupPermit,
+              path,
+              `${evidenceRef}.reused`,
+              baseSchema,
+              { kind: "malformed" }
+            )
+          );
+          expect(reusedPermit.failureStage).toBe("permit_admission");
+        }
+      }
+
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const missingPath = workspaceRecordPath(
+        workspaceRoot,
+        ["conditional-compatible", authority, "missing.json"],
+        `conditional.compatible.${authority}.missing`
+      );
+      await mkdir(dirname(missingPath), { recursive: true });
+      if (authority === "ordinary") {
+        expect(
+          await conditionalDeleteJsonRecord(
+            missingPath,
+            `conditional.compatible.${authority}.missing`,
+            z.object({ id: z.string() }),
+            { kind: "malformed" }
+          )
+        ).toEqual({ status: "missing" });
+      } else {
+        const record = { id: "cleanup-permit-missing" };
+        const created = await createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          ["conditional-compatible", authority],
+          "missing.json",
+          record,
+          `conditional.compatible.${authority}.missing`,
+          z.object({ id: z.string() })
+        );
+        if (created.status !== "created") throw new Error("Expected missing permit fixture.");
+        unlinkSync(missingPath);
+        const missingFailure = await captureConditionalDeleteError(() =>
+          conditionalDeleteJsonRecordWithCleanupPermit(
+            created.cleanupPermit,
+            missingPath,
+            `conditional.compatible.${authority}.missing`,
+            z.object({ id: z.string() }),
+            { kind: "malformed" }
+          )
+        );
+        expect(missingFailure.failureStage).toBe("permit_admission");
+        await expectPathMissing(missingPath);
+      }
+    }
   });
 
   test("mutable canonical baseline rejects lease-hook and final-precommit destination drift", async () => {
