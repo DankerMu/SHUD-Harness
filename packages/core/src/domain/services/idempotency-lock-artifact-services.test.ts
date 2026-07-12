@@ -2162,6 +2162,44 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("ordinary conditional delete treats ENOENT and ENOTDIR parents as missing without callbacks or namespaces", async () => {
+    for (const parentState of ["ENOENT", "ENOTDIR"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      await mkdir(workspaceRoot);
+      const evidenceRef = `conditional.missing-parent.${parentState.toLowerCase()}`;
+      const blockerPath = join(workspaceRoot, `missing-parent-${parentState.toLowerCase()}`);
+      if (parentState === "ENOTDIR") {
+        await writeFile(blockerPath, "not a directory\n", { flag: "wx", mode: 0o600 });
+      }
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [basename(blockerPath), "child", "record.json"],
+        evidenceRef
+      );
+      let schemaCalls = 0;
+      let conditionCalls = 0;
+      const schema = z.object({ id: z.string() }).superRefine(() => {
+        schemaCalls += 1;
+      });
+
+      expect(
+        await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+          kind: "record",
+          expected: { id: "missing" },
+          matches: () => {
+            conditionCalls += 1;
+            return true;
+          }
+        })
+      ).toEqual({ status: "missing" });
+      expect(schemaCalls).toBe(0);
+      expect(conditionCalls).toBe(0);
+      expect((await readdir(workspaceRoot)).some(isOwnedRecordPath)).toBe(false);
+      await expectPathMissing(dirname(path));
+    }
+  });
+
   test("mutable canonical baseline rejects lease-hook and final-precommit destination drift", async () => {
     for (const phase of ["lease-hook", "final-precommit"] as const) {
       for (const mutation of ["absent-to-present", "replacement", "same-inode-drift"] as const) {
@@ -6684,6 +6722,297 @@ describe("idempotency, lock, and artifact services", () => {
         );
       }
       await rm(dirname(isolatedPath!), { recursive: true });
+    }
+  });
+
+  test("post-link proof failure rolls back its owned link and retries restoration without residue", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "restore-post-link-proof-retry" };
+    const evidenceRef = "restore.post-link-proof.retry";
+    const directorySegments = ["restore-post-link-proof"] as const;
+    const fileName = "record.json";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    expect(
+      await createJsonRecordIfAbsent(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      )
+    ).toEqual({ status: "created", record });
+    const before = await readFileWithIdentity(path);
+    const isolationFailure = new Error("force post-link restore proof");
+    const proofFailure = new Error("transient post-link proof failure");
+    let postLinkProofCalls = 0;
+    let ownedRollbackCalls = 0;
+
+    const failure = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterOwnedPathIsolation: (input) => {
+            if (input.site === "conditional_delete") throw isolationFailure;
+          },
+          afterOwnedPublicLinkCreated: (input) => {
+            if (input.site !== "conditional_delete") return;
+            postLinkProofCalls += 1;
+            if (postLinkProofCalls === 1) throw proofFailure;
+          },
+          beforeExactOwnedPublicLinkUnlink: () => {
+            ownedRollbackCalls += 1;
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+            kind: "record",
+            expected: record,
+            matches: (current, expected) => current.id === expected.id
+          })
+      )
+    );
+
+    expect(errorTreeContains(failure, isolationFailure)).toBe(true);
+    expect(errorTreeContains(failure, proofFailure)).toBe(false);
+    expect(postLinkProofCalls).toBe(2);
+    expect(ownedRollbackCalls).toBe(1);
+    expect(await readFileWithIdentity(path)).toEqual(before);
+    expect((await stat(path, { bigint: true })).nlink).toBe(1n);
+    expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+    expect(
+      await conditionalDeleteJsonRecord(path, `${evidenceRef}.repaired`, schema, {
+        kind: "record",
+        expected: record,
+        matches: (current, expected) => current.id === expected.id
+      })
+    ).toEqual({ status: "deleted" });
+    expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+  });
+
+  test("all restore call sites share post-link rollback and repaired retry cleanup", async () => {
+    for (const site of [
+      "conditional_delete",
+      "conditional_unlink_owned_path",
+      "published_rollback",
+      "temporary_generation_compensation"
+    ] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `restore-post-link-shared-${site}` };
+      const evidenceRef = `restore.post-link.shared.${site}`;
+      const directorySegments = ["restore-post-link-shared"] as const;
+      const fileName = `${site}.json`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const primary = new Error(`post-link shared primary ${site}`);
+      const isolationFailure = new Error(`post-link shared isolation ${site}`);
+      const proofFailure = new Error(`post-link shared proof ${site}`);
+      let temporaryPath: string | undefined;
+      let isolatedPath = "";
+      const postLinkSites: string[] = [];
+      let rollbackCalls = 0;
+
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            beforeOwnedTemporaryRecordWrite: async (input) => {
+              if (site !== "conditional_unlink_owned_path") return;
+              temporaryPath = input.path;
+              await writeFile(input.path, Buffer.from(`partial ${site}\n`));
+              throw primary;
+            },
+            afterOwnedPathIsolation: (input) => {
+              if (input.site !== site) return;
+              isolatedPath = input.isolatedPath;
+              throw isolationFailure;
+            },
+            afterOwnedPublicLinkCreated: (input) => {
+              if (input.site !== site) return;
+              postLinkSites.push(input.site);
+              if (postLinkSites.length === 1) throw proofFailure;
+            },
+            beforeExactOwnedPublicLinkUnlink: () => {
+              rollbackCalls += 1;
+            }
+          },
+          async () => {
+            if (site === "conditional_delete") {
+              expect(
+                await createJsonRecordIfAbsent(
+                  workspaceRoot,
+                  directorySegments,
+                  fileName,
+                  record,
+                  evidenceRef,
+                  schema
+                )
+              ).toEqual({ status: "created", record });
+              return await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+                kind: "record",
+                expected: record,
+                matches: (current, expected) => current.id === expected.id
+              });
+            }
+            return await runWithWorkspaceRecordPublicationHooks(
+              {
+                afterTemporaryFileWritten: async (input) => {
+                  temporaryPath = input.temporaryPath;
+                  if (site === "temporary_generation_compensation") throw primary;
+                },
+                afterCanonicalLink: () => {
+                  if (site === "published_rollback") throw primary;
+                },
+                beforeTemporaryUnlink: async ({ temporaryPath: candidatePath }) => {
+                  if (site !== "temporary_generation_compensation") return;
+                  await chmod(dirname(candidatePath), 0o500);
+                  throw new Error("retain shared post-link generation for compensation");
+                },
+                beforePublicationCompensationStateInspection: async ({ site: inspectionSite }) => {
+                  if (
+                    site === "temporary_generation_compensation" &&
+                    inspectionSite === "unpublished_cleanup" &&
+                    temporaryPath
+                  ) {
+                    await chmod(dirname(temporaryPath), 0o700);
+                  }
+                }
+              },
+              () =>
+                createJsonRecordIfAbsent(
+                  workspaceRoot,
+                  directorySegments,
+                  fileName,
+                  record,
+                  evidenceRef,
+                  schema
+                )
+            );
+          }
+        )
+      );
+
+      expect(errorTreeContains(failure, site === "conditional_delete" ? isolationFailure : primary)).toBe(
+        true
+      );
+      expect(errorTreeContains(failure, proofFailure)).toBe(false);
+      expect(postLinkSites).toEqual([site, site]);
+      expect(rollbackCalls).toBe(1);
+      await expectPathMissing(dirname(isolatedPath));
+      const recordDirectory = dirname(path);
+      for (const name of (await readdir(recordDirectory)).filter(isOwnedRecordPath)) {
+        await rm(join(recordDirectory, name), { recursive: true, force: true });
+      }
+
+      const repaired = await createJsonRecordIfAbsent(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        `${evidenceRef}.repaired`,
+        schema
+      );
+      expect(["created", "exists"]).toContain(repaired.status);
+      expect(
+        await conditionalDeleteJsonRecord(path, `${evidenceRef}.repaired`, schema, {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.id === expected.id
+        })
+      ).toEqual({ status: "deleted" });
+      expect((await readdir(recordDirectory)).some(isOwnedRecordPath)).toBe(false);
+    }
+  });
+
+  test("post-link rollback preserves foreign public and namespace replacements", async () => {
+    for (const replacement of ["public", "namespace"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `restore-post-link-foreign-${replacement}` };
+      const evidenceRef = `restore.post-link.foreign.${replacement}`;
+      const directorySegments = ["restore-post-link-foreign"] as const;
+      const fileName = `${replacement}.json`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      expect(
+        await createJsonRecordIfAbsent(
+          workspaceRoot,
+          directorySegments,
+          fileName,
+          record,
+          evidenceRef,
+          schema
+        )
+      ).toEqual({ status: "created", record });
+      const foreignBytes = Buffer.from(`foreign ${replacement} replacement\n`);
+      const isolationFailure = new Error(`force foreign ${replacement} restore`);
+      const proofFailure = new Error(`foreign ${replacement} post-link proof`);
+      let isolatedPath = "";
+      let displacedNamespace = "";
+      let foreignSentinel = "";
+      let postLinkCalls = 0;
+
+      const failure = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            afterOwnedPathIsolation: (input) => {
+              if (input.site !== "conditional_delete") return;
+              isolatedPath = input.isolatedPath;
+              throw isolationFailure;
+            },
+            afterOwnedPublicLinkCreated: async (input) => {
+              if (input.site !== "conditional_delete") return;
+              postLinkCalls += 1;
+              if (replacement === "public") {
+                await rm(input.path);
+                await writeFile(input.path, foreignBytes, { flag: "wx", mode: 0o600 });
+              } else {
+                const namespacePath = dirname(input.isolatedPath);
+                displacedNamespace = join(tempRoot, "displaced-owned-namespace");
+                await rename(namespacePath, displacedNamespace);
+                await mkdir(namespacePath, { mode: 0o700 });
+                foreignSentinel = join(namespacePath, "foreign-sentinel");
+                await writeFile(foreignSentinel, foreignBytes, { flag: "wx", mode: 0o600 });
+              }
+              throw proofFailure;
+            }
+          },
+          () =>
+            conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+              kind: "record",
+              expected: record,
+              matches: (current, expected) => current.id === expected.id
+            })
+        )
+      );
+
+      expect(errorTreeContains(failure, isolationFailure)).toBe(true);
+      expect(errorTreeContains(failure, proofFailure)).toBe(true);
+      expect(postLinkCalls).toBe(1);
+      if (replacement === "public") {
+        expect(await readFile(path)).toEqual(foreignBytes);
+        expect((await stat(path, { bigint: true })).nlink).toBe(1n);
+        expect((await stat(isolatedPath, { bigint: true })).nlink).toBe(1n);
+      } else {
+        expect(await readFile(foreignSentinel)).toEqual(foreignBytes);
+        expect(await readFile(join(displacedNamespace, basename(isolatedPath)))).toEqual(
+          Buffer.from(`${JSON.stringify(record, null, 2)}\n`)
+        );
+        expect((await stat(path, { bigint: true })).nlink).toBe(2n);
+      }
     }
   });
 
