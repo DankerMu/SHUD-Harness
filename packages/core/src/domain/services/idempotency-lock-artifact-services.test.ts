@@ -689,6 +689,313 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("mutable authority binds create and update to the pre-hook physical record directory", async () => {
+    for (const mode of ["create", "update"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const service = createLockRecordService({ workspaceRoot });
+      const before = { ...validLockRecord(), lock_id: `LOCK-pre-hook-parent-${mode}` };
+      const after = { ...before, holder: `after-${mode}` };
+      if (mode === "update") await service.storeLock(before);
+      const evidenceRef = lockRecordEvidenceRef(after.scope, after.lock_id);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        [...lockRecordDirectorySegments(after.scope), lockRecordFileName(after.lock_id)],
+        evidenceRef
+      );
+      const recordDirectory = dirname(recordPath);
+      const displacedDirectory = join(tempRoot, `displaced-record-directory-${mode}`);
+      const replacementSentinel = join(recordDirectory, "replacement-sentinel");
+      const oldSentinel = join(recordDirectory, "old-sentinel");
+      await mkdir(recordDirectory, { recursive: true });
+      await writeFile(oldSentinel, "old physical directory");
+
+      const error = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterAuthorityLeaseAcquired: async ({ operation }) => {
+              if (operation !== "rename") return;
+              await rename(recordDirectory, displacedDirectory);
+              await mkdir(recordDirectory);
+              await writeFile(replacementSentinel, "replacement physical directory");
+            }
+          },
+          () => service.storeLock(after)
+        )
+      );
+
+      expect(error.code).toBe("workspace_path_not_safe");
+      expect(await readFile(join(displacedDirectory, "old-sentinel"), "utf8")).toBe(
+        "old physical directory"
+      );
+      expect(await readFile(replacementSentinel, "utf8")).toBe(
+        "replacement physical directory"
+      );
+      if (mode === "update") {
+        expect(
+          JSON.parse(await readFile(join(displacedDirectory, basename(recordPath)), "utf8"))
+        ).toEqual(before);
+      }
+      await expectPathMissing(recordPath);
+
+      await rm(recordDirectory, { recursive: true });
+      await rename(displacedDirectory, recordDirectory);
+      expect(await service.storeLock(after)).toEqual(after);
+      expect(await service.getLock(after.scope, after.lock_id)).toEqual(after);
+    }
+  });
+
+  test("mutable canonical baseline rejects lease-hook and final-precommit destination drift", async () => {
+    for (const phase of ["lease-hook", "final-precommit"] as const) {
+      for (const mutation of ["absent-to-present", "replacement", "same-inode-drift"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const service = createLockRecordService({ workspaceRoot });
+        const before = { ...validLockRecord(), lock_id: `LOCK-canonical-${phase}-${mutation}` };
+        const after = { ...before, holder: `after-${mutation}` };
+        if (mutation !== "absent-to-present") await service.storeLock(before);
+        const evidenceRef = lockRecordEvidenceRef(after.scope, after.lock_id);
+        const recordPath = workspaceRecordPath(
+          workspaceRoot,
+          [...lockRecordDirectorySegments(after.scope), lockRecordFileName(after.lock_id)],
+          evidenceRef
+        );
+        const beforeBytes =
+          mutation === "absent-to-present" ? undefined : await readFile(recordPath);
+        const displacedPath = join(dirname(recordPath), `displaced-${phase}-${mutation}`);
+        let intervening: Awaited<ReturnType<typeof readFileWithIdentity>>;
+        let mutated = false;
+        const mutateCanonical = async () => {
+          if (mutated) return;
+          mutated = true;
+          if (mutation === "absent-to-present") {
+            await writeFile(recordPath, "foreign create generation\n", {
+              flag: "wx",
+              mode: 0o600
+            });
+          } else if (mutation === "replacement") {
+            await rename(recordPath, displacedPath);
+            await writeFile(recordPath, "foreign update replacement\n", {
+              flag: "wx",
+              mode: 0o600
+            });
+          } else {
+            const drift = Buffer.from(beforeBytes!);
+            drift[0] = drift[0] === 0x7b ? 0x5b : 0x7b;
+            const handle = await open(recordPath, "r+");
+            try {
+              await handle.write(drift, 0, drift.length, 0);
+              await handle.sync();
+            } finally {
+              await handle.close();
+            }
+          }
+          intervening = await readFileWithIdentity(recordPath);
+        };
+
+        const error = await captureTaskServiceError(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              afterAuthorityLeaseAcquired: async ({ operation }) => {
+                if (operation === "rename" && phase === "lease-hook") await mutateCanonical();
+              },
+              afterTemporaryFileClosed: async () => {
+                if (phase === "final-precommit") await mutateCanonical();
+              }
+            },
+            () => service.storeLock(after)
+          )
+        );
+
+        expect(error.code).toBe("workspace_path_not_safe");
+        expect(await readFileWithIdentity(recordPath)).toEqual(intervening!);
+        if (mutation === "replacement") {
+          expect(await readFile(displacedPath)).toEqual(beforeBytes!);
+        }
+
+        if (mutation === "absent-to-present") {
+          await rm(recordPath);
+        } else if (mutation === "replacement") {
+          await rm(recordPath);
+          await rename(displacedPath, recordPath);
+        } else {
+          await writeFile(recordPath, beforeBytes!);
+        }
+        expect(await service.storeLock(after)).toEqual(after);
+        expect(await service.getLock(after.scope, after.lock_id)).toEqual(after);
+      }
+    }
+  });
+
+  test("mutable and shared temporary cleanup reject move-plus-symlink namespace rebound", async () => {
+    for (const publication of ["mutable", "hardlink"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const record = { ...validLockRecord(), lock_id: `LOCK-cleanup-rebound-${publication}` };
+      const directorySegments = lockRecordDirectorySegments(record.scope);
+      const fileName = lockRecordFileName(record.lock_id);
+      const evidenceRef = lockRecordEvidenceRef(record.scope, record.lock_id);
+      let namespacePath = "";
+      let movedNamespace = "";
+      let generationBytes: Buffer | undefined;
+      const primary = new Error(`${publication} cleanup primary`);
+
+      const error = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: ({ temporaryPath }) => {
+              namespacePath = dirname(temporaryPath);
+              if (publication === "mutable") throw primary;
+            },
+            afterCanonicalLink: () => {
+              if (publication === "hardlink") throw primary;
+            },
+            beforeGenerationIsolation: async ({ path, operation }) => {
+              const expectedOperation =
+                publication === "mutable" ? "rename_temp_cleanup" : "hardlink_temp_cleanup";
+              if (operation !== expectedOperation || movedNamespace) return;
+              namespacePath = dirname(path);
+              movedNamespace = join(tempRoot, `moved-${publication}-namespace`);
+              generationBytes = await readFile(path);
+              await rename(namespacePath, movedNamespace);
+              await symlink(movedNamespace, namespacePath, "dir");
+            }
+          },
+          () =>
+            publication === "mutable"
+              ? writeJsonRecord(
+                  workspaceRoot,
+                  directorySegments,
+                  fileName,
+                  record,
+                  evidenceRef,
+                  LockRecordSchema
+                )
+              : createJsonRecordIfAbsent(
+                  workspaceRoot,
+                  directorySegments,
+                  fileName,
+                  record,
+                  evidenceRef,
+                  LockRecordSchema
+                )
+        )
+      );
+
+      expect(aggregateErrorMessages(error)).toContain(primary.message);
+      expect(await readFile(join(movedNamespace, "generation"))).toEqual(generationBytes!);
+      expect((await lstat(namespacePath)).isSymbolicLink()).toBe(true);
+    }
+  });
+
+  test("early write and namespace-removal failures preserve foreign namespace replacements", async () => {
+    for (const site of ["early-write", "mutable-removal", "shared-removal"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const record = { ...validLockRecord(), lock_id: `LOCK-namespace-owner-${site}` };
+      const primary = new Error(`${site} primary`);
+      let namespacePath = "";
+      let movedNamespace = "";
+      let replacementIdentity: { dev: number; ino: number } | undefined;
+      let replaced = false;
+
+      const action = () =>
+        site === "shared-removal"
+          ? createJsonRecordIfAbsent(
+              workspaceRoot,
+              lockRecordDirectorySegments(record.scope),
+              lockRecordFileName(record.lock_id),
+              record,
+              lockRecordEvidenceRef(record.scope, record.lock_id),
+              LockRecordSchema
+            )
+          : writeJsonRecord(
+              workspaceRoot,
+              lockRecordDirectorySegments(record.scope),
+              lockRecordFileName(record.lock_id),
+              record,
+              lockRecordEvidenceRef(record.scope, record.lock_id),
+              LockRecordSchema
+            );
+
+      const error = await captureError(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            beforeOwnedTemporaryRecordWrite: async ({ path }) => {
+              if (site !== "early-write") return;
+              namespacePath = dirname(path);
+              movedNamespace = join(tempRoot, "moved-early-write-namespace");
+              await rename(namespacePath, movedNamespace);
+              await mkdir(namespacePath, { mode: 0o700 });
+              replacementIdentity = await readPathIdentity(namespacePath);
+              throw primary;
+            }
+          },
+          () =>
+            runWithWorkspaceRecordPublicationHooks(
+              {
+                afterTemporaryFileWritten: ({ temporaryPath }) => {
+                  namespacePath = dirname(temporaryPath);
+                  if (site === "mutable-removal") throw primary;
+                },
+                afterCanonicalLink: () => {
+                  if (site === "shared-removal") throw primary;
+                },
+                beforeAuthorityNamespaceRemoval: async ({ path }) => {
+                  if (site === "early-write" || replaced || path !== namespacePath) return;
+                  replaced = true;
+                  movedNamespace = join(tempRoot, `moved-${site}-namespace`);
+                  await rename(path, movedNamespace);
+                  await mkdir(path, { mode: 0o700 });
+                  replacementIdentity = await readPathIdentity(path);
+                }
+              },
+              action
+            )
+        )
+      );
+
+      expect(aggregateErrorMessages(error)).toContain(primary.message);
+      expect(await readPathIdentity(namespacePath)).toEqual(replacementIdentity!);
+      expect((await stat(namespacePath)).mode & 0o777).toBe(0o700);
+      expect((await stat(movedNamespace)).isDirectory()).toBe(true);
+    }
+  });
+
+  test("postcommit namespace ownership mismatch is non-rejecting and preserves replacement state", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createLockRecordService({ workspaceRoot });
+    const record = { ...validLockRecord(), lock_id: "LOCK-postcommit-namespace-owner" };
+    let namespacePath = "";
+    let movedNamespace = "";
+    let replacementIdentity: { dev: number; ino: number } | undefined;
+    let replaced = false;
+
+    expect(
+      await runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: ({ temporaryPath }) => {
+            namespacePath = dirname(temporaryPath);
+          },
+          beforeAuthorityNamespaceRemoval: async ({ path }) => {
+            if (replaced || path !== namespacePath) return;
+            replaced = true;
+            movedNamespace = join(tempRoot, "moved-postcommit-namespace");
+            await rename(path, movedNamespace);
+            await mkdir(path, { mode: 0o700 });
+            replacementIdentity = await readPathIdentity(path);
+          }
+        },
+        () => service.storeLock(record)
+      )
+    ).toEqual(record);
+
+    expect(await service.getLock(record.scope, record.lock_id)).toEqual(record);
+    expect(await readPathIdentity(namespacePath)).toEqual(replacementIdentity!);
+    expect((await stat(movedNamespace)).isDirectory()).toBe(true);
+  });
+
   test("compensation preservation safely exposes aggregate cause for every cause descriptor kind", () => {
     const compensation = new Error("descriptor compensation");
 
@@ -8662,6 +8969,11 @@ async function expectUnicodeAuthorityPairOnCaseSensitiveWorkspace(
 async function readFileWithIdentity(path: string): Promise<{ bytes: Buffer; dev: number; ino: number }> {
   const [bytes, identity] = await Promise.all([readFile(path), stat(path)]);
   return { bytes, dev: identity.dev, ino: identity.ino };
+}
+
+async function readPathIdentity(path: string): Promise<{ dev: number; ino: number }> {
+  const identity = await lstat(path);
+  return { dev: identity.dev, ino: identity.ino };
 }
 
 function hasTestErrorCode(error: unknown, code: string): boolean {
