@@ -557,6 +557,77 @@ describe("idempotency, lock, and artifact services", () => {
     ).toBe(false);
   });
 
+  test("publication compensation retains an undefined cleanup failure on a frozen primary", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const record = { ...validLockRecord(), lock_id: "LOCK-mutable-custom-primary" };
+    const priorCause = new Error("mutable custom prior cause");
+    const primary = new StructuredServiceError(
+      "mutable custom primary",
+      "E_MUTABLE_CUSTOM",
+      Object.freeze({ surface: "workspace", immutability: "frozen" }),
+      priorCause
+    );
+    Object.freeze(primary);
+    const descriptors = Object.getOwnPropertyDescriptors(primary);
+    const evidenceRef = lockRecordEvidenceRef(record.scope, record.lock_id);
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      [...lockRecordDirectorySegments(record.scope), lockRecordFileName(record.lock_id)],
+      evidenceRef
+    );
+    let temporaryPath = "";
+
+    const error = await captureError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: (input) => {
+            temporaryPath = input.temporaryPath;
+            throw primary;
+          },
+          afterTemporaryFileClosed: async ({ descriptor }) => {
+            await expectFileDescriptorClosed(descriptor.fd);
+          },
+          beforePublicationCompensationStateInspection: ({ site }) => {
+            expect(site).toBe("unpublished_cleanup");
+            throw undefined;
+          }
+        },
+        () =>
+          createJsonRecordIfAbsent(
+            workspaceRoot,
+            lockRecordDirectorySegments(record.scope),
+            lockRecordFileName(record.lock_id),
+            record,
+            evidenceRef,
+            LockRecordSchema
+          )
+      )
+    );
+
+    expect(error).toBeInstanceOf(StructuredServiceError);
+    expect(Object.getPrototypeOf(error)).toBe(Object.getPrototypeOf(primary));
+    expect((error as StructuredServiceError).code).toBe(primary.code);
+    expect((error as StructuredServiceError).details).toBe(primary.details);
+    expectPreservedOwnDescriptors(error, descriptors);
+    expect(Object.isFrozen(error)).toBe(true);
+    expect(Object.isSealed(error)).toBe(true);
+    expect(Object.isExtensible(error)).toBe(false);
+    expect(Reflect.defineProperty(error, "unexpected", { value: true })).toBe(false);
+    expect(Object.hasOwn(error, "unexpected")).toBe(false);
+    expect(error.cause).toBeInstanceOf(AggregateError);
+    const aggregateErrors = (error.cause as AggregateError).errors;
+    expect(aggregateErrors).toHaveLength(2);
+    expect(aggregateErrors[0]).toBe(priorCause);
+    expect(aggregateErrors[1]).toBeUndefined();
+    expect(aggregateErrors.filter((entry) => entry instanceof AggregateError)).toHaveLength(0);
+    await expectPathMissing(temporaryPath);
+    await expectPathMissing(recordPath);
+    expect(
+      (await readdir(join(workspaceRoot, "locks", record.scope))).some(isOwnedRecordPath)
+    ).toBe(false);
+  });
+
   test("mutable final precommit rejects private mode drift and cleanly retries", async () => {
     for (const mode of ["create", "update"] as const) {
       for (const drift of ["generation", "namespace"] as const) {
@@ -1605,6 +1676,56 @@ describe("idempotency, lock, and artifact services", () => {
         expect(Reflect.get(result, "integrityProbe")).toBe(integrityCase.name);
       }
     }
+  });
+
+  test("compensation preservation retains every undefined and falsy slot in order", () => {
+    const ordinaryCompensation = new Error("ordinary compensation");
+    const cases = [
+      { name: "undefined-only", compensations: [undefined] },
+      { name: "mixed", compensations: [undefined, ordinaryCompensation] },
+      { name: "falsy", compensations: [null, false, 0, ""] }
+    ] as const;
+
+    for (const matrixCase of cases) {
+      const priorCause = new Error(`${matrixCase.name} prior cause`);
+      const primary = new StructuredServiceError(
+        `${matrixCase.name} primary`,
+        `E_${matrixCase.name.toUpperCase().replace("-", "_")}`,
+        Object.freeze({ surface: "helper", immutability: "frozen" }),
+        priorCause
+      );
+      Object.freeze(primary);
+      const descriptors = Object.getOwnPropertyDescriptors(primary);
+
+      const result = preservePrimaryAndCompensationErrors(
+        primary,
+        matrixCase.compensations,
+        `${matrixCase.name} aggregate`
+      ) as StructuredServiceError;
+
+      expect(Object.getPrototypeOf(result)).toBe(Object.getPrototypeOf(primary));
+      expectPreservedOwnDescriptors(result, descriptors);
+      expect(Object.isFrozen(result)).toBe(true);
+      expect(Object.isSealed(result)).toBe(true);
+      expect(Object.isExtensible(result)).toBe(false);
+      expect(result.cause).toBeInstanceOf(AggregateError);
+      const aggregateErrors = (result.cause as AggregateError).errors;
+      expect(aggregateErrors).toHaveLength(matrixCase.compensations.length + 1);
+      expect(aggregateErrors[0]).toBe(priorCause);
+      matrixCase.compensations.forEach((compensation, index) => {
+        expect(aggregateErrors[index + 1]).toBe(compensation);
+      });
+      expect(primary.cause).toBe(priorCause);
+    }
+
+    const nonErrorPrimary = Object.freeze({ kind: "non-error" });
+    expect(
+      preservePrimaryAndCompensationErrors(nonErrorPrimary, [undefined], "non-error aggregate")
+    ).toBe(nonErrorPrimary);
+    const emptyPrimary = Object.freeze(new Error("empty primary"));
+    expect(preservePrimaryAndCompensationErrors(emptyPrimary, [], "empty aggregate")).toBe(
+      emptyPrimary
+    );
   });
 
   test("Artifact duplicate registration converges across the owned publication window", async () => {

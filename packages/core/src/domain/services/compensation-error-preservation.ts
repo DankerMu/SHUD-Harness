@@ -3,15 +3,14 @@ export function preservePrimaryAndCompensationErrors(
   compensations: readonly unknown[],
   aggregateMessage: string
 ): unknown {
-  const failures = compensations.filter((error) => error !== undefined);
-  if (!(primary instanceof Error) || failures.length === 0) return primary;
+  if (!(primary instanceof Error) || compensations.length === 0) return primary;
 
   const descriptors = Object.getOwnPropertyDescriptors(primary);
   const integrityLevel = captureIntegrityLevel(primary, descriptors);
   const priorCauseDescriptor = descriptors.cause;
   const observedCauses = safelyObservePriorCause(primary, priorCauseDescriptor);
   const aggregateCause = new AggregateError(
-    [...observedCauses, ...failures],
+    [...observedCauses, ...compensations],
     aggregateMessage
   );
   descriptors.cause = aggregateCauseDescriptor(aggregateCause, priorCauseDescriptor);
