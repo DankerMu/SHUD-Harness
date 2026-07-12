@@ -333,6 +333,27 @@ export interface WorkspaceRecordCompensationTestHooks {
       attempt: number;
     }>
   ) => Promise<void> | void;
+  afterOwnedIsolatedSourceUnlink?: (
+    input: Readonly<{
+      path: string;
+      isolatedPath: string;
+      site: WorkspaceRecordPostIsolationSite;
+      attempt: number;
+    }>
+  ) => Promise<void> | void;
+  beforePostSourcePublicLinkCleanup?: (
+    input: Readonly<{
+      path: string;
+      isolatedPath: string;
+      site: WorkspaceRecordPostIsolationSite;
+    }>
+  ) => Promise<void> | void;
+  beforeExactOwnedPublicLinkUnlink?: (
+    input: Readonly<{ path: string }>
+  ) => Promise<void> | void;
+  afterExactOwnedPublicLinkUnlinkFailure?: (
+    input: Readonly<{ path: string; error: unknown }>
+  ) => Promise<void> | void;
   beforeUnsafeRestoredLinkRollback?: (
     input: Readonly<{
       path: string;
@@ -2371,6 +2392,9 @@ async function restoreOwnedIsolatedPath(
         }
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
         await unlink(isolatedPath);
+        await compensationTestHookStorage.getStore()?.afterOwnedIsolatedSourceUnlink?.(
+          Object.freeze({ path: publicPath, isolatedPath, site, attempt })
+        );
         await assertRecordDirectoryIdentity(
           mutationNamespace.parentPath,
           mutationNamespace.parentIdentity,
@@ -2384,6 +2408,9 @@ async function restoreOwnedIsolatedPath(
             evidenceRef
           ))
         ) {
+          await compensationTestHookStorage.getStore()?.beforePostSourcePublicLinkCleanup?.(
+            Object.freeze({ path: publicPath, isolatedPath, site })
+          );
           const cleanup = await removeExactOwnedPublicLink(
             publicPath,
             mutationNamespace,
@@ -2395,6 +2422,9 @@ async function restoreOwnedIsolatedPath(
             publicationStateError(evidenceRef),
             ...cleanup.cleanupErrors
           );
+          publicOwnership = cleanup.ownership === "retained"
+            ? "owned"
+            : "relinquished";
           break;
         }
         return;
@@ -2417,22 +2447,26 @@ async function restoreOwnedIsolatedPath(
     if (publicOwnership === "relinquished") {
       rollbackErrors = [];
     } else if (firstProofRollbackAttempted) {
-      rollbackErrors = (await removeExactOwnedPublicLink(
+      const rollback = await removeExactOwnedPublicLink(
         publicPath,
         mutationNamespace,
         expectedGeneration,
         expectedGeneration.nlink + 1n,
         evidenceRef,
         false
-      )).cleanupErrors;
+      );
+      rollbackErrors = rollback.cleanupErrors;
+      publicOwnership = rollback.ownership === "retained" ? "owned" : "relinquished";
     } else {
-      rollbackErrors = (await rollbackUnsafeRestoredLink(
+      const rollback = await rollbackUnsafeRestoredLink(
         publicPath,
         isolatedPath,
         mutationNamespace,
         expectedGeneration,
         evidenceRef
-      )).cleanupErrors;
+      );
+      rollbackErrors = rollback.cleanupErrors;
+      publicOwnership = rollback.publicOwnership;
     }
     throw preserveWorkspacePrimaryError(sourceUnlinkErrors[0], [
       ...sourceUnlinkErrors.slice(1),
@@ -2545,8 +2579,25 @@ async function removeExactOwnedPublicLink(
           throw publicationStateError(evidenceRef);
         }
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
-        await unlink(publicPath);
-        ownership = "removed";
+        await compensationTestHookStorage.getStore()?.beforeExactOwnedPublicLinkUnlink?.(
+          Object.freeze({ path: publicPath })
+        );
+        try {
+          await unlink(publicPath);
+          ownership = "removed";
+        } catch (error) {
+          if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+            ownership = "relinquished";
+          }
+          cleanupErrors.push(error);
+          try {
+            await compensationTestHookStorage.getStore()?.afterExactOwnedPublicLinkUnlinkFailure?.(
+              Object.freeze({ path: publicPath, error })
+            );
+          } catch (hookError) {
+            cleanupErrors.push(hookError);
+          }
+        }
       } else {
         if (
           !workspaceRecordPhysicalIdentityMatches(

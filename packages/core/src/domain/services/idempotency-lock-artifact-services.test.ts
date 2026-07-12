@@ -6088,6 +6088,101 @@ describe("idempotency, lock, and artifact services", () => {
     ).toHaveLength(1);
   });
 
+  test("post-source cleanup relinquishes final-unlink races before same-inode rebound", async () => {
+    for (const outcome of ["ENOENT", "ENOTDIR"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `restore-post-source-${outcome.toLowerCase()}` };
+      const expectedBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+      const evidenceRef = `restore.post-source.${outcome.toLowerCase()}`;
+      const directorySegments = ["restore-post-source"] as const;
+      const fileName = `${outcome.toLowerCase()}.json`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      await createJsonRecordIfAbsent(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      );
+      const ownedBefore = await readFileWithIdentity(path);
+      const isolationFailure = new Error(`force post-source cleanup ${outcome}`);
+      const outsideAlias = join(tempRoot, `post-source-${outcome.toLowerCase()}-alias.json`);
+      const displacedParent = join(tempRoot, `post-source-${outcome.toLowerCase()}-parent`);
+      let isolatedPath = "";
+      let finalUnlinkError: unknown;
+      let sourceUnlinkCalls = 0;
+      let postSourceCleanupCalls = 0;
+      let finalUnlinkCalls = 0;
+      let finalUnlinkFailureCalls = 0;
+
+      const failure = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            afterOwnedPathIsolation: (input) => {
+              if (input.site !== "conditional_delete") return;
+              isolatedPath = input.isolatedPath;
+              throw isolationFailure;
+            },
+            afterOwnedIsolatedSourceUnlink: async (input) => {
+              sourceUnlinkCalls += 1;
+              await chmod(input.path, 0o400);
+            },
+            beforePostSourcePublicLinkCleanup: async (input) => {
+              postSourceCleanupCalls += 1;
+              await chmod(input.path, 0o600);
+            },
+            beforeExactOwnedPublicLinkUnlink: async (input) => {
+              finalUnlinkCalls += 1;
+              if (finalUnlinkCalls !== 1) return;
+              await link(input.path, outsideAlias);
+              await rm(input.path);
+              if (outcome === "ENOTDIR") {
+                await rename(dirname(input.path), displacedParent);
+                await writeFile(dirname(input.path), "block final unlink with a non-directory");
+              }
+            },
+            afterExactOwnedPublicLinkUnlinkFailure: async (input) => {
+              finalUnlinkFailureCalls += 1;
+              finalUnlinkError = input.error;
+              if (outcome === "ENOTDIR") {
+                await rm(dirname(input.path));
+                await rename(displacedParent, dirname(input.path));
+              }
+              await link(outsideAlias, input.path);
+            }
+          },
+          () =>
+            conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+              kind: "record",
+              expected: record,
+              matches: (current, expected) => current.id === expected.id
+            })
+        )
+      );
+
+      expect(sourceUnlinkCalls).toBe(1);
+      expect(postSourceCleanupCalls).toBe(1);
+      expect(finalUnlinkCalls).toBe(1);
+      expect(finalUnlinkFailureCalls).toBe(1);
+      expect(finalUnlinkError).toBeInstanceOf(Error);
+      expect(finalUnlinkError).toMatchObject({ code: outcome });
+      expect(errorTreeContains(failure, finalUnlinkError)).toBe(true);
+      expect(aggregateErrorMessages(failure)).toContain(isolationFailure.message);
+      expect(await readFileWithIdentity(path)).toEqual(ownedBefore);
+      expect(await readFile(path)).toEqual(expectedBytes);
+      expect(await readFileWithIdentity(outsideAlias)).toEqual(ownedBefore);
+      expect((await stat(path, { bigint: true })).nlink).toBe(2n);
+      await expectPathMissing(isolatedPath);
+    }
+  });
+
   test("all post-isolation sites restore through the shared source-unlink helper", async () => {
     for (const site of [
       "conditional_delete",
