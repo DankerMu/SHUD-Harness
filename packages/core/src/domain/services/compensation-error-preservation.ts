@@ -7,6 +7,7 @@ export function preservePrimaryAndCompensationErrors(
   if (!(primary instanceof Error) || failures.length === 0) return primary;
 
   const descriptors = Object.getOwnPropertyDescriptors(primary);
+  const integrityLevel = captureIntegrityLevel(primary, descriptors);
   const priorCauseDescriptor = descriptors.cause;
   const observedCauses = safelyObservePriorCause(primary, priorCauseDescriptor);
   const aggregateCause = new AggregateError(
@@ -17,7 +18,38 @@ export function preservePrimaryAndCompensationErrors(
 
   const clone = Object.create(Object.getPrototypeOf(primary)) as Error;
   Object.defineProperties(clone, descriptors);
-  return clone;
+  return restoreIntegrityLevel(clone, integrityLevel);
+}
+
+type IntegrityLevel = "frozen" | "sealed" | "non-extensible" | "extensible";
+
+function captureIntegrityLevel(
+  primary: Error,
+  descriptors: PropertyDescriptorMap
+): IntegrityLevel {
+  if (Object.isExtensible(primary)) return "extensible";
+
+  const ownDescriptors = Reflect.ownKeys(descriptors).map((key) => descriptors[key]!);
+  const sealed = ownDescriptors.every((descriptor) => !descriptor.configurable);
+  if (!sealed) return "non-extensible";
+
+  const frozen = ownDescriptors.every(
+    (descriptor) => !("value" in descriptor) || !descriptor.writable
+  );
+  return frozen ? "frozen" : "sealed";
+}
+
+function restoreIntegrityLevel(clone: Error, integrityLevel: IntegrityLevel): Error {
+  switch (integrityLevel) {
+    case "frozen":
+      return Object.freeze(clone);
+    case "sealed":
+      return Object.seal(clone);
+    case "non-extensible":
+      return Object.preventExtensions(clone);
+    case "extensible":
+      return clone;
+  }
 }
 
 function safelyObservePriorCause(

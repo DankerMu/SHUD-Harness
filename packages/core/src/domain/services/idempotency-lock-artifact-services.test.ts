@@ -543,6 +543,11 @@ describe("idempotency, lock, and artifact services", () => {
     expect((error as StructuredServiceError).code).toBe(primary.code);
     expect((error as StructuredServiceError).details).toBe(primary.details);
     expectPreservedOwnDescriptors(error, descriptors);
+    expect(Object.isFrozen(error)).toBe(true);
+    expect(Object.isSealed(error)).toBe(true);
+    expect(Object.isExtensible(error)).toBe(false);
+    expect(Reflect.defineProperty(error, "unexpected", { value: true })).toBe(false);
+    expect(Object.hasOwn(error, "unexpected")).toBe(false);
     const messages = aggregateErrorMessages(error.cause);
     expect(messages.filter((message) => message === priorCause.message)).toHaveLength(1);
     expect(messages.filter((message) => message === compensation.message)).toHaveLength(1);
@@ -1533,18 +1538,73 @@ describe("idempotency, lock, and artifact services", () => {
     });
     expect((noOwnResult.cause as AggregateError).errors).toEqual([compensation]);
 
-    const frozenPrior = new Error("frozen data prior");
-    const frozenData = new Error("frozen data primary", { cause: frozenPrior });
-    const frozenDescriptors = Object.getOwnPropertyDescriptors(Object.freeze(frozenData));
-    const frozenResult = preservePrimaryAndCompensationErrors(
-      frozenData,
-      [compensation],
-      "frozen-data aggregate"
-    ) as Error;
-    expect(Object.getPrototypeOf(frozenResult)).toBe(Object.getPrototypeOf(frozenData));
-    expectPreservedOwnDescriptors(frozenResult, frozenDescriptors);
-    expect((frozenResult.cause as AggregateError).errors).toEqual([frozenPrior, compensation]);
-    expect(frozenData.cause).toBe(frozenPrior);
+    const integrityCases = [
+      {
+        name: "frozen",
+        apply: (error: Error) => Object.freeze(error),
+        frozen: true,
+        sealed: true,
+        extensible: false
+      },
+      {
+        name: "sealed",
+        apply: (error: Error) => Object.seal(error),
+        frozen: false,
+        sealed: true,
+        extensible: false
+      },
+      {
+        name: "non-extensible",
+        apply: (error: Error) => Object.preventExtensions(error),
+        frozen: false,
+        sealed: false,
+        extensible: false
+      },
+      {
+        name: "extensible",
+        apply: (error: Error) => error,
+        frozen: false,
+        sealed: false,
+        extensible: true
+      }
+    ] as const;
+
+    for (const integrityCase of integrityCases) {
+      const prior = new Error(`${integrityCase.name} data prior`);
+      const primary = new StructuredServiceError(
+        `${integrityCase.name} data primary`,
+        `E_${integrityCase.name.toUpperCase().replace("-", "_")}`,
+        Object.freeze({ surface: "helper", immutability: integrityCase.name }),
+        prior
+      );
+      integrityCase.apply(primary);
+      const descriptors = Object.getOwnPropertyDescriptors(primary);
+      const result = preservePrimaryAndCompensationErrors(
+        primary,
+        [compensation],
+        `${integrityCase.name} data aggregate`
+      ) as StructuredServiceError;
+
+      expect(Object.getPrototypeOf(result)).toBe(Object.getPrototypeOf(primary));
+      expect(result.code).toBe(primary.code);
+      expect(result.details).toBe(primary.details);
+      expectPreservedOwnDescriptors(result, descriptors);
+      expect((result.cause as AggregateError).errors).toEqual([prior, compensation]);
+      expect(primary.cause).toBe(prior);
+      expect(Object.isFrozen(result)).toBe(integrityCase.frozen);
+      expect(Object.isSealed(result)).toBe(integrityCase.sealed);
+      expect(Object.isExtensible(result)).toBe(integrityCase.extensible);
+
+      const propertyDefined = Reflect.defineProperty(result, "integrityProbe", {
+        configurable: true,
+        value: integrityCase.name
+      });
+      expect(propertyDefined).toBe(integrityCase.extensible);
+      expect(Object.hasOwn(result, "integrityProbe")).toBe(integrityCase.extensible);
+      if (integrityCase.extensible) {
+        expect(Reflect.get(result, "integrityProbe")).toBe(integrityCase.name);
+      }
+    }
   });
 
   test("Artifact duplicate registration converges across the owned publication window", async () => {
