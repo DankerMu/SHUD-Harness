@@ -25,6 +25,7 @@ import {
   rm,
   stat,
   symlink,
+  unlink,
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1946,6 +1947,306 @@ describe("idempotency, lock, and artifact services", () => {
         expect((await stat(path)).ino).not.toBe((await stat(displacedPath)).ino);
       }
       expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+    }
+  });
+
+  test("authority-mutating callback failures cannot skip durable-observation proof", async () => {
+    for (const surface of ["direct-read", "ordinary-delete", "permit-delete"] as const) {
+      for (const markerKind of ["branded", "filesystem-shaped"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const schema = z.object({ id: z.string() });
+        const record = { id: `durable-throw-${surface}-${markerKind}` };
+        const evidenceRef = `durable.throw.${surface}.${markerKind}`;
+        const directorySegments = ["durable-throw", surface, markerKind] as const;
+        const path = workspaceRecordPath(
+          workspaceRoot,
+          [...directorySegments, "record.json"],
+          evidenceRef
+        );
+        const created = surface === "permit-delete"
+          ? await createJsonRecordIfAbsentWithCleanupPermit(
+              workspaceRoot, directorySegments, "record.json", record, evidenceRef, schema
+            )
+          : await createJsonRecordIfAbsent(
+              workspaceRoot, directorySegments, "record.json", record, evidenceRef, schema
+            );
+        if (created.status !== "created") throw new Error("Expected callback boundary fixture.");
+        const before = await readFileWithIdentity(path);
+        const displacedPath = `${path}.same-inode`;
+        class BrandedCallbackError extends Error {
+          readonly brand = "round-11";
+        }
+        const marker = markerKind === "branded"
+          ? new BrandedCallbackError("durable callback marker")
+          : Object.assign(new Error("durable callback ENOENT marker"), { code: "ENOENT" });
+        let hookCalls = 0;
+        const failure = await captureError(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              afterDurableRecordObservation: async ({ status }) => {
+                hookCalls += 1;
+                expect(status).toBe("read");
+                await rename(path, displacedPath);
+                await link(displacedPath, path);
+                await unlink(displacedPath);
+                throw marker;
+              }
+            },
+            () => surface === "direct-read"
+              ? readJsonRecord(path, evidenceRef, schema)
+              : surface === "permit-delete"
+                ? conditionalDeleteJsonRecordWithCleanupPermit(
+                    created.cleanupPermit,
+                    path,
+                    evidenceRef,
+                    schema,
+                    { kind: "record", expected: record, matches: () => true }
+                  )
+                : conditionalDeleteJsonRecord(
+                    path,
+                    evidenceRef,
+                    schema,
+                    { kind: "record", expected: record, matches: () => true }
+                  )
+          )
+        );
+
+        expect(hookCalls).toBe(1);
+        expect(errorTreeContains(failure, marker)).toBe(true);
+        expect(
+          findErrorNode(
+            failure,
+            (error) => error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
+          )
+        ).toBeInstanceOf(TaskServiceError);
+        expect(await readFileWithIdentity(path)).toEqual(before);
+        expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+
+        expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(record);
+        expect(
+          await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+            kind: "record",
+            expected: record,
+            matches: (current, expected) => current.id === expected.id
+          })
+        ).toEqual({ status: "deleted" });
+      }
+    }
+  });
+
+  test("no-drift authority-mutating callback failures preserve exact marker provenance", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "no-drift-marker" };
+    const evidenceRef = "callback.boundary.no-drift";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      ["callback-boundary", "no-drift.json"],
+      evidenceRef
+    );
+    expect(
+      await createJsonRecordIfAbsent(
+        workspaceRoot, ["callback-boundary"], "no-drift.json", record, evidenceRef, schema
+      )
+    ).toEqual({ status: "created", record });
+    const marker = Object.assign(new Error("exact no-drift callback marker"), {
+      code: "ENOENT"
+    });
+    let thrown: unknown;
+    try {
+      await runWithWorkspaceRecordPublicationHooks(
+        { afterDurableRecordObservation: () => { throw marker; } },
+        () => readJsonRecord(path, evidenceRef, schema)
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBe(marker);
+    expect(await readFile(path, "utf8")).toBe(`${JSON.stringify(record, null, 2)}\n`);
+  });
+
+  test("sibling authority callbacks prove throw-path drift before any mutation syscall", async () => {
+    {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: "lease-throw-proof" };
+      const evidenceRef = "callback.boundary.lease-throw";
+      const path = workspaceRecordPath(workspaceRoot, ["lease-throw", "record.json"], evidenceRef);
+      expect(
+        await createJsonRecordIfAbsent(
+          workspaceRoot, ["lease-throw"], "record.json", record, evidenceRef, schema
+        )
+      ).toEqual({ status: "created", record });
+      const before = await readFileWithIdentity(path);
+      const parentPath = dirname(path);
+      const displacedParent = `${parentPath}.admitted`;
+      const marker = new Error("lease hook branded marker");
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterAuthorityLeaseAcquired: async ({ operation }) => {
+              expect(operation).toBe("read");
+              await rename(parentPath, displacedParent);
+              await mkdir(parentPath);
+              await rename(join(displacedParent, "record.json"), path);
+              throw marker;
+            }
+          },
+          () => readJsonRecord(path, evidenceRef, schema)
+        )
+      );
+      expect(errorTreeContains(failure, marker)).toBe(true);
+      expect(
+        findErrorNode(
+          failure,
+          (error) => error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
+        )
+      ).toBeInstanceOf(TaskServiceError);
+      expect(await readFileWithIdentity(path)).toEqual(before);
+      expect((await readdir(parentPath)).some(isOwnedRecordPath)).toBe(false);
+      await rename(path, join(displacedParent, "record.json"));
+      await rmdir(parentPath);
+      await rename(displacedParent, parentPath);
+      expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(record);
+    }
+
+    {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: "namespace-create-throw-proof" };
+      const evidenceRef = "callback.boundary.namespace-create-throw";
+      const directorySegments = ["namespace-create-throw"] as const;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, "record.json"],
+        evidenceRef
+      );
+      expect(
+        await createJsonRecordIfAbsent(
+          workspaceRoot, directorySegments, "record.json", record, evidenceRef, schema
+        )
+      ).toEqual({ status: "created", record });
+      const before = await readFileWithIdentity(path);
+      const marker = Object.assign(new Error("namespace creation hook ENOENT marker"), {
+        code: "ENOENT"
+      });
+      let parentPath = "";
+      let displacedParent = "";
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            beforeAuthorityNamespaceCreation: async ({ path: namespacePath }) => {
+              parentPath = dirname(namespacePath);
+              displacedParent = `${parentPath}.admitted`;
+              await rename(parentPath, displacedParent);
+              await mkdir(parentPath);
+              await rename(join(displacedParent, "record.json"), path);
+              throw marker;
+            }
+          },
+          () => conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+            kind: "record",
+            expected: record,
+            matches: () => true
+          })
+        )
+      );
+      expect(errorTreeContains(failure, marker)).toBe(true);
+      expect(
+        findErrorNode(
+          failure,
+          (error) => error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
+        )
+      ).toBeInstanceOf(TaskServiceError);
+      expect(await readFileWithIdentity(path)).toEqual(before);
+      expect((await readdir(parentPath)).some(isOwnedRecordPath)).toBe(false);
+      await rename(path, join(displacedParent, "record.json"));
+      await rmdir(parentPath);
+      await rename(displacedParent, parentPath);
+      expect(
+        await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+          kind: "record",
+          expected: record,
+          matches: () => true
+        })
+      ).toEqual({ status: "deleted" });
+    }
+  });
+
+  test("conditional-delete callback throw still proves parent authority on ordinary and permit paths", async () => {
+    for (const authority of ["ordinary", "cleanup-permit"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `conditional-throw-${authority}` };
+      const evidenceRef = `conditional.throw.${authority}`;
+      const directorySegments = ["conditional-throw", authority] as const;
+      const fileName = "record.json";
+      const path = workspaceRecordPath(workspaceRoot, [...directorySegments, fileName], evidenceRef);
+      const created = authority === "cleanup-permit"
+        ? await createJsonRecordIfAbsentWithCleanupPermit(
+            workspaceRoot, directorySegments, fileName, record, evidenceRef, schema
+          )
+        : await createJsonRecordIfAbsent(
+            workspaceRoot, directorySegments, fileName, record, evidenceRef, schema
+          );
+      if (created.status !== "created") throw new Error("Expected conditional throw fixture.");
+      const before = await readFileWithIdentity(path);
+      const parentPath = dirname(path);
+      const displacedParent = `${parentPath}.admitted`;
+      const marker = Object.assign(new Error(`conditional callback marker ${authority}`), {
+        code: "ENOENT"
+      });
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            beforeConditionalDelete: async () => {
+              await rename(parentPath, displacedParent);
+              await mkdir(parentPath);
+              await rename(join(displacedParent, fileName), path);
+              throw marker;
+            }
+          },
+          () => authority === "cleanup-permit"
+            ? conditionalDeleteJsonRecordWithCleanupPermit(
+                created.cleanupPermit,
+                path,
+                evidenceRef,
+                schema,
+                { kind: "record", expected: record, matches: () => true }
+              )
+            : conditionalDeleteJsonRecord(
+                path,
+                evidenceRef,
+                schema,
+                { kind: "record", expected: record, matches: () => true }
+              )
+        )
+      );
+      expect(errorTreeContains(failure, marker)).toBe(true);
+      expect(
+        findErrorNode(
+          failure,
+          (error) => error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
+        )
+      ).toBeInstanceOf(TaskServiceError);
+      expect(await readFileWithIdentity(path)).toEqual(before);
+      expect((await readdir(parentPath)).some(isOwnedRecordPath)).toBe(false);
+
+      await rename(path, join(displacedParent, fileName));
+      await rmdir(parentPath);
+      await rename(displacedParent, parentPath);
+      expect(
+        await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.id === expected.id
+        })
+      ).toEqual({ status: "deleted" });
     }
   });
 
