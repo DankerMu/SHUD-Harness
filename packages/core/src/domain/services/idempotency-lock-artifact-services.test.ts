@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   fstat,
   fstatSync,
+  mkdirSync,
   renameSync,
+  symlinkSync,
   writeFileSync,
   type BigIntStats
 } from "node:fs";
@@ -1654,6 +1656,186 @@ describe("idempotency, lock, and artifact services", () => {
     expect(schemaEvaluated).toBe(true);
     expect(await readFile(recordPath)).toEqual(replacementBytes);
     expect(await readFile(displacedPath)).toEqual(originalBytes);
+  });
+
+  test("read schema exits reject parent authority drift with a preserved canonical generation", async () => {
+    for (const parentDrift of ["symlink", "rebound"] as const) {
+      for (const schemaExit of ["success", "invalid", "throw"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const record = { id: `schema-parent-${parentDrift}-${schemaExit}` };
+        const evidenceRef = `authority.read.schema-parent.${parentDrift}.${schemaExit}`;
+        const directorySegments = ["read-schema-parent", parentDrift, schemaExit] as const;
+        const fileName = "record.json";
+        const recordPath = workspaceRecordPath(
+          workspaceRoot,
+          [...directorySegments, fileName],
+          evidenceRef
+        );
+        const baseSchema = z.object({ id: z.string() });
+        expect(
+          await createJsonRecordIfAbsent(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            record,
+            evidenceRef,
+            baseSchema
+          )
+        ).toEqual({ status: "created", record });
+        const parentPath = dirname(recordPath);
+        const displacedParent = `${parentPath}.displaced`;
+        const canonicalBefore = await readFileWithIdentity(recordPath);
+        const schemaMarker = new Error(`schema marker ${parentDrift} ${schemaExit}`);
+        let schemaEvaluated = false;
+        const mutatingSchema = baseSchema.superRefine((_value, context) => {
+          if (!schemaEvaluated) {
+            schemaEvaluated = true;
+            renameSync(parentPath, displacedParent);
+            if (parentDrift === "symlink") {
+              symlinkSync(displacedParent, parentPath, "dir");
+            } else {
+              mkdirSync(parentPath);
+              renameSync(join(displacedParent, fileName), recordPath);
+            }
+          }
+          if (schemaExit === "invalid") {
+            context.addIssue({ code: "custom", message: "injected schema issue" });
+          } else if (schemaExit === "throw") {
+            throw schemaMarker;
+          }
+        });
+
+        const failure = await captureTaskServiceError(() =>
+          readJsonRecord(recordPath, evidenceRef, mutatingSchema)
+        );
+
+        expect(failure.code).toBe("workspace_path_not_safe");
+        expect(schemaEvaluated).toBe(true);
+        expect(await readFileWithIdentity(recordPath)).toEqual(canonicalBefore);
+        if (schemaExit === "invalid") {
+          expect(
+            findErrorNode(
+              failure,
+              (error) => error instanceof TaskServiceError && error.code === "record_schema_error"
+            )
+          ).toBeInstanceOf(TaskServiceError);
+        } else if (schemaExit === "throw") {
+          expect(errorTreeContains(failure, schemaMarker)).toBe(true);
+        }
+      }
+    }
+  });
+
+  test("read failed schema exits reject a replaced canonical leaf", async () => {
+    for (const schemaExit of ["invalid", "throw"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const record = { id: `schema-leaf-${schemaExit}-original` };
+      const replacement = { id: `schema-leaf-${schemaExit}-replacement` };
+      const evidenceRef = `authority.read.schema-leaf.${schemaExit}`;
+      const directorySegments = ["read-schema-leaf", schemaExit] as const;
+      const fileName = "record.json";
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const displacedPath = `${recordPath}.displaced`;
+      const baseSchema = z.object({ id: z.string() });
+      expect(
+        await createJsonRecordIfAbsent(
+          workspaceRoot,
+          directorySegments,
+          fileName,
+          record,
+          evidenceRef,
+          baseSchema
+        )
+      ).toEqual({ status: "created", record });
+      const originalBytes = await readFile(recordPath);
+      const replacementBytes = Buffer.from(`${JSON.stringify(replacement, null, 2)}\n`);
+      const schemaMarker = new Error(`schema leaf marker ${schemaExit}`);
+      const mutatingSchema = baseSchema.superRefine((_value, context) => {
+        renameSync(recordPath, displacedPath);
+        writeFileSync(recordPath, replacementBytes, { flag: "wx", mode: 0o600 });
+        if (schemaExit === "invalid") {
+          context.addIssue({ code: "custom", message: "injected leaf schema issue" });
+        } else {
+          throw schemaMarker;
+        }
+      });
+
+      const failure = await captureTaskServiceError(() =>
+        readJsonRecord(recordPath, evidenceRef, mutatingSchema)
+      );
+
+      expect(failure.code).toBe("workspace_path_not_safe");
+      expect(await readFile(recordPath)).toEqual(replacementBytes);
+      expect(await readFile(displacedPath)).toEqual(originalBytes);
+      if (schemaExit === "invalid") {
+        expect(
+          findErrorNode(
+            failure,
+            (error) => error instanceof TaskServiceError && error.code === "record_schema_error"
+          )
+        ).toBeInstanceOf(TaskServiceError);
+      } else {
+        expect(errorTreeContains(failure, schemaMarker)).toBe(true);
+      }
+    }
+  });
+
+  test("read schema exits preserve validation and exact thrown-error semantics without drift", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const record = { id: "schema-exit-compatible" };
+    const evidenceRef = "authority.read.schema-compatible";
+    const directorySegments = ["read-schema-compatible"] as const;
+    const fileName = "record.json";
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const schema = z.object({ id: z.string() });
+    expect(
+      await createJsonRecordIfAbsent(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      )
+    ).toEqual({ status: "created", record });
+
+    expect(await readJsonRecord(recordPath, evidenceRef, schema)).toEqual(record);
+    const validationFailure = await captureTaskServiceError(() =>
+      readJsonRecord(
+        recordPath,
+        evidenceRef,
+        schema.superRefine((_value, context) => {
+          context.addIssue({ code: "custom", message: "compatible schema issue" });
+        })
+      )
+    );
+    expect(validationFailure.code).toBe("record_schema_error");
+
+    const exactMarker = new Error("exact schema callback marker");
+    let thrownValue: unknown;
+    try {
+      await readJsonRecord(
+        recordPath,
+        evidenceRef,
+        schema.superRefine(() => {
+          throw exactMarker;
+        })
+      );
+    } catch (error) {
+      thrownValue = error;
+    }
+    expect(thrownValue).toBe(exactMarker);
   });
 
   test("mutable canonical baseline rejects lease-hook and final-precommit destination drift", async () => {

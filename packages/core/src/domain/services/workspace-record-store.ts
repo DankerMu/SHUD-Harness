@@ -574,10 +574,12 @@ export async function conditionalDeleteJsonRecordWithCleanupPermit<T>(
         parentPath,
         evidenceRef
       );
-      await authorityLease.validateCleanupGeneration?.();
-      await hooks?.afterAuthorityLeaseAcquired?.(Object.freeze({ operation: "delete" }));
-      await assertRecordDirectoryIdentity(parentPath, admittedParentIdentity, evidenceRef);
-      await authorityLease.validateCleanupGeneration?.();
+      if (hooks?.afterAuthorityLeaseAcquired) {
+        await authorityLease.validateCleanupGeneration?.();
+        await hooks.afterAuthorityLeaseAcquired(Object.freeze({ operation: "delete" }));
+        await assertRecordDirectoryIdentity(parentPath, admittedParentIdentity, evidenceRef);
+        await authorityLease.validateCleanupGeneration?.();
+      }
       return await conditionalDeleteJsonRecordUnderAuthority(
         path,
         evidenceRef,
@@ -664,10 +666,14 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   const parentIdentity =
     admittedParentIdentity ??
     (await readSafeRecordDirectoryIdentity(parentPath, evidenceRef));
-  const observedIdentity = await readRecordPathIdentity(path, evidenceRef);
-  if (!observedIdentity) {
+  const observation = await inspectJsonRecordUnderAuthority(path, evidenceRef, schema);
+  if (observation.status === "missing") {
+    if (expectedGeneration || ordinaryCanonicalBaseline?.status === "existing") {
+      throw publicationStateError(evidenceRef);
+    }
     return { status: "missing" };
   }
+  const observedIdentity = observation.authorityObservation.identity;
   if (
     expectedGeneration &&
     !workspaceRecordPhysicalIdentityMatches(observedIdentity, expectedGeneration.identity)
@@ -675,8 +681,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     throw publicationStateError(evidenceRef);
   }
   if (ordinaryCanonicalBaseline?.status === "absent") {
-    if (observedIdentity) throw publicationStateError(evidenceRef);
-    return { status: "missing" };
+    throw publicationStateError(evidenceRef);
   }
   if (
     ordinaryCanonicalBaseline?.status === "existing" &&
@@ -687,14 +692,13 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   ) {
     throw publicationStateError(evidenceRef);
   }
-
-  const observation = await inspectJsonRecordUnderAuthority(path, evidenceRef, schema);
-  if (observation.status === "missing") {
-    return { status: "missing" };
-  }
   if (
     ordinaryCanonicalBaseline?.status === "existing" &&
-    !observation.bytes.equals(ordinaryCanonicalBaseline.bytes)
+    (!observation.bytes.equals(ordinaryCanonicalBaseline.bytes) ||
+      !hasExactPrivatePermissions(
+        ordinaryCanonicalBaseline.mode,
+        PRIVATE_GENERATION_MODE
+      ))
   ) {
     throw publicationStateError(evidenceRef);
   }
@@ -703,14 +707,16 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   }
   const generationExpectation =
     expectedGeneration ??
-    (await captureOwnedGenerationExpectation(
-      path,
-      observedIdentity,
-      observation.bytes,
-      1n,
-      evidenceRef,
-      PRIVATE_GENERATION_MODE
-    ));
+    (ordinaryCanonicalBaseline?.status === "existing"
+      ? ordinaryCanonicalBaseline
+      : await captureOwnedGenerationExpectation(
+          path,
+          observedIdentity,
+          observation.bytes,
+          1n,
+          evidenceRef,
+          PRIVATE_GENERATION_MODE
+        ));
   const matched =
     condition.kind === "malformed"
       ? observation.status === "malformed"
@@ -744,29 +750,25 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   );
   const quarantinePath = join(mutationNamespace.path, "generation");
   try {
-    await hooks?.beforeGenerationIsolation?.(
-      Object.freeze({ path, operation: "conditional_delete" })
-    );
-    const finalPublicIdentity = await readRegularFilePathIdentity(path, evidenceRef);
-    if (!finalPublicIdentity) {
-      await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
-      return { status: "missing" };
-    }
-    await compensationTestHookStorage.getStore()?.beforeOwnedPathIsolation?.(
-      Object.freeze({ path, isolatedPath: quarantinePath, site: "conditional_delete" })
-    );
-    await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
-    if (
-      !(await ownedGenerationStateMatches(
-        path,
-        generationExpectation,
-        generationExpectation.nlink,
+    const compensationHooks = compensationTestHookStorage.getStore();
+    if (hooks?.beforeGenerationIsolation) {
+      await hooks.beforeGenerationIsolation(
+        Object.freeze({ path, operation: "conditional_delete" })
+      );
+      await assertConditionalDeleteGenerationCheckpoint(
+        { ...admittedGenerationCheckpoint, namespace: mutationNamespace },
         evidenceRef
-      ))
-    ) {
-      throw recordChangedBeforeConditionalRemovalError(evidenceRef);
+      );
     }
-    await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
+    if (compensationHooks?.beforeOwnedPathIsolation) {
+      await compensationHooks.beforeOwnedPathIsolation(
+        Object.freeze({ path, isolatedPath: quarantinePath, site: "conditional_delete" })
+      );
+      await assertConditionalDeleteGenerationCheckpoint(
+        { ...admittedGenerationCheckpoint, namespace: mutationNamespace },
+        evidenceRef
+      );
+    }
     await rename(path, quarantinePath);
     if (mutationState) mutationState.started = true;
   } catch (error) {
@@ -796,31 +798,33 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       })
     );
     await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
-    quarantinedIdentity = await readRegularFilePathIdentity(quarantinePath, evidenceRef);
     if (
-      quarantinedIdentity &&
-      (await ownedGenerationStateMatches(
+      await ownedGenerationStateMatches(
         quarantinePath,
         generationExpectation,
         generationExpectation.nlink,
         evidenceRef
-      ))
+      )
     ) {
+      quarantinedIdentity = generationExpectation.identity;
+      await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
       await hooks?.beforeAuthorityOwnedUnlink?.(
         Object.freeze({ path, operation: "conditional_delete" })
       );
-      await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
-      if (
-        !(await ownedGenerationStateMatches(
-          quarantinePath,
-          generationExpectation,
-          generationExpectation.nlink,
-          evidenceRef
-        ))
-      ) {
-        throw recordChangedBeforeConditionalRemovalError(evidenceRef);
+      if (hooks?.beforeAuthorityOwnedUnlink) {
+        await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
+        if (
+          !(await ownedGenerationStateMatches(
+            quarantinePath,
+            generationExpectation,
+            generationExpectation.nlink,
+            evidenceRef
+          ))
+        ) {
+          throw recordChangedBeforeConditionalRemovalError(evidenceRef);
+        }
+        await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
       }
-      await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
       await unlink(quarantinePath);
       if (mutationState) {
         mutationState.deletedGeneration = Object.freeze({
@@ -869,6 +873,28 @@ function recordChangedBeforeConditionalRemovalError(evidenceRef: string): TaskSe
   );
 }
 
+async function assertConditionalDeleteGenerationCheckpoint(
+  checkpoint: OwnedGenerationCheckpoint & { namespace: OwnedAuthorityNamespace },
+  evidenceRef: string
+): Promise<void> {
+  await assertAuthorityNamespaceOwnership(checkpoint.namespace, evidenceRef);
+  let generationMatches = false;
+  try {
+    generationMatches = await ownedGenerationStateMatches(
+      checkpoint.path,
+      checkpoint.generation,
+      checkpoint.generation.nlink,
+      evidenceRef
+    );
+  } catch {
+    throw recordChangedBeforeConditionalRemovalError(evidenceRef);
+  }
+  if (!generationMatches) {
+    throw recordChangedBeforeConditionalRemovalError(evidenceRef);
+  }
+  await assertAuthorityNamespaceOwnership(checkpoint.namespace, evidenceRef);
+}
+
 type JsonRecordInspection<T> =
   | {
       status: "missing";
@@ -878,13 +904,19 @@ type JsonRecordInspection<T> =
       status: "record";
       record: T;
       bytes: Buffer;
-      authorityObservation: Awaited<ReturnType<typeof readDurableSingleLinkFile>>;
+      authorityObservation: Extract<
+        Awaited<ReturnType<typeof readDurableSingleLinkFile>>,
+        { status: "read" }
+      >;
     }
   | {
       status: "malformed";
       error: TaskServiceError;
       bytes: Buffer;
-      authorityObservation: Awaited<ReturnType<typeof readDurableSingleLinkFile>>;
+      authorityObservation: Extract<
+        Awaited<ReturnType<typeof readDurableSingleLinkFile>>,
+        { status: "read" }
+      >;
     };
 
 async function readJsonRecordUnderAuthority<T>(
@@ -898,26 +930,29 @@ async function readJsonRecordUnderAuthority<T>(
     path,
     evidenceRef,
     schema,
-    admittedParentBaseline
+    admittedParentBaseline,
+    canonicalBaseline
   );
-  if (inspection.status === "missing") {
-    await assertDurableReadMatchesCanonicalBaseline(
+  try {
+    await assertJsonRecordReadAuthority(
       path,
       inspection.authorityObservation,
+      admittedParentBaseline,
       canonicalBaseline,
       evidenceRef
     );
+  } catch (proofError) {
+    if (inspection.status === "malformed") {
+      throw preserveWorkspacePrimaryError(proofError, [inspection.error]);
+    }
+    throw proofError;
+  }
+  if (inspection.status === "missing") {
     return undefined;
   }
   if (inspection.status === "malformed") {
     throw inspection.error;
   }
-  await assertDurableReadMatchesCanonicalBaseline(
-    path,
-    inspection.authorityObservation,
-    canonicalBaseline,
-    evidenceRef
-  );
   return inspection.record;
 }
 
@@ -925,7 +960,8 @@ async function inspectJsonRecordUnderAuthority<T>(
   path: string,
   evidenceRef: string,
   schema: z.ZodType<T>,
-  admittedParentBaseline?: SafeRecordDirectoryBaseline
+  admittedParentBaseline?: SafeRecordDirectoryBaseline,
+  canonicalBaseline?: CanonicalAuthorityBaseline
 ): Promise<JsonRecordInspection<T>> {
   const parentPath = dirname(path);
   const durableRead = await readDurableSingleLinkFile({
@@ -971,7 +1007,25 @@ async function inspectJsonRecordUnderAuthority<T>(
     };
   }
 
-  const parsedRecord = schema.safeParse(rawRecord);
+  let parsedRecord:
+    | { success: true; data: T }
+    | { success: false; error: z.ZodError };
+  try {
+    parsedRecord = schema.safeParse(rawRecord);
+  } catch (schemaError) {
+    try {
+      await assertJsonRecordReadAuthority(
+        path,
+        durableRead,
+        admittedParentBaseline,
+        canonicalBaseline,
+        evidenceRef
+      );
+    } catch (proofError) {
+      throw preserveWorkspacePrimaryError(proofError, [schemaError]);
+    }
+    throw schemaError;
+  }
   if (!parsedRecord.success) {
     return {
       status: "malformed",
@@ -995,6 +1049,36 @@ async function inspectJsonRecordUnderAuthority<T>(
     bytes: durableRead.bytes,
     authorityObservation: durableRead
   };
+}
+
+async function assertJsonRecordReadAuthority(
+  path: string,
+  observed: Awaited<ReturnType<typeof readDurableSingleLinkFile>>,
+  admittedParentBaseline: SafeRecordDirectoryBaseline | undefined,
+  canonicalBaseline: CanonicalAuthorityBaseline | undefined,
+  evidenceRef: string
+): Promise<void> {
+  const parentPath = dirname(path);
+  if (admittedParentBaseline) {
+    await assertSafeRecordDirectoryBaseline(
+      parentPath,
+      admittedParentBaseline,
+      evidenceRef
+    );
+  }
+  await assertDurableReadMatchesCanonicalBaseline(
+    path,
+    observed,
+    canonicalBaseline,
+    evidenceRef
+  );
+  if (admittedParentBaseline) {
+    await assertSafeRecordDirectoryBaseline(
+      parentPath,
+      admittedParentBaseline,
+      evidenceRef
+    );
+  }
 }
 
 async function assertDurableReadMatchesCanonicalBaseline(
@@ -1096,10 +1180,11 @@ async function createAuthorityOwnedMutationNamespace(
     parentPath,
     `.${parse(publicPath).base}-${process.pid}-${randomUUID()}.authority`
   );
-  await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef);
-  await publicationHookStorage
-    .getStore()
-    ?.beforeAuthorityNamespaceCreation?.(Object.freeze({ path: namespacePath }));
+  const beforeCreation = publicationHookStorage.getStore()?.beforeAuthorityNamespaceCreation;
+  if (beforeCreation) {
+    await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef);
+    await beforeCreation(Object.freeze({ path: namespacePath }));
+  }
   await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef);
   const identity = await createPrivateAuthorityNamespaceAt(namespacePath, evidenceRef);
   return { path: namespacePath, parentPath, parentIdentity, identity };
@@ -2989,30 +3074,30 @@ async function assertHardlinkPublicationCheckpoint(
   if (!namespace) throw publicationStateError(evidenceRef);
 
   await assertAuthorityNamespaceOwnership(namespace, evidenceRef);
-  if (
-    !(await ownedGenerationStateMatches(
-      temporaryCheckpoint.path,
-      temporaryCheckpoint.generation,
-      2n,
-      evidenceRef
-    ))
-  ) {
+  let canonical: BigIntStats;
+  let temporary: BigIntStats;
+  try {
+    canonical = await lstat(canonicalPath, { bigint: true });
+    temporary = await lstat(temporaryCheckpoint.path, { bigint: true });
+  } catch {
     throw publicationStateError(evidenceRef);
   }
-  await assertAuthorityNamespaceOwnership(namespace, evidenceRef);
+  const generation = temporaryCheckpoint.generation;
   if (
-    !(await ownedGenerationStateMatches(
-      canonicalPath,
-      temporaryCheckpoint.generation,
-      2n,
-      evidenceRef
-    )) ||
-    !(await ownedGenerationStateMatches(
-      temporaryCheckpoint.path,
-      temporaryCheckpoint.generation,
-      2n,
-      evidenceRef
-    ))
+    !canonical.isFile() ||
+    canonical.isSymbolicLink() ||
+    canonical.nlink !== 2n ||
+    canonical.mode !== generation.mode ||
+    canonical.size !== BigInt(generation.bytes.length) ||
+    !workspaceRecordPhysicalIdentityMatches(canonical, generation.identity) ||
+    !temporary.isFile() ||
+    temporary.isSymbolicLink() ||
+    temporary.nlink !== 2n ||
+    temporary.mode !== generation.mode ||
+    temporary.size !== canonical.size ||
+    !workspaceRecordPhysicalIdentityMatches(temporary, generation.identity) ||
+    temporary.ctimeNs !== canonical.ctimeNs ||
+    temporary.mtimeNs !== canonical.mtimeNs
   ) {
     throw publicationStateError(evidenceRef);
   }
@@ -3967,11 +4052,8 @@ async function bindRecordAuthorityCleanupPermitGeneration(
   }
   let pinnedFile: RecordFileHandle | undefined;
   try {
-    await assertRecordDirectoryIdentity(
-      admittedParentPath,
-      admittedParentIdentity,
-      evidenceRef
-    );
+    // assertPublishedRecordAuthority returns with this admitted parent proven.
+    // No hook or mutation occurs before this descriptor is opened.
     pinnedFile = await open(state.publicPath, constants.O_RDONLY | constants.O_NOFOLLOW);
     const before = await pinnedFile.stat({ bigint: true });
     if (
@@ -3993,7 +4075,7 @@ async function bindRecordAuthorityCleanupPermitGeneration(
       bytes: observedBytes,
       before: beforeRead,
       after
-    } = await readBoundedOpenFile(pinnedFile);
+    } = await readBoundedOpenFile(pinnedFile, before);
     if (
       !observedBytes.equals(expectedBytes) ||
       !beforeRead.isFile() ||
@@ -4051,17 +4133,8 @@ async function assertCleanupPermitPinnedGeneration(
     throw publicationStateError(evidenceRef);
   }
   try {
-    const [pinnedIdentity, pathIdentity, observedBytes, pathStateMatches] = await Promise.all([
-      pinnedFile.stat({ bigint: true }),
-      readRegularFilePathIdentity(path, evidenceRef),
-      readBoundedOpenFile(pinnedFile),
-      ownedGenerationStateMatches(
-        path,
-        generationExpectation,
-        generationExpectation.nlink,
-        evidenceRef
-      )
-    ]);
+    const pinnedIdentity = await pinnedFile.stat({ bigint: true });
+    const observedBytes = await readBoundedOpenFile(pinnedFile, pinnedIdentity);
     if (
       !pinnedIdentity.isFile() ||
       pinnedIdentity.nlink !== 1n ||
@@ -4070,10 +4143,12 @@ async function assertCleanupPermitPinnedGeneration(
       pinnedIdentity.nlink !== generationExpectation.nlink ||
       !observedBytes.bytes.equals(expectedBytes) ||
       !workspaceRecordPhysicalIdentityMatches(pinnedIdentity, generation) ||
-      !pathIdentity ||
-      !pathStateMatches ||
-      !workspaceRecordPhysicalIdentityMatches(pathIdentity, generation) ||
-      !workspaceRecordPhysicalIdentityMatches(pathIdentity, pinnedIdentity)
+      !(await ownedGenerationStateMatches(
+        path,
+        generationExpectation,
+        generationExpectation.nlink,
+        evidenceRef
+      ))
     ) {
       throw publicationStateError(evidenceRef);
     }
