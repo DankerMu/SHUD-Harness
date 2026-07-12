@@ -984,6 +984,7 @@ describe("idempotency, lock, and artifact services", () => {
           ? join(tempRoot, "cleanup-permit-displaced-parent")
           : join(tempRoot, "cleanup-permit-displaced-canonical.json");
       const canonicalBefore = await readFileWithIdentity(canonicalPath);
+      const canonicalPhysicalBefore = await readOwnedFileState(canonicalPath);
       const replacementBytes = Buffer.from(`${JSON.stringify(replacement, null, 2)}\n`);
 
       const failure = await captureConditionalDeleteError(() =>
@@ -994,10 +995,11 @@ describe("idempotency, lock, and artifact services", () => {
               if (rebind === "parent") {
                 await rename(parentPath, displacedPath);
                 await mkdir(parentPath);
+                await rename(join(displacedPath, fileName), canonicalPath);
               } else {
                 await rename(canonicalPath, displacedPath);
+                await writeFile(canonicalPath, replacementBytes, { flag: "wx", mode: 0o600 });
               }
-              await writeFile(canonicalPath, replacementBytes, { flag: "wx", mode: 0o600 });
             }
           },
           () =>
@@ -1017,19 +1019,23 @@ describe("idempotency, lock, and artifact services", () => {
 
       expect(failure.mutationPhase).toBe("pre_mutation");
       expect(failure.failureStage).toBe("operation");
-      expect(await readFile(canonicalPath)).toEqual(replacementBytes);
-      expect(
-        await readFile(rebind === "parent" ? join(displacedPath, fileName) : displacedPath)
-      ).toEqual(canonicalBefore.bytes);
+      if (rebind === "parent") {
+        expect(await readOwnedFileState(canonicalPath)).toEqual(canonicalPhysicalBefore);
+        await expectPathMissing(join(displacedPath, fileName));
+      } else {
+        expect(await readFile(canonicalPath)).toEqual(replacementBytes);
+        expect(await readFile(displacedPath)).toEqual(canonicalBefore.bytes);
+      }
       expect((await readdir(parentPath)).some(isOwnedRecordPath)).toBe(false);
       expect((await readdir(rebind === "parent" ? displacedPath : parentPath)).some(isOwnedRecordPath))
         .toBe(false);
 
-      await rm(canonicalPath);
       if (rebind === "parent") {
+        await rename(canonicalPath, join(displacedPath, fileName));
         await rmdir(parentPath);
         await rename(displacedPath, parentPath);
       } else {
+        await rm(canonicalPath);
         await rename(displacedPath, canonicalPath);
       }
       expect(
@@ -5302,8 +5308,10 @@ describe("idempotency, lock, and artifact services", () => {
         const primary = new Error(`before-isolation primary ${site} ${rebind}`);
         let temporaryPath: string | undefined;
         let ownedPath = "";
-        let ownedBytes: Buffer | undefined;
+        let ownedBefore: Awaited<ReturnType<typeof readOwnedFileState>> | undefined;
+        let namespaceBefore: Awaited<ReturnType<typeof readPathState>> | undefined;
         let isolatedPath = "";
+        let namespacePath = "";
         let reboundPath = "";
         let displacedPath = "";
         let replacementSentinel = "";
@@ -5323,12 +5331,17 @@ describe("idempotency, lock, and artifact services", () => {
                 hookCalls += 1;
                 ownedPath = input.path;
                 isolatedPath = input.isolatedPath;
-                ownedBytes = await readFile(input.path);
-                const namespacePath = dirname(input.isolatedPath);
+                ownedBefore = await readOwnedFileState(input.path);
+                namespacePath = dirname(input.isolatedPath);
+                namespaceBefore = await readPathState(namespacePath);
                 reboundPath = rebind === "parent" ? dirname(namespacePath) : namespacePath;
                 displacedPath = join(tempRoot, `displaced-${site}-${rebind}`);
                 await rename(reboundPath, displacedPath);
                 await mkdir(reboundPath, { mode: 0o700 });
+                if (rebind === "parent") {
+                  await rename(join(displacedPath, basename(namespacePath)), namespacePath);
+                  await rename(join(displacedPath, basename(ownedPath)), ownedPath);
+                }
                 replacementSentinel = join(reboundPath, "replacement-sentinel");
                 await writeFile(replacementSentinel, `replacement ${site} ${rebind}`);
               }
@@ -5396,15 +5409,29 @@ describe("idempotency, lock, and artifact services", () => {
         expect(await readFile(replacementSentinel, "utf8")).toBe(
           `replacement ${site} ${rebind}`
         );
-        const displacedOwnedPath =
-          rebind === "parent"
-            ? join(displacedPath, basename(ownedPath))
-            : ownedPath;
-        expect(await readFile(displacedOwnedPath)).toEqual(ownedBytes!);
+        expect(await readOwnedFileState(ownedPath)).toEqual(ownedBefore!);
+        if (rebind === "parent") {
+          expect(await readPathState(namespacePath)).toEqual(namespaceBefore!);
+          await expectPathMissing(join(displacedPath, basename(ownedPath)));
+          await expectPathMissing(join(displacedPath, basename(namespacePath)));
+        }
         await expectPathMissing(isolatedPath);
-        expect((await readdir(reboundPath)).filter(isOwnedRecordPath)).toHaveLength(0);
+        if (rebind === "parent") {
+          expect((await readdir(reboundPath)).filter(isOwnedRecordPath).sort()).toEqual(
+            [basename(namespacePath)]
+          );
+        } else {
+          expect((await readdir(reboundPath)).filter(isOwnedRecordPath)).toHaveLength(0);
+        }
 
-        await rm(reboundPath, { recursive: true });
+        if (rebind === "parent") {
+          await rm(replacementSentinel);
+          await rename(ownedPath, join(displacedPath, basename(ownedPath)));
+          await rename(namespacePath, join(displacedPath, basename(namespacePath)));
+          await rmdir(reboundPath);
+        } else {
+          await rm(reboundPath, { recursive: true });
+        }
         await rename(displacedPath, reboundPath);
         const recordDirectory = dirname(canonicalPath);
         for (const name of await readdir(recordDirectory)) {
@@ -10373,6 +10400,38 @@ async function expectUnicodeAuthorityPairOnCaseSensitiveWorkspace(
 async function readFileWithIdentity(path: string): Promise<{ bytes: Buffer; dev: number; ino: number }> {
   const [bytes, identity] = await Promise.all([readFile(path), stat(path)]);
   return { bytes, dev: identity.dev, ino: identity.ino };
+}
+
+async function readOwnedFileState(path: string): Promise<{
+  bytes: Buffer;
+  dev: bigint;
+  ino: bigint;
+  mode: bigint;
+  nlink: bigint;
+}> {
+  const [bytes, identity] = await Promise.all([readFile(path), lstat(path, { bigint: true })]);
+  return {
+    bytes,
+    dev: identity.dev,
+    ino: identity.ino,
+    mode: identity.mode,
+    nlink: identity.nlink
+  };
+}
+
+async function readPathState(path: string): Promise<{
+  dev: bigint;
+  ino: bigint;
+  mode: bigint;
+  nlink: bigint;
+}> {
+  const identity = await lstat(path, { bigint: true });
+  return {
+    dev: identity.dev,
+    ino: identity.ino,
+    mode: identity.mode,
+    nlink: identity.nlink
+  };
 }
 
 async function readPathIdentity(path: string): Promise<{ dev: number; ino: number }> {
