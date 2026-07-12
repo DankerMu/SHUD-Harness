@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { fstat, fstatSync, type BigIntStats } from "node:fs";
+import {
+  fstat,
+  fstatSync,
+  renameSync,
+  writeFileSync,
+  type BigIntStats
+} from "node:fs";
 import {
   access,
   chmod,
@@ -1603,6 +1609,51 @@ describe("idempotency, lock, and artifact services", () => {
         }
       }
     }
+  });
+
+  test("read final authority proof covers synchronous schema evaluation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const record = { id: "schema-evaluation-original" };
+    const replacement = { id: "schema-evaluation-replacement" };
+    const evidenceRef = "authority.read.schema-evaluation";
+    const directorySegments = ["read-schema-evaluation"] as const;
+    const fileName = "record.json";
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const displacedPath = `${recordPath}.displaced`;
+    const schema = z.object({ id: z.string() });
+    expect(
+      await createJsonRecordIfAbsent(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      )
+    ).toEqual({ status: "created", record });
+    const originalBytes = await readFile(recordPath);
+    const replacementBytes = Buffer.from(`${JSON.stringify(replacement, null, 2)}\n`);
+    let schemaEvaluated = false;
+    const mutatingSchema = schema.superRefine(() => {
+      if (schemaEvaluated) return;
+      schemaEvaluated = true;
+      renameSync(recordPath, displacedPath);
+      writeFileSync(recordPath, replacementBytes, { flag: "wx", mode: 0o600 });
+    });
+
+    const error = await captureTaskServiceError(() =>
+      readJsonRecord(recordPath, evidenceRef, mutatingSchema)
+    );
+
+    expect(error.code).toBe("workspace_path_not_safe");
+    expect(schemaEvaluated).toBe(true);
+    expect(await readFile(recordPath)).toEqual(replacementBytes);
+    expect(await readFile(displacedPath)).toEqual(originalBytes);
   });
 
   test("mutable canonical baseline rejects lease-hook and final-precommit destination drift", async () => {

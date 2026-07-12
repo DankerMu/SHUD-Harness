@@ -485,7 +485,24 @@ export async function ensureWorkspaceRecordDirectory(
   for (const segment of relativeSegments) {
     currentPath = join(currentPath, segment);
     assertPathInsideWorkspace(resolvedRoot, currentPath, evidenceRef);
+    const existingEntry = await maybeLstat(currentPath);
+    if (existingEntry) {
+      if (!isSafeDirectoryEntry(existingEntry)) {
+        throw unsafeWorkspaceRecordDirectoryError(evidenceRef);
+      }
+      continue;
+    }
+
+    // The preceding serial walk proves every existing ancestor. Directory
+    // creation is a mutation boundary, so retain the full pre/post proof used
+    // by ensureSafeDirectory instead of carrying that admission across mkdir.
     await ensureSafeDirectory(currentPath, evidenceRef);
+  }
+
+  // Existing-only walks have no hook or mutation boundary, but must still end
+  // with a complete ancestor proof before their result can be used by callers.
+  if (!(await isSafeExistingDirectoryPath(currentPath))) {
+    throw unsafeWorkspaceRecordDirectoryError(evidenceRef);
   }
 
   return currentPath;
@@ -502,13 +519,18 @@ export async function readJsonRecord<T>(
     const parentPath = dirname(path);
     const parentBaseline = await captureSafeRecordDirectoryBaseline(parentPath, evidenceRef);
     const canonicalBaseline = await captureCanonicalAuthorityBaseline(path, evidenceRef);
-    await hooks?.afterAuthorityLeaseAcquired?.(Object.freeze({ operation: "read" }));
-    await assertSafeRecordDirectoryBaseline(parentPath, parentBaseline, evidenceRef);
-    await assertCanonicalAuthorityBaseline(path, canonicalBaseline, evidenceRef);
-    const record = await readJsonRecordUnderAuthority(path, evidenceRef, schema);
-    await assertSafeRecordDirectoryBaseline(parentPath, parentBaseline, evidenceRef);
-    await assertCanonicalAuthorityBaseline(path, canonicalBaseline, evidenceRef);
-    return record;
+    if (hooks?.afterAuthorityLeaseAcquired) {
+      await hooks.afterAuthorityLeaseAcquired(Object.freeze({ operation: "read" }));
+      await assertSafeRecordDirectoryBaseline(parentPath, parentBaseline, evidenceRef);
+      await assertCanonicalAuthorityBaseline(path, canonicalBaseline, evidenceRef);
+    }
+    return await readJsonRecordUnderAuthority(
+      path,
+      evidenceRef,
+      schema,
+      parentBaseline,
+      canonicalBaseline
+    );
   } finally {
     authorityLease.release();
   }
@@ -848,37 +870,84 @@ function recordChangedBeforeConditionalRemovalError(evidenceRef: string): TaskSe
 }
 
 type JsonRecordInspection<T> =
-  | { status: "missing" }
-  | { status: "record"; record: T; bytes: Buffer }
-  | { status: "malformed"; error: TaskServiceError; bytes: Buffer };
+  | {
+      status: "missing";
+      authorityObservation: Awaited<ReturnType<typeof readDurableSingleLinkFile>>;
+    }
+  | {
+      status: "record";
+      record: T;
+      bytes: Buffer;
+      authorityObservation: Awaited<ReturnType<typeof readDurableSingleLinkFile>>;
+    }
+  | {
+      status: "malformed";
+      error: TaskServiceError;
+      bytes: Buffer;
+      authorityObservation: Awaited<ReturnType<typeof readDurableSingleLinkFile>>;
+    };
 
 async function readJsonRecordUnderAuthority<T>(
   path: string,
   evidenceRef: string,
-  schema: z.ZodType<T>
+  schema: z.ZodType<T>,
+  admittedParentBaseline?: SafeRecordDirectoryBaseline,
+  canonicalBaseline?: CanonicalAuthorityBaseline
 ): Promise<T | undefined> {
-  const inspection = await inspectJsonRecordUnderAuthority(path, evidenceRef, schema);
+  const inspection = await inspectJsonRecordUnderAuthority(
+    path,
+    evidenceRef,
+    schema,
+    admittedParentBaseline
+  );
   if (inspection.status === "missing") {
+    await assertDurableReadMatchesCanonicalBaseline(
+      path,
+      inspection.authorityObservation,
+      canonicalBaseline,
+      evidenceRef
+    );
     return undefined;
   }
   if (inspection.status === "malformed") {
     throw inspection.error;
   }
+  await assertDurableReadMatchesCanonicalBaseline(
+    path,
+    inspection.authorityObservation,
+    canonicalBaseline,
+    evidenceRef
+  );
   return inspection.record;
 }
 
 async function inspectJsonRecordUnderAuthority<T>(
   path: string,
   evidenceRef: string,
-  schema: z.ZodType<T>
+  schema: z.ZodType<T>,
+  admittedParentBaseline?: SafeRecordDirectoryBaseline
 ): Promise<JsonRecordInspection<T>> {
+  const parentPath = dirname(path);
   const durableRead = await readDurableSingleLinkFile({
     path,
     maxBytes: MAX_SERVICE_RECORD_BYTES,
-    validateParentPath: async () => await isSafeExistingDirectoryPath(dirname(path))
+    validateParentPath: admittedParentBaseline
+      ? async () => {
+          try {
+            await assertSafeRecordDirectoryBaseline(
+              parentPath,
+              admittedParentBaseline,
+              evidenceRef
+            );
+            return true;
+          } catch {
+            return false;
+          }
+        }
+      : async () => await isSafeExistingDirectoryPath(parentPath)
   });
   if (durableRead.status === "missing") {
-    return { status: "missing" };
+    return { status: "missing", authorityObservation: durableRead };
   }
   if (durableRead.status === "invalid") {
     throw recordDurableReadError(durableRead.reason, evidenceRef, durableRead.cause);
@@ -891,6 +960,7 @@ async function inspectJsonRecordUnderAuthority<T>(
     return {
       status: "malformed",
       bytes: durableRead.bytes,
+      authorityObservation: durableRead,
       error: serviceWorkspaceError(
         "record_malformed",
         "Record is not valid JSON.",
@@ -906,6 +976,7 @@ async function inspectJsonRecordUnderAuthority<T>(
     return {
       status: "malformed",
       bytes: durableRead.bytes,
+      authorityObservation: durableRead,
       error: new TaskServiceError({
         code: "record_schema_error",
         status: 400,
@@ -918,7 +989,55 @@ async function inspectJsonRecordUnderAuthority<T>(
     };
   }
 
-  return { status: "record", record: parsedRecord.data, bytes: durableRead.bytes };
+  return {
+    status: "record",
+    record: parsedRecord.data,
+    bytes: durableRead.bytes,
+    authorityObservation: durableRead
+  };
+}
+
+async function assertDurableReadMatchesCanonicalBaseline(
+  path: string,
+  observed: Awaited<ReturnType<typeof readDurableSingleLinkFile>>,
+  expected: CanonicalAuthorityBaseline | undefined,
+  evidenceRef: string
+): Promise<void> {
+  if (!expected) return;
+  // Preserve the durable reader's more specific semantic error for an invalid
+  // observation; this helper only rejects authority drift that still produced
+  // an otherwise admissible durable result.
+  if (observed.status === "invalid") return;
+  if (expected.status === "absent") {
+    if (observed.status !== "missing") throw publicationStateError(evidenceRef);
+    return;
+  }
+  if (expected.status !== "existing" || observed.status !== "read") {
+    throw publicationStateError(evidenceRef);
+  }
+
+  let finalPath: BigIntStats;
+  try {
+    finalPath = await lstat(path, { bigint: true });
+  } catch {
+    throw publicationStateError(evidenceRef);
+  }
+  if (
+    !observed.bytes.equals(expected.bytes) ||
+    !workspaceRecordPhysicalIdentityMatches(observed.identity, expected.identity) ||
+    observed.linkCount !== expected.nlink ||
+    observed.size !== BigInt(expected.bytes.length) ||
+    !finalPath.isFile() ||
+    finalPath.isSymbolicLink() ||
+    !workspaceRecordPhysicalIdentityMatches(finalPath, observed.identity) ||
+    finalPath.nlink !== expected.nlink ||
+    finalPath.mode !== expected.mode ||
+    finalPath.size !== observed.size ||
+    finalPath.ctimeNs !== observed.mutation.ctimeNs ||
+    finalPath.mtimeNs !== observed.mutation.mtimeNs
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
 }
 
 async function readRecordPathIdentity(
@@ -4409,12 +4528,7 @@ async function ensureSafeDirectory(path: string, evidenceRef: string): Promise<v
   const existingEntry = await maybeLstat(path);
   if (existingEntry) {
     if (!(await isSafeExistingDirectoryPath(path))) {
-      throw serviceWorkspaceError(
-        "workspace_path_not_safe",
-        "Path is not a safe directory.",
-        "A required workspace path is not a safe directory.",
-        [evidenceRef]
-      );
+      throw unsafeWorkspaceRecordDirectoryError(evidenceRef);
     }
     return;
   }
@@ -4446,13 +4560,20 @@ async function ensureSafeDirectory(path: string, evidenceRef: string): Promise<v
   }
 
   if (!(await isSafeExistingDirectoryPath(path))) {
-    throw serviceWorkspaceError(
-      "workspace_path_not_safe",
-      "Created path is not a safe directory.",
-      "A required workspace path is not a safe directory.",
-      [evidenceRef]
-    );
+    throw unsafeWorkspaceRecordDirectoryError(evidenceRef, true);
   }
+}
+
+function unsafeWorkspaceRecordDirectoryError(
+  evidenceRef: string,
+  created = false
+): TaskServiceError {
+  return serviceWorkspaceError(
+    "workspace_path_not_safe",
+    created ? "Created path is not a safe directory." : "Path is not a safe directory.",
+    "A required workspace path is not a safe directory.",
+    [evidenceRef]
+  );
 }
 
 async function isSafeExistingDirectoryPath(path: string): Promise<boolean> {
