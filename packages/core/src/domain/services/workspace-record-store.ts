@@ -5,7 +5,7 @@ import { chmod, link, lstat, mkdir, open, rename, rmdir, unlink } from "node:fs/
 import { dirname, isAbsolute, join, normalize, parse, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import { preservePrimaryAndCompensationErrors } from "./compensation-error-preservation";
+import { preserveThrownValueAndCompensationErrors } from "./compensation-error-preservation";
 import {
   readDurableSingleLinkFile,
   type DurableSingleLinkReadFailureReason
@@ -46,6 +46,27 @@ export interface WorkspaceRecordPhysicalIdentity {
 }
 
 interface OwnedTemporaryRecordIdentity extends WorkspaceRecordPhysicalIdentity {}
+
+interface PresentFailure {
+  readonly value: unknown;
+}
+
+interface ExactOwnedPublicLinkRemoval {
+  readonly cleanupErrors: unknown[];
+  readonly ownership: "removed" | "retained" | "relinquished";
+}
+
+function appendSequentialFailure(
+  primary: PresentFailure | undefined,
+  compensations: unknown[],
+  value: unknown
+): PresentFailure {
+  if (primary) {
+    compensations.push(value);
+    return primary;
+  }
+  return { value };
+}
 
 interface OwnedAuthorityNamespace {
   path: string;
@@ -310,6 +331,20 @@ export interface WorkspaceRecordCompensationTestHooks {
       isolatedPath: string;
       site: WorkspaceRecordPostIsolationSite;
       attempt: number;
+    }>
+  ) => Promise<void> | void;
+  beforeUnsafeRestoredLinkRollback?: (
+    input: Readonly<{
+      path: string;
+      isolatedPath: string;
+      site: WorkspaceRecordPostIsolationSite;
+    }>
+  ) => Promise<void> | void;
+  afterUnsafeRestoredLinkRollback?: (
+    input: Readonly<{
+      path: string;
+      isolatedPath: string;
+      site: WorkspaceRecordPostIsolationSite;
     }>
   ) => Promise<void> | void;
 }
@@ -955,7 +990,7 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
   evidenceRef: string,
   invokeHooks = true
 ): Promise<void> {
-  let primaryError: unknown;
+  let primaryFailure: PresentFailure | undefined;
   const compensationErrors: unknown[] = [];
   for (let attempt = 1; attempt <= RECORD_NAMESPACE_CLEANUP_ATTEMPTS; attempt += 1) {
     try {
@@ -971,8 +1006,11 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
       return;
     } catch (error) {
       if (hasErrorCode(error, "ENOENT")) return;
-      if (primaryError === undefined) primaryError = error;
-      else compensationErrors.push(error);
+      primaryFailure = appendSequentialFailure(
+        primaryFailure,
+        compensationErrors,
+        error
+      );
       if (attempt < RECORD_NAMESPACE_CLEANUP_ATTEMPTS) {
         await sleep(RECORD_TEMP_CLEANUP_RETRY_MS);
       }
@@ -984,7 +1022,7 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
     "Workspace mutation namespace cleanup did not complete.",
     "The workspace record mutation could not be finalized safely.",
     [evidenceRef],
-    preserveWorkspacePrimaryError(primaryError, compensationErrors)
+    preserveWorkspacePrimaryError(primaryFailure!.value, compensationErrors)
   );
 }
 
@@ -1017,7 +1055,7 @@ export async function writeJsonRecord<T>(
   let recordDirectoryIdentity: OwnedTemporaryRecordIdentity | undefined;
   let canonicalBaseline: MutableCanonicalBaseline | undefined;
   let committed = false;
-  let operationError: unknown;
+  let operationFailure: PresentFailure | undefined;
   const compensationErrors: unknown[] = [];
   try {
     try {
@@ -1059,15 +1097,18 @@ export async function writeJsonRecord<T>(
       );
       committed = true;
     } catch (error) {
-      operationError = error;
+      operationFailure = { value: error };
     }
 
     if (temporaryRecord && !temporaryRecord.handleClosed) {
       try {
         await closeTemporaryRecord(temporaryRecord, recordPath, temporaryPath, hooks);
       } catch (error) {
-        if (operationError === undefined) operationError = error;
-        else compensationErrors.push(error);
+        operationFailure = appendSequentialFailure(
+          operationFailure,
+          compensationErrors,
+          error
+        );
       }
     }
 
@@ -1085,13 +1126,16 @@ export async function writeJsonRecord<T>(
           hooks
         );
       } catch (error) {
-        if (operationError === undefined) operationError = error;
-        else compensationErrors.push(error);
+        operationFailure = appendSequentialFailure(
+          operationFailure,
+          compensationErrors,
+          error
+        );
       }
     }
 
-    if (operationError !== undefined) {
-      throw preserveWorkspacePrimaryError(operationError, compensationErrors);
+    if (operationFailure) {
+      throw preserveWorkspacePrimaryError(operationFailure.value, compensationErrors);
     }
   } finally {
     authorityLease?.release();
@@ -1254,7 +1298,7 @@ async function createJsonRecordIfAbsentInternal<T>(
   };
   let authorityLease: RecordAuthorityLease | undefined;
   let publicationOutcome: "published" | "exists" | undefined;
-  let operationError: unknown;
+  let operationFailure: PresentFailure | undefined;
   const compensationErrors = ownedResources.compensationErrors;
   let cleanupPermit: WorkspaceRecordCleanupPermit | undefined;
   let cleanupPermitOwnership: "none" | "owned" | "transferred" = "none";
@@ -1345,15 +1389,18 @@ async function createJsonRecordIfAbsentInternal<T>(
         }
       }
     } catch (error) {
-      operationError = error;
+      operationFailure = { value: error };
     }
 
     if (ownedResources.temporaryRecord && !ownedResources.handleClosed) {
       try {
         await closeOwnedTemporaryRecord(ownedResources, hooks);
       } catch (cleanupError) {
-        if (operationError === undefined) operationError = cleanupError;
-        else compensationErrors.push(cleanupError);
+        operationFailure = appendSequentialFailure(
+          operationFailure,
+          compensationErrors,
+          cleanupError
+        );
       }
     }
 
@@ -1381,14 +1428,17 @@ async function createJsonRecordIfAbsentInternal<T>(
           ownedResources
         );
       } catch (cleanupError) {
-        if (operationError === undefined) operationError = cleanupError;
-        else compensationErrors.push(cleanupError);
+        operationFailure = appendSequentialFailure(
+          operationFailure,
+          compensationErrors,
+          cleanupError
+        );
       }
     }
 
     if (
       publicationOutcome === "published" &&
-      operationError === undefined &&
+      !operationFailure &&
       ownedResources.directoryIdentity &&
       ownedResources.temporaryExpectation
     ) {
@@ -1414,13 +1464,13 @@ async function createJsonRecordIfAbsentInternal<T>(
           );
         }
       } catch (error) {
-        operationError = error;
+        operationFailure = { value: error };
       }
     }
 
     if (
       publicationOutcome === "published" &&
-      operationError !== undefined &&
+      operationFailure &&
       ownedResources.canonicalIdentity &&
       ownedResources.directoryIdentity
     ) {
@@ -1471,7 +1521,7 @@ async function createJsonRecordIfAbsentInternal<T>(
 
     if (
       publicationOutcome !== "published" &&
-      operationError !== undefined &&
+      operationFailure &&
       ownedResources.temporaryIdentity
     ) {
       try {
@@ -1506,8 +1556,8 @@ async function createJsonRecordIfAbsentInternal<T>(
       }
     }
 
-    if (operationError !== undefined) {
-      throw preserveWorkspacePrimaryError(operationError, compensationErrors);
+    if (operationFailure) {
+      throw preserveWorkspacePrimaryError(operationFailure.value, compensationErrors);
     }
 
     if (publicationOutcome === "exists") {
@@ -1566,33 +1616,31 @@ async function closeTemporaryRecord(
       ino: temporaryRecord.identity.ino
     })
   });
-  let primaryError: unknown;
+  let primaryFailure: PresentFailure | undefined;
   const compensationErrors: unknown[] = [];
   try {
     await hooks?.beforeTemporaryFileClose?.(hookInput);
   } catch (error) {
-    primaryError = error;
+    primaryFailure = { value: error };
   }
 
   try {
     await temporaryRecord.file.close();
     temporaryRecord.handleClosed = true;
   } catch (error) {
-    if (primaryError === undefined) primaryError = error;
-    else compensationErrors.push(error);
+    primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, error);
   }
 
   if (temporaryRecord.handleClosed) {
     try {
       await hooks?.afterTemporaryFileClosed?.(hookInput);
     } catch (error) {
-      if (primaryError === undefined) primaryError = error;
-      else compensationErrors.push(error);
+      primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, error);
     }
   }
 
-  if (primaryError !== undefined) {
-    throw preserveWorkspacePrimaryError(primaryError, compensationErrors);
+  if (primaryFailure) {
+    throw preserveWorkspacePrimaryError(primaryFailure.value, compensationErrors);
   }
 }
 
@@ -1621,7 +1669,7 @@ async function writeOwnedTemporaryRecordFile(
   let shouldCleanup = false;
   let namespaceCreated = false;
   let namespaceIdentity: OwnedTemporaryRecordIdentity | undefined;
-  let operationError: unknown;
+  let operationFailure: PresentFailure | undefined;
   try {
     namespaceIdentity = await createPrivateAuthorityNamespaceAt(namespacePath, evidenceRef);
     namespaceCreated = true;
@@ -1647,13 +1695,15 @@ async function writeOwnedTemporaryRecordFile(
       handleClosed: false
     };
   } catch (error) {
-    operationError = serviceWorkspaceError(
-      "workspace_path_not_safe",
-      "Failed to write workspace record temporary file.",
-      "The workspace record could not be written safely.",
-      [evidenceRef],
-      error
-    );
+    operationFailure = {
+      value: serviceWorkspaceError(
+        "workspace_path_not_safe",
+        "Failed to write workspace record temporary file.",
+        "The workspace record could not be written safely.",
+        [evidenceRef],
+        error
+      )
+    };
   }
 
   const cleanupErrors: unknown[] = [];
@@ -1710,7 +1760,7 @@ async function writeOwnedTemporaryRecordFile(
       cleanupErrors.push(error);
     }
   }
-  throw preserveWorkspacePrimaryError(operationError, cleanupErrors);
+  throw preserveWorkspacePrimaryError(operationFailure!.value, cleanupErrors);
 }
 
 async function removeOwnedMutablePublicationResources(
@@ -1724,7 +1774,7 @@ async function removeOwnedMutablePublicationResources(
   evidenceRef: string,
   hooks: WorkspaceRecordPublicationHooks | undefined
 ): Promise<void> {
-  let cleanupError: unknown;
+  let cleanupFailure: PresentFailure | undefined;
   try {
     await assertMutableCleanupPathAuthority(
       directoryPath,
@@ -1751,7 +1801,7 @@ async function removeOwnedMutablePublicationResources(
     );
     return;
   } catch (error) {
-    cleanupError = error;
+    cleanupFailure = { value: error };
   }
 
   const finalizationErrors: unknown[] = [];
@@ -1810,7 +1860,7 @@ async function removeOwnedMutablePublicationResources(
     finalizationErrors.push(error);
   }
 
-  throw preserveWorkspacePrimaryError(cleanupError, finalizationErrors);
+  throw preserveWorkspacePrimaryError(cleanupFailure!.value, finalizationErrors);
 }
 
 async function conditionalUnlinkOwnedPath(
@@ -1932,7 +1982,7 @@ async function removeOwnedPublicationTemporaryPath(
 ): Promise<void> {
   const attemptErrors: unknown[] = [];
   let generationExpectation: OwnedGenerationExpectation | undefined;
-  let generationExpectationError: unknown;
+  let generationExpectationFailure: PresentFailure | undefined;
   if (ownedResources?.temporaryExpectation) {
     generationExpectation = {
       ...ownedResources.temporaryExpectation,
@@ -1949,7 +1999,7 @@ async function removeOwnedPublicationTemporaryPath(
         PRIVATE_GENERATION_MODE
       );
     } catch (error) {
-      generationExpectationError = error;
+      generationExpectationFailure = { value: error };
     }
   }
   for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
@@ -1964,7 +2014,7 @@ async function removeOwnedPublicationTemporaryPath(
         Object.freeze({ path: temporaryPath, operation })
       );
       await assertAuthorityNamespaceOwnership(namespaceOwnership, evidenceRef);
-      if (!generationExpectation) throw generationExpectationError;
+      if (!generationExpectation) throw generationExpectationFailure!.value;
       const isolatedIdentity = await readRegularFilePathIdentity(temporaryPath, evidenceRef);
       if (
         !isolatedIdentity ||
@@ -2263,7 +2313,8 @@ async function restoreOwnedIsolatedPath(
     await link(isolatedPath, publicPath);
     await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
     const sourceUnlinkErrors: unknown[] = [];
-    let restoredLinkRolledBack = false;
+    let publicOwnership: "owned" | "relinquished" = "owned";
+    let firstProofRollbackAttempted = false;
     for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
       try {
         await compensationTestHookStorage.getStore()?.beforeOwnedIsolatedSourceUnlink?.(
@@ -2281,15 +2332,29 @@ async function restoreOwnedIsolatedPath(
             evidenceRef
           ))
         ) {
-          const cleanupErrors = await rollbackUnsafeRestoredLink(
+          await compensationTestHookStorage.getStore()?.beforeUnsafeRestoredLinkRollback?.(
+            Object.freeze({ path: publicPath, isolatedPath, site })
+          );
+          firstProofRollbackAttempted = true;
+          const rollback = await rollbackUnsafeRestoredLink(
             publicPath,
             isolatedPath,
             mutationNamespace,
             expectedGeneration,
             evidenceRef
           );
-          sourceUnlinkErrors.push(publicationStateError(evidenceRef), ...cleanupErrors);
-          restoredLinkRolledBack = true;
+          try {
+            await compensationTestHookStorage.getStore()?.afterUnsafeRestoredLinkRollback?.(
+              Object.freeze({ path: publicPath, isolatedPath, site })
+            );
+          } catch (error) {
+            rollback.cleanupErrors.push(error);
+          }
+          sourceUnlinkErrors.push(
+            publicationStateError(evidenceRef),
+            ...rollback.cleanupErrors
+          );
+          publicOwnership = rollback.publicOwnership;
           break;
         }
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
@@ -2319,14 +2384,17 @@ async function restoreOwnedIsolatedPath(
             evidenceRef
           ))
         ) {
-          const cleanupErrors = await removeExactOwnedPublicLink(
+          const cleanup = await removeExactOwnedPublicLink(
             publicPath,
             mutationNamespace,
             expectedGeneration,
             expectedGeneration.nlink,
             evidenceRef
           );
-          sourceUnlinkErrors.push(publicationStateError(evidenceRef), ...cleanupErrors);
+          sourceUnlinkErrors.push(
+            publicationStateError(evidenceRef),
+            ...cleanup.cleanupErrors
+          );
           break;
         }
         return;
@@ -2345,22 +2413,27 @@ async function restoreOwnedIsolatedPath(
       }
     }
 
-    const rollbackErrors = restoredLinkRolledBack
-      ? await removeExactOwnedPublicLink(
-          publicPath,
-          mutationNamespace,
-          expectedGeneration,
-          expectedGeneration.nlink + 1n,
-          evidenceRef,
-          false
-        )
-      : await rollbackUnsafeRestoredLink(
-          publicPath,
-          isolatedPath,
-          mutationNamespace,
-          expectedGeneration,
-          evidenceRef
-        );
+    let rollbackErrors: unknown[];
+    if (publicOwnership === "relinquished") {
+      rollbackErrors = [];
+    } else if (firstProofRollbackAttempted) {
+      rollbackErrors = (await removeExactOwnedPublicLink(
+        publicPath,
+        mutationNamespace,
+        expectedGeneration,
+        expectedGeneration.nlink + 1n,
+        evidenceRef,
+        false
+      )).cleanupErrors;
+    } else {
+      rollbackErrors = (await rollbackUnsafeRestoredLink(
+        publicPath,
+        isolatedPath,
+        mutationNamespace,
+        expectedGeneration,
+        evidenceRef
+      )).cleanupErrors;
+    }
     throw preserveWorkspacePrimaryError(sourceUnlinkErrors[0], [
       ...sourceUnlinkErrors.slice(1),
       ...rollbackErrors
@@ -2406,14 +2479,18 @@ async function rollbackUnsafeRestoredLink(
   mutationNamespace: OwnedAuthorityNamespace,
   expectedGeneration: OwnedGenerationExpectation,
   evidenceRef: string
-): Promise<unknown[]> {
-  const cleanupErrors = await removeExactOwnedPublicLink(
+): Promise<{
+  cleanupErrors: unknown[];
+  publicOwnership: "owned" | "relinquished";
+}> {
+  const publicLinkRemoval = await removeExactOwnedPublicLink(
     publicPath,
     mutationNamespace,
     expectedGeneration,
     expectedGeneration.nlink + 1n,
     evidenceRef
   );
+  const cleanupErrors = publicLinkRemoval.cleanupErrors;
   cleanupErrors.push(
     ...(await removeUnsafeOwnedIsolatedSource(
       isolatedPath,
@@ -2422,7 +2499,12 @@ async function rollbackUnsafeRestoredLink(
       evidenceRef
     ))
   );
-  return cleanupErrors;
+  return {
+    cleanupErrors,
+    publicOwnership: publicLinkRemoval.ownership === "retained"
+      ? "owned"
+      : "relinquished"
+  };
 }
 
 async function removeExactOwnedPublicLink(
@@ -2432,8 +2514,9 @@ async function removeExactOwnedPublicLink(
   expectedLinkCount: bigint,
   evidenceRef: string,
   reportMismatch = true
-): Promise<unknown[]> {
+): Promise<ExactOwnedPublicLinkRemoval> {
   const cleanupErrors: unknown[] = [];
+  let ownership: ExactOwnedPublicLinkRemoval["ownership"] = "retained";
   try {
     await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
     const publicIdentity = await readRegularFilePathIdentity(publicPath, evidenceRef);
@@ -2463,14 +2546,25 @@ async function removeExactOwnedPublicLink(
         }
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
         await unlink(publicPath);
-      } else if (reportMismatch) {
-        cleanupErrors.push(publicationStateError(evidenceRef));
+        ownership = "removed";
+      } else {
+        if (
+          !workspaceRecordPhysicalIdentityMatches(
+            publicIdentity,
+            expectedGeneration.identity
+          )
+        ) {
+          ownership = "relinquished";
+        }
+        if (reportMismatch) cleanupErrors.push(publicationStateError(evidenceRef));
       }
+    } else {
+      ownership = "relinquished";
     }
   } catch (error) {
     cleanupErrors.push(error);
   }
-  return cleanupErrors;
+  return { cleanupErrors, ownership };
 }
 
 async function removeUnsafeOwnedIsolatedSource(
@@ -2654,7 +2748,7 @@ async function assertHardlinkPublicationCheckpoint(
 }
 
 function preserveWorkspacePrimaryError(primary: unknown, compensations: unknown[]): unknown {
-  return preservePrimaryAndCompensationErrors(
+  return preserveThrownValueAndCompensationErrors(
     primary,
     compensations,
     "Workspace record publication compensation failed."

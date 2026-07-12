@@ -70,7 +70,10 @@ import {
   runWithWorkspacePathSafetyHooks
 } from "./workspace-path-safety";
 import { readDurableSingleLinkFile } from "./durable-single-link-reader";
-import { preservePrimaryAndCompensationErrors } from "./compensation-error-preservation";
+import {
+  PreservedNonErrorThrownValue,
+  preservePrimaryAndCompensationErrors
+} from "./compensation-error-preservation";
 
 const tempRoots: string[] = [];
 const distinctCaseEntriesSupported = await detectDistinctCaseEntriesSupport();
@@ -409,6 +412,242 @@ describe("idempotency, lock, and artifact services", () => {
         ).toBe(false);
       }
     }
+  });
+
+  test("mutable create and update retain an undefined primary and clean exactly once", async () => {
+    for (const mode of ["create", "update"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string(), value: z.string() });
+      const before = { id: `mutable-undefined-${mode}`, value: "before" };
+      const after = { ...before, value: "after" };
+      const directorySegments = ["mutable-undefined-primary"] as const;
+      const fileName = `${mode}.json`;
+      const evidenceRef = `mutable.undefined.${mode}`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      if (mode === "update") {
+        await writeJsonRecord(
+          workspaceRoot,
+          directorySegments,
+          fileName,
+          before,
+          evidenceRef,
+          schema
+        );
+      }
+      const baseline = mode === "update" ? await readFileWithIdentity(path) : undefined;
+      let temporaryPath = "";
+      let cleanupCalls = 0;
+
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: (input) => {
+              temporaryPath = input.temporaryPath;
+              throw undefined;
+            },
+            beforeAuthorityOwnedUnlink: ({ operation }) => {
+              expect(operation).toBe("rename_temp_cleanup");
+              cleanupCalls += 1;
+            }
+          },
+          () =>
+            writeJsonRecord(
+              workspaceRoot,
+              directorySegments,
+              fileName,
+              after,
+              evidenceRef,
+              schema
+            )
+        )
+      );
+
+      expect(failure).toBeInstanceOf(PreservedNonErrorThrownValue);
+      expect((failure as PreservedNonErrorThrownValue).thrownValue).toBeUndefined();
+      expect(cleanupCalls).toBe(1);
+      await expectPathMissing(temporaryPath);
+      expect(
+        (await readdir(join(workspaceRoot, ...directorySegments))).some(isOwnedRecordPath)
+      ).toBe(false);
+      if (baseline) expect(await readFileWithIdentity(path)).toEqual(baseline);
+      else await expectPathMissing(path);
+    }
+  });
+
+  test("undefined mutable primary precedes later close compensation without false success", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "undefined-primary-close-compensation" };
+    const directorySegments = ["undefined-primary-close-compensation"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "undefined.primary.close.compensation";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const closeCompensation = new Error("close compensation after undefined primary");
+    let temporaryPath = "";
+    let cleanupCalls = 0;
+
+    const failure = await captureError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: (input) => {
+            temporaryPath = input.temporaryPath;
+            throw undefined;
+          },
+          beforeTemporaryFileClose: () => {
+            throw closeCompensation;
+          },
+          beforeAuthorityOwnedUnlink: () => {
+            cleanupCalls += 1;
+          }
+        },
+        () =>
+          writeJsonRecord(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            record,
+            evidenceRef,
+            schema
+          )
+      )
+    );
+
+    expect(failure).toBeInstanceOf(PreservedNonErrorThrownValue);
+    expect((failure as PreservedNonErrorThrownValue).thrownValue).toBeUndefined();
+    expect(failure.cause).toBeInstanceOf(AggregateError);
+    expect((failure.cause as AggregateError).errors).toEqual([undefined, closeCompensation]);
+    expect(cleanupCalls).toBe(1);
+    await expectPathMissing(path);
+    await expectPathMissing(temporaryPath);
+  });
+
+  test("hardlink, close, and namespace slots retain undefined failures", async () => {
+    const schema = z.object({ id: z.string() });
+
+    for (const surface of ["hardlink-primary", "close-primary"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const record = { id: surface };
+      const directorySegments = ["undefined-sibling-slots"] as const;
+      const fileName = `${surface}.json`;
+      const evidenceRef = `undefined.sibling.${surface}`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      let temporaryPath = "";
+      let cleanupCalls = 0;
+      let closeObserverCalls = 0;
+
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: (input) => {
+              temporaryPath = input.temporaryPath;
+              if (surface === "hardlink-primary") throw undefined;
+            },
+            beforeTemporaryFileClose: () => {
+              if (surface === "close-primary") throw undefined;
+            },
+            afterTemporaryFileClosed: async ({ descriptor }) => {
+              closeObserverCalls += 1;
+              await expectFileDescriptorClosed(descriptor.fd);
+            },
+            beforeAuthorityOwnedUnlink: ({ operation }) => {
+              expect(operation).toBe("hardlink_temp_cleanup");
+              cleanupCalls += 1;
+            }
+          },
+          () =>
+            createJsonRecordIfAbsent(
+              workspaceRoot,
+              directorySegments,
+              fileName,
+              record,
+              evidenceRef,
+              schema
+            )
+        )
+      );
+
+      expect(failure).toBeInstanceOf(PreservedNonErrorThrownValue);
+      expect((failure as PreservedNonErrorThrownValue).thrownValue).toBeUndefined();
+      expect(closeObserverCalls).toBe(1);
+      expect(cleanupCalls).toBe(1);
+      await expectPathMissing(path);
+      await expectPathMissing(temporaryPath);
+      expect(
+        (await readdir(join(workspaceRoot, ...directorySegments))).some(isOwnedRecordPath)
+      ).toBe(false);
+    }
+
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const record = { id: "namespace-primary" };
+    const directorySegments = ["undefined-namespace-slot"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "undefined.sibling.namespace";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    await createJsonRecordIfAbsent(
+      workspaceRoot,
+      directorySegments,
+      fileName,
+      record,
+      evidenceRef,
+      schema
+    );
+    const laterFailures = [
+      new Error("namespace cleanup attempt two"),
+      new Error("namespace cleanup attempt three")
+    ];
+    const attempts: number[] = [];
+    const namespaceFailure = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeAuthorityNamespaceRemoval: ({ attempt }) => {
+            attempts.push(attempt);
+            if (attempt === 1) throw undefined;
+            throw laterFailures[attempt - 2];
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+            kind: "record",
+            expected: record,
+            matches: (current, expected) => current.id === expected.id
+          })
+      )
+    );
+
+    expect(attempts).toEqual([1, 2, 3]);
+    const representedPrimary = findErrorNode(
+      namespaceFailure,
+      (error) => error instanceof PreservedNonErrorThrownValue
+    ) as PreservedNonErrorThrownValue | undefined;
+    expect(representedPrimary).toBeDefined();
+    expect(representedPrimary!.thrownValue).toBeUndefined();
+    expect(representedPrimary!.cause).toBeInstanceOf(AggregateError);
+    expect((representedPrimary!.cause as AggregateError).errors).toEqual([
+      undefined,
+      ...laterFailures
+    ]);
+    await expectPathMissing(path);
+    expect(await readdir(join(workspaceRoot, ...directorySegments))).toHaveLength(1);
   });
 
   test("mutable replacement and same-length drift preserve the old generation and cleanly retry", async () => {
@@ -5754,6 +5993,99 @@ describe("idempotency, lock, and artifact services", () => {
     const isolatedIdentity = await stat(isolatedPath, { bigint: true });
     expect(isolatedIdentity).toMatchObject({ dev: BigInt(ownedBefore.dev), ino: BigInt(ownedBefore.ino) });
     expect(isolatedIdentity.nlink).toBe(1n);
+  });
+
+  test("first restore rollback relinquishes public ownership before a same-inode rebind", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "restore-first-proof-same-inode-rebind" };
+    const replacementBytes = Buffer.from("first proof temporary replacement\n");
+    const evidenceRef = "restore.first-proof.same-inode-rebind";
+    const directorySegments = ["restore-first-proof-rebind"] as const;
+    const fileName = "record.json";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    await createJsonRecordIfAbsent(
+      workspaceRoot,
+      directorySegments,
+      fileName,
+      record,
+      evidenceRef,
+      schema
+    );
+    const ownedBefore = await readFileWithIdentity(path);
+    const isolationFailure = new Error("force same-inode restore rollback");
+    const rollbackFailure = new Error("first rollback postcondition observer failure");
+    let isolatedPath = "";
+    let beforeRollbackCalls = 0;
+    let afterRollbackCalls = 0;
+
+    const failure = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterOwnedPathIsolation: (input) => {
+            if (input.site !== "conditional_delete") return;
+            isolatedPath = input.isolatedPath;
+            throw isolationFailure;
+          },
+          beforeOwnedIsolatedSourceUnlink: async (input) => {
+            await rm(input.path);
+            await writeFile(input.path, replacementBytes, { flag: "wx", mode: 0o600 });
+          },
+          beforeUnsafeRestoredLinkRollback: async (input) => {
+            beforeRollbackCalls += 1;
+            await rm(input.path);
+            await link(input.isolatedPath, input.path);
+          },
+          afterUnsafeRestoredLinkRollback: async (input) => {
+            afterRollbackCalls += 1;
+            await link(input.isolatedPath, input.path);
+            throw rollbackFailure;
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+            kind: "record",
+            expected: record,
+            matches: (current, expected) => current.id === expected.id
+          })
+      )
+    );
+
+    expect(beforeRollbackCalls).toBe(1);
+    expect(afterRollbackCalls).toBe(1);
+    const rebound = await readFileWithIdentity(path);
+    expect(rebound).toEqual(ownedBefore);
+    expect(await readFileWithIdentity(isolatedPath)).toEqual(ownedBefore);
+    expect((await stat(path, { bigint: true })).nlink).toBe(2n);
+
+    const restoreFailure = findErrorNode(
+      failure,
+      (error) =>
+        error instanceof TaskServiceError &&
+        error.message === "Workspace record generation could not be restored after a failed mutation."
+    );
+    expect(restoreFailure).toBeDefined();
+    const proofFailure = restoreFailure!.cause as TaskServiceError;
+    expect(proofFailure).toMatchObject({
+      code: "workspace_path_not_safe",
+      message: "Workspace record publication authority could not be verified."
+    });
+    expect(proofFailure.cause).toBeInstanceOf(AggregateError);
+    expect((proofFailure.cause as AggregateError).errors).toEqual([rollbackFailure]);
+    expect(
+      aggregateErrorMessages(failure).filter((message) => message === rollbackFailure.message)
+    ).toHaveLength(1);
+    expect(
+      aggregateErrorMessages(restoreFailure).filter(
+        (message) =>
+          message === "Workspace record publication authority could not be verified."
+      )
+    ).toHaveLength(1);
   });
 
   test("all post-isolation sites restore through the shared source-unlink helper", async () => {

@@ -6,6 +6,42 @@ interface PreservedErrorProvenance {
 
 const preservedErrorProvenance = new WeakMap<Error, PreservedErrorProvenance>();
 
+export class PreservedNonErrorThrownValue extends Error {
+  readonly thrownValue: unknown;
+
+  constructor(thrownValue: unknown) {
+    super("A non-Error value was thrown.");
+    this.name = "PreservedNonErrorThrownValue";
+    this.thrownValue = thrownValue;
+  }
+}
+
+export function preserveThrownValueAndCompensationErrors(
+  primary: unknown,
+  compensations: readonly unknown[],
+  aggregateMessage: string
+): Error {
+  if (primary instanceof Error) {
+    return preservePrimaryAndCompensationErrors(
+      primary,
+      compensations,
+      aggregateMessage
+    ) as Error;
+  }
+
+  const representedPrimary = new PreservedNonErrorThrownValue(primary);
+  preservedErrorProvenance.set(representedPrimary, {
+    primary: representedPrimary,
+    observedCauses: [primary],
+    rawCompensations: []
+  });
+  return preservePrimaryAndCompensationErrors(
+    representedPrimary,
+    compensations,
+    aggregateMessage
+  ) as Error;
+}
+
 export function preservePrimaryAndCompensationErrors(
   primary: unknown,
   compensations: readonly unknown[],
