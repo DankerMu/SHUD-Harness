@@ -29,6 +29,13 @@ const RECORD_AUTHORITY_ACQUISITION_TIMEOUT_MS = 5_000;
 const RECORD_TEMP_CLEANUP_ATTEMPTS = 3;
 const RECORD_TEMP_CLEANUP_RETRY_MS = 5;
 const RECORD_NAMESPACE_CLEANUP_ATTEMPTS = 3;
+const PRIVATE_PERMISSION_MASK = 0o7777n;
+const PRIVATE_GENERATION_MODE = 0o600n;
+const PRIVATE_NAMESPACE_MODE = 0o700n;
+
+function hasExactPrivatePermissions(mode: bigint, expected: bigint): boolean {
+  return (mode & PRIVATE_PERMISSION_MASK) === expected;
+}
 
 type FileStat = Awaited<ReturnType<typeof lstat>>;
 type RecordFileHandle = Awaited<ReturnType<typeof open>>;
@@ -620,9 +627,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       observation.bytes,
       1n,
       evidenceRef,
-      ordinaryCanonicalBaseline?.status === "existing"
-        ? ordinaryCanonicalBaseline.mode & 0o777n
-        : undefined
+      PRIVATE_GENERATION_MODE
     ));
   const matched =
     condition.kind === "malformed"
@@ -924,7 +929,11 @@ async function createPrivateAuthorityNamespaceAt(
   try {
     await mkdir(namespacePath, { mode: 0o700 });
     const entry = await lstat(namespacePath, { bigint: true });
-    if (!entry.isDirectory() || entry.isSymbolicLink() || (entry.mode & 0o777n) !== 0o700n) {
+    if (
+      !entry.isDirectory() ||
+      entry.isSymbolicLink() ||
+      !hasExactPrivatePermissions(entry.mode, PRIVATE_NAMESPACE_MODE)
+    ) {
       await rmdir(namespacePath);
       throw publicationStateError(evidenceRef);
     }
@@ -1290,7 +1299,7 @@ async function createJsonRecordIfAbsentInternal<T>(
         ownedResources.expectedBytes,
         1n,
         evidenceRef,
-        0o600n
+        PRIVATE_GENERATION_MODE
       );
       const hardlinkCheckpoint: OwnedGenerationCheckpoint = {
         parentPath: directoryPath,
@@ -1623,7 +1632,7 @@ async function writeOwnedTemporaryRecordFile(
     );
     shouldCleanup = true;
     const entry = await temporaryFile.stat({ bigint: true });
-    if (!entry.isFile() || (entry.mode & 0o777n) !== 0o600n) {
+    if (!entry.isFile() || !hasExactPrivatePermissions(entry.mode, PRIVATE_GENERATION_MODE)) {
       throw publicationStateError(evidenceRef);
     }
     temporaryIdentity = { dev: entry.dev, ino: entry.ino };
@@ -1769,7 +1778,7 @@ async function removeOwnedMutablePublicationResources(
         expectedBytes,
         1n,
         evidenceRef,
-        0o600n
+        PRIVATE_GENERATION_MODE
       );
       if (
         !(await ownedGenerationStateMatches(
@@ -1816,7 +1825,7 @@ async function conditionalUnlinkOwnedPath(
     expectedBytes,
     1n,
     evidenceRef,
-    0o600n
+    PRIVATE_GENERATION_MODE
   );
   const mutationNamespace = await createAuthorityOwnedMutationNamespace(path, evidenceRef);
   const isolatedPath = join(mutationNamespace.path, "generation");
@@ -1937,7 +1946,7 @@ async function removeOwnedPublicationTemporaryPath(
         expectedBytes,
         undefined,
         evidenceRef,
-        0o600n
+        PRIVATE_GENERATION_MODE
       );
     } catch (error) {
       generationExpectationError = error;
@@ -2046,7 +2055,7 @@ async function removeOwnedPrivateGenerationWithoutHooks(
     expectedBytes,
     undefined,
     evidenceRef,
-    0o600n
+    PRIVATE_GENERATION_MODE
   );
   await assertAuthorityNamespaceOwnership(namespaceOwnership, evidenceRef);
   if (
@@ -2098,7 +2107,7 @@ async function removeOwnedPathWithoutHooks(
     expectedBytes,
     undefined,
     evidenceRef,
-    0o600n
+    PRIVATE_GENERATION_MODE
   );
   const mutationNamespace = await createAuthorityOwnedMutationNamespace(
     path,
@@ -2555,7 +2564,7 @@ async function captureOwnedGenerationExpectation(
     if (
       !before.isFile() ||
       (expectedLinkCount !== undefined && before.nlink !== expectedLinkCount) ||
-      (expectedMode !== undefined && (before.mode & 0o777n) !== expectedMode) ||
+      (expectedMode !== undefined && !hasExactPrivatePermissions(before.mode, expectedMode)) ||
       !workspaceRecordPhysicalIdentityMatches(before, expectedIdentity) ||
       before.size !== BigInt(expectedBytes.length) ||
       before.size > BigInt(MAX_SERVICE_RECORD_BYTES)
@@ -2664,7 +2673,7 @@ async function assertOwnedTemporaryRecordPath(
   if (
     !entry.isFile() ||
     entry.isSymbolicLink() ||
-    (entry.mode & 0o777n) !== 0o600n ||
+    !hasExactPrivatePermissions(entry.mode, PRIVATE_GENERATION_MODE) ||
     !workspaceRecordPhysicalIdentityMatches(entry, expected)
   ) {
     throw publicationStateError(evidenceRef);
@@ -2761,7 +2770,7 @@ async function assertOpenRecordAuthority(
   const before = await temporaryRecord.file.stat({ bigint: true });
   if (
     !before.isFile() ||
-    (before.mode & 0o777n) !== 0o600n ||
+    !hasExactPrivatePermissions(before.mode, PRIVATE_GENERATION_MODE) ||
     !workspaceRecordPhysicalIdentityMatches(before, temporaryRecord.identity) ||
     before.nlink !== BigInt(expectedLinks) ||
     before.size !== BigInt(expectedBytes.length) ||
@@ -2788,7 +2797,7 @@ async function assertOpenRecordAuthority(
     !observedBytes.equals(expectedBytes) ||
     after.dev !== before.dev ||
     after.ino !== before.ino ||
-    (after.mode & 0o777n) !== 0o600n ||
+    !hasExactPrivatePermissions(after.mode, PRIVATE_GENERATION_MODE) ||
     after.nlink !== BigInt(expectedLinks) ||
     after.size !== before.size
   ) {
@@ -2890,7 +2899,7 @@ async function assertAuthorityNamespaceOwnership(
     if (
       !namespace.isDirectory() ||
       namespace.isSymbolicLink() ||
-      (namespace.mode & 0o777n) !== 0o700n ||
+      !hasExactPrivatePermissions(namespace.mode, PRIVATE_NAMESPACE_MODE) ||
       !workspaceRecordPhysicalIdentityMatches(namespace, ownership.identity)
     ) {
       throw publicationStateError(evidenceRef);
@@ -2950,7 +2959,7 @@ async function normalizeOwnedAuthorityNamespaceMode(
     ) {
       throw publicationStateError(evidenceRef);
     }
-    if ((namespace.mode & 0o777n) !== 0o700n) {
+    if (!hasExactPrivatePermissions(namespace.mode, PRIVATE_NAMESPACE_MODE)) {
       await chmod(ownership.path, 0o700);
     }
     await assertAuthorityNamespaceOwnership(ownership, evidenceRef);
@@ -3140,12 +3149,12 @@ async function assertFinalMutablePublicationAuthority(
     if (
       !namespace.isDirectory() ||
       namespace.isSymbolicLink() ||
-      (namespace.mode & 0o777n) !== 0o700n ||
+      !hasExactPrivatePermissions(namespace.mode, PRIVATE_NAMESPACE_MODE) ||
       !workspaceRecordPhysicalIdentityMatches(namespace, expectedNamespace) ||
       !generation.isFile() ||
       generation.isSymbolicLink() ||
       generation.nlink !== 1n ||
-      (generation.mode & 0o777n) !== 0o600n ||
+      !hasExactPrivatePermissions(generation.mode, PRIVATE_GENERATION_MODE) ||
       !workspaceRecordPhysicalIdentityMatches(generation, expectedGeneration)
     ) {
       throw publicationStateError(evidenceRef);
