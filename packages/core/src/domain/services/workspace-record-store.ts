@@ -54,6 +54,14 @@ interface OwnedGenerationExpectation {
   nlink: bigint;
 }
 
+interface OwnedGenerationCheckpoint {
+  parentPath: string;
+  parentIdentity: OwnedTemporaryRecordIdentity;
+  namespace?: OwnedAuthorityNamespace;
+  path: string;
+  generation: OwnedGenerationExpectation;
+}
+
 type SafeRecordDirectoryBaseline =
   | { status: "absent" }
   | { status: "existing"; identity: OwnedTemporaryRecordIdentity };
@@ -106,6 +114,7 @@ interface HardlinkPublicationOwnedResources {
   expectedBytes: Buffer;
   temporaryRecord?: OwnedTemporaryRecord;
   temporaryIdentity?: OwnedTemporaryRecordIdentity;
+  temporaryExpectation?: OwnedGenerationExpectation;
   isolatedGeneration?: OwnedIsolatedGeneration;
   canonicalIdentity?: OwnedTemporaryRecordIdentity;
   handleClosed: boolean;
@@ -142,7 +151,7 @@ interface RecordAuthorityMutex {
 }
 
 interface RecordAuthorityLease {
-  expectedCleanupGeneration?: WorkspaceRecordPhysicalIdentity;
+  expectedCleanupGeneration?: OwnedGenerationExpectation;
   validateCleanupGeneration?: () => Promise<void>;
   release: () => void;
   reserveCleanupPermit: (
@@ -160,6 +169,7 @@ const cleanupPermitState = new WeakMap<
     mutex: RecordAuthorityMutex;
     publicPath: string;
     generation?: OwnedTemporaryRecordIdentity;
+    generationExpectation?: OwnedGenerationExpectation;
     pinnedFile?: RecordFileHandle;
     pinnedFileClosed: boolean;
     expectedBytes?: Buffer;
@@ -470,7 +480,14 @@ export async function conditionalDeleteJsonRecordWithCleanupPermit<T>(
   const mutationState = { started: false };
   try {
     try {
+      const parentPath = dirname(path);
+      const admittedParentIdentity = await readSafeRecordDirectoryIdentity(
+        parentPath,
+        evidenceRef
+      );
+      await authorityLease.validateCleanupGeneration?.();
       await hooks?.afterAuthorityLeaseAcquired?.(Object.freeze({ operation: "delete" }));
+      await assertRecordDirectoryIdentity(parentPath, admittedParentIdentity, evidenceRef);
       await authorityLease.validateCleanupGeneration?.();
       return await conditionalDeleteJsonRecordUnderAuthority(
         path,
@@ -479,7 +496,9 @@ export async function conditionalDeleteJsonRecordWithCleanupPermit<T>(
         condition,
         hooks,
         mutationState,
-        authorityLease.expectedCleanupGeneration
+        authorityLease.expectedCleanupGeneration,
+        undefined,
+        admittedParentIdentity
       );
     } catch (error) {
       throw new WorkspaceRecordConditionalDeleteError(
@@ -511,10 +530,13 @@ export async function conditionalDeleteJsonRecord<T>(
   } = { started: false };
   try {
     const parentPath = dirname(path);
-    const parentBaseline = await captureSafeRecordDirectoryBaseline(parentPath, evidenceRef);
+    const admittedParentIdentity = await readSafeRecordDirectoryIdentity(
+      parentPath,
+      evidenceRef
+    );
     const canonicalBaseline = await captureCanonicalAuthorityBaseline(path, evidenceRef);
     await hooks?.afterAuthorityLeaseAcquired?.(Object.freeze({ operation: "delete" }));
-    await assertSafeRecordDirectoryBaseline(parentPath, parentBaseline, evidenceRef);
+    await assertRecordDirectoryIdentity(parentPath, admittedParentIdentity, evidenceRef);
     await assertCanonicalAuthorityBaseline(path, canonicalBaseline, evidenceRef);
     return await conditionalDeleteJsonRecordUnderAuthority(
       path,
@@ -524,7 +546,8 @@ export async function conditionalDeleteJsonRecord<T>(
       hooks,
       mutationState,
       undefined,
-      canonicalBaseline
+      canonicalBaseline,
+      admittedParentIdentity
     );
   } finally {
     if (mutationState.deletedGeneration) {
@@ -544,16 +567,21 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     started: boolean;
     deletedGeneration?: WorkspaceRecordPhysicalIdentity;
   },
-  expectedGeneration?: WorkspaceRecordPhysicalIdentity,
-  ordinaryCanonicalBaseline?: CanonicalAuthorityBaseline
+  expectedGeneration?: OwnedGenerationExpectation,
+  ordinaryCanonicalBaseline?: CanonicalAuthorityBaseline,
+  admittedParentIdentity?: OwnedTemporaryRecordIdentity
 ): Promise<ConditionalDeleteJsonRecordResult> {
+  const parentPath = dirname(path);
+  const parentIdentity =
+    admittedParentIdentity ??
+    (await readSafeRecordDirectoryIdentity(parentPath, evidenceRef));
   const observedIdentity = await readRecordPathIdentity(path, evidenceRef);
   if (!observedIdentity) {
     return { status: "missing" };
   }
   if (
     expectedGeneration &&
-    !workspaceRecordPhysicalIdentityMatches(observedIdentity, expectedGeneration)
+    !workspaceRecordPhysicalIdentityMatches(observedIdentity, expectedGeneration.identity)
   ) {
     throw publicationStateError(evidenceRef);
   }
@@ -581,16 +609,21 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   ) {
     throw publicationStateError(evidenceRef);
   }
-  const generationExpectation = await captureOwnedGenerationExpectation(
-    path,
-    observedIdentity,
-    observation.bytes,
-    1n,
-    evidenceRef,
-    ordinaryCanonicalBaseline?.status === "existing"
-      ? ordinaryCanonicalBaseline.mode & 0o777n
-      : undefined
-  );
+  if (expectedGeneration && !observation.bytes.equals(expectedGeneration.bytes)) {
+    throw publicationStateError(evidenceRef);
+  }
+  const generationExpectation =
+    expectedGeneration ??
+    (await captureOwnedGenerationExpectation(
+      path,
+      observedIdentity,
+      observation.bytes,
+      1n,
+      evidenceRef,
+      ordinaryCanonicalBaseline?.status === "existing"
+        ? ordinaryCanonicalBaseline.mode & 0o777n
+        : undefined
+    ));
   const matched =
     condition.kind === "malformed"
       ? observation.status === "malformed"
@@ -602,11 +635,26 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       conditionStatus: matched ? "matched" : "not_matched"
     })
   );
+  const admittedGenerationCheckpoint: OwnedGenerationCheckpoint = {
+    parentPath,
+    parentIdentity,
+    path,
+    generation: generationExpectation
+  };
+  await assertOwnedGenerationCheckpoint(admittedGenerationCheckpoint, evidenceRef);
   if (!matched) {
     return { status: "condition_not_met" };
   }
 
-  const mutationNamespace = await createAuthorityOwnedMutationNamespace(path, evidenceRef);
+  const mutationNamespace = await createAuthorityOwnedMutationNamespace(
+    path,
+    evidenceRef,
+    parentIdentity
+  );
+  await assertOwnedGenerationCheckpoint(
+    { ...admittedGenerationCheckpoint, namespace: mutationNamespace },
+    evidenceRef
+  );
   const quarantinePath = join(mutationNamespace.path, "generation");
   try {
     await hooks?.beforeGenerationIsolation?.(
@@ -849,14 +897,18 @@ async function readRegularFilePathIdentity(
 
 async function createAuthorityOwnedMutationNamespace(
   publicPath: string,
-  evidenceRef: string
+  evidenceRef: string,
+  admittedParentIdentity?: OwnedTemporaryRecordIdentity
 ): Promise<OwnedAuthorityNamespace> {
   const parentPath = dirname(publicPath);
-  const parentIdentity = await readSafeRecordDirectoryIdentity(parentPath, evidenceRef);
+  const parentIdentity =
+    admittedParentIdentity ??
+    (await readSafeRecordDirectoryIdentity(parentPath, evidenceRef));
   const namespacePath = join(
     parentPath,
     `.${parse(publicPath).base}-${process.pid}-${randomUUID()}.authority`
   );
+  await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef);
   await publicationHookStorage
     .getStore()
     ?.beforeAuthorityNamespaceCreation?.(Object.freeze({ path: namespacePath }));
@@ -1232,15 +1284,31 @@ async function createJsonRecordIfAbsentInternal<T>(
         ownedResources.directoryIdentity
       );
       ownedResources.temporaryIdentity = ownedResources.temporaryRecord.identity;
+      ownedResources.temporaryExpectation = await captureOwnedGenerationExpectation(
+        temporaryPath,
+        ownedResources.temporaryIdentity,
+        ownedResources.expectedBytes,
+        1n,
+        evidenceRef,
+        0o600n
+      );
+      const hardlinkCheckpoint: OwnedGenerationCheckpoint = {
+        parentPath: directoryPath,
+        parentIdentity: ownedResources.directoryIdentity,
+        namespace: hardlinkTemporaryNamespaceOwnership(
+          ownedResources,
+          producerNamespacePath,
+          directoryPath,
+          evidenceRef
+        ),
+        path: temporaryPath,
+        generation: ownedResources.temporaryExpectation
+      };
       await hooks?.afterTemporaryFileWritten?.({
         canonicalPath: recordPath,
         temporaryPath
       });
-      await assertOwnedTemporaryRecordPath(
-        temporaryPath,
-        ownedResources.temporaryIdentity,
-        evidenceRef
-      );
+      await assertOwnedGenerationCheckpoint(hardlinkCheckpoint, evidenceRef);
       try {
         await link(temporaryPath, recordPath);
         publicationOutcome = "published";
@@ -1249,6 +1317,11 @@ async function createJsonRecordIfAbsentInternal<T>(
           canonicalPath: recordPath,
           temporaryPath
         });
+        await assertHardlinkPublicationCheckpoint(
+          hardlinkCheckpoint,
+          recordPath,
+          evidenceRef
+        );
       } catch (error) {
         if (hasErrorCode(error, "EEXIST")) {
           publicationOutcome = "exists";
@@ -1304,23 +1377,31 @@ async function createJsonRecordIfAbsentInternal<T>(
       }
     }
 
-    if (publicationOutcome === "published" && operationError === undefined) {
+    if (
+      publicationOutcome === "published" &&
+      operationError === undefined &&
+      ownedResources.directoryIdentity &&
+      ownedResources.temporaryExpectation
+    ) {
       try {
         await assertPublishedRecordAuthority(
           recordPath,
           directoryPath,
+          ownedResources.directoryIdentity,
           recordText,
           evidenceRef,
-          ownedResources.canonicalIdentity,
+          ownedResources.temporaryExpectation,
           hooks
         );
         if (cleanupPermit && ownedResources.canonicalIdentity) {
           await bindRecordAuthorityCleanupPermitGeneration(
             cleanupPermit,
-            ownedResources.canonicalIdentity,
+            ownedResources.temporaryExpectation,
             ownedResources.expectedBytes,
             hooks,
-            evidenceRef
+            evidenceRef,
+            directoryPath,
+            ownedResources.directoryIdentity
           );
         }
       } catch (error) {
@@ -1331,14 +1412,17 @@ async function createJsonRecordIfAbsentInternal<T>(
     if (
       publicationOutcome === "published" &&
       operationError !== undefined &&
-      ownedResources.canonicalIdentity
+      ownedResources.canonicalIdentity &&
+      ownedResources.directoryIdentity
     ) {
       try {
         await rollbackPublishedRecordClaim(
           recordPath,
           ownedResources.canonicalIdentity,
           ownedResources.expectedBytes,
-          evidenceRef
+          evidenceRef,
+          directoryPath,
+          ownedResources.directoryIdentity
         );
       } catch (error) {
         compensationErrors.push(error);
@@ -1366,7 +1450,8 @@ async function createJsonRecordIfAbsentInternal<T>(
             ownedResources.temporaryIdentity ?? ownedResources.canonicalIdentity,
             ownedResources.expectedBytes,
             evidenceRef,
-            "temporary_generation_compensation"
+            "temporary_generation_compensation",
+            ownedResources.temporaryRecord?.namespaceIdentity
           );
         }
       } catch (error) {
@@ -1403,7 +1488,8 @@ async function createJsonRecordIfAbsentInternal<T>(
             ownedResources.temporaryIdentity,
             ownedResources.expectedBytes,
             evidenceRef,
-            "temporary_generation_compensation"
+            "temporary_generation_compensation",
+            ownedResources.temporaryRecord?.namespaceIdentity
           );
         }
       } catch (error) {
@@ -1838,17 +1924,24 @@ async function removeOwnedPublicationTemporaryPath(
   const attemptErrors: unknown[] = [];
   let generationExpectation: OwnedGenerationExpectation | undefined;
   let generationExpectationError: unknown;
-  try {
-    generationExpectation = await captureOwnedGenerationExpectation(
-      temporaryPath,
-      temporaryIdentity,
-      expectedBytes,
-      undefined,
-      evidenceRef,
-      0o600n
-    );
-  } catch (error) {
-    generationExpectationError = error;
+  if (ownedResources?.temporaryExpectation) {
+    generationExpectation = {
+      ...ownedResources.temporaryExpectation,
+      nlink: ownedResources.canonicalIdentity ? 2n : 1n
+    };
+  } else {
+    try {
+      generationExpectation = await captureOwnedGenerationExpectation(
+        temporaryPath,
+        temporaryIdentity,
+        expectedBytes,
+        undefined,
+        evidenceRef,
+        0o600n
+      );
+    } catch (error) {
+      generationExpectationError = error;
+    }
   }
   for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
     try {
@@ -1969,14 +2062,22 @@ async function rollbackPublishedRecordClaim(
   recordPath: string,
   expectedIdentity: OwnedTemporaryRecordIdentity,
   expectedBytes: Buffer,
-  evidenceRef: string
+  evidenceRef: string,
+  admittedParentPath: string,
+  admittedParentIdentity: OwnedTemporaryRecordIdentity
 ): Promise<void> {
+  await assertRecordDirectoryIdentity(
+    admittedParentPath,
+    admittedParentIdentity,
+    evidenceRef
+  );
   await removeOwnedPathWithoutHooks(
     recordPath,
     expectedIdentity,
     expectedBytes,
     evidenceRef,
-    "published_rollback"
+    "published_rollback",
+    admittedParentIdentity
   );
 }
 
@@ -1988,7 +2089,8 @@ async function removeOwnedPathWithoutHooks(
   site: Extract<
     WorkspaceRecordPostIsolationSite,
     "published_rollback" | "temporary_generation_compensation"
-  > = "temporary_generation_compensation"
+  > = "temporary_generation_compensation",
+  admittedParentIdentity?: OwnedTemporaryRecordIdentity
 ): Promise<void> {
   const generationExpectation = await captureOwnedGenerationExpectation(
     path,
@@ -1998,7 +2100,11 @@ async function removeOwnedPathWithoutHooks(
     evidenceRef,
     0o600n
   );
-  const mutationNamespace = await createAuthorityOwnedMutationNamespace(path, evidenceRef);
+  const mutationNamespace = await createAuthorityOwnedMutationNamespace(
+    path,
+    evidenceRef,
+    admittedParentIdentity
+  );
   const isolatedPath = join(mutationNamespace.path, "generation");
   let namespaceCleanupAttempted = false;
   try {
@@ -2482,6 +2588,56 @@ async function captureOwnedGenerationExpectation(
   }
 }
 
+async function assertOwnedGenerationCheckpoint(
+  checkpoint: OwnedGenerationCheckpoint,
+  evidenceRef: string,
+  expectedLinkCount = checkpoint.generation.nlink
+): Promise<void> {
+  await assertRecordDirectoryIdentity(
+    checkpoint.parentPath,
+    checkpoint.parentIdentity,
+    evidenceRef
+  );
+  if (checkpoint.namespace) {
+    await assertAuthorityNamespaceOwnership(checkpoint.namespace, evidenceRef);
+  }
+  if (
+    !(await ownedGenerationStateMatches(
+      checkpoint.path,
+      checkpoint.generation,
+      expectedLinkCount,
+      evidenceRef
+    ))
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  if (checkpoint.namespace) {
+    await assertAuthorityNamespaceOwnership(checkpoint.namespace, evidenceRef);
+  } else {
+    await assertRecordDirectoryIdentity(
+      checkpoint.parentPath,
+      checkpoint.parentIdentity,
+      evidenceRef
+    );
+  }
+}
+
+async function assertHardlinkPublicationCheckpoint(
+  temporaryCheckpoint: OwnedGenerationCheckpoint,
+  canonicalPath: string,
+  evidenceRef: string
+): Promise<void> {
+  await assertOwnedGenerationCheckpoint(temporaryCheckpoint, evidenceRef, 2n);
+  const canonicalCheckpoint: OwnedGenerationCheckpoint = {
+    parentPath: temporaryCheckpoint.parentPath,
+    parentIdentity: temporaryCheckpoint.parentIdentity,
+    path: canonicalPath,
+    generation: temporaryCheckpoint.generation
+  };
+  await assertOwnedGenerationCheckpoint(canonicalCheckpoint, evidenceRef, 2n);
+  await assertOwnedGenerationCheckpoint(temporaryCheckpoint, evidenceRef, 2n);
+}
+
 function preserveWorkspacePrimaryError(primary: unknown, compensations: unknown[]): unknown {
   return preservePrimaryAndCompensationErrors(
     primary,
@@ -2518,27 +2674,55 @@ async function assertOwnedTemporaryRecordPath(
 async function assertPublishedRecordAuthority(
   recordPath: string,
   directoryPath: string,
+  expectedDirectoryIdentity: OwnedTemporaryRecordIdentity,
   recordText: string,
   evidenceRef: string,
-  expectedIdentity?: OwnedTemporaryRecordIdentity,
+  expectedGeneration?: OwnedGenerationExpectation,
   hooks?: WorkspaceRecordPublicationHooks
 ): Promise<void> {
-  if (!(await isSafeExistingDirectoryPath(directoryPath))) {
-    throw publicationStateError(evidenceRef);
-  }
+  await assertRecordDirectoryIdentity(
+    directoryPath,
+    expectedDirectoryIdentity,
+    evidenceRef
+  );
 
   const published = await readDurableSingleLinkFile({
     path: recordPath,
     maxBytes: MAX_SERVICE_RECORD_BYTES,
-    validateParentPath: async () => await isSafeExistingDirectoryPath(directoryPath),
+    validateParentPath: async () => {
+      try {
+        await assertRecordDirectoryIdentity(
+          directoryPath,
+          expectedDirectoryIdentity,
+          evidenceRef
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    },
     beforeFinalParentValidation: hooks?.beforePublishedRecordFinalValidation
   });
   if (published.status !== "read" || !published.bytes.equals(Buffer.from(recordText, "utf8"))) {
     throw publicationStateError(evidenceRef);
   }
-  if (expectedIdentity) {
+  await assertRecordDirectoryIdentity(
+    directoryPath,
+    expectedDirectoryIdentity,
+    evidenceRef
+  );
+  if (expectedGeneration) {
     if (
-      !workspaceRecordPhysicalIdentityMatches(published.identity, expectedIdentity)
+      !workspaceRecordPhysicalIdentityMatches(
+        published.identity,
+        expectedGeneration.identity
+      ) ||
+      !(await ownedGenerationStateMatches(
+        recordPath,
+        expectedGeneration,
+        1n,
+        evidenceRef
+      ))
     ) {
       throw publicationStateError(evidenceRef);
     }
@@ -3218,7 +3402,9 @@ function createRecordAuthorityLease(
 ): RecordAuthorityLease {
   let released = false;
   return {
-    expectedCleanupGeneration,
+    expectedCleanupGeneration: cleanupPermit
+      ? cleanupPermitState.get(cleanupPermit)?.generationExpectation
+      : undefined,
     validateCleanupGeneration:
       cleanupPermit && cleanupEvidenceRef
         ? async () => {
@@ -3347,10 +3533,12 @@ function reserveRecordAuthorityCleanupPermit(
 
 async function bindRecordAuthorityCleanupPermitGeneration(
   permit: WorkspaceRecordCleanupPermit,
-  generation: OwnedTemporaryRecordIdentity,
+  generation: OwnedGenerationExpectation,
   expectedBytes: Buffer,
   hooks: WorkspaceRecordPublicationHooks | undefined,
-  evidenceRef: string
+  evidenceRef: string,
+  admittedParentPath: string,
+  admittedParentIdentity: OwnedTemporaryRecordIdentity
 ): Promise<void> {
   const state = cleanupPermitState.get(permit);
   if (
@@ -3364,17 +3552,28 @@ async function bindRecordAuthorityCleanupPermitGeneration(
   }
   let pinnedFile: RecordFileHandle | undefined;
   try {
+    await assertRecordDirectoryIdentity(
+      admittedParentPath,
+      admittedParentIdentity,
+      evidenceRef
+    );
     pinnedFile = await open(state.publicPath, constants.O_RDONLY | constants.O_NOFOLLOW);
     const before = await pinnedFile.stat({ bigint: true });
     if (
       !before.isFile() ||
       before.nlink !== 1n ||
-      !workspaceRecordPhysicalIdentityMatches(before, generation) ||
+      before.mode !== generation.mode ||
+      !workspaceRecordPhysicalIdentityMatches(before, generation.identity) ||
       before.size !== BigInt(expectedBytes.length) ||
       before.size > BigInt(MAX_SERVICE_RECORD_BYTES)
     ) {
       throw publicationStateError(evidenceRef);
     }
+    await assertRecordDirectoryIdentity(
+      admittedParentPath,
+      admittedParentIdentity,
+      evidenceRef
+    );
     const observedBytes = await readBoundedOpenFileBytes(pinnedFile);
     const after = await pinnedFile.stat({ bigint: true });
     if (
@@ -3387,8 +3586,17 @@ async function bindRecordAuthorityCleanupPermitGeneration(
     ) {
       throw publicationStateError(evidenceRef);
     }
-    state.generation = Object.freeze({ dev: generation.dev, ino: generation.ino });
+    state.generation = Object.freeze({
+      dev: generation.identity.dev,
+      ino: generation.identity.ino
+    });
     state.expectedBytes = Buffer.from(expectedBytes);
+    state.generationExpectation = {
+      identity: { dev: generation.identity.dev, ino: generation.identity.ino },
+      bytes: Buffer.from(expectedBytes),
+      mode: generation.mode,
+      nlink: 1n
+    };
     state.afterPinnedFileClosed = hooks?.afterCleanupPermitPinnedHandleClosed;
     state.pinnedFile = pinnedFile;
     pinnedFile = undefined;
@@ -3407,22 +3615,38 @@ async function assertCleanupPermitPinnedGeneration(
   const pinnedFile = state.pinnedFile;
   const generation = state.generation;
   const expectedBytes = state.expectedBytes;
-  if (!pinnedFile || !generation || !expectedBytes || state.pinnedFileClosed) {
+  const generationExpectation = state.generationExpectation;
+  if (
+    !pinnedFile ||
+    !generation ||
+    !expectedBytes ||
+    !generationExpectation ||
+    state.pinnedFileClosed
+  ) {
     throw publicationStateError(evidenceRef);
   }
   try {
-    const [pinnedIdentity, pathIdentity, observedBytes] = await Promise.all([
+    const [pinnedIdentity, pathIdentity, observedBytes, pathStateMatches] = await Promise.all([
       pinnedFile.stat({ bigint: true }),
       readRegularFilePathIdentity(path, evidenceRef),
-      readBoundedOpenFileBytes(pinnedFile)
+      readBoundedOpenFileBytes(pinnedFile),
+      ownedGenerationStateMatches(
+        path,
+        generationExpectation,
+        generationExpectation.nlink,
+        evidenceRef
+      )
     ]);
     if (
       !pinnedIdentity.isFile() ||
       pinnedIdentity.nlink !== 1n ||
       pinnedIdentity.size !== BigInt(expectedBytes.length) ||
+      pinnedIdentity.mode !== generationExpectation.mode ||
+      pinnedIdentity.nlink !== generationExpectation.nlink ||
       !observedBytes.equals(expectedBytes) ||
       !workspaceRecordPhysicalIdentityMatches(pinnedIdentity, generation) ||
       !pathIdentity ||
+      !pathStateMatches ||
       !workspaceRecordPhysicalIdentityMatches(pathIdentity, generation) ||
       !workspaceRecordPhysicalIdentityMatches(pathIdentity, pinnedIdentity)
     ) {
