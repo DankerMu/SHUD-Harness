@@ -862,6 +862,7 @@ export async function writeJsonRecord<T>(
   const hooks = publicationHookStorage.getStore();
   let authorityLease: RecordAuthorityLease | undefined;
   let temporaryRecord: OwnedTemporaryRecord | undefined;
+  let recordDirectoryIdentity: OwnedTemporaryRecordIdentity | undefined;
   let committed = false;
   let operationError: unknown;
   const compensationErrors: unknown[] = [];
@@ -869,14 +870,10 @@ export async function writeJsonRecord<T>(
     try {
       authorityLease = await acquireRecordAuthority(recordPath, evidenceRef, "rename", hooks);
       await hooks?.afterAuthorityLeaseAcquired?.(Object.freeze({ operation: "rename" }));
-      if (!(await isSafeExistingDirectoryPath(directoryPath))) {
-        throw serviceWorkspaceError(
-          "workspace_path_not_safe",
-          "Record directory is not a safe directory.",
-          "A workspace record directory is not usable.",
-          [evidenceRef]
-        );
-      }
+      recordDirectoryIdentity = await readSafeRecordDirectoryIdentity(
+        directoryPath,
+        evidenceRef
+      );
       temporaryRecord = await writeOwnedTemporaryRecordFile(
         producerNamespacePath,
         temporaryPath,
@@ -892,6 +889,8 @@ export async function writeJsonRecord<T>(
         temporaryRecord,
         recordPath,
         expectedBytes,
+        directoryPath,
+        recordDirectoryIdentity,
         evidenceRef,
         hooks
       );
@@ -916,6 +915,8 @@ export async function writeJsonRecord<T>(
           temporaryPath,
           temporaryRecord,
           expectedBytes,
+          directoryPath,
+          recordDirectoryIdentity!,
           recordPath,
           evidenceRef,
           hooks
@@ -941,6 +942,8 @@ async function publishOwnedMutableRecord(
   temporaryRecord: OwnedTemporaryRecord,
   recordPath: string,
   expectedBytes: Buffer,
+  directoryPath: string,
+  recordDirectoryIdentity: OwnedTemporaryRecordIdentity,
   evidenceRef: string,
   hooks?: WorkspaceRecordPublicationHooks
 ): Promise<void> {
@@ -966,6 +969,15 @@ async function publishOwnedMutableRecord(
     temporaryPath,
     temporaryRecord.identity,
     expectedBytes,
+    evidenceRef
+  );
+  await assertFinalMutablePublicationAuthority(
+    directoryPath,
+    recordDirectoryIdentity,
+    dirname(temporaryPath),
+    temporaryRecord.namespaceIdentity,
+    temporaryPath,
+    temporaryRecord.identity,
     evidenceRef
   );
 
@@ -1448,12 +1460,21 @@ async function removeOwnedMutablePublicationResources(
   temporaryPath: string,
   temporaryRecord: OwnedTemporaryRecord,
   expectedBytes: Buffer,
+  directoryPath: string,
+  recordDirectoryIdentity: OwnedTemporaryRecordIdentity,
   recordPath: string,
   evidenceRef: string,
   hooks: WorkspaceRecordPublicationHooks | undefined
 ): Promise<void> {
   let cleanupError: unknown;
   try {
+    await assertMutableCleanupPathAuthority(
+      directoryPath,
+      recordDirectoryIdentity,
+      namespacePath,
+      temporaryRecord.namespaceIdentity,
+      evidenceRef
+    );
     await removeOwnedPublicationTemporaryPath(
       namespacePath,
       temporaryPath,
@@ -1471,6 +1492,13 @@ async function removeOwnedMutablePublicationResources(
 
   const finalizationErrors: unknown[] = [];
   try {
+    await assertMutableCleanupPathAuthority(
+      directoryPath,
+      recordDirectoryIdentity,
+      namespacePath,
+      temporaryRecord.namespaceIdentity,
+      evidenceRef
+    );
     const namespace = await lstat(namespacePath, { bigint: true });
     if (
       !namespace.isDirectory() ||
@@ -2155,6 +2183,7 @@ async function assertOwnedTemporaryRecordPath(
   if (
     !entry.isFile() ||
     entry.isSymbolicLink() ||
+    (entry.mode & 0o777n) !== 0o600n ||
     !workspaceRecordPhysicalIdentityMatches(entry, expected)
   ) {
     throw publicationStateError(evidenceRef);
@@ -2208,6 +2237,7 @@ async function assertClosedTemporaryRecordAuthority(
   ) {
     throw publicationStateError(evidenceRef);
   }
+  await assertOwnedTemporaryRecordPath(temporaryPath, expectedIdentity, evidenceRef);
 
   return observed.identity;
 }
@@ -2222,6 +2252,7 @@ async function assertOpenRecordAuthority(
   const before = await temporaryRecord.file.stat({ bigint: true });
   if (
     !before.isFile() ||
+    (before.mode & 0o777n) !== 0o600n ||
     !workspaceRecordPhysicalIdentityMatches(before, temporaryRecord.identity) ||
     before.nlink !== BigInt(expectedLinks) ||
     before.size !== BigInt(expectedBytes.length) ||
@@ -2248,9 +2279,108 @@ async function assertOpenRecordAuthority(
     !observedBytes.equals(expectedBytes) ||
     after.dev !== before.dev ||
     after.ino !== before.ino ||
+    (after.mode & 0o777n) !== 0o600n ||
     after.nlink !== BigInt(expectedLinks) ||
     after.size !== before.size
   ) {
+    throw publicationStateError(evidenceRef);
+  }
+}
+
+async function readSafeRecordDirectoryIdentity(
+  directoryPath: string,
+  evidenceRef: string
+): Promise<OwnedTemporaryRecordIdentity> {
+  if (!(await isSafeExistingDirectoryPath(directoryPath))) {
+    throw serviceWorkspaceError(
+      "workspace_path_not_safe",
+      "Record directory is not a safe directory.",
+      "A workspace record directory is not usable.",
+      [evidenceRef]
+    );
+  }
+
+  try {
+    const directory = await lstat(directoryPath, { bigint: true });
+    if (!directory.isDirectory() || directory.isSymbolicLink()) {
+      throw publicationStateError(evidenceRef);
+    }
+    return { dev: directory.dev, ino: directory.ino };
+  } catch (error) {
+    if (error instanceof TaskServiceError) throw error;
+    throw publicationStateError(evidenceRef);
+  }
+}
+
+async function assertMutableCleanupPathAuthority(
+  directoryPath: string,
+  expectedDirectory: OwnedTemporaryRecordIdentity,
+  namespacePath: string,
+  expectedNamespace: OwnedTemporaryRecordIdentity,
+  evidenceRef: string
+): Promise<void> {
+  if (!(await isSafeExistingDirectoryPath(directoryPath))) {
+    throw publicationStateError(evidenceRef);
+  }
+
+  try {
+    const [directory, namespace] = await Promise.all([
+      lstat(directoryPath, { bigint: true }),
+      lstat(namespacePath, { bigint: true })
+    ]);
+    if (
+      !directory.isDirectory() ||
+      directory.isSymbolicLink() ||
+      !workspaceRecordPhysicalIdentityMatches(directory, expectedDirectory) ||
+      !namespace.isDirectory() ||
+      namespace.isSymbolicLink() ||
+      !workspaceRecordPhysicalIdentityMatches(namespace, expectedNamespace)
+    ) {
+      throw publicationStateError(evidenceRef);
+    }
+  } catch (error) {
+    if (error instanceof TaskServiceError) throw error;
+    throw publicationStateError(evidenceRef);
+  }
+}
+
+async function assertFinalMutablePublicationAuthority(
+  directoryPath: string,
+  expectedDirectory: OwnedTemporaryRecordIdentity,
+  namespacePath: string,
+  expectedNamespace: OwnedTemporaryRecordIdentity,
+  temporaryPath: string,
+  expectedGeneration: OwnedTemporaryRecordIdentity,
+  evidenceRef: string
+): Promise<void> {
+  await assertMutableCleanupPathAuthority(
+    directoryPath,
+    expectedDirectory,
+    namespacePath,
+    expectedNamespace,
+    evidenceRef
+  );
+
+  try {
+    const [namespace, generation] = await Promise.all([
+      lstat(namespacePath, { bigint: true }),
+      lstat(temporaryPath, { bigint: true })
+    ]);
+    if (
+      !namespace.isDirectory() ||
+      namespace.isSymbolicLink() ||
+      (namespace.mode & 0o777n) !== 0o700n ||
+      !workspaceRecordPhysicalIdentityMatches(namespace, expectedNamespace) ||
+      !generation.isFile() ||
+      generation.isSymbolicLink() ||
+      generation.nlink !== 1n ||
+      (generation.mode & 0o777n) !== 0o600n ||
+      !workspaceRecordPhysicalIdentityMatches(generation, expectedGeneration)
+    ) {
+      throw publicationStateError(evidenceRef);
+    }
+  } catch (error) {
+    if (error instanceof TaskServiceError) throw error;
     throw publicationStateError(evidenceRef);
   }
 }

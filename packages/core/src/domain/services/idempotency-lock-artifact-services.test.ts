@@ -19,7 +19,7 @@ import {
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import ts from "typescript";
 import { z } from "zod";
 import { LockRecordSchema } from "../schemas/lock";
@@ -70,6 +70,7 @@ import {
   runWithWorkspacePathSafetyHooks
 } from "./workspace-path-safety";
 import { readDurableSingleLinkFile } from "./durable-single-link-reader";
+import { preservePrimaryAndCompensationErrors } from "./compensation-error-preservation";
 
 const tempRoots: string[] = [];
 const distinctCaseEntriesSupported = await detectDistinctCaseEntriesSupport();
@@ -546,6 +547,246 @@ describe("idempotency, lock, and artifact services", () => {
     expect(
       (await readdir(join(workspaceRoot, "locks", record.scope))).some(isOwnedRecordPath)
     ).toBe(false);
+  });
+
+  test("mutable final precommit rejects private mode drift and cleanly retries", async () => {
+    for (const mode of ["create", "update"] as const) {
+      for (const drift of ["generation", "namespace"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const service = createLockRecordService({ workspaceRoot });
+        const before = {
+          ...validLockRecord(),
+          lock_id: `LOCK-mutable-mode-${mode}-${drift}`
+        };
+        const after = { ...before, holder: `after-${drift}` };
+        if (mode === "update") await service.storeLock(before);
+        const evidenceRef = lockRecordEvidenceRef(after.scope, after.lock_id);
+        const recordPath = workspaceRecordPath(
+          workspaceRoot,
+          [...lockRecordDirectorySegments(after.scope), lockRecordFileName(after.lock_id)],
+          evidenceRef
+        );
+        const beforeBytes = mode === "update" ? await readFile(recordPath) : undefined;
+        let temporaryPath = "";
+        let closedDescriptor: number | undefined;
+
+        const error = await captureTaskServiceError(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              afterTemporaryFileWritten: ({ temporaryPath: observedPath }) => {
+                temporaryPath = observedPath;
+              },
+              afterTemporaryFileClosed: async ({ descriptor }) => {
+                closedDescriptor = descriptor.fd;
+                await expectFileDescriptorClosed(descriptor.fd);
+                await chmod(
+                  drift === "generation" ? temporaryPath : dirname(temporaryPath),
+                  drift === "generation" ? 0o644 : 0o755
+                );
+              }
+            },
+            () => service.storeLock(after)
+          )
+        );
+
+        expect(error.code).toBe("workspace_path_not_safe");
+        expect(closedDescriptor).toBeDefined();
+        if (beforeBytes) expect(await readFile(recordPath)).toEqual(beforeBytes);
+        else await expectPathMissing(recordPath);
+        await expectPathMissing(temporaryPath);
+        expect(
+          (await readdir(join(workspaceRoot, "locks", after.scope))).some(isOwnedRecordPath)
+        ).toBe(false);
+
+        expect(await service.storeLock(after)).toEqual(after);
+        expect(await readFile(recordPath)).toEqual(
+          Buffer.from(`${JSON.stringify(after, null, 2)}\n`)
+        );
+      }
+    }
+  });
+
+  test("mutable final precommit rejects namespace and parent rebind without touching external physical state", async () => {
+    for (const mode of ["create", "update"] as const) {
+      for (const rebind of ["namespace", "parent"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const service = createLockRecordService({ workspaceRoot });
+        const before = {
+          ...validLockRecord(),
+          lock_id: `LOCK-mutable-rebind-${mode}-${rebind}`
+        };
+        const after = { ...before, holder: `after-${rebind}` };
+        if (mode === "update") await service.storeLock(before);
+        const evidenceRef = lockRecordEvidenceRef(after.scope, after.lock_id);
+        const recordPath = workspaceRecordPath(
+          workspaceRoot,
+          [...lockRecordDirectorySegments(after.scope), lockRecordFileName(after.lock_id)],
+          evidenceRef
+        );
+        const recordDirectory = dirname(recordPath);
+        const beforeBytes = mode === "update" ? await readFile(recordPath) : undefined;
+        const externalPhysicalPath = join(tempRoot, `external-${mode}-${rebind}`);
+        let temporaryPath = "";
+        let producerNamespaceName = "";
+        let reboundPath = "";
+        let externalGenerationBytes: Buffer | undefined;
+        let closedDescriptor: number | undefined;
+
+        const error = await captureTaskServiceError(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              afterTemporaryFileWritten: ({ temporaryPath: observedPath }) => {
+                temporaryPath = observedPath;
+                producerNamespaceName = basename(dirname(observedPath));
+              },
+              afterTemporaryFileClosed: async ({ descriptor }) => {
+                closedDescriptor = descriptor.fd;
+                await expectFileDescriptorClosed(descriptor.fd);
+                reboundPath = rebind === "namespace" ? dirname(temporaryPath) : recordDirectory;
+                await rename(reboundPath, externalPhysicalPath);
+                externalGenerationBytes = await readFile(
+                  rebind === "namespace"
+                    ? join(externalPhysicalPath, "generation")
+                    : join(externalPhysicalPath, producerNamespaceName, "generation")
+                );
+                await symlink(externalPhysicalPath, reboundPath, "dir");
+              }
+            },
+            () => service.storeLock(after)
+          )
+        );
+
+        expect(error.code).toBe("workspace_path_not_safe");
+        expect(closedDescriptor).toBeDefined();
+        const externalGenerationPath =
+          rebind === "namespace"
+            ? join(externalPhysicalPath, "generation")
+            : join(externalPhysicalPath, producerNamespaceName, "generation");
+        expect(await readFile(externalGenerationPath)).toEqual(externalGenerationBytes!);
+        const externalCanonicalPath = join(externalPhysicalPath, lockRecordFileName(after.lock_id));
+        if (rebind === "parent" && beforeBytes) {
+          expect(await readFile(externalCanonicalPath)).toEqual(beforeBytes);
+        } else {
+          await expectPathMissing(externalCanonicalPath);
+        }
+        if (rebind === "namespace" && beforeBytes) {
+          expect(await readFile(recordPath)).toEqual(beforeBytes);
+        }
+
+        await rm(reboundPath);
+        await rename(externalPhysicalPath, reboundPath);
+        await rm(dirname(temporaryPath), { recursive: true });
+        if (beforeBytes) expect(await readFile(recordPath)).toEqual(beforeBytes);
+        else await expectPathMissing(recordPath);
+
+        expect(await service.storeLock(after)).toEqual(after);
+        expect(await readFile(recordPath)).toEqual(
+          Buffer.from(`${JSON.stringify(after, null, 2)}\n`)
+        );
+      }
+    }
+  });
+
+  test("compensation preservation safely exposes aggregate cause for every cause descriptor kind", () => {
+    const compensation = new Error("descriptor compensation");
+
+    const getterPrior = new Error("getter-only prior");
+    let getterReads = 0;
+    const getterOnly = new Error("getter-only primary");
+    Object.defineProperty(getterOnly, "cause", {
+      configurable: false,
+      enumerable: true,
+      get: () => {
+        getterReads += 1;
+        return getterPrior;
+      }
+    });
+    const getterOnlyResult = preservePrimaryAndCompensationErrors(
+      getterOnly,
+      [compensation],
+      "getter-only aggregate"
+    ) as Error;
+    const getterOnlyDescriptor = Object.getOwnPropertyDescriptor(getterOnlyResult, "cause")!;
+    expect(getterReads).toBe(1);
+    expect("get" in getterOnlyDescriptor).toBe(true);
+    expect(getterOnlyDescriptor).toMatchObject({ configurable: false, enumerable: true, set: undefined });
+    expect((getterOnlyResult.cause as AggregateError).errors).toEqual([getterPrior, compensation]);
+
+    let setterReceiver: unknown;
+    let setterValue: unknown;
+    const getterSetter = new Error("getter-setter primary");
+    const setter = function (this: unknown, value: unknown): void {
+      setterReceiver = this;
+      setterValue = value;
+    };
+    Object.defineProperty(getterSetter, "cause", {
+      configurable: true,
+      enumerable: false,
+      get: () => undefined,
+      set: setter
+    });
+    const getterSetterResult = preservePrimaryAndCompensationErrors(
+      getterSetter,
+      [compensation],
+      "getter-setter aggregate"
+    ) as Error;
+    const getterSetterDescriptor = Object.getOwnPropertyDescriptor(getterSetterResult, "cause")!;
+    expect(getterSetterDescriptor.set).toBe(setter);
+    getterSetterDescriptor.set!.call(getterSetterResult, "assigned through preserved setter");
+    expect(setterReceiver).toBe(getterSetterResult);
+    expect(setterValue).toBe("assigned through preserved setter");
+    expect((getterSetterResult.cause as AggregateError).errors).toEqual([compensation]);
+
+    const getterFailure = new Error("throwing getter read failure");
+    let throwingGetterReads = 0;
+    const throwingGetter = new Error("throwing-getter primary");
+    Object.defineProperty(throwingGetter, "cause", {
+      configurable: true,
+      enumerable: false,
+      get: () => {
+        throwingGetterReads += 1;
+        throw getterFailure;
+      }
+    });
+    const throwingResult = preservePrimaryAndCompensationErrors(
+      throwingGetter,
+      [compensation],
+      "throwing-getter aggregate"
+    ) as Error;
+    expect(throwingGetterReads).toBe(1);
+    expect((throwingResult.cause as AggregateError).errors).toEqual([
+      getterFailure,
+      compensation
+    ]);
+
+    const noOwnCause = new Error("no-own-cause primary");
+    const noOwnResult = preservePrimaryAndCompensationErrors(
+      noOwnCause,
+      [compensation],
+      "no-own-cause aggregate"
+    ) as Error;
+    expect(Object.hasOwn(noOwnCause, "cause")).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(noOwnResult, "cause")).toMatchObject({
+      configurable: true,
+      enumerable: false,
+      writable: true
+    });
+    expect((noOwnResult.cause as AggregateError).errors).toEqual([compensation]);
+
+    const frozenPrior = new Error("frozen data prior");
+    const frozenData = new Error("frozen data primary", { cause: frozenPrior });
+    const frozenDescriptors = Object.getOwnPropertyDescriptors(Object.freeze(frozenData));
+    const frozenResult = preservePrimaryAndCompensationErrors(
+      frozenData,
+      [compensation],
+      "frozen-data aggregate"
+    ) as Error;
+    expect(Object.getPrototypeOf(frozenResult)).toBe(Object.getPrototypeOf(frozenData));
+    expectPreservedOwnDescriptors(frozenResult, frozenDescriptors);
+    expect((frozenResult.cause as AggregateError).errors).toEqual([frozenPrior, compensation]);
+    expect(frozenData.cause).toBe(frozenPrior);
   });
 
   test("Artifact duplicate registration converges across the owned publication window", async () => {
