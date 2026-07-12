@@ -71,8 +71,10 @@ import {
 } from "./workspace-path-safety";
 import { readDurableSingleLinkFile } from "./durable-single-link-reader";
 import {
+  PreservedErrorCompensationEnvelope,
   PreservedNonErrorThrownValue,
-  preservePrimaryAndCompensationErrors
+  preservePrimaryAndCompensationErrors,
+  semanticPrimaryError
 } from "./compensation-error-preservation";
 
 const tempRoots: string[] = [];
@@ -522,8 +524,10 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
 
-    expect(failure).toBeInstanceOf(PreservedNonErrorThrownValue);
-    expect((failure as PreservedNonErrorThrownValue).thrownValue).toBeUndefined();
+    expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(semanticPrimaryError(failure)).toBeInstanceOf(PreservedNonErrorThrownValue);
+    expect((semanticPrimaryError(failure) as PreservedNonErrorThrownValue).thrownValue)
+      .toBeUndefined();
     expect(failure.cause).toBeInstanceOf(AggregateError);
     expect((failure.cause as AggregateError).errors).toEqual([undefined, closeCompensation]);
     expect(cleanupCalls).toBe(1);
@@ -581,8 +585,9 @@ describe("idempotency, lock, and artifact services", () => {
         )
       );
 
-      expect(failure).toBeInstanceOf(PreservedNonErrorThrownValue);
-      expect((failure as PreservedNonErrorThrownValue).thrownValue).toBeUndefined();
+      expect(semanticPrimaryError(failure)).toBeInstanceOf(PreservedNonErrorThrownValue);
+      expect((semanticPrimaryError(failure) as PreservedNonErrorThrownValue).thrownValue)
+        .toBeUndefined();
       expect(closeObserverCalls).toBe(1);
       expect(cleanupCalls).toBe(1);
       await expectPathMissing(path);
@@ -641,8 +646,13 @@ describe("idempotency, lock, and artifact services", () => {
     ) as PreservedNonErrorThrownValue | undefined;
     expect(representedPrimary).toBeDefined();
     expect(representedPrimary!.thrownValue).toBeUndefined();
-    expect(representedPrimary!.cause).toBeInstanceOf(AggregateError);
-    expect((representedPrimary!.cause as AggregateError).errors).toEqual([
+    const compensationEnvelope = findErrorNode(
+      namespaceFailure,
+      (error) => error instanceof PreservedErrorCompensationEnvelope
+    ) as PreservedErrorCompensationEnvelope | undefined;
+    expect(compensationEnvelope).toBeDefined();
+    expect(compensationEnvelope!.semanticPrimary).toBe(representedPrimary!);
+    expect((compensationEnvelope!.cause as AggregateError).errors).toEqual([
       undefined,
       ...laterFailures
     ]);
@@ -777,16 +787,16 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
 
-    expect(error).toBeInstanceOf(StructuredServiceError);
-    expect(Object.getPrototypeOf(error)).toBe(Object.getPrototypeOf(primary));
-    expect((error as StructuredServiceError).code).toBe(primary.code);
-    expect((error as StructuredServiceError).details).toBe(primary.details);
-    expectPreservedOwnDescriptors(error, descriptors);
-    expect(Object.isFrozen(error)).toBe(true);
-    expect(Object.isSealed(error)).toBe(true);
-    expect(Object.isExtensible(error)).toBe(false);
-    expect(Reflect.defineProperty(error, "unexpected", { value: true })).toBe(false);
-    expect(Object.hasOwn(error, "unexpected")).toBe(false);
+    expect(error).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(error).not.toBeInstanceOf(StructuredServiceError);
+    expect(semanticPrimaryError(error)).toBe(primary);
+    expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
+    expectPreservedOwnDescriptors(primary, descriptors);
+    expect(Object.isFrozen(primary)).toBe(true);
+    expect(Object.isSealed(primary)).toBe(true);
+    expect(Object.isExtensible(primary)).toBe(false);
+    expect(Reflect.defineProperty(primary, "unexpected", { value: true })).toBe(false);
+    expect(Object.hasOwn(primary, "unexpected")).toBe(false);
     const messages = aggregateErrorMessages(error.cause);
     expect(messages.filter((message) => message === priorCause.message)).toHaveLength(1);
     expect(messages.filter((message) => message === compensation.message)).toHaveLength(1);
@@ -876,14 +886,14 @@ describe("idempotency, lock, and artifact services", () => {
         )
       );
 
-      expect(failure).toBeInstanceOf(StructuredServiceError);
-      expect(Object.getPrototypeOf(failure)).toBe(Object.getPrototypeOf(primary));
-      expect((failure as StructuredServiceError).code).toBe(primary.code);
-      expect((failure as StructuredServiceError).details).toBe(primary.details);
-      expectPreservedOwnDescriptors(failure, descriptors);
-      expect(Object.isFrozen(failure)).toBe(true);
-      expect(Object.isSealed(failure)).toBe(true);
-      expect(Object.isExtensible(failure)).toBe(false);
+      expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+      expect(failure).not.toBeInstanceOf(StructuredServiceError);
+      expect(semanticPrimaryError(failure)).toBe(primary);
+      expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
+      expectPreservedOwnDescriptors(primary, descriptors);
+      expect(Object.isFrozen(primary)).toBe(true);
+      expect(Object.isSealed(primary)).toBe(true);
+      expect(Object.isExtensible(primary)).toBe(false);
       expect(failure.cause).toBeInstanceOf(AggregateError);
       const rawSlots = (failure.cause as AggregateError).errors;
       expect(rawSlots).toHaveLength(surface === "hardlink" ? 5 : 6);
@@ -984,16 +994,16 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
 
-    expect(error).toBeInstanceOf(StructuredServiceError);
-    expect(Object.getPrototypeOf(error)).toBe(Object.getPrototypeOf(primary));
-    expect((error as StructuredServiceError).code).toBe(primary.code);
-    expect((error as StructuredServiceError).details).toBe(primary.details);
-    expectPreservedOwnDescriptors(error, descriptors);
-    expect(Object.isFrozen(error)).toBe(true);
-    expect(Object.isSealed(error)).toBe(true);
-    expect(Object.isExtensible(error)).toBe(false);
-    expect(Reflect.defineProperty(error, "unexpected", { value: true })).toBe(false);
-    expect(Object.hasOwn(error, "unexpected")).toBe(false);
+    expect(error).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(error).not.toBeInstanceOf(StructuredServiceError);
+    expect(semanticPrimaryError(error)).toBe(primary);
+    expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
+    expectPreservedOwnDescriptors(primary, descriptors);
+    expect(Object.isFrozen(primary)).toBe(true);
+    expect(Object.isSealed(primary)).toBe(true);
+    expect(Object.isExtensible(primary)).toBe(false);
+    expect(Reflect.defineProperty(primary, "unexpected", { value: true })).toBe(false);
+    expect(Object.hasOwn(primary, "unexpected")).toBe(false);
     expect(error.cause).toBeInstanceOf(AggregateError);
     const aggregateErrors = (error.cause as AggregateError).errors;
     expect(aggregateErrors).toHaveLength(2);
@@ -1921,8 +1931,10 @@ describe("idempotency, lock, and artifact services", () => {
       [compensation],
       "getter-only aggregate"
     ) as Error;
-    const getterOnlyDescriptor = Object.getOwnPropertyDescriptor(getterOnlyResult, "cause")!;
+    const getterOnlyDescriptor = Object.getOwnPropertyDescriptor(getterOnly, "cause")!;
     expect(getterReads).toBe(1);
+    expect(getterOnlyResult).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(semanticPrimaryError(getterOnlyResult)).toBe(getterOnly);
     expect("get" in getterOnlyDescriptor).toBe(true);
     expect(getterOnlyDescriptor).toMatchObject({ configurable: false, enumerable: true, set: undefined });
     expect((getterOnlyResult.cause as AggregateError).errors).toEqual([getterPrior, compensation]);
@@ -1945,10 +1957,11 @@ describe("idempotency, lock, and artifact services", () => {
       [compensation],
       "getter-setter aggregate"
     ) as Error;
-    const getterSetterDescriptor = Object.getOwnPropertyDescriptor(getterSetterResult, "cause")!;
+    const getterSetterDescriptor = Object.getOwnPropertyDescriptor(getterSetter, "cause")!;
+    expect(semanticPrimaryError(getterSetterResult)).toBe(getterSetter);
     expect(getterSetterDescriptor.set).toBe(setter);
-    getterSetterDescriptor.set!.call(getterSetterResult, "assigned through preserved setter");
-    expect(setterReceiver).toBe(getterSetterResult);
+    getterSetterDescriptor.set!.call(getterSetter, "assigned through preserved setter");
+    expect(setterReceiver).toBe(getterSetter);
     expect(setterValue).toBe("assigned through preserved setter");
     expect((getterSetterResult.cause as AggregateError).errors).toEqual([compensation]);
 
@@ -1969,6 +1982,7 @@ describe("idempotency, lock, and artifact services", () => {
       "throwing-getter aggregate"
     ) as Error;
     expect(throwingGetterReads).toBe(1);
+    expect(semanticPrimaryError(throwingResult)).toBe(throwingGetter);
     expect((throwingResult.cause as AggregateError).errors).toEqual([
       getterFailure,
       compensation
@@ -1981,11 +1995,8 @@ describe("idempotency, lock, and artifact services", () => {
       "no-own-cause aggregate"
     ) as Error;
     expect(Object.hasOwn(noOwnCause, "cause")).toBe(false);
-    expect(Object.getOwnPropertyDescriptor(noOwnResult, "cause")).toMatchObject({
-      configurable: true,
-      enumerable: false,
-      writable: true
-    });
+    expect(semanticPrimaryError(noOwnResult)).toBe(noOwnCause);
+    expect(Object.hasOwn(noOwnCause, "cause")).toBe(false);
     expect((noOwnResult.cause as AggregateError).errors).toEqual([compensation]);
 
     const integrityCases = [
@@ -2033,27 +2044,181 @@ describe("idempotency, lock, and artifact services", () => {
         primary,
         [compensation],
         `${integrityCase.name} data aggregate`
-      ) as StructuredServiceError;
+      ) as Error;
 
-      expect(Object.getPrototypeOf(result)).toBe(Object.getPrototypeOf(primary));
-      expect(result.code).toBe(primary.code);
-      expect(result.details).toBe(primary.details);
-      expectPreservedOwnDescriptors(result, descriptors);
+      expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+      expect(result).not.toBeInstanceOf(StructuredServiceError);
+      expect(semanticPrimaryError(result)).toBe(primary);
+      expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
+      expectPreservedOwnDescriptors(primary, descriptors);
       expect((result.cause as AggregateError).errors).toEqual([prior, compensation]);
       expect(primary.cause).toBe(prior);
-      expect(Object.isFrozen(result)).toBe(integrityCase.frozen);
-      expect(Object.isSealed(result)).toBe(integrityCase.sealed);
-      expect(Object.isExtensible(result)).toBe(integrityCase.extensible);
+      expect(Object.isFrozen(primary)).toBe(integrityCase.frozen);
+      expect(Object.isSealed(primary)).toBe(integrityCase.sealed);
+      expect(Object.isExtensible(primary)).toBe(integrityCase.extensible);
 
-      const propertyDefined = Reflect.defineProperty(result, "integrityProbe", {
+      const propertyDefined = Reflect.defineProperty(primary, "integrityProbe", {
         configurable: true,
         value: integrityCase.name
       });
       expect(propertyDefined).toBe(integrityCase.extensible);
-      expect(Object.hasOwn(result, "integrityProbe")).toBe(integrityCase.extensible);
+      expect(Object.hasOwn(primary, "integrityProbe")).toBe(integrityCase.extensible);
       if (integrityCase.extensible) {
-        expect(Reflect.get(result, "integrityProbe")).toBe(integrityCase.name);
+        expect(Reflect.get(primary, "integrityProbe")).toBe(integrityCase.name);
       }
+    }
+  });
+
+  test("compensation preservation keeps private and WeakMap Error brands on the original object", () => {
+    class PrivateFieldError extends Error {
+      #token: string;
+
+      constructor(token: string) {
+        super(`private ${token}`);
+        this.#token = token;
+      }
+
+      get token(): string {
+        return this.#token;
+      }
+
+      reveal(): string {
+        return this.#token;
+      }
+    }
+
+    const weakTokens = new WeakMap<object, string>();
+    class WeakMapError extends Error {
+      constructor(token: string) {
+        super(`weak ${token}`);
+        weakTokens.set(this, token);
+      }
+
+      get token(): string {
+        return weakTokens.get(this) ?? "missing";
+      }
+
+      reveal(): string {
+        return weakTokens.get(this) ?? "missing";
+      }
+    }
+
+    const integrityCases = [
+      { name: "frozen", apply: (error: Error) => Object.freeze(error) },
+      { name: "sealed", apply: (error: Error) => Object.seal(error) },
+      { name: "extensible", apply: (error: Error) => error }
+    ] as const;
+
+    for (const integrityCase of integrityCases) {
+      for (const primary of [
+        new PrivateFieldError(integrityCase.name),
+        new WeakMapError(integrityCase.name)
+      ]) {
+        const originalPrototype = Object.getPrototypeOf(primary);
+        integrityCase.apply(primary);
+        const originalDescriptors = Object.getOwnPropertyDescriptors(primary);
+        const compensation = new Error(`${integrityCase.name} compensation`);
+        const result = preservePrimaryAndCompensationErrors(
+          primary,
+          [compensation],
+          `${integrityCase.name} branded aggregate`
+        ) as Error;
+
+        expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+        expect(result).not.toBeInstanceOf(primary.constructor);
+        expect(semanticPrimaryError(result)).toBe(primary);
+        expect(Object.getPrototypeOf(primary)).toBe(originalPrototype);
+        expectPreservedOwnDescriptors(primary, originalDescriptors);
+        expect(primary.token).toBe(integrityCase.name);
+        expect(primary.reveal()).toBe(integrityCase.name);
+        expect(Object.isFrozen(primary)).toBe(integrityCase.name === "frozen");
+        expect(Object.isSealed(primary)).toBe(integrityCase.name !== "extensible");
+        expect(Object.isExtensible(primary)).toBe(integrityCase.name === "extensible");
+        expect((result.cause as AggregateError).errors).toEqual([compensation]);
+      }
+    }
+  });
+
+  test("mutable and hardlink compensation preserve branded Error identity and behavior", async () => {
+    class PrivateFieldError extends Error {
+      #token: string;
+
+      constructor(token: string) {
+        super(`private ${token}`);
+        this.#token = token;
+      }
+
+      reveal(): string {
+        return this.#token;
+      }
+    }
+
+    const weakTokens = new WeakMap<object, string>();
+    class WeakMapError extends Error {
+      constructor(token: string) {
+        super(`weak ${token}`);
+        weakTokens.set(this, token);
+      }
+
+      get token(): string {
+        return weakTokens.get(this) ?? "missing";
+      }
+    }
+
+    for (const surface of ["mutable", "hardlink"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `branded-${surface}` };
+      const directorySegments = ["branded-compensation"] as const;
+      const fileName = `${surface}.json`;
+      const evidenceRef = `branded.compensation.${surface}`;
+      const primary = surface === "mutable"
+        ? Object.freeze(new PrivateFieldError(surface))
+        : Object.seal(new WeakMapError(surface));
+      const compensation = new Error(`${surface} branded compensation`);
+
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: () => {
+              throw primary;
+            },
+            beforeTemporaryFileClose: () => {
+              throw compensation;
+            }
+          },
+          () => surface === "mutable"
+            ? writeJsonRecord(
+                workspaceRoot,
+                directorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                schema
+              )
+            : createJsonRecordIfAbsent(
+                workspaceRoot,
+                directorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                schema
+              )
+        )
+      );
+
+      expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+      expect(failure).not.toBeInstanceOf(primary.constructor);
+      expect(semanticPrimaryError(failure)).toBe(primary);
+      if (primary instanceof PrivateFieldError) {
+        expect(primary.reveal()).toBe(surface);
+      } else {
+        expect(primary.token).toBe(surface);
+      }
+      expect((failure.cause as AggregateError).errors).toEqual([compensation]);
+      expect(Object.isFrozen(primary)).toBe(surface === "mutable");
+      expect(Object.isSealed(primary)).toBe(true);
     }
   });
 
@@ -2080,13 +2245,16 @@ describe("idempotency, lock, and artifact services", () => {
         primary,
         matrixCase.compensations,
         `${matrixCase.name} aggregate`
-      ) as StructuredServiceError;
+      ) as Error;
 
-      expect(Object.getPrototypeOf(result)).toBe(Object.getPrototypeOf(primary));
-      expectPreservedOwnDescriptors(result, descriptors);
-      expect(Object.isFrozen(result)).toBe(true);
-      expect(Object.isSealed(result)).toBe(true);
-      expect(Object.isExtensible(result)).toBe(false);
+      expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+      expect(result).not.toBeInstanceOf(StructuredServiceError);
+      expect(semanticPrimaryError(result)).toBe(primary);
+      expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
+      expectPreservedOwnDescriptors(primary, descriptors);
+      expect(Object.isFrozen(primary)).toBe(true);
+      expect(Object.isSealed(primary)).toBe(true);
+      expect(Object.isExtensible(primary)).toBe(false);
       expect(result.cause).toBeInstanceOf(AggregateError);
       const aggregateErrors = (result.cause as AggregateError).errors;
       expect(aggregateErrors).toHaveLength(matrixCase.compensations.length + 1);
@@ -2107,7 +2275,7 @@ describe("idempotency, lock, and artifact services", () => {
     );
   });
 
-  test("compensation preservation flattens only helper-owned clones by provenance", () => {
+  test("compensation preservation flattens only helper-owned envelopes by provenance", () => {
     const semanticPriorCause = new Error("provenance semantic prior cause");
     const semanticPrimary = new StructuredServiceError(
       "provenance semantic primary",
@@ -2123,21 +2291,21 @@ describe("idempotency, lock, and artifact services", () => {
       semanticPrimary,
       [firstFailure],
       "first provenance aggregate"
-    ) as StructuredServiceError;
+    ) as Error;
     const laterClone = preservePrimaryAndCompensationErrors(
       firstClone,
       [laterFailure],
       "later provenance aggregate"
-    ) as StructuredServiceError;
+    ) as Error;
 
-    expect(laterClone).toBeInstanceOf(StructuredServiceError);
-    expect(Object.getPrototypeOf(laterClone)).toBe(Object.getPrototypeOf(semanticPrimary));
-    expect(laterClone.code).toBe(semanticPrimary.code);
-    expect(laterClone.details).toBe(semanticPrimary.details);
-    expectPreservedOwnDescriptors(laterClone, semanticDescriptors);
-    expect(Object.isFrozen(laterClone)).toBe(true);
-    expect(Object.isSealed(laterClone)).toBe(true);
-    expect(Object.isExtensible(laterClone)).toBe(false);
+    expect(laterClone).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(laterClone).not.toBeInstanceOf(StructuredServiceError);
+    expect(semanticPrimaryError(laterClone)).toBe(semanticPrimary);
+    expect(Object.getPrototypeOf(semanticPrimary)).toBe(StructuredServiceError.prototype);
+    expectPreservedOwnDescriptors(semanticPrimary, semanticDescriptors);
+    expect(Object.isFrozen(semanticPrimary)).toBe(true);
+    expect(Object.isSealed(semanticPrimary)).toBe(true);
+    expect(Object.isExtensible(semanticPrimary)).toBe(false);
     expect(laterClone.cause).toBeInstanceOf(AggregateError);
     expect((laterClone.cause as AggregateError).message).toBe("later provenance aggregate");
     expect((laterClone.cause as AggregateError).errors).toEqual([
@@ -5338,13 +5506,14 @@ describe("idempotency, lock, and artifact services", () => {
         )
       );
 
-      expect(failure.message).toBe(
+      expect(semanticPrimaryError(failure)?.message).toBe(
         site === "published_rollback"
           ? "Failed to publish workspace record claim."
           : primaryError.message
       );
-      expect(failure.cause).toBeInstanceOf(AggregateError);
-      const aggregatedErrors = (failure.cause as AggregateError).errors;
+      const compensationAggregate = findPreservedCompensationAggregate(failure);
+      expect(compensationAggregate).toBeDefined();
+      const aggregatedErrors = compensationAggregate!.errors;
       expect(aggregatedErrors).toContain(inspectionError);
       if (trailingInspectionError) expect(aggregatedErrors).toContain(trailingInspectionError);
       if (site === "published_rollback") expect(aggregatedErrors).toContain(primaryError);
@@ -5420,9 +5589,10 @@ describe("idempotency, lock, and artifact services", () => {
             )
         )
       );
-      expect(failure.message).toBe(primaryError.message);
-      expect(failure.cause).toBeInstanceOf(AggregateError);
-      expect((failure.cause as AggregateError).errors).toContain(inspectionError);
+      expect(semanticPrimaryError(failure)).toBe(primaryError);
+      const compensationAggregate = findPreservedCompensationAggregate(failure);
+      expect(compensationAggregate).toBeDefined();
+      expect(compensationAggregate!.errors).toContain(inspectionError);
     }
 
     expect((await readdir(join(workspaceRoot, ...directorySegments))).some(isOwnedRecordPath)).toBe(
@@ -5515,7 +5685,7 @@ describe("idempotency, lock, and artifact services", () => {
         expect((operationFailure as TaskServiceError).message).toBe(
           "Workspace record changed before conditional removal."
         );
-        expect((operationFailure as TaskServiceError).cause).toBeInstanceOf(AggregateError);
+        expect(findPreservedCompensationAggregate(operationFailure)).toBeDefined();
         await expectPathMissing(path);
         expect(isolatedPath).toBeDefined();
         expect(await readFile(isolatedPath!)).toEqual(unprovenBytes);
@@ -5623,7 +5793,7 @@ describe("idempotency, lock, and artifact services", () => {
 
       expect(failure.code).toBe("workspace_path_not_safe");
       expect(failure.message).toBe("Failed to write workspace record temporary file.");
-      expect(failure.cause).toBeInstanceOf(AggregateError);
+      expect(findPreservedCompensationAggregate(failure)).toBeDefined();
       expect(errorTreeContains(failure, primaryError)).toBe(true);
       expect(aggregateErrorMessages(failure)).toContain(isolationError.message);
       expect(errorTreeContains(failure, inspectionError)).toBe(true);
@@ -5856,14 +6026,16 @@ describe("idempotency, lock, and artifact services", () => {
             "Workspace record generation could not be restored after a failed mutation."
       );
       expect(restoreFailure).toBeDefined();
-      const restorePrimary = restoreFailure!.cause;
-      expect(restorePrimary).toBeInstanceOf(Error);
+      const restoreEnvelope = restoreFailure!.cause as PreservedErrorCompensationEnvelope;
+      expect(restoreEnvelope).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+      const restorePrimary = semanticPrimaryError(restoreEnvelope);
+      expect(restorePrimary).toBe(unlinkFailures[0]);
       expect(Object.getPrototypeOf(restorePrimary)).toBe(
         Object.getPrototypeOf(unlinkFailures[0]!)
       );
-      expect((restorePrimary as Error).message).toBe(unlinkFailures[0]!.message);
-      expect((restorePrimary as Error).cause).toBeInstanceOf(AggregateError);
-      const restoreCompensations = (restorePrimary as Error).cause as AggregateError;
+      expect(restorePrimary!.message).toBe(unlinkFailures[0]!.message);
+      expect(restoreEnvelope.cause).toBeInstanceOf(AggregateError);
+      const restoreCompensations = restoreEnvelope.cause as AggregateError;
       expect(restoreCompensations.message).toBe(
         "Workspace record publication compensation failed."
       );
@@ -5975,8 +6147,11 @@ describe("idempotency, lock, and artifact services", () => {
       code: "workspace_path_not_safe",
       message: "Workspace record publication authority could not be verified."
     });
-    expect(proofFailure.cause).toBeInstanceOf(AggregateError);
-    const rollbackFailures = (proofFailure.cause as AggregateError).errors;
+    expect(semanticPrimaryError(proofFailure)).toBeInstanceOf(TaskServiceError);
+    expect(proofFailure.cause).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    const rollbackFailures = (
+      (proofFailure.cause as PreservedErrorCompensationEnvelope).cause as AggregateError
+    ).errors;
     expect(rollbackFailures).toHaveLength(1);
     expect(rollbackFailures[0]).toMatchObject({
       code: "workspace_path_not_safe",
@@ -6075,8 +6250,12 @@ describe("idempotency, lock, and artifact services", () => {
       code: "workspace_path_not_safe",
       message: "Workspace record publication authority could not be verified."
     });
-    expect(proofFailure.cause).toBeInstanceOf(AggregateError);
-    expect((proofFailure.cause as AggregateError).errors).toEqual([rollbackFailure]);
+    expect(semanticPrimaryError(proofFailure)).toBeInstanceOf(TaskServiceError);
+    expect(proofFailure.cause).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(
+      ((proofFailure.cause as PreservedErrorCompensationEnvelope).cause as AggregateError)
+        .errors
+    ).toEqual([rollbackFailure]);
     expect(
       aggregateErrorMessages(failure).filter((message) => message === rollbackFailure.message)
     ).toHaveLength(1);
@@ -6088,7 +6267,7 @@ describe("idempotency, lock, and artifact services", () => {
     ).toHaveLength(1);
   });
 
-  test("post-source cleanup relinquishes final-unlink races before same-inode rebound", async () => {
+  test("post-source cleanup revalidates ENOENT and ENOTDIR final-unlink hook outcomes", async () => {
     for (const outcome of ["ENOENT", "ENOTDIR"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
       tempRoots.push(tempRoot);
@@ -6116,11 +6295,9 @@ describe("idempotency, lock, and artifact services", () => {
       const outsideAlias = join(tempRoot, `post-source-${outcome.toLowerCase()}-alias.json`);
       const displacedParent = join(tempRoot, `post-source-${outcome.toLowerCase()}-parent`);
       let isolatedPath = "";
-      let finalUnlinkError: unknown;
       let sourceUnlinkCalls = 0;
       let postSourceCleanupCalls = 0;
       let finalUnlinkCalls = 0;
-      let finalUnlinkFailureCalls = 0;
 
       const failure = await captureTaskServiceError(() =>
         runWithWorkspaceRecordCompensationTestHooks(
@@ -6147,15 +6324,6 @@ describe("idempotency, lock, and artifact services", () => {
                 await rename(dirname(input.path), displacedParent);
                 await writeFile(dirname(input.path), "block final unlink with a non-directory");
               }
-            },
-            afterExactOwnedPublicLinkUnlinkFailure: async (input) => {
-              finalUnlinkFailureCalls += 1;
-              finalUnlinkError = input.error;
-              if (outcome === "ENOTDIR") {
-                await rm(dirname(input.path));
-                await rename(displacedParent, dirname(input.path));
-              }
-              await link(outsideAlias, input.path);
             }
           },
           () =>
@@ -6170,68 +6338,142 @@ describe("idempotency, lock, and artifact services", () => {
       expect(sourceUnlinkCalls).toBe(1);
       expect(postSourceCleanupCalls).toBe(1);
       expect(finalUnlinkCalls).toBe(1);
-      expect(finalUnlinkFailureCalls).toBe(1);
-      expect(finalUnlinkError).toBeInstanceOf(Error);
-      expect(finalUnlinkError).toMatchObject({ code: outcome });
-      expect(errorTreeContains(failure, finalUnlinkError)).toBe(true);
       expect(aggregateErrorMessages(failure)).toContain(isolationFailure.message);
-      expect(await readFileWithIdentity(path)).toEqual(ownedBefore);
-      expect(await readFile(path)).toEqual(expectedBytes);
       expect(await readFileWithIdentity(outsideAlias)).toEqual(ownedBefore);
-      expect((await stat(path, { bigint: true })).nlink).toBe(2n);
+      expect(await readFile(outsideAlias)).toEqual(expectedBytes);
+      expect((await stat(outsideAlias, { bigint: true })).nlink).toBe(1n);
+      if (outcome === "ENOTDIR") {
+        await rm(dirname(path));
+        await rename(displacedParent, dirname(path));
+      }
+      await expectPathMissing(path);
       await expectPathMissing(isolatedPath);
     }
   });
 
-  test("all post-isolation sites restore through the shared source-unlink helper", async () => {
+  test("all post-isolation sites relinquish final-unlink hook replacements", async () => {
     for (const site of [
       "conditional_delete",
       "conditional_unlink_owned_path",
       "published_rollback",
       "temporary_generation_compensation"
     ] as const) {
-      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-      tempRoots.push(tempRoot);
-      const schema = z.object({ id: z.string() });
-      const record = { id: `shared-restore-${site}` };
-      const evidenceRef = `restore.shared.${site}`;
-      const directorySegments = ["shared-restore-sites"] as const;
-      const fileName = `${site}.json`;
-      const path = workspaceRecordPath(
-        workspaceRoot,
-        [...directorySegments, fileName],
-        evidenceRef
-      );
-      const primary = new Error(`shared restore primary ${site}`);
-      const isolationFailure = new Error(`shared restore isolation ${site}`);
-      const observedSites: string[] = [];
-      let restoredPath: string | undefined;
-      let isolatedPath: string | undefined;
-      let temporaryPath: string | undefined;
+      for (const replacement of ["foreign_leaf", "parent_symlink", "same_inode"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const schema = z.object({ id: z.string() });
+        const record = { id: `shared-restore-${site}-${replacement}` };
+        const evidenceRef = `restore.shared.${site}.${replacement}`;
+        const directorySegments = ["shared-restore-sites"] as const;
+        const fileName = `${site}-${replacement}.json`;
+        const path = workspaceRecordPath(
+          workspaceRoot,
+          [...directorySegments, fileName],
+          evidenceRef
+        );
+        const primary = new Error(`shared restore primary ${site} ${replacement}`);
+        const isolationFailure = new Error(`shared restore isolation ${site} ${replacement}`);
+        const foreignBytes = Buffer.from(`foreign final unlink ${site} ${replacement}\n`);
+        const sameInodeAlias = join(tempRoot, `same-inode-${site}-${replacement}.json`);
+        const externalParent = join(tempRoot, `external-parent-${site}-${replacement}`);
+        const displacedParent = join(tempRoot, `displaced-parent-${site}-${replacement}`);
+        let restoredPath: string | undefined;
+        let isolatedPath: string | undefined;
+        let temporaryPath: string | undefined;
+        let ownedBeforeFinal: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
+        let finalUnlinkHookCalls = 0;
 
-      const failure = await captureError(() =>
-        runWithWorkspaceRecordCompensationTestHooks(
-          {
-            beforeOwnedTemporaryRecordWrite: async (input) => {
-              if (site !== "conditional_unlink_owned_path") return;
-              temporaryPath = input.path;
-              await writeFile(input.path, Buffer.from("partial shared restore\n"));
-              throw primary;
+        const failure = await captureError(() =>
+          runWithWorkspaceRecordCompensationTestHooks(
+            {
+              beforeOwnedTemporaryRecordWrite: async (input) => {
+                if (site !== "conditional_unlink_owned_path") return;
+                temporaryPath = input.path;
+                await writeFile(input.path, Buffer.from("partial shared restore\n"));
+                throw primary;
+              },
+              afterOwnedPathIsolation: (input) => {
+                if (input.site !== site) return;
+                isolatedPath = input.isolatedPath;
+                throw isolationFailure;
+              },
+              beforeOwnedIsolatedSourceUnlink: (input) => {
+                restoredPath = input.path;
+              },
+              afterOwnedIsolatedSourceUnlink: async (input) => {
+                await chmod(input.path, 0o400);
+              },
+              beforePostSourcePublicLinkCleanup: async (input) => {
+                await chmod(input.path, 0o600);
+              },
+              beforeExactOwnedPublicLinkUnlink: async (input) => {
+                finalUnlinkHookCalls += 1;
+                ownedBeforeFinal = await readFileWithIdentity(input.path);
+                if (replacement === "foreign_leaf") {
+                  await rm(input.path);
+                  await writeFile(input.path, foreignBytes, { flag: "wx", mode: 0o600 });
+                  return;
+                }
+                if (replacement === "parent_symlink") {
+                  await mkdir(externalParent, { mode: 0o700 });
+                  await writeFile(join(externalParent, basename(input.path)), foreignBytes, {
+                    flag: "wx",
+                    mode: 0o600
+                  });
+                  await rename(dirname(input.path), displacedParent);
+                  await symlink(externalParent, dirname(input.path));
+                  return;
+                }
+                await link(input.path, sameInodeAlias);
+                await rm(input.path);
+                await link(sameInodeAlias, input.path);
+                await rm(sameInodeAlias);
+              }
             },
-            afterOwnedPathIsolation: (input) => {
-              if (input.site !== site) return;
-              isolatedPath = input.isolatedPath;
-              throw isolationFailure;
-            },
-            beforeOwnedIsolatedSourceUnlink: (input) => {
-              observedSites.push(input.site);
-              restoredPath = input.path;
-            }
-          },
-          async () => {
-            if (site === "conditional_delete") {
-              expect(
-                await createJsonRecordIfAbsent(
+            async () => {
+              if (site === "conditional_delete") {
+                expect(
+                  await createJsonRecordIfAbsent(
+                    workspaceRoot,
+                    directorySegments,
+                    fileName,
+                    record,
+                    evidenceRef,
+                    schema
+                  )
+                ).toEqual({ status: "created", record });
+                return await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+                  kind: "record",
+                  expected: record,
+                  matches: (current, expected) => current.id === expected.id
+                });
+              }
+
+              return await runWithWorkspaceRecordPublicationHooks(
+                {
+                  afterTemporaryFileWritten: async (input) => {
+                    temporaryPath = input.temporaryPath;
+                    if (site === "temporary_generation_compensation") throw primary;
+                  },
+                  afterCanonicalLink: () => {
+                    if (site === "published_rollback") throw primary;
+                  },
+                  beforeTemporaryUnlink: async ({ temporaryPath: candidatePath }) => {
+                    if (site !== "temporary_generation_compensation") return;
+                    await chmod(dirname(candidatePath), 0o500);
+                    throw new Error("hold exact temporary generation for compensation");
+                  },
+                  beforePublicationCompensationStateInspection: async ({ site: inspectionSite }) => {
+                    if (
+                      site === "temporary_generation_compensation" &&
+                      inspectionSite === "unpublished_cleanup" &&
+                      temporaryPath
+                    ) {
+                      await chmod(dirname(temporaryPath), 0o700);
+                    }
+                  }
+                },
+                () => createJsonRecordIfAbsent(
                   workspaceRoot,
                   directorySegments,
                   fileName,
@@ -6239,57 +6481,33 @@ describe("idempotency, lock, and artifact services", () => {
                   evidenceRef,
                   schema
                 )
-              ).toEqual({ status: "created", record });
-              return await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
-                kind: "record",
-                expected: record,
-                matches: (current, expected) => current.id === expected.id
-              });
+              );
             }
+          )
+        );
 
-            return await runWithWorkspaceRecordPublicationHooks(
-              {
-                afterTemporaryFileWritten: async (input) => {
-                  temporaryPath = input.temporaryPath;
-                  if (site === "temporary_generation_compensation") throw primary;
-                },
-                afterCanonicalLink: () => {
-                  if (site === "published_rollback") throw primary;
-                },
-                beforeTemporaryUnlink: async ({ temporaryPath: candidatePath }) => {
-                  if (site !== "temporary_generation_compensation") return;
-                  await chmod(dirname(candidatePath), 0o500);
-                  throw new Error("hold exact temporary generation for compensation");
-                },
-                beforePublicationCompensationStateInspection: async ({ site: inspectionSite }) => {
-                  if (
-                    site === "temporary_generation_compensation" &&
-                    inspectionSite === "unpublished_cleanup" &&
-                    temporaryPath
-                  ) {
-                    await chmod(dirname(temporaryPath), 0o700);
-                  }
-                }
-              },
-              () => createJsonRecordIfAbsent(
-                workspaceRoot,
-                directorySegments,
-                fileName,
-                record,
-                evidenceRef,
-                schema
-              )
-            );
-          }
-        )
-      );
-
-      expect(aggregateErrorMessages(failure)).toContain(isolationFailure.message);
-      expect(observedSites).toEqual([site]);
-      expect(restoredPath).toBeDefined();
-      expect((await stat(restoredPath!, { bigint: true })).nlink).toBe(1n);
-      await expectPathMissing(isolatedPath!);
-      if (temporaryPath) await chmod(dirname(temporaryPath), 0o700).catch(() => undefined);
+        expect(aggregateErrorMessages(failure)).toContain(isolationFailure.message);
+        expect(finalUnlinkHookCalls).toBe(1);
+        expect(restoredPath).toBeDefined();
+        expect(ownedBeforeFinal).toBeDefined();
+        if (replacement === "foreign_leaf") {
+          expect(await readFile(restoredPath!)).toEqual(foreignBytes);
+          expect((await stat(restoredPath!, { bigint: true })).nlink).toBe(1n);
+        } else if (replacement === "parent_symlink") {
+          expect(await readFile(join(externalParent, basename(restoredPath!)))).toEqual(
+            foreignBytes
+          );
+          await rm(dirname(restoredPath!));
+          await rename(displacedParent, dirname(restoredPath!));
+          expect(await readFileWithIdentity(restoredPath!)).toEqual(ownedBeforeFinal!);
+          expect((await stat(restoredPath!, { bigint: true })).nlink).toBe(1n);
+        } else {
+          expect(await readFileWithIdentity(restoredPath!)).toEqual(ownedBeforeFinal!);
+          expect((await stat(restoredPath!, { bigint: true })).nlink).toBe(1n);
+        }
+        await expectPathMissing(isolatedPath!);
+        if (temporaryPath) await chmod(dirname(temporaryPath), 0o700).catch(() => undefined);
+      }
     }
   });
 
@@ -6657,11 +6875,10 @@ describe("idempotency, lock, and artifact services", () => {
         error.message === "Workspace record generation could not be restored after a failed mutation."
     );
     expect(restoreFailure).toBeDefined();
-    expect(restoreFailure!.cause).toBeInstanceOf(Error);
-    expect((restoreFailure!.cause as Error).message).toBe(sourceUnlinkFailure.message);
-    expect((restoreFailure!.cause as Error).cause).toBeInstanceOf(AggregateError);
-    const retryThenRollbackFailures = ((restoreFailure!.cause as Error).cause as AggregateError)
-      .errors;
+    const restoreEnvelope = restoreFailure!.cause as PreservedErrorCompensationEnvelope;
+    expect(restoreEnvelope).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(semanticPrimaryError(restoreEnvelope)).toBe(sourceUnlinkFailure);
+    const retryThenRollbackFailures = (restoreEnvelope.cause as AggregateError).errors;
     expect(retryThenRollbackFailures).toHaveLength(3);
     for (const retainedFailure of retryThenRollbackFailures) {
       expect(retainedFailure).toMatchObject({
@@ -7172,7 +7389,8 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
 
-    expect(failure.message).toBe(operationError.message);
+    expect(semanticPrimaryError(failure)).toBe(operationError);
+    expect(semanticPrimaryError(failure)?.message).toBe(operationError.message);
     expect(aggregateErrorMessages(failure)).toContain(removalError.message);
     expect(errorTreeContains(failure, inspectionError)).toBe(true);
     await expectPathMissing(path);
@@ -8467,17 +8685,14 @@ describe("idempotency, lock, and artifact services", () => {
           )
       )
     );
-    expect(repeatedError.cause).toBeInstanceOf(Error);
-    expect((repeatedError.cause as Error).cause).toBeInstanceOf(AggregateError);
-    const repeatedAggregate = (repeatedError.cause as Error).cause as AggregateError;
-    expect(repeatedAggregate.errors).toHaveLength(2);
-    expect(repeatedAggregate.errors).toEqual([repeatedFailure, repeatedFailure]);
+    const repeatedAggregate = findPreservedCompensationAggregate(repeatedError);
+    expect(repeatedAggregate).toBeDefined();
+    expect(repeatedAggregate!.errors).toHaveLength(2);
+    expect(repeatedAggregate!.errors).toEqual([repeatedFailure, repeatedFailure]);
     expect(aggregateErrorMessages(repeatedError)).toEqual([
       "Workspace mutation namespace cleanup did not complete.",
       "same namespace cleanup failure",
-      "Workspace record publication compensation failed.",
-      "same namespace cleanup failure",
-      "same namespace cleanup failure"
+      "Workspace record publication compensation failed."
     ]);
     await expectPathMissing(repeatedPath);
     await rm(await findOnlyAuthorityNamespace(directoryPath), { recursive: true });
@@ -11591,17 +11806,28 @@ async function readFileDescriptorIdentity(
   return { dev: entry.dev, ino: entry.ino };
 }
 
+function findPreservedCompensationAggregate(value: unknown): AggregateError | undefined {
+  const envelope = findErrorNode(
+    value,
+    (error) => error instanceof PreservedErrorCompensationEnvelope
+  ) as PreservedErrorCompensationEnvelope | undefined;
+  return envelope?.cause instanceof AggregateError ? envelope.cause : undefined;
+}
+
 function aggregateErrorMessages(value: unknown, ancestors = new Set<unknown>()): string[] {
   if (!(value instanceof Error) || ancestors.has(value)) return [];
   ancestors.add(value);
-  const messages = [value.message];
+  const semanticPrimary = semanticPrimaryError(value);
+  const messages = semanticPrimary && semanticPrimary !== value ? [] : [value.message];
+  if (semanticPrimary && semanticPrimary !== value) {
+    messages.push(...aggregateErrorMessages(semanticPrimary, ancestors));
+  }
   if (value instanceof AggregateError) {
     for (const error of value.errors) {
       messages.push(...aggregateErrorMessages(error, ancestors));
     }
   }
   messages.push(...aggregateErrorMessages(value.cause, ancestors));
-  ancestors.delete(value);
   return messages;
 }
 
@@ -11618,9 +11844,15 @@ function errorTreeContains(
       if (errorTreeContains(error, expected, ancestors)) return true;
     }
   }
-  const found = errorTreeContains(value.cause, expected, ancestors);
-  ancestors.delete(value);
-  return found;
+  const semanticPrimary = semanticPrimaryError(value);
+  if (
+    semanticPrimary &&
+    semanticPrimary !== value &&
+    errorTreeContains(semanticPrimary, expected, ancestors)
+  ) {
+    return true;
+  }
+  return errorTreeContains(value.cause, expected, ancestors);
 }
 
 function findErrorNode(
@@ -11629,8 +11861,13 @@ function findErrorNode(
   ancestors = new Set<unknown>()
 ): Error | undefined {
   if (!(value instanceof Error) || ancestors.has(value)) return undefined;
-  if (predicate(value)) return value;
   ancestors.add(value);
+  const semanticPrimary = semanticPrimaryError(value);
+  if (semanticPrimary && semanticPrimary !== value) {
+    const found = findErrorNode(semanticPrimary, predicate, ancestors);
+    if (found) return found;
+  }
+  if (predicate(value)) return value;
   if (value instanceof AggregateError) {
     for (const error of value.errors) {
       const found = findErrorNode(error, predicate, ancestors);
@@ -11647,7 +11884,11 @@ function countErrorNodes(
 ): number {
   if (!(value instanceof Error) || ancestors.has(value)) return 0;
   ancestors.add(value);
-  let count = predicate(value) ? 1 : 0;
+  const semanticPrimary = semanticPrimaryError(value);
+  let count = semanticPrimary && semanticPrimary !== value ? 0 : predicate(value) ? 1 : 0;
+  if (semanticPrimary && semanticPrimary !== value) {
+    count += countErrorNodes(semanticPrimary, predicate, ancestors);
+  }
   if (value instanceof AggregateError) {
     for (const error of value.errors) {
       count += countErrorNodes(error, predicate, ancestors);

@@ -5,7 +5,11 @@ import { chmod, link, lstat, mkdir, open, rename, rmdir, unlink } from "node:fs/
 import { dirname, isAbsolute, join, normalize, parse, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import { preserveThrownValueAndCompensationErrors } from "./compensation-error-preservation";
+import {
+  preserveThrownValueAndCompensationErrors,
+  registerPreservedErrorCompatibility,
+  semanticPrimaryError
+} from "./compensation-error-preservation";
 import {
   readDurableSingleLinkFile,
   type DurableSingleLinkReadFailureReason
@@ -820,6 +824,10 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     );
     const primary = preserveWorkspacePrimaryError(error, compensationErrors);
     if (primary instanceof TaskServiceError) throw primary;
+    const semanticPrimary = semanticPrimaryError(primary);
+    if (semanticPrimary instanceof TaskServiceError) {
+      throw taskServiceErrorWithCompensationEnvelope(semanticPrimary, primary);
+    }
     throw serviceWorkspaceError(
       "workspace_path_not_safe",
       "Failed to remove quarantined workspace record.",
@@ -2551,6 +2559,7 @@ async function removeExactOwnedPublicLink(
 ): Promise<ExactOwnedPublicLinkRemoval> {
   const cleanupErrors: unknown[] = [];
   let ownership: ExactOwnedPublicLinkRemoval["ownership"] = "retained";
+  let finalUnlinkHookPassed = false;
   try {
     await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
     const publicIdentity = await readRegularFilePathIdentity(publicPath, evidenceRef);
@@ -2579,9 +2588,52 @@ async function removeExactOwnedPublicLink(
           throw publicationStateError(evidenceRef);
         }
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
+        const bindingCtimeNs = await readExactPublicLinkBindingCtime(
+          publicPath,
+          expectedGeneration.identity,
+          evidenceRef
+        );
         await compensationTestHookStorage.getStore()?.beforeExactOwnedPublicLinkUnlink?.(
           Object.freeze({ path: publicPath })
         );
+        finalUnlinkHookPassed = true;
+        await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
+        if (
+          bindingCtimeNs === undefined ||
+          (await readExactPublicLinkBindingCtime(
+            publicPath,
+            expectedGeneration.identity,
+            evidenceRef
+          )) !== bindingCtimeNs ||
+          !(await ownedGenerationStateMatches(
+            publicPath,
+            expectedGeneration,
+            expectedLinkCount,
+            evidenceRef
+          ))
+        ) {
+          ownership = "relinquished";
+          if (reportMismatch) cleanupErrors.push(publicationStateError(evidenceRef));
+          return { cleanupErrors, ownership };
+        }
+        await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
+        if (
+          !(await ownedGenerationStateMatches(
+            publicPath,
+            expectedGeneration,
+            expectedLinkCount,
+            evidenceRef
+          )) ||
+          (await readExactPublicLinkBindingCtime(
+            publicPath,
+            expectedGeneration.identity,
+            evidenceRef
+          )) !== bindingCtimeNs
+        ) {
+          ownership = "relinquished";
+          if (reportMismatch) cleanupErrors.push(publicationStateError(evidenceRef));
+          return { cleanupErrors, ownership };
+        }
         try {
           await unlink(publicPath);
           ownership = "removed";
@@ -2613,9 +2665,31 @@ async function removeExactOwnedPublicLink(
       ownership = "relinquished";
     }
   } catch (error) {
+    if (finalUnlinkHookPassed) ownership = "relinquished";
     cleanupErrors.push(error);
   }
   return { cleanupErrors, ownership };
+}
+
+async function readExactPublicLinkBindingCtime(
+  publicPath: string,
+  expectedIdentity: OwnedTemporaryRecordIdentity,
+  evidenceRef: string
+): Promise<bigint | undefined> {
+  try {
+    const entry = await lstat(publicPath, { bigint: true });
+    if (
+      !entry.isFile() ||
+      entry.isSymbolicLink() ||
+      !workspaceRecordPhysicalIdentityMatches(entry, expectedIdentity)
+    ) {
+      return undefined;
+    }
+    return entry.ctimeNs;
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) return undefined;
+    throw publicationStateError(evidenceRef);
+  }
 }
 
 async function removeUnsafeOwnedIsolatedSource(
@@ -2799,11 +2873,37 @@ async function assertHardlinkPublicationCheckpoint(
 }
 
 function preserveWorkspacePrimaryError(primary: unknown, compensations: unknown[]): unknown {
-  return preserveThrownValueAndCompensationErrors(
+  const preserved = preserveThrownValueAndCompensationErrors(
     primary,
     compensations,
     "Workspace record publication compensation failed."
   );
+  const semanticPrimary = semanticPrimaryError(preserved);
+  if (semanticPrimary instanceof TaskServiceError && preserved !== semanticPrimary) {
+    return taskServiceErrorWithCompensationEnvelope(semanticPrimary, preserved);
+  }
+  return preserved;
+}
+
+function taskServiceErrorWithCompensationEnvelope(
+  primary: TaskServiceError,
+  compensationEnvelope: unknown
+): TaskServiceError {
+  const compatibleError = new TaskServiceError({
+    code: primary.code,
+    status: primary.status,
+    category: primary.category,
+    message: primary.message,
+    userMessage: primary.userMessage,
+    evidenceRefs: primary.evidenceRefs,
+    retryable: primary.retryable,
+    recommendedNextActions: primary.recommendedNextActions
+  });
+  if (compensationEnvelope instanceof Error) {
+    compatibleError.cause = compensationEnvelope;
+    registerPreservedErrorCompatibility(compatibleError, compensationEnvelope);
+  }
+  return compatibleError;
 }
 
 async function assertOwnedTemporaryRecordPath(
