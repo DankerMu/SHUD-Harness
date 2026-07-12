@@ -68,6 +68,12 @@ interface RestoredPublicLinkBinding {
   readonly parentMtimeNs: bigint;
 }
 
+interface CanonicalPathnameBinding {
+  readonly identity: OwnedTemporaryRecordIdentity;
+  readonly ctimeNs: bigint;
+  readonly mtimeNs: bigint;
+}
+
 function appendSequentialFailure(
   primary: PresentFailure | undefined,
   compensations: unknown[],
@@ -146,6 +152,7 @@ interface OwnedGenerationCheckpoint {
   namespace?: OwnedAuthorityNamespace;
   path: string;
   generation: OwnedGenerationExpectation;
+  pathnameBinding?: CanonicalPathnameBinding;
 }
 
 type SafeRecordDirectoryBaseline =
@@ -205,6 +212,7 @@ interface HardlinkPublicationOwnedResources {
   temporaryExpectation?: OwnedGenerationExpectation;
   isolatedGeneration?: OwnedIsolatedGeneration;
   canonicalIdentity?: OwnedTemporaryRecordIdentity;
+  canonicalPathnameBindingRetained: boolean;
   handleClosed: boolean;
   compensationErrors: unknown[];
   directoryIdentity?: OwnedTemporaryRecordIdentity;
@@ -241,6 +249,7 @@ interface RecordAuthorityMutex {
 
 interface RecordAuthorityLease {
   expectedCleanupGeneration?: OwnedGenerationExpectation;
+  expectedCleanupPathnameBinding?: CanonicalPathnameBinding;
   validateCleanupGeneration?: () => Promise<void>;
   release: () => void;
   reserveCleanupPermit: (
@@ -259,6 +268,7 @@ const cleanupPermitState = new WeakMap<
     publicPath: string;
     generation?: OwnedTemporaryRecordIdentity;
     generationExpectation?: OwnedGenerationExpectation;
+    pathnameBinding?: CanonicalPathnameBinding;
     pinnedFile?: RecordFileHandle;
     pinnedFileClosed: boolean;
     expectedBytes?: Buffer;
@@ -661,7 +671,8 @@ export async function conditionalDeleteJsonRecordWithCleanupPermit<T>(
         mutationState,
         authorityLease.expectedCleanupGeneration,
         undefined,
-        { status: "existing", identity: admittedParentIdentity }
+        { status: "existing", identity: admittedParentIdentity },
+        authorityLease.expectedCleanupPathnameBinding
       );
     } catch (error) {
       throw new WorkspaceRecordConditionalDeleteError(
@@ -769,7 +780,8 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   },
   expectedGeneration?: OwnedGenerationExpectation,
   ordinaryCanonicalBaseline?: CanonicalAuthorityBaseline,
-  admittedParentBaseline?: SafeRecordDirectoryBaseline
+  admittedParentBaseline?: SafeRecordDirectoryBaseline,
+  expectedPathnameBinding?: CanonicalPathnameBinding
 ): Promise<ConditionalDeleteJsonRecordResult> {
   const parentPath = dirname(path);
   const parentBaseline =
@@ -780,7 +792,12 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     } satisfies SafeRecordDirectoryBaseline);
   const callbackCanonicalBaseline: CanonicalAuthorityBaseline | undefined =
     expectedGeneration
-      ? { status: "existing", ...expectedGeneration }
+      ? {
+          status: "existing",
+          ...expectedGeneration,
+          ctimeNs: expectedPathnameBinding?.ctimeNs,
+          mtimeNs: expectedPathnameBinding?.mtimeNs
+        }
       : ordinaryCanonicalBaseline;
   const observation = await inspectJsonRecordUnderAuthority(
     path,
@@ -846,7 +863,17 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     parentPath,
     parentIdentity,
     path,
-    generation: generationExpectation
+    generation: generationExpectation,
+    pathnameBinding: expectedPathnameBinding ??
+      (ordinaryCanonicalBaseline?.status === "existing" &&
+      ordinaryCanonicalBaseline.ctimeNs !== undefined &&
+      ordinaryCanonicalBaseline.mtimeNs !== undefined
+        ? {
+            identity: ordinaryCanonicalBaseline.identity,
+            ctimeNs: ordinaryCanonicalBaseline.ctimeNs,
+            mtimeNs: ordinaryCanonicalBaseline.mtimeNs
+          }
+        : undefined)
   };
   await runAuthorityMutatingCallbackBoundary(
     hooks?.beforeConditionalDelete
@@ -875,12 +902,21 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       evidenceRef
     );
     admittedGenerationCheckpoint.generation = generationExpectation;
+    admittedGenerationCheckpoint.pathnameBinding = await captureCanonicalPathnameBinding(
+      path,
+      generationExpectation,
+      generationExpectation.nlink,
+      evidenceRef
+    );
   }
+
+  await assertOwnedGenerationCheckpoint(admittedGenerationCheckpoint, evidenceRef);
 
   const mutationNamespace = await createAuthorityOwnedMutationNamespace(
     path,
     evidenceRef,
-    parentIdentity
+    parentIdentity,
+    async () => await assertOwnedGenerationCheckpoint(admittedGenerationCheckpoint, evidenceRef)
   );
   await assertOwnedGenerationCheckpoint(
     { ...admittedGenerationCheckpoint, namespace: mutationNamespace },
@@ -1089,6 +1125,19 @@ async function assertConditionalDeleteGenerationCheckpoint(
   if (!generationMatches) {
     throw recordChangedBeforeConditionalRemovalError(evidenceRef);
   }
+  if (checkpoint.pathnameBinding) {
+    try {
+      await assertCanonicalPathnameBinding(
+        checkpoint.path,
+        checkpoint.pathnameBinding,
+        checkpoint.generation,
+        checkpoint.generation.nlink,
+        evidenceRef
+      );
+    } catch {
+      throw recordChangedBeforeConditionalRemovalError(evidenceRef);
+    }
+  }
   await assertAuthorityNamespaceOwnership(checkpoint.namespace, evidenceRef);
 }
 
@@ -1187,7 +1236,7 @@ async function inspectJsonRecordUnderAuthority<T>(
   const durableFailure = durableRead.status === "invalid"
     ? recordDurableReadError(durableRead.reason, evidenceRef, durableRead.cause)
     : undefined;
-  await runAuthorityMutatingCallbackBoundary(
+  const callbackOutcome = await captureAuthorityMutatingCallbackBoundary(
     afterDurableObservation
       ? () => afterDurableObservation(Object.freeze({ path, status: durableRead.status }))
       : undefined,
@@ -1201,6 +1250,12 @@ async function inspectJsonRecordUnderAuthority<T>(
       ),
     durableFailure ? [durableFailure] : []
   );
+  if (callbackOutcome.status === "callback_failed") {
+    if (durableFailure) {
+      throw preserveWorkspacePrimaryError(durableFailure, [callbackOutcome.error]);
+    }
+    throw callbackOutcome.error;
+  }
   if (durableRead.status === "missing") {
     return { status: "missing", authorityObservation: durableRead };
   }
@@ -1406,7 +1461,8 @@ async function readRegularFilePathIdentity(
 async function createAuthorityOwnedMutationNamespace(
   publicPath: string,
   evidenceRef: string,
-  admittedParentIdentity?: OwnedTemporaryRecordIdentity
+  admittedParentIdentity?: OwnedTemporaryRecordIdentity,
+  proveCallerAuthority?: () => Promise<void>
 ): Promise<OwnedAuthorityNamespace> {
   const parentPath = dirname(publicPath);
   const parentIdentity =
@@ -1421,7 +1477,10 @@ async function createAuthorityOwnedMutationNamespace(
     await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef);
     await runAuthorityMutatingCallbackBoundary(
       () => beforeCreation(Object.freeze({ path: namespacePath })),
-      async () => await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef)
+      async () => {
+        await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef);
+        await proveCallerAuthority?.();
+      }
     );
   } else {
     await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef);
@@ -1857,6 +1916,7 @@ async function createJsonRecordIfAbsentInternal<T>(
     temporaryPath,
     canonicalPath: recordPath,
     expectedBytes: Buffer.from(recordText, "utf8"),
+    canonicalPathnameBindingRetained: false,
     handleClosed: false,
     compensationErrors: [],
     namespaceAuthorityAdmitted: false
@@ -1955,16 +2015,30 @@ async function createJsonRecordIfAbsentInternal<T>(
       if (linkCreated) {
         publicationOutcome = "published";
         ownedResources.canonicalIdentity = ownedResources.temporaryIdentity;
+        const canonicalPathnameBinding = await captureCanonicalPathnameBinding(
+          recordPath,
+          ownedResources.temporaryExpectation,
+          2n,
+          evidenceRef
+        );
+        ownedResources.canonicalPathnameBindingRetained = true;
         const callbackOutcome = await captureAuthorityMutatingCallbackBoundary(
           hooks?.afterCanonicalLink
             ? () => hooks.afterCanonicalLink!({ canonicalPath: recordPath, temporaryPath })
             : undefined,
-          async () =>
-            await assertHardlinkPublicationCheckpoint(
-              hardlinkCheckpoint,
-              recordPath,
-              evidenceRef
-            )
+          async () => {
+            try {
+              await assertHardlinkPublicationCheckpoint(
+                hardlinkCheckpoint,
+                recordPath,
+                canonicalPathnameBinding,
+                evidenceRef
+              );
+            } catch (error) {
+              ownedResources.canonicalPathnameBindingRetained = false;
+              throw error;
+            }
+          }
         );
         if (callbackOutcome.status === "callback_failed") {
           throw callbackOutcome.error;
@@ -2061,7 +2135,8 @@ async function createJsonRecordIfAbsentInternal<T>(
       publicationOutcome === "published" &&
       operationFailure &&
       ownedResources.canonicalIdentity &&
-      ownedResources.directoryIdentity
+      ownedResources.directoryIdentity &&
+      ownedResources.canonicalPathnameBindingRetained
     ) {
       try {
         await rollbackPublishedRecordClaim(
@@ -3875,6 +3950,15 @@ async function assertOwnedGenerationCheckpoint(
   ) {
     throw publicationStateError(evidenceRef);
   }
+  if (checkpoint.pathnameBinding) {
+    await assertCanonicalPathnameBinding(
+      checkpoint.path,
+      checkpoint.pathnameBinding,
+      checkpoint.generation,
+      expectedLinkCount,
+      evidenceRef
+    );
+  }
   if (checkpoint.namespace) {
     await assertAuthorityNamespaceOwnership(checkpoint.namespace, evidenceRef);
   } else {
@@ -3889,6 +3973,7 @@ async function assertOwnedGenerationCheckpoint(
 async function assertHardlinkPublicationCheckpoint(
   temporaryCheckpoint: OwnedGenerationCheckpoint,
   canonicalPath: string,
+  canonicalPathnameBinding: CanonicalPathnameBinding,
   evidenceRef: string
 ): Promise<void> {
   const namespace = temporaryCheckpoint.namespace;
@@ -3919,6 +4004,64 @@ async function assertHardlinkPublicationCheckpoint(
     !workspaceRecordPhysicalIdentityMatches(temporary, generation.identity) ||
     temporary.ctimeNs !== canonical.ctimeNs ||
     temporary.mtimeNs !== canonical.mtimeNs
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  await assertCanonicalPathnameBinding(
+    canonicalPath,
+    canonicalPathnameBinding,
+    generation,
+    2n,
+    evidenceRef
+  );
+}
+
+async function captureCanonicalPathnameBinding(
+  path: string,
+  generation: OwnedGenerationExpectation,
+  expectedLinkCount: bigint,
+  evidenceRef: string
+): Promise<CanonicalPathnameBinding> {
+  let entry: BigIntStats;
+  try {
+    entry = await lstat(path, { bigint: true });
+  } catch {
+    throw publicationStateError(evidenceRef);
+  }
+  if (
+    !entry.isFile() ||
+    entry.isSymbolicLink() ||
+    entry.nlink !== expectedLinkCount ||
+    entry.mode !== generation.mode ||
+    entry.size !== BigInt(generation.bytes.length) ||
+    !workspaceRecordPhysicalIdentityMatches(entry, generation.identity)
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  return Object.freeze({
+    identity: { dev: entry.dev, ino: entry.ino },
+    ctimeNs: entry.ctimeNs,
+    mtimeNs: entry.mtimeNs
+  });
+}
+
+async function assertCanonicalPathnameBinding(
+  path: string,
+  binding: CanonicalPathnameBinding,
+  generation: OwnedGenerationExpectation,
+  expectedLinkCount: bigint,
+  evidenceRef: string
+): Promise<void> {
+  const observed = await captureCanonicalPathnameBinding(
+    path,
+    generation,
+    expectedLinkCount,
+    evidenceRef
+  );
+  if (
+    !workspaceRecordPhysicalIdentityMatches(observed.identity, binding.identity) ||
+    observed.ctimeNs !== binding.ctimeNs ||
+    observed.mtimeNs !== binding.mtimeNs
   ) {
     throw publicationStateError(evidenceRef);
   }
@@ -4693,7 +4836,12 @@ async function acquireRecordAuthorityWithCleanupPermit(
   void lease.catch(() => undefined);
   const setup = (async () => {
     try {
-      await hooks?.beforeCleanupPermitIdentityResolution?.(Object.freeze({ path: recordPath }));
+      await runAuthorityMutatingCallbackBoundary(
+        hooks?.beforeCleanupPermitIdentityResolution
+          ? () => hooks.beforeCleanupPermitIdentityResolution!(Object.freeze({ path: recordPath }))
+          : undefined,
+        async () => await assertCleanupPermitPinnedGeneration(state, recordPath, evidenceRef)
+      );
       if (!waiter.active) return;
       const identity = await recordAuthorityIdentityCandidates(recordPath, evidenceRef);
       if (!waiter.active) return;
@@ -4741,6 +4889,9 @@ function createRecordAuthorityLease(
   return {
     expectedCleanupGeneration: cleanupPermit
       ? cleanupPermitState.get(cleanupPermit)?.generationExpectation
+      : undefined,
+    expectedCleanupPathnameBinding: cleanupPermit
+      ? cleanupPermitState.get(cleanupPermit)?.pathnameBinding
       : undefined,
     validateCleanupGeneration:
       cleanupPermit && cleanupEvidenceRef
@@ -4941,6 +5092,12 @@ async function bindRecordAuthorityCleanupPermitGeneration(
       mode: generation.mode,
       nlink: 1n
     };
+    state.pathnameBinding = await captureCanonicalPathnameBinding(
+      state.publicPath,
+      state.generationExpectation,
+      1n,
+      evidenceRef
+    );
     state.afterPinnedFileClosed = hooks?.afterCleanupPermitPinnedHandleClosed;
     state.pinnedFile = pinnedFile;
     pinnedFile = undefined;
@@ -4960,11 +5117,13 @@ async function assertCleanupPermitPinnedGeneration(
   const generation = state.generation;
   const expectedBytes = state.expectedBytes;
   const generationExpectation = state.generationExpectation;
+  const pathnameBinding = state.pathnameBinding;
   if (
     !pinnedFile ||
     !generation ||
     !expectedBytes ||
     !generationExpectation ||
+    !pathnameBinding ||
     state.pinnedFileClosed
   ) {
     throw publicationStateError(evidenceRef);
@@ -4989,6 +5148,13 @@ async function assertCleanupPermitPinnedGeneration(
     ) {
       throw publicationStateError(evidenceRef);
     }
+    await assertCanonicalPathnameBinding(
+      path,
+      pathnameBinding,
+      generationExpectation,
+      generationExpectation.nlink,
+      evidenceRef
+    );
   } catch (error) {
     if (error instanceof TaskServiceError) throw error;
     throw publicationStateError(evidenceRef);
