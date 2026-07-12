@@ -2320,6 +2320,7 @@ async function restoreOwnedIsolatedPath(
   evidenceRef: string,
   site: WorkspaceRecordPostIsolationSite
 ): Promise<void> {
+  let phase: "pre_source_commit" | "post_source_committed" = "pre_source_commit";
   try {
     await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
     if (
@@ -2400,6 +2401,7 @@ async function restoreOwnedIsolatedPath(
         }
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
         await unlink(isolatedPath);
+        phase = "post_source_committed";
         await compensationTestHookStorage.getStore()?.afterOwnedIsolatedSourceUnlink?.(
           Object.freeze({ path: publicPath, isolatedPath, site, attempt })
         );
@@ -2416,28 +2418,13 @@ async function restoreOwnedIsolatedPath(
             evidenceRef
           ))
         ) {
-          await compensationTestHookStorage.getStore()?.beforePostSourcePublicLinkCleanup?.(
-            Object.freeze({ path: publicPath, isolatedPath, site })
-          );
-          const cleanup = await removeExactOwnedPublicLink(
-            publicPath,
-            mutationNamespace,
-            expectedGeneration,
-            expectedGeneration.nlink,
-            evidenceRef
-          );
-          sourceUnlinkErrors.push(
-            publicationStateError(evidenceRef),
-            ...cleanup.cleanupErrors
-          );
-          publicOwnership = cleanup.ownership === "retained"
-            ? "owned"
-            : "relinquished";
+          sourceUnlinkErrors.push(publicationStateError(evidenceRef));
           break;
         }
         return;
       } catch (error) {
         sourceUnlinkErrors.push(error);
+        if (phase === "post_source_committed") break;
         try {
           await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
         } catch (authorityError) {
@@ -2452,7 +2439,7 @@ async function restoreOwnedIsolatedPath(
     }
 
     let rollbackErrors: unknown[];
-    if (publicOwnership === "relinquished") {
+    if (phase === "post_source_committed" || publicOwnership === "relinquished") {
       rollbackErrors = [];
     } else if (firstProofRollbackAttempted) {
       const rollback = await removeExactOwnedPublicLink(
@@ -2895,10 +2882,11 @@ function taskServiceErrorWithCompensationEnvelope(
     category: primary.category,
     message: primary.message,
     userMessage: primary.userMessage,
-    evidenceRefs: primary.evidenceRefs,
+    evidenceRefs: [...primary.evidenceRefs],
     retryable: primary.retryable,
-    recommendedNextActions: primary.recommendedNextActions
+    recommendedNextActions: [...primary.recommendedNextActions]
   });
+  compatibleError.stack = primary.stack;
   if (compensationEnvelope instanceof Error) {
     compatibleError.cause = compensationEnvelope;
     registerPreservedErrorCompatibility(compatibleError, compensationEnvelope);

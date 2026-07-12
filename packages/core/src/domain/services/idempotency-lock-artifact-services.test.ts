@@ -5852,15 +5852,18 @@ describe("idempotency, lock, and artifact services", () => {
       );
       if (created.status !== "created") throw new Error("Expected a cleanup-permit fixture.");
       const before = await readFileWithIdentity(path);
+      const primaryEvidenceRefs = [evidenceRef];
+      const primaryRecommendedNextActions = ["Inspect the injected failure."];
       const primaryError = new TaskServiceError({
         code: "workspace_path_not_safe",
         status: 500,
         category: "workspace_error",
         message: `post-isolation ${authority} primary`,
         userMessage: "Injected post-isolation failure.",
-        evidenceRefs: [evidenceRef],
-        recommendedNextActions: ["Inspect the injected failure."]
+        evidenceRefs: primaryEvidenceRefs,
+        recommendedNextActions: primaryRecommendedNextActions
       });
+      primaryError.stack = `TaskServiceError: ${primaryError.message}\n    at semantic-primary`;
       const inspectionError = Object.assign(
         new Error(`post-isolation ${authority} inspection`),
         { code: "EIO" }
@@ -5920,6 +5923,55 @@ describe("idempotency, lock, and artifact services", () => {
         userMessage: primaryError.userMessage
       });
       expect(errorTreeContains(preservedPrimary, inspectionError)).toBe(true);
+      const compatibilityWrapper = preservedPrimary as TaskServiceError;
+      expect(compatibilityWrapper).not.toBe(primaryError);
+      expect(compatibilityWrapper.name).toBe(primaryError.name);
+      expect(compatibilityWrapper.message).toBe(primaryError.message);
+      expect(compatibilityWrapper.code).toBe(primaryError.code);
+      expect(compatibilityWrapper.status).toBe(primaryError.status);
+      expect(compatibilityWrapper.category).toBe(primaryError.category);
+      expect(compatibilityWrapper.userMessage).toBe(primaryError.userMessage);
+      expect(compatibilityWrapper.retryable).toBe(primaryError.retryable);
+      expect(compatibilityWrapper.evidenceRefs).toEqual(primaryError.evidenceRefs);
+      expect(compatibilityWrapper.evidenceRefs).not.toBe(primaryError.evidenceRefs);
+      expect(compatibilityWrapper.recommendedNextActions).toEqual(
+        primaryError.recommendedNextActions
+      );
+      expect(compatibilityWrapper.recommendedNextActions).not.toBe(
+        primaryError.recommendedNextActions
+      );
+      expect(compatibilityWrapper.stack).toBe(primaryError.stack);
+      expect(compatibilityWrapper.cause).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+      expect(semanticPrimaryError(compatibilityWrapper)).toBe(primaryError);
+
+      const compatibilityMutationCause = new Error("compatibility wrapper mutation");
+      Object.assign(compatibilityWrapper, {
+        name: "MutatedCompatibilityWrapper",
+        message: "mutated compatibility message",
+        code: "record_malformed",
+        status: 400,
+        category: "mutated_category",
+        userMessage: "mutated user message",
+        retryable: true,
+        stack: "mutated compatibility stack",
+        cause: compatibilityMutationCause
+      });
+      compatibilityWrapper.evidenceRefs.push("mutated.evidence");
+      compatibilityWrapper.recommendedNextActions.push("Mutated action.");
+      expect(primaryError).toMatchObject({
+        name: "TaskServiceError",
+        message: `post-isolation ${authority} primary`,
+        code: "workspace_path_not_safe",
+        status: 500,
+        category: "workspace_error",
+        userMessage: "Injected post-isolation failure.",
+        retryable: false,
+        stack: `TaskServiceError: post-isolation ${authority} primary\n    at semantic-primary`
+      });
+      expect(primaryError.evidenceRefs).toEqual(primaryEvidenceRefs);
+      expect(primaryError.recommendedNextActions).toEqual(primaryRecommendedNextActions);
+      expect(primaryError.cause).toBeUndefined();
+      expect(semanticPrimaryError(compatibilityWrapper)).toBe(primaryError);
       expect(sites).toEqual([
         "primary:conditional_delete",
         "inspection:conditional_delete"
@@ -6267,8 +6319,8 @@ describe("idempotency, lock, and artifact services", () => {
     ).toHaveLength(1);
   });
 
-  test("post-source cleanup revalidates ENOENT and ENOTDIR final-unlink hook outcomes", async () => {
-    for (const outcome of ["ENOENT", "ENOTDIR"] as const) {
+  test("post-source observer and validation failures retain the committed public generation", async () => {
+    for (const outcome of ["observer", "validation"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
       tempRoots.push(tempRoot);
       const schema = z.object({ id: z.string() });
@@ -6293,11 +6345,11 @@ describe("idempotency, lock, and artifact services", () => {
       const ownedBefore = await readFileWithIdentity(path);
       const isolationFailure = new Error(`force post-source cleanup ${outcome}`);
       const outsideAlias = join(tempRoot, `post-source-${outcome.toLowerCase()}-alias.json`);
-      const displacedParent = join(tempRoot, `post-source-${outcome.toLowerCase()}-parent`);
       let isolatedPath = "";
       let sourceUnlinkCalls = 0;
       let postSourceCleanupCalls = 0;
       let finalUnlinkCalls = 0;
+      const observerFailure = new Error(`post-source observer ${outcome}`);
 
       const failure = await captureTaskServiceError(() =>
         runWithWorkspaceRecordCompensationTestHooks(
@@ -6309,21 +6361,14 @@ describe("idempotency, lock, and artifact services", () => {
             },
             afterOwnedIsolatedSourceUnlink: async (input) => {
               sourceUnlinkCalls += 1;
-              await chmod(input.path, 0o400);
-            },
-            beforePostSourcePublicLinkCleanup: async (input) => {
-              postSourceCleanupCalls += 1;
-              await chmod(input.path, 0o600);
-            },
-            beforeExactOwnedPublicLinkUnlink: async (input) => {
-              finalUnlinkCalls += 1;
-              if (finalUnlinkCalls !== 1) return;
               await link(input.path, outsideAlias);
-              await rm(input.path);
-              if (outcome === "ENOTDIR") {
-                await rename(dirname(input.path), displacedParent);
-                await writeFile(dirname(input.path), "block final unlink with a non-directory");
-              }
+              if (outcome === "observer") throw observerFailure;
+            },
+            beforePostSourcePublicLinkCleanup: async () => {
+              postSourceCleanupCalls += 1;
+            },
+            beforeExactOwnedPublicLinkUnlink: async () => {
+              finalUnlinkCalls += 1;
             }
           },
           () =>
@@ -6336,52 +6381,62 @@ describe("idempotency, lock, and artifact services", () => {
       );
 
       expect(sourceUnlinkCalls).toBe(1);
-      expect(postSourceCleanupCalls).toBe(1);
-      expect(finalUnlinkCalls).toBe(1);
+      expect(postSourceCleanupCalls).toBe(0);
+      expect(finalUnlinkCalls).toBe(0);
       expect(aggregateErrorMessages(failure)).toContain(isolationFailure.message);
+      if (outcome === "observer") {
+        expect(aggregateErrorMessages(failure)).toContain(observerFailure.message);
+      } else {
+        expect(aggregateErrorMessages(failure)).toContain(
+          "Workspace record publication authority could not be verified."
+        );
+      }
+      expect(await readFileWithIdentity(path)).toEqual(ownedBefore);
       expect(await readFileWithIdentity(outsideAlias)).toEqual(ownedBefore);
       expect(await readFile(outsideAlias)).toEqual(expectedBytes);
-      expect((await stat(outsideAlias, { bigint: true })).nlink).toBe(1n);
-      if (outcome === "ENOTDIR") {
-        await rm(dirname(path));
-        await rename(displacedParent, dirname(path));
-      }
-      await expectPathMissing(path);
+      expect((await stat(path, { bigint: true })).nlink).toBe(2n);
+      expect((await stat(outsideAlias, { bigint: true })).nlink).toBe(2n);
       await expectPathMissing(isolatedPath);
+      await rm(outsideAlias);
+      expect((await stat(path, { bigint: true })).nlink).toBe(1n);
+      expect(
+        await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.id === expected.id
+        })
+      ).toEqual({ status: "deleted" });
     }
   });
 
-  test("all post-isolation sites relinquish final-unlink hook replacements", async () => {
+  test("all restore sites retain canonical and alias links after direct post-source hardlink drift", async () => {
     for (const site of [
       "conditional_delete",
       "conditional_unlink_owned_path",
       "published_rollback",
       "temporary_generation_compensation"
     ] as const) {
-      for (const replacement of ["foreign_leaf", "parent_symlink", "same_inode"] as const) {
         const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
         tempRoots.push(tempRoot);
         const schema = z.object({ id: z.string() });
-        const record = { id: `shared-restore-${site}-${replacement}` };
-        const evidenceRef = `restore.shared.${site}.${replacement}`;
+        const record = { id: `shared-restore-${site}` };
+        const evidenceRef = `restore.shared.${site}`;
         const directorySegments = ["shared-restore-sites"] as const;
-        const fileName = `${site}-${replacement}.json`;
+        const fileName = `${site}.json`;
         const path = workspaceRecordPath(
           workspaceRoot,
           [...directorySegments, fileName],
           evidenceRef
         );
-        const primary = new Error(`shared restore primary ${site} ${replacement}`);
-        const isolationFailure = new Error(`shared restore isolation ${site} ${replacement}`);
-        const foreignBytes = Buffer.from(`foreign final unlink ${site} ${replacement}\n`);
-        const sameInodeAlias = join(tempRoot, `same-inode-${site}-${replacement}.json`);
-        const externalParent = join(tempRoot, `external-parent-${site}-${replacement}`);
-        const displacedParent = join(tempRoot, `displaced-parent-${site}-${replacement}`);
+        const primary = new Error(`shared restore primary ${site}`);
+        const isolationFailure = new Error(`shared restore isolation ${site}`);
+        const sameInodeAlias = join(tempRoot, `same-inode-${site}.json`);
         let restoredPath: string | undefined;
         let isolatedPath: string | undefined;
         let temporaryPath: string | undefined;
         let ownedBeforeFinal: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
-        let finalUnlinkHookCalls = 0;
+        let postSourceHookCalls = 0;
+        const restoreEvents: string[] = [];
 
         const failure = await captureError(() =>
           runWithWorkspaceRecordCompensationTestHooks(
@@ -6394,6 +6449,7 @@ describe("idempotency, lock, and artifact services", () => {
               },
               afterOwnedPathIsolation: (input) => {
                 if (input.site !== site) return;
+                restoreEvents.push("isolation_failure");
                 isolatedPath = input.isolatedPath;
                 throw isolationFailure;
               },
@@ -6401,33 +6457,10 @@ describe("idempotency, lock, and artifact services", () => {
                 restoredPath = input.path;
               },
               afterOwnedIsolatedSourceUnlink: async (input) => {
-                await chmod(input.path, 0o400);
-              },
-              beforePostSourcePublicLinkCleanup: async (input) => {
-                await chmod(input.path, 0o600);
-              },
-              beforeExactOwnedPublicLinkUnlink: async (input) => {
-                finalUnlinkHookCalls += 1;
+                restoreEvents.push("post_source_drift");
+                postSourceHookCalls += 1;
                 ownedBeforeFinal = await readFileWithIdentity(input.path);
-                if (replacement === "foreign_leaf") {
-                  await rm(input.path);
-                  await writeFile(input.path, foreignBytes, { flag: "wx", mode: 0o600 });
-                  return;
-                }
-                if (replacement === "parent_symlink") {
-                  await mkdir(externalParent, { mode: 0o700 });
-                  await writeFile(join(externalParent, basename(input.path)), foreignBytes, {
-                    flag: "wx",
-                    mode: 0o600
-                  });
-                  await rename(dirname(input.path), displacedParent);
-                  await symlink(externalParent, dirname(input.path));
-                  return;
-                }
                 await link(input.path, sameInodeAlias);
-                await rm(input.path);
-                await link(sameInodeAlias, input.path);
-                await rm(sameInodeAlias);
               }
             },
             async () => {
@@ -6486,28 +6519,47 @@ describe("idempotency, lock, and artifact services", () => {
           )
         );
 
-        expect(aggregateErrorMessages(failure)).toContain(isolationFailure.message);
-        expect(finalUnlinkHookCalls).toBe(1);
+        const messages = aggregateErrorMessages(failure);
+        expect(messages).toContain(isolationFailure.message);
+        expect(messages).toContain(
+          "Workspace record publication authority could not be verified."
+        );
+        const causalPrimary = site === "conditional_delete" ? isolationFailure : primary;
+        expect(errorTreeContains(failure, causalPrimary)).toBe(true);
+        expect(restoreEvents).toEqual(["isolation_failure", "post_source_drift"]);
+        const restoreFailure = findErrorNode(
+          failure,
+          (error) =>
+            error instanceof TaskServiceError &&
+            error.message ===
+              "Workspace record generation could not be restored after a failed mutation."
+        );
+        expect(restoreFailure).toBeDefined();
+        expect(semanticPrimaryError(restoreFailure!.cause)).toMatchObject({
+          message: "Workspace record publication authority could not be verified."
+        });
+        expect(postSourceHookCalls).toBe(1);
         expect(restoredPath).toBeDefined();
         expect(ownedBeforeFinal).toBeDefined();
-        if (replacement === "foreign_leaf") {
-          expect(await readFile(restoredPath!)).toEqual(foreignBytes);
-          expect((await stat(restoredPath!, { bigint: true })).nlink).toBe(1n);
-        } else if (replacement === "parent_symlink") {
-          expect(await readFile(join(externalParent, basename(restoredPath!)))).toEqual(
-            foreignBytes
-          );
-          await rm(dirname(restoredPath!));
-          await rename(displacedParent, dirname(restoredPath!));
-          expect(await readFileWithIdentity(restoredPath!)).toEqual(ownedBeforeFinal!);
-          expect((await stat(restoredPath!, { bigint: true })).nlink).toBe(1n);
-        } else {
-          expect(await readFileWithIdentity(restoredPath!)).toEqual(ownedBeforeFinal!);
-          expect((await stat(restoredPath!, { bigint: true })).nlink).toBe(1n);
-        }
+        expect(await readFileWithIdentity(restoredPath!)).toEqual(ownedBeforeFinal!);
+        expect(await readFileWithIdentity(sameInodeAlias)).toEqual(ownedBeforeFinal!);
+        expect((await stat(restoredPath!, { bigint: true })).nlink).toBe(2n);
+        expect((await stat(sameInodeAlias, { bigint: true })).nlink).toBe(2n);
         await expectPathMissing(isolatedPath!);
+        await rm(sameInodeAlias);
+        expect((await stat(restoredPath!, { bigint: true })).nlink).toBe(1n);
+        await rm(restoredPath!);
+        expect(
+          await createJsonRecordIfAbsent(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            record,
+            evidenceRef,
+            schema
+          )
+        ).toEqual({ status: "created", record });
         if (temporaryPath) await chmod(dirname(temporaryPath), 0o700).catch(() => undefined);
-      }
     }
   });
 
