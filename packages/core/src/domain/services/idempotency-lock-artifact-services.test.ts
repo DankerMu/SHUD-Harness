@@ -5335,6 +5335,43 @@ describe("idempotency, lock, and artifact services", () => {
       for (const unlinkFailure of unlinkFailures) {
         expect(errorMessages).toContain(unlinkFailure.message);
       }
+      const restoreFailure = findErrorNode(
+        failure,
+        (error) =>
+          error instanceof TaskServiceError &&
+          error.message ===
+            "Workspace record generation could not be restored after a failed mutation."
+      );
+      expect(restoreFailure).toBeDefined();
+      const restorePrimary = restoreFailure!.cause;
+      expect(restorePrimary).toBeInstanceOf(Error);
+      expect(Object.getPrototypeOf(restorePrimary)).toBe(
+        Object.getPrototypeOf(unlinkFailures[0]!)
+      );
+      expect((restorePrimary as Error).message).toBe(unlinkFailures[0]!.message);
+      expect((restorePrimary as Error).cause).toBeInstanceOf(AggregateError);
+      const restoreCompensations = (restorePrimary as Error).cause as AggregateError;
+      expect(restoreCompensations.message).toBe(
+        "Workspace record publication compensation failed."
+      );
+      expect(restoreCompensations.errors[0]).toBe(unlinkFailures[1]);
+      expect(restoreCompensations.errors[1]).toBe(unlinkFailures[2]);
+      expect(
+        restoreCompensations.errors.filter((error) => error instanceof AggregateError)
+      ).toHaveLength(0);
+      expect(countErrorNodes(restoreFailure, (error) => error instanceof AggregateError)).toBe(1);
+      if (outcome === "rollback_exact_link") {
+        expect(restoreCompensations.errors).toHaveLength(2);
+      } else {
+        expect(restoreCompensations.errors).toHaveLength(3);
+        expect(restoreCompensations.errors[2]).toBeInstanceOf(TaskServiceError);
+        expect(restoreCompensations.errors[2]).toMatchObject({
+          code: "workspace_path_not_safe",
+          status: 500,
+          category: "workspace_error",
+          message: "Workspace record publication authority could not be verified."
+        });
+      }
       expect(attempts).toEqual([
         { site: "conditional_delete", attempt: 1 },
         { site: "conditional_delete", attempt: 2 },
@@ -10769,6 +10806,39 @@ function errorTreeContains(
   const found = errorTreeContains(value.cause, expected, ancestors);
   ancestors.delete(value);
   return found;
+}
+
+function findErrorNode(
+  value: unknown,
+  predicate: (error: Error) => boolean,
+  ancestors = new Set<unknown>()
+): Error | undefined {
+  if (!(value instanceof Error) || ancestors.has(value)) return undefined;
+  if (predicate(value)) return value;
+  ancestors.add(value);
+  if (value instanceof AggregateError) {
+    for (const error of value.errors) {
+      const found = findErrorNode(error, predicate, ancestors);
+      if (found) return found;
+    }
+  }
+  return findErrorNode(value.cause, predicate, ancestors);
+}
+
+function countErrorNodes(
+  value: unknown,
+  predicate: (error: Error) => boolean,
+  ancestors = new Set<unknown>()
+): number {
+  if (!(value instanceof Error) || ancestors.has(value)) return 0;
+  ancestors.add(value);
+  let count = predicate(value) ? 1 : 0;
+  if (value instanceof AggregateError) {
+    for (const error of value.errors) {
+      count += countErrorNodes(error, predicate, ancestors);
+    }
+  }
+  return count + countErrorNodes(value.cause, predicate, ancestors);
 }
 
 async function captureConditionalDeleteError(

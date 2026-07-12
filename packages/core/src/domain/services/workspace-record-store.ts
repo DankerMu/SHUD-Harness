@@ -2264,7 +2264,6 @@ async function restoreOwnedIsolatedPath(
     await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
     const sourceUnlinkErrors: unknown[] = [];
     for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
-      let commitProofFailed = false;
       try {
         await compensationTestHookStorage.getStore()?.beforeOwnedIsolatedSourceUnlink?.(
           Object.freeze({ path: publicPath, isolatedPath, site, attempt })
@@ -2279,7 +2278,6 @@ async function restoreOwnedIsolatedPath(
             evidenceRef
           ))
         ) {
-          commitProofFailed = true;
           const cleanupErrors = await rollbackUnsafeRestoredLink(
             publicPath,
             isolatedPath,
@@ -2287,10 +2285,8 @@ async function restoreOwnedIsolatedPath(
             expectedGeneration,
             evidenceRef
           );
-          throw preserveWorkspacePrimaryError(
-            publicationStateError(evidenceRef),
-            cleanupErrors
-          );
+          sourceUnlinkErrors.push(publicationStateError(evidenceRef), ...cleanupErrors);
+          break;
         }
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
         if (
@@ -2319,7 +2315,6 @@ async function restoreOwnedIsolatedPath(
             evidenceRef
           ))
         ) {
-          commitProofFailed = true;
           const cleanupErrors = await removeExactOwnedPublicLink(
             publicPath,
             mutationNamespace,
@@ -2327,15 +2322,12 @@ async function restoreOwnedIsolatedPath(
             expectedGeneration.nlink,
             evidenceRef
           );
-          throw preserveWorkspacePrimaryError(
-            publicationStateError(evidenceRef),
-            cleanupErrors
-          );
+          sourceUnlinkErrors.push(publicationStateError(evidenceRef), ...cleanupErrors);
+          break;
         }
         return;
       } catch (error) {
         sourceUnlinkErrors.push(error);
-        if (commitProofFailed) break;
         try {
           await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
         } catch {
@@ -2348,10 +2340,6 @@ async function restoreOwnedIsolatedPath(
       }
     }
 
-    const primary = preserveWorkspacePrimaryError(
-      sourceUnlinkErrors[0],
-      sourceUnlinkErrors.slice(1)
-    );
     const rollbackErrors = await rollbackUnsafeRestoredLink(
       publicPath,
       isolatedPath,
@@ -2359,7 +2347,10 @@ async function restoreOwnedIsolatedPath(
       expectedGeneration,
       evidenceRef
     );
-    throw preserveWorkspacePrimaryError(primary, rollbackErrors);
+    throw preserveWorkspacePrimaryError(sourceUnlinkErrors[0], [
+      ...sourceUnlinkErrors.slice(1),
+      ...rollbackErrors
+    ]);
   } catch (error) {
     throw serviceWorkspaceError(
       "record_malformed",
