@@ -2147,6 +2147,7 @@ async function createJsonRecordIfAbsentInternal<T>(
       ownedResources.directoryIdentity &&
       ownedResources.canonicalPathnameAuthority.status === "retained"
     ) {
+      const rollbackAuthorityBefore = ownedResources.canonicalPathnameAuthority.status;
       try {
         await rollbackPublishedRecordClaim(
           recordPath,
@@ -2158,7 +2159,10 @@ async function createJsonRecordIfAbsentInternal<T>(
           ownedResources
         );
       } catch (error) {
-        if (hardlinkCanonicalAuthorityWasRelinquished(ownedResources)) {
+        if (hardlinkCanonicalAuthorityTransitionedToRelinquished(
+          ownedResources,
+          rollbackAuthorityBefore
+        )) {
           compensationErrors.unshift(operationFailure.value);
           operationFailure = { value: error };
         } else {
@@ -2181,6 +2185,8 @@ async function createJsonRecordIfAbsentInternal<T>(
           compensationErrors.push(cleanupError);
         }
       }
+      const compensationInspectionAuthorityBefore =
+        ownedResources.canonicalPathnameAuthority.status;
       try {
         const ownership = hardlinkTemporaryNamespaceOwnership(
           ownedResources,
@@ -2230,7 +2236,10 @@ async function createJsonRecordIfAbsentInternal<T>(
           );
         }
       } catch (error) {
-        if (hardlinkCanonicalAuthorityWasRelinquished(ownedResources)) {
+        if (hardlinkCanonicalAuthorityTransitionedToRelinquished(
+          ownedResources,
+          compensationInspectionAuthorityBefore
+        )) {
           compensationErrors.unshift(operationFailure.value);
           operationFailure = { value: error };
         } else {
@@ -3198,7 +3207,10 @@ async function removeOwnedPathWithoutHooks(
             evidenceRef,
             expectedPathnameBinding
           ))) {
-          if (expectedPathnameBinding) onPathnameBindingDrift?.();
+          if (expectedPathnameBinding) {
+            onPathnameBindingDrift?.();
+            throw publicationStateError(evidenceRef);
+          }
           await removePreIsolationExternallyLinkedOwnedPath(
             path,
             expectedIdentity,
@@ -4263,6 +4275,14 @@ function hardlinkCanonicalAuthorityWasRelinquished(
   ownedResources: HardlinkPublicationOwnedResources
 ): boolean {
   return ownedResources.canonicalPathnameAuthority.status === "relinquished";
+}
+
+function hardlinkCanonicalAuthorityTransitionedToRelinquished(
+  ownedResources: HardlinkPublicationOwnedResources,
+  statusBeforeBoundary: HardlinkCanonicalPathnameAuthority["status"]
+): boolean {
+  return statusBeforeBoundary !== "relinquished" &&
+    hardlinkCanonicalAuthorityWasRelinquished(ownedResources);
 }
 
 async function runHardlinkPostLinkCallbackBoundary(

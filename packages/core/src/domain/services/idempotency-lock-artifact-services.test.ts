@@ -14102,6 +14102,257 @@ describe("idempotency, lock, and artifact services", () => {
       }
     }
   });
+
+  test("published rollback relinquishment preserves a retained two-link canonical generation", async () => {
+    let activePermitBaseline: number | undefined;
+    for (const authority of ["ordinary", "cleanup-permit"] as const) {
+      for (const hookExit of ["return", "throw"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const schema = z.object({ id: z.string() });
+        const record = { id: `round-15-two-link-${authority}-${hookExit}` };
+        const evidenceRef = `round-15.rollback.two-link.${authority}.${hookExit}`;
+        const directorySegments = ["round-15-two-link", authority, hookExit] as const;
+        const fileName = "record.json";
+        const path = workspaceRecordPath(workspaceRoot, [...directorySegments, fileName], evidenceRef);
+        const marker = Object.assign(new Error(`round-15 two-link marker ${hookExit}`), {
+          code: "ENOENT"
+        });
+        let temporaryPath = "";
+        let reboundIdentity: bigint | undefined;
+        let rollbackMutationCalls = 0;
+        let compensationInspectionCalls = 0;
+
+        const failure = await captureError(() =>
+          runWithWorkspaceRecordCompensationTestHooks(
+            {
+              beforeOwnedPathIsolation: async ({ site }) => {
+                if (site !== "published_rollback" || rollbackMutationCalls > 0) return;
+                rollbackMutationCalls += 1;
+                expect((await stat(path, { bigint: true })).nlink).toBe(2n);
+                reboundIdentity = (await stat(path, { bigint: true })).ino;
+                const alias = `${path}.round-15-two-link-rebound`;
+                await rename(path, alias);
+                await link(alias, path);
+                await unlink(alias);
+                if (hookExit === "throw") throw marker;
+              }
+            },
+            () => runWithWorkspaceRecordPublicationHooks(
+              {
+                afterTemporaryFileWritten: ({ temporaryPath: observedPath }) => {
+                  temporaryPath = observedPath;
+                },
+                beforeTemporaryUnlink: async ({ temporaryPath: candidatePath }) => {
+                  await chmod(dirname(candidatePath), 0o500);
+                  throw new Error("round-15 forced temporary namespace cleanup failure");
+                },
+                beforePublicationCompensationStateInspection: async (input) => {
+                  if (input.site !== "published_rollback") return;
+                  compensationInspectionCalls += 1;
+                  if (authority === "ordinary") {
+                    activePermitBaseline ??= input.activeCleanupPermitCount;
+                    expect(input.activeCleanupPermitCount).toBe(activePermitBaseline);
+                  } else {
+                    expect(input.activeCleanupPermitCount).toBe(activePermitBaseline! + 1);
+                  }
+                  await chmod(dirname(temporaryPath), 0o700);
+                }
+              },
+              () => authority === "cleanup-permit"
+                ? createJsonRecordIfAbsentWithCleanupPermit(
+                    workspaceRoot, directorySegments, fileName, record, evidenceRef, schema
+                  )
+                : createJsonRecordIfAbsent(
+                    workspaceRoot, directorySegments, fileName, record, evidenceRef, schema
+                  )
+            )
+          )
+        );
+
+        expect(rollbackMutationCalls).toBe(1);
+        expect(compensationInspectionCalls).toBe(1);
+        expect(semanticPrimaryError(failure)).toBeInstanceOf(TaskServiceError);
+        expect((semanticPrimaryError(failure) as TaskServiceError).code).toBe(
+          "workspace_path_not_safe"
+        );
+        expect(errorTreeContains(failure, marker)).toBe(hookExit === "throw");
+        expect(countErrorNodes(failure, (error) => error === marker)).toBe(
+          hookExit === "throw" ? 1 : 0
+        );
+        expect(await readFile(path, "utf8")).toBe(`${JSON.stringify(record, null, 2)}\n`);
+        expect((await stat(path, { bigint: true })).ino).toBe(reboundIdentity);
+        expect((await stat(path, { bigint: true })).nlink).toBe(1n);
+        await expectPathMissing(temporaryPath);
+        expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+
+        await rm(path);
+        const retried = await createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot, directorySegments, fileName, record, `${evidenceRef}.retry`, schema
+        );
+        if (retried.status !== "created") throw new Error("Expected repaired Round 15 retry.");
+        expect(
+          await conditionalDeleteJsonRecordWithCleanupPermit(
+            retried.cleanupPermit,
+            path,
+            `${evidenceRef}.retry`,
+            schema,
+            { kind: "record", expected: record, matches: () => true }
+          )
+        ).toEqual({ status: "deleted" });
+        expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+      }
+    }
+  });
+
+  test("published rollback promotes only the boundary that relinquishes canonical authority", async () => {
+    let activePermitBaseline: number | undefined;
+    for (const authority of ["ordinary", "cleanup-permit"] as const) {
+      for (const laterExit of ["return", "throw"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const schema = z.object({ id: z.string() });
+        const record = { id: `round-15-transition-${authority}-${laterExit}` };
+        const evidenceRef = `round-15.rollback.transition.${authority}.${laterExit}`;
+        const directorySegments = ["round-15-transition", authority, laterExit] as const;
+        const fileName = "record.json";
+        const path = workspaceRecordPath(workspaceRoot, [...directorySegments, fileName], evidenceRef);
+        const trigger = new Error(`round-15 initial trigger ${authority}`);
+        const laterMarker = Object.assign(new Error(`round-15 later marker ${laterExit}`), {
+          code: "EIO"
+        });
+        let reboundIdentity: bigint | undefined;
+        let rollbackMutationCalls = 0;
+        let laterCallbackCalls = 0;
+
+        const failure = await captureError(() =>
+          runWithWorkspaceRecordCompensationTestHooks(
+            {
+              beforeOwnedPathIsolation: async ({ site }) => {
+                if (site !== "published_rollback" || rollbackMutationCalls > 0) return;
+                rollbackMutationCalls += 1;
+                expect((await stat(path, { bigint: true })).nlink).toBe(1n);
+                reboundIdentity = (await stat(path, { bigint: true })).ino;
+                const alias = `${path}.round-15-transition-rebound`;
+                await rename(path, alias);
+                await link(alias, path);
+                await unlink(alias);
+              }
+            },
+            () => runWithWorkspaceRecordPublicationHooks(
+              {
+                beforePublishedRecordFinalValidation: () => {
+                  throw trigger;
+                },
+                beforePublicationCompensationStateInspection: ({
+                  site,
+                  activeCleanupPermitCount
+                }) => {
+                  if (site !== "published_rollback") return;
+                  laterCallbackCalls += 1;
+                  if (authority === "ordinary") {
+                    activePermitBaseline ??= activeCleanupPermitCount;
+                    expect(activeCleanupPermitCount).toBe(activePermitBaseline);
+                  } else {
+                    expect(activeCleanupPermitCount).toBe(activePermitBaseline! + 1);
+                  }
+                  if (laterExit === "throw") throw laterMarker;
+                }
+              },
+              () => authority === "cleanup-permit"
+                ? createJsonRecordIfAbsentWithCleanupPermit(
+                    workspaceRoot, directorySegments, fileName, record, evidenceRef, schema
+                  )
+                : createJsonRecordIfAbsent(
+                    workspaceRoot, directorySegments, fileName, record, evidenceRef, schema
+                  )
+            )
+          )
+        );
+
+        expect(rollbackMutationCalls).toBe(1);
+        expect(laterCallbackCalls).toBe(1);
+        const primary = semanticPrimaryError(failure);
+        expect(primary).toBeInstanceOf(TaskServiceError);
+        expect((primary as TaskServiceError).code).toBe("workspace_path_not_safe");
+        expect(errorTreeContains(failure, trigger)).toBe(true);
+        expect(countErrorNodes(failure, (error) => error === trigger)).toBe(1);
+        expect(errorTreeContains(failure, laterMarker)).toBe(laterExit === "throw");
+        expect(countErrorNodes(failure, (error) => error === laterMarker)).toBe(
+          laterExit === "throw" ? 1 : 0
+        );
+        expect(await readFile(path, "utf8")).toBe(`${JSON.stringify(record, null, 2)}\n`);
+        expect((await stat(path, { bigint: true })).ino).toBe(reboundIdentity);
+        expect((await stat(path, { bigint: true })).nlink).toBe(1n);
+        expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+
+        await rm(path);
+        const retried = await createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot, directorySegments, fileName, record, `${evidenceRef}.retry`, schema
+        );
+        if (retried.status !== "created") throw new Error("Expected transition retry.");
+        expect(
+          await conditionalDeleteJsonRecordWithCleanupPermit(
+            retried.cleanupPermit,
+            path,
+            `${evidenceRef}.retry`,
+            schema,
+            { kind: "record", expected: record, matches: () => true }
+          )
+        ).toEqual({ status: "deleted" });
+        expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+      }
+    }
+  });
+
+  test("no-drift publication callback failures remain primary after exact owned rollback", async () => {
+    for (const authority of ["ordinary", "cleanup-permit"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `round-15-no-drift-${authority}` };
+      const evidenceRef = `round-15.rollback.no-drift.${authority}`;
+      const directorySegments = ["round-15-no-drift", authority] as const;
+      const fileName = "record.json";
+      const path = workspaceRecordPath(workspaceRoot, [...directorySegments, fileName], evidenceRef);
+      const marker = new Error(`round-15 no-drift marker ${authority}`);
+
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            beforePublishedRecordFinalValidation: () => {
+              throw marker;
+            }
+          },
+          () => authority === "cleanup-permit"
+            ? createJsonRecordIfAbsentWithCleanupPermit(
+                workspaceRoot, directorySegments, fileName, record, evidenceRef, schema
+              )
+            : createJsonRecordIfAbsent(
+                workspaceRoot, directorySegments, fileName, record, evidenceRef, schema
+              )
+        )
+      );
+
+      expect(semanticPrimaryError(failure)).toBe(marker);
+      expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
+      await expectPathMissing(path);
+      expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+
+      expect(
+        await createJsonRecordIfAbsent(
+          workspaceRoot, directorySegments, fileName, record, `${evidenceRef}.retry`, schema
+        )
+      ).toEqual({ status: "created", record });
+      expect(
+        await conditionalDeleteJsonRecord(path, `${evidenceRef}.retry`, schema, {
+          kind: "record",
+          expected: record,
+          matches: () => true
+        })
+      ).toEqual({ status: "deleted" });
+    }
+  });
 });
 
 function holdFailedLookupUntilBothRetryServicesObserveIt(
