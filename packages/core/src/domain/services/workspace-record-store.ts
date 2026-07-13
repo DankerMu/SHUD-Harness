@@ -3332,27 +3332,43 @@ async function compensateOwnedIsolatedPath(
   }
 
   if (isolatedPathExists !== false) {
-    try {
-      const restoreGeneration = publicRestoreGeneration
-        ? await restoreIsolatedGenerationModeForPublicRollback(
-            isolatedPath,
-            mutationNamespace,
-            expectedGeneration,
-            publicRestoreGeneration,
-            evidenceRef
-          )
-        : expectedGeneration;
-      const restoredBinding = await restoreOwnedIsolatedPath(
-        isolatedPath,
-        publicPath,
-        mutationNamespace,
-        restoreGeneration,
-        evidenceRef,
-        site
-      );
-      onExactPublicRestore?.(restoredBinding);
-    } catch (error) {
-      compensationErrors.push(error);
+    let restoreGeneration: OwnedGenerationExpectation | undefined = expectedGeneration;
+    if (publicRestoreGeneration) {
+      try {
+        restoreGeneration = await restoreIsolatedGenerationModeForPublicRollback(
+          isolatedPath,
+          mutationNamespace,
+          expectedGeneration,
+          publicRestoreGeneration,
+          evidenceRef
+        );
+      } catch (error) {
+        compensationErrors.push(error);
+        restoreGeneration = undefined;
+        const cleanupErrors = await removeUnsafeOwnedIsolatedSource(
+          isolatedPath,
+          mutationNamespace,
+          expectedGeneration,
+          evidenceRef,
+          publicRestoreGeneration
+        );
+        compensationErrors.push(...cleanupErrors);
+      }
+    }
+    if (restoreGeneration) {
+      try {
+        const restoredBinding = await restoreOwnedIsolatedPath(
+          isolatedPath,
+          publicPath,
+          mutationNamespace,
+          restoreGeneration,
+          evidenceRef,
+          site
+        );
+        onExactPublicRestore?.(restoredBinding);
+      } catch (error) {
+        compensationErrors.push(error);
+      }
     }
   }
 
@@ -3949,29 +3965,43 @@ async function removeUnsafeOwnedIsolatedSource(
   isolatedPath: string,
   mutationNamespace: OwnedAuthorityNamespace,
   expectedGeneration: OwnedGenerationExpectation,
-  evidenceRef: string
+  evidenceRef: string,
+  publicRollbackGeneration?: OwnedGenerationExpectation
 ): Promise<unknown[]> {
   const cleanupErrors: unknown[] = [];
   try {
     await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
     const identity = await lstat(isolatedPath, { bigint: true });
-    if (
-      identity.isFile() &&
-      !identity.isSymbolicLink() &&
-      identity.nlink > 1n &&
-      workspaceRecordPhysicalIdentityMatches(identity, expectedGeneration.identity) &&
-      (await ownedGenerationStateMatches(
-        isolatedPath,
-        expectedGeneration,
-        identity.nlink,
-        evidenceRef
-      ))
-    ) {
+    let matchedGeneration: OwnedGenerationExpectation | undefined;
+    if (identity.isFile() && !identity.isSymbolicLink() && identity.nlink > 1n) {
+      // Mode restoration can fail before chmod or after reaching the admitted
+      // public mode, but only the exact admitted pair may widen this match.
+      const expectedGenerations =
+        publicRollbackGeneration &&
+        publicRollbackGenerationPairMatches(expectedGeneration, publicRollbackGeneration)
+        ? [expectedGeneration, publicRollbackGeneration]
+        : [expectedGeneration];
+      for (const candidate of expectedGenerations) {
+        if (
+          workspaceRecordPhysicalIdentityMatches(identity, candidate.identity) &&
+          (await ownedGenerationStateMatches(
+            isolatedPath,
+            candidate,
+            identity.nlink,
+            evidenceRef
+          ))
+        ) {
+          matchedGeneration = candidate;
+          break;
+        }
+      }
+    }
+    if (matchedGeneration) {
       await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
       if (
         !(await ownedGenerationStateMatches(
           isolatedPath,
-          expectedGeneration,
+          matchedGeneration,
           identity.nlink,
           evidenceRef
         ))
@@ -4149,6 +4179,22 @@ async function normalizeLegacyIsolatedGenerationMode(
   return normalizedGeneration;
 }
 
+function publicRollbackGenerationPairMatches(
+  privateGeneration: OwnedGenerationExpectation,
+  publicGeneration: OwnedGenerationExpectation
+): boolean {
+  return (
+    hasExactPrivatePermissions(privateGeneration.mode, PRIVATE_GENERATION_MODE) &&
+    isSafeBaseCompatibleOrdinaryGenerationMode(publicGeneration.mode) &&
+    workspaceRecordPhysicalIdentityMatches(
+      privateGeneration.identity,
+      publicGeneration.identity
+    ) &&
+    privateGeneration.bytes.equals(publicGeneration.bytes) &&
+    privateGeneration.nlink === publicGeneration.nlink
+  );
+}
+
 async function restoreIsolatedGenerationModeForPublicRollback(
   path: string,
   mutationNamespace: OwnedAuthorityNamespace,
@@ -4156,13 +4202,7 @@ async function restoreIsolatedGenerationModeForPublicRollback(
   publicGeneration: OwnedGenerationExpectation,
   evidenceRef: string
 ): Promise<OwnedGenerationExpectation> {
-  if (
-    !hasExactPrivatePermissions(privateGeneration.mode, PRIVATE_GENERATION_MODE) ||
-    !isSafeBaseCompatibleOrdinaryGenerationMode(publicGeneration.mode) ||
-    !workspaceRecordPhysicalIdentityMatches(privateGeneration.identity, publicGeneration.identity) ||
-    !privateGeneration.bytes.equals(publicGeneration.bytes) ||
-    privateGeneration.nlink !== publicGeneration.nlink
-  ) {
+  if (!publicRollbackGenerationPairMatches(privateGeneration, publicGeneration)) {
     throw publicationStateError(evidenceRef);
   }
   await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);

@@ -3247,6 +3247,164 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("legacy rollback removes exact normalized hardlink sources without restoring alias mode", async () => {
+    for (const mode of [0o644, 0o666] as const) {
+      for (const hookExit of ["return", "throw"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const schema = z.object({ id: z.string() });
+        const record = { id: `legacy-normalized-hardlink-${mode.toString(8)}-${hookExit}` };
+        const evidenceRef = `legacy.normalized-hardlink.${mode.toString(8)}.${hookExit}`;
+        const path = workspaceRecordPath(
+          workspaceRoot,
+          ["legacy-normalized-hardlink", `${mode.toString(8)}-${hookExit}.json`],
+          evidenceRef
+        );
+        const expectedBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+        const aliasPath = join(
+          tempRoot,
+          `legacy-normalized-hardlink-${mode.toString(8)}-${hookExit}.json`
+        );
+        const marker = new Error(`legacy normalized hardlink ${mode.toString(8)} ${hookExit}`);
+        let isolatedPath = "";
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, expectedBytes, { flag: "wx", mode: 0o600 });
+        await chmod(path, mode);
+
+        const failure = await captureError(() =>
+          runWithWorkspaceRecordCompensationTestHooks(
+            {
+              afterOwnedPathIsolation: async (input) => {
+                if (input.site !== "conditional_delete") return;
+                isolatedPath = input.isolatedPath;
+                await link(input.isolatedPath, aliasPath);
+                expect(
+                  (await lstat(aliasPath, { bigint: true })).mode & 0o7777n
+                ).toBe(0o600n);
+                if (hookExit === "throw") throw marker;
+              }
+            },
+            () => conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+              kind: "record",
+              expected: record,
+              matches: (current, expected) => current.id === expected.id
+            })
+          )
+        );
+
+        const semanticPrimary = semanticPrimaryError(failure);
+        expect(semanticPrimary).toBeInstanceOf(TaskServiceError);
+        expect((semanticPrimary as TaskServiceError).code).toBe("record_malformed");
+        const messages = aggregateErrorMessages(failure);
+        expect(messages[0]).toBe("Workspace record changed before conditional removal.");
+        const authorityIndex = messages.indexOf(
+          "Workspace record publication authority could not be verified."
+        );
+        expect(authorityIndex).toBeGreaterThan(0);
+        if (hookExit === "throw") {
+          const markerIndex = messages.indexOf(marker.message);
+          expect(markerIndex).toBeGreaterThanOrEqual(0);
+          expect(authorityIndex).toBeGreaterThan(markerIndex);
+          expect(errorTreeContains(failure, marker)).toBe(true);
+        } else {
+          expect(errorTreeContains(failure, marker)).toBe(false);
+        }
+
+        expect(isolatedPath).not.toBe("");
+        await expectPathMissing(path);
+        await expectPathMissing(isolatedPath);
+        await expectPathMissing(dirname(isolatedPath));
+        const aliasState = await readOwnedFileState(aliasPath);
+        expect(aliasState.bytes).toEqual(expectedBytes);
+        expect(aliasState.mode & 0o7777n).toBe(0o600n);
+        expect(aliasState.nlink).toBe(1n);
+        expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+
+        await rename(aliasPath, path);
+        expect(
+          await conditionalDeleteJsonRecord(path, `${evidenceRef}.retry`, schema, {
+            kind: "record",
+            expected: record,
+            matches: (current, expected) => current.id === expected.id
+          })
+        ).toEqual({ status: "deleted" });
+        await expectPathMissing(path);
+        expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+      }
+    }
+  });
+
+  test("legacy rollback cleanup accepts an exact admitted original-mode hardlink state", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const mode = 0o640;
+    const schema = z.object({ id: z.string() });
+    const record = { id: "legacy-original-mode-hardlink" };
+    const evidenceRef = "legacy.original-mode-hardlink";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      ["legacy-original-mode-hardlink", "record.json"],
+      evidenceRef
+    );
+    const expectedBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+    const aliasPath = join(tempRoot, "legacy-original-mode-hardlink-alias.json");
+    const marker = new Error("legacy original-mode hardlink marker");
+    let isolatedPath = "";
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, expectedBytes, { flag: "wx", mode: 0o600 });
+    await chmod(path, mode);
+
+    const failure = await captureError(() =>
+      runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterOwnedPathIsolation: async (input) => {
+            if (input.site !== "conditional_delete") return;
+            isolatedPath = input.isolatedPath;
+            await link(input.isolatedPath, aliasPath);
+            // Model an exact failure state after mode restoration reached the
+            // admitted public mode but before rollback could finish.
+            await chmod(aliasPath, mode);
+            throw marker;
+          }
+        },
+        () => conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+          kind: "record",
+          expected: record,
+          matches: (current, expected) => current.id === expected.id
+        })
+      )
+    );
+
+    expect(semanticPrimaryError(failure)).toBeInstanceOf(TaskServiceError);
+    const messages = aggregateErrorMessages(failure);
+    const markerIndex = messages.indexOf(marker.message);
+    const authorityIndex = messages.indexOf(
+      "Workspace record publication authority could not be verified."
+    );
+    expect(messages[0]).toBe("Workspace record changed before conditional removal.");
+    expect(markerIndex).toBeGreaterThanOrEqual(0);
+    expect(authorityIndex).toBeGreaterThan(markerIndex);
+    expect(isolatedPath).not.toBe("");
+    await expectPathMissing(path);
+    await expectPathMissing(isolatedPath);
+    await expectPathMissing(dirname(isolatedPath));
+    const aliasState = await readOwnedFileState(aliasPath);
+    expect(aliasState.bytes).toEqual(expectedBytes);
+    expect(aliasState.mode & 0o7777n).toBe(BigInt(mode));
+    expect(aliasState.nlink).toBe(1n);
+    expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+
+    await rename(aliasPath, path);
+    expect(
+      await conditionalDeleteJsonRecord(path, `${evidenceRef}.retry`, schema, {
+        kind: "record",
+        expected: record,
+        matches: (current, expected) => current.id === expected.id
+      })
+    ).toEqual({ status: "deleted" });
+    await expectPathMissing(path);
+  });
+
   test("legacy rollback mode restoration never chmods a replacement generation", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
