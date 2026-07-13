@@ -2403,7 +2403,13 @@ async function closeHardlinkTemporaryRecord(
       hooks?.beforeTemporaryFileClose
         ? () => hooks.beforeTemporaryFileClose!(hookInput)
         : undefined,
-      evidenceRef
+      evidenceRef,
+      async () =>
+        await assertHardlinkPrivateTemporaryAuthority(
+          ownedResources,
+          evidenceRef,
+          "open"
+        )
     );
   } catch (error) {
     primaryFailure = { value: error };
@@ -2412,6 +2418,7 @@ async function closeHardlinkTemporaryRecord(
   try {
     await temporaryRecord.file.close();
     temporaryRecord.handleClosed = true;
+    ownedResources.handleClosed = true;
   } catch (error) {
     primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, error);
   }
@@ -2423,7 +2430,13 @@ async function closeHardlinkTemporaryRecord(
         hooks?.afterTemporaryFileClosed
           ? () => hooks.afterTemporaryFileClosed!(hookInput)
           : undefined,
-        evidenceRef
+        evidenceRef,
+        async () =>
+          await assertHardlinkPrivateTemporaryAuthority(
+            ownedResources,
+            evidenceRef,
+            "closed"
+          )
       );
     } catch (error) {
       primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, error);
@@ -4295,12 +4308,81 @@ async function runHardlinkPostLinkCallbackBoundary(
   await runAuthorityMutatingCallbackBoundary(
     callback,
     async () => {
+      let proofFailure: PresentFailure | undefined;
+      const proofCompensations: unknown[] = [];
       if (ownedResources.canonicalPathnameAuthority.status === "retained") {
-        await assertRetainedHardlinkCanonicalEpoch(ownedResources, evidenceRef);
+        try {
+          await assertRetainedHardlinkCanonicalEpoch(ownedResources, evidenceRef);
+        } catch (error) {
+          proofFailure = { value: error };
+        }
       }
-      await proveAdditionalAuthority?.();
+      try {
+        await proveAdditionalAuthority?.();
+      } catch (error) {
+        proofFailure = appendSequentialFailure(
+          proofFailure,
+          proofCompensations,
+          error
+        );
+      }
+      if (proofFailure) {
+        throw preserveWorkspacePrimaryError(
+          proofFailure.value,
+          proofCompensations
+        );
+      }
     }
   );
+}
+
+async function assertHardlinkPrivateTemporaryAuthority(
+  ownedResources: HardlinkPublicationOwnedResources,
+  evidenceRef: string,
+  handleState: "open" | "closed"
+): Promise<void> {
+  const temporaryRecord = ownedResources.temporaryRecord;
+  const generation = ownedResources.temporaryExpectation;
+  const directoryIdentity = ownedResources.directoryIdentity;
+  if (!temporaryRecord || !generation || !directoryIdentity) {
+    throw publicationStateError(evidenceRef);
+  }
+
+  const namespacePath = dirname(ownedResources.temporaryPath);
+  await assertAuthorityNamespaceOwnership(
+    {
+      path: namespacePath,
+      parentPath: dirname(namespacePath),
+      parentIdentity: directoryIdentity,
+      identity: temporaryRecord.namespaceIdentity
+    },
+    evidenceRef
+  );
+  const expectedLinkCount = ownedResources.canonicalIdentity ? 2n : 1n;
+  if (
+    !(await ownedGenerationStateMatches(
+      ownedResources.temporaryPath,
+      generation,
+      expectedLinkCount,
+      evidenceRef
+    ))
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+
+  if (handleState === "open") {
+    if (temporaryRecord.handleClosed || ownedResources.handleClosed) {
+      throw publicationStateError(evidenceRef);
+    }
+    await assertOpenRecordAuthority(
+      temporaryRecord,
+      ownedResources.expectedBytes.toString("utf8"),
+      Number(expectedLinkCount),
+      evidenceRef
+    );
+  } else if (!temporaryRecord.handleClosed || !ownedResources.handleClosed) {
+    throw publicationStateError(evidenceRef);
+  }
 }
 
 async function advanceHardlinkCanonicalEpochAfterTemporaryUnlink(
