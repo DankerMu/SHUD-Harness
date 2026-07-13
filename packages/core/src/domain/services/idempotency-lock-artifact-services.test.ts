@@ -28,6 +28,7 @@ import {
   unlink,
   writeFile
 } from "node:fs/promises";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import ts from "typescript";
@@ -2365,6 +2366,129 @@ describe("idempotency, lock, and artifact services", () => {
           }
         }
       }
+    }
+  });
+
+  test("ordinary canonical baselines reject FIFO and socket entries without blocking or mutation", async () => {
+    for (const kind of ["fifo", "socket"] as const) {
+      const tempRoot = await realpath(await mkdtemp("/tmp/shud-special-canonical-"));
+      const workspaceRoot = join(tempRoot, "workspace");
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `special-canonical-${kind}` };
+      const evidenceRef = `special.canonical.${kind}`;
+      const directorySegments = ["special-canonical", kind] as const;
+      const fileName = "record.json";
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      await mkdir(dirname(path), { recursive: true });
+
+      const holderGate = createAsyncGate();
+      const holderAcquired = createSignal();
+      const targetContended = createSignal();
+      const holder = captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterAuthorityLeaseAcquired: async ({ operation }) => {
+              expect(operation).toBe("read");
+              holderAcquired.resolve();
+              await holderGate.wait;
+            }
+          },
+          () => readJsonRecord(path, `${evidenceRef}.holder`, schema)
+        )
+      );
+      await Promise.race([
+        holderAcquired.promise,
+        timeoutAfter(1_000, `${kind} baseline holder did not acquire`)
+      ]);
+
+      let authorityCallbacks = 0;
+      let temporaryCallbacks = 0;
+      const attemptedWrite = captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            onAuthorityContention: ({ operation }) => {
+              expect(operation).toBe("rename");
+              targetContended.resolve();
+            },
+            afterAuthorityLeaseAcquired: () => {
+              authorityCallbacks += 1;
+            },
+            afterTemporaryFileWritten: () => {
+              temporaryCallbacks += 1;
+            }
+          },
+          () => writeJsonRecord(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            record,
+            evidenceRef,
+            schema
+          )
+        )
+      );
+      await Promise.race([
+        targetContended.promise,
+        timeoutAfter(1_000, `${kind} baseline target did not queue`)
+      ]);
+
+      let socketServer: Server | undefined;
+      if (kind === "fifo") {
+        await createFifo(path);
+      } else {
+        socketServer = createServer();
+        await new Promise<void>((resolvePromise, rejectPromise) => {
+          const rejectOnError = (error: Error) => rejectPromise(error);
+          socketServer!.once("error", rejectOnError);
+          socketServer!.listen(path, () => {
+            socketServer!.off("error", rejectOnError);
+            resolvePromise();
+          });
+        });
+      }
+
+      try {
+        const before = await lstat(path, { bigint: true });
+        expect(kind === "fifo" ? before.isFIFO() : before.isSocket()).toBe(true);
+        holderGate.open();
+        const failure = await Promise.race([
+          attemptedWrite,
+          timeoutAfter(1_500, `${kind} canonical baseline blocked`)
+        ]);
+
+        expect(failure.code).toBe("workspace_path_not_safe");
+        expect(authorityCallbacks).toBe(0);
+        expect(temporaryCallbacks).toBe(0);
+        const after = await lstat(path, { bigint: true });
+        expect(kind === "fifo" ? after.isFIFO() : after.isSocket()).toBe(true);
+        expect(after.dev).toBe(before.dev);
+        expect(after.ino).toBe(before.ino);
+        expect(after.mode).toBe(before.mode);
+        expect(after.nlink).toBe(before.nlink);
+        expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+      } finally {
+        holderGate.open();
+        await Promise.allSettled([holder, attemptedWrite]);
+        if (socketServer) await closeServer(socketServer);
+      }
+
+      await rm(path, { force: true });
+      expect(
+        await writeJsonRecord(
+          workspaceRoot,
+          directorySegments,
+          fileName,
+          record,
+          `${evidenceRef}.retry`,
+          schema
+        )
+      ).toEqual(record);
+      expect(await readJsonRecord(path, `${evidenceRef}.retry`, schema)).toEqual(record);
     }
   });
 
@@ -14759,6 +14883,256 @@ describe("idempotency, lock, and artifact services", () => {
     );
   });
 
+  test("close hooks reject generation-only replacement with an exact private namespace", async () => {
+    const observeActiveCleanupPermitCount = async (phase: "baseline" | "settled") => {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `round-18-generation-capacity-${phase}` };
+      const evidenceRef = `round-18.generation.capacity.${phase}`;
+      const marker = new Error(`round-18 generation capacity ${phase}`);
+      let activeCleanupPermitCount: number | undefined;
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            beforePublishedRecordFinalValidation: () => {
+              throw marker;
+            },
+            beforePublicationCompensationStateInspection: (input) => {
+              if (input.site === "published_rollback") {
+                activeCleanupPermitCount = input.activeCleanupPermitCount;
+              }
+            }
+          },
+          () => createJsonRecordIfAbsent(
+            workspaceRoot,
+            ["round-18-generation-capacity", phase],
+            "record.json",
+            record,
+            evidenceRef,
+            schema
+          )
+        )
+      );
+      expect(semanticPrimaryError(failure)).toBe(marker);
+      expect(activeCleanupPermitCount).toBeDefined();
+      return activeCleanupPermitCount!;
+    };
+
+    const activeCleanupPermitBaseline = await observeActiveCleanupPermitCount("baseline");
+    const cases = [
+      ["retained", "beforeTemporaryFileClose", "ordinary", "return"],
+      ["retained", "beforeTemporaryFileClose", "cleanup-permit", "throw"],
+      ["retained", "afterTemporaryFileClosed", "ordinary", "throw"],
+      ["retained", "afterTemporaryFileClosed", "cleanup-permit", "return"],
+      ["relinquished", "beforeTemporaryFileClose", "ordinary", "throw"],
+      ["relinquished", "beforeTemporaryFileClose", "cleanup-permit", "return"],
+      ["relinquished", "afterTemporaryFileClosed", "ordinary", "return"],
+      ["relinquished", "afterTemporaryFileClosed", "cleanup-permit", "throw"]
+    ] as const;
+
+    for (const [canonicalState, closeHook, authority, hookExit] of cases) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = {
+        id: `round-18-generation-${canonicalState}-${closeHook}-${authority}-${hookExit}`
+      };
+      const foreign = {
+        id: `round-18-foreign-${canonicalState}-${closeHook}-${authority}-${hookExit}`
+      };
+      const recordBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+      const foreignBytes = Buffer.from(`${JSON.stringify(foreign, null, 2)}\n`);
+      const evidenceRef =
+        `round-18.generation.${canonicalState}.${closeHook}.${authority}.${hookExit}`;
+      const directorySegments = [
+        "round-18-generation",
+        canonicalState,
+        closeHook,
+        authority,
+        hookExit
+      ] as const;
+      const fileName = "record.json";
+      const canonicalPath = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const foreignPath = join(
+        tempRoot,
+        `foreign-${canonicalState}-${closeHook}-${authority}-${hookExit}.json`
+      );
+      const marker = Object.assign(
+        new Error(`round-18 generation ${closeHook} ${hookExit}`),
+        { code: "EIO" }
+      );
+      let callbackCalls = 0;
+      let descriptor = -1;
+      let temporaryPath = "";
+      let displacedOwnedPath = "";
+      let ownedGenerationIdentity: bigint | undefined;
+      let foreignGenerationIdentity: bigint | undefined;
+      let parentIdentity: bigint | undefined;
+      let namespaceIdentity: bigint | undefined;
+      let canonicalIdentity: bigint | undefined;
+
+      const replaceGenerationOnly = async (
+        input: WorkspaceRecordTemporaryHandleHookInput
+      ) => {
+        callbackCalls += 1;
+        descriptor = input.descriptor.fd;
+        temporaryPath = input.temporaryPath;
+        displacedOwnedPath = `${temporaryPath}.round-18-displaced-owned`;
+        if (closeHook === "beforeTemporaryFileClose") {
+          const openIdentity = fstatSync(descriptor, { bigint: true });
+          expect(openIdentity.dev).toBe(input.descriptor.dev);
+          expect(openIdentity.ino).toBe(input.descriptor.ino);
+        } else {
+          await expectFileDescriptorClosed(descriptor);
+        }
+
+        const namespacePath = dirname(temporaryPath);
+        const beforeParent = await stat(dirname(namespacePath), { bigint: true });
+        const beforeNamespace = await stat(namespacePath, { bigint: true });
+        const beforeGeneration = await stat(temporaryPath, { bigint: true });
+        parentIdentity = beforeParent.ino;
+        namespaceIdentity = beforeNamespace.ino;
+        ownedGenerationIdentity = beforeGeneration.ino;
+        expect(beforeNamespace.mode & 0o7777n).toBe(0o700n);
+        expect(beforeGeneration.nlink).toBe(2n);
+        expect(beforeGeneration.mode & 0o7777n).toBe(0o600n);
+        expect(await readFile(temporaryPath)).toEqual(recordBytes);
+
+        await writeFile(foreignPath, foreignBytes, { flag: "wx", mode: 0o600 });
+        await rename(temporaryPath, displacedOwnedPath);
+        await link(foreignPath, temporaryPath);
+
+        const afterParent = await stat(dirname(namespacePath), { bigint: true });
+        const afterNamespace = await stat(namespacePath, { bigint: true });
+        const replacement = await stat(temporaryPath, { bigint: true });
+        foreignGenerationIdentity = replacement.ino;
+        expect(afterParent.ino).toBe(parentIdentity);
+        expect(afterNamespace.ino).toBe(namespaceIdentity);
+        expect(afterNamespace.mode).toBe(beforeNamespace.mode);
+        expect(replacement.ino).not.toBe(ownedGenerationIdentity);
+        expect(replacement.nlink).toBe(2n);
+        expect(replacement.mode & 0o7777n).toBe(0o600n);
+        expect(await readFile(temporaryPath)).toEqual(foreignBytes);
+        if (hookExit === "throw") throw marker;
+      };
+
+      const publicationHooks: WorkspaceRecordPublicationHooks = {
+        afterCanonicalLink: async ({ canonicalPath: observedCanonical }) => {
+          canonicalIdentity = (await stat(observedCanonical, { bigint: true })).ino;
+          if (canonicalState !== "relinquished") return;
+          const alias = `${observedCanonical}.round-18-rebound`;
+          await rename(observedCanonical, alias);
+          await link(alias, observedCanonical);
+          await unlink(alias);
+        }
+      };
+      publicationHooks[closeHook] = replaceGenerationOnly;
+
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          publicationHooks,
+          () => authority === "cleanup-permit"
+            ? createJsonRecordIfAbsentWithCleanupPermit(
+                workspaceRoot,
+                directorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                schema
+              )
+            : createJsonRecordIfAbsent(
+                workspaceRoot,
+                directorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                schema
+              )
+        )
+      );
+
+      expect(callbackCalls).toBe(1);
+      expect(descriptor).toBeGreaterThanOrEqual(0);
+      await expectFileDescriptorClosed(descriptor);
+      const primary = semanticPrimaryError(failure);
+      expect(primary).toBeInstanceOf(TaskServiceError);
+      expect((primary as TaskServiceError).code).toBe("workspace_path_not_safe");
+      expect(errorTreeContains(failure, marker)).toBe(hookExit === "throw");
+      expect(countErrorNodes(failure, (error) => error === marker)).toBe(
+        hookExit === "throw" ? 1 : 0
+      );
+      if (hookExit === "throw") {
+        const proofFirstBoundary = findErrorNode(
+          failure,
+          (error) => error instanceof PreservedErrorCompensationEnvelope &&
+            error.semanticPrimary instanceof TaskServiceError &&
+            error.cause instanceof AggregateError &&
+            errorTreeContains(error.cause, marker)
+        ) as PreservedErrorCompensationEnvelope | undefined;
+        expect(proofFirstBoundary).toBeDefined();
+        const ordered = (proofFirstBoundary!.cause as AggregateError).errors;
+        expect(semanticPrimaryError(ordered[0])).toBeInstanceOf(TaskServiceError);
+        expect((semanticPrimaryError(ordered[0]) as TaskServiceError).code).toBe(
+          "workspace_path_not_safe"
+        );
+        expect(ordered[1]).toBe(marker);
+      }
+
+      const namespacePath = dirname(temporaryPath);
+      expect((await stat(dirname(namespacePath), { bigint: true })).ino).toBe(parentIdentity);
+      expect((await stat(namespacePath, { bigint: true })).ino).toBe(namespaceIdentity);
+      expect(await readFile(temporaryPath)).toEqual(foreignBytes);
+      expect((await stat(temporaryPath, { bigint: true })).ino).toBe(
+        foreignGenerationIdentity
+      );
+      expect(await readFile(foreignPath)).toEqual(foreignBytes);
+      expect((await stat(foreignPath, { bigint: true })).ino).toBe(
+        foreignGenerationIdentity
+      );
+      expect(await readFile(displacedOwnedPath)).toEqual(recordBytes);
+      expect((await stat(displacedOwnedPath, { bigint: true })).ino).toBe(
+        ownedGenerationIdentity
+      );
+      expect(await readFile(canonicalPath)).toEqual(recordBytes);
+      expect((await stat(canonicalPath, { bigint: true })).ino).toBe(canonicalIdentity);
+      expect((await stat(canonicalPath, { bigint: true })).nlink).toBe(2n);
+
+      await rm(namespacePath, { recursive: true });
+      expect(await readFile(foreignPath)).toEqual(foreignBytes);
+      await rm(canonicalPath, { force: true });
+      const retried = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        `${evidenceRef}.retry`,
+        schema
+      );
+      if (retried.status !== "created") {
+        throw new Error("Expected repaired Round 18 generation retry.");
+      }
+      expect(
+        await conditionalDeleteJsonRecordWithCleanupPermit(
+          retried.cleanupPermit,
+          canonicalPath,
+          `${evidenceRef}.retry`,
+          schema,
+          { kind: "record", expected: record, matches: () => true }
+        )
+      ).toEqual({ status: "deleted" });
+      expect((await readdir(dirname(canonicalPath))).some(isOwnedRecordPath)).toBe(false);
+    }
+
+    expect(await observeActiveCleanupPermitCount("settled")).toBe(
+      activeCleanupPermitBaseline
+    );
+  });
+
   test("cleanup hooks reject namespace-only replacement with an exact owned generation", async () => {
     const observeActiveCleanupPermitCount = async (phase: "baseline" | "settled") => {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -15597,6 +15971,29 @@ async function chmodIncludingSpecialBits(path: string, mode: number): Promise<vo
   if (exitCode !== 0) {
     throw new Error(`chmod failed with exit ${exitCode}: ${stderr.trim()}`);
   }
+}
+
+async function createFifo(path: string): Promise<void> {
+  const process = Bun.spawn(["mkfifo", path], {
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const [exitCode, stderr] = await Promise.all([
+    process.exited,
+    new Response(process.stderr).text()
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(`mkfifo failed with exit ${exitCode}: ${stderr.trim()}`);
+  }
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    server.close((error) => {
+      if (error) rejectPromise(error);
+      else resolvePromise();
+    });
+  });
 }
 
 function hasTestErrorCode(error: unknown, code: string): boolean {

@@ -4819,16 +4819,44 @@ async function captureMutableCanonicalBaseline(
   recordPath: string,
   evidenceRef: string
 ): Promise<MutableCanonicalBaseline> {
+  const baseline = await captureCanonicalAuthorityBaseline(recordPath, evidenceRef);
+  if (baseline.status === "invalid") throw publicationStateError(evidenceRef);
+  return baseline;
+}
+
+async function captureCanonicalAuthorityBaseline(
+  recordPath: string,
+  evidenceRef: string
+): Promise<CanonicalAuthorityBaseline> {
+  // A successful no-follow open is the valid-entry observation for this
+  // mutation-free authority epoch. Only paths that cannot be opened that way
+  // need a separate lstat to preserve their exact invalid baseline.
   let file: RecordFileHandle | undefined;
   try {
-    file = await open(recordPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    file = await open(
+      recordPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    );
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+      return { status: "absent" };
+    }
+    if (error instanceof TaskServiceError) throw error;
+    return await captureInvalidCanonicalAuthorityBaseline(
+      recordPath,
+      evidenceRef,
+      error
+    );
+  }
+
+  try {
     const before = await file.stat({ bigint: true });
     if (
       !before.isFile() ||
       before.nlink !== 1n ||
       before.size > BigInt(MAX_SERVICE_RECORD_BYTES)
     ) {
-      throw publicationStateError(evidenceRef);
+      return canonicalInvalidBaselineFromStat(before);
     }
     const { bytes, after } = await readBoundedOpenFile(file, before);
     if (
@@ -4852,38 +4880,43 @@ async function captureMutableCanonicalBaseline(
       mtimeNs: before.mtimeNs
     };
   } catch (error) {
-    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
-      return { status: "absent" };
-    }
     if (error instanceof TaskServiceError) throw error;
-    throw publicationStateError(evidenceRef);
+    throw publicationStateError(evidenceRef, error);
   } finally {
     await file?.close();
   }
 }
 
-async function captureCanonicalAuthorityBaseline(
+async function captureInvalidCanonicalAuthorityBaseline(
   recordPath: string,
-  evidenceRef: string
+  evidenceRef: string,
+  openFailure: unknown
 ): Promise<CanonicalAuthorityBaseline> {
-  let entry: Awaited<ReturnType<typeof lstat>>;
+  let entry: BigIntStats;
   try {
     entry = await lstat(recordPath, { bigint: true });
   } catch (error) {
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return { status: "absent" };
     }
-    throw publicationStateError(evidenceRef);
+    if (error instanceof TaskServiceError) throw error;
+    throw publicationStateError(evidenceRef, error);
   }
-
   if (
     entry.isFile() &&
     !entry.isSymbolicLink() &&
     entry.nlink === 1n &&
     entry.size <= BigInt(MAX_SERVICE_RECORD_BYTES)
   ) {
-    return await captureMutableCanonicalBaseline(recordPath, evidenceRef);
+    throw publicationStateError(evidenceRef, openFailure);
   }
+  return canonicalInvalidBaselineFromStat(entry);
+}
+
+function canonicalInvalidBaselineFromStat(entry: BigIntStats): Extract<
+  CanonicalAuthorityBaseline,
+  { status: "invalid" }
+> {
   return {
     status: "invalid",
     identity: { dev: entry.dev, ino: entry.ino },
