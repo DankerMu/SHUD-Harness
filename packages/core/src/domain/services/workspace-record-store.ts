@@ -4292,14 +4292,12 @@ async function runHardlinkPostLinkCallbackBoundary(
   proveAdditionalAuthority?: () => Promise<void>
 ): Promise<void> {
   if (!callback) return;
-  if (ownedResources.canonicalPathnameAuthority.status !== "retained") {
-    await callback();
-    return;
-  }
   await runAuthorityMutatingCallbackBoundary(
     callback,
     async () => {
-      await assertRetainedHardlinkCanonicalEpoch(ownedResources, evidenceRef);
+      if (ownedResources.canonicalPathnameAuthority.status === "retained") {
+        await assertRetainedHardlinkCanonicalEpoch(ownedResources, evidenceRef);
+      }
       await proveAdditionalAuthority?.();
     }
   );

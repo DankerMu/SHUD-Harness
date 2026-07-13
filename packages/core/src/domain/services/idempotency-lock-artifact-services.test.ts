@@ -14305,6 +14305,232 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("relinquished canonical authority still proves every destructive private cleanup callback", async () => {
+    const observeActiveCleanupPermitCount = async (phase: "baseline" | "settled") => {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `round-16-permit-capacity-${phase}` };
+      const evidenceRef = `round-16.private-proof.permit-capacity.${phase}`;
+      const directorySegments = [
+        "round-16-private-proof",
+        "permit-capacity",
+        phase
+      ] as const;
+      const marker = new Error(`round-16 permit capacity ${phase} probe`);
+      let activeCleanupPermitCount: number | undefined;
+      const probeFailure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            beforePublishedRecordFinalValidation: () => {
+              throw marker;
+            },
+            beforePublicationCompensationStateInspection: (input) => {
+              if (input.site === "published_rollback") {
+                activeCleanupPermitCount = input.activeCleanupPermitCount;
+              }
+            }
+          },
+          () => createJsonRecordIfAbsent(
+            workspaceRoot,
+            directorySegments,
+            "record.json",
+            record,
+            evidenceRef,
+            schema
+          )
+        )
+      );
+      expect(semanticPrimaryError(probeFailure)).toBe(marker);
+      expect(activeCleanupPermitCount).toBeDefined();
+      return activeCleanupPermitCount!;
+    };
+
+    const activeCleanupPermitBaseline = await observeActiveCleanupPermitCount("baseline");
+
+    for (const destructiveConsumer of [
+      "beforeAuthorityOwnedUnlink",
+      "beforePublicationTemporaryUnlinkSyscall"
+    ] as const) {
+      for (const authority of ["ordinary", "cleanup-permit"] as const) {
+        for (const laterExit of ["return", "throw"] as const) {
+          const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+          tempRoots.push(tempRoot);
+          const schema = z.object({ id: z.string() });
+          const record = {
+            id: `round-16-${destructiveConsumer}-${authority}-${laterExit}`
+          };
+          const external = {
+            id: `round-16-external-${destructiveConsumer}-${authority}-${laterExit}`
+          };
+          const recordBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+          const externalBytes = Buffer.from(`${JSON.stringify(external, null, 2)}\n`);
+          const evidenceRef =
+            `round-16.private-proof.${destructiveConsumer}.${authority}.${laterExit}`;
+          const directorySegments = [
+            "round-16-private-proof",
+            destructiveConsumer,
+            authority,
+            laterExit
+          ] as const;
+          const fileName = "record.json";
+          const path = workspaceRecordPath(
+            workspaceRoot,
+            [...directorySegments, fileName],
+            evidenceRef
+          );
+          const externalPath = join(tempRoot, "external-generation.json");
+          const laterMarker = Object.assign(
+            new Error(`round-16 later ${destructiveConsumer} ${laterExit}`),
+            { code: "EIO" }
+          );
+          let temporaryPath = "";
+          let displacedOwnedPath = "";
+          let canonicalReboundIdentity: bigint | undefined;
+          let destructiveCallbackCalls = 0;
+
+          const mutatePrivateGeneration = async (candidatePath: string) => {
+            if (destructiveCallbackCalls > 0) return;
+            destructiveCallbackCalls += 1;
+            temporaryPath = candidatePath;
+            displacedOwnedPath = `${candidatePath}.displaced-owned`;
+            await writeFile(externalPath, externalBytes, { flag: "wx", mode: 0o600 });
+            await rename(candidatePath, displacedOwnedPath);
+            await link(externalPath, candidatePath);
+            if (laterExit === "throw") throw laterMarker;
+          };
+
+          const publicationHooks: WorkspaceRecordPublicationHooks = {
+            afterCanonicalLink: async ({ canonicalPath, temporaryPath: observedPath }) => {
+              temporaryPath = observedPath;
+              const alias = `${canonicalPath}.round-16-rebound`;
+              await rename(canonicalPath, alias);
+              await link(alias, canonicalPath);
+              await unlink(alias);
+              canonicalReboundIdentity = (await stat(canonicalPath, { bigint: true })).ino;
+            }
+          };
+          const compensationHooks: Parameters<
+            typeof runWithWorkspaceRecordCompensationTestHooks
+          >[0] = {};
+          if (destructiveConsumer === "beforeAuthorityOwnedUnlink") {
+            publicationHooks.beforeAuthorityOwnedUnlink = async (
+              { path: candidatePath, operation }
+            ) => {
+              if (operation === "hardlink_temp_cleanup") {
+                await mutatePrivateGeneration(candidatePath);
+              }
+            };
+          } else {
+            compensationHooks.beforePublicationTemporaryUnlinkSyscall = async (
+              { path: candidatePath }
+            ) => {
+              await mutatePrivateGeneration(candidatePath);
+            };
+          }
+
+          const failure = await captureError(() =>
+            runWithWorkspaceRecordCompensationTestHooks(
+              compensationHooks,
+              () => runWithWorkspaceRecordPublicationHooks(
+                publicationHooks,
+                () => authority === "cleanup-permit"
+                  ? createJsonRecordIfAbsentWithCleanupPermit(
+                      workspaceRoot,
+                      directorySegments,
+                      fileName,
+                      record,
+                      evidenceRef,
+                      schema
+                    )
+                  : createJsonRecordIfAbsent(
+                      workspaceRoot,
+                      directorySegments,
+                      fileName,
+                      record,
+                      evidenceRef,
+                      schema
+                    )
+              )
+            )
+          );
+
+          expect(destructiveCallbackCalls).toBe(1);
+          const primary = semanticPrimaryError(failure);
+          expect(primary).toBeInstanceOf(TaskServiceError);
+          expect((primary as TaskServiceError).code).toBe("workspace_path_not_safe");
+          expect(errorTreeContains(failure, laterMarker)).toBe(laterExit === "throw");
+          expect(countErrorNodes(failure, (error) => error === laterMarker)).toBe(
+            laterExit === "throw" ? 1 : 0
+          );
+          const orderedEnvelope = findErrorNode(
+            failure,
+            (error) => error instanceof PreservedErrorCompensationEnvelope &&
+              error.semanticPrimary.stack === (primary as TaskServiceError).stack
+          ) as PreservedErrorCompensationEnvelope | undefined;
+          expect(orderedEnvelope).toBeDefined();
+          expect(orderedEnvelope!.semanticPrimary).toBe(primary);
+          expect(orderedEnvelope!.cause).toBeInstanceOf(AggregateError);
+          const compensationAggregate = orderedEnvelope!.cause as AggregateError;
+          const orderedPrivateProof = semanticPrimaryError(
+            compensationAggregate.errors[0]
+          );
+          expect(orderedPrivateProof).toBeInstanceOf(TaskServiceError);
+          expect((orderedPrivateProof as TaskServiceError).code).toBe(
+            "workspace_path_not_safe"
+          );
+          if (laterExit === "throw") {
+            expect(compensationAggregate.errors[1]).toBe(laterMarker);
+          }
+
+          expect(temporaryPath).not.toBe("");
+          expect(displacedOwnedPath).not.toBe("");
+          expect(await readFile(path)).toEqual(recordBytes);
+          expect((await stat(path, { bigint: true })).ino).toBe(canonicalReboundIdentity);
+          expect(await readFile(displacedOwnedPath)).toEqual(recordBytes);
+          expect((await stat(displacedOwnedPath, { bigint: true })).ino).toBe(
+            canonicalReboundIdentity
+          );
+          expect((await stat(path, { bigint: true })).nlink).toBe(2n);
+          expect(await readFile(temporaryPath)).toEqual(externalBytes);
+          expect(await readFile(externalPath)).toEqual(externalBytes);
+          expect((await stat(temporaryPath, { bigint: true })).ino).toBe(
+            (await stat(externalPath, { bigint: true })).ino
+          );
+          expect((await stat(temporaryPath, { bigint: true })).nlink).toBe(2n);
+
+          await rm(dirname(temporaryPath), { recursive: true });
+          await rm(path);
+          const retried = await createJsonRecordIfAbsentWithCleanupPermit(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            record,
+            `${evidenceRef}.retry`,
+            schema
+          );
+          if (retried.status !== "created") {
+            throw new Error("Expected repaired Round 16 retry.");
+          }
+          expect(
+            await conditionalDeleteJsonRecordWithCleanupPermit(
+              retried.cleanupPermit,
+              path,
+              `${evidenceRef}.retry`,
+              schema,
+              { kind: "record", expected: record, matches: () => true }
+            )
+          ).toEqual({ status: "deleted" });
+          expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
+        }
+      }
+    }
+
+    expect(await observeActiveCleanupPermitCount("settled")).toBe(
+      activeCleanupPermitBaseline
+    );
+  });
+
   test("no-drift publication callback failures remain primary after exact owned rollback", async () => {
     for (const authority of ["ordinary", "cleanup-permit"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
