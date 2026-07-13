@@ -1,10 +1,34 @@
 interface PreservedErrorProvenance {
   readonly primary: Error;
   readonly observedCauses: readonly unknown[];
+  readonly observationFailures: readonly unknown[];
   readonly rawCompensations: readonly unknown[];
 }
 
+type ErrorObservation =
+  | {
+      readonly kind: "error";
+      readonly error: Error;
+      readonly failures: readonly unknown[];
+    }
+  | {
+      readonly kind: "non_error" | "indeterminate";
+      readonly error?: undefined;
+      readonly failures: readonly unknown[];
+    };
+
+interface CauseObservation {
+  readonly causes: readonly unknown[];
+  readonly failures: readonly unknown[];
+}
+
+interface CanonicalCompensations {
+  readonly values: readonly unknown[];
+  readonly observationFailures: readonly unknown[];
+}
+
 const preservedErrorProvenance = new WeakMap<Error, PreservedErrorProvenance>();
+const errorObservationCache = new WeakMap<object, ErrorObservation>();
 
 export class PreservedNonErrorThrownValue extends Error {
   readonly thrownValue: unknown;
@@ -26,43 +50,120 @@ export class PreservedErrorCompensationEnvelope extends Error {
   }
 }
 
+class PreservedCompensationCycle extends Error {
+  constructor() {
+    super("A cycle was detected while flattening preserved compensation errors.");
+    this.name = "PreservedCompensationCycle";
+  }
+}
+
+const preservedCompensationCycle = Object.freeze(new PreservedCompensationCycle());
+
+type AsyncOutcome<T> =
+  | { readonly status: "fulfilled"; readonly value: T }
+  | { readonly status: "rejected"; readonly reason: unknown };
+
+export async function runWithPreservedRelease<T>(
+  body: () => Promise<T>,
+  release: () => Promise<void>,
+  aggregateMessage: string,
+  settleFulfilledValueAfterReleaseFailure?: (
+    fulfilledValue: T,
+    releaseReason: unknown
+  ) => Promise<void>
+): Promise<T> {
+  let bodyOutcome: AsyncOutcome<T>;
+  try {
+    bodyOutcome = { status: "fulfilled", value: await body() };
+  } catch (reason) {
+    bodyOutcome = { status: "rejected", reason };
+  }
+
+  let releaseOutcome: AsyncOutcome<void>;
+  try {
+    releaseOutcome = { status: "fulfilled", value: await release() };
+  } catch (reason) {
+    releaseOutcome = { status: "rejected", reason };
+  }
+
+  if (bodyOutcome.status === "rejected") {
+    if (releaseOutcome.status === "rejected") {
+      throw preserveThrownValueAndCompensationErrors(
+        bodyOutcome.reason,
+        [releaseOutcome.reason],
+        aggregateMessage
+      );
+    }
+    throw bodyOutcome.reason;
+  }
+  if (releaseOutcome.status === "rejected") {
+    if (settleFulfilledValueAfterReleaseFailure !== undefined) {
+      try {
+        await settleFulfilledValueAfterReleaseFailure(
+          bodyOutcome.value,
+          releaseOutcome.reason
+        );
+      } catch (settlementReason) {
+        throw preserveThrownValueAndCompensationErrors(
+          releaseOutcome.reason,
+          [settlementReason],
+          aggregateMessage
+        );
+      }
+    }
+    throw releaseOutcome.reason;
+  }
+  return bodyOutcome.value;
+}
+
 export function semanticPrimaryError(value: unknown): Error | undefined {
-  if (!(value instanceof Error)) return undefined;
-  return preservedErrorProvenance.get(value)?.primary ?? value;
+  const provenance = readPreservedErrorProvenance(value);
+  if (provenance) return provenance.primary;
+  const observation = observeError(value);
+  return observation.kind === "error" ? observation.error : undefined;
 }
 
 export function registerPreservedErrorCompatibility(
   compatibleError: Error,
   preservedError: Error
 ): void {
-  const provenance = preservedErrorProvenance.get(preservedError);
+  const provenance = readPreservedErrorProvenance(preservedError);
   if (provenance) preservedErrorProvenance.set(compatibleError, provenance);
 }
 
 export function preserveThrownValueAndCompensationErrors(
   primary: unknown,
   compensations: readonly unknown[],
-  aggregateMessage: string
+  aggregateMessage: string,
+  additionalObservationFailures: readonly unknown[] = []
 ): Error {
-  if (primary instanceof Error) {
-    return preservePrimaryAndCompensationErrors(
-      primary,
+  const primaryObservation = observeError(primary);
+  if (primaryObservation.kind === "error") {
+    return preserveObservedPrimaryAndCompensationErrors(
+      primaryObservation.error,
+      [...primaryObservation.failures, ...additionalObservationFailures],
       compensations,
       aggregateMessage
-    ) as Error;
+    );
   }
 
   const representedPrimary = new PreservedNonErrorThrownValue(primary);
+  const observationFailures = [
+    ...primaryObservation.failures,
+    ...additionalObservationFailures
+  ];
   preservedErrorProvenance.set(representedPrimary, {
     primary: representedPrimary,
     observedCauses: [primary],
+    observationFailures,
     rawCompensations: []
   });
-  return preservePrimaryAndCompensationErrors(
+  return preserveObservedPrimaryAndCompensationErrors(
     representedPrimary,
+    [],
     compensations,
     aggregateMessage
-  ) as Error;
+  );
 }
 
 export function preservePrimaryAndCompensationErrors(
@@ -70,18 +171,43 @@ export function preservePrimaryAndCompensationErrors(
   compensations: readonly unknown[],
   aggregateMessage: string
 ): unknown {
-  if (!(primary instanceof Error) || compensations.length === 0) return primary;
+  const primaryObservation = observeError(primary);
+  if (primaryObservation.kind !== "error" || compensations.length === 0) return primary;
+  return preserveObservedPrimaryAndCompensationErrors(
+    primaryObservation.error,
+    primaryObservation.failures,
+    compensations,
+    aggregateMessage
+  );
+}
 
-  const priorProvenance = preservedErrorProvenance.get(primary);
+function preserveObservedPrimaryAndCompensationErrors(
+  primary: Error,
+  primaryObservationFailures: readonly unknown[],
+  compensations: readonly unknown[],
+  aggregateMessage: string
+): Error {
+  if (compensations.length === 0) return primary;
+
+  const priorProvenance = readPreservedErrorProvenance(primary);
   const semanticPrimary = priorProvenance?.primary ?? primary;
-  const observedCauses = priorProvenance?.observedCauses ??
-    safelyObservePriorCause(semanticPrimary);
+  const causeObservation = priorProvenance
+    ? undefined
+    : safelyObservePriorCause(semanticPrimary);
+  const observedCauses = priorProvenance?.observedCauses ?? causeObservation!.causes;
+  const canonicalCompensations = canonicalizeCompensations(compensations);
+  const observationFailures = [
+    ...(priorProvenance?.observationFailures ?? []),
+    ...primaryObservationFailures,
+    ...(causeObservation?.failures ?? []),
+    ...canonicalCompensations.observationFailures
+  ].filter((failure, index, allFailures) => allFailures.indexOf(failure) === index);
   const rawCompensations = [
     ...(priorProvenance?.rawCompensations ?? []),
-    ...canonicalizeCompensations(compensations)
+    ...canonicalCompensations.values
   ];
   const aggregateCause = new AggregateError(
-    [...observedCauses, ...rawCompensations],
+    [...observedCauses, ...observationFailures, ...rawCompensations],
     aggregateMessage
   );
   const envelope = new PreservedErrorCompensationEnvelope(
@@ -91,43 +217,107 @@ export function preservePrimaryAndCompensationErrors(
   preservedErrorProvenance.set(envelope, {
     primary: semanticPrimary,
     observedCauses,
+    observationFailures,
     rawCompensations
   });
   return envelope;
 }
 
-function canonicalizeCompensations(compensations: readonly unknown[]): unknown[] {
-  const canonical: unknown[] = [];
+function canonicalizeCompensations(
+  compensations: readonly unknown[],
+  activeProvenance = new Set<PreservedErrorProvenance>()
+): CanonicalCompensations {
+  const values: unknown[] = [];
+  const observationFailures: unknown[] = [];
   for (const compensation of compensations) {
-    if (!(compensation instanceof Error)) {
-      canonical.push(compensation);
+    const provenance = readPreservedErrorProvenance(compensation);
+    if (provenance) {
+      if (activeProvenance.has(provenance)) {
+        values.push(preservedCompensationCycle);
+        continue;
+      }
+
+      activeProvenance.add(provenance);
+      try {
+        observationFailures.push(...provenance.observationFailures);
+        values.push(provenance.primary);
+        const nested = canonicalizeCompensations(
+          provenance.rawCompensations,
+          activeProvenance
+        );
+        observationFailures.push(...nested.observationFailures);
+        values.push(...nested.values);
+      } finally {
+        activeProvenance.delete(provenance);
+      }
       continue;
     }
 
-    const provenance = preservedErrorProvenance.get(compensation);
-    if (!provenance) {
-      canonical.push(compensation);
-      continue;
-    }
-
-    canonical.push(
-      provenance.primary,
-      ...canonicalizeCompensations(provenance.rawCompensations)
-    );
+    const observation = observeError(compensation);
+    observationFailures.push(...observation.failures);
+    values.push(compensation);
   }
-  return canonical;
+  return { values, observationFailures };
 }
 
-function safelyObservePriorCause(primary: Error): unknown[] {
-  const descriptor = Object.getOwnPropertyDescriptor(primary, "cause");
+function safelyObservePriorCause(primary: Error): CauseObservation {
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(primary, "cause");
+  } catch (error) {
+    return { causes: [], failures: [error] };
+  }
+
   if (descriptor && "value" in descriptor) {
-    return descriptor.value === undefined ? [] : [descriptor.value];
+    return descriptor.value === undefined
+      ? { causes: [], failures: [] }
+      : { causes: [descriptor.value], failures: [] };
   }
 
   try {
     const priorCause = descriptor?.get ? descriptor.get.call(primary) : primary.cause;
-    return priorCause === undefined ? [] : [priorCause];
+    return priorCause === undefined
+      ? { causes: [], failures: [] }
+      : { causes: [priorCause], failures: [] };
   } catch (error) {
-    return [error];
+    return { causes: [], failures: [error] };
   }
+}
+
+function observeError(value: unknown): ErrorObservation {
+  const provenance = readPreservedErrorProvenance(value);
+  if (provenance) return { kind: "error", error: value as Error, failures: [] };
+  if (!isObjectLike(value)) return { kind: "non_error", failures: [] };
+
+  const cached = errorObservationCache.get(value);
+  if (cached) return cached;
+
+  try {
+    const observation = value instanceof Error
+      ? { kind: "error" as const, error: value, failures: [] }
+      : { kind: "non_error" as const, failures: [] };
+    errorObservationCache.set(value, observation);
+    return observation;
+  } catch (error) {
+    // A trapping prototype/brand observation cannot distinguish Proxy(Error)
+    // from Proxy(plain object). Preserve the raw identity through the existing
+    // represented non-error channel, but never promote it to semantic Error.
+    const observation = {
+      kind: "indeterminate" as const,
+      failures: [error]
+    };
+    errorObservationCache.set(value, observation);
+    return observation;
+  }
+}
+
+function readPreservedErrorProvenance(
+  value: unknown
+): PreservedErrorProvenance | undefined {
+  if (!isObjectLike(value)) return undefined;
+  return preservedErrorProvenance.get(value as Error);
+}
+
+function isObjectLike(value: unknown): value is object {
+  return (typeof value === "object" && value !== null) || typeof value === "function";
 }
