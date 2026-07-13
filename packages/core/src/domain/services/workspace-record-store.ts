@@ -11,6 +11,7 @@ import {
   semanticPrimaryError
 } from "./compensation-error-preservation";
 import {
+  BOUNDED_NOFOLLOW_READ_OPEN_FLAGS,
   readDurableSingleLinkFile,
   type DurableSingleLinkReadFailureReason
 } from "./durable-single-link-reader";
@@ -39,6 +40,14 @@ const PRIVATE_NAMESPACE_MODE = 0o700n;
 
 function hasExactPrivatePermissions(mode: bigint, expected: bigint): boolean {
   return (mode & PRIVATE_PERMISSION_MASK) === expected;
+}
+
+function isSafeBaseCompatibleOrdinaryGenerationMode(mode: bigint): boolean {
+  const permissions = mode & PRIVATE_PERMISSION_MASK;
+  return (
+    (permissions & 0o600n) === 0o600n &&
+    (permissions & ~0o666n) === 0n
+  );
 }
 
 type FileStat = Awaited<ReturnType<typeof lstat>>;
@@ -849,11 +858,9 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   if (observation.status === "missing") return { status: "missing" };
   if (parentBaseline.status !== "existing") throw publicationStateError(evidenceRef);
   const parentIdentity = parentBaseline.identity;
-  const legacyOrdinaryMode = 0o644n;
   if (
     ordinaryCanonicalBaseline?.status === "existing" &&
-    !hasExactPrivatePermissions(ordinaryCanonicalBaseline.mode, PRIVATE_GENERATION_MODE) &&
-    !hasExactPrivatePermissions(ordinaryCanonicalBaseline.mode, legacyOrdinaryMode)
+    !isSafeBaseCompatibleOrdinaryGenerationMode(ordinaryCanonicalBaseline.mode)
   ) {
     throw publicationStateError(evidenceRef);
   }
@@ -901,25 +908,10 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   if (!matched) {
     return { status: "condition_not_met" };
   }
-  if (
+  const admittedPublicGeneration = generationExpectation;
+  const requiresPrivateModeNormalization =
     ordinaryCanonicalBaseline?.status === "existing" &&
-    hasExactPrivatePermissions(ordinaryCanonicalBaseline.mode, legacyOrdinaryMode)
-  ) {
-    generationExpectation = await normalizeLegacyOrdinaryGenerationMode(
-      path,
-      parentPath,
-      parentIdentity,
-      generationExpectation,
-      evidenceRef
-    );
-    admittedGenerationCheckpoint.generation = generationExpectation;
-    admittedGenerationCheckpoint.pathnameBinding = await captureCanonicalPathnameBinding(
-      path,
-      generationExpectation,
-      generationExpectation.nlink,
-      evidenceRef
-    );
-  }
+    !hasExactPrivatePermissions(ordinaryCanonicalBaseline.mode, PRIVATE_GENERATION_MODE);
 
   const mutationNamespace = await createAuthorityOwnedMutationNamespace(
     path,
@@ -990,7 +982,17 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
 
   let quarantinedIdentity: OwnedTemporaryRecordIdentity | undefined;
   let namespaceCleanupAttempted = false;
+  let modeNormalizationCommitted = false;
   try {
+    if (requiresPrivateModeNormalization) {
+      generationExpectation = await normalizeLegacyIsolatedGenerationMode(
+        quarantinePath,
+        mutationNamespace,
+        admittedPublicGeneration,
+        evidenceRef
+      );
+      modeNormalizationCommitted = true;
+    }
     const afterIsolation = compensationTestHookStorage.getStore()?.afterOwnedPathIsolation;
     await runAuthorityMutatingCallbackBoundary(
       afterIsolation
@@ -1089,7 +1091,9 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       generationExpectation,
       evidenceRef,
       "conditional_delete",
-      namespaceCleanupAttempted
+      namespaceCleanupAttempted,
+      undefined,
+      modeNormalizationCommitted ? admittedPublicGeneration : undefined
     );
     const primary = preserveWorkspacePrimaryError(error, compensationErrors);
     if (primary instanceof TaskServiceError) throw primary;
@@ -3308,7 +3312,8 @@ async function compensateOwnedIsolatedPath(
   evidenceRef: string,
   site: WorkspaceRecordPostIsolationSite,
   namespaceCleanupAlreadyAttempted = false,
-  onExactPublicRestore?: (binding: CanonicalPathnameBinding) => void
+  onExactPublicRestore?: (binding: CanonicalPathnameBinding) => void,
+  publicRestoreGeneration?: OwnedGenerationExpectation
 ): Promise<unknown[]> {
   const compensationErrors: unknown[] = [];
   let isolatedPathExists: boolean | undefined;
@@ -3328,11 +3333,20 @@ async function compensateOwnedIsolatedPath(
 
   if (isolatedPathExists !== false) {
     try {
+      const restoreGeneration = publicRestoreGeneration
+        ? await restoreIsolatedGenerationModeForPublicRollback(
+            isolatedPath,
+            mutationNamespace,
+            expectedGeneration,
+            publicRestoreGeneration,
+            evidenceRef
+          )
+        : expectedGeneration;
       const restoredBinding = await restoreOwnedIsolatedPath(
         isolatedPath,
         publicPath,
         mutationNamespace,
-        expectedGeneration,
+        restoreGeneration,
         evidenceRef,
         site
       );
@@ -3984,7 +3998,7 @@ async function ownedGenerationStateMatches(
 ): Promise<boolean> {
   let file: RecordFileHandle | undefined;
   try {
-    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    file = await open(path, BOUNDED_NOFOLLOW_READ_OPEN_FLAGS);
     const before = await file.stat({ bigint: true });
     if (
       !before.isFile() ||
@@ -4020,27 +4034,34 @@ async function ownedGenerationStateMatches(
   }
 }
 
-async function normalizeLegacyOrdinaryGenerationMode(
+async function normalizeLegacyIsolatedGenerationMode(
   path: string,
-  parentPath: string,
-  parentIdentity: OwnedTemporaryRecordIdentity,
+  mutationNamespace: OwnedAuthorityNamespace,
   expectedGeneration: OwnedGenerationExpectation,
   evidenceRef: string
 ): Promise<OwnedGenerationExpectation> {
-  if (!hasExactPrivatePermissions(expectedGeneration.mode, 0o644n)) {
+  if (
+    !isSafeBaseCompatibleOrdinaryGenerationMode(expectedGeneration.mode) ||
+    hasExactPrivatePermissions(expectedGeneration.mode, PRIVATE_GENERATION_MODE)
+  ) {
     throw publicationStateError(evidenceRef);
   }
-  await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef);
+  await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
 
   let file: RecordFileHandle | undefined;
+  let modeMutationAttempted = false;
+  let originalModeRestored = false;
+  let normalizedGeneration: OwnedGenerationExpectation | undefined;
+  let primaryFailure: PresentFailure | undefined;
+  const compensationErrors: unknown[] = [];
   try {
-    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    file = await open(path, BOUNDED_NOFOLLOW_READ_OPEN_FLAGS);
     const before = await file.stat({ bigint: true });
     if (
       !before.isFile() ||
       before.isSymbolicLink() ||
       before.nlink !== 1n ||
-      !hasExactPrivatePermissions(before.mode, 0o644n) ||
+      before.mode !== expectedGeneration.mode ||
       !workspaceRecordPhysicalIdentityMatches(before, expectedGeneration.identity) ||
       before.size !== BigInt(expectedGeneration.bytes.length) ||
       before.size > BigInt(MAX_SERVICE_RECORD_BYTES)
@@ -4056,6 +4077,7 @@ async function normalizeLegacyOrdinaryGenerationMode(
       throw publicationStateError(evidenceRef);
     }
 
+    modeMutationAttempted = true;
     await file.chmod(0o600);
     const afterChmod = await file.stat({ bigint: true });
     if (
@@ -4076,22 +4098,149 @@ async function normalizeLegacyOrdinaryGenerationMode(
     ) {
       throw publicationStateError(evidenceRef);
     }
+    normalizedGeneration = {
+      identity: { dev: afterChmod.dev, ino: afterChmod.ino },
+      bytes: Buffer.from(expectedGeneration.bytes),
+      mode: afterChmod.mode,
+      nlink: afterChmod.nlink
+    };
+    if (
+      !(await ownedGenerationStateMatches(
+        path,
+        normalizedGeneration,
+        normalizedGeneration.nlink,
+        evidenceRef
+      ))
+    ) {
+      throw publicationStateError(evidenceRef);
+    }
+    await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
-    throw publicationStateError(evidenceRef);
+    primaryFailure = {
+      value: error instanceof TaskServiceError ? error : publicationStateError(evidenceRef, error)
+    };
+    if (modeMutationAttempted && file) {
+      try {
+        await restoreOpenGenerationMode(file, expectedGeneration, evidenceRef);
+        originalModeRestored = true;
+      } catch (restoreError) {
+        compensationErrors.push(restoreError);
+      }
+    }
   } finally {
-    await file?.close();
+    try {
+      await file?.close();
+    } catch (closeError) {
+      primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, closeError);
+      if (modeMutationAttempted && !originalModeRestored && file) {
+        try {
+          await restoreOpenGenerationMode(file, expectedGeneration, evidenceRef);
+          originalModeRestored = true;
+        } catch (restoreError) {
+          compensationErrors.push(restoreError);
+        }
+      }
+    }
+  }
+  if (primaryFailure) {
+    throw preserveWorkspacePrimaryError(primaryFailure.value, compensationErrors);
+  }
+  if (!normalizedGeneration) throw publicationStateError(evidenceRef);
+  return normalizedGeneration;
+}
+
+async function restoreIsolatedGenerationModeForPublicRollback(
+  path: string,
+  mutationNamespace: OwnedAuthorityNamespace,
+  privateGeneration: OwnedGenerationExpectation,
+  publicGeneration: OwnedGenerationExpectation,
+  evidenceRef: string
+): Promise<OwnedGenerationExpectation> {
+  if (
+    !hasExactPrivatePermissions(privateGeneration.mode, PRIVATE_GENERATION_MODE) ||
+    !isSafeBaseCompatibleOrdinaryGenerationMode(publicGeneration.mode) ||
+    !workspaceRecordPhysicalIdentityMatches(privateGeneration.identity, publicGeneration.identity) ||
+    !privateGeneration.bytes.equals(publicGeneration.bytes) ||
+    privateGeneration.nlink !== publicGeneration.nlink
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
+
+  let file: RecordFileHandle | undefined;
+  let primaryFailure: PresentFailure | undefined;
+  const compensationErrors: unknown[] = [];
+  try {
+    file = await open(path, BOUNDED_NOFOLLOW_READ_OPEN_FLAGS);
+    const before = await file.stat({ bigint: true });
+    await assertOpenGenerationMatches(file, before, privateGeneration, evidenceRef);
+    await file.chmod(Number(publicGeneration.mode & PRIVATE_PERMISSION_MASK));
+    const restored = await file.stat({ bigint: true });
+    await assertOpenGenerationMatches(file, restored, publicGeneration, evidenceRef);
+  } catch (error) {
+    primaryFailure = {
+      value: error instanceof TaskServiceError ? error : publicationStateError(evidenceRef, error)
+    };
+  } finally {
+    try {
+      await file?.close();
+    } catch (closeError) {
+      primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, closeError);
+    }
+  }
+  if (primaryFailure) {
+    throw preserveWorkspacePrimaryError(primaryFailure.value, compensationErrors);
   }
 
-  await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef);
+  await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
   return await captureOwnedGenerationExpectation(
     path,
-    expectedGeneration.identity,
-    expectedGeneration.bytes,
-    1n,
+    publicGeneration.identity,
+    publicGeneration.bytes,
+    publicGeneration.nlink,
     evidenceRef,
-    PRIVATE_GENERATION_MODE
+    publicGeneration.mode & PRIVATE_PERMISSION_MASK
   );
+}
+
+async function restoreOpenGenerationMode(
+  file: RecordFileHandle,
+  expectedGeneration: OwnedGenerationExpectation,
+  evidenceRef: string
+): Promise<void> {
+  await file.chmod(Number(expectedGeneration.mode & PRIVATE_PERMISSION_MASK));
+  const restored = await file.stat({ bigint: true });
+  await assertOpenGenerationMatches(file, restored, expectedGeneration, evidenceRef);
+}
+
+async function assertOpenGenerationMatches(
+  file: RecordFileHandle,
+  before: BigIntStats,
+  expectedGeneration: OwnedGenerationExpectation,
+  evidenceRef: string
+): Promise<void> {
+  if (
+    !before.isFile() ||
+    before.isSymbolicLink() ||
+    before.nlink !== expectedGeneration.nlink ||
+    before.mode !== expectedGeneration.mode ||
+    !workspaceRecordPhysicalIdentityMatches(before, expectedGeneration.identity) ||
+    before.size !== BigInt(expectedGeneration.bytes.length) ||
+    before.size > BigInt(MAX_SERVICE_RECORD_BYTES)
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  const observed = await readBoundedOpenFile(file, before);
+  if (
+    !observed.bytes.equals(expectedGeneration.bytes) ||
+    observed.after.dev !== before.dev ||
+    observed.after.ino !== before.ino ||
+    observed.after.mode !== before.mode ||
+    observed.after.nlink !== before.nlink ||
+    observed.after.size !== before.size
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
 }
 
 async function captureOwnedGenerationExpectation(
@@ -4104,7 +4253,7 @@ async function captureOwnedGenerationExpectation(
 ): Promise<OwnedGenerationExpectation> {
   let file: RecordFileHandle | undefined;
   try {
-    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    file = await open(path, BOUNDED_NOFOLLOW_READ_OPEN_FLAGS);
     const before = await file.stat({ bigint: true });
     if (
       !before.isFile() ||
@@ -4833,10 +4982,7 @@ async function captureCanonicalAuthorityBaseline(
   // need a separate lstat to preserve their exact invalid baseline.
   let file: RecordFileHandle | undefined;
   try {
-    file = await open(
-      recordPath,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-    );
+    file = await open(recordPath, BOUNDED_NOFOLLOW_READ_OPEN_FLAGS);
   } catch (error) {
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return { status: "absent" };
@@ -5458,7 +5604,7 @@ async function bindRecordAuthorityCleanupPermitGeneration(
     }
     // assertPublishedRecordAuthority returns with this admitted parent proven.
     // No hook or mutation occurs before this descriptor is opened.
-    pinnedFile = await open(state.publicPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    pinnedFile = await open(state.publicPath, BOUNDED_NOFOLLOW_READ_OPEN_FLAGS);
     const before = await pinnedFile.stat({ bigint: true });
     if (
       !before.isFile() ||

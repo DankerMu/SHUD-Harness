@@ -2,7 +2,10 @@ import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, type FileHandle } from "node:fs/promises";
 
 const DURABLE_READ_CHUNK_BYTES = 64 * 1024;
-const DURABLE_READ_OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+export const BOUNDED_NOFOLLOW_READ_OPEN_FLAGS =
+  constants.O_RDONLY |
+  (constants.O_NOFOLLOW ?? 0) |
+  (constants.O_NONBLOCK ?? 0);
 
 type DurableFileStat = BigIntStats;
 
@@ -74,18 +77,13 @@ export async function readDurableSingleLinkFile(
 
   let file: FileHandle;
   try {
-    file = await open(options.path, DURABLE_READ_OPEN_FLAGS);
+    file = await open(options.path, BOUNDED_NOFOLLOW_READ_OPEN_FLAGS);
   } catch (error) {
     return invalidRead("open_failed", error);
   }
   let fileClosed = false;
 
   try {
-    const parentBeforeRead = await validateParentPath(options.validateParentPath);
-    if (parentBeforeRead.status === "invalid") {
-      return parentBeforeRead;
-    }
-
     let beforeRead: DurableFileStat;
     try {
       beforeRead = await file.stat({ bigint: true });
@@ -98,6 +96,11 @@ export async function readDurableSingleLinkFile(
     }
     if (!sameFileIdentity(pathEntry, beforeRead)) {
       return invalidRead("identity_changed");
+    }
+
+    const parentBeforeRead = await validateParentPath(options.validateParentPath);
+    if (parentBeforeRead.status === "invalid") {
+      return parentBeforeRead;
     }
 
     let bytes: Buffer;
