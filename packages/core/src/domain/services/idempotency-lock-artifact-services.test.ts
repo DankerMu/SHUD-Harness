@@ -47,6 +47,7 @@ import {
   lockRecordDirectorySegments,
   lockRecordEvidenceRef,
   lockRecordFileName,
+  runWithExistingWorkspaceRecordDirectoryReproof,
   sha256Hex,
   assertPathInsideWorkspace,
   resolveWorkspacePath,
@@ -54,6 +55,7 @@ import {
   type IdempotencyRecord,
   type IdempotencyRecordService,
   type LockRecord,
+  type TaskCard,
   WorkspacePathSafetyError
 } from "./index";
 import {
@@ -63,7 +65,9 @@ import {
   conditionalDeleteJsonRecordWithCleanupPermit,
   createJsonRecordIfAbsent,
   createJsonRecordIfAbsentWithCleanupPermit,
+  ensureWorkspaceRecordDirectory,
   observeJsonRecordForCleanup,
+  publishJsonRecordWithLifecycleCallbacks,
   readJsonRecord,
   runWithWorkspaceRecordAuthorityDeadline,
   runWithWorkspaceRecordCompensationTestHooks,
@@ -76,6 +80,8 @@ import {
   workspaceRecordPath,
   writeJsonRecord,
   type WorkspaceRecordPublicationHookInput,
+  type WorkspaceJsonRecordLifecycleCallbacks,
+  type WorkspaceJsonRecordLifecycleStateHandle,
   type WorkspaceRecordTemporaryHandleHookInput,
   type WorkspaceRecordPublicationHooks,
   type WorkspaceRecordCleanupPermit
@@ -160,7 +166,10 @@ describe("idempotency, lock, and artifact services", () => {
       "physicalCanonicalPath",
       "physicalAuthorityPathIdentity",
       "physicalAuthorityPathIdentityCandidates",
-      "filesystemDeviceIdentityMatches"
+      "filesystemDeviceIdentityMatches",
+      "ensureWorkspaceDirectoryTree",
+      "probeWorkspaceRecordDirectoryWritable",
+      "runWithExistingWorkspaceRecordDirectoryReproof"
     ];
     const forbiddenTypeExports = [
       "WorkspacePathSafetyHooks",
@@ -170,8 +179,17 @@ describe("idempotency, lock, and artifact services", () => {
       "WorkspaceRecordCompensationTestHooks",
       "runWithWorkspaceRecordCompensationTestHooks",
       "WorkspaceJsonRecordCleanupObservation",
+      "WorkspaceJsonRecordLifecycleCallbacks",
+      "WorkspaceJsonRecordLifecycleStateHandle",
+      "WorkspaceJsonRecordLifecycleStateSnapshot",
+      "createWorkspaceJsonRecordLifecycleStateHandle",
+      "snapshotWorkspaceJsonRecordLifecycleState",
       "observeJsonRecordForCleanup",
       "cancelWorkspaceRecordCleanupPermit",
+      "ensureWorkspaceRecordDirectory",
+      "publishJsonRecordWithLifecycleCallbacks",
+      "quarantineWorkspaceRecordEntry",
+      "removeWorkspaceRecordDirectoryIfEmpty",
       "preservePrimaryAndCompensationErrors",
       "runWithPreservedRelease"
     ];
@@ -185,11 +203,20 @@ describe("idempotency, lock, and artifact services", () => {
       "physicalCanonicalPath",
       "physicalAuthorityPathIdentity",
       "physicalAuthorityPathIdentityCandidates",
-      "filesystemDeviceIdentityMatches"
+      "filesystemDeviceIdentityMatches",
+      "ensureWorkspaceDirectoryTree",
+      "probeWorkspaceRecordDirectoryWritable",
+      "runWithExistingWorkspaceRecordDirectoryReproof"
     ];
     const forbiddenRuntimeExports = [
       "observeJsonRecordForCleanup",
       "cancelWorkspaceRecordCleanupPermit",
+      "ensureWorkspaceRecordDirectory",
+      "createWorkspaceJsonRecordLifecycleStateHandle",
+      "publishJsonRecordWithLifecycleCallbacks",
+      "quarantineWorkspaceRecordEntry",
+      "removeWorkspaceRecordDirectoryIfEmpty",
+      "snapshotWorkspaceJsonRecordLifecycleState",
       "runWithPreservedRelease"
     ];
 
@@ -7008,6 +7035,55 @@ describe("idempotency, lock, and artifact services", () => {
     }
   }, 20_000);
 
+  test("1,025 same-path workspace teardown generations release every directory binding holder", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+
+    for (let generation = 0; generation < 1025; generation += 1) {
+      const directory = await ensureWorkspaceRecordDirectory(
+        workspaceRoot,
+        ["records"],
+        `binding.teardown.same-path.${generation}`
+      );
+      if (directory !== join(workspaceRoot, "records")) {
+        throw new Error(`Same-path teardown generation ${generation} resolved incorrectly.`);
+      }
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    await expectPathMissing(workspaceRoot);
+  }, 20_000);
+
+  test("1,025 distinct-workspace teardowns release every directory binding holder", async () => {
+    const { tempRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const workspaceParent = join(tempRoot, "distinct-workspaces");
+    await mkdir(workspaceParent);
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+
+    for (let generation = 0; generation < 1025; generation += 1) {
+      const workspaceRoot = join(workspaceParent, `workspace-${generation}`);
+      const directory = await ensureWorkspaceRecordDirectory(
+        workspaceRoot,
+        ["records"],
+        `binding.teardown.distinct.${generation}`
+      );
+      if (directory !== join(workspaceRoot, "records")) {
+        throw new Error(`Distinct teardown generation ${generation} resolved incorrectly.`);
+      }
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(await readdir(workspaceParent)).toEqual([]);
+  }, 20_000);
+
   test.skipIf(!distinctCaseEntriesSupported)("ordinary deletion settles only the permit bound to the deleted generation", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -8500,11 +8576,13 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
-  test("trusted sibling create update delete advances shared parent bindings in place", async () => {
+  test("paused record surfaces accept trusted nested-directory mutation on the retained parent lease", async () => {
     for (const surface of [
       "read",
+      "hardlink",
       "publish",
       "delete",
+      "permit-delete",
       "rollback",
       "restoration"
     ] as const) {
@@ -8518,6 +8596,7 @@ describe("idempotency, lock, and artifact services", () => {
       const evidenceRef = `trusted.sibling.binding.${surface}`;
       const targetFileName = "target.json";
       const siblingFileName = "sibling.json";
+      const siblingDirectorySegments = [...directorySegments, "nested"] as const;
       const targetPath = workspaceRecordPath(
         workspaceRoot,
         [...directorySegments, targetFileName],
@@ -8525,15 +8604,30 @@ describe("idempotency, lock, and artifact services", () => {
       );
       const siblingPath = workspaceRecordPath(
         workspaceRoot,
-        [...directorySegments, siblingFileName],
+        [...siblingDirectorySegments, siblingFileName],
         `${evidenceRef}.sibling`
       );
       const targetRecord = { id: `target-${surface}`, revision: 1 };
       const publishedRecord = { id: `target-${surface}`, revision: 2 };
       const startsExisting = surface === "read" ||
         surface === "delete" ||
+        surface === "permit-delete" ||
         surface === "restoration";
-      if (startsExisting) {
+      let cleanupPermit: WorkspaceRecordCleanupPermit | undefined;
+      if (surface === "permit-delete") {
+        const created = await createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          directorySegments,
+          targetFileName,
+          targetRecord,
+          evidenceRef,
+          schema
+        );
+        if (created.status !== "created") {
+          throw new Error("Expected a trusted nested cleanup-permit fixture.");
+        }
+        cleanupPermit = created.cleanupPermit;
+      } else if (startsExisting) {
         expect(
           await createJsonRecordIfAbsent(
             workspaceRoot,
@@ -8565,10 +8659,6 @@ describe("idempotency, lock, and artifact services", () => {
         ? await readFileWithIdentity(targetPath)
         : undefined;
       const parentIdentity = await lstat(dirname(targetPath), { bigint: true });
-      const trustedBindingSequence = workspaceRecordDirectoryBindingSequenceForTest(
-        parentIdentity
-      );
-      expect(trustedBindingSequence).toBeDefined();
       const paused = createSignal();
       const pauseGate = createAsyncGate();
       const primary = new Error(`trusted sibling ${surface} primary`);
@@ -8582,6 +8672,18 @@ describe("idempotency, lock, and artifact services", () => {
         operation = runWithWorkspaceRecordPublicationHooks(
           { afterAuthorityLeaseAcquired: pause },
           () => readJsonRecord(targetPath, evidenceRef, schema)
+        );
+      } else if (surface === "hardlink") {
+        operation = runWithWorkspaceRecordPublicationHooks(
+          { afterCanonicalLink: pause },
+          () => createJsonRecordIfAbsent(
+            workspaceRoot,
+            directorySegments,
+            targetFileName,
+            publishedRecord,
+            evidenceRef,
+            schema
+          )
         );
       } else if (surface === "publish") {
         operation = runWithWorkspaceRecordPublicationHooks(
@@ -8603,6 +8705,21 @@ describe("idempotency, lock, and artifact services", () => {
             expected: targetRecord,
             matches: () => true
           })
+        );
+      } else if (surface === "permit-delete") {
+        operation = runWithWorkspaceRecordPublicationHooks(
+          { beforeConditionalDelete: pause },
+          () => conditionalDeleteJsonRecordWithCleanupPermit(
+            cleanupPermit!,
+            targetPath,
+            evidenceRef,
+            schema,
+            {
+              kind: "record",
+              expected: targetRecord,
+              matches: () => true
+            }
+          )
         );
       } else if (surface === "rollback") {
         operation = captureThrownValue(() =>
@@ -8649,12 +8766,16 @@ describe("idempotency, lock, and artifact services", () => {
         paused.promise,
         timeoutAfter(1_000, `trusted sibling ${surface} did not pause`)
       ]);
+      const trustedBindingSequence = workspaceRecordDirectoryBindingSequenceForTest(
+        parentIdentity
+      );
+      expect(trustedBindingSequence).toBeDefined();
       const siblingFirst = { id: `sibling-${surface}`, revision: 1 };
       const siblingSecond = { id: `sibling-${surface}`, revision: 2 };
       expect(
         await writeJsonRecord(
           workspaceRoot,
-          directorySegments,
+          siblingDirectorySegments,
           siblingFileName,
           siblingFirst,
           `${evidenceRef}.sibling.create`,
@@ -8667,7 +8788,7 @@ describe("idempotency, lock, and artifact services", () => {
       expect(
         await writeJsonRecord(
           workspaceRoot,
-          directorySegments,
+          siblingDirectorySegments,
           siblingFileName,
           siblingSecond,
           `${evidenceRef}.sibling.update`,
@@ -8698,10 +8819,13 @@ describe("idempotency, lock, and artifact services", () => {
       if (surface === "read") {
         expect(outcome).toEqual(targetRecord);
         expect(await readFileWithIdentity(targetPath)).toEqual(targetBefore!);
+      } else if (surface === "hardlink") {
+        expect(outcome).toEqual({ status: "created", record: publishedRecord });
+        expect(JSON.parse(await readFile(targetPath, "utf8"))).toEqual(publishedRecord);
       } else if (surface === "publish") {
         expect(outcome).toEqual(publishedRecord);
         expect(JSON.parse(await readFile(targetPath, "utf8"))).toEqual(publishedRecord);
-      } else if (surface === "delete") {
+      } else if (surface === "delete" || surface === "permit-delete") {
         expect(outcome).toEqual({ status: "deleted" });
         await expectPathMissing(targetPath);
       } else if (surface === "rollback") {
@@ -8713,6 +8837,456 @@ describe("idempotency, lock, and artifact services", () => {
         expect((await stat(targetPath, { bigint: true })).nlink).toBe(1n);
       }
       expect((await readdir(dirname(targetPath))).filter(isOwnedRecordPath)).toEqual([]);
+      expect(
+        workspaceRecordDirectoryBindingSequenceForTest(parentIdentity)
+      ).toBeUndefined();
+      await rmdir(dirname(siblingPath));
+    }
+  });
+
+  test("staggered same-child missing observers retain cohort trust through the final participant", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const parentSegments = ["durable-child-staggered"] as const;
+    const childSegments = [...parentSegments, "nested"] as const;
+    const evidenceRef = "durable.child.staggered";
+    const parentPath = await ensureWorkspaceRecordDirectory(
+      workspaceRoot,
+      parentSegments,
+      evidenceRef
+    );
+    const childPath = join(parentPath, "nested");
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const firstObservedMissing = createSignal();
+    const secondObservedMissing = createSignal();
+    const firstCreationGate = createAsyncGate();
+    const secondCreationGate = createAsyncGate();
+    let missingObservations = 0;
+    let internalCreations = 0;
+    const hooks: WorkspaceRecordPublicationHooks = {
+      beforeDurableDirectoryCreation: async ({ path }) => {
+        if (path !== childPath) return;
+        missingObservations += 1;
+        if (missingObservations === 1) {
+          firstObservedMissing.resolve();
+          await firstCreationGate.wait;
+          return;
+        }
+        secondObservedMissing.resolve();
+        await secondCreationGate.wait;
+      },
+      afterDurableDirectoryCreated: ({ path }) => {
+        if (path === childPath) internalCreations += 1;
+      }
+    };
+    const firstRecord = { id: "staggered-first" };
+    const secondRecord = { id: "staggered-second" };
+    const first = runWithWorkspaceRecordPublicationHooks(hooks, () =>
+      writeJsonRecord(
+        workspaceRoot,
+        childSegments,
+        "first.json",
+        firstRecord,
+        `${evidenceRef}.first`,
+        schema
+      )
+    );
+    await Promise.race([
+      firstObservedMissing.promise,
+      timeoutAfter(1_000, "first staggered operation did not observe the missing child")
+    ]);
+    const second = runWithWorkspaceRecordPublicationHooks(hooks, () =>
+      writeJsonRecord(
+        workspaceRoot,
+        childSegments,
+        "second.json",
+        secondRecord,
+        `${evidenceRef}.second`,
+        schema
+      )
+    );
+    await Promise.race([
+      secondObservedMissing.promise,
+      timeoutAfter(1_000, "second staggered operation did not observe the missing child")
+    ]);
+
+    const joinedDiagnostics = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    expect(joinedDiagnostics.pendingCreationCohorts).toBe(1);
+    expect(joinedDiagnostics.pendingCreationParticipants).toBe(2);
+    expect(joinedDiagnostics.pendingCreationBindings).toBe(0);
+    firstCreationGate.open();
+    expect(await Promise.race([
+      first,
+      timeoutAfter(1_000, "first staggered operation did not fully return")
+    ])).toEqual(firstRecord);
+
+    const retainedDiagnostics = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    expect(retainedDiagnostics.pendingCreationCohorts).toBe(1);
+    expect(retainedDiagnostics.pendingCreationParticipants).toBe(1);
+    expect(retainedDiagnostics.pendingCreationBindings).toBe(1);
+    secondCreationGate.open();
+    expect(await Promise.race([
+      second,
+      timeoutAfter(1_000, "second staggered operation did not consume cohort trust")
+    ])).toEqual(secondRecord);
+
+    expect(missingObservations).toBe(2);
+    expect(internalCreations).toBe(1);
+    expect(await readFile(join(childPath, "first.json"), "utf8")).toBe(
+      `${JSON.stringify(firstRecord, null, 2)}\n`
+    );
+    expect(await readFile(join(childPath, "second.json"), "utf8")).toBe(
+      `${JSON.stringify(secondRecord, null, 2)}\n`
+    );
+    expect(await readJsonRecord(join(childPath, "first.json"), evidenceRef, schema)).toEqual(
+      firstRecord
+    );
+    expect(await readJsonRecord(join(childPath, "second.json"), evidenceRef, schema)).toEqual(
+      secondRecord
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("a failed pending participant releases the published cohort child once after its peer succeeds", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const parentSegments = ["durable-child-participant-failure"] as const;
+    const childSegments = [...parentSegments, "nested"] as const;
+    const evidenceRef = "durable.child.participant.failure";
+    const parentPath = await ensureWorkspaceRecordDirectory(
+      workspaceRoot,
+      parentSegments,
+      evidenceRef
+    );
+    const childPath = join(parentPath, "nested");
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const successfulParticipantObserved = createSignal();
+    const failedParticipantObserved = createSignal();
+    const successGate = createAsyncGate();
+    const failureGate = createAsyncGate();
+    const participantFailure = new Error("pending creation participant failed");
+    let missingObservations = 0;
+    let internalCreations = 0;
+    const hooks: WorkspaceRecordPublicationHooks = {
+      beforeDurableDirectoryCreation: async ({ path }) => {
+        if (path !== childPath) return;
+        missingObservations += 1;
+        if (missingObservations === 1) {
+          successfulParticipantObserved.resolve();
+          await successGate.wait;
+          return;
+        }
+        failedParticipantObserved.resolve();
+        await failureGate.wait;
+        throw participantFailure;
+      },
+      afterDurableDirectoryCreated: ({ path }) => {
+        if (path === childPath) internalCreations += 1;
+      }
+    };
+    const successfulRecord = { id: "successful-participant" };
+    const successful = runWithWorkspaceRecordPublicationHooks(hooks, () =>
+      writeJsonRecord(
+        workspaceRoot,
+        childSegments,
+        "successful.json",
+        successfulRecord,
+        `${evidenceRef}.successful`,
+        schema
+      )
+    );
+    await Promise.race([
+      successfulParticipantObserved.promise,
+      timeoutAfter(1_000, "successful participant did not observe the missing child")
+    ]);
+    const failed = runWithWorkspaceRecordPublicationHooks(hooks, () =>
+      writeJsonRecord(
+        workspaceRoot,
+        childSegments,
+        "failed.json",
+        { id: "failed-participant" },
+        `${evidenceRef}.failed`,
+        schema
+      )
+    );
+    await Promise.race([
+      failedParticipantObserved.promise,
+      timeoutAfter(1_000, "failed participant did not observe the missing child")
+    ]);
+
+    successGate.open();
+    expect(await Promise.race([
+      successful,
+      timeoutAfter(1_000, "successful participant did not create the cohort child")
+    ])).toEqual(successfulRecord);
+    const retainedDiagnostics = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    expect(retainedDiagnostics.pendingCreationCohorts).toBe(1);
+    expect(retainedDiagnostics.pendingCreationParticipants).toBe(1);
+    expect(retainedDiagnostics.pendingCreationBindings).toBe(1);
+
+    failureGate.open();
+    const observedFailure = await Promise.race([
+      failed.then(
+        () => new Error("failed participant unexpectedly fulfilled"),
+        (error: unknown) => error
+      ),
+      timeoutAfter(1_000, "failed participant did not settle")
+    ]);
+    expect(observedFailure).toBe(participantFailure);
+    expect(missingObservations).toBe(2);
+    expect(internalCreations).toBe(1);
+    await expectPathMissing(join(childPath, "failed.json"));
+    expect(await readJsonRecord(
+      join(childPath, "successful.json"),
+      evidenceRef,
+      schema
+    )).toEqual(successfulRecord);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("all precreation participant failures retire the cohort before a repaired write", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const parentSegments = ["durable-child-all-participants-fail"] as const;
+    const childSegments = [...parentSegments, "nested"] as const;
+    const evidenceRef = "durable.child.all.participants.fail";
+    const parentPath = await ensureWorkspaceRecordDirectory(
+      workspaceRoot,
+      parentSegments,
+      evidenceRef
+    );
+    const childPath = join(parentPath, "nested");
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const firstObservedMissing = createSignal();
+    const secondObservedMissing = createSignal();
+    const failureGate = createAsyncGate();
+    const firstFailure = new Error("first precreation participant failed");
+    const secondFailure = new Error("second precreation participant failed");
+    let missingObservations = 0;
+    const failingHooks: WorkspaceRecordPublicationHooks = {
+      beforeDurableDirectoryCreation: async ({ path }) => {
+        if (path !== childPath) return;
+        missingObservations += 1;
+        const observation = missingObservations;
+        if (observation === 1) firstObservedMissing.resolve();
+        else secondObservedMissing.resolve();
+        await failureGate.wait;
+        throw observation === 1 ? firstFailure : secondFailure;
+      }
+    };
+    const first = runWithWorkspaceRecordPublicationHooks(failingHooks, () =>
+      writeJsonRecord(
+        workspaceRoot,
+        childSegments,
+        "first.json",
+        { id: "first-failure" },
+        `${evidenceRef}.first`,
+        schema
+      )
+    );
+    await Promise.race([
+      firstObservedMissing.promise,
+      timeoutAfter(1_000, "first failing participant did not observe the missing child")
+    ]);
+    const second = runWithWorkspaceRecordPublicationHooks(failingHooks, () =>
+      writeJsonRecord(
+        workspaceRoot,
+        childSegments,
+        "second.json",
+        { id: "second-failure" },
+        `${evidenceRef}.second`,
+        schema
+      )
+    );
+    await Promise.race([
+      secondObservedMissing.promise,
+      timeoutAfter(1_000, "second failing participant did not observe the missing child")
+    ]);
+    const joinedDiagnostics = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    expect(joinedDiagnostics.pendingCreationCohorts).toBe(1);
+    expect(joinedDiagnostics.pendingCreationParticipants).toBe(2);
+    expect(joinedDiagnostics.pendingCreationBindings).toBe(0);
+
+    failureGate.open();
+    const outcomes = await Promise.race([
+      Promise.allSettled([first, second]),
+      timeoutAfter(1_000, "failing participants did not settle")
+    ]);
+    expect(outcomes[0]).toEqual({ status: "rejected", reason: firstFailure });
+    expect(outcomes[1]).toEqual({ status: "rejected", reason: secondFailure });
+    await expectPathMissing(childPath);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+
+    let repairedCreations = 0;
+    const repairedRecord = { id: "repaired-after-participant-failures" };
+    expect(await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterDurableDirectoryCreated: ({ path }) => {
+          if (path === childPath) repairedCreations += 1;
+        }
+      },
+      () => writeJsonRecord(
+        workspaceRoot,
+        childSegments,
+        "repaired.json",
+        repairedRecord,
+        `${evidenceRef}.repaired`,
+        schema
+      )
+    )).toEqual(repairedRecord);
+    expect(repairedCreations).toBe(1);
+    expect(await readJsonRecord(join(childPath, "repaired.json"), evidenceRef, schema)).toEqual(
+      repairedRecord
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("overlapping internal creation of the same durable child converges under one parent epoch", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const parentSegments = ["durable-child-convergence"] as const;
+    const childSegments = [...parentSegments, "nested"] as const;
+    const evidenceRef = "durable.child.convergence";
+    const parentPath = await ensureWorkspaceRecordDirectory(
+      workspaceRoot,
+      parentSegments,
+      evidenceRef
+    );
+    const childPath = join(parentPath, "nested");
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bothObservedMissing = createSignal();
+    const creationGate = createAsyncGate();
+    let missingObservations = 0;
+    let internalCreations = 0;
+    const hooks: WorkspaceRecordPublicationHooks = {
+      beforeDurableDirectoryCreation: async ({ path }) => {
+        if (path !== childPath) return;
+        missingObservations += 1;
+        if (missingObservations === 2) bothObservedMissing.resolve();
+        await creationGate.wait;
+      },
+      afterDurableDirectoryCreated: ({ path }) => {
+        if (path === childPath) internalCreations += 1;
+      }
+    };
+    const firstRecord = { id: "same-child-first" };
+    const secondRecord = { id: "same-child-second" };
+    const first = runWithWorkspaceRecordPublicationHooks(hooks, () =>
+      writeJsonRecord(
+        workspaceRoot,
+        childSegments,
+        "first.json",
+        firstRecord,
+        `${evidenceRef}.first`,
+        schema
+      )
+    );
+    const second = runWithWorkspaceRecordPublicationHooks(hooks, () =>
+      writeJsonRecord(
+        workspaceRoot,
+        childSegments,
+        "second.json",
+        secondRecord,
+        `${evidenceRef}.second`,
+        schema
+      )
+    );
+
+    await Promise.race([
+      bothObservedMissing.promise,
+      timeoutAfter(1_000, "same-child operations did not both observe the missing child")
+    ]);
+    expect(
+      workspaceRecordDirectoryBindingDiagnosticsForTest().holders
+    ).toBeGreaterThan(bindingBaseline.holders);
+    creationGate.open();
+    expect(await Promise.all([first, second])).toEqual([firstRecord, secondRecord]);
+
+    expect(missingObservations).toBe(2);
+    expect(internalCreations).toBe(1);
+    expect(await readJsonRecord(join(childPath, "first.json"), evidenceRef, schema)).toEqual(
+      firstRecord
+    );
+    expect(await readJsonRecord(join(childPath, "second.json"), evidenceRef, schema)).toEqual(
+      secondRecord
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("unexplained external durable-child creation and replacement fail closed", async () => {
+    for (const drift of ["creation", "replacement"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const parentSegments = ["durable-child-external", drift] as const;
+      const childSegments = [...parentSegments, "nested"] as const;
+      const evidenceRef = `durable.child.external.${drift}`;
+      const parentPath = await ensureWorkspaceRecordDirectory(
+        workspaceRoot,
+        parentSegments,
+        evidenceRef
+      );
+      const childPath = join(parentPath, "nested");
+      const recordPath = join(childPath, "record.json");
+      const displacedPath = join(parentPath, "nested-displaced");
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      let mutationCalls = 0;
+      const failure = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          drift === "creation"
+            ? {
+                beforeDurableDirectoryCreation: async ({ path }) => {
+                  if (path !== childPath) return;
+                  mutationCalls += 1;
+                  await mkdir(path);
+                }
+              }
+            : {
+                afterDurableDirectoryCreated: async ({ path }) => {
+                  if (path !== childPath) return;
+                  mutationCalls += 1;
+                  await rename(path, displacedPath);
+                  await mkdir(path);
+                }
+              },
+          () =>
+            writeJsonRecord(
+              workspaceRoot,
+              childSegments,
+              "record.json",
+              { id: `external-${drift}` },
+              evidenceRef,
+              schema
+            )
+        )
+      );
+
+      expect(failure.code).toBe("workspace_path_not_safe");
+      expect(mutationCalls).toBe(1);
+      expect((await stat(childPath)).isDirectory()).toBe(true);
+      await expectPathMissing(recordPath);
+      if (drift === "replacement") {
+        expect((await stat(displacedPath)).isDirectory()).toBe(true);
+      }
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+
+      await rm(childPath, { recursive: true, force: true });
+      await rm(displacedPath, { recursive: true, force: true });
     }
   });
 
@@ -9077,7 +9651,7 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
-  test("same dev/ino registry replacement preserves the active binding across private eviction", async () => {
+  test("same dev/ino recreation cannot evict an active binding before exact release", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const schema = z.object({ id: z.string(), revision: z.number().int() });
@@ -9112,11 +9686,6 @@ describe("idempotency, lock, and artifact services", () => {
       schema
     );
     const parentIdentity = await lstat(dirname(firstPath), { bigint: true });
-    const originalSequence = workspaceRecordDirectoryBindingSequenceForTest(
-      parentIdentity
-    );
-    expect(originalSequence).toBeDefined();
-
     const paused = createSignal();
     const gate = createAsyncGate();
     const staleReader = captureTaskServiceError(() =>
@@ -9131,16 +9700,14 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
     await paused.promise;
+    const originalSequence = workspaceRecordDirectoryBindingSequenceForTest(
+      parentIdentity
+    );
+    expect(originalSequence).toBeDefined();
     await moveDirectoryAwayAndBack(dirname(firstPath));
     expect(
       await readJsonRecord(secondPath, "binding.same-key.second.rebind", schema)
     ).toEqual(second);
-    const replacementSequence = workspaceRecordDirectoryBindingSequenceForTest(
-      parentIdentity
-    );
-    expect(replacementSequence).toBeDefined();
-    expect(replacementSequence).not.toBe(originalSequence);
-
     expect(
       await writeJsonRecord(
         workspaceRoot,
@@ -9153,12 +9720,22 @@ describe("idempotency, lock, and artifact services", () => {
     ).toEqual(secondUpdated);
     expect(
       workspaceRecordDirectoryBindingSequenceForTest(parentIdentity)
-    ).toBe(replacementSequence);
+    ).toBe(originalSequence);
     gate.open();
     expect((await staleReader).code).toBe("workspace_path_not_safe");
     expect(
       workspaceRecordDirectoryBindingSequenceForTest(parentIdentity)
-    ).toBe(replacementSequence);
+    ).toBeUndefined();
+    expect(
+      await writeJsonRecord(
+        workspaceRoot,
+        directorySegments,
+        "second.json",
+        secondUpdated,
+        "binding.same-key.second.update.repaired",
+        schema
+      )
+    ).toEqual(secondUpdated);
     expect(
       await readJsonRecord(firstPath, "binding.same-key.first.retry", schema)
     ).toEqual(first);
@@ -16796,6 +17373,236 @@ describe("idempotency, lock, and artifact services", () => {
     await expectPathMissing(join(workspaceRoot, "artifacts", "reports", "report.md"));
   });
 
+  test("TaskCard and record publication converge on one simultaneous missing tasks child", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    await mkdir(workspaceRoot);
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const tasksPath = join(workspaceRoot, "tasks");
+    const bothObservedMissing = createSignal();
+    const creationGate = createAsyncGate();
+    let missingObservations = 0;
+    let internalCreations = 0;
+    const hooks: WorkspaceRecordPublicationHooks = {
+      beforeDurableDirectoryCreation: async ({ path }) => {
+        if (path !== tasksPath) return;
+        missingObservations += 1;
+        if (missingObservations === 2) bothObservedMissing.resolve();
+        await creationGate.wait;
+      },
+      afterDurableDirectoryCreated: ({ path }) => {
+        if (path === tasksPath) internalCreations += 1;
+      }
+    };
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:39:58.000Z"),
+      taskIdFactory: () => "TASK-shared-tasks-simultaneous"
+    });
+    const input = {
+      type: "engineering" as const,
+      title: "Share the tasks directory authority",
+      question_or_goal: "Publish a TaskCard beside a record-store participant.",
+      inference_budget: { mode: "normal" as const },
+      created_by: "pi" as const
+    };
+    const record = { id: "tasks-sibling-simultaneous", revision: 1 };
+    const recordSchema = z.object({ id: z.string(), revision: z.number().int() });
+    const taskPromise = runWithWorkspaceRecordPublicationHooks(hooks, () =>
+      service.createTask(input)
+    );
+    const recordPromise = runWithWorkspaceRecordPublicationHooks(hooks, () =>
+      writeJsonRecord(
+        workspaceRoot,
+        ["tasks"],
+        "shared-record.json",
+        record,
+        "tasks.shared.simultaneous",
+        recordSchema
+      )
+    );
+
+    await Promise.race([
+      bothObservedMissing.promise,
+      timeoutAfter(1_000, "TaskCard and record writer did not both observe missing tasks")
+    ]);
+    creationGate.open();
+    const [task, storedRecord] = await Promise.race([
+      Promise.all([taskPromise, recordPromise]),
+      timeoutAfter(1_000, "TaskCard and record writer did not converge")
+    ]);
+
+    expect(storedRecord).toEqual(record);
+    expect(missingObservations).toBe(2);
+    expect(internalCreations).toBe(1);
+    expect(await readFile(
+      join(tasksPath, task.task_id, "snapshot.json"),
+      "utf8"
+    )).toBe(expectedTaskSnapshotText(task));
+    expect(await readFile(join(tasksPath, "shared-record.json"), "utf8")).toBe(
+      `${JSON.stringify(record, null, 2)}\n`
+    );
+    expect(await service.listTasks()).toEqual([task]);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("TaskCard and record publication retain staggered missing-child cohort authority", async () => {
+    for (const firstKind of ["task", "record"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      await mkdir(workspaceRoot);
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const tasksPath = join(workspaceRoot, "tasks");
+      const firstObservedMissing = createSignal();
+      const secondObservedMissing = createSignal();
+      const firstGate = createAsyncGate();
+      const secondGate = createAsyncGate();
+      let missingObservations = 0;
+      let internalCreations = 0;
+      const hooks: WorkspaceRecordPublicationHooks = {
+        beforeDurableDirectoryCreation: async ({ path }) => {
+          if (path !== tasksPath) return;
+          missingObservations += 1;
+          if (missingObservations === 1) {
+            firstObservedMissing.resolve();
+            await firstGate.wait;
+            return;
+          }
+          secondObservedMissing.resolve();
+          await secondGate.wait;
+        },
+        afterDurableDirectoryCreated: ({ path }) => {
+          if (path === tasksPath) internalCreations += 1;
+        }
+      };
+      const taskId = `TASK-shared-tasks-staggered-${firstKind}`;
+      const service = createTaskCardService({
+        workspaceRoot,
+        now: () => new Date("2026-07-07T13:39:59.000Z"),
+        taskIdFactory: () => taskId
+      });
+      const input = {
+        type: "engineering" as const,
+        title: `Stagger the ${firstKind} producer`,
+        question_or_goal: "Retain exact child authority until the final participant returns.",
+        inference_budget: { mode: "normal" as const },
+        created_by: "pi" as const
+      };
+      const record = { id: `tasks-sibling-staggered-${firstKind}`, revision: 1 };
+      const recordSchema = z.object({ id: z.string(), revision: z.number().int() });
+      const start = (kind: "task" | "record") =>
+        kind === "task"
+          ? runWithWorkspaceRecordPublicationHooks(hooks, async () =>
+              Object.freeze({ kind, value: await service.createTask(input) })
+            )
+          : runWithWorkspaceRecordPublicationHooks(hooks, async () =>
+              Object.freeze({
+                kind,
+                value: await writeJsonRecord(
+                  workspaceRoot,
+                  ["tasks"],
+                  "shared-record.json",
+                  record,
+                  `tasks.shared.staggered.${firstKind}`,
+                  recordSchema
+                )
+              })
+            );
+      const secondKind = firstKind === "task" ? "record" : "task";
+      const first = start(firstKind);
+      await Promise.race([
+        firstObservedMissing.promise,
+        timeoutAfter(1_000, `${firstKind} producer did not observe missing tasks`)
+      ]);
+      const second = start(secondKind);
+      await Promise.race([
+        secondObservedMissing.promise,
+        timeoutAfter(1_000, `${secondKind} producer did not observe missing tasks`)
+      ]);
+
+      firstGate.open();
+      const firstResult = await Promise.race([
+        first,
+        timeoutAfter(1_000, `${firstKind} producer did not finish while its peer was paused`)
+      ]);
+      expect(firstResult.kind).toBe(firstKind);
+      const retainedDiagnostics = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      expect(retainedDiagnostics.pendingCreationCohorts).toBe(1);
+      expect(retainedDiagnostics.pendingCreationParticipants).toBe(1);
+      expect(retainedDiagnostics.pendingCreationBindings).toBe(1);
+
+      secondGate.open();
+      const secondResult = await Promise.race([
+        second,
+        timeoutAfter(1_000, `${secondKind} producer did not consume retained child authority`)
+      ]);
+      const task = (firstResult.kind === "task" ? firstResult.value : secondResult.value) as TaskCard;
+
+      expect(secondResult.kind).toBe(secondKind);
+      expect(missingObservations).toBe(2);
+      expect(internalCreations).toBe(1);
+      expect(await readFile(join(tasksPath, taskId, "snapshot.json"), "utf8")).toBe(
+        expectedTaskSnapshotText(task)
+      );
+      expect(await readFile(join(tasksPath, "shared-record.json"), "utf8")).toBe(
+        `${JSON.stringify(record, null, 2)}\n`
+      );
+      expect(await service.listTasks()).toEqual([task]);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    }
+  });
+
+  test("TaskCard snapshot hooks release authority resources on failure and repaired retry", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const hookFailure = new Error("TaskCard before-write fixture failure");
+    const taskIds = ["TASK-hook-failure", "TASK-hook-repaired"];
+    let shouldFail = true;
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:39:59.500Z"),
+      taskIdFactory: () => taskIds.shift() ?? "TASK-hook-unexpected",
+      snapshotWriteHooks: {
+        beforeSnapshotWrite: () => {
+          if (!shouldFail) return;
+          shouldFail = false;
+          throw hookFailure;
+        }
+      }
+    });
+    const input = {
+      type: "engineering" as const,
+      title: "Release failed TaskCard authority",
+      question_or_goal: "Do not retain a phantom task or poisoned publication resource.",
+      inference_budget: { mode: "normal" as const },
+      created_by: "pi" as const
+    };
+
+    const failure = await captureTaskServiceError(() => service.createTask(input));
+
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(await service.listTasks()).toEqual([]);
+    await expectPathMissing(join(workspaceRoot, "tasks", "TASK-hook-failure"));
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+
+    const repaired = await service.createTask(input);
+    expect(repaired.task_id).toBe("TASK-hook-repaired");
+    expect(await service.listTasks()).toEqual([repaired]);
+    expect(await readFile(
+      join(workspaceRoot, "tasks", repaired.task_id, "snapshot.json"),
+      "utf8"
+    )).toBe(expectedTaskSnapshotText(repaired));
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
   test("TaskCard snapshot writes expose normalized task directories and reject symlink escape", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -16852,6 +17659,8 @@ describe("idempotency, lock, and artifact services", () => {
   test("TaskCard snapshot writes revalidate after post-write hook before caching no-key creates", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
     const taskIds = ["TASK-post-hook-delete", "TASK-post-hook-retry"];
     let shouldDeleteSnapshot = true;
     const service = createTaskCardService({
@@ -16879,6 +17688,8 @@ describe("idempotency, lock, and artifact services", () => {
       })
     );
     const listAfterFailure = await service.listTasks();
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     const retryTask = await service.createTask({
       type: "engineering",
       title: "Retry after post-hook repair",
@@ -16895,6 +17706,50 @@ describe("idempotency, lock, and artifact services", () => {
     expect(
       (await stat(join(workspaceRoot, "tasks", retryTask.task_id, "snapshot.json"))).isFile()
     ).toBe(true);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("TaskCard after-write validation rejects same-byte mutation epochs", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-post-write-same-bytes";
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    let mutationCalls = 0;
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:05.500Z"),
+      taskIdFactory: () => taskId
+    });
+
+    const error = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterDurableRecordObservation: async ({ path, status }) => {
+            if (path !== snapshotPath) return;
+            expect(status).toBe("read");
+            mutationCalls += 1;
+            const expectedBytes = await readFile(path);
+            const transientBytes = Buffer.from(expectedBytes);
+            transientBytes[0] = transientBytes[0] === 0x7b ? 0x5b : 0x7b;
+            await writeFile(path, transientBytes);
+            await writeFile(path, expectedBytes);
+          }
+        },
+        () => service.createTask({
+          type: "engineering",
+          title: "Reject same-byte mutation epoch",
+          question_or_goal: "Do not cache a snapshot whose generation changed after reading.",
+          inference_budget: { mode: "normal" },
+          created_by: "pi"
+        })
+      )
+    );
+
+    expect(error.code).toBe("workspace_path_not_safe");
+    expect(mutationCalls).toBe(1);
+    expect(await service.listTasks()).toEqual([]);
+    await expectPathMissing(snapshotPath);
   });
 
   test("TaskCard snapshot writes reject schema-valid outer snapshot drift before caching", async () => {
@@ -17118,6 +17973,8 @@ describe("idempotency, lock, and artifact services", () => {
   test("TaskCard snapshot writes quarantine directory leaf replacements before hydration", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
     const taskIds = ["TASK-post-hook-directory", "TASK-post-hook-directory-retry"];
     let shouldReplaceSnapshot = true;
     const service = createTaskCardService({
@@ -17149,6 +18006,8 @@ describe("idempotency, lock, and artifact services", () => {
     const listAfterFailure = await service.listTasks();
     const freshService = createTaskCardService({ workspaceRoot });
     const freshListAfterFailure = await freshService.listTasks();
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     const retryTask = await service.createTask(input);
 
     expect(error.code).toBe("workspace_path_not_safe");
@@ -17159,6 +18018,8 @@ describe("idempotency, lock, and artifact services", () => {
     );
     expect(retryTask.task_id).toBe("TASK-post-hook-directory-retry");
     expect(await service.listTasks()).toEqual([retryTask]);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
   test("Artifact registry normalizes artifact paths in stored manifests", async () => {
@@ -19154,9 +20015,7 @@ describe("idempotency, lock, and artifact services", () => {
       expect(failure.mutationPhase).toBe("pre_mutation");
       expect(failure.failureStage).toBe("permit_admission");
       expect(await readFileWithIdentity(path)).toEqual(before);
-      expect(workspaceRecordDirectoryBindingSequenceForTest(parentIdentity)).toBe(
-        bindingSequence
-      );
+      expect(workspaceRecordDirectoryBindingSequenceForTest(parentIdentity)).toBeUndefined();
       expect(pinnedCloseCount).toBe(1);
       await expectFileDescriptorClosed(pinnedDescriptor);
       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
@@ -19171,10 +20030,11 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
-  test("publication cleanup permit accepts trusted sibling mutations on its retained binding", async () => {
+  test("transferred cleanup permits retain the exact parent binding until consume or cancel", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
     const schema = z.object({ id: z.string(), revision: z.number().int() });
     const directorySegments = ["cleanup-retained-parent-trusted"] as const;
     const target = { id: "retained-target", revision: 1 };
@@ -19201,6 +20061,11 @@ describe("idempotency, lock, and artifact services", () => {
     if (created.status !== "created") throw new Error("Expected trusted permit fixture.");
     const parentIdentity = await lstat(dirname(targetPath), { bigint: true });
     const bindingSequence = workspaceRecordDirectoryBindingSequenceForTest(parentIdentity);
+    const retainedDiagnostics = workspaceRecordDirectoryBindingDiagnosticsForTest();
+
+    expect(bindingSequence).toBeDefined();
+    expect(retainedDiagnostics.registered).toBe(bindingBaseline.registered + 1);
+    expect(retainedDiagnostics.holders).toBe(bindingBaseline.holders + 1);
 
     expect(
       await writeJsonRecord(
@@ -19240,6 +20105,39 @@ describe("idempotency, lock, and artifact services", () => {
         { kind: "record", expected: target, matches: () => true }
       )
     ).toEqual({ status: "deleted" });
+    expect(workspaceRecordDirectoryBindingSequenceForTest(parentIdentity)).toBeUndefined();
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+
+    const cancelledTarget = { id: "retained-target-cancelled", revision: 2 };
+    const cancelled = await createJsonRecordIfAbsentWithCleanupPermit(
+      workspaceRoot,
+      directorySegments,
+      "target.json",
+      cancelledTarget,
+      "cleanup.retained-parent.trusted.cancel",
+      schema
+    );
+    if (cancelled.status !== "created") throw new Error("Expected cancellable permit fixture.");
+    const cancelledParentIdentity = await lstat(dirname(targetPath), { bigint: true });
+    expect(
+      workspaceRecordDirectoryBindingSequenceForTest(cancelledParentIdentity)
+    ).toBeDefined();
+    await cancelWorkspaceRecordCleanupPermit(cancelled.cleanupPermit);
+    expect(
+      workspaceRecordDirectoryBindingSequenceForTest(cancelledParentIdentity)
+    ).toBeUndefined();
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(
+      await conditionalDeleteJsonRecord(
+        targetPath,
+        "cleanup.retained-parent.trusted.cancel",
+        schema,
+        { kind: "record", expected: cancelledTarget, matches: () => true }
+      )
+    ).toEqual({ status: "deleted" });
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
@@ -20045,7 +20943,8 @@ describe("idempotency, lock, and artifact services", () => {
       timeoutAfter(1_000, "failed fulfilled-guard settlement descriptors did not close")
     ]);
 
-    expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(failure).toBeInstanceOf(TaskServiceError);
+    expect(failure).not.toBeInstanceOf(PreservedErrorCompensationEnvelope);
     const publishRelease = semanticPrimaryError(failure);
     expect(publishRelease).toBeInstanceOf(TaskServiceError);
     expect(publishRelease?.message).toBe(
@@ -20057,8 +20956,9 @@ describe("idempotency, lock, and artifact services", () => {
     expect(publishReleaseCause.failureStage).toBe("operation");
     expect(errorTreeContains(publishReleaseCause, releaseMarker)).toBe(true);
 
-    const settlementAggregate = (failure as PreservedErrorCompensationEnvelope)
-      .cause as AggregateError;
+    expect(failure.cause).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    const compatibilityCause = failure.cause as PreservedErrorCompensationEnvelope;
+    const settlementAggregate = compatibilityCause.cause as AggregateError;
     expect(settlementAggregate).toBeInstanceOf(AggregateError);
     expect(settlementAggregate.errors).toHaveLength(2);
     expect(settlementAggregate.errors[0]).toBe(publishReleaseCause);
@@ -20450,6 +21350,594 @@ describe("idempotency, lock, and artifact services", () => {
       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     }
   });
+
+  test("completeRecord preserves TaskServiceError compatibility across every release class", async () => {
+    for (const releaseClass of ["guard", "publish-lock", "cleanup-lock"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:task-service-body-release-${releaseClass}`;
+      const requestDigest = `digest-task-service-body-release-${releaseClass}`;
+      const resultRef = `TASK-task-service-body-release-${releaseClass}`;
+      const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+      const recordPath = join(
+        workspaceRoot,
+        "tasks",
+        "_idempotency",
+        "task",
+        idempotencyRecordFileName(rawKey)
+      );
+      const bodyFailure = new TaskServiceError({
+        code: "record_malformed",
+        status: 409,
+        category: "workspace_error",
+        message: `semantic completeRecord failure ${releaseClass}`,
+        userMessage: `Semantic completeRecord user failure ${releaseClass}.`,
+        evidenceRefs: [evidenceRef, `release-class:${releaseClass}`],
+        retryable: true,
+        recommendedNextActions: [
+          `Retry the ${releaseClass} transition.`,
+          "Inspect retained transition evidence."
+        ]
+      });
+      bodyFailure.stack = `TaskServiceError: semantic completeRecord failure ${releaseClass}\n    at exact-stack:${releaseClass}`;
+      const releaseFailure = new Error(
+        `TaskServiceError release failure ${releaseClass}`
+      );
+      const seedService = createIdempotencyRecordService({ workspaceRoot });
+      const begin = await seedService.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      });
+      let service = seedService;
+
+      if (releaseClass === "cleanup-lock") {
+        const staleGuard = {
+          guard_id: "task-service-body-release-stale-guard",
+          owner_pid: 9_999_999,
+          acquired_at_ms: Date.now() - 31_000,
+          acquired_at: "2026-07-07T13:34:00.000Z"
+        };
+        await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, {
+          flag: "wx",
+          mode: 0o600
+        });
+        service = createIdempotencyRecordService({
+          workspaceRoot,
+          transitionGuardHooks: {
+            beforeStaleGuardCleanup: () => {
+              throw bodyFailure;
+            }
+          }
+        });
+      }
+
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let matchingReleaseCalls = 0;
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: ({ canonicalPath }) => {
+              if (
+                (releaseClass === "guard" && canonicalPath === recordPath) ||
+                (releaseClass === "publish-lock" && canonicalPath === guardPath)
+              ) {
+                throw bodyFailure;
+              }
+            },
+            beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+              const releasePath = releaseClass === "guard" ? guardPath : cleanupLockPath;
+              if (path !== releasePath || operation !== "conditional_delete") return;
+              matchingReleaseCalls += 1;
+              if (releaseClass === "cleanup-lock" && matchingReleaseCalls === 1) {
+                return;
+              }
+              throw releaseFailure;
+            }
+          },
+          () =>
+            service.completeRecord({
+              scope: "task",
+              key: rawKey,
+              requestDigest,
+              resultRef
+            })
+        )
+      );
+
+      expect(begin.status).toBe("acquired");
+      expect(failure).toBeInstanceOf(TaskServiceError);
+      expect(failure).not.toBe(bodyFailure);
+      expect(semanticPrimaryError(failure)).toBe(bodyFailure);
+      const compatible = failure as TaskServiceError;
+      expect(compatible.code).toBe(bodyFailure.code);
+      expect(compatible.status).toBe(bodyFailure.status);
+      expect(compatible.category).toBe(bodyFailure.category);
+      expect(compatible.message).toBe(bodyFailure.message);
+      expect(compatible.userMessage).toBe(bodyFailure.userMessage);
+      expect(compatible.evidenceRefs).toEqual(bodyFailure.evidenceRefs);
+      expect(compatible.retryable).toBe(bodyFailure.retryable);
+      expect(compatible.recommendedNextActions).toEqual(
+        bodyFailure.recommendedNextActions
+      );
+      expect(compatible.stack).toBe(bodyFailure.stack);
+      expect(compatible.cause).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+      expect(matchingReleaseCalls).toBe(releaseClass === "cleanup-lock" ? 2 : 1);
+      expect(countErrorNodes(failure, (error) => error === releaseFailure)).toBe(1);
+      const releaseServiceFailure = findErrorNode(
+        failure,
+        (error) =>
+          error instanceof TaskServiceError &&
+          error.message ===
+            "Idempotency transition artifact release did not settle safely."
+      );
+      expect(releaseServiceFailure).toBeInstanceOf(TaskServiceError);
+      expect(findPreservedCompensationAggregate(failure)?.errors).toEqual([
+        releaseServiceFailure
+      ]);
+      expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        bindingBaseline
+      );
+    }
+  });
+
+  test("lifecycle callback accessors are captured once before publication authority", async () => {
+    for (const callbackName of ["beforeWrite", "afterWrite"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const directorySegments = ["lifecycle-accessor-capture", callbackName] as const;
+      const fileName = "record.json";
+      const evidenceRef = `lifecycle.accessor.${callbackName}`;
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const safeRecord = { id: `safe-${callbackName}` };
+      const poisonRecord = { id: `poison-${callbackName}` };
+      const safeText = `${JSON.stringify(safeRecord, null, 2)}\n`;
+      const poisonText = `${JSON.stringify(poisonRecord, null, 2)}\n`;
+      const schema = z.object({ id: z.string() });
+      const callbacks: WorkspaceJsonRecordLifecycleCallbacks = {};
+      let accessorReads = 0;
+      Object.defineProperty(callbacks, callbackName, {
+        configurable: false,
+        enumerable: true,
+        get: () => {
+          accessorReads += 1;
+          if (accessorReads > 1) {
+            writeFileSync(recordPath, poisonText);
+          }
+          return undefined;
+        }
+      });
+
+      const returned = await publishJsonRecordWithLifecycleCallbacks(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        safeRecord,
+        evidenceRef,
+        schema,
+        callbacks
+      );
+
+      expect(accessorReads).toBe(1);
+      expect(returned).toEqual(safeRecord);
+      expect(Object.getPrototypeOf(returned)).toBe(Object.prototype);
+      expect(await readFile(recordPath, "utf8")).toBe(safeText);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        bindingBaseline
+      );
+    }
+  });
+
+  test("caller-owned lifecycle state proxies are rejected without setter execution", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const directorySegments = ["caller-lifecycle-state"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "lifecycle.state.caller-owned";
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const poisonText = `${JSON.stringify({ id: "poison" }, null, 2)}\n`;
+    let setterCalls = 0;
+    const callerOwnedState = new Proxy(
+      {
+        beforeWriteStarted: false,
+        beforeWriteReturned: false,
+        afterWriteStarted: false
+      },
+      {
+        set: (target, property, value) => {
+          setterCalls += 1;
+          if (property === "afterWriteStarted") {
+            writeFileSync(recordPath, poisonText);
+          }
+          return Reflect.set(target, property, value);
+        }
+      }
+    );
+
+    const error = await captureTaskServiceError(() =>
+      publishJsonRecordWithLifecycleCallbacks(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        { id: "safe" },
+        evidenceRef,
+        z.object({ id: z.string() }),
+        {},
+        callerOwnedState as unknown as WorkspaceJsonRecordLifecycleStateHandle
+      )
+    );
+
+    expect(error.code).toBe("workspace_path_not_safe");
+    expect(error.message).toBe(
+      "Workspace record publication authority could not be verified."
+    );
+    expect(setterCalls).toBe(0);
+    await expectPathMissing(recordPath);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("writeJsonRecord returns an inert copy of schema output with a stateful then getter", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const directorySegments = ["write-inert-result"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "write.inert-result.then";
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const safeRecord = { id: "safe-write-result" };
+    const poisonText = `${JSON.stringify({ id: "poison-write-result" }, null, 2)}\n`;
+    let thenReads = 0;
+    const schema = z.object({ id: z.string() }).transform((value) => {
+      Object.defineProperty(value, "then", {
+        configurable: false,
+        enumerable: false,
+        get: () => {
+          thenReads += 1;
+          writeFileSync(recordPath, poisonText);
+          return undefined;
+        }
+      });
+      return value;
+    });
+
+    const returned = await writeJsonRecord(
+      workspaceRoot,
+      directorySegments,
+      fileName,
+      safeRecord,
+      evidenceRef,
+      schema
+    );
+
+    expect(thenReads).toBe(0);
+    expect(returned).toEqual(safeRecord);
+    expect(Object.getOwnPropertyDescriptor(returned, "then")).toBeUndefined();
+    expect(Object.getPrototypeOf(returned)).toBe(Object.prototype);
+    expect(await readFile(recordPath, "utf8")).toBe(
+      `${JSON.stringify(safeRecord, null, 2)}\n`
+    );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("readJsonRecord normalizes a schema-transform thenable before its final proof", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const directorySegments = ["read-inert-result"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "read.inert-result.then";
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const safeRecord = { id: "safe-read-result" };
+    const baseSchema = z.object({ id: z.string() });
+    await writeJsonRecord(
+      workspaceRoot,
+      directorySegments,
+      fileName,
+      safeRecord,
+      evidenceRef,
+      baseSchema
+    );
+    const safeText = `${JSON.stringify(safeRecord, null, 2)}\n`;
+    const poisonText = `${JSON.stringify({ id: "poison-read-result" }, null, 2)}\n`;
+    let thenReads = 0;
+    const transformedSchema = baseSchema.transform((value) => {
+      Object.defineProperty(value, "then", {
+        configurable: false,
+        enumerable: false,
+        get: () => {
+          thenReads += 1;
+          writeFileSync(recordPath, poisonText);
+          return undefined;
+        }
+      });
+      return value;
+    });
+
+    const returned = await readJsonRecord(
+      recordPath,
+      evidenceRef,
+      transformedSchema
+    );
+
+    expect(thenReads).toBe(0);
+    expect(returned).toEqual(safeRecord);
+    expect(Object.getOwnPropertyDescriptor(returned!, "then")).toBeUndefined();
+    expect(Object.getPrototypeOf(returned!)).toBe(Object.prototype);
+    expect(await readFile(recordPath, "utf8")).toBe(safeText);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("lifecycle publication returns an inert copy of stateful thenable schema output", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const directorySegments = ["lifecycle-inert-result"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "lifecycle.inert-result.then";
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const safeRecord = { id: "safe-lifecycle-result" };
+    const safeText = `${JSON.stringify(safeRecord, null, 2)}\n`;
+    const poisonText = `${JSON.stringify({ id: "poison-lifecycle-result" }, null, 2)}\n`;
+    let thenReads = 0;
+    const schema = z.object({ id: z.string() }).transform((value) => {
+      Object.defineProperty(value, "then", {
+        configurable: false,
+        enumerable: false,
+        get: () => {
+          thenReads += 1;
+          writeFileSync(recordPath, poisonText);
+          return undefined;
+        }
+      });
+      return value;
+    });
+
+    const returned = await publishJsonRecordWithLifecycleCallbacks(
+      workspaceRoot,
+      directorySegments,
+      fileName,
+      safeRecord,
+      evidenceRef,
+      schema
+    );
+
+    expect(thenReads).toBe(0);
+    expect(returned).toEqual(safeRecord);
+    expect(Object.getOwnPropertyDescriptor(returned, "then")).toBeUndefined();
+    expect(Object.getPrototypeOf(returned)).toBe(Object.prototype);
+    expect(await readFile(recordPath, "utf8")).toBe(safeText);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("create and cleanup observations nest only normalized inert records", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const directorySegments = ["nested-inert-results"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "nested.inert-results.then";
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const safeRecord = { id: "safe-nested-result" };
+    const safeText = `${JSON.stringify(safeRecord, null, 2)}\n`;
+    const poisonText = `${JSON.stringify({ id: "poison-nested-result" }, null, 2)}\n`;
+    let thenReads = 0;
+    const schema = z.object({ id: z.string() }).transform((value) => {
+      Object.defineProperty(value, "then", {
+        configurable: false,
+        enumerable: false,
+        get: () => {
+          thenReads += 1;
+          writeFileSync(recordPath, poisonText);
+          return undefined;
+        }
+      });
+      return value;
+    });
+
+    const created = await createJsonRecordIfAbsent(
+      workspaceRoot,
+      directorySegments,
+      fileName,
+      safeRecord,
+      evidenceRef,
+      schema
+    );
+    if (created.status !== "created") throw new Error("Expected nested record creation.");
+    const createdRecord = await created.record;
+    const observation = await observeJsonRecordForCleanup(
+      recordPath,
+      evidenceRef,
+      schema
+    );
+    if (observation.status !== "record") {
+      throw new Error("Expected a nested cleanup observation record.");
+    }
+    const observedRecord = await observation.record;
+    await cancelWorkspaceRecordCleanupPermit(observation.cleanupPermit);
+
+    expect(thenReads).toBe(0);
+    expect(createdRecord).toEqual(safeRecord);
+    expect(observedRecord).toEqual(safeRecord);
+    expect(Object.getOwnPropertyDescriptor(createdRecord, "then")).toBeUndefined();
+    expect(Object.getOwnPropertyDescriptor(observedRecord, "then")).toBeUndefined();
+    expect(Object.getPrototypeOf(createdRecord)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(observedRecord)).toBe(Object.prototype);
+    expect(await readFile(recordPath, "utf8")).toBe(safeText);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("directory reproof reduces a stateful callback thenable to a terminal boolean", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    await mkdir(workspaceRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const poisonPath = join(workspaceRoot, "post-proof-poison.json");
+    const before = await lstat(workspaceRoot, { bigint: true });
+    let thenReads = 0;
+    const callbackResult = {};
+    Object.defineProperty(callbackResult, "then", {
+      configurable: false,
+      enumerable: false,
+      get: () => {
+        thenReads += 1;
+        if (thenReads > 1) {
+          writeFileSync(poisonPath, "poison\n", { flag: "wx", mode: 0o600 });
+        }
+        return undefined;
+      }
+    });
+
+    const returned = await runWithExistingWorkspaceRecordDirectoryReproof(
+      workspaceRoot,
+      [],
+      "workspace.health.custom_writable.thenable",
+      () => callbackResult
+    );
+    const after = await lstat(workspaceRoot, { bigint: true });
+
+    expect(returned).toBe(true);
+    expect(thenReads).toBe(1);
+    await expectPathMissing(poisonPath);
+    expect({
+      dev: after.dev,
+      ino: after.ino,
+      mode: after.mode,
+      nlink: after.nlink,
+      size: after.size,
+      ctimeNs: after.ctimeNs,
+      mtimeNs: after.mtimeNs
+    }).toEqual({
+      dev: before.dev,
+      ino: before.ino,
+      mode: before.mode,
+      nlink: before.nlink,
+      size: before.size,
+      ctimeNs: before.ctimeNs,
+      mtimeNs: before.mtimeNs
+    });
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("generic record-store Promise settlements have an explicit inertness disposition", async () => {
+    const sourcePath = join(import.meta.dir, "workspace-record-store.ts");
+    const sourceText = await readFile(sourcePath, "utf8");
+    const sourceFile = ts.createSourceFile(
+      sourcePath,
+      sourceText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS
+    );
+    const directGenericPromiseFunctions: string[] = [];
+    let directoryReproofReturnType: string | undefined;
+    const visit = (node: ts.Node): void => {
+      if (ts.isFunctionDeclaration(node) && node.name && node.type) {
+        const name = node.name.text;
+        const returnType = node.type.getText(sourceFile);
+        if (name === "runWithExistingWorkspaceRecordDirectoryReproof") {
+          directoryReproofReturnType = returnType;
+        }
+        if (
+          node.typeParameters?.some((typeParameter) => typeParameter.name.text === "T") &&
+          returnType.startsWith("Promise<") &&
+          /\bT\b/.test(returnType)
+        ) {
+          directGenericPromiseFunctions.push(name);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+
+    const contextOnlyWithoutTerminalProof = [
+      "runWithWorkspaceRecordAuthorityDeadline",
+      "runWithWorkspaceRecordCompensationTestHooks",
+      "runWithWorkspaceRecordPublicationHooks"
+    ];
+    const normalizedInertJsonSettlement = [
+      "publishJsonRecordWithLifecycleCallbacks",
+      "readJsonRecord",
+      "readJsonRecordUnderAuthority",
+      "readJsonRecordWithDirectoryBindingOperation",
+      "writeJsonRecord",
+      "writeJsonRecordWithDirectoryBindingOperation"
+    ];
+    const recordStoreOwnedEnvelopeSettlement = [
+      "createJsonRecordIfAbsent",
+      "createJsonRecordIfAbsentInternal",
+      "createJsonRecordIfAbsentWithCleanupPermit",
+      "createJsonRecordIfAbsentWithDirectoryBindingOperation",
+      "inspectJsonRecordUnderAuthority",
+      "observeJsonRecordForCleanup",
+      "observeJsonRecordForCleanupWithDirectoryBindingOperation",
+      "prepareJsonRecordWrite",
+      "writePreparedJsonRecordWithDirectoryBindingOperation"
+    ];
+    const explicitLaterDirectoryProof = [
+      "runOwnedAuthorityNamespaceMutation",
+      "runOwnedRecordDirectoryMutation",
+      "runOwnedRecordDirectoryTransferMutation"
+    ];
+    const recordStoreOwnedInternalSettlement = [
+      "runWithRecordDirectoryBindingOperation",
+      "runWithRecordDirectoryMutationLocks"
+    ];
+    const inventoriedFunctions = [
+      ...contextOnlyWithoutTerminalProof,
+      ...normalizedInertJsonSettlement,
+      ...recordStoreOwnedEnvelopeSettlement,
+      ...explicitLaterDirectoryProof,
+      ...recordStoreOwnedInternalSettlement
+    ].sort();
+
+    expect(directGenericPromiseFunctions.sort()).toEqual(inventoriedFunctions);
+    expect(directoryReproofReturnType).toBe("Promise<boolean>");
+  });
 });
 
 function holdFailedLookupUntilBothRetryServicesObserveIt(
@@ -20543,6 +22031,27 @@ function createSignal(): { promise: Promise<void>; resolve: () => void } {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+function expectedTaskSnapshotText(task: TaskCard): string {
+  return `${JSON.stringify(
+    {
+      task_id: task.task_id,
+      status: task.status,
+      runtime_phase: task.runtime_phase ?? null,
+      ...(task.stack_id ? { stack_id: task.stack_id } : {}),
+      ...(task.data_id ? { data_id: task.data_id } : {}),
+      linked_jobs: task.linked_jobs,
+      linked_runs: [],
+      linked_reports: task.linked_reports,
+      pending_pi_gates: [],
+      latest_seq: 0,
+      updated_at: task.updated_at,
+      task_card: task
+    },
+    null,
+    2
+  )}\n`;
 }
 
 async function runMixedLockAuthorityOperation(

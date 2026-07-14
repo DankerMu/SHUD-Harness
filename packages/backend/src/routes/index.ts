@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, mkdir, realpath, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, parse, resolve, sep } from "node:path";
+import { access, lstat } from "node:fs/promises";
+import { join, parse, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   DEFAULT_TASK_CREATED_BY,
@@ -12,7 +12,11 @@ import {
   createIdempotencyMismatchError,
   createIdempotencyRecordService,
   createTaskCardService,
+  ensureWorkspaceDirectoryTree,
+  ensureWorkspaceRecordRootPhysicalIdentity,
   isSafeTaskId,
+  probeWorkspaceRecordDirectoryWritable,
+  runWithExistingWorkspaceRecordDirectoryReproof,
   sha256Hex,
   type CreateTaskInput,
   type InvalidCompletedIdempotencyRecordLookup,
@@ -538,36 +542,14 @@ async function idempotentTaskCreateInFlightIdentity(
 }
 
 async function canonicalInFlightWorkspaceIdentity(workspaceRoot: string): Promise<string> {
-  const resolvedRoot = resolve(workspaceRoot);
   try {
-    await ensureWorkspaceRootDirectory(resolvedRoot);
+    return await ensureWorkspaceRecordRootPhysicalIdentity(
+      workspaceRoot,
+      "workspace.task_create_identity"
+    );
   } catch {
     throw workspaceInFlightIdentityError();
   }
-
-  if (!(await isSafeExistingDirectoryPath(resolvedRoot))) {
-    throw workspaceInFlightIdentityError();
-  }
-
-  let firstPhysicalRoot: string;
-  let secondPhysicalRoot: string;
-  try {
-    firstPhysicalRoot = await realpath(resolvedRoot);
-    if (!(await isSafeExistingDirectoryPath(resolvedRoot))) {
-      throw workspaceInFlightIdentityError();
-    }
-    secondPhysicalRoot = await realpath(resolvedRoot);
-  } catch (error) {
-    if (error instanceof TaskServiceError) {
-      throw error;
-    }
-    throw workspaceInFlightIdentityError();
-  }
-  if (firstPhysicalRoot !== secondPhysicalRoot) {
-    throw workspaceInFlightIdentityError();
-  }
-
-  return firstPhysicalRoot;
 }
 
 async function resolveIdempotentTaskCreateWithoutOwner(
@@ -1170,16 +1152,17 @@ export function createWorkspaceRoutesService(
   const version = options.version ?? process.env.npm_package_version ?? "0.0.0";
   const now = options.now ?? (() => new Date());
   const startTimeMs = options.startTimeMs ?? Date.now();
-  const writableProbe = options.writableProbe ?? defaultWorkspaceWritableProbe;
+  const writableProbe = options.writableProbe;
   const snapshotReadableProbe =
     options.snapshotReadableProbe ?? defaultSnapshotReadableProbe;
 
   return {
     async initWorkspace(): Promise<WorkspaceInitResponse> {
-      await ensureWorkspaceRootDirectory(workspaceRoot);
-      for (const relativeDir of WORKSPACE_CANONICAL_DIRECTORIES) {
-        await ensureSafeWorkspaceDirectory(workspaceRoot, relativeDir);
-      }
+      await ensureWorkspaceDirectoryTree(
+        workspaceRoot,
+        WORKSPACE_CANONICAL_DIRECTORIES.map((relativeDir) => relativeDir.split("/")),
+        "workspace.init"
+      );
 
       return {
         status: "ok",
@@ -1262,46 +1245,6 @@ async function findMissingWorkspaceDirectories(
   return missingDirectories;
 }
 
-async function ensureWorkspaceRootDirectory(workspaceRoot: string): Promise<void> {
-  const existingEntry = await maybeLstat(workspaceRoot);
-  if (existingEntry) {
-    if (!(await isSafeExistingDirectoryPath(workspaceRoot))) {
-      throw new Error("workspace_root_not_safe");
-    }
-    return;
-  }
-
-  const parentPath = dirname(workspaceRoot);
-  if (parentPath === workspaceRoot || !(await isSafeExistingDirectoryPath(parentPath))) {
-    throw new Error("workspace_root_not_safe");
-  }
-
-  try {
-    await mkdir(workspaceRoot);
-  } catch (error) {
-    if (!hasErrorCode(error, "EEXIST")) {
-      throw error;
-    }
-  }
-
-  if (!(await isSafeExistingDirectoryPath(workspaceRoot))) {
-    throw new Error("workspace_root_not_safe");
-  }
-}
-
-async function ensureSafeWorkspaceDirectory(
-  workspaceRoot: string,
-  relativeDir: WorkspaceCanonicalDirectory
-): Promise<void> {
-  await ensureWorkspaceRootDirectory(workspaceRoot);
-
-  let currentPath = workspaceRoot;
-  for (const segment of relativeDir.split("/")) {
-    currentPath = join(currentPath, segment);
-    await ensureSafeDirectorySegment(currentPath, "workspace_directory_not_safe");
-  }
-}
-
 async function probeSnapshotReadable(
   workspaceRoot: string,
   snapshotReadableProbe: WorkspaceSnapshotReadableProbe
@@ -1337,10 +1280,6 @@ async function isSafeWorkspaceDirectory(
   return await isSafeExistingDirectoryPath(join(workspaceRoot, relativeDir));
 }
 
-async function isAcceptedWorkspaceRootDirectory(workspaceRoot: string): Promise<boolean> {
-  return await isSafeExistingDirectoryPath(workspaceRoot);
-}
-
 async function maybeLstat(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
   try {
     return await lstat(path);
@@ -1351,15 +1290,21 @@ async function maybeLstat(path: string): Promise<Awaited<ReturnType<typeof lstat
 
 async function probeWorkspaceWritable(
   workspaceRoot: string,
-  writableProbe: WorkspaceWritableProbe
+  writableProbe: WorkspaceWritableProbe | undefined
 ): Promise<boolean> {
-  if (!(await isAcceptedWorkspaceRootDirectory(workspaceRoot))) {
-    return false;
-  }
-
   try {
-    const writable = await writableProbe({ workspaceRoot });
-    return Boolean(writable) && (await isAcceptedWorkspaceRootDirectory(workspaceRoot));
+    if (!writableProbe) {
+      return await probeWorkspaceRecordDirectoryWritable(
+        workspaceRoot,
+        "workspace.health.writable"
+      );
+    }
+    return await runWithExistingWorkspaceRecordDirectoryReproof(
+      workspaceRoot,
+      [],
+      "workspace.health.custom_writable",
+      async () => Boolean(await writableProbe({ workspaceRoot }))
+    );
   } catch {
     return false;
   }
@@ -1367,57 +1312,6 @@ async function probeWorkspaceWritable(
 
 function statusFromBoolean(value: boolean): WorkspaceHealthCheckStatus {
   return value ? "ok" : "fail";
-}
-
-async function defaultWorkspaceWritableProbe(input: WorkspaceWritableProbeInput): Promise<boolean> {
-  if (!(await isAcceptedWorkspaceRootDirectory(input.workspaceRoot))) {
-    return false;
-  }
-
-  const probePath = join(
-    input.workspaceRoot,
-    `.health-write-probe-${process.pid}-${randomUUID()}`
-  );
-
-  let createdProbe = false;
-  try {
-    await writeFile(probePath, "", { flag: "wx" });
-    createdProbe = true;
-    return await isAcceptedWorkspaceRootDirectory(input.workspaceRoot);
-  } catch {
-    return false;
-  } finally {
-    if (createdProbe && (await isAcceptedWorkspaceRootDirectory(input.workspaceRoot))) {
-      await unlink(probePath).catch(() => undefined);
-    }
-  }
-}
-
-async function ensureSafeDirectorySegment(path: string, errorCode: string): Promise<void> {
-  const existingEntry = await maybeLstat(path);
-  if (existingEntry) {
-    if (!(await isSafeExistingDirectoryPath(path))) {
-      throw new Error(errorCode);
-    }
-    return;
-  }
-
-  const parentPath = dirname(path);
-  if (parentPath !== path && !(await isSafeExistingDirectoryPath(parentPath))) {
-    throw new Error(errorCode);
-  }
-
-  try {
-    await mkdir(path);
-  } catch (error) {
-    if (!hasErrorCode(error, "EEXIST")) {
-      throw error;
-    }
-  }
-
-  if (!(await isSafeExistingDirectoryPath(path))) {
-    throw new Error(errorCode);
-  }
 }
 
 async function isSafeExistingDirectoryPath(path: string): Promise<boolean> {
@@ -1452,13 +1346,4 @@ function isSafeDirectoryEntry(
   entry: Awaited<ReturnType<typeof lstat>> | undefined
 ): boolean {
   return Boolean(entry?.isDirectory() && !entry.isSymbolicLink());
-}
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === code
-  );
 }

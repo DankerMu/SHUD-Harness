@@ -7,6 +7,12 @@ export * from "./idempotency-service";
 export * from "./lock-service";
 export * from "./task-card-service";
 export {
+  ensureWorkspaceDirectoryTree,
+  ensureWorkspaceRecordRootPhysicalIdentity,
+  probeWorkspaceRecordDirectoryWritable,
+  runWithExistingWorkspaceRecordDirectoryReproof
+} from "./workspace-record-store";
+export {
   WorkspacePathSafetyError,
   assertPathInsideWorkspace,
   filesystemDeviceIdentityMatches,

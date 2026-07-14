@@ -10,6 +10,7 @@ import {
 } from "../schemas/idempotency";
 import { TaskServiceError, isSafeTaskId } from "./task-card-service";
 import { runWithPreservedRelease } from "./compensation-error-preservation";
+import { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
 import {
   WorkspaceRecordConditionalDeleteError,
   cancelWorkspaceRecordCleanupPermit,
@@ -42,7 +43,8 @@ async function runWithIdempotencyRelease<T>(
     body,
     release,
     IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE,
-    settleFulfilledValueAfterReleaseFailure
+    settleFulfilledValueAfterReleaseFailure,
+    preserveTaskServiceErrorCompensationCompatibility
   );
 }
 

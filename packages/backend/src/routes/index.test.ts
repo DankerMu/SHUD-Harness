@@ -9,6 +9,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -19,6 +20,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import { z } from "zod";
 import {
   DEFAULT_TASK_CREATED_BY,
   MAX_TASK_SNAPSHOT_BYTES,
@@ -39,6 +41,13 @@ import {
   redactApiLogValue,
   type ApiRequestLogLine
 } from "../middleware";
+import {
+  runWithWorkspaceRecordPublicationHooks,
+  workspaceRecordAuthorityDiagnosticsForTest,
+  workspaceRecordDirectoryBindingDiagnosticsForTest,
+  writeJsonRecord,
+  type WorkspaceRecordPublicationHooks
+} from "../../../core/src/domain/services/workspace-record-store";
 
 const tempRoots: string[] = [];
 const originalCwd = process.cwd();
@@ -171,6 +180,134 @@ describe("backend workspace and health routes", () => {
     expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200, 200, 200]);
     for (const relativeDir of EXPECTED_M1_RUNTIME_DIRECTORIES) {
       expect((await stat(join(workspaceRoot, relativeDir))).isDirectory()).toBe(true);
+    }
+  });
+
+  test("workspace init and record writers share canonical missing-child authority", async () => {
+    const recordSchema = z.object({ id: z.string(), parent: z.string() });
+    for (const directorySegments of [
+      [],
+      ["tasks"],
+      ["artifacts", "manifests"]
+    ] as const) {
+      for (const schedule of ["simultaneous", "init-first", "record-first"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        if (directorySegments.length > 0) await mkdir(workspaceRoot);
+        if (directorySegments.length > 1) {
+          await mkdir(join(workspaceRoot, ...directorySegments.slice(0, -1)), {
+            recursive: true
+          });
+        }
+        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+        const targetDirectory = join(workspaceRoot, ...directorySegments);
+        const firstObservedMissing = createSignal();
+        const bothObservedMissing = createSignal();
+        const simultaneousGate = createAsyncGate();
+        const firstGate = createAsyncGate();
+        const secondGate = createAsyncGate();
+        let missingObservations = 0;
+        let internalCreations = 0;
+        const hooks: WorkspaceRecordPublicationHooks = {
+          beforeDurableDirectoryCreation: async ({ path }) => {
+            if (path !== targetDirectory) return;
+            missingObservations += 1;
+            if (missingObservations === 1) firstObservedMissing.resolve();
+            if (missingObservations === 2) bothObservedMissing.resolve();
+            if (schedule === "simultaneous") {
+              await simultaneousGate.wait;
+            } else if (missingObservations === 1) {
+              await firstGate.wait;
+            } else {
+              await secondGate.wait;
+            }
+          },
+          afterDurableDirectoryCreated: ({ path }) => {
+            if (path === targetDirectory) internalCreations += 1;
+          }
+        };
+        const app = createBackendApi({ workspaceRoot });
+        const record = {
+          id: `init-record-${directorySegments.join("-") || "root"}-${schedule}`,
+          parent: directorySegments.join("/") || "."
+        };
+        const startInit = () =>
+          runWithWorkspaceRecordPublicationHooks(hooks, () =>
+            app.request("/api/workspace/init", { method: "POST" })
+          );
+        const startRecord = () =>
+          runWithWorkspaceRecordPublicationHooks(hooks, () =>
+            writeJsonRecord(
+              workspaceRoot,
+              directorySegments,
+              "integration-record.json",
+              record,
+              `workspace.init.integration.${directorySegments.join(".")}.${schedule}`,
+              recordSchema
+            )
+          );
+        let initPromise: Promise<Response>;
+        let recordPromise: Promise<typeof record>;
+
+        if (schedule === "simultaneous") {
+          initPromise = startInit();
+          recordPromise = startRecord();
+          await Promise.race([
+            bothObservedMissing.promise,
+            timeoutAfter(2_000, `init/record did not both observe ${targetDirectory}`)
+          ]);
+          simultaneousGate.open();
+        } else {
+          const firstKind = schedule === "init-first" ? "init" : "record";
+          const firstPromise = firstKind === "init"
+            ? (initPromise = startInit())
+            : (recordPromise = startRecord());
+          await Promise.race([
+            firstObservedMissing.promise,
+            timeoutAfter(2_000, `${firstKind} did not observe ${targetDirectory}`)
+          ]);
+          if (firstKind === "init") recordPromise = startRecord();
+          else initPromise = startInit();
+          await Promise.race([
+            bothObservedMissing.promise,
+            timeoutAfter(2_000, `staggered peer did not observe ${targetDirectory}`)
+          ]);
+
+          firstGate.open();
+          const firstResult = await Promise.race([
+            firstPromise,
+            timeoutAfter(2_000, `${firstKind} did not finish while its peer was paused`)
+          ]);
+          if (firstKind === "init") expect((firstResult as Response).status).toBe(200);
+          else expect(firstResult).toEqual(record);
+          secondGate.open();
+        }
+
+        const [initResponse, storedRecord] = await Promise.race([
+          Promise.all([initPromise!, recordPromise!]),
+          timeoutAfter(2_000, `init/record did not converge for ${targetDirectory}`)
+        ]);
+        const initBody = await initResponse.json();
+
+        expect(initResponse.status).toBe(200);
+        expect(initBody).toEqual({
+          status: "ok",
+          directory_count: EXPECTED_M1_RUNTIME_DIRECTORIES.length,
+          directories: EXPECTED_M1_RUNTIME_DIRECTORIES
+        });
+        expect(storedRecord).toEqual(record);
+        expect(missingObservations).toBe(2);
+        expect(internalCreations).toBe(1);
+        expect(await readFile(join(targetDirectory, "integration-record.json"), "utf8")).toBe(
+          `${JSON.stringify(record, null, 2)}\n`
+        );
+        expect(await workspaceDirectoryInventory(workspaceRoot)).toEqual(
+          [...EXPECTED_M1_RUNTIME_DIRECTORIES].sort()
+        );
+        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      }
     }
   });
 
@@ -451,6 +588,108 @@ describe("backend workspace and health routes", () => {
       workspace_writable: "ok"
     });
     expect(readyBody.missing_directories).toBeUndefined();
+  });
+
+  test("default writable probe converges with an active root record publication", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({ workspaceRoot });
+    expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const recordPath = join(workspaceRoot, "active-root-record.json");
+    const temporaryWritten = createSignal();
+    const publicationGate = createAsyncGate();
+    const record = { id: "active-root-ready", revision: 1 };
+    const recordSchema = z.object({ id: z.string(), revision: z.number().int() });
+    const publication = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterTemporaryFileWritten: async ({ canonicalPath }) => {
+          if (canonicalPath !== recordPath) return;
+          temporaryWritten.resolve();
+          await publicationGate.wait;
+        }
+      },
+      () =>
+        writeJsonRecord(
+          workspaceRoot,
+          [],
+          "active-root-record.json",
+          record,
+          "workspace.ready.active-root",
+          recordSchema
+        )
+    );
+    await Promise.race([
+      temporaryWritten.promise,
+      timeoutAfter(2_000, "root record publication did not reach its active generation")
+    ]);
+
+    const readyResponse = await Promise.race([
+      app.request("/api/health/ready"),
+      timeoutAfter(2_000, "default writable probe waited on an unlocked root callback")
+    ]);
+    const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
+
+    expect(readyResponse.status).toBe(200);
+    expect(readyBody.status).toBe("ok");
+    expect(readyBody.checks.workspace_writable).toBe("ok");
+    expect((await readdir(workspaceRoot)).filter((entry) => entry.includes("health-write-probe")))
+      .toEqual([]);
+
+    publicationGate.open();
+    expect(await Promise.race([
+      publication,
+      timeoutAfter(2_000, "root record publication did not finish after readiness")
+    ])).toEqual(record);
+    expect(await readFile(recordPath, "utf8")).toBe(`${JSON.stringify(record, null, 2)}\n`);
+    expect((await readdir(workspaceRoot)).filter((entry) => entry.includes("health-write-probe")))
+      .toEqual([]);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("custom writable probe mutation and root replacement fail closed after exact reproof", async () => {
+    for (const drift of ["mutation", "replacement"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const foreignLeaf = join(workspaceRoot, "custom-probe-foreign.txt");
+      const displacedRoot = join(tempRoot, "workspace-displaced-by-custom-probe");
+      let probeCalls = 0;
+      const app = createBackendApi({
+        workspaceRoot,
+        writableProbe: async ({ workspaceRoot: probeRoot }) => {
+          probeCalls += 1;
+          expect(probeRoot).toBe(resolve(workspaceRoot));
+          if (drift === "mutation") {
+            await writeFile(foreignLeaf, "external custom probe mutation", { flag: "wx" });
+          } else {
+            await rename(workspaceRoot, displacedRoot);
+            await mkdir(workspaceRoot);
+          }
+          return true;
+        }
+      });
+      expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+
+      const readyResponse = await app.request("/api/health/ready");
+      const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
+
+      expect(readyResponse.status).toBe(503);
+      expect(readyBody.status).toBe("not_ready");
+      expect(readyBody.checks.workspace_writable).toBe("fail");
+      expect(probeCalls).toBe(1);
+      if (drift === "mutation") {
+        expect(await readFile(foreignLeaf, "utf8")).toBe("external custom probe mutation");
+      } else {
+        expect((await stat(displacedRoot)).isDirectory()).toBe(true);
+        expect((await stat(workspaceRoot)).isDirectory()).toBe(true);
+      }
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    }
   });
 
   test("GET /api/health/ready reports injected workspace_writable failure in the configured root", async () => {
@@ -3909,6 +4148,98 @@ describe("backend workspace and health routes", () => {
     expect(idempotencyFiles).toEqual([idempotencyRecordFileName(idempotencyKey)]);
   });
 
+  test("POST /api/tasks preserves semantic TaskServiceError fields across completion and release failure", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:semantic-completion-release-failure";
+    const taskId = "TASK-semantic-completion-release-failure";
+    const recordPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      idempotencyRecordFileName(idempotencyKey)
+    );
+    const guardPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`
+    );
+    const semanticFailure = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "The completed idempotency record lost its semantic authority.",
+      userMessage: "The task request conflicted with its durable idempotency authority.",
+      evidenceRefs: ["workspace/tasks/_idempotency/task", "idempotency.semantic_authority"],
+      retryable: true,
+      recommendedNextActions: [
+        "Inspect the retained idempotency evidence.",
+        "Retry after repairing the transition authority."
+      ]
+    });
+    const releaseFailure = new Error("Injected transition guard release failure.");
+    let bodyFailureCount = 0;
+    let releaseFailureCount = 0;
+    let releaseNamespacePath: string | undefined;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:57.627Z"),
+      taskIdFactory: () => taskId,
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          completeRecord: async (input) =>
+            await runWithWorkspaceRecordPublicationHooks(
+              {
+                afterTemporaryFileWritten: ({ canonicalPath }) => {
+                  if (canonicalPath !== recordPath) return;
+                  bodyFailureCount += 1;
+                  throw semanticFailure;
+                },
+                beforeAuthorityNamespaceRemoval: ({ path }) => {
+                  if (!basename(path).startsWith(`.${basename(guardPath)}-`)) return;
+                  releaseNamespacePath ??= path;
+                  if (path !== releaseNamespacePath) return;
+                  releaseFailureCount += 1;
+                  throw releaseFailure;
+                }
+              },
+              () => service.completeRecord(input)
+            )
+        };
+      }
+    });
+
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+    const recordAfterFailure = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+
+    expect(response.status).toBe(409);
+    expect(body.error.category).toBe(semanticFailure.category);
+    expect(body.error.message).toBe(semanticFailure.message);
+    expect(body.error.user_message).toBe(semanticFailure.userMessage);
+    expect(body.error.evidence_refs).toEqual(semanticFailure.evidenceRefs);
+    expect(body.error.retryable).toBe(true);
+    expect(body.error.recommended_next_actions).toEqual(
+      semanticFailure.recommendedNextActions
+    );
+    expect(body.error.message).not.toBe("Unexpected backend route failure.");
+    expect(bodyFailureCount).toBe(1);
+    expect(releaseFailureCount).toBe(3);
+    expect(recordAfterFailure?.status).toBe("failed");
+    expect(recordAfterFailure?.result_ref).toBeUndefined();
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([]);
+  });
+
   test("POST /api/tasks recovers a malformed transition guard after completion rollback", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -4975,6 +5306,21 @@ async function createExpectedRuntimeTree(
   }
 }
 
+async function workspaceDirectoryInventory(workspaceRoot: string): Promise<string[]> {
+  const inventory: string[] = [];
+  const visit = async (directoryPath: string, relativeParent: string): Promise<void> => {
+    const entries = await readdir(directoryPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      const relativePath = relativeParent ? join(relativeParent, entry.name) : entry.name;
+      inventory.push(relativePath);
+      await visit(join(directoryPath, entry.name), relativePath);
+    }
+  };
+  await visit(workspaceRoot, "");
+  return inventory.sort();
+}
+
 async function expectPathMissing(path: string): Promise<void> {
   try {
     await access(path);
@@ -5170,6 +5516,22 @@ function parseApiRequestLogLine(line: string): ApiRequestLogLine {
 async function timeoutAfter(milliseconds: number, message: string): Promise<never> {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
   throw new Error(message);
+}
+
+function createAsyncGate(): { wait: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const wait = new Promise<void>((resolvePromise) => {
+    open = resolvePromise;
+  });
+  return { wait, open };
+}
+
+function createSignal(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 async function waitFor(predicate: () => boolean, message: string): Promise<void> {

@@ -70,7 +70,12 @@ export async function runWithPreservedRelease<T>(
   settleFulfilledValueAfterReleaseFailure?: (
     fulfilledValue: T,
     releaseReason: unknown
-  ) => Promise<void>
+  ) => Promise<void>,
+  preserveCombinedFailure: (
+    primary: unknown,
+    compensations: readonly unknown[],
+    aggregateMessage: string
+  ) => unknown = preserveThrownValueAndCompensationErrors
 ): Promise<T> {
   let bodyOutcome: AsyncOutcome<T>;
   try {
@@ -88,7 +93,7 @@ export async function runWithPreservedRelease<T>(
 
   if (bodyOutcome.status === "rejected") {
     if (releaseOutcome.status === "rejected") {
-      throw preserveThrownValueAndCompensationErrors(
+      throw preserveCombinedFailure(
         bodyOutcome.reason,
         [releaseOutcome.reason],
         aggregateMessage
@@ -104,7 +109,7 @@ export async function runWithPreservedRelease<T>(
           releaseOutcome.reason
         );
       } catch (settlementReason) {
-        throw preserveThrownValueAndCompensationErrors(
+        throw preserveCombinedFailure(
           releaseOutcome.reason,
           [settlementReason],
           aggregateMessage
