@@ -24,6 +24,7 @@ import {
   type IdempotencyRecordService,
   type TaskCard,
   type TaskCardService,
+  type TaskSnapshotCleanupObservation,
   type TaskSnapshotReadHooks,
   type TaskSnapshotWriteHooks
 } from "@shud-harness/core";
@@ -456,35 +457,17 @@ async function createOwnedIdempotentTaskCard(
 
   let authority: ObservedCompletedTaskAuthorityClassification;
   try {
-    const replayBeforeCompletion = await input.idempotencyService.lookupReplay({
+    await assertTaskSnapshotBindsRequest(input.taskService, task, input.requestDigest);
+    const completedRecord = await input.idempotencyService.completeRecord({
       scope: "task",
       key: input.idempotencyKey,
-      requestDigest: input.requestDigest
+      requestDigest: input.requestDigest,
+      resultRef: task.task_id
     });
-    if (replayBeforeCompletion.status === "mismatch") {
-      throw createIdempotencyMismatchError();
+    if (completedRecord.status !== "completed" || !completedRecord.result_ref) {
+      throw idempotencyResultBindingError();
     }
-    if (replayBeforeCompletion.status === "invalid_completed") {
-      return await invalidateInvalidCompletedTaskAuthority(input, replayBeforeCompletion);
-    }
-    if (replayBeforeCompletion.status === "completed") {
-      authority = await classifyCompletedTaskAuthority(
-        input,
-        replayBeforeCompletion.record.result_ref
-      );
-    } else {
-      await assertTaskSnapshotBindsRequest(input.taskService, task, input.requestDigest);
-      const completedRecord = await input.idempotencyService.completeRecord({
-        scope: "task",
-        key: input.idempotencyKey,
-        requestDigest: input.requestDigest,
-        resultRef: task.task_id
-      });
-      if (completedRecord.status !== "completed" || !completedRecord.result_ref) {
-        throw idempotencyResultBindingError();
-      }
-      authority = await classifyCompletedTaskAuthority(input, completedRecord.result_ref);
-    }
+    authority = await classifyCompletedTaskAuthority(input, completedRecord.result_ref);
   } catch (error) {
     let recoveredAuthority: CompletedTaskAuthorityClassification = { status: "absent" };
     let authorityError: unknown;
@@ -679,10 +662,48 @@ async function classifyCompletedTaskAuthority(
   input: CreateIdempotentTaskCardInput,
   resultRef: string
 ): Promise<ObservedCompletedTaskAuthorityClassification> {
+  let observation: TaskSnapshotCleanupObservation | undefined;
+  let cleanupObservedGeneration = false;
   try {
+    if (!isSafeTaskId(resultRef)) {
+      throw new TaskServiceError({
+        code: "record_malformed",
+        status: 500,
+        category: "workspace_error",
+        message: "Completed task idempotency result_ref is not a safe TaskCard id.",
+        userMessage: "The idempotency result reference cannot be used safely.",
+        evidenceRefs: ["idempotency.result_ref"],
+        retryable: false,
+        recommendedNextActions: [
+          "Inspect and repair the idempotency result reference before retrying."
+        ]
+      });
+    }
+
+    observation = await input.taskService.observeTaskSnapshotForCleanup(resultRef);
+    if (observation.status === "repairable") {
+      const error = observation.error;
+      const ownedObservation = observation;
+      observation = undefined;
+      await input.taskService.cancelTaskSnapshotCleanupObservation(ownedObservation);
+      return { status: "repairable", error, resultRef };
+    }
+    if (observation.status === "missing" || observation.status === "invalid") {
+      cleanupObservedGeneration = true;
+      throw new CompletedTaskSnapshotAuthorityReadError();
+    }
+    if (taskCreateRequestDigestFromTask(observation.task) !== input.requestDigest) {
+      throw idempotencyResultBindingError();
+    }
+
+    const ownedObservation = observation;
+    observation = undefined;
+    const task = await input.taskService.acceptTaskSnapshotCleanupObservation(
+      ownedObservation
+    );
     return {
       status: "valid",
-      task: await getIdempotentTaskResult(input.taskService, resultRef, input.requestDigest),
+      task,
       resultRef
     };
   } catch (error) {
@@ -701,8 +722,14 @@ async function classifyCompletedTaskAuthority(
       requestDigest: input.requestDigest,
       resultRef
     });
-    if (error instanceof CompletedTaskSnapshotAuthorityReadError) {
-      await input.taskService.quarantineInvalidTaskSnapshot(resultRef);
+    if (observation) {
+      const ownedObservation = observation;
+      observation = undefined;
+      if (cleanupObservedGeneration) {
+        await input.taskService.cleanupTaskSnapshotObservation(ownedObservation);
+      } else {
+        await input.taskService.cancelTaskSnapshotCleanupObservation(ownedObservation);
+      }
     }
     return {
       status: "invalid",
@@ -710,6 +737,10 @@ async function classifyCompletedTaskAuthority(
       error: authorityError,
       resultRef
     };
+  } finally {
+    if (observation) {
+      await input.taskService.cancelTaskSnapshotCleanupObservation(observation);
+    }
   }
 }
 

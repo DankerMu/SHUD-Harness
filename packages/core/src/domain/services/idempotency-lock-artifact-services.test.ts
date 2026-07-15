@@ -37,6 +37,7 @@ import { ArtifactSchema } from "../schemas/artifact";
 import { IdempotencyRecordSchema } from "../schemas/idempotency";
 import { LockRecordSchema } from "../schemas/lock";
 import {
+  MAX_TASK_SNAPSHOT_BYTES,
   TaskServiceError,
   createArtifactRegistryService,
   createIdempotencyRecordService,
@@ -56,6 +57,8 @@ import {
   type IdempotencyRecordService,
   type LockRecord,
   type TaskCard,
+  type TaskSnapshotWriteHookInput,
+  type TaskSnapshotWriteHooks,
   WorkspacePathSafetyError
 } from "./index";
 import {
@@ -63,12 +66,15 @@ import {
   cancelWorkspaceRecordCleanupPermit,
   conditionalDeleteJsonRecord,
   conditionalDeleteJsonRecordWithCleanupPermit,
+  conditionalDeleteObservedJsonRecordWithCleanupPermit,
   createJsonRecordIfAbsent,
   createJsonRecordIfAbsentWithCleanupPermit,
   ensureWorkspaceRecordDirectory,
+  isWorkspaceRecordOversizeError,
   observeJsonRecordForCleanup,
   publishJsonRecordWithLifecycleCallbacks,
   readJsonRecord,
+  removeWorkspaceRecordDirectoryIfEmpty,
   runWithWorkspaceRecordAuthorityDeadline,
   runWithWorkspaceRecordCompensationTestHooks,
   runWithWorkspaceRecordPublicationHooks,
@@ -190,6 +196,7 @@ describe("idempotency, lock, and artifact services", () => {
       "publishJsonRecordWithLifecycleCallbacks",
       "quarantineWorkspaceRecordEntry",
       "removeWorkspaceRecordDirectoryIfEmpty",
+      "isWorkspaceRecordOversizeError",
       "preservePrimaryAndCompensationErrors",
       "runWithPreservedRelease"
     ];
@@ -216,6 +223,7 @@ describe("idempotency, lock, and artifact services", () => {
       "publishJsonRecordWithLifecycleCallbacks",
       "quarantineWorkspaceRecordEntry",
       "removeWorkspaceRecordDirectoryIfEmpty",
+      "isWorkspaceRecordOversizeError",
       "snapshotWorkspaceJsonRecordLifecycleState",
       "runWithPreservedRelease"
     ];
@@ -3953,6 +3961,468 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("lifecycle publication settles its owned namespace after committed-baseline failure", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const schema = z.object({ id: z.string(), revision: z.number().int() });
+    const directorySegments = ["strategy-15-lifecycle-baseline"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "strategy-15.lifecycle.committed-baseline";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const lanePath = dirname(path);
+    const committed = { id: "strategy-15-lifecycle", revision: 1 };
+    const repaired = { ...committed, revision: 2 };
+    const expectedCommittedBytes = Buffer.from(
+      `${JSON.stringify(committed, null, 2)}\n`
+    );
+    const baselineFailure = new Error(
+      "strategy-15 lifecycle committed-baseline failure"
+    );
+    const permitClosed = createSignal();
+    let failCommittedBaseline = true;
+    let baselineHookCalls = 0;
+    let ownedNamespaceCleanupCalls = 0;
+    let ownedNamespacePath = "";
+    let committedAtHook:
+      | Awaited<ReturnType<typeof readFileWithIdentity>>
+      | undefined;
+    let permitCloseCount = 0;
+    let pinnedDescriptor = -1;
+
+    await expectPathMissing(path);
+    await expectPathMissing(lanePath);
+    const failure = await captureError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeCommittedMutableBaselineCapture: async ({ path: committedPath }) => {
+            baselineHookCalls += 1;
+            expect(committedPath).toBe(path);
+            committedAtHook = await readFileWithIdentity(committedPath);
+            expect(committedAtHook.bytes).toEqual(expectedCommittedBytes);
+            const namespaceNames = (await readdir(lanePath)).filter(isOwnedRecordPath);
+            expect(namespaceNames).toHaveLength(1);
+            ownedNamespacePath = join(lanePath, namespaceNames[0]!);
+            expect(await readdir(ownedNamespacePath)).toEqual([]);
+            if (failCommittedBaseline) {
+              failCommittedBaseline = false;
+              throw baselineFailure;
+            }
+          },
+          beforeAuthorityNamespaceRemoval: ({ path: namespacePath, attempt }) => {
+            if (namespacePath !== ownedNamespacePath) return;
+            ownedNamespaceCleanupCalls += 1;
+            expect(attempt).toBe(1);
+            expect(baselineHookCalls).toBe(1);
+          },
+          afterCleanupPermitPinnedHandleClosed: ({ path: closedPath, fd }) => {
+            expect(closedPath).toBe(path);
+            permitCloseCount += 1;
+            pinnedDescriptor = fd;
+            permitClosed.resolve();
+          }
+        },
+        () =>
+          publishJsonRecordWithLifecycleCallbacks(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            committed,
+            evidenceRef,
+            schema,
+            { afterWrite: () => undefined }
+          )
+      )
+    );
+    await Promise.race([
+      permitClosed.promise,
+      timeoutAfter(1_000, "Strategy 15 lifecycle permit did not close")
+    ]);
+
+    const sourcePath = join(import.meta.dir, "workspace-record-store.ts");
+    const sourceText = await readFile(sourcePath, "utf8");
+    const sourceFile = ts.createSourceFile(
+      sourcePath,
+      sourceText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS
+    );
+    let publicationFunction: ts.FunctionDeclaration | undefined;
+    const findPublicationFunction = (node: ts.Node): void => {
+      if (
+        ts.isFunctionDeclaration(node) &&
+        node.name?.text === "publishOwnedMutableRecord"
+      ) {
+        publicationFunction = node;
+        return;
+      }
+      ts.forEachChild(node, findPublicationFunction);
+    };
+    findPublicationFunction(sourceFile);
+    expect(publicationFunction).toBeDefined();
+    const publicationBody = publicationFunction!.body!.getText(sourceFile);
+    const renameIndex = publicationBody.indexOf("rename(temporaryPath, recordPath)");
+    const hookIndex = publicationBody.indexOf("await Reflect.apply(");
+    const baselineCaptureIndex = publicationBody.indexOf(
+      "captureMutableCanonicalBaseline("
+    );
+    expect(renameIndex).toBeGreaterThan(-1);
+    expect(hookIndex).toBeGreaterThan(renameIndex);
+    expect(baselineCaptureIndex).toBeGreaterThan(hookIndex);
+
+    expect(semanticPrimaryError(failure)).toBe(baselineFailure);
+    expect(countErrorNodes(failure, (error) => error === baselineFailure)).toBe(1);
+    expect(baselineHookCalls).toBe(1);
+    expect(failCommittedBaseline).toBe(false);
+    expect(committedAtHook).toBeDefined();
+    expect(ownedNamespaceCleanupCalls).toBe(1);
+    expect(permitCloseCount).toBe(1);
+    await expectFileDescriptorClosed(pinnedDescriptor);
+    await expectPathMissing(path);
+    await expectPathMissing(ownedNamespacePath);
+    await expectPathMissing(lanePath);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+
+    expect(
+      await writeJsonRecord(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        repaired,
+        `${evidenceRef}.retry`,
+        schema
+      )
+    ).toEqual(repaired);
+    expect(await readJsonRecord(path, `${evidenceRef}.retry`, schema)).toEqual(
+      repaired
+    );
+    expect((await readdir(lanePath)).filter(isOwnedRecordPath)).toEqual([]);
+    expect(permitCloseCount).toBe(1);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+  });
+
+  test("ordinary mutable create keeps its committed canonical after committed-baseline failure", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const schema = z.object({ id: z.string(), revision: z.number().int() });
+    const directorySegments = ["strategy-15-ordinary-create"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "strategy-15.ordinary.create";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const lanePath = dirname(path);
+    const committed = { id: "strategy-15-ordinary-create", revision: 1 };
+    const repaired = { ...committed, revision: 2 };
+    const expectedCommittedBytes = Buffer.from(
+      `${JSON.stringify(committed, null, 2)}\n`
+    );
+    const baselineFailure = new Error(
+      "strategy-15 ordinary create committed-baseline failure"
+    );
+    let failCommittedBaseline = true;
+    let baselineHookCalls = 0;
+    let ownedNamespaceCleanupCalls = 0;
+    let ownedNamespacePath = "";
+    let permitCloseCount = 0;
+    let committedAtHook:
+      | Awaited<ReturnType<typeof readFileWithIdentity>>
+      | undefined;
+
+    await expectPathMissing(path);
+    const failure = await captureError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeCommittedMutableBaselineCapture: async ({ path: committedPath }) => {
+            baselineHookCalls += 1;
+            expect(committedPath).toBe(path);
+            committedAtHook = await readFileWithIdentity(committedPath);
+            expect(committedAtHook.bytes).toEqual(expectedCommittedBytes);
+            const namespaceNames = (await readdir(lanePath)).filter(isOwnedRecordPath);
+            expect(namespaceNames).toHaveLength(1);
+            ownedNamespacePath = join(lanePath, namespaceNames[0]!);
+            expect(await readdir(ownedNamespacePath)).toEqual([]);
+            if (failCommittedBaseline) {
+              failCommittedBaseline = false;
+              throw baselineFailure;
+            }
+          },
+          beforeAuthorityNamespaceRemoval: ({ path: namespacePath, attempt }) => {
+            if (namespacePath !== ownedNamespacePath) return;
+            ownedNamespaceCleanupCalls += 1;
+            expect(attempt).toBe(1);
+          },
+          afterCleanupPermitPinnedHandleClosed: () => {
+            permitCloseCount += 1;
+          }
+        },
+        () =>
+          writeJsonRecord(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            committed,
+            evidenceRef,
+            schema
+          )
+      )
+    );
+
+    expect(semanticPrimaryError(failure)).toBe(baselineFailure);
+    expect(countErrorNodes(failure, (error) => error === baselineFailure)).toBe(1);
+    expect(baselineHookCalls).toBe(1);
+    expect(failCommittedBaseline).toBe(false);
+    expect(committedAtHook).toBeDefined();
+    expect(await readFileWithIdentity(path)).toEqual(committedAtHook!);
+    expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(committed);
+    expect(ownedNamespaceCleanupCalls).toBe(1);
+    expect(permitCloseCount).toBe(0);
+    await expectPathMissing(ownedNamespacePath);
+    expect((await readdir(lanePath)).filter(isOwnedRecordPath)).toEqual([]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+
+    expect(
+      await writeJsonRecord(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        repaired,
+        `${evidenceRef}.retry`,
+        schema
+      )
+    ).toEqual(repaired);
+    expect(await readJsonRecord(path, `${evidenceRef}.retry`, schema)).toEqual(
+      repaired
+    );
+    expect((await readdir(lanePath)).filter(isOwnedRecordPath)).toEqual([]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+  });
+
+  test("ordinary mutable update keeps its committed revision after committed-baseline failure", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string(), revision: z.number().int() });
+    const directorySegments = ["strategy-15-ordinary-update"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "strategy-15.ordinary.update";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const lanePath = dirname(path);
+    const initial = { id: "strategy-15-ordinary-update", revision: 1 };
+    const committed = { ...initial, revision: 2 };
+    const repaired = { ...initial, revision: 3 };
+    await writeJsonRecord(
+      workspaceRoot,
+      directorySegments,
+      fileName,
+      initial,
+      evidenceRef,
+      schema
+    );
+    const initialIdentity = await readFileWithIdentity(path);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const expectedCommittedBytes = Buffer.from(
+      `${JSON.stringify(committed, null, 2)}\n`
+    );
+    const baselineFailure = new Error(
+      "strategy-15 ordinary update committed-baseline failure"
+    );
+    let failCommittedBaseline = true;
+    let baselineHookCalls = 0;
+    let ownedNamespaceCleanupCalls = 0;
+    let ownedNamespacePath = "";
+    let permitCloseCount = 0;
+    let committedAtHook:
+      | Awaited<ReturnType<typeof readFileWithIdentity>>
+      | undefined;
+
+    const failure = await captureError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeCommittedMutableBaselineCapture: async ({ path: committedPath }) => {
+            baselineHookCalls += 1;
+            expect(committedPath).toBe(path);
+            committedAtHook = await readFileWithIdentity(committedPath);
+            expect(committedAtHook.bytes).toEqual(expectedCommittedBytes);
+            const namespaceNames = (await readdir(lanePath)).filter(isOwnedRecordPath);
+            expect(namespaceNames).toHaveLength(1);
+            ownedNamespacePath = join(lanePath, namespaceNames[0]!);
+            expect(await readdir(ownedNamespacePath)).toEqual([]);
+            if (failCommittedBaseline) {
+              failCommittedBaseline = false;
+              throw baselineFailure;
+            }
+          },
+          beforeAuthorityNamespaceRemoval: ({ path: namespacePath, attempt }) => {
+            if (namespacePath !== ownedNamespacePath) return;
+            ownedNamespaceCleanupCalls += 1;
+            expect(attempt).toBe(1);
+          },
+          afterCleanupPermitPinnedHandleClosed: () => {
+            permitCloseCount += 1;
+          }
+        },
+        () =>
+          writeJsonRecord(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            committed,
+            evidenceRef,
+            schema
+          )
+      )
+    );
+
+    expect(semanticPrimaryError(failure)).toBe(baselineFailure);
+    expect(countErrorNodes(failure, (error) => error === baselineFailure)).toBe(1);
+    expect(baselineHookCalls).toBe(1);
+    expect(failCommittedBaseline).toBe(false);
+    expect(committedAtHook).toBeDefined();
+    expect(await readFileWithIdentity(path)).toEqual(committedAtHook!);
+    expect(
+      workspaceRecordPhysicalIdentityMatches(committedAtHook!, initialIdentity)
+    ).toBe(false);
+    expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(committed);
+    expect(ownedNamespaceCleanupCalls).toBe(1);
+    expect(permitCloseCount).toBe(0);
+    await expectPathMissing(ownedNamespacePath);
+    expect((await readdir(lanePath)).filter(isOwnedRecordPath)).toEqual([]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+
+    expect(
+      await writeJsonRecord(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        repaired,
+        `${evidenceRef}.retry`,
+        schema
+      )
+    ).toEqual(repaired);
+    expect(await readJsonRecord(path, `${evidenceRef}.retry`, schema)).toEqual(
+      repaired
+    );
+    expect((await readdir(lanePath)).filter(isOwnedRecordPath)).toEqual([]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+  });
+
+  test("getter-backed committed-baseline hooks preserve their receiver and commit order", async () => {
+    for (const outcome of ["return", "throw"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const schema = z.object({ id: z.string(), outcome: z.enum(["return", "throw"]) });
+      const directorySegments = [`strategy-17-hook-receiver-${outcome}`] as const;
+      const fileName = "record.json";
+      const evidenceRef = `strategy-17.hook.receiver.${outcome}`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const lanePath = dirname(path);
+      const committed = { id: "strategy-17-hook-receiver", outcome };
+      const expectedCommittedBytes = Buffer.from(
+        `${JSON.stringify(committed, null, 2)}\n`
+      );
+      const hookFailure = new Error(`strategy-17 hook ${outcome} failure`);
+      const events: string[] = [];
+      let getterCalls = 0;
+      let callbackCalls = 0;
+      let callbackReceiver: unknown;
+      let hooks: WorkspaceRecordPublicationHooks;
+      hooks = {
+        get beforeCommittedMutableBaselineCapture() {
+          getterCalls += 1;
+          events.push("getter");
+          return async function (
+            this: WorkspaceRecordPublicationHooks,
+            { path: committedPath }: Readonly<{ path: string }>
+          ): Promise<void> {
+            callbackCalls += 1;
+            callbackReceiver = this;
+            events.push("callback");
+            expect(committedPath).toBe(path);
+            expect(await readFile(committedPath)).toEqual(expectedCommittedBytes);
+            const namespaceNames = (await readdir(lanePath)).filter(isOwnedRecordPath);
+            expect(namespaceNames).toHaveLength(1);
+            expect(await readdir(join(lanePath, namespaceNames[0]!))).toEqual([]);
+            if (outcome === "throw") throw hookFailure;
+          };
+        },
+        beforeGenerationIsolation: () => {
+          expect(getterCalls).toBe(1);
+          expect(callbackCalls).toBe(0);
+          events.push("before-generation-isolation");
+        }
+      };
+      const publish = () =>
+        runWithWorkspaceRecordPublicationHooks(hooks, () =>
+          writeJsonRecord(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            committed,
+            evidenceRef,
+            schema
+          )
+        );
+
+      if (outcome === "throw") {
+        const failure = await captureError(publish);
+        expect(semanticPrimaryError(failure)).toBe(hookFailure);
+        expect(countErrorNodes(failure, (error) => error === hookFailure)).toBe(1);
+      } else {
+        expect(await publish()).toEqual(committed);
+      }
+
+      expect(getterCalls).toBe(1);
+      expect(callbackCalls).toBe(1);
+      expect(callbackReceiver).toBe(hooks);
+      expect(events).toEqual(["getter", "before-generation-isolation", "callback"]);
+      expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(committed);
+      expect((await readdir(lanePath)).filter(isOwnedRecordPath)).toEqual([]);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        bindingBaseline
+      );
+    }
+  });
+
   test("mutable and shared temporary cleanup reject move-plus-symlink namespace rebound", async () => {
     for (const publication of ["mutable", "hardlink"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -6393,38 +6863,106 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
-  test("oversized hardlink records fail before authority admission or workspace mutation", async () => {
+  test("oversized generic records keep private provenance and the public record error", async () => {
     const { tempRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const oversizedSchema = z.object({ payload: z.string() });
     const oversizedRecord = { payload: "x".repeat(MAX_SERVICE_RECORD_BYTES) };
-    let authorityAdmissions = 0;
+    const brandedErrors: TaskServiceError[] = [];
 
-    const workspaceRoot = join(tempRoot, "hardlink");
-    const error = await captureTaskServiceError(() =>
-      runWithWorkspaceRecordPublicationHooks(
-        {
-          afterAuthorityLeaseAcquired: () => {
-            authorityAdmissions += 1;
-          }
-        },
-        () =>
-          createJsonRecordIfAbsent(
-            workspaceRoot,
-            ["records"],
-            "oversized.json",
-            oversizedRecord,
-            "oversized.hardlink",
-            oversizedSchema
-          )
+    for (const surface of ["create", "write"] as const) {
+      let authorityAdmissions = 0;
+      const workspaceRoot = join(tempRoot, surface);
+      const evidenceRef = `oversized.${surface}`;
+      const error = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterAuthorityLeaseAcquired: () => {
+              authorityAdmissions += 1;
+            }
+          },
+          () =>
+            surface === "create"
+              ? createJsonRecordIfAbsent(
+                  workspaceRoot,
+                  ["records"],
+                  "oversized.json",
+                  oversizedRecord,
+                  evidenceRef,
+                  oversizedSchema
+                )
+              : writeJsonRecord(
+                  workspaceRoot,
+                  ["records"],
+                  "oversized.json",
+                  oversizedRecord,
+                  evidenceRef,
+                  oversizedSchema
+                )
+        )
+      );
+
+      expect(error.code).toBe("record_schema_error");
+      expect(error.status).toBe(400);
+      expect(error.category).toBe("schema_error");
+      expect(error.message).toBe("Workspace record would exceed the M1 bounded size.");
+      expect(error.userMessage).toBe("The record is too large to persist safely.");
+      expect(error.evidenceRefs).toEqual([evidenceRef]);
+      expect(error.retryable).toBe(false);
+      expect(error.recommendedNextActions).toEqual([
+        "Reduce record field sizes and retry."
+      ]);
+      expect(isWorkspaceRecordOversizeError(error)).toBe(true);
+      expect(authorityAdmissions).toBe(0);
+      await expectPathMissing(workspaceRoot);
+      brandedErrors.push(error);
+    }
+
+    const genuine = brandedErrors[0]!;
+    const forged = new TaskServiceError({
+      code: genuine.code,
+      status: genuine.status,
+      category: genuine.category,
+      message: genuine.message,
+      userMessage: genuine.userMessage,
+      evidenceRefs: [...genuine.evidenceRefs],
+      retryable: genuine.retryable,
+      recommendedNextActions: [...genuine.recommendedNextActions]
+    });
+    expect({
+      code: forged.code,
+      status: forged.status,
+      category: forged.category,
+      message: forged.message,
+      userMessage: forged.userMessage,
+      evidenceRefs: forged.evidenceRefs,
+      retryable: forged.retryable,
+      recommendedNextActions: forged.recommendedNextActions
+    }).toEqual({
+      code: genuine.code,
+      status: genuine.status,
+      category: genuine.category,
+      message: genuine.message,
+      userMessage: genuine.userMessage,
+      evidenceRefs: genuine.evidenceRefs,
+      retryable: genuine.retryable,
+      recommendedNextActions: genuine.recommendedNextActions
+    });
+    expect(isWorkspaceRecordOversizeError(forged)).toBe(false);
+
+    const schemaFailure = await captureTaskServiceError(() =>
+      createJsonRecordIfAbsent(
+        join(tempRoot, "schema-failure"),
+        ["records"],
+        "invalid.json",
+        { payload: "x" },
+        "invalid.schema",
+        z.object({ payload: z.string().min(2) })
       )
     );
-
-    expect(error.code).toBe("record_schema_error");
-    expect(error.message).toBe("Workspace record would exceed the M1 bounded size.");
-    await expectPathMissing(workspaceRoot);
-
-    expect(authorityAdmissions).toBe(0);
+    expect(schemaFailure.code).toBe("record_schema_error");
+    expect(schemaFailure.message).toBe("Workspace record failed schema validation.");
+    expect(isWorkspaceRecordOversizeError(schemaFailure)).toBe(false);
   });
 
   test("conditional delete serializes readers and immediate recreation without transient read errors", async () => {
@@ -17556,6 +18094,107 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("TaskCard oversized preparation maps no-hook provenance and stays early with hooks", async () => {
+    expect(MAX_TASK_SNAPSHOT_BYTES).toBe(MAX_SERVICE_RECORD_BYTES);
+    const oversizedInput = {
+      type: "engineering" as const,
+      title: "x".repeat(MAX_TASK_SNAPSHOT_BYTES),
+      question_or_goal: "Reject the oversized TaskCard before publication.",
+      inference_budget: { mode: "normal" as const },
+      created_by: "pi" as const
+    };
+    const expectTaskSnapshotTooLarge = (error: TaskServiceError): void => {
+      expect(error.code).toBe("task_snapshot_too_large");
+      expect(error.status).toBe(400);
+      expect(error.category).toBe("schema_error");
+      expect(error.message).toBe(
+        "Task snapshot would exceed the M1 bounded recovery size."
+      );
+      expect(error.userMessage).toBe("The task request is too large to persist safely.");
+      expect(error.evidenceRefs).toEqual(["request.body"]);
+      expect(error.retryable).toBe(false);
+      expect(error.recommendedNextActions).toEqual([
+        "Shorten the task title, goal, or creator fields and submit again."
+      ]);
+      expect(error.cause).toBeUndefined();
+    };
+
+    const noHookCase = await createTempWorkspacePath();
+    tempRoots.push(noHookCase.tempRoot);
+    const noHookService = createTaskCardService({
+      workspaceRoot: noHookCase.workspaceRoot,
+      now: () => new Date("2026-07-07T13:39:59.250Z"),
+      taskIdFactory: () => "TASK-oversized-no-hook"
+    });
+    const noHookError = await captureTaskServiceError(() =>
+      noHookService.createTask(oversizedInput)
+    );
+    expectTaskSnapshotTooLarge(noHookError);
+    expect(isWorkspaceRecordOversizeError(noHookError)).toBe(false);
+    expect(await noHookService.listTasks()).toEqual([]);
+    await expectPathMissing(noHookCase.workspaceRoot);
+
+    const repaired = await noHookService.createTask({
+      ...oversizedInput,
+      title: "Persist the repaired no-hook TaskCard"
+    });
+    const repairedSnapshotPath = join(
+      noHookCase.workspaceRoot,
+      "tasks",
+      repaired.task_id,
+      "snapshot.json"
+    );
+    const repairedCacheReturn = await noHookService.getTask(repaired.task_id);
+    expect(repaired.task_id).toBe("TASK-oversized-no-hook");
+    expect(await readFile(repairedSnapshotPath, "utf8")).toBe(
+      expectedTaskSnapshotText(repaired)
+    );
+    expect(repairedCacheReturn).toEqual(repaired);
+    expect(repairedCacheReturn).not.toBe(repaired);
+    expect(repairedCacheReturn.inference_budget).not.toBe(repaired.inference_budget);
+    expect(repairedCacheReturn.linked_jobs).not.toBe(repaired.linked_jobs);
+    expect(repairedCacheReturn.linked_reports).not.toBe(repaired.linked_reports);
+
+    for (const hookKind of ["snapshot-write", "record-publication"] as const) {
+      const hookCase = await createTempWorkspacePath();
+      tempRoots.push(hookCase.tempRoot);
+      let hookCalls = 0;
+      const service = createTaskCardService({
+        workspaceRoot: hookCase.workspaceRoot,
+        taskIdFactory: () => `TASK-oversized-${hookKind}`,
+        ...(hookKind === "snapshot-write"
+          ? {
+              snapshotWriteHooks: {
+                beforeSnapshotWrite: () => {
+                  hookCalls += 1;
+                }
+              }
+            }
+          : {})
+      });
+      const action = () =>
+        hookKind === "record-publication"
+          ? runWithWorkspaceRecordPublicationHooks(
+              {
+                beforeDurableDirectoryCreation: () => {
+                  hookCalls += 1;
+                },
+                afterAuthorityLeaseAcquired: () => {
+                  hookCalls += 1;
+                }
+              },
+              () => service.createTask(oversizedInput)
+            )
+          : service.createTask(oversizedInput);
+      const error = await captureTaskServiceError(action);
+
+      expectTaskSnapshotTooLarge(error);
+      expect(hookCalls).toBe(0);
+      expect(await service.listTasks()).toEqual([]);
+      await expectPathMissing(hookCase.workspaceRoot);
+    }
+  });
+
   test("TaskCard snapshot hooks release authority resources on failure and repaired retry", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -17599,6 +18238,306 @@ describe("idempotency, lock, and artifact services", () => {
       join(workspaceRoot, "tasks", repaired.task_id, "snapshot.json"),
       "utf8"
     )).toBe(expectedTaskSnapshotText(repaired));
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("TaskCard getter-backed before hook keeps its owner and precedes publication", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const taskId = "TASK-getter-before-success";
+    const taskDirectory = join(workspaceRoot, "tasks", taskId);
+    const snapshotPath = join(taskDirectory, "snapshot.json");
+    let getterReads = 0;
+    let callbackCalls = 0;
+    let observedReceiver: unknown;
+    let observedMissingSnapshot = false;
+    const hookOwner: TaskSnapshotWriteHooks & { readonly marker: string } = {
+      marker: "before-owner"
+    };
+    const beforeMethod = async function (
+      this: TaskSnapshotWriteHooks & { readonly marker: string },
+      input: TaskSnapshotWriteHookInput
+    ): Promise<void> {
+      callbackCalls += 1;
+      observedReceiver = this;
+      expect(this.marker).toBe("before-owner");
+      expect(input).toEqual({ taskDirectory, taskId });
+      await expectPathMissing(snapshotPath);
+      observedMissingSnapshot = true;
+    };
+    Object.defineProperty(hookOwner, "beforeSnapshotWrite", {
+      configurable: false,
+      enumerable: true,
+      get: () => {
+        getterReads += 1;
+        return beforeMethod;
+      }
+    });
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:39:59.600Z"),
+      taskIdFactory: () => taskId,
+      snapshotWriteHooks: hookOwner
+    });
+
+    const task = await service.createTask({
+      type: "engineering",
+      title: "Preserve the before hook owner",
+      question_or_goal: "Invoke the getter-backed method before publishing the snapshot.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+
+    expect(getterReads).toBe(1);
+    expect(callbackCalls).toBe(1);
+    expect(observedReceiver).toBe(hookOwner);
+    expect(observedMissingSnapshot).toBe(true);
+    expect(await readFile(snapshotPath, "utf8")).toBe(expectedTaskSnapshotText(task));
+    expect(await service.listTasks()).toEqual([task]);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("TaskCard getter-backed after hook keeps its owner and observes published bytes", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const taskId = "TASK-getter-after-success";
+    const taskDirectory = join(workspaceRoot, "tasks", taskId);
+    let getterReads = 0;
+    let callbackCalls = 0;
+    let observedReceiver: unknown;
+    const observedSnapshotTexts: string[] = [];
+    const hookOwner: TaskSnapshotWriteHooks & { readonly marker: string } = {
+      marker: "after-owner"
+    };
+    const afterMethod = async function (
+      this: TaskSnapshotWriteHooks & { readonly marker: string },
+      input: TaskSnapshotWriteHookInput
+    ): Promise<void> {
+      callbackCalls += 1;
+      observedReceiver = this;
+      expect(this.marker).toBe("after-owner");
+      expect(input).toEqual({ taskDirectory, taskId });
+      observedSnapshotTexts.push(
+        await readFile(join(input.taskDirectory, "snapshot.json"), "utf8")
+      );
+    };
+    Object.defineProperty(hookOwner, "afterSnapshotWrite", {
+      configurable: false,
+      enumerable: true,
+      get: () => {
+        getterReads += 1;
+        return afterMethod;
+      }
+    });
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:39:59.650Z"),
+      taskIdFactory: () => taskId,
+      snapshotWriteHooks: hookOwner
+    });
+
+    const task = await service.createTask({
+      type: "engineering",
+      title: "Preserve the after hook owner",
+      question_or_goal: "Invoke the getter-backed method after publishing exact bytes.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+
+    expect(getterReads).toBe(1);
+    expect(callbackCalls).toBe(1);
+    expect(observedReceiver).toBe(hookOwner);
+    expect(observedSnapshotTexts).toEqual([expectedTaskSnapshotText(task)]);
+    expect(await service.listTasks()).toEqual([task]);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("TaskCard throwing getter-backed before hook leaves no residue and repairs in place", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const taskId = "TASK-getter-before-repair";
+    const taskDirectory = join(workspaceRoot, "tasks", taskId);
+    const snapshotPath = join(taskDirectory, "snapshot.json");
+    const hookFailure = new Error("getter-backed before hook failure");
+    let shouldThrow = true;
+    let getterReads = 0;
+    let callbackCalls = 0;
+    const observedReceivers: unknown[] = [];
+    const hookOwner: TaskSnapshotWriteHooks & { readonly marker: string } = {
+      marker: "throwing-before-owner"
+    };
+    const beforeMethod = function (
+      this: TaskSnapshotWriteHooks & { readonly marker: string },
+      input: TaskSnapshotWriteHookInput
+    ): void {
+      callbackCalls += 1;
+      observedReceivers.push(this);
+      expect(this.marker).toBe("throwing-before-owner");
+      expect(input).toEqual({ taskDirectory, taskId });
+      if (!shouldThrow) return;
+      shouldThrow = false;
+      throw hookFailure;
+    };
+    Object.defineProperty(hookOwner, "beforeSnapshotWrite", {
+      configurable: false,
+      enumerable: true,
+      get: () => {
+        getterReads += 1;
+        return beforeMethod;
+      }
+    });
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:39:59.700Z"),
+      taskIdFactory: () => taskId,
+      snapshotWriteHooks: hookOwner
+    });
+    const input = {
+      type: "engineering" as const,
+      title: "Repair a getter-backed before failure",
+      question_or_goal: "Release the failed task generation before retrying the same id.",
+      inference_budget: { mode: "normal" as const },
+      created_by: "pi" as const
+    };
+
+    const failure = await captureTaskServiceError(() => service.createTask(input));
+
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(errorTreeContains(failure, hookFailure)).toBe(true);
+    expect(getterReads).toBe(1);
+    expect(callbackCalls).toBe(1);
+    expect(observedReceivers[0]).toBe(hookOwner);
+    expect(await service.listTasks()).toEqual([]);
+    await expectPathMissing(snapshotPath);
+    await expectPathMissing(taskDirectory);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+
+    const repaired = await service.createTask(input);
+
+    expect(repaired.task_id).toBe(taskId);
+    expect(getterReads).toBe(2);
+    expect(callbackCalls).toBe(2);
+    expect(observedReceivers[1]).toBe(hookOwner);
+    expect(await readFile(snapshotPath, "utf8")).toBe(expectedTaskSnapshotText(repaired));
+    expect(await service.listTasks()).toEqual([repaired]);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("TaskCard throwing getter-backed after hook compensates exactly and repairs in place", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const siblingId = "TASK-getter-after-sibling";
+    const siblingService = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:39:59.700Z"),
+      taskIdFactory: () => siblingId
+    });
+    const sibling = await siblingService.createTask({
+      type: "engineering",
+      title: "Preserve an unrelated TaskCard generation",
+      question_or_goal: "Prove after-hook compensation stays within its failed generation.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const siblingSnapshotPath = join(
+      workspaceRoot,
+      "tasks",
+      siblingId,
+      "snapshot.json"
+    );
+    const siblingSnapshotText = await readFile(siblingSnapshotPath, "utf8");
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const taskId = "TASK-getter-after-repair";
+    const taskDirectory = join(workspaceRoot, "tasks", taskId);
+    const snapshotPath = join(taskDirectory, "snapshot.json");
+    const hookFailure = new Error("getter-backed after hook failure");
+    let shouldThrow = true;
+    let getterReads = 0;
+    let callbackCalls = 0;
+    const observedReceivers: unknown[] = [];
+    const observedSnapshotTexts: string[] = [];
+    const hookOwner: TaskSnapshotWriteHooks & { readonly marker: string } = {
+      marker: "throwing-after-owner"
+    };
+    const afterMethod = async function (
+      this: TaskSnapshotWriteHooks & { readonly marker: string },
+      input: TaskSnapshotWriteHookInput
+    ): Promise<void> {
+      callbackCalls += 1;
+      observedReceivers.push(this);
+      expect(this.marker).toBe("throwing-after-owner");
+      expect(input).toEqual({ taskDirectory, taskId });
+      observedSnapshotTexts.push(
+        await readFile(join(input.taskDirectory, "snapshot.json"), "utf8")
+      );
+      if (!shouldThrow) return;
+      shouldThrow = false;
+      throw hookFailure;
+    };
+    Object.defineProperty(hookOwner, "afterSnapshotWrite", {
+      configurable: false,
+      enumerable: true,
+      get: () => {
+        getterReads += 1;
+        return afterMethod;
+      }
+    });
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:39:59.750Z"),
+      taskIdFactory: () => taskId,
+      snapshotWriteHooks: hookOwner
+    });
+    const input = {
+      type: "engineering" as const,
+      title: "Repair a getter-backed after failure",
+      question_or_goal: "Delete only the failed published generation before retrying.",
+      inference_budget: { mode: "normal" as const },
+      created_by: "pi" as const
+    };
+
+    const failure = await captureTaskServiceError(() => service.createTask(input));
+
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(errorTreeContains(failure, hookFailure)).toBe(true);
+    expect(getterReads).toBe(1);
+    expect(callbackCalls).toBe(1);
+    expect(observedReceivers[0]).toBe(hookOwner);
+    expect(observedSnapshotTexts).toHaveLength(1);
+    expect(JSON.parse(observedSnapshotTexts[0]!)).toMatchObject({ task_id: taskId });
+    expect(await service.listTasks()).toEqual([sibling]);
+    await expectPathMissing(snapshotPath);
+    await expectPathMissing(taskDirectory);
+    expect(await readFile(siblingSnapshotPath, "utf8")).toBe(siblingSnapshotText);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+
+    const repaired = await service.createTask(input);
+    const repairedSnapshotText = expectedTaskSnapshotText(repaired);
+
+    expect(repaired.task_id).toBe(taskId);
+    expect(getterReads).toBe(2);
+    expect(callbackCalls).toBe(2);
+    expect(observedReceivers[1]).toBe(hookOwner);
+    expect(observedSnapshotTexts).toEqual([
+      repairedSnapshotText,
+      repairedSnapshotText
+    ]);
+    expect(await readFile(snapshotPath, "utf8")).toBe(repairedSnapshotText);
+    expect(await readFile(siblingSnapshotPath, "utf8")).toBe(siblingSnapshotText);
+    expect(await service.listTasks()).toEqual([sibling, repaired]);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
@@ -17970,7 +18909,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await service.listTasks()).toEqual([siblingTask, targetTask]);
   });
 
-  test("TaskCard snapshot writes quarantine directory leaf replacements before hydration", async () => {
+  test("TaskCard snapshot writes preserve a directory successor outside their generation", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
@@ -18005,21 +18944,976 @@ describe("idempotency, lock, and artifact services", () => {
     const error = await captureTaskServiceError(() => service.createTask(input));
     const listAfterFailure = await service.listTasks();
     const freshService = createTaskCardService({ workspaceRoot });
-    const freshListAfterFailure = await freshService.listTasks();
+    const freshHydrationError = await captureTaskServiceError(() => freshService.listTasks());
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     const retryTask = await service.createTask(input);
 
     expect(error.code).toBe("workspace_path_not_safe");
     expect(listAfterFailure).toEqual([]);
-    expect(freshListAfterFailure).toEqual([]);
-    await expectPathMissing(
-      join(workspaceRoot, "tasks", "TASK-post-hook-directory", "snapshot.json")
+    expect(freshHydrationError.code).toBe("task_snapshot_malformed");
+    const successorPath = join(
+      workspaceRoot,
+      "tasks",
+      "TASK-post-hook-directory",
+      "snapshot.json"
+    );
+    expect((await lstat(successorPath)).isDirectory()).toBe(true);
+    expect(await readFile(join(successorPath, "nested.txt"), "utf8")).toBe(
+      "untrusted replacement"
     );
     expect(retryTask.task_id).toBe("TASK-post-hook-directory-retry");
     expect(await service.listTasks()).toEqual([retryTask]);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("TaskCard hook publication preserves different-byte and same-byte new-inode successors", async () => {
+    for (const phase of ["callback_throw", "final_proof"] as const) {
+      for (const successorBytesKind of ["different", "same"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+        const taskId = `TASK-exact-hook-${phase}-${successorBytesKind}`;
+        const retryTaskId = `${taskId}-retry`;
+        const taskIds = [taskId, retryTaskId];
+        const marker = new Error(`TaskCard ${phase} ${successorBytesKind}`);
+        const pinnedClosed = createSignal();
+        let pinnedDescriptor = -1;
+        let pinnedCloseCount = 0;
+        let replacementCount = 0;
+        let originalIdentity: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
+        let successorIdentity: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
+        let successorTask: TaskCard | undefined;
+
+        const replaceSnapshot = async (snapshotPath: string) => {
+          if (replacementCount > 0) return;
+          replacementCount += 1;
+          originalIdentity = await readFileWithIdentity(snapshotPath);
+          const parsed = JSON.parse(originalIdentity.bytes.toString("utf8")) as {
+            task_card: TaskCard;
+          };
+          successorTask = successorBytesKind === "same"
+            ? parsed.task_card
+            : {
+                ...parsed.task_card,
+                title: `${parsed.task_card.title} successor`
+              };
+          const successorBytes = successorBytesKind === "same"
+            ? originalIdentity.bytes
+            : Buffer.from(
+                `${JSON.stringify({ ...parsed, task_card: successorTask }, null, 2)}\n`
+              );
+          await unlink(snapshotPath);
+          await writeFile(snapshotPath, successorBytes, { flag: "wx", mode: 0o600 });
+          successorIdentity = await readFileWithIdentity(snapshotPath);
+        };
+
+        const service = createTaskCardService({
+          workspaceRoot,
+          now: () => new Date("2026-07-07T13:40:07.250Z"),
+          taskIdFactory: () => taskIds.shift() ?? `${retryTaskId}-unexpected`,
+          snapshotWriteHooks: phase === "callback_throw"
+            ? {
+                afterSnapshotWrite: async ({ taskDirectory }) => {
+                  if (basename(taskDirectory) !== taskId) return;
+                  await replaceSnapshot(join(taskDirectory, "snapshot.json"));
+                  throw marker;
+                }
+              }
+            : {
+                afterSnapshotWrite: () => undefined
+              }
+        });
+        const input = {
+          type: "engineering" as const,
+          title: `Exact hook ${phase}`,
+          question_or_goal: "A failed publisher must not delete a successor generation.",
+          inference_budget: { mode: "normal" as const },
+          created_by: "pi"
+        };
+
+        const failure = await captureTaskServiceError(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              ...(phase === "final_proof"
+                ? {
+                    beforeCleanupPermitIdentityResolution: async ({ path }: { path: string }) => {
+                      if (path.endsWith(`/${taskId}/snapshot.json`)) {
+                        await replaceSnapshot(path);
+                      }
+                    }
+                  }
+                : {}),
+              afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+                pinnedDescriptor = fd;
+                pinnedCloseCount += 1;
+                pinnedClosed.resolve();
+              }
+            },
+            () => service.createTask(input)
+          )
+        );
+        await Promise.race([
+          pinnedClosed.promise,
+          timeoutAfter(1_000, `TaskCard ${phase}/${successorBytesKind} permit did not close`)
+        ]);
+
+        expect(failure.code).toBe("workspace_path_not_safe");
+        expect(errorTreeContains(failure, marker)).toBe(phase === "callback_throw");
+        expect(replacementCount).toBe(1);
+        expect(originalIdentity).toBeDefined();
+        expect(successorIdentity).toBeDefined();
+        expect(successorTask).toBeDefined();
+        expect(
+          workspaceRecordPhysicalIdentityMatches(successorIdentity!, originalIdentity!)
+        ).toBe(false);
+        expect(await readFileWithIdentity(
+          join(workspaceRoot, "tasks", taskId, "snapshot.json")
+        )).toEqual(successorIdentity!);
+        const freshService = createTaskCardService({ workspaceRoot });
+        expect(await freshService.getTaskFromSnapshot(taskId)).toEqual(successorTask!);
+        expect(await freshService.listTasks()).toEqual([successorTask!]);
+        const retry = await service.createTask(input);
+        expect(retry.task_id).toBe(retryTaskId);
+        expect(pinnedCloseCount).toBe(1);
+        await expectFileDescriptorClosed(pinnedDescriptor);
+        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+      }
+    }
+  });
+
+  test("TaskCard publication fails closed across same-inode pathname rebounds", async () => {
+    for (const phase of ["callback_throw", "final_proof"] as const) {
+      for (const restoredBytesKind of ["different", "same"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+        const taskId = `TASK-strategy-13-rebound-${phase}-${restoredBytesKind}`;
+        const retryTaskId = `${taskId}-retry`;
+        const taskIds = [taskId, retryTaskId];
+        const marker = new Error(
+          `TaskCard rebound ${phase} ${restoredBytesKind}`
+        );
+        const pinnedClosed = createSignal();
+        let pinnedDescriptor = -1;
+        let pinnedCloseCount = 0;
+        let reboundCount = 0;
+        let reboundIdentity:
+          | Awaited<ReturnType<typeof applySameInodePathnameRebound>>
+          | undefined;
+        let reboundTask: TaskCard | undefined;
+
+        const reboundSnapshot = async (snapshotPath: string) => {
+          if (reboundCount > 0) return;
+          reboundCount += 1;
+          const original = await readFileWithIdentity(snapshotPath);
+          const parsed = JSON.parse(original.bytes.toString("utf8")) as {
+            task_card: TaskCard;
+          };
+          reboundTask = restoredBytesKind === "same"
+            ? parsed.task_card
+            : {
+                ...parsed.task_card,
+                title: `${parsed.task_card.title} rebound`
+              };
+          const restoredBytes = restoredBytesKind === "same"
+            ? original.bytes
+            : Buffer.from(
+                `${JSON.stringify({ ...parsed, task_card: reboundTask }, null, 2)}\n`
+              );
+          reboundIdentity = await applySameInodePathnameRebound(
+            snapshotPath,
+            restoredBytes
+          );
+        };
+
+        const service = createTaskCardService({
+          workspaceRoot,
+          now: () => new Date("2026-07-07T13:40:07.375Z"),
+          taskIdFactory: () => taskIds.shift() ?? `${retryTaskId}-unexpected`,
+          snapshotWriteHooks: phase === "callback_throw"
+            ? {
+                afterSnapshotWrite: async ({ taskDirectory }) => {
+                  if (basename(taskDirectory) !== taskId) return;
+                  await reboundSnapshot(join(taskDirectory, "snapshot.json"));
+                  throw marker;
+                }
+              }
+            : { afterSnapshotWrite: () => undefined }
+        });
+        const input = {
+          type: "engineering" as const,
+          title: `Strategy 13 TaskCard ${phase}`,
+          question_or_goal:
+            "A rebound pathname must survive failed publication compensation.",
+          inference_budget: { mode: "normal" as const },
+          created_by: "pi"
+        };
+
+        const failure = await captureTaskServiceError(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              ...(phase === "final_proof"
+                ? {
+                    beforeCleanupPermitIdentityResolution: async ({ path }) => {
+                      if (path.endsWith(`/${taskId}/snapshot.json`)) {
+                        await reboundSnapshot(path);
+                      }
+                    }
+                  }
+                : {}),
+              afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+                pinnedDescriptor = fd;
+                pinnedCloseCount += 1;
+                pinnedClosed.resolve();
+              }
+            },
+            () => service.createTask(input)
+          )
+        );
+        await Promise.race([
+          pinnedClosed.promise,
+          timeoutAfter(
+            1_000,
+            `TaskCard rebound ${phase}/${restoredBytesKind} permit did not close`
+          )
+        ]);
+
+        expect(failure.code).toBe("workspace_path_not_safe");
+        expect(errorTreeContains(failure, marker)).toBe(phase === "callback_throw");
+        expect(countErrorNodes(failure, (error) => error === marker)).toBe(
+          phase === "callback_throw" ? 1 : 0
+        );
+        expect(reboundCount).toBe(1);
+        expect(reboundIdentity).toBeDefined();
+        expect(reboundTask).toBeDefined();
+        const snapshotPath = join(
+          workspaceRoot,
+          "tasks",
+          taskId,
+          "snapshot.json"
+        );
+        expect(await readFileWithIdentity(snapshotPath)).toEqual(
+          reboundIdentity!.rebound
+        );
+        expect(
+          workspaceRecordPhysicalIdentityMatches(
+            reboundIdentity!.rebound,
+            reboundIdentity!.original
+          )
+        ).toBe(true);
+        const freshService = createTaskCardService({ workspaceRoot });
+        expect(await freshService.getTaskFromSnapshot(taskId)).toEqual(reboundTask!);
+        expect(await freshService.listTasks()).toEqual([reboundTask!]);
+        const retry = await service.createTask(input);
+        expect(retry.task_id).toBe(retryTaskId);
+        expect(pinnedCloseCount).toBe(1);
+        await expectFileDescriptorClosed(pinnedDescriptor);
+        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+          bindingBaseline
+        );
+      }
+    }
+  });
+
+  test("TaskCard publication preserves a pre-terminal sibling-drifted in-place snapshot", async () => {
+    for (const phase of ["callback_throw", "final_proof"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const taskId = `TASK-strategy-14-pre-terminal-${phase}`;
+      const retryTaskId = `${taskId}-retry`;
+      const taskIds = [taskId, retryTaskId];
+      const marker = new Error(`TaskCard strategy 14 ${phase}`);
+      const siblingSchema = z.object({ id: z.string() });
+      const sibling = { id: `strategy-14-task-sibling-${phase}` };
+      const siblingFileName = "publication-sibling.json";
+      const siblingEvidenceRef = `workspace/tasks/${taskId}/${siblingFileName}`;
+      const pinnedClosed = createSignal();
+      let pinnedDescriptor = -1;
+      let pinnedCloseCount = 0;
+      let hookCount = 0;
+      let originalIdentity:
+        | Awaited<ReturnType<typeof readFileWithIdentity>>
+        | undefined;
+      let mutatedIdentity:
+        | Awaited<ReturnType<typeof readFileWithIdentity>>
+        | undefined;
+      let mutatedTask: TaskCard | undefined;
+      let parentBefore: BigIntStats | undefined;
+      let parentAfter: BigIntStats | undefined;
+
+      const service = createTaskCardService({
+        workspaceRoot,
+        now: () => new Date("2026-07-07T13:40:07.406Z"),
+        taskIdFactory: () => taskIds.shift() ?? `${retryTaskId}-unexpected`,
+        snapshotWriteHooks: {
+          afterSnapshotWrite: async ({ taskDirectory }) => {
+            if (basename(taskDirectory) !== taskId) return;
+            hookCount += 1;
+            const snapshotPath = join(taskDirectory, "snapshot.json");
+            originalIdentity = await readFileWithIdentity(snapshotPath);
+            const parsed = JSON.parse(
+              originalIdentity.bytes.toString("utf8")
+            ) as Record<string, unknown> & { task_card: TaskCard };
+            mutatedTask = {
+              ...parsed.task_card,
+              title: `${parsed.task_card.title} strategy-14 mutation`
+            };
+            parentBefore = await lstat(taskDirectory, { bigint: true });
+            await writeJsonRecord(
+              workspaceRoot,
+              ["tasks", taskId],
+              siblingFileName,
+              sibling,
+              siblingEvidenceRef,
+              siblingSchema
+            );
+            parentAfter = await lstat(taskDirectory, { bigint: true });
+            await replaceFileBytesInPlaceWithMtimeAdvance(
+              snapshotPath,
+              Buffer.from(
+                `${JSON.stringify({ ...parsed, task_card: mutatedTask }, null, 2)}\n`
+              )
+            );
+            mutatedIdentity = await readFileWithIdentity(snapshotPath);
+            if (phase === "callback_throw") throw marker;
+          }
+        }
+      });
+      const input = {
+        type: "engineering" as const,
+        title: `Strategy 14 TaskCard ${phase}`,
+        question_or_goal:
+          "A sibling write before terminal capture must invalidate destructive compensation.",
+        inference_budget: { mode: "normal" as const },
+        created_by: "pi"
+      };
+
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+              pinnedDescriptor = fd;
+              pinnedCloseCount += 1;
+              pinnedClosed.resolve();
+            }
+          },
+          () => service.createTask(input)
+        )
+      );
+      await Promise.race([
+        pinnedClosed.promise,
+        timeoutAfter(1_000, `Strategy 14 TaskCard ${phase} permit did not close`)
+      ]);
+
+      expect(semanticPrimaryError(failure)).toBeInstanceOf(TaskServiceError);
+      expect((semanticPrimaryError(failure) as TaskServiceError).code).toBe(
+        "workspace_path_not_safe"
+      );
+      expect(errorTreeContains(failure, marker)).toBe(phase === "callback_throw");
+      expect(countErrorNodes(failure, (error) => error === marker)).toBe(
+        phase === "callback_throw" ? 1 : 0
+      );
+      expect(hookCount).toBe(1);
+      expect(parentBefore).toBeDefined();
+      expect(parentAfter).toBeDefined();
+      expect(parentAfter!.dev).toBe(parentBefore!.dev);
+      expect(parentAfter!.ino).toBe(parentBefore!.ino);
+      expect(
+        parentAfter!.ctimeNs === parentBefore!.ctimeNs &&
+          parentAfter!.mtimeNs === parentBefore!.mtimeNs
+      ).toBe(false);
+      expect(originalIdentity).toBeDefined();
+      expect(mutatedIdentity).toBeDefined();
+      expect(mutatedTask).toBeDefined();
+      expect(
+        workspaceRecordPhysicalIdentityMatches(mutatedIdentity!, originalIdentity!)
+      ).toBe(true);
+      const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+      expect(await readFileWithIdentity(snapshotPath)).toEqual(mutatedIdentity!);
+      const siblingPath = join(workspaceRoot, "tasks", taskId, siblingFileName);
+      expect(
+        await readJsonRecord(siblingPath, siblingEvidenceRef, siblingSchema)
+      ).toEqual(sibling);
+      const freshService = createTaskCardService({ workspaceRoot });
+      expect(await freshService.getTaskFromSnapshot(taskId)).toEqual(mutatedTask!);
+      expect(await freshService.listTasks()).toEqual([mutatedTask!]);
+      const retry = await service.createTask(input);
+      expect(retry.task_id).toBe(retryTaskId);
+      expect(pinnedCloseCount).toBe(1);
+      await expectFileDescriptorClosed(pinnedDescriptor);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        bindingBaseline
+      );
+    }
+  });
+
+  test("TaskCard publication compensates pure in-place mutations under the retained parent epoch", async () => {
+    for (const phase of ["callback_throw", "final_proof"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const taskId = `TASK-strategy-13-in-place-${phase}`;
+      const retryTaskId = `${taskId}-retry`;
+      const taskIds = [taskId, retryTaskId];
+      const marker = new Error(`TaskCard in-place ${phase}`);
+      const pinnedClosed = createSignal();
+      let pinnedDescriptor = -1;
+      let pinnedCloseCount = 0;
+      let mutationCount = 0;
+      let parentEpochStayedExact = false;
+      let originalIdentity:
+        | Awaited<ReturnType<typeof readFileWithIdentity>>
+        | undefined;
+      let mutatedIdentity:
+        | Awaited<ReturnType<typeof readFileWithIdentity>>
+        | undefined;
+
+      const mutateSnapshot = async (snapshotPath: string) => {
+        if (mutationCount > 0) return;
+        mutationCount += 1;
+        originalIdentity = await readFileWithIdentity(snapshotPath);
+        const parsed = JSON.parse(originalIdentity.bytes.toString("utf8")) as {
+          task_card: TaskCard;
+        };
+        const mutatedBytes = Buffer.from(
+          `${JSON.stringify(
+            {
+              ...parsed,
+              task_card: {
+                ...parsed.task_card,
+                title: `${parsed.task_card.title} in-place mutation`
+              }
+            },
+            null,
+            2
+          )}\n`
+        );
+        const parentBefore = await lstat(dirname(snapshotPath), { bigint: true });
+        await replaceFileBytesInPlaceWithMtimeAdvance(snapshotPath, mutatedBytes);
+        const parentAfter = await lstat(dirname(snapshotPath), { bigint: true });
+        mutatedIdentity = await readFileWithIdentity(snapshotPath);
+        parentEpochStayedExact =
+          parentAfter.dev === parentBefore.dev &&
+          parentAfter.ino === parentBefore.ino &&
+          parentAfter.ctimeNs === parentBefore.ctimeNs &&
+          parentAfter.mtimeNs === parentBefore.mtimeNs;
+        expect(
+          workspaceRecordPhysicalIdentityMatches(mutatedIdentity, originalIdentity)
+        ).toBe(true);
+      };
+
+      const service = createTaskCardService({
+        workspaceRoot,
+        now: () => new Date("2026-07-07T13:40:07.437Z"),
+        taskIdFactory: () => taskIds.shift() ?? `${retryTaskId}-unexpected`,
+        snapshotWriteHooks: phase === "callback_throw"
+          ? {
+              afterSnapshotWrite: async ({ taskDirectory }) => {
+                if (basename(taskDirectory) !== taskId) return;
+                await mutateSnapshot(join(taskDirectory, "snapshot.json"));
+                throw marker;
+              }
+            }
+          : { afterSnapshotWrite: () => undefined }
+      });
+      const input = {
+        type: "engineering" as const,
+        title: `Strategy 13 in-place ${phase}`,
+        question_or_goal: "Compensate only the still-bound publisher generation.",
+        inference_budget: { mode: "normal" as const },
+        created_by: "pi"
+      };
+
+      const failure = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            ...(phase === "final_proof"
+              ? {
+                  beforeCleanupPermitIdentityResolution: async ({ path }) => {
+                    if (path.endsWith(`/${taskId}/snapshot.json`)) {
+                      await mutateSnapshot(path);
+                    }
+                  }
+                }
+              : {}),
+            afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+              pinnedDescriptor = fd;
+              pinnedCloseCount += 1;
+              pinnedClosed.resolve();
+            }
+          },
+          () => service.createTask(input)
+        )
+      );
+      await Promise.race([
+        pinnedClosed.promise,
+        timeoutAfter(1_000, `TaskCard in-place ${phase} permit did not close`)
+      ]);
+
+      expect(failure.code).toBe("workspace_path_not_safe");
+      expect(errorTreeContains(failure, marker)).toBe(phase === "callback_throw");
+      expect(countErrorNodes(failure, (error) => error === marker)).toBe(
+        phase === "callback_throw" ? 1 : 0
+      );
+      expect(mutationCount).toBe(1);
+      expect(parentEpochStayedExact).toBe(true);
+      expect(originalIdentity).toBeDefined();
+      expect(mutatedIdentity).toBeDefined();
+      await expectPathMissing(
+        join(workspaceRoot, "tasks", taskId, "snapshot.json")
+      );
+      expect(await createTaskCardService({ workspaceRoot }).listTasks()).toEqual([]);
+      const retry = await service.createTask(input);
+      expect(retry.task_id).toBe(retryTaskId);
+      expect(pinnedCloseCount).toBe(1);
+      await expectFileDescriptorClosed(pinnedDescriptor);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        bindingBaseline
+      );
+    }
+  });
+
+  test("TaskCard publication preserves the canonical snapshot after sibling epoch drift", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const taskId = "TASK-strategy-13-sibling-drift";
+    const pinnedClosed = createSignal();
+    let pinnedDescriptor = -1;
+    let pinnedCloseCount = 0;
+    let driftCount = 0;
+    let canonicalBefore:
+      | Awaited<ReturnType<typeof readFileWithIdentity>>
+      | undefined;
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:07.468Z"),
+      taskIdFactory: () => taskId,
+      snapshotWriteHooks: { afterSnapshotWrite: () => undefined }
+    });
+    const input = {
+      type: "engineering" as const,
+      title: "Strategy 13 sibling drift",
+      question_or_goal: "Do not reconstruct cleanup authority after sibling drift.",
+      inference_budget: { mode: "normal" as const },
+      created_by: "pi"
+    };
+
+    const failure = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeCleanupPermitIdentityResolution: async ({ path }) => {
+            if (!path.endsWith(`/${taskId}/snapshot.json`) || driftCount > 0) return;
+            driftCount += 1;
+            canonicalBefore = await readFileWithIdentity(path);
+            await applyExternalParentMetadataDrift(dirname(path), "sibling-only");
+          },
+          afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+            pinnedDescriptor = fd;
+            pinnedCloseCount += 1;
+            pinnedClosed.resolve();
+          }
+        },
+        () => service.createTask(input)
+      )
+    );
+    await Promise.race([
+      pinnedClosed.promise,
+      timeoutAfter(1_000, "TaskCard sibling-drift permit did not close")
+    ]);
+
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(driftCount).toBe(1);
+    expect(canonicalBefore).toBeDefined();
+    expect(await readFileWithIdentity(snapshotPath)).toEqual(canonicalBefore!);
+    expect(await createTaskCardService({ workspaceRoot }).listTasks()).toEqual([
+      expect.objectContaining({ task_id: taskId })
+    ]);
+    expect(pinnedCloseCount).toBe(1);
+    await expectFileDescriptorClosed(pinnedDescriptor);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+  });
+
+  test("TaskCard rollback consumes only its observed generation when a successor arrives", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:07.500Z"),
+      taskIdFactory: () => "TASK-observed-rollback-successor"
+    });
+    const task = await service.createTask({
+      type: "engineering",
+      title: "Observed rollback owner",
+      question_or_goal: "Preserve a successor published after rollback observation.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", task.task_id, "snapshot.json");
+    const originalSnapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as {
+      task_card: TaskCard;
+    };
+    const successorTask = {
+      ...task,
+      title: "Observed rollback successor"
+    };
+    const successorBytes = Buffer.from(
+      `${JSON.stringify({ ...originalSnapshot, task_card: successorTask }, null, 2)}\n`
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const pinnedClosed = createSignal();
+    let pinnedDescriptor = -1;
+    let replacementCount = 0;
+    let successorIdentity: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
+
+    await runWithWorkspaceRecordPublicationHooks(
+      {
+        beforeCleanupPermitIdentityResolution: async ({ path }) => {
+          if (path !== snapshotPath || replacementCount > 0) return;
+          replacementCount += 1;
+          await unlink(path);
+          await writeFile(path, successorBytes, { flag: "wx", mode: 0o600 });
+          successorIdentity = await readFileWithIdentity(path);
+        },
+        afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+          pinnedDescriptor = fd;
+          pinnedClosed.resolve();
+        }
+      },
+      () => service.rollbackTaskForIdempotency(task.task_id, task)
+    );
+    await Promise.race([
+      pinnedClosed.promise,
+      timeoutAfter(1_000, "TaskCard rollback observation permit did not close")
+    ]);
+
+    expect(replacementCount).toBe(1);
+    expect(successorIdentity).toBeDefined();
+    expect(await readFileWithIdentity(snapshotPath)).toEqual(successorIdentity!);
+    expect(await service.getTask(task.task_id)).toEqual(successorTask);
+    expect(await service.listTasks()).toEqual([successorTask]);
+    const freshService = createTaskCardService({ workspaceRoot });
+    expect(await freshService.listTasks()).toEqual([successorTask]);
+    expect(await freshService.getTaskFromSnapshot(task.task_id)).toEqual(successorTask);
+    await expectFileDescriptorClosed(pinnedDescriptor);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("TaskCard rollback preserves a valid successor already current at observation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:07.750Z"),
+      taskIdFactory: () => "TASK-current-rollback-successor"
+    });
+    const task = await service.createTask({
+      type: "engineering",
+      title: "Rollback original generation",
+      question_or_goal: "Do not delete a valid successor already current at observation.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", task.task_id, "snapshot.json");
+    const originalIdentity = await readFileWithIdentity(snapshotPath);
+    const originalSnapshot = JSON.parse(originalIdentity.bytes.toString("utf8")) as {
+      task_card: TaskCard;
+    };
+    const successorTask = { ...task, title: "Rollback current successor" };
+    const successorTempPath = `${snapshotPath}.successor`;
+    await writeFile(
+      successorTempPath,
+      `${JSON.stringify({ ...originalSnapshot, task_card: successorTask }, null, 2)}\n`,
+      { flag: "wx", mode: 0o600 }
+    );
+    await unlink(snapshotPath);
+    await rename(successorTempPath, snapshotPath);
+    const successorIdentity = await readFileWithIdentity(snapshotPath);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+
+    await service.rollbackTaskForIdempotency(task.task_id, task);
+
+    expect(
+      workspaceRecordPhysicalIdentityMatches(successorIdentity, originalIdentity)
+    ).toBe(false);
+    expect(await readFileWithIdentity(snapshotPath)).toEqual(successorIdentity);
+    expect(await service.getTask(task.task_id)).toEqual(successorTask);
+    expect(await service.listTasks()).toEqual([successorTask]);
+    expect(
+      await createTaskCardService({ workspaceRoot }).getTaskFromSnapshot(task.task_id)
+    ).toEqual(successorTask);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("TaskCard public values stay isolated from canonical cache and durable state", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:08.000Z"),
+      taskIdFactory: () => "TASK-private-value-isolation"
+    });
+    const mutatePublicTask = (task: TaskCard, marker: string): void => {
+      task.task_id = `TASK-public-${marker}`;
+      task.title = `Public mutation ${marker}`;
+      task.inference_budget.mode = "deep";
+      task.inference_budget.advisory_usd = 999;
+      task.inference_budget.advisory_model_calls = 999;
+      task.inference_budget.reviewer_enabled = false;
+      task.linked_jobs.push(`JOB-public-${marker}`);
+      task.linked_reports.push(`REPORT-public-${marker}`);
+      task.theory_bundle_ids ??= [];
+      task.theory_bundle_ids.push(`THEORY-public-${marker}`);
+    };
+    const expectDistinctTaskValues = (left: TaskCard, right: TaskCard): void => {
+      expect(left).not.toBe(right);
+      expect(left.inference_budget).not.toBe(right.inference_budget);
+      expect(left.linked_jobs).not.toBe(right.linked_jobs);
+      expect(left.linked_reports).not.toBe(right.linked_reports);
+      if (
+        left.theory_bundle_ids === undefined ||
+        right.theory_bundle_ids === undefined
+      ) {
+        expect(left.theory_bundle_ids).toBeUndefined();
+        expect(right.theory_bundle_ids).toBeUndefined();
+      } else {
+        expect(left.theory_bundle_ids).not.toBe(right.theory_bundle_ids);
+      }
+    };
+    const created = await service.createTask({
+      type: "engineering",
+      title: "Private canonical task",
+      question_or_goal: "Keep every public TaskCard value detached from private state.",
+      inference_budget: {
+        mode: "normal",
+        advisory_usd: 10,
+        advisory_model_calls: 5,
+        reviewer_enabled: true
+      },
+      created_by: "pi"
+    });
+    const taskId = created.task_id;
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const createdSnapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as {
+      readonly linked_jobs: string[];
+      readonly linked_reports: string[];
+      readonly task_card: TaskCard;
+    };
+    const createdCanonical = createdSnapshot.task_card;
+    const createdCacheReturn = await service.getTask(taskId);
+
+    expect(createdCacheReturn).toEqual(createdCanonical);
+    expectDistinctTaskValues(created, createdCacheReturn);
+
+    mutatePublicTask(created, "create");
+
+    expect(await service.getTask(taskId)).toEqual(createdCanonical);
+    expect(await service.listTasks()).toEqual([createdCanonical]);
+    expect(JSON.parse(await readFile(snapshotPath, "utf8"))).toEqual(createdSnapshot);
+
+    const canonicalTask: TaskCard = {
+      ...createdCanonical,
+      title: "Private canonical task with linked state",
+      inference_budget: {
+        mode: "normal",
+        advisory_usd: 12,
+        advisory_model_calls: 6,
+        reviewer_enabled: true
+      },
+      linked_jobs: ["JOB-canonical"],
+      linked_reports: ["REPORT-canonical"],
+      theory_bundle_ids: ["THEORY-canonical"]
+    };
+    const canonicalSnapshot = {
+      ...createdSnapshot,
+      linked_jobs: [...canonicalTask.linked_jobs],
+      linked_reports: [...canonicalTask.linked_reports],
+      task_card: canonicalTask
+    };
+    await writeFile(snapshotPath, `${JSON.stringify(canonicalSnapshot, null, 2)}\n`, {
+      flag: "w"
+    });
+    const canonicalBytes = await readFile(snapshotPath);
+    const firstSnapshotReturn = await service.getTaskFromSnapshot(taskId);
+    const firstSnapshotCacheReturn = await service.getTask(taskId);
+
+    expect(firstSnapshotReturn).toEqual(canonicalTask);
+    expect(firstSnapshotCacheReturn).toEqual(canonicalTask);
+    expectDistinctTaskValues(firstSnapshotReturn, firstSnapshotCacheReturn);
+    mutatePublicTask(firstSnapshotReturn, "first-snapshot");
+    expect(await service.getTask(taskId)).toEqual(canonicalTask);
+    expect(await readFile(snapshotPath)).toEqual(canonicalBytes);
+
+    const observation = await service.observeTaskSnapshotForCleanup(taskId);
+    if (observation.status !== "record") {
+      throw new Error("Expected a valid TaskCard cleanup observation.");
+    }
+    expect(observation.task).toEqual(canonicalTask);
+    mutatePublicTask(observation.task, "observation");
+
+    const accepted = await service.acceptTaskSnapshotCleanupObservation(observation);
+
+    expect(accepted).toEqual(canonicalTask);
+    expectDistinctTaskValues(accepted, observation.task);
+    expect(await service.getTask(taskId)).toEqual(canonicalTask);
+    expect(await service.listTasks()).toEqual([canonicalTask]);
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(canonicalTask);
+    expect(await readFile(snapshotPath)).toEqual(canonicalBytes);
+    const forgedTaskIdError = await captureTaskServiceError(() =>
+      service.getTask("TASK-public-observation")
+    );
+    expect(forgedTaskIdError.code).toBe("task_not_found");
+
+    const getReturn = await service.getTask(taskId);
+    const listReturn = (await service.listTasks())[0]!;
+    const snapshotReturn = await service.getTaskFromSnapshot(taskId);
+    const freshService = createTaskCardService({ workspaceRoot });
+    const freshHydrationReturn = (await freshService.listTasks())[0]!;
+
+    expectDistinctTaskValues(accepted, getReturn);
+    expectDistinctTaskValues(getReturn, listReturn);
+    expectDistinctTaskValues(listReturn, snapshotReturn);
+    expectDistinctTaskValues(snapshotReturn, freshHydrationReturn);
+
+    mutatePublicTask(accepted, "accept");
+    expect(getReturn).toEqual(canonicalTask);
+    mutatePublicTask(getReturn, "get");
+    expect(listReturn).toEqual(canonicalTask);
+    mutatePublicTask(listReturn, "list");
+    expect(snapshotReturn).toEqual(canonicalTask);
+    mutatePublicTask(snapshotReturn, "snapshot");
+    expect(freshHydrationReturn).toEqual(canonicalTask);
+    mutatePublicTask(freshHydrationReturn, "hydration");
+
+    expect(await service.getTask(taskId)).toEqual(canonicalTask);
+    expect(await service.listTasks()).toEqual([canonicalTask]);
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(canonicalTask);
+    expect(await freshService.getTask(taskId)).toEqual(canonicalTask);
+    expect(await freshService.getTaskFromSnapshot(taskId)).toEqual(canonicalTask);
+    expect(await readFile(snapshotPath)).toEqual(canonicalBytes);
+  });
+
+  test("TaskCard cleanup observations remain private, one-shot, and permit-terminal", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:08.250Z"),
+      taskIdFactory: () => "TASK-private-observation-settlement"
+    });
+    const task = await service.createTask({
+      type: "engineering",
+      title: "Private observation settlement",
+      question_or_goal: "Keep cleanup observation authority private and terminal.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const taskId = task.task_id;
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const foreignService = createTaskCardService({ workspaceRoot });
+    type CleanupObservation = Parameters<
+      typeof service.acceptTaskSnapshotCleanupObservation
+    >[0];
+    const expectDiagnosticsSettled = (): void => {
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        bindingBaseline
+      );
+    };
+    const expectObservationSettled = async (
+      observation: CleanupObservation
+    ): Promise<void> => {
+      const actions: Array<() => Promise<unknown>> = [
+        () => service.acceptTaskSnapshotCleanupObservation(observation),
+        () => service.cancelTaskSnapshotCleanupObservation(observation),
+        () => service.cleanupTaskSnapshotObservation(observation)
+      ];
+      for (const action of actions) {
+        const error = await captureError(action);
+        expect(error).toBeInstanceOf(TypeError);
+        expect(error.message).toBe(
+          "Task snapshot cleanup observation is not owned by this TaskCard service or is already settled."
+        );
+      }
+    };
+
+    const cancelObservation = await service.observeTaskSnapshotForCleanup(taskId);
+    if (cancelObservation.status !== "record") {
+      throw new Error("Expected a cancellable TaskCard cleanup observation.");
+    }
+    const forgedObservation = {
+      ...cancelObservation
+    } as unknown as CleanupObservation;
+    const forgedError = await captureError(() =>
+      service.acceptTaskSnapshotCleanupObservation(forgedObservation)
+    );
+    const foreignError = await captureError(() =>
+      foreignService.acceptTaskSnapshotCleanupObservation(cancelObservation)
+    );
+    expect(forgedError).toBeInstanceOf(TypeError);
+    expect(foreignError).toBeInstanceOf(TypeError);
+    expect(forgedError.message).toBe(
+      "Task snapshot cleanup observation is not owned by this TaskCard service or is already settled."
+    );
+    expect(foreignError.message).toBe(forgedError.message);
+    await service.cancelTaskSnapshotCleanupObservation(cancelObservation);
+    await expectObservationSettled(cancelObservation);
+    expectDiagnosticsSettled();
+
+    const acceptObservation = await service.observeTaskSnapshotForCleanup(taskId);
+    if (acceptObservation.status !== "record") {
+      throw new Error("Expected an acceptable TaskCard cleanup observation.");
+    }
+    expect(
+      await service.acceptTaskSnapshotCleanupObservation(acceptObservation)
+    ).toEqual(task);
+    await expectObservationSettled(acceptObservation);
+    expectDiagnosticsSettled();
+
+    const cleanupObservation = await service.observeTaskSnapshotForCleanup(taskId);
+    if (cleanupObservation.status !== "record") {
+      throw new Error("Expected a cleanable TaskCard cleanup observation.");
+    }
+    await service.cleanupTaskSnapshotObservation(cleanupObservation);
+    await expectObservationSettled(cleanupObservation);
+    await expectPathMissing(snapshotPath);
+    expect(await service.listTasks()).toEqual([]);
+    expectDiagnosticsSettled();
+
+    const missingObservation = await service.observeTaskSnapshotForCleanup(taskId);
+    expect(missingObservation.status).toBe("missing");
+    const missingTaskError = await captureError(() =>
+      service.acceptTaskSnapshotCleanupObservation(missingObservation)
+    );
+    expect(missingTaskError).toBeInstanceOf(TypeError);
+    expect(missingTaskError.message).toBe(
+      "Only a valid TaskCard cleanup observation can be accepted."
+    );
+    await service.cancelTaskSnapshotCleanupObservation(missingObservation);
+    await expectObservationSettled(missingObservation);
+    expectDiagnosticsSettled();
   });
 
   test("Artifact registry normalizes artifact paths in stored manifests", async () => {
@@ -21809,6 +23703,1062 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
+  test("generic lifecycle preserves an in-place mutation after a pre-terminal sibling write", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const schema = z.object({ id: z.string(), revision: z.number().int() });
+    const directorySegments = ["strategy-14-lifecycle-pre-terminal-sibling"] as const;
+    const fileName = "record.json";
+    const siblingFileName = "sibling.json";
+    const evidenceRef = "strategy-14.lifecycle.pre-terminal-sibling";
+    const siblingEvidenceRef = `${evidenceRef}.sibling`;
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const siblingPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, siblingFileName],
+      siblingEvidenceRef
+    );
+    const record = { id: "strategy-14-lifecycle-owner", revision: 1 };
+    const mutatedRecord = { ...record, revision: 2 };
+    const sibling = { id: "strategy-14-lifecycle-sibling", revision: 1 };
+    const marker = new Error("strategy-14 lifecycle callback primary");
+    const pinnedClosed = createSignal();
+    let pinnedDescriptor = -1;
+    let pinnedCloseCount = 0;
+    let callbackCount = 0;
+    let originalIdentity:
+      | Awaited<ReturnType<typeof readFileWithIdentity>>
+      | undefined;
+    let mutatedIdentity:
+      | Awaited<ReturnType<typeof readFileWithIdentity>>
+      | undefined;
+    let parentBefore: BigIntStats | undefined;
+    let parentAfter: BigIntStats | undefined;
+
+    const failure = await captureError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+            pinnedDescriptor = fd;
+            pinnedCloseCount += 1;
+            pinnedClosed.resolve();
+          }
+        },
+        () =>
+          publishJsonRecordWithLifecycleCallbacks(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            record,
+            evidenceRef,
+            schema,
+            {
+              afterWrite: async () => {
+                callbackCount += 1;
+                originalIdentity = await readFileWithIdentity(path);
+                parentBefore = await lstat(dirname(path), { bigint: true });
+                await writeJsonRecord(
+                  workspaceRoot,
+                  directorySegments,
+                  siblingFileName,
+                  sibling,
+                  siblingEvidenceRef,
+                  schema
+                );
+                parentAfter = await lstat(dirname(path), { bigint: true });
+                await replaceFileBytesInPlaceWithMtimeAdvance(
+                  path,
+                  Buffer.from(`${JSON.stringify(mutatedRecord, null, 2)}\n`)
+                );
+                mutatedIdentity = await readFileWithIdentity(path);
+                throw marker;
+              }
+            }
+          )
+      )
+    );
+    await Promise.race([
+      pinnedClosed.promise,
+      timeoutAfter(1_000, "Strategy 14 lifecycle permit did not close")
+    ]);
+
+    expect(semanticPrimaryError(failure)).toBe(marker);
+    expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
+    expect(callbackCount).toBe(1);
+    expect(parentBefore).toBeDefined();
+    expect(parentAfter).toBeDefined();
+    expect(parentAfter!.dev).toBe(parentBefore!.dev);
+    expect(parentAfter!.ino).toBe(parentBefore!.ino);
+    expect(
+      parentAfter!.ctimeNs === parentBefore!.ctimeNs &&
+        parentAfter!.mtimeNs === parentBefore!.mtimeNs
+    ).toBe(false);
+    expect(originalIdentity).toBeDefined();
+    expect(mutatedIdentity).toBeDefined();
+    expect(
+      workspaceRecordPhysicalIdentityMatches(mutatedIdentity!, originalIdentity!)
+    ).toBe(true);
+    expect(await readFileWithIdentity(path)).toEqual(mutatedIdentity!);
+    expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(mutatedRecord);
+    expect(await readJsonRecord(siblingPath, siblingEvidenceRef, schema)).toEqual(sibling);
+    expect(pinnedCloseCount).toBe(1);
+    await expectFileDescriptorClosed(pinnedDescriptor);
+    expect((await readdir(dirname(path))).filter(isOwnedRecordPath)).toEqual([]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("generic lifecycle compensation preserves different-byte and same-byte new-inode successors", async () => {
+    for (const phase of ["callback_throw", "final_proof"] as const) {
+      for (const successorBytesKind of ["different", "same"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+        const schema = z.object({ id: z.string(), revision: z.number().int() });
+        const directorySegments = ["strategy-12-lifecycle", phase, successorBytesKind] as const;
+        const fileName = "record.json";
+        const evidenceRef = `strategy-12.lifecycle.${phase}.${successorBytesKind}`;
+        const path = workspaceRecordPath(
+          workspaceRoot,
+          [...directorySegments, fileName],
+          evidenceRef
+        );
+        const record = { id: `owner-${phase}-${successorBytesKind}`, revision: 1 };
+        const successor = successorBytesKind === "same"
+          ? record
+          : { ...record, revision: 2 };
+        const successorBytes = Buffer.from(`${JSON.stringify(successor, null, 2)}\n`);
+        const marker = new Error(`lifecycle callback ${successorBytesKind}`);
+        const pinnedClosed = createSignal();
+        let pinnedDescriptor = -1;
+        let pinnedCloseCount = 0;
+        let lifecycleCallbackCount = 0;
+        let replacementCount = 0;
+        let originalIdentity: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
+        let successorIdentity: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
+
+        const replaceGeneration = async () => {
+          if (replacementCount > 0) return;
+          replacementCount += 1;
+          originalIdentity = await readFileWithIdentity(path);
+          await unlink(path);
+          await writeFile(path, successorBytes, { flag: "wx", mode: 0o600 });
+          successorIdentity = await readFileWithIdentity(path);
+        };
+        const failure = await captureError(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              ...(phase === "final_proof"
+                ? {
+                    beforeCleanupPermitIdentityResolution: async ({ path: observedPath }: { path: string }) => {
+                      if (observedPath === path) await replaceGeneration();
+                    }
+                  }
+                : {}),
+              afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+                pinnedDescriptor = fd;
+                pinnedCloseCount += 1;
+                pinnedClosed.resolve();
+              }
+            },
+            () => publishJsonRecordWithLifecycleCallbacks(
+              workspaceRoot,
+              directorySegments,
+              fileName,
+              record,
+              evidenceRef,
+              schema,
+              {
+                afterWrite: async () => {
+                  lifecycleCallbackCount += 1;
+                  if (phase === "callback_throw") {
+                    await replaceGeneration();
+                    throw marker;
+                  }
+                }
+              }
+            )
+          )
+        );
+        await Promise.race([
+          pinnedClosed.promise,
+          timeoutAfter(1_000, `Lifecycle ${phase}/${successorBytesKind} permit did not close`)
+        ]);
+
+        expect(lifecycleCallbackCount).toBe(1);
+        expect(replacementCount).toBe(1);
+        expect(originalIdentity).toBeDefined();
+        expect(successorIdentity).toBeDefined();
+        expect(
+          workspaceRecordPhysicalIdentityMatches(successorIdentity!, originalIdentity!)
+        ).toBe(false);
+        expect(await readFileWithIdentity(path)).toEqual(successorIdentity!);
+        expect(JSON.parse(await readFile(path, "utf8"))).toEqual(successor);
+        if (phase === "callback_throw") {
+          expect(semanticPrimaryError(failure)).toBe(marker);
+          expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
+        } else {
+          expect(semanticPrimaryError(failure)).toBeInstanceOf(TaskServiceError);
+          expect((semanticPrimaryError(failure) as TaskServiceError).code).toBe(
+            "workspace_path_not_safe"
+          );
+        }
+        expect(pinnedCloseCount).toBe(1);
+        await expectFileDescriptorClosed(pinnedDescriptor);
+        expect((await readdir(dirname(path))).filter(isOwnedRecordPath)).toEqual([]);
+        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+      }
+    }
+  });
+
+  test("generic lifecycle fails closed across same-inode pathname rebounds", async () => {
+    for (const phase of ["callback_throw", "final_proof"] as const) {
+      for (const restoredBytesKind of ["different", "same"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+        const schema = z.object({ id: z.string(), revision: z.number().int() });
+        const directorySegments = [
+          "strategy-13-lifecycle-rebound",
+          phase,
+          restoredBytesKind
+        ] as const;
+        const fileName = "record.json";
+        const evidenceRef =
+          `strategy-13.lifecycle.rebound.${phase}.${restoredBytesKind}`;
+        const path = workspaceRecordPath(
+          workspaceRoot,
+          [...directorySegments, fileName],
+          evidenceRef
+        );
+        const record = {
+          id: `strategy-13-owner-${phase}-${restoredBytesKind}`,
+          revision: 1
+        };
+        const reboundRecord = restoredBytesKind === "same"
+          ? record
+          : { ...record, revision: 2 };
+        const restoredBytes = Buffer.from(
+          `${JSON.stringify(reboundRecord, null, 2)}\n`
+        );
+        const marker = new Error(
+          `lifecycle rebound ${phase} ${restoredBytesKind}`
+        );
+        const pinnedClosed = createSignal();
+        let pinnedDescriptor = -1;
+        let pinnedCloseCount = 0;
+        let lifecycleCallbackCount = 0;
+        let reboundCount = 0;
+        let reboundIdentity:
+          | Awaited<ReturnType<typeof applySameInodePathnameRebound>>
+          | undefined;
+
+        const reboundGeneration = async () => {
+          if (reboundCount > 0) return;
+          reboundCount += 1;
+          reboundIdentity = await applySameInodePathnameRebound(
+            path,
+            restoredBytes
+          );
+        };
+        const failure = await captureError(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              ...(phase === "final_proof"
+                ? {
+                    beforeCleanupPermitIdentityResolution: async ({ path: observedPath }) => {
+                      if (observedPath === path) await reboundGeneration();
+                    }
+                  }
+                : {}),
+              afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+                pinnedDescriptor = fd;
+                pinnedCloseCount += 1;
+                pinnedClosed.resolve();
+              }
+            },
+            () =>
+              publishJsonRecordWithLifecycleCallbacks(
+                workspaceRoot,
+                directorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                schema,
+                {
+                  afterWrite: async () => {
+                    lifecycleCallbackCount += 1;
+                    if (phase !== "callback_throw") return;
+                    await reboundGeneration();
+                    throw marker;
+                  }
+                }
+              )
+          )
+        );
+        await Promise.race([
+          pinnedClosed.promise,
+          timeoutAfter(
+            1_000,
+            `Lifecycle rebound ${phase}/${restoredBytesKind} permit did not close`
+          )
+        ]);
+
+        expect(lifecycleCallbackCount).toBe(1);
+        expect(reboundCount).toBe(1);
+        expect(reboundIdentity).toBeDefined();
+        expect(await readFileWithIdentity(path)).toEqual(reboundIdentity!.rebound);
+        expect(
+          workspaceRecordPhysicalIdentityMatches(
+            reboundIdentity!.rebound,
+            reboundIdentity!.original
+          )
+        ).toBe(true);
+        expect(JSON.parse(await readFile(path, "utf8"))).toEqual(reboundRecord);
+        if (phase === "callback_throw") {
+          expect(semanticPrimaryError(failure)).toBe(marker);
+          expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
+        } else {
+          expect(semanticPrimaryError(failure)).toBeInstanceOf(TaskServiceError);
+          expect((semanticPrimaryError(failure) as TaskServiceError).code).toBe(
+            "workspace_path_not_safe"
+          );
+          expect(errorTreeContains(failure, marker)).toBe(false);
+        }
+        expect(pinnedCloseCount).toBe(1);
+        await expectFileDescriptorClosed(pinnedDescriptor);
+        expect((await readdir(dirname(path))).filter(isOwnedRecordPath)).toEqual([]);
+        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+          bindingBaseline
+        );
+      }
+    }
+  });
+
+  test("generic lifecycle compensates pure in-place mutations under the retained parent epoch", async () => {
+    for (const phase of ["callback_throw", "final_proof"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const schema = z.object({ id: z.string(), revision: z.number().int() });
+      const directorySegments = ["strategy-13-lifecycle-in-place", phase] as const;
+      const fileName = "record.json";
+      const evidenceRef = `strategy-13.lifecycle.in-place.${phase}`;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const record = { id: `strategy-13-in-place-${phase}`, revision: 1 };
+      const mutatedRecord = { ...record, revision: 2 };
+      const mutatedBytes = Buffer.from(
+        `${JSON.stringify(mutatedRecord, null, 2)}\n`
+      );
+      const marker = new Error(`lifecycle in-place ${phase}`);
+      const pinnedClosed = createSignal();
+      let pinnedDescriptor = -1;
+      let pinnedCloseCount = 0;
+      let lifecycleCallbackCount = 0;
+      let mutationCount = 0;
+      let parentEpochStayedExact = false;
+      let originalIdentity:
+        | Awaited<ReturnType<typeof readFileWithIdentity>>
+        | undefined;
+      let mutatedIdentity:
+        | Awaited<ReturnType<typeof readFileWithIdentity>>
+        | undefined;
+
+      const mutateGeneration = async () => {
+        if (mutationCount > 0) return;
+        mutationCount += 1;
+        originalIdentity = await readFileWithIdentity(path);
+        const parentBefore = await lstat(dirname(path), { bigint: true });
+        await replaceFileBytesInPlaceWithMtimeAdvance(path, mutatedBytes);
+        const parentAfter = await lstat(dirname(path), { bigint: true });
+        mutatedIdentity = await readFileWithIdentity(path);
+        parentEpochStayedExact =
+          parentAfter.dev === parentBefore.dev &&
+          parentAfter.ino === parentBefore.ino &&
+          parentAfter.ctimeNs === parentBefore.ctimeNs &&
+          parentAfter.mtimeNs === parentBefore.mtimeNs;
+        expect(
+          workspaceRecordPhysicalIdentityMatches(mutatedIdentity, originalIdentity)
+        ).toBe(true);
+      };
+      const failure = await captureError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            ...(phase === "final_proof"
+              ? {
+                  beforeCleanupPermitIdentityResolution: async ({ path: observedPath }) => {
+                    if (observedPath === path) await mutateGeneration();
+                  }
+                }
+              : {}),
+            afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+              pinnedDescriptor = fd;
+              pinnedCloseCount += 1;
+              pinnedClosed.resolve();
+            }
+          },
+          () =>
+            publishJsonRecordWithLifecycleCallbacks(
+              workspaceRoot,
+              directorySegments,
+              fileName,
+              record,
+              evidenceRef,
+              schema,
+              {
+                afterWrite: async () => {
+                  lifecycleCallbackCount += 1;
+                  if (phase !== "callback_throw") return;
+                  await mutateGeneration();
+                  throw marker;
+                }
+              }
+            )
+        )
+      );
+      await Promise.race([
+        pinnedClosed.promise,
+        timeoutAfter(1_000, `Lifecycle in-place ${phase} permit did not close`)
+      ]);
+
+      expect(lifecycleCallbackCount).toBe(1);
+      expect(mutationCount).toBe(1);
+      expect(parentEpochStayedExact).toBe(true);
+      expect(originalIdentity).toBeDefined();
+      expect(mutatedIdentity).toBeDefined();
+      await expectPathMissing(path);
+      if (phase === "callback_throw") {
+        expect(semanticPrimaryError(failure)).toBe(marker);
+        expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
+      } else {
+        expect(semanticPrimaryError(failure)).toBeInstanceOf(TaskServiceError);
+        expect((semanticPrimaryError(failure) as TaskServiceError).code).toBe(
+          "workspace_path_not_safe"
+        );
+        expect(errorTreeContains(failure, marker)).toBe(false);
+      }
+      expect(pinnedCloseCount).toBe(1);
+      await expectFileDescriptorClosed(pinnedDescriptor);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        bindingBaseline
+      );
+    }
+  });
+
+  test("published terminal cleanup preserves a successor created only after pinned close", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const schema = z.object({ id: z.string(), revision: z.number().int() });
+    const directorySegments = ["strategy-13-post-close-successor"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "strategy-13.post-close-successor";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const record = { id: "strategy-13-post-close", revision: 1 };
+    const mutatedRecord = { ...record, revision: 2 };
+    const successor = { ...record, revision: 3 };
+    const successorBytes = Buffer.from(`${JSON.stringify(successor, null, 2)}\n`);
+    const marker = new Error("strategy-13 post-close primary");
+    const pinnedClosed = createSignal();
+    let pinnedDescriptor = -1;
+    let pinnedCloseCount = 0;
+    let closedDescriptorCode: string | undefined;
+    let originalIdentity:
+      | Awaited<ReturnType<typeof readFileWithIdentity>>
+      | undefined;
+
+    const failure = await captureError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterCleanupPermitPinnedHandleClosed: ({ path: closedPath, fd }) => {
+            pinnedDescriptor = fd;
+            pinnedCloseCount += 1;
+            try {
+              fstatSync(fd);
+            } catch (error) {
+              closedDescriptorCode = (error as NodeJS.ErrnoException).code;
+            }
+            writeFileSync(closedPath, successorBytes, {
+              flag: "wx",
+              mode: 0o600
+            });
+            pinnedClosed.resolve();
+          }
+        },
+        () =>
+          publishJsonRecordWithLifecycleCallbacks(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            record,
+            evidenceRef,
+            schema,
+            {
+              afterWrite: async () => {
+                originalIdentity = await readFileWithIdentity(path);
+                await replaceFileBytesInPlaceWithMtimeAdvance(
+                  path,
+                  Buffer.from(`${JSON.stringify(mutatedRecord, null, 2)}\n`)
+                );
+                throw marker;
+              }
+            }
+          )
+      )
+    );
+    await Promise.race([
+      pinnedClosed.promise,
+      timeoutAfter(1_000, "Post-close successor hook did not settle")
+    ]);
+
+    const successorIdentity = await readFileWithIdentity(path);
+    expect(semanticPrimaryError(failure)).toBe(marker);
+    expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
+    expect(originalIdentity).toBeDefined();
+    expect(successorIdentity.bytes).toEqual(successorBytes);
+    expect(JSON.parse(successorIdentity.bytes.toString("utf8"))).toEqual(successor);
+    expect(closedDescriptorCode).toBe("EBADF");
+    expect(pinnedCloseCount).toBe(1);
+    await expectFileDescriptorClosed(pinnedDescriptor);
+    expect((await readdir(dirname(path))).filter(isOwnedRecordPath)).toEqual([]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+  });
+
+  test("generic lifecycle preserves the canonical record after sibling epoch drift", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const schema = z.object({ id: z.string(), revision: z.number().int() });
+    const directorySegments = ["strategy-13-lifecycle-sibling-drift"] as const;
+    const fileName = "record.json";
+    const evidenceRef = "strategy-13.lifecycle.sibling-drift";
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const record = { id: "strategy-13-sibling-drift", revision: 1 };
+    const pinnedClosed = createSignal();
+    let pinnedDescriptor = -1;
+    let pinnedCloseCount = 0;
+    let driftCount = 0;
+    let canonicalBefore:
+      | Awaited<ReturnType<typeof readFileWithIdentity>>
+      | undefined;
+
+    const failure = await captureError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeCleanupPermitIdentityResolution: async ({ path: observedPath }) => {
+            if (observedPath !== path || driftCount > 0) return;
+            driftCount += 1;
+            canonicalBefore = await readFileWithIdentity(path);
+            await applyExternalParentMetadataDrift(dirname(path), "sibling-only");
+          },
+          afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+            pinnedDescriptor = fd;
+            pinnedCloseCount += 1;
+            pinnedClosed.resolve();
+          }
+        },
+        () =>
+          publishJsonRecordWithLifecycleCallbacks(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            record,
+            evidenceRef,
+            schema,
+            { afterWrite: () => undefined }
+          )
+      )
+    );
+    await Promise.race([
+      pinnedClosed.promise,
+      timeoutAfter(1_000, "Lifecycle sibling-drift permit did not close")
+    ]);
+
+    expect(semanticPrimaryError(failure)).toBeInstanceOf(TaskServiceError);
+    expect((semanticPrimaryError(failure) as TaskServiceError).code).toBe(
+      "workspace_path_not_safe"
+    );
+    expect(driftCount).toBe(1);
+    expect(canonicalBefore).toBeDefined();
+    expect(await readFileWithIdentity(path)).toEqual(canonicalBefore!);
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(record);
+    expect((await readdir(dirname(path))).filter(isOwnedRecordPath)).toEqual([]);
+    expect(pinnedCloseCount).toBe(1);
+    await expectFileDescriptorClosed(pinnedDescriptor);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+  });
+
+  test("exact cleanup observations delete only their generation and release permit resources", async () => {
+    for (const outcome of ["exact", "bytes", "successor", "rebound"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string(), revision: z.number().int() });
+      const record = { id: `observed-${outcome}`, revision: 1 };
+      const successor = { ...record, revision: 2 };
+      const evidenceRef = `strategy-12.observation.${outcome}`;
+      const directorySegments = ["strategy-12-observation", outcome] as const;
+      const fileName = "record.json";
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      await writeJsonRecord(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      );
+      const originalIdentity = await readFileWithIdentity(path);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const pinnedClosed = createSignal();
+      let pinnedDescriptor = -1;
+      let pinnedCloseCount = 0;
+      const observation = await runWithWorkspaceRecordPublicationHooks(
+        {
+          afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+            pinnedDescriptor = fd;
+            pinnedCloseCount += 1;
+            pinnedClosed.resolve();
+          }
+        },
+        () => observeJsonRecordForCleanup(path, evidenceRef, schema)
+      );
+      if (observation.status !== "record") {
+        throw new Error(`Expected ${outcome} record cleanup observation.`);
+      }
+      let successorIdentity: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
+      if (outcome === "bytes") {
+        await replaceFileBytesInPlace(
+          path,
+          Buffer.from(`${JSON.stringify(successor, null, 2)}\n`)
+        );
+        successorIdentity = await readFileWithIdentity(path);
+      } else if (outcome === "successor") {
+        await unlink(path);
+        await writeFile(path, `${JSON.stringify(successor, null, 2)}\n`, {
+          flag: "wx",
+          mode: 0o600
+        });
+        successorIdentity = await readFileWithIdentity(path);
+      } else if (outcome === "rebound") {
+        const reboundPath = `${path}.rebound`;
+        await rename(path, reboundPath);
+        await link(reboundPath, path);
+        await unlink(reboundPath);
+        successorIdentity = await readFileWithIdentity(path);
+      }
+
+      const result = await conditionalDeleteObservedJsonRecordWithCleanupPermit(
+        observation.cleanupPermit,
+        path,
+        evidenceRef,
+        schema,
+        { kind: "record", expected: record, matches: () => true }
+      );
+      await Promise.race([
+        pinnedClosed.promise,
+        timeoutAfter(1_000, `${outcome} observation permit did not close`)
+      ]);
+
+      expect(result).toEqual({ status: outcome === "exact" ? "deleted" : "superseded" });
+      if (outcome === "exact") {
+        await expectPathMissing(path);
+      } else {
+        expect(await readFileWithIdentity(path)).toEqual(successorIdentity!);
+        if (outcome === "bytes") {
+          expect(
+            workspaceRecordPhysicalIdentityMatches(
+              successorIdentity!,
+              originalIdentity
+            )
+          ).toBe(true);
+        }
+        expect(JSON.parse(await readFile(path, "utf8"))).toEqual(
+          outcome === "bytes" || outcome === "successor" ? successor : record
+        );
+      }
+      expect(pinnedCloseCount).toBe(1);
+      await expectFileDescriptorClosed(pinnedDescriptor);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("exact cleanup observation is non-destructive after a same-store sibling epoch advance", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string(), revision: z.number().int() });
+    const directorySegments = ["strategy-14-exact-observation"] as const;
+    const fileName = "record.json";
+    const siblingFileName = "sibling.json";
+    const evidenceRef = "strategy-14.exact-observation";
+    const siblingEvidenceRef = `${evidenceRef}.sibling`;
+    const record = { id: "strategy-14-observed-owner", revision: 1 };
+    const mutatedRecord = { ...record, revision: 2 };
+    const sibling = { id: "strategy-14-observed-sibling", revision: 1 };
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, fileName],
+      evidenceRef
+    );
+    const siblingPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, siblingFileName],
+      siblingEvidenceRef
+    );
+    await writeJsonRecord(
+      workspaceRoot,
+      directorySegments,
+      fileName,
+      record,
+      evidenceRef,
+      schema
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const pinnedClosed = createSignal();
+    let pinnedDescriptor = -1;
+    let pinnedCloseCount = 0;
+    const observation = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+          pinnedDescriptor = fd;
+          pinnedCloseCount += 1;
+          pinnedClosed.resolve();
+        }
+      },
+      () => observeJsonRecordForCleanup(path, evidenceRef, schema)
+    );
+    if (observation.status !== "record") {
+      throw new Error("Expected Strategy 14 exact cleanup observation.");
+    }
+    const originalIdentity = await readFileWithIdentity(path);
+    const parentBefore = await lstat(dirname(path), { bigint: true });
+    await writeJsonRecord(
+      workspaceRoot,
+      directorySegments,
+      siblingFileName,
+      sibling,
+      siblingEvidenceRef,
+      schema
+    );
+    const parentAfter = await lstat(dirname(path), { bigint: true });
+    await replaceFileBytesInPlaceWithMtimeAdvance(
+      path,
+      Buffer.from(`${JSON.stringify(mutatedRecord, null, 2)}\n`)
+    );
+    const mutatedIdentity = await readFileWithIdentity(path);
+
+    const result = await conditionalDeleteObservedJsonRecordWithCleanupPermit(
+      observation.cleanupPermit,
+      path,
+      evidenceRef,
+      schema,
+      { kind: "record", expected: record, matches: () => true }
+    );
+    await Promise.race([
+      pinnedClosed.promise,
+      timeoutAfter(1_000, "Strategy 14 exact observation permit did not close")
+    ]);
+
+    expect(result).toEqual({ status: "superseded" });
+    expect(parentAfter.dev).toBe(parentBefore.dev);
+    expect(parentAfter.ino).toBe(parentBefore.ino);
+    expect(
+      parentAfter.ctimeNs === parentBefore.ctimeNs &&
+        parentAfter.mtimeNs === parentBefore.mtimeNs
+    ).toBe(false);
+    expect(
+      workspaceRecordPhysicalIdentityMatches(mutatedIdentity, originalIdentity)
+    ).toBe(true);
+    expect(await readFileWithIdentity(path)).toEqual(mutatedIdentity);
+    expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(mutatedRecord);
+    expect(await readJsonRecord(siblingPath, siblingEvidenceRef, schema)).toEqual(sibling);
+    expect(pinnedCloseCount).toBe(1);
+    await expectFileDescriptorClosed(pinnedDescriptor);
+    expect((await readdir(dirname(path))).filter(isOwnedRecordPath)).toEqual([]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("task-lane empty removal uses direct rmdir without enumerating lane entries", async () => {
+    const sourcePath = join(import.meta.dir, "workspace-record-store.ts");
+    const sourceText = await readFile(sourcePath, "utf8");
+    const sourceFile = ts.createSourceFile(
+      sourcePath,
+      sourceText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS
+    );
+    let removalFunction: ts.FunctionDeclaration | undefined;
+    const findRemovalFunction = (node: ts.Node): void => {
+      if (
+        ts.isFunctionDeclaration(node) &&
+        node.name?.text === "removeWorkspaceRecordDirectoryIfEmpty"
+      ) {
+        removalFunction = node;
+        return;
+      }
+      ts.forEachChild(node, findRemovalFunction);
+    };
+    findRemovalFunction(sourceFile);
+    expect(removalFunction).toBeDefined();
+    const calledFunctions: string[] = [];
+    const collectCalls = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        if (ts.isIdentifier(node.expression)) {
+          calledFunctions.push(node.expression.text);
+        } else if (ts.isPropertyAccessExpression(node.expression)) {
+          calledFunctions.push(node.expression.name.text);
+        }
+      }
+      ts.forEachChild(node, collectCalls);
+    };
+    collectCalls(removalFunction!.body!);
+    expect(calledFunctions.filter((name) => name === "readdir")).toEqual([]);
+    expect(calledFunctions.filter((name) => name === "rmdir")).toEqual(["rmdir"]);
+    const removalBody = removalFunction!.body!.getText(sourceFile);
+    const caughtErrorCodes = [...removalBody.matchAll(/hasErrorCode\(error,\s*"([A-Z]+)"\)/g)]
+      .map((match) => match[1]);
+    expect(caughtErrorCodes).toEqual(["ENOTEMPTY", "EEXIST"]);
+
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    expect(
+      await removeWorkspaceRecordDirectoryIfEmpty(
+        workspaceRoot,
+        ["tasks", "TASK-direct-rmdir-missing"],
+        "strategy-12.rmdir.missing"
+      )
+    ).toEqual({ status: "missing" });
+
+    const emptyLane = join(workspaceRoot, "tasks", "TASK-direct-rmdir-empty");
+    await mkdir(emptyLane, { recursive: true });
+    expect(
+      await removeWorkspaceRecordDirectoryIfEmpty(
+        workspaceRoot,
+        ["tasks", "TASK-direct-rmdir-empty"],
+        "strategy-12.rmdir.empty"
+      )
+    ).toEqual({ status: "removed" });
+    await expectPathMissing(emptyLane);
+
+    const occupiedLane = join(workspaceRoot, "tasks", "TASK-direct-rmdir-occupied");
+    const sentinelPath = join(occupiedLane, "sentinel.txt");
+    await mkdir(occupiedLane, { recursive: true });
+    await writeFile(sentinelPath, "preserve direct-rmdir sentinel", { flag: "wx" });
+    expect(
+      await removeWorkspaceRecordDirectoryIfEmpty(
+        workspaceRoot,
+        ["tasks", "TASK-direct-rmdir-occupied"],
+        "strategy-12.rmdir.occupied"
+      )
+    ).toEqual({ status: "not_empty" });
+    expect(await readFile(sentinelPath, "utf8")).toBe("preserve direct-rmdir sentinel");
+
+    const deniedParent = join(workspaceRoot, "direct-rmdir-denied-parent");
+    const deniedLane = join(deniedParent, "lane");
+    await mkdir(deniedLane, { recursive: true });
+    await chmod(deniedParent, 0o500);
+    let deniedFailure: unknown;
+    try {
+      deniedFailure = await captureError(() =>
+        removeWorkspaceRecordDirectoryIfEmpty(
+          workspaceRoot,
+          ["direct-rmdir-denied-parent", "lane"],
+          "strategy-12.rmdir.denied"
+        )
+      );
+    } finally {
+      await chmod(deniedParent, 0o700);
+    }
+    const deniedCode =
+      typeof deniedFailure === "object" &&
+      deniedFailure !== null &&
+      "code" in deniedFailure
+        ? (deniedFailure as NodeJS.ErrnoException).code
+        : undefined;
+    expect(["EACCES", "EPERM"]).toContain(deniedCode);
+    expect((await lstat(deniedLane)).isDirectory()).toBe(true);
+  });
+
+  test("TaskCard production publication keeps the bounded create-only fast path", async () => {
+    const sourcePath = join(import.meta.dir, "task-card-service.ts");
+    const sourceText = await readFile(sourcePath, "utf8");
+    const sourceFile = ts.createSourceFile(
+      sourcePath,
+      sourceText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS
+    );
+    let persistFunction: ts.FunctionDeclaration | undefined;
+    let snapshotInputFunction: ts.FunctionDeclaration | undefined;
+    let createTaskMethod: ts.MethodDeclaration | undefined;
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isFunctionDeclaration(node) &&
+        node.name?.text === "persistTaskSnapshot"
+      ) {
+        persistFunction = node;
+      }
+      if (
+        ts.isFunctionDeclaration(node) &&
+        node.name?.text === "createTaskSnapshotInput"
+      ) {
+        snapshotInputFunction = node;
+      }
+      if (
+        ts.isMethodDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === "createTask"
+      ) {
+        createTaskMethod = node;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    expect(persistFunction).toBeDefined();
+    expect(snapshotInputFunction).toBeDefined();
+    expect(createTaskMethod).toBeDefined();
+
+    let productionFastPath: ts.IfStatement | undefined;
+    let hookPreparation: ts.IfStatement | undefined;
+    const findPreparationPaths = (node: ts.Node): void => {
+      if (
+        ts.isIfStatement(node) &&
+        node.expression.getText(sourceFile) ===
+          "!snapshotWriteHooks && !publicationHooksActive"
+      ) {
+        productionFastPath = node;
+      }
+      if (
+        ts.isIfStatement(node) &&
+        node.expression.getText(sourceFile) ===
+          "snapshotWriteHooks || publicationHooksActive"
+      ) {
+        hookPreparation = node;
+      }
+      ts.forEachChild(node, findPreparationPaths);
+    };
+    findPreparationPaths(persistFunction!.body!);
+    expect(productionFastPath).toBeDefined();
+    expect(hookPreparation).toBeDefined();
+
+    const persistBody = persistFunction!.body!.getText(sourceFile);
+    const snapshotInputBody = snapshotInputFunction!.body!.getText(sourceFile);
+    const hookPreparationText = hookPreparation!.getText(sourceFile);
+    const hookPreparationBody = hookPreparation!.thenStatement.getText(sourceFile);
+    const forbiddenPreparationCalls = [
+      "TaskSnapshotSchema.parse(",
+      "JSON.stringify(",
+      "Buffer.byteLength("
+    ];
+    expect(sourceText).toContain(
+      "MAX_SERVICE_RECORD_BYTES as MAX_TASK_SNAPSHOT_BYTES"
+    );
+    expect(
+      persistBody.match(/workspaceRecordPublicationHooksActive\(\)/g) ?? []
+    ).toHaveLength(1);
+    expect(persistBody).toContain(
+      "!snapshotWriteHooks && workspaceRecordPublicationHooksActive();"
+    );
+    expect(persistBody.indexOf(hookPreparationText)).toBeLessThan(
+      persistBody.indexOf("const existingTaskDirectory = await maybeLstat(taskDirectory);")
+    );
+    for (const requiredHookPreparationCall of forbiddenPreparationCalls) {
+      expect(hookPreparationBody).toContain(requiredHookPreparationCall);
+      expect(snapshotInputBody).not.toContain(requiredHookPreparationCall);
+      expect(
+        persistBody.replace(hookPreparationText, "")
+      ).not.toContain(requiredHookPreparationCall);
+    }
+
+    const fastPathBody = productionFastPath!.thenStatement.getText(sourceFile);
+    expect(fastPathBody).toContain("createJsonRecordIfAbsent(");
+    expect(fastPathBody).toContain("snapshotInput,");
+    expect(fastPathBody).toContain(
+      'if (created.status === "exists") return "exists";'
+    );
+    expect(fastPathBody).toContain(
+      'return { status: "created", task: created.record.task_card! };'
+    );
+    for (const forbiddenCall of [
+      "createJsonRecordIfAbsentWithCleanupPermit",
+      "observeJsonRecordForCleanup",
+      "settleWorkspaceRecordCleanupPermitAfterExactObservation",
+      "conditionalDeleteObservedJsonRecordWithCleanupPermit",
+      "readTaskCardFromSnapshot",
+      "readTaskSnapshot"
+    ]) {
+      expect(fastPathBody).not.toContain(forbiddenCall);
+    }
+    for (const forbiddenPreparationCall of forbiddenPreparationCalls) {
+      expect(fastPathBody).not.toContain(forbiddenPreparationCall);
+    }
+
+    const createTaskBody = createTaskMethod!.body!;
+    const boundedAttemptLoops: ts.ForStatement[] = [];
+    const collectAttemptLoops = (node: ts.Node): void => {
+      if (
+        ts.isForStatement(node) &&
+        node.condition?.getText(sourceFile) ===
+          "attempt < MAX_TASK_ID_ATTEMPTS"
+      ) {
+        boundedAttemptLoops.push(node);
+      }
+      ts.forEachChild(node, collectAttemptLoops);
+    };
+    collectAttemptLoops(createTaskBody);
+    expect(boundedAttemptLoops).toHaveLength(1);
+    const attemptLoopBody = boundedAttemptLoops[0]!.statement.getText(sourceFile);
+    expect(attemptLoopBody).toContain('if (publication === "exists") continue;');
+    expect(attemptLoopBody).toContain("reservedTaskIds.delete(taskId)");
+    expect(attemptLoopBody).toContain("tasks.set(task.task_id, publication.task);");
+    expect(attemptLoopBody).toContain("return task;");
+    expect(attemptLoopBody).not.toContain("copyTaskCard(task)");
+    expect(createTaskBody.getText(sourceFile)).toContain(
+      "throw taskIdGenerationFailedError();"
+    );
+  });
+
   test("directory reproof reduces a stateful callback thenable to a terminal boolean", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -21916,6 +24866,7 @@ describe("idempotency, lock, and artifact services", () => {
       "observeJsonRecordForCleanup",
       "observeJsonRecordForCleanupWithDirectoryBindingOperation",
       "prepareJsonRecordWrite",
+      "attemptPreparedJsonRecordWriteWithDirectoryBindingOperation",
       "writePreparedJsonRecordWithDirectoryBindingOperation"
     ];
     const explicitLaterDirectoryProof = [
@@ -22462,6 +25413,66 @@ async function expectUnicodeAuthorityPairOnCaseSensitiveWorkspace(
 async function readFileWithIdentity(path: string): Promise<{ bytes: Buffer; dev: number; ino: number }> {
   const [bytes, identity] = await Promise.all([readFile(path), stat(path)]);
   return { bytes, dev: identity.dev, ino: identity.ino };
+}
+
+async function replaceFileBytesInPlace(path: string, bytes: Buffer): Promise<void> {
+  const file = await open(path, "r+");
+  try {
+    await file.truncate(0);
+    await file.write(bytes, 0, bytes.length, 0);
+    await file.truncate(bytes.length);
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+}
+
+async function replaceFileBytesInPlaceWithMtimeAdvance(
+  path: string,
+  bytes: Buffer
+): Promise<void> {
+  const before = await lstat(path, { bigint: true });
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
+    await delay(2);
+    await replaceFileBytesInPlace(path, bytes);
+    const after = await lstat(path, { bigint: true });
+    expect(after.dev).toBe(before.dev);
+    expect(after.ino).toBe(before.ino);
+    if (after.mtimeNs !== before.mtimeNs) return;
+  }
+  throw new Error("In-place record mutation did not advance file mtime.");
+}
+
+async function applySameInodePathnameRebound(
+  path: string,
+  restoredBytes: Buffer
+): Promise<Readonly<{
+  original: Awaited<ReturnType<typeof readFileWithIdentity>>;
+  rebound: Awaited<ReturnType<typeof readFileWithIdentity>>;
+}>> {
+  const original = await readFileWithIdentity(path);
+  const parentPath = dirname(path);
+  const parentBefore = await lstat(parentPath, { bigint: true });
+  const aliasPath = `${path}.strategy-13-rebound`;
+  await delay(2);
+  await rename(path, aliasPath);
+  await delay(2);
+  await link(aliasPath, path);
+  await delay(2);
+  await unlink(aliasPath);
+  await replaceFileBytesInPlaceWithMtimeAdvance(
+    path,
+    Buffer.from("strategy-13-intermediate-generation\n")
+  );
+  await replaceFileBytesInPlaceWithMtimeAdvance(path, restoredBytes);
+  const rebound = await readFileWithIdentity(path);
+  const parentAfter = await lstat(parentPath, { bigint: true });
+  expect(workspaceRecordPhysicalIdentityMatches(rebound, original)).toBe(true);
+  expect(
+    parentAfter.ctimeNs !== parentBefore.ctimeNs ||
+      parentAfter.mtimeNs !== parentBefore.mtimeNs
+  ).toBe(true);
+  return Object.freeze({ original, rebound });
 }
 
 async function readOwnedFileState(path: string): Promise<{

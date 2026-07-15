@@ -17,12 +17,24 @@ import {
   type DurableSingleLinkReadFailureReason
 } from "./durable-single-link-reader";
 import {
-  createWorkspaceJsonRecordLifecycleStateHandle,
-  publishJsonRecordWithLifecycleCallbacks,
-  quarantineWorkspaceRecordEntry,
+  MAX_SERVICE_RECORD_BYTES as MAX_TASK_SNAPSHOT_BYTES,
+  cancelWorkspaceRecordCleanupPermit,
+  conditionalDeleteObservedJsonRecordWithCleanupPermit,
+  conditionalDeletePublishedJsonRecordGenerationWithCleanupPermit,
+  createJsonRecordIfAbsent,
+  createJsonRecordIfAbsentWithCleanupPermit,
+  ensureWorkspaceDirectoryTree,
+  isWorkspaceRecordOversizeError,
+  isWorkspaceRecordDurableReadError,
+  observeJsonRecordForCleanup,
   removeWorkspaceRecordDirectoryIfEmpty,
-  snapshotWorkspaceJsonRecordLifecycleState
+  settleWorkspaceRecordCleanupPermitAfterExactObservation,
+  workspaceRecordPublicationHooksActive,
+  type ConditionalDeleteObservedJsonRecordResult,
+  type WorkspaceRecordCleanupPermit
 } from "./workspace-record-store";
+
+export { MAX_TASK_SNAPSHOT_BYTES };
 
 export const DEFAULT_TASK_CREATED_BY = "pi" as const;
 export const DEFAULT_TASK_CURRENT_OWNER = "coordinator" as const;
@@ -33,7 +45,6 @@ const TASK_ID_PATTERN = /^TASK-[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const MAX_TASK_ID_ATTEMPTS = 20;
 // M1 skeleton bound: cap workspace/tasks fan-out before opening any task snapshots.
 const MAX_TASK_HYDRATION_ENTRIES = 1024;
-export const MAX_TASK_SNAPSHOT_BYTES = 1024 * 1024;
 
 export const CreateTaskInputSchema = z.object({
   type: TaskTypeSchema,
@@ -62,6 +73,38 @@ export const TaskSnapshotSchema = z.object({
 
 export type CreateTaskInput = z.infer<typeof CreateTaskInputSchema>;
 export type TaskSnapshot = z.infer<typeof TaskSnapshotSchema>;
+
+const TASK_SNAPSHOT_CLEANUP_OBSERVATION = Symbol(
+  "task_snapshot_cleanup_observation"
+);
+
+interface TaskSnapshotCleanupObservationAuthority {
+  readonly [TASK_SNAPSHOT_CLEANUP_OBSERVATION]: true;
+}
+
+type TaskSnapshotCleanupObservationData =
+  | {
+      readonly status: "missing";
+      readonly taskId: string;
+    }
+  | {
+      readonly status: "record";
+      readonly taskId: string;
+      readonly task: TaskCard;
+    }
+  | {
+      readonly status: "repairable";
+      readonly taskId: string;
+      readonly error: TaskServiceError;
+    }
+  | {
+      readonly status: "invalid";
+      readonly taskId: string;
+      readonly error: TaskServiceError;
+    };
+
+export type TaskSnapshotCleanupObservation =
+  TaskSnapshotCleanupObservationAuthority & TaskSnapshotCleanupObservationData;
 
 export type TaskServiceErrorCode =
   | "schema_error"
@@ -126,7 +169,18 @@ export interface TaskCardServiceOptions {
 export interface TaskCardService {
   createTask: (input: CreateTaskInput) => Promise<TaskCard>;
   rollbackTaskForIdempotency: (taskId: string, expectedTask?: TaskCard) => Promise<void>;
-  quarantineInvalidTaskSnapshot: (taskId: string) => Promise<void>;
+  observeTaskSnapshotForCleanup: (
+    taskId: string
+  ) => Promise<TaskSnapshotCleanupObservation>;
+  acceptTaskSnapshotCleanupObservation: (
+    observation: TaskSnapshotCleanupObservation
+  ) => Promise<TaskCard>;
+  cancelTaskSnapshotCleanupObservation: (
+    observation: TaskSnapshotCleanupObservation
+  ) => Promise<void>;
+  cleanupTaskSnapshotObservation: (
+    observation: TaskSnapshotCleanupObservation
+  ) => Promise<void>;
   listTasks: () => Promise<TaskCard[]>;
   getTask: (taskId: string) => Promise<TaskCard>;
   getTaskFromSnapshot: (taskId: string) => Promise<TaskCard>;
@@ -153,6 +207,46 @@ export interface TaskSnapshotWriteHooks {
   afterSnapshotWrite?: (input: TaskSnapshotWriteHookInput) => Promise<void> | void;
 }
 
+type TaskSnapshotCleanupCondition =
+  | { readonly kind: "record"; readonly expected: unknown }
+  | { readonly kind: "malformed" };
+
+interface TaskSnapshotCleanupObservationState {
+  readonly taskId: string;
+  readonly snapshotPath: string;
+  readonly evidenceRef: string;
+  readonly condition?: TaskSnapshotCleanupCondition;
+  readonly cleanupPermit?: WorkspaceRecordCleanupPermit;
+  readonly cachedAtObservation?: TaskCard;
+  readonly task?: TaskCard;
+  status: "outstanding" | "settling" | "settled";
+}
+
+type TaskSnapshotWithTaskCard = TaskSnapshot & { task_card: TaskCard };
+
+interface ValidatedTaskSnapshotValues {
+  readonly canonical: TaskSnapshotWithTaskCard;
+  readonly validatedRaw: TaskSnapshotWithTaskCard;
+}
+
+type PersistTaskSnapshotResult =
+  | "exists"
+  | { readonly status: "created"; readonly task: TaskCard };
+
+const TaskSnapshotCleanupRawSchema = z.unknown();
+
+function copyTaskCard(task: TaskCard): TaskCard {
+  return {
+    ...task,
+    inference_budget: { ...task.inference_budget },
+    linked_jobs: [...task.linked_jobs],
+    linked_reports: [...task.linked_reports],
+    ...(task.theory_bundle_ids === undefined
+      ? {}
+      : { theory_bundle_ids: [...task.theory_bundle_ids] })
+  };
+}
+
 export function createTaskCardService(options: TaskCardServiceOptions): TaskCardService {
   const workspaceRoot = resolve(options.workspaceRoot);
   const now = options.now ?? (() => new Date());
@@ -161,6 +255,10 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
   const snapshotWriteHooks = options.snapshotWriteHooks;
   const tasks = new Map<string, TaskCard>();
   const reservedTaskIds = new Set<string>();
+  const cleanupObservations = new WeakMap<
+    TaskSnapshotCleanupObservation,
+    TaskSnapshotCleanupObservationState
+  >();
   let hydration: Promise<void> | undefined;
 
   async function ensureHydrated(): Promise<void> {
@@ -177,6 +275,269 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       hydration = undefined;
       throw error;
     }
+  }
+
+  function registerCleanupObservation(
+    publicObservation: TaskSnapshotCleanupObservationData,
+    state: Omit<TaskSnapshotCleanupObservationState, "status">
+  ): TaskSnapshotCleanupObservation {
+    const observation = Object.freeze({
+      ...publicObservation,
+      [TASK_SNAPSHOT_CLEANUP_OBSERVATION]: true as const
+    }) as TaskSnapshotCleanupObservation;
+    cleanupObservations.set(observation, { ...state, status: "outstanding" });
+    return observation;
+  }
+
+  function outstandingCleanupObservationState(
+    observation: TaskSnapshotCleanupObservation
+  ): TaskSnapshotCleanupObservationState;
+  function outstandingCleanupObservationState(
+    observation: TaskSnapshotCleanupObservation,
+    requireTask: true
+  ): TaskSnapshotCleanupObservationState & { readonly task: TaskCard };
+  function outstandingCleanupObservationState(
+    observation: TaskSnapshotCleanupObservation,
+    requireTask = false
+  ): TaskSnapshotCleanupObservationState {
+    const state = cleanupObservations.get(observation);
+    if (!state || state.status !== "outstanding") {
+      throw new TypeError(
+        "Task snapshot cleanup observation is not owned by this TaskCard service or is already settled."
+      );
+    }
+    if (requireTask && !state.task) {
+      throw new TypeError("Only a valid TaskCard cleanup observation can be accepted.");
+    }
+    state.status = "settling";
+    return state;
+  }
+
+  async function observeTaskSnapshotForCleanupInternal(
+    taskId: string
+  ): Promise<TaskSnapshotCleanupObservation> {
+    assertSafeTaskId(taskId, `path.task_id:${taskId}`);
+    const taskDirectory = join(workspaceRoot, "tasks", taskId);
+    const snapshotPath = join(taskDirectory, "snapshot.json");
+    const evidenceRef = taskSnapshotEvidenceRef(taskId);
+    assertPathInsideWorkspace(workspaceRoot, snapshotPath, evidenceRef);
+
+    const taskDirectoryEntry = await maybeLstat(taskDirectory);
+    if (
+      taskDirectoryEntry &&
+      (!taskDirectoryEntry.isDirectory() ||
+        taskDirectoryEntry.isSymbolicLink() ||
+        !(await isSafeExistingDirectoryPath(taskDirectory)))
+    ) {
+      throw taskLaneNotDirectoryError(taskId);
+    }
+
+    if (await maybeLstat(snapshotPath)) {
+      await snapshotReadHooks?.beforeSnapshotOpen?.({
+        snapshotPath,
+        laneTaskId: taskId
+      });
+    }
+
+    const cachedAtObservation = tasks.get(taskId);
+    const commonState = {
+      taskId,
+      snapshotPath,
+      evidenceRef,
+      cachedAtObservation
+    };
+    let observed: Awaited<ReturnType<typeof observeJsonRecordForCleanup<unknown>>>;
+    try {
+      observed = await observeJsonRecordForCleanup(
+        snapshotPath,
+        evidenceRef,
+        TaskSnapshotCleanupRawSchema
+      );
+    } catch (error) {
+      if (tasks.get(taskId) === cachedAtObservation) tasks.delete(taskId);
+      if (isWorkspaceRecordDurableReadError(error)) {
+        return registerCleanupObservation(
+          { status: "invalid", taskId, error },
+          commonState
+        );
+      }
+      throw error;
+    }
+    if (observed.status === "missing") {
+      return registerCleanupObservation(
+        { status: "missing", taskId },
+        commonState
+      );
+    }
+
+    if (observed.status === "malformed") {
+      const error = workspaceError(
+        "task_snapshot_malformed",
+        "Task snapshot is not valid JSON.",
+        "A task snapshot is malformed and recovery has been stopped.",
+        [evidenceRef],
+        observed.error
+      );
+      return registerCleanupObservation(
+        { status: "invalid", taskId, error },
+        {
+          ...commonState,
+          cleanupPermit: observed.cleanupPermit,
+          condition: { kind: "malformed" }
+        }
+      );
+    }
+
+    if (observed.status === "schema_threw") {
+      const error = workspaceError(
+        "task_snapshot_malformed",
+        "Task snapshot schema validation could not complete.",
+        "A task snapshot is malformed and recovery has been stopped.",
+        [evidenceRef],
+        observed.error
+      );
+      return registerCleanupObservation(
+        { status: "invalid", taskId, error },
+        {
+          ...commonState,
+          cleanupPermit: observed.cleanupPermit,
+          condition: { kind: "record", expected: undefined }
+        }
+      );
+    }
+
+    const condition = { kind: "record" as const, expected: observed.record };
+    try {
+      const snapshot = validateRawTaskSnapshot(observed.record, taskId, evidenceRef);
+      return registerCleanupObservation(
+        { status: "record", taskId, task: snapshot.validatedRaw.task_card },
+        {
+          ...commonState,
+          cleanupPermit: observed.cleanupPermit,
+          condition,
+          task: snapshot.canonical.task_card
+        }
+      );
+    } catch (error) {
+      if (!(error instanceof TaskServiceError)) {
+        await cancelWorkspaceRecordCleanupPermit(observed.cleanupPermit);
+        throw error;
+      }
+      return registerCleanupObservation(
+        {
+          status: error.code === "task_snapshot_missing_card" ? "repairable" : "invalid",
+          taskId,
+          error
+        },
+        {
+          ...commonState,
+          cleanupPermit: observed.cleanupPermit,
+          condition
+        }
+      );
+    }
+  }
+
+  async function cancelTaskSnapshotCleanupObservationInternal(
+    observation: TaskSnapshotCleanupObservation
+  ): Promise<void> {
+    const state = outstandingCleanupObservationState(observation);
+    try {
+      if (state.cleanupPermit) {
+        await cancelWorkspaceRecordCleanupPermit(state.cleanupPermit);
+      }
+      if (
+        !state.task &&
+        tasks.get(state.taskId) === state.cachedAtObservation
+      ) {
+        tasks.delete(state.taskId);
+      }
+    } finally {
+      state.status = "settled";
+    }
+  }
+
+  async function acceptTaskSnapshotCleanupObservationInternal(
+    observation: TaskSnapshotCleanupObservation
+  ): Promise<TaskCard> {
+    const state = outstandingCleanupObservationState(observation, true);
+    try {
+      if (state.cleanupPermit) {
+        await cancelWorkspaceRecordCleanupPermit(state.cleanupPermit);
+      }
+      const task = state.task;
+      tasks.set(state.taskId, task);
+      return copyTaskCard(task);
+    } finally {
+      state.status = "settled";
+    }
+  }
+
+  async function cleanupTaskSnapshotObservationInternal(
+    observation: TaskSnapshotCleanupObservation
+  ): Promise<void> {
+    const state = outstandingCleanupObservationState(observation);
+    let result: ConditionalDeleteObservedJsonRecordResult = { status: "missing" };
+    try {
+      if (state.cleanupPermit && state.condition) {
+        result = await conditionalDeleteObservedJsonRecordWithCleanupPermit(
+          state.cleanupPermit,
+          state.snapshotPath,
+          state.evidenceRef,
+          TaskSnapshotCleanupRawSchema,
+          state.condition.kind === "malformed"
+            ? { kind: "malformed" }
+            : {
+                kind: "record",
+                expected: state.condition.expected,
+                matches: () => true
+              }
+        );
+      }
+    } catch (error) {
+      throw workspaceError(
+        "workspace_path_not_safe",
+        "Failed to clean up the observed task snapshot generation.",
+        "The task snapshot could not be cleaned up safely.",
+        [state.evidenceRef],
+        error
+      );
+    } finally {
+      state.status = "settled";
+    }
+
+    if (result.status === "condition_not_met") {
+      throw workspaceError(
+        "task_snapshot_mismatch",
+        "Observed task snapshot no longer satisfies its cleanup condition.",
+        "The task snapshot changed before it could be cleaned up safely.",
+        [state.evidenceRef]
+      );
+    }
+
+    if (result.status === "superseded") {
+      if (tasks.get(state.taskId) === state.cachedAtObservation) {
+        try {
+          const successor = await readTaskCardFromSnapshot(
+            workspaceRoot,
+            state.taskId
+          );
+          if (tasks.get(state.taskId) === state.cachedAtObservation) {
+            tasks.set(state.taskId, successor.canonical);
+          }
+        } catch {
+          if (tasks.get(state.taskId) === state.cachedAtObservation) {
+            tasks.delete(state.taskId);
+          }
+        }
+      }
+      return;
+    }
+
+    if (tasks.get(state.taskId) === state.cachedAtObservation) {
+      tasks.delete(state.taskId);
+    }
+    await removeEmptyTaskLaneAfterRollback(workspaceRoot, state.taskId);
   }
 
   return {
@@ -196,32 +557,43 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       await ensureHydrated();
 
       const timestamp = now().toISOString();
-      const taskId = nextTaskId(tasks, reservedTaskIds, taskIdFactory);
-      reservedTaskIds.add(taskId);
+      for (let attempt = 0; attempt < MAX_TASK_ID_ATTEMPTS; attempt += 1) {
+        const taskId = taskIdFactory();
+        assertSafeTaskId(taskId, `generated_task_id:${taskId}`);
+        if (tasks.has(taskId) || reservedTaskIds.has(taskId)) continue;
+        reservedTaskIds.add(taskId);
 
-      try {
-        const task: TaskCard = TaskCardSchema.parse({
-          task_id: taskId,
-          type: parsedInput.data.type,
-          status: "created",
-          title: parsedInput.data.title,
-          question_or_goal: parsedInput.data.question_or_goal,
-          created_by: parsedInput.data.created_by ?? DEFAULT_TASK_CREATED_BY,
-          current_owner: DEFAULT_TASK_CURRENT_OWNER,
-          reviewer: DEFAULT_TASK_REVIEWER,
-          inference_budget: parsedInput.data.inference_budget,
-          linked_jobs: [],
-          linked_reports: [],
-          created_at: timestamp,
-          updated_at: timestamp
-        });
+        try {
+          const task: TaskCard = TaskCardSchema.parse({
+            task_id: taskId,
+            type: parsedInput.data.type,
+            status: "created",
+            title: parsedInput.data.title,
+            question_or_goal: parsedInput.data.question_or_goal,
+            created_by: parsedInput.data.created_by ?? DEFAULT_TASK_CREATED_BY,
+            current_owner: DEFAULT_TASK_CURRENT_OWNER,
+            reviewer: DEFAULT_TASK_REVIEWER,
+            inference_budget: parsedInput.data.inference_budget,
+            linked_jobs: [],
+            linked_reports: [],
+            created_at: timestamp,
+            updated_at: timestamp
+          });
 
-        await persistTaskSnapshot(workspaceRoot, task, snapshotWriteHooks);
-        tasks.set(task.task_id, task);
-        return task;
-      } finally {
-        reservedTaskIds.delete(taskId);
+          const publication = await persistTaskSnapshot(
+            workspaceRoot,
+            task,
+            snapshotWriteHooks
+          );
+          if (publication === "exists") continue;
+          tasks.set(task.task_id, publication.task);
+          return task;
+        } finally {
+          reservedTaskIds.delete(taskId);
+        }
       }
+
+      throw taskIdGenerationFailedError();
     },
 
     async rollbackTaskForIdempotency(
@@ -264,119 +636,73 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         });
       }
 
+      let observation: TaskSnapshotCleanupObservation | undefined;
+      let cacheHandled = false;
       try {
-        const taskDirectory = join(workspaceRoot, "tasks", taskId);
-        assertPathInsideWorkspace(workspaceRoot, taskDirectory, `workspace/tasks/${taskId}`);
-        const taskDirectoryEntry = await maybeLstat(taskDirectory);
-        if (!taskDirectoryEntry) {
-          await evictTaskAfterMissingRollbackSnapshot(tasks, workspaceRoot, taskId);
+        observation = await observeTaskSnapshotForCleanupInternal(taskId);
+        if (observation.status === "record") {
+          if (JSON.stringify(observation.task) === JSON.stringify(task)) {
+            const ownedObservation = observation;
+            observation = undefined;
+            await cleanupTaskSnapshotObservationInternal(ownedObservation);
+          } else {
+            const ownedObservation = observation;
+            observation = undefined;
+            await acceptTaskSnapshotCleanupObservationInternal(ownedObservation);
+          }
+          cacheHandled = true;
           return;
         }
-        if (
-          !taskDirectoryEntry.isDirectory() ||
-          taskDirectoryEntry.isSymbolicLink() ||
-          !(await isSafeExistingDirectoryPath(taskDirectory))
-        ) {
-          throw workspaceError(
-            "task_lane_not_directory",
-            `Task lane is not a safe directory: ${taskId}`,
-            "A task snapshot lane is blocked by a non-directory filesystem entry.",
-            [`workspace/tasks/${taskId}`]
-          );
-        }
 
-        const snapshotPath = join(taskDirectory, "snapshot.json");
-        if (!(await maybeLstat(snapshotPath))) {
-          await evictTaskAfterMissingRollbackSnapshot(tasks, workspaceRoot, taskId);
+        if (observation.status !== "missing") {
+          const ownedObservation = observation;
+          observation = undefined;
+          await cleanupTaskSnapshotObservationInternal(ownedObservation);
+          cacheHandled = true;
           return;
         }
-        let snapshot: TaskSnapshot;
-        try {
-          await snapshotReadHooks?.beforeSnapshotOpen?.({ snapshotPath, laneTaskId: taskId });
-          snapshot = await readTaskSnapshot(
-            snapshotPath,
-            taskId,
-            taskDirectory,
-            taskSnapshotEvidenceRef(taskId)
-          );
-        } catch (error) {
-          if (await isMissingRollbackSnapshotError(error, snapshotPath)) {
-            await evictTaskAfterMissingRollbackSnapshot(tasks, workspaceRoot, taskId);
-            return;
-          }
 
-          const quarantineResult = await cleanupPublishedTaskSnapshotAfterFailedWrite(
-            workspaceRoot,
-            taskDirectory,
-            taskId
-          );
-          if (quarantineResult !== "unsafe") {
-            return;
-          }
-
-          throw error;
-        }
-        if (JSON.stringify(snapshot.task_card) !== JSON.stringify(task)) {
-          const mismatchError = workspaceError(
-            "task_snapshot_mismatch",
-            "Task rollback snapshot does not match the in-memory task.",
-            "The task snapshot lane is not safe to roll back automatically.",
-            [taskSnapshotEvidenceRef(taskId), "snapshot.task_card"]
-          );
-          const quarantineResult = await cleanupPublishedTaskSnapshotAfterFailedWrite(
-            workspaceRoot,
-            taskDirectory,
-            taskId
-          );
-          if (quarantineResult !== "unsafe") {
-            return;
-          }
-
-          throw mismatchError;
-        }
-
-        const quarantineResult = await cleanupPublishedTaskSnapshotAfterFailedWrite(
-          workspaceRoot,
-          taskDirectory,
-          taskId
-        );
-        if (quarantineResult === "unsafe") {
-          throw workspaceError(
-            "task_lane_not_directory",
-            `Task lane is not a safe directory: ${taskId}`,
-            "The task snapshot lane could not be rolled back safely.",
-            [`workspace/tasks/${taskId}`]
-          );
-        }
+        const ownedObservation = observation;
+        observation = undefined;
+        await cleanupTaskSnapshotObservationInternal(ownedObservation);
+        cacheHandled = true;
       } finally {
-        tasks.delete(taskId);
+        if (observation) {
+          await cancelTaskSnapshotCleanupObservationInternal(observation);
+        }
+        if (!cacheHandled && tasks.get(taskId) === cachedTask) {
+          tasks.delete(taskId);
+        }
       }
     },
 
-    async quarantineInvalidTaskSnapshot(taskId: string): Promise<void> {
-      assertSafeTaskId(taskId, `path.task_id:${taskId}`);
-      tasks.delete(taskId);
+    async observeTaskSnapshotForCleanup(
+      taskId: string
+    ): Promise<TaskSnapshotCleanupObservation> {
+      return await observeTaskSnapshotForCleanupInternal(taskId);
+    },
 
-      const taskDirectory = join(workspaceRoot, "tasks", taskId);
-      assertPathInsideWorkspace(workspaceRoot, taskDirectory, `workspace/tasks/${taskId}`);
-      const quarantineResult = await cleanupPublishedTaskSnapshotAfterFailedWrite(
-        workspaceRoot,
-        taskDirectory,
-        taskId
-      );
-      if (quarantineResult === "unsafe") {
-        throw workspaceError(
-          "task_lane_not_directory",
-          `Task lane is not a safe directory: ${taskId}`,
-          "The invalid task snapshot could not be quarantined safely.",
-          [`workspace/tasks/${taskId}`]
-        );
-      }
+    async acceptTaskSnapshotCleanupObservation(
+      observation: TaskSnapshotCleanupObservation
+    ): Promise<TaskCard> {
+      return await acceptTaskSnapshotCleanupObservationInternal(observation);
+    },
+
+    async cancelTaskSnapshotCleanupObservation(
+      observation: TaskSnapshotCleanupObservation
+    ): Promise<void> {
+      await cancelTaskSnapshotCleanupObservationInternal(observation);
+    },
+
+    async cleanupTaskSnapshotObservation(
+      observation: TaskSnapshotCleanupObservation
+    ): Promise<void> {
+      await cleanupTaskSnapshotObservationInternal(observation);
     },
 
     async listTasks(): Promise<TaskCard[]> {
       await ensureHydrated();
-      return Array.from(tasks.values()).sort(compareTaskCards);
+      return Array.from(tasks.values()).sort(compareTaskCards).map(copyTaskCard);
     },
 
     async getTask(taskId: string): Promise<TaskCard> {
@@ -387,14 +713,18 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         throw taskNotFoundError(taskId);
       }
 
-      return task;
+      return copyTaskCard(task);
     },
 
     async getTaskFromSnapshot(taskId: string): Promise<TaskCard> {
       try {
-        const task = await readTaskCardFromSnapshot(workspaceRoot, taskId, snapshotReadHooks);
-        tasks.set(task.task_id, task);
-        return task;
+        const task = await readTaskCardFromSnapshot(
+          workspaceRoot,
+          taskId,
+          snapshotReadHooks
+        );
+        tasks.set(task.canonical.task_id, task.canonical);
+        return task.validatedRaw;
       } catch (error) {
         tasks.delete(taskId);
         throw error;
@@ -407,20 +737,8 @@ export function isSafeTaskId(taskId: string): boolean {
   return TASK_ID_PATTERN.test(taskId);
 }
 
-function nextTaskId(
-  tasks: ReadonlyMap<string, TaskCard>,
-  reservedTaskIds: ReadonlySet<string>,
-  taskIdFactory: () => string
-): string {
-  for (let attempt = 0; attempt < MAX_TASK_ID_ATTEMPTS; attempt += 1) {
-    const taskId = taskIdFactory();
-    assertSafeTaskId(taskId, `generated_task_id:${taskId}`);
-    if (!tasks.has(taskId) && !reservedTaskIds.has(taskId)) {
-      return taskId;
-    }
-  }
-
-  throw new TaskServiceError({
+function taskIdGenerationFailedError(): TaskServiceError {
+  return new TaskServiceError({
     code: "task_id_generation_failed",
     status: 500,
     category: "workspace_error",
@@ -502,7 +820,7 @@ async function hydrateTasksFromDisk(
       lanePath,
       snapshotEvidenceRef
     );
-    tasks.set(snapshot.task_id, snapshot.task_card);
+    tasks.set(snapshot.canonical.task_id, snapshot.canonical.task_card);
   }
 
   return tasks;
@@ -512,7 +830,7 @@ async function readTaskCardFromSnapshot(
   workspaceRoot: string,
   taskId: string,
   snapshotReadHooks?: TaskSnapshotReadHooks
-): Promise<TaskCard> {
+): Promise<{ readonly canonical: TaskCard; readonly validatedRaw: TaskCard }> {
   assertSafeTaskId(taskId, `path.task_id:${taskId}`);
   const workspaceEntry = await maybeLstat(workspaceRoot);
   if (!workspaceEntry) {
@@ -584,7 +902,10 @@ async function readTaskCardFromSnapshot(
     lanePath,
     taskSnapshotEvidenceRef(taskId)
   );
-  return snapshot.task_card;
+  return {
+    canonical: snapshot.canonical.task_card,
+    validatedRaw: snapshot.validatedRaw.task_card
+  };
 }
 
 async function readBoundedTaskEntries(tasksRoot: string): Promise<Dirent[]> {
@@ -632,10 +953,6 @@ async function removeEmptyTaskLaneAfterRollback(
       `workspace/tasks/${taskId}`
     );
   } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return;
-    }
-
     throw workspaceError(
       "workspace_path_not_safe",
       "Failed to remove empty idempotency rollback task lane.",
@@ -644,39 +961,6 @@ async function removeEmptyTaskLaneAfterRollback(
       error
     );
   }
-}
-
-async function evictTaskAfterMissingRollbackSnapshot(
-  tasks: Map<string, TaskCard>,
-  workspaceRoot: string,
-  taskId: string
-): Promise<void> {
-  tasks.delete(taskId);
-  await removeEmptyTaskLaneAfterRollback(workspaceRoot, taskId);
-}
-
-async function isMissingRollbackSnapshotError(
-  error: unknown,
-  snapshotPath: string
-): Promise<boolean> {
-  if (hasErrorCode(error, "ENOENT")) {
-    return true;
-  }
-  if (!(error instanceof TaskServiceError)) {
-    return false;
-  }
-
-  if (error.code === "task_not_found") {
-    return true;
-  }
-  if (
-    (error.code === "task_snapshot_malformed" || error.code === "workspace_path_not_safe") &&
-    !(await maybeLstat(snapshotPath))
-  ) {
-    return true;
-  }
-
-  return hasErrorCode(error.cause, "ENOENT");
 }
 
 function assertSafeTaskLaneEntry(entry: Dirent, lanePath: string): void {
@@ -698,7 +982,7 @@ async function readTaskSnapshot(
   lanePath: string,
   evidenceRef: string,
   expectedSnapshotText?: string
-): Promise<TaskSnapshot & { task_card: TaskCard }> {
+): Promise<ValidatedTaskSnapshotValues> {
   const durableRead = await readDurableSingleLinkFile({
     path: snapshotPath,
     maxBytes: MAX_TASK_SNAPSHOT_BYTES,
@@ -747,6 +1031,14 @@ async function readTaskSnapshot(
     );
   }
 
+  return validateRawTaskSnapshot(rawSnapshot, laneTaskId, evidenceRef);
+}
+
+function validateRawTaskSnapshot(
+  rawSnapshot: unknown,
+  laneTaskId: string,
+  evidenceRef: string
+): ValidatedTaskSnapshotValues {
   const parsedSnapshot = TaskSnapshotSchema.safeParse(rawSnapshot);
   if (!parsedSnapshot.success) {
     throw workspaceError(
@@ -805,7 +1097,10 @@ async function readTaskSnapshot(
   }
 
   validateSnapshotTaskCardConsistency(parsedSnapshot.data, evidenceRef);
-  return parsedSnapshot.data as TaskSnapshot & { task_card: TaskCard };
+  return {
+    canonical: parsedSnapshot.data as TaskSnapshotWithTaskCard,
+    validatedRaw: rawSnapshot as TaskSnapshotWithTaskCard
+  };
 }
 
 function canonicalSnapshotJson(value: unknown): string {
@@ -885,74 +1180,21 @@ function taskSnapshotDurableReadError(
   );
 }
 
-type TaskSnapshotQuarantineResult = "quarantined" | "missing" | "unsafe";
-
-async function cleanupPublishedTaskSnapshotAfterFailedWrite(
-  workspaceRoot: string,
-  taskDirectory: string,
-  taskId: string
-): Promise<TaskSnapshotQuarantineResult> {
-  const taskDirectoryEntry = await maybeLstat(taskDirectory);
-  if (!taskDirectoryEntry) {
-    return "missing";
-  }
-  if (
-    !taskDirectoryEntry.isDirectory() ||
-    taskDirectoryEntry.isSymbolicLink() ||
-    !(await isSafeExistingDirectoryPath(taskDirectory))
-  ) {
-    return "unsafe";
-  }
-
-  try {
-    const quarantine = await quarantineWorkspaceRecordEntry(
-      workspaceRoot,
-      ["tasks", taskId],
-      "snapshot.json",
-      taskSnapshotEvidenceRef(taskId)
-    );
-    await removeEmptyTaskLaneAfterRollback(workspaceRoot, taskId);
-    return quarantine.status;
-  } catch (error) {
-    const currentTaskDirectoryEntry = await maybeLstat(taskDirectory);
-    if (!currentTaskDirectoryEntry) {
-      return "missing";
-    }
-    if (
-      !currentTaskDirectoryEntry.isDirectory() ||
-      currentTaskDirectoryEntry.isSymbolicLink() ||
-      !(await isSafeExistingDirectoryPath(taskDirectory))
-    ) {
-      return "unsafe";
-    }
-
-    throw workspaceError(
-      "workspace_path_not_safe",
-      "Failed to quarantine published task snapshot after a failed write.",
-      "The task snapshot could not be cleaned up safely.",
-      [taskSnapshotEvidenceRef(taskId)],
-      error
-    );
-  }
-}
-
 async function persistTaskSnapshot(
   workspaceRoot: string,
   task: TaskCard,
   snapshotWriteHooks?: TaskSnapshotWriteHooks
-): Promise<void> {
-  const snapshot = createTaskSnapshot(task);
-  const snapshotText = `${JSON.stringify(snapshot, null, 2)}\n`;
-  if (Buffer.byteLength(snapshotText, "utf8") > MAX_TASK_SNAPSHOT_BYTES) {
-    throw new TaskServiceError({
-      code: "task_snapshot_too_large",
-      status: 400,
-      category: "schema_error",
-      message: "Task snapshot would exceed the M1 bounded recovery size.",
-      userMessage: "The task request is too large to persist safely.",
-      evidenceRefs: ["request.body"],
-      recommendedNextActions: ["Shorten the task title, goal, or creator fields and submit again."]
-    });
+): Promise<PersistTaskSnapshotResult> {
+  const snapshotInput = createTaskSnapshotInput(task);
+  const publicationHooksActive =
+    !snapshotWriteHooks && workspaceRecordPublicationHooksActive();
+  let snapshot = snapshotInput;
+  if (snapshotWriteHooks || publicationHooksActive) {
+    snapshot = TaskSnapshotSchema.parse(snapshotInput) as TaskSnapshotWithTaskCard;
+    const snapshotText = `${JSON.stringify(snapshot, null, 2)}\n`;
+    if (Buffer.byteLength(snapshotText, "utf8") > MAX_TASK_SNAPSHOT_BYTES) {
+      throw taskSnapshotTooLargeError();
+    }
   }
 
   const taskDirectory = join(workspaceRoot, "tasks", task.task_id);
@@ -972,45 +1214,132 @@ async function persistTaskSnapshot(
     );
   }
 
-  const lifecycleStateHandle = createWorkspaceJsonRecordLifecycleStateHandle();
+  const evidenceRef = taskSnapshotEvidenceRef(task.task_id);
+  if (!snapshotWriteHooks && !publicationHooksActive) {
+    try {
+      const created = await createJsonRecordIfAbsent(
+        workspaceRoot,
+        ["tasks", task.task_id],
+        "snapshot.json",
+        snapshotInput,
+        evidenceRef,
+        TaskSnapshotSchema
+      );
+      if (created.status === "exists") return "exists";
+      return { status: "created", task: created.record.task_card! };
+    } catch (error) {
+      if (isWorkspaceRecordOversizeError(error)) {
+        throw taskSnapshotTooLargeError();
+      }
+      throw workspaceError(
+        "workspace_path_not_safe",
+        "Failed to persist task snapshot under the configured workspace.",
+        "The task snapshot could not be written safely.",
+        [`workspace/tasks/${task.task_id}/snapshot.json`],
+        error
+      );
+    }
+  }
+
+  const snapshotWriteHookOwner = snapshotWriteHooks;
+  const beforeSnapshotWrite = snapshotWriteHookOwner?.beforeSnapshotWrite;
+  const afterSnapshotWrite = snapshotWriteHookOwner?.afterSnapshotWrite;
+  let beforeWriteStarted = false;
+  let beforeWriteReturned = false;
+  let afterWriteStarted = false;
+  let cleanupPermit: WorkspaceRecordCleanupPermit | undefined;
   try {
-    await publishJsonRecordWithLifecycleCallbacks(
+    await ensureWorkspaceDirectoryTree(
+      workspaceRoot,
+      [["tasks", task.task_id]],
+      evidenceRef
+    );
+    beforeWriteStarted = true;
+    if (beforeSnapshotWrite) {
+      await Reflect.apply(beforeSnapshotWrite, snapshotWriteHookOwner, [
+        { taskDirectory, taskId: task.task_id }
+      ]);
+    }
+    beforeWriteReturned = true;
+
+    const created = await createJsonRecordIfAbsentWithCleanupPermit(
       workspaceRoot,
       ["tasks", task.task_id],
       "snapshot.json",
       snapshot,
-      taskSnapshotEvidenceRef(task.task_id),
-      TaskSnapshotSchema,
-      {
-        ...(snapshotWriteHooks?.beforeSnapshotWrite
-          ? {
-              beforeWrite: async ({ directoryPath }: { directoryPath: string }) => {
-                await snapshotWriteHooks.beforeSnapshotWrite!({
-                  taskDirectory: directoryPath,
-                  taskId: task.task_id
-                });
-              }
-            }
-          : {}),
-        ...(snapshotWriteHooks?.afterSnapshotWrite
-          ? {
-              afterWrite: async ({ directoryPath }: { directoryPath: string }) => {
-                await snapshotWriteHooks.afterSnapshotWrite!({
-                  taskDirectory: directoryPath,
-                  taskId: task.task_id
-                });
-              }
-            }
-          : {})
-      },
-      lifecycleStateHandle
+      evidenceRef,
+      TaskSnapshotSchema
     );
+    if (created.status === "exists") return "exists";
+    cleanupPermit = created.cleanupPermit;
+    const publishedTask = created.record.task_card!;
+
+    afterWriteStarted = true;
+    if (afterSnapshotWrite) {
+      try {
+        await Reflect.apply(afterSnapshotWrite, snapshotWriteHookOwner, [
+          { taskDirectory, taskId: task.task_id }
+        ]);
+      } catch (callbackError) {
+        const permit = cleanupPermit;
+        cleanupPermit = undefined;
+        const compensationErrors: unknown[] = [];
+        try {
+          await conditionalDeletePublishedJsonRecordGenerationWithCleanupPermit(
+            permit,
+            join(taskDirectory, "snapshot.json"),
+            evidenceRef,
+            TaskSnapshotSchema,
+            { kind: "record", expected: snapshot, matches: () => true }
+          );
+        } catch (cleanupError) {
+          compensationErrors.push(cleanupError);
+        }
+        try {
+          await removeEmptyTaskLaneAfterRollback(workspaceRoot, task.task_id);
+        } catch (cleanupError) {
+          compensationErrors.push(cleanupError);
+        }
+        if (compensationErrors.length > 0) {
+          throw new AggregateError(
+            [callbackError, ...compensationErrors],
+            "Task snapshot publication compensation failed."
+          );
+        }
+        throw callbackError;
+      }
+    }
+
+    const permit = cleanupPermit;
+    cleanupPermit = undefined;
+    const settlement = await settleWorkspaceRecordCleanupPermitAfterExactObservation(
+      permit,
+      join(taskDirectory, "snapshot.json"),
+      evidenceRef
+    );
+    if (settlement.status !== "current") {
+      throw workspaceError(
+        "task_snapshot_mismatch",
+        "Published task snapshot generation changed before final observation.",
+        "The task snapshot changed during publication and cannot be accepted.",
+        [evidenceRef, "snapshot.bytes"]
+      );
+    }
+    return { status: "created", task: publishedTask };
   } catch (error) {
-    const lifecycleState = snapshotWorkspaceJsonRecordLifecycleState(
-      lifecycleStateHandle
-    );
+    let publicationFailure: unknown = error;
+    if (beforeWriteStarted && !beforeWriteReturned) {
+      try {
+        await removeEmptyTaskLaneAfterRollback(workspaceRoot, task.task_id);
+      } catch (cleanupError) {
+        publicationFailure = new AggregateError(
+          [error, cleanupError],
+          "Task snapshot publication compensation failed."
+        );
+      }
+    }
     if (
-      !lifecycleState.beforeWriteStarted &&
+      !beforeWriteStarted &&
       (await isSafeExistingDirectoryPath(join(workspaceRoot, "tasks")))
     ) {
       const taskDirectoryEntry = await maybeLstat(taskDirectory);
@@ -1022,25 +1351,41 @@ async function persistTaskSnapshot(
           taskLaneFailure?.userMessage ??
             "A required workspace directory could not be created safely.",
           [`workspace/tasks/${task.task_id}`],
-          error
+          publicationFailure
         );
       }
     }
     if (
-      lifecycleState.beforeWriteReturned &&
-      !lifecycleState.afterWriteStarted &&
+      beforeWriteReturned &&
+      !afterWriteStarted &&
       !(await isSafeExistingDirectoryPath(taskDirectory))
     ) {
-      throw taskLaneNotDirectoryError(task.task_id, error);
+      throw taskLaneNotDirectoryError(task.task_id, publicationFailure);
     }
     throw workspaceError(
       "workspace_path_not_safe",
       "Failed to persist task snapshot under the configured workspace.",
       "The task snapshot could not be written safely.",
       [`workspace/tasks/${task.task_id}/snapshot.json`],
-      error
+      publicationFailure
     );
+  } finally {
+    if (cleanupPermit) {
+      await cancelWorkspaceRecordCleanupPermit(cleanupPermit);
+    }
   }
+}
+
+function taskSnapshotTooLargeError(): TaskServiceError {
+  return new TaskServiceError({
+    code: "task_snapshot_too_large",
+    status: 400,
+    category: "schema_error",
+    message: "Task snapshot would exceed the M1 bounded recovery size.",
+    userMessage: "The task request is too large to persist safely.",
+    evidenceRefs: ["request.body"],
+    recommendedNextActions: ["Shorten the task title, goal, or creator fields and submit again."]
+  });
 }
 
 function taskLaneNotDirectoryError(taskId: string, cause?: unknown): TaskServiceError {
@@ -1053,8 +1398,8 @@ function taskLaneNotDirectoryError(taskId: string, cause?: unknown): TaskService
   );
 }
 
-function createTaskSnapshot(task: TaskCard): TaskSnapshot & { task_card: TaskCard } {
-  return TaskSnapshotSchema.parse({
+function createTaskSnapshotInput(task: TaskCard): TaskSnapshotWithTaskCard {
+  return {
     task_id: task.task_id,
     status: task.status,
     runtime_phase: task.runtime_phase ?? null,
@@ -1067,7 +1412,7 @@ function createTaskSnapshot(task: TaskCard): TaskSnapshot & { task_card: TaskCar
     latest_seq: TASK_SNAPSHOT_LATEST_SEQ,
     updated_at: task.updated_at,
     task_card: task
-  }) as TaskSnapshot & { task_card: TaskCard };
+  };
 }
 
 async function isSafeExistingDirectoryPath(path: string): Promise<boolean> {
@@ -1249,13 +1594,4 @@ function taskSnapshotEvidenceRef(taskId: string): string {
 function taskLaneEvidenceRef(path: string): string {
   const name = parse(path).base;
   return isSafeTaskId(name) ? `workspace/tasks/${name}` : "workspace/tasks";
-}
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === code
-  );
 }
