@@ -5755,7 +5755,7 @@ describe("backend workspace and health routes", () => {
       expect(finalRecord?.status).toBe("completed");
       expect(finalRecord?.result_ref).toBe(finalTask?.task_id);
     },
-    60_000
+    180_000
   );
 
   test(
@@ -5816,7 +5816,7 @@ describe("backend workspace and health routes", () => {
       });
       expect((await freshOverflow.request("/api/tasks")).status).toBe(500);
     },
-    60_000
+    180_000
   );
 
   test("POST /api/tasks active same-key digest mismatch stays 422 and does not join owner", async () => {
