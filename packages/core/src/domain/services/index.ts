@@ -6,6 +6,13 @@ export * from "./artifact-registry-service";
 export * from "./idempotency-service";
 export * from "./lock-service";
 export * from "./task-card-service";
+export { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
+export {
+  ensureWorkspaceDirectoryTree,
+  ensureWorkspaceRecordRootPhysicalIdentity,
+  probeWorkspaceRecordDirectoryWritable,
+  runWithExistingWorkspaceRecordDirectoryReproof
+} from "./workspace-record-store";
 export {
   WorkspacePathSafetyError,
   assertPathInsideWorkspace,

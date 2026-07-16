@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFile as execFileWithCallback } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, type BigIntStats } from "node:fs";
 import {
   access,
   link,
   readdir,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -19,6 +21,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import * as ts from "typescript";
+import { z } from "zod";
 import {
   DEFAULT_TASK_CREATED_BY,
   MAX_TASK_SNAPSHOT_BYTES,
@@ -29,6 +33,7 @@ import {
   idempotencyRecordEvidenceRef,
   idempotencyRecordFileName,
   sha256Hex,
+  type CompletedIdempotencyRecordMutationAuthority,
   type CreateTaskInput,
   type TaskCard,
   type TaskSnapshot
@@ -39,6 +44,17 @@ import {
   redactApiLogValue,
   type ApiRequestLogLine
 } from "../middleware";
+import {
+  runWithWorkspaceRecordPublicationHooks,
+  workspaceRecordAuthorityDiagnosticsForTest,
+  workspaceRecordDirectoryBindingDiagnosticsForTest,
+  writeJsonRecord,
+  type WorkspaceRecordPublicationHooks
+} from "../../../core/src/domain/services/workspace-record-store";
+import {
+  PreservedErrorCompensationEnvelope,
+  semanticPrimaryError
+} from "../../../core/src/domain/services/compensation-error-preservation";
 
 const tempRoots: string[] = [];
 const originalCwd = process.cwd();
@@ -171,6 +187,134 @@ describe("backend workspace and health routes", () => {
     expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200, 200, 200]);
     for (const relativeDir of EXPECTED_M1_RUNTIME_DIRECTORIES) {
       expect((await stat(join(workspaceRoot, relativeDir))).isDirectory()).toBe(true);
+    }
+  });
+
+  test("workspace init and record writers share canonical missing-child authority", async () => {
+    const recordSchema = z.object({ id: z.string(), parent: z.string() });
+    for (const directorySegments of [
+      [],
+      ["tasks"],
+      ["artifacts", "manifests"]
+    ] as const) {
+      for (const schedule of ["simultaneous", "init-first", "record-first"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        if (directorySegments.length > 0) await mkdir(workspaceRoot);
+        if (directorySegments.length > 1) {
+          await mkdir(join(workspaceRoot, ...directorySegments.slice(0, -1)), {
+            recursive: true
+          });
+        }
+        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+        const targetDirectory = join(workspaceRoot, ...directorySegments);
+        const firstObservedMissing = createSignal();
+        const bothObservedMissing = createSignal();
+        const simultaneousGate = createAsyncGate();
+        const firstGate = createAsyncGate();
+        const secondGate = createAsyncGate();
+        let missingObservations = 0;
+        let internalCreations = 0;
+        const hooks: WorkspaceRecordPublicationHooks = {
+          beforeDurableDirectoryCreation: async ({ path }) => {
+            if (path !== targetDirectory) return;
+            missingObservations += 1;
+            if (missingObservations === 1) firstObservedMissing.resolve();
+            if (missingObservations === 2) bothObservedMissing.resolve();
+            if (schedule === "simultaneous") {
+              await simultaneousGate.wait;
+            } else if (missingObservations === 1) {
+              await firstGate.wait;
+            } else {
+              await secondGate.wait;
+            }
+          },
+          afterDurableDirectoryCreated: ({ path }) => {
+            if (path === targetDirectory) internalCreations += 1;
+          }
+        };
+        const app = createBackendApi({ workspaceRoot });
+        const record = {
+          id: `init-record-${directorySegments.join("-") || "root"}-${schedule}`,
+          parent: directorySegments.join("/") || "."
+        };
+        const startInit = () =>
+          runWithWorkspaceRecordPublicationHooks(hooks, () =>
+            app.request("/api/workspace/init", { method: "POST" })
+          );
+        const startRecord = () =>
+          runWithWorkspaceRecordPublicationHooks(hooks, () =>
+            writeJsonRecord(
+              workspaceRoot,
+              directorySegments,
+              "integration-record.json",
+              record,
+              `workspace.init.integration.${directorySegments.join(".")}.${schedule}`,
+              recordSchema
+            )
+          );
+        let initPromise: Promise<Response>;
+        let recordPromise: Promise<typeof record>;
+
+        if (schedule === "simultaneous") {
+          initPromise = startInit();
+          recordPromise = startRecord();
+          await Promise.race([
+            bothObservedMissing.promise,
+            timeoutAfter(2_000, `init/record did not both observe ${targetDirectory}`)
+          ]);
+          simultaneousGate.open();
+        } else {
+          const firstKind = schedule === "init-first" ? "init" : "record";
+          const firstPromise = firstKind === "init"
+            ? (initPromise = startInit())
+            : (recordPromise = startRecord());
+          await Promise.race([
+            firstObservedMissing.promise,
+            timeoutAfter(2_000, `${firstKind} did not observe ${targetDirectory}`)
+          ]);
+          if (firstKind === "init") recordPromise = startRecord();
+          else initPromise = startInit();
+          await Promise.race([
+            bothObservedMissing.promise,
+            timeoutAfter(2_000, `staggered peer did not observe ${targetDirectory}`)
+          ]);
+
+          firstGate.open();
+          const firstResult = await Promise.race([
+            firstPromise,
+            timeoutAfter(2_000, `${firstKind} did not finish while its peer was paused`)
+          ]);
+          if (firstKind === "init") expect((firstResult as Response).status).toBe(200);
+          else expect(firstResult).toEqual(record);
+          secondGate.open();
+        }
+
+        const [initResponse, storedRecord] = await Promise.race([
+          Promise.all([initPromise!, recordPromise!]),
+          timeoutAfter(2_000, `init/record did not converge for ${targetDirectory}`)
+        ]);
+        const initBody = await initResponse.json();
+
+        expect(initResponse.status).toBe(200);
+        expect(initBody).toEqual({
+          status: "ok",
+          directory_count: EXPECTED_M1_RUNTIME_DIRECTORIES.length,
+          directories: EXPECTED_M1_RUNTIME_DIRECTORIES
+        });
+        expect(storedRecord).toEqual(record);
+        expect(missingObservations).toBe(2);
+        expect(internalCreations).toBe(1);
+        expect(await readFile(join(targetDirectory, "integration-record.json"), "utf8")).toBe(
+          `${JSON.stringify(record, null, 2)}\n`
+        );
+        expect(await workspaceDirectoryInventory(workspaceRoot)).toEqual(
+          [...EXPECTED_M1_RUNTIME_DIRECTORIES].sort()
+        );
+        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      }
     }
   });
 
@@ -451,6 +595,108 @@ describe("backend workspace and health routes", () => {
       workspace_writable: "ok"
     });
     expect(readyBody.missing_directories).toBeUndefined();
+  });
+
+  test("default writable probe converges with an active root record publication", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({ workspaceRoot });
+    expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const recordPath = join(workspaceRoot, "active-root-record.json");
+    const temporaryWritten = createSignal();
+    const publicationGate = createAsyncGate();
+    const record = { id: "active-root-ready", revision: 1 };
+    const recordSchema = z.object({ id: z.string(), revision: z.number().int() });
+    const publication = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterTemporaryFileWritten: async ({ canonicalPath }) => {
+          if (canonicalPath !== recordPath) return;
+          temporaryWritten.resolve();
+          await publicationGate.wait;
+        }
+      },
+      () =>
+        writeJsonRecord(
+          workspaceRoot,
+          [],
+          "active-root-record.json",
+          record,
+          "workspace.ready.active-root",
+          recordSchema
+        )
+    );
+    await Promise.race([
+      temporaryWritten.promise,
+      timeoutAfter(2_000, "root record publication did not reach its active generation")
+    ]);
+
+    const readyResponse = await Promise.race([
+      app.request("/api/health/ready"),
+      timeoutAfter(2_000, "default writable probe waited on an unlocked root callback")
+    ]);
+    const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
+
+    expect(readyResponse.status).toBe(200);
+    expect(readyBody.status).toBe("ok");
+    expect(readyBody.checks.workspace_writable).toBe("ok");
+    expect((await readdir(workspaceRoot)).filter((entry) => entry.includes("health-write-probe")))
+      .toEqual([]);
+
+    publicationGate.open();
+    expect(await Promise.race([
+      publication,
+      timeoutAfter(2_000, "root record publication did not finish after readiness")
+    ])).toEqual(record);
+    expect(await readFile(recordPath, "utf8")).toBe(`${JSON.stringify(record, null, 2)}\n`);
+    expect((await readdir(workspaceRoot)).filter((entry) => entry.includes("health-write-probe")))
+      .toEqual([]);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("custom writable probe mutation and root replacement fail closed after exact reproof", async () => {
+    for (const drift of ["mutation", "replacement"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const foreignLeaf = join(workspaceRoot, "custom-probe-foreign.txt");
+      const displacedRoot = join(tempRoot, "workspace-displaced-by-custom-probe");
+      let probeCalls = 0;
+      const app = createBackendApi({
+        workspaceRoot,
+        writableProbe: async ({ workspaceRoot: probeRoot }) => {
+          probeCalls += 1;
+          expect(probeRoot).toBe(resolve(workspaceRoot));
+          if (drift === "mutation") {
+            await writeFile(foreignLeaf, "external custom probe mutation", { flag: "wx" });
+          } else {
+            await rename(workspaceRoot, displacedRoot);
+            await mkdir(workspaceRoot);
+          }
+          return true;
+        }
+      });
+      expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+
+      const readyResponse = await app.request("/api/health/ready");
+      const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
+
+      expect(readyResponse.status).toBe(503);
+      expect(readyBody.status).toBe("not_ready");
+      expect(readyBody.checks.workspace_writable).toBe("fail");
+      expect(probeCalls).toBe(1);
+      if (drift === "mutation") {
+        expect(await readFile(foreignLeaf, "utf8")).toBe("external custom probe mutation");
+      } else {
+        expect((await stat(displacedRoot)).isDirectory()).toBe(true);
+        expect((await stat(workspaceRoot)).isDirectory()).toBe(true);
+      }
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    }
   });
 
   test("GET /api/health/ready reports injected workspace_writable failure in the configured root", async () => {
@@ -902,6 +1148,717 @@ describe("backend workspace and health routes", () => {
     expect(idempotencyRecord?.result_ref).toBe(firstTask.task_id);
   });
 
+  test("POST /api/tasks delegates normal-owner pre-completion observation to completeRecord", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:normal-owner-observation";
+    const taskId = "TASK-normal-owner-observation";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = sha256Hex(
+      canonicalJson({
+        ...taskBody,
+        created_by: taskBody.created_by ?? DEFAULT_TASK_CREATED_BY
+      })
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const callOrder: string[] = [];
+    let beginRecordCalls = 0;
+    let lookupReplayCalls = 0;
+    let completeRecordCalls = 0;
+    let snapshotReads = 0;
+    let snapshotReadsAtCompletion: number | undefined;
+    let cleanupPermitsAtCompletion: number | undefined;
+    let cleanupPermitsAfterCompletion: number | undefined;
+    let completionResultRef: string | undefined;
+    let completionRequestDigest: string | undefined;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:30.125Z"),
+      taskIdFactory: () => taskId,
+      taskSnapshotReadHooks: {
+        beforeSnapshotOpen: ({ laneTaskId }) => {
+          if (laneTaskId !== taskId) return;
+          snapshotReads += 1;
+          callOrder.push(`snapshot:${snapshotReads}`);
+        }
+      },
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        return {
+          ...service,
+          beginRecord: async (input) => {
+            beginRecordCalls += 1;
+            callOrder.push("beginRecord");
+            return await service.beginRecord(input);
+          },
+          lookupReplay: async (input) => {
+            lookupReplayCalls += 1;
+            callOrder.push("lookupReplay");
+            return await service.lookupReplay(input);
+          },
+          completeRecord: async (input) => {
+            completeRecordCalls += 1;
+            snapshotReadsAtCompletion = snapshotReads;
+            cleanupPermitsAtCompletion =
+              workspaceRecordAuthorityDiagnosticsForTest().cleanupPermits;
+            completionResultRef = input.resultRef;
+            completionRequestDigest = input.requestDigest;
+            callOrder.push("completeRecord");
+            const completed = await service.completeRecord(input);
+            cleanupPermitsAfterCompletion =
+              workspaceRecordAuthorityDiagnosticsForTest().cleanupPermits;
+            return completed;
+          }
+        };
+      }
+    });
+
+    const response = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const createdTask = (await response.json()) as TaskCard;
+    const completedRecord = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+    const snapshot = JSON.parse(
+      await readFile(join(workspaceRoot, "tasks", taskId, "snapshot.json"), "utf8")
+    ) as TaskSnapshot & { task_card: TaskCard };
+
+    expect(response.status).toBe(201);
+    expect(createdTask.task_id).toBe(taskId);
+    expect(beginRecordCalls).toBe(1);
+    expect(lookupReplayCalls).toBe(0);
+    expect(completeRecordCalls).toBe(1);
+    expect(snapshotReadsAtCompletion).toBe(1);
+    expect(cleanupPermitsAtCompletion).toBe(authorityBaseline.cleanupPermits + 1);
+    expect(cleanupPermitsAfterCompletion).toBe(authorityBaseline.cleanupPermits + 1);
+    expect(snapshotReads).toBe(1);
+    expect(callOrder).toEqual([
+      "beginRecord",
+      "snapshot:1",
+      "completeRecord"
+    ]);
+    expect(completionResultRef).toBe(taskId);
+    expect(completionRequestDigest).toBe(requestDigest);
+    expect(completedRecord?.status).toBe("completed");
+    expect(completedRecord?.request_digest).toBe(requestDigest);
+    expect(completedRecord?.result_ref).toBe(taskId);
+    expect(snapshot.task_card).toEqual(createdTask);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("POST /api/tasks retains a committed snapshot when completion cleanup and reconciliation reads fail", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:unknown-post-completion-authority";
+    const taskId = "TASK-unknown-post-completion-authority";
+    const taskBody = validTaskCreateBody({ title: "Retain post-completion authority" });
+    const completionMarker = new Error("post-completion cleanup marker");
+    const reconciliationMarker = new Error("post-completion reconciliation marker");
+    let completionCommitted = false;
+    let reconciliationFaultActive = true;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:30.125Z"),
+      taskIdFactory: () => taskId,
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        return {
+          ...service,
+          completeRecord: async (input) => {
+            await service.completeRecord(input);
+            completionCommitted = true;
+            throw completionMarker;
+          },
+          consumeCompletedRecord: async (input, consume) => {
+            if (completionCommitted && reconciliationFaultActive) {
+              throw reconciliationMarker;
+            }
+            return await service.consumeCompletedRecord(input, consume);
+          }
+        };
+      }
+    });
+
+    const failedResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const retainedBytes = await readFile(snapshotPath);
+    const record = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+
+    expect(failedResponse.status).toBe(500);
+    expectCanonicalError(failedBody, "workspace_error");
+    expect(completionCommitted).toBe(true);
+    expect(record?.status).toBe("completed");
+    expect(record?.result_ref).toBe(taskId);
+    expect(retainedBytes.byteLength).toBeGreaterThan(0);
+    expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+
+    reconciliationFaultActive = false;
+    const replayResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const replayTask = (await replayResponse.json()) as TaskCard;
+
+    expect(replayResponse.status).toBe(200);
+    expect(replayTask.task_id).toBe(taskId);
+    expect(await readFile(snapshotPath)).toEqual(retainedBytes);
+    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+      tasks: [replayTask]
+    });
+  });
+
+  test("POST /api/tasks retains a snapshot when pre-completion authority is unknown and a completion references it", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:unknown-pre-completion-authority";
+    const taskId = "TASK-unknown-pre-completion-authority";
+    const taskBody = validTaskCreateBody({ title: "Retain pre-completion authority" });
+    const requestDigest = sha256Hex(
+      canonicalJson({
+        ...taskBody,
+        created_by: taskBody.created_by ?? DEFAULT_TASK_CREATED_BY
+      })
+    );
+    const observationMarker = new Error("pre-completion observation marker");
+    const reconciliationMarker = new Error("pre-completion reconciliation marker");
+    let serviceForCompetingCompletion:
+      | ReturnType<typeof createIdempotencyRecordService>
+      | undefined;
+    let competingCompletionPublished = false;
+    let reconciliationFaultActive = true;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:30.156Z"),
+      taskIdFactory: () => taskId,
+      taskSnapshotReadHooks: {
+        beforeSnapshotOpen: async ({ laneTaskId }) => {
+          if (laneTaskId !== taskId || competingCompletionPublished) return;
+          competingCompletionPublished = true;
+          await serviceForCompetingCompletion!.completeRecord({
+            scope: "task",
+            key: idempotencyKey,
+            requestDigest,
+            resultRef: taskId
+          });
+          throw observationMarker;
+        }
+      },
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        serviceForCompetingCompletion = service;
+        return {
+          ...service,
+          consumeCompletedRecord: async (input, consume) => {
+            if (competingCompletionPublished && reconciliationFaultActive) {
+              throw reconciliationMarker;
+            }
+            return await service.consumeCompletedRecord(input, consume);
+          }
+        };
+      }
+    });
+
+    const failedResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const retainedBytes = await readFile(snapshotPath);
+    const record = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+
+    expect(failedResponse.status).toBe(500);
+    expectCanonicalError(failedBody, "workspace_error");
+    expect(competingCompletionPublished).toBe(true);
+    expect(record?.status).toBe("completed");
+    expect(record?.result_ref).toBe(taskId);
+    expect(retainedBytes.byteLength).toBeGreaterThan(0);
+    expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+
+    reconciliationFaultActive = false;
+    const replayResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const replayTask = (await replayResponse.json()) as TaskCard;
+
+    expect(replayResponse.status).toBe(200);
+    expect(replayTask.task_id).toBe(taskId);
+    expect(await readFile(snapshotPath)).toEqual(retainedBytes);
+  });
+
+  test("POST /api/tasks retains exact snapshot drift and replays after fault-free reproof", async () => {
+    for (const drift of ["minified_bytes", "pending_pi_gates"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const idempotencyKey = `task:create:r23-completion-drift-${drift}`;
+      const ownerTaskId = `TASK-r23-completion-drift-${drift}`;
+      const unusedTaskId = `${ownerTaskId}-unused`;
+      const taskIds = [ownerTaskId, unusedTaskId];
+      const taskBody = validTaskCreateBody({
+        title: `R23 exact completion drift ${drift}`
+      });
+      const snapshotPath = join(workspaceRoot, "tasks", ownerTaskId, "snapshot.json");
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let mutationCount = 0;
+      let generationBefore:
+        | { readonly dev: bigint; readonly ino: bigint }
+        | undefined;
+      let generationAfter:
+        | { readonly dev: bigint; readonly ino: bigint }
+        | undefined;
+      const app = createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:30.187Z"),
+        taskIdFactory: () => taskIds.shift() ?? `${unusedTaskId}-unexpected`,
+        idempotencyServiceFactory: (serviceOptions) => {
+          const service = createIdempotencyRecordService(serviceOptions);
+          return {
+            ...service,
+            completeRecord: async (input) => {
+              if (input.resultRef === ownerTaskId && mutationCount === 0) {
+                mutationCount += 1;
+                const before = await stat(snapshotPath, { bigint: true });
+                generationBefore = { dev: before.dev, ino: before.ino };
+                const snapshot = JSON.parse(
+                  await readFile(snapshotPath, "utf8")
+                ) as TaskSnapshot & { task_card: TaskCard };
+                await writeFile(
+                  snapshotPath,
+                  drift === "minified_bytes"
+                    ? JSON.stringify(snapshot)
+                    : `${JSON.stringify({
+                        ...snapshot,
+                        pending_pi_gates: ["GATE-r23-after-first-read"]
+                      }, null, 2)}\n`
+                );
+                const after = await stat(snapshotPath, { bigint: true });
+                generationAfter = { dev: after.dev, ino: after.ino };
+              }
+              return await service.completeRecord(input);
+            }
+          };
+        }
+      });
+
+      const failedResponse = await postTask(app, taskBody, {
+        "Idempotency-Key": idempotencyKey
+      });
+      const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+      const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+      const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
+      const retainedBytes = await readFile(snapshotPath);
+      const retainedSnapshot = JSON.parse(retainedBytes.toString("utf8")) as TaskSnapshot & {
+        task_card: TaskCard;
+      };
+      const retainedTask = retainedSnapshot.task_card;
+      const sameAppList = await app.request("/api/tasks");
+      const sameAppDetail = await app.request(`/api/tasks/${ownerTaskId}`);
+      const freshApp = createBackendApi({ workspaceRoot });
+      const freshList = await freshApp.request("/api/tasks");
+      const freshDetail = await freshApp.request(`/api/tasks/${ownerTaskId}`);
+
+      expect(failedResponse.status).toBe(500);
+      expectCanonicalError(failedBody, "workspace_error");
+      expect(failedBody.error.message).toBe(
+        "Observed task snapshot changed before exact cache settlement."
+      );
+      expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+      expect(mutationCount).toBe(1);
+      expect(generationBefore).toBeDefined();
+      expect(generationAfter).toEqual(generationBefore!);
+      expect(recordAfterFailure?.status).toBe("completed");
+      expect(recordAfterFailure?.result_ref).toBe(ownerTaskId);
+      expect(sameAppList.status).toBe(200);
+      expect(await sameAppList.json()).toEqual({ tasks: [retainedTask] });
+      expect(sameAppDetail.status).toBe(200);
+      expect(await sameAppDetail.json()).toEqual(retainedTask);
+      expect(freshList.status).toBe(200);
+      expect(await freshList.json()).toEqual({ tasks: [retainedTask] });
+      expect(freshDetail.status).toBe(200);
+      expect(await freshDetail.json()).toEqual(retainedTask);
+      expect(await readFile(snapshotPath)).toEqual(retainedBytes);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+
+      const replayResponse = await postTask(app, taskBody, {
+        "Idempotency-Key": idempotencyKey
+      });
+      const replayTask = (await replayResponse.json()) as TaskCard;
+      const recordAfterReplay = await idempotencyService.getRecord("task", idempotencyKey);
+
+      expect(replayResponse.status).toBe(200);
+      expect(replayTask).toEqual(retainedTask);
+      expect(taskIds).toEqual([unusedTaskId]);
+      expect(recordAfterReplay).toEqual(recordAfterFailure);
+      expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+        tasks: [retainedTask]
+      });
+      expect(await createBackendApi({ workspaceRoot }).request("/api/tasks").then(
+        (response) => response.json()
+      )).toEqual({ tasks: [retainedTask] });
+      expect(await readFile(snapshotPath)).toEqual(retainedBytes);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("POST /api/tasks exact invalidation bypasses unrelated transition-guard recovery", async () => {
+    for (const failureClass of ["post_mutation_release"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const idempotencyKey = `task:create:r23-invalidation-recovery-${failureClass}`;
+      const ownerTaskId = `TASK-r23-invalidation-recovery-${failureClass}`;
+      const repairedTaskId = `${ownerTaskId}-repaired`;
+      const taskIds = [ownerTaskId, repairedTaskId];
+      const taskBody = validTaskCreateBody({
+        title: `R23 invalidation recovery ${failureClass}`
+      });
+      const snapshotPath = join(workspaceRoot, "tasks", ownerTaskId, "snapshot.json");
+      const guardPath = join(
+        workspaceRoot,
+        "tasks",
+        "_idempotency",
+        "task",
+        `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`
+      );
+      const invalidationMarker = new Error(`private ${failureClass} invalidation marker`);
+      const quarantineMarker = new Error(`private ${failureClass} quarantine marker`);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let replacementCount = 0;
+      let invalidationCalls = 0;
+      let quarantineCalls = 0;
+      let matchingGuardReleaseCalls = 0;
+      let invalidationActive = false;
+      let quarantineActive = false;
+      let successorTask: TaskCard | undefined;
+      let successorBytes: Buffer | undefined;
+      let successorIdentity: { readonly dev: bigint; readonly ino: bigint } | undefined;
+      const app = createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:30.218Z"),
+        requestLogSink: () => undefined,
+        taskIdFactory: () => taskIds.shift() ?? `${repairedTaskId}-unexpected`,
+        idempotencyServiceFactory: (serviceOptions) => {
+          const service = createIdempotencyRecordService(serviceOptions);
+          return {
+            ...service,
+            completeRecord: async (input) => {
+              const completed = await service.completeRecord(input);
+              if (input.resultRef !== ownerTaskId || replacementCount > 0) return completed;
+              replacementCount += 1;
+              const snapshot = JSON.parse(
+                await readFile(snapshotPath, "utf8")
+              ) as TaskSnapshot & { task_card: TaskCard };
+              successorTask = {
+                ...snapshot.task_card,
+                title: `R23 valid successor ${failureClass}`
+              };
+              successorBytes = Buffer.from(
+                `${JSON.stringify({ ...snapshot, task_card: successorTask }, null, 2)}\n`
+              );
+              const temporarySuccessor = `${snapshotPath}.successor`;
+              await writeFile(temporarySuccessor, successorBytes, {
+                flag: "wx",
+                mode: 0o600
+              });
+              await rename(temporarySuccessor, snapshotPath);
+              const successorEntry = await stat(snapshotPath, { bigint: true });
+              successorIdentity = { dev: successorEntry.dev, ino: successorEntry.ino };
+              return completed;
+            },
+            invalidateCompletedRecord: async (input) => {
+              invalidationCalls += 1;
+              invalidationActive = true;
+              try {
+                return await service.invalidateCompletedRecord(input);
+              } finally {
+                invalidationActive = false;
+              }
+            },
+            quarantineRecordAfterUnsafeRollback: async (input) => {
+              quarantineCalls += 1;
+              quarantineActive = true;
+              try {
+                return await service.quarantineRecordAfterUnsafeRollback(input);
+              } finally {
+                quarantineActive = false;
+              }
+            }
+          };
+        }
+      });
+
+      const phaseResponses = await runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+            if (
+              path !== guardPath ||
+              operation !== "conditional_delete" ||
+              !invalidationActive
+            ) {
+              return;
+            }
+            matchingGuardReleaseCalls += 1;
+            if (matchingGuardReleaseCalls === 1) {
+              throw invalidationMarker;
+            }
+          }
+        },
+        async () => {
+          const unknownResponse = await postTask(app, taskBody, {
+            "Idempotency-Key": idempotencyKey
+          });
+          const unknownBody = (await unknownResponse.json()) as ApiErrorResponse;
+          const recordAfterUnknown = await createIdempotencyRecordService({
+            workspaceRoot
+          }).getRecord("task", idempotencyKey);
+          const bytesAfterUnknown = await readFile(snapshotPath);
+          const countsAfterUnknown = {
+            invalidationCalls,
+            quarantineCalls,
+            matchingGuardReleaseCalls
+          };
+          const failedResponse = await postTask(app, taskBody, {
+            "Idempotency-Key": idempotencyKey
+          });
+          return {
+            unknownResponse,
+            unknownBody,
+            recordAfterUnknown,
+            bytesAfterUnknown,
+            countsAfterUnknown,
+            failedResponse
+          };
+        }
+      );
+      const {
+        unknownResponse,
+        unknownBody,
+        recordAfterUnknown,
+        bytesAfterUnknown,
+        countsAfterUnknown,
+        failedResponse
+      } = phaseResponses;
+      const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+      const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+      const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
+
+      expect(unknownResponse.status).toBe(500);
+      expectCanonicalError(unknownBody, "workspace_error");
+      expect(unknownBody.error.message).toBe(
+        "Observed task snapshot changed before exact cache settlement."
+      );
+      expect(recordAfterUnknown?.status).toBe("completed");
+      expect(recordAfterUnknown?.result_ref).toBe(ownerTaskId);
+      expect(countsAfterUnknown).toEqual({
+        invalidationCalls: 0,
+        quarantineCalls: 0,
+        matchingGuardReleaseCalls: 0
+      });
+      expect(bytesAfterUnknown).toEqual(successorBytes!);
+      expect(failedResponse.status).toBe(500);
+      expectCanonicalError(failedBody, "workspace_error");
+      expect(failedBody.error.message).toBe(INVALID_DURABLE_TASK_AUTHORITY_MESSAGE);
+      expect(failedBody.error.retryable).toBe(true);
+      expect(JSON.stringify(failedBody)).not.toContain(invalidationMarker.message);
+      expect(JSON.stringify(failedBody)).not.toContain(quarantineMarker.message);
+      expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+      expect(replacementCount).toBe(1);
+      expect(invalidationCalls).toBe(1);
+      expect(quarantineCalls).toBe(0);
+      expect(matchingGuardReleaseCalls).toBe(0);
+      expect(recordAfterFailure?.status).toBe("failed");
+      expect(recordAfterFailure?.result_ref).toBeUndefined();
+      expect(successorTask).toBeDefined();
+      expect(successorBytes).toBeDefined();
+      expect(successorIdentity).toBeDefined();
+      expect(await readFile(snapshotPath)).toEqual(successorBytes!);
+      const successorEntryAfterFailure = await stat(snapshotPath, { bigint: true });
+      expect({
+        dev: successorEntryAfterFailure.dev,
+        ino: successorEntryAfterFailure.ino
+      }).toEqual(successorIdentity!);
+      expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+        tasks: [successorTask]
+      });
+      expect(
+        await createBackendApi({ workspaceRoot }).request("/api/tasks").then(
+          (response) => response.json()
+        )
+      ).toEqual({ tasks: [successorTask] });
+      await expectPathMissing(guardPath);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+
+      const repairedResponse = await postTask(app, taskBody, {
+        "Idempotency-Key": idempotencyKey
+      });
+      const repairedTask = (await repairedResponse.json()) as TaskCard;
+      const repairedRecord = await idempotencyService.getRecord("task", idempotencyKey);
+
+      expect(repairedResponse.status).toBe(201);
+      expect(repairedTask.task_id).toBe(repairedTaskId);
+      expect(repairedRecord?.status).toBe("completed");
+      expect(repairedRecord?.result_ref).toBe(repairedTaskId);
+      expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+        tasks: [successorTask, repairedTask]
+      });
+      expect(await readFile(snapshotPath)).toEqual(successorBytes!);
+      await expectPathMissing(guardPath);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("POST /api/tasks does not retain fail intent across rejected completed authority", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:durable-fail-intent-fence";
+    const ownerTaskId = "TASK-durable-fail-intent-fence-a";
+    const repairedTaskId = "TASK-durable-fail-intent-fence-repaired";
+    const taskIds = [ownerTaskId, repairedTaskId];
+    const taskBody = validTaskCreateBody({ title: "Durable fail-intent fence" });
+    const snapshotPath = join(workspaceRoot, "tasks", ownerTaskId, "snapshot.json");
+    const recordPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      idempotencyRecordFileName(idempotencyKey)
+    );
+    const guardPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`
+    );
+    let successorBytes: Buffer | undefined;
+    let successorIdentity: { readonly dev: bigint; readonly ino: bigint } | undefined;
+    let successorTask: TaskCard | undefined;
+    let replacementPublished = false;
+    let storageHealthy = false;
+    let failedRecordWrites = 0;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:30.312Z"),
+      requestLogSink: () => undefined,
+      taskIdFactory: () => taskIds.shift() ?? "TASK-durable-fail-intent-unexpected",
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        return {
+          ...service,
+          completeRecord: async (input) => {
+            const completed = await service.completeRecord(input);
+            if (input.resultRef !== ownerTaskId || replacementPublished) return completed;
+            replacementPublished = true;
+            const snapshot = JSON.parse(
+              await readFile(snapshotPath, "utf8")
+            ) as TaskSnapshot & { task_card: TaskCard };
+            successorTask = {
+              ...snapshot.task_card,
+              title: "Durable fail-intent successor A2"
+            };
+            successorBytes = Buffer.from(
+              `${JSON.stringify({ ...snapshot, task_card: successorTask }, null, 2)}\n`
+            );
+            const temporarySuccessor = `${snapshotPath}.successor`;
+            await writeFile(temporarySuccessor, successorBytes, {
+              flag: "wx",
+              mode: 0o600
+            });
+            await rename(temporarySuccessor, snapshotPath);
+            const successorEntry = await stat(snapshotPath, { bigint: true });
+            successorIdentity = { dev: successorEntry.dev, ino: successorEntry.ino };
+            return completed;
+          }
+        };
+      }
+    });
+    const freshApp = createBackendApi({ workspaceRoot, requestLogSink: () => undefined });
+    const writeFailure = new Error("durable fail-intent record write failure");
+    const hooks: WorkspaceRecordPublicationHooks = {
+      afterTemporaryFileWritten: ({ canonicalPath }) => {
+        if (!replacementPublished || storageHealthy || canonicalPath !== recordPath) return;
+        failedRecordWrites += 1;
+        throw writeFailure;
+      }
+    };
+
+    const { failedResponse, sameAppBlocked, freshAppBlocked, writesAfterOwner } =
+      await runWithWorkspaceRecordPublicationHooks(hooks, async () => {
+        const failedResponse = await postTask(app, taskBody, {
+          "Idempotency-Key": idempotencyKey
+        });
+        const writesAfterOwner = failedRecordWrites;
+        const sameAppBlocked = await postTask(app, taskBody, {
+          "Idempotency-Key": idempotencyKey
+        });
+        const freshAppBlocked = await postTask(freshApp, taskBody, {
+          "Idempotency-Key": idempotencyKey
+        });
+        return { failedResponse, sameAppBlocked, freshAppBlocked, writesAfterOwner };
+      });
+    const retainedRecord = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+    expect(failedResponse.status).toBe(500);
+    expect(writesAfterOwner).toBe(0);
+    expect(sameAppBlocked.status).toBe(500);
+    expect(freshAppBlocked.status).toBe(500);
+    expect(failedRecordWrites).toBeGreaterThan(0);
+    expect(retainedRecord?.status).toBe("completed");
+    expect(retainedRecord?.result_ref).toBe(ownerTaskId);
+    await expectPathMissing(guardPath);
+    expect(successorTask).toBeDefined();
+    expect(successorBytes).toBeDefined();
+    expect(successorIdentity).toBeDefined();
+    expect(await readFile(snapshotPath)).toEqual(successorBytes!);
+    const successorEntryWhileFenced = await stat(snapshotPath, { bigint: true });
+    expect({
+      dev: successorEntryWhileFenced.dev,
+      ino: successorEntryWhileFenced.ino
+    }).toEqual(successorIdentity!);
+
+    storageHealthy = true;
+    const recoveryResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const recoveryService = createIdempotencyRecordService({ workspaceRoot });
+    const recoveredRecord = await recoveryService.getRecord("task", idempotencyKey);
+
+    expect(recoveryResponse.status).toBe(500);
+    expect(recoveredRecord?.status).toBe("failed");
+    expect(recoveredRecord?.result_ref).toBeUndefined();
+    await expectPathMissing(guardPath);
+    expect(await readFile(snapshotPath)).toEqual(successorBytes!);
+
+    const repairedResponse = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const repairedTask = (await repairedResponse.json()) as TaskCard;
+
+    expect(repairedResponse.status).toBe(201);
+    expect(repairedTask.task_id).toBe(repairedTaskId);
+    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+      tasks: [successorTask, repairedTask]
+    });
+  });
+
   test("completed replay evicts same-app cache after external snapshot deletion", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1053,7 +2010,464 @@ describe("backend workspace and health routes", () => {
     }
   });
 
-  test("completed replay quarantines a hardlinked TaskSnapshot without changing its outside alias", async () => {
+  test("invalid completed authority cleanup preserves a valid successor published after invalidation", async () => {
+    for (const invalidAuthority of ["malformed", "invalid"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = `TASK-completed-successor-${invalidAuthority}`;
+      const invalidKey = `task:create:completed-invalid-${invalidAuthority}`;
+      const successorKey = `task:create:completed-successor-${invalidAuthority}`;
+      const taskBody = validTaskCreateBody({
+        title: `Completed cleanup successor ${invalidAuthority}`
+      });
+      const requestDigest = sha256Hex(canonicalJson(taskBody));
+      const creatingApp = createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:30.500Z"),
+        taskIdFactory: () => taskId
+      });
+      const createResponse = await postTask(creatingApp, taskBody, {
+        "Idempotency-Key": invalidKey
+      });
+      const task = (await createResponse.json()) as TaskCard;
+      const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+      const canonicalSnapshotText = await readFile(snapshotPath, "utf8");
+      const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+      await idempotencyService.beginRecord({
+        scope: "task",
+        key: successorKey,
+        requestDigest
+      });
+      await idempotencyService.completeRecord({
+        scope: "task",
+        key: successorKey,
+        requestDigest,
+        resultRef: taskId
+      });
+
+      if (invalidAuthority === "missing") {
+        await rm(snapshotPath);
+      } else if (invalidAuthority === "malformed") {
+        await writeFile(snapshotPath, "{");
+      } else {
+        const invalidSnapshot = JSON.parse(canonicalSnapshotText) as Record<string, unknown>;
+        invalidSnapshot.unknown_completed_authority = "must not authorize successor cleanup";
+        await writeFile(snapshotPath, `${JSON.stringify(invalidSnapshot)}\n`);
+      }
+      const observedIdentity = invalidAuthority === "missing"
+        ? undefined
+        : await stat(snapshotPath, { bigint: true });
+      let replacementCount = 0;
+      let taskIdFactoryCalls = 0;
+      let successorIdentity: { dev: bigint; ino: bigint } | undefined;
+      const replayApp = createBackendApi({
+        workspaceRoot,
+        taskIdFactory: () => {
+          taskIdFactoryCalls += 1;
+          return `TASK-completed-successor-unexpected-${invalidAuthority}`;
+        },
+        idempotencyServiceFactory: (serviceOptions) => {
+          const service = createIdempotencyRecordService(serviceOptions);
+          return {
+            ...service,
+            invalidateCompletedRecord: async (input) => {
+              try {
+                return await service.invalidateCompletedRecord(input);
+              } finally {
+                if (input.key === invalidKey && replacementCount === 0) {
+                  replacementCount += 1;
+                  const successorTempPath = `${snapshotPath}.successor`;
+                  await writeFile(successorTempPath, canonicalSnapshotText, {
+                    flag: "wx",
+                    mode: 0o600
+                  });
+                  await rm(snapshotPath, { recursive: true, force: true });
+                  await rename(successorTempPath, snapshotPath);
+                  const successorEntry = await stat(snapshotPath, { bigint: true });
+                  successorIdentity = {
+                    dev: successorEntry.dev,
+                    ino: successorEntry.ino
+                  };
+                }
+              }
+            }
+          };
+        }
+      });
+
+      const failedResponse = await postTask(replayApp, taskBody, {
+        "Idempotency-Key": invalidKey
+      });
+      const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+      const invalidRecord = await idempotencyService.getRecord("task", invalidKey);
+      const successorRecordBeforeReplay = await idempotencyService.getRecord(
+        "task",
+        successorKey
+      );
+
+      expect(createResponse.status).toBe(201);
+      expect(failedResponse.status).toBe(500);
+      expectCanonicalError(failedBody, "workspace_error");
+      expect(failedBody.error.message).toBe(INVALID_DURABLE_TASK_AUTHORITY_MESSAGE);
+      expect(replacementCount).toBe(1);
+      expect(taskIdFactoryCalls).toBe(0);
+      expect(successorIdentity).toBeDefined();
+      if (observedIdentity) {
+        expect({ dev: successorIdentity!.dev, ino: successorIdentity!.ino }).not.toEqual({
+          dev: observedIdentity.dev,
+          ino: observedIdentity.ino
+        });
+      }
+      expect(await readFile(snapshotPath, "utf8")).toBe(canonicalSnapshotText);
+      expect(invalidRecord?.status).toBe("failed");
+      expect(invalidRecord?.result_ref).toBeUndefined();
+      expect(successorRecordBeforeReplay?.status).toBe("completed");
+      expect(successorRecordBeforeReplay?.result_ref).toBe(taskId);
+
+      const successorReplay = await postTask(replayApp, taskBody, {
+        "Idempotency-Key": successorKey
+      });
+      expect(successorReplay.status).toBe(200);
+      expect(await successorReplay.json()).toEqual(task);
+      expect(await replayApp.request("/api/tasks").then((response) => response.json())).toEqual({
+        tasks: [task]
+      });
+      const freshApp = createBackendApi({ workspaceRoot });
+      expect(await freshApp.request("/api/tasks").then((response) => response.json())).toEqual({
+        tasks: [task]
+      });
+      const freshReplay = await postTask(freshApp, taskBody, {
+        "Idempotency-Key": successorKey
+      });
+      expect(freshReplay.status).toBe(200);
+      expect(await freshReplay.json()).toEqual(task);
+      expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([taskId]);
+      expect(taskIdFactoryCalls).toBe(0);
+    }
+  });
+
+  test("completed A invalidation installs durable B and boundedly converges when B changes during settlement", async () => {
+    for (const settlement of ["stable_b", "b_changes_to_d"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const idempotencyKey = `task:create:r23-successor-${settlement}`;
+      const taskId = `TASK-r23-successor-a-${settlement}`;
+      const repairedTaskId = `TASK-r23-successor-c-${settlement}`;
+      const taskIds = [taskId, repairedTaskId];
+      let taskIdFactoryCalls = 0;
+      const taskBody = validTaskCreateBody({
+        title: `R23 cached authority A ${settlement}`
+      });
+      const app = createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:30.625Z"),
+        taskIdFactory: () => {
+          taskIdFactoryCalls += 1;
+          return taskIds.shift() ?? `${repairedTaskId}-unexpected`;
+        }
+      });
+      const createResponse = await postTask(app, taskBody, {
+        "Idempotency-Key": idempotencyKey
+      });
+      const taskA = (await createResponse.json()) as TaskCard;
+      const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+      const snapshotA = JSON.parse(
+        await readFile(snapshotPath, "utf8")
+      ) as TaskSnapshot & { task_card: TaskCard };
+      const identityA = await stat(snapshotPath, { bigint: true });
+      const taskB: TaskCard = {
+        ...taskA,
+        title: `R23 durable successor B ${settlement}`
+      };
+      const snapshotB = { ...snapshotA, task_card: taskB };
+      const bytesB = Buffer.from(`${JSON.stringify(snapshotB, null, 2)}\n`);
+      const tempBPath = `${snapshotPath}.b`;
+      await writeFile(tempBPath, bytesB, { flag: "wx", mode: 0o600 });
+      await rename(tempBPath, snapshotPath);
+      const identityB = await stat(snapshotPath, { bigint: true });
+      const taskD: TaskCard = {
+        ...taskB,
+        title: `R23 settlement successor D ${settlement}`
+      };
+      const snapshotD = { ...snapshotA, task_card: taskD };
+      const bytesD = Buffer.from(`${JSON.stringify(snapshotD, null, 2)}\n`);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let settlementReplacementCount = 0;
+      let identityD:
+        | { readonly dev: bigint; readonly ino: bigint }
+        | undefined;
+
+      const replay = () =>
+        postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+      const initialResponse = settlement === "stable_b"
+        ? await replay()
+        : await runWithWorkspaceRecordPublicationHooks(
+            {
+              beforeCleanupPermitIdentityResolution: async ({ path }) => {
+                if (path !== snapshotPath || settlementReplacementCount > 0) return;
+                settlementReplacementCount += 1;
+                const tempDPath = `${snapshotPath}.d`;
+                await writeFile(tempDPath, bytesD, { flag: "wx", mode: 0o600 });
+                await rename(tempDPath, snapshotPath);
+                const successor = await stat(snapshotPath, { bigint: true });
+                identityD = { dev: successor.dev, ino: successor.ino };
+              }
+            },
+            replay
+          );
+      const initialBody = (await initialResponse.json()) as ApiErrorResponse;
+      const expectedSuccessor = settlement === "stable_b" ? taskB : taskD;
+      const expectedBytes = settlement === "stable_b" ? bytesB : bytesD;
+      const expectedIdentity = settlement === "stable_b"
+        ? { dev: identityB.dev, ino: identityB.ino }
+        : identityD!;
+      const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+      let failedResponse = initialResponse;
+      let failedBody = initialBody;
+      if (settlement === "b_changes_to_d") {
+        const retainedRecord = await idempotencyService.getRecord("task", idempotencyKey);
+        const retainedList = await app.request("/api/tasks");
+        const retainedIdentity = await stat(snapshotPath, { bigint: true });
+
+        expect(initialResponse.status).toBe(500);
+        expectCanonicalError(initialBody, "workspace_error");
+        expect(initialBody.error.message).toBe(
+          "Observed task snapshot changed before exact cache settlement."
+        );
+        expect(retainedRecord?.status).toBe("completed");
+        expect(retainedRecord?.result_ref).toBe(taskId);
+        expect(await retainedList.json()).toEqual({ tasks: [taskD] });
+        expect(await readFile(snapshotPath)).toEqual(bytesD);
+        expect({ dev: retainedIdentity.dev, ino: retainedIdentity.ino }).toEqual(identityD!);
+
+        failedResponse = await replay();
+        failedBody = (await failedResponse.json()) as ApiErrorResponse;
+      }
+      const invalidatedRecord = await idempotencyService.getRecord("task", idempotencyKey);
+      const sameAppList = await app.request("/api/tasks");
+      const sameAppDetail = await app.request(`/api/tasks/${taskId}`);
+      const freshApp = createBackendApi({ workspaceRoot });
+      const freshList = await freshApp.request("/api/tasks");
+      const freshDetail = await freshApp.request(`/api/tasks/${taskId}`);
+      const currentIdentity = await stat(snapshotPath, { bigint: true });
+
+      expect(createResponse.status).toBe(201);
+      expect(taskA.task_id).toBe(taskId);
+      expect({ dev: identityB.dev, ino: identityB.ino }).not.toEqual({
+        dev: identityA.dev,
+        ino: identityA.ino
+      });
+      expect(failedResponse.status).toBe(500);
+      expectCanonicalError(failedBody, "workspace_error");
+      expect(failedBody.error.message).toBe(INVALID_DURABLE_TASK_AUTHORITY_MESSAGE);
+      expect(failedBody.error.retryable).toBe(true);
+      expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
+      expect(settlementReplacementCount).toBe(settlement === "stable_b" ? 0 : 1);
+      if (settlement === "b_changes_to_d") {
+        expect(identityD).toBeDefined();
+        expect(identityD).not.toEqual({ dev: identityB.dev, ino: identityB.ino });
+      }
+      expect(await readFile(snapshotPath)).toEqual(expectedBytes);
+      expect({ dev: currentIdentity.dev, ino: currentIdentity.ino }).toEqual(expectedIdentity);
+      expect(invalidatedRecord?.status).toBe("failed");
+      expect(invalidatedRecord?.result_ref).toBeUndefined();
+      expect(sameAppList.status).toBe(200);
+      expect(await sameAppList.json()).toEqual({ tasks: [expectedSuccessor] });
+      expect(sameAppDetail.status).toBe(200);
+      expect(await sameAppDetail.json()).toEqual(expectedSuccessor);
+      expect(freshList.status).toBe(200);
+      expect(await freshList.json()).toEqual({ tasks: [expectedSuccessor] });
+      expect(freshDetail.status).toBe(200);
+      expect(await freshDetail.json()).toEqual(expectedSuccessor);
+      expect(taskIdFactoryCalls).toBe(1);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+
+      const repairedResponse = await postTask(app, taskBody, {
+        "Idempotency-Key": idempotencyKey
+      });
+      const repairedTask = (await repairedResponse.json()) as TaskCard;
+      const repairedRecord = await idempotencyService.getRecord("task", idempotencyKey);
+      const expectedTasks = [expectedSuccessor, repairedTask];
+      const sameAppAfterRepair = await app.request("/api/tasks");
+      const freshAppAfterRepair = createBackendApi({ workspaceRoot });
+      const freshListAfterRepair = await freshAppAfterRepair.request("/api/tasks");
+      const freshSuccessorDetail = await freshAppAfterRepair.request(`/api/tasks/${taskId}`);
+      const freshRepairDetail = await freshAppAfterRepair.request(
+        `/api/tasks/${repairedTaskId}`
+      );
+      const identityAfterRepair = await stat(snapshotPath, { bigint: true });
+
+      expect(repairedResponse.status).toBe(201);
+      expect(repairedTask.task_id).toBe(repairedTaskId);
+      expect(repairedRecord?.status).toBe("completed");
+      expect(repairedRecord?.result_ref).toBe(repairedTaskId);
+      expect(taskIdFactoryCalls).toBe(2);
+      expect(await sameAppAfterRepair.json()).toEqual({ tasks: expectedTasks });
+      expect(await freshListAfterRepair.json()).toEqual({ tasks: expectedTasks });
+      expect(await freshSuccessorDetail.json()).toEqual(expectedSuccessor);
+      expect(await freshRepairDetail.json()).toEqual(repairedTask);
+      expect(await readFile(snapshotPath)).toEqual(expectedBytes);
+      expect({ dev: identityAfterRepair.dev, ino: identityAfterRepair.ino }).toEqual(
+        expectedIdentity
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("invalid completed cleanup preserves a same-inode snapshot after a pre-consume sibling write", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-invalid-completion-strategy-14";
+    const idempotencyKey = "task:create:invalid-completion-strategy-14";
+    const taskBody = validTaskCreateBody({
+      title: "Invalid completion Strategy 14"
+    });
+    const creatingApp = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:30.750Z"),
+      taskIdFactory: () => taskId
+    });
+    const createResponse = await postTask(creatingApp, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const task = (await createResponse.json()) as TaskCard;
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const taskDirectory = dirname(snapshotPath);
+    const canonicalSnapshotText = await readFile(snapshotPath, "utf8");
+    const invalidSnapshot = JSON.parse(canonicalSnapshotText) as Record<string, unknown>;
+    invalidSnapshot.unknown_strategy_14_authority = "observe before sibling write";
+    const invalidSnapshotText = `${JSON.stringify(invalidSnapshot)}\n`;
+    await writeFile(snapshotPath, invalidSnapshotText);
+    const observedSnapshot = await stat(snapshotPath, { bigint: true });
+    const siblingSchema = z.object({ id: z.string() });
+    const sibling = { id: "invalid-completion-strategy-14-sibling" };
+    const siblingFileName = "invalid-completion-sibling.json";
+    const siblingEvidenceRef = `workspace/tasks/${taskId}/${siblingFileName}`;
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let invalidationCount = 0;
+    let taskIdFactoryCalls = 0;
+    let parentBefore:
+      | { dev: bigint; ino: bigint; ctimeNs: bigint; mtimeNs: bigint }
+      | undefined;
+    let parentAfter:
+      | { dev: bigint; ino: bigint; ctimeNs: bigint; mtimeNs: bigint }
+      | undefined;
+    let restoredSnapshot: { dev: bigint; ino: bigint } | undefined;
+    const replayApp = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => {
+        taskIdFactoryCalls += 1;
+        return "TASK-invalid-completion-strategy-14-unexpected";
+      },
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        return {
+          ...service,
+          invalidateCompletedRecord: async (input) => {
+            try {
+              return await service.invalidateCompletedRecord(input);
+            } finally {
+              if (input.key === idempotencyKey && invalidationCount === 0) {
+                invalidationCount += 1;
+                const parentBeforeEntry = await stat(taskDirectory, { bigint: true });
+                parentBefore = {
+                  dev: parentBeforeEntry.dev,
+                  ino: parentBeforeEntry.ino,
+                  ctimeNs: parentBeforeEntry.ctimeNs,
+                  mtimeNs: parentBeforeEntry.mtimeNs
+                };
+                await writeJsonRecord(
+                  workspaceRoot,
+                  ["tasks", taskId],
+                  siblingFileName,
+                  sibling,
+                  siblingEvidenceRef,
+                  siblingSchema
+                );
+                const parentAfterEntry = await stat(taskDirectory, { bigint: true });
+                parentAfter = {
+                  dev: parentAfterEntry.dev,
+                  ino: parentAfterEntry.ino,
+                  ctimeNs: parentAfterEntry.ctimeNs,
+                  mtimeNs: parentAfterEntry.mtimeNs
+                };
+                const snapshotHandle = await open(snapshotPath, "r+");
+                try {
+                  const canonicalBytes = Buffer.from(canonicalSnapshotText);
+                  await snapshotHandle.truncate(0);
+                  const writeResult = await snapshotHandle.write(
+                    canonicalBytes,
+                    0,
+                    canonicalBytes.length,
+                    0
+                  );
+                  expect(writeResult.bytesWritten).toBe(canonicalBytes.length);
+                  await snapshotHandle.sync();
+                } finally {
+                  await snapshotHandle.close();
+                }
+                const restoredEntry = await stat(snapshotPath, { bigint: true });
+                restoredSnapshot = {
+                  dev: restoredEntry.dev,
+                  ino: restoredEntry.ino
+                };
+              }
+            }
+          }
+        };
+      }
+    });
+
+    const failedResponse = await postTask(replayApp, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const failedBody = (await failedResponse.json()) as ApiErrorResponse;
+    const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
+    const invalidatedRecord = await idempotencyService.getRecord(
+      "task",
+      idempotencyKey
+    );
+
+    expect(createResponse.status).toBe(201);
+    expect(failedResponse.status).toBe(500);
+    expectCanonicalError(failedBody, "workspace_error");
+    expect(failedBody.error.message).toBe(INVALID_DURABLE_TASK_AUTHORITY_MESSAGE);
+    expect(invalidationCount).toBe(1);
+    expect(taskIdFactoryCalls).toBe(0);
+    expect(parentBefore).toBeDefined();
+    expect(parentAfter).toBeDefined();
+    expect(parentAfter!.dev).toBe(parentBefore!.dev);
+    expect(parentAfter!.ino).toBe(parentBefore!.ino);
+    expect(
+      parentAfter!.ctimeNs === parentBefore!.ctimeNs &&
+        parentAfter!.mtimeNs === parentBefore!.mtimeNs
+    ).toBe(false);
+    expect(restoredSnapshot).toEqual({
+      dev: observedSnapshot.dev,
+      ino: observedSnapshot.ino
+    });
+    expect(await readFile(snapshotPath, "utf8")).toBe(canonicalSnapshotText);
+    expect(
+      JSON.parse(
+        await readFile(join(taskDirectory, siblingFileName), "utf8")
+      )
+    ).toEqual(sibling);
+    expect(invalidatedRecord?.status).toBe("failed");
+    expect(invalidatedRecord?.result_ref).toBeUndefined();
+    const freshApp = createBackendApi({ workspaceRoot });
+    expect(await freshApp.request("/api/tasks").then((response) => response.json())).toEqual({
+      tasks: [task]
+    });
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([taskId]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("completed replay preserves an unowned hardlinked TaskSnapshot generation", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const idempotencyKey = "task:create:hardlinked-completed-snapshot";
@@ -1086,7 +2500,7 @@ describe("backend workspace and health routes", () => {
     });
     const replayBody = (await replayResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
-    const failedRecord = await idempotencyService.getRecord("task", idempotencyKey);
+    const retainedRecord = await idempotencyService.getRecord("task", idempotencyKey);
     const sameAppList = await app.request("/api/tasks");
     const sameAppDetail = await app.request(`/api/tasks/${createdTask.task_id}`);
     const freshApp = createBackendApi({ workspaceRoot });
@@ -1096,36 +2510,41 @@ describe("backend workspace and health routes", () => {
     expect(createResponse.status).toBe(201);
     expect(replayResponse.status).toBe(500);
     expectCanonicalError(replayBody, "workspace_error");
-    expect(replayBody.error.message).toBe(INVALID_DURABLE_TASK_AUTHORITY_MESSAGE);
-    expect(replayBody.error.retryable).toBe(true);
+    expect(replayBody.error.message).toBe("Record path is not a safe regular file.");
     expect(JSON.stringify(replayBody)).not.toContain(idempotencyKey);
     expectNoAbsoluteWorkspacePath(replayBody, tempRoot, workspaceRoot);
-    expect(failedRecord?.status).toBe("failed");
-    expect(failedRecord?.result_ref).toBeUndefined();
+    expect(retainedRecord?.status).toBe("completed");
+    expect(retainedRecord?.result_ref).toBe(createdTask.task_id);
     expect(sameAppList.status).toBe(200);
-    expect(await sameAppList.json()).toEqual({ tasks: [] });
-    expect(sameAppDetail.status).toBe(404);
-    expect(freshList.status).toBe(200);
-    expect(await freshList.json()).toEqual({ tasks: [] });
-    expect(freshDetail.status).toBe(404);
-    await expectPathMissing(snapshotPath);
+    expect(await sameAppList.json()).toEqual({ tasks: [createdTask] });
+    expect(sameAppDetail.status).toBe(200);
+    expect(await sameAppDetail.json()).toEqual(createdTask);
+    expect(freshList.status).toBe(500);
+    expectCanonicalError((await freshList.json()) as ApiErrorResponse, "workspace_error");
+    expect(freshDetail.status).toBe(500);
+    expectCanonicalError((await freshDetail.json()) as ApiErrorResponse, "workspace_error");
+    expect(await readFile(snapshotPath)).toEqual(snapshotBytes);
     expect(await readFile(outsideAlias)).toEqual(snapshotBytes);
-    expect((await stat(outsideAlias)).nlink).toBe(1);
+    expect((await stat(snapshotPath)).nlink).toBe(2);
+    expect((await stat(outsideAlias)).nlink).toBe(2);
     expect(taskIdFactoryCalls).toBe(1);
 
+    await unlink(outsideAlias);
     const repairedResponse = await postTask(app, taskBody, {
       "Idempotency-Key": idempotencyKey
     });
     const repairedTask = (await repairedResponse.json()) as TaskCard;
     const repairedRecord = await idempotencyService.getRecord("task", idempotencyKey);
 
-    expect(repairedResponse.status).toBe(201);
-    expect(repairedTask.task_id).toBe("TASK-hardlinked-repaired");
-    expect(repairedRecord?.status).toBe("completed");
-    expect(repairedRecord?.result_ref).toBe(repairedTask.task_id);
-    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([repairedTask.task_id]);
-    expect(await readFile(outsideAlias)).toEqual(snapshotBytes);
-    expect(taskIdFactoryCalls).toBe(2);
+    expect(repairedResponse.status).toBe(200);
+    expect(repairedTask).toEqual(createdTask);
+    expect(repairedRecord).toEqual(retainedRecord);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([createdTask.task_id]);
+    expect(await readFile(snapshotPath)).toEqual(snapshotBytes);
+    await expectPathMissing(outsideAlias);
+    expect((await stat(snapshotPath)).nlink).toBe(1);
+    expect(taskIdFactoryCalls).toBe(1);
+    expect(taskIds).toEqual(["TASK-hardlinked-repaired"]);
   });
 
   test("POST /api/tasks completed idempotency replay resolves a stale task cache from durable snapshot", async () => {
@@ -1378,7 +2797,7 @@ describe("backend workspace and health routes", () => {
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([authoritativeTask.task_id]);
   });
 
-  test("POST /api/tasks revalidates equal-ref completion before returning 201", async () => {
+  test("POST /api/tasks retains equal-ref drift before exact missing reproof", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const idempotencyKey = "task:create:equal-ref-post-complete-delete";
@@ -1415,12 +2834,13 @@ describe("backend workspace and health routes", () => {
 
     expect(failedResponse.status).toBe(500);
     expectCanonicalError(failedBody, "workspace_error");
-    expect(failedBody.error.message).toBe(INVALID_DURABLE_TASK_AUTHORITY_MESSAGE);
-    expect(failedBody.error.retryable).toBe(true);
+    expect(failedBody.error.message).toBe(
+      "Observed task snapshot changed before exact cache settlement."
+    );
     expect(JSON.stringify(failedBody)).not.toContain(idempotencyKey);
     expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
-    expect(recordAfterFailure?.status).toBe("failed");
-    expect(recordAfterFailure?.result_ref).toBeUndefined();
+    expect(recordAfterFailure?.status).toBe("completed");
+    expect(recordAfterFailure?.result_ref).toBe("TASK-equal-ref-deleted");
     expect(sameAppListResponse.status).toBe(200);
     expect(await sameAppListResponse.json()).toEqual({ tasks: [] });
     expect(freshAppListResponse.status).toBe(200);
@@ -1428,6 +2848,21 @@ describe("backend workspace and health routes", () => {
     await expectPathMissing(
       join(workspaceRoot, "tasks", "TASK-equal-ref-deleted", "snapshot.json")
     );
+
+    const invalidationResponse = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const invalidationBody = (await invalidationResponse.json()) as ApiErrorResponse;
+    const recordAfterInvalidation = await idempotencyService.getRecord(
+      "task",
+      idempotencyKey
+    );
+
+    expect(invalidationResponse.status).toBe(500);
+    expectCanonicalError(invalidationBody, "workspace_error");
+    expect(invalidationBody.error.message).toBe(INVALID_DURABLE_TASK_AUTHORITY_MESSAGE);
+    expect(recordAfterInvalidation?.status).toBe("failed");
+    expect(recordAfterInvalidation?.result_ref).toBeUndefined();
 
     const retryResponse = await postTask(app, validTaskCreateBody(), {
       "Idempotency-Key": idempotencyKey
@@ -2416,6 +3851,160 @@ describe("backend workspace and health routes", () => {
     expect(idempotencyRecord?.result_ref).toBe(firstTask.task_id);
   });
 
+  test("POST /api/tasks attached followers share one completed-authority replay", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const ownerGate = createAsyncGate();
+    const ownerSnapshotStarted = createSignal();
+    const idempotencyKey = "task:create:shared-follower-replay";
+    let lookupReplayCalls = 0;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:55.500Z"),
+      requestLogSink: () => undefined,
+      taskIdFactory: () => "TASK-shared-follower-replay",
+      taskSnapshotWriteHooks: {
+        afterSnapshotWrite: async () => {
+          ownerSnapshotStarted.resolve();
+          await ownerGate.wait;
+        }
+      },
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        return {
+          ...service,
+          lookupReplay: async (input) => {
+            lookupReplayCalls += 1;
+            return await service.lookupReplay(input);
+          }
+        };
+      }
+    });
+
+    const ownerRequest = postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    await ownerSnapshotStarted.promise;
+    const followerRequests = Array.from({ length: 12 }, () =>
+      postTask(app, validTaskCreateBody(), { "Idempotency-Key": idempotencyKey })
+    );
+    await sleep(50);
+    ownerGate.open();
+
+    const [ownerResponse, followerResponses] = await Promise.all([
+      ownerRequest,
+      Promise.all(followerRequests)
+    ]);
+    const ownerTask = (await ownerResponse.json()) as TaskCard;
+    const followerTasks = (await Promise.all(
+      followerResponses.map((response) => response.json())
+    )) as TaskCard[];
+
+    expect(ownerResponse.status).toBe(201);
+    expect(followerResponses.every((response) => response.status === 200)).toBe(true);
+    expect(followerTasks.every((task) => JSON.stringify(task) === JSON.stringify(ownerTask))).toBe(
+      true
+    );
+    expect(lookupReplayCalls).toBe(1);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([ownerTask.task_id]);
+  });
+
+  test("POST /api/tasks coalesces attached replay once per app-local TaskCard service", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const ownerGate = createAsyncGate();
+    const ownerSnapshotStarted = createSignal();
+    const idempotencyKey = "task:create:app-local-follower-replay";
+    let ownerTaskIdFactoryCalls = 0;
+    let followerBReplayCalls = 0;
+    let followerCReplayCalls = 0;
+    const ownerApp = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:55.625Z"),
+      requestLogSink: () => undefined,
+      taskIdFactory: () => {
+        ownerTaskIdFactoryCalls += 1;
+        return "TASK-app-local-follower-replay";
+      },
+      taskSnapshotWriteHooks: {
+        afterSnapshotWrite: async () => {
+          ownerSnapshotStarted.resolve();
+          await ownerGate.wait;
+        }
+      }
+    });
+    const createFollowerApp = (onReplay: () => void) =>
+      createBackendApi({
+        workspaceRoot,
+        requestLogSink: () => undefined,
+        idempotencyServiceFactory: (serviceOptions) => {
+          const service = createIdempotencyRecordService(serviceOptions);
+          return {
+            ...service,
+            lookupReplay: async (input) => {
+              if (input.key === idempotencyKey) onReplay();
+              return await service.lookupReplay(input);
+            }
+          };
+        }
+      });
+    const followerB = createFollowerApp(() => {
+      followerBReplayCalls += 1;
+    });
+    const followerC = createFollowerApp(() => {
+      followerCReplayCalls += 1;
+    });
+
+    expect(await followerB.request("/api/tasks").then((response) => response.json())).toEqual({
+      tasks: []
+    });
+    expect(await followerC.request("/api/tasks").then((response) => response.json())).toEqual({
+      tasks: []
+    });
+
+    const ownerRequest = postTask(ownerApp, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    await ownerSnapshotStarted.promise;
+    const followerBRequest = postTask(followerB, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const followerCRequest = postTask(followerC, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    await sleep(50);
+    ownerGate.open();
+
+    const [ownerResponse, followerBResponse, followerCResponse] = await Promise.all([
+      ownerRequest,
+      followerBRequest,
+      followerCRequest
+    ]);
+    const ownerTask = (await ownerResponse.json()) as TaskCard;
+    const followerBTask = (await followerBResponse.json()) as TaskCard;
+    const followerCTask = (await followerCResponse.json()) as TaskCard;
+
+    expect([ownerResponse.status, followerBResponse.status, followerCResponse.status]).toEqual([
+      201,
+      200,
+      200
+    ]);
+    expect(followerBTask).toEqual(ownerTask);
+    expect(followerCTask).toEqual(ownerTask);
+    expect(followerBReplayCalls).toBe(1);
+    expect(followerCReplayCalls).toBe(1);
+    expect(ownerTaskIdFactoryCalls).toBe(1);
+    for (const app of [followerB, followerC]) {
+      expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+        tasks: [ownerTask]
+      });
+      const detail = await app.request(`/api/tasks/${ownerTask.task_id}`);
+      expect(detail.status).toBe(200);
+      expect(await detail.json()).toEqual(ownerTask);
+    }
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([ownerTask.task_id]);
+  });
+
   test("POST /api/tasks concurrent same-key creates converge across backend app instances", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -2591,6 +4180,8 @@ describe("backend workspace and health routes", () => {
     async () => {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
       tempRoots.push(tempRoot);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
       const idempotencyKey = "task:create:bounded-active-follower";
       let releaseOwner!: () => void;
       const ownerRelease = new Promise<void>((resolveRelease) => {
@@ -2670,8 +4261,291 @@ describe("backend workspace and health routes", () => {
       expect(completedRecord?.status).toBe("completed");
       expect(completedRecord?.result_ref).toBe(ownerTask.task_id);
       expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([ownerTask.task_id]);
+      await waitFor(
+        () =>
+          JSON.stringify(workspaceRecordAuthorityDiagnosticsForTest()) ===
+            JSON.stringify(authorityBaseline) &&
+          JSON.stringify(workspaceRecordDirectoryBindingDiagnosticsForTest()) ===
+            JSON.stringify(bindingBaseline),
+        "timed-out follower shared replay retained workspace diagnostics"
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
     },
-    12_000
+    20_000
+  );
+
+  test(
+    "S27-P62-09 POST /api/tasks keeps detached terminal drivers registered and bounded",
+    async () => {
+      const routeSourceText = await readFile(new URL("./index.ts", import.meta.url), "utf8");
+      const routeSource = ts.createSourceFile(
+        "index.ts",
+        routeSourceText,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS
+      );
+      const waitSource = sourceFunctionText(
+        routeSource,
+        "waitForInFlightIdempotentTaskCreate"
+      );
+      expect(routeSourceText).toContain("registeredTerminalReplayDrivers");
+      expect(routeSourceText).toContain("registeredTerminalReplayDriverCount");
+      expect(routeSourceText).toContain(
+        "registeredTerminalReplayDriverCount >= MAX_IN_FLIGHT_IDEMPOTENT_TASK_CREATES"
+      );
+      expect(countSourceOccurrences(waitSource, "Promise.race")).toBe(0);
+      expect(waitSource).toContain("setTimeout(");
+
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const idempotencyKey = "task:create:detached-follower-waves";
+      const ownerGate = createAsyncGate();
+      const ownerSnapshotStarted = createSignal();
+      let snapshotReads = 0;
+      let beginRecordCalls = 0;
+      let lookupReplayCalls = 0;
+      const app = createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:56.160Z"),
+        requestLogSink: () => undefined,
+        taskIdFactory: () => "TASK-detached-follower-waves",
+        taskSnapshotWriteHooks: {
+          afterSnapshotWrite: async () => {
+            ownerSnapshotStarted.resolve();
+            await ownerGate.wait;
+          }
+        },
+        taskSnapshotReadHooks: {
+          beforeSnapshotOpen: ({ laneTaskId }) => {
+            if (laneTaskId !== "TASK-detached-follower-waves") return;
+            snapshotReads += 1;
+          }
+        },
+        idempotencyServiceFactory: (serviceOptions) => {
+          const service = createIdempotencyRecordService(serviceOptions);
+          return {
+            ...service,
+            beginRecord: async (input) => {
+              if (input.key === idempotencyKey) beginRecordCalls += 1;
+              return await service.beginRecord(input);
+            },
+            lookupReplay: async (input) => {
+              if (input.key === idempotencyKey) lookupReplayCalls += 1;
+              return await service.lookupReplay(input);
+            }
+          };
+        }
+      });
+      const taskBody = validTaskCreateBody();
+      const ownerRequest = postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+      ownerRequest.catch(() => undefined);
+      await ownerSnapshotStarted.promise;
+
+      const runTimeoutWave = async (followerCount: number): Promise<void> => {
+        const responses = await Promise.all(
+          Array.from({ length: followerCount }, () =>
+            postTask(app, taskBody, { "Idempotency-Key": idempotencyKey })
+          )
+        );
+        const bodies = (await Promise.all(
+          responses.map((response) => response.json())
+        )) as ApiErrorResponse[];
+
+        expect(responses.every((response) => response.status === 409)).toBe(true);
+        expect(
+          bodies.every(
+            (body) =>
+              body.error.message ===
+              "Active idempotent task create did not finish before the follower wait timeout."
+          )
+        ).toBe(true);
+      };
+
+      try {
+        await runTimeoutWave(1);
+        await runTimeoutWave(IN_FLIGHT_TASK_CREATE_LIMIT);
+        expect(lookupReplayCalls).toBe(0);
+      } finally {
+        ownerGate.open();
+      }
+
+      const ownerResponse = await ownerRequest;
+      const ownerTask = (await ownerResponse.json()) as TaskCard;
+      expect(ownerResponse.status).toBe(201);
+      expect(lookupReplayCalls).toBe(0);
+
+      const laterReplay = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+      const laterTask = (await laterReplay.json()) as TaskCard;
+      expect(laterReplay.status).toBe(200);
+      expect(laterTask).toEqual(ownerTask);
+      expect(beginRecordCalls).toBe(2);
+      expect(lookupReplayCalls).toBe(0);
+    },
+    40_000
+  );
+
+  test(
+    "S27-P62-09 POST /api/tasks reuses a hung registered driver after owner release",
+    async () => {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const idempotencyKey = "task:create:hung-shared-follower-replay";
+      const ownerGate = createAsyncGate();
+      const ownerSnapshotStarted = createSignal();
+      const replayGate = createAsyncGate();
+      const replayEntered = createSignal();
+      const replayFinished = createSignal();
+      const sharedClassificationStarted = createSignal();
+      let snapshotWrites = 0;
+      let ownerSnapshotReads = 0;
+      let taskIdFactoryCalls = 0;
+      let targetReplayCalls = 0;
+      const app = createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:56.175Z"),
+        requestLogSink: () => undefined,
+        taskIdFactory: () => {
+          taskIdFactoryCalls += 1;
+          return `TASK-hung-shared-replay-${taskIdFactoryCalls}`;
+        },
+        taskSnapshotWriteHooks: {
+          afterSnapshotWrite: async () => {
+            snapshotWrites += 1;
+            if (snapshotWrites !== 1) return;
+            ownerSnapshotStarted.resolve();
+            await ownerGate.wait;
+          }
+        },
+        taskSnapshotReadHooks: {
+          beforeSnapshotOpen: ({ laneTaskId }) => {
+            if (laneTaskId !== "TASK-hung-shared-replay-1") return;
+            ownerSnapshotReads += 1;
+            if (ownerSnapshotReads === 2) sharedClassificationStarted.resolve();
+          }
+        },
+        idempotencyServiceFactory: (serviceOptions) => {
+          const service = createIdempotencyRecordService(serviceOptions);
+          return {
+            ...service,
+            lookupReplay: async (input) => {
+              if (input.key !== idempotencyKey) {
+                return await service.lookupReplay(input);
+              }
+              targetReplayCalls += 1;
+              replayEntered.resolve();
+              await replayGate.wait;
+              try {
+                return await service.lookupReplay(input);
+              } finally {
+                replayFinished.resolve();
+              }
+            }
+          };
+        }
+      });
+
+      const ownerRequest = postTask(app, validTaskCreateBody(), {
+        "Idempotency-Key": idempotencyKey
+      });
+      await ownerSnapshotStarted.promise;
+      const firstJoinedAt = Date.now();
+      const firstFollower = postTask(app, validTaskCreateBody(), {
+        "Idempotency-Key": idempotencyKey
+      }).then((response) => ({
+        response,
+        completedAt: Date.now(),
+        elapsedMs: Date.now() - firstJoinedAt
+      }));
+      await sleep(250);
+      const secondJoinedAt = Date.now();
+      const secondFollower = postTask(app, validTaskCreateBody(), {
+        "Idempotency-Key": idempotencyKey
+      }).then((response) => ({
+        response,
+        completedAt: Date.now(),
+        elapsedMs: Date.now() - secondJoinedAt
+      }));
+      await sleep(50);
+      ownerGate.open();
+
+      const ownerResponse = await ownerRequest;
+      const ownerTask = (await ownerResponse.json()) as TaskCard;
+      await Promise.race([
+        replayEntered.promise,
+        timeoutAfter(1_000, "shared follower replay did not start after owner completion")
+      ]);
+      const laterJoinedAt = Date.now();
+      const laterFollower = postTask(app, validTaskCreateBody(), {
+        "Idempotency-Key": idempotencyKey
+      }).then((response) => ({
+        response,
+        elapsedMs: Date.now() - laterJoinedAt
+      }));
+      const distinctResponse = await Promise.race([
+        postTask(app, validTaskCreateBody({ title: "Distinct after hung replay" }), {
+          "Idempotency-Key": "task:create:distinct-after-hung-replay"
+        }),
+        timeoutAfter(1_000, "distinct caller was retained behind hung shared replay")
+      ]);
+
+      const [firstResult, secondResult, laterResult] = await Promise.all([
+        firstFollower,
+        secondFollower,
+        laterFollower
+      ]);
+      const firstBody = (await firstResult.response.json()) as ApiErrorResponse;
+      const secondBody = (await secondResult.response.json()) as ApiErrorResponse;
+      const laterBody = (await laterResult.response.json()) as ApiErrorResponse;
+
+      expect(ownerResponse.status).toBe(201);
+      expect(ownerTask.task_id).toBe("TASK-hung-shared-replay-1");
+      expect(distinctResponse.status).toBe(201);
+      expect(firstResult.response.status).toBe(409);
+      expect(secondResult.response.status).toBe(409);
+      expect(laterResult.response.status).toBe(409);
+      expect(firstBody.error.message).toBe(
+        "Active idempotent task create did not finish before the follower wait timeout."
+      );
+      expect(secondBody.error.message).toBe(firstBody.error.message);
+      expect(laterBody.error.message).toBe(firstBody.error.message);
+      expect(firstResult.elapsedMs).toBeGreaterThanOrEqual(4_800);
+      expect(secondResult.elapsedMs).toBeGreaterThanOrEqual(4_800);
+      expect(firstResult.elapsedMs).toBeLessThan(6_500);
+      expect(secondResult.elapsedMs).toBeLessThan(6_500);
+      expect(laterResult.elapsedMs).toBeGreaterThanOrEqual(4_800);
+      expect(laterResult.elapsedMs).toBeLessThan(6_500);
+      expect(secondResult.completedAt - firstResult.completedAt).toBeGreaterThanOrEqual(150);
+      expect(targetReplayCalls).toBe(1);
+      expect(taskIdFactoryCalls).toBe(2);
+
+      replayGate.open();
+      await Promise.race([
+        replayFinished.promise,
+        timeoutAfter(1_000, "orphaned shared replay did not settle after release")
+      ]);
+      await Promise.race([
+        sharedClassificationStarted.promise,
+        timeoutAfter(1_000, "orphaned shared replay did not start authority classification")
+      ]);
+      await sleep(25);
+      await waitFor(
+        () =>
+          JSON.stringify(workspaceRecordAuthorityDiagnosticsForTest()) ===
+            JSON.stringify(authorityBaseline) &&
+          JSON.stringify(workspaceRecordDirectoryBindingDiagnosticsForTest()) ===
+            JSON.stringify(bindingBaseline),
+        "orphaned shared replay retained workspace authority diagnostics"
+      );
+      expect(targetReplayCalls).toBe(1);
+      expect(ownerSnapshotReads).toBe(2);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    },
+    20_000
   );
 
   test("POST /api/tasks active same-key create delayed past replay timeout converges across app instances", async () => {
@@ -2742,6 +4616,8 @@ describe("backend workspace and health routes", () => {
       return;
     }
 
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
     const idempotencyKey = "task:create:physical-workspace-alias";
     let resolveHookStarted!: () => void;
     const hookStarted = new Promise<void>((resolveStarted) => {
@@ -2789,6 +4665,8 @@ describe("backend workspace and health routes", () => {
     expect(ownerTaskIdFactoryCalls).toBe(1);
     expect(aliasTaskIdFactoryCalls).toBe(0);
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([ownerTask.task_id]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
   test("POST /api/tasks physical workspace identity rejects a symlinked root", async () => {
@@ -2951,9 +4829,265 @@ describe("backend workspace and health routes", () => {
     ]);
   });
 
+  test("POST /api/tasks bounds keyed and absent-key durable task-id collisions", async () => {
+    for (const requestMode of ["keyed", "absent"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const collisionId = `TASK-constant-collision-${requestMode}`;
+      let taskIdFactoryCalls = 0;
+      const app = createBackendApi({
+        workspaceRoot,
+        taskIdFactory: () => {
+          taskIdFactoryCalls += 1;
+          return collisionId;
+        }
+      });
+      expect(await app.request("/api/tasks").then((result) => result.json())).toEqual({
+        tasks: []
+      });
+      const seed = await createTaskCardService({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:56.355Z"),
+        taskIdFactory: () => collisionId
+      }).createTask(validTaskCreateBody({ title: `Durable collision seed ${requestMode}` }));
+      const snapshotPath = join(workspaceRoot, "tasks", collisionId, "snapshot.json");
+      const seedBytes = await readFile(snapshotPath);
+      const idempotencyKey = `task:create:constant-collision-${requestMode}`;
+
+      const response = await postTask(
+        app,
+        validTaskCreateBody({ title: `Rejected collision ${requestMode}` }),
+        requestMode === "keyed" ? { "Idempotency-Key": idempotencyKey } : {}
+      );
+      const body = (await response.json()) as ApiErrorResponse;
+
+      expect(response.status).toBe(500);
+      expectCanonicalError(body, "workspace_error");
+      expect(body.error.message).toBe("Unable to generate a unique task id.");
+      expect(body.error.evidence_refs).toEqual(["generated_task_id"]);
+      expect(taskIdFactoryCalls).toBe(20);
+      expect(await readFile(snapshotPath)).toEqual(seedBytes);
+      expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([collisionId]);
+      expect(await app.request("/api/tasks").then((result) => result.json())).toEqual({
+        tasks: []
+      });
+      expect(
+        await createBackendApi({ workspaceRoot })
+          .request("/api/tasks")
+          .then((result) => result.json())
+      ).toEqual({ tasks: [seed] });
+      if (requestMode === "keyed") {
+        const record = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+          "task",
+          idempotencyKey
+        );
+        expect(record?.status).toBe("failed");
+        expect(record?.result_ref).toBeUndefined();
+      }
+    }
+  });
+
+  test("POST /api/tasks retries keyed and absent-key durable collisions with a unique id", async () => {
+    for (const requestMode of ["keyed", "absent"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const collisionId = `TASK-retry-collision-${requestMode}`;
+      const uniqueId = `TASK-retry-unique-${requestMode}`;
+      const candidates = [collisionId, uniqueId];
+      let taskIdFactoryCalls = 0;
+      const app = createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:56.357Z"),
+        taskIdFactory: () => {
+          taskIdFactoryCalls += 1;
+          return candidates.shift() ?? `${uniqueId}-unexpected`;
+        }
+      });
+      expect(await app.request("/api/tasks").then((result) => result.json())).toEqual({
+        tasks: []
+      });
+      const seed = await createTaskCardService({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:56.356Z"),
+        taskIdFactory: () => collisionId
+      }).createTask(validTaskCreateBody({ title: `Retry collision seed ${requestMode}` }));
+      const taskBody = validTaskCreateBody({ title: `Unique after collision ${requestMode}` });
+      const idempotencyKey = `task:create:retry-collision-${requestMode}`;
+
+      const response = await postTask(
+        app,
+        taskBody,
+        requestMode === "keyed" ? { "Idempotency-Key": idempotencyKey } : {}
+      );
+      const created = (await response.json()) as TaskCard;
+
+      expect(response.status).toBe(201);
+      expect(created.task_id).toBe(uniqueId);
+      expect(taskIdFactoryCalls).toBe(2);
+      expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([collisionId, uniqueId]);
+      expect(await app.request("/api/tasks").then((result) => result.json())).toEqual({
+        tasks: [created]
+      });
+      expect(
+        await createBackendApi({ workspaceRoot })
+          .request("/api/tasks")
+          .then((result) => result.json())
+      ).toEqual({ tasks: [seed, created] });
+      if (requestMode === "keyed") {
+        const replay = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+        expect(replay.status).toBe(200);
+        expect(await replay.json()).toEqual(created);
+        expect(taskIdFactoryCalls).toBe(2);
+      }
+    }
+  });
+
+  test("two apps atomically allocate a shared first task id in both owner orders", async () => {
+    for (const owner of ["A", "B"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const sharedId = `TASK-two-app-shared-${owner}`;
+      const uniqueIds = {
+        A: `TASK-two-app-unique-a-${owner}`,
+        B: `TASK-two-app-unique-b-${owner}`
+      } as const;
+      const keys = {
+        A: `task:create:two-app-a-${owner}`,
+        B: `task:create:two-app-b-${owner}`
+      } as const;
+      const bodies = {
+        A: validTaskCreateBody({ title: `Two app body A, owner ${owner}` }),
+        B: validTaskCreateBody({ title: `Two app body B, owner ${owner}` })
+      } as const;
+      const candidates = {
+        A: [sharedId, uniqueIds.A],
+        B: [sharedId, uniqueIds.B]
+      };
+      const factoryCalls = { A: 0, B: 0 };
+      const ownerHookStarted = createSignal();
+      const ownerRelease = createAsyncGate();
+      const makeApp = (label: "A" | "B") => createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:56.358Z"),
+        taskIdFactory: () => {
+          factoryCalls[label] += 1;
+          return candidates[label].shift() ?? `${uniqueIds[label]}-unexpected`;
+        },
+        taskSnapshotWriteHooks: label === owner
+          ? {
+              afterSnapshotWrite: async ({ taskId }) => {
+                if (taskId !== sharedId) return;
+                ownerHookStarted.resolve();
+                await ownerRelease.wait;
+              }
+            }
+          : undefined
+      });
+      const apps = { A: makeApp("A"), B: makeApp("B") };
+      await Promise.all([
+        apps.A.request("/api/tasks"),
+        apps.B.request("/api/tasks")
+      ]);
+      const follower = owner === "A" ? "B" : "A";
+      const ownerRequest = postTask(apps[owner], bodies[owner], {
+        "Idempotency-Key": keys[owner]
+      });
+      await Promise.race([
+        ownerHookStarted.promise,
+        timeoutAfter(2_000, `two-app ${owner} owner did not publish the shared id`)
+      ]);
+      const followerRequest = postTask(apps[follower], bodies[follower], {
+        "Idempotency-Key": keys[follower]
+      });
+      await waitFor(
+        () => factoryCalls[follower] >= 1,
+        `two-app ${follower} follower did not request the shared candidate`
+      );
+      ownerRelease.open();
+      const [ownerResponse, followerResponse] = await Promise.all([
+        ownerRequest,
+        followerRequest
+      ]);
+      const tasks = {
+        [owner]: (await ownerResponse.json()) as TaskCard,
+        [follower]: (await followerResponse.json()) as TaskCard
+      } as Record<"A" | "B", TaskCard>;
+
+      expect(ownerResponse.status).toBe(201);
+      expect(followerResponse.status).toBe(201);
+      expect(tasks[owner].task_id).toBe(sharedId);
+      expect(tasks[follower].task_id).toBe(uniqueIds[follower]);
+      expect(tasks.A.title).toBe(bodies.A.title);
+      expect(tasks.B.title).toBe(bodies.B.title);
+      expect(factoryCalls[owner]).toBe(1);
+      expect(factoryCalls[follower]).toBe(2);
+      expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual(
+        [tasks.A.task_id, tasks.B.task_id].sort()
+      );
+      for (const label of ["A", "B"] as const) {
+        const detail = await apps[label].request(`/api/tasks/${tasks[label].task_id}`);
+        expect(detail.status).toBe(200);
+        expect(await detail.json()).toEqual(tasks[label]);
+        const completed = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+          "task",
+          keys[label]
+        );
+        expect(completed?.status).toBe("completed");
+        expect(completed?.result_ref).toBe(tasks[label].task_id);
+        const snapshot = JSON.parse(
+          await readFile(
+            join(workspaceRoot, "tasks", tasks[label].task_id, "snapshot.json"),
+            "utf8"
+          )
+        ) as TaskSnapshot & { task_card: TaskCard };
+        expect(snapshot.task_card).toEqual(tasks[label]);
+      }
+
+      const freshApp = createBackendApi({ workspaceRoot });
+      expect(await freshApp.request("/api/tasks").then((response) => response.json())).toEqual({
+        tasks: [tasks.A, tasks.B].sort((left, right) =>
+          left.created_at.localeCompare(right.created_at) ||
+          left.task_id.localeCompare(right.task_id)
+        )
+      });
+      for (const label of ["A", "B"] as const) {
+        const replayApp = createBackendApi({ workspaceRoot });
+        const replay = await postTask(replayApp, bodies[label], {
+          "Idempotency-Key": keys[label]
+        });
+        expect(replay.status).toBe(200);
+        expect(await replay.json()).toEqual(tasks[label]);
+        expect(
+          await replayApp.request(`/api/tasks/${tasks[label].task_id}`).then((response) =>
+            response.json()
+          )
+        ).toEqual(tasks[label]);
+      }
+    }
+  });
+
   test(
-    "POST /api/tasks full in-flight capacity still classifies durable non-owner states",
+    "S29-P62-08 owner-full terminal work is registered before durable classification",
     async () => {
+      const routeSourceText = await readFile(new URL("./index.ts", import.meta.url), "utf8");
+      const routeSource = ts.createSourceFile(
+        "index.ts",
+        routeSourceText,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS
+      );
+      const createBody = sourceFunctionText(routeSource, "createIdempotentTaskCard");
+      const ownerFullBody = sourceFunctionText(
+        routeSource,
+        "resolveIdempotentTaskCreateThroughRegisteredDriver"
+      );
+      expect(createBody).toContain("resolveIdempotentTaskCreateThroughRegisteredDriver");
+      expect(createBody).not.toContain("resolveIdempotentTaskCreateWithoutOwner(input)");
+      expect(ownerFullBody.indexOf("waitForInFlightIdempotentTaskCreate")).toBeLessThan(
+        ownerFullBody.indexOf("resolveIdempotentTaskCreateWithoutOwner")
+      );
+      expect(ownerFullBody).toContain("terminalOperation");
       const saturation = await createTempWorkspacePath();
       const target = await createTempWorkspacePath();
       tempRoots.push(saturation.tempRoot, target.tempRoot);
@@ -3189,6 +5323,405 @@ describe("backend workspace and health routes", () => {
   );
 
   test(
+    "S29-P62-08 counts 1,024 pending terminal drivers before work and releases them for a second wave",
+    async () => {
+      const saturation = await createTempWorkspacePath();
+      const target = await createTempWorkspacePath();
+      tempRoots.push(saturation.tempRoot, target.tempRoot);
+      const taskBody = validTaskCreateBody();
+      const ownerPrefix = "task:create:terminal-driver-owner:";
+      const firstWavePrefix = "task:create:terminal-driver-wave-1:";
+      const secondWavePrefix = "task:create:terminal-driver-wave-2:";
+
+      let enteredOwners = 0;
+      let resolveAllOwnersEntered!: () => void;
+      const allOwnersEntered = new Promise<void>((resolve) => {
+        resolveAllOwnersEntered = resolve;
+      });
+      const ownerGate = createAsyncGate();
+      const saturationApp = createBackendApi({
+        workspaceRoot: saturation.workspaceRoot,
+        requestLogSink: () => undefined,
+        idempotencyServiceFactory: (serviceOptions) => {
+          const service = createIdempotencyRecordService(serviceOptions);
+          return {
+            ...service,
+            beginRecord: async (input) => {
+              if (!input.key.startsWith(ownerPrefix)) {
+                return await service.beginRecord(input);
+              }
+              enteredOwners += 1;
+              if (enteredOwners === IN_FLIGHT_TASK_CREATE_LIMIT) {
+                resolveAllOwnersEntered();
+              }
+              await ownerGate.wait;
+              throw new TaskServiceError({
+                code: "record_malformed",
+                status: 500,
+                category: "workspace_error",
+                message: "Injected owner release after terminal-driver fixture.",
+                userMessage: "The test owner was released.",
+                evidenceRefs: ["workspace/tasks/_idempotency/task"],
+                retryable: false,
+                recommendedNextActions: ["Retry the request."]
+              });
+            }
+          };
+        }
+      });
+      const ownerRequests = Array.from({ length: IN_FLIGHT_TASK_CREATE_LIMIT }, (_, index) =>
+        postTask(saturationApp, taskBody, {
+          "Idempotency-Key": `${ownerPrefix}${index}`
+        })
+      );
+
+      const firstWaveGate = createAsyncGate();
+      const secondWaveGate = createAsyncGate();
+      let totalDriverCalls = 0;
+      let firstAppDriverCalls = 0;
+      let secondAppDriverCalls = 0;
+      let resolveFirstWaveEntered!: () => void;
+      const firstWaveEntered = new Promise<void>((resolve) => {
+        resolveFirstWaveEntered = resolve;
+      });
+      let resolveSecondWaveEntered!: () => void;
+      const secondWaveEntered = new Promise<void>((resolve) => {
+        resolveSecondWaveEntered = resolve;
+      });
+      const createDriverApp = (appIndex: 1 | 2) =>
+        createBackendApi({
+          workspaceRoot: target.workspaceRoot,
+          requestLogSink: () => undefined,
+          idempotencyServiceFactory: (serviceOptions) => {
+            const service = createIdempotencyRecordService(serviceOptions);
+            return {
+              ...service,
+              lookupReplay: async (input) => {
+                if (
+                  !input.key.startsWith(firstWavePrefix) &&
+                  !input.key.startsWith(secondWavePrefix)
+                ) {
+                  return await service.lookupReplay(input);
+                }
+                totalDriverCalls += 1;
+                if (appIndex === 1) firstAppDriverCalls += 1;
+                else secondAppDriverCalls += 1;
+                if (totalDriverCalls === IN_FLIGHT_TASK_CREATE_LIMIT) {
+                  resolveFirstWaveEntered();
+                } else if (totalDriverCalls === IN_FLIGHT_TASK_CREATE_LIMIT * 2) {
+                  resolveSecondWaveEntered();
+                }
+                if (input.key.startsWith(firstWavePrefix)) {
+                  await firstWaveGate.wait;
+                } else {
+                  await secondWaveGate.wait;
+                }
+                return { status: "missing" as const };
+              }
+            };
+          }
+        });
+      const firstApp = createDriverApp(1);
+      const secondApp = createDriverApp(2);
+      let ownerResponses: Response[] = [];
+
+      try {
+        await Promise.race([
+          allOwnersEntered,
+          timeoutAfter(30_000, "owner map did not reach terminal-driver fixture capacity")
+        ]);
+
+        const firstWaveRequests = Array.from(
+          { length: IN_FLIGHT_TASK_CREATE_LIMIT - 1 },
+          (_, index) =>
+            postTask(firstApp, taskBody, {
+              "Idempotency-Key": `${firstWavePrefix}${index}`
+            })
+        );
+        const sameDomainReuse = postTask(firstApp, taskBody, {
+          "Idempotency-Key": `${firstWavePrefix}0`
+        });
+        const isolatedServiceRequest = postTask(secondApp, taskBody, {
+          "Idempotency-Key": `${firstWavePrefix}0`
+        });
+        await Promise.race([
+          firstWaveEntered,
+          timeoutAfter(10_000, "1,024 terminal drivers did not enter the first gate")
+        ]);
+
+        const firstOverflow = await postTask(firstApp, taskBody, {
+          "Idempotency-Key": `${firstWavePrefix}overflow`
+        });
+        expect(firstOverflow.status).toBe(409);
+        expect(totalDriverCalls).toBe(IN_FLIGHT_TASK_CREATE_LIMIT);
+        expect(firstAppDriverCalls).toBe(IN_FLIGHT_TASK_CREATE_LIMIT - 1);
+        expect(secondAppDriverCalls).toBe(1);
+        firstWaveGate.open();
+        const firstWaveResponses = await Promise.all([
+          ...firstWaveRequests,
+          sameDomainReuse,
+          isolatedServiceRequest
+        ]);
+        expect(firstWaveResponses).toHaveLength(IN_FLIGHT_TASK_CREATE_LIMIT + 1);
+        expect(firstWaveResponses.every((response) => response.status === 409)).toBe(true);
+
+        const secondWaveRequests = Array.from(
+          { length: IN_FLIGHT_TASK_CREATE_LIMIT },
+          (_, index) =>
+            postTask(firstApp, taskBody, {
+              "Idempotency-Key": `${secondWavePrefix}${index}`
+            })
+        );
+        await Promise.race([
+          secondWaveEntered,
+          timeoutAfter(10_000, "1,024 terminal drivers did not enter the second gate")
+        ]);
+        const secondOverflow = await postTask(firstApp, taskBody, {
+          "Idempotency-Key": `${secondWavePrefix}overflow`
+        });
+        expect(secondOverflow.status).toBe(409);
+        expect(totalDriverCalls).toBe(IN_FLIGHT_TASK_CREATE_LIMIT * 2);
+        expect(firstAppDriverCalls).toBe(IN_FLIGHT_TASK_CREATE_LIMIT * 2 - 1);
+        expect(secondAppDriverCalls).toBe(1);
+        secondWaveGate.open();
+        const secondWaveResponses = await Promise.all(secondWaveRequests);
+        expect(secondWaveResponses).toHaveLength(IN_FLIGHT_TASK_CREATE_LIMIT);
+        expect(secondWaveResponses.every((response) => response.status === 409)).toBe(true);
+      } finally {
+        firstWaveGate.open();
+        secondWaveGate.open();
+        ownerGate.open();
+        ownerResponses = await Promise.all(ownerRequests);
+      }
+
+      expect(enteredOwners).toBe(IN_FLIGHT_TASK_CREATE_LIMIT);
+      expect(ownerResponses).toHaveLength(IN_FLIGHT_TASK_CREATE_LIMIT);
+      expect(ownerResponses.every((response) => response.status === 500)).toBe(true);
+    },
+    60_000
+  );
+
+  test(
+    "POST /api/tasks admits at most 1024 attached followers and releases their accounting",
+    async () => {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const idempotencyKey = "task:create:follower-capacity";
+      const ownerGate = createAsyncGate();
+      const ownerSnapshotStarted = createSignal();
+      let snapshotWrites = 0;
+      let taskIdFactoryCalls = 0;
+      let lookupReplayCalls = 0;
+      const app = createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:56.372Z"),
+        requestLogSink: () => undefined,
+        taskIdFactory: () => {
+          taskIdFactoryCalls += 1;
+          return `TASK-follower-capacity-${taskIdFactoryCalls}`;
+        },
+        taskSnapshotWriteHooks: {
+          afterSnapshotWrite: async () => {
+            snapshotWrites += 1;
+            if (snapshotWrites !== 1) return;
+            ownerSnapshotStarted.resolve();
+            await ownerGate.wait;
+          }
+        },
+        idempotencyServiceFactory: (serviceOptions) => {
+          const service = createIdempotencyRecordService(serviceOptions);
+          return {
+            ...service,
+            lookupReplay: async (input) => {
+              lookupReplayCalls += 1;
+              return await service.lookupReplay(input);
+            }
+          };
+        }
+      });
+
+      const ownerRequest = postTask(app, validTaskCreateBody(), {
+        "Idempotency-Key": idempotencyKey
+      });
+      await ownerSnapshotStarted.promise;
+      const followerRequests = Array.from({ length: 1_025 }, () =>
+        postTask(app, validTaskCreateBody(), { "Idempotency-Key": idempotencyKey })
+      );
+      let firstSettled: Response;
+      try {
+        firstSettled = await Promise.race([
+          ...followerRequests,
+          timeoutAfter(3_000, "bounded follower fixture did not reject its overflow")
+        ]);
+        expect(firstSettled.status).toBe(409);
+        const capacityBody = (await firstSettled.json()) as ApiErrorResponse;
+        expectCanonicalError(capacityBody, "workspace_error");
+        expect(capacityBody.error.message).toBe(
+          "Too many task idempotency requests are active in this process."
+        );
+      } finally {
+        ownerGate.open();
+      }
+
+      const [ownerResponse, followerResponses] = await Promise.all([
+        ownerRequest,
+        Promise.all(followerRequests)
+      ]);
+      expect(ownerResponse.status).toBe(201);
+      expect(followerResponses.filter((response) => response.status === 200)).toHaveLength(1_024);
+      expect(followerResponses.filter((response) => response.status === 409)).toHaveLength(1);
+      expect(lookupReplayCalls).toBe(1);
+
+      const repairedReplay = await postTask(app, validTaskCreateBody(), {
+        "Idempotency-Key": idempotencyKey
+      });
+      const distinctResponse = await postTask(
+        app,
+        validTaskCreateBody({ title: "Follower accounting released" }),
+        { "Idempotency-Key": "task:create:follower-capacity-released" }
+      );
+      expect(repairedReplay.status).toBe(200);
+      expect(distinctResponse.status).toBe(201);
+      expect(taskIdFactoryCalls).toBe(2);
+    },
+    20_000
+  );
+
+  test(
+    "POST /api/tasks terminal owner with delayed follower leaves room beside 1023 active owners",
+    async () => {
+      const terminal = await createTempWorkspacePath();
+      const saturation = await createTempWorkspacePath();
+      const admitted = await createTempWorkspacePath();
+      tempRoots.push(terminal.tempRoot, saturation.tempRoot, admitted.tempRoot);
+      const terminalKey = "task:create:terminal-delayed-follower";
+      const terminalOwnerGate = createAsyncGate();
+      const terminalOwnerStarted = createSignal();
+      const delayedReplayGate = createAsyncGate();
+      const delayedReplayEntered = createSignal();
+      const activeOwnersGate = createAsyncGate();
+      const allActiveOwnersEntered = createSignal();
+      const activePrefix = "task:create:1023-active-owner:";
+      let activeOwnersEntered = 0;
+      let terminalFollower: Promise<Response> | undefined;
+      let terminalOwner: Promise<Response> | undefined;
+      let activeOwnerRequests: Promise<Response>[] = [];
+      const terminalApp = createBackendApi({
+        workspaceRoot: terminal.workspaceRoot,
+        requestLogSink: () => undefined,
+        taskIdFactory: () => "TASK-terminal-delayed-follower",
+        taskSnapshotWriteHooks: {
+          afterSnapshotWrite: async () => {
+            terminalOwnerStarted.resolve();
+            await terminalOwnerGate.wait;
+          }
+        },
+        idempotencyServiceFactory: (serviceOptions) => {
+          const service = createIdempotencyRecordService(serviceOptions);
+          return {
+            ...service,
+            lookupReplay: async (input) => {
+              if (input.key === terminalKey) {
+                delayedReplayEntered.resolve();
+                await delayedReplayGate.wait;
+              }
+              return await service.lookupReplay(input);
+            }
+          };
+        }
+      });
+      const saturationApp = createBackendApi({
+        workspaceRoot: saturation.workspaceRoot,
+        requestLogSink: () => undefined,
+        idempotencyServiceFactory: (serviceOptions) => {
+          const service = createIdempotencyRecordService(serviceOptions);
+          return {
+            ...service,
+            beginRecord: async (input) => {
+              if (!input.key.startsWith(activePrefix)) {
+                return await service.beginRecord(input);
+              }
+              activeOwnersEntered += 1;
+              if (activeOwnersEntered === IN_FLIGHT_TASK_CREATE_LIMIT - 1) {
+                allActiveOwnersEntered.resolve();
+              }
+              await activeOwnersGate.wait;
+              throw new TaskServiceError({
+                code: "record_malformed",
+                status: 500,
+                category: "workspace_error",
+                message: "Injected 1023-owner fixture release.",
+                userMessage: "The bounded owner fixture was released.",
+                evidenceRefs: ["workspace/tasks/_idempotency/task"],
+                retryable: false,
+                recommendedNextActions: ["Retry the request."]
+              });
+            }
+          };
+        }
+      });
+      const admittedApp = createBackendApi({
+        workspaceRoot: admitted.workspaceRoot,
+        requestLogSink: () => undefined,
+        taskIdFactory: () => "TASK-admitted-beside-1023"
+      });
+
+      try {
+        terminalOwner = postTask(terminalApp, validTaskCreateBody(), {
+          "Idempotency-Key": terminalKey
+        });
+        await terminalOwnerStarted.promise;
+        terminalFollower = postTask(terminalApp, validTaskCreateBody(), {
+          "Idempotency-Key": terminalKey
+        });
+        await sleep(50);
+        terminalOwnerGate.open();
+        const terminalOwnerResponse = await terminalOwner;
+        expect(terminalOwnerResponse.status).toBe(201);
+        await Promise.race([
+          delayedReplayEntered.promise,
+          timeoutAfter(1_000, "delayed follower did not enter shared replay")
+        ]);
+
+        activeOwnerRequests = Array.from(
+          { length: IN_FLIGHT_TASK_CREATE_LIMIT - 1 },
+          (_, index) =>
+            postTask(saturationApp, validTaskCreateBody(), {
+              "Idempotency-Key": `${activePrefix}${index}`
+            })
+        );
+        await Promise.race([
+          allActiveOwnersEntered.promise,
+          timeoutAfter(30_000, "1023-owner bounded fixture did not become active")
+        ]);
+
+        const admittedResponse = await Promise.race([
+          postTask(admittedApp, validTaskCreateBody(), {
+            "Idempotency-Key": "task:create:admitted-beside-1023"
+          }),
+          timeoutAfter(2_000, "terminal follower entry consumed active-owner capacity")
+        ]);
+        expect(admittedResponse.status).toBe(201);
+        expect((await admittedResponse.json()) as TaskCard).toMatchObject({
+          task_id: "TASK-admitted-beside-1023"
+        });
+      } finally {
+        terminalOwnerGate.open();
+        activeOwnersGate.open();
+        delayedReplayGate.open();
+      }
+
+      const activeOwnerResponses = await Promise.all(activeOwnerRequests);
+      const terminalFollowerResponse = await terminalFollower!;
+      expect(activeOwnersEntered).toBe(IN_FLIGHT_TASK_CREATE_LIMIT - 1);
+      expect(activeOwnerResponses).toHaveLength(IN_FLIGHT_TASK_CREATE_LIMIT - 1);
+      expect(activeOwnerResponses.every((response) => response.status === 500)).toBe(true);
+      expect(terminalFollowerResponse.status).toBe(200);
+    },
+    60_000
+  );
+
+  test(
     "POST /api/tasks successful owners release bounded in-flight capacity",
     async () => {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -3222,7 +5755,68 @@ describe("backend workspace and health routes", () => {
       expect(finalRecord?.status).toBe("completed");
       expect(finalRecord?.result_ref).toBe(finalTask?.task_id);
     },
-    60_000
+    360_000
+  );
+
+  test(
+    "S29-P62-07 1,024 keyed tasks restart while the 1,025th task lane fails closed",
+    async () => {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      let nextId = 0;
+      const app = createBackendApi({
+        workspaceRoot,
+        now: fixedNow("2026-07-07T12:03:56.375Z"),
+        requestLogSink: () => undefined,
+        taskIdFactory: () => {
+          nextId += 1;
+          return `TASK-capacity-cleanup-${String(nextId).padStart(4, "0")}`;
+        }
+      });
+
+      let finalTask: TaskCard | undefined;
+      for (let index = 0; index < IN_FLIGHT_TASK_CREATE_LIMIT; index += 1) {
+        const response = await postTask(app, validTaskCreateBody(), {
+          "Idempotency-Key": `task:create:capacity-cleanup:${index}`
+        });
+        expect(response.status).toBe(201);
+        finalTask = (await response.json()) as TaskCard;
+      }
+
+      const freshAtLimit = createBackendApi({
+        workspaceRoot,
+        requestLogSink: () => undefined
+      });
+      const listAtLimit = await freshAtLimit.request("/api/tasks");
+      const tasksAtLimit = (await listAtLimit.json()) as { tasks: TaskCard[] };
+      const detailAtLimit = await freshAtLimit.request(
+        `/api/tasks/${finalTask!.task_id}`
+      );
+      expect(listAtLimit.status).toBe(200);
+      expect(tasksAtLimit.tasks).toHaveLength(IN_FLIGHT_TASK_CREATE_LIMIT);
+      expect(detailAtLimit.status).toBe(200);
+
+      const overflowResponse = await postTask(app, validTaskCreateBody(), {
+        "Idempotency-Key": `task:create:capacity-cleanup:${IN_FLIGHT_TASK_CREATE_LIMIT}`
+      });
+      expect(overflowResponse.status).toBe(201);
+      finalTask = (await overflowResponse.json()) as TaskCard;
+
+      expect(nextId).toBe(IN_FLIGHT_TASK_CREATE_LIMIT + 1);
+      expect(finalTask?.task_id).toBe("TASK-capacity-cleanup-1025");
+      const finalRecord = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+        "task",
+        `task:create:capacity-cleanup:${IN_FLIGHT_TASK_CREATE_LIMIT}`
+      );
+      expect(finalRecord?.status).toBe("completed");
+      expect(finalRecord?.result_ref).toBe(finalTask?.task_id);
+      const freshOverflow = createBackendApi({
+        workspaceRoot,
+        requestLogSink: () => undefined
+      });
+      expect((await freshOverflow.request("/api/tasks")).status).toBe(500);
+    },
+    360_000
   );
 
   test("POST /api/tasks active same-key digest mismatch stays 422 and does not join owner", async () => {
@@ -3632,7 +6226,7 @@ describe("backend workspace and health routes", () => {
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([retryTask.task_id]);
   });
 
-  test("POST /api/tasks quarantines a directory replacement at the snapshot leaf", async () => {
+  test("POST /api/tasks preserves a directory successor at the snapshot leaf", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const idempotencyKey = "task:create:after-snapshot-directory";
@@ -3670,9 +6264,21 @@ describe("backend workspace and health routes", () => {
     expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
     expect(recordAfterFailure?.status).toBe("failed");
     expect(recordAfterFailure?.result_ref).toBeUndefined();
-    await expectPathMissing(join(workspaceRoot, "tasks", "TASK-hook-directory", "snapshot.json"));
-    expect(freshListResponse.status).toBe(200);
-    expect(await freshListResponse.json()).toEqual({ tasks: [] });
+    const successorPath = join(
+      workspaceRoot,
+      "tasks",
+      "TASK-hook-directory",
+      "snapshot.json"
+    );
+    expect((await stat(successorPath)).isDirectory()).toBe(true);
+    expect(await readFile(join(successorPath, "nested.txt"), "utf8")).toBe(
+      "untrusted replacement"
+    );
+    expect(freshListResponse.status).toBe(500);
+    expectCanonicalError(
+      (await freshListResponse.json()) as ApiErrorResponse,
+      "workspace_error"
+    );
 
     const retryResponse = await postTask(app, validTaskCreateBody(), {
       "Idempotency-Key": idempotencyKey
@@ -3685,6 +6291,7 @@ describe("backend workspace and health routes", () => {
     expect(recordAfterRetry?.status).toBe("completed");
     expect(recordAfterRetry?.result_ref).toBe(retryTask.task_id);
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([retryTask.task_id]);
+    expect((await stat(successorPath)).isDirectory()).toBe(true);
   });
 
   test("POST /api/tasks does not follow a swapped task lane symlink during failed snapshot cleanup", async () => {
@@ -3730,7 +6337,7 @@ describe("backend workspace and health routes", () => {
     expect(await readFile(outsideSnapshot, "utf8")).toBe(outsideSnapshotText);
   });
 
-  test("POST /api/tasks leaves unsafe rollback failed and retryable after lane repair", async () => {
+  test("POST /api/tasks retains unknown rollback cache and retries after lane repair", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const idempotencyKey = "task:create:unsafe-rollback-repair";
@@ -3785,6 +6392,8 @@ describe("backend workspace and health routes", () => {
     const recordAfterFirst = await idempotencyService.getRecord("task", idempotencyKey);
     const firstList = await app.request("/api/tasks");
     const firstDetail = await app.request(`/api/tasks/${taskId}`);
+    const firstListBody = (await firstList.json()) as { tasks: TaskCard[] };
+    const retainedTask = firstListBody.tasks[0]!;
 
     const unsafeRetryResponse = await postTask(app, validTaskCreateBody(), {
       "Idempotency-Key": idempotencyKey
@@ -3798,8 +6407,10 @@ describe("backend workspace and health routes", () => {
     expect(recordAfterFirst?.status).toBe("failed");
     expect(recordAfterFirst?.result_ref).toBeUndefined();
     expect(firstList.status).toBe(200);
-    expect(await firstList.json()).toEqual({ tasks: [] });
-    expect(firstDetail.status).toBe(404);
+    expect(firstListBody.tasks).toHaveLength(1);
+    expect(retainedTask.task_id).toBe(taskId);
+    expect(firstDetail.status).toBe(200);
+    expect(await firstDetail.json()).toEqual(retainedTask);
     expect(unsafeRetryResponse.status).toBe(500);
     expectCanonicalError(unsafeRetryBody, "workspace_error");
     expectNoAbsoluteWorkspacePath(unsafeRetryBody, tempRoot, workspaceRoot);
@@ -3809,7 +6420,7 @@ describe("backend workspace and health routes", () => {
     expect(await realpath(taskLane)).toBe(await realpath(outsideLane));
     expect(await readFile(outsideSentinel, "utf8")).toBe(outsideText);
     expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
-      tasks: []
+      tasks: [retainedTask]
     });
 
     await unlink(taskLane);
@@ -3909,11 +6520,1991 @@ describe("backend workspace and health routes", () => {
     expect(idempotencyFiles).toEqual([idempotencyRecordFileName(idempotencyKey)]);
   });
 
-  test("POST /api/tasks recovers a malformed transition guard after completion rollback", async () => {
+  test("POST /api/tasks preserves semantic TaskServiceError fields across completion and release failure", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:semantic-completion-release-failure";
+    const taskId = "TASK-semantic-completion-release-failure";
+    const recordPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      idempotencyRecordFileName(idempotencyKey)
+    );
+    const guardPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`
+    );
+    const semanticFailure = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "The completed idempotency record lost its semantic authority.",
+      userMessage: "The task request conflicted with its durable idempotency authority.",
+      evidenceRefs: ["workspace/tasks/_idempotency/task", "idempotency.semantic_authority"],
+      retryable: true,
+      recommendedNextActions: [
+        "Inspect the retained idempotency evidence.",
+        "Retry after repairing the transition authority."
+      ]
+    });
+    const releaseFailure = new Error("Injected transition guard release failure.");
+    let bodyFailureCount = 0;
+    let releaseFailureCount = 0;
+    let releaseNamespacePath: string | undefined;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-07T12:03:57.627Z"),
+      taskIdFactory: () => taskId,
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          completeRecord: async (input) =>
+            await runWithWorkspaceRecordPublicationHooks(
+              {
+                afterTemporaryFileWritten: ({ canonicalPath }) => {
+                  if (canonicalPath !== recordPath) return;
+                  bodyFailureCount += 1;
+                  throw semanticFailure;
+                },
+                beforeAuthorityNamespaceRemoval: ({ path }) => {
+                  if (!basename(path).startsWith(`.${basename(guardPath)}-`)) return;
+                  releaseNamespacePath ??= path;
+                  if (path !== releaseNamespacePath) return;
+                  releaseFailureCount += 1;
+                  throw releaseFailure;
+                }
+              },
+              () => service.completeRecord(input)
+            )
+        };
+      }
+    });
+
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+    const recordAfterFailure = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+
+    expect(response.status).toBe(409);
+    expect(body.error.category).toBe(semanticFailure.category);
+    expect(body.error.message).toBe(semanticFailure.message);
+    expect(body.error.user_message).toBe(semanticFailure.userMessage);
+    expect(body.error.evidence_refs).toEqual(semanticFailure.evidenceRefs);
+    expect(body.error.retryable).toBe(true);
+    expect(body.error.recommended_next_actions).toEqual(
+      semanticFailure.recommendedNextActions
+    );
+    expect(body.error.message).not.toBe("Unexpected backend route failure.");
+    expect(bodyFailureCount).toBe(1);
+    expect(releaseFailureCount).toBe(3);
+    expect(recordAfterFailure?.status).toBe("failed");
+    expect(recordAfterFailure?.result_ref).toBeUndefined();
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([]);
+  });
+
+  test("S29-P62-10 POST /api/tasks binds descriptor-safe adapter at both route failure folds", async () => {
+    const routeSourceText = await readFile(new URL("./index.ts", import.meta.url), "utf8");
+    const routeSource = ts.createSourceFile(
+      "index.ts",
+      routeSourceText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS
+    );
+    expect(sourceFunctionText(routeSource, "observeTaskSnapshotBindsRequest")).toContain(
+      "preserveTaskServiceErrorCompensationCompatibility"
+    );
+    expect(sourceFunctionText(routeSource, "preservePrimaryFailure")).toContain(
+      "preserveTaskServiceErrorCompensationCompatibility"
+    );
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:r28-frozen-semantic-error";
+    const semanticFailure = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "R28 semantic completion authority failed.",
+      userMessage: "The durable completion authority could not be reconciled.",
+      evidenceRefs: ["idempotency.r28.semantic"],
+      retryable: true,
+      recommendedNextActions: ["Inspect the retained completion authority."]
+    });
+    let primaryCauseReads = 0;
+    const originalPrimaryCause = new Error("R28 original primary cause");
+    Object.defineProperty(semanticFailure, "cause", {
+      configurable: false,
+      enumerable: false,
+      get: () => {
+        primaryCauseReads += 1;
+        return originalPrimaryCause;
+      }
+    });
+    const originalCauseDescriptor = Object.getOwnPropertyDescriptor(semanticFailure, "cause");
+    Object.freeze(semanticFailure);
+
+    const reconciliationFailure = new Error("R28 cyclic reconciliation failure");
+    let reconciliationCauseReads = 0;
+    Object.defineProperty(reconciliationFailure, "cause", {
+      configurable: false,
+      enumerable: false,
+      get: () => {
+        reconciliationCauseReads += 1;
+        return reconciliationFailure;
+      }
+    });
+    let completionAttempted = false;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-15T12:28:11.000Z"),
+      taskIdFactory: () => "TASK-r28-frozen-semantic-error",
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          completeRecord: async () => {
+            completionAttempted = true;
+            throw semanticFailure;
+          },
+          lookupReplay: async (input) => {
+            if (completionAttempted) throw reconciliationFailure;
+            return await service.lookupReplay(input);
+          },
+          consumeCompletedRecord: async (input, consume) => {
+            if (completionAttempted) throw reconciliationFailure;
+            return await service.consumeCompletedRecord(input, consume);
+          }
+        };
+      }
+    });
+
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": idempotencyKey
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(semanticFailure.status);
+    expect(body.error.category).toBe(semanticFailure.category);
+    expect(body.error.message).toBe(semanticFailure.message);
+    expect(body.error.user_message).toBe(semanticFailure.userMessage);
+    expect(body.error.evidence_refs).toEqual(semanticFailure.evidenceRefs);
+    expect(body.error.retryable).toBe(semanticFailure.retryable);
+    expect(body.error.recommended_next_actions).toEqual(
+      semanticFailure.recommendedNextActions
+    );
+    expect(Object.getOwnPropertyDescriptor(semanticFailure, "cause")).toEqual(
+      originalCauseDescriptor
+    );
+    expect(primaryCauseReads).toBe(1);
+    expect(reconciliationCauseReads).toBeLessThanOrEqual(1);
+  });
+
+  test("S30-P62-03/S31-P62-03/S32-P62-03 pre-completion primary dominates recovered-authority settlement", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s30-primary-before-rollback";
+    const primary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S30 primary observation failure.",
+      userMessage: "The original task operation failed before completion.",
+      evidenceRefs: ["s30.primary"],
+      retryable: true,
+      recommendedNextActions: ["Inspect the primary operation evidence."]
+    });
+    let foreignIdentity: Awaited<ReturnType<typeof stat>> | undefined;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          observeTaskSnapshotForCleanup: async () => {
+            throw primary;
+          },
+          rollbackTaskForIdempotency: async (rollbackTaskId, expectedTask) => {
+            const snapshotPath = join(
+              workspaceRoot,
+              "tasks",
+              rollbackTaskId,
+              "snapshot.json"
+            );
+            const bytes = await readFile(snapshotPath);
+            const foreignPath = `${snapshotPath}.foreign`;
+            await writeFile(foreignPath, bytes, { flag: "wx", mode: 0o600 });
+            await rename(foreignPath, snapshotPath);
+            foreignIdentity = await stat(snapshotPath, { bigint: true });
+            await service.rollbackTaskForIdempotency(rollbackTaskId, expectedTask);
+          }
+        };
+      }
+    });
+
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": "task:create:s30-primary-before-rollback"
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+    const survivingIdentity = await stat(
+      join(workspaceRoot, "tasks", taskId, "snapshot.json"),
+      { bigint: true }
+    );
+
+    expect(response.status).toBe(primary.status);
+    expect(body.error.category).toBe(primary.category);
+    expect(body.error.message).toBe(primary.message);
+    expect(body.error.user_message).toBe(primary.userMessage);
+    expect(body.error.evidence_refs).toEqual(primary.evidenceRefs);
+    expect(body.error.retryable).toBe(primary.retryable);
+    expect(body.error.recommended_next_actions).toEqual(primary.recommendedNextActions);
+    expect(foreignIdentity).toBeDefined();
+    expect(survivingIdentity.dev).toBe(foreignIdentity!.dev);
+    expect(survivingIdentity.ino).toBe(foreignIdentity!.ino);
+    // Complete ordered compensation identity vector: the pre-completion
+    // primary carries exactly the foreign-generation rollback refusal.
+    expect(semanticPrimaryError(routedError)).toBe(primary);
+    const orderedVector = orderedPreservedCompensationVector(routedError);
+    expect(orderedVector.length).toBe(1);
+    expect(orderedVector[0]).toBeInstanceOf(TaskServiceError);
+    expect((orderedVector[0] as TaskServiceError).code).toBe("task_snapshot_mismatch");
+    expect((orderedVector[0] as TaskServiceError).message).toBe(
+      "Task rollback publication authority no longer matches the durable generation."
+    );
+  });
+
+  test("S32-P62-03 competing completed cleanup consumes exact authority and preserves cleanup primary", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s32-competing-cleanup";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = sha256Hex(
+      canonicalJson({
+        ...taskBody,
+        created_by: taskBody.created_by ?? DEFAULT_TASK_CREATED_BY
+      })
+    );
+    const authoritativeTask = await createTaskCardService({
+      workspaceRoot,
+      now: fixedNow("2026-07-15T12:28:10.900Z"),
+      taskIdFactory: () => "TASK-s32-competing-authority"
+    }).createTask(taskBody);
+    const localTaskId = "TASK-s32-competing-local";
+    const cleanupPrimary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S32 local cleanup failed after exact deletion.",
+      userMessage: "The local task cleanup could not be confirmed.",
+      evidenceRefs: ["s32.competing.cleanup"],
+      retryable: true,
+      recommendedNextActions: ["Inspect the local cleanup evidence."]
+    });
+    const quarantineCompensation = new Error(
+      "S32 exact quarantine failed after committing its terminal outcome."
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let completedByHook = false;
+    let cleanupCalls = 0;
+    let quarantineCalls = 0;
+    let routedError: unknown;
+    let capturedAuthority: CompletedIdempotencyRecordMutationAuthority | undefined;
+    let routeIdempotencyService:
+      | ReturnType<typeof createIdempotencyRecordService>
+      | undefined;
+    const app = createBackendApi({
+      workspaceRoot,
+      now: fixedNow("2026-07-15T12:28:11.000Z"),
+      taskIdFactory: () => localTaskId,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      taskSnapshotWriteHooks: {
+        afterSnapshotWrite: async () => {
+          if (completedByHook) return;
+          completedByHook = true;
+          await createIdempotencyRecordService({ workspaceRoot }).completeRecord({
+            scope: "task",
+            key: idempotencyKey,
+            requestDigest,
+            resultRef: authoritativeTask.task_id
+          });
+        }
+      },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          cleanupTaskSnapshotObservation: async (observation) => {
+            cleanupCalls += 1;
+            await service.cleanupTaskSnapshotObservation(observation);
+            throw cleanupPrimary;
+          }
+        };
+      },
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        routeIdempotencyService = service;
+        return {
+          ...service,
+          quarantineRecordAfterUnsafeRollback: async (input) => {
+            quarantineCalls += 1;
+            capturedAuthority = input.expectedCompletedAuthority?.mutationAuthority;
+            await service.quarantineRecordAfterUnsafeRollback(input);
+            throw quarantineCompensation;
+          }
+        };
+      }
+    });
+
+    const response = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    const body = (await response.json()) as ApiErrorResponse;
+    const record = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+
+    expect(response.status).toBe(cleanupPrimary.status);
+    expect(body.error.category).toBe(cleanupPrimary.category);
+    expect(body.error.message).toBe(cleanupPrimary.message);
+    expect(body.error.user_message).toBe(cleanupPrimary.userMessage);
+    expect(body.error.evidence_refs).toEqual(cleanupPrimary.evidenceRefs);
+    expect(body.error.retryable).toBe(cleanupPrimary.retryable);
+    expect(body.error.recommended_next_actions).toEqual(
+      cleanupPrimary.recommendedNextActions
+    );
+    expect(cleanupCalls).toBe(1);
+    expect(quarantineCalls).toBe(1);
+    expect(capturedAuthority).toBeDefined();
+    expect(semanticPrimaryError(routedError)).toBe(cleanupPrimary);
+    expect(countErrorGraphIdentity(routedError, quarantineCompensation)).toBe(1);
+    // Complete ordered compensation identity vector with multiplicity.
+    expectOrderedPreservedCompensationVector(routedError, [quarantineCompensation]);
+    expect(record?.status).toBe("failed");
+    expect(record?.result_ref).toBeUndefined();
+    await expectPathMissing(join(workspaceRoot, "tasks", localTaskId, "snapshot.json"));
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([
+      authoritativeTask.task_id
+    ]);
+    await expect(
+      routeIdempotencyService!.cancelCompletedRecordMutationAuthority(
+        capturedAuthority!
+      )
+    ).rejects.toThrow(TypeError);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S30-P62-08/S31-P62-04/S32-P62-04 observation body dominates final cancellation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s30-observation-cancellation";
+    const primary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S30 observation authority rejected the request.",
+      userMessage: "The observed task authority does not match this request.",
+      evidenceRefs: ["s30.observation.primary"],
+      retryable: true,
+      recommendedNextActions: ["Inspect the observed task authority."]
+    });
+    let primaryCauseReads = 0;
+    Object.defineProperty(primary, "cause", {
+      configurable: false,
+      enumerable: false,
+      get: () => {
+        primaryCauseReads += 1;
+        throw new Error("S30 throwing primary cause getter.");
+      }
+    });
+    Object.freeze(primary);
+    const cancellationFailure = new Error("S30 observation cancellation failure.");
+    let cancellationCauseReads = 0;
+    Object.defineProperty(cancellationFailure, "cause", {
+      configurable: false,
+      enumerable: false,
+      get: () => {
+        cancellationCauseReads += 1;
+        return cancellationFailure;
+      }
+    });
+    Object.freeze(cancellationFailure);
+    let cancellationAttempts = 0;
+    let rejectObservation = true;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      taskSnapshotReadHooks: {
+        beforeSnapshotOpen: () => {
+          if (!rejectObservation) return;
+          rejectObservation = false;
+          throw primary;
+        }
+      },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          cancelTaskSnapshotCleanupObservation: async (observation) => {
+            cancellationAttempts += 1;
+            await service.cancelTaskSnapshotCleanupObservation(observation);
+            throw cancellationFailure;
+          }
+        };
+      }
+    });
+
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": "task:create:s30-observation-cancellation"
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(primary.status);
+    expect(body.error.category).toBe(primary.category);
+    expect(body.error.message).toBe(primary.message);
+    expect(body.error.user_message).toBe(primary.userMessage);
+    expect(body.error.evidence_refs).toEqual(primary.evidenceRefs);
+    expect(body.error.retryable).toBe(primary.retryable);
+    expect(body.error.recommended_next_actions).toEqual(primary.recommendedNextActions);
+    expect(body.error.message).not.toBe("Unexpected backend route failure.");
+    expect(cancellationAttempts).toBe(1);
+    expect(routedError).toBeInstanceOf(TaskServiceError);
+    expect(routedError).not.toBe(primary);
+    expect(semanticPrimaryError(routedError)).toBe(primary);
+    expect(errorGraphContainsIdentity(routedError, cancellationFailure)).toBe(true);
+    expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
+    expect(primaryCauseReads).toBeLessThanOrEqual(1);
+    expect(cancellationCauseReads).toBeLessThanOrEqual(1);
+  });
+
+  test("S31-P62-05 initial publication primary dominates failed-record recovery", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const primary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S31 initial publication primary.",
+      userMessage: "The initial task publication failed.",
+      evidenceRefs: ["s31.initial.primary"],
+      retryable: true,
+      recommendedNextActions: ["Inspect the initial publication evidence."]
+    });
+    const recovery = new Error("S31 failed-record recovery compensation");
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: (error) => { routedError = error; },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return { ...service, createTaskForIdempotency: async () => { throw primary; } };
+      },
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          recoverFailedRecordAfterRollback: async () => { throw recovery; }
+        };
+      }
+    });
+
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": "task:create:s31-initial-primary"
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+    expect(response.status).toBe(primary.status);
+    expect(body.error.message).toBe(primary.message);
+    expect(routedError).toBeInstanceOf(TaskServiceError);
+    expect(semanticPrimaryError(routedError)).toBe(primary);
+    expect(errorGraphContainsIdentity(routedError, recovery)).toBe(true);
+    expect(countErrorGraphIdentity(routedError, recovery)).toBe(1);
+  });
+
+  test("S31-P62-06 earlier caller primary dominates invalid authority and post-rollback recovery", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s31-invalid-authority";
+    const invalidResultRef = "TASK-s31-invalid-authority-foreign";
+    const completionPrimary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S31 completion trigger primary.",
+      userMessage: "The completion path entered authority reconciliation.",
+      evidenceRefs: ["s31.completion.trigger"],
+      retryable: true,
+      recommendedNextActions: ["Inspect completion reconciliation."]
+    });
+    const recovery = new Error("S31 post-rollback recovery compensation");
+    let recoveryCalls = 0;
+    let routedError: unknown;
+    let completionWritten = false;
+    let transportedAuthority: Parameters<
+      ReturnType<typeof createIdempotencyRecordService>["cancelCompletedRecordMutationAuthority"]
+    >[0] | undefined;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      taskRouteErrorSinkForTest: (error) => { routedError = error; },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          rollbackTaskForIdempotency: async () => undefined
+        };
+      },
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          invalidateCompletedRecord: async (input) => {
+            transportedAuthority = input.mutationAuthority;
+            if (input.mutationAuthority) {
+              await service.cancelCompletedRecordMutationAuthority(input.mutationAuthority);
+            }
+            return {
+              key: input.key,
+              scope: input.scope,
+              request_digest: input.requestDigest,
+              status: "failed" as const,
+              created_at: "2026-07-15T23:56:00.000Z",
+              updated_at: "2026-07-15T23:56:00.000Z"
+            };
+          },
+          completeRecord: async (input) => {
+            await mkdir(join(workspaceRoot, "tasks", invalidResultRef), {
+              recursive: true
+            });
+            await writeFile(
+              join(workspaceRoot, "tasks", invalidResultRef, "snapshot.json"),
+              "{",
+              { flag: "wx", mode: 0o600 }
+            );
+            await service.completeRecord({ ...input, resultRef: invalidResultRef });
+            completionWritten = true;
+            throw completionPrimary;
+          },
+          recoverFailedRecordAfterRollback: async () => {
+            recoveryCalls += 1;
+            throw recovery;
+          }
+        };
+      }
+    });
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": "task:create:s31-invalid-authority"
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+    expect(completionWritten).toBe(true);
+    expect(response.status).toBe(completionPrimary.status);
+    expect(body.error.message).toBe(completionPrimary.message);
+    expect(recoveryCalls).toBe(1);
+    expect(routedError).toBeInstanceOf(TaskServiceError);
+    expect(semanticPrimaryError(routedError)).toBe(completionPrimary);
+    expect(errorGraphContainsIdentity(routedError, recovery)).toBe(true);
+    expect(countErrorGraphIdentity(routedError, recovery)).toBe(1);
+    // Complete ordered compensation vector with multiplicity: the quarantined
+    // invalid-authority refusal, its malformed-snapshot evidence, then the
+    // post-rollback recovery compensation identity.
+    const orderedVector = orderedPreservedCompensationVector(routedError);
+    expect(orderedVector.length).toBe(3);
+    expect(orderedVector[0]).toBeInstanceOf(TaskServiceError);
+    expect((orderedVector[0] as TaskServiceError).code).toBe("record_malformed");
+    expect((orderedVector[0] as TaskServiceError).message).toBe(
+      INVALID_DURABLE_TASK_AUTHORITY_MESSAGE
+    );
+    expect(orderedVector[1]).toBeInstanceOf(TaskServiceError);
+    expect((orderedVector[1] as TaskServiceError).code).toBe(
+      "task_snapshot_malformed"
+    );
+    expect((orderedVector[1] as TaskServiceError).message).toBe(
+      "Task snapshot is not valid JSON."
+    );
+    expect(orderedVector[2]).toBe(recovery);
+    expect(transportedAuthority).toBeDefined();
+  });
+
+  test("S31-P62-10 throwing route observer cannot replace canonical typed JSON", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const primary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S31 observer-isolated primary.",
+      userMessage: "The route primary must remain authoritative.",
+      evidenceRefs: ["s31.route.observer"],
+      retryable: true,
+      recommendedNextActions: ["Inspect the routed primary."]
+    });
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: () => { throw new Error("S31 observer throw"); },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return { ...service, createTaskForIdempotency: async () => { throw primary; } };
+      }
+    });
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": "task:create:s31-observer-isolation"
+    });
+    expect(response.status).toBe(primary.status);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    const body = (await response.json()) as ApiErrorResponse;
+    expect(body.error.message).toBe(primary.message);
+    expect(body.error.category).toBe(primary.category);
+  });
+
+  test("S32-P62-10 rejected-thenable route observer cannot replace typed JSON", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const primary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S32 rejected observer primary.",
+      userMessage: "The route primary remains authoritative.",
+      evidenceRefs: ["s32.route.observer.reject"],
+      retryable: true,
+      recommendedNextActions: ["Inspect the routed primary."]
+    });
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: () =>
+        Promise.reject(new Error("S32 observer rejected thenable")) as never,
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return { ...service, createTaskForIdempotency: async () => { throw primary; } };
+      }
+    });
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": "task:create:s32-observer-rejection"
+    });
+    expect(response.status).toBe(primary.status);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    const body = (await response.json()) as ApiErrorResponse;
+    expect(body.error.message).toBe(primary.message);
+    expect(body.error.category).toBe(primary.category);
+    await Promise.resolve();
+  });
+
+  test("S32-P62-05 repairable authority primary dominates authority cancellation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s32-repairable-cancellation";
+    const taskBody = validTaskCreateBody();
+    const initialApp = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-s32-repairable-cancellation"
+    });
+    const initial = await postTask(initialApp, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const task = (await initial.json()) as TaskCard;
+    const snapshotPath = join(workspaceRoot, "tasks", task.task_id, "snapshot.json");
+    const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    delete snapshot.task_card;
+    await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+    const cancellationFailure = new Error("S32 repairable authority cancellation");
+    let repairablePrimary: TaskServiceError | undefined;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: (error) => { routedError = error; },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          rejectTaskSnapshotCleanupObservation: async (observation) => {
+            if (observation.status === "repairable") repairablePrimary = observation.error;
+            await service.rejectTaskSnapshotCleanupObservation(observation);
+          }
+        };
+      },
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          cancelCompletedRecordMutationAuthority: async (authority) => {
+            await service.cancelCompletedRecordMutationAuthority(authority);
+            throw cancellationFailure;
+          }
+        };
+      }
+    });
+    const response = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    const body = (await response.json()) as ApiErrorResponse;
+    expect(repairablePrimary).toBeDefined();
+    expect(response.status).toBe(repairablePrimary!.status);
+    expect(body.error.message).toBe(repairablePrimary!.message);
+    expect(semanticPrimaryError(routedError)).toBe(repairablePrimary);
+    expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
+    // Complete ordered compensation identity vector with multiplicity: the
+    // repairable primary's observed cause precedes the authority-cancellation
+    // compensation.
+    expectOrderedPreservedCompensationVector(routedError, [
+      ...(repairablePrimary!.cause === undefined ? [] : [repairablePrimary!.cause]),
+      cancellationFailure
+    ]);
+  });
+
+  test("S33-P62-01 owner invalid-completed preserves same-semantic physical B behind exact authority", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s33-owner-invalid-completed";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = taskCreateRequestDigest(taskBody);
+    const recordPath = await writeInvalidCompletedIdempotencyRecord(
+      workspaceRoot,
+      idempotencyKey,
+      requestDigest
+    );
+    const recordBytes = await readFile(recordPath);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-s33-owner-invalid-completed"
+    });
+    const swap = createSameSemanticRecordSwap(recordPath, recordBytes);
+
+    const first = await runWithWorkspaceRecordPublicationHooks(swap.hooks, () =>
+      postTask(app, taskBody, { "Idempotency-Key": idempotencyKey })
+    );
+    const firstBody = (await first.json()) as ApiErrorResponse;
+
+    expect(swap.swapped()).toBe(true);
+    expect(first.status).toBe(500);
+    expect(firstBody.error.message).toBe(
+      "Completed idempotency record is missing result_ref."
+    );
+    const survivingIdentity = await stat(recordPath, { bigint: true });
+    expect(survivingIdentity.dev).toBe(swap.physicalB()!.dev);
+    expect(survivingIdentity.ino).toBe(swap.physicalB()!.ino);
+    expect(survivingIdentity.mtimeNs).toBe(swap.physicalB()!.mtimeNs);
+    expect(await readFile(recordPath)).toEqual(recordBytes);
+
+    const second = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(second.status).toBe(500);
+    expect(((await second.json()) as ApiErrorResponse).error.message).toBe(
+      "Completed idempotency record is missing result_ref."
+    );
+    expect(
+      JSON.parse(await readFile(recordPath, "utf8")) as { status: string }
+    ).toMatchObject({ status: "failed" });
+    const third = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(third.status).toBe(201);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S33-P62-01 polling invalid-completed preserves same-semantic physical B behind exact authority", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s33-polling-invalid-completed";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = taskCreateRequestDigest(taskBody);
+    const recordDirectory = join(workspaceRoot, "tasks", "_idempotency", "task");
+    await mkdir(recordDirectory, { recursive: true });
+    const recordPath = join(recordDirectory, idempotencyRecordFileName(idempotencyKey));
+    const invalidRecordText = invalidCompletedIdempotencyRecordText(
+      idempotencyKey,
+      requestDigest
+    );
+    await writeFile(
+      recordPath,
+      `${JSON.stringify({
+        key: idempotencyKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "started",
+        created_at: "2026-07-16T09:00:00.000Z",
+        updated_at: "2026-07-16T09:00:00.000Z"
+      })}\n`,
+      { flag: "wx" }
+    );
+    const recordBytes = Buffer.from(invalidRecordText, "utf8");
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let invalidCompletedInjected = false;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-s33-polling-invalid-completed",
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        return {
+          ...service,
+          lookupReplay: async (input) => {
+            if (input.key === idempotencyKey && !invalidCompletedInjected) {
+              invalidCompletedInjected = true;
+              await writeFile(recordPath, invalidRecordText, { flag: "w" });
+            }
+            return await service.lookupReplay(input);
+          }
+        };
+      }
+    });
+    const swap = createSameSemanticRecordSwap(recordPath, recordBytes);
+
+    const first = await runWithWorkspaceRecordPublicationHooks(swap.hooks, () =>
+      postTask(app, taskBody, { "Idempotency-Key": idempotencyKey })
+    );
+    const firstBody = (await first.json()) as ApiErrorResponse;
+
+    expect(invalidCompletedInjected).toBe(true);
+    expect(swap.swapped()).toBe(true);
+    expect(first.status).toBe(500);
+    expect(firstBody.error.message).toBe(
+      "Completed idempotency record is missing result_ref."
+    );
+    const survivingIdentity = await stat(recordPath, { bigint: true });
+    expect(survivingIdentity.dev).toBe(swap.physicalB()!.dev);
+    expect(survivingIdentity.ino).toBe(swap.physicalB()!.ino);
+    expect(survivingIdentity.mtimeNs).toBe(swap.physicalB()!.mtimeNs);
+    expect(await readFile(recordPath)).toEqual(recordBytes);
+
+    const second = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(second.status).toBe(500);
+    expect(
+      JSON.parse(await readFile(recordPath, "utf8")) as { status: string }
+    ).toMatchObject({ status: "failed" });
+    const third = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(third.status).toBe(201);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test(
+    "S33-P62-01 no-owner invalid-completed preserves same-semantic physical B behind exact authority",
+    async () => {
+      const saturation = await createTempWorkspacePath();
+      const target = await createTempWorkspacePath();
+      tempRoots.push(saturation.tempRoot, target.tempRoot);
+      const taskBody = validTaskCreateBody();
+      const ownerPrefix = "task:create:s33-no-owner-saturation:";
+      const idempotencyKey = "task:create:s33-no-owner-invalid-completed";
+      const requestDigest = taskCreateRequestDigest(taskBody);
+      const recordPath = await writeInvalidCompletedIdempotencyRecord(
+        target.workspaceRoot,
+        idempotencyKey,
+        requestDigest
+      );
+      const recordBytes = await readFile(recordPath);
+      // S34-P62-11 (V33-07): the no-owner schedule pins both diagnostics
+      // baselines, mirroring the owner/polling siblings, so a leak on this
+      // arm is observable.
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+
+      let enteredOwners = 0;
+      let resolveAllOwnersEntered!: () => void;
+      const allOwnersEntered = new Promise<void>((resolve) => {
+        resolveAllOwnersEntered = resolve;
+      });
+      const ownerGate = createAsyncGate();
+      const saturationApp = createBackendApi({
+        workspaceRoot: saturation.workspaceRoot,
+        requestLogSink: () => undefined,
+        idempotencyServiceFactory: (serviceOptions) => {
+          const service = createIdempotencyRecordService(serviceOptions);
+          return {
+            ...service,
+            beginRecord: async (input) => {
+              if (!input.key.startsWith(ownerPrefix)) {
+                return await service.beginRecord(input);
+              }
+              enteredOwners += 1;
+              if (enteredOwners === IN_FLIGHT_TASK_CREATE_LIMIT) {
+                resolveAllOwnersEntered();
+              }
+              await ownerGate.wait;
+              throw new TaskServiceError({
+                code: "record_malformed",
+                status: 500,
+                category: "workspace_error",
+                message: "Injected owner release after no-owner fixture.",
+                userMessage: "The test owner was released.",
+                evidenceRefs: ["workspace/tasks/_idempotency/task"],
+                retryable: false,
+                recommendedNextActions: ["Retry the request."]
+              });
+            }
+          };
+        }
+      });
+      const ownerRequests = Array.from(
+        { length: IN_FLIGHT_TASK_CREATE_LIMIT },
+        (_, index) =>
+          postTask(saturationApp, taskBody, {
+            "Idempotency-Key": `${ownerPrefix}${index}`
+          })
+      );
+      const targetApp = createBackendApi({
+        workspaceRoot: target.workspaceRoot,
+        requestLogSink: () => undefined,
+        taskIdFactory: () => "TASK-s33-no-owner-invalid-completed"
+      });
+      const swap = createSameSemanticRecordSwap(recordPath, recordBytes);
+
+      try {
+        await Promise.race([
+          allOwnersEntered,
+          timeoutAfter(30_000, "owner map did not reach no-owner fixture capacity")
+        ]);
+
+        const first = await runWithWorkspaceRecordPublicationHooks(swap.hooks, () =>
+          postTask(targetApp, taskBody, { "Idempotency-Key": idempotencyKey })
+        );
+        const firstBody = (await first.json()) as ApiErrorResponse;
+
+        expect(swap.swapped()).toBe(true);
+        expect(first.status).toBe(500);
+        expect(firstBody.error.message).toBe(
+          "Completed idempotency record is missing result_ref."
+        );
+        const survivingIdentity = await stat(recordPath, { bigint: true });
+        expect(survivingIdentity.dev).toBe(swap.physicalB()!.dev);
+        expect(survivingIdentity.ino).toBe(swap.physicalB()!.ino);
+        expect(survivingIdentity.mtimeNs).toBe(swap.physicalB()!.mtimeNs);
+        expect(await readFile(recordPath)).toEqual(recordBytes);
+
+        const second = await postTask(targetApp, taskBody, {
+          "Idempotency-Key": idempotencyKey
+        });
+        expect(second.status).toBe(500);
+        expect(
+          JSON.parse(await readFile(recordPath, "utf8")) as { status: string }
+        ).toMatchObject({ status: "failed" });
+
+        // Drain the saturation owners so the durably failed key can be
+        // re-acquired by a fresh owner and replayed to creation.
+        ownerGate.open();
+        const ownerResponses = await Promise.all(ownerRequests);
+        expect(ownerResponses).toHaveLength(IN_FLIGHT_TASK_CREATE_LIMIT);
+        expect(ownerResponses.every((response) => response.status === 500)).toBe(true);
+        const third = await postTask(targetApp, taskBody, {
+          "Idempotency-Key": idempotencyKey
+        });
+        expect(third.status).toBe(201);
+      } finally {
+        ownerGate.open();
+        await Promise.all(ownerRequests);
+      }
+      expect(enteredOwners).toBe(IN_FLIGHT_TASK_CREATE_LIMIT);
+      // S34-P62-11 (V33-07): every counted authority and directory-binding
+      // resource is settled once the no-owner schedule fully drains.
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    },
+    60_000
+  );
+
+  test("S34-P62-01 guard-release failure settles every transported rejected-decision resource on the malformed arm", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s34-guard-release-malformed";
+    const taskId = "TASK-s34-guard-release-malformed";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = taskCreateRequestDigest(taskBody);
+    const recordDirectory = join(workspaceRoot, "tasks", "_idempotency", "task");
+    await mkdir(recordDirectory, { recursive: true });
+    const recordPath = join(recordDirectory, idempotencyRecordFileName(idempotencyKey));
+    await writeFile(
+      recordPath,
+      `${JSON.stringify({
+        key: idempotencyKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        result_ref: taskId,
+        created_at: "2026-07-16T09:00:00.000Z",
+        updated_at: "2026-07-16T09:00:00.000Z"
+      })}\n`,
+      { flag: "wx" }
+    );
+    const recordBytes = await readFile(recordPath);
+    const taskLane = join(workspaceRoot, "tasks", taskId);
+    await mkdir(taskLane, { recursive: true });
+    const snapshotPath = join(taskLane, "snapshot.json");
+    await writeFile(snapshotPath, "{", { flag: "wx" });
+    const guardPath = join(recordDirectory, `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`);
+    const releaseFailure = new Error("S34 injected guard release failure.");
+    let releaseInjectionArmed = true;
+    let decisionFulfilled = false;
+    let releaseInjections = 0;
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let cacheDiagnostics: { slots: number; activeClaims: number } | undefined;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-s34-guard-release-malformed-recovered",
+      taskServiceFactory: (options) =>
+        createTaskCardService({
+          ...options,
+          cacheDiagnosticsForTest: (diagnostics) => {
+            cacheDiagnostics = diagnostics;
+          }
+        }),
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        return {
+          ...service,
+          consumeCompletedRecord: async (input, consume) => {
+            decisionFulfilled = false;
+            return await runWithWorkspaceRecordPublicationHooks(
+              {
+                // The guard-path unlink after the fulfilled rejected decision
+                // is the transition-guard release; failing it post-quarantine
+                // rejects guard.release itself while the guard file is gone.
+                beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+                  if (!releaseInjectionArmed || !decisionFulfilled) return;
+                  if (operation !== "conditional_delete" || path !== guardPath) return;
+                  releaseInjections += 1;
+                  if (releaseInjections === 1) throw releaseFailure;
+                }
+              },
+              () =>
+                service.consumeCompletedRecord(input, async (record) => {
+                  const decision = await consume(record);
+                  decisionFulfilled = true;
+                  return decision;
+                })
+            );
+          }
+        };
+      }
+    });
+
+    const first = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(first.status).toBe(500);
+    expect(releaseInjections).toBeGreaterThanOrEqual(1);
+    // Every transported resource is settled on the guard-release throw window:
+    // record + snapshot permits, mutexes, pinned fds, and the cache claim.
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(cacheDiagnostics).toEqual({ slots: 0, activeClaims: 0 });
+    // The failed replay is re-drivable: nothing durable was destroyed.
+    expect(await readFile(recordPath)).toEqual(recordBytes);
+    expect(await readFile(snapshotPath, "utf8")).toBe("{");
+
+    // The failed release preserves the guard generation (fail-closed, bounded
+    // by IDEMPOTENCY_TRANSITION_GUARD_STALE_MS). Simulate the elapsed
+    // staleness window so the replay drives immediately.
+    await unlink(guardPath);
+    releaseInjectionArmed = false;
+    const second = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(second.status).toBe(500);
+    expect(((await second.json()) as ApiErrorResponse).error.message).toBe(
+      INVALID_DURABLE_TASK_AUTHORITY_MESSAGE
+    );
+    // No per-path permit wedge: the replay re-observed, re-classified, and
+    // conditional-deleted the malformed snapshot.
+    expect(
+      JSON.parse(await readFile(recordPath, "utf8")) as { status: string }
+    ).toMatchObject({ status: "failed" });
+    await expectPathMissing(snapshotPath);
+
+    const third = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(third.status).toBe(201);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S34-P62-01 guard-release failure settles the missing-arm cache claim without per-retry growth", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s34-guard-release-missing";
+    const taskId = "TASK-s34-guard-release-missing";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = taskCreateRequestDigest(taskBody);
+    const recordDirectory = join(workspaceRoot, "tasks", "_idempotency", "task");
+    await mkdir(recordDirectory, { recursive: true });
+    const recordPath = join(recordDirectory, idempotencyRecordFileName(idempotencyKey));
+    await writeFile(
+      recordPath,
+      `${JSON.stringify({
+        key: idempotencyKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        result_ref: taskId,
+        created_at: "2026-07-16T09:00:00.000Z",
+        updated_at: "2026-07-16T09:00:00.000Z"
+      })}\n`,
+      { flag: "wx" }
+    );
+    const guardPath = join(recordDirectory, `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`);
+    const releaseFailure = new Error("S34 injected missing-arm guard release failure.");
+    let releaseInjectionArmed = true;
+    let decisionFulfilled = false;
+    let releaseInjections = 0;
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let cacheDiagnostics: { slots: number; activeClaims: number } | undefined;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-s34-guard-release-missing-recovered",
+      taskServiceFactory: (options) =>
+        createTaskCardService({
+          ...options,
+          cacheDiagnosticsForTest: (diagnostics) => {
+            cacheDiagnostics = diagnostics;
+          }
+        }),
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        return {
+          ...service,
+          consumeCompletedRecord: async (input, consume) => {
+            decisionFulfilled = false;
+            const armedAtEntry = releaseInjectionArmed;
+            let thrownThisCall = false;
+            return await runWithWorkspaceRecordPublicationHooks(
+              {
+                beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+                  if (!armedAtEntry || !decisionFulfilled || thrownThisCall) return;
+                  if (operation !== "conditional_delete" || path !== guardPath) return;
+                  thrownThisCall = true;
+                  releaseInjections += 1;
+                  throw releaseFailure;
+                }
+              },
+              () =>
+                service.consumeCompletedRecord(input, async (record) => {
+                  const decision = await consume(record);
+                  decisionFulfilled = true;
+                  return decision;
+                })
+            );
+          }
+        };
+      }
+    });
+
+    // Three failing replays in a row: the missing-arm cache claim is settled
+    // on every attempt (no unbounded per-retry cache-claim growth). Each
+    // failed release preserves the guard generation (fail-closed, bounded by
+    // IDEMPOTENCY_TRANSITION_GUARD_STALE_MS); simulate the elapsed staleness
+    // window between attempts so every replay drives immediately.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const failed = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+      expect(failed.status).toBe(500);
+      expect(cacheDiagnostics).toEqual({ slots: 0, activeClaims: 0 });
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      await unlink(guardPath);
+    }
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+
+    releaseInjectionArmed = false;
+    const second = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(second.status).toBe(500);
+    expect(((await second.json()) as ApiErrorResponse).error.message).toBe(
+      INVALID_DURABLE_TASK_AUTHORITY_MESSAGE
+    );
+    expect(
+      JSON.parse(await readFile(recordPath, "utf8")) as { status: string }
+    ).toMatchObject({ status: "failed" });
+
+    const third = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(third.status).toBe(201);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S34-P62-02 refresh failure settles every transported rejected-decision resource", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s34-refresh-window";
+    const taskId = "TASK-s34-refresh-window";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = taskCreateRequestDigest(taskBody);
+    const recordDirectory = join(workspaceRoot, "tasks", "_idempotency", "task");
+    await mkdir(recordDirectory, { recursive: true });
+    const recordPath = join(recordDirectory, idempotencyRecordFileName(idempotencyKey));
+    await writeFile(
+      recordPath,
+      `${JSON.stringify({
+        key: idempotencyKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        result_ref: taskId,
+        created_at: "2026-07-16T09:00:00.000Z",
+        updated_at: "2026-07-16T09:00:00.000Z"
+      })}\n`,
+      { flag: "wx" }
+    );
+    const recordBytes = await readFile(recordPath);
+    const taskLane = join(workspaceRoot, "tasks", taskId);
+    await mkdir(taskLane, { recursive: true });
+    const snapshotPath = join(taskLane, "snapshot.json");
+    await writeFile(snapshotPath, "{", { flag: "wx" });
+    let swapArmed = true;
+    let swapped = false;
+    let physicalB: BigIntStats | undefined;
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let cacheDiagnostics: { slots: number; activeClaims: number } | undefined;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-s34-refresh-window-recovered",
+      taskServiceFactory: (options) =>
+        createTaskCardService({
+          ...options,
+          cacheDiagnosticsForTest: (diagnostics) => {
+            cacheDiagnostics = diagnostics;
+          }
+        }),
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        return {
+          ...service,
+          consumeCompletedRecord: async (input, consume) =>
+            await service.consumeCompletedRecord(input, async (record) => {
+              // Same-semantic physical B swap after the rejected decision is
+              // classified but before the guard release — exactly like a real
+              // sibling rewrite under the same transition guard — so the
+              // post-release cleanup-permit refresh window itself throws on
+              // the exact pinned generation.
+              const decision = await consume(record);
+              if (swapArmed && !swapped) {
+                swapped = true;
+                const replacementPath = `${recordPath}.same-semantic-b`;
+                await writeFile(replacementPath, recordBytes, {
+                  flag: "wx",
+                  mode: 0o600
+                });
+                await rename(replacementPath, recordPath);
+                physicalB = await stat(recordPath, { bigint: true });
+              }
+              return decision;
+            })
+        };
+      }
+    });
+
+    const first = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    const firstBody = (await first.json()) as ApiErrorResponse;
+    expect(swapped).toBe(true);
+    expect(first.status).toBe(500);
+    expect(firstBody.error.message).toBe(
+      "Workspace record publication authority could not be verified."
+    );
+    // Every transported resource is settled on the refresh throw window.
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(cacheDiagnostics).toEqual({ slots: 0, activeClaims: 0 });
+    // Physical generation B survives byte-identically.
+    const survivingIdentity = await stat(recordPath, { bigint: true });
+    expect(survivingIdentity.dev).toBe(physicalB!.dev);
+    expect(survivingIdentity.ino).toBe(physicalB!.ino);
+    expect(await readFile(recordPath)).toEqual(recordBytes);
+    expect(await readFile(snapshotPath, "utf8")).toBe("{");
+
+    // The out-of-band sibling swap left the guard's parent binding stale, so
+    // the release preserved the guard generation (fail-closed, bounded by
+    // IDEMPOTENCY_TRANSITION_GUARD_STALE_MS). Simulate the elapsed staleness
+    // window so the replay drives immediately.
+    await unlink(
+      join(recordDirectory, `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`)
+    );
+    swapArmed = false;
+    const second = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(second.status).toBe(500);
+    expect(((await second.json()) as ApiErrorResponse).error.message).toBe(
+      INVALID_DURABLE_TASK_AUTHORITY_MESSAGE
+    );
+    expect(
+      JSON.parse(await readFile(recordPath, "utf8")) as { status: string }
+    ).toMatchObject({ status: "failed" });
+    await expectPathMissing(snapshotPath);
+
+    const third = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(third.status).toBe(201);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S34-P62-04 compound settlement and release failure preserves the unknown-wrapped typed primary", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s34-compound-release";
+    const taskBody = validTaskCreateBody();
+    const typedPrimary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S34 compound settlement typed primary.",
+      userMessage: "The completed task snapshot could not be settled.",
+      evidenceRefs: ["s34.compound.primary"],
+      retryable: true,
+      recommendedNextActions: ["Retry the task creation."]
+    });
+    const releaseFailure = Object.assign(
+      new Error("S34 injected publication-authority release failure."),
+      { code: "EBADF" }
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let recordCompleted = false;
+    let acceptInjectionArmed = true;
+    let releaseInjectionArmed = true;
+    let routedError: unknown;
+    let taskSequence = 0;
+    const app = createBackendApi({
+      workspaceRoot,
+      // Each request creates its own durable task lane so the counterfactual
+      // request replays the same injection schedule instead of colliding with
+      // the first request's committed lane.
+      taskIdFactory: () => {
+        taskSequence += 1;
+        return `TASK-s34-compound-release-${taskSequence}`;
+      },
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          completeRecord: async (input) => {
+            const record = await service.completeRecord(input);
+            recordCompleted = true;
+            return record;
+          }
+        };
+      },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          acceptTaskSnapshotCleanupObservation: async (observation) => {
+            const task = await service.acceptTaskSnapshotCleanupObservation(observation);
+            if (recordCompleted && acceptInjectionArmed) {
+              acceptInjectionArmed = false;
+              throw typedPrimary;
+            }
+            return task;
+          },
+          releaseTaskPublicationForIdempotency: async (task) => {
+            await service.releaseTaskPublicationForIdempotency(task);
+            if (!releaseInjectionArmed) return;
+            releaseInjectionArmed = false;
+            throw releaseFailure;
+          }
+        };
+      }
+    });
+
+    const response = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+    // The HTTP envelope preserves the typed primary through the unknown
+    // wrapper with the release failure retained exactly once — not a generic
+    // 500.
+    expect(response.status).toBe(typedPrimary.status);
+    expect(body.error.category).toBe(typedPrimary.category);
+    expect(body.error.message).toBe(typedPrimary.message);
+    expect(body.error.evidence_refs).toEqual(typedPrimary.evidenceRefs);
+    expect(body.error.message).not.toBe("Unexpected backend route failure.");
+    const unknownAuthorityError = (
+      routedError as { authorityError?: unknown } | undefined
+    )?.authorityError;
+    expect(semanticPrimaryError(unknownAuthorityError)).toBe(typedPrimary);
+    expectOrderedPreservedCompensationVector(unknownAuthorityError, [releaseFailure]);
+    expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+
+    // Counterfactual: the release-success path renders the same typed
+    // envelope without any release compensation.
+    recordCompleted = false;
+    acceptInjectionArmed = true;
+    releaseInjectionArmed = false;
+    routedError = undefined;
+    const counterfactual = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": "task:create:s34-compound-release-counterfactual"
+    });
+    const counterfactualBody = (await counterfactual.json()) as ApiErrorResponse;
+    expect(counterfactual.status).toBe(typedPrimary.status);
+    expect(counterfactualBody.error.message).toBe(typedPrimary.message);
+    expect(
+      semanticPrimaryError(
+        (routedError as { authorityError?: unknown } | undefined)?.authorityError
+      )
+    ).toBe(typedPrimary);
+    expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(0);
+  });
+
+  test("S34-P62-05 digest-mismatch accept-settlement failure preserves the typed binding primary", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s34-digest-mismatch-settlement";
+    const taskBody = validTaskCreateBody();
+    const initialApp = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-s34-digest-mismatch"
+    });
+    const initial = await postTask(initialApp, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    expect(initial.status).toBe(201);
+    const task = (await initial.json()) as TaskCard;
+    // Divergent durable snapshot: the completed record still matches the
+    // request digest, but the task-derived digest no longer binds.
+    const snapshotPath = join(workspaceRoot, "tasks", task.task_id, "snapshot.json");
+    const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as {
+      task_card: { title: string };
+    };
+    snapshot.task_card.title = "S34 divergent durable title";
+    await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+
+    const settlementFailure = new Error("S34 digest-mismatch acceptance failure");
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let acceptInjectionArmed = true;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          acceptTaskSnapshotCleanupObservation: async (observation) => {
+            const accepted = await service.acceptTaskSnapshotCleanupObservation(observation);
+            if (!acceptInjectionArmed) return accepted;
+            acceptInjectionArmed = false;
+            throw settlementFailure;
+          }
+        };
+      }
+    });
+
+    const response = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+    // The typed record_malformed binding classification is the semantic
+    // primary; the settlement failure is retained exactly once as an ordered
+    // compensation.
+    expect(response.status).toBe(500);
+    expect(body.error.message).toBe(
+      "Completed idempotency result is not bound to the task create request."
+    );
+    expect(body.error.message).not.toBe("Unexpected backend route failure.");
+    const unknownAuthorityError = (
+      routedError as { authorityError?: unknown } | undefined
+    )?.authorityError;
+    const semanticPrimary = semanticPrimaryError(unknownAuthorityError);
+    expect(semanticPrimary).toBeInstanceOf(TaskServiceError);
+    expect((semanticPrimary as TaskServiceError).message).toBe(
+      "Completed idempotency result is not bound to the task create request."
+    );
+    expectOrderedPreservedCompensationVector(unknownAuthorityError, [settlementFailure]);
+    expect(countErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S34-P62-05b digest-mismatch typed acceptance failure keeps the typed primary with the binding classification folded", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s34-digest-mismatch-typed-settlement";
+    const taskBody = validTaskCreateBody();
+    const initialApp = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-s34-digest-mismatch-typed"
+    });
+    const initial = await postTask(initialApp, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    expect(initial.status).toBe(201);
+    const task = (await initial.json()) as TaskCard;
+    // Divergent durable snapshot: the completed record still matches the
+    // request digest, but the task-derived digest no longer binds.
+    const snapshotPath = join(workspaceRoot, "tasks", task.task_id, "snapshot.json");
+    const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as {
+      task_card: { title: string };
+    };
+    snapshot.task_card.title = "S34 divergent durable title (typed arm)";
+    await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+
+    const typedSettlementFailure = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S34 typed digest-mismatch acceptance failure.",
+      userMessage: "The completed task authority could not settle its observation.",
+      evidenceRefs: ["s34.digest-mismatch.typed-settlement"],
+      retryable: true,
+      recommendedNextActions: ["Retry the task creation."]
+    });
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let acceptInjectionArmed = true;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          acceptTaskSnapshotCleanupObservation: async (observation) => {
+            const accepted = await service.acceptTaskSnapshotCleanupObservation(observation);
+            if (!acceptInjectionArmed) return accepted;
+            acceptInjectionArmed = false;
+            throw typedSettlementFailure;
+          }
+        };
+      }
+    });
+
+    const response = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+    // Root C (V33-04) typed arm: the typed acceptance failure stays the
+    // actionable primary; the binding classification is retained exactly once
+    // as its ordered compensation behind the unknown-authority wrapper.
+    expect(response.status).toBe(typedSettlementFailure.status);
+    expect(body.error.category).toBe(typedSettlementFailure.category);
+    expect(body.error.message).toBe(typedSettlementFailure.message);
+    expect(body.error.message).not.toBe("Unexpected backend route failure.");
+    const unknownAuthorityError = (
+      routedError as { authorityError?: unknown } | undefined
+    )?.authorityError;
+    expect(semanticPrimaryError(unknownAuthorityError)).toBe(typedSettlementFailure);
+    const orderedVector = orderedPreservedCompensationVector(unknownAuthorityError);
+    expect(orderedVector).toHaveLength(1);
+    const classificationEntry = orderedVector[0];
+    expect(classificationEntry).toBeInstanceOf(TaskServiceError);
+    expect((classificationEntry as TaskServiceError).code).toBe("record_malformed");
+    expect((classificationEntry as TaskServiceError).message).toBe(
+      "Completed idempotency result is not bound to the task create request."
+    );
+    // The typed primary rides only the semantic-primary channel — zero
+    // occurrences in the cause/errors graph proves it was never duplicated as
+    // a compensation.
+    expect(countErrorGraphIdentity(routedError, typedSettlementFailure)).toBe(0);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S34-P62-08 self-identical release rejection folds the failure exactly once", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskBody = validTaskCreateBody();
+    const typedFailure = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S34 self-identical release failure.",
+      userMessage: "The task creation could not settle its authority.",
+      evidenceRefs: ["s34.self-identical.release"],
+      retryable: true,
+      recommendedNextActions: ["Retry the task creation."]
+    });
+    const distinctReleaseFailure = new Error("S34 distinct release failure");
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let recordCompleted = false;
+    let acceptInjectionArmed = false;
+    let releaseInjection: unknown;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          completeRecord: async (input) => {
+            const record = await service.completeRecord(input);
+            recordCompleted = true;
+            return record;
+          }
+        };
+      },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          acceptTaskSnapshotCleanupObservation: async (observation) => {
+            const accepted = await service.acceptTaskSnapshotCleanupObservation(observation);
+            if (recordCompleted && acceptInjectionArmed) {
+              acceptInjectionArmed = false;
+              throw typedFailure;
+            }
+            return accepted;
+          },
+          releaseTaskPublicationForIdempotency: async (task) => {
+            await service.releaseTaskPublicationForIdempotency(task);
+            if (releaseInjection === undefined) return;
+            const injected = releaseInjection;
+            releaseInjection = undefined;
+            throw injected;
+          }
+        };
+      }
+    });
+
+    // Self-identical: the release rejects with the same object that failed
+    // the body — the envelope carries it exactly once, as the primary.
+    recordCompleted = false;
+    acceptInjectionArmed = true;
+    releaseInjection = typedFailure;
+    const selfIdentical = await postTask(app, taskBody, {
+      "Idempotency-Key": "task:create:s34-self-identical-release"
+    });
+    const selfIdenticalBody = (await selfIdentical.json()) as ApiErrorResponse;
+    expect(selfIdentical.status).toBe(typedFailure.status);
+    expect(selfIdenticalBody.error.message).toBe(typedFailure.message);
+    expect(selfIdenticalBody.error.message).not.toBe("Unexpected backend route failure.");
+    expect(countErrorGraphIdentity(routedError, typedFailure)).toBe(1);
+    const selfIdenticalAuthorityError = (
+      routedError as { authorityError?: unknown } | undefined
+    )?.authorityError;
+    expect(semanticPrimaryError(selfIdenticalAuthorityError)).toBe(typedFailure);
+    expectOrderedPreservedCompensationVector(selfIdenticalAuthorityError, []);
+
+    // Distinct-error case: both failures are folded, the release failure
+    // exactly once as an ordered compensation.
+    recordCompleted = false;
+    acceptInjectionArmed = true;
+    releaseInjection = distinctReleaseFailure;
+    routedError = undefined;
+    const distinct = await postTask(app, taskBody, {
+      "Idempotency-Key": "task:create:s34-distinct-release"
+    });
+    const distinctBody = (await distinct.json()) as ApiErrorResponse;
+    expect(distinct.status).toBe(typedFailure.status);
+    expect(distinctBody.error.message).toBe(typedFailure.message);
+    const distinctAuthorityError = (
+      routedError as { authorityError?: unknown } | undefined
+    )?.authorityError;
+    expect(semanticPrimaryError(distinctAuthorityError)).toBe(typedFailure);
+    expectOrderedPreservedCompensationVector(distinctAuthorityError, [
+      distinctReleaseFailure
+    ]);
+    // The typed primary is transported exactly once, via the envelope's
+    // semantic-primary channel (asserted above); zero occurrences in the
+    // cause/errors graph proves it was never duplicated as a compensation.
+    expect(countErrorGraphIdentity(routedError, typedFailure)).toBe(0);
+    expect(countErrorGraphIdentity(routedError, distinctReleaseFailure)).toBe(1);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S33-P62-04 completed-replay unknown settlement failure preserves the typed primary", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s33-unknown-settlement";
+    const taskBody = validTaskCreateBody();
+    const initialApp = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-s33-unknown-settlement"
+    });
+    const initial = await postTask(initialApp, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    expect(initial.status).toBe(201);
+    const initialTask = (await initial.json()) as TaskCard;
+
+    const primary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S33 unknown completed-replay primary.",
+      userMessage: "The completed task authority is temporarily unknown.",
+      evidenceRefs: ["s33.unknown.primary"],
+      retryable: true,
+      recommendedNextActions: ["Retry the completed replay."]
+    });
+    const cancellationFailure = new Error(
+      "S33 unknown observation cancellation failure"
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let observationArmed = true;
+    let cancellationArmed = true;
+    let cancellations = 0;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      taskSnapshotReadHooks: {
+        beforeSnapshotOpen: () => {
+          if (!observationArmed) return;
+          observationArmed = false;
+          throw primary;
+        }
+      },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          cancelTaskSnapshotCleanupObservation: async (observation) => {
+            await service.cancelTaskSnapshotCleanupObservation(observation);
+            if (!cancellationArmed) return;
+            cancellationArmed = false;
+            cancellations += 1;
+            throw cancellationFailure;
+          }
+        };
+      }
+    });
+
+    const response = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+    expect(response.status).toBe(primary.status);
+    expect(body.error.category).toBe(primary.category);
+    expect(body.error.message).toBe(primary.message);
+    expect(body.error.message).not.toBe("Unexpected backend route failure.");
+    expect(cancellations).toBe(1);
+    const unknownAuthorityError = (
+      routedError as { authorityError?: unknown } | undefined
+    )?.authorityError;
+    expect(semanticPrimaryError(unknownAuthorityError)).toBe(primary);
+    // S34-P62-09 (V33-16): exact primary identity plus the complete ordered
+    // compensation identity vector, pinned at the unknown-branch fold.
+    expectOrderedPreservedCompensationVector(unknownAuthorityError, [
+      cancellationFailure
+    ]);
+    expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
+
+    // The completed record and durable task survive the settlement failure;
+    // the replay succeeds once the transient authority denial clears.
+    const replay = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    expect(replay.status).toBe(200);
+    expect((await replay.json()) as TaskCard).toEqual(initialTask);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+  });
+
+  test("S33-P62-04 completed-replay repairable settlement failure preserves the typed primary", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s33-repairable-settlement";
+    const taskBody = validTaskCreateBody();
+    const initialApp = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => "TASK-s33-repairable-settlement"
+    });
+    const initial = await postTask(initialApp, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    expect(initial.status).toBe(201);
+    const task = (await initial.json()) as TaskCard;
+    const snapshotPath = join(workspaceRoot, "tasks", task.task_id, "snapshot.json");
+    const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    delete snapshot.task_card;
+    await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
+
+    const rejectionFailure = new Error(
+      "S33 repairable observation rejection failure"
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let repairablePrimary: TaskServiceError | undefined;
+    let rejections = 0;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          rejectTaskSnapshotCleanupObservation: async (observation) => {
+            if (observation.status === "repairable") {
+              repairablePrimary = observation.error;
+            }
+            await service.rejectTaskSnapshotCleanupObservation(observation);
+            rejections += 1;
+            throw rejectionFailure;
+          }
+        };
+      }
+    });
+
+    const response = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+    expect(repairablePrimary).toBeDefined();
+    expect(response.status).toBe(repairablePrimary!.status);
+    expect(body.error.message).toBe(repairablePrimary!.message);
+    expect(body.error.message).not.toBe("Unexpected backend route failure.");
+    expect(rejections).toBe(1);
+    expect(semanticPrimaryError(routedError)).toBe(repairablePrimary);
+    // S34-P62-09 (V33-16): exact primary identity plus the complete ordered
+    // compensation identity vector, pinned at the repairable-branch fold.
+    expectOrderedPreservedCompensationVector(routedError, [rejectionFailure]);
+    expect(countErrorGraphIdentity(routedError, rejectionFailure)).toBe(1);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+  });
+
+  test("S33-P62-09 inner completed-consumption fold preserves the primary with the complete ordered vector", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:s33-inner-consumption-fold";
+    const taskId = "TASK-s33-inner-consumption-fold";
+    const taskBody = validTaskCreateBody();
+    const consumptionPrimary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "S33 inner completed-consumption primary.",
+      userMessage: "The freshly completed record could not be consumed.",
+      evidenceRefs: ["s33.inner.consumption"],
+      retryable: true,
+      recommendedNextActions: ["Retry the completed consumption."]
+    });
+    const cancellationFailure = new Error(
+      "S33 inner local observation cancellation failure"
+    );
+    let recordCompleted = false;
+    let consumptionArmed = true;
+    let cancellationArmed = true;
+    let cancellations = 0;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          completeRecord: async (input) => {
+            const record = await service.completeRecord(input);
+            recordCompleted = true;
+            return record;
+          },
+          consumeCompletedRecord: async (input, consume) => {
+            if (recordCompleted && consumptionArmed) {
+              consumptionArmed = false;
+              throw consumptionPrimary;
+            }
+            return await service.consumeCompletedRecord(input, consume);
+          }
+        };
+      },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          cancelTaskSnapshotCleanupObservation: async (observation) => {
+            await service.cancelTaskSnapshotCleanupObservation(observation);
+            if (!cancellationArmed) return;
+            cancellationArmed = false;
+            cancellations += 1;
+            throw cancellationFailure;
+          }
+        };
+      }
+    });
+
+    // The owner establishes a REAL completed record before the inner
+    // completed-consumption fold (routes/index.ts, "Completed task
+    // consumption and local observation cancellation both failed.") runs.
+    const response = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+    expect(recordCompleted).toBe(true);
+    expect(cancellations).toBe(1);
+    expect(response.status).toBe(consumptionPrimary.status);
+    expect(body.error.category).toBe(consumptionPrimary.category);
+    expect(body.error.message).toBe(consumptionPrimary.message);
+    expect(routedError).toBeInstanceOf(TaskServiceError);
+    expect(semanticPrimaryError(routedError)).toBe(consumptionPrimary);
+    // Exact primary identity plus the complete ordered compensation identity
+    // vector with multiplicity, pinned at the inner fold's altitude.
+    expectOrderedPreservedCompensationVector(routedError, [cancellationFailure]);
+    expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
+    const envelope = (routedError as Error).cause;
+    expect(envelope).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(((envelope as PreservedErrorCompensationEnvelope).cause as AggregateError).message).toBe(
+      "Completed task consumption and local observation cancellation both failed."
+    );
+
+    // The durable outcome is intact: the real completed record replays the
+    // created task once the injected consumption denial clears.
+    const record = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    );
+    expect(record).toMatchObject({ status: "completed", result_ref: taskId });
+    const replay = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    expect(replay.status).toBe(200);
+    expect(((await replay.json()) as TaskCard).task_id).toBe(taskId);
+  });
+
+  test("POST /api/tasks fails closed on a malformed transition guard", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const idempotencyKey = "task:create:malformed-guard-route-retry";
     const taskIds = ["TASK-malformed-guard-first", "TASK-malformed-guard-retry"];
+    const guardPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`
+    );
     let poisonedGuard = false;
     const app = createBackendApi({
       workspaceRoot,
@@ -3922,16 +8513,7 @@ describe("backend workspace and health routes", () => {
         const taskId = taskIds.shift() ?? "TASK-unexpected-malformed-guard-extra";
         if (!poisonedGuard) {
           poisonedGuard = true;
-          writeFileSync(
-            join(
-              workspaceRoot,
-              "tasks",
-              "_idempotency",
-              "task",
-              `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`
-            ),
-            "{"
-          );
+          writeFileSync(guardPath, "{");
         }
         return taskId;
       }
@@ -3947,27 +8529,37 @@ describe("backend workspace and health routes", () => {
     expect(failedResponse.status).toBe(500);
     expectCanonicalError(failedBody, "workspace_error");
     expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
-    expect(recordAfterFailure?.status).toBe("failed");
+    expect(recordAfterFailure?.status).toBe("started");
     expect(recordAfterFailure?.result_ref).toBeUndefined();
-    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([]);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([
+      "TASK-malformed-guard-first"
+    ]);
 
-    const repairedResponse = await postTask(app, validTaskCreateBody(), {
+    const blockedResponse = await postTask(app, validTaskCreateBody(), {
       "Idempotency-Key": idempotencyKey
     });
-    const repairedTask = (await repairedResponse.json()) as TaskCard;
-    const recordAfterRepair = await idempotencyService.getRecord("task", idempotencyKey);
+    const blockedBody = (await blockedResponse.json()) as ApiErrorResponse;
+    const recordAfterRetry = await idempotencyService.getRecord("task", idempotencyKey);
     const idempotencyFiles = await readdir(join(workspaceRoot, "tasks", "_idempotency", "task"));
 
-    expect(repairedResponse.status).toBe(201);
-    expect(repairedTask.task_id).toBe("TASK-malformed-guard-retry");
-    expect(taskIds).toEqual([]);
-    expect(recordAfterRepair?.status).toBe("completed");
-    expect(recordAfterRepair?.result_ref).toBe(repairedTask.task_id);
-    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([repairedTask.task_id]);
-    expect(idempotencyFiles).toEqual([idempotencyRecordFileName(idempotencyKey)]);
+    expect(blockedResponse.status).toBe(500);
+    expectCanonicalError(blockedBody, "workspace_error");
+    expectNoAbsoluteWorkspacePath(blockedBody, tempRoot, workspaceRoot);
+    expect(taskIds).toEqual(["TASK-malformed-guard-retry"]);
+    expect(recordAfterRetry).toEqual(recordAfterFailure);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([
+      "TASK-malformed-guard-first"
+    ]);
+    expect(await readFile(guardPath, "utf8")).toBe("{");
+    expect(idempotencyFiles.sort()).toEqual(
+      [
+        idempotencyRecordFileName(idempotencyKey),
+        `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`
+      ].sort()
+    );
   });
 
-  test("POST /api/tasks quarantines idempotency state when completion and rollback cannot prove the snapshot", async () => {
+  test("POST /api/tasks preserves a directory successor when rollback cannot observe its generation", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const idempotencyKey = "task:create:rollback-failure-bound";
@@ -3975,7 +8567,7 @@ describe("backend workspace and health routes", () => {
     const requestDigest = sha256Hex(canonicalJson(taskBody));
     let taskIdFactoryCalls = 0;
     let poisonedCompletion = false;
-    let snapshotOpenCount = 0;
+    let successorReplacementCount = 0;
     const app = createBackendApi({
       workspaceRoot,
       now: fixedNow("2026-07-07T12:03:57.640Z"),
@@ -4009,20 +8601,43 @@ describe("backend workspace and health routes", () => {
           ? "TASK-rollback-failure-original"
           : "TASK-rollback-failure-duplicate";
       },
-      taskSnapshotReadHooks: {
-        beforeSnapshotOpen: async ({ snapshotPath, laneTaskId }) => {
-          if (laneTaskId !== "TASK-rollback-failure-original") {
-            return;
+      idempotencyServiceFactory: (serviceOptions) => {
+        const service = createIdempotencyRecordService(serviceOptions);
+        return {
+          ...service,
+          consumeCompletedRecord: async (input, consume) => {
+            const replay = await service.consumeCompletedRecord(input, consume);
+            if (input.key === idempotencyKey && successorReplacementCount === 0) {
+              successorReplacementCount += 1;
+              await rm(
+                join(
+                  workspaceRoot,
+                  "tasks",
+                  "TASK-rollback-failure-original",
+                  "snapshot.json"
+                )
+              );
+              await mkdir(
+                join(
+                  workspaceRoot,
+                  "tasks",
+                  "TASK-rollback-failure-original",
+                  "snapshot.json"
+                )
+              );
+            }
+            return replay;
           }
-          snapshotOpenCount += 1;
-          if (snapshotOpenCount === 2) {
-            await rm(snapshotPath);
-            await mkdir(snapshotPath);
-          }
-        }
+        };
       }
     });
 
+    const snapshotPath = join(
+      workspaceRoot,
+      "tasks",
+      "TASK-rollback-failure-original",
+      "snapshot.json"
+    );
     const failedResponse = await postTask(app, taskBody, {
       "Idempotency-Key": idempotencyKey
     });
@@ -4033,7 +8648,9 @@ describe("backend workspace and health routes", () => {
     const detailAfterFailure = await app.request(
       "/api/tasks/TASK-rollback-failure-original"
     );
-    const detailBody = (await detailAfterFailure.json()) as ApiErrorResponse;
+    const listBody = (await listAfterFailure.json()) as { tasks: TaskCard[] };
+    const retainedTask = listBody.tasks[0]!;
+    const detailBody = (await detailAfterFailure.json()) as TaskCard;
     const freshListAfterFailure = await createBackendApi({ workspaceRoot }).request("/api/tasks");
     const retryResponse = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
     const retryTask = (await retryResponse.json()) as TaskCard;
@@ -4045,20 +8662,24 @@ describe("backend workspace and health routes", () => {
     expect(recordAfterFailure?.status).toBe("failed");
     expect(recordAfterFailure?.result_ref).toBeUndefined();
     expect(listAfterFailure.status).toBe(200);
-    expect(await listAfterFailure.json()).toEqual({ tasks: [] });
-    expect(detailAfterFailure.status).toBe(404);
-    expectCanonicalError(detailBody, "not_found");
-    expect(freshListAfterFailure.status).toBe(200);
-    expect(await freshListAfterFailure.json()).toEqual({ tasks: [] });
-    await expectPathMissing(
-      join(workspaceRoot, "tasks", "TASK-rollback-failure-original", "snapshot.json")
+    expect(listBody.tasks).toHaveLength(1);
+    expect(retainedTask.task_id).toBe("TASK-rollback-failure-original");
+    expect(detailAfterFailure.status).toBe(200);
+    expect(detailBody).toEqual(retainedTask);
+    expect(freshListAfterFailure.status).toBe(500);
+    expectCanonicalError(
+      (await freshListAfterFailure.json()) as ApiErrorResponse,
+      "workspace_error"
     );
+    expect(successorReplacementCount).toBe(1);
+    expect((await stat(snapshotPath)).isDirectory()).toBe(true);
     expect(retryResponse.status).toBe(201);
     expect(retryTask.task_id).toBe("TASK-rollback-failure-duplicate");
     expect(recordAfterRetry?.status).toBe("completed");
     expect(recordAfterRetry?.result_ref).toBe(retryTask.task_id);
     expect(taskIdFactoryCalls).toBe(2);
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([retryTask.task_id]);
+    expect((await stat(snapshotPath)).isDirectory()).toBe(true);
   });
 
   test("POST /api/tasks rollback preserves existing lane files and leaves failed claim retryable", async () => {
@@ -4070,9 +8691,12 @@ describe("backend workspace and health routes", () => {
     const taskIds = ["TASK-existing-lane", "TASK-existing-lane-retry"];
     const taskLane = join(workspaceRoot, "tasks", "TASK-existing-lane");
     const sentinelPath = join(taskLane, "sentinel.txt");
+    const fanoutCount = 2_048;
     let poisonedCompletion = false;
     await mkdir(taskLane, { recursive: true });
     await writeFile(sentinelPath, "preserve lane sentinel", { flag: "wx" });
+    await writeFillerTaskEntries(taskLane, fanoutCount);
+    const existingLaneEntries = (await readdir(taskLane)).sort();
     const app = createBackendApi({
       workspaceRoot,
       now: fixedNow("2026-07-07T12:03:57.650Z"),
@@ -4117,6 +8741,8 @@ describe("backend workspace and health routes", () => {
     expectCanonicalError(failedBody, "schema_error");
     expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
     expect(await readFile(sentinelPath, "utf8")).toBe("preserve lane sentinel");
+    expect(existingLaneEntries).toHaveLength(fanoutCount + 1);
+    expect((await readdir(taskLane)).sort()).toEqual(existingLaneEntries);
     await expectPathMissing(join(taskLane, "snapshot.json"));
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([]);
     expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
@@ -4135,6 +8761,7 @@ describe("backend workspace and health routes", () => {
     expect(repairedTask.task_id).toBe("TASK-existing-lane-retry");
     expect(taskIds).toEqual([]);
     expect(await readFile(sentinelPath, "utf8")).toBe("preserve lane sentinel");
+    expect((await readdir(taskLane)).sort()).toEqual(existingLaneEntries);
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([repairedTask.task_id]);
     expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
       tasks: [repairedTask]
@@ -4975,6 +9602,21 @@ async function createExpectedRuntimeTree(
   }
 }
 
+async function workspaceDirectoryInventory(workspaceRoot: string): Promise<string[]> {
+  const inventory: string[] = [];
+  const visit = async (directoryPath: string, relativeParent: string): Promise<void> => {
+    const entries = await readdir(directoryPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      const relativePath = relativeParent ? join(relativeParent, entry.name) : entry.name;
+      inventory.push(relativePath);
+      await visit(join(directoryPath, entry.name), relativePath);
+    }
+  };
+  await visit(workspaceRoot, "");
+  return inventory.sort();
+}
+
 async function expectPathMissing(path: string): Promise<void> {
   try {
     await access(path);
@@ -4997,6 +9639,71 @@ function validTaskCreateBody(overrides: Partial<CreateTaskInput> = {}): CreateTa
     inference_budget: { mode: "normal" },
     created_by: "pi",
     ...overrides
+  };
+}
+
+function taskCreateRequestDigest(taskBody: CreateTaskInput): string {
+  return sha256Hex(
+    canonicalJson({
+      ...taskBody,
+      created_by: taskBody.created_by ?? DEFAULT_TASK_CREATED_BY
+    })
+  );
+}
+
+function invalidCompletedIdempotencyRecordText(
+  idempotencyKey: string,
+  requestDigest: string
+): string {
+  return `${JSON.stringify({
+    key: idempotencyKey,
+    scope: "task",
+    request_digest: requestDigest,
+    status: "completed",
+    created_at: "2026-07-16T09:00:00.000Z",
+    updated_at: "2026-07-16T09:00:00.000Z"
+  })}\n`;
+}
+
+async function writeInvalidCompletedIdempotencyRecord(
+  workspaceRoot: string,
+  idempotencyKey: string,
+  requestDigest: string
+): Promise<string> {
+  const recordDirectory = join(workspaceRoot, "tasks", "_idempotency", "task");
+  await mkdir(recordDirectory, { recursive: true });
+  const recordPath = join(recordDirectory, idempotencyRecordFileName(idempotencyKey));
+  await writeFile(
+    recordPath,
+    invalidCompletedIdempotencyRecordText(idempotencyKey, requestDigest),
+    { flag: "wx" }
+  );
+  return recordPath;
+}
+
+function createSameSemanticRecordSwap(
+  recordPath: string,
+  recordBytes: Buffer
+): {
+  hooks: WorkspaceRecordPublicationHooks;
+  swapped: () => boolean;
+  physicalB: () => BigIntStats | undefined;
+} {
+  let swapped = false;
+  let physicalB: BigIntStats | undefined;
+  return {
+    hooks: {
+      afterTemporaryFileWritten: async ({ canonicalPath }) => {
+        if (canonicalPath !== recordPath || swapped) return;
+        swapped = true;
+        const replacementPath = `${recordPath}.same-semantic-b`;
+        await writeFile(replacementPath, recordBytes, { flag: "wx", mode: 0o600 });
+        await rename(replacementPath, recordPath);
+        physicalB = await stat(recordPath, { bigint: true });
+      }
+    },
+    swapped: () => swapped,
+    physicalB: () => physicalB
   };
 }
 
@@ -5056,6 +9763,81 @@ async function writeFillerTaskEntries(tasksRoot: string, count: number): Promise
       )
     );
   }
+}
+
+function errorGraphContainsIdentity(
+  root: unknown,
+  target: unknown,
+  seen = new Set<object>()
+): boolean {
+  if (root === target) return true;
+  if ((typeof root !== "object" && typeof root !== "function") || root === null) {
+    return false;
+  }
+  const object = root as object;
+  if (seen.has(object)) return false;
+  seen.add(object);
+  for (const property of ["cause", "errors"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, property);
+    if (!descriptor || !("value" in descriptor)) continue;
+    const value = descriptor.value as unknown;
+    if (Array.isArray(value)) {
+      if (value.some((entry) => errorGraphContainsIdentity(entry, target, seen))) {
+        return true;
+      }
+    } else if (errorGraphContainsIdentity(value, target, seen)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function orderedPreservedCompensationVector(error: unknown): readonly unknown[] {
+  const envelope =
+    error instanceof PreservedErrorCompensationEnvelope
+      ? error
+      : error instanceof Error &&
+          error.cause instanceof PreservedErrorCompensationEnvelope
+        ? error.cause
+        : undefined;
+  if (!envelope || !(envelope.cause instanceof AggregateError)) return [];
+  return envelope.cause.errors;
+}
+
+function expectOrderedPreservedCompensationVector(
+  error: unknown,
+  expectedVector: readonly unknown[]
+): void {
+  const orderedVector = orderedPreservedCompensationVector(error);
+  expect(orderedVector.length).toBe(expectedVector.length);
+  for (let index = 0; index < expectedVector.length; index += 1) {
+    expect(orderedVector[index]).toBe(expectedVector[index]);
+  }
+}
+
+function countErrorGraphIdentity(
+  root: unknown,
+  target: unknown,
+  seen = new Set<object>()
+): number {
+  let count = root === target ? 1 : 0;
+  if ((typeof root !== "object" && typeof root !== "function") || root === null) {
+    return count;
+  }
+  const object = root as object;
+  if (seen.has(object)) return count;
+  seen.add(object);
+  for (const property of ["cause", "errors"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, property);
+    if (!descriptor || !("value" in descriptor)) continue;
+    const value = descriptor.value as unknown;
+    if (Array.isArray(value)) {
+      for (const entry of value) count += countErrorGraphIdentity(entry, target, seen);
+    } else {
+      count += countErrorGraphIdentity(value, target, seen);
+    }
+  }
+  return count;
 }
 
 async function postTask(
@@ -5170,6 +9952,37 @@ function parseApiRequestLogLine(line: string): ApiRequestLogLine {
 async function timeoutAfter(milliseconds: number, message: string): Promise<never> {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
   throw new Error(message);
+}
+
+function createAsyncGate(): { wait: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const wait = new Promise<void>((resolvePromise) => {
+    open = resolvePromise;
+  });
+  return { wait, open };
+}
+
+function createSignal(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function sourceFunctionText(sourceFile: ts.SourceFile, name: string): string {
+  const declaration = sourceFile.statements.find(
+    (statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === name
+  );
+  if (!declaration) {
+    throw new Error(`Missing source function: ${name}`);
+  }
+  return declaration.getText(sourceFile);
+}
+
+function countSourceOccurrences(source: string, fragment: string): number {
+  return source.split(fragment).length - 1;
 }
 
 async function waitFor(predicate: () => boolean, message: string): Promise<void> {
