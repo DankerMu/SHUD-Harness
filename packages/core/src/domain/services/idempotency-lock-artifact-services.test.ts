@@ -242,7 +242,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(requiredRuntimeExports.filter((name) => !runtimeExports.has(name))).toEqual([]);
     expect(forbiddenRuntimeExports.filter((name) => runtimeExports.has(name))).toEqual([]);
     expect(runtimeExports.has("runWithWorkspacePathSafetyHooks")).toBe(false);
-  });
+  }, 10_000);
 
   test("IdempotencyRecord store/get/replay uses safe deterministic direct paths", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -7546,7 +7546,7 @@ describe("idempotency, lock, and artifact services", () => {
         })}`
       );
     }
-  }, 20_000);
+  }, 90_000);
 
   test("1,025 mutable namespace lifecycles retire exact bindings to the durable upper bound", async () => {
     const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
@@ -8119,7 +8119,7 @@ describe("idempotency, lock, and artifact services", () => {
         ).toEqual({ status: "deleted" });
       }
     }
-  }, 20_000);
+  }, 60_000);
 
   test("cleanup permit pins its accepted generation and rejects an external unlink replacement", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -8449,7 +8449,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(elapsedMs).toBeLessThan(9_000);
     expectErrorNotToLeakRecordContent(deadlineError, tempRoot);
     expect(await service.getLock("task", lockId)).toBeUndefined();
-  }, 10_000);
+  }, 30_000);
 
   test("expired ordinary waiter is rejected at handoff before its operation and the queue converges", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();

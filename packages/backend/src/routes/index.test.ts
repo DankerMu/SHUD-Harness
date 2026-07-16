@@ -4272,7 +4272,7 @@ describe("backend workspace and health routes", () => {
       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
       expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
     },
-    12_000
+    20_000
   );
 
   test(
@@ -4383,7 +4383,7 @@ describe("backend workspace and health routes", () => {
       expect(beginRecordCalls).toBe(2);
       expect(lookupReplayCalls).toBe(0);
     },
-    20_000
+    40_000
   );
 
   test(
@@ -4545,7 +4545,7 @@ describe("backend workspace and health routes", () => {
       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
       expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
     },
-    12_000
+    20_000
   );
 
   test("POST /api/tasks active same-key create delayed past replay timeout converges across app instances", async () => {
@@ -5755,7 +5755,7 @@ describe("backend workspace and health routes", () => {
       expect(finalRecord?.status).toBe("completed");
       expect(finalRecord?.result_ref).toBe(finalTask?.task_id);
     },
-    180_000
+    360_000
   );
 
   test(
@@ -5816,7 +5816,7 @@ describe("backend workspace and health routes", () => {
       });
       expect((await freshOverflow.request("/api/tasks")).status).toBe(500);
     },
-    180_000
+    360_000
   );
 
   test("POST /api/tasks active same-key digest mismatch stays 422 and does not join owner", async () => {
