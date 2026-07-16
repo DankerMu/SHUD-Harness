@@ -3,6 +3,7 @@ interface PreservedErrorProvenance {
   readonly observedCauses: readonly unknown[];
   readonly observationFailures: readonly unknown[];
   readonly rawCompensations: readonly unknown[];
+  readonly retainedCompensationIdentities: readonly unknown[];
 }
 
 type ErrorObservation =
@@ -57,7 +58,20 @@ class PreservedCompensationCycle extends Error {
   }
 }
 
-const preservedCompensationCycle = Object.freeze(new PreservedCompensationCycle());
+const preservedCompensationCycles = new WeakMap<
+  PreservedErrorProvenance,
+  PreservedCompensationCycle
+>();
+
+function preservedCompensationCycleFor(
+  provenance: PreservedErrorProvenance
+): PreservedCompensationCycle {
+  const existing = preservedCompensationCycles.get(provenance);
+  if (existing) return existing;
+  const marker = Object.freeze(new PreservedCompensationCycle());
+  preservedCompensationCycles.set(provenance, marker);
+  return marker;
+}
 
 type AsyncOutcome<T> =
   | { readonly status: "fulfilled"; readonly value: T }
@@ -161,7 +175,8 @@ export function preserveThrownValueAndCompensationErrors(
     primary: representedPrimary,
     observedCauses: [primary],
     observationFailures,
-    rawCompensations: []
+    rawCompensations: [],
+    retainedCompensationIdentities: []
   });
   return preserveObservedPrimaryAndCompensationErrors(
     representedPrimary,
@@ -200,16 +215,34 @@ function preserveObservedPrimaryAndCompensationErrors(
     ? undefined
     : safelyObservePriorCause(semanticPrimary);
   const observedCauses = priorProvenance?.observedCauses ?? causeObservation!.causes;
-  const canonicalCompensations = canonicalizeCompensations(compensations);
+  const priorRetainedProvenance = priorProvenance
+    ? priorProvenance.retainedCompensationIdentities
+    : [];
+  const newCompensationInputs = compensations.filter(
+    (candidate) => !priorRetainedProvenance.some((prior) => Object.is(prior, candidate))
+  );
+  const canonicalCompensations = canonicalizeCompensations(newCompensationInputs);
   const observationFailures = [
     ...(priorProvenance?.observationFailures ?? []),
     ...primaryObservationFailures,
     ...(causeObservation?.failures ?? []),
     ...canonicalCompensations.observationFailures
   ].filter((failure, index, allFailures) => allFailures.indexOf(failure) === index);
+  const priorRawCompensations = priorProvenance?.rawCompensations ?? [];
+  const newRawCompensations = canonicalCompensations.values.filter(
+    (candidate) => !priorRetainedProvenance.some((prior) => Object.is(prior, candidate))
+  );
   const rawCompensations = [
-    ...(priorProvenance?.rawCompensations ?? []),
-    ...canonicalCompensations.values
+    ...priorRawCompensations,
+    ...newRawCompensations
+  ];
+  const retainedCompensationIdentities = [
+    ...priorRetainedProvenance,
+    ...[...newCompensationInputs, ...canonicalCompensations.values].filter(
+      (candidate, index, values) =>
+        !priorRetainedProvenance.some((prior) => Object.is(prior, candidate)) &&
+        values.findIndex((value) => Object.is(value, candidate)) === index
+    )
   ];
   const aggregateCause = new AggregateError(
     [...observedCauses, ...observationFailures, ...rawCompensations],
@@ -223,7 +256,8 @@ function preserveObservedPrimaryAndCompensationErrors(
     primary: semanticPrimary,
     observedCauses,
     observationFailures,
-    rawCompensations
+    rawCompensations,
+    retainedCompensationIdentities
   });
   return envelope;
 }
@@ -238,7 +272,7 @@ function canonicalizeCompensations(
     const provenance = readPreservedErrorProvenance(compensation);
     if (provenance) {
       if (activeProvenance.has(provenance)) {
-        values.push(preservedCompensationCycle);
+        values.push(preservedCompensationCycleFor(provenance));
         continue;
       }
 

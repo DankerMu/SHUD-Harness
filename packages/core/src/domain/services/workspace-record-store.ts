@@ -2,10 +2,11 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readdir, realpath, rename, rmdir, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize, parse, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, parse, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import {
+  runWithPreservedRelease,
   semanticPrimaryError
 } from "./compensation-error-preservation";
 import { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
@@ -366,6 +367,17 @@ interface RecordAuthorityLease {
 
 export interface WorkspaceRecordCleanupPermit {}
 
+export interface WorkspaceRecordTransferredPinnedFile {
+  readonly fd: number;
+  stat: (options: { bigint: true }) => Promise<BigIntStats>;
+  close: () => Promise<void>;
+}
+
+export interface WorkspaceRecordTransferredPublicationAuthority {
+  readonly pinnedFile: WorkspaceRecordTransferredPinnedFile;
+  readonly identity: BigIntStats;
+}
+
 interface WorkspaceRecordCleanupPermitState {
   mutex: RecordAuthorityMutex;
   publicPath: string;
@@ -464,6 +476,15 @@ export interface WorkspaceRecordPublicationHooks {
   beforeRecordAuthorityIdentitySupplier?: (
     input: Readonly<{ path: string }>
   ) => Promise<void> | void;
+  rewriteRecordAuthorityIdentityCandidates?: (
+    input: Readonly<{
+      path: string;
+      exactPath: string;
+      aliases: readonly string[];
+    }>
+  ) =>
+    | Readonly<{ exactPath: string; aliases: readonly string[] }>
+    | undefined;
   afterCleanupPermitPinnedHandleClosed?: (
     input: Readonly<{ path: string; fd: number }>
   ) => Promise<void> | void;
@@ -592,6 +613,11 @@ export type WorkspaceRecordDirectoryRemovalResult =
 
 export type WorkspaceRecordCleanupPermitSettlementResult =
   | { readonly status: "current" }
+  | { readonly status: "missing" }
+  | { readonly status: "superseded" };
+
+export type ExactWorkspaceJsonRecordReplacementResult<T> =
+  | { readonly status: "replaced"; readonly record: T }
   | { readonly status: "missing" }
   | { readonly status: "superseded" };
 
@@ -753,8 +779,28 @@ export async function runWithWorkspaceRecordPublicationHooks<T>(
   return await publicationHookStorage.run(hooks, action);
 }
 
+const observationOnlyPublicationHookOwners =
+  new WeakSet<WorkspaceRecordPublicationHooks>();
+
+/**
+ * Root E (V32-09): observation-only projection of the publication hooks. The
+ * hooks fire for test observability, but workspaceRecordPublicationHooksActive
+ * stays false so production branch selectors (the create-only fast path in
+ * persistTaskSnapshot) keep their production branch. Nesting real publication
+ * hooks inside an observation context restores active=true.
+ */
+export async function runWithWorkspaceRecordObservationHooksForTest<T>(
+  hooks: WorkspaceRecordPublicationHooks,
+  action: () => Promise<T>
+): Promise<T> {
+  const observationHooks: WorkspaceRecordPublicationHooks = { ...hooks };
+  observationOnlyPublicationHookOwners.add(observationHooks);
+  return await publicationHookStorage.run(observationHooks, action);
+}
+
 export function workspaceRecordPublicationHooksActive(): boolean {
-  return publicationHookStorage.getStore() !== undefined;
+  const store = publicationHookStorage.getStore();
+  return store !== undefined && !observationOnlyPublicationHookOwners.has(store);
 }
 
 export async function runWithWorkspaceRecordAuthorityDeadline<T>(
@@ -1763,6 +1809,191 @@ export async function cancelWorkspaceRecordCleanupPermit(
   await settleRecordAuthorityCleanupPermitState(permit, state);
 }
 
+export async function transferWorkspaceRecordCleanupPermitPublicationAuthority(
+  permit: WorkspaceRecordCleanupPermit,
+  path: string,
+  evidenceRef: string
+): Promise<WorkspaceRecordTransferredPublicationAuthority> {
+  return await runWithRecordDirectoryBindingOperation(async () => {
+  const state = cleanupPermitState.get(permit);
+  const expectedBytes = state?.expectedBytes;
+  if (
+    !state ||
+    state.status !== "outstanding" ||
+    state.publicPath !== resolve(path) ||
+    state.evidenceRef !== evidenceRef ||
+    !state.pinnedFile ||
+    state.pinnedFileClosed ||
+    !expectedBytes
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+
+  const authorityLease = await acquireRecordAuthorityWithCleanupPermit(
+    permit,
+    path,
+    evidenceRef,
+    publicationHookStorage.getStore()
+  );
+  return await runWithPreservedRelease(
+    async () => {
+      if (!authorityLease.validateCleanupGeneration) {
+        throw publicationStateError(evidenceRef);
+      }
+      await authorityLease.validateCleanupGeneration();
+      const pinnedFile = state.pinnedFile;
+      if (!pinnedFile || state.pinnedFileClosed) {
+        throw publicationStateError(evidenceRef);
+      }
+      const identity = await pinnedFile.stat({ bigint: true });
+      const observed = await readBoundedOpenFile(pinnedFile, identity);
+      await authorityLease.validateCleanupGeneration();
+      if (
+        !state.generation ||
+        !identity.isFile() ||
+        !workspaceRecordPhysicalIdentityMatches(identity, state.generation) ||
+        identity.size !== BigInt(expectedBytes.length) ||
+        !observed.bytes.equals(expectedBytes) ||
+        observed.before.dev !== identity.dev ||
+        observed.before.ino !== identity.ino ||
+        observed.after.dev !== identity.dev ||
+        observed.after.ino !== identity.ino ||
+        observed.after.size !== identity.size
+      ) {
+        throw publicationStateError(evidenceRef);
+      }
+
+      const closeHook = state.afterPinnedFileClosed;
+      const hookInput = Object.freeze({ path: state.publicPath, fd: pinnedFile.fd });
+      state.pinnedFile = undefined;
+      state.pinnedFileClosed = true;
+      state.afterPinnedFileClosed = undefined;
+      let closePromise: Promise<void> | undefined;
+      const transferred: WorkspaceRecordTransferredPinnedFile = Object.freeze({
+        fd: pinnedFile.fd,
+        stat: async (options: { bigint: true }) => await pinnedFile.stat(options),
+        close: () => {
+          if (!closePromise) {
+            closePromise = pinnedFile.close().then(
+              async () => {
+                try {
+                  await closeHook?.(hookInput);
+                } catch {
+                  // Close diagnostics are observation-only.
+                }
+              },
+              async (error) => {
+                try {
+                  await closeHook?.(hookInput);
+                } catch {
+                  // Preserve the descriptor-close primary.
+                }
+                throw error;
+              }
+            );
+          }
+          return closePromise;
+        }
+      });
+      return Object.freeze({ pinnedFile: transferred, identity });
+    },
+    authorityLease.release,
+    "Workspace record publication-authority transfer and permit settlement both failed.",
+    undefined,
+    preserveTaskServiceErrorCompensationCompatibility
+  );
+  });
+}
+
+export async function refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
+  permit: WorkspaceRecordCleanupPermit,
+  path: string,
+  evidenceRef: string
+): Promise<void> {
+  const state = cleanupPermitState.get(permit);
+  const parentIdentity = state?.parentIdentity;
+  const parentPath = state?.parentPath;
+  const pinnedFile = state?.pinnedFile;
+  const generation = state?.generation;
+  const generationExpectation = state?.generationExpectation;
+  const expectedBytes = state?.expectedBytes;
+  if (
+    !state ||
+    state.status !== "outstanding" ||
+    state.publicPath !== resolve(path) ||
+    state.evidenceRef !== evidenceRef ||
+    !state.capacityActive ||
+    !parentIdentity ||
+    !parentPath ||
+    !state.parentBindingRelease ||
+    !pinnedFile ||
+    state.pinnedFileClosed ||
+    !generation ||
+    !generationExpectation ||
+    !expectedBytes
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+
+  await runWithRecordDirectoryMutationLocks([parentIdentity], async () => {
+    try {
+      const beforeParent = await lstat(parentPath, { bigint: true });
+      if (
+        !beforeParent.isDirectory() ||
+        beforeParent.isSymbolicLink() ||
+        !workspaceRecordPhysicalIdentityMatches(beforeParent, parentIdentity)
+      ) {
+        throw publicationStateError(evidenceRef);
+      }
+      const pinnedIdentity = await pinnedFile.stat({ bigint: true });
+      const observed = await readBoundedOpenFile(pinnedFile, pinnedIdentity);
+      if (
+        !pinnedIdentity.isFile() ||
+        !workspaceRecordPhysicalIdentityMatches(pinnedIdentity, generation) ||
+        pinnedIdentity.mode !== generationExpectation.mode ||
+        pinnedIdentity.nlink !== generationExpectation.nlink ||
+        pinnedIdentity.size !== BigInt(expectedBytes.length) ||
+        !observed.bytes.equals(expectedBytes) ||
+        observed.before.dev !== pinnedIdentity.dev ||
+        observed.before.ino !== pinnedIdentity.ino ||
+        observed.after.dev !== pinnedIdentity.dev ||
+        observed.after.ino !== pinnedIdentity.ino ||
+        observed.after.size !== pinnedIdentity.size
+      ) {
+        throw publicationStateError(evidenceRef);
+      }
+      const pathnameBinding = await captureCanonicalPathnameBinding(
+        state.publicPath,
+        generationExpectation,
+        generationExpectation.nlink,
+        evidenceRef
+      );
+      const afterParent = await lstat(parentPath, { bigint: true });
+      if (
+        afterParent.dev !== beforeParent.dev ||
+        afterParent.ino !== beforeParent.ino ||
+        afterParent.ctimeNs !== beforeParent.ctimeNs ||
+        afterParent.mtimeNs !== beforeParent.mtimeNs
+      ) {
+        throw publicationStateError(evidenceRef);
+      }
+      parentIdentity.ctimeNs = afterParent.ctimeNs;
+      parentIdentity.mtimeNs = afterParent.mtimeNs;
+      state.bindingTimeParentSnapshot = Object.freeze({
+        path: parentPath,
+        dev: afterParent.dev,
+        ino: afterParent.ino,
+        ctimeNs: afterParent.ctimeNs,
+        mtimeNs: afterParent.mtimeNs
+      });
+      state.pathnameBinding = pathnameBinding;
+    } catch (error) {
+      if (error instanceof TaskServiceError) throw error;
+      throw publicationStateError(evidenceRef, error);
+    }
+  });
+}
+
 export type ConditionalDeleteJsonRecordCondition<T> =
   | {
       kind: "record";
@@ -2459,6 +2690,188 @@ export async function settleWorkspaceRecordCleanupPermitAfterExactObservation(
       await authorityLease.release();
     }
   });
+}
+
+export async function validateWorkspaceRecordCleanupPermitAfterExactObservation(
+  permit: WorkspaceRecordCleanupPermit,
+  path: string,
+  evidenceRef: string,
+  acceptExactObservation: () => Promise<void> | void
+): Promise<WorkspaceRecordCleanupPermitSettlementResult> {
+  return await runWithPreservedRelease(
+    async () =>
+      await runWithRecordDirectoryBindingOperation(async () => {
+        const expected = snapshotWorkspaceRecordCleanupPermitGeneration(
+          permit,
+          path,
+          evidenceRef
+        );
+        const hooks = publicationHookStorage.getStore();
+        let authorityLease: RecordAuthorityLease;
+        try {
+          authorityLease = await acquireRecordAuthorityWithCleanupPermit(
+            permit,
+            path,
+            evidenceRef,
+            hooks,
+            { authority: "exact_observation", expected }
+          );
+        } catch (error) {
+          if (error instanceof WorkspaceRecordCleanupTerminalResultError) {
+            return error.result;
+          }
+          throw error;
+        }
+
+        return await runWithPreservedRelease(
+          async () => {
+            const admissionFailure = authorityLease.cleanupPermitAdmissionFailure;
+            if (admissionFailure !== undefined) throw admissionFailure.value;
+            const classification = await classifyWorkspaceRecordCleanupPermitGeneration(
+              permit,
+              expected,
+              "exact_observation"
+            );
+            if (
+              classification.status === "missing" ||
+              classification.status === "superseded"
+            ) {
+              return classification;
+            }
+            if (!authorityLease.validateCleanupGeneration) {
+              throw publicationStateError(evidenceRef);
+            }
+            if (hooks?.afterDurableRecordObservation) {
+              await runAuthorityMutatingCallbackBoundary(
+                () =>
+                  hooks.afterDurableRecordObservation!(
+                    Object.freeze({ path, status: "read" })
+                  ),
+                authorityLease.validateCleanupGeneration
+              );
+            } else {
+              await authorityLease.validateCleanupGeneration();
+            }
+            await acceptExactObservation();
+            return { status: "current" } as const;
+          },
+          authorityLease.release,
+          "Workspace record consumer validation and authority release both failed.",
+          undefined,
+          preserveTaskServiceErrorCompensationCompatibility
+        );
+      }),
+    async () => await cancelRecordAuthorityCleanupPermit(permit),
+    "Workspace record consumer validation and cleanup-permit cancellation both failed.",
+    undefined,
+    preserveTaskServiceErrorCompensationCompatibility
+  );
+}
+
+/**
+ * Replaces only the exact physical generation captured by a cleanup
+ * observation. Publication uses one rename commit, so no delete/create gap is
+ * exposed, and a pathname successor is reported without being rewritten.
+ */
+export async function replaceJsonRecordAfterExactObservation<T>(
+  permit: WorkspaceRecordCleanupPermit,
+  workspaceRoot: string,
+  relativeDirectorySegments: readonly string[],
+  fileName: string,
+  record: T,
+  evidenceRef: string,
+  schema: z.ZodType<T>
+): Promise<ExactWorkspaceJsonRecordReplacementResult<T>> {
+  const recordPath = workspaceRecordPath(
+    workspaceRoot,
+    [...relativeDirectorySegments, fileName],
+    evidenceRef
+  );
+  return await runWithPreservedRelease(
+    async () =>
+      await runWithRecordDirectoryBindingOperation(async () => {
+        const expected = snapshotWorkspaceRecordCleanupPermitGeneration(
+          permit,
+          recordPath,
+          evidenceRef
+        );
+        const hooks = publicationHookStorage.getStore();
+        let authorityLease: RecordAuthorityLease;
+        try {
+          authorityLease = await acquireRecordAuthorityWithCleanupPermit(
+            permit,
+            recordPath,
+            evidenceRef,
+            hooks,
+            { authority: "exact_observation", expected }
+          );
+        } catch (error) {
+          if (error instanceof WorkspaceRecordCleanupTerminalResultError) {
+            return error.result;
+          }
+          throw error;
+        }
+
+        try {
+          const admissionFailure = authorityLease.cleanupPermitAdmissionFailure;
+          if (admissionFailure !== undefined) throw admissionFailure.value;
+          const classification = await classifyWorkspaceRecordCleanupPermitGeneration(
+            permit,
+            expected,
+            "exact_observation"
+          );
+          if (
+            classification.status === "missing" ||
+            classification.status === "superseded"
+          ) {
+            return classification;
+          }
+          if (
+            classification.proof !== "exact_observation" ||
+            !authorityLease.validateCleanupGeneration
+          ) {
+            throw publicationStateError(evidenceRef);
+          }
+          await authorityLease.validateCleanupGeneration();
+
+          const prepared = await prepareJsonRecordWrite(
+            workspaceRoot,
+            relativeDirectorySegments,
+            fileName,
+            record,
+            evidenceRef,
+            schema
+          );
+          if (prepared.recordPath !== recordPath) {
+            throw publicationStateError(evidenceRef);
+          }
+          const expectedBaseline: Extract<MutableCanonicalBaseline, { status: "existing" }> = {
+            status: "existing",
+            identity: expected.generation.identity,
+            bytes: Buffer.from(expected.generation.bytes),
+            mode: expected.generation.mode,
+            nlink: expected.generation.nlink,
+            ctimeNs: expected.pathnameBinding.ctimeNs,
+            mtimeNs: expected.pathnameBinding.mtimeNs
+          };
+          const outcome =
+            await attemptPreparedJsonRecordWriteWithDirectoryBindingOperation(
+              prepared,
+              evidenceRef,
+              false,
+              { authorityLease, canonicalBaseline: expectedBaseline }
+            );
+          if (outcome.status === "failed") throw outcome.error;
+          return Object.freeze({ status: "replaced" as const, record: outcome.written.data });
+        } finally {
+          await authorityLease.release();
+        }
+      }),
+    async () => await cancelRecordAuthorityCleanupPermit(permit),
+    "Exact workspace record replacement and cleanup-permit settlement both failed.",
+    undefined,
+    preserveTaskServiceErrorCompensationCompatibility
+  );
 }
 
 /**
@@ -3788,8 +4201,10 @@ export async function publishJsonRecordWithLifecycleCallbacks<T>(
 ): Promise<T> {
   const beforeWrite = callbacks.beforeWrite;
   const afterWrite = callbacks.afterWrite;
-  const publicationHooksEntryActive =
-    publicationHookStorage.getStore() !== undefined;
+  // Root E (V33-17): derived from the marked-aware selector so the
+  // observation seam cannot flip exactGenerationPermitRequired — observation
+  // hooks observe, they never select a different write mode.
+  const publicationHooksEntryActive = workspaceRecordPublicationHooksActive();
   const lifecycleState = lifecycleStateHandle
     ? workspaceJsonRecordLifecycleStates.get(lifecycleStateHandle)
     : undefined;
@@ -4034,7 +4449,11 @@ async function writePreparedJsonRecordWithDirectoryBindingOperation<T>(
 async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
   prepared: PreparedJsonRecordWrite<T>,
   evidenceRef: string,
-  reserveCleanupPermit: boolean
+  reserveCleanupPermit: boolean,
+  exactReplacement?: Readonly<{
+    authorityLease: RecordAuthorityLease;
+    canonicalBaseline: Extract<MutableCanonicalBaseline, { status: "existing" }>;
+  }>
 ): Promise<AttemptedPreparedJsonRecordWrite<T>> {
   const {
     data,
@@ -4068,7 +4487,8 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
   };
   try {
     try {
-      authorityLease = await acquireRecordAuthority(recordPath, evidenceRef, "rename", hooks);
+      authorityLease = exactReplacement?.authorityLease ??
+        await acquireRecordAuthority(recordPath, evidenceRef, "rename", hooks);
       if (reserveCleanupPermit) {
         cleanupPermit = reserveRecordAuthorityCleanupPermit(
           authorityLease,
@@ -4081,7 +4501,8 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
         hooks?.beforeRecordAuthorityIdentitySupplier || hooks?.onAuthorityContention
           ? await readSafeRecordDirectoryIdentity(directoryPath, evidenceRef)
           : directoryIdentity;
-      canonicalBaseline = await captureMutableCanonicalBaseline(recordPath, evidenceRef);
+      canonicalBaseline = exactReplacement?.canonicalBaseline ??
+        await captureMutableCanonicalBaseline(recordPath, evidenceRef);
       if (hooks?.afterAuthorityLeaseAcquired) {
         await runAuthorityMutatingCallbackBoundary(
           () => hooks.afterAuthorityLeaseAcquired!(Object.freeze({ operation: "rename" })),
@@ -4211,7 +4632,7 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
       cleanupPermitOwnership = "none";
       await cancelRecordAuthorityCleanupPermit(cleanupPermit);
     }
-    await authorityLease?.release();
+    if (!exactReplacement) await authorityLease?.release();
   }
 }
 
@@ -9962,10 +10383,35 @@ async function recordAuthorityIdentityCandidates(
   evidenceRef: string
 ): Promise<{ exactPath: string; aliases: readonly string[] }> {
   try {
-    const candidates = await physicalAuthorityPathIdentityCandidates(recordPath, evidenceRef);
+    const observed = await physicalAuthorityPathIdentityCandidates(recordPath, evidenceRef);
+    const rewritten = publicationHookStorage.getStore()
+      ?.rewriteRecordAuthorityIdentityCandidates?.(
+        Object.freeze({
+          path: recordPath,
+          exactPath: observed.exact,
+          aliases: observed.aliases
+        })
+      );
+    const candidates = rewritten ?? {
+      exactPath: observed.exact,
+      aliases: observed.aliases
+    };
+    const stableRequestedPath = resolve(dirname(recordPath), basename(recordPath));
+    const stableAliases = Array.from(new Set([
+      stableRequestedPath,
+      // Root E (V33-14): the hashed physical-exact identity stays in every
+      // alias set so hardlink/physical unification and collision detection
+      // survive on case-sensitive filesystems, without moving the FIFO
+      // anchor off the requested pathname.
+      candidates.exactPath,
+      ...candidates.aliases
+    ]));
     return {
-      exactPath: candidates.exact,
-      aliases: Object.freeze(candidates.aliases.map(hashRecordAuthorityAlias))
+      // A hardlinked file descriptor can be canonicalized through either link.
+      // Keep FIFO identity anchored to the requested pathname while retaining
+      // the filesystem-aware shared alias for case-insensitive coordination.
+      exactPath: stableRequestedPath,
+      aliases: Object.freeze(stableAliases.map(hashRecordAuthorityAlias))
     };
   } catch (error) {
     if (error instanceof WorkspacePathSafetyError) {

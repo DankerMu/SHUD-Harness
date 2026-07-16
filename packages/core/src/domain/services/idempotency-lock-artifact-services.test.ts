@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  closeSync,
   fstat,
   fstatSync,
   mkdirSync,
@@ -48,6 +49,7 @@ import {
   lockRecordDirectorySegments,
   lockRecordEvidenceRef,
   lockRecordFileName,
+  preserveTaskServiceErrorCompensationCompatibility,
   runWithExistingWorkspaceRecordDirectoryReproof,
   sha256Hex,
   assertPathInsideWorkspace,
@@ -77,6 +79,7 @@ import {
   removeWorkspaceRecordDirectoryIfEmpty,
   runWithWorkspaceRecordAuthorityDeadline,
   runWithWorkspaceRecordCompensationTestHooks,
+  runWithWorkspaceRecordObservationHooksForTest,
   runWithWorkspaceRecordPublicationHooks,
   WorkspaceRecordConditionalDeleteError,
   workspaceRecordAuthorityDiagnosticsForTest,
@@ -84,6 +87,7 @@ import {
   workspaceRecordDirectoryBindingSequenceForTest,
   workspaceRecordPhysicalIdentityMatches,
   workspaceRecordPath,
+  workspaceRecordPublicationHooksActive,
   writeJsonRecord,
   type WorkspaceRecordPublicationHookInput,
   type WorkspaceJsonRecordLifecycleCallbacks,
@@ -111,6 +115,11 @@ import {
 } from "./compensation-error-preservation";
 
 const tempRoots: string[] = [];
+// Hook-sourced tasks-root proof call index of the final pre-commit proof for
+// a single-lane hydration (see hydrateTasksFromDiskAttempt): initial expected
+// stats, then the enumeration / per-entry / pre-read / post-read proofs, then
+// this final pre-commit proof, then the post-commit proof.
+const S34_FINAL_PRE_COMMIT_PROOF_CALL = 6;
 const specialEntryServers = new Map<string, Server>();
 const distinctCaseEntriesSupported = await detectDistinctCaseEntriesSupport();
 const caseAliasWorkspaceSupported = await detectCaseAliasWorkspaceSupport();
@@ -5417,12 +5426,7 @@ describe("idempotency, lock, and artifact services", () => {
     const aggregate = knownPreservedCompensationAggregate(failure);
 
     expect(semanticPrimaryError(failure)).toBe(outerPrimary);
-    expect(aggregate.errors).toEqual([
-      innerPrimary,
-      innerLeaf,
-      innerPrimary,
-      innerLeaf
-    ]);
+    expect(aggregate.errors).toEqual([innerPrimary, innerLeaf, innerPrimary]);
     expect(
       aggregate.errors.some(
         (error) => error instanceof PreservedErrorCompensationEnvelope
@@ -6131,9 +6135,13 @@ describe("idempotency, lock, and artifact services", () => {
     );
     const linked = createSignal();
     const linkGate = createAsyncGate();
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let privateGenerationPath: string | undefined;
     const owner = runWithWorkspaceRecordPublicationHooks(
       {
-        afterCanonicalLink: async () => {
+        afterCanonicalLink: async ({ temporaryPath }) => {
+          privateGenerationPath = temporaryPath;
           linked.resolve();
           await linkGate.wait;
         }
@@ -6166,8 +6174,21 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
     await contentions[1]!.promise;
+    let driftDeleterIdentity = false;
     const deleter = runWithWorkspaceRecordPublicationHooks(
-      { onAuthorityContention: () => contentions[2]!.resolve() },
+      {
+        onAuthorityContention: () => {
+          driftDeleterIdentity = true;
+          contentions[2]!.resolve();
+        },
+        rewriteRecordAuthorityIdentityCandidates: ({ exactPath, aliases }) =>
+          driftDeleterIdentity
+            ? {
+                exactPath: privateGenerationPath!,
+                aliases: [privateGenerationPath!]
+              }
+            : { exactPath, aliases }
+      },
       () => conditionalDeleteJsonRecord(path, evidenceRef, schema, {
         kind: "record",
         expected: record,
@@ -6176,10 +6197,23 @@ describe("idempotency, lock, and artifact services", () => {
     );
     await contentions[2]!.promise;
     linkGate.open();
-    expect(await owner).toEqual({ status: "created", record });
-    expect(await reader).toEqual(record);
-    expect(await creator).toEqual({ status: "exists" });
-    expect(await deleter).toEqual({ status: "deleted" });
+    const settlements = await Promise.allSettled([owner, reader, creator, deleter]);
+    expect(settlements.map((settlement) => settlement.status)).toEqual([
+      "fulfilled",
+      "fulfilled",
+      "fulfilled",
+      "fulfilled"
+    ]);
+    expect(settlements.map((settlement) =>
+      settlement.status === "fulfilled" ? settlement.value : settlement.reason
+    )).toEqual([
+      { status: "created", record },
+      record,
+      { status: "exists" },
+      { status: "deleted" }
+    ]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
   test("same-path reader retains authority while conditional delete isolates the generation", async () => {
@@ -8411,7 +8445,8 @@ describe("idempotency, lock, and artifact services", () => {
       "Workspace record authority lease was not acquired before the bounded deadline."
     );
     expect(elapsedMs).toBeGreaterThanOrEqual(4_800);
-    expect(elapsedMs).toBeLessThan(6_500);
+    // Upper band widened for host-load tolerance (V34-06): nominal path ≈5.0 s; load only inflates elapsedMs. Lower bound is the real oracle.
+    expect(elapsedMs).toBeLessThan(9_000);
     expectErrorNotToLeakRecordContent(deadlineError, tempRoot);
     expect(await service.getLock("task", lockId)).toBeUndefined();
   }, 10_000);
@@ -16235,6 +16270,392 @@ describe("idempotency, lock, and artifact services", () => {
     expect(reacquired.record.result_ref).toBeUndefined();
   });
 
+  test("IdempotencyRecord completed invalidation durably quarantines pre-write and post-release failures", async () => {
+    for (const failureClass of ["pre_write", "post_release"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const rawKey = `task:create:invalidate-recovery-${failureClass}`;
+      const requestDigest = `digest-invalidate-recovery-${failureClass}`;
+      const resultRef = `TASK-invalidate-recovery-${failureClass}`;
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+        idempotencyRecordEvidenceRef("task", rawKey)
+      );
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+      const marker = new Error(`completed invalidation ${failureClass} marker`);
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+      await service.completeRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        resultRef
+      });
+      let matchingHookCalls = 0;
+
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: ({ canonicalPath }) => {
+              if (failureClass !== "pre_write" || canonicalPath !== recordPath) return;
+              matchingHookCalls += 1;
+              if (matchingHookCalls === 1) throw marker;
+            },
+            beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+              if (
+                failureClass !== "post_release" ||
+                path !== guardPath ||
+                operation !== "conditional_delete"
+              ) {
+                return;
+              }
+              matchingHookCalls += 1;
+              if (matchingHookCalls === 1) throw marker;
+            }
+          },
+          () =>
+            service.invalidateCompletedRecord({
+              scope: "task",
+              key: rawKey,
+              requestDigest,
+              resultRef
+            })
+        )
+      );
+
+      expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
+      expect(matchingHookCalls).toBe(failureClass === "pre_write" ? 1 : 2);
+      if (failureClass === "pre_write") {
+        expect(semanticPrimaryError(failure)).toBe(marker);
+      } else {
+        expect(failure).toBeInstanceOf(TaskServiceError);
+        expect((failure as TaskServiceError).message).toBe(
+          "Idempotency transition artifact release did not settle safely."
+        );
+      }
+      expect(await service.getRecord("task", rawKey)).toMatchObject({
+        status: failureClass === "pre_write" ? "completed" : "failed",
+        request_digest: requestDigest,
+        ...(failureClass === "pre_write" ? { result_ref: resultRef } : {})
+      });
+      await expectPathMissing(guardPath);
+      await expectPathMissing(cleanupLockPath);
+
+      const repairedRetry = await service.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      });
+      expect(repairedRetry.status).toBe(
+        failureClass === "pre_write" ? "completed" : "acquired"
+      );
+      expect(repairedRetry.record.status).toBe(
+        failureClass === "pre_write" ? "completed" : "started"
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("IdempotencyRecord invalidation preserves ordered write failures before independent quarantine", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:invalidate-ordered-write-failures";
+    const requestDigest = "digest-invalidate-ordered-write-failures";
+    const resultRef = "TASK-invalidate-ordered-write-failures";
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      idempotencyRecordEvidenceRef("task", rawKey)
+    );
+    const firstWriteFailure = new Error("first invalidation write failure");
+    const recoveryWriteFailure = new Error("recovery invalidation write failure");
+    const writeFailures = [firstWriteFailure, recoveryWriteFailure];
+    let failedWriteCalls = 0;
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const completed = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef
+    });
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: ({ canonicalPath }) => {
+            if (canonicalPath !== recordPath || failedWriteCalls >= writeFailures.length) return;
+            const failure = writeFailures[failedWriteCalls]!;
+            failedWriteCalls += 1;
+            throw failure;
+          }
+        },
+        () =>
+          service.invalidateCompletedRecord({
+            scope: "task",
+            key: rawKey,
+            requestDigest,
+            resultRef
+          })
+      )
+    );
+
+    expect(failedWriteCalls).toBe(1);
+    expect(semanticPrimaryError(failure)).toBe(firstWriteFailure);
+    expect(countErrorNodes(failure, (error) => error === firstWriteFailure)).toBe(1);
+    expect(countErrorNodes(failure, (error) => error === recoveryWriteFailure)).toBe(0);
+    expect(await service.getRecord("task", rawKey)).toEqual(completed);
+
+    // Root A (V32-01): independent quarantine of a completed record requires
+    // the exact transported mutation authority; tokenless mutation is refused.
+    const tokenlessRefusal = await captureTaskServiceError(() =>
+      service.quarantineRecordAfterUnsafeRollback({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        expectedCompletedAuthority: { resultRef }
+      })
+    );
+    expect(tokenlessRefusal.code).toBe("record_malformed");
+    expect(await service.getRecord("task", rawKey)).toEqual(completed);
+    const consumed = await service.consumeCompletedRecord(
+      { scope: "task", key: rawKey, requestDigest },
+      async () => ({ status: "accepted" as const, value: undefined })
+    );
+    expect(consumed.status).toBe("accepted");
+    if (consumed.status !== "accepted") throw new Error("Expected completed authority.");
+    const quarantined = await service.quarantineRecordAfterUnsafeRollback({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      expectedCompletedAuthority: {
+        resultRef,
+        mutationAuthority: consumed.mutationAuthority
+      }
+    });
+    expect(quarantined.status).toBe("failed");
+    expect(quarantined.result_ref).toBeUndefined();
+    expect(await service.getRecord("task", rawKey)).toEqual(quarantined);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("IdempotencyRecord failed invalidation retains an exact private fail-intent guard", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:r27-retained-fail-intent";
+    const requestDigest = "digest-r27-retained-fail-intent";
+    const resultRef = "TASK-r27-retained-fail-intent";
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef
+    });
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      idempotencyRecordEvidenceRef("task", rawKey)
+    );
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    const failures = [new Error("R27 first failed write"), new Error("R27 second failed write")];
+    let failedWrites = 0;
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: ({ canonicalPath }) => {
+            if (canonicalPath !== recordPath || failedWrites >= failures.length) return;
+            const marker = failures[failedWrites]!;
+            failedWrites += 1;
+            throw marker;
+          }
+        },
+        () =>
+          service.invalidateCompletedRecord({
+            scope: "task",
+            key: rawKey,
+            requestDigest,
+            resultRef
+          })
+      )
+    );
+    expect(failedWrites).toBe(1);
+    expect(countErrorNodes(failure, (error) => error === failures[0])).toBe(1);
+    expect(countErrorNodes(failure, (error) => error === failures[1])).toBe(0);
+    expect(await service.getRecord("task", rawKey)).toMatchObject({
+      status: "completed",
+      request_digest: requestDigest,
+      result_ref: resultRef
+    });
+    await expectPathMissing(guardPath);
+  });
+
+  test("IdempotencyRecord fail-intent replay preserves mismatches and recovers an exact stale guard", async () => {
+    for (const mismatch of ["digest", "result_ref"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:r27-fail-intent-${mismatch}`;
+      const requestDigest = `digest-r27-fail-intent-${mismatch}`;
+      const resultRef = `TASK-r27-fail-intent-${mismatch}`;
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+      const completed = await service.completeRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        resultRef
+      });
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const guard = {
+        guard_id: `r27-${mismatch}-guard`,
+        owner_pid: process.pid,
+        acquired_at_ms: Date.now(),
+        acquired_at: new Date().toISOString(),
+        intent: "fail",
+        request_digest: mismatch === "digest" ? `${requestDigest}-replacement` : requestDigest,
+        result_ref: mismatch === "result_ref" ? `${resultRef}-replacement` : resultRef
+      };
+      await writeFile(guardPath, `${JSON.stringify(guard)}\n`, { flag: "wx", mode: 0o600 });
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+
+      const error = await captureTaskServiceError(() =>
+        service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+      );
+
+      expect(error.code).toBe("record_malformed");
+      expect(error.status).toBe(409);
+      expect(await service.getRecord("task", rawKey)).toEqual(completed);
+      expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(guard);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:r27-stale-exact-fail-intent";
+    const requestDigest = "digest-r27-stale-exact-fail-intent";
+    const resultRef = "TASK-r27-stale-exact-fail-intent";
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef
+    });
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    await writeFile(
+      guardPath,
+      `${JSON.stringify({
+        guard_id: "r27-stale-exact-fail-intent",
+        owner_pid: 9_999_999,
+        acquired_at_ms: Date.now() - 31_000,
+        acquired_at: "2026-07-07T13:34:00.000Z",
+        intent: "fail",
+        request_digest: requestDigest,
+        result_ref: resultRef
+      })}\n`,
+      { flag: "wx", mode: 0o600 }
+    );
+
+    const recovered = await service.lookupReplay({ scope: "task", key: rawKey, requestDigest });
+
+    expect(recovered.status).toBe("completed");
+    if (recovered.status !== "completed") {
+      throw new Error("Expected stale fail-intent recovery to preserve completed authority.");
+    }
+    expect(recovered.record.status).toBe("completed");
+    expect(recovered.record.result_ref).toBe(resultRef);
+    await expectPathMissing(guardPath);
+  });
+
+  test("IdempotencyRecord fail-intent recovery preserves a replacement guard generation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:r27-fail-intent-replacement";
+    const requestDigest = "digest-r27-fail-intent-replacement";
+    const resultRef = "TASK-r27-fail-intent-replacement";
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef
+    });
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    const originalGuard = {
+      guard_id: "r27-fail-intent-original",
+      owner_pid: 9_999_999,
+      acquired_at_ms: Date.now() - 31_000,
+      acquired_at: "2026-07-07T13:34:00.000Z",
+      intent: "fail",
+      request_digest: requestDigest,
+      result_ref: resultRef
+    };
+    const replacementGuard = {
+      ...originalGuard,
+      guard_id: "r27-fail-intent-replacement"
+    };
+    await writeFile(guardPath, `${JSON.stringify(originalGuard)}\n`, {
+      flag: "wx",
+      mode: 0o600
+    });
+    const displacedPath = join(tempRoot, "r27-displaced-fail-intent-guard");
+    let replacementWrites = 0;
+
+    const recoveryError = await captureThrownValue(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeConditionalDelete: async ({ path, conditionStatus }) => {
+            if (path !== guardPath || replacementWrites > 0) return;
+            expect(conditionStatus).toBe("matched");
+            replacementWrites += 1;
+            await rename(path, displacedPath);
+            await writeFile(path, `${JSON.stringify(replacementGuard)}\n`, {
+              flag: "wx",
+              mode: 0o600
+            });
+          }
+        },
+        () => service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+      )
+    );
+
+    expect(replacementWrites).toBe(1);
+    expect(recoveryError).toBeInstanceOf(TaskServiceError);
+    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(replacementGuard);
+    expect(JSON.parse(await readFile(displacedPath, "utf8"))).toEqual(originalGuard);
+    expect(await service.getRecord("task", rawKey)).toMatchObject({
+      status: "completed",
+      request_digest: requestDigest,
+      result_ref: resultRef
+    });
+
+    const blocked = await captureTaskServiceError(() =>
+      service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+    );
+    expect(blocked.status).toBe(409);
+    expect(blocked.retryable).toBe(true);
+    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(replacementGuard);
+    expect(
+      JSON.parse(
+        await readFile(idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey), "utf8")
+      )
+    ).toMatchObject({ owner_pid: process.pid });
+  });
+
   test("IdempotencyRecord completed invalidation requires exact digest and result_ref", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -16593,7 +17014,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await seedService.getRecord("task", "task:create:seed-started")).toEqual(seeded);
   });
 
-  test("IdempotencyRecord unsafe rollback quarantine fails the claim and preserves completed authority", async () => {
+  test("IdempotencyRecord unsafe rollback quarantine fails started, completed, and invalid-completed authority", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const service = createIdempotencyRecordService({
@@ -16604,6 +17025,8 @@ describe("idempotency, lock, and artifact services", () => {
     const retryableDigest = "digest-unsafe-rollback-retryable";
     const completedKey = "task:create:unsafe-rollback-completed";
     const completedDigest = "digest-unsafe-rollback-completed";
+    const invalidCompletedKey = "task:create:unsafe-rollback-invalid-completed";
+    const invalidCompletedDigest = "digest-unsafe-rollback-invalid-completed";
 
     const started = await service.beginRecord({
       scope: "task",
@@ -16632,10 +17055,33 @@ describe("idempotency, lock, and artifact services", () => {
       requestDigest: completedDigest,
       resultRef: "TASK-unsafe-rollback-authority"
     });
-    const preserved = await service.quarantineRecordAfterUnsafeRollback({
+    // Root A (V32-01): completed mutation requires the transported exact
+    // authority; the tokenless fallback is refused and preserves the record.
+    const tokenlessCompletedRefusal = await captureTaskServiceError(() =>
+      service.quarantineRecordAfterUnsafeRollback({
+        scope: "task",
+        key: completedKey,
+        requestDigest: completedDigest,
+        expectedCompletedAuthority: {
+          resultRef: "TASK-unsafe-rollback-authority"
+        }
+      })
+    );
+    const completedConsumption = await service.consumeCompletedRecord(
+      { scope: "task", key: completedKey, requestDigest: completedDigest },
+      async () => ({ status: "accepted" as const, value: undefined })
+    );
+    if (completedConsumption.status !== "accepted") {
+      throw new Error("Expected completed authority.");
+    }
+    const quarantinedCompleted = await service.quarantineRecordAfterUnsafeRollback({
       scope: "task",
       key: completedKey,
-      requestDigest: completedDigest
+      requestDigest: completedDigest,
+      expectedCompletedAuthority: {
+        resultRef: "TASK-unsafe-rollback-authority",
+        mutationAuthority: completedConsumption.mutationAuthority
+      }
     });
     const mismatch = await captureTaskServiceError(() =>
       service.quarantineRecordAfterUnsafeRollback({
@@ -16644,16 +17090,131 @@ describe("idempotency, lock, and artifact services", () => {
         requestDigest: "digest-unsafe-rollback-foreign"
       })
     );
+    const invalidCompletedPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(invalidCompletedKey)],
+      idempotencyRecordEvidenceRef("task", invalidCompletedKey)
+    );
+    await writeFile(
+      invalidCompletedPath,
+      `${JSON.stringify({
+        key: invalidCompletedKey,
+        scope: "task",
+        request_digest: invalidCompletedDigest,
+        status: "completed",
+        created_at: "2026-07-07T13:34:31.000Z",
+        updated_at: "2026-07-07T13:34:31.000Z"
+      })}\n`,
+      { flag: "wx" }
+    );
+    const tokenlessInvalidCompletedRefusal = await captureTaskServiceError(() =>
+      service.quarantineRecordAfterUnsafeRollback({
+        scope: "task",
+        key: invalidCompletedKey,
+        requestDigest: invalidCompletedDigest,
+        expectedCompletedAuthority: {
+          resultRef: undefined
+        }
+      })
+    );
+    const invalidCompletedConsumption = await service.consumeCompletedRecord(
+      {
+        scope: "task",
+        key: invalidCompletedKey,
+        requestDigest: invalidCompletedDigest
+      },
+      async () => ({ status: "accepted" as const, value: undefined })
+    );
+    if (invalidCompletedConsumption.status !== "invalid_completed") {
+      throw new Error("Expected invalid-completed authority.");
+    }
+    const quarantinedInvalidCompleted = await service.quarantineRecordAfterUnsafeRollback({
+      scope: "task",
+      key: invalidCompletedKey,
+      requestDigest: invalidCompletedDigest,
+      expectedCompletedAuthority: {
+        resultRef: undefined,
+        mutationAuthority: invalidCompletedConsumption.mutationAuthority
+      }
+    });
 
     expect(started.status).toBe("acquired");
     expect(failed.status).toBe("failed");
     expect(failed.result_ref).toBeUndefined();
     expect(reacquired.status).toBe("acquired");
     expect(reacquired.record.status).toBe("started");
-    expect(preserved).toEqual(completed);
-    expect(await service.getRecord("task", completedKey)).toEqual(completed);
+    expect(completed.status).toBe("completed");
+    expect(tokenlessCompletedRefusal.code).toBe("record_malformed");
+    expect(tokenlessInvalidCompletedRefusal.code).toBe("record_malformed");
+    expect(quarantinedCompleted.status).toBe("failed");
+    expect(quarantinedCompleted.result_ref).toBeUndefined();
+    expect(await service.getRecord("task", completedKey)).toEqual(quarantinedCompleted);
+    expect(quarantinedInvalidCompleted.status).toBe("failed");
+    expect(quarantinedInvalidCompleted.result_ref).toBeUndefined();
+    expect(await service.getRecord("task", invalidCompletedKey)).toEqual(
+      quarantinedInvalidCompleted
+    );
     expect(mismatch.code).toBe("idempotency_mismatch");
     expect(mismatch.status).toBe(422);
+  });
+
+  test("IdempotencyRecord unsafe rollback quarantine fails closed on malformed guards for every consumable state", async () => {
+    for (const recordState of ["started", "completed", "invalid_completed"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:quarantine-malformed-guard-${recordState}`;
+      const requestDigest = `digest-quarantine-malformed-guard-${recordState}`;
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      const begin = await service.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      });
+      if (recordState === "completed") {
+        await service.completeRecord({
+          scope: "task",
+          key: rawKey,
+          requestDigest,
+          resultRef: `TASK-quarantine-malformed-guard-${recordState}`
+        });
+      } else if (recordState === "invalid_completed") {
+        const recordPath = workspaceRecordPath(
+          workspaceRoot,
+          ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+          idempotencyRecordEvidenceRef("task", rawKey)
+        );
+        await writeFile(
+          recordPath,
+          `${JSON.stringify({
+            ...begin.record,
+            status: "completed",
+            updated_at: "2026-07-07T13:34:32.000Z"
+          })}\n`
+        );
+      }
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+      await writeFile(guardPath, "{", { flag: "wx", mode: 0o600 });
+      const guardBytes = await readFile(guardPath);
+      const recordBefore = await service.getRecord("task", rawKey);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+
+      const error = await captureTaskServiceError(() =>
+        service.quarantineRecordAfterUnsafeRollback({
+          scope: "task",
+          key: rawKey,
+          requestDigest
+        })
+      );
+
+      expect(error.code).toBe("record_malformed");
+      expect(await service.getRecord("task", rawKey)).toEqual(recordBefore);
+      expect(await readFile(guardPath)).toEqual(guardBytes);
+      await expectPathMissing(cleanupLockPath);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
   });
 
   test("IdempotencyRecord malformed transition guard fails bounded without completing", async () => {
@@ -17104,7 +17665,7 @@ describe("idempotency, lock, and artifact services", () => {
     );
   });
 
-  test("IdempotencyRecord malformed rollback cleanup deletes its exact admitted generation", async () => {
+  test("IdempotencyRecord malformed rollback cleanup retains its exact generation", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const cleanupPermitBaseline = workspaceRecordAuthorityDiagnosticsForTest().cleanupPermits;
@@ -17118,26 +17679,28 @@ describe("idempotency, lock, and artifact services", () => {
     const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
     await writeFile(guardPath, "{", { flag: "wx", mode: 0o600 });
 
-    const failed = await service.recoverFailedRecordAfterRollback({
-      scope: "task",
-      key: rawKey,
-      requestDigest
-    });
+    const error = await captureTaskServiceError(() =>
+      service.recoverFailedRecordAfterRollback({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      })
+    );
 
     expect(begin.status).toBe("acquired");
-    expect(failed.status).toBe("failed");
-    await expectPathMissing(guardPath);
+    expect(error.code).toBe("record_malformed");
+    expect(await readFile(guardPath, "utf8")).toBe("{");
     await expectPathMissing(idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey));
     expect(
       (await readdir(join(workspaceRoot, "tasks", "_idempotency", "task"))).sort()
-    ).toEqual([idempotencyRecordFileName(rawKey)]);
-    expect(await service.getRecord("task", rawKey)).toEqual(failed);
+    ).toEqual([idempotencyRecordFileName(rawKey), basename(guardPath)].sort());
+    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
     expect(workspaceRecordAuthorityDiagnosticsForTest().cleanupPermits).toBe(
       cleanupPermitBaseline
     );
   });
 
-  test("IdempotencyRecord malformed rollback cleanup rejects replacement byte and parent drift", async () => {
+  test("IdempotencyRecord malformed rollback cleanup never admits destructive drift hooks", async () => {
     for (const drift of ["replacement", "bytes", "parent-aba"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
       tempRoots.push(tempRoot);
@@ -17181,23 +17744,12 @@ describe("idempotency, lock, and artifact services", () => {
         )
       );
 
-      const admitted = admittedGeneration;
-      if (!admitted) throw new Error(`Expected malformed ${drift} admission.`);
       expect(begin.status).toBe("acquired");
-      expect(error.code).toBe("workspace_path_not_safe");
+      expect(admittedGeneration).toBeUndefined();
+      expect(error.code).toBe("record_malformed");
       expect(error.retryable).toBe(false);
-      expect(await readFile(guardPath)).toEqual(
-        drift === "parent-aba" ? originalBytes : driftedBytes
-      );
-      if (drift === "replacement") {
-        expect(await readFile(displacedPath)).toEqual(originalBytes);
-        expect(
-          workspaceRecordPhysicalIdentityMatches(
-            await readOwnedFileState(guardPath),
-            admitted
-          )
-        ).toBe(false);
-      }
+      expect(await readFile(guardPath)).toEqual(originalBytes);
+      await expectPathMissing(displacedPath);
       expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
       expect(
         (await readdir(dirname(guardPath))).filter(isOwnedRecordPath)
@@ -17291,7 +17843,7 @@ describe("idempotency, lock, and artifact services", () => {
     await expectPathMissing(join(workspaceRoot, "tasks", task.task_id));
   });
 
-  test("TaskCard unsafe rollback evicts cache without following a replaced lane", async () => {
+  test("TaskCard unsafe rollback preserves cache without following an unknown lane", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const service = createTaskCardService({
@@ -17319,11 +17871,11 @@ describe("idempotency, lock, and artifact services", () => {
     const rollbackError = await captureTaskServiceError(() =>
       service.rollbackTaskForIdempotency(task.task_id)
     );
-    const detailError = await captureTaskServiceError(() => service.getTask(task.task_id));
+    const cachedTask = await service.getTask(task.task_id);
 
     expect(rollbackError.code).toBe("task_lane_not_directory");
-    expect(await service.listTasks()).toEqual([]);
-    expect(detailError.code).toBe("task_not_found");
+    expect(await service.listTasks()).toEqual([task]);
+    expect(cachedTask).toEqual(task);
     expect(await readFile(outsideSentinel, "utf8")).toBe("external bytes must survive");
   });
 
@@ -19617,7 +20169,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
-  test("TaskCard rollback preserves a valid successor already current at observation", async () => {
+  test("TaskCard rollback rejects stale authority and preserves a valid current successor", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const service = createTaskCardService({
@@ -19650,8 +20202,11 @@ describe("idempotency, lock, and artifact services", () => {
     const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
     const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
 
-    await service.rollbackTaskForIdempotency(task.task_id, task);
+    const rollbackError = await captureTaskServiceError(() =>
+      service.rollbackTaskForIdempotency(task.task_id, task)
+    );
 
+    expect(rollbackError.code).toBe("task_snapshot_mismatch");
     expect(
       workspaceRecordPhysicalIdentityMatches(successorIdentity, originalIdentity)
     ).toBe(false);
@@ -19914,6 +20469,730 @@ describe("idempotency, lock, and artifact services", () => {
     await service.cancelTaskSnapshotCleanupObservation(missingObservation);
     await expectObservationSettled(missingObservation);
     expectDiagnosticsSettled();
+  });
+
+  test("TaskCard exact acceptance rejects a changed observation and boundedly installs its durable successor", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-r23-exact-accept-successor";
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:08.375Z"),
+      taskIdFactory: () => taskId
+    });
+    const taskA = await service.createTask({
+      type: "engineering",
+      title: "R23 exact acceptance A",
+      question_or_goal: "Reject stale observation authority and converge the cache.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const snapshotA = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<
+      string,
+      unknown
+    > & { task_card: TaskCard };
+    const identityA = await readFileWithIdentity(snapshotPath);
+    const taskB: TaskCard = { ...taskA, title: "R23 exact acceptance B" };
+    const bytesB = Buffer.from(
+      `${JSON.stringify({ ...snapshotA, task_card: taskB }, null, 2)}\n`
+    );
+    const tempBPath = `${snapshotPath}.b`;
+    await writeFile(tempBPath, bytesB, { flag: "wx", mode: 0o600 });
+    await rename(tempBPath, snapshotPath);
+    const identityB = await readFileWithIdentity(snapshotPath);
+    const taskD: TaskCard = { ...taskB, title: "R23 exact acceptance D" };
+    const bytesD = Buffer.from(
+      `${JSON.stringify({ ...snapshotA, task_card: taskD }, null, 2)}\n`
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const observation = await service.observeTaskSnapshotForCleanup(taskId);
+    if (observation.status !== "record") {
+      throw new Error("Expected a valid R23 successor observation.");
+    }
+    expect(observation.task).toEqual(taskB);
+    expect(workspaceRecordAuthorityDiagnosticsForTest().cleanupPermits).toBe(
+      authorityBaseline.cleanupPermits + 1
+    );
+    let replacementCount = 0;
+    let identityD: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
+
+    const settlementError = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeCleanupPermitIdentityResolution: async ({ path }) => {
+            if (path !== snapshotPath || replacementCount > 0) return;
+            replacementCount += 1;
+            const tempDPath = `${snapshotPath}.d`;
+            await writeFile(tempDPath, bytesD, { flag: "wx", mode: 0o600 });
+            await rename(tempDPath, snapshotPath);
+            identityD = await readFileWithIdentity(snapshotPath);
+          }
+        },
+        () => service.acceptTaskSnapshotCleanupObservation(observation)
+      )
+    );
+
+    expect(settlementError.code).toBe("task_snapshot_mismatch");
+    expect(settlementError.message).toBe(
+      "Observed task snapshot changed before exact cache settlement."
+    );
+    expect(replacementCount).toBe(1);
+    expect(identityD).toBeDefined();
+    expect(workspaceRecordPhysicalIdentityMatches(identityB, identityA)).toBe(false);
+    expect(workspaceRecordPhysicalIdentityMatches(identityD!, identityB)).toBe(false);
+    expect(await readFileWithIdentity(snapshotPath)).toEqual(identityD!);
+    expect(identityD!.bytes).toEqual(bytesD);
+    expect(await service.getTask(taskId)).toEqual(taskD);
+    expect(await service.listTasks()).toEqual([taskD]);
+    const freshService = createTaskCardService({ workspaceRoot });
+    expect(await freshService.getTaskFromSnapshot(taskId)).toEqual(taskD);
+    expect(await freshService.listTasks()).toEqual([taskD]);
+    const settledReuseError = await captureError(() =>
+      service.cancelTaskSnapshotCleanupObservation(observation)
+    );
+    expect(settledReuseError).toBeInstanceOf(TypeError);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("TaskCard cache generations preserve a newer direct read when stale settlement re-observation fails", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-r23-cache-generation";
+    const reobservationMarker = new Error("R23 bounded re-observation marker");
+    let failReobservations = false;
+    const service = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:08.500Z"),
+      taskIdFactory: () => taskId,
+      snapshotReadHooks: {
+        beforeSnapshotOpen: () => {
+          if (failReobservations) throw reobservationMarker;
+        }
+      }
+    });
+    const taskA = await service.createTask({
+      type: "engineering",
+      title: "R23 cache generation A",
+      question_or_goal: "Keep newer durable cache authority across stale settlement.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const snapshotA = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<
+      string,
+      unknown
+    > & { task_card: TaskCard };
+    const taskB: TaskCard = { ...taskA, title: "R23 cache generation B" };
+    const bytesB = Buffer.from(
+      `${JSON.stringify({ ...snapshotA, task_card: taskB }, null, 2)}\n`
+    );
+    const temporaryB = `${snapshotPath}.b`;
+    await writeFile(temporaryB, bytesB, { flag: "wx", mode: 0o600 });
+    await rename(temporaryB, snapshotPath);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const observation = await service.observeTaskSnapshotForCleanup(taskId);
+    if (observation.status !== "record") {
+      throw new Error("Expected an observed B cache generation.");
+    }
+    expect(observation.task).toEqual(taskB);
+
+    const taskD: TaskCard = { ...taskB, title: "R23 cache generation D" };
+    const bytesD = Buffer.from(
+      `${JSON.stringify({ ...snapshotA, task_card: taskD }, null, 2)}\n`
+    );
+    const temporaryD = `${snapshotPath}.d`;
+    await writeFile(temporaryD, bytesD, { flag: "wx", mode: 0o600 });
+    await rename(temporaryD, snapshotPath);
+    const identityD = await readFileWithIdentity(snapshotPath);
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(taskD);
+    failReobservations = true;
+
+    const settlementError = await captureTaskServiceError(() =>
+      service.acceptTaskSnapshotCleanupObservation(observation)
+    );
+
+    expect(settlementError.code).toBe("task_snapshot_mismatch");
+    expect(countErrorNodes(settlementError, (error) => error === reobservationMarker)).toBe(1);
+    expect(await service.getTask(taskId)).toEqual(taskD);
+    expect(await service.listTasks()).toEqual([taskD]);
+    expect(await readFileWithIdentity(snapshotPath)).toEqual(identityD);
+    expect(identityD.bytes).toEqual(bytesD);
+    const freshService = createTaskCardService({ workspaceRoot });
+    expect(await freshService.getTaskFromSnapshot(taskId)).toEqual(taskD);
+    expect(await freshService.listTasks()).toEqual([taskD]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S29-P62-05 TaskCard hydration returns durable B instead of stale cached D", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-r23-hydration-generation";
+    const writer = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:08.562Z"),
+      taskIdFactory: () => taskId
+    });
+    const taskB = await writer.createTask({
+      type: "engineering",
+      title: "R23 hydration generation B",
+      question_or_goal: "Keep hydration from replacing a newer direct-read generation.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const snapshotB = JSON.parse(await readFile(snapshotPath, "utf8")) as Record<
+      string,
+      unknown
+    > & { task_card: TaskCard };
+    const bytesB = await readFile(snapshotPath);
+    const taskD: TaskCard = { ...taskB, title: "R23 hydration generation D" };
+    const bytesD = Buffer.from(
+      `${JSON.stringify({ ...snapshotB, task_card: taskD }, null, 2)}\n`
+    );
+    const hydrationRead = createSignal();
+    const hydrationGate = createAsyncGate();
+    let snapshotHookCalls = 0;
+    const service = createTaskCardService({
+      workspaceRoot,
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async ({ snapshotPath: observedPath }) => {
+          if (observedPath !== snapshotPath) return;
+          snapshotHookCalls += 1;
+          if (snapshotHookCalls !== 1) return;
+          hydrationRead.resolve();
+          await hydrationGate.wait;
+        }
+      }
+    });
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const hydrationList = service.listTasks();
+    await Promise.race([
+      hydrationRead.promise,
+      timeoutAfter(1_000, "hydration did not hold its observed B generation")
+    ]);
+    const temporaryD = `${snapshotPath}.d`;
+    await writeFile(temporaryD, bytesD, { flag: "wx", mode: 0o600 });
+    await rename(temporaryD, snapshotPath);
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(taskD);
+    const temporaryB = `${snapshotPath}.b`;
+    await writeFile(temporaryB, bytesB, { flag: "wx", mode: 0o600 });
+    await rename(temporaryB, snapshotPath);
+    hydrationGate.open();
+
+    expect(await hydrationList).toEqual([taskB]);
+    expect(await service.getTask(taskId)).toEqual(taskB);
+    expect(await service.listTasks()).toEqual([taskB]);
+    // Strategy 29 makes the exact durable B re-observation authoritative over
+    // the previously cached D generation.
+    expect(snapshotHookCalls).toBe(3);
+    const finalTemporaryD = `${snapshotPath}.final-d`;
+    await writeFile(finalTemporaryD, bytesD, { flag: "wx", mode: 0o600 });
+    await rename(finalTemporaryD, snapshotPath);
+    const identityD = await readFileWithIdentity(snapshotPath);
+    const freshService = createTaskCardService({ workspaceRoot });
+    expect(await freshService.listTasks()).toEqual([taskD]);
+    expect(await readFileWithIdentity(snapshotPath)).toEqual(identityD);
+    expect(identityD.bytes).toEqual(bytesD);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("TaskCard direct-read success remains locally visible across both failed-reader orderings", async () => {
+    for (const ordering of ["success_first", "failure_first"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = `TASK-r27-direct-read-${ordering}`;
+      const readEntered = createSignal();
+      const readGate = createAsyncGate();
+      const failedReadMarker = new Error(`R27 failed direct read ${ordering}`);
+      let hookCalls = 0;
+      const service = createTaskCardService({
+        workspaceRoot,
+        snapshotReadHooks: {
+          beforeSnapshotOpen: async () => {
+            hookCalls += 1;
+            if (hookCalls === 1) {
+              readEntered.resolve();
+              await readGate.wait;
+              if (ordering === "failure_first") throw failedReadMarker;
+              return;
+            }
+            if (ordering === "success_first") throw failedReadMarker;
+          }
+        }
+      });
+      expect(await service.listTasks()).toEqual([]);
+      const writer = createTaskCardService({
+        workspaceRoot,
+        now: () => new Date("2026-07-07T13:40:08.594Z"),
+        taskIdFactory: () => taskId
+      });
+      const durableTask = await writer.createTask({
+        type: "engineering",
+        title: `R27 direct read ${ordering}`,
+        question_or_goal: "Keep a successful durable read visible in the same service cache.",
+        inference_budget: { mode: "normal" },
+        created_by: "pi"
+      });
+
+      const firstRead = service.getTaskFromSnapshot(taskId);
+      await Promise.race([
+        readEntered.promise,
+        timeoutAfter(1_000, `first ${ordering} direct read did not reach its hook`)
+      ]);
+      const secondRead = service.getTaskFromSnapshot(taskId);
+
+      let successfulRead: TaskCard;
+      if (ordering === "success_first") {
+        const failure = await captureThrownValue(() => secondRead);
+        expect(failure).toBe(failedReadMarker);
+        readGate.open();
+        successfulRead = await firstRead;
+      } else {
+        successfulRead = await secondRead;
+        readGate.open();
+        const failure = await captureThrownValue(() => firstRead);
+        expect(failure).toBe(failedReadMarker);
+      }
+
+      expect(successfulRead).toEqual(durableTask);
+      expect(await service.listTasks()).toEqual([durableTask]);
+      expect(await service.getTask(taskId)).toEqual(durableTask);
+      const freshService = createTaskCardService({ workspaceRoot });
+      expect(await freshService.listTasks()).toEqual([durableTask]);
+      expect(await freshService.getTask(taskId)).toEqual(durableTask);
+      expect(hookCalls).toBe(2);
+    }
+  });
+
+  test("TaskCard checked cache publication survives failed readers across every publishing surface", async () => {
+    const expectLocallyAndFreshlyVisible = async (
+      service: ReturnType<typeof createTaskCardService>,
+      workspaceRoot: string,
+      task: TaskCard
+    ): Promise<void> => {
+      expect(await service.listTasks()).toEqual([task]);
+      expect(await service.getTask(task.task_id)).toEqual(task);
+      const fresh = createTaskCardService({ workspaceRoot });
+      expect(await fresh.listTasks()).toEqual([task]);
+      expect(await fresh.getTask(task.task_id)).toEqual(task);
+    };
+
+    {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = "TASK-r27-create-failed-reader";
+      const writeReached = createSignal();
+      const writeGate = createAsyncGate();
+      const failedRead = new Error("R27 create failed reader");
+      let rejectRead = false;
+      const service = createTaskCardService({
+        workspaceRoot,
+        taskIdFactory: () => taskId,
+        snapshotReadHooks: {
+          beforeSnapshotOpen: () => {
+            if (rejectRead) throw failedRead;
+          }
+        },
+        snapshotWriteHooks: {
+          afterSnapshotWrite: async () => {
+            writeReached.resolve();
+            await writeGate.wait;
+          }
+        }
+      });
+      const creation = service.createTask({
+        type: "engineering",
+        title: "R27 create publication",
+        question_or_goal: "Keep a successful create locally visible after a failed reader.",
+        inference_budget: { mode: "normal" },
+        created_by: "pi"
+      });
+      await Promise.race([
+        writeReached.promise,
+        timeoutAfter(1_000, "R27 create publication did not reach its write hook")
+      ]);
+      rejectRead = true;
+      expect(await captureThrownValue(() => service.getTaskFromSnapshot(taskId))).toBe(
+        failedRead
+      );
+      rejectRead = false;
+      writeGate.open();
+      const task = await creation;
+      await expectLocallyAndFreshlyVisible(service, workspaceRoot, task);
+    }
+
+    {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = "TASK-r27-accept-failed-reader";
+      const failedRead = new Error("R27 accept failed reader");
+      let rejectRead = false;
+      const service = createTaskCardService({
+        workspaceRoot,
+        taskIdFactory: () => taskId,
+        snapshotReadHooks: {
+          beforeSnapshotOpen: () => {
+            if (rejectRead) throw failedRead;
+          }
+        }
+      });
+      const taskA = await service.createTask({
+        type: "engineering",
+        title: "R27 accept A",
+        question_or_goal: "Install exact B after a failed reader removes A.",
+        inference_budget: { mode: "normal" },
+        created_by: "pi"
+      });
+      const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+      const snapshotA = JSON.parse(await readFile(snapshotPath, "utf8")) as TaskSnapshot & {
+        task_card: TaskCard;
+      };
+      const taskB: TaskCard = { ...taskA, title: "R27 accept B" };
+      await writeFile(
+        snapshotPath,
+        `${JSON.stringify({ ...snapshotA, task_card: taskB }, null, 2)}\n`,
+        { flag: "w" }
+      );
+      const observation = await service.observeTaskSnapshotForCleanup(taskId);
+      if (observation.status !== "record") {
+        throw new Error("Expected an exact R27 accept observation.");
+      }
+      rejectRead = true;
+      expect(await captureThrownValue(() => service.getTaskFromSnapshot(taskId))).toBe(
+        failedRead
+      );
+      rejectRead = false;
+      expect(await service.acceptTaskSnapshotCleanupObservation(observation)).toEqual(taskB);
+      await expectLocallyAndFreshlyVisible(service, workspaceRoot, taskB);
+    }
+
+    {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = "TASK-r27-hydration-failed-reader";
+      const writer = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+      const task = await writer.createTask({
+        type: "engineering",
+        title: "R27 hydration publication",
+        question_or_goal: "Keep hydration visible after a failed direct reader.",
+        inference_budget: { mode: "normal" },
+        created_by: "pi"
+      });
+      const hydrationReached = createSignal();
+      const hydrationGate = createAsyncGate();
+      const failedRead = new Error("R27 hydration failed reader");
+      let readCalls = 0;
+      const service = createTaskCardService({
+        workspaceRoot,
+        snapshotReadHooks: {
+          beforeSnapshotOpen: async () => {
+            readCalls += 1;
+            if (readCalls === 1) {
+              hydrationReached.resolve();
+              await hydrationGate.wait;
+            } else if (readCalls === 2) {
+              throw failedRead;
+            }
+          }
+        }
+      });
+      const hydration = service.listTasks();
+      await Promise.race([
+        hydrationReached.promise,
+        timeoutAfter(1_000, "R27 hydration did not capture its cache claim")
+      ]);
+      expect(await captureThrownValue(() => service.getTaskFromSnapshot(taskId))).toBe(
+        failedRead
+      );
+      hydrationGate.open();
+      expect(await hydration).toEqual([task]);
+      await expectLocallyAndFreshlyVisible(service, workspaceRoot, task);
+      expect(readCalls).toBe(2);
+    }
+
+    {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = "TASK-r27-superseded-cleanup-failed-reader";
+      const failedRead = new Error("R27 superseded cleanup failed reader");
+      let rejectRead = false;
+      const service = createTaskCardService({
+        workspaceRoot,
+        taskIdFactory: () => taskId,
+        snapshotReadHooks: {
+          beforeSnapshotOpen: () => {
+            if (rejectRead) throw failedRead;
+          }
+        }
+      });
+      const taskA = await service.createTask({
+        type: "engineering",
+        title: "R27 superseded cleanup A",
+        question_or_goal: "Install successor B after stale cleanup loses its claim.",
+        inference_budget: { mode: "normal" },
+        created_by: "pi"
+      });
+      const observation = await service.observeTaskSnapshotForCleanup(taskId);
+      if (observation.status !== "record") {
+        throw new Error("Expected an R27 superseded cleanup observation.");
+      }
+      const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+      const snapshotA = JSON.parse(await readFile(snapshotPath, "utf8")) as TaskSnapshot & {
+        task_card: TaskCard;
+      };
+      const taskB: TaskCard = { ...taskA, title: "R27 superseded cleanup B" };
+      const replacementPath = `${snapshotPath}.replacement`;
+      await writeFile(
+        replacementPath,
+        `${JSON.stringify({ ...snapshotA, task_card: taskB }, null, 2)}\n`,
+        { flag: "wx", mode: 0o600 }
+      );
+      await rename(replacementPath, snapshotPath);
+      rejectRead = true;
+      expect(await captureThrownValue(() => service.getTaskFromSnapshot(taskId))).toBe(
+        failedRead
+      );
+      rejectRead = false;
+      await service.cleanupTaskSnapshotObservation(observation);
+      await expectLocallyAndFreshlyVisible(service, workspaceRoot, taskB);
+    }
+  });
+
+  test("S29-P62-09 repeated unique missing rollback prunes every vacant cache slot", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value)
+    });
+    expect(await service.listTasks()).toEqual([]);
+
+    for (let index = 0; index < 1_024; index += 1) {
+      const error = await captureTaskServiceError(() =>
+        service.rollbackTaskForIdempotency(`TASK-r27-missing-rollback-${index}`)
+      );
+      expect(error.code).toBe("task_not_found");
+    }
+
+    expect(await service.listTasks()).toEqual([]);
+    const cacheSource = await readFile(
+      join(import.meta.dir, "task-card-service.ts"),
+      "utf8"
+    );
+    const cacheSourceFile = ts.createSourceFile(
+      "task-card-service.ts",
+      cacheSource,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS
+    );
+    let cacheFactoryDeclaration: ts.FunctionDeclaration | undefined;
+    let equivalenceDeclaration: ts.FunctionDeclaration | undefined;
+    const findCacheDeclarations = (node: ts.Node): void => {
+      if (ts.isFunctionDeclaration(node)) {
+        if (node.name?.text === "createTaskCardCache") cacheFactoryDeclaration = node;
+        if (node.name?.text === "taskCardsEquivalent") equivalenceDeclaration = node;
+      }
+      ts.forEachChild(node, findCacheDeclarations);
+    };
+    findCacheDeclarations(cacheSourceFile);
+    expect(cacheFactoryDeclaration).toBeDefined();
+    expect(equivalenceDeclaration).toBeDefined();
+    const instrumentedFactory = cacheFactoryDeclaration!
+      .getText(cacheSourceFile)
+      .replace(
+        "return {",
+        "return { __slotCountForMutationTest: () => slots.size,"
+      );
+    const executableCacheSource = ts.transpileModule(
+      `${equivalenceDeclaration!.getText(cacheSourceFile)}\n${instrumentedFactory}\n` +
+        `(globalThis as { cacheFactory?: unknown }).cacheFactory = createTaskCardCache;`,
+      {
+        compilerOptions: {
+          target: ts.ScriptTarget.ES2022,
+          module: ts.ModuleKind.ESNext
+        }
+      }
+    ).outputText;
+    const cacheSandbox: { cacheFactory?: () => {
+      claim: (taskId: string) => unknown;
+      settleCancel: (claim: unknown) => unknown;
+      __slotCountForMutationTest: () => number;
+    } } = {};
+    new Function("globalThis", executableCacheSource)(cacheSandbox);
+    const instrumentedCache = cacheSandbox.cacheFactory!();
+    for (let index = 0; index < 1_024; index += 1) {
+      const claim = instrumentedCache.claim(`TASK-r29-cache-cardinality-${index}`);
+      instrumentedCache.settleCancel(claim);
+    }
+    expect(instrumentedCache.__slotCountForMutationTest()).toBe(0);
+  });
+
+  test("S27-P62-08 TaskCard observation setup failure preserves pre-existing A and concurrently published D", async () => {
+    for (const concurrentPublication of [false, true]) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = `TASK-r27-observation-setup-${concurrentPublication ? "d" : "stale"}`;
+      const setupReached = createSignal();
+      const setupGate = createAsyncGate();
+      const setupFailure = new Error(`R27 observation setup ${concurrentPublication}`);
+      let raceEnabled = false;
+      let hookCalls = 0;
+      const service = createTaskCardService({
+        workspaceRoot,
+        taskIdFactory: () => taskId,
+        snapshotReadHooks: {
+          beforeSnapshotOpen: async () => {
+            if (!raceEnabled) return;
+            hookCalls += 1;
+            if (hookCalls !== 1) return;
+            setupReached.resolve();
+            await setupGate.wait;
+            throw setupFailure;
+          }
+        }
+      });
+      const taskA = await service.createTask({
+        type: "engineering",
+        title: "R27 observation setup A",
+        question_or_goal: "Settle a failed setup claim without deleting newer D.",
+        inference_budget: { mode: "normal" },
+        created_by: "pi"
+      });
+      const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+      const snapshotA = JSON.parse(await readFile(snapshotPath, "utf8")) as TaskSnapshot & {
+        task_card: TaskCard;
+      };
+      const durableTask: TaskCard = {
+        ...taskA,
+        title: concurrentPublication ? "R27 concurrent D" : "R27 durable B"
+      };
+      const replacementPath = `${snapshotPath}.setup-replacement`;
+      await writeFile(
+        replacementPath,
+        `${JSON.stringify({ ...snapshotA, task_card: durableTask }, null, 2)}\n`,
+        { flag: "wx", mode: 0o600 }
+      );
+      await rename(replacementPath, snapshotPath);
+
+      raceEnabled = true;
+      const failedObservation = service.observeTaskSnapshotForCleanup(taskId);
+      await Promise.race([
+        setupReached.promise,
+        timeoutAfter(1_000, "R27 observation setup did not capture A")
+      ]);
+      if (concurrentPublication) {
+        expect(await service.getTaskFromSnapshot(taskId)).toEqual(durableTask);
+      }
+      setupGate.open();
+      const unknownObservation = await failedObservation;
+      expect(unknownObservation.status).toBe("unknown");
+      if (unknownObservation.status !== "unknown") {
+        throw new Error("Expected setup failure to produce unknown authority.");
+      }
+      expect(unknownObservation.error.cause).toBe(setupFailure);
+      expect(
+        (await captureTaskServiceError(() =>
+          service.cleanupTaskSnapshotObservation(unknownObservation)
+        )).cause
+      ).toBe(setupFailure);
+
+      if (concurrentPublication) {
+        expect(await service.listTasks()).toEqual([durableTask]);
+        expect(await service.getTask(taskId)).toEqual(durableTask);
+      } else {
+        expect(await service.listTasks()).toEqual([taskA]);
+        expect(await service.getTask(taskId)).toEqual(taskA);
+      }
+      const fresh = createTaskCardService({ workspaceRoot });
+      expect(await fresh.listTasks()).toEqual([durableTask]);
+      expect(await fresh.getTask(taskId)).toEqual(durableTask);
+    }
+  });
+
+  test.skipIf(!caseAliasWorkspaceSupported)("TaskCard read hooks keep configured alias identity while exact settlement uses physical authority", async () => {
+    const aliasWorkspace = await createCaseAliasWorkspacePath();
+    if (!aliasWorkspace) throw new Error("Expected case-alias workspace support.");
+    tempRoots.push(aliasWorkspace.tempRoot);
+    const { workspaceRoot, aliasRoot } = aliasWorkspace;
+    const taskId = "TASK-r23-configured-hook-path";
+    const writer = createTaskCardService({
+      workspaceRoot,
+      now: () => new Date("2026-07-07T13:40:08.625Z"),
+      taskIdFactory: () => taskId
+    });
+    const taskA = await writer.createTask({
+      type: "engineering",
+      title: "R23 configured hook A",
+      question_or_goal: "Separate configured hook identity from physical settlement authority.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const physicalSnapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const configuredSnapshotPath = join(aliasRoot, "tasks", taskId, "snapshot.json");
+    const snapshotA = JSON.parse(await readFile(physicalSnapshotPath, "utf8")) as Record<
+      string,
+      unknown
+    > & { task_card: TaskCard };
+    const taskB: TaskCard = { ...taskA, title: "R23 configured hook B" };
+    const bytesB = Buffer.from(
+      `${JSON.stringify({ ...snapshotA, task_card: taskB }, null, 2)}\n`
+    );
+    const identityA = await readFileWithIdentity(physicalSnapshotPath);
+    const observationHookPaths: string[] = [];
+    let mutateOnObservation = true;
+    const aliasService = createTaskCardService({
+      workspaceRoot: aliasRoot,
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async (input) => {
+          observationHookPaths.push(input.snapshotPath);
+          if (!mutateOnObservation) return;
+          mutateOnObservation = false;
+          const temporaryB = `${input.snapshotPath}.b`;
+          await writeFile(temporaryB, bytesB, { flag: "wx", mode: 0o600 });
+          await rename(temporaryB, input.snapshotPath);
+        }
+      }
+    });
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+
+    const observation = await aliasService.observeTaskSnapshotForCleanup(taskId);
+    if (observation.status !== "record") {
+      throw new Error("Expected case-alias TaskCard observation.");
+    }
+    const identityB = await readFileWithIdentity(physicalSnapshotPath);
+    expect(observation.task).toEqual(taskB);
+    expect(await aliasService.acceptTaskSnapshotCleanupObservation(observation)).toEqual(taskB);
+    expect(await aliasService.getTaskFromSnapshot(taskId)).toEqual(taskB);
+
+    const hydrationHookPaths: string[] = [];
+    const hydrationService = createTaskCardService({
+      workspaceRoot: aliasRoot,
+      snapshotReadHooks: {
+        beforeSnapshotOpen: (input) => {
+          hydrationHookPaths.push(input.snapshotPath);
+        }
+      }
+    });
+    expect(await hydrationService.listTasks()).toEqual([taskB]);
+    expect(observationHookPaths).toEqual([
+      configuredSnapshotPath,
+      configuredSnapshotPath
+    ]);
+    expect(hydrationHookPaths).toEqual([configuredSnapshotPath]);
+    expect(workspaceRecordPhysicalIdentityMatches(identityB, identityA)).toBe(false);
+    expect(identityB.bytes).toEqual(bytesB);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
   test("Artifact registry normalizes artifact paths in stored manifests", async () => {
@@ -22309,7 +23588,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
-  test("malformed observation preserves a distinct malformed replacement before rollback lock", async () => {
+  test("malformed private marker fails closed before rollback cleanup admission", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
@@ -22319,53 +23598,30 @@ describe("idempotency, lock, and artifact services", () => {
     const begin = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
     const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
     const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
-    const displacedPath = join(tempRoot, "malformed-observation-a");
     const malformedA = Buffer.from("{\"generation\":\"A\"");
-    const malformedB = Buffer.from("{\"generation\":\"B-distinct\"");
     await writeFile(guardPath, malformedA, { flag: "wx", mode: 0o600 });
     const observedA = await readFileWithIdentity(guardPath);
-    const lockAdmission = createSignal();
-    const lockGate = createAsyncGate();
     let cleanupLockAdmissions = 0;
-    const recovery = runWithWorkspaceRecordPublicationHooks(
-      {
-        beforeRecordAuthorityIdentitySupplier: async ({ path }) => {
-          if (path !== cleanupLockPath) return;
-          cleanupLockAdmissions += 1;
-          if (cleanupLockAdmissions !== 2) return;
-          lockAdmission.resolve();
-          await lockGate.wait;
-        }
-      },
-      () => service.recoverFailedRecordAfterRollback({
-        scope: "task",
-        key: rawKey,
-        requestDigest
-      })
-    );
-
-    await Promise.race([
-      lockAdmission.promise,
-      timeoutAfter(1_000, "malformed observation did not reach rollback cleanup lock")
-    ]);
-    await rename(guardPath, displacedPath);
-    await writeFile(guardPath, malformedB, { flag: "wx", mode: 0o600 });
-    const replacementB = await readFileWithIdentity(guardPath);
-    lockGate.open();
     const error = await captureTaskServiceError(() =>
-      Promise.race([
-        recovery,
-        timeoutAfter(1_000, "malformed A-to-B cleanup did not settle boundedly")
-      ])
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeRecordAuthorityIdentitySupplier: async ({ path }) => {
+            if (path !== cleanupLockPath) return;
+            cleanupLockAdmissions += 1;
+          }
+        },
+        () => service.recoverFailedRecordAfterRollback({
+          scope: "task",
+          key: rawKey,
+          requestDigest
+        })
+      )
     );
 
     expect(begin.status).toBe("acquired");
-    expect(error.code).toBe("workspace_path_not_safe");
-    expect(error.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    expect(replacementB.bytes).toEqual(malformedB);
-    expect(workspaceRecordPhysicalIdentityMatches(replacementB, observedA)).toBe(false);
-    expect(await readFileWithIdentity(guardPath)).toEqual(replacementB);
-    expect(await readFileWithIdentity(displacedPath)).toEqual(observedA);
+    expect(error.code).toBe("record_malformed");
+    expect(cleanupLockAdmissions).toBe(0);
+    expect(await readFileWithIdentity(guardPath)).toEqual(observedA);
     await expectPathMissing(cleanupLockPath);
     expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
@@ -22677,7 +23933,7 @@ describe("idempotency, lock, and artifact services", () => {
     ).toBe(1);
   });
 
-  test("only the guard-producing idempotency release site opts into fulfilled-value settlement", async () => {
+  test("only authority-producing idempotency release sites opt into fulfilled-value settlement", async () => {
     const sourcePath = join(import.meta.dir, "idempotency-service.ts");
     const sourceText = await readFile(sourcePath, "utf8");
     const sourceFile = ts.createSourceFile(
@@ -22688,7 +23944,23 @@ describe("idempotency, lock, and artifact services", () => {
       ts.ScriptKind.TS
     );
     const releaseCalls: ts.CallExpression[] = [];
+    let failedRecordRecoveryWrapper: ts.FunctionDeclaration | undefined;
+    let settleFulfilledDecisionResourcesInitializer: ts.Expression | undefined;
     const visit = (node: ts.Node): void => {
+      if (
+        ts.isFunctionDeclaration(node) &&
+        node.name?.text === "runFailedRecordTransitionWithGuardRecovery"
+      ) {
+        failedRecordRecoveryWrapper = node;
+      }
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === "settleFulfilledDecisionResources" &&
+        node.initializer !== undefined
+      ) {
+        settleFulfilledDecisionResourcesInitializer = node.initializer;
+      }
       if (
         ts.isCallExpression(node) &&
         ts.isIdentifier(node.expression) &&
@@ -22700,21 +23972,62 @@ describe("idempotency, lock, and artifact services", () => {
     };
     visit(sourceFile);
 
-    expect(releaseCalls).toHaveLength(8);
+    expect(releaseCalls).toHaveLength(9);
     expect(releaseCalls.filter((call) => call.arguments.length === 2)).toHaveLength(7);
     const fulfilledValueSettlementCalls = releaseCalls.filter(
       (call) => call.arguments.length === 3
     );
-    expect(fulfilledValueSettlementCalls).toHaveLength(1);
-    const guardProducerCall = fulfilledValueSettlementCalls[0]!;
+    expect(fulfilledValueSettlementCalls).toHaveLength(2);
+    const guardProducerCall = fulfilledValueSettlementCalls.find((call) =>
+      call.arguments[0]!.getText(sourceFile).includes(
+        "createJsonRecordIfAbsentWithCleanupPermit"
+      )
+    )!;
     expect(guardProducerCall.arguments[0]!.getText(sourceFile)).toContain(
       "createJsonRecordIfAbsentWithCleanupPermit"
     );
     expect(guardProducerCall.arguments[2]!.getText(sourceFile)).toContain(
       'fulfilledGuard.status !== "created"'
     );
+    // Root A (V33-01): the completed-consumer settlement lives in the shared
+    // settleFulfilledDecisionResources helper (referenced by the call site so
+    // both throw-after-fulfilled windows reuse it); the helper body must
+    // still cancel the completed mutation authority.
+    const completedConsumerCall = fulfilledValueSettlementCalls.find((call) =>
+      call.arguments[2]!.getText(sourceFile).includes(
+        "settleFulfilledDecisionResources"
+      )
+    );
+    expect(completedConsumerCall).toBeDefined();
+    expect(settleFulfilledDecisionResourcesInitializer).toBeDefined();
+    expect(
+      settleFulfilledDecisionResourcesInitializer!.getText(sourceFile)
+    ).toContain("cancelCompletedMutationAuthority");
     expect(guardProducerCall.arguments[2]!.getText(sourceFile)).toContain(
       "releaseOwnedIdempotencyTransitionArtifact"
+    );
+    expect(failedRecordRecoveryWrapper).toBeDefined();
+    const recoveryReleaseCalls: ts.CallExpression[] = [];
+    const visitRecoveryWrapper = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "runWithIdempotencyRelease"
+      ) {
+        recoveryReleaseCalls.push(node);
+      }
+      ts.forEachChild(node, visitRecoveryWrapper);
+    };
+    visitRecoveryWrapper(failedRecordRecoveryWrapper!.body!);
+    expect(recoveryReleaseCalls).toHaveLength(0);
+    const failedRecoverySource = failedRecordRecoveryWrapper!.body!.getText(sourceFile);
+    expect(failedRecoverySource.match(/await body\(\)/g) ?? []).toHaveLength(1);
+    expect(failedRecoverySource.match(/requireDurablyFailedRecord\(/g) ?? []).toHaveLength(2);
+    expect(failedRecoverySource.match(/await guard\.release\(\)/g) ?? []).toHaveLength(2);
+    expect(failedRecoverySource.match(/await guard\.retain\(\)/g) ?? []).toHaveLength(1);
+    expect(failedRecoverySource.match(/guard\.recoverTerminalRelease\(/g) ?? []).toHaveLength(1);
+    expect(failedRecoverySource.indexOf("await body()")).toBeLessThan(
+      failedRecoverySource.indexOf("requireDurablyFailedRecord(")
     );
     expect(releaseCalls.filter((call) => ![2, 3].includes(call.arguments.length))).toEqual([]);
   });
@@ -24619,6 +25932,501 @@ describe("idempotency, lock, and artifact services", () => {
     expect((await lstat(deniedLane)).isDirectory()).toBe(true);
   });
 
+  test("S27-P62-01 completed consumption lease linearizes before retained fail intent", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:r28-consumption-lease";
+    const requestDigest = "digest-r28-consumption-lease";
+    const resultRef = "TASK-r28-consumption-lease";
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef
+    });
+    const recordPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      idempotencyRecordFileName(rawKey)
+    );
+    const consumeEntered = createSignal();
+    const consumeGate = createAsyncGate();
+    const writeFailure = new Error("S27-P62-01 retained fail-intent write failure");
+    const consumeCompletedRecord = (
+      service as IdempotencyRecordService & {
+        consumeCompletedRecord: (
+          input: { scope: "task"; key: string; requestDigest: string },
+          consume: (record: IdempotencyRecord & { result_ref: string }) => Promise<unknown>
+        ) => Promise<{
+          status: string;
+          value?: string;
+        }>;
+      }
+    ).consumeCompletedRecord;
+
+    const consumption = consumeCompletedRecord(
+      { scope: "task", key: rawKey, requestDigest },
+      async (record) => {
+        expect(record.result_ref).toBe(resultRef);
+        consumeEntered.resolve();
+        await consumeGate.wait;
+        return { status: "accepted", value: record.result_ref };
+      }
+    );
+    await Promise.race([
+      consumeEntered.promise,
+      timeoutAfter(1_000, "completed consumer did not acquire its transition lease")
+    ]);
+
+    let invalidationSettled = false;
+    const invalidation = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterTemporaryFileWritten: ({ canonicalPath }) => {
+          if (canonicalPath === recordPath) throw writeFailure;
+        }
+      },
+      () =>
+        service.invalidateCompletedRecord({
+          scope: "task",
+          key: rawKey,
+          requestDigest,
+          resultRef
+        })
+    ).finally(() => {
+      invalidationSettled = true;
+    });
+    invalidation.catch(() => undefined);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
+    expect(invalidationSettled).toBe(false);
+
+    consumeGate.open();
+    const consumed = await consumption;
+    expect(consumed).toMatchObject({ status: "accepted", value: resultRef });
+    if ("mutationAuthority" in consumed) {
+      await service.cancelCompletedRecordMutationAuthority(
+        consumed.mutationAuthority as never
+      );
+    }
+    expect(await captureThrownValue(() => invalidation)).toBeDefined();
+
+    let laterCallbackCalls = 0;
+    const later = await consumeCompletedRecord(
+      { scope: "task", key: rawKey, requestDigest },
+      async () => {
+        laterCallbackCalls += 1;
+        return { status: "accepted", value: "unexpected" };
+      }
+    );
+    expect(laterCallbackCalls).toBe(1);
+    expect(later.status).toBe("accepted");
+    if ("mutationAuthority" in later) {
+      await service.cancelCompletedRecordMutationAuthority(later.mutationAuthority);
+    }
+  });
+
+  test("S27-P62-02 replacement B releases only A marker and preserves replacement marker", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:r28-replacement-marker";
+    const requestDigest = "digest-r28-replacement-marker";
+    const resultA = "TASK-r28-replacement-a";
+    const resultB = "TASK-r28-replacement-b";
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const completedA = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef: resultA
+    });
+    const recordPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      idempotencyRecordFileName(rawKey)
+    );
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    const completedB: IdempotencyRecord = {
+      ...completedA,
+      result_ref: resultB,
+      updated_at: "2026-07-15T12:28:02.000Z"
+    };
+    const originalGetRecord = service.getRecord;
+    let replaceRecord = true;
+    service.getRecord = async (scope, key) => {
+      if (replaceRecord && scope === "task" && key === rawKey) {
+        replaceRecord = false;
+        await writeFile(recordPath, `${JSON.stringify(completedB, null, 2)}\n`, {
+          flag: "w"
+        });
+      }
+      return await originalGetRecord(scope, key);
+    };
+    const replacementMarker = {
+      guard_id: "r28-replacement-marker-b",
+      owner_pid: process.pid,
+      acquired_at_ms: Date.now(),
+      acquired_at: new Date().toISOString(),
+      intent: "complete",
+      request_digest: requestDigest,
+      result_ref: resultB
+    };
+    let replacementInstalled = false;
+
+    const invalidationError = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeConditionalDelete: async ({ path, conditionStatus }) => {
+            if (
+              path !== guardPath ||
+              conditionStatus !== "matched" ||
+              replacementInstalled
+            ) {
+              return;
+            }
+            replacementInstalled = true;
+            const replacementPath = `${guardPath}.replacement`;
+            await writeFile(
+              replacementPath,
+              `${JSON.stringify(replacementMarker, null, 2)}\n`,
+              { flag: "wx", mode: 0o600 }
+            );
+            await rename(replacementPath, guardPath);
+          }
+        },
+        () =>
+          service.invalidateCompletedRecord({
+            scope: "task",
+            key: rawKey,
+            requestDigest,
+            resultRef: resultA
+          })
+      )
+    );
+
+    expect(invalidationError.code).toBe("record_malformed");
+    expect(replacementInstalled).toBe(true);
+    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(replacementMarker);
+    const replayB = await service.lookupReplay({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    expect(replayB.status).toBe("completed");
+    if (replayB.status === "completed") expect(replayB.record.result_ref).toBe(resultB);
+  });
+
+  test("S27-P62-03 malformed private marker fails closed while legacy identity remains compatible", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:r28-malformed-private-marker";
+    const requestDigest = "digest-r28-malformed-private-marker";
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const completed = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef: "TASK-r28-malformed-private-marker"
+    });
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    await writeFile(guardPath, "{", { flag: "wx", mode: 0o600 });
+    const malformedBytes = await readFile(guardPath);
+
+    const malformedError = await captureTaskServiceError(() =>
+      service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+    );
+    expect(malformedError.code).toBe("record_malformed");
+    expect(await readFile(guardPath)).toEqual(malformedBytes);
+    expect(await service.getRecord("task", rawKey)).toEqual(completed);
+
+    const malformedQuarantineError = await captureTaskServiceError(() =>
+      service.quarantineRecordAfterUnsafeRollback({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      })
+    );
+    expect(malformedQuarantineError.code).toBe("record_malformed");
+    expect(await readFile(guardPath)).toEqual(malformedBytes);
+    expect(await service.getRecord("task", rawKey)).toEqual(completed);
+
+    await unlink(guardPath);
+    const legacyMarker = {
+      guard_id: "r28-legacy-marker",
+      owner_pid: process.pid,
+      acquired_at_ms: 0,
+      acquired_at: "1970-01-01T00:00:00.000Z"
+    };
+    await writeFile(guardPath, `${JSON.stringify(legacyMarker)}\n`, {
+      flag: "wx",
+      mode: 0o600
+    });
+    const legacyReplay = await service.lookupReplay({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    expect(legacyReplay).toEqual({ status: "completed", record: completed });
+    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(legacyMarker);
+  });
+
+  test("S27-P62-04 consumer validation failure is non-destructive and retryable", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-r28-consumer-validation";
+    const service = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+    const task = await service.createTask({
+      type: "engineering",
+      title: "R28 non-destructive consumer validation",
+      question_or_goal: "Preserve exact snapshot authority when consumer validation fails.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const exactSnapshot = await readFileWithIdentity(snapshotPath);
+    const observation = await service.observeTaskSnapshotForCleanup(taskId);
+    if (observation.status !== "record") throw new Error("Expected exact TaskCard observation.");
+    const validationFailure = new Error("S27-P62-04 consumer validation hook failure");
+
+    const acceptanceError = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterDurableRecordObservation: ({ path }) => {
+            if (path === snapshotPath) throw validationFailure;
+          }
+        },
+        () => service.acceptTaskSnapshotCleanupObservation(observation)
+      )
+    );
+    expect(acceptanceError.code).toBe("workspace_path_not_safe");
+    expect(await readFileWithIdentity(snapshotPath)).toEqual(exactSnapshot);
+    expect(await service.getTask(taskId)).toEqual(task);
+
+    const retryObservation = await service.observeTaskSnapshotForCleanup(taskId);
+    if (retryObservation.status !== "record") {
+      throw new Error("Expected retryable exact TaskCard observation.");
+    }
+    expect(await service.acceptTaskSnapshotCleanupObservation(retryObservation)).toEqual(task);
+    expect(await readFileWithIdentity(snapshotPath)).toEqual(exactSnapshot);
+  });
+
+  test("S27-P62-05 unknown snapshot authority never reports successful cleanup", async () => {
+    for (const kind of ["hardlink", "symlink", "read_hook"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = `TASK-r28-unknown-${kind}`;
+      const readFailure = new Error(`S27-P62-05 ${kind} read failure`);
+      let failRead = false;
+      const service = createTaskCardService({
+        workspaceRoot,
+        taskIdFactory: () => taskId,
+        snapshotReadHooks: {
+          beforeSnapshotOpen: () => {
+            if (failRead) throw readFailure;
+          }
+        }
+      });
+      await service.createTask({
+        type: "engineering",
+        title: `R28 unknown ${kind}`,
+        question_or_goal: "Retain snapshot authority that could not be proved exact.",
+        inference_budget: { mode: "normal" },
+        created_by: "pi"
+      });
+      const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+      const originalBytes = await readFile(snapshotPath);
+      const externalPath = join(tempRoot, `external-${kind}.json`);
+      if (kind === "hardlink" || kind === "symlink") {
+        await writeFile(externalPath, originalBytes, { flag: "wx", mode: 0o600 });
+        await unlink(snapshotPath);
+        if (kind === "hardlink") await link(externalPath, snapshotPath);
+        else await symlink(externalPath, snapshotPath);
+      } else {
+        failRead = true;
+      }
+
+      const observation = await service.observeTaskSnapshotForCleanup(taskId);
+      expect((observation as { status: string }).status).toBe("unknown");
+      const cleanupError = await captureTaskServiceError(() =>
+        service.cleanupTaskSnapshotObservation(observation)
+      );
+      expect(cleanupError.category).toBe("workspace_error");
+      if (kind === "hardlink") {
+        expect((await lstat(snapshotPath)).isFile()).toBe(true);
+        expect(await readFile(snapshotPath)).toEqual(originalBytes);
+        expect(await readFile(externalPath)).toEqual(originalBytes);
+      } else if (kind === "symlink") {
+        expect((await lstat(snapshotPath)).isSymbolicLink()).toBe(true);
+        expect(await readFile(externalPath)).toEqual(originalBytes);
+      } else {
+        expect(await readFile(snapshotPath)).toEqual(originalBytes);
+      }
+    }
+
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-r28-known-malformed";
+    const service = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+    await service.createTask({
+      type: "engineering",
+      title: "R28 known malformed",
+      question_or_goal: "Delete only a positively identified unsafe generation.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    await writeFile(snapshotPath, "{", { flag: "w" });
+    const malformed = await service.observeTaskSnapshotForCleanup(taskId);
+    expect(malformed.status).toBe("invalid");
+    await service.cleanupTaskSnapshotObservation(malformed);
+    await expectPathMissing(snapshotPath);
+  });
+
+  test("S27-P62-06 equivalent publication does not create a phantom cache generation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-r28-equivalent-publication";
+    const service = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+    const task = await service.createTask({
+      type: "engineering",
+      title: "R28 equivalent publication",
+      question_or_goal: "Keep equivalent cache publication epoch-neutral.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const observation = await service.observeTaskSnapshotForCleanup(taskId);
+    if (observation.status !== "record") throw new Error("Expected exact TaskCard observation.");
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+    await service.cleanupTaskSnapshotObservation(observation);
+    expect(await service.listTasks()).toEqual([]);
+    expect((await captureTaskServiceError(() => service.getTask(taskId))).code).toBe(
+      "task_not_found"
+    );
+
+    const source = await readFile(new URL("./task-card-service.ts", import.meta.url), "utf8");
+    expect(source).toContain("interface TaskCardCacheSlot");
+    expect(source).toContain("activeClaims");
+    expect(source).toContain("epoch");
+  });
+
+  test("S27-P62-07 stale rollback A preserves already-published successor D", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-r28-stale-rollback";
+    const service = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+    const taskA = await service.createTask({
+      type: "engineering",
+      title: "R28 rollback A",
+      question_or_goal: "Do not delete successor D with stale rollback authority A.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const snapshotA = JSON.parse(await readFile(snapshotPath, "utf8")) as TaskSnapshot & {
+      task_card: TaskCard;
+    };
+    const taskD: TaskCard = { ...taskA, title: "R28 rollback successor D" };
+    const replacementPath = `${snapshotPath}.d`;
+    await writeFile(
+      replacementPath,
+      `${JSON.stringify({ ...snapshotA, task_card: taskD }, null, 2)}\n`,
+      { flag: "wx", mode: 0o600 }
+    );
+    await rename(replacementPath, snapshotPath);
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(taskD);
+
+    const rollbackError = await captureTaskServiceError(() =>
+      service.rollbackTaskForIdempotency(taskId, taskA)
+    );
+    expect(rollbackError.code).toBe("task_snapshot_mismatch");
+    expect(await service.getTask(taskId)).toEqual(taskD);
+    expect(await service.listTasks()).toEqual([taskD]);
+    expect(await createTaskCardService({ workspaceRoot }).getTaskFromSnapshot(taskId)).toEqual(
+      taskD
+    );
+  });
+
+  test("S27-P62-10 absent hydration claim is ABA-safe across D publication and deletion", async () => {
+    const cacheSource = await readFile(
+      new URL("./task-card-service.ts", import.meta.url),
+      "utf8"
+    );
+    expect(cacheSource).toContain("interface TaskCardCacheSlot");
+    expect(cacheSource).toContain("activeClaims");
+    expect(cacheSource).toContain("pruneEmptySlot");
+
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskAId = "TASK-r28-aba-a";
+    const blockerId = "TASK-r28-aba-z";
+    const ids = [taskAId, blockerId];
+    const writer = createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => ids.shift() ?? "TASK-r28-aba-unexpected"
+    });
+    const taskA = await writer.createTask({
+      type: "engineering",
+      title: "R28 stale hydration A",
+      question_or_goal: "Prevent stale absent-claim publication after a full ABA cycle.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const blocker = await writer.createTask({
+      type: "engineering",
+      title: "R28 hydration blocker",
+      question_or_goal: "Hold hydration after A has been durably read.",
+      inference_budget: { mode: "normal" },
+      created_by: "pi"
+    });
+    const blockerReached = createSignal();
+    const blockerGate = createAsyncGate();
+    const service = createTaskCardService({
+      workspaceRoot,
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async ({ laneTaskId }) => {
+          if (laneTaskId !== blockerId) return;
+          blockerReached.resolve();
+          await blockerGate.wait;
+        }
+      }
+    });
+    const hydration = service.listTasks();
+    await Promise.race([
+      blockerReached.promise,
+      timeoutAfter(1_000, "hydration did not retain the absent A claim")
+    ]);
+
+    const snapshotPath = join(workspaceRoot, "tasks", taskAId, "snapshot.json");
+    const snapshotA = JSON.parse(await readFile(snapshotPath, "utf8")) as TaskSnapshot & {
+      task_card: TaskCard;
+    };
+    const taskD: TaskCard = { ...taskA, title: "R28 ABA successor D" };
+    await writeFile(
+      snapshotPath,
+      `${JSON.stringify({ ...snapshotA, task_card: taskD }, null, 2)}\n`,
+      { flag: "w" }
+    );
+    expect(await service.getTaskFromSnapshot(taskAId)).toEqual(taskD);
+    const deleteD = await service.observeTaskSnapshotForCleanup(taskAId);
+    if (deleteD.status !== "record") throw new Error("Expected exact D cleanup observation.");
+    await service.cleanupTaskSnapshotObservation(deleteD);
+    await expectPathMissing(snapshotPath);
+
+    blockerGate.open();
+    const hydrationResult = await captureThrownValue(() => hydration);
+    expect(hydrationResult).toBeInstanceOf(TaskServiceError);
+    expect(await service.listTasks()).toEqual([blocker]);
+    expect((await captureTaskServiceError(() => service.getTask(taskAId))).code).toBe(
+      "task_not_found"
+    );
+  });
+
   test("TaskCard production publication keeps the bounded create-only fast path", async () => {
     const sourcePath = join(import.meta.dir, "task-card-service.ts");
     const sourceText = await readFile(sourcePath, "utf8");
@@ -24631,7 +26439,9 @@ describe("idempotency, lock, and artifact services", () => {
     );
     let persistFunction: ts.FunctionDeclaration | undefined;
     let snapshotInputFunction: ts.FunctionDeclaration | undefined;
-    let createTaskMethod: ts.MethodDeclaration | undefined;
+    let cacheFunction: ts.FunctionDeclaration | undefined;
+    let createTaskFunction: ts.FunctionDeclaration | undefined;
+    let rollbackTaskMethod: ts.MethodDeclaration | undefined;
     const visit = (node: ts.Node): void => {
       if (
         ts.isFunctionDeclaration(node) &&
@@ -24646,18 +26456,51 @@ describe("idempotency, lock, and artifact services", () => {
         snapshotInputFunction = node;
       }
       if (
+        ts.isFunctionDeclaration(node) &&
+        node.name?.text === "createTaskCardCache"
+      ) {
+        cacheFunction = node;
+      }
+      if (
+        ts.isFunctionDeclaration(node) &&
+        node.name?.text === "createTaskInternal"
+      ) {
+        createTaskFunction = node;
+      }
+      if (
         ts.isMethodDeclaration(node) &&
         ts.isIdentifier(node.name) &&
-        node.name.text === "createTask"
+        node.name.text === "rollbackTaskForIdempotency"
       ) {
-        createTaskMethod = node;
+        rollbackTaskMethod = node;
       }
       ts.forEachChild(node, visit);
     };
     visit(sourceFile);
     expect(persistFunction).toBeDefined();
     expect(snapshotInputFunction).toBeDefined();
-    expect(createTaskMethod).toBeDefined();
+    expect(cacheFunction).toBeDefined();
+    expect(createTaskFunction).toBeDefined();
+    expect(rollbackTaskMethod).toBeDefined();
+
+    const cacheBody = cacheFunction!.body!.getText(sourceFile);
+    expect(cacheBody).toContain("const slots = new Map<string, TaskCardCacheSlot>();");
+    expect(cacheBody).toContain("const openClaims = new WeakSet<TaskCardCacheClaim>();");
+    expect(cacheBody).toContain("const pruneEmptySlot = (slot: TaskCardCacheSlot): void =>");
+    expect(cacheBody).not.toContain("captureAbsent");
+    expect(cacheBody.indexOf("beginSettlement(operationClaim)")).toBeLessThan(
+      cacheBody.indexOf("slot.epoch = ++nextEpoch")
+    );
+    expect(cacheBody.indexOf('return { status: "equivalent", task: current };')).toBeLessThan(
+      cacheBody.indexOf("slot.epoch = ++nextEpoch")
+    );
+    const rollbackBody = rollbackTaskMethod!.body!.getText(sourceFile);
+    expect(rollbackBody.indexOf("const cachedBeforeClaim = taskCache.get(taskId);")).toBeLessThan(
+      rollbackBody.lastIndexOf("const cacheClaim = taskCache.claim(taskId);")
+    );
+    expect(rollbackBody.indexOf("if (!expectedTask && !cachedBeforeClaim)")).toBeLessThan(
+      rollbackBody.lastIndexOf("const cacheClaim = taskCache.claim(taskId);")
+    );
 
     let productionFastPath: ts.IfStatement | undefined;
     let hookPreparation: ts.IfStatement | undefined;
@@ -24712,6 +26555,7 @@ describe("idempotency, lock, and artifact services", () => {
     }
 
     const fastPathBody = productionFastPath!.thenStatement.getText(sourceFile);
+    expect(fastPathBody).toContain("if (retainPublicationAuthority)");
     expect(fastPathBody).toContain("createJsonRecordIfAbsent(");
     expect(fastPathBody).toContain("snapshotInput,");
     expect(fastPathBody).toContain(
@@ -24721,9 +26565,7 @@ describe("idempotency, lock, and artifact services", () => {
       'return { status: "created", task: created.record.task_card! };'
     );
     for (const forbiddenCall of [
-      "createJsonRecordIfAbsentWithCleanupPermit",
       "observeJsonRecordForCleanup",
-      "settleWorkspaceRecordCleanupPermitAfterExactObservation",
       "conditionalDeleteObservedJsonRecordWithCleanupPermit",
       "readTaskCardFromSnapshot",
       "readTaskSnapshot"
@@ -24734,7 +26576,7 @@ describe("idempotency, lock, and artifact services", () => {
       expect(fastPathBody).not.toContain(forbiddenPreparationCall);
     }
 
-    const createTaskBody = createTaskMethod!.body!;
+    const createTaskBody = createTaskFunction!.body!;
     const boundedAttemptLoops: ts.ForStatement[] = [];
     const collectAttemptLoops = (node: ts.Node): void => {
       if (
@@ -24749,11 +26591,48 @@ describe("idempotency, lock, and artifact services", () => {
     collectAttemptLoops(createTaskBody);
     expect(boundedAttemptLoops).toHaveLength(1);
     const attemptLoopBody = boundedAttemptLoops[0]!.statement.getText(sourceFile);
-    expect(attemptLoopBody).toContain('if (publication === "exists") continue;');
+    const captureCacheClaim = "const cacheClaim = taskCache.claim(taskId);";
+    const publishTaskSnapshot = "const publication = await persistTaskSnapshot(";
+    const installPublishedTask =
+      "const published = await publishTaskCacheClaimWithBoundedReobservation(";
+    const returnCreatedTask =
+      'if (bodyOutcome.status === "returned") return bodyOutcome.task;';
+    expect(attemptLoopBody).toContain('bodyOutcome = { status: "retry" };');
     expect(attemptLoopBody).toContain("reservedTaskIds.delete(taskId)");
-    expect(attemptLoopBody).toContain("tasks.set(task.task_id, publication.task);");
-    expect(attemptLoopBody).toContain("return task;");
-    expect(attemptLoopBody).not.toContain("copyTaskCard(task)");
+    expect(attemptLoopBody).toContain(captureCacheClaim);
+    expect(attemptLoopBody).toContain(installPublishedTask);
+    expect(attemptLoopBody.indexOf(captureCacheClaim)).toBeLessThan(
+      attemptLoopBody.indexOf(publishTaskSnapshot)
+    );
+    expect(attemptLoopBody.indexOf(captureCacheClaim)).toBeLessThan(
+      attemptLoopBody.indexOf(installPublishedTask)
+    );
+    expect(attemptLoopBody.indexOf(installPublishedTask)).toBeLessThan(
+      attemptLoopBody.indexOf(returnCreatedTask)
+    );
+    const attemptTryStatements: ts.TryStatement[] = [];
+    const collectAttemptTryStatements = (node: ts.Node): void => {
+      if (ts.isTryStatement(node)) attemptTryStatements.push(node);
+      ts.forEachChild(node, collectAttemptTryStatements);
+    };
+    collectAttemptTryStatements(boundedAttemptLoops[0]!.statement);
+    // Root D (V32-06): no finally may hold a bare first-position descriptor
+    // close; the close settles in its own try/catch and every sibling
+    // cleanup runs after it regardless of the close outcome.
+    expect(attemptTryStatements).toHaveLength(2);
+    for (const attemptTryStatement of attemptTryStatements) {
+      expect(attemptTryStatement.finallyBlock).toBeUndefined();
+      expect(attemptTryStatement.catchClause).toBeDefined();
+    }
+    expect(attemptLoopBody).toContain("taskCache.settleCancel(cacheClaim);");
+    expect(attemptLoopBody).not.toContain("taskCache.settleDelete(cacheClaim);");
+    expect(attemptLoopBody.indexOf("pinnedFile.close()")).toBeLessThan(
+      attemptLoopBody.indexOf("taskCache.settleCancel(cacheClaim);")
+    );
+    expect(
+      attemptLoopBody.indexOf("taskCache.settleCancel(cacheClaim);")
+    ).toBeLessThan(attemptLoopBody.indexOf("reservedTaskIds.delete(taskId)"));
+    expect(attemptLoopBody).toContain(returnCreatedTask);
     expect(createTaskBody.getText(sourceFile)).toContain(
       "throw taskIdGenerationFailedError();"
     );
@@ -24847,6 +26726,7 @@ describe("idempotency, lock, and artifact services", () => {
     const contextOnlyWithoutTerminalProof = [
       "runWithWorkspaceRecordAuthorityDeadline",
       "runWithWorkspaceRecordCompensationTestHooks",
+      "runWithWorkspaceRecordObservationHooksForTest",
       "runWithWorkspaceRecordPublicationHooks"
     ];
     const normalizedInertJsonSettlement = [
@@ -24866,6 +26746,7 @@ describe("idempotency, lock, and artifact services", () => {
       "observeJsonRecordForCleanup",
       "observeJsonRecordForCleanupWithDirectoryBindingOperation",
       "prepareJsonRecordWrite",
+      "replaceJsonRecordAfterExactObservation",
       "attemptPreparedJsonRecordWriteWithDirectoryBindingOperation",
       "writePreparedJsonRecordWithDirectoryBindingOperation"
     ];
@@ -24888,6 +26769,2924 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(directGenericPromiseFunctions.sort()).toEqual(inventoriedFunctions);
     expect(directoryReproofReturnType).toBe("Promise<boolean>");
+  });
+
+  test("S29-P62-01/02 quarantine refuses non-exact completed authority and preserves replacement B", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:s29-exact-quarantine";
+    const requestDigest = "digest-s29-exact-quarantine";
+    const resultRef = "TASK-s29-replacement-b";
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const completedB = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef
+    });
+
+    for (const input of [
+      { scope: "task" as const, key: rawKey, requestDigest },
+      {
+        scope: "task" as const,
+        key: rawKey,
+        requestDigest,
+        expectedCompletedAuthority: { resultRef: "TASK-s29-obsolete-a" }
+      },
+      // Root A (V32-01): even the exact result_ref is refused without the
+      // transported mutation authority captured at classification.
+      {
+        scope: "task" as const,
+        key: rawKey,
+        requestDigest,
+        expectedCompletedAuthority: { resultRef }
+      }
+    ]) {
+      const failure = await captureTaskServiceError(() =>
+        service.quarantineRecordAfterUnsafeRollback(input)
+      );
+      expect(failure.code).toBe("record_malformed");
+      expect(await service.getRecord("task", rawKey)).toEqual(completedB);
+    }
+
+    const consumed = await service.consumeCompletedRecord(
+      { scope: "task", key: rawKey, requestDigest },
+      async () => ({ status: "accepted" as const, value: undefined })
+    );
+    expect(consumed.status).toBe("accepted");
+    if (consumed.status !== "accepted") throw new Error("Expected completed authority.");
+    const failed = await service.quarantineRecordAfterUnsafeRollback({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      expectedCompletedAuthority: {
+        resultRef,
+        mutationAuthority: consumed.mutationAuthority
+      }
+    });
+    expect(failed.status).toBe("failed");
+    expect(failed.result_ref).toBeUndefined();
+  });
+
+  test("S29-P62-03 torn private transition markers fail closed while identity-only legacy remains compatible", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:s29-marker-discriminant";
+    const requestDigest = "digest-s29-marker-discriminant";
+    const resultRef = "TASK-s29-marker-discriminant";
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    await service.completeRecord({ scope: "task", key: rawKey, requestDigest, resultRef });
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    const identity = {
+      guard_id: "s29-marker",
+      owner_pid: 9_999_999,
+      acquired_at_ms: Date.now() - 31_000,
+      acquired_at: "2026-07-15T12:29:03.000Z"
+    };
+
+    for (const privateFields of [
+      { request_digest: requestDigest, result_ref: resultRef },
+      { intent: "fail" },
+      { intent: "complete", request_digest: requestDigest }
+    ]) {
+      await writeFile(guardPath, `${JSON.stringify({ ...identity, ...privateFields })}\n`, {
+        flag: "wx",
+        mode: 0o600
+      });
+      const failure = await captureTaskServiceError(() =>
+        service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+      );
+      expect(failure.code).toBe("record_malformed");
+      await unlink(guardPath);
+    }
+
+    await writeFile(guardPath, `${JSON.stringify(identity)}\n`, { flag: "wx", mode: 0o600 });
+    expect(await service.lookupReplay({ scope: "task", key: rawKey, requestDigest })).toMatchObject({
+      status: "completed",
+      record: { result_ref: resultRef }
+    });
+  });
+
+  test("S29-P62-04 non-ENOENT metadata denial preserves cached A and retries in the same service", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s29-metadata-denial";
+    const service = createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    });
+    const task = await service.createTask({
+      type: "engineering",
+      title: "S29 metadata denial",
+      question_or_goal: "Preserve cached durable authority across access denial.",
+      inference_budget: { mode: "normal" }
+    });
+    const lanePath = join(workspaceRoot, "tasks", taskId);
+    await chmod(lanePath, 0o000);
+    try {
+      const failure = await captureTaskServiceError(() => service.getTaskFromSnapshot(taskId));
+      expect(failure.code).toBe("workspace_path_not_safe");
+      expect(await service.getTask(taskId)).toEqual(task);
+    } finally {
+      await chmod(lanePath, 0o700);
+    }
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+  });
+
+  test("S29-P62-06 keyed publication rollback preserves a byte-identical foreign inode", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s29-publication-handle";
+    const service = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+    const task = await service.createTaskForIdempotency({
+      type: "engineering",
+      title: "S29 publication handle",
+      question_or_goal: "Preserve byte-identical foreign generations.",
+      inference_budget: { mode: "normal" }
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const original = await readFileWithIdentity(snapshotPath);
+    const replacementPath = `${snapshotPath}.foreign`;
+    await writeFile(replacementPath, original.bytes, { flag: "wx", mode: 0o600 });
+    await rename(replacementPath, snapshotPath);
+    const replacement = await readFileWithIdentity(snapshotPath);
+    expect(workspaceRecordPhysicalIdentityMatches(replacement, original)).toBe(false);
+
+    const failure = await captureTaskServiceError(() =>
+      service.rollbackTaskForIdempotency(taskId, task)
+    );
+    expect(failure.code).toBe("task_snapshot_mismatch");
+    expect(await readFileWithIdentity(snapshotPath)).toEqual(replacement);
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+    await service.releaseTaskPublicationForIdempotency(task);
+  });
+
+  test("S29-P62-10 direct TaskServiceError adapter preserves descriptor and repeated-fold semantics", () => {
+    for (const kind of [
+      "frozen-data",
+      "sealed-data",
+      "accessor",
+      "throwing-accessor",
+      "primitive",
+      "falsy",
+      "cyclic"
+    ] as const) {
+      const primary = new TaskServiceError({
+        code: "record_malformed",
+        status: 409,
+        category: "idempotency_conflict",
+        message: `S29 adapter ${kind}`,
+        userMessage: "The primary semantic failure must be preserved.",
+        evidenceRefs: [`s29.adapter.${kind}`],
+        retryable: true,
+        recommendedNextActions: ["Inspect the primary transition failure."]
+      });
+      let getterReads = 0;
+      if (kind === "accessor" || kind === "throwing-accessor") {
+        Object.defineProperty(primary, "cause", {
+          configurable: false,
+          enumerable: false,
+          get: () => {
+            getterReads += 1;
+            if (kind === "throwing-accessor") throw new Error("throwing cause getter");
+            return new Error("accessor cause");
+          }
+        });
+      } else {
+        const cause =
+          kind === "primitive"
+            ? "primitive-cause"
+            : kind === "falsy"
+              ? 0
+              : kind === "cyclic"
+                ? primary
+                : new Error(`${kind} cause`);
+        Object.defineProperty(primary, "cause", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: cause
+        });
+      }
+      if (kind === "frozen-data") Object.freeze(primary);
+      if (kind === "sealed-data") Object.seal(primary);
+
+      const firstCompensation = new Error(`first ${kind}`);
+      const secondCompensation = new Error(`second ${kind}`);
+      const first = preserveTaskServiceErrorCompensationCompatibility(
+        primary,
+        [firstCompensation],
+        "S29 adapter first fold"
+      );
+      const repeated = preserveTaskServiceErrorCompensationCompatibility(
+        first,
+        [secondCompensation],
+        "S29 adapter repeated fold"
+      );
+      expect(getterReads).toBeLessThanOrEqual(2);
+
+      expect(repeated).toBeInstanceOf(TaskServiceError);
+      expect(repeated).toMatchObject({
+        code: primary.code,
+        status: primary.status,
+        category: primary.category,
+        message: primary.message,
+        userMessage: primary.userMessage,
+        evidenceRefs: primary.evidenceRefs,
+        retryable: primary.retryable,
+        recommendedNextActions: primary.recommendedNextActions
+      });
+      if (kind !== "throwing-accessor") {
+        expect(errorTreeContains(repeated, firstCompensation)).toBe(true);
+        expect(errorTreeContains(repeated, secondCompensation)).toBe(true);
+      }
+    }
+  });
+
+  test("S30-P62-01/02 completed quarantine preserves same- and different-result foreign generations", async () => {
+    for (const replacementKind of ["same_result_ref", "different_result_ref"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:s30-exact-completed-quarantine-${replacementKind}`;
+      const requestDigest = `digest-s30-exact-completed-quarantine-${replacementKind}`;
+      const resultRef = `TASK-s30-exact-completed-quarantine-${replacementKind}`;
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+      await service.completeRecord({ scope: "task", key: rawKey, requestDigest, resultRef });
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+        idempotencyRecordEvidenceRef("task", rawKey)
+      );
+      const original = await readFileWithIdentity(recordPath);
+      const foreignRecord = JSON.parse(original.bytes.toString("utf8")) as IdempotencyRecord;
+      if (replacementKind === "different_result_ref") {
+        foreignRecord.result_ref = "TASK-s30-foreign-result-ref";
+      }
+      const foreignBytes = Buffer.from(`${JSON.stringify(foreignRecord, null, 2)}\n`);
+      let replacement: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
+      let installedForeign = false;
+
+      // Root A (V32-01): completed quarantine consumes the exact transported
+      // authority captured at classification before mutating anything.
+      const consumed = await service.consumeCompletedRecord(
+        { scope: "task", key: rawKey, requestDigest },
+        async () => ({ status: "accepted" as const, value: undefined })
+      );
+      expect(consumed.status).toBe("accepted");
+      if (consumed.status !== "accepted") throw new Error("Expected completed authority.");
+      const failure = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: async ({ canonicalPath }) => {
+              if (canonicalPath !== recordPath || installedForeign) return;
+              installedForeign = true;
+              const foreignPath = `${recordPath}.foreign`;
+              await writeFile(foreignPath, foreignBytes, { flag: "wx", mode: 0o600 });
+              await rename(foreignPath, recordPath);
+              replacement = await readFileWithIdentity(recordPath);
+            }
+          },
+          () =>
+            service.quarantineRecordAfterUnsafeRollback({
+              scope: "task",
+              key: rawKey,
+              requestDigest,
+              expectedCompletedAuthority: {
+                resultRef,
+                mutationAuthority: consumed.mutationAuthority
+              }
+            })
+        )
+      );
+
+      expect(failure.code).toBe("workspace_path_not_safe");
+      expect(installedForeign).toBe(true);
+      expect(replacement).toBeDefined();
+      expect(workspaceRecordPhysicalIdentityMatches(replacement!, original)).toBe(false);
+      expect(await readFileWithIdentity(recordPath)).toEqual(replacement!);
+      expect(await service.getRecord("task", rawKey)).toEqual(foreignRecord);
+    }
+  });
+
+  test("S30-P62-04 post-precheck deletion invalidates the old service cache", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s30-post-precheck-missing";
+    let deleteOnOpen = false;
+    const service = createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async ({ snapshotPath }) => {
+          if (!deleteOnOpen) return;
+          deleteOnOpen = false;
+          await unlink(snapshotPath);
+        }
+      }
+    });
+    await service.createTask({
+      type: "engineering",
+      title: "S30 post-precheck deletion",
+      question_or_goal: "Invalidate cache after durable authority becomes unavailable.",
+      inference_budget: { mode: "normal" }
+    });
+    deleteOnOpen = true;
+    const failure = await captureTaskServiceError(() => service.getTaskFromSnapshot(taskId));
+    expect(failure.code).toBe("task_not_found");
+    expect(await service.listTasks()).toEqual([]);
+    expect((await captureTaskServiceError(() => service.getTask(taskId))).code).toBe(
+      "task_not_found"
+    );
+    expect(await createTaskCardService({ workspaceRoot }).listTasks()).toEqual([]);
+
+    const malformedFixture = await createTempWorkspacePath();
+    tempRoots.push(malformedFixture.tempRoot);
+    const malformedTaskId = "TASK-s30-malformed-hydration";
+    const writer = createTaskCardService({
+      workspaceRoot: malformedFixture.workspaceRoot,
+      taskIdFactory: () => malformedTaskId
+    });
+    const durableTask = await writer.createTask({
+      type: "engineering",
+      title: "S30 malformed hydration",
+      question_or_goal: "Evict an exact malformed durable generation from cache.",
+      inference_budget: { mode: "normal" }
+    });
+    const malformedService = createTaskCardService({
+      workspaceRoot: malformedFixture.workspaceRoot
+    });
+    expect(await malformedService.getTaskFromSnapshot(malformedTaskId)).toEqual(
+      durableTask
+    );
+    const malformedPath = join(
+      malformedFixture.workspaceRoot,
+      "tasks",
+      malformedTaskId,
+      "snapshot.json"
+    );
+    await writeFile(malformedPath, "{", { flag: "w" });
+    expect((await captureTaskServiceError(() => malformedService.listTasks())).code).toBe(
+      "task_snapshot_malformed"
+    );
+    await unlink(malformedPath);
+    expect(await malformedService.listTasks()).toEqual([]);
+    expect(await createTaskCardService({
+      workspaceRoot: malformedFixture.workspaceRoot
+    }).listTasks()).toEqual([]);
+  });
+
+  test("S30-P62-05 first hydration metadata denial preserves cached A and retries", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s30-hydration-access-retry";
+    const writer = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+    const task = await writer.createTask({
+      type: "engineering",
+      title: "S30 hydration access retry",
+      question_or_goal: "Keep cached authority across unknown hydration metadata failures.",
+      inference_budget: { mode: "normal" }
+    });
+    const service = createTaskCardService({ workspaceRoot });
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+    const tasksRoot = join(workspaceRoot, "tasks");
+    await chmod(tasksRoot, 0o000);
+    try {
+      expect((await captureTaskServiceError(() => service.listTasks())).code).toBe(
+        "workspace_path_not_safe"
+      );
+    } finally {
+      await chmod(tasksRoot, 0o700);
+    }
+    expect(await service.listTasks()).toEqual([task]);
+    expect(await service.getTask(taskId)).toEqual(task);
+  });
+
+  test("S30-P62-06 live observation cancellation prunes production cache claims", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value: { slots: number; activeClaims: number }) => {
+        diagnostics.push(value);
+      }
+    });
+    expect(await service.listTasks()).toEqual([]);
+    const baseline = diagnostics.at(-1);
+    const observation = await service.observeTaskSnapshotForCleanup(
+      "TASK-s30-live-cache-cardinality"
+    );
+    expect(observation.status).toBe("missing");
+    await service.cancelTaskSnapshotCleanupObservation(observation);
+    expect(diagnostics.at(-1)).toEqual(baseline);
+    expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
+  });
+
+  test("S30-P62-07 only a genuine reserved directory is exempt from hydration capacity", async () => {
+    const genuineFixture = await createTempWorkspacePath();
+    tempRoots.push(genuineFixture.tempRoot);
+    const genuineTasksRoot = join(genuineFixture.workspaceRoot, "tasks");
+    await mkdir(genuineTasksRoot, { recursive: true });
+    for (let index = 0; index < 1_024; index += 1) {
+      await mkdir(join(genuineTasksRoot, `TASK-s30-genuine-capacity-${index}`));
+    }
+    await mkdir(join(genuineTasksRoot, "_idempotency"));
+    expect(await createTaskCardService({
+      workspaceRoot: genuineFixture.workspaceRoot
+    }).listTasks()).toEqual([]);
+
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const tasksRoot = join(workspaceRoot, "tasks");
+    await mkdir(tasksRoot, { recursive: true });
+    for (let index = 0; index < 1_024; index += 1) {
+      await mkdir(join(tasksRoot, `TASK-s30-capacity-${index}`));
+    }
+    await writeFile(join(tasksRoot, "_idempotency"), "ordinary filler", {
+      flag: "wx",
+      mode: 0o600
+    });
+    const failure = await captureTaskServiceError(() =>
+      createTaskCardService({ workspaceRoot }).listTasks()
+    );
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(failure.evidenceRefs).toContain("workspace/tasks:entry_count");
+  });
+
+  test("S31-P62-01 completed consumption transports exact authority across later invalidation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:s31-cross-call-exact-authority";
+    const requestDigest = "digest-s31-cross-call-exact-authority";
+    const resultRef = "TASK-s31-cross-call-exact-authority";
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    await service.completeRecord({ scope: "task", key: rawKey, requestDigest, resultRef });
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      idempotencyRecordEvidenceRef("task", rawKey)
+    );
+
+    const consumed = await service.consumeCompletedRecord(
+      { scope: "task", key: rawKey, requestDigest },
+      async (record) => ({ status: "accepted", value: record.result_ref })
+    );
+    expect(consumed.status).toBe("accepted");
+    const completedA = await readFile(recordPath);
+    const foreignPath = `${recordPath}.foreign`;
+    await writeFile(foreignPath, completedA, { flag: "wx", mode: 0o600 });
+    await rename(foreignPath, recordPath);
+    const foreignB = await readFileWithIdentity(recordPath);
+
+    const failure = await captureTaskServiceError(() =>
+      service.invalidateCompletedRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        resultRef,
+        ...("mutationAuthority" in consumed
+          ? { mutationAuthority: consumed.mutationAuthority }
+          : {})
+      })
+    );
+    expect(failure.code).toBe("record_malformed");
+    expect(await readFileWithIdentity(recordPath)).toEqual(foreignB);
+    expect(await service.lookupReplay({ scope: "task", key: rawKey, requestDigest })).toMatchObject({
+      status: "completed",
+      record: { result_ref: resultRef }
+    });
+  });
+
+  test("S31-P62-02 retained fail intent never rewrites a foreign completed generation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:s31-retained-fail-intent";
+    const requestDigest = "digest-s31-retained-fail-intent";
+    const resultRef = "TASK-s31-retained-fail-intent";
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    await service.completeRecord({ scope: "task", key: rawKey, requestDigest, resultRef });
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      idempotencyRecordEvidenceRef("task", rawKey)
+    );
+    let replacement: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
+    let installed = false;
+    await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: async ({ canonicalPath }) => {
+            if (canonicalPath !== recordPath || installed) return;
+            installed = true;
+            const foreignPath = `${recordPath}.foreign`;
+            await writeFile(foreignPath, await readFile(recordPath), {
+              flag: "wx",
+              mode: 0o600
+            });
+            await rename(foreignPath, recordPath);
+            replacement = await readFileWithIdentity(recordPath);
+          }
+        },
+        () => service.invalidateCompletedRecord({
+          scope: "task",
+          key: rawKey,
+          requestDigest,
+          resultRef
+        })
+      )
+    );
+    expect(installed).toBe(true);
+    expect(replacement).toBeDefined();
+
+    for (const reader of [service, createIdempotencyRecordService({ workspaceRoot })]) {
+      expect(await reader.lookupReplay({ scope: "task", key: rawKey, requestDigest })).toMatchObject({
+        status: "completed",
+        record: { result_ref: resultRef }
+      });
+      expect(await readFileWithIdentity(recordPath)).toEqual(replacement!);
+    }
+  });
+
+  test("S31-P62-07 snapshot authority classification is attempt-local across services", async () => {
+    const firstFixture = await createTempWorkspacePath();
+    tempRoots.push(firstFixture.tempRoot);
+    const firstTaskId = "TASK-s31-exact-error-source";
+    const firstWriter = createTaskCardService({
+      workspaceRoot: firstFixture.workspaceRoot,
+      taskIdFactory: () => firstTaskId
+    });
+    await firstWriter.createTask({
+      type: "engineering",
+      title: "S31 exact error source",
+      question_or_goal: "Create an exact malformed error identity.",
+      inference_budget: { mode: "normal" }
+    });
+    await writeFile(
+      join(firstFixture.workspaceRoot, "tasks", firstTaskId, "snapshot.json"),
+      "{",
+      { flag: "w" }
+    );
+    const sharedError = await captureTaskServiceError(() =>
+      createTaskCardService({ workspaceRoot: firstFixture.workspaceRoot })
+        .getTaskFromSnapshot(firstTaskId)
+    );
+
+    const secondFixture = await createTempWorkspacePath();
+    tempRoots.push(secondFixture.tempRoot);
+    const secondTaskId = "TASK-s31-unknown-error-target";
+    const secondWriter = createTaskCardService({
+      workspaceRoot: secondFixture.workspaceRoot,
+      taskIdFactory: () => secondTaskId
+    });
+    await secondWriter.createTask({
+      type: "engineering",
+      title: "S31 unknown error target",
+      question_or_goal: "Do not reuse another attempt's exact authority.",
+      inference_budget: { mode: "normal" }
+    });
+    const secondService = createTaskCardService({
+      workspaceRoot: secondFixture.workspaceRoot,
+      snapshotReadHooks: { beforeSnapshotOpen: () => { throw sharedError; } }
+    });
+    expect(await captureThrownValue(() => secondService.getTaskFromSnapshot(secondTaskId)))
+      .toBe(sharedError);
+    expect(await captureThrownValue(() => secondService.listTasks())).toBe(sharedError);
+    expect(await createTaskCardService({
+      workspaceRoot: secondFixture.workspaceRoot
+    }).listTasks()).toHaveLength(1);
+  });
+
+  test("S31-P62-08 hydration inventory and capacity bind one tasks-root generation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s31-root-generation";
+    const writer = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+    await writer.createTask({
+      type: "engineering",
+      title: "S31 root A",
+      question_or_goal: "Bind hydration to one physical tasks root.",
+      inference_budget: { mode: "normal" }
+    });
+    const replacementWorkspace = join(tempRoot, "replacement-workspace");
+    const replacementWriter = createTaskCardService({
+      workspaceRoot: replacementWorkspace,
+      taskIdFactory: () => taskId
+    });
+    await replacementWriter.createTask({
+      type: "engineering",
+      title: "S31 root B",
+      question_or_goal: "Reject a replacement root beyond the raw-entry bound.",
+      inference_budget: { mode: "normal" }
+    });
+    const replacementTasksRoot = join(replacementWorkspace, "tasks");
+    for (let index = 0; index < 1_024; index += 1) {
+      await mkdir(join(replacementTasksRoot, `TASK-s31-root-b-filler-${index}`));
+    }
+    let swapped = false;
+    const service = createTaskCardService({
+      workspaceRoot,
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async () => {
+          if (swapped) return;
+          swapped = true;
+          await rename(join(workspaceRoot, "tasks"), join(workspaceRoot, "tasks-old"));
+          await rename(replacementTasksRoot, join(workspaceRoot, "tasks"));
+        }
+      }
+    });
+    const failure = await captureTaskServiceError(() => service.listTasks());
+    expect(swapped).toBe(true);
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(failure.evidenceRefs).toContain("workspace/tasks:entry_count");
+  });
+
+  test("S31-P62-09 repeated folds deduplicate prior provenance but preserve sibling multiplicity", () => {
+    const primary = new Error("S31 primary");
+    const compensation = new Error("S31 repeated compensation");
+    const first = preserveThrownValueAndCompensationErrors(
+      primary,
+      [compensation],
+      "S31 first fold"
+    );
+    const repeated = preserveThrownValueAndCompensationErrors(
+      first,
+      [compensation],
+      "S31 repeated fold"
+    );
+    expect(countErrorGraphIdentity(repeated, compensation)).toBe(1);
+
+    const siblings = preserveThrownValueAndCompensationErrors(
+      primary,
+      [compensation, compensation],
+      "S31 sibling fold"
+    );
+    expect(countErrorGraphIdentity(siblings, compensation)).toBe(2);
+    const cyclic = preserveThrownValueAndCompensationErrors(
+      primary,
+      [first],
+      "S31 bounded nested fold"
+    );
+    expect(errorTreeContains(cyclic, compensation)).toBe(true);
+  });
+
+  test("S31-P62-11 cache diagnostics are observation-only after claim mutation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    let throwsRemaining = 1;
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => {
+        diagnostics.push(value);
+        if (throwsRemaining > 0) {
+          throwsRemaining -= 1;
+          throw new Error("S31 diagnostics observer failure");
+        }
+      }
+    });
+    expect(await service.listTasks()).toEqual([]);
+    const observation = await service.observeTaskSnapshotForCleanup(
+      "TASK-s31-diagnostics-cardinality"
+    );
+    await service.cancelTaskSnapshotCleanupObservation(observation);
+    expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
+  });
+
+  test("S31-P62-12 malformed hydration deletes phantom cache before repair and rehydrates", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s31-malformed-rehydration";
+    const writer = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+    const task = await writer.createTask({
+      type: "engineering",
+      title: "S31 malformed rehydration",
+      question_or_goal: "Delete exact malformed cache state before bounded repair.",
+      inference_budget: { mode: "normal" }
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const canonicalBytes = await readFile(snapshotPath);
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value)
+    });
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+    await writeFile(snapshotPath, "{", { flag: "w" });
+    expect((await captureTaskServiceError(() => service.listTasks())).code).toBe(
+      "task_snapshot_malformed"
+    );
+    expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
+    await writeFile(snapshotPath, canonicalBytes, { flag: "w" });
+    expect(await service.listTasks()).toEqual([task]);
+  });
+
+  test("S31-P62-13 hydration metadata denial is unknown and retries in the same service", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s31-metadata-attempt";
+    const writer = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+    const task = await writer.createTask({
+      type: "engineering",
+      title: "S31 metadata attempt",
+      question_or_goal: "Preserve cached A across deterministic metadata denial.",
+      inference_budget: { mode: "normal" }
+    });
+    let denyMetadata = true;
+    const denial = Object.assign(new Error("S31 metadata EACCES"), { code: "EACCES" });
+    const service = createTaskCardService({
+      workspaceRoot,
+      snapshotReadHooks: {
+        beforeHydrationTasksRootMetadata: () => {
+          if (!denyMetadata) return;
+          denyMetadata = false;
+          throw denial;
+        }
+      }
+    });
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+    const failure = await captureTaskServiceError(() => service.listTasks());
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(failure.evidenceRefs).toContain("workspace/tasks:metadata");
+    expect(await service.getTask(taskId)).toEqual(task);
+    expect(await service.listTasks()).toEqual([task]);
+  });
+
+  test("S31-P62-14 reserved symlink counts against the 1,024-entry hydration bound", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const tasksRoot = join(workspaceRoot, "tasks");
+    const external = join(tempRoot, "external-idempotency");
+    await mkdir(tasksRoot, { recursive: true });
+    await mkdir(external);
+    await writeFile(join(external, "sentinel"), "untouched", { flag: "wx" });
+    for (let index = 0; index < 1_024; index += 1) {
+      await mkdir(join(tasksRoot, `TASK-s31-symlink-capacity-${index}`));
+    }
+    await symlink(external, join(tasksRoot, "_idempotency"));
+    const failure = await captureTaskServiceError(() =>
+      createTaskCardService({ workspaceRoot }).listTasks()
+    );
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(failure.evidenceRefs).toContain("workspace/tasks:entry_count");
+    expect(await readFile(join(external, "sentinel"), "utf8")).toBe("untouched");
+  });
+
+  test("S32-P62-06 attempt-local unknown never deletes a previously cached task", async () => {
+    const source = await createTempWorkspacePath();
+    tempRoots.push(source.tempRoot);
+    const sourceTaskId = "TASK-s32-exact-source";
+    await createTaskCardService({
+      workspaceRoot: source.workspaceRoot,
+      taskIdFactory: () => sourceTaskId
+    }).createTask({
+      type: "engineering",
+      title: "S32 exact source",
+      question_or_goal: "Create an exact-looking foreign TaskServiceError.",
+      inference_budget: { mode: "normal" }
+    });
+    await writeFile(
+      join(source.workspaceRoot, "tasks", sourceTaskId, "snapshot.json"),
+      "{",
+      { flag: "w" }
+    );
+    const foreignExactError = await captureTaskServiceError(() =>
+      createTaskCardService({ workspaceRoot: source.workspaceRoot })
+        .getTaskFromSnapshot(sourceTaskId)
+    );
+
+    const target = await createTempWorkspacePath();
+    tempRoots.push(target.tempRoot);
+    const targetTaskId = "TASK-s32-unknown-cache-target";
+    const task = await createTaskCardService({
+      workspaceRoot: target.workspaceRoot,
+      taskIdFactory: () => targetTaskId
+    }).createTask({
+      type: "engineering",
+      title: "S32 cached D",
+      question_or_goal: "Retain D when the current attempt has unknown authority.",
+      inference_budget: { mode: "normal" }
+    });
+    let armed = false;
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot: target.workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value),
+      snapshotReadHooks: {
+        beforeSnapshotOpen: () => {
+          if (armed) throw foreignExactError;
+        }
+      }
+    });
+    expect(await service.getTaskFromSnapshot(targetTaskId)).toEqual(task);
+    armed = true;
+    const thrown = await captureThrownValue(() => service.listTasks());
+    expect(thrown).toMatchObject({
+      name: foreignExactError.name,
+      message: foreignExactError.message,
+      code: foreignExactError.code
+    });
+    expect(diagnostics.at(-1)).toEqual({ slots: 1, activeClaims: 0 });
+    armed = false;
+    expect(await service.getTask(targetTaskId)).toEqual(task);
+  });
+
+  test("S32-P62-07 same-inode member expansion restarts the entire bounded inventory", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s32-root-member-epoch";
+    const task = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    }).createTask({
+      type: "engineering",
+      title: "S32 root member epoch",
+      question_or_goal: "Bind the raw inventory count to the member epoch.",
+      inference_budget: { mode: "normal" }
+    });
+    const tasksRoot = join(workspaceRoot, "tasks");
+    let expanded = false;
+    const service = createTaskCardService({
+      workspaceRoot,
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async () => {
+          if (expanded) return;
+          expanded = true;
+          for (let index = 0; index < 1_024; index += 1) {
+            await mkdir(join(tasksRoot, `TASK-s32-epoch-filler-${index}`));
+          }
+        }
+      }
+    });
+    const failure = await captureTaskServiceError(() => service.listTasks());
+    expect(expanded).toBe(true);
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(failure.evidenceRefs).toContain("workspace/tasks:entry_count");
+    expect(await createTaskCardService({ workspaceRoot }).getTaskFromSnapshot(taskId)).toEqual(
+      task
+    );
+  });
+
+  test("S32-P62-07 tasks-root A-to-B-to-A forces a fresh bounded attempt", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s32-root-aba";
+    const task = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    }).createTask({
+      type: "engineering",
+      title: "S32 root ABA",
+      question_or_goal: "Require a retry after a full pathname rebound.",
+      inference_budget: { mode: "normal" }
+    });
+    const tasksRoot = join(workspaceRoot, "tasks");
+    const parkedA = join(workspaceRoot, "tasks-a");
+    const replacementB = join(workspaceRoot, "tasks-b");
+    await mkdir(replacementB);
+    let hookCalls = 0;
+    const service = createTaskCardService({
+      workspaceRoot,
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async () => {
+          hookCalls += 1;
+          if (hookCalls !== 1) return;
+          await rename(tasksRoot, parkedA);
+          await rename(replacementB, tasksRoot);
+          await rename(tasksRoot, replacementB);
+          await rename(parkedA, tasksRoot);
+        }
+      }
+    });
+    expect(await service.listTasks()).toEqual([task]);
+    expect(hookCalls).toBe(2);
+  });
+
+  test("S32-P62-07 retry exhaustion settles every attempt-local cache claim", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s32-root-retry-exhaustion";
+    await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    }).createTask({
+      type: "engineering",
+      title: "S32 root retry exhaustion",
+      question_or_goal: "Fail closed after every bounded root generation changes.",
+      inference_budget: { mode: "normal" }
+    });
+    const tasksRoot = join(workspaceRoot, "tasks");
+    let hookCalls = 0;
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value),
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async () => {
+          hookCalls += 1;
+          await mkdir(join(tasksRoot, `TASK-s32-root-drift-${hookCalls}`));
+        }
+      }
+    });
+
+    const failure = await captureTaskServiceError(() => service.listTasks());
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(failure.evidenceRefs).toContain("workspace/tasks:generation");
+    expect(hookCalls).toBe(2);
+    expect(diagnostics).toContainEqual({ slots: 1, activeClaims: 1 });
+    expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
+  });
+
+  test("S32-P62-11 diagnostics failures at a live claim are observation-only", async () => {
+    for (const mode of ["throw", "reject"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      let armed = true;
+      const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+      const service = createTaskCardService({
+        workspaceRoot,
+        cacheDiagnosticsForTest: (value) => {
+          diagnostics.push(value);
+          if (!armed || value.slots !== 1 || value.activeClaims !== 1) return;
+          armed = false;
+          if (mode === "throw") throw new Error("S32 claim diagnostics throw");
+          return Promise.reject(new Error("S32 claim diagnostics rejection")) as never;
+        }
+      });
+      const observation = await service.observeTaskSnapshotForCleanup(
+        `TASK-s32-diagnostics-${mode}`
+      );
+      expect(observation.status).toBe("missing");
+      await service.cancelTaskSnapshotCleanupObservation(observation);
+      expect(armed).toBe(false);
+      expect(diagnostics).toContainEqual({ slots: 1, activeClaims: 1 });
+      expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
+      expect(await service.listTasks()).toEqual([]);
+    }
+  });
+
+  test("S32-P62-09 independent provenance cycles retain distinct ordered occurrences", () => {
+    const makeCycle = (label: string) => {
+      const primary = new Error(`S32 cycle ${label}`);
+      const seed = preservePrimaryAndCompensationErrors(
+        primary,
+        [primary],
+        `S32 cycle seed ${label}`
+      ) as PreservedErrorCompensationEnvelope;
+      registerPreservedErrorCompatibility(primary, seed);
+      return seed;
+    };
+    const semanticPrimary = new Error("S32 cycle folding primary");
+    const firstCycle = makeCycle("one");
+    const secondCycle = makeCycle("two");
+    const firstFold = preserveThrownValueAndCompensationErrors(
+      semanticPrimary,
+      [firstCycle],
+      "S32 first cycle fold"
+    );
+    const secondFold = preserveThrownValueAndCompensationErrors(
+      firstFold,
+      [secondCycle],
+      "S32 second cycle fold"
+    );
+    const replayedSecond = preserveThrownValueAndCompensationErrors(
+      secondFold,
+      [secondCycle],
+      "S32 replayed second cycle fold"
+    );
+    const markers = (replayedSecond.cause as AggregateError).errors.filter(
+      (value) => value instanceof Error && value.name === "PreservedCompensationCycle"
+    );
+    expect(markers).toHaveLength(2);
+    expect(markers[0]).not.toBe(markers[1]);
+    expect((secondFold.cause as AggregateError).errors).toEqual(
+      (replayedSecond.cause as AggregateError).errors
+    );
+  });
+
+  test("S32-P62-12 real tasks-root lstat denial retains cache and retries in one service", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s32-root-lstat-denial";
+    const task = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    }).createTask({
+      type: "engineering",
+      title: "S32 root lstat denial",
+      question_or_goal: "Retain cache across a real metadata transport denial.",
+      inference_budget: { mode: "normal" }
+    });
+    let deny = false;
+    const denial = Object.assign(new Error("S32 tasks-root lstat EACCES"), {
+      code: "EACCES"
+    });
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value),
+      snapshotReadHooks: {
+        lstatTasksRootForHydration: async ({ tasksRoot }) => {
+          if (deny) {
+            deny = false;
+            throw denial;
+          }
+          return await lstat(tasksRoot, { bigint: true });
+        }
+      }
+    });
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+    deny = true;
+    const failure = await captureTaskServiceError(() => service.listTasks());
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(failure.evidenceRefs).toContain("workspace/tasks:metadata");
+    expect(diagnostics.at(-1)).toEqual({ slots: 1, activeClaims: 0 });
+    expect(await service.getTask(taskId)).toEqual(task);
+    expect(await service.listTasks()).toEqual([task]);
+  });
+
+  test("S32-P62-13 bounded malformed and missing successors delete stale cache", async () => {
+    for (const successor of ["malformed", "missing"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = `TASK-s32-rehydrate-${successor}`;
+      const task = await createTaskCardService({
+        workspaceRoot,
+        taskIdFactory: () => taskId
+      }).createTask({
+        type: "engineering",
+        title: `S32 ${successor} successor`,
+        question_or_goal: "Delete stale A from the bounded successor branch.",
+        inference_budget: { mode: "normal" }
+      });
+      const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+      const service = createTaskCardService({
+        workspaceRoot,
+        cacheDiagnosticsForTest: (value) => diagnostics.push(value)
+      });
+      expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+      const observation = await service.observeTaskSnapshotForCleanup(taskId);
+      expect(observation.status).toBe("record");
+      const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+      if (successor === "malformed") {
+        const replacement = `${snapshotPath}.malformed`;
+        await writeFile(replacement, "{", { flag: "wx", mode: 0o600 });
+        await rename(replacement, snapshotPath);
+      } else {
+        await unlink(snapshotPath);
+      }
+      await captureTaskServiceError(() =>
+        service.acceptTaskSnapshotCleanupObservation(observation)
+      );
+      expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
+    }
+  });
+
+  test("S32-P62-01 exact completed authority never semantically reauthorizes same-byte B", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:s32-exact-route-recovery";
+    const requestDigest = "digest-s32-exact-route-recovery";
+    const resultRef = "TASK-s32-exact-route-recovery";
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    await service.completeRecord({ scope: "task", key: rawKey, requestDigest, resultRef });
+    const consumed = await service.consumeCompletedRecord(
+      { scope: "task", key: rawKey, requestDigest },
+      async () => ({ status: "accepted", value: undefined })
+    );
+    expect(consumed.status).toBe("accepted");
+    if (consumed.status !== "accepted") throw new Error("Expected completed authority.");
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      idempotencyRecordEvidenceRef("task", rawKey)
+    );
+    const bytes = await readFile(recordPath);
+    const replacementPath = `${recordPath}.same-semantic-b`;
+    await writeFile(replacementPath, bytes, { flag: "wx", mode: 0o600 });
+    await rename(replacementPath, recordPath);
+    const physicalB = await readFileWithIdentity(recordPath);
+
+    await captureTaskServiceError(() =>
+      service.invalidateCompletedRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        resultRef,
+        mutationAuthority: consumed.mutationAuthority
+      })
+    );
+    await captureTaskServiceError(() =>
+      service.quarantineRecordAfterUnsafeRollback({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        expectedCompletedAuthority: {
+          resultRef,
+          mutationAuthority: consumed.mutationAuthority
+        }
+      })
+    );
+    expect(await readFileWithIdentity(recordPath)).toEqual(physicalB);
+    for (const reader of [
+      service,
+      createIdempotencyRecordService({ workspaceRoot }),
+      createIdempotencyRecordService({ workspaceRoot })
+    ]) {
+      expect(await reader.lookupReplay({ scope: "task", key: rawKey, requestDigest }))
+        .toMatchObject({ status: "completed", record: { result_ref: resultRef } });
+    }
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S32-P62-02 completed mutation authority has one deterministic terminal outcome", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:s32-one-terminal-authority";
+    const requestDigest = "digest-s32-one-terminal-authority";
+    const resultRef = "TASK-s32-one-terminal-authority";
+    const baseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    await service.completeRecord({ scope: "task", key: rawKey, requestDigest, resultRef });
+    const consumed = await service.consumeCompletedRecord(
+      { scope: "task", key: rawKey, requestDigest },
+      async () => ({ status: "accepted", value: undefined })
+    );
+    expect(consumed.status).toBe("accepted");
+    if (consumed.status !== "accepted") throw new Error("Expected completed authority.");
+    const failed = await service.invalidateCompletedRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef,
+      mutationAuthority: consumed.mutationAuthority
+    });
+    expect(failed.status).toBe("failed");
+    const repeated = await captureError(() =>
+      service.cancelCompletedRecordMutationAuthority(consumed.mutationAuthority)
+    );
+    expect(repeated).toBeInstanceOf(TypeError);
+    expect(repeated.message).toBe(
+      "Completed idempotency mutation authority is not owned by this service or is already settled."
+    );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(baseline);
+  });
+
+  test("S32-P62-08 publication transfer rejects a changed leaf before accepting authority", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s32-publication-transfer";
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const externalPath = join(tempRoot, "external-snapshot.json");
+    await writeFile(externalPath, "external sentinel\n", { flag: "wx", mode: 0o600 });
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let replaced = false;
+    let closedFd: number | undefined;
+    const service = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+    const failure = await captureTaskServiceError(() =>
+      Promise.race([
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            beforeCleanupPermitIdentityResolution: async ({ path }) => {
+              if (path !== snapshotPath || replaced) return;
+              replaced = true;
+              await rename(snapshotPath, `${snapshotPath}.original`);
+              await symlink(externalPath, snapshotPath);
+            },
+            afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+              closedFd = fd;
+            }
+          },
+          () => service.createTaskForIdempotency({
+            type: "engineering",
+            title: "S32 publication transfer",
+            question_or_goal: "Never ordinary-open a changed public leaf.",
+            inference_budget: { mode: "normal" }
+          })
+        ),
+        timeoutAfter(1_000, "S32 publication transfer blocked on a changed leaf")
+      ])
+    );
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(replaced).toBe(true);
+    expect((await lstat(snapshotPath)).isSymbolicLink()).toBe(true);
+    expect(await readFile(externalPath, "utf8")).toBe("external sentinel\n");
+    expect(closedFd).toBeNumber();
+    await expectFileDescriptorClosed(closedFd!);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S33-P62-02 absent-to-created tasks root restarts hydration instead of publishing empty", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s33-absent-created";
+    const task = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    }).createTask({
+      type: "engineering",
+      title: "S33 absent-to-created root",
+      question_or_goal: "Re-prove the absence witness before committing empty.",
+      inference_budget: { mode: "normal" }
+    });
+    let absentObservations = 0;
+    const service = createTaskCardService({
+      workspaceRoot,
+      snapshotReadHooks: {
+        lstatTasksRootForHydration: async ({ tasksRoot }) => {
+          if (absentObservations === 0) {
+            absentObservations += 1;
+            throw Object.assign(new Error("S33 tasks root not yet visible"), {
+              code: "ENOENT"
+            });
+          }
+          return await lstat(tasksRoot, { bigint: true });
+        }
+      }
+    });
+
+    expect(await service.listTasks()).toEqual([task]);
+    expect(absentObservations).toBe(1);
+    expect(await service.getTask(taskId)).toEqual(task);
+  });
+
+  test("S33-P62-03 root drift between final proof and cache commit restarts the attempt", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const survivingTaskId = "TASK-s33-proof-window-a";
+    const driftedTaskId = "TASK-s33-proof-window-b";
+    const surviving = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => survivingTaskId
+    }).createTask({
+      type: "engineering",
+      title: "S33 proof window A",
+      question_or_goal: "Remain visible through the proved commit window.",
+      inference_budget: { mode: "normal" }
+    });
+    const drifted = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => driftedTaskId
+    }).createTask({
+      type: "engineering",
+      title: "S33 proof window B",
+      question_or_goal: "Land between the final proof and the cache commit.",
+      inference_budget: { mode: "normal" }
+    });
+    const tasksRoot = join(workspaceRoot, "tasks");
+    const stagedLane = join(tempRoot, driftedTaskId);
+    await rename(join(tasksRoot, driftedTaskId), stagedLane);
+    let hookCalls = 0;
+    const service = createTaskCardService({
+      workspaceRoot,
+      snapshotReadHooks: {
+        lstatTasksRootForHydration: async ({ tasksRoot: observedRoot }) => {
+          hookCalls += 1;
+          const stats = await lstat(observedRoot, { bigint: true });
+          // Recalibrated for Root E (V33-11): with all six proofs
+          // hook-sourced, the final pre-commit proof of the single-lane first
+          // attempt is hook call 6.
+          if (hookCalls === 6) {
+            // Drift lands after the final pre-commit proof observed the
+            // pre-drift generation and before the cache commit consumes it.
+            await rename(stagedLane, join(tasksRoot, driftedTaskId));
+          }
+          return stats;
+        }
+      }
+    });
+
+    const tasks = await service.listTasks();
+    expect(tasks.map((task) => task.task_id).sort()).toEqual([
+      survivingTaskId,
+      driftedTaskId
+    ].sort());
+    expect(tasks).toContainEqual(surviving);
+    expect(tasks).toContainEqual(drifted);
+    expect(hookCalls).toBeGreaterThan(6);
+  });
+
+  test("S33-P62-05 durable-read denial during hydration retains unrelated cached lanes", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const cachedTaskId = "TASK-s33-hydration-cached";
+    const deniedTaskId = "TASK-s33-hydration-denied";
+    const cachedTask = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => cachedTaskId
+    }).createTask({
+      type: "engineering",
+      title: "S33 cached lane",
+      question_or_goal: "Survive an unrelated lane's transient read denial.",
+      inference_budget: { mode: "normal" }
+    });
+    const deniedTask = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => deniedTaskId
+    }).createTask({
+      type: "engineering",
+      title: "S33 denied lane",
+      question_or_goal: "Deny durable reads without deleting sibling caches.",
+      inference_budget: { mode: "normal" }
+    });
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value)
+    });
+    expect(await service.getTaskFromSnapshot(cachedTaskId)).toEqual(cachedTask);
+    const deniedSnapshotPath = join(workspaceRoot, "tasks", deniedTaskId, "snapshot.json");
+    await chmod(deniedSnapshotPath, 0o000);
+    try {
+      const failure = await captureTaskServiceError(() => service.listTasks());
+      expect(failure.code).toBe("task_snapshot_malformed");
+      expect(diagnostics.at(-1)).toEqual({ slots: 1, activeClaims: 0 });
+    } finally {
+      await chmod(deniedSnapshotPath, 0o600);
+    }
+    expect(await service.getTask(cachedTaskId)).toEqual(cachedTask);
+    expect(
+      (await service.listTasks()).map((task) => task.task_id).sort()
+    ).toEqual([cachedTaskId, deniedTaskId].sort());
+    expect(await service.getTask(deniedTaskId)).toEqual(deniedTask);
+  });
+
+  test("S33-P62-05 exact malformed evidence deletes only the failing lane cache", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const retainedTaskId = "TASK-s33-exact-retained";
+    const malformedTaskId = "TASK-s33-exact-malformed";
+    const retainedTask = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => retainedTaskId
+    }).createTask({
+      type: "engineering",
+      title: "S33 retained lane",
+      question_or_goal: "Survive a sibling lane's exact malformed evidence.",
+      inference_budget: { mode: "normal" }
+    });
+    await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => malformedTaskId
+    }).createTask({
+      type: "engineering",
+      title: "S33 malformed lane",
+      question_or_goal: "Provide exact malformed durable evidence.",
+      inference_budget: { mode: "normal" }
+    });
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value)
+    });
+    expect(await service.getTaskFromSnapshot(retainedTaskId)).toEqual(retainedTask);
+    const malformedSnapshotPath = join(
+      workspaceRoot,
+      "tasks",
+      malformedTaskId,
+      "snapshot.json"
+    );
+    await service.getTaskFromSnapshot(malformedTaskId);
+    const originalMalformedBytes = await readFile(malformedSnapshotPath);
+    await writeFile(malformedSnapshotPath, "{", { flag: "w" });
+
+    const failure = await captureTaskServiceError(() => service.listTasks());
+    expect(failure.code).toBe("task_snapshot_malformed");
+    // The lane with exact malformed evidence is deleted; the sibling is kept.
+    expect(diagnostics.at(-1)).toEqual({ slots: 1, activeClaims: 0 });
+
+    await writeFile(malformedSnapshotPath, originalMalformedBytes, { flag: "w" });
+    expect(
+      (await service.listTasks()).map((task) => task.task_id).sort()
+    ).toEqual([retainedTaskId, malformedTaskId].sort());
+  });
+
+  test("S33-P62-06 mid-batch publication throw settles every hydration claim", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const laneTaskIds = ["TASK-s33-midbatch-one", "TASK-s33-midbatch-two"] as const;
+    const lanes = new Map<string, TaskCard>();
+    for (const laneTaskId of laneTaskIds) {
+      lanes.set(
+        laneTaskId,
+        await createTaskCardService({
+          workspaceRoot,
+          taskIdFactory: () => laneTaskId
+        }).createTask({
+          type: "engineering",
+          title: `S33 mid-batch lane ${laneTaskId}`,
+          question_or_goal: "Exercise the commit batch behind a stolen epoch.",
+          inference_budget: { mode: "normal" }
+        })
+      );
+    }
+    const reobservationDenial = new Error("S33 mid-batch reobservation denial");
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    let phase: "idle" | "steal" | "deny" = "idle";
+    let stealing = false;
+    let denials = 0;
+    let stolenTaskId: string | undefined;
+    const snapshotPathFor = (taskId: string): string =>
+      join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const service: ReturnType<typeof createTaskCardService> = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value),
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async ({ laneTaskId }) => {
+          if (stealing || !laneTaskIds.includes(laneTaskId as never)) return;
+          if (phase === "steal") {
+            // Steal the first-processed lane's slot epoch with different
+            // content so the later cache commit loses its settlement.
+            phase = "deny";
+            stolenTaskId = laneTaskId;
+            stealing = true;
+            const snapshotPath = snapshotPathFor(laneTaskId);
+            const originalBytes = await readFile(snapshotPath);
+            const modified = JSON.parse(originalBytes.toString("utf8")) as {
+              task_card: { title: string };
+            };
+            modified.task_card.title = "S33 stolen divergent title";
+            try {
+              await writeFile(snapshotPath, `${JSON.stringify(modified)}\n`, {
+                flag: "w"
+              });
+              await service.getTaskFromSnapshot(laneTaskId);
+            } finally {
+              await writeFile(snapshotPath, originalBytes, { flag: "w" });
+              stealing = false;
+            }
+            return;
+          }
+          if (phase === "deny" && laneTaskId === stolenTaskId && denials < 4) {
+            denials += 1;
+            throw reobservationDenial;
+          }
+        }
+      }
+    });
+
+    phase = "steal";
+    const failure = await captureTaskServiceError(() => service.listTasks());
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(denials).toBeGreaterThan(0);
+    expect(stolenTaskId).toBeDefined();
+    // Every claim the failed attempt created is settled: only the stolen
+    // lane's published slot remains and no active claims leak.
+    expect(diagnostics.at(-1)).toEqual({ slots: 1, activeClaims: 0 });
+
+    // The pending lane can still be pruned and hydration retried afterwards.
+    phase = "idle";
+    const pendingTaskId = laneTaskIds.find((taskId) => taskId !== stolenTaskId)!;
+    await rm(join(workspaceRoot, "tasks", pendingTaskId), { recursive: true });
+    expect(await service.listTasks()).toEqual([lanes.get(stolenTaskId!)!]);
+    expect(diagnostics.at(-1)).toEqual({ slots: 1, activeClaims: 0 });
+  });
+
+  test("S34-P62-03 lost cleanup delete-settlement reconciles cache with durable absence", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s34-lost-cleanup-delete";
+    const task = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    }).createTask({
+      type: "engineering",
+      title: "S34 lost cleanup delete",
+      question_or_goal: "Reconcile a lost cleanup delete-settlement.",
+      inference_budget: { mode: "normal" }
+    });
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value)
+    });
+
+    // Ungated observation claims the slot at the pre-hydration epoch.
+    const observation = await service.observeTaskSnapshotForCleanup(taskId);
+    expect(observation.status).toBe("record");
+    // The first (memoized) hydration publishes the same lane, bumping the
+    // slot epoch, so the later cleanup delete-settlement is "lost".
+    expect(await service.listTasks()).toEqual([task]);
+
+    await service.cleanupTaskSnapshotObservation(observation);
+
+    // Reconciled: cache agrees with durable absence in the same service
+    // lifetime — the memoized hydration is never re-run.
+    await expectPathMissing(join(workspaceRoot, "tasks", taskId, "snapshot.json"));
+    expect(
+      (await captureTaskServiceError(() => service.getTask(taskId))).code
+    ).toBe("task_not_found");
+    expect(await service.listTasks()).toEqual([]);
+    expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
+  });
+
+  test("S34-P62-03 lost reject delete-settlement reconciles cache with durable absence", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s34-lost-reject-delete";
+    const task = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    }).createTask({
+      type: "engineering",
+      title: "S34 lost reject delete",
+      question_or_goal: "Reconcile a lost reject delete-settlement.",
+      inference_budget: { mode: "normal" }
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const gate = createAsyncGate();
+    const pausedAtFinalProof = createSignal();
+    let hookCalls = 0;
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value),
+      snapshotReadHooks: {
+        lstatTasksRootForHydration: async ({ tasksRoot }) => {
+          hookCalls += 1;
+          const stats = await lstat(tasksRoot, { bigint: true });
+          if (hookCalls === S34_FINAL_PRE_COMMIT_PROOF_CALL) {
+            pausedAtFinalProof.resolve();
+            await gate.wait;
+          }
+          return stats;
+        }
+      }
+    });
+
+    // Pause the first hydration at the final pre-commit proof, after it read
+    // the snapshot but before the cache commit publishes it.
+    const hydration = service.listTasks();
+    await pausedAtFinalProof.promise;
+    // The snapshot disappears inside the lane (tasks-root stats unchanged),
+    // and an ungated observation witnesses the absence at the pre-commit
+    // epoch.
+    await unlink(snapshotPath);
+    const observation = await service.observeTaskSnapshotForCleanup(taskId);
+    expect(observation.status).toBe("missing");
+    gate.open();
+    // The paused commit publishes its stale read — an ungated publish landing
+    // between the durable absence witness and the reject delete-settlement.
+    expect(await hydration).toEqual([task]);
+
+    await service.rejectTaskSnapshotCleanupObservation(observation);
+
+    // Reconciled: cache agrees with durable absence in the same service.
+    expect(
+      (await captureTaskServiceError(() => service.getTask(taskId))).code
+    ).toBe("task_not_found");
+    expect(await service.listTasks()).toEqual([]);
+    expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
+  });
+
+  test("S34-P62-03 lost task_not_found delete-settlement reconciles cache with durable absence", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s34-lost-notfound-delete";
+    const task = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    }).createTask({
+      type: "engineering",
+      title: "S34 lost task_not_found delete",
+      question_or_goal: "Reconcile a lost getTaskFromSnapshot delete-settlement.",
+      inference_budget: { mode: "normal" }
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const gate = createAsyncGate();
+    const pausedAtFinalProof = createSignal();
+    let hookCalls = 0;
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value),
+      snapshotReadHooks: {
+        lstatTasksRootForHydration: async ({ tasksRoot }) => {
+          hookCalls += 1;
+          // Stats are captured before the pause so the resumed proof and the
+          // cache commit complete in microtasks, strictly before the ungated
+          // reader's next filesystem turn.
+          const stats = await lstat(tasksRoot, { bigint: true });
+          if (hookCalls === S34_FINAL_PRE_COMMIT_PROOF_CALL) {
+            pausedAtFinalProof.resolve();
+            await gate.wait;
+          }
+          return stats;
+        }
+      }
+    });
+
+    // Pause the first hydration at the final pre-commit proof.
+    const hydration = service.listTasks();
+    await pausedAtFinalProof.promise;
+    // The snapshot disappears inside the lane; the ungated reader claims the
+    // slot at the pre-commit epoch and will observe task_not_found.
+    await unlink(snapshotPath);
+    const reader = service.getTaskFromSnapshot(taskId);
+    reader.catch(() => undefined);
+    gate.open();
+    // The commit publishes its stale read within the resumed microtask turn,
+    // before the reader's absence observation settles.
+    expect(await hydration).toEqual([task]);
+    expect(
+      (await captureTaskServiceError(() => reader)).code
+    ).toBe("task_not_found");
+
+    // Reconciled: cache agrees with durable absence in the same service.
+    expect(
+      (await captureTaskServiceError(() => service.getTask(taskId))).code
+    ).toBe("task_not_found");
+    expect(await service.listTasks()).toEqual([]);
+    expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
+  });
+
+  test("S34-P62-06 guard-recovery mid-window completed swap is refused fail-closed", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:s34-guard-recovery-completed-swap";
+    const requestDigest = "digest-s34-guard-recovery-completed-swap";
+    const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      evidenceRef
+    );
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    // Stale tokenless fail-intent guard from a dead owner: recoverable for a
+    // started record (guard.result_ref === undefined).
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    await writeFile(
+      guardPath,
+      `${JSON.stringify({
+        guard_id: "s34-guard-recovery-completed-swap",
+        owner_pid: 9_999_999,
+        acquired_at_ms: Date.now() - 31_000,
+        acquired_at: "2026-07-16T09:00:00.000Z",
+        intent: "fail",
+        request_digest: requestDigest
+      })}\n`,
+      { flag: "wx", mode: 0o600 }
+    );
+    // Out-of-band completed generation (schema-valid without result_ref) that
+    // lands mid-window: after the first failed-record write starts and before
+    // the recovery re-read.
+    const completedText = `${JSON.stringify({
+      key: rawKey,
+      scope: "task",
+      request_digest: requestDigest,
+      status: "completed",
+      created_at: "2026-07-16T09:00:00.000Z",
+      updated_at: "2026-07-16T09:00:00.000Z"
+    })}\n`;
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let swapped = false;
+
+    const refusal = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: async ({ canonicalPath }) => {
+            if (canonicalPath !== recordPath || swapped) return;
+            swapped = true;
+            // The swap fails the in-flight first write (its canonical
+            // baseline changed) and leaves a completed record in the window.
+            await writeFile(recordPath, completedText, { flag: "w" });
+          }
+        },
+        () => service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+      )
+    );
+
+    expect(swapped).toBe(true);
+    // Refused fail-closed with the typed identity error, matching
+    // assertUnsafeRollbackQuarantineAuthority semantics.
+    expect(refusal.code).toBe("record_malformed");
+    expect(refusal.status).toBe(409);
+    expect(refusal.message).toBe(
+      "Completed idempotency result changed before exact invalidation."
+    );
+    // The completed generation is preserved byte-identically.
+    expect(await readFile(recordPath, "utf8")).toBe(completedText);
+    // And it remains replayable: the invalid-completed protocol takes over.
+    const replay = await service.lookupReplay({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    expect(replay.status).toBe("invalid_completed");
+    if (replay.status !== "invalid_completed") {
+      throw new Error("Expected the preserved completed record to replay.");
+    }
+    expect(replay.reason).toBe("missing_result_ref");
+    expect(await readFile(recordPath, "utf8")).toBe(completedText);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S34-P62-07 ENOTDIR lane swap inside the reader window retains the lane cache", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const retainedTaskId = "TASK-s34-enotdir-retained";
+    const swappedTaskId = "TASK-s34-enotdir-lane-swap";
+    const retainedTask = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => retainedTaskId
+    }).createTask({
+      type: "engineering",
+      title: "S34 ENOTDIR retained sibling",
+      question_or_goal: "Survive a sibling lane's ENOTDIR collapse.",
+      inference_budget: { mode: "normal" }
+    });
+    const swappedTask = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => swappedTaskId
+    }).createTask({
+      type: "engineering",
+      title: "S34 ENOTDIR lane swap",
+      question_or_goal: "Retain the cache when the lane collapses to a file.",
+      inference_budget: { mode: "normal" }
+    });
+    const lanePath = join(workspaceRoot, "tasks", swappedTaskId);
+    const snapshotPath = join(lanePath, "snapshot.json");
+    const snapshotBytes = await readFile(snapshotPath);
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    let swapArmed = false;
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value),
+      snapshotReadHooks: {
+        beforeSnapshotDurableRead: async ({ laneTaskId }) => {
+          if (!swapArmed || laneTaskId !== swappedTaskId) return;
+          swapArmed = false;
+          // The lane collapses to a regular file inside the reader window —
+          // after the caller's last lane-shape proof, before the reader's
+          // first pathname inspection — so the frozen reader reports ENOTDIR
+          // as "missing".
+          await unlink(snapshotPath);
+          await rmdir(lanePath);
+          await writeFile(lanePath, "not a directory\n", { flag: "wx" });
+        }
+      }
+    });
+    // Both lanes are cached before the swap.
+    expect(await service.getTaskFromSnapshot(retainedTaskId)).toEqual(retainedTask);
+    expect(await service.getTaskFromSnapshot(swappedTaskId)).toEqual(swappedTask);
+    expect(diagnostics.at(-1)).toEqual({ slots: 2, activeClaims: 0 });
+
+    swapArmed = true;
+    const failure = await captureTaskServiceError(() => service.listTasks());
+    // ENOTDIR-shaped absence is a retained (unknown) classification — not
+    // exact-content evidence — so no lane cache entry is deleted.
+    expect(failure.code).toBe("task_lane_not_directory");
+    expect(diagnostics.at(-1)).toEqual({ slots: 2, activeClaims: 0 });
+
+    // Healing the lane re-proves both retained entries through hydration.
+    await unlink(lanePath);
+    await mkdir(lanePath);
+    await writeFile(snapshotPath, snapshotBytes, { flag: "wx" });
+    expect(
+      (await service.listTasks()).map((entry) => entry.task_id).sort()
+    ).toEqual([retainedTaskId, swappedTaskId].sort());
+    expect(await service.getTask(retainedTaskId)).toEqual(retainedTask);
+    expect(await service.getTask(swappedTaskId)).toEqual(swappedTask);
+    expect(diagnostics.at(-1)).toEqual({ slots: 2, activeClaims: 0 });
+  });
+
+  test("S34-P62-07 genuine ENOENT missing inside the reader window still deletes exactly", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s34-enoent-missing";
+    const task = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    }).createTask({
+      type: "engineering",
+      title: "S34 genuine ENOENT missing",
+      question_or_goal: "Keep exact-absence semantics when the lane stays a directory.",
+      inference_budget: { mode: "normal" }
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    let removeArmed = false;
+    const service = createTaskCardService({
+      workspaceRoot,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value),
+      snapshotReadHooks: {
+        beforeSnapshotDurableRead: async ({ laneTaskId }) => {
+          if (!removeArmed || laneTaskId !== taskId) return;
+          removeArmed = false;
+          // Genuine durable absence: the snapshot disappears while the lane
+          // remains a directory.
+          await unlink(snapshotPath);
+        }
+      }
+    });
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+
+    removeArmed = true;
+    const failure = await captureTaskServiceError(() =>
+      service.getTaskFromSnapshot(taskId)
+    );
+    expect(failure.code).toBe("task_not_found");
+    expect(
+      (await captureTaskServiceError(() => service.getTask(taskId))).code
+    ).toBe("task_not_found");
+    expect(await service.listTasks()).toEqual([]);
+    expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
+  });
+
+  test("S34-P62-12 hydration proofs consume one stat source with a stable virtual generation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s34-proof-stat-source";
+    const task = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId
+    }).createTask({
+      type: "engineering",
+      title: "S34 proof stat source",
+      question_or_goal: "Survive a benign real-root mutation under a virtual generation.",
+      inference_budget: { mode: "normal" }
+    });
+    const tasksRoot = join(workspaceRoot, "tasks");
+    const virtualStats = await lstat(tasksRoot, { bigint: true });
+    let mutationArmed = true;
+    const service = createTaskCardService({
+      workspaceRoot,
+      snapshotReadHooks: {
+        // A stable virtualized generation: every proof must consume this one
+        // stat source, or a hook-blind proof spuriously fails the attempt.
+        lstatTasksRootForHydration: async () => virtualStats,
+        beforeSnapshotOpen: async () => {
+          if (!mutationArmed) return;
+          mutationArmed = false;
+          // Benign real-root mutation inside the per-entry read window: bumps
+          // the real tasks-root mtime without touching any lane.
+          await writeFile(join(tasksRoot, "not-a-task.marker"), "drift\n", {
+            flag: "wx"
+          });
+        }
+      }
+    });
+
+    expect(await service.listTasks()).toEqual([task]);
+    expect(mutationArmed).toBe(false);
+    expect(await service.getTask(taskId)).toEqual(task);
+  });
+
+  test("S34-P62-12 root drift is injectable at the enumeration, per-entry, and pre-read proofs", async () => {
+    // Hook-call windows for a single-lane hydration attempt: 1 initial stats,
+    // 2 enumeration proof, 3 per-entry proof, 4 pre-read proof, 5 post-read
+    // proof, 6 final pre-commit proof, 7 post-commit proof.
+    for (const window of [2, 3, 4]) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = `TASK-s34-proof-drift-${window}`;
+      const task = await createTaskCardService({
+        workspaceRoot,
+        taskIdFactory: () => taskId
+      }).createTask({
+        type: "engineering",
+        title: `S34 proof drift window ${window}`,
+        question_or_goal: "Catch injected drift at the exact proof window.",
+        inference_budget: { mode: "normal" }
+      });
+      const tasksRoot = join(workspaceRoot, "tasks");
+      let hookCalls = 0;
+      let driftArmed = true;
+      const service = createTaskCardService({
+        workspaceRoot,
+        snapshotReadHooks: {
+          lstatTasksRootForHydration: async ({ tasksRoot: observedRoot }) => {
+            hookCalls += 1;
+            if (driftArmed && hookCalls === window) {
+              driftArmed = false;
+              // Real root drift lands inside this exact proof window and must
+              // be caught by this proof, restarting the bounded attempt.
+              await writeFile(
+                join(tasksRoot, `not-a-task-drift-${window}.marker`),
+                "drift\n",
+                { flag: "wx" }
+              );
+            }
+            return await lstat(observedRoot, { bigint: true });
+          }
+        }
+      });
+
+      expect(await service.listTasks()).toEqual([task]);
+      // The drifted attempt stopped at the injected window; the clean restart
+      // consumed the full seven-call proof chain.
+      expect(hookCalls).toBe(window + 7);
+    }
+  });
+
+  test("S34-P62-10 observation seam cannot flip the lifecycle-publish exact-generation permit", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const directorySegments = ["s34-lifecycle-seam"] as const;
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const permitResolutions: string[] = [];
+
+    // Polarity 1 — the observation seam keeps exactGenerationPermitRequired
+    // disengaged: the exact-generation cleanup permit is never resolved, and
+    // the raw write-integrity gate (hooks were present around the writer)
+    // fails loud instead of silently engaging the hardened write mode.
+    const seamRecord = { id: "s34-seam-only" };
+    const seamPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "seam-only.json"],
+      "s34.lifecycle-seam.seam-only"
+    );
+    const seamFailure = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordObservationHooksForTest(
+        {
+          beforeCleanupPermitIdentityResolution: ({ path }) => {
+            if (path === seamPath) permitResolutions.push("seam");
+          }
+        },
+        () =>
+          publishJsonRecordWithLifecycleCallbacks(
+            workspaceRoot,
+            directorySegments,
+            "seam-only.json",
+            seamRecord,
+            "s34.lifecycle-seam.seam-only",
+            schema
+          )
+      )
+    );
+    expect(permitResolutions).toEqual([]);
+    expect(seamFailure.code).toBe("workspace_path_not_safe");
+    expect(seamFailure.message).toBe(
+      "Workspace record publication authority could not be verified."
+    );
+    // The committed generation survives the loud terminal-proof refusal.
+    expect(JSON.parse(await readFile(seamPath, "utf8"))).toEqual(seamRecord);
+
+    // Polarity 2 — nesting real publication hooks inside the observation
+    // context re-engages the exact-generation permit.
+    const nestedRecord = { id: "s34-nested-real" };
+    const nestedPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "nested-real.json"],
+      "s34.lifecycle-seam.nested-real"
+    );
+    const nested = await runWithWorkspaceRecordObservationHooksForTest(
+      {},
+      () =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            beforeCleanupPermitIdentityResolution: ({ path }) => {
+              if (path === nestedPath) permitResolutions.push("nested-real");
+            }
+          },
+          () =>
+            publishJsonRecordWithLifecycleCallbacks(
+              workspaceRoot,
+              directorySegments,
+              "nested-real.json",
+              nestedRecord,
+              "s34.lifecycle-seam.nested-real",
+              schema
+            )
+        )
+    );
+    expect(nested).toEqual(nestedRecord);
+    expect(permitResolutions).toEqual(["nested-real"]);
+    expect(JSON.parse(await readFile(nestedPath, "utf8"))).toEqual(nestedRecord);
+
+    // Production sanity: without any hooks the terminal writer proof holds.
+    const plainRecord = { id: "s34-plain" };
+    expect(
+      await publishJsonRecordWithLifecycleCallbacks(
+        workspaceRoot,
+        directorySegments,
+        "plain.json",
+        plainRecord,
+        "s34.lifecycle-seam.plain",
+        schema
+      )
+    ).toEqual(plainRecord);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S34-P62-13 record-authority alias set retains the physical-exact identity", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "s34-physical-alias" };
+    const directorySegments = ["s34-physical-alias"] as const;
+    const evidenceRef = "s34.physical-alias.owner";
+    const requestedPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "record-a.json"],
+      evidenceRef
+    );
+    const physicalPath = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "record-b.json"],
+      evidenceRef
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const linked = createSignal();
+    const linkGate = createAsyncGate();
+    // The identity-candidates seam reports a distinct physical-exact identity
+    // for the requested pathname (the hardlink/case-alias canonicalization
+    // shape on a case-sensitive filesystem).
+    const owner = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterCanonicalLink: async () => {
+          linked.resolve();
+          await linkGate.wait;
+        },
+        rewriteRecordAuthorityIdentityCandidates: ({ path, exactPath, aliases }) =>
+          path === requestedPath
+            ? { exactPath: physicalPath, aliases: [physicalPath] }
+            : { exactPath, aliases }
+      },
+      () =>
+        createJsonRecordIfAbsent(
+          workspaceRoot,
+          directorySegments,
+          "record-a.json",
+          record,
+          evidenceRef,
+          schema
+        )
+    );
+    await linked.promise;
+
+    // A second operation addressing the physical identity directly must
+    // collide with the owner's mutex through the retained physical-exact
+    // alias; the requested-path FIFO anchor is unchanged.
+    const contended = createSignal();
+    const reader = runWithWorkspaceRecordPublicationHooks(
+      { onAuthorityContention: () => contended.resolve() },
+      () => readJsonRecord(physicalPath, "s34.physical-alias.reader", schema)
+    );
+    await Promise.race([
+      contended.promise,
+      timeoutAfter(1_000, "physical-exact alias did not unify the record authority")
+    ]);
+    linkGate.open();
+    expect(await owner).toEqual({ status: "created", record });
+    expect(await reader).toBeUndefined();
+    expect(await readJsonRecord(requestedPath, evidenceRef, schema)).toEqual(record);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S34-P62-14 claimed-lane disappearance across a root swap escalates fail-closed and self-heals", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const generationATaskId = "TASK-s34-root-swap-a";
+    const generationBTaskId = "TASK-s34-root-swap-b";
+    await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => generationATaskId
+    }).createTask({
+      type: "engineering",
+      title: "S34 root swap generation A",
+      question_or_goal: "Disappear together with the root generation.",
+      inference_budget: { mode: "normal" }
+    });
+    const generationBTask = await createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => generationBTaskId
+    }).createTask({
+      type: "engineering",
+      title: "S34 root swap generation B",
+      question_or_goal: "Hydrate successfully after the escalation.",
+      inference_budget: { mode: "normal" }
+    });
+    const tasksRoot = join(workspaceRoot, "tasks");
+    // Generation B is staged outside the root so the first attempt claims
+    // only the generation-A lane.
+    const stagedLaneB = join(tempRoot, generationBTaskId);
+    await rename(join(tasksRoot, generationBTaskId), stagedLaneB);
+    const displacedRootA = join(tempRoot, "s34-displaced-generation-a");
+    let hookCalls = 0;
+    let swapArmed = true;
+    const service = createTaskCardService({
+      workspaceRoot,
+      snapshotReadHooks: {
+        lstatTasksRootForHydration: async ({ tasksRoot: observedRoot }) => {
+          hookCalls += 1;
+          if (swapArmed && hookCalls === 6) {
+            swapArmed = false;
+            // The whole tasks root swaps to generation B at the final
+            // pre-commit proof: the claimed generation-A lane disappears
+            // together with the root generation change.
+            await rename(tasksRoot, displacedRootA);
+            await mkdir(tasksRoot);
+            await rename(stagedLaneB, join(tasksRoot, generationBTaskId));
+          }
+          return await lstat(observedRoot, { bigint: true });
+        }
+      }
+    });
+
+    const escalation = await captureTaskServiceError(() => service.listTasks());
+    // Pinned intentional fail-closed escalation (V33-10 documented
+    // disposition): the coupled claimed-lane + root-generation disappearance
+    // refuses the bounded retry loudly.
+    expect(escalation.code).toBe("workspace_path_not_safe");
+    expect(escalation.message).toBe(
+      "A task observed by a changed-root hydration attempt disappeared before retry."
+    );
+    expect(escalation.evidenceRefs).toContain(
+      `workspace/tasks/${generationATaskId}/snapshot.json`
+    );
+
+    // Availability self-heals: the next gated call hydrates generation B.
+    expect(await service.listTasks()).toEqual([generationBTask]);
+    expect(await service.getTask(generationBTaskId)).toEqual(generationBTask);
+  });
+
+  test("S33-P62-01 quarantine fallback refuses tokenless completed mutation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:s33-tokenless-quarantine";
+    const requestDigest = "digest-s33-tokenless-quarantine";
+    const resultRef = "TASK-s33-tokenless-quarantine";
+    const invalidKey = "task:create:s33-tokenless-quarantine-invalid";
+    const invalidDigest = "digest-s33-tokenless-quarantine-invalid";
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const completed = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef
+    });
+
+    const refusal = await captureTaskServiceError(() =>
+      service.quarantineRecordAfterUnsafeRollback({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        expectedCompletedAuthority: { resultRef }
+      })
+    );
+
+    expect(refusal.code).toBe("record_malformed");
+    expect(refusal.status).toBe(409);
+    expect(refusal.message).toBe(
+      "Completed idempotency result changed before exact invalidation."
+    );
+    expect(await service.getRecord("task", rawKey)).toEqual(completed);
+
+    const invalidCompletedPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(invalidKey)],
+      idempotencyRecordEvidenceRef("task", invalidKey)
+    );
+    const invalidRecordText = `${JSON.stringify({
+      key: invalidKey,
+      scope: "task",
+      request_digest: invalidDigest,
+      status: "completed",
+      created_at: "2026-07-16T09:00:00.000Z",
+      updated_at: "2026-07-16T09:00:00.000Z"
+    })}\n`;
+    await writeFile(invalidCompletedPath, invalidRecordText, { flag: "wx" });
+    const invalidRefusal = await captureTaskServiceError(() =>
+      service.quarantineRecordAfterUnsafeRollback({
+        scope: "task",
+        key: invalidKey,
+        requestDigest: invalidDigest,
+        expectedCompletedAuthority: { resultRef: undefined }
+      })
+    );
+    expect(invalidRefusal.code).toBe("record_malformed");
+    expect(invalidRefusal.status).toBe(409);
+    expect(await readFile(invalidCompletedPath, "utf8")).toBe(invalidRecordText);
+
+    const consumed = await service.consumeCompletedRecord(
+      { scope: "task", key: rawKey, requestDigest },
+      async () => ({ status: "accepted" as const, value: undefined })
+    );
+    expect(consumed.status).toBe("accepted");
+    if (consumed.status !== "accepted") throw new Error("Expected completed authority.");
+    const quarantined = await service.quarantineRecordAfterUnsafeRollback({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      expectedCompletedAuthority: {
+        resultRef,
+        mutationAuthority: consumed.mutationAuthority
+      }
+    });
+    expect(quarantined.status).toBe("failed");
+    expect(quarantined.result_ref).toBeUndefined();
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S33-P62-07 release exit keeps a rejected publication-handle close re-drivable", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s33-release-close";
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value)
+    });
+    const task = await service.createTaskForIdempotency({
+      type: "engineering",
+      title: "S33 release close settlement",
+      question_or_goal: "Keep a rejected publication-handle close re-drivable.",
+      inference_budget: { mode: "normal" }
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const snapshotIdentity = await stat(snapshotPath, { bigint: true });
+    const pinnedDescriptors = findOpenFileDescriptorsByIdentity(snapshotIdentity);
+    expect(pinnedDescriptors).toHaveLength(1);
+    closeSync(pinnedDescriptors[0]!);
+
+    const first = await captureThrownValue(() =>
+      service.releaseTaskPublicationForIdempotency(task)
+    );
+    expect(first).toBeInstanceOf(Error);
+    expect(first).toMatchObject({ code: "EBADF" });
+    // Retry is not a silent no-op: the unsettled authority re-surfaces the
+    // rejected close instead of resolving as if the release had succeeded.
+    const second = await captureThrownValue(() =>
+      service.releaseTaskPublicationForIdempotency(task)
+    );
+    expect(second).toBeInstanceOf(Error);
+    expect(second).toMatchObject({ code: "EBADF" });
+    expect(diagnostics.at(-1)).toEqual({ slots: 1, activeClaims: 0 });
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+  });
+
+  test("S33-P62-07 rollback exit preserves the mismatch primary across a rejected descriptor close", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s33-rollback-close";
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const service = createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value)
+    });
+    const task = await service.createTaskForIdempotency({
+      type: "engineering",
+      title: "S33 rollback close settlement",
+      question_or_goal: "Preserve the rollback primary across a rejected close.",
+      inference_budget: { mode: "normal" }
+    });
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    // Advance the durable generation so the rollback classifies a typed
+    // mismatch primary before the exit settles the publication handle.
+    const successor = JSON.parse(await readFile(snapshotPath, "utf8")) as {
+      task_card: { title: string };
+    };
+    successor.task_card.title = "S33 rollback successor title";
+    await writeFile(snapshotPath, `${JSON.stringify(successor, null, 2)}\n`, {
+      flag: "w"
+    });
+    const snapshotIdentity = await stat(snapshotPath, { bigint: true });
+    const pinnedDescriptors = findOpenFileDescriptorsByIdentity(snapshotIdentity);
+    expect(pinnedDescriptors).toHaveLength(1);
+    closeSync(pinnedDescriptors[0]!);
+
+    const failure = await captureThrownValue(() =>
+      service.rollbackTaskForIdempotency(taskId, task)
+    );
+    expect(failure).toBeInstanceOf(TaskServiceError);
+    expect((failure as TaskServiceError).code).toBe("task_snapshot_mismatch");
+    const semantic = semanticPrimaryError(failure);
+    expect(semantic).toBeInstanceOf(TaskServiceError);
+    expect((semantic as TaskServiceError).message).toBe(
+      "Task rollback publication authority no longer matches the durable generation."
+    );
+    const aggregate = knownPreservedCompensationAggregate(failure);
+    const closeRejections = aggregate.errors.filter(
+      (entry) =>
+        entry instanceof Error && (entry as { code?: unknown }).code === "EBADF"
+    );
+    expect(closeRejections).toHaveLength(1);
+    expect(diagnostics.at(-1)).toEqual({ slots: 1, activeClaims: 0 });
+
+    // The authority settles with the close: the retry verifies durable state
+    // through the normal rollback path instead of silently no-opping.
+    const retry = await captureTaskServiceError(() =>
+      service.rollbackTaskForIdempotency(taskId, task)
+    );
+    expect(retry.code).toBe("task_snapshot_mismatch");
+    expect((await service.getTaskFromSnapshot(taskId)).title).toBe(
+      "S33 rollback successor title"
+    );
+  });
+
+  test("S33-P62-07 create exit folds a rejected descriptor close behind the publish primary", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s33-create-close";
+    const publishDenial = new Error("S33 create publish reobservation denial");
+    const diagnostics: Array<{ slots: number; activeClaims: number }> = [];
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    let stealArmed = false;
+    let denialArmed = false;
+    let denials = 0;
+    let closedPinnedDescriptors = 0;
+    const service: ReturnType<typeof createTaskCardService> = createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      cacheDiagnosticsForTest: (value) => diagnostics.push(value),
+      snapshotWriteHooks: {
+        beforeSnapshotWrite: async ({ taskId: laneTaskId }) => {
+          if (!stealArmed || laneTaskId !== taskId) return;
+          stealArmed = false;
+          // Steal the create claim's slot epoch without touching the durable
+          // lane: the missing-lane read settles an exact absence delete.
+          const stolen = await captureTaskServiceError(() =>
+            service.getTaskFromSnapshot(taskId)
+          );
+          expect(stolen.code).toBe("task_not_found");
+          denialArmed = true;
+        }
+      },
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async ({ laneTaskId }) => {
+          if (!denialArmed || laneTaskId !== taskId || denials >= 2) return;
+          denials += 1;
+          if (denials === 1) {
+            // Reject the transferred publication handle before the create
+            // exit settles it.
+            const snapshotIdentity = await stat(snapshotPath, { bigint: true });
+            const pinnedDescriptors =
+              findOpenFileDescriptorsByIdentity(snapshotIdentity);
+            expect(pinnedDescriptors).toHaveLength(1);
+            closeSync(pinnedDescriptors[0]!);
+            closedPinnedDescriptors += 1;
+          }
+          throw publishDenial;
+        }
+      }
+    });
+
+    stealArmed = true;
+    const failure = await captureThrownValue(() =>
+      service.createTaskForIdempotency({
+        type: "engineering",
+        title: "S33 create close settlement",
+        question_or_goal: "Fold a rejected close behind the publish primary.",
+        inference_budget: { mode: "normal" }
+      })
+    );
+    expect(denials).toBe(2);
+    expect(closedPinnedDescriptors).toBe(1);
+    expect(failure).toBeInstanceOf(TaskServiceError);
+    expect((failure as TaskServiceError).code).toBe("workspace_path_not_safe");
+    const semantic = semanticPrimaryError(failure);
+    expect(semantic).toBeInstanceOf(TaskServiceError);
+    expect((semantic as TaskServiceError).message).toBe(
+      "Failed to publish a durably observed task into the local cache."
+    );
+    // The denied reobservations stay attached to the publish primary through
+    // the read-attempt carriers in its folded cause.
+    const primaryCause = (semantic as TaskServiceError).cause;
+    expect(primaryCause).toBeInstanceOf(AggregateError);
+    expect(
+      (primaryCause as AggregateError).errors.some(
+        (entry) => (entry as { reason?: unknown } | null)?.reason === publishDenial
+      )
+    ).toBe(true);
+    const aggregate = knownPreservedCompensationAggregate(failure);
+    const closeRejections = aggregate.errors.filter(
+      (entry) =>
+        entry instanceof Error && (entry as { code?: unknown }).code === "EBADF"
+    );
+    expect(closeRejections).toHaveLength(1);
+    expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
+
+    // Sibling cleanup ran: the durable lane stays readable in this service
+    // once the transient denial clears.
+    expect(await service.getTaskFromSnapshot(taskId)).toMatchObject({
+      task_id: taskId,
+      title: "S33 create close settlement"
+    });
+    expect(diagnostics.at(-1)).toEqual({ slots: 1, activeClaims: 0 });
+  });
+
+  test("S34-P62-15 single denied reobservation transports the read-attempt carrier as the terminal publish cause", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s34-single-carrier";
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const stashPath = `${snapshotPath}.s34-p62-15-stash`;
+    const injectedDenial = new Error("S34-P62-15 reobservation read denial");
+    let armed = false;
+    let stealInProgress = false;
+    let hookCalls = 0;
+    let denials = 0;
+    let steals = 0;
+    const service: ReturnType<typeof createTaskCardService> = createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      snapshotReadHooks: {
+        beforeSnapshotOpen: async ({ laneTaskId }) => {
+          if (!armed || stealInProgress || laneTaskId !== taskId) return;
+          hookCalls += 1;
+          if (hookCalls === 2) {
+            // First reobservation read: denied — exactly ONE read-attempt
+            // carrier accumulates.
+            denials += 1;
+            throw injectedDenial;
+          }
+          // Initial read (call 1) and second reobservation read (call 3):
+          // allowed, but the slot epoch is stolen mid-flow so the following
+          // settleSet is lost without accumulating an error.
+          stealInProgress = true;
+          steals += 1;
+          try {
+            await rename(snapshotPath, stashPath);
+            try {
+              const stolen = await captureTaskServiceError(() =>
+                service.getTaskFromSnapshot(taskId)
+              );
+              expect(stolen.code).toBe("task_not_found");
+            } finally {
+              await rename(stashPath, snapshotPath);
+            }
+          } finally {
+            stealInProgress = false;
+          }
+        }
+      }
+    });
+
+    const task = await service.createTask({
+      type: "engineering",
+      title: "S34 single-carrier settlement",
+      question_or_goal: "Transport one read-attempt carrier as the fold shortcut.",
+      inference_budget: { mode: "normal" }
+    });
+
+    armed = true;
+    const failure = await captureTaskServiceError(() =>
+      service.getTaskFromSnapshot(taskId)
+    );
+    armed = false;
+
+    expect(hookCalls).toBe(3);
+    expect(denials).toBe(1);
+    expect(steals).toBe(2);
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(failure.status).toBe(500);
+    expect(failure.message).toBe(
+      "Failed to publish a durably observed task into the local cache."
+    );
+    // Root C (V33-12): with exactly one accumulated reobservation error the
+    // settlement fold short-circuits to the error itself, so the terminal
+    // failure's `cause` IS the read-attempt carrier — a real Error whose
+    // `cause` transports the semantic reason while `.reason` keeps the
+    // explicit transport channel.
+    const carrier = failure.cause;
+    expect(carrier).toBeInstanceOf(Error);
+    expect((carrier as Error).message).toBe(
+      "Task snapshot read attempt failed before authority was known."
+    );
+    expect((carrier as Error).name).toBe("TaskSnapshotReadAttemptFailure");
+    expect((carrier as Error & { reason?: unknown }).reason).toBe(injectedDenial);
+    expect((carrier as Error).cause).toBe(injectedDenial);
+    expect((carrier as Error & { authority?: unknown }).authority).toBe("unknown");
+
+    // The durable lane survives: once the denial clears, the same service
+    // republishes the task.
+    expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+  });
+
+  test("S34-P62-16 shared consume and guard-release rejection transports the primary once, never as its own compensation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:s34-p62-16-shared-rejection";
+    const requestDigest = "digest-s34-p62-16-shared-rejection";
+    const resultRef = "TASK-s34-p62-16-shared";
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const completed = await service.completeRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest,
+      resultRef
+    });
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+
+    // Root C (V33-13): one rejection object rides both failure channels — the
+    // consume body throws `shared` and the transition-guard release is denied
+    // with the same `shared` object.
+    const shared = new Error("S34-P62-16 shared rejection");
+    let consumeCalls = 0;
+    let releaseInjections = 0;
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+            if (consumeCalls === 0) return;
+            if (operation !== "conditional_delete" || path !== guardPath) return;
+            releaseInjections += 1;
+            if (releaseInjections === 1) throw shared;
+          }
+        },
+        () =>
+          service.consumeCompletedRecord(
+            { scope: "task", key: rawKey, requestDigest },
+            async () => {
+              consumeCalls += 1;
+              throw shared;
+            }
+          )
+      )
+    );
+
+    expect(consumeCalls).toBe(1);
+    expect(releaseInjections).toBe(1);
+    // The shared rejection stays the semantic primary of the preserved
+    // envelope; the guard-release failure is folded as an ordered
+    // compensation through its own typed settlement wrapper.
+    expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(semanticPrimaryError(failure)).toBe(shared);
+    const aggregate = knownPreservedCompensationAggregate(failure);
+    // The primary is never duplicated into its own ordered compensation
+    // vector: no aggregate entry is the shared object itself.
+    expect(aggregate.errors.some((entry) => entry === shared)).toBe(false);
+    const releaseWrappers = aggregate.errors.filter(
+      (entry) =>
+        entry instanceof TaskServiceError &&
+        entry.message ===
+          "Idempotency transition artifact release did not settle safely."
+    );
+    expect(releaseWrappers).toHaveLength(1);
+    expect((releaseWrappers[0] as TaskServiceError).code).toBe(
+      "workspace_path_not_safe"
+    );
+    // The denied release still transports the injected denial inside the
+    // wrapper's cause graph — the single occurrence of the release failure.
+    expect(errorTreeContains(releaseWrappers[0], shared)).toBe(true);
+
+    // Nothing durable was destroyed: the completed record replays untouched
+    // and every counted authority resource settled.
+    expect(await service.getRecord("task", rawKey)).toEqual(completed);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("S33-P62-08 transported completed authority settles terminally on failed write, missing record, and identity mismatch", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    const repeatedSettleMessage =
+      "Completed idempotency mutation authority is not owned by this service or is already settled.";
+    const identityRefusalMessage =
+      "Completed idempotency result changed before exact invalidation.";
+    const establishCompletedAuthority = async (
+      key: string,
+      requestDigest: string,
+      resultRef: string
+    ) => {
+      await service.beginRecord({ scope: "task", key, requestDigest });
+      await service.completeRecord({ scope: "task", key, requestDigest, resultRef });
+      const consumed = await service.consumeCompletedRecord(
+        { scope: "task", key, requestDigest },
+        async () => ({ status: "accepted" as const, value: undefined })
+      );
+      expect(consumed.status).toBe("accepted");
+      if (consumed.status !== "accepted") {
+        throw new Error("Expected completed authority.");
+      }
+      return consumed.mutationAuthority;
+    };
+    const expectRepeatedSettleRefused = async (
+      authority: Parameters<
+        IdempotencyRecordService["cancelCompletedRecordMutationAuthority"]
+      >[0]
+    ): Promise<void> => {
+      const repeatedCancel = await captureThrownValue(() =>
+        service.cancelCompletedRecordMutationAuthority(authority)
+      );
+      expect(repeatedCancel).toBeInstanceOf(TypeError);
+      expect((repeatedCancel as TypeError).message).toBe(repeatedSettleMessage);
+    };
+
+    // Failed-write schedule: the replace write is denied after consumption;
+    // the durable completed record survives and the authority is terminal.
+    const failedWriteKey = "task:create:s33-terminal-failed-write";
+    const failedWriteDigest = "digest-s33-terminal-failed-write";
+    const failedWriteRef = "TASK-s33-terminal-failed-write";
+    const failedWriteAuthority = await establishCompletedAuthority(
+      failedWriteKey,
+      failedWriteDigest,
+      failedWriteRef
+    );
+    const writeDenial = new Error("S33 terminal replace write denial");
+    const writeFailure = await captureThrownValue(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: () => {
+            throw writeDenial;
+          }
+        },
+        () =>
+          service.invalidateCompletedRecord({
+            scope: "task",
+            key: failedWriteKey,
+            requestDigest: failedWriteDigest,
+            resultRef: failedWriteRef,
+            mutationAuthority: failedWriteAuthority
+          })
+      )
+    );
+    expect(errorTreeContains(writeFailure, writeDenial)).toBe(true);
+    expect(await service.getRecord("task", failedWriteKey)).toMatchObject({
+      status: "completed",
+      result_ref: failedWriteRef
+    });
+    await expectRepeatedSettleRefused(failedWriteAuthority);
+    const failedWriteRepeatMutation = await captureTaskServiceError(() =>
+      service.invalidateCompletedRecord({
+        scope: "task",
+        key: failedWriteKey,
+        requestDigest: failedWriteDigest,
+        resultRef: failedWriteRef,
+        mutationAuthority: failedWriteAuthority
+      })
+    );
+    expect(failedWriteRepeatMutation.message).toBe(identityRefusalMessage);
+
+    // Missing schedule: the durable record disappears after consumption; the
+    // invalidation fails closed and the authority is terminal.
+    const missingKey = "task:create:s33-terminal-missing";
+    const missingDigest = "digest-s33-terminal-missing";
+    const missingRef = "TASK-s33-terminal-missing";
+    const missingAuthority = await establishCompletedAuthority(
+      missingKey,
+      missingDigest,
+      missingRef
+    );
+    const missingRecordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(missingKey)],
+      idempotencyRecordEvidenceRef("task", missingKey)
+    );
+    await unlink(missingRecordPath);
+    const missingFailure = await captureTaskServiceError(() =>
+      service.invalidateCompletedRecord({
+        scope: "task",
+        key: missingKey,
+        requestDigest: missingDigest,
+        resultRef: missingRef,
+        mutationAuthority: missingAuthority
+      })
+    );
+    expect(missingFailure.code).toBe("record_malformed");
+    expect(missingFailure.status).toBe(409);
+    expect(missingFailure.message).toBe(identityRefusalMessage);
+    await expectPathMissing(missingRecordPath);
+    await expectRepeatedSettleRefused(missingAuthority);
+
+    // Identity-mismatch schedule (cancel-before-invalidate): the settled
+    // authority refuses the mutation, preserves B, and stays terminal.
+    const cancelKey = "task:create:s33-terminal-cancelled";
+    const cancelDigest = "digest-s33-terminal-cancelled";
+    const cancelRef = "TASK-s33-terminal-cancelled";
+    const cancelledAuthority = await establishCompletedAuthority(
+      cancelKey,
+      cancelDigest,
+      cancelRef
+    );
+    await service.cancelCompletedRecordMutationAuthority(cancelledAuthority);
+    const mismatchFailure = await captureTaskServiceError(() =>
+      service.invalidateCompletedRecord({
+        scope: "task",
+        key: cancelKey,
+        requestDigest: cancelDigest,
+        resultRef: cancelRef,
+        mutationAuthority: cancelledAuthority
+      })
+    );
+    expect(mismatchFailure.code).toBe("record_malformed");
+    expect(mismatchFailure.status).toBe(409);
+    expect(mismatchFailure.message).toBe(identityRefusalMessage);
+    expect(await service.getRecord("task", cancelKey)).toMatchObject({
+      status: "completed",
+      result_ref: cancelRef
+    });
+    await expectRepeatedSettleRefused(cancelledAuthority);
+
+    // Success anchor: an undisturbed transported authority invalidates the
+    // completed record and is terminal afterwards.
+    const successKey = "task:create:s33-terminal-success";
+    const successDigest = "digest-s33-terminal-success";
+    const successRef = "TASK-s33-terminal-success";
+    const successAuthority = await establishCompletedAuthority(
+      successKey,
+      successDigest,
+      successRef
+    );
+    const invalidated = await service.invalidateCompletedRecord({
+      scope: "task",
+      key: successKey,
+      requestDigest: successDigest,
+      resultRef: successRef,
+      mutationAuthority: successAuthority
+    });
+    expect(invalidated.status).toBe("failed");
+    expect(invalidated.result_ref).toBeUndefined();
+    await expectRepeatedSettleRefused(successAuthority);
+
+    // Guard-busy is unreachable with transported authority:
+    // invalidateCompletedRecord returns through
+    // replaceCompletedRecordWithMutationAuthority (idempotency-service.ts,
+    // `if (input.mutationAuthority)` branch) BEFORE the fail-transition guard
+    // acquisition, so a busy guard only refuses the tokenless path. Acquiring
+    // a guard would also create a sibling generation in the records
+    // directory, which the exact replace refuses fail-closed (demonstrated
+    // below) — the success anchor above is therefore itself evidence that the
+    // exact-authority path acquires no guard.
+    const guardKey = "task:create:s33-terminal-guard-busy";
+    const guardDigest = "digest-s33-terminal-guard-busy";
+    const guardRef = "TASK-s33-terminal-guard-busy";
+    await service.beginRecord({
+      scope: "task",
+      key: guardKey,
+      requestDigest: guardDigest
+    });
+    await service.completeRecord({
+      scope: "task",
+      key: guardKey,
+      requestDigest: guardDigest,
+      resultRef: guardRef
+    });
+    const guardPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      `${sha256Hex(`transition:${guardKey}`)}.guard.json`
+    );
+    await writeFile(
+      guardPath,
+      `${JSON.stringify({
+        guard_id: "s33-terminal-busy-guard",
+        owner_pid: process.pid,
+        acquired_at_ms: Date.now(),
+        acquired_at: new Date().toISOString()
+      })}\n`,
+      { flag: "wx" }
+    );
+    const busyRefusal = await captureTaskServiceError(() =>
+      service.invalidateCompletedRecord({
+        scope: "task",
+        key: guardKey,
+        requestDigest: guardDigest,
+        resultRef: guardRef
+      })
+    );
+    expect(busyRefusal.message).toBe(
+      "Idempotency record fail transition is already in progress."
+    );
+    await unlink(guardPath);
+
+    // Sibling-generation refusal: a guard-file write between consumption and
+    // the exact replace supersedes the transported observation, preserves the
+    // completed record, and settles the authority terminally.
+    const siblingKey = "task:create:s33-terminal-sibling-churn";
+    const siblingDigest = "digest-s33-terminal-sibling-churn";
+    const siblingRef = "TASK-s33-terminal-sibling-churn";
+    const siblingAuthority = await establishCompletedAuthority(
+      siblingKey,
+      siblingDigest,
+      siblingRef
+    );
+    const siblingGuardPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      `${sha256Hex(`transition:${siblingKey}`)}.guard.json`
+    );
+    await writeFile(
+      siblingGuardPath,
+      `${JSON.stringify({
+        guard_id: "s33-terminal-sibling-guard",
+        owner_pid: process.pid,
+        acquired_at_ms: Date.now(),
+        acquired_at: new Date().toISOString()
+      })}\n`,
+      { flag: "wx" }
+    );
+    const siblingRefusal = await captureTaskServiceError(() =>
+      service.invalidateCompletedRecord({
+        scope: "task",
+        key: siblingKey,
+        requestDigest: siblingDigest,
+        resultRef: siblingRef,
+        mutationAuthority: siblingAuthority
+      })
+    );
+    expect(siblingRefusal.code).toBe("record_malformed");
+    expect(siblingRefusal.status).toBe(409);
+    expect(siblingRefusal.message).toBe(identityRefusalMessage);
+    expect(await service.getRecord("task", siblingKey)).toMatchObject({
+      status: "completed",
+      result_ref: siblingRef
+    });
+    await expectRepeatedSettleRefused(siblingAuthority);
+    await unlink(siblingGuardPath);
+
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S33-P62-10 create-only fast path rejects a changed leaf without hook-flip or pathname opens", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s33-fast-path-transfer";
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const externalPath = join(tempRoot, "s33-external-snapshot.json");
+    await writeFile(externalPath, "external sentinel\n", { flag: "wx", mode: 0o600 });
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let replaced = false;
+    let closedFd: number | undefined;
+    let selectorObservedActive: boolean | undefined;
+    const service = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+    const failure = await captureTaskServiceError(() =>
+      Promise.race([
+        runWithWorkspaceRecordObservationHooksForTest(
+          {
+            beforeCleanupPermitIdentityResolution: async ({ path }) => {
+              if (path !== snapshotPath || replaced) return;
+              replaced = true;
+              // The observation seam must not flip the production branch
+              // selector: the create-only fast path stays selected while the
+              // adversarial swap lands.
+              selectorObservedActive = workspaceRecordPublicationHooksActive();
+              await rename(snapshotPath, `${snapshotPath}.original`);
+              await symlink(externalPath, snapshotPath);
+            },
+            afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+              closedFd = fd;
+            }
+          },
+          () =>
+            service.createTaskForIdempotency({
+              type: "engineering",
+              title: "S33 fast-path publication transfer",
+              question_or_goal:
+                "Never ordinary-open a changed public leaf on the fast path.",
+              inference_budget: { mode: "normal" }
+            })
+        ),
+        timeoutAfter(1_000, "S33 fast-path publication transfer blocked on a changed leaf")
+      ])
+    );
+    expect(selectorObservedActive).toBe(false);
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(replaced).toBe(true);
+    // No ordinary pathname open followed the swap: the external sentinel
+    // behind the symlink was never opened or consumed.
+    expect((await lstat(snapshotPath)).isSymbolicLink()).toBe(true);
+    expect(await readFile(externalPath, "utf8")).toBe("external sentinel\n");
+    // Resource-clean outcome: the pinned descriptor is closed and diagnostics
+    // return to baseline.
+    expect(closedFd).toBeNumber();
+    await expectFileDescriptorClosed(closedFd!);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    // Nesting real publication hooks inside an observation context restores
+    // the production selector.
+    await runWithWorkspaceRecordObservationHooksForTest({}, async () => {
+      expect(workspaceRecordPublicationHooksActive()).toBe(false);
+      await runWithWorkspaceRecordPublicationHooks({}, async () => {
+        expect(workspaceRecordPublicationHooksActive()).toBe(true);
+      });
+    });
   });
 });
 
@@ -25729,6 +30528,24 @@ async function readFileDescriptorIdentity(
   return { dev: entry.dev, ino: entry.ino };
 }
 
+function findOpenFileDescriptorsByIdentity(identity: {
+  dev: bigint;
+  ino: bigint;
+}): number[] {
+  const matches: number[] = [];
+  for (let fd = 3; fd <= 2048; fd += 1) {
+    try {
+      const entry = fstatSync(fd, { bigint: true });
+      if (entry.dev === identity.dev && entry.ino === identity.ino) {
+        matches.push(fd);
+      }
+    } catch {
+      // Unopened descriptor slots reject the fstat probe; skip them.
+    }
+  }
+  return matches;
+}
+
 function findPreservedCompensationAggregate(value: unknown): AggregateError | undefined {
   const envelope = findErrorNode(
     value,
@@ -25788,6 +30605,29 @@ function errorTreeContains(
     return true;
   }
   return errorTreeContains(value.cause, expected, ancestors);
+}
+
+function countErrorGraphIdentity(
+  value: unknown,
+  expected: unknown,
+  ancestors = new Set<unknown>()
+): number {
+  if (value === expected) return 1;
+  if (!(value instanceof Error) || ancestors.has(value)) return 0;
+  const nextAncestors = new Set(ancestors);
+  nextAncestors.add(value);
+  let count = 0;
+  if (value instanceof AggregateError) {
+    for (const error of value.errors) {
+      count += countErrorGraphIdentity(error, expected, nextAncestors);
+    }
+  }
+  const semanticPrimary = semanticPrimaryError(value);
+  if (semanticPrimary && semanticPrimary !== value) {
+    count += countErrorGraphIdentity(semanticPrimary, expected, nextAncestors);
+  }
+  count += countErrorGraphIdentity(value.cause, expected, nextAncestors);
+  return count;
 }
 
 function findErrorNode(
