@@ -47,9 +47,24 @@ M1 以 `POST /api/tasks` 作为 skeleton 的验证载体，属 change-scoped 约
 - **WHEN** 以相同 `Idempotency-Key` + 相同请求体重放 `POST /api/tasks`
 - **THEN** 返回首次创建的同一 TaskCard，不产生重复对象
 
+#### Scenario: 活跃同 key 请求跨一秒且在 follower 界内仍收敛
+
+- **WHEN** 首个相同 `Idempotency-Key` + 相同 request digest 的建卡请求仍在本进程执行，且 snapshot 写入或 post-write hook 超过 1000ms、但在 5000ms follower 等待界内完成
+- **THEN** 后到请求等待同一 in-flight owner 终态并重放同一 durable TaskCard，不返回 pending 409，不产生第二个 snapshot/result_ref
+
+#### Scenario: 活跃 owner 超过 follower 界时不释放 authority
+
+- **WHEN** 首个相同 `Idempotency-Key` + 相同 request digest 的建卡请求超过 5000ms follower 等待界仍未终态
+- **THEN** 后到 follower 返回稳定可重试 409，但不得删除、替换或复制仍活跃的 owner；owner 后续完成后，相同请求重放同一 durable TaskCard/result_ref
+
+#### Scenario: 无活跃 owner 的 started record 走 stale 路径
+
+- **WHEN** workspace 中只有 `status=started` 的同 key/digest IdempotencyRecord，但本进程没有对应 in-flight owner
+- **THEN** 后端在有界等待后返回稳定可重试错误，不创建 TaskCard，不把 orphaned claim 误记 completed
+
 #### Scenario: digest mismatch 返回 422
 
-- **WHEN** 以相同 `Idempotency-Key` + 不同请求体（request_digest 不一致）重放 `POST /api/tasks`
+- **WHEN** 以相同 `Idempotency-Key` + 不同请求体（request_digest 不一致）重放 `POST /api/tasks`，包括首个 owner 尚未发布 durable record 的活跃窗口
 - **THEN** 返回 422 标准错误 envelope（idempotency key mismatch，API_Error_And_Idempotency_Contracts §2），不创建新对象
 
 ### Requirement: task snapshot 落盘与恢复
@@ -60,6 +75,21 @@ TaskCard SHALL 落盘为 workspace 内 snapshot；服务重启后 `GET /api/task
 
 - **WHEN** 建卡后重启后端服务并请求 `GET /api/tasks`
 - **THEN** 列表包含重启前创建的 TaskCard
+
+#### Scenario: post-write 后 snapshot 必须仍为精确可重放 authority
+
+- **WHEN** snapshot rename 后、producer 返回前，post-write hook 删除、替换、破坏或注入 canonical schema 未声明字段到 `snapshot.json`
+- **THEN** producer 以 bounded no-follow 读取校验精确 canonical durable bytes；任何 byte/object drift 均使建卡失败且不缓存 phantom TaskCard，keyed 路径不留下 poisoned completed IdempotencyRecord；unsafe rollback 隔离 canonical leaf 并驱逐缓存，修复 workspace 后同 key 可安全重试
+
+#### Scenario: producer validation invalidates pre-validation poisoned completion
+
+- **WHEN** keyed `POST /api/tasks` owner 已发布 snapshot，但在 producer validation / `completeRecord` 前，外部或并发路径写出 `completed` IdempotencyRecord，且其 `result_ref` 不安全、缺失、指向 missing/malformed snapshot，或指向 TaskCard/request digest 不匹配的 snapshot
+- **THEN** producer validation fail closed，显式 invalidates 或 quarantines 该 poisoned completion 使 replay 无法消费，驱逐任何 in-memory phantom TaskCard；workspace 修复后相同 key/body 可重试，且不退化为 generic completed-result binding failure
+
+#### Scenario: canonical snapshot 缺 task_card 返回专门错误
+
+- **WHEN** completed result_ref 指向一个 schema 可解析但不含 nested `task_card` 的 canonical TaskSnapshot
+- **THEN** 返回 `task_snapshot_missing_card` recovery/migration error，不折叠为 idempotency result binding mismatch
 
 ### Requirement: health live/ready skeleton
 

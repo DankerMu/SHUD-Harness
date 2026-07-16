@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
@@ -10,27 +9,137 @@ import {
   type IdempotencyScope
 } from "../schemas/idempotency";
 import { TaskServiceError, isSafeTaskId } from "./task-card-service";
+import { runWithPreservedRelease } from "./compensation-error-preservation";
+import { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
 import {
+  WorkspaceRecordConditionalDeleteError,
+  cancelWorkspaceRecordCleanupPermit,
+  conditionalDeleteJsonRecordWithCleanupPermit,
   createJsonRecordIfAbsent,
+  createJsonRecordIfAbsentWithCleanupPermit,
+  observeJsonRecordForCleanup,
   readJsonRecord,
+  refreshWorkspaceRecordCleanupPermitAfterSiblingMutation,
+  replaceJsonRecordAfterExactObservation,
   workspaceRecordPath,
-  writeJsonRecord
+  writeJsonRecord,
+  type WorkspaceJsonRecordCleanupObservation,
+  type WorkspaceRecordCleanupPermit
 } from "./workspace-record-store";
 
 const IDEMPOTENCY_TRANSITION_GUARD_STALE_MS = 30_000;
 const IDEMPOTENCY_TRANSITION_GUARD_WAIT_MS = 250;
 const IDEMPOTENCY_TRANSITION_GUARD_POLL_MS = 5;
+const IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE =
+  "An idempotency operation failed and its owned artifact release also failed.";
+const IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE =
+  "Completed idempotency invalidation and its durable quarantine recovery both failed.";
 
-const IdempotencyTransitionGuardSchema = z.object({
+async function runWithIdempotencyRelease<T>(
+  body: () => Promise<T>,
+  release: () => Promise<void>,
+  settleFulfilledValueAfterReleaseFailure?: (
+    fulfilledValue: T,
+    releaseReason: unknown
+  ) => Promise<void>
+): Promise<T> {
+  return await runWithPreservedRelease(
+    body,
+    release,
+    IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE,
+    settleFulfilledValueAfterReleaseFailure,
+    preserveAuthorityTransportAwareCombinedFailure
+  );
+}
+
+/**
+ * Root C (V33-03): a caller-thrown authority-transport wrapper (an Error
+ * exposing the inner failure via `authorityError`, e.g. the backend's
+ * CompletedTaskSnapshotAuthorityUnknownError) must keep its INNER typed
+ * primary reachable through the caller's one-level unwrap. The fold
+ * preserves the inner error with the release failure as an ordered
+ * compensation and re-wraps with the same constructor.
+ */
+function preserveAuthorityTransportAwareCombinedFailure(
+  primary: unknown,
+  compensations: readonly unknown[],
+  aggregateMessage: string
+): unknown {
+  // Root C (V33-13): never count one occurrence twice — a compensation
+  // candidate that IS the primary is already represented by the primary
+  // itself, so a memoized rejection folded into itself yields primary-only.
+  const distinctCompensations = compensations.filter(
+    (candidate) => !Object.is(primary, candidate)
+  );
+  if (distinctCompensations.length === 0) return primary;
+  if (
+    primary instanceof Error &&
+    primary.name === "CompletedTaskSnapshotAuthorityUnknownError" &&
+    "authorityError" in primary
+  ) {
+    const authorityError =
+      (primary as Error & { authorityError: unknown }).authorityError;
+    const innerDistinctCompensations = distinctCompensations.filter(
+      (candidate) => !Object.is(authorityError, candidate)
+    );
+    if (innerDistinctCompensations.length === 0) return primary;
+    try {
+      const folded = preserveTaskServiceErrorCompensationCompatibility(
+        authorityError,
+        innerDistinctCompensations,
+        aggregateMessage
+      );
+      return Reflect.construct(
+        primary.constructor as new (inner: unknown) => Error,
+        [folded]
+      );
+    } catch {
+      // Fall through to the wrapper-blind fold when reconstruction fails.
+    }
+  }
+  return preserveTaskServiceErrorCompensationCompatibility(
+    primary,
+    distinctCompensations,
+    aggregateMessage
+  );
+}
+
+const IdempotencyTransitionGuardIdentitySchema = z.object({
   guard_id: z.string().min(1),
   owner_pid: z.number().int().nonnegative(),
   acquired_at_ms: z.number().int().nonnegative(),
   acquired_at: z.string().min(1)
 });
 
+const IdempotencyTransitionGuardSchema = IdempotencyTransitionGuardIdentitySchema.extend({
+  intent: z.enum(["complete", "fail"]).optional(),
+  request_digest: z.string().min(1).optional(),
+  result_ref: z.string().min(1).optional()
+});
+
+type IdempotencyTransitionGuardIdentity = z.infer<
+  typeof IdempotencyTransitionGuardIdentitySchema
+>;
 type IdempotencyTransitionGuard = z.infer<typeof IdempotencyTransitionGuardSchema>;
+type IdempotencyTransitionGuardIntent =
+  | Record<never, never>
+  | { readonly intent: "complete"; readonly request_digest: string; readonly result_ref?: string }
+  | { readonly intent: "fail"; readonly request_digest: string; readonly result_ref?: string };
+
+const activeIdempotencyTransitionGuards = new Map<string, IdempotencyTransitionGuard>();
+const malformedIdempotencyTransitionGuardErrors = new WeakSet<TaskServiceError>();
 
 type IdempotencyTransitionGuardAcquire =
+  | {
+      status: "acquired";
+      guard: IdempotencyTransitionGuard;
+      release: () => Promise<void>;
+      retain: () => Promise<void>;
+      recoverTerminalRelease: (assertDurablyFailed: () => Promise<void>) => Promise<void>;
+    }
+  | { status: "busy" };
+
+type IdempotencyTransitionCleanupLockAcquire =
   | { status: "acquired"; release: () => Promise<void> }
   | { status: "busy" };
 
@@ -43,7 +152,7 @@ export interface IdempotencyRecordServiceOptions {
 export interface IdempotencyTransitionGuardCleanupHookInput {
   guardPath: string;
   evidenceRef: string;
-  observedGuard: IdempotencyTransitionGuard;
+  observedGuard: IdempotencyTransitionGuardIdentity;
 }
 
 export interface IdempotencyTransitionGuardHooks {
@@ -58,30 +167,115 @@ export interface IdempotencyRecordLookupInput {
   requestDigest: string;
 }
 
+export type InvalidCompletedIdempotencyRecordReason =
+  | "missing_result_ref"
+  | "unsafe_result_ref";
+
+export interface InvalidCompletedIdempotencyRecordLookup {
+  status: "invalid_completed";
+  reason: InvalidCompletedIdempotencyRecordReason;
+  record: IdempotencyRecord;
+  observedResultRef: string | undefined;
+  mutationAuthority?: CompletedIdempotencyRecordMutationAuthority;
+}
+
 export type IdempotencyReplayLookup =
   | { status: "missing" }
   | { status: "mismatch"; record: IdempotencyRecord }
   | { status: "incomplete"; record: IdempotencyRecord }
-  | { status: "completed"; record: IdempotencyRecord & { result_ref: string } };
+  | { status: "completed"; record: IdempotencyRecord & { result_ref: string } }
+  | InvalidCompletedIdempotencyRecordLookup;
+
+export type CompletedIdempotencyRecordConsumptionDecision<Accepted, Rejected> =
+  | { readonly status: "accepted"; readonly value: Accepted }
+  | {
+      readonly status: "rejected";
+      readonly reason: Rejected;
+      /**
+       * Root A (V33-01): a rejected decision may transport caller-owned
+       * counted resources inside `reason` (an observation owning a cleanup
+       * permit, a pinned fd, and a cache claim). `consumeCompletedRecord`
+       * invokes this hook on its own throw-after-fulfilled windows so every
+       * transported resource is settled before the error propagates; it is
+       * never invoked when the rejected decision is returned to the caller.
+       */
+      readonly settleReasonAfterConsumptionFailure?: () => Promise<void>;
+    };
+
+/** Runtime ownership is validated by the creating service's private WeakMap. */
+export interface CompletedIdempotencyRecordMutationAuthority {}
+
+export type CompletedIdempotencyRecordConsumptionResult<Accepted, Rejected> =
+  | Exclude<
+      IdempotencyReplayLookup,
+      { status: "completed" } | InvalidCompletedIdempotencyRecordLookup
+    >
+  /**
+   * Root A (V32-01): an invalid-completed consumption always transports the
+   * exact generation authority captured under the transition guard so callers
+   * never invalidate a record they did not physically observe.
+   */
+  | (InvalidCompletedIdempotencyRecordLookup & {
+      readonly mutationAuthority: CompletedIdempotencyRecordMutationAuthority;
+    })
+  | {
+      readonly status: "accepted";
+      readonly record: IdempotencyRecord & { result_ref: string };
+      readonly value: Accepted;
+      readonly mutationAuthority: CompletedIdempotencyRecordMutationAuthority;
+    }
+  | {
+      readonly status: "rejected";
+      readonly record: IdempotencyRecord & { result_ref: string };
+      readonly reason: Rejected;
+      readonly mutationAuthority: CompletedIdempotencyRecordMutationAuthority;
+    };
 
 export type BeginIdempotencyRecordResult =
   | { status: "acquired"; record: IdempotencyRecord }
   | { status: "mismatch"; record: IdempotencyRecord }
   | { status: "incomplete"; record: IdempotencyRecord }
-  | { status: "completed"; record: IdempotencyRecord & { result_ref: string } };
+  | { status: "completed"; record: IdempotencyRecord & { result_ref: string } }
+  | InvalidCompletedIdempotencyRecordLookup;
 
 export interface CompleteIdempotencyRecordInput extends IdempotencyRecordLookupInput {
   resultRef: string;
 }
 
+export interface InvalidateCompletedIdempotencyRecordInput
+  extends IdempotencyRecordLookupInput {
+  resultRef: string | undefined;
+  mutationAuthority?: CompletedIdempotencyRecordMutationAuthority;
+}
+
 export type FailIdempotencyRecordInput = IdempotencyRecordLookupInput;
+
+export interface QuarantineIdempotencyRecordInput
+  extends IdempotencyRecordLookupInput {
+  readonly expectedCompletedAuthority?: {
+    readonly resultRef: string | undefined;
+    readonly mutationAuthority?: CompletedIdempotencyRecordMutationAuthority;
+  };
+}
 
 export interface IdempotencyRecordService {
   storeRecord: (record: IdempotencyRecord) => Promise<IdempotencyRecord>;
   getRecord: (scope: IdempotencyScope, key: string) => Promise<IdempotencyRecord | undefined>;
   beginRecord: (input: IdempotencyRecordLookupInput) => Promise<BeginIdempotencyRecordResult>;
   lookupReplay: (input: IdempotencyRecordLookupInput) => Promise<IdempotencyReplayLookup>;
+  consumeCompletedRecord: <Accepted, Rejected>(
+    input: IdempotencyRecordLookupInput,
+    consume: (
+      record: IdempotencyRecord & { result_ref: string }
+    ) => Promise<CompletedIdempotencyRecordConsumptionDecision<Accepted, Rejected>>
+  ) => Promise<CompletedIdempotencyRecordConsumptionResult<Accepted, Rejected>>;
+  cancelCompletedRecordMutationAuthority: (
+    authority: CompletedIdempotencyRecordMutationAuthority
+  ) => Promise<void>;
   completeRecord: (input: CompleteIdempotencyRecordInput) => Promise<IdempotencyRecord>;
+  invalidateCompletedRecord: (
+    input: InvalidateCompletedIdempotencyRecordInput
+  ) => Promise<IdempotencyRecord>;
   failRecord: (input: FailIdempotencyRecordInput) => Promise<IdempotencyRecord>;
   recoverFailedRecordAfterRollback: (
     input: FailIdempotencyRecordInput
@@ -90,7 +284,7 @@ export interface IdempotencyRecordService {
     input: CompleteIdempotencyRecordInput
   ) => Promise<IdempotencyRecord>;
   quarantineRecordAfterUnsafeRollback: (
-    input: FailIdempotencyRecordInput
+    input: QuarantineIdempotencyRecordInput
   ) => Promise<IdempotencyRecord>;
 }
 
@@ -100,6 +294,122 @@ export function createIdempotencyRecordService(
   const workspaceRoot = resolve(options.workspaceRoot);
   const now = options.now ?? (() => new Date());
   const transitionGuardHooks = options.transitionGuardHooks;
+  const completedMutationAuthorities = new WeakMap<
+    CompletedIdempotencyRecordMutationAuthority,
+    {
+      readonly scope: IdempotencyScope;
+      readonly key: string;
+      readonly requestDigest: string;
+      readonly resultRef: string | undefined;
+      readonly record: IdempotencyRecord;
+      readonly cleanupPermit: WorkspaceRecordCleanupPermit;
+      status: "outstanding" | "consumed" | "cancelled";
+    }
+  >();
+
+  function registerCompletedMutationAuthority(
+    scope: IdempotencyScope,
+    input: IdempotencyRecordLookupInput,
+    record: IdempotencyRecord,
+    cleanupPermit: WorkspaceRecordCleanupPermit
+  ): CompletedIdempotencyRecordMutationAuthority {
+    const authority = Object.freeze({});
+    completedMutationAuthorities.set(authority, {
+      scope,
+      key: input.key,
+      requestDigest: input.requestDigest,
+      resultRef: record.result_ref,
+      record,
+      cleanupPermit,
+      status: "outstanding"
+    });
+    return authority;
+  }
+
+  async function cancelCompletedMutationAuthority(
+    authority: CompletedIdempotencyRecordMutationAuthority
+  ): Promise<void> {
+    const state = completedMutationAuthorities.get(authority);
+    if (!state || state.status !== "outstanding") {
+      throw new TypeError(
+        "Completed idempotency mutation authority is not owned by this service or is already settled."
+      );
+    }
+    state.status = "cancelled";
+    await cancelWorkspaceRecordCleanupPermit(state.cleanupPermit);
+  }
+
+  function consumeCompletedMutationAuthority(
+    authority: CompletedIdempotencyRecordMutationAuthority,
+    input: IdempotencyRecordLookupInput,
+    resultRef: string | undefined
+  ) {
+    const state = completedMutationAuthorities.get(authority);
+    if (
+      !state ||
+      state.status !== "outstanding" ||
+      state.scope !== input.scope ||
+      state.key !== input.key ||
+      state.requestDigest !== input.requestDigest ||
+      state.resultRef !== resultRef
+    ) {
+      throw completedRecordInvalidationIdentityError(
+        idempotencyRecordEvidenceRef(input.scope, input.key)
+      );
+    }
+    state.status = "consumed";
+    return state;
+  }
+
+  async function replaceCompletedRecordWithMutationAuthority(
+    authority: CompletedIdempotencyRecordMutationAuthority,
+    input: IdempotencyRecordLookupInput,
+    scope: IdempotencyScope,
+    resultRef: string | undefined,
+    evidenceRef: string
+  ): Promise<IdempotencyRecord> {
+    let exact: ReturnType<typeof consumeCompletedMutationAuthority>;
+    try {
+      exact = consumeCompletedMutationAuthority(
+        authority,
+        { ...input, scope },
+        resultRef
+      );
+    } catch (identityError) {
+      const state = completedMutationAuthorities.get(authority);
+      if (state?.status === "outstanding") {
+        try {
+          await cancelCompletedMutationAuthority(authority);
+        } catch (cancellationError) {
+          throw preserveTaskServiceErrorCompensationCompatibility(
+            identityError,
+            [cancellationError],
+            IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+          );
+        }
+      }
+      throw identityError;
+    }
+    const failedRecord: IdempotencyRecord = {
+      ...exact.record,
+      status: "failed",
+      updated_at: now().toISOString()
+    };
+    delete failedRecord.result_ref;
+    const replacement = await replaceJsonRecordAfterExactObservation(
+      exact.cleanupPermit,
+      workspaceRoot,
+      idempotencyRecordDirectorySegments(scope),
+      idempotencyRecordFileName(input.key),
+      failedRecord,
+      evidenceRef,
+      IdempotencyRecordSchema
+    );
+    if (replacement.status !== "replaced") {
+      throw completedRecordInvalidationIdentityError(evidenceRef);
+    }
+    return replacement.record;
+  }
 
   async function storeRecordInternal(
     record: IdempotencyRecord,
@@ -169,6 +479,12 @@ export function createIdempotencyRecordService(
     try {
       return await transition();
     } catch (error) {
+      if (
+        error instanceof TaskServiceError &&
+        malformedIdempotencyTransitionGuardErrors.has(error)
+      ) {
+        throw error;
+      }
       if (!(error instanceof TaskServiceError) || error.code !== "record_malformed") {
         throw error;
       }
@@ -188,6 +504,9 @@ export function createIdempotencyRecordService(
     if (current.status === "completed") {
       return current.record;
     }
+    if (current.status === "invalid_completed") {
+      throw invalidCompletedRecordAuthorityError(current.reason, evidenceRef);
+    }
     if (current.record.status === "failed") {
       return current.record;
     }
@@ -203,6 +522,650 @@ export function createIdempotencyRecordService(
       "fail"
     );
     return await transition();
+  }
+
+  async function writeFailedRecord(
+    existing: IdempotencyRecord,
+    scope: IdempotencyScope,
+    key: string,
+    evidenceRef: string
+  ): Promise<IdempotencyRecord> {
+    const failedRecord: IdempotencyRecord = { ...existing };
+    delete failedRecord.result_ref;
+    return await writeJsonRecord(
+      workspaceRoot,
+      idempotencyRecordDirectorySegments(scope),
+      idempotencyRecordFileName(key),
+      {
+        ...failedRecord,
+        status: "failed",
+        updated_at: now().toISOString()
+      },
+      evidenceRef,
+      IdempotencyRecordSchema
+    );
+  }
+
+  async function quarantineRecordAfterUnsafeRollbackInternal(
+    input: QuarantineIdempotencyRecordInput
+  ): Promise<IdempotencyRecord> {
+    try {
+      return await quarantineRecordAfterUnsafeRollbackTransition(input);
+    } catch (error) {
+      if (input.expectedCompletedAuthority?.mutationAuthority) {
+        throw error;
+      }
+      if (
+        error instanceof TaskServiceError &&
+        malformedIdempotencyTransitionGuardErrors.has(error)
+      ) {
+        throw error;
+      }
+      if (!(error instanceof TaskServiceError) || error.code !== "record_malformed") {
+        throw error;
+      }
+    }
+
+    const parsedScope = assertIdempotencyScope(input.scope);
+    assertNonblankIdempotencyKey(input.key);
+    const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
+    const current = await service.getRecord(parsedScope, input.key);
+    if (!current) {
+      throw missingTransitionRecordError(
+        parsedScope,
+        input.key,
+        "Idempotency record was missing during unsafe rollback quarantine recovery."
+      );
+    }
+    if (current.request_digest !== input.requestDigest) {
+      throw createIdempotencyMismatchError();
+    }
+    if (current.status === "failed") return current;
+
+    await removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
+      workspaceRoot,
+      parsedScope,
+      input.key,
+      evidenceRef,
+      "fail"
+    );
+    return await quarantineRecordAfterUnsafeRollbackTransition({
+      ...input,
+      scope: parsedScope
+    });
+  }
+
+  async function quarantineRecordAfterUnsafeRollbackTransition(
+    input: QuarantineIdempotencyRecordInput
+  ): Promise<IdempotencyRecord> {
+    const parsedScope = assertIdempotencyScope(input.scope);
+    assertNonblankIdempotencyKey(input.key);
+    const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      [...idempotencyRecordDirectorySegments(parsedScope), idempotencyRecordFileName(input.key)],
+      evidenceRef
+    );
+    const exactCompletedAuthority =
+      input.expectedCompletedAuthority?.mutationAuthority;
+    if (exactCompletedAuthority) {
+      return await replaceCompletedRecordWithMutationAuthority(
+        exactCompletedAuthority,
+        input,
+        parsedScope,
+        input.expectedCompletedAuthority?.resultRef,
+        evidenceRef
+      );
+    }
+    const replay = await service.lookupReplay({ ...input, scope: parsedScope });
+    if (replay.status === "missing") {
+      throw missingTransitionRecordError(
+        parsedScope,
+        input.key,
+        "Idempotency record was missing when quarantining unsafe rollback authority."
+      );
+    }
+    if (replay.status === "mismatch") throw createIdempotencyMismatchError();
+    const semanticRecord = replay.record;
+    if (semanticRecord.status === "failed") return semanticRecord;
+    assertUnsafeRollbackQuarantineAuthority(semanticRecord, evidenceRef);
+
+    const guard = await acquireIdempotencyTransitionGuard(
+      workspaceRoot,
+      parsedScope,
+      input.key,
+      evidenceRef,
+      {
+        intent: "fail",
+        request_digest: input.requestDigest,
+        ...(semanticRecord.result_ref === undefined
+          ? {}
+          : { result_ref: semanticRecord.result_ref })
+      },
+      transitionGuardHooks
+    );
+    if (guard.status === "busy") {
+      throw transitionGuardBusyError(parsedScope, input.key, "fail");
+    }
+
+    return await runExactFailedRecordTransitionWithGuardRecovery(
+      input,
+      parsedScope,
+      guard,
+      async () => {
+      const observation = await observeJsonRecordForCleanup(
+        recordPath,
+        evidenceRef,
+        IdempotencyRecordSchema
+      );
+      if (observation.status === "missing") {
+        throw missingTransitionRecordError(
+          parsedScope,
+          input.key,
+          "Idempotency record was missing when quarantining unsafe rollback authority."
+        );
+      }
+      const cleanupPermit = observation.cleanupPermit;
+      let cleanupPermitOutstanding = true;
+      try {
+        if (observation.status === "malformed") throw observation.error;
+        if (observation.status === "schema_threw") throw observation.error;
+        const observed = observation.record;
+        if (observed.request_digest !== input.requestDigest) {
+          throw createIdempotencyMismatchError();
+        }
+        if (observed.status === "failed") return observed;
+        assertUnsafeRollbackQuarantineAuthority(observed, evidenceRef);
+        const failedRecord: IdempotencyRecord = {
+          ...observed,
+          status: "failed",
+          updated_at: now().toISOString()
+        };
+        delete failedRecord.result_ref;
+        cleanupPermitOutstanding = false;
+        let replacement;
+        try {
+          replacement = await replaceJsonRecordAfterExactObservation(
+            cleanupPermit,
+            workspaceRoot,
+            idempotencyRecordDirectorySegments(parsedScope),
+            idempotencyRecordFileName(input.key),
+            failedRecord,
+            evidenceRef,
+            IdempotencyRecordSchema
+          );
+        } catch (error) {
+          throw preserveTaskServiceErrorCompensationCompatibility(
+            completedRecordInvalidationIdentityError(evidenceRef),
+            [error],
+            IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+          );
+        }
+        if (replacement.status !== "replaced") {
+          throw completedRecordInvalidationIdentityError(evidenceRef);
+        }
+        return replacement.record;
+      } finally {
+        if (cleanupPermitOutstanding) {
+          await cancelWorkspaceRecordCleanupPermit(cleanupPermit);
+        }
+      }
+      }
+    );
+  }
+
+  async function recoverRetainedFailIntentGuardForReplay(
+    scope: IdempotencyScope,
+    key: string,
+    record: IdempotencyRecord | undefined,
+    evidenceRef: string
+  ): Promise<IdempotencyRecord | undefined> {
+    const guardPath = workspaceRecordPath(
+      workspaceRoot,
+      [...idempotencyRecordDirectorySegments(scope), idempotencyTransitionGuardFileName(key)],
+      evidenceRef
+    );
+    const observationDeadline = Date.now() + IDEMPOTENCY_TRANSITION_GUARD_WAIT_MS;
+    let observation: WorkspaceJsonRecordCleanupObservation<IdempotencyTransitionGuard>;
+    for (;;) {
+      const activeGuard = activeIdempotencyTransitionGuards.get(guardPath);
+      if (activeGuard?.intent === "complete") return record;
+      if (activeGuard && activeGuard.intent === undefined) return record;
+      if (activeGuard?.intent === "fail") {
+        throw transitionGuardBusyError(scope, key, "fail");
+      }
+      try {
+        observation = await observeJsonRecordForCleanup(
+          guardPath,
+          evidenceRef,
+          IdempotencyTransitionGuardSchema
+        );
+        break;
+      } catch (error) {
+        if (!isRetryableWorkspaceRecordAuthorityContention(error)) throw error;
+        if (Date.now() >= observationDeadline) {
+          throw transitionGuardBusyError(scope, key, "fail");
+        }
+        await sleep(IDEMPOTENCY_TRANSITION_GUARD_POLL_MS);
+      }
+    }
+    if (observation.status === "missing") return record;
+
+    return await withOwnedIdempotencyTransitionObservation(
+      observation,
+      guardPath,
+      evidenceRef,
+      async (consume) => {
+        if (observation.status === "schema_threw") throw observation.error;
+        if (observation.status === "malformed") {
+          throw malformedIdempotencyTransitionGuardError(evidenceRef, observation.error);
+        }
+        assertValidIdempotencyTransitionGuardShape(observation.record, evidenceRef);
+        if (observation.record.intent !== "fail") {
+          return record;
+        }
+
+        const guard = observation.record as IdempotencyTransitionGuard & {
+          intent: "fail";
+        };
+        if (
+          isSameIdempotencyTransitionGuard(
+            activeIdempotencyTransitionGuards.get(guardPath),
+            guard
+          ) ||
+          (guard.owner_pid !== process.pid && !isIdempotencyTransitionGuardStale(guard))
+        ) {
+          throw transitionGuardBusyError(scope, key, "fail");
+        }
+        if (!record || guard.request_digest !== record.request_digest) {
+          throw transitionGuardBusyError(scope, key, "fail");
+        }
+        assertFailIntentGuardMatchesRecoverableRecord(guard, record, scope, key);
+
+        const cleanupLock = await acquireIdempotencyTransitionCleanupLock(
+          workspaceRoot,
+          scope,
+          key,
+          evidenceRef
+        );
+        if (cleanupLock.status === "busy") {
+          throw transitionGuardBusyError(scope, key, "fail");
+        }
+
+        return await runWithIdempotencyRelease(async () => {
+          let current = await service.getRecord(scope, key);
+          if (!current || current.request_digest !== guard.request_digest) {
+            throw transitionGuardBusyError(scope, key, "fail");
+          }
+          assertFailIntentGuardMatchesRecoverableRecord(guard, current, scope, key);
+
+          if (current.status === "completed") {
+            if (!(await consume())) {
+              throw idempotencyTransitionArtifactSettlementError(
+                evidenceRef,
+                new Error(
+                  "Idempotency fail-intent guard changed while preserving completed authority."
+                )
+              );
+            }
+            return current;
+          }
+
+          let transitionError: unknown;
+          if (current.status !== "failed") {
+            try {
+              await writeFailedRecord(current, scope, key, evidenceRef);
+            } catch (firstWriteError) {
+              transitionError = firstWriteError;
+              let afterFirstWrite: IdempotencyRecord | undefined;
+              try {
+                afterFirstWrite = await service.getRecord(scope, key);
+              } catch (classificationError) {
+                throw preserveTaskServiceErrorCompensationCompatibility(
+                  firstWriteError,
+                  [classificationError],
+                  IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+                );
+              }
+              if (
+                !afterFirstWrite ||
+                afterFirstWrite.request_digest !== guard.request_digest
+              ) {
+                throw preserveTaskServiceErrorCompensationCompatibility(
+                  firstWriteError,
+                  [transitionGuardBusyError(scope, key, "fail")],
+                  IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+                );
+              }
+              if (afterFirstWrite.status === "completed") {
+                // Root D (V33-08): a completed record observed mid-recovery is
+                // never adopted by the tokenless fail-intent guard — refuse
+                // fail-closed with the typed identity error, matching
+                // assertUnsafeRollbackQuarantineAuthority semantics. Only the
+                // exact transported mutation authority may invalidate a
+                // completed generation.
+                throw preserveTaskServiceErrorCompensationCompatibility(
+                  completedRecordInvalidationIdentityError(evidenceRef),
+                  [firstWriteError],
+                  IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+                );
+              }
+              if (afterFirstWrite.status !== "failed") {
+                assertFailIntentGuardMatchesRecoverableRecord(
+                  guard,
+                  afterFirstWrite,
+                  scope,
+                  key
+                );
+                try {
+                  await writeFailedRecord(afterFirstWrite, scope, key, evidenceRef);
+                } catch (secondWriteError) {
+                  throw preserveTaskServiceErrorCompensationCompatibility(
+                    firstWriteError,
+                    [secondWriteError],
+                    IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+                  );
+                }
+              }
+            }
+          }
+
+          current = await requireDurablyFailedRecord(
+            { scope, key, requestDigest: guard.request_digest },
+            scope
+          );
+          if (!(await consume())) {
+            throw idempotencyTransitionArtifactSettlementError(
+              evidenceRef,
+              new Error("Idempotency fail-intent guard changed during durable recovery.")
+            );
+          }
+          if (transitionError !== undefined) throw transitionError;
+          return current;
+        }, cleanupLock.release);
+      }
+    );
+  }
+
+  function assertFailIntentGuardMatchesRecoverableRecord(
+    guard: IdempotencyTransitionGuard & { intent: "fail" },
+    record: IdempotencyRecord,
+    scope: IdempotencyScope,
+    key: string
+  ): void {
+    if (!guard.request_digest || guard.request_digest !== record.request_digest) {
+      throw transitionGuardBusyError(scope, key, "fail");
+    }
+    if (record.status === "failed") return;
+    if (record.status === "completed") {
+      if (guard.result_ref === record.result_ref) return;
+      throw completedRecordInvalidationIdentityError(
+        idempotencyRecordEvidenceRef(scope, key)
+      );
+    }
+    if (record.status === "started" && guard.result_ref === undefined) return;
+    throw completedRecordInvalidationStateError(idempotencyRecordEvidenceRef(scope, key));
+  }
+
+  async function runFailedRecordTransitionWithGuardRecovery<T>(
+    input: IdempotencyRecordLookupInput,
+    scope: IdempotencyScope,
+    guard: Extract<IdempotencyTransitionGuardAcquire, { status: "acquired" }>,
+    body: () => Promise<T>
+  ): Promise<T> {
+    let bodyCompleted = false;
+    let bodyResult: T | undefined;
+    let transitionError: unknown;
+    try {
+      bodyResult = await body();
+      bodyCompleted = true;
+    } catch (error) {
+      transitionError = error;
+    }
+
+    let durableFailedRecord: IdempotencyRecord | undefined;
+    let classificationError: unknown;
+    try {
+      durableFailedRecord = await requireDurablyFailedRecord(input, scope);
+    } catch (error) {
+      classificationError = error;
+    }
+
+    if (durableFailedRecord) {
+      const releaseErrors: unknown[] = [];
+      try {
+        await guard.release();
+      } catch (releaseError) {
+        releaseErrors.push(releaseError);
+        try {
+          await guard.recoverTerminalRelease(async () => {
+            await requireDurablyFailedRecord(input, scope);
+          });
+        } catch (recoveryError) {
+          releaseErrors.push(recoveryError);
+        }
+      }
+
+      if (transitionError !== undefined) {
+        throw preserveTaskServiceErrorCompensationCompatibility(
+          transitionError,
+          releaseErrors,
+          IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+        );
+      }
+      if (releaseErrors.length > 0) {
+        throw preserveTaskServiceErrorCompensationCompatibility(
+          releaseErrors[0],
+          releaseErrors.slice(1),
+          IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+        );
+      }
+      if (!bodyCompleted) {
+        throw new TypeError("Failed idempotency transition settled without a body result.");
+      }
+      return bodyResult as T;
+    }
+
+    const retentionErrors: unknown[] = [];
+    let retainExactFailIntent = true;
+    try {
+      retainExactFailIntent = await exactFailIntentStillProtectsCurrentRecord(
+        input,
+        scope,
+        guard.guard
+      );
+    } catch (retentionClassificationError) {
+      retentionErrors.push(retentionClassificationError);
+    }
+    try {
+      if (retainExactFailIntent) await guard.retain();
+      else await guard.release();
+    } catch (retentionError) {
+      retentionErrors.push(retentionError);
+    }
+    const primary = transitionError ?? classificationError ?? new TaskServiceError({
+      code: "record_malformed",
+      status: 500,
+      category: "workspace_error",
+      message: "Failed idempotency transition did not reach a durable failed state.",
+      userMessage: "The idempotency record could not be failed safely.",
+      evidenceRefs: [idempotencyRecordEvidenceRef(scope, input.key)],
+      retryable: true,
+      recommendedNextActions: ["Retry after inspecting the idempotency transition state."]
+    });
+    const compensations = [
+      ...(transitionError !== undefined && classificationError !== undefined
+        ? [classificationError]
+        : []),
+      ...retentionErrors
+    ];
+    throw preserveTaskServiceErrorCompensationCompatibility(
+      primary,
+      compensations,
+      IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+    );
+  }
+
+  async function runExactFailedRecordTransitionWithGuardRecovery<T>(
+    input: IdempotencyRecordLookupInput,
+    scope: IdempotencyScope,
+    guard: Extract<IdempotencyTransitionGuardAcquire, { status: "acquired" }>,
+    body: () => Promise<T>
+  ): Promise<T> {
+    let bodyResult: T | undefined;
+    let bodyCompleted = false;
+    let bodyError: unknown;
+    try {
+      bodyResult = await body();
+      bodyCompleted = true;
+    } catch (error) {
+      bodyError = error;
+    }
+
+    let durableFailure: IdempotencyRecord | undefined;
+    let classificationError: unknown;
+    try {
+      durableFailure = await requireDurablyFailedRecord(input, scope);
+    } catch (error) {
+      classificationError = error;
+    }
+
+    const releaseErrors: unknown[] = [];
+    try {
+      await guard.release();
+    } catch (releaseError) {
+      releaseErrors.push(releaseError);
+      if (durableFailure) {
+        try {
+          await guard.recoverTerminalRelease(async () => {
+            await requireDurablyFailedRecord(input, scope);
+          });
+        } catch (recoveryError) {
+          releaseErrors.push(recoveryError);
+        }
+      }
+    }
+
+    if (bodyError !== undefined) {
+      throw preserveTaskServiceErrorCompensationCompatibility(
+        bodyError,
+        [
+          ...(classificationError === undefined ? [] : [classificationError]),
+          ...releaseErrors
+        ],
+        IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+      );
+    }
+    if (!durableFailure) {
+      throw preserveTaskServiceErrorCompensationCompatibility(
+        classificationError ?? completedRecordInvalidationStateError(
+          idempotencyRecordEvidenceRef(scope, input.key)
+        ),
+        releaseErrors,
+        IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+      );
+    }
+    if (releaseErrors.length > 0) {
+      throw preserveTaskServiceErrorCompensationCompatibility(
+        releaseErrors[0],
+        releaseErrors.slice(1),
+        IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+      );
+    }
+    if (!bodyCompleted) {
+      throw new TypeError("Exact failed transition completed without a body result.");
+    }
+    return bodyResult as T;
+  }
+
+  async function requireDurablyFailedRecord(
+    input: IdempotencyRecordLookupInput,
+    scope: IdempotencyScope
+  ): Promise<IdempotencyRecord> {
+    const current = await service.getRecord(scope, input.key);
+    if (!current) {
+      throw missingTransitionRecordError(
+        scope,
+        input.key,
+        "Idempotency record was missing while proving durable failed recovery."
+      );
+    }
+    if (current.request_digest !== input.requestDigest) {
+      throw createIdempotencyMismatchError();
+    }
+    if (current.status !== "failed" || current.result_ref !== undefined) {
+      throw completedRecordInvalidationStateError(
+        idempotencyRecordEvidenceRef(scope, input.key)
+      );
+    }
+    return current;
+  }
+
+  async function exactFailIntentStillProtectsCurrentRecord(
+    input: IdempotencyRecordLookupInput,
+    scope: IdempotencyScope,
+    guard: IdempotencyTransitionGuard
+  ): Promise<boolean> {
+    const current = await service.getRecord(scope, input.key);
+    if (!current || current.request_digest !== guard.request_digest) return false;
+    if (current.status === "failed") return false;
+    if (guard.result_ref !== undefined) {
+      return current.status === "completed" && current.result_ref === guard.result_ref;
+    }
+    return current.status === "started" && current.result_ref === undefined;
+  }
+
+  async function beginFromExistingReplay(
+    input: IdempotencyRecordLookupInput,
+    scope: IdempotencyScope,
+    replacement: IdempotencyRecord,
+    evidenceRef: string,
+    existing: Exclude<IdempotencyReplayLookup, { status: "missing" }>
+  ): Promise<BeginIdempotencyRecordResult> {
+    if (existing.status === "incomplete" && existing.record.status === "failed") {
+      const guard = await acquireIdempotencyTransitionGuard(
+        workspaceRoot,
+        scope,
+        input.key,
+        evidenceRef,
+        {},
+        transitionGuardHooks
+      );
+      if (guard.status === "busy") {
+        return beginResultFromReplayLookup(
+          await lookupExistingRecordForBegin(
+            service,
+            { ...input, scope },
+            evidenceRef
+          )
+        );
+      }
+      return await runWithIdempotencyRelease(async () => {
+        const retryExisting = await service.lookupReplay({ ...input, scope });
+        if (retryExisting.status === "missing") {
+          throw new TaskServiceError({
+            code: "record_malformed",
+            status: 500,
+            category: "workspace_error",
+            message: "Idempotency record was not readable during failed retry acquisition.",
+            userMessage: "The idempotency record could not be updated safely.",
+            evidenceRefs: [evidenceRef],
+            recommendedNextActions: ["Inspect the idempotency record state before retrying."]
+          });
+        }
+        if (retryExisting.status !== "incomplete" || retryExisting.record.status !== "failed") {
+          return beginResultFromReplayLookup(retryExisting);
+        }
+
+        const stored = await storeRecordInternal(replacement, {
+          allowCompletedWrite: false,
+          allowExistingMutation: true
+        });
+        return beginResultFromStoredRecord(stored, input.requestDigest, scope);
+      }, guard.release);
+    }
+
+    return beginResultFromReplayLookup(existing);
   }
 
   const service: IdempotencyRecordService = {
@@ -258,6 +1221,16 @@ export function createIdempotencyRecordService(
         updated_at: timestamp
       };
       const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
+      const beforeCreate = await service.lookupReplay({ ...input, scope: parsedScope });
+      if (beforeCreate.status !== "missing") {
+        return await beginFromExistingReplay(
+          input,
+          parsedScope,
+          record,
+          evidenceRef,
+          beforeCreate
+        );
+      }
       const created = await createJsonRecordIfAbsent(
         workspaceRoot,
         idempotencyRecordDirectorySegments(parsedScope),
@@ -283,53 +1256,28 @@ export function createIdempotencyRecordService(
           recommendedNextActions: ["Inspect the idempotency record state before retrying."]
         });
       }
-      if (existing.status === "incomplete" && existing.record.status === "failed") {
-        const guard = await acquireIdempotencyTransitionGuard(
-          workspaceRoot,
-          parsedScope,
-          input.key,
-          evidenceRef,
-          transitionGuardHooks
-        );
-        if (guard.status === "busy") {
-          return beginResultFromReplayLookup(
-            await lookupExistingRecordForBegin(service, { ...input, scope: parsedScope }, evidenceRef)
-          );
-        }
-        try {
-          const retryExisting = await service.lookupReplay({ ...input, scope: parsedScope });
-          if (retryExisting.status === "missing") {
-            throw new TaskServiceError({
-              code: "record_malformed",
-              status: 500,
-              category: "workspace_error",
-              message: "Idempotency record was not readable during failed retry acquisition.",
-              userMessage: "The idempotency record could not be updated safely.",
-              evidenceRefs: [evidenceRef],
-              recommendedNextActions: ["Inspect the idempotency record state before retrying."]
-            });
-          }
-          if (retryExisting.status !== "incomplete" || retryExisting.record.status !== "failed") {
-            return beginResultFromReplayLookup(retryExisting);
-          }
-
-          const stored = await storeRecordInternal(record, {
-            allowCompletedWrite: false,
-            allowExistingMutation: true
-          });
-          return beginResultFromStoredRecord(stored, input.requestDigest, parsedScope, input.key);
-        } finally {
-          await guard.release();
-        }
-      }
-
-      return existing;
+      return await beginFromExistingReplay(
+        input,
+        parsedScope,
+        record,
+        evidenceRef,
+        existing
+      );
     },
 
     async lookupReplay(input: IdempotencyRecordLookupInput): Promise<IdempotencyReplayLookup> {
       const parsedScope = assertIdempotencyScope(input.scope);
       assertNonblankIdempotencyKey(input.key);
-      const record = await service.getRecord(parsedScope, input.key);
+      let record = await service.getRecord(parsedScope, input.key);
+      if (record && record.request_digest !== input.requestDigest) {
+        return { status: "mismatch", record };
+      }
+      record = await recoverRetainedFailIntentGuardForReplay(
+        parsedScope,
+        input.key,
+        record,
+        idempotencyRecordEvidenceRef(parsedScope, input.key)
+      );
       if (!record) {
         return { status: "missing" };
       }
@@ -338,18 +1286,247 @@ export function createIdempotencyRecordService(
       }
       if (record.status === "completed") {
         if (!record.result_ref) {
-          throw completedRecordMissingResultRefError(parsedScope, input.key);
+          return {
+            status: "invalid_completed",
+            reason: "missing_result_ref",
+            record,
+            observedResultRef: undefined
+          };
         }
-        assertTaskScopeCompletedResultRef(
-          record as IdempotencyRecord & { result_ref: string },
-          parsedScope,
-          input.key
-        );
+        if (parsedScope === "task" && !isSafeTaskId(record.result_ref)) {
+          return {
+            status: "invalid_completed",
+            reason: "unsafe_result_ref",
+            record,
+            observedResultRef: record.result_ref
+          };
+        }
 
         return { status: "completed", record: record as IdempotencyRecord & { result_ref: string } };
       }
 
       return { status: "incomplete", record };
+    },
+
+    /**
+     * Root E (V33-15, documented disposition): composed permit envelope. An
+     * in-window completed replay holds a peak of TWO counted cleanup permits
+     * from the shared 1,024 pool — the record permit held across
+     * classification, plus the observation permit transported inside the
+     * rejected reason until the route settles it. Roughly 512 concurrent
+     * completed replays therefore saturate the shared pool; excess replays
+     * receive the typed, retryable authority-capacity rejection and
+     * self-heal. Capacity re-scoping is out of scope for #74 (deferred to a
+     * Phase 8 follow-up issue).
+     */
+    async consumeCompletedRecord<Accepted, Rejected>(
+      input: IdempotencyRecordLookupInput,
+      consume: (
+        record: IdempotencyRecord & { result_ref: string }
+      ) => Promise<CompletedIdempotencyRecordConsumptionDecision<Accepted, Rejected>>
+    ): Promise<CompletedIdempotencyRecordConsumptionResult<Accepted, Rejected>> {
+      const parsedScope = assertIdempotencyScope(input.scope);
+      assertNonblankIdempotencyKey(input.key);
+      const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
+      const deadline = Date.now() + IDEMPOTENCY_TRANSITION_GUARD_WAIT_MS;
+
+      for (;;) {
+        const observed = await service.lookupReplay({ ...input, scope: parsedScope });
+        if (
+          observed.status !== "completed" &&
+          observed.status !== "invalid_completed"
+        ) return observed;
+
+        const guard = await acquireIdempotencyTransitionGuard(
+          workspaceRoot,
+          parsedScope,
+          input.key,
+          evidenceRef,
+          {
+            intent: "complete",
+            request_digest: input.requestDigest,
+            ...(observed.record.result_ref === undefined
+              ? {}
+              : { result_ref: observed.record.result_ref })
+          },
+          transitionGuardHooks
+        );
+        if (guard.status === "busy") {
+          throw transitionGuardBusyError(parsedScope, input.key, "complete");
+        }
+
+        let retryWithCurrentAuthority = false;
+        // Root A (V33-01): the rejected decision's settlement hook is carried
+        // beside (never inside) the returned result so both of this
+        // function's own throw-after-fulfilled windows can settle the
+        // transported reason resources without changing the result shape.
+        let settleRejectedReasonAfterFailure: (() => Promise<void>) | undefined;
+        const settleFulfilledDecisionResources = async (
+          fulfilled: unknown
+        ): Promise<void> => {
+          if (
+            !fulfilled ||
+            typeof fulfilled !== "object" ||
+            !("mutationAuthority" in fulfilled)
+          ) {
+            return;
+          }
+          const settlementErrors: unknown[] = [];
+          try {
+            await cancelCompletedMutationAuthority(
+              fulfilled.mutationAuthority as CompletedIdempotencyRecordMutationAuthority
+            );
+          } catch (cancellationError) {
+            settlementErrors.push(cancellationError);
+          }
+          const settleRejectedReason = settleRejectedReasonAfterFailure;
+          settleRejectedReasonAfterFailure = undefined;
+          if (settleRejectedReason) {
+            try {
+              await settleRejectedReason();
+            } catch (reasonSettlementError) {
+              settlementErrors.push(reasonSettlementError);
+            }
+          }
+          if (settlementErrors.length === 1) throw settlementErrors[0];
+          if (settlementErrors.length > 1) {
+            throw preserveTaskServiceErrorCompensationCompatibility(
+              settlementErrors[0],
+              settlementErrors.slice(1),
+              IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE
+            );
+          }
+        };
+        const recordPath = workspaceRecordPath(
+          workspaceRoot,
+          [
+            ...idempotencyRecordDirectorySegments(parsedScope),
+            idempotencyRecordFileName(input.key)
+          ],
+          evidenceRef
+        );
+        const result = await runWithIdempotencyRelease(
+          async () => {
+            const exact = await observeJsonRecordForCleanup(
+              recordPath,
+              evidenceRef,
+              IdempotencyRecordSchema
+            );
+            if (exact.status === "missing") {
+              retryWithCurrentAuthority = true;
+              return undefined;
+            }
+            let permitOutstanding = true;
+            try {
+              if (exact.status === "malformed" || exact.status === "schema_threw") {
+                throw exact.error;
+              }
+              const current = exact.record;
+              const sameObservedCompletedGeneration =
+                current.request_digest === input.requestDigest &&
+                current.status === "completed" &&
+                current.result_ref === observed.record.result_ref;
+              if (!sameObservedCompletedGeneration) {
+                retryWithCurrentAuthority = true;
+                return undefined;
+              }
+              if (observed.status === "invalid_completed") {
+                const mutationAuthority = registerCompletedMutationAuthority(
+                  parsedScope,
+                  input,
+                  current,
+                  exact.cleanupPermit
+                );
+                permitOutstanding = false;
+                return {
+                  ...observed,
+                  record: current,
+                  mutationAuthority
+                };
+              }
+              const decision = await consume(
+                current as IdempotencyRecord & { result_ref: string }
+              );
+              const mutationAuthority = registerCompletedMutationAuthority(
+                parsedScope,
+                input,
+                current,
+                exact.cleanupPermit
+              );
+              permitOutstanding = false;
+              if (decision.status === "accepted") {
+                return {
+                  status: "accepted" as const,
+                  record: current as IdempotencyRecord & { result_ref: string },
+                  value: decision.value,
+                  mutationAuthority
+                };
+              }
+              settleRejectedReasonAfterFailure =
+                decision.settleReasonAfterConsumptionFailure;
+              return {
+                status: "rejected" as const,
+                record: current as IdempotencyRecord & { result_ref: string },
+                reason: decision.reason,
+                mutationAuthority
+              };
+            } finally {
+              if (permitOutstanding) {
+                await cancelWorkspaceRecordCleanupPermit(exact.cleanupPermit);
+              }
+            }
+          },
+          guard.release,
+          settleFulfilledDecisionResources
+        );
+
+        if (!retryWithCurrentAuthority) {
+          if (
+            result &&
+            typeof result === "object" &&
+            "mutationAuthority" in result
+          ) {
+            const mutationAuthority = result.mutationAuthority as
+              CompletedIdempotencyRecordMutationAuthority;
+            const authorityState = completedMutationAuthorities.get(mutationAuthority);
+            if (!authorityState || authorityState.status !== "outstanding") {
+              throw completedRecordInvalidationIdentityError(evidenceRef);
+            }
+            try {
+              await refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
+                authorityState.cleanupPermit,
+                recordPath,
+                evidenceRef
+              );
+            } catch (refreshError) {
+              // Root A (V33-01): this refresh window is the second
+              // throw-after-fulfilled exit; settle the mutation authority AND
+              // the rejected reason's transported resources before the
+              // refresh failure propagates.
+              try {
+                await settleFulfilledDecisionResources(result);
+              } catch (settlementError) {
+                throw preserveTaskServiceErrorCompensationCompatibility(
+                  refreshError,
+                  [settlementError],
+                  IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE
+                );
+              }
+              throw refreshError;
+            }
+          }
+          return result as CompletedIdempotencyRecordConsumptionResult<Accepted, Rejected>;
+        }
+        if (Date.now() >= deadline) {
+          throw transitionGuardBusyError(parsedScope, input.key, "complete");
+        }
+      }
+    },
+
+    async cancelCompletedRecordMutationAuthority(
+      authority: CompletedIdempotencyRecordMutationAuthority
+    ): Promise<void> {
+      await cancelCompletedMutationAuthority(authority);
     },
 
     async completeRecord(input: CompleteIdempotencyRecordInput): Promise<IdempotencyRecord> {
@@ -371,12 +1548,20 @@ export function createIdempotencyRecordService(
       if (observed.status === "completed") {
         return observed.record;
       }
+      if (observed.status === "invalid_completed") {
+        throw invalidCompletedRecordAuthorityError(observed.reason, evidenceRef);
+      }
 
       const guard = await acquireIdempotencyTransitionGuard(
         workspaceRoot,
         parsedScope,
         input.key,
         evidenceRef,
+        {
+          intent: "complete",
+          request_digest: input.requestDigest,
+          result_ref: input.resultRef
+        },
         transitionGuardHooks
       );
       if (guard.status === "busy") {
@@ -384,10 +1569,13 @@ export function createIdempotencyRecordService(
         if (current.status === "completed") {
           return current.record;
         }
+        if (current.status === "invalid_completed") {
+          throw invalidCompletedRecordAuthorityError(current.reason, evidenceRef);
+        }
         throw transitionGuardBusyError(parsedScope, input.key, "complete");
       }
 
-      try {
+      return await runWithIdempotencyRelease(async () => {
         const existing = await service.lookupReplay({ ...input, scope: parsedScope });
         if (existing.status === "mismatch") {
           throw createIdempotencyMismatchError();
@@ -401,6 +1589,9 @@ export function createIdempotencyRecordService(
         }
         if (existing.status === "completed") {
           return existing.record;
+        }
+        if (existing.status === "invalid_completed") {
+          throw invalidCompletedRecordAuthorityError(existing.reason, evidenceRef);
         }
         if (existing.record.status !== "started") {
           throw invalidTransitionStateError(
@@ -422,9 +1613,129 @@ export function createIdempotencyRecordService(
           created_at: existing.record.created_at,
           updated_at: timestamp
         }, { allowCompletedWrite: true, allowExistingMutation: true });
-      } finally {
-        await guard.release();
+      }, guard.release);
+    },
+
+    async invalidateCompletedRecord(
+      input: InvalidateCompletedIdempotencyRecordInput
+    ): Promise<IdempotencyRecord> {
+      const parsedScope = assertIdempotencyScope(input.scope);
+      assertNonblankIdempotencyKey(input.key);
+      const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
+      if (!input.mutationAuthority) {
+        const beforeInvalidation = await service.lookupReplay({
+          ...input,
+          scope: parsedScope
+        });
+        if (beforeInvalidation.status === "mismatch") {
+          throw createIdempotencyMismatchError();
+        }
+        if (beforeInvalidation.status === "missing") {
+          throw missingTransitionRecordError(
+            parsedScope,
+            input.key,
+            "Idempotency record was missing when invalidating the completed result."
+          );
+        }
+        if (
+          beforeInvalidation.status === "incomplete" &&
+          beforeInvalidation.record.status === "failed"
+        ) {
+          return beforeInvalidation.record;
+        }
       }
+      if (input.mutationAuthority) {
+        return await replaceCompletedRecordWithMutationAuthority(
+          input.mutationAuthority,
+          input,
+          parsedScope,
+          input.resultRef,
+          evidenceRef
+        );
+      }
+      const guard = await acquireIdempotencyTransitionGuard(
+        workspaceRoot,
+        parsedScope,
+        input.key,
+        evidenceRef,
+        {
+          intent: "fail",
+          request_digest: input.requestDigest,
+          ...(input.resultRef === undefined ? {} : { result_ref: input.resultRef })
+        },
+        transitionGuardHooks
+      );
+      if (guard.status === "busy") {
+        throw transitionGuardBusyError(parsedScope, input.key, "fail");
+      }
+
+      return await runExactFailedRecordTransitionWithGuardRecovery(
+        input,
+        parsedScope,
+        guard,
+        async () => {
+          const recordPath = workspaceRecordPath(
+            workspaceRoot,
+            [
+              ...idempotencyRecordDirectorySegments(parsedScope),
+              idempotencyRecordFileName(input.key)
+            ],
+            evidenceRef
+          );
+          const exact = await observeJsonRecordForCleanup(
+            recordPath,
+            evidenceRef,
+            IdempotencyRecordSchema
+          );
+          if (exact.status === "missing") {
+            throw missingTransitionRecordError(
+              parsedScope,
+              input.key,
+              "Idempotency record was missing when invalidating the completed result."
+            );
+          }
+          let permitOutstanding = true;
+          try {
+            if (exact.status === "malformed" || exact.status === "schema_threw") {
+              throw exact.error;
+            }
+            const existing = exact.record;
+            if (existing.request_digest !== input.requestDigest) {
+              throw createIdempotencyMismatchError();
+            }
+            if (existing.status !== "completed") {
+              throw completedRecordInvalidationStateError(evidenceRef);
+            }
+            if (existing.result_ref !== input.resultRef) {
+              throw completedRecordInvalidationIdentityError(evidenceRef);
+            }
+            const failedRecord: IdempotencyRecord = {
+              ...existing,
+              status: "failed",
+              updated_at: now().toISOString()
+            };
+            delete failedRecord.result_ref;
+            permitOutstanding = false;
+            const replacement = await replaceJsonRecordAfterExactObservation(
+              exact.cleanupPermit,
+              workspaceRoot,
+              idempotencyRecordDirectorySegments(parsedScope),
+              idempotencyRecordFileName(input.key),
+              failedRecord,
+              evidenceRef,
+              IdempotencyRecordSchema
+            );
+            if (replacement.status !== "replaced") {
+              throw completedRecordInvalidationIdentityError(evidenceRef);
+            }
+            return replacement.record;
+          } finally {
+            if (permitOutstanding) {
+              await cancelWorkspaceRecordCleanupPermit(exact.cleanupPermit);
+            }
+          }
+        }
+      );
     },
 
     async failRecord(input: FailIdempotencyRecordInput): Promise<IdempotencyRecord> {
@@ -442,6 +1753,9 @@ export function createIdempotencyRecordService(
           "Idempotency record was missing when marking the claim failed."
         );
       }
+      if (observed.status === "invalid_completed") {
+        throw invalidCompletedRecordAuthorityError(observed.reason, evidenceRef);
+      }
       if (observed.status === "completed" || observed.record.status === "failed") {
         return observed.record;
       }
@@ -451,6 +1765,10 @@ export function createIdempotencyRecordService(
         parsedScope,
         input.key,
         evidenceRef,
+        {
+          intent: "fail",
+          request_digest: input.requestDigest
+        },
         transitionGuardHooks
       );
       if (guard.status === "busy") {
@@ -461,44 +1779,53 @@ export function createIdempotencyRecordService(
         ) {
           return current.record;
         }
+        if (current.status === "invalid_completed") {
+          throw invalidCompletedRecordAuthorityError(current.reason, evidenceRef);
+        }
         throw transitionGuardBusyError(parsedScope, input.key, "fail");
       }
 
-      try {
-        const existing = await service.lookupReplay({ ...input, scope: parsedScope });
-        if (existing.status === "mismatch") {
-          throw createIdempotencyMismatchError();
-        }
-        if (existing.status === "missing") {
-          throw missingTransitionRecordError(
-            parsedScope,
-            input.key,
-            "Idempotency record was missing when marking the claim failed."
-          );
-        }
-        if (existing.status === "completed" || existing.record.status === "failed") {
-          return existing.record;
-        }
-        if (existing.record.status !== "started") {
-          throw invalidTransitionStateError(
-            parsedScope,
-            input.key,
-            "failed",
-            "Only a started idempotency record can be marked failed.",
-            "The idempotency record is not in a failable state."
-          );
-        }
+      return await runFailedRecordTransitionWithGuardRecovery(
+        input,
+        parsedScope,
+        guard,
+        async () => {
+          const existing = await service.getRecord(parsedScope, input.key);
+          if (!existing) {
+            throw missingTransitionRecordError(
+              parsedScope,
+              input.key,
+              "Idempotency record was missing when marking the claim failed."
+            );
+          }
+          if (existing.request_digest !== input.requestDigest) {
+            throw createIdempotencyMismatchError();
+          }
+          if (existing.status === "failed") {
+            return existing;
+          }
+          if (existing.status !== "started") {
+            throw invalidTransitionStateError(
+              parsedScope,
+              input.key,
+              "failed",
+              "Only a started idempotency record can be marked failed.",
+              "The idempotency record is not in a failable state."
+            );
+          }
 
-        const recordWithoutResultRef = { ...existing.record };
-        delete recordWithoutResultRef.result_ref;
-        return await storeRecordInternal({
-          ...recordWithoutResultRef,
-          status: "failed",
-          updated_at: now().toISOString()
-        }, { allowCompletedWrite: false, allowExistingMutation: true });
-      } finally {
-        await guard.release();
-      }
+          const recordWithoutResultRef = { ...existing };
+          delete recordWithoutResultRef.result_ref;
+          return await storeRecordInternal(
+            {
+              ...recordWithoutResultRef,
+              status: "failed",
+              updated_at: now().toISOString()
+            },
+            { allowCompletedWrite: false, allowExistingMutation: true }
+          );
+        }
+      );
     },
 
     async recoverFailedRecordAfterRollback(
@@ -525,6 +1852,9 @@ export function createIdempotencyRecordService(
       if (current.status === "completed") {
         return current.record;
       }
+      if (current.status === "invalid_completed") {
+        throw invalidCompletedRecordAuthorityError(current.reason, evidenceRef);
+      }
       if (current.record.request_digest !== input.requestDigest) {
         throw createIdempotencyMismatchError();
       }
@@ -545,37 +1875,27 @@ export function createIdempotencyRecordService(
     },
 
     async quarantineRecordAfterUnsafeRollback(
-      input: FailIdempotencyRecordInput
+      input: QuarantineIdempotencyRecordInput
     ): Promise<IdempotencyRecord> {
-      const parsedScope = assertIdempotencyScope(input.scope);
-      assertNonblankIdempotencyKey(input.key);
-      const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
-      const current = await lookupExistingRecordForBegin(
-        service,
-        { ...input, scope: parsedScope },
-        evidenceRef
-      );
-      if (current.status === "mismatch") {
-        throw createIdempotencyMismatchError();
-      }
-      if (current.status === "completed") {
-        return current.record;
-      }
-      if (current.record.request_digest !== input.requestDigest) {
-        throw createIdempotencyMismatchError();
-      }
-
-      const recordWithoutResultRef = { ...current.record };
-      delete recordWithoutResultRef.result_ref;
-      return await storeRecordInternal({
-        ...recordWithoutResultRef,
-        status: "started",
-        updated_at: now().toISOString()
-      }, { allowCompletedWrite: false, allowExistingMutation: true });
+      return await quarantineRecordAfterUnsafeRollbackInternal(input);
     }
   };
 
   return service;
+}
+
+/**
+ * Root A (V32-01): a completed record may only be mutated through the exact
+ * transported mutation authority captured at classification. The tokenless
+ * quarantine fallback fails closed on every completed observation instead of
+ * re-authorizing semantically from a fresh read.
+ */
+function assertUnsafeRollbackQuarantineAuthority(
+  record: IdempotencyRecord,
+  evidenceRef: string
+): void {
+  if (record.status !== "completed") return;
+  throw completedRecordInvalidationIdentityError(evidenceRef);
 }
 
 export function idempotencyRecordFileName(key: string): string {
@@ -605,6 +1925,7 @@ async function acquireIdempotencyTransitionGuard(
   scope: IdempotencyScope,
   key: string,
   evidenceRef: string,
+  intent: IdempotencyTransitionGuardIntent,
   transitionGuardHooks?: IdempotencyTransitionGuardHooks
 ): Promise<IdempotencyTransitionGuardAcquire> {
   const directorySegments = idempotencyRecordDirectorySegments(scope);
@@ -621,7 +1942,8 @@ async function acquireIdempotencyTransitionGuard(
       guard_id: randomUUID(),
       owner_pid: process.pid,
       acquired_at_ms: Date.now(),
-      acquired_at: new Date().toISOString()
+      acquired_at: new Date().toISOString(),
+      ...intent
     };
     const publishLock = await acquireIdempotencyTransitionCleanupLock(
       workspaceRoot,
@@ -637,47 +1959,87 @@ async function acquireIdempotencyTransitionGuard(
       continue;
     }
 
-    let created: Awaited<ReturnType<typeof createJsonRecordIfAbsent<IdempotencyTransitionGuard>>>;
-    try {
-      created = await createJsonRecordIfAbsent(
-        workspaceRoot,
-        directorySegments,
-        guardFileName,
-        guard,
-        evidenceRef,
-        IdempotencyTransitionGuardSchema
-      );
-    } finally {
-      await publishLock.release();
-    }
+    const created = await runWithIdempotencyRelease(
+      async () =>
+        await createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          directorySegments,
+          guardFileName,
+          guard,
+          evidenceRef,
+          IdempotencyTransitionGuardSchema
+        ),
+      publishLock.release,
+      async (fulfilledGuard) => {
+        if (fulfilledGuard.status !== "created") return;
+        await releaseOwnedIdempotencyTransitionArtifact(
+          fulfilledGuard.cleanupPermit,
+          guardPath,
+          evidenceRef,
+          fulfilledGuard.record
+        );
+      }
+    );
     if (created.status === "created") {
+      const cleanupPermit = created.cleanupPermit;
+      activeIdempotencyTransitionGuards.set(guardPath, created.record);
+      const markTerminal = (): void => {
+        if (
+          isSameIdempotencyTransitionGuard(
+            activeIdempotencyTransitionGuards.get(guardPath),
+            created.record
+          )
+        ) {
+          activeIdempotencyTransitionGuards.delete(guardPath);
+        }
+      };
       return {
         status: "acquired",
+        guard: created.record,
         release: async () => {
-          const current = await readJsonRecord(
+          try {
+            await releaseOwnedIdempotencyTransitionArtifact(
+              cleanupPermit,
+              guardPath,
+              evidenceRef,
+              created.record
+            );
+          } finally {
+            markTerminal();
+          }
+        },
+        retain: async () => {
+          try {
+            await cancelWorkspaceRecordCleanupPermit(cleanupPermit);
+          } finally {
+            markTerminal();
+          }
+        },
+        recoverTerminalRelease: async (assertDurablyFailed) =>
+          await recoverOwnedIdempotencyTransitionGuardAfterTerminalReleaseFailure(
+            workspaceRoot,
+            scope,
+            key,
             guardPath,
             evidenceRef,
-            IdempotencyTransitionGuardSchema
-          ).catch(() => undefined);
-          if (current?.guard_id === guard.guard_id) {
-            await unlink(guardPath).catch(() => undefined);
-          }
-        }
+            created.record,
+            assertDurablyFailed
+          )
       };
     }
 
-    if (
-      await removeStaleIdempotencyTransitionGuard(
-        workspaceRoot,
-        scope,
-        key,
-        guardPath,
-        evidenceRef,
-        transitionGuardHooks
-      )
-    ) {
+    const staleCleanup = await removeStaleIdempotencyTransitionGuard(
+      workspaceRoot,
+      scope,
+      key,
+      guardPath,
+      evidenceRef,
+      transitionGuardHooks
+    );
+    if (staleCleanup === "removed") {
       continue;
     }
+    if (staleCleanup === "authority_changed") return { status: "busy" };
     if (Date.now() >= deadline) {
       return { status: "busy" };
     }
@@ -693,40 +2055,56 @@ async function removeStaleIdempotencyTransitionGuard(
   guardPath: string,
   evidenceRef: string,
   transitionGuardHooks?: IdempotencyTransitionGuardHooks
-): Promise<boolean> {
-  const existing = await readJsonRecord(
-    guardPath,
-    evidenceRef,
-    IdempotencyTransitionGuardSchema
-  );
-  if (!existing) {
-    return true;
-  }
-
-  if (!isIdempotencyTransitionGuardStale(existing)) {
-    return false;
-  }
-
-  const cleanupLock = await acquireIdempotencyTransitionCleanupLock(
-    workspaceRoot,
-    scope,
-    key,
-    evidenceRef
-  );
-  if (cleanupLock.status === "busy") {
-    return false;
-  }
-
+): Promise<"removed" | "blocked" | "authority_changed"> {
+  let observation: WorkspaceJsonRecordCleanupObservation<IdempotencyTransitionGuard>;
   try {
-    await transitionGuardHooks?.beforeStaleGuardCleanup?.({
+    observation = await observeJsonRecordForCleanup(
       guardPath,
       evidenceRef,
-      observedGuard: existing
-    });
+      IdempotencyTransitionGuardSchema
+    );
+  } catch (error) {
+    if (isRetryableWorkspaceRecordAuthorityContention(error)) return "blocked";
+    throw error;
+  }
+  if (observation.status === "missing") return "removed";
 
-    return await unlinkObservedIdempotencyTransitionGuard(guardPath, evidenceRef, existing);
-  } finally {
-    await cleanupLock.release();
+  try {
+    const removed = await withOwnedIdempotencyTransitionObservation(
+      observation,
+      guardPath,
+      evidenceRef,
+      async (consume) => {
+        if (observation.status === "schema_threw") throw observation.error;
+        if (observation.status === "malformed") throw observation.error;
+        assertValidIdempotencyTransitionGuardShape(observation.record, evidenceRef);
+        if (observation.record.intent === "fail") return false;
+        if (!isIdempotencyTransitionGuardStale(observation.record)) return false;
+
+        const cleanupLock = await acquireIdempotencyTransitionCleanupLock(
+          workspaceRoot,
+          scope,
+          key,
+          evidenceRef
+        );
+        if (cleanupLock.status === "busy") return false;
+
+        return await runWithIdempotencyRelease(async () => {
+          await transitionGuardHooks?.beforeStaleGuardCleanup?.({
+            guardPath,
+            evidenceRef,
+            observedGuard: idempotencyTransitionGuardIdentity(observation.record)
+          });
+          return await consume();
+        }, cleanupLock.release);
+      }
+    );
+    return removed ? "removed" : "blocked";
+  } catch (error) {
+    if (isPreMutationIdempotencyArtifactAuthorityChange(error)) {
+      return "authority_changed";
+    }
+    throw error;
   }
 }
 
@@ -743,140 +2121,130 @@ async function removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
     evidenceRef
   );
 
-  let guard: IdempotencyTransitionGuard | undefined;
+  let observation: WorkspaceJsonRecordCleanupObservation<IdempotencyTransitionGuard>;
   try {
-    guard = await readJsonRecord(
+    observation = await observeJsonRecordForCleanup(
       guardPath,
       evidenceRef,
       IdempotencyTransitionGuardSchema
     );
   } catch (error) {
-    if (!isRecoverableTransitionGuardRecordError(error)) {
-      throw error;
+    if (isRetryableWorkspaceRecordAuthorityContention(error)) {
+      throw transitionGuardBusyError(scope, key, transition);
     }
-
-    await unlinkRecoverableMalformedIdempotencyTransitionGuardForRollbackRecovery(
-      workspaceRoot,
-      scope,
-      key,
-      guardPath,
-      evidenceRef,
-      transition
-    );
-    return;
+    throw error;
   }
+  if (observation.status === "missing") return;
 
-  if (!guard) {
-    return;
-  }
-
-  if (isIdempotencyTransitionGuardStale(guard)) {
-    await unlinkObservedIdempotencyTransitionGuardForRollbackRecovery(
-      workspaceRoot,
-      scope,
-      key,
-      guardPath,
-      evidenceRef,
-      guard,
-      transition
-    );
-    return;
-  }
-
-  throw transitionGuardBusyError(scope, key, transition);
-}
-
-async function unlinkIdempotencyTransitionGuardForRollbackRecovery(
-  guardPath: string,
-  evidenceRef: string
-): Promise<void> {
-  try {
-    await unlink(guardPath);
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return;
-    }
-
-    throw new TaskServiceError({
-      code: "workspace_path_not_safe",
-      status: 500,
-      category: "workspace_error",
-      message: "Failed to remove idempotency transition guard during rollback recovery.",
-      userMessage: "The idempotency record could not be recovered safely.",
-      evidenceRefs: [evidenceRef],
-      retryable: false,
-      recommendedNextActions: ["Inspect the idempotency transition guard before retrying."]
-    });
-  }
-}
-
-async function unlinkObservedIdempotencyTransitionGuardForRollbackRecovery(
-  workspaceRoot: string,
-  scope: IdempotencyScope,
-  key: string,
-  guardPath: string,
-  evidenceRef: string,
-  observed: IdempotencyTransitionGuard,
-  transition: "complete" | "fail"
-): Promise<void> {
-  const cleanupLock = await acquireIdempotencyTransitionCleanupLock(
-    workspaceRoot,
-    scope,
-    key,
-    evidenceRef
-  );
-  if (cleanupLock.status === "busy") {
-    throw transitionGuardBusyError(scope, key, transition);
-  }
-
-  try {
-    if (await unlinkObservedIdempotencyTransitionGuard(guardPath, evidenceRef, observed)) {
-      return;
-    }
-  } finally {
-    await cleanupLock.release();
-  }
-
-  throw new TaskServiceError({
-    code: "record_malformed",
-    status: 500,
-    category: "workspace_error",
-    message: "Idempotency transition guard changed during rollback recovery.",
-    userMessage: "The idempotency record could not be recovered safely.",
-    evidenceRefs: [evidenceRef],
-    retryable: true,
-    recommendedNextActions: ["Retry after the in-progress idempotency transition finishes."]
-  });
-}
-
-async function unlinkObservedIdempotencyTransitionGuard(
-  guardPath: string,
-  evidenceRef: string,
-  observed: IdempotencyTransitionGuard
-): Promise<boolean> {
-  const current = await readJsonRecord(
+  await withOwnedIdempotencyTransitionObservation(
+    observation,
     guardPath,
     evidenceRef,
-    IdempotencyTransitionGuardSchema
-  );
-  if (!current) {
-    return true;
-  }
-  if (!isSameIdempotencyTransitionGuard(current, observed)) {
-    return false;
-  }
+    async (consume) => {
+      if (observation.status === "schema_threw") throw observation.error;
+      if (observation.status === "malformed") {
+        throw malformedIdempotencyTransitionGuardError(evidenceRef, observation.error);
+      }
+      assertValidIdempotencyTransitionGuardShape(observation.record, evidenceRef);
+      if (
+        observation.status === "record" &&
+        (observation.record.intent === "fail" ||
+          !isIdempotencyTransitionGuardStale(observation.record))
+      ) {
+        throw transitionGuardBusyError(scope, key, transition);
+      }
 
-  await unlinkIdempotencyTransitionGuardForRollbackRecovery(guardPath, evidenceRef);
-  return true;
+      await deleteObservedIdempotencyTransitionGuardForRollbackRecovery(
+        workspaceRoot,
+        scope,
+        key,
+        evidenceRef,
+        transition,
+        consume
+      );
+    }
+  );
 }
 
-async function unlinkRecoverableMalformedIdempotencyTransitionGuardForRollbackRecovery(
+async function recoverOwnedIdempotencyTransitionGuardAfterTerminalReleaseFailure(
   workspaceRoot: string,
   scope: IdempotencyScope,
   key: string,
   guardPath: string,
   evidenceRef: string,
-  transition: "complete" | "fail"
+  expected: IdempotencyTransitionGuard,
+  assertDurablyFailed: () => Promise<void>
+): Promise<void> {
+  let observation: WorkspaceJsonRecordCleanupObservation<IdempotencyTransitionGuard>;
+  try {
+    observation = await observeJsonRecordForCleanup(
+      guardPath,
+      evidenceRef,
+      IdempotencyTransitionGuardSchema
+    );
+  } catch (error) {
+    if (isRetryableWorkspaceRecordAuthorityContention(error)) {
+      throw transitionGuardBusyError(scope, key, "fail");
+    }
+    throw error;
+  }
+  if (observation.status === "missing") return;
+
+  await withOwnedIdempotencyTransitionObservation(
+    observation,
+    guardPath,
+    evidenceRef,
+    async (consume) => {
+      if (
+        observation.status !== "record" ||
+        !isSameIdempotencyTransitionGuard(observation.record, expected)
+      ) {
+        return;
+      }
+
+      const cleanupLock = await acquireIdempotencyTransitionCleanupLock(
+        workspaceRoot,
+        scope,
+        key,
+        evidenceRef
+      );
+      if (cleanupLock.status === "busy") {
+        throw transitionGuardBusyError(scope, key, "fail");
+      }
+
+      await runWithIdempotencyRelease(async () => {
+        await assertDurablyFailed();
+        await consume();
+      }, cleanupLock.release);
+    }
+  );
+}
+
+function assertValidIdempotencyTransitionGuardShape(
+  guard: IdempotencyTransitionGuard,
+  evidenceRef: string
+): void {
+  const hasIntent = guard.intent !== undefined;
+  const hasRequestDigest = guard.request_digest !== undefined;
+  const hasResultRef = guard.result_ref !== undefined;
+  if (!hasIntent && !hasRequestDigest && !hasResultRef) return;
+  if (guard.intent === "complete" && hasRequestDigest && hasResultRef) return;
+  if (guard.intent === "fail" && hasRequestDigest) return;
+  throw malformedIdempotencyTransitionGuardError(
+    evidenceRef,
+    new TypeError(
+      "Idempotency transition guard private fields do not form a complete or fail marker."
+    )
+  );
+}
+
+async function deleteObservedIdempotencyTransitionGuardForRollbackRecovery(
+  workspaceRoot: string,
+  scope: IdempotencyScope,
+  key: string,
+  evidenceRef: string,
+  transition: "complete" | "fail",
+  consume: () => Promise<boolean>
 ): Promise<void> {
   const cleanupLock = await acquireIdempotencyTransitionCleanupLock(
     workspaceRoot,
@@ -888,38 +2256,84 @@ async function unlinkRecoverableMalformedIdempotencyTransitionGuardForRollbackRe
     throw transitionGuardBusyError(scope, key, transition);
   }
 
-  try {
-    try {
-      const current = await readJsonRecord(
-        guardPath,
-        evidenceRef,
-        IdempotencyTransitionGuardSchema
-      );
-      if (!current) {
-        return;
-      }
-    } catch (error) {
-      if (isRecoverableTransitionGuardRecordError(error)) {
-        await unlinkIdempotencyTransitionGuardForRollbackRecovery(guardPath, evidenceRef);
-        return;
-      }
+  await runWithIdempotencyRelease(async () => {
+    if (await consume()) return;
+    throw new TaskServiceError({
+      code: "record_malformed",
+      status: 500,
+      category: "workspace_error",
+      message: "Idempotency transition guard changed during rollback recovery.",
+      userMessage: "The idempotency record could not be recovered safely.",
+      evidenceRefs: [evidenceRef],
+      retryable: true,
+      recommendedNextActions: ["Retry after the in-progress idempotency transition finishes."]
+    });
+  }, cleanupLock.release);
+}
 
-      throw error;
+type ExistingIdempotencyTransitionObservation = Exclude<
+  WorkspaceJsonRecordCleanupObservation<IdempotencyTransitionGuard>,
+  { readonly status: "missing" }
+>;
+
+async function withOwnedIdempotencyTransitionObservation<T>(
+  observation: ExistingIdempotencyTransitionObservation,
+  path: string,
+  evidenceRef: string,
+  body: (consume: () => Promise<boolean>) => Promise<T>
+): Promise<T> {
+  let ownership: "owned" | "transferred" | "settled" = "owned";
+  return await runWithIdempotencyRelease(
+    async () =>
+      await body(async () => {
+        if (ownership !== "owned") {
+          throw idempotencyTransitionArtifactSettlementError(
+            evidenceRef,
+            new Error("Idempotency transition cleanup capability was reused.")
+          );
+        }
+        ownership = "transferred";
+        return await consumeObservedIdempotencyTransitionArtifact(
+          observation,
+          path,
+          evidenceRef
+        );
+      }),
+    async () => {
+      if (ownership !== "owned") return;
+      ownership = "settled";
+      await cancelWorkspaceRecordCleanupPermit(observation.cleanupPermit);
     }
-  } finally {
-    await cleanupLock.release();
-  }
+  );
+}
 
-  throw new TaskServiceError({
-    code: "record_malformed",
-    status: 500,
-    category: "workspace_error",
-    message: "Idempotency transition guard was replaced during rollback recovery.",
-    userMessage: "The idempotency record could not be recovered safely.",
-    evidenceRefs: [evidenceRef],
-    retryable: true,
-    recommendedNextActions: ["Retry after the in-progress idempotency transition finishes."]
-  });
+async function consumeObservedIdempotencyTransitionArtifact(
+  observation: ExistingIdempotencyTransitionObservation,
+  path: string,
+  evidenceRef: string
+): Promise<boolean> {
+  if (observation.status === "schema_threw") throw observation.error;
+  try {
+    const result = await conditionalDeleteJsonRecordWithCleanupPermit(
+      observation.cleanupPermit,
+      path,
+      evidenceRef,
+      IdempotencyTransitionGuardSchema,
+      observation.status === "record"
+        ? {
+            kind: "record",
+            expected: observation.record,
+            matches: () => true
+          }
+        : { kind: "malformed" }
+    );
+    return result.status !== "condition_not_met";
+  } catch (error) {
+    if (error instanceof WorkspaceRecordConditionalDeleteError) {
+      throw idempotencyTransitionArtifactSettlementError(evidenceRef, error);
+    }
+    throw error;
+  }
 }
 
 async function acquireIdempotencyTransitionCleanupLock(
@@ -927,7 +2341,7 @@ async function acquireIdempotencyTransitionCleanupLock(
   scope: IdempotencyScope,
   key: string,
   evidenceRef: string
-): Promise<IdempotencyTransitionGuardAcquire> {
+): Promise<IdempotencyTransitionCleanupLockAcquire> {
   const directorySegments = idempotencyRecordDirectorySegments(scope);
   const cleanupLockFileName = idempotencyTransitionCleanupLockFileName(key);
   const cleanupLockPath = workspaceRecordPath(
@@ -944,7 +2358,7 @@ async function acquireIdempotencyTransitionCleanupLock(
       acquired_at_ms: Date.now(),
       acquired_at: new Date().toISOString()
     };
-    const created = await createJsonRecordIfAbsent(
+    const created = await createJsonRecordIfAbsentWithCleanupPermit(
       workspaceRoot,
       directorySegments,
       cleanupLockFileName,
@@ -953,18 +2367,16 @@ async function acquireIdempotencyTransitionCleanupLock(
       IdempotencyTransitionGuardSchema
     );
     if (created.status === "created") {
+      const cleanupPermit = created.cleanupPermit;
       return {
         status: "acquired",
-        release: async () => {
-          const current = await readJsonRecord(
+        release: async () =>
+          await releaseOwnedIdempotencyTransitionArtifact(
+            cleanupPermit,
             cleanupLockPath,
             evidenceRef,
-            IdempotencyTransitionGuardSchema
-          ).catch(() => undefined);
-          if (current && isSameIdempotencyTransitionGuard(current, cleanupLock)) {
-            await unlink(cleanupLockPath).catch(() => undefined);
-          }
-        }
+            cleanupLock
+          )
       };
     }
 
@@ -984,22 +2396,113 @@ async function removeStaleIdempotencyTransitionCleanupLock(
   cleanupLockPath: string,
   evidenceRef: string
 ): Promise<boolean> {
-  const existing = await readJsonRecord(
-    cleanupLockPath,
-    evidenceRef,
-    IdempotencyTransitionGuardSchema
-  );
-  if (!existing) {
-    return true;
+  let observation: WorkspaceJsonRecordCleanupObservation<IdempotencyTransitionGuard>;
+  try {
+    observation = await observeJsonRecordForCleanup(
+      cleanupLockPath,
+      evidenceRef,
+      IdempotencyTransitionGuardSchema
+    );
+  } catch (error) {
+    if (isRetryableWorkspaceRecordAuthorityContention(error)) return false;
+    throw error;
   }
-  if (!isIdempotencyTransitionGuardStale(existing)) {
-    return false;
-  }
+  if (observation.status === "missing") return true;
 
-  return await unlinkObservedIdempotencyTransitionGuard(
+  return await withOwnedIdempotencyTransitionObservation(
+    observation,
     cleanupLockPath,
     evidenceRef,
-    existing
+    async (consume) => {
+      if (observation.status === "schema_threw") throw observation.error;
+      if (observation.status === "malformed") throw observation.error;
+      if (!isIdempotencyTransitionGuardStale(observation.record)) return false;
+      return await consume();
+    }
+  );
+}
+
+async function releaseOwnedIdempotencyTransitionArtifact(
+  cleanupPermit: WorkspaceRecordCleanupPermit,
+  path: string,
+  evidenceRef: string,
+  expected: IdempotencyTransitionGuard
+): Promise<void> {
+  try {
+    await conditionalDeleteJsonRecordWithCleanupPermit(
+      cleanupPermit,
+      path,
+      evidenceRef,
+      IdempotencyTransitionGuardSchema,
+      {
+        kind: "record",
+        expected,
+        matches: isSameIdempotencyTransitionGuard
+      }
+    );
+  } catch (error) {
+    if (
+      error instanceof WorkspaceRecordConditionalDeleteError &&
+      error.mutationPhase === "pre_mutation"
+    ) {
+      return;
+    }
+
+    throw idempotencyTransitionArtifactSettlementError(evidenceRef, error);
+  }
+}
+
+function idempotencyTransitionArtifactSettlementError(
+  evidenceRef: string,
+  cause: unknown
+): TaskServiceError {
+  const error = new TaskServiceError({
+    code: "workspace_path_not_safe",
+    status: 500,
+    category: "workspace_error",
+    message: "Idempotency transition artifact release did not settle safely.",
+    userMessage: "The idempotency transition could not be finalized safely.",
+    evidenceRefs: [evidenceRef],
+    retryable: false,
+    recommendedNextActions: ["Inspect the idempotency transition artifacts before retrying."]
+  });
+  error.cause = cause;
+  return error;
+}
+
+function malformedIdempotencyTransitionGuardError(
+  evidenceRef: string,
+  cause: unknown
+): TaskServiceError {
+  const error = new TaskServiceError({
+    code: "record_malformed",
+    status: 500,
+    category: "workspace_error",
+    message: "Idempotency transition guard is malformed.",
+    userMessage: "The idempotency transition state cannot be read safely.",
+    evidenceRefs: [evidenceRef],
+    retryable: false,
+    recommendedNextActions: ["Inspect and repair the private transition marker before retrying."]
+  });
+  if (cause instanceof Error) error.cause = cause;
+  malformedIdempotencyTransitionGuardErrors.add(error);
+  return error;
+}
+
+function isPreMutationIdempotencyArtifactAuthorityChange(error: unknown): boolean {
+  return (
+    error instanceof TaskServiceError &&
+    error.cause instanceof WorkspaceRecordConditionalDeleteError &&
+    error.cause.mutationPhase === "pre_mutation"
+  );
+}
+
+function isRetryableWorkspaceRecordAuthorityContention(error: unknown): boolean {
+  return (
+    error instanceof TaskServiceError &&
+    error.status === 409 &&
+    error.category === "workspace_error" &&
+    error.retryable
   );
 }
 
@@ -1008,28 +2511,36 @@ function idempotencyTransitionCleanupLockFileName(key: string): string {
 }
 
 function isSameIdempotencyTransitionGuard(
-  left: IdempotencyTransitionGuard,
+  left: IdempotencyTransitionGuard | undefined,
   right: IdempotencyTransitionGuard
 ): boolean {
   return (
+    left !== undefined &&
     left.guard_id === right.guard_id &&
     left.owner_pid === right.owner_pid &&
     left.acquired_at_ms === right.acquired_at_ms &&
-    left.acquired_at === right.acquired_at
+    left.acquired_at === right.acquired_at &&
+    left.intent === right.intent &&
+    left.request_digest === right.request_digest &&
+    left.result_ref === right.result_ref
   );
+}
+
+function idempotencyTransitionGuardIdentity(
+  guard: IdempotencyTransitionGuard
+): IdempotencyTransitionGuardIdentity {
+  return {
+    guard_id: guard.guard_id,
+    owner_pid: guard.owner_pid,
+    acquired_at_ms: guard.acquired_at_ms,
+    acquired_at: guard.acquired_at
+  };
 }
 
 function isIdempotencyTransitionGuardStale(guard: IdempotencyTransitionGuard): boolean {
   const ageMs = Date.now() - guard.acquired_at_ms;
   const ownerIsGone = guard.owner_pid !== process.pid && !isProcessLikelyAlive(guard.owner_pid);
   return ageMs >= IDEMPOTENCY_TRANSITION_GUARD_STALE_MS || ownerIsGone;
-}
-
-function isRecoverableTransitionGuardRecordError(error: unknown): boolean {
-  return (
-    error instanceof TaskServiceError &&
-    (error.code === "record_malformed" || error.code === "record_schema_error")
-  );
 }
 
 function isProcessLikelyAlive(pid: number): boolean {
@@ -1102,18 +2613,6 @@ function assertTaskScopeInputResultRef(
   throw unsafeTaskResultRefError(idempotencyRecordEvidenceRef(scope, key));
 }
 
-function assertTaskScopeCompletedResultRef(
-  record: IdempotencyRecord & { result_ref: string },
-  scope: IdempotencyScope,
-  key: string
-): void {
-  if (scope !== "task" || isSafeTaskId(record.result_ref)) {
-    return;
-  }
-
-  throw unsafeTaskResultRefError(idempotencyRecordEvidenceRef(scope, key));
-}
-
 function unsafeTaskResultRefError(evidenceRef: string): TaskServiceError {
   return new TaskServiceError({
     code: "record_malformed",
@@ -1124,6 +2623,25 @@ function unsafeTaskResultRefError(evidenceRef: string): TaskServiceError {
     evidenceRefs: [evidenceRef, "idempotency.result_ref"],
     retryable: false,
     recommendedNextActions: ["Inspect and repair the idempotency result reference before retrying."]
+  });
+}
+
+function invalidCompletedRecordAuthorityError(
+  reason: InvalidCompletedIdempotencyRecordReason,
+  evidenceRef: string
+): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 500,
+    category: "workspace_error",
+    message:
+      reason === "missing_result_ref"
+        ? "Completed idempotency record is missing result_ref."
+        : "Completed task idempotency result_ref is not a safe TaskCard id.",
+    userMessage: "The completed idempotency result cannot be used safely.",
+    evidenceRefs: [evidenceRef, "idempotency.result_ref"],
+    retryable: false,
+    recommendedNextActions: ["Retry after the invalid completed authority is quarantined."]
   });
 }
 
@@ -1150,6 +2668,32 @@ function idempotencyRecordStoreExistingError(evidenceRef: string): TaskServiceEr
     evidenceRefs: [evidenceRef, "idempotency.status"],
     retryable: false,
     recommendedNextActions: ["Use beginRecord, completeRecord, or failRecord for state transitions."]
+  });
+}
+
+function completedRecordInvalidationStateError(evidenceRef: string): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 409,
+    category: "workspace_error",
+    message: "Only the exact observed completed idempotency record can be invalidated.",
+    userMessage: "The idempotency result changed before it could be invalidated safely.",
+    evidenceRefs: [evidenceRef, "idempotency.status"],
+    retryable: true,
+    recommendedNextActions: ["Retry after inspecting the current idempotency record state."]
+  });
+}
+
+function completedRecordInvalidationIdentityError(evidenceRef: string): TaskServiceError {
+  return new TaskServiceError({
+    code: "record_malformed",
+    status: 409,
+    category: "workspace_error",
+    message: "Completed idempotency result changed before exact invalidation.",
+    userMessage: "The idempotency result changed before it could be invalidated safely.",
+    evidenceRefs: [evidenceRef, "idempotency.result_ref"],
+    retryable: true,
+    recommendedNextActions: ["Retry after inspecting the current idempotency result."]
   });
 }
 
@@ -1303,6 +2847,9 @@ function beginResultFromReplayLookup(
   if (lookup.status === "completed") {
     return { status: "completed", record: lookup.record };
   }
+  if (lookup.status === "invalid_completed") {
+    return lookup;
+  }
 
   return { status: "incomplete", record: lookup.record };
 }
@@ -1310,21 +2857,28 @@ function beginResultFromReplayLookup(
 function beginResultFromStoredRecord(
   record: IdempotencyRecord,
   requestDigest: string,
-  scope: IdempotencyScope,
-  key: string
+  scope: IdempotencyScope
 ): BeginIdempotencyRecordResult {
   if (record.request_digest !== requestDigest) {
     return { status: "mismatch", record };
   }
   if (record.status === "completed") {
     if (!record.result_ref) {
-      throw completedRecordMissingResultRefError(scope, key);
+      return {
+        status: "invalid_completed",
+        reason: "missing_result_ref",
+        record,
+        observedResultRef: undefined
+      };
     }
-    assertTaskScopeCompletedResultRef(
-      record as IdempotencyRecord & { result_ref: string },
-      scope,
-      key
-    );
+    if (scope === "task" && !isSafeTaskId(record.result_ref)) {
+      return {
+        status: "invalid_completed",
+        reason: "unsafe_result_ref",
+        record,
+        observedResultRef: record.result_ref
+      };
+    }
 
     return {
       status: "completed",

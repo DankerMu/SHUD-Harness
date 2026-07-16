@@ -169,6 +169,48 @@
       - Artifact registry test uses a valid Artifact type from `Artifact_Registry_Spec`, returns the same record by id, and persists metadata under `workspace/artifacts/manifests/`; M1 does not create/serve the payload file or implement full manifest/evidence_usable semantics.
       - PR evidence states the `POST /api/tasks` idempotency carrier is change-scoped only and does not modify canonical frozen spec applicability lists.
       - `bun run test:backend-api`; `bun run test:backend-ws`; `bun run test:schemas`; `bun run typecheck`; `bun run check`; `openspec validate m1-foundation --strict --no-interactive`; `git diff --check`; `git -C zero diff --quiet`; `test -z "$(git ls-files workspace)"`.
+- [x] 6.3a #74 TaskCard 幂等重放与 snapshot authority 不变量修复（阻塞 9.1/#38；依赖: 6.2、6.3）
+  - Fixture (#74): expanded / high；repair intensity: high；Project profile: SHUD-Harness。
+  - Change surface: `packages/backend/src/routes/**` keyed create/in-flight convergence；`packages/core/src/domain/services/task-card-service.ts` snapshot publish/read authority；相关 backend/core tests；本 change 的 design/task-api spec/tasks fixture。
+  - Must preserve: absent-key #29 create/list/detail/restart behavior；same-key mismatch 422 canonical envelope；stale started claim bounded failure；bounded no-follow snapshot reads；workspace path safety；raw key/absolute path/secret 不泄漏；#31 logging、#33 path helper、Dashboard shape、zero diff=0、workspace untracked。
+  - Must add/change: 同进程同 normalized workspace+scope+key 只允许一个 in-flight owner，entry 携带 digest 以使 pre-record mismatch 稳定 422；相同 digest follower 超过 1000ms、在 5000ms follower 界内仍收敛到同一 durable TaskCard，超界只返回 retryable 409 且不释放 owner；无活跃 owner 的 orphaned `started` 保持独立 stale 路径；post-hook 后以 bounded no-follow 读取比对精确 canonical bytes 并绑定 TaskCard/digest 后才允许 completed；unsafe rollback 隔离 canonical leaf、驱逐 cache，pre-validation poisoned completion 显式失效；缺 `task_card` 返回专门 recovery/migration error。
+  - Risk packs considered:
+    - Public API / CLI / script entry: selected - keyed `POST /api/tasks` 并发与错误语义改变。
+    - Config / project setup: selected - 协调 identity 必须绑定规范化 workspace root。
+    - File IO / path safety / overwrite: selected - snapshot rename、post-hook、重读、cleanup/rollback 属 publish authority。
+    - Schema / columns / units / field names: selected - TaskSnapshot optional `task_card` 与 IdempotencyRecord result_ref/error code 是契约面。
+    - Auth / permissions / secrets: selected - caller key 只能以 digest/内存 identity 使用，错误/日志不得回显原值。
+    - Concurrency / shared state / ordering: selected - active owner、record transition、snapshot publish、completed replay 必须同序收敛。
+    - Resource limits / large input / discovery: selected - stale wait、in-flight wait 与 snapshot read 必须有界；不得 broad scan。
+    - Legacy compatibility / examples: selected - canonical snapshot 缺 `task_card` 要有稳定专门错误；#28/#29/#30 consumers 保持。
+    - Error handling / rollback / partial outputs: selected - missing/mutated snapshot 不得留下 cache phantom 或 poisoned completed record。
+    - Release / packaging / dependency compatibility: selected - 不增 runtime dependency，Bun/CI 不漂移。
+    - Documentation / migration notes: selected - fixture 与 PR evidence 明确 M1 单进程及缺卡恢复边界。
+    - Scientific governance / PI gate / evidence lineage: selected - completed receipt 必须绑定真实 durable bytes；不涉及科学判断。
+    - Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - 不触碰 solver/runtime。
+    - Zero adapter / tool registry / agent role governance: not selected - 不触碰 Zero/tool surface。
+  - Invariant Matrix:
+    - Governing invariant: 每个 normalized workspace + 非空 key + scope=task 在本进程内最多一个 active owner（entry 单独绑定 canonical digest），且 completed 仅能指向当前安全可读、精确 canonical bytes 与 TaskCard/digest 均匹配的 durable snapshot；所有 replay 从该 authority 返回同一对象。
+    - Source-of-truth identity/contract: normalized workspace root、sha256(key)、scope=task、owner request_digest、IdempotencyRecord status/result_ref、精确 snapshot fd bytes、TaskCard schema。
+    - Producers: keyed `POST /api/tasks`、TaskCard service snapshot producer、IdempotencyRecord transitions。
+    - Validators/preflight: create schema/digest、in-flight identity、safe path/no-follow bounded reader、TaskCard/snapshot/digest binding。
+    - Storage/cache/query: module-shared in-flight map（ephemeral）、task snapshot、TaskCard cache、idempotency record direct lookup。
+    - Public routes/entrypoints: `POST /api/tasks` keyed and absent-key sibling path；GET list/detail unchanged。
+    - Frontend/downstream consumers: Dashboard create/list；startup hydration；completed replay；future retry UI。
+    - Failure paths/rollback/stale state: active >1s、active >5s、pre-record mismatch、orphaned started、hook delete/replace/malformed/unknown-field、unsafe rollback、pre-validation completed record、missing `task_card`、owner failure、convergence cleanup、service re-instantiation。
+    - Evidence/audit/readiness: backend/core regressions、full check、OpenSpec validation、zero/workspace/git gates、PR review evidence。
+    - Regression rows:
+      - active same key/digest >1000ms、在 5000ms follower 界内 across two same-process backend app instances -> both return identical TaskCard, one snapshot/result_ref, no 409；超界 follower -> retryable 409，owner 保持，owner 完成后 replay 同一结果。
+      - started record without active owner -> bounded retryable stale error, no task/completed record。
+      - post-hook deletes, mutates, replaces snapshot 或注入 unknown field 后返回 -> 精确 durable bytes 校验失败，cache/list 无 phantom，record 不得 poisoned completed，repaired retry succeeds。
+      - pre-validation completed IdempotencyRecord with invalid `result_ref` authority -> explicit invalidation/quarantine，no poisoned replay，cache/list 无 phantom，repaired same key/body retry succeeds without generic binding failure。
+      - completed replay to snapshot without `task_card` -> stable `task_snapshot_missing_card`, not generic binding mismatch。
+      - active owner success or failure -> in-flight entry always removed；unsafe rollback canonical leaf 被隔离且 cache 驱逐；same key may later replay/retry without stale promise、hydration poison 或 capacity leak。
+      - concurrent requests with distinct normalized workspace roots -> never share owner/result；each workspace has its own TaskCard/result_ref。
+      - concurrent distinct keys remain isolated；same key/different digest before or after durable record publication -> 422，不分裂第二 owner、不创建第二 TaskCard。
+      - absent-key create/restart + mismatch 422 + path/log consumers -> unchanged。
+  - Evidence floor (#74): focused regressions cover all rows above plus in-flight map cleanup after success/failure and distinct workspace/key isolation；`bun run test:backend-api`、`bun run test:core-services`、`bun run typecheck`、`bun run check`、strict OpenSpec、diff/zero/workspace gates all pass。
+  - Non-goals: cross-process lease/cgroup/supervisor；M3 event bus/latest_seq critical section；frontend retry UX；扩张 canonical idempotency applicability list；修改 frozen canonical TaskSnapshot 字段集。
 - [ ] 6.4 结构化 NDJSON API 请求日志中间件（OBS-LOG-001 八字段：ts/level/service/event/request_id/route/status/duration_ms；secret 仅以 ref/[REDACTED] 形式出现，OBS-LOG-002）
   - Fixture (#31): expanded / medium
     - Change surface: `packages/backend/src/middleware/**` request logging middleware and backend route tests that instantiate `createBackendApi`.
