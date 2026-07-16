@@ -4,7 +4,7 @@ status: accepted
 
 # ADR-0001: Agent 运行时基座与拓扑（Zero + 单 Coordinator 星型）
 
-**状态**: accepted（2026-07-02） · **执行状态**: Trial，M1 spike 触发 revisit → 边界重划已裁决（2026-07-04），条 2' 绿后复判转正
+**状态**: accepted（2026-07-02） · **执行状态**: Adopt（2026-07-10，M1 spike 五条复判全绿）
 · **决策人**: PI + 工程师 · **方法**: future-aware-architecture 分析
 **事实基线**: zero@13e25c1（development 分支）· SHUD-Harness v0.8.3（97 篇 spec，零代码）
 
@@ -151,6 +151,24 @@ independent verifier 确认 4 条 merge-blocking finding，但它们是同一堵
    显式移出条 2'；四条 finding 按 acceptance-boundary 修正处置（非实现漏项，cand-04 随 preflight 收窄修复）。
    落账：Phased_Plan M1 条 2 行与 policy-gate-spike spec 同步（账本例外批次 5 延伸）。PR #48 基于更新后的
    boundary 重做实现并继续 gate。
+
+### 2026-07-10 复判：五条全绿，Zero Trial 转正
+
+M1 条 2'、条 3 与其余验收依赖全部合入后，基于 issue #21 的首轮 verdict 重出五条判定：
+
+1. 工具注册层中央策略门全覆盖：绿（issue #17 / PR #43）。
+2. `data/raw/**` 执行层 byte authority：绿（issue #19 / PR #48）；seatbelt 守住六类逃逸，
+   合法 raw 读与 workspace 写放行，遥测与进程所有权边界按上节收窄。
+3. spawn 剖面超集拒绝：绿（issue #20 / PR #50）。
+4. 策略门纯函数与独立单测：绿（issue #18 / PR #45）。
+5. Zero 源码零改动且 pin 不漂移：绿；`git -C zero diff --quiet` 通过，HEAD 为
+   `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`。
+
+裁决：ADR-0001 触发器 1 结案，Zero 基座由 **Trial** 转为 **Adopt**。2026-07-04 的边界重划继续有效，
+不是回退到静态 shell 判定；预存 hardlink 兜底、可信可观测遥测范围与未来跨平台等价沙箱仍是必须保留的
+架构边界。两备胎评估保持关闭。完整逐条证据与 M1 验收记录见
+[`policy-gate-spike-final-verdict.md`](../../openspec/changes/m1-foundation/policy-gate-spike-final-verdict.md)
+和 [`m1-acceptance-record.md`](../../openspec/changes/m1-foundation/m1-acceptance-record.md)。
 
 ## 参照
 
