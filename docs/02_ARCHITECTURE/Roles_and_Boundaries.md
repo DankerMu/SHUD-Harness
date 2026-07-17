@@ -81,6 +81,10 @@ Coordinator 负责：
 - 提出“建议下一步”，但不做最终科学判断。
 ```
 
+> **修订注（2026-07-16，例外批次 7）**：上列「选择是否直接 bash」已被 ADR-0002 开工三决②取代——
+> coordinator **无直接 bash**；其可用工具面以 tool-registry-governance 的 role→tool_id canonical
+> 映射表为唯一权威（该 spec 已显式声明优先级）。本句保留仅作历史记录。
+
 Coordinator 不负责：
 
 ```text

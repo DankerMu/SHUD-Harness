@@ -46,6 +46,18 @@ denial 属配置误用并 fail closed，post-exec 进程输出/退出码只记 l
 后续不可伪造 OS 事件源；隐藏拒绝完整遥测 + 任意后代进程生命周期所有权移出 M1 归后续 executor/audit 后端。
 账面同步落 Phased_Plan M1 条 2 行、`m1-foundation` OpenSpec artifacts 与 ADR-0001 裁决补充。
 findings 按 acceptance-boundary 修正处置（非实现漏项，process-creation preflight 收窄后合法 waited 前台子进程放行）。
+**例外批次 6（2026-07-16，M2 grill 定案，PI 批准）**：API 注册表 bug 级修正——SideNav ResearchContext
+的既有 UI 契约（Frontend_State_Design §1"REST snapshot"+ 刷新恢复基线）需要 StackLock/DataProvenance
+读取端点，注册表漏登记。Schemas_APIs_CLIs §1 补 `GET /api/stacks/:stackId` 与 `GET /api/data/:dataId`
+两行。M2 其余 grill 定案（鉴权 = localhost + 单一本地 token；renv.lock 归 StackLock 采集；evidence_usable
+七条 + LLM 默认 false + audit、agent-403 推迟至 agent 身份里程碑；ID 采用 `STACK-/DATA-<uuid>` 沿用 M1
+已验收先例）不改 spec 正文，落实施记录 `openspec/changes/m2-research-context`。
+**例外批次 7（2026-07-16，PI 批准）**：清偿 m1-foundation proposal.md Impact 节记录的两笔待办账：
+① Roles_and_Boundaries §3 coordinator「选择是否直接 bash」句补修订注（被 ADR-0002 开工三决②取代，
+工具面以 tool-registry-governance 映射表为准）；② `POST /api/tasks` 幂等语义（scope=task、sha256 key、
+digest 配方、mismatch 422）补入 Idempotency_Concurrency_Locking_Spec §4 表与
+API_Error_And_Idempotency_Contracts §3 适用清单——M1 期间刻意 change-scoped，经 #74 硬化（24 轮审查
++ 3× exact-SHA CI）与 M1 验收后，canonical 清单追认既成事实，属 spec 落后于已验收现实的 bug 级修正。
 
 **依据：** 本文档基于全部文档的交叉引用和依赖链深度分析生成。
 

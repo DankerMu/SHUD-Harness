@@ -20,7 +20,9 @@ DELETE /api/tasks/:id/artifacts          # 清理临时文件
 
 # 版本与数据
 POST   /api/stacks/lock                  # 锁版本
+GET    /api/stacks/:stackId              # 读取 StackLock（SideNav 版本链快照重建；例外批次 6）
 POST   /api/data/register                # 注册数据源
+GET    /api/data/:dataId                 # 读取 DataProvenance（同上；例外批次 6）
 
 # 执行
 POST   /api/tasks/:id/run-tiny           # 运行 tiny benchmark

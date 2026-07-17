@@ -1,1 +1,2 @@
 {"date":"2026-07-03","change":"m1-foundation","grill_gate":"passed","rounds":2,"gate_net_catch":0,"p0":{"in":3,"resolved":3,"residual":0},"p1":{"resolved":13},"regressions":0,"approx_subagent_calls":13,"verdict":"clean"}
+{"date":"2026-07-16","change":"m2-research-context","grill_gate":"passed","rounds":1,"gate_net_catch":0,"p0":{"in":7,"resolved":7,"residual":0},"p1":{"resolved":20},"regressions":0,"approx_subagent_calls":10,"verdict":"clean"}

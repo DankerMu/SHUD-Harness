@@ -1,0 +1,101 @@
+# M2 Research Context — Design
+
+## Decisions
+
+### D1. 鉴权形态：localhost 绑定 + 单一本地 token（grill 定案）
+
+- server 仅监听 `127.0.0.1`；启动时从 `HARNESS_LOCAL_TOKEN` 环境变量读取 token，缺失时生成并写入 `workspace/secrets/local-token`（文件 0600、目录 0700）。
+- `workspace/secrets/` 为**本次新建目录**（勘误：早稿「目录已在 secrets 白名单」表述不实——M1 `WORKSPACE_CANONICAL_DIRECTORIES` 与 Workspace_Conventions §1.2 树均无该目录，「不入 git」此前仅靠 `/workspace/` 整体 ignore）：本 change 将其加入 `WORKSPACE_CANONICAL_DIRECTORIES` 并联动 ready 检查；该子树 MUST NOT 被任何目录列举/读取端点服务（含 `GET /api/artifacts/:artifactId/data` 与 `POST /api/data/register`，各 spec 有 secrets denylist requirement）；token 值受 redaction 覆盖。
+- `HARNESS_LOCAL_TOKEN` 为**新登记环境变量**：Config_Secrets §4 推荐环境变量表现无此项，按批次 4（`GLM_API_KEY`）先例补一行并并入例外批次 6 账（任务 0.1）。
+- 中间件对全部 `/api/**` 校验 `Authorization: Bearer <token>`；豁免 `GET /api/health/live` 与 `GET /api/health/ready`（本地监控探针，无副作用只读）。非 `/api` 面（前端入口页/静态资源）不做 Bearer 校验——token 即经该面 bootstrap 分发，见下条。
+- **前端 token 获取/携带**：后端 serve 前端入口页时把 token 注入页面 bootstrap 配置（inline `window.__HARNESS_BOOTSTRAP__`；仅回环监听 + 同源可读，不设 CORS 头，跨源页面无法读取注入值）；前端统一 fetch wrapper（api 层唯一出口）为全部 `/api/**` 请求附加 `Authorization: Bearer <token>`。token MUST NOT 出现在 URL/query，不写 localStorage（页内存态，刷新随入口页重新注入）。M1 既有 `window.fetch` 直连调用点（Dashboard 建卡/列表）随任务 1.2 迁移到该 wrapper 并做浏览器 UI 回归——否则 8.1 验收门（SideNav 浏览器走查）与 W2 UI/E2E 三条在 token 体制下不可达。
+- 失败返回 canonical error envelope（401，`category=permission_error`）。勘误：早稿写 `category=auth`，但 Error_Handling_Spec §1（frozen）分类枚举与 M1 `ErrorCategorySchema` 均无 `auth` 类别；复用既有 `permission_error`（权限类拒绝的既有类别；API_Error_And_Idempotency_Contracts §2 只约束 status 映射 `auth missing → 401`，不定义类别），不扩 frozen 枚举，与 proposal「不改 error envelope」一致。响应不回显 token。
+- 备选：仅 localhost 无 token（拒绝：浏览器任意页面可打本地 API，CSRF 面；M3 WebSocket 建连校验无凭据可用）；本地密码 + session（拒绝：超出 ADR-0002 D6 收缩口径）；新增 `auth_error` 枚举值（拒绝：需动 frozen 错误分类与 M1 schema，401 语义 `permission_error` 已可承载）。
+- 排序决策：auth 在 backend 面第一个落地（schemas 之后），此后全部新路由与测试在最终鉴权体制下编写，避免后补 token 时全量测试翻改。迁移面 = M1 全部路由测试 + `bun run check` 之外直打 `/api` 的 harness（`scripts/perf/api.ts`，PERF-API-001）+ 前端 fetch 面（任务 1.2）。
+
+### D2. renv.lock 归 StackLock 采集（grill 定案）
+
+`POST /api/stacks/lock` 时读取仓库根 `renv.lock`：存在 → `runtime.r_packages_lock = { path, sha256 }`；缺失 → `null` 并在响应 `degraded[]` 数组中列出 `renv_lock_missing`（显式降级语义，不静默）。data/register 不涉 renv。
+
+### D3. sha256 语义：文件与目录双形态
+
+- 文件：内容字节流式 sha256（不整读内存，SHUD 输出可能大）。
+- 目录（canonical 示例中 `forcing/` 是目录源）：对目录内全部常规文件按 **相对路径字典序** 生成 `"<relpath>\n<file-sha256>\n"` 行序列，对该序列再做 sha256。符号链接与非常规文件直接拒绝（raw 数据保护 + M1 no-follow 纪律）。
+- 空目录拒绝（422）：无内容可溯源。
+
+### D4. 持久化复用 M1 硬化后的 workspace record store（关键的 review 经济决策）
+
+StackLock 与 DataProvenance 记录以 JSON 形式经 **既有 `writeJsonRecord` 发布权威** 落盘（`workspace/stacks/`、`workspace/provenance/`），复用 #74 已硬化的唯一 rename 提交、observation binding 与 path safety。**不新建任何写路径**——M1 的 #19/#74 审查爆炸都源于新建高风险面；M2 的存储层零新面。读取走既有 bounded no-follow reader。
+
+**provenance 目录裁决（对两个互相矛盾 canonical 的显式偏离）**：Workspace_Conventions §5（canonical_for workspace-paths）写 `data/DATA-001/provenance.yaml`，Repository_Layout §2 写 `data_provenance/DATA-*.yaml`——两个 canonical 本身互相矛盾，且都不是平面 JSON record 目录形态。M2 采用 `workspace/provenance/DATA-<uuid>.json`：与 `workspace/stacks/`、M1 `workspace/tasks/` 同构，record store 权威直接复用（per-DATA 嵌套目录 + YAML 需新建写路径，违背本决策首段）。偏离在 data-provenance spec 显式记录；两 canonical 的统一走 bug 级修正通道（canonical 内部矛盾，符合冻结规则），任务 0.1 落账。
+
+**群组 ArtifactManifest 目录裁决**：`workspace/artifacts/manifests/` 已被 M1 交付占用——`artifact-registry-service.ts` 把**单 artifact 元数据记录**以 `<artifactId>.json` 存于该目录，并对该目录任意 id 按 `ArtifactSchema` 解析（失败走 `record_malformed` 500），两类记录同目录必然冲突。裁决：群组 ArtifactManifest 落独立目录 `workspace/artifacts/manifest-sets/`（加入 `WORKSPACE_CANONICAL_DIRECTORIES`）——零迁移、不触碰 M1 硬化面、命名空间隔离。备选「M1 单 artifact 记录目录改名 registry/、manifests/ 归群组语义」被拒：需迁移既有 workspace 数据，破坏 M1 已验收面。canonical §4 `manifests/` 语义与 M1 占用的错位随任务 0.1 一并落账。
+
+**目录树扩展账**：本 change 新增目录 = `provenance/`、`secrets/`、`artifacts/manifest-sets/`；`stacks/` 已在 M1 `WORKSPACE_CANONICAL_DIRECTORIES` 存在（proposal 早稿把 stacks/ 记为本次扩展系账目不实，已修正）。
+
+### D5. ID 规范：`STACK-<uuid>` / `DATA-<uuid>` / `MANIFEST-<uuid>`，沿用 M1 已验收的 TaskCard 先例
+
+Minimal_Schemas 示例写 `STACK-NNNN`（ArtifactManifest 示例 `MANIFEST-001` 同理）；M1 实际交付并通过验收的是 `TASK-<uuid>`（见 m1-acceptance-record 走查记录）。单调 NNNN 计数器需要一个可变的计数权威——这正是 #74 花 47 轮审查才收口的那类并发/持久化面。裁决：M2 采用 `STACK-<uuid>`/`DATA-<uuid>`/`MANIFEST-<uuid>`（无碰撞、无计数器、无新并发面），canonical 示例中的 NNNN 视为示意格式；本偏离在 spec 中显式记录，与 M1 先例一致。
+
+### D5a. StackLock schema 两处内容偏离（与 D5 同款显式记录）
+
+- `repos` 含第四键 `zero`：Minimal_Schemas §2（frozen）示例仅 SHUD/rSHUD/AutoSHUD 三键，但 zero 是 ADR-0001 钉死的 agent runtime 基座（submodule pin 13e25c1），复现链必须含 runtime pin；Test_Plan W2-SUB-001 已明列「SHUD/rSHUD/AutoSHUD/zero 均可读取」——canonical 内部自相矛盾。M2 按四键实现；Minimal_Schemas §2 补 zero 行走 bug 级修正通道（任务 0.1）。
+- `runtime.r_packages_lock` 为 `{ path, sha256 } | null`：canonical 写字符串 `renv.lock`（文件名指针，Config_Secrets §6 同），指针防不了内容漂移——grill 定案 2 的目的正是内容哈希锁定；对象化 = path + 内容 sha256，缺文件显式 `null` + degraded。字段形态补正同走任务 0.1。
+
+### D6. evidence_usable 规则引擎与 audit（grill 定案）
+
+- registry 服务在 register/update 时执行 Artifact_Registry_Spec §4 的七条确定性校验；不满足 → `evidence_usable` 强制 false（不报错，降级记录）。
+- **`llm_generated` 为 Artifact 持久化扩展字段**（boolean，可选，缺省 false）：canonical 机制（Artifact_Registry_Spec §4）以「created_by 与操作者身份」识别 LLM 产物，但 M2 无 agent 身份体系，该机制无输入可用；M2 以显式持久化标记承载。这是对 Support_Schema_Contracts §1 Artifact 接口的 additive 偏离（落账任务 0.1）——M1 `ArtifactSchema` 为 strict 集合，未声明键会被直接拒，必须做 schema delta（任务 2.1），不能只作瞬态注册参数。register 时随记录落盘；update 与升级路径 MUST 读取**落盘值**而非请求值（否则 register 后无从得知产物是否 LLM 生成，红线可被后续请求洗白）。M3+ agent 身份落地后与 `created_by` 校验机制合流。
+- 落盘 `llm_generated: true` → `evidence_usable` 默认 false 且注册时不可直接置 true；升级为 true 是 **core 服务操作**（M2 不开 HTTP 端点——API 注册表无此端点，审批 UI 属 M7），D6 单账号下 actor 恒为本地用户。
+- **audit 通道形态**（勘误：早稿「复用 #31 日志通道」不成立——#31 交付的是 HTTP 请求级中间件，event 为字面量 `api.request.completed`、仅在请求生命周期触发，而升级操作是 core 服务操作、无请求可挂钩，packages/core 亦无日志 sink 基础设施）：registry 服务 options bag 注入 `auditSink`（与既有 `ApiRequestLogSink` 同型 `(line: string) => void | Promise<void>`）；成功升级写一行 NDJSON：`{ ts, level: "info", service, event: "audit.evidence_upgrade", actor, target_id, result }`；默认 sink 沿 #31 约定（console 行输出、best-effort、失败不影响操作结果）。sink 与行 schema 定义属任务 6.1 交付物。
+- `created_by=agent` 一律 403 的校验 **显式推迟** 到 agent 身份进入系统的里程碑（M3+）：M2 无 agent 身份，无消费方；spec 中留 deferred requirement 记录，防止治理红线被遗忘。
+
+### D7. 读取端点：注册表例外批次 6（PI 已批）
+
+SideNav 刷新后重建版本链快照需要 REST 读取；注册表原只登记两个 POST，属注册表漏登记（其 UI 契约自身要求 REST snapshot）。经 grill 拍板走账本例外：`GET /api/stacks/:stackId`、`GET /api/data/:dataId` 已补入 Schemas_APIs_CLIs §1，账见 Phased_Spec_Activation 例外批次 6。artifact metadata 读取沿用 M1 core 服务先例，M2 不开 metadata HTTP 端点（`GET /api/artifacts/:artifactId/data` 是注册表既有 canonical 数据端点，属本 change 交付）。
+
+**ArtifactRef 数据来源随之定案**：M2 契约 = 纯展示组件，props（artifact_id/type/path/evidence_usable）由调用方传入；M2 交付面无任何返回 artifact 元数据的读取端点，组件经组件测试行使 W2 UI 细目（「可点击/复制路径」）。真实调用场景 = RunRecord/报告视图接线，属该视图所在里程碑（M3+）；届时如需 metadata HTTP 端点，按批次 6 同款流程补登记（Artifact_Registry_Spec §7 的 `GET /api/artifacts/:artifactId` 属 Phase 3 激活面）。
+
+### D7a. submodule commit 采集：gitlink 只读发现 + harness/llm 占位口径
+
+`git ls-tree HEAD SHUD rSHUD AutoSHUD zero` 读取四个 gitlink commit（W2-SUB-001），不进入 submodule 工作树、不改任何 git 状态。runtime 版本（r/python/sundials/gcc/gdal）M2 填占位探测值或 `unknown`（Phased_Plan 明示"runtime versions 占位"）。llm 块从 provider 配置（#37 已落）读取 provider/model_id/base_url。
+
+**harness 块与两个 digest 的 M2 采集口径**（勘误：早稿「params_digest/prompt_pack_digest 以配置内容哈希生成」与 canonical 字段语义冲突——Minimal_Schemas §2 定义 params_digest = 采样参数集哈希、prompt_pack_digest = prompt pack 实际内容哈希，而 M1 provider 配置的 exact keys 既不含采样参数也不含 prompt pack，照早稿两 digest 会退化为同一份配置文件哈希）：
+
+- `harness.version` = 仓库根 `package.json` 版本；`cli_version` = 占位常量 `"unknown"`（领域 CLI 属后续里程碑，语义见 Domain_CLI_Spec §5）；`prompt_pack` = 占位 id `"promptpack-unset"`；`skills_version` = 占位 id `"skills-unset"`。与 runtime 同型的显式占位允许，升级里程碑在 spec 注明。
+- `llm.params_digest` = 当前生效采样参数集的 canonical JSON sha256；M2 无参数存储 → 对空参数集 `{}` 哈希（确定性、可断言，显式记录）。
+- `llm.prompt_pack_digest` = prompt pack 实际内容 sha256；M2 无 prompt pack 对象 → 对空字节串哈希占位。两 digest 语义源不同，值必然不同，各自随其机制落地的里程碑升级。
+- Config_Secrets §6 的 harness 示例字段（version/config_profile/secrets_policy_version）与 Minimal_Schemas §2（version/cli_version/prompt_pack/skills_version）不一致：**以 Minimal_Schemas §2 为准**（canonical_for core-object-schemas），差异随任务 0.1 落账。
+
+### D8. 细粒度交付策略（本里程碑的过程性决策）
+
+M1 教训：#19 单 issue 扛整个 seatbelt 面（25 轮/205 项拦截）、#74 单链路扛全部幂等+发布权威不变量（47 轮）。M2 规则：
+
+1. 高风险面（文件系统 hashing、数据服务端点、auth 中间件）各自独立成 issue，单 PR 爆炸半径 ≤ 一个服务/路由对。
+2. schema、service、route 分层拆 issue，每个 issue 1–3 个紧耦合 task。
+3. 复用 M1 硬化 seam（record store、path safety、error envelope、NDJSON 日志），新面数量最小化。
+4. 预计 16–18 个子 issue（含 canonical 落账与前端 token bootstrap）；不为压数量合并模块边界。
+
+## Seams under test
+
+| Seam | 选择理由 |
+|---|---|
+| `createBackendApi`（HTTP 边界，既有） | 最高可用 seam；一次行使 route+service+store 全链路，M1 全部集成测试已锚定于此，零新 seam 成本 |
+| core 服务公共函数（`hashFile`/`hashDirectory`、evidence 规则引擎、stack 采集器） | 纯函数/确定性服务的单元粒度，沿用 M1 core-services 测试文件模式 |
+| 前端组件测试（既有 dashboard/workbench 测试模式） | UI 三条 W2 细目的最低成本行使点 |
+
+不新增测试专用 seam；LLM/git 等外部依赖经服务的既有注入点（options bag）替身。
+
+## Risks & Mitigations
+
+| 风险 | 缓解 |
+|---|---|
+| auth 中间件触碰全部既有路由测试（一次性大改） | 独立 issue 且排序最前；测试 helper 统一注入 token，后续 issue 全部在终态体制下编写；迁移清单显式含 `scripts/perf/api.ts`（PERF-API-001，`bun run check` 之外）与前端 fetch 面（任务 1.2） |
+| `GET /api/artifacts/:id/data` 路径穿越/泄密 | 仅按已登记 artifact record 的 path 服务；path-safety helper + no-follow；无目录列举；range/分页留 skeleton 注记 |
+| 目录 hashing 性能（未来大 forcing 目录） | 流式 hash + 排序行协议；M2 fixture 级数据量；复杂度上界随文件数线性，记录于 spec |
+| ID 格式偏离 canonical 示例被审查反复质疑 | D5 显式裁决 + spec 记录，审查以本 design 为准 |
+| STACK/DATA 记录并发写 | 全部经 M1 record store 权威（#74 硬化面），无新并发原语 |
+
+## Test IDs
+
+W2-SUB-001（submodule discovery）、W2-DATA-001/002（register 存在/缺失路径）、W2-ART-001（artifact metadata 合法性）、W2-ART-002（manifest_sha256 可复算）+ UI 三条（ResearchContext×2、ArtifactRef）。Exit gate：任一 task 可绑定 stack_id + data_id；registry 记录 evidence_usable artifact。

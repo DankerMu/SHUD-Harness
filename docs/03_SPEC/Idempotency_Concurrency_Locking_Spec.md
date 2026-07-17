@@ -54,6 +54,7 @@ interface LockRecord {
 
 | 操作 | idempotency key |
 |---|---|
+| `POST /api/tasks`（例外批次 7 补录，M1 实现 + #74 硬化后追认） | `normalized_workspace_root + scope=task + sha256(Idempotency-Key)`，owner 绑定请求体 canonical digest；same key + different digest → 422 |
 | `POST /api/jobs` | `task_id + plan_step_id + command_digest` |
 | `POST /api/jobs/:id/collect` | `job_id + output_digest_or_exit_marker` |
 | `POST /api/tasks/:id/report` | `task_id + run_record_ids + report_template_version` |
