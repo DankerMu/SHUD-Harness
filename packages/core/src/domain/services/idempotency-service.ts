@@ -9,7 +9,10 @@ import {
   type IdempotencyScope
 } from "../schemas/idempotency";
 import { TaskServiceError, isSafeTaskId } from "./task-card-service";
-import { runWithPreservedRelease } from "./compensation-error-preservation";
+import {
+  runWithPreservedRelease,
+  semanticPrimaryError
+} from "./compensation-error-preservation";
 import { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
 import {
   WorkspaceRecordConditionalDeleteError,
@@ -129,6 +132,7 @@ type IdempotencyTransitionGuardIntent =
 
 const activeIdempotencyTransitionGuards = new Map<string, IdempotencyTransitionGuard>();
 const malformedIdempotencyTransitionGuardErrors = new WeakSet<TaskServiceError>();
+const quarantineReplacementWriterFailures = new WeakSet<Error>();
 
 type IdempotencyTransitionGuardAcquire =
   | {
@@ -899,9 +903,22 @@ export function createIdempotencyRecordService(
       );
     }
     if (outcome.classification.status === "completed") {
+      const semanticWriterFailure = semanticPrimaryError(outcome.error);
+      // A standalone physical-authority proof reports why the successor won;
+      // it is classification evidence, not independent writer provenance.
+      if (
+        semanticWriterFailure instanceof TaskServiceError &&
+        semanticWriterFailure.code === "workspace_path_not_safe"
+      ) {
+        throw preserveTaskServiceErrorCompensationCompatibility(
+          completedRecordInvalidationIdentityError(evidenceRef),
+          [outcome.error],
+          IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+        );
+      }
       throw preserveTaskServiceErrorCompensationCompatibility(
-        completedRecordInvalidationIdentityError(evidenceRef),
-        [outcome.error],
+        outcome.error,
+        [completedRecordInvalidationIdentityError(evidenceRef)],
         IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
       );
     }
@@ -934,11 +951,30 @@ export function createIdempotencyRecordService(
     evidenceRef: string,
     writerError: unknown
   ): unknown {
-    return preserveTaskServiceErrorCompensationCompatibility(
-      completedRecordInvalidationIdentityError(evidenceRef),
-      [writerError],
+    markQuarantineReplacementWriterFailure(writerError);
+    const failure = preserveTaskServiceErrorCompensationCompatibility(
+      writerError,
+      [completedRecordInvalidationIdentityError(evidenceRef)],
       IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
     );
+    markQuarantineReplacementWriterFailure(failure);
+    return failure;
+  }
+
+  function markQuarantineReplacementWriterFailure(error: unknown): void {
+    if (!(error instanceof Error)) return;
+    quarantineReplacementWriterFailures.add(error);
+    const primary = semanticPrimaryError(error);
+    if (primary) quarantineReplacementWriterFailures.add(primary);
+  }
+
+  function hasQuarantineReplacementWriterFailureProvenance(
+    error: unknown
+  ): boolean {
+    if (!(error instanceof Error)) return false;
+    if (quarantineReplacementWriterFailures.has(error)) return true;
+    const primary = semanticPrimaryError(error);
+    return primary !== undefined && quarantineReplacementWriterFailures.has(primary);
   }
 
   function assertValidCompletedRecoveryRecord(
@@ -968,6 +1004,9 @@ export function createIdempotencyRecordService(
         error instanceof TaskServiceError &&
         malformedIdempotencyTransitionGuardErrors.has(error)
       ) {
+        throw error;
+      }
+      if (hasQuarantineReplacementWriterFailureProvenance(error)) {
         throw error;
       }
       if (!(error instanceof TaskServiceError) || error.code !== "record_malformed") {

@@ -29502,12 +29502,110 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
-  test("Issue79 post-audit quarantine self-heals one thrown or returned writer failure", async () => {
+  test("Issue79 direct and retained recovery keep writer primary when a valid completed successor wins", async () => {
+    for (const surface of ["direct", "retained"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:issue79-writer-completed-successor-${surface}`;
+      const requestDigest = `digest-issue79-writer-completed-successor-${surface}`;
+      const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+        evidenceRef
+      );
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+      if (surface === "retained") {
+        await writeFile(
+          guardPath,
+          `${JSON.stringify({
+            guard_id: `issue79-writer-completed-successor-${surface}`,
+            owner_pid: 9_999_999,
+            acquired_at_ms: Date.now() - 31_000,
+            acquired_at: "2026-07-17T10:00:00.000Z",
+            intent: "fail",
+            request_digest: requestDigest
+          })}\n`,
+          { flag: "wx", mode: 0o600 }
+        );
+      }
+      const successor = {
+        key: rawKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        result_ref: `TASK-issue79-writer-completed-successor-${surface}`,
+        created_at: "2026-07-17T10:00:01.000Z",
+        updated_at: "2026-07-17T10:00:02.000Z"
+      } satisfies IdempotencyRecord;
+      const successorText = `${JSON.stringify(successor)}\n`;
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const writerMarker = new Error(
+        `Issue79 writer completed successor marker ${surface}`
+      );
+      let writerCalls = 0;
+      let successorInstalled = false;
+
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: ({ canonicalPath }) => {
+              if (canonicalPath !== recordPath || writerCalls > 0) return;
+              writerCalls += 1;
+              throw writerMarker;
+            },
+            beforeTemporaryUnlink: async ({ canonicalPath }) => {
+              if (canonicalPath !== recordPath || successorInstalled) return;
+              successorInstalled = true;
+              await writeFile(recordPath, successorText, { flag: "w" });
+            }
+          },
+          () =>
+            surface === "direct"
+              ? service.recoverFailedRecordAfterRollback({
+                  scope: "task",
+                  key: rawKey,
+                  requestDigest
+                })
+              : service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+        )
+      );
+
+      expect(writerCalls).toBe(1);
+      expect(successorInstalled).toBe(true);
+      expect(semanticPrimaryError(failure)).toBe(writerMarker);
+      expect(countErrorGraphIdentity(failure, writerMarker)).toBe(1);
+      const identityCompensation = findErrorNode(
+        failure,
+        (error) =>
+          error instanceof TaskServiceError &&
+          error.message ===
+            "Completed idempotency result changed before exact invalidation."
+      );
+      expect(identityCompensation).toBeDefined();
+      expect(countErrorGraphIdentity(failure, identityCompensation)).toBe(1);
+      expect(await readFile(recordPath, "utf8")).toBe(successorText);
+      expect(
+        await service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+      ).toEqual({ status: "completed", record: successor });
+      expect(await readFile(recordPath, "utf8")).toBe(successorText);
+      await expectPathMissing(guardPath);
+      await expectPathMissing(cleanupLockPath);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("Issue79 tokenless quarantine keeps thrown and returned writer primary when a valid completed successor wins", async () => {
     for (const failureForm of ["thrown", "returned"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
       tempRoots.push(tempRoot);
-      const rawKey = `task:create:issue79-post-audit-quarantine-${failureForm}`;
-      const requestDigest = `digest-issue79-post-audit-quarantine-${failureForm}`;
+      const rawKey = `task:create:issue79-quarantine-writer-successor-${failureForm}`;
+      const requestDigest = `digest-issue79-quarantine-writer-successor-${failureForm}`;
       const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
       const recordPath = workspaceRecordPath(
         workspaceRoot,
@@ -29521,30 +29619,196 @@ describe("idempotency, lock, and artifact services", () => {
         now: () => new Date("2026-07-17T08:00:00.000Z")
       });
       await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+      const successor = {
+        key: rawKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        result_ref: `TASK-issue79-quarantine-writer-successor-${failureForm}`,
+        created_at: "2026-07-17T08:00:01.000Z",
+        updated_at: "2026-07-17T08:00:02.000Z"
+      } satisfies IdempotencyRecord;
+      const successorText = `${JSON.stringify(successor)}\n`;
       const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
       const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
       const writerMarker = new Error(
-        `Issue79 post-audit quarantine writer marker ${failureForm}`
+        `Issue79 quarantine writer successor marker ${failureForm}`
       );
-      let hookCalls = 0;
-      const failOnce = (): void => {
-        if (hookCalls > 0) return;
-        hookCalls += 1;
-        throw writerMarker;
-      };
+      let writerCalls = 0;
+      let successorInstalled = false;
+
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          failureForm === "returned"
+            ? {
+                afterTemporaryFileWritten: ({ canonicalPath }) => {
+                  if (canonicalPath !== recordPath || writerCalls > 0) return;
+                  writerCalls += 1;
+                  throw writerMarker;
+                },
+                beforeTemporaryUnlink: async ({ canonicalPath }) => {
+                  if (canonicalPath !== recordPath || successorInstalled) return;
+                  successorInstalled = true;
+                  await writeFile(recordPath, successorText, { flag: "w" });
+                }
+              }
+            : {
+                beforeCleanupPermitIdentityResolution: ({ path }) => {
+                  if (path !== recordPath || writerCalls > 0) return;
+                  writerCalls += 1;
+                  throw writerMarker;
+                },
+                afterCleanupPermitPinnedHandleClosed: async ({ path }) => {
+                  if (path !== recordPath || successorInstalled) return;
+                  successorInstalled = true;
+                  await writeFile(recordPath, successorText, { flag: "w" });
+                }
+              },
+          () =>
+            service.quarantineRecordAfterUnsafeRollback({
+              scope: "task",
+              key: rawKey,
+              requestDigest
+            })
+        )
+      );
+
+      expect(writerCalls).toBe(1);
+      expect(successorInstalled).toBe(true);
+      expect(semanticPrimaryError(failure)).toBe(writerMarker);
+      expect(countErrorGraphIdentity(failure, writerMarker)).toBe(1);
+      const identityCompensation = findErrorNode(
+        failure,
+        (error) =>
+          error instanceof TaskServiceError &&
+          error.message ===
+            "Completed idempotency result changed before exact invalidation."
+      );
+      expect(identityCompensation).toBeDefined();
+      expect(countErrorGraphIdentity(failure, identityCompensation)).toBe(1);
+      expect(await readFile(recordPath, "utf8")).toBe(successorText);
+      expect(
+        await service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+      ).toEqual({ status: "completed", record: successor });
+      expect(await readFile(recordPath, "utf8")).toBe(successorText);
+      await expectPathMissing(guardPath);
+      await expectPathMissing(cleanupLockPath);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("Issue79 tokenless quarantine does not self-heal a record_malformed writer", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:issue79-quarantine-record-malformed-writer";
+    const requestDigest = "digest-issue79-quarantine-record-malformed-writer";
+    const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      evidenceRef
+    );
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    const started = await service.beginRecord({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    if (started.status !== "acquired") throw new Error("Expected writer fixture acquisition.");
+    const startedText = await readFile(recordPath, "utf8");
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const writerMarker = new TaskServiceError({
+      code: "record_malformed",
+      status: 500,
+      category: "workspace_error",
+      message: "Injected record writer failure.",
+      userMessage: "The record writer failed.",
+      evidenceRefs: [evidenceRef]
+    });
+    let writerCalls = 0;
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: ({ canonicalPath }) => {
+            if (canonicalPath !== recordPath || writerCalls > 0) return;
+            writerCalls += 1;
+            throw writerMarker;
+          }
+        },
+        () =>
+          service.quarantineRecordAfterUnsafeRollback({
+            scope: "task",
+            key: rawKey,
+            requestDigest
+          })
+      )
+    );
+
+    expect(writerCalls).toBe(1);
+    expect(semanticPrimaryError(failure)).toBe(writerMarker);
+    expect(countErrorNodes(failure, (error) => error === writerMarker)).toBe(1);
+    expect(await readFile(recordPath, "utf8")).toBe(startedText);
+    expect(await service.getRecord("task", rawKey)).toEqual(started.record);
+    await expectPathMissing(guardPath);
+    await expectPathMissing(cleanupLockPath);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("Issue79 tokenless quarantine self-heals genuine non-writer record_malformed exact loss", async () => {
+    for (const exactLoss of ["same_inode", "new_inode"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:issue79-quarantine-exact-loss-${exactLoss}`;
+      const requestDigest = `digest-issue79-quarantine-exact-loss-${exactLoss}`;
+      const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+        evidenceRef
+      );
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+      const service = createIdempotencyRecordService({
+        workspaceRoot,
+        now: () => new Date("2026-07-17T08:10:00.000Z")
+      });
+      const started = await service.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      });
+      if (started.status !== "acquired") {
+        throw new Error("Expected exact-loss fixture acquisition.");
+      }
+      const successor = {
+        ...started.record,
+        updated_at: "2026-07-17T08:09:59.000Z"
+      } satisfies IdempotencyRecord;
+      const successorText = `${JSON.stringify(successor)}\n`;
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let exactLossInstalled = false;
 
       const recovered = await runWithWorkspaceRecordPublicationHooks(
-        failureForm === "returned"
-          ? {
-              afterTemporaryFileWritten: ({ canonicalPath }) => {
-                if (canonicalPath === recordPath) failOnce();
-              }
+        {
+          beforeCleanupPermitIdentityResolution: async ({ path }) => {
+            if (path !== recordPath || exactLossInstalled) return;
+            exactLossInstalled = true;
+            if (exactLoss === "same_inode") {
+              await writeFile(recordPath, successorText, { flag: "w" });
+            } else {
+              const successorPath = `${recordPath}.issue79-exact-loss`;
+              await writeFile(successorPath, successorText, { flag: "wx", mode: 0o600 });
+              await rename(successorPath, recordPath);
             }
-          : {
-              beforeCleanupPermitIdentityResolution: ({ path }) => {
-                if (path === recordPath) failOnce();
-              }
-            },
+          }
+        },
         () =>
           service.quarantineRecordAfterUnsafeRollback({
             scope: "task",
@@ -29553,7 +29817,7 @@ describe("idempotency, lock, and artifact services", () => {
           })
       );
 
-      expect(hookCalls).toBe(1);
+      expect(exactLossInstalled).toBe(true);
       expect(recovered).toMatchObject({
         key: rawKey,
         request_digest: requestDigest,
