@@ -27,6 +27,9 @@ node_modules/
 .agents/
 .codex/
 
+# Agent issue workplans
+/.workplans/issue-*/
+
 # Runtime workspace
 /workspace/
 

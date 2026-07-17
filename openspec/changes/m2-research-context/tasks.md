@@ -2,18 +2,20 @@
 
 粒度纪律（design D8，M1 教训）：schema/service/route 分层拆分，高风险面（hashing、数据服务端点、auth 中间件）各自独立成任务；每任务 = 一个小 PR 尺寸的 issue；不为压数量合并模块边界。依赖: 行内标注。
 
+依赖判定（2026-07-16 代码接缝复核）：只记录在既定 PR boundary 内完成任务所必需的前置产物/契约，不把单纯推荐顺序记成依赖。0.1 的 canonical 修正分别定义 1.1 使用的 token/目录契约与 2.1 使用的 schema 契约，因此直接阻塞 1.1、2.1；1.1 是 path-safety deny 子树机制的唯一 owner，5.1/6.1 仅消费该机制，因此两者直接依赖 1.1；3.1 的文件/目录 hashing 只被 4.1/5.1 消费，6.1 的 evidence 规则、落盘判定与 audit 不计算内容哈希，因此 6.1 不依赖 3.1。
+
 ## 0. canonical 账目落账（bug 级修正批次，先行）
 
 - [ ] 0.1 canonical 文档 bug 级修正与账本补记（依据 design D1/D4/D5a/D6/D7a 的显式偏离记录）：Minimal_Schemas §2 repos 补 `zero` 行（与 Test_Plan W2-SUB-001 的 canonical 内部矛盾修正）+ `r_packages_lock` 形态改 `{ path, sha256 } | null`；Support_Schema_Contracts §1 Artifact 补 `llm_generated`、§2 ArtifactManifest 补 `superseded_by`；Config_Secrets §4 推荐环境变量表补 `HARNESS_LOCAL_TOKEN` 一行（批次 4 `GLM_API_KEY` 先例）、§6 harness 示例与 Minimal_Schemas §2 对齐；Workspace_Conventions §1.2/§5 与 Repository_Layout §2 的 provenance 目录形态统一为 `workspace/provenance/DATA-*.json` 并补 `secrets/`、`artifacts/manifest-sets/` 目录；Phased_Spec_Activation 例外批次 6 账补记上述各项（验证: 修正后各文档交叉引用一致、provenance 目录无第三种命名残留）
 
 ## 1. local-auth（最前落地，design D1 排序决策）
 
-- [ ] 1.1 localhost 绑定 + 单一本地 token 中间件 + 既有测试面迁移（token 来源 `HARNESS_LOCAL_TOKEN` → `workspace/secrets/local-token` 文件 0600/目录 0700；`secrets/` 加入 `WORKSPACE_CANONICAL_DIRECTORIES` 并联动 ready 检查、不受任何目录列举/读取端点服务、token 值受 redaction 覆盖；豁免 health live/ready，非 `/api` 面不做 Bearer 校验；401 canonical envelope `category=permission_error`（design D1，不扩 frozen 枚举）；token 不入日志。迁移清单 = M1 全部路由测试（helper 统一注入）+ `scripts/perf/api.ts` 注入测试 token。验证: 新增负例 4 条 + `bun run check` 全绿 + `bun run test:perf:api` 通过）
+- [ ] 1.1 localhost 绑定 + 单一本地 token 中间件 + 既有测试面迁移（token 来源 `HARNESS_LOCAL_TOKEN` → `workspace/secrets/local-token` 文件 0600/目录 0700；`secrets/` 加入 `WORKSPACE_CANONICAL_DIRECTORIES` 并联动 ready 检查、不受任何目录列举/读取端点服务、token 值受 redaction 覆盖；豁免 health live/ready，非 `/api` 面不做 Bearer 校验；401 canonical envelope `category=permission_error`（design D1，不扩 frozen 枚举）；token 不入日志。迁移清单 = M1 全部路由测试（helper 统一注入）+ `scripts/perf/api.ts` 注入测试 token）（依赖: 0.1。验证: 新增负例 4 条 + `bun run check` 全绿 + `bun run test:perf:api` 通过）
 - [ ] 1.2 前端 token bootstrap + 统一鉴权 fetch wrapper + M1 UI 回归（入口页注入 `window.__HARNESS_BOOTSTRAP__`；api 层统一 wrapper 为全部 `/api/**` 请求附加 Authorization；迁移 Dashboard 既有 `window.fetch` 直连调用点；token 不落 URL/localStorage）（依赖: 1.1。验证: 浏览器建卡 M1 走查在 token 体制下端到端成功 + `bun run test:frontend`）
 
 ## 2. core-schemas 扩展
 
-- [ ] 2.1 StackLock + DataProvenance + ArtifactManifest Zod schemas + Artifact `llm_generated` 扩展 + 正反例单测（strict 拒废弃字段；llm.base_url required；event_window 对象形态；ID 格式 `STACK-/DATA-/MANIFEST-<uuid>`（design D5）；StackLock repos 四键与 `r_packages_lock` 对象形态按 D5a 偏离记录；ArtifactManifest 与 Support_Schema_Contracts §2 一一对应——含必填 `generator`、可选 `report_id`、`artifacts` 为完整 Artifact[]、可选 `superseded_by`；Artifact 增 `llm_generated` 可选缺省 false（design D6 偏离记录）。验证: `bun run test:schemas`、schema drift 检查覆盖 D5a/D6 偏离记录）
+- [ ] 2.1 StackLock + DataProvenance + ArtifactManifest Zod schemas + Artifact `llm_generated` 扩展 + 正反例单测（strict 拒废弃字段；llm.base_url required；event_window 对象形态；ID 格式 `STACK-/DATA-/MANIFEST-<uuid>`（design D5）；StackLock repos 四键与 `r_packages_lock` 对象形态按 D5a 偏离记录；ArtifactManifest 与 Support_Schema_Contracts §2 一一对应——含必填 `generator`、可选 `report_id`、`artifacts` 为完整 Artifact[]、可选 `superseded_by`；Artifact 增 `llm_generated` 可选缺省 false（design D6 偏离记录）（依赖: 0.1。验证: `bun run test:schemas`、schema drift 检查覆盖 D5a/D6 偏离记录）
 
 ## 3. hashing 工具（高风险面，独立）
 
@@ -27,12 +29,12 @@
 
 ## 5. data-provenance
 
-- [ ] 5.1 DataProvenance 服务：来源路径安全校验（含 `workspace/secrets/**` deny 子树拒绝）+ 文件/目录 sha256 + 只读纪律 + 持久化到 `workspace/provenance/`（`provenance/` 加入 `WORKSPACE_CANONICAL_DIRECTORIES` 并联动 ready 检查；目录裁决 design D4）（依赖: 2.1、3.1。验证: register 前后来源字节一致断言 + secrets 路径拒绝负例）
+- [ ] 5.1 DataProvenance 服务：来源路径安全校验（含 `workspace/secrets/**` deny 子树拒绝）+ 文件/目录 sha256 + 只读纪律 + 持久化到 `workspace/provenance/`（`provenance/` 加入 `WORKSPACE_CANONICAL_DIRECTORIES` 并联动 ready 检查；目录裁决 design D4）（依赖: 1.1、2.1、3.1。验证: register 前后来源字节一致断言 + secrets 路径拒绝负例）
 - [ ] 5.2 `POST /api/data/register` + `GET /api/data/:dataId` 路由（独立输入 schema：basin/event_window/sources 描述字段必填，sha256 为服务端专属——输入含 sha256/output_sha256 → 422；重复提交非幂等各得独立 data_id；W2-DATA-001 存在路径成功 / W2-DATA-002 缺失路径 404/422 / 越界 422 / secrets 子树 422）（依赖: 1.1、5.1。验证: `bun run test:backend-api`）
 
 ## 6. artifact-evidence
 
-- [ ] 6.1 evidence_usable 七条规则引擎 + `llm_generated` 落盘值判定（update/升级路径读落盘值，不采信请求值）+ 升级 core 服务操作经 options bag 注入的 `auditSink` 写 `audit.evidence_upgrade` NDJSON 行（行 schema ts/level/service/event/actor/target_id/result + 默认 sink，交付物含 sink 定义，design D6；agent-403 deferred requirement 记录，M3+）（依赖: 2.1（复用 canonical hash 工具则含 3.1）。验证: W2-ART-001 + 七条正反例 + llm_generated 洗白负例 + audit 行断言）
+- [ ] 6.1 evidence_usable 七条规则引擎 + `llm_generated` 落盘值判定（update/升级路径读落盘值，不采信请求值）+ 升级 core 服务操作经 options bag 注入的 `auditSink` 写 `audit.evidence_upgrade` NDJSON 行（行 schema ts/level/service/event/actor/target_id/result + 默认 sink，交付物含 sink 定义，design D6；agent-403 deferred requirement 记录，M3+）（依赖: 1.1、2.1。验证: W2-ART-001 + 七条正反例 + llm_generated 洗白负例 + audit 行断言）
 - [ ] 6.2 群组 ArtifactManifest read/write 到 `workspace/artifacts/manifest-sets/`（design D4 目录裁决——`artifacts/manifests/` 已被 M1 单 artifact 记录占用；目录加入 `WORKSPACE_CANONICAL_DIRECTORIES`）+ `manifest_sha256` 复算 + 重生成新 id 且旧记录标记 `superseded_by`（W2-ART-002）（依赖: 2.1、6.1。验证: 复算一致 + 不可覆盖 + superseded 标记断言）
 - [ ] 6.3 `GET /api/artifacts/:artifactId/data` skeleton（高风险面，独立）：按登记 path 服务、no-follow、无目录列举、`workspace/secrets/**` deny 子树（登记 422 / 服务 403）、404/410 envelope、range 留注记（依赖: 1.1、6.1。验证: 穿越负例 + secrets 负例 + media_type 断言）
 
