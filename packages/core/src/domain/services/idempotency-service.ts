@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -179,25 +178,6 @@ export interface IdempotencyRecordServiceOptions {
   workspaceRoot: string;
   now?: () => Date;
   transitionGuardHooks?: IdempotencyTransitionGuardHooks;
-}
-
-export interface IdempotencyCompletedConsumptionTestHooks {
-  afterMutationAuthorityRegistered?: (input: Readonly<{
-    mutationAuthority: CompletedIdempotencyRecordMutationAuthority;
-  }>) => Promise<void> | void;
-  beforePostReleaseAuthorityStateValidation?: (input: Readonly<{
-    mutationAuthority: CompletedIdempotencyRecordMutationAuthority;
-  }>) => Promise<void> | void;
-}
-
-const completedConsumptionTestHookStorage =
-  new AsyncLocalStorage<IdempotencyCompletedConsumptionTestHooks>();
-
-export async function runWithIdempotencyCompletedConsumptionTestHooks<T>(
-  hooks: IdempotencyCompletedConsumptionTestHooks,
-  action: () => Promise<T>
-): Promise<T> {
-  return await completedConsumptionTestHookStorage.run(hooks, action);
 }
 
 export interface IdempotencyTransitionGuardCleanupHookInput {
@@ -388,28 +368,6 @@ export function createIdempotencyRecordService(
     }
     state.status = "cancelled";
     await cancelWorkspaceRecordCleanupPermit(state.cleanupPermit);
-  }
-
-  async function observeCompletedMutationAuthorityForTest(
-    authority: CompletedIdempotencyRecordMutationAuthority
-  ): Promise<void> {
-    const hook = completedConsumptionTestHookStorage.getStore()
-      ?.afterMutationAuthorityRegistered;
-    if (!hook) return;
-    try {
-      await hook(Object.freeze({ mutationAuthority: authority }));
-    } catch (hookError) {
-      try {
-        await cancelCompletedMutationAuthority(authority);
-      } catch (settlementError) {
-        throw preserveTaskServiceErrorCompensationCompatibility(
-          hookError,
-          [settlementError],
-          IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE
-        );
-      }
-      throw hookError;
-    }
   }
 
   function consumeCompletedMutationAuthority(
@@ -1772,7 +1730,6 @@ export function createIdempotencyRecordService(
                   exact.cleanupPermit
                 );
                 permitOutstanding = false;
-                await observeCompletedMutationAuthorityForTest(mutationAuthority);
                 return {
                   ...observed,
                   record: current,
@@ -1789,7 +1746,6 @@ export function createIdempotencyRecordService(
                 exact.cleanupPermit
               );
               permitOutstanding = false;
-              await observeCompletedMutationAuthorityForTest(mutationAuthority);
               if (decision.status === "accepted") {
                 return {
                   status: "accepted" as const,
@@ -1824,24 +1780,22 @@ export function createIdempotencyRecordService(
           ) {
             const mutationAuthority = result.mutationAuthority as
               CompletedIdempotencyRecordMutationAuthority;
-            const validationHook = completedConsumptionTestHookStorage.getStore()
-              ?.beforePostReleaseAuthorityStateValidation;
-            let validationHookError: unknown;
-            if (validationHook) {
+            const authorityState = completedMutationAuthorities.get(mutationAuthority);
+            let authorityStateError: unknown;
+            if (!authorityState || authorityState.status !== "outstanding") {
+              authorityStateError = completedRecordInvalidationIdentityError(evidenceRef);
+            } else {
               try {
-                await validationHook(Object.freeze({ mutationAuthority }));
+                // Reuse the existing durable-observation boundary to prove
+                // that the transported authority still names a safely
+                // observable public record after guard release. Semantic
+                // generation drift remains the cleanup-permit refresh exit.
+                await readJsonRecord(recordPath, evidenceRef, IdempotencyRecordSchema);
               } catch (error) {
-                validationHookError = error;
+                authorityStateError = error;
               }
             }
-            const authorityState = completedMutationAuthorities.get(mutationAuthority);
-            if (
-              validationHookError !== undefined ||
-              !authorityState ||
-              authorityState.status !== "outstanding"
-            ) {
-              const authorityStateError = validationHookError ??
-                completedRecordInvalidationIdentityError(evidenceRef);
+            if (authorityStateError !== undefined) {
               // Root A (V33-01): the post-release authority-state validation
               // is the second throw-after-fulfilled exit and therefore uses
               // the same owner as release and refresh failures.
@@ -1858,7 +1812,7 @@ export function createIdempotencyRecordService(
             }
             try {
               await refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
-                authorityState.cleanupPermit,
+                authorityState!.cleanupPermit,
                 recordPath,
                 evidenceRef
               );
@@ -2225,6 +2179,7 @@ export function createIdempotencyRecordService(
       );
       if (guard.status === "busy") {
         const current = await service.lookupReplay(recoveryInput);
+        if (current.status === "mismatch") throw createIdempotencyMismatchError();
         if (current.status === "completed") return current.record;
         if (current.status === "invalid_completed") {
           throw invalidCompletedRecordAuthorityError(current.reason, evidenceRef);

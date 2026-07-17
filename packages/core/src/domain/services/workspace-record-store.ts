@@ -1963,111 +1963,149 @@ export async function classifyWorkspaceRecordCleanupPermitAfterSiblingMutation(
   }
 
   try {
-    let beforeParent = await lstat(parentPath, { bigint: true });
-    if (
-      !beforeParent.isDirectory() ||
-      beforeParent.isSymbolicLink() ||
-      !workspaceRecordPhysicalIdentityMatches(beforeParent, parentIdentity)
-    ) {
-      throw publicationStateError(evidenceRef);
-    }
-    const pinnedIdentity = await pinnedFile.stat({ bigint: true });
-    const observed = await readBoundedOpenFile(pinnedFile, pinnedIdentity);
-    if (
-      !pinnedIdentity.isFile() ||
-      !workspaceRecordPhysicalIdentityMatches(pinnedIdentity, generation) ||
-      pinnedIdentity.mode !== generationExpectation.mode ||
-      (pinnedIdentity.nlink !== generationExpectation.nlink &&
-        pinnedIdentity.nlink !== 0n) ||
-      observed.before.dev !== pinnedIdentity.dev ||
-      observed.before.ino !== pinnedIdentity.ino ||
-      observed.after.dev !== pinnedIdentity.dev ||
-      observed.after.ino !== pinnedIdentity.ino ||
-      observed.after.size !== pinnedIdentity.size
-    ) {
-      throw publicationStateError(evidenceRef);
-    }
-    let current!: CanonicalAuthorityBaseline;
-    let afterParent!: BigIntStats;
-    let stableParentEpoch = false;
-    const maxStableParentAttempts = 10;
-    for (let attempt = 0; attempt < maxStableParentAttempts; attempt += 1) {
-      const candidate = await captureCanonicalAuthorityBaseline(
-        state.publicPath,
-        evidenceRef,
-        true
-      );
-      afterParent = await lstat(parentPath, { bigint: true });
+    await publicationHookStorage.getStore()?.beforeRecordAuthorityIdentitySupplier?.(
+      Object.freeze({ path: state.publicPath })
+    );
+    return await runWithRecordDirectoryMutationLocks([parentIdentity], async () => {
+      let beforeParent = await lstat(parentPath, { bigint: true });
       if (
-        !afterParent.isDirectory() ||
-        afterParent.isSymbolicLink() ||
-        !workspaceRecordPhysicalIdentityMatches(afterParent, beforeParent)
+        !beforeParent.isDirectory() ||
+        beforeParent.isSymbolicLink() ||
+        !workspaceRecordPhysicalIdentityMatches(beforeParent, parentIdentity)
       ) {
         throw publicationStateError(evidenceRef);
       }
-      const parentEpochStable =
-        afterParent.ctimeNs === beforeParent.ctimeNs &&
-        afterParent.mtimeNs === beforeParent.mtimeNs;
-      if (candidate.status !== "generation_drift" && parentEpochStable) {
-        current = candidate;
-        stableParentEpoch = true;
-        break;
+      const pinnedIdentity = await pinnedFile.stat({ bigint: true });
+      const observed = await readBoundedOpenFile(pinnedFile, pinnedIdentity);
+      if (
+        !pinnedIdentity.isFile() ||
+        !workspaceRecordPhysicalIdentityMatches(pinnedIdentity, generation) ||
+        pinnedIdentity.mode !== generationExpectation.mode ||
+        (pinnedIdentity.nlink !== generationExpectation.nlink &&
+          pinnedIdentity.nlink !== 0n) ||
+        observed.before.dev !== pinnedIdentity.dev ||
+        observed.before.ino !== pinnedIdentity.ino ||
+        observed.after.dev !== pinnedIdentity.dev ||
+        observed.after.ino !== pinnedIdentity.ino ||
+        observed.after.size !== pinnedIdentity.size
+      ) {
+        throw publicationStateError(evidenceRef);
       }
-      beforeParent = afterParent;
-    }
-    if (!stableParentEpoch) throw publicationStateError(evidenceRef);
-    if (current.status === "invalid") {
-      throw publicationStateError(evidenceRef);
-    }
-    const refreshParentBinding = (): void => {
-      parentIdentity.ctimeNs = afterParent.ctimeNs;
-      parentIdentity.mtimeNs = afterParent.mtimeNs;
-      state.bindingTimeParentSnapshot = Object.freeze({
-        path: parentPath,
-        dev: afterParent.dev,
-        ino: afterParent.ino,
-        ctimeNs: afterParent.ctimeNs,
-        mtimeNs: afterParent.mtimeNs
-      });
-    };
-    if (current.status === "absent") {
+      let current!: CanonicalAuthorityBaseline;
+      let afterParent!: BigIntStats;
+      let stableParentEpoch = false;
+      const maxStableParentAttempts = 10;
+      for (let attempt = 0; attempt < maxStableParentAttempts; attempt += 1) {
+        const candidate = await captureCanonicalAuthorityBaseline(
+          state.publicPath,
+          evidenceRef,
+          true
+        );
+        afterParent = await lstat(parentPath, { bigint: true });
+        if (
+          !afterParent.isDirectory() ||
+          afterParent.isSymbolicLink() ||
+          !workspaceRecordPhysicalIdentityMatches(afterParent, beforeParent)
+        ) {
+          throw publicationStateError(evidenceRef);
+        }
+        const parentEpochStable =
+          afterParent.ctimeNs === beforeParent.ctimeNs &&
+          afterParent.mtimeNs === beforeParent.mtimeNs;
+        if (candidate.status !== "generation_drift" && parentEpochStable) {
+          current = candidate;
+          stableParentEpoch = true;
+          break;
+        }
+        beforeParent = afterParent;
+      }
+      if (!stableParentEpoch) throw publicationStateError(evidenceRef);
+      if (current.status === "invalid") {
+        throw publicationStateError(evidenceRef);
+      }
+      const afterDurableObservation = publicationHookStorage.getStore()
+        ?.afterDurableRecordObservation;
+      if (afterDurableObservation) {
+        await runAuthorityMutatingCallbackBoundary(
+          () =>
+            afterDurableObservation(
+              Object.freeze({
+                path: state.publicPath,
+                status: current.status === "absent" ? "missing" : "read"
+              })
+            ),
+          async () => {
+            const provedParent = await lstat(parentPath, { bigint: true });
+            if (
+              !provedParent.isDirectory() ||
+              provedParent.isSymbolicLink() ||
+              !workspaceRecordPhysicalIdentityMatches(provedParent, afterParent) ||
+              provedParent.ctimeNs !== afterParent.ctimeNs ||
+              provedParent.mtimeNs !== afterParent.mtimeNs
+            ) {
+              throw publicationStateError(evidenceRef);
+            }
+            await assertCanonicalAuthorityBaseline(
+              state.publicPath,
+              current,
+              evidenceRef
+            );
+          }
+        );
+      }
+      const refreshParentBinding = (): void => {
+        parentIdentity.ctimeNs = afterParent.ctimeNs;
+        parentIdentity.mtimeNs = afterParent.mtimeNs;
+        state.bindingTimeParentSnapshot = Object.freeze({
+          path: parentPath,
+          dev: afterParent.dev,
+          ino: afterParent.ino,
+          ctimeNs: afterParent.ctimeNs,
+          mtimeNs: afterParent.mtimeNs
+        });
+      };
+      if (current.status === "absent") {
+        refreshParentBinding();
+        return { status: "missing" };
+      }
+      const samePhysicalGeneration = workspaceRecordPhysicalIdentityMatches(
+        current.identity,
+        generation
+      );
+      if (!samePhysicalGeneration) {
+        if (!isSafeBaseCompatibleOrdinaryGenerationMode(current.mode)) {
+          throw publicationStateError(evidenceRef);
+        }
+        refreshParentBinding();
+        return { status: "superseded", bytes: Buffer.from(current.bytes) };
+      }
+      if (
+        pinnedIdentity.nlink !== generationExpectation.nlink ||
+        current.mode !== generationExpectation.mode ||
+        current.nlink !== generationExpectation.nlink
+      ) {
+        throw publicationStateError(evidenceRef);
+      }
+      if (
+        pinnedIdentity.size !== BigInt(expectedBytes.length) ||
+        !observed.bytes.equals(expectedBytes) ||
+        !current.bytes.equals(expectedBytes) ||
+        current.ctimeNs !== expectedPathnameBinding.ctimeNs ||
+        current.mtimeNs !== expectedPathnameBinding.mtimeNs
+      ) {
+        refreshParentBinding();
+        return { status: "superseded", bytes: Buffer.from(current.bytes) };
+      }
+      const refreshedPathnameBinding = await captureCanonicalPathnameBinding(
+        state.publicPath,
+        generationExpectation,
+        generationExpectation.nlink,
+        evidenceRef
+      );
       refreshParentBinding();
-      return { status: "missing" };
-    }
-    const samePhysicalGeneration = workspaceRecordPhysicalIdentityMatches(
-      current.identity,
-      generation
-    );
-    if (!samePhysicalGeneration) {
-      refreshParentBinding();
-      return { status: "superseded", bytes: Buffer.from(current.bytes) };
-    }
-    if (
-      pinnedIdentity.nlink !== generationExpectation.nlink ||
-      current.mode !== generationExpectation.mode ||
-      current.nlink !== generationExpectation.nlink
-    ) {
-      throw publicationStateError(evidenceRef);
-    }
-    if (
-      pinnedIdentity.size !== BigInt(expectedBytes.length) ||
-      !observed.bytes.equals(expectedBytes) ||
-      !current.bytes.equals(expectedBytes) ||
-      current.ctimeNs !== expectedPathnameBinding.ctimeNs ||
-      current.mtimeNs !== expectedPathnameBinding.mtimeNs
-    ) {
-      refreshParentBinding();
-      return { status: "superseded", bytes: Buffer.from(current.bytes) };
-    }
-    const refreshedPathnameBinding = await captureCanonicalPathnameBinding(
-      state.publicPath,
-      generationExpectation,
-      generationExpectation.nlink,
-      evidenceRef
-    );
-    refreshParentBinding();
-    state.pathnameBinding = refreshedPathnameBinding;
-    return { status: "current" };
+      state.pathnameBinding = refreshedPathnameBinding;
+      return { status: "current" };
+    });
   } catch (error) {
     if (error instanceof TaskServiceError) throw error;
     throw publicationStateError(evidenceRef, error);
