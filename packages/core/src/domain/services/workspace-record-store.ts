@@ -3118,8 +3118,8 @@ export async function replaceJsonRecordAfterExactObservation<T>(
                   : classification;
               } catch (classificationError) {
                 throw preserveWorkspacePrimaryError(
-                  classificationError,
-                  [outcome.error]
+                  outcome.error,
+                  [classificationError]
                 );
               }
               return Object.freeze({

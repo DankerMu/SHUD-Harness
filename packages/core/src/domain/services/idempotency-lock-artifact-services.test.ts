@@ -29663,6 +29663,206 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("Issue79 physical proof failure stays compensation behind the writer primary", async () => {
+    for (const surface of ["direct", "retained"] as const) {
+      for (const drift of ["unsafe_mode", "hardlink_identity"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const rawKey = `task:create:issue79-physical-proof-${surface}-${drift}`;
+        const requestDigest = `digest-issue79-physical-proof-${surface}-${drift}`;
+        const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+        const recordPath = workspaceRecordPath(
+          workspaceRoot,
+          ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+          evidenceRef
+        );
+        const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+        const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+        const hardlinkPath = `${recordPath}.issue79-physical-successor`;
+        const service = createIdempotencyRecordService({ workspaceRoot });
+        await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+        let retainedGuardText: string | undefined;
+        if (surface === "retained") {
+          retainedGuardText = `${JSON.stringify({
+            guard_id: `issue79-physical-proof-${drift}`,
+            owner_pid: 9_999_999,
+            acquired_at_ms: Date.now() - 31_000,
+            acquired_at: "2026-07-17T09:00:00.000Z",
+            intent: "fail",
+            request_digest: requestDigest
+          })}\n`;
+          await writeFile(guardPath, retainedGuardText, { flag: "wx", mode: 0o600 });
+        }
+        const successorBytes = await readFile(recordPath);
+        const originalStats = await lstat(recordPath, { bigint: true });
+        const expectedMode = BigInt(drift === "unsafe_mode" ? 0o700 : 0o600);
+        const expectedLinkCount = drift === "hardlink_identity" ? 2n : 1n;
+        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+        const writerMarker = new Error(
+          `Issue79 physical proof writer marker ${surface} ${drift}`
+        );
+        let expectedRetainedGuardText = retainedGuardText;
+        let expectedRetainedCleanupLockText: string | undefined;
+        let writerHookCalls = 0;
+        let driftInstalled = false;
+
+        const failure = await captureThrownValue(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              afterTemporaryFileWritten: async ({ canonicalPath }) => {
+                if (canonicalPath !== recordPath || writerHookCalls > 0) return;
+                writerHookCalls += 1;
+                expectedRetainedGuardText ??= await readFile(guardPath, "utf8");
+                if (surface === "retained" && drift === "hardlink_identity") {
+                  expectedRetainedCleanupLockText = await readFile(
+                    cleanupLockPath,
+                    "utf8"
+                  );
+                }
+                throw writerMarker;
+              },
+              beforeTemporaryUnlink: async ({ canonicalPath }) => {
+                if (canonicalPath !== recordPath || driftInstalled) return;
+                driftInstalled = true;
+                if (drift === "unsafe_mode") {
+                  await chmod(recordPath, 0o700);
+                } else {
+                  await link(recordPath, hardlinkPath);
+                }
+              }
+            },
+            () =>
+              surface === "direct"
+                ? service.recoverFailedRecordAfterRollback({
+                    scope: "task",
+                    key: rawKey,
+                    requestDigest
+                  })
+                : service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+          )
+        );
+
+        expect(writerHookCalls).toBe(1);
+        expect(driftInstalled).toBe(true);
+        expect(semanticPrimaryError(failure)).toBe(writerMarker);
+        expect(countErrorGraphIdentity(failure, writerMarker)).toBe(1);
+        const proofError = findErrorNode(
+          failure,
+          (error) =>
+            error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
+        );
+        expect(proofError).toBeDefined();
+        expect(proofError).not.toBe(writerMarker);
+        expect(countErrorGraphIdentity(failure, proofError)).toBe(1);
+        expect(await readFile(recordPath)).toEqual(successorBytes);
+        const successorStats = await lstat(recordPath, { bigint: true });
+        expect(successorStats.dev).toBe(originalStats.dev);
+        expect(successorStats.ino).toBe(originalStats.ino);
+        expect(successorStats.mode & 0o7777n).toBe(expectedMode);
+        expect(successorStats.nlink).toBe(expectedLinkCount);
+        if (surface === "direct" && drift === "unsafe_mode") {
+          await expectPathMissing(guardPath);
+        } else {
+          expect(await readFile(guardPath, "utf8")).toBe(expectedRetainedGuardText);
+        }
+        if (surface === "retained" && drift === "hardlink_identity") {
+          expect(await readFile(cleanupLockPath, "utf8")).toBe(
+            expectedRetainedCleanupLockText
+          );
+        } else {
+          await expectPathMissing(cleanupLockPath);
+        }
+        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+      }
+    }
+  });
+
+  test("Issue79 writer failure without physical drift has no proof compensation", async () => {
+    for (const surface of ["direct", "retained"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:issue79-no-physical-drift-${surface}`;
+      const requestDigest = `digest-issue79-no-physical-drift-${surface}`;
+      const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+        evidenceRef
+      );
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+      let retainedGuardText: string | undefined;
+      if (surface === "retained") {
+        retainedGuardText = `${JSON.stringify({
+          guard_id: "issue79-no-physical-drift",
+          owner_pid: 9_999_999,
+          acquired_at_ms: Date.now() - 31_000,
+          acquired_at: "2026-07-17T09:01:00.000Z",
+          intent: "fail",
+          request_digest: requestDigest
+        })}\n`;
+        await writeFile(guardPath, retainedGuardText, { flag: "wx", mode: 0o600 });
+      }
+      const originalBytes = await readFile(recordPath);
+      const originalStats = await lstat(recordPath, { bigint: true });
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const writerMarker = new Error(
+        `Issue79 no physical drift writer marker ${surface}`
+      );
+      let writerHookCalls = 0;
+
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: ({ canonicalPath }) => {
+              if (canonicalPath !== recordPath || writerHookCalls > 0) return;
+              writerHookCalls += 1;
+              throw writerMarker;
+            }
+          },
+          () =>
+            surface === "direct"
+              ? service.recoverFailedRecordAfterRollback({
+                  scope: "task",
+                  key: rawKey,
+                  requestDigest
+                })
+              : service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+        )
+      );
+
+      expect(writerHookCalls).toBe(1);
+      expect(semanticPrimaryError(failure)).toBe(writerMarker);
+      expect(countErrorGraphIdentity(failure, writerMarker)).toBe(1);
+      expect(
+        countErrorNodes(
+          failure,
+          (error) =>
+            error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
+        )
+      ).toBe(0);
+      expect(await readFile(recordPath)).toEqual(originalBytes);
+      const currentStats = await lstat(recordPath, { bigint: true });
+      expect(currentStats.dev).toBe(originalStats.dev);
+      expect(currentStats.ino).toBe(originalStats.ino);
+      expect(currentStats.mode).toBe(originalStats.mode);
+      expect(currentStats.nlink).toBe(originalStats.nlink);
+      if (surface === "direct") {
+        await expectPathMissing(guardPath);
+      } else {
+        expect(await readFile(guardPath, "utf8")).toBe(retainedGuardText);
+      }
+      await expectPathMissing(cleanupLockPath);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
   test("Issue79 post-audit invalid-completed authority cancels at the ordinary reservation ceiling", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
