@@ -29600,6 +29600,101 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("Issue79 pinned-close successor is total for direct and retained recovery", async () => {
+    for (const surface of ["direct", "retained"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:issue79-pinned-close-${surface}`;
+      const requestDigest = `digest-issue79-pinned-close-${surface}`;
+      const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+        evidenceRef
+      );
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+      if (surface === "retained") {
+        await writeFile(
+          guardPath,
+          `${JSON.stringify({
+            guard_id: `issue79-pinned-close-${surface}`,
+            owner_pid: 9_999_999,
+            acquired_at_ms: Date.now() - 31_000,
+            acquired_at: "2026-07-17T10:10:00.000Z",
+            intent: "fail",
+            request_digest: requestDigest
+          })}\n`,
+          { flag: "wx", mode: 0o600 }
+        );
+      }
+      const successor = {
+        key: rawKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        result_ref: `TASK-issue79-pinned-close-${surface}`,
+        created_at: "2026-07-17T10:10:01.000Z",
+        updated_at: "2026-07-17T10:10:02.000Z"
+      } satisfies IdempotencyRecord;
+      const successorText = `${JSON.stringify(successor)}\n`;
+      const primary = new Error(`Issue79 pinned-close primary ${surface}`);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let primaryCalls = 0;
+      let successorInstalled = false;
+
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            beforeCleanupPermitIdentityResolution: ({ path }) => {
+              if (path !== recordPath || primaryCalls > 0) return;
+              primaryCalls += 1;
+              throw primary;
+            },
+            afterCleanupPermitPinnedHandleClosed: async ({ path }) => {
+              if (path !== recordPath || successorInstalled) return;
+              successorInstalled = true;
+              await writeFile(recordPath, successorText, { flag: "w" });
+            }
+          },
+          () =>
+            surface === "direct"
+              ? service.recoverFailedRecordAfterRollback({
+                  scope: "task",
+                  key: rawKey,
+                  requestDigest
+                })
+              : service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+        )
+      );
+
+      expect(primaryCalls).toBe(1);
+      expect(successorInstalled).toBe(true);
+      expect(semanticPrimaryError(failure)).toBe(primary);
+      expect(countErrorGraphIdentity(failure, primary)).toBe(1);
+      const identityCompensation = findErrorNode(
+        failure,
+        (error) =>
+          error instanceof TaskServiceError &&
+          error.message ===
+            "Completed idempotency result changed before exact invalidation."
+      );
+      expect(identityCompensation).toBeDefined();
+      expect(countErrorNodes(failure, (error) => error === identityCompensation)).toBe(1);
+      expect(await readFile(recordPath, "utf8")).toBe(successorText);
+      expect(
+        await service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+      ).toEqual({ status: "completed", record: successor });
+      await expectPathMissing(guardPath);
+      await expectPathMissing(cleanupLockPath);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
   test("Issue79 tokenless quarantine keeps thrown and returned writer primary when a valid completed successor wins", async () => {
     for (const failureForm of ["thrown", "returned"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -29758,6 +29853,157 @@ describe("idempotency, lock, and artifact services", () => {
     await expectPathMissing(cleanupLockPath);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("Issue79 retained quarantine preserves store origin across codes services and error graphs", async () => {
+    for (const serviceOrigin of ["same", "cross"] as const) {
+      for (const storeForm of ["thrown", "returned"] as const) {
+        for (const writerCode of [
+          "workspace_path_not_safe",
+          "record_malformed"
+        ] as const) {
+          for (const failureForm of [
+            "plain",
+            "task_wrapper",
+            "aggregate_cause",
+            "repeated_compensation"
+          ] as const) {
+            const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+            tempRoots.push(tempRoot);
+            const rawKey =
+              `task:create:issue79-retained-quarantine-${serviceOrigin}-${storeForm}-${writerCode}-${failureForm}`;
+            const requestDigest =
+              `digest-issue79-retained-quarantine-${serviceOrigin}-${storeForm}-${writerCode}-${failureForm}`;
+            const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+            const recordPath = workspaceRecordPath(
+              workspaceRoot,
+              ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+              evidenceRef
+            );
+            const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+            const cleanupLockPath = idempotencyTransitionCleanupLockPath(
+              workspaceRoot,
+              rawKey
+            );
+            const creator = createIdempotencyRecordService({ workspaceRoot });
+            await creator.beginRecord({ scope: "task", key: rawKey, requestDigest });
+            const service = serviceOrigin === "same"
+              ? creator
+              : createIdempotencyRecordService({ workspaceRoot });
+            await writeFile(
+              guardPath,
+              `${JSON.stringify({
+                guard_id:
+                  `issue79-retained-${serviceOrigin}-${storeForm}-${writerCode}-${failureForm}`,
+                owner_pid: 9_999_999,
+                acquired_at_ms: Date.now() - 31_000,
+                acquired_at: "2026-07-17T11:10:00.000Z",
+                intent: "fail",
+                request_digest: requestDigest
+              })}\n`,
+              { flag: "wx", mode: 0o600 }
+            );
+            const successor = {
+              key: rawKey,
+              scope: "task",
+              request_digest: requestDigest,
+              status: "completed",
+              result_ref:
+                `TASK-issue79-retained-${serviceOrigin}-${storeForm}-${writerCode}-${failureForm}`,
+              created_at: "2026-07-17T11:10:01.000Z",
+              updated_at: "2026-07-17T11:10:02.000Z"
+            } satisfies IdempotencyRecord;
+            const successorText = `${JSON.stringify(successor)}\n`;
+            const primary = new TaskServiceError({
+              code: writerCode,
+              status: 500,
+              category: "workspace_error",
+              message:
+                `Issue79 retained quarantine writer ${serviceOrigin} ${storeForm} ${writerCode} ${failureForm}`,
+              userMessage: "The injected retained writer failed.",
+              evidenceRefs: [evidenceRef]
+            });
+            let writerFailure: unknown = primary;
+            if (failureForm === "task_wrapper") {
+              writerFailure = preserveTaskServiceErrorCompensationCompatibility(
+                primary,
+                [new Error("Issue79 retained task wrapper compensation")],
+                "Issue79 retained task wrapper"
+              );
+            } else if (failureForm === "aggregate_cause") {
+              primary.cause = new AggregateError(
+                [new Error("Issue79 retained aggregate cause")],
+                "Issue79 retained aggregate writer cause"
+              );
+            } else if (failureForm === "repeated_compensation") {
+              const compensation = new Error("Issue79 retained repeated compensation");
+              writerFailure = preserveTaskServiceErrorCompensationCompatibility(
+                preserveTaskServiceErrorCompensationCompatibility(
+                  primary,
+                  [compensation],
+                  "Issue79 retained first fold"
+                ),
+                [compensation],
+                "Issue79 retained repeated fold"
+              );
+            }
+            const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+            const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+            let writerCalls = 0;
+            let successorInstalled = false;
+
+            const failure = await captureThrownValue(() =>
+              runWithWorkspaceRecordPublicationHooks(
+                storeForm === "returned"
+                  ? {
+                      afterTemporaryFileWritten: ({ canonicalPath }) => {
+                        if (canonicalPath !== recordPath || writerCalls > 0) return;
+                        writerCalls += 1;
+                        throw writerFailure;
+                      },
+                      beforeTemporaryUnlink: async ({ canonicalPath }) => {
+                        if (canonicalPath !== recordPath || successorInstalled) return;
+                        successorInstalled = true;
+                        await writeFile(recordPath, successorText, { flag: "w" });
+                      }
+                    }
+                  : {
+                      beforeCleanupPermitIdentityResolution: ({ path }) => {
+                        if (path !== recordPath || writerCalls > 0) return;
+                        writerCalls += 1;
+                        throw writerFailure;
+                      },
+                      afterCleanupPermitPinnedHandleClosed: async ({ path }) => {
+                        if (path !== recordPath || successorInstalled) return;
+                        successorInstalled = true;
+                        await writeFile(recordPath, successorText, { flag: "w" });
+                      }
+                    },
+                () =>
+                  service.quarantineRecordAfterUnsafeRollback({
+                    scope: "task",
+                    key: rawKey,
+                    requestDigest
+                  })
+              )
+            );
+
+            expect(writerCalls).toBe(1);
+            expect(successorInstalled).toBe(true);
+            expect(semanticPrimaryError(failure)).toBe(primary);
+            expect(countErrorNodes(failure, (error) => error === primary)).toBe(1);
+            expect(await readFile(recordPath, "utf8")).toBe(successorText);
+            expect(
+              await service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+            ).toEqual({ status: "completed", record: successor });
+            await expectPathMissing(guardPath);
+            await expectPathMissing(cleanupLockPath);
+            expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+            expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+          }
+        }
+      }
+    }
   });
 
   test("Issue79 tokenless quarantine self-heals genuine non-writer record_malformed exact loss", async () => {

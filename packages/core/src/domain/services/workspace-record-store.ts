@@ -195,13 +195,30 @@ async function captureAuthorityMutatingCallbackBoundary(
       typeof preservedProofFailure === "function"
     ) {
       authorityCallbackProofFailures.add(preservedProofFailure);
+      authorityCallbackProofFailureDetails.set(
+        preservedProofFailure as object,
+        Object.freeze({
+          proofError,
+          ...(callbackFailure ? { callbackFailure } : {}),
+          proofCompensations
+        })
+      );
     }
     throw preservedProofFailure;
   }
 
-  return callbackFailure
-    ? { status: "callback_failed", error: callbackFailure.value }
-    : { status: "succeeded" };
+  if (callbackFailure) {
+    if (
+      (typeof callbackFailure.value === "object" && callbackFailure.value !== null) ||
+      typeof callbackFailure.value === "function"
+    ) {
+      authorityCallbackFailures.add(callbackFailure.value as object);
+    }
+    const callbackPrimary = semanticPrimaryError(callbackFailure.value);
+    if (callbackPrimary) authorityCallbackFailures.add(callbackPrimary);
+    return { status: "callback_failed", error: callbackFailure.value };
+  }
+  return { status: "succeeded" };
 }
 
 async function runAuthorityMutatingCallbackBoundary(
@@ -625,10 +642,31 @@ export type WorkspaceRecordCleanupPermitSiblingClassification =
   | { readonly status: "missing" }
   | { readonly status: "superseded"; readonly bytes: Buffer };
 
-type WorkspaceRecordDurableSuccessorOutcome =
-  | { readonly status: "current"; readonly bytes: Buffer }
+export type WorkspaceRecordDurableSuccessorOutcome =
+  | {
+      readonly status: "current";
+      readonly bytes: Buffer;
+      readonly identity: WorkspaceRecordPhysicalIdentity;
+    }
   | { readonly status: "missing" }
-  | { readonly status: "superseded"; readonly bytes: Buffer };
+  | {
+      readonly status: "superseded";
+      readonly bytes: Buffer;
+      readonly identity: WorkspaceRecordPhysicalIdentity;
+    }
+  | { readonly status: "unavailable"; readonly proofError: unknown };
+
+export type ExactWorkspaceJsonRecordReplacementFailureOrigin =
+  | "writer"
+  | "physical_proof"
+  | "precondition"
+  | "settlement";
+
+export interface ExactWorkspaceJsonRecordReplacementOperationalFailure {
+  readonly origin: ExactWorkspaceJsonRecordReplacementFailureOrigin;
+  readonly error: unknown;
+  readonly successor: WorkspaceRecordDurableSuccessorOutcome;
+}
 
 export type ExactWorkspaceJsonRecordReplacementResult<T> =
   | { readonly status: "replaced"; readonly record: T }
@@ -636,12 +674,16 @@ export type ExactWorkspaceJsonRecordReplacementResult<T> =
   | { readonly status: "superseded"; readonly bytes: Buffer }
   | {
       readonly status: "writer_failed";
-      readonly error: unknown;
-      readonly successor: WorkspaceRecordDurableSuccessorOutcome;
-    };
+    } & ExactWorkspaceJsonRecordReplacementOperationalFailure
+  | {
+      readonly status: "operation_failed";
+    } & ExactWorkspaceJsonRecordReplacementOperationalFailure;
 
 type ExactWorkspaceJsonRecordReplacementAttempt<T> =
-  ExactWorkspaceJsonRecordReplacementResult<T>;
+  Readonly<{
+    result: ExactWorkspaceJsonRecordReplacementResult<T>;
+    successor: WorkspaceRecordDurableSuccessorOutcome;
+  }>;
 
 export type ConditionalDeleteObservedJsonRecordResult =
   | ConditionalDeleteJsonRecordResult
@@ -665,7 +707,43 @@ let activeRecordAuthorityCleanupPermits = 0;
 const publicationHookStorage = new AsyncLocalStorage<WorkspaceRecordPublicationHooks>();
 const authorityDeadlineStorage = new AsyncLocalStorage<number>();
 const committedMutablePublicationCleanupFailures = new WeakSet<object>();
+const authorityCallbackFailures = new WeakSet<object>();
 const authorityCallbackProofFailures = new WeakSet<object>();
+const authorityCallbackProofFailureDetails = new WeakMap<
+  object,
+  Readonly<{
+    proofError: unknown;
+    callbackFailure?: PresentFailure;
+    proofCompensations: readonly unknown[];
+  }>
+>();
+
+function findStoreOwnedFailureTag(
+  failures: WeakSet<object>,
+  value: unknown,
+  seen = new Set<unknown>()
+): object | undefined {
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+  if (
+    ((typeof value === "object" && value !== null) || typeof value === "function") &&
+    failures.has(value as object)
+  ) return value as object;
+  const primary = semanticPrimaryError(value);
+  if (primary !== undefined && primary !== value) {
+    const found = findStoreOwnedFailureTag(failures, primary, seen);
+    if (found) return found;
+  }
+  if (value instanceof AggregateError) {
+    for (const error of value.errors) {
+      const found = findStoreOwnedFailureTag(failures, error, seen);
+      if (found) return found;
+    }
+  }
+  return value instanceof Error
+    ? findStoreOwnedFailureTag(failures, value.cause, seen)
+    : undefined;
+}
 const authorityNamespaceRemovalProofFailures = new WeakSet<object>();
 // The symbol gives callers a nominal type only. Runtime authority comes solely
 // from record-store-owned WeakMap membership, which cannot be forged or proxied.
@@ -2265,7 +2343,11 @@ interface WorkspaceRecordCleanupPermitGenerationSnapshot {
 
 type WorkspaceRecordCleanupPermitGenerationClassification =
   | { readonly status: "missing" }
-  | { readonly status: "superseded"; readonly bytes: Buffer }
+  | {
+      readonly status: "superseded";
+      readonly bytes: Buffer;
+      readonly identity: WorkspaceRecordPhysicalIdentity;
+    }
   | {
       readonly status: "same_generation";
       readonly proof: "exact_observation" | "published_mutation";
@@ -2573,7 +2655,14 @@ async function classifyWorkspaceRecordCleanupPermitGenerationNow(
     if (!isSafeBaseCompatibleOrdinaryGenerationMode(current.mode)) {
       throw publicationStateError(expected.evidenceRef);
     }
-    return { status: "superseded", bytes: Buffer.from(current.bytes) };
+    return {
+      status: "superseded",
+      bytes: Buffer.from(current.bytes),
+      identity: Object.freeze({
+        dev: current.identity.dev,
+        ino: current.identity.ino
+      })
+    };
   }
 
   const pinnedFile = state.pinnedFile!;
@@ -2599,7 +2688,14 @@ async function classifyWorkspaceRecordCleanupPermitGenerationNow(
     if (!isSafeBaseCompatibleOrdinaryGenerationMode(current.mode)) {
       throw publicationStateError(expected.evidenceRef);
     }
-    return { status: "superseded", bytes: Buffer.from(current.bytes) };
+    return {
+      status: "superseded",
+      bytes: Buffer.from(current.bytes),
+      identity: Object.freeze({
+        dev: current.identity.dev,
+        ino: current.identity.ino
+      })
+    };
   }
   return { status: "same_generation", proof: "published_mutation" };
 }
@@ -3022,127 +3118,587 @@ export async function replaceJsonRecordAfterExactObservation<T>(
     [...relativeDirectorySegments, fileName],
     evidenceRef
   );
-  return await runWithPreservedRelease(
-    async () => {
-      const attempt = await runWithRecordDirectoryBindingOperation<
-        ExactWorkspaceJsonRecordReplacementAttempt<T>
-      >(async () => {
-          const expected = snapshotWorkspaceRecordCleanupPermitGeneration(
-            permit,
-            recordPath,
-            evidenceRef
-          );
-          const hooks = publicationHookStorage.getStore();
-          let authorityLease: RecordAuthorityLease;
-          try {
-            authorityLease = await acquireRecordAuthorityWithCleanupPermit(
-              permit,
-              recordPath,
-              evidenceRef,
-              hooks,
-              { authority: "exact_observation", expected }
-            );
-          } catch (error) {
-            if (error instanceof WorkspaceRecordCleanupTerminalResultError) {
-              return error.result;
-            }
-            throw error;
+  let attempt: ExactWorkspaceJsonRecordReplacementAttempt<T> | undefined;
+  let operationError: unknown;
+  try {
+    attempt = await runWithRecordDirectoryBindingOperation<
+      ExactWorkspaceJsonRecordReplacementAttempt<T>
+    >(async () => {
+      const expected = snapshotWorkspaceRecordCleanupPermitGeneration(
+        permit,
+        recordPath,
+        evidenceRef
+      );
+      const currentSuccessor = (): WorkspaceRecordDurableSuccessorOutcome => ({
+        status: "current",
+        bytes: Buffer.from(expected.generation.bytes),
+        identity: Object.freeze({
+          dev: expected.generation.identity.dev,
+          ino: expected.generation.identity.ino
+        })
+      });
+      const successorFromClassification = (
+        classification: WorkspaceRecordCleanupPermitGenerationClassification
+      ): WorkspaceRecordDurableSuccessorOutcome =>
+        classification.status === "same_generation"
+          ? currentSuccessor()
+          : classification.status === "missing"
+            ? { status: "missing" }
+            : {
+                status: "superseded",
+                bytes: Buffer.from(classification.bytes),
+                identity: Object.freeze({
+                  dev: classification.identity.dev,
+                  ino: classification.identity.ino
+                })
+              };
+      const operationalFailure = (
+        origin: ExactWorkspaceJsonRecordReplacementFailureOrigin,
+        error: unknown,
+        successor: WorkspaceRecordDurableSuccessorOutcome
+      ): ExactWorkspaceJsonRecordReplacementAttempt<T> => {
+        const result = Object.freeze({
+          status: origin === "writer" ? "writer_failed" as const : "operation_failed" as const,
+          origin,
+          error,
+          successor
+        }) as ExactWorkspaceJsonRecordReplacementResult<T>;
+        return Object.freeze({ result, successor });
+      };
+      const findOwnedFailureTag = (
+        failures: WeakSet<object>,
+        value: unknown,
+        seen = new Set<unknown>()
+      ): object | undefined => {
+        if (seen.has(value)) return undefined;
+        seen.add(value);
+        if (
+          ((typeof value === "object" && value !== null) ||
+            typeof value === "function") &&
+          failures.has(value as object)
+        ) {
+          return value as object;
+        }
+        const primary = semanticPrimaryError(value);
+        if (primary !== undefined && primary !== value) {
+          const found = findOwnedFailureTag(failures, primary, seen);
+          if (found) return found;
+        }
+        if (value instanceof AggregateError) {
+          for (const error of value.errors) {
+            const found = findOwnedFailureTag(failures, error, seen);
+            if (found) return found;
           }
+        }
+        if (value instanceof Error) {
+          return findOwnedFailureTag(failures, value.cause, seen);
+        }
+        return undefined;
+      };
+      const hasOwnedFailureTag = (
+        failures: WeakSet<object>,
+        value: unknown
+      ): boolean => findOwnedFailureTag(failures, value) !== undefined;
+      const callbackProofFailureDetails = (value: unknown) => {
+        if (
+          (typeof value === "object" && value !== null) ||
+          typeof value === "function"
+        ) {
+          const direct = authorityCallbackProofFailureDetails.get(value as object);
+          if (direct) return direct;
+        }
+        const primary = semanticPrimaryError(value);
+        return primary
+          ? authorityCallbackProofFailureDetails.get(primary)
+          : undefined;
+      };
+      const callbackPrimaryFailure = (
+        value: unknown
+      ): Readonly<{
+        origin: "writer" | "precondition" | "physical_proof";
+        error: unknown;
+      }> => {
+        const details = callbackProofFailureDetails(value);
+        if (details?.callbackFailure) {
+          return {
+            origin: "writer",
+            error: preserveWorkspacePrimaryError(
+              details.callbackFailure.value,
+              [details.proofError, ...details.proofCompensations]
+            )
+          };
+        }
+        const callbackFailure = findOwnedFailureTag(
+          authorityCallbackFailures,
+          value
+        );
+        if (callbackFailure) {
+          const proofPrimary = semanticPrimaryError(value);
+          return {
+            origin: "writer",
+            error:
+              proofPrimary && proofPrimary !== callbackFailure
+                ? preserveWorkspacePrimaryError(callbackFailure, [proofPrimary])
+                : callbackFailure
+          };
+        }
+        return { origin: "physical_proof", error: value };
+      };
+      const failureAfterPhysicalObservation = async (
+        origin: ExactWorkspaceJsonRecordReplacementFailureOrigin,
+        primary: unknown
+      ): Promise<ExactWorkspaceJsonRecordReplacementAttempt<T>> => {
+        try {
+          const classification = await classifyWorkspaceRecordCleanupPermitGeneration(
+            permit,
+            expected,
+            "exact_observation"
+          );
+          return operationalFailure(
+            origin,
+            primary,
+            successorFromClassification(classification)
+          );
+        } catch (proofError) {
+          return operationalFailure(
+            origin,
+            Object.is(primary, proofError)
+              ? primary
+              : preserveWorkspacePrimaryError(primary, [proofError]),
+            { status: "unavailable", proofError }
+          );
+        }
+      };
+      const observeSuccessorAfterPermitSettlement = async ():
+        Promise<WorkspaceRecordDurableSuccessorOutcome> => {
+        const baseline = await captureCanonicalAuthorityBaseline(
+          recordPath,
+          evidenceRef
+        );
+        if (baseline.status === "absent") return { status: "missing" };
+        if (
+          baseline.status === "invalid" ||
+          baseline.nlink !== 1n ||
+          !isSafeBaseCompatibleOrdinaryGenerationMode(baseline.mode)
+        ) {
+          throw publicationStateError(evidenceRef);
+        }
+        const status = workspaceRecordPhysicalIdentityMatches(
+          baseline.identity,
+          expected.generation.identity
+        ) && baseline.bytes.equals(expected.generation.bytes)
+          ? "current" as const
+          : "superseded" as const;
+        return {
+          status,
+          bytes: Buffer.from(baseline.bytes),
+          identity: Object.freeze({
+            dev: baseline.identity.dev,
+            ino: baseline.identity.ino
+          })
+        };
+      };
 
+      const hooks = publicationHookStorage.getStore();
+      let authorityLease: RecordAuthorityLease;
+      try {
+        authorityLease = await acquireRecordAuthorityWithCleanupPermit(
+          permit,
+          recordPath,
+          evidenceRef,
+          hooks,
+          { authority: "exact_observation", expected }
+        );
+      } catch (error) {
+        let acquisitionError = error;
+        try {
+          await settleRecordAuthorityCleanupAdmission(permit);
+        } catch (settlementError) {
+          acquisitionError = preserveWorkspacePrimaryError(
+            acquisitionError,
+            [settlementError]
+          );
+        }
+        if (error instanceof WorkspaceRecordCleanupTerminalResultError) {
+          let successor: WorkspaceRecordDurableSuccessorOutcome;
           try {
-            const admissionFailure = authorityLease.cleanupPermitAdmissionFailure;
-            if (admissionFailure !== undefined) throw admissionFailure.value;
-            const classification = await classifyWorkspaceRecordCleanupPermitGeneration(
+            successor = await observeSuccessorAfterPermitSettlement();
+          } catch (proofError) {
+            return operationalFailure(
+              "physical_proof",
+              preserveWorkspacePrimaryError(error.cause ?? acquisitionError, [proofError]),
+              { status: "unavailable", proofError }
+            );
+          }
+          const terminalCause = error.cause ?? acquisitionError;
+          const ownedCallbackFailure = callbackPrimaryFailure(terminalCause);
+          if (ownedCallbackFailure.origin !== "physical_proof") {
+            return operationalFailure(
+              ownedCallbackFailure.origin,
+              ownedCallbackFailure.error,
+              successor
+            );
+          }
+          if (successor.status === "current" || successor.status === "unavailable") {
+            return operationalFailure(
+              successor.status === "current" ? "precondition" : "physical_proof",
+              terminalCause,
+              successor
+            );
+          }
+          return Object.freeze({
+            result: successor.status === "missing"
+              ? { status: "missing" as const }
+              : {
+                  status: "superseded" as const,
+                  bytes: Buffer.from(successor.bytes)
+                },
+            successor
+          });
+        }
+        const ownedCallbackFailure = callbackPrimaryFailure(acquisitionError);
+        const taggedCallbackFailure =
+          ownedCallbackFailure.origin !== "physical_proof";
+        try {
+          const successor = await observeSuccessorAfterPermitSettlement();
+          if (
+            !taggedCallbackFailure &&
+            (successor.status === "missing" ||
+              successor.status === "superseded")
+          ) {
+            return Object.freeze({
+              result: successor.status === "missing"
+                ? { status: "missing" as const }
+                : {
+                    status: "superseded" as const,
+                    bytes: Buffer.from(successor.bytes)
+                  },
+              successor
+            });
+          }
+          return operationalFailure(
+            ownedCallbackFailure.origin === "physical_proof" &&
+              successor.status === "current"
+              ? "precondition"
+              : ownedCallbackFailure.origin,
+            ownedCallbackFailure.error,
+            successor
+          );
+        } catch (proofError) {
+          return operationalFailure(
+            ownedCallbackFailure.origin,
+            Object.is(ownedCallbackFailure.error, proofError)
+              ? ownedCallbackFailure.error
+              : preserveWorkspacePrimaryError(
+                  ownedCallbackFailure.error,
+                  [proofError]
+                ),
+            { status: "unavailable", proofError }
+          );
+        }
+      }
+
+      let ownedAttempt: ExactWorkspaceJsonRecordReplacementAttempt<T> | undefined;
+      let unexpectedError: unknown;
+      try {
+        const admissionFailure = authorityLease.cleanupPermitAdmissionFailure;
+        if (admissionFailure !== undefined) {
+          ownedAttempt = await failureAfterPhysicalObservation(
+            "precondition",
+            admissionFailure.value
+          );
+        } else {
+          let classification: WorkspaceRecordCleanupPermitGenerationClassification;
+          try {
+            classification = await classifyWorkspaceRecordCleanupPermitGeneration(
               permit,
               expected,
               "exact_observation"
             );
+          } catch (error) {
+            ownedAttempt = operationalFailure(
+              "physical_proof",
+              error,
+              { status: "unavailable", proofError: error }
+            );
+            classification = undefined as never;
+          }
+
+          if (!ownedAttempt) {
             if (
               classification.status === "missing" ||
               classification.status === "superseded"
             ) {
-              return classification;
-            }
-            if (
+              const successor = successorFromClassification(classification);
+              ownedAttempt = Object.freeze({
+                result: classification.status === "missing"
+                  ? { status: "missing" as const }
+                  : {
+                      status: "superseded" as const,
+                      bytes: Buffer.from(classification.bytes)
+                    },
+                successor
+              });
+            } else if (
               classification.proof !== "exact_observation" ||
               !authorityLease.validateCleanupGeneration
             ) {
-              throw publicationStateError(evidenceRef);
-            }
-            await authorityLease.validateCleanupGeneration();
-
-            const prepared = await prepareJsonRecordWrite(
-              workspaceRoot,
-              relativeDirectorySegments,
-              fileName,
-              record,
-              evidenceRef,
-              schema
-            );
-            if (prepared.recordPath !== recordPath) {
-              throw publicationStateError(evidenceRef);
-            }
-            const expectedBaseline: Extract<
-              MutableCanonicalBaseline,
-              { status: "existing" }
-            > = {
-              status: "existing",
-              identity: expected.generation.identity,
-              bytes: Buffer.from(expected.generation.bytes),
-              mode: expected.generation.mode,
-              nlink: expected.generation.nlink,
-              ctimeNs: expected.pathnameBinding.ctimeNs,
-              mtimeNs: expected.pathnameBinding.mtimeNs
-            };
-            const outcome =
-              await attemptPreparedJsonRecordWriteWithDirectoryBindingOperation(
-                prepared,
-                evidenceRef,
-                false,
-                { authorityLease, canonicalBaseline: expectedBaseline }
+              ownedAttempt = await failureAfterPhysicalObservation(
+                "precondition",
+                publicationStateError(evidenceRef)
               );
-            if (outcome.status === "failed") {
-              let successor: WorkspaceRecordDurableSuccessorOutcome;
+            } else {
               try {
-                const classification =
-                  await classifyWorkspaceRecordCleanupPermitGeneration(
-                    permit,
-                    expected,
-                    "exact_observation"
-                  );
-                successor = classification.status === "same_generation"
-                  ? {
-                      status: "current",
-                      bytes: Buffer.from(expected.generation.bytes)
-                    }
-                  : classification;
-              } catch (classificationError) {
-                throw preserveWorkspacePrimaryError(
-                  outcome.error,
-                  [classificationError]
+                await authorityLease.validateCleanupGeneration();
+              } catch (error) {
+                ownedAttempt = await failureAfterPhysicalObservation(
+                  "physical_proof",
+                  error
                 );
               }
-              return Object.freeze({
-                status: "writer_failed" as const,
-                error: outcome.error,
-                successor
-              });
             }
-            return Object.freeze({
-              status: "replaced" as const,
-              record: outcome.written.data
-            });
-          } finally {
-            await authorityLease.release();
           }
-        });
-      return attempt;
-    },
-    async () => await cancelRecordAuthorityCleanupPermit(permit),
-    "Exact workspace record replacement and cleanup-permit settlement both failed.",
-    undefined,
-    preserveTaskServiceErrorCompensationCompatibility
-  );
+
+          if (!ownedAttempt) {
+            let prepared: PreparedJsonRecordWrite<T> | undefined;
+            try {
+              prepared = await prepareJsonRecordWrite(
+                workspaceRoot,
+                relativeDirectorySegments,
+                fileName,
+                record,
+                evidenceRef,
+                schema
+              );
+              if (prepared.recordPath !== recordPath) {
+                throw publicationStateError(evidenceRef);
+              }
+            } catch (error) {
+              ownedAttempt = await failureAfterPhysicalObservation(
+                "precondition",
+                error
+              );
+            }
+
+            if (prepared && !ownedAttempt) {
+              const expectedBaseline: Extract<
+                MutableCanonicalBaseline,
+                { status: "existing" }
+              > = {
+                status: "existing",
+                identity: expected.generation.identity,
+                bytes: Buffer.from(expected.generation.bytes),
+                mode: expected.generation.mode,
+                nlink: expected.generation.nlink,
+                ctimeNs: expected.pathnameBinding.ctimeNs,
+                mtimeNs: expected.pathnameBinding.mtimeNs
+              };
+              const outcome =
+                await attemptPreparedJsonRecordWriteWithDirectoryBindingOperation(
+                  prepared,
+                  evidenceRef,
+                  false,
+                  { authorityLease, canonicalBaseline: expectedBaseline }
+                );
+              if (outcome.status === "failed") {
+                const ownedWriterFailure = callbackPrimaryFailure(outcome.error);
+                const hasCallbackProofFailure = hasOwnedFailureTag(
+                  authorityCallbackProofFailures,
+                  outcome.error
+                );
+                ownedAttempt = await failureAfterPhysicalObservation(
+                  ownedWriterFailure.origin === "precondition"
+                    ? "writer"
+                    : hasCallbackProofFailure
+                      ? ownedWriterFailure.origin
+                      : "writer",
+                  hasCallbackProofFailure || ownedWriterFailure.origin === "precondition"
+                    ? ownedWriterFailure.error
+                    : outcome.error
+                );
+              } else {
+                const committed = outcome.written.publication.committedBaseline;
+                const successor: WorkspaceRecordDurableSuccessorOutcome = {
+                  status: "superseded",
+                  bytes: Buffer.from(committed.bytes),
+                  identity: Object.freeze({
+                    dev: committed.identity.dev,
+                    ino: committed.identity.ino
+                  })
+                };
+                ownedAttempt = Object.freeze({
+                  result: Object.freeze({
+                    status: "replaced" as const,
+                    record: outcome.written.data
+                  }),
+                  successor
+                });
+              }
+            }
+          }
+        }
+      } catch (error) {
+        unexpectedError = error;
+      }
+
+      let releaseError: unknown;
+      try {
+        await authorityLease.release();
+      } catch (error) {
+        releaseError = error;
+      }
+      if (unexpectedError !== undefined) {
+        if (releaseError !== undefined) {
+          throw preserveWorkspacePrimaryError(unexpectedError, [releaseError]);
+        }
+        throw unexpectedError;
+      }
+      if (!ownedAttempt) {
+        throw new TypeError("Exact workspace replacement did not produce an outcome.");
+      }
+      if (releaseError === undefined) return ownedAttempt;
+      if (
+        ownedAttempt.result.status === "writer_failed" ||
+        ownedAttempt.result.status === "operation_failed"
+      ) {
+        return operationalFailure(
+          ownedAttempt.result.origin,
+          preserveWorkspacePrimaryError(ownedAttempt.result.error, [releaseError]),
+          ownedAttempt.result.successor
+        );
+      }
+      return operationalFailure("settlement", releaseError, ownedAttempt.successor);
+    });
+  } catch (error) {
+    operationError = error;
+  }
+
+  let settlementError: unknown;
+  try {
+    await cancelRecordAuthorityCleanupPermit(permit);
+  } catch (error) {
+    settlementError = error;
+  }
+  if (operationError !== undefined) {
+    if (settlementError !== undefined) {
+      throw preserveWorkspacePrimaryError(operationError, [settlementError]);
+    }
+    throw operationError;
+  }
+  if (!attempt) {
+    throw new TypeError("Exact workspace replacement did not enter its operation.");
+  }
+  if (
+    attempt.result.status === "writer_failed" ||
+    attempt.result.status === "operation_failed"
+  ) {
+    let successor: WorkspaceRecordDurableSuccessorOutcome;
+    let refreshedError = attempt.result.error;
+    let refreshedOrigin = attempt.result.origin;
+    const callbackFailure = findStoreOwnedFailureTag(
+      authorityCallbackFailures,
+      refreshedError
+    );
+    if (callbackFailure) {
+      const proofPrimary = semanticPrimaryError(refreshedError);
+      refreshedError =
+        proofPrimary && proofPrimary !== callbackFailure
+          ? preserveWorkspacePrimaryError(callbackFailure, [proofPrimary])
+          : callbackFailure;
+      refreshedOrigin = "writer";
+    }
+    try {
+      const baseline = await captureCanonicalAuthorityBaseline(
+        recordPath,
+        evidenceRef
+      );
+      if (baseline.status === "absent") {
+        successor = { status: "missing" };
+      } else if (
+        baseline.status === "invalid" ||
+        baseline.nlink !== 1n ||
+        !isSafeBaseCompatibleOrdinaryGenerationMode(baseline.mode)
+      ) {
+        throw publicationStateError(evidenceRef);
+      } else {
+        successor = {
+          status:
+            attempt.result.successor.status === "current" &&
+            workspaceRecordPhysicalIdentityMatches(
+              baseline.identity,
+              attempt.result.successor.identity
+            ) &&
+            baseline.bytes.equals(attempt.result.successor.bytes)
+              ? "current"
+              : "superseded",
+          bytes: Buffer.from(baseline.bytes),
+          identity: Object.freeze({
+            dev: baseline.identity.dev,
+            ino: baseline.identity.ino
+          })
+        };
+      }
+    } catch (proofError) {
+      refreshedError = preserveWorkspacePrimaryError(
+        refreshedError,
+        [proofError]
+      );
+      successor = { status: "unavailable", proofError };
+    }
+    const refreshedPrimary = semanticPrimaryError(refreshedError);
+    const callbackFailurePrimary =
+      refreshedPrimary !== undefined && authorityCallbackFailures.has(refreshedPrimary);
+    const callbackProofFailure =
+      (((typeof refreshedError === "object" && refreshedError !== null) ||
+        typeof refreshedError === "function") &&
+        authorityCallbackProofFailures.has(refreshedError as object)) ||
+      (refreshedPrimary !== undefined &&
+        authorityCallbackProofFailures.has(refreshedPrimary));
+    if (
+      refreshedOrigin === "physical_proof" &&
+      !callbackFailurePrimary &&
+      !callbackProofFailure &&
+      (successor.status === "missing" || successor.status === "superseded")
+    ) {
+      attempt = Object.freeze({
+        result: successor.status === "missing"
+          ? { status: "missing" as const }
+          : {
+              status: "superseded" as const,
+              bytes: Buffer.from(successor.bytes)
+            },
+        successor
+      });
+    } else {
+      attempt = Object.freeze({
+        result: Object.freeze({
+          ...attempt.result,
+          origin: refreshedOrigin,
+          error: refreshedError,
+          successor
+        }),
+        successor
+      });
+    }
+  }
+  if (settlementError !== undefined) {
+    if (
+      attempt.result.status === "writer_failed" ||
+      attempt.result.status === "operation_failed"
+    ) {
+      return Object.freeze({
+        ...attempt.result,
+        error: preserveWorkspacePrimaryError(attempt.result.error, [settlementError])
+      });
+    }
+    return Object.freeze({
+      status: "operation_failed",
+      origin: "settlement",
+      error: settlementError,
+      successor: attempt.successor
+    });
+  }
+  return attempt.result;
 }
 
 /**
@@ -10632,18 +11188,18 @@ function closeRecordAuthorityCleanupPermitPinnedFile(
   const input = Object.freeze({ path: state.publicPath, fd: pinnedFile.fd });
   const afterPinnedFileClosed = state.afterPinnedFileClosed;
   state.afterPinnedFileClosed = undefined;
-  const closeSettled = pinnedFile.close().then(
+  const fileCloseSettled = pinnedFile.close().then(
     () => undefined,
     () => undefined
   );
+  const closeSettled = fileCloseSettled
+    .then(async () => await afterPinnedFileClosed?.(input))
+    .catch(() => undefined);
   state.pinnedFileClose = closeSettled;
   pendingCleanupPermitFileCloses.add(closeSettled);
   void closeSettled.finally(() => {
     pendingCleanupPermitFileCloses.delete(closeSettled);
   });
-  void closeSettled
-    .then(async () => await afterPinnedFileClosed?.(input))
-    .catch(() => undefined);
   return closeSettled;
 }
 
