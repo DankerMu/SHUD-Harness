@@ -152,6 +152,19 @@ Artifact registry 记录 evidence_usable artifact。测试细目：Test_Plan W2 
 **风险优先级（账本 Phase 2 同款）**：park→collect→resume→按 plan_cursor 接续的端到端原型是本里程碑
 **第一个 issue**，先于 WebSocket 细节打磨——这是全系统技术风险最高点。
 
+**M2 → M3 交接约束（2026-07-16 M2 符合性分析定案，PI 批准；stage-change-pipeline Stage 1 强制上下文）**：
+
+1. **agent-403 落 M3，不留治理真空窗**：Repo Explorer 角色与 RepoContextBrief artifact 在本里程碑同时出现，
+   artifact registry 的 `created_by=agent` 一律 403（Artifact_Registry_Spec §4）及其与 `llm_generated`
+   落盘判定的合流必须随 Repo Explorer/artifact 相关 issue 交付——收紧 `m2-research-context`
+   artifact-evidence spec 中 deferred requirement 的「M3+」表述为 M3。
+2. **audit 合流挂账**：M2 的 `audit.evidence_upgrade` NDJSON 行（#31 型，无 `AUDIT-NNN` id、无 actor_type）
+   须在 Session/Audit 层或 M7 审批链激活时向 User_Session_And_Audit_Schema 的 canonical AuditEvent 合流；
+   M3 凡新增 audit 面（sandbox 命令审计、PI gate 骨架）须先立此账，避免第二种非 canonical 审计形态固化。
+3. **Context_Trust 激活必须覆盖研究上下文自由文本**：T0–T4 信任分级在本里程碑激活时，StackLock/DataProvenance
+   的自由文本字段（`uncertainty_notes`、`preprocess.params`、`basin` 等）必须纳入信任标注——这些字段自
+   Coordinator Brief（Agent_Architecture §4.1）起进入提示词，是注入通道。
+
 **必读（增量重点）**：
 
 | 文档 | 关注点 |
