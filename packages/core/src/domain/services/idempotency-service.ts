@@ -172,6 +172,11 @@ type FailedRecoveryWriteOutcome =
       readonly status: "writer_failed";
       readonly error: unknown;
       readonly classification: RecoveryGenerationClassification;
+    }
+  | {
+      readonly status: "writer_failed";
+      readonly error: unknown;
+      readonly classificationError: unknown;
     };
 
 export interface IdempotencyRecordServiceOptions {
@@ -575,20 +580,18 @@ export function createIdempotencyRecordService(
           IdempotencyRecordSchema
         );
       } catch (writerError) {
-        return {
-          status: "writer_failed",
-          error: writerError,
-          classification: classifyRecoveryRecord(existing, input, scope)
-        };
+        return classifyFailedRecoveryWriterFailure(
+          writerError,
+          () => classifyRecoveryRecord(existing, input, scope)
+        );
       }
       if (replacement.status === "replaced") {
         return { status: "replaced", record: replacement.record };
       }
       if (replacement.status === "writer_failed") {
-        return {
-          status: "writer_failed",
-          error: replacement.error,
-          classification:
+        return classifyFailedRecoveryWriterFailure(
+          replacement.error,
+          () =>
             replacement.successor.status === "missing"
               ? { status: "missing" }
               : classifyRecoveryRecordBytes(
@@ -597,7 +600,7 @@ export function createIdempotencyRecordService(
                   scope,
                   evidenceRef
                 )
-        };
+        );
       }
       return {
         status: "generation_lost",
@@ -863,6 +866,81 @@ export function createIdempotencyRecordService(
     throw completedRecordInvalidationStateError(evidenceRef);
   }
 
+  function classifyFailedRecoveryWriterFailure(
+    writerError: unknown,
+    classifySuccessor: () => RecoveryGenerationClassification
+  ): Extract<FailedRecoveryWriteOutcome, { status: "writer_failed" }> {
+    try {
+      return {
+        status: "writer_failed",
+        error: writerError,
+        classification: classifySuccessor()
+      };
+    } catch (classificationError) {
+      return {
+        status: "writer_failed",
+        error: writerError,
+        classificationError
+      };
+    }
+  }
+
+  function resolveFailedRecoveryWriterFailure(
+    outcome: Extract<FailedRecoveryWriteOutcome, { status: "writer_failed" }>,
+    input: IdempotencyRecordLookupInput,
+    scope: IdempotencyScope,
+    evidenceRef: string
+  ): IdempotencyRecord {
+    if ("classificationError" in outcome) {
+      throw preserveTaskServiceErrorCompensationCompatibility(
+        outcome.error,
+        [outcome.classificationError],
+        IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+      );
+    }
+    if (outcome.classification.status === "completed") {
+      throw preserveTaskServiceErrorCompensationCompatibility(
+        completedRecordInvalidationIdentityError(evidenceRef),
+        [outcome.error],
+        IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+      );
+    }
+    if (
+      outcome.classification.status === "failed" ||
+      outcome.classification.status === "nonterminal"
+    ) {
+      throw outcome.error;
+    }
+    let classificationError: unknown;
+    try {
+      resolveRecoveryGenerationClassification(
+        outcome.classification,
+        input,
+        scope,
+        evidenceRef,
+        "Idempotency record was missing after failed rollback writer failure."
+      );
+    } catch (error) {
+      classificationError = error;
+    }
+    throw preserveTaskServiceErrorCompensationCompatibility(
+      outcome.error,
+      [classificationError],
+      IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+    );
+  }
+
+  function quarantineReplacementWriterFailure(
+    evidenceRef: string,
+    writerError: unknown
+  ): unknown {
+    return preserveTaskServiceErrorCompensationCompatibility(
+      completedRecordInvalidationIdentityError(evidenceRef),
+      [writerError],
+      IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+    );
+  }
+
   function assertValidCompletedRecoveryRecord(
     record: IdempotencyRecord,
     scope: IdempotencyScope,
@@ -1026,13 +1104,14 @@ export function createIdempotencyRecordService(
             IdempotencyRecordSchema
           );
         } catch (error) {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            completedRecordInvalidationIdentityError(evidenceRef),
-            [error],
-            IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+          throw quarantineReplacementWriterFailure(evidenceRef, error);
+        }
+        if (replacement.status === "writer_failed") {
+          throw quarantineReplacementWriterFailure(
+            evidenceRef,
+            replacement.error
           );
         }
-        if (replacement.status === "writer_failed") throw replacement.error;
         if (replacement.status !== "replaced") {
           throw completedRecordInvalidationIdentityError(evidenceRef);
         }
@@ -1136,6 +1215,7 @@ export function createIdempotencyRecordService(
           );
           const retainGuardForRetry =
             outcome.status === "writer_failed" &&
+            "classification" in outcome &&
             outcome.classification.status === "nonterminal";
           if (!retainGuardForRetry && !(await consume())) {
             throw idempotencyTransitionArtifactSettlementError(
@@ -1161,31 +1241,11 @@ export function createIdempotencyRecordService(
               "Idempotency record was missing after failed rollback recovery lost its observed generation."
             );
           }
-          if (outcome.classification.status === "completed") {
-            throw preserveTaskServiceErrorCompensationCompatibility(
-              completedRecordInvalidationIdentityError(evidenceRef),
-              [outcome.error],
-              IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
-            );
-          }
-          if (outcome.classification.status === "failed") throw outcome.error;
-          if (outcome.classification.status === "nonterminal") throw outcome.error;
-          let classificationError: unknown;
-          try {
-            resolveRecoveryGenerationClassification(
-              outcome.classification,
-              recoveryInput,
-              scope,
-              evidenceRef,
-              "Idempotency record was missing after failed rollback writer failure."
-            );
-          } catch (error) {
-            classificationError = error;
-          }
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            outcome.error,
-            [classificationError],
-            IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+          return resolveFailedRecoveryWriterFailure(
+            outcome,
+            recoveryInput,
+            scope,
+            evidenceRef
           );
         }, cleanupLock.release);
       }
@@ -2232,31 +2292,11 @@ export function createIdempotencyRecordService(
             "Idempotency record was missing after failed rollback recovery lost its observed generation."
           );
         }
-        if (outcome.classification.status === "completed") {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            completedRecordInvalidationIdentityError(evidenceRef),
-            [outcome.error],
-            IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
-          );
-        }
-        if (outcome.classification.status === "failed") throw outcome.error;
-        if (outcome.classification.status === "nonterminal") throw outcome.error;
-        let classificationError: unknown;
-        try {
-          resolveRecoveryGenerationClassification(
-            outcome.classification,
-            recoveryInput,
-            parsedScope,
-            evidenceRef,
-            "Idempotency record was missing after failed rollback writer failure."
-          );
-        } catch (error) {
-          classificationError = error;
-        }
-        throw preserveTaskServiceErrorCompensationCompatibility(
-          outcome.error,
-          [classificationError],
-          IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+        return resolveFailedRecoveryWriterFailure(
+          outcome,
+          recoveryInput,
+          parsedScope,
+          evidenceRef
         );
       }, guard.release);
     },

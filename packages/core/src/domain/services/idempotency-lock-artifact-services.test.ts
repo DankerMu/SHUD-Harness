@@ -29502,6 +29502,239 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
+  test("Issue79 post-audit quarantine self-heals one thrown or returned writer failure", async () => {
+    for (const failureForm of ["thrown", "returned"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:issue79-post-audit-quarantine-${failureForm}`;
+      const requestDigest = `digest-issue79-post-audit-quarantine-${failureForm}`;
+      const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+        evidenceRef
+      );
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+      const service = createIdempotencyRecordService({
+        workspaceRoot,
+        now: () => new Date("2026-07-17T08:00:00.000Z")
+      });
+      await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const writerMarker = new Error(
+        `Issue79 post-audit quarantine writer marker ${failureForm}`
+      );
+      let hookCalls = 0;
+      const failOnce = (): void => {
+        if (hookCalls > 0) return;
+        hookCalls += 1;
+        throw writerMarker;
+      };
+
+      const recovered = await runWithWorkspaceRecordPublicationHooks(
+        failureForm === "returned"
+          ? {
+              afterTemporaryFileWritten: ({ canonicalPath }) => {
+                if (canonicalPath === recordPath) failOnce();
+              }
+            }
+          : {
+              beforeCleanupPermitIdentityResolution: ({ path }) => {
+                if (path === recordPath) failOnce();
+              }
+            },
+        () =>
+          service.quarantineRecordAfterUnsafeRollback({
+            scope: "task",
+            key: rawKey,
+            requestDigest
+          })
+      );
+
+      expect(hookCalls).toBe(1);
+      expect(recovered).toMatchObject({
+        key: rawKey,
+        request_digest: requestDigest,
+        status: "failed"
+      });
+      expect(recovered.result_ref).toBeUndefined();
+      expect(await service.getRecord("task", rawKey)).toEqual(recovered);
+      await expectPathMissing(guardPath);
+      await expectPathMissing(cleanupLockPath);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("Issue79 post-audit writer primary owns malformed successor classification compensation", async () => {
+    for (const surface of ["direct", "retained"] as const) {
+      for (const successorKind of ["malformed", "schema_invalid"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const rawKey = `task:create:issue79-post-audit-primary-${surface}-${successorKind}`;
+        const requestDigest = `digest-issue79-post-audit-primary-${surface}-${successorKind}`;
+        const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+        const recordPath = workspaceRecordPath(
+          workspaceRoot,
+          ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+          evidenceRef
+        );
+        const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+        const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+        const service = createIdempotencyRecordService({ workspaceRoot });
+        await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+        if (surface === "retained") {
+          await writeFile(
+            guardPath,
+            `${JSON.stringify({
+              guard_id: `issue79-post-audit-primary-${successorKind}`,
+              owner_pid: 9_999_999,
+              acquired_at_ms: Date.now() - 31_000,
+              acquired_at: "2026-07-17T08:01:00.000Z",
+              intent: "fail",
+              request_digest: requestDigest
+            })}\n`,
+            { flag: "wx", mode: 0o600 }
+          );
+        }
+        const successorText = successorKind === "malformed"
+          ? "{"
+          : `${JSON.stringify({ invalid: true })}\n`;
+        const originalStats = await lstat(recordPath, { bigint: true });
+        const originalMode = originalStats.mode & 0o7777n;
+        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+        const writerMarker = new Error(
+          `Issue79 post-audit writer marker ${surface} ${successorKind}`
+        );
+        let hookCalls = 0;
+        let successorInstalled = false;
+
+        const failure = await captureThrownValue(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              afterTemporaryFileWritten: ({ canonicalPath }) => {
+                if (canonicalPath !== recordPath || hookCalls > 0) return;
+                hookCalls += 1;
+                throw writerMarker;
+              },
+              beforeTemporaryUnlink: async ({ canonicalPath }) => {
+                if (canonicalPath !== recordPath || successorInstalled) return;
+                successorInstalled = true;
+                await writeFile(recordPath, successorText, { flag: "w" });
+              }
+            },
+            () =>
+              surface === "direct"
+                ? service.recoverFailedRecordAfterRollback({
+                    scope: "task",
+                    key: rawKey,
+                    requestDigest
+                  })
+                : service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+          )
+        );
+
+        expect(hookCalls).toBe(1);
+        expect(successorInstalled).toBe(true);
+        expect(countErrorGraphIdentity(failure, writerMarker)).toBe(1);
+        expect(semanticPrimaryError(failure)).toBe(writerMarker);
+        const classificationError = findErrorNode(
+          failure,
+          (error) =>
+            error instanceof TaskServiceError &&
+            error.code ===
+              (successorKind === "malformed" ? "record_malformed" : "record_schema_error")
+        );
+        expect(classificationError).toBeDefined();
+        expect(countErrorGraphIdentity(failure, classificationError)).toBe(1);
+        expect(await readFile(recordPath, "utf8")).toBe(successorText);
+        const successorStats = await lstat(recordPath, { bigint: true });
+        expect(successorStats.dev).toBe(originalStats.dev);
+        expect(successorStats.ino).toBe(originalStats.ino);
+        expect(successorStats.mode & 0o7777n).toBe(originalMode);
+        await expectPathMissing(guardPath);
+        await expectPathMissing(cleanupLockPath);
+        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+      }
+    }
+  });
+
+  test("Issue79 post-audit invalid-completed authority cancels at the ordinary reservation ceiling", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:issue79-post-audit-invalid-capacity";
+    const requestDigest = "digest-issue79-post-audit-invalid-capacity";
+    const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      evidenceRef
+    );
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    const started = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    if (started.status !== "acquired") throw new Error("Expected invalid fixture acquisition.");
+    await writeFile(
+      recordPath,
+      `${JSON.stringify({ ...started.record, status: "completed" })}\n`,
+      { flag: "w" }
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let consumeCalls = 0;
+    const outcome = await service.consumeCompletedRecord(
+      { scope: "task", key: rawKey, requestDigest },
+      async () => {
+        consumeCalls += 1;
+        return { status: "accepted" as const, value: undefined };
+      }
+    );
+    expect(outcome.status).toBe("invalid_completed");
+    expect(consumeCalls).toBe(0);
+    if (outcome.status !== "invalid_completed") {
+      throw new Error("Expected transported invalid-completed authority.");
+    }
+    const readerGate = createAsyncGate();
+    const reservationsReady = createSignal();
+    let reservations = 0;
+    const noteReservation = (): void => {
+      reservations += 1;
+      if (reservations === 64) reservationsReady.resolve();
+    };
+    const readers = Array.from({ length: 64 }, (_, index) =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterAuthorityLeaseAcquired: async ({ operation }) => {
+            expect(operation).toBe("read");
+            noteReservation();
+            await readerGate.wait;
+          },
+          onAuthorityContention: () => noteReservation()
+        },
+        () =>
+          readJsonRecord(
+            recordPath,
+            `${evidenceRef}.invalid-reader.${index}`,
+            IdempotencyRecordSchema
+          )
+      )
+    );
+    await Promise.race([
+      reservationsReady.promise,
+      timeoutAfter(1_000, "invalid-completed readers did not reach the supported ceiling")
+    ]);
+    expect(reservations).toBe(64);
+
+    await service.cancelCompletedRecordMutationAuthority(outcome.mutationAuthority);
+    readerGate.open();
+    await Promise.all(readers);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
   test("Issue79 round3 classifier callback contract spans direct, wrapper, and completed recovery", async () => {
     for (const surface of ["direct", "refresh", "completed"] as const) {
       for (const hook of [
