@@ -24,6 +24,18 @@ Typical evidence:
 - Focused unit/integration tests for touched package/script; shell dry-runs for deterministic scripts.
 - Git/submodule status, generated YAML/JSON schema validation, PR CI, and issue/PR evidence links.
 
+Command entry points:
+- Setup: `git submodule update --init zero && bun install` (Bun 1.2.19).
+- Default check: `bun run check`; focused: `bun run test:core-services|test:backend-api|test:schemas|test:policy-gate`.
+- Contract/drift: `openspec validate <change> --strict --no-interactive`; `bun run schema:check`; `scripts/docs/check_links.sh`.
+
+Verification matrix:
+- Core domain services/state/file authority -> `bun run test:core-services && bun run typecheck` -> focused regressions + type safety.
+- Backend/API/entrypoint -> `bun run test:backend-api && bun run test:perf:api` -> route envelopes + PERF-API-001.
+- Shared/full-system TypeScript -> `bun run check` -> all package suites.
+- OpenSpec/docs/schema -> strict OpenSpec + docs links + `bun run schema:check` -> fixture/link/generated-drift evidence.
+- Submodule/workspace hygiene -> `git -C zero diff --quiet && test -z "$(git ls-files workspace)"` -> pinned base and no runtime assets.
+
 Domain risk packs:
 - Scientific governance / PI gate / evidence lineage.
 - Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility.

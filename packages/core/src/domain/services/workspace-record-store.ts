@@ -787,7 +787,10 @@ const observationOnlyPublicationHookOwners =
  * hooks fire for test observability, but workspaceRecordPublicationHooksActive
  * stays false so production branch selectors (the create-only fast path in
  * persistTaskSnapshot) keep their production branch. Nesting real publication
- * hooks inside an observation context restores active=true.
+ * hooks inside an observation context restores active=true. An injected hook
+ * error after the canonical commit is intentionally propagated even though
+ * the commit succeeded: committed-then-throw is this seam's fail-loud
+ * tripwire, not a rollback signal.
  */
 export async function runWithWorkspaceRecordObservationHooksForTest<T>(
   hooks: WorkspaceRecordPublicationHooks,

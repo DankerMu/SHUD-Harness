@@ -23945,6 +23945,7 @@ describe("idempotency, lock, and artifact services", () => {
     );
     const releaseCalls: ts.CallExpression[] = [];
     let failedRecordRecoveryWrapper: ts.FunctionDeclaration | undefined;
+    let completedConsumerMethod: ts.MethodDeclaration | undefined;
     let settleFulfilledDecisionResourcesInitializer: ts.Expression | undefined;
     const visit = (node: ts.Node): void => {
       if (
@@ -23952,6 +23953,13 @@ describe("idempotency, lock, and artifact services", () => {
         node.name?.text === "runFailedRecordTransitionWithGuardRecovery"
       ) {
         failedRecordRecoveryWrapper = node;
+      }
+      if (
+        ts.isMethodDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === "consumeCompletedRecord"
+      ) {
+        completedConsumerMethod = node;
       }
       if (
         ts.isVariableDeclaration(node) &&
@@ -23991,7 +23999,7 @@ describe("idempotency, lock, and artifact services", () => {
     );
     // Root A (V33-01): the completed-consumer settlement lives in the shared
     // settleFulfilledDecisionResources helper (referenced by the call site so
-    // both throw-after-fulfilled windows reuse it); the helper body must
+    // all three throw-after-fulfilled windows reuse it); the helper body must
     // still cancel the completed mutation authority.
     const completedConsumerCall = fulfilledValueSettlementCalls.find((call) =>
       call.arguments[2]!.getText(sourceFile).includes(
@@ -24003,6 +24011,36 @@ describe("idempotency, lock, and artifact services", () => {
     expect(
       settleFulfilledDecisionResourcesInitializer!.getText(sourceFile)
     ).toContain("cancelCompletedMutationAuthority");
+    expect(completedConsumerMethod).toBeDefined();
+    const completedConsumerSource = completedConsumerMethod!.getText(sourceFile);
+    expect(completedConsumerSource).toContain("transition-artifact release failure");
+    expect(completedConsumerSource).toContain(
+      "post-release mutation-authority state validation"
+    );
+    expect(completedConsumerSource).toContain("cleanup-permit refresh failure");
+    const completedConsumerSettlementCalls: ts.CallExpression[] = [];
+    const collectCompletedConsumerSettlementCalls = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "settleFulfilledDecisionResources"
+      ) {
+        completedConsumerSettlementCalls.push(node);
+      }
+      ts.forEachChild(node, collectCompletedConsumerSettlementCalls);
+    };
+    collectCompletedConsumerSettlementCalls(completedConsumerMethod!.body!);
+    expect(completedConsumerSettlementCalls).toHaveLength(2);
+    expect(completedConsumerCall!.arguments[2]!.getText(sourceFile)).toBe(
+      "settleFulfilledDecisionResources"
+    );
+    const recordStoreSource = await readFile(
+      join(import.meta.dir, "workspace-record-store.ts"),
+      "utf8"
+    );
+    expect(recordStoreSource).toContain(
+      "committed-then-throw is this seam's fail-loud"
+    );
     expect(guardProducerCall.arguments[2]!.getText(sourceFile)).toContain(
       "releaseOwnedIdempotencyTransitionArtifact"
     );
@@ -28495,6 +28533,332 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
+  test("Issue79 failed rollback recovery preserves a completed generation installed after deciding A", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:issue79-failed-recovery-generation";
+    const requestDigest = "digest-issue79-failed-recovery-generation";
+    const resultRef = "TASK-issue79-failed-recovery-generation";
+    const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      evidenceRef
+    );
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    await writeFile(
+      guardPath,
+      `${JSON.stringify({
+        guard_id: "issue79-failed-recovery-generation",
+        owner_pid: 9_999_999,
+        acquired_at_ms: Date.now() - 31_000,
+        acquired_at: "2026-07-16T16:20:00.000Z",
+        intent: "fail",
+        request_digest: requestDigest
+      })}\n`,
+      { flag: "wx", mode: 0o600 }
+    );
+    const completedB = {
+      key: rawKey,
+      scope: "task",
+      request_digest: requestDigest,
+      status: "completed",
+      result_ref: resultRef,
+      created_at: "2026-07-16T16:20:01.000Z",
+      updated_at: "2026-07-16T16:20:02.000Z"
+    } satisfies IdempotencyRecord;
+    const completedBText = `${JSON.stringify(completedB)}\n`;
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let recordObservations = 0;
+    let installed = false;
+
+    const recovered = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterDurableRecordObservation: ({ path, status }) => {
+          if (path === recordPath && status === "read") recordObservations += 1;
+        },
+        beforeRecordAuthorityIdentitySupplier: async ({ path }) => {
+          if (path !== recordPath || installed || recordObservations !== 2) return;
+          installed = true;
+          await writeFile(recordPath, completedBText, { flag: "w" });
+        },
+        beforeCleanupPermitIdentityResolution: async ({ path }) => {
+          if (path !== recordPath || installed || recordObservations !== 2) return;
+          installed = true;
+          await writeFile(recordPath, completedBText, { flag: "w" });
+        }
+      },
+      () =>
+        service.recoverFailedRecordAfterRollback({
+          scope: "task",
+          key: rawKey,
+          requestDigest
+        })
+    );
+
+    expect(installed).toBe(true);
+    expect(recovered).toEqual(completedB);
+    expect(await readFile(recordPath, "utf8")).toBe(completedBText);
+    const replay = await service.lookupReplay({ scope: "task", key: rawKey, requestDigest });
+    expect(replay).toEqual({ status: "completed", record: completedB });
+    expect(await readFile(recordPath, "utf8")).toBe(completedBText);
+    await expectPathMissing(guardPath);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("Issue79 completed rollback recovery preserves a completed generation installed after deciding A", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:issue79-completed-recovery-generation";
+    const requestDigest = "digest-issue79-completed-recovery-generation";
+    const requestedResultRef = "TASK-issue79-requested-completed-generation";
+    const installedResultRef = "TASK-issue79-installed-completed-generation";
+    const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+      evidenceRef
+    );
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const completedB = {
+      key: rawKey,
+      scope: "task",
+      request_digest: requestDigest,
+      status: "completed",
+      result_ref: installedResultRef,
+      created_at: "2026-07-16T16:21:01.000Z",
+      updated_at: "2026-07-16T16:21:02.000Z"
+    } satisfies IdempotencyRecord;
+    const completedBText = `${JSON.stringify(completedB)}\n`;
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let recordObservations = 0;
+    let installed = false;
+
+    const recovered = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterDurableRecordObservation: ({ path, status }) => {
+          if (path === recordPath && status === "read") recordObservations += 1;
+        },
+        beforeRecordAuthorityIdentitySupplier: async ({ path }) => {
+          if (path !== recordPath || installed || recordObservations !== 1) return;
+          installed = true;
+          await writeFile(recordPath, completedBText, { flag: "w" });
+        },
+        beforeCleanupPermitIdentityResolution: async ({ path }) => {
+          if (path !== recordPath || installed || recordObservations !== 1) return;
+          installed = true;
+          await writeFile(recordPath, completedBText, { flag: "w" });
+        }
+      },
+      () =>
+        service.recoverCompletedRecordAfterRollbackFailure({
+          scope: "task",
+          key: rawKey,
+          requestDigest,
+          resultRef: requestedResultRef
+        })
+    );
+
+    expect(installed).toBe(true);
+    expect(recovered).toEqual(completedB);
+    expect(await readFile(recordPath, "utf8")).toBe(completedBText);
+    const replay = await service.lookupReplay({ scope: "task", key: rawKey, requestDigest });
+    expect(replay).toEqual({ status: "completed", record: completedB });
+    expect(await readFile(recordPath, "utf8")).toBe(completedBText);
+    await expectPathMissing(idempotencyTransitionGuardPath(workspaceRoot, rawKey));
+    await expectPathMissing(idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey));
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("Issue79 uncontended recovery publishes one replayable terminal generation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      now: () => new Date("2026-07-16T16:22:00.000Z")
+    });
+    const failedKey = "task:create:issue79-uncontended-failed";
+    const failedDigest = "digest-issue79-uncontended-failed";
+    await service.beginRecord({ scope: "task", key: failedKey, requestDigest: failedDigest });
+    await writeFile(
+      idempotencyTransitionGuardPath(workspaceRoot, failedKey),
+      `${JSON.stringify({
+        guard_id: "issue79-uncontended-failed",
+        owner_pid: 9_999_999,
+        acquired_at_ms: Date.now() - 31_000,
+        acquired_at: "2026-07-16T16:21:00.000Z",
+        intent: "fail",
+        request_digest: failedDigest
+      })}\n`,
+      { flag: "wx", mode: 0o600 }
+    );
+    const completedKey = "task:create:issue79-uncontended-completed";
+    const completedDigest = "digest-issue79-uncontended-completed";
+    const completedResultRef = "TASK-issue79-uncontended-completed";
+    await service.beginRecord({
+      scope: "task",
+      key: completedKey,
+      requestDigest: completedDigest
+    });
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+
+    const failed = await service.recoverFailedRecordAfterRollback({
+      scope: "task",
+      key: failedKey,
+      requestDigest: failedDigest
+    });
+    const completed = await service.recoverCompletedRecordAfterRollbackFailure({
+      scope: "task",
+      key: completedKey,
+      requestDigest: completedDigest,
+      resultRef: completedResultRef
+    });
+
+    expect(failed).toMatchObject({
+      key: failedKey,
+      request_digest: failedDigest,
+      status: "failed"
+    });
+    expect(completed).toMatchObject({
+      key: completedKey,
+      request_digest: completedDigest,
+      status: "completed",
+      result_ref: completedResultRef
+    });
+    expect(
+      await service.lookupReplay({
+        scope: "task",
+        key: failedKey,
+        requestDigest: failedDigest
+      })
+    ).toEqual({ status: "incomplete", record: failed });
+    expect(
+      await service.lookupReplay({
+        scope: "task",
+        key: completedKey,
+        requestDigest: completedDigest
+      })
+    ).toEqual({ status: "completed", record: completed });
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("Issue79 replacement mismatch and invalid-completed classifications preserve exact bytes", async () => {
+    for (const recovery of ["failed", "completed"] as const) {
+      for (const replacementKind of ["mismatch", "invalid_completed"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const rawKey = `task:create:issue79-${recovery}-${replacementKind}`;
+        const requestDigest = `digest-issue79-${recovery}-${replacementKind}`;
+        const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+        const recordPath = workspaceRecordPath(
+          workspaceRoot,
+          ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+          evidenceRef
+        );
+        const service = createIdempotencyRecordService({ workspaceRoot });
+        await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+        if (recovery === "failed") {
+          await writeFile(
+            idempotencyTransitionGuardPath(workspaceRoot, rawKey),
+            `${JSON.stringify({
+              guard_id: `issue79-${recovery}-${replacementKind}`,
+              owner_pid: 9_999_999,
+              acquired_at_ms: Date.now() - 31_000,
+              acquired_at: "2026-07-16T16:23:00.000Z",
+              intent: "fail",
+              request_digest: requestDigest
+            })}\n`,
+            { flag: "wx", mode: 0o600 }
+          );
+        }
+        const replacement = {
+          key: rawKey,
+          scope: "task",
+          request_digest:
+            replacementKind === "mismatch" ? `${requestDigest}-replacement` : requestDigest,
+          status: "completed",
+          ...(replacementKind === "mismatch"
+            ? { result_ref: `TASK-issue79-${recovery}-mismatch` }
+            : {}),
+          created_at: "2026-07-16T16:23:01.000Z",
+          updated_at: "2026-07-16T16:23:02.000Z"
+        } satisfies IdempotencyRecord;
+        const replacementText = `${JSON.stringify(replacement)}\n`;
+        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+        let recordObservations = 0;
+        let installed = false;
+
+        const error = await captureTaskServiceError(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              afterDurableRecordObservation: ({ path, status }) => {
+                if (path === recordPath && status === "read") recordObservations += 1;
+              },
+              beforeRecordAuthorityIdentitySupplier: async ({ path }) => {
+                const decidingObservation = recovery === "failed" ? 2 : 1;
+                if (
+                  path !== recordPath ||
+                  installed ||
+                  recordObservations !== decidingObservation
+                ) return;
+                installed = true;
+                await writeFile(recordPath, replacementText, { flag: "w" });
+              },
+              beforeCleanupPermitIdentityResolution: async ({ path }) => {
+                const decidingObservation = recovery === "failed" ? 2 : 1;
+                if (
+                  path !== recordPath ||
+                  installed ||
+                  recordObservations !== decidingObservation
+                ) return;
+                installed = true;
+                await writeFile(recordPath, replacementText, { flag: "w" });
+              }
+            },
+            () =>
+              recovery === "failed"
+                ? service.recoverFailedRecordAfterRollback({
+                    scope: "task",
+                    key: rawKey,
+                    requestDigest
+                  })
+                : service.recoverCompletedRecordAfterRollbackFailure({
+                    scope: "task",
+                    key: rawKey,
+                    requestDigest,
+                    resultRef: `TASK-issue79-${recovery}-requested`
+                  })
+          )
+        );
+
+        expect(installed).toBe(true);
+        if (replacementKind === "mismatch") {
+          expect(error.code).toBe("idempotency_mismatch");
+          expect(error.status).toBe(422);
+        } else {
+          expect(error.code).toBe("record_malformed");
+          expect(error.status).toBe(500);
+          expect(error.message).toBe(
+            "Completed idempotency record is missing result_ref."
+          );
+        }
+        expect(await readFile(recordPath, "utf8")).toBe(replacementText);
+        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+      }
+    }
+  });
+
   test("S34-P62-07 ENOTDIR lane swap inside the reader window retains the lane cache", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -29277,6 +29641,109 @@ describe("idempotency, lock, and artifact services", () => {
     // The durable lane survives: once the denial clears, the same service
     // republishes the task.
     expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
+  });
+
+  test("Issue79 completed-consumption release and refresh exits settle transported resources once", async () => {
+    for (const exit of ["release", "refresh"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:issue79-consumption-${exit}`;
+      const requestDigest = `digest-issue79-consumption-${exit}`;
+      const resultRef = `TASK-issue79-consumption-${exit}`;
+      const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+        evidenceRef
+      );
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+      const completed = await service.completeRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest,
+        resultRef
+      });
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const releaseFailure = new Error("Issue79 fulfilled release failure");
+      const reasonSettlementFailure = new Error(
+        "Issue79 rejected-reason settlement compensation"
+      );
+      const completedB = {
+        ...completed,
+        result_ref: `TASK-issue79-consumption-${exit}-successor`,
+        updated_at: "2026-07-16T16:24:00.000Z"
+      } satisfies IdempotencyRecord;
+      const completedBText = `${JSON.stringify(completedB)}\n`;
+      let decisionFulfilled = false;
+      let reasonSettlementCalls = 0;
+      let replacementInstalled = false;
+
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+              if (
+                exit === "release" &&
+                decisionFulfilled &&
+                path === guardPath &&
+                operation === "conditional_delete"
+              ) {
+                throw releaseFailure;
+              }
+            },
+            afterCleanupPermitPinnedHandleClosed: async ({ path }) => {
+              if (exit !== "refresh" || path !== guardPath || replacementInstalled) return;
+              replacementInstalled = true;
+              await writeFile(recordPath, completedBText, { flag: "w" });
+            }
+          },
+          () =>
+            service.consumeCompletedRecord(
+              { scope: "task", key: rawKey, requestDigest },
+              async () => {
+                decisionFulfilled = true;
+                return {
+                  status: "rejected" as const,
+                  reason: "transported-reason",
+                  settleReasonAfterConsumptionFailure: async () => {
+                    reasonSettlementCalls += 1;
+                    if (exit === "release") throw reasonSettlementFailure;
+                  }
+                };
+              }
+            )
+        )
+      );
+
+      expect(decisionFulfilled).toBe(true);
+      expect(reasonSettlementCalls).toBe(1);
+      if (exit === "release") {
+        expect(semanticPrimaryError(failure)).toBeInstanceOf(TaskServiceError);
+        expect(
+          (semanticPrimaryError(failure) as TaskServiceError).message
+        ).toBe("Idempotency transition artifact release did not settle safely.");
+        expect(errorTreeContains(failure, releaseFailure)).toBe(true);
+        expect(errorTreeContains(failure, reasonSettlementFailure)).toBe(true);
+        expect(await readFile(recordPath, "utf8")).toBe(
+          `${JSON.stringify(completed, null, 2)}\n`
+        );
+      } else {
+        expect(replacementInstalled).toBe(true);
+        expect(semanticPrimaryError(failure)).toBeInstanceOf(TaskServiceError);
+        expect((semanticPrimaryError(failure) as TaskServiceError).code).toBe(
+          "workspace_path_not_safe"
+        );
+        expect(await readFile(recordPath, "utf8")).toBe(completedBText);
+        expect(
+          await service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+        ).toEqual({ status: "completed", record: completedB });
+      }
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
   });
 
   test("S34-P62-16 shared consume and guard-release rejection transports the primary once, never as its own compensation", async () => {
