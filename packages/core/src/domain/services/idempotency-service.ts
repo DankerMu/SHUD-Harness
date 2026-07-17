@@ -436,6 +436,7 @@ export function createIdempotencyRecordService(
       evidenceRef,
       IdempotencyRecordSchema
     );
+    if (replacement.status === "writer_failed") throw replacement.error;
     if (replacement.status !== "replaced") {
       throw completedRecordInvalidationIdentityError(evidenceRef);
     }
@@ -574,26 +575,41 @@ export function createIdempotencyRecordService(
           IdempotencyRecordSchema
         );
       } catch (writerError) {
-        try {
-          return {
-            status: "writer_failed",
-            error: writerError,
-            classification: await classifyCurrentRecoveryRecord(input, scope)
-          };
-        } catch (classificationError) {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            writerError,
-            [classificationError],
-            IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
-          );
-        }
+        return {
+          status: "writer_failed",
+          error: writerError,
+          classification: classifyRecoveryRecord(existing, input, scope)
+        };
       }
       if (replacement.status === "replaced") {
         return { status: "replaced", record: replacement.record };
       }
+      if (replacement.status === "writer_failed") {
+        return {
+          status: "writer_failed",
+          error: replacement.error,
+          classification:
+            replacement.successor.status === "missing"
+              ? { status: "missing" }
+              : classifyRecoveryRecordBytes(
+                  replacement.successor.bytes,
+                  input,
+                  scope,
+                  evidenceRef
+                )
+        };
+      }
       return {
         status: "generation_lost",
-        classification: await classifyCurrentRecoveryRecord(input, scope)
+        classification:
+          replacement.status === "missing"
+            ? { status: "missing" }
+            : classifyRecoveryRecordBytes(
+                replacement.bytes,
+                input,
+                scope,
+                evidenceRef
+              )
       };
     } finally {
       if (cleanupPermitOutstanding) {
@@ -720,8 +736,16 @@ export function createIdempotencyRecordService(
         IdempotencyRecordSchema
       );
       if (replacement.status === "replaced") return replacement.record;
+      if (replacement.status === "writer_failed") throw replacement.error;
       return resolveRecoveryGenerationClassification(
-        await classifyCurrentRecoveryRecord(input, scope),
+        replacement.status === "missing"
+          ? { status: "missing" }
+          : classifyRecoveryRecordBytes(
+              replacement.bytes,
+              input,
+              scope,
+              evidenceRef
+            ),
         input,
         scope,
         evidenceRef,
@@ -732,16 +756,6 @@ export function createIdempotencyRecordService(
         await cancelWorkspaceRecordCleanupPermit(observation.cleanupPermit);
       }
     }
-  }
-
-  async function classifyCurrentRecoveryRecord(
-    input: IdempotencyRecordLookupInput,
-    scope: IdempotencyScope
-  ): Promise<RecoveryGenerationClassification> {
-    const current = await service.getRecord(scope, input.key);
-    return current
-      ? classifyRecoveryRecord(current, input, scope)
-      : { status: "missing" };
   }
 
   function classifyRecoveryRecordBytes(
@@ -1018,6 +1032,7 @@ export function createIdempotencyRecordService(
             IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
           );
         }
+        if (replacement.status === "writer_failed") throw replacement.error;
         if (replacement.status !== "replaced") {
           throw completedRecordInvalidationIdentityError(evidenceRef);
         }
@@ -1786,11 +1801,16 @@ export function createIdempotencyRecordService(
               authorityStateError = completedRecordInvalidationIdentityError(evidenceRef);
             } else {
               try {
-                // Reuse the existing durable-observation boundary to prove
-                // that the transported authority still names a safely
-                // observable public record after guard release. Semantic
-                // generation drift remains the cleanup-permit refresh exit.
-                await readJsonRecord(recordPath, evidenceRef, IdempotencyRecordSchema);
+                // Reuse the transported cleanup permit for the defensive
+                // post-release proof. The classification is intentionally
+                // non-consuming here: semantic generation drift remains the
+                // cleanup-permit refresh exit below, and no ordinary record
+                // authority reservation is added after fulfillment.
+                await classifyWorkspaceRecordCleanupPermitAfterSiblingMutation(
+                  authorityState.cleanupPermit,
+                  recordPath,
+                  evidenceRef
+                );
               } catch (error) {
                 authorityStateError = error;
               }
@@ -2043,6 +2063,7 @@ export function createIdempotencyRecordService(
               evidenceRef,
               IdempotencyRecordSchema
             );
+            if (replacement.status === "writer_failed") throw replacement.error;
             if (replacement.status !== "replaced") {
               throw completedRecordInvalidationIdentityError(evidenceRef);
             }

@@ -625,10 +625,23 @@ export type WorkspaceRecordCleanupPermitSiblingClassification =
   | { readonly status: "missing" }
   | { readonly status: "superseded"; readonly bytes: Buffer };
 
+type WorkspaceRecordDurableSuccessorOutcome =
+  | { readonly status: "current"; readonly bytes: Buffer }
+  | { readonly status: "missing" }
+  | { readonly status: "superseded"; readonly bytes: Buffer };
+
 export type ExactWorkspaceJsonRecordReplacementResult<T> =
   | { readonly status: "replaced"; readonly record: T }
   | { readonly status: "missing" }
-  | { readonly status: "superseded" };
+  | { readonly status: "superseded"; readonly bytes: Buffer }
+  | {
+      readonly status: "writer_failed";
+      readonly error: unknown;
+      readonly successor: WorkspaceRecordDurableSuccessorOutcome;
+    };
+
+type ExactWorkspaceJsonRecordReplacementAttempt<T> =
+  ExactWorkspaceJsonRecordReplacementResult<T>;
 
 export type ConditionalDeleteObservedJsonRecordResult =
   | ConditionalDeleteJsonRecordResult
@@ -1962,9 +1975,43 @@ export async function classifyWorkspaceRecordCleanupPermitAfterSiblingMutation(
     throw publicationStateError(evidenceRef);
   }
 
+  const callbackPrimaries: unknown[] = [];
+  const runClassifierCallback = async (
+    callback: (() => Promise<void> | void) | undefined,
+    proveAuthority: () => Promise<void>
+  ): Promise<void> => {
+    try {
+      await runAuthorityMutatingCallbackBoundary(callback, proveAuthority);
+    } catch (error) {
+      const proofFailure =
+        ((typeof error === "object" && error !== null) ||
+          typeof error === "function") &&
+        authorityCallbackProofFailures.has(error);
+      if (!proofFailure) callbackPrimaries.push(error);
+      throw error;
+    }
+  };
+
   try {
-    await publicationHookStorage.getStore()?.beforeRecordAuthorityIdentitySupplier?.(
-      Object.freeze({ path: state.publicPath })
+    const beforeRecordAuthorityIdentitySupplier = publicationHookStorage.getStore()
+      ?.beforeRecordAuthorityIdentitySupplier;
+    await runClassifierCallback(
+      beforeRecordAuthorityIdentitySupplier
+        ? () =>
+            beforeRecordAuthorityIdentitySupplier(
+              Object.freeze({ path: state.publicPath })
+            )
+        : undefined,
+      async () => {
+        const provedParent = await lstat(parentPath, { bigint: true });
+        if (
+          !provedParent.isDirectory() ||
+          provedParent.isSymbolicLink() ||
+          !workspaceRecordPhysicalIdentityMatches(provedParent, parentIdentity)
+        ) {
+          throw publicationStateError(evidenceRef);
+        }
+      }
     );
     return await runWithRecordDirectoryMutationLocks([parentIdentity], async () => {
       let beforeParent = await lstat(parentPath, { bigint: true });
@@ -2026,7 +2073,7 @@ export async function classifyWorkspaceRecordCleanupPermitAfterSiblingMutation(
       const afterDurableObservation = publicationHookStorage.getStore()
         ?.afterDurableRecordObservation;
       if (afterDurableObservation) {
-        await runAuthorityMutatingCallbackBoundary(
+        await runClassifierCallback(
           () =>
             afterDurableObservation(
               Object.freeze({
@@ -2107,7 +2154,15 @@ export async function classifyWorkspaceRecordCleanupPermitAfterSiblingMutation(
       return { status: "current" };
     });
   } catch (error) {
+    if (callbackPrimaries.some((primary) => Object.is(primary, error))) throw error;
     if (error instanceof TaskServiceError) throw error;
+    if (
+      ((typeof error === "object" && error !== null) ||
+        typeof error === "function") &&
+      authorityCallbackProofFailures.has(error)
+    ) {
+      throw error;
+    }
     throw publicationStateError(evidenceRef, error);
   }
 }
@@ -2209,10 +2264,8 @@ interface WorkspaceRecordCleanupPermitGenerationSnapshot {
 }
 
 type WorkspaceRecordCleanupPermitGenerationClassification =
-  | Extract<
-      WorkspaceRecordCleanupPermitSettlementResult,
-      { status: "missing" | "superseded" }
-    >
+  | { readonly status: "missing" }
+  | { readonly status: "superseded"; readonly bytes: Buffer }
   | {
       readonly status: "same_generation";
       readonly proof: "exact_observation" | "published_mutation";
@@ -2229,13 +2282,13 @@ interface WorkspaceRecordCleanupTerminalAdmission {
 
 class WorkspaceRecordCleanupTerminalResultError extends Error {
   readonly result: Extract<
-    WorkspaceRecordCleanupPermitSettlementResult,
+    WorkspaceRecordCleanupPermitGenerationClassification,
     { status: "missing" | "superseded" }
   >;
 
   constructor(
     result: Extract<
-      WorkspaceRecordCleanupPermitSettlementResult,
+      WorkspaceRecordCleanupPermitGenerationClassification,
       { status: "missing" | "superseded" }
     >,
     cause: unknown
@@ -2246,6 +2299,18 @@ class WorkspaceRecordCleanupTerminalResultError extends Error {
     this.name = "WorkspaceRecordCleanupTerminalResultError";
     this.result = result;
   }
+}
+
+function cleanupPermitSettlementResultFromGenerationClassification(
+  result: Extract<
+    WorkspaceRecordCleanupPermitGenerationClassification,
+    { status: "missing" | "superseded" }
+  >
+): Extract<
+  WorkspaceRecordCleanupPermitSettlementResult,
+  { status: "missing" | "superseded" }
+> {
+  return { status: result.status };
 }
 
 function recordDirectoryBindingTimeParentSnapshotsMatch(
@@ -2423,8 +2488,14 @@ async function classifyWorkspaceRecordCleanupPermitGenerationNow(
   );
   const parentPath = expected.bindingTimeParentSnapshot.path;
   const parentBefore = await readSafeDirectoryLeafEntry(parentPath);
-  if (!workspaceRecordCleanupSnapshotParentMatchesStat(parentBefore, expected)) {
-    return { status: "superseded" };
+  if (
+    !parentBefore ||
+    !parentBefore.isDirectory() ||
+    parentBefore.isSymbolicLink() ||
+    !recordDirectoryPathnameBindingMatchesPath(parentPath, expected.parentIdentity) ||
+    !workspaceRecordPhysicalIdentityMatches(parentBefore, expected.parentIdentity)
+  ) {
+    throw publicationStateError(expected.evidenceRef);
   }
   let exactObservation = false;
   try {
@@ -2440,14 +2511,17 @@ async function classifyWorkspaceRecordCleanupPermitGenerationNow(
   if (exactObservation) {
     const parentAfterExactProof = await readSafeDirectoryLeafEntry(parentPath);
     if (
-      !workspaceRecordCleanupSnapshotParentMatchesStat(
+      !parentAfterExactProof ||
+      !parentAfterExactProof.isDirectory() ||
+      parentAfterExactProof.isSymbolicLink() ||
+      !workspaceRecordPhysicalIdentityMatches(
         parentAfterExactProof,
-        expected
+        expected.parentIdentity
       ) ||
       parentAfterExactProof.ctimeNs !== parentBefore.ctimeNs ||
       parentAfterExactProof.mtimeNs !== parentBefore.mtimeNs
     ) {
-      return { status: "superseded" };
+      throw publicationStateError(expected.evidenceRef);
     }
     return { status: "same_generation", proof: "exact_observation" };
   }
@@ -2456,17 +2530,50 @@ async function classifyWorkspaceRecordCleanupPermitGenerationNow(
     expected.publicPath,
     expected.evidenceRef
   );
-  if (current.status === "absent") return { status: "missing" };
+  const parentAfterCurrent = await readSafeDirectoryLeafEntry(parentPath);
   if (
-    !workspaceRecordCleanupSnapshotParentMatchesStat(parentBefore, expected) ||
+    !parentAfterCurrent ||
+    !parentAfterCurrent.isDirectory() ||
+    parentAfterCurrent.isSymbolicLink() ||
+    !workspaceRecordPhysicalIdentityMatches(
+      parentAfterCurrent,
+      expected.parentIdentity
+    ) ||
+    parentAfterCurrent.ctimeNs !== parentBefore.ctimeNs ||
+    parentAfterCurrent.mtimeNs !== parentBefore.mtimeNs
+  ) {
+    throw publicationStateError(expected.evidenceRef);
+  }
+  const refreshParentBinding = (): void => {
+    expected.parentIdentity.ctimeNs = parentAfterCurrent.ctimeNs;
+    expected.parentIdentity.mtimeNs = parentAfterCurrent.mtimeNs;
+    state.bindingTimeParentSnapshot = Object.freeze({
+      path: parentPath,
+      dev: parentAfterCurrent.dev,
+      ino: parentAfterCurrent.ino,
+      ctimeNs: parentAfterCurrent.ctimeNs,
+      mtimeNs: parentAfterCurrent.mtimeNs
+    });
+  };
+  if (current.status === "absent") {
+    refreshParentBinding();
+    return { status: "missing" };
+  }
+  if (current.status === "invalid") {
+    throw publicationStateError(expected.evidenceRef);
+  }
+  if (
     !workspaceRecordPhysicalIdentityMatches(
       current.identity,
       expected.generation.identity
     ) ||
-    current.status !== "existing" ||
     authority !== "published_generation"
   ) {
-    return { status: "superseded" };
+    refreshParentBinding();
+    if (!isSafeBaseCompatibleOrdinaryGenerationMode(current.mode)) {
+      throw publicationStateError(expected.evidenceRef);
+    }
+    return { status: "superseded", bytes: Buffer.from(current.bytes) };
   }
 
   const pinnedFile = state.pinnedFile!;
@@ -2488,7 +2595,11 @@ async function classifyWorkspaceRecordCleanupPermitGenerationNow(
     pinnedAfter.mtimeNs !== pinnedBefore.mtimeNs ||
     current.mtimeNs === expected.pathnameBinding.mtimeNs
   ) {
-    return { status: "superseded" };
+    refreshParentBinding();
+    if (!isSafeBaseCompatibleOrdinaryGenerationMode(current.mode)) {
+      throw publicationStateError(expected.evidenceRef);
+    }
+    return { status: "superseded", bytes: Buffer.from(current.bytes) };
   }
   return { status: "same_generation", proof: "published_mutation" };
 }
@@ -2624,7 +2735,9 @@ async function conditionalDeleteJsonRecordGenerationWithCleanupPermit<T>(
       );
     } catch (error) {
       if (error instanceof WorkspaceRecordCleanupTerminalResultError) {
-        return error.result;
+        return cleanupPermitSettlementResultFromGenerationClassification(
+          error.result
+        );
       }
       throw new WorkspaceRecordConditionalDeleteError(
         "pre_mutation",
@@ -2735,7 +2848,9 @@ export async function settleWorkspaceRecordCleanupPermitAfterExactObservation(
       );
     } catch (error) {
       if (error instanceof WorkspaceRecordCleanupTerminalResultError) {
-        return error.result;
+        return cleanupPermitSettlementResultFromGenerationClassification(
+          error.result
+        );
       }
       throw error;
     }
@@ -2836,7 +2951,9 @@ export async function validateWorkspaceRecordCleanupPermitAfterExactObservation(
           );
         } catch (error) {
           if (error instanceof WorkspaceRecordCleanupTerminalResultError) {
-            return error.result;
+            return cleanupPermitSettlementResultFromGenerationClassification(
+              error.result
+            );
           }
           throw error;
         }
@@ -2906,85 +3023,121 @@ export async function replaceJsonRecordAfterExactObservation<T>(
     evidenceRef
   );
   return await runWithPreservedRelease(
-    async () =>
-      await runWithRecordDirectoryBindingOperation(async () => {
-        const expected = snapshotWorkspaceRecordCleanupPermitGeneration(
-          permit,
-          recordPath,
-          evidenceRef
-        );
-        const hooks = publicationHookStorage.getStore();
-        let authorityLease: RecordAuthorityLease;
-        try {
-          authorityLease = await acquireRecordAuthorityWithCleanupPermit(
+    async () => {
+      const attempt = await runWithRecordDirectoryBindingOperation<
+        ExactWorkspaceJsonRecordReplacementAttempt<T>
+      >(async () => {
+          const expected = snapshotWorkspaceRecordCleanupPermitGeneration(
             permit,
             recordPath,
-            evidenceRef,
-            hooks,
-            { authority: "exact_observation", expected }
+            evidenceRef
           );
-        } catch (error) {
-          if (error instanceof WorkspaceRecordCleanupTerminalResultError) {
-            return error.result;
-          }
-          throw error;
-        }
-
-        try {
-          const admissionFailure = authorityLease.cleanupPermitAdmissionFailure;
-          if (admissionFailure !== undefined) throw admissionFailure.value;
-          const classification = await classifyWorkspaceRecordCleanupPermitGeneration(
-            permit,
-            expected,
-            "exact_observation"
-          );
-          if (
-            classification.status === "missing" ||
-            classification.status === "superseded"
-          ) {
-            return classification;
-          }
-          if (
-            classification.proof !== "exact_observation" ||
-            !authorityLease.validateCleanupGeneration
-          ) {
-            throw publicationStateError(evidenceRef);
-          }
-          await authorityLease.validateCleanupGeneration();
-
-          const prepared = await prepareJsonRecordWrite(
-            workspaceRoot,
-            relativeDirectorySegments,
-            fileName,
-            record,
-            evidenceRef,
-            schema
-          );
-          if (prepared.recordPath !== recordPath) {
-            throw publicationStateError(evidenceRef);
-          }
-          const expectedBaseline: Extract<MutableCanonicalBaseline, { status: "existing" }> = {
-            status: "existing",
-            identity: expected.generation.identity,
-            bytes: Buffer.from(expected.generation.bytes),
-            mode: expected.generation.mode,
-            nlink: expected.generation.nlink,
-            ctimeNs: expected.pathnameBinding.ctimeNs,
-            mtimeNs: expected.pathnameBinding.mtimeNs
-          };
-          const outcome =
-            await attemptPreparedJsonRecordWriteWithDirectoryBindingOperation(
-              prepared,
+          const hooks = publicationHookStorage.getStore();
+          let authorityLease: RecordAuthorityLease;
+          try {
+            authorityLease = await acquireRecordAuthorityWithCleanupPermit(
+              permit,
+              recordPath,
               evidenceRef,
-              false,
-              { authorityLease, canonicalBaseline: expectedBaseline }
+              hooks,
+              { authority: "exact_observation", expected }
             );
-          if (outcome.status === "failed") throw outcome.error;
-          return Object.freeze({ status: "replaced" as const, record: outcome.written.data });
-        } finally {
-          await authorityLease.release();
-        }
-      }),
+          } catch (error) {
+            if (error instanceof WorkspaceRecordCleanupTerminalResultError) {
+              return error.result;
+            }
+            throw error;
+          }
+
+          try {
+            const admissionFailure = authorityLease.cleanupPermitAdmissionFailure;
+            if (admissionFailure !== undefined) throw admissionFailure.value;
+            const classification = await classifyWorkspaceRecordCleanupPermitGeneration(
+              permit,
+              expected,
+              "exact_observation"
+            );
+            if (
+              classification.status === "missing" ||
+              classification.status === "superseded"
+            ) {
+              return classification;
+            }
+            if (
+              classification.proof !== "exact_observation" ||
+              !authorityLease.validateCleanupGeneration
+            ) {
+              throw publicationStateError(evidenceRef);
+            }
+            await authorityLease.validateCleanupGeneration();
+
+            const prepared = await prepareJsonRecordWrite(
+              workspaceRoot,
+              relativeDirectorySegments,
+              fileName,
+              record,
+              evidenceRef,
+              schema
+            );
+            if (prepared.recordPath !== recordPath) {
+              throw publicationStateError(evidenceRef);
+            }
+            const expectedBaseline: Extract<
+              MutableCanonicalBaseline,
+              { status: "existing" }
+            > = {
+              status: "existing",
+              identity: expected.generation.identity,
+              bytes: Buffer.from(expected.generation.bytes),
+              mode: expected.generation.mode,
+              nlink: expected.generation.nlink,
+              ctimeNs: expected.pathnameBinding.ctimeNs,
+              mtimeNs: expected.pathnameBinding.mtimeNs
+            };
+            const outcome =
+              await attemptPreparedJsonRecordWriteWithDirectoryBindingOperation(
+                prepared,
+                evidenceRef,
+                false,
+                { authorityLease, canonicalBaseline: expectedBaseline }
+              );
+            if (outcome.status === "failed") {
+              let successor: WorkspaceRecordDurableSuccessorOutcome;
+              try {
+                const classification =
+                  await classifyWorkspaceRecordCleanupPermitGeneration(
+                    permit,
+                    expected,
+                    "exact_observation"
+                  );
+                successor = classification.status === "same_generation"
+                  ? {
+                      status: "current",
+                      bytes: Buffer.from(expected.generation.bytes)
+                    }
+                  : classification;
+              } catch (classificationError) {
+                throw preserveWorkspacePrimaryError(
+                  classificationError,
+                  [outcome.error]
+                );
+              }
+              return Object.freeze({
+                status: "writer_failed" as const,
+                error: outcome.error,
+                successor
+              });
+            }
+            return Object.freeze({
+              status: "replaced" as const,
+              record: outcome.written.data
+            });
+          } finally {
+            await authorityLease.release();
+          }
+        });
+      return attempt;
+    },
     async () => await cancelRecordAuthorityCleanupPermit(permit),
     "Exact workspace record replacement and cleanup-permit settlement both failed.",
     undefined,
