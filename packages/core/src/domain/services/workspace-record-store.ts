@@ -270,6 +270,10 @@ type CanonicalAuthorityBaseline =
       mtimeNs: bigint;
     };
 
+type CanonicalAuthorityBaselineObservation =
+  | CanonicalAuthorityBaseline
+  | { status: "generation_drift" };
+
 export function workspaceRecordPhysicalIdentityMatches(
   observed: WorkspaceRecordPhysicalIdentity,
   expected: WorkspaceRecordPhysicalIdentity
@@ -615,6 +619,11 @@ export type WorkspaceRecordCleanupPermitSettlementResult =
   | { readonly status: "current" }
   | { readonly status: "missing" }
   | { readonly status: "superseded" };
+
+export type WorkspaceRecordCleanupPermitSiblingClassification =
+  | { readonly status: "current" }
+  | { readonly status: "missing" }
+  | { readonly status: "superseded"; readonly bytes: Buffer };
 
 export type ExactWorkspaceJsonRecordReplacementResult<T> =
   | { readonly status: "replaced"; readonly record: T }
@@ -1913,12 +1922,26 @@ export async function refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
   path: string,
   evidenceRef: string
 ): Promise<void> {
+  const result = await classifyWorkspaceRecordCleanupPermitAfterSiblingMutation(
+    permit,
+    path,
+    evidenceRef
+  );
+  if (result.status !== "current") throw publicationStateError(evidenceRef);
+}
+
+export async function classifyWorkspaceRecordCleanupPermitAfterSiblingMutation(
+  permit: WorkspaceRecordCleanupPermit,
+  path: string,
+  evidenceRef: string
+): Promise<WorkspaceRecordCleanupPermitSiblingClassification> {
   const state = cleanupPermitState.get(permit);
   const parentIdentity = state?.parentIdentity;
   const parentPath = state?.parentPath;
   const pinnedFile = state?.pinnedFile;
   const generation = state?.generation;
   const generationExpectation = state?.generationExpectation;
+  const expectedPathnameBinding = state?.pathnameBinding;
   const expectedBytes = state?.expectedBytes;
   if (
     !state ||
@@ -1933,53 +1956,70 @@ export async function refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
     state.pinnedFileClosed ||
     !generation ||
     !generationExpectation ||
+    !expectedPathnameBinding ||
     !expectedBytes
   ) {
     throw publicationStateError(evidenceRef);
   }
 
-  await runWithRecordDirectoryMutationLocks([parentIdentity], async () => {
-    try {
-      const beforeParent = await lstat(parentPath, { bigint: true });
-      if (
-        !beforeParent.isDirectory() ||
-        beforeParent.isSymbolicLink() ||
-        !workspaceRecordPhysicalIdentityMatches(beforeParent, parentIdentity)
-      ) {
-        throw publicationStateError(evidenceRef);
-      }
-      const pinnedIdentity = await pinnedFile.stat({ bigint: true });
-      const observed = await readBoundedOpenFile(pinnedFile, pinnedIdentity);
-      if (
-        !pinnedIdentity.isFile() ||
-        !workspaceRecordPhysicalIdentityMatches(pinnedIdentity, generation) ||
-        pinnedIdentity.mode !== generationExpectation.mode ||
-        pinnedIdentity.nlink !== generationExpectation.nlink ||
-        pinnedIdentity.size !== BigInt(expectedBytes.length) ||
-        !observed.bytes.equals(expectedBytes) ||
-        observed.before.dev !== pinnedIdentity.dev ||
-        observed.before.ino !== pinnedIdentity.ino ||
-        observed.after.dev !== pinnedIdentity.dev ||
-        observed.after.ino !== pinnedIdentity.ino ||
-        observed.after.size !== pinnedIdentity.size
-      ) {
-        throw publicationStateError(evidenceRef);
-      }
-      const pathnameBinding = await captureCanonicalPathnameBinding(
+  try {
+    let beforeParent = await lstat(parentPath, { bigint: true });
+    if (
+      !beforeParent.isDirectory() ||
+      beforeParent.isSymbolicLink() ||
+      !workspaceRecordPhysicalIdentityMatches(beforeParent, parentIdentity)
+    ) {
+      throw publicationStateError(evidenceRef);
+    }
+    const pinnedIdentity = await pinnedFile.stat({ bigint: true });
+    const observed = await readBoundedOpenFile(pinnedFile, pinnedIdentity);
+    if (
+      !pinnedIdentity.isFile() ||
+      !workspaceRecordPhysicalIdentityMatches(pinnedIdentity, generation) ||
+      pinnedIdentity.mode !== generationExpectation.mode ||
+      (pinnedIdentity.nlink !== generationExpectation.nlink &&
+        pinnedIdentity.nlink !== 0n) ||
+      observed.before.dev !== pinnedIdentity.dev ||
+      observed.before.ino !== pinnedIdentity.ino ||
+      observed.after.dev !== pinnedIdentity.dev ||
+      observed.after.ino !== pinnedIdentity.ino ||
+      observed.after.size !== pinnedIdentity.size
+    ) {
+      throw publicationStateError(evidenceRef);
+    }
+    let current!: CanonicalAuthorityBaseline;
+    let afterParent!: BigIntStats;
+    let stableParentEpoch = false;
+    const maxStableParentAttempts = 10;
+    for (let attempt = 0; attempt < maxStableParentAttempts; attempt += 1) {
+      const candidate = await captureCanonicalAuthorityBaseline(
         state.publicPath,
-        generationExpectation,
-        generationExpectation.nlink,
-        evidenceRef
+        evidenceRef,
+        true
       );
-      const afterParent = await lstat(parentPath, { bigint: true });
+      afterParent = await lstat(parentPath, { bigint: true });
       if (
-        afterParent.dev !== beforeParent.dev ||
-        afterParent.ino !== beforeParent.ino ||
-        afterParent.ctimeNs !== beforeParent.ctimeNs ||
-        afterParent.mtimeNs !== beforeParent.mtimeNs
+        !afterParent.isDirectory() ||
+        afterParent.isSymbolicLink() ||
+        !workspaceRecordPhysicalIdentityMatches(afterParent, beforeParent)
       ) {
         throw publicationStateError(evidenceRef);
       }
+      const parentEpochStable =
+        afterParent.ctimeNs === beforeParent.ctimeNs &&
+        afterParent.mtimeNs === beforeParent.mtimeNs;
+      if (candidate.status !== "generation_drift" && parentEpochStable) {
+        current = candidate;
+        stableParentEpoch = true;
+        break;
+      }
+      beforeParent = afterParent;
+    }
+    if (!stableParentEpoch) throw publicationStateError(evidenceRef);
+    if (current.status === "invalid") {
+      throw publicationStateError(evidenceRef);
+    }
+    const refreshParentBinding = (): void => {
       parentIdentity.ctimeNs = afterParent.ctimeNs;
       parentIdentity.mtimeNs = afterParent.mtimeNs;
       state.bindingTimeParentSnapshot = Object.freeze({
@@ -1989,12 +2029,49 @@ export async function refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
         ctimeNs: afterParent.ctimeNs,
         mtimeNs: afterParent.mtimeNs
       });
-      state.pathnameBinding = pathnameBinding;
-    } catch (error) {
-      if (error instanceof TaskServiceError) throw error;
-      throw publicationStateError(evidenceRef, error);
+    };
+    if (current.status === "absent") {
+      refreshParentBinding();
+      return { status: "missing" };
     }
-  });
+    const samePhysicalGeneration = workspaceRecordPhysicalIdentityMatches(
+      current.identity,
+      generation
+    );
+    if (!samePhysicalGeneration) {
+      refreshParentBinding();
+      return { status: "superseded", bytes: Buffer.from(current.bytes) };
+    }
+    if (
+      pinnedIdentity.nlink !== generationExpectation.nlink ||
+      current.mode !== generationExpectation.mode ||
+      current.nlink !== generationExpectation.nlink
+    ) {
+      throw publicationStateError(evidenceRef);
+    }
+    if (
+      pinnedIdentity.size !== BigInt(expectedBytes.length) ||
+      !observed.bytes.equals(expectedBytes) ||
+      !current.bytes.equals(expectedBytes) ||
+      current.ctimeNs !== expectedPathnameBinding.ctimeNs ||
+      current.mtimeNs !== expectedPathnameBinding.mtimeNs
+    ) {
+      refreshParentBinding();
+      return { status: "superseded", bytes: Buffer.from(current.bytes) };
+    }
+    const refreshedPathnameBinding = await captureCanonicalPathnameBinding(
+      state.publicPath,
+      generationExpectation,
+      generationExpectation.nlink,
+      evidenceRef
+    );
+    refreshParentBinding();
+    state.pathnameBinding = refreshedPathnameBinding;
+    return { status: "current" };
+  } catch (error) {
+    if (error instanceof TaskServiceError) throw error;
+    throw publicationStateError(evidenceRef, error);
+  }
 }
 
 export type ConditionalDeleteJsonRecordCondition<T> =
@@ -9075,10 +9152,20 @@ async function assertReboundCommittedCanonicalAuthority(
   await assertMutableCanonicalBaseline(recordPath, committedBaseline, evidenceRef);
 }
 
-async function captureCanonicalAuthorityBaseline(
+function captureCanonicalAuthorityBaseline(
   recordPath: string,
   evidenceRef: string
-): Promise<CanonicalAuthorityBaseline> {
+): Promise<CanonicalAuthorityBaseline>;
+function captureCanonicalAuthorityBaseline(
+  recordPath: string,
+  evidenceRef: string,
+  reportGenerationDrift: true
+): Promise<CanonicalAuthorityBaselineObservation>;
+async function captureCanonicalAuthorityBaseline(
+  recordPath: string,
+  evidenceRef: string,
+  reportGenerationDrift = false
+): Promise<CanonicalAuthorityBaselineObservation> {
   // A successful no-follow open is the valid-entry observation for this
   // mutation-free authority epoch. Only paths that cannot be opened that way
   // need a separate lstat to preserve their exact invalid baseline.
@@ -9110,12 +9197,22 @@ async function captureCanonicalAuthorityBaseline(
     if (
       after.dev !== before.dev ||
       after.ino !== before.ino ||
-      after.nlink !== before.nlink ||
       after.mode !== before.mode ||
-      after.size !== before.size ||
+      after.size !== before.size
+    ) {
+      throw publicationStateError(evidenceRef);
+    }
+    if (after.nlink !== before.nlink) {
+      if (reportGenerationDrift && before.nlink === 1n && after.nlink === 0n) {
+        return { status: "generation_drift" };
+      }
+      throw publicationStateError(evidenceRef);
+    }
+    if (
       after.ctimeNs !== before.ctimeNs ||
       after.mtimeNs !== before.mtimeNs
     ) {
+      if (reportGenerationDrift) return { status: "generation_drift" };
       throw publicationStateError(evidenceRef);
     }
     return {
