@@ -4087,7 +4087,7 @@ describe("idempotency, lock, and artifact services", () => {
     const publicationBody = publicationFunction!.body!.getText(sourceFile);
     const renameIndex = publicationBody.indexOf("rename(temporaryPath, recordPath)");
     const isolationBoundaryIndex = publicationBody.indexOf(
-      "await runWithoutExactReplacementFailureCarrier("
+      "await runWithoutExactReplacementFailureCarrierAsync("
     );
     const hookIndex = publicationBody.indexOf(
       "() => Reflect.apply(",
@@ -26848,16 +26848,23 @@ describe("idempotency, lock, and artifact services", () => {
       "runWithRecordDirectoryBindingOperation",
       "runWithRecordDirectoryMutationLocks"
     ];
+    const carrierFreeCallbackSettlement = [
+      "runWithoutExactReplacementFailureCarrierAsync"
+    ];
     const inventoriedFunctions = [
       ...contextOnlyWithoutTerminalProof,
       ...normalizedInertJsonSettlement,
       ...recordStoreOwnedEnvelopeSettlement,
       ...explicitLaterDirectoryProof,
-      ...recordStoreOwnedInternalSettlement
+      ...recordStoreOwnedInternalSettlement,
+      ...carrierFreeCallbackSettlement
     ].sort();
 
     expect(directGenericPromiseFunctions.sort()).toEqual(inventoriedFunctions);
     expect(directoryReproofReturnType).toBe("Promise<boolean>");
+    expect(sourceText).toContain(
+      "function runWithoutExactReplacementFailureCarrierSync<T>("
+    );
   });
 
   test("S29-P62-01/02 quarantine refuses non-exact completed authority and preserves replacement B", async () => {
@@ -29579,6 +29586,522 @@ describe("idempotency, lock, and artifact services", () => {
       );
     });
   }
+
+  test("Issue79 callback result isolation assimilates custom thenables before restoring the outer carrier", async () => {
+    for (const location of ["getter", "method"] as const) {
+      for (const workTiming of ["sync", "async"] as const) {
+        for (const settlement of ["fulfill", "reject"] as const) {
+          const label = `${location}-${workTiming}-${settlement}`;
+          const fixture = await createIssue79CarrierOwnershipFixture(
+            `callback-result-thenable-${label}`
+          );
+          const independentFailure = new Error(
+            `Issue79 callback result ${label} independent failure`
+          );
+          const callbackFailure = new Error(
+            `Issue79 callback result ${label} callback failure`
+          );
+          const nestedEvidenceRef = `issue79.callback-result.thenable.${label}`;
+          const nestedFileName = `thenable-${label}.json`;
+          const nestedPath = workspaceRecordPath(
+            fixture.workspaceRoot,
+            [...fixture.directorySegments, nestedFileName],
+            nestedEvidenceRef
+          );
+          const carrierBaseline =
+            workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+          let outerCalls = 0;
+          let nestedFailure: unknown;
+          let independentSettlement: Promise<void> | undefined;
+          const nestedCallbackStarted = createSignal();
+          const releaseNestedCallback = createAsyncGate();
+          const unhandled: unknown[] = [];
+          const onUnhandled = (reason: unknown) => unhandled.push(reason);
+          process.on("unhandledRejection", onUnhandled);
+
+          const activateIndependentWork = (): Promise<void> => {
+            if (!independentSettlement) {
+              const start = () =>
+                captureThrownValue(() =>
+                  writeJsonRecord(
+                    fixture.workspaceRoot,
+                    fixture.directorySegments,
+                    nestedFileName,
+                    fixture.replacement,
+                    nestedEvidenceRef,
+                    IdempotencyRecordSchema
+                  )
+                );
+              const started = workTiming === "sync"
+                ? start()
+                : Promise.resolve().then(start);
+              independentSettlement = started.then(async (failure) => {
+                nestedFailure = failure;
+                if (settlement === "fulfill") {
+                  await chmod(fixture.recordPath, 0o700);
+                }
+              });
+            }
+            return independentSettlement;
+          };
+
+          let result: Awaited<ReturnType<typeof fixture.replace>>;
+          try {
+            result = await runWithWorkspaceRecordPublicationHooks(
+              {
+                afterTemporaryFileWritten: async ({ canonicalPath }) => {
+                  if (canonicalPath === nestedPath) {
+                    if (settlement === "reject") {
+                      nestedCallbackStarted.resolve();
+                      await releaseNestedCallback.wait;
+                    }
+                    throw independentFailure;
+                  }
+                  if (canonicalPath !== fixture.recordPath || outerCalls > 0) return;
+                  outerCalls += 1;
+                  return createIssue79CallbackThenable({
+                    location,
+                    activate: activateIndependentWork,
+                    awaitActivationBeforeSettlement: settlement === "fulfill",
+                    settlement,
+                    rejection: callbackFailure
+                  });
+                }
+              },
+              fixture.replace
+            );
+            if (settlement === "reject") {
+              await nestedCallbackStarted.promise;
+              releaseNestedCallback.open();
+            }
+            await independentSettlement;
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          } finally {
+            releaseNestedCallback.open();
+            await independentSettlement;
+            process.off("unhandledRejection", onUnhandled);
+          }
+
+          expect(outerCalls).toBe(1);
+          expect(nestedFailure).toBe(independentFailure);
+          if (settlement === "fulfill") {
+            expect(result.status).toBe("operation_failed");
+            if (result.status !== "operation_failed") {
+              throw new Error("Expected the custom thenable physical-proof failure.");
+            }
+            expect(result.origin).toBe("physical_proof");
+            expect(semanticPrimaryError(result.error)).toBeInstanceOf(TaskServiceError);
+            expect((semanticPrimaryError(result.error) as TaskServiceError).code).toBe(
+              "workspace_path_not_safe"
+            );
+          } else {
+            expect(result.status).toBe("writer_failed");
+            if (result.status !== "writer_failed") {
+              throw new Error("Expected the custom thenable rejection.");
+            }
+            expect(result.origin).toBe("writer");
+            expect(semanticPrimaryError(result.error)).toBe(callbackFailure);
+          }
+          expect(countErrorGraphIdentity(result.error, callbackFailure)).toBe(
+            settlement === "reject" ? 1 : 0
+          );
+          expect(countErrorGraphIdentity(result.error, independentFailure)).toBe(0);
+          expect(unhandled).toEqual([]);
+          expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+            carrierBaseline
+          );
+          expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+            fixture.authorityBaseline
+          );
+          expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+            fixture.bindingBaseline
+          );
+        }
+      }
+    }
+    const sourceText = await readFile(
+      join(import.meta.dir, "workspace-record-store.ts"),
+      "utf8"
+    );
+    expect(sourceText).toContain(
+      "function runWithoutExactReplacementFailureCarrierSync<T>("
+    );
+    expect(sourceText).toContain(
+      "async function runWithoutExactReplacementFailureCarrierAsync<T>("
+    );
+  });
+
+  test("Issue79 callback result isolation preserves thenable throws and isolates an overridden Promise subclass", async () => {
+    for (const location of ["getter", "method"] as const) {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `callback-result-throw-${location}`
+      );
+      const callbackFailure = new Error(
+        `Issue79 callback result ${location} throw identity`
+      );
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: ({ canonicalPath }) => {
+            if (canonicalPath !== fixture.recordPath) return;
+            if (location === "getter") {
+              return Object.defineProperty({}, "then", {
+                get: () => {
+                  throw callbackFailure;
+                }
+              }) as Promise<void>;
+            }
+            return {
+              then: () => {
+                throw callbackFailure;
+              }
+            } as unknown as Promise<void>;
+          }
+        },
+        fixture.replace
+      );
+
+      expect(result.status).toBe("writer_failed");
+      if (result.status !== "writer_failed") {
+        throw new Error("Expected the thenable throw identity.");
+      }
+      expect(result.origin).toBe("writer");
+      expect(semanticPrimaryError(result.error)).toBe(callbackFailure);
+      expect(countErrorGraphIdentity(result.error, callbackFailure)).toBe(1);
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    }
+
+    const fixture = await createIssue79CarrierOwnershipFixture(
+      "callback-result-overridden-promise-subclass"
+    );
+    const independentFailure = new Error(
+      "Issue79 overridden Promise subclass independent failure"
+    );
+    const nestedEvidenceRef = "issue79.callback-result.overridden-subclass";
+    const nestedFileName = "overridden-subclass.json";
+    const nestedPath = workspaceRecordPath(
+      fixture.workspaceRoot,
+      [...fixture.directorySegments, nestedFileName],
+      nestedEvidenceRef
+    );
+    const carrierBaseline =
+      workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+    let nestedFailure: unknown;
+    let independentSettlement: Promise<void> | undefined;
+    let subclassThenCalls = 0;
+
+    const result = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterTemporaryFileWritten: ({ canonicalPath }) => {
+          if (canonicalPath === nestedPath) throw independentFailure;
+          if (canonicalPath !== fixture.recordPath) return;
+          class CallbackPromise extends Promise<void> {}
+          const callbackPromise = new CallbackPromise((resolvePromise) => {
+            resolvePromise();
+          });
+          const originalThen = callbackPromise.then.bind(callbackPromise);
+          Object.defineProperty(callbackPromise, "then", {
+            value: (
+              onFulfilled?: (value: void) => unknown,
+              onRejected?: (reason: unknown) => unknown
+            ) => {
+              subclassThenCalls += 1;
+              independentSettlement = captureThrownValue(() =>
+                writeJsonRecord(
+                  fixture.workspaceRoot,
+                  fixture.directorySegments,
+                  nestedFileName,
+                  fixture.replacement,
+                  nestedEvidenceRef,
+                  IdempotencyRecordSchema
+                )
+              ).then(async (failure) => {
+                nestedFailure = failure;
+                await chmod(fixture.recordPath, 0o700);
+              });
+              return originalThen(
+                (value) => independentSettlement!.then(() => onFulfilled?.(value)),
+                onRejected
+              );
+            }
+          });
+          return callbackPromise;
+        }
+      },
+      fixture.replace
+    );
+    await independentSettlement;
+
+    expect(subclassThenCalls).toBe(1);
+    expect(nestedFailure).toBe(independentFailure);
+    expect(result.status).toBe("operation_failed");
+    if (result.status !== "operation_failed") {
+      throw new Error("Expected the Promise subclass physical-proof failure.");
+    }
+    expect(result.origin).toBe("physical_proof");
+    expect(semanticPrimaryError(result.error)).toBeInstanceOf(TaskServiceError);
+    expect((semanticPrimaryError(result.error) as TaskServiceError).code).toBe(
+      "workspace_path_not_safe"
+    );
+    expect(countErrorGraphIdentity(result.error, independentFailure)).toBe(0);
+    expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+      carrierBaseline
+    );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
+  test("callback result controls preserve native Promise, async, and default subclass settlement", async () => {
+    for (const form of ["native", "async", "default_subclass"] as const) {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `callback-result-control-${form}`
+      );
+      let callbackCalls = 0;
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: ({ canonicalPath }) => {
+            if (canonicalPath !== fixture.recordPath) return;
+            callbackCalls += 1;
+            if (form === "native") return Promise.resolve();
+            if (form === "async") return (async () => undefined)();
+            class DefaultCallbackPromise extends Promise<void> {}
+            return new DefaultCallbackPromise((resolvePromise) => {
+              resolvePromise();
+            });
+          }
+        },
+        fixture.replace
+      );
+
+      expect(callbackCalls).toBe(1);
+      expect(result).toEqual({ status: "replaced", record: fixture.replacement });
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    }
+  });
+
+  test("Issue79 callback result isolation snapshots rewrite accessors iterators and proxies before restoring the carrier", async () => {
+    for (const surface of [
+      "exact_path_getter",
+      "aliases_getter",
+      "symbol_iterator",
+      "next",
+      "done",
+      "value",
+      "proxy"
+    ] as const) {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `callback-result-rewrite-${surface}`
+      );
+      const independentFailure = new Error(
+        `Issue79 rewrite ${surface} detached independent failure`
+      );
+      const nestedEvidenceRef = `issue79.callback-result.rewrite.${surface}`;
+      const nestedFileName = `rewrite-${surface}.json`;
+      const nestedDirectorySegments = [
+        "issue79-callback-result-rewrite",
+        surface
+      ] as const;
+      const nestedPath = workspaceRecordPath(
+        fixture.workspaceRoot,
+        [...nestedDirectorySegments, nestedFileName],
+        nestedEvidenceRef
+      );
+      const nestedCallbackStarted = createSignal();
+      const releaseNestedCallback = createAsyncGate();
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+      let detachedFailure: Promise<unknown> | undefined;
+      let accessCalls = 0;
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on("unhandledRejection", onUnhandled);
+
+      const startDetached = (): void => {
+        accessCalls += 1;
+        if (detachedFailure) return;
+        detachedFailure = captureThrownValue(() =>
+          writeJsonRecord(
+            fixture.workspaceRoot,
+            nestedDirectorySegments,
+            nestedFileName,
+            fixture.replacement,
+            nestedEvidenceRef,
+            IdempotencyRecordSchema
+          )
+        );
+      };
+
+      let result: Awaited<ReturnType<typeof fixture.replace>>;
+      try {
+        result = await runWithWorkspaceRecordPublicationHooks(
+          {
+            rewriteRecordAuthorityIdentityCandidates: ({
+              path,
+              exactPath,
+              aliases
+            }) => {
+              if (path !== fixture.recordPath || detachedFailure) {
+                return { exactPath, aliases };
+              }
+              return createIssue79HostileRewriteCandidates(
+                surface,
+                exactPath,
+                aliases,
+                startDetached
+              );
+            },
+            afterTemporaryFileWritten: async ({ canonicalPath }) => {
+              if (canonicalPath !== nestedPath) return;
+              nestedCallbackStarted.resolve();
+              await releaseNestedCallback.wait;
+              throw independentFailure;
+            }
+          },
+          fixture.replace
+        );
+        await nestedCallbackStarted.promise;
+        releaseNestedCallback.open();
+        expect(await detachedFailure).toBe(independentFailure);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      } finally {
+        releaseNestedCallback.open();
+        await detachedFailure;
+        process.off("unhandledRejection", onUnhandled);
+      }
+
+      expect(accessCalls).toBeGreaterThan(0);
+      expect(result).toEqual({ status: "replaced", record: fixture.replacement });
+      expect(unhandled).toEqual([]);
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    }
+  });
+
+  test("Issue79 callback result isolation preserves synchronous rewrite access throw identity", async () => {
+    for (const surface of [
+      "exact_path_getter",
+      "aliases_getter",
+      "symbol_iterator",
+      "next",
+      "done",
+      "value",
+      "proxy"
+    ] as const) {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `callback-result-rewrite-throw-${surface}`
+      );
+      const rewriteFailure = new Error(
+        `Issue79 rewrite ${surface} synchronous throw identity`
+      );
+      const independentFailure = new Error(
+        `Issue79 rewrite ${surface} throw detached independent failure`
+      );
+      const nestedEvidenceRef = `issue79.callback-result.rewrite-throw.${surface}`;
+      const nestedFileName = `rewrite-throw-${surface}.json`;
+      const nestedDirectorySegments = [
+        "issue79-callback-result-rewrite-throw",
+        surface
+      ] as const;
+      const nestedPath = workspaceRecordPath(
+        fixture.workspaceRoot,
+        [...nestedDirectorySegments, nestedFileName],
+        nestedEvidenceRef
+      );
+      const nestedCallbackStarted = createSignal();
+      const releaseNestedCallback = createAsyncGate();
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+      let detachedFailure: Promise<unknown> | undefined;
+      let accessCalls = 0;
+      const startDetachedAndThrow = (): never => {
+        accessCalls += 1;
+        detachedFailure = captureThrownValue(() =>
+          writeJsonRecord(
+            fixture.workspaceRoot,
+            nestedDirectorySegments,
+            nestedFileName,
+            fixture.replacement,
+            nestedEvidenceRef,
+            IdempotencyRecordSchema
+          )
+        );
+        throw rewriteFailure;
+      };
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          rewriteRecordAuthorityIdentityCandidates: ({
+            path,
+            exactPath,
+            aliases
+          }) => path === fixture.recordPath
+            ? createIssue79HostileRewriteCandidates(
+                surface,
+                exactPath,
+                aliases,
+                startDetachedAndThrow
+              )
+            : { exactPath, aliases },
+          afterTemporaryFileWritten: async ({ canonicalPath }) => {
+            if (canonicalPath !== nestedPath) return;
+            nestedCallbackStarted.resolve();
+            await releaseNestedCallback.wait;
+            throw independentFailure;
+          }
+        },
+        fixture.replace
+      );
+      await nestedCallbackStarted.promise;
+      releaseNestedCallback.open();
+      expect(await detachedFailure).toBe(independentFailure);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(accessCalls).toBe(1);
+      expect(result.status).toBe("operation_failed");
+      if (result.status !== "operation_failed") {
+        throw new Error("Expected the synchronous rewrite access failure.");
+      }
+      expect(result.origin).toBe("precondition");
+      expect(semanticPrimaryError(result.error)).toBe(rewriteFailure);
+      expect(countErrorGraphIdentity(result.error, rewriteFailure)).toBe(1);
+      expect(countErrorGraphIdentity(result.error, independentFailure)).toBe(0);
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    }
+  });
 
   test("Issue79 cleanup notification nested exact replacement keeps a separately owned carrier", async () => {
     const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
@@ -34368,6 +34891,129 @@ async function createTempWorkspacePath(): Promise<{
   return {
     tempRoot,
     workspaceRoot: join(tempRoot, "workspace")
+  };
+}
+
+function createIssue79CallbackThenable(input: Readonly<{
+  location: "getter" | "method";
+  activate: () => Promise<void>;
+  awaitActivationBeforeSettlement: boolean;
+  settlement: "fulfill" | "reject";
+  rejection: unknown;
+}>): Promise<void> {
+  const settle = (
+    onFulfilled: (value: void) => void,
+    onRejected: (reason: unknown) => void
+  ): void => {
+    const activated = input.activate();
+    const settleResult = () => {
+      if (input.settlement === "fulfill") {
+        onFulfilled(undefined);
+      } else {
+        onRejected(input.rejection);
+      }
+    };
+    if (input.awaitActivationBeforeSettlement) {
+      void activated.then(settleResult);
+    } else {
+      settleResult();
+    }
+  };
+  if (input.location === "getter") {
+    return Object.defineProperty({}, "then", {
+      get: () => settle
+    }) as Promise<void>;
+  }
+  return { then: settle } as unknown as Promise<void>;
+}
+
+type Issue79HostileRewriteSurface =
+  | "exact_path_getter"
+  | "aliases_getter"
+  | "symbol_iterator"
+  | "next"
+  | "done"
+  | "value"
+  | "proxy";
+
+function createIssue79HostileRewriteCandidates(
+  surface: Issue79HostileRewriteSurface,
+  exactPath: string,
+  aliases: readonly string[],
+  onAccess: () => void
+): Readonly<{ exactPath: string; aliases: readonly string[] }> {
+  if (surface === "exact_path_getter") {
+    return Object.defineProperty({ aliases }, "exactPath", {
+      enumerable: true,
+      get: () => {
+        onAccess();
+        return exactPath;
+      }
+    }) as Readonly<{ exactPath: string; aliases: readonly string[] }>;
+  }
+  if (surface === "aliases_getter") {
+    return Object.defineProperty({ exactPath }, "aliases", {
+      enumerable: true,
+      get: () => {
+        onAccess();
+        return aliases;
+      }
+    }) as Readonly<{ exactPath: string; aliases: readonly string[] }>;
+  }
+  if (surface === "proxy") {
+    return new Proxy(
+      { exactPath, aliases },
+      {
+        get: (target, property, receiver) => {
+          if (property === "exactPath") onAccess();
+          return Reflect.get(target, property, receiver);
+        }
+      }
+    );
+  }
+
+  const source = aliases[Symbol.iterator]();
+  const iterable = {
+    [Symbol.iterator]() {
+      if (surface === "symbol_iterator") onAccess();
+      return this;
+    },
+    next(): IteratorResult<string> {
+      if (surface === "next") onAccess();
+      const next = source.next();
+      if (surface === "done") {
+        return Object.defineProperties({}, {
+          done: {
+            enumerable: true,
+            get: () => {
+              onAccess();
+              return next.done;
+            }
+          },
+          value: {
+            enumerable: true,
+            get: () => next.value
+          }
+        }) as IteratorResult<string>;
+      }
+      if (surface === "value" && !next.done) {
+        return Object.defineProperties({}, {
+          done: { enumerable: true, value: false },
+          value: {
+            enumerable: true,
+            get: () => {
+              onAccess();
+              return next.value;
+            }
+          }
+        }) as IteratorResult<string>;
+      }
+      return next;
+    }
+  };
+  return {
+    exactPath,
+    aliases: iterable as unknown as readonly string[]
   };
 }
 

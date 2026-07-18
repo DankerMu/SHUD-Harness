@@ -169,8 +169,16 @@ const exactReplacementFailureCarrierStorage =
 let activeExactReplacementFailureHolders = 0;
 let rejectedExactReplacementFailureWrites = 0;
 
-function runWithoutExactReplacementFailureCarrier<T>(callback: () => T): T {
+function runWithoutExactReplacementFailureCarrierSync<T>(callback: () => T): T {
   return exactReplacementFailureCarrierStorage.exit(callback);
+}
+
+async function runWithoutExactReplacementFailureCarrierAsync<T>(
+  callback: () => T
+): Promise<Awaited<T>> {
+  return await exactReplacementFailureCarrierStorage.exit(async () => {
+    return await Promise.resolve(callback());
+  });
 }
 
 function createExactReplacementFailureHolder(): ExactReplacementFailureHolder {
@@ -471,7 +479,7 @@ async function captureAuthorityMutatingCallbackBoundary(
 
   const callbackSettlement = (async (): Promise<PresentFailure | undefined> => {
     try {
-      await runWithoutExactReplacementFailureCarrier(callback);
+      await runWithoutExactReplacementFailureCarrierAsync(callback);
       return undefined;
     } catch (error) {
       return { value: error };
@@ -1626,8 +1634,8 @@ export async function runWithExistingWorkspaceRecordDirectoryReproof(
     let value = false;
     let callbackFailure: PresentFailure | undefined;
     try {
-      value = Boolean(
-        await runWithoutExactReplacementFailureCarrier(callback)
+      value = await runWithoutExactReplacementFailureCarrierAsync(
+        async () => Boolean(await Promise.resolve(callback()))
       );
     } catch (error) {
       callbackFailure = { value: error };
@@ -2272,7 +2280,7 @@ export async function transferWorkspaceRecordCleanupPermitPublicationAuthority(
             closePromise = pinnedFile.close().then(
               async () => {
                 try {
-                  await runWithoutExactReplacementFailureCarrier(
+                  await runWithoutExactReplacementFailureCarrierAsync(
                     () => closeHook?.(hookInput)
                   );
                 } catch {
@@ -2281,7 +2289,7 @@ export async function transferWorkspaceRecordCleanupPermitPublicationAuthority(
               },
               async (error) => {
                 try {
-                  await runWithoutExactReplacementFailureCarrier(
+                  await runWithoutExactReplacementFailureCarrierAsync(
                     () => closeHook?.(hookInput)
                   );
                 } catch {
@@ -3403,7 +3411,7 @@ export async function validateWorkspaceRecordCleanupPermitAfterExactObservation(
             } else {
               await authorityLease.validateCleanupGeneration();
             }
-            await runWithoutExactReplacementFailureCarrier(
+            await runWithoutExactReplacementFailureCarrierAsync(
               acceptExactObservation
             );
             return { status: "current" } as const;
@@ -4125,7 +4133,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     matched = observation.status === "malformed";
   } else if (observation.status === "record") {
     try {
-      matched = runWithoutExactReplacementFailureCarrier(
+      matched = runWithoutExactReplacementFailureCarrierSync(
         () => condition.matches(observation.record, condition.expected)
       );
     } catch (error) {
@@ -5383,7 +5391,7 @@ export async function publishJsonRecordWithLifecycleCallbacks<T>(
 
       if (lifecycleState) lifecycleState.afterWriteStarted = true;
       if (afterWrite) {
-        await runWithoutExactReplacementFailureCarrier(
+        await runWithoutExactReplacementFailureCarrierAsync(
           () => afterWrite(lifecycleInput)
         );
       }
@@ -5899,7 +5907,7 @@ async function publishOwnedMutableRecord(
     | { readonly status: "failed"; readonly failure: PresentFailure };
   try {
     if (beforeCommittedMutableBaselineCapture != null) {
-      await runWithoutExactReplacementFailureCarrier(
+      await runWithoutExactReplacementFailureCarrierAsync(
         () => Reflect.apply(beforeCommittedMutableBaselineCapture, hooks, [
           Object.freeze({ path: recordPath })
         ])
@@ -11589,7 +11597,7 @@ function closeRecordAuthorityCleanupPermitPinnedFile(
   );
   const closeSettled = fileCloseSettled
     .then(
-      async () => await runWithoutExactReplacementFailureCarrier(
+      async () => await runWithoutExactReplacementFailureCarrierAsync(
         () => afterPinnedFileClosed?.(input)
       )
     )
@@ -11634,15 +11642,23 @@ async function recordAuthorityIdentityCandidates(
     const rewriteRecordAuthorityIdentityCandidates =
       hooks?.rewriteRecordAuthorityIdentityCandidates;
     const rewritten = rewriteRecordAuthorityIdentityCandidates
-      ? runWithoutExactReplacementFailureCarrier(
-          () => Reflect.apply(rewriteRecordAuthorityIdentityCandidates, hooks, [
-            Object.freeze({
-              path: recordPath,
-              exactPath: observed.exact,
-              aliases: observed.aliases
-            })
-          ])
-        )
+      ? runWithoutExactReplacementFailureCarrierSync(() => {
+          const callbackResult = Reflect.apply(
+            rewriteRecordAuthorityIdentityCandidates,
+            hooks,
+            [
+              Object.freeze({
+                path: recordPath,
+                exactPath: observed.exact,
+                aliases: observed.aliases
+              })
+            ]
+          );
+          if (callbackResult === undefined) return undefined;
+          const exactPath = callbackResult.exactPath;
+          const aliases = Object.freeze(Array.from(callbackResult.aliases));
+          return Object.freeze({ exactPath, aliases });
+        })
       : undefined;
     const candidates = rewritten ?? {
       exactPath: observed.exact,
