@@ -91,6 +91,9 @@ import {
   workspaceRecordPhysicalIdentityMatches,
   workspaceRecordPath,
   workspaceRecordPublicationHooksActive,
+  workspaceRecordExactReplacementCarrierDiagnosticsForTest,
+  transferWorkspaceRecordCleanupPermitPublicationAuthority,
+  validateWorkspaceRecordCleanupPermitAfterExactObservation,
   writeJsonRecord,
   type WorkspaceRecordPublicationHookInput,
   type WorkspaceJsonRecordLifecycleCallbacks,
@@ -4083,12 +4086,19 @@ describe("idempotency, lock, and artifact services", () => {
     expect(publicationFunction).toBeDefined();
     const publicationBody = publicationFunction!.body!.getText(sourceFile);
     const renameIndex = publicationBody.indexOf("rename(temporaryPath, recordPath)");
-    const hookIndex = publicationBody.indexOf("await Reflect.apply(");
+    const isolationBoundaryIndex = publicationBody.indexOf(
+      "await runWithoutExactReplacementFailureCarrier("
+    );
+    const hookIndex = publicationBody.indexOf(
+      "() => Reflect.apply(",
+      isolationBoundaryIndex
+    );
     const baselineCaptureIndex = publicationBody.indexOf(
       "captureMutableCanonicalBaseline("
     );
     expect(renameIndex).toBeGreaterThan(-1);
-    expect(hookIndex).toBeGreaterThan(renameIndex);
+    expect(isolationBoundaryIndex).toBeGreaterThan(renameIndex);
+    expect(hookIndex).toBeGreaterThan(isolationBoundaryIndex);
     expect(baselineCaptureIndex).toBeGreaterThan(hookIndex);
 
     expect(semanticPrimaryError(failure)).toBe(baselineFailure);
@@ -28951,6 +28961,718 @@ describe("idempotency, lock, and artifact services", () => {
     );
   });
 
+  test("Issue79 callback context isolation keeps an awaited cleanup-close ordinary failure out of the outer physical proof", async () => {
+    const independentFailure = new Error(
+      "Issue79 cleanup-close awaited independent failure"
+    );
+    const notificationFailure = new Error(
+      "Issue79 cleanup-close awaited observation-only failure"
+    );
+    const nestedEvidenceRef = "issue79.callback.cleanup-awaited.nested";
+    const nestedFileName = "cleanup-awaited-nested.json";
+    let fixture: Awaited<ReturnType<typeof createIssue79CarrierOwnershipFixture>>;
+    let nestedPath = "";
+    let closedFd = -1;
+    let nestedFailure: unknown;
+    const afterPinnedFileClosed = async ({ path, fd }: Readonly<{
+      path: string;
+      fd: number;
+    }>) => {
+      if (path !== fixture.recordPath) return;
+      closedFd = fd;
+      nestedFailure = await captureThrownValue(() =>
+        writeJsonRecord(
+          fixture.workspaceRoot,
+          fixture.directorySegments,
+          nestedFileName,
+          fixture.replacement,
+          nestedEvidenceRef,
+          IdempotencyRecordSchema
+        )
+      );
+      throw notificationFailure;
+    };
+    fixture = await createIssue79CarrierOwnershipFixture(
+      "callback-cleanup-awaited",
+      { afterCleanupPermitPinnedHandleClosed: afterPinnedFileClosed }
+    );
+    nestedPath = workspaceRecordPath(
+      fixture.workspaceRoot,
+      [...fixture.directorySegments, nestedFileName],
+      nestedEvidenceRef
+    );
+    const carrierBaseline =
+      workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+
+    const result = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterTemporaryFileWritten: ({ canonicalPath }) => {
+          if (canonicalPath === nestedPath) throw independentFailure;
+        },
+        beforeCleanupPermitIdentityResolution: async ({ path }) => {
+          if (path === fixture.recordPath) await chmod(path, 0o700);
+        }
+      },
+      fixture.replace
+    );
+
+    expect(result.status).toBe("operation_failed");
+    if (result.status !== "operation_failed") {
+      throw new Error("Expected an isolated outer physical-proof failure.");
+    }
+    expect(result.origin).toBe("physical_proof");
+    expect(semanticPrimaryError(result.error)).toBeInstanceOf(TaskServiceError);
+    expect((semanticPrimaryError(result.error) as TaskServiceError).code).toBe(
+      "workspace_path_not_safe"
+    );
+    expect(nestedFailure).toBe(independentFailure);
+    expect(countErrorGraphIdentity(result.error, independentFailure)).toBe(0);
+    expect(countErrorGraphIdentity(result.error, notificationFailure)).toBe(0);
+    expect(closedFd).toBeGreaterThanOrEqual(0);
+    await expectFileDescriptorClosed(closedFd);
+    expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+      carrierBaseline
+    );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
+  test("Issue79 callback context isolation keeps a detached cleanup-close ordinary failure out of finalized carrier diagnostics", async () => {
+    const independentFailure = new Error(
+      "Issue79 cleanup-close detached independent failure"
+    );
+    const nestedEvidenceRef = "issue79.callback.cleanup-detached.nested";
+    const nestedFileName = "cleanup-detached-nested.json";
+    let fixture: Awaited<ReturnType<typeof createIssue79CarrierOwnershipFixture>>;
+    let nestedPath = "";
+    const nestedCallbackStarted = createSignal();
+    const releaseNestedCallback = createAsyncGate();
+    let detachedFailure: Promise<unknown> | undefined;
+    const afterPinnedFileClosed = async ({ path }: Readonly<{ path: string }>) => {
+      if (path !== fixture.recordPath) return;
+      detachedFailure = captureThrownValue(() =>
+        writeJsonRecord(
+          fixture.workspaceRoot,
+          fixture.directorySegments,
+          nestedFileName,
+          fixture.replacement,
+          nestedEvidenceRef,
+          IdempotencyRecordSchema
+        )
+      );
+      await nestedCallbackStarted.promise;
+      queueMicrotask(() => releaseNestedCallback.open());
+    };
+    fixture = await createIssue79CarrierOwnershipFixture(
+      "callback-cleanup-detached",
+      { afterCleanupPermitPinnedHandleClosed: afterPinnedFileClosed }
+    );
+    nestedPath = workspaceRecordPath(
+      fixture.workspaceRoot,
+      [...fixture.directorySegments, nestedFileName],
+      nestedEvidenceRef
+    );
+    const carrierBaseline =
+      workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    let result: Awaited<ReturnType<typeof fixture.replace>>;
+    try {
+      result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: async ({ canonicalPath }) => {
+            if (canonicalPath === nestedPath) {
+              nestedCallbackStarted.resolve();
+              await releaseNestedCallback.wait;
+              throw independentFailure;
+            }
+          },
+          beforeCleanupPermitIdentityResolution: async ({ path }) => {
+            if (path === fixture.recordPath) await chmod(path, 0o700);
+          }
+        },
+        fixture.replace
+      );
+      expect(await detachedFailure).toBe(independentFailure);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      releaseNestedCallback.open();
+      await detachedFailure;
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(result.status).toBe("operation_failed");
+    if (result.status !== "operation_failed") {
+      throw new Error("Expected an isolated detached physical-proof failure.");
+    }
+    expect(result.origin).toBe("physical_proof");
+    expect(semanticPrimaryError(result.error)).toBeInstanceOf(TaskServiceError);
+    expect((semanticPrimaryError(result.error) as TaskServiceError).code).toBe(
+      "workspace_path_not_safe"
+    );
+    expect(countErrorGraphIdentity(result.error, independentFailure)).toBe(0);
+    expect(unhandled).toEqual([]);
+    expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+      carrierBaseline
+    );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
+  test("Issue79 callback context isolation preserves transferred close success and original close failure", async () => {
+    for (const closeMode of ["success", "failure"] as const) {
+      const independentFailure = new Error(
+        `Issue79 transferred ${closeMode} independent failure`
+      );
+      const notificationFailure = new Error(
+        `Issue79 transferred ${closeMode} notification failure`
+      );
+      const transferEvidenceRef = `issue79.callback.transfer.${closeMode}`;
+      const transferFileName = `transferred-${closeMode}.json`;
+      const nestedEvidenceRef = `issue79.callback.transfer.${closeMode}.nested`;
+      const nestedFileName = `transferred-${closeMode}-nested.json`;
+      const schema = z.object({ id: z.string() });
+      let fixture: Awaited<ReturnType<typeof createIssue79CarrierOwnershipFixture>>;
+      let transferPath = "";
+      let nestedPath = "";
+      let transferred:
+        | Awaited<ReturnType<typeof transferWorkspaceRecordCleanupPermitPublicationAuthority>>
+        | undefined;
+      let nestedFailure: unknown;
+      let closeOutcome: unknown;
+      let outerClosedFd = -1;
+      const afterPinnedFileClosed = async ({ path, fd }: Readonly<{
+        path: string;
+        fd: number;
+      }>) => {
+        if (path === transferPath) {
+          nestedFailure = await captureThrownValue(() =>
+            writeJsonRecord(
+              fixture.workspaceRoot,
+              fixture.directorySegments,
+              nestedFileName,
+              fixture.replacement,
+              nestedEvidenceRef,
+              IdempotencyRecordSchema
+            )
+          );
+          throw notificationFailure;
+        }
+        if (path !== fixture.recordPath) return;
+        outerClosedFd = fd;
+        closeOutcome = await captureThrownValue(
+          () => transferred!.pinnedFile.close()
+        );
+      };
+      fixture = await createIssue79CarrierOwnershipFixture(
+        `callback-transfer-${closeMode}`,
+        { afterCleanupPermitPinnedHandleClosed: afterPinnedFileClosed }
+      );
+      transferPath = workspaceRecordPath(
+        fixture.workspaceRoot,
+        [...fixture.directorySegments, transferFileName],
+        transferEvidenceRef
+      );
+      nestedPath = workspaceRecordPath(
+        fixture.workspaceRoot,
+        [...fixture.directorySegments, nestedFileName],
+        nestedEvidenceRef
+      );
+      const created = await runWithWorkspaceRecordPublicationHooks(
+        { afterCleanupPermitPinnedHandleClosed: afterPinnedFileClosed },
+        () => createJsonRecordIfAbsentWithCleanupPermit(
+          fixture.workspaceRoot,
+          fixture.directorySegments,
+          transferFileName,
+          { id: `transferred-${closeMode}` },
+          transferEvidenceRef,
+          schema
+        )
+      );
+      if (created.status !== "created") {
+        throw new Error("Expected a transferred close fixture.");
+      }
+      transferred = await runWithWorkspaceRecordPublicationHooks(
+        { afterCleanupPermitPinnedHandleClosed: afterPinnedFileClosed },
+        () => transferWorkspaceRecordCleanupPermitPublicationAuthority(
+          created.cleanupPermit,
+          transferPath,
+          transferEvidenceRef
+        )
+      );
+      const transferredFd = transferred.pinnedFile.fd;
+      if (closeMode === "failure") closeSync(transferredFd);
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: ({ canonicalPath }) => {
+            if (canonicalPath === nestedPath) throw independentFailure;
+          },
+          beforeCleanupPermitIdentityResolution: async ({ path }) => {
+            if (path === fixture.recordPath) await chmod(path, 0o700);
+          }
+        },
+        fixture.replace
+      );
+
+      expect(result.status).toBe("operation_failed");
+      if (result.status !== "operation_failed") {
+        throw new Error("Expected transferred close physical-proof isolation.");
+      }
+      expect(result.origin).toBe("physical_proof");
+      expect(semanticPrimaryError(result.error)).toBeInstanceOf(TaskServiceError);
+      expect((semanticPrimaryError(result.error) as TaskServiceError).code).toBe(
+        "workspace_path_not_safe"
+      );
+      expect(nestedFailure).toBe(independentFailure);
+      expect(countErrorGraphIdentity(result.error, independentFailure)).toBe(0);
+      expect(countErrorGraphIdentity(result.error, notificationFailure)).toBe(0);
+      if (closeMode === "success") {
+        expect(closeOutcome).toBeUndefined();
+      } else {
+        expect(closeOutcome).toBeInstanceOf(Error);
+        expect((closeOutcome as NodeJS.ErrnoException).code).toBe("EBADF");
+        expect(closeOutcome).not.toBe(notificationFailure);
+      }
+      expect(outerClosedFd).toBeGreaterThanOrEqual(0);
+      await expectFileDescriptorClosed(outerClosedFd);
+      await expectFileDescriptorClosed(transferredFd);
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    }
+  });
+
+  test("Issue79 callback context isolation keeps synchronous identity rewrite detached work out of the outer result", async () => {
+    const fixture = await createIssue79CarrierOwnershipFixture(
+      "callback-sync-rewrite"
+    );
+    const independentFailure = new Error(
+      "Issue79 synchronous rewrite detached independent failure"
+    );
+    const nestedEvidenceRef = "issue79.callback.sync-rewrite.nested";
+    const nestedFileName = "sync-rewrite-nested.json";
+    const nestedDirectorySegments = ["issue79-callback-rewrite-nested"] as const;
+    const nestedPath = workspaceRecordPath(
+      fixture.workspaceRoot,
+      [...nestedDirectorySegments, nestedFileName],
+      nestedEvidenceRef
+    );
+    const nestedCallbackStarted = createSignal();
+    const releaseNestedCallback = createAsyncGate();
+    const carrierBaseline =
+      workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+    let detachedFailure: Promise<unknown> | undefined;
+    let rewriteReturned = false;
+
+    const result = await runWithWorkspaceRecordPublicationHooks(
+      {
+        rewriteRecordAuthorityIdentityCandidates: ({ path, exactPath, aliases }) => {
+          if (path === fixture.recordPath && !detachedFailure) {
+            detachedFailure = captureThrownValue(() =>
+              writeJsonRecord(
+                fixture.workspaceRoot,
+                nestedDirectorySegments,
+                nestedFileName,
+                fixture.replacement,
+                nestedEvidenceRef,
+                IdempotencyRecordSchema
+              )
+            );
+          }
+          rewriteReturned = true;
+          return { exactPath, aliases };
+        },
+        afterTemporaryFileWritten: async ({ canonicalPath }) => {
+          if (canonicalPath !== nestedPath) return;
+          nestedCallbackStarted.resolve();
+          await releaseNestedCallback.wait;
+          throw independentFailure;
+        }
+      },
+      fixture.replace
+    );
+    await nestedCallbackStarted.promise;
+    releaseNestedCallback.open();
+    const nestedFailure = await detachedFailure;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(rewriteReturned).toBe(true);
+    expect(nestedFailure).toBe(independentFailure);
+    expect(result).toEqual({ status: "replaced", record: fixture.replacement });
+    expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+      carrierBaseline
+    );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
+  test("Issue79 callback context isolation keeps committed-baseline independent failure behind the physical proof", async () => {
+    const fixture = await createIssue79CarrierOwnershipFixture(
+      "callback-committed-baseline"
+    );
+    const independentFailure = new Error(
+      "Issue79 committed-baseline independent failure"
+    );
+    const committedBaselineFailure = new Error(
+      "Issue79 committed-baseline owned hook failure"
+    );
+    const nestedEvidenceRef = "issue79.callback.committed-baseline.nested";
+    const nestedFileName = "committed-baseline-nested.json";
+    const nestedPath = workspaceRecordPath(
+      fixture.workspaceRoot,
+      [...fixture.directorySegments, nestedFileName],
+      nestedEvidenceRef
+    );
+    const carrierBaseline =
+      workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+    let nestedFailure: unknown;
+
+    const result = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterTemporaryFileWritten: ({ canonicalPath }) => {
+          if (canonicalPath === nestedPath) throw independentFailure;
+        },
+        beforeCommittedMutableBaselineCapture: async ({ path }) => {
+          if (path !== fixture.recordPath) return;
+          nestedFailure = await captureThrownValue(() =>
+            writeJsonRecord(
+              fixture.workspaceRoot,
+              fixture.directorySegments,
+              nestedFileName,
+              fixture.replacement,
+              nestedEvidenceRef,
+              IdempotencyRecordSchema
+            )
+          );
+          throw committedBaselineFailure;
+        }
+      },
+      fixture.replace
+    );
+
+    expect(result.status).toBe("writer_failed");
+    if (result.status !== "writer_failed") {
+      throw new Error("Expected the committed-baseline hook failure.");
+    }
+    expect(result.origin).toBe("writer");
+    expect(semanticPrimaryError(result.error)).toBe(committedBaselineFailure);
+    expect(nestedFailure).toBe(independentFailure);
+    expect(countErrorGraphIdentity(result.error, independentFailure)).toBe(0);
+    expect(countErrorGraphIdentity(result.error, committedBaselineFailure)).toBe(1);
+    expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+      carrierBaseline
+    );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
+  for (const surface of [
+    "after_write",
+    "condition_matches",
+    "accept_exact_observation",
+    "existing_directory_reproof"
+  ] as const) {
+    test(`Issue79 callback context isolation covers ${surface} callback`, async () => {
+      const independentFailure = new Error(
+        `Issue79 ${surface} independent failure`
+      );
+      const nestedEvidenceRef = `issue79.callback.${surface}.nested`;
+      const nestedFileName = `${surface}-nested.json`;
+      const auxiliaryEvidenceRef = `issue79.callback.${surface}.auxiliary`;
+      const auxiliaryFileName = `${surface}-auxiliary.json`;
+      const nestedDirectorySegments = [
+        "issue79-callback-nested",
+        surface
+      ] as const;
+      const auxiliaryDirectorySegments = [
+        "issue79-callback-auxiliary",
+        surface
+      ] as const;
+      const auxiliarySchema = z.object({ id: z.string() });
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `callback-direct-${surface}`
+      );
+      const nestedPath = workspaceRecordPath(
+        fixture.workspaceRoot,
+        [...nestedDirectorySegments, nestedFileName],
+        nestedEvidenceRef
+      );
+      const auxiliaryPath = workspaceRecordPath(
+        fixture.workspaceRoot,
+        [...auxiliaryDirectorySegments, auxiliaryFileName],
+        auxiliaryEvidenceRef
+      );
+      let auxiliaryPermit: WorkspaceRecordCleanupPermit | undefined;
+      let nestedFailure: unknown;
+      let callbackCalls = 0;
+      let detachedFailure: Promise<unknown> | undefined;
+      let surfaceOperation: Promise<unknown> | undefined;
+      let surfaceStarted = false;
+      const nestedCallbackStarted = createSignal();
+      const releaseNestedCallback = createAsyncGate();
+      const runIndependentFailure = async (): Promise<void> => {
+        nestedFailure = await captureThrownValue(() =>
+          writeJsonRecord(
+            fixture.workspaceRoot,
+            nestedDirectorySegments,
+            nestedFileName,
+            fixture.replacement,
+            nestedEvidenceRef,
+            IdempotencyRecordSchema
+          )
+        );
+      };
+      if (
+        surface === "condition_matches" ||
+        surface === "accept_exact_observation"
+      ) {
+        const created = await createJsonRecordIfAbsentWithCleanupPermit(
+          fixture.workspaceRoot,
+          auxiliaryDirectorySegments,
+          auxiliaryFileName,
+          { id: surface },
+          auxiliaryEvidenceRef,
+          auxiliarySchema
+        );
+        if (created.status !== "created") {
+          throw new Error(`Expected ${surface} callback fixture.`);
+        }
+        if (surface === "condition_matches") {
+          await cancelWorkspaceRecordCleanupPermit(created.cleanupPermit);
+        } else {
+          auxiliaryPermit = created.cleanupPermit;
+        }
+      } else if (surface === "existing_directory_reproof") {
+        await ensureWorkspaceRecordDirectory(
+          fixture.workspaceRoot,
+          auxiliaryDirectorySegments,
+          auxiliaryEvidenceRef
+        );
+      }
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: async ({ canonicalPath }) => {
+            if (canonicalPath !== nestedPath) return;
+            nestedCallbackStarted.resolve();
+            await releaseNestedCallback.wait;
+            throw independentFailure;
+          },
+          rewriteRecordAuthorityIdentityCandidates: ({ path, exactPath, aliases }) => {
+            if (path === fixture.recordPath && !surfaceStarted) {
+              surfaceStarted = true;
+              surfaceOperation = (async () => {
+                if (surface === "after_write") {
+                  await publishJsonRecordWithLifecycleCallbacks(
+                    fixture.workspaceRoot,
+                    auxiliaryDirectorySegments,
+                    auxiliaryFileName,
+                    { id: surface },
+                    auxiliaryEvidenceRef,
+                    auxiliarySchema,
+                    {
+                      afterWrite: async () => {
+                        callbackCalls += 1;
+                        await runIndependentFailure();
+                      }
+                    }
+                  );
+                  return;
+                }
+                if (surface === "condition_matches") {
+                  await conditionalDeleteJsonRecord(
+                    auxiliaryPath,
+                    auxiliaryEvidenceRef,
+                    auxiliarySchema,
+                    {
+                      kind: "record",
+                      expected: { id: surface },
+                      matches: () => {
+                        callbackCalls += 1;
+                        detachedFailure = runIndependentFailure().then(() => {
+                          return nestedFailure;
+                        });
+                        return true;
+                      }
+                    }
+                  );
+                  await detachedFailure;
+                  return;
+                }
+                if (surface === "accept_exact_observation") {
+                  await validateWorkspaceRecordCleanupPermitAfterExactObservation(
+                    auxiliaryPermit!,
+                    auxiliaryPath,
+                    auxiliaryEvidenceRef,
+                    async () => {
+                      callbackCalls += 1;
+                      await runIndependentFailure();
+                    }
+                  );
+                  return;
+                }
+                const reproofed =
+                  await runWithExistingWorkspaceRecordDirectoryReproof(
+                    fixture.workspaceRoot,
+                    auxiliaryDirectorySegments,
+                    auxiliaryEvidenceRef,
+                    async () => {
+                      callbackCalls += 1;
+                      await runIndependentFailure();
+                      return true;
+                    }
+                  );
+                expect(reproofed).toBe(true);
+              })();
+            }
+            return { exactPath, aliases };
+          }
+        },
+        fixture.replace
+      );
+      await nestedCallbackStarted.promise;
+      releaseNestedCallback.open();
+      expect(await surfaceOperation).toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(surfaceStarted).toBe(true);
+      expect(callbackCalls).toBe(1);
+      expect(nestedFailure).toBe(independentFailure);
+      expect(result).toEqual({ status: "replaced", record: fixture.replacement });
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    });
+  }
+
+  test("Issue79 cleanup notification nested exact replacement keeps a separately owned carrier", async () => {
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const nestedFixture = await createIssue79CarrierOwnershipFixture(
+      "callback-nested-exact-inner"
+    );
+    const nestedWriter = new Error("Issue79 nested exact writer control");
+    let outerFixture:
+      Awaited<ReturnType<typeof createIssue79CarrierOwnershipFixture>>;
+    let nestedResult: Awaited<ReturnType<typeof nestedFixture.replace>> | undefined;
+    let outerClosedFd = -1;
+    const afterPinnedFileClosed = async ({ path, fd }: Readonly<{
+      path: string;
+      fd: number;
+    }>) => {
+      if (path !== outerFixture.recordPath) return;
+      outerClosedFd = fd;
+      nestedResult = await nestedFixture.replace();
+    };
+    outerFixture = await createIssue79CarrierOwnershipFixture(
+      "callback-nested-exact-outer",
+      { afterCleanupPermitPinnedHandleClosed: afterPinnedFileClosed }
+    );
+    const carrierBaseline =
+      workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+
+    const outerResult = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterTemporaryFileWritten: ({ canonicalPath }) => {
+          if (canonicalPath === nestedFixture.recordPath) throw nestedWriter;
+        },
+        beforeCleanupPermitIdentityResolution: async ({ path }) => {
+          if (path === outerFixture.recordPath) await chmod(path, 0o700);
+        }
+      },
+      outerFixture.replace
+    );
+
+    expect(nestedResult?.status).toBe("writer_failed");
+    if (nestedResult?.status !== "writer_failed") {
+      throw new Error("Expected the nested exact writer control failure.");
+    }
+    expect(semanticPrimaryError(nestedResult.error)).toBe(nestedWriter);
+    expect(outerResult.status).toBe("operation_failed");
+    if (outerResult.status !== "operation_failed") {
+      throw new Error("Expected the outer exact physical-proof control failure.");
+    }
+    expect(outerResult.origin).toBe("physical_proof");
+    expect(countErrorGraphIdentity(outerResult.error, nestedWriter)).toBe(0);
+    expect(outerClosedFd).toBeGreaterThanOrEqual(0);
+    await expectFileDescriptorClosed(outerClosedFd);
+    expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+      carrierBaseline
+    );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+  });
+
+  test("record-authority identity rewrite remains synchronous and propagates its original thrown value", async () => {
+    const fixture = await createIssue79CarrierOwnershipFixture(
+      "callback-sync-rewrite-throw-control"
+    );
+    const rewriteFailure = new Error("Issue79 synchronous rewrite throw control");
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          rewriteRecordAuthorityIdentityCandidates: () => {
+            throw rewriteFailure;
+          }
+        },
+        () => readJsonRecord(
+          fixture.recordPath,
+          fixture.evidenceRef,
+          IdempotencyRecordSchema
+        )
+      )
+    );
+    await cancelWorkspaceRecordCleanupPermit(fixture.cleanupPermit);
+
+    expect(failure).toBe(rewriteFailure);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
   test("Issue79 immutable failure carrier keeps hostile writer values opaque and P then C ordered once", async () => {
     const cases = [
       { form: "plain", combination: "W" },
@@ -33649,7 +34371,10 @@ async function createTempWorkspacePath(): Promise<{
   };
 }
 
-async function createIssue79CarrierOwnershipFixture(label: string) {
+async function createIssue79CarrierOwnershipFixture(
+  label: string,
+  observationHooks?: WorkspaceRecordPublicationHooks
+) {
   const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
   tempRoots.push(tempRoot);
   const rawKey = `task:create:issue79-owner-${label}`;
@@ -33673,11 +34398,20 @@ async function createIssue79CarrierOwnershipFixture(label: string) {
   }
   const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
   const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
-  const observation = await observeJsonRecordForCleanup(
-    recordPath,
-    evidenceRef,
-    IdempotencyRecordSchema
-  );
+  const observation = observationHooks
+    ? await runWithWorkspaceRecordPublicationHooks(
+        observationHooks,
+        () => observeJsonRecordForCleanup(
+          recordPath,
+          evidenceRef,
+          IdempotencyRecordSchema
+        )
+      )
+    : await observeJsonRecordForCleanup(
+        recordPath,
+        evidenceRef,
+        IdempotencyRecordSchema
+      );
   if (observation.status !== "record") {
     throw new Error("Expected an exact Issue79 carrier observation.");
   }

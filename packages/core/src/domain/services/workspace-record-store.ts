@@ -169,6 +169,10 @@ const exactReplacementFailureCarrierStorage =
 let activeExactReplacementFailureHolders = 0;
 let rejectedExactReplacementFailureWrites = 0;
 
+function runWithoutExactReplacementFailureCarrier<T>(callback: () => T): T {
+  return exactReplacementFailureCarrierStorage.exit(callback);
+}
+
 function createExactReplacementFailureHolder(): ExactReplacementFailureHolder {
   const owner = Object.freeze({ identity: Symbol("exact-replacement-owner") });
   activeExactReplacementFailureHolders += 1;
@@ -467,7 +471,7 @@ async function captureAuthorityMutatingCallbackBoundary(
 
   const callbackSettlement = (async (): Promise<PresentFailure | undefined> => {
     try {
-      await exactReplacementFailureCarrierStorage.exit(callback);
+      await runWithoutExactReplacementFailureCarrier(callback);
       return undefined;
     } catch (error) {
       return { value: error };
@@ -1622,7 +1626,9 @@ export async function runWithExistingWorkspaceRecordDirectoryReproof(
     let value = false;
     let callbackFailure: PresentFailure | undefined;
     try {
-      value = Boolean(await callback());
+      value = Boolean(
+        await runWithoutExactReplacementFailureCarrier(callback)
+      );
     } catch (error) {
       callbackFailure = { value: error };
     }
@@ -2266,14 +2272,18 @@ export async function transferWorkspaceRecordCleanupPermitPublicationAuthority(
             closePromise = pinnedFile.close().then(
               async () => {
                 try {
-                  await closeHook?.(hookInput);
+                  await runWithoutExactReplacementFailureCarrier(
+                    () => closeHook?.(hookInput)
+                  );
                 } catch {
                   // Close diagnostics are observation-only.
                 }
               },
               async (error) => {
                 try {
-                  await closeHook?.(hookInput);
+                  await runWithoutExactReplacementFailureCarrier(
+                    () => closeHook?.(hookInput)
+                  );
                 } catch {
                   // Preserve the descriptor-close primary.
                 }
@@ -3393,7 +3403,9 @@ export async function validateWorkspaceRecordCleanupPermitAfterExactObservation(
             } else {
               await authorityLease.validateCleanupGeneration();
             }
-            await acceptExactObservation();
+            await runWithoutExactReplacementFailureCarrier(
+              acceptExactObservation
+            );
             return { status: "current" } as const;
           },
           authorityLease.release,
@@ -4113,7 +4125,9 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     matched = observation.status === "malformed";
   } else if (observation.status === "record") {
     try {
-      matched = condition.matches(observation.record, condition.expected);
+      matched = runWithoutExactReplacementFailureCarrier(
+        () => condition.matches(observation.record, condition.expected)
+      );
     } catch (error) {
       conditionFailure = { value: error };
     }
@@ -5369,7 +5383,9 @@ export async function publishJsonRecordWithLifecycleCallbacks<T>(
 
       if (lifecycleState) lifecycleState.afterWriteStarted = true;
       if (afterWrite) {
-        await afterWrite(lifecycleInput);
+        await runWithoutExactReplacementFailureCarrier(
+          () => afterWrite(lifecycleInput)
+        );
       }
       const publication = written.publication;
       const writerProofIsTerminal =
@@ -5883,9 +5899,11 @@ async function publishOwnedMutableRecord(
     | { readonly status: "failed"; readonly failure: PresentFailure };
   try {
     if (beforeCommittedMutableBaselineCapture != null) {
-      await Reflect.apply(beforeCommittedMutableBaselineCapture, hooks, [
-        Object.freeze({ path: recordPath })
-      ]);
+      await runWithoutExactReplacementFailureCarrier(
+        () => Reflect.apply(beforeCommittedMutableBaselineCapture, hooks, [
+          Object.freeze({ path: recordPath })
+        ])
+      );
     }
     const observedCommittedBaseline = await captureMutableCanonicalBaseline(
       recordPath,
@@ -11570,7 +11588,11 @@ function closeRecordAuthorityCleanupPermitPinnedFile(
     () => undefined
   );
   const closeSettled = fileCloseSettled
-    .then(async () => await afterPinnedFileClosed?.(input))
+    .then(
+      async () => await runWithoutExactReplacementFailureCarrier(
+        () => afterPinnedFileClosed?.(input)
+      )
+    )
     .catch(() => undefined);
   state.pinnedFileClose = closeSettled;
   pendingCleanupPermitFileCloses.add(closeSettled);
@@ -11608,14 +11630,20 @@ async function recordAuthorityIdentityCandidates(
 ): Promise<{ exactPath: string; aliases: readonly string[] }> {
   try {
     const observed = await physicalAuthorityPathIdentityCandidates(recordPath, evidenceRef);
-    const rewritten = publicationHookStorage.getStore()
-      ?.rewriteRecordAuthorityIdentityCandidates?.(
-        Object.freeze({
-          path: recordPath,
-          exactPath: observed.exact,
-          aliases: observed.aliases
-        })
-      );
+    const hooks = publicationHookStorage.getStore();
+    const rewriteRecordAuthorityIdentityCandidates =
+      hooks?.rewriteRecordAuthorityIdentityCandidates;
+    const rewritten = rewriteRecordAuthorityIdentityCandidates
+      ? runWithoutExactReplacementFailureCarrier(
+          () => Reflect.apply(rewriteRecordAuthorityIdentityCandidates, hooks, [
+            Object.freeze({
+              path: recordPath,
+              exactPath: observed.exact,
+              aliases: observed.aliases
+            })
+          ])
+        )
+      : undefined;
     const candidates = rewritten ?? {
       exactPath: observed.exact,
       aliases: observed.aliases
