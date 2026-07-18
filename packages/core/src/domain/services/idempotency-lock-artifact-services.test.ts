@@ -29898,6 +29898,235 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  for (const candidate of [
+    { label: "String object", create: () => new String("boxed-exact-path") },
+    { label: "number", create: () => 17 },
+    { label: "null", create: () => null },
+    { label: "function", create: () => function callbackOwnedPath() {} },
+    { label: "symbol", create: () => Symbol("callback-owned-path") },
+    { label: "bigint", create: () => 17n }
+  ] as const) {
+    test(`Issue79 rewrite candidate primitive-string boundary rejects ${candidate.label} exactPath with the stable contract`, async () => {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `rewrite-primitive-exact-${candidate.label.replaceAll(" ", "-")}`
+      );
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          rewriteRecordAuthorityIdentityCandidates: ({ exactPath, aliases }) => ({
+            exactPath: candidate.create() as unknown as typeof exactPath,
+            aliases
+          })
+        },
+        fixture.replace
+      );
+
+      expectIssue79RewritePrimitiveBoundaryFailure(
+        result,
+        "rewriteRecordAuthorityIdentityCandidates exactPath must be a primitive string."
+      );
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    });
+
+    test(`Issue79 rewrite candidate primitive-string boundary rejects ${candidate.label} alias with its index`, async () => {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `rewrite-primitive-alias-${candidate.label.replaceAll(" ", "-")}`
+      );
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          rewriteRecordAuthorityIdentityCandidates: ({ exactPath }) => ({
+            exactPath,
+            aliases: [
+              "primitive-alias-before",
+              candidate.create() as unknown as string,
+              "primitive-alias-after"
+            ]
+          })
+        },
+        fixture.replace
+      );
+
+      expectIssue79RewritePrimitiveBoundaryFailure(
+        result,
+        "rewriteRecordAuthorityIdentityCandidates aliases[1] must be a primitive string."
+      );
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    });
+  }
+
+  for (const target of ["exactPath", "alias"] as const) {
+    test(`Issue79 rewrite candidate primitive-string boundary rejects Proxy String ${target} without traps or detached work`, async () => {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `rewrite-primitive-proxy-${target}`
+      );
+      const nestedFileName = `rewrite-primitive-proxy-${target}-nested.json`;
+      const nestedEvidenceRef = `issue79.rewrite.primitive.proxy.${target}.nested`;
+      const nestedPath = workspaceRecordPath(
+        fixture.workspaceRoot,
+        [...fixture.directorySegments, nestedFileName],
+        nestedEvidenceRef
+      );
+      const independentFailure = new Error(
+        `Issue79 rewrite primitive Proxy String ${target} detached failure`
+      );
+      const nestedCallbackStarted = createSignal();
+      const releaseNestedCallback = createAsyncGate();
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+      let trapCalls = 0;
+      let detachedWorkStarted = false;
+      let detachedWork: Promise<unknown> | undefined;
+      let detachedOutcome: unknown;
+      const proxyString = new Proxy(new String(`proxy-${target}`), {
+        get: (object, property, receiver) => {
+          trapCalls += 1;
+          if (!detachedWork) {
+            detachedWorkStarted = true;
+            detachedWork = captureThrownValue(() =>
+              writeJsonRecord(
+                fixture.workspaceRoot,
+                fixture.directorySegments,
+                nestedFileName,
+                fixture.replacement,
+                nestedEvidenceRef,
+                IdempotencyRecordSchema
+              )
+            );
+          }
+          return Reflect.get(object, property, receiver);
+        }
+      });
+
+      let result!: Awaited<ReturnType<typeof fixture.replace>>;
+      try {
+        result = await runWithWorkspaceRecordPublicationHooks(
+          {
+            rewriteRecordAuthorityIdentityCandidates: ({ exactPath, aliases }) => ({
+              exactPath: target === "exactPath"
+                ? proxyString as unknown as string
+                : exactPath,
+              aliases: target === "alias"
+                ? [aliases[0] ?? exactPath, proxyString as unknown as string]
+                : aliases
+            }),
+            afterTemporaryFileWritten: async ({ canonicalPath }) => {
+              if (canonicalPath !== nestedPath) return;
+              nestedCallbackStarted.resolve();
+              await releaseNestedCallback.wait;
+              throw independentFailure;
+            }
+          },
+          fixture.replace
+        );
+        if (detachedWork) {
+          await Promise.race([
+            nestedCallbackStarted.promise,
+            timeoutAfter(2_000, `Proxy String ${target} detached work did not start`)
+          ]);
+        }
+      } finally {
+        releaseNestedCallback.open();
+        if (detachedWork) detachedOutcome = await detachedWork;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expectIssue79RewritePrimitiveBoundaryFailure(
+        result,
+        target === "exactPath"
+          ? "rewriteRecordAuthorityIdentityCandidates exactPath must be a primitive string."
+          : "rewriteRecordAuthorityIdentityCandidates aliases[1] must be a primitive string."
+      );
+      expect(trapCalls).toBe(0);
+      expect(detachedWorkStarted).toBe(false);
+      expect(detachedWork).toBeUndefined();
+      expect(detachedOutcome).toBeUndefined();
+      expect(countErrorGraphIdentity(result.error, independentFailure)).toBe(0);
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    });
+  }
+
+  test("rewrite candidate primitive-string controls preserve unusual exact paths and aliases", async () => {
+    for (const control of [
+      { label: "empty", exactPath: "", aliases: [""] },
+      {
+        label: "duplicate",
+        exactPath: "duplicate-primitive",
+        aliases: ["duplicate-primitive", "duplicate-primitive"]
+      },
+      {
+        label: "nul",
+        exactPath: "primitive\0exact",
+        aliases: ["primitive\0alias"]
+      },
+      {
+        label: "relative-looking",
+        exactPath: "../primitive-exact",
+        aliases: ["./primitive-alias", "../../primitive-alias"]
+      },
+      {
+        label: "unicode",
+        exactPath: "水文/é",
+        aliases: ["流域/e\u0301", "🌊"]
+      }
+    ] as const) {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `rewrite-primitive-control-${control.label}`
+      );
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          rewriteRecordAuthorityIdentityCandidates: () => ({
+            exactPath: control.exactPath,
+            aliases: control.aliases
+          })
+        },
+        fixture.replace
+      );
+
+      expect(result).toEqual({ status: "replaced", record: fixture.replacement });
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    }
+  });
+
   test("Issue79 callback result isolation snapshots rewrite accessors iterators and proxies before restoring the carrier", async () => {
     for (const surface of [
       "exact_path_getter",
@@ -35087,6 +35316,29 @@ async function createIssue79CarrierOwnershipFixture(
         IdempotencyRecordSchema
       )
   };
+}
+
+function expectIssue79RewritePrimitiveBoundaryFailure(
+  result: Awaited<
+    ReturnType<
+      Awaited<ReturnType<typeof createIssue79CarrierOwnershipFixture>>["replace"]
+    >
+  >,
+  expectedMessage: string
+): asserts result is Extract<typeof result, { status: "operation_failed" }> {
+  expect(result.status).toBe("operation_failed");
+  if (result.status !== "operation_failed") {
+    throw new Error("Expected the rewrite primitive-string boundary failure.");
+  }
+  expect(result.origin).toBe("precondition");
+  expect(result.successor.status).toBe("current");
+  const primary = semanticPrimaryError(result.error);
+  expect(primary).toBe(result.error);
+  expect(primary).toBeInstanceOf(TypeError);
+  expect(primary).not.toBeInstanceOf(WorkspacePathSafetyError);
+  expect((primary as TypeError).message).toBe(expectedMessage);
+  expect((primary as TypeError & { code?: unknown }).code).toBeUndefined();
+  expect(countErrorGraphIdentity(result.error, primary)).toBe(1);
 }
 
 async function createCleanupPermitQueueFixture(label: string) {

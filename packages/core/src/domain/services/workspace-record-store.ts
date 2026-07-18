@@ -11656,8 +11656,20 @@ async function recordAuthorityIdentityCandidates(
           );
           if (callbackResult === undefined) return undefined;
           const exactPath = callbackResult.exactPath;
-          const aliases = Object.freeze(Array.from(callbackResult.aliases));
-          return Object.freeze({ exactPath, aliases });
+          const aliases = Array.from(callbackResult.aliases);
+          if (typeof exactPath !== "string") {
+            throw new TypeError(
+              "rewriteRecordAuthorityIdentityCandidates exactPath must be a primitive string."
+            );
+          }
+          for (let index = 0; index < aliases.length; index += 1) {
+            if (typeof aliases[index] !== "string") {
+              throw new TypeError(
+                `rewriteRecordAuthorityIdentityCandidates aliases[${index}] must be a primitive string.`
+              );
+            }
+          }
+          return Object.freeze({ exactPath, aliases: Object.freeze(aliases) });
         })
       : undefined;
     const candidates = rewritten ?? {
