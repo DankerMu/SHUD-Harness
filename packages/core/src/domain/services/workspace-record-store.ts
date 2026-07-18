@@ -367,11 +367,15 @@ function materializeExactReplacementFailure(
   carrier: ExactReplacementFailureCarrier,
   fallbackPrimary: unknown
 ): unknown {
-  const primary = carrier.writer?.value ??
-    carrier.physicalProof?.value ??
-    carrier.cleanup[0] ??
-    carrier.releaseSettlement[0] ??
-    fallbackPrimary;
+  const primary = carrier.writer !== undefined
+    ? carrier.writer.value
+    : carrier.physicalProof !== undefined
+      ? carrier.physicalProof.value
+      : carrier.cleanup.length > 0
+        ? carrier.cleanup[0]
+        : carrier.releaseSettlement.length > 0
+          ? carrier.releaseSettlement[0]
+          : fallbackPrimary;
   const compensations = [
     ...(carrier.writer !== undefined && carrier.physicalProof !== undefined
       ? [carrier.physicalProof.value]
@@ -2277,26 +2281,17 @@ export async function transferWorkspaceRecordCleanupPermitPublicationAuthority(
         stat: async (options: { bigint: true }) => await pinnedFile.stat(options),
         close: () => {
           if (!closePromise) {
-            closePromise = pinnedFile.close().then(
-              async () => {
-                try {
-                  await runWithoutExactReplacementFailureCarrierAsync(
-                    () => closeHook?.(hookInput)
-                  );
-                } catch {
-                  // Close diagnostics are observation-only.
-                }
-              },
-              async (error) => {
-                try {
-                  await runWithoutExactReplacementFailureCarrierAsync(
-                    () => closeHook?.(hookInput)
-                  );
-                } catch {
-                  // Preserve the descriptor-close primary.
-                }
-                throw error;
-              }
+            const settlementDeadline = recordAuthoritySettlementDeadline();
+            closePromise = settlePinnedFileCloseWithObservation(
+              pinnedFile.close(),
+              closeHook
+                ? () => runWithoutExactReplacementFailureCarrierAsync(
+                    () => closeHook(hookInput)
+                  )
+                : undefined,
+              settlementDeadline,
+              evidenceRef,
+              false
             );
           }
           return closePromise;
@@ -3596,7 +3591,9 @@ export async function replaceJsonRecordAfterExactObservation<T>(
         return carrier.writer !== undefined || carrier.cleanup.length > 0
           ? {
               origin: "writer",
-              error: carrier.writer?.value ?? carrier.cleanup[0]
+              error: carrier.writer !== undefined
+                ? carrier.writer.value
+                : carrier.cleanup[0]
             }
           : { origin: "physical_proof", error: value };
       };
@@ -11304,7 +11301,11 @@ async function bindRecordAuthorityCleanupPermitGeneration(
   let pinnedFile: RecordFileHandle | undefined;
   try {
     if (pendingCleanupPermitFileCloses.size > 0) {
-      await Promise.all([...pendingCleanupPermitFileCloses]);
+      await awaitRecordAuthoritySettlement(
+        Promise.all([...pendingCleanupPermitFileCloses]).then(() => undefined),
+        recordAuthoritySettlementDeadline(),
+        evidenceRef
+      );
     }
     const generationExpectation: OwnedGenerationExpectation = {
       identity: Object.freeze({
@@ -11591,23 +11592,97 @@ function closeRecordAuthorityCleanupPermitPinnedFile(
   const input = Object.freeze({ path: state.publicPath, fd: pinnedFile.fd });
   const afterPinnedFileClosed = state.afterPinnedFileClosed;
   state.afterPinnedFileClosed = undefined;
+  const settlementDeadline = recordAuthoritySettlementDeadline();
   const fileCloseSettled = pinnedFile.close().then(
     () => undefined,
     () => undefined
   );
-  const closeSettled = fileCloseSettled
-    .then(
-      async () => await runWithoutExactReplacementFailureCarrierAsync(
-        () => afterPinnedFileClosed?.(input)
-      )
-    )
-    .catch(() => undefined);
+  const closeSettled = settlePinnedFileCloseWithObservation(
+    fileCloseSettled,
+    afterPinnedFileClosed
+      ? () => runWithoutExactReplacementFailureCarrierAsync(
+          () => afterPinnedFileClosed(input)
+        )
+      : undefined,
+    settlementDeadline,
+    state.evidenceRef,
+    true
+  );
   state.pinnedFileClose = closeSettled;
-  pendingCleanupPermitFileCloses.add(closeSettled);
-  void closeSettled.finally(() => {
-    pendingCleanupPermitFileCloses.delete(closeSettled);
+  pendingCleanupPermitFileCloses.add(fileCloseSettled);
+  void fileCloseSettled.finally(() => {
+    pendingCleanupPermitFileCloses.delete(fileCloseSettled);
   });
   return closeSettled;
+}
+
+function recordAuthoritySettlementDeadline(): number {
+  return authorityDeadlineStorage.getStore() ??
+    Date.now() + RECORD_AUTHORITY_ACQUISITION_TIMEOUT_MS;
+}
+
+async function awaitRecordAuthoritySettlement(
+  settlement: Promise<void>,
+  deadline: number,
+  evidenceRef: string
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      settlement,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(authoritySettlementWaitError(evidenceRef)),
+          Math.max(0, deadline - Date.now())
+        );
+      })
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function settlePinnedFileCloseWithObservation(
+  physicalClose: Promise<void>,
+  observeClosed: (() => Promise<unknown>) | undefined,
+  deadline: number,
+  evidenceRef: string,
+  ignorePhysicalCloseFailure: boolean
+): Promise<void> {
+  let physicalFailure: PresentFailure | undefined;
+  const physicalSettled = physicalClose.then(
+    () => undefined,
+    (error: unknown) => {
+      physicalFailure = { value: error };
+    }
+  );
+  const observationSettled = physicalSettled.then(async () => {
+    if (!observeClosed) return;
+    try {
+      await observeClosed();
+    } catch {
+      // The notification is observation-only. Its rejection is consumed even
+      // after an owning operation has timed out.
+    }
+  });
+
+  await awaitRecordAuthoritySettlement(physicalSettled, deadline, evidenceRef);
+  let observationWaitFailure: PresentFailure | undefined;
+  try {
+    await awaitRecordAuthoritySettlement(observationSettled, deadline, evidenceRef);
+  } catch (error) {
+    observationWaitFailure = { value: error };
+  }
+
+  if (physicalFailure && !ignorePhysicalCloseFailure) {
+    throw observationWaitFailure
+      ? preserveWorkspacePrimaryError(
+          physicalFailure.value,
+          [observationWaitFailure.value]
+        )
+      : physicalFailure.value;
+  }
+  if (observationWaitFailure) throw observationWaitFailure.value;
 }
 
 function releaseRecordAuthorityReservation(mutex: RecordAuthorityMutex): void {
@@ -11797,6 +11872,13 @@ function authorityCapacityError(evidenceRef: string): TaskServiceError {
 function authorityWaitError(evidenceRef: string): TaskServiceError {
   return authorityCoordinationError(
     "Workspace record authority lease was not acquired before the bounded deadline.",
+    evidenceRef
+  );
+}
+
+function authoritySettlementWaitError(evidenceRef: string): TaskServiceError {
+  return authorityCoordinationError(
+    "Workspace record cleanup-permit resource settlement did not complete before the bounded authority deadline.",
     evidenceRef
   );
 }

@@ -915,12 +915,10 @@ export function createIdempotencyRecordService(
 
     let classificationError: unknown;
     if (classification.status === "completed") {
-      classificationError = classification.invalidReason
-        ? invalidCompletedRecordAuthorityError(
-            classification.invalidReason,
-            evidenceRef
-          )
-        : completedRecordInvalidationIdentityError(evidenceRef);
+      classificationError = completedRecoveryClassificationError(
+        classification,
+        evidenceRef
+      );
       if (
         failure.origin === "precondition" ||
         (failure.origin === "physical_proof" && classification.invalidReason)
@@ -994,12 +992,12 @@ export function createIdempotencyRecordService(
     }
   }
 
-  function resolveFailedRecoveryOperationalFailure(
+  function failedRecoveryOperationalFailureForDomain(
     outcome: Extract<FailedRecoveryWriteOutcome, { status: "operational_failure" }>,
     input: IdempotencyRecordLookupInput,
     scope: IdempotencyScope,
     evidenceRef: string
-  ): IdempotencyRecord {
+  ): unknown {
     if ("classificationError" in outcome) {
       if (
         outcome.failure.successor.status === "unavailable" &&
@@ -1008,29 +1006,33 @@ export function createIdempotencyRecordService(
           outcome.failure.successor.proofError
         )
       ) {
-        throw outcome.failure.error;
+        return outcome.failure.error;
       }
-      throw preserveTaskServiceErrorCompensationCompatibility(
+      return preserveTaskServiceErrorCompensationCompatibility(
         outcome.failure.error,
         [outcome.classificationError],
         IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
       );
     }
     if (outcome.classification.status === "completed") {
+      const classificationError = completedRecoveryClassificationError(
+        outcome.classification,
+        evidenceRef
+      );
       if (
         outcome.failure.origin === "precondition" ||
         (outcome.failure.origin === "physical_proof" &&
           outcome.classification.invalidReason)
       ) {
-        throw preserveTaskServiceErrorCompensationCompatibility(
-          completedRecordInvalidationIdentityError(evidenceRef),
+        return preserveTaskServiceErrorCompensationCompatibility(
+          classificationError,
           [outcome.failure.error],
           IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
         );
       }
-      throw preserveTaskServiceErrorCompensationCompatibility(
+      return preserveTaskServiceErrorCompensationCompatibility(
         outcome.failure.error,
-        [completedRecordInvalidationIdentityError(evidenceRef)],
+        [classificationError],
         IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
       );
     }
@@ -1038,7 +1040,7 @@ export function createIdempotencyRecordService(
       outcome.classification.status === "failed" ||
       outcome.classification.status === "nonterminal"
     ) {
-      throw outcome.failure.error;
+      return outcome.failure.error;
     }
     let classificationError: unknown;
     try {
@@ -1052,11 +1054,26 @@ export function createIdempotencyRecordService(
     } catch (error) {
       classificationError = error;
     }
-    throw preserveTaskServiceErrorCompensationCompatibility(
+    return preserveTaskServiceErrorCompensationCompatibility(
       outcome.failure.error,
       [classificationError],
       IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
     );
+  }
+
+  function completedRecoveryClassificationError(
+    classification: Extract<
+      RecoveryGenerationClassification,
+      { status: "completed" }
+    >,
+    evidenceRef: string
+  ): TaskServiceError {
+    return classification.invalidReason
+      ? invalidCompletedRecordAuthorityError(
+          classification.invalidReason,
+          evidenceRef
+        )
+      : completedRecordInvalidationIdentityError(evidenceRef);
   }
 
   function assertValidCompletedRecoveryRecord(
@@ -1346,65 +1363,115 @@ export function createIdempotencyRecordService(
           throw transitionGuardBusyError(scope, key, "fail");
         }
 
+        const recoveryInput = { scope, key, requestDigest: guardRequestDigest };
+        let result: IdempotencyRecord | undefined;
+        let resultResolved = false;
+        let bodyFailure: { value: unknown } | undefined;
         let retainedOperationalFailure:
           | IdempotencyExactReplacementOperationalFailure
           | undefined;
+        let retainedDomainFailure: unknown;
+        const settlementFailures: unknown[] = [];
         try {
-          return await runWithIdempotencyRelease(async () => {
-            const recoveryInput = { scope, key, requestDigest: guardRequestDigest };
-            const outcome = await writeFailedRecord(
-              recoveryInput,
-              scope,
-              key,
-              evidenceRef,
-              guard
-            );
-            const retainGuardForRetry =
-              outcome.status === "operational_failure" &&
-              ("classificationError" in outcome
-                ? outcome.failure.successor.status === "unavailable"
-                : outcome.classification.status === "nonterminal");
-            if (!retainGuardForRetry && !(await consume())) {
-              throw idempotencyTransitionArtifactSettlementError(
-                evidenceRef,
-                new Error(
-                  "Idempotency fail-intent guard changed while settling generation-bound recovery."
-                )
-              );
-            }
-            if (outcome.status === "replaced") return outcome.record;
-            if (outcome.status === "exact_existing_terminal") {
-              // lookupReplay owns completed validity classification. Returning
-              // the exact terminal record here also lets a stale guard settle
-              // before invalid-completed replay is reported.
-              return outcome.classification.record;
-            }
-            if (outcome.status === "generation_lost") {
-              return resolveRecoveryGenerationClassification(
-                outcome.classification,
-                recoveryInput,
-                scope,
-                evidenceRef,
-                "Idempotency record was missing after failed rollback recovery lost its observed generation."
-              );
-            }
+          const outcome = await writeFailedRecord(
+            recoveryInput,
+            scope,
+            key,
+            evidenceRef,
+            guard
+          );
+          const retainGuardForRetry =
+            outcome.status === "operational_failure" &&
+            ("classificationError" in outcome
+              ? outcome.failure.successor.status === "unavailable"
+              : outcome.classification.status === "nonterminal");
+
+          if (outcome.status === "operational_failure") {
+            // Fix both provenance channels before settling the observed guard:
+            // consume/release failures are compensations of this domain error,
+            // never replacements for the exact store writer/proof outcome.
             retainedOperationalFailure = outcome.failure;
-            return resolveFailedRecoveryOperationalFailure(
+            retainedDomainFailure = failedRecoveryOperationalFailureForDomain(
               outcome,
               recoveryInput,
               scope,
               evidenceRef
             );
-          }, cleanupLock.release);
-        } catch (error) {
-          if (retainedOperationalFailure) {
-            throw new RetainedIdempotencyExactReplacementFailure(
-              retainedOperationalFailure,
-              error
-            );
           }
-          throw error;
+
+          if (!retainGuardForRetry) {
+            try {
+              if (!(await consume())) {
+                throw idempotencyTransitionArtifactSettlementError(
+                  evidenceRef,
+                  new Error(
+                    "Idempotency fail-intent guard changed while settling generation-bound recovery."
+                  )
+                );
+              }
+            } catch (error) {
+              if (retainedOperationalFailure) {
+                settlementFailures.push(error);
+              } else {
+                throw error;
+              }
+            }
+          }
+
+          if (outcome.status === "operational_failure") {
+            // The error is transported after the cleanup lock is released so
+            // every settlement occurrence can be folded exactly once.
+          } else if (outcome.status === "replaced") {
+            result = outcome.record;
+            resultResolved = true;
+          } else if (outcome.status === "exact_existing_terminal") {
+            // lookupReplay owns completed validity classification. Returning
+            // the exact terminal record here also lets a stale guard settle
+            // before invalid-completed replay is reported.
+            result = outcome.classification.record;
+            resultResolved = true;
+          } else {
+            result = resolveRecoveryGenerationClassification(
+              outcome.classification,
+              recoveryInput,
+              scope,
+              evidenceRef,
+              "Idempotency record was missing after failed rollback recovery lost its observed generation."
+            );
+            resultResolved = true;
+          }
+        } catch (error) {
+          bodyFailure = { value: error };
         }
+
+        if (retainedOperationalFailure) {
+          try {
+            await cleanupLock.release();
+          } catch (error) {
+            settlementFailures.push(error);
+          }
+          const finalDomainFailure = settlementFailures.length === 0
+            ? retainedDomainFailure
+            : preserveAuthorityTransportAwareCombinedFailure(
+                retainedDomainFailure,
+                settlementFailures,
+                IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+              );
+          throw new RetainedIdempotencyExactReplacementFailure(
+            retainedOperationalFailure,
+            finalDomainFailure
+          );
+        }
+        return await runWithIdempotencyRelease(
+          async () => {
+            if (bodyFailure) throw bodyFailure.value;
+            if (!resultResolved) {
+              throw new TypeError("Retained failed recovery completed without a result.");
+            }
+            return result!;
+          },
+          cleanupLock.release
+        );
       }
     );
   }
@@ -2487,7 +2554,7 @@ export function createIdempotencyRecordService(
             "Idempotency record was missing after failed rollback recovery lost its observed generation."
           );
         }
-        return resolveFailedRecoveryOperationalFailure(
+        throw failedRecoveryOperationalFailureForDomain(
           outcome,
           recoveryInput,
           parsedScope,

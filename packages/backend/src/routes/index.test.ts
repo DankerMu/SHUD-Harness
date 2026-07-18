@@ -9556,6 +9556,270 @@ describe("backend workspace and health routes", () => {
     );
   });
 
+  test("Issue79 round4 final settlement keeps typed retained writer primary in backend guard settlement", async () => {
+    for (const settlement of ["guard_replaced", "cleanup_release"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskBody = validTaskCreateBody({
+        title: `Issue79 round4 final settlement backend ${settlement}`
+      });
+      const idempotencyKey = `task:create:issue79-round4-final-backend-${settlement}`;
+      const requestDigest = taskCreateRequestDigest(taskBody);
+      const evidenceRef = idempotencyRecordEvidenceRef("task", idempotencyKey);
+      const recordPath = join(
+        workspaceRoot,
+        "tasks",
+        "_idempotency",
+        "task",
+        idempotencyRecordFileName(idempotencyKey)
+      );
+      const guardPath = join(
+        dirname(recordPath),
+        `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`
+      );
+      const cleanupLockPath = join(
+        dirname(recordPath),
+        `${sha256Hex(`transition-cleanup:${idempotencyKey}`)}.guard-cleanup`
+      );
+      const seed = createIdempotencyRecordService({ workspaceRoot });
+      await seed.beginRecord({ scope: "task", key: idempotencyKey, requestDigest });
+      await writeFile(
+        guardPath,
+        `${JSON.stringify({
+          guard_id: `issue79-round4-final-backend-${settlement}`,
+          owner_pid: 9_999_999,
+          acquired_at_ms: Date.now() - 31_000,
+          acquired_at: "2026-07-18T12:00:00.000Z",
+          intent: "fail",
+          request_digest: requestDigest
+        })}\n`,
+        { flag: "wx", mode: 0o600 }
+      );
+      const completedB = {
+        key: idempotencyKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        result_ref: `TASK-issue79-round4-final-backend-${settlement}`,
+        created_at: "2026-07-18T12:00:01.000Z",
+        updated_at: "2026-07-18T12:00:02.000Z"
+      } as const;
+      const completedBText = `${JSON.stringify(completedB)}\n`;
+      const writerMarker = new TaskServiceError({
+        code: "record_schema_error",
+        status: 400,
+        category: "schema_error",
+        message: `Issue79 round4 final settlement backend writer ${settlement}`,
+        userMessage: "The backend retained the typed writer primary.",
+        evidenceRefs: [evidenceRef, "issue79.round4.backend_writer"],
+        retryable: false,
+        recommendedNextActions: ["Repair the injected writer input."]
+      });
+      let writerCalls = 0;
+      let guardCalls = 0;
+      let releaseCalls = 0;
+      let installed = false;
+      let routedError: unknown;
+      const hooks: WorkspaceRecordPublicationHooks = {
+        afterTemporaryFileWritten: ({ canonicalPath }) => {
+          if (canonicalPath !== recordPath || writerCalls > 0) return;
+          writerCalls += 1;
+          throw writerMarker;
+        },
+        beforeTemporaryUnlink: async ({ canonicalPath }) => {
+          if (canonicalPath !== recordPath || installed) return;
+          installed = true;
+          await writeFile(recordPath, completedBText, { flag: "w" });
+        },
+        beforeConditionalDelete: async ({ path, conditionStatus }) => {
+          if (
+            settlement !== "guard_replaced" ||
+            path !== guardPath ||
+            conditionStatus !== "matched" ||
+            guardCalls > 0
+          ) return;
+          guardCalls += 1;
+          const replacementPath = `${guardPath}.replacement`;
+          await writeFile(
+            replacementPath,
+            `${JSON.stringify({
+              guard_id: "issue79-round4-final-backend-replacement",
+              owner_pid: process.pid,
+              acquired_at_ms: Date.now(),
+              acquired_at: "2026-07-18T12:00:03.000Z",
+              intent: "fail",
+              request_digest: requestDigest
+            })}\n`,
+            { flag: "wx", mode: 0o600 }
+          );
+          await rename(replacementPath, guardPath);
+        },
+        beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+          if (
+            settlement !== "cleanup_release" ||
+            path !== cleanupLockPath ||
+            operation !== "conditional_delete" ||
+            releaseCalls > 0
+          ) return;
+          releaseCalls += 1;
+          throw new Error("Issue79 round4 final settlement backend cleanup release");
+        }
+      };
+      const app = createBackendApi({
+        workspaceRoot,
+        taskRouteErrorSinkForTest: (error) => {
+          routedError = error;
+        },
+        idempotencyServiceFactory: (options) => {
+          const service = createIdempotencyRecordService(options);
+          return {
+            ...service,
+            beginRecord: async (input) =>
+              await runWithWorkspaceRecordPublicationHooks(
+                hooks,
+                () => service.beginRecord(input)
+              ),
+            lookupReplay: async (input) =>
+              await runWithWorkspaceRecordPublicationHooks(
+                hooks,
+                () => service.lookupReplay(input)
+              )
+          };
+        }
+      });
+
+      const response = await postTask(app, taskBody, {
+        "Idempotency-Key": idempotencyKey
+      });
+      const body = (await response.json()) as ApiErrorResponse;
+      expect(response.status).toBe(400);
+      expectCanonicalError(body, "schema_error");
+      expect(body.error.message).toBe(writerMarker.message);
+      expect(body.error.user_message).toBe(writerMarker.userMessage);
+      expect(body.error.evidence_refs).toEqual(writerMarker.evidenceRefs);
+      expect(body.error.retryable).toBe(false);
+      expect(writerCalls).toBe(1);
+      expect(installed).toBe(true);
+      expect(guardCalls).toBe(settlement === "guard_replaced" ? 1 : 0);
+      expect(releaseCalls).toBe(settlement === "cleanup_release" ? 1 : 0);
+      expect(semanticPrimaryError(routedError)).toBe(writerMarker);
+      expect(await readFile(recordPath, "utf8")).toBe(completedBText);
+      expect(workspaceRecordAuthorityDiagnosticsForTest().cleanupPermits).toBe(0);
+    }
+  });
+
+  test("Issue79 round4 final settlement exposes reason-specific invalid completed operational primary in backend", async () => {
+    for (const reason of ["missing_result_ref", "unsafe_result_ref"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskBody = validTaskCreateBody({
+        title: `Issue79 round4 final settlement invalid backend ${reason}`
+      });
+      const idempotencyKey = `task:create:issue79-round4-final-invalid-backend-${reason}`;
+      const requestDigest = taskCreateRequestDigest(taskBody);
+      const evidenceRef = idempotencyRecordEvidenceRef("task", idempotencyKey);
+      const recordPath = join(
+        workspaceRoot,
+        "tasks",
+        "_idempotency",
+        "task",
+        idempotencyRecordFileName(idempotencyKey)
+      );
+      const guardPath = join(
+        dirname(recordPath),
+        `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`
+      );
+      const seed = createIdempotencyRecordService({ workspaceRoot });
+      await seed.beginRecord({ scope: "task", key: idempotencyKey, requestDigest });
+      await writeFile(
+        guardPath,
+        `${JSON.stringify({
+          guard_id: `issue79-round4-final-invalid-backend-${reason}`,
+          owner_pid: 9_999_999,
+          acquired_at_ms: Date.now() - 31_000,
+          acquired_at: "2026-07-18T13:00:00.000Z",
+          intent: "fail",
+          request_digest: requestDigest
+        })}\n`,
+        { flag: "wx", mode: 0o600 }
+      );
+      const invalidB = {
+        key: idempotencyKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        ...(reason === "unsafe_result_ref" ? { result_ref: "../unsafe" } : {}),
+        created_at: "2026-07-18T13:00:01.000Z",
+        updated_at: "2026-07-18T13:00:02.000Z"
+      } as const;
+      const invalidBText = `${JSON.stringify(invalidB)}\n`;
+      let observations = 0;
+      let injected = false;
+      let installed = false;
+      let routedError: unknown;
+      const preconditionMarker = new Error(
+        `Issue79 round4 final settlement backend precondition ${reason}`
+      );
+      const hooks: WorkspaceRecordPublicationHooks = {
+        afterDurableRecordObservation: ({ path, status }) => {
+          if (path === recordPath && status === "read") observations += 1;
+        },
+        rewriteRecordAuthorityIdentityCandidates: (input) => {
+          if (input.path !== recordPath || injected || observations < 2) {
+            return { exactPath: input.exactPath, aliases: input.aliases };
+          }
+          injected = true;
+          throw preconditionMarker;
+        },
+        afterCleanupPermitPinnedHandleClosed: ({ path }) => {
+          if (path !== recordPath || installed) return;
+          installed = true;
+          writeFileSync(recordPath, invalidBText, { flag: "w", mode: 0o600 });
+        }
+      };
+      const app = createBackendApi({
+        workspaceRoot,
+        taskRouteErrorSinkForTest: (error) => {
+          routedError = error;
+        },
+        idempotencyServiceFactory: (options) => {
+          const service = createIdempotencyRecordService(options);
+          return {
+            ...service,
+            beginRecord: async (input) =>
+              await runWithWorkspaceRecordPublicationHooks(
+                hooks,
+                () => service.beginRecord(input)
+              )
+          };
+        }
+      });
+
+      const response = await postTask(app, taskBody, {
+        "Idempotency-Key": idempotencyKey
+      });
+      const body = (await response.json()) as ApiErrorResponse;
+      expect(response.status).toBe(500);
+      expectCanonicalError(body, "workspace_error");
+      expect(body.error.message).toBe(
+        reason === "missing_result_ref"
+          ? "Completed idempotency record is missing result_ref."
+          : "Completed task idempotency result_ref is not a safe TaskCard id."
+      );
+      expect(body.error.retryable).toBe(false);
+      expect(body.error.evidence_refs).toEqual([evidenceRef, "idempotency.result_ref"]);
+      expect(injected).toBe(true);
+      expect(installed).toBe(true);
+      expect(semanticPrimaryError(routedError)).toBeInstanceOf(TaskServiceError);
+      expect((semanticPrimaryError(routedError) as TaskServiceError).message).toBe(
+        body.error.message
+      );
+      expect(countErrorGraphIdentity(routedError, preconditionMarker)).toBe(1);
+      expect(await readFile(recordPath, "utf8")).toBe(invalidBText);
+      expectNoAbsoluteWorkspacePath(body, tempRoot, workspaceRoot);
+    }
+  });
+
   test("task snapshot writes reject a symlinked tasks root without writing outside", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);

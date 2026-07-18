@@ -28566,12 +28566,12 @@ describe("idempotency, lock, and artifact services", () => {
     );
 
     expect(swapped).toBe(true);
-    // Refused fail-closed with the typed identity error, matching
-    // assertUnsafeRollbackQuarantineAuthority semantics.
+    // Refused fail-closed with the reason-specific invalid-completed error.
     expect(refusal.code).toBe("record_malformed");
-    expect(refusal.status).toBe(409);
+    expect(refusal.status).toBe(500);
+    expect(refusal.retryable).toBe(false);
     expect(refusal.message).toBe(
-      "Completed idempotency result changed before exact invalidation."
+      "Completed idempotency record is missing result_ref."
     );
     // The completed generation is preserved byte-identically.
     expect(await readFile(recordPath, "utf8")).toBe(completedText);
@@ -35155,6 +35155,526 @@ describe("idempotency, lock, and artifact services", () => {
         expect(workspaceRecordPublicationHooksActive()).toBe(true);
       });
     });
+  });
+
+  test("Issue79 round4 final settlement preserves nullish writer slots across W P C", async () => {
+    for (const writerValue of [undefined, null] as const) {
+      for (const combination of ["W", "W+P", "W+C", "W+P+C"] as const) {
+        const fixture = await createIssue79CarrierOwnershipFixture(
+          `round4-nullish-${String(writerValue)}-${combination}`
+        );
+        const cleanupFailure = new Error(
+          `Issue79 round4 final settlement cleanup ${String(writerValue)} ${combination}`
+        );
+        let writerCalls = 0;
+        let cleanupCalls = 0;
+        const result = await runWithWorkspaceRecordPublicationHooks(
+          {
+            afterTemporaryFileWritten: ({ canonicalPath }) => {
+              if (canonicalPath !== fixture.recordPath || writerCalls > 0) return;
+              writerCalls += 1;
+              throw writerValue;
+            },
+            beforeTemporaryUnlink: async ({ canonicalPath }) => {
+              if (canonicalPath !== fixture.recordPath || cleanupCalls > 0) return;
+              cleanupCalls += 1;
+              if (combination.includes("P")) {
+                await chmod(fixture.recordPath, 0o700);
+              }
+              if (combination.includes("C")) throw cleanupFailure;
+            }
+          },
+          fixture.replace
+        );
+
+        expect(result.status).toBe("writer_failed");
+        if (result.status !== "writer_failed") {
+          throw new Error("Expected a nullish writer failure outcome.");
+        }
+        expect(result.origin).toBe("writer");
+        expect(writerCalls).toBe(1);
+        expect(cleanupCalls).toBe(1);
+        if (combination === "W") {
+          expect(result.error).toBe(writerValue);
+        } else {
+          const primary = semanticPrimaryError(result.error);
+          expect(primary).toBeInstanceOf(PreservedNonErrorThrownValue);
+          expect((primary as PreservedNonErrorThrownValue).thrownValue).toBe(writerValue);
+          expect(countErrorGraphIdentity(result.error, cleanupFailure)).toBe(
+            combination.includes("C") ? 1 : 0
+          );
+          if (combination === "W+P+C") {
+            const compensations = knownPreservedCompensationAggregate(result.error).errors;
+            expect(compensations[0]).toBe(writerValue);
+            expect(compensations[1]).toBeInstanceOf(TaskServiceError);
+            expect(compensations[2]).toBe(cleanupFailure);
+          }
+        }
+        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+          fixture.authorityBaseline
+        );
+        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+          fixture.bindingBaseline
+        );
+      }
+    }
+  });
+
+  test("Issue79 round4 final settlement bounds close notification ownership without global or nested deadlock", async () => {
+    const nestedFixture = await createIssue79CarrierOwnershipFixture(
+      "round4-notification-nested-target"
+    );
+    let outerFixture: Awaited<ReturnType<typeof createIssue79CarrierOwnershipFixture>>;
+    let notificationCalls = 0;
+    outerFixture = await createIssue79CarrierOwnershipFixture(
+      "round4-notification-nested-owner",
+      {
+        afterCleanupPermitPinnedHandleClosed: async ({ path }) => {
+          if (path !== outerFixture.recordPath || notificationCalls > 0) return;
+          notificationCalls += 1;
+          const same = await observeJsonRecordForCleanup(
+            outerFixture.recordPath,
+            outerFixture.evidenceRef,
+            IdempotencyRecordSchema
+          );
+          if (same.status === "missing") throw new Error("Expected same-record observation.");
+          await cancelWorkspaceRecordCleanupPermit(same.cleanupPermit);
+          const different = await observeJsonRecordForCleanup(
+            nestedFixture.recordPath,
+            nestedFixture.evidenceRef,
+            IdempotencyRecordSchema
+          );
+          if (different.status === "missing") {
+            throw new Error("Expected different-record observation.");
+          }
+          await cancelWorkspaceRecordCleanupPermit(different.cleanupPermit);
+        }
+      }
+    );
+    const nestedResult = await Promise.race([
+      outerFixture.replace(),
+      timeoutAfter(500, "Issue79 round4 final settlement nested notification self-deadlocked")
+    ]);
+    expect(nestedResult.status).toBe("replaced");
+    expect(notificationCalls).toBe(1);
+    await cancelWorkspaceRecordCleanupPermit(nestedFixture.cleanupPermit);
+
+    const never = new Promise<void>(() => undefined);
+    let firstClosedFd = -1;
+    const first = await createIssue79CarrierOwnershipFixture(
+      "round4-notification-never-first",
+      {
+        afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+          firstClosedFd = fd;
+          return never;
+        }
+      }
+    );
+    const firstStartedAt = Date.now();
+    const firstFailure = await captureTaskServiceError(() =>
+      Promise.race([
+        runWithWorkspaceRecordAuthorityDeadline(
+          Date.now() + 50,
+          () => cancelWorkspaceRecordCleanupPermit(first.cleanupPermit)
+        ),
+        timeoutAfter(500, "Issue79 round4 final settlement first notification was unbounded")
+      ])
+    );
+    expect(Date.now() - firstStartedAt).toBeLessThan(450);
+    expect(firstFailure.code).toBe("record_malformed");
+    expect(firstFailure.status).toBe(409);
+    expect(firstFailure.retryable).toBe(true);
+    expect(firstFailure.message).toBe(
+      "Workspace record cleanup-permit resource settlement did not complete before the bounded authority deadline."
+    );
+    await expectFileDescriptorClosed(firstClosedFd);
+
+    const second = await Promise.race([
+      createIssue79CarrierOwnershipFixture("round4-notification-never-second"),
+      timeoutAfter(500, "Issue79 round4 final settlement unrelated record inherited notification wait")
+    ]);
+    await Promise.race([
+      cancelWorkspaceRecordCleanupPermit(second.cleanupPermit),
+      timeoutAfter(500, "Issue79 round4 final settlement unrelated close did not settle")
+    ]);
+
+    const lateUnhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => lateUnhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      for (const late of ["fulfill", "reject"] as const) {
+        let settleLate!: (reason?: unknown) => void;
+        const lateReason = new Error(
+          `Issue79 round4 final settlement late ${late}`
+        );
+        const lateNotification = new Promise<void>((resolve, reject) => {
+          settleLate = late === "fulfill" ? resolve : reject;
+        });
+        let lateFd = -1;
+        const fixture = await createIssue79CarrierOwnershipFixture(
+          `round4-notification-late-${late}`,
+          {
+            afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+              lateFd = fd;
+              return lateNotification;
+            }
+          }
+        );
+        const failure = await captureTaskServiceError(() =>
+          runWithWorkspaceRecordAuthorityDeadline(
+            Date.now() + 50,
+            () => cancelWorkspaceRecordCleanupPermit(fixture.cleanupPermit)
+          )
+        );
+        expect(failure.message).toBe(firstFailure.message);
+        await expectFileDescriptorClosed(lateFd);
+        settleLate(late === "reject" ? lateReason : undefined);
+        await delay(10);
+      }
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(lateUnhandled).toEqual([]);
+
+    const writerMarker = new Error(
+      "Issue79 round4 final settlement writer before notification timeout"
+    );
+    const writerFixture = await createIssue79CarrierOwnershipFixture(
+      "round4-notification-writer-timeout",
+      { afterCleanupPermitPinnedHandleClosed: () => never }
+    );
+    const writerResult = await runWithWorkspaceRecordAuthorityDeadline(
+      Date.now() + 50,
+      () => runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: ({ canonicalPath }) => {
+            if (canonicalPath === writerFixture.recordPath) throw writerMarker;
+          }
+        },
+        writerFixture.replace
+      )
+    );
+    expect(writerResult.status).toBe("writer_failed");
+    if (writerResult.status !== "writer_failed") {
+      throw new Error("Expected writer plus notification timeout outcome.");
+    }
+    expect(semanticPrimaryError(writerResult.error)).toBe(writerMarker);
+    expect(countErrorGraphIdentity(writerResult.error, writerMarker)).toBe(1);
+    const timeoutNode = findErrorNode(
+      writerResult.error,
+      (error) => error instanceof TaskServiceError && error.message === firstFailure.message
+    );
+    expect(timeoutNode).toBeDefined();
+    expect(countErrorGraphIdentity(writerResult.error, timeoutNode)).toBe(1);
+
+    let transferredFd = -1;
+    const transferredFixture = await createIssue79CarrierOwnershipFixture(
+      "round4-notification-transferred-timeout",
+      {
+        afterCleanupPermitPinnedHandleClosed: ({ fd }) => {
+          transferredFd = fd;
+          return never;
+        }
+      }
+    );
+    const transferred = await transferWorkspaceRecordCleanupPermitPublicationAuthority(
+      transferredFixture.cleanupPermit,
+      transferredFixture.recordPath,
+      transferredFixture.evidenceRef
+    );
+    const transferredFailure = await captureTaskServiceError(() =>
+      runWithWorkspaceRecordAuthorityDeadline(
+        Date.now() + 50,
+        transferred.pinnedFile.close
+      )
+    );
+    expect(transferredFailure.message).toBe(firstFailure.message);
+    expect(transferredFd).toBe(transferred.pinnedFile.fd);
+    await expectFileDescriptorClosed(transferredFd);
+  });
+
+  test("Issue79 round4 final settlement retains typed writer primary through guard and cleanup-lock settlement", async () => {
+    for (const surface of ["lookup", "quarantine"] as const) {
+      for (const settlement of ["guard_replaced", "cleanup_release"] as const) {
+        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+        tempRoots.push(tempRoot);
+        const rawKey = `task:create:issue79-round4-final-${surface}-${settlement}`;
+        const requestDigest = `digest-issue79-round4-final-${surface}-${settlement}`;
+        const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+        const recordPath = workspaceRecordPath(
+          workspaceRoot,
+          ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+          evidenceRef
+        );
+        const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+        const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+        const service = createIdempotencyRecordService({ workspaceRoot });
+        await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+        await writeFile(
+          guardPath,
+          `${JSON.stringify({
+            guard_id: `issue79-round4-final-${surface}-${settlement}`,
+            owner_pid: 9_999_999,
+            acquired_at_ms: Date.now() - 31_000,
+            acquired_at: "2026-07-18T10:00:00.000Z",
+            intent: "fail",
+            request_digest: requestDigest
+          })}\n`,
+          { flag: "wx", mode: 0o600 }
+        );
+        const completedB = {
+          key: rawKey,
+          scope: "task",
+          request_digest: requestDigest,
+          status: "completed",
+          result_ref: `TASK-issue79-round4-final-${surface}-${settlement}`,
+          created_at: "2026-07-18T10:00:01.000Z",
+          updated_at: "2026-07-18T10:00:02.000Z"
+        } satisfies IdempotencyRecord;
+        const completedBText = `${JSON.stringify(completedB)}\n`;
+        const writerMarker = new TaskServiceError({
+          code: "record_schema_error",
+          status: 400,
+          category: "schema_error",
+          message: `Issue79 round4 final settlement typed writer ${surface} ${settlement}`,
+          userMessage: "The typed writer remains the public primary.",
+          evidenceRefs: [evidenceRef, "issue79.round4.writer"],
+          retryable: false,
+          recommendedNextActions: ["Repair the injected writer input."]
+        });
+        const settlementMarker = new Error(
+          `Issue79 round4 final settlement ${settlement}`
+        );
+        let writerCalls = 0;
+        let guardSettlementCalls = 0;
+        let cleanupReleaseCalls = 0;
+        let completedInstalled = false;
+
+        const hooks: WorkspaceRecordPublicationHooks = {
+          afterTemporaryFileWritten: ({ canonicalPath }) => {
+            if (canonicalPath !== recordPath || writerCalls > 0) return;
+            writerCalls += 1;
+            throw writerMarker;
+          },
+          beforeTemporaryUnlink: async ({ canonicalPath }) => {
+            if (canonicalPath !== recordPath || completedInstalled) return;
+            completedInstalled = true;
+            await writeFile(recordPath, completedBText, { flag: "w" });
+          },
+          beforeConditionalDelete: async ({ path, conditionStatus }) => {
+            if (
+              settlement !== "guard_replaced" ||
+              path !== guardPath ||
+              conditionStatus !== "matched" ||
+              guardSettlementCalls > 0
+            ) return;
+            guardSettlementCalls += 1;
+            const replacementPath = `${guardPath}.replacement`;
+            await writeFile(
+              replacementPath,
+              `${JSON.stringify({
+                guard_id: "issue79-round4-final-replacement",
+                owner_pid: process.pid,
+                acquired_at_ms: Date.now(),
+                acquired_at: "2026-07-18T10:00:03.000Z",
+                intent: "fail",
+                request_digest: requestDigest
+              })}\n`,
+              { flag: "wx", mode: 0o600 }
+            );
+            await rename(replacementPath, guardPath);
+          },
+          beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+            if (
+              settlement !== "cleanup_release" ||
+              path !== cleanupLockPath ||
+              operation !== "conditional_delete" ||
+              cleanupReleaseCalls > 0
+            ) return;
+            cleanupReleaseCalls += 1;
+            throw settlementMarker;
+          }
+        };
+        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+        const failure = await captureThrownValue(() =>
+          runWithWorkspaceRecordPublicationHooks(
+            hooks,
+            () => surface === "lookup"
+              ? service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+              : service.quarantineRecordAfterUnsafeRollback({
+                  scope: "task",
+                  key: rawKey,
+                  requestDigest
+                })
+          )
+        );
+
+        expect(writerCalls).toBe(1);
+        expect(completedInstalled).toBe(true);
+        expect(semanticPrimaryError(failure)).toBe(writerMarker);
+        const compensationAggregate = findPreservedCompensationAggregate(failure);
+        expect(compensationAggregate).toBeDefined();
+        expect(
+          compensationAggregate!.errors.some((entry) => entry === writerMarker)
+        ).toBe(false);
+        expect(guardSettlementCalls).toBe(settlement === "guard_replaced" ? 1 : 0);
+        expect(cleanupReleaseCalls).toBe(settlement === "cleanup_release" ? 1 : 0);
+        expect(countErrorGraphIdentity(failure, settlementMarker)).toBe(
+          settlement === "cleanup_release" ? 1 : 0
+        );
+        expect(await readFile(recordPath, "utf8")).toBe(completedBText);
+        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+          authorityBaseline
+        );
+      }
+    }
+  });
+
+  test("Issue79 round4 final settlement maps invalid completed B by reason for direct and retained operational origins", async () => {
+    for (const surface of ["direct", "retained"] as const) {
+      for (const reason of ["missing_result_ref", "unsafe_result_ref"] as const) {
+        for (const origin of ["writer", "precondition", "physical_proof"] as const) {
+          const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+          tempRoots.push(tempRoot);
+          const rawKey = `task:create:issue79-round4-final-${surface}-${reason}-${origin}`;
+          const requestDigest = `digest-issue79-round4-final-${surface}-${reason}-${origin}`;
+          const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+          const recordPath = workspaceRecordPath(
+            workspaceRoot,
+            ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+            evidenceRef
+          );
+          const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+          const service = createIdempotencyRecordService({ workspaceRoot });
+          await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+          if (surface === "retained") {
+            await writeFile(
+              guardPath,
+              `${JSON.stringify({
+                guard_id: `issue79-round4-final-${reason}-${origin}`,
+                owner_pid: 9_999_999,
+                acquired_at_ms: Date.now() - 31_000,
+                acquired_at: "2026-07-18T11:00:00.000Z",
+                intent: "fail",
+                request_digest: requestDigest
+              })}\n`,
+              { flag: "wx", mode: 0o600 }
+            );
+          }
+          const invalidB = {
+            key: rawKey,
+            scope: "task",
+            request_digest: requestDigest,
+            status: "completed",
+            ...(reason === "unsafe_result_ref" ? { result_ref: "../unsafe" } : {}),
+            created_at: "2026-07-18T11:00:01.000Z",
+            updated_at: "2026-07-18T11:00:02.000Z"
+          } satisfies IdempotencyRecord;
+          const invalidBText = `${JSON.stringify(invalidB)}\n`;
+          const operationalMarker = new Error(
+            `Issue79 round4 final settlement ${origin} ${reason} ${surface}`
+          );
+          let installed = false;
+          let injected = false;
+          let recordObservations = 0;
+          const hooks: WorkspaceRecordPublicationHooks = origin === "writer"
+            ? {
+                afterTemporaryFileWritten: ({ canonicalPath }) => {
+                  if (canonicalPath !== recordPath || injected) return;
+                  injected = true;
+                  throw operationalMarker;
+                },
+                beforeTemporaryUnlink: async ({ canonicalPath }) => {
+                  if (canonicalPath !== recordPath || installed) return;
+                  installed = true;
+                  await writeFile(recordPath, invalidBText, { flag: "w" });
+                }
+              }
+            : origin === "precondition"
+              ? {
+                  afterDurableRecordObservation: ({ path, status }) => {
+                    if (path === recordPath && status === "read") {
+                      recordObservations += 1;
+                    }
+                  },
+                  rewriteRecordAuthorityIdentityCandidates: (input) => {
+                    if (
+                      input.path !== recordPath ||
+                      injected ||
+                      recordObservations < 2
+                    ) {
+                      return { exactPath: input.exactPath, aliases: input.aliases };
+                    }
+                    injected = true;
+                    throw operationalMarker;
+                  },
+                  afterCleanupPermitPinnedHandleClosed: ({ path }) => {
+                    if (path !== recordPath || installed) return;
+                    installed = true;
+                    writeFileSync(recordPath, invalidBText, { flag: "w", mode: 0o600 });
+                  }
+                }
+              : {
+                  afterTemporaryFileWritten: async ({ canonicalPath }) => {
+                    if (canonicalPath !== recordPath || injected) return;
+                    injected = true;
+                    await chmod(recordPath, 0o700);
+                  },
+                  afterCleanupPermitPinnedHandleClosed: async ({ path }) => {
+                    if (path !== recordPath || installed) return;
+                    installed = true;
+                    await chmod(recordPath, 0o600);
+                    await writeFile(recordPath, invalidBText, { flag: "w" });
+                  }
+                };
+
+          const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+          const failure = await captureThrownValue(() =>
+            runWithWorkspaceRecordPublicationHooks(
+              hooks,
+              () => surface === "direct"
+                ? service.recoverFailedRecordAfterRollback({
+                    scope: "task",
+                    key: rawKey,
+                    requestDigest
+                  })
+                : service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+            )
+          );
+
+          expect(injected).toBe(true);
+          expect(installed).toBe(true);
+          const typed = findErrorNode(
+            failure,
+            (error) =>
+              error instanceof TaskServiceError &&
+              error.message === (reason === "missing_result_ref"
+                ? "Completed idempotency record is missing result_ref."
+                : "Completed task idempotency result_ref is not a safe TaskCard id.")
+          ) as TaskServiceError | undefined;
+          expect(typed).toBeDefined();
+          expect(typed!.code).toBe("record_malformed");
+          expect(typed!.status).toBe(500);
+          expect(typed!.retryable).toBe(false);
+          expect(typed!.evidenceRefs).toEqual([evidenceRef, "idempotency.result_ref"]);
+          expect(countErrorGraphIdentity(failure, operationalMarker)).toBe(
+            origin === "physical_proof" ? 0 : 1
+          );
+          expect(semanticPrimaryError(failure)).toBe(
+            origin === "writer" ? operationalMarker : typed
+          );
+          const ordered = findPreservedCompensationAggregate(failure);
+          expect(ordered).toBeDefined();
+          expect(ordered!.errors.filter((entry) => entry === typed)).toHaveLength(
+            origin === "writer" ? 1 : 0
+          );
+          expect(await readFile(recordPath, "utf8")).toBe(invalidBText);
+          expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+            authorityBaseline
+          );
+        }
+      }
+    }
   });
 });
 
