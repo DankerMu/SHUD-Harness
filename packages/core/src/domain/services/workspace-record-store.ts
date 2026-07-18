@@ -122,10 +122,41 @@ interface ExactReplacementFailureCarrier {
   readonly releaseSettlement: readonly unknown[];
 }
 
-interface ExactReplacementFailureCarrierState {
-  carrier: ExactReplacementFailureCarrier;
-  callbackFailureSlot: "writer" | "cleanup";
-  physicalProofSource: "callback_boundary" | "observation";
+interface ExactReplacementFailureOwnerToken {
+  readonly identity: symbol;
+}
+
+interface ExactReplacementFailureEventToken {
+  readonly identity: symbol;
+}
+
+interface ExactReplacementFailureEvent {
+  readonly token: ExactReplacementFailureEventToken;
+  readonly owner: ExactReplacementFailureOwnerToken;
+  readonly slot: ExactReplacementFailureSlot;
+  readonly physicalProofSource: "callback_boundary" | "observation";
+  readonly ordinal: number;
+  state: "open" | "cancelled" | "recorded";
+}
+
+interface ExactReplacementRecordedFailure {
+  readonly event: ExactReplacementFailureEvent;
+  readonly value: unknown;
+}
+
+interface ExactReplacementFailureHolder {
+  readonly owner: ExactReplacementFailureOwnerToken;
+  readonly events: Map<ExactReplacementFailureEventToken, ExactReplacementFailureEvent>;
+  readonly records: ExactReplacementRecordedFailure[];
+  state: "open" | "cancelled" | "finalized";
+  nextOrdinal: number;
+}
+
+interface ExactReplacementFailureCarrierContext {
+  readonly holder: ExactReplacementFailureHolder;
+  readonly owner: ExactReplacementFailureOwnerToken;
+  readonly callbackFailureSlot: "writer" | "cleanup";
+  readonly physicalProofSource: "callback_boundary" | "observation";
 }
 
 const EMPTY_EXACT_REPLACEMENT_FAILURE_CARRIER: ExactReplacementFailureCarrier =
@@ -134,65 +165,190 @@ const EMPTY_EXACT_REPLACEMENT_FAILURE_CARRIER: ExactReplacementFailureCarrier =
     releaseSettlement: Object.freeze([])
   });
 const exactReplacementFailureCarrierStorage =
-  new AsyncLocalStorage<ExactReplacementFailureCarrierState>();
+  new AsyncLocalStorage<ExactReplacementFailureCarrierContext>();
+let activeExactReplacementFailureHolders = 0;
+let rejectedExactReplacementFailureWrites = 0;
+
+function createExactReplacementFailureHolder(): ExactReplacementFailureHolder {
+  const owner = Object.freeze({ identity: Symbol("exact-replacement-owner") });
+  activeExactReplacementFailureHolders += 1;
+  return {
+    owner,
+    events: new Map(),
+    records: [],
+    state: "open",
+    nextOrdinal: 0
+  };
+}
+
+function exactReplacementFailureContext(
+  holder: ExactReplacementFailureHolder
+): ExactReplacementFailureCarrierContext {
+  return Object.freeze({
+    holder,
+    owner: holder.owner,
+    callbackFailureSlot: "writer",
+    physicalProofSource: "observation"
+  });
+}
+
+function issueExactReplacementFailureEvent(
+  context: ExactReplacementFailureCarrierContext,
+  slot: ExactReplacementFailureSlot,
+  physicalProofSource: "callback_boundary" | "observation" = "observation"
+): ExactReplacementFailureEventToken | undefined {
+  const { holder, owner } = context;
+  if (holder.state !== "open" || holder.owner !== owner) {
+    rejectedExactReplacementFailureWrites += 1;
+    return undefined;
+  }
+  const token = Object.freeze({ identity: Symbol("exact-replacement-event") });
+  const event: ExactReplacementFailureEvent = {
+    token,
+    owner,
+    slot,
+    physicalProofSource,
+    ordinal: holder.nextOrdinal,
+    state: "open"
+  };
+  holder.nextOrdinal += 1;
+  holder.events.set(token, event);
+  return token;
+}
+
+function cancelExactReplacementFailureEvent(
+  context: ExactReplacementFailureCarrierContext,
+  token: ExactReplacementFailureEventToken | undefined
+): void {
+  if (!token) return;
+  const event = context.holder.events.get(token);
+  if (
+    context.holder.state !== "open" ||
+    context.holder.owner !== context.owner ||
+    !event ||
+    event.owner !== context.owner ||
+    event.state !== "open"
+  ) {
+    rejectedExactReplacementFailureWrites += 1;
+    return;
+  }
+  event.state = "cancelled";
+}
+
+function settleExactReplacementFailureHolder(
+  holder: ExactReplacementFailureHolder,
+  state: "cancelled" | "finalized"
+): void {
+  if (holder.state !== "open") return;
+  holder.state = state;
+  for (const event of holder.events.values()) {
+    if (event.state === "open") event.state = "cancelled";
+  }
+  activeExactReplacementFailureHolders -= 1;
+}
+
+export function workspaceRecordExactReplacementCarrierDiagnosticsForTest(): Readonly<{
+  activeHolders: number;
+  rejectedWrites: number;
+}> {
+  return Object.freeze({
+    activeHolders: activeExactReplacementFailureHolders,
+    rejectedWrites: rejectedExactReplacementFailureWrites
+  });
+}
 
 async function runWithExactReplacementFailureSlot<T>(
   slot: "writer" | "cleanup",
   action: () => Promise<T>
 ): Promise<T> {
-  const state = exactReplacementFailureCarrierStorage.getStore();
-  if (!state) return await action();
-  const previous = state.callbackFailureSlot;
-  state.callbackFailureSlot = slot;
-  try {
-    return await action();
-  } finally {
-    state.callbackFailureSlot = previous;
-  }
+  const context = exactReplacementFailureCarrierStorage.getStore();
+  if (!context) return await action();
+  return await exactReplacementFailureCarrierStorage.run(
+    Object.freeze({ ...context, callbackFailureSlot: slot }),
+    action
+  );
 }
 
 async function runWithExactReplacementPhysicalProofSource<T>(
   source: "callback_boundary" | "observation",
   action: () => Promise<T>
 ): Promise<T> {
-  const state = exactReplacementFailureCarrierStorage.getStore();
-  if (!state) return await action();
-  const previous = state.physicalProofSource;
-  state.physicalProofSource = source;
-  try {
-    return await action();
-  } finally {
-    state.physicalProofSource = previous;
-  }
+  const context = exactReplacementFailureCarrierStorage.getStore();
+  if (!context) return await action();
+  return await exactReplacementFailureCarrierStorage.run(
+    Object.freeze({ ...context, physicalProofSource: source }),
+    action
+  );
 }
 
 function recordExactReplacementFailure(
+  context: ExactReplacementFailureCarrierContext,
+  token: ExactReplacementFailureEventToken | undefined,
+  error: unknown
+): boolean {
+  const { holder, owner } = context;
+  const event = token ? holder.events.get(token) : undefined;
+  if (
+    holder.state !== "open" ||
+    holder.owner !== owner ||
+    !event ||
+    event.token !== token ||
+    event.owner !== owner ||
+    event.state !== "open"
+  ) {
+    rejectedExactReplacementFailureWrites += 1;
+    return false;
+  }
+  event.state = "recorded";
+  holder.records.push(Object.freeze({ event, value: error }));
+  return true;
+}
+
+function issueAndRecordExactReplacementFailure(
   slot: ExactReplacementFailureSlot,
   error: unknown,
   physicalProofSource: "callback_boundary" | "observation" = "observation"
-): void {
-  const state = exactReplacementFailureCarrierStorage.getStore();
-  if (!state) return;
-  const current = state.carrier;
-  if (slot === "writer") {
-    if (current.writer !== undefined) return;
-    state.carrier = Object.freeze({ ...current, writer: Object.freeze({ value: error }) });
-    return;
-  }
-  if (slot === "physical_proof") {
-    if (current.physicalProof !== undefined) return;
-    state.carrier = Object.freeze({
-      ...current,
-      physicalProof: Object.freeze({ value: error, source: physicalProofSource })
+): boolean {
+  const context = exactReplacementFailureCarrierStorage.getStore();
+  if (!context) return false;
+  const token = issueExactReplacementFailureEvent(
+    context,
+    slot,
+    physicalProofSource
+  );
+  return recordExactReplacementFailure(context, token, error);
+}
+
+function exactReplacementFailureCarrier(
+  holder: ExactReplacementFailureHolder
+): ExactReplacementFailureCarrier {
+  let carrier = EMPTY_EXACT_REPLACEMENT_FAILURE_CARRIER;
+  for (const { event, value } of [...holder.records].sort(
+    (left, right) => left.event.ordinal - right.event.ordinal
+  )) {
+    if (event.slot === "writer") {
+      if (carrier.writer !== undefined) continue;
+      carrier = Object.freeze({ ...carrier, writer: Object.freeze({ value }) });
+      continue;
+    }
+    if (event.slot === "physical_proof") {
+      if (carrier.physicalProof !== undefined) continue;
+      carrier = Object.freeze({
+        ...carrier,
+        physicalProof: Object.freeze({
+          value,
+          source: event.physicalProofSource
+        })
+      });
+      continue;
+    }
+    const key = event.slot === "cleanup" ? "cleanup" : "releaseSettlement";
+    carrier = Object.freeze({
+      ...carrier,
+      [key]: Object.freeze([...carrier[key], value])
     });
-    return;
   }
-  const key = slot === "cleanup" ? "cleanup" : "releaseSettlement";
-  if (current[key].some((recorded) => Object.is(recorded, error))) return;
-  state.carrier = Object.freeze({
-    ...current,
-    [key]: Object.freeze([...current[key], error])
-  });
+  return carrier;
 }
 
 function materializeExactReplacementFailure(
@@ -271,15 +427,47 @@ async function captureAuthorityMutatingCallbackBoundary(
   proofCompensations: readonly unknown[] = [],
   cancellation?: AuthorityMutatingCallbackCancellation
 ): Promise<AuthorityMutatingCallbackOutcome> {
+  const carrierContext = exactReplacementFailureCarrierStorage.getStore();
+  const callbackEvent = carrierContext
+    ? issueExactReplacementFailureEvent(
+        carrierContext,
+        carrierContext.callbackFailureSlot
+      )
+    : undefined;
+  const proofEvent = carrierContext
+    ? issueExactReplacementFailureEvent(
+        carrierContext,
+        "physical_proof",
+        carrierContext.physicalProofSource
+      )
+    : undefined;
   if (!callback) {
-    if (cancellation?.isCancelled()) return { status: "cancelled" };
-    await proveAuthority();
-    return { status: "succeeded" };
+    if (cancellation?.isCancelled()) {
+      if (carrierContext) {
+        cancelExactReplacementFailureEvent(carrierContext, callbackEvent);
+        cancelExactReplacementFailureEvent(carrierContext, proofEvent);
+      }
+      return { status: "cancelled" };
+    }
+    try {
+      await proveAuthority();
+      if (carrierContext) {
+        cancelExactReplacementFailureEvent(carrierContext, callbackEvent);
+        cancelExactReplacementFailureEvent(carrierContext, proofEvent);
+      }
+      return { status: "succeeded" };
+    } catch (proofError) {
+      if (carrierContext) {
+        cancelExactReplacementFailureEvent(carrierContext, callbackEvent);
+        recordExactReplacementFailure(carrierContext, proofEvent, proofError);
+      }
+      throw proofError;
+    }
   }
 
   const callbackSettlement = (async (): Promise<PresentFailure | undefined> => {
     try {
-      await callback();
+      await exactReplacementFailureCarrierStorage.exit(callback);
       return undefined;
     } catch (error) {
       return { value: error };
@@ -292,36 +480,41 @@ async function captureAuthorityMutatingCallbackBoundary(
       ])
     : await callbackSettlement;
   if (cancellation?.isCancelled()) {
-    // callbackSettlement always fulfills, so a late resolve/reject is consumed
-    // without retaining a proof or waiter-state continuation.
-    void callbackSettlement.then(() => undefined);
+    if (carrierContext) {
+      cancelExactReplacementFailureEvent(carrierContext, callbackEvent);
+      cancelExactReplacementFailureEvent(carrierContext, proofEvent);
+    }
+    // A late reject is consumed and deliberately presented to the cancelled
+    // event token. The safe rejection is observable only through diagnostics.
+    void callbackSettlement.then((lateFailure) => {
+      if (lateFailure && carrierContext) {
+        recordExactReplacementFailure(
+          carrierContext,
+          callbackEvent,
+          lateFailure.value
+        );
+      }
+    });
     return { status: "cancelled" };
   }
 
-  if (callbackFailure) {
-    recordExactReplacementFailure(
-      exactReplacementFailureCarrierStorage.getStore()?.callbackFailureSlot ??
-        "writer",
-      callbackFailure.value
-    );
+  if (carrierContext) {
+    if (callbackFailure) {
+      recordExactReplacementFailure(
+        carrierContext,
+        callbackEvent,
+        callbackFailure.value
+      );
+    } else {
+      cancelExactReplacementFailureEvent(carrierContext, callbackEvent);
+    }
   }
 
   try {
     await proveAuthority();
   } catch (proofError) {
-    recordExactReplacementFailure(
-      "physical_proof",
-      proofError,
-      exactReplacementFailureCarrierStorage.getStore()?.physicalProofSource ??
-        "observation"
-    );
-    for (const compensation of proofCompensations) {
-      recordExactReplacementFailure(
-        "physical_proof",
-        compensation,
-        exactReplacementFailureCarrierStorage.getStore()?.physicalProofSource ??
-          "observation"
-      );
+    if (carrierContext) {
+      recordExactReplacementFailure(carrierContext, proofEvent, proofError);
     }
     const preservedProofFailure = preserveWorkspacePrimaryError(
       proofError,
@@ -337,6 +530,10 @@ async function captureAuthorityMutatingCallbackBoundary(
       authorityCallbackProofFailures.add(preservedProofFailure);
     }
     throw preservedProofFailure;
+  }
+
+  if (carrierContext) {
+    cancelExactReplacementFailureEvent(carrierContext, proofEvent);
   }
 
   if (callbackFailure) {
@@ -3283,7 +3480,7 @@ async function observeDurableSuccessorWithinCapturedParentEpoch(
       }
     );
   } catch (proofError) {
-    recordExactReplacementFailure("physical_proof", proofError);
+    issueAndRecordExactReplacementFailure("physical_proof", proofError);
     return { status: "unavailable", proofError };
   }
 }
@@ -3309,14 +3506,11 @@ export async function replaceJsonRecordAfterExactObservation<T>(
   );
   let attempt: ExactWorkspaceJsonRecordReplacementAttempt<T> | undefined;
   let operationError: unknown;
-  const failureCarrierState: ExactReplacementFailureCarrierState = {
-    carrier: EMPTY_EXACT_REPLACEMENT_FAILURE_CARRIER,
-    callbackFailureSlot: "writer",
-    physicalProofSource: "observation"
-  };
+  const failureHolder = createExactReplacementFailureHolder();
+  const failureCarrierContext = exactReplacementFailureContext(failureHolder);
   try {
     attempt = await exactReplacementFailureCarrierStorage.run(
-      failureCarrierState,
+      failureCarrierContext,
       async () => await runWithRecordDirectoryBindingOperation<
         ExactWorkspaceJsonRecordReplacementAttempt<T>
       >(async () => {
@@ -3358,7 +3552,8 @@ export async function replaceJsonRecordAfterExactObservation<T>(
         error: unknown,
         successor: WorkspaceRecordDurableSuccessorOutcome
       ): ExactWorkspaceJsonRecordReplacementAttempt<T> => {
-        const resolvedOrigin = failureCarrierState.carrier.writer !== undefined
+        const carrier = exactReplacementFailureCarrier(failureHolder);
+        const resolvedOrigin = carrier.writer !== undefined
           ? "writer" as const
           : origin;
         const result = Object.freeze({
@@ -3366,10 +3561,7 @@ export async function replaceJsonRecordAfterExactObservation<T>(
             ? "writer_failed" as const
             : "operation_failed" as const,
           origin: resolvedOrigin,
-          error: materializeExactReplacementFailure(
-            failureCarrierState.carrier,
-            error
-          ),
+          error,
           successor
         }) as ExactWorkspaceJsonRecordReplacementResult<T>;
         return Object.freeze({ result, successor });
@@ -3379,15 +3571,15 @@ export async function replaceJsonRecordAfterExactObservation<T>(
       ): Readonly<{
         origin: "writer" | "physical_proof";
         error: unknown;
-      }> => failureCarrierState.carrier.writer !== undefined ||
-        failureCarrierState.carrier.cleanup.length > 0
-        ? {
-            origin: "writer",
-            error:
-              failureCarrierState.carrier.writer?.value ??
-              failureCarrierState.carrier.cleanup[0]
-          }
-        : { origin: "physical_proof", error: value };
+      }> => {
+        const carrier = exactReplacementFailureCarrier(failureHolder);
+        return carrier.writer !== undefined || carrier.cleanup.length > 0
+          ? {
+              origin: "writer",
+              error: carrier.writer?.value ?? carrier.cleanup[0]
+            }
+          : { origin: "physical_proof", error: value };
+      };
       const failureAfterPhysicalObservation = async (
         origin: ExactWorkspaceJsonRecordReplacementFailureOrigin,
         primary: unknown
@@ -3404,7 +3596,7 @@ export async function replaceJsonRecordAfterExactObservation<T>(
             successorFromClassification(classification)
           );
         } catch (proofError) {
-          recordExactReplacementFailure("physical_proof", proofError);
+          issueAndRecordExactReplacementFailure("physical_proof", proofError);
           return operationalFailure(
             origin,
             primary,
@@ -3428,7 +3620,7 @@ export async function replaceJsonRecordAfterExactObservation<T>(
         try {
           await settleRecordAuthorityCleanupAdmission(permit);
         } catch (settlementError) {
-          recordExactReplacementFailure("release_settlement", settlementError);
+          issueAndRecordExactReplacementFailure("release_settlement", settlementError);
         }
         const terminalDetail = workspaceRecordCleanupTerminalResultDetail(error);
         const successor = await observeDurableSuccessorWithinCapturedParentEpoch(
@@ -3445,7 +3637,7 @@ export async function replaceJsonRecordAfterExactObservation<T>(
             );
           }
           if (
-            failureCarrierState.carrier.physicalProof?.source ===
+            exactReplacementFailureCarrier(failureHolder).physicalProof?.source ===
               "callback_boundary"
           ) {
             return operationalFailure(
@@ -3474,7 +3666,7 @@ export async function replaceJsonRecordAfterExactObservation<T>(
         const ownedCallbackFailure = callbackPrimaryFailure(acquisitionError);
         const taggedCallbackFailure =
           ownedCallbackFailure.origin !== "physical_proof" ||
-          failureCarrierState.carrier.physicalProof?.source ===
+          exactReplacementFailureCarrier(failureHolder).physicalProof?.source ===
             "callback_boundary";
         if (
           !taggedCallbackFailure &&
@@ -3608,10 +3800,10 @@ export async function replaceJsonRecordAfterExactObservation<T>(
                 );
               if (outcome.status === "failed") {
                 if (
-                  failureCarrierState.carrier.writer === undefined &&
-                  failureCarrierState.carrier.physicalProof === undefined
+                  exactReplacementFailureCarrier(failureHolder).writer === undefined &&
+                  exactReplacementFailureCarrier(failureHolder).physicalProof === undefined
                 ) {
-                  recordExactReplacementFailure("writer", outcome.error);
+                  issueAndRecordExactReplacementFailure("writer", outcome.error);
                 }
                 const ownedWriterFailure = callbackPrimaryFailure(outcome.error);
                 ownedAttempt = await failureAfterPhysicalObservation(
@@ -3648,7 +3840,7 @@ export async function replaceJsonRecordAfterExactObservation<T>(
         await authorityLease.release();
       } catch (error) {
         releaseError = error;
-        recordExactReplacementFailure("release_settlement", error);
+        issueAndRecordExactReplacementFailure("release_settlement", error);
       }
       if (unexpectedError !== undefined) {
         const successor = await observeDurableSuccessorWithinCapturedParentEpoch(
@@ -3684,8 +3876,8 @@ export async function replaceJsonRecordAfterExactObservation<T>(
         );
         if (
           ownedAttempt.result.origin === "physical_proof" &&
-          failureCarrierState.carrier.writer === undefined &&
-          failureCarrierState.carrier.physicalProof?.source !==
+          exactReplacementFailureCarrier(failureHolder).writer === undefined &&
+          exactReplacementFailureCarrier(failureHolder).physicalProof?.source !==
             "callback_boundary" &&
           (successor.status === "missing" || successor.status === "superseded")
         ) {
@@ -3717,20 +3909,29 @@ export async function replaceJsonRecordAfterExactObservation<T>(
     await cancelRecordAuthorityCleanupPermit(permit);
   } catch (error) {
     settlementError = error;
-    await exactReplacementFailureCarrierStorage.run(
-      failureCarrierState,
-      async () => recordExactReplacementFailure("release_settlement", error)
+    const settlementEvent = issueExactReplacementFailureEvent(
+      failureCarrierContext,
+      "release_settlement"
+    );
+    recordExactReplacementFailure(
+      failureCarrierContext,
+      settlementEvent,
+      error
     );
   }
   if (operationError !== undefined) {
+    settleExactReplacementFailureHolder(failureHolder, "cancelled");
     if (settlementError !== undefined) {
       throw preserveWorkspacePrimaryError(operationError, [settlementError]);
     }
     throw operationError;
   }
   if (!attempt) {
+    settleExactReplacementFailureHolder(failureHolder, "cancelled");
     throw new TypeError("Exact workspace replacement did not enter its operation.");
   }
+  settleExactReplacementFailureHolder(failureHolder, "finalized");
+  const failureCarrier = exactReplacementFailureCarrier(failureHolder);
   if (settlementError !== undefined) {
     if (
       attempt.result.status === "writer_failed" ||
@@ -3739,7 +3940,7 @@ export async function replaceJsonRecordAfterExactObservation<T>(
       return Object.freeze({
         ...attempt.result,
         error: materializeExactReplacementFailure(
-          failureCarrierState.carrier,
+          failureCarrier,
           attempt.result.error
         )
       });
@@ -3748,10 +3949,22 @@ export async function replaceJsonRecordAfterExactObservation<T>(
       status: "operation_failed",
       origin: "settlement" as const,
       error: materializeExactReplacementFailure(
-        failureCarrierState.carrier,
+        failureCarrier,
         settlementError
       ),
       successor: attempt.successor
+    });
+  }
+  if (
+    attempt.result.status === "writer_failed" ||
+    attempt.result.status === "operation_failed"
+  ) {
+    return Object.freeze({
+      ...attempt.result,
+      error: materializeExactReplacementFailure(
+        failureCarrier,
+        attempt.result.error
+      )
     });
   }
   return attempt.result;
@@ -4997,10 +5210,14 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
           )
         : ownership;
       await assertEmptyAuthorityOwnedMutationNamespace(terminalOwnership, evidenceRef);
-      await compensationTestHookStorage.getStore()
-        ?.beforeTerminalAuthorityNamespaceRemovalSyscall?.(
-          Object.freeze({ path: terminalOwnership.path })
-        );
+      const beforeTerminalRemoval = compensationTestHookStorage.getStore()
+        ?.beforeTerminalAuthorityNamespaceRemovalSyscall;
+      await runAuthorityMutatingCallbackBoundary(
+        beforeTerminalRemoval
+          ? () => beforeTerminalRemoval(Object.freeze({ path: terminalOwnership.path }))
+          : undefined,
+        async () => undefined
+      );
       await removeExactEmptyAuthorityOwnedMutationNamespace(
         terminalOwnership,
         evidenceRef,
@@ -5447,9 +5664,10 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
     }
 
     if (temporaryRecord && !temporaryRecord.handleClosed) {
-      const cleanupCarrierBefore = exactReplacement
-        ? exactReplacementFailureCarrierStorage.getStore()?.carrier
+      const cleanupContext = exactReplacement
+        ? exactReplacementFailureCarrierStorage.getStore()
         : undefined;
+      const cleanupRecordsBefore = cleanupContext?.holder.records.length;
       try {
         await runWithExactReplacementFailureSlot(
           exactReplacement ? "cleanup" : "writer",
@@ -5458,19 +5676,17 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
               temporaryRecord!,
               recordPath,
               temporaryPath,
-              hooks
+              hooks,
+              evidenceRef
             )
         );
       } catch (error) {
-        const cleanupCarrierAfter = exactReplacementFailureCarrierStorage.getStore()
-          ?.carrier;
         if (
-          cleanupCarrierBefore &&
-          cleanupCarrierAfter &&
-          cleanupCarrierAfter.cleanup.length === cleanupCarrierBefore.cleanup.length &&
-          cleanupCarrierAfter.physicalProof === cleanupCarrierBefore.physicalProof
+          cleanupContext &&
+          cleanupRecordsBefore !== undefined &&
+          cleanupContext.holder.records.length === cleanupRecordsBefore
         ) {
-          recordExactReplacementFailure("cleanup", error);
+          issueAndRecordExactReplacementFailure("cleanup", error);
         }
         operationFailure = appendSequentialFailure(
           operationFailure,
@@ -5481,9 +5697,10 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
     }
 
     if (temporaryRecord && !committed) {
-      const cleanupCarrierBefore = exactReplacement
-        ? exactReplacementFailureCarrierStorage.getStore()?.carrier
+      const cleanupContext = exactReplacement
+        ? exactReplacementFailureCarrierStorage.getStore()
         : undefined;
+      const cleanupRecordsBefore = cleanupContext?.holder.records.length;
       try {
         await runWithExactReplacementFailureSlot(
           exactReplacement ? "cleanup" : "writer",
@@ -5501,15 +5718,12 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
             )
         );
       } catch (error) {
-        const cleanupCarrierAfter = exactReplacementFailureCarrierStorage.getStore()
-          ?.carrier;
         if (
-          cleanupCarrierBefore &&
-          cleanupCarrierAfter &&
-          cleanupCarrierAfter.cleanup.length === cleanupCarrierBefore.cleanup.length &&
-          cleanupCarrierAfter.physicalProof === cleanupCarrierBefore.physicalProof
+          cleanupContext &&
+          cleanupRecordsBefore !== undefined &&
+          cleanupContext.holder.records.length === cleanupRecordsBefore
         ) {
-          recordExactReplacementFailure("cleanup", error);
+          issueAndRecordExactReplacementFailure("cleanup", error);
         }
         operationFailure = appendSequentialFailure(
           operationFailure,
@@ -5601,7 +5815,13 @@ async function publishOwnedMutableRecord(
       }
     );
   }
-  await closeTemporaryRecord(temporaryRecord, recordPath, temporaryPath, hooks);
+  await closeTemporaryRecord(
+    temporaryRecord,
+    recordPath,
+    temporaryPath,
+    hooks,
+    evidenceRef
+  );
   temporaryRecord.identity = await assertClosedTemporaryRecordAuthority(
     temporaryPath,
     temporaryRecord.identity,
@@ -6370,7 +6590,8 @@ async function closeTemporaryRecord(
   temporaryRecord: OwnedTemporaryRecord,
   canonicalPath: string,
   temporaryPath: string,
-  hooks: WorkspaceRecordPublicationHooks | undefined
+  hooks: WorkspaceRecordPublicationHooks | undefined,
+  evidenceRef: string
 ): Promise<void> {
   if (temporaryRecord.handleClosed) return;
   const hookInput = Object.freeze({
@@ -6385,7 +6606,17 @@ async function closeTemporaryRecord(
   let primaryFailure: PresentFailure | undefined;
   const compensationErrors: unknown[] = [];
   try {
-    await hooks?.beforeTemporaryFileClose?.(hookInput);
+    await runAuthorityMutatingCallbackBoundary(
+      hooks?.beforeTemporaryFileClose
+        ? () => hooks.beforeTemporaryFileClose!(hookInput)
+        : undefined,
+      async () =>
+        await assertOwnedTemporaryRecordPath(
+          temporaryPath,
+          temporaryRecord.identity,
+          evidenceRef
+        )
+    );
   } catch (error) {
     primaryFailure = { value: error };
   }
@@ -6397,7 +6628,17 @@ async function closeTemporaryRecord(
   }
   if (temporaryRecord.handleClosed) {
     try {
-      await hooks?.afterTemporaryFileClosed?.(hookInput);
+      await runAuthorityMutatingCallbackBoundary(
+        hooks?.afterTemporaryFileClosed
+          ? () => hooks.afterTemporaryFileClosed!(hookInput)
+          : undefined,
+        async () =>
+          await assertOwnedTemporaryRecordPath(
+            temporaryPath,
+            temporaryRecord.identity,
+            evidenceRef
+          )
+      );
     } catch (error) {
       primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, error);
     }
@@ -6521,8 +6762,24 @@ async function writeOwnedTemporaryRecordFile(
       throw publicationStateError(evidenceRef);
     }
     temporaryIdentity = { dev: entry.dev, ino: entry.ino };
-    await compensationTestHookStorage.getStore()?.beforeOwnedTemporaryRecordWrite?.(
-      Object.freeze({ path: temporaryPath, identity: temporaryIdentity, fd: temporaryFile.fd })
+    const beforeTemporaryWrite = compensationTestHookStorage.getStore()
+      ?.beforeOwnedTemporaryRecordWrite;
+    await runAuthorityMutatingCallbackBoundary(
+      beforeTemporaryWrite
+        ? () => beforeTemporaryWrite(
+            Object.freeze({
+              path: temporaryPath,
+              identity: temporaryIdentity!,
+              fd: temporaryFile!.fd
+            })
+          )
+        : undefined,
+      async () =>
+        await assertOwnedTemporaryRecordPath(
+          temporaryPath,
+          temporaryIdentity!,
+          evidenceRef
+        )
     );
     await temporaryFile.writeFile(recordText, "utf8");
     return {
@@ -7616,8 +7873,15 @@ async function restoreOwnedIsolatedPath(
         } catch (authorityDrift) {
           let unsafeRollbackCallbackFailure: PresentFailure | undefined;
           try {
-            await compensationTestHookStorage.getStore()?.beforeUnsafeRestoredLinkRollback?.(
-              Object.freeze({ path: publicPath, isolatedPath, site })
+            const beforeUnsafeRollback = compensationTestHookStorage.getStore()
+              ?.beforeUnsafeRestoredLinkRollback;
+            await runAuthorityMutatingCallbackBoundary(
+              beforeUnsafeRollback
+                ? () => beforeUnsafeRollback(
+                    Object.freeze({ path: publicPath, isolatedPath, site })
+                  )
+                : undefined,
+              async () => undefined
             );
           } catch (error) {
             unsafeRollbackCallbackFailure = { value: error };
@@ -7632,8 +7896,15 @@ async function restoreOwnedIsolatedPath(
             publicLinkBinding
           );
           try {
-            await compensationTestHookStorage.getStore()?.afterUnsafeRestoredLinkRollback?.(
-              Object.freeze({ path: publicPath, isolatedPath, site })
+            const afterUnsafeRollback = compensationTestHookStorage.getStore()
+              ?.afterUnsafeRestoredLinkRollback;
+            await runAuthorityMutatingCallbackBoundary(
+              afterUnsafeRollback
+                ? () => afterUnsafeRollback(
+                    Object.freeze({ path: publicPath, isolatedPath, site })
+                  )
+                : undefined,
+              async () => undefined
             );
           } catch (error) {
             rollback.cleanupErrors.push(error);
@@ -7953,8 +8224,15 @@ async function removeExactOwnedPublicLink(
           }
           cleanupErrors.push(error);
           try {
-            await compensationTestHookStorage.getStore()?.afterExactOwnedPublicLinkUnlinkFailure?.(
-              Object.freeze({ path: publicPath, error })
+            const afterPublicUnlinkFailure = compensationTestHookStorage.getStore()
+              ?.afterExactOwnedPublicLinkUnlinkFailure;
+            await runAuthorityMutatingCallbackBoundary(
+              afterPublicUnlinkFailure
+                ? () => afterPublicUnlinkFailure(
+                    Object.freeze({ path: publicPath, error })
+                  )
+                : undefined,
+              async () => undefined
             );
           } catch (hookError) {
             cleanupErrors.push(hookError);
@@ -10349,8 +10627,12 @@ async function acquireRecordAuthority(
   let identitySettled = false;
   const identityWork = Promise.resolve()
     .then(async () => {
-      await hooks?.beforeRecordAuthorityIdentitySupplier?.(
-        Object.freeze({ path: recordPath })
+      const beforeIdentity = hooks?.beforeRecordAuthorityIdentitySupplier;
+      await runAuthorityMutatingCallbackBoundary(
+        beforeIdentity
+          ? () => beforeIdentity(Object.freeze({ path: recordPath }))
+          : undefined,
+        async () => undefined
       );
       return await recordAuthorityIdentityCandidates(recordPath, evidenceRef);
     })

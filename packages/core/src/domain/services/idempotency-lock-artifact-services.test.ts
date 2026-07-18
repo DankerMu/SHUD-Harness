@@ -28574,6 +28574,383 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
+  test("Issue79 carrier ownership rejects awaited nested ordinary failures across W P C schedules", async () => {
+    for (const combination of ["W", "W+P", "W+C", "W+P+C"] as const) {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `awaited-${combination}`
+      );
+      const outerWriter = new Error(`Issue79 owned outer writer ${combination}`);
+      const nestedWriter = new Error(`Issue79 unrelated nested writer ${combination}`);
+      const ownedCleanup = new Error(`Issue79 owned cleanup ${combination}`);
+      const scheduleLabel = combination.replaceAll("+", "-");
+      const nestedEvidenceRef = `issue79-unrelated-${scheduleLabel}`;
+      const nestedFileName = `unrelated-${scheduleLabel}.json`;
+      const nestedPath = workspaceRecordPath(
+        fixture.workspaceRoot,
+        [...fixture.directorySegments, nestedFileName],
+        nestedEvidenceRef
+      );
+      let outerCalls = 0;
+      let nestedCalls = 0;
+      let cleanupCalls = 0;
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: async ({ canonicalPath }) => {
+            if (canonicalPath === nestedPath) {
+              nestedCalls += 1;
+              throw nestedWriter;
+            }
+            if (canonicalPath !== fixture.recordPath || outerCalls > 0) return;
+            outerCalls += 1;
+            try {
+              await writeJsonRecord(
+                fixture.workspaceRoot,
+                fixture.directorySegments,
+                nestedFileName,
+                fixture.replacement,
+                nestedEvidenceRef,
+                IdempotencyRecordSchema
+              );
+            } catch {
+              // The unrelated failure is intentionally handled by the hook.
+            }
+            throw outerWriter;
+          },
+          beforeTemporaryUnlink: async ({ canonicalPath }) => {
+            if (canonicalPath !== fixture.recordPath || cleanupCalls > 0) return;
+            cleanupCalls += 1;
+            if (combination.includes("P")) {
+              await chmod(fixture.recordPath, 0o700);
+            }
+            if (combination.includes("C")) throw ownedCleanup;
+          }
+        },
+        fixture.replace
+      );
+
+      expect(result.status).toBe("writer_failed");
+      if (result.status !== "writer_failed") {
+        throw new Error("Expected an owned outer writer failure.");
+      }
+      expect(result.origin).toBe("writer");
+      expect(semanticPrimaryError(result.error)).toBe(outerWriter);
+      expect(countErrorGraphIdentity(result.error, outerWriter)).toBe(1);
+      expect(countErrorGraphIdentity(result.error, nestedWriter)).toBe(0);
+      expect(countErrorGraphIdentity(result.error, ownedCleanup)).toBe(
+        combination.includes("C") ? 1 : 0
+      );
+      expect(outerCalls).toBe(1);
+      expect(nestedCalls).toBe(1);
+      expect(cleanupCalls).toBe(1);
+      if (combination === "W+P+C") {
+        const compensations = knownPreservedCompensationAggregate(result.error).errors;
+        expect(compensations[0]).toBeInstanceOf(TaskServiceError);
+        expect(compensations[1]).toBe(ownedCleanup);
+      }
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    }
+  });
+
+  test("Issue79 carrier ownership rejects detached nested failures overlapping owned cleanup", async () => {
+    const fixture = await createIssue79CarrierOwnershipFixture("detached-cleanup");
+    const outerWriter = new Error("Issue79 detached owned outer writer");
+    const nestedWriter = new Error("Issue79 detached unrelated writer");
+    const ownedCleanup = new Error("Issue79 detached owned cleanup");
+    const nestedEvidenceRef = "issue79-detached-unrelated";
+    const nestedFileName = "detached-unrelated.json";
+    const nestedPath = workspaceRecordPath(
+      fixture.workspaceRoot,
+      [...fixture.directorySegments, nestedFileName],
+      nestedEvidenceRef
+    );
+    const startDetached = createAsyncGate();
+    let detached: Promise<void> | undefined;
+    let cleanupCalls = 0;
+
+    const result = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterTemporaryFileWritten: ({ canonicalPath }) => {
+          if (canonicalPath === nestedPath) throw nestedWriter;
+          if (canonicalPath !== fixture.recordPath || detached) return;
+          detached = (async () => {
+            await startDetached.wait;
+            try {
+              await writeJsonRecord(
+                fixture.workspaceRoot,
+                fixture.directorySegments,
+                nestedFileName,
+                fixture.replacement,
+                nestedEvidenceRef,
+                IdempotencyRecordSchema
+              );
+            } catch {
+              // This detached failure is unrelated to the replacement holder.
+            }
+          })();
+          throw outerWriter;
+        },
+        beforeTemporaryUnlink: async ({ canonicalPath }) => {
+          if (canonicalPath !== fixture.recordPath || cleanupCalls > 0) return;
+          cleanupCalls += 1;
+          startDetached.open();
+          await detached;
+          throw ownedCleanup;
+        }
+      },
+      fixture.replace
+    );
+    await detached;
+
+    expect(result.status).toBe("writer_failed");
+    if (result.status !== "writer_failed") {
+      throw new Error("Expected a detached owned writer failure.");
+    }
+    expect(semanticPrimaryError(result.error)).toBe(outerWriter);
+    expect(countErrorGraphIdentity(result.error, outerWriter)).toBe(1);
+    expect(countErrorGraphIdentity(result.error, nestedWriter)).toBe(0);
+    expect(countErrorGraphIdentity(result.error, ownedCleanup)).toBe(1);
+    expect(cleanupCalls).toBe(1);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
+  test("Issue79 carrier ownership rejects nested writer physical proof failures", async () => {
+    const fixture = await createIssue79CarrierOwnershipFixture("nested-proof");
+    const outerWriter = new Error("Issue79 nested-proof owned outer writer");
+    const nestedCallback = new Error("Issue79 nested-proof unrelated callback");
+    const nestedEvidenceRef = "issue79-nested-proof-unrelated";
+    const nestedFileName = "nested-proof-unrelated.json";
+    const nestedPath = workspaceRecordPath(
+      fixture.workspaceRoot,
+      [...fixture.directorySegments, nestedFileName],
+      nestedEvidenceRef
+    );
+    let nestedFailure: unknown;
+    let outerCalls = 0;
+
+    const result = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterTemporaryFileWritten: async ({ canonicalPath }) => {
+          if (canonicalPath === nestedPath) {
+            await writeFile(nestedPath, "{}\n", { flag: "wx", mode: 0o600 });
+            throw nestedCallback;
+          }
+          if (canonicalPath !== fixture.recordPath || outerCalls > 0) return;
+          outerCalls += 1;
+          try {
+            await writeJsonRecord(
+              fixture.workspaceRoot,
+              fixture.directorySegments,
+              nestedFileName,
+              fixture.replacement,
+              nestedEvidenceRef,
+              IdempotencyRecordSchema
+            );
+          } catch (error) {
+            nestedFailure = error;
+          }
+          await rm(nestedPath, { force: true });
+          throw outerWriter;
+        }
+      },
+      fixture.replace
+    );
+
+    expect(nestedFailure).toBeDefined();
+    expect(result.status).toBe("writer_failed");
+    if (result.status !== "writer_failed") {
+      throw new Error("Expected a nested-proof owned writer failure.");
+    }
+    expect(semanticPrimaryError(result.error)).toBe(outerWriter);
+    expect(countErrorGraphIdentity(result.error, outerWriter)).toBe(1);
+    expect(countErrorGraphIdentity(result.error, nestedCallback)).toBe(0);
+    expect(countErrorGraphIdentity(result.error, nestedFailure)).toBe(0);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
+  test("Issue79 carrier ownership rejects late callback settlement after cancellation and finalization", async () => {
+    const fixture = await createIssue79CarrierOwnershipFixture("late-cancel");
+    const authorityHeld = createSignal();
+    const releaseAuthority = createAsyncGate();
+    const contentionEntered = createSignal();
+    const releaseLateCallback = createAsyncGate();
+    const lateFailure = new Error("Issue79 cancelled late contention callback");
+    const carrierModule = await import("./workspace-record-store");
+    const before = carrierModule.workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    const holder = runWithWorkspaceRecordPublicationHooks(
+      {
+        afterAuthorityLeaseAcquired: async ({ operation }) => {
+          if (operation !== "read") return;
+          authorityHeld.resolve();
+          await releaseAuthority.wait;
+        }
+      },
+      () => readJsonRecord(
+        fixture.recordPath,
+        fixture.evidenceRef,
+        IdempotencyRecordSchema
+      )
+    );
+    await authorityHeld.promise;
+
+    let result: Awaited<ReturnType<typeof fixture.replace>>;
+    try {
+      result = await runWithWorkspaceRecordAuthorityDeadline(
+        Date.now() + 40,
+        () =>
+          runWithWorkspaceRecordPublicationHooks(
+            {
+              onAuthorityContention: async ({ operation }) => {
+                if (operation !== "delete") return;
+                contentionEntered.resolve();
+                await releaseLateCallback.wait;
+                throw lateFailure;
+              }
+            },
+            fixture.replace
+          )
+      );
+      await contentionEntered.promise;
+      releaseLateCallback.open();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      releaseLateCallback.open();
+      releaseAuthority.open();
+      await holder;
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(result.status).toBe("operation_failed");
+    if (result.status !== "operation_failed") {
+      throw new Error("Expected cancelled exact replacement acquisition.");
+    }
+    expect(countErrorGraphIdentity(result.error, lateFailure)).toBe(0);
+    const finalizedNestedFailure = new Error(
+      "Issue79 unrelated nested failure after holder finalization"
+    );
+    const finalizedNestedEvidenceRef = "issue79-finalized-unrelated";
+    const finalizedNestedFileName = "finalized-unrelated.json";
+    const finalizedNestedPath = workspaceRecordPath(
+      fixture.workspaceRoot,
+      [...fixture.directorySegments, finalizedNestedFileName],
+      finalizedNestedEvidenceRef
+    );
+    await captureThrownValue(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: ({ canonicalPath }) => {
+            if (canonicalPath === finalizedNestedPath) {
+              throw finalizedNestedFailure;
+            }
+          }
+        },
+        () =>
+          writeJsonRecord(
+            fixture.workspaceRoot,
+            fixture.directorySegments,
+            finalizedNestedFileName,
+            fixture.replacement,
+            finalizedNestedEvidenceRef,
+            IdempotencyRecordSchema
+          )
+      )
+    );
+    expect(countErrorGraphIdentity(result.error, finalizedNestedFailure)).toBe(0);
+    const after = carrierModule.workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+    expect(after.activeHolders).toBe(before.activeHolders);
+    expect(after.rejectedWrites).toBe(before.rejectedWrites + 1);
+    expect(unhandled).toEqual([]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
+  test("Issue79 carrier ownership green controls nested success and sequential replacements", async () => {
+    const fixture = await createIssue79CarrierOwnershipFixture("green-isolation");
+    const nestedEvidenceRef = "issue79-green-nested";
+    const nestedFileName = "green-nested.json";
+    const nestedPath = workspaceRecordPath(
+      fixture.workspaceRoot,
+      [...fixture.directorySegments, nestedFileName],
+      nestedEvidenceRef
+    );
+    let nestedWritten = false;
+    const first = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterTemporaryFileWritten: async ({ canonicalPath }) => {
+          if (canonicalPath !== fixture.recordPath || nestedWritten) return;
+          nestedWritten = true;
+          await writeJsonRecord(
+            fixture.workspaceRoot,
+            fixture.directorySegments,
+            nestedFileName,
+            fixture.replacement,
+            nestedEvidenceRef,
+            IdempotencyRecordSchema
+          );
+        }
+      },
+      fixture.replace
+    );
+    expect(first).toMatchObject({ status: "replaced" });
+    expect(await readJsonRecord(
+      nestedPath,
+      nestedEvidenceRef,
+      IdempotencyRecordSchema
+    )).toEqual(fixture.replacement);
+
+    const secondObservation = await observeJsonRecordForCleanup(
+      fixture.recordPath,
+      fixture.evidenceRef,
+      IdempotencyRecordSchema
+    );
+    if (secondObservation.status !== "record") {
+      throw new Error("Expected the sequential replacement observation.");
+    }
+    const secondRecord = {
+      ...secondObservation.record,
+      updated_at: "2026-07-17T20:01:00.000Z"
+    } satisfies IdempotencyRecord;
+    const second = await replaceJsonRecordAfterExactObservation(
+      secondObservation.cleanupPermit,
+      fixture.workspaceRoot,
+      fixture.directorySegments,
+      fixture.fileName,
+      secondRecord,
+      fixture.evidenceRef,
+      IdempotencyRecordSchema
+    );
+    expect(second).toEqual({ status: "replaced", record: secondRecord });
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
   test("Issue79 immutable failure carrier keeps hostile writer values opaque and P then C ordered once", async () => {
     const cases = [
       { form: "plain", combination: "W" },
@@ -33269,6 +33646,66 @@ async function createTempWorkspacePath(): Promise<{
   return {
     tempRoot,
     workspaceRoot: join(tempRoot, "workspace")
+  };
+}
+
+async function createIssue79CarrierOwnershipFixture(label: string) {
+  const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+  tempRoots.push(tempRoot);
+  const rawKey = `task:create:issue79-owner-${label}`;
+  const requestDigest = `digest-issue79-owner-${label}`;
+  const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+  const directorySegments = ["tasks", "_idempotency", "task"] as const;
+  const fileName = idempotencyRecordFileName(rawKey);
+  const recordPath = workspaceRecordPath(
+    workspaceRoot,
+    [...directorySegments, fileName],
+    evidenceRef
+  );
+  const service = createIdempotencyRecordService({ workspaceRoot });
+  const begun = await service.beginRecord({
+    scope: "task",
+    key: rawKey,
+    requestDigest
+  });
+  if (begun.status !== "acquired") {
+    throw new Error("Expected an acquired Issue79 carrier fixture.");
+  }
+  const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+  const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+  const observation = await observeJsonRecordForCleanup(
+    recordPath,
+    evidenceRef,
+    IdempotencyRecordSchema
+  );
+  if (observation.status !== "record") {
+    throw new Error("Expected an exact Issue79 carrier observation.");
+  }
+  const replacement: IdempotencyRecord = {
+    ...observation.record,
+    status: "failed",
+    updated_at: "2026-07-17T20:00:00.000Z"
+  };
+  return {
+    workspaceRoot,
+    directorySegments,
+    fileName,
+    recordPath,
+    evidenceRef,
+    replacement,
+    cleanupPermit: observation.cleanupPermit,
+    authorityBaseline,
+    bindingBaseline,
+    replace: async () =>
+      await replaceJsonRecordAfterExactObservation(
+        observation.cleanupPermit,
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        replacement,
+        evidenceRef,
+        IdempotencyRecordSchema
+      )
   };
 }
 
