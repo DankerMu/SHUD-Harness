@@ -140,7 +140,11 @@ type IdempotencyTransitionGuardAcquire =
   | { status: "busy" };
 
 type IdempotencyTransitionCleanupLockAcquire =
-  | { status: "acquired"; release: () => Promise<void> }
+  | {
+      status: "acquired";
+      release: () => Promise<void>;
+      settleAfterSiblingMutation: () => Promise<void>;
+    }
   | { status: "busy" };
 
 type FailedRecoveryWriteOutcome =
@@ -162,6 +166,9 @@ export interface IdempotencyTransitionGuardCleanupHookInput {
 
 export interface IdempotencyTransitionGuardHooks {
   beforeStaleGuardCleanup?: (
+    input: IdempotencyTransitionGuardCleanupHookInput
+  ) => Promise<void> | void;
+  beforeStaleGuardSettlementRefresh?: (
     input: IdempotencyTransitionGuardCleanupHookInput
   ) => Promise<void> | void;
 }
@@ -534,27 +541,14 @@ export function createIdempotencyRecordService(
     scope: IdempotencyScope,
     key: string,
     evidenceRef: string,
-    guard: IdempotencyTransitionGuard & { intent: "fail" }
+    guard: IdempotencyTransitionGuard & { intent: "fail" },
+    observation: Extract<
+      WorkspaceJsonRecordCleanupObservation<IdempotencyRecord>,
+      { status: "record" }
+    >
   ): Promise<FailedRecoveryWriteOutcome> {
-    const recordPath = workspaceRecordPath(
-      workspaceRoot,
-      [...idempotencyRecordDirectorySegments(scope), idempotencyRecordFileName(key)],
-      evidenceRef
-    );
-    const observation = await observeJsonRecordForCleanup(
-      recordPath,
-      evidenceRef,
-      IdempotencyRecordSchema
-    );
-    if (observation.status === "missing") {
-      return { status: "generation_lost" };
-    }
-
     let cleanupPermitOutstanding = true;
     try {
-      if (observation.status === "malformed" || observation.status === "schema_threw") {
-        return { status: "generation_lost_with_error", error: observation.error };
-      }
       const existing = observation.record;
       assertIdempotencyRecordLookupIdentity(existing, scope, key, evidenceRef);
       if (existing.request_digest !== input.requestDigest) {
@@ -625,31 +619,14 @@ export function createIdempotencyRecordService(
   async function writeCompletedRecordAfterRollbackFailure(
     input: CompleteIdempotencyRecordInput,
     scope: IdempotencyScope,
-    evidenceRef: string
+    evidenceRef: string,
+    observation: Extract<
+      WorkspaceJsonRecordCleanupObservation<IdempotencyRecord>,
+      { status: "record" }
+    >
   ): Promise<IdempotencyRecord> {
-    const recordPath = workspaceRecordPath(
-      workspaceRoot,
-      [...idempotencyRecordDirectorySegments(scope), idempotencyRecordFileName(input.key)],
-      evidenceRef
-    );
-    const observation = await observeJsonRecordForCleanup(
-      recordPath,
-      evidenceRef,
-      IdempotencyRecordSchema
-    );
-    if (observation.status === "missing") {
-      throw missingTransitionRecordError(
-        scope,
-        input.key,
-        "Idempotency record was missing during completed rollback recovery."
-      );
-    }
-
     let cleanupPermitOutstanding = true;
     try {
-      if (observation.status === "malformed" || observation.status === "schema_threw") {
-        throw observation.error;
-      }
       const existing = observation.record;
       assertIdempotencyRecordLookupIdentity(existing, scope, input.key, evidenceRef);
       if (existing.request_digest !== input.requestDigest) {
@@ -686,6 +663,28 @@ export function createIdempotencyRecordService(
       if (cleanupPermitOutstanding) {
         await cancelWorkspaceRecordCleanupPermit(observation.cleanupPermit);
       }
+    }
+  }
+
+  async function classifyFailedRecoveryAuthorityLoss(
+    authorityError: unknown,
+    scope: IdempotencyScope,
+    key: string
+  ): Promise<FailedRecoveryWriteOutcome> {
+    try {
+      const current = await service.getRecord(scope, key);
+      return current
+        ? { status: "generation_lost", record: current }
+        : { status: "generation_lost" };
+    } catch (classificationError) {
+      return {
+        status: "generation_lost_with_error",
+        error: preserveTaskServiceErrorCompensationCompatibility(
+          classificationError,
+          [authorityError],
+          IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+        )
+      };
     }
   }
 
@@ -974,31 +973,162 @@ export function createIdempotencyRecordService(
         }
 
         return await runWithIdempotencyRelease(async () => {
-          const outcome = await writeFailedRecord(
-            { scope, key, requestDigest: guardRequestDigest },
-            scope,
-            key,
-            evidenceRef,
-            guard
-          );
-          await refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
-            observation.cleanupPermit,
-            guardPath,
+          const recordPath = workspaceRecordPath(
+            workspaceRoot,
+            [...idempotencyRecordDirectorySegments(scope), idempotencyRecordFileName(key)],
             evidenceRef
           );
-          if (!(await consume())) {
-            throw idempotencyTransitionArtifactSettlementError(
+          const exact = await observeJsonRecordForCleanup(
+            recordPath,
+            evidenceRef,
+            IdempotencyRecordSchema
+          );
+          let outcome: FailedRecoveryWriteOutcome | undefined;
+          if (exact.status === "missing") {
+            outcome = { status: "generation_lost" };
+          } else if (exact.status === "malformed" || exact.status === "schema_threw") {
+            await cancelWorkspaceRecordCleanupPermit(exact.cleanupPermit);
+            outcome = { status: "generation_lost_with_error", error: exact.error };
+          } else {
+            let recordPermitOutstanding = true;
+            try {
+              const exactRecord = exact.record;
+              assertIdempotencyRecordLookupIdentity(exactRecord, scope, key, evidenceRef);
+              if (
+                exactRecord.request_digest !== guardRequestDigest ||
+                exactRecord.status === "completed" ||
+                exactRecord.status === "failed"
+              ) {
+                outcome = { status: "generation_lost", record: exactRecord };
+              } else {
+                assertFailIntentGuardMatchesRecoverableRecord(
+                  guard,
+                  exactRecord,
+                  scope,
+                  key
+                );
+                await transitionGuardHooks?.beforeStaleGuardCleanup?.({
+                  guardPath,
+                  evidenceRef,
+                  observedGuard: idempotencyTransitionGuardIdentity(guard)
+                });
+                try {
+                  await refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
+                    exact.cleanupPermit,
+                    recordPath,
+                    evidenceRef
+                  );
+                } catch (authorityError) {
+                  await cancelWorkspaceRecordCleanupPermit(exact.cleanupPermit);
+                  recordPermitOutstanding = false;
+                  outcome = await classifyFailedRecoveryAuthorityLoss(
+                    authorityError,
+                    scope,
+                    key
+                  );
+                }
+                if (!outcome) {
+                  recordPermitOutstanding = false;
+                  outcome = await writeFailedRecord(
+                    { scope, key, requestDigest: guardRequestDigest },
+                    scope,
+                    key,
+                    evidenceRef,
+                    guard,
+                    exact
+                  );
+                }
+              }
+            } finally {
+              if (recordPermitOutstanding) {
+                await cancelWorkspaceRecordCleanupPermit(exact.cleanupPermit);
+              }
+            }
+          }
+
+          if (!outcome) throw completedRecordInvalidationStateError(evidenceRef);
+
+          const settlementErrors: unknown[] = [];
+          try {
+            await transitionGuardHooks?.beforeStaleGuardSettlementRefresh?.({
+              guardPath,
               evidenceRef,
-              new Error(
-                "Idempotency fail-intent guard changed while settling generation-bound recovery."
-              )
+              observedGuard: idempotencyTransitionGuardIdentity(guard)
+            });
+            await refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
+              observation.cleanupPermit,
+              guardPath,
+              evidenceRef
+            );
+          } catch (error) {
+            settlementErrors.push(error);
+          }
+          try {
+            if (!(await consume())) {
+              settlementErrors.push(
+                idempotencyTransitionArtifactSettlementError(
+                  evidenceRef,
+                  new Error(
+                    "Idempotency fail-intent guard changed while settling generation-bound recovery."
+                  )
+                )
+              );
+            }
+          } catch (consumeError) {
+            if (!settlementErrors.some((error) => Object.is(error, consumeError))) {
+              settlementErrors.push(consumeError);
+            }
+            try {
+              await settleExactIdempotencyTransitionArtifact(
+                guardPath,
+                evidenceRef,
+                guard
+              );
+            } catch (retryError) {
+              if (!settlementErrors.some((error) => Object.is(error, retryError))) {
+                settlementErrors.push(retryError);
+              }
+            }
+          }
+
+          if (outcome.status === "generation_lost_with_error") {
+            throw preserveTaskServiceErrorCompensationCompatibility(
+              outcome.error,
+              settlementErrors,
+              IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
             );
           }
-          if (outcome.status === "generation_lost_with_error") {
-            throw outcome.error;
+          if (settlementErrors.length > 0) {
+            throw preserveTaskServiceErrorCompensationCompatibility(
+              settlementErrors[0],
+              settlementErrors.slice(1),
+              IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+            );
           }
           return outcome.record;
-        }, cleanupLock.release);
+        }, async () => {
+          const settlementErrors: unknown[] = [];
+          try {
+            await cleanupLock.release();
+          } catch (releaseError) {
+            settlementErrors.push(releaseError);
+          }
+          try {
+            await cleanupLock.settleAfterSiblingMutation();
+          } catch (retryError) {
+            if (!settlementErrors.some((error) => Object.is(error, retryError))) {
+              settlementErrors.push(retryError);
+            }
+          }
+          if (settlementErrors.length === 1) throw settlementErrors[0];
+          if (settlementErrors.length > 1) {
+            throw preserveTaskServiceErrorCompensationCompatibility(
+              settlementErrors[0],
+              settlementErrors.slice(1),
+              IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+            );
+          }
+        });
       }
     );
   }
@@ -1957,18 +2087,91 @@ export function createIdempotencyRecordService(
       assertNonblankIdempotencyKey(input.key);
       assertTaskScopeInputResultRef(parsedScope, input.key, input.resultRef);
       const evidenceRef = idempotencyRecordEvidenceRef(parsedScope, input.key);
-      await removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
+      const parsedInput = { ...input, scope: parsedScope };
+      const recordPath = workspaceRecordPath(
         workspaceRoot,
-        parsedScope,
-        input.key,
-        evidenceRef,
-        "complete"
-      );
-      return await writeCompletedRecordAfterRollbackFailure(
-        { ...input, scope: parsedScope },
-        parsedScope,
+        [
+          ...idempotencyRecordDirectorySegments(parsedScope),
+          idempotencyRecordFileName(input.key)
+        ],
         evidenceRef
       );
+      const observation = await observeJsonRecordForCleanup(
+        recordPath,
+        evidenceRef,
+        IdempotencyRecordSchema
+      );
+      if (observation.status === "missing") {
+        throw missingTransitionRecordError(
+          parsedScope,
+          input.key,
+          "Idempotency record was missing during completed rollback recovery."
+        );
+      }
+
+      let permitOutstanding = true;
+      try {
+        if (observation.status === "malformed" || observation.status === "schema_threw") {
+          throw observation.error;
+        }
+        const current = observation.record;
+        assertIdempotencyRecordLookupIdentity(
+          current,
+          parsedScope,
+          input.key,
+          evidenceRef
+        );
+        if (current.request_digest !== input.requestDigest) {
+          throw createIdempotencyMismatchError();
+        }
+        if (current.status === "completed") {
+          assertValidCompletedRecoveryRecord(current, parsedScope, evidenceRef);
+          return current;
+        }
+
+        await removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
+          workspaceRoot,
+          parsedScope,
+          input.key,
+          evidenceRef,
+          "complete"
+        );
+        try {
+          await refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
+            observation.cleanupPermit,
+            recordPath,
+            evidenceRef
+          );
+        } catch (authorityError) {
+          await cancelWorkspaceRecordCleanupPermit(observation.cleanupPermit);
+          permitOutstanding = false;
+          try {
+            return await classifyCurrentCompletedRecoveryRecord(
+              parsedInput,
+              parsedScope,
+              evidenceRef
+            );
+          } catch (classificationError) {
+            throw preserveTaskServiceErrorCompensationCompatibility(
+              classificationError,
+              [authorityError],
+              IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+            );
+          }
+        }
+
+        permitOutstanding = false;
+        return await writeCompletedRecordAfterRollbackFailure(
+          parsedInput,
+          parsedScope,
+          evidenceRef,
+          observation
+        );
+      } finally {
+        if (permitOutstanding) {
+          await cancelWorkspaceRecordCleanupPermit(observation.cleanupPermit);
+        }
+      }
     },
 
     async quarantineRecordAfterUnsafeRollback(
@@ -2404,6 +2607,43 @@ async function withOwnedIdempotencyTransitionObservation<T>(
   );
 }
 
+async function settleExactIdempotencyTransitionArtifact(
+  path: string,
+  evidenceRef: string,
+  expected: IdempotencyTransitionGuard
+): Promise<void> {
+  const refreshed = await observeJsonRecordForCleanup(
+    path,
+    evidenceRef,
+    IdempotencyTransitionGuardSchema
+  );
+  if (refreshed.status === "missing") return;
+
+  await withOwnedIdempotencyTransitionObservation(
+    refreshed,
+    path,
+    evidenceRef,
+    async (consume) => {
+      if (refreshed.status === "schema_threw") throw refreshed.error;
+      if (
+        refreshed.status !== "record" ||
+        !isSameIdempotencyTransitionGuard(refreshed.record, expected)
+      ) {
+        throw idempotencyTransitionArtifactSettlementError(
+          evidenceRef,
+          new Error("Idempotency transition artifact changed during settlement retry.")
+        );
+      }
+      if (!(await consume())) {
+        throw idempotencyTransitionArtifactSettlementError(
+          evidenceRef,
+          new Error("Idempotency transition artifact changed during settlement retry.")
+        );
+      }
+    }
+  );
+}
+
 async function consumeObservedIdempotencyTransitionArtifact(
   observation: ExistingIdempotencyTransitionObservation,
   path: string,
@@ -2470,6 +2710,12 @@ async function acquireIdempotencyTransitionCleanupLock(
         release: async () =>
           await releaseOwnedIdempotencyTransitionArtifact(
             cleanupPermit,
+            cleanupLockPath,
+            evidenceRef,
+            cleanupLock
+          ),
+        settleAfterSiblingMutation: async () =>
+          await settleExactIdempotencyTransitionArtifact(
             cleanupLockPath,
             evidenceRef,
             cleanupLock

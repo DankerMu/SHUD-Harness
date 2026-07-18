@@ -5,7 +5,7 @@ Issue #79 identifies two recovery writers that decide from generation A but late
 ## What Changes
 
 - Bind the plain failed-recovery writer and `recoverCompletedRecordAfterRollbackFailure` to the exact record generation that justified the transition.
-- Preserve and reclassify a newer completed, mismatched, malformed, or otherwise superseding generation instead of mutating it.
+- Preserve and reclassify a newer completed, mismatched, malformed, or otherwise superseding generation that arrives after the deciding observation and before the service invokes exact replacement, instead of mutating it.
 - Add public-service race regressions and compatibility rows without changing schemas, routes, or record-store publication primitives.
 
 ## Capabilities
@@ -22,5 +22,6 @@ Issue #79 identifies two recovery writers that decide from generation A but late
 
 - Primary code: `packages/core/src/domain/services/idempotency-service.ts`.
 - Tests: `packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts`.
-- The existing `workspace-record-store.ts` observation/exact-replacement API is consumed unchanged unless fixture review proves a missing contract.
+- The existing `workspace-record-store.ts` observation/exact-replacement API is consumed unchanged.
+- Store-internal authority failures after exact replacement begins are tracked separately by #107.
 - No public schema, HTTP envelope, dependency, submodule, or persisted-format change.

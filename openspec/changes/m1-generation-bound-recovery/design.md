@@ -8,20 +8,23 @@ Fixture level: expanded. Repair intensity: high. Project profile: SHUD-Harness.
 
 **Goals:**
 - An unchanged started generation transitions to failed/completed exactly once and remains replayable.
-- A generation installed after the deciding observation is preserved byte-for-byte and classified through existing public error/result contracts.
+- A generation installed after the deciding observation and before the service invokes exact replacement is preserved byte-for-byte and classified through existing public error/result contracts.
 - Existing same-key mismatch, invalid-completed, failed recovery, transition-guard cleanup, and task replay behavior stays stable.
 
 **Non-Goals:**
 - Completed-consumption post-fulfillment settlement and documentation; that is issue #79 Child B.
 - New record-store publication primitives, carrier/provenance transport, cross-process ownership, or a production caller for the rollback-completion API.
+- Total successor classification for authority failures inside `replaceJsonRecordAfterExactObservation` after invocation has begun; that requires a store-owned physical-generation outcome and is tracked by #107.
 - Capacity re-scoping (#82), error-taxonomy changes (#80), lane cleanup ordering (#81), or test-infrastructure work (#83).
 
 ## Decisions
 
 1. Reimplement from `origin/main`; do not cherry-pick PR #104. The accepted store already supplies the required exact-observation primitive, while PR #104's later carrier and wrapper architecture is both unnecessary for this slice and terminally unreviewed.
 2. The deciding service path must carry a record-store cleanup permit into `replaceJsonRecordAfterExactObservation`. A fresh `writeJsonRecord` after decision is forbidden.
-3. Losing exact authority is a classification event, not permission to retry against the replacement as a new mutable baseline. A same-digest terminal replacement may be returned; mismatched or invalid completed replacements retain existing typed behavior.
+   Any preliminary replay read is semantic preflight only; the single exact observation that supplies the permit is the mutation decision, and no later record observation may become writable authority.
+3. At the service handoff seam, losing exact authority before exact replacement is invoked is a classification event, not permission to retry against the replacement as a new mutable baseline. A same-digest terminal replacement may be returned; mismatched or invalid completed replacements retain existing typed behavior.
 4. Test through `createIdempotencyRecordService` and existing publication/observation hooks. No private-helper-only test seam and no new mock of internal modules.
+5. Scope decision (2026-07-18, user-approved): Child A stops at the pre-invocation service seam. The store continues to protect bytes once exact replacement starts, while total public classification of store-internal pre-commit failures is deferred to #107 rather than expanding this fixture or changing `workspace-record-store.ts`.
 
 ## Risks / Trade-offs
 
@@ -31,29 +34,29 @@ Fixture level: expanded. Repair intensity: high. Project profile: SHUD-Harness.
 
 ## Invariant Matrix
 
-Governing invariant: once recovery decides from generation A, it may replace only A under its pinned authority; any generation B that appears before commit is preserved and classified, never adopted as a fresh mutable baseline.
+Governing invariant: once recovery decides from generation A, it invokes exact replacement only with A's pinned authority; any generation B that appears before that invocation is preserved and classified, never adopted as a fresh mutable baseline. After invocation begins, the unchanged store protects B from overwrite; total classification of those internal failure windows belongs to #107.
 
 Source-of-truth identity/contract: normalized workspace + scope + key path, `request_digest`, status/result_ref, observed physical generation, and record-store cleanup permit.
 
 Surfaces:
 - Producers: `writeFailedRecord` reached by stale fail-intent-guard recovery, and `recoverCompletedRecordAfterRollbackFailure` in `idempotency-service.ts`.
-- Validators/preflight: replay/lookup classification, digest/result binding, exact observation comparison.
+- Validators/preflight: replay/lookup semantic preflight, digest/result binding, and one deciding exact observation whose permit is carried through sibling-artifact settlement.
 - Storage/cache/query: idempotency JSON record and cleanup permit; no store implementation change planned.
 - Public routes/entrypoints: `lookupReplay` is the public seam that triggers stale fail-intent-guard recovery; `recoverCompletedRecordAfterRollbackFailure` is the second public seam; task route remains an unchanged consumer.
 - Frontend/downstream consumers: completed replay and task creation; no frontend code change.
-- Failure paths/rollback/stale state: missing, mismatched, invalid completed, superseded, malformed, writer failure, permit cancellation.
+- Failure paths/rollback/stale state: service-seam missing, mismatched, invalid completed, superseded, malformed, writer failure, permit cancellation; store-internal successor provenance is #107.
 - Evidence/audit/readiness: focused public-service tests, core suite, typecheck/check, OpenSpec, git/submodule/workspace hygiene.
 
 Regression rows:
 - stale fail-intent guard + `lookupReplay` observes started A unchanged -> exact replacement writes failed A, returns `incomplete` with that failed record, consumes the stale guard, and restores guard/permit/authority diagnostics.
 - completed rollback recovery observes started A unchanged -> exact replacement returns one completed record with the requested `result_ref`; replay returns the same bytes and diagnostics return to baseline.
-- either writer observes started A, then same-digest valid completed B is installed after observation and before exact replacement -> B remains byte-for-byte unchanged; `lookupReplay` returns `completed` B and completed rollback recovery returns B.
+- either writer observes started A, then same-digest valid completed B is installed after observation and before exact replacement is invoked -> B remains byte-for-byte unchanged; `lookupReplay` returns `completed` B and completed rollback recovery returns B.
 - either writer loses A to different-digest B -> B bytes remain unchanged; `lookupReplay` returns `mismatch`, while completed rollback recovery rejects with `TaskServiceError.code=idempotency_mismatch`.
 - either writer loses A to completed B with missing/unsafe `result_ref` -> B bytes remain unchanged; `lookupReplay` returns `invalid_completed`, while completed rollback recovery rejects with `TaskServiceError.code=record_malformed`.
 - either writer loses A to byte-distinct same-digest started/failed B -> B bytes remain unchanged; stale-guard `lookupReplay` consumes the guard for lost A and returns `incomplete` B, while completed rollback recovery rejects retryably with `TaskServiceError.code=record_malformed` and status 409.
 - either writer loses A to malformed bytes B -> B bytes remain unchanged; both public seams reject with the existing `TaskServiceError.code=record_malformed`, and the stale guard/record permit is settled without granting mutation authority over B.
 - either writer loses A to a missing generation -> no replacement occurs; `lookupReplay` returns `missing`, while completed rollback recovery rejects with the existing missing-transition `record_malformed` contract.
-- exact replacement writer failure before commit with A still current -> original writer failure remains the semantic primary, no partial terminal record is reported, and acquired cleanup permits/authority return to baseline; if a completed B caused that writer failure, the existing S34-P62-06 fail-closed identity error remains primary with the writer failure retained as compensation; committed-then-throw behavior is explicitly outside Child A and unchanged.
+- exact replacement writer failure with A still current -> original writer failure remains the semantic primary, no partial terminal record is reported, and acquired cleanup permits/authority return to baseline; the existing S34-P62-06 fail-closed identity error remains primary with the writer failure retained as compensation; committed-then-throw and store-internal successor total classification are explicitly outside Child A and unchanged (#107).
 - normal `completeRecord` still publishes/replays one completed record; invalidation/quarantine still requires exact completed authority; keyed `POST /api/tasks` still returns 201 with one TaskCard on first creation and 200 with the identical TaskCard on replay while producing one snapshot; S34-P62-06 keeps the completed generation unchanged; every row returns diagnostics to baseline.
 
 ## Boundary-Surface Checklist
