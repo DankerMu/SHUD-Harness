@@ -30127,6 +30127,346 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
+  test("Issue79 bounded record-authority alias collector accepts 65 raw yields and closes on the 66th", async () => {
+    for (const input of [
+      { label: "empty", values: [] as unknown[], outcome: "replaced", nextCalls: 1 },
+      {
+        label: "64-duplicates",
+        values: Array.from({ length: 64 }, () => "duplicate"),
+        outcome: "replaced",
+        nextCalls: 65
+      },
+      {
+        label: "65-duplicates",
+        values: Array.from({ length: 65 }, () => "duplicate"),
+        outcome: "replaced",
+        nextCalls: 66
+      },
+      {
+        label: "65-unique",
+        values: Array.from({ length: 65 }, (_, index) => `unique-${index}`),
+        outcome: "capacity",
+        nextCalls: 66
+      },
+      {
+        label: "66-duplicates",
+        values: Array.from({ length: 66 }, () => "duplicate"),
+        outcome: "capacity",
+        nextCalls: 66
+      }
+    ] as const) {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `bounded-alias-budget-${input.label}`
+      );
+      const probe = createIssue79BoundedAliasIterable(input.values);
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          rewriteRecordAuthorityIdentityCandidates: ({ exactPath }) => ({
+            exactPath,
+            aliases: probe.aliases
+          })
+        },
+        fixture.replace
+      );
+
+      if (input.outcome === "replaced") {
+        expect(result).toEqual({ status: "replaced", record: fixture.replacement });
+      } else {
+        expectIssue79BoundedAliasCapacityFailure(result, fixture.evidenceRef);
+      }
+      expect(probe.nextCalls()).toBe(input.nextCalls);
+      expect(probe.returnCalls()).toBe(input.values.length > 65 ? 1 : 0);
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    }
+
+    const fixture = await createIssue79CarrierOwnershipFixture(
+      "bounded-alias-injected-exact-duplicates"
+    );
+    let probe: ReturnType<typeof createIssue79BoundedAliasIterable> | undefined;
+    const result = await runWithWorkspaceRecordPublicationHooks(
+      {
+        rewriteRecordAuthorityIdentityCandidates: ({ exactPath, aliases }) => {
+          probe = createIssue79BoundedAliasIterable(
+            Array.from(
+              { length: 65 },
+              (_, index) => index % 2 === 0 ? exactPath : aliases[0] ?? exactPath
+            )
+          );
+          return { exactPath, aliases: probe.aliases };
+        }
+      },
+      fixture.replace
+    );
+    expect(result).toEqual({ status: "replaced", record: fixture.replacement });
+    expect(probe?.nextCalls()).toBe(66);
+    expect(probe?.returnCalls()).toBe(0);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
+  test("Issue79 bounded record-authority alias collector bounds huge unique duplicate and mixed iterables", async () => {
+    for (const input of [
+      {
+        label: "unique",
+        values: Array.from({ length: 10_000 }, (_, index) => `huge-unique-${index}`)
+      },
+      {
+        label: "duplicate",
+        values: Array.from({ length: 10_000 }, () => "huge-duplicate")
+      },
+      {
+        label: "mixed",
+        values: Array.from(
+          { length: 10_000 },
+          (_, index) => index % 3 === 0 ? "" : index % 3 === 1 ? "水文/é" : `mixed-${index}`
+        )
+      }
+    ] as const) {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `bounded-alias-huge-${input.label}`
+      );
+      const probe = createIssue79BoundedAliasIterable(input.values);
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          rewriteRecordAuthorityIdentityCandidates: ({ exactPath }) => ({
+            exactPath,
+            aliases: probe.aliases
+          })
+        },
+        fixture.replace
+      );
+
+      expectIssue79BoundedAliasCapacityFailure(result, fixture.evidenceRef);
+      expect(probe.nextCalls()).toBe(66);
+      expect(probe.returnCalls()).toBe(1);
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    }
+  });
+
+  test("Issue79 bounded record-authority alias collector validates exactPath before acquiring aliases", async () => {
+    const fixture = await createIssue79CarrierOwnershipFixture(
+      "bounded-alias-exact-precedence"
+    );
+    let aliasesGetterCalls = 0;
+    let iteratorCalls = 0;
+    const aliasesFailure = new Error("Issue79 aliases must not be acquired");
+    const callbackResult = Object.defineProperty(
+      { exactPath: new String("invalid-exact") as unknown as string },
+      "aliases",
+      {
+        enumerable: true,
+        get: () => {
+          aliasesGetterCalls += 1;
+          return {
+            [Symbol.iterator](): Iterator<string> {
+              iteratorCalls += 1;
+              throw aliasesFailure;
+            }
+          } as unknown as readonly string[];
+        }
+      }
+    ) as Readonly<{ exactPath: string; aliases: readonly string[] }>;
+    const carrierBaseline =
+      workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+
+    const result = await runWithWorkspaceRecordPublicationHooks(
+      { rewriteRecordAuthorityIdentityCandidates: () => callbackResult },
+      fixture.replace
+    );
+
+    expectIssue79RewritePrimitiveBoundaryFailure(
+      result,
+      "rewriteRecordAuthorityIdentityCandidates exactPath must be a primitive string."
+    );
+    expect(aliasesGetterCalls).toBe(0);
+    expect(iteratorCalls).toBe(0);
+    expect(countErrorGraphIdentity(result.error, aliasesFailure)).toBe(0);
+    expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+      carrierBaseline
+    );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      fixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      fixture.bindingBaseline
+    );
+  });
+
+  test("Issue79 bounded record-authority alias collector preserves raw validation index and primary across IteratorClose", async () => {
+    for (const returnMode of ["normal", "throw"] as const) {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `bounded-alias-validation-close-${returnMode}`
+      );
+      const returnFailure = new Error(
+        `Issue79 validation ${returnMode} return failure`
+      );
+      const probe = createIssue79BoundedAliasIterable(
+        ["duplicate", "duplicate", new String("invalid-alias"), "after"],
+        { returnFailure: returnMode === "throw" ? returnFailure : undefined }
+      );
+      const carrierBaseline =
+        workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          rewriteRecordAuthorityIdentityCandidates: ({ exactPath }) => ({
+            exactPath,
+            aliases: probe.aliases
+          })
+        },
+        fixture.replace
+      );
+
+      expectIssue79RewritePrimitiveBoundaryFailure(
+        result,
+        "rewriteRecordAuthorityIdentityCandidates aliases[2] must be a primitive string."
+      );
+      expect(probe.nextCalls()).toBe(3);
+      expect(probe.returnCalls()).toBe(1);
+      expect(countErrorGraphIdentity(result.error, returnFailure)).toBe(0);
+      expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+        carrierBaseline
+      );
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    }
+  });
+
+  test("Issue79 bounded record-authority alias collector preserves iterator abrupt identity and capacity primary", async () => {
+    for (const surface of ["next", "done", "value"] as const) {
+      const fixture = await createIssue79CarrierOwnershipFixture(
+        `bounded-alias-abrupt-${surface}`
+      );
+      const abruptFailure = new Error(`Issue79 ${surface} abrupt identity`);
+      const probe = createIssue79BoundedAliasIterable(["ordinary"], {
+        abrupt: { surface, failure: abruptFailure }
+      });
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          rewriteRecordAuthorityIdentityCandidates: ({ exactPath }) => ({
+            exactPath,
+            aliases: probe.aliases
+          })
+        },
+        fixture.replace
+      );
+
+      expect(result.status).toBe("operation_failed");
+      if (result.status !== "operation_failed") {
+        throw new Error("Expected an iterator abrupt precondition failure.");
+      }
+      expect(result.origin).toBe("precondition");
+      expect(result.successor.status).toBe("current");
+      expect(semanticPrimaryError(result.error)).toBe(abruptFailure);
+      expect(countErrorGraphIdentity(result.error, abruptFailure)).toBe(1);
+      expect(probe.nextCalls()).toBe(1);
+      expect(probe.returnCalls()).toBe(0);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+        fixture.authorityBaseline
+      );
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+        fixture.bindingBaseline
+      );
+    }
+
+    const exhaustedFixture = await createIssue79CarrierOwnershipFixture(
+      "bounded-alias-ordinary-exhaustion"
+    );
+    const exhaustedProbe = createIssue79BoundedAliasIterable([
+      "",
+      "duplicate",
+      "duplicate",
+      "primitive\0alias",
+      "流域/e\u0301",
+      "🌊"
+    ]);
+    const exhausted = await runWithWorkspaceRecordPublicationHooks(
+      {
+        rewriteRecordAuthorityIdentityCandidates: ({ exactPath }) => ({
+          exactPath,
+          aliases: exhaustedProbe.aliases
+        })
+      },
+      exhaustedFixture.replace
+    );
+    expect(exhausted).toEqual({
+      status: "replaced",
+      record: exhaustedFixture.replacement
+    });
+    expect(exhaustedProbe.nextCalls()).toBe(7);
+    expect(exhaustedProbe.returnCalls()).toBe(0);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      exhaustedFixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      exhaustedFixture.bindingBaseline
+    );
+
+    const overflowFixture = await createIssue79CarrierOwnershipFixture(
+      "bounded-alias-overflow-return-throw"
+    );
+    const returnFailure = new Error("Issue79 overflow return failure");
+    const overflowProbe = createIssue79BoundedAliasIterable(
+      Array.from({ length: 66 }, () => "overflow-duplicate"),
+      { returnFailure }
+    );
+    const carrierBaseline =
+      workspaceRecordExactReplacementCarrierDiagnosticsForTest();
+    const overflow = await runWithWorkspaceRecordPublicationHooks(
+      {
+        rewriteRecordAuthorityIdentityCandidates: ({ exactPath }) => ({
+          exactPath,
+          aliases: overflowProbe.aliases
+        })
+      },
+      overflowFixture.replace
+    );
+    expectIssue79BoundedAliasCapacityFailure(
+      overflow,
+      overflowFixture.evidenceRef
+    );
+    expect(overflowProbe.nextCalls()).toBe(66);
+    expect(overflowProbe.returnCalls()).toBe(1);
+    expect(countErrorGraphIdentity(overflow.error, returnFailure)).toBe(0);
+    expect(workspaceRecordExactReplacementCarrierDiagnosticsForTest()).toEqual(
+      carrierBaseline
+    );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
+      overflowFixture.authorityBaseline
+    );
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      overflowFixture.bindingBaseline
+    );
+  });
+
   test("Issue79 callback result isolation snapshots rewrite accessors iterators and proxies before restoring the carrier", async () => {
     for (const surface of [
       "exact_path_getter",
@@ -35338,6 +35678,101 @@ function expectIssue79RewritePrimitiveBoundaryFailure(
   expect(primary).not.toBeInstanceOf(WorkspacePathSafetyError);
   expect((primary as TypeError).message).toBe(expectedMessage);
   expect((primary as TypeError & { code?: unknown }).code).toBeUndefined();
+  expect(countErrorGraphIdentity(result.error, primary)).toBe(1);
+}
+
+function createIssue79BoundedAliasIterable(
+  values: readonly unknown[],
+  options: Readonly<{
+    abrupt?: Readonly<{
+      surface: "next" | "done" | "value";
+      failure: unknown;
+    }>;
+    returnFailure?: unknown;
+  }> = {}
+): Readonly<{
+  aliases: readonly string[];
+  nextCalls: () => number;
+  returnCalls: () => number;
+}> {
+  let valueIndex = 0;
+  let nextCallCount = 0;
+  let returnCallCount = 0;
+  const iterator = {
+    [Symbol.iterator]() {
+      return this;
+    },
+    next(): IteratorResult<unknown> {
+      nextCallCount += 1;
+      if (options.abrupt?.surface === "next") throw options.abrupt.failure;
+      if (valueIndex >= values.length) {
+        return { done: true, value: undefined };
+      }
+      const value = values[valueIndex];
+      valueIndex += 1;
+      if (options.abrupt?.surface === "done") {
+        return Object.defineProperties({}, {
+          done: {
+            enumerable: true,
+            get: () => {
+              throw options.abrupt!.failure;
+            }
+          },
+          value: { enumerable: true, value }
+        }) as IteratorResult<unknown>;
+      }
+      if (options.abrupt?.surface === "value") {
+        return Object.defineProperties({}, {
+          done: { enumerable: true, value: false },
+          value: {
+            enumerable: true,
+            get: () => {
+              throw options.abrupt!.failure;
+            }
+          }
+        }) as IteratorResult<unknown>;
+      }
+      return { done: false, value };
+    },
+    return(): IteratorResult<unknown> {
+      returnCallCount += 1;
+      if (options.returnFailure !== undefined) throw options.returnFailure;
+      return { done: true, value: undefined };
+    }
+  };
+  return Object.freeze({
+    aliases: iterator as unknown as readonly string[],
+    nextCalls: () => nextCallCount,
+    returnCalls: () => returnCallCount
+  });
+}
+
+function expectIssue79BoundedAliasCapacityFailure(
+  result: Awaited<
+    ReturnType<
+      Awaited<ReturnType<typeof createIssue79CarrierOwnershipFixture>>["replace"]
+    >
+  >,
+  evidenceRef: string
+): asserts result is Extract<typeof result, { status: "operation_failed" }> {
+  expect(result.status).toBe("operation_failed");
+  if (result.status !== "operation_failed") {
+    throw new Error("Expected the bounded record-authority capacity failure.");
+  }
+  expect(result.origin).toBe("precondition");
+  expect(result.successor.status).toBe("current");
+  const primary = semanticPrimaryError(result.error);
+  expect(primary).toBe(result.error);
+  expect(primary).toBeInstanceOf(TaskServiceError);
+  const capacity = primary as TaskServiceError;
+  expect(capacity.code).toBe("record_malformed");
+  expect(capacity.status).toBe(409);
+  expect(capacity.category).toBe("workspace_error");
+  expect(capacity.message).toBe(
+    "Workspace record authority coordination is at capacity."
+  );
+  expect(capacity.evidenceRefs).toEqual([evidenceRef]);
+  expect(capacity.retryable).toBe(true);
   expect(countErrorGraphIdentity(result.error, primary)).toBe(1);
 }
 

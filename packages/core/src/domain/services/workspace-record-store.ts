@@ -11656,18 +11656,24 @@ async function recordAuthorityIdentityCandidates(
           );
           if (callbackResult === undefined) return undefined;
           const exactPath = callbackResult.exactPath;
-          const aliases = Array.from(callbackResult.aliases);
           if (typeof exactPath !== "string") {
             throw new TypeError(
               "rewriteRecordAuthorityIdentityCandidates exactPath must be a primitive string."
             );
           }
-          for (let index = 0; index < aliases.length; index += 1) {
-            if (typeof aliases[index] !== "string") {
+          const aliases: string[] = [];
+          let index = 0;
+          for (const alias of callbackResult.aliases) {
+            if (index === MAX_RECORD_AUTHORITY_ALIASES_PER_MUTEX) {
+              throw authorityCapacityError(evidenceRef);
+            }
+            if (typeof alias !== "string") {
               throw new TypeError(
                 `rewriteRecordAuthorityIdentityCandidates aliases[${index}] must be a primitive string.`
               );
             }
+            aliases.push(alias);
+            index += 1;
           }
           return Object.freeze({ exactPath, aliases: Object.freeze(aliases) });
         })
