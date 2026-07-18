@@ -28411,6 +28411,40 @@ describe("idempotency, lock, and artifact services", () => {
     expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
   });
 
+  for (const successor of [
+    "completed",
+    "mismatch",
+    "invalid_missing_result_ref",
+    "invalid_unsafe_result_ref",
+    "started",
+    "failed",
+    "malformed",
+    "missing"
+  ] as const) {
+    test(`Issue79 Child A stale fail-intent generation race classifies ${successor} successor`, async () => {
+      await expectIssue79GenerationBoundRecovery("stale_fail_intent", successor);
+    });
+
+    const completedRecoveryRow = (
+      successor === "mismatch" ||
+      successor === "invalid_missing_result_ref" ||
+      successor === "malformed"
+    ) ? "compatibility row classifies" : "generation race classifies";
+    test(`Issue79 Child A completed rollback ${completedRecoveryRow} ${successor} successor`, async () => {
+      await expectIssue79GenerationBoundRecovery("completed_rollback", successor);
+    });
+  }
+
+  test("Issue79 Child A uncontended recovery publishes replayable failed and completed records", async () => {
+    await expectIssue79UncontendedRecovery();
+  });
+
+  for (const recovery of ["stale_fail_intent", "completed_rollback"] as const) {
+    test(`Issue79 Child A ${recovery} writer failure remains primary and resource-clean`, async () => {
+      await expectIssue79RecoveryWriterFailure(recovery);
+    });
+  }
+
   test("S34-P62-06 guard-recovery mid-window completed swap is refused fail-closed", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -30726,6 +30760,350 @@ function expectErrorNotToLeakRecordContent(error: TaskServiceError, content: str
     causeMessage: cause instanceof Error ? cause.message : cause
   });
   expect(exposedError).not.toContain(content);
+}
+
+type Issue79RecoverySurface = "stale_fail_intent" | "completed_rollback";
+type Issue79Successor =
+  | "completed"
+  | "mismatch"
+  | "invalid_missing_result_ref"
+  | "invalid_unsafe_result_ref"
+  | "started"
+  | "failed"
+  | "malformed"
+  | "missing";
+
+async function expectIssue79GenerationBoundRecovery(
+  recovery: Issue79RecoverySurface,
+  successor: Issue79Successor
+): Promise<void> {
+  const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+  tempRoots.push(tempRoot);
+  const rawKey = `task:create:issue79-child-a-${recovery}-${successor}`;
+  const requestDigest = `digest-issue79-child-a-${recovery}-${successor}`;
+  const requestedResultRef = `TASK-issue79-requested-${recovery}-${successor}`;
+  const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+  const recordPath = workspaceRecordPath(
+    workspaceRoot,
+    ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+    evidenceRef
+  );
+  const service = createIdempotencyRecordService({
+    workspaceRoot,
+    now: () => new Date("2026-07-18T12:00:00.000Z")
+  });
+  const begin = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+  expect(begin.status).toBe("acquired");
+  if (begin.status !== "acquired") throw new Error("Expected issue79 started generation A.");
+
+  const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+  if (recovery === "stale_fail_intent") {
+    await writeFile(
+      guardPath,
+      `${JSON.stringify({
+        guard_id: `issue79-child-a-${successor}`,
+        owner_pid: 9_999_999,
+        acquired_at_ms: Date.now() - 31_000,
+        acquired_at: "2026-07-18T11:59:00.000Z",
+        intent: "fail",
+        request_digest: requestDigest
+      })}\n`,
+      { flag: "wx", mode: 0o600 }
+    );
+  }
+
+  const successorRecord = issue79SuccessorRecord(
+    successor,
+    rawKey,
+    requestDigest
+  );
+  const successorBytes = successor === "malformed"
+    ? "{issue79-child-a-malformed-successor\n"
+    : successor === "missing"
+      ? undefined
+      : `${JSON.stringify(successorRecord, null, 2)}\n`;
+  const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+  const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+  const decidingObservation = recovery === "stale_fail_intent" ? 2 : 1;
+  let recordObservations = 0;
+  let installed = false;
+  let value: unknown;
+  let failure: unknown;
+  const installSuccessor = async (path: string): Promise<void> => {
+    if (
+      path !== recordPath ||
+      installed ||
+      recordObservations !== decidingObservation
+    ) return;
+    installed = true;
+    if (successorBytes === undefined) {
+      await unlink(recordPath);
+    } else {
+      await writeFile(recordPath, successorBytes, { flag: "w" });
+    }
+  };
+
+  try {
+    value = await runWithWorkspaceRecordPublicationHooks(
+      {
+        afterDurableRecordObservation: ({ path, status }) => {
+          if (path === recordPath && status === "read") recordObservations += 1;
+        },
+        beforeRecordAuthorityIdentitySupplier: ({ path }) => installSuccessor(path),
+        beforeCleanupPermitIdentityResolution: ({ path }) => installSuccessor(path)
+      },
+      () => recovery === "stale_fail_intent"
+        ? service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+        : service.recoverCompletedRecordAfterRollbackFailure({
+            scope: "task",
+            key: rawKey,
+            requestDigest,
+            resultRef: requestedResultRef
+          })
+    );
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(installed).toBe(true);
+  if (successorBytes === undefined) {
+    await expectPathMissing(recordPath);
+  } else {
+    expect(await readFile(recordPath, "utf8")).toBe(successorBytes);
+  }
+
+  if (recovery === "stale_fail_intent") {
+    if (successor === "malformed") {
+      expect(failure).toBeInstanceOf(TaskServiceError);
+      expect((failure as TaskServiceError).code).toBe("record_malformed");
+    } else {
+      expect(failure).toBeUndefined();
+      if (successor === "missing") {
+        expect(value).toEqual({ status: "missing" });
+      } else if (successor === "mismatch") {
+        expect(value).toEqual({ status: "mismatch", record: successorRecord });
+      } else if (successor === "invalid_missing_result_ref") {
+        expect(value).toEqual({
+          status: "invalid_completed",
+          reason: "missing_result_ref",
+          record: successorRecord,
+          observedResultRef: undefined
+        });
+      } else if (successor === "invalid_unsafe_result_ref") {
+        expect(value).toEqual({
+          status: "invalid_completed",
+          reason: "unsafe_result_ref",
+          record: successorRecord,
+          observedResultRef: "../issue79-unsafe-result"
+        });
+      } else if (successor === "completed") {
+        expect(value).toEqual({ status: "completed", record: successorRecord });
+      } else {
+        expect(value).toEqual({ status: "incomplete", record: successorRecord });
+      }
+    }
+    await expectPathMissing(guardPath);
+  } else if (successor === "completed") {
+    expect(failure).toBeUndefined();
+    expect(value).toEqual(successorRecord);
+    expect(
+      await service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+    ).toEqual({ status: "completed", record: successorRecord });
+  } else {
+    expect(failure).toBeInstanceOf(TaskServiceError);
+    const typed = failure as TaskServiceError;
+    if (successor === "mismatch") {
+      expect(typed.code).toBe("idempotency_mismatch");
+    } else {
+      expect(typed.code).toBe("record_malformed");
+    }
+    if (successor === "started" || successor === "failed") {
+      expect(typed.status).toBe(409);
+      expect(typed.retryable).toBe(true);
+    }
+  }
+
+  await expectPathMissing(idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey));
+  expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+}
+
+function issue79SuccessorRecord(
+  successor: Exclude<Issue79Successor, "malformed" | "missing">,
+  rawKey: string,
+  requestDigest: string
+): IdempotencyRecord;
+function issue79SuccessorRecord(
+  successor: Issue79Successor,
+  rawKey: string,
+  requestDigest: string
+): IdempotencyRecord | undefined;
+function issue79SuccessorRecord(
+  successor: Issue79Successor,
+  rawKey: string,
+  requestDigest: string
+): IdempotencyRecord | undefined {
+  if (successor === "malformed" || successor === "missing") return undefined;
+  const base = {
+    key: rawKey,
+    scope: "task" as const,
+    request_digest: successor === "mismatch"
+      ? `${requestDigest}-replacement`
+      : requestDigest,
+    created_at: "2026-07-18T12:00:01.000Z",
+    updated_at: "2026-07-18T12:00:02.000Z"
+  };
+  if (successor === "started" || successor === "failed") {
+    return { ...base, status: successor };
+  }
+  return {
+    ...base,
+    status: "completed",
+    ...(successor === "invalid_missing_result_ref"
+      ? {}
+      : {
+          result_ref: successor === "invalid_unsafe_result_ref"
+            ? "../issue79-unsafe-result"
+            : `TASK-issue79-installed-${successor}`
+        })
+  };
+}
+
+async function expectIssue79UncontendedRecovery(): Promise<void> {
+  const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+  tempRoots.push(tempRoot);
+  const service = createIdempotencyRecordService({
+    workspaceRoot,
+    now: () => new Date("2026-07-18T12:01:00.000Z")
+  });
+  const failedKey = "task:create:issue79-child-a-uncontended-failed";
+  const failedDigest = "digest-issue79-child-a-uncontended-failed";
+  await service.beginRecord({ scope: "task", key: failedKey, requestDigest: failedDigest });
+  await writeFile(
+    idempotencyTransitionGuardPath(workspaceRoot, failedKey),
+    `${JSON.stringify({
+      guard_id: "issue79-child-a-uncontended-failed",
+      owner_pid: 9_999_999,
+      acquired_at_ms: Date.now() - 31_000,
+      acquired_at: "2026-07-18T12:00:00.000Z",
+      intent: "fail",
+      request_digest: failedDigest
+    })}\n`,
+    { flag: "wx", mode: 0o600 }
+  );
+  const completedKey = "task:create:issue79-child-a-uncontended-completed";
+  const completedDigest = "digest-issue79-child-a-uncontended-completed";
+  const completedResultRef = "TASK-issue79-child-a-uncontended-completed";
+  await service.beginRecord({
+    scope: "task",
+    key: completedKey,
+    requestDigest: completedDigest
+  });
+  const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+  const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+
+  const failedReplay = await service.lookupReplay({
+    scope: "task",
+    key: failedKey,
+    requestDigest: failedDigest
+  });
+  expect(failedReplay.status).toBe("incomplete");
+  if (failedReplay.status !== "incomplete") throw new Error("Expected failed replay.");
+  expect(failedReplay.record).toMatchObject({
+    key: failedKey,
+    request_digest: failedDigest,
+    status: "failed"
+  });
+
+  const completed = await service.recoverCompletedRecordAfterRollbackFailure({
+    scope: "task",
+    key: completedKey,
+    requestDigest: completedDigest,
+    resultRef: completedResultRef
+  });
+  expect(completed).toMatchObject({
+    key: completedKey,
+    request_digest: completedDigest,
+    status: "completed",
+    result_ref: completedResultRef
+  });
+  expect(
+    await service.lookupReplay({
+      scope: "task",
+      key: completedKey,
+      requestDigest: completedDigest
+    })
+  ).toEqual({ status: "completed", record: completed });
+  await expectPathMissing(idempotencyTransitionGuardPath(workspaceRoot, failedKey));
+  expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+}
+
+async function expectIssue79RecoveryWriterFailure(
+  recovery: Issue79RecoverySurface
+): Promise<void> {
+  const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+  tempRoots.push(tempRoot);
+  const rawKey = `task:create:issue79-child-a-writer-${recovery}`;
+  const requestDigest = `digest-issue79-child-a-writer-${recovery}`;
+  const resultRef = `TASK-issue79-child-a-writer-${recovery}`;
+  const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+  const recordPath = workspaceRecordPath(
+    workspaceRoot,
+    ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+    evidenceRef
+  );
+  const service = createIdempotencyRecordService({ workspaceRoot });
+  const begin = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+  expect(begin.status).toBe("acquired");
+  if (begin.status !== "acquired") throw new Error("Expected writer-failure generation A.");
+  const originalBytes = await readFile(recordPath, "utf8");
+  const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+  let guardBytes: string | undefined;
+  if (recovery === "stale_fail_intent") {
+    guardBytes = `${JSON.stringify({
+      guard_id: "issue79-child-a-writer-stale",
+      owner_pid: 9_999_999,
+      acquired_at_ms: Date.now() - 31_000,
+      acquired_at: "2026-07-18T12:02:00.000Z",
+      intent: "fail",
+      request_digest: requestDigest
+    })}\n`;
+    await writeFile(guardPath, guardBytes, { flag: "wx", mode: 0o600 });
+  }
+  const writerFailure = new Error(`issue79 child a writer failure ${recovery}`);
+  const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+  const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+
+  const failure = await captureThrownValue(() =>
+    runWithWorkspaceRecordPublicationHooks(
+      {
+        afterTemporaryFileWritten: ({ canonicalPath }) => {
+          if (canonicalPath === recordPath) throw writerFailure;
+        }
+      },
+      () => recovery === "stale_fail_intent"
+        ? service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+        : service.recoverCompletedRecordAfterRollbackFailure({
+            scope: "task",
+            key: rawKey,
+            requestDigest,
+            resultRef
+          })
+    )
+  );
+
+  expect(semanticPrimaryError(failure)).toBe(writerFailure);
+  expect(await readFile(recordPath, "utf8")).toBe(originalBytes);
+  expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+  if (guardBytes === undefined) {
+    await expectPathMissing(guardPath);
+  } else {
+    expect(await readFile(guardPath, "utf8")).toBe(guardBytes);
+  }
+  await expectPathMissing(idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey));
+  expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
 }
 
 async function expectPathMissing(path: string): Promise<void> {
