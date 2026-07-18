@@ -77,6 +77,7 @@ import {
   observeJsonRecordForCleanup,
   publishJsonRecordWithLifecycleCallbacks,
   readJsonRecord,
+  replaceJsonRecordAfterExactObservation,
   refreshWorkspaceRecordCleanupPermitAfterSiblingMutation,
   removeWorkspaceRecordDirectoryIfEmpty,
   runWithWorkspaceRecordAuthorityDeadline,
@@ -26832,6 +26833,8 @@ describe("idempotency, lock, and artifact services", () => {
       "runOwnedRecordDirectoryTransferMutation"
     ];
     const recordStoreOwnedInternalSettlement = [
+      "runWithExactReplacementFailureSlot",
+      "runWithExactReplacementPhysicalProofSource",
       "runWithRecordDirectoryBindingOperation",
       "runWithRecordDirectoryMutationLocks"
     ];
@@ -28569,6 +28572,388 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await readFile(recordPath, "utf8")).toBe(completedText);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("Issue79 immutable failure carrier keeps hostile writer values opaque and P then C ordered once", async () => {
+    const cases = [
+      { form: "plain", combination: "W" },
+      { form: "plain", combination: "W+P" },
+      { form: "plain", combination: "W+C" },
+      { form: "plain", combination: "W+P+C" },
+      { form: "wrapped", combination: "W+P+C" },
+      { form: "aggregate", combination: "W+P+C" },
+      { form: "throwing_cause", combination: "W+P+C" },
+      { form: "proxy", combination: "W+P+C" }
+    ] as const;
+
+    for (const { form, combination } of cases) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:issue79-carrier-${form}-${combination}`;
+      const requestDigest = `digest-issue79-carrier-${form}-${combination}`;
+      const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+      const fileName = idempotencyRecordFileName(rawKey);
+      const directorySegments = ["tasks", "_idempotency", "task"] as const;
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      const begun = await service.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      });
+      if (begun.status !== "acquired") throw new Error("Expected exact writer fixture.");
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const observation = await observeJsonRecordForCleanup(
+        recordPath,
+        evidenceRef,
+        IdempotencyRecordSchema
+      );
+      if (observation.status !== "record") {
+        throw new Error("Expected exact cleanup observation.");
+      }
+      const failedRecord: IdempotencyRecord = {
+        ...observation.record,
+        status: "failed",
+        updated_at: "2026-07-17T18:00:00.000Z"
+      };
+      const semanticWriter = new Error(
+        `Issue79 carrier writer ${form} ${combination}`
+      );
+      let writerValue: unknown = semanticWriter;
+      let hostileObservationFailure: Error | undefined;
+      let hostileReads = 0;
+      if (form === "wrapped") {
+        writerValue = new Error("Issue79 opaque wrapper", { cause: semanticWriter });
+      } else if (form === "aggregate") {
+        writerValue = new AggregateError(
+          [semanticWriter, new Error("Issue79 aggregate sibling")],
+          "Issue79 opaque aggregate"
+        );
+      } else if (form === "throwing_cause") {
+        hostileObservationFailure = new Error("Issue79 throwing cause accessor");
+        Object.defineProperty(semanticWriter, "cause", {
+          configurable: true,
+          get() {
+            hostileReads += 1;
+            throw hostileObservationFailure;
+          }
+        });
+      } else if (form === "proxy") {
+        hostileObservationFailure = new Error("Issue79 proxy observation trap");
+        writerValue = new Proxy(semanticWriter, {
+          getPrototypeOf() {
+            hostileReads += 1;
+            throw hostileObservationFailure;
+          },
+          get() {
+            hostileReads += 1;
+            throw hostileObservationFailure;
+          }
+        });
+      }
+      const cleanupFailure = new Error(
+        `Issue79 carrier cleanup ${form} ${combination}`
+      );
+      const installsProof = combination.includes("P");
+      const installsCleanup = combination.includes("C");
+      let writerCalls = 0;
+      let cleanupCalls = 0;
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: ({ canonicalPath }) => {
+            if (canonicalPath !== recordPath || writerCalls > 0) return;
+            writerCalls += 1;
+            throw writerValue;
+          },
+          beforeTemporaryUnlink: async ({ canonicalPath }) => {
+            if (canonicalPath !== recordPath || cleanupCalls > 0) return;
+            cleanupCalls += 1;
+            if (installsProof) await chmod(recordPath, 0o700);
+            if (installsCleanup) throw cleanupFailure;
+          }
+        },
+        () =>
+          replaceJsonRecordAfterExactObservation(
+            observation.cleanupPermit,
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            failedRecord,
+            evidenceRef,
+            IdempotencyRecordSchema
+          )
+      );
+
+      expect(result.status).toBe("writer_failed");
+      if (result.status !== "writer_failed") {
+        throw new Error("Expected total writer-failed replacement outcome.");
+      }
+      expect(result.origin).toBe("writer");
+      expect(writerCalls).toBe(1);
+      if (!installsProof && !installsCleanup) {
+        expect(result.error).toBe(writerValue);
+      } else {
+        const primary = semanticPrimaryError(result.error);
+        if (form === "proxy") {
+          expect(primary).toBeInstanceOf(PreservedNonErrorThrownValue);
+          expect((primary as PreservedNonErrorThrownValue).thrownValue).toBe(writerValue);
+        } else {
+          expect(primary).toBe(writerValue);
+        }
+        if (form !== "throwing_cause" && form !== "proxy") {
+          expect(countErrorGraphIdentity(result.error, cleanupFailure)).toBe(
+            installsCleanup ? 1 : 0
+          );
+        }
+        if (installsProof && installsCleanup && form === "plain") {
+          const envelope = result.error as Error;
+          expect(envelope.cause).toBeInstanceOf(AggregateError);
+          const errors = (envelope.cause as AggregateError).errors;
+          expect(errors[0]).toBeInstanceOf(TaskServiceError);
+          expect(errors[1]).toBe(cleanupFailure);
+        }
+      }
+      if (hostileObservationFailure) {
+        expect(semanticPrimaryError(result.error)).not.toBe(hostileObservationFailure);
+      }
+      expect(hostileReads).toBeLessThanOrEqual(2);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("Issue79 successor observer stays bound to the captured parent epoch", async () => {
+    for (const drift of [
+      "same_parent_successor",
+      "parent_recreated",
+      "intermediate_symlink"
+    ] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:issue79-bound-successor-${drift}`;
+      const requestDigest = `digest-issue79-bound-successor-${drift}`;
+      const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+      const fileName = idempotencyRecordFileName(rawKey);
+      const directorySegments = ["tasks", "_idempotency", "task"] as const;
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      const begun = await service.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      });
+      if (begun.status !== "acquired") throw new Error("Expected exact binding fixture.");
+      const originalText = await readFile(recordPath, "utf8");
+      const failedRecord: IdempotencyRecord = {
+        ...begun.record,
+        status: "failed",
+        updated_at: "2026-07-17T18:10:00.000Z"
+      };
+      const foreign = {
+        ...begun.record,
+        status: "completed",
+        result_ref: `TASK-issue79-foreign-${drift}`,
+        updated_at: "2026-07-17T18:11:00.000Z"
+      } satisfies IdempotencyRecord;
+      const foreignText = `${JSON.stringify(foreign)}\n`;
+      const writerFailure = new Error(`Issue79 binding writer ${drift}`);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let swapped = false;
+      let originalRecordPath = recordPath;
+      const hooks: WorkspaceRecordPublicationHooks = {
+          beforeCleanupPermitIdentityResolution: ({ path }) => {
+            if (path === recordPath) throw writerFailure;
+          },
+          afterCleanupPermitPinnedHandleClosed: async ({ path }) => {
+            if (path !== recordPath || swapped) return;
+            swapped = true;
+            if (drift === "same_parent_successor") {
+              await writeFile(recordPath, foreignText, { flag: "w" });
+              return;
+            }
+            if (drift === "parent_recreated") {
+              const parentPath = dirname(recordPath);
+              const retainedPath = `${parentPath}.issue79-retained`;
+              await rename(parentPath, retainedPath);
+              await mkdir(parentPath, { mode: 0o700 });
+              originalRecordPath = join(retainedPath, basename(recordPath));
+              await writeFile(recordPath, foreignText, { flag: "wx", mode: 0o600 });
+              return;
+            }
+            const tasksPath = join(workspaceRoot, "tasks");
+            const retainedTasksPath = join(workspaceRoot, "tasks.issue79-retained");
+            const foreignTasksPath = join(workspaceRoot, "tasks.issue79-foreign");
+            await rename(tasksPath, retainedTasksPath);
+            await mkdir(join(foreignTasksPath, "_idempotency", "task"), {
+              recursive: true,
+              mode: 0o700
+            });
+            await writeFile(
+              join(foreignTasksPath, "_idempotency", "task", fileName),
+              foreignText,
+              { flag: "wx", mode: 0o600 }
+            );
+            await symlink(foreignTasksPath, tasksPath, "dir");
+            originalRecordPath = join(
+              retainedTasksPath,
+              "_idempotency",
+              "task",
+              fileName
+            );
+          }
+        };
+      const observation = await runWithWorkspaceRecordPublicationHooks(
+        hooks,
+        () => observeJsonRecordForCleanup(
+          recordPath,
+          evidenceRef,
+          IdempotencyRecordSchema
+        )
+      );
+      if (observation.status !== "record") {
+        throw new Error("Expected exact binding observation.");
+      }
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        hooks,
+        () =>
+          replaceJsonRecordAfterExactObservation(
+            observation.cleanupPermit,
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            failedRecord,
+            evidenceRef,
+            IdempotencyRecordSchema
+          )
+      );
+
+      expect(swapped).toBe(true);
+      expect(result.status).toBe("writer_failed");
+      if (result.status !== "writer_failed") {
+        throw new Error("Expected total writer failure after successor observation.");
+      }
+      expect(semanticPrimaryError(result.error)).toBe(writerFailure);
+      if (drift === "same_parent_successor") {
+        expect(result.successor.status).toBe("superseded");
+        if (result.successor.status === "superseded") {
+          expect(result.successor.bytes.toString("utf8")).toBe(foreignText);
+        }
+      } else {
+        expect(result.successor.status).toBe("unavailable");
+      }
+      if (drift !== "same_parent_successor") {
+        expect(await readFile(originalRecordPath, "utf8")).toBe(originalText);
+      }
+      expect(await readFile(recordPath, "utf8")).toBe(foreignText);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("Issue79 direct and retained recovery never classify bytes from a rebound parent", async () => {
+    for (const surface of ["direct", "retained"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:issue79-rebound-service-${surface}`;
+      const requestDigest = `digest-issue79-rebound-service-${surface}`;
+      const evidenceRef = idempotencyRecordEvidenceRef("task", rawKey);
+      const recordPath = workspaceRecordPath(
+        workspaceRoot,
+        ["tasks", "_idempotency", "task", idempotencyRecordFileName(rawKey)],
+        evidenceRef
+      );
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+      if (surface === "retained") {
+        await writeFile(
+          guardPath,
+          `${JSON.stringify({
+            guard_id: `issue79-rebound-service-${surface}`,
+            owner_pid: 9_999_999,
+            acquired_at_ms: Date.now() - 31_000,
+            acquired_at: "2026-07-17T18:20:00.000Z",
+            intent: "fail",
+            request_digest: requestDigest
+          })}\n`,
+          { flag: "wx", mode: 0o600 }
+        );
+      }
+      const originalText = await readFile(recordPath, "utf8");
+      const foreign = {
+        key: rawKey,
+        scope: "task",
+        request_digest: requestDigest,
+        status: "completed",
+        result_ref: `TASK-issue79-rebound-foreign-${surface}`,
+        created_at: "2026-07-17T18:20:01.000Z",
+        updated_at: "2026-07-17T18:20:02.000Z"
+      } satisfies IdempotencyRecord;
+      const foreignText = `${JSON.stringify(foreign)}\n`;
+      const writerFailure = new Error(`Issue79 rebound service writer ${surface}`);
+      const parentPath = dirname(recordPath);
+      const retainedParentPath = `${parentPath}.issue79-service-retained`;
+      const retainedRecordPath = join(retainedParentPath, basename(recordPath));
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let swapped = false;
+
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            beforeCleanupPermitIdentityResolution: ({ path }) => {
+              if (path === recordPath) throw writerFailure;
+            },
+            afterCleanupPermitPinnedHandleClosed: async ({ path }) => {
+              if (path !== recordPath || swapped) return;
+              swapped = true;
+              await rename(parentPath, retainedParentPath);
+              await mkdir(parentPath, { mode: 0o700 });
+              await writeFile(recordPath, foreignText, {
+                flag: "wx",
+                mode: 0o600
+              });
+            }
+          },
+          () =>
+            surface === "direct"
+              ? service.recoverFailedRecordAfterRollback({
+                  scope: "task",
+                  key: rawKey,
+                  requestDigest
+                })
+              : service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+        )
+      );
+
+      expect(swapped).toBe(true);
+      expect(semanticPrimaryError(failure)).toBe(writerFailure);
+      expect(
+        findErrorNode(
+          failure,
+          (error) =>
+            error instanceof TaskServiceError &&
+            error.message ===
+              "Completed idempotency result changed before exact invalidation."
+        )
+      ).toBeUndefined();
+      expect(await readFile(retainedRecordPath, "utf8")).toBe(originalText);
+      expect(await readFile(recordPath, "utf8")).toBe(foreignText);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
   });
 
   test("Issue79 failed rollback recovery preserves a completed generation installed after deciding A", async () => {
