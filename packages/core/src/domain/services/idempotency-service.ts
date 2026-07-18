@@ -14,7 +14,7 @@ import { preserveTaskServiceErrorCompensationCompatibility } from "./task-servic
 import {
   WorkspaceRecordConditionalDeleteError,
   cancelWorkspaceRecordCleanupPermit,
-  conditionalDeleteJsonRecordWithCleanupPermit,
+  conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement,
   createJsonRecordIfAbsent,
   createJsonRecordIfAbsentWithCleanupPermit,
   observeJsonRecordForCleanup,
@@ -2017,12 +2017,6 @@ async function acquireIdempotencyTransitionGuard(
         },
         recoverTerminalRelease: async (assertDurablyFailed) =>
           await recoverOwnedIdempotencyTransitionGuardAfterTerminalReleaseFailure(
-            workspaceRoot,
-            scope,
-            key,
-            guardPath,
-            evidenceRef,
-            created.record,
             assertDurablyFailed
           )
       };
@@ -2167,57 +2161,9 @@ async function removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
 }
 
 async function recoverOwnedIdempotencyTransitionGuardAfterTerminalReleaseFailure(
-  workspaceRoot: string,
-  scope: IdempotencyScope,
-  key: string,
-  guardPath: string,
-  evidenceRef: string,
-  expected: IdempotencyTransitionGuard,
   assertDurablyFailed: () => Promise<void>
 ): Promise<void> {
-  let observation: WorkspaceJsonRecordCleanupObservation<IdempotencyTransitionGuard>;
-  try {
-    observation = await observeJsonRecordForCleanup(
-      guardPath,
-      evidenceRef,
-      IdempotencyTransitionGuardSchema
-    );
-  } catch (error) {
-    if (isRetryableWorkspaceRecordAuthorityContention(error)) {
-      throw transitionGuardBusyError(scope, key, "fail");
-    }
-    throw error;
-  }
-  if (observation.status === "missing") return;
-
-  await withOwnedIdempotencyTransitionObservation(
-    observation,
-    guardPath,
-    evidenceRef,
-    async (consume) => {
-      if (
-        observation.status !== "record" ||
-        !isSameIdempotencyTransitionGuard(observation.record, expected)
-      ) {
-        return;
-      }
-
-      const cleanupLock = await acquireIdempotencyTransitionCleanupLock(
-        workspaceRoot,
-        scope,
-        key,
-        evidenceRef
-      );
-      if (cleanupLock.status === "busy") {
-        throw transitionGuardBusyError(scope, key, "fail");
-      }
-
-      await runWithIdempotencyRelease(async () => {
-        await assertDurablyFailed();
-        await consume();
-      }, cleanupLock.release);
-    }
-  );
+  await assertDurablyFailed();
 }
 
 function assertValidIdempotencyTransitionGuardShape(
@@ -2314,19 +2260,20 @@ async function consumeObservedIdempotencyTransitionArtifact(
 ): Promise<boolean> {
   if (observation.status === "schema_threw") throw observation.error;
   try {
-    const result = await conditionalDeleteJsonRecordWithCleanupPermit(
-      observation.cleanupPermit,
-      path,
-      evidenceRef,
-      IdempotencyTransitionGuardSchema,
-      observation.status === "record"
-        ? {
-            kind: "record",
-            expected: observation.record,
-            matches: () => true
-          }
-        : { kind: "malformed" }
-    );
+    const result =
+      await conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+        observation.cleanupPermit,
+        path,
+        evidenceRef,
+        IdempotencyTransitionGuardSchema,
+        observation.status === "record"
+          ? {
+              kind: "record",
+              expected: observation.record,
+              matches: () => true
+            }
+          : { kind: "malformed" }
+      );
     return result.status !== "condition_not_met";
   } catch (error) {
     if (error instanceof WorkspaceRecordConditionalDeleteError) {
@@ -2429,7 +2376,7 @@ async function releaseOwnedIdempotencyTransitionArtifact(
   expected: IdempotencyTransitionGuard
 ): Promise<void> {
   try {
-    await conditionalDeleteJsonRecordWithCleanupPermit(
+    await conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
       cleanupPermit,
       path,
       evidenceRef,

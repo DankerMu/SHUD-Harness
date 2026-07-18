@@ -760,6 +760,9 @@ export interface WorkspaceRecordCompensationTestHooks {
   beforeTerminalAuthorityNamespaceRemovalSyscall?: (
     input: Readonly<{ path: string }>
   ) => Promise<void> | void;
+  beforeExactFailureSettlement?: (
+    input: Readonly<{ path: string }>
+  ) => Promise<void> | void;
 }
 
 const compensationTestHookStorage =
@@ -2005,6 +2008,13 @@ export type ConditionalDeleteJsonRecordCondition<T> =
 export type ConditionalDeleteJsonRecordResult =
   { status: "deleted" } | { status: "missing" } | { status: "condition_not_met" };
 
+export type ConditionalDeleteJsonRecordWithExactFailureSettlementResult =
+  | ConditionalDeleteJsonRecordResult
+  | {
+      readonly status: "recovered";
+      readonly settlement: "deleted" | "missing" | "superseded";
+    };
+
 export async function conditionalDeleteJsonRecordWithCleanupPermit<T>(
   permit: WorkspaceRecordCleanupPermit,
   path: string,
@@ -2022,6 +2032,42 @@ export async function conditionalDeleteJsonRecordWithCleanupPermit<T>(
         condition
       )
   );
+}
+
+export async function conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement<T>(
+  permit: WorkspaceRecordCleanupPermit,
+  path: string,
+  evidenceRef: string,
+  schema: z.ZodType<T>,
+  condition: ConditionalDeleteJsonRecordCondition<T>
+): Promise<ConditionalDeleteJsonRecordWithExactFailureSettlementResult> {
+  let failureBeforeBindingRelease: PresentFailure | undefined;
+  try {
+    return await runWithRecordDirectoryBindingOperation(
+      async () =>
+        await conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlementWithDirectoryBindingOperation(
+          permit,
+          path,
+          evidenceRef,
+          schema,
+          condition,
+          (failure) => {
+            failureBeforeBindingRelease = { value: failure };
+          }
+        )
+    );
+  } catch (error) {
+    if (
+      failureBeforeBindingRelease !== undefined &&
+      !Object.is(failureBeforeBindingRelease.value, error)
+    ) {
+      throw preserveWorkspacePrimaryError(
+        failureBeforeBindingRelease.value,
+        distinctFailureOccurrences(failureBeforeBindingRelease.value, [error])
+      );
+    }
+    throw error;
+  }
 }
 
 async function conditionalDeleteJsonRecordWithCleanupPermitAndDirectoryBindingOperation<T>(
@@ -2079,6 +2125,167 @@ async function conditionalDeleteJsonRecordWithCleanupPermitAndDirectoryBindingOp
   } finally {
     await authorityLease.release();
   }
+}
+
+async function conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlementWithDirectoryBindingOperation<T>(
+  permit: WorkspaceRecordCleanupPermit,
+  path: string,
+  evidenceRef: string,
+  schema: z.ZodType<T>,
+  condition: ConditionalDeleteJsonRecordCondition<T>,
+  retainFailureThroughBindingRelease: (failure: unknown) => void
+): Promise<ConditionalDeleteJsonRecordWithExactFailureSettlementResult> {
+  const hooks = publicationHookStorage.getStore();
+  let authorityLease: RecordAuthorityLease;
+  try {
+    authorityLease = await acquireRecordAuthorityWithCleanupPermit(
+      permit,
+      path,
+      evidenceRef,
+      hooks
+    );
+  } catch (error) {
+    throw new WorkspaceRecordConditionalDeleteError(
+      "pre_mutation",
+      "permit_admission",
+      error
+    );
+  }
+
+  let restoredPathnameBinding: CanonicalPathnameBinding | undefined;
+  const mutationState = {
+    started: false,
+    onExactPublicRestore: (binding: CanonicalPathnameBinding) => {
+      restoredPathnameBinding = binding;
+    }
+  };
+  let initialResult: ConditionalDeleteJsonRecordResult | undefined;
+  let initialFailure: WorkspaceRecordConditionalDeleteError | undefined;
+  let recoveredResult:
+    | Extract<
+        ConditionalDeleteJsonRecordWithExactFailureSettlementResult,
+        { status: "recovered" }
+      >
+    | undefined;
+  let settlementFailure: PresentFailure | undefined;
+
+  try {
+    try {
+      const admittedParent = authorityLease.expectedCleanupParent;
+      if (!admittedParent || !authorityLease.validateCleanupGeneration) {
+        throw publicationStateError(evidenceRef);
+      }
+      await authorityLease.validateCleanupGeneration();
+      if (hooks?.afterAuthorityLeaseAcquired) {
+        await runAuthorityMutatingCallbackBoundary(
+          () =>
+            hooks.afterAuthorityLeaseAcquired!(
+              Object.freeze({ operation: "delete" })
+            ),
+          authorityLease.validateCleanupGeneration
+        );
+      }
+      initialResult = await conditionalDeleteJsonRecordUnderAuthority(
+        path,
+        evidenceRef,
+        schema,
+        condition,
+        hooks,
+        mutationState,
+        authorityLease.expectedCleanupGeneration,
+        undefined,
+        { status: "existing", identity: admittedParent.identity },
+        authorityLease.expectedCleanupPathnameBinding
+      );
+    } catch (error) {
+      initialFailure = new WorkspaceRecordConditionalDeleteError(
+        mutationState.started ? "post_mutation" : "pre_mutation",
+        "operation",
+        error
+      );
+    }
+
+    if (initialFailure?.mutationPhase === "post_mutation") {
+      try {
+        const expected = await prepareWorkspaceRecordCleanupPermitExactFailureSettlement(
+          permit,
+          path,
+          evidenceRef,
+          restoredPathnameBinding
+        );
+        await compensationTestHookStorage.getStore()?.beforeExactFailureSettlement?.(
+          Object.freeze({ path })
+        );
+        const settlement =
+          await removeWorkspaceRecordGenerationUnderCleanupPermitAuthority(
+            permit,
+            expected,
+            "exact_observation"
+          );
+        recoveredResult = Object.freeze({
+          status: "recovered" as const,
+          settlement: settlement.status
+        });
+      } catch (error) {
+        settlementFailure = { value: error };
+      }
+    }
+  } finally {
+    let releaseFailure: PresentFailure | undefined;
+    try {
+      await authorityLease.release();
+    } catch (error) {
+      releaseFailure = { value: error };
+    }
+
+    if (initialFailure) {
+      if (
+        initialFailure.mutationPhase === "post_mutation" &&
+        recoveredResult &&
+        releaseFailure === undefined
+      ) {
+        retainFailureThroughBindingRelease(initialFailure);
+        return recoveredResult;
+      }
+      const laterFailures = distinctFailureOccurrences(
+        initialFailure,
+        [
+          ...(settlementFailure ? [settlementFailure.value] : []),
+          ...(releaseFailure ? [releaseFailure.value] : [])
+        ]
+      );
+      const preservedFailure = preserveWorkspacePrimaryError(
+        initialFailure,
+        laterFailures
+      );
+      retainFailureThroughBindingRelease(preservedFailure);
+      throw preservedFailure;
+    }
+    if (releaseFailure !== undefined) {
+      retainFailureThroughBindingRelease(releaseFailure.value);
+      throw releaseFailure.value;
+    }
+  }
+
+  if (!initialResult) throw publicationStateError(evidenceRef);
+  return initialResult;
+}
+
+function distinctFailureOccurrences(
+  primary: unknown,
+  failures: readonly unknown[]
+): unknown[] {
+  const distinct: unknown[] = [];
+  for (const failure of failures) {
+    if (
+      Object.is(failure, primary) ||
+      distinct.some((existing) => Object.is(existing, failure))
+    ) {
+      continue;
+    }
+    distinct.push(failure);
+  }
+  return distinct;
 }
 
 interface WorkspaceRecordCleanupPermitGenerationSnapshot {
@@ -2154,6 +2361,123 @@ function snapshotWorkspaceRecordCleanupPermitGeneration(
     state.status !== "outstanding" ||
     !state.capacityActive ||
     state.publicPath !== path ||
+    state.evidenceRef !== evidenceRef ||
+    !state.parentPath ||
+    !state.parentIdentity ||
+    !state.bindingTimeParentSnapshot ||
+    state.parentPath !== state.bindingTimeParentSnapshot.path ||
+    !workspaceRecordPhysicalIdentityMatches(
+      state.parentIdentity,
+      state.bindingTimeParentSnapshot
+    ) ||
+    !state.generationExpectation ||
+    !state.pathnameBinding
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+
+  return Object.freeze({
+    publicPath: state.publicPath,
+    evidenceRef: state.evidenceRef,
+    parentIdentity: state.parentIdentity,
+    bindingTimeParentSnapshot: Object.freeze({
+      path: state.bindingTimeParentSnapshot.path,
+      dev: state.bindingTimeParentSnapshot.dev,
+      ino: state.bindingTimeParentSnapshot.ino,
+      ctimeNs: state.bindingTimeParentSnapshot.ctimeNs,
+      mtimeNs: state.bindingTimeParentSnapshot.mtimeNs
+    }),
+    generation: Object.freeze({
+      identity: Object.freeze({
+        dev: state.generationExpectation.identity.dev,
+        ino: state.generationExpectation.identity.ino
+      }),
+      bytes: Buffer.from(state.generationExpectation.bytes),
+      mode: state.generationExpectation.mode,
+      nlink: state.generationExpectation.nlink
+    }),
+    pathnameBinding: Object.freeze({
+      identity: Object.freeze({
+        dev: state.pathnameBinding.identity.dev,
+        ino: state.pathnameBinding.identity.ino
+      }),
+      ctimeNs: state.pathnameBinding.ctimeNs,
+      mtimeNs: state.pathnameBinding.mtimeNs
+    })
+  });
+}
+
+async function prepareWorkspaceRecordCleanupPermitExactFailureSettlement(
+  permit: WorkspaceRecordCleanupPermit,
+  path: string,
+  evidenceRef: string,
+  restoredPathnameBinding: CanonicalPathnameBinding | undefined
+): Promise<WorkspaceRecordCleanupPermitGenerationSnapshot> {
+  const state = cleanupPermitState.get(permit);
+  const parentPath = state?.parentPath;
+  const parentIdentity = state?.parentIdentity;
+  if (
+    !state ||
+    state.status !== "claimed" ||
+    !state.capacityActive ||
+    state.publicPath !== resolve(path) ||
+    state.evidenceRef !== evidenceRef ||
+    !parentPath ||
+    !parentIdentity ||
+    !state.parentBindingRelease ||
+    !state.generation ||
+    !state.generationExpectation ||
+    !state.pathnameBinding ||
+    !state.pinnedFile ||
+    state.pinnedFileClosed ||
+    (restoredPathnameBinding !== undefined &&
+      !workspaceRecordPhysicalIdentityMatches(
+        restoredPathnameBinding.identity,
+        state.generation
+      ))
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+
+  await runWithRecordDirectoryMutationLocks([parentIdentity], async () => {
+    await assertRecordDirectoryIdentityNow(parentPath, parentIdentity, evidenceRef);
+    state.bindingTimeParentSnapshot = Object.freeze({
+      path: parentPath,
+      dev: parentIdentity.dev,
+      ino: parentIdentity.ino,
+      ctimeNs: parentIdentity.ctimeNs,
+      mtimeNs: parentIdentity.mtimeNs
+    });
+    if (restoredPathnameBinding) {
+      state.pathnameBinding = Object.freeze({
+        identity: Object.freeze({
+          dev: restoredPathnameBinding.identity.dev,
+          ino: restoredPathnameBinding.identity.ino
+        }),
+        ctimeNs: restoredPathnameBinding.ctimeNs,
+        mtimeNs: restoredPathnameBinding.mtimeNs
+      });
+    }
+  });
+
+  return snapshotClaimedWorkspaceRecordCleanupPermitGeneration(
+    permit,
+    path,
+    evidenceRef
+  );
+}
+
+function snapshotClaimedWorkspaceRecordCleanupPermitGeneration(
+  permit: WorkspaceRecordCleanupPermit,
+  path: string,
+  evidenceRef: string
+): WorkspaceRecordCleanupPermitGenerationSnapshot {
+  const state = cleanupPermitState.get(permit);
+  if (
+    !state ||
+    state.status !== "claimed" ||
+    !state.capacityActive ||
+    state.publicPath !== resolve(path) ||
     state.evidenceRef !== evidenceRef ||
     !state.parentPath ||
     !state.parentIdentity ||
@@ -2305,8 +2629,28 @@ async function classifyWorkspaceRecordCleanupPermitGenerationNow(
   );
   const parentPath = expected.bindingTimeParentSnapshot.path;
   const parentBefore = await readSafeDirectoryLeafEntry(parentPath);
-  if (!workspaceRecordCleanupSnapshotParentMatchesStat(parentBefore, expected)) {
+  if (
+    !parentBefore ||
+    !recordDirectoryPathnameBindingMatchesPath(
+      parentPath,
+      expected.parentIdentity
+    ) ||
+    expected.parentIdentity.state !== "active" ||
+    !workspaceRecordPhysicalIdentityMatches(
+      parentBefore,
+      expected.bindingTimeParentSnapshot
+    )
+  ) {
     return { status: "superseded" };
+  }
+  if (!workspaceRecordCleanupSnapshotParentMatchesStat(parentBefore, expected)) {
+    const current = await captureCanonicalAuthorityBaseline(
+      expected.publicPath,
+      expected.evidenceRef
+    );
+    return current.status === "absent"
+      ? { status: "missing" }
+      : { status: "superseded" };
   }
   let exactObservation = false;
   try {
@@ -2982,6 +3326,9 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   mutationState?: {
     started: boolean;
     deletedGeneration?: WorkspaceRecordPhysicalIdentity;
+    onExactPublicRestore?: (
+      binding: CanonicalPathnameBinding
+    ) => Promise<void> | void;
   },
   expectedGeneration?: OwnedGenerationExpectation,
   ordinaryCanonicalBaseline?: CanonicalAuthorityBaseline,
@@ -3305,7 +3652,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       evidenceRef,
       "conditional_delete",
       namespaceCleanupAttempted,
-      undefined,
+      mutationState?.onExactPublicRestore,
       modeNormalizationCommitted ? admittedPublicGeneration : undefined
     );
     const primary = preserveWorkspacePrimaryError(error, compensationErrors);
@@ -6326,7 +6673,9 @@ async function removeOwnedPathWithoutHooks(
   expectedPathnameBinding?: CanonicalPathnameBinding,
   expectedPathnameLinkCount = 1n,
   onPathnameBindingDrift?: () => void,
-  onExactPublicRestore?: (binding: CanonicalPathnameBinding) => void
+  onExactPublicRestore?: (
+    binding: CanonicalPathnameBinding
+  ) => Promise<void> | void
 ): Promise<void> {
   const generationExpectation = await captureOwnedGenerationExpectation(
     path,
@@ -6496,7 +6845,9 @@ async function compensateOwnedIsolatedPath(
   evidenceRef: string,
   site: WorkspaceRecordPostIsolationSite,
   namespaceCleanupAlreadyAttempted = false,
-  onExactPublicRestore?: (binding: CanonicalPathnameBinding) => void,
+  onExactPublicRestore?: (
+    binding: CanonicalPathnameBinding
+  ) => Promise<void> | void,
   publicRestoreGeneration?: OwnedGenerationExpectation
 ): Promise<unknown[]> {
   const compensationErrors: unknown[] = [];
@@ -6549,7 +6900,7 @@ async function compensateOwnedIsolatedPath(
           evidenceRef,
           site
         );
-        onExactPublicRestore?.(restoredBinding);
+        await onExactPublicRestore?.(restoredBinding);
       } catch (error) {
         compensationErrors.push(error);
       }

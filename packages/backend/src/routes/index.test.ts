@@ -45,6 +45,7 @@ import {
   type ApiRequestLogLine
 } from "../middleware";
 import {
+  runWithWorkspaceRecordCompensationTestHooks,
   runWithWorkspaceRecordPublicationHooks,
   workspaceRecordAuthorityDiagnosticsForTest,
   workspaceRecordDirectoryBindingDiagnosticsForTest,
@@ -7522,7 +7523,7 @@ describe("backend workspace and health routes", () => {
     60_000
   );
 
-  test("S34-P62-01 guard-release failure settles every transported rejected-decision resource on the malformed arm", async () => {
+  test("S34-P62-01 unrecoverable guard-release and exact-settlement failure settles every transported rejected-decision resource on the malformed arm", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const idempotencyKey = "task:create:s34-guard-release-malformed";
@@ -7552,15 +7553,21 @@ describe("backend workspace and health routes", () => {
     await writeFile(snapshotPath, "{", { flag: "wx" });
     const guardPath = join(recordDirectory, `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`);
     const releaseFailure = new Error("S34 injected guard release failure.");
+    const settlementFailure = new Error("S34 injected guard exact-settlement failure.");
     let releaseInjectionArmed = true;
     let decisionFulfilled = false;
     let releaseInjections = 0;
+    let settlementInjections = 0;
+    let routedError: unknown;
     const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
     const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
     let cacheDiagnostics: { slots: number; activeClaims: number } | undefined;
     const app = createBackendApi({
       workspaceRoot,
       taskIdFactory: () => "TASK-s34-guard-release-malformed-recovered",
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
       taskServiceFactory: (options) =>
         createTaskCardService({
           ...options,
@@ -7574,24 +7581,34 @@ describe("backend workspace and health routes", () => {
           ...service,
           consumeCompletedRecord: async (input, consume) => {
             decisionFulfilled = false;
-            return await runWithWorkspaceRecordPublicationHooks(
+            return await runWithWorkspaceRecordCompensationTestHooks(
               {
-                // The guard-path unlink after the fulfilled rejected decision
-                // is the transition-guard release; failing it post-quarantine
-                // rejects guard.release itself while the guard file is gone.
-                beforeAuthorityOwnedUnlink: ({ path, operation }) => {
-                  if (!releaseInjectionArmed || !decisionFulfilled) return;
-                  if (operation !== "conditional_delete" || path !== guardPath) return;
-                  releaseInjections += 1;
-                  if (releaseInjections === 1) throw releaseFailure;
+                beforeExactFailureSettlement: ({ path }) => {
+                  if (path !== guardPath) return;
+                  settlementInjections += 1;
+                  throw settlementFailure;
                 }
               },
               () =>
-                service.consumeCompletedRecord(input, async (record) => {
-                  const decision = await consume(record);
-                  decisionFulfilled = true;
-                  return decision;
-                })
+                runWithWorkspaceRecordPublicationHooks(
+                  {
+                    // The guard-path unlink after the fulfilled rejected decision
+                    // is the transition-guard release. Its post-mutation failure
+                    // remains unrecoverable only when exact settlement also fails.
+                    beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+                      if (!releaseInjectionArmed || !decisionFulfilled) return;
+                      if (operation !== "conditional_delete" || path !== guardPath) return;
+                      releaseInjections += 1;
+                      if (releaseInjections === 1) throw releaseFailure;
+                    }
+                  },
+                  () =>
+                    service.consumeCompletedRecord(input, async (record) => {
+                      const decision = await consume(record);
+                      decisionFulfilled = true;
+                      return decision;
+                    })
+                )
             );
           }
         };
@@ -7600,7 +7617,13 @@ describe("backend workspace and health routes", () => {
 
     const first = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
     expect(first.status).toBe(500);
-    expect(releaseInjections).toBeGreaterThanOrEqual(1);
+    expect(releaseInjections).toBe(1);
+    expect(settlementInjections).toBe(1);
+    const releasePrimary = semanticPrimaryError(semanticPrimaryError(routedError)?.cause);
+    expect(errorGraphContainsIdentity(releasePrimary, releaseFailure)).toBe(true);
+    expect(errorGraphContainsIdentity(releasePrimary, settlementFailure)).toBe(false);
+    expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
+    expect(countErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
     // Every transported resource is settled on the guard-release throw window:
     // record + snapshot permits, mutexes, pinned fds, and the cache claim.
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
@@ -7633,7 +7656,7 @@ describe("backend workspace and health routes", () => {
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
-  test("S34-P62-01 guard-release failure settles the missing-arm cache claim without per-retry growth", async () => {
+  test("S34-P62-01 unrecoverable guard-release and exact-settlement failure settles the missing-arm cache claim without per-retry growth", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const idempotencyKey = "task:create:s34-guard-release-missing";
@@ -7658,15 +7681,23 @@ describe("backend workspace and health routes", () => {
     );
     const guardPath = join(recordDirectory, `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`);
     const releaseFailure = new Error("S34 injected missing-arm guard release failure.");
+    const settlementFailure = new Error(
+      "S34 injected missing-arm guard exact-settlement failure."
+    );
     let releaseInjectionArmed = true;
     let decisionFulfilled = false;
     let releaseInjections = 0;
+    let settlementInjections = 0;
+    let routedError: unknown;
     const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
     const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
     let cacheDiagnostics: { slots: number; activeClaims: number } | undefined;
     const app = createBackendApi({
       workspaceRoot,
       taskIdFactory: () => "TASK-s34-guard-release-missing-recovered",
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
       taskServiceFactory: (options) =>
         createTaskCardService({
           ...options,
@@ -7682,22 +7713,32 @@ describe("backend workspace and health routes", () => {
             decisionFulfilled = false;
             const armedAtEntry = releaseInjectionArmed;
             let thrownThisCall = false;
-            return await runWithWorkspaceRecordPublicationHooks(
+            return await runWithWorkspaceRecordCompensationTestHooks(
               {
-                beforeAuthorityOwnedUnlink: ({ path, operation }) => {
-                  if (!armedAtEntry || !decisionFulfilled || thrownThisCall) return;
-                  if (operation !== "conditional_delete" || path !== guardPath) return;
-                  thrownThisCall = true;
-                  releaseInjections += 1;
-                  throw releaseFailure;
+                beforeExactFailureSettlement: ({ path }) => {
+                  if (path !== guardPath) return;
+                  settlementInjections += 1;
+                  throw settlementFailure;
                 }
               },
               () =>
-                service.consumeCompletedRecord(input, async (record) => {
-                  const decision = await consume(record);
-                  decisionFulfilled = true;
-                  return decision;
-                })
+                runWithWorkspaceRecordPublicationHooks(
+                  {
+                    beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+                      if (!armedAtEntry || !decisionFulfilled || thrownThisCall) return;
+                      if (operation !== "conditional_delete" || path !== guardPath) return;
+                      thrownThisCall = true;
+                      releaseInjections += 1;
+                      throw releaseFailure;
+                    }
+                  },
+                  () =>
+                    service.consumeCompletedRecord(input, async (record) => {
+                      const decision = await consume(record);
+                      decisionFulfilled = true;
+                      return decision;
+                    })
+                )
             );
           }
         };
@@ -7714,6 +7755,13 @@ describe("backend workspace and health routes", () => {
       expect(failed.status).toBe(500);
       expect(cacheDiagnostics).toEqual({ slots: 0, activeClaims: 0 });
       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(releaseInjections).toBe(attempt + 1);
+      expect(settlementInjections).toBe(attempt + 1);
+      const releasePrimary = semanticPrimaryError(semanticPrimaryError(routedError)?.cause);
+      expect(errorGraphContainsIdentity(releasePrimary, releaseFailure)).toBe(true);
+      expect(errorGraphContainsIdentity(releasePrimary, settlementFailure)).toBe(false);
+      expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
+      expect(countErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
       await unlink(guardPath);
     }
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);

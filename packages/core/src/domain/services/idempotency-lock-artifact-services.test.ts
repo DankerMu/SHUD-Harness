@@ -67,6 +67,7 @@ import {
   MAX_SERVICE_RECORD_BYTES,
   cancelWorkspaceRecordCleanupPermit,
   conditionalDeleteJsonRecord,
+  conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement,
   conditionalDeleteJsonRecordWithCleanupPermit,
   conditionalDeleteObservedJsonRecordWithCleanupPermit,
   createJsonRecordIfAbsent,
@@ -6472,6 +6473,378 @@ describe("idempotency, lock, and artifact services", () => {
         matches: (current, expected) => current.id === expected.id
       })
     ).toEqual({ status: "deleted" });
+  });
+
+  test("opt-in cleanup-permit deletion settles only restored exact A and preserves converged successors", async () => {
+    for (const outcome of [
+      "exact",
+      "missing",
+      "different_fields",
+      "same_fields_new_inode",
+      "same_inode_byte_drift"
+    ] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string(), revision: z.number().int() });
+      const record = { id: `exact-settlement-${outcome}`, revision: 1 };
+      const successor = outcome === "different_fields"
+        ? { ...record, revision: 2 }
+        : record;
+      const evidenceRef = `conditional-delete.exact-settlement.${outcome}`;
+      const directorySegments = ["conditional-delete-exact-settlement", outcome] as const;
+      const fileName = "record.json";
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const initialMarker = new Error(`initial post-mutation ${outcome}`);
+      const closeTracker = createCleanupPermitCloseTracker([path]);
+      const created = await runWithWorkspaceRecordPublicationHooks(
+        { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
+        () =>
+          createJsonRecordIfAbsentWithCleanupPermit(
+            workspaceRoot,
+            directorySegments,
+            fileName,
+            record,
+            evidenceRef,
+            schema
+          )
+      );
+      if (created.status !== "created") throw new Error("Expected exact-settlement fixture.");
+      const original = await readFileWithIdentity(path);
+      let successorIdentity: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
+      let settlementHookCount = 0;
+
+      const result = await runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterOwnedPathIsolation: ({ site }) => {
+            if (site === "conditional_delete") throw initialMarker;
+          },
+          beforeExactFailureSettlement: async ({ path: settlementPath }) => {
+            if (settlementPath !== path) return;
+            settlementHookCount += 1;
+            if (outcome === "exact") return;
+            if (outcome === "missing") {
+              await unlink(path);
+              return;
+            }
+            if (outcome === "same_inode_byte_drift") {
+              await replaceFileBytesInPlaceWithMtimeAdvance(
+                path,
+                Buffer.from(`${JSON.stringify(successor, null, 2)}\n`)
+              );
+              successorIdentity = await readFileWithIdentity(path);
+              return;
+            }
+            await unlink(path);
+            await writeFile(path, `${JSON.stringify(successor, null, 2)}\n`, {
+              flag: "wx",
+              mode: 0o600
+            });
+            successorIdentity = await readFileWithIdentity(path);
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+            created.cleanupPermit,
+            path,
+            evidenceRef,
+            schema,
+            {
+              kind: "record",
+              expected: record,
+              matches: (current, expected) => current.id === expected.id
+            }
+          )
+      );
+      await Promise.race([
+        closeTracker.waitForAll(),
+        timeoutAfter(1_000, `${outcome} exact-settlement permit did not close`)
+      ]);
+
+      expect(result).toEqual({
+        status: "recovered",
+        settlement: outcome === "exact"
+          ? "deleted"
+          : outcome === "missing"
+            ? "missing"
+            : "superseded"
+      });
+      expect(settlementHookCount).toBe(1);
+      if (outcome === "exact" || outcome === "missing") {
+        await expectPathMissing(path);
+      } else {
+        expect(successorIdentity).toBeDefined();
+        expect(await readFileWithIdentity(path)).toEqual(successorIdentity!);
+        expect(await readFile(path)).toEqual(
+          Buffer.from(`${JSON.stringify(successor, null, 2)}\n`)
+        );
+        if (outcome === "same_inode_byte_drift") {
+          expect(workspaceRecordPhysicalIdentityMatches(successorIdentity!, original)).toBe(true);
+        } else {
+          expect(workspaceRecordPhysicalIdentityMatches(successorIdentity!, original)).toBe(false);
+        }
+      }
+      expect(closeTracker.count(path)).toBe(1);
+      await expectFileDescriptorClosed(closeTracker.descriptors(path)[0]!);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("opt-in exact failure settlement runs once only after post-mutation failure", async () => {
+    for (const initial of ["deleted", "condition_not_met"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `exact-settlement-terminal-${initial}` };
+      const evidenceRef = `conditional-delete.exact-settlement.terminal.${initial}`;
+      const directorySegments = ["conditional-delete-exact-settlement-terminal", initial] as const;
+      const fileName = "record.json";
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, fileName],
+        evidenceRef
+      );
+      const created = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        directorySegments,
+        fileName,
+        record,
+        evidenceRef,
+        schema
+      );
+      if (created.status !== "created") throw new Error("Expected terminal fixture.");
+      let settlementHookCount = 0;
+
+      const result = await runWithWorkspaceRecordCompensationTestHooks(
+        {
+          beforeExactFailureSettlement: () => {
+            settlementHookCount += 1;
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+            created.cleanupPermit,
+            path,
+            evidenceRef,
+            schema,
+            {
+              kind: "record",
+              expected: record,
+              matches: () => initial === "deleted"
+            }
+          )
+      );
+
+      expect(result).toEqual({ status: initial });
+      expect(settlementHookCount).toBe(0);
+      if (initial === "deleted") {
+        await writeFile(path, `${JSON.stringify(record)}\n`, { flag: "wx", mode: 0o600 });
+        expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(record);
+      } else {
+        expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(record);
+      }
+      const beforeReuse = await readFileWithIdentity(path);
+      const reused = await captureConditionalDeleteError(() =>
+        conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+          created.cleanupPermit,
+          path,
+          evidenceRef,
+          schema,
+          { kind: "record", expected: record, matches: () => true }
+        )
+      );
+      expect(reused.mutationPhase).toBe("pre_mutation");
+      expect(reused.failureStage).toBe("permit_admission");
+      expect(await readFileWithIdentity(path)).toEqual(beforeReuse);
+    }
+  });
+
+  test("opt-in exact settlement failure keeps the initial marker primary and settles authority once", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "exact-settlement-failure" };
+    const evidenceRef = "conditional-delete.exact-settlement.failure";
+    const directorySegments = ["conditional-delete-exact-settlement-failure"] as const;
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "record.json"],
+      evidenceRef
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const initialMarker = new Error("initial post-mutation marker");
+    const settlementMarker = new Error("exact settlement marker");
+    const closeTracker = createCleanupPermitCloseTracker([path]);
+    const created = await runWithWorkspaceRecordPublicationHooks(
+      { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
+      () =>
+        createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          directorySegments,
+          "record.json",
+          record,
+          evidenceRef,
+          schema
+        )
+    );
+    if (created.status !== "created") throw new Error("Expected settlement-failure fixture.");
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterOwnedPathIsolation: ({ site }) => {
+            if (site === "conditional_delete") throw initialMarker;
+          },
+          beforeExactFailureSettlement: () => {
+            throw settlementMarker;
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+            created.cleanupPermit,
+            path,
+            evidenceRef,
+            schema,
+            { kind: "record", expected: record, matches: () => true }
+          )
+      )
+    );
+    await Promise.race([
+      closeTracker.waitForAll(),
+      timeoutAfter(1_000, "failed exact-settlement permit did not close")
+    ]);
+
+    expect(semanticPrimaryError(failure)).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+    const initialFailure = semanticPrimaryError(failure) as WorkspaceRecordConditionalDeleteError;
+    expect(initialFailure.mutationPhase).toBe("post_mutation");
+    expect(errorTreeContains(initialFailure, initialMarker)).toBe(true);
+    expect(countErrorNodes(failure, (error) => error === settlementMarker)).toBe(1);
+    expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(record);
+    expect(closeTracker.count(path)).toBe(1);
+    await expectFileDescriptorClosed(closeTracker.descriptors(path)[0]!);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("completeRecord and failRecord recover restored transition artifacts without surfacing the initial marker", async () => {
+    for (const transition of ["complete", "fail"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:exact-settlement-${transition}`;
+      const requestDigest = `digest-exact-settlement-${transition}`;
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+      const now = new Date("2026-07-18T12:00:00.000Z");
+      const service = createIdempotencyRecordService({ workspaceRoot, now: () => now });
+      const begin = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const initialMarker = new Error(`public ${transition} post-mutation marker`);
+      const closeTracker = createCleanupPermitCloseTracker([guardPath, cleanupLockPath]);
+      let injected = false;
+
+      const result = await runWithWorkspaceRecordPublicationHooks(
+        { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
+        () =>
+          runWithWorkspaceRecordCompensationTestHooks(
+            {
+              afterOwnedPathIsolation: ({ path, site }) => {
+                if (!injected && path === guardPath && site === "conditional_delete") {
+                  injected = true;
+                  throw initialMarker;
+                }
+              }
+            },
+            () => transition === "complete"
+              ? service.completeRecord({
+                  scope: "task",
+                  key: rawKey,
+                  requestDigest,
+                  resultRef: `TASK-exact-settlement-${transition}`
+                })
+              : service.failRecord({ scope: "task", key: rawKey, requestDigest })
+          )
+      );
+      await Promise.race([
+        closeTracker.waitForAll(),
+        timeoutAfter(1_000, `${transition} exact-settlement permits did not close`)
+      ]);
+
+      expect(begin.status).toBe("acquired");
+      expect(injected).toBe(true);
+      expect(result).toMatchObject({
+        key: rawKey,
+        scope: "task",
+        request_digest: requestDigest,
+        created_at: begin.record.created_at,
+        updated_at: now.toISOString(),
+        status: transition === "complete" ? "completed" : "failed"
+      });
+      if (transition === "complete") {
+        expect(result.result_ref).toBe(`TASK-exact-settlement-${transition}`);
+      } else {
+        expect(result.result_ref).toBeUndefined();
+      }
+      await expectPathMissing(guardPath);
+      await expectPathMissing(cleanupLockPath);
+      expect(closeTracker.count(guardPath)).toBe(1);
+      expect(closeTracker.count(cleanupLockPath)).toBe(1);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("stale observed guard consumption recovers restored exact A before reacquisition", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const rawKey = "task:create:exact-settlement-stale-observed";
+    const requestDigest = "digest-exact-settlement-stale-observed";
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const failed = await service.failRecord({ scope: "task", key: rawKey, requestDigest });
+    const staleGuard = {
+      guard_id: "exact-settlement-stale-observed",
+      owner_pid: 9_999_999,
+      acquired_at_ms: Date.now() - 31_000,
+      acquired_at: "2026-07-18T11:00:00.000Z"
+    };
+    await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, {
+      flag: "wx",
+      mode: 0o600
+    });
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const initialMarker = new Error("stale observed guard post-mutation marker");
+    let injected = false;
+
+    const reacquired = await runWithWorkspaceRecordCompensationTestHooks(
+      {
+        afterOwnedPathIsolation: ({ path, site }) => {
+          if (!injected && path === guardPath && site === "conditional_delete") {
+            injected = true;
+            throw initialMarker;
+          }
+        }
+      },
+      () => service.beginRecord({ scope: "task", key: rawKey, requestDigest })
+    );
+
+    expect(failed.status).toBe("failed");
+    expect(injected).toBe(true);
+    expect(reacquired).toMatchObject({ status: "acquired", record: { status: "started" } });
+    await expectPathMissing(guardPath);
+    await expectPathMissing(cleanupLockPath);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
   test("physical canonical paths preserve existing spelling across follower restart windows", async () => {
@@ -16297,7 +16670,7 @@ describe("idempotency, lock, and artifact services", () => {
       });
       let matchingHookCalls = 0;
 
-      const failure = await captureThrownValue(() =>
+      const action = () =>
         runWithWorkspaceRecordPublicationHooks(
           {
             afterTemporaryFileWritten: ({ canonicalPath }) => {
@@ -16324,18 +16697,20 @@ describe("idempotency, lock, and artifact services", () => {
               requestDigest,
               resultRef
             })
-        )
-      );
+        );
+      const failure = failureClass === "pre_write"
+        ? await captureThrownValue(action)
+        : undefined;
+      const recovered = failureClass === "post_release"
+        ? await action()
+        : undefined;
 
-      expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
-      expect(matchingHookCalls).toBe(failureClass === "pre_write" ? 1 : 2);
+      expect(matchingHookCalls).toBe(1);
       if (failureClass === "pre_write") {
+        expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
         expect(semanticPrimaryError(failure)).toBe(marker);
       } else {
-        expect(failure).toBeInstanceOf(TaskServiceError);
-        expect((failure as TaskServiceError).message).toBe(
-          "Idempotency transition artifact release did not settle safely."
-        );
+        expect(recovered).toMatchObject({ status: "failed", request_digest: requestDigest });
       }
       expect(await service.getRecord("task", rawKey)).toMatchObject({
         status: failureClass === "pre_write" ? "completed" : "failed",
@@ -23945,6 +24320,7 @@ describe("idempotency, lock, and artifact services", () => {
     );
     const releaseCalls: ts.CallExpression[] = [];
     let failedRecordRecoveryWrapper: ts.FunctionDeclaration | undefined;
+    let terminalGuardRecovery: ts.FunctionDeclaration | undefined;
     let settleFulfilledDecisionResourcesInitializer: ts.Expression | undefined;
     const visit = (node: ts.Node): void => {
       if (
@@ -23952,6 +24328,13 @@ describe("idempotency, lock, and artifact services", () => {
         node.name?.text === "runFailedRecordTransitionWithGuardRecovery"
       ) {
         failedRecordRecoveryWrapper = node;
+      }
+      if (
+        ts.isFunctionDeclaration(node) &&
+        node.name?.text ===
+          "recoverOwnedIdempotencyTransitionGuardAfterTerminalReleaseFailure"
+      ) {
+        terminalGuardRecovery = node;
       }
       if (
         ts.isVariableDeclaration(node) &&
@@ -23972,8 +24355,8 @@ describe("idempotency, lock, and artifact services", () => {
     };
     visit(sourceFile);
 
-    expect(releaseCalls).toHaveLength(9);
-    expect(releaseCalls.filter((call) => call.arguments.length === 2)).toHaveLength(7);
+    expect(releaseCalls).toHaveLength(8);
+    expect(releaseCalls.filter((call) => call.arguments.length === 2)).toHaveLength(6);
     const fulfilledValueSettlementCalls = releaseCalls.filter(
       (call) => call.arguments.length === 3
     );
@@ -24029,10 +24412,15 @@ describe("idempotency, lock, and artifact services", () => {
     expect(failedRecoverySource.indexOf("await body()")).toBeLessThan(
       failedRecoverySource.indexOf("requireDurablyFailedRecord(")
     );
+    expect(terminalGuardRecovery).toBeDefined();
+    const terminalRecoverySource = terminalGuardRecovery!.body!.getText(sourceFile);
+    expect(terminalRecoverySource).toContain("await assertDurablyFailed()");
+    expect(terminalRecoverySource).not.toContain("observeJsonRecordForCleanup");
+    expect(terminalRecoverySource).not.toContain("isSameIdempotencyTransitionGuard");
     expect(releaseCalls.filter((call) => ![2, 3].includes(call.arguments.length))).toEqual([]);
   });
 
-  test("publish-lock release failure emergency-settles the fulfilled guard before propagating", async () => {
+  test("publish-lock post-mutation failure is recovered before releasing the fulfilled guard", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const rawKey = "task:create:fulfilled-guard-release-settled";
@@ -24049,7 +24437,7 @@ describe("idempotency, lock, and artifact services", () => {
       new Map([[cleanupLockPath, releaseMarker]])
     );
 
-    const failure = await captureTaskServiceError(() =>
+    const completed = await
       runWithWorkspaceRecordPublicationHooks(
         {
           ...failureHooks.publicationHooks,
@@ -24066,25 +24454,16 @@ describe("idempotency, lock, and artifact services", () => {
                 resultRef
               })
           )
-      )
-    );
+      );
     await Promise.race([
       closeTracker.waitForAll(),
       timeoutAfter(1_000, "fulfilled guard emergency-settlement descriptors did not close")
     ]);
 
     expect(begin.status).toBe("acquired");
-    expect(semanticPrimaryError(failure)).toBe(failure);
-    expect(failure.message).toBe(
-      "Idempotency transition artifact release did not settle safely."
-    );
-    expect(failure.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    const releaseCause = failure.cause as WorkspaceRecordConditionalDeleteError;
-    expect(releaseCause.mutationPhase).toBe("post_mutation");
-    expect(releaseCause.failureStage).toBe("operation");
-    expect(errorTreeContains(releaseCause, releaseMarker)).toBe(true);
+    expect(completed).toMatchObject({ status: "completed", result_ref: resultRef });
     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath, guardPath]);
-    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+    expect(await service.getRecord("task", rawKey)).toEqual(completed);
     await expectPathMissing(guardPath);
     await expectPathMissing(cleanupLockPath);
     expect(closeTracker.count(guardPath)).toBe(1);
@@ -24105,7 +24484,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
-  test("publish-lock release stays primary when fulfilled-guard emergency settlement also fails", async () => {
+  test("independent publish-lock and guard post-mutation failures each recover exact A", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const rawKey = "task:create:fulfilled-guard-release-settlement-failed";
@@ -24126,7 +24505,7 @@ describe("idempotency, lock, and artifact services", () => {
       ])
     );
 
-    const failure = await captureThrownValue(() =>
+    const completed = await
       runWithWorkspaceRecordPublicationHooks(
         {
           ...failureHooks.publicationHooks,
@@ -24143,50 +24522,15 @@ describe("idempotency, lock, and artifact services", () => {
                 resultRef
               })
           )
-      )
-    );
+      );
     await Promise.race([
       closeTracker.waitForAll(),
       timeoutAfter(1_000, "failed fulfilled-guard settlement descriptors did not close")
     ]);
 
-    expect(failure).toBeInstanceOf(TaskServiceError);
-    expect(failure).not.toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    const publishRelease = semanticPrimaryError(failure);
-    expect(publishRelease).toBeInstanceOf(TaskServiceError);
-    expect(publishRelease?.message).toBe(
-      "Idempotency transition artifact release did not settle safely."
-    );
-    expect(publishRelease?.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    const publishReleaseCause = publishRelease!.cause as WorkspaceRecordConditionalDeleteError;
-    expect(publishReleaseCause.mutationPhase).toBe("post_mutation");
-    expect(publishReleaseCause.failureStage).toBe("operation");
-    expect(errorTreeContains(publishReleaseCause, releaseMarker)).toBe(true);
-
-    expect(failure.cause).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    const compatibilityCause = failure.cause as PreservedErrorCompensationEnvelope;
-    const settlementAggregate = compatibilityCause.cause as AggregateError;
-    expect(settlementAggregate).toBeInstanceOf(AggregateError);
-    expect(settlementAggregate.errors).toHaveLength(2);
-    expect(settlementAggregate.errors[0]).toBe(publishReleaseCause);
-    const guardSettlement = settlementAggregate.errors[1];
-    expect(guardSettlement).toBeInstanceOf(TaskServiceError);
-    expect((guardSettlement as TaskServiceError).message).toBe(
-      "Idempotency transition artifact release did not settle safely."
-    );
-    expect((guardSettlement as TaskServiceError).cause).toBeInstanceOf(
-      WorkspaceRecordConditionalDeleteError
-    );
-    const guardSettlementCause = (guardSettlement as TaskServiceError)
-      .cause as WorkspaceRecordConditionalDeleteError;
-    expect(guardSettlementCause.mutationPhase).toBe("post_mutation");
-    expect(guardSettlementCause.failureStage).toBe("operation");
-    expect(errorTreeContains(guardSettlementCause, settlementMarker)).toBe(true);
-    expect(
-      countErrorNodes(failure, (error) => error === guardSettlement)
-    ).toBe(1);
+    expect(completed).toMatchObject({ status: "completed", result_ref: resultRef });
     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath, guardPath]);
-    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+    expect(await service.getRecord("task", rawKey)).toEqual(completed);
     await expectPathMissing(guardPath);
     await expectPathMissing(cleanupLockPath);
     expect(closeTracker.count(guardPath)).toBe(1);
@@ -24272,21 +24616,30 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(begin.status).toBe("acquired");
     expect(semanticPrimaryError(failure)).toBe(failure);
-    expect(failure.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    const releaseCause = failure.cause as WorkspaceRecordConditionalDeleteError;
-    expect(releaseCause.mutationPhase).toBe("post_mutation");
-    expect(errorTreeContains(releaseCause, releaseMarker)).toBe(true);
-    expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath]);
+    expect(failure.code).toBe("record_malformed");
+    expect(failure.status).toBe(409);
+    expect(failure.message).toBe(
+      "Idempotency record complete transition is already in progress."
+    );
+    expect(failure.cause).toBeUndefined();
+    expect(failureHooks.conditionalDeletePaths.length).toBeGreaterThan(0);
+    expect(new Set(failureHooks.conditionalDeletePaths)).toEqual(
+      new Set([cleanupLockPath])
+    );
     expect(await readFileWithIdentity(guardPath)).toEqual(existingGeneration);
     await expectPathMissing(cleanupLockPath);
     expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
     expect(closeTracker.count(guardPath)).toBe(0);
-    expect(closeTracker.count(cleanupLockPath)).toBe(1);
-    await expectFileDescriptorClosed(closeTracker.descriptors(cleanupLockPath)[0]!);
+    expect(closeTracker.count(cleanupLockPath)).toBe(
+      failureHooks.conditionalDeletePaths.length
+    );
+    for (const descriptor of closeTracker.descriptors(cleanupLockPath)) {
+      await expectFileDescriptorClosed(descriptor);
+    }
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
-  test("pre-mutation emergency settlement preserves a replacement but terminates the exact guard permit", async () => {
+  test("exact settlement preserves a replacement installed during restored publish-lock release", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const rawKey = "task:create:fulfilled-guard-pre-mutation-settlement";
@@ -24335,7 +24688,7 @@ describe("idempotency, lock, and artifact services", () => {
       }
     };
 
-    const failure = await captureTaskServiceError(() =>
+    const completed = await
       runWithWorkspaceRecordPublicationHooks(
         {
           ...failureHooks.publicationHooks,
@@ -24352,8 +24705,7 @@ describe("idempotency, lock, and artifact services", () => {
                 resultRef: "TASK-fulfilled-guard-pre-mutation-settlement"
               })
           )
-      )
-    );
+      );
     await Promise.race([
       closeTracker.waitForAll(),
       timeoutAfter(1_000, "pre-mutation emergency-settlement descriptors did not close")
@@ -24361,11 +24713,10 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(begin.status).toBe("acquired");
     expect(replacementInstalled).toBe(true);
-    expect(semanticPrimaryError(failure)).toBe(failure);
-    expect(failure.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    expect((failure.cause as WorkspaceRecordConditionalDeleteError).mutationPhase).toBe(
-      "post_mutation"
-    );
+    expect(completed).toMatchObject({
+      status: "completed",
+      result_ref: "TASK-fulfilled-guard-pre-mutation-settlement"
+    });
     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath]);
     expect(originalGuardGeneration).toBeDefined();
     expect(replacementGeneration).toBeDefined();
@@ -24376,7 +24727,7 @@ describe("idempotency, lock, and artifact services", () => {
       originalGuardGeneration!
     )).toBe(false);
     await expectPathMissing(cleanupLockPath);
-    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+    expect(await service.getRecord("task", rawKey)).toEqual(completed);
     expect(closeTracker.count(guardPath)).toBe(1);
     expect(closeTracker.count(cleanupLockPath)).toBe(1);
     await expectFileDescriptorClosed(closeTracker.descriptors(guardPath)[0]!);
@@ -24384,7 +24735,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
-  test("idempotency post-mutation owner release keeps its exact cause after durable success", async () => {
+  test("idempotency post-mutation owner release recovers exact A after durable success", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
@@ -24396,7 +24747,7 @@ describe("idempotency, lock, and artifact services", () => {
     const service = createIdempotencyRecordService({ workspaceRoot });
     const begin = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
 
-    const failure = await captureTaskServiceError(() =>
+    const completed = await
       runWithWorkspaceRecordPublicationHooks(
         {
           beforeAuthorityOwnedUnlink: ({ path, operation }) => {
@@ -24411,24 +24762,18 @@ describe("idempotency, lock, and artifact services", () => {
           requestDigest,
           resultRef: "TASK-post-mutation-owner-release"
         })
-      )
-    );
+      );
 
     expect(begin.status).toBe("acquired");
-    expect(failure.message).toBe(
-      "Idempotency transition artifact release did not settle safely."
-    );
-    expect(semanticPrimaryError(failure)).toBe(failure);
-    expect(failure.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    const conditionalFailure = failure.cause as WorkspaceRecordConditionalDeleteError;
-    expect(conditionalFailure.mutationPhase).toBe("post_mutation");
-    expect(conditionalFailure.failureStage).toBe("operation");
-    expect(countErrorNodes(failure, (error) => error === releaseMarker)).toBe(1);
+    expect(completed).toMatchObject({
+      status: "completed",
+      result_ref: "TASK-post-mutation-owner-release"
+    });
     expect(await service.getRecord("task", rawKey)).toMatchObject({
       status: "completed",
       result_ref: "TASK-post-mutation-owner-release"
     });
-    expect(await readFile(guardPath)).toBeDefined();
+    await expectPathMissing(guardPath);
     await expectPathMissing(cleanupLockPath);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
@@ -24507,14 +24852,25 @@ describe("idempotency, lock, and artifact services", () => {
               }
             }
           },
-          () => releaseClass === "cleanup-lock"
-            ? service.beginRecord({ scope: "task", key: rawKey, requestDigest })
-            : service.completeRecord({
-                scope: "task",
-                key: rawKey,
-                requestDigest,
-                resultRef: `TASK-body-release-${releaseClass}`
-              })
+          () =>
+            runWithWorkspaceRecordCompensationTestHooks(
+              {
+                beforeExactFailureSettlement: ({ path }) => {
+                  const releasePath = releaseClass === "guard"
+                    ? guardPath
+                    : cleanupLockPath;
+                  if (path === releasePath) throw releaseFailure;
+                }
+              },
+              () => releaseClass === "cleanup-lock"
+                ? service.beginRecord({ scope: "task", key: rawKey, requestDigest })
+                : service.completeRecord({
+                    scope: "task",
+                    key: rawKey,
+                    requestDigest,
+                    resultRef: `TASK-body-release-${releaseClass}`
+                  })
+            )
         )
       );
 
@@ -24531,13 +24887,13 @@ describe("idempotency, lock, and artifact services", () => {
             "Idempotency transition artifact release did not settle safely."
       );
       expect(releaseServiceFailure).toBeInstanceOf(TaskServiceError);
-      expect(releaseServiceFailure?.cause).toBeInstanceOf(
-        WorkspaceRecordConditionalDeleteError
-      );
-      const conditionalFailure = releaseServiceFailure!
-        .cause as WorkspaceRecordConditionalDeleteError;
-      expect(conditionalFailure.mutationPhase).toBe("post_mutation");
-      expect(conditionalFailure.failureStage).toBe("operation");
+      const conditionalFailure = findErrorNode(
+        releaseServiceFailure,
+        (error) => error instanceof WorkspaceRecordConditionalDeleteError
+      ) as WorkspaceRecordConditionalDeleteError | undefined;
+      expect(conditionalFailure).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+      expect(conditionalFailure!.mutationPhase).toBe("post_mutation");
+      expect(conditionalFailure!.failureStage).toBe("operation");
       expect(findPreservedCompensationAggregate(failure)?.errors).toEqual([
         releaseServiceFailure
       ]);
@@ -24646,12 +25002,23 @@ describe("idempotency, lock, and artifact services", () => {
             }
           },
           () =>
-            service.completeRecord({
-              scope: "task",
-              key: rawKey,
-              requestDigest,
-              resultRef
-            })
+            runWithWorkspaceRecordCompensationTestHooks(
+              {
+                beforeExactFailureSettlement: ({ path }) => {
+                  const releasePath = releaseClass === "guard"
+                    ? guardPath
+                    : cleanupLockPath;
+                  if (path === releasePath) throw releaseFailure;
+                }
+              },
+              () =>
+                service.completeRecord({
+                  scope: "task",
+                  key: rawKey,
+                  requestDigest,
+                  resultRef
+                })
+            )
         )
       );
 
@@ -29279,7 +29646,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
   });
 
-  test("S34-P62-16 shared consume and guard-release rejection transports the primary once, never as its own compensation", async () => {
+  test("S34-P62-16 shared consume rejection remains primary when exact guard release recovers", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const rawKey = "task:create:s34-p62-16-shared-rejection";
@@ -29325,32 +29692,16 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(consumeCalls).toBe(1);
     expect(releaseInjections).toBe(1);
-    // The shared rejection stays the semantic primary of the preserved
-    // envelope; the guard-release failure is folded as an ordered
-    // compensation through its own typed settlement wrapper.
-    expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    // The release's identical post-mutation marker is recovered by exact-A
+    // settlement, so the body rejection remains the only outer failure.
+    expect(failure).toBe(shared);
     expect(semanticPrimaryError(failure)).toBe(shared);
-    const aggregate = knownPreservedCompensationAggregate(failure);
-    // The primary is never duplicated into its own ordered compensation
-    // vector: no aggregate entry is the shared object itself.
-    expect(aggregate.errors.some((entry) => entry === shared)).toBe(false);
-    const releaseWrappers = aggregate.errors.filter(
-      (entry) =>
-        entry instanceof TaskServiceError &&
-        entry.message ===
-          "Idempotency transition artifact release did not settle safely."
-    );
-    expect(releaseWrappers).toHaveLength(1);
-    expect((releaseWrappers[0] as TaskServiceError).code).toBe(
-      "workspace_path_not_safe"
-    );
-    // The denied release still transports the injected denial inside the
-    // wrapper's cause graph — the single occurrence of the release failure.
-    expect(errorTreeContains(releaseWrappers[0], shared)).toBe(true);
+    expect(countErrorNodes(failure, (error) => error === shared)).toBe(1);
 
     // Nothing durable was destroyed: the completed record replays untouched
     // and every counted authority resource settled.
     expect(await service.getRecord("task", rawKey)).toEqual(completed);
+    await expectPathMissing(guardPath);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
