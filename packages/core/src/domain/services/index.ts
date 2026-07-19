@@ -6,7 +6,32 @@ export * from "./artifact-registry-service";
 export * from "./idempotency-service";
 export * from "./lock-service";
 export * from "./task-card-service";
-export { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
+export {
+  preserveTaskServiceErrorCompensationCompatibility,
+  taskServiceErrorAtBoundary,
+  trustedTaskServiceErrorFromFailureLedger
+} from "./task-service-error-compensation";
+export {
+  FAILURE_GRAPH_MAX_EDGES,
+  FAILURE_GRAPH_MAX_NODES,
+  FailureGraphObservationIssue,
+  captureFailureOccurrence,
+  failureEvents,
+  failureGraphNodes,
+  failureLedger,
+  mergeTrustedFailureOccurrences,
+  orderedDistinctCompensationFailures,
+  orderedDistinctFailures,
+  semanticPrimaryValue
+} from "./compensation-error-preservation";
+export type {
+  FailureGraphEdge,
+  FailureGraphNode,
+  FailureGraphObservationIssueCode,
+  FailureOccurrence,
+  FailurePhase,
+  PreservedFailureLedger
+} from "./compensation-error-preservation";
 export {
   ensureWorkspaceDirectoryTree,
   ensureWorkspaceRecordRootPhysicalIdentity,

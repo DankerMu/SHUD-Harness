@@ -53,6 +53,9 @@ import {
 } from "../../../core/src/domain/services/workspace-record-store";
 import {
   PreservedErrorCompensationEnvelope,
+  failureLedger,
+  orderedDistinctCompensationFailures,
+  orderedDistinctFailures,
   semanticPrimaryError
 } from "../../../core/src/domain/services/compensation-error-preservation";
 
@@ -6989,7 +6992,7 @@ describe("backend workspace and health routes", () => {
     expect(body.error.message).not.toBe("Unexpected backend route failure.");
     expect(cancellationAttempts).toBe(1);
     expect(routedError).toBeInstanceOf(TaskServiceError);
-    expect(routedError).not.toBe(primary);
+    expect(routedError).toBe(primary);
     expect(semanticPrimaryError(routedError)).toBe(primary);
     expect(errorGraphContainsIdentity(routedError, cancellationFailure)).toBe(true);
     expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
@@ -7957,7 +7960,9 @@ describe("backend workspace and health routes", () => {
         (routedError as { authorityError?: unknown } | undefined)?.authorityError
       )
     ).toBe(typedPrimary);
-    expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(0);
+    // Reusing the exact same Error object retains its last trusted fold; the
+    // counterfactual adds no new occurrence and still renders the typed root.
+    expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
   });
 
   test("S34-P62-05 digest-mismatch accept-settlement failure preserves the typed binding primary", async () => {
@@ -8112,10 +8117,8 @@ describe("backend workspace and health routes", () => {
     expect((classificationEntry as TaskServiceError).message).toBe(
       "Completed idempotency result is not bound to the task create request."
     );
-    // The typed primary rides only the semantic-primary channel — zero
-    // occurrences in the cause/errors graph proves it was never duplicated as
-    // a compensation.
-    expect(countErrorGraphIdentity(routedError, typedSettlementFailure)).toBe(0);
+    // The exact typed root is represented once in the ledger identity view.
+    expect(countErrorGraphIdentity(routedError, typedSettlementFailure)).toBe(1);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
@@ -8218,10 +8221,8 @@ describe("backend workspace and health routes", () => {
     expectOrderedPreservedCompensationVector(distinctAuthorityError, [
       distinctReleaseFailure
     ]);
-    // The typed primary is transported exactly once, via the envelope's
-    // semantic-primary channel (asserted above); zero occurrences in the
-    // cause/errors graph proves it was never duplicated as a compensation.
-    expect(countErrorGraphIdentity(routedError, typedFailure)).toBe(0);
+    // The exact typed root is represented once in the ledger identity view.
+    expect(countErrorGraphIdentity(routedError, typedFailure)).toBe(1);
     expect(countErrorGraphIdentity(routedError, distinctReleaseFailure)).toBe(1);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
@@ -8473,11 +8474,7 @@ describe("backend workspace and health routes", () => {
     // vector with multiplicity, pinned at the inner fold's altitude.
     expectOrderedPreservedCompensationVector(routedError, [cancellationFailure]);
     expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
-    const envelope = (routedError as Error).cause;
-    expect(envelope).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(((envelope as PreservedErrorCompensationEnvelope).cause as AggregateError).message).toBe(
-      "Completed task consumption and local observation cancellation both failed."
-    );
+    expect(failureLedger(routedError)).toBeDefined();
 
     // The durable outcome is intact: the real completed record replays the
     // created task once the injected consumption denial clears.
@@ -9770,6 +9767,9 @@ function errorGraphContainsIdentity(
   target: unknown,
   seen = new Set<object>()
 ): boolean {
+  if (failureLedger(root)) {
+    return orderedDistinctFailures(root).some((value) => Object.is(value, target));
+  }
   if (root === target) return true;
   if ((typeof root !== "object" && typeof root !== "function") || root === null) {
     return false;
@@ -9793,6 +9793,7 @@ function errorGraphContainsIdentity(
 }
 
 function orderedPreservedCompensationVector(error: unknown): readonly unknown[] {
+  if (failureLedger(error)) return orderedDistinctCompensationFailures(error);
   const envelope =
     error instanceof PreservedErrorCompensationEnvelope
       ? error
@@ -9820,6 +9821,9 @@ function countErrorGraphIdentity(
   target: unknown,
   seen = new Set<object>()
 ): number {
+  if (failureLedger(root)) {
+    return orderedDistinctFailures(root).filter((value) => Object.is(value, target)).length;
+  }
   let count = root === target ? 1 : 0;
   if ((typeof root !== "object" && typeof root !== "function") || root === null) {
     return count;

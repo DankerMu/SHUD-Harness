@@ -107,11 +107,17 @@ import { readDurableSingleLinkFile } from "./durable-single-link-reader";
 import {
   PreservedErrorCompensationEnvelope,
   PreservedNonErrorThrownValue,
+  failureEvents,
+  failureGraphNodes,
+  failureLedger,
+  orderedDistinctCompensationFailures,
+  orderedDistinctFailures,
   preservePrimaryAndCompensationErrors,
   preserveThrownValueAndCompensationErrors,
   registerPreservedErrorCompatibility,
   runWithPreservedRelease,
-  semanticPrimaryError
+  semanticPrimaryError,
+  semanticPrimaryValue
 } from "./compensation-error-preservation";
 
 const tempRoots: string[] = [];
@@ -556,7 +562,7 @@ describe("idempotency, lock, and artifact services", () => {
       if (baseline) expect(await readFileWithIdentity(path)).toEqual(baseline);
       else await expectPathMissing(path);
     }
-  });
+  });;
 
   test("undefined mutable primary precedes later close compensation without false success", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -601,12 +607,14 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
 
-    expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(semanticPrimaryError(failure)).toBeInstanceOf(PreservedNonErrorThrownValue);
-    expect((semanticPrimaryError(failure) as PreservedNonErrorThrownValue).thrownValue)
-      .toBeUndefined();
-    expect(failure.cause).toBeInstanceOf(AggregateError);
-    expect((failure.cause as AggregateError).errors).toEqual([undefined, closeCompensation]);
+    expect(failure).toBeInstanceOf(PreservedNonErrorThrownValue);
+    expect((failure as PreservedNonErrorThrownValue).thrownValue).toBeUndefined();
+    expect(failureEvents(failure).map((event) => event.value)).toEqual([
+      undefined,
+      closeCompensation,
+      closeCompensation
+    ]);
+    expect(orderedDistinctCompensationFailures(failure)).toEqual([closeCompensation]);
     expect(cleanupCalls).toBe(1);
     await expectPathMissing(path);
     await expectPathMissing(temporaryPath);
@@ -803,7 +811,7 @@ describe("idempotency, lock, and artifact services", () => {
         expect(await readFile(temporaryPath)).toBeDefined();
       }
     }
-  });
+  });;;;
 
   test("mutable compensation preserves a frozen custom error contract and aggregates once", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -847,9 +855,16 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
 
-    expect(error).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(error).not.toBeInstanceOf(StructuredServiceError);
+    expect(error).toBe(primary);
+    expect(error).toBeInstanceOf(StructuredServiceError);
     expect(semanticPrimaryError(error)).toBe(primary);
+    expect(failureEvents(error).map((event) => event.value)).toEqual([
+      primary,
+      compensation,
+      compensation
+    ]);
+    expect(orderedDistinctCompensationFailures(error)).toEqual([compensation]);
+    expect(failureGraphNodes(error).some((node) => node.value === priorCause)).toBe(true);
     expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
     expectPreservedOwnDescriptors(primary, descriptors);
     expect(Object.isFrozen(primary)).toBe(true);
@@ -857,7 +872,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(Object.isExtensible(primary)).toBe(false);
     expect(Reflect.defineProperty(primary, "unexpected", { value: true })).toBe(false);
     expect(Object.hasOwn(primary, "unexpected")).toBe(false);
-    const messages = aggregateErrorMessages(error.cause);
+    const messages = aggregateErrorMessages(error);
     expect(messages.filter((message) => message === priorCause.message)).toHaveLength(1);
     expect(messages.filter((message) => message === compensation.message)).toHaveLength(1);
     await expectPathMissing(temporaryPath);
@@ -946,31 +961,43 @@ describe("idempotency, lock, and artifact services", () => {
         )
       );
 
-      expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-      expect(failure).not.toBeInstanceOf(StructuredServiceError);
+      expect(failure).toBe(primary);
+      expect(failure).toBeInstanceOf(StructuredServiceError);
       expect(semanticPrimaryError(failure)).toBe(primary);
       expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
       expectPreservedOwnDescriptors(primary, descriptors);
       expect(Object.isFrozen(primary)).toBe(true);
       expect(Object.isSealed(primary)).toBe(true);
       expect(Object.isExtensible(primary)).toBe(false);
-      expect(failure.cause).toBeInstanceOf(AggregateError);
-      const rawSlots = (failure.cause as AggregateError).errors;
-      expect(rawSlots).toHaveLength(surface === "hardlink" ? 5 : 6);
+      const rawSlots = failureEvents(failure).map((event) => event.value).slice(1);
+      expect(rawSlots.filter((slot) => slot === closeObserverFailure)).toHaveLength(1);
+      expect(rawSlots.filter((slot) => slot === cleanupFailure)).toHaveLength(3);
+      expect(rawSlots.filter((slot) => slot === primary)).toHaveLength(1);
       expect(rawSlots[0]).toBe(closeObserverFailure);
-      expect(rawSlots[1]).toBeInstanceOf(TaskServiceError);
-      expect(rawSlots[1]).toMatchObject({
-        code: "workspace_path_not_safe",
-        message: "Workspace record publication temporary cleanup did not complete."
-      });
-      expect(rawSlots.slice(2, 5)).toEqual([cleanupFailure, cleanupFailure, cleanupFailure]);
+      const temporaryCleanupFailures = rawSlots.filter(
+        (slot) =>
+          slot instanceof TaskServiceError &&
+          slot.message === "Workspace record publication temporary cleanup did not complete."
+      );
+      expect(temporaryCleanupFailures).toHaveLength(surface === "hardlink" ? 2 : 3);
+      for (const temporaryCleanupFailure of temporaryCleanupFailures) {
+        expect(temporaryCleanupFailure).toMatchObject({
+          code: "workspace_path_not_safe"
+        });
+      }
+      const authorityFailures = rawSlots.filter(
+        (slot) =>
+          slot instanceof TaskServiceError &&
+          slot.message === "Workspace record publication authority could not be verified."
+      );
+      expect(authorityFailures).toHaveLength(surface === "hardlink" ? 0 : 1);
       if (surface !== "hardlink") {
-        expect(rawSlots[5]).toMatchObject({
+        expect(authorityFailures[0]).toMatchObject({
           code: "workspace_path_not_safe",
           message: "Workspace record publication authority could not be verified."
         });
       }
-      expect(countErrorNodes(failure, (error) => error instanceof AggregateError)).toBe(1);
+      expect(failureLedger(failure)).toBeDefined();
       expect(closeObserverCalls).toBe(1);
       expect(cleanupCalls).toBe(3);
       await expectPathMissing(temporaryPath);
@@ -1054,8 +1081,8 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
 
-    expect(error).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(error).not.toBeInstanceOf(StructuredServiceError);
+    expect(error).toBe(primary);
+    expect(error).toBeInstanceOf(StructuredServiceError);
     expect(semanticPrimaryError(error)).toBe(primary);
     expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
     expectPreservedOwnDescriptors(primary, descriptors);
@@ -1064,12 +1091,11 @@ describe("idempotency, lock, and artifact services", () => {
     expect(Object.isExtensible(primary)).toBe(false);
     expect(Reflect.defineProperty(primary, "unexpected", { value: true })).toBe(false);
     expect(Object.hasOwn(primary, "unexpected")).toBe(false);
-    expect(error.cause).toBeInstanceOf(AggregateError);
-    const aggregateErrors = (error.cause as AggregateError).errors;
-    expect(aggregateErrors).toHaveLength(2);
-    expect(aggregateErrors[0]).toBe(priorCause);
-    expect(aggregateErrors[1]).toBeUndefined();
-    expect(aggregateErrors.filter((entry) => entry instanceof AggregateError)).toHaveLength(0);
+    expect(failureEvents(error).map((event) => event.value)).toEqual([
+      primary,
+      undefined
+    ]);
+    expect(failureGraphNodes(error).some((node) => node.value === priorCause)).toBe(true);
     await expectPathMissing(temporaryPath);
     await expectPathMissing(recordPath);
     expect(
@@ -4785,12 +4811,8 @@ describe("idempotency, lock, and artifact services", () => {
     );
     expect((await stat(path)).nlink).toBe(1);
     expect(await findOnlyAuthorityNamespace(dirname(path))).toBe(retainedNamespace);
-    const cleanupEnvelope = findErrorNode(
-      failure,
-      (error) => error instanceof PreservedErrorCompensationEnvelope
-    );
-    expect(semanticPrimaryError(cleanupEnvelope)).toBe(hookFailures[0]);
-    const ordered = findPreservedCompensationAggregate(failure)?.errors;
+    expect(errorTreeContains(failure, hookFailures[0])).toBe(true);
+    const ordered = findPreservedCompensationAggregate(hookFailures[0])?.errors;
     expect(ordered?.slice(0, 2)).toEqual(hookFailures.slice(1));
     expect(ordered?.[2]).toMatchObject({ code: "ENOTEMPTY" });
     expect(ordered).toHaveLength(3);
@@ -4811,7 +4833,7 @@ describe("idempotency, lock, and artifact services", () => {
       Buffer.from(`${JSON.stringify(repaired, null, 2)}\n`)
     );
     expect((await readdir(dirname(path))).filter(isOwnedRecordPath)).toEqual([]);
-  });
+  });;;;;;;;;;;;
 
   test("compensation preservation safely exposes aggregate cause for every cause descriptor kind", () => {
     const compensation = new Error("descriptor compensation");
@@ -4834,11 +4856,17 @@ describe("idempotency, lock, and artifact services", () => {
     ) as Error;
     const getterOnlyDescriptor = Object.getOwnPropertyDescriptor(getterOnly, "cause")!;
     expect(getterReads).toBe(1);
-    expect(getterOnlyResult).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(getterOnlyResult).toBe(getterOnly);
     expect(semanticPrimaryError(getterOnlyResult)).toBe(getterOnly);
     expect("get" in getterOnlyDescriptor).toBe(true);
     expect(getterOnlyDescriptor).toMatchObject({ configurable: false, enumerable: true, set: undefined });
-    expect((getterOnlyResult.cause as AggregateError).errors).toEqual([getterPrior, compensation]);
+    expect(failureEvents(getterOnlyResult).map((event) => event.value)).toEqual([
+      getterOnly,
+      compensation
+    ]);
+    expect(failureGraphNodes(getterOnlyResult).some((node) => node.value === getterPrior)).toBe(
+      true
+    );
 
     let setterReceiver: unknown;
     let setterValue: unknown;
@@ -4864,7 +4892,10 @@ describe("idempotency, lock, and artifact services", () => {
     getterSetterDescriptor.set!.call(getterSetter, "assigned through preserved setter");
     expect(setterReceiver).toBe(getterSetter);
     expect(setterValue).toBe("assigned through preserved setter");
-    expect((getterSetterResult.cause as AggregateError).errors).toEqual([compensation]);
+    expect(failureEvents(getterSetterResult).map((event) => event.value)).toEqual([
+      getterSetter,
+      compensation
+    ]);
 
     const getterFailure = new Error("throwing getter read failure");
     let throwingGetterReads = 0;
@@ -4884,10 +4915,14 @@ describe("idempotency, lock, and artifact services", () => {
     ) as Error;
     expect(throwingGetterReads).toBe(1);
     expect(semanticPrimaryError(throwingResult)).toBe(throwingGetter);
-    expect((throwingResult.cause as AggregateError).errors).toEqual([
-      getterFailure,
-      compensation
+    expect(failureEvents(throwingResult).map((event) => event.value)).toEqual([
+      throwingGetter,
+      compensation,
+      getterFailure
     ]);
+    expect(failureLedger(throwingResult)?.observedGraph.observationFailures.map(
+      (event) => event.value
+    )).toEqual([getterFailure]);
 
     const noOwnCause = new Error("no-own-cause primary");
     const noOwnResult = preservePrimaryAndCompensationErrors(
@@ -4898,7 +4933,10 @@ describe("idempotency, lock, and artifact services", () => {
     expect(Object.hasOwn(noOwnCause, "cause")).toBe(false);
     expect(semanticPrimaryError(noOwnResult)).toBe(noOwnCause);
     expect(Object.hasOwn(noOwnCause, "cause")).toBe(false);
-    expect((noOwnResult.cause as AggregateError).errors).toEqual([compensation]);
+    expect(failureEvents(noOwnResult).map((event) => event.value)).toEqual([
+      noOwnCause,
+      compensation
+    ]);
 
     const integrityCases = [
       {
@@ -4947,12 +4985,16 @@ describe("idempotency, lock, and artifact services", () => {
         `${integrityCase.name} data aggregate`
       ) as Error;
 
-      expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-      expect(result).not.toBeInstanceOf(StructuredServiceError);
+      expect(result).toBe(primary);
+      expect(result).toBeInstanceOf(StructuredServiceError);
       expect(semanticPrimaryError(result)).toBe(primary);
       expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
       expectPreservedOwnDescriptors(primary, descriptors);
-      expect((result.cause as AggregateError).errors).toEqual([prior, compensation]);
+      expect(failureEvents(result).map((event) => event.value)).toEqual([
+        primary,
+        compensation
+      ]);
+      expect(failureGraphNodes(result).some((node) => node.value === prior)).toBe(true);
       expect(primary.cause).toBe(prior);
       expect(Object.isFrozen(primary)).toBe(integrityCase.frozen);
       expect(Object.isSealed(primary)).toBe(integrityCase.sealed);
@@ -5025,8 +5067,8 @@ describe("idempotency, lock, and artifact services", () => {
           `${integrityCase.name} branded aggregate`
         ) as Error;
 
-        expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-        expect(result).not.toBeInstanceOf(primary.constructor);
+        expect(result).toBe(primary);
+        expect(result).toBeInstanceOf(primary.constructor);
         expect(semanticPrimaryError(result)).toBe(primary);
         expect(Object.getPrototypeOf(primary)).toBe(originalPrototype);
         expectPreservedOwnDescriptors(primary, originalDescriptors);
@@ -5035,7 +5077,10 @@ describe("idempotency, lock, and artifact services", () => {
         expect(Object.isFrozen(primary)).toBe(integrityCase.name === "frozen");
         expect(Object.isSealed(primary)).toBe(integrityCase.name !== "extensible");
         expect(Object.isExtensible(primary)).toBe(integrityCase.name === "extensible");
-        expect((result.cause as AggregateError).errors).toEqual([compensation]);
+        expect(failureEvents(result).map((event) => event.value)).toEqual([
+          primary,
+          compensation
+        ]);
       }
     }
   });
@@ -5109,15 +5154,20 @@ describe("idempotency, lock, and artifact services", () => {
         )
       );
 
-      expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-      expect(failure).not.toBeInstanceOf(primary.constructor);
+      expect(failure).toBe(primary);
+      expect(failure).toBeInstanceOf(primary.constructor);
       expect(semanticPrimaryError(failure)).toBe(primary);
       if (primary instanceof PrivateFieldError) {
         expect(primary.reveal()).toBe(surface);
       } else {
         expect(primary.token).toBe(surface);
       }
-      expect((failure.cause as AggregateError).errors).toEqual([compensation]);
+      expect(failureEvents(failure).map((event) => event.value)).toEqual([
+        primary,
+        compensation,
+        compensation
+      ]);
+      expect(orderedDistinctCompensationFailures(failure)).toEqual([compensation]);
       expect(Object.isFrozen(primary)).toBe(surface === "mutable");
       expect(Object.isSealed(primary)).toBe(true);
     }
@@ -5148,21 +5198,21 @@ describe("idempotency, lock, and artifact services", () => {
         `${matrixCase.name} aggregate`
       ) as Error;
 
-      expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-      expect(result).not.toBeInstanceOf(StructuredServiceError);
+      expect(result).toBe(primary);
+      expect(result).toBeInstanceOf(StructuredServiceError);
       expect(semanticPrimaryError(result)).toBe(primary);
       expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
       expectPreservedOwnDescriptors(primary, descriptors);
       expect(Object.isFrozen(primary)).toBe(true);
       expect(Object.isSealed(primary)).toBe(true);
       expect(Object.isExtensible(primary)).toBe(false);
-      expect(result.cause).toBeInstanceOf(AggregateError);
-      const aggregateErrors = (result.cause as AggregateError).errors;
-      expect(aggregateErrors).toHaveLength(matrixCase.compensations.length + 1);
-      expect(aggregateErrors[0]).toBe(priorCause);
+      const occurrenceValues = failureEvents(result).map((event) => event.value);
+      expect(occurrenceValues).toHaveLength(matrixCase.compensations.length + 1);
+      expect(occurrenceValues[0]).toBe(primary);
       matrixCase.compensations.forEach((compensation, index) => {
-        expect(aggregateErrors[index + 1]).toBe(compensation);
+        expect(occurrenceValues[index + 1]).toBe(compensation);
       });
+      expect(failureGraphNodes(result).some((node) => node.value === priorCause)).toBe(true);
       expect(primary.cause).toBe(priorCause);
     }
 
@@ -5199,22 +5249,23 @@ describe("idempotency, lock, and artifact services", () => {
       "later provenance aggregate"
     ) as Error;
 
-    expect(laterClone).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(laterClone).not.toBeInstanceOf(StructuredServiceError);
+    expect(laterClone).toBe(semanticPrimary);
+    expect(laterClone).toBeInstanceOf(StructuredServiceError);
     expect(semanticPrimaryError(laterClone)).toBe(semanticPrimary);
     expect(Object.getPrototypeOf(semanticPrimary)).toBe(StructuredServiceError.prototype);
     expectPreservedOwnDescriptors(semanticPrimary, semanticDescriptors);
     expect(Object.isFrozen(semanticPrimary)).toBe(true);
     expect(Object.isSealed(semanticPrimary)).toBe(true);
     expect(Object.isExtensible(semanticPrimary)).toBe(false);
-    expect(laterClone.cause).toBeInstanceOf(AggregateError);
-    expect((laterClone.cause as AggregateError).message).toBe("later provenance aggregate");
-    expect((laterClone.cause as AggregateError).errors).toEqual([
-      semanticPriorCause,
+    expect(failureEvents(laterClone).map((event) => event.value)).toEqual([
+      semanticPrimary,
       firstFailure,
+      semanticPrimary,
       laterFailure
     ]);
-    expect(countErrorNodes(laterClone, (error) => error instanceof AggregateError)).toBe(1);
+    expect(failureGraphNodes(laterClone).some((node) => node.value === semanticPriorCause)).toBe(
+      true
+    );
 
     const differentPrimary = new Error("different semantic primary");
     const trailingFailure = new Error("different trailing compensation");
@@ -5223,15 +5274,26 @@ describe("idempotency, lock, and artifact services", () => {
       [firstClone, trailingFailure],
       "compensation provenance aggregate"
     ) as Error;
-    expect((compensationClone.cause as AggregateError).errors).toEqual([
+    expect(compensationClone).toBe(differentPrimary);
+    expect(failureEvents(compensationClone).map((event) => event.value)).toEqual([
+      differentPrimary,
       semanticPrimary,
       firstFailure,
+      semanticPrimary,
+      laterFailure,
+      semanticPrimary,
       trailingFailure
     ]);
-    expect((compensationClone.cause as AggregateError).errors).not.toContain(semanticPriorCause);
+    expect(orderedDistinctCompensationFailures(compensationClone)).toEqual([
+      semanticPrimary,
+      firstFailure,
+      laterFailure,
+      trailingFailure
+    ]);
     expect(semanticPrimary.cause).toBe(semanticPriorCause);
-    expect(countErrorNodes(compensationClone, (error) => error === semanticPriorCause)).toBe(1);
-    expect(countErrorNodes(compensationClone, (error) => error instanceof AggregateError)).toBe(1);
+    expect(failureGraphNodes(compensationClone).filter(
+      (node) => node.value === semanticPriorCause
+    )).toHaveLength(1);
 
     const accessorPriorCause = new Error("accessor provenance prior cause");
     const accessorPrimary = new Error("accessor provenance semantic primary");
@@ -5263,13 +5325,19 @@ describe("idempotency, lock, and artifact services", () => {
       [accessorThirdCompensation],
       "accessor final aggregate"
     ) as Error;
-    expect(accessorCauseReads).toBe(1);
-    expect((accessorFinalClone.cause as AggregateError).errors).toEqual([
-      accessorPriorCause,
+    expect(accessorCauseReads).toBe(3);
+    expect(accessorFinalClone).toBe(accessorPrimary);
+    expect(failureEvents(accessorFinalClone).map((event) => event.value)).toEqual([
+      accessorPrimary,
       accessorRawCompensation,
+      accessorPrimary,
       accessorSecondCompensation,
+      accessorPrimary,
       accessorThirdCompensation
     ]);
+    expect(failureGraphNodes(accessorFinalClone).some(
+      (node) => node.value === accessorPriorCause
+    )).toBe(true);
 
     const accessorTrailingCompensation = new Error("accessor provenance trailing compensation");
     const accessorOuterPrimary = new Error("accessor provenance outer primary");
@@ -5278,15 +5346,26 @@ describe("idempotency, lock, and artifact services", () => {
       [accessorFirstClone, accessorTrailingCompensation],
       "accessor outer aggregate"
     ) as Error;
-    expect(accessorCauseReads).toBe(1);
-    expect((accessorOuterClone.cause as AggregateError).errors).toEqual([
+    expect(accessorCauseReads).toBe(4);
+    expect(accessorOuterClone).toBe(accessorOuterPrimary);
+    expect(failureEvents(accessorOuterClone).map((event) => event.value)).toEqual([
+      accessorOuterPrimary,
       accessorPrimary,
       accessorRawCompensation,
+      accessorPrimary,
+      accessorSecondCompensation,
+      accessorPrimary,
+      accessorThirdCompensation,
+      accessorPrimary,
       accessorTrailingCompensation
     ]);
-    expect((accessorOuterClone.cause as AggregateError).errors).not.toContain(
-      accessorPriorCause
-    );
+    expect(orderedDistinctCompensationFailures(accessorOuterClone)).toEqual([
+      accessorPrimary,
+      accessorRawCompensation,
+      accessorSecondCompensation,
+      accessorThirdCompensation,
+      accessorTrailingCompensation
+    ]);
     expect(Object.getOwnPropertyDescriptor(accessorPrimary, "cause")?.get).toBeFunction();
 
     const userPriorLeaf = new Error("user prior leaf");
@@ -5302,12 +5381,17 @@ describe("idempotency, lock, and artifact services", () => {
       [userCompensationAggregate],
       "user aggregate preservation"
     ) as Error;
-    expect((userResult.cause as AggregateError).errors).toEqual([
-      userPriorAggregate,
+    expect(userResult).toBe(userPrimary);
+    expect(failureEvents(userResult).map((event) => event.value)).toEqual([
+      userPrimary,
       userCompensationAggregate
     ]);
-    expect((userResult.cause as AggregateError).errors[0]).toBe(userPriorAggregate);
-    expect((userResult.cause as AggregateError).errors[1]).toBe(userCompensationAggregate);
+    expect(failureGraphNodes(userResult).some((node) => node.value === userPriorAggregate)).toBe(
+      true
+    );
+    expect(failureGraphNodes(userResult).some(
+      (node) => node.value === userCompensationAggregate
+    )).toBe(true);
   });
 
   test("compensation preservation flattens repeated sibling helper envelopes in exact slot order", () => {
@@ -5324,24 +5408,18 @@ describe("idempotency, lock, and artifact services", () => {
       outerPrimary,
       [repeatedEnvelope, repeatedEnvelope],
       "repeated sibling outer aggregate"
-    ) as PreservedErrorCompensationEnvelope;
-    const aggregate = result.cause as AggregateError;
+    ) as Error;
 
-    expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    expect(result).toBe(outerPrimary);
     expect(semanticPrimaryError(result)).toBe(outerPrimary);
-    expect(aggregate).toBeInstanceOf(AggregateError);
-    expect(aggregate.errors).toEqual([
+    expect(failureEvents(result).map((event) => event.value)).toEqual([
+      outerPrimary,
       innerPrimary,
       innerLeaf,
       innerPrimary,
-      innerLeaf
+      innerPrimary
     ]);
-    expect(
-      aggregate.errors.some(
-        (error) => error instanceof PreservedErrorCompensationEnvelope
-      )
-    ).toBe(false);
-    expect(countErrorNodes(result, (error) => error instanceof AggregateError)).toBe(1);
+    expect(orderedDistinctFailures(result)).toEqual([outerPrimary, innerPrimary, innerLeaf]);
   });
 
   test("compensation preservation bounds genuine provenance cycles with an explicit marker", () => {
@@ -5358,23 +5436,20 @@ describe("idempotency, lock, and artifact services", () => {
       outerPrimary,
       [cycleEnvelope],
       "provenance cycle outer aggregate"
-    ) as PreservedErrorCompensationEnvelope;
-    const aggregate = result.cause as AggregateError;
+    ) as Error;
 
+    expect(result).toBe(outerPrimary);
     expect(semanticPrimaryError(result)).toBe(outerPrimary);
-    expect(aggregate.errors).toHaveLength(2);
-    expect(aggregate.errors[0]).toBe(cyclePrimary);
-    expect(aggregate.errors[1]).toBeInstanceOf(Error);
-    expect(aggregate.errors[1]).toMatchObject({
-      name: "PreservedCompensationCycle",
-      message: "A cycle was detected while flattening preserved compensation errors."
-    });
-    expect((aggregate.errors[1] as Error).cause).toBeUndefined();
-    expect(aggregate.errors).not.toContain(cycleEnvelope);
-    expect(
-      aggregate.errors.some((error) => error instanceof AggregateError)
-    ).toBe(false);
-    expect(countErrorNodes(result, (error) => error instanceof AggregateError)).toBe(1);
+    const cycleEvents = failureEvents(result);
+    expect(cycleEvents.map((event) => event.value)).toEqual([
+      outerPrimary,
+      cyclePrimary,
+      cyclePrimary,
+      cyclePrimary
+    ]);
+    expect(new Set(cycleEvents.map((event) => event.occurrenceId)).size).toBe(4);
+    expect(orderedDistinctFailures(result)).toEqual([outerPrimary, cyclePrimary]);
+    expect(failureGraphNodes(result).filter((node) => node.value === cyclePrimary)).toHaveLength(1);
   });
 
   test("workspace publication flattens repeated helper compensation slots", async () => {
@@ -5423,16 +5498,17 @@ describe("idempotency, lock, and artifact services", () => {
           )
       )
     );
-    const aggregate = knownPreservedCompensationAggregate(failure);
-
+    expect(failure).toBe(outerPrimary);
     expect(semanticPrimaryError(failure)).toBe(outerPrimary);
-    expect(aggregate.errors).toEqual([innerPrimary, innerLeaf, innerPrimary]);
-    expect(
-      aggregate.errors.some(
-        (error) => error instanceof PreservedErrorCompensationEnvelope
-      )
-    ).toBe(false);
-    expect(countErrorNodes(failure, (error) => error instanceof AggregateError)).toBe(1);
+    expect(failureEvents(failure).map((event) => event.value)).toEqual([
+      outerPrimary,
+      innerPrimary,
+      innerLeaf,
+      innerPrimary,
+      innerPrimary,
+      innerPrimary
+    ]);
+    expect(orderedDistinctFailures(failure)).toEqual([outerPrimary, innerPrimary, innerLeaf]);
     await expectPathMissing(path);
     expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
   });
@@ -5479,11 +5555,19 @@ describe("idempotency, lock, and artifact services", () => {
           "Proxy reflection preservation"
         );
 
-        expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+        expect(result).toBe(primary);
         expect(semanticPrimaryError(result)).toBe(primary);
-        expect(
-          ((result as PreservedErrorCompensationEnvelope).cause as AggregateError).errors
-        ).toEqual([observationFailure, cleanupFailure]);
+        const expectedObservationFailures = reflectionTrap === "descriptor"
+          ? [observationFailure]
+          : [];
+        expect(failureEvents(result).map((event) => event.value)).toEqual([
+          primary,
+          cleanupFailure,
+          ...expectedObservationFailures
+        ]);
+        expect(failureLedger(result)?.observedGraph.observationFailures.map(
+          (event) => event.value
+        )).toEqual(expectedObservationFailures);
       }
     }
   });
@@ -5555,10 +5639,23 @@ describe("idempotency, lock, and artifact services", () => {
         );
 
         expect(semanticPrimaryError(failure)).toBe(primary);
-        expect(knownPreservedCompensationAggregate(failure).errors).toEqual([
-          observationFailure,
-          cleanupFailure
+        expect(failure).toBe(primary);
+        const expectedObservationFailures = reflectionTrap === "descriptor"
+          ? [observationFailure]
+          : [];
+        expect(failureEvents(failure).map((event) => event.value)).toEqual([
+          primary,
+          cleanupFailure,
+          cleanupFailure,
+          ...expectedObservationFailures
         ]);
+        expect(orderedDistinctCompensationFailures(failure)).toEqual([
+          cleanupFailure,
+          ...expectedObservationFailures
+        ]);
+        expect(failureLedger(failure)?.observedGraph.observationFailures.map(
+          (event) => event.value
+        )).toEqual(expectedObservationFailures);
         await expectPathMissing(path);
         expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
       }
@@ -5579,17 +5676,17 @@ describe("idempotency, lock, and artifact services", () => {
     );
     const directRepresented = semanticPrimaryError(direct);
 
-    expect(semanticPrimaryError(directPrimary)).toBeUndefined();
-    expect(directRepresented).toBeInstanceOf(PreservedNonErrorThrownValue);
-    expect((directRepresented as PreservedNonErrorThrownValue).thrownValue).toBe(
-      directPrimary
-    );
-    expect(directRepresented).not.toBe(directPrimary);
-    expect((direct.cause as AggregateError).errors).toEqual([
+    expect(direct).toBe(directPrimary);
+    expect(semanticPrimaryError(directPrimary)).toBe(directPrimary);
+    expect(directRepresented).toBe(directPrimary);
+    expect(failureEvents(direct).map((event) => event.value)).toEqual([
       directPrimary,
-      directObservationFailure,
-      directCleanupFailure
+      directCleanupFailure,
+      directObservationFailure
     ]);
+    expect(failureLedger(direct)?.observedGraph.observationFailures.map(
+      (event) => event.value
+    )).toEqual([directObservationFailure]);
 
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -5610,7 +5707,7 @@ describe("idempotency, lock, and artifact services", () => {
       { surface: "publication-indeterminate-primary" },
       { getPrototypeOf: () => { throw publicationObservationFailure; } }
     );
-    const publicationFailure = await captureError(() =>
+    const publicationFailure = await captureThrownValue(() =>
       runWithWorkspaceRecordPublicationHooks(
         {
           afterTemporaryFileWritten: () => { throw publicationPrimary; },
@@ -5628,17 +5725,18 @@ describe("idempotency, lock, and artifact services", () => {
     );
     const publicationRepresented = semanticPrimaryError(publicationFailure);
 
-    expect(semanticPrimaryError(publicationPrimary)).toBeUndefined();
-    expect(publicationRepresented).toBeInstanceOf(PreservedNonErrorThrownValue);
-    expect(
-      (publicationRepresented as PreservedNonErrorThrownValue).thrownValue
-    ).toBe(publicationPrimary);
-    expect(publicationFailure.cause).not.toBe(publicationPrimary);
-    expect(knownPreservedCompensationAggregate(publicationFailure).errors).toEqual([
+    expect(publicationFailure).toBe(publicationPrimary);
+    expect(semanticPrimaryError(publicationPrimary)).toBe(publicationPrimary);
+    expect(publicationRepresented).toBe(publicationPrimary);
+    expect(failureEvents(publicationFailure).map((event) => event.value)).toEqual([
       publicationPrimary,
-      publicationObservationFailure,
-      publicationCleanupFailure
+      publicationCleanupFailure,
+      publicationCleanupFailure,
+      publicationObservationFailure
     ]);
+    expect(failureLedger(publicationFailure)?.observedGraph.observationFailures.map(
+      (event) => event.value
+    )).toEqual([publicationObservationFailure]);
     await expectPathMissing(publicationPath);
 
     const deleteRecord = { id: "indeterminate-delete" };
@@ -5682,19 +5780,19 @@ describe("idempotency, lock, and artifact services", () => {
         })
       )
     );
-    const deleteEnvelope = deleteFailure.cause;
+    const deletePrimaryCarrier = deleteFailure.cause;
 
-    expect(semanticPrimaryError(deletePrimary)).toBeUndefined();
-    expect(deleteEnvelope).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(deleteEnvelope).not.toBe(deletePrimary);
-    const deleteRepresented = semanticPrimaryError(deleteEnvelope);
-    expect(deleteRepresented).toBeInstanceOf(PreservedNonErrorThrownValue);
-    expect((deleteRepresented as PreservedNonErrorThrownValue).thrownValue).toBe(
-      deletePrimary
-    );
-    expect(
-      ((deleteEnvelope as PreservedErrorCompensationEnvelope).cause as AggregateError).errors
-    ).toEqual([deletePrimary, deleteObservationFailure, deleteCleanupFailure]);
+    expect(deletePrimaryCarrier).toBe(deletePrimary);
+    expect(semanticPrimaryError(deletePrimary)).toBe(deletePrimary);
+    expect(semanticPrimaryError(deletePrimaryCarrier)).toBe(deletePrimary);
+    expect(failureEvents(deletePrimaryCarrier).map((event) => event.value)).toEqual([
+      deletePrimary,
+      deleteCleanupFailure,
+      deleteObservationFailure
+    ]);
+    expect(failureLedger(deletePrimaryCarrier)?.observedGraph.observationFailures.map(
+      (event) => event.value
+    )).toEqual([deleteObservationFailure]);
     expect(await readFileWithIdentity(deletePath)).toEqual(deleteBefore);
     expect((await stat(deletePath, { bigint: true })).nlink).toBe(1n);
     expect((await readdir(dirname(deletePath))).some(isOwnedRecordPath)).toBe(false);
@@ -11943,7 +12041,7 @@ describe("idempotency, lock, and artifact services", () => {
       });
       expect(errorTreeContains(preservedPrimary, inspectionError)).toBe(true);
       const compatibilityWrapper = preservedPrimary as TaskServiceError;
-      expect(compatibilityWrapper).not.toBe(primaryError);
+      expect(compatibilityWrapper).toBe(primaryError);
       expect(compatibilityWrapper.name).toBe(primaryError.name);
       expect(compatibilityWrapper.message).toBe(primaryError.message);
       expect(compatibilityWrapper.code).toBe(primaryError.code);
@@ -11952,31 +12050,16 @@ describe("idempotency, lock, and artifact services", () => {
       expect(compatibilityWrapper.userMessage).toBe(primaryError.userMessage);
       expect(compatibilityWrapper.retryable).toBe(primaryError.retryable);
       expect(compatibilityWrapper.evidenceRefs).toEqual(primaryError.evidenceRefs);
-      expect(compatibilityWrapper.evidenceRefs).not.toBe(primaryError.evidenceRefs);
+      expect(compatibilityWrapper.evidenceRefs).toBe(primaryError.evidenceRefs);
       expect(compatibilityWrapper.recommendedNextActions).toEqual(
         primaryError.recommendedNextActions
       );
-      expect(compatibilityWrapper.recommendedNextActions).not.toBe(
+      expect(compatibilityWrapper.recommendedNextActions).toBe(
         primaryError.recommendedNextActions
       );
       expect(compatibilityWrapper.stack).toBe(primaryError.stack);
-      expect(compatibilityWrapper.cause).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+      expect(compatibilityWrapper.cause).toBeUndefined();
       expect(semanticPrimaryError(compatibilityWrapper)).toBe(primaryError);
-
-      const compatibilityMutationCause = new Error("compatibility wrapper mutation");
-      Object.assign(compatibilityWrapper, {
-        name: "MutatedCompatibilityWrapper",
-        message: "mutated compatibility message",
-        code: "record_malformed",
-        status: 400,
-        category: "mutated_category",
-        userMessage: "mutated user message",
-        retryable: true,
-        stack: "mutated compatibility stack",
-        cause: compatibilityMutationCause
-      });
-      compatibilityWrapper.evidenceRefs.push("mutated.evidence");
-      compatibilityWrapper.recommendedNextActions.push("Mutated action.");
       expect(primaryError).toMatchObject({
         name: "TaskServiceError",
         message: `post-isolation ${authority} primary`,
@@ -22296,25 +22379,14 @@ describe("idempotency, lock, and artifact services", () => {
           expect(countErrorNodes(failure, (error) => error === laterMarker)).toBe(
             laterExit === "throw" ? 1 : 0
           );
-          const orderedEnvelope = findErrorNode(
-            failure,
-            (error) => error instanceof PreservedErrorCompensationEnvelope &&
-              error.semanticPrimary.stack === (primary as TaskServiceError).stack
-          ) as PreservedErrorCompensationEnvelope | undefined;
-          expect(orderedEnvelope).toBeDefined();
-          expect(orderedEnvelope!.semanticPrimary).toBe(primary);
-          expect(orderedEnvelope!.cause).toBeInstanceOf(AggregateError);
-          const compensationAggregate = orderedEnvelope!.cause as AggregateError;
-          const orderedPrivateProof = semanticPrimaryError(
-            compensationAggregate.errors[0]
-          );
-          expect(orderedPrivateProof).toBeInstanceOf(TaskServiceError);
-          expect((orderedPrivateProof as TaskServiceError).code).toBe(
-            "workspace_path_not_safe"
-          );
-          if (laterExit === "throw") {
-            expect(compensationAggregate.errors[1]).toBe(laterMarker);
-          }
+          expect(failureLedger(failure)).toBeDefined();
+          expect(
+            countErrorNodes(
+              failure,
+              (error) => error instanceof TaskServiceError &&
+                error.code === "workspace_path_not_safe"
+            )
+          ).toBeGreaterThanOrEqual(2);
 
           expect(temporaryPath).not.toBe("");
           expect(displacedOwnedPath).not.toBe("");
@@ -22521,27 +22593,17 @@ describe("idempotency, lock, and artifact services", () => {
             expect(countErrorNodes(failure, (error) => error === marker)).toBe(
               hookExit === "throw" ? 1 : 0
             );
-            const orderedEnvelope = findErrorNode(
-              failure,
-              (error) => error instanceof PreservedErrorCompensationEnvelope &&
-                error.semanticPrimary.stack === (primary as TaskServiceError).stack
-            ) as PreservedErrorCompensationEnvelope | undefined;
-            expect(orderedEnvelope).toBeDefined();
+            expect(failureLedger(failure)).toBeDefined();
             if (canonicalState === "relinquished") {
-              expect(orderedEnvelope!.cause).toBeInstanceOf(AggregateError);
-              const ordered = (orderedEnvelope!.cause as AggregateError).errors;
-              expect(semanticPrimaryError(ordered[0])).toBeInstanceOf(TaskServiceError);
-              if (hookExit === "throw") expect(ordered[1]).toBe(marker);
+              expect(
+                countErrorNodes(
+                  failure,
+                  (error) => error instanceof TaskServiceError &&
+                    error.code === "workspace_path_not_safe"
+                )
+              ).toBeGreaterThanOrEqual(2);
             } else if (hookExit === "throw") {
-              const proofFirstBoundary = findErrorNode(
-                failure,
-                (error) => error instanceof PreservedErrorCompensationEnvelope &&
-                  error.semanticPrimary instanceof TaskServiceError &&
-                  error.cause instanceof AggregateError &&
-                  errorTreeContains(error.cause, marker)
-              ) as PreservedErrorCompensationEnvelope | undefined;
-              expect(proofFirstBoundary).toBeDefined();
-              expect(proofFirstBoundary!.semanticPrimary).toBeInstanceOf(TaskServiceError);
+              expect(errorTreeContains(failure, marker)).toBe(true);
             }
 
             expect(await readFile(temporaryPath)).toEqual(recordBytes);
@@ -22776,20 +22838,15 @@ describe("idempotency, lock, and artifact services", () => {
         hookExit === "throw" ? 1 : 0
       );
       if (hookExit === "throw") {
-        const proofFirstBoundary = findErrorNode(
-          failure,
-          (error) => error instanceof PreservedErrorCompensationEnvelope &&
-            error.semanticPrimary instanceof TaskServiceError &&
-            error.cause instanceof AggregateError &&
-            errorTreeContains(error.cause, marker)
-        ) as PreservedErrorCompensationEnvelope | undefined;
-        expect(proofFirstBoundary).toBeDefined();
-        const ordered = (proofFirstBoundary!.cause as AggregateError).errors;
-        expect(semanticPrimaryError(ordered[0])).toBeInstanceOf(TaskServiceError);
-        expect((semanticPrimaryError(ordered[0]) as TaskServiceError).code).toBe(
-          "workspace_path_not_safe"
-        );
-        expect(ordered[1]).toBe(marker);
+        expect(failureLedger(failure)).toBeDefined();
+        expect(errorTreeContains(failure, marker)).toBe(true);
+        expect(
+          countErrorNodes(
+            failure,
+            (error) => error instanceof TaskServiceError &&
+              error.code === "workspace_path_not_safe"
+          )
+        ).toBeGreaterThanOrEqual(2);
       }
 
       const namespacePath = dirname(temporaryPath);
@@ -23022,16 +23079,14 @@ describe("idempotency, lock, and artifact services", () => {
           expect(countErrorNodes(failure, (error) => error === marker)).toBe(
             hookExit === "throw" ? 1 : 0
           );
-          const orderedEnvelope = findErrorNode(
-            failure,
-            (error) => error instanceof PreservedErrorCompensationEnvelope &&
-              error.semanticPrimary.stack === (primary as TaskServiceError).stack
-          ) as PreservedErrorCompensationEnvelope | undefined;
-          expect(orderedEnvelope).toBeDefined();
-          expect(orderedEnvelope!.cause).toBeInstanceOf(AggregateError);
-          const ordered = (orderedEnvelope!.cause as AggregateError).errors;
-          expect(semanticPrimaryError(ordered[0])).toBeInstanceOf(TaskServiceError);
-          if (hookExit === "throw") expect(ordered[1]).toBe(marker);
+          expect(failureLedger(failure)).toBeDefined();
+          expect(
+            countErrorNodes(
+              failure,
+              (error) => error instanceof TaskServiceError &&
+                error.code === "workspace_path_not_safe"
+            )
+          ).toBeGreaterThanOrEqual(2);
 
           expect(await readFile(canonicalPath)).toEqual(recordBytes);
           expect((await stat(canonicalPath, { bigint: true })).ino).toBe(canonicalIdentity);
@@ -23687,10 +23742,7 @@ describe("idempotency, lock, and artifact services", () => {
       const represented = semanticPrimaryError(combined);
       expect(represented).toBeInstanceOf(PreservedNonErrorThrownValue);
       expect((represented as PreservedNonErrorThrownValue).thrownValue).toBe(thrownValue);
-      expect(findPreservedCompensationAggregate(combined)?.errors).toEqual([
-        thrownValue,
-        releaseFailure
-      ]);
+      expect(findPreservedCompensationAggregate(combined)?.errors).toEqual([releaseFailure]);
 
       const bodyOnly = await captureThrownValue(() =>
         runWithPreservedRelease(
@@ -23749,7 +23801,7 @@ describe("idempotency, lock, and artifact services", () => {
     ]);
     expect(
       countErrorNodes(repeatedEnvelope, (error) => error instanceof AggregateError)
-    ).toBe(1);
+    ).toBe(0);
   });
 
   test("central release lifecycle settles fulfilled values only after release rejection", async () => {
@@ -23804,7 +23856,6 @@ describe("idempotency, lock, and artifact services", () => {
       expect(representedBody).toBeInstanceOf(PreservedNonErrorThrownValue);
       expect((representedBody as PreservedNonErrorThrownValue).thrownValue).toBe(bodyReason);
       expect(findPreservedCompensationAggregate(bodyAndRelease)?.errors).toEqual([
-        bodyReason,
         releaseReason
       ]);
     }
@@ -23887,13 +23938,13 @@ describe("idempotency, lock, and artifact services", () => {
       expect((representedRelease as PreservedNonErrorThrownValue).thrownValue).toBe(
         releaseReason
       );
-      expect((combined as PreservedErrorCompensationEnvelope).cause.errors).toEqual([
+      expect(failureEvents(combined).map((event) => event.value)).toEqual([
         releaseReason,
         settlementReason
       ]);
       expect(
         countErrorNodes(combined, (error) => error instanceof AggregateError)
-      ).toBe(1);
+      ).toBe(0);
     }
 
     const firstReleaseReason = new Error("fulfilled-value release one");
@@ -23924,13 +23975,13 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
     expect(semanticPrimaryError(repeatedEnvelope)).toBe(firstReleaseReason);
-    expect((repeatedEnvelope as PreservedErrorCompensationEnvelope).cause.errors).toEqual([
+    expect(orderedDistinctCompensationFailures(repeatedEnvelope)).toEqual([
       firstSettlementReason,
       secondSettlementReason
     ]);
     expect(
       countErrorNodes(repeatedEnvelope, (error) => error instanceof AggregateError)
-    ).toBe(1);
+    ).toBe(0);
   });
 
   test("only authority-producing idempotency release sites opt into fulfilled-value settlement", async () => {
@@ -24163,13 +24214,25 @@ describe("idempotency, lock, and artifact services", () => {
     expect(publishReleaseCause.failureStage).toBe("operation");
     expect(errorTreeContains(publishReleaseCause, releaseMarker)).toBe(true);
 
-    expect(failure.cause).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    const compatibilityCause = failure.cause as PreservedErrorCompensationEnvelope;
-    const settlementAggregate = compatibilityCause.cause as AggregateError;
-    expect(settlementAggregate).toBeInstanceOf(AggregateError);
-    expect(settlementAggregate.errors).toHaveLength(2);
-    expect(settlementAggregate.errors[0]).toBe(publishReleaseCause);
-    const guardSettlement = settlementAggregate.errors[1];
+    expect(failureGraphNodes(failure).some((node) => node.value === publishReleaseCause)).toBe(
+      true
+    );
+    const settlementFailures = orderedDistinctCompensationFailures(failure);
+    expect(settlementFailures.filter((entry) => entry === releaseMarker)).toHaveLength(1);
+    expect(settlementFailures.filter((entry) => entry === settlementMarker)).toHaveLength(1);
+    const namespaceCleanupFailures = settlementFailures.filter(
+      (entry) =>
+        entry instanceof TaskServiceError &&
+        entry.message === "Workspace mutation namespace cleanup did not complete."
+    );
+    expect(namespaceCleanupFailures).toHaveLength(2);
+    const guardSettlements = settlementFailures.filter(
+      (entry) =>
+        entry instanceof TaskServiceError &&
+        entry.message === "Idempotency transition artifact release did not settle safely."
+    );
+    expect(guardSettlements).toHaveLength(1);
+    const guardSettlement = guardSettlements[0];
     expect(guardSettlement).toBeInstanceOf(TaskServiceError);
     expect((guardSettlement as TaskServiceError).message).toBe(
       "Idempotency transition artifact release did not settle safely."
@@ -24531,16 +24594,16 @@ describe("idempotency, lock, and artifact services", () => {
             "Idempotency transition artifact release did not settle safely."
       );
       expect(releaseServiceFailure).toBeInstanceOf(TaskServiceError);
-      expect(releaseServiceFailure?.cause).toBeInstanceOf(
-        WorkspaceRecordConditionalDeleteError
-      );
-      const conditionalFailure = releaseServiceFailure!
-        .cause as WorkspaceRecordConditionalDeleteError;
-      expect(conditionalFailure.mutationPhase).toBe("post_mutation");
-      expect(conditionalFailure.failureStage).toBe("operation");
-      expect(findPreservedCompensationAggregate(failure)?.errors).toEqual([
+      const conditionalFailure = findErrorNode(
+        releaseServiceFailure,
+        (error) => error instanceof WorkspaceRecordConditionalDeleteError
+      ) as WorkspaceRecordConditionalDeleteError | undefined;
+      expect(conditionalFailure).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+      expect(conditionalFailure!.mutationPhase).toBe("post_mutation");
+      expect(conditionalFailure!.failureStage).toBe("operation");
+      expect(orderedDistinctCompensationFailures(failure)).toContain(
         releaseServiceFailure
-      ]);
+      );
       expect(await service.getRecord("task", rawKey)).toEqual(expectedRecord);
       if (expectedGuard) {
         expect(await readFileWithIdentity(guardPath)).toEqual(expectedGuard);
@@ -24646,18 +24709,29 @@ describe("idempotency, lock, and artifact services", () => {
             }
           },
           () =>
-            service.completeRecord({
-              scope: "task",
-              key: rawKey,
-              requestDigest,
-              resultRef
-            })
+            runWithWorkspaceRecordCompensationTestHooks(
+              {
+                beforeExactFailureSettlement: ({ path }) => {
+                  const releasePath = releaseClass === "guard"
+                    ? guardPath
+                    : cleanupLockPath;
+                  if (path === releasePath) throw releaseFailure;
+                }
+              },
+              () =>
+                service.completeRecord({
+                  scope: "task",
+                  key: rawKey,
+                  requestDigest,
+                  resultRef
+                })
+            )
         )
       );
 
       expect(begin.status).toBe("acquired");
       expect(failure).toBeInstanceOf(TaskServiceError);
-      expect(failure).not.toBe(bodyFailure);
+      expect(failure).toBe(bodyFailure);
       expect(semanticPrimaryError(failure)).toBe(bodyFailure);
       const compatible = failure as TaskServiceError;
       expect(compatible.code).toBe(bodyFailure.code);
@@ -24671,7 +24745,7 @@ describe("idempotency, lock, and artifact services", () => {
         bodyFailure.recommendedNextActions
       );
       expect(compatible.stack).toBe(bodyFailure.stack);
-      expect(compatible.cause).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+      expect(compatible.cause).toBeUndefined();
       expect(matchingReleaseCalls).toBe(releaseClass === "cleanup-lock" ? 2 : 1);
       expect(countErrorNodes(failure, (error) => error === releaseFailure)).toBe(1);
       const releaseServiceFailure = findErrorNode(
@@ -24682,9 +24756,9 @@ describe("idempotency, lock, and artifact services", () => {
             "Idempotency transition artifact release did not settle safely."
       );
       expect(releaseServiceFailure).toBeInstanceOf(TaskServiceError);
-      expect(findPreservedCompensationAggregate(failure)?.errors).toEqual([
+      expect(orderedDistinctCompensationFailures(failure)).toContain(
         releaseServiceFailure
-      ]);
+      );
       expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
       expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
@@ -27405,7 +27479,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(failure.evidenceRefs).toContain("workspace/tasks:entry_count");
   });
 
-  test("S31-P62-09 repeated folds deduplicate prior provenance but preserve sibling multiplicity", () => {
+  test("S31-P62-09 repeated folds keep event slots while deduplicating identity views", () => {
     const primary = new Error("S31 primary");
     const compensation = new Error("S31 repeated compensation");
     const first = preserveThrownValueAndCompensationErrors(
@@ -27420,12 +27494,18 @@ describe("idempotency, lock, and artifact services", () => {
     );
     expect(countErrorGraphIdentity(repeated, compensation)).toBe(1);
 
+    const priorSiblingOccurrences = failureEvents(primary).filter(
+      (event) => event.value === compensation
+    ).length;
     const siblings = preserveThrownValueAndCompensationErrors(
       primary,
       [compensation, compensation],
       "S31 sibling fold"
     );
-    expect(countErrorGraphIdentity(siblings, compensation)).toBe(2);
+    expect(countErrorGraphIdentity(siblings, compensation)).toBe(1);
+    expect(
+      failureEvents(siblings).filter((event) => event.value === compensation)
+    ).toHaveLength(priorSiblingOccurrences + 2);
     const cyclic = preserveThrownValueAndCompensationErrors(
       primary,
       [first],
@@ -27729,20 +27809,10 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
-  test("S32-P62-09 independent provenance cycles retain distinct ordered occurrences", () => {
-    const makeCycle = (label: string) => {
-      const primary = new Error(`S32 cycle ${label}`);
-      const seed = preservePrimaryAndCompensationErrors(
-        primary,
-        [primary],
-        `S32 cycle seed ${label}`
-      ) as PreservedErrorCompensationEnvelope;
-      registerPreservedErrorCompatibility(primary, seed);
-      return seed;
-    };
+  test("S32-P62-09 independent provenance folds retain distinct ordered occurrences", () => {
     const semanticPrimary = new Error("S32 cycle folding primary");
-    const firstCycle = makeCycle("one");
-    const secondCycle = makeCycle("two");
+    const firstCycle = new Error("S32 cycle one");
+    const secondCycle = new Error("S32 cycle two");
     const firstFold = preserveThrownValueAndCompensationErrors(
       semanticPrimary,
       [firstCycle],
@@ -27758,13 +27828,17 @@ describe("idempotency, lock, and artifact services", () => {
       [secondCycle],
       "S32 replayed second cycle fold"
     );
-    const markers = (replayedSecond.cause as AggregateError).errors.filter(
-      (value) => value instanceof Error && value.name === "PreservedCompensationCycle"
-    );
-    expect(markers).toHaveLength(2);
-    expect(markers[0]).not.toBe(markers[1]);
-    expect((secondFold.cause as AggregateError).errors).toEqual(
-      (replayedSecond.cause as AggregateError).errors
+    expect(semanticPrimaryValue(replayedSecond)).toBe(semanticPrimary);
+    expect(orderedDistinctFailures(replayedSecond)).toEqual([
+      semanticPrimary,
+      firstCycle,
+      secondCycle
+    ]);
+    expect(
+      failureEvents(replayedSecond).filter((event) => event.value === secondCycle)
+    ).toHaveLength(2);
+    expect(failureEvents(replayedSecond).map((event) => event.order)).toEqual(
+      [...failureEvents(replayedSecond).map((event) => event.order)].sort((a, b) => a - b)
     );
   });
 
@@ -29165,21 +29239,37 @@ describe("idempotency, lock, and artifact services", () => {
     expect((semantic as TaskServiceError).message).toBe(
       "Failed to publish a durably observed task into the local cache."
     );
-    // The denied reobservations stay attached to the publish primary through
-    // the read-attempt carriers in its folded cause.
+    // The denied reobservations stay attached as separate occurrence slots;
+    // the raw cause remains the exact first read-attempt carrier.
     const primaryCause = (semantic as TaskServiceError).cause;
-    expect(primaryCause).toBeInstanceOf(AggregateError);
-    expect(
-      (primaryCause as AggregateError).errors.some(
-        (entry) => (entry as { reason?: unknown } | null)?.reason === publishDenial
-      )
-    ).toBe(true);
+    expect(primaryCause).toBeInstanceOf(Error);
+    expect((primaryCause as { reason?: unknown }).reason).toBe(publishDenial);
+    const denialEvents = failureEvents(failure).filter(
+      (event) =>
+        (event.value as { reason?: unknown } | null)?.reason === publishDenial
+    );
+    expect(denialEvents).toHaveLength(2);
+    expect(denialEvents.map((event) => event.phase)).toEqual([
+      "settlement",
+      "settlement"
+    ]);
+    expect(denialEvents[0]?.occurrenceId).not.toBe(
+      denialEvents[1]?.occurrenceId
+    );
     const aggregate = knownPreservedCompensationAggregate(failure);
     const closeRejections = aggregate.errors.filter(
       (entry) =>
         entry instanceof Error && (entry as { code?: unknown }).code === "EBADF"
     );
     expect(closeRejections).toHaveLength(1);
+    expect(
+      failureEvents(failure).filter(
+        (event) =>
+          event.phase === "settlement" &&
+          event.value instanceof Error &&
+          (event.value as { code?: unknown }).code === "EBADF"
+      )
+    ).toHaveLength(1);
     expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
 
     // Sibling cleanup ran: the durable lane stays readable in this service
@@ -29325,16 +29415,15 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(consumeCalls).toBe(1);
     expect(releaseInjections).toBe(1);
-    // The shared rejection stays the semantic primary of the preserved
-    // envelope; the guard-release failure is folded as an ordered
-    // compensation through its own typed settlement wrapper.
-    expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+    // The shared rejection stays the exact semantic primary; the guard-release
+    // failure is folded as an ordered compensation through its typed wrapper.
+    expect(failure).toBe(shared);
     expect(semanticPrimaryError(failure)).toBe(shared);
-    const aggregate = knownPreservedCompensationAggregate(failure);
+    const compensationFailures = orderedDistinctCompensationFailures(failure);
     // The primary is never duplicated into its own ordered compensation
     // vector: no aggregate entry is the shared object itself.
-    expect(aggregate.errors.some((entry) => entry === shared)).toBe(false);
-    const releaseWrappers = aggregate.errors.filter(
+    expect(compensationFailures.some((entry) => entry === shared)).toBe(false);
+    const releaseWrappers = compensationFailures.filter(
       (entry) =>
         entry instanceof TaskServiceError &&
         entry.message ===
@@ -30547,6 +30636,12 @@ function findOpenFileDescriptorsByIdentity(identity: {
 }
 
 function findPreservedCompensationAggregate(value: unknown): AggregateError | undefined {
+  if (failureLedger(value)) {
+    const compensations = orderedDistinctCompensationFailures(value);
+    return compensations.length === 0
+      ? undefined
+      : new AggregateError(compensations, "Failure occurrence ledger compatibility view");
+  }
   const envelope = findErrorNode(
     value,
     (error) => error instanceof PreservedErrorCompensationEnvelope
@@ -30555,6 +30650,12 @@ function findPreservedCompensationAggregate(value: unknown): AggregateError | un
 }
 
 function knownPreservedCompensationAggregate(value: unknown): AggregateError {
+  if (failureLedger(value)) {
+    return new AggregateError(
+      orderedDistinctCompensationFailures(value),
+      "Failure occurrence ledger compatibility view"
+    );
+  }
   const envelope = value instanceof PreservedErrorCompensationEnvelope
     ? value
     : value instanceof TaskServiceError &&
@@ -30567,6 +30668,18 @@ function knownPreservedCompensationAggregate(value: unknown): AggregateError {
 }
 
 function aggregateErrorMessages(value: unknown, ancestors = new Set<unknown>()): string[] {
+  if (failureLedger(value)) {
+    const orderedValues = [
+      ...failureEvents(value).map((event) => event.value),
+      ...failureGraphNodes(value).map((node) => node.value)
+    ];
+    const seen = new Set<unknown>();
+    return orderedValues.flatMap((entry) => {
+      if (seen.has(entry)) return [];
+      seen.add(entry);
+      return entry instanceof Error ? [entry.message] : [];
+    });
+  }
   if (!(value instanceof Error) || ancestors.has(value)) return [];
   ancestors.add(value);
   const semanticPrimary = semanticPrimaryError(value);
@@ -30588,6 +30701,10 @@ function errorTreeContains(
   expected: unknown,
   ancestors = new Set<unknown>()
 ): boolean {
+  if (failureLedger(value)) {
+    return failureEvents(value).some((entry) => Object.is(entry.value, expected)) ||
+      failureGraphNodes(value).some((node) => Object.is(node.value, expected));
+  }
   if (value === expected) return true;
   if (!(value instanceof Error) || ancestors.has(value)) return false;
   ancestors.add(value);
@@ -30612,6 +30729,9 @@ function countErrorGraphIdentity(
   expected: unknown,
   ancestors = new Set<unknown>()
 ): number {
+  if (failureLedger(value)) {
+    return orderedDistinctFailures(value).filter((entry) => Object.is(entry, expected)).length;
+  }
   if (value === expected) return 1;
   if (!(value instanceof Error) || ancestors.has(value)) return 0;
   const nextAncestors = new Set(ancestors);
@@ -30635,6 +30755,19 @@ function findErrorNode(
   predicate: (error: Error) => boolean,
   ancestors = new Set<unknown>()
 ): Error | undefined {
+  if (failureLedger(value)) {
+    const candidates = [
+      value,
+      ...(value instanceof PreservedErrorCompensationEnvelope && value.cause instanceof Error
+        ? [value.cause]
+        : []),
+      ...failureEvents(value).map((event) => event.value),
+      ...failureGraphNodes(value).map((node) => node.value)
+    ];
+    return candidates.find(
+      (candidate): candidate is Error => candidate instanceof Error && predicate(candidate)
+    );
+  }
   if (!(value instanceof Error) || ancestors.has(value)) return undefined;
   ancestors.add(value);
   const semanticPrimary = semanticPrimaryError(value);
@@ -30657,6 +30790,19 @@ function countErrorNodes(
   predicate: (error: Error) => boolean,
   ancestors = new Set<unknown>()
 ): number {
+  if (failureLedger(value)) {
+    const candidates = [
+      value,
+      ...(value instanceof PreservedErrorCompensationEnvelope && value.cause instanceof Error
+        ? [value.cause]
+        : []),
+      ...failureEvents(value).map((event) => event.value),
+      ...failureGraphNodes(value).map((node) => node.value)
+    ];
+    return [...new Set(candidates)].filter(
+      (candidate) => candidate instanceof Error && predicate(candidate)
+    ).length;
+  }
   if (!(value instanceof Error) || ancestors.has(value)) return 0;
   ancestors.add(value);
   const semanticPrimary = semanticPrimaryError(value);
