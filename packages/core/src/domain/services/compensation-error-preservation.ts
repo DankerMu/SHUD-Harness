@@ -170,8 +170,9 @@ interface ObservationState {
   readonly queue: unknown[];
   readonly occurrenceById: Map<symbol, FailureOccurrence>;
   readonly visitedLedgers: Set<PreservedFailureLedger>;
+  readonly errorsContainerSnapshots: WeakMap<object, ErrorsContainerSnapshot>;
   readonly semanticPrimaryValue: unknown;
-  readonly classifiedPrimaryBrand?: FailureGraphNode["errorBrand"];
+  classifiedPrimaryBrand?: FailureGraphNode["errorBrand"];
   queueHead: number;
   edgeCount: number;
   controlledOperationCount: number;
@@ -181,6 +182,17 @@ interface ObservationState {
   numericKeyBudgetRecorded: boolean;
   controlledOperationBudgetRecorded: boolean;
   observationFailureBudgetRecorded: boolean;
+}
+
+interface ErrorsContainerElementSnapshot {
+  readonly index: number;
+  readonly present: boolean;
+  readonly value?: unknown;
+}
+
+interface ErrorsContainerSnapshot {
+  readonly elements: readonly ErrorsContainerElementSnapshot[];
+  readonly overflowWitnessPresent: boolean;
 }
 
 let nextFailureOccurrenceOrder = 1;
@@ -193,6 +205,7 @@ interface FailureCarrierAdoptionState {
 const trustedFailureCarrierAdoptions = new WeakMap<object, FailureCarrierAdoptionState>();
 const claimedFailureCarrierAdoptions = new WeakSet<object>();
 const preservedFailureLedgers = new WeakMap<object, PreservedFailureLedger>();
+const preservedSemanticPrimaryErrors = new WeakMap<object, Error>();
 
 class PreservedFailureCarrier extends Error {
   readonly semanticPrimary: unknown;
@@ -370,12 +383,7 @@ export function semanticPrimaryValue(value: unknown): unknown {
 export function semanticPrimaryError(value: unknown): Error | undefined {
   const ledger = failureLedger(value);
   if (ledger) {
-    const primary = ledger.primary.value;
-    const node = ledger.observedGraph.nodes.find((candidate) => candidate.value === primary);
-    if (node?.errorBrand === "error" || node?.errorBrand === "indeterminate") {
-      return primary as Error;
-    }
-    return undefined;
+    return isObjectLike(value) ? preservedSemanticPrimaryErrors.get(value) : undefined;
   }
   return boundedErrorBrand(value) === "error" ? value as Error : undefined;
 }
@@ -482,6 +490,7 @@ export function mergeTrustedFailureOccurrenceVector(
     queue: [],
     occurrenceById: new Map<symbol, FailureOccurrence>(),
     visitedLedgers: new Set<PreservedFailureLedger>(),
+    errorsContainerSnapshots: new WeakMap<object, ErrorsContainerSnapshot>(),
     semanticPrimaryValue: semanticPrimary.value,
     classifiedPrimaryBrand,
     queueHead: 0,
@@ -494,6 +503,10 @@ export function mergeTrustedFailureOccurrenceVector(
     controlledOperationBudgetRecorded: false,
     observationFailureBudgetRecorded: false
   };
+
+  if (isObjectLike(semanticPrimary.value) && state.classifiedPrimaryBrand === undefined) {
+    state.classifiedPrimaryBrand = observeErrorBrand(semanticPrimary.value, state);
+  }
 
   for (const entry of entrySnapshot) adoptOrRetainEntry(entry, state);
 
@@ -531,6 +544,13 @@ export function mergeTrustedFailureOccurrenceVector(
     ledger.compensations.map((occurrence) => occurrence.value)
   );
   preservedFailureLedgers.set(carrier, ledger);
+  if (
+    isObjectLike(semanticPrimary.value) &&
+    (state.classifiedPrimaryBrand === "error" ||
+      state.classifiedPrimaryBrand === "indeterminate")
+  ) {
+    preservedSemanticPrimaryErrors.set(carrier, semanticPrimary.value as Error);
+  }
   return Object.freeze(carrier);
 }
 
@@ -631,84 +651,74 @@ function observeSparseErrorsArray(
   edges: FailureGraphEdge[],
   state: ObservationState
 ): void {
+  let snapshot = state.errorsContainerSnapshots.get(values);
+  if (!snapshot) {
+    snapshot = inspectSparseErrorsArray(values, state);
+    state.errorsContainerSnapshots.set(values, snapshot);
+  }
+
+  for (const element of snapshot.elements) {
+    if (!element.present) continue;
+    if (!addEdge({
+      kind: "errors",
+      target: element.value,
+      index: element.index
+    }, edges, state)) return;
+  }
+  if (
+    snapshot.overflowWitnessPresent &&
+    state.edgeCount >= FAILURE_GRAPH_MAX_EDGES
+  ) {
+    recordBudgetIssue("edge_budget_exceeded", FAILURE_GRAPH_MAX_EDGES, state);
+  }
+}
+
+function inspectSparseErrorsArray(
+  values: object,
+  state: ObservationState
+): ErrorsContainerSnapshot {
   let keys: (string | symbol)[];
-  if (!chargeControlledOperation(state)) return;
+  if (!chargeControlledOperation(state)) return emptyErrorsContainerSnapshot();
   try {
     keys = Reflect.ownKeys(values);
   } catch (error) {
     recordObservationFailure(error, state);
-    return;
+    return emptyErrorsContainerSnapshot();
   }
 
   type NumericKey = { readonly key: string; readonly index: number };
   const numericKeys: NumericKey[] = [];
-  let numericOverflow: { readonly key: string; readonly index: number } | undefined;
+  let numericOverflow: NumericKey | undefined;
   for (const key of keys) {
-    if (!chargeControlledOperation(state)) return;
+    if (!chargeControlledOperation(state)) break;
     if (typeof key === "string" && isCanonicalArrayIndex(key)) {
-      let omitted: NumericKey | undefined;
       const candidate = { key, index: Number(key) };
       if (numericKeys.length < FAILURE_GRAPH_MAX_NUMERIC_KEYS) {
         numericKeys.push(candidate);
-        let child = numericKeys.length - 1;
-        while (child > 0) {
-          const parent = Math.floor((child - 1) / 2);
-          if (numericKeys[parent]!.index >= numericKeys[child]!.index) break;
-          [numericKeys[parent], numericKeys[child]] = [
-            numericKeys[child]!,
-            numericKeys[parent]!
-          ];
-          child = parent;
-        }
-      } else if (candidate.index < numericKeys[0]!.index) {
-        omitted = numericKeys[0];
-        numericKeys[0] = candidate;
-        let parent = 0;
-        while (true) {
-          const left = parent * 2 + 1;
-          const right = left + 1;
-          if (left >= numericKeys.length) break;
-          const largerChild =
-            right < numericKeys.length &&
-            numericKeys[right]!.index > numericKeys[left]!.index
-              ? right
-              : left;
-          if (numericKeys[parent]!.index >= numericKeys[largerChild]!.index) break;
-          [numericKeys[parent], numericKeys[largerChild]] = [
-            numericKeys[largerChild]!,
-            numericKeys[parent]!
-          ];
-          parent = largerChild;
-        }
       } else {
-        omitted = candidate;
-      }
-      if (
-        omitted &&
-        (numericOverflow === undefined || omitted.index < numericOverflow.index)
-      ) {
-        numericOverflow = omitted;
-        // The first omitted canonical index proves numeric-key exhaustion.
-        // Record that fact at discovery time so a later controlled-work or
-        // edge-budget exit cannot suppress already-known evidence. The budget
-        // recorder is idempotent while `numericOverflow` may still move to a
-        // lower omitted index as the bounded lowest-N heap is refined.
+        numericOverflow = candidate;
         recordBudgetIssue(
           "numeric_key_budget_exceeded",
           FAILURE_GRAPH_MAX_NUMERIC_KEYS,
           state
         );
+        break;
       }
     }
   }
   numericKeys.sort((left, right) => left.index - right.index);
 
+  const elements: ErrorsContainerElementSnapshot[] = [];
   for (const { key, index } of numericKeys) {
     const element = observeOwnArrayElement(values, key, state);
     for (const failure of element.failures) recordObservationFailure(failure, state);
-    if (!element.present) continue;
-    if (!addEdge({ kind: "errors", target: element.value, index }, edges, state)) return;
+    elements.push(Object.freeze({
+      index,
+      present: element.present,
+      ...(element.present ? { value: element.value } : {})
+    }));
   }
+  let overflowWitnessPresent = false;
   if (numericOverflow) {
     const overflowElement = observeOwnArrayElement(
       values,
@@ -718,14 +728,19 @@ function observeSparseErrorsArray(
     for (const failure of overflowElement.failures) {
       recordObservationFailure(failure, state);
     }
-    if (overflowElement.present) {
-      addEdge({
-        kind: "errors",
-        target: overflowElement.value,
-        index: numericOverflow.index
-      }, edges, state);
-    }
+    overflowWitnessPresent = overflowElement.present;
   }
+  return Object.freeze({
+    elements: Object.freeze(elements),
+    overflowWitnessPresent
+  });
+}
+
+function emptyErrorsContainerSnapshot(): ErrorsContainerSnapshot {
+  return Object.freeze({
+    elements: Object.freeze([]),
+    overflowWitnessPresent: false
+  });
 }
 
 function preflightFailureFoldEntries(entries: readonly FailureFoldEntry[]): void {

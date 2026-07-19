@@ -46,8 +46,9 @@ Non-goals:
 
 3. Graph observation is iterative and all engine-controlled work is bounded.
    A FIFO queue observes at most 4096 unique object nodes and 8192 graph edges.
-   After an engine operation returns, the ledger inspects at most 8192 numeric
-   keys per container, performs at most 65536 total controlled
+   After an engine operation returns, the ledger retains at most 8192 numeric
+   keys per container and may classify/read one additional numeric overflow
+   witness, performs at most 65536 total controlled
    prototype/property/descriptor/accessor operations, and records at most 256
    ordinary observation failures plus one stable occurrence for each exhausted
    budget kind. Every controlled unit is charged before work. It reads only own
@@ -144,13 +145,29 @@ same-invariant retro therefore strengthens, rather than replaces, Decisions
 12. Numeric-key capacity counts canonical numeric keys, not their position in
     the array returned by `Reflect.ownKeys()`. Returned strings and symbols are
     classified under the shared controlled-operation budget but do not consume
-    the 8192 numeric-key limit. The 8193rd classified numeric key records one
-    numeric-key budget occurrence; exhaustion before the tail is classified
-    records one controlled-operation occurrence and does not fabricate a
-   numeric overflow. `Reflect.ownKeys()` remains exactly once per container.
-   When N observed present edges already fill the edge budget and a classified
-   N+1 numeric key proves further edge capacity was truncated, edge and numeric
-   budgets each retain one independent occurrence.
+    numeric capacity. The selected set is the first 8192 canonical numeric keys
+    in that single returned snapshot, emitted in numeric-index order; the 8193rd
+    canonical numeric key is the sole overflow witness and stops further key
+    classification. This deliberately does not search an adversarial Proxy tail
+    for globally lower indices: such a search and a strict per-container bound
+    cannot both hold. Ordinary arrays still select their lowest present indices
+    because the engine returns their integer own keys in numeric order.
+
+    Controlled-work exhaustion before an overflow witness records one
+    controlled-operation occurrence and does not fabricate numeric overflow.
+    The observer may read the witness descriptor to distinguish a present edge
+    truncated by capacity, but it never retains more than N numeric edges. When
+    N present edges fill the edge budget and the witness is present, edge and
+    numeric budgets each retain one independent occurrence.
+
+13. `Reflect.ownKeys()` and element descriptors are inspected exactly once per
+    distinct `errors` container per fold. Aliasing parents reuse one immutable
+    container snapshot; edge capacity is still charged separately for each
+    parent edge. The semantic primary's safe Error classification is also
+    computed once per fold and retained privately, independently of whether its
+    graph node fits within the 4096-node observation vector. Therefore
+    `semanticPrimaryError()` remains exact beyond the graph-node boundary while
+    public graph nodes remain bounded.
 
 ## Risk Packs
 
@@ -217,9 +234,10 @@ Domain packs:
     keys are observed in numeric order without a length-wide scan.
   - 25K+ cause chain, cyclic/fresh-per-hop prototypes, deceptive own keys,
     repeated descriptor failures, aliases, throwing accessor, or trapping
-    Proxy -> after each engine call returns, no more than 8192 keys per
-    container, 65536 total controlled operations, and 256 ordinary observation
-    failures are consumed; one occurrence per exhausted budget, no naked
+    Proxy -> after each engine call returns, no more than 8192 numeric keys plus
+    one overflow witness per container, 65536 total controlled operations, and
+    256 ordinary observation failures are consumed; one occurrence per
+    exhausted budget, no naked
     RangeError, and unchanged semantic primary.
   - Revoked `errors` array Proxy -> one array-brand observation failure and no
     child edge/node on that failed path.
@@ -246,8 +264,13 @@ Domain packs:
     `undefined` -> rejection remains present, phase/order is complete, no false
     success, destructive rollback, cleanup-permit/binding/cache-claim leak.
   - `length`/strings/symbols before N or N+1 numeric Proxy keys -> nonnumeric
-    position does not consume numeric capacity; edges and each applicable
-    frozen budget occurrence are exact and `ownKeys` is called once.
+    position does not consume numeric capacity; the first N numeric keys are
+    emitted in numeric order, one N+1 witness closes classification, edges and
+    each applicable frozen budget occurrence are exact, and each aliased
+    container is inspected once per fold.
+  - A semantic primary after 4096 earlier vector objects -> exact raw Error is
+    still returned by `semanticPrimaryError()` even when its graph node is
+    omitted with explicit node-budget evidence.
   - Normal N+1 present numeric descriptors -> N edges plus exactly one numeric
     and one edge budget occurrence; deceptive/unknown tails do not fabricate
     edge evidence without a proven present edge.

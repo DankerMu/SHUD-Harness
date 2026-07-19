@@ -20,7 +20,10 @@ import {
   taskServiceErrorAtBoundary
 } from "./index";
 import * as failurePreservation from "./compensation-error-preservation";
-import { runWithPreservedRelease } from "./compensation-error-preservation";
+import {
+  runWithPreservedRelease,
+  semanticPrimaryError
+} from "./compensation-error-preservation";
 import { TaskServiceError } from "./task-card-service";
 
 describe("failure occurrence ledger", () => {
@@ -1036,8 +1039,14 @@ describe("failure occurrence ledger", () => {
         : [];
 
       expect(ownKeysCalls).toBe(1);
+      const expectedFirstReturned = numericCount > FAILURE_GRAPH_MAX_NUMERIC_KEYS
+        ? 1
+        : 0;
       expect(edges.map((edge) => edge.index)).toEqual(
-        Array.from({ length: expectedEdgeCount }, (_, index) => index)
+        Array.from(
+          { length: expectedEdgeCount },
+          (_, index) => index + expectedFirstReturned
+        )
       );
       expect(observationIssueCodes(result)).toEqual(expectedIssues);
       expect(Object.isFrozen(ledger.observedGraph.nodes)).toBe(true);
@@ -1117,6 +1126,191 @@ describe("failure occurrence ledger", () => {
     expect(semanticPrimaryValue(result)).toBe(primary);
   });
 
+  test("stops a 65,536-key Proxy after the first N numeric keys and one witness", () => {
+    const numericCount = 65_536;
+    const returnedNumericKeys = Array.from(
+      { length: numericCount },
+      (_, index) => String(numericCount - index - 1)
+    );
+    let ownKeysCalls = 0;
+    let descriptorReads = 0;
+    const marker = Object.freeze({ kind: "bounded-first-returned" });
+    const errors = new Proxy([], {
+      ownKeys() {
+        ownKeysCalls += 1;
+        return ["length", "metadata", Symbol("metadata"), ...returnedNumericKeys];
+      },
+      getOwnPropertyDescriptor(target, property) {
+        if (property === "length") {
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        }
+        if (typeof property !== "string" || !/^\d+$/.test(property)) {
+          throw new Error(`tail descriptor must not be read: ${String(property)}`);
+        }
+        descriptorReads += 1;
+        return {
+          configurable: true,
+          enumerable: true,
+          value: marker,
+          writable: true
+        };
+      }
+    });
+    const primary = new AggregateError([], "65,536 numeric keys");
+    Object.defineProperty(primary, "errors", { value: errors });
+
+    const result = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", primary),
+      [],
+      "65,536 numeric keys"
+    );
+    const ledger = failureLedger(result)!;
+    const edges = ledger.observedGraph.nodes[0]!.edges.filter(
+      (edge) => edge.kind === "errors"
+    );
+
+    expect(ownKeysCalls).toBe(1);
+    expect(descriptorReads).toBe(FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1);
+    expect(edges.map((edge) => edge.index)).toEqual(Array.from(
+      { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS },
+      (_, index) => numericCount - FAILURE_GRAPH_MAX_NUMERIC_KEYS + index
+    ));
+    expect(observationIssueCodes(result)).toEqual([
+      "numeric_key_budget_exceeded",
+      "edge_budget_exceeded"
+    ]);
+    expect(Object.isFrozen(ledger.events)).toBe(true);
+    expect(Object.isFrozen(ledger.observedGraph.nodes)).toBe(true);
+    expect(Object.isFrozen(ledger.observedGraph.nodes[0]!.edges)).toBe(true);
+    expect(Object.isFrozen(ledger.observedGraph.observationFailures)).toBe(true);
+  });
+
+  test("reuses one immutable errors-container snapshot across aliasing parents", () => {
+    const stable = Object.freeze({ kind: "stable-shared-edge" });
+    const descriptorFailure = new Error("shared descriptor failure");
+    let ownKeysCalls = 0;
+    let descriptorReads = 0;
+    const sharedErrors = new Proxy([], {
+      ownKeys() {
+        ownKeysCalls += 1;
+        return ownKeysCalls === 1 ? ["length", "0", "1"] : ["length", "2"];
+      },
+      getOwnPropertyDescriptor(target, property) {
+        if (property === "length") {
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        }
+        descriptorReads += 1;
+        if (property === "1") throw descriptorFailure;
+        return {
+          configurable: true,
+          enumerable: true,
+          value: descriptorReads === 1 ? stable : Object.freeze({ descriptorReads }),
+          writable: true
+        };
+      }
+    });
+    const firstParent = Object.freeze({ errors: sharedErrors });
+    const secondParent = Object.freeze({ errors: sharedErrors });
+    const primary = new AggregateError([firstParent, secondParent], "shared errors alias");
+
+    const result = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", primary),
+      [],
+      "shared errors alias"
+    );
+    const ledger = failureLedger(result)!;
+    const firstEdges = ledger.observedGraph.nodes.find(
+      (node) => node.value === firstParent
+    )!.edges.filter((edge) => edge.kind === "errors");
+    const secondEdges = ledger.observedGraph.nodes.find(
+      (node) => node.value === secondParent
+    )!.edges.filter((edge) => edge.kind === "errors");
+
+    expect(ownKeysCalls).toBe(1);
+    expect(descriptorReads).toBe(2);
+    expect(firstEdges).toEqual([{ kind: "errors", target: stable, index: 0 }]);
+    expect(secondEdges).toEqual([{ kind: "errors", target: stable, index: 0 }]);
+    expect(ledger.observedGraph.observationFailures.map((event) => event.value)).toEqual([
+      descriptorFailure
+    ]);
+    expect(Object.isFrozen(firstEdges[0])).toBe(true);
+    expect(Object.isFrozen(secondEdges[0])).toBe(true);
+  });
+
+  test("records shared errors-container overflow evidence once", () => {
+    const stable = Object.freeze({ kind: "stable-shared-overflow-edge" });
+    const overflowKeys = Array.from(
+      { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1 },
+      (_, index) => String(index)
+    );
+    let overflowOwnKeysCalls = 0;
+    let overflowDescriptorReads = 0;
+    const sharedOverflow = new Proxy([], {
+      ownKeys() {
+        overflowOwnKeysCalls += 1;
+        return ["length", ...overflowKeys];
+      },
+      getOwnPropertyDescriptor(target, property) {
+        if (property === "length") {
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        }
+        overflowDescriptorReads += 1;
+        return {
+          configurable: true,
+          enumerable: true,
+          value: stable,
+          writable: true
+        };
+      }
+    });
+    const overflowFirstParent = Object.freeze({ errors: sharedOverflow });
+    const overflowSecondParent = Object.freeze({ errors: sharedOverflow });
+    const overflowPrimary = new AggregateError(
+      [overflowFirstParent, overflowSecondParent],
+      "shared overflow alias"
+    );
+    const overflowResult = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", overflowPrimary),
+      [],
+      "shared overflow alias"
+    );
+
+    expect(overflowOwnKeysCalls).toBe(1);
+    expect(overflowDescriptorReads).toBe(FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1);
+    expect(observationIssueCodes(overflowResult)).toEqual([
+      "numeric_key_budget_exceeded",
+      "edge_budget_exceeded"
+    ]);
+  });
+
+  test("retains the exact semantic primary Error beyond the public node budget", () => {
+    const earlier = Array.from(
+      { length: FAILURE_GRAPH_MAX_NODES },
+      (_, index) => Object.freeze({ index })
+    );
+    const first = captureFailureOccurrence("initial_release", earlier[0]);
+    const earlierSettlements = earlier.slice(1).map((value) =>
+      captureFailureOccurrence("settlement", value)
+    );
+    const exactPrimary = new Error("semantic primary after node boundary");
+    const primary = captureFailureOccurrence("settlement", exactPrimary);
+
+    const result = failurePreservation.mergeTrustedFailureOccurrenceVector(
+      primary,
+      [first, ...earlierSettlements, primary],
+      "late semantic primary"
+    );
+    const ledger = failureLedger(result)!;
+
+    expect(semanticPrimaryError(result)).toBe(exactPrimary);
+    expect(semanticPrimaryValue(result)).toBe(exactPrimary);
+    expect(ledger.observedGraph.nodes).toHaveLength(FAILURE_GRAPH_MAX_NODES);
+    expect(ledger.observedGraph.nodes.some((node) => node.value === exactPrimary)).toBe(false);
+    expect(observationIssueCodes(result)).toEqual(["node_budget_exceeded"]);
+    expect(Object.isFrozen(ledger.observedGraph.nodes)).toBe(true);
+    expect(Object.isFrozen(ledger.events)).toBe(true);
+  });
+
   test("records known numeric overflow before a preoccupied semantic edge exhausts the edge budget", () => {
     const marker = Object.freeze({ kind: "numeric-edge-marker" });
     const numericKeys = Array.from(
@@ -1182,7 +1376,7 @@ describe("failure occurrence ledger", () => {
     expect(semanticPrimaryValue(result)).toBe(primary);
   });
 
-  test("records known numeric overflow before a later nonnumeric tail exhausts controlled work", () => {
+  test("stops classification at a known numeric overflow before a nonnumeric tail", () => {
     const numericKeys = Array.from(
       { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1 },
       (_, index) => String(index)
@@ -1222,11 +1416,11 @@ describe("failure occurrence ledger", () => {
     expect(ownKeysCalls).toBe(1);
     expect(observationIssueCodes(result)).toEqual([
       "numeric_key_budget_exceeded",
-      "controlled_operation_budget_exceeded"
+      "edge_budget_exceeded"
     ]);
     expect(ledger.observedGraph.nodes[0]!.edges.filter(
       (edge) => edge.kind === "errors"
-    )).toEqual([]);
+    )).toHaveLength(FAILURE_GRAPH_MAX_NUMERIC_KEYS);
     expect(ledger.observedGraph.observationFailures).toHaveLength(2);
     expect(ledger.observedGraph.observationFailures.every(Object.isFrozen)).toBe(true);
     expect(Object.isFrozen(ledger.events)).toBe(true);
@@ -1243,7 +1437,7 @@ describe("failure occurrence ledger", () => {
 
   test("does not fabricate edge exhaustion when the omitted reverse/interleaved overflow descriptor is absent", () => {
     for (const order of ["reverse", "interleaved"] as const) {
-      const overflowIndex = FAILURE_GRAPH_MAX_NUMERIC_KEYS;
+      const overflowIndex = 0;
       const marker = Object.freeze({ order });
       const numericKeys = Array.from(
         { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1 },
@@ -1300,7 +1494,7 @@ describe("failure occurrence ledger", () => {
         (edge) => edge.index
       )).toEqual(Array.from(
         { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS },
-        (_, index) => index
+        (_, index) => index + 1
       ));
       expect(observationIssueCodes(result)).toEqual([
         "numeric_key_budget_exceeded"

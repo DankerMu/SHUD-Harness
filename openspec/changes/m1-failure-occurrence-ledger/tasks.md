@@ -29,16 +29,19 @@
 ## 2. Bounded Hostile Observation
 
 - [x] 2.1 Retain iterative 4096-node/8192-edge limits and add pre-charged
-  limits after engine calls return: at most 8192 numeric keys per container,
+  limits after engine calls return: at most 8192 retained numeric keys plus one
+  classified/read overflow witness per container,
   65536 total controlled prototype/property/descriptor/accessor operations,
   and 256 ordinary observation failures plus one event per exhausted budget.
 - [x] 2.2 Replace unbounded `instanceof`/prototype traversal with bounded brand
   work covering cyclic and fresh-per-hop Proxy prototypes. Each exhausted
   budget records exactly one frozen observation occurrence.
-- [x] 2.3 Call `Reflect.ownKeys()` at most once per observed array/container;
-  after it returns, bound numeric-key filtering/sorting and throwing descriptor
-  reads before ledger-controlled work. For at least 16,384 returned keys, prove
-  no more than 8192 are inspected and calls/events stay within declared limits.
+- [x] 2.3 Call `Reflect.ownKeys()` at most once per distinct array/container per
+  fold and reuse one immutable snapshot for aliases. After it returns, retain
+  only the first 8192 returned canonical numeric keys, sort only that bounded
+  selected set, classify/read at most one overflow witness, and stop key
+  classification. For at least 16,384 returned keys, prove no more than N+1
+  numeric keys/descriptors are inspected and calls/events stay within limits.
 - [x] 2.4 Model array-brand observation as `array | non_array | failed`; on
   failure record exactly one occurrence and add no child edge/node.
 - [x] 2.5 Retain N-1/N/N+1 node/edge, max-length sparse array, 25K+ chain,
@@ -130,8 +133,10 @@
   envelope; untrusted lookalikes MUST stay generic and no caller constructor or
   getter may run.
 - [x] 7.4 Count actual canonical numeric keys independently from returned-key
-  position. Cover N-1/N/N+1 with `length`, strings, and symbols reordered;
-  assert one `ownKeys` call, complete edges, exact frozen budget vectors,
+  position. Select the first N returned numeric keys and emit the bounded set in
+  numeric order; do not scan an adversarial Proxy tail for globally lower
+  indices. Cover N-1/N/N+1 with `length`, strings, and symbols reordered; assert
+  one `ownKeys` call per aliased container, complete edges, exact frozen vectors,
   strictly increasing unique order, and unchanged semantic primary. Restore
   independent edge and numeric occurrences for a normal N+1 present-descriptor
   array without fabricating edge evidence for an unclassified/absent tail.
@@ -150,3 +155,17 @@
 - [x] 7.8 Run dedicated and real-producer focused tests, full core/backend,
   typecheck, root `check`, strict OpenSpec, diff/stash/submodule/Zero/workspace
   hygiene, then complete a full-inventory invariant audit before Round 3.
+
+## 8. Round-3 Split Child A2 — Observation Bounds
+
+- [x] 8.1 Enforce the reconciled first-N-plus-one-witness numeric contract and
+  update prior lowest-N tests without changing historical replay-patch bytes.
+- [x] 8.2 Memoize each distinct `errors` container inspection once per fold;
+  reuse the immutable snapshot across parent aliases while charging each edge.
+- [x] 8.3 Preserve exact semantic-primary Error identity independently of the
+  4096-node public graph budget.
+- [x] 8.4 Capture red-first regressions for a 65,536 numeric-key Proxy, a shared
+  mutating Array Proxy, and a late vector semantic primary; cover N-1/N/N+1,
+  descriptor failures, frozen vectors, budget events, and alias edge fan-out.
+- [x] 8.5 Run dedicated, full core/backend, typecheck, root check, strict
+  OpenSpec, and incremental hygiene verification on the final A2 head.
