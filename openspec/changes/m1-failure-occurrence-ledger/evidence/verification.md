@@ -425,7 +425,10 @@ bindings after the Round-3 breadth split.
 
 The tracked definitive audit is
 `evidence/phase-6.2-definitive-audit.md`. Replay-artifact whitespace accounting
-and fresh-clone commands are in `evidence/replay-whitespace-exceptions.md`.
+and fresh-clone commands are in `evidence/replay-whitespace-exceptions.md`;
+their executable authority and 17-scenario lifecycle matrix are under
+`evidence/scripts/verify-replay-evidence.sh` and
+`evidence/scripts/verify-replay-evidence.test.sh`.
 No canonical claim depends on `.workplans`.
 
 Final A2 verification:

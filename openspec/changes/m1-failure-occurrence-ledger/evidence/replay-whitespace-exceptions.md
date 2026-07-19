@@ -48,51 +48,17 @@ Expected results:
 - `rg` returns exactly the seven plus six lines above;
 - hashes match the two values above.
 
-Patch preflight was executed in detached temporary worktrees:
+The canonical replay verifier and its deterministic lifecycle fault matrix are
+tracked beside this report:
 
 ```sh
-set -eu
-repo_root=$(git rev-parse --show-toplevel)
-replay_root=$(mktemp -d "${TMPDIR:-/tmp}/shud-ledger-replay.XXXXXX")
-cleanup_replay_worktrees() {
-  replay_status=$?
-  trap - EXIT
-  trap '' HUP INT TERM
-  git -C "$repo_root" worktree unlock "$replay_root/round-1" >/dev/null 2>&1 || true
-  git -C "$repo_root" worktree unlock "$replay_root/round-2" >/dev/null 2>&1 || true
-  git -C "$repo_root" worktree remove --force "$replay_root/round-1" >/dev/null 2>&1 || true
-  git -C "$repo_root" worktree remove --force "$replay_root/round-2" >/dev/null 2>&1 || true
-  rmdir "$replay_root" >/dev/null 2>&1 || true
-  exit "$replay_status"
-}
-trap cleanup_replay_worktrees EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-git -C "$repo_root" worktree add --detach "$replay_root/round-1" \
-  a370f8e3a510b34c47d642f10f7d095aa8bb4b26
-git -C "$replay_root/round-1" apply --check \
-  "$repo_root/openspec/changes/m1-failure-occurrence-ledger/evidence/repair-round-1/phase-6.2/red-before-tests.patch"
-
-git -C "$repo_root" worktree add --detach "$replay_root/round-2" \
-  b425a68aa6e3f886c424d439f48bb97ac05bac23
-git -C "$replay_root/round-2" apply --check \
-  "$repo_root/openspec/changes/m1-failure-occurrence-ledger/evidence/repair-round-2/red-before-backend-undefined.patch"
-
-git -C "$repo_root" worktree remove "$replay_root/round-1"
-git -C "$repo_root" worktree remove "$replay_root/round-2"
-rmdir "$replay_root"
-trap - EXIT HUP INT TERM
+./openspec/changes/m1-failure-occurrence-ledger/evidence/scripts/verify-replay-evidence.sh
+./openspec/changes/m1-failure-occurrence-ledger/evidence/scripts/verify-replay-evidence.test.sh
 ```
 
-The complete block was copied from this tracked file and executed from the
-repository root: both `git apply --check` commands exited 0, both temporary
-worktrees were removed, and the temporary root no longer existed. Patch-check
-failure and locked-worktree cleanup probes each returned nonzero; the EXIT trap
-then ignored later HUP/INT/TERM signals, unlocked and force-removed their
-temporary worktrees without residue, and retained the first failure/signal
-status. Rotating double-signal probes covered HUP, INT, and TERM during cleanup.
-A clean
-incremental A3 `git diff --check` must exit 0 because A3 introduces no new
-whitespace exception.
+The verifier exited 0 after both `git apply --check` commands and strict cleanup.
+The self-test passed 17/17 normal, add/patch/partial, dirty/locked/missing
+cleanup, startup signal, double-signal, and failure-during-cleanup scenarios.
+Every case retained its required status and left no registered worktree or
+temporary root. A clean incremental A3 `git diff --check` must exit 0 because
+A3 introduces no new whitespace exception.

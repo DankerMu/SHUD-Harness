@@ -184,3 +184,7 @@
 - [x] 9.4 Bind final source/test diff hashes, file hashes, replay artifact
   hashes, replay preflight commands, strict OpenSpec, and final-head hygiene to
   the A1/A2 semantic stack without using `.workplans` as canonical evidence.
+- [x] 9.5 Replace the inline replay lifecycle with one tracked executable
+  verifier whose cleanup authority exists before temporary state, and prove
+  normal, partial, failure, dirty/locked/missing, and single/double-signal paths
+  with a deterministic zero-residue self-test matrix.
