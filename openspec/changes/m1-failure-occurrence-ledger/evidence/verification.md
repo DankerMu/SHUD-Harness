@@ -7,7 +7,8 @@
 > requirements. The repair must append a new final-head verification section
 > that supersedes every conflicting claim and hash.
 
-> **Round-2 review status.** The binding at `b425a68` is not merge evidence:
+> **Round-2 review status.** The binding at
+> `b425a68aa6e3f886c424d439f48bb97ac05bac23` is not merge evidence:
 > Round 2 verified six findings and triggered a same-invariant depth retro.
 > Tasks 7.1-7.8 and a new final-head binding must be completed before merge.
 
@@ -275,7 +276,8 @@ Verified on `2026-07-19 12:39:24 EDT`. The semantic repair head is
 `730276230aa6992e09f5e5b3427880a68e5772b1` on branch
 `codex/issue-108-ledger-foundation`, based on
 `5a450a97f2a474af2f4db26bd9ee198adb7395ec`. This section supersedes the
-Round-2 reviewed head `b425a68` and every earlier verification count/hash for
+Round-2 reviewed head `b425a68aa6e3f886c424d439f48bb97ac05bac23`
+and every earlier verification count/hash for
 merge purposes.
 
 ### Corrective-action and architecture closure
@@ -306,11 +308,13 @@ merge purposes.
 ### Replayable red evidence
 
 - `evidence/repair-round-2/red-before-core-depth.patch` plus
-  `round2-depth-regression.test.ts` replay on `b425a68`: exit 1; 2 pass,
+  `round2-depth-regression.test.ts` replay on
+  `b425a68aa6e3f886c424d439f48bb97ac05bac23`: exit 1; 2 pass,
   3 intended fail, 10 assertions. The identical command on the semantic repair
   head exits 0 with 5 pass, 0 fail, 46 assertions.
 - `evidence/repair-round-2/red-before-backend-undefined.patch` replay on
-  `b425a68`: exit 1; the old adapter static check fails, exact `undefined`
+  `b425a68aa6e3f886c424d439f48bb97ac05bac23`: exit 1; the old adapter static
+  check fails, exact `undefined`
   finalizer rejection returns 201 instead of 500, and reconciliation loses the
   expected `body, settlement` vector.
 - `evidence/repair-round-2/red-before-report.md` records which dirty-baseline

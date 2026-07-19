@@ -27,7 +27,7 @@ Lines: 51, 68, 160, 205, 209, and 376.
 SHA-256:
 `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
 
-Replay base: `b425a68`.
+Replay base: `b425a68aa6e3f886c424d439f48bb97ac05bac23`.
 
 ## Fresh-clone verification
 
@@ -55,27 +55,40 @@ set -eu
 repo_root=$(git rev-parse --show-toplevel)
 replay_root=$(mktemp -d "${TMPDIR:-/tmp}/shud-ledger-replay.XXXXXX")
 cleanup_replay_worktrees() {
-  git -C "$repo_root" worktree remove "$replay_root/round-1" >/dev/null 2>&1 || true
-  git -C "$repo_root" worktree remove "$replay_root/round-2" >/dev/null 2>&1 || true
+  replay_status=$?
+  trap - EXIT
+  git -C "$repo_root" worktree unlock "$replay_root/round-1" >/dev/null 2>&1 || true
+  git -C "$repo_root" worktree unlock "$replay_root/round-2" >/dev/null 2>&1 || true
+  git -C "$repo_root" worktree remove --force "$replay_root/round-1" >/dev/null 2>&1 || true
+  git -C "$repo_root" worktree remove --force "$replay_root/round-2" >/dev/null 2>&1 || true
   rmdir "$replay_root" >/dev/null 2>&1 || true
+  exit "$replay_status"
 }
-trap cleanup_replay_worktrees EXIT HUP INT TERM
+trap cleanup_replay_worktrees EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 git -C "$repo_root" worktree add --detach "$replay_root/round-1" \
   a370f8e3a510b34c47d642f10f7d095aa8bb4b26
 git -C "$replay_root/round-1" apply --check \
   "$repo_root/openspec/changes/m1-failure-occurrence-ledger/evidence/repair-round-1/phase-6.2/red-before-tests.patch"
 
-git -C "$repo_root" worktree add --detach "$replay_root/round-2" b425a68
+git -C "$repo_root" worktree add --detach "$replay_root/round-2" \
+  b425a68aa6e3f886c424d439f48bb97ac05bac23
 git -C "$replay_root/round-2" apply --check \
   "$repo_root/openspec/changes/m1-failure-occurrence-ledger/evidence/repair-round-2/red-before-backend-undefined.patch"
 
-cleanup_replay_worktrees
+git -C "$repo_root" worktree remove "$replay_root/round-1"
+git -C "$repo_root" worktree remove "$replay_root/round-2"
+rmdir "$replay_root"
 trap - EXIT HUP INT TERM
 ```
 
 The complete block was copied from this tracked file and executed from the
 repository root: both `git apply --check` commands exited 0, both temporary
-worktrees were removed, and the temporary root no longer existed. A clean
+worktrees were removed, and the temporary root no longer existed. Patch-check
+failure and locked-worktree cleanup probes each returned nonzero; the EXIT trap
+then unlocked and force-removed their temporary worktrees without residue. A clean
 incremental A3 `git diff --check` must exit 0 because A3 introduces no new
 whitespace exception.
