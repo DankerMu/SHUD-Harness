@@ -3,8 +3,9 @@
 - Date: 2026-07-19
 - Working branch: `codex/issue-108-ledger-foundation`
 - Frozen red source: `b425a68aa6e3f886c424d439f48bb97ac05bac23`
-- The exact semantic repair commit is bound by the final Round 2 section in
-  `../verification.md` after the implementation commit is created.
+- Semantic repair commit:
+  `730276230aa6992e09f5e5b3427880a68e5772b1`; the final Round 2 section in
+  `../verification.md` binds its exact source/test bytes and commands.
 
 ## Identical core red/green command
 
@@ -26,7 +27,11 @@ Result: exit 0; 5 pass, 0 fail, 46 assertions.
   tool-registry, backend HTTP/WebSocket, frontend, schema, core-service, and
   GLM-provider suites completed.
 - Strict OpenSpec validation: exit 0; change is valid.
-- `git diff --check`: exit 0; `git stash list` contains no `red-proof` stash.
+- Incremental implementation/spec/test diff check excluding replay-patch bytes:
+  exit 0; `git stash list` contains no `red-proof` stash. The committed backend
+  replay patch contains six literal `+ ` blank lines from the captured unified
+  diff, so a range-wide `git diff --check` reports those artifact lines. They
+  are retained to preserve exact replay bytes and are not source whitespace.
 - Final full-inventory Phase 6.2 audit: clean across shared helper, public
   entrypoint, producer/consumer, rollback/release, stale/idempotency, and
   unchanged-consumer surfaces.

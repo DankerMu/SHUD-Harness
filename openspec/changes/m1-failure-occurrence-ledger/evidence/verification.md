@@ -268,3 +268,137 @@ Final file SHA-256 values:
   `d07f70e4d992095e9741ae984494b6bfbfdc8e1f48f61bd15816e85f8a7d0557`;
 - `packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts`:
   `788bbd462639ff3e15b1b86879e2ee3a5e84b4b7a7cf1c13073870b1d33cc874`.
+
+## Final Round-2 depth repair binding (supersedes all prior merge evidence)
+
+Verified on `2026-07-19 12:39:24 EDT`. The semantic repair head is
+`730276230aa6992e09f5e5b3427880a68e5772b1` on branch
+`codex/issue-108-ledger-foundation`, based on
+`5a450a97f2a474af2f4db26bd9ee198adb7395ec`. This section supersedes the
+Round-2 reviewed head `b425a68` and every earlier verification count/hash for
+merge purposes.
+
+### Corrective-action and architecture closure
+
+- The fold ABI is occurrence/adoption-only. Explicit carrier adoption imports
+  prior occurrence IDs once and adds a fresh occurrence for the current
+  physical catch; untrusted, duplicate, stale/reused, reordered, cardinality-
+  invalid, and phase-invalid entries reject transactionally.
+- Exact raw identity and operation-owned lookup are mutually incompatible when
+  one raw object is reused sequentially, concurrently, or reentrantly. The
+  accepted architecture therefore uses a unique operation carrier plus an
+  exact semantic accessor. This is the tracked decision selected after the
+  architecture spike, not a compatibility shortcut.
+- Exact `undefined`, nullish, and falsy failures use explicit discriminated
+  outcomes rather than value sentinels across backend and in-scope core release
+  siblings.
+- Authority transport is a core-owned closure-branded family; it does not use
+  name, field, prototype, constructor, or caller-code inspection.
+- Numeric-key accounting selects the lowest canonical present keys with a
+  bounded max-heap independent of returned-key position. Known numeric-budget
+  exhaustion is recorded when proved, so later edge/control exhaustion cannot
+  swallow it; absent descriptors do not fabricate edge evidence.
+- TaskCard, backend, idempotency, and workspace callers were migrated by symbol
+  without changing private generation settlement, unrelated business state,
+  persisted schemas, dependencies, frontend behavior, Zero, or public HTTP
+  payloads.
+
+### Replayable red evidence
+
+- `evidence/repair-round-2/red-before-core-depth.patch` plus
+  `round2-depth-regression.test.ts` replay on `b425a68`: exit 1; 2 pass,
+  3 intended fail, 10 assertions. The identical command on the semantic repair
+  head exits 0 with 5 pass, 0 fail, 46 assertions.
+- `evidence/repair-round-2/red-before-backend-undefined.patch` replay on
+  `b425a68`: exit 1; the old adapter static check fails, exact `undefined`
+  finalizer rejection returns 201 instead of 500, and reconciliation loses the
+  expected `body, settlement` vector.
+- `evidence/repair-round-2/red-before-report.md` records which dirty-baseline
+  failures cannot be losslessly replayed because their pre-source state was not
+  preserved. Those observations are not presented as replayable proof.
+
+### Final local verification
+
+- Dedicated ledger/backend command:
+  `npx --yes bun@1.2.19 test packages/core/src/domain/services/failure-occurrence-ledger.test.ts packages/backend/src/routes/failure-occurrence-ledger-routes.test.ts`
+  -> exit 0; 27 pass, 0 fail, 376 assertions.
+- Round-2 corrective regression command:
+  `npx --yes bun@1.2.19 test openspec/changes/m1-failure-occurrence-ledger/evidence/repair-round-2/round2-depth-regression.test.ts`
+  -> exit 0; 5 pass, 0 fail, 46 assertions.
+- `npx --yes bun@1.2.19 run test:core-services` -> exit 0; 430 pass,
+  5 platform-conditioned skips, 0 fail, 29,117 assertions across 435 tests.
+- `npx --yes bun@1.2.19 run test:backend-api` -> exit 0; 161 pass,
+  0 fail, 5,092 assertions across 161 tests.
+- `npx --yes bun@1.2.19 run typecheck` -> exit 0.
+- `npx --yes bun@1.2.19 run check` -> exit 0; policy, tool-registry,
+  backend HTTP/WebSocket, frontend, schemas, core services, and GLM provider
+  all completed.
+- `npx --yes openspec validate m1-failure-occurrence-ledger --strict --no-interactive`
+  -> exit 0 (`Change 'm1-failure-occurrence-ledger' is valid`).
+- Final Phase 6.2 full-inventory audit:
+  `.workplans/issue-108-ledger/review/phase-6.2-round-2-definitive-audit.md`
+  -> clean; all shared-helper, entrypoint, read/write, release/rollback,
+  producer/consumer, stale/idempotency, and unchanged-consumer surfaces were
+  covered.
+
+### Oracle, declaration, and hygiene evidence
+
+- Tasks 7.1-7.8 are complete. No acceptance criterion, selected risk-pack
+  scenario, existing test, spec requirement, or CI command was weakened or
+  deleted to obtain green results.
+- Static `test()` declarations are 24 dedicated core plus 3 dedicated backend
+  (27 total, matching runtime), 396 large core-service versus 381 at base, and
+  158 backend route versus 154 at base.
+- No `red-proof` stash remains. No temporary replay worktree is retained. No
+  dependency manifest, `zero/` gitlink, tracked workspace output, or submodule
+  pin is changed; Zero remains
+  `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`.
+- Incremental implementation/spec/test whitespace check excluding captured
+  replay-patch bytes exits 0. The backend replay patch intentionally retains
+  six literal `+ ` blank lines from its captured unified diff; a range-wide
+  `git diff --check` reports only those evidence-artifact lines. Removing them
+  would change the replay bytes. This is an evidence-format limit, not product
+  source whitespace.
+- The known monotonic-clock defect is unrelated to this change and is routed to
+  follow-up issue `#111`; it is not fixed or silently deferred in this PR.
+
+### Source, test, and replay hash binding
+
+The source diff SHA-256 over the seven product-source paths is
+`b5aeb6517f0f9a91dfd1fc4b00b1edfbc974a32dd274f018403f735f83339263`.
+The test diff SHA-256 over the four runtime-test paths is
+`0f4a32ba42be17a728c6b0f6461389682f7914f2613f85f38f7bafa4b7cd59dc`.
+
+Final file SHA-256 values:
+
+- `packages/backend/src/routes/index.ts`:
+  `c8a87246c31f5ae1a0d152787a802cceefea092533f06e7f44e1ded21a7f1760`;
+- `packages/core/src/domain/services/compensation-error-preservation.ts`:
+  `0ce6063b237170a214604a350e53c316d0bb15de7c3b410f4bd963e0a6a83de2`;
+- `packages/core/src/domain/services/idempotency-service.ts`:
+  `160729b27297f6dc80d306d989ad9cc8ebe91a3df2b1ac2c522bb639b484c5de`;
+- `packages/core/src/domain/services/index.ts`:
+  `58a6db996787bed2bd973578127954ca2e69744a4e99ed2e16adb1900b429596`;
+- `packages/core/src/domain/services/task-card-service.ts`:
+  `a84e2cf9240f67738a73f45d0271036d655771f4db7d10ec9f15b221b436c800`;
+- `packages/core/src/domain/services/task-service-error-compensation.ts`:
+  `eaa4571425df41a7c6c858c221cf9aea787293ac8d9e0befc2674ebb92a2791f`;
+- `packages/core/src/domain/services/workspace-record-store.ts`:
+  `737dacfae08b2997d0be139e28f8520c2040f4fc12a4f4bb230fa406d913f2ff`;
+- `packages/backend/src/routes/failure-occurrence-ledger-routes.test.ts`:
+  `e508e1562b475b5d43d001684a2cd87f634ae919ce22d811a93ef7031ae42a38`;
+- `packages/backend/src/routes/index.test.ts`:
+  `adc9a93d2a5b69b83e1eaf82d73841a2499b6f73fd65a4dc8d274c21f1ef9b03`;
+- `packages/core/src/domain/services/failure-occurrence-ledger.test.ts`:
+  `63ece6ca29295e70adec8eb4e424fc3e1486f3bcdc85ec01aa94494653e2572b`;
+- `packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts`:
+  `fc21a9079b9e710847c0420fcfaaf674acb0851d23e04f8cd273c4318ba0b50e`.
+
+Replay artifact SHA-256 values:
+
+- `red-before-backend-undefined.patch`:
+  `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`;
+- `red-before-core-depth.patch`:
+  `ae4b91286bbdbaf7a385fc68a932abd77e1f093d9940425eb7dee05cbdbb2912`;
+- `round2-depth-regression.test.ts`:
+  `dc6f22b7c6a7ef8fe986d813d9617eda9041515fbd45255ef9f6617c4a2b670a`.
