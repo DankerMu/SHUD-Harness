@@ -8,6 +8,7 @@ import {
   CreateTaskInputSchema,
   MAX_TASK_SNAPSHOT_BYTES,
   TaskServiceError,
+  captureFailureOccurrence,
   canonicalJson,
   createIdempotencyMismatchError,
   createIdempotencyRecordService,
@@ -30,6 +31,8 @@ import {
   type TaskCardService,
   type TaskCardServiceOptions,
   type TaskSnapshotCleanupObservation,
+  type FailureOccurrence,
+  type FailurePhase,
   type TaskSnapshotReadHooks,
   type TaskSnapshotWriteHooks
 } from "@shud-harness/core";
@@ -530,15 +533,27 @@ async function createOwnedIdempotentTaskCard(
     await input.taskService.releaseTaskPublicationForIdempotency(task);
     return result;
   } catch (error) {
+    const primaryOccurrence = captureFailureOccurrence("body", error);
+    const semanticPrimaryOccurrence =
+      captureAuthorityTransportSemanticPrimaryOccurrence("body", error);
     try {
       await input.taskService.releaseTaskPublicationForIdempotency(task);
     } catch (releaseError) {
+      const releaseOccurrence = captureFailureOccurrence(
+        "final_release",
+        releaseError
+      );
       // Root C (V33-03): the fold is wrapper-aware so an unknown-authority
       // wrapper keeps its inner typed primary reachable end-to-end.
       throw preserveAuthorityAwarePrimaryFailure(
         error,
         [releaseError],
-        "Task create failure and publication-authority release both failed."
+        "Task create failure and publication-authority release both failed.",
+        "body",
+        ["final_release"],
+        primaryOccurrence,
+        [releaseOccurrence],
+        semanticPrimaryOccurrence
       );
     }
     throw error;
@@ -979,20 +994,36 @@ async function runWithTaskSnapshotObservationFinalizer<T>(
 ): Promise<T> {
   let bodyOutcome:
     | { readonly status: "fulfilled"; readonly value: T }
-    | { readonly status: "rejected"; readonly reason: unknown };
+    | {
+        readonly status: "rejected";
+        readonly reason: unknown;
+        readonly occurrence: FailureOccurrence;
+        readonly semanticPrimaryOccurrence?: FailureOccurrence;
+      };
   try {
     bodyOutcome = { status: "fulfilled", value: await body() };
   } catch (reason) {
-    bodyOutcome = { status: "rejected", reason };
+    bodyOutcome = {
+      status: "rejected",
+      reason,
+      occurrence: captureFailureOccurrence("body", reason),
+      semanticPrimaryOccurrence:
+        captureAuthorityTransportSemanticPrimaryOccurrence("body", reason)
+    };
   }
 
   let settlementError: unknown;
+  let settlementOccurrence: FailureOccurrence | undefined;
   const observation = takeObservation();
   if (observation) {
     try {
       await taskService.cancelTaskSnapshotCleanupObservation(observation);
     } catch (error) {
       settlementError = error;
+      settlementOccurrence = captureFailureOccurrence(
+        bodyOutcome.status === "rejected" ? "final_release" : "initial_release",
+        error
+      );
     }
   }
   if (bodyOutcome.status === "rejected") {
@@ -1002,7 +1033,12 @@ async function runWithTaskSnapshotObservationFinalizer<T>(
       throw preserveAuthorityAwarePrimaryFailure(
         bodyOutcome.reason,
         [settlementError],
-        aggregateMessage
+        aggregateMessage,
+        "body",
+        ["final_release"],
+        bodyOutcome.occurrence,
+        [settlementOccurrence!],
+        bodyOutcome.semanticPrimaryOccurrence
       );
     }
     throw bodyOutcome.reason;
@@ -1039,10 +1075,19 @@ async function observeTaskSnapshotBindsRequest(
   try {
     await taskService.cancelTaskSnapshotCleanupObservation(observation);
   } catch (settlementError) {
+    const primaryOccurrence = captureFailureOccurrence("body", error);
+    const settlementOccurrence = captureFailureOccurrence(
+      "final_release",
+      settlementError
+    );
     error = preserveTaskServiceErrorCompensationCompatibility(
       error,
       [settlementError],
-      "Task snapshot observation rejection and cancellation both failed."
+      "Task snapshot observation rejection and cancellation both failed.",
+      "body",
+      ["final_release"],
+      primaryOccurrence,
+      [settlementOccurrence]
     );
   }
   throw error;
@@ -1827,13 +1872,21 @@ function isCompletedMutationAuthorityAlreadySettledError(error: unknown): boolea
 function preservePrimaryFailure(
   primary: unknown,
   compensations: readonly unknown[],
-  aggregateMessage: string
+  aggregateMessage: string,
+  primaryPhase: FailurePhase = "body",
+  compensationPhases: readonly FailurePhase[] = compensations.map(() => "settlement"),
+  primaryOccurrence?: FailureOccurrence,
+  compensationOccurrences?: readonly FailureOccurrence[]
 ): unknown {
   if (compensations.length === 0) return primary;
   return preserveTaskServiceErrorCompensationCompatibility(
     primary,
     compensations,
-    aggregateMessage
+    aggregateMessage,
+    primaryPhase,
+    compensationPhases,
+    primaryOccurrence,
+    compensationOccurrences
   );
 }
 
@@ -1847,17 +1900,48 @@ function preservePrimaryFailure(
 function preserveAuthorityAwarePrimaryFailure(
   primary: unknown,
   compensations: readonly unknown[],
-  aggregateMessage: string
+  aggregateMessage: string,
+  primaryPhase: FailurePhase = "body",
+  compensationPhases: readonly FailurePhase[] = compensations.map(() => "settlement"),
+  primaryOccurrence?: FailureOccurrence,
+  compensationOccurrences?: readonly FailureOccurrence[],
+  semanticPrimaryOccurrence?: FailureOccurrence
 ): unknown {
   if (compensations.length === 0) return primary;
   if (primary instanceof CompletedTaskSnapshotAuthorityUnknownError) {
     const trustedAuthority = taskServiceErrorAtBoundary(primary.authorityError);
     if (trustedAuthority) {
-      preservePrimaryFailure(trustedAuthority, compensations, aggregateMessage);
-      return primary;
+      return new CompletedTaskSnapshotAuthorityUnknownError(
+        preservePrimaryFailure(
+          primary.authorityError,
+          compensations,
+          aggregateMessage,
+          primaryPhase,
+          compensationPhases,
+          semanticPrimaryOccurrence,
+          compensationOccurrences
+        )
+      );
     }
   }
-  return preservePrimaryFailure(primary, compensations, aggregateMessage);
+  return preservePrimaryFailure(
+    primary,
+    compensations,
+    aggregateMessage,
+    primaryPhase,
+    compensationPhases,
+    primaryOccurrence,
+    compensationOccurrences
+  );
+}
+
+function captureAuthorityTransportSemanticPrimaryOccurrence(
+  phase: FailurePhase,
+  primary: unknown
+): FailureOccurrence | undefined {
+  return primary instanceof CompletedTaskSnapshotAuthorityUnknownError
+    ? captureFailureOccurrence(phase, primary.authorityError)
+    : undefined;
 }
 
 function observeTaskRouteErrorWithoutInterference(
@@ -1947,7 +2031,7 @@ async function getIdempotentTaskResult(
     const taskServiceError = taskServiceErrorAtBoundary(error);
     if (taskServiceError) {
       if (taskServiceError.code === "task_snapshot_missing_card") {
-        throw taskServiceError;
+        throw error;
       }
       throw new CompletedTaskSnapshotAuthorityReadError();
     }
@@ -2179,10 +2263,6 @@ function parseIdempotencyKey(c: Context): ParsedIdempotencyKey {
 }
 
 function jsonTaskServiceError(c: Context, error: unknown): Response {
-  const semanticPrimary = semanticPrimaryValue(error);
-  if (!Object.is(semanticPrimary, error)) {
-    return jsonTaskServiceError(c, semanticPrimary);
-  }
   const taskServiceError = taskServiceErrorAtBoundary(error);
   if (taskServiceError) {
     return jsonApiError(
@@ -2198,6 +2278,10 @@ function jsonTaskServiceError(c: Context, error: unknown): Response {
       },
       taskServiceError.status
     );
+  }
+  const semanticPrimary = semanticPrimaryValue(error);
+  if (!Object.is(semanticPrimary, error)) {
+    return jsonTaskServiceError(c, semanticPrimary);
   }
   if (error instanceof CompletedTaskSnapshotAuthorityUnknownError) {
     return jsonTaskServiceError(c, error.authorityError);

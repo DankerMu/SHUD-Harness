@@ -9,8 +9,15 @@ import {
   type IdempotencyScope
 } from "../schemas/idempotency";
 import { TaskServiceError, isSafeTaskId } from "./task-card-service";
-import { runWithPreservedRelease } from "./compensation-error-preservation";
-import { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
+import {
+  runWithPreservedRelease,
+  type FailureOccurrence,
+  type FailurePhase
+} from "./compensation-error-preservation";
+import {
+  preserveTaskServiceErrorCompensationCompatibility,
+  taskServiceErrorAtBoundary
+} from "./task-service-error-compensation";
 import {
   WorkspaceRecordConditionalDeleteError,
   cancelWorkspaceRecordCleanupPermit,
@@ -63,15 +70,12 @@ async function runWithIdempotencyRelease<T>(
 function preserveAuthorityTransportAwareCombinedFailure(
   primary: unknown,
   compensations: readonly unknown[],
-  aggregateMessage: string
+  aggregateMessage: string,
+  primaryPhase: FailurePhase = "body",
+  compensationPhases: readonly FailurePhase[] = compensations.map(() => "settlement"),
+  primaryOccurrence?: FailureOccurrence,
+  compensationOccurrences?: readonly FailureOccurrence[]
 ): unknown {
-  // Root C (V33-13): never count one occurrence twice — a compensation
-  // candidate that IS the primary is already represented by the primary
-  // itself, so a memoized rejection folded into itself yields primary-only.
-  const distinctCompensations = compensations.filter(
-    (candidate) => !Object.is(primary, candidate)
-  );
-  if (distinctCompensations.length === 0) return primary;
   if (
     primary instanceof Error &&
     primary.name === "CompletedTaskSnapshotAuthorityUnknownError" &&
@@ -79,15 +83,15 @@ function preserveAuthorityTransportAwareCombinedFailure(
   ) {
     const authorityError =
       (primary as Error & { authorityError: unknown }).authorityError;
-    const innerDistinctCompensations = distinctCompensations.filter(
-      (candidate) => !Object.is(authorityError, candidate)
-    );
-    if (innerDistinctCompensations.length === 0) return primary;
     try {
       const folded = preserveTaskServiceErrorCompensationCompatibility(
         authorityError,
-        innerDistinctCompensations,
-        aggregateMessage
+        compensations,
+        aggregateMessage,
+        primaryPhase,
+        compensationPhases,
+        undefined,
+        compensationOccurrences
       );
       return Reflect.construct(
         primary.constructor as new (inner: unknown) => Error,
@@ -99,8 +103,12 @@ function preserveAuthorityTransportAwareCombinedFailure(
   }
   return preserveTaskServiceErrorCompensationCompatibility(
     primary,
-    distinctCompensations,
-    aggregateMessage
+    compensations,
+    aggregateMessage,
+    primaryPhase,
+    compensationPhases,
+    primaryOccurrence,
+    compensationOccurrences
   );
 }
 
@@ -479,13 +487,14 @@ export function createIdempotencyRecordService(
     try {
       return await transition();
     } catch (error) {
+      const taskServiceError = taskServiceErrorAtBoundary(error);
       if (
-        error instanceof TaskServiceError &&
-        malformedIdempotencyTransitionGuardErrors.has(error)
+        taskServiceError &&
+        malformedIdempotencyTransitionGuardErrors.has(taskServiceError)
       ) {
         throw error;
       }
-      if (!(error instanceof TaskServiceError) || error.code !== "record_malformed") {
+      if (!taskServiceError || taskServiceError.code !== "record_malformed") {
         throw error;
       }
     }
@@ -555,13 +564,14 @@ export function createIdempotencyRecordService(
       if (input.expectedCompletedAuthority?.mutationAuthority) {
         throw error;
       }
+      const taskServiceError = taskServiceErrorAtBoundary(error);
       if (
-        error instanceof TaskServiceError &&
-        malformedIdempotencyTransitionGuardErrors.has(error)
+        taskServiceError &&
+        malformedIdempotencyTransitionGuardErrors.has(taskServiceError)
       ) {
         throw error;
       }
-      if (!(error instanceof TaskServiceError) || error.code !== "record_malformed") {
+      if (!taskServiceError || taskServiceError.code !== "record_malformed") {
         throw error;
       }
     }
@@ -2490,19 +2500,21 @@ function malformedIdempotencyTransitionGuardError(
 }
 
 function isPreMutationIdempotencyArtifactAuthorityChange(error: unknown): boolean {
+  const taskServiceError = taskServiceErrorAtBoundary(error);
   return (
-    error instanceof TaskServiceError &&
-    error.cause instanceof WorkspaceRecordConditionalDeleteError &&
-    error.cause.mutationPhase === "pre_mutation"
+    taskServiceError !== undefined &&
+    taskServiceError.cause instanceof WorkspaceRecordConditionalDeleteError &&
+    taskServiceError.cause.mutationPhase === "pre_mutation"
   );
 }
 
 function isRetryableWorkspaceRecordAuthorityContention(error: unknown): boolean {
+  const taskServiceError = taskServiceErrorAtBoundary(error);
   return (
-    error instanceof TaskServiceError &&
-    error.status === 409 &&
-    error.category === "workspace_error" &&
-    error.retryable
+    taskServiceError !== undefined &&
+    taskServiceError.status === 409 &&
+    taskServiceError.category === "workspace_error" &&
+    taskServiceError.retryable
   );
 }
 

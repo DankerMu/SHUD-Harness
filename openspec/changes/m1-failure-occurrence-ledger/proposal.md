@@ -10,7 +10,9 @@ private exact-transition settlement work continues.
 ## What Changes
 
 - Add operation-owned failure occurrences with stable IDs, phase, and order.
-- Fold occurrences into a trusted ledger without mutating caller-owned values.
+- Fold occurrences into a unique operation-owned `Error` carrier without
+  mutating caller-owned values; recover the exact raw primary only through
+  trusted semantic-primary accessors.
 - Observe `semanticPrimary`, `errors`, and `cause` iteratively with deterministic
   limits of 4096 nodes and 8192 edges.
 - Enumerate present numeric own keys of normal sparse arrays, including high
@@ -18,11 +20,15 @@ private exact-transition settlement work continues.
 - Append stable operation-owned observation occurrences when a node, edge,
   own-key, descriptor, accessor, proxy-brand, or traversal budget blocks full
   observation; never expose a naked observation `RangeError`.
-- Refresh every nested ledger carrier and its current raw edges once per
-  independent fold while reusing inherited occurrence history only.
+- Adopt nested history only from an explicit trusted carrier/ref. Reusing the
+  same raw `Error` in another fold starts an isolated operation ledger.
 - Expose typed `TaskServiceError` compatibility exclusively through a trusted
-  ledger view and migrate generic TaskCard/backend consumers without changing
-  existing HTTP envelopes.
+  constructor brand, controlled Proxy factory, and carrier view; migrate
+  generic TaskCard/backend consumers without changing existing HTTP envelopes.
+- Bound prototype walking, own-key expansion, descriptor/accessor work, and
+  observation-failure growth in addition to node and edge counts.
+- Preserve physical `body`, `initial_release`, `settlement`, and
+  `final_release` phases at the actual release producers.
 - Add a dedicated replayable test file and tracked red-before evidence.
 
 ## Capabilities
@@ -38,9 +44,12 @@ private exact-transition settlement work continues.
 
 ## Impact
 
-- Core: compensation preservation, typed error adapter, service exports, and
-  generic TaskCard compensation folds.
+- Core: compensation preservation, typed error adapter/brand, service exports,
+  generic TaskCard compensation folds, and the narrow release-producer symbols
+  in idempotency/workspace services that consume the shared helper.
 - Backend: generic route error serialization and typed-boundary consumers.
 - Tests: dedicated ledger contract tests plus backend HTTP compatibility tests.
-- No workspace-record-store, idempotency-service, private settlement, Zero,
-  dependency, schema, or public HTTP payload changes.
+- No private transition-ticket/generation settlement, watcher, Zero,
+  dependency, persisted schema, or public HTTP payload changes. Whole-file
+  idempotency/workspace behavior remains out of scope except the shared release
+  helper call sites needed for carrier and phase compatibility.

@@ -11,7 +11,11 @@ import {
   TaskTypeSchema,
   type TaskCard
 } from "../schemas/task";
-import { failureLedger } from "./compensation-error-preservation";
+import {
+  captureFailureOccurrence,
+  failureLedger,
+  type FailureOccurrence
+} from "./compensation-error-preservation";
 import { isPathInsideBoundary } from "./workspace-path-safety";
 import {
   preserveTaskServiceErrorCompensationCompatibility,
@@ -171,6 +175,9 @@ export interface TaskServiceErrorOptions {
   recommendedNextActions?: string[];
 }
 
+const trustedTaskServiceErrors = new WeakSet<TaskServiceError>();
+const trustedTaskServiceErrorProxyTargets = new WeakMap<object, TaskServiceError>();
+
 export class TaskServiceError extends Error {
   readonly code: TaskServiceErrorCode;
   readonly status: 400 | 404 | 409 | 422 | 500;
@@ -192,7 +199,32 @@ export class TaskServiceError extends Error {
     this.recommendedNextActions = options.recommendedNextActions ?? [
       "Inspect the workspace task snapshot state before retrying."
     ];
+    trustedTaskServiceErrors.add(this);
   }
+}
+
+export function trustedTaskServiceErrorTarget(
+  value: unknown
+): TaskServiceError | undefined {
+  if ((typeof value !== "object" || value === null) && typeof value !== "function") {
+    return undefined;
+  }
+  if (trustedTaskServiceErrors.has(value as TaskServiceError)) {
+    return value as TaskServiceError;
+  }
+  return trustedTaskServiceErrorProxyTargets.get(value);
+}
+
+export function createTrustedTaskServiceErrorProxy<T extends TaskServiceError>(
+  target: T,
+  handler: ProxyHandler<T> = {}
+): T {
+  if (!trustedTaskServiceErrors.has(target)) {
+    throw new TypeError("A trusted TaskServiceError Proxy requires a constructed TaskServiceError target.");
+  }
+  const proxy = new Proxy(target, handler);
+  trustedTaskServiceErrorProxyTargets.set(proxy, target);
+  return proxy;
 }
 
 export interface TaskCardServiceOptions {
@@ -386,7 +418,9 @@ async function retainTaskSnapshotPublicationAuthority(
       evidenceRef
     );
   } catch (error) {
+    const primaryOccurrence = captureFailureOccurrence("body", error);
     const compensationErrors: unknown[] = [];
+    const compensationOccurrences: FailureOccurrence[] = [];
     try {
       await conditionalDeletePublishedJsonRecordGenerationWithCleanupPermit(
         cleanupPermit,
@@ -397,11 +431,17 @@ async function retainTaskSnapshotPublicationAuthority(
       );
     } catch (cleanupError) {
       compensationErrors.push(cleanupError);
+      compensationOccurrences.push(
+        captureFailureOccurrence("final_release", cleanupError)
+      );
     }
     try {
       await removeEmptyTaskLaneAfterRollback(workspaceRoot, taskId);
     } catch (cleanupError) {
       compensationErrors.push(cleanupError);
+      compensationOccurrences.push(
+        captureFailureOccurrence("final_release", cleanupError)
+      );
     }
     if (compensationErrors.length > 0) {
       // Root C (V33-05 residue): fold through the preservation protocol so no
@@ -410,7 +450,11 @@ async function retainTaskSnapshotPublicationAuthority(
       throw preserveTaskServiceErrorCompensationCompatibility(
         error,
         compensationErrors,
-        "Task snapshot publication authority transfer and compensation failed."
+        "Task snapshot publication authority transfer and compensation failed.",
+        "body",
+        compensationErrors.map(() => "final_release"),
+        primaryOccurrence,
+        compensationOccurrences
       );
     }
     throw error;
@@ -974,7 +1018,8 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           }
         );
       } catch (error) {
-        if (!(error instanceof TaskServiceError)) {
+        const taskServiceError = taskServiceErrorAtBoundary(error);
+        if (!taskServiceError) {
           try {
             await cancelWorkspaceRecordCleanupPermit(observed.cleanupPermit);
           } catch (cancellationError) {
@@ -984,9 +1029,9 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         }
         return registerCleanupObservation(
           {
-            status: error.code === "task_snapshot_missing_card" ? "repairable" : "invalid",
+            status: taskServiceError.code === "task_snapshot_missing_card" ? "repairable" : "invalid",
             taskId,
-            error
+            error: taskServiceError
           },
           {
             ...commonState,
@@ -1353,10 +1398,8 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           throw error.reason;
         }
         if (!isExactTaskSnapshotContentCandidate(error)) {
-          if (
-            error instanceof TaskServiceError &&
-            error.code === "task_not_found"
-          ) {
+          const taskServiceError = taskServiceErrorAtBoundary(error);
+          if (taskServiceError?.code === "task_not_found") {
             if (taskCache.settleDelete(cacheClaim).status === "lost") {
               // Root B (V33-02): an interleaved publish won the slot epoch
               // between the durable absence observation and this settlement;
@@ -1407,7 +1450,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       await getTaskFromSnapshotInternal(taskId);
       return true;
     } catch (error) {
-      if (error instanceof TaskServiceError && error.code === "task_not_found") {
+      if (taskServiceErrorAtBoundary(error)?.code === "task_not_found") {
         return false;
       }
       throw error;
@@ -1450,7 +1493,11 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       let bodyOutcome:
         | { readonly status: "returned"; readonly task: TaskCard }
         | { readonly status: "retry" }
-        | { readonly status: "threw"; readonly reason: unknown };
+        | {
+            readonly status: "threw";
+            readonly reason: unknown;
+            readonly occurrence: FailureOccurrence;
+          };
 
       try {
         const task: TaskCard = TaskCardSchema.parse({
@@ -1492,17 +1539,26 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           bodyOutcome = { status: "returned", task: returnedTask };
         }
       } catch (error) {
-        bodyOutcome = { status: "threw", reason: error };
+        bodyOutcome = {
+          status: "threw",
+          reason: error,
+          occurrence: captureFailureOccurrence("body", error)
+        };
       }
       // Root D (V32-06): settle the descriptor close first-class and run the
       // sibling cleanups regardless of its outcome; a rejected close folds
       // into the preserved primary instead of replacing it.
-      let closeRejection: { readonly reason: unknown } | undefined;
+      let closeRejection:
+        | { readonly reason: unknown; readonly occurrence: FailureOccurrence }
+        | undefined;
       if (publicationAuthority) {
         try {
           await publicationAuthority.pinnedFile.close();
         } catch (closeError) {
-          closeRejection = { reason: closeError };
+          closeRejection = {
+            reason: closeError,
+            occurrence: captureFailureOccurrence("final_release", closeError)
+          };
         }
         publicationAuthority = undefined;
       }
@@ -1513,7 +1569,11 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           throw preserveTaskServiceErrorCompensationCompatibility(
             bodyOutcome.reason,
             [closeRejection.reason],
-            "Task creation and publication-authority settlement both failed."
+            "Task creation and publication-authority settlement both failed.",
+            "body",
+            ["final_release"],
+            bodyOutcome.occurrence,
+            [closeRejection.occurrence]
           );
         }
         throw bodyOutcome.reason;
@@ -1559,7 +1619,11 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         let observation: TaskSnapshotCleanupObservation | undefined;
         let bodyOutcome:
           | { readonly status: "returned" }
-          | { readonly status: "threw"; readonly reason: unknown };
+          | {
+              readonly status: "threw";
+              readonly reason: unknown;
+              readonly occurrence: FailureOccurrence;
+            };
         try {
           await (async (): Promise<void> => {
             observation = await observeTaskSnapshotForCleanupInternal(taskId, cacheClaim);
@@ -1601,17 +1665,28 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           })();
           bodyOutcome = { status: "returned" };
         } catch (error) {
-          bodyOutcome = { status: "threw", reason: error };
+          bodyOutcome = {
+            status: "threw",
+            reason: error,
+            occurrence: captureFailureOccurrence("body", error)
+          };
         }
         // Root D (V32-06): settle the descriptor close first-class, run every
         // sibling cleanup regardless of its outcome, disown the authority only
         // after the close settles, and fold settlement failures around the
         // preserved primary instead of replacing it.
         const compensations: unknown[] = [];
+        const compensationOccurrences: FailureOccurrence[] = [];
         try {
           await publicationAuthority.pinnedFile.close();
         } catch (closeError) {
           compensations.push(closeError);
+          compensationOccurrences.push(
+            captureFailureOccurrence(
+              bodyOutcome.status === "threw" ? "final_release" : "initial_release",
+              closeError
+            )
+          );
         }
         idempotentPublicationAuthorities.delete(expectedTask!);
         if (observation) {
@@ -1621,6 +1696,16 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
             await cancelTaskSnapshotCleanupObservationInternal(ownedObservation);
           } catch (cancellationError) {
             compensations.push(cancellationError);
+            compensationOccurrences.push(
+              captureFailureOccurrence(
+                bodyOutcome.status === "threw"
+                  ? "final_release"
+                  : compensations.length === 1
+                    ? "initial_release"
+                    : "settlement",
+                cancellationError
+              )
+            );
           }
         }
         taskCache.settleCancel(cacheClaim);
@@ -1629,7 +1714,11 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
             throw preserveTaskServiceErrorCompensationCompatibility(
               bodyOutcome.reason,
               compensations,
-              "Task rollback and publication-authority settlement both failed."
+              "Task rollback and publication-authority settlement both failed.",
+              "body",
+              compensations.map(() => "final_release"),
+              bodyOutcome.occurrence,
+              compensationOccurrences
             );
           }
           throw bodyOutcome.reason;
@@ -1640,7 +1729,11 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
             : preserveTaskServiceErrorCompensationCompatibility(
                 compensations[0],
                 compensations.slice(1),
-                "Task rollback publication-authority settlement failed."
+                "Task rollback publication-authority settlement failed.",
+                compensationOccurrences[0]!.phase,
+                compensationOccurrences.slice(1).map((item) => item.phase),
+                compensationOccurrences[0],
+                compensationOccurrences.slice(1)
               );
         }
         return;
@@ -2143,7 +2236,7 @@ async function readBoundedTaskEntries(tasksRoot: string): Promise<Dirent[]> {
       entries.push(entry);
     }
   } catch (error) {
-    if (error instanceof TaskServiceError) {
+    if (taskServiceErrorAtBoundary(error)) {
       throw error;
     }
     throw workspaceError(
@@ -2274,11 +2367,12 @@ async function readTaskSnapshot(
   return validateRawTaskSnapshot(rawSnapshot, laneTaskId, evidenceRef);
 }
 
-function isExactTaskSnapshotContentCandidate(error: unknown): error is TaskServiceError {
-  return error instanceof TaskServiceError && (
-    error.code === "task_snapshot_malformed" ||
-    error.code === "task_snapshot_mismatch" ||
-    error.code === "task_snapshot_missing_card"
+function isExactTaskSnapshotContentCandidate(error: unknown): boolean {
+  const taskServiceError = taskServiceErrorAtBoundary(error);
+  return taskServiceError !== undefined && (
+    taskServiceError.code === "task_snapshot_malformed" ||
+    taskServiceError.code === "task_snapshot_mismatch" ||
+    taskServiceError.code === "task_snapshot_missing_card"
   );
 }
 
@@ -2296,7 +2390,8 @@ function markTaskSnapshotDurableReadFailure(error: TaskServiceError): TaskServic
 }
 
 function isTaskSnapshotDurableReadFailure(error: unknown): boolean {
-  return error instanceof TaskServiceError && taskSnapshotDurableReadFailures.has(error);
+  const taskServiceError = taskServiceErrorAtBoundary(error);
+  return taskServiceError !== undefined && taskSnapshotDurableReadFailures.has(taskServiceError);
 }
 
 /**
@@ -2468,7 +2563,8 @@ function unknownTaskSnapshotAuthorityError(
   evidenceRef: string,
   cause: unknown
 ): TaskServiceError {
-  if (cause instanceof TaskServiceError) return cause;
+  const taskServiceError = taskServiceErrorAtBoundary(cause);
+  if (taskServiceError) return taskServiceError;
   return workspaceError(
     "workspace_path_not_safe",
     `Task snapshot authority could not be classified safely: ${taskId}`,
@@ -2604,9 +2700,11 @@ async function persistTaskSnapshot(
           { taskDirectory, taskId: task.task_id }
         ]);
       } catch (callbackError) {
+        const callbackOccurrence = captureFailureOccurrence("body", callbackError);
         const permit = cleanupPermit;
         cleanupPermit = undefined;
         const compensationErrors: unknown[] = [];
+        const compensationOccurrences: FailureOccurrence[] = [];
         try {
           await conditionalDeletePublishedJsonRecordGenerationWithCleanupPermit(
             permit,
@@ -2617,11 +2715,17 @@ async function persistTaskSnapshot(
           );
         } catch (cleanupError) {
           compensationErrors.push(cleanupError);
+          compensationOccurrences.push(
+            captureFailureOccurrence("final_release", cleanupError)
+          );
         }
         try {
           await removeEmptyTaskLaneAfterRollback(workspaceRoot, task.task_id);
         } catch (cleanupError) {
           compensationErrors.push(cleanupError);
+          compensationOccurrences.push(
+            captureFailureOccurrence("final_release", cleanupError)
+          );
         }
         if (compensationErrors.length > 0) {
           throw preserveTaskServiceErrorCompensationCompatibility(
@@ -2629,7 +2733,9 @@ async function persistTaskSnapshot(
             compensationErrors,
             "Task snapshot publication compensation failed.",
             "body",
-            compensationErrors.map(() => "settlement")
+            compensationErrors.map(() => "final_release"),
+            callbackOccurrence,
+            compensationOccurrences
           );
         }
         throw callbackError;
@@ -2668,17 +2774,24 @@ async function persistTaskSnapshot(
     }
     return { status: "created", task: publishedTask };
   } catch (error) {
+    const primaryOccurrence = captureFailureOccurrence("body", error);
     let publicationFailure: unknown = error;
     if (beforeWriteStarted && !beforeWriteReturned) {
       try {
         await removeEmptyTaskLaneAfterRollback(workspaceRoot, task.task_id);
       } catch (cleanupError) {
+        const cleanupOccurrence = captureFailureOccurrence(
+          "final_release",
+          cleanupError
+        );
         publicationFailure = preserveTaskServiceErrorCompensationCompatibility(
           error,
           [cleanupError],
           "Task snapshot publication compensation failed.",
           "body",
-          ["settlement"]
+          ["final_release"],
+          primaryOccurrence,
+          [cleanupOccurrence]
         );
       }
     }
@@ -2708,7 +2821,7 @@ async function persistTaskSnapshot(
     }
     if (failureLedger(publicationFailure)) {
       const taskServiceFailure = taskServiceErrorAtBoundary(publicationFailure);
-      if (taskServiceFailure) throw taskServiceFailure;
+      if (taskServiceFailure) throw publicationFailure;
     }
     throw workspaceError(
       "workspace_path_not_safe",

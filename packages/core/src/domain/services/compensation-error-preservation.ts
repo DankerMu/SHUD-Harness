@@ -7,6 +7,9 @@ export type FailurePhase =
 
 export const FAILURE_GRAPH_MAX_NODES = 4096;
 export const FAILURE_GRAPH_MAX_EDGES = 8192;
+export const FAILURE_GRAPH_MAX_NUMERIC_KEYS = 8192;
+export const FAILURE_GRAPH_MAX_CONTROLLED_OPERATIONS = 65_536;
+export const FAILURE_GRAPH_MAX_OBSERVATION_FAILURES = 256;
 
 const FAILURE_OCCURRENCE = Symbol("failure_occurrence");
 
@@ -49,18 +52,24 @@ export interface FailurePrimaryClassification {
 
 export type FailureGraphObservationIssueCode =
   | "node_budget_exceeded"
-  | "edge_budget_exceeded";
+  | "edge_budget_exceeded"
+  | "numeric_key_budget_exceeded"
+  | "controlled_operation_budget_exceeded"
+  | "observation_failure_budget_exceeded";
 
 export class FailureGraphObservationIssue extends Error {
   readonly code: FailureGraphObservationIssueCode;
   readonly limit: number;
 
   constructor(code: FailureGraphObservationIssueCode, limit: number) {
-    super(
-      code === "node_budget_exceeded"
-        ? `Failure graph observation stopped at the ${limit}-node budget.`
-        : `Failure graph observation stopped at the ${limit}-edge budget.`
-    );
+    const labels: Record<FailureGraphObservationIssueCode, string> = {
+      node_budget_exceeded: "node",
+      edge_budget_exceeded: "edge",
+      numeric_key_budget_exceeded: "numeric-key",
+      controlled_operation_budget_exceeded: "controlled-operation",
+      observation_failure_budget_exceeded: "observation-failure"
+    };
+    super(`Failure graph observation stopped at the ${limit}-${labels[code]} budget.`);
     this.name = "FailureGraphObservationIssue";
     this.code = code;
     this.limit = limit;
@@ -93,7 +102,11 @@ export class PreservedErrorCompensationEnvelope extends Error {
 
 type AsyncOutcome<T> =
   | { readonly status: "fulfilled"; readonly value: T }
-  | { readonly status: "rejected"; readonly reason: unknown };
+  | {
+      readonly status: "rejected";
+      readonly reason: unknown;
+      readonly occurrence: FailureOccurrence;
+    };
 
 interface ObservationState {
   readonly nodes: FailureGraphNode[];
@@ -106,14 +119,25 @@ interface ObservationState {
   readonly classifyPrimary?: (value: object) => FailureGraphNode["errorBrand"];
   queueHead: number;
   edgeCount: number;
+  controlledOperationCount: number;
+  ordinaryObservationFailureCount: number;
   nodeBudgetRecorded: boolean;
   edgeBudgetRecorded: boolean;
+  numericKeyBudgetRecorded: boolean;
+  controlledOperationBudgetRecorded: boolean;
+  observationFailureBudgetRecorded: boolean;
 }
 
 let nextFailureOccurrenceOrder = 1;
 const trustedFailureOccurrences = new WeakSet<object>();
 const preservedFailureLedgers = new WeakMap<object, PreservedFailureLedger>();
-const preservedFailureSemanticErrors = new WeakMap<object, Error>();
+
+class PreservedFailureCarrier extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PreservedFailureCarrier";
+  }
+}
 
 export async function runWithPreservedRelease<T>(
   body: () => Promise<T>,
@@ -126,21 +150,52 @@ export async function runWithPreservedRelease<T>(
   preserveCombinedFailure: (
     primary: unknown,
     compensations: readonly unknown[],
-    aggregateMessage: string
-  ) => unknown = preserveThrownValueAndCompensationErrors
+    aggregateMessage: string,
+    primaryPhase?: FailurePhase,
+    compensationPhases?: readonly FailurePhase[],
+    primaryOccurrence?: FailureOccurrence,
+    compensationOccurrences?: readonly FailureOccurrence[]
+  ) => unknown = (
+    primary,
+    compensations,
+    message,
+    primaryPhase,
+    compensationPhases,
+    primaryOccurrence,
+    compensationOccurrences
+  ) =>
+    preserveThrownValueAndCompensationErrors(
+      primary,
+      compensations,
+      message,
+      [],
+      primaryPhase,
+      compensationPhases,
+      primaryOccurrence,
+      compensationOccurrences
+    )
 ): Promise<T> {
   let bodyOutcome: AsyncOutcome<T>;
   try {
     bodyOutcome = { status: "fulfilled", value: await body() };
   } catch (reason) {
-    bodyOutcome = { status: "rejected", reason };
+    bodyOutcome = {
+      status: "rejected",
+      reason,
+      occurrence: captureFailureOccurrence("body", reason)
+    };
   }
 
   let releaseOutcome: AsyncOutcome<void>;
   try {
     releaseOutcome = { status: "fulfilled", value: await release() };
   } catch (reason) {
-    releaseOutcome = { status: "rejected", reason };
+    const phase = bodyOutcome.status === "rejected" ? "final_release" : "initial_release";
+    releaseOutcome = {
+      status: "rejected",
+      reason,
+      occurrence: captureFailureOccurrence(phase, reason)
+    };
   }
 
   if (bodyOutcome.status === "rejected") {
@@ -148,7 +203,11 @@ export async function runWithPreservedRelease<T>(
       throw preserveCombinedFailure(
         bodyOutcome.reason,
         [releaseOutcome.reason],
-        aggregateMessage
+        aggregateMessage,
+        "body",
+        ["final_release"],
+        bodyOutcome.occurrence,
+        [releaseOutcome.occurrence]
       );
     }
     throw bodyOutcome.reason;
@@ -161,10 +220,18 @@ export async function runWithPreservedRelease<T>(
           releaseOutcome.reason
         );
       } catch (settlementReason) {
+        const settlementOccurrence = captureFailureOccurrence(
+          "settlement",
+          settlementReason
+        );
         throw preserveCombinedFailure(
           releaseOutcome.reason,
           [settlementReason],
-          aggregateMessage
+          aggregateMessage,
+          "initial_release",
+          ["settlement"],
+          releaseOutcome.occurrence,
+          [settlementOccurrence]
         );
       }
     }
@@ -199,14 +266,11 @@ export function failureLedger(value: unknown): PreservedFailureLedger | undefine
 }
 
 export function semanticPrimaryValue(value: unknown): unknown {
-  return failureLedger(value)?.primary.value ?? value;
+  const ledger = failureLedger(value);
+  return ledger ? ledger.primary.value : value;
 }
 
 export function semanticPrimaryError(value: unknown): Error | undefined {
-  if (isObjectLike(value)) {
-    const represented = preservedFailureSemanticErrors.get(value);
-    if (represented) return represented;
-  }
   const ledger = failureLedger(value);
   if (ledger) {
     const primary = ledger.primary.value;
@@ -214,9 +278,9 @@ export function semanticPrimaryError(value: unknown): Error | undefined {
     if (node?.errorBrand === "error" || node?.errorBrand === "indeterminate") {
       return primary as Error;
     }
-    return value instanceof Error ? value : undefined;
+    return undefined;
   }
-  return safelyHasErrorBrand(value) ? value : undefined;
+  return boundedErrorBrand(value) === "error" ? value as Error : undefined;
 }
 
 export function failureGraphNodes(value: unknown): readonly FailureGraphNode[] {
@@ -237,20 +301,15 @@ export function orderedDistinctCompensationFailures(
   const ledger = failureLedger(value);
   if (!ledger) return [];
   return ledger.orderedDistinct
-    .filter((occurrence) => occurrence !== ledger.primary)
+    .filter(
+      (occurrence) =>
+        occurrence !== ledger.primary &&
+        !(
+          isObjectLike(ledger.primary.value) &&
+          Object.is(occurrence.value, ledger.primary.value)
+        )
+    )
     .map((occurrence) => occurrence.value);
-}
-
-export function registerPreservedErrorCompatibility(
-  compatibleError: Error,
-  preservedError: Error
-): void {
-  const ledger = failureLedger(preservedError);
-  if (ledger) {
-    preservedFailureLedgers.set(compatibleError, ledger);
-    const semantic = semanticPrimaryError(preservedError);
-    if (semantic) preservedFailureSemanticErrors.set(compatibleError, semantic);
-  }
 }
 
 export function mergeTrustedFailureOccurrences(
@@ -276,13 +335,22 @@ export function mergeTrustedFailureOccurrences(
     classifyPrimary: primaryClassification?.classify,
     queueHead: 0,
     edgeCount: 0,
+    controlledOperationCount: 0,
+    ordinaryObservationFailureCount: 0,
     nodeBudgetRecorded: false,
-    edgeBudgetRecorded: false
+    edgeBudgetRecorded: false,
+    numericKeyBudgetRecorded: false,
+    controlledOperationBudgetRecorded: false,
+    observationFailureBudgetRecorded: false
   };
 
-  adoptLedger(inherited, state);
-  retainOccurrence(primary, state, true);
-  for (const occurrence of later) retainOccurrence(occurrence, state, true);
+  if (inherited) {
+    adoptLedger(inherited, state);
+    state.queue.push(primary.value);
+  } else {
+    retainOccurrence(primary, state, true);
+  }
+  for (const occurrence of later) adoptOrRetainOccurrence(occurrence, state);
 
   while (state.queueHead < state.queue.length) {
     const value = state.queue[state.queueHead++];
@@ -302,10 +370,7 @@ export function mergeTrustedFailureOccurrences(
   const chronological = [...state.occurrenceById.values()].sort(
     (left, right) => left.order - right.order
   );
-  const events = Object.freeze([
-    semanticPrimary,
-    ...chronological.filter((occurrence) => occurrence !== semanticPrimary)
-  ]);
+  const events = Object.freeze(chronological);
   const ledger: PreservedFailureLedger = Object.freeze({
     primary: semanticPrimary,
     events,
@@ -317,15 +382,9 @@ export function mergeTrustedFailureOccurrences(
     })
   });
 
-  const primaryNode = state.nodes.find((node) => node.value === semanticPrimary.value);
-  const representedPrimary = !isObjectLike(semanticPrimary.value) ||
-    primaryNode?.errorBrand === "non_error";
-  const carrier: object = representedPrimary
-    ? new PreservedNonErrorThrownValue(semanticPrimary.value)
-    : semanticPrimary.value as object;
+  const carrier = new PreservedFailureCarrier(_aggregateMessage);
   preservedFailureLedgers.set(carrier, ledger);
-  if (representedPrimary) preservedFailureSemanticErrors.set(carrier, carrier as Error);
-  return carrier;
+  return Object.freeze(carrier);
 }
 
 export function adoptTrustedFailureRef(
@@ -340,13 +399,23 @@ export function preserveThrownValueAndCompensationErrors(
   primary: unknown,
   compensations: readonly unknown[],
   aggregateMessage: string,
-  additionalObservationFailures: readonly unknown[] = []
+  additionalObservationFailures: readonly unknown[] = [],
+  primaryPhase: FailurePhase = "body",
+  compensationPhases: readonly FailurePhase[] = compensations.map(() => "settlement"),
+  primaryOccurrence?: FailureOccurrence,
+  compensationOccurrences?: readonly FailureOccurrence[]
 ): Error {
   return preserveFailureOccurrencesWithCompatibility(
-    captureFailureOccurrence("body", primary),
-    [...additionalObservationFailures, ...compensations].map((value) =>
-      captureFailureOccurrence("settlement", value)
-    ),
+    primaryOccurrence ?? captureFailureOccurrence(primaryPhase, primary),
+    [
+      ...additionalObservationFailures.map((value) =>
+        captureFailureOccurrence("observation", value)
+      ),
+      ...compensations.map((value, index) =>
+        compensationOccurrences?.[index] ??
+          captureFailureOccurrence(compensationPhases[index] ?? "settlement", value)
+      )
+    ],
     aggregateMessage
   );
 }
@@ -365,7 +434,7 @@ export function preservePrimaryAndCompensationErrors(
   compensations: readonly unknown[],
   aggregateMessage: string
 ): unknown {
-  if (compensations.length === 0 || !safelyHasErrorBrand(primary)) return primary;
+  if (compensations.length === 0 || boundedErrorBrand(primary) !== "error") return primary;
   return preserveThrownValueAndCompensationErrors(primary, compensations, aggregateMessage);
 }
 
@@ -379,6 +448,19 @@ function retainOccurrence(
   if (queueValue) state.queue.push(occurrence.value);
 }
 
+function adoptOrRetainOccurrence(
+  occurrence: FailureOccurrence,
+  state: ObservationState
+): void {
+  const inherited = failureLedger(occurrence.value);
+  if (!inherited) {
+    retainOccurrence(occurrence, state, true);
+    return;
+  }
+  adoptLedger(inherited, state);
+  state.queue.push(occurrence.value);
+}
+
 function adoptLedger(
   ledger: PreservedFailureLedger | undefined,
   state: ObservationState
@@ -389,28 +471,21 @@ function adoptLedger(
 }
 
 function observeNode(value: object, state: ObservationState): void {
-  let errorBrand: FailureGraphNode["errorBrand"];
-  try {
-    errorBrand = value === state.semanticPrimaryValue && state.classifyPrimary
-      ? state.classifyPrimary(value)
-      : value instanceof Error
-        ? "error"
-        : "non_error";
-  } catch (error) {
-    errorBrand = "indeterminate";
-    recordObservationFailure(error, state);
-  }
+  const errorBrand = value === state.semanticPrimaryValue && state.classifyPrimary
+    ? observePrimaryClassification(value, state)
+    : observeErrorBrand(value, state);
 
   const edges: FailureGraphEdge[] = [];
   for (const kind of ["semanticPrimary", "errors", "cause"] as const) {
-    const field = observeOwnGraphField(value, kind);
+    const field = observeOwnGraphField(value, kind, state);
     for (const failure of field.failures) recordObservationFailure(failure, state);
     if (!field.present) continue;
 
     if (kind === "errors") {
-      const arrayBrand = safelyObserveArray(field.value);
+      const arrayBrand = safelyObserveArray(field.value, state);
       for (const failure of arrayBrand.failures) recordObservationFailure(failure, state);
-      if (arrayBrand.isArray) {
+      if (arrayBrand.status === "failed") continue;
+      if (arrayBrand.status === "array") {
         observeSparseErrorsArray(arrayBrand.value, edges, state);
         continue;
       }
@@ -432,6 +507,7 @@ function observeSparseErrorsArray(
   state: ObservationState
 ): void {
   let keys: (string | symbol)[];
+  if (!chargeControlledOperation(state)) return;
   try {
     keys = Reflect.ownKeys(values);
   } catch (error) {
@@ -439,16 +515,33 @@ function observeSparseErrorsArray(
     return;
   }
 
-  const numericKeys = keys.flatMap((key) => {
-    if (typeof key !== "string" || !isCanonicalArrayIndex(key)) return [];
-    return [{ key, index: Number(key) }];
-  }).sort((left, right) => left.index - right.index);
+  const numericKeys: Array<{ readonly key: string; readonly index: number }> = [];
+  const inspected = Math.min(keys.length, FAILURE_GRAPH_MAX_NUMERIC_KEYS);
+  for (let position = 0; position < inspected; position += 1) {
+    if (!chargeControlledOperation(state)) return;
+    const key = keys[position];
+    if (typeof key === "string" && isCanonicalArrayIndex(key)) {
+      numericKeys.push({ key, index: Number(key) });
+    }
+  }
+  numericKeys.sort((left, right) => left.index - right.index);
 
   for (const { key, index } of numericKeys) {
-    const element = observeOwnArrayElement(values, key);
+    const element = observeOwnArrayElement(values, key, state);
     for (const failure of element.failures) recordObservationFailure(failure, state);
     if (!element.present) continue;
     if (!addEdge({ kind: "errors", target: element.value, index }, edges, state)) return;
+  }
+  if (keys.length > FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1) {
+    if (state.edgeCount >= FAILURE_GRAPH_MAX_EDGES) {
+      recordBudgetIssue("edge_budget_exceeded", FAILURE_GRAPH_MAX_EDGES, state);
+    } else {
+      recordBudgetIssue(
+        "numeric_key_budget_exceeded",
+        FAILURE_GRAPH_MAX_NUMERIC_KEYS,
+        state
+      );
+    }
   }
 }
 
@@ -470,8 +563,10 @@ function addEdge(
 
 function observeOwnGraphField(
   value: object,
-  property: FailureGraphEdge["kind"]
+  property: FailureGraphEdge["kind"],
+  state: ObservationState
 ): { readonly present: boolean; readonly value?: unknown; readonly failures: readonly unknown[] } {
+  if (!chargeControlledOperation(state)) return { present: false, failures: [] };
   let descriptor: PropertyDescriptor | undefined;
   try {
     descriptor = Object.getOwnPropertyDescriptor(value, property);
@@ -485,6 +580,7 @@ function observeOwnGraphField(
       : { present: true, value: descriptor.value, failures: [] };
   }
   if (!descriptor.get) return { present: false, failures: [] };
+  if (!chargeControlledOperation(state)) return { present: false, failures: [] };
   try {
     const observed = descriptor.get.call(value);
     return observed === undefined
@@ -497,13 +593,16 @@ function observeOwnGraphField(
 
 function observeOwnArrayElement(
   values: object,
-  key: string
+  key: string,
+  state: ObservationState
 ): { readonly present: boolean; readonly value?: unknown; readonly failures: readonly unknown[] } {
+  if (!chargeControlledOperation(state)) return { present: false, failures: [] };
   try {
     const descriptor = Object.getOwnPropertyDescriptor(values, key);
     if (!descriptor) return { present: false, failures: [] };
     if ("value" in descriptor) return { present: true, value: descriptor.value, failures: [] };
     if (!descriptor.get) return { present: false, failures: [] };
+    if (!chargeControlledOperation(state)) return { present: false, failures: [] };
     return { present: true, value: descriptor.get.call(values), failures: [] };
   } catch (error) {
     return { present: false, failures: [error] };
@@ -511,20 +610,32 @@ function observeOwnArrayElement(
 }
 
 function safelyObserveArray(
-  value: unknown
+  value: unknown,
+  state: ObservationState
 ):
-  | { readonly isArray: true; readonly value: object; readonly failures: readonly unknown[] }
-  | { readonly isArray: false; readonly failures: readonly unknown[] } {
+  | { readonly status: "array"; readonly value: object; readonly failures: readonly unknown[] }
+  | { readonly status: "non_array"; readonly failures: readonly unknown[] }
+  | { readonly status: "failed"; readonly failures: readonly unknown[] } {
+  if (!chargeControlledOperation(state)) return { status: "failed", failures: [] };
   try {
     return Array.isArray(value)
-      ? { isArray: true, value, failures: [] }
-      : { isArray: false, failures: [] };
+      ? { status: "array", value, failures: [] }
+      : { status: "non_array", failures: [] };
   } catch (error) {
-    return { isArray: false, failures: [error] };
+    return { status: "failed", failures: [error] };
   }
 }
 
 function recordObservationFailure(value: unknown, state: ObservationState): void {
+  if (state.ordinaryObservationFailureCount >= FAILURE_GRAPH_MAX_OBSERVATION_FAILURES) {
+    recordBudgetIssue(
+      "observation_failure_budget_exceeded",
+      FAILURE_GRAPH_MAX_OBSERVATION_FAILURES,
+      state
+    );
+    return;
+  }
+  state.ordinaryObservationFailureCount += 1;
   const occurrence = captureFailureOccurrence("observation", value);
   state.observationFailures.push(occurrence);
   retainOccurrence(occurrence, state, false);
@@ -535,14 +646,81 @@ function recordBudgetIssue(
   limit: number,
   state: ObservationState
 ): void {
-  if (code === "node_budget_exceeded") {
-    if (state.nodeBudgetRecorded) return;
-    state.nodeBudgetRecorded = true;
-  } else {
-    if (state.edgeBudgetRecorded) return;
-    state.edgeBudgetRecorded = true;
+  switch (code) {
+    case "node_budget_exceeded":
+      if (state.nodeBudgetRecorded) return;
+      state.nodeBudgetRecorded = true;
+      break;
+    case "edge_budget_exceeded":
+      if (state.edgeBudgetRecorded) return;
+      state.edgeBudgetRecorded = true;
+      break;
+    case "numeric_key_budget_exceeded":
+      if (state.numericKeyBudgetRecorded) return;
+      state.numericKeyBudgetRecorded = true;
+      break;
+    case "controlled_operation_budget_exceeded":
+      if (state.controlledOperationBudgetRecorded) return;
+      state.controlledOperationBudgetRecorded = true;
+      break;
+    case "observation_failure_budget_exceeded":
+      if (state.observationFailureBudgetRecorded) return;
+      state.observationFailureBudgetRecorded = true;
+      break;
   }
-  recordObservationFailure(Object.freeze(new FailureGraphObservationIssue(code, limit)), state);
+  const occurrence = captureFailureOccurrence(
+    "observation",
+    Object.freeze(new FailureGraphObservationIssue(code, limit))
+  );
+  state.observationFailures.push(occurrence);
+  retainOccurrence(occurrence, state, false);
+}
+
+function chargeControlledOperation(state: ObservationState): boolean {
+  if (state.controlledOperationCount >= FAILURE_GRAPH_MAX_CONTROLLED_OPERATIONS) {
+    recordBudgetIssue(
+      "controlled_operation_budget_exceeded",
+      FAILURE_GRAPH_MAX_CONTROLLED_OPERATIONS,
+      state
+    );
+    return false;
+  }
+  state.controlledOperationCount += 1;
+  return true;
+}
+
+function observePrimaryClassification(
+  value: object,
+  state: ObservationState
+): FailureGraphNode["errorBrand"] {
+  if (!chargeControlledOperation(state)) return "indeterminate";
+  try {
+    return state.classifyPrimary!(value);
+  } catch (error) {
+    recordObservationFailure(error, state);
+    return "indeterminate";
+  }
+}
+
+function observeErrorBrand(
+  value: object,
+  state: ObservationState
+): FailureGraphNode["errorBrand"] {
+  const seen = new WeakSet<object>();
+  let cursor: object | null = value;
+  while (cursor !== null) {
+    if (seen.has(cursor)) return "indeterminate";
+    seen.add(cursor);
+    if (cursor === Error.prototype) return "error";
+    if (!chargeControlledOperation(state)) return "indeterminate";
+    try {
+      cursor = Object.getPrototypeOf(cursor) as object | null;
+    } catch (error) {
+      recordObservationFailure(error, state);
+      return "indeterminate";
+    }
+  }
+  return "non_error";
 }
 
 function distinctFailureOccurrences(
@@ -569,13 +747,21 @@ function isCanonicalArrayIndex(value: string): boolean {
     String(numeric) === value;
 }
 
-function safelyHasErrorBrand(value: unknown): value is Error {
-  if (!isObjectLike(value)) return false;
-  try {
-    return value instanceof Error;
-  } catch {
-    return false;
+function boundedErrorBrand(value: unknown): FailureGraphNode["errorBrand"] {
+  if (!isObjectLike(value)) return "non_error";
+  const seen = new WeakSet<object>();
+  let cursor: object | null = value;
+  for (let count = 0; cursor !== null && count < 256; count += 1) {
+    if (seen.has(cursor)) return "indeterminate";
+    seen.add(cursor);
+    if (cursor === Error.prototype) return "error";
+    try {
+      cursor = Object.getPrototypeOf(cursor) as object | null;
+    } catch {
+      return "indeterminate";
+    }
   }
+  return cursor === null ? "non_error" : "indeterminate";
 }
 
 function isObjectLike(value: unknown): value is object {

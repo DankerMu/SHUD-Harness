@@ -4,7 +4,10 @@ import {
   mergeTrustedFailureOccurrences,
   type FailurePhase
 } from "./compensation-error-preservation";
-import { TaskServiceError } from "./task-card-service";
+import {
+  TaskServiceError,
+  trustedTaskServiceErrorTarget
+} from "./task-card-service";
 
 const trustedTaskServiceErrorLedgerViews = new WeakMap<object, TaskServiceError>();
 
@@ -20,7 +23,7 @@ export function taskServiceErrorAtBoundary(
   const trusted = trustedTaskServiceErrorFromFailureLedger(value);
   if (trusted) return trusted;
   if (failureLedger(value)) return undefined;
-  return classifyTaskServiceErrorPrimary(value).taskServiceError;
+  return trustedTaskServiceErrorTarget(value);
 }
 
 export function preserveTaskServiceErrorCompensationCompatibility(
@@ -28,56 +31,28 @@ export function preserveTaskServiceErrorCompensationCompatibility(
   compensations: readonly unknown[],
   aggregateMessage: string,
   primaryPhase: FailurePhase = "body",
-  compensationPhases: readonly FailurePhase[] = compensations.map(() => "settlement")
+  compensationPhases: readonly FailurePhase[] = compensations.map(() => "settlement"),
+  primaryOccurrence?: import("./compensation-error-preservation").FailureOccurrence,
+  compensationOccurrences?: readonly import("./compensation-error-preservation").FailureOccurrence[]
 ): unknown {
-  let trustedPrimary = trustedTaskServiceErrorFromFailureLedger(primary);
-  const primaryOccurrence = captureFailureOccurrence(primaryPhase, primary);
-  const compensationOccurrences = compensations.map((value, index) =>
-    captureFailureOccurrence(compensationPhases[index] ?? "settlement", value)
+  const trustedPrimary = trustedTaskServiceErrorFromFailureLedger(primary) ??
+    trustedTaskServiceErrorTarget(primary);
+  const capturedPrimary = primaryOccurrence ?? captureFailureOccurrence(primaryPhase, primary);
+  const capturedCompensations = compensations.map((value, index) =>
+    compensationOccurrences?.[index] ??
+      captureFailureOccurrence(compensationPhases[index] ?? "settlement", value)
   );
   const preserved = mergeTrustedFailureOccurrences(
-    primaryOccurrence,
-    compensationOccurrences,
+    capturedPrimary,
+    capturedCompensations,
     aggregateMessage,
-    {
-      classify: (value) => {
-        if (trustedPrimary) return "error";
-        const result = classifyTaskServiceErrorPrimary(value, true);
-        trustedPrimary = result.taskServiceError;
-        return result.errorBrand;
-      }
-    }
+    trustedPrimary ? { classify: () => "error" } : undefined
   );
   if (trustedPrimary && isObjectLike(preserved)) {
     trustedTaskServiceErrorLedgerViews.set(preserved, trustedPrimary);
     return preserved;
   }
   return preserved;
-}
-
-function classifyTaskServiceErrorPrimary(value: unknown, propagateFailure = false): {
-  readonly errorBrand: "error" | "non_error" | "indeterminate";
-  readonly taskServiceError?: TaskServiceError;
-} {
-  if (!isObjectLike(value)) return { errorBrand: "non_error" };
-  const seen = new WeakSet<object>();
-  let cursor: object | null = value;
-  try {
-    while (cursor !== null) {
-      if (seen.has(cursor)) return { errorBrand: "indeterminate" };
-      seen.add(cursor);
-      const prototype = Object.getPrototypeOf(cursor) as object | null;
-      if (prototype === TaskServiceError.prototype) {
-        return { errorBrand: "error", taskServiceError: value as TaskServiceError };
-      }
-      if (prototype === Error.prototype) return { errorBrand: "error" };
-      cursor = prototype;
-    }
-    return { errorBrand: "non_error" };
-  } catch (error) {
-    if (propagateFailure) throw error;
-    return { errorBrand: "indeterminate" };
-  }
 }
 
 function isObjectLike(value: unknown): value is object {

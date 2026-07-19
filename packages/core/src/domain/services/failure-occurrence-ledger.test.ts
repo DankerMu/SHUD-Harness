@@ -4,6 +4,7 @@ import {
   FAILURE_GRAPH_MAX_NODES,
   FailureGraphObservationIssue,
   captureFailureOccurrence,
+  createTrustedTaskServiceErrorProxy,
   failureEvents,
   failureGraphNodes,
   failureLedger,
@@ -13,6 +14,7 @@ import {
   semanticPrimaryValue,
   taskServiceErrorAtBoundary
 } from "./index";
+import { runWithPreservedRelease } from "./compensation-error-preservation";
 import { TaskServiceError } from "./task-card-service";
 
 describe("failure occurrence ledger", () => {
@@ -25,7 +27,10 @@ describe("failure occurrence ledger", () => {
       "reused identity"
     );
 
-    expect(objectLedger).toBe(shared);
+    expect(objectLedger).not.toBe(shared);
+    expect(objectLedger).toBeInstanceOf(Error);
+    expect(failureLedger(shared)).toBeUndefined();
+    expect(semanticPrimaryValue(objectLedger)).toBe(shared);
     expect(failureEvents(objectLedger).map(({ phase, value }) => ({ phase, value }))).toEqual([
       { phase: "body", value: shared },
       { phase: "final_release", value: shared }
@@ -75,6 +80,108 @@ describe("failure occurrence ledger", () => {
     expect(graphEdgeTargets(second, "cause")).toEqual([secondCause]);
     expect(failureGraphNodes(second).some((node) => node.value === firstCause)).toBe(false);
     expect(causeReads).toBe(2);
+  });
+
+  test("isolates sequential, concurrent, and getter-reentrant reuse of one raw Error", async () => {
+    const shared = new Error("one raw failure");
+    const first = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", shared),
+      [captureFailureOccurrence("final_release", "first release")],
+      "first operation"
+    );
+    const second = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", shared),
+      [captureFailureOccurrence("settlement", "second settlement")],
+      "second operation"
+    );
+    const concurrent = await Promise.all(["left", "right"].map(async (label) =>
+      mergeTrustedFailureOccurrences(
+        captureFailureOccurrence("body", shared),
+        [captureFailureOccurrence("settlement", label)],
+        label
+      )
+    ));
+    let reentrant: unknown;
+    const getterPrimary = new Error("getter primary");
+    Object.defineProperty(getterPrimary, "cause", {
+      get() {
+        reentrant = mergeTrustedFailureOccurrences(
+          captureFailureOccurrence("body", shared),
+          [captureFailureOccurrence("settlement", "inner")],
+          "inner operation"
+        );
+        return shared;
+      }
+    });
+    const outer = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", getterPrimary),
+      [],
+      "outer operation"
+    );
+
+    const carriers = [first, second, ...concurrent, reentrant, outer];
+    expect(new Set(carriers).size).toBe(carriers.length);
+    expect(failureLedger(shared)).toBeUndefined();
+    expect(failureEvents(first).map((event) => event.value)).toEqual([shared, "first release"]);
+    expect(failureEvents(second).map((event) => event.value)).toEqual([shared, "second settlement"]);
+    expect(concurrent.map((value) => failureEvents(value).at(-1)?.value)).toEqual(["left", "right"]);
+    expect(failureEvents(reentrant).map((event) => event.value)).toEqual([shared, "inner"]);
+    for (const carrier of carriers) {
+      expect(Object.isFrozen(failureLedger(carrier))).toBe(true);
+      expect(Object.isFrozen(failureEvents(carrier))).toBe(true);
+      expect(failureEvents(carrier).every(Object.isFrozen)).toBe(true);
+      expect(Object.isFrozen(failureLedger(carrier)!.observedGraph)).toBe(true);
+      expect(Object.isFrozen(failureGraphNodes(carrier))).toBe(true);
+      expect(failureGraphNodes(carrier).every((node) =>
+        Object.isFrozen(node) && Object.isFrozen(node.edges) && node.edges.every(Object.isFrozen)
+      )).toBe(true);
+      expect(semanticPrimaryValue(carrier)).toBe(carrier === outer ? getterPrimary : shared);
+    }
+  });
+
+  test("round-trips exact nullish and custom-branded semantic primaries", () => {
+    const privateBrand = new WeakSet<object>();
+    class PrivateError extends Error {
+      #value = 7;
+      constructor() {
+        super("private");
+        privateBrand.add(this);
+      }
+      value() { return this.#value; }
+    }
+    const branded = new PrivateError();
+    for (const raw of [null, undefined, false, 0, "", branded] as const) {
+      const carrier = mergeTrustedFailureOccurrences(
+        captureFailureOccurrence("body", raw),
+        [captureFailureOccurrence("settlement", "later")],
+        "exact primary"
+      );
+      expect(semanticPrimaryValue(carrier)).toBe(raw);
+      expect(failureLedger(raw)).toBeUndefined();
+    }
+    expect(branded.value()).toBe(7);
+    expect(privateBrand.has(branded)).toBe(true);
+  });
+
+  test("keeps adopted history chronological and imports every occurrence once", () => {
+    const primary = new Error("chronological primary");
+    const first = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", primary),
+      [captureFailureOccurrence("settlement", "first later")],
+      "first"
+    );
+    const adopted = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("final_release", first),
+      [captureFailureOccurrence("observation", "new later")],
+      "adopt"
+    );
+    const events = failureEvents(adopted);
+    expect(events.map((event) => event.order)).toEqual(
+      [...events].map((event) => event.order).sort((left, right) => left - right)
+    );
+    expect(new Set(events.map((event) => event.order)).size).toBe(events.length);
+    expect(new Set(events.map((event) => event.occurrenceId)).size).toBe(events.length);
+    expect(failureLedger(adopted)).toBe(failureLedger(adopted));
   });
 
   test("freshly observes a nested Proxy carrier once per fold and terminates cyclic graphs", () => {
@@ -136,6 +243,9 @@ describe("failure occurrence ledger", () => {
       );
       expect(failureGraphNodes(result)).toHaveLength(Math.min(count, FAILURE_GRAPH_MAX_NODES));
       expect(observationIssueCodes(result).includes("node_budget_exceeded")).toBe(truncated);
+      expect(observationIssueCodes(result).filter(
+        (code) => code === "node_budget_exceeded"
+      )).toHaveLength(truncated ? 1 : 0);
       expect(semanticPrimaryValue(result)).toBe(primary);
     }
   });
@@ -159,6 +269,9 @@ describe("failure occurrence ledger", () => {
       );
       expect(edgeCount).toBe(Math.min(count, FAILURE_GRAPH_MAX_EDGES));
       expect(observationIssueCodes(result).includes("edge_budget_exceeded")).toBe(truncated);
+      expect(observationIssueCodes(result).filter(
+        (code) => code === "edge_budget_exceeded"
+      )).toHaveLength(truncated ? 1 : 0);
       expect(semanticPrimaryValue(result)).toBe(primary);
     }
   });
@@ -230,6 +343,90 @@ describe("failure occurrence ledger", () => {
     expect(semanticPrimaryValue(proxyResult)).toBe(proxyPrimary);
   });
 
+  test("bounds deceptive numeric keys and terminates a failed array-brand path", () => {
+    let descriptorReads = 0;
+    const keys = Array.from({ length: 16_384 }, (_, index) => String(index));
+    const deceptive = new Proxy([], {
+      ownKeys() { return [...keys, "length"]; },
+      getOwnPropertyDescriptor(_target, property) {
+        if (property === "length") return { configurable: false, enumerable: false, value: 16_384, writable: true };
+        descriptorReads += 1;
+        throw new Error(`descriptor ${String(property)}`);
+      }
+    });
+    const primary = new AggregateError([], "deceptive keys");
+    Object.defineProperty(primary, "errors", { value: deceptive });
+    const result = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", primary),
+      [],
+      "deceptive keys"
+    );
+    expect(descriptorReads).toBeLessThanOrEqual(8192);
+    expect(failureLedger(result)!.observedGraph.observationFailures.filter(
+      (event) => !(event.value instanceof FailureGraphObservationIssue)
+    ).length).toBeLessThanOrEqual(256);
+
+    const revoked = Proxy.revocable([], {});
+    revoked.revoke();
+    const revokedPrimary = new AggregateError([], "revoked errors");
+    Object.defineProperty(revokedPrimary, "errors", { value: revoked.proxy });
+    const revokedResult = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", revokedPrimary),
+      [],
+      "revoked errors"
+    );
+    const revokedLedger = failureLedger(revokedResult)!;
+    expect(revokedLedger.observedGraph.observationFailures).toHaveLength(1);
+    expect(revokedLedger.observedGraph.nodes.some((node) => node.value === revoked.proxy)).toBe(false);
+    expect(revokedLedger.observedGraph.nodes
+      .flatMap((node) => node.edges)
+      .some((edge) => edge.target === revoked.proxy)).toBe(false);
+  });
+
+  test("bounds cyclic and fresh-per-hop prototype work and observes aliases once", () => {
+    let cyclicReads = 0;
+    let cyclicProxy: object;
+    cyclicProxy = new Proxy({}, {
+      getPrototypeOf() {
+        cyclicReads += 1;
+        return cyclicProxy;
+      }
+    });
+    const cyclicResult = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", cyclicProxy),
+      [],
+      "cyclic prototype"
+    );
+    expect(cyclicReads).toBe(1);
+    expect(semanticPrimaryValue(cyclicResult)).toBe(cyclicProxy);
+
+    let freshReads = 0;
+    const fresh = (): object => new Proxy({}, {
+      getPrototypeOf() {
+        freshReads += 1;
+        return fresh();
+      }
+    });
+    const freshPrimary = fresh();
+    const freshResult = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", freshPrimary),
+      [],
+      "fresh prototype"
+    );
+    expect(freshReads).toBeLessThanOrEqual(65_536);
+    expect(observationIssueCodes(freshResult)).toContain("controlled_operation_budget_exceeded");
+
+    const alias = new Error("one aliased node");
+    const aliasedPrimary = new AggregateError([alias, alias], "aliases");
+    aliasedPrimary.cause = alias;
+    const aliased = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", aliasedPrimary),
+      [],
+      "aliases"
+    );
+    expect(failureGraphNodes(aliased).filter((node) => node.value === alias)).toHaveLength(1);
+  });
+
   test("projects only an exact trusted TaskServiceError primary", () => {
     const primary = taskServiceError("trusted typed primary");
     const compensation = new Error("typed compensation");
@@ -242,7 +439,8 @@ describe("failure occurrence ledger", () => {
       ["final_release"]
     );
 
-    expect(result).toBe(primary);
+    expect(result).not.toBe(primary);
+    expect(semanticPrimaryValue(result)).toBe(primary);
     expect(taskServiceErrorAtBoundary(result)).toBe(primary);
     expect(failureEvents(result).map((event) => event.value)).toEqual([primary, compensation]);
     expect(Object.getOwnPropertyDescriptors(primary)).toEqual(descriptors);
@@ -254,7 +452,7 @@ describe("failure occurrence ledger", () => {
 
     const proxyTarget = taskServiceError("one-shot proxy primary");
     let brandReads = 0;
-    const proxy = new Proxy(proxyTarget, {
+    const proxy = createTrustedTaskServiceErrorProxy(proxyTarget, {
       getPrototypeOf(target) {
         brandReads += 1;
         if (brandReads > 1) throw new Error("TaskServiceError brand read twice");
@@ -266,9 +464,45 @@ describe("failure occurrence ledger", () => {
       [new Error("proxy compensation")],
       "proxy typed fold"
     );
-    expect(proxyResult).toBe(proxy);
-    expect(taskServiceErrorAtBoundary(proxyResult)).toBe(proxy);
-    expect(brandReads).toBe(1);
+    expect(proxyResult).not.toBe(proxy);
+    expect(semanticPrimaryValue(proxyResult)).toBe(proxy);
+    expect(taskServiceErrorAtBoundary(proxyResult)).toBe(proxyTarget);
+    expect(brandReads).toBe(0);
+
+    const forged = Object.create(TaskServiceError.prototype);
+    const spoof = new Proxy({}, { getPrototypeOf: () => TaskServiceError.prototype });
+    const aggregate = new AggregateError([primary], "untrusted aggregate");
+    const ledgerLike = { primary: { value: primary }, events: [primary] };
+    for (const untrusted of [forged, spoof, aggregate, ledgerLike]) {
+      expect(taskServiceErrorAtBoundary(untrusted)).toBeUndefined();
+    }
+  });
+
+  test("captures physical body, release, and settlement phases at the shared helper", async () => {
+    const bodyFailure = new Error("body failed");
+    const releaseFailure = new Error("release failed");
+    const bodyAndRelease = await runWithPreservedRelease(
+      async () => { throw bodyFailure; },
+      async () => { throw releaseFailure; },
+      "body and release",
+      undefined,
+      preserveTaskServiceErrorCompensationCompatibility
+    ).catch((error) => error);
+    expect(failureEvents(bodyAndRelease).map((event) => event.phase)).toEqual([
+      "body", "final_release"
+    ]);
+
+    const settlementFailure = new Error("settlement failed");
+    const releaseAndSettlement = await runWithPreservedRelease(
+      async () => "value",
+      async () => { throw releaseFailure; },
+      "release and settlement",
+      async () => { throw settlementFailure; },
+      preserveTaskServiceErrorCompensationCompatibility
+    ).catch((error) => error);
+    expect(failureEvents(releaseAndSettlement).map((event) => event.phase)).toEqual([
+      "initial_release", "settlement"
+    ]);
   });
 
 

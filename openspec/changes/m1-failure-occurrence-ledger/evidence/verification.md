@@ -1,4 +1,13 @@
-## Verification evidence
+> **Superseded Round-1 evidence.** This file binds only to frozen pre-repair
+> head `1a993c89c842b72512768c40b87dd2205562ac05` and MUST NOT be used as current
+> merge evidence. Round-1 review invalidated its raw-Error/Proxy-carrier,
+> implicit-adoption, bounded-work, typed-trust, phase, and whole-file exclusion
+> conclusions. In particular, `exact raw Proxy carrier` and “no
+> idempotency/workspace diff” below are historical observations, not current
+> requirements. The repair must append a new final-head verification section
+> that supersedes every conflicting claim and hash.
+
+## Superseded verification evidence
 
 - Date: 2026-07-18 through 2026-07-19 (America/New_York)
 - Base source: `5a450a97f2a474af2f4db26bd9ee198adb7395ec`

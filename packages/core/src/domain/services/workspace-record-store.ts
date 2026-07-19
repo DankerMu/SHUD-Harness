@@ -9,7 +9,10 @@ import {
   runWithPreservedRelease,
   semanticPrimaryError
 } from "./compensation-error-preservation";
-import { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
+import {
+  preserveTaskServiceErrorCompensationCompatibility,
+  taskServiceErrorAtBoundary
+} from "./task-service-error-compensation";
 import {
   BOUNDED_NOFOLLOW_READ_OPEN_FLAGS,
   readDurableSingleLinkFile,
@@ -410,14 +413,16 @@ const pendingCleanupPermitFileCloses = new Set<Promise<void>>();
 
 export function isWorkspaceRecordDurableReadError(
   error: unknown
-): error is TaskServiceError {
-  return error instanceof TaskServiceError && workspaceRecordDurableReadErrors.has(error);
+): boolean {
+  const trusted = taskServiceErrorAtBoundary(error);
+  return trusted !== undefined && workspaceRecordDurableReadErrors.has(trusted);
 }
 
 export function isWorkspaceRecordOversizeError(
   error: unknown
-): error is TaskServiceError {
-  return error instanceof TaskServiceError && workspaceRecordOversizeErrors.has(error);
+): boolean {
+  const trusted = taskServiceErrorAtBoundary(error);
+  return trusted !== undefined && workspaceRecordOversizeErrors.has(trusted);
 }
 
 export interface WorkspaceRecordPublicationHookInput {
@@ -1988,7 +1993,7 @@ export async function refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
       });
       state.pathnameBinding = pathnameBinding;
     } catch (error) {
-      if (error instanceof TaskServiceError) throw error;
+      if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
       throw publicationStateError(evidenceRef, error);
     }
   });
@@ -3172,7 +3177,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       return { status: "missing" };
     }
     await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw serviceWorkspaceError(
       "workspace_path_not_safe",
       "Failed to conditionally remove workspace record.",
@@ -3311,7 +3316,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     const primary = preserveWorkspacePrimaryError(error, compensationErrors);
     let taskServiceCompatible = false;
     try {
-      taskServiceCompatible = primary instanceof TaskServiceError;
+      taskServiceCompatible = taskServiceErrorAtBoundary(primary) !== undefined;
     } catch {
       taskServiceCompatible = false;
     }
@@ -3895,7 +3900,7 @@ async function readRecordPathIdentity(
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return undefined;
     }
-    if (error instanceof TaskServiceError) {
+    if (taskServiceErrorAtBoundary(error) !== undefined) {
       throw error;
     }
     throw recordDurableReadError("inspect_failed", evidenceRef, error);
@@ -3916,7 +3921,7 @@ async function readRegularFilePathIdentity(
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return undefined;
     }
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw recordDurableReadError("inspect_failed", evidenceRef, error);
   }
 }
@@ -4019,7 +4024,7 @@ async function createPrivateAuthorityNamespaceAt(
     if (!identity) throw publicationStateError(evidenceRef);
     return identity;
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw serviceWorkspaceError(
       "workspace_path_not_safe",
       "Failed to create a private workspace mutation namespace.",
@@ -7394,7 +7399,7 @@ async function normalizeLegacyIsolatedGenerationMode(
     await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
   } catch (error) {
     primaryFailure = {
-      value: error instanceof TaskServiceError ? error : publicationStateError(evidenceRef, error)
+      value: taskServiceErrorAtBoundary(error) !== undefined ? error : publicationStateError(evidenceRef, error)
     };
     if (modeMutationAttempted && file) {
       try {
@@ -7466,7 +7471,7 @@ async function restoreIsolatedGenerationModeForPublicRollback(
     await assertOpenGenerationMatches(file, restored, publicGeneration, evidenceRef);
   } catch (error) {
     primaryFailure = {
-      value: error instanceof TaskServiceError ? error : publicationStateError(evidenceRef, error)
+      value: taskServiceErrorAtBoundary(error) !== undefined ? error : publicationStateError(evidenceRef, error)
     };
   } finally {
     try {
@@ -7570,7 +7575,7 @@ async function captureOwnedGenerationExpectation(
       nlink: before.nlink
     };
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   } finally {
     await file?.close();
@@ -8376,7 +8381,7 @@ async function captureSafeRecordDirectoryBaseline(
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return { status: "absent" };
     }
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   }
 }
@@ -8827,10 +8832,10 @@ async function removeExactEmptyAuthorityOwnedMutationNamespace(
           );
         }
       } catch (error) {
-        const proofError = error instanceof TaskServiceError
+        const proofError = taskServiceErrorAtBoundary(error) !== undefined
           ? error
           : publicationStateError(evidenceRef, error);
-        authorityNamespaceRemovalProofFailures.add(proofError);
+        authorityNamespaceRemovalProofFailures.add(proofError as object);
         throw proofError;
       }
 
@@ -9035,7 +9040,7 @@ async function normalizeOwnedAuthorityNamespaceMode(
     }
     await assertAuthorityNamespaceOwnership(ownership, evidenceRef);
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   }
 }
@@ -9086,7 +9091,7 @@ async function captureCanonicalAuthorityBaseline(
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return { status: "absent" };
     }
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     return await captureInvalidCanonicalAuthorityBaseline(
       recordPath,
       evidenceRef,
@@ -9125,7 +9130,7 @@ async function captureCanonicalAuthorityBaseline(
       mtimeNs: before.mtimeNs
     };
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef, error);
   } finally {
     await file?.close();
@@ -9144,7 +9149,7 @@ async function captureInvalidCanonicalAuthorityBaseline(
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return { status: "absent" };
     }
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef, error);
   }
   if (
@@ -9311,7 +9316,7 @@ async function assertMutableCleanupPathAuthority(
           throw publicationStateError(evidenceRef);
         }
       } catch (error) {
-        if (error instanceof TaskServiceError) throw error;
+        if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
         throw publicationStateError(evidenceRef);
       }
     }
@@ -9372,7 +9377,7 @@ async function assertFinalMutablePublicationAuthority(
       nlink: generation.nlink
     });
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   }
   await assertMutableCanonicalBaseline(recordPath, canonicalBaseline, evidenceRef);
@@ -10150,7 +10155,7 @@ async function bindRecordAuthorityCleanupPermitGeneration(
     });
   } catch (error) {
     await pinnedFile?.close().catch(() => undefined);
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   }
 }
@@ -10167,7 +10172,7 @@ async function assertCleanupPermitPinnedGeneration(
       await assertCleanupPermitPinnedGenerationNow(state, path, evidenceRef);
     });
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   }
 }

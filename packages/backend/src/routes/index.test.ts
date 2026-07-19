@@ -53,6 +53,7 @@ import {
 } from "../../../core/src/domain/services/workspace-record-store";
 import {
   PreservedErrorCompensationEnvelope,
+  failureEvents,
   failureLedger,
   orderedDistinctCompensationFailures,
   orderedDistinctFailures,
@@ -6991,9 +6992,24 @@ describe("backend workspace and health routes", () => {
     expect(body.error.recommended_next_actions).toEqual(primary.recommendedNextActions);
     expect(body.error.message).not.toBe("Unexpected backend route failure.");
     expect(cancellationAttempts).toBe(1);
-    expect(routedError).toBeInstanceOf(TaskServiceError);
-    expect(routedError).toBe(primary);
+    expect(routedError).not.toBe(primary);
+    expect(failureLedger(routedError)).toBeDefined();
     expect(semanticPrimaryError(routedError)).toBe(primary);
+    expect(
+      failureEvents(routedError)
+        .filter((event) => event.value === primary)
+        .map((event) => event.phase)
+    ).toEqual(["body"]);
+    expect(
+      failureEvents(routedError)
+        .filter((event) => event.value === cancellationFailure)
+        .map((event) => event.phase)
+    ).toEqual(["final_release"]);
+    expect(failureEvents(routedError).map((event) => event.phase)).toEqual([
+      "body",
+      "final_release",
+      "observation"
+    ]);
     expect(errorGraphContainsIdentity(routedError, cancellationFailure)).toBe(true);
     expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
     expect(primaryCauseReads).toBeLessThanOrEqual(1);
@@ -7037,7 +7053,7 @@ describe("backend workspace and health routes", () => {
     const body = (await response.json()) as ApiErrorResponse;
     expect(response.status).toBe(primary.status);
     expect(body.error.message).toBe(primary.message);
-    expect(routedError).toBeInstanceOf(TaskServiceError);
+    expect(failureLedger(routedError)).toBeDefined();
     expect(semanticPrimaryError(routedError)).toBe(primary);
     expect(errorGraphContainsIdentity(routedError, recovery)).toBe(true);
     expect(countErrorGraphIdentity(routedError, recovery)).toBe(1);
@@ -7122,7 +7138,7 @@ describe("backend workspace and health routes", () => {
     expect(response.status).toBe(completionPrimary.status);
     expect(body.error.message).toBe(completionPrimary.message);
     expect(recoveryCalls).toBe(1);
-    expect(routedError).toBeInstanceOf(TaskServiceError);
+    expect(failureLedger(routedError)).toBeDefined();
     expect(semanticPrimaryError(routedError)).toBe(completionPrimary);
     expect(errorGraphContainsIdentity(routedError, recovery)).toBe(true);
     expect(countErrorGraphIdentity(routedError, recovery)).toBe(1);
@@ -7960,9 +7976,9 @@ describe("backend workspace and health routes", () => {
         (routedError as { authorityError?: unknown } | undefined)?.authorityError
       )
     ).toBe(typedPrimary);
-    // Reusing the exact same Error object retains its last trusted fold; the
-    // counterfactual adds no new occurrence and still renders the typed root.
-    expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
+    // Reusing the raw typed primary does not import an earlier operation's
+    // carrier. The release-success counterfactual has no release occurrence.
+    expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(0);
   });
 
   test("S34-P62-05 digest-mismatch accept-settlement failure preserves the typed binding primary", async () => {
@@ -8307,6 +8323,10 @@ describe("backend workspace and health routes", () => {
     expectOrderedPreservedCompensationVector(unknownAuthorityError, [
       cancellationFailure
     ]);
+    expect(failureEvents(unknownAuthorityError).map((event) => event.phase)).toEqual([
+      "body",
+      "settlement"
+    ]);
     expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
 
     // The completed record and durable task survive the settlement failure;
@@ -8468,7 +8488,7 @@ describe("backend workspace and health routes", () => {
     expect(response.status).toBe(consumptionPrimary.status);
     expect(body.error.category).toBe(consumptionPrimary.category);
     expect(body.error.message).toBe(consumptionPrimary.message);
-    expect(routedError).toBeInstanceOf(TaskServiceError);
+    expect(failureLedger(routedError)).toBeDefined();
     expect(semanticPrimaryError(routedError)).toBe(consumptionPrimary);
     // Exact primary identity plus the complete ordered compensation identity
     // vector with multiplicity, pinned at the inner fold's altitude.

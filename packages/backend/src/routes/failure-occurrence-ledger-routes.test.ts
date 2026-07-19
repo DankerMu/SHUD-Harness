@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   TaskServiceError,
+  createTrustedTaskServiceErrorProxy,
   createTaskCardService,
   failureEvents,
   preserveTaskServiceErrorCompensationCompatibility,
@@ -23,7 +24,7 @@ describe("backend failure occurrence ledger boundary", () => {
     const workspaceRoot = await temporaryWorkspace();
     const primaryTarget = typedPrimary();
     let prototypeReads = 0;
-    const primary = new Proxy(primaryTarget, {
+    const primary = createTrustedTaskServiceErrorProxy(primaryTarget, {
       getPrototypeOf(target) {
         prototypeReads += 1;
         if (prototypeReads > 1) throw new Error("typed Proxy was reclassified");
@@ -58,10 +59,42 @@ describe("backend failure occurrence ledger boundary", () => {
     expect(response.status).toBe(primaryTarget.status);
     expect(body.error.category).toBe(primaryTarget.category);
     expect(body.error.message).toBe(primaryTarget.message);
+    expect(body.error.user_message).toBe(primaryTarget.userMessage);
+    expect(body.error.retryable).toBe(primaryTarget.retryable);
     expect(body.error.evidence_refs).toEqual(primaryTarget.evidenceRefs);
-    expect(taskServiceErrorAtBoundary(routed)).toBe(primary);
+    expect(body.error.recommended_next_actions).toEqual(primaryTarget.recommendedNextActions);
+    expect(taskServiceErrorAtBoundary(routed)).toBe(primaryTarget);
     expect(failureEvents(routed).map((event) => event.value)).toEqual([primary, compensation]);
-    expect(prototypeReads).toBe(1);
+    expect(prototypeReads).toBe(0);
+  });
+
+  test("rejects prototype, Proxy, AggregateError, and ledger-like typed forgeries", async () => {
+    const target = typedPrimary();
+    const values = [
+      Object.create(TaskServiceError.prototype),
+      new Proxy({}, { getPrototypeOf: () => TaskServiceError.prototype }),
+      new AggregateError([target], "raw aggregate"),
+      { primary: { value: target }, events: [target] }
+    ];
+    for (const value of values) {
+      const workspaceRoot = await temporaryWorkspace();
+      const app = createBackendApi({
+        workspaceRoot,
+        taskServiceFactory: (options) => ({
+          ...createTaskCardService(options),
+          createTask: async () => { throw value; }
+        })
+      });
+      const response = await app.request("/api/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(validTaskCreateBody())
+      });
+      const body = (await response.json()) as ApiErrorResponse;
+      expect(response.status).toBe(500);
+      expect(body.error.category).toBe("workspace_error");
+      expect(body.error.message).toBe("Unexpected backend route failure.");
+    }
   });
 
   test("keeps an untrusted typed-looking service failure on the generic 500 path", async () => {
