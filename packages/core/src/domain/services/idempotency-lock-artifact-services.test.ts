@@ -110,11 +110,13 @@ import {
   FailureOccurrenceProtocolError,
   PreservedErrorCompensationEnvelope,
   captureFailureFoldEntry,
+  captureFailureOccurrence,
   failureEvents,
   failureGraphNodes,
   failureLedger,
   orderedDistinctCompensationFailures,
   orderedDistinctFailures,
+  mergeTrustedFailureOccurrences,
   preserveFailureOccurrencesWithCompatibility,
   runWithPreservedRelease,
   semanticPrimaryError,
@@ -29027,7 +29029,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
   });
 
-  test("S34-P62-06 guard-recovery mid-window completed swap is refused fail-closed", async () => {
+  test("S34-P62-06/Child-A1 guard-recovery completed swap captures each rejection once", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const rawKey = "task:create:s34-guard-recovery-completed-swap";
@@ -29070,7 +29072,12 @@ describe("idempotency, lock, and artifact services", () => {
     const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
     let swapped = false;
 
-    const refusal = await captureTaskServiceError(() =>
+    const orderAnchor = failureEvents(mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", new Error("S31 capture-order anchor")),
+      [],
+      "S31 capture-order anchor"
+    ))[0]!.order;
+    const failure = await captureThrownValue(() =>
       runWithWorkspaceRecordPublicationHooks(
         {
           afterTemporaryFileWritten: async ({ canonicalPath }) => {
@@ -29084,6 +29091,7 @@ describe("idempotency, lock, and artifact services", () => {
         () => service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
       )
     );
+    const refusal = taskServiceErrorAtBoundary(failure)!;
 
     expect(swapped).toBe(true);
     // Refused fail-closed with the typed identity error, matching
@@ -29093,6 +29101,19 @@ describe("idempotency, lock, and artifact services", () => {
     expect(refusal.message).toBe(
       "Completed idempotency result changed before exact invalidation."
     );
+    const branchEvents = failureEvents(failure);
+    expect(branchEvents.map((event) => event.phase)).toEqual([
+      "settlement",
+      "body",
+      "body",
+      "settlement"
+    ]);
+    const branchOrders = branchEvents.map((event) => event.order);
+    expect(branchOrders).toEqual(Array.from(
+      { length: branchOrders.length },
+      (_, index) => branchOrders[0]! + index
+    ));
+    expect(branchOrders[0]).toBeGreaterThan(orderAnchor);
     // The completed generation is preserved byte-identically.
     expect(await readFile(recordPath, "utf8")).toBe(completedText);
     // And it remains replayable: the invalid-completed protocol takes over.

@@ -193,12 +193,22 @@ describe("failure occurrence ledger", () => {
     expect(events.filter((event) => inheritedEvents.some(
       (inherited) => inherited.occurrenceId === event.occurrenceId
     ))).toHaveLength(inheritedEvents.length);
-    expect(events).toContainEqual(recatch.occurrence);
-    expect(recatch.occurrence).toMatchObject({
+    const recatchOccurrence = events.find((event) => event.value === first);
+    expect(recatchOccurrence).toMatchObject({
       phase: "body",
-      value: first,
-      order: recatch.order
+      value: first
     });
+    expect(Object.keys(recatch)).toEqual(["order"]);
+    expect("occurrence" in recatch).toBe(false);
+    expect("carrier" in recatch).toBe(false);
+    expectProtocolError(
+      () => mergeTrustedFailureOccurrences(
+        (recatch as unknown as { occurrence?: never }).occurrence!,
+        [],
+        "opaque adoption child"
+      ),
+      "untrusted_entry"
+    );
     expect(events.at(-1)).toBe(finalRelease);
     expect(semanticPrimaryValue(adopted)).toBe(primary);
     expect(failureLedger(adopted)).toBe(failureLedger(adopted));
@@ -806,6 +816,120 @@ describe("failure occurrence ledger", () => {
       );
       expect(failureEvents(result)).toEqual(entries);
     }
+  });
+
+  test("validates adopted physical history before claiming a fresh phase", () => {
+    const observationFailure = new Error("adopted observation tail");
+    const primary = new Error("adopted terminal primary");
+    Object.defineProperty(primary, "cause", {
+      get() {
+        throw observationFailure;
+      }
+    });
+    const inherited = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", primary),
+      [captureFailureOccurrence("final_release", new Error("terminal release"))],
+      "terminal inherited history"
+    );
+    expect(failureEvents(inherited).map((event) => event.phase)).toEqual([
+      "body",
+      "final_release",
+      "observation"
+    ]);
+    expect(
+      (failurePreservation as unknown as {
+        failureTerminalPhysicalPhase(value: unknown): string | undefined;
+      }).failureTerminalPhysicalPhase(inherited)
+    ).toBe("final_release");
+
+    const invalidAdoption = adoptFailureCarrier("settlement", inherited);
+    expectProtocolError(
+      () => mergeTrustedFailureOccurrences(invalidAdoption, [], "invalid imported phase"),
+      "invalid_phase"
+    );
+    // The combined-history rejection is transactional: retry reports the same
+    // phase error, not a stale token consumed by the first preflight.
+    expectProtocolError(
+      () => mergeTrustedFailureOccurrences(invalidAdoption, [], "retry imported phase"),
+      "invalid_phase"
+    );
+  });
+
+  test("snapshots a hostile fold vector exactly once before claim", () => {
+    const primary = captureFailureOccurrence("body", new Error("snapshot primary"));
+    const snapshottedLater = captureFailureOccurrence(
+      "settlement",
+      new Error("snapshotted later")
+    );
+    const substitutedLater = captureFailureOccurrence(
+      "settlement",
+      new Error("substituted later")
+    );
+    let laterReads = 0;
+    const entries = new Proxy([primary, snapshottedLater], {
+      get(target, property, receiver) {
+        if (property === "1") {
+          laterReads += 1;
+          return laterReads === 1 ? snapshottedLater : substitutedLater;
+        }
+        return Reflect.get(target, property, receiver);
+      }
+    });
+
+    const result = failurePreservation.mergeTrustedFailureOccurrenceVector(
+      primary,
+      entries,
+      "transactional vector snapshot"
+    );
+    expect(failureEvents(result)).toEqual([primary, snapshottedLater]);
+    expect(laterReads).toBe(1);
+    expectProtocolError(
+      () => mergeTrustedFailureOccurrences(
+        snapshottedLater,
+        [],
+        "snapshotted entry was claimed"
+      ),
+      "stale_entry"
+    );
+    expect(failureEvents(mergeTrustedFailureOccurrences(
+      substitutedLater,
+      [],
+      "unobserved substitute remains fresh"
+    ))).toEqual([substitutedLater]);
+  });
+
+  test("resolves and executes primary classification before claiming entries", () => {
+    const getterFailure = new Error("classification getter failed");
+    const getterPrimary = captureFailureOccurrence("body", new Error("getter primary"));
+    expect(() => failurePreservation.mergeTrustedFailureOccurrenceVector(
+      getterPrimary,
+      [getterPrimary],
+      "throwing classification getter",
+      Object.defineProperty({}, "classify", {
+        get() {
+          throw getterFailure;
+        }
+      }) as failurePreservation.FailurePrimaryClassification
+    )).toThrow(getterFailure);
+    expect(failureEvents(mergeTrustedFailureOccurrences(
+      getterPrimary,
+      [],
+      "getter failure leaves occurrence fresh"
+    ))).toEqual([getterPrimary]);
+
+    const callableFailure = new Error("classification callable failed");
+    const callablePrimary = captureFailureOccurrence("body", new Error("callable primary"));
+    expect(() => failurePreservation.mergeTrustedFailureOccurrenceVector(
+      callablePrimary,
+      [callablePrimary],
+      "throwing classification callable",
+      { classify: () => { throw callableFailure; } }
+    )).toThrow(callableFailure);
+    expect(failureEvents(mergeTrustedFailureOccurrences(
+      callablePrimary,
+      [],
+      "callable failure leaves occurrence fresh"
+    ))).toEqual([callablePrimary]);
   });
 
   test("counts reordered canonical numeric keys rather than returned-key positions", () => {

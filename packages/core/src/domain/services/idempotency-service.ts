@@ -780,18 +780,12 @@ export function createIdempotencyRecordService(
             try {
               await writeFailedRecord(current, scope, key, evidenceRef);
             } catch (firstWriteError) {
-              const firstWriteEntry = captureFailureFoldEntry("body", firstWriteError);
-              transitionOutcome = {
-                status: "rejected",
-                reason: firstWriteError,
-                occurrence: firstWriteEntry
-              };
               let afterFirstWrite: IdempotencyRecord | undefined;
               try {
                 afterFirstWrite = await service.getRecord(scope, key);
               } catch (classificationError) {
                 throw preserveTaskServiceErrorFailureEntries(
-                  firstWriteEntry,
+                  captureFailureFoldEntry("body", firstWriteError),
                   [captureFailureFoldEntry("settlement", classificationError)],
                   IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
                 );
@@ -801,7 +795,7 @@ export function createIdempotencyRecordService(
                 afterFirstWrite.request_digest !== guard.request_digest
               ) {
                 throw preserveTaskServiceErrorFailureEntries(
-                  firstWriteEntry,
+                  captureFailureFoldEntry("body", firstWriteError),
                   [captureFailureFoldEntry(
                     "settlement",
                     transitionGuardBusyError(scope, key, "fail")
@@ -836,12 +830,17 @@ export function createIdempotencyRecordService(
                   await writeFailedRecord(afterFirstWrite, scope, key, evidenceRef);
                 } catch (secondWriteError) {
                   throw preserveTaskServiceErrorFailureEntries(
-                    firstWriteEntry,
+                    captureFailureFoldEntry("body", firstWriteError),
                     [captureFailureFoldEntry("settlement", secondWriteError)],
                     IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
                   );
                 }
               }
+              transitionOutcome = {
+                status: "rejected",
+                reason: firstWriteError,
+                occurrence: captureFailureFoldEntry("body", firstWriteError)
+              };
             }
           }
 

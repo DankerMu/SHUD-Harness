@@ -24,10 +24,7 @@ export interface FailureOccurrence {
 
 export interface FailureCarrierAdoption {
   readonly [FAILURE_CARRIER_ADOPTION]: true;
-  readonly adoptionId: symbol;
   readonly order: number;
-  readonly carrier: object;
-  readonly occurrence: FailureOccurrence;
 }
 
 export type FailureFoldEntry = FailureOccurrence | FailureCarrierAdoption;
@@ -174,7 +171,7 @@ interface ObservationState {
   readonly occurrenceById: Map<symbol, FailureOccurrence>;
   readonly visitedLedgers: Set<PreservedFailureLedger>;
   readonly semanticPrimaryValue: unknown;
-  readonly classifyPrimary?: (value: object) => FailureGraphNode["errorBrand"];
+  readonly classifiedPrimaryBrand?: FailureGraphNode["errorBrand"];
   queueHead: number;
   edgeCount: number;
   controlledOperationCount: number;
@@ -189,7 +186,11 @@ interface ObservationState {
 let nextFailureOccurrenceOrder = 1;
 const trustedFailureOccurrences = new WeakSet<object>();
 const claimedFailureOccurrences = new WeakSet<object>();
-const trustedFailureCarrierAdoptions = new WeakMap<object, PreservedFailureLedger>();
+interface FailureCarrierAdoptionState {
+  readonly ledger: PreservedFailureLedger;
+  readonly occurrence: FailureOccurrence;
+}
+const trustedFailureCarrierAdoptions = new WeakMap<object, FailureCarrierAdoptionState>();
 const claimedFailureCarrierAdoptions = new WeakSet<object>();
 const preservedFailureLedgers = new WeakMap<object, PreservedFailureLedger>();
 
@@ -333,12 +334,9 @@ export function adoptFailureCarrier(
   const occurrence = mintFailureOccurrence(phase, carrier);
   const adoption = Object.freeze({
     [FAILURE_CARRIER_ADOPTION]: true as const,
-    adoptionId: Symbol("failure_carrier_adoption"),
-    order: occurrence.order,
-    carrier,
-    occurrence
+    order: occurrence.order
   });
-  trustedFailureCarrierAdoptions.set(adoption, ledger);
+  trustedFailureCarrierAdoptions.set(adoption, { ledger, occurrence });
   return adoption;
 }
 
@@ -353,7 +351,7 @@ export function failureFoldEntryValue(entry: FailureFoldEntry): unknown {
     throw new FailureOccurrenceProtocolError("untrusted_entry");
   }
   const adoption = trustedFailureCarrierAdoptions.get(entry);
-  if (adoption) return (entry as FailureCarrierAdoption).occurrence.value;
+  if (adoption) return adoption.occurrence.value;
   if (trustedFailureOccurrences.has(entry)) {
     return (entry as FailureOccurrence).value;
   }
@@ -388,6 +386,13 @@ export function failureGraphNodes(value: unknown): readonly FailureGraphNode[] {
 
 export function failureEvents(value: unknown): readonly FailureOccurrence[] {
   return failureLedger(value)?.events ?? [];
+}
+
+export function failureTerminalPhysicalPhase(
+  value: unknown
+): Exclude<FailurePhase, "observation"> | undefined {
+  const ledger = failureLedger(value);
+  return ledger ? terminalPhysicalPhase(ledger) : undefined;
 }
 
 export function orderedDistinctFailures(value: unknown): readonly unknown[] {
@@ -431,14 +436,45 @@ export function mergeTrustedFailureOccurrenceVector(
   _aggregateMessage: string,
   primaryClassification?: FailurePrimaryClassification
 ): unknown {
-  if (!entries.includes(primary)) {
+  const entrySnapshot = Object.freeze(Array.from(entries));
+  if (!entrySnapshot.includes(primary)) {
     throw new FailureOccurrenceProtocolError("invalid_cardinality");
   }
-  preflightFailureFoldEntries(entries);
-  claimFailureFoldEntries(entries);
-
   const primaryAdoption = trustedFailureCarrierAdoptions.get(primary as object);
-  const semanticPrimary = primaryAdoption?.primary ?? primary as FailureOccurrence;
+  const directPrimary = trustedFailureOccurrences.has(primary as object)
+    ? primary as FailureOccurrence
+    : undefined;
+  if (!primaryAdoption && !directPrimary) {
+    preflightFailureFoldEntries(entrySnapshot);
+    throw new FailureOccurrenceProtocolError("untrusted_entry");
+  }
+  const semanticPrimary = primaryAdoption?.ledger.primary ?? directPrimary!;
+  // Validate the frozen token vector before invoking the optional classifier,
+  // then repeat the same validation after it returns so reentrant claims or
+  // state changes cannot cross the final claim boundary unnoticed.
+  preflightFailureFoldEntries(entrySnapshot);
+  const classifyPrimary = primaryClassification?.classify;
+  let classifiedPrimaryBrand: FailureGraphNode["errorBrand"] | undefined;
+  if (classifyPrimary !== undefined) {
+    if (typeof classifyPrimary !== "function") {
+      throw new FailureOccurrenceProtocolError("untrusted_entry");
+    }
+    if (isObjectLike(semanticPrimary.value)) {
+      classifiedPrimaryBrand = classifyPrimary(semanticPrimary.value);
+      if (
+        classifiedPrimaryBrand !== "error" &&
+        classifiedPrimaryBrand !== "non_error" &&
+        classifiedPrimaryBrand !== "indeterminate"
+      ) {
+        throw new FailureOccurrenceProtocolError("untrusted_entry");
+      }
+    }
+  }
+  // No caller-controlled reads or calls occur between this final validation
+  // and claim. Preflight, claim, and fold all consume the same frozen snapshot.
+  preflightFailureFoldEntries(entrySnapshot);
+  claimFailureFoldEntries(entrySnapshot);
+
   const state: ObservationState = {
     nodes: [],
     observationFailures: [],
@@ -447,10 +483,10 @@ export function mergeTrustedFailureOccurrenceVector(
     occurrenceById: new Map<symbol, FailureOccurrence>(),
     visitedLedgers: new Set<PreservedFailureLedger>(),
     semanticPrimaryValue: semanticPrimary.value,
-    classifyPrimary: primaryClassification?.classify,
+    classifiedPrimaryBrand,
     queueHead: 0,
     edgeCount: 0,
-    controlledOperationCount: 0,
+    controlledOperationCount: classifiedPrimaryBrand === undefined ? 0 : 1,
     ordinaryObservationFailureCount: 0,
     nodeBudgetRecorded: false,
     edgeBudgetRecorded: false,
@@ -459,7 +495,7 @@ export function mergeTrustedFailureOccurrenceVector(
     observationFailureBudgetRecorded: false
   };
 
-  for (const entry of entries) adoptOrRetainEntry(entry, state);
+  for (const entry of entrySnapshot) adoptOrRetainEntry(entry, state);
 
   while (state.queueHead < state.queue.length) {
     const value = state.queue[state.queueHead++];
@@ -546,8 +582,8 @@ function adoptOrRetainEntry(
     retainOccurrence(entry as FailureOccurrence, state, true);
     return;
   }
-  adoptLedger(adopted, state);
-  retainOccurrence((entry as FailureCarrierAdoption).occurrence, state, true);
+  adoptLedger(adopted.ledger, state);
+  retainOccurrence(adopted.occurrence, state, true);
 }
 
 function adoptLedger(
@@ -560,8 +596,8 @@ function adoptLedger(
 }
 
 function observeNode(value: object, state: ObservationState): void {
-  const errorBrand = value === state.semanticPrimaryValue && state.classifyPrimary
-    ? observePrimaryClassification(value, state)
+  const errorBrand = value === state.semanticPrimaryValue && state.classifiedPrimaryBrand
+    ? state.classifiedPrimaryBrand
     : observeErrorBrand(value, state);
 
   const edges: FailureGraphEdge[] = [];
@@ -725,27 +761,46 @@ function preflightFailureFoldEntries(entries: readonly FailureFoldEntry[]): void
       if (claimedFailureCarrierAdoptions.has(entry)) {
         throw new FailureOccurrenceProtocolError("stale_entry");
       }
-      const adoption = entry as FailureCarrierAdoption;
-      if (
-        !trustedFailureOccurrences.has(adoption.occurrence) ||
-        adoption.occurrence.value !== adoption.carrier ||
-        adoption.occurrence.order !== adoption.order
-      ) {
-        throw new FailureOccurrenceProtocolError("untrusted_entry");
-      }
+      const adoption = trustedFailureCarrierAdoptions.get(entry)!;
       if (claimedFailureOccurrences.has(adoption.occurrence)) {
         throw new FailureOccurrenceProtocolError("stale_entry");
       }
-      if (adoption.order <= previousEntryOrder) {
+      if (adoption.occurrence.order <= previousEntryOrder) {
         throw new FailureOccurrenceProtocolError("reordered_entry");
       }
       assertFailurePhaseRole(adoption.occurrence.phase, index, finalReleaseSeen);
       if (adoption.occurrence.phase === "final_release") finalReleaseSeen = true;
-      previousEntryOrder = adoption.order;
+      previousEntryOrder = adoption.occurrence.order;
       continue;
     }
     throw new FailureOccurrenceProtocolError("untrusted_entry");
   }
+  assertCombinedTerminalPhaseGrammar(entries);
+}
+
+function assertCombinedTerminalPhaseGrammar(
+  entries: readonly FailureFoldEntry[]
+): void {
+  for (const entry of entries) {
+    const adoption = trustedFailureCarrierAdoptions.get(entry as object);
+    if (
+      adoption &&
+      terminalPhysicalPhase(adoption.ledger) === "final_release" &&
+      adoption.occurrence.phase === "settlement"
+    ) {
+      throw new FailureOccurrenceProtocolError("invalid_phase");
+    }
+  }
+}
+
+function terminalPhysicalPhase(
+  ledger: PreservedFailureLedger
+): Exclude<FailurePhase, "observation"> | undefined {
+  for (let index = ledger.events.length - 1; index >= 0; index -= 1) {
+    const phase = ledger.events[index]!.phase;
+    if (phase !== "observation") return phase;
+  }
+  return undefined;
 }
 
 function claimFailureFoldEntries(entries: readonly FailureFoldEntry[]): void {
@@ -754,7 +809,9 @@ function claimFailureFoldEntries(entries: readonly FailureFoldEntry[]): void {
       claimedFailureOccurrences.add(entry as object);
     } else {
       claimedFailureCarrierAdoptions.add(entry as object);
-      claimedFailureOccurrences.add((entry as FailureCarrierAdoption).occurrence);
+      claimedFailureOccurrences.add(
+        trustedFailureCarrierAdoptions.get(entry as object)!.occurrence
+      );
     }
   }
 }
@@ -925,19 +982,6 @@ function chargeControlledOperation(state: ObservationState): boolean {
   }
   state.controlledOperationCount += 1;
   return true;
-}
-
-function observePrimaryClassification(
-  value: object,
-  state: ObservationState
-): FailureGraphNode["errorBrand"] {
-  if (!chargeControlledOperation(state)) return "indeterminate";
-  try {
-    return state.classifyPrimary!(value);
-  } catch (error) {
-    recordObservationFailure(error, state);
-    return "indeterminate";
-  }
 }
 
 function observeErrorBrand(

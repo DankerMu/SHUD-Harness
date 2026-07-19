@@ -15,7 +15,7 @@ import {
   createTaskCardService,
   ensureWorkspaceDirectoryTree,
   ensureWorkspaceRecordRootPhysicalIdentity,
-  failureLedger,
+  failureTerminalPhysicalPhase,
   isSafeTaskId,
   probeWorkspaceRecordDirectoryWritable,
   preserveTaskServiceErrorFailureEntries,
@@ -1737,7 +1737,7 @@ async function completedTaskCreateResultWithoutLocal(
     } catch (recoveryError) {
       throw preservePrimaryFailure(
         authorityEntry,
-        [captureFailureFoldEntry("settlement", recoveryError)],
+        [capturePostSettlementFailure(recoveryError)],
         "Completed authority failure and failed-record recovery both failed."
       );
     }
@@ -1886,8 +1886,9 @@ async function invalidateCompletedTaskAuthorityWithRecovery(
     });
     return { durablyFailed: failed.status === "failed", entries: [] };
   } catch (invalidationError) {
+    let finalReleaseFailureSeen = failureEndsInFinalRelease(invalidationError);
     const entries: FailureFoldEntry[] = [
-      captureFailureFoldEntry("settlement", invalidationError)
+      capturePostSettlementFailure(invalidationError)
     ];
     try {
       const failed = await input.idempotencyService.quarantineRecordAfterUnsafeRollback({
@@ -1901,7 +1902,11 @@ async function invalidateCompletedTaskAuthorityWithRecovery(
       });
       return { durablyFailed: failed.status === "failed", entries };
     } catch (quarantineError) {
-      entries.push(captureFailureFoldEntry("settlement", quarantineError));
+      finalReleaseFailureSeen ||= failureEndsInFinalRelease(quarantineError);
+      entries.push(captureFailureFoldEntry(
+        finalReleaseFailureSeen ? "final_release" : "settlement",
+        quarantineError
+      ));
     }
     if (mutationAuthority !== undefined) {
       try {
@@ -1937,16 +1942,16 @@ function preservePrimaryFailure(
 }
 
 function capturePostSettlementFailure(error: unknown): FailureFoldEntry {
-  const inheritedEvents = failureLedger(error)?.events;
-  const inheritedPhase = inheritedEvents?.at(-1)?.phase;
   return captureFailureFoldEntry(
-    inheritedPhase === "final_release" ? "final_release" : "settlement",
+    failureTerminalPhysicalPhase(error) === "final_release"
+      ? "final_release"
+      : "settlement",
     error
   );
 }
 
 function failureEndsInFinalRelease(error: unknown): boolean {
-  return failureLedger(error)?.events.at(-1)?.phase === "final_release";
+  return failureTerminalPhysicalPhase(error) === "final_release";
 }
 
 /**

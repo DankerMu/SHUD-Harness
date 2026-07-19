@@ -28,6 +28,7 @@ export {
   failureFoldEntryValue,
   failureGraphNodes,
   failureLedger,
+  failureTerminalPhysicalPhase,
   mergeTrustedFailureOccurrences,
   orderedDistinctCompensationFailures,
   orderedDistinctFailures,
