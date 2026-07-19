@@ -24058,10 +24058,10 @@ describe("idempotency, lock, and artifact services", () => {
     expect(result.stderr).toBe("");
   });
 
-  test("Phase 6.2 bounds hostile prototype failures through TaskCard hydration and settlement", async () => {
-    const coreIndexPath = join(import.meta.dir, "index.ts");
-    const workspaceStorePath = join(import.meta.dir, "workspace-record-store.ts");
-    for (const kind of ["cyclic", "fresh", "throwing"] as const) {
+  for (const kind of ["cyclic", "fresh", "throwing"] as const) {
+    test(`Phase 6.2 bounds hostile prototype failures through TaskCard hydration and settlement (${kind})`, async () => {
+      const coreIndexPath = join(import.meta.dir, "index.ts");
+      const workspaceStorePath = join(import.meta.dir, "workspace-record-store.ts");
       const script = [
         'import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";',
         'import { tmpdir } from "node:os";',
@@ -24130,10 +24130,41 @@ describe("idempotency, lock, and artifact services", () => {
         '  }',
         '  return typed;',
         '}',
+        'const settlementRoot = await realpath(await mkdtemp(join(tmpdir(), `taskcard-settlement-${kind}-`)));',
+        'try {',
+        '  const workspaceRoot = join(settlementRoot, "workspace");',
+        '  const taskId = `TASK-phase62-hostile-settlement-${kind}`;',
+        '  const service = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });',
+        '  await service.createTask({ type: "engineering", title: "Hostile settlement",',
+        '    question_or_goal: "Bound the single-item settlement fold.", inference_budget: { mode: "normal" } });',
+        '  const observation = await service.observeTaskSnapshotForCleanup(taskId);',
+        '  if (observation.status !== "record") throw new Error("expected exact settlement observation");',
+        '  rawTarget = undefined;',
+        '  prototypeReads = 0;',
+        '  const raw = hostile();',
+        '  const descriptors = Object.getOwnPropertyDescriptors(rawTarget);',
+        '  let injections = 0;',
+        '  let failure;',
+        '  try {',
+        '    await runWithWorkspaceRecordPublicationHooks({',
+        '      afterDurableRecordObservation: () => { if (injections++ === 0) throw raw; }',
+        '    }, () => service.acceptTaskSnapshotCleanupObservation(observation));',
+        '  } catch (error) { failure = error; }',
+        '  const typed = assertWorkspaceFailure(',
+        '    failure, raw, "Failed to settle the exact observed task snapshot generation.",',
+        '    [`workspace/tasks/${taskId}/snapshot.json`, "snapshot.bytes"], "settlement"',
+        '  );',
+        '  if (typed.userMessage !== "The task snapshot could not be accepted safely.") throw new Error("settlement user message changed");',
+        '  if (injections < 1) throw new Error("settlement failure was not injected");',
+        '  if (!sameDescriptors(descriptors, Object.getOwnPropertyDescriptors(rawTarget))) throw new Error(`${kind} settlement caller object was mutated`);',
+        '  if (prototypeReads > 65792) throw new Error(`${kind} settlement prototype work exceeded the declared bound: ${prototypeReads}`);',
+        '} finally { await rm(settlementRoot, { recursive: true, force: true }); }',
         'const hydrationRoot = await realpath(await mkdtemp(join(tmpdir(), `taskcard-hydration-${kind}-`)));',
         'try {',
         '  const workspaceRoot = join(hydrationRoot, "workspace");',
         '  await mkdir(join(workspaceRoot, "tasks"), { recursive: true });',
+        '  rawTarget = undefined;',
+        '  prototypeReads = 0;',
         '  const raw = hostile();',
         '  const descriptors = Object.getOwnPropertyDescriptors(rawTarget);',
         '  let failure;',
@@ -24147,34 +24178,8 @@ describe("idempotency, lock, and artifact services", () => {
         '    ["workspace/tasks", "workspace/tasks:metadata"], "body"',
         '  );',
         '  if (typed.userMessage !== "The workspace tasks directory is temporarily unavailable.") throw new Error("hydration user message changed");',
-        '  if (!sameDescriptors(descriptors, Object.getOwnPropertyDescriptors(rawTarget))) throw new Error(`${kind} caller object was mutated`);',
+        '  if (!sameDescriptors(descriptors, Object.getOwnPropertyDescriptors(rawTarget))) throw new Error(`${kind} hydration caller object was mutated`);',
         '} finally { await rm(hydrationRoot, { recursive: true, force: true }); }',
-        'if (kind === "throwing") {',
-        '  const settlementRoot = await realpath(await mkdtemp(join(tmpdir(), "taskcard-settlement-throwing-")));',
-        '  try {',
-        '    const workspaceRoot = join(settlementRoot, "workspace");',
-        '    const taskId = "TASK-phase62-hostile-settlement";',
-        '    const service = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });',
-        '    await service.createTask({ type: "engineering", title: "Hostile settlement",',
-        '      question_or_goal: "Bound the single-item settlement fold.", inference_budget: { mode: "normal" } });',
-        '    const observation = await service.observeTaskSnapshotForCleanup(taskId);',
-        '    if (observation.status !== "record") throw new Error("expected exact settlement observation");',
-        '    const raw = hostile();',
-        '    let injections = 0;',
-        '    let failure;',
-        '    try {',
-        '      await runWithWorkspaceRecordPublicationHooks({',
-        '        afterDurableRecordObservation: () => { if (injections++ === 0) throw raw; }',
-        '      }, () => service.acceptTaskSnapshotCleanupObservation(observation));',
-        '    } catch (error) { failure = error; }',
-        '    const typed = assertWorkspaceFailure(',
-        '      failure, raw, "Failed to settle the exact observed task snapshot generation.",',
-        '      [`workspace/tasks/${taskId}/snapshot.json`, "snapshot.bytes"], "settlement"',
-        '    );',
-        '    if (typed.userMessage !== "The task snapshot could not be accepted safely.") throw new Error("settlement user message changed");',
-        '    if (injections < 1) throw new Error("settlement failure was not injected");',
-        '  } finally { await rm(settlementRoot, { recursive: true, force: true }); }',
-        '}',
         'if (prototypeReads > 65792) throw new Error(`${kind} prototype work exceeded the declared bound: ${prototypeReads}`);',
         'console.log(`taskcard-hostile-${kind}-ok`);'
       ].join("\n");
@@ -24190,8 +24195,8 @@ describe("idempotency, lock, and artifact services", () => {
       }
       expect(result.stdout).toContain(`taskcard-hostile-${kind}-ok`);
       expect(result.stderr).toBe("");
-    }
-  });
+    });
+  }
 
   test("TaskCard hydration distinguishes explicit non-Error failures from an omitted cause", async () => {
     const ordinaryObject = Object.freeze({ kind: "ordinary hydration failure" });
