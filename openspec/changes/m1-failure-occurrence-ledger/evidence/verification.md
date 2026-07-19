@@ -336,10 +336,11 @@ merge purposes.
 - `npx --yes openspec validate m1-failure-occurrence-ledger --strict --no-interactive`
   -> exit 0 (`Change 'm1-failure-occurrence-ledger' is valid`).
 - Final Phase 6.2 full-inventory audit:
-  `.workplans/issue-108-ledger/review/phase-6.2-round-2-definitive-audit.md`
+  `evidence/phase-6.2-definitive-audit.md`
   -> clean; all shared-helper, entrypoint, read/write, release/rollback,
   producer/consumer, stale/idempotency, and unchanged-consumer surfaces were
-  covered.
+  covered. The tracked report preserves the historical Round-2 result and
+  revalidates the complete inventory on the final A1/A2 semantic stack.
 
 ### Oracle, declaration, and hygiene evidence
 
@@ -402,3 +403,71 @@ Replay artifact SHA-256 values:
   `ae4b91286bbdbaf7a385fc68a932abd77e1f093d9940425eb7dee05cbdbb2912`;
 - `round2-depth-regression.test.ts`:
   `dc6f22b7c6a7ef8fe986d813d9617eda9041515fbd45255ef9f6617c4a2b670a`.
+
+## Final Round-3 stacked semantic and evidence binding
+
+Verified on `2026-07-19 17:23:00 EDT`. This section supersedes prior merge
+bindings after the Round-3 breadth split.
+
+- Issue base: `5a450a97f2a474af2f4db26bd9ee198adb7395ec`.
+- Split base: `1aadd5c613eb383f9e65079066e2459876038811`.
+- Child A1 semantic head: `ca67f6fcc2588d719465ee28be791aa80d17660e`
+  (tree `62d307803879ab7643428017a5840fdfa2bbfd4e`).
+- Child A2 and final semantic head:
+  `a070092e02568125b8c0e96810f20dfbb85bbbe3`
+  (tree `78bbd7edb25958963b4eed631235070f8191f2db`).
+- Child A3 changes tracked evidence only and do not alter product or runtime
+  test semantics.
+
+The tracked definitive audit is
+`evidence/phase-6.2-definitive-audit.md`. Replay-artifact whitespace accounting
+and fresh-clone commands are in `evidence/replay-whitespace-exceptions.md`.
+No canonical claim depends on `.workplans`.
+
+Final A2 verification:
+
+- Dedicated core/backend ledger suite: 41 pass, 0 fail, 520 assertions.
+- Full core services, backend API, typecheck, and root `check`: exit 0.
+- Strict OpenSpec: exit 0; change valid.
+- Incremental product/spec/test diff check, stash hygiene, submodule hygiene,
+  and Zero pin `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`: clean.
+- Independent post-repair Phase 6.2 audit, six-lens Round 2, and final gap
+  sweep: clean with zero verified remaining findings.
+
+The SHA-256 of the binary diff from the issue base to the final semantic head
+over the seven declared product-source paths is
+`b3c59fe691bd4dc9a722334d56f928ce1959c71516cc83ffc0cab3880c7266af`.
+The corresponding four-runtime-test-path diff SHA-256 is
+`11fa8a4f5a38eda9f1dba58a2c124446aa434593657dfee1628d5c6569bf7b1b`.
+
+Final semantic file SHA-256 values:
+
+- `packages/backend/src/routes/index.ts`:
+  `434c5dd1291f7978815960e8d9d80cbf0a4bdb4d18d249223c6c61ecd19077c2`;
+- `packages/core/src/domain/services/compensation-error-preservation.ts`:
+  `d8cd20c7390104b7b57791a4d790f6cb3d5509c36275a22ba736a494b6df26cf`;
+- `packages/core/src/domain/services/idempotency-service.ts`:
+  `0eb13da856e2467284893e770550b7b92b77fcaa3f7e3396777142d4fe5f9149`;
+- `packages/core/src/domain/services/index.ts`:
+  `88def0bc3680cc45799f7582bcb3dba4e1656ee2ca76d335cf694086cbc5a58a`;
+- `packages/core/src/domain/services/task-card-service.ts`:
+  `a84e2cf9240f67738a73f45d0271036d655771f4db7d10ec9f15b221b436c800`;
+- `packages/core/src/domain/services/task-service-error-compensation.ts`:
+  `8465b5916bce854cf7cc3608ad8cae8de7cebe53ceb14693d963c7dcc3b5244d`;
+- `packages/core/src/domain/services/workspace-record-store.ts`:
+  `737dacfae08b2997d0be139e28f8520c2040f4fc12a4f4bb230fa406d913f2ff`;
+- `packages/backend/src/routes/failure-occurrence-ledger-routes.test.ts`:
+  `cfc2580b5b4318f47f519efd49916b26eaa816f99a324ccae9d2bb744536309f`;
+- `packages/backend/src/routes/index.test.ts`:
+  `6d87e05c1407723d9525bf2795c18f09a48c99474c2a6619d15c147b810cdca7`;
+- `packages/core/src/domain/services/failure-occurrence-ledger.test.ts`:
+  `e2f98af0c462c9b17fda93ad6510be4983f13f5556aac15984b27c972ef6012c`;
+- `packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts`:
+  `1d2d90b9f0a2b3ac4225f3325ebd0d73439776f405d4c4ba5a657d9a5842bbff`.
+
+Replay artifact SHA-256 values:
+
+- Round-1 Phase 6.2 `red-before-tests.patch`:
+  `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`;
+- Round-2 `red-before-backend-undefined.patch`:
+  `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.

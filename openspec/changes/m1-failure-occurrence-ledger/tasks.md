@@ -169,3 +169,18 @@
   descriptor failures, frozen vectors, budget events, and alias edge fan-out.
 - [x] 8.5 Run dedicated, full core/backend, typecheck, root check, strict
   OpenSpec, and incremental hygiene verification on the final A2 head.
+
+## 9. Round-3 Split Child A3 — Tracked Evidence Closure
+
+- [x] 9.1 Persist the definitive Phase 6.2 invariant inventory under tracked
+  OpenSpec evidence, including every required surface, the A1/A2 semantic
+  heads, verification results, and residual platform limits.
+- [x] 9.2 Replace the final ignored `.workplans` audit reference with the
+  tracked report so a fresh clone can resolve every canonical evidence path.
+- [x] 9.3 Enumerate all 13 preserved replay-artifact whitespace lines: seven in
+  the Round-1 Phase 6.2 patch and six in the Round-2 backend patch. Remove all
+  unrelated trailing whitespace so range-wide hygiene reports only those
+  byte-preserving exceptions.
+- [x] 9.4 Bind final source/test diff hashes, file hashes, replay artifact
+  hashes, replay preflight commands, strict OpenSpec, and final-head hygiene to
+  the A1/A2 semantic stack without using `.workplans` as canonical evidence.
