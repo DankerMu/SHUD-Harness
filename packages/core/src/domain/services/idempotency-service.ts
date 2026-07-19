@@ -17,6 +17,7 @@ import {
 } from "./compensation-error-preservation";
 import {
   preserveTaskServiceErrorFailureEntries,
+  preserveTaskServiceErrorFailureVector,
   taskServiceErrorAtBoundary
 } from "./task-service-error-compensation";
 import {
@@ -780,12 +781,13 @@ export function createIdempotencyRecordService(
             try {
               await writeFailedRecord(current, scope, key, evidenceRef);
             } catch (firstWriteError) {
+              const firstWriteEntry = captureFailureFoldEntry("body", firstWriteError);
               let afterFirstWrite: IdempotencyRecord | undefined;
               try {
                 afterFirstWrite = await service.getRecord(scope, key);
               } catch (classificationError) {
                 throw preserveTaskServiceErrorFailureEntries(
-                  captureFailureFoldEntry("body", firstWriteError),
+                  firstWriteEntry,
                   [captureFailureFoldEntry("settlement", classificationError)],
                   IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
                 );
@@ -795,7 +797,7 @@ export function createIdempotencyRecordService(
                 afterFirstWrite.request_digest !== guard.request_digest
               ) {
                 throw preserveTaskServiceErrorFailureEntries(
-                  captureFailureFoldEntry("body", firstWriteError),
+                  firstWriteEntry,
                   [captureFailureFoldEntry(
                     "settlement",
                     transitionGuardBusyError(scope, key, "fail")
@@ -810,12 +812,13 @@ export function createIdempotencyRecordService(
                 // assertUnsafeRollbackQuarantineAuthority semantics. Only the
                 // exact transported mutation authority may invalidate a
                 // completed generation.
-                throw preserveTaskServiceErrorFailureEntries(
-                  captureFailureFoldEntry(
-                    "body",
-                    completedRecordInvalidationIdentityError(evidenceRef)
-                  ),
-                  [captureFailureFoldEntry("settlement", firstWriteError)],
+                const identityEntry = captureFailureFoldEntry(
+                  "settlement",
+                  completedRecordInvalidationIdentityError(evidenceRef)
+                );
+                throw preserveTaskServiceErrorFailureVector(
+                  identityEntry,
+                  [firstWriteEntry, identityEntry],
                   IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
                 );
               }
@@ -830,7 +833,7 @@ export function createIdempotencyRecordService(
                   await writeFailedRecord(afterFirstWrite, scope, key, evidenceRef);
                 } catch (secondWriteError) {
                   throw preserveTaskServiceErrorFailureEntries(
-                    captureFailureFoldEntry("body", firstWriteError),
+                    firstWriteEntry,
                     [captureFailureFoldEntry("settlement", secondWriteError)],
                     IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
                   );
@@ -839,7 +842,7 @@ export function createIdempotencyRecordService(
               transitionOutcome = {
                 status: "rejected",
                 reason: firstWriteError,
-                occurrence: captureFailureFoldEntry("body", firstWriteError)
+                occurrence: firstWriteEntry
               };
             }
           }

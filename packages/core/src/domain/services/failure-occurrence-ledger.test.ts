@@ -930,6 +930,64 @@ describe("failure occurrence ledger", () => {
       [],
       "callable failure leaves occurrence fresh"
     ))).toEqual([callablePrimary]);
+
+    const invalidBrandPrimary = captureFailureOccurrence(
+      "body",
+      new Error("invalid brand primary")
+    );
+    expectProtocolError(
+      () => failurePreservation.mergeTrustedFailureOccurrenceVector(
+        invalidBrandPrimary,
+        [invalidBrandPrimary],
+        "invalid classification brand",
+        {
+          classify: () => "invalid" as unknown as "error"
+        }
+      ),
+      "untrusted_entry"
+    );
+    expect(failureEvents(mergeTrustedFailureOccurrences(
+      invalidBrandPrimary,
+      [],
+      "invalid classification leaves occurrence fresh"
+    ))).toEqual([invalidBrandPrimary]);
+
+    const reentrantPrimary = captureFailureOccurrence(
+      "body",
+      new Error("reentrant classification primary")
+    );
+    let innerCarrier: unknown;
+    let outerCarrier: unknown;
+    expectProtocolError(
+      () => {
+        outerCarrier = failurePreservation.mergeTrustedFailureOccurrenceVector(
+          reentrantPrimary,
+          [reentrantPrimary],
+          "reentrant classification outer",
+          {
+            classify: () => {
+              innerCarrier = mergeTrustedFailureOccurrences(
+                reentrantPrimary,
+                [],
+                "reentrant classification inner"
+              );
+              return "error";
+            }
+          }
+        );
+      },
+      "stale_entry"
+    );
+    expect(outerCarrier).toBeUndefined();
+    expect(failureEvents(innerCarrier)).toEqual([reentrantPrimary]);
+    expectProtocolError(
+      () => mergeTrustedFailureOccurrences(
+        reentrantPrimary,
+        [],
+        "reentrant occurrence only publishes once"
+      ),
+      "stale_entry"
+    );
   });
 
   test("counts reordered canonical numeric keys rather than returned-key positions", () => {
