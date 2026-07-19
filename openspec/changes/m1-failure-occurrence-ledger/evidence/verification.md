@@ -426,10 +426,20 @@ bindings after the Round-3 breadth split.
 The tracked definitive audit is
 `evidence/phase-6.2-definitive-audit.md`. Replay-artifact whitespace accounting
 and fresh-clone commands are in `evidence/replay-whitespace-exceptions.md`;
-their executable authority and 17-scenario lifecycle matrix are under
+their executable authority and 22-scenario lifecycle matrix are under
 `evidence/scripts/verify-replay-evidence.sh` and
 `evidence/scripts/verify-replay-evidence.test.sh`.
 No canonical claim depends on `.workplans`.
+
+The replay transaction pre-binds an exact per-process root before creation,
+rejects an existing target without changing it, and installs signal/EXIT
+authority before temporary state. Cleanup receives the first status as an
+already-expanded trap argument and masks HUP/INT/TERM as its first command.
+The 22-case matrix covers normal replay, immediate post-create failure and
+signals, add/patch/partial failures, strict dirty/locked/missing cleanup,
+cleanup-entry second signals, verifier and harness collision preservation, and
+the self-test harness's own startup and cleanup-entry signal paths. All cases
+leave zero registered-worktree and owned-filesystem residue.
 
 Final A2 verification:
 

@@ -185,6 +185,9 @@
   hashes, replay preflight commands, strict OpenSpec, and final-head hygiene to
   the A1/A2 semantic stack without using `.workplans` as canonical evidence.
 - [x] 9.5 Replace the inline replay lifecycle with one tracked executable
-  verifier whose cleanup authority exists before temporary state, and prove
-  normal, partial, failure, dirty/locked/missing, and single/double-signal paths
-  with a deterministic zero-residue self-test matrix.
+  verifier whose exact target and cleanup authority exist before temporary
+  state. Reject collisions without touching foreign paths, latch the first
+  failure/signal before cleanup command boundaries, and prove normal,
+  post-create, partial, add/patch, dirty/locked/missing, single/double-signal,
+  verifier/harness collision, and self-test-harness paths with a deterministic
+  22-case zero-residue matrix.

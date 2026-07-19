@@ -57,8 +57,16 @@ tracked beside this report:
 ```
 
 The verifier exited 0 after both `git apply --check` commands and strict cleanup.
-The self-test passed 17/17 normal, add/patch/partial, dirty/locked/missing
-cleanup, startup signal, double-signal, and failure-during-cleanup scenarios.
-Every case retained its required status and left no registered worktree or
-temporary root. A clean incremental A3 `git diff --check` must exit 0 because
-A3 introduces no new whitespace exception.
+It pre-binds one exact per-process root, rejects a pre-existing target without
+touching it, and installs EXIT/HUP/INT/TERM authority before creating that root.
+Signal and EXIT handlers receive an already-expanded status and mask later
+signals as their first command.
+
+The self-test passed 22/22 normal, root-creation failure, add/patch/partial,
+dirty/locked/missing cleanup, single-signal, cleanup-entry double-signal,
+first-failure preservation, verifier/harness collision, harness-startup signal,
+and harness cleanup-entry double-signal scenarios. Every case retained its
+required first status and left no registered worktree or owned temporary root;
+the collision cases also proved that the foreign targets remained unchanged. A clean
+incremental A3 `git diff --check` must exit 0 because A3 introduces no new
+whitespace exception.
