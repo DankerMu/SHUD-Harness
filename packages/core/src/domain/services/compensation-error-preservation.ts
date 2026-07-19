@@ -170,7 +170,7 @@ interface ObservationState {
   readonly queue: unknown[];
   readonly occurrenceById: Map<symbol, FailureOccurrence>;
   readonly visitedLedgers: Set<PreservedFailureLedger>;
-  readonly errorsContainerSnapshots: WeakMap<object, ErrorsContainerSnapshot>;
+  readonly errorsContainerOutcomes: WeakMap<object, ErrorsContainerOutcome>;
   readonly semanticPrimaryValue: unknown;
   classifiedPrimaryBrand?: FailureGraphNode["errorBrand"];
   queueHead: number;
@@ -186,14 +186,18 @@ interface ObservationState {
 
 interface ErrorsContainerElementSnapshot {
   readonly index: number;
-  readonly present: boolean;
-  readonly value?: unknown;
+  readonly value: unknown;
 }
 
 interface ErrorsContainerSnapshot {
   readonly elements: readonly ErrorsContainerElementSnapshot[];
   readonly overflowWitnessPresent: boolean;
 }
+
+type ErrorsContainerOutcome =
+  | { readonly status: "array"; readonly snapshot: ErrorsContainerSnapshot }
+  | { readonly status: "non_array" }
+  | { readonly status: "failed" };
 
 let nextFailureOccurrenceOrder = 1;
 const trustedFailureOccurrences = new WeakSet<object>();
@@ -490,7 +494,7 @@ export function mergeTrustedFailureOccurrenceVector(
     queue: [],
     occurrenceById: new Map<symbol, FailureOccurrence>(),
     visitedLedgers: new Set<PreservedFailureLedger>(),
-    errorsContainerSnapshots: new WeakMap<object, ErrorsContainerSnapshot>(),
+    errorsContainerOutcomes: new WeakMap<object, ErrorsContainerOutcome>(),
     semanticPrimaryValue: semanticPrimary.value,
     classifiedPrimaryBrand,
     queueHead: 0,
@@ -627,11 +631,10 @@ function observeNode(value: object, state: ObservationState): void {
     if (!field.present) continue;
 
     if (kind === "errors") {
-      const arrayBrand = safelyObserveArray(field.value, state);
-      for (const failure of arrayBrand.failures) recordObservationFailure(failure, state);
-      if (arrayBrand.status === "failed") continue;
-      if (arrayBrand.status === "array") {
-        observeSparseErrorsArray(arrayBrand.value, edges, state);
+      const container = observeErrorsContainer(field.value, state);
+      if (container.status === "failed") continue;
+      if (container.status === "array") {
+        replayErrorsContainerSnapshot(container.snapshot, edges, state);
         continue;
       }
     }
@@ -646,19 +649,35 @@ function observeNode(value: object, state: ObservationState): void {
   }));
 }
 
-function observeSparseErrorsArray(
-  values: object,
+function observeErrorsContainer(
+  value: unknown,
+  state: ObservationState
+): ErrorsContainerOutcome {
+  if (isObjectLike(value)) {
+    const cached = state.errorsContainerOutcomes.get(value);
+    if (cached) return cached;
+  }
+
+  const arrayBrand = safelyObserveArray(value, state);
+  for (const failure of arrayBrand.failures) {
+    recordObservationFailure(failure, state);
+  }
+  const outcome: ErrorsContainerOutcome = arrayBrand.status === "array"
+    ? Object.freeze({
+      status: "array",
+      snapshot: inspectSparseErrorsArray(arrayBrand.value, state)
+    })
+    : Object.freeze({ status: arrayBrand.status });
+  if (isObjectLike(value)) state.errorsContainerOutcomes.set(value, outcome);
+  return outcome;
+}
+
+function replayErrorsContainerSnapshot(
+  snapshot: ErrorsContainerSnapshot,
   edges: FailureGraphEdge[],
   state: ObservationState
 ): void {
-  let snapshot = state.errorsContainerSnapshots.get(values);
-  if (!snapshot) {
-    snapshot = inspectSparseErrorsArray(values, state);
-    state.errorsContainerSnapshots.set(values, snapshot);
-  }
-
   for (const element of snapshot.elements) {
-    if (!element.present) continue;
     if (!addEdge({
       kind: "errors",
       target: element.value,
@@ -712,11 +731,9 @@ function inspectSparseErrorsArray(
   for (const { key, index } of numericKeys) {
     const element = observeOwnArrayElement(values, key, state);
     for (const failure of element.failures) recordObservationFailure(failure, state);
-    elements.push(Object.freeze({
-      index,
-      present: element.present,
-      ...(element.present ? { value: element.value } : {})
-    }));
+    if (element.present) {
+      elements.push(Object.freeze({ index, value: element.value }));
+    }
   }
   let overflowWitnessPresent = false;
   if (numericOverflow) {

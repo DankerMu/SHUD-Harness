@@ -1,10 +1,9 @@
 import {
   createTrustedFailureTransportFamily,
+  failureFoldEntryValue,
   failureLedger,
-  isTrustedFailureOccurrence,
   mergeTrustedFailureOccurrenceVector,
   mergeTrustedFailureOccurrences,
-  semanticPrimaryValue,
   type FailureFoldEntry
 } from "./compensation-error-preservation";
 import {
@@ -43,7 +42,7 @@ export function preserveTaskServiceErrorFailureEntries(
   compensations: readonly FailureFoldEntry[],
   aggregateMessage: string
 ): unknown {
-  const directPrimary = isTrustedFailureOccurrence(primary) ? primary.value : undefined;
+  const directPrimary = failureFoldEntryValue(primary);
   const directProjection = taskServiceErrorAuthorityTransportFamily.project(directPrimary);
   const trustedDirectPrimary = trustedTaskServiceErrorFromFailureLedger(directPrimary) ??
     trustedTaskServiceErrorTarget(directPrimary) ??
@@ -55,14 +54,8 @@ export function preserveTaskServiceErrorFailureEntries(
     aggregateMessage,
     trustedDirectPrimary ? { classify: () => "error" } : undefined
   );
-  const exactPrimary = semanticPrimaryValue(preserved);
-  const transportProjection = taskServiceErrorAuthorityTransportFamily.project(exactPrimary);
-  const trustedPrimary = trustedTaskServiceErrorFromFailureLedger(exactPrimary) ??
-    trustedTaskServiceErrorTarget(exactPrimary) ??
-    trustedTaskServiceErrorFromFailureLedger(transportProjection) ??
-    trustedTaskServiceErrorTarget(transportProjection);
-  if (trustedPrimary && isObjectLike(preserved)) {
-    trustedTaskServiceErrorLedgerViews.set(preserved, trustedPrimary);
+  if (trustedDirectPrimary && isObjectLike(preserved)) {
+    trustedTaskServiceErrorLedgerViews.set(preserved, trustedDirectPrimary);
     return preserved;
   }
   return preserved;
@@ -73,7 +66,7 @@ export function preserveTaskServiceErrorFailureVector(
   entries: readonly FailureFoldEntry[],
   aggregateMessage: string
 ): unknown {
-  const directPrimary = isTrustedFailureOccurrence(primary) ? primary.value : undefined;
+  const directPrimary = failureFoldEntryValue(primary);
   const directProjection = taskServiceErrorAuthorityTransportFamily.project(directPrimary);
   const trustedDirectPrimary = trustedTaskServiceErrorFromFailureLedger(directPrimary) ??
     trustedTaskServiceErrorTarget(directPrimary) ??
@@ -85,14 +78,8 @@ export function preserveTaskServiceErrorFailureVector(
     aggregateMessage,
     trustedDirectPrimary ? { classify: () => "error" } : undefined
   );
-  const exactPrimary = semanticPrimaryValue(preserved);
-  const transportProjection = taskServiceErrorAuthorityTransportFamily.project(exactPrimary);
-  const trustedPrimary = trustedTaskServiceErrorFromFailureLedger(exactPrimary) ??
-    trustedTaskServiceErrorTarget(exactPrimary) ??
-    trustedTaskServiceErrorFromFailureLedger(transportProjection) ??
-    trustedTaskServiceErrorTarget(transportProjection);
-  if (trustedPrimary && isObjectLike(preserved)) {
-    trustedTaskServiceErrorLedgerViews.set(preserved, trustedPrimary);
+  if (trustedDirectPrimary && isObjectLike(preserved)) {
+    trustedTaskServiceErrorLedgerViews.set(preserved, trustedDirectPrimary);
   }
   return preserved;
 }
