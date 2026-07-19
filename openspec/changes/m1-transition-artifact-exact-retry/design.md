@@ -1,6 +1,6 @@
 ## Context
 
-`WorkspaceRecordCleanupPermit` retains the observed parent binding, physical generation, pathname epoch, bytes, and pinned descriptor while outstanding. A terminal delete claims the permit and its lease `release()` settles capacity, closes the descriptor, and clears that snapshot on every exit. Existing generation-aware helpers can classify `missing | superseded | same_generation` only while that original admission remains alive. Service-level recovery after the call returns is therefore too late: a fresh observation describes current B, not original A.
+`WorkspaceRecordCleanupPermit` retains the observed physical generation, bytes, mode, link count, and pinned descriptor while outstanding. The conditional-delete path already moves public A into a random store-owned `0700` namespace before destructive work. The superseded repair restored A to the public pathname, watched the ancestor chain, and isolated A a second time. Delayed-callback diagnosis proved watcher delivery cannot authorize pathname-history claims. Error-occurrence diagnosis also proved that cloning/pruning raw `cause/errors/semanticPrimary` graphs loses identity and subtype while module-lifetime observation caches make independent folds stale.
 
 Fixture level: expanded. Repair intensity: high. Project profile: SHUD-Harness.
 
@@ -8,25 +8,26 @@ Fixture level: expanded. Repair intensity: high. Project profile: SHUD-Harness.
 
 **Goals:**
 
-- Settle restored exact A inside the original store admission after a post-mutation failure.
-- Never delete or reject a current B merely because its JSON fields equal A.
-- Preserve failure identity/order and release permit, FD, capacity, parent binding, and authority state exactly once.
+- Retain and settle the first privately isolated exact A inside the original store admission after a post-isolation failure.
+- Treat the public pathname as observation-only after ticket capture; never restore A or delete/reject current B.
+- Preserve immutable raw evidence separately from exact phase-tagged failure occurrences and typed transport views.
+- Release permit, FD, capacity, mutex, bindings, private generation, and namespace exactly once.
 - Keep legacy/default conditional-delete behavior and unchanged consumers compatible.
 
 **Non-Goals:**
 
 - PR #106 record-generation recovery policy and successor classification.
 - Issue #107 record exact-replacement publication provenance/commit outcome.
-- Generic retry loops, service-side `stat`/inode checks, persisted artifact shape changes, or `zero/` edits.
+- Generic retry loops, service-side `stat`/inode checks, persisted artifact shape changes, raw graph rewriting, native dirfd-relative unlink, or `zero/` edits.
 
 ## Decisions
 
-1. **Use an opt-in store-internal total operation, not an externally reusable retry token.** The post-mutation settlement runs before the original authority lease releases, while the store still owns A's snapshot and pinned descriptor. Exposing a token after return would require reversing the existing terminal permit lifecycle and lengthening caller-owned FD/capacity retention. The API remains opaque and additive; existing callers keep the current default.
-2. **Retry only a post-mutation failure and at most once.** Normal `deleted`, `missing`, `superseded`, or `condition_not_met` results are terminal and never trigger a second observation/delete. Pre-mutation authority loss remains non-destructive and is not retried.
-3. **Authorize settlement only from the original snapshot.** The store reuses the claimed permit's parent binding, physical identity, bytes, pathname epoch, and pinned descriptor. Exact A may be deleted; missing or any physical/content successor is convergence and remains untouched. Field/schema equality is never deletion authority.
-4. **Use an explicit total-operation result algebra.** A recovered post-mutation failure returns `recovered { settlement: deleted | missing | superseded }` and does not fail a fulfilled service operation. If exact settlement or final authority release also fails, the original post-mutation error becomes primary and each distinct later failure is appended once in occurrence order. Missing/superseded settlement adds no failure of its own.
-5. **Transition artifacts opt into the new mode at the shared delete roots present on `main`.** `releaseOwnedIdempotencyTransitionArtifact` and `consumeObservedIdempotencyTransitionArtifact` use the total operation; `recoverOwnedIdempotencyTransitionGuardAfterTerminalReleaseFailure` no longer performs fresh field-equality deletion. Older artifact JSON remains valid. PR #106-only helpers are handled by the rebase gate below, not implemented in this prerequisite branch.
-6. **Use deterministic store hooks only if an existing hook cannot place B after restoration and before settlement.** Any new hook is optional test instrumentation, exposes no authority material, and does not change production behavior when absent.
+1. **Capture a private one-consumer ticket at the first isolation.** The ticket is store-private and couples the owned namespace/generation expectation with the still-pinned permit. Its phase is monotonic and repeated settlement/release shares the same promise. Existing callers keep the default restore policy; only the total operation requests ticket handoff.
+2. **Never reconstruct public pathname continuity after ticket capture.** Post-isolation settlement proves and removes only the private generation. Missing or any B at the public pathname is preserved and does not change the successful recovered/deleted result. Watchers, fixed waits, public restore, and public re-isolation are absent from the opt-in chain.
+3. **Fail closed on private drift.** Private missing is successful only after the ticket has already proved removal and the pinned descriptor reports `nlink=0`. Foreign replacement, namespace drift, unexpected link count, permanent unlink failure, cleanup failure, or close failure are typed failures; none may become benign missing/superseded.
+4. **Separate occurrence semantics from evidence graphs.** Each operation captures immutable phase-tagged occurrences. A fresh fold-local observation session records identity-unique nodes plus alias/edge metadata without rewriting caller objects. Event multiplicity and edge multiplicity remain distinct. Object occurrences deduplicate by identity in the ordered distinct view; primitive occurrences retain their tokens.
+5. **Preserve exact roots and trusted typed views.** An `Error` primary is returned by exact identity and receives a private sidecar ledger. A non-Error primary uses an internal carrier whose ledger retains the exact value. `TaskServiceError` compatibility derives only from exact trusted ledger provenance; caller-created envelopes remain semantic roots unless a store-owned occurrence ref explicitly adopts an inner value.
+6. **Migrate the naturally affected chain as one model.** Workspace settlement, idempotency/task-card adapters, and backend typed serialization use the same ledger accessors. Raw graph traversal remains only for JavaScript compatibility evidence. Older artifact JSON and public HTTP behavior remain unchanged.
 
 ### Total-operation result table
 
@@ -34,12 +35,12 @@ Fixture level: expanded. Repair intensity: high. Project profile: SHUD-Harness.
 | --- | --- | --- | --- | --- |
 | fulfilled or pending | `deleted | missing | superseded | condition_not_met` | not run | success | return the initial result unchanged |
 | fulfilled or pending | pre-mutation throw | not run | success | throw the original pre-mutation error; existing service classification remains |
-| fulfilled | post-mutation throw | `deleted | missing | superseded` | success | return `recovered` with that settlement; service release succeeds and preserves its fulfilled value |
-| failed | post-mutation throw | `deleted | missing | superseded` | success | store returns `recovered`; outer service body error remains the only primary |
+| fulfilled | post-isolation throw with private ticket | private `deleted` | success | return `recovered/deleted`; service release succeeds and preserves its fulfilled value and public missing/B |
+| failed | post-isolation throw with private ticket | private `deleted` | success | store returns `recovered/deleted`; outer service body failure remains the only primary |
 | any | post-mutation throw | throws | success | throw initial post-mutation error primary + settlement compensation |
 | any | post-mutation throw | converges or throws | throws | throw initial post-mutation error primary, then settlement failure if present, then authority-release failure |
 
-Identity dedup removes only repeated references to the same error object. A distinct failure with equal text is retained.
+The ordered distinct ledger view deduplicates repeated object occurrences by identity. Distinct equal-looking objects and repeated primitive event slots remain. Raw aliases and repeated edges are retained unchanged and are not occurrence counts.
 
 ### Opt-in and default sibling table
 
@@ -58,11 +59,14 @@ Identity dedup removes only repeated references to the same error object. A dist
 | --- | --- | --- |
 | A; initial delete succeeds; B installed only after completion | opt-in store API plus guard/cleanup-lock service release | initial `deleted`; no settlement call; fulfilled output; B bytes/dev/ino unchanged |
 | A; pre-mutation replacement by different-field or same-field/new-inode B | guard/cleanup-lock release and observed guard consume | existing pre-mutation classification; B unchanged; no retry |
-| A; post-mutation hook fails and compensation restores exact A | opt-in store API and public guard/cleanup-lock paths | `recovered/deleted`; fulfilled service output; A absent; initial marker not thrown |
-| A; after restoration pathname becomes missing | same | `recovered/missing`; fulfilled output; resource baselines |
-| A; after restoration different-field B or same-field/new-inode B is installed | same | `recovered/superseded`; fulfilled output; B exact bytes/dev/ino unchanged |
+| A; post-isolation hook fails after first private proof | opt-in store API and public guard/cleanup-lock paths | private A deleted once; `recovered/deleted`; no public restore or second isolation |
+| A; public pathname remains missing after isolation | same | `recovered/deleted`; public pathname remains missing; resource baselines |
+| A; different-field B or same-field/new-inode B appears publicly after isolation | same | `recovered/deleted`; B exact bytes/dev/ino unchanged |
+| A; ancestor ABA or delayed watcher callbacks after isolation | same | `recovered/deleted`; zero watcher registration and no event wait |
+| private A missing with pinned `nlink>0`, replaced, or link-count drift | private ticket settlement | typed failure; public state untouched; no false recovered result |
+| private unlink/namespace cleanup/close fails | private ticket settlement | monotonic phase; ordered ledger compensation; each resource settles once |
 | A; exact settlement throws | opt-in store API | initial post-mutation marker primary; settlement marker one compensation |
-| Body also fails and release/settlement fail | public service wrapper | body primary → initial release → settlement → final release, each distinct identity once |
+| Body also fails and release/settlement fail | public service wrapper | body primary → initial release → settlement → final release ledger occurrences; unique object identities once in ordered view |
 | A remains exact but the caller predicate rejects it | default and opt-in store seams | exact `{ status: "condition_not_met" }`; no settlement; A bytes/dev/ino unchanged; permit terminal |
 | Guard bytes are malformed JSON | `lookupReplay` and rollback recovery | `TaskServiceError { code: "record_malformed", status: 500, retryable: false }`; malformed bytes unchanged; durable record unchanged |
 | Legacy identity-only guard `{ guard_id, owner_pid, acquired_at_ms, acquired_at }` accompanies a completed record | `lookupReplay({ scope, key, requestDigest })` | exact `{ status: "completed", record }`; legacy marker unchanged |
@@ -82,7 +86,7 @@ Identity dedup removes only repeated references to the same error object. A dist
 
 Governing invariant: only the original observed/published physical generation A may be deleted; post-failure settlement never derives authority from current pathname fields.
 
-Source-of-truth identity/contract: the claimed cleanup permit snapshot—parent binding, generation dev/ino, expected bytes/mode/nlink, pathname epoch, and pinned descriptor—until one terminal store operation completes.
+Source-of-truth identity/contract: after first rename and exact private proof, the claimed cleanup permit plus private ticket—owned namespace, private generation dev/ino/bytes/mode/nlink, and pinned descriptor—until one terminal store operation completes.
 
 Surfaces:
 
@@ -91,13 +95,13 @@ Surfaces:
 - Storage/query: generation-aware conditional delete and exact-observation settlement in `workspace-record-store.ts`.
 - Public entrypoints: `createIdempotencyRecordService` guard/cleanup-lock release and stale/recovery paths.
 - Downstream consumers: normal complete/fail/replay and keyed task idempotency remain unchanged.
-- Failure/rollback/stale state: pre/post-mutation delete failure, restored A, missing, different-field B, same-field/new-inode B, retry failure, body/release failure.
-- Evidence/readiness: exact bytes/dev/ino, replay, path absence/preservation, error graph, FD close count, permit/capacity/authority/binding diagnostics.
+- Failure/rollback/stale state: pre/post-mutation delete failure, first-private-isolation ticket handoff, public missing/B, private drift, body/settlement/release failure.
+- Evidence/readiness: exact bytes/dev/ino, replay, path absence/preservation, occurrence ledger plus raw graph edges, FD close count, permit/capacity/authority/binding diagnostics.
 
 Regression rows:
 
-- Post-mutation failure restores A → one internal settlement deletes exact A and returns a recovered result; fulfilled service output remains fulfilled.
-- Before settlement, pathname becomes missing or B (different fields or same fields/new inode) → recovered convergence preserves B/missing and does not throw the original recovered failure.
+- Post-isolation failure hands off the first private A → one internal settlement deletes only that A and returns recovered/deleted; fulfilled service output remains fulfilled.
+- Before settlement, the public pathname is missing or B (different fields or same fields/new inode) → private settlement still reports recovered/deleted and preserves that public state.
 - Initial delete succeeds → no second settlement; a later B is untouched and fulfilled service result remains fulfilled.
 - Settlement or final authority release also fails → original post-mutation failure primary, later failures ordered exactly once, resources terminal.
 - Default non-opted conditional delete and legacy artifacts → existing behavior unchanged.
@@ -106,16 +110,16 @@ Regression rows:
 
 - Shared roots: permit claim/release, generation classification/removal, compensation preservation.
 - Read/write/delete: exact observation, owned publication permit, conditional delete, no fresh writable observation.
-- Staging/rollback: canonical isolation restoration and post-mutation cleanup.
+- Staging/rollback: default-call canonical restoration; opt-in first-private-isolation handoff and post-mutation cleanup.
 - Stale/idempotency: guard, cleanup lock, terminal recovery, rollback recovery.
 - Unchanged consumers: generic record deletion, TaskCard/artifact deletion, backend routes, `zero/`.
 
 ## Risks / Trade-offs
 
-- [Longer store admission during failure settlement] → one bounded attempt only; assert FD/capacity and timeout baselines.
+- [Longer store admission during failure settlement] → monotonic ticket settlement with bounded private unlink/namespace cleanup attempts; assert FD/capacity and timeout baselines.
 - [Changing generic delete semantics] → explicit opt-in; keep existing default regression green.
-- [Retry hook creates a second authority path] → hook is observation-only timing control; all authority stays in the original store snapshot.
-- [Error graph duplication] → identity-dedupe only the same object; preserve distinct failures in occurrence order.
+- [Node pathname unlink has a final proof-to-syscall window] → document that same-UID adversarial replacement needs a native dirfd-relative primitive and is outside this issue.
+- [Failure aliases conflict with event counts] → immutable ledger exposes node, edge, event, and ordered-distinct views separately.
 
 ## Migration Plan
 
@@ -125,4 +129,4 @@ After this prerequisite merges, PR #106 MUST rebase onto it and remove its branc
 
 ## Open Questions
 
-- None. If the original store admission cannot retain enough authority through canonical restoration, stop and report the blocker rather than falling back to service re-observation.
+- None. The opt-in chain retains private authority at first isolation and must never fall back to canonical restoration or service re-observation.

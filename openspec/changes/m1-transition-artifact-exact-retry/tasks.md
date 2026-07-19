@@ -1,4 +1,31 @@
-## 1. Store-owned exact settlement
+## 1. Depth-redesign contract amendment
+
+- [x] 1.1 Amend the active proposal, design, and delta spec from public restore/re-isolation and recovered missing/superseded to first-private-isolation ticket settlement with public observation-only semantics.
+- [x] 1.2 Specify operation-owned immutable occurrence ledgers, exact typed roots, fresh fold observation, explicit trusted adoption, and separate node/edge/event/ordered-distinct semantics.
+- [x] 1.3 Record `review-failure-retro-same-invariant-1.md`, `diagnosis/path-lifecycle/report.md`, and `diagnosis/error-occurrence/corrected-report.md` as the internal correctness reason; preserve public and persisted contracts.
+
+## 2. Private generation settlement ticket
+
+- [x] 2.1 Add the store-private monotonic one-consumer ticket after first rename and exact private proof; default callers keep legacy restoration.
+- [x] 2.2 Make opt-in post-isolation failure hand off and settle only private A; remove watchers, fixed waits, public restore callback, and public re-isolation from that chain.
+- [x] 2.3 Type and test private missing/link drift/replacement/namespace drift, transient and permanent unlink, namespace cleanup and close failures, repeated settle/release, and occurrence ordering.
+- [x] 2.4 Migrate transition guard/cleanup-lock producers and consumers without changing non-opt-in or public HTTP behavior.
+
+## 3. Failure occurrence ledger
+
+- [x] 3.1 Implement phase-tagged occurrences, exact primary, identity-unique graph nodes, raw alias/edge metadata, ordered distinct values, fold-local observation, non-Error carrier, and private sidecar provenance.
+- [x] 3.2 Replace raw graph snapshot/pruning/normalization and typed cloning with exact trusted ledger views; keep caller envelopes fail-closed unless explicitly adopted.
+- [x] 3.3 Migrate workspace, idempotency/task-card, and backend typed consumers so no naturally affected call chain mixes raw-envelope and ledger occurrence semantics.
+
+## 4. Red/green and verification
+
+- [x] 4.1 Run both diagnosis red harnesses against the superseded source and record a reproducible red patch/output before restoring the redesign.
+- [x] 4.2 Cover the complete private-ticket and ledger matrices, including zero watcher registration/no event wait and backend typed HTTP view.
+- [x] 4.3 Run focused greens, full core services, full backend routes, root/core typecheck, root check, strict OpenSpec, and diff/submodule/workspace/stash hygiene.
+
+<!-- Superseded Round 1 checklist retained below as historical evidence only. -->
+
+## Historical Round 1 checklist
 
 - [x] 1.1 Add batched red-before tests against `origin/main`: call the opt-in store seam and public `completeRecord`/`failRecord`/stale-guard seams with restored A, missing, different-field B, same-field/new-inode B, initial success followed by B, and settlement failure; record base SHA, test patch/hash, exact command/output, expected returned outcome/error tree, and semantic failure reason.
 - [x] 1.2 Add an opt-in generation-aware conditional-delete mode/primitive with explicit initial results plus `recovered { settlement: deleted | missing | superseded }`; retain the original permit snapshot and perform at most one exact-A settlement before the authority lease releases, while keeping every existing delete entrypoint and default result unchanged.

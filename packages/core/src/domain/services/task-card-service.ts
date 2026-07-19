@@ -11,8 +11,12 @@ import {
   TaskTypeSchema,
   type TaskCard
 } from "../schemas/task";
+import { failureLedger } from "./compensation-error-preservation";
 import { isPathInsideBoundary } from "./workspace-path-safety";
-import { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
+import {
+  preserveTaskServiceErrorCompensationCompatibility,
+  taskServiceErrorAtBoundary
+} from "./task-service-error-compensation";
 import {
   readDurableSingleLinkFile,
   type DurableSingleLinkReadFailureReason
@@ -432,10 +436,13 @@ const TaskSnapshotCleanupRawSchema = z.unknown();
 function foldTaskSnapshotSettlementErrors(errors: readonly unknown[]): Error | undefined {
   if (errors.length === 0) return undefined;
   if (errors.length === 1 && errors[0] instanceof Error) return errors[0];
-  return new AggregateError(
-    [...errors],
-    "Task snapshot exact settlement and bounded cache rehydration failed."
-  );
+  return preserveTaskServiceErrorCompensationCompatibility(
+    errors[0],
+    errors.slice(1),
+    "Task snapshot exact settlement and bounded cache rehydration failed.",
+    "settlement",
+    errors.slice(1).map(() => "settlement")
+  ) as Error;
 }
 
 function copyTaskCard(task: TaskCard): TaskCard {
@@ -2617,9 +2624,12 @@ async function persistTaskSnapshot(
           compensationErrors.push(cleanupError);
         }
         if (compensationErrors.length > 0) {
-          throw new AggregateError(
-            [callbackError, ...compensationErrors],
-            "Task snapshot publication compensation failed."
+          throw preserveTaskServiceErrorCompensationCompatibility(
+            callbackError,
+            compensationErrors,
+            "Task snapshot publication compensation failed.",
+            "body",
+            compensationErrors.map(() => "settlement")
           );
         }
         throw callbackError;
@@ -2663,9 +2673,12 @@ async function persistTaskSnapshot(
       try {
         await removeEmptyTaskLaneAfterRollback(workspaceRoot, task.task_id);
       } catch (cleanupError) {
-        publicationFailure = new AggregateError(
-          [error, cleanupError],
-          "Task snapshot publication compensation failed."
+        publicationFailure = preserveTaskServiceErrorCompensationCompatibility(
+          error,
+          [cleanupError],
+          "Task snapshot publication compensation failed.",
+          "body",
+          ["settlement"]
         );
       }
     }
@@ -2692,6 +2705,10 @@ async function persistTaskSnapshot(
       !(await isSafeExistingDirectoryPath(taskDirectory))
     ) {
       throw taskLaneNotDirectoryError(task.task_id, publicationFailure);
+    }
+    if (failureLedger(publicationFailure)) {
+      const taskServiceFailure = taskServiceErrorAtBoundary(publicationFailure);
+      if (taskServiceFailure) throw taskServiceFailure;
     }
     throw workspaceError(
       "workspace_path_not_safe",

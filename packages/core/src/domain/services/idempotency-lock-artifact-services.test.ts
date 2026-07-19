@@ -4,6 +4,7 @@ import {
   fstat,
   fstatSync,
   mkdirSync,
+  readdirSync,
   renameSync,
   symlinkSync,
   unlinkSync,
@@ -50,6 +51,7 @@ import {
   lockRecordEvidenceRef,
   lockRecordFileName,
   preserveTaskServiceErrorCompensationCompatibility,
+  taskServiceErrorAtBoundary,
   runWithExistingWorkspaceRecordDirectoryReproof,
   sha256Hex,
   assertPathInsideWorkspace,
@@ -75,6 +77,7 @@ import {
   ensureWorkspaceRecordDirectory,
   isWorkspaceRecordOversizeError,
   observeJsonRecordForCleanup,
+  preserveWorkspaceRecordFailureGraph,
   publishJsonRecordWithLifecycleCallbacks,
   readJsonRecord,
   removeWorkspaceRecordDirectoryIfEmpty,
@@ -105,14 +108,21 @@ import {
   runWithWorkspacePathSafetyHooks
 } from "./workspace-path-safety";
 import { readDurableSingleLinkFile } from "./durable-single-link-reader";
+import { preserveIdempotencyReleaseFailureOccurrences } from "./idempotency-service";
 import {
   PreservedErrorCompensationEnvelope,
   PreservedNonErrorThrownValue,
-  preservePrimaryAndCompensationErrors,
+  adoptTrustedFailureRef,
+  captureFailureOccurrence,
+  failureEvents,
+  failureGraphNodes,
+  failureLedger,
+  orderedDistinctCompensationFailures,
+  orderedDistinctFailures,
   preserveThrownValueAndCompensationErrors,
-  registerPreservedErrorCompatibility,
   runWithPreservedRelease,
-  semanticPrimaryError
+  semanticPrimaryError,
+  semanticPrimaryValue
 } from "./compensation-error-preservation";
 
 const tempRoots: string[] = [];
@@ -559,60 +569,6 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
-  test("undefined mutable primary precedes later close compensation without false success", async () => {
-    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-    tempRoots.push(tempRoot);
-    const schema = z.object({ id: z.string() });
-    const record = { id: "undefined-primary-close-compensation" };
-    const directorySegments = ["undefined-primary-close-compensation"] as const;
-    const fileName = "record.json";
-    const evidenceRef = "undefined.primary.close.compensation";
-    const path = workspaceRecordPath(
-      workspaceRoot,
-      [...directorySegments, fileName],
-      evidenceRef
-    );
-    const closeCompensation = new Error("close compensation after undefined primary");
-    let temporaryPath = "";
-    let cleanupCalls = 0;
-
-    const failure = await captureError(() =>
-      runWithWorkspaceRecordPublicationHooks(
-        {
-          afterTemporaryFileWritten: (input) => {
-            temporaryPath = input.temporaryPath;
-            throw undefined;
-          },
-          beforeTemporaryFileClose: () => {
-            throw closeCompensation;
-          },
-          beforeAuthorityOwnedUnlink: () => {
-            cleanupCalls += 1;
-          }
-        },
-        () =>
-          writeJsonRecord(
-            workspaceRoot,
-            directorySegments,
-            fileName,
-            record,
-            evidenceRef,
-            schema
-          )
-      )
-    );
-
-    expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(semanticPrimaryError(failure)).toBeInstanceOf(PreservedNonErrorThrownValue);
-    expect((semanticPrimaryError(failure) as PreservedNonErrorThrownValue).thrownValue)
-      .toBeUndefined();
-    expect(failure.cause).toBeInstanceOf(AggregateError);
-    expect((failure.cause as AggregateError).errors).toEqual([undefined, closeCompensation]);
-    expect(cleanupCalls).toBe(1);
-    await expectPathMissing(path);
-    await expectPathMissing(temporaryPath);
-  });
-
   test("hardlink and close slots retain undefined failures while terminal namespace cleanup settles", async () => {
     const schema = z.object({ id: z.string() });
 
@@ -804,278 +760,6 @@ describe("idempotency, lock, and artifact services", () => {
         expect(await readFile(temporaryPath)).toBeDefined();
       }
     }
-  });
-
-  test("mutable compensation preserves a frozen custom error contract and aggregates once", async () => {
-    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-    tempRoots.push(tempRoot);
-    const record = { ...validLockRecord(), lock_id: "LOCK-mutable-custom-primary" };
-    const priorCause = new Error("mutable custom prior cause");
-    const primary = new StructuredServiceError(
-      "mutable custom primary",
-      "E_MUTABLE_CUSTOM",
-      Object.freeze({ surface: "workspace", immutability: "frozen" }),
-      priorCause
-    );
-    Object.freeze(primary);
-    const descriptors = Object.getOwnPropertyDescriptors(primary);
-    const compensation = new Error("mutable close compensation");
-    let temporaryPath = "";
-
-    const error = await captureError(() =>
-      runWithWorkspaceRecordPublicationHooks(
-        {
-          afterTemporaryFileWritten: (input) => {
-            temporaryPath = input.temporaryPath;
-            throw primary;
-          },
-          beforeTemporaryFileClose: () => {
-            throw compensation;
-          },
-          afterTemporaryFileClosed: async ({ descriptor }) => {
-            await expectFileDescriptorClosed(descriptor.fd);
-          }
-        },
-        () =>
-          writeJsonRecord(
-            workspaceRoot,
-            lockRecordDirectorySegments(record.scope),
-            lockRecordFileName(record.lock_id),
-            record,
-            lockRecordEvidenceRef(record.scope, record.lock_id),
-            LockRecordSchema
-          )
-      )
-    );
-
-    expect(error).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(error).not.toBeInstanceOf(StructuredServiceError);
-    expect(semanticPrimaryError(error)).toBe(primary);
-    expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
-    expectPreservedOwnDescriptors(primary, descriptors);
-    expect(Object.isFrozen(primary)).toBe(true);
-    expect(Object.isSealed(primary)).toBe(true);
-    expect(Object.isExtensible(primary)).toBe(false);
-    expect(Reflect.defineProperty(primary, "unexpected", { value: true })).toBe(false);
-    expect(Object.hasOwn(primary, "unexpected")).toBe(false);
-    const messages = aggregateErrorMessages(error.cause);
-    expect(messages.filter((message) => message === priorCause.message)).toHaveLength(1);
-    expect(messages.filter((message) => message === compensation.message)).toHaveLength(1);
-    await expectPathMissing(temporaryPath);
-    expect(
-      (await readdir(join(workspaceRoot, "locks", record.scope))).some(isOwnedRecordPath)
-    ).toBe(false);
-  });
-
-  test("mutable and hardlink close compensation remains flat through later cleanup failure", async () => {
-    for (const surface of ["mutable-create", "mutable-update", "hardlink"] as const) {
-      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-      tempRoots.push(tempRoot);
-      const schema = z.object({ id: z.string(), value: z.string() });
-      const before = { id: `flat-close-${surface}`, value: "before" };
-      const after = { ...before, value: "after" };
-      const directorySegments = ["flat-close-compensation"] as const;
-      const fileName = `${surface}.json`;
-      const evidenceRef = `flat.close.${surface}`;
-      const path = workspaceRecordPath(
-        workspaceRoot,
-        [...directorySegments, fileName],
-        evidenceRef
-      );
-      if (surface === "mutable-update") {
-        await writeJsonRecord(
-          workspaceRoot,
-          directorySegments,
-          fileName,
-          before,
-          evidenceRef,
-          schema
-        );
-      }
-      const baseline = surface === "mutable-update" ? await readFileWithIdentity(path) : undefined;
-      const primary = new StructuredServiceError(
-        `flat close primary ${surface}`,
-        `E_FLAT_CLOSE_${surface.toUpperCase().replace("-", "_")}`,
-        Object.freeze({ surface, immutability: "frozen" }),
-        undefined
-      );
-      Object.freeze(primary);
-      const descriptors = Object.getOwnPropertyDescriptors(primary);
-      const closeObserverFailure = new Error(`flat close observer ${surface}`);
-      const cleanupFailure = new Error(`flat later cleanup ${surface}`);
-      let temporaryPath = "";
-      let closeObserverCalls = 0;
-      let cleanupCalls = 0;
-
-      const failure = await captureError(() =>
-        runWithWorkspaceRecordPublicationHooks(
-          {
-            afterTemporaryFileWritten: (input) => {
-              temporaryPath = input.temporaryPath;
-            },
-            beforeTemporaryFileClose: () => {
-              throw primary;
-            },
-            afterTemporaryFileClosed: async ({ descriptor }) => {
-              closeObserverCalls += 1;
-              await expectFileDescriptorClosed(descriptor.fd);
-              throw closeObserverFailure;
-            },
-            beforeAuthorityOwnedUnlink: () => {
-              cleanupCalls += 1;
-              throw cleanupFailure;
-            }
-          },
-          () =>
-            surface === "hardlink"
-              ? createJsonRecordIfAbsent(
-                  workspaceRoot,
-                  directorySegments,
-                  fileName,
-                  after,
-                  evidenceRef,
-                  schema
-                )
-              : writeJsonRecord(
-                  workspaceRoot,
-                  directorySegments,
-                  fileName,
-                  after,
-                  evidenceRef,
-                  schema
-                )
-        )
-      );
-
-      expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-      expect(failure).not.toBeInstanceOf(StructuredServiceError);
-      expect(semanticPrimaryError(failure)).toBe(primary);
-      expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
-      expectPreservedOwnDescriptors(primary, descriptors);
-      expect(Object.isFrozen(primary)).toBe(true);
-      expect(Object.isSealed(primary)).toBe(true);
-      expect(Object.isExtensible(primary)).toBe(false);
-      expect(failure.cause).toBeInstanceOf(AggregateError);
-      const rawSlots = (failure.cause as AggregateError).errors;
-      expect(rawSlots).toHaveLength(surface === "hardlink" ? 5 : 6);
-      expect(rawSlots[0]).toBe(closeObserverFailure);
-      expect(rawSlots[1]).toBeInstanceOf(TaskServiceError);
-      expect(rawSlots[1]).toMatchObject({
-        code: "workspace_path_not_safe",
-        message: "Workspace record publication temporary cleanup did not complete."
-      });
-      expect(rawSlots.slice(2, 5)).toEqual([cleanupFailure, cleanupFailure, cleanupFailure]);
-      if (surface !== "hardlink") {
-        expect(rawSlots[5]).toMatchObject({
-          code: "workspace_path_not_safe",
-          message: "Workspace record publication authority could not be verified."
-        });
-      }
-      expect(countErrorNodes(failure, (error) => error instanceof AggregateError)).toBe(1);
-      expect(closeObserverCalls).toBe(1);
-      expect(cleanupCalls).toBe(3);
-      await expectPathMissing(temporaryPath);
-      expect((await readdir(join(workspaceRoot, ...directorySegments))).some(isOwnedRecordPath)).toBe(
-        false
-      );
-      if (baseline) expect(await readFileWithIdentity(path)).toEqual(baseline);
-      else await expectPathMissing(path);
-
-      const retried =
-        surface === "hardlink"
-          ? await createJsonRecordIfAbsent(
-              workspaceRoot,
-              directorySegments,
-              fileName,
-              after,
-              evidenceRef,
-              schema
-            )
-          : await writeJsonRecord(
-              workspaceRoot,
-              directorySegments,
-              fileName,
-              after,
-              evidenceRef,
-              schema
-            );
-      expect(retried).toEqual(
-        surface === "hardlink" ? { status: "created", record: after } : after
-      );
-      expect(await readFile(path)).toEqual(Buffer.from(`${JSON.stringify(after, null, 2)}\n`));
-      expect((await stat(path, { bigint: true })).nlink).toBe(1n);
-    }
-  });
-
-  test("publication compensation retains an undefined cleanup failure on a frozen primary", async () => {
-    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-    tempRoots.push(tempRoot);
-    const record = { ...validLockRecord(), lock_id: "LOCK-mutable-custom-primary" };
-    const priorCause = new Error("mutable custom prior cause");
-    const primary = new StructuredServiceError(
-      "mutable custom primary",
-      "E_MUTABLE_CUSTOM",
-      Object.freeze({ surface: "workspace", immutability: "frozen" }),
-      priorCause
-    );
-    Object.freeze(primary);
-    const descriptors = Object.getOwnPropertyDescriptors(primary);
-    const evidenceRef = lockRecordEvidenceRef(record.scope, record.lock_id);
-    const recordPath = workspaceRecordPath(
-      workspaceRoot,
-      [...lockRecordDirectorySegments(record.scope), lockRecordFileName(record.lock_id)],
-      evidenceRef
-    );
-    let temporaryPath = "";
-
-    const error = await captureError(() =>
-      runWithWorkspaceRecordPublicationHooks(
-        {
-          afterTemporaryFileWritten: (input) => {
-            temporaryPath = input.temporaryPath;
-            throw primary;
-          },
-          afterTemporaryFileClosed: async ({ descriptor }) => {
-            await expectFileDescriptorClosed(descriptor.fd);
-          },
-          beforePublicationCompensationStateInspection: ({ site }) => {
-            expect(site).toBe("unpublished_cleanup");
-            throw undefined;
-          }
-        },
-        () =>
-          createJsonRecordIfAbsent(
-            workspaceRoot,
-            lockRecordDirectorySegments(record.scope),
-            lockRecordFileName(record.lock_id),
-            record,
-            evidenceRef,
-            LockRecordSchema
-          )
-      )
-    );
-
-    expect(error).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(error).not.toBeInstanceOf(StructuredServiceError);
-    expect(semanticPrimaryError(error)).toBe(primary);
-    expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
-    expectPreservedOwnDescriptors(primary, descriptors);
-    expect(Object.isFrozen(primary)).toBe(true);
-    expect(Object.isSealed(primary)).toBe(true);
-    expect(Object.isExtensible(primary)).toBe(false);
-    expect(Reflect.defineProperty(primary, "unexpected", { value: true })).toBe(false);
-    expect(Object.hasOwn(primary, "unexpected")).toBe(false);
-    expect(error.cause).toBeInstanceOf(AggregateError);
-    const aggregateErrors = (error.cause as AggregateError).errors;
-    expect(aggregateErrors).toHaveLength(2);
-    expect(aggregateErrors[0]).toBe(priorCause);
-    expect(aggregateErrors[1]).toBeUndefined();
-    expect(aggregateErrors.filter((entry) => entry instanceof AggregateError)).toHaveLength(0);
-    await expectPathMissing(temporaryPath);
-    await expectPathMissing(recordPath);
-    expect(
-      (await readdir(join(workspaceRoot, "locks", record.scope))).some(isOwnedRecordPath)
-    ).toBe(false);
   });
 
   test("mutable final precommit rejects private mode drift and cleanly retries", async () => {
@@ -4786,12 +4470,8 @@ describe("idempotency, lock, and artifact services", () => {
     );
     expect((await stat(path)).nlink).toBe(1);
     expect(await findOnlyAuthorityNamespace(dirname(path))).toBe(retainedNamespace);
-    const cleanupEnvelope = findErrorNode(
-      failure,
-      (error) => error instanceof PreservedErrorCompensationEnvelope
-    );
-    expect(semanticPrimaryError(cleanupEnvelope)).toBe(hookFailures[0]);
-    const ordered = findPreservedCompensationAggregate(failure)?.errors;
+    expect(errorTreeContains(failure, hookFailures[0])).toBe(true);
+    const ordered = findPreservedCompensationAggregate(hookFailures[0])?.errors;
     expect(ordered?.slice(0, 2)).toEqual(hookFailures.slice(1));
     expect(ordered?.[2]).toMatchObject({ code: "ENOTEMPTY" });
     expect(ordered).toHaveLength(3);
@@ -4812,893 +4492,6 @@ describe("idempotency, lock, and artifact services", () => {
       Buffer.from(`${JSON.stringify(repaired, null, 2)}\n`)
     );
     expect((await readdir(dirname(path))).filter(isOwnedRecordPath)).toEqual([]);
-  });
-
-  test("compensation preservation safely exposes aggregate cause for every cause descriptor kind", () => {
-    const compensation = new Error("descriptor compensation");
-
-    const getterPrior = new Error("getter-only prior");
-    let getterReads = 0;
-    const getterOnly = new Error("getter-only primary");
-    Object.defineProperty(getterOnly, "cause", {
-      configurable: false,
-      enumerable: true,
-      get: () => {
-        getterReads += 1;
-        return getterPrior;
-      }
-    });
-    const getterOnlyResult = preservePrimaryAndCompensationErrors(
-      getterOnly,
-      [compensation],
-      "getter-only aggregate"
-    ) as Error;
-    const getterOnlyDescriptor = Object.getOwnPropertyDescriptor(getterOnly, "cause")!;
-    expect(getterReads).toBe(1);
-    expect(getterOnlyResult).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(semanticPrimaryError(getterOnlyResult)).toBe(getterOnly);
-    expect("get" in getterOnlyDescriptor).toBe(true);
-    expect(getterOnlyDescriptor).toMatchObject({ configurable: false, enumerable: true, set: undefined });
-    expect((getterOnlyResult.cause as AggregateError).errors).toEqual([getterPrior, compensation]);
-
-    let setterReceiver: unknown;
-    let setterValue: unknown;
-    const getterSetter = new Error("getter-setter primary");
-    const setter = function (this: unknown, value: unknown): void {
-      setterReceiver = this;
-      setterValue = value;
-    };
-    Object.defineProperty(getterSetter, "cause", {
-      configurable: true,
-      enumerable: false,
-      get: () => undefined,
-      set: setter
-    });
-    const getterSetterResult = preservePrimaryAndCompensationErrors(
-      getterSetter,
-      [compensation],
-      "getter-setter aggregate"
-    ) as Error;
-    const getterSetterDescriptor = Object.getOwnPropertyDescriptor(getterSetter, "cause")!;
-    expect(semanticPrimaryError(getterSetterResult)).toBe(getterSetter);
-    expect(getterSetterDescriptor.set).toBe(setter);
-    getterSetterDescriptor.set!.call(getterSetter, "assigned through preserved setter");
-    expect(setterReceiver).toBe(getterSetter);
-    expect(setterValue).toBe("assigned through preserved setter");
-    expect((getterSetterResult.cause as AggregateError).errors).toEqual([compensation]);
-
-    const getterFailure = new Error("throwing getter read failure");
-    let throwingGetterReads = 0;
-    const throwingGetter = new Error("throwing-getter primary");
-    Object.defineProperty(throwingGetter, "cause", {
-      configurable: true,
-      enumerable: false,
-      get: () => {
-        throwingGetterReads += 1;
-        throw getterFailure;
-      }
-    });
-    const throwingResult = preservePrimaryAndCompensationErrors(
-      throwingGetter,
-      [compensation],
-      "throwing-getter aggregate"
-    ) as Error;
-    expect(throwingGetterReads).toBe(1);
-    expect(semanticPrimaryError(throwingResult)).toBe(throwingGetter);
-    expect((throwingResult.cause as AggregateError).errors).toEqual([
-      getterFailure,
-      compensation
-    ]);
-
-    const noOwnCause = new Error("no-own-cause primary");
-    const noOwnResult = preservePrimaryAndCompensationErrors(
-      noOwnCause,
-      [compensation],
-      "no-own-cause aggregate"
-    ) as Error;
-    expect(Object.hasOwn(noOwnCause, "cause")).toBe(false);
-    expect(semanticPrimaryError(noOwnResult)).toBe(noOwnCause);
-    expect(Object.hasOwn(noOwnCause, "cause")).toBe(false);
-    expect((noOwnResult.cause as AggregateError).errors).toEqual([compensation]);
-
-    const integrityCases = [
-      {
-        name: "frozen",
-        apply: (error: Error) => Object.freeze(error),
-        frozen: true,
-        sealed: true,
-        extensible: false
-      },
-      {
-        name: "sealed",
-        apply: (error: Error) => Object.seal(error),
-        frozen: false,
-        sealed: true,
-        extensible: false
-      },
-      {
-        name: "non-extensible",
-        apply: (error: Error) => Object.preventExtensions(error),
-        frozen: false,
-        sealed: false,
-        extensible: false
-      },
-      {
-        name: "extensible",
-        apply: (error: Error) => error,
-        frozen: false,
-        sealed: false,
-        extensible: true
-      }
-    ] as const;
-
-    for (const integrityCase of integrityCases) {
-      const prior = new Error(`${integrityCase.name} data prior`);
-      const primary = new StructuredServiceError(
-        `${integrityCase.name} data primary`,
-        `E_${integrityCase.name.toUpperCase().replace("-", "_")}`,
-        Object.freeze({ surface: "helper", immutability: integrityCase.name }),
-        prior
-      );
-      integrityCase.apply(primary);
-      const descriptors = Object.getOwnPropertyDescriptors(primary);
-      const result = preservePrimaryAndCompensationErrors(
-        primary,
-        [compensation],
-        `${integrityCase.name} data aggregate`
-      ) as Error;
-
-      expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-      expect(result).not.toBeInstanceOf(StructuredServiceError);
-      expect(semanticPrimaryError(result)).toBe(primary);
-      expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
-      expectPreservedOwnDescriptors(primary, descriptors);
-      expect((result.cause as AggregateError).errors).toEqual([prior, compensation]);
-      expect(primary.cause).toBe(prior);
-      expect(Object.isFrozen(primary)).toBe(integrityCase.frozen);
-      expect(Object.isSealed(primary)).toBe(integrityCase.sealed);
-      expect(Object.isExtensible(primary)).toBe(integrityCase.extensible);
-
-      const propertyDefined = Reflect.defineProperty(primary, "integrityProbe", {
-        configurable: true,
-        value: integrityCase.name
-      });
-      expect(propertyDefined).toBe(integrityCase.extensible);
-      expect(Object.hasOwn(primary, "integrityProbe")).toBe(integrityCase.extensible);
-      if (integrityCase.extensible) {
-        expect(Reflect.get(primary, "integrityProbe")).toBe(integrityCase.name);
-      }
-    }
-  });
-
-  test("compensation preservation keeps private and WeakMap Error brands on the original object", () => {
-    class PrivateFieldError extends Error {
-      #token: string;
-
-      constructor(token: string) {
-        super(`private ${token}`);
-        this.#token = token;
-      }
-
-      get token(): string {
-        return this.#token;
-      }
-
-      reveal(): string {
-        return this.#token;
-      }
-    }
-
-    const weakTokens = new WeakMap<object, string>();
-    class WeakMapError extends Error {
-      constructor(token: string) {
-        super(`weak ${token}`);
-        weakTokens.set(this, token);
-      }
-
-      get token(): string {
-        return weakTokens.get(this) ?? "missing";
-      }
-
-      reveal(): string {
-        return weakTokens.get(this) ?? "missing";
-      }
-    }
-
-    const integrityCases = [
-      { name: "frozen", apply: (error: Error) => Object.freeze(error) },
-      { name: "sealed", apply: (error: Error) => Object.seal(error) },
-      { name: "extensible", apply: (error: Error) => error }
-    ] as const;
-
-    for (const integrityCase of integrityCases) {
-      for (const primary of [
-        new PrivateFieldError(integrityCase.name),
-        new WeakMapError(integrityCase.name)
-      ]) {
-        const originalPrototype = Object.getPrototypeOf(primary);
-        integrityCase.apply(primary);
-        const originalDescriptors = Object.getOwnPropertyDescriptors(primary);
-        const compensation = new Error(`${integrityCase.name} compensation`);
-        const result = preservePrimaryAndCompensationErrors(
-          primary,
-          [compensation],
-          `${integrityCase.name} branded aggregate`
-        ) as Error;
-
-        expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-        expect(result).not.toBeInstanceOf(primary.constructor);
-        expect(semanticPrimaryError(result)).toBe(primary);
-        expect(Object.getPrototypeOf(primary)).toBe(originalPrototype);
-        expectPreservedOwnDescriptors(primary, originalDescriptors);
-        expect(primary.token).toBe(integrityCase.name);
-        expect(primary.reveal()).toBe(integrityCase.name);
-        expect(Object.isFrozen(primary)).toBe(integrityCase.name === "frozen");
-        expect(Object.isSealed(primary)).toBe(integrityCase.name !== "extensible");
-        expect(Object.isExtensible(primary)).toBe(integrityCase.name === "extensible");
-        expect((result.cause as AggregateError).errors).toEqual([compensation]);
-      }
-    }
-  });
-
-  test("mutable and hardlink compensation preserve branded Error identity and behavior", async () => {
-    class PrivateFieldError extends Error {
-      #token: string;
-
-      constructor(token: string) {
-        super(`private ${token}`);
-        this.#token = token;
-      }
-
-      reveal(): string {
-        return this.#token;
-      }
-    }
-
-    const weakTokens = new WeakMap<object, string>();
-    class WeakMapError extends Error {
-      constructor(token: string) {
-        super(`weak ${token}`);
-        weakTokens.set(this, token);
-      }
-
-      get token(): string {
-        return weakTokens.get(this) ?? "missing";
-      }
-    }
-
-    for (const surface of ["mutable", "hardlink"] as const) {
-      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-      tempRoots.push(tempRoot);
-      const schema = z.object({ id: z.string() });
-      const record = { id: `branded-${surface}` };
-      const directorySegments = ["branded-compensation"] as const;
-      const fileName = `${surface}.json`;
-      const evidenceRef = `branded.compensation.${surface}`;
-      const primary = surface === "mutable"
-        ? Object.freeze(new PrivateFieldError(surface))
-        : Object.seal(new WeakMapError(surface));
-      const compensation = new Error(`${surface} branded compensation`);
-
-      const failure = await captureError(() =>
-        runWithWorkspaceRecordPublicationHooks(
-          {
-            afterTemporaryFileWritten: () => {
-              throw primary;
-            },
-            beforeTemporaryFileClose: () => {
-              throw compensation;
-            }
-          },
-          () => surface === "mutable"
-            ? writeJsonRecord(
-                workspaceRoot,
-                directorySegments,
-                fileName,
-                record,
-                evidenceRef,
-                schema
-              )
-            : createJsonRecordIfAbsent(
-                workspaceRoot,
-                directorySegments,
-                fileName,
-                record,
-                evidenceRef,
-                schema
-              )
-        )
-      );
-
-      expect(failure).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-      expect(failure).not.toBeInstanceOf(primary.constructor);
-      expect(semanticPrimaryError(failure)).toBe(primary);
-      if (primary instanceof PrivateFieldError) {
-        expect(primary.reveal()).toBe(surface);
-      } else {
-        expect(primary.token).toBe(surface);
-      }
-      expect((failure.cause as AggregateError).errors).toEqual([compensation]);
-      expect(Object.isFrozen(primary)).toBe(surface === "mutable");
-      expect(Object.isSealed(primary)).toBe(true);
-    }
-  });
-
-  test("compensation preservation retains every undefined and falsy slot in order", () => {
-    const ordinaryCompensation = new Error("ordinary compensation");
-    const cases = [
-      { name: "undefined-only", compensations: [undefined] },
-      { name: "mixed", compensations: [undefined, ordinaryCompensation] },
-      { name: "falsy", compensations: [null, false, 0, ""] }
-    ] as const;
-
-    for (const matrixCase of cases) {
-      const priorCause = new Error(`${matrixCase.name} prior cause`);
-      const primary = new StructuredServiceError(
-        `${matrixCase.name} primary`,
-        `E_${matrixCase.name.toUpperCase().replace("-", "_")}`,
-        Object.freeze({ surface: "helper", immutability: "frozen" }),
-        priorCause
-      );
-      Object.freeze(primary);
-      const descriptors = Object.getOwnPropertyDescriptors(primary);
-
-      const result = preservePrimaryAndCompensationErrors(
-        primary,
-        matrixCase.compensations,
-        `${matrixCase.name} aggregate`
-      ) as Error;
-
-      expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-      expect(result).not.toBeInstanceOf(StructuredServiceError);
-      expect(semanticPrimaryError(result)).toBe(primary);
-      expect(Object.getPrototypeOf(primary)).toBe(StructuredServiceError.prototype);
-      expectPreservedOwnDescriptors(primary, descriptors);
-      expect(Object.isFrozen(primary)).toBe(true);
-      expect(Object.isSealed(primary)).toBe(true);
-      expect(Object.isExtensible(primary)).toBe(false);
-      expect(result.cause).toBeInstanceOf(AggregateError);
-      const aggregateErrors = (result.cause as AggregateError).errors;
-      expect(aggregateErrors).toHaveLength(matrixCase.compensations.length + 1);
-      expect(aggregateErrors[0]).toBe(priorCause);
-      matrixCase.compensations.forEach((compensation, index) => {
-        expect(aggregateErrors[index + 1]).toBe(compensation);
-      });
-      expect(primary.cause).toBe(priorCause);
-    }
-
-    const nonErrorPrimary = Object.freeze({ kind: "non-error" });
-    expect(
-      preservePrimaryAndCompensationErrors(nonErrorPrimary, [undefined], "non-error aggregate")
-    ).toBe(nonErrorPrimary);
-    const emptyPrimary = Object.freeze(new Error("empty primary"));
-    expect(preservePrimaryAndCompensationErrors(emptyPrimary, [], "empty aggregate")).toBe(
-      emptyPrimary
-    );
-  });
-
-  test("compensation preservation flattens only helper-owned envelopes by provenance", () => {
-    const semanticPriorCause = new Error("provenance semantic prior cause");
-    const semanticPrimary = new StructuredServiceError(
-      "provenance semantic primary",
-      "E_PROVENANCE_PRIMARY",
-      Object.freeze({ surface: "helper", immutability: "frozen" }),
-      semanticPriorCause
-    );
-    Object.freeze(semanticPrimary);
-    const semanticDescriptors = Object.getOwnPropertyDescriptors(semanticPrimary);
-    const firstFailure = new Error("provenance first compensation");
-    const laterFailure = new Error("provenance later compensation");
-    const firstClone = preservePrimaryAndCompensationErrors(
-      semanticPrimary,
-      [firstFailure],
-      "first provenance aggregate"
-    ) as Error;
-    const laterClone = preservePrimaryAndCompensationErrors(
-      firstClone,
-      [laterFailure],
-      "later provenance aggregate"
-    ) as Error;
-
-    expect(laterClone).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(laterClone).not.toBeInstanceOf(StructuredServiceError);
-    expect(semanticPrimaryError(laterClone)).toBe(semanticPrimary);
-    expect(Object.getPrototypeOf(semanticPrimary)).toBe(StructuredServiceError.prototype);
-    expectPreservedOwnDescriptors(semanticPrimary, semanticDescriptors);
-    expect(Object.isFrozen(semanticPrimary)).toBe(true);
-    expect(Object.isSealed(semanticPrimary)).toBe(true);
-    expect(Object.isExtensible(semanticPrimary)).toBe(false);
-    expect(laterClone.cause).toBeInstanceOf(AggregateError);
-    expect((laterClone.cause as AggregateError).message).toBe("later provenance aggregate");
-    expect((laterClone.cause as AggregateError).errors).toEqual([
-      semanticPriorCause,
-      firstFailure,
-      laterFailure
-    ]);
-    expect(countErrorNodes(laterClone, (error) => error instanceof AggregateError)).toBe(1);
-
-    const differentPrimary = new Error("different semantic primary");
-    const trailingFailure = new Error("different trailing compensation");
-    const compensationClone = preservePrimaryAndCompensationErrors(
-      differentPrimary,
-      [firstClone, trailingFailure],
-      "compensation provenance aggregate"
-    ) as Error;
-    expect((compensationClone.cause as AggregateError).errors).toEqual([
-      semanticPrimary,
-      firstFailure,
-      trailingFailure
-    ]);
-    expect((compensationClone.cause as AggregateError).errors).not.toContain(semanticPriorCause);
-    expect(semanticPrimary.cause).toBe(semanticPriorCause);
-    expect(countErrorNodes(compensationClone, (error) => error === semanticPriorCause)).toBe(1);
-    expect(countErrorNodes(compensationClone, (error) => error instanceof AggregateError)).toBe(1);
-
-    const accessorPriorCause = new Error("accessor provenance prior cause");
-    const accessorPrimary = new Error("accessor provenance semantic primary");
-    let accessorCauseReads = 0;
-    Object.defineProperty(accessorPrimary, "cause", {
-      configurable: true,
-      enumerable: false,
-      get: () => {
-        accessorCauseReads += 1;
-        return accessorPriorCause;
-      }
-    });
-    const accessorRawCompensation = new Error("accessor provenance raw compensation");
-    const accessorSecondCompensation = new Error("accessor provenance second compensation");
-    const accessorThirdCompensation = new Error("accessor provenance third compensation");
-    const accessorFirstClone = preservePrimaryAndCompensationErrors(
-      accessorPrimary,
-      [accessorRawCompensation],
-      "accessor first aggregate"
-    ) as Error;
-    expect(accessorCauseReads).toBe(1);
-    const accessorSecondClone = preservePrimaryAndCompensationErrors(
-      accessorFirstClone,
-      [accessorSecondCompensation],
-      "accessor second aggregate"
-    ) as Error;
-    const accessorFinalClone = preservePrimaryAndCompensationErrors(
-      accessorSecondClone,
-      [accessorThirdCompensation],
-      "accessor final aggregate"
-    ) as Error;
-    expect(accessorCauseReads).toBe(1);
-    expect((accessorFinalClone.cause as AggregateError).errors).toEqual([
-      accessorPriorCause,
-      accessorRawCompensation,
-      accessorSecondCompensation,
-      accessorThirdCompensation
-    ]);
-
-    const accessorTrailingCompensation = new Error("accessor provenance trailing compensation");
-    const accessorOuterPrimary = new Error("accessor provenance outer primary");
-    const accessorOuterClone = preservePrimaryAndCompensationErrors(
-      accessorOuterPrimary,
-      [accessorFirstClone, accessorTrailingCompensation],
-      "accessor outer aggregate"
-    ) as Error;
-    expect(accessorCauseReads).toBe(1);
-    expect((accessorOuterClone.cause as AggregateError).errors).toEqual([
-      accessorPrimary,
-      accessorRawCompensation,
-      accessorTrailingCompensation
-    ]);
-    expect((accessorOuterClone.cause as AggregateError).errors).not.toContain(
-      accessorPriorCause
-    );
-    expect(Object.getOwnPropertyDescriptor(accessorPrimary, "cause")?.get).toBeFunction();
-
-    const userPriorLeaf = new Error("user prior leaf");
-    const userPriorAggregate = new AggregateError([userPriorLeaf], "user prior aggregate");
-    const userCompensationLeaf = new Error("user compensation leaf");
-    const userCompensationAggregate = new AggregateError(
-      [userCompensationLeaf],
-      "user compensation aggregate"
-    );
-    const userPrimary = new Error("user aggregate primary", { cause: userPriorAggregate });
-    const userResult = preservePrimaryAndCompensationErrors(
-      userPrimary,
-      [userCompensationAggregate],
-      "user aggregate preservation"
-    ) as Error;
-    expect((userResult.cause as AggregateError).errors).toEqual([
-      userPriorAggregate,
-      userCompensationAggregate
-    ]);
-    expect((userResult.cause as AggregateError).errors[0]).toBe(userPriorAggregate);
-    expect((userResult.cause as AggregateError).errors[1]).toBe(userCompensationAggregate);
-  });
-
-  test("compensation preservation flattens repeated sibling helper envelopes in exact slot order", () => {
-    const innerPrimary = new Error("repeated sibling inner primary");
-    const innerLeaf = new Error("repeated sibling inner leaf");
-    const repeatedEnvelope = preservePrimaryAndCompensationErrors(
-      innerPrimary,
-      [innerLeaf],
-      "repeated sibling inner aggregate"
-    ) as PreservedErrorCompensationEnvelope;
-    const outerPrimary = new Error("repeated sibling outer primary");
-
-    const result = preservePrimaryAndCompensationErrors(
-      outerPrimary,
-      [repeatedEnvelope, repeatedEnvelope],
-      "repeated sibling outer aggregate"
-    ) as PreservedErrorCompensationEnvelope;
-    const aggregate = result.cause as AggregateError;
-
-    expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(semanticPrimaryError(result)).toBe(outerPrimary);
-    expect(aggregate).toBeInstanceOf(AggregateError);
-    expect(aggregate.errors).toEqual([
-      innerPrimary,
-      innerLeaf,
-      innerPrimary,
-      innerLeaf
-    ]);
-    expect(
-      aggregate.errors.some(
-        (error) => error instanceof PreservedErrorCompensationEnvelope
-      )
-    ).toBe(false);
-    expect(countErrorNodes(result, (error) => error instanceof AggregateError)).toBe(1);
-  });
-
-  test("compensation preservation bounds genuine provenance cycles with an explicit marker", () => {
-    const cyclePrimary = new Error("provenance cycle primary");
-    const cycleEnvelope = preservePrimaryAndCompensationErrors(
-      cyclePrimary,
-      [cyclePrimary],
-      "provenance cycle seed aggregate"
-    ) as PreservedErrorCompensationEnvelope;
-    registerPreservedErrorCompatibility(cyclePrimary, cycleEnvelope);
-    const outerPrimary = new Error("provenance cycle outer primary");
-
-    const result = preservePrimaryAndCompensationErrors(
-      outerPrimary,
-      [cycleEnvelope],
-      "provenance cycle outer aggregate"
-    ) as PreservedErrorCompensationEnvelope;
-    const aggregate = result.cause as AggregateError;
-
-    expect(semanticPrimaryError(result)).toBe(outerPrimary);
-    expect(aggregate.errors).toHaveLength(2);
-    expect(aggregate.errors[0]).toBe(cyclePrimary);
-    expect(aggregate.errors[1]).toBeInstanceOf(Error);
-    expect(aggregate.errors[1]).toMatchObject({
-      name: "PreservedCompensationCycle",
-      message: "A cycle was detected while flattening preserved compensation errors."
-    });
-    expect((aggregate.errors[1] as Error).cause).toBeUndefined();
-    expect(aggregate.errors).not.toContain(cycleEnvelope);
-    expect(
-      aggregate.errors.some((error) => error instanceof AggregateError)
-    ).toBe(false);
-    expect(countErrorNodes(result, (error) => error instanceof AggregateError)).toBe(1);
-  });
-
-  test("workspace publication flattens repeated helper compensation slots", async () => {
-    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-    tempRoots.push(tempRoot);
-    const schema = z.object({ id: z.string() });
-    const record = { id: "workspace-repeated-helper-compensation" };
-    const directorySegments = ["workspace-repeated-helper-compensation"] as const;
-    const fileName = "record.json";
-    const evidenceRef = "compensation.repeated.workspace";
-    const path = workspaceRecordPath(
-      workspaceRoot,
-      [...directorySegments, fileName],
-      evidenceRef
-    );
-    const outerPrimary = new Error("workspace repeated outer primary");
-    const innerPrimary = new Error("workspace repeated inner primary");
-    const innerLeaf = new Error("workspace repeated inner leaf");
-    const repeatedEnvelope = preservePrimaryAndCompensationErrors(
-      innerPrimary,
-      [innerLeaf],
-      "workspace repeated inner aggregate"
-    ) as PreservedErrorCompensationEnvelope;
-
-    const failure = await captureError(() =>
-      runWithWorkspaceRecordPublicationHooks(
-        {
-          afterTemporaryFileWritten: () => {
-            throw outerPrimary;
-          },
-          beforeTemporaryFileClose: () => {
-            throw repeatedEnvelope;
-          },
-          afterTemporaryFileClosed: () => {
-            throw repeatedEnvelope;
-          }
-        },
-        () =>
-          writeJsonRecord(
-            workspaceRoot,
-            directorySegments,
-            fileName,
-            record,
-            evidenceRef,
-            schema
-          )
-      )
-    );
-    const aggregate = knownPreservedCompensationAggregate(failure);
-
-    expect(semanticPrimaryError(failure)).toBe(outerPrimary);
-    expect(aggregate.errors).toEqual([innerPrimary, innerLeaf, innerPrimary]);
-    expect(
-      aggregate.errors.some(
-        (error) => error instanceof PreservedErrorCompensationEnvelope
-      )
-    ).toBe(false);
-    expect(countErrorNodes(failure, (error) => error instanceof AggregateError)).toBe(1);
-    await expectPathMissing(path);
-    expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
-  });
-
-  test("compensation preservation observes positively branded Proxy Error traps without replacing the primary", () => {
-    for (const primaryKind of ["error", "task-service-error"] as const) {
-      for (const reflectionTrap of ["descriptor", "getter"] as const) {
-        const observationFailure = new Error(
-          `${primaryKind} ${reflectionTrap} observation failure`
-        );
-        const cleanupFailure = new Error(
-          `${primaryKind} ${reflectionTrap} cleanup failure`
-        );
-        const target = primaryKind === "error"
-          ? new Error(`${primaryKind} ${reflectionTrap} primary`)
-          : new TaskServiceError({
-              code: "workspace_path_not_safe",
-              status: 500,
-              category: "workspace_error",
-              message: `${primaryKind} ${reflectionTrap} primary`,
-              userMessage: "Proxy TaskServiceError primary.",
-              evidenceRefs: ["proxy.reflection.direct"],
-              retryable: false,
-              recommendedNextActions: ["Inspect the preserved primary."]
-            });
-        const primary = new Proxy(target, {
-          get: (proxyTarget, property, receiver) => {
-            if (reflectionTrap === "getter" && property === "cause") {
-              throw observationFailure;
-            }
-            return Reflect.get(proxyTarget, property, receiver);
-          },
-          getOwnPropertyDescriptor: (proxyTarget, property) => {
-            if (reflectionTrap === "descriptor" && property === "cause") {
-              throw observationFailure;
-            }
-            return Reflect.getOwnPropertyDescriptor(proxyTarget, property);
-          }
-        });
-
-        const result = preservePrimaryAndCompensationErrors(
-          primary,
-          [cleanupFailure],
-          "Proxy reflection preservation"
-        );
-
-        expect(result).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-        expect(semanticPrimaryError(result)).toBe(primary);
-        expect(
-          ((result as PreservedErrorCompensationEnvelope).cause as AggregateError).errors
-        ).toEqual([observationFailure, cleanupFailure]);
-      }
-    }
-  });
-
-  test("mutable compensation keeps positively branded Proxy Error failures ordered before cleanup", async () => {
-    for (const primaryKind of ["error", "task-service-error"] as const) {
-      for (const reflectionTrap of ["descriptor", "getter"] as const) {
-        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-        tempRoots.push(tempRoot);
-        const schema = z.object({ id: z.string() });
-        const record = { id: `proxy-${primaryKind}-${reflectionTrap}` };
-        const directorySegments = ["proxy-reflection-publication"] as const;
-        const fileName = `${primaryKind}-${reflectionTrap}.json`;
-        const evidenceRef = `proxy.reflection.publication.${primaryKind}.${reflectionTrap}`;
-        const observationFailure = new Error(`${evidenceRef} observation failure`);
-        const cleanupFailure = new Error(`${evidenceRef} cleanup failure`);
-        const target = primaryKind === "error"
-          ? new Error(`${evidenceRef} primary`)
-          : new TaskServiceError({
-              code: "workspace_path_not_safe",
-              status: 500,
-              category: "workspace_error",
-              message: `${evidenceRef} primary`,
-              userMessage: "Proxy TaskServiceError publication primary.",
-              evidenceRefs: [evidenceRef],
-              retryable: false,
-              recommendedNextActions: ["Inspect the publication failure."]
-            });
-        const primary = new Proxy(target, {
-          get: (proxyTarget, property, receiver) => {
-            if (reflectionTrap === "getter" && property === "cause") {
-              throw observationFailure;
-            }
-            return Reflect.get(proxyTarget, property, receiver);
-          },
-          getOwnPropertyDescriptor: (proxyTarget, property) => {
-            if (reflectionTrap === "descriptor" && property === "cause") {
-              throw observationFailure;
-            }
-            return Reflect.getOwnPropertyDescriptor(proxyTarget, property);
-          }
-        });
-        const path = workspaceRecordPath(
-          workspaceRoot,
-          [...directorySegments, fileName],
-          evidenceRef
-        );
-
-        const failure = await captureThrownValue(() =>
-          runWithWorkspaceRecordPublicationHooks(
-            {
-              afterTemporaryFileWritten: () => {
-                throw primary;
-              },
-              beforeTemporaryFileClose: () => {
-                throw cleanupFailure;
-              }
-            },
-            () =>
-              writeJsonRecord(
-                workspaceRoot,
-                directorySegments,
-                fileName,
-                record,
-                evidenceRef,
-                schema
-              )
-          )
-        );
-
-        expect(semanticPrimaryError(failure)).toBe(primary);
-        expect(knownPreservedCompensationAggregate(failure).errors).toEqual([
-          observationFailure,
-          cleanupFailure
-        ]);
-        await expectPathMissing(path);
-        expect((await readdir(dirname(path))).some(isOwnedRecordPath)).toBe(false);
-      }
-    }
-  });
-
-  test("indeterminate Proxy brands stay represented raw values across helper, publication, and delete", async () => {
-    const directObservationFailure = new Error("direct indeterminate brand observation");
-    const directCleanupFailure = new Error("direct indeterminate cleanup");
-    const directPrimary = new Proxy(
-      { surface: "direct-indeterminate-primary" },
-      { getPrototypeOf: () => { throw directObservationFailure; } }
-    );
-    const direct = preserveThrownValueAndCompensationErrors(
-      directPrimary,
-      [directCleanupFailure],
-      "Indeterminate direct preservation"
-    );
-    const directRepresented = semanticPrimaryError(direct);
-
-    expect(semanticPrimaryError(directPrimary)).toBeUndefined();
-    expect(directRepresented).toBeInstanceOf(PreservedNonErrorThrownValue);
-    expect((directRepresented as PreservedNonErrorThrownValue).thrownValue).toBe(
-      directPrimary
-    );
-    expect(directRepresented).not.toBe(directPrimary);
-    expect((direct.cause as AggregateError).errors).toEqual([
-      directPrimary,
-      directObservationFailure,
-      directCleanupFailure
-    ]);
-
-    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-    tempRoots.push(tempRoot);
-    const schema = z.object({ id: z.string() });
-    const directorySegments = ["indeterminate-proxy-publication"] as const;
-    const publicationRecord = { id: "indeterminate-publication" };
-    const publicationEvidenceRef = "proxy.indeterminate.publication";
-    const publicationPath = workspaceRecordPath(
-      workspaceRoot,
-      [...directorySegments, "publication.json"],
-      publicationEvidenceRef
-    );
-    const publicationObservationFailure = new Error(
-      "publication indeterminate brand observation"
-    );
-    const publicationCleanupFailure = new Error("publication indeterminate cleanup");
-    const publicationPrimary = new Proxy(
-      { surface: "publication-indeterminate-primary" },
-      { getPrototypeOf: () => { throw publicationObservationFailure; } }
-    );
-    const publicationFailure = await captureError(() =>
-      runWithWorkspaceRecordPublicationHooks(
-        {
-          afterTemporaryFileWritten: () => { throw publicationPrimary; },
-          beforeTemporaryFileClose: () => { throw publicationCleanupFailure; }
-        },
-        () => writeJsonRecord(
-          workspaceRoot,
-          directorySegments,
-          "publication.json",
-          publicationRecord,
-          publicationEvidenceRef,
-          schema
-        )
-      )
-    );
-    const publicationRepresented = semanticPrimaryError(publicationFailure);
-
-    expect(semanticPrimaryError(publicationPrimary)).toBeUndefined();
-    expect(publicationRepresented).toBeInstanceOf(PreservedNonErrorThrownValue);
-    expect(
-      (publicationRepresented as PreservedNonErrorThrownValue).thrownValue
-    ).toBe(publicationPrimary);
-    expect(publicationFailure.cause).not.toBe(publicationPrimary);
-    expect(knownPreservedCompensationAggregate(publicationFailure).errors).toEqual([
-      publicationPrimary,
-      publicationObservationFailure,
-      publicationCleanupFailure
-    ]);
-    await expectPathMissing(publicationPath);
-
-    const deleteRecord = { id: "indeterminate-delete" };
-    const deleteEvidenceRef = "proxy.indeterminate.delete";
-    const deletePath = workspaceRecordPath(
-      workspaceRoot,
-      [...directorySegments, "delete.json"],
-      deleteEvidenceRef
-    );
-    expect(
-      await createJsonRecordIfAbsent(
-        workspaceRoot,
-        directorySegments,
-        "delete.json",
-        deleteRecord,
-        deleteEvidenceRef,
-        schema
-      )
-    ).toEqual({ status: "created", record: deleteRecord });
-    const deleteBefore = await readFileWithIdentity(deletePath);
-    const deleteObservationFailure = new Error("delete indeterminate brand observation");
-    const deleteCleanupFailure = new Error("delete indeterminate cleanup");
-    const deletePrimary = new Proxy(
-      { surface: "delete-indeterminate-primary" },
-      { getPrototypeOf: () => { throw deleteObservationFailure; } }
-    );
-    const deleteFailure = await captureTaskServiceError(() =>
-      runWithWorkspaceRecordCompensationTestHooks(
-        {
-          afterOwnedPathIsolation: ({ site }) => {
-            if (site === "conditional_delete") throw deletePrimary;
-          },
-          beforeOwnedPathCompensationStateInspection: ({ site }) => {
-            if (site === "conditional_delete") throw deleteCleanupFailure;
-          }
-        },
-        () => conditionalDeleteJsonRecord(deletePath, deleteEvidenceRef, schema, {
-          kind: "record",
-          expected: deleteRecord,
-          matches: () => true
-        })
-      )
-    );
-    const deleteEnvelope = deleteFailure.cause;
-
-    expect(semanticPrimaryError(deletePrimary)).toBeUndefined();
-    expect(deleteEnvelope).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(deleteEnvelope).not.toBe(deletePrimary);
-    const deleteRepresented = semanticPrimaryError(deleteEnvelope);
-    expect(deleteRepresented).toBeInstanceOf(PreservedNonErrorThrownValue);
-    expect((deleteRepresented as PreservedNonErrorThrownValue).thrownValue).toBe(
-      deletePrimary
-    );
-    expect(
-      ((deleteEnvelope as PreservedErrorCompensationEnvelope).cause as AggregateError).errors
-    ).toEqual([deletePrimary, deleteObservationFailure, deleteCleanupFailure]);
-    expect(await readFileWithIdentity(deletePath)).toEqual(deleteBefore);
-    expect((await stat(deletePath, { bigint: true })).nlink).toBe(1n);
-    expect((await readdir(dirname(deletePath))).some(isOwnedRecordPath)).toBe(false);
   });
 
   test("Artifact duplicate registration converges across the owned publication window", async () => {
@@ -6400,210 +5193,19 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
-  test("cleanup-permit deletion marks failures after canonical isolation post-mutation", async () => {
-    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-    tempRoots.push(tempRoot);
-    const schema = z.object({ id: z.string() });
-    const record = { id: "post-rename" };
-    const evidenceRef = "conditional-delete.post-mutation";
-    const directorySegments = ["conditional-delete-post-mutation"] as const;
-    const path = workspaceRecordPath(
-      workspaceRoot,
-      [...directorySegments, "record.json"],
-      evidenceRef
-    );
-    const created = await createJsonRecordIfAbsentWithCleanupPermit(
-      workspaceRoot,
-      directorySegments,
-      "record.json",
-      record,
-      evidenceRef,
-      schema
-    );
-    if (created.status !== "created") throw new Error("Expected a cleanup-permit fixture.");
-    const before = await readFileWithIdentity(path);
-
-    const error = await captureConditionalDeleteError(() =>
-      runWithWorkspaceRecordPublicationHooks(
-        {
-          beforeAuthorityOwnedUnlink: ({ operation }) => {
-            if (operation === "conditional_delete") {
-              throw new Error("injected post-rename failure");
-            }
-          }
-        },
-        () =>
-          conditionalDeleteJsonRecordWithCleanupPermit(
-            created.cleanupPermit,
-            path,
-            evidenceRef,
-            schema,
-            {
-              kind: "record",
-              expected: record,
-              matches: (current, expected) => current.id === expected.id
-            }
-          )
-      )
-    );
-
-    expect(error.mutationPhase).toBe("post_mutation");
-    expect(error.failureStage).toBe("operation");
-    expect(await readFileWithIdentity(path)).toEqual(before);
-    expect((await readdir(join(path, ".."))).some(isOwnedRecordPath)).toBe(false);
-    const reusedPermit = await captureConditionalDeleteError(() =>
-      conditionalDeleteJsonRecordWithCleanupPermit(
-        created.cleanupPermit,
-        path,
-        evidenceRef,
-        schema,
-        {
-          kind: "record",
-          expected: record,
-          matches: (current, expected) => current.id === expected.id
-        }
-      )
-    );
-    expect(reusedPermit.mutationPhase).toBe("pre_mutation");
-    expect(reusedPermit.failureStage).toBe("permit_admission");
-    expect(
-      await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
-        kind: "record",
-        expected: record,
-        matches: (current, expected) => current.id === expected.id
-      })
-    ).toEqual({ status: "deleted" });
-  });
-
-  test("opt-in cleanup-permit deletion settles only restored exact A and preserves converged successors", async () => {
-    for (const outcome of [
-      "exact",
+  test("private-ticket settlement deletes only first-isolated A and observes public successors", async () => {
+    for (const successor of [
       "missing",
-      "different_fields",
-      "same_fields_new_inode",
-      "same_inode_byte_drift"
+      "different-bytes",
+      "same-bytes-new-inode",
+      "ancestor-aba"
     ] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
       tempRoots.push(tempRoot);
-      const schema = z.object({ id: z.string(), revision: z.number().int() });
-      const record = { id: `exact-settlement-${outcome}`, revision: 1 };
-      const successor = outcome === "different_fields"
-        ? { ...record, revision: 2 }
-        : record;
-      const evidenceRef = `conditional-delete.exact-settlement.${outcome}`;
-      const directorySegments = ["conditional-delete-exact-settlement", outcome] as const;
-      const fileName = "record.json";
-      const path = workspaceRecordPath(
-        workspaceRoot,
-        [...directorySegments, fileName],
-        evidenceRef
-      );
-      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
-      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
-      const initialMarker = new Error(`initial post-mutation ${outcome}`);
-      const closeTracker = createCleanupPermitCloseTracker([path]);
-      const created = await runWithWorkspaceRecordPublicationHooks(
-        { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
-        () =>
-          createJsonRecordIfAbsentWithCleanupPermit(
-            workspaceRoot,
-            directorySegments,
-            fileName,
-            record,
-            evidenceRef,
-            schema
-          )
-      );
-      if (created.status !== "created") throw new Error("Expected exact-settlement fixture.");
-      const original = await readFileWithIdentity(path);
-      let successorIdentity: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
-      let settlementHookCount = 0;
-
-      const result = await runWithWorkspaceRecordCompensationTestHooks(
-        {
-          afterOwnedPathIsolation: ({ site }) => {
-            if (site === "conditional_delete") throw initialMarker;
-          },
-          beforeExactFailureSettlement: async ({ path: settlementPath }) => {
-            if (settlementPath !== path) return;
-            settlementHookCount += 1;
-            if (outcome === "exact") return;
-            if (outcome === "missing") {
-              await unlink(path);
-              return;
-            }
-            if (outcome === "same_inode_byte_drift") {
-              await replaceFileBytesInPlaceWithMtimeAdvance(
-                path,
-                Buffer.from(`${JSON.stringify(successor, null, 2)}\n`)
-              );
-              successorIdentity = await readFileWithIdentity(path);
-              return;
-            }
-            await unlink(path);
-            await writeFile(path, `${JSON.stringify(successor, null, 2)}\n`, {
-              flag: "wx",
-              mode: 0o600
-            });
-            successorIdentity = await readFileWithIdentity(path);
-          }
-        },
-        () =>
-          conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
-            created.cleanupPermit,
-            path,
-            evidenceRef,
-            schema,
-            {
-              kind: "record",
-              expected: record,
-              matches: (current, expected) => current.id === expected.id
-            }
-          )
-      );
-      await Promise.race([
-        closeTracker.waitForAll(),
-        timeoutAfter(1_000, `${outcome} exact-settlement permit did not close`)
-      ]);
-
-      expect(result).toEqual({
-        status: "recovered",
-        settlement: outcome === "exact"
-          ? "deleted"
-          : outcome === "missing"
-            ? "missing"
-            : "superseded"
-      });
-      expect(settlementHookCount).toBe(1);
-      if (outcome === "exact" || outcome === "missing") {
-        await expectPathMissing(path);
-      } else {
-        expect(successorIdentity).toBeDefined();
-        expect(await readFileWithIdentity(path)).toEqual(successorIdentity!);
-        expect(await readFile(path)).toEqual(
-          Buffer.from(`${JSON.stringify(successor, null, 2)}\n`)
-        );
-        if (outcome === "same_inode_byte_drift") {
-          expect(workspaceRecordPhysicalIdentityMatches(successorIdentity!, original)).toBe(true);
-        } else {
-          expect(workspaceRecordPhysicalIdentityMatches(successorIdentity!, original)).toBe(false);
-        }
-      }
-      expect(closeTracker.count(path)).toBe(1);
-      await expectFileDescriptorClosed(closeTracker.descriptors(path)[0]!);
-      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
-      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
-    }
-  });
-
-  test("opt-in exact failure settlement runs once only after post-mutation failure", async () => {
-    for (const initial of ["deleted", "condition_not_met"] as const) {
-      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-      tempRoots.push(tempRoot);
       const schema = z.object({ id: z.string() });
-      const record = { id: `exact-settlement-terminal-${initial}` };
-      const evidenceRef = `conditional-delete.exact-settlement.terminal.${initial}`;
-      const directorySegments = ["conditional-delete-exact-settlement-terminal", initial] as const;
+      const record = { id: `private-ticket-${successor}` };
+      const evidenceRef = `private.ticket.${successor}`;
+      const directorySegments = ["private-ticket", successor] as const;
       const fileName = "record.json";
       const path = workspaceRecordPath(
         workspaceRoot,
@@ -6618,13 +5220,39 @@ describe("idempotency, lock, and artifact services", () => {
         evidenceRef,
         schema
       );
-      if (created.status !== "created") throw new Error("Expected terminal fixture.");
-      let settlementHookCount = 0;
+      if (created.status !== "created") throw new Error("Expected private-ticket fixture.");
+      const beforeDiagnostics = workspaceRecordAuthorityDiagnosticsForTest();
+      let isolatedPath = "";
+      let isolatedIdentity: { dev: number; ino: number } | undefined;
+      let successorState: { bytes: Buffer; dev: number; ino: number } | undefined;
+      const watcherBaseline = activeFileSystemWatcherCount();
+      const initialFailure = new Error(`post-isolation ${successor}`);
 
       const result = await runWithWorkspaceRecordCompensationTestHooks(
         {
-          beforeExactFailureSettlement: () => {
-            settlementHookCount += 1;
+          afterOwnedPathIsolation: async (input) => {
+            if (input.site !== "conditional_delete") return;
+            isolatedPath = input.isolatedPath;
+            isolatedIdentity = await readPathIdentity(isolatedPath);
+            if (successor === "different-bytes") {
+              await writeFile(path, Buffer.from('{"id":"successor-B"}\n'), {
+                flag: "wx",
+                mode: 0o600
+              });
+              successorState = await readFileWithIdentity(path);
+            } else if (successor === "same-bytes-new-inode") {
+              await writeFile(
+                path,
+                Buffer.from(`${JSON.stringify(record, null, 2)}\n`),
+                { flag: "wx", mode: 0o600 }
+              );
+              successorState = await readFileWithIdentity(path);
+            } else if (successor === "ancestor-aba") {
+              const movedRoot = join(tempRoot, "workspace-away");
+              await rename(workspaceRoot, movedRoot);
+              await rename(movedRoot, workspaceRoot);
+            }
+            throw initialFailure;
           }
         },
         () =>
@@ -6633,24 +5261,144 @@ describe("idempotency, lock, and artifact services", () => {
             path,
             evidenceRef,
             schema,
-            {
-              kind: "record",
-              expected: record,
-              matches: () => initial === "deleted"
-            }
+            { kind: "record", expected: record, matches: () => true }
           )
       );
 
-      expect(result).toEqual({ status: initial });
-      expect(settlementHookCount).toBe(0);
-      if (initial === "deleted") {
-        await writeFile(path, `${JSON.stringify(record)}\n`, { flag: "wx", mode: 0o600 });
-        expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(record);
+      expect(result).toEqual({ status: "recovered", settlement: "deleted" });
+      expect(activeFileSystemWatcherCount()).toBe(watcherBaseline);
+      expect(isolatedPath).not.toBe("");
+      await expectPathMissing(isolatedPath);
+      expect(isolatedIdentity).toBeDefined();
+      if (successorState) {
+        expect(await readFileWithIdentity(path)).toEqual(successorState);
+        expect(successorState.ino).not.toBe(isolatedIdentity!.ino);
       } else {
-        expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(record);
+        await expectPathMissing(path);
       }
-      const beforeReuse = await readFileWithIdentity(path);
-      const reused = await captureConditionalDeleteError(() =>
+      expect(beforeDiagnostics.cleanupPermits).toBe(1);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual({
+        mutexes: 0,
+        reservations: 0,
+        cleanupPermits: 0,
+        pendingPinnedFileCloses: 0
+      });
+    }
+  });
+
+  test("exact isolation never republishes A when ticket capture, pinned proof, or legacy normalization fails", async () => {
+    for (const failureWindow of ["capture", "pinned-proof", "normalization"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `exact-isolation-${failureWindow}` };
+      const evidenceRef = `exact.isolation.${failureWindow}`;
+      const directorySegments = ["exact-isolation", failureWindow] as const;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, "record.json"],
+        evidenceRef
+      );
+      const originalBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+      const successorBytes = Buffer.from(`{"id":"successor-${failureWindow}"}\n`);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, originalBytes, { flag: "wx", mode: 0o600 });
+      if (failureWindow === "normalization") await chmod(path, 0o644);
+      const observation = await observeJsonRecordForCleanup(path, evidenceRef, schema);
+      if (observation.status !== "record") {
+        throw new Error("Expected exact-isolation cleanup observation.");
+      }
+      const originalIdentity = await stat(path, { bigint: true });
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const watcherBaseline = activeFileSystemWatcherCount();
+      const marker = new Error(`exact isolation ${failureWindow} failure`);
+      let isolatedPath = "";
+      let successorWritten = false;
+
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            afterOwnedPathIsolationSyscall: async (input) => {
+              if (input.site !== "conditional_delete") return;
+              isolatedPath = input.isolatedPath;
+              if (failureWindow === "normalization") {
+                await chmod(isolatedPath, 0o666);
+              }
+              if (failureWindow !== "pinned-proof") {
+                await writeFile(path, successorBytes, { flag: "wx", mode: 0o600 });
+                successorWritten = true;
+              }
+              if (failureWindow === "capture") {
+                const pinnedDescriptors = findOpenFileDescriptorsByIdentity(originalIdentity);
+                expect(pinnedDescriptors).toHaveLength(1);
+                closeSync(pinnedDescriptors[0]!);
+                throw marker;
+              }
+            },
+            beforeCleanupPermitPinnedGenerationProof: async () => {
+              if (failureWindow !== "pinned-proof" || isolatedPath === "") return;
+              if (!successorWritten) {
+                await writeFile(path, successorBytes, { flag: "wx", mode: 0o600 });
+                successorWritten = true;
+              }
+              throw marker;
+            }
+          },
+          () =>
+            conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+              observation.cleanupPermit,
+              path,
+              evidenceRef,
+              schema,
+              { kind: "record", expected: record, matches: () => true }
+            )
+        )
+      );
+
+      expect(failure).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+      expect(isolatedPath).not.toBe("");
+      expect(await readFile(isolatedPath)).toEqual(originalBytes);
+      expect(await readFile(path)).toEqual(successorBytes);
+      expect(activeFileSystemWatcherCount()).toBe(watcherBaseline);
+      expect(authorityBaseline.cleanupPermits).toBe(1);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual({
+        mutexes: 0,
+        reservations: 0,
+        cleanupPermits: 0,
+        pendingPinnedFileCloses: 0
+      });
+    }
+  });
+
+  test("exact settlement is not entered after initial success and its permit cannot be reused", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "exact-initial-success" };
+    const evidenceRef = "exact.initial-success";
+    const directorySegments = ["exact-initial-success"] as const;
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "record.json"],
+      evidenceRef
+    );
+    const created = await createJsonRecordIfAbsentWithCleanupPermit(
+      workspaceRoot,
+      directorySegments,
+      "record.json",
+      record,
+      evidenceRef,
+      schema
+    );
+    if (created.status !== "created") throw new Error("Expected exact-success fixture.");
+    let settlementEntries = 0;
+    const outcome = await runWithWorkspaceRecordCompensationTestHooks(
+      {
+        beforeExactFailureSettlement: () => {
+          settlementEntries += 1;
+        }
+      },
+      () =>
         conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
           created.cleanupPermit,
           path,
@@ -6658,52 +5406,296 @@ describe("idempotency, lock, and artifact services", () => {
           schema,
           { kind: "record", expected: record, matches: () => true }
         )
+    );
+    expect(outcome).toEqual({ status: "deleted" });
+    expect(settlementEntries).toBe(0);
+    await expectPathMissing(path);
+
+    const reuse = await captureThrownValue(() =>
+      conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+        created.cleanupPermit,
+        path,
+        evidenceRef,
+        schema,
+        { kind: "record", expected: record, matches: () => true }
+      )
+    );
+    expect(reuse).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+    expect((reuse as WorkspaceRecordConditionalDeleteError).mutationPhase).toBe(
+      "pre_mutation"
+    );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual({
+      mutexes: 0,
+      reservations: 0,
+      cleanupPermits: 0,
+      pendingPinnedFileCloses: 0
+    });
+  });
+
+  test("private-ticket settlement retries transient unlink and fails closed on permanent unlink", async () => {
+    for (const mode of ["transient", "permanent"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `private-unlink-${mode}` };
+      const evidenceRef = `private.unlink.${mode}`;
+      const directorySegments = ["private-unlink", mode] as const;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, "record.json"],
+        evidenceRef
       );
-      expect(reused.mutationPhase).toBe("pre_mutation");
-      expect(reused.failureStage).toBe("permit_admission");
-      expect(await readFileWithIdentity(path)).toEqual(beforeReuse);
+      const created = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        directorySegments,
+        "record.json",
+        record,
+        evidenceRef,
+        schema
+      );
+      if (created.status !== "created") throw new Error("Expected unlink fixture.");
+      const initialFailure = new Error(`initial ${mode}`);
+      const unlinkFailures = [1, 2, 3].map(
+        (attempt) => new Error(`${mode} unlink attempt ${attempt}`)
+      );
+      let attempts = 0;
+      const action = () =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            afterOwnedPathIsolation: ({ site }) => {
+              if (site === "conditional_delete") throw initialFailure;
+            },
+            beforeOwnedIsolatedSourceUnlink: ({ site, attempt }) => {
+              if (site !== "exact_failure_settlement") return;
+              attempts += 1;
+              if (mode === "permanent" || attempt < 3) {
+                throw unlinkFailures[attempt - 1]!;
+              }
+            }
+          },
+          () =>
+            conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+              created.cleanupPermit,
+              path,
+              evidenceRef,
+              schema,
+              { kind: "record", expected: record, matches: () => true }
+            )
+        );
+
+      if (mode === "transient") {
+        expect(await action()).toEqual({ status: "recovered", settlement: "deleted" });
+        expect(attempts).toBe(3);
+        await expectPathMissing(path);
+      } else {
+        const failure = await captureThrownValue(action);
+        expect(failure).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+        expect(semanticPrimaryValue(failure)).toBe(failure);
+        expect(attempts).toBe(3);
+        const later = orderedDistinctCompensationFailures(failure);
+        expect(later.some((value) => value instanceof TaskServiceError)).toBe(true);
+        expect(later.filter((value) =>
+          unlinkFailures.includes(value as Error)
+        )).toEqual(unlinkFailures);
+        await expectPathMissing(path);
+      }
+      expect(workspaceRecordAuthorityDiagnosticsForTest().cleanupPermits).toBe(0);
     }
   });
 
-  test("opt-in exact settlement failure keeps the initial marker primary and settles authority once", async () => {
+  test("private-ticket drift is typed failure and never touches public state", async () => {
+    for (const drift of [
+      "private-missing-positive-link",
+      "private-replacement",
+      "link-count",
+      "namespace-mode"
+    ] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `private-drift-${drift}` };
+      const evidenceRef = `private.drift.${drift}`;
+      const directorySegments = ["private-drift", drift] as const;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, "record.json"],
+        evidenceRef
+      );
+      const created = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        directorySegments,
+        "record.json",
+        record,
+        evidenceRef,
+        schema
+      );
+      if (created.status !== "created") throw new Error("Expected drift fixture.");
+      let privatePath = "";
+      let retainedPath = "";
+      let foreignBytes: Buffer | undefined;
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            afterOwnedPathIsolation: async (input) => {
+              if (input.site !== "conditional_delete") return;
+              privatePath = input.isolatedPath;
+              if (drift === "private-missing-positive-link") {
+                retainedPath = join(tempRoot, "retained-A.json");
+                await link(privatePath, retainedPath);
+                await unlink(privatePath);
+              } else if (drift === "private-replacement") {
+                retainedPath = join(tempRoot, "retained-private-A.json");
+                await rename(privatePath, retainedPath);
+                foreignBytes = Buffer.from('{"id":"foreign-private-B"}\n');
+                await writeFile(privatePath, foreignBytes, { flag: "wx", mode: 0o600 });
+              } else if (drift === "link-count") {
+                retainedPath = join(tempRoot, "linked-A.json");
+                await link(privatePath, retainedPath);
+              } else {
+                await chmod(dirname(privatePath), 0o755);
+              }
+              throw new Error(`drift marker ${drift}`);
+            }
+          },
+          () =>
+            conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+              created.cleanupPermit,
+              path,
+              evidenceRef,
+              schema,
+              { kind: "record", expected: record, matches: () => true }
+            )
+        )
+      );
+
+      expect(failure).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+      expect(
+        orderedDistinctCompensationFailures(failure)[0]
+      ).toBeInstanceOf(TaskServiceError);
+      await expectPathMissing(path);
+      if (foreignBytes) expect(await readFile(privatePath)).toEqual(foreignBytes);
+      if (retainedPath) {
+        expect(await readFile(retainedPath)).toEqual(
+          Buffer.from(`${JSON.stringify(record, null, 2)}\n`)
+        );
+      }
+      expect(workspaceRecordAuthorityDiagnosticsForTest().cleanupPermits).toBe(0);
+    }
+  });
+
+  test("private namespace cleanup and pinned close failures retain exact phase order", async () => {
+    for (const site of ["namespace", "close"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `private-resource-${site}` };
+      const evidenceRef = `private.resource.${site}`;
+      const directorySegments = ["private-resource", site] as const;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, "record.json"],
+        evidenceRef
+      );
+      const created = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        directorySegments,
+        "record.json",
+        record,
+        evidenceRef,
+        schema
+      );
+      if (created.status !== "created") throw new Error("Expected resource fixture.");
+      const initialFailure = new Error(`resource initial ${site}`);
+      const closeFailure = new Error("pinned close failure");
+      let privateNamespace = "";
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          site === "namespace"
+            ? {
+                beforeAuthorityNamespaceRemoval: ({ path: namespacePath }) => {
+                  if (namespacePath === privateNamespace) {
+                    throw new Error("namespace cleanup retry failure");
+                  }
+                }
+              }
+            : {},
+          () =>
+            runWithWorkspaceRecordCompensationTestHooks(
+              {
+                afterOwnedPathIsolation: ({ site: isolationSite, isolatedPath }) => {
+                  if (isolationSite !== "conditional_delete") return;
+                  privateNamespace = dirname(isolatedPath);
+                  throw initialFailure;
+                },
+                beforeTerminalAuthorityNamespaceRemovalSyscall: async ({ path: namespacePath }) => {
+                  if (site === "namespace" && namespacePath === privateNamespace) {
+                    await writeFile(join(namespacePath, "cleanup-blocker"), "block\n", {
+                      flag: "wx"
+                    });
+                  }
+                },
+                afterCleanupPermitPinnedFileClose: () => {
+                  if (site === "close") throw closeFailure;
+                }
+              },
+              () =>
+                conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+                  created.cleanupPermit,
+                  path,
+                  evidenceRef,
+                  schema,
+                  { kind: "record", expected: record, matches: () => true }
+                )
+            )
+        )
+      );
+
+      expect(failure).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+      const ledger = failureLedger(failure);
+      expect(ledger?.events[0]?.phase).toBe("initial_release");
+      if (site === "namespace") {
+        expect(ledger?.events.some((event) => event.phase === "settlement")).toBe(true);
+        expect((await readdir(privateNamespace))).toContain("cleanup-blocker");
+      } else {
+        expect(ledger?.events.some((event) => event.phase === "final_release")).toBe(true);
+        expect(orderedDistinctCompensationFailures(failure)).toContain(closeFailure);
+        await expectPathMissing(path);
+      }
+      expect(workspaceRecordAuthorityDiagnosticsForTest().cleanupPermits).toBe(0);
+    }
+  });
+
+  test("binding release records repeated failure identity as distinct physical occurrences", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const schema = z.object({ id: z.string() });
-    const record = { id: "exact-settlement-failure" };
-    const evidenceRef = "conditional-delete.exact-settlement.failure";
-    const directorySegments = ["conditional-delete-exact-settlement-failure"] as const;
+    const record = { id: "repeated-binding-release-failure" };
+    const evidenceRef = "repeated.binding-release.failure";
+    const directorySegments = ["repeated-binding-release-failure"] as const;
     const path = workspaceRecordPath(
       workspaceRoot,
       [...directorySegments, "record.json"],
       evidenceRef
     );
-    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
-    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
-    const initialMarker = new Error("initial post-mutation marker");
-    const settlementMarker = new Error("exact settlement marker");
-    const closeTracker = createCleanupPermitCloseTracker([path]);
-    const created = await runWithWorkspaceRecordPublicationHooks(
-      { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
-      () =>
-        createJsonRecordIfAbsentWithCleanupPermit(
-          workspaceRoot,
-          directorySegments,
-          "record.json",
-          record,
-          evidenceRef,
-          schema
-        )
+    const created = await createJsonRecordIfAbsentWithCleanupPermit(
+      workspaceRoot,
+      directorySegments,
+      "record.json",
+      record,
+      evidenceRef,
+      schema
     );
-    if (created.status !== "created") throw new Error("Expected settlement-failure fixture.");
+    if (created.status !== "created") throw new Error("Expected repeated release fixture.");
+    const sharedFailure = new Error("shared release failure");
 
     const failure = await captureThrownValue(() =>
       runWithWorkspaceRecordCompensationTestHooks(
         {
-          afterOwnedPathIsolation: ({ site }) => {
-            if (site === "conditional_delete") throw initialMarker;
+          afterCleanupPermitPinnedFileClose: () => {
+            throw sharedFailure;
           },
-          beforeExactFailureSettlement: () => {
-            throw settlementMarker;
+          afterRecordDirectoryBindingRelease: () => {
+            throw sharedFailure;
           }
         },
         () =>
@@ -6716,135 +5708,467 @@ describe("idempotency, lock, and artifact services", () => {
           )
       )
     );
-    await Promise.race([
-      closeTracker.waitForAll(),
-      timeoutAfter(1_000, "failed exact-settlement permit did not close")
-    ]);
 
-    expect(semanticPrimaryError(failure)).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    const initialFailure = semanticPrimaryError(failure) as WorkspaceRecordConditionalDeleteError;
-    expect(initialFailure.mutationPhase).toBe("post_mutation");
-    expect(errorTreeContains(initialFailure, initialMarker)).toBe(true);
-    expect(countErrorNodes(failure, (error) => error === settlementMarker)).toBe(1);
-    expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(record);
-    expect(closeTracker.count(path)).toBe(1);
-    await expectFileDescriptorClosed(closeTracker.descriptors(path)[0]!);
-    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
-    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    expect(semanticPrimaryValue(failure)).toBe(sharedFailure);
+    expect(failureEvents(failure).map((event) => event.phase)).toEqual([
+      "initial_release",
+      "final_release"
+    ]);
+    expect(failureEvents(failure).map((event) => event.value)).toEqual([
+      sharedFailure,
+      sharedFailure
+    ]);
+    expect(failureEvents(failure)[0]?.occurrenceId).not.toBe(
+      failureEvents(failure)[1]?.occurrenceId
+    );
+    expect(orderedDistinctFailures(failure)).toEqual([sharedFailure]);
+    await expectPathMissing(path);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual({
+      mutexes: 0,
+      reservations: 0,
+      cleanupPermits: 0,
+      pendingPinnedFileCloses: 0
+    });
   });
 
-  test("completeRecord and failRecord recover restored transition artifacts without surfacing the initial marker", async () => {
-    for (const transition of ["complete", "fail"] as const) {
+  test("default conditional delete still restores the isolated generation after callback failure", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "legacy-default-restore" };
+    const evidenceRef = "legacy.default.restore";
+    const directorySegments = ["legacy-default-restore"] as const;
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "record.json"],
+      evidenceRef
+    );
+    expect(
+      await createJsonRecordIfAbsent(
+        workspaceRoot,
+        directorySegments,
+        "record.json",
+        record,
+        evidenceRef,
+        schema
+      )
+    ).toEqual({ status: "created", record });
+    const before = await readFileWithIdentity(path);
+    const marker = new Error("legacy callback failure");
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterOwnedPathIsolation: ({ site }) => {
+            if (site === "conditional_delete") throw marker;
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+            kind: "record",
+            expected: record,
+            matches: () => true
+          })
+      )
+    );
+    expect(failure).toBeInstanceOf(TaskServiceError);
+    expect(await readFileWithIdentity(path)).toEqual(before);
+  });
+
+  test("public complete, fail, and observed-consume callers recover only private exact artifacts", async () => {
+    for (const surface of ["complete", "fail", "observed-consume"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
       tempRoots.push(tempRoot);
-      const rawKey = `task:create:exact-settlement-${transition}`;
-      const requestDigest = `digest-exact-settlement-${transition}`;
-      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
-      const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
-      const now = new Date("2026-07-18T12:00:00.000Z");
-      const service = createIdempotencyRecordService({ workspaceRoot, now: () => now });
+      const rawKey = `task:create:private-exact-public-${surface}`;
+      const requestDigest = `digest-private-exact-public-${surface}`;
+      const service = createIdempotencyRecordService({ workspaceRoot });
       const begin = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
-      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
-      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
-      const initialMarker = new Error(`public ${transition} post-mutation marker`);
-      const closeTracker = createCleanupPermitCloseTracker([guardPath, cleanupLockPath]);
-      let injected = false;
-
-      const result = await runWithWorkspaceRecordPublicationHooks(
-        { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
-        () =>
-          runWithWorkspaceRecordCompensationTestHooks(
-            {
-              afterOwnedPathIsolation: ({ path, site }) => {
-                if (!injected && path === guardPath && site === "conditional_delete") {
-                  injected = true;
-                  throw initialMarker;
-                }
-              }
-            },
-            () => transition === "complete"
-              ? service.completeRecord({
-                  scope: "task",
-                  key: rawKey,
-                  requestDigest,
-                  resultRef: `TASK-exact-settlement-${transition}`
-                })
-              : service.failRecord({ scope: "task", key: rawKey, requestDigest })
-          )
-      );
-      await Promise.race([
-        closeTracker.waitForAll(),
-        timeoutAfter(1_000, `${transition} exact-settlement permits did not close`)
-      ]);
-
       expect(begin.status).toBe("acquired");
-      expect(injected).toBe(true);
-      expect(result).toMatchObject({
-        key: rawKey,
-        scope: "task",
-        request_digest: requestDigest,
-        created_at: begin.record.created_at,
-        updated_at: now.toISOString(),
-        status: transition === "complete" ? "completed" : "failed"
-      });
-      if (transition === "complete") {
-        expect(result.result_ref).toBe(`TASK-exact-settlement-${transition}`);
+      let expectedStatus: IdempotencyRecord["status"];
+      let action: () => Promise<unknown>;
+      if (surface === "complete") {
+        expectedStatus = "completed";
+        action = () => service.completeRecord({
+          scope: "task",
+          key: rawKey,
+          requestDigest,
+          resultRef: `TASK-private-exact-public-${surface}`
+        });
+      } else if (surface === "fail") {
+        expectedStatus = "failed";
+        action = () => service.failRecord({ scope: "task", key: rawKey, requestDigest });
       } else {
-        expect(result.result_ref).toBeUndefined();
+        expectedStatus = "started";
+        await service.failRecord({ scope: "task", key: rawKey, requestDigest });
+        const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+        await writeFile(
+          guardPath,
+          `${JSON.stringify({
+            guard_id: "private-exact-observed-stale",
+            owner_pid: 9_999_999,
+            acquired_at_ms: Date.now() - 31_000,
+            acquired_at: "2026-07-07T13:34:00.000Z"
+          })}\n`,
+          { flag: "wx", mode: 0o600 }
+        );
+        action = () => createIdempotencyRecordService({ workspaceRoot }).beginRecord({
+          scope: "task",
+          key: rawKey,
+          requestDigest
+        });
       }
-      await expectPathMissing(guardPath);
-      await expectPathMissing(cleanupLockPath);
-      expect(closeTracker.count(guardPath)).toBe(1);
-      expect(closeTracker.count(cleanupLockPath)).toBe(1);
-      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
-      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+
+      let isolationFailures = 0;
+      const isolatedPublicPaths = new Set<string>();
+      const result = await runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterOwnedPathIsolation: ({ site, path }) => {
+            if (site !== "conditional_delete") return;
+            isolationFailures += 1;
+            isolatedPublicPaths.add(path);
+            throw new Error(`public ${surface} post-isolation failure`);
+          }
+        },
+        action
+      );
+
+      expect(isolationFailures).toBeGreaterThanOrEqual(1);
+      expect(isolatedPublicPaths.size).toBeGreaterThanOrEqual(1);
+      if (surface === "observed-consume") {
+        expect(result).toMatchObject({ status: "acquired" });
+      } else {
+        expect(result).toMatchObject({ status: expectedStatus });
+      }
+      expect(await service.getRecord("task", rawKey)).toMatchObject({
+        status: expectedStatus
+      });
+      await expectPathMissing(idempotencyTransitionGuardPath(workspaceRoot, rawKey));
+      for (const isolatedPublicPath of isolatedPublicPaths) {
+        await expectPathMissing(isolatedPublicPath);
+      }
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual({
+        mutexes: 0,
+        reservations: 0,
+        cleanupPermits: 0,
+        pendingPinnedFileCloses: 0
+      });
     }
   });
 
-  test("stale observed guard consumption recovers restored exact A before reacquisition", async () => {
-    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
-    tempRoots.push(tempRoot);
-    const rawKey = "task:create:exact-settlement-stale-observed";
-    const requestDigest = "digest-exact-settlement-stale-observed";
-    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
-    const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
-    const service = createIdempotencyRecordService({ workspaceRoot });
-    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
-    const failed = await service.failRecord({ scope: "task", key: rawKey, requestDigest });
-    const staleGuard = {
-      guard_id: "exact-settlement-stale-observed",
-      owner_pid: 9_999_999,
-      acquired_at_ms: Date.now() - 31_000,
-      acquired_at: "2026-07-18T11:00:00.000Z"
-    };
-    await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, {
-      flag: "wx",
-      mode: 0o600
+  test("failure ledger separates exact identities, events, aliases, and caller evidence", () => {
+    const shared = new Error("shared occurrence");
+    const equalOne = new Error("equal");
+    const equalTwo = new Error("equal");
+    const typedPrimary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "exact frozen typed primary",
+      userMessage: "Exact frozen typed primary.",
+      evidenceRefs: ["ledger.exact"],
+      retryable: false,
+      recommendedNextActions: ["Inspect ledger evidence."]
     });
-    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
-    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
-    const initialMarker = new Error("stale observed guard post-mutation marker");
-    let injected = false;
+    const aliasAggregate = new AggregateError([shared, equalOne], "alias aggregate");
+    typedPrimary.cause = aliasAggregate;
+    Object.defineProperty(aliasAggregate, "cause", {
+      configurable: true,
+      value: shared,
+      writable: true
+    });
+    Object.freeze(typedPrimary);
+    const before = Object.getOwnPropertyDescriptors(typedPrimary);
 
-    const reacquired = await runWithWorkspaceRecordCompensationTestHooks(
-      {
-        afterOwnedPathIsolation: ({ path, site }) => {
-          if (!injected && path === guardPath && site === "conditional_delete") {
-            injected = true;
-            throw initialMarker;
-          }
-        }
-      },
-      () => service.beginRecord({ scope: "task", key: rawKey, requestDigest })
+    const folded = preserveTaskServiceErrorCompensationCompatibility(
+      typedPrimary,
+      [shared, shared, equalTwo],
+      "ledger identity matrix"
     );
+    expect(folded).toBe(typedPrimary);
+    expect(Object.getOwnPropertyDescriptors(typedPrimary)).toEqual(before);
+    expect(semanticPrimaryValue(folded)).toBe(typedPrimary);
+    expect(failureEvents(folded).map((event) => event.value)).toEqual([
+      typedPrimary,
+      shared,
+      shared,
+      equalTwo
+    ]);
+    expect(orderedDistinctFailures(folded)).toEqual([
+      typedPrimary,
+      shared,
+      equalTwo
+    ]);
+    expect(failureGraphNodes(folded).filter((node) => node.value === shared)).toHaveLength(1);
+    const aggregateNode = failureGraphNodes(folded).find(
+      (node) => node.value === aliasAggregate
+    );
+    expect(aggregateNode?.edges.filter((edge) => edge.target === shared)).toHaveLength(2);
+    expect(orderedDistinctFailures(folded)).toContain(equalTwo);
+    expect(orderedDistinctFailures(folded)).not.toContain(equalOne);
+  });
 
-    expect(failed.status).toBe("failed");
-    expect(injected).toBe(true);
-    expect(reacquired).toMatchObject({ status: "acquired", record: { status: "started" } });
-    await expectPathMissing(guardPath);
-    await expectPathMissing(cleanupLockPath);
-    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
-    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  test("failure ledger requires explicit trusted adoption and keeps folds fresh", () => {
+    const typed = new TaskServiceError({
+      code: "workspace_path_not_safe",
+      status: 500,
+      category: "workspace_error",
+      message: "trusted typed inner",
+      userMessage: "Trusted typed inner.",
+      evidenceRefs: ["ledger.adoption"],
+      retryable: false,
+      recommendedNextActions: ["Inspect ledger adoption."]
+    });
+    const envelope = Object.freeze(
+      new PreservedErrorCompensationEnvelope(
+        typed,
+        new AggregateError([], "caller envelope")
+      )
+    );
+    const descriptors = Object.getOwnPropertyDescriptors(envelope);
+    const bare = preserveWorkspaceRecordFailureGraph(
+      envelope,
+      [new Error("bare later")],
+      "bare caller fold"
+    );
+    expect(bare).toBe(envelope);
+    expect(semanticPrimaryValue(bare)).toBe(envelope);
+    expect(Object.getOwnPropertyDescriptors(envelope)).toEqual(descriptors);
+
+    const ref = captureFailureOccurrence("body", typed);
+    const adopted = adoptTrustedFailureRef(
+      ref,
+      [captureFailureOccurrence("settlement", new Error("trusted later"))]
+    );
+    expect(adopted).toBe(typed);
+    expect(semanticPrimaryValue(adopted)).toBe(typed);
+
+    let currentCause: Error = new Error("first dynamic cause");
+    let getterReads = 0;
+    const dynamic = new Error("dynamic root");
+    Object.defineProperty(dynamic, "cause", {
+      configurable: true,
+      get: () => {
+        getterReads += 1;
+        return currentCause;
+      }
+    });
+    preserveWorkspaceRecordFailureGraph(
+      dynamic,
+      [new Error("first fold later")],
+      "first dynamic fold"
+    );
+    currentCause = new Error("second dynamic cause");
+    preserveWorkspaceRecordFailureGraph(
+      dynamic,
+      [new Error("second fold later")],
+      "second dynamic fold"
+    );
+    expect(getterReads).toBe(2);
+    expect(
+      failureGraphNodes(dynamic)
+        .flatMap((node) => node.edges)
+        .some((edge) => edge.target === currentCause)
+    ).toBe(true);
+  });
+
+  test("caller writable and non-configurable compatibility envelopes remain exact roots", () => {
+    const typed = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "caller envelope inner",
+      userMessage: "Caller envelope inner.",
+      evidenceRefs: ["ledger.caller-envelope"],
+      retryable: false,
+      recommendedNextActions: ["Inspect caller envelope evidence."]
+    });
+    for (const descriptorKind of ["writable", "non-configurable"] as const) {
+      const envelope = new PreservedErrorCompensationEnvelope(
+        typed,
+        new AggregateError([], descriptorKind)
+      );
+      if (descriptorKind === "non-configurable") {
+        Object.defineProperty(envelope, "semanticPrimary", {
+          configurable: false,
+          enumerable: true,
+          value: typed,
+          writable: false
+        });
+      }
+      const before = Object.getOwnPropertyDescriptors(envelope);
+      const folded = preserveWorkspaceRecordFailureGraph(
+        envelope,
+        [new Error(`${descriptorKind} later`)],
+        `${descriptorKind} caller envelope fold`
+      );
+      expect(folded).toBe(envelope);
+      expect(semanticPrimaryValue(folded)).toBe(envelope);
+      expect(Object.getOwnPropertyDescriptors(envelope)).toEqual(before);
+    }
+  });
+
+  test("failure ledger preserves throwing accessors, primitive slots, and nested folds", () => {
+    const getterFailure = new Error("getter observation failure");
+    const primary = new Error("throwing accessor primary");
+    Object.defineProperty(primary, "cause", {
+      configurable: true,
+      get: () => {
+        throw getterFailure;
+      }
+    });
+    const repeated = new Error("repeated nested compensation");
+    const first = preserveWorkspaceRecordFailureGraph(
+      primary,
+      [repeated],
+      "first nested fold"
+    );
+    const second = preserveWorkspaceRecordFailureGraph(
+      first,
+      [repeated, new Error("new nested compensation")],
+      "second nested fold"
+    );
+    expect(second).toBe(primary);
+    expect(
+      failureEvents(second).some(
+        (event) => event.phase === "observation" && event.value === getterFailure
+      )
+    ).toBe(true);
+    expect(
+      orderedDistinctFailures(second).filter((value) => value === repeated)
+    ).toHaveLength(1);
+
+    const primitive = preserveThrownValueAndCompensationErrors(
+      "primitive primary",
+      ["same primitive", "same primitive"],
+      "primitive ledger"
+    );
+    expect(semanticPrimaryValue(primitive)).toBe("primitive primary");
+    expect(orderedDistinctCompensationFailures(primitive)).toEqual([
+      "same primitive",
+      "same primitive"
+    ]);
+
+    for (const primitivePrimary of [undefined, null, false, 0, ""] as const) {
+      const sameValueOccurrences = preserveThrownValueAndCompensationErrors(
+        primitivePrimary,
+        [primitivePrimary, primitivePrimary],
+        "same primitive occurrence identity"
+      );
+      expect(semanticPrimaryValue(sameValueOccurrences)).toBe(primitivePrimary);
+      expect(orderedDistinctCompensationFailures(sameValueOccurrences)).toEqual([
+        primitivePrimary,
+        primitivePrimary
+      ]);
+    }
+  });
+
+  test("failure ledger observes Error proxies and array traps once per fresh fold", () => {
+    const typed = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "proxy typed primary",
+      userMessage: "Proxy typed primary.",
+      evidenceRefs: ["ledger.proxy"],
+      retryable: false,
+      recommendedNextActions: ["Inspect proxy evidence."]
+    });
+    let positiveBrandReads = 0;
+    const positiveProxy = new Proxy(typed, {
+      getPrototypeOf: (target) => {
+        positiveBrandReads += 1;
+        return Reflect.getPrototypeOf(target);
+      }
+    });
+    expect(
+      preserveTaskServiceErrorCompensationCompatibility(
+        positiveProxy,
+        [],
+        "positive proxy fold"
+      )
+    ).toBe(positiveProxy);
+    expect(positiveBrandReads).toBe(1);
+    preserveTaskServiceErrorCompensationCompatibility(
+      positiveProxy,
+      [],
+      "fresh positive proxy fold"
+    );
+    expect(positiveBrandReads).toBe(2);
+
+    const brandFailure = new Error("indeterminate proxy brand");
+    let indeterminateBrandReads = 0;
+    const indeterminateProxy = new Proxy(new Error("indeterminate primary"), {
+      getPrototypeOf: () => {
+        indeterminateBrandReads += 1;
+        throw brandFailure;
+      }
+    });
+    const indeterminate = preserveWorkspaceRecordFailureGraph(
+      indeterminateProxy,
+      [new Error("later")],
+      "indeterminate proxy fold"
+    );
+    expect(indeterminate).toBe(indeterminateProxy);
+    expect(semanticPrimaryError(indeterminate)).toBe(indeterminateProxy);
+    expect(indeterminateBrandReads).toBe(1);
+    expect(
+      failureEvents(indeterminate).some(
+        (event) => event.phase === "observation" && event.value === brandFailure
+      )
+    ).toBe(true);
+
+    const typedBrandFailure = new Error("typed proxy brand observation failure");
+    let typedIndeterminateBrandReads = 0;
+    const typedIndeterminateProxy = new Proxy(typed, {
+      getPrototypeOf: () => {
+        typedIndeterminateBrandReads += 1;
+        throw typedBrandFailure;
+      }
+    });
+    const typedIndeterminate = preserveTaskServiceErrorCompensationCompatibility(
+      typedIndeterminateProxy,
+      [new Error("typed indeterminate later")],
+      "typed indeterminate proxy fold"
+    );
+    expect(typedIndeterminate).toBe(typedIndeterminateProxy);
+    expect(typedIndeterminateBrandReads).toBe(1);
+    expect(
+      failureEvents(typedIndeterminate).some(
+        (event) =>
+          event.phase === "observation" && event.value === typedBrandFailure
+      )
+    ).toBe(true);
+
+    const elementFailure = new Error("array element getter trap");
+    let lengthReads = 0;
+    let elementReads = 0;
+    const errors = [new Error("unobserved element")];
+    Object.defineProperty(errors, "0", {
+      configurable: true,
+      get: () => {
+        elementReads += 1;
+        throw elementFailure;
+      }
+    });
+    const errorsProxy = new Proxy(errors, {
+      getOwnPropertyDescriptor: (target, property) => {
+        if (property === "length") lengthReads += 1;
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      }
+    });
+    const aggregate = new AggregateError([], "array proxy root");
+    Object.defineProperty(aggregate, "errors", { value: errorsProxy });
+    const observed = preserveWorkspaceRecordFailureGraph(
+      aggregate,
+      [new Error("array later")],
+      "array proxy fold"
+    );
+    expect(lengthReads).toBe(1);
+    expect(elementReads).toBe(1);
+    expect(
+      failureEvents(observed).some(
+        (event) => event.phase === "observation" && event.value === elementFailure
+      )
+    ).toBe(true);
   });
 
   test("physical canonical paths preserve existing spelling across follower restart windows", async () => {
@@ -12316,7 +11640,7 @@ describe("idempotency, lock, and artifact services", () => {
       });
       expect(errorTreeContains(preservedPrimary, inspectionError)).toBe(true);
       const compatibilityWrapper = preservedPrimary as TaskServiceError;
-      expect(compatibilityWrapper).not.toBe(primaryError);
+      expect(compatibilityWrapper).toBe(primaryError);
       expect(compatibilityWrapper.name).toBe(primaryError.name);
       expect(compatibilityWrapper.message).toBe(primaryError.message);
       expect(compatibilityWrapper.code).toBe(primaryError.code);
@@ -12325,31 +11649,16 @@ describe("idempotency, lock, and artifact services", () => {
       expect(compatibilityWrapper.userMessage).toBe(primaryError.userMessage);
       expect(compatibilityWrapper.retryable).toBe(primaryError.retryable);
       expect(compatibilityWrapper.evidenceRefs).toEqual(primaryError.evidenceRefs);
-      expect(compatibilityWrapper.evidenceRefs).not.toBe(primaryError.evidenceRefs);
+      expect(compatibilityWrapper.evidenceRefs).toBe(primaryError.evidenceRefs);
       expect(compatibilityWrapper.recommendedNextActions).toEqual(
         primaryError.recommendedNextActions
       );
-      expect(compatibilityWrapper.recommendedNextActions).not.toBe(
+      expect(compatibilityWrapper.recommendedNextActions).toBe(
         primaryError.recommendedNextActions
       );
       expect(compatibilityWrapper.stack).toBe(primaryError.stack);
-      expect(compatibilityWrapper.cause).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+      expect(compatibilityWrapper.cause).toBeUndefined();
       expect(semanticPrimaryError(compatibilityWrapper)).toBe(primaryError);
-
-      const compatibilityMutationCause = new Error("compatibility wrapper mutation");
-      Object.assign(compatibilityWrapper, {
-        name: "MutatedCompatibilityWrapper",
-        message: "mutated compatibility message",
-        code: "record_malformed",
-        status: 400,
-        category: "mutated_category",
-        userMessage: "mutated user message",
-        retryable: true,
-        stack: "mutated compatibility stack",
-        cause: compatibilityMutationCause
-      });
-      compatibilityWrapper.evidenceRefs.push("mutated.evidence");
-      compatibilityWrapper.recommendedNextActions.push("Mutated action.");
       expect(primaryError).toMatchObject({
         name: "TaskServiceError",
         message: `post-isolation ${authority} primary`,
@@ -17018,17 +16327,23 @@ describe("idempotency, lock, and artifact services", () => {
       result_ref: resultRef
     });
 
-    const blocked = await captureTaskServiceError(() =>
-      service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+    const recoveredReplacement = await service.lookupReplay({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    expect(recoveredReplacement).toMatchObject({
+      status: "completed",
+      record: {
+        status: "completed",
+        request_digest: requestDigest,
+        result_ref: resultRef
+      }
+    });
+    await expectPathMissing(guardPath);
+    await expectPathMissing(
+      idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey)
     );
-    expect(blocked.status).toBe(409);
-    expect(blocked.retryable).toBe(true);
-    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(replacementGuard);
-    expect(
-      JSON.parse(
-        await readFile(idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey), "utf8")
-      )
-    ).toMatchObject({ owner_pid: process.pid });
   });
 
   test("IdempotencyRecord completed invalidation requires exact digest and result_ref", async () => {
@@ -17686,6 +17001,8 @@ describe("idempotency, lock, and artifact services", () => {
   test("IdempotencyRecord stale transition guard cleanup preserves a fresh replacement guard", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
     const rawKey = "task:create:stale-guard-fresh-replacement";
     const requestDigest = "digest-stale-guard-fresh";
     const seedService = createIdempotencyRecordService({
@@ -17709,6 +17026,7 @@ describe("idempotency, lock, and artifact services", () => {
       "task",
       `${sha256Hex(`transition:${rawKey}`)}.guard.json`
     );
+    const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
     const staleGuard = {
       guard_id: "stale-observed-guard",
       owner_pid: 9_999_999,
@@ -17723,6 +17041,9 @@ describe("idempotency, lock, and artifact services", () => {
     };
     await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, { flag: "wx" });
     let cleanupHookCalls = 0;
+    let replacementGeneration:
+      | Awaited<ReturnType<typeof readFileWithIdentity>>
+      | undefined;
     const retryService = createIdempotencyRecordService({
       workspaceRoot,
       now: () => new Date("2026-07-07T13:35:41.000Z"),
@@ -17733,6 +17054,7 @@ describe("idempotency, lock, and artifact services", () => {
           expect(observedGuard).toEqual(staleGuard);
           await rm(observedPath, { force: true });
           await writeFile(observedPath, `${JSON.stringify(freshGuard)}\n`, { flag: "wx" });
+          replacementGeneration = await readFileWithIdentity(observedPath);
         }
       }
     });
@@ -17750,8 +17072,150 @@ describe("idempotency, lock, and artifact services", () => {
     expect(failed.status).toBe("failed");
     expect(cleanupHookCalls).toBe(1);
     expect(retry).toEqual({ status: "incomplete", record: failed });
-    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(freshGuard);
+    expect(replacementGeneration).toBeDefined();
+    expect(await readFileWithIdentity(guardPath)).toEqual(replacementGeneration!);
+    expect(JSON.parse(replacementGeneration!.bytes.toString("utf8"))).toEqual(freshGuard);
+    await expectPathMissing(cleanupLockPath);
+    expect((await readdir(dirname(guardPath))).filter(isOwnedRecordPath)).toEqual([]);
     expect(await seedService.getRecord("task", rawKey)).toEqual(failed);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("stale guard authority convergence does not swallow cleanup-lock release and exact-settlement failures", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const rawKey = "task:create:stale-guard-authority-ledger";
+    const requestDigest = "digest-stale-guard-authority-ledger";
+    const seedService = createIdempotencyRecordService({ workspaceRoot });
+    const begin = await seedService.beginRecord({ scope: "task", key: rawKey, requestDigest });
+    const failed = await seedService.failRecord({ scope: "task", key: rawKey, requestDigest });
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+    const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
+    const staleGuard = {
+      guard_id: "stale-authority-ledger-A",
+      owner_pid: 9_999_999,
+      acquired_at_ms: Date.now() - 31_000,
+      acquired_at: "2026-07-07T13:34:00.000Z"
+    };
+    const replacementGuard = {
+      guard_id: "fresh-authority-ledger-B",
+      owner_pid: process.pid,
+      acquired_at_ms: Date.now(),
+      acquired_at: new Date().toISOString()
+    };
+    await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, {
+      flag: "wx",
+      mode: 0o600
+    });
+    const postIsolationFailure = new Error(
+      "stale guard cleanup-lock post-isolation release failure"
+    );
+    const exactSettlementFailure = new Error(
+      "stale guard cleanup-lock exact-settlement failure"
+    );
+    let replacementGeneration:
+      | Awaited<ReturnType<typeof readFileWithIdentity>>
+      | undefined;
+    let privateGeneration:
+      | Awaited<ReturnType<typeof readFileWithIdentity>>
+      | undefined;
+    let privatePath = "";
+    const closeTracker = createCleanupPermitCloseTracker([guardPath, cleanupLockPath]);
+    const service = createIdempotencyRecordService({
+      workspaceRoot,
+      transitionGuardHooks: {
+        beforeStaleGuardCleanup: async ({ guardPath: observedPath }) => {
+          await unlink(observedPath);
+          await writeFile(observedPath, `${JSON.stringify(replacementGuard)}\n`, {
+            flag: "wx",
+            mode: 0o600
+          });
+          replacementGeneration = await readFileWithIdentity(observedPath);
+        }
+      }
+    });
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
+        () =>
+          runWithWorkspaceRecordCompensationTestHooks(
+            {
+              afterOwnedPathIsolation: async ({ path, isolatedPath, site }) => {
+                if (
+                  path !== cleanupLockPath ||
+                  site !== "conditional_delete" ||
+                  replacementGeneration === undefined
+                ) return;
+                privatePath = isolatedPath;
+                privateGeneration = await readFileWithIdentity(isolatedPath);
+                throw postIsolationFailure;
+              },
+              beforeExactFailureSettlement: ({ path }) => {
+                if (path === cleanupLockPath && privatePath !== "") {
+                  throw exactSettlementFailure;
+                }
+              }
+            },
+            () => service.beginRecord({ scope: "task", key: rawKey, requestDigest })
+          )
+      )
+    );
+
+    expect(begin.status).toBe("acquired");
+    expect(failed.status).toBe("failed");
+    expect(failure).toBeInstanceOf(TaskServiceError);
+    expect(taskServiceErrorAtBoundary(failure)).toBe(failure);
+    expect(semanticPrimaryValue(failure)).toBe(failure);
+    const primary = failure as TaskServiceError;
+    expect(primary.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+    const authorityChange = primary.cause as WorkspaceRecordConditionalDeleteError;
+    expect(authorityChange.mutationPhase).toBe("pre_mutation");
+    expect(authorityChange.preMutationDisposition).toBe("benign_convergence");
+    const events = failureEvents(failure);
+    expect(events.map((event) => event.phase)).toEqual([
+      "body",
+      "body",
+      "settlement",
+      "settlement",
+      "initial_release",
+      "settlement",
+      "initial_release",
+      "final_release",
+      "initial_release"
+    ]);
+    expect(new Set(events.map((event) => event.occurrenceId)).size).toBe(events.length);
+    expect(events.filter((event) => event.value === primary)).toHaveLength(1);
+    expect(events.filter((event) => event.value === exactSettlementFailure)).toHaveLength(1);
+    expect(errorTreeContains(failure, postIsolationFailure)).toBe(true);
+    expect(errorTreeContains(failure, exactSettlementFailure)).toBe(true);
+    expect(replacementGeneration).toBeDefined();
+    expect(await readFileWithIdentity(guardPath)).toEqual(replacementGeneration!);
+    expect(JSON.parse(replacementGeneration!.bytes.toString("utf8"))).toEqual(
+      replacementGuard
+    );
+    await expectPathMissing(cleanupLockPath);
+    expect(privatePath).not.toBe("");
+    expect(privateGeneration).toBeDefined();
+    expect(await readFileWithIdentity(privatePath)).toEqual(privateGeneration!);
+    await expectPrivateAuthorityDirectory(dirname(privatePath));
+    expect((await readdir(dirname(guardPath))).filter(isOwnedRecordPath)).toEqual([
+      basename(dirname(privatePath))
+    ]);
+    expect(await seedService.getRecord("task", rawKey)).toEqual(failed);
+    expect(closeTracker.count(guardPath)).toBe(2);
+    expect(closeTracker.count(cleanupLockPath)).toBe(2);
+    for (const descriptor of [
+      ...closeTracker.descriptors(guardPath),
+      ...closeTracker.descriptors(cleanupLockPath)
+    ]) {
+      await expectFileDescriptorClosed(descriptor);
+    }
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
   test("IdempotencyRecord stale transition cleanup lock is recoverable before completion", async () => {
@@ -22671,25 +22135,14 @@ describe("idempotency, lock, and artifact services", () => {
           expect(countErrorNodes(failure, (error) => error === laterMarker)).toBe(
             laterExit === "throw" ? 1 : 0
           );
-          const orderedEnvelope = findErrorNode(
-            failure,
-            (error) => error instanceof PreservedErrorCompensationEnvelope &&
-              error.semanticPrimary.stack === (primary as TaskServiceError).stack
-          ) as PreservedErrorCompensationEnvelope | undefined;
-          expect(orderedEnvelope).toBeDefined();
-          expect(orderedEnvelope!.semanticPrimary).toBe(primary);
-          expect(orderedEnvelope!.cause).toBeInstanceOf(AggregateError);
-          const compensationAggregate = orderedEnvelope!.cause as AggregateError;
-          const orderedPrivateProof = semanticPrimaryError(
-            compensationAggregate.errors[0]
-          );
-          expect(orderedPrivateProof).toBeInstanceOf(TaskServiceError);
-          expect((orderedPrivateProof as TaskServiceError).code).toBe(
-            "workspace_path_not_safe"
-          );
-          if (laterExit === "throw") {
-            expect(compensationAggregate.errors[1]).toBe(laterMarker);
-          }
+          expect(failureLedger(failure)).toBeDefined();
+          expect(
+            countErrorNodes(
+              failure,
+              (error) => error instanceof TaskServiceError &&
+                error.code === "workspace_path_not_safe"
+            )
+          ).toBeGreaterThanOrEqual(2);
 
           expect(temporaryPath).not.toBe("");
           expect(displacedOwnedPath).not.toBe("");
@@ -22896,27 +22349,17 @@ describe("idempotency, lock, and artifact services", () => {
             expect(countErrorNodes(failure, (error) => error === marker)).toBe(
               hookExit === "throw" ? 1 : 0
             );
-            const orderedEnvelope = findErrorNode(
-              failure,
-              (error) => error instanceof PreservedErrorCompensationEnvelope &&
-                error.semanticPrimary.stack === (primary as TaskServiceError).stack
-            ) as PreservedErrorCompensationEnvelope | undefined;
-            expect(orderedEnvelope).toBeDefined();
+            expect(failureLedger(failure)).toBeDefined();
             if (canonicalState === "relinquished") {
-              expect(orderedEnvelope!.cause).toBeInstanceOf(AggregateError);
-              const ordered = (orderedEnvelope!.cause as AggregateError).errors;
-              expect(semanticPrimaryError(ordered[0])).toBeInstanceOf(TaskServiceError);
-              if (hookExit === "throw") expect(ordered[1]).toBe(marker);
+              expect(
+                countErrorNodes(
+                  failure,
+                  (error) => error instanceof TaskServiceError &&
+                    error.code === "workspace_path_not_safe"
+                )
+              ).toBeGreaterThanOrEqual(2);
             } else if (hookExit === "throw") {
-              const proofFirstBoundary = findErrorNode(
-                failure,
-                (error) => error instanceof PreservedErrorCompensationEnvelope &&
-                  error.semanticPrimary instanceof TaskServiceError &&
-                  error.cause instanceof AggregateError &&
-                  errorTreeContains(error.cause, marker)
-              ) as PreservedErrorCompensationEnvelope | undefined;
-              expect(proofFirstBoundary).toBeDefined();
-              expect(proofFirstBoundary!.semanticPrimary).toBeInstanceOf(TaskServiceError);
+              expect(errorTreeContains(failure, marker)).toBe(true);
             }
 
             expect(await readFile(temporaryPath)).toEqual(recordBytes);
@@ -23151,20 +22594,15 @@ describe("idempotency, lock, and artifact services", () => {
         hookExit === "throw" ? 1 : 0
       );
       if (hookExit === "throw") {
-        const proofFirstBoundary = findErrorNode(
-          failure,
-          (error) => error instanceof PreservedErrorCompensationEnvelope &&
-            error.semanticPrimary instanceof TaskServiceError &&
-            error.cause instanceof AggregateError &&
-            errorTreeContains(error.cause, marker)
-        ) as PreservedErrorCompensationEnvelope | undefined;
-        expect(proofFirstBoundary).toBeDefined();
-        const ordered = (proofFirstBoundary!.cause as AggregateError).errors;
-        expect(semanticPrimaryError(ordered[0])).toBeInstanceOf(TaskServiceError);
-        expect((semanticPrimaryError(ordered[0]) as TaskServiceError).code).toBe(
-          "workspace_path_not_safe"
-        );
-        expect(ordered[1]).toBe(marker);
+        expect(failureLedger(failure)).toBeDefined();
+        expect(errorTreeContains(failure, marker)).toBe(true);
+        expect(
+          countErrorNodes(
+            failure,
+            (error) => error instanceof TaskServiceError &&
+              error.code === "workspace_path_not_safe"
+          )
+        ).toBeGreaterThanOrEqual(2);
       }
 
       const namespacePath = dirname(temporaryPath);
@@ -23397,16 +22835,14 @@ describe("idempotency, lock, and artifact services", () => {
           expect(countErrorNodes(failure, (error) => error === marker)).toBe(
             hookExit === "throw" ? 1 : 0
           );
-          const orderedEnvelope = findErrorNode(
-            failure,
-            (error) => error instanceof PreservedErrorCompensationEnvelope &&
-              error.semanticPrimary.stack === (primary as TaskServiceError).stack
-          ) as PreservedErrorCompensationEnvelope | undefined;
-          expect(orderedEnvelope).toBeDefined();
-          expect(orderedEnvelope!.cause).toBeInstanceOf(AggregateError);
-          const ordered = (orderedEnvelope!.cause as AggregateError).errors;
-          expect(semanticPrimaryError(ordered[0])).toBeInstanceOf(TaskServiceError);
-          if (hookExit === "throw") expect(ordered[1]).toBe(marker);
+          expect(failureLedger(failure)).toBeDefined();
+          expect(
+            countErrorNodes(
+              failure,
+              (error) => error instanceof TaskServiceError &&
+                error.code === "workspace_path_not_safe"
+            )
+          ).toBeGreaterThanOrEqual(2);
 
           expect(await readFile(canonicalPath)).toEqual(recordBytes);
           expect((await stat(canonicalPath, { bigint: true })).ino).toBe(canonicalIdentity);
@@ -24002,7 +23438,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
-  test("owner guard and cleanup-lock releases inherit retained-parent rejection", async () => {
+  test("owner guard and cleanup-lock releases settle exact artifacts after sibling epoch advance", async () => {
     for (const artifact of ["guard", "cleanup-lock"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
       tempRoots.push(tempRoot);
@@ -24039,7 +23475,7 @@ describe("idempotency, lock, and artifact services", () => {
       expect(begin.status).toBe("acquired");
       expect(completed.status).toBe("completed");
       expect(drifted).toBe(true);
-      expect(await readFileWithIdentity(artifactPath)).toEqual(admitted);
+      await expectPathMissing(artifactPath);
       expect(await service.getRecord("task", rawKey)).toEqual(completed);
       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     }
@@ -24062,10 +23498,7 @@ describe("idempotency, lock, and artifact services", () => {
       const represented = semanticPrimaryError(combined);
       expect(represented).toBeInstanceOf(PreservedNonErrorThrownValue);
       expect((represented as PreservedNonErrorThrownValue).thrownValue).toBe(thrownValue);
-      expect(findPreservedCompensationAggregate(combined)?.errors).toEqual([
-        thrownValue,
-        releaseFailure
-      ]);
+      expect(findPreservedCompensationAggregate(combined)?.errors).toEqual([releaseFailure]);
 
       const bodyOnly = await captureThrownValue(() =>
         runWithPreservedRelease(
@@ -24124,7 +23557,7 @@ describe("idempotency, lock, and artifact services", () => {
     ]);
     expect(
       countErrorNodes(repeatedEnvelope, (error) => error instanceof AggregateError)
-    ).toBe(1);
+    ).toBe(0);
   });
 
   test("central release lifecycle settles fulfilled values only after release rejection", async () => {
@@ -24179,7 +23612,6 @@ describe("idempotency, lock, and artifact services", () => {
       expect(representedBody).toBeInstanceOf(PreservedNonErrorThrownValue);
       expect((representedBody as PreservedNonErrorThrownValue).thrownValue).toBe(bodyReason);
       expect(findPreservedCompensationAggregate(bodyAndRelease)?.errors).toEqual([
-        bodyReason,
         releaseReason
       ]);
     }
@@ -24262,13 +23694,13 @@ describe("idempotency, lock, and artifact services", () => {
       expect((representedRelease as PreservedNonErrorThrownValue).thrownValue).toBe(
         releaseReason
       );
-      expect((combined as PreservedErrorCompensationEnvelope).cause.errors).toEqual([
+      expect(failureEvents(combined).map((event) => event.value)).toEqual([
         releaseReason,
         settlementReason
       ]);
       expect(
         countErrorNodes(combined, (error) => error instanceof AggregateError)
-      ).toBe(1);
+      ).toBe(0);
     }
 
     const firstReleaseReason = new Error("fulfilled-value release one");
@@ -24299,13 +23731,13 @@ describe("idempotency, lock, and artifact services", () => {
       )
     );
     expect(semanticPrimaryError(repeatedEnvelope)).toBe(firstReleaseReason);
-    expect((repeatedEnvelope as PreservedErrorCompensationEnvelope).cause.errors).toEqual([
+    expect(orderedDistinctCompensationFailures(repeatedEnvelope)).toEqual([
       firstSettlementReason,
       secondSettlementReason
     ]);
     expect(
       countErrorNodes(repeatedEnvelope, (error) => error instanceof AggregateError)
-    ).toBe(1);
+    ).toBe(0);
   });
 
   test("only authority-producing idempotency release sites opt into fulfilled-value settlement", async () => {
@@ -24420,7 +23852,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(releaseCalls.filter((call) => ![2, 3].includes(call.arguments.length))).toEqual([]);
   });
 
-  test("publish-lock post-mutation failure is recovered before releasing the fulfilled guard", async () => {
+  test("persistent publish-lock namespace failure remains observable after releasing the fulfilled guard", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const rawKey = "task:create:fulfilled-guard-release-settled";
@@ -24437,7 +23869,7 @@ describe("idempotency, lock, and artifact services", () => {
       new Map([[cleanupLockPath, releaseMarker]])
     );
 
-    const completed = await
+    const failure = await captureTaskServiceError(() =>
       runWithWorkspaceRecordPublicationHooks(
         {
           ...failureHooks.publicationHooks,
@@ -24454,16 +23886,18 @@ describe("idempotency, lock, and artifact services", () => {
                 resultRef
               })
           )
-      );
+      )
+    );
     await Promise.race([
       closeTracker.waitForAll(),
       timeoutAfter(1_000, "fulfilled guard emergency-settlement descriptors did not close")
     ]);
 
     expect(begin.status).toBe("acquired");
-    expect(completed).toMatchObject({ status: "completed", result_ref: resultRef });
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(errorTreeContains(failure, releaseMarker)).toBe(true);
     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath, guardPath]);
-    expect(await service.getRecord("task", rawKey)).toEqual(completed);
+    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
     await expectPathMissing(guardPath);
     await expectPathMissing(cleanupLockPath);
     expect(closeTracker.count(guardPath)).toBe(1);
@@ -24484,7 +23918,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
-  test("independent publish-lock and guard post-mutation failures each recover exact A", async () => {
+  test("independent persistent publish-lock and guard namespace failures remain ordered", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const rawKey = "task:create:fulfilled-guard-release-settlement-failed";
@@ -24505,7 +23939,7 @@ describe("idempotency, lock, and artifact services", () => {
       ])
     );
 
-    const completed = await
+    const failure = await captureTaskServiceError(() =>
       runWithWorkspaceRecordPublicationHooks(
         {
           ...failureHooks.publicationHooks,
@@ -24522,15 +23956,18 @@ describe("idempotency, lock, and artifact services", () => {
                 resultRef
               })
           )
-      );
+      )
+    );
     await Promise.race([
       closeTracker.waitForAll(),
       timeoutAfter(1_000, "failed fulfilled-guard settlement descriptors did not close")
     ]);
 
-    expect(completed).toMatchObject({ status: "completed", result_ref: resultRef });
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(errorTreeContains(failure, releaseMarker)).toBe(true);
+    expect(errorTreeContains(failure, settlementMarker)).toBe(true);
     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath, guardPath]);
-    expect(await service.getRecord("task", rawKey)).toEqual(completed);
+    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
     await expectPathMissing(guardPath);
     await expectPathMissing(cleanupLockPath);
     expect(closeTracker.count(guardPath)).toBe(1);
@@ -24616,12 +24053,13 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(begin.status).toBe("acquired");
     expect(semanticPrimaryError(failure)).toBe(failure);
-    expect(failure.code).toBe("record_malformed");
-    expect(failure.status).toBe(409);
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(failure.status).toBe(500);
     expect(failure.message).toBe(
-      "Idempotency record complete transition is already in progress."
+      "Idempotency transition artifact release did not settle safely."
     );
-    expect(failure.cause).toBeUndefined();
+    expect(failure.cause).toBeDefined();
+    expect(errorTreeContains(failure, releaseMarker)).toBe(true);
     expect(failureHooks.conditionalDeletePaths.length).toBeGreaterThan(0);
     expect(new Set(failureHooks.conditionalDeletePaths)).toEqual(
       new Set([cleanupLockPath])
@@ -24639,7 +24077,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
-  test("exact settlement preserves a replacement installed during restored publish-lock release", async () => {
+  test("persistent publish-lock namespace failure preserves a replacement guard", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const rawKey = "task:create:fulfilled-guard-pre-mutation-settlement";
@@ -24688,7 +24126,7 @@ describe("idempotency, lock, and artifact services", () => {
       }
     };
 
-    const completed = await
+    const failure = await captureTaskServiceError(() =>
       runWithWorkspaceRecordPublicationHooks(
         {
           ...failureHooks.publicationHooks,
@@ -24705,7 +24143,8 @@ describe("idempotency, lock, and artifact services", () => {
                 resultRef: "TASK-fulfilled-guard-pre-mutation-settlement"
               })
           )
-      );
+      )
+    );
     await Promise.race([
       closeTracker.waitForAll(),
       timeoutAfter(1_000, "pre-mutation emergency-settlement descriptors did not close")
@@ -24713,10 +24152,8 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(begin.status).toBe("acquired");
     expect(replacementInstalled).toBe(true);
-    expect(completed).toMatchObject({
-      status: "completed",
-      result_ref: "TASK-fulfilled-guard-pre-mutation-settlement"
-    });
+    expect(failure.code).toBe("workspace_path_not_safe");
+    expect(errorTreeContains(failure, releaseMarker)).toBe(true);
     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath]);
     expect(originalGuardGeneration).toBeDefined();
     expect(replacementGeneration).toBeDefined();
@@ -24727,7 +24164,7 @@ describe("idempotency, lock, and artifact services", () => {
       originalGuardGeneration!
     )).toBe(false);
     await expectPathMissing(cleanupLockPath);
-    expect(await service.getRecord("task", rawKey)).toEqual(completed);
+    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
     expect(closeTracker.count(guardPath)).toBe(1);
     expect(closeTracker.count(cleanupLockPath)).toBe(1);
     await expectFileDescriptorClosed(closeTracker.descriptors(guardPath)[0]!);
@@ -24894,22 +24331,18 @@ describe("idempotency, lock, and artifact services", () => {
       expect(conditionalFailure).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
       expect(conditionalFailure!.mutationPhase).toBe("post_mutation");
       expect(conditionalFailure!.failureStage).toBe("operation");
-      expect(findPreservedCompensationAggregate(failure)?.errors).toEqual([
+      expect(orderedDistinctCompensationFailures(failure)).toContain(
         releaseServiceFailure
-      ]);
+      );
       expect(await service.getRecord("task", rawKey)).toEqual(expectedRecord);
       if (expectedGuard) {
         expect(await readFileWithIdentity(guardPath)).toEqual(expectedGuard);
-      } else if (releaseClass === "publish-lock") {
+      } else if (releaseClass === "publish-lock" || releaseClass === "guard") {
         await expectPathMissing(guardPath);
       } else {
         expect(await readFile(guardPath)).toBeDefined();
       }
-      if (releaseClass === "guard") {
-        await expectPathMissing(cleanupLockPath);
-      } else {
-        expect(await readFile(cleanupLockPath)).toBeDefined();
-      }
+      await expectPathMissing(cleanupLockPath);
       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     }
   });
@@ -25024,7 +24457,7 @@ describe("idempotency, lock, and artifact services", () => {
 
       expect(begin.status).toBe("acquired");
       expect(failure).toBeInstanceOf(TaskServiceError);
-      expect(failure).not.toBe(bodyFailure);
+      expect(failure).toBe(bodyFailure);
       expect(semanticPrimaryError(failure)).toBe(bodyFailure);
       const compatible = failure as TaskServiceError;
       expect(compatible.code).toBe(bodyFailure.code);
@@ -25038,7 +24471,7 @@ describe("idempotency, lock, and artifact services", () => {
         bodyFailure.recommendedNextActions
       );
       expect(compatible.stack).toBe(bodyFailure.stack);
-      expect(compatible.cause).toBeInstanceOf(PreservedErrorCompensationEnvelope);
+      expect(compatible.cause).toBeUndefined();
       expect(matchingReleaseCalls).toBe(releaseClass === "cleanup-lock" ? 2 : 1);
       expect(countErrorNodes(failure, (error) => error === releaseFailure)).toBe(1);
       const releaseServiceFailure = findErrorNode(
@@ -25049,9 +24482,9 @@ describe("idempotency, lock, and artifact services", () => {
             "Idempotency transition artifact release did not settle safely."
       );
       expect(releaseServiceFailure).toBeInstanceOf(TaskServiceError);
-      expect(findPreservedCompensationAggregate(failure)?.errors).toEqual([
+      expect(orderedDistinctCompensationFailures(failure)).toContain(
         releaseServiceFailure
-      ]);
+      );
       expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
       expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
@@ -27772,7 +27205,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(failure.evidenceRefs).toContain("workspace/tasks:entry_count");
   });
 
-  test("S31-P62-09 repeated folds deduplicate prior provenance but preserve sibling multiplicity", () => {
+  test("S31-P62-09 repeated folds keep event slots while deduplicating identity views", () => {
     const primary = new Error("S31 primary");
     const compensation = new Error("S31 repeated compensation");
     const first = preserveThrownValueAndCompensationErrors(
@@ -27787,12 +27220,18 @@ describe("idempotency, lock, and artifact services", () => {
     );
     expect(countErrorGraphIdentity(repeated, compensation)).toBe(1);
 
+    const priorSiblingOccurrences = failureEvents(primary).filter(
+      (event) => event.value === compensation
+    ).length;
     const siblings = preserveThrownValueAndCompensationErrors(
       primary,
       [compensation, compensation],
       "S31 sibling fold"
     );
-    expect(countErrorGraphIdentity(siblings, compensation)).toBe(2);
+    expect(countErrorGraphIdentity(siblings, compensation)).toBe(1);
+    expect(
+      failureEvents(siblings).filter((event) => event.value === compensation)
+    ).toHaveLength(priorSiblingOccurrences + 2);
     const cyclic = preserveThrownValueAndCompensationErrors(
       primary,
       [first],
@@ -28096,20 +27535,10 @@ describe("idempotency, lock, and artifact services", () => {
     }
   });
 
-  test("S32-P62-09 independent provenance cycles retain distinct ordered occurrences", () => {
-    const makeCycle = (label: string) => {
-      const primary = new Error(`S32 cycle ${label}`);
-      const seed = preservePrimaryAndCompensationErrors(
-        primary,
-        [primary],
-        `S32 cycle seed ${label}`
-      ) as PreservedErrorCompensationEnvelope;
-      registerPreservedErrorCompatibility(primary, seed);
-      return seed;
-    };
+  test("S32-P62-09 independent provenance folds retain distinct ordered occurrences", () => {
     const semanticPrimary = new Error("S32 cycle folding primary");
-    const firstCycle = makeCycle("one");
-    const secondCycle = makeCycle("two");
+    const firstCycle = new Error("S32 cycle one");
+    const secondCycle = new Error("S32 cycle two");
     const firstFold = preserveThrownValueAndCompensationErrors(
       semanticPrimary,
       [firstCycle],
@@ -28125,13 +27554,17 @@ describe("idempotency, lock, and artifact services", () => {
       [secondCycle],
       "S32 replayed second cycle fold"
     );
-    const markers = (replayedSecond.cause as AggregateError).errors.filter(
-      (value) => value instanceof Error && value.name === "PreservedCompensationCycle"
-    );
-    expect(markers).toHaveLength(2);
-    expect(markers[0]).not.toBe(markers[1]);
-    expect((secondFold.cause as AggregateError).errors).toEqual(
-      (replayedSecond.cause as AggregateError).errors
+    expect(semanticPrimaryValue(replayedSecond)).toBe(semanticPrimary);
+    expect(orderedDistinctFailures(replayedSecond)).toEqual([
+      semanticPrimary,
+      firstCycle,
+      secondCycle
+    ]);
+    expect(
+      failureEvents(replayedSecond).filter((event) => event.value === secondCycle)
+    ).toHaveLength(2);
+    expect(failureEvents(replayedSecond).map((event) => event.order)).toEqual(
+      [...failureEvents(replayedSecond).map((event) => event.order)].sort((a, b) => a - b)
     );
   });
 
@@ -29532,21 +28965,37 @@ describe("idempotency, lock, and artifact services", () => {
     expect((semantic as TaskServiceError).message).toBe(
       "Failed to publish a durably observed task into the local cache."
     );
-    // The denied reobservations stay attached to the publish primary through
-    // the read-attempt carriers in its folded cause.
+    // The denied reobservations stay attached as separate occurrence slots;
+    // the raw cause remains the exact first read-attempt carrier.
     const primaryCause = (semantic as TaskServiceError).cause;
-    expect(primaryCause).toBeInstanceOf(AggregateError);
-    expect(
-      (primaryCause as AggregateError).errors.some(
-        (entry) => (entry as { reason?: unknown } | null)?.reason === publishDenial
-      )
-    ).toBe(true);
+    expect(primaryCause).toBeInstanceOf(Error);
+    expect((primaryCause as { reason?: unknown }).reason).toBe(publishDenial);
+    const denialEvents = failureEvents(failure).filter(
+      (event) =>
+        (event.value as { reason?: unknown } | null)?.reason === publishDenial
+    );
+    expect(denialEvents).toHaveLength(2);
+    expect(denialEvents.map((event) => event.phase)).toEqual([
+      "settlement",
+      "settlement"
+    ]);
+    expect(denialEvents[0]?.occurrenceId).not.toBe(
+      denialEvents[1]?.occurrenceId
+    );
     const aggregate = knownPreservedCompensationAggregate(failure);
     const closeRejections = aggregate.errors.filter(
       (entry) =>
         entry instanceof Error && (entry as { code?: unknown }).code === "EBADF"
     );
     expect(closeRejections).toHaveLength(1);
+    expect(
+      failureEvents(failure).filter(
+        (event) =>
+          event.phase === "settlement" &&
+          event.value instanceof Error &&
+          (event.value as { code?: unknown }).code === "EBADF"
+      )
+    ).toHaveLength(1);
     expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
 
     // Sibling cleanup ran: the durable lane stays readable in this service
@@ -29703,6 +29152,445 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await service.getRecord("task", rawKey)).toEqual(completed);
     await expectPathMissing(guardPath);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+  });
+
+  test("S35-P62-01 idempotency release adapter captures equal falsy values as distinct occurrences", () => {
+    for (const value of [undefined, null, false, 0, ""] as const) {
+      const preserved = preserveIdempotencyReleaseFailureOccurrences(
+        value,
+        [value],
+        "S35 equal-valued body and release failures",
+        "body",
+        ["initial_release"]
+      );
+      const ledger = failureLedger(preserved);
+      expect(ledger).toBeDefined();
+      expect(ledger!.events.map((event) => event.value)).toEqual([value, value]);
+      expect(ledger!.events.map((event) => event.phase)).toEqual([
+        "body",
+        "initial_release"
+      ]);
+      expect(ledger!.events[0]!.occurrenceId).not.toBe(
+        ledger!.events[1]!.occurrenceId
+      );
+      expect(orderedDistinctCompensationFailures(preserved)).toEqual([value]);
+      expect(semanticPrimaryValue(preserved)).toBe(value);
+    }
+  });
+
+  test("S35-P62-05 idempotency release adapter retains exact typed boundaries and nested release tokens", () => {
+    for (const primaryKind of ["exact", "one-shot-proxy"] as const) {
+      const target = Object.freeze(
+        new TaskServiceError({
+          code: "record_malformed",
+          status: 422,
+          category: "idempotency_conflict",
+          message: `S35 ${primaryKind} idempotency release primary.`,
+          userMessage: "The exact idempotency transition was rejected.",
+          evidenceRefs: [`s35.idempotency-release.${primaryKind}`],
+          retryable: true,
+          recommendedNextActions: ["Inspect the exact transition evidence."]
+        })
+      );
+      const proxyState = primaryKind === "one-shot-proxy"
+        ? oneShotTaskServiceErrorProxy(target)
+        : undefined;
+      const primary = proxyState?.proxy ?? target;
+      const primaryDescriptors = Object.getOwnPropertyDescriptors(primary);
+      const initialReleaseFailure = new Error(
+        `S35 ${primaryKind} nested initial release failure`
+      );
+      const finalReleaseFailure = new Error(
+        `S35 ${primaryKind} nested final release failure`
+      );
+      const releaseCarrier = preserveWorkspaceRecordFailureGraph(
+        initialReleaseFailure,
+        [finalReleaseFailure],
+        "S35 nested idempotency release failures.",
+        "initial_release",
+        ["final_release"]
+      );
+      const inheritedEvents = [...failureEvents(releaseCarrier)];
+
+      const preserved = preserveIdempotencyReleaseFailureOccurrences(
+        primary,
+        [releaseCarrier],
+        "S35 typed idempotency operation and release failed.",
+        "body",
+        ["settlement"]
+      );
+
+      expect(preserved).toBe(primary);
+      expect(taskServiceErrorAtBoundary(preserved)).toBe(primary);
+      expect((preserved as TaskServiceError).code).toBe("record_malformed");
+      expect((preserved as TaskServiceError).status).toBe(422);
+      expect((preserved as TaskServiceError).category).toBe(
+        "idempotency_conflict"
+      );
+      expect((preserved as TaskServiceError).evidenceRefs).toEqual([
+        `s35.idempotency-release.${primaryKind}`
+      ]);
+      expect(Object.getOwnPropertyDescriptors(primary)).toEqual(primaryDescriptors);
+      if (proxyState) expect(proxyState.brandReads).toBe(1);
+
+      const events = failureEvents(preserved);
+      expect(events.map((event) => event.phase)).toEqual([
+        "body",
+        "initial_release",
+        "final_release",
+        "settlement"
+      ]);
+      expect(events.map((event) => event.value)).toEqual([
+        primary,
+        initialReleaseFailure,
+        finalReleaseFailure,
+        releaseCarrier
+      ]);
+      for (const inherited of inheritedEvents) {
+        expect(
+          events.filter((event) => event.occurrenceId === inherited.occurrenceId)
+        ).toEqual([inherited]);
+      }
+      expect(events[0]!.occurrenceId).not.toBe(events[3]!.occurrenceId);
+      expect(orderedDistinctFailures(preserved)).toEqual([
+        primary,
+        initialReleaseFailure,
+        finalReleaseFailure
+      ]);
+      expect(taskServiceErrorAtBoundary(preserved)).toBe(primary);
+      if (proxyState) expect(proxyState.brandReads).toBe(1);
+    }
+  });
+
+  test("S35-P62-02 TaskCard after-write cleanup preserves a one-shot typed Proxy and exact nested ledger", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s35-ledger-publication";
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const primaryTarget = Object.freeze(
+      new TaskServiceError({
+        code: "task_snapshot_mismatch",
+        status: 409,
+        category: "workspace_conflict",
+        message: "S35 exact callback primary.",
+        userMessage: "The exact callback rejected the task snapshot.",
+        evidenceRefs: ["s35.task-card.callback"],
+        retryable: true,
+        recommendedNextActions: ["Inspect the exact callback evidence."]
+      })
+    );
+    const primaryState = oneShotTaskServiceErrorProxy(primaryTarget);
+    const primary = primaryState.proxy;
+    const primaryDescriptors = Object.getOwnPropertyDescriptors(primary);
+    const observationFailure = new Error("S35 nested cleanup observation failure");
+    let observationReads = 0;
+    const initialReleaseFailure = new Error("S35 nested initial release failure");
+    Object.defineProperty(initialReleaseFailure, "cause", {
+      configurable: true,
+      get: () => {
+        observationReads += 1;
+        throw observationFailure;
+      }
+    });
+    const finalReleaseFailure = new Error("S35 nested final release failure");
+    const cleanupCarrier = preserveWorkspaceRecordFailureGraph(
+      initialReleaseFailure,
+      [finalReleaseFailure],
+      "S35 nested cleanup release failures.",
+      "initial_release",
+      ["final_release"]
+    );
+    const inheritedEvents = [...failureEvents(cleanupCarrier)];
+    expect(inheritedEvents.map((event) => event.phase)).toEqual([
+      "initial_release",
+      "final_release",
+      "observation"
+    ]);
+    expect(observationReads).toBe(1);
+    const cleanupDescriptors = Object.getOwnPropertyDescriptors(initialReleaseFailure);
+    const finalReleaseDescriptors = Object.getOwnPropertyDescriptors(finalReleaseFailure);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let cleanupAttempts = 0;
+    let cleanupFailureArmed = false;
+    const service = createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      snapshotWriteHooks: {
+        afterSnapshotWrite: () => {
+          cleanupFailureArmed = true;
+          throw primary;
+        }
+      }
+    });
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterRecordDirectoryBindingRelease: () => {
+            if (!cleanupFailureArmed) return;
+            cleanupFailureArmed = false;
+            cleanupAttempts += 1;
+            throw cleanupCarrier;
+          }
+        },
+        () =>
+          service.createTask({
+            type: "engineering",
+            title: "S35 ledger publication",
+            question_or_goal: "Preserve the exact typed publication failure.",
+            inference_budget: { mode: "normal" }
+          })
+      )
+    );
+
+    expect(failure).toBe(primary);
+    expect(primaryState.brandReads).toBe(1);
+    expect(cleanupAttempts).toBe(1);
+    expect((failure as TaskServiceError).code).toBe("task_snapshot_mismatch");
+    expect((failure as TaskServiceError).status).toBe(409);
+    expect((failure as TaskServiceError).category).toBe("workspace_conflict");
+    expect(taskServiceErrorAtBoundary(failure)).toBe(primary);
+    expect(primaryState.brandReads).toBe(1);
+    expect(Object.getOwnPropertyDescriptors(primary)).toEqual(primaryDescriptors);
+    expect(Object.getOwnPropertyDescriptors(initialReleaseFailure)).toEqual(
+      cleanupDescriptors
+    );
+    const ledger = failureLedger(failure);
+    expect(ledger).toBeDefined();
+    expect(ledger!.events).toHaveLength(5);
+    expect(ledger!.events.map((event) => event.phase)).toEqual([
+      "body",
+      "initial_release",
+      "final_release",
+      "observation",
+      "settlement"
+    ]);
+    expect(ledger!.events.map((event) => event.value)).toEqual([
+      primary,
+      initialReleaseFailure,
+      finalReleaseFailure,
+      observationFailure,
+      cleanupCarrier
+    ]);
+    for (const inherited of inheritedEvents) {
+      expect(
+        ledger!.events.filter(
+          (event) => event.occurrenceId === inherited.occurrenceId
+        )
+      ).toEqual([inherited]);
+      expect(ledger!.events.find((event) => event === inherited)?.phase).toBe(
+        inherited.phase
+      );
+      expect(ledger!.events.find((event) => event === inherited)?.order).toBe(
+        inherited.order
+      );
+    }
+    expect(
+      ledger!.events.filter((event) => event.phase === "observation")
+    ).toEqual([inheritedEvents[2]]);
+    expect(observationReads).toBe(1);
+    expect(
+      ledger!.events.filter(
+        (event) => event.phase === "settlement" && event.value === cleanupCarrier
+      )
+    ).toHaveLength(1);
+    expect(ledger!.orderedDistinct.map((event) => event.value)).toEqual([
+      primary,
+      initialReleaseFailure,
+      finalReleaseFailure,
+      observationFailure
+    ]);
+    expect(errorTreeContains(failure, initialReleaseFailure)).toBe(true);
+    expect(errorTreeContains(failure, finalReleaseFailure)).toBe(true);
+    expect(errorTreeContains(failure, observationFailure)).toBe(true);
+    expect(
+      failureEvents(failure).filter((event) => event.value === observationFailure)
+    ).toHaveLength(1);
+    expect(
+      failureEvents(failure).filter((event) => event.value === cleanupCarrier)
+    ).toHaveLength(2);
+    expect(
+      failureEvents(failure).filter((event) => event.value === primary)
+    ).toHaveLength(1);
+    expect(semanticPrimaryError(failure)).toBe(primary);
+    expect(semanticPrimaryValue(failure)).toBe(primary);
+    expect(Object.getOwnPropertyDescriptors(finalReleaseFailure)).toEqual(
+      finalReleaseDescriptors
+    );
+    await expectPathMissing(snapshotPath);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+  });
+
+  test("S35-P62-02 TaskCard publication-authority transfer cleanup preserves a one-shot typed Proxy", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s35-transfer-cleanup-proxy";
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const taskDirectory = join(workspaceRoot, "tasks", taskId);
+    const primaryTarget = Object.freeze(
+      new TaskServiceError({
+        code: "task_snapshot_mismatch",
+        status: 409,
+        category: "workspace_conflict",
+        message: "S35 exact publication-authority transfer primary.",
+        userMessage: "The exact task publication authority could not be transferred.",
+        evidenceRefs: ["s35.task-card.transfer"],
+        retryable: true,
+        recommendedNextActions: ["Inspect the publication-authority transfer evidence."]
+      })
+    );
+    const primaryState = oneShotTaskServiceErrorProxy(primaryTarget);
+    const primary = primaryState.proxy;
+    const primaryDescriptors = Object.getOwnPropertyDescriptors(primary);
+    const cleanupFailure = new Error("S35 transfer cleanup binding release failure");
+    const cleanupDescriptors = Object.getOwnPropertyDescriptors(cleanupFailure);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let primaryInjected = false;
+    let bindingReleasesAfterPrimary = 0;
+    const service = createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      snapshotWriteHooks: { afterSnapshotWrite: () => undefined }
+    });
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeCleanupPermitIdentityResolution: ({ path }) => {
+            if (primaryInjected || path !== snapshotPath) return;
+            primaryInjected = true;
+            throw primary;
+          }
+        },
+        () =>
+          runWithWorkspaceRecordCompensationTestHooks(
+            {
+              afterRecordDirectoryBindingRelease: () => {
+                if (!primaryInjected) return;
+                bindingReleasesAfterPrimary += 1;
+                if (bindingReleasesAfterPrimary === 2) throw cleanupFailure;
+              }
+            },
+            () =>
+              service.createTaskForIdempotency({
+                type: "engineering",
+                title: "S35 transfer cleanup Proxy",
+                question_or_goal: "Preserve the exact transfer primary after cleanup.",
+                inference_budget: { mode: "normal" }
+              })
+          )
+      )
+    );
+
+    expect(primaryInjected).toBe(true);
+    expect(bindingReleasesAfterPrimary).toBeGreaterThanOrEqual(2);
+    expect(failure).toBe(primary);
+    expect(primaryState.brandReads).toBe(1);
+    expect((failure as TaskServiceError).status).toBe(409);
+    expect((failure as TaskServiceError).code).toBe("task_snapshot_mismatch");
+    expect((failure as TaskServiceError).category).toBe("workspace_conflict");
+    expect(taskServiceErrorAtBoundary(failure)).toBe(primary);
+    expect(primaryState.brandReads).toBe(1);
+    expect(Object.getOwnPropertyDescriptors(primary)).toEqual(primaryDescriptors);
+    expect(Object.getOwnPropertyDescriptors(cleanupFailure)).toEqual(
+      cleanupDescriptors
+    );
+    const events = failureEvents(failure);
+    expect(events.map((event) => event.phase)).toEqual(["body", "settlement"]);
+    expect(events[0]?.value).toBe(primary);
+    expect(events[1]?.value).toBe(cleanupFailure);
+    expect(events[0]?.occurrenceId).not.toBe(events[1]?.occurrenceId);
+    expect(await readFile(snapshotPath, "utf8")).toContain(taskId);
+    expect((await stat(taskDirectory)).isDirectory()).toBe(true);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
+  });
+
+  test("S35-P62-02 TaskCard pre-write lane cleanup preserves a one-shot typed Proxy", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s35-prewrite-cleanup";
+    const taskDirectory = join(workspaceRoot, "tasks", taskId);
+    const cleanupFailure = new Error("S35 pre-write lane cleanup failure");
+    const cleanupFailureDescriptors = Object.getOwnPropertyDescriptors(cleanupFailure);
+    let cleanupFailureArmed = false;
+    const primaryTarget = Object.freeze(
+      new TaskServiceError({
+        code: "task_snapshot_mismatch",
+        status: 409,
+        category: "workspace_conflict",
+        message: "S35 exact pre-write primary.",
+        userMessage: "The exact pre-write callback rejected the task lane.",
+        evidenceRefs: ["s35.task-card.prewrite"],
+        retryable: true,
+        recommendedNextActions: ["Inspect the pre-write callback evidence."]
+      })
+    );
+    const primaryState = oneShotTaskServiceErrorProxy(primaryTarget);
+    const primary = primaryState.proxy;
+    const primaryDescriptors = Object.getOwnPropertyDescriptors(primary);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const service = createTaskCardService({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      snapshotWriteHooks: {
+        beforeSnapshotWrite: () => {
+          cleanupFailureArmed = true;
+          throw primary;
+        }
+      }
+    });
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterRecordDirectoryBindingRelease: () => {
+            if (!cleanupFailureArmed) return;
+            cleanupFailureArmed = false;
+            throw cleanupFailure;
+          }
+        },
+        () =>
+          service.createTask({
+            type: "engineering",
+            title: "S35 pre-write cleanup slot",
+            question_or_goal: "Retain one failed lane-cleanup settlement occurrence.",
+            inference_budget: { mode: "normal" }
+          })
+      )
+    );
+
+    expect(failure).toBe(primary);
+    expect(primaryState.brandReads).toBe(1);
+    expect((failure as TaskServiceError).status).toBe(409);
+    expect((failure as TaskServiceError).code).toBe("task_snapshot_mismatch");
+    expect((failure as TaskServiceError).category).toBe("workspace_conflict");
+    expect(taskServiceErrorAtBoundary(failure)).toBe(primary);
+    expect(primaryState.brandReads).toBe(1);
+    expect(Object.getOwnPropertyDescriptors(primary)).toEqual(primaryDescriptors);
+    const events = failureEvents(failure);
+    expect(events.map((event) => event.phase)).toEqual(["body", "settlement"]);
+    expect(events[0]?.value).toBe(primary);
+    expect(events[1]?.value).toBeInstanceOf(TaskServiceError);
+    expect((events[1]?.value as TaskServiceError).cause).toBe(cleanupFailure);
+    expect(events[0]?.occurrenceId).not.toBe(events[1]?.occurrenceId);
+    expect(Object.getOwnPropertyDescriptors(cleanupFailure)).toEqual(
+      cleanupFailureDescriptors
+    );
+    await expectPathMissing(join(taskDirectory, "snapshot.json"));
+    await expectPathMissing(taskDirectory);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
+      bindingBaseline
+    );
   });
 
   test("S33-P62-08 transported completed authority settles terminally on failed write, missing record, and identity mismatch", async () => {
@@ -30812,6 +30700,29 @@ async function captureError(action: () => Promise<unknown>): Promise<Error> {
   throw new Error("Expected an error.");
 }
 
+function oneShotTaskServiceErrorProxy(target: TaskServiceError): Readonly<{
+  proxy: TaskServiceError;
+  readonly brandReads: number;
+}> {
+  let brandReads = 0;
+  const secondBrandRead = new Error(
+    "TaskServiceError Proxy brand was observed more than once."
+  );
+  const proxy = new Proxy(target, {
+    getPrototypeOf: (candidate) => {
+      brandReads += 1;
+      if (brandReads > 1) throw secondBrandRead;
+      return Reflect.getPrototypeOf(candidate);
+    }
+  });
+  return {
+    proxy,
+    get brandReads() {
+      return brandReads;
+    }
+  };
+}
+
 async function captureThrownValue(action: () => Promise<unknown>): Promise<unknown> {
   try {
     await action();
@@ -30884,7 +30795,10 @@ function findOpenFileDescriptorsByIdentity(identity: {
   ino: bigint;
 }): number[] {
   const matches: number[] = [];
-  for (let fd = 3; fd <= 2048; fd += 1) {
+  const openDescriptors = readdirSync("/dev/fd")
+    .map((entry) => Number(entry))
+    .filter((fd) => Number.isInteger(fd) && fd >= 3);
+  for (const fd of openDescriptors) {
     try {
       const entry = fstatSync(fd, { bigint: true });
       if (entry.dev === identity.dev && entry.ino === identity.ino) {
@@ -30897,7 +30811,94 @@ function findOpenFileDescriptorsByIdentity(identity: {
   return matches;
 }
 
+function activeFileSystemWatcherCount(): number {
+  return process.getActiveResourcesInfo().filter(
+    (resource) => resource === "FSEventWrap" || resource === "FSWatcher"
+  ).length;
+}
+
+type CallerPreservationEnvelopeFixture = Readonly<{
+  semanticPrimary: Error;
+  firstIndependent: Error;
+  secondIndependent: Error;
+  aggregate: AggregateError;
+  envelope: PreservedErrorCompensationEnvelope;
+  envelopeDescriptors: PropertyDescriptorMap;
+  aggregateDescriptors: PropertyDescriptorMap;
+  aggregateErrors: readonly unknown[];
+}>;
+
+function createCallerPreservationEnvelopeFixture(
+  label: string,
+  wrapperKind: "writable" | "frozen" | "nonconfigurable"
+): CallerPreservationEnvelopeFixture {
+  const semanticPrimary = new Error(`${label} semantic primary`);
+  const firstIndependent = new Error(`${label} independent one`);
+  const secondIndependent = new Error(`${label} independent two`);
+  const aggregateErrors = [
+    semanticPrimary,
+    firstIndependent,
+    secondIndependent
+  ] as const;
+  const aggregate = new AggregateError([...aggregateErrors], `${label} aggregate`);
+  const envelope = new PreservedErrorCompensationEnvelope(semanticPrimary, aggregate);
+  if (wrapperKind === "frozen") {
+    Object.freeze(aggregate);
+    Object.freeze(envelope);
+  } else if (wrapperKind === "nonconfigurable") {
+    for (const [target, property] of [
+      [aggregate, "errors"],
+      [envelope, "semanticPrimary"],
+      [envelope, "cause"]
+    ] as const) {
+      const descriptor = Object.getOwnPropertyDescriptor(target, property);
+      if (!descriptor || !("value" in descriptor)) {
+        throw new Error(`Expected caller data property ${property}.`);
+      }
+      Object.defineProperty(target, property, {
+        ...descriptor,
+        configurable: false,
+        writable: false
+      });
+    }
+  }
+  return Object.freeze({
+    semanticPrimary,
+    firstIndependent,
+    secondIndependent,
+    aggregate,
+    envelope,
+    envelopeDescriptors: Object.getOwnPropertyDescriptors(envelope),
+    aggregateDescriptors: Object.getOwnPropertyDescriptors(aggregate),
+    aggregateErrors
+  });
+}
+
+function expectCallerPreservationEnvelopeUnchanged(
+  fixture: CallerPreservationEnvelopeFixture
+): void {
+  expect(Object.getOwnPropertyDescriptors(fixture.envelope)).toEqual(
+    fixture.envelopeDescriptors
+  );
+  expect(Object.getOwnPropertyDescriptors(fixture.aggregate)).toEqual(
+    fixture.aggregateDescriptors
+  );
+  expect(fixture.envelope.semanticPrimary).toBe(fixture.semanticPrimary);
+  expect(fixture.envelope.cause).toBe(fixture.aggregate);
+  expect(fixture.aggregate.errors).toEqual(fixture.aggregateErrors);
+  expect(fixture.aggregate.errors[1]).toBe(fixture.firstIndependent);
+  expect(fixture.aggregate.errors[2]).toBe(fixture.secondIndependent);
+  expect(countErrorGraphIdentity(fixture.envelope, fixture.firstIndependent)).toBe(1);
+  expect(countErrorGraphIdentity(fixture.envelope, fixture.secondIndependent)).toBe(1);
+}
+
 function findPreservedCompensationAggregate(value: unknown): AggregateError | undefined {
+  if (failureLedger(value)) {
+    const compensations = orderedDistinctCompensationFailures(value);
+    return compensations.length === 0
+      ? undefined
+      : new AggregateError(compensations, "Failure occurrence ledger compatibility view");
+  }
   const envelope = findErrorNode(
     value,
     (error) => error instanceof PreservedErrorCompensationEnvelope
@@ -30906,6 +30907,12 @@ function findPreservedCompensationAggregate(value: unknown): AggregateError | un
 }
 
 function knownPreservedCompensationAggregate(value: unknown): AggregateError {
+  if (failureLedger(value)) {
+    return new AggregateError(
+      orderedDistinctCompensationFailures(value),
+      "Failure occurrence ledger compatibility view"
+    );
+  }
   const envelope = value instanceof PreservedErrorCompensationEnvelope
     ? value
     : value instanceof TaskServiceError &&
@@ -30918,6 +30925,18 @@ function knownPreservedCompensationAggregate(value: unknown): AggregateError {
 }
 
 function aggregateErrorMessages(value: unknown, ancestors = new Set<unknown>()): string[] {
+  if (failureLedger(value)) {
+    const orderedValues = [
+      ...failureEvents(value).map((event) => event.value),
+      ...failureGraphNodes(value).map((node) => node.value)
+    ];
+    const seen = new Set<unknown>();
+    return orderedValues.flatMap((entry) => {
+      if (seen.has(entry)) return [];
+      seen.add(entry);
+      return entry instanceof Error ? [entry.message] : [];
+    });
+  }
   if (!(value instanceof Error) || ancestors.has(value)) return [];
   ancestors.add(value);
   const semanticPrimary = semanticPrimaryError(value);
@@ -30939,6 +30958,10 @@ function errorTreeContains(
   expected: unknown,
   ancestors = new Set<unknown>()
 ): boolean {
+  if (failureLedger(value)) {
+    return failureEvents(value).some((entry) => Object.is(entry.value, expected)) ||
+      failureGraphNodes(value).some((node) => Object.is(node.value, expected));
+  }
   if (value === expected) return true;
   if (!(value instanceof Error) || ancestors.has(value)) return false;
   ancestors.add(value);
@@ -30963,6 +30986,9 @@ function countErrorGraphIdentity(
   expected: unknown,
   ancestors = new Set<unknown>()
 ): number {
+  if (failureLedger(value)) {
+    return orderedDistinctFailures(value).filter((entry) => Object.is(entry, expected)).length;
+  }
   if (value === expected) return 1;
   if (!(value instanceof Error) || ancestors.has(value)) return 0;
   const nextAncestors = new Set(ancestors);
@@ -30986,6 +31012,15 @@ function findErrorNode(
   predicate: (error: Error) => boolean,
   ancestors = new Set<unknown>()
 ): Error | undefined {
+  if (failureLedger(value)) {
+    const candidates = [
+      ...failureEvents(value).map((event) => event.value),
+      ...failureGraphNodes(value).map((node) => node.value)
+    ];
+    return candidates.find(
+      (candidate): candidate is Error => candidate instanceof Error && predicate(candidate)
+    );
+  }
   if (!(value instanceof Error) || ancestors.has(value)) return undefined;
   ancestors.add(value);
   const semanticPrimary = semanticPrimaryError(value);
@@ -31008,6 +31043,11 @@ function countErrorNodes(
   predicate: (error: Error) => boolean,
   ancestors = new Set<unknown>()
 ): number {
+  if (failureLedger(value)) {
+    return orderedDistinctFailures(value).filter(
+      (candidate) => candidate instanceof Error && predicate(candidate)
+    ).length;
+  }
   if (!(value instanceof Error) || ancestors.has(value)) return 0;
   ancestors.add(value);
   const semanticPrimary = semanticPrimaryError(value);

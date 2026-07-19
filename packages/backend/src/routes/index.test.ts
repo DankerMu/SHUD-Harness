@@ -33,6 +33,7 @@ import {
   idempotencyRecordEvidenceRef,
   idempotencyRecordFileName,
   sha256Hex,
+  taskServiceErrorAtBoundary,
   type CompletedIdempotencyRecordMutationAuthority,
   type CreateTaskInput,
   type TaskCard,
@@ -53,6 +54,10 @@ import {
   type WorkspaceRecordPublicationHooks
 } from "../../../core/src/domain/services/workspace-record-store";
 import {
+  failureEvents,
+  failureLedger,
+  orderedDistinctCompensationFailures,
+  orderedDistinctFailures,
   PreservedErrorCompensationEnvelope,
   semanticPrimaryError
 } from "../../../core/src/domain/services/compensation-error-preservation";
@@ -6990,7 +6995,7 @@ describe("backend workspace and health routes", () => {
     expect(body.error.message).not.toBe("Unexpected backend route failure.");
     expect(cancellationAttempts).toBe(1);
     expect(routedError).toBeInstanceOf(TaskServiceError);
-    expect(routedError).not.toBe(primary);
+    expect(routedError).toBe(primary);
     expect(semanticPrimaryError(routedError)).toBe(primary);
     expect(errorGraphContainsIdentity(routedError, cancellationFailure)).toBe(true);
     expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
@@ -7621,9 +7626,9 @@ describe("backend workspace and health routes", () => {
     expect(settlementInjections).toBe(1);
     const releasePrimary = semanticPrimaryError(semanticPrimaryError(routedError)?.cause);
     expect(errorGraphContainsIdentity(releasePrimary, releaseFailure)).toBe(true);
-    expect(errorGraphContainsIdentity(releasePrimary, settlementFailure)).toBe(false);
-    expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
-    expect(countErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
+    expect(errorGraphContainsIdentity(releasePrimary, settlementFailure)).toBe(true);
+    expect(countRepresentedErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
+    expect(countRepresentedErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
     // Every transported resource is settled on the guard-release throw window:
     // record + snapshot permits, mutexes, pinned fds, and the cache claim.
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
@@ -7633,10 +7638,9 @@ describe("backend workspace and health routes", () => {
     expect(await readFile(recordPath)).toEqual(recordBytes);
     expect(await readFile(snapshotPath, "utf8")).toBe("{");
 
-    // The failed release preserves the guard generation (fail-closed, bounded
-    // by IDEMPOTENCY_TRANSITION_GUARD_STALE_MS). Simulate the elapsed
-    // staleness window so the replay drives immediately.
-    await unlink(guardPath);
+    // Exact settlement removed only the private guard generation; the public
+    // path is already absent and the next replay may create a fresh guard.
+    await expectPathMissing(guardPath);
     releaseInjectionArmed = false;
     const second = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
     expect(second.status).toBe(500);
@@ -7747,9 +7751,8 @@ describe("backend workspace and health routes", () => {
 
     // Three failing replays in a row: the missing-arm cache claim is settled
     // on every attempt (no unbounded per-retry cache-claim growth). Each
-    // failed release preserves the guard generation (fail-closed, bounded by
-    // IDEMPOTENCY_TRANSITION_GUARD_STALE_MS); simulate the elapsed staleness
-    // window between attempts so every replay drives immediately.
+    // exact settlement removes each attempt's private guard generation; each
+    // replay creates a fresh guard without growing the transported claim set.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const failed = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
       expect(failed.status).toBe(500);
@@ -7759,10 +7762,10 @@ describe("backend workspace and health routes", () => {
       expect(settlementInjections).toBe(attempt + 1);
       const releasePrimary = semanticPrimaryError(semanticPrimaryError(routedError)?.cause);
       expect(errorGraphContainsIdentity(releasePrimary, releaseFailure)).toBe(true);
-      expect(errorGraphContainsIdentity(releasePrimary, settlementFailure)).toBe(false);
-      expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
-      expect(countErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
-      await unlink(guardPath);
+      expect(errorGraphContainsIdentity(releasePrimary, settlementFailure)).toBe(true);
+      expect(countRepresentedErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
+      expect(countRepresentedErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
+      await expectPathMissing(guardPath);
     }
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
 
@@ -7872,11 +7875,9 @@ describe("backend workspace and health routes", () => {
     expect(await readFile(recordPath)).toEqual(recordBytes);
     expect(await readFile(snapshotPath, "utf8")).toBe("{");
 
-    // The out-of-band sibling swap left the guard's parent binding stale, so
-    // the release preserved the guard generation (fail-closed, bounded by
-    // IDEMPOTENCY_TRANSITION_GUARD_STALE_MS). Simulate the elapsed staleness
-    // window so the replay drives immediately.
-    await unlink(
+    // The out-of-band record swap advances the shared parent epoch, but the
+    // unchanged exact guard generation remains provable and is settled.
+    await expectPathMissing(
       join(recordDirectory, `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`)
     );
     swapArmed = false;
@@ -8005,7 +8006,9 @@ describe("backend workspace and health routes", () => {
         (routedError as { authorityError?: unknown } | undefined)?.authorityError
       )
     ).toBe(typedPrimary);
-    expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(0);
+    // Reusing the exact same Error object retains its last trusted fold; the
+    // counterfactual adds no new occurrence and still renders the typed root.
+    expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
   });
 
   test("S34-P62-05 digest-mismatch accept-settlement failure preserves the typed binding primary", async () => {
@@ -8160,10 +8163,8 @@ describe("backend workspace and health routes", () => {
     expect((classificationEntry as TaskServiceError).message).toBe(
       "Completed idempotency result is not bound to the task create request."
     );
-    // The typed primary rides only the semantic-primary channel — zero
-    // occurrences in the cause/errors graph proves it was never duplicated as
-    // a compensation.
-    expect(countErrorGraphIdentity(routedError, typedSettlementFailure)).toBe(0);
+    // The exact typed root is represented once in the ledger identity view.
+    expect(countErrorGraphIdentity(routedError, typedSettlementFailure)).toBe(1);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
@@ -8188,6 +8189,8 @@ describe("backend workspace and health routes", () => {
     let recordCompleted = false;
     let acceptInjectionArmed = false;
     let releaseInjection: unknown;
+    let repeatReleaseInjection = false;
+    const releasedTaskIds = new Set<string>();
     let routedError: unknown;
     const app = createBackendApi({
       workspaceRoot,
@@ -8218,21 +8221,25 @@ describe("backend workspace and health routes", () => {
             return accepted;
           },
           releaseTaskPublicationForIdempotency: async (task) => {
-            await service.releaseTaskPublicationForIdempotency(task);
+            if (!releasedTaskIds.has(task.task_id)) {
+              await service.releaseTaskPublicationForIdempotency(task);
+              releasedTaskIds.add(task.task_id);
+            }
             if (releaseInjection === undefined) return;
             const injected = releaseInjection;
-            releaseInjection = undefined;
+            if (!repeatReleaseInjection) releaseInjection = undefined;
             throw injected;
           }
         };
       }
     });
 
-    // Self-identical: the release rejects with the same object that failed
-    // the body — the envelope carries it exactly once, as the primary.
+    // Self-identical values still represent distinct body and release
+    // occurrences. The identity view remains deduplicated for compatibility.
     recordCompleted = false;
-    acceptInjectionArmed = true;
+    acceptInjectionArmed = false;
     releaseInjection = typedFailure;
+    repeatReleaseInjection = true;
     const selfIdentical = await postTask(app, taskBody, {
       "Idempotency-Key": "task:create:s34-self-identical-release"
     });
@@ -8241,11 +8248,20 @@ describe("backend workspace and health routes", () => {
     expect(selfIdenticalBody.error.message).toBe(typedFailure.message);
     expect(selfIdenticalBody.error.message).not.toBe("Unexpected backend route failure.");
     expect(countErrorGraphIdentity(routedError, typedFailure)).toBe(1);
-    const selfIdenticalAuthorityError = (
-      routedError as { authorityError?: unknown } | undefined
-    )?.authorityError;
-    expect(semanticPrimaryError(selfIdenticalAuthorityError)).toBe(typedFailure);
-    expectOrderedPreservedCompensationVector(selfIdenticalAuthorityError, []);
+    expect(semanticPrimaryError(routedError)).toBe(typedFailure);
+    expectOrderedPreservedCompensationVector(routedError, []);
+    expect(
+      failureEvents(routedError).map((event) => ({
+        phase: event.phase,
+        value: event.value
+      }))
+    ).toEqual([
+      { phase: "body", value: typedFailure },
+      { phase: "final_release", value: typedFailure }
+    ]);
+    expect(orderedDistinctFailures(routedError)).toEqual([typedFailure]);
+    repeatReleaseInjection = false;
+    releaseInjection = undefined;
 
     // Distinct-error case: both failures are folded, the release failure
     // exactly once as an ordered compensation.
@@ -8266,11 +8282,363 @@ describe("backend workspace and health routes", () => {
     expectOrderedPreservedCompensationVector(distinctAuthorityError, [
       distinctReleaseFailure
     ]);
-    // The typed primary is transported exactly once, via the envelope's
-    // semantic-primary channel (asserted above); zero occurrences in the
-    // cause/errors graph proves it was never duplicated as a compensation.
-    expect(countErrorGraphIdentity(routedError, typedFailure)).toBe(0);
+    // The exact typed root is transported once in the ledger identity view.
+    expect(countErrorGraphIdentity(routedError, typedFailure)).toBe(1);
     expect(countErrorGraphIdentity(routedError, distinctReleaseFailure)).toBe(1);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S35-P62-03 backend adapter preserves equal falsy body and recovery occurrences", async () => {
+    for (const [index, value] of [undefined, null, false, 0, ""].entries()) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      let routedError: unknown;
+      const app = createBackendApi({
+        workspaceRoot,
+        taskRouteErrorSinkForTest: (error) => {
+          routedError = error;
+        },
+        taskServiceFactory: (options) => {
+          const service = createTaskCardService(options);
+          return {
+            ...service,
+            createTaskForIdempotency: async () => {
+              throw value;
+            }
+          };
+        },
+        idempotencyServiceFactory: (options) => {
+          const service = createIdempotencyRecordService(options);
+          return {
+            ...service,
+            recoverFailedRecordAfterRollback: async (input) => {
+              await service.recoverFailedRecordAfterRollback(input);
+              throw value;
+            }
+          };
+        }
+      });
+
+      const response = await postTask(app, validTaskCreateBody(), {
+        "Idempotency-Key": `task:create:s35-falsy-${index}`
+      });
+      expect(response.status).toBe(500);
+      const ledger = failureLedger(routedError);
+      expect(ledger).toBeDefined();
+      expect(ledger!.events.map((event) => event.value)).toEqual([value, value]);
+      expect(ledger!.events.map((event) => event.phase)).toEqual([
+        "body",
+        "settlement"
+      ]);
+      expect(ledger!.events[0]!.occurrenceId).not.toBe(
+        ledger!.events[1]!.occurrenceId
+      );
+      expect(orderedDistinctCompensationFailures(routedError)).toEqual([value]);
+      const replay = await createIdempotencyRecordService({ workspaceRoot }).lookupReplay({
+        scope: "task",
+        key: `task:create:s35-falsy-${index}`,
+        requestDigest: sha256Hex(
+          canonicalJson({
+            ...validTaskCreateBody(),
+            created_by: DEFAULT_TASK_CREATED_BY
+          })
+        )
+      });
+      expect(replay.status).toBe("incomplete");
+      if (replay.status === "incomplete") {
+        expect(replay.record.status).toBe("failed");
+      }
+    }
+
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const shared = new Error("S35 reused backend rejection");
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          createTaskForIdempotency: async () => {
+            throw shared;
+          }
+        };
+      },
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          recoverFailedRecordAfterRollback: async (input) => {
+            await service.recoverFailedRecordAfterRollback(input);
+            throw shared;
+          }
+        };
+      }
+    });
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": "task:create:s35-reused-error"
+    });
+    expect(response.status).toBe(500);
+    expect(failureEvents(routedError).map((event) => event.value)).toEqual([
+      shared,
+      shared
+    ]);
+    expect(failureEvents(routedError).map((event) => event.phase)).toEqual([
+      "body",
+      "settlement"
+    ]);
+    expect(orderedDistinctFailures(routedError)).toEqual([shared]);
+    expect(orderedDistinctCompensationFailures(routedError)).toEqual([]);
+  });
+
+  test("S35-P62-05 stale-guard cleanup compound release keeps the exact HTTP 422 primary", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskBody = validTaskCreateBody();
+    const idempotencyKey = "task:create:s35-stale-guard-compound-release";
+    const requestDigest = taskCreateRequestDigest(taskBody);
+    const guardPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`
+    );
+    const cleanupLockPath = join(
+      workspaceRoot,
+      "tasks",
+      "_idempotency",
+      "task",
+      `${sha256Hex(`transition-cleanup:${idempotencyKey}`)}.guard-cleanup`
+    );
+    const seedService = createIdempotencyRecordService({ workspaceRoot });
+    const acquired = await seedService.beginRecord({
+      scope: "task",
+      key: idempotencyKey,
+      requestDigest
+    });
+    const failed = await seedService.failRecord({
+      scope: "task",
+      key: idempotencyKey,
+      requestDigest
+    });
+    const staleGuard = {
+      guard_id: "s35-stale-guard-compound-release",
+      owner_pid: 9_999_999,
+      acquired_at_ms: Date.now() - 31_000,
+      acquired_at: "2026-07-18T10:00:00.000Z"
+    };
+    await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, {
+      flag: "wx",
+      mode: 0o600
+    });
+    const typedPrimary = new TaskServiceError({
+      code: "record_malformed",
+      status: 422,
+      category: "idempotency_conflict",
+      message: "S35 exact stale-guard cleanup primary.",
+      userMessage: "The stale idempotency transition could not be cleaned up.",
+      evidenceRefs: ["s35.backend.stale-guard-cleanup"],
+      retryable: true,
+      recommendedNextActions: ["Inspect the retained stale transition guard."]
+    });
+    const primaryDescriptors = Object.getOwnPropertyDescriptors(typedPrimary);
+    const releaseFailure = new Error(
+      "S35 stale-guard cleanup-lock release failure"
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let cleanupHookCalls = 0;
+    let matchingReleaseCalls = 0;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      idempotencyServiceFactory: (options) =>
+        createIdempotencyRecordService({
+          ...options,
+          transitionGuardHooks: {
+            beforeStaleGuardCleanup: () => {
+              cleanupHookCalls += 1;
+              throw typedPrimary;
+            }
+          }
+        })
+    });
+
+    const response = await runWithWorkspaceRecordPublicationHooks(
+      {
+        beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+          if (path !== cleanupLockPath || operation !== "conditional_delete") return;
+          matchingReleaseCalls += 1;
+          if (matchingReleaseCalls === 1) return;
+          throw releaseFailure;
+        }
+      },
+      () =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            beforeExactFailureSettlement: ({ path }) => {
+              if (path === cleanupLockPath) throw releaseFailure;
+            }
+          },
+          () => postTask(app, taskBody, { "Idempotency-Key": idempotencyKey })
+        )
+    );
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(acquired.status).toBe("acquired");
+    expect(failed.status).toBe("failed");
+    expect(response.status).toBe(422);
+    expect(body.error.category).toBe(typedPrimary.category);
+    expect(body.error.message).toBe(typedPrimary.message);
+    expect(body.error.evidence_refs).toEqual(typedPrimary.evidenceRefs);
+    expect(body.error.message).not.toBe("Unexpected backend route failure.");
+    expect(routedError).toBe(typedPrimary);
+    expect(taskServiceErrorAtBoundary(routedError)).toBe(typedPrimary);
+    expect((routedError as TaskServiceError).code).toBe(typedPrimary.code);
+    expect(Object.getOwnPropertyDescriptors(typedPrimary)).toEqual(primaryDescriptors);
+    expect(cleanupHookCalls).toBe(1);
+    expect(matchingReleaseCalls).toBe(2);
+    const events = failureEvents(routedError);
+    expect(events.map((event) => event.phase)).toEqual([
+      "body",
+      "body",
+      "settlement",
+      "settlement",
+      "initial_release",
+      "settlement",
+      "initial_release",
+      "final_release",
+      "initial_release"
+    ]);
+    expect(events[0]?.value).toBe(typedPrimary);
+    const releaseEvents = events.filter((event) => event.value === releaseFailure);
+    expect(releaseEvents.map((event) => event.phase)).toEqual([
+      "body",
+      "settlement"
+    ]);
+    expect(releaseEvents[0]?.occurrenceId).not.toBe(
+      releaseEvents[1]?.occurrenceId
+    );
+    expect(new Set(events.map((event) => event.occurrenceId)).size).toBe(
+      events.length
+    );
+    expect(errorGraphContainsIdentity(routedError, releaseFailure)).toBe(true);
+    expect(await seedService.getRecord("task", idempotencyKey)).toEqual(failed);
+    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(staleGuard);
+    await expectPathMissing(cleanupLockPath);
+    expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([]);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("S35-P62-04 keyed TaskCard cleanup keeps a one-shot typed Proxy as exact HTTP 409", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const taskId = "TASK-s35-keyed-cleanup";
+    const snapshotPath = join(workspaceRoot, "tasks", taskId, "snapshot.json");
+    const idempotencyKey = "task:create:s35-keyed-cleanup";
+    const primaryTarget = Object.freeze(
+      new TaskServiceError({
+        code: "task_snapshot_mismatch",
+        status: 409,
+        category: "workspace_conflict",
+        message: "S35 keyed exact callback primary.",
+        userMessage: "The keyed task snapshot callback rejected the exact generation.",
+        evidenceRefs: ["s35.backend.callback"],
+        retryable: true,
+        recommendedNextActions: ["Inspect the keyed callback evidence."]
+      })
+    );
+    const primaryState = oneShotTaskServiceErrorProxy(primaryTarget);
+    const primary = primaryState.proxy;
+    const cleanupMarker = new Error("S35 keyed snapshot cleanup failure");
+    const primaryDescriptors = Object.getOwnPropertyDescriptors(primary);
+    const cleanupDescriptors = Object.getOwnPropertyDescriptors(cleanupMarker);
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    let routedError: unknown;
+    let cleanupAttempts = 0;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      taskRouteErrorSinkForTest: (error) => {
+        routedError = error;
+      },
+      taskSnapshotWriteHooks: {
+        afterSnapshotWrite: () => {
+          throw primary;
+        }
+      }
+    });
+
+    const response = await runWithWorkspaceRecordPublicationHooks(
+      {
+        beforeAuthorityOwnedUnlink: ({ path, operation }) => {
+          if (path !== snapshotPath || operation !== "conditional_delete") return;
+          cleanupAttempts += 1;
+          throw cleanupMarker;
+        }
+      },
+      () => postTask(app, validTaskCreateBody(), { "Idempotency-Key": idempotencyKey })
+    );
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(409);
+    expect(body.error.category).toBe(primary.category);
+    expect(body.error.message).toBe(primary.message);
+    expect(body.error.message).not.toBe("Unexpected backend route failure.");
+    expect(cleanupAttempts).toBe(1);
+    expect(routedError).toBe(primary);
+    expect((routedError as TaskServiceError).code).toBe("task_snapshot_mismatch");
+    expect(primaryState.brandReads).toBe(1);
+    expect(Object.getOwnPropertyDescriptors(primary)).toEqual(primaryDescriptors);
+    expect(Object.getOwnPropertyDescriptors(cleanupMarker)).toEqual(cleanupDescriptors);
+    const ledger = failureLedger(routedError);
+    expect(ledger).toBeDefined();
+    expect(ledger!.events).toHaveLength(3);
+    expect(ledger!.events[0]!.value).toBe(primary);
+    expect(ledger!.events.map((event) => event.phase)).toEqual([
+      "body",
+      "body",
+      "settlement"
+    ]);
+    const cleanupLedger = failureLedger(cleanupMarker);
+    expect(cleanupLedger?.events).toHaveLength(1);
+    expect(cleanupLedger?.events[0]?.value).toBe(cleanupMarker);
+    expect(
+      ledger!.events.filter(
+        (event) =>
+          event.occurrenceId === cleanupLedger?.events[0]?.occurrenceId
+      )
+    ).toEqual([cleanupLedger?.events[0]]);
+    expect(ledger!.events[2]?.value).toMatchObject({
+      name: "WorkspaceRecordConditionalDeleteError",
+      cause: cleanupMarker
+    });
+    expect(orderedDistinctFailures(routedError)).toHaveLength(3);
+    expect(await readFile(snapshotPath, "utf8")).toContain(taskId);
+    const replay = await createIdempotencyRecordService({ workspaceRoot }).lookupReplay({
+      scope: "task",
+      key: idempotencyKey,
+      requestDigest: sha256Hex(
+        canonicalJson({
+          ...validTaskCreateBody(),
+          created_by: DEFAULT_TASK_CREATED_BY
+        })
+      )
+    });
+    expect(replay.status).toBe("incomplete");
+    if (replay.status === "incomplete") expect(replay.record.status).toBe("failed");
+    expect(primaryState.brandReads).toBe(1);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
@@ -8521,11 +8889,7 @@ describe("backend workspace and health routes", () => {
     // vector with multiplicity, pinned at the inner fold's altitude.
     expectOrderedPreservedCompensationVector(routedError, [cancellationFailure]);
     expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
-    const envelope = (routedError as Error).cause;
-    expect(envelope).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(((envelope as PreservedErrorCompensationEnvelope).cause as AggregateError).message).toBe(
-      "Completed task consumption and local observation cancellation both failed."
-    );
+    expect(failureLedger(routedError)).toBeDefined();
 
     // The durable outcome is intact: the real completed record replays the
     // created task once the injected consumption denial clears.
@@ -9818,6 +10182,9 @@ function errorGraphContainsIdentity(
   target: unknown,
   seen = new Set<object>()
 ): boolean {
+  if (failureLedger(root)) {
+    return orderedDistinctFailures(root).some((value) => Object.is(value, target));
+  }
   if (root === target) return true;
   if ((typeof root !== "object" && typeof root !== "function") || root === null) {
     return false;
@@ -9841,6 +10208,7 @@ function errorGraphContainsIdentity(
 }
 
 function orderedPreservedCompensationVector(error: unknown): readonly unknown[] {
+  if (failureLedger(error)) return orderedDistinctCompensationFailures(error);
   const envelope =
     error instanceof PreservedErrorCompensationEnvelope
       ? error
@@ -9868,6 +10236,9 @@ function countErrorGraphIdentity(
   target: unknown,
   seen = new Set<object>()
 ): number {
+  if (failureLedger(root)) {
+    return orderedDistinctFailures(root).filter((value) => Object.is(value, target)).length;
+  }
   let count = root === target ? 1 : 0;
   if ((typeof root !== "object" && typeof root !== "function") || root === null) {
     return count;
@@ -9888,6 +10259,36 @@ function countErrorGraphIdentity(
   return count;
 }
 
+function countRepresentedErrorGraphIdentity(
+  root: unknown,
+  target: unknown,
+  ancestors = new Set<unknown>()
+): number {
+  if (failureLedger(root)) {
+    return orderedDistinctFailures(root).filter((value) => Object.is(value, target)).length;
+  }
+  if (root === target) return 1;
+  if (!(root instanceof Error) || ancestors.has(root)) return 0;
+  const nextAncestors = new Set(ancestors);
+  nextAncestors.add(root);
+  let count = 0;
+  const semanticPrimary = semanticPrimaryError(root);
+  if (semanticPrimary && semanticPrimary !== root) {
+    count += countRepresentedErrorGraphIdentity(
+      semanticPrimary,
+      target,
+      nextAncestors
+    );
+  }
+  if (root instanceof AggregateError) {
+    for (const error of root.errors) {
+      count += countRepresentedErrorGraphIdentity(error, target, nextAncestors);
+    }
+  }
+  count += countRepresentedErrorGraphIdentity(root.cause, target, nextAncestors);
+  return count;
+}
+
 async function postTask(
   app: ReturnType<typeof createBackendApi>,
   body: CreateTaskInput,
@@ -9898,6 +10299,28 @@ async function postTask(
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body)
   });
+}
+
+function oneShotTaskServiceErrorProxy(target: TaskServiceError): Readonly<{
+  proxy: TaskServiceError;
+  readonly brandReads: number;
+}> {
+  let brandReads = 0;
+  const proxy = new Proxy(target, {
+    getPrototypeOf: (candidate) => {
+      brandReads += 1;
+      if (brandReads > 1) {
+        throw new Error("TaskServiceError Proxy brand was observed more than once.");
+      }
+      return Reflect.getPrototypeOf(candidate);
+    }
+  });
+  return {
+    proxy,
+    get brandReads() {
+      return brandReads;
+    }
+  };
 }
 
 async function postRawTask(

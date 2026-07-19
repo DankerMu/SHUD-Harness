@@ -9,8 +9,14 @@ import {
   type IdempotencyScope
 } from "../schemas/idempotency";
 import { TaskServiceError, isSafeTaskId } from "./task-card-service";
-import { runWithPreservedRelease } from "./compensation-error-preservation";
-import { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
+import {
+  failureLedger,
+  type FailurePhase
+} from "./compensation-error-preservation";
+import {
+  preserveTaskServiceErrorCompensationCompatibility,
+  taskServiceErrorAtBoundary
+} from "./task-service-error-compensation";
 import {
   WorkspaceRecordConditionalDeleteError,
   cancelWorkspaceRecordCleanupPermit,
@@ -43,64 +49,73 @@ async function runWithIdempotencyRelease<T>(
     releaseReason: unknown
   ) => Promise<void>
 ): Promise<T> {
-  return await runWithPreservedRelease(
-    body,
-    release,
-    IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE,
-    settleFulfilledValueAfterReleaseFailure,
-    preserveAuthorityTransportAwareCombinedFailure
-  );
+  let bodyOutcome:
+    | { readonly status: "fulfilled"; readonly value: T }
+    | { readonly status: "rejected"; readonly reason: unknown };
+  try {
+    bodyOutcome = { status: "fulfilled", value: await body() };
+  } catch (reason) {
+    bodyOutcome = { status: "rejected", reason };
+  }
+  let releaseOutcome:
+    | { readonly status: "fulfilled" }
+    | { readonly status: "rejected"; readonly reason: unknown };
+  try {
+    await release();
+    releaseOutcome = { status: "fulfilled" };
+  } catch (reason) {
+    releaseOutcome = { status: "rejected", reason };
+  }
+  if (bodyOutcome.status === "rejected") {
+    if (releaseOutcome.status === "rejected") {
+      throw preserveIdempotencyReleaseFailureOccurrences(
+        bodyOutcome.reason,
+        [releaseOutcome.reason],
+        IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE,
+        "body",
+        ["initial_release"]
+      );
+    }
+    throw bodyOutcome.reason;
+  }
+  if (releaseOutcome.status === "rejected") {
+    if (settleFulfilledValueAfterReleaseFailure) {
+      try {
+        await settleFulfilledValueAfterReleaseFailure(
+          bodyOutcome.value,
+          releaseOutcome.reason
+        );
+      } catch (settlementReason) {
+        throw preserveIdempotencyReleaseFailureOccurrences(
+          releaseOutcome.reason,
+          [settlementReason],
+          IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE,
+          "initial_release",
+          ["settlement"]
+        );
+      }
+    }
+    throw releaseOutcome.reason;
+  }
+  return bodyOutcome.value;
 }
 
-/**
- * Root C (V33-03): a caller-thrown authority-transport wrapper (an Error
- * exposing the inner failure via `authorityError`, e.g. the backend's
- * CompletedTaskSnapshotAuthorityUnknownError) must keep its INNER typed
- * primary reachable through the caller's one-level unwrap. The fold
- * preserves the inner error with the release failure as an ordered
- * compensation and re-wraps with the same constructor.
- */
-function preserveAuthorityTransportAwareCombinedFailure(
+export function preserveIdempotencyReleaseFailureOccurrences(
   primary: unknown,
   compensations: readonly unknown[],
-  aggregateMessage: string
+  aggregateMessage: string,
+  primaryPhase: FailurePhase = "body",
+  compensationPhases: readonly FailurePhase[] = compensations.map(
+    () => "settlement"
+  )
 ): unknown {
-  // Root C (V33-13): never count one occurrence twice — a compensation
-  // candidate that IS the primary is already represented by the primary
-  // itself, so a memoized rejection folded into itself yields primary-only.
-  const distinctCompensations = compensations.filter(
-    (candidate) => !Object.is(primary, candidate)
-  );
-  if (distinctCompensations.length === 0) return primary;
-  if (
-    primary instanceof Error &&
-    primary.name === "CompletedTaskSnapshotAuthorityUnknownError" &&
-    "authorityError" in primary
-  ) {
-    const authorityError =
-      (primary as Error & { authorityError: unknown }).authorityError;
-    const innerDistinctCompensations = distinctCompensations.filter(
-      (candidate) => !Object.is(authorityError, candidate)
-    );
-    if (innerDistinctCompensations.length === 0) return primary;
-    try {
-      const folded = preserveTaskServiceErrorCompensationCompatibility(
-        authorityError,
-        innerDistinctCompensations,
-        aggregateMessage
-      );
-      return Reflect.construct(
-        primary.constructor as new (inner: unknown) => Error,
-        [folded]
-      );
-    } catch {
-      // Fall through to the wrapper-blind fold when reconstruction fails.
-    }
-  }
+  if (compensations.length === 0) return primary;
   return preserveTaskServiceErrorCompensationCompatibility(
     primary,
-    distinctCompensations,
-    aggregateMessage
+    compensations,
+    aggregateMessage,
+    primaryPhase,
+    compensationPhases
   );
 }
 
@@ -479,13 +494,14 @@ export function createIdempotencyRecordService(
     try {
       return await transition();
     } catch (error) {
+      const taskServiceError = taskServiceErrorAtBoundary(error);
       if (
-        error instanceof TaskServiceError &&
-        malformedIdempotencyTransitionGuardErrors.has(error)
+        taskServiceError &&
+        malformedIdempotencyTransitionGuardErrors.has(taskServiceError)
       ) {
         throw error;
       }
-      if (!(error instanceof TaskServiceError) || error.code !== "record_malformed") {
+      if (taskServiceError?.code !== "record_malformed") {
         throw error;
       }
     }
@@ -555,13 +571,14 @@ export function createIdempotencyRecordService(
       if (input.expectedCompletedAuthority?.mutationAuthority) {
         throw error;
       }
+      const taskServiceError = taskServiceErrorAtBoundary(error);
       if (
-        error instanceof TaskServiceError &&
-        malformedIdempotencyTransitionGuardErrors.has(error)
+        taskServiceError &&
+        malformedIdempotencyTransitionGuardErrors.has(taskServiceError)
       ) {
         throw error;
       }
-      if (!(error instanceof TaskServiceError) || error.code !== "record_malformed") {
+      if (taskServiceError?.code !== "record_malformed") {
         throw error;
       }
     }
@@ -656,7 +673,8 @@ export function createIdempotencyRecordService(
       const observation = await observeJsonRecordForCleanup(
         recordPath,
         evidenceRef,
-        IdempotencyRecordSchema
+        IdempotencyRecordSchema,
+        workspaceRoot
       );
       if (observation.status === "missing") {
         throw missingTransitionRecordError(
@@ -738,7 +756,8 @@ export function createIdempotencyRecordService(
         observation = await observeJsonRecordForCleanup(
           guardPath,
           evidenceRef,
-          IdempotencyTransitionGuardSchema
+          IdempotencyTransitionGuardSchema,
+          workspaceRoot
         );
         break;
       } catch (error) {
@@ -1410,7 +1429,8 @@ export function createIdempotencyRecordService(
             const exact = await observeJsonRecordForCleanup(
               recordPath,
               evidenceRef,
-              IdempotencyRecordSchema
+              IdempotencyRecordSchema,
+              workspaceRoot
             );
             if (exact.status === "missing") {
               retryWithCurrentAuthority = true;
@@ -1685,7 +1705,8 @@ export function createIdempotencyRecordService(
           const exact = await observeJsonRecordForCleanup(
             recordPath,
             evidenceRef,
-            IdempotencyRecordSchema
+            IdempotencyRecordSchema,
+            workspaceRoot
           );
           if (exact.status === "missing") {
             throw missingTransitionRecordError(
@@ -2055,7 +2076,8 @@ async function removeStaleIdempotencyTransitionGuard(
     observation = await observeJsonRecordForCleanup(
       guardPath,
       evidenceRef,
-      IdempotencyTransitionGuardSchema
+      IdempotencyTransitionGuardSchema,
+      workspaceRoot
     );
   } catch (error) {
     if (isRetryableWorkspaceRecordAuthorityContention(error)) return "blocked";
@@ -2120,7 +2142,8 @@ async function removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
     observation = await observeJsonRecordForCleanup(
       guardPath,
       evidenceRef,
-      IdempotencyTransitionGuardSchema
+      IdempotencyTransitionGuardSchema,
+      workspaceRoot
     );
   } catch (error) {
     if (isRetryableWorkspaceRecordAuthorityContention(error)) {
@@ -2327,7 +2350,11 @@ async function acquireIdempotencyTransitionCleanupLock(
       };
     }
 
-    if (await removeStaleIdempotencyTransitionCleanupLock(cleanupLockPath, evidenceRef)) {
+    if (await removeStaleIdempotencyTransitionCleanupLock(
+      workspaceRoot,
+      cleanupLockPath,
+      evidenceRef
+    )) {
       continue;
     }
 
@@ -2340,6 +2367,7 @@ async function acquireIdempotencyTransitionCleanupLock(
 }
 
 async function removeStaleIdempotencyTransitionCleanupLock(
+  workspaceRoot: string,
   cleanupLockPath: string,
   evidenceRef: string
 ): Promise<boolean> {
@@ -2348,7 +2376,8 @@ async function removeStaleIdempotencyTransitionCleanupLock(
     observation = await observeJsonRecordForCleanup(
       cleanupLockPath,
       evidenceRef,
-      IdempotencyTransitionGuardSchema
+      IdempotencyTransitionGuardSchema,
+      workspaceRoot
     );
   } catch (error) {
     if (isRetryableWorkspaceRecordAuthorityContention(error)) return false;
@@ -2390,7 +2419,8 @@ async function releaseOwnedIdempotencyTransitionArtifact(
   } catch (error) {
     if (
       error instanceof WorkspaceRecordConditionalDeleteError &&
-      error.mutationPhase === "pre_mutation"
+      error.mutationPhase === "pre_mutation" &&
+      error.preMutationDisposition === "benign_convergence"
     ) {
       return;
     }
@@ -2437,14 +2467,21 @@ function malformedIdempotencyTransitionGuardError(
 }
 
 function isPreMutationIdempotencyArtifactAuthorityChange(error: unknown): boolean {
+  // A trusted ledger means a later release/settlement occurrence was folded
+  // into this carrier. Do not reclassify that combined failure by inspecting
+  // the semantic primary's raw workspace-delete cause.
+  if (failureLedger(error)) return false;
   return (
     error instanceof TaskServiceError &&
     error.cause instanceof WorkspaceRecordConditionalDeleteError &&
-    error.cause.mutationPhase === "pre_mutation"
+    error.cause.mutationPhase === "pre_mutation" &&
+    error.cause.preMutationDisposition === "benign_convergence"
   );
 }
 
 function isRetryableWorkspaceRecordAuthorityContention(error: unknown): boolean {
+  // Observation admission errors are classified here before release folding;
+  // retaining the raw predicate cannot re-read a trusted ledger primary.
   return (
     error instanceof TaskServiceError &&
     error.status === 409 &&

@@ -1,0 +1,2261 @@
+diff --git a/packages/backend/src/routes/index.test.ts b/packages/backend/src/routes/index.test.ts
+index 62822ec..cd68877 100644
+--- a/packages/backend/src/routes/index.test.ts
++++ b/packages/backend/src/routes/index.test.ts
+@@ -7622,8 +7622,8 @@ describe("backend workspace and health routes", () => {
+     const releasePrimary = semanticPrimaryError(semanticPrimaryError(routedError)?.cause);
+     expect(errorGraphContainsIdentity(releasePrimary, releaseFailure)).toBe(true);
+     expect(errorGraphContainsIdentity(releasePrimary, settlementFailure)).toBe(false);
+-    expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
+-    expect(countErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
++    expect(countRepresentedErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
++    expect(countRepresentedErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
+     // Every transported resource is settled on the guard-release throw window:
+     // record + snapshot permits, mutexes, pinned fds, and the cache claim.
+     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+@@ -7760,8 +7760,8 @@ describe("backend workspace and health routes", () => {
+       const releasePrimary = semanticPrimaryError(semanticPrimaryError(routedError)?.cause);
+       expect(errorGraphContainsIdentity(releasePrimary, releaseFailure)).toBe(true);
+       expect(errorGraphContainsIdentity(releasePrimary, settlementFailure)).toBe(false);
+-      expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
+-      expect(countErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
++      expect(countRepresentedErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
++      expect(countRepresentedErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
+       await unlink(guardPath);
+     }
+     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+@@ -7872,11 +7872,9 @@ describe("backend workspace and health routes", () => {
+     expect(await readFile(recordPath)).toEqual(recordBytes);
+     expect(await readFile(snapshotPath, "utf8")).toBe("{");
+
+-    // The out-of-band sibling swap left the guard's parent binding stale, so
+-    // the release preserved the guard generation (fail-closed, bounded by
+-    // IDEMPOTENCY_TRANSITION_GUARD_STALE_MS). Simulate the elapsed staleness
+-    // window so the replay drives immediately.
+-    await unlink(
++    // The out-of-band record swap advances the shared parent epoch, but the
++    // unchanged exact guard generation remains provable and is settled.
++    await expectPathMissing(
+       join(recordDirectory, `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`)
+     );
+     swapArmed = false;
+@@ -9888,6 +9886,33 @@ function countErrorGraphIdentity(
+   return count;
+ }
+
++function countRepresentedErrorGraphIdentity(
++  root: unknown,
++  target: unknown,
++  ancestors = new Set<unknown>()
++): number {
++  if (root === target) return 1;
++  if (!(root instanceof Error) || ancestors.has(root)) return 0;
++  const nextAncestors = new Set(ancestors);
++  nextAncestors.add(root);
++  let count = 0;
++  const semanticPrimary = semanticPrimaryError(root);
++  if (semanticPrimary && semanticPrimary !== root) {
++    count += countRepresentedErrorGraphIdentity(
++      semanticPrimary,
++      target,
++      nextAncestors
++    );
++  }
++  if (root instanceof AggregateError) {
++    for (const error of root.errors) {
++      count += countRepresentedErrorGraphIdentity(error, target, nextAncestors);
++    }
++  }
++  count += countRepresentedErrorGraphIdentity(root.cause, target, nextAncestors);
++  return count;
++}
++
+ async function postTask(
+   app: ReturnType<typeof createBackendApi>,
+   body: CreateTaskInput,
+diff --git a/packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts b/packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts
+index e0152c8..246055b 100644
+--- a/packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts
++++ b/packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts
+@@ -4,6 +4,7 @@ import {
+   fstat,
+   fstatSync,
+   mkdirSync,
++  readdirSync,
+   renameSync,
+   symlinkSync,
+   unlinkSync,
+@@ -75,6 +76,7 @@ import {
+   ensureWorkspaceRecordDirectory,
+   isWorkspaceRecordOversizeError,
+   observeJsonRecordForCleanup,
++  preserveWorkspaceRecordFailureGraph,
+   publishJsonRecordWithLifecycleCallbacks,
+   readJsonRecord,
+   removeWorkspaceRecordDirectoryIfEmpty,
+@@ -6847,6 +6849,1865 @@ describe("idempotency, lock, and artifact services", () => {
+     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+   });
+
++  test("Round 1 exact settlement commits atomically across isolation, restore, and sibling epochs", async () => {
++    for (const failureWindow of [
++      "post_isolation_commit",
++      "post_restore_commit",
++      "sibling_epoch"
++    ] as const) {
++      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++      tempRoots.push(tempRoot);
++      const schema = z.object({ id: z.string(), revision: z.number().int() });
++      const directorySegments = ["round-1-atomic-settlement", failureWindow] as const;
++      const fileName = "record.json";
++      const siblingFileName = "sibling.json";
++      const evidenceRef = `round-1.atomic.${failureWindow}`;
++      const record = { id: failureWindow, revision: 1 };
++      const path = workspaceRecordPath(
++        workspaceRoot,
++        [...directorySegments, fileName],
++        evidenceRef
++      );
++      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++      const initialMarker = new Error(`round-1 initial ${failureWindow}`);
++      const restoreMarker = new Error(`round-1 restore ${failureWindow}`);
++      const created = await createJsonRecordIfAbsentWithCleanupPermit(
++        workspaceRoot,
++        directorySegments,
++        fileName,
++        record,
++        evidenceRef,
++        schema
++      );
++      if (created.status !== "created") throw new Error("Expected Round 1 fixture.");
++      let initialInjected = false;
++
++      const result = await runWithWorkspaceRecordPublicationHooks(
++        {
++          beforeAuthorityOwnedUnlink: ({ path: removedPath, operation }) => {
++            if (
++              failureWindow === "post_restore_commit" &&
++              removedPath === path &&
++              operation === "conditional_delete"
++            ) {
++              initialInjected = true;
++              throw initialMarker;
++            }
++          }
++        },
++        () =>
++          runWithWorkspaceRecordCompensationTestHooks(
++            {
++              afterOwnedPathIsolationSyscall: ({ path: isolatedPublicPath, site }) => {
++                if (
++                  failureWindow === "post_isolation_commit" &&
++                  isolatedPublicPath === path &&
++                  site === "conditional_delete" &&
++                  !initialInjected
++                ) {
++                  initialInjected = true;
++                  throw initialMarker;
++                }
++              },
++              afterOwnedPathIsolation: ({ path: isolatedPublicPath, site }) => {
++                if (
++                  failureWindow === "sibling_epoch" &&
++                  isolatedPublicPath === path &&
++                  site === "conditional_delete" &&
++                  !initialInjected
++                ) {
++                  initialInjected = true;
++                  throw initialMarker;
++                }
++              },
++              afterOwnedIsolatedSourceUnlink: ({ path: restoredPath, site }) => {
++                if (
++                  failureWindow === "post_restore_commit" &&
++                  restoredPath === path &&
++                  site === "conditional_delete"
++                ) {
++                  throw restoreMarker;
++                }
++              },
++              beforeExactFailureSettlement: async ({ path: settlementPath }) => {
++                if (failureWindow !== "sibling_epoch" || settlementPath !== path) return;
++                await writeJsonRecord(
++                  workspaceRoot,
++                  directorySegments,
++                  siblingFileName,
++                  { id: "unrelated-sibling", revision: 1 },
++                  `${evidenceRef}.sibling`,
++                  schema
++                );
++              }
++            },
++            () =>
++              conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
++                created.cleanupPermit,
++                path,
++                evidenceRef,
++                schema,
++                { kind: "record", expected: record, matches: () => true }
++              )
++          )
++      );
++
++      expect(initialInjected).toBe(true);
++      expect(result).toEqual({ status: "recovered", settlement: "deleted" });
++      await expectPathMissing(path);
++      expect((await readdir(dirname(path))).filter(isOwnedRecordPath)).toEqual([]);
++      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
++      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
++    }
++  });
++
++  test("Round 1 exact settlement isolates A before a syscall-adjacent B replacement", async () => {
++    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++    tempRoots.push(tempRoot);
++    const schema = z.object({ id: z.string(), revision: z.number().int() });
++    const directorySegments = ["round-1-syscall-adjacent-successor"] as const;
++    const fileName = "record.json";
++    const evidenceRef = "round-1.syscall-adjacent-successor";
++    const record = { id: "generation-a", revision: 1 };
++    const successor = { id: "generation-b", revision: 2 };
++    const path = workspaceRecordPath(
++      workspaceRoot,
++      [...directorySegments, fileName],
++      evidenceRef
++    );
++    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++    const initialMarker = new Error("round-1 restored A marker");
++    const created = await createJsonRecordIfAbsentWithCleanupPermit(
++      workspaceRoot,
++      directorySegments,
++      fileName,
++      record,
++      evidenceRef,
++      schema
++    );
++    if (created.status !== "created") throw new Error("Expected Round 1 successor fixture.");
++    let initialInjected = false;
++    let successorGeneration: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
++
++    const result = await runWithWorkspaceRecordCompensationTestHooks(
++      {
++        afterOwnedPathIsolation: async ({ path: isolatedPublicPath, site }) => {
++          if (isolatedPublicPath !== path) return;
++          if (site === "conditional_delete" && !initialInjected) {
++            initialInjected = true;
++            throw initialMarker;
++          }
++          if (site === "exact_failure_settlement") {
++            await writeFile(path, `${JSON.stringify(successor, null, 2)}\n`, {
++              flag: "wx",
++              mode: 0o600
++            });
++            successorGeneration = await readFileWithIdentity(path);
++          }
++        }
++      },
++      () =>
++        conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
++          created.cleanupPermit,
++          path,
++          evidenceRef,
++          schema,
++          { kind: "record", expected: record, matches: () => true }
++        )
++    );
++
++    expect(result).toEqual({ status: "recovered", settlement: "deleted" });
++    expect(successorGeneration).toBeDefined();
++    expect(await readFileWithIdentity(path)).toEqual(successorGeneration!);
++    expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(successor);
++    expect((await readdir(dirname(path))).filter(isOwnedRecordPath)).toEqual([]);
++    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
++    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
++  });
++
++  test("Round 1 exact settlement rejects parent rebound and terminal namespace leaks", async () => {
++    for (const failureClass of [
++      "same_inode_parent_aba",
++      "different_inode_parent",
++      "persistent_namespace_cleanup"
++    ] as const) {
++      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++      tempRoots.push(tempRoot);
++      const schema = z.object({ id: z.string() });
++      const directorySegments = ["round-1-authority-classification", failureClass] as const;
++      const fileName = "record.json";
++      const evidenceRef = `round-1.authority.${failureClass}`;
++      const record = { id: failureClass };
++      const path = workspaceRecordPath(
++        workspaceRoot,
++        [...directorySegments, fileName],
++        evidenceRef
++      );
++      const created = await createJsonRecordIfAbsentWithCleanupPermit(
++        workspaceRoot,
++        directorySegments,
++        fileName,
++        record,
++        evidenceRef,
++        schema
++      );
++      if (created.status !== "created") throw new Error("Expected Round 1 authority fixture.");
++      const parentPath = dirname(path);
++      const displacedParentPath = `${parentPath}.displaced`;
++      const reboundBytes = Buffer.from("round-1 rebound sentinel\n");
++      const namespaceMarker = new Error("round-1 persistent namespace cleanup");
++      let initialInjected = false;
++
++      const failure = await captureThrownValue(() =>
++        runWithWorkspaceRecordPublicationHooks(
++          failureClass === "persistent_namespace_cleanup"
++            ? {
++                beforeAuthorityNamespaceRemoval: ({ path: namespacePath }) => {
++                  if (isAuthorityNamespaceForCanonicalPath(namespacePath, path)) {
++                    throw namespaceMarker;
++                  }
++                }
++              }
++            : {},
++          () =>
++            runWithWorkspaceRecordCompensationTestHooks(
++              {
++                afterOwnedPathIsolation: ({ path: isolatedPublicPath, site }) => {
++                  if (
++                    isolatedPublicPath === path &&
++                    site === "conditional_delete" &&
++                    !initialInjected
++                  ) {
++                    initialInjected = true;
++                    throw new Error(`round-1 initial ${failureClass}`);
++                  }
++                },
++                beforeExactFailureSettlement: async ({ path: settlementPath }) => {
++                  if (settlementPath !== path) return;
++                  if (failureClass === "same_inode_parent_aba") {
++                    await moveDirectoryAwayAndBack(parentPath);
++                  } else if (failureClass === "different_inode_parent") {
++                    await rename(parentPath, displacedParentPath);
++                    await mkdir(parentPath, { recursive: true });
++                    await writeFile(path, reboundBytes, { flag: "wx", mode: 0o600 });
++                  }
++                },
++                beforeTerminalAuthorityNamespaceRemovalSyscall: ({ path: namespacePath }) => {
++                  if (
++                    failureClass === "persistent_namespace_cleanup" &&
++                    isAuthorityNamespaceForCanonicalPath(namespacePath, path)
++                  ) {
++                    throw namespaceMarker;
++                  }
++                }
++              },
++              () =>
++                conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
++                  created.cleanupPermit,
++                  path,
++                  evidenceRef,
++                  schema,
++                  { kind: "record", expected: record, matches: () => true }
++                )
++            )
++        )
++      );
++
++      expect(initialInjected).toBe(true);
++      const pathSafetyFailure = findErrorNode(
++        failure,
++        (error) => error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
++      );
++      expect(pathSafetyFailure).toBeInstanceOf(TaskServiceError);
++      if (failureClass === "different_inode_parent") {
++        expect(await readFile(path)).toEqual(reboundBytes);
++        expect(await readJsonRecord(
++          join(displacedParentPath, fileName),
++          evidenceRef,
++          schema
++        )).toEqual(record);
++      }
++      if (failureClass === "persistent_namespace_cleanup") {
++        expect(errorTreeContains(failure, namespaceMarker)).toBe(true);
++      }
++    }
++  });
++
++  test("Round 1 exact settlement preserves pinned proof, close, and error identity failures", async () => {
++    for (const failureClass of [
++      "pinned_proof",
++      "final_close",
++      "same_identity",
++      "distinct_equal_text"
++    ] as const) {
++      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++      tempRoots.push(tempRoot);
++      const schema = z.object({ id: z.string() });
++      const directorySegments = ["round-1-error-resource", failureClass] as const;
++      const fileName = "record.json";
++      const evidenceRef = `round-1.error-resource.${failureClass}`;
++      const record = { id: failureClass };
++      const path = workspaceRecordPath(
++        workspaceRoot,
++        [...directorySegments, fileName],
++        evidenceRef
++      );
++      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++      const sharedMarker = new Error("round-1 shared failure identity");
++      const initialMarker = failureClass === "same_identity"
++        ? sharedMarker
++        : new Error("round-1 equal failure text");
++      const laterMarker = failureClass === "same_identity"
++        ? sharedMarker
++        : new Error("round-1 equal failure text");
++      const created = await createJsonRecordIfAbsentWithCleanupPermit(
++        workspaceRoot,
++        directorySegments,
++        fileName,
++        record,
++        evidenceRef,
++        schema
++      );
++      if (created.status !== "created") throw new Error("Expected Round 1 error fixture.");
++      let initialInjected = false;
++
++      const failure = await captureThrownValue(() =>
++        runWithWorkspaceRecordCompensationTestHooks(
++          {
++            afterOwnedPathIsolation: ({ path: isolatedPublicPath, site }) => {
++              if (
++                isolatedPublicPath === path &&
++                site === "conditional_delete" &&
++                !initialInjected
++              ) {
++                initialInjected = true;
++                throw initialMarker;
++              }
++            },
++            beforeCleanupPermitPinnedGenerationProof: ({ path: proofPath }) => {
++              if (failureClass === "pinned_proof" && proofPath === path) {
++                throw laterMarker;
++              }
++            },
++            beforeExactFailureSettlement: ({ path: settlementPath }) => {
++              if (
++                (failureClass === "same_identity" || failureClass === "distinct_equal_text") &&
++                settlementPath === path
++              ) {
++                throw laterMarker;
++              }
++            },
++            afterCleanupPermitPinnedFileClose: ({ path: closedPath }) => {
++              if (failureClass === "final_close" && closedPath === path) {
++                throw laterMarker;
++              }
++            }
++          },
++          () =>
++            conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
++              created.cleanupPermit,
++              path,
++              evidenceRef,
++              schema,
++              { kind: "record", expected: record, matches: () => true }
++            )
++        )
++      );
++
++      expect(initialInjected).toBe(true);
++      expect(semanticPrimaryError(failure)).toBeInstanceOf(
++        WorkspaceRecordConditionalDeleteError
++      );
++      if (failureClass === "same_identity") {
++        expect(countErrorGraphIdentity(failure, initialMarker)).toBe(1);
++      } else {
++        expect(errorTreeContains(failure, initialMarker)).toBe(true);
++      }
++      expect(countErrorGraphIdentity(failure, laterMarker)).toBe(
++        failureClass === "same_identity" ? 1 : 1
++      );
++      if (failureClass === "distinct_equal_text") {
++        expect(initialMarker).not.toBe(laterMarker);
++      }
++      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
++      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
++    }
++  });
++
++  test("Round 1 default exact-observation keeps missing-after-sibling as superseded", async () => {
++    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++    tempRoots.push(tempRoot);
++    const schema = z.object({ id: z.string() });
++    const directorySegments = ["round-1-default-observation"] as const;
++    const fileName = "record.json";
++    const siblingFileName = "sibling.json";
++    const evidenceRef = "round-1.default-observation";
++    const record = { id: "default-observation-a" };
++    const path = workspaceRecordPath(
++      workspaceRoot,
++      [...directorySegments, fileName],
++      evidenceRef
++    );
++    await writeJsonRecord(
++      workspaceRoot,
++      directorySegments,
++      fileName,
++      record,
++      evidenceRef,
++      schema
++    );
++    const observation = await observeJsonRecordForCleanup(path, evidenceRef, schema);
++    if (observation.status !== "record") throw new Error("Expected observed record.");
++    await writeJsonRecord(
++      workspaceRoot,
++      directorySegments,
++      siblingFileName,
++      { id: "default-observation-sibling" },
++      `${evidenceRef}.sibling`,
++      schema
++    );
++    await unlink(path);
++
++    expect(
++      await conditionalDeleteObservedJsonRecordWithCleanupPermit(
++        observation.cleanupPermit,
++        path,
++        evidenceRef,
++        schema,
++        { kind: "record", expected: record, matches: () => true }
++      )
++    ).toEqual({ status: "superseded" });
++  });
++
++  test("Round 1 public complete and fail settle guard and cleanup-lock generations exactly once", async () => {
++    for (const transition of ["complete", "fail"] as const) {
++      for (const artifact of ["guard", "cleanup-lock"] as const) {
++        for (const outcome of [
++          "restored_a",
++          "missing",
++          "different_b",
++          "same_fields_new_inode_b",
++          "initial_success"
++        ] as const) {
++          const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++          tempRoots.push(tempRoot);
++          const rawKey = `task:create:round-1-public-${transition}-${artifact}-${outcome}`;
++          const requestDigest = `digest-round-1-public-${transition}-${artifact}-${outcome}`;
++          const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
++          const cleanupLockPath = idempotencyTransitionCleanupLockPath(
++            workspaceRoot,
++            rawKey
++          );
++          const artifactPath = artifact === "guard" ? guardPath : cleanupLockPath;
++          const service = createIdempotencyRecordService({ workspaceRoot });
++          const begin = await service.beginRecord({
++            scope: "task",
++            key: rawKey,
++            requestDigest
++          });
++          const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++          const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++          const initialMarker = new Error(
++            `round-1 public ${transition} ${artifact} ${outcome}`
++          );
++          let initialInjected = false;
++          let settlementCount = 0;
++          let successorGeneration:
++            | Awaited<ReturnType<typeof readFileWithIdentity>>
++            | undefined;
++          const successorBytes = Buffer.from(
++            `${JSON.stringify({
++              guard_id: `round-1-successor-${transition}-${artifact}-${outcome}`,
++              owner_pid: process.pid,
++              acquired_at_ms: Date.now(),
++              acquired_at: new Date().toISOString()
++            })}\n`
++          );
++
++          const result = await runWithWorkspaceRecordCompensationTestHooks(
++            {
++              afterOwnedPathIsolation: ({ path, site }) => {
++                if (
++                  outcome !== "initial_success" &&
++                  path === artifactPath &&
++                  site === "conditional_delete" &&
++                  !initialInjected
++                ) {
++                  initialInjected = true;
++                  throw initialMarker;
++                }
++              },
++              beforeExactFailureSettlement: async ({ path }) => {
++                if (path !== artifactPath) return;
++                settlementCount += 1;
++                if (outcome === "restored_a") return;
++                if (outcome === "missing") {
++                  await unlink(path);
++                  return;
++                }
++                if (
++                  outcome === "different_b" ||
++                  outcome === "same_fields_new_inode_b"
++                ) {
++                  const replacementBytes = outcome === "same_fields_new_inode_b"
++                    ? await readFile(path)
++                    : successorBytes;
++                  await unlink(path);
++                  await writeFile(path, replacementBytes, {
++                    flag: "wx",
++                    mode: 0o600
++                  });
++                  successorGeneration = await readFileWithIdentity(path);
++                }
++              },
++              afterCleanupPermitPinnedFileClose: async ({ path }) => {
++                if (outcome !== "initial_success" || path !== artifactPath) return;
++                await writeFile(path, successorBytes, {
++                  flag: "wx",
++                  mode: 0o600
++                });
++                successorGeneration = await readFileWithIdentity(path);
++              }
++            },
++            () => transition === "complete"
++              ? service.completeRecord({
++                  scope: "task",
++                  key: rawKey,
++                  requestDigest,
++                  resultRef: `TASK-round-1-${artifact}-${outcome}`
++                })
++              : service.failRecord({ scope: "task", key: rawKey, requestDigest })
++          );
++
++          expect(begin.status).toBe("acquired");
++          expect(result).toMatchObject({
++            key: rawKey,
++            scope: "task",
++            request_digest: requestDigest,
++            status: transition === "complete" ? "completed" : "failed"
++          });
++          expect(settlementCount).toBe(outcome === "initial_success" ? 0 : 1);
++          expect(initialInjected).toBe(outcome !== "initial_success");
++          if (outcome === "restored_a" || outcome === "missing") {
++            await expectPathMissing(artifactPath);
++          } else {
++            expect(successorGeneration).toBeDefined();
++            expect(await readFileWithIdentity(artifactPath)).toEqual(
++              successorGeneration!
++            );
++          }
++          expect(await service.getRecord("task", rawKey)).toEqual(result);
++          expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
++            authorityBaseline
++          );
++          expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
++            bindingBaseline
++          );
++        }
++      }
++    }
++  });
++
++  test("Round 1 public transition artifacts reject same-inode and different-inode parent rebound", async () => {
++    for (const transition of ["complete", "fail"] as const) {
++      for (const artifact of ["guard", "cleanup-lock"] as const) {
++        for (const rebound of ["same_inode_aba", "different_inode"] as const) {
++          const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++          tempRoots.push(tempRoot);
++          const rawKey = `task:create:round-1-public-parent-${transition}-${artifact}-${rebound}`;
++          const requestDigest = `digest-round-1-public-parent-${transition}-${artifact}-${rebound}`;
++          const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
++          const cleanupLockPath = idempotencyTransitionCleanupLockPath(
++            workspaceRoot,
++            rawKey
++          );
++          const artifactPath = artifact === "guard" ? guardPath : cleanupLockPath;
++          const parentPath = dirname(artifactPath);
++          const displacedParentPath = `${parentPath}.round-1-displaced`;
++          const reboundBytes = Buffer.from("round-1 external parent sentinel\n");
++          const service = createIdempotencyRecordService({ workspaceRoot });
++          const begin = await service.beginRecord({
++            scope: "task",
++            key: rawKey,
++            requestDigest
++          });
++          const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++          const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++          let initialInjected = false;
++          let parentRebound = false;
++
++          const failure = await captureThrownValue(() =>
++            runWithWorkspaceRecordCompensationTestHooks(
++              {
++                afterOwnedPathIsolation: ({ path, site }) => {
++                  if (
++                    path === artifactPath &&
++                    site === "conditional_delete" &&
++                    !initialInjected
++                  ) {
++                    initialInjected = true;
++                    throw new Error(
++                      `round-1 public parent initial ${transition} ${artifact} ${rebound}`
++                    );
++                  }
++                },
++                beforeExactFailureSettlement: async ({ path }) => {
++                  if (path !== artifactPath || parentRebound) return;
++                  parentRebound = true;
++                  if (rebound === "same_inode_aba") {
++                    await moveDirectoryAwayAndBack(parentPath);
++                    return;
++                  }
++                  await rename(parentPath, displacedParentPath);
++                  await mkdir(parentPath, { recursive: true });
++                  await writeFile(artifactPath, reboundBytes, {
++                    flag: "wx",
++                    mode: 0o600
++                  });
++                }
++              },
++              () => transition === "complete"
++                ? service.completeRecord({
++                    scope: "task",
++                    key: rawKey,
++                    requestDigest,
++                    resultRef: `TASK-round-1-public-parent-${artifact}-${rebound}`
++                  })
++                : service.failRecord({ scope: "task", key: rawKey, requestDigest })
++            )
++          );
++
++          expect(begin.status).toBe("acquired");
++          expect(initialInjected).toBe(true);
++          expect(parentRebound).toBe(true);
++          expect(findErrorNode(
++            failure,
++            (error) =>
++              error instanceof TaskServiceError &&
++              error.code === "workspace_path_not_safe"
++          )).toBeInstanceOf(TaskServiceError);
++          if (rebound === "different_inode") {
++            expect(await readFile(artifactPath)).toEqual(reboundBytes);
++          }
++          expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
++            authorityBaseline
++          );
++          expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
++            bindingBaseline
++          );
++        }
++      }
++    }
++  });
++
++  test("Phase 6.2 parent ABA followed by sibling mutation cannot restore exact-settlement authority", async () => {
++    {
++      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++      tempRoots.push(tempRoot);
++      const schema = z.object({ id: z.string() });
++      const directorySegments = ["phase-6-2-parent-continuity"] as const;
++      const fileName = "record.json";
++      const evidenceRef = "phase-6-2.parent-continuity.store";
++      const record = { id: "generation-a" };
++      const path = workspaceRecordPath(
++        workspaceRoot,
++        [...directorySegments, fileName],
++        evidenceRef
++      );
++      const parentPath = dirname(path);
++      const sentinelPath = join(parentPath, "external-sentinel");
++      const siblingPath = join(parentPath, "ephemeral-sibling");
++      const sentinelBytes = Buffer.from("phase-6-2 external sentinel\n");
++      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++      await mkdir(parentPath, { recursive: true });
++      await writeFile(sentinelPath, sentinelBytes, { flag: "wx", mode: 0o600 });
++      const created = await createJsonRecordIfAbsentWithCleanupPermit(
++        workspaceRoot,
++        directorySegments,
++        fileName,
++        record,
++        evidenceRef,
++        schema
++      );
++      if (created.status !== "created") throw new Error("Expected Phase 6.2 fixture.");
++      const generationA = await readFileWithIdentity(path);
++      let initialInjected = false;
++      let compositionInjected = false;
++
++      const failure = await captureThrownValue(() =>
++        runWithWorkspaceRecordCompensationTestHooks(
++          {
++            afterOwnedPathIsolation: ({ path: isolatedPublicPath, site }) => {
++              if (
++                isolatedPublicPath === path &&
++                site === "conditional_delete" &&
++                !initialInjected
++              ) {
++                initialInjected = true;
++                throw new Error("phase-6-2 store initial failure");
++              }
++            },
++            beforeExactFailureSettlement: async ({ path: settlementPath }) => {
++              if (settlementPath !== path || compositionInjected) return;
++              compositionInjected = true;
++              await moveDirectoryAwayAndBack(parentPath);
++              await writeFile(siblingPath, "ephemeral\n", {
++                flag: "wx",
++                mode: 0o600
++              });
++              await unlink(siblingPath);
++            }
++          },
++          () =>
++            conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
++              created.cleanupPermit,
++              path,
++              evidenceRef,
++              schema,
++              { kind: "record", expected: record, matches: () => true }
++            )
++        )
++      );
++
++      expect(initialInjected).toBe(true);
++      expect(compositionInjected).toBe(true);
++      expect(findErrorNode(
++        failure,
++        (error) =>
++          error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
++      )).toBeInstanceOf(TaskServiceError);
++      expect(await readFileWithIdentity(path)).toEqual(generationA);
++      expect(await readFile(sentinelPath)).toEqual(sentinelBytes);
++      expect((await readdir(parentPath)).filter(isOwnedRecordPath)).toEqual([]);
++      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
++      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
++    }
++
++    for (const transition of ["complete", "fail"] as const) {
++      for (const artifact of ["guard", "cleanup-lock"] as const) {
++        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++        tempRoots.push(tempRoot);
++        const rawKey = `task:create:phase-6-2-parent-${transition}-${artifact}`;
++        const requestDigest = `digest-phase-6-2-parent-${transition}-${artifact}`;
++        const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
++        const cleanupLockPath = idempotencyTransitionCleanupLockPath(
++          workspaceRoot,
++          rawKey
++        );
++        const artifactPath = artifact === "guard" ? guardPath : cleanupLockPath;
++        const parentPath = dirname(artifactPath);
++        const sentinelPath = join(parentPath, "phase-6-2-public-sentinel");
++        const siblingPath = join(parentPath, "phase-6-2-public-sibling");
++        const sentinelBytes = Buffer.from("phase-6-2 public external sentinel\n");
++        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++        await mkdir(parentPath, { recursive: true });
++        await writeFile(sentinelPath, sentinelBytes, { flag: "wx", mode: 0o600 });
++        const service = createIdempotencyRecordService({ workspaceRoot });
++        const begin = await service.beginRecord({
++          scope: "task",
++          key: rawKey,
++          requestDigest
++        });
++        let generationA: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
++        let initialInjected = false;
++        let compositionInjected = false;
++
++        const failure = await captureThrownValue(() =>
++          runWithWorkspaceRecordPublicationHooks(
++            {
++              beforeConditionalDelete: async ({ path, conditionStatus }) => {
++                if (
++                  path === artifactPath &&
++                  conditionStatus === "matched" &&
++                  generationA === undefined
++                ) {
++                  generationA = await readFileWithIdentity(path);
++                }
++              }
++            },
++            () =>
++              runWithWorkspaceRecordCompensationTestHooks(
++                {
++                  afterOwnedPathIsolation: ({ path, site }) => {
++                    if (
++                      path === artifactPath &&
++                      site === "conditional_delete" &&
++                      !initialInjected
++                    ) {
++                      initialInjected = true;
++                      throw new Error(
++                        `phase-6-2 public initial ${transition} ${artifact}`
++                      );
++                    }
++                  },
++                  beforeExactFailureSettlement: async ({ path }) => {
++                    if (path !== artifactPath || compositionInjected) return;
++                    compositionInjected = true;
++                    await moveDirectoryAwayAndBack(parentPath);
++                    await writeFile(siblingPath, "ephemeral\n", {
++                      flag: "wx",
++                      mode: 0o600
++                    });
++                    await unlink(siblingPath);
++                  }
++                },
++                () => transition === "complete"
++                  ? service.completeRecord({
++                      scope: "task",
++                      key: rawKey,
++                      requestDigest,
++                      resultRef: `TASK-phase-6-2-${artifact}`
++                    })
++                  : service.failRecord({ scope: "task", key: rawKey, requestDigest })
++              )
++          )
++        );
++
++        expect(begin.status).toBe("acquired");
++        expect(generationA).toBeDefined();
++        expect(initialInjected).toBe(true);
++        expect(compositionInjected).toBe(true);
++        expect(findErrorNode(
++          failure,
++          (error) =>
++            error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
++        )).toBeInstanceOf(TaskServiceError);
++        expect(await readFileWithIdentity(artifactPath)).toEqual(generationA!);
++        expect(await readFile(sentinelPath)).toEqual(sentinelBytes);
++        expect((await readdir(parentPath)).filter(isOwnedRecordPath)).toEqual([]);
++        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
++          authorityBaseline
++        );
++        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
++          bindingBaseline
++        );
++      }
++    }
++  });
++
++  test("Phase 6.2 error normalization represents nested initial identities exactly once", async () => {
++    for (const stage of ["settlement", "final_release"] as const) {
++      for (const wrapperKind of ["cause", "aggregate"] as const) {
++        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++        tempRoots.push(tempRoot);
++        const schema = z.object({ id: z.string() });
++        const directorySegments = ["phase-6-2-error-normalization", stage, wrapperKind] as const;
++        const fileName = "record.json";
++        const evidenceRef = `phase-6-2.error-normalization.${stage}.${wrapperKind}`;
++        const record = { id: `${stage}-${wrapperKind}` };
++        const path = workspaceRecordPath(
++          workspaceRoot,
++          [...directorySegments, fileName],
++          evidenceRef
++        );
++        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++        const initialMarker = new Error("phase-6-2 initial identity");
++        const independentMarker = new Error("phase-6-2 independent identity");
++        const laterWrapper = wrapperKind === "cause"
++          ? new Error("phase-6-2 later cause wrapper", { cause: initialMarker })
++          : new AggregateError(
++              [initialMarker, independentMarker],
++              "phase-6-2 later aggregate wrapper"
++            );
++        const created = await createJsonRecordIfAbsentWithCleanupPermit(
++          workspaceRoot,
++          directorySegments,
++          fileName,
++          record,
++          evidenceRef,
++          schema
++        );
++        if (created.status !== "created") {
++          throw new Error("Expected Phase 6.2 error fixture.");
++        }
++        let initialInjected = false;
++
++        const failure = await captureThrownValue(() =>
++          runWithWorkspaceRecordCompensationTestHooks(
++            {
++              afterOwnedPathIsolation: ({ path: isolatedPublicPath, site }) => {
++                if (
++                  isolatedPublicPath === path &&
++                  site === "conditional_delete" &&
++                  !initialInjected
++                ) {
++                  initialInjected = true;
++                  throw initialMarker;
++                }
++              },
++              beforeExactFailureSettlement: ({ path: settlementPath }) => {
++                if (stage === "settlement" && settlementPath === path) {
++                  throw laterWrapper;
++                }
++              },
++              afterCleanupPermitPinnedFileClose: ({ path: closedPath }) => {
++                if (stage === "final_release" && closedPath === path) {
++                  throw laterWrapper;
++                }
++              }
++            },
++            () =>
++              conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
++                created.cleanupPermit,
++                path,
++                evidenceRef,
++                schema,
++                { kind: "record", expected: record, matches: () => true }
++              )
++          )
++        );
++
++        expect(initialInjected).toBe(true);
++        expect(countErrorGraphIdentity(failure, initialMarker)).toBe(1);
++        expect(findErrorNode(
++          failure,
++          (error) => error.message === laterWrapper.message
++        )).toBeInstanceOf(Error);
++        expect(countErrorGraphIdentity(failure, independentMarker)).toBe(
++          wrapperKind === "aggregate" ? 1 : 0
++        );
++        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
++          authorityBaseline
++        );
++        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
++          bindingBaseline
++        );
++      }
++    }
++  });
++
++  test("Phase 6.2 re-audit invalidates exact authority across every workspace ancestor", async () => {
++    for (const ancestorKind of ["workspace_root", "intermediate"] as const) {
++      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++      tempRoots.push(tempRoot);
++      const schema = z.object({ id: z.string() });
++      const directorySegments = ["phase-6-2-reaudit", "middle", "records"] as const;
++      const fileName = "record.json";
++      const evidenceRef = `phase-6-2.reaudit.store.${ancestorKind}`;
++      const record = { id: ancestorKind };
++      const path = workspaceRecordPath(
++        workspaceRoot,
++        [...directorySegments, fileName],
++        evidenceRef
++      );
++      const parentPath = dirname(path);
++      const ancestorPath = ancestorKind === "workspace_root"
++        ? workspaceRoot
++        : join(workspaceRoot, directorySegments[0]);
++      const sentinelPath = join(parentPath, "external-sentinel");
++      const siblingPath = join(parentPath, "ephemeral-sibling");
++      const sentinelBytes = Buffer.from("phase-6-2 re-audit store sentinel\n");
++      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++      await mkdir(parentPath, { recursive: true });
++      await writeFile(sentinelPath, sentinelBytes, { flag: "wx", mode: 0o600 });
++      const created = await createJsonRecordIfAbsentWithCleanupPermit(
++        workspaceRoot,
++        directorySegments,
++        fileName,
++        record,
++        evidenceRef,
++        schema
++      );
++      if (created.status !== "created") throw new Error("Expected re-audit fixture.");
++      const generationA = await readFileWithIdentity(path);
++      let initialInjected = false;
++      let ancestorCompositionInjected = false;
++
++      const failure = await captureThrownValue(() =>
++        runWithWorkspaceRecordCompensationTestHooks(
++          {
++            afterOwnedPathIsolation: ({ path: isolatedPublicPath, site }) => {
++              if (
++                isolatedPublicPath === path &&
++                site === "conditional_delete" &&
++                !initialInjected
++              ) {
++                initialInjected = true;
++                throw new Error(`re-audit store initial ${ancestorKind}`);
++              }
++            },
++            beforeExactFailureSettlement: async ({ path: settlementPath }) => {
++              if (settlementPath !== path || ancestorCompositionInjected) return;
++              ancestorCompositionInjected = true;
++              await moveDirectoryAwayAndBack(ancestorPath);
++              await writeFile(siblingPath, "ephemeral\n", {
++                flag: "wx",
++                mode: 0o600
++              });
++              await unlink(siblingPath);
++            }
++          },
++          () =>
++            conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
++              created.cleanupPermit,
++              path,
++              evidenceRef,
++              schema,
++              { kind: "record", expected: record, matches: () => true }
++            )
++        )
++      );
++
++      expect(initialInjected).toBe(true);
++      expect(ancestorCompositionInjected).toBe(true);
++      expect(findErrorNode(
++        failure,
++        (error) =>
++          error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
++      )).toBeInstanceOf(TaskServiceError);
++      expect(await readFileWithIdentity(path)).toEqual(generationA);
++      expect(await readFile(sentinelPath)).toEqual(sentinelBytes);
++      expect((await readdir(parentPath)).filter(isOwnedRecordPath)).toEqual([]);
++      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
++      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
++    }
++
++    for (const transition of ["complete", "fail"] as const) {
++      for (const artifact of ["guard", "cleanup-lock"] as const) {
++        for (const ancestorKind of ["workspace_root", "intermediate"] as const) {
++          const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++          tempRoots.push(tempRoot);
++          const rawKey = `task:create:phase-6-2-reaudit-${transition}-${artifact}-${ancestorKind}`;
++          const requestDigest = `digest-phase-6-2-reaudit-${transition}-${artifact}-${ancestorKind}`;
++          const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
++          const cleanupLockPath = idempotencyTransitionCleanupLockPath(
++            workspaceRoot,
++            rawKey
++          );
++          const artifactPath = artifact === "guard" ? guardPath : cleanupLockPath;
++          const parentPath = dirname(artifactPath);
++          const ancestorPath = ancestorKind === "workspace_root"
++            ? workspaceRoot
++            : join(workspaceRoot, "tasks");
++          const sentinelPath = join(parentPath, "phase-6-2-reaudit-public-sentinel");
++          const siblingPath = join(parentPath, "phase-6-2-reaudit-public-sibling");
++          const sentinelBytes = Buffer.from("phase-6-2 re-audit public sentinel\n");
++          const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++          const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++          await mkdir(parentPath, { recursive: true });
++          await writeFile(sentinelPath, sentinelBytes, { flag: "wx", mode: 0o600 });
++          const service = createIdempotencyRecordService({ workspaceRoot });
++          const begin = await service.beginRecord({
++            scope: "task",
++            key: rawKey,
++            requestDigest
++          });
++          let generationA: Awaited<ReturnType<typeof readFileWithIdentity>> | undefined;
++          let initialInjected = false;
++          let ancestorCompositionInjected = false;
++
++          const failure = await captureThrownValue(() =>
++            runWithWorkspaceRecordPublicationHooks(
++              {
++                beforeConditionalDelete: async ({ path, conditionStatus }) => {
++                  if (
++                    path === artifactPath &&
++                    conditionStatus === "matched" &&
++                    generationA === undefined
++                  ) {
++                    generationA = await readFileWithIdentity(path);
++                  }
++                }
++              },
++              () =>
++                runWithWorkspaceRecordCompensationTestHooks(
++                  {
++                    afterOwnedPathIsolation: ({ path, site }) => {
++                      if (
++                        path === artifactPath &&
++                        site === "conditional_delete" &&
++                        !initialInjected
++                      ) {
++                        initialInjected = true;
++                        throw new Error(
++                          `re-audit public initial ${transition} ${artifact} ${ancestorKind}`
++                        );
++                      }
++                    },
++                    beforeExactFailureSettlement: async ({ path }) => {
++                      if (path !== artifactPath || ancestorCompositionInjected) return;
++                      ancestorCompositionInjected = true;
++                      await moveDirectoryAwayAndBack(ancestorPath);
++                      await writeFile(siblingPath, "ephemeral\n", {
++                        flag: "wx",
++                        mode: 0o600
++                      });
++                      await unlink(siblingPath);
++                    }
++                  },
++                  () => transition === "complete"
++                    ? service.completeRecord({
++                        scope: "task",
++                        key: rawKey,
++                        requestDigest,
++                        resultRef: `TASK-phase-6-2-reaudit-${artifact}-${ancestorKind}`
++                      })
++                    : service.failRecord({ scope: "task", key: rawKey, requestDigest })
++                )
++            )
++          );
++
++          expect(begin.status).toBe("acquired");
++          expect(generationA).toBeDefined();
++          expect(initialInjected).toBe(true);
++          expect(ancestorCompositionInjected).toBe(true);
++          expect(findErrorNode(
++            failure,
++            (error) =>
++              error instanceof TaskServiceError &&
++              error.code === "workspace_path_not_safe"
++          )).toBeInstanceOf(TaskServiceError);
++          expect(await readFileWithIdentity(artifactPath)).toEqual(generationA!);
++          expect(await readFile(sentinelPath)).toEqual(sentinelBytes);
++          expect((await readdir(parentPath)).filter(isOwnedRecordPath)).toEqual([]);
++          expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
++            authorityBaseline
++          );
++          expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
++            bindingBaseline
++          );
++        }
++      }
++    }
++
++    for (const ancestorKind of ["workspace_root", "intermediate"] as const) {
++      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++      tempRoots.push(tempRoot);
++      const rawKey = `task:create:phase-6-2-reaudit-observed-${ancestorKind}`;
++      const requestDigest = `digest-phase-6-2-reaudit-observed-${ancestorKind}`;
++      const service = createIdempotencyRecordService({ workspaceRoot });
++      const begin = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
++      const failed = await service.failRecord({ scope: "task", key: rawKey, requestDigest });
++      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
++      const parentPath = dirname(guardPath);
++      const ancestorPath = ancestorKind === "workspace_root"
++        ? workspaceRoot
++        : join(workspaceRoot, "tasks");
++      const sentinelPath = join(parentPath, "phase-6-2-reaudit-observed-sentinel");
++      const siblingPath = join(parentPath, "phase-6-2-reaudit-observed-sibling");
++      const sentinelBytes = Buffer.from("phase-6-2 re-audit observed sentinel\n");
++      const staleGuard = {
++        guard_id: `phase-6-2-reaudit-observed-${ancestorKind}`,
++        owner_pid: 9_999_999,
++        acquired_at_ms: Date.now() - 31_000,
++        acquired_at: "2026-07-18T12:00:00.000Z"
++      };
++      await writeFile(sentinelPath, sentinelBytes, { flag: "wx", mode: 0o600 });
++      await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, {
++        flag: "wx",
++        mode: 0o600
++      });
++      const generationA = await readFileWithIdentity(guardPath);
++      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++      let initialInjected = false;
++      let ancestorCompositionInjected = false;
++
++      const failure = await captureThrownValue(() =>
++        runWithWorkspaceRecordCompensationTestHooks(
++          {
++            afterOwnedPathIsolation: ({ path, site }) => {
++              if (
++                path === guardPath &&
++                site === "conditional_delete" &&
++                !initialInjected
++              ) {
++                initialInjected = true;
++                throw new Error(`re-audit observed initial ${ancestorKind}`);
++              }
++            },
++            beforeExactFailureSettlement: async ({ path }) => {
++              if (path !== guardPath || ancestorCompositionInjected) return;
++              ancestorCompositionInjected = true;
++              await moveDirectoryAwayAndBack(ancestorPath);
++              await writeFile(siblingPath, "ephemeral\n", {
++                flag: "wx",
++                mode: 0o600
++              });
++              await unlink(siblingPath);
++            }
++          },
++          () => service.beginRecord({ scope: "task", key: rawKey, requestDigest })
++        )
++      );
++
++      expect(begin.status).toBe("acquired");
++      expect(failed.status).toBe("failed");
++      expect(initialInjected).toBe(true);
++      expect(ancestorCompositionInjected).toBe(true);
++      expect(findErrorNode(
++        failure,
++        (error) =>
++          error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
++      )).toBeInstanceOf(TaskServiceError);
++      expect(await readFileWithIdentity(guardPath)).toEqual(generationA);
++      expect(await readFile(sentinelPath)).toEqual(sentinelBytes);
++      expect((await readdir(parentPath)).filter(isOwnedRecordPath)).toEqual([]);
++      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
++      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
++    }
++  });
++
++  test("Phase 6.2 third audit closes every trusted-root-to-parent watcher registration window", async () => {
++    for (const ancestorKind of ["workspace_root", "intermediate"] as const) {
++      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++      tempRoots.push(tempRoot);
++      const schema = z.object({ id: z.string() });
++      const directorySegments = ["phase-6-2-third-store", "middle", "records"] as const;
++      const fileName = "record.json";
++      const evidenceRef = `phase-6-2.third.store.${ancestorKind}`;
++      const record = { id: ancestorKind };
++      const recordPath = workspaceRecordPath(
++        workspaceRoot,
++        [...directorySegments, fileName],
++        evidenceRef
++      );
++      const parentPath = dirname(recordPath);
++      const ancestorPath = ancestorKind === "workspace_root"
++        ? workspaceRoot
++        : join(workspaceRoot, directorySegments[0]);
++      const sentinelPath = join(parentPath, "third-audit-sentinel");
++      const sentinelBytes = Buffer.from("phase 6.2 third audit store sentinel\n");
++      await mkdir(parentPath, { recursive: true });
++      await writeFile(sentinelPath, sentinelBytes, { flag: "wx", mode: 0o600 });
++      const created = await createJsonRecordIfAbsent(
++        workspaceRoot,
++        directorySegments,
++        fileName,
++        record,
++        evidenceRef,
++        schema
++      );
++      expect(created.status).toBe("created");
++      const generationA = await readFileWithIdentity(recordPath);
++      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++      const watcherBaseline = activeFileSystemWatcherCount();
++      const descriptorBaseline = findOpenFileDescriptorsByIdentity({
++        dev: BigInt(generationA.dev),
++        ino: BigInt(generationA.ino)
++      });
++      const registrationPaths: string[] = [];
++      let injected = false;
++
++      const failure = await captureThrownValue(() =>
++        runWithWorkspaceRecordCompensationTestHooks(
++          {
++            beforeRecordDirectoryPathnameWatcherRegistration: async (input) => {
++              if (input.recordPath !== recordPath) return;
++              registrationPaths.push(input.path);
++              if (input.path !== ancestorPath || injected) return;
++              injected = true;
++              await moveDirectoryAwayAndBack(ancestorPath);
++            }
++          },
++          async () => {
++            await observeJsonRecordForCleanup(
++              recordPath,
++              evidenceRef,
++              schema,
++              workspaceRoot
++            );
++          }
++        )
++      );
++
++      expect(findErrorNode(
++        failure,
++        (error) =>
++          error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
++      )).toBeInstanceOf(TaskServiceError);
++      expect(injected).toBe(true);
++      expect(registrationPaths[0]).toBe(workspaceRoot);
++      expect(registrationPaths.at(-1)).toBe(parentPath);
++      expect(await readFileWithIdentity(recordPath)).toEqual(generationA);
++      expect(await readFile(sentinelPath)).toEqual(sentinelBytes);
++      expect((await readdir(parentPath)).filter(isOwnedRecordPath)).toEqual([]);
++      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
++      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
++      expect(activeFileSystemWatcherCount()).toBe(watcherBaseline);
++      expect(findOpenFileDescriptorsByIdentity({
++        dev: BigInt(generationA.dev),
++        ino: BigInt(generationA.ino)
++      })).toEqual(descriptorBaseline);
++    }
++
++    for (const transition of ["complete", "fail"] as const) {
++      for (const artifact of ["guard", "cleanup-lock"] as const) {
++        for (const ancestorKind of ["workspace_root", "intermediate"] as const) {
++          const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++          tempRoots.push(tempRoot);
++          const rawKey = `task:create:phase-6-2-third-${transition}-${artifact}-${ancestorKind}`;
++          const requestDigest = `digest-phase-6-2-third-${transition}-${artifact}-${ancestorKind}`;
++          const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
++          const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
++          const artifactPath = artifact === "guard" ? guardPath : cleanupLockPath;
++          const parentPath = dirname(artifactPath);
++          const ancestorPath = ancestorKind === "workspace_root"
++            ? workspaceRoot
++            : join(workspaceRoot, "tasks");
++          const sentinelPath = join(parentPath, "phase-6-2-third-public-sentinel");
++          const sentinelBytes = Buffer.from("phase 6.2 third audit public sentinel\n");
++          await mkdir(parentPath, { recursive: true });
++          await writeFile(sentinelPath, sentinelBytes, { flag: "wx", mode: 0o600 });
++          const service = createIdempotencyRecordService({ workspaceRoot });
++          const begin = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
++          expect(begin.status).toBe("acquired");
++          await writeFile(artifactPath, `${JSON.stringify({
++            guard_id: `phase-6-2-third-${transition}-${artifact}-${ancestorKind}`,
++            owner_pid: 9_999_999,
++            acquired_at_ms: Date.now() - 31_000,
++            acquired_at: "2026-07-18T12:00:00.000Z"
++          })}\n`, { flag: "wx", mode: 0o600 });
++          const generationA = await readFileWithIdentity(artifactPath);
++          const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++          const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++          const watcherBaseline = activeFileSystemWatcherCount();
++          const registrationPaths: string[] = [];
++          let injected = false;
++
++          const failure = await captureThrownValue(() =>
++            runWithWorkspaceRecordCompensationTestHooks(
++              {
++                beforeRecordDirectoryPathnameWatcherRegistration: async (input) => {
++                  if (input.recordPath !== artifactPath) return;
++                  registrationPaths.push(input.path);
++                  if (input.path !== ancestorPath || injected) return;
++                  injected = true;
++                  await moveDirectoryAwayAndBack(ancestorPath);
++                }
++              },
++              () => transition === "complete"
++                ? service.completeRecord({
++                    scope: "task",
++                    key: rawKey,
++                    requestDigest,
++                    resultRef: `TASK-phase-6-2-third-${artifact}-${ancestorKind}`
++                  })
++                : service.failRecord({ scope: "task", key: rawKey, requestDigest })
++            )
++          );
++
++          expect(findErrorNode(
++            failure,
++            (error) =>
++              error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
++          )).toBeInstanceOf(TaskServiceError);
++          expect(injected).toBe(true);
++          expect(registrationPaths[0]).toBe(workspaceRoot);
++          expect(registrationPaths.at(-1)).toBe(parentPath);
++          expect(await readFileWithIdentity(artifactPath)).toEqual(generationA);
++          expect(await readFile(sentinelPath)).toEqual(sentinelBytes);
++          expect((await readdir(parentPath)).filter(isOwnedRecordPath)).toEqual([]);
++          expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
++          expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
++          expect(activeFileSystemWatcherCount()).toBe(watcherBaseline);
++          expect(findOpenFileDescriptorsByIdentity({
++            dev: BigInt(generationA.dev),
++            ino: BigInt(generationA.ino)
++          })).toEqual([]);
++        }
++      }
++    }
++
++    for (const ancestorKind of ["workspace_root", "intermediate"] as const) {
++      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++      tempRoots.push(tempRoot);
++      const rawKey = `task:create:phase-6-2-third-observed-${ancestorKind}`;
++      const requestDigest = `digest-phase-6-2-third-observed-${ancestorKind}`;
++      const service = createIdempotencyRecordService({ workspaceRoot });
++      const begin = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
++      const failed = await service.failRecord({ scope: "task", key: rawKey, requestDigest });
++      expect(begin.status).toBe("acquired");
++      expect(failed.status).toBe("failed");
++      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
++      const parentPath = dirname(guardPath);
++      const ancestorPath = ancestorKind === "workspace_root"
++        ? workspaceRoot
++        : join(workspaceRoot, "tasks");
++      const staleGuard = {
++        guard_id: `phase-6-2-third-observed-${ancestorKind}`,
++        owner_pid: 9_999_999,
++        acquired_at_ms: Date.now() - 31_000,
++        acquired_at: "2026-07-18T12:00:00.000Z"
++      };
++      const sentinelPath = join(parentPath, "phase-6-2-third-observed-sentinel");
++      const sentinelBytes = Buffer.from("phase 6.2 third audit observed sentinel\n");
++      await writeFile(sentinelPath, sentinelBytes, { flag: "wx", mode: 0o600 });
++      await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, {
++        flag: "wx",
++        mode: 0o600
++      });
++      const generationA = await readFileWithIdentity(guardPath);
++      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++      const watcherBaseline = activeFileSystemWatcherCount();
++      const descriptorBaseline = findOpenFileDescriptorsByIdentity({
++        dev: BigInt(generationA.dev),
++        ino: BigInt(generationA.ino)
++      });
++      const registrationPaths: string[] = [];
++      let injected = false;
++
++      const failure = await captureThrownValue(() =>
++        runWithWorkspaceRecordCompensationTestHooks(
++          {
++            beforeRecordDirectoryPathnameWatcherRegistration: async (input) => {
++              if (input.recordPath !== guardPath) return;
++              registrationPaths.push(input.path);
++              if (input.path !== ancestorPath || injected) return;
++              injected = true;
++              await moveDirectoryAwayAndBack(ancestorPath);
++            }
++          },
++          () => service.beginRecord({ scope: "task", key: rawKey, requestDigest })
++        )
++      );
++
++      expect(findErrorNode(
++        failure,
++        (error) =>
++          error instanceof TaskServiceError && error.code === "workspace_path_not_safe"
++      )).toBeInstanceOf(TaskServiceError);
++      expect(injected).toBe(true);
++      expect(registrationPaths[0]).toBe(workspaceRoot);
++      expect(registrationPaths.at(-1)).toBe(parentPath);
++      expect(await readFileWithIdentity(guardPath)).toEqual(generationA);
++      expect(await readFile(sentinelPath)).toEqual(sentinelBytes);
++      expect((await readdir(parentPath)).filter(isOwnedRecordPath)).toEqual([]);
++      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
++      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
++      expect(activeFileSystemWatcherCount()).toBe(watcherBaseline);
++      expect(findOpenFileDescriptorsByIdentity({
++        dev: BigInt(generationA.dev),
++        ino: BigInt(generationA.ino)
++      })).toEqual(descriptorBaseline);
++    }
++  });
++
++  test("Phase 6.2 third audit never claims caller-created preservation envelopes", async () => {
++    for (const wrapperKind of ["writable", "frozen", "nonconfigurable"] as const) {
++      const direct = createCallerPreservationEnvelopeFixture(`direct-${wrapperKind}`, wrapperKind);
++      const directResult = preserveWorkspaceRecordFailureGraph(
++        direct.envelope,
++        [direct.semanticPrimary],
++        "phase 6.2 third direct fold"
++      );
++      expect(directResult).toBe(direct.envelope);
++      expectCallerPreservationEnvelopeUnchanged(direct);
++
++      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++      tempRoots.push(tempRoot);
++      const schema = z.object({ id: z.string() });
++      const directorySegments = ["phase-6-2-third-binding", wrapperKind] as const;
++      const fileName = "record.json";
++      const evidenceRef = `phase-6-2.third.binding.${wrapperKind}`;
++      const record = { id: wrapperKind };
++      const recordPath = workspaceRecordPath(
++        workspaceRoot,
++        [...directorySegments, fileName],
++        evidenceRef
++      );
++      const binding = createCallerPreservationEnvelopeFixture(
++        `binding-${wrapperKind}`,
++        wrapperKind
++      );
++      const created = await createJsonRecordIfAbsentWithCleanupPermit(
++        workspaceRoot,
++        directorySegments,
++        fileName,
++        record,
++        evidenceRef,
++        schema
++      );
++      if (created.status !== "created") throw new Error("Expected binding fixture.");
++      let releaseEnvelopeInjected = false;
++      let bindingPrimaryInjected = false;
++      const bindingFailure = await captureThrownValue(() =>
++        runWithWorkspaceRecordCompensationTestHooks(
++          {
++            afterCleanupPermitPinnedFileClose: ({ path }) => {
++              if (path !== recordPath || releaseEnvelopeInjected) return;
++              releaseEnvelopeInjected = true;
++              throw binding.envelope;
++            },
++            afterRecordDirectoryBindingRelease: () => {
++              if (!releaseEnvelopeInjected || bindingPrimaryInjected) return;
++              bindingPrimaryInjected = true;
++              throw binding.semanticPrimary;
++            }
++          },
++          () => conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
++            created.cleanupPermit,
++            recordPath,
++            evidenceRef,
++            schema,
++            { kind: "record", expected: record, matches: () => true }
++          )
++        )
++      );
++      expect(bindingFailure).toBe(binding.envelope);
++      expect(releaseEnvelopeInjected).toBe(true);
++      expect(bindingPrimaryInjected).toBe(true);
++      expectCallerPreservationEnvelopeUnchanged(binding);
++
++      const idempotency = createCallerPreservationEnvelopeFixture(
++        `idempotency-${wrapperKind}`,
++        wrapperKind
++      );
++      const idempotencyKey = `task:create:phase-6-2-third-envelope-${wrapperKind}`;
++      const idempotencyDigest = `digest-phase-6-2-third-envelope-${wrapperKind}`;
++      let staleCleanupEntered = false;
++      let idempotencyPrimaryInjected = false;
++      const idempotencyService = createIdempotencyRecordService({
++        workspaceRoot,
++        transitionGuardHooks: {
++          beforeStaleGuardCleanup: () => {
++            staleCleanupEntered = true;
++            throw idempotency.envelope;
++          }
++        }
++      });
++      const first = await idempotencyService.beginRecord({
++        scope: "task",
++        key: idempotencyKey,
++        requestDigest: idempotencyDigest
++      });
++      const firstFailed = await idempotencyService.failRecord({
++        scope: "task",
++        key: idempotencyKey,
++        requestDigest: idempotencyDigest
++      });
++      expect(first.status).toBe("acquired");
++      expect(firstFailed.status).toBe("failed");
++      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, idempotencyKey);
++      await writeFile(guardPath, `${JSON.stringify({
++        guard_id: `phase-6-2-third-envelope-${wrapperKind}`,
++        owner_pid: 9_999_999,
++        acquired_at_ms: Date.now() - 31_000,
++        acquired_at: "2026-07-18T12:00:00.000Z"
++      })}\n`, { flag: "wx", mode: 0o600 });
++      const idempotencyFailure = await captureThrownValue(() =>
++        runWithWorkspaceRecordCompensationTestHooks(
++          {
++            afterRecordDirectoryBindingRelease: () => {
++              if (!staleCleanupEntered || idempotencyPrimaryInjected) return;
++              idempotencyPrimaryInjected = true;
++              throw idempotency.semanticPrimary;
++            }
++          },
++          () => idempotencyService.beginRecord({
++            scope: "task",
++            key: idempotencyKey,
++            requestDigest: idempotencyDigest
++          })
++        )
++      );
++      expect(semanticPrimaryError(idempotencyFailure)).toBe(idempotency.envelope);
++      expect(staleCleanupEntered).toBe(true);
++      expect(idempotencyPrimaryInjected).toBe(true);
++      expectCallerPreservationEnvelopeUnchanged(idempotency);
++    }
++  });
++
++  test("Phase 6.2 re-audit normalizes caller errors without mutation or repeated getters", async () => {
++    for (const stage of ["settlement", "final_release"] as const) {
++      for (const wrapperKind of [
++        "writable",
++        "frozen",
++        "nonconfigurable",
++        "getter_cause",
++        "getter_errors",
++        "getter_semantic",
++        "throwing_getter"
++      ] as const) {
++        const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++        tempRoots.push(tempRoot);
++        const schema = z.object({ id: z.string() });
++        const directorySegments = ["phase-6-2-reaudit-errors", stage, wrapperKind] as const;
++        const fileName = "record.json";
++        const evidenceRef = `phase-6-2.reaudit.errors.${stage}.${wrapperKind}`;
++        const record = { id: `${stage}-${wrapperKind}` };
++        const path = workspaceRecordPath(
++          workspaceRoot,
++          [...directorySegments, fileName],
++          evidenceRef
++        );
++        const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++        const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++        const initialMarker = new Error("phase-6-2 re-audit initial identity");
++        const independentMarker = new Error("phase-6-2 re-audit independent identity");
++        const observationFailure = new Error("phase-6-2 re-audit getter observation");
++        const laterWrapper = new Error(`phase-6-2 re-audit ${wrapperKind}`);
++        let getterReads = 0;
++        if (wrapperKind === "writable") {
++          Object.defineProperty(laterWrapper, "cause", {
++            configurable: true,
++            enumerable: false,
++            writable: true,
++            value: initialMarker
++          });
++        } else if (wrapperKind === "frozen") {
++          Object.defineProperty(laterWrapper, "cause", {
++            configurable: true,
++            enumerable: false,
++            writable: true,
++            value: initialMarker
++          });
++          Object.freeze(laterWrapper);
++        } else if (wrapperKind === "nonconfigurable") {
++          Object.defineProperty(laterWrapper, "cause", {
++            configurable: false,
++            enumerable: false,
++            writable: false,
++            value: initialMarker
++          });
++        } else {
++          const property = wrapperKind === "getter_errors"
++            ? "errors"
++            : wrapperKind === "getter_semantic"
++              ? "semanticPrimary"
++              : "cause";
++          Object.defineProperty(laterWrapper, property, {
++            configurable: false,
++            enumerable: false,
++            get: () => {
++              getterReads += 1;
++              if (wrapperKind === "throwing_getter") throw observationFailure;
++              return wrapperKind === "getter_errors"
++                ? [initialMarker, independentMarker]
++                : initialMarker;
++            }
++          });
++        }
++        const callerDescriptors = Object.getOwnPropertyDescriptors(laterWrapper);
++        const created = await createJsonRecordIfAbsentWithCleanupPermit(
++          workspaceRoot,
++          directorySegments,
++          fileName,
++          record,
++          evidenceRef,
++          schema
++        );
++        if (created.status !== "created") throw new Error("Expected re-audit error fixture.");
++        let initialInjected = false;
++
++        const failure = await captureThrownValue(() =>
++          runWithWorkspaceRecordCompensationTestHooks(
++            {
++              afterOwnedPathIsolation: ({ path: isolatedPublicPath, site }) => {
++                if (
++                  isolatedPublicPath === path &&
++                  site === "conditional_delete" &&
++                  !initialInjected
++                ) {
++                  initialInjected = true;
++                  throw initialMarker;
++                }
++              },
++              beforeExactFailureSettlement: ({ path: settlementPath }) => {
++                if (stage === "settlement" && settlementPath === path) {
++                  throw laterWrapper;
++                }
++              },
++              afterCleanupPermitPinnedFileClose: ({ path: closedPath }) => {
++                if (stage === "final_release" && closedPath === path) {
++                  throw laterWrapper;
++                }
++              }
++            },
++            () =>
++              conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
++                created.cleanupPermit,
++                path,
++                evidenceRef,
++                schema,
++                { kind: "record", expected: record, matches: () => true }
++              )
++          )
++        );
++
++        expect(initialInjected).toBe(true);
++        expect(countErrorGraphIdentity(failure, initialMarker)).toBe(1);
++        expect(findErrorNode(
++          failure,
++          (error) => error.message === laterWrapper.message
++        )).toBeInstanceOf(Error);
++        expect(countErrorGraphIdentity(failure, independentMarker)).toBe(
++          wrapperKind === "getter_errors" ? 1 : 0
++        );
++        expect(errorTreeContains(failure, observationFailure)).toBe(
++          wrapperKind === "throwing_getter"
++        );
++        expect(Object.getOwnPropertyDescriptors(laterWrapper)).toEqual(
++          callerDescriptors
++        );
++        expect(getterReads).toBe(
++          wrapperKind.startsWith("getter_") || wrapperKind === "throwing_getter"
++            ? 1
++            : 0
++        );
++        expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(
++          authorityBaseline
++        );
++        expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
++          bindingBaseline
++        );
++      }
++    }
++  });
++
++  test("Phase 6.2 re-audit preserves immutable wrappers through binding and idempotency folds", async () => {
++    {
++      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++      tempRoots.push(tempRoot);
++      const schema = z.object({ id: z.string() });
++      const directorySegments = ["phase-6-2-reaudit-binding-fold"] as const;
++      const fileName = "record.json";
++      const evidenceRef = "phase-6-2.reaudit.binding-fold";
++      const record = { id: "binding-fold" };
++      const path = workspaceRecordPath(
++        workspaceRoot,
++        [...directorySegments, fileName],
++        evidenceRef
++      );
++      const initialMarker = new Error("phase-6-2 re-audit binding initial");
++      const settlementMarker = new Error("phase-6-2 re-audit binding settlement");
++      const bindingWrapper = new Error(
++        "phase-6-2 re-audit immutable binding wrapper",
++        { cause: initialMarker }
++      );
++      Object.freeze(bindingWrapper);
++      const bindingDescriptors = Object.getOwnPropertyDescriptors(bindingWrapper);
++      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++      const created = await createJsonRecordIfAbsentWithCleanupPermit(
++        workspaceRoot,
++        directorySegments,
++        fileName,
++        record,
++        evidenceRef,
++        schema
++      );
++      if (created.status !== "created") throw new Error("Expected binding fixture.");
++      let initialInjected = false;
++
++      const failure = await captureThrownValue(() =>
++        runWithWorkspaceRecordCompensationTestHooks(
++          {
++            afterOwnedPathIsolation: ({ path: isolatedPublicPath, site }) => {
++              if (
++                isolatedPublicPath === path &&
++                site === "conditional_delete" &&
++                !initialInjected
++              ) {
++                initialInjected = true;
++                throw initialMarker;
++              }
++            },
++            beforeExactFailureSettlement: ({ path: settlementPath }) => {
++              if (settlementPath === path) throw settlementMarker;
++            },
++            afterRecordDirectoryBindingRelease: () => {
++              throw bindingWrapper;
++            }
++          },
++          () =>
++            conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
++              created.cleanupPermit,
++              path,
++              evidenceRef,
++              schema,
++              { kind: "record", expected: record, matches: () => true }
++            )
++        )
++      );
++
++      expect(initialInjected).toBe(true);
++      expect(countErrorGraphIdentity(failure, initialMarker)).toBe(1);
++      expect(errorTreeContains(failure, settlementMarker)).toBe(true);
++      expect(findErrorNode(
++        failure,
++        (error) => error.message === bindingWrapper.message
++      )).toBeInstanceOf(Error);
++      expect(Object.getOwnPropertyDescriptors(bindingWrapper)).toEqual(
++        bindingDescriptors
++      );
++      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
++      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
++    }
++
++    for (const transition of ["complete", "fail"] as const) {
++      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
++      tempRoots.push(tempRoot);
++      const rawKey = `task:create:phase-6-2-reaudit-idempotency-${transition}`;
++      const requestDigest = `digest-phase-6-2-reaudit-idempotency-${transition}`;
++      const artifactPath = transition === "complete"
++        ? idempotencyTransitionGuardPath(workspaceRoot, rawKey)
++        : idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey);
++      const service = createIdempotencyRecordService({ workspaceRoot });
++      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
++      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
++      const begin = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
++      const initialMarker = new Error(`phase-6-2 re-audit idempotency ${transition}`);
++      const laterWrapper = new Error(
++        `phase-6-2 re-audit frozen idempotency wrapper ${transition}`,
++        { cause: initialMarker }
++      );
++      Object.freeze(laterWrapper);
++      const callerDescriptors = Object.getOwnPropertyDescriptors(laterWrapper);
++      let initialInjected = false;
++
++      const failure = await captureThrownValue(() =>
++        runWithWorkspaceRecordCompensationTestHooks(
++          {
++            afterOwnedPathIsolation: ({ path, site }) => {
++              if (
++                path === artifactPath &&
++                site === "conditional_delete" &&
++                !initialInjected
++              ) {
++                initialInjected = true;
++                throw initialMarker;
++              }
++            },
++            beforeExactFailureSettlement: ({ path }) => {
++              if (path === artifactPath) throw laterWrapper;
++            }
++          },
++          () => transition === "complete"
++            ? service.completeRecord({
++                scope: "task",
++                key: rawKey,
++                requestDigest,
++                resultRef: `TASK-phase-6-2-reaudit-${transition}`
++              })
++            : service.failRecord({ scope: "task", key: rawKey, requestDigest })
++        )
++      );
++
++      expect(begin.status).toBe("acquired");
++      expect(initialInjected).toBe(true);
++      expect(countErrorGraphIdentity(failure, initialMarker)).toBe(1);
++      expect(findErrorNode(
++        failure,
++        (error) => error.message === laterWrapper.message
++      )).toBeInstanceOf(Error);
++      expect(Object.getOwnPropertyDescriptors(laterWrapper)).toEqual(
++        callerDescriptors
++      );
++      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
++      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
++    }
++  });
++
+   test("physical canonical paths preserve existing spelling across follower restart windows", async () => {
+     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+     tempRoots.push(tempRoot);
+@@ -17018,17 +18879,23 @@ describe("idempotency, lock, and artifact services", () => {
+       result_ref: resultRef
+     });
+
+-    const blocked = await captureTaskServiceError(() =>
+-      service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
++    const recoveredReplacement = await service.lookupReplay({
++      scope: "task",
++      key: rawKey,
++      requestDigest
++    });
++    expect(recoveredReplacement).toMatchObject({
++      status: "completed",
++      record: {
++        status: "completed",
++        request_digest: requestDigest,
++        result_ref: resultRef
++      }
++    });
++    await expectPathMissing(guardPath);
++    await expectPathMissing(
++      idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey)
+     );
+-    expect(blocked.status).toBe(409);
+-    expect(blocked.retryable).toBe(true);
+-    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(replacementGuard);
+-    expect(
+-      JSON.parse(
+-        await readFile(idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey), "utf8")
+-      )
+-    ).toMatchObject({ owner_pid: process.pid });
+   });
+
+   test("IdempotencyRecord completed invalidation requires exact digest and result_ref", async () => {
+@@ -24002,7 +25869,7 @@ describe("idempotency, lock, and artifact services", () => {
+     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+   });
+
+-  test("owner guard and cleanup-lock releases inherit retained-parent rejection", async () => {
++  test("owner guard and cleanup-lock releases settle exact artifacts after sibling epoch advance", async () => {
+     for (const artifact of ["guard", "cleanup-lock"] as const) {
+       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+       tempRoots.push(tempRoot);
+@@ -24039,7 +25906,7 @@ describe("idempotency, lock, and artifact services", () => {
+       expect(begin.status).toBe("acquired");
+       expect(completed.status).toBe("completed");
+       expect(drifted).toBe(true);
+-      expect(await readFileWithIdentity(artifactPath)).toEqual(admitted);
++      await expectPathMissing(artifactPath);
+       expect(await service.getRecord("task", rawKey)).toEqual(completed);
+       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+     }
+@@ -24420,7 +26287,7 @@ describe("idempotency, lock, and artifact services", () => {
+     expect(releaseCalls.filter((call) => ![2, 3].includes(call.arguments.length))).toEqual([]);
+   });
+
+-  test("publish-lock post-mutation failure is recovered before releasing the fulfilled guard", async () => {
++  test("persistent publish-lock namespace failure remains observable after releasing the fulfilled guard", async () => {
+     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+     tempRoots.push(tempRoot);
+     const rawKey = "task:create:fulfilled-guard-release-settled";
+@@ -24437,7 +26304,7 @@ describe("idempotency, lock, and artifact services", () => {
+       new Map([[cleanupLockPath, releaseMarker]])
+     );
+
+-    const completed = await
++    const failure = await captureTaskServiceError(() =>
+       runWithWorkspaceRecordPublicationHooks(
+         {
+           ...failureHooks.publicationHooks,
+@@ -24454,16 +26321,18 @@ describe("idempotency, lock, and artifact services", () => {
+                 resultRef
+               })
+           )
+-      );
++      )
++    );
+     await Promise.race([
+       closeTracker.waitForAll(),
+       timeoutAfter(1_000, "fulfilled guard emergency-settlement descriptors did not close")
+     ]);
+
+     expect(begin.status).toBe("acquired");
+-    expect(completed).toMatchObject({ status: "completed", result_ref: resultRef });
++    expect(failure.code).toBe("workspace_path_not_safe");
++    expect(errorTreeContains(failure, releaseMarker)).toBe(true);
+     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath, guardPath]);
+-    expect(await service.getRecord("task", rawKey)).toEqual(completed);
++    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+     await expectPathMissing(guardPath);
+     await expectPathMissing(cleanupLockPath);
+     expect(closeTracker.count(guardPath)).toBe(1);
+@@ -24484,7 +26353,7 @@ describe("idempotency, lock, and artifact services", () => {
+     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+   });
+
+-  test("independent publish-lock and guard post-mutation failures each recover exact A", async () => {
++  test("independent persistent publish-lock and guard namespace failures remain ordered", async () => {
+     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+     tempRoots.push(tempRoot);
+     const rawKey = "task:create:fulfilled-guard-release-settlement-failed";
+@@ -24505,7 +26374,7 @@ describe("idempotency, lock, and artifact services", () => {
+       ])
+     );
+
+-    const completed = await
++    const failure = await captureTaskServiceError(() =>
+       runWithWorkspaceRecordPublicationHooks(
+         {
+           ...failureHooks.publicationHooks,
+@@ -24522,15 +26391,18 @@ describe("idempotency, lock, and artifact services", () => {
+                 resultRef
+               })
+           )
+-      );
++      )
++    );
+     await Promise.race([
+       closeTracker.waitForAll(),
+       timeoutAfter(1_000, "failed fulfilled-guard settlement descriptors did not close")
+     ]);
+
+-    expect(completed).toMatchObject({ status: "completed", result_ref: resultRef });
++    expect(failure.code).toBe("workspace_path_not_safe");
++    expect(errorTreeContains(failure, releaseMarker)).toBe(true);
++    expect(errorTreeContains(failure, settlementMarker)).toBe(true);
+     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath, guardPath]);
+-    expect(await service.getRecord("task", rawKey)).toEqual(completed);
++    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+     await expectPathMissing(guardPath);
+     await expectPathMissing(cleanupLockPath);
+     expect(closeTracker.count(guardPath)).toBe(1);
+@@ -24616,12 +26488,13 @@ describe("idempotency, lock, and artifact services", () => {
+
+     expect(begin.status).toBe("acquired");
+     expect(semanticPrimaryError(failure)).toBe(failure);
+-    expect(failure.code).toBe("record_malformed");
+-    expect(failure.status).toBe(409);
++    expect(failure.code).toBe("workspace_path_not_safe");
++    expect(failure.status).toBe(500);
+     expect(failure.message).toBe(
+-      "Idempotency record complete transition is already in progress."
++      "Idempotency transition artifact release did not settle safely."
+     );
+-    expect(failure.cause).toBeUndefined();
++    expect(failure.cause).toBeDefined();
++    expect(errorTreeContains(failure, releaseMarker)).toBe(true);
+     expect(failureHooks.conditionalDeletePaths.length).toBeGreaterThan(0);
+     expect(new Set(failureHooks.conditionalDeletePaths)).toEqual(
+       new Set([cleanupLockPath])
+@@ -24639,7 +26512,7 @@ describe("idempotency, lock, and artifact services", () => {
+     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+   });
+
+-  test("exact settlement preserves a replacement installed during restored publish-lock release", async () => {
++  test("persistent publish-lock namespace failure preserves a replacement guard", async () => {
+     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+     tempRoots.push(tempRoot);
+     const rawKey = "task:create:fulfilled-guard-pre-mutation-settlement";
+@@ -24688,7 +26561,7 @@ describe("idempotency, lock, and artifact services", () => {
+       }
+     };
+
+-    const completed = await
++    const failure = await captureTaskServiceError(() =>
+       runWithWorkspaceRecordPublicationHooks(
+         {
+           ...failureHooks.publicationHooks,
+@@ -24705,7 +26578,8 @@ describe("idempotency, lock, and artifact services", () => {
+                 resultRef: "TASK-fulfilled-guard-pre-mutation-settlement"
+               })
+           )
+-      );
++      )
++    );
+     await Promise.race([
+       closeTracker.waitForAll(),
+       timeoutAfter(1_000, "pre-mutation emergency-settlement descriptors did not close")
+@@ -24713,10 +26587,8 @@ describe("idempotency, lock, and artifact services", () => {
+
+     expect(begin.status).toBe("acquired");
+     expect(replacementInstalled).toBe(true);
+-    expect(completed).toMatchObject({
+-      status: "completed",
+-      result_ref: "TASK-fulfilled-guard-pre-mutation-settlement"
+-    });
++    expect(failure.code).toBe("workspace_path_not_safe");
++    expect(errorTreeContains(failure, releaseMarker)).toBe(true);
+     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath]);
+     expect(originalGuardGeneration).toBeDefined();
+     expect(replacementGeneration).toBeDefined();
+@@ -24727,7 +26599,7 @@ describe("idempotency, lock, and artifact services", () => {
+       originalGuardGeneration!
+     )).toBe(false);
+     await expectPathMissing(cleanupLockPath);
+-    expect(await service.getRecord("task", rawKey)).toEqual(completed);
++    expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
+     expect(closeTracker.count(guardPath)).toBe(1);
+     expect(closeTracker.count(cleanupLockPath)).toBe(1);
+     await expectFileDescriptorClosed(closeTracker.descriptors(guardPath)[0]!);
+@@ -30884,7 +32756,10 @@ function findOpenFileDescriptorsByIdentity(identity: {
+   ino: bigint;
+ }): number[] {
+   const matches: number[] = [];
+-  for (let fd = 3; fd <= 2048; fd += 1) {
++  const openDescriptors = readdirSync("/dev/fd")
++    .map((entry) => Number(entry))
++    .filter((fd) => Number.isInteger(fd) && fd >= 3);
++  for (const fd of openDescriptors) {
+     try {
+       const entry = fstatSync(fd, { bigint: true });
+       if (entry.dev === identity.dev && entry.ino === identity.ino) {
+@@ -30897,6 +32772,87 @@ function findOpenFileDescriptorsByIdentity(identity: {
+   return matches;
+ }
+
++function activeFileSystemWatcherCount(): number {
++  return process.getActiveResourcesInfo().filter(
++    (resource) => resource === "FSEventWrap" || resource === "FSWatcher"
++  ).length;
++}
++
++type CallerPreservationEnvelopeFixture = Readonly<{
++  semanticPrimary: Error;
++  firstIndependent: Error;
++  secondIndependent: Error;
++  aggregate: AggregateError;
++  envelope: PreservedErrorCompensationEnvelope;
++  envelopeDescriptors: PropertyDescriptorMap;
++  aggregateDescriptors: PropertyDescriptorMap;
++  aggregateErrors: readonly unknown[];
++}>;
++
++function createCallerPreservationEnvelopeFixture(
++  label: string,
++  wrapperKind: "writable" | "frozen" | "nonconfigurable"
++): CallerPreservationEnvelopeFixture {
++  const semanticPrimary = new Error(`${label} semantic primary`);
++  const firstIndependent = new Error(`${label} independent one`);
++  const secondIndependent = new Error(`${label} independent two`);
++  const aggregateErrors = [
++    semanticPrimary,
++    firstIndependent,
++    secondIndependent
++  ] as const;
++  const aggregate = new AggregateError([...aggregateErrors], `${label} aggregate`);
++  const envelope = new PreservedErrorCompensationEnvelope(semanticPrimary, aggregate);
++  if (wrapperKind === "frozen") {
++    Object.freeze(aggregate);
++    Object.freeze(envelope);
++  } else if (wrapperKind === "nonconfigurable") {
++    for (const [target, property] of [
++      [aggregate, "errors"],
++      [envelope, "semanticPrimary"],
++      [envelope, "cause"]
++    ] as const) {
++      const descriptor = Object.getOwnPropertyDescriptor(target, property);
++      if (!descriptor || !("value" in descriptor)) {
++        throw new Error(`Expected caller data property ${property}.`);
++      }
++      Object.defineProperty(target, property, {
++        ...descriptor,
++        configurable: false,
++        writable: false
++      });
++    }
++  }
++  return Object.freeze({
++    semanticPrimary,
++    firstIndependent,
++    secondIndependent,
++    aggregate,
++    envelope,
++    envelopeDescriptors: Object.getOwnPropertyDescriptors(envelope),
++    aggregateDescriptors: Object.getOwnPropertyDescriptors(aggregate),
++    aggregateErrors
++  });
++}
++
++function expectCallerPreservationEnvelopeUnchanged(
++  fixture: CallerPreservationEnvelopeFixture
++): void {
++  expect(Object.getOwnPropertyDescriptors(fixture.envelope)).toEqual(
++    fixture.envelopeDescriptors
++  );
++  expect(Object.getOwnPropertyDescriptors(fixture.aggregate)).toEqual(
++    fixture.aggregateDescriptors
++  );
++  expect(fixture.envelope.semanticPrimary).toBe(fixture.semanticPrimary);
++  expect(fixture.envelope.cause).toBe(fixture.aggregate);
++  expect(fixture.aggregate.errors).toEqual(fixture.aggregateErrors);
++  expect(fixture.aggregate.errors[1]).toBe(fixture.firstIndependent);
++  expect(fixture.aggregate.errors[2]).toBe(fixture.secondIndependent);
++  expect(countErrorGraphIdentity(fixture.envelope, fixture.firstIndependent)).toBe(1);
++  expect(countErrorGraphIdentity(fixture.envelope, fixture.secondIndependent)).toBe(1);
++}
++
+ function findPreservedCompensationAggregate(value: unknown): AggregateError | undefined {
+   const envelope = findErrorNode(
+     value,

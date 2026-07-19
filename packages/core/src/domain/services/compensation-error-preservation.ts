@@ -1,35 +1,62 @@
-interface PreservedErrorProvenance {
-  readonly primary: Error;
-  readonly observedCauses: readonly unknown[];
-  readonly observationFailures: readonly unknown[];
-  readonly rawCompensations: readonly unknown[];
-  readonly retainedCompensationIdentities: readonly unknown[];
+export type FailurePhase =
+  | "body"
+  | "initial_release"
+  | "settlement"
+  | "final_release"
+  | "observation";
+
+const FAILURE_OCCURRENCE = Symbol("failure_occurrence");
+
+export interface FailureOccurrence {
+  readonly [FAILURE_OCCURRENCE]: true;
+  readonly occurrenceId: symbol;
+  readonly phase: FailurePhase;
+  readonly order: number;
+  readonly value: unknown;
 }
 
-type ErrorObservation =
-  | {
-      readonly kind: "error";
-      readonly error: Error;
-      readonly failures: readonly unknown[];
-    }
-  | {
-      readonly kind: "non_error" | "indeterminate";
-      readonly error?: undefined;
-      readonly failures: readonly unknown[];
-    };
-
-interface CauseObservation {
-  readonly causes: readonly unknown[];
-  readonly failures: readonly unknown[];
+export interface FailureGraphEdge {
+  readonly kind: "semanticPrimary" | "errors" | "cause";
+  readonly target: unknown;
+  readonly index?: number;
 }
 
-interface CanonicalCompensations {
-  readonly values: readonly unknown[];
-  readonly observationFailures: readonly unknown[];
+export interface FailureGraphNode {
+  readonly value: object;
+  readonly errorBrand: "error" | "non_error" | "indeterminate";
+  readonly edges: readonly FailureGraphEdge[];
 }
 
-const preservedErrorProvenance = new WeakMap<Error, PreservedErrorProvenance>();
-const errorObservationCache = new WeakMap<object, ErrorObservation>();
+export interface FailureGraphObservation {
+  readonly nodes: readonly FailureGraphNode[];
+  readonly observationFailures: readonly FailureOccurrence[];
+}
+
+export interface PreservedFailureLedger {
+  readonly primary: FailureOccurrence;
+  readonly events: readonly FailureOccurrence[];
+  readonly compensations: readonly FailureOccurrence[];
+  readonly orderedDistinct: readonly FailureOccurrence[];
+  readonly observedGraph: FailureGraphObservation;
+}
+
+interface FailureObservationSession {
+  readonly nodes: FailureGraphNode[];
+  readonly observationFailures: FailureOccurrence[];
+  readonly observed: WeakSet<object>;
+  readonly refreshLedgerCarriers: WeakSet<object>;
+  readonly classifiedPrimary?: object;
+  readonly classifyPrimary?: (value: object) => FailureGraphNode["errorBrand"];
+  adoptNestedLedger?: (value: object) => boolean;
+}
+
+export interface FailurePrimaryClassification {
+  readonly classify: (value: object) => FailureGraphNode["errorBrand"];
+}
+
+let nextFailureOccurrenceOrder = 1;
+const trustedFailureOccurrences = new WeakSet<object>();
+const preservedFailureLedgers = new WeakMap<object, PreservedFailureLedger>();
 
 export class PreservedNonErrorThrownValue extends Error {
   readonly thrownValue: unknown;
@@ -41,6 +68,10 @@ export class PreservedNonErrorThrownValue extends Error {
   }
 }
 
+/**
+ * Retained only as a JavaScript compatibility type for caller-created values.
+ * The preservation fold never constructs or adopts one by shape.
+ */
 export class PreservedErrorCompensationEnvelope extends Error {
   readonly semanticPrimary: Error;
 
@@ -49,28 +80,6 @@ export class PreservedErrorCompensationEnvelope extends Error {
     this.name = "PreservedErrorCompensationEnvelope";
     this.semanticPrimary = semanticPrimary;
   }
-}
-
-class PreservedCompensationCycle extends Error {
-  constructor() {
-    super("A cycle was detected while flattening preserved compensation errors.");
-    this.name = "PreservedCompensationCycle";
-  }
-}
-
-const preservedCompensationCycles = new WeakMap<
-  PreservedErrorProvenance,
-  PreservedCompensationCycle
->();
-
-function preservedCompensationCycleFor(
-  provenance: PreservedErrorProvenance
-): PreservedCompensationCycle {
-  const existing = preservedCompensationCycles.get(provenance);
-  if (existing) return existing;
-  const marker = Object.freeze(new PreservedCompensationCycle());
-  preservedCompensationCycles.set(provenance, marker);
-  return marker;
 }
 
 type AsyncOutcome<T> =
@@ -135,19 +144,207 @@ export async function runWithPreservedRelease<T>(
   return bodyOutcome.value;
 }
 
-export function semanticPrimaryError(value: unknown): Error | undefined {
-  const provenance = readPreservedErrorProvenance(value);
-  if (provenance) return provenance.primary;
-  const observation = observeError(value);
-  return observation.kind === "error" ? observation.error : undefined;
+export function captureFailureOccurrence(
+  phase: FailurePhase,
+  value: unknown
+): FailureOccurrence {
+  const occurrence = Object.freeze({
+    [FAILURE_OCCURRENCE]: true as const,
+    occurrenceId: Symbol(phase),
+    phase,
+    order: nextFailureOccurrenceOrder++,
+    value
+  });
+  trustedFailureOccurrences.add(occurrence);
+  return occurrence;
 }
 
-export function registerPreservedErrorCompatibility(
-  compatibleError: Error,
-  preservedError: Error
-): void {
-  const provenance = readPreservedErrorProvenance(preservedError);
-  if (provenance) preservedErrorProvenance.set(compatibleError, provenance);
+export function isTrustedFailureOccurrence(
+  value: unknown
+): value is FailureOccurrence {
+  return isObjectLike(value) && trustedFailureOccurrences.has(value);
+}
+
+export function failureLedger(value: unknown): PreservedFailureLedger | undefined {
+  return isObjectLike(value) ? preservedFailureLedgers.get(value) : undefined;
+}
+
+export function semanticPrimaryValue(value: unknown): unknown {
+  const ledger = failureLedger(value);
+  return ledger ? ledger.primary.value : value;
+}
+
+export function semanticPrimaryError(value: unknown): Error | undefined {
+  const ledger = failureLedger(value);
+  if (ledger) {
+    const primary = ledger.primary.value;
+    const observedPrimary = ledger.observedGraph.nodes.find(
+      (node) => node.value === primary
+    );
+    if (
+      observedPrimary?.errorBrand === "error" ||
+      observedPrimary?.errorBrand === "indeterminate"
+    ) return primary as Error;
+    return isObjectLike(value) && !Object.is(value, primary)
+      ? value as Error
+      : undefined;
+  }
+  return safelyHasErrorBrand(value) ? value : undefined;
+}
+
+export function failureGraphNodes(value: unknown): readonly FailureGraphNode[] {
+  return failureLedger(value)?.observedGraph.nodes ?? [];
+}
+
+export function failureEvents(value: unknown): readonly FailureOccurrence[] {
+  return failureLedger(value)?.events ?? [];
+}
+
+export function orderedDistinctFailures(value: unknown): readonly unknown[] {
+  return failureLedger(value)?.orderedDistinct.map((occurrence) => occurrence.value) ?? [value];
+}
+
+export function orderedDistinctCompensationFailures(
+  value: unknown
+): readonly unknown[] {
+  const ledger = failureLedger(value);
+  if (!ledger) return [];
+  return ledger.orderedDistinct
+    .filter((occurrence) => occurrence !== ledger.primary)
+    .map((occurrence) => occurrence.value);
+}
+
+export function mergeTrustedFailureOccurrences(
+  primary: FailureOccurrence,
+  later: readonly FailureOccurrence[],
+  _aggregateMessage: string,
+  primaryClassification?: FailurePrimaryClassification
+): unknown {
+  if (!isTrustedFailureOccurrence(primary) || later.some((item) => !isTrustedFailureOccurrence(item))) {
+    throw new TypeError("Failure occurrences must be created by the preservation boundary.");
+  }
+
+  const inherited = failureLedger(primary.value);
+  const semanticPrimary = inherited?.primary ?? primary;
+  const occurrenceById = new Map<symbol, FailureOccurrence>();
+  const visitedLedgers = new Set<PreservedFailureLedger>();
+  const reusedObservationLedgers = new Set<PreservedFailureLedger>();
+  const retainedObservationFailureIds = new Set<symbol>();
+  const session: FailureObservationSession = {
+    nodes: [],
+    observationFailures: [],
+    observed: new WeakSet<object>(),
+    refreshLedgerCarriers: new WeakSet<object>(),
+    classifiedPrimary: isObjectLike(semanticPrimary.value)
+      ? semanticPrimary.value
+      : undefined,
+    classifyPrimary: primaryClassification?.classify
+  };
+  const retainOccurrence = (occurrence: FailureOccurrence): void => {
+    occurrenceById.set(occurrence.occurrenceId, occurrence);
+  };
+  const retainObservationFailure = (occurrence: FailureOccurrence): void => {
+    if (retainedObservationFailureIds.has(occurrence.occurrenceId)) return;
+    retainedObservationFailureIds.add(occurrence.occurrenceId);
+    session.observationFailures.push(occurrence);
+  };
+  const retainLedger = (
+    ledger: PreservedFailureLedger | undefined,
+    carrier: object | undefined,
+    observationMode: "refresh" | "reuse"
+  ): boolean => {
+    if (!ledger) return false;
+    const firstVisit = !visitedLedgers.has(ledger);
+    if (firstVisit) {
+      visitedLedgers.add(ledger);
+      for (const occurrence of ledger.events) retainOccurrence(occurrence);
+    }
+    if (observationMode === "refresh") {
+      if (carrier) session.refreshLedgerCarriers.add(carrier);
+    } else if (!reusedObservationLedgers.has(ledger)) {
+      reusedObservationLedgers.add(ledger);
+      if (carrier) session.observed.add(carrier);
+      for (const node of ledger.observedGraph.nodes) {
+        if (session.observed.has(node.value)) continue;
+        session.observed.add(node.value);
+        session.nodes.push(node);
+      }
+      for (const occurrence of ledger.observedGraph.observationFailures) {
+        retainObservationFailure(occurrence);
+      }
+    } else if (carrier) {
+      session.observed.add(carrier);
+    }
+    if (!firstVisit) return true;
+    for (const occurrence of ledger.events) {
+      if (!isObjectLike(occurrence.value)) continue;
+      const nested = failureLedger(occurrence.value);
+      if (nested && nested !== ledger) retainLedger(nested, occurrence.value, "reuse");
+    }
+    for (const node of ledger.observedGraph.nodes) {
+      const nested = failureLedger(node.value);
+      if (nested && nested !== ledger) retainLedger(nested, node.value, "reuse");
+    }
+    return true;
+  };
+  session.adoptNestedLedger = (value) => {
+    const ledger = failureLedger(value);
+    return ledger ? retainLedger(ledger, value, "reuse") : false;
+  };
+
+  retainLedger(
+    inherited,
+    isObjectLike(primary.value) ? primary.value : undefined,
+    "refresh"
+  );
+  retainOccurrence(primary);
+  for (const occurrence of later) {
+    retainLedger(
+      failureLedger(occurrence.value),
+      isObjectLike(occurrence.value) ? occurrence.value : undefined,
+      "reuse"
+    );
+    retainOccurrence(occurrence);
+  }
+
+  for (const occurrence of occurrenceById.values()) {
+    observeFailureGraphValue(occurrence.value, session);
+  }
+  for (const occurrence of session.observationFailures) retainOccurrence(occurrence);
+  const chronologicalEvents = [...occurrenceById.values()].sort(
+    (left, right) => left.order - right.order
+  );
+  const events = [
+    semanticPrimary,
+    ...chronologicalEvents.filter((occurrence) => occurrence !== semanticPrimary)
+  ];
+  const orderedDistinct = distinctFailureOccurrences(events);
+  const ledger = Object.freeze({
+    primary: semanticPrimary,
+    events: Object.freeze(events),
+    compensations: Object.freeze(events.filter((item) => item !== semanticPrimary)),
+    orderedDistinct: Object.freeze(orderedDistinct),
+    observedGraph: Object.freeze({
+      nodes: Object.freeze(session.nodes),
+      observationFailures: Object.freeze(session.observationFailures)
+    })
+  });
+
+  const primaryObservation = session.nodes.find((node) => node.value === semanticPrimary.value);
+  const carrier: object = isObjectLike(semanticPrimary.value) &&
+    primaryObservation?.errorBrand !== "non_error"
+    ? semanticPrimary.value as object
+    : new PreservedNonErrorThrownValue(semanticPrimary.value);
+  preservedFailureLedgers.set(carrier, ledger);
+  return carrier;
+}
+
+export function adoptTrustedFailureRef(
+  ref: FailureOccurrence,
+  later: readonly FailureOccurrence[],
+  aggregateMessage = "A trusted failure and compensating actions failed."
+): unknown {
+  return mergeTrustedFailureOccurrences(ref, later, aggregateMessage);
 }
 
 export function preserveThrownValueAndCompensationErrors(
@@ -156,34 +353,11 @@ export function preserveThrownValueAndCompensationErrors(
   aggregateMessage: string,
   additionalObservationFailures: readonly unknown[] = []
 ): Error {
-  const primaryObservation = observeError(primary);
-  if (primaryObservation.kind === "error") {
-    return preserveObservedPrimaryAndCompensationErrors(
-      primaryObservation.error,
-      [...primaryObservation.failures, ...additionalObservationFailures],
-      compensations,
-      aggregateMessage
-    );
-  }
-
-  const representedPrimary = new PreservedNonErrorThrownValue(primary);
-  const observationFailures = [
-    ...primaryObservation.failures,
-    ...additionalObservationFailures
-  ];
-  preservedErrorProvenance.set(representedPrimary, {
-    primary: representedPrimary,
-    observedCauses: [primary],
-    observationFailures,
-    rawCompensations: [],
-    retainedCompensationIdentities: []
-  });
-  return preserveObservedPrimaryAndCompensationErrors(
-    representedPrimary,
-    [],
-    compensations,
-    aggregateMessage
+  const primaryOccurrence = captureFailureOccurrence("body", primary);
+  const later = [...additionalObservationFailures, ...compensations].map((value) =>
+    captureFailureOccurrence("settlement", value)
   );
+  return mergeTrustedFailureOccurrences(primaryOccurrence, later, aggregateMessage) as Error;
 }
 
 export function preservePrimaryAndCompensationErrors(
@@ -191,170 +365,196 @@ export function preservePrimaryAndCompensationErrors(
   compensations: readonly unknown[],
   aggregateMessage: string
 ): unknown {
-  const primaryObservation = observeError(primary);
-  if (primaryObservation.kind !== "error" || compensations.length === 0) return primary;
-  return preserveObservedPrimaryAndCompensationErrors(
-    primaryObservation.error,
-    primaryObservation.failures,
+  if (compensations.length === 0) return primary;
+  return preserveThrownValueAndCompensationErrors(
+    primary,
     compensations,
     aggregateMessage
   );
 }
 
-function preserveObservedPrimaryAndCompensationErrors(
-  primary: Error,
-  primaryObservationFailures: readonly unknown[],
-  compensations: readonly unknown[],
-  aggregateMessage: string
-): Error {
-  if (compensations.length === 0) return primary;
-
-  const priorProvenance = readPreservedErrorProvenance(primary);
-  const semanticPrimary = priorProvenance?.primary ?? primary;
-  const causeObservation = priorProvenance
-    ? undefined
-    : safelyObservePriorCause(semanticPrimary);
-  const observedCauses = priorProvenance?.observedCauses ?? causeObservation!.causes;
-  const priorRetainedProvenance = priorProvenance
-    ? priorProvenance.retainedCompensationIdentities
-    : [];
-  const newCompensationInputs = compensations.filter(
-    (candidate) => !priorRetainedProvenance.some((prior) => Object.is(prior, candidate))
-  );
-  const canonicalCompensations = canonicalizeCompensations(newCompensationInputs);
-  const observationFailures = [
-    ...(priorProvenance?.observationFailures ?? []),
-    ...primaryObservationFailures,
-    ...(causeObservation?.failures ?? []),
-    ...canonicalCompensations.observationFailures
-  ].filter((failure, index, allFailures) => allFailures.indexOf(failure) === index);
-  const priorRawCompensations = priorProvenance?.rawCompensations ?? [];
-  const newRawCompensations = canonicalCompensations.values.filter(
-    (candidate) => !priorRetainedProvenance.some((prior) => Object.is(prior, candidate))
-  );
-  const rawCompensations = [
-    ...priorRawCompensations,
-    ...newRawCompensations
-  ];
-  const retainedCompensationIdentities = [
-    ...priorRetainedProvenance,
-    ...[...newCompensationInputs, ...canonicalCompensations.values].filter(
-      (candidate, index, values) =>
-        !priorRetainedProvenance.some((prior) => Object.is(prior, candidate)) &&
-        values.findIndex((value) => Object.is(value, candidate)) === index
-    )
-  ];
-  const aggregateCause = new AggregateError(
-    [...observedCauses, ...observationFailures, ...rawCompensations],
-    aggregateMessage
-  );
-  const envelope = new PreservedErrorCompensationEnvelope(
-    semanticPrimary,
-    aggregateCause
-  );
-  preservedErrorProvenance.set(envelope, {
-    primary: semanticPrimary,
-    observedCauses,
-    observationFailures,
-    rawCompensations,
-    retainedCompensationIdentities
-  });
-  return envelope;
+function distinctFailureOccurrences(
+  occurrences: readonly FailureOccurrence[]
+): FailureOccurrence[] {
+  const objects = new WeakSet<object>();
+  const distinct: FailureOccurrence[] = [];
+  for (const occurrence of occurrences) {
+    if (isObjectLike(occurrence.value)) {
+      if (objects.has(occurrence.value)) continue;
+      objects.add(occurrence.value);
+    }
+    distinct.push(occurrence);
+  }
+  return distinct;
 }
 
-function canonicalizeCompensations(
-  compensations: readonly unknown[],
-  activeProvenance = new Set<PreservedErrorProvenance>()
-): CanonicalCompensations {
-  const values: unknown[] = [];
-  const observationFailures: unknown[] = [];
-  for (const compensation of compensations) {
-    const provenance = readPreservedErrorProvenance(compensation);
-    if (provenance) {
-      if (activeProvenance.has(provenance)) {
-        values.push(preservedCompensationCycleFor(provenance));
+function observeFailureGraphValue(
+  value: unknown,
+  session: FailureObservationSession
+): void {
+  if (!isObjectLike(value)) return;
+  const refreshLedgerCarrier = session.refreshLedgerCarriers.has(value);
+  if (session.observed.has(value) && !refreshLedgerCarrier) return;
+  if (refreshLedgerCarrier) {
+    session.refreshLedgerCarriers.delete(value);
+    session.observed.delete(value);
+    const retainedNodeIndex = session.nodes.findIndex(
+      (node) => node.value === value
+    );
+    if (retainedNodeIndex >= 0) session.nodes.splice(retainedNodeIndex, 1);
+  }
+  if (
+    !refreshLedgerCarrier &&
+    session.adoptNestedLedger?.(value)
+  ) return;
+  session.observed.add(value);
+
+  let errorBrand: FailureGraphNode["errorBrand"];
+  try {
+    errorBrand = value === session.classifiedPrimary && session.classifyPrimary
+      ? session.classifyPrimary(value)
+      : value instanceof Error
+        ? "error"
+        : "non_error";
+  } catch (error) {
+    errorBrand = "indeterminate";
+    session.observationFailures.push(
+      captureFailureOccurrence("observation", error)
+    );
+  }
+
+  const edges: FailureGraphEdge[] = [];
+  for (const kind of ["semanticPrimary", "errors", "cause"] as const) {
+    const observation = observeOwnGraphField(value, kind);
+    session.observationFailures.push(
+      ...observation.failures.map((failure) =>
+        captureFailureOccurrence("observation", failure)
+      )
+    );
+    if (!observation.present) continue;
+    if (kind === "errors") {
+      const arrayObservation = safelyObserveArray(observation.value);
+      session.observationFailures.push(
+        ...arrayObservation.failures.map((failure) =>
+          captureFailureOccurrence("observation", failure)
+        )
+      );
+      if (!arrayObservation.isArray) {
+        edges.push(Object.freeze({ kind, target: observation.value }));
         continue;
       }
-
-      activeProvenance.add(provenance);
-      try {
-        observationFailures.push(...provenance.observationFailures);
-        values.push(provenance.primary);
-        const nested = canonicalizeCompensations(
-          provenance.rawCompensations,
-          activeProvenance
+      const lengthObservation = safelyObserveArrayLength(arrayObservation.value);
+      session.observationFailures.push(
+        ...lengthObservation.failures.map((failure) =>
+          captureFailureOccurrence("observation", failure)
+        )
+      );
+      if (lengthObservation.length === undefined) continue;
+      const length = lengthObservation.length;
+      for (let index = 0; index < length; index += 1) {
+        const element = observeArrayElement(arrayObservation.value, index);
+        session.observationFailures.push(
+          ...element.failures.map((failure) =>
+            captureFailureOccurrence("observation", failure)
+          )
         );
-        observationFailures.push(...nested.observationFailures);
-        values.push(...nested.values);
-      } finally {
-        activeProvenance.delete(provenance);
+        if (!element.present) continue;
+        edges.push(Object.freeze({ kind, target: element.value, index }));
       }
       continue;
     }
-
-    const observation = observeError(compensation);
-    observationFailures.push(...observation.failures);
-    values.push(compensation);
+    edges.push(Object.freeze({ kind, target: observation.value }));
   }
-  return { values, observationFailures };
+
+  const node = Object.freeze({
+    value,
+    errorBrand,
+    edges: Object.freeze(edges)
+  });
+  session.nodes.push(node);
+  for (const edge of edges) observeFailureGraphValue(edge.target, session);
 }
 
-function safelyObservePriorCause(primary: Error): CauseObservation {
+function observeOwnGraphField(
+  value: object,
+  property: FailureGraphEdge["kind"]
+): { readonly present: boolean; readonly value?: unknown; readonly failures: readonly unknown[] } {
   let descriptor: PropertyDescriptor | undefined;
   try {
-    descriptor = Object.getOwnPropertyDescriptor(primary, "cause");
+    descriptor = Object.getOwnPropertyDescriptor(value, property);
   } catch (error) {
-    return { causes: [], failures: [error] };
+    return { present: false, failures: [error] };
   }
-
-  if (descriptor && "value" in descriptor) {
+  if (!descriptor) return { present: false, failures: [] };
+  if ("value" in descriptor) {
     return descriptor.value === undefined
-      ? { causes: [], failures: [] }
-      : { causes: [descriptor.value], failures: [] };
+      ? { present: false, failures: [] }
+      : { present: true, value: descriptor.value, failures: [] };
   }
-
+  if (!descriptor.get) return { present: false, failures: [] };
   try {
-    const priorCause = descriptor?.get ? descriptor.get.call(primary) : primary.cause;
-    return priorCause === undefined
-      ? { causes: [], failures: [] }
-      : { causes: [priorCause], failures: [] };
+    const observed = descriptor.get.call(value);
+    return observed === undefined
+      ? { present: false, failures: [] }
+      : { present: true, value: observed, failures: [] };
   } catch (error) {
-    return { causes: [], failures: [error] };
+    return { present: false, failures: [error] };
   }
 }
 
-function observeError(value: unknown): ErrorObservation {
-  const provenance = readPreservedErrorProvenance(value);
-  if (provenance) return { kind: "error", error: value as Error, failures: [] };
-  if (!isObjectLike(value)) return { kind: "non_error", failures: [] };
-
-  const cached = errorObservationCache.get(value);
-  if (cached) return cached;
-
+function observeArrayElement(
+  values: object,
+  index: number
+): { readonly present: boolean; readonly value?: unknown; readonly failures: readonly unknown[] } {
   try {
-    const observation = value instanceof Error
-      ? { kind: "error" as const, error: value, failures: [] }
-      : { kind: "non_error" as const, failures: [] };
-    errorObservationCache.set(value, observation);
-    return observation;
+    const descriptor = Object.getOwnPropertyDescriptor(values, String(index));
+    if (!descriptor) return { present: false, failures: [] };
+    if ("value" in descriptor) {
+      return { present: true, value: descriptor.value, failures: [] };
+    }
+    if (!descriptor.get) return { present: false, failures: [] };
+    return { present: true, value: descriptor.get.call(values), failures: [] };
   } catch (error) {
-    // A trapping prototype/brand observation cannot distinguish Proxy(Error)
-    // from Proxy(plain object). Preserve the raw identity through the existing
-    // represented non-error channel, but never promote it to semantic Error.
-    const observation = {
-      kind: "indeterminate" as const,
-      failures: [error]
-    };
-    errorObservationCache.set(value, observation);
-    return observation;
+    return { present: false, failures: [error] };
   }
 }
 
-function readPreservedErrorProvenance(
+function safelyObserveArray(
   value: unknown
-): PreservedErrorProvenance | undefined {
-  if (!isObjectLike(value)) return undefined;
-  return preservedErrorProvenance.get(value as Error);
+):
+  | { readonly isArray: true; readonly value: object; readonly failures: readonly unknown[] }
+  | { readonly isArray: false; readonly failures: readonly unknown[] } {
+  try {
+    return Array.isArray(value)
+      ? { isArray: true, value, failures: [] }
+      : { isArray: false, failures: [] };
+  } catch (error) {
+    return { isArray: false, failures: [error] };
+  }
+}
+
+function safelyObserveArrayLength(
+  value: object
+): { readonly length?: number; readonly failures: readonly unknown[] } {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, "length");
+    if (!descriptor || !("value" in descriptor)) return { failures: [] };
+    const length = descriptor.value;
+    return typeof length === "number" && Number.isSafeInteger(length) && length >= 0
+      ? { length, failures: [] }
+      : { failures: [] };
+  } catch (error) {
+    return { failures: [error] };
+  }
+}
+
+function safelyHasErrorBrand(value: unknown): value is Error {
+  if (!isObjectLike(value)) return false;
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
 }
 
 function isObjectLike(value: unknown): value is object {

@@ -17,6 +17,9 @@ import {
   isSafeTaskId,
   probeWorkspaceRecordDirectoryWritable,
   preserveTaskServiceErrorCompensationCompatibility,
+  taskServiceErrorAtBoundary,
+  semanticPrimaryValue,
+  type FailurePhase,
   runWithExistingWorkspaceRecordDirectoryReproof,
   sha256Hex,
   type CreateTaskInput,
@@ -219,8 +222,9 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
           ? parseJsonRequestText(await readBoundedKeyedTaskCreateRequestText(c))
           : await c.req.json();
     } catch (error) {
-      if (error instanceof TaskServiceError) {
-        return jsonTaskServiceError(c, error);
+      const taskServiceError = taskServiceErrorAtBoundary(error);
+      if (taskServiceError) {
+        return jsonTaskServiceError(c, taskServiceError);
       }
 
       return jsonApiError(
@@ -535,7 +539,9 @@ async function createOwnedIdempotentTaskCard(
       throw preserveAuthorityAwarePrimaryFailure(
         error,
         [releaseError],
-        "Task create failure and publication-authority release both failed."
+        "Task create failure and publication-authority release both failed.",
+        "body",
+        ["final_release"]
       );
     }
     throw error;
@@ -1490,10 +1496,11 @@ async function classifyCompletedTaskAuthorityUnderLease(
         // its ordered compensation, preserving the pre-existing envelope; an
         // untyped acceptance failure folds behind the typed binding
         // classification as the semantic primary.
+        const taskServiceError = taskServiceErrorAtBoundary(error);
         throw new CompletedTaskSnapshotAuthorityUnknownError(
-          error instanceof TaskServiceError
+          taskServiceError
             ? preservePrimaryFailure(
-                error,
+                taskServiceError,
                 [classificationError],
                 "Completed task authority classification and observation acceptance both failed."
               )
@@ -1528,14 +1535,14 @@ async function classifyCompletedTaskAuthorityUnderLease(
       throw new CompletedTaskSnapshotAuthorityUnknownError(error);
     }
   } catch (error) {
+    const taskServiceError = taskServiceErrorAtBoundary(error);
     if (
       isSafeTaskId(resultRef) &&
-      error instanceof TaskServiceError &&
-      error.code === "task_snapshot_missing_card"
+      taskServiceError?.code === "task_snapshot_missing_card"
     ) {
       return {
         status: "accepted",
-        value: { status: "repairable", error, resultRef }
+        value: { status: "repairable", error: taskServiceError, resultRef }
       };
     }
     if (observation) {
@@ -1823,50 +1830,58 @@ function isCompletedMutationAuthorityAlreadySettledError(error: unknown): boolea
 function preservePrimaryFailure(
   primary: unknown,
   compensations: readonly unknown[],
-  aggregateMessage: string
+  aggregateMessage: string,
+  primaryPhase: FailurePhase = "body",
+  compensationPhases: readonly FailurePhase[] = compensations.map(
+    () => "settlement"
+  )
 ): unknown {
-  // Root C (V33-13): never count one occurrence twice — a compensation
-  // candidate that IS the primary is already represented by the primary
-  // itself, so a memoized rejection folded into itself yields primary-only.
-  const distinctCompensations = compensations.filter(
-    (candidate) => !Object.is(primary, candidate)
-  );
-  if (distinctCompensations.length === 0) return primary;
+  if (compensations.length === 0) return primary;
   return preserveTaskServiceErrorCompensationCompatibility(
     primary,
-    distinctCompensations,
-    aggregateMessage
+    compensations,
+    aggregateMessage,
+    primaryPhase,
+    compensationPhases
   );
 }
 
 /**
  * Root C (V33-03): fold sites whose caught primary may be a
- * CompletedTaskSnapshotAuthorityUnknownError preserve the INNER typed primary
- * with the compensations retained as an ordered vector, re-wrapping so
- * jsonTaskServiceError's existing one-level unwrap still renders the typed
- * envelope instead of a generic 500.
+ * CompletedTaskSnapshotAuthorityUnknownError attach the occurrence ledger to
+ * its trusted exact TaskServiceError while leaving the raw wrapper unchanged.
+ * jsonTaskServiceError can therefore keep its existing typed unwrap without
+ * synthesizing a replacement error.
  */
 function preserveAuthorityAwarePrimaryFailure(
   primary: unknown,
   compensations: readonly unknown[],
-  aggregateMessage: string
+  aggregateMessage: string,
+  primaryPhase: FailurePhase = "body",
+  compensationPhases: readonly FailurePhase[] = compensations.map(
+    () => "settlement"
+  )
 ): unknown {
-  // Root C (V33-13): drop compensation candidates that ARE the primary
-  // before folding, so the same occurrence is never transported twice.
-  const distinctCompensations = compensations.filter(
-    (candidate) => !Object.is(primary, candidate)
-  );
-  if (distinctCompensations.length === 0) return primary;
   if (primary instanceof CompletedTaskSnapshotAuthorityUnknownError) {
-    return new CompletedTaskSnapshotAuthorityUnknownError(
-      preservePrimaryFailure(
-        primary.authorityError,
-        distinctCompensations,
-        aggregateMessage
-      )
-    );
+    const trustedAuthorityPrimary = taskServiceErrorAtBoundary(primary.authorityError);
+    if (trustedAuthorityPrimary) {
+      preserveTaskServiceErrorCompensationCompatibility(
+        trustedAuthorityPrimary,
+        compensations,
+        aggregateMessage,
+        primaryPhase,
+        compensationPhases
+      );
+      return primary;
+    }
   }
-  return preservePrimaryFailure(primary, distinctCompensations, aggregateMessage);
+  return preservePrimaryFailure(
+    primary,
+    compensations,
+    aggregateMessage,
+    primaryPhase,
+    compensationPhases
+  );
 }
 
 function observeTaskRouteErrorWithoutInterference(
@@ -1953,9 +1968,10 @@ async function getIdempotentTaskResult(
   try {
     task = await taskService.getTaskFromSnapshot(taskId);
   } catch (error) {
-    if (error instanceof TaskServiceError) {
-      if (error.code === "task_snapshot_missing_card") {
-        throw error;
+    const taskServiceError = taskServiceErrorAtBoundary(error);
+    if (taskServiceError) {
+      if (taskServiceError.code === "task_snapshot_missing_card") {
+        throw taskServiceError;
       }
       throw new CompletedTaskSnapshotAuthorityReadError();
     }
@@ -2187,23 +2203,28 @@ function parseIdempotencyKey(c: Context): ParsedIdempotencyKey {
 }
 
 function jsonTaskServiceError(c: Context, error: unknown): Response {
-  if (error instanceof CompletedTaskSnapshotAuthorityUnknownError) {
-    return jsonTaskServiceError(c, error.authorityError);
+  const semanticPrimary = semanticPrimaryValue(error);
+  if (!Object.is(semanticPrimary, error)) {
+    return jsonTaskServiceError(c, semanticPrimary);
   }
-  if (error instanceof TaskServiceError) {
+  const taskServiceError = taskServiceErrorAtBoundary(error);
+  if (taskServiceError) {
     return jsonApiError(
       c,
       {
-        category: error.category,
+        category: taskServiceError.category,
         severity: "error",
-        message: error.message,
-        userMessage: error.userMessage,
-        evidenceRefs: error.evidenceRefs,
-        retryable: error.retryable,
-        recommendedNextActions: error.recommendedNextActions
+        message: taskServiceError.message,
+        userMessage: taskServiceError.userMessage,
+        evidenceRefs: taskServiceError.evidenceRefs,
+        retryable: taskServiceError.retryable,
+        recommendedNextActions: taskServiceError.recommendedNextActions
       },
-      error.status
+      taskServiceError.status
     );
+  }
+  if (error instanceof CompletedTaskSnapshotAuthorityUnknownError) {
+    return jsonTaskServiceError(c, error.authorityError);
   }
 
   return jsonApiError(
