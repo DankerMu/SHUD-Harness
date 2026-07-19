@@ -57,6 +57,7 @@ replay_root=$(mktemp -d "${TMPDIR:-/tmp}/shud-ledger-replay.XXXXXX")
 cleanup_replay_worktrees() {
   replay_status=$?
   trap - EXIT
+  trap '' HUP INT TERM
   git -C "$repo_root" worktree unlock "$replay_root/round-1" >/dev/null 2>&1 || true
   git -C "$repo_root" worktree unlock "$replay_root/round-2" >/dev/null 2>&1 || true
   git -C "$repo_root" worktree remove --force "$replay_root/round-1" >/dev/null 2>&1 || true
@@ -89,6 +90,9 @@ The complete block was copied from this tracked file and executed from the
 repository root: both `git apply --check` commands exited 0, both temporary
 worktrees were removed, and the temporary root no longer existed. Patch-check
 failure and locked-worktree cleanup probes each returned nonzero; the EXIT trap
-then unlocked and force-removed their temporary worktrees without residue. A clean
+then ignored later HUP/INT/TERM signals, unlocked and force-removed their
+temporary worktrees without residue, and retained the first failure/signal
+status. Rotating double-signal probes covered HUP, INT, and TERM during cleanup.
+A clean
 incremental A3 `git diff --check` must exit 0 because A3 introduces no new
 whitespace exception.
