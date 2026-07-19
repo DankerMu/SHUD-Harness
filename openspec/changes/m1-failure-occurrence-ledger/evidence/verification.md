@@ -143,3 +143,123 @@ The final implementation keeps every base core-service test declaration and
 adds eight dedicated ledger tests plus two dedicated backend tests. No
 `workspace-record-store.ts`, `idempotency-service.ts`, dependency manifest,
 `zero/`, or workspace output is part of this child diff.
+
+## Final Round-1 repair binding (supersedes all evidence above)
+
+Verified on `2026-07-19 05:30:25 EDT`. The verified semantic implementation
+head is `68932bc05b73b8f09079e075a80ec3d9b79502ff` on branch
+`codex/issue-108-ledger-foundation`, based on
+`5a450a97f2a474af2f4db26bd9ee198adb7395ec`. This section supersedes the
+pre-repair `1a993c8` and initial implementation `2b1e916` claims above.
+
+### Architecture and deviation binding
+
+- Exact raw `Error` identity plus `failureLedger(error)` lookup cannot isolate
+  sequential, concurrent, and reentrant operations that reuse the same raw
+  object. The tracked architecture decision therefore selects one immutable
+  carrier per ledger-producing fold and exact raw recovery through semantic
+  accessors.
+- The repair expanded by symbol into the shared idempotency/workspace release
+  producers named by the fixture; it did not change their business state,
+  generation tickets, private settlement, persisted schema, or public HTTP
+  payload.
+- Phase 6.2 found one same-class TaskCard sibling outside the initial cited
+  lines: raw `instanceof Error` classification before bounded observation.
+  The repair removed both TaskCard occurrences, preserved explicit nullish/
+  falsy cause presence, and completed cyclic/fresh/throwing public hydration
+  and settlement matrices.
+- There are no remaining product deviations from the repaired fixture. The
+  only evidence-format exception is that full-range `git diff --check` reports
+  unified-diff context marker lines inside the tracked replay patch; removing
+  those mandatory markers would make the patch invalid. Every incremental
+  source/test/evidence diff passed `git diff --check` before commit.
+
+### Replayable red evidence
+
+- Initial behavior red: `evidence/red-before-tests.patch` and
+  `evidence/red-before.md` against base `5a450a9`.
+- Round-1 repair red: `evidence/repair-round-1/red-before-tests.patch` and
+  `red-before-report.md` against `1a993c8`.
+- First Phase 6.2 closure red:
+  `evidence/repair-round-1/phase-6.2/red-before-tests.patch` and
+  `red-before-report.md` against `a370f8e`; the focused command exited 1 with
+  1 pass, 4 intended failures, 561 filtered, and 22 assertions. The same
+  command on the repair tree passed 5/5 with 47 assertions.
+- TaskCard sibling red: the test-only diff obtained with
+  `git diff 7ff73f7..68932bc -- packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts`
+  was applied in a detached `7ff73f7` worktree with the root dependencies.
+  The cyclic and fresh cleanup-settlement rows each hit the one-second
+  watchdog (`0 pass, 2 fail, 398 filtered`), with no dependency/import error.
+  The temporary worktree was removed. On `68932bc`, all three cyclic/fresh/
+  throwing settlement and hydration rows pass.
+
+### Final local verification
+
+- Dedicated ledger/typed-boundary command:
+  `npx --yes bun@1.2.19 test ./packages/core/src/domain/services/failure-occurrence-ledger.test.ts ./packages/backend/src/routes/failure-occurrence-ledger-routes.test.ts`
+  -> exit 0; 19 pass, 0 fail, 193 assertions.
+- TaskCard/settlement focused command:
+  `npx --yes bun@1.2.19 test ./packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts -t 'Phase 6\.2 bounds hostile prototype failures|TaskCard hydration distinguishes explicit|TaskCard single settlement retains|S34-P62-03 lost'`
+  -> exit 0; 8 pass, 392 filtered, 0 fail, 74 assertions.
+- `npx --yes bun@1.2.19 run test:core-services` -> exit 0; 411 pass,
+  5 platform-dependent skips, 0 fail across 416 tests.
+- `npx --yes bun@1.2.19 run test:backend-api` -> exit 0; 158 pass,
+  0 fail.
+- `npx --yes bun@1.2.19 run typecheck` -> exit 0.
+- `npx --yes bun@1.2.19 run check` -> exit 0; policy, tool-registry,
+  backend HTTP/WebSocket, frontend, schemas, core services, and GLM provider
+  all passed.
+- `npx --yes openspec validate m1-failure-occurrence-ledger --strict --no-interactive`
+  -> valid.
+- Phase 6.2 full-inventory audit on `68932bc` -> clean; no remaining finding.
+- Hygiene -> no `red-proof` stash, no retained temporary worktree, no tracked
+  workspace output, no submodule gitlink change, and Zero remains
+  `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`.
+
+### Oracle integrity and declaration retention
+
+- The large core service file retains every base declaration except the two
+  fixture-authorized S31/S32 ledger-equivalent names; static declarations are
+  382 at base and 386 after repair. The two missing names are replaced by the
+  operation-carrier/explicit-adoption equivalents required by the repaired
+  contract.
+- Backend route declarations are 155 at base and 156 after repair, with none
+  removed. The dedicated ledger and backend files add 17 and 4 static
+  declarations respectively.
+- The last test-only commit expands one static test into three runtime cases;
+  core runtime tests increase by two without deleting a scenario or weakening
+  an assertion category.
+- No existing spec, acceptance criterion, test gate, or CI command was weakened
+  to obtain green results.
+
+### Source and test hash binding
+
+The source diff SHA-256 over the seven product-source paths is
+`8a029f4c44f9b7ca6b2224b8a7c8a3da1eeba19d6669aca4585ce58270d6be44`.
+The test diff SHA-256 over the four runtime test paths is
+`52d314f24aae882db70dee13d866a607871cd36854b7b01b506ef95dba4ab670`.
+
+Final file SHA-256 values:
+
+- `packages/backend/src/routes/index.ts`:
+  `efcba7c234416170122b98ec24194df0e9b89f98f73c46c5fd7bea863827375e`;
+- `packages/core/src/domain/services/compensation-error-preservation.ts`:
+  `fabe513b2fe043a380f3ce1754ea6751ab0f1d6c77898a2253ab5c8266f539bc`;
+- `packages/core/src/domain/services/idempotency-service.ts`:
+  `f1a98dc0f915fff04aac552129531a24f5b46e0d5e9c03056c59931806453cc5`;
+- `packages/core/src/domain/services/index.ts`:
+  `1dadcf5373f302392f6847526fd2065f11c73cfe6ea719ac167b7da3bf0cd4a6`;
+- `packages/core/src/domain/services/task-card-service.ts`:
+  `d4fbc09f8e8fa9c8bf23000fa0182d2e7868a28502bd71deff731b6198982b61`;
+- `packages/core/src/domain/services/task-service-error-compensation.ts`:
+  `45abe521a5eff5c041e680becf6c5388e0dd30ea184726ffa47fba3d67b3a8b9`;
+- `packages/core/src/domain/services/workspace-record-store.ts`:
+  `7ea6e0370a5b9f3a6f5c33107339bcb470f873a8793e4621d72a5611deec41ac`;
+- `packages/backend/src/routes/failure-occurrence-ledger-routes.test.ts`:
+  `7f51a37fc75f8b098471fa90f38b4cd20eb174a3e0568390eeaa797cc288c64f`;
+- `packages/backend/src/routes/index.test.ts`:
+  `ab251ef3a9d7a99ce949977906fbf25f9aa0a49543ccd9eb1a06f6fe52dd9422`;
+- `packages/core/src/domain/services/failure-occurrence-ledger.test.ts`:
+  `d07f70e4d992095e9741ae984494b6bfbfdc8e1f48f61bd15816e85f8a7d0557`;
+- `packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts`:
+  `788bbd462639ff3e15b1b86879e2ee3a5e84b4b7a7cf1c13073870b1d33cc874`.
