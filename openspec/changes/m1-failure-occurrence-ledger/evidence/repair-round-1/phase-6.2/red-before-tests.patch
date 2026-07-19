@@ -593,4 +593,3 @@ index 130a0f6..ac7afff 100644
  async function createFifo(path: string): Promise<void> {
    const process = Bun.spawn(["mkfifo", path], {
      stdout: "pipe",
-
