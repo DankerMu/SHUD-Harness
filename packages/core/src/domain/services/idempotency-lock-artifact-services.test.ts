@@ -24058,6 +24058,267 @@ describe("idempotency, lock, and artifact services", () => {
     expect(result.stderr).toBe("");
   });
 
+  test("Phase 6.2 bounds hostile prototype failures through TaskCard hydration and settlement", async () => {
+    const coreIndexPath = join(import.meta.dir, "index.ts");
+    const workspaceStorePath = join(import.meta.dir, "workspace-record-store.ts");
+    for (const kind of ["cyclic", "fresh", "throwing"] as const) {
+      const script = [
+        'import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";',
+        'import { tmpdir } from "node:os";',
+        'import { join } from "node:path";',
+        `import { createTaskCardService, failureEvents, failureGraphNodes, failureLedger, semanticPrimaryValue, taskServiceErrorAtBoundary } from ${JSON.stringify(coreIndexPath)};`,
+        `import { runWithWorkspaceRecordPublicationHooks } from ${JSON.stringify(workspaceStorePath)};`,
+        `const kind = ${JSON.stringify(kind)};`,
+        'let prototypeReads = 0;',
+        'const classifierFailure = new Error("prototype classifier escaped");',
+        'let rawTarget;',
+        'function hostile() {',
+        '  if (kind === "cyclic") {',
+        '    rawTarget = new Error("cyclic TaskCard failure");',
+        '    let proxy;',
+        '    proxy = new Proxy(rawTarget, { getPrototypeOf() { prototypeReads += 1; return proxy; } });',
+        '    return proxy;',
+        '  }',
+        '  if (kind === "fresh") {',
+        '    const fresh = () => {',
+        '      const target = new Error("fresh TaskCard failure");',
+        '      const proxy = new Proxy(target, { getPrototypeOf() { prototypeReads += 1; return fresh(); } });',
+        '      if (!rawTarget) rawTarget = target;',
+        '      return proxy;',
+        '    };',
+        '    return fresh();',
+        '  }',
+        '  rawTarget = new Error("throwing TaskCard failure");',
+        '  return new Proxy(rawTarget, { getPrototypeOf() { prototypeReads += 1; throw classifierFailure; } });',
+        '}',
+        'function sameDescriptors(before, after) {',
+        '  const beforeKeys = Reflect.ownKeys(before);',
+        '  const afterKeys = Reflect.ownKeys(after);',
+        '  if (beforeKeys.length !== afterKeys.length || beforeKeys.some((key, index) => key !== afterKeys[index])) return false;',
+        '  return beforeKeys.every((key) => {',
+        '    const left = before[key]; const right = after[key];',
+        '    return left.configurable === right.configurable && left.enumerable === right.enumerable &&',
+        '      left.writable === right.writable && left.value === right.value && left.get === right.get && left.set === right.set;',
+        '  });',
+        '}',
+        'function assertWorkspaceFailure(failure, raw, expectedMessage, expectedRefs, expectedPhase) {',
+        '  const typed = taskServiceErrorAtBoundary(failure);',
+        '  if (!typed || typed.code !== "workspace_path_not_safe" || typed.status !== 500 ||',
+        '      typed.category !== "workspace_error" || typed.message !== expectedMessage ||',
+        '      typed.retryable !== false || JSON.stringify(typed.evidenceRefs) !== JSON.stringify(expectedRefs) ||',
+        '      JSON.stringify(typed.recommendedNextActions) !== JSON.stringify(["Inspect the workspace task snapshot state before retrying."])) {',
+        '    throw new Error(`unexpected TaskServiceError vector for ${kind}: ${String(failure?.message ?? failure)}`);',
+        '  }',
+        '  if (typed.cause === raw) throw new Error(`${kind} raw failure escaped without an operation carrier`);',
+        '  const ledger = failureLedger(typed.cause);',
+        '  if (!ledger || semanticPrimaryValue(typed.cause) !== raw) throw new Error(`${kind} semantic primary was not retained`);',
+        '  const primaryNode = failureGraphNodes(typed.cause).find((node) => node.value === raw);',
+        '  if (primaryNode?.errorBrand !== "indeterminate") throw new Error(`${kind} primary was not observed as indeterminate`);',
+        '  if (ledger.observedGraph.nodes.length > 4096 || ledger.observedGraph.observationFailures.length > 257) {',
+        '    throw new Error(`${kind} observation evidence exceeded its bound`);',
+        '  }',
+        '  if (kind === "throwing" && !ledger.observedGraph.observationFailures.some((event) => event.value === classifierFailure)) {',
+        '    throw new Error("throwing prototype observation evidence was not retained");',
+        '  }',
+        '  if (kind === "fresh" && !ledger.observedGraph.observationFailures.some((event) => event.value?.code === "controlled_operation_budget_exceeded")) {',
+        '    throw new Error("fresh prototype budget evidence was not retained");',
+        '  }',
+        '  const events = failureEvents(typed.cause);',
+        '  if (events[0]?.value !== raw || events[0]?.phase !== expectedPhase) throw new Error(`${kind} occurrence phase was not preserved`);',
+        '  if (new Set(events.map((event) => event.order)).size !== events.length || events.some((event, index) => index > 0 && events[index - 1].order >= event.order)) {',
+        '    throw new Error(`${kind} occurrence order was not strictly increasing`);',
+        '  }',
+        '  return typed;',
+        '}',
+        'const hydrationRoot = await realpath(await mkdtemp(join(tmpdir(), `taskcard-hydration-${kind}-`)));',
+        'try {',
+        '  const workspaceRoot = join(hydrationRoot, "workspace");',
+        '  await mkdir(join(workspaceRoot, "tasks"), { recursive: true });',
+        '  const raw = hostile();',
+        '  const descriptors = Object.getOwnPropertyDescriptors(rawTarget);',
+        '  let failure;',
+        '  try {',
+        '    await createTaskCardService({ workspaceRoot, snapshotReadHooks: {',
+        '      lstatTasksRootForHydration: async () => { throw raw; }',
+        '    } }).listTasks();',
+        '  } catch (error) { failure = error; }',
+        '  const typed = assertWorkspaceFailure(',
+        '    failure, raw, "Workspace tasks root metadata could not be inspected safely.",',
+        '    ["workspace/tasks", "workspace/tasks:metadata"], "body"',
+        '  );',
+        '  if (typed.userMessage !== "The workspace tasks directory is temporarily unavailable.") throw new Error("hydration user message changed");',
+        '  if (!sameDescriptors(descriptors, Object.getOwnPropertyDescriptors(rawTarget))) throw new Error(`${kind} caller object was mutated`);',
+        '} finally { await rm(hydrationRoot, { recursive: true, force: true }); }',
+        'if (kind === "throwing") {',
+        '  const settlementRoot = await realpath(await mkdtemp(join(tmpdir(), "taskcard-settlement-throwing-")));',
+        '  try {',
+        '    const workspaceRoot = join(settlementRoot, "workspace");',
+        '    const taskId = "TASK-phase62-hostile-settlement";',
+        '    const service = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });',
+        '    await service.createTask({ type: "engineering", title: "Hostile settlement",',
+        '      question_or_goal: "Bound the single-item settlement fold.", inference_budget: { mode: "normal" } });',
+        '    const observation = await service.observeTaskSnapshotForCleanup(taskId);',
+        '    if (observation.status !== "record") throw new Error("expected exact settlement observation");',
+        '    const raw = hostile();',
+        '    let injections = 0;',
+        '    let failure;',
+        '    try {',
+        '      await runWithWorkspaceRecordPublicationHooks({',
+        '        afterDurableRecordObservation: () => { if (injections++ === 0) throw raw; }',
+        '      }, () => service.acceptTaskSnapshotCleanupObservation(observation));',
+        '    } catch (error) { failure = error; }',
+        '    const typed = assertWorkspaceFailure(',
+        '      failure, raw, "Failed to settle the exact observed task snapshot generation.",',
+        '      [`workspace/tasks/${taskId}/snapshot.json`, "snapshot.bytes"], "settlement"',
+        '    );',
+        '    if (typed.userMessage !== "The task snapshot could not be accepted safely.") throw new Error("settlement user message changed");',
+        '    if (injections < 1) throw new Error("settlement failure was not injected");',
+        '  } finally { await rm(settlementRoot, { recursive: true, force: true }); }',
+        '}',
+        'if (prototypeReads > 65792) throw new Error(`${kind} prototype work exceeded the declared bound: ${prototypeReads}`);',
+        'console.log(`taskcard-hostile-${kind}-ok`);'
+      ].join("\n");
+
+      const result = await runBoundedBunProbe(script, 1_000);
+      if (result.timedOut) {
+        throw new Error(`TaskCard ${kind} prototype probe exceeded 1 second`);
+      }
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `TaskCard ${kind} prototype probe failed with exit ${result.exitCode}: ${result.stderr} ${result.stdout}`
+        );
+      }
+      expect(result.stdout).toContain(`taskcard-hostile-${kind}-ok`);
+      expect(result.stderr).toBe("");
+    }
+  });
+
+  test("TaskCard hydration distinguishes explicit non-Error failures from an omitted cause", async () => {
+    const ordinaryObject = Object.freeze({ kind: "ordinary hydration failure" });
+    const cases = [
+      { label: "undefined", value: undefined },
+      { label: "null", value: null },
+      { label: "false", value: false },
+      { label: "zero", value: 0 },
+      { label: "empty-string", value: "" },
+      { label: "object", value: ordinaryObject }
+    ] as const;
+
+    for (const matrixCase of cases) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      await mkdir(join(workspaceRoot, "tasks"), { recursive: true });
+      const service = createTaskCardService({
+        workspaceRoot,
+        snapshotReadHooks: {
+          lstatTasksRootForHydration: async () => {
+            throw matrixCase.value;
+          }
+        }
+      });
+      const failure = await captureTaskServiceError(() =>
+        Promise.race([
+          service.listTasks(),
+          timeoutAfter(1_000, `${matrixCase.label} hydration failure was not bounded`)
+        ])
+      );
+
+      expect(failure.code).toBe("workspace_path_not_safe");
+      expect(failure.message).toBe(
+        "Workspace tasks root metadata could not be inspected safely."
+      );
+      expect(failureLedger(failure.cause)).toBeDefined();
+      expect(Object.is(semanticPrimaryValue(failure.cause), matrixCase.value)).toBe(true);
+    }
+
+    const omittedFixture = await createTempWorkspacePath();
+    tempRoots.push(omittedFixture.tempRoot);
+    await writeFile(omittedFixture.workspaceRoot, "not a workspace directory\n", {
+      flag: "wx",
+      mode: 0o600
+    });
+    const omittedFailure = await captureTaskServiceError(() =>
+      createTaskCardService({ workspaceRoot: omittedFixture.workspaceRoot }).listTasks()
+    );
+    expect(omittedFailure.code).toBe("workspace_path_not_safe");
+    expect(Object.prototype.hasOwnProperty.call(omittedFailure, "cause")).toBe(false);
+    expect(omittedFailure.cause).toBeUndefined();
+  });
+
+  test("TaskCard single settlement retains safe Error and trusted carrier identity", async () => {
+    const hydrationFixture = await createTempWorkspacePath();
+    tempRoots.push(hydrationFixture.tempRoot);
+    await mkdir(join(hydrationFixture.workspaceRoot, "tasks"), { recursive: true });
+    const hydrationError = new Error("safe TaskCard hydration failure");
+    const hydrationFailure = await captureTaskServiceError(() =>
+      createTaskCardService({
+        workspaceRoot: hydrationFixture.workspaceRoot,
+        snapshotReadHooks: {
+          lstatTasksRootForHydration: async () => {
+            throw hydrationError;
+          }
+        }
+      }).listTasks()
+    );
+    expect(hydrationFailure).toMatchObject({
+      code: "workspace_path_not_safe",
+      status: 500,
+      category: "workspace_error",
+      message: "Workspace tasks root metadata could not be inspected safely.",
+      userMessage: "The workspace tasks directory is temporarily unavailable.",
+      retryable: false,
+      evidenceRefs: ["workspace/tasks", "workspace/tasks:metadata"],
+      recommendedNextActions: [
+        "Inspect the workspace task snapshot state before retrying."
+      ]
+    });
+    expect(hydrationFailure.cause).toBe(hydrationError);
+
+    for (const transport of ["error", "carrier"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const taskId = `TASK-safe-single-settlement-${transport}`;
+      const service = createTaskCardService({ workspaceRoot, taskIdFactory: () => taskId });
+      await service.createTask({
+        type: "engineering",
+        title: `Safe single settlement ${transport}`,
+        question_or_goal: "Retain the established single-item transport identity.",
+        inference_budget: { mode: "normal" }
+      });
+      const observation = await service.observeTaskSnapshotForCleanup(taskId);
+      if (observation.status !== "record") throw new Error("Expected exact observation.");
+      const raw = new Error(`safe single settlement ${transport}`);
+      const thrown = transport === "error"
+        ? raw
+        : preserveThrownValueAndCompensationErrors(
+            raw,
+            [],
+            "pre-existing safe settlement carrier",
+            [],
+            "settlement"
+          );
+      let injections = 0;
+      const failure = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          {
+            afterDurableRecordObservation: () => {
+              if (injections++ === 0) throw thrown;
+            }
+          },
+          () => service.acceptTaskSnapshotCleanupObservation(observation)
+        )
+      );
+
+      expect(injections).toBeGreaterThanOrEqual(1);
+      expect(failure.code).toBe("workspace_path_not_safe");
+      expect(failure.message).toBe(
+        "Failed to settle the exact observed task snapshot generation."
+      );
+      expect(failure.cause).toBe(thrown);
+      expect(semanticPrimaryValue(failure.cause)).toBe(raw);
+    }
+  });
+
   test("only authority-producing idempotency release sites opt into fulfilled-value settlement", async () => {
     const sourcePath = join(import.meta.dir, "idempotency-service.ts");
     const sourceText = await readFile(sourcePath, "utf8");

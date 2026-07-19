@@ -14,6 +14,8 @@ import {
 import {
   captureFailureOccurrence,
   failureLedger,
+  semanticPrimaryError,
+  type FailurePhase,
   type FailureOccurrence
 } from "./compensation-error-preservation";
 import { isPathInsideBoundary } from "./workspace-path-safety";
@@ -479,7 +481,13 @@ const TaskSnapshotCleanupRawSchema = z.unknown();
 
 function foldTaskSnapshotSettlementErrors(errors: readonly unknown[]): Error | undefined {
   if (errors.length === 0) return undefined;
-  if (errors.length === 1 && errors[0] instanceof Error) return errors[0];
+  if (errors.length === 1) {
+    return transportTaskCardFailure(
+      errors[0],
+      "Task snapshot exact settlement and bounded cache rehydration failed.",
+      "settlement"
+    );
+  }
   return preserveTaskServiceErrorCompensationCompatibility(
     errors[0],
     errors.slice(1),
@@ -487,6 +495,27 @@ function foldTaskSnapshotSettlementErrors(errors: readonly unknown[]): Error | u
     "settlement",
     errors.slice(1).map(() => "settlement")
   ) as Error;
+}
+
+function transportTaskCardFailure(
+  value: unknown,
+  carrierMessage: string,
+  phase: FailurePhase
+): Error {
+  if (failureLedger(value)) return value as Error;
+  const exactError = semanticPrimaryError(value);
+  if (exactError !== undefined && exactError === value) return exactError;
+  return preserveTaskServiceErrorCompensationCompatibility(
+    value,
+    [],
+    carrierMessage,
+    phase,
+    []
+  ) as Error;
+}
+
+function presentWorkspaceErrorCause(cause: Error | undefined): [] | [Error] {
+  return cause === undefined ? [] : [cause];
 }
 
 function copyTaskCard(task: TaskCard): TaskCard {
@@ -749,7 +778,9 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       "Failed to publish a durably observed task into the local cache.",
       "The task snapshot could not be made locally visible safely.",
       [taskSnapshotEvidenceRef(taskId), "snapshot.bytes"],
-      foldTaskSnapshotSettlementErrors(reobservationErrors)
+      ...presentWorkspaceErrorCause(
+        foldTaskSnapshotSettlementErrors(reobservationErrors)
+      )
     );
   }
 
@@ -1122,10 +1153,12 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         "Failed to settle the exact observed task snapshot generation.",
         "The task snapshot could not be accepted safely.",
         [taskSnapshotEvidenceRef(observation.taskId), "snapshot.bytes"],
-        foldTaskSnapshotSettlementErrors([
-          settlement.error,
-          ...rehydrationErrors
-        ])
+        ...presentWorkspaceErrorCause(
+          foldTaskSnapshotSettlementErrors([
+            settlement.error,
+            ...rehydrationErrors
+          ])
+        )
       );
     }
 
@@ -1134,7 +1167,9 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       "Observed task snapshot changed before exact cache settlement.",
       "The task snapshot changed before it could be accepted safely.",
       [taskSnapshotEvidenceRef(observation.taskId), "snapshot.bytes"],
-      foldTaskSnapshotSettlementErrors(rehydrationErrors)
+      ...presentWorkspaceErrorCause(
+        foldTaskSnapshotSettlementErrors(rehydrationErrors)
+      )
     );
   }
 
@@ -1200,7 +1235,9 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         "Failed to reconcile a lost task snapshot delete-settlement.",
         "The removed task snapshot could not be reconciled into the local cache safely.",
         [evidenceRef],
-        foldTaskSnapshotSettlementErrors(rehydrationErrors)
+        ...presentWorkspaceErrorCause(
+          foldTaskSnapshotSettlementErrors(rehydrationErrors)
+        )
       );
     }
   }
@@ -1328,7 +1365,9 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           "Observed task snapshot no longer satisfies its cleanup condition.",
           "The task snapshot changed before it could be cleaned up safely.",
           [state.evidenceRef],
-          foldTaskSnapshotSettlementErrors(rehydrationErrors)
+          ...presentWorkspaceErrorCause(
+            foldTaskSnapshotSettlementErrors(rehydrationErrors)
+          )
         );
       }
 
@@ -2333,7 +2372,9 @@ async function readTaskSnapshot(
       durableRead.reason,
       laneTaskId,
       evidenceRef,
-      durableRead.cause
+      ...(Object.prototype.hasOwnProperty.call(durableRead, "cause")
+        ? [durableRead.cause] as [unknown]
+        : [])
     );
   }
 
@@ -2501,7 +2542,7 @@ function taskSnapshotDurableReadError(
   reason: DurableSingleLinkReadFailureReason,
   laneTaskId: string,
   evidenceRef: string,
-  cause?: unknown
+  ...causeArguments: [] | [unknown]
 ): TaskServiceError {
   if (reason === "parent_not_safe") {
     return workspaceError(
@@ -2509,7 +2550,7 @@ function taskSnapshotDurableReadError(
       `Task lane is not a safe directory: ${laneTaskId}`,
       "A task snapshot lane is blocked by a non-directory filesystem entry.",
       [`workspace/tasks/${laneTaskId}`],
-      cause
+      ...causeArguments
     );
   }
   if (reason === "not_regular_file" || reason === "multiple_links") {
@@ -2518,7 +2559,7 @@ function taskSnapshotDurableReadError(
       "Task snapshot is not a safe regular file.",
       "A task snapshot cannot be read safely.",
       [evidenceRef],
-      cause
+      ...causeArguments
     );
   }
   if (reason === "too_large") {
@@ -2527,7 +2568,7 @@ function taskSnapshotDurableReadError(
       "Task snapshot exceeds the M1 bounded read size.",
       "A task snapshot is too large to load safely.",
       [evidenceRef],
-      cause
+      ...causeArguments
     );
   }
   if (reason === "open_failed") {
@@ -2536,7 +2577,7 @@ function taskSnapshotDurableReadError(
       "Task snapshot cannot be opened safely.",
       "A task snapshot cannot be read safely.",
       [evidenceRef],
-      cause
+      ...causeArguments
     ));
   }
   if (reason === "read_failed") {
@@ -2545,7 +2586,7 @@ function taskSnapshotDurableReadError(
       "Task snapshot cannot be read safely.",
       "A task snapshot cannot be read safely.",
       [evidenceRef],
-      cause
+      ...causeArguments
     ));
   }
 
@@ -2554,7 +2595,7 @@ function taskSnapshotDurableReadError(
     "Task snapshot cannot be inspected.",
     "A task snapshot cannot be read safely.",
     [evidenceRef],
-    cause
+    ...causeArguments
   ));
 }
 
@@ -2849,13 +2890,16 @@ function taskSnapshotTooLargeError(): TaskServiceError {
   });
 }
 
-function taskLaneNotDirectoryError(taskId: string, cause?: unknown): TaskServiceError {
+function taskLaneNotDirectoryError(
+  taskId: string,
+  ...causeArguments: [] | [unknown]
+): TaskServiceError {
   return workspaceError(
     "task_lane_not_directory",
     `Task lane is not a safe directory: ${taskId}`,
     "A task snapshot lane is blocked by a non-directory filesystem entry.",
     [`workspace/tasks/${taskId}`],
-    cause
+    ...causeArguments
   );
 }
 
@@ -3044,7 +3088,7 @@ function workspaceError(
   message: string,
   userMessage: string,
   evidenceRefs: string[],
-  cause?: unknown
+  ...causeArguments: [] | [unknown]
 ): TaskServiceError {
   const error = new TaskServiceError({
     code,
@@ -3057,8 +3101,12 @@ function workspaceError(
     recommendedNextActions: ["Inspect the workspace task snapshot state before retrying."]
   });
 
-  if (cause instanceof Error) {
-    error.cause = cause;
+  if (causeArguments.length === 1) {
+    error.cause = transportTaskCardFailure(
+      causeArguments[0],
+      "A TaskCard workspace operation failed before its cause could be classified safely.",
+      "body"
+    );
   }
 
   return error;
