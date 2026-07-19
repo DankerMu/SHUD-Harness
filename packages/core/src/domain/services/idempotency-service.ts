@@ -10,6 +10,7 @@ import {
 } from "../schemas/idempotency";
 import { TaskServiceError, isSafeTaskId } from "./task-card-service";
 import {
+  captureFailureOccurrence,
   runWithPreservedRelease,
   type FailureOccurrence,
   type FailurePhase
@@ -41,6 +42,12 @@ const IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE =
   "An idempotency operation failed and its owned artifact release also failed.";
 const IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE =
   "Completed idempotency invalidation and its durable quarantine recovery both failed.";
+const AUTHORITY_TRANSPORT_MAX_PROTOTYPE_HOPS = 16;
+
+interface AuthorityTransportInspection {
+  readonly authorityError: unknown;
+  readonly constructor: new (inner: unknown) => Error;
+}
 
 async function runWithIdempotencyRelease<T>(
   body: () => Promise<T>,
@@ -55,7 +62,8 @@ async function runWithIdempotencyRelease<T>(
     release,
     IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE,
     settleFulfilledValueAfterReleaseFailure,
-    preserveAuthorityTransportAwareCombinedFailure
+    preserveAuthorityTransportAwareCombinedFailure,
+    captureAuthorityTransportSemanticPrimaryOccurrence
   );
 }
 
@@ -74,29 +82,29 @@ function preserveAuthorityTransportAwareCombinedFailure(
   primaryPhase: FailurePhase = "body",
   compensationPhases: readonly FailurePhase[] = compensations.map(() => "settlement"),
   primaryOccurrence?: FailureOccurrence,
-  compensationOccurrences?: readonly FailureOccurrence[]
+  compensationOccurrences?: readonly FailureOccurrence[],
+  semanticPrimaryOccurrence?: FailureOccurrence
 ): unknown {
+  const authorityTransport = inspectAuthorityTransport(primary);
   if (
-    primary instanceof Error &&
-    primary.name === "CompletedTaskSnapshotAuthorityUnknownError" &&
-    "authorityError" in primary
+    authorityTransport !== undefined &&
+    semanticPrimaryOccurrence !== undefined &&
+    Object.is(
+      semanticPrimaryOccurrence.value,
+      authorityTransport.authorityError
+    )
   ) {
-    const authorityError =
-      (primary as Error & { authorityError: unknown }).authorityError;
     try {
       const folded = preserveTaskServiceErrorCompensationCompatibility(
-        authorityError,
+        authorityTransport.authorityError,
         compensations,
         aggregateMessage,
         primaryPhase,
         compensationPhases,
-        undefined,
+        semanticPrimaryOccurrence,
         compensationOccurrences
       );
-      return Reflect.construct(
-        primary.constructor as new (inner: unknown) => Error,
-        [folded]
-      );
+      return Reflect.construct(authorityTransport.constructor, [folded]);
     } catch {
       // Fall through to the wrapper-blind fold when reconstruction fails.
     }
@@ -110,6 +118,72 @@ function preserveAuthorityTransportAwareCombinedFailure(
     primaryOccurrence,
     compensationOccurrences
   );
+}
+
+function captureAuthorityTransportSemanticPrimaryOccurrence(
+  phase: FailurePhase,
+  primary: unknown
+): FailureOccurrence | undefined {
+  const authorityTransport = inspectAuthorityTransport(primary);
+  return authorityTransport === undefined
+    ? undefined
+    : captureFailureOccurrence(phase, authorityTransport.authorityError);
+}
+
+function inspectAuthorityTransport(
+  primary: unknown
+): AuthorityTransportInspection | undefined {
+  if (
+    primary === null ||
+    (typeof primary !== "object" && typeof primary !== "function")
+  ) {
+    return undefined;
+  }
+
+  try {
+    const nameDescriptor = Object.getOwnPropertyDescriptor(primary, "name");
+    const authorityDescriptor = Object.getOwnPropertyDescriptor(
+      primary,
+      "authorityError"
+    );
+    if (
+      nameDescriptor === undefined ||
+      !("value" in nameDescriptor) ||
+      nameDescriptor.value !== "CompletedTaskSnapshotAuthorityUnknownError" ||
+      authorityDescriptor === undefined ||
+      !("value" in authorityDescriptor)
+    ) {
+      return undefined;
+    }
+
+    let cursor: object | null = primary;
+    for (
+      let hop = 0;
+      cursor !== null && hop < AUTHORITY_TRANSPORT_MAX_PROTOTYPE_HOPS;
+      hop += 1
+    ) {
+      const constructorDescriptor = Object.getOwnPropertyDescriptor(
+        cursor,
+        "constructor"
+      );
+      if (
+        constructorDescriptor !== undefined &&
+        "value" in constructorDescriptor &&
+        typeof constructorDescriptor.value === "function"
+      ) {
+        return {
+          authorityError: authorityDescriptor.value,
+          constructor: constructorDescriptor.value as new (inner: unknown) => Error
+        };
+      }
+      const next = Object.getPrototypeOf(cursor) as object | null;
+      if (next === cursor) return undefined;
+      cursor = next;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }
 
 const IdempotencyTransitionGuardIdentitySchema = z.object({

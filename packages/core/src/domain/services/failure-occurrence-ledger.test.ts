@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   FAILURE_GRAPH_MAX_EDGES,
+  FAILURE_GRAPH_MAX_NUMERIC_KEYS,
   FAILURE_GRAPH_MAX_NODES,
   FailureGraphObservationIssue,
   captureFailureOccurrence,
@@ -184,6 +185,72 @@ describe("failure occurrence ledger", () => {
     expect(failureLedger(adopted)).toBe(failureLedger(adopted));
   });
 
+  test("Phase 6.2 observes nested carrier edges without incidental adoption", () => {
+    const inheritedPrimary = new Error("inherited primary");
+    const inheritedLater = new Error("inherited later");
+    const inherited = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", inheritedPrimary),
+      [captureFailureOccurrence("settlement", inheritedLater)],
+      "inherited operation"
+    );
+    const inheritedIds = new Set(
+      failureEvents(inherited).map((event) => event.occurrenceId)
+    );
+
+    for (const kind of ["cause", "errors", "semanticPrimary"] as const) {
+      const outer = kind === "errors"
+        ? new AggregateError([inherited], `outer ${kind}`)
+        : new Error(`outer ${kind}`);
+      if (kind !== "errors") {
+        Object.defineProperty(outer, kind, {
+          configurable: true,
+          enumerable: false,
+          value: inherited
+        });
+      }
+      const outerOccurrence = captureFailureOccurrence("body", outer);
+      const result = mergeTrustedFailureOccurrences(
+        outerOccurrence,
+        [],
+        `outer ${kind} operation`
+      );
+      const events = failureEvents(result);
+      const outerNode = failureGraphNodes(result).find(
+        (node) => node.value === outer
+      );
+
+      expect(events).toEqual([outerOccurrence]);
+      expect(
+        events.some((event) => inheritedIds.has(event.occurrenceId))
+      ).toBe(false);
+      expect(failureGraphNodes(result).some((node) => node.value === inherited)).toBe(
+        true
+      );
+      expect(
+        failureGraphNodes(result).some((node) => node.value === inheritedPrimary)
+      ).toBe(true);
+      expect(
+        failureGraphNodes(result).some((node) => node.value === inheritedLater)
+      ).toBe(true);
+      expect(
+        outerNode?.edges.some(
+          (edge) => edge.kind === kind && edge.target === inherited
+        )
+      ).toBe(true);
+    }
+
+    const explicitlyAdopted = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("final_release", inherited),
+      [captureFailureOccurrence("observation", "new later")],
+      "explicit adoption"
+    );
+    expect(
+      failureEvents(explicitlyAdopted).filter((event) =>
+        inheritedIds.has(event.occurrenceId)
+      )
+    ).toHaveLength(inheritedIds.size);
+  });
+
   test("freshly observes a nested Proxy carrier once per fold and terminates cyclic graphs", () => {
     const firstCause = new Error("proxy first cause");
     const secondCause = new Error("proxy second cause");
@@ -274,6 +341,29 @@ describe("failure occurrence ledger", () => {
       )).toHaveLength(truncated ? 1 : 0);
       expect(semanticPrimaryValue(result)).toBe(primary);
     }
+  });
+
+  test("Phase 6.2 records edge and numeric-key budget exhaustion independently", () => {
+    const errors = Array.from(
+      { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1 },
+      (_, index) => index
+    );
+    const primary = new AggregateError(errors, "combined budget exhaustion");
+    const result = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", primary),
+      [],
+      "combined budget exhaustion"
+    );
+    const codes = observationIssueCodes(result);
+
+    expect(codes.filter((code) => code === "edge_budget_exceeded")).toHaveLength(1);
+    expect(
+      codes.filter((code) => code === "numeric_key_budget_exceeded")
+    ).toHaveLength(1);
+    expect(failureGraphNodes(result)[0]?.edges).toHaveLength(
+      FAILURE_GRAPH_MAX_EDGES
+    );
+    expect(semanticPrimaryValue(result)).toBe(primary);
   });
 
   test("enumerates present numeric keys of a maximum-length sparse errors array", () => {

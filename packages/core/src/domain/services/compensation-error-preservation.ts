@@ -106,6 +106,7 @@ type AsyncOutcome<T> =
       readonly status: "rejected";
       readonly reason: unknown;
       readonly occurrence: FailureOccurrence;
+      readonly semanticPrimaryOccurrence?: FailureOccurrence;
     };
 
 interface ObservationState {
@@ -133,9 +134,18 @@ const trustedFailureOccurrences = new WeakSet<object>();
 const preservedFailureLedgers = new WeakMap<object, PreservedFailureLedger>();
 
 class PreservedFailureCarrier extends Error {
-  constructor(message: string) {
+  readonly semanticPrimary: unknown;
+  readonly errors: readonly unknown[];
+
+  constructor(
+    message: string,
+    semanticPrimary: unknown,
+    compensations: readonly unknown[]
+  ) {
     super(message);
     this.name = "PreservedFailureCarrier";
+    this.semanticPrimary = semanticPrimary;
+    this.errors = Object.freeze([...compensations]);
   }
 }
 
@@ -154,7 +164,8 @@ export async function runWithPreservedRelease<T>(
     primaryPhase?: FailurePhase,
     compensationPhases?: readonly FailurePhase[],
     primaryOccurrence?: FailureOccurrence,
-    compensationOccurrences?: readonly FailureOccurrence[]
+    compensationOccurrences?: readonly FailureOccurrence[],
+    semanticPrimaryOccurrence?: FailureOccurrence
   ) => unknown = (
     primary,
     compensations,
@@ -162,7 +173,8 @@ export async function runWithPreservedRelease<T>(
     primaryPhase,
     compensationPhases,
     primaryOccurrence,
-    compensationOccurrences
+    compensationOccurrences,
+    _semanticPrimaryOccurrence
   ) =>
     preserveThrownValueAndCompensationErrors(
       primary,
@@ -173,7 +185,11 @@ export async function runWithPreservedRelease<T>(
       compensationPhases,
       primaryOccurrence,
       compensationOccurrences
-    )
+    ),
+  captureSemanticPrimaryOccurrence?: (
+    phase: FailurePhase,
+    value: unknown
+  ) => FailureOccurrence | undefined
 ): Promise<T> {
   let bodyOutcome: AsyncOutcome<T>;
   try {
@@ -182,7 +198,9 @@ export async function runWithPreservedRelease<T>(
     bodyOutcome = {
       status: "rejected",
       reason,
-      occurrence: captureFailureOccurrence("body", reason)
+      occurrence: captureFailureOccurrence("body", reason),
+      semanticPrimaryOccurrence:
+        captureSemanticPrimaryOccurrence?.("body", reason)
     };
   }
 
@@ -194,7 +212,9 @@ export async function runWithPreservedRelease<T>(
     releaseOutcome = {
       status: "rejected",
       reason,
-      occurrence: captureFailureOccurrence(phase, reason)
+      occurrence: captureFailureOccurrence(phase, reason),
+      semanticPrimaryOccurrence:
+        captureSemanticPrimaryOccurrence?.(phase, reason)
     };
   }
 
@@ -207,7 +227,8 @@ export async function runWithPreservedRelease<T>(
         "body",
         ["final_release"],
         bodyOutcome.occurrence,
-        [releaseOutcome.occurrence]
+        [releaseOutcome.occurrence],
+        bodyOutcome.semanticPrimaryOccurrence
       );
     }
     throw bodyOutcome.reason;
@@ -231,7 +252,8 @@ export async function runWithPreservedRelease<T>(
           "initial_release",
           ["settlement"],
           releaseOutcome.occurrence,
-          [settlementOccurrence]
+          [settlementOccurrence],
+          releaseOutcome.semanticPrimaryOccurrence
         );
       }
     }
@@ -356,8 +378,6 @@ export function mergeTrustedFailureOccurrences(
     const value = state.queue[state.queueHead++];
     if (!isObjectLike(value) || state.observed.has(value)) continue;
 
-    adoptLedger(failureLedger(value), state);
-    if (state.observed.has(value)) continue;
     if (state.nodes.length >= FAILURE_GRAPH_MAX_NODES) {
       recordBudgetIssue("node_budget_exceeded", FAILURE_GRAPH_MAX_NODES, state);
       continue;
@@ -382,7 +402,11 @@ export function mergeTrustedFailureOccurrences(
     })
   });
 
-  const carrier = new PreservedFailureCarrier(_aggregateMessage);
+  const carrier = new PreservedFailureCarrier(
+    _aggregateMessage,
+    semanticPrimary.value,
+    ledger.compensations.map((occurrence) => occurrence.value)
+  );
   preservedFailureLedgers.set(carrier, ledger);
   return Object.freeze(carrier);
 }
@@ -535,13 +559,12 @@ function observeSparseErrorsArray(
   if (keys.length > FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1) {
     if (state.edgeCount >= FAILURE_GRAPH_MAX_EDGES) {
       recordBudgetIssue("edge_budget_exceeded", FAILURE_GRAPH_MAX_EDGES, state);
-    } else {
-      recordBudgetIssue(
-        "numeric_key_budget_exceeded",
-        FAILURE_GRAPH_MAX_NUMERIC_KEYS,
-        state
-      );
     }
+    recordBudgetIssue(
+      "numeric_key_budget_exceeded",
+      FAILURE_GRAPH_MAX_NUMERIC_KEYS,
+      state
+    );
   }
 }
 

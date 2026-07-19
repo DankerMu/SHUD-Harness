@@ -886,7 +886,7 @@ async function replayInFlightIdempotentTaskCreate(
       );
     } catch (error) {
       if (
-        !(error instanceof CompletedTaskSnapshotAuthorityUnknownError) ||
+        !isCompletedTaskSnapshotAuthorityUnknownError(error) ||
         Date.now() >= deadline
       ) {
         throw error;
@@ -1328,6 +1328,8 @@ class CompletedTaskSnapshotAuthorityReadError extends Error {
   }
 }
 
+const completedTaskSnapshotAuthorityUnknownErrors = new WeakSet<object>();
+
 class CompletedTaskSnapshotAuthorityUnknownError extends Error {
   readonly authorityError: unknown;
 
@@ -1337,7 +1339,18 @@ class CompletedTaskSnapshotAuthorityUnknownError extends Error {
     });
     this.name = "CompletedTaskSnapshotAuthorityUnknownError";
     this.authorityError = authorityError;
+    completedTaskSnapshotAuthorityUnknownErrors.add(this);
   }
+}
+
+function isCompletedTaskSnapshotAuthorityUnknownError(
+  value: unknown
+): value is CompletedTaskSnapshotAuthorityUnknownError {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    completedTaskSnapshotAuthorityUnknownErrors.has(value)
+  );
 }
 
 async function classifyCompletedTaskAuthorityIfPresent(
@@ -1602,7 +1615,7 @@ async function classifyCompletedTaskAuthorityUnderLease(
         );
       }
     }
-    if (error instanceof CompletedTaskSnapshotAuthorityUnknownError) throw error;
+    if (isCompletedTaskSnapshotAuthorityUnknownError(error)) throw error;
     throw new CompletedTaskSnapshotAuthorityUnknownError(error);
   }
 }
@@ -1908,7 +1921,7 @@ function preserveAuthorityAwarePrimaryFailure(
   semanticPrimaryOccurrence?: FailureOccurrence
 ): unknown {
   if (compensations.length === 0) return primary;
-  if (primary instanceof CompletedTaskSnapshotAuthorityUnknownError) {
+  if (isCompletedTaskSnapshotAuthorityUnknownError(primary)) {
     const trustedAuthority = taskServiceErrorAtBoundary(primary.authorityError);
     if (trustedAuthority) {
       return new CompletedTaskSnapshotAuthorityUnknownError(
@@ -1939,7 +1952,7 @@ function captureAuthorityTransportSemanticPrimaryOccurrence(
   phase: FailurePhase,
   primary: unknown
 ): FailureOccurrence | undefined {
-  return primary instanceof CompletedTaskSnapshotAuthorityUnknownError
+  return isCompletedTaskSnapshotAuthorityUnknownError(primary)
     ? captureFailureOccurrence(phase, primary.authorityError)
     : undefined;
 }
@@ -2283,7 +2296,7 @@ function jsonTaskServiceError(c: Context, error: unknown): Response {
   if (!Object.is(semanticPrimary, error)) {
     return jsonTaskServiceError(c, semanticPrimary);
   }
-  if (error instanceof CompletedTaskSnapshotAuthorityUnknownError) {
+  if (isCompletedTaskSnapshotAuthorityUnknownError(error)) {
     return jsonTaskServiceError(c, error.authorityError);
   }
 

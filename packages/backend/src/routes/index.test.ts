@@ -7955,6 +7955,21 @@ describe("backend workspace and health routes", () => {
     )?.authorityError;
     expect(semanticPrimaryError(unknownAuthorityError)).toBe(typedPrimary);
     expectOrderedPreservedCompensationVector(unknownAuthorityError, [releaseFailure]);
+    const physicalEvents = failureEvents(unknownAuthorityError);
+    expect(physicalEvents.map((event) => event.value)).toEqual([
+      typedPrimary,
+      releaseFailure
+    ]);
+    expect(physicalEvents.map((event) => event.phase)).toEqual([
+      "body",
+      "final_release"
+    ]);
+    expect(physicalEvents.map((event) => event.order)).toEqual(
+      physicalEvents.map((event) => event.order).sort((left, right) => left - right)
+    );
+    expect(new Set(physicalEvents.map((event) => event.order)).size).toBe(
+      physicalEvents.length
+    );
     expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
@@ -7979,6 +7994,97 @@ describe("backend workspace and health routes", () => {
     // Reusing the raw typed primary does not import an earlier operation's
     // carrier. The release-success counterfactual has no release occurrence.
     expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(0);
+  });
+
+  test("Phase 6.2 bounds cyclic and fresh prototype proxies through backend finalizer and serializer", async () => {
+    const backendIndexPath = join(import.meta.dir, "index.ts");
+    const coreIndexPath = resolve(import.meta.dir, "../../../core/src/index.ts");
+    const script = [
+      'import { mkdtemp, realpath, rm } from "node:fs/promises";',
+      'import { tmpdir } from "node:os";',
+      'import { join } from "node:path";',
+      `import { createBackendApi } from ${JSON.stringify(backendIndexPath)};`,
+      `import { createIdempotencyRecordService, createTaskCardService } from ${JSON.stringify(coreIndexPath)};`,
+      'const body = {',
+      '  type: "engineering",',
+      '  title: "Phase 6.2 bounded proxy",',
+      '  question_or_goal: "Bound real backend consumers.",',
+      '  inference_budget: { mode: "normal" }',
+      '};',
+      'function hostile(kind) {',
+      '  if (kind === "cyclic") {',
+      '    let proxy;',
+      '    proxy = new Proxy(new Error("cyclic proxy"), { getPrototypeOf: () => proxy });',
+      '    return proxy;',
+      '  }',
+      '  const fresh = () => new Proxy(new Error("fresh proxy"), { getPrototypeOf: () => fresh() });',
+      '  return fresh();',
+      '}',
+      'async function post(app, key) {',
+      '  const headers = { "content-type": "application/json" };',
+      '  if (key) headers["Idempotency-Key"] = key;',
+      '  return await app.request("/api/tasks", { method: "POST", headers, body: JSON.stringify(body) });',
+      '}',
+      'for (const kind of ["cyclic", "fresh"]) {',
+      '  const finalizerRoot = await realpath(await mkdtemp(join(tmpdir(), "phase62-finalizer-")));',
+      '  try {',
+      '    const primary = hostile(kind);',
+      '    let cancellations = 0;',
+      '    let consumeCalls = 0;',
+      '    const app = createBackendApi({',
+      '      workspaceRoot: join(finalizerRoot, "workspace"),',
+      '      taskIdFactory: () => `TASK-phase62-finalizer-${kind}` ,',
+      '      idempotencyServiceFactory: (options) => {',
+      '        const service = createIdempotencyRecordService(options);',
+      '        return { ...service, consumeCompletedRecord: async () => { consumeCalls += 1; throw primary; } };',
+      '      },',
+      '      taskServiceFactory: (options) => {',
+      '        const service = createTaskCardService(options);',
+      '        return { ...service, cancelTaskSnapshotCleanupObservation: async (observation) => {',
+      '          cancellations += 1;',
+      '          await service.cancelTaskSnapshotCleanupObservation(observation);',
+      '          throw new Error(`phase62 cancellation ${kind}`);',
+      '        } };',
+      '      }',
+      '    });',
+      '    const response = await post(app, `task:create:phase62-finalizer-${kind}`);',
+      '    const responseText = await response.text();',
+      '    if (response.status !== 500 || cancellations !== 1) {',
+      '      throw new Error(`finalizer ${kind} status=${response.status} cancellations=${cancellations} consumes=${consumeCalls} body=${responseText}`);',
+      '    }',
+      '  } finally {',
+      '    await rm(finalizerRoot, { recursive: true, force: true });',
+      '  }',
+      '  const serializerRoot = await realpath(await mkdtemp(join(tmpdir(), "phase62-serializer-")));',
+      '  try {',
+      '    const primary = hostile(kind);',
+      '    const app = createBackendApi({',
+      '      workspaceRoot: join(serializerRoot, "workspace"),',
+      '      taskServiceFactory: (options) => {',
+      '        const service = createTaskCardService(options);',
+      '        return { ...service, createTask: async () => { throw primary; } };',
+      '      }',
+      '    });',
+      '    const response = await post(app);',
+      '    if (response.status !== 500) throw new Error(`serializer ${kind} did not return 500`);',
+      '  } finally {',
+      '    await rm(serializerRoot, { recursive: true, force: true });',
+      '  }',
+      '}',
+      'console.log("phase62-backend-ok");'
+    ].join("\n");
+
+    const result = await runBoundedBunProbe(script, 3_000);
+    if (result.timedOut) {
+      throw new Error("backend finalizer/serializer proxy probe exceeded 3 seconds");
+    }
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `backend proxy probe failed with exit ${result.exitCode}: ${result.stderr} ${result.stdout}`
+      );
+    }
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("phase62-backend-ok");
   });
 
   test("S34-P62-05 digest-mismatch accept-settlement failure preserves the typed binding primary", async () => {
@@ -9971,6 +10077,42 @@ function parseApiRequestLogLine(line: string): ApiRequestLogLine {
   expect(typeof parsed.duration_ms).toBe("number");
 
   return parsed;
+}
+
+async function runBoundedBunProbe(
+  script: string,
+  timeoutMs: number
+): Promise<Readonly<{
+  timedOut: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}>> {
+  const child = Bun.spawn([process.execPath, "-e", script], {
+    cwd: resolve(import.meta.dir, "../../../.."),
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    child.exited.then((exitCode) => ({ timedOut: false as const, exitCode })),
+    new Promise<{ timedOut: true; exitCode: null }>((resolveTimeout) => {
+      timer = setTimeout(
+        () => resolveTimeout({ timedOut: true, exitCode: null }),
+        timeoutMs
+      );
+    })
+  ]);
+  if (timer) clearTimeout(timer);
+  if (outcome.timedOut) {
+    child.kill(9);
+    await child.exited;
+  }
+  const [stdout, stderr] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text()
+  ]);
+  return Object.freeze({ ...outcome, stdout, stderr });
 }
 
 async function timeoutAfter(milliseconds: number, message: string): Promise<never> {

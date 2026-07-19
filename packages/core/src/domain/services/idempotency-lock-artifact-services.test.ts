@@ -31,7 +31,7 @@ import {
 } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import ts from "typescript";
 import { z } from "zod";
 import { ArtifactSchema } from "../schemas/artifact";
@@ -4802,9 +4802,14 @@ describe("idempotency, lock, and artifact services", () => {
     expect((await stat(path)).nlink).toBe(1);
     expect(await findOnlyAuthorityNamespace(dirname(path))).toBe(retainedNamespace);
     expect(errorTreeContains(failure, hookFailures[0])).toBe(true);
-    const ordered = findPreservedCompensationAggregate(failure.cause)?.errors;
-    expect(ordered?.slice(0, 3)).toEqual(hookFailures);
-    expect(ordered?.[3]).toMatchObject({ code: "ENOTEMPTY" });
+    const cleanupCarrier = findErrorNode(
+      failure.cause,
+      (error) => failureLedger(error) !== undefined
+    );
+    expect(cleanupCarrier).toBeDefined();
+    const ordered = failureEvents(cleanupCarrier!).map((event) => event.value);
+    expect(ordered.slice(0, 3)).toEqual(hookFailures);
+    expect(ordered[3]).toMatchObject({ code: "ENOTEMPTY" });
     expect(ordered).toHaveLength(4);
 
     await unlink(join(retainedNamespace, "terminal-rmdir-blocker"));
@@ -23951,6 +23956,108 @@ describe("idempotency, lock, and artifact services", () => {
     ).toBe(0);
   });
 
+  test("Phase 6.2 bounds cyclic and fresh prototype proxies through idempotency release", async () => {
+    const coreIndexPath = join(import.meta.dir, "index.ts");
+    const workspaceStorePath = join(import.meta.dir, "workspace-record-store.ts");
+    const script = [
+      'import { mkdtemp, realpath, rm } from "node:fs/promises";',
+      'import { tmpdir } from "node:os";',
+      'import { join } from "node:path";',
+      `import { TaskServiceError, createIdempotencyRecordService, failureEvents, idempotencyRecordFileName, semanticPrimaryValue, sha256Hex, taskServiceErrorAtBoundary } from ${JSON.stringify(coreIndexPath)};`,
+      `import { runWithWorkspaceRecordCompensationTestHooks, runWithWorkspaceRecordPublicationHooks } from ${JSON.stringify(workspaceStorePath)};`,
+      'function hostile(kind) {',
+      '  if (kind === "cyclic") {',
+      '    let proxy;',
+      '    proxy = new Proxy(new Error("cyclic proxy"), { getPrototypeOf: () => proxy });',
+      '    return proxy;',
+      '  }',
+      '  const fresh = () => new Proxy(new Error("fresh proxy"), { getPrototypeOf: () => fresh() });',
+      '  return fresh();',
+      '}',
+      'class CompletedTaskSnapshotAuthorityUnknownError extends Error {',
+      '  constructor(authorityError) {',
+      '    super("unknown authority", { cause: authorityError });',
+      '    this.name = "CompletedTaskSnapshotAuthorityUnknownError";',
+      '    this.authorityError = authorityError;',
+      '  }',
+      '}',
+      'async function runReleaseScenario(primary, label) {',
+      '  const tempRoot = await realpath(await mkdtemp(join(tmpdir(), "phase62-idempotency-")));',
+      '  try {',
+      '    const workspaceRoot = join(tempRoot, "workspace");',
+      '    const rawKey = `task:create:phase62-${label}`;',
+      '    const requestDigest = `digest-phase62-${label}`;',
+      '    const service = createIdempotencyRecordService({ workspaceRoot });',
+      '    await service.beginRecord({ scope: "task", key: rawKey, requestDigest });',
+      '    await service.completeRecord({',
+      '      scope: "task", key: rawKey, requestDigest, resultRef: `TASK-phase62-${label}`',
+      '    });',
+      '    const directory = join(workspaceRoot, "tasks", "_idempotency", "task");',
+      '    const guardPath = join(directory, `${sha256Hex(`transition:${rawKey}`)}.guard.json`);',
+      '    const releaseFailure = new Error(`phase62 release ${label}`);',
+      '    let failure;',
+      '    try {',
+      '      await runWithWorkspaceRecordPublicationHooks({',
+      '        beforeAuthorityOwnedUnlink: ({ path, operation }) => {',
+      '          if (path === guardPath && operation === "conditional_delete") throw releaseFailure;',
+      '        }',
+      '      }, () => runWithWorkspaceRecordCompensationTestHooks({',
+      '        beforeExactFailureSettlement: ({ path }) => {',
+      '          if (path === guardPath) throw releaseFailure;',
+      '        }',
+      '      }, () => service.consumeCompletedRecord({',
+      '        scope: "task", key: rawKey, requestDigest',
+      '      }, async () => { throw primary; })));',
+      '    } catch (error) {',
+      '      failure = error;',
+      '    }',
+      '    return { failure, releaseFailure };',
+      '  } finally {',
+      '    await rm(tempRoot, { recursive: true, force: true });',
+      '  }',
+      '}',
+      'const typedPrimary = new TaskServiceError({',
+      '  code: "record_malformed", status: 409, category: "idempotency_conflict",',
+      '  message: "phase62 authority primary", userMessage: "phase62 authority primary",',
+      '  evidenceRefs: ["phase62.authority"], retryable: true,',
+      '  recommendedNextActions: ["Retry."]',
+      '});',
+      'const wrapped = await runReleaseScenario(',
+      '  new CompletedTaskSnapshotAuthorityUnknownError(typedPrimary),',
+      '  "authority-wrapper"',
+      ');',
+      'const authorityEvents = failureEvents(wrapped.failure.authorityError);',
+      'const releaseView = taskServiceErrorAtBoundary(authorityEvents[1]?.value);',
+      'if (authorityEvents.length !== 2 ||',
+      '    authorityEvents[0].value !== typedPrimary || authorityEvents[0].phase !== "body" ||',
+      '    releaseView?.message !== "Idempotency transition artifact release did not settle safely." ||',
+      '    releaseView !== authorityEvents[1].value || authorityEvents[1].phase !== "final_release" ||',
+      '    authorityEvents[0].order >= authorityEvents[1].order ||',
+      '    new Set(authorityEvents.map((event) => event.order)).size !== authorityEvents.length) {',
+      '  throw new Error(`authority occurrence order phases=${authorityEvents.map((event) => event.phase).join(",")} length=${authorityEvents.length} primary=${authorityEvents[0]?.value === typedPrimary} release=${releaseView?.message} orders=${authorityEvents.map((event) => event.order).join(",")}`);',
+      '}',
+      'for (const kind of ["cyclic", "fresh"]) {',
+      '    const primary = hostile(kind);',
+      '  const { failure } = await runReleaseScenario(primary, kind);',
+      '  if (semanticPrimaryValue(failure) !== primary) throw new Error(`lost ${kind} primary`);',
+      '}',
+      'console.log("phase62-idempotency-ok");'
+    ].join("\n");
+
+    const result = await runBoundedBunProbe(script, 3_000);
+    if (result.timedOut) {
+      throw new Error("idempotency release proxy probe exceeded 3 seconds");
+    }
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `idempotency proxy probe failed with exit ${result.exitCode}: ${result.stderr} ${result.stdout}`
+      );
+    }
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("phase62-idempotency-ok");
+    expect(result.stderr).toBe("");
+  });
+
   test("only authority-producing idempotency release sites opt into fulfilled-value settlement", async () => {
     const sourcePath = join(import.meta.dir, "idempotency-service.ts");
     const sourceText = await readFile(sourcePath, "utf8");
@@ -24183,22 +24290,21 @@ describe("idempotency, lock, and artifact services", () => {
     expect(failureGraphNodes(failure).some((node) => node.value === publishReleaseCause)).toBe(
       true
     );
-    const settlementFailures = orderedDistinctCompensationFailures(failure);
-    expect(settlementFailures.filter((entry) => entry === releaseMarker)).toHaveLength(1);
-    expect(settlementFailures.filter((entry) => entry === settlementMarker)).toHaveLength(1);
-    const namespaceCleanupFailures = settlementFailures.filter(
-      (entry) =>
-        entry instanceof TaskServiceError &&
-        entry.message === "Workspace mutation namespace cleanup did not complete."
+    expect(countErrorNodes(failure, (error) => error === releaseMarker)).toBe(1);
+    expect(countErrorNodes(failure, (error) => error === settlementMarker)).toBe(1);
+    expect(
+      countErrorNodes(
+        failure,
+        (error) =>
+          error instanceof TaskServiceError &&
+          error.message === "Workspace mutation namespace cleanup did not complete."
+      )
+    ).toBe(2);
+    const settlementOccurrence = failureEvents(failure).find(
+      (event) => event.phase === "settlement"
     );
-    expect(namespaceCleanupFailures).toHaveLength(2);
-    const guardSettlements = settlementFailures.filter(
-      (entry) =>
-        entry instanceof TaskServiceError &&
-        entry.message === "Idempotency transition artifact release did not settle safely."
-    );
-    expect(guardSettlements).toHaveLength(1);
-    const guardSettlement = guardSettlements[0];
+    expect(settlementOccurrence).toBeDefined();
+    const guardSettlement = semanticPrimaryError(settlementOccurrence!.value);
     expect(guardSettlement).toBeInstanceOf(TaskServiceError);
     expect((guardSettlement as TaskServiceError).message).toBe(
       "Idempotency transition artifact release did not settle safely."
@@ -24210,10 +24316,12 @@ describe("idempotency, lock, and artifact services", () => {
       .cause as WorkspaceRecordConditionalDeleteError;
     expect(guardSettlementCause.mutationPhase).toBe("post_mutation");
     expect(guardSettlementCause.failureStage).toBe("operation");
-    expect(errorTreeContains(guardSettlementCause, settlementMarker)).toBe(true);
     expect(
       countErrorNodes(failure, (error) => error === guardSettlement)
     ).toBe(1);
+    expect(orderedDistinctCompensationFailures(failure)).toEqual([
+      settlementOccurrence!.value
+    ]);
     expect(
       failureEvents(failure)
         .filter((event) => event.value === publishRelease)
@@ -24221,21 +24329,11 @@ describe("idempotency, lock, and artifact services", () => {
     ).toEqual(["initial_release"]);
     expect(
       failureEvents(failure)
-        .filter((event) => event.value === guardSettlement)
+        .filter((event) => event.value === settlementOccurrence!.value)
         .map((event) => event.phase)
     ).toEqual(["settlement"]);
     expect(failureEvents(failure).map((event) => event.phase)).toEqual([
-      "body",
-      "settlement",
-      "settlement",
-      "settlement",
-      "body",
       "initial_release",
-      "body",
-      "settlement",
-      "settlement",
-      "settlement",
-      "body",
       "settlement"
     ]);
     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath, guardPath]);
@@ -24752,9 +24850,11 @@ describe("idempotency, lock, and artifact services", () => {
         failureEvents(failure).map(({ phase, value }) => ({ phase, value }))
       ).toEqual([
         { phase: "body", value: bodyFailure },
-        { phase: "body", value: releaseFailure },
         { phase: "final_release", value: releaseServiceFailure }
       ]);
+      expect(
+        failureGraphNodes(failure).filter((node) => node.value === releaseFailure)
+      ).toHaveLength(1);
       expect(
         failureEvents(failure)
           .filter((event) => event.value === bodyFailure)
@@ -29262,25 +29362,20 @@ describe("idempotency, lock, and artifact services", () => {
     expect((semantic as TaskServiceError).message).toBe(
       "Failed to publish a durably observed task into the local cache."
     );
-    // The denied reobservations stay attached as separate occurrence slots;
-    // the raw cause remains the exact first read-attempt carrier.
+    // The raw cause remains the exact first read-attempt carrier. Because it is
+    // visible only through an ordinary cause edge, its prior occurrence slots
+    // stay operation-local while both current raw nodes remain observable.
     const primaryCause = (semantic as TaskServiceError).cause;
     expect(primaryCause).toBeInstanceOf(Error);
     const readAttempt = semanticPrimaryValue(primaryCause);
     expect(readAttempt).toBeInstanceOf(Error);
     expect((readAttempt as { reason?: unknown }).reason).toBe(publishDenial);
-    const denialEvents = failureEvents(failure).filter(
-      (event) =>
-        (event.value as { reason?: unknown } | null)?.reason === publishDenial
+    const denialNodes = failureGraphNodes(failure).filter(
+      (node) =>
+        (node.value as { reason?: unknown } | null)?.reason === publishDenial
     );
-    expect(denialEvents).toHaveLength(2);
-    expect(denialEvents.map((event) => event.phase)).toEqual([
-      "settlement",
-      "settlement"
-    ]);
-    expect(denialEvents[0]?.occurrenceId).not.toBe(
-      denialEvents[1]?.occurrenceId
-    );
+    expect(denialNodes).toHaveLength(2);
+    expect(denialNodes[0]?.value).not.toBe(denialNodes[1]?.value);
     const aggregate = knownPreservedCompensationAggregate(failure);
     const closeRejections = aggregate.errors.filter(
       (entry) =>
@@ -29288,8 +29383,6 @@ describe("idempotency, lock, and artifact services", () => {
     );
     expect(closeRejections).toHaveLength(1);
     expect(failureEvents(failure).map((event) => event.phase)).toEqual([
-      "settlement",
-      "settlement",
       "body",
       "final_release"
     ]);
@@ -30479,6 +30572,42 @@ async function createBaseWriterFilesInIsolatedProcess(
       `isolated base writer failed with exit ${exitCode}: ${stderr.trim()} ${stdout.trim()}`.trim()
     );
   }
+}
+
+async function runBoundedBunProbe(
+  script: string,
+  timeoutMs: number
+): Promise<Readonly<{
+  timedOut: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}>> {
+  const child = Bun.spawn([process.execPath, "-e", script], {
+    cwd: resolve(import.meta.dir, "../../../../.."),
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    child.exited.then((exitCode) => ({ timedOut: false as const, exitCode })),
+    new Promise<{ timedOut: true; exitCode: null }>((resolveTimeout) => {
+      timer = setTimeout(
+        () => resolveTimeout({ timedOut: true, exitCode: null }),
+        timeoutMs
+      );
+    })
+  ]);
+  if (timer) clearTimeout(timer);
+  if (outcome.timedOut) {
+    child.kill(9);
+    await child.exited;
+  }
+  const [stdout, stderr] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text()
+  ]);
+  return Object.freeze({ ...outcome, stdout, stderr });
 }
 
 async function createFifo(path: string): Promise<void> {
