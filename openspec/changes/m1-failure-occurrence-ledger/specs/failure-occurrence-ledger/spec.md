@@ -168,3 +168,103 @@ initial release and failed recovery/settlement SHALL produce
 - **THEN** the ledger contains `initial_release, settlement`
 - **AND** real TaskCard, idempotency, workspace, and backend producer tests use
   the same phase contract where those paths exist
+
+### Requirement: Occurrences are the sole post-catch failure authority
+
+After a physical catch, an occurrence-bearing fold SHALL derive failure
+presence, exact raw value, phase, order, adoption, and typed projection from
+trusted occurrence/adoption entries only. It MUST NOT accept an independently
+authoritative raw value or phase vector. Untrusted, duplicate, stale/reused,
+reordered, phase-invalid, or incorrectly adopted entries SHALL fail closed
+before publishing a carrier, ledger, or typed view. Nested history SHALL be
+reused only through explicit trusted carrier adoption.
+
+An explicit adoption SHALL retain one fresh occurrence whose exact raw value
+is the carrier caught at the current physical site and SHALL import the prior
+ledger IDs once. A direct `body` or `initial_release` SHALL appear only as the
+primary entry; caller-supplied `observation` entries and a `settlement` after
+`final_release` MUST fail closed. Real producer vectors `body, final_release`,
+`initial_release, settlement`, settlement followed by final release, and
+repeated final releases SHALL remain valid where those physical paths exist.
+
+#### Scenario: mismatched or stale occurrence input fails closed
+
+- **WHEN** a caller pairs a trusted occurrence with a different raw value or
+  phase, reorders or duplicates occurrence entries, reuses a claimed entry, or
+  supplies an invalid adoption
+- **THEN** the fold reports a stable protocol error
+- **AND** no carrier, ledger, or typed view is published
+- **AND** concurrent claims of one fresh occurrence have exactly one winner
+
+#### Scenario: a caught carrier keeps history and the new physical catch
+
+- **WHEN** a trusted carrier is caught again and explicitly adopted into a new
+  fold
+- **THEN** every inherited occurrence ID appears once
+- **AND** one fresh occurrence records the caught carrier's exact value, current
+  phase, and later order
+- **AND** the prior raw semantic primary remains exact
+
+#### Scenario: invalid phase roles fail before publication
+
+- **WHEN** a vector contains a later `body` or `initial_release`, a
+  caller-provided `observation`, or a `settlement` after `final_release`
+- **THEN** the fold reports a stable phase protocol error
+- **AND** no entry is claimed and no carrier, ledger, or typed view is published
+
+### Requirement: Async rejection presence is discriminated from its value
+
+Release, finalizer, and authority-reconciliation producers SHALL represent
+fulfilled, rejected, and not-attempted state with an explicit discriminant.
+Exact `undefined`, `null`, and falsy rejection reasons MUST remain present
+failures and MUST NOT select success, absence, fallback, or rollback behavior.
+
+#### Scenario: undefined release or reconciliation rejection remains a failure
+
+- **WHEN** cancellation or authority reconciliation rejects with exact
+  `undefined`
+- **THEN** the rejection occurrence remains in the complete phase/order vector
+- **AND** the operation does not report false success or treat authority as
+  absent
+- **AND** cleanup, binding, cache-claim, snapshot, and durable-record state
+  remain consistent with the failed operation
+
+### Requirement: Authority transport uses an unforgeable shared capability
+
+Authority transports SHALL be created and recognized only by a core-owned
+closure capability backed by private state. Code MUST NOT recognize a transport
+from caller-controlled fields or prototype shape and MUST NOT invoke a
+caller-supplied constructor, getter, or reconstruction callback. A genuine
+transport SHALL remain the exact ledger semantic primary; its privately trusted
+inner `TaskServiceError` MAY provide the existing typed HTTP projection.
+
+#### Scenario: genuine and forged authority transports remain distinct
+
+- **WHEN** a genuine transport and a field-shaped or custom-constructor
+  lookalike each cross a compensation/release fold
+- **THEN** the genuine transport preserves exact outer identity, inner trusted
+  typed projection, and the existing HTTP fields
+- **AND** the lookalike constructor/getters are not invoked
+- **AND** the lookalike remains generic and cannot replace the carrier or
+  promote a nested typed error
+
+### Requirement: Numeric-key budget is independent of key-list ordering
+
+The failure ledger SHALL count canonical numeric keys independently of strings,
+symbols, and the `length` key after one `Reflect.ownKeys()` call returns. It
+SHALL observe at most 8192 numeric keys and SHALL record one
+stable occurrence for every budget actually exhausted. If controlled work is
+exhausted before the returned tail is classified, it SHALL record controlled
+work exhaustion without claiming an unobserved numeric overflow.
+
+#### Scenario: reordered nonnumeric keys do not consume numeric capacity
+
+- **WHEN** a legal Array Proxy returns `length`, strings, or symbols before N
+  or N+1 canonical numeric keys
+- **THEN** N numeric keys produce N ordered edges without a numeric budget event
+- **AND** N+1 numeric keys produce at most N ordered edges plus exactly one
+  numeric-key budget occurrence
+- **AND** when N+1 normal present descriptors prove an edge beyond N, exactly
+  one edge-budget occurrence is also retained
+- **AND** `Reflect.ownKeys()` is called once and every event, issue, and graph
+  vector remains frozen with exact semantic primary

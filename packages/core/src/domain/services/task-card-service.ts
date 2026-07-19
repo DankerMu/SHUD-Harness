@@ -12,15 +12,16 @@ import {
   type TaskCard
 } from "../schemas/task";
 import {
-  captureFailureOccurrence,
+  captureFailureFoldEntry,
+  failureFoldEntryValue,
   failureLedger,
+  isTrustedFailureOccurrence,
   semanticPrimaryError,
-  type FailurePhase,
-  type FailureOccurrence
+  type FailureFoldEntry
 } from "./compensation-error-preservation";
 import { isPathInsideBoundary } from "./workspace-path-safety";
 import {
-  preserveTaskServiceErrorCompensationCompatibility,
+  preserveTaskServiceErrorFailureEntries,
   taskServiceErrorAtBoundary
 } from "./task-service-error-compensation";
 import {
@@ -420,9 +421,8 @@ async function retainTaskSnapshotPublicationAuthority(
       evidenceRef
     );
   } catch (error) {
-    const primaryOccurrence = captureFailureOccurrence("body", error);
-    const compensationErrors: unknown[] = [];
-    const compensationOccurrences: FailureOccurrence[] = [];
+    const primaryOccurrence = captureFailureFoldEntry("body", error);
+    const compensationEntries: FailureFoldEntry[] = [];
     try {
       await conditionalDeletePublishedJsonRecordGenerationWithCleanupPermit(
         cleanupPermit,
@@ -432,31 +432,25 @@ async function retainTaskSnapshotPublicationAuthority(
         { kind: "record", expected: expectedSnapshot, matches: () => true }
       );
     } catch (cleanupError) {
-      compensationErrors.push(cleanupError);
-      compensationOccurrences.push(
-        captureFailureOccurrence("final_release", cleanupError)
+      compensationEntries.push(
+        captureFailureFoldEntry("final_release", cleanupError)
       );
     }
     try {
       await removeEmptyTaskLaneAfterRollback(workspaceRoot, taskId);
     } catch (cleanupError) {
-      compensationErrors.push(cleanupError);
-      compensationOccurrences.push(
-        captureFailureOccurrence("final_release", cleanupError)
+      compensationEntries.push(
+        captureFailureFoldEntry("final_release", cleanupError)
       );
     }
-    if (compensationErrors.length > 0) {
+    if (compensationEntries.length > 0) {
       // Root C (V33-05 residue): fold through the preservation protocol so no
       // future fold above this site can adopt a bare AggregateError as the
       // semantic primary.
-      throw preserveTaskServiceErrorCompensationCompatibility(
-        error,
-        compensationErrors,
-        "Task snapshot publication authority transfer and compensation failed.",
-        "body",
-        compensationErrors.map(() => "final_release"),
+      throw preserveTaskServiceErrorFailureEntries(
         primaryOccurrence,
-        compensationOccurrences
+        compensationEntries,
+        "Task snapshot publication authority transfer and compensation failed.",
       );
     }
     throw error;
@@ -479,38 +473,19 @@ async function retainTaskSnapshotPublicationAuthority(
 
 const TaskSnapshotCleanupRawSchema = z.unknown();
 
-function foldTaskSnapshotSettlementErrors(errors: readonly unknown[]): Error | undefined {
-  if (errors.length === 0) return undefined;
-  if (errors.length === 1) {
-    return transportTaskCardFailure(
-      errors[0],
-      "Task snapshot exact settlement and bounded cache rehydration failed.",
-      "settlement"
-    );
+function foldTaskSnapshotSettlementErrors(
+  entries: readonly FailureFoldEntry[]
+): Error | undefined {
+  if (entries.length === 0) return undefined;
+  if (entries.length === 1 && isTrustedFailureOccurrence(entries[0])) {
+    const value = entries[0].value;
+    const exactError = semanticPrimaryError(value);
+    if (exactError !== undefined && exactError === value) return exactError;
   }
-  return preserveTaskServiceErrorCompensationCompatibility(
-    errors[0],
-    errors.slice(1),
-    "Task snapshot exact settlement and bounded cache rehydration failed.",
-    "settlement",
-    errors.slice(1).map(() => "settlement")
-  ) as Error;
-}
-
-function transportTaskCardFailure(
-  value: unknown,
-  carrierMessage: string,
-  phase: FailurePhase
-): Error {
-  if (failureLedger(value)) return value as Error;
-  const exactError = semanticPrimaryError(value);
-  if (exactError !== undefined && exactError === value) return exactError;
-  return preserveTaskServiceErrorCompensationCompatibility(
-    value,
-    [],
-    carrierMessage,
-    phase,
-    []
+  return preserveTaskServiceErrorFailureEntries(
+    entries[0]!,
+    entries.slice(1),
+    "Task snapshot exact settlement and bounded cache rehydration failed."
   ) as Error;
 }
 
@@ -731,7 +706,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
     initialClaim: TaskCardCacheClaim,
     initialTask: { readonly canonical: TaskCard; readonly validatedRaw: TaskCard }
   ): Promise<{ readonly canonical: TaskCard; readonly validatedRaw: TaskCard }> {
-    const reobservationErrors: unknown[] = [];
+    const reobservationErrors: FailureFoldEntry[] = [];
     const initialSettlement = taskCache.settleSet(initialClaim, initialTask.canonical);
     if (
       initialSettlement.status === "published" ||
@@ -769,7 +744,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         // Root C (V33-12): the read-attempt carrier is itself an Error whose
         // `cause` is the semantic reason, so the fold below stays transparent
         // while the carrier keeps its `.reason` transport channel.
-        reobservationErrors.push(error);
+        reobservationErrors.push(captureFailureFoldEntry("settlement", error));
       }
     }
 
@@ -1049,12 +1024,16 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           }
         );
       } catch (error) {
+        const validationEntry = captureFailureFoldEntry("body", error);
         const taskServiceError = taskServiceErrorAtBoundary(error);
         if (!taskServiceError) {
           try {
             await cancelWorkspaceRecordCleanupPermit(observed.cleanupPermit);
           } catch (cancellationError) {
-            throw foldTaskSnapshotSettlementErrors([error, cancellationError]);
+            throw foldTaskSnapshotSettlementErrors([
+              validationEntry,
+              captureFailureFoldEntry("final_release", cancellationError)
+            ]);
           }
           throw error;
         }
@@ -1143,6 +1122,9 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
     if (settlement.status === "current") {
       return copyTaskCard(settlement.task);
     }
+    const settlementEntry = settlement.status === "failed"
+      ? captureFailureFoldEntry("settlement", settlement.error)
+      : undefined;
 
     const rehydrationErrors = await boundedlyRehydrateTaskSnapshotCache(
       observation.taskId
@@ -1155,7 +1137,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         [taskSnapshotEvidenceRef(observation.taskId), "snapshot.bytes"],
         ...presentWorkspaceErrorCause(
           foldTaskSnapshotSettlementErrors([
-            settlement.error,
+            settlementEntry!,
             ...rehydrationErrors
           ])
         )
@@ -1244,8 +1226,8 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
 
   async function boundedlyRehydrateTaskSnapshotCache(
     taskId: string
-  ): Promise<unknown[]> {
-    const errors: unknown[] = [];
+  ): Promise<FailureFoldEntry[]> {
+    const errors: FailureFoldEntry[] = [];
     for (
       let attempt = 0;
       attempt < MAX_TASK_SNAPSHOT_CACHE_REOBSERVATIONS;
@@ -1260,19 +1242,23 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
             observation.status === "invalid" ||
             observation.status === "unknown"
           ) {
-            errors.push(observation.error);
+            errors.push(captureFailureFoldEntry("settlement", observation.error));
           }
           const ownedObservation = observation;
           observation = undefined;
-          if (ownedObservation.status === "unknown") {
-            await cancelTaskSnapshotCleanupObservationInternal(ownedObservation);
-          } else {
-            // Root B (V33-02): the rehydration loop is itself the
-            // reconciler — a nested lost delete-settlement must not recurse.
-            await rejectKnownUnavailableTaskSnapshotObservationInternal(
-              ownedObservation,
-              false
-            );
+          try {
+            if (ownedObservation.status === "unknown") {
+              await cancelTaskSnapshotCleanupObservationInternal(ownedObservation);
+            } else {
+              // Root B (V33-02): the rehydration loop is itself the
+              // reconciler — a nested lost delete-settlement must not recurse.
+              await rejectKnownUnavailableTaskSnapshotObservationInternal(
+                ownedObservation,
+                false
+              );
+            }
+          } catch (error) {
+            errors.push(captureFailureFoldEntry("final_release", error));
           }
           return errors;
         }
@@ -1283,16 +1269,18 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           ownedObservation
         );
         if (settlement.status === "current") return errors;
-        if (settlement.status === "failed") errors.push(settlement.error);
+        if (settlement.status === "failed") {
+          errors.push(captureFailureFoldEntry("settlement", settlement.error));
+        }
       } catch (error) {
-        errors.push(error);
+        errors.push(captureFailureFoldEntry("settlement", error));
         return errors;
       } finally {
         if (observation) {
           try {
             await cancelTaskSnapshotCleanupObservationInternal(observation);
           } catch (error) {
-            errors.push(error);
+            errors.push(captureFailureFoldEntry("final_release", error));
           }
         }
       }
@@ -1535,7 +1523,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         | {
             readonly status: "threw";
             readonly reason: unknown;
-            readonly occurrence: FailureOccurrence;
+            readonly occurrence: FailureFoldEntry;
           };
 
       try {
@@ -1581,14 +1569,14 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         bodyOutcome = {
           status: "threw",
           reason: error,
-          occurrence: captureFailureOccurrence("body", error)
+          occurrence: captureFailureFoldEntry("body", error)
         };
       }
       // Root D (V32-06): settle the descriptor close first-class and run the
       // sibling cleanups regardless of its outcome; a rejected close folds
       // into the preserved primary instead of replacing it.
       let closeRejection:
-        | { readonly reason: unknown; readonly occurrence: FailureOccurrence }
+        | { readonly reason: unknown; readonly occurrence: FailureFoldEntry }
         | undefined;
       if (publicationAuthority) {
         try {
@@ -1596,7 +1584,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         } catch (closeError) {
           closeRejection = {
             reason: closeError,
-            occurrence: captureFailureOccurrence("final_release", closeError)
+            occurrence: captureFailureFoldEntry("final_release", closeError)
           };
         }
         publicationAuthority = undefined;
@@ -1605,14 +1593,10 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       reservedTaskIds.delete(taskId);
       if (bodyOutcome.status === "threw") {
         if (closeRejection) {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            bodyOutcome.reason,
-            [closeRejection.reason],
-            "Task creation and publication-authority settlement both failed.",
-            "body",
-            ["final_release"],
+          throw preserveTaskServiceErrorFailureEntries(
             bodyOutcome.occurrence,
-            [closeRejection.occurrence]
+            [closeRejection.occurrence],
+            "Task creation and publication-authority settlement both failed.",
           );
         }
         throw bodyOutcome.reason;
@@ -1661,7 +1645,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           | {
               readonly status: "threw";
               readonly reason: unknown;
-              readonly occurrence: FailureOccurrence;
+              readonly occurrence: FailureFoldEntry;
             };
         try {
           await (async (): Promise<void> => {
@@ -1707,21 +1691,19 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           bodyOutcome = {
             status: "threw",
             reason: error,
-            occurrence: captureFailureOccurrence("body", error)
+            occurrence: captureFailureFoldEntry("body", error)
           };
         }
         // Root D (V32-06): settle the descriptor close first-class, run every
         // sibling cleanup regardless of its outcome, disown the authority only
         // after the close settles, and fold settlement failures around the
         // preserved primary instead of replacing it.
-        const compensations: unknown[] = [];
-        const compensationOccurrences: FailureOccurrence[] = [];
+        const compensationEntries: FailureFoldEntry[] = [];
         try {
           await publicationAuthority.pinnedFile.close();
         } catch (closeError) {
-          compensations.push(closeError);
-          compensationOccurrences.push(
-            captureFailureOccurrence(
+          compensationEntries.push(
+            captureFailureFoldEntry(
               bodyOutcome.status === "threw" ? "final_release" : "initial_release",
               closeError
             )
@@ -1734,12 +1716,11 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           try {
             await cancelTaskSnapshotCleanupObservationInternal(ownedObservation);
           } catch (cancellationError) {
-            compensations.push(cancellationError);
-            compensationOccurrences.push(
-              captureFailureOccurrence(
+            compensationEntries.push(
+              captureFailureFoldEntry(
                 bodyOutcome.status === "threw"
                   ? "final_release"
-                  : compensations.length === 1
+                  : compensationEntries.length === 0
                     ? "initial_release"
                     : "settlement",
                 cancellationError
@@ -1749,30 +1730,22 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         }
         taskCache.settleCancel(cacheClaim);
         if (bodyOutcome.status === "threw") {
-          if (compensations.length > 0) {
-            throw preserveTaskServiceErrorCompensationCompatibility(
-              bodyOutcome.reason,
-              compensations,
-              "Task rollback and publication-authority settlement both failed.",
-              "body",
-              compensations.map(() => "final_release"),
+          if (compensationEntries.length > 0) {
+            throw preserveTaskServiceErrorFailureEntries(
               bodyOutcome.occurrence,
-              compensationOccurrences
+              compensationEntries,
+              "Task rollback and publication-authority settlement both failed.",
             );
           }
           throw bodyOutcome.reason;
         }
-        if (compensations.length > 0) {
-          throw compensations.length === 1
-            ? compensations[0]
-            : preserveTaskServiceErrorCompensationCompatibility(
-                compensations[0],
-                compensations.slice(1),
+        if (compensationEntries.length > 0) {
+          throw compensationEntries.length === 1
+            ? failureFoldEntryValue(compensationEntries[0]!)
+            : preserveTaskServiceErrorFailureEntries(
+                compensationEntries[0]!,
+                compensationEntries.slice(1),
                 "Task rollback publication-authority settlement failed.",
-                compensationOccurrences[0]!.phase,
-                compensationOccurrences.slice(1).map((item) => item.phase),
-                compensationOccurrences[0],
-                compensationOccurrences.slice(1)
               );
         }
         return;
@@ -2741,11 +2714,10 @@ async function persistTaskSnapshot(
           { taskDirectory, taskId: task.task_id }
         ]);
       } catch (callbackError) {
-        const callbackOccurrence = captureFailureOccurrence("body", callbackError);
+        const callbackOccurrence = captureFailureFoldEntry("body", callbackError);
         const permit = cleanupPermit;
         cleanupPermit = undefined;
-        const compensationErrors: unknown[] = [];
-        const compensationOccurrences: FailureOccurrence[] = [];
+        const compensationEntries: FailureFoldEntry[] = [];
         try {
           await conditionalDeletePublishedJsonRecordGenerationWithCleanupPermit(
             permit,
@@ -2755,28 +2727,22 @@ async function persistTaskSnapshot(
             { kind: "record", expected: snapshot, matches: () => true }
           );
         } catch (cleanupError) {
-          compensationErrors.push(cleanupError);
-          compensationOccurrences.push(
-            captureFailureOccurrence("final_release", cleanupError)
+          compensationEntries.push(
+            captureFailureFoldEntry("final_release", cleanupError)
           );
         }
         try {
           await removeEmptyTaskLaneAfterRollback(workspaceRoot, task.task_id);
         } catch (cleanupError) {
-          compensationErrors.push(cleanupError);
-          compensationOccurrences.push(
-            captureFailureOccurrence("final_release", cleanupError)
+          compensationEntries.push(
+            captureFailureFoldEntry("final_release", cleanupError)
           );
         }
-        if (compensationErrors.length > 0) {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            callbackError,
-            compensationErrors,
-            "Task snapshot publication compensation failed.",
-            "body",
-            compensationErrors.map(() => "final_release"),
+        if (compensationEntries.length > 0) {
+          throw preserveTaskServiceErrorFailureEntries(
             callbackOccurrence,
-            compensationOccurrences
+            compensationEntries,
+            "Task snapshot publication compensation failed.",
           );
         }
         throw callbackError;
@@ -2815,24 +2781,20 @@ async function persistTaskSnapshot(
     }
     return { status: "created", task: publishedTask };
   } catch (error) {
-    const primaryOccurrence = captureFailureOccurrence("body", error);
+    const primaryOccurrence = captureFailureFoldEntry("body", error);
     let publicationFailure: unknown = error;
     if (beforeWriteStarted && !beforeWriteReturned) {
       try {
         await removeEmptyTaskLaneAfterRollback(workspaceRoot, task.task_id);
       } catch (cleanupError) {
-        const cleanupOccurrence = captureFailureOccurrence(
+        const cleanupOccurrence = captureFailureFoldEntry(
           "final_release",
           cleanupError
         );
-        publicationFailure = preserveTaskServiceErrorCompensationCompatibility(
-          error,
-          [cleanupError],
-          "Task snapshot publication compensation failed.",
-          "body",
-          ["final_release"],
+        publicationFailure = preserveTaskServiceErrorFailureEntries(
           primaryOccurrence,
-          [cleanupOccurrence]
+          [cleanupOccurrence],
+          "Task snapshot publication compensation failed.",
         );
       }
     }
@@ -3102,11 +3064,19 @@ function workspaceError(
   });
 
   if (causeArguments.length === 1) {
-    error.cause = transportTaskCardFailure(
-      causeArguments[0],
-      "A TaskCard workspace operation failed before its cause could be classified safely.",
-      "body"
-    );
+    const cause = causeArguments[0];
+    if (failureLedger(cause)) {
+      error.cause = cause as Error;
+    } else {
+      const exactError = semanticPrimaryError(cause);
+      error.cause = exactError !== undefined && exactError === cause
+        ? exactError
+        : preserveTaskServiceErrorFailureEntries(
+            captureFailureFoldEntry("body", cause),
+            [],
+            "A TaskCard workspace operation failed before its cause could be classified safely."
+          ) as Error;
+    }
   }
 
   return error;

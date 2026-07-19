@@ -10,13 +10,13 @@ import {
 } from "../schemas/idempotency";
 import { TaskServiceError, isSafeTaskId } from "./task-card-service";
 import {
-  captureFailureOccurrence,
+  captureFailureFoldEntry,
   runWithPreservedRelease,
-  type FailureOccurrence,
-  type FailurePhase
+  type FailureAsyncOutcome,
+  type FailureFoldEntry
 } from "./compensation-error-preservation";
 import {
-  preserveTaskServiceErrorCompensationCompatibility,
+  preserveTaskServiceErrorFailureEntries,
   taskServiceErrorAtBoundary
 } from "./task-service-error-compensation";
 import {
@@ -42,12 +42,6 @@ const IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE =
   "An idempotency operation failed and its owned artifact release also failed.";
 const IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE =
   "Completed idempotency invalidation and its durable quarantine recovery both failed.";
-const AUTHORITY_TRANSPORT_MAX_PROTOTYPE_HOPS = 16;
-
-interface AuthorityTransportInspection {
-  readonly authorityError: unknown;
-  readonly constructor: new (inner: unknown) => Error;
-}
 
 async function runWithIdempotencyRelease<T>(
   body: () => Promise<T>,
@@ -62,128 +56,8 @@ async function runWithIdempotencyRelease<T>(
     release,
     IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE,
     settleFulfilledValueAfterReleaseFailure,
-    preserveAuthorityTransportAwareCombinedFailure,
-    captureAuthorityTransportSemanticPrimaryOccurrence
+    preserveTaskServiceErrorFailureEntries
   );
-}
-
-/**
- * Root C (V33-03): a caller-thrown authority-transport wrapper (an Error
- * exposing the inner failure via `authorityError`, e.g. the backend's
- * CompletedTaskSnapshotAuthorityUnknownError) must keep its INNER typed
- * primary reachable through the caller's one-level unwrap. The fold
- * preserves the inner error with the release failure as an ordered
- * compensation and re-wraps with the same constructor.
- */
-function preserveAuthorityTransportAwareCombinedFailure(
-  primary: unknown,
-  compensations: readonly unknown[],
-  aggregateMessage: string,
-  primaryPhase: FailurePhase = "body",
-  compensationPhases: readonly FailurePhase[] = compensations.map(() => "settlement"),
-  primaryOccurrence?: FailureOccurrence,
-  compensationOccurrences?: readonly FailureOccurrence[],
-  semanticPrimaryOccurrence?: FailureOccurrence
-): unknown {
-  const authorityTransport = inspectAuthorityTransport(primary);
-  if (
-    authorityTransport !== undefined &&
-    semanticPrimaryOccurrence !== undefined &&
-    Object.is(
-      semanticPrimaryOccurrence.value,
-      authorityTransport.authorityError
-    )
-  ) {
-    try {
-      const folded = preserveTaskServiceErrorCompensationCompatibility(
-        authorityTransport.authorityError,
-        compensations,
-        aggregateMessage,
-        primaryPhase,
-        compensationPhases,
-        semanticPrimaryOccurrence,
-        compensationOccurrences
-      );
-      return Reflect.construct(authorityTransport.constructor, [folded]);
-    } catch {
-      // Fall through to the wrapper-blind fold when reconstruction fails.
-    }
-  }
-  return preserveTaskServiceErrorCompensationCompatibility(
-    primary,
-    compensations,
-    aggregateMessage,
-    primaryPhase,
-    compensationPhases,
-    primaryOccurrence,
-    compensationOccurrences
-  );
-}
-
-function captureAuthorityTransportSemanticPrimaryOccurrence(
-  phase: FailurePhase,
-  primary: unknown
-): FailureOccurrence | undefined {
-  const authorityTransport = inspectAuthorityTransport(primary);
-  return authorityTransport === undefined
-    ? undefined
-    : captureFailureOccurrence(phase, authorityTransport.authorityError);
-}
-
-function inspectAuthorityTransport(
-  primary: unknown
-): AuthorityTransportInspection | undefined {
-  if (
-    primary === null ||
-    (typeof primary !== "object" && typeof primary !== "function")
-  ) {
-    return undefined;
-  }
-
-  try {
-    const nameDescriptor = Object.getOwnPropertyDescriptor(primary, "name");
-    const authorityDescriptor = Object.getOwnPropertyDescriptor(
-      primary,
-      "authorityError"
-    );
-    if (
-      nameDescriptor === undefined ||
-      !("value" in nameDescriptor) ||
-      nameDescriptor.value !== "CompletedTaskSnapshotAuthorityUnknownError" ||
-      authorityDescriptor === undefined ||
-      !("value" in authorityDescriptor)
-    ) {
-      return undefined;
-    }
-
-    let cursor: object | null = primary;
-    for (
-      let hop = 0;
-      cursor !== null && hop < AUTHORITY_TRANSPORT_MAX_PROTOTYPE_HOPS;
-      hop += 1
-    ) {
-      const constructorDescriptor = Object.getOwnPropertyDescriptor(
-        cursor,
-        "constructor"
-      );
-      if (
-        constructorDescriptor !== undefined &&
-        "value" in constructorDescriptor &&
-        typeof constructorDescriptor.value === "function"
-      ) {
-        return {
-          authorityError: authorityDescriptor.value,
-          constructor: constructorDescriptor.value as new (inner: unknown) => Error
-        };
-      }
-      const next = Object.getPrototypeOf(cursor) as object | null;
-      if (next === cursor) return undefined;
-      cursor = next;
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
 }
 
 const IdempotencyTransitionGuardIdentitySchema = z.object({
@@ -458,14 +332,15 @@ export function createIdempotencyRecordService(
         resultRef
       );
     } catch (identityError) {
+      const identityEntry = captureFailureFoldEntry("body", identityError);
       const state = completedMutationAuthorities.get(authority);
       if (state?.status === "outstanding") {
         try {
           await cancelCompletedMutationAuthority(authority);
         } catch (cancellationError) {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            identityError,
-            [cancellationError],
+          throw preserveTaskServiceErrorFailureEntries(
+            identityEntry,
+            [captureFailureFoldEntry("final_release", cancellationError)],
             IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
           );
         }
@@ -779,9 +654,12 @@ export function createIdempotencyRecordService(
             IdempotencyRecordSchema
           );
         } catch (error) {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            completedRecordInvalidationIdentityError(evidenceRef),
-            [error],
+          throw preserveTaskServiceErrorFailureEntries(
+            captureFailureFoldEntry(
+              "body",
+              completedRecordInvalidationIdentityError(evidenceRef)
+            ),
+            [captureFailureFoldEntry("settlement", error)],
             IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
           );
         }
@@ -895,19 +773,26 @@ export function createIdempotencyRecordService(
             return current;
           }
 
-          let transitionError: unknown;
+          let transitionOutcome: FailureAsyncOutcome<never> = {
+            status: "not_attempted"
+          };
           if (current.status !== "failed") {
             try {
               await writeFailedRecord(current, scope, key, evidenceRef);
             } catch (firstWriteError) {
-              transitionError = firstWriteError;
+              const firstWriteEntry = captureFailureFoldEntry("body", firstWriteError);
+              transitionOutcome = {
+                status: "rejected",
+                reason: firstWriteError,
+                occurrence: firstWriteEntry
+              };
               let afterFirstWrite: IdempotencyRecord | undefined;
               try {
                 afterFirstWrite = await service.getRecord(scope, key);
               } catch (classificationError) {
-                throw preserveTaskServiceErrorCompensationCompatibility(
-                  firstWriteError,
-                  [classificationError],
+                throw preserveTaskServiceErrorFailureEntries(
+                  firstWriteEntry,
+                  [captureFailureFoldEntry("settlement", classificationError)],
                   IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
                 );
               }
@@ -915,9 +800,12 @@ export function createIdempotencyRecordService(
                 !afterFirstWrite ||
                 afterFirstWrite.request_digest !== guard.request_digest
               ) {
-                throw preserveTaskServiceErrorCompensationCompatibility(
-                  firstWriteError,
-                  [transitionGuardBusyError(scope, key, "fail")],
+                throw preserveTaskServiceErrorFailureEntries(
+                  firstWriteEntry,
+                  [captureFailureFoldEntry(
+                    "settlement",
+                    transitionGuardBusyError(scope, key, "fail")
+                  )],
                   IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
                 );
               }
@@ -928,9 +816,12 @@ export function createIdempotencyRecordService(
                 // assertUnsafeRollbackQuarantineAuthority semantics. Only the
                 // exact transported mutation authority may invalidate a
                 // completed generation.
-                throw preserveTaskServiceErrorCompensationCompatibility(
-                  completedRecordInvalidationIdentityError(evidenceRef),
-                  [firstWriteError],
+                throw preserveTaskServiceErrorFailureEntries(
+                  captureFailureFoldEntry(
+                    "body",
+                    completedRecordInvalidationIdentityError(evidenceRef)
+                  ),
+                  [captureFailureFoldEntry("settlement", firstWriteError)],
                   IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
                 );
               }
@@ -944,9 +835,9 @@ export function createIdempotencyRecordService(
                 try {
                   await writeFailedRecord(afterFirstWrite, scope, key, evidenceRef);
                 } catch (secondWriteError) {
-                  throw preserveTaskServiceErrorCompensationCompatibility(
-                    firstWriteError,
-                    [secondWriteError],
+                  throw preserveTaskServiceErrorFailureEntries(
+                    firstWriteEntry,
+                    [captureFailureFoldEntry("settlement", secondWriteError)],
                     IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
                   );
                 }
@@ -964,7 +855,13 @@ export function createIdempotencyRecordService(
               new Error("Idempotency fail-intent guard changed during durable recovery.")
             );
           }
-          if (transitionError !== undefined) throw transitionError;
+          if (transitionOutcome.status === "rejected") {
+            throw preserveTaskServiceErrorFailureEntries(
+              transitionOutcome.occurrence,
+              [],
+              IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+            );
+          }
           return current;
         }, cleanupLock.release);
       }
@@ -997,60 +894,68 @@ export function createIdempotencyRecordService(
     guard: Extract<IdempotencyTransitionGuardAcquire, { status: "acquired" }>,
     body: () => Promise<T>
   ): Promise<T> {
-    let bodyCompleted = false;
-    let bodyResult: T | undefined;
-    let transitionError: unknown;
+    let bodyOutcome: FailureAsyncOutcome<T>;
     try {
-      bodyResult = await body();
-      bodyCompleted = true;
+      bodyOutcome = { status: "fulfilled", value: await body() };
     } catch (error) {
-      transitionError = error;
+      bodyOutcome = {
+        status: "rejected",
+        reason: error,
+        occurrence: captureFailureFoldEntry("body", error)
+      };
     }
 
-    let durableFailedRecord: IdempotencyRecord | undefined;
-    let classificationError: unknown;
+    let durableOutcome: FailureAsyncOutcome<IdempotencyRecord>;
     try {
-      durableFailedRecord = await requireDurablyFailedRecord(input, scope);
+      durableOutcome = {
+        status: "fulfilled",
+        value: await requireDurablyFailedRecord(input, scope)
+      };
     } catch (error) {
-      classificationError = error;
+      durableOutcome = {
+        status: "rejected",
+        reason: error,
+        occurrence: captureFailureFoldEntry("settlement", error)
+      };
     }
 
-    if (durableFailedRecord) {
-      const releaseErrors: unknown[] = [];
+    if (durableOutcome.status === "fulfilled") {
+      const releaseEntries: FailureFoldEntry[] = [];
       try {
         await guard.release();
       } catch (releaseError) {
-        releaseErrors.push(releaseError);
+        releaseEntries.push(captureFailureFoldEntry(
+          bodyOutcome.status === "rejected" ? "final_release" : "initial_release",
+          releaseError
+        ));
         try {
           await guard.recoverTerminalRelease(async () => {
             await requireDurablyFailedRecord(input, scope);
           });
         } catch (recoveryError) {
-          releaseErrors.push(recoveryError);
+          releaseEntries.push(captureFailureFoldEntry("final_release", recoveryError));
         }
       }
 
-      if (transitionError !== undefined) {
-        throw preserveTaskServiceErrorCompensationCompatibility(
-          transitionError,
-          releaseErrors,
+      if (bodyOutcome.status === "rejected") {
+        if (releaseEntries.length === 0) throw bodyOutcome.reason;
+        throw preserveTaskServiceErrorFailureEntries(
+          bodyOutcome.occurrence,
+          releaseEntries,
           IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
         );
       }
-      if (releaseErrors.length > 0) {
-        throw preserveTaskServiceErrorCompensationCompatibility(
-          releaseErrors[0],
-          releaseErrors.slice(1),
+      if (releaseEntries.length > 0) {
+        throw preserveTaskServiceErrorFailureEntries(
+          releaseEntries[0]!,
+          releaseEntries.slice(1),
           IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
         );
       }
-      if (!bodyCompleted) {
-        throw new TypeError("Failed idempotency transition settled without a body result.");
-      }
-      return bodyResult as T;
+      return bodyOutcome.value;
     }
 
-    const retentionErrors: unknown[] = [];
+    const retentionEntries: FailureFoldEntry[] = [];
     let retainExactFailIntent = true;
     try {
       retainExactFailIntent = await exactFailIntentStillProtectsCurrentRecord(
@@ -1059,15 +964,32 @@ export function createIdempotencyRecordService(
         guard.guard
       );
     } catch (retentionClassificationError) {
-      retentionErrors.push(retentionClassificationError);
+      retentionEntries.push(captureFailureFoldEntry(
+        "settlement",
+        retentionClassificationError
+      ));
     }
     try {
       if (retainExactFailIntent) await guard.retain();
       else await guard.release();
     } catch (retentionError) {
-      retentionErrors.push(retentionError);
+      retentionEntries.push(captureFailureFoldEntry("final_release", retentionError));
     }
-    const primary = transitionError ?? classificationError ?? new TaskServiceError({
+    if (bodyOutcome.status === "rejected") {
+      throw preserveTaskServiceErrorFailureEntries(
+        bodyOutcome.occurrence,
+        [durableOutcome.occurrence, ...retentionEntries],
+        IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+      );
+    }
+    if (durableOutcome.status === "rejected") {
+      throw preserveTaskServiceErrorFailureEntries(
+        durableOutcome.occurrence,
+        retentionEntries,
+        IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+      );
+    }
+    const fallback = new TaskServiceError({
       code: "record_malformed",
       status: 500,
       category: "workspace_error",
@@ -1077,15 +999,9 @@ export function createIdempotencyRecordService(
       retryable: true,
       recommendedNextActions: ["Retry after inspecting the idempotency transition state."]
     });
-    const compensations = [
-      ...(transitionError !== undefined && classificationError !== undefined
-        ? [classificationError]
-        : []),
-      ...retentionErrors
-    ];
-    throw preserveTaskServiceErrorCompensationCompatibility(
-      primary,
-      compensations,
+    throw preserveTaskServiceErrorFailureEntries(
+      captureFailureFoldEntry("settlement", fallback),
+      retentionEntries,
       IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
     );
   }
@@ -1096,70 +1012,77 @@ export function createIdempotencyRecordService(
     guard: Extract<IdempotencyTransitionGuardAcquire, { status: "acquired" }>,
     body: () => Promise<T>
   ): Promise<T> {
-    let bodyResult: T | undefined;
-    let bodyCompleted = false;
-    let bodyError: unknown;
+    let bodyOutcome: FailureAsyncOutcome<T>;
     try {
-      bodyResult = await body();
-      bodyCompleted = true;
+      bodyOutcome = { status: "fulfilled", value: await body() };
     } catch (error) {
-      bodyError = error;
+      bodyOutcome = {
+        status: "rejected",
+        reason: error,
+        occurrence: captureFailureFoldEntry("body", error)
+      };
     }
 
-    let durableFailure: IdempotencyRecord | undefined;
-    let classificationError: unknown;
+    let durableOutcome: FailureAsyncOutcome<IdempotencyRecord>;
     try {
-      durableFailure = await requireDurablyFailedRecord(input, scope);
+      durableOutcome = {
+        status: "fulfilled",
+        value: await requireDurablyFailedRecord(input, scope)
+      };
     } catch (error) {
-      classificationError = error;
+      durableOutcome = {
+        status: "rejected",
+        reason: error,
+        occurrence: captureFailureFoldEntry("settlement", error)
+      };
     }
 
-    const releaseErrors: unknown[] = [];
+    const releaseEntries: FailureFoldEntry[] = [];
     try {
       await guard.release();
     } catch (releaseError) {
-      releaseErrors.push(releaseError);
-      if (durableFailure) {
+      releaseEntries.push(captureFailureFoldEntry(
+        bodyOutcome.status === "rejected" || durableOutcome.status === "rejected"
+          ? "final_release"
+          : "initial_release",
+        releaseError
+      ));
+      if (durableOutcome.status === "fulfilled") {
         try {
           await guard.recoverTerminalRelease(async () => {
             await requireDurablyFailedRecord(input, scope);
           });
         } catch (recoveryError) {
-          releaseErrors.push(recoveryError);
+          releaseEntries.push(captureFailureFoldEntry("final_release", recoveryError));
         }
       }
     }
 
-    if (bodyError !== undefined) {
-      throw preserveTaskServiceErrorCompensationCompatibility(
-        bodyError,
+    if (bodyOutcome.status === "rejected") {
+      throw preserveTaskServiceErrorFailureEntries(
+        bodyOutcome.occurrence,
         [
-          ...(classificationError === undefined ? [] : [classificationError]),
-          ...releaseErrors
+          ...(durableOutcome.status === "rejected" ? [durableOutcome.occurrence] : []),
+          ...releaseEntries
         ],
         IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
       );
     }
-    if (!durableFailure) {
-      throw preserveTaskServiceErrorCompensationCompatibility(
-        classificationError ?? completedRecordInvalidationStateError(
-          idempotencyRecordEvidenceRef(scope, input.key)
-        ),
-        releaseErrors,
+    if (durableOutcome.status === "rejected") {
+      throw preserveTaskServiceErrorFailureEntries(
+        durableOutcome.occurrence,
+        releaseEntries,
         IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
       );
     }
-    if (releaseErrors.length > 0) {
-      throw preserveTaskServiceErrorCompensationCompatibility(
-        releaseErrors[0],
-        releaseErrors.slice(1),
+    if (releaseEntries.length > 0) {
+      throw preserveTaskServiceErrorFailureEntries(
+        releaseEntries[0]!,
+        releaseEntries.slice(1),
         IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
       );
     }
-    if (!bodyCompleted) {
-      throw new TypeError("Exact failed transition completed without a body result.");
-    }
-    return bodyResult as T;
+    return bodyOutcome.value;
   }
 
   async function requireDurablyFailedRecord(
@@ -1446,7 +1369,8 @@ export function createIdempotencyRecordService(
         // transported reason resources without changing the result shape.
         let settleRejectedReasonAfterFailure: (() => Promise<void>) | undefined;
         const settleFulfilledDecisionResources = async (
-          fulfilled: unknown
+          fulfilled: unknown,
+          context: "guard_release_failure" | "body_failure"
         ): Promise<void> => {
           if (
             !fulfilled ||
@@ -1455,13 +1379,18 @@ export function createIdempotencyRecordService(
           ) {
             return;
           }
-          const settlementErrors: unknown[] = [];
+          const settlementErrors: FailureFoldEntry[] = [];
           try {
             await cancelCompletedMutationAuthority(
               fulfilled.mutationAuthority as CompletedIdempotencyRecordMutationAuthority
             );
           } catch (cancellationError) {
-            settlementErrors.push(cancellationError);
+            settlementErrors.push(
+              captureFailureFoldEntry(
+                context === "body_failure" ? "final_release" : "initial_release",
+                cancellationError
+              )
+            );
           }
           const settleRejectedReason = settleRejectedReasonAfterFailure;
           settleRejectedReasonAfterFailure = undefined;
@@ -1469,12 +1398,16 @@ export function createIdempotencyRecordService(
             try {
               await settleRejectedReason();
             } catch (reasonSettlementError) {
-              settlementErrors.push(reasonSettlementError);
+              settlementErrors.push(
+                captureFailureFoldEntry(
+                  context === "body_failure" ? "final_release" : "settlement",
+                  reasonSettlementError
+                )
+              );
             }
           }
-          if (settlementErrors.length === 1) throw settlementErrors[0];
-          if (settlementErrors.length > 1) {
-            throw preserveTaskServiceErrorCompensationCompatibility(
+          if (settlementErrors.length > 0) {
+            throw preserveTaskServiceErrorFailureEntries(
               settlementErrors[0],
               settlementErrors.slice(1),
               IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE
@@ -1561,7 +1494,11 @@ export function createIdempotencyRecordService(
             }
           },
           guard.release,
-          settleFulfilledDecisionResources
+          async (fulfilled) =>
+            await settleFulfilledDecisionResources(
+              fulfilled,
+              "guard_release_failure"
+            )
         );
 
         if (!retryWithCurrentAuthority) {
@@ -1583,16 +1520,17 @@ export function createIdempotencyRecordService(
                 evidenceRef
               );
             } catch (refreshError) {
+              const refreshEntry = captureFailureFoldEntry("body", refreshError);
               // Root A (V33-01): this refresh window is the second
               // throw-after-fulfilled exit; settle the mutation authority AND
               // the rejected reason's transported resources before the
               // refresh failure propagates.
               try {
-                await settleFulfilledDecisionResources(result);
+                await settleFulfilledDecisionResources(result, "body_failure");
               } catch (settlementError) {
-                throw preserveTaskServiceErrorCompensationCompatibility(
-                  refreshError,
-                  [settlementError],
+                throw preserveTaskServiceErrorFailureEntries(
+                  refreshEntry,
+                  [captureFailureFoldEntry("final_release", settlementError)],
                   IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE
                 );
               }

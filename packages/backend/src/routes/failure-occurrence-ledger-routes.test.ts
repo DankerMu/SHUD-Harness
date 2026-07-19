@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   TaskServiceError,
+  captureFailureOccurrence,
   createTrustedTaskServiceErrorProxy,
   createTaskCardService,
   failureEvents,
-  preserveTaskServiceErrorCompensationCompatibility,
+  preserveTaskServiceErrorFailureEntries,
   taskServiceErrorAtBoundary,
   type CreateTaskInput
 } from "@shud-harness/core";
@@ -32,12 +33,10 @@ describe("backend failure occurrence ledger boundary", () => {
       }
     });
     const compensation = new Error("route compensation");
-    const routed = preserveTaskServiceErrorCompensationCompatibility(
-      primary,
-      [compensation],
-      "route typed fold",
-      "body",
-      ["final_release"]
+    const routed = preserveTaskServiceErrorFailureEntries(
+      captureFailureOccurrence("body", primary),
+      [captureFailureOccurrence("final_release", compensation)],
+      "route typed fold"
     );
     const app = createBackendApi({
       workspaceRoot,

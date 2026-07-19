@@ -7,6 +7,10 @@
 > requirements. The repair must append a new final-head verification section
 > that supersedes every conflicting claim and hash.
 
+> **Round-2 review status.** The binding at `b425a68` is not merge evidence:
+> Round 2 verified six findings and triggered a same-invariant depth retro.
+> Tasks 7.1-7.8 and a new final-head binding must be completed before merge.
+
 ## Superseded verification evidence
 
 - Date: 2026-07-18 through 2026-07-19 (America/New_York)
@@ -224,8 +228,9 @@ pre-repair `1a993c8` and initial implementation `2b1e916` claims above.
   operation-carrier/explicit-adoption equivalents required by the repaired
   contract.
 - Backend route declarations are 155 at base and 156 after repair, with none
-  removed. The dedicated ledger and backend files add 17 and 4 static
-  declarations respectively.
+  removed. Using the repository's static test-declaration convention
+  `rg -c '^\s*test\('`, the dedicated ledger and backend files contain 16 and
+  3 declarations respectively (19 total, matching the dedicated runtime run).
 - The last test-only commit expands one static test into three runtime cases;
   core runtime tests increase by two without deleting a scenario or weakening
   an assertion category.

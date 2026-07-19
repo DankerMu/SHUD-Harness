@@ -1,8 +1,11 @@
 import {
-  captureFailureOccurrence,
+  createTrustedFailureTransportFamily,
   failureLedger,
+  isTrustedFailureOccurrence,
+  mergeTrustedFailureOccurrenceVector,
   mergeTrustedFailureOccurrences,
-  type FailurePhase
+  semanticPrimaryValue,
+  type FailureFoldEntry
 } from "./compensation-error-preservation";
 import {
   TaskServiceError,
@@ -10,6 +13,12 @@ import {
 } from "./task-card-service";
 
 const trustedTaskServiceErrorLedgerViews = new WeakMap<object, TaskServiceError>();
+
+export const taskServiceErrorAuthorityTransportFamily =
+  createTrustedFailureTransportFamily<unknown>({
+    name: "CompletedTaskSnapshotAuthorityUnknownError",
+    message: "Completed task snapshot authority is temporarily unknown."
+  });
 
 export function trustedTaskServiceErrorFromFailureLedger(
   value: unknown
@@ -23,34 +32,67 @@ export function taskServiceErrorAtBoundary(
   const trusted = trustedTaskServiceErrorFromFailureLedger(value);
   if (trusted) return trusted;
   if (failureLedger(value)) return undefined;
-  return trustedTaskServiceErrorTarget(value);
+  const transportProjection = taskServiceErrorAuthorityTransportFamily.project(value);
+  return trustedTaskServiceErrorTarget(value) ??
+    trustedTaskServiceErrorFromFailureLedger(transportProjection) ??
+    trustedTaskServiceErrorTarget(transportProjection);
 }
 
-export function preserveTaskServiceErrorCompensationCompatibility(
-  primary: unknown,
-  compensations: readonly unknown[],
-  aggregateMessage: string,
-  primaryPhase: FailurePhase = "body",
-  compensationPhases: readonly FailurePhase[] = compensations.map(() => "settlement"),
-  primaryOccurrence?: import("./compensation-error-preservation").FailureOccurrence,
-  compensationOccurrences?: readonly import("./compensation-error-preservation").FailureOccurrence[]
+export function preserveTaskServiceErrorFailureEntries(
+  primary: FailureFoldEntry,
+  compensations: readonly FailureFoldEntry[],
+  aggregateMessage: string
 ): unknown {
-  const trustedPrimary = trustedTaskServiceErrorFromFailureLedger(primary) ??
-    trustedTaskServiceErrorTarget(primary);
-  const capturedPrimary = primaryOccurrence ?? captureFailureOccurrence(primaryPhase, primary);
-  const capturedCompensations = compensations.map((value, index) =>
-    compensationOccurrences?.[index] ??
-      captureFailureOccurrence(compensationPhases[index] ?? "settlement", value)
-  );
+  const directPrimary = isTrustedFailureOccurrence(primary) ? primary.value : undefined;
+  const directProjection = taskServiceErrorAuthorityTransportFamily.project(directPrimary);
+  const trustedDirectPrimary = trustedTaskServiceErrorFromFailureLedger(directPrimary) ??
+    trustedTaskServiceErrorTarget(directPrimary) ??
+    trustedTaskServiceErrorFromFailureLedger(directProjection) ??
+    trustedTaskServiceErrorTarget(directProjection);
   const preserved = mergeTrustedFailureOccurrences(
-    capturedPrimary,
-    capturedCompensations,
+    primary,
+    compensations,
     aggregateMessage,
-    trustedPrimary ? { classify: () => "error" } : undefined
+    trustedDirectPrimary ? { classify: () => "error" } : undefined
   );
+  const exactPrimary = semanticPrimaryValue(preserved);
+  const transportProjection = taskServiceErrorAuthorityTransportFamily.project(exactPrimary);
+  const trustedPrimary = trustedTaskServiceErrorFromFailureLedger(exactPrimary) ??
+    trustedTaskServiceErrorTarget(exactPrimary) ??
+    trustedTaskServiceErrorFromFailureLedger(transportProjection) ??
+    trustedTaskServiceErrorTarget(transportProjection);
   if (trustedPrimary && isObjectLike(preserved)) {
     trustedTaskServiceErrorLedgerViews.set(preserved, trustedPrimary);
     return preserved;
+  }
+  return preserved;
+}
+
+export function preserveTaskServiceErrorFailureVector(
+  primary: FailureFoldEntry,
+  entries: readonly FailureFoldEntry[],
+  aggregateMessage: string
+): unknown {
+  const directPrimary = isTrustedFailureOccurrence(primary) ? primary.value : undefined;
+  const directProjection = taskServiceErrorAuthorityTransportFamily.project(directPrimary);
+  const trustedDirectPrimary = trustedTaskServiceErrorFromFailureLedger(directPrimary) ??
+    trustedTaskServiceErrorTarget(directPrimary) ??
+    trustedTaskServiceErrorFromFailureLedger(directProjection) ??
+    trustedTaskServiceErrorTarget(directProjection);
+  const preserved = mergeTrustedFailureOccurrenceVector(
+    primary,
+    entries,
+    aggregateMessage,
+    trustedDirectPrimary ? { classify: () => "error" } : undefined
+  );
+  const exactPrimary = semanticPrimaryValue(preserved);
+  const transportProjection = taskServiceErrorAuthorityTransportFamily.project(exactPrimary);
+  const trustedPrimary = trustedTaskServiceErrorFromFailureLedger(exactPrimary) ??
+    trustedTaskServiceErrorTarget(exactPrimary) ??
+    trustedTaskServiceErrorFromFailureLedger(transportProjection) ??
+    trustedTaskServiceErrorTarget(transportProjection);
+  if (trustedPrimary && isObjectLike(preserved)) {
+    trustedTaskServiceErrorLedgerViews.set(preserved, trustedPrimary);
   }
   return preserved;
 }

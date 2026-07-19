@@ -98,6 +98,60 @@ Non-goals:
    settlement`; a final resource release after settlement -> `final_release`.
    Array position is not used to guess phase after the fact.
 
+## Round 2 Depth Corrective Addendum
+
+Round 2 verified that the first repair still reconstructed physical failure
+state from three secondary authorities: raw-value sentinels, parallel
+raw/phase/occurrence arguments, and caller-controlled wrapper shape. The
+same-invariant retro therefore strengthens, rather than replaces, Decisions
+1, 6, and 8:
+
+9. A trusted occurrence is the sole authority for failure presence, exact raw
+   value, phase, and order after a physical catch. Occurrence-bearing folds
+   accept occurrence/adoption entries only; they do not also accept raw-value
+   and phase arrays. Fresh direct occurrences are synchronously claimed once
+   after transactional preflight. Untrusted, duplicate, stale, reordered,
+   phase-invalid, or incorrectly adopted entries fail closed without
+   publishing a carrier or typed view. Nested reuse goes through explicit
+   trusted carrier adoption, never token replay. An adoption entry contains a
+   fresh occurrence for the current physical catch whose exact value is the
+   caught carrier, plus the private prior-ledger reference. Adoption imports
+   inherited IDs once without replacing or omitting that new catch.
+
+   Fold-role grammar is centralized: a direct `body` or `initial_release` may
+   appear only as the primary entry; caller-supplied `observation` entries are
+   rejected; later direct entries are `settlement` or `final_release`; after a
+   `final_release`, only further `final_release` entries may follow. Positive
+   vectors retain `body, final_release`, `initial_release, settlement`,
+   settlement followed by final release, and repeated final releases where
+   real producers require them.
+
+10. Async producers represent rejection with a discriminated outcome. Exact
+    `undefined`, `null`, and falsy reasons remain values inside a rejected
+    outcome and are never reused as “no failure” sentinels. Backend finalizer
+    and authority-reconciliation decisions therefore branch on status, not on
+    the raw reason.
+
+11. Authority transport is a core-owned, closure-branded family backed by a
+    private WeakMap. Backend creates genuine transports through the family and
+    core reads their semantic projection through the same capability. No code
+    recognizes `name`/`authorityError` shape, walks a caller prototype to find
+    a constructor, registers an arbitrary wrapper, or invokes caller-supplied
+    reconstruction. The exact thrown transport remains ledger semantic
+    primary; a privately verified inner `TaskServiceError` may supply the
+    existing HTTP typed view without replacing ledger identity.
+
+12. Numeric-key capacity counts canonical numeric keys, not their position in
+    the array returned by `Reflect.ownKeys()`. Returned strings and symbols are
+    classified under the shared controlled-operation budget but do not consume
+    the 8192 numeric-key limit. The 8193rd classified numeric key records one
+    numeric-key budget occurrence; exhaustion before the tail is classified
+    records one controlled-operation occurrence and does not fabricate a
+   numeric overflow. `Reflect.ownKeys()` remains exactly once per container.
+   When N observed present edges already fill the edge budget and a classified
+   N+1 numeric key proves further edge capacity was truncated, edge and numeric
+   budgets each retain one independent occurrence.
+
 ## Risk Packs
 
 - Public API / CLI / script entry: selected - backend JSON is a public seam.
@@ -176,6 +230,27 @@ Domain packs:
     ledger shape -> no typed view; backend retains the generic 500 contract.
   - Release helper body/release/settlement failures -> exact complete phase
     vectors and strictly increasing unique event orders at real producers.
+  - Raw/token/phase mismatch, duplicate/reordered/stale token reuse, and invalid
+    adoption -> fail closed before carrier or typed-view publication; one
+    concurrent claimant succeeds and all other claimants fail stale.
+  - Catching an existing carrier -> prior IDs occur once, one fresh occurrence
+    has the caught carrier as exact value and current catch phase/order, and
+    the inherited raw semantic primary remains authoritative.
+  - Later `body`/`initial_release`, caller-provided `observation`, and a
+    `settlement` after `final_release` -> stable phase protocol error before
+    publish; all fixture-authorized positive vectors remain green.
+  - Genuine authority transport -> exact outer semantic primary plus trusted
+    inner typed HTTP projection; lookalikes and custom constructors are never
+    read/invoked and retain the generic 500 contract.
+  - Backend cancellation or authority reconciliation rejects with exact
+    `undefined` -> rejection remains present, phase/order is complete, no false
+    success, destructive rollback, cleanup-permit/binding/cache-claim leak.
+  - `length`/strings/symbols before N or N+1 numeric Proxy keys -> nonnumeric
+    position does not consume numeric capacity; edges and each applicable
+    frozen budget occurrence are exact and `ownKeys` is called once.
+  - Normal N+1 present numeric descriptors -> N edges plus exactly one numeric
+    and one edge budget occurrence; deceptive/unknown tails do not fabricate
+    edge evidence without a proven present edge.
 
 ## Boundary-Surface Checklist
 

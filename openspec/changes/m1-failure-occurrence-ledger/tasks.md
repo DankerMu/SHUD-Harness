@@ -109,3 +109,44 @@
 - [x] 6.3 Every Round-1 confirmed finding P1/P2/S1/S2/S3/C1/C2/C3/TE1/TE2 is
   mapped to at least one executable regression and closed without silent
   deferral.
+
+## 7. Round-2 Depth Corrective Action
+
+- [x] 7.1 Replace the parallel raw/phase/occurrence fold ABI with an
+  occurrence/adoption-only protocol. Transactionally reject untrusted,
+  duplicate, stale/reused, reordered, phase-invalid, cardinality-invalid, and
+  incorrectly adopted entries before publishing a ledger or typed view.
+  Carrier adoption MUST retain one fresh occurrence for the current physical
+  catch while importing prior IDs once. Central phase grammar MUST reject later
+  `body`/`initial_release`, caller-provided `observation`, and settlement after
+  final release while retaining real positive vectors.
+- [x] 7.2 Replace raw-value failure sentinels in backend finalizer and authority
+  reconciliation, plus matching in-scope core release siblings, with explicit
+  fulfilled/rejected/not-attempted outcomes. Exact `undefined`, nullish, and
+  falsy rejection reasons MUST remain failures.
+- [x] 7.3 Replace name/field/prototype/constructor authority-wrapper inspection
+  with a core-owned closure-branded transport family. Preserve the exact outer
+  semantic primary, trusted inner typed HTTP projection, and existing HTTP
+  envelope; untrusted lookalikes MUST stay generic and no caller constructor or
+  getter may run.
+- [x] 7.4 Count actual canonical numeric keys independently from returned-key
+  position. Cover N-1/N/N+1 with `length`, strings, and symbols reordered;
+  assert one `ownKeys` call, complete edges, exact frozen budget vectors,
+  strictly increasing unique order, and unchanged semantic primary. Restore
+  independent edge and numeric occurrences for a normal N+1 present-descriptor
+  array without fabricating edge evidence for an unclassified/absent tail.
+- [x] 7.5 Add replayable red evidence for mismatched/stale occurrence entries,
+  untrusted/custom authority transports, exact `undefined` cancellation and
+  reconciliation, deceptive numeric ordering, and the strengthened hostile
+  oracle. The red run MUST fail for intended behavior and leave no stash or
+  temporary worktree.
+- [x] 7.6 Migrate every occurrence-bearing TaskCard, backend, idempotency, and
+  workspace release caller atomically. Preserve private generation settlement,
+  unrelated business state, persisted schemas, frontend, dependencies, Zero,
+  and the public HTTP payload.
+- [x] 7.7 Correct dedicated static declaration evidence to the reproducible
+  `test()` count convention, report parameterized runtime cases separately,
+  and bind final commands/counts/hashes to the repaired semantic HEAD.
+- [x] 7.8 Run dedicated and real-producer focused tests, full core/backend,
+  typecheck, root `check`, strict OpenSpec, diff/stash/submodule/Zero/workspace
+  hygiene, then complete a full-inventory invariant audit before Round 3.

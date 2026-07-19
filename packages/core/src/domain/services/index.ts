@@ -7,7 +7,8 @@ export * from "./idempotency-service";
 export * from "./lock-service";
 export * from "./task-card-service";
 export {
-  preserveTaskServiceErrorCompensationCompatibility,
+  preserveTaskServiceErrorFailureEntries,
+  taskServiceErrorAuthorityTransportFamily,
   taskServiceErrorAtBoundary,
   trustedTaskServiceErrorFromFailureLedger
 } from "./task-service-error-compensation";
@@ -18,8 +19,13 @@ export {
   FAILURE_GRAPH_MAX_NUMERIC_KEYS,
   FAILURE_GRAPH_MAX_OBSERVATION_FAILURES,
   FailureGraphObservationIssue,
+  FailureOccurrenceProtocolError,
+  adoptFailureCarrier,
+  captureFailureFoldEntry,
   captureFailureOccurrence,
+  createTrustedFailureTransportFamily,
   failureEvents,
+  failureFoldEntryValue,
   failureGraphNodes,
   failureLedger,
   mergeTrustedFailureOccurrences,
@@ -31,9 +37,14 @@ export type {
   FailureGraphEdge,
   FailureGraphNode,
   FailureGraphObservationIssueCode,
+  FailureAsyncOutcome,
+  FailureCarrierAdoption,
+  FailureFoldEntry,
   FailureOccurrence,
+  FailureOccurrenceProtocolErrorCode,
   FailurePhase,
-  PreservedFailureLedger
+  PreservedFailureLedger,
+  TrustedFailureTransportFamily
 } from "./compensation-error-preservation";
 export {
   ensureWorkspaceDirectoryTree,

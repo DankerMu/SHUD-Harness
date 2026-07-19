@@ -12,6 +12,7 @@ export const FAILURE_GRAPH_MAX_CONTROLLED_OPERATIONS = 65_536;
 export const FAILURE_GRAPH_MAX_OBSERVATION_FAILURES = 256;
 
 const FAILURE_OCCURRENCE = Symbol("failure_occurrence");
+const FAILURE_CARRIER_ADOPTION = Symbol("failure_carrier_adoption");
 
 export interface FailureOccurrence {
   readonly [FAILURE_OCCURRENCE]: true;
@@ -19,6 +20,62 @@ export interface FailureOccurrence {
   readonly phase: FailurePhase;
   readonly order: number;
   readonly value: unknown;
+}
+
+export interface FailureCarrierAdoption {
+  readonly [FAILURE_CARRIER_ADOPTION]: true;
+  readonly adoptionId: symbol;
+  readonly order: number;
+  readonly carrier: object;
+  readonly occurrence: FailureOccurrence;
+}
+
+export type FailureFoldEntry = FailureOccurrence | FailureCarrierAdoption;
+
+export type FailureOccurrenceProtocolErrorCode =
+  | "untrusted_entry"
+  | "duplicate_entry"
+  | "stale_entry"
+  | "reordered_entry"
+  | "invalid_phase"
+  | "invalid_adoption"
+  | "invalid_cardinality";
+
+export class FailureOccurrenceProtocolError extends Error {
+  readonly code: FailureOccurrenceProtocolErrorCode;
+
+  constructor(code: FailureOccurrenceProtocolErrorCode) {
+    super(`Failure occurrence protocol rejected the fold: ${code}.`);
+    this.name = "FailureOccurrenceProtocolError";
+    this.code = code;
+  }
+}
+
+export interface TrustedFailureTransportFamily<T> {
+  readonly create: (projection: T) => Error;
+  readonly has: (value: unknown) => boolean;
+  readonly project: (value: unknown) => T | undefined;
+}
+
+export function createTrustedFailureTransportFamily<T>(input: {
+  readonly name: string;
+  readonly message: string;
+}): TrustedFailureTransportFamily<T> {
+  const projections = new WeakMap<object, T>();
+  class TrustedFailureTransport extends Error {
+    constructor(projection: T) {
+      super(input.message);
+      this.name = input.name;
+      projections.set(this, projection);
+      Object.freeze(this);
+    }
+  }
+  return Object.freeze({
+    create: (projection: T): Error => new TrustedFailureTransport(projection),
+    has: (value: unknown): boolean => isObjectLike(value) && projections.has(value),
+    project: (value: unknown): T | undefined =>
+      isObjectLike(value) ? projections.get(value) : undefined
+  });
 }
 
 export interface FailureGraphEdge {
@@ -100,13 +157,13 @@ export class PreservedErrorCompensationEnvelope extends Error {
   }
 }
 
-type AsyncOutcome<T> =
+export type FailureAsyncOutcome<T> =
   | { readonly status: "fulfilled"; readonly value: T }
+  | { readonly status: "not_attempted" }
   | {
       readonly status: "rejected";
       readonly reason: unknown;
-      readonly occurrence: FailureOccurrence;
-      readonly semanticPrimaryOccurrence?: FailureOccurrence;
+      readonly occurrence: FailureFoldEntry;
     };
 
 interface ObservationState {
@@ -131,6 +188,9 @@ interface ObservationState {
 
 let nextFailureOccurrenceOrder = 1;
 const trustedFailureOccurrences = new WeakSet<object>();
+const claimedFailureOccurrences = new WeakSet<object>();
+const trustedFailureCarrierAdoptions = new WeakMap<object, PreservedFailureLedger>();
+const claimedFailureCarrierAdoptions = new WeakSet<object>();
 const preservedFailureLedgers = new WeakMap<object, PreservedFailureLedger>();
 
 class PreservedFailureCarrier extends Error {
@@ -158,53 +218,23 @@ export async function runWithPreservedRelease<T>(
     releaseReason: unknown
   ) => Promise<void>,
   preserveCombinedFailure: (
-    primary: unknown,
-    compensations: readonly unknown[],
-    aggregateMessage: string,
-    primaryPhase?: FailurePhase,
-    compensationPhases?: readonly FailurePhase[],
-    primaryOccurrence?: FailureOccurrence,
-    compensationOccurrences?: readonly FailureOccurrence[],
-    semanticPrimaryOccurrence?: FailureOccurrence
-  ) => unknown = (
-    primary,
-    compensations,
-    message,
-    primaryPhase,
-    compensationPhases,
-    primaryOccurrence,
-    compensationOccurrences,
-    _semanticPrimaryOccurrence
-  ) =>
-    preserveThrownValueAndCompensationErrors(
-      primary,
-      compensations,
-      message,
-      [],
-      primaryPhase,
-      compensationPhases,
-      primaryOccurrence,
-      compensationOccurrences
-    ),
-  captureSemanticPrimaryOccurrence?: (
-    phase: FailurePhase,
-    value: unknown
-  ) => FailureOccurrence | undefined
+    primary: FailureFoldEntry,
+    compensations: readonly FailureFoldEntry[],
+    aggregateMessage: string
+  ) => unknown = preserveFailureOccurrencesWithCompatibility
 ): Promise<T> {
-  let bodyOutcome: AsyncOutcome<T>;
+  let bodyOutcome: FailureAsyncOutcome<T>;
   try {
     bodyOutcome = { status: "fulfilled", value: await body() };
   } catch (reason) {
     bodyOutcome = {
       status: "rejected",
       reason,
-      occurrence: captureFailureOccurrence("body", reason),
-      semanticPrimaryOccurrence:
-        captureSemanticPrimaryOccurrence?.("body", reason)
+      occurrence: captureFailureFoldEntry("body", reason)
     };
   }
 
-  let releaseOutcome: AsyncOutcome<void>;
+  let releaseOutcome: FailureAsyncOutcome<void>;
   try {
     releaseOutcome = { status: "fulfilled", value: await release() };
   } catch (reason) {
@@ -212,23 +242,16 @@ export async function runWithPreservedRelease<T>(
     releaseOutcome = {
       status: "rejected",
       reason,
-      occurrence: captureFailureOccurrence(phase, reason),
-      semanticPrimaryOccurrence:
-        captureSemanticPrimaryOccurrence?.(phase, reason)
+      occurrence: captureFailureFoldEntry(phase, reason)
     };
   }
 
   if (bodyOutcome.status === "rejected") {
     if (releaseOutcome.status === "rejected") {
       throw preserveCombinedFailure(
-        bodyOutcome.reason,
-        [releaseOutcome.reason],
-        aggregateMessage,
-        "body",
-        ["final_release"],
         bodyOutcome.occurrence,
         [releaseOutcome.occurrence],
-        bodyOutcome.semanticPrimaryOccurrence
+        aggregateMessage
       );
     }
     throw bodyOutcome.reason;
@@ -241,28 +264,37 @@ export async function runWithPreservedRelease<T>(
           releaseOutcome.reason
         );
       } catch (settlementReason) {
-        const settlementOccurrence = captureFailureOccurrence(
+        const settlementOccurrence = captureFailureFoldEntry(
           "settlement",
           settlementReason
         );
         throw preserveCombinedFailure(
-          releaseOutcome.reason,
-          [settlementReason],
-          aggregateMessage,
-          "initial_release",
-          ["settlement"],
           releaseOutcome.occurrence,
           [settlementOccurrence],
-          releaseOutcome.semanticPrimaryOccurrence
+          aggregateMessage
         );
       }
     }
-    throw releaseOutcome.reason;
+    throw preserveCombinedFailure(
+      releaseOutcome.occurrence,
+      [],
+      aggregateMessage
+    );
   }
   return bodyOutcome.value;
 }
 
 export function captureFailureOccurrence(
+  phase: FailurePhase,
+  value: unknown
+): FailureOccurrence {
+  if (!isFailurePhase(phase)) {
+    throw new FailureOccurrenceProtocolError("invalid_phase");
+  }
+  return mintFailureOccurrence(phase, value);
+}
+
+function mintFailureOccurrence(
   phase: FailurePhase,
   value: unknown
 ): FailureOccurrence {
@@ -277,10 +309,55 @@ export function captureFailureOccurrence(
   return occurrence;
 }
 
+export function captureFailureFoldEntry(
+  phase: FailurePhase,
+  value: unknown
+): FailureFoldEntry {
+  return failureLedger(value)
+    ? adoptFailureCarrier(phase, value)
+    : captureFailureOccurrence(phase, value);
+}
+
+export function adoptFailureCarrier(
+  phase: FailurePhase,
+  carrier: unknown
+): FailureCarrierAdoption {
+  if (!isFailurePhase(phase)) {
+    throw new FailureOccurrenceProtocolError("invalid_phase");
+  }
+  if (!isObjectLike(carrier)) {
+    throw new FailureOccurrenceProtocolError("invalid_adoption");
+  }
+  const ledger = preservedFailureLedgers.get(carrier);
+  if (!ledger) throw new FailureOccurrenceProtocolError("invalid_adoption");
+  const occurrence = mintFailureOccurrence(phase, carrier);
+  const adoption = Object.freeze({
+    [FAILURE_CARRIER_ADOPTION]: true as const,
+    adoptionId: Symbol("failure_carrier_adoption"),
+    order: occurrence.order,
+    carrier,
+    occurrence
+  });
+  trustedFailureCarrierAdoptions.set(adoption, ledger);
+  return adoption;
+}
+
 export function isTrustedFailureOccurrence(
   value: unknown
 ): value is FailureOccurrence {
   return isObjectLike(value) && trustedFailureOccurrences.has(value);
+}
+
+export function failureFoldEntryValue(entry: FailureFoldEntry): unknown {
+  if (!isObjectLike(entry)) {
+    throw new FailureOccurrenceProtocolError("untrusted_entry");
+  }
+  const adoption = trustedFailureCarrierAdoptions.get(entry);
+  if (adoption) return (entry as FailureCarrierAdoption).occurrence.value;
+  if (trustedFailureOccurrences.has(entry)) {
+    return (entry as FailureOccurrence).value;
+  }
+  throw new FailureOccurrenceProtocolError("untrusted_entry");
 }
 
 export function failureLedger(value: unknown): PreservedFailureLedger | undefined {
@@ -335,17 +412,33 @@ export function orderedDistinctCompensationFailures(
 }
 
 export function mergeTrustedFailureOccurrences(
-  primary: FailureOccurrence,
-  later: readonly FailureOccurrence[],
+  primary: FailureFoldEntry,
+  later: readonly FailureFoldEntry[],
   _aggregateMessage: string,
   primaryClassification?: FailurePrimaryClassification
 ): unknown {
-  if (!isTrustedFailureOccurrence(primary) || later.some((item) => !isTrustedFailureOccurrence(item))) {
-    throw new TypeError("Failure occurrences must be created by the preservation boundary.");
-  }
+  return mergeTrustedFailureOccurrenceVector(
+    primary,
+    [primary, ...later],
+    _aggregateMessage,
+    primaryClassification
+  );
+}
 
-  const inherited = failureLedger(primary.value);
-  const semanticPrimary = inherited?.primary ?? primary;
+export function mergeTrustedFailureOccurrenceVector(
+  primary: FailureFoldEntry,
+  entries: readonly FailureFoldEntry[],
+  _aggregateMessage: string,
+  primaryClassification?: FailurePrimaryClassification
+): unknown {
+  if (!entries.includes(primary)) {
+    throw new FailureOccurrenceProtocolError("invalid_cardinality");
+  }
+  preflightFailureFoldEntries(entries);
+  claimFailureFoldEntries(entries);
+
+  const primaryAdoption = trustedFailureCarrierAdoptions.get(primary as object);
+  const semanticPrimary = primaryAdoption?.primary ?? primary as FailureOccurrence;
   const state: ObservationState = {
     nodes: [],
     observationFailures: [],
@@ -366,13 +459,7 @@ export function mergeTrustedFailureOccurrences(
     observationFailureBudgetRecorded: false
   };
 
-  if (inherited) {
-    adoptLedger(inherited, state);
-    state.queue.push(primary.value);
-  } else {
-    retainOccurrence(primary, state, true);
-  }
-  for (const occurrence of later) adoptOrRetainOccurrence(occurrence, state);
+  for (const entry of entries) adoptOrRetainEntry(entry, state);
 
   while (state.queueHead < state.queue.length) {
     const value = state.queue[state.queueHead++];
@@ -412,54 +499,32 @@ export function mergeTrustedFailureOccurrences(
 }
 
 export function adoptTrustedFailureRef(
-  ref: FailureOccurrence,
-  later: readonly FailureOccurrence[],
+  ref: FailureFoldEntry,
+  later: readonly FailureFoldEntry[],
   aggregateMessage = "A trusted failure and compensating actions failed."
 ): unknown {
   return mergeTrustedFailureOccurrences(ref, later, aggregateMessage);
 }
 
 export function preserveThrownValueAndCompensationErrors(
-  primary: unknown,
-  compensations: readonly unknown[],
-  aggregateMessage: string,
-  additionalObservationFailures: readonly unknown[] = [],
-  primaryPhase: FailurePhase = "body",
-  compensationPhases: readonly FailurePhase[] = compensations.map(() => "settlement"),
-  primaryOccurrence?: FailureOccurrence,
-  compensationOccurrences?: readonly FailureOccurrence[]
+  primary: FailureFoldEntry,
+  compensations: readonly FailureFoldEntry[],
+  aggregateMessage: string
 ): Error {
   return preserveFailureOccurrencesWithCompatibility(
-    primaryOccurrence ?? captureFailureOccurrence(primaryPhase, primary),
-    [
-      ...additionalObservationFailures.map((value) =>
-        captureFailureOccurrence("observation", value)
-      ),
-      ...compensations.map((value, index) =>
-        compensationOccurrences?.[index] ??
-          captureFailureOccurrence(compensationPhases[index] ?? "settlement", value)
-      )
-    ],
+    primary,
+    compensations,
     aggregateMessage
   );
 }
 
 export function preserveFailureOccurrencesWithCompatibility(
-  primary: FailureOccurrence,
-  later: readonly FailureOccurrence[],
+  primary: FailureFoldEntry,
+  later: readonly FailureFoldEntry[],
   aggregateMessage: string
 ): Error {
   const merged = mergeTrustedFailureOccurrences(primary, later, aggregateMessage);
   return merged as Error;
-}
-
-export function preservePrimaryAndCompensationErrors(
-  primary: unknown,
-  compensations: readonly unknown[],
-  aggregateMessage: string
-): unknown {
-  if (compensations.length === 0 || boundedErrorBrand(primary) !== "error") return primary;
-  return preserveThrownValueAndCompensationErrors(primary, compensations, aggregateMessage);
 }
 
 function retainOccurrence(
@@ -472,17 +537,17 @@ function retainOccurrence(
   if (queueValue) state.queue.push(occurrence.value);
 }
 
-function adoptOrRetainOccurrence(
-  occurrence: FailureOccurrence,
+function adoptOrRetainEntry(
+  entry: FailureFoldEntry,
   state: ObservationState
 ): void {
-  const inherited = failureLedger(occurrence.value);
-  if (!inherited) {
-    retainOccurrence(occurrence, state, true);
+  const adopted = trustedFailureCarrierAdoptions.get(entry as object);
+  if (!adopted) {
+    retainOccurrence(entry as FailureOccurrence, state, true);
     return;
   }
-  adoptLedger(inherited, state);
-  state.queue.push(occurrence.value);
+  adoptLedger(adopted, state);
+  retainOccurrence((entry as FailureCarrierAdoption).occurrence, state, true);
 }
 
 function adoptLedger(
@@ -539,13 +604,65 @@ function observeSparseErrorsArray(
     return;
   }
 
-  const numericKeys: Array<{ readonly key: string; readonly index: number }> = [];
-  const inspected = Math.min(keys.length, FAILURE_GRAPH_MAX_NUMERIC_KEYS);
-  for (let position = 0; position < inspected; position += 1) {
+  type NumericKey = { readonly key: string; readonly index: number };
+  const numericKeys: NumericKey[] = [];
+  let numericOverflow: { readonly key: string; readonly index: number } | undefined;
+  for (const key of keys) {
     if (!chargeControlledOperation(state)) return;
-    const key = keys[position];
     if (typeof key === "string" && isCanonicalArrayIndex(key)) {
-      numericKeys.push({ key, index: Number(key) });
+      let omitted: NumericKey | undefined;
+      const candidate = { key, index: Number(key) };
+      if (numericKeys.length < FAILURE_GRAPH_MAX_NUMERIC_KEYS) {
+        numericKeys.push(candidate);
+        let child = numericKeys.length - 1;
+        while (child > 0) {
+          const parent = Math.floor((child - 1) / 2);
+          if (numericKeys[parent]!.index >= numericKeys[child]!.index) break;
+          [numericKeys[parent], numericKeys[child]] = [
+            numericKeys[child]!,
+            numericKeys[parent]!
+          ];
+          child = parent;
+        }
+      } else if (candidate.index < numericKeys[0]!.index) {
+        omitted = numericKeys[0];
+        numericKeys[0] = candidate;
+        let parent = 0;
+        while (true) {
+          const left = parent * 2 + 1;
+          const right = left + 1;
+          if (left >= numericKeys.length) break;
+          const largerChild =
+            right < numericKeys.length &&
+            numericKeys[right]!.index > numericKeys[left]!.index
+              ? right
+              : left;
+          if (numericKeys[parent]!.index >= numericKeys[largerChild]!.index) break;
+          [numericKeys[parent], numericKeys[largerChild]] = [
+            numericKeys[largerChild]!,
+            numericKeys[parent]!
+          ];
+          parent = largerChild;
+        }
+      } else {
+        omitted = candidate;
+      }
+      if (
+        omitted &&
+        (numericOverflow === undefined || omitted.index < numericOverflow.index)
+      ) {
+        numericOverflow = omitted;
+        // The first omitted canonical index proves numeric-key exhaustion.
+        // Record that fact at discovery time so a later controlled-work or
+        // edge-budget exit cannot suppress already-known evidence. The budget
+        // recorder is idempotent while `numericOverflow` may still move to a
+        // lower omitted index as the bounded lowest-N heap is refined.
+        recordBudgetIssue(
+          "numeric_key_budget_exceeded",
+          FAILURE_GRAPH_MAX_NUMERIC_KEYS,
+          state
+        );
+      }
     }
   }
   numericKeys.sort((left, right) => left.index - right.index);
@@ -556,16 +673,112 @@ function observeSparseErrorsArray(
     if (!element.present) continue;
     if (!addEdge({ kind: "errors", target: element.value, index }, edges, state)) return;
   }
-  if (keys.length > FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1) {
-    if (state.edgeCount >= FAILURE_GRAPH_MAX_EDGES) {
-      recordBudgetIssue("edge_budget_exceeded", FAILURE_GRAPH_MAX_EDGES, state);
-    }
-    recordBudgetIssue(
-      "numeric_key_budget_exceeded",
-      FAILURE_GRAPH_MAX_NUMERIC_KEYS,
+  if (numericOverflow) {
+    const overflowElement = observeOwnArrayElement(
+      values,
+      numericOverflow.key,
       state
     );
+    for (const failure of overflowElement.failures) {
+      recordObservationFailure(failure, state);
+    }
+    if (overflowElement.present) {
+      addEdge({
+        kind: "errors",
+        target: overflowElement.value,
+        index: numericOverflow.index
+      }, edges, state);
+    }
   }
+}
+
+function preflightFailureFoldEntries(entries: readonly FailureFoldEntry[]): void {
+  if (entries.length === 0) {
+    throw new FailureOccurrenceProtocolError("invalid_cardinality");
+  }
+  const seen = new Set<object>();
+  let previousEntryOrder = -1;
+  let finalReleaseSeen = false;
+  for (const [index, entry] of entries.entries()) {
+    if (!isObjectLike(entry)) {
+      throw new FailureOccurrenceProtocolError("untrusted_entry");
+    }
+    if (seen.has(entry)) throw new FailureOccurrenceProtocolError("duplicate_entry");
+    seen.add(entry);
+    if (trustedFailureOccurrences.has(entry)) {
+      const occurrence = entry as FailureOccurrence;
+      if (!isFailurePhase(occurrence.phase)) {
+        throw new FailureOccurrenceProtocolError("invalid_phase");
+      }
+      if (claimedFailureOccurrences.has(entry)) {
+        throw new FailureOccurrenceProtocolError("stale_entry");
+      }
+      if (occurrence.order <= previousEntryOrder) {
+        throw new FailureOccurrenceProtocolError("reordered_entry");
+      }
+      assertFailurePhaseRole(occurrence.phase, index, finalReleaseSeen);
+      if (occurrence.phase === "final_release") finalReleaseSeen = true;
+      previousEntryOrder = occurrence.order;
+      continue;
+    }
+    if (trustedFailureCarrierAdoptions.has(entry)) {
+      if (claimedFailureCarrierAdoptions.has(entry)) {
+        throw new FailureOccurrenceProtocolError("stale_entry");
+      }
+      const adoption = entry as FailureCarrierAdoption;
+      if (
+        !trustedFailureOccurrences.has(adoption.occurrence) ||
+        adoption.occurrence.value !== adoption.carrier ||
+        adoption.occurrence.order !== adoption.order
+      ) {
+        throw new FailureOccurrenceProtocolError("untrusted_entry");
+      }
+      if (claimedFailureOccurrences.has(adoption.occurrence)) {
+        throw new FailureOccurrenceProtocolError("stale_entry");
+      }
+      if (adoption.order <= previousEntryOrder) {
+        throw new FailureOccurrenceProtocolError("reordered_entry");
+      }
+      assertFailurePhaseRole(adoption.occurrence.phase, index, finalReleaseSeen);
+      if (adoption.occurrence.phase === "final_release") finalReleaseSeen = true;
+      previousEntryOrder = adoption.order;
+      continue;
+    }
+    throw new FailureOccurrenceProtocolError("untrusted_entry");
+  }
+}
+
+function claimFailureFoldEntries(entries: readonly FailureFoldEntry[]): void {
+  for (const entry of entries) {
+    if (trustedFailureOccurrences.has(entry as object)) {
+      claimedFailureOccurrences.add(entry as object);
+    } else {
+      claimedFailureCarrierAdoptions.add(entry as object);
+      claimedFailureOccurrences.add((entry as FailureCarrierAdoption).occurrence);
+    }
+  }
+}
+
+function assertFailurePhaseRole(
+  phase: FailurePhase,
+  index: number,
+  finalReleaseSeen: boolean
+): void {
+  if (
+    phase === "observation" ||
+    (index > 0 && (phase === "body" || phase === "initial_release")) ||
+    (finalReleaseSeen && phase !== "final_release")
+  ) {
+    throw new FailureOccurrenceProtocolError("invalid_phase");
+  }
+}
+
+function isFailurePhase(value: unknown): value is FailurePhase {
+  return value === "body" ||
+    value === "initial_release" ||
+    value === "settlement" ||
+    value === "final_release" ||
+    value === "observation";
 }
 
 function addEdge(
@@ -659,7 +872,8 @@ function recordObservationFailure(value: unknown, state: ObservationState): void
     return;
   }
   state.ordinaryObservationFailureCount += 1;
-  const occurrence = captureFailureOccurrence("observation", value);
+  const occurrence = mintFailureOccurrence("observation", value);
+  claimedFailureOccurrences.add(occurrence);
   state.observationFailures.push(occurrence);
   retainOccurrence(occurrence, state, false);
 }
@@ -691,10 +905,11 @@ function recordBudgetIssue(
       state.observationFailureBudgetRecorded = true;
       break;
   }
-  const occurrence = captureFailureOccurrence(
+  const occurrence = mintFailureOccurrence(
     "observation",
     Object.freeze(new FailureGraphObservationIssue(code, limit))
   );
+  claimedFailureOccurrences.add(occurrence);
   state.observationFailures.push(occurrence);
   retainOccurrence(occurrence, state, false);
 }
