@@ -51,10 +51,31 @@ Expected results:
 Patch preflight was executed in detached temporary worktrees:
 
 ```sh
-git -C <a370-worktree> apply --check <round-1-phase-6.2-patch>
-git -C <b425-worktree> apply --check <round-2-backend-patch>
+set -eu
+repo_root=$(git rev-parse --show-toplevel)
+replay_root=$(mktemp -d "${TMPDIR:-/tmp}/shud-ledger-replay.XXXXXX")
+cleanup_replay_worktrees() {
+  git -C "$repo_root" worktree remove "$replay_root/round-1" >/dev/null 2>&1 || true
+  git -C "$repo_root" worktree remove "$replay_root/round-2" >/dev/null 2>&1 || true
+  rmdir "$replay_root" >/dev/null 2>&1 || true
+}
+trap cleanup_replay_worktrees EXIT HUP INT TERM
+
+git -C "$repo_root" worktree add --detach "$replay_root/round-1" \
+  a370f8e3a510b34c47d642f10f7d095aa8bb4b26
+git -C "$replay_root/round-1" apply --check \
+  "$repo_root/openspec/changes/m1-failure-occurrence-ledger/evidence/repair-round-1/phase-6.2/red-before-tests.patch"
+
+git -C "$repo_root" worktree add --detach "$replay_root/round-2" b425a68
+git -C "$replay_root/round-2" apply --check \
+  "$repo_root/openspec/changes/m1-failure-occurrence-ledger/evidence/repair-round-2/red-before-backend-undefined.patch"
+
+cleanup_replay_worktrees
+trap - EXIT HUP INT TERM
 ```
 
-Both commands exited 0, and both temporary worktrees were removed. A clean
+The complete block was copied from this tracked file and executed from the
+repository root: both `git apply --check` commands exited 0, both temporary
+worktrees were removed, and the temporary root no longer existed. A clean
 incremental A3 `git diff --check` must exit 0 because A3 introduces no new
 whitespace exception.
