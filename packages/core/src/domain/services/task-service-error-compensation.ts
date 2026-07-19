@@ -1,5 +1,6 @@
 import {
   createTrustedFailureTransportFamily,
+  failureFoldEntrySemanticPrimaryValue,
   failureFoldEntryValue,
   failureLedger,
   mergeTrustedFailureOccurrenceVector,
@@ -42,12 +43,7 @@ export function preserveTaskServiceErrorFailureEntries(
   compensations: readonly FailureFoldEntry[],
   aggregateMessage: string
 ): unknown {
-  const directPrimary = failureFoldEntryValue(primary);
-  const directProjection = taskServiceErrorAuthorityTransportFamily.project(directPrimary);
-  const trustedDirectPrimary = trustedTaskServiceErrorFromFailureLedger(directPrimary) ??
-    trustedTaskServiceErrorTarget(directPrimary) ??
-    trustedTaskServiceErrorFromFailureLedger(directProjection) ??
-    trustedTaskServiceErrorTarget(directProjection);
+  const trustedDirectPrimary = trustedTaskServiceErrorForFoldPrimary(primary);
   const preserved = mergeTrustedFailureOccurrences(
     primary,
     compensations,
@@ -66,12 +62,7 @@ export function preserveTaskServiceErrorFailureVector(
   entries: readonly FailureFoldEntry[],
   aggregateMessage: string
 ): unknown {
-  const directPrimary = failureFoldEntryValue(primary);
-  const directProjection = taskServiceErrorAuthorityTransportFamily.project(directPrimary);
-  const trustedDirectPrimary = trustedTaskServiceErrorFromFailureLedger(directPrimary) ??
-    trustedTaskServiceErrorTarget(directPrimary) ??
-    trustedTaskServiceErrorFromFailureLedger(directProjection) ??
-    trustedTaskServiceErrorTarget(directProjection);
+  const trustedDirectPrimary = trustedTaskServiceErrorForFoldPrimary(primary);
   const preserved = mergeTrustedFailureOccurrenceVector(
     primary,
     entries,
@@ -82,6 +73,25 @@ export function preserveTaskServiceErrorFailureVector(
     trustedTaskServiceErrorLedgerViews.set(preserved, trustedDirectPrimary);
   }
   return preserved;
+}
+
+function trustedTaskServiceErrorForFoldPrimary(
+  primary: FailureFoldEntry
+): TaskServiceError | undefined {
+  const entryValue = failureFoldEntryValue(primary);
+  const semanticPrimary = failureFoldEntrySemanticPrimaryValue(primary);
+  return trustedTaskServiceErrorFromPrivateAuthority(entryValue) ??
+    trustedTaskServiceErrorFromPrivateAuthority(semanticPrimary);
+}
+
+function trustedTaskServiceErrorFromPrivateAuthority(
+  value: unknown
+): TaskServiceError | undefined {
+  const projection = taskServiceErrorAuthorityTransportFamily.project(value);
+  return trustedTaskServiceErrorFromFailureLedger(value) ??
+    trustedTaskServiceErrorTarget(value) ??
+    trustedTaskServiceErrorFromFailureLedger(projection) ??
+    trustedTaskServiceErrorTarget(projection);
 }
 
 function isObjectLike(value: unknown): value is object {

@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   TaskServiceError,
+  adoptFailureCarrier,
   captureFailureOccurrence,
   createTrustedTaskServiceErrorProxy,
   createTaskCardService,
   failureEvents,
+  mergeTrustedFailureOccurrences,
   preserveTaskServiceErrorFailureEntries,
   taskServiceErrorAtBoundary,
   type CreateTaskInput
@@ -65,6 +67,58 @@ describe("backend failure occurrence ledger boundary", () => {
     expect(taskServiceErrorAtBoundary(routed)).toBe(primaryTarget);
     expect(failureEvents(routed).map((event) => event.value)).toEqual([primary, compensation]);
     expect(prototypeReads).toBe(0);
+  });
+
+  test("serializes typed fields after adopting a generic controlled-Proxy carrier", async () => {
+    const workspaceRoot = await temporaryWorkspace();
+    const primaryTarget = typedPrimary();
+    let prototypeReads = 0;
+    const primary = createTrustedTaskServiceErrorProxy(primaryTarget, {
+      getPrototypeOf(target) {
+        prototypeReads += 1;
+        return Reflect.getPrototypeOf(target);
+      }
+    });
+    const generic = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", primary),
+      [],
+      "generic route fold"
+    );
+    expect(prototypeReads).toBe(1);
+    const routed = preserveTaskServiceErrorFailureEntries(
+      adoptFailureCarrier("body", generic),
+      [],
+      "typed route adoption"
+    );
+    const app = createBackendApi({
+      workspaceRoot,
+      taskServiceFactory: (options) => ({
+        ...createTaskCardService(options),
+        createTask: async () => {
+          throw routed;
+        }
+      })
+    });
+
+    const response = await app.request("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(validTaskCreateBody())
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(primaryTarget.status);
+    expect(body.error.category).toBe(primaryTarget.category);
+    expect(body.error.message).toBe(primaryTarget.message);
+    expect(body.error.user_message).toBe(primaryTarget.userMessage);
+    expect(body.error.retryable).toBe(primaryTarget.retryable);
+    expect(body.error.evidence_refs).toEqual(primaryTarget.evidenceRefs);
+    expect(body.error.recommended_next_actions).toEqual(primaryTarget.recommendedNextActions);
+    expect(taskServiceErrorAtBoundary(routed)).toBe(primaryTarget);
+    expect(failureEvents(routed).filter(
+      (event) => event.phase === "body" && event.value === generic
+    )).toHaveLength(1);
+    expect(prototypeReads).toBe(1);
   });
 
   test("rejects prototype, Proxy, AggregateError, and ledger-like typed forgeries", async () => {

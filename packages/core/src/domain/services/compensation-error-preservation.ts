@@ -375,6 +375,20 @@ export function failureFoldEntryValue(entry: FailureFoldEntry): unknown {
   throw new FailureOccurrenceProtocolError("untrusted_entry");
 }
 
+export function failureFoldEntrySemanticPrimaryValue(
+  entry: FailureFoldEntry
+): unknown {
+  if (!isObjectLike(entry)) {
+    throw new FailureOccurrenceProtocolError("untrusted_entry");
+  }
+  const adoption = trustedFailureCarrierAdoptions.get(entry);
+  if (adoption) return adoption.ledger.primary.value;
+  if (trustedFailureOccurrences.has(entry)) {
+    return (entry as FailureOccurrence).value;
+  }
+  throw new FailureOccurrenceProtocolError("untrusted_entry");
+}
+
 export function failureLedger(value: unknown): PreservedFailureLedger | undefined {
   return isObjectLike(value) ? preservedFailureLedgers.get(value) : undefined;
 }

@@ -24,6 +24,7 @@ import * as corePackage from "@shud-harness/core";
 import * as failurePreservation from "./compensation-error-preservation";
 import { runWithPreservedRelease } from "./compensation-error-preservation";
 import { TaskServiceError } from "./task-card-service";
+import { preserveTaskServiceErrorFailureVector } from "./task-service-error-compensation";
 
 const semanticPrimaryErrorFromServices = (
   coreServices as typeof coreServices & {
@@ -675,6 +676,107 @@ describe("failure occurrence ledger", () => {
       (event) => event.phase === "body" && event.value === first
     )).toHaveLength(1);
     expect(failureLedger(adopted)!.observedGraph.observationFailures).toEqual([]);
+  });
+
+  test("adopts a generic carrier into both typed adapters without reclassifying its controlled Proxy", () => {
+    for (const adapter of typedFailureAdapters()) {
+      const proxyTarget = taskServiceError(`${adapter.name} generic carrier primary`);
+      let prototypeReads = 0;
+      const proxy = createTrustedTaskServiceErrorProxy(proxyTarget, {
+        getPrototypeOf(target) {
+          prototypeReads += 1;
+          return Reflect.getPrototypeOf(target);
+        }
+      });
+      const firstSettlement = new Error(`${adapter.name} first settlement`);
+      const generic = mergeTrustedFailureOccurrences(
+        captureFailureOccurrence("body", proxy),
+        [captureFailureOccurrence("settlement", firstSettlement)],
+        `${adapter.name} generic fold`
+      );
+      const inheritedEvents = failureEvents(generic);
+      expect(prototypeReads).toBe(1);
+
+      const finalRelease = new Error(`${adapter.name} adopted release`);
+      const adopted = adapter.preserve(
+        adoptFailureCarrier("body", generic),
+        [captureFailureOccurrence("final_release", finalRelease)],
+        `${adapter.name} typed adoption`
+      );
+      const adoptedEvents = failureEvents(adopted);
+
+      expect(prototypeReads).toBe(1);
+      expect(semanticPrimaryValue(adopted)).toBe(proxy);
+      expect(taskServiceErrorAtBoundary(adopted)).toBe(proxyTarget);
+      expect(taskServiceErrorAtBoundary(adopted)).toMatchObject({
+        code: proxyTarget.code,
+        status: proxyTarget.status,
+        category: proxyTarget.category,
+        message: proxyTarget.message,
+        userMessage: proxyTarget.userMessage,
+        retryable: proxyTarget.retryable,
+        evidenceRefs: proxyTarget.evidenceRefs,
+        recommendedNextActions: proxyTarget.recommendedNextActions
+      });
+      for (const inherited of inheritedEvents) {
+        expect(adoptedEvents.filter(
+          (event) => event.occurrenceId === inherited.occurrenceId
+        )).toHaveLength(1);
+      }
+      expect(adoptedEvents.filter(
+        (event) => event.phase === "body" && event.value === generic
+      )).toHaveLength(1);
+      expect(adoptedEvents.filter(
+        (event) => event.phase === "final_release" && event.value === finalRelease
+      )).toHaveLength(1);
+      expect(failureLedger(adopted)!.observedGraph.observationFailures).toEqual([]);
+    }
+  });
+
+  test("adopts a generic carrier with one failed Proxy observation without retrying it in either typed adapter", () => {
+    for (const adapter of typedFailureAdapters()) {
+      const proxyTarget = taskServiceError(`${adapter.name} throwing generic primary`);
+      const prototypeFailure = new Error(`${adapter.name} prototype observation failed`);
+      let prototypeReads = 0;
+      const proxy = createTrustedTaskServiceErrorProxy(proxyTarget, {
+        getPrototypeOf() {
+          prototypeReads += 1;
+          throw prototypeFailure;
+        }
+      });
+      const generic = mergeTrustedFailureOccurrences(
+        captureFailureOccurrence("body", proxy),
+        [],
+        `${adapter.name} throwing generic fold`
+      );
+      const inheritedEvents = failureEvents(generic);
+      const inheritedObservationFailures = failureLedger(generic)!.observedGraph
+        .observationFailures;
+      expect(prototypeReads).toBe(1);
+      expect(inheritedObservationFailures.map((event) => event.value)).toEqual([
+        prototypeFailure
+      ]);
+
+      const adopted = adapter.preserve(
+        adoptFailureCarrier("body", generic),
+        [],
+        `${adapter.name} throwing typed adoption`
+      );
+      const adoptedEvents = failureEvents(adopted);
+
+      expect(prototypeReads).toBe(1);
+      expect(semanticPrimaryValue(adopted)).toBe(proxy);
+      expect(taskServiceErrorAtBoundary(adopted)).toBe(proxyTarget);
+      for (const inherited of inheritedEvents) {
+        expect(adoptedEvents.filter(
+          (event) => event.occurrenceId === inherited.occurrenceId
+        )).toHaveLength(1);
+      }
+      expect(adoptedEvents.filter(
+        (event) => event.phase === "body" && event.value === generic
+      )).toHaveLength(1);
+      expect(failureLedger(adopted)!.observedGraph.observationFailures).toEqual([]);
+    }
   });
 
   test("captures physical body, release, and settlement phases at the shared helper", async () => {
@@ -1755,4 +1857,25 @@ function taskServiceError(message: string): TaskServiceError {
     retryable: true,
     recommendedNextActions: ["Inspect the failure occurrence ledger."]
   });
+}
+
+function typedFailureAdapters(): readonly Readonly<{
+  name: "entries" | "vector";
+  preserve: typeof preserveTaskServiceErrorFailureEntries;
+}>[] {
+  return [
+    {
+      name: "entries",
+      preserve: preserveTaskServiceErrorFailureEntries
+    },
+    {
+      name: "vector",
+      preserve: (primary, compensations, aggregateMessage) =>
+        preserveTaskServiceErrorFailureVector(
+          primary,
+          [primary, ...compensations],
+          aggregateMessage
+        )
+    }
+  ];
 }
