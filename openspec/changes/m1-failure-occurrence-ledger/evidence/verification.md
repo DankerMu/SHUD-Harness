@@ -1088,3 +1088,31 @@ Current script SHA-256 values:
   `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
 - `evidence/scripts/verify-replay-evidence.test.sh`:
   `5b99a876bc42f50084e07b30a852d14946e52c0b629248fd395ce23e6a59ad78`.
+
+### A8 Round-1 witnessed-publication precedence repair
+
+Verified on `2026-07-20`. The final semantic repair is commit
+`392707748cb4c8bf13d8e00f37f034e9f0c886ae`.
+
+Round 1 confirmed that handler-side late-source promotion also ran after a
+positive probe had witnessed publication. Deferred HUP 129 could therefore
+overtake collision 73 or required-publication disappearance 67 before shared
+decode. Promotion now requires an active transaction, cleared decode authority,
+and no witnessed or decoded publication, precisely limiting it to the negative
+probe tail.
+
+Four verifier/harness regressions defer HUP during the positive probe and
+deliver later INT before shared decode. The pre-fix implementation returned
+129 four times; the repair returns 73/73/67/67, decodes once, settles the child,
+and leaves zero residue. Canonical verifier and the 95/95 lifecycle matrix
+(40 two-party races, 80 participant outcomes), syntax, shellcheck, strict
+OpenSpec and incremental hygiene pass.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `3fc79e61336638b926b5e5491585bac436c86a3c37ed063fff9f054d0f0b7f95`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `d4d21adf68e53157df5d77df2316929da30b99f5f6e8c4a758c3746902a19cc4`.

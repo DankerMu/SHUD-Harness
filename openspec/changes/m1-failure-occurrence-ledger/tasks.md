@@ -295,3 +295,7 @@
   handler MUST promote it before outcome adoption. Prove verifier/harness
   collision and unknown publication paths with later INT, settlement, and zero
   residue in the 91-case matrix.
+- [x] 12.10 Restrict late-source promotion to negative probes. A positive probe
+  that already witnessed publication MUST decode/commit collision 73 or
+  disappearance 67 before deferred HUP and later INT. Prove verifier/harness
+  paths with settlement and zero residue in the 95-case matrix.

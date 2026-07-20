@@ -102,8 +102,8 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 91/91 named scenarios. Thirty-six are two-party races
-with 72 explicit participant outcomes:
+The self-test passed 95/95 named scenarios. Forty are two-party races
+with 80 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -168,6 +168,10 @@ with 72 explicit participant outcomes:
   73 or unknown-protocol 67 with later INT. All four promote 129 before outcome
   adoption, preserve nested/current identity, settle the child, and leave no
   lifecycle/probe residue;
+- verifier and harness positive-probe precedence cases defer HUP while outcome
+  publication is witnessed, then deliver later INT before shared decode. Both
+  collision cases preserve 73 and both disappearance cases preserve 67, with
+  one decode, mandatory settlement, and zero lifecycle/probe residue;
 - verifier and harness witnessed-publication probes remove the outcome before
   classification, then deliver TERM with the link absent or after restoring
   `token:73`. All four preserve the earlier required-publication failure 67,
