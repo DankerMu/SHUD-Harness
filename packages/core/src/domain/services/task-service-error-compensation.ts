@@ -1,98 +1,99 @@
 import {
-  preserveThrownValueAndCompensationErrors,
-  registerPreservedErrorCompatibility,
-  semanticPrimaryError
+  createTrustedFailureTransportFamily,
+  failureFoldEntrySemanticPrimaryValue,
+  failureFoldEntryValue,
+  failureLedger,
+  mergeTrustedFailureOccurrenceVector,
+  mergeTrustedFailureOccurrences,
+  type FailureFoldEntry
 } from "./compensation-error-preservation";
 import {
   TaskServiceError,
-  type TaskServiceErrorCode
+  trustedTaskServiceErrorTarget
 } from "./task-card-service";
 
-interface TaskServiceErrorSnapshot {
-  readonly code: TaskServiceErrorCode;
-  readonly status: 400 | 404 | 409 | 422 | 500;
-  readonly category: string;
-  readonly message: string;
-  readonly userMessage: string;
-  readonly evidenceRefs: readonly string[];
-  readonly retryable: boolean;
-  readonly recommendedNextActions: readonly string[];
-  readonly stack: string | undefined;
+const trustedTaskServiceErrorLedgerViews = new WeakMap<object, TaskServiceError>();
+
+export const taskServiceErrorAuthorityTransportFamily =
+  createTrustedFailureTransportFamily<unknown>({
+    name: "CompletedTaskSnapshotAuthorityUnknownError",
+    message: "Completed task snapshot authority is temporarily unknown."
+  });
+
+export function trustedTaskServiceErrorFromFailureLedger(
+  value: unknown
+): TaskServiceError | undefined {
+  return isObjectLike(value) ? trustedTaskServiceErrorLedgerViews.get(value) : undefined;
 }
 
-interface TaskServiceErrorObservation {
-  readonly snapshot: TaskServiceErrorSnapshot | undefined;
-  readonly failures: readonly unknown[];
+export function taskServiceErrorAtBoundary(
+  value: unknown
+): TaskServiceError | undefined {
+  const trusted = trustedTaskServiceErrorFromFailureLedger(value);
+  if (trusted) return trusted;
+  if (failureLedger(value)) return undefined;
+  const transportProjection = taskServiceErrorAuthorityTransportFamily.project(value);
+  return trustedTaskServiceErrorTarget(value) ??
+    trustedTaskServiceErrorFromFailureLedger(transportProjection) ??
+    trustedTaskServiceErrorTarget(transportProjection);
 }
 
-export function preserveTaskServiceErrorCompensationCompatibility(
-  primary: unknown,
-  compensations: readonly unknown[],
+export function preserveTaskServiceErrorFailureEntries(
+  primary: FailureFoldEntry,
+  compensations: readonly FailureFoldEntry[],
   aggregateMessage: string
 ): unknown {
-  const semanticCandidate = semanticPrimaryError(primary);
-  const observation = observeTaskServiceError(semanticCandidate);
-  const preserved = preserveThrownValueAndCompensationErrors(
+  const trustedDirectPrimary = trustedTaskServiceErrorForFoldPrimary(primary);
+  const preserved = mergeTrustedFailureOccurrences(
     primary,
     compensations,
     aggregateMessage,
-    observation.failures
+    trustedDirectPrimary ? { classify: () => "error" } : undefined
   );
-  const semanticPrimary = semanticPrimaryError(preserved);
-  if (
-    observation.snapshot &&
-    semanticPrimary === semanticCandidate &&
-    preserved !== semanticPrimary
-  ) {
-    return taskServiceErrorWithCompensationEnvelope(
-      observation.snapshot,
-      preserved
-    );
+  if (trustedDirectPrimary && isObjectLike(preserved)) {
+    trustedTaskServiceErrorLedgerViews.set(preserved, trustedDirectPrimary);
+    return preserved;
   }
   return preserved;
 }
 
-function taskServiceErrorWithCompensationEnvelope(
-  primary: TaskServiceErrorSnapshot,
-  compensationEnvelope: Error
-): TaskServiceError {
-  const compatibleError = new TaskServiceError({
-    code: primary.code,
-    status: primary.status,
-    category: primary.category,
-    message: primary.message,
-    userMessage: primary.userMessage,
-    evidenceRefs: [...primary.evidenceRefs],
-    retryable: primary.retryable,
-    recommendedNextActions: [...primary.recommendedNextActions]
-  });
-  compatibleError.stack = primary.stack;
-  compatibleError.cause = compensationEnvelope;
-  registerPreservedErrorCompatibility(compatibleError, compensationEnvelope);
-  return compatibleError;
+export function preserveTaskServiceErrorFailureVector(
+  primary: FailureFoldEntry,
+  entries: readonly FailureFoldEntry[],
+  aggregateMessage: string
+): unknown {
+  const trustedDirectPrimary = trustedTaskServiceErrorForFoldPrimary(primary);
+  const preserved = mergeTrustedFailureOccurrenceVector(
+    primary,
+    entries,
+    aggregateMessage,
+    trustedDirectPrimary ? { classify: () => "error" } : undefined
+  );
+  if (trustedDirectPrimary && isObjectLike(preserved)) {
+    trustedTaskServiceErrorLedgerViews.set(preserved, trustedDirectPrimary);
+  }
+  return preserved;
 }
 
-function observeTaskServiceError(value: unknown): TaskServiceErrorObservation {
-  if (value === undefined) return { snapshot: undefined, failures: [] };
-  try {
-    if (!(value instanceof TaskServiceError)) {
-      return { snapshot: undefined, failures: [] };
-    }
-    return {
-      snapshot: {
-        code: value.code,
-        status: value.status,
-        category: value.category,
-        message: value.message,
-        userMessage: value.userMessage,
-        evidenceRefs: [...value.evidenceRefs],
-        retryable: value.retryable,
-        recommendedNextActions: [...value.recommendedNextActions],
-        stack: value.stack
-      },
-      failures: []
-    };
-  } catch (error) {
-    return { snapshot: undefined, failures: [error] };
-  }
+function trustedTaskServiceErrorForFoldPrimary(
+  primary: FailureFoldEntry
+): TaskServiceError | undefined {
+  const entryValue = failureFoldEntryValue(primary);
+  const semanticPrimary = failureFoldEntrySemanticPrimaryValue(primary);
+  return trustedTaskServiceErrorFromPrivateAuthority(entryValue) ??
+    trustedTaskServiceErrorFromPrivateAuthority(semanticPrimary);
+}
+
+function trustedTaskServiceErrorFromPrivateAuthority(
+  value: unknown
+): TaskServiceError | undefined {
+  const projection = taskServiceErrorAuthorityTransportFamily.project(value);
+  return trustedTaskServiceErrorFromFailureLedger(value) ??
+    trustedTaskServiceErrorTarget(value) ??
+    trustedTaskServiceErrorFromFailureLedger(projection) ??
+    trustedTaskServiceErrorTarget(projection);
+}
+
+function isObjectLike(value: unknown): value is object {
+  return (typeof value === "object" && value !== null) || typeof value === "function";
 }

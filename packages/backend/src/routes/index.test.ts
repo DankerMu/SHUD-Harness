@@ -4,6 +4,7 @@ import { writeFileSync, type BigIntStats } from "node:fs";
 import {
   access,
   link,
+  lstat,
   readdir,
   mkdir,
   mkdtemp,
@@ -32,7 +33,9 @@ import {
   createTaskCardService,
   idempotencyRecordEvidenceRef,
   idempotencyRecordFileName,
+  semanticPrimaryValue,
   sha256Hex,
+  taskServiceErrorAtBoundary,
   type CompletedIdempotencyRecordMutationAuthority,
   type CreateTaskInput,
   type TaskCard,
@@ -53,6 +56,12 @@ import {
 } from "../../../core/src/domain/services/workspace-record-store";
 import {
   PreservedErrorCompensationEnvelope,
+  captureFailureOccurrence,
+  failureEvents,
+  failureLedger,
+  mergeTrustedFailureOccurrences,
+  orderedDistinctCompensationFailures,
+  orderedDistinctFailures,
   semanticPrimaryError
 } from "../../../core/src/domain/services/compensation-error-preservation";
 
@@ -6622,11 +6631,15 @@ describe("backend workspace and health routes", () => {
       ts.ScriptKind.TS
     );
     expect(sourceFunctionText(routeSource, "observeTaskSnapshotBindsRequest")).toContain(
-      "preserveTaskServiceErrorCompensationCompatibility"
+      "preserveTaskServiceErrorFailureEntries"
     );
     expect(sourceFunctionText(routeSource, "preservePrimaryFailure")).toContain(
+      "preserveTaskServiceErrorFailureEntries"
+    );
+    expect(routeSourceText).not.toContain(
       "preserveTaskServiceErrorCompensationCompatibility"
     );
+    expect(routeSourceText).not.toContain("preserveTaskServiceErrorCompensationValues");
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const idempotencyKey = "task:create:r28-frozen-semantic-error";
@@ -6705,8 +6718,10 @@ describe("backend workspace and health routes", () => {
     expect(Object.getOwnPropertyDescriptor(semanticFailure, "cause")).toEqual(
       originalCauseDescriptor
     );
-    expect(primaryCauseReads).toBe(1);
-    expect(reconciliationCauseReads).toBeLessThanOrEqual(1);
+    // Round 2 requires each independent fold to freshly observe the retained
+    // semantic graph instead of reusing a stale nested observation snapshot.
+    expect(primaryCauseReads).toBe(2);
+    expect(reconciliationCauseReads).toBe(2);
   });
 
   test("S30-P62-03/S31-P62-03/S32-P62-03 pre-completion primary dominates recovered-authority settlement", async () => {
@@ -6893,6 +6908,17 @@ describe("backend workspace and health routes", () => {
     expect(capturedAuthority).toBeDefined();
     expect(semanticPrimaryError(routedError)).toBe(cleanupPrimary);
     expect(countErrorGraphIdentity(routedError, quarantineCompensation)).toBe(1);
+    expect(
+      failureEvents(routedError)
+        .filter(
+          (event) =>
+            event.value === cleanupPrimary || event.value === quarantineCompensation
+        )
+        .map(({ phase, value }) => ({ phase, value }))
+    ).toEqual([
+      { phase: "final_release", value: cleanupPrimary },
+      { phase: "final_release", value: quarantineCompensation }
+    ]);
     // Complete ordered compensation identity vector with multiplicity.
     expectOrderedPreservedCompensationVector(routedError, [quarantineCompensation]);
     expect(record?.status).toBe("failed");
@@ -6988,13 +7014,30 @@ describe("backend workspace and health routes", () => {
     expect(body.error.recommended_next_actions).toEqual(primary.recommendedNextActions);
     expect(body.error.message).not.toBe("Unexpected backend route failure.");
     expect(cancellationAttempts).toBe(1);
-    expect(routedError).toBeInstanceOf(TaskServiceError);
     expect(routedError).not.toBe(primary);
+    expect(failureLedger(routedError)).toBeDefined();
     expect(semanticPrimaryError(routedError)).toBe(primary);
+    expect(
+      failureEvents(routedError)
+        .filter((event) => event.value === primary)
+        .map((event) => event.phase)
+    ).toEqual(["body"]);
+    expect(
+      failureEvents(routedError)
+        .filter((event) => event.value === cancellationFailure)
+        .map((event) => event.phase)
+    ).toEqual(["final_release"]);
+    expect(failureEvents(routedError).map((event) => event.phase)).toEqual([
+      "body",
+      "final_release",
+      "observation",
+      "body",
+      "observation"
+    ]);
     expect(errorGraphContainsIdentity(routedError, cancellationFailure)).toBe(true);
     expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
-    expect(primaryCauseReads).toBeLessThanOrEqual(1);
-    expect(cancellationCauseReads).toBeLessThanOrEqual(1);
+    expect(primaryCauseReads).toBe(2);
+    expect(cancellationCauseReads).toBe(2);
   });
 
   test("S31-P62-05 initial publication primary dominates failed-record recovery", async () => {
@@ -7034,10 +7077,86 @@ describe("backend workspace and health routes", () => {
     const body = (await response.json()) as ApiErrorResponse;
     expect(response.status).toBe(primary.status);
     expect(body.error.message).toBe(primary.message);
-    expect(routedError).toBeInstanceOf(TaskServiceError);
+    expect(failureLedger(routedError)).toBeDefined();
     expect(semanticPrimaryError(routedError)).toBe(primary);
+    expect(failureEvents(routedError).map((event) => event.phase)).toEqual([
+      "body",
+      "settlement"
+    ]);
+    expect(failureEvents(routedError).map((event) => event.value)).toEqual([
+      primary,
+      recovery
+    ]);
+    const eventOrders = failureEvents(routedError).map((event) => event.order);
+    expect(new Set(eventOrders).size).toBe(eventOrders.length);
+    expect(eventOrders).toEqual([...eventOrders].sort((left, right) => left - right));
     expect(errorGraphContainsIdentity(routedError, recovery)).toBe(true);
     expect(countErrorGraphIdentity(routedError, recovery)).toBe(1);
+  });
+
+  test("Child A1 keeps final release authoritative behind an observation tail", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const initialPrimary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "Child A1 initial publication failure.",
+      userMessage: "The initial task publication failed.",
+      evidenceRefs: ["child-a1.initial-primary"],
+      retryable: true,
+      recommendedNextActions: ["Inspect the failure ledger."]
+    });
+    const observationFailure = new Error("Child A1 observation tail.");
+    const classificationPrimary = new Error("Child A1 authority classification failure.");
+    Object.defineProperty(classificationPrimary, "cause", {
+      get() {
+        throw observationFailure;
+      }
+    });
+    let classificationCarrier: unknown;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: (error) => { routedError = error; },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          createTaskForIdempotency: async () => { throw initialPrimary; }
+        };
+      },
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          consumeCompletedRecord: async () => {
+            classificationCarrier = mergeTrustedFailureOccurrences(
+              captureFailureOccurrence("body", classificationPrimary),
+              [captureFailureOccurrence("final_release", new Error("classification release"))],
+              "classification failure with terminal release"
+            );
+            expect(failureEvents(classificationCarrier).map((event) => event.phase)).toEqual([
+              "body",
+              "final_release",
+              "observation"
+            ]);
+            throw classificationCarrier;
+          }
+        } as typeof service;
+      }
+    });
+
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": "task:create:child-a1-observation-tail"
+    });
+    expect(response.status).toBe(initialPrimary.status);
+    expect(taskServiceErrorAtBoundary(routedError)).toBe(initialPrimary);
+    expect(
+      failureEvents(routedError)
+        .filter((event) => event.value === classificationCarrier)
+        .map((event) => event.phase)
+    ).toEqual(["final_release"]);
   });
 
   test("S31-P62-06 earlier caller primary dominates invalid authority and post-rollback recovery", async () => {
@@ -7119,7 +7238,7 @@ describe("backend workspace and health routes", () => {
     expect(response.status).toBe(completionPrimary.status);
     expect(body.error.message).toBe(completionPrimary.message);
     expect(recoveryCalls).toBe(1);
-    expect(routedError).toBeInstanceOf(TaskServiceError);
+    expect(failureLedger(routedError)).toBeDefined();
     expect(semanticPrimaryError(routedError)).toBe(completionPrimary);
     expect(errorGraphContainsIdentity(routedError, recovery)).toBe(true);
     expect(countErrorGraphIdentity(routedError, recovery)).toBe(1);
@@ -7229,6 +7348,8 @@ describe("backend workspace and health routes", () => {
     delete snapshot.task_card;
     await writeFile(snapshotPath, `${JSON.stringify(snapshot)}\n`);
     const cancellationFailure = new Error("S32 repairable authority cancellation");
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
     let repairablePrimary: TaskServiceError | undefined;
     let routedError: unknown;
     const app = createBackendApi({
@@ -7262,6 +7383,17 @@ describe("backend workspace and health routes", () => {
     expect(body.error.message).toBe(repairablePrimary!.message);
     expect(semanticPrimaryError(routedError)).toBe(repairablePrimary);
     expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
+    expect(
+      failureEvents(routedError)
+        .filter(
+          (event) =>
+            event.value === repairablePrimary || event.value === cancellationFailure
+        )
+        .map(({ phase, value }) => ({ phase, value }))
+    ).toEqual([
+      { phase: "body", value: repairablePrimary },
+      { phase: "final_release", value: cancellationFailure }
+    ]);
     // Complete ordered compensation identity vector with multiplicity: the
     // repairable primary's observed cause precedes the authority-cancellation
     // compensation.
@@ -7269,6 +7401,53 @@ describe("backend workspace and health routes", () => {
       ...(repairablePrimary!.cause === undefined ? [] : [repairablePrimary!.cause]),
       cancellationFailure
     ]);
+    const eventOrders = failureEvents(routedError).map((event) => event.order);
+    expect(new Set(eventOrders).size).toBe(eventOrders.length);
+    expect(eventOrders).toEqual([...eventOrders].sort((left, right) => left - right));
+    expect(
+      await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+        "task",
+        idempotencyKey
+      )
+    ).toMatchObject({ status: "completed", result_ref: task.task_id });
+    expect(JSON.parse(await readFile(snapshotPath, "utf8"))).toEqual(snapshot);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("backend resource-release catches are final-release producers", async () => {
+    const sourceText = await readFile(new URL("./index.ts", import.meta.url), "utf8");
+    const source = ts.createSourceFile(
+      "index.ts",
+      sourceText,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS
+    );
+    const reconciliation = sourceFunctionText(
+      source,
+      "reconcileLocalTaskAfterCompletionFailure"
+    );
+    const cleanup = sourceFunctionText(source, "cleanupLocalTaskCompletionObservation");
+    const rejected = sourceFunctionText(source, "settleRejectedCompletedTaskAuthority");
+    const invalidation = sourceFunctionText(
+      source,
+      "invalidateCompletedTaskAuthorityWithRecovery"
+    );
+
+    expect(reconciliation).toContain(
+      'cancellationEntries.push(captureFailureFoldEntry("final_release", error))'
+    );
+    expect(cleanup).toContain(
+      'const cleanupEntry = captureFailureFoldEntry("final_release", error)'
+    );
+    expect(rejected).not.toContain('captureFailureFoldEntry("settlement", settlementError)');
+    expect(invalidation).toContain(
+      'entries.push(captureFailureFoldEntry("final_release", settlementError))'
+    );
+    expect(sourceText).not.toContain(
+      'captureFailureFoldEntry("settlement", cancellationError)'
+    );
   });
 
   test("S33-P62-01 owner invalid-completed preserves same-semantic physical B behind exact authority", async () => {
@@ -7931,11 +8110,21 @@ describe("backend workspace and health routes", () => {
     expect(body.error.message).toBe(typedPrimary.message);
     expect(body.error.evidence_refs).toEqual(typedPrimary.evidenceRefs);
     expect(body.error.message).not.toBe("Unexpected backend route failure.");
-    const unknownAuthorityError = (
-      routedError as { authorityError?: unknown } | undefined
-    )?.authorityError;
-    expect(semanticPrimaryError(unknownAuthorityError)).toBe(typedPrimary);
-    expectOrderedPreservedCompensationVector(unknownAuthorityError, [releaseFailure]);
+    expect(taskServiceErrorAtBoundary(routedError)).toBe(typedPrimary);
+    expectOrderedPreservedCompensationVector(routedError, [releaseFailure]);
+    const physicalEvents = failureEvents(routedError);
+    expect(taskServiceErrorAtBoundary(physicalEvents[0]?.value)).toBe(typedPrimary);
+    expect(physicalEvents[1]?.value).toBe(releaseFailure);
+    expect(physicalEvents.map((event) => event.phase)).toEqual([
+      "body",
+      "final_release"
+    ]);
+    expect(physicalEvents.map((event) => event.order)).toEqual(
+      physicalEvents.map((event) => event.order).sort((left, right) => left - right)
+    );
+    expect(new Set(physicalEvents.map((event) => event.order)).size).toBe(
+      physicalEvents.length
+    );
     expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(1);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
@@ -7952,12 +8141,101 @@ describe("backend workspace and health routes", () => {
     const counterfactualBody = (await counterfactual.json()) as ApiErrorResponse;
     expect(counterfactual.status).toBe(typedPrimary.status);
     expect(counterfactualBody.error.message).toBe(typedPrimary.message);
-    expect(
-      semanticPrimaryError(
-        (routedError as { authorityError?: unknown } | undefined)?.authorityError
-      )
-    ).toBe(typedPrimary);
+    expect(taskServiceErrorAtBoundary(routedError)).toBe(typedPrimary);
+    // Reusing the raw typed primary does not import an earlier operation's
+    // carrier. The release-success counterfactual has no release occurrence.
     expect(countErrorGraphIdentity(routedError, releaseFailure)).toBe(0);
+  });
+
+  test("Phase 6.2 bounds cyclic and fresh prototype proxies through backend finalizer and serializer", async () => {
+    const backendIndexPath = join(import.meta.dir, "index.ts");
+    const coreIndexPath = resolve(import.meta.dir, "../../../core/src/index.ts");
+    const script = [
+      'import { mkdtemp, realpath, rm } from "node:fs/promises";',
+      'import { tmpdir } from "node:os";',
+      'import { join } from "node:path";',
+      `import { createBackendApi } from ${JSON.stringify(backendIndexPath)};`,
+      `import { createIdempotencyRecordService, createTaskCardService } from ${JSON.stringify(coreIndexPath)};`,
+      'const body = {',
+      '  type: "engineering",',
+      '  title: "Phase 6.2 bounded proxy",',
+      '  question_or_goal: "Bound real backend consumers.",',
+      '  inference_budget: { mode: "normal" }',
+      '};',
+      'function hostile(kind) {',
+      '  if (kind === "cyclic") {',
+      '    let proxy;',
+      '    proxy = new Proxy(new Error("cyclic proxy"), { getPrototypeOf: () => proxy });',
+      '    return proxy;',
+      '  }',
+      '  const fresh = () => new Proxy(new Error("fresh proxy"), { getPrototypeOf: () => fresh() });',
+      '  return fresh();',
+      '}',
+      'async function post(app, key) {',
+      '  const headers = { "content-type": "application/json" };',
+      '  if (key) headers["Idempotency-Key"] = key;',
+      '  return await app.request("/api/tasks", { method: "POST", headers, body: JSON.stringify(body) });',
+      '}',
+      'for (const kind of ["cyclic", "fresh"]) {',
+      '  const finalizerRoot = await realpath(await mkdtemp(join(tmpdir(), "phase62-finalizer-")));',
+      '  try {',
+      '    const primary = hostile(kind);',
+      '    let cancellations = 0;',
+      '    let consumeCalls = 0;',
+      '    const app = createBackendApi({',
+      '      workspaceRoot: join(finalizerRoot, "workspace"),',
+      '      taskIdFactory: () => `TASK-phase62-finalizer-${kind}` ,',
+      '      idempotencyServiceFactory: (options) => {',
+      '        const service = createIdempotencyRecordService(options);',
+      '        return { ...service, consumeCompletedRecord: async () => { consumeCalls += 1; throw primary; } };',
+      '      },',
+      '      taskServiceFactory: (options) => {',
+      '        const service = createTaskCardService(options);',
+      '        return { ...service, cancelTaskSnapshotCleanupObservation: async (observation) => {',
+      '          cancellations += 1;',
+      '          await service.cancelTaskSnapshotCleanupObservation(observation);',
+      '          throw new Error(`phase62 cancellation ${kind}`);',
+      '        } };',
+      '      }',
+      '    });',
+      '    const response = await post(app, `task:create:phase62-finalizer-${kind}`);',
+      '    const responseText = await response.text();',
+      '    if (response.status !== 500 || cancellations !== 1) {',
+      '      throw new Error(`finalizer ${kind} status=${response.status} cancellations=${cancellations} consumes=${consumeCalls} body=${responseText}`);',
+      '    }',
+      '  } finally {',
+      '    await rm(finalizerRoot, { recursive: true, force: true });',
+      '  }',
+      '  const serializerRoot = await realpath(await mkdtemp(join(tmpdir(), "phase62-serializer-")));',
+      '  try {',
+      '    const primary = hostile(kind);',
+      '    const app = createBackendApi({',
+      '      workspaceRoot: join(serializerRoot, "workspace"),',
+      '      taskServiceFactory: (options) => {',
+      '        const service = createTaskCardService(options);',
+      '        return { ...service, createTask: async () => { throw primary; } };',
+      '      }',
+      '    });',
+      '    const response = await post(app);',
+      '    if (response.status !== 500) throw new Error(`serializer ${kind} did not return 500`);',
+      '  } finally {',
+      '    await rm(serializerRoot, { recursive: true, force: true });',
+      '  }',
+      '}',
+      'console.log("phase62-backend-ok");'
+    ].join("\n");
+
+    const result = await runBoundedBunProbe(script, 3_000);
+    if (result.timedOut) {
+      throw new Error("backend finalizer/serializer proxy probe exceeded 3 seconds");
+    }
+    if (result.exitCode !== 0) {
+      throw new Error(
+        `backend proxy probe failed with exit ${result.exitCode}: ${result.stderr} ${result.stdout}`
+      );
+    }
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("phase62-backend-ok");
   });
 
   test("S34-P62-05 digest-mismatch accept-settlement failure preserves the typed binding primary", async () => {
@@ -8019,15 +8297,12 @@ describe("backend workspace and health routes", () => {
       "Completed idempotency result is not bound to the task create request."
     );
     expect(body.error.message).not.toBe("Unexpected backend route failure.");
-    const unknownAuthorityError = (
-      routedError as { authorityError?: unknown } | undefined
-    )?.authorityError;
-    const semanticPrimary = semanticPrimaryError(unknownAuthorityError);
+    const semanticPrimary = taskServiceErrorAtBoundary(routedError);
     expect(semanticPrimary).toBeInstanceOf(TaskServiceError);
-    expect((semanticPrimary as TaskServiceError).message).toBe(
+    expect(semanticPrimary?.message).toBe(
       "Completed idempotency result is not bound to the task create request."
     );
-    expectOrderedPreservedCompensationVector(unknownAuthorityError, [settlementFailure]);
+    expectOrderedPreservedCompensationVector(routedError, [settlementFailure]);
     expect(countErrorGraphIdentity(routedError, settlementFailure)).toBe(1);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
@@ -8100,11 +8375,8 @@ describe("backend workspace and health routes", () => {
     expect(body.error.category).toBe(typedSettlementFailure.category);
     expect(body.error.message).toBe(typedSettlementFailure.message);
     expect(body.error.message).not.toBe("Unexpected backend route failure.");
-    const unknownAuthorityError = (
-      routedError as { authorityError?: unknown } | undefined
-    )?.authorityError;
-    expect(semanticPrimaryError(unknownAuthorityError)).toBe(typedSettlementFailure);
-    const orderedVector = orderedPreservedCompensationVector(unknownAuthorityError);
+    expect(taskServiceErrorAtBoundary(routedError)).toBe(typedSettlementFailure);
+    const orderedVector = orderedPreservedCompensationVector(routedError);
     expect(orderedVector).toHaveLength(1);
     const classificationEntry = orderedVector[0];
     expect(classificationEntry).toBeInstanceOf(TaskServiceError);
@@ -8112,9 +8384,7 @@ describe("backend workspace and health routes", () => {
     expect((classificationEntry as TaskServiceError).message).toBe(
       "Completed idempotency result is not bound to the task create request."
     );
-    // The typed primary rides only the semantic-primary channel — zero
-    // occurrences in the cause/errors graph proves it was never duplicated as
-    // a compensation.
+    // The inner typed projection is private capability state, not a public graph edge.
     expect(countErrorGraphIdentity(routedError, typedSettlementFailure)).toBe(0);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
@@ -8193,11 +8463,8 @@ describe("backend workspace and health routes", () => {
     expect(selfIdenticalBody.error.message).toBe(typedFailure.message);
     expect(selfIdenticalBody.error.message).not.toBe("Unexpected backend route failure.");
     expect(countErrorGraphIdentity(routedError, typedFailure)).toBe(1);
-    const selfIdenticalAuthorityError = (
-      routedError as { authorityError?: unknown } | undefined
-    )?.authorityError;
-    expect(semanticPrimaryError(selfIdenticalAuthorityError)).toBe(typedFailure);
-    expectOrderedPreservedCompensationVector(selfIdenticalAuthorityError, []);
+    expect(taskServiceErrorAtBoundary(routedError)).toBe(typedFailure);
+    expectOrderedPreservedCompensationVector(routedError, [typedFailure]);
 
     // Distinct-error case: both failures are folded, the release failure
     // exactly once as an ordered compensation.
@@ -8211,16 +8478,11 @@ describe("backend workspace and health routes", () => {
     const distinctBody = (await distinct.json()) as ApiErrorResponse;
     expect(distinct.status).toBe(typedFailure.status);
     expect(distinctBody.error.message).toBe(typedFailure.message);
-    const distinctAuthorityError = (
-      routedError as { authorityError?: unknown } | undefined
-    )?.authorityError;
-    expect(semanticPrimaryError(distinctAuthorityError)).toBe(typedFailure);
-    expectOrderedPreservedCompensationVector(distinctAuthorityError, [
+    expect(taskServiceErrorAtBoundary(routedError)).toBe(typedFailure);
+    expectOrderedPreservedCompensationVector(routedError, [
       distinctReleaseFailure
     ]);
-    // The typed primary is transported exactly once, via the envelope's
-    // semantic-primary channel (asserted above); zero occurrences in the
-    // cause/errors graph proves it was never duplicated as a compensation.
+    // The inner typed projection is private capability state, not a public graph edge.
     expect(countErrorGraphIdentity(routedError, typedFailure)).toBe(0);
     expect(countErrorGraphIdentity(routedError, distinctReleaseFailure)).toBe(1);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
@@ -8297,14 +8559,15 @@ describe("backend workspace and health routes", () => {
     expect(body.error.message).toBe(primary.message);
     expect(body.error.message).not.toBe("Unexpected backend route failure.");
     expect(cancellations).toBe(1);
-    const unknownAuthorityError = (
-      routedError as { authorityError?: unknown } | undefined
-    )?.authorityError;
-    expect(semanticPrimaryError(unknownAuthorityError)).toBe(primary);
+    expect(taskServiceErrorAtBoundary(routedError)).toBe(primary);
     // S34-P62-09 (V33-16): exact primary identity plus the complete ordered
     // compensation identity vector, pinned at the unknown-branch fold.
-    expectOrderedPreservedCompensationVector(unknownAuthorityError, [
+    expectOrderedPreservedCompensationVector(routedError, [
       cancellationFailure
+    ]);
+    expect(failureEvents(routedError).map((event) => event.phase)).toEqual([
+      "body",
+      "final_release"
     ]);
     expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
 
@@ -8319,6 +8582,167 @@ describe("backend workspace and health routes", () => {
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(
       bindingBaseline
     );
+  });
+
+  test("Round 2 finalizer keeps undefined cancellation rejections present for fulfilled and rejected bodies", async () => {
+    for (const bodyStatus of ["fulfilled", "rejected"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const idempotencyKey = `task:create:r2-undefined-finalizer-${bodyStatus}`;
+      const taskId = `TASK-r2-undefined-finalizer-${bodyStatus}`;
+      const taskBody = validTaskCreateBody();
+      const typedPrimary = new TaskServiceError({
+        code: "record_malformed",
+        status: 409,
+        category: "idempotency_conflict",
+        message: `Round 2 ${bodyStatus} body primary.`,
+        userMessage: "The completed task could not be finalized.",
+        evidenceRefs: [`round2.finalizer.${bodyStatus}`],
+        retryable: true,
+        recommendedNextActions: ["Retry the completed task."]
+      });
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let bodyInjectionArmed = bodyStatus === "rejected";
+      let cancellationArmed = true;
+      let cancellations = 0;
+      let localTask: TaskCard | undefined;
+      let routedError: unknown;
+      const app = createBackendApi({
+        workspaceRoot,
+        taskIdFactory: () => taskId,
+        taskRouteErrorSinkForTest: (error) => { routedError = error; },
+        idempotencyServiceFactory: (options) => {
+          const service = createIdempotencyRecordService(options);
+          return {
+            ...service,
+            consumeCompletedRecord: async (input, consume) => {
+              if (bodyInjectionArmed) {
+                bodyInjectionArmed = false;
+                throw typedPrimary;
+              }
+              return await service.consumeCompletedRecord(input, async (record) => ({
+                status: "accepted" as const,
+                value: {
+                  status: "valid" as const,
+                  task: localTask!,
+                  resultRef: record.result_ref
+                }
+              }));
+            }
+          };
+        },
+        taskServiceFactory: (options) => {
+          const service = createTaskCardService(options);
+          return {
+            ...service,
+            createTaskForIdempotency: async (input) => {
+              const task = await service.createTaskForIdempotency(input);
+              localTask = task;
+              return task;
+            },
+            cancelTaskSnapshotCleanupObservation: async (observation) => {
+              await service.cancelTaskSnapshotCleanupObservation(observation);
+              if (!cancellationArmed) return;
+              cancellationArmed = false;
+              cancellations += 1;
+              throw undefined;
+            }
+          };
+        }
+      });
+
+      const response = await postTask(app, taskBody, {
+        "Idempotency-Key": idempotencyKey
+      });
+      const events = failureEvents(routedError);
+      expect(cancellations).toBe(1);
+      if (bodyStatus === "fulfilled") {
+        expect(response.status).toBe(500);
+        expect(semanticPrimaryValue(routedError)).toBeUndefined();
+        expect(events.map((event) => event.phase)).toEqual(["initial_release"]);
+        expect(events.map((event) => event.value)).toEqual([undefined]);
+      } else {
+        expect(response.status).toBe(typedPrimary.status);
+        expect(taskServiceErrorAtBoundary(routedError)).toBe(typedPrimary);
+        expect(events.map((event) => event.phase)).toEqual(["body", "final_release"]);
+        expect(events[1]?.value).toBeUndefined();
+      }
+      expect(events.map((event) => event.order)).toEqual(
+        [...events].map((event) => event.order).sort((left, right) => left - right)
+      );
+      expect(new Set(events.map((event) => event.order)).size).toBe(events.length);
+      expect(await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+        "task",
+        idempotencyKey
+      )).toMatchObject({ status: "completed", result_ref: taskId });
+      expect(await lstat(join(workspaceRoot, "tasks", taskId, "snapshot.json"))).toBeDefined();
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("Round 2 undefined authority reconciliation rejection prevents rollback and preserves completed state", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const idempotencyKey = "task:create:r2-undefined-reconciliation";
+    const taskId = "TASK-r2-undefined-reconciliation";
+    const taskBody = validTaskCreateBody();
+    const requestDigest = sha256Hex(canonicalJson({
+      ...taskBody,
+      created_by: taskBody.created_by ?? DEFAULT_TASK_CREATED_BY
+    }));
+    const observationMarker = new Error("Round 2 pre-completion observation failure.");
+    let serviceForCompletion: ReturnType<typeof createIdempotencyRecordService> | undefined;
+    let completed = false;
+    let routedError: unknown;
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const app = createBackendApi({
+      workspaceRoot,
+      taskIdFactory: () => taskId,
+      taskRouteErrorSinkForTest: (error) => { routedError = error; },
+      taskSnapshotReadHooks: {
+        beforeSnapshotOpen: async ({ laneTaskId }) => {
+          if (laneTaskId !== taskId || completed) return;
+          completed = true;
+          await serviceForCompletion!.completeRecord({
+            scope: "task",
+            key: idempotencyKey,
+            requestDigest,
+            resultRef: taskId
+          });
+          throw observationMarker;
+        }
+      },
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        serviceForCompletion = service;
+        return {
+          ...service,
+          consumeCompletedRecord: async (input, consume) => {
+            if (completed) throw undefined;
+            return await service.consumeCompletedRecord(input, consume);
+          }
+        };
+      }
+    });
+
+    const response = await postTask(app, taskBody, {
+      "Idempotency-Key": idempotencyKey
+    });
+    const events = failureEvents(routedError);
+    expect(response.status).toBe(500);
+    expect(completed).toBe(true);
+    expect(events.map((event) => event.phase)).toEqual(["body", "settlement"]);
+    expect(events[1]?.value).toBeUndefined();
+    expect(await createIdempotencyRecordService({ workspaceRoot }).getRecord(
+      "task",
+      idempotencyKey
+    )).toMatchObject({ status: "completed", result_ref: taskId });
+    expect(await lstat(join(workspaceRoot, "tasks", taskId, "snapshot.json"))).toBeDefined();
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
   test("S33-P62-04 completed-replay repairable settlement failure preserves the typed primary", async () => {
@@ -8467,17 +8891,13 @@ describe("backend workspace and health routes", () => {
     expect(response.status).toBe(consumptionPrimary.status);
     expect(body.error.category).toBe(consumptionPrimary.category);
     expect(body.error.message).toBe(consumptionPrimary.message);
-    expect(routedError).toBeInstanceOf(TaskServiceError);
+    expect(failureLedger(routedError)).toBeDefined();
     expect(semanticPrimaryError(routedError)).toBe(consumptionPrimary);
     // Exact primary identity plus the complete ordered compensation identity
     // vector with multiplicity, pinned at the inner fold's altitude.
     expectOrderedPreservedCompensationVector(routedError, [cancellationFailure]);
     expect(countErrorGraphIdentity(routedError, cancellationFailure)).toBe(1);
-    const envelope = (routedError as Error).cause;
-    expect(envelope).toBeInstanceOf(PreservedErrorCompensationEnvelope);
-    expect(((envelope as PreservedErrorCompensationEnvelope).cause as AggregateError).message).toBe(
-      "Completed task consumption and local observation cancellation both failed."
-    );
+    expect(failureLedger(routedError)).toBeDefined();
 
     // The durable outcome is intact: the real completed record replays the
     // created task once the injected consumption denial clears.
@@ -9770,6 +10190,9 @@ function errorGraphContainsIdentity(
   target: unknown,
   seen = new Set<object>()
 ): boolean {
+  if (failureLedger(root)) {
+    return orderedDistinctFailures(root).some((value) => Object.is(value, target));
+  }
   if (root === target) return true;
   if ((typeof root !== "object" && typeof root !== "function") || root === null) {
     return false;
@@ -9793,6 +10216,11 @@ function errorGraphContainsIdentity(
 }
 
 function orderedPreservedCompensationVector(error: unknown): readonly unknown[] {
+  if (failureLedger(error)) {
+    return orderedDistinctCompensationFailures(error).filter(
+      (value) => failureLedger(value) === undefined
+    );
+  }
   const envelope =
     error instanceof PreservedErrorCompensationEnvelope
       ? error
@@ -9820,6 +10248,9 @@ function countErrorGraphIdentity(
   target: unknown,
   seen = new Set<object>()
 ): number {
+  if (failureLedger(root)) {
+    return orderedDistinctFailures(root).filter((value) => Object.is(value, target)).length;
+  }
   let count = root === target ? 1 : 0;
   if ((typeof root !== "object" && typeof root !== "function") || root === null) {
     return count;
@@ -9947,6 +10378,42 @@ function parseApiRequestLogLine(line: string): ApiRequestLogLine {
   expect(typeof parsed.duration_ms).toBe("number");
 
   return parsed;
+}
+
+async function runBoundedBunProbe(
+  script: string,
+  timeoutMs: number
+): Promise<Readonly<{
+  timedOut: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}>> {
+  const child = Bun.spawn([process.execPath, "-e", script], {
+    cwd: resolve(import.meta.dir, "../../../.."),
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    child.exited.then((exitCode) => ({ timedOut: false as const, exitCode })),
+    new Promise<{ timedOut: true; exitCode: null }>((resolveTimeout) => {
+      timer = setTimeout(
+        () => resolveTimeout({ timedOut: true, exitCode: null }),
+        timeoutMs
+      );
+    })
+  ]);
+  if (timer) clearTimeout(timer);
+  if (outcome.timedOut) {
+    child.kill(9);
+    await child.exited;
+  }
+  const [stdout, stderr] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text()
+  ]);
+  return Object.freeze({ ...outcome, stdout, stderr });
 }
 
 async function timeoutAfter(milliseconds: number, message: string): Promise<never> {

@@ -1,0 +1,68 @@
+import { describe, expect, test } from "bun:test";
+import {
+  captureFailureOccurrence,
+  failureGraphNodes,
+  failureLedger,
+  mergeTrustedFailureOccurrences,
+  semanticPrimaryValue
+} from "../../../../../packages/core/src/domain/services/compensation-error-preservation";
+
+describe("Round 2 occurrence-ledger diagnosis", () => {
+  test("independent nested fold rereads the current mutable cause", () => {
+    const firstCause = new Error("Round 2 stale nested cause");
+    const secondCause = new Error("Round 2 current nested cause");
+    const nestedPrimary = new Error("Round 2 mutable nested primary");
+    nestedPrimary.cause = firstCause;
+    const nested = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", nestedPrimary),
+      [],
+      "Round 2 nested seed"
+    );
+
+    nestedPrimary.cause = secondCause;
+    const outerPrimary = new Error("Round 2 independent outer primary");
+    const folded = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", outerPrimary),
+      [captureFailureOccurrence("settlement", nested)],
+      "Round 2 independent nested fold"
+    );
+
+    const currentNestedNode = failureGraphNodes(folded).find(
+      (node) => node.value === nestedPrimary
+    );
+    expect(currentNestedNode).toBeDefined();
+    expect(
+      currentNestedNode!.edges
+        .filter((edge) => edge.kind === "cause")
+        .map((edge) => edge.target)
+    ).toEqual([secondCause]);
+    expect(failureGraphNodes(folded).some((node) => node.value === firstCause)).toBe(false);
+    expect(failureGraphNodes(folded).some((node) => node.value === secondCause)).toBe(true);
+  });
+
+  test("25K cause chain is iterative, bounded, and retains its primary ledger", () => {
+    const primary = causeChain(25_001);
+    let folded: unknown;
+    expect(() => {
+      folded = mergeTrustedFailureOccurrences(
+        captureFailureOccurrence("body", primary),
+        [],
+        "Round 2 deep cause chain"
+      );
+    }).not.toThrow();
+
+    expect(semanticPrimaryValue(folded)).toBe(primary);
+    expect(failureLedger(folded)).toBeDefined();
+  });
+});
+
+function causeChain(count: number): Error {
+  const root = new Error("Round 2 cause 0");
+  let cursor = root;
+  for (let index = 1; index < count; index += 1) {
+    const next = new Error(`Round 2 cause ${index}`);
+    cursor.cause = next;
+    cursor = next;
+  }
+  return root;
+}

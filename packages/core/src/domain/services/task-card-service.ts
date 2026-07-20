@@ -11,8 +11,19 @@ import {
   TaskTypeSchema,
   type TaskCard
 } from "../schemas/task";
+import {
+  captureFailureFoldEntry,
+  failureFoldEntryValue,
+  failureLedger,
+  isTrustedFailureOccurrence,
+  semanticPrimaryError,
+  type FailureFoldEntry
+} from "./compensation-error-preservation";
 import { isPathInsideBoundary } from "./workspace-path-safety";
-import { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
+import {
+  preserveTaskServiceErrorFailureEntries,
+  taskServiceErrorAtBoundary
+} from "./task-service-error-compensation";
 import {
   readDurableSingleLinkFile,
   type DurableSingleLinkReadFailureReason
@@ -167,6 +178,9 @@ export interface TaskServiceErrorOptions {
   recommendedNextActions?: string[];
 }
 
+const trustedTaskServiceErrors = new WeakSet<TaskServiceError>();
+const trustedTaskServiceErrorProxyTargets = new WeakMap<object, TaskServiceError>();
+
 export class TaskServiceError extends Error {
   readonly code: TaskServiceErrorCode;
   readonly status: 400 | 404 | 409 | 422 | 500;
@@ -188,7 +202,32 @@ export class TaskServiceError extends Error {
     this.recommendedNextActions = options.recommendedNextActions ?? [
       "Inspect the workspace task snapshot state before retrying."
     ];
+    trustedTaskServiceErrors.add(this);
   }
+}
+
+export function trustedTaskServiceErrorTarget(
+  value: unknown
+): TaskServiceError | undefined {
+  if ((typeof value !== "object" || value === null) && typeof value !== "function") {
+    return undefined;
+  }
+  if (trustedTaskServiceErrors.has(value as TaskServiceError)) {
+    return value as TaskServiceError;
+  }
+  return trustedTaskServiceErrorProxyTargets.get(value);
+}
+
+export function createTrustedTaskServiceErrorProxy<T extends TaskServiceError>(
+  target: T,
+  handler: ProxyHandler<T> = {}
+): T {
+  if (!trustedTaskServiceErrors.has(target)) {
+    throw new TypeError("A trusted TaskServiceError Proxy requires a constructed TaskServiceError target.");
+  }
+  const proxy = new Proxy(target, handler);
+  trustedTaskServiceErrorProxyTargets.set(proxy, target);
+  return proxy;
 }
 
 export interface TaskCardServiceOptions {
@@ -382,7 +421,8 @@ async function retainTaskSnapshotPublicationAuthority(
       evidenceRef
     );
   } catch (error) {
-    const compensationErrors: unknown[] = [];
+    const primaryOccurrence = captureFailureFoldEntry("body", error);
+    const compensationEntries: FailureFoldEntry[] = [];
     try {
       await conditionalDeletePublishedJsonRecordGenerationWithCleanupPermit(
         cleanupPermit,
@@ -392,21 +432,25 @@ async function retainTaskSnapshotPublicationAuthority(
         { kind: "record", expected: expectedSnapshot, matches: () => true }
       );
     } catch (cleanupError) {
-      compensationErrors.push(cleanupError);
+      compensationEntries.push(
+        captureFailureFoldEntry("final_release", cleanupError)
+      );
     }
     try {
       await removeEmptyTaskLaneAfterRollback(workspaceRoot, taskId);
     } catch (cleanupError) {
-      compensationErrors.push(cleanupError);
+      compensationEntries.push(
+        captureFailureFoldEntry("final_release", cleanupError)
+      );
     }
-    if (compensationErrors.length > 0) {
+    if (compensationEntries.length > 0) {
       // Root C (V33-05 residue): fold through the preservation protocol so no
       // future fold above this site can adopt a bare AggregateError as the
       // semantic primary.
-      throw preserveTaskServiceErrorCompensationCompatibility(
-        error,
-        compensationErrors,
-        "Task snapshot publication authority transfer and compensation failed."
+      throw preserveTaskServiceErrorFailureEntries(
+        primaryOccurrence,
+        compensationEntries,
+        "Task snapshot publication authority transfer and compensation failed.",
       );
     }
     throw error;
@@ -429,13 +473,24 @@ async function retainTaskSnapshotPublicationAuthority(
 
 const TaskSnapshotCleanupRawSchema = z.unknown();
 
-function foldTaskSnapshotSettlementErrors(errors: readonly unknown[]): Error | undefined {
-  if (errors.length === 0) return undefined;
-  if (errors.length === 1 && errors[0] instanceof Error) return errors[0];
-  return new AggregateError(
-    [...errors],
+function foldTaskSnapshotSettlementErrors(
+  entries: readonly FailureFoldEntry[]
+): Error | undefined {
+  if (entries.length === 0) return undefined;
+  if (entries.length === 1 && isTrustedFailureOccurrence(entries[0])) {
+    const value = entries[0].value;
+    const exactError = semanticPrimaryError(value);
+    if (exactError !== undefined && exactError === value) return exactError;
+  }
+  return preserveTaskServiceErrorFailureEntries(
+    entries[0]!,
+    entries.slice(1),
     "Task snapshot exact settlement and bounded cache rehydration failed."
-  );
+  ) as Error;
+}
+
+function presentWorkspaceErrorCause(cause: Error | undefined): [] | [Error] {
+  return cause === undefined ? [] : [cause];
 }
 
 function copyTaskCard(task: TaskCard): TaskCard {
@@ -651,7 +706,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
     initialClaim: TaskCardCacheClaim,
     initialTask: { readonly canonical: TaskCard; readonly validatedRaw: TaskCard }
   ): Promise<{ readonly canonical: TaskCard; readonly validatedRaw: TaskCard }> {
-    const reobservationErrors: unknown[] = [];
+    const reobservationErrors: FailureFoldEntry[] = [];
     const initialSettlement = taskCache.settleSet(initialClaim, initialTask.canonical);
     if (
       initialSettlement.status === "published" ||
@@ -689,7 +744,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         // Root C (V33-12): the read-attempt carrier is itself an Error whose
         // `cause` is the semantic reason, so the fold below stays transparent
         // while the carrier keeps its `.reason` transport channel.
-        reobservationErrors.push(error);
+        reobservationErrors.push(captureFailureFoldEntry("settlement", error));
       }
     }
 
@@ -698,7 +753,9 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       "Failed to publish a durably observed task into the local cache.",
       "The task snapshot could not be made locally visible safely.",
       [taskSnapshotEvidenceRef(taskId), "snapshot.bytes"],
-      foldTaskSnapshotSettlementErrors(reobservationErrors)
+      ...presentWorkspaceErrorCause(
+        foldTaskSnapshotSettlementErrors(reobservationErrors)
+      )
     );
   }
 
@@ -967,19 +1024,24 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           }
         );
       } catch (error) {
-        if (!(error instanceof TaskServiceError)) {
+        const validationEntry = captureFailureFoldEntry("body", error);
+        const taskServiceError = taskServiceErrorAtBoundary(error);
+        if (!taskServiceError) {
           try {
             await cancelWorkspaceRecordCleanupPermit(observed.cleanupPermit);
           } catch (cancellationError) {
-            throw foldTaskSnapshotSettlementErrors([error, cancellationError]);
+            throw foldTaskSnapshotSettlementErrors([
+              validationEntry,
+              captureFailureFoldEntry("final_release", cancellationError)
+            ]);
           }
           throw error;
         }
         return registerCleanupObservation(
           {
-            status: error.code === "task_snapshot_missing_card" ? "repairable" : "invalid",
+            status: taskServiceError.code === "task_snapshot_missing_card" ? "repairable" : "invalid",
             taskId,
-            error
+            error: taskServiceError
           },
           {
             ...commonState,
@@ -1060,6 +1122,9 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
     if (settlement.status === "current") {
       return copyTaskCard(settlement.task);
     }
+    const settlementEntry = settlement.status === "failed"
+      ? captureFailureFoldEntry("settlement", settlement.error)
+      : undefined;
 
     const rehydrationErrors = await boundedlyRehydrateTaskSnapshotCache(
       observation.taskId
@@ -1070,10 +1135,12 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         "Failed to settle the exact observed task snapshot generation.",
         "The task snapshot could not be accepted safely.",
         [taskSnapshotEvidenceRef(observation.taskId), "snapshot.bytes"],
-        foldTaskSnapshotSettlementErrors([
-          settlement.error,
-          ...rehydrationErrors
-        ])
+        ...presentWorkspaceErrorCause(
+          foldTaskSnapshotSettlementErrors([
+            settlementEntry!,
+            ...rehydrationErrors
+          ])
+        )
       );
     }
 
@@ -1082,7 +1149,9 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       "Observed task snapshot changed before exact cache settlement.",
       "The task snapshot changed before it could be accepted safely.",
       [taskSnapshotEvidenceRef(observation.taskId), "snapshot.bytes"],
-      foldTaskSnapshotSettlementErrors(rehydrationErrors)
+      ...presentWorkspaceErrorCause(
+        foldTaskSnapshotSettlementErrors(rehydrationErrors)
+      )
     );
   }
 
@@ -1148,15 +1217,17 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         "Failed to reconcile a lost task snapshot delete-settlement.",
         "The removed task snapshot could not be reconciled into the local cache safely.",
         [evidenceRef],
-        foldTaskSnapshotSettlementErrors(rehydrationErrors)
+        ...presentWorkspaceErrorCause(
+          foldTaskSnapshotSettlementErrors(rehydrationErrors)
+        )
       );
     }
   }
 
   async function boundedlyRehydrateTaskSnapshotCache(
     taskId: string
-  ): Promise<unknown[]> {
-    const errors: unknown[] = [];
+  ): Promise<FailureFoldEntry[]> {
+    const errors: FailureFoldEntry[] = [];
     for (
       let attempt = 0;
       attempt < MAX_TASK_SNAPSHOT_CACHE_REOBSERVATIONS;
@@ -1171,19 +1242,23 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
             observation.status === "invalid" ||
             observation.status === "unknown"
           ) {
-            errors.push(observation.error);
+            errors.push(captureFailureFoldEntry("settlement", observation.error));
           }
           const ownedObservation = observation;
           observation = undefined;
-          if (ownedObservation.status === "unknown") {
-            await cancelTaskSnapshotCleanupObservationInternal(ownedObservation);
-          } else {
-            // Root B (V33-02): the rehydration loop is itself the
-            // reconciler — a nested lost delete-settlement must not recurse.
-            await rejectKnownUnavailableTaskSnapshotObservationInternal(
-              ownedObservation,
-              false
-            );
+          try {
+            if (ownedObservation.status === "unknown") {
+              await cancelTaskSnapshotCleanupObservationInternal(ownedObservation);
+            } else {
+              // Root B (V33-02): the rehydration loop is itself the
+              // reconciler — a nested lost delete-settlement must not recurse.
+              await rejectKnownUnavailableTaskSnapshotObservationInternal(
+                ownedObservation,
+                false
+              );
+            }
+          } catch (error) {
+            errors.push(captureFailureFoldEntry("final_release", error));
           }
           return errors;
         }
@@ -1194,16 +1269,18 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           ownedObservation
         );
         if (settlement.status === "current") return errors;
-        if (settlement.status === "failed") errors.push(settlement.error);
+        if (settlement.status === "failed") {
+          errors.push(captureFailureFoldEntry("settlement", settlement.error));
+        }
       } catch (error) {
-        errors.push(error);
+        errors.push(captureFailureFoldEntry("settlement", error));
         return errors;
       } finally {
         if (observation) {
           try {
             await cancelTaskSnapshotCleanupObservationInternal(observation);
           } catch (error) {
-            errors.push(error);
+            errors.push(captureFailureFoldEntry("final_release", error));
           }
         }
       }
@@ -1276,7 +1353,9 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           "Observed task snapshot no longer satisfies its cleanup condition.",
           "The task snapshot changed before it could be cleaned up safely.",
           [state.evidenceRef],
-          foldTaskSnapshotSettlementErrors(rehydrationErrors)
+          ...presentWorkspaceErrorCause(
+            foldTaskSnapshotSettlementErrors(rehydrationErrors)
+          )
         );
       }
 
@@ -1346,10 +1425,8 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           throw error.reason;
         }
         if (!isExactTaskSnapshotContentCandidate(error)) {
-          if (
-            error instanceof TaskServiceError &&
-            error.code === "task_not_found"
-          ) {
+          const taskServiceError = taskServiceErrorAtBoundary(error);
+          if (taskServiceError?.code === "task_not_found") {
             if (taskCache.settleDelete(cacheClaim).status === "lost") {
               // Root B (V33-02): an interleaved publish won the slot epoch
               // between the durable absence observation and this settlement;
@@ -1400,7 +1477,7 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       await getTaskFromSnapshotInternal(taskId);
       return true;
     } catch (error) {
-      if (error instanceof TaskServiceError && error.code === "task_not_found") {
+      if (taskServiceErrorAtBoundary(error)?.code === "task_not_found") {
         return false;
       }
       throw error;
@@ -1443,7 +1520,11 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       let bodyOutcome:
         | { readonly status: "returned"; readonly task: TaskCard }
         | { readonly status: "retry" }
-        | { readonly status: "threw"; readonly reason: unknown };
+        | {
+            readonly status: "threw";
+            readonly reason: unknown;
+            readonly occurrence: FailureFoldEntry;
+          };
 
       try {
         const task: TaskCard = TaskCardSchema.parse({
@@ -1485,17 +1566,26 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           bodyOutcome = { status: "returned", task: returnedTask };
         }
       } catch (error) {
-        bodyOutcome = { status: "threw", reason: error };
+        bodyOutcome = {
+          status: "threw",
+          reason: error,
+          occurrence: captureFailureFoldEntry("body", error)
+        };
       }
       // Root D (V32-06): settle the descriptor close first-class and run the
       // sibling cleanups regardless of its outcome; a rejected close folds
       // into the preserved primary instead of replacing it.
-      let closeRejection: { readonly reason: unknown } | undefined;
+      let closeRejection:
+        | { readonly reason: unknown; readonly occurrence: FailureFoldEntry }
+        | undefined;
       if (publicationAuthority) {
         try {
           await publicationAuthority.pinnedFile.close();
         } catch (closeError) {
-          closeRejection = { reason: closeError };
+          closeRejection = {
+            reason: closeError,
+            occurrence: captureFailureFoldEntry("final_release", closeError)
+          };
         }
         publicationAuthority = undefined;
       }
@@ -1503,10 +1593,10 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
       reservedTaskIds.delete(taskId);
       if (bodyOutcome.status === "threw") {
         if (closeRejection) {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            bodyOutcome.reason,
-            [closeRejection.reason],
-            "Task creation and publication-authority settlement both failed."
+          throw preserveTaskServiceErrorFailureEntries(
+            bodyOutcome.occurrence,
+            [closeRejection.occurrence],
+            "Task creation and publication-authority settlement both failed.",
           );
         }
         throw bodyOutcome.reason;
@@ -1552,7 +1642,11 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
         let observation: TaskSnapshotCleanupObservation | undefined;
         let bodyOutcome:
           | { readonly status: "returned" }
-          | { readonly status: "threw"; readonly reason: unknown };
+          | {
+              readonly status: "threw";
+              readonly reason: unknown;
+              readonly occurrence: FailureFoldEntry;
+            };
         try {
           await (async (): Promise<void> => {
             observation = await observeTaskSnapshotForCleanupInternal(taskId, cacheClaim);
@@ -1594,17 +1688,26 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           })();
           bodyOutcome = { status: "returned" };
         } catch (error) {
-          bodyOutcome = { status: "threw", reason: error };
+          bodyOutcome = {
+            status: "threw",
+            reason: error,
+            occurrence: captureFailureFoldEntry("body", error)
+          };
         }
         // Root D (V32-06): settle the descriptor close first-class, run every
         // sibling cleanup regardless of its outcome, disown the authority only
         // after the close settles, and fold settlement failures around the
         // preserved primary instead of replacing it.
-        const compensations: unknown[] = [];
+        const compensationEntries: FailureFoldEntry[] = [];
         try {
           await publicationAuthority.pinnedFile.close();
         } catch (closeError) {
-          compensations.push(closeError);
+          compensationEntries.push(
+            captureFailureFoldEntry(
+              bodyOutcome.status === "threw" ? "final_release" : "initial_release",
+              closeError
+            )
+          );
         }
         idempotentPublicationAuthorities.delete(expectedTask!);
         if (observation) {
@@ -1613,27 +1716,36 @@ export function createTaskCardService(options: TaskCardServiceOptions): TaskCard
           try {
             await cancelTaskSnapshotCleanupObservationInternal(ownedObservation);
           } catch (cancellationError) {
-            compensations.push(cancellationError);
+            compensationEntries.push(
+              captureFailureFoldEntry(
+                bodyOutcome.status === "threw"
+                  ? "final_release"
+                  : compensationEntries.length === 0
+                    ? "initial_release"
+                    : "settlement",
+                cancellationError
+              )
+            );
           }
         }
         taskCache.settleCancel(cacheClaim);
         if (bodyOutcome.status === "threw") {
-          if (compensations.length > 0) {
-            throw preserveTaskServiceErrorCompensationCompatibility(
-              bodyOutcome.reason,
-              compensations,
-              "Task rollback and publication-authority settlement both failed."
+          if (compensationEntries.length > 0) {
+            throw preserveTaskServiceErrorFailureEntries(
+              bodyOutcome.occurrence,
+              compensationEntries,
+              "Task rollback and publication-authority settlement both failed.",
             );
           }
           throw bodyOutcome.reason;
         }
-        if (compensations.length > 0) {
-          throw compensations.length === 1
-            ? compensations[0]
-            : preserveTaskServiceErrorCompensationCompatibility(
-                compensations[0],
-                compensations.slice(1),
-                "Task rollback publication-authority settlement failed."
+        if (compensationEntries.length > 0) {
+          throw compensationEntries.length === 1
+            ? failureFoldEntryValue(compensationEntries[0]!)
+            : preserveTaskServiceErrorFailureEntries(
+                compensationEntries[0]!,
+                compensationEntries.slice(1),
+                "Task rollback publication-authority settlement failed.",
               );
         }
         return;
@@ -2136,7 +2248,7 @@ async function readBoundedTaskEntries(tasksRoot: string): Promise<Dirent[]> {
       entries.push(entry);
     }
   } catch (error) {
-    if (error instanceof TaskServiceError) {
+    if (taskServiceErrorAtBoundary(error)) {
       throw error;
     }
     throw workspaceError(
@@ -2233,7 +2345,9 @@ async function readTaskSnapshot(
       durableRead.reason,
       laneTaskId,
       evidenceRef,
-      durableRead.cause
+      ...(Object.prototype.hasOwnProperty.call(durableRead, "cause")
+        ? [durableRead.cause] as [unknown]
+        : [])
     );
   }
 
@@ -2267,11 +2381,12 @@ async function readTaskSnapshot(
   return validateRawTaskSnapshot(rawSnapshot, laneTaskId, evidenceRef);
 }
 
-function isExactTaskSnapshotContentCandidate(error: unknown): error is TaskServiceError {
-  return error instanceof TaskServiceError && (
-    error.code === "task_snapshot_malformed" ||
-    error.code === "task_snapshot_mismatch" ||
-    error.code === "task_snapshot_missing_card"
+function isExactTaskSnapshotContentCandidate(error: unknown): boolean {
+  const taskServiceError = taskServiceErrorAtBoundary(error);
+  return taskServiceError !== undefined && (
+    taskServiceError.code === "task_snapshot_malformed" ||
+    taskServiceError.code === "task_snapshot_mismatch" ||
+    taskServiceError.code === "task_snapshot_missing_card"
   );
 }
 
@@ -2289,7 +2404,8 @@ function markTaskSnapshotDurableReadFailure(error: TaskServiceError): TaskServic
 }
 
 function isTaskSnapshotDurableReadFailure(error: unknown): boolean {
-  return error instanceof TaskServiceError && taskSnapshotDurableReadFailures.has(error);
+  const taskServiceError = taskServiceErrorAtBoundary(error);
+  return taskServiceError !== undefined && taskSnapshotDurableReadFailures.has(taskServiceError);
 }
 
 /**
@@ -2399,7 +2515,7 @@ function taskSnapshotDurableReadError(
   reason: DurableSingleLinkReadFailureReason,
   laneTaskId: string,
   evidenceRef: string,
-  cause?: unknown
+  ...causeArguments: [] | [unknown]
 ): TaskServiceError {
   if (reason === "parent_not_safe") {
     return workspaceError(
@@ -2407,7 +2523,7 @@ function taskSnapshotDurableReadError(
       `Task lane is not a safe directory: ${laneTaskId}`,
       "A task snapshot lane is blocked by a non-directory filesystem entry.",
       [`workspace/tasks/${laneTaskId}`],
-      cause
+      ...causeArguments
     );
   }
   if (reason === "not_regular_file" || reason === "multiple_links") {
@@ -2416,7 +2532,7 @@ function taskSnapshotDurableReadError(
       "Task snapshot is not a safe regular file.",
       "A task snapshot cannot be read safely.",
       [evidenceRef],
-      cause
+      ...causeArguments
     );
   }
   if (reason === "too_large") {
@@ -2425,7 +2541,7 @@ function taskSnapshotDurableReadError(
       "Task snapshot exceeds the M1 bounded read size.",
       "A task snapshot is too large to load safely.",
       [evidenceRef],
-      cause
+      ...causeArguments
     );
   }
   if (reason === "open_failed") {
@@ -2434,7 +2550,7 @@ function taskSnapshotDurableReadError(
       "Task snapshot cannot be opened safely.",
       "A task snapshot cannot be read safely.",
       [evidenceRef],
-      cause
+      ...causeArguments
     ));
   }
   if (reason === "read_failed") {
@@ -2443,7 +2559,7 @@ function taskSnapshotDurableReadError(
       "Task snapshot cannot be read safely.",
       "A task snapshot cannot be read safely.",
       [evidenceRef],
-      cause
+      ...causeArguments
     ));
   }
 
@@ -2452,7 +2568,7 @@ function taskSnapshotDurableReadError(
     "Task snapshot cannot be inspected.",
     "A task snapshot cannot be read safely.",
     [evidenceRef],
-    cause
+    ...causeArguments
   ));
 }
 
@@ -2461,7 +2577,8 @@ function unknownTaskSnapshotAuthorityError(
   evidenceRef: string,
   cause: unknown
 ): TaskServiceError {
-  if (cause instanceof TaskServiceError) return cause;
+  const taskServiceError = taskServiceErrorAtBoundary(cause);
+  if (taskServiceError) return taskServiceError;
   return workspaceError(
     "workspace_path_not_safe",
     `Task snapshot authority could not be classified safely: ${taskId}`,
@@ -2597,9 +2714,10 @@ async function persistTaskSnapshot(
           { taskDirectory, taskId: task.task_id }
         ]);
       } catch (callbackError) {
+        const callbackOccurrence = captureFailureFoldEntry("body", callbackError);
         const permit = cleanupPermit;
         cleanupPermit = undefined;
-        const compensationErrors: unknown[] = [];
+        const compensationEntries: FailureFoldEntry[] = [];
         try {
           await conditionalDeletePublishedJsonRecordGenerationWithCleanupPermit(
             permit,
@@ -2609,17 +2727,22 @@ async function persistTaskSnapshot(
             { kind: "record", expected: snapshot, matches: () => true }
           );
         } catch (cleanupError) {
-          compensationErrors.push(cleanupError);
+          compensationEntries.push(
+            captureFailureFoldEntry("final_release", cleanupError)
+          );
         }
         try {
           await removeEmptyTaskLaneAfterRollback(workspaceRoot, task.task_id);
         } catch (cleanupError) {
-          compensationErrors.push(cleanupError);
+          compensationEntries.push(
+            captureFailureFoldEntry("final_release", cleanupError)
+          );
         }
-        if (compensationErrors.length > 0) {
-          throw new AggregateError(
-            [callbackError, ...compensationErrors],
-            "Task snapshot publication compensation failed."
+        if (compensationEntries.length > 0) {
+          throw preserveTaskServiceErrorFailureEntries(
+            callbackOccurrence,
+            compensationEntries,
+            "Task snapshot publication compensation failed.",
           );
         }
         throw callbackError;
@@ -2658,14 +2781,20 @@ async function persistTaskSnapshot(
     }
     return { status: "created", task: publishedTask };
   } catch (error) {
+    const primaryOccurrence = captureFailureFoldEntry("body", error);
     let publicationFailure: unknown = error;
     if (beforeWriteStarted && !beforeWriteReturned) {
       try {
         await removeEmptyTaskLaneAfterRollback(workspaceRoot, task.task_id);
       } catch (cleanupError) {
-        publicationFailure = new AggregateError(
-          [error, cleanupError],
-          "Task snapshot publication compensation failed."
+        const cleanupOccurrence = captureFailureFoldEntry(
+          "final_release",
+          cleanupError
+        );
+        publicationFailure = preserveTaskServiceErrorFailureEntries(
+          primaryOccurrence,
+          [cleanupOccurrence],
+          "Task snapshot publication compensation failed.",
         );
       }
     }
@@ -2675,7 +2804,7 @@ async function persistTaskSnapshot(
     ) {
       const taskDirectoryEntry = await maybeLstat(taskDirectory);
       if (!taskDirectoryEntry || !(await isSafeExistingDirectoryPath(taskDirectory))) {
-        const taskLaneFailure = error instanceof TaskServiceError ? error : undefined;
+        const taskLaneFailure = taskServiceErrorAtBoundary(error);
         throw workspaceError(
           "task_lane_not_directory",
           taskLaneFailure?.message ?? "Failed to create workspace directory.",
@@ -2692,6 +2821,10 @@ async function persistTaskSnapshot(
       !(await isSafeExistingDirectoryPath(taskDirectory))
     ) {
       throw taskLaneNotDirectoryError(task.task_id, publicationFailure);
+    }
+    if (failureLedger(publicationFailure)) {
+      const taskServiceFailure = taskServiceErrorAtBoundary(publicationFailure);
+      if (taskServiceFailure) throw publicationFailure;
     }
     throw workspaceError(
       "workspace_path_not_safe",
@@ -2719,13 +2852,16 @@ function taskSnapshotTooLargeError(): TaskServiceError {
   });
 }
 
-function taskLaneNotDirectoryError(taskId: string, cause?: unknown): TaskServiceError {
+function taskLaneNotDirectoryError(
+  taskId: string,
+  ...causeArguments: [] | [unknown]
+): TaskServiceError {
   return workspaceError(
     "task_lane_not_directory",
     `Task lane is not a safe directory: ${taskId}`,
     "A task snapshot lane is blocked by a non-directory filesystem entry.",
     [`workspace/tasks/${taskId}`],
-    cause
+    ...causeArguments
   );
 }
 
@@ -2914,7 +3050,7 @@ function workspaceError(
   message: string,
   userMessage: string,
   evidenceRefs: string[],
-  cause?: unknown
+  ...causeArguments: [] | [unknown]
 ): TaskServiceError {
   const error = new TaskServiceError({
     code,
@@ -2927,8 +3063,20 @@ function workspaceError(
     recommendedNextActions: ["Inspect the workspace task snapshot state before retrying."]
   });
 
-  if (cause instanceof Error) {
-    error.cause = cause;
+  if (causeArguments.length === 1) {
+    const cause = causeArguments[0];
+    if (failureLedger(cause)) {
+      error.cause = cause as Error;
+    } else {
+      const exactError = semanticPrimaryError(cause);
+      error.cause = exactError !== undefined && exactError === cause
+        ? exactError
+        : preserveTaskServiceErrorFailureEntries(
+            captureFailureFoldEntry("body", cause),
+            [],
+            "A TaskCard workspace operation failed before its cause could be classified safely."
+          ) as Error;
+    }
   }
 
   return error;

@@ -8,15 +8,20 @@ import {
   CreateTaskInputSchema,
   MAX_TASK_SNAPSHOT_BYTES,
   TaskServiceError,
+  captureFailureFoldEntry,
   canonicalJson,
   createIdempotencyMismatchError,
   createIdempotencyRecordService,
   createTaskCardService,
   ensureWorkspaceDirectoryTree,
   ensureWorkspaceRecordRootPhysicalIdentity,
+  failureTerminalPhysicalPhase,
   isSafeTaskId,
   probeWorkspaceRecordDirectoryWritable,
-  preserveTaskServiceErrorCompensationCompatibility,
+  preserveTaskServiceErrorFailureEntries,
+  semanticPrimaryValue,
+  taskServiceErrorAuthorityTransportFamily,
+  taskServiceErrorAtBoundary,
   runWithExistingWorkspaceRecordDirectoryReproof,
   sha256Hex,
   type CreateTaskInput,
@@ -28,6 +33,8 @@ import {
   type TaskCardService,
   type TaskCardServiceOptions,
   type TaskSnapshotCleanupObservation,
+  type FailureAsyncOutcome,
+  type FailureFoldEntry,
   type TaskSnapshotReadHooks,
   type TaskSnapshotWriteHooks
 } from "@shud-harness/core";
@@ -219,8 +226,9 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
           ? parseJsonRequestText(await readBoundedKeyedTaskCreateRequestText(c))
           : await c.req.json();
     } catch (error) {
-      if (error instanceof TaskServiceError) {
-        return jsonTaskServiceError(c, error);
+      const taskServiceError = taskServiceErrorAtBoundary(error);
+      if (taskServiceError) {
+        return jsonTaskServiceError(c, taskServiceError);
       }
 
       return jsonApiError(
@@ -489,18 +497,22 @@ async function createOwnedIdempotentTaskCard(
   try {
     task = await input.taskService.createTaskForIdempotency(input.input);
   } catch (error) {
-    const compensations: unknown[] = [];
+    const primaryEntry = captureFailureFoldEntry("body", error);
+    const compensations: FailureFoldEntry[] = [];
+    let finalReleaseFailureSeen = false;
     let authority: CompletedTaskAuthorityClassification = { status: "absent" };
     try {
       authority = await classifyCompletedTaskAuthorityIfPresent(input);
     } catch (classificationError) {
-      compensations.push(classificationError);
+      finalReleaseFailureSeen = failureEndsInFinalRelease(classificationError);
+      compensations.push(capturePostSettlementFailure(classificationError));
     }
     if (authority.status !== "absent") {
       try {
         return await completedTaskCreateResultWithoutLocal(input, authority);
       } catch (settlementError) {
-        compensations.push(settlementError);
+        finalReleaseFailureSeen ||= failureEndsInFinalRelease(settlementError);
+        compensations.push(capturePostSettlementFailure(settlementError));
       }
     }
 
@@ -512,11 +524,17 @@ async function createOwnedIdempotentTaskCard(
           requestDigest: input.requestDigest
         });
       } catch (recoveryError) {
-        compensations.push(recoveryError);
+        compensations.push(
+          captureFailureFoldEntry(
+            finalReleaseFailureSeen ? "final_release" : "settlement",
+            recoveryError
+          )
+        );
       }
     }
+    if (compensations.length === 0) throw error;
     throw preservePrimaryFailure(
-      error,
+      primaryEntry,
       compensations,
       "Initial task publication and idempotency recovery both failed."
     );
@@ -527,14 +545,19 @@ async function createOwnedIdempotentTaskCard(
     await input.taskService.releaseTaskPublicationForIdempotency(task);
     return result;
   } catch (error) {
+    const primaryOccurrence = captureFailureFoldEntry("body", error);
     try {
       await input.taskService.releaseTaskPublicationForIdempotency(task);
     } catch (releaseError) {
+      const releaseOccurrence = captureFailureFoldEntry(
+        "final_release",
+        releaseError
+      );
       // Root C (V33-03): the fold is wrapper-aware so an unknown-authority
       // wrapper keeps its inner typed primary reachable end-to-end.
       throw preserveAuthorityAwarePrimaryFailure(
-        error,
-        [releaseError],
+        primaryOccurrence,
+        [releaseOccurrence],
         "Task create failure and publication-authority release both failed."
       );
     }
@@ -868,7 +891,7 @@ async function replayInFlightIdempotentTaskCreate(
       );
     } catch (error) {
       if (
-        !(error instanceof CompletedTaskSnapshotAuthorityUnknownError) ||
+        !isCompletedTaskSnapshotAuthorityUnknownError(error) ||
         Date.now() >= deadline
       ) {
         throw error;
@@ -892,7 +915,11 @@ async function completeOwnedIdempotentTaskCard(
         input.requestDigest
       );
     } catch (error) {
-      return await reconcileLocalTaskAfterPreCompletionFailure(input, task, error);
+      return await reconcileLocalTaskAfterPreCompletionFailure(
+        input,
+        task,
+        captureFailureFoldEntry("body", error)
+      );
     }
 
     let completedRecord: Awaited<
@@ -912,7 +939,7 @@ async function completeOwnedIdempotentTaskCard(
         input,
         task,
         ownedObservation,
-        error
+        captureFailureFoldEntry("body", error)
       );
     }
 
@@ -923,7 +950,7 @@ async function completeOwnedIdempotentTaskCard(
         input,
         task,
         ownedObservation,
-        idempotencyResultBindingError()
+        captureFailureFoldEntry("body", idempotencyResultBindingError())
       );
     }
 
@@ -974,37 +1001,51 @@ async function runWithTaskSnapshotObservationFinalizer<T>(
   taskService: TaskCardService,
   aggregateMessage: string
 ): Promise<T> {
-  let bodyOutcome:
-    | { readonly status: "fulfilled"; readonly value: T }
-    | { readonly status: "rejected"; readonly reason: unknown };
+  let bodyOutcome: FailureAsyncOutcome<T>;
   try {
     bodyOutcome = { status: "fulfilled", value: await body() };
   } catch (reason) {
-    bodyOutcome = { status: "rejected", reason };
+    bodyOutcome = {
+      status: "rejected",
+      reason,
+      occurrence: captureFailureFoldEntry("body", reason)
+    };
   }
 
-  let settlementError: unknown;
+  let settlementOutcome: FailureAsyncOutcome<void> = { status: "not_attempted" };
   const observation = takeObservation();
   if (observation) {
     try {
       await taskService.cancelTaskSnapshotCleanupObservation(observation);
+      settlementOutcome = { status: "fulfilled", value: undefined };
     } catch (error) {
-      settlementError = error;
+      settlementOutcome = {
+        status: "rejected",
+        reason: error,
+        occurrence: captureFailureFoldEntry(
+          bodyOutcome.status === "rejected" ? "final_release" : "initial_release",
+          error
+        )
+      };
     }
   }
   if (bodyOutcome.status === "rejected") {
-    if (settlementError !== undefined) {
-      // Root C (V33-03): the finalizer fold is wrapper-aware so an
-      // unknown-authority wrapper keeps its inner typed primary reachable.
+    if (settlementOutcome.status === "rejected") {
       throw preserveAuthorityAwarePrimaryFailure(
-        bodyOutcome.reason,
-        [settlementError],
+        bodyOutcome.occurrence,
+        [settlementOutcome.occurrence],
         aggregateMessage
       );
     }
     throw bodyOutcome.reason;
   }
-  if (settlementError !== undefined) throw settlementError;
+  if (settlementOutcome.status === "rejected") {
+    throw preserveTaskServiceErrorFailureEntries(
+      settlementOutcome.occurrence,
+      [],
+      aggregateMessage
+    );
+  }
   return bodyOutcome.value;
 }
 
@@ -1036,9 +1077,14 @@ async function observeTaskSnapshotBindsRequest(
   try {
     await taskService.cancelTaskSnapshotCleanupObservation(observation);
   } catch (settlementError) {
-    error = preserveTaskServiceErrorCompensationCompatibility(
-      error,
-      [settlementError],
+    const primaryOccurrence = captureFailureFoldEntry("body", error);
+    const settlementOccurrence = captureFailureFoldEntry(
+      "final_release",
+      settlementError
+    );
+    error = preserveTaskServiceErrorFailureEntries(
+      primaryOccurrence,
+      [settlementOccurrence],
       "Task snapshot observation rejection and cancellation both failed."
     );
   }
@@ -1048,23 +1094,30 @@ async function observeTaskSnapshotBindsRequest(
 async function reconcileLocalTaskAfterPreCompletionFailure(
   input: CreateIdempotentTaskCardInput,
   task: TaskCard,
-  error: unknown
+  errorEntry: FailureFoldEntry
 ): Promise<IdempotentTaskCreateResult> {
-  let recoveredAuthority: CompletedTaskAuthorityClassification = { status: "absent" };
-  let authorityError: unknown;
+  let authorityOutcome: FailureAsyncOutcome<CompletedTaskAuthorityClassification>;
   try {
-    recoveredAuthority = await classifyCompletedTaskAuthorityIfPresent(input);
+    authorityOutcome = {
+      status: "fulfilled",
+      value: await classifyCompletedTaskAuthorityIfPresent(input)
+    };
   } catch (reconciliationError) {
-    authorityError = reconciliationError;
+    authorityOutcome = {
+      status: "rejected",
+      reason: reconciliationError,
+      occurrence: capturePostSettlementFailure(reconciliationError)
+    };
   }
 
-  if (authorityError !== undefined) {
-    throw preservePrimaryFailure(
-      error,
-      [authorityError],
+  if (authorityOutcome.status === "rejected") {
+    throw preserveTaskServiceErrorFailureEntries(
+      errorEntry,
+      [authorityOutcome.occurrence],
       "Task creation failure and completed-authority reconciliation both failed."
     );
   }
+  const recoveredAuthority = authorityOutcome.value;
   if (recoveredAuthority.status !== "absent") {
     try {
       return await settleLocalTaskAgainstCompletedAuthority(
@@ -1073,19 +1126,19 @@ async function reconcileLocalTaskAfterPreCompletionFailure(
         recoveredAuthority
       );
     } catch (settlementError) {
-      throw preservePrimaryFailure(
-        error,
-        [settlementError],
+      throw preserveTaskServiceErrorFailureEntries(
+        errorEntry,
+        [capturePostSettlementFailure(settlementError)],
         "Task creation failure and recovered-authority settlement both failed."
       );
     }
   }
 
-  const compensationErrors: unknown[] = [];
+  const compensationEntries: FailureFoldEntry[] = [];
   try {
     await rollbackLocalTaskAfterAuthorityFailure(input, task);
   } catch (rollbackError) {
-    compensationErrors.push(rollbackError);
+    compensationEntries.push(captureFailureFoldEntry("final_release", rollbackError));
   }
   try {
     await input.idempotencyService.recoverFailedRecordAfterRollback({
@@ -1094,11 +1147,11 @@ async function reconcileLocalTaskAfterPreCompletionFailure(
       requestDigest: input.requestDigest
     });
   } catch (recoveryError) {
-    compensationErrors.push(recoveryError);
+    compensationEntries.push(captureFailureFoldEntry("final_release", recoveryError));
   }
-  throw preservePrimaryFailure(
-    error,
-    compensationErrors,
+  throw preserveTaskServiceErrorFailureEntries(
+    errorEntry,
+    compensationEntries,
     "Task creation failure and pre-completion compensation both failed."
   );
 }
@@ -1107,7 +1160,7 @@ async function reconcileLocalTaskAfterCompletionFailure(
   input: CreateIdempotentTaskCardInput,
   task: TaskCard,
   initialObservation: TaskSnapshotCleanupObservation,
-  completionError: unknown
+  completionEntry: FailureFoldEntry
 ): Promise<IdempotentTaskCreateResult> {
   const local: LocalCompletedTaskConsumption = {
     task,
@@ -1119,19 +1172,20 @@ async function reconcileLocalTaskAfterCompletionFailure(
     try {
       authority = await consumeCompletedTaskAuthority(input, local);
     } catch (reconciliationError) {
-      const cancellationErrors: unknown[] = [];
+      const reconciliationEntry = capturePostSettlementFailure(reconciliationError);
+      const cancellationEntries: FailureFoldEntry[] = [];
       if (local.observation) {
         const ownedObservation = local.observation;
         local.observation = undefined;
         try {
           await input.taskService.cancelTaskSnapshotCleanupObservation(ownedObservation);
         } catch (error) {
-          cancellationErrors.push(error);
+          cancellationEntries.push(captureFailureFoldEntry("final_release", error));
         }
       }
-      throw preservePrimaryFailure(
-        completionError,
-        [reconciliationError, ...cancellationErrors],
+      throw preserveTaskServiceErrorFailureEntries(
+        completionEntry,
+        [reconciliationEntry, ...cancellationEntries],
         "Task completion failure, authority reconciliation, and observation cancellation failed."
       );
     }
@@ -1153,22 +1207,22 @@ async function reconcileLocalTaskAfterCompletionFailure(
         }
         return await completedTaskCreateResultWithoutLocal(input, authority);
       } catch (settlementError) {
-        throw preservePrimaryFailure(
-          completionError,
-          [settlementError],
+        throw preserveTaskServiceErrorFailureEntries(
+          completionEntry,
+          [captureFailureFoldEntry("final_release", settlementError)],
           "Task completion failure and completed-authority settlement both failed."
         );
       }
     }
 
-    const settlementErrors: unknown[] = [];
+    const settlementEntries: FailureFoldEntry[] = [];
     if (local.observation) {
       const ownedObservation = local.observation;
       local.observation = undefined;
       try {
         await cleanupLocalTaskCompletionObservation(input, ownedObservation);
       } catch (error) {
-        settlementErrors.push(error);
+        settlementEntries.push(captureFailureFoldEntry("final_release", error));
       }
     }
     try {
@@ -1178,28 +1232,38 @@ async function reconcileLocalTaskAfterCompletionFailure(
         requestDigest: input.requestDigest
       });
     } catch (error) {
-      settlementErrors.push(error);
+      settlementEntries.push(
+        captureFailureFoldEntry(
+          settlementEntries.length === 0 ? "settlement" : "final_release",
+          error
+        )
+      );
     }
-    throw preservePrimaryFailure(
-      completionError,
-      settlementErrors,
+    throw preserveTaskServiceErrorFailureEntries(
+      completionEntry,
+      settlementEntries,
       "Task completion failure and known-absent authority settlement failed."
     );
   } catch (bodyError) {
+    const bodyEntry = captureFailureFoldEntry("body", bodyError);
     if (local.observation) {
       const ownedObservation = local.observation;
       local.observation = undefined;
       try {
         await input.taskService.cancelTaskSnapshotCleanupObservation(ownedObservation);
       } catch (cancellationError) {
-        throw preservePrimaryFailure(
-          bodyError,
-          [cancellationError],
+        throw preserveTaskServiceErrorFailureEntries(
+          bodyEntry,
+          [captureFailureFoldEntry("final_release", cancellationError)],
           "Task completion reconciliation and final observation cancellation both failed."
         );
       }
     }
-    throw bodyError;
+    throw preserveTaskServiceErrorFailureEntries(
+      bodyEntry,
+      [],
+      "Task completion reconciliation failed."
+    );
   } finally {
     if (local.observation) {
       await input.taskService.cancelTaskSnapshotCleanupObservation(local.observation);
@@ -1216,6 +1280,7 @@ async function cleanupLocalTaskCompletionObservation(
   try {
     await input.taskService.cleanupTaskSnapshotObservation(observation);
   } catch (error) {
+    const cleanupEntry = captureFailureFoldEntry("final_release", error);
     try {
       await input.idempotencyService.quarantineRecordAfterUnsafeRollback({
         scope: "task",
@@ -1232,8 +1297,8 @@ async function cleanupLocalTaskCompletionObservation(
       });
     } catch (quarantineError) {
       throw preservePrimaryFailure(
-        error,
-        [quarantineError],
+        cleanupEntry,
+        [captureFailureFoldEntry("final_release", quarantineError)],
         "Task snapshot cleanup and idempotency quarantine both failed."
       );
     }
@@ -1269,7 +1334,8 @@ interface LocalCompletedTaskConsumption {
 interface RejectedCompletedTaskAuthority {
   readonly resultRef: string;
   readonly authorityError: TaskServiceError;
-  readonly classificationErrors: readonly unknown[];
+  readonly authorityEntry: FailureFoldEntry;
+  readonly classificationEntries: readonly FailureFoldEntry[];
   readonly observation?: TaskSnapshotCleanupObservation;
 }
 
@@ -1280,16 +1346,30 @@ class CompletedTaskSnapshotAuthorityReadError extends Error {
   }
 }
 
-class CompletedTaskSnapshotAuthorityUnknownError extends Error {
-  readonly authorityError: unknown;
+type CompletedTaskSnapshotAuthorityUnknownError = Error;
 
-  constructor(authorityError: unknown) {
-    super("Completed task snapshot authority is temporarily unknown.", {
-      cause: authorityError
-    });
-    this.name = "CompletedTaskSnapshotAuthorityUnknownError";
-    this.authorityError = authorityError;
-  }
+function completedTaskSnapshotAuthorityUnknownError(
+  authorityError: unknown
+): CompletedTaskSnapshotAuthorityUnknownError {
+  return taskServiceErrorAuthorityTransportFamily.create(authorityError);
+}
+
+function preserveCompletedTaskSnapshotAuthorityUnknownFailureEntries(
+  primary: FailureFoldEntry,
+  compensations: readonly FailureFoldEntry[],
+  aggregateMessage: string
+): unknown {
+  return preserveTaskServiceErrorFailureEntries(primary, compensations, aggregateMessage);
+}
+
+function isCompletedTaskSnapshotAuthorityUnknownError(
+  value: unknown
+): value is CompletedTaskSnapshotAuthorityUnknownError {
+  return taskServiceErrorAuthorityTransportFamily.has(value);
+}
+
+function completedTaskSnapshotAuthorityProjection(value: unknown): unknown {
+  return taskServiceErrorAuthorityTransportFamily.project(value);
 }
 
 async function classifyCompletedTaskAuthorityIfPresent(
@@ -1374,7 +1454,7 @@ async function classifyCompletedTaskAuthorityUnderLease(
   if (local && resultRef === local.task.task_id) {
     const observation = local.observation;
     if (!observation) {
-      throw new CompletedTaskSnapshotAuthorityUnknownError(
+      throw completedTaskSnapshotAuthorityUnknownError(
         new TypeError("Local completed TaskCard observation was already settled.")
       );
     }
@@ -1392,7 +1472,7 @@ async function classifyCompletedTaskAuthorityUnderLease(
         value: { status: "valid", task, resultRef }
       };
     } catch (error) {
-      throw new CompletedTaskSnapshotAuthorityUnknownError(error);
+      throw completedTaskSnapshotAuthorityUnknownError(error);
     }
   }
 
@@ -1416,6 +1496,8 @@ async function classifyCompletedTaskAuthorityUnderLease(
     observation = await input.taskService.observeTaskSnapshotForCleanup(resultRef);
     if (observation.status === "unknown") {
       const error = observation.error;
+      const transport = completedTaskSnapshotAuthorityUnknownError(error);
+      const primaryEntry = captureFailureFoldEntry("body", transport);
       const ownedObservation = observation;
       observation = undefined;
       // Root D (V32-03): a throwing settlement must never replace the typed
@@ -1423,18 +1505,17 @@ async function classifyCompletedTaskAuthorityUnderLease(
       try {
         await input.taskService.cancelTaskSnapshotCleanupObservation(ownedObservation);
       } catch (settlementError) {
-        throw new CompletedTaskSnapshotAuthorityUnknownError(
-          preservePrimaryFailure(
-            error,
-            [settlementError],
-            "Completed task authority classification and observation cancellation both failed."
-          )
+        throw preserveCompletedTaskSnapshotAuthorityUnknownFailureEntries(
+          primaryEntry,
+          [captureFailureFoldEntry("final_release", settlementError)],
+          "Completed task authority classification and observation cancellation both failed."
         );
       }
-      throw new CompletedTaskSnapshotAuthorityUnknownError(error);
+      throw transport;
     }
     if (observation.status === "repairable") {
       const error = observation.error;
+      const primaryEntry = captureFailureFoldEntry("body", error);
       const ownedObservation = observation;
       observation = undefined;
       // Root D (V32-03): the repairable primary survives a throwing rejection
@@ -1447,8 +1528,8 @@ async function classifyCompletedTaskAuthorityUnderLease(
           value: {
             status: "repairable",
             error: preservePrimaryFailure(
-              error,
-              [settlementError],
+              primaryEntry,
+              [captureFailureFoldEntry("final_release", settlementError)],
               "Completed task authority classification and observation rejection both failed."
             ) as TaskServiceError,
             resultRef
@@ -1465,20 +1546,25 @@ async function classifyCompletedTaskAuthorityUnderLease(
         observation.status === "invalid"
           ? observation.error
           : new CompletedTaskSnapshotAuthorityReadError();
+      const authorityError = invalidDurableTaskAuthorityError();
+      const authorityEntry = captureFailureFoldEntry("body", authorityError);
       const rejectedObservation = observation;
       observation = undefined;
       return {
         status: "rejected",
         reason: {
           resultRef,
-          authorityError: invalidDurableTaskAuthorityError(),
-          classificationErrors: [classificationError],
+          authorityError,
+          authorityEntry,
+          classificationEntries: [captureFailureFoldEntry("settlement", classificationError)],
           observation: rejectedObservation
         }
       };
     }
     if (taskCreateRequestDigestFromTask(observation.task) !== input.requestDigest) {
       const classificationError = idempotencyResultBindingError();
+      const authorityError = invalidDurableTaskAuthorityError();
+      const authorityEntry = captureFailureFoldEntry("body", authorityError);
       const ownedObservation = observation;
       observation = undefined;
       try {
@@ -1490,26 +1576,28 @@ async function classifyCompletedTaskAuthorityUnderLease(
         // its ordered compensation, preserving the pre-existing envelope; an
         // untyped acceptance failure folds behind the typed binding
         // classification as the semantic primary.
-        throw new CompletedTaskSnapshotAuthorityUnknownError(
-          error instanceof TaskServiceError
-            ? preservePrimaryFailure(
-                error,
-                [classificationError],
-                "Completed task authority classification and observation acceptance both failed."
-              )
-            : preservePrimaryFailure(
-                classificationError,
-                [error],
-                "Completed task authority classification and observation acceptance both failed."
-              )
+        const taskServiceError = taskServiceErrorAtBoundary(error);
+        const transport = completedTaskSnapshotAuthorityUnknownError(
+          taskServiceError ?? classificationError
+        );
+        throw preserveCompletedTaskSnapshotAuthorityUnknownFailureEntries(
+          captureFailureFoldEntry("body", transport),
+          [
+            captureFailureFoldEntry(
+              taskServiceError ? "settlement" : "final_release",
+              taskServiceError ? classificationError : error
+            )
+          ],
+          "Completed task authority classification and observation acceptance both failed."
         );
       }
       return {
         status: "rejected",
         reason: {
           resultRef,
-          authorityError: invalidDurableTaskAuthorityError(),
-          classificationErrors: [classificationError]
+          authorityError,
+          authorityEntry,
+          classificationEntries: [captureFailureFoldEntry("settlement", classificationError)]
         }
       };
     }
@@ -1525,17 +1613,19 @@ async function classifyCompletedTaskAuthorityUnderLease(
         value: { status: "valid", task, resultRef }
       };
     } catch (error) {
-      throw new CompletedTaskSnapshotAuthorityUnknownError(error);
+      throw completedTaskSnapshotAuthorityUnknownError(error);
     }
   } catch (error) {
+    const taskServiceError = taskServiceErrorAtBoundary(error);
+    const transport = completedTaskSnapshotAuthorityUnknownError(error);
+    const primaryEntry = captureFailureFoldEntry("body", transport);
     if (
       isSafeTaskId(resultRef) &&
-      error instanceof TaskServiceError &&
-      error.code === "task_snapshot_missing_card"
+      taskServiceError?.code === "task_snapshot_missing_card"
     ) {
       return {
         status: "accepted",
-        value: { status: "repairable", error, resultRef }
+        value: { status: "repairable", error: taskServiceError, resultRef }
       };
     }
     if (observation) {
@@ -1544,17 +1634,20 @@ async function classifyCompletedTaskAuthorityUnderLease(
       try {
         await input.taskService.cancelTaskSnapshotCleanupObservation(ownedObservation);
       } catch (settlementError) {
-        throw new CompletedTaskSnapshotAuthorityUnknownError(
-          preservePrimaryFailure(
-            error,
-            [settlementError],
-            "Completed task authority observation and cancellation both failed."
-          )
+        throw preserveCompletedTaskSnapshotAuthorityUnknownFailureEntries(
+          primaryEntry,
+          [captureFailureFoldEntry("final_release", settlementError)],
+          "Completed task authority observation and cancellation both failed."
         );
       }
     }
-    if (error instanceof CompletedTaskSnapshotAuthorityUnknownError) throw error;
-    throw new CompletedTaskSnapshotAuthorityUnknownError(error);
+    if (
+      isCompletedTaskSnapshotAuthorityUnknownError(error) ||
+      isCompletedTaskSnapshotAuthorityUnknownError(semanticPrimaryValue(error))
+    ) {
+      throw error;
+    }
+    throw completedTaskSnapshotAuthorityUnknownError(error);
   }
 }
 
@@ -1568,7 +1661,7 @@ async function settleRejectedCompletedTaskAuthority(
     rejection.resultRef,
     mutationAuthority
   );
-  const settlementErrors: unknown[] = [];
+  const settlementErrors: FailureFoldEntry[] = [];
   if (rejection.observation) {
     try {
       if (recovery.durablyFailed) {
@@ -1577,7 +1670,7 @@ async function settleRejectedCompletedTaskAuthority(
         await input.taskService.cancelTaskSnapshotCleanupObservation(rejection.observation);
       }
     } catch (settlementError) {
-      settlementErrors.push(settlementError);
+      settlementErrors.push(captureFailureFoldEntry("final_release", settlementError));
       try {
         await input.idempotencyService.quarantineRecordAfterUnsafeRollback({
           scope: "task",
@@ -1589,7 +1682,7 @@ async function settleRejectedCompletedTaskAuthority(
           }
         });
       } catch (quarantineError) {
-        settlementErrors.push(quarantineError);
+        settlementErrors.push(captureFailureFoldEntry("final_release", quarantineError));
       }
     }
   }
@@ -1597,8 +1690,8 @@ async function settleRejectedCompletedTaskAuthority(
     status: "invalid",
     reason: "invalid_durable_task_authority",
     error: preservePrimaryFailure(
-      rejection.authorityError,
-      [...rejection.classificationErrors, ...recovery.errors, ...settlementErrors],
+      rejection.authorityEntry,
+      [...rejection.classificationEntries, ...recovery.entries, ...settlementErrors],
       "Completed task authority classification and recovery failed."
     ) as TaskServiceError,
     resultRef: rejection.resultRef,
@@ -1618,14 +1711,15 @@ async function completedTaskCreateResultWithoutLocal(
     return { task: authority.task, created: false };
   }
   if (authority.status === "repairable") {
+    const authorityEntry = captureFailureFoldEntry("body", authority.error);
     try {
       await input.idempotencyService.cancelCompletedRecordMutationAuthority(
         authority.mutationAuthority
       );
     } catch (cancellationError) {
       throw preservePrimaryFailure(
-        authority.error,
-        [cancellationError],
+        authorityEntry,
+        [captureFailureFoldEntry("final_release", cancellationError)],
         "Repairable completed authority and mutation-authority cancellation both failed."
       );
     }
@@ -1633,6 +1727,7 @@ async function completedTaskCreateResultWithoutLocal(
   }
 
   if (authority.durablyFailed) {
+    const authorityEntry = captureFailureFoldEntry("body", authority.error);
     try {
       await input.idempotencyService.recoverFailedRecordAfterRollback({
         scope: "task",
@@ -1641,8 +1736,8 @@ async function completedTaskCreateResultWithoutLocal(
       });
     } catch (recoveryError) {
       throw preservePrimaryFailure(
-        authority.error,
-        [recoveryError],
+        authorityEntry,
+        [capturePostSettlementFailure(recoveryError)],
         "Completed authority failure and failed-record recovery both failed."
       );
     }
@@ -1673,6 +1768,9 @@ async function settleLocalTaskAgainstCompletedAuthority(
     authority.status === "invalid" ? undefined : authority.mutationAuthority
   );
   if (authority.status !== "invalid") {
+    const authorityEntry = authority.status === "repairable"
+      ? captureFailureFoldEntry("body", authority.error)
+      : undefined;
     try {
       await input.idempotencyService.cancelCompletedRecordMutationAuthority(
         authority.mutationAuthority
@@ -1680,8 +1778,8 @@ async function settleLocalTaskAgainstCompletedAuthority(
     } catch (cancellationError) {
       if (authority.status === "repairable") {
         throw preservePrimaryFailure(
-          authority.error,
-          [cancellationError],
+          authorityEntry!,
+          [captureFailureFoldEntry("final_release", cancellationError)],
           "Repairable completed authority and mutation-authority cancellation both failed."
         );
       }
@@ -1695,6 +1793,7 @@ async function settleLocalTaskAgainstCompletedAuthority(
     throw authority.error;
   }
 
+  const authorityEntry = captureFailureFoldEntry("body", authority.error);
   try {
     await input.idempotencyService.recoverFailedRecordAfterRollback({
       scope: "task",
@@ -1703,8 +1802,8 @@ async function settleLocalTaskAgainstCompletedAuthority(
     });
   } catch (recoveryError) {
     throw preservePrimaryFailure(
-      authority.error,
-      [recoveryError],
+      authorityEntry,
+      [captureFailureFoldEntry("final_release", recoveryError)],
       "Completed authority failure and post-rollback recovery both failed."
     );
   }
@@ -1720,6 +1819,7 @@ async function rollbackLocalTaskAfterAuthorityFailure(
   try {
     await input.taskService.rollbackTaskForIdempotency(localTask.task_id, localTask);
   } catch (rollbackError) {
+    const rollbackEntry = captureFailureFoldEntry("final_release", rollbackError);
     try {
       await input.idempotencyService.quarantineRecordAfterUnsafeRollback({
         scope: "task",
@@ -1736,8 +1836,8 @@ async function rollbackLocalTaskAfterAuthorityFailure(
       });
     } catch (quarantineError) {
       throw preservePrimaryFailure(
-        rollbackError,
-        [quarantineError],
+        rollbackEntry,
+        [captureFailureFoldEntry("final_release", quarantineError)],
         "Task rollback and idempotency quarantine both failed."
       );
     }
@@ -1752,21 +1852,23 @@ async function invalidateInvalidCompletedTaskAuthority(
   }
 ): Promise<never> {
   const error = invalidCompletedTaskAuthorityError(authority.reason);
+  const errorEntry = captureFailureFoldEntry("body", error);
   const recovery = await invalidateCompletedTaskAuthorityWithRecovery(
     input,
     authority.observedResultRef,
     authority.mutationAuthority
   );
+  if (recovery.entries.length === 0) throw error;
   throw preservePrimaryFailure(
-    error,
-    recovery.errors,
+    errorEntry,
+    recovery.entries,
     "Invalid completed task authority and durable recovery failed."
   );
 }
 
 interface CompletedTaskAuthorityInvalidationOutcome {
   readonly durablyFailed: boolean;
-  readonly errors: unknown[];
+  readonly entries: FailureFoldEntry[];
 }
 
 async function invalidateCompletedTaskAuthorityWithRecovery(
@@ -1782,9 +1884,12 @@ async function invalidateCompletedTaskAuthorityWithRecovery(
       resultRef,
       ...(mutationAuthority === undefined ? {} : { mutationAuthority })
     });
-    return { durablyFailed: failed.status === "failed", errors: [] };
+    return { durablyFailed: failed.status === "failed", entries: [] };
   } catch (invalidationError) {
-    const errors: unknown[] = [invalidationError];
+    let finalReleaseFailureSeen = failureEndsInFinalRelease(invalidationError);
+    const entries: FailureFoldEntry[] = [
+      capturePostSettlementFailure(invalidationError)
+    ];
     try {
       const failed = await input.idempotencyService.quarantineRecordAfterUnsafeRollback({
         scope: "task",
@@ -1795,9 +1900,13 @@ async function invalidateCompletedTaskAuthorityWithRecovery(
           ...(mutationAuthority === undefined ? {} : { mutationAuthority })
         }
       });
-      return { durablyFailed: failed.status === "failed", errors };
+      return { durablyFailed: failed.status === "failed", entries };
     } catch (quarantineError) {
-      errors.push(quarantineError);
+      finalReleaseFailureSeen ||= failureEndsInFinalRelease(quarantineError);
+      entries.push(captureFailureFoldEntry(
+        finalReleaseFailureSeen ? "final_release" : "settlement",
+        quarantineError
+      ));
     }
     if (mutationAuthority !== undefined) {
       try {
@@ -1806,11 +1915,11 @@ async function invalidateCompletedTaskAuthorityWithRecovery(
         );
       } catch (settlementError) {
         if (!isCompletedMutationAuthorityAlreadySettledError(settlementError)) {
-          errors.push(settlementError);
+          entries.push(captureFailureFoldEntry("final_release", settlementError));
         }
       }
     }
-    return { durablyFailed: false, errors };
+    return { durablyFailed: false, entries };
   }
 }
 
@@ -1821,22 +1930,28 @@ function isCompletedMutationAuthorityAlreadySettledError(error: unknown): boolea
 }
 
 function preservePrimaryFailure(
-  primary: unknown,
-  compensations: readonly unknown[],
+  primary: FailureFoldEntry,
+  compensations: readonly FailureFoldEntry[],
   aggregateMessage: string
 ): unknown {
-  // Root C (V33-13): never count one occurrence twice — a compensation
-  // candidate that IS the primary is already represented by the primary
-  // itself, so a memoized rejection folded into itself yields primary-only.
-  const distinctCompensations = compensations.filter(
-    (candidate) => !Object.is(primary, candidate)
-  );
-  if (distinctCompensations.length === 0) return primary;
-  return preserveTaskServiceErrorCompensationCompatibility(
+  return preserveTaskServiceErrorFailureEntries(
     primary,
-    distinctCompensations,
+    compensations,
     aggregateMessage
   );
+}
+
+function capturePostSettlementFailure(error: unknown): FailureFoldEntry {
+  return captureFailureFoldEntry(
+    failureTerminalPhysicalPhase(error) === "final_release"
+      ? "final_release"
+      : "settlement",
+    error
+  );
+}
+
+function failureEndsInFinalRelease(error: unknown): boolean {
+  return failureTerminalPhysicalPhase(error) === "final_release";
 }
 
 /**
@@ -1847,26 +1962,15 @@ function preservePrimaryFailure(
  * envelope instead of a generic 500.
  */
 function preserveAuthorityAwarePrimaryFailure(
-  primary: unknown,
-  compensations: readonly unknown[],
+  primary: FailureFoldEntry,
+  compensations: readonly FailureFoldEntry[],
   aggregateMessage: string
 ): unknown {
-  // Root C (V33-13): drop compensation candidates that ARE the primary
-  // before folding, so the same occurrence is never transported twice.
-  const distinctCompensations = compensations.filter(
-    (candidate) => !Object.is(primary, candidate)
+  return preserveTaskServiceErrorFailureEntries(
+    primary,
+    compensations,
+    aggregateMessage
   );
-  if (distinctCompensations.length === 0) return primary;
-  if (primary instanceof CompletedTaskSnapshotAuthorityUnknownError) {
-    return new CompletedTaskSnapshotAuthorityUnknownError(
-      preservePrimaryFailure(
-        primary.authorityError,
-        distinctCompensations,
-        aggregateMessage
-      )
-    );
-  }
-  return preservePrimaryFailure(primary, distinctCompensations, aggregateMessage);
 }
 
 function observeTaskRouteErrorWithoutInterference(
@@ -1953,8 +2057,9 @@ async function getIdempotentTaskResult(
   try {
     task = await taskService.getTaskFromSnapshot(taskId);
   } catch (error) {
-    if (error instanceof TaskServiceError) {
-      if (error.code === "task_snapshot_missing_card") {
+    const taskServiceError = taskServiceErrorAtBoundary(error);
+    if (taskServiceError) {
+      if (taskServiceError.code === "task_snapshot_missing_card") {
         throw error;
       }
       throw new CompletedTaskSnapshotAuthorityReadError();
@@ -2187,23 +2292,28 @@ function parseIdempotencyKey(c: Context): ParsedIdempotencyKey {
 }
 
 function jsonTaskServiceError(c: Context, error: unknown): Response {
-  if (error instanceof CompletedTaskSnapshotAuthorityUnknownError) {
-    return jsonTaskServiceError(c, error.authorityError);
-  }
-  if (error instanceof TaskServiceError) {
+  const taskServiceError = taskServiceErrorAtBoundary(error);
+  if (taskServiceError) {
     return jsonApiError(
       c,
       {
-        category: error.category,
+        category: taskServiceError.category,
         severity: "error",
-        message: error.message,
-        userMessage: error.userMessage,
-        evidenceRefs: error.evidenceRefs,
-        retryable: error.retryable,
-        recommendedNextActions: error.recommendedNextActions
+        message: taskServiceError.message,
+        userMessage: taskServiceError.userMessage,
+        evidenceRefs: taskServiceError.evidenceRefs,
+        retryable: taskServiceError.retryable,
+        recommendedNextActions: taskServiceError.recommendedNextActions
       },
-      error.status
+      taskServiceError.status
     );
+  }
+  const semanticPrimary = semanticPrimaryValue(error);
+  if (!Object.is(semanticPrimary, error)) {
+    return jsonTaskServiceError(c, semanticPrimary);
+  }
+  if (isCompletedTaskSnapshotAuthorityUnknownError(error)) {
+    return jsonTaskServiceError(c, completedTaskSnapshotAuthorityProjection(error));
   }
 
   return jsonApiError(
