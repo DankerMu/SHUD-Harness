@@ -102,8 +102,8 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 87/87 named scenarios. Thirty-two are two-party races
-with 64 explicit participant outcomes:
+The self-test passed 91/91 named scenarios. Thirty-six are two-party races
+with 72 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -163,6 +163,11 @@ with 64 explicit participant outcomes:
   later INT enters. All four preserve 129, expose continuous transfer
   authority, classify once, settle the child, and leave no lifecycle/probe
   residue;
+- verifier and harness empty-source-tail probes deliver HUP 129 after the first
+  empty-source check but before decode authority clears, then publish collision
+  73 or unknown-protocol 67 with later INT. All four promote 129 before outcome
+  adoption, preserve nested/current identity, settle the child, and leave no
+  lifecycle/probe residue;
 - verifier and harness witnessed-publication probes remove the outcome before
   classification, then deliver TERM with the link absent or after restoring
   `token:73`. All four preserve the earlier required-publication failure 67,
@@ -177,5 +182,5 @@ with 64 explicit participant outcomes:
   marker-created assertion-window TERM and HUP→INT paths.
 
 Every case leaves no exact registered worktree, claim, token, marker, or owned
-temporary root. A clean incremental A7 `git diff --check` must exit 0 because
-A7 introduces no new whitespace exception.
+temporary root. A clean incremental A8 `git diff --check` must exit 0 because
+A8 introduces no new whitespace exception.

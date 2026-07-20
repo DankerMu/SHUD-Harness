@@ -1055,3 +1055,36 @@ Current script SHA-256 values:
 The replay patch hashes remain byte-identical at
 `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
 and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+### A8 Phase-7 empty-source tail repair
+
+Verified on `2026-07-20`. The semantic implementation is commit
+`63005f6c898cfb0fba9baa3b25fb9c9c3632cb7f`, based on integrated A3 head
+`a3a390930f8e211e200cd6e16a7da67f5bcd8260`.
+
+The A7-integrated Phase-7 sweep found one remaining boundary: HUP could arrive
+after an empty-source establishment check but before decode authority cleared.
+The handler now promotes any late deferred source into the existing transfer
+authority before outcome adoption while no outcome has been decoded. Once
+decode authority clears, the caller performs a final promotion and latch. An
+already decoded 67/73 remains committed ahead of later signals.
+
+Four verifier/harness public-surface regressions cover collision and unknown
+publication from that exact tail. Restoring the old behavior returns
+73/73/67/67; the repair preserves 129, later-event identity, single
+classification, mandatory child settlement, and zero residue.
+
+Independent checks passed: focused A6/A7/A8 controls, canonical verifier,
+91/91 lifecycle matrix (36 two-party races, 72 participant outcomes), POSIX
+syntax, shellcheck, strict OpenSpec, incremental hygiene, replay hashes, and
+Zero gitlink. The pre-existing one-second disappearance watchdog remains
+load-sensitive; serial reruns pass and no A8 behavior depends on it.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `4ad6c124568cb998919f55a62ef39c9f6dcc0a56641b344b61ee8c0efce379c6`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `5b99a876bc42f50084e07b30a852d14946e52c0b629248fd395ce23e6a59ad78`.

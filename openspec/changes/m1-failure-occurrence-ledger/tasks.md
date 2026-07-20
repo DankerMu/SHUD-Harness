@@ -290,3 +290,8 @@
   prove verifier/harness collision 73 and unknown-protocol 67 publications plus
   later INT cannot overtake it, with settlement and zero residue in the
   87-case matrix.
+- [x] 12.9 Close the empty-source tail of that handoff. If HUP 129 arrives after
+  the first empty-source check but before `decode_active` clears, a post-clear
+  handler MUST promote it before outcome adoption. Prove verifier/harness
+  collision and unknown publication paths with later INT, settlement, and zero
+  residue in the 91-case matrix.
