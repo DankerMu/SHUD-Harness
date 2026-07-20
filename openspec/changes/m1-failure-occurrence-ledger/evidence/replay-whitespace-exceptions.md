@@ -69,14 +69,16 @@ inside the root only after its own `mkdir` succeeds. Every parent path after
 child spawn converges on one settlement boundary: it publishes the release
 barrier when possible, otherwise force-reaps the child. When an outcome is
 published while the creation child remains live, the parent reads, classifies,
-and latches it before wait/reap; an unknown protocol value maps to 67. While
-that transaction remains active, each lifecycle handler first adopts an
-already-published non-zero outcome before recording its own signal, closing the
-readlink classification window without changing event-before-publication
-order. As soon as a non-zero release or outcome result is determined, the
-parent records it in the shared write-once latch before later settlement,
-ownership reconciliation, or transaction cleanup; an earlier signal already
-in the latch remains first.
+and latches it before wait/reap. Handler adoption and ordinary settlement use
+one decoder that distinguishes no publication, exact token zero, collision 73,
+and protocol/read failures mapped to 67. A signal arriving during ordinary
+decoding is deferred until that decoded result is latched; an active handler
+masks reentrancy while it uses the same decoder before recording its signal.
+This closes both read windows without changing event-before-publication order.
+As soon as a non-zero release or outcome result is determined, the parent
+records it in the shared write-once latch before later settlement, ownership
+reconciliation, or transaction cleanup; an earlier signal already in the
+latch remains first.
 The parent accepts ownership only when child success, claim token, and root
 token all agree. A same-name or non-cooperating loser returns 73 without
 publishing a marker or touching the target; a pre-existing foreign target
@@ -87,8 +89,8 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 62/62 named scenarios. Fifteen are two-party races with
-30 explicit participant outcomes:
+The self-test passed 64/64 named scenarios. Seventeen are two-party races with
+34 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -106,9 +108,10 @@ The self-test passed 62/62 named scenarios. Fifteen are two-party races with
   residue;
 - HUP, INT, TERM, HUP→INT, INT→TERM, and TERM→HUP delivered to an isolated
   process group while the external root-creation child is live;
-- TERM interrupting the outcome read preserves 143 after reconciling committed
-  ownership, while injected release-publication failure preserves transaction
-  status 67 after force-reaping the unreleased child;
+- TERM delivered by a failing published-outcome read is deferred behind the
+  decoder's protocol status 67 after reconciling committed ownership, while
+  injected release-publication failure likewise preserves transaction status
+  67 after force-reaping the unreleased child;
 - verifier and harness chronology probes preserve release failure 67 and a
   published collision outcome 73 when TERM arrives only after that result is
   determined; the collision child remains held until the parent has classified
@@ -121,6 +124,9 @@ The self-test passed 62/62 named scenarios. Fifteen are two-party races with
   collision 73 and unknown-protocol 67 when TERM enters the handler before the
   ordinary parent read has classified that link; paired TERM-before-publication
   controls remain 143;
+- verifier and harness handler-read-failure probes publish collision first,
+  make the handler's authoritative read fail, and preserve protocol status 67
+  before the same TERM. Both prove mandatory child settlement and zero residue;
 - the held-child watchdog uses a distinct failure marker and never creates the
   settlement-release marker. Every held probe asserts it did not fire, so a
   missing production release fails quickly instead of making the probe green;

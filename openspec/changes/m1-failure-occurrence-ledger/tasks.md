@@ -239,3 +239,9 @@
   marker. Assert that no focused probe fires the watchdog, and mutation-prove
   that removing the production release makes all four verifier/harness
   collision/unknown probes fail quickly instead of self-healing.
+- [x] 11.7 Replace handler adoption and ordinary settlement classification with
+  one side-effect-controlled outcome decoder. Map a failed published-symlink
+  read and unknown/mismatched protocol to 67 before later signals, preserve
+  exact zero, collision 73, TERM-before-publication, handler masking, mandatory
+  child settlement, A4 claim behavior, and zero residue in the expanded
+  64-case matrix.
