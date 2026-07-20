@@ -7724,7 +7724,6 @@ describe("backend workspace and health routes", () => {
       })}\n`,
       { flag: "wx" }
     );
-    const recordBytes = await readFile(recordPath);
     const taskLane = join(workspaceRoot, "tasks", taskId);
     await mkdir(taskLane, { recursive: true });
     const snapshotPath = join(taskLane, "snapshot.json");
@@ -7785,29 +7784,16 @@ describe("backend workspace and health routes", () => {
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
     expect(cacheDiagnostics).toEqual({ slots: 0, activeClaims: 0 });
-    // The failed replay is re-drivable: nothing durable was destroyed.
-    expect(await readFile(recordPath)).toEqual(recordBytes);
-    expect(await readFile(snapshotPath, "utf8")).toBe("{");
-
-    // The failed release preserves the guard generation (fail-closed, bounded
-    // by IDEMPOTENCY_TRANSITION_GUARD_STALE_MS). Simulate the elapsed
-    // staleness window so the replay drives immediately.
-    await unlink(guardPath);
-    releaseInjectionArmed = false;
-    const second = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
-    expect(second.status).toBe(500);
-    expect(((await second.json()) as ApiErrorResponse).error.message).toBe(
-      INVALID_DURABLE_TASK_AUTHORITY_MESSAGE
-    );
-    // No per-path permit wedge: the replay re-observed, re-classified, and
-    // conditional-deleted the malformed snapshot.
+    // Exact-A guard recovery lets the same request finish durable quarantine.
     expect(
       JSON.parse(await readFile(recordPath, "utf8")) as { status: string }
     ).toMatchObject({ status: "failed" });
     await expectPathMissing(snapshotPath);
+    await expectPathMissing(guardPath);
 
-    const third = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
-    expect(third.status).toBe(201);
+    releaseInjectionArmed = false;
+    const second = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(second.status).toBe(201);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
@@ -7883,32 +7869,16 @@ describe("backend workspace and health routes", () => {
       }
     });
 
-    // Three failing replays in a row: the missing-arm cache claim is settled
-    // on every attempt (no unbounded per-retry cache-claim growth). Each
-    // failed release preserves the guard generation (fail-closed, bounded by
-    // IDEMPOTENCY_TRANSITION_GUARD_STALE_MS); simulate the elapsed staleness
-    // window between attempts so every replay drives immediately.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const failed = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
-      expect(failed.status).toBe(500);
-      expect(cacheDiagnostics).toEqual({ slots: 0, activeClaims: 0 });
-      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
-      await unlink(guardPath);
-    }
+    const failed = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
+    expect(failed.status).toBe(500);
+    expect(cacheDiagnostics).toEqual({ slots: 0, activeClaims: 0 });
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    await expectPathMissing(guardPath);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
 
     releaseInjectionArmed = false;
     const second = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
-    expect(second.status).toBe(500);
-    expect(((await second.json()) as ApiErrorResponse).error.message).toBe(
-      INVALID_DURABLE_TASK_AUTHORITY_MESSAGE
-    );
-    expect(
-      JSON.parse(await readFile(recordPath, "utf8")) as { status: string }
-    ).toMatchObject({ status: "failed" });
-
-    const third = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
-    expect(third.status).toBe(201);
+    expect(second.status).toBe(201);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
@@ -8003,11 +7973,8 @@ describe("backend workspace and health routes", () => {
     expect(await readFile(recordPath)).toEqual(recordBytes);
     expect(await readFile(snapshotPath, "utf8")).toBe("{");
 
-    // The out-of-band sibling swap left the guard's parent binding stale, so
-    // the release preserved the guard generation (fail-closed, bounded by
-    // IDEMPOTENCY_TRANSITION_GUARD_STALE_MS). Simulate the elapsed staleness
-    // window so the replay drives immediately.
-    await unlink(
+    // Exact-A settlement removes the guard without deriving authority from B.
+    await expectPathMissing(
       join(recordDirectory, `${sha256Hex(`transition:${idempotencyKey}`)}.guard.json`)
     );
     swapArmed = false;

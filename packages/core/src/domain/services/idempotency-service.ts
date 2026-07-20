@@ -12,6 +12,7 @@ import { TaskServiceError, isSafeTaskId } from "./task-card-service";
 import {
   captureFailureFoldEntry,
   capturePostSettlementFailureFoldEntry,
+  failureLedger,
   runWithPreservedRelease,
   type FailureAsyncOutcome,
   type FailureFoldEntry
@@ -24,7 +25,7 @@ import {
 import {
   WorkspaceRecordConditionalDeleteError,
   cancelWorkspaceRecordCleanupPermit,
-  conditionalDeleteJsonRecordWithCleanupPermit,
+  conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement,
   createJsonRecordIfAbsent,
   createJsonRecordIfAbsentWithCleanupPermit,
   observeJsonRecordForCleanup,
@@ -617,7 +618,8 @@ export function createIdempotencyRecordService(
       const observation = await observeJsonRecordForCleanup(
         recordPath,
         evidenceRef,
-        IdempotencyRecordSchema
+        IdempotencyRecordSchema,
+        workspaceRoot
       );
       if (observation.status === "missing") {
         throw missingTransitionRecordError(
@@ -702,7 +704,8 @@ export function createIdempotencyRecordService(
         observation = await observeJsonRecordForCleanup(
           guardPath,
           evidenceRef,
-          IdempotencyTransitionGuardSchema
+          IdempotencyTransitionGuardSchema,
+          workspaceRoot
         );
         break;
       } catch (error) {
@@ -1430,7 +1433,8 @@ export function createIdempotencyRecordService(
             const exact = await observeJsonRecordForCleanup(
               recordPath,
               evidenceRef,
-              IdempotencyRecordSchema
+              IdempotencyRecordSchema,
+              workspaceRoot
             );
             if (exact.status === "missing") {
               retryWithCurrentAuthority = true;
@@ -1710,7 +1714,8 @@ export function createIdempotencyRecordService(
           const exact = await observeJsonRecordForCleanup(
             recordPath,
             evidenceRef,
-            IdempotencyRecordSchema
+            IdempotencyRecordSchema,
+            workspaceRoot
           );
           if (exact.status === "missing") {
             throw missingTransitionRecordError(
@@ -2042,12 +2047,6 @@ async function acquireIdempotencyTransitionGuard(
         },
         recoverTerminalRelease: async (assertDurablyFailed) =>
           await recoverOwnedIdempotencyTransitionGuardAfterTerminalReleaseFailure(
-            workspaceRoot,
-            scope,
-            key,
-            guardPath,
-            evidenceRef,
-            created.record,
             assertDurablyFailed
           )
       };
@@ -2086,7 +2085,8 @@ async function removeStaleIdempotencyTransitionGuard(
     observation = await observeJsonRecordForCleanup(
       guardPath,
       evidenceRef,
-      IdempotencyTransitionGuardSchema
+      IdempotencyTransitionGuardSchema,
+      workspaceRoot
     );
   } catch (error) {
     if (isRetryableWorkspaceRecordAuthorityContention(error)) return "blocked";
@@ -2151,7 +2151,8 @@ async function removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
     observation = await observeJsonRecordForCleanup(
       guardPath,
       evidenceRef,
-      IdempotencyTransitionGuardSchema
+      IdempotencyTransitionGuardSchema,
+      workspaceRoot
     );
   } catch (error) {
     if (isRetryableWorkspaceRecordAuthorityContention(error)) {
@@ -2192,57 +2193,9 @@ async function removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
 }
 
 async function recoverOwnedIdempotencyTransitionGuardAfterTerminalReleaseFailure(
-  workspaceRoot: string,
-  scope: IdempotencyScope,
-  key: string,
-  guardPath: string,
-  evidenceRef: string,
-  expected: IdempotencyTransitionGuard,
   assertDurablyFailed: () => Promise<void>
 ): Promise<void> {
-  let observation: WorkspaceJsonRecordCleanupObservation<IdempotencyTransitionGuard>;
-  try {
-    observation = await observeJsonRecordForCleanup(
-      guardPath,
-      evidenceRef,
-      IdempotencyTransitionGuardSchema
-    );
-  } catch (error) {
-    if (isRetryableWorkspaceRecordAuthorityContention(error)) {
-      throw transitionGuardBusyError(scope, key, "fail");
-    }
-    throw error;
-  }
-  if (observation.status === "missing") return;
-
-  await withOwnedIdempotencyTransitionObservation(
-    observation,
-    guardPath,
-    evidenceRef,
-    async (consume) => {
-      if (
-        observation.status !== "record" ||
-        !isSameIdempotencyTransitionGuard(observation.record, expected)
-      ) {
-        return;
-      }
-
-      const cleanupLock = await acquireIdempotencyTransitionCleanupLock(
-        workspaceRoot,
-        scope,
-        key,
-        evidenceRef
-      );
-      if (cleanupLock.status === "busy") {
-        throw transitionGuardBusyError(scope, key, "fail");
-      }
-
-      await runWithIdempotencyRelease(async () => {
-        await assertDurablyFailed();
-        await consume();
-      }, cleanupLock.release);
-    }
-  );
+  await assertDurablyFailed();
 }
 
 function assertValidIdempotencyTransitionGuardShape(
@@ -2339,19 +2292,20 @@ async function consumeObservedIdempotencyTransitionArtifact(
 ): Promise<boolean> {
   if (observation.status === "schema_threw") throw observation.error;
   try {
-    const result = await conditionalDeleteJsonRecordWithCleanupPermit(
-      observation.cleanupPermit,
-      path,
-      evidenceRef,
-      IdempotencyTransitionGuardSchema,
-      observation.status === "record"
-        ? {
-            kind: "record",
-            expected: observation.record,
-            matches: () => true
-          }
-        : { kind: "malformed" }
-    );
+    const result =
+      await conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+        observation.cleanupPermit,
+        path,
+        evidenceRef,
+        IdempotencyTransitionGuardSchema,
+        observation.status === "record"
+          ? {
+              kind: "record",
+              expected: observation.record,
+              matches: () => true
+            }
+          : { kind: "malformed" }
+      );
     return result.status !== "condition_not_met";
   } catch (error) {
     if (error instanceof WorkspaceRecordConditionalDeleteError) {
@@ -2405,7 +2359,11 @@ async function acquireIdempotencyTransitionCleanupLock(
       };
     }
 
-    if (await removeStaleIdempotencyTransitionCleanupLock(cleanupLockPath, evidenceRef)) {
+    if (await removeStaleIdempotencyTransitionCleanupLock(
+      workspaceRoot,
+      cleanupLockPath,
+      evidenceRef
+    )) {
       continue;
     }
 
@@ -2418,6 +2376,7 @@ async function acquireIdempotencyTransitionCleanupLock(
 }
 
 async function removeStaleIdempotencyTransitionCleanupLock(
+  workspaceRoot: string,
   cleanupLockPath: string,
   evidenceRef: string
 ): Promise<boolean> {
@@ -2426,7 +2385,8 @@ async function removeStaleIdempotencyTransitionCleanupLock(
     observation = await observeJsonRecordForCleanup(
       cleanupLockPath,
       evidenceRef,
-      IdempotencyTransitionGuardSchema
+      IdempotencyTransitionGuardSchema,
+      workspaceRoot
     );
   } catch (error) {
     if (isRetryableWorkspaceRecordAuthorityContention(error)) return false;
@@ -2454,7 +2414,7 @@ async function releaseOwnedIdempotencyTransitionArtifact(
   expected: IdempotencyTransitionGuard
 ): Promise<void> {
   try {
-    await conditionalDeleteJsonRecordWithCleanupPermit(
+    await conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
       cleanupPermit,
       path,
       evidenceRef,
@@ -2468,7 +2428,8 @@ async function releaseOwnedIdempotencyTransitionArtifact(
   } catch (error) {
     if (
       error instanceof WorkspaceRecordConditionalDeleteError &&
-      error.mutationPhase === "pre_mutation"
+      error.mutationPhase === "pre_mutation" &&
+      error.preMutationDisposition === "benign_convergence"
     ) {
       return;
     }
@@ -2515,11 +2476,13 @@ function malformedIdempotencyTransitionGuardError(
 }
 
 function isPreMutationIdempotencyArtifactAuthorityChange(error: unknown): boolean {
+  if (failureLedger(error)) return false;
   const taskServiceError = taskServiceErrorAtBoundary(error);
   return (
     taskServiceError !== undefined &&
     taskServiceError.cause instanceof WorkspaceRecordConditionalDeleteError &&
-    taskServiceError.cause.mutationPhase === "pre_mutation"
+    taskServiceError.cause.mutationPhase === "pre_mutation" &&
+    taskServiceError.cause.preMutationDisposition === "benign_convergence"
   );
 }
 

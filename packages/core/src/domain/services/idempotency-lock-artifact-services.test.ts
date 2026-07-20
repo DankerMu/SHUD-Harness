@@ -70,6 +70,7 @@ import {
   cancelWorkspaceRecordCleanupPermit,
   conditionalDeleteJsonRecord,
   conditionalDeleteJsonRecordWithCleanupPermit,
+  conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement,
   conditionalDeleteObservedJsonRecordWithCleanupPermit,
   createJsonRecordIfAbsent,
   createJsonRecordIfAbsentWithCleanupPermit,
@@ -16429,7 +16430,7 @@ describe("idempotency, lock, and artifact services", () => {
       });
       let matchingHookCalls = 0;
 
-      const failure = await captureThrownValue(() =>
+      const action = () =>
         runWithWorkspaceRecordPublicationHooks(
           {
             afterTemporaryFileWritten: ({ canonicalPath }) => {
@@ -16456,19 +16457,20 @@ describe("idempotency, lock, and artifact services", () => {
               requestDigest,
               resultRef
             })
-        )
-      );
+        );
+      const failure = failureClass === "pre_write"
+        ? await captureThrownValue(action)
+        : undefined;
+      const recovered = failureClass === "post_release"
+        ? await action()
+        : undefined;
 
-      expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
-      expect(matchingHookCalls).toBe(failureClass === "pre_write" ? 1 : 2);
+      expect(matchingHookCalls).toBe(1);
       if (failureClass === "pre_write") {
+        expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
         expect(semanticPrimaryError(failure)).toBe(marker);
       } else {
-        const compatible = taskServiceErrorAtBoundary(failure);
-        expect(compatible).toBeDefined();
-        expect(compatible!.message).toBe(
-          "Idempotency transition artifact release did not settle safely."
-        );
+        expect(recovered).toMatchObject({ status: "failed", request_digest: requestDigest });
       }
       expect(await service.getRecord("task", rawKey)).toMatchObject({
         status: failureClass === "pre_write" ? "completed" : "failed",
@@ -16828,7 +16830,7 @@ describe("idempotency, lock, and artifact services", () => {
     );
 
     expect(replacementWrites).toBe(1);
-    expect(recoveryError).toBeInstanceOf(TaskServiceError);
+    expect(taskServiceErrorAtBoundary(recoveryError)).toBeInstanceOf(TaskServiceError);
     expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(replacementGuard);
     expect(JSON.parse(await readFile(displacedPath, "utf8"))).toEqual(originalGuard);
     expect(await service.getRecord("task", rawKey)).toMatchObject({
@@ -16837,17 +16839,23 @@ describe("idempotency, lock, and artifact services", () => {
       result_ref: resultRef
     });
 
-    const blocked = await captureTaskServiceError(() =>
-      service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
+    const recoveredReplacement = await service.lookupReplay({
+      scope: "task",
+      key: rawKey,
+      requestDigest
+    });
+    expect(recoveredReplacement).toMatchObject({
+      status: "completed",
+      record: {
+        status: "completed",
+        request_digest: requestDigest,
+        result_ref: resultRef
+      }
+    });
+    await expectPathMissing(guardPath);
+    await expectPathMissing(
+      idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey)
     );
-    expect(blocked.status).toBe(409);
-    expect(blocked.retryable).toBe(true);
-    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(replacementGuard);
-    expect(
-      JSON.parse(
-        await readFile(idempotencyTransitionCleanupLockPath(workspaceRoot, rawKey), "utf8")
-      )
-    ).toMatchObject({ owner_pid: process.pid });
   });
 
   test("IdempotencyRecord completed invalidation requires exact digest and result_ref", async () => {
@@ -23793,7 +23801,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
-  test("owner guard and cleanup-lock releases inherit retained-parent rejection", async () => {
+  test("owner guard and cleanup-lock releases settle exact artifacts after sibling epoch advance", async () => {
     for (const artifact of ["guard", "cleanup-lock"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
       tempRoots.push(tempRoot);
@@ -23830,7 +23838,7 @@ describe("idempotency, lock, and artifact services", () => {
       expect(begin.status).toBe("acquired");
       expect(completed.status).toBe("completed");
       expect(drifted).toBe(true);
-      expect(await readFileWithIdentity(artifactPath)).toEqual(admitted);
+      await expectPathMissing(artifactPath);
       expect(await service.getRecord("task", rawKey)).toEqual(completed);
       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     }
@@ -24529,8 +24537,8 @@ describe("idempotency, lock, and artifact services", () => {
     };
     visit(sourceFile);
 
-    expect(releaseCalls).toHaveLength(9);
-    expect(releaseCalls.filter((call) => call.arguments.length === 2)).toHaveLength(7);
+    expect(releaseCalls).toHaveLength(8);
+    expect(releaseCalls.filter((call) => call.arguments.length === 2)).toHaveLength(6);
     const fulfilledValueSettlementCalls = releaseCalls.filter(
       (call) => call.arguments.length === 3
     );
@@ -24635,10 +24643,13 @@ describe("idempotency, lock, and artifact services", () => {
     expect(failure.message).toBe(
       "Idempotency transition artifact release did not settle safely."
     );
-    expect(failure.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    const releaseCause = failure.cause as WorkspaceRecordConditionalDeleteError;
-    expect(releaseCause.mutationPhase).toBe("post_mutation");
-    expect(releaseCause.failureStage).toBe("operation");
+    const releaseCause = findErrorNode(
+      failure.cause,
+      (error) => error instanceof WorkspaceRecordConditionalDeleteError
+    ) as WorkspaceRecordConditionalDeleteError | undefined;
+    expect(releaseCause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+    expect(releaseCause!.mutationPhase).toBe("post_mutation");
+    expect(releaseCause!.failureStage).toBe("operation");
     expect(errorTreeContains(releaseCause, releaseMarker)).toBe(true);
     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath, guardPath]);
     expect(await service.getRecord("task", rawKey)).toEqual(begin.record);
@@ -24713,10 +24724,13 @@ describe("idempotency, lock, and artifact services", () => {
     expect(publishRelease?.message).toBe(
       "Idempotency transition artifact release did not settle safely."
     );
-    expect(publishRelease?.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    const publishReleaseCause = publishRelease!.cause as WorkspaceRecordConditionalDeleteError;
-    expect(publishReleaseCause.mutationPhase).toBe("post_mutation");
-    expect(publishReleaseCause.failureStage).toBe("operation");
+    const publishReleaseCause = findErrorNode(
+      publishRelease?.cause,
+      (error) => error instanceof WorkspaceRecordConditionalDeleteError
+    ) as WorkspaceRecordConditionalDeleteError | undefined;
+    expect(publishReleaseCause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+    expect(publishReleaseCause!.mutationPhase).toBe("post_mutation");
+    expect(publishReleaseCause!.failureStage).toBe("operation");
     expect(errorTreeContains(publishReleaseCause, releaseMarker)).toBe(true);
 
     expect(failureGraphNodes(failure).some((node) => node.value === publishReleaseCause)).toBe(
@@ -24724,14 +24738,15 @@ describe("idempotency, lock, and artifact services", () => {
     );
     expect(countErrorNodes(failure, (error) => error === releaseMarker)).toBe(1);
     expect(countErrorNodes(failure, (error) => error === settlementMarker)).toBe(1);
-    expect(
-      countErrorNodes(
-        failure,
-        (error) =>
-          error instanceof TaskServiceError &&
-          error.message === "Workspace mutation namespace cleanup did not complete."
-      )
-    ).toBe(2);
+    expect(new Set(
+      failureGraphNodes(failure)
+        .map((node) => node.value)
+        .filter(
+          (error) =>
+            error instanceof TaskServiceError &&
+            error.message === "Workspace mutation namespace cleanup did not complete."
+        )
+    ).size).toBeGreaterThanOrEqual(2);
     const settlementOccurrence = failureEvents(failure).find(
       (event) => event.phase === "settlement"
     );
@@ -24741,13 +24756,13 @@ describe("idempotency, lock, and artifact services", () => {
     expect((guardSettlement as TaskServiceError).message).toBe(
       "Idempotency transition artifact release did not settle safely."
     );
-    expect((guardSettlement as TaskServiceError).cause).toBeInstanceOf(
-      WorkspaceRecordConditionalDeleteError
-    );
-    const guardSettlementCause = (guardSettlement as TaskServiceError)
-      .cause as WorkspaceRecordConditionalDeleteError;
-    expect(guardSettlementCause.mutationPhase).toBe("post_mutation");
-    expect(guardSettlementCause.failureStage).toBe("operation");
+    const guardSettlementCause = findErrorNode(
+      (guardSettlement as TaskServiceError).cause,
+      (error) => error instanceof WorkspaceRecordConditionalDeleteError
+    ) as WorkspaceRecordConditionalDeleteError | undefined;
+    expect(guardSettlementCause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+    expect(guardSettlementCause!.mutationPhase).toBe("post_mutation");
+    expect(guardSettlementCause!.failureStage).toBe("operation");
     expect(
       countErrorNodes(failure, (error) => error === guardSettlement)
     ).toBe(1);
@@ -24855,9 +24870,12 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(begin.status).toBe("acquired");
     expect(semanticPrimaryError(failure)).toBe(failure);
-    expect(failure.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    const releaseCause = failure.cause as WorkspaceRecordConditionalDeleteError;
-    expect(releaseCause.mutationPhase).toBe("post_mutation");
+    const releaseCause = findErrorNode(
+      failure.cause,
+      (error) => error instanceof WorkspaceRecordConditionalDeleteError
+    ) as WorkspaceRecordConditionalDeleteError | undefined;
+    expect(releaseCause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+    expect(releaseCause!.mutationPhase).toBe("post_mutation");
     expect(errorTreeContains(releaseCause, releaseMarker)).toBe(true);
     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath]);
     expect(await readFileWithIdentity(guardPath)).toEqual(existingGeneration);
@@ -24945,10 +24963,12 @@ describe("idempotency, lock, and artifact services", () => {
     expect(begin.status).toBe("acquired");
     expect(replacementInstalled).toBe(true);
     expect(semanticPrimaryError(failure)).toBe(failure);
-    expect(failure.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    expect((failure.cause as WorkspaceRecordConditionalDeleteError).mutationPhase).toBe(
-      "post_mutation"
-    );
+    const releaseCause = findErrorNode(
+      failure.cause,
+      (error) => error instanceof WorkspaceRecordConditionalDeleteError
+    ) as WorkspaceRecordConditionalDeleteError | undefined;
+    expect(releaseCause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+    expect(releaseCause!.mutationPhase).toBe("post_mutation");
     expect(failureHooks.conditionalDeletePaths).toEqual([cleanupLockPath]);
     expect(originalGuardGeneration).toBeDefined();
     expect(replacementGeneration).toBeDefined();
@@ -24967,7 +24987,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
-  test("idempotency post-mutation owner release keeps its exact cause after durable success", async () => {
+  test("idempotency post-mutation owner release recovers exact A after durable success", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
@@ -24979,8 +24999,7 @@ describe("idempotency, lock, and artifact services", () => {
     const service = createIdempotencyRecordService({ workspaceRoot });
     const begin = await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
 
-    const failure = await captureTaskServiceError(() =>
-      runWithWorkspaceRecordPublicationHooks(
+    const completed = await runWithWorkspaceRecordPublicationHooks(
         {
           beforeAuthorityOwnedUnlink: ({ path, operation }) => {
             if (path === guardPath && operation === "conditional_delete") {
@@ -24994,24 +25013,18 @@ describe("idempotency, lock, and artifact services", () => {
           requestDigest,
           resultRef: "TASK-post-mutation-owner-release"
         })
-      )
-    );
+      );
 
     expect(begin.status).toBe("acquired");
-    expect(failure.message).toBe(
-      "Idempotency transition artifact release did not settle safely."
-    );
-    expect(semanticPrimaryError(failure)).toBe(failure);
-    expect(failure.cause).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-    const conditionalFailure = failure.cause as WorkspaceRecordConditionalDeleteError;
-    expect(conditionalFailure.mutationPhase).toBe("post_mutation");
-    expect(conditionalFailure.failureStage).toBe("operation");
-    expect(countErrorNodes(failure, (error) => error === releaseMarker)).toBe(1);
+    expect(completed).toMatchObject({
+      status: "completed",
+      result_ref: "TASK-post-mutation-owner-release"
+    });
     expect(await service.getRecord("task", rawKey)).toMatchObject({
       status: "completed",
       result_ref: "TASK-post-mutation-owner-release"
     });
-    expect(await readFile(guardPath)).toBeDefined();
+    await expectPathMissing(guardPath);
     await expectPathMissing(cleanupLockPath);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
@@ -25090,14 +25103,25 @@ describe("idempotency, lock, and artifact services", () => {
               }
             }
           },
-          () => releaseClass === "cleanup-lock"
-            ? service.beginRecord({ scope: "task", key: rawKey, requestDigest })
-            : service.completeRecord({
-                scope: "task",
-                key: rawKey,
-                requestDigest,
-                resultRef: `TASK-body-release-${releaseClass}`
-              })
+          () =>
+            runWithWorkspaceRecordCompensationTestHooks(
+              {
+                beforeExactFailureSettlement: ({ path }) => {
+                  const releasePath = releaseClass === "guard"
+                    ? guardPath
+                    : cleanupLockPath;
+                  if (path === releasePath) throw releaseFailure;
+                }
+              },
+              () => releaseClass === "cleanup-lock"
+                ? service.beginRecord({ scope: "task", key: rawKey, requestDigest })
+                : service.completeRecord({
+                    scope: "task",
+                    key: rawKey,
+                    requestDigest,
+                    resultRef: `TASK-body-release-${releaseClass}`
+                  })
+            )
         )
       );
 
@@ -25127,16 +25151,12 @@ describe("idempotency, lock, and artifact services", () => {
       expect(await service.getRecord("task", rawKey)).toEqual(expectedRecord);
       if (expectedGuard) {
         expect(await readFileWithIdentity(guardPath)).toEqual(expectedGuard);
-      } else if (releaseClass === "publish-lock") {
+      } else if (releaseClass === "publish-lock" || releaseClass === "guard") {
         await expectPathMissing(guardPath);
       } else {
         expect(await readFile(guardPath)).toBeDefined();
       }
-      if (releaseClass === "guard") {
-        await expectPathMissing(cleanupLockPath);
-      } else {
-        expect(await readFile(cleanupLockPath)).toBeDefined();
-      }
+      await expectPathMissing(cleanupLockPath);
       expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     }
   });
@@ -29992,7 +30012,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(await service.getTaskFromSnapshot(taskId)).toEqual(task);
   });
 
-  test("S34-P62-16 shared consume and guard-release rejection transports the primary once, never as its own compensation", async () => {
+  test("S34-P62-16 shared consume rejection remains primary when exact guard release recovers", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const rawKey = "task:create:s34-p62-16-shared-rejection";
@@ -30038,32 +30058,16 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(consumeCalls).toBe(1);
     expect(releaseInjections).toBe(1);
-    // The shared rejection stays the exact semantic primary; the guard-release
-    // failure is folded as an ordered compensation through its typed wrapper.
-    expect(failure).not.toBe(shared);
-    expect(failureLedger(failure)).toBeDefined();
+    // The release's identical post-mutation marker is recovered by exact-A
+    // settlement, so the body rejection remains the only outer failure.
+    expect(failure).toBe(shared);
     expect(semanticPrimaryError(failure)).toBe(shared);
-    const compensationFailures = orderedDistinctCompensationFailures(failure);
-    // The primary is never duplicated into its own ordered compensation
-    // vector: no aggregate entry is the shared object itself.
-    expect(compensationFailures.some((entry) => entry === shared)).toBe(false);
-    const releaseWrappers = compensationFailures.filter(
-      (entry) =>
-        entry instanceof TaskServiceError &&
-        entry.message ===
-          "Idempotency transition artifact release did not settle safely."
-    );
-    expect(releaseWrappers).toHaveLength(1);
-    expect((releaseWrappers[0] as TaskServiceError).code).toBe(
-      "workspace_path_not_safe"
-    );
-    // The denied release still transports the injected denial inside the
-    // wrapper's cause graph — the single occurrence of the release failure.
-    expect(errorTreeContains(releaseWrappers[0], shared)).toBe(true);
+    expect(countErrorNodes(failure, (error) => error === shared)).toBe(1);
 
     // Nothing durable was destroyed: the completed record replays untouched
     // and every counted authority resource settled.
     expect(await service.getRecord("task", rawKey)).toEqual(completed);
+    await expectPathMissing(guardPath);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
   });
 
@@ -30336,7 +30340,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
-  test("S36-P62-01 guard-release compound retains initial/settlement cancellation ownership", async () => {
+  test("S36-P62-01 exact guard recovery returns rejected authority without failure settlement", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const key = "task:create:s36-guard-release-compound";
@@ -30365,8 +30369,7 @@ describe("idempotency, lock, and artifact services", () => {
     let releaseInjections = 0;
     let reasonCancellationCalls = 0;
 
-    const failure = await captureThrownValue(() =>
-      runWithWorkspaceRecordObservationHooksForTest(
+    const result = await runWithWorkspaceRecordObservationHooksForTest(
         {
           beforeAuthorityOwnedUnlink: ({ path, operation }) => {
             if (path !== guardPath || operation !== "conditional_delete") return;
@@ -30387,38 +30390,20 @@ describe("idempotency, lock, and artifact services", () => {
               }
             })
           )
-      )
-    );
+      );
+    expect(result.status).toBe("rejected");
+    if (result.status !== "rejected") throw new Error("Expected rejected decision.");
+    await service.cancelCompletedRecordMutationAuthority(result.mutationAuthority);
     await Promise.race([
       closeTracker.waitForAll(),
       timeoutAfter(1_000, "S36 guard-release compound descriptors did not close")
     ]);
 
     expect(releaseInjections).toBe(1);
-    expect(reasonCancellationCalls).toBe(1);
-    expect(failure).not.toBeInstanceOf(FailureOccurrenceProtocolError);
-    const events = failureEvents(failure);
-    expect(events.map((event) => event.phase)).toEqual([
-      "initial_release",
-      "settlement",
-      "settlement"
-    ]);
-    const guardReleaseFailure = events[0]!.value;
-    expect(taskServiceErrorAtBoundary(guardReleaseFailure)?.message).toBe(
-      "Idempotency transition artifact release did not settle safely."
-    );
-    expect(countErrorNodes(failure, (error) => error === releaseMarker)).toBe(1);
-    expect(events[1]!.value).toBe(reasonCancellation);
-    const cancellationCarrier = events[2]!.value;
-    expect(semanticPrimaryValue(cancellationCarrier)).toBe(reasonCancellation);
-    expect(countErrorNodes(failure, (error) => error === reasonCancellation)).toBe(1);
-    expect(new Set(events.map((event) => event.occurrenceId)).size).toBe(events.length);
-    expect(new Set(events.map((event) => event.order)).size).toBe(events.length);
-    expect(events.map((event) => event.order)).toEqual(
-      [...events.map((event) => event.order)].sort((left, right) => left - right)
-    );
+    expect(result.reason).toBe(rejectedReason);
+    expect(reasonCancellationCalls).toBe(0);
     expect(await service.getRecord("task", key)).toEqual(completed);
-    expect(await readFile(guardPath)).toBeDefined();
+    await expectPathMissing(guardPath);
     expect(closeTracker.count(recordPath)).toBe(1);
     expect(closeTracker.count(guardPath)).toBe(1);
     await expectFileDescriptorClosed(closeTracker.descriptors(recordPath)[0]!);
@@ -30517,7 +30502,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
-  test("S35-P62-01 exact invalidation preserves settlement before final guard release failure", async () => {
+  test("S35-P62-01 exact invalidation recovers guard release before durable-proof failure", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const key = "task:create:s35-settlement-final-release";
@@ -30584,16 +30569,10 @@ describe("idempotency, lock, and artifact services", () => {
     expect(failure).not.toBeInstanceOf(FailureOccurrenceProtocolError);
     expect(failureLedger(failure)).toBeDefined();
     expect(semanticPrimaryError(failure)).toBe(durableProofFailure);
-    const releaseView = failureEvents(failure)[1]!.value;
     expect(failureEvents(failure).map(({ phase, value }) => ({ phase, value }))).toEqual([
-      { phase: "settlement", value: durableProofFailure },
-      { phase: "final_release", value: releaseView }
+      { phase: "settlement", value: durableProofFailure }
     ]);
-    expect(taskServiceErrorAtBoundary(releaseView)).toMatchObject({
-      code: "workspace_path_not_safe",
-      message: "Idempotency transition artifact release did not settle safely."
-    });
-    expect(errorTreeContains(releaseView, guardReleaseFailure)).toBe(true);
+    expect(countErrorNodes(failure, (error) => error === guardReleaseFailure)).toBe(0);
     const orders = failureEvents(failure).map((event) => event.order);
     expect(new Set(orders).size).toBe(orders.length);
     expect(orders).toEqual([...orders].sort((left, right) => left - right));
@@ -30602,13 +30581,12 @@ describe("idempotency, lock, and artifact services", () => {
       request_digest: requestDigest
     });
     expect(await readFile(recordPath, "utf8")).not.toContain("result_ref");
-    await expect(access(guardPath)).resolves.toBeNull();
+    await expectPathMissing(guardPath);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
-    await unlink(guardPath);
   });
 
-  test("S35-P62-02 terminal guard recovery remains final after body and release failures", async () => {
+  test("S35-P62-02 exact guard settlement removes fresh terminal reobservation", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const key = "task:create:s35-body-release-recovery";
@@ -30673,35 +30651,23 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(bodyInjections).toBe(1);
     expect(releaseAttempts).toBe(1);
-    expect(recoveryAttempts).toBe(1);
-    expect(countErrorNodes(failure, (error) => error === releaseMarker)).toBe(1);
-    expect(countErrorNodes(failure, (error) => error === recoveryMarker)).toBe(1);
-    const events = failureEvents(failure);
-    expect(events.map((event) => event.phase)).toEqual([
-      "body",
-      "final_release",
-      "final_release"
-    ]);
-    const bodyFailure = events[0]!.value;
-    expect(bodyFailure).toBeInstanceOf(TaskServiceError);
-    expect(countErrorNodes(failure, (error) => error === bodyFailure)).toBe(1);
-    const recoveryFailure = events[2]!.value;
-    expect(recoveryFailure).toBeInstanceOf(TaskServiceError);
-    expect(countErrorNodes(failure, (error) => error === recoveryFailure)).toBe(1);
-    expect(new Set(events.map((event) => event.occurrenceId)).size).toBe(3);
-    expect(new Set(events.map((event) => event.order)).size).toBe(3);
-    expect(events.map((event) => event.order)).toEqual(
-      [...events.map((event) => event.order)].sort((left, right) => left - right)
-    );
+    expect(recoveryAttempts).toBe(0);
+    expect(countErrorNodes(failure, (error) => error === releaseMarker)).toBe(0);
+    expect(countErrorNodes(failure, (error) => error === recoveryMarker)).toBe(0);
+    expect(taskServiceErrorAtBoundary(failure)).toMatchObject({
+      code: "record_malformed",
+      status: 409
+    });
     expect(await service.getRecord("task", key)).toMatchObject({
       status: "failed",
       request_digest: requestDigest
     });
+    await expectPathMissing(guardPath);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
-  test("S35-P62-03 guard release remains final after durable failed-record proof rejects", async () => {
+  test("S35-P62-03 exact guard release recovers after durable failed-record proof rejects", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const key = "task:create:s35-durable-release";
@@ -30743,12 +30709,11 @@ describe("idempotency, lock, and artifact services", () => {
     expect(releaseAttempts).toBe(1);
     const events = failureEvents(failure);
     expect(events.map(({ phase, value }) => ({ phase, value }))).toEqual([
-      { phase: "settlement", value: durableMarker },
-      { phase: "final_release", value: events[1]!.value }
+      { phase: "settlement", value: durableMarker }
     ]);
-    expect(countErrorNodes(events[1]!.value, (error) => error === releaseMarker)).toBe(1);
-    expect(new Set(events.map((event) => event.occurrenceId)).size).toBe(2);
-    expect(new Set(events.map((event) => event.order)).size).toBe(2);
+    expect(countErrorNodes(failure, (error) => error === releaseMarker)).toBe(0);
+    expect(new Set(events.map((event) => event.occurrenceId)).size).toBe(1);
+    expect(new Set(events.map((event) => event.order)).size).toBe(1);
     expect(events.map((event) => event.order)).toEqual(
       [...events.map((event) => event.order)].sort((left, right) => left - right)
     );
@@ -30756,6 +30721,7 @@ describe("idempotency, lock, and artifact services", () => {
       status: "failed",
       request_digest: requestDigest
     });
+    await expectPathMissing(guardPath);
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
@@ -31372,6 +31338,683 @@ describe("idempotency, lock, and artifact services", () => {
     expect(boundedRehydrationSource).toContain(
       'errors.push(captureFailureFoldEntry("final_release", error))'
     );
+  });
+
+  test("private exact settlement terminal predicate and permit reuse matrix preserves public successors", async () => {
+    for (const terminal of ["condition_not_met", "deleted_then_b"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `private-terminal-${terminal}` };
+      const evidenceRef = `private.terminal.${terminal}`;
+      const directorySegments = ["private-terminal", terminal] as const;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, "record.json"],
+        evidenceRef
+      );
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const created = await createJsonRecordIfAbsentWithCleanupPermit(
+        workspaceRoot,
+        directorySegments,
+        "record.json",
+        record,
+        evidenceRef,
+        schema
+      );
+      if (created.status !== "created") throw new Error("Expected terminal fixture.");
+
+      const result = await conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+        created.cleanupPermit,
+        path,
+        evidenceRef,
+        schema,
+        {
+          kind: "record",
+          expected: record,
+          matches: () => terminal === "deleted_then_b"
+        }
+      );
+      expect(result).toEqual(
+        terminal === "condition_not_met"
+          ? { status: "condition_not_met" }
+          : { status: "deleted" }
+      );
+
+      const successorBytes = Buffer.from(`{"id":"successor-${terminal}"}\n`);
+      if (terminal === "deleted_then_b") {
+        await writeFile(path, successorBytes, { flag: "wx", mode: 0o600 });
+      }
+      const reuse = await captureConditionalDeleteError(() =>
+        conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+          created.cleanupPermit,
+          path,
+          evidenceRef,
+          schema,
+          { kind: "record", expected: record, matches: () => true }
+        )
+      );
+      expect(reuse.mutationPhase).toBe("pre_mutation");
+      expect(reuse.failureStage).toBe("permit_admission");
+      if (terminal === "deleted_then_b") {
+        expect(await readFile(path)).toEqual(successorBytes);
+        await unlink(path);
+      } else {
+        expect(await readJsonRecord(path, evidenceRef, schema)).toEqual(record);
+        expect(
+          await conditionalDeleteJsonRecord(path, evidenceRef, schema, {
+            kind: "record",
+            expected: record,
+            matches: () => true
+          })
+        ).toEqual({ status: "deleted" });
+      }
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("same private generation ticket coalesces concurrent settlement and preserves successor B", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "private-ticket-coalescing-a" };
+    const evidenceRef = "private.ticket.coalescing";
+    const directorySegments = ["private-ticket-coalescing"] as const;
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "record.json"],
+      evidenceRef
+    );
+    const successorBytes = Buffer.from('{"id":"private-ticket-coalescing-b"}\n');
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const closeTracker = createCleanupPermitCloseTracker([path]);
+    const created = await runWithWorkspaceRecordPublicationHooks(
+      { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
+      () =>
+        createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          directorySegments,
+          "record.json",
+          record,
+          evidenceRef,
+          schema
+        )
+    );
+    if (created.status !== "created") throw new Error("Expected coalescing fixture.");
+    const initialFailure = new Error("force private ticket settlement");
+    let canonicalSettlement: Promise<{ readonly status: "deleted" }> | undefined;
+    let repeatedSettlement: Promise<{ readonly status: "deleted" }> | undefined;
+    let privateUnlinkAttempts = 0;
+
+    const result = await runWithWorkspaceRecordCompensationTestHooks(
+      {
+        afterOwnedPathIsolation: async ({ site }) => {
+          if (site !== "conditional_delete") return;
+          await writeFile(path, successorBytes, { flag: "wx", mode: 0o600 });
+          throw initialFailure;
+        },
+        onExactFailureSettlementPromise: ({ settlement, settleSameTicket }) => {
+          canonicalSettlement = settlement;
+          repeatedSettlement = settleSameTicket();
+        },
+        beforeOwnedIsolatedSourceUnlink: ({ site }) => {
+          if (site === "exact_failure_settlement") privateUnlinkAttempts += 1;
+        }
+      },
+      () =>
+        conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+          created.cleanupPermit,
+          path,
+          evidenceRef,
+          schema,
+          { kind: "record", expected: record, matches: () => true }
+        )
+    );
+
+    expect(result).toEqual({ status: "recovered", settlement: "deleted" });
+    expect(canonicalSettlement).toBeDefined();
+    expect(repeatedSettlement).toBe(canonicalSettlement);
+    expect(await repeatedSettlement).toEqual({ status: "deleted" });
+    expect(privateUnlinkAttempts).toBe(1);
+    expect(await readFile(path)).toEqual(successorBytes);
+    await closeTracker.waitForAll();
+    expect(closeTracker.count(path)).toBe(1);
+    await expectFileDescriptorClosed(closeTracker.descriptors(path)[0]!);
+    await unlink(path);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("binding finalization records one shared rejection at both physical release points", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "private-shared-release" };
+    const evidenceRef = "private.shared-release";
+    const directorySegments = ["private-shared-release"] as const;
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "record.json"],
+      evidenceRef
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const created = await createJsonRecordIfAbsentWithCleanupPermit(
+      workspaceRoot,
+      directorySegments,
+      "record.json",
+      record,
+      evidenceRef,
+      schema
+    );
+    if (created.status !== "created") throw new Error("Expected shared-release fixture.");
+    const shared = new Error("shared physical release rejection");
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterCleanupPermitPinnedFileClose: () => {
+            throw shared;
+          },
+          afterRecordDirectoryBindingRelease: () => {
+            throw shared;
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+            created.cleanupPermit,
+            path,
+            evidenceRef,
+            schema,
+            { kind: "record", expected: record, matches: () => true }
+          )
+      )
+    );
+
+    expect(failureEvents(failure).map((event) => event.phase)).toEqual([
+      "initial_release",
+      "final_release"
+    ]);
+    expect(failureEvents(failure).map((event) => event.value)).toEqual([shared, shared]);
+    expect(failureEvents(failure)[0]?.occurrenceId).not.toBe(
+      failureEvents(failure)[1]?.occurrenceId
+    );
+    expect(orderedDistinctFailures(failure)).toEqual([shared]);
+    await expectPathMissing(path);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("early permit-admission action rejection keeps an undefined binding finalizer occurrence", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "private-early-admission-finalizer" };
+    const evidenceRef = "private.early-admission-finalizer";
+    const directorySegments = ["private-early-admission-finalizer"] as const;
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "record.json"],
+      evidenceRef
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const closeTracker = createCleanupPermitCloseTracker([path]);
+    const created = await runWithWorkspaceRecordPublicationHooks(
+      { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
+      () =>
+        createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          directorySegments,
+          "record.json",
+          record,
+          evidenceRef,
+          schema
+        )
+    );
+    if (created.status !== "created") throw new Error("Expected early-admission fixture.");
+    const publicGeneration = await readFileWithIdentity(path);
+
+    expect(
+      await conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+        created.cleanupPermit,
+        path,
+        evidenceRef,
+        schema,
+        { kind: "record", expected: record, matches: () => false }
+      )
+    ).toEqual({ status: "condition_not_met" });
+    await closeTracker.waitForAll();
+    expect(closeTracker.count(path)).toBe(1);
+    await expectFileDescriptorClosed(closeTracker.descriptors(path)[0]!);
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterRecordDirectoryBindingRelease: () => {
+            throw undefined;
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+            created.cleanupPermit,
+            path,
+            evidenceRef,
+            schema,
+            { kind: "record", expected: record, matches: () => true }
+          )
+      )
+    );
+
+    const primary = semanticPrimaryValue(failure);
+    expect(primary).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+    expect((primary as WorkspaceRecordConditionalDeleteError).mutationPhase).toBe(
+      "pre_mutation"
+    );
+    expect((primary as WorkspaceRecordConditionalDeleteError).failureStage).toBe(
+      "permit_admission"
+    );
+    expect(failureEvents(failure).map(({ phase, value }) => ({ phase, value }))).toEqual([
+      { phase: "initial_release", value: primary },
+      { phase: "final_release", value: undefined }
+    ]);
+    expect(orderedDistinctFailures(failure)).toEqual([primary, undefined]);
+    expect(await readFileWithIdentity(path)).toEqual(publicGeneration);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("idempotency owner-release consumer accepts explicit missing and superseded convergence", async () => {
+    for (const convergence of ["missing", "superseded"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:explicit-benign-${convergence}`;
+      const requestDigest = `digest-explicit-benign-${convergence}`;
+      const resultRef = `TASK-explicit-benign-${convergence}`;
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const displacedGuardPath = `${guardPath}.displaced`;
+      const successorBytes = Buffer.from(
+        `${JSON.stringify({
+          guard_id: `successor-${convergence}`,
+          owner_pid: process.pid,
+          acquired_at_ms: Date.now(),
+          acquired_at: new Date().toISOString()
+        })}\n`
+      );
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      const begin = await service.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      });
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let convergenceInjected = false;
+
+      const completed = await runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeConditionalDelete: async ({ path, conditionStatus }) => {
+            if (path !== guardPath) return;
+            expect(conditionStatus).toBe("matched");
+            convergenceInjected = true;
+            if (convergence === "missing") {
+              await unlink(guardPath);
+            } else {
+              await rename(guardPath, displacedGuardPath);
+              await writeFile(guardPath, successorBytes, { flag: "wx", mode: 0o600 });
+            }
+            throw new Error(`explicit ${convergence} convergence`);
+          }
+        },
+        () =>
+          service.completeRecord({
+            scope: "task",
+            key: rawKey,
+            requestDigest,
+            resultRef
+          })
+      );
+
+      expect(begin.status).toBe("acquired");
+      expect(convergenceInjected).toBe(true);
+      expect(completed).toMatchObject({ status: "completed", result_ref: resultRef });
+      expect(await service.getRecord("task", rawKey)).toMatchObject({
+        status: "completed",
+        result_ref: resultRef
+      });
+      if (convergence === "missing") {
+        await expectPathMissing(guardPath);
+      } else {
+        expect(await readFile(guardPath)).toEqual(successorBytes);
+        expect(await readFile(displacedGuardPath)).toBeDefined();
+      }
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("idempotency owner-release consumer propagates ordinary and ledger-carried pre-mutation failures", async () => {
+    for (const failureClass of ["ordinary", "ledger_carried"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:pre-mutation-${failureClass}`;
+      const requestDigest = `digest-pre-mutation-${failureClass}`;
+      const resultRef = `TASK-pre-mutation-${failureClass}`;
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const callbackFailure = new Error(`pre-mutation callback ${failureClass}`);
+      const finalReleaseFailure = new Error(`final release ${failureClass}`);
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      const begin = await service.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      });
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let failureInjected = false;
+
+      const failure = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            afterCleanupPermitPinnedFileClose: ({ path }) => {
+              if (failureClass === "ledger_carried" && path === guardPath) {
+                throw finalReleaseFailure;
+              }
+            }
+          },
+          () =>
+            runWithWorkspaceRecordPublicationHooks(
+              {
+                beforeConditionalDelete: async ({ path, conditionStatus }) => {
+                  if (path !== guardPath) return;
+                  expect(conditionStatus).toBe("matched");
+                  failureInjected = true;
+                  if (failureClass === "ledger_carried") await unlink(guardPath);
+                  throw callbackFailure;
+                }
+              },
+              () =>
+                service.completeRecord({
+                  scope: "task",
+                  key: rawKey,
+                  requestDigest,
+                  resultRef
+                })
+            )
+        )
+      );
+
+      expect(begin.status).toBe("acquired");
+      expect(failureInjected).toBe(true);
+      expect(failure.message).toBe(
+        "Idempotency transition artifact release did not settle safely."
+      );
+      const conditionalFailure = findErrorNode(
+        failure.cause,
+        (error) => error instanceof WorkspaceRecordConditionalDeleteError
+      ) as WorkspaceRecordConditionalDeleteError | undefined;
+      expect(conditionalFailure).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+      expect(conditionalFailure!.mutationPhase).toBe("pre_mutation");
+      expect(conditionalFailure!.failureStage).toBe("operation");
+      expect(conditionalFailure!.preMutationDisposition).toBe(
+        failureClass === "ledger_carried" ? "benign_convergence" : undefined
+      );
+      if (failureClass === "ordinary") {
+        expect(failureLedger(failure.cause)).toBeUndefined();
+        expect(await readFile(guardPath)).toBeDefined();
+      } else {
+        expect(failureLedger(failure.cause)).toBeDefined();
+        expect(errorTreeContains(failure.cause, finalReleaseFailure)).toBe(true);
+        await expectPathMissing(guardPath);
+      }
+      expect(await service.getRecord("task", rawKey)).toMatchObject({
+        status: "completed",
+        result_ref: resultRef
+      });
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("private proof drift is irreversible after hardlink or namespace-mode restoration", async () => {
+    for (const drift of ["hardlink", "namespace_mode"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `private-irreversible-${drift}` };
+      const evidenceRef = `private.irreversible.${drift}`;
+      const directorySegments = ["private-irreversible", drift] as const;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, "record.json"],
+        evidenceRef
+      );
+      const successorBytes = Buffer.from(`{"id":"successor-${drift}"}\n`);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const closeTracker = createCleanupPermitCloseTracker([path]);
+      const created = await runWithWorkspaceRecordPublicationHooks(
+        { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
+        () =>
+          createJsonRecordIfAbsentWithCleanupPermit(
+            workspaceRoot,
+            directorySegments,
+            "record.json",
+            record,
+            evidenceRef,
+            schema
+          )
+      );
+      if (created.status !== "created") throw new Error("Expected drift fixture.");
+      let privatePath = "";
+      let privateProofs = 0;
+      let privateUnlinkAttempts = 0;
+      let canonicalSettlement: Promise<{ readonly status: "deleted" }> | undefined;
+      let settleSameTicket:
+        | (() => Promise<{ readonly status: "deleted" }>)
+        | undefined;
+      let settlementRejection: unknown;
+      let restoreDrift: (() => Promise<void>) | undefined;
+      let restoration: Promise<void> | undefined;
+
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            afterOwnedPathIsolation: async ({ site, isolatedPath }) => {
+              if (site !== "conditional_delete") return;
+              privatePath = isolatedPath;
+              await writeFile(path, successorBytes, { flag: "wx", mode: 0o600 });
+              throw new Error(`initial ${drift}`);
+            },
+            onExactFailureSettlementPromise: ({ settlement, settleSameTicket: settle }) => {
+              canonicalSettlement = settlement;
+              settleSameTicket = settle;
+              restoration = settlement.then(
+                () => undefined,
+                async (error) => {
+                  settlementRejection = error;
+                  await restoreDrift?.();
+                }
+              );
+            },
+            beforeCleanupPermitPinnedGenerationProof: ({ path: proofPath }) => {
+              if (proofPath === path) privateProofs += 1;
+            },
+            beforeOwnedIsolatedSourceUnlink: async ({ site, attempt }) => {
+              if (site !== "exact_failure_settlement") return;
+              privateUnlinkAttempts += 1;
+              if (attempt !== 1) return;
+              if (drift === "hardlink") {
+                const alias = join(tempRoot, "transient-private-alias");
+                await link(privatePath, alias);
+                restoreDrift = async () => await unlink(alias);
+              } else {
+                await chmod(dirname(privatePath), 0o755);
+                restoreDrift = async () => await chmod(dirname(privatePath), 0o700);
+              }
+            }
+          },
+          () =>
+            conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+              created.cleanupPermit,
+              path,
+              evidenceRef,
+              schema,
+              { kind: "record", expected: record, matches: () => true }
+            )
+        )
+      );
+      await restoration;
+      const settledPrivateProofs = privateProofs;
+      const settledPrivateUnlinkAttempts = privateUnlinkAttempts;
+      expect(canonicalSettlement).toBeDefined();
+      expect(settleSameTicket).toBeDefined();
+      const repeatedSettlement = settleSameTicket!();
+      expect(repeatedSettlement).toBe(canonicalSettlement);
+      expect(await captureThrownValue(() => repeatedSettlement)).toBe(
+        settlementRejection
+      );
+      expect(privateProofs).toBe(settledPrivateProofs);
+      expect(privateUnlinkAttempts).toBe(settledPrivateUnlinkAttempts);
+      await closeTracker.waitForAll();
+
+      expect(
+        findErrorNode(
+          failure,
+          (error) => error instanceof WorkspaceRecordConditionalDeleteError
+        )
+      ).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+      expect(privateUnlinkAttempts).toBe(1);
+      expect(failureEvents(failure).map((event) => event.phase)).toContain("settlement");
+      expect(await readFile(path)).toEqual(successorBytes);
+      expect(await readFile(privatePath)).toEqual(
+        Buffer.from(`${JSON.stringify(record, null, 2)}\n`)
+      );
+      expect(closeTracker.count(path)).toBe(1);
+      await expectFileDescriptorClosed(closeTracker.descriptors(path)[0]!);
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("private settlement failures keep truthful phase vectors and release every counted resource", async () => {
+    for (const failureSite of [
+      "permanent_unlink",
+      "namespace_cleanup",
+      "pinned_close",
+      "binding_release"
+    ] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const schema = z.object({ id: z.string() });
+      const record = { id: `private-resource-${failureSite}` };
+      const evidenceRef = `private.resource.${failureSite}`;
+      const directorySegments = ["private-resource", failureSite] as const;
+      const path = workspaceRecordPath(
+        workspaceRoot,
+        [...directorySegments, "record.json"],
+        evidenceRef
+      );
+      const successorBytes = Buffer.from(`{"id":"successor-${failureSite}"}\n`);
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      const closeTracker = createCleanupPermitCloseTracker([path]);
+      const created = await runWithWorkspaceRecordPublicationHooks(
+        { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
+        () =>
+          createJsonRecordIfAbsentWithCleanupPermit(
+            workspaceRoot,
+            directorySegments,
+            "record.json",
+            record,
+            evidenceRef,
+            schema
+          )
+      );
+      if (created.status !== "created") throw new Error("Expected resource fixture.");
+      const initialFailure = new Error(`initial ${failureSite}`);
+      const injectedFailure = new Error(`injected ${failureSite}`);
+      let privateNamespace = "";
+      let privateUnlinkAttempts = 0;
+
+      const failure = await captureThrownValue(() =>
+        runWithWorkspaceRecordPublicationHooks(
+          failureSite === "namespace_cleanup"
+            ? {
+                beforeAuthorityNamespaceRemoval: ({ path: namespacePath }) => {
+                  if (namespacePath === privateNamespace) throw injectedFailure;
+                }
+              }
+            : {},
+          () =>
+            runWithWorkspaceRecordCompensationTestHooks(
+              {
+                afterOwnedPathIsolation: async ({ site, isolatedPath }) => {
+                  if (site !== "conditional_delete") return;
+                  privateNamespace = dirname(isolatedPath);
+                  await writeFile(path, successorBytes, { flag: "wx", mode: 0o600 });
+                  throw initialFailure;
+                },
+                beforeOwnedIsolatedSourceUnlink: ({ site }) => {
+                  if (site !== "exact_failure_settlement") return;
+                  privateUnlinkAttempts += 1;
+                  if (failureSite === "permanent_unlink") throw injectedFailure;
+                },
+                beforeTerminalAuthorityNamespaceRemovalSyscall: async ({ path: namespacePath }) => {
+                  if (
+                    failureSite === "namespace_cleanup" &&
+                    namespacePath === privateNamespace
+                  ) {
+                    await writeFile(join(namespacePath, "cleanup-blocker"), "block\n", {
+                      flag: "wx"
+                    });
+                  }
+                },
+                afterCleanupPermitPinnedFileClose: () => {
+                  if (failureSite === "pinned_close") throw injectedFailure;
+                },
+                afterRecordDirectoryBindingRelease: () => {
+                  if (failureSite === "binding_release") throw injectedFailure;
+                }
+              },
+              () =>
+                conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+                  created.cleanupPermit,
+                  path,
+                  evidenceRef,
+                  schema,
+                  { kind: "record", expected: record, matches: () => true }
+                )
+            )
+        )
+      );
+
+      expect(
+        findErrorNode(
+          failure,
+          (error) => error instanceof WorkspaceRecordConditionalDeleteError
+        )
+      ).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+      expect(await readFile(path)).toEqual(successorBytes);
+      const phases = failureEvents(failure).map((event) => event.phase);
+      expect(phases[0]).toBe("initial_release");
+      if (failureSite === "pinned_close" || failureSite === "binding_release") {
+        expect(phases).toContain("final_release");
+      } else {
+        expect(phases).toContain("settlement");
+        expect(phases).not.toContain("final_release");
+      }
+      if (failureSite === "permanent_unlink") expect(privateUnlinkAttempts).toBe(3);
+      await closeTracker.waitForAll();
+      for (const fd of closeTracker.descriptors(path)) {
+        if (fd >= 0) await expectFileDescriptorClosed(fd);
+      }
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
   });
 });
 
