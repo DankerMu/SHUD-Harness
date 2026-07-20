@@ -61,8 +61,11 @@ The verifier exited 0 after both `git apply --check` commands and strict cleanup
 `replay-lifecycle.sh` atomically acquires a fixed claim symlink whose value is a
 per-invocation token. One short child transaction ignores HUP/INT/TERM, wins or
 loses atomic `mkdir`, and publishes the same token inside the root only after
-its own `mkdir` succeeds. The parent latches signals while waiting and accepts
-ownership only when child success, claim token, and root token all agree. A
+its own `mkdir` succeeds. Every parent path after child spawn converges on one
+settlement boundary: it publishes the release barrier when possible, otherwise
+force-reaps the child, waits, reconciles the exact outcome and ownership tokens,
+and only then propagates the write-once status. The parent accepts ownership
+only when child success, claim token, and root token all agree. A
 same-name or non-cooperating loser returns 73 without publishing a marker or
 touching the target; a pre-existing foreign target remains byte-for-byte
 unchanged. EXIT cleanup masks EXIT/HUP/INT/TERM as its first command, then
@@ -72,8 +75,8 @@ cleanup armed, then immediately exits through that cleanup when the same
 write-once latch is already set; strict teardown only begins from a clear
 latch.
 
-The self-test passed 46/46 named scenarios. Seven are two-party races with
-14 explicit participant outcomes:
+The self-test passed 48/48 named scenarios. Nine are two-party races with
+18 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -90,7 +93,10 @@ The self-test passed 46/46 named scenarios. Seven are two-party races with
   returns 143, 143, and 129 respectively and both participants leave no
   residue;
 - HUP, INT, TERM, HUP→INT, INT→TERM, and TERM→HUP delivered to an isolated
-  process group while the external root-creation child is live; and
+  process group while the external root-creation child is live;
+- TERM interrupting the outcome read preserves 143 after reconciling committed
+  ownership, while injected release-publication failure preserves transaction
+  status 67 after force-reaping the unreleased child; and
 - verifier/harness collision helpers forced to observe child status 42 plus
   marker-created assertion-window TERM and HUP→INT paths.
 

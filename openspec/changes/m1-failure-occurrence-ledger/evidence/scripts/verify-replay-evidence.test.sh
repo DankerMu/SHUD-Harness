@@ -20,6 +20,8 @@ fixture_marker_checksum=
 aux_ready=
 aux_release=
 aux_signals_ready=
+transaction_fault_dir=
+transaction_pid_file=
 passed=0
 harness_owner_token=${SHUD_REPLAY_TEST_OWNER_TOKEN:-harness.$$}
 # Reset background-job INT before the held child installs its own handlers.
@@ -91,6 +93,9 @@ cleanup_test_parent() {
   if [ -n "$aux_ready" ]; then rm "$aux_ready" >/dev/null 2>&1 || true; fi
   if [ -n "$aux_release" ]; then rm "$aux_release" >/dev/null 2>&1 || true; fi
   if [ -n "$aux_signals_ready" ]; then rm "$aux_signals_ready" >/dev/null 2>&1 || true; fi
+  if [ -n "$transaction_fault_dir" ] && [ -d "$transaction_fault_dir" ]; then
+    rm -rf "$transaction_fault_dir" >/dev/null 2>&1 || true
+  fi
   lifecycle_cleanup_root_failure
   exit "$lifecycle_first_status"
 }
@@ -453,10 +458,181 @@ run_acquisition_signal_case() {
   record_pass
 }
 
+cleanup_transaction_fault_residue() {
+  cleanup_root=$1
+  cleanup_claim=$2
+  cleanup_token=$3
+
+  if [ -n "$transaction_pid_file" ] && [ -f "$transaction_pid_file" ]; then
+    while IFS= read -r cleanup_pid; do
+      case "$cleanup_pid" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      kill -KILL "$cleanup_pid" >/dev/null 2>&1 || true
+    done <"$transaction_pid_file"
+  fi
+  cleanup_attempt=0
+  while [ "$cleanup_attempt" -lt 20 ]; do
+    cleanup_live=0
+    if [ -n "$transaction_pid_file" ] && [ -f "$transaction_pid_file" ]; then
+      while IFS= read -r cleanup_pid; do
+        case "$cleanup_pid" in
+          ''|*[!0-9]*) continue ;;
+        esac
+        if kill -0 "$cleanup_pid" >/dev/null 2>&1; then cleanup_live=1; fi
+      done <"$transaction_pid_file"
+    fi
+    if [ "$cleanup_live" -eq 0 ]; then break; fi
+    cleanup_attempt=$((cleanup_attempt + 1))
+    sleep 0.05
+  done
+
+  for cleanup_link in "$cleanup_claim".transaction.*; do
+    if [ -L "$cleanup_link" ]; then
+      cleanup_value=$(readlink "$cleanup_link") || cleanup_value=
+      case "$cleanup_value" in
+        "$cleanup_token"|"$cleanup_token":*) rm "$cleanup_link" >/dev/null 2>&1 || true ;;
+      esac
+    fi
+  done
+  if lifecycle_link_matches "$cleanup_root/.shud-replay-owner" "$cleanup_token"; then
+    rm "$cleanup_root/.shud-replay-owner" >/dev/null 2>&1 || true
+  fi
+  rmdir "$cleanup_root" >/dev/null 2>&1 || true
+  if lifecycle_link_matches "$cleanup_claim" "$cleanup_token"; then
+    rm "$cleanup_claim" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$transaction_fault_dir" >/dev/null 2>&1 || true
+  transaction_fault_dir=
+  transaction_pid_file=
+}
+
+run_transaction_settlement_case() {
+  case_name=$1
+  fault_kind=$2
+  expected=$3
+  root_name="case-$case_name"
+  child_token="transaction-$case_name"
+  child_root="$lifecycle_root/$root_name"
+  child_claim="$lifecycle_root/.$root_name.claim"
+  child_marker="$child_root/.shud-replay-owner"
+  transaction_fault_dir="$lifecycle_root/$case_name.fault-bin"
+  transaction_pid_file="$transaction_fault_dir/creation-pids"
+  fault_event="$transaction_fault_dir/fault-fired"
+  mkdir -m 700 "$transaction_fault_dir"
+
+  case "$fault_kind" in
+    outcome_read_term)
+      cat >"$transaction_fault_dir/readlink" <<'EOF'
+#!/bin/sh
+case "$1" in
+  *.transaction.*.outcome)
+    if [ ! -e "$SHUD_REPLAY_TEST_FAULT_EVENT" ]; then
+      /bin/ps -axo pid=,ppid= |
+        /usr/bin/awk -v parent="$PPID" -v self="$$" '$2 == parent && $1 != self { print $1 }' \
+          >>"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+      : >"$SHUD_REPLAY_TEST_FAULT_EVENT"
+      kill -s TERM "$PPID"
+      exit 1
+    fi
+    ;;
+esac
+exec /usr/bin/readlink "$@"
+EOF
+      chmod 700 "$transaction_fault_dir/readlink"
+      ;;
+    release_publication_failure)
+      cat >"$transaction_fault_dir/ln" <<'EOF'
+#!/bin/sh
+last_arg=
+for arg do last_arg=$arg; done
+case "$last_arg" in
+  *.transaction.*.release)
+    /bin/ps -axo pid=,ppid= |
+      /usr/bin/awk -v parent="$PPID" -v self="$$" '$2 == parent && $1 != self { print $1 }' \
+        >>"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+    : >"$SHUD_REPLAY_TEST_FAULT_EVENT"
+    exit 67
+    ;;
+esac
+exec /bin/ln "$@"
+EOF
+      chmod 700 "$transaction_fault_dir/ln"
+      ;;
+    *)
+      echo "unknown transaction fault: $fault_kind" >&2
+      return 1
+      ;;
+  esac
+
+  set +e
+  PATH="$transaction_fault_dir:$PATH" \
+    SHUD_REPLAY_TEST_FAULT_EVENT="$fault_event" \
+    SHUD_REPLAY_TEST_CREATION_PID_FILE="$transaction_pid_file" \
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+    "$verifier" >/dev/null 2>&1
+  actual=$?
+  set -e
+
+  settlement_failed=0
+  if [ "$actual" -ne "$expected" ]; then
+    echo "$case_name exited $actual, expected $expected" >&2
+    settlement_failed=1
+  fi
+  if [ ! -s "$transaction_pid_file" ]; then
+    echo "$case_name did not identify the spawned creation child" >&2
+    settlement_failed=1
+  else
+    while IFS= read -r child_pid; do
+      case "$child_pid" in
+        ''|*[!0-9]*)
+          echo "$case_name recorded invalid creation pid: $child_pid" >&2
+          settlement_failed=1
+          ;;
+        *)
+          if kill -0 "$child_pid" >/dev/null 2>&1; then
+            echo "$case_name retained live creation child $child_pid" >&2
+            settlement_failed=1
+          fi
+          ;;
+      esac
+    done <"$transaction_pid_file"
+  fi
+  if find "$lifecycle_root" -maxdepth 1 -name ".$root_name.claim.transaction.*" -print -quit |
+    grep . >/dev/null; then
+    echo "$case_name retained transaction links" >&2
+    settlement_failed=1
+  fi
+  if [ -e "$child_claim" ] || [ -L "$child_claim" ]; then
+    echo "$case_name retained its claim" >&2
+    settlement_failed=1
+  fi
+  if [ -e "$child_marker" ] || [ -L "$child_marker" ]; then
+    echo "$case_name retained its owner marker" >&2
+    settlement_failed=1
+  fi
+  if [ -e "$child_root" ] || [ -L "$child_root" ]; then
+    echo "$case_name retained its root" >&2
+    settlement_failed=1
+  fi
+  if test_worktree_is_registered "$child_root/round-1" ||
+    test_worktree_is_registered "$child_root/round-2"; then
+    echo "$case_name retained a registered worktree" >&2
+    settlement_failed=1
+  fi
+
+  cleanup_transaction_fault_residue "$child_root" "$child_claim" "$child_token"
+  if [ "$settlement_failed" -ne 0 ]; then return 1; fi
+  record_pass
+}
+
 case "$self_test_scenario" in
   matrix|harness_startup_term|harness_double_hup_int|harness_hold_after_root|\
     collision_verifier_child_42|collision_harness_child_42|\
-    assertion_signal_term|assertion_double_hup_int)
+    assertion_signal_term|assertion_double_hup_int|\
+    transaction_outcome_read_term|transaction_release_publication_failure)
     ;;
   *)
     echo "unknown replay self-test scenario: $self_test_scenario" >&2
@@ -507,6 +683,22 @@ case "$self_test_scenario" in
     kill -s HUP "$$"
     kill -s INT "$$"
     lifecycle_abort_if_latched
+    ;;
+  transaction_outcome_read_term)
+    run_transaction_settlement_case outcome_read_term outcome_read_term 143
+    ;;
+  transaction_release_publication_failure)
+    run_transaction_settlement_case release_publication_failure release_publication_failure 67
+    ;;
+esac
+
+case "$self_test_scenario" in
+  transaction_outcome_read_term|transaction_release_publication_failure)
+    lifecycle_begin_successful_finalization
+    lifecycle_release_root_strict 84
+    trap - EXIT HUP INT TERM
+    echo "replay transaction settlement probe: 1/1 passed"
+    exit 0
     ;;
 esac
 
@@ -568,11 +760,15 @@ run_harness_case forced_harness_child_42 collision_harness_child_42 42
 run_harness_case assertion_signal_term assertion_signal_term 143
 run_harness_case assertion_double_hup_int assertion_double_hup_int 129
 
-if [ "$passed" -ne 46 ]; then
-  echo "replay scenario accounting mismatch: $passed/46" >&2
+# Every post-spawn fault settles the creation child before ownership cleanup.
+run_transaction_settlement_case outcome_read_term outcome_read_term 143
+run_transaction_settlement_case release_publication_failure release_publication_failure 67
+
+if [ "$passed" -ne 48 ]; then
+  echo "replay scenario accounting mismatch: $passed/48" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 46/46 named scenarios passed (7 two-party races, 14 participant outcomes)"
+echo "replay evidence lifecycle: 48/48 named scenarios passed (9 two-party races, 18 participant outcomes)"

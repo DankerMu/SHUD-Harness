@@ -16,6 +16,7 @@ lifecycle_root_owned=0
 lifecycle_transaction_ready=
 lifecycle_transaction_release=
 lifecycle_transaction_outcome=
+lifecycle_create_pid=
 
 lifecycle_latch_status() {
   if [ -z "$lifecycle_first_status" ]; then
@@ -203,6 +204,76 @@ lifecycle_wait_for_link() {
   done
 }
 
+lifecycle_wait_for_creation_child() {
+  while :; do
+    wait "$lifecycle_create_pid" >/dev/null 2>&1 || true
+    if ! kill -0 "$lifecycle_create_pid" >/dev/null 2>&1; then
+      break
+    fi
+  done
+}
+
+lifecycle_mask_latched_signals() {
+  if [ -n "$lifecycle_first_status" ]; then
+    trap '' HUP INT TERM
+  fi
+}
+
+lifecycle_link_matches_during_settlement() {
+  lifecycle_settlement_match_path=$1
+  lifecycle_settlement_match_token=$2
+  lifecycle_mask_latched_signals
+  if lifecycle_link_matches "$lifecycle_settlement_match_path" "$lifecycle_settlement_match_token"; then
+    return 0
+  fi
+  if [ -n "$lifecycle_first_status" ]; then
+    trap '' HUP INT TERM
+    lifecycle_link_matches "$lifecycle_settlement_match_path" "$lifecycle_settlement_match_token"
+    return $?
+  fi
+  return 1
+}
+
+lifecycle_settle_creation_transaction() {
+  lifecycle_settlement_status=$1
+  lifecycle_release_published=$2
+
+  if [ "$lifecycle_release_published" -ne 1 ] &&
+    kill -0 "$lifecycle_create_pid" >/dev/null 2>&1; then
+    kill -KILL "$lifecycle_create_pid" >/dev/null 2>&1 || true
+  fi
+  lifecycle_wait_for_creation_child
+  lifecycle_mask_latched_signals
+
+  lifecycle_outcome_value=
+  if [ -L "$lifecycle_transaction_outcome" ]; then
+    lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || {
+      lifecycle_outcome_value=
+      lifecycle_settlement_status=67
+    }
+    if [ -z "$lifecycle_outcome_value" ] && [ -n "$lifecycle_first_status" ]; then
+      trap '' HUP INT TERM
+      lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || lifecycle_outcome_value=
+    fi
+  fi
+
+  # Ownership is a physical fact independent of the command status. Record it
+  # only after the child is reaped so EXIT cleanup cannot race later creation.
+  if lifecycle_link_matches_during_settlement "$lifecycle_claim" "$lifecycle_token" &&
+    lifecycle_link_matches_during_settlement "$lifecycle_marker" "$lifecycle_token"; then
+    lifecycle_root_owned=1
+  fi
+
+  if [ "$lifecycle_settlement_status" -ne 0 ]; then
+    return "$lifecycle_settlement_status"
+  fi
+  case "$lifecycle_outcome_value" in
+    "$lifecycle_token":0) return 0 ;;
+    "$lifecycle_token":73) return 73 ;;
+    *) return 67 ;;
+  esac
+}
+
 lifecycle_run_creation_transaction() {
   lifecycle_external_ready=${SHUD_REPLAY_TEST_CREATE_BARRIER_READY:-}
   lifecycle_external_release=${SHUD_REPLAY_TEST_CREATE_BARRIER_RELEASE:-}
@@ -232,25 +303,32 @@ lifecycle_run_creation_transaction() {
     exit "$lifecycle_child_status"
   ) &
   lifecycle_create_pid=$!
+  if [ -n "${SHUD_REPLAY_TEST_CREATION_PID_FILE:-}" ]; then
+    printf '%s\n' "$lifecycle_create_pid" >"$SHUD_REPLAY_TEST_CREATION_PID_FILE" || true
+  fi
 
+  lifecycle_settlement_status=0
+  lifecycle_release_published=0
   if ! lifecycle_wait_for_link "$lifecycle_transaction_ready" "$lifecycle_create_pid"; then
-    wait "$lifecycle_create_pid" >/dev/null 2>&1 || true
-    return 67
+    lifecycle_settlement_status=67
+  else
+    lifecycle_inject_acquisition_signals
+    ln -s "$lifecycle_token" "$lifecycle_transaction_release" >/dev/null 2>&1 || true
+    if lifecycle_link_matches_during_settlement "$lifecycle_transaction_release" "$lifecycle_token"; then
+      lifecycle_release_published=1
+    else
+      lifecycle_settlement_status=67
+    fi
   fi
-  lifecycle_inject_acquisition_signals
-  ln -s "$lifecycle_token" "$lifecycle_transaction_release" || return 67
 
-  if ! lifecycle_wait_for_link "$lifecycle_transaction_outcome" "$lifecycle_create_pid"; then
-    wait "$lifecycle_create_pid" >/dev/null 2>&1 || true
-    return 67
+  if [ "$lifecycle_release_published" -eq 1 ] &&
+    ! lifecycle_wait_for_link "$lifecycle_transaction_outcome" "$lifecycle_create_pid"; then
+    lifecycle_settlement_status=67
   fi
-  lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || return 67
-  wait "$lifecycle_create_pid" >/dev/null 2>&1 || true
-  case "$lifecycle_outcome_value" in
-    "$lifecycle_token":0) return 0 ;;
-    "$lifecycle_token":73) return 73 ;;
-    *) return 67 ;;
-  esac
+  if [ "$lifecycle_release_published" -eq 1 ] && [ -L "$lifecycle_transaction_outcome" ]; then
+    lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || lifecycle_settlement_status=67
+  fi
+  lifecycle_settle_creation_transaction "$lifecycle_settlement_status" "$lifecycle_release_published"
 }
 
 lifecycle_acquire_root() {
@@ -270,11 +348,7 @@ lifecycle_acquire_root() {
 
   lifecycle_transaction_status=0
   lifecycle_run_creation_transaction || lifecycle_transaction_status=$?
-  if [ "$lifecycle_transaction_status" -eq 0 ] &&
-    lifecycle_link_matches "$lifecycle_claim" "$lifecycle_token" &&
-    lifecycle_link_matches "$lifecycle_marker" "$lifecycle_token"; then
-    lifecycle_root_owned=1
-  fi
+  lifecycle_mask_latched_signals
   lifecycle_cleanup_transaction_files
 
   if [ -n "$lifecycle_first_status" ]; then

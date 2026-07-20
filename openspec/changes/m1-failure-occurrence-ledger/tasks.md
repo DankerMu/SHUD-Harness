@@ -190,5 +190,7 @@
   collisions without touching foreign paths, preserve one write-once command/
   signal status through cleanup and successful finalization, and prove the full
   normal/failure/collision/process-group signal/harness rollback surface with a
-  deterministic 46-case zero-residue matrix, including seven two-party races
-  and 14 participant outcomes.
+  deterministic 48-case zero-residue matrix, including nine two-party races
+  and 18 participant outcomes. Converge every post-spawn release, outcome,
+  wait/reap, and ownership-reconciliation path before propagating its exact
+  write-once status.

@@ -426,7 +426,7 @@ bindings after the Round-3 breadth split.
 The tracked definitive audit is
 `evidence/phase-6.2-definitive-audit.md`. Replay-artifact whitespace accounting
 and fresh-clone commands are in `evidence/replay-whitespace-exceptions.md`;
-their shared lifecycle authority, canonical verifier, and 46-scenario matrix
+their shared lifecycle authority, canonical verifier, and 48-scenario matrix
 are under `evidence/scripts/replay-lifecycle.sh`,
 `evidence/scripts/verify-replay-evidence.sh`, and
 `evidence/scripts/verify-replay-evidence.test.sh`.
@@ -437,9 +437,12 @@ a per-invocation token. A signal-immune child performs `mkdir` and publishes the
 same root token only after its own atomic creation succeeds. The parent never
 infers ownership from root existence: it requires child success plus the exact
 claim/root token pair. Signals latch while the parent waits and exit only after
-the transaction outcome is knowable. EXIT cleanup masks EXIT/HUP/INT/TERM as
-its first command; command failures and signals share one write-once first-
-status latch. The successful-finalization boundary masks HUP/INT/TERM without
+the transaction outcome is knowable. After child spawn, release publication,
+outcome reading, child reaping, and ownership reconciliation converge on one
+settlement path before claim cleanup or status propagation. EXIT cleanup masks
+EXIT/HUP/INT/TERM as its first command; command failures and signals share one
+write-once first-status latch. The successful-finalization boundary masks
+HUP/INT/TERM without
 disarming EXIT, immediately honors any latched status through failure cleanup,
 and permits strict teardown only when the latch is clear.
 
@@ -447,15 +450,24 @@ The pre-fix syntax-plus-matrix command exited 1 with
 `verifier_finalization_term exited 0, expected 143`. The identical command
 after the shared boundary was added exited 0.
 
-Verified on `2026-07-19 20:55:09 EDT`, the matrix passed 46/46 named scenarios.
-Seven are two-party races with 14 explicit participant outcomes. Coverage
+The post-spawn red probes first exited 1: an outcome-read TERM preserved 143
+but left an owner-marked root, and injected release-publication failure
+preserved 67 but left the signal-immune child alive. After the shared
+settlement correction, both dedicated probes exit 0 with exact statuses
+143/67 and no live child, claim, transaction link, root, owner marker, or
+registered worktree.
+
+Verified on `2026-07-19 21:26:38 EDT`, the matrix passed 48/48 named scenarios.
+Nine are two-party races with 18 explicit participant outcomes. Coverage
 includes the prior 18 baseline cases, seven exact-status cleanup-diagnostic
 variants, static verifier/harness collisions, cooperative same-name verifier/
 harness races, non-cooperating actor barriers for both scripts, six isolated-
 process-group acquisition signal orders, both collision helpers forced to child
 status 42, marker-created assertion-window single/double signals, and three
 barrier-driven finalization-window cases: verifier TERM, harness TERM, and
-verifier HUP→INT return 143/143/129 before any strict teardown. In each
+verifier HUP→INT return 143/143/129 before any strict teardown; and the two
+post-spawn settlement probes cover interrupted outcome reading and failed
+release publication. In each
 non-cooperating barrier the child pauses before `mkdir`, a foreign actor creates
 the exact root/marker without honoring the claim, and the child returns 73 with
 foreign bytes unchanged, no owner marker, and no retained claim. Controlled
