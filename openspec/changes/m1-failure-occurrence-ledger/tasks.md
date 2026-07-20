@@ -280,3 +280,8 @@
   TERM or a restored collision 73; handler adoption before publication retains
   signal-first behavior. Prove disappearance and disappearance-plus-restore in
   verifier and harness with settlement and zero residue in the 79-case matrix.
+- [x] 12.7 Represent deferred-to-first-status transfer with one handler-visible
+  authority from capture through latch. A handler entering after the source
+  slot clears MUST commit transferred HUP 129 before its later INT/TERM, without
+  discarding that later event. Prove negative-wait and exact-zero paths through
+  verifier and harness with settlement and zero residue in the 83-case matrix.

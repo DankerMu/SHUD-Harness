@@ -958,3 +958,50 @@ Current script SHA-256 values:
 The replay patch hashes remain byte-identical at
 `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
 and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+### A6 Round-4 deferred-transfer authority repair
+
+Verified on `2026-07-20 08:22:55 EDT`. The semantic implementation is commit
+`a1a42a2782e8235ecf992b8957f82b4d9ecca5f9`, based on Round-4 head
+`40dc415808dc818ec30a8cdc6f592da91e762803`.
+
+Round 4 confirmed that deferred handoff cleared its source slot before
+first-status latching. A later INT/TERM could enter that interval and commit
+130/143 ahead of copied HUP 129. The persisted depth retro replaced repeated
+window patches with one explicit transfer authority spanning capture to latch.
+
+`lifecycle_deferred_transfer_status` is now the sole transfer-in-progress
+authority. It becomes nonempty before the source slot clears, remains visible
+through the first-status latch, and clears only afterward. HUP/INT/TERM
+handlers check it first, commit the transfer status, then attempt their current
+event. No separate active bit or signal masking creates a new establishment
+gap or discards the later event. Transaction start/end reset the authority.
+
+Four verifier/harness public-surface regressions inject a later INT/TERM after
+the original deferred HUP slot clears but before the outer latch, across both
+negative-wait and exact-zero paths. Pre-fix semantics returned 130/130/143/143;
+the fixed cases each return 129, transfer once, record the later event after
+129, classify once, settle the child, and leave no lifecycle or probe residue.
+
+Independent checks passed:
+
+- four transfer-window cases and 15 prior controls;
+- canonical verifier and 83/83 lifecycle matrix, comprising 28 two-party races
+  and 56 participant outcomes;
+- `/bin/sh -n`, `shellcheck -s sh`, strict OpenSpec and incremental hygiene;
+- exactly 13 documented issue-base replay-artifact whitespace findings;
+- byte-identical replay hashes, Zero gitlink, no submodule diff, stash, debug
+  marker, watchdog/release probe, or replay residue.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `87303397bd9b20859c8c86ce2b21603932db689ba03da1dd1354a2b841d1ad73`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `9e0afca8904065bed986e88a8617790731cadedf7c49face40d4cedb779470d9`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.

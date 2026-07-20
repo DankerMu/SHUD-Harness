@@ -80,8 +80,11 @@ latching. Once classification is committed, handlers cannot re-adopt the
 publication until transaction settlement ends. The boundary then clears the
 flag before consuming the deferred first event; a post-clear handler first
 commits any existing deferred event and only then its current event. This
-closes all read/commit and exact-zero tail windows without changing event-
-before-publication order.
+handoff uses one nonempty transfer status as its authority from capture through
+the first-status latch. A reentrant handler sees and commits that status before
+attempting its current event, even after the original deferred slot clears.
+This closes all read/commit and exact-zero tail windows without changing event-
+before-publication order or discarding the later event.
 As soon as a non-zero release or outcome result is determined, the parent
 records it in the shared write-once latch before later settlement, ownership
 reconciliation, or transaction cleanup; an earlier signal already in the
@@ -96,8 +99,8 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 79/79 named scenarios. Twenty-four are two-party races
-with 48 explicit participant outcomes:
+The self-test passed 83/83 named scenarios. Twenty-eight are two-party races
+with 56 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -146,6 +149,11 @@ with 48 explicit participant outcomes:
   post-clear INT at 129, and preserve post-clear TERM at 143 without a second
   publication read even when that read would fail or decode collision 73. All
   six prove child settlement and zero lifecycle/probe residue;
+- verifier and harness deferred-transfer probes inject INT/TERM after HUP 129
+  moves out of its source slot but before the outer latch, on both negative-
+  wait and exact-zero paths. All four preserve 129, record that the later event
+  was attempted after it, classify once, settle the child, and leave no
+  lifecycle/probe residue;
 - verifier and harness witnessed-publication probes remove the outcome before
   classification, then deliver TERM with the link absent or after restoring
   `token:73`. All four preserve the earlier required-publication failure 67,
