@@ -523,3 +523,240 @@ Replay artifact SHA-256 values:
   `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`;
 - Round-2 `red-before-backend-undefined.patch`:
   `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+## Child A4 pre-spawn claim reconciliation
+
+Verified on `2026-07-19 21:51:13 EDT` against split base
+`8f7187d0eb4dcdd0f4fd49c2e5f7e344bbac2f29`.
+
+The first exact-token verification after atomic claim creation is deliberately
+signal-capable. The shared lifecycle boundary then masks HUP/INT/TERM and makes
+one authoritative exact-token retry before spawning a creation child. It sets
+`lifecycle_claim_owned` only when the current physical claim still matches the
+invocation token, never removes a mismatched claim, restores signal handlers
+only for a clean continuation, and propagates any already-latched status after
+the exact owned claim is known to EXIT cleanup.
+
+The initial dynamic verifier and harness probes each returned 143 and retained
+their exact claim (`verifier-red-token` and `harness-red-token`), confirming the
+R5-FULL-01 window. The batched source-only red proof then ran both new public-
+surface cases against the pre-change lifecycle source. Each test exited 1 with
+`retained its exact claim`; the source stash was popped immediately and no
+`red-proof` stash remains. With the shared reconciliation boundary restored,
+both dedicated probes report `1/1 passed`: their child process returns 143 and
+leaves no claim, transaction link, root, owner marker, registered worktree, or
+creation-child PID.
+
+The canonical replay verifier exits 0, and the expanded lifecycle matrix passes
+50/50 named scenarios while retaining nine two-party races and 18 explicit
+participant outcomes. A4 adds only the verifier/harness pre-spawn TERM cases;
+post-spawn transaction statuses 67/73 and their chronology are unchanged.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `921953b7f1646f9d6dfe807fa6fa683fd9fe6ff9d90ae7e03effc10a80fc58a5`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `07e8fe637158d5073b68d50f4ccd8860b43850262625dd6a1ce8229c71dc4e13`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+### A5 Round-3 shared outcome decoder
+
+Verified on `2026-07-20 04:41:10 EDT`. The Round-3 depth retro found that
+handler adoption and ordinary settlement classified the same published
+outcome with separate logic: a handler-internal `readlink` failure became an
+empty no-op and allowed TERM 143, while settlement mapped the read failure to
+protocol status 67.
+
+Both callers now use one side-effect-controlled decoder. It distinguishes no
+publication, exact `token:0`, collision `token:73`, unknown/mismatched protocol
+values, and a failed read of a published symlink. The last two map to 67.
+Signals arriving during ordinary decoding are held in one deferred first-signal
+slot; the caller latches any decoded non-zero result before releasing that
+signal to the same write-once ledger. Handler adoption masks HUP/INT/TERM while
+decoding, preserving its reentrancy boundary. Exact zero still permits the
+current signal to win, and verifier/harness TERM-before-publication controls
+remain 143. Child release/reap, A4 claim reconciliation, foreign preservation,
+strict cleanup, and root ownership are unchanged.
+
+Two deterministic public-surface probes publish a collision outcome, deliver
+TERM to the exact transaction parent, and make the handler's outcome read fail.
+With the production source stashed back to `a7069a7`, both current tests exit 1
+at 73 instead of 67. With the shared decoder restored, verifier and harness
+each report `1/1 passed` at 67
+with no live creation child, claim, transaction link, marker, root, registered
+worktree, watchdog, or probe residue. The pre-existing published-read failure
+now also preserves 67 before its injected TERM.
+
+The canonical replay verifier exits 0. The complete lifecycle matrix passes
+64/64 named scenarios, comprising 17 two-party races and 34 participant
+outcomes. Removing the production settlement release still makes all four
+held collision/unknown verifier/harness probes fail with the distinct watchdog
+marker; restoring it makes all four green. Syntax and shellcheck pass for all
+three replay scripts, and the final A5 gate covers strict OpenSpec, incremental
+and exact 13-row range hygiene, replay hashes, gitlink/submodules, stash state,
+and replay residue.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `8e684d04048044c89871b2df84ba57fb8fa7d68fae64dfb5c2a8e72c6cebddba`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `9e9fae0a75c3c55b1fd31b2a3e7c3085e86645aede393295b554e4d0a5eb191e`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+Final A5 verification:
+
+- `/bin/sh -n` and `shellcheck -s sh` pass for all three replay scripts.
+- The canonical verifier exits 0; the lifecycle matrix reports 64/64 passed.
+- `openspec validate m1-failure-occurrence-ledger --strict --no-interactive`
+  reports the change valid, and incremental `git diff --check` exits 0.
+- Range-wide `git diff --check` from issue base `5a450a9` exits 2 with exactly
+  the documented 13 replay-artifact rows and no other finding.
+- Zero remains uninitialized in this split worktree; its index gitlink remains
+  `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6` with no submodule diff.
+- No `red-proof` stash, replay temporary root, replay worktree registration,
+  fault probe, or out-of-scope changed path remains.
+
+Final A4 verification:
+
+- `/bin/sh -n` and `shellcheck -s sh` pass for all three replay scripts.
+- The canonical verifier exits 0; the lifecycle matrix reports 50/50 passed.
+- `openspec validate m1-failure-occurrence-ledger --strict --no-interactive`
+  reports the change valid, and incremental `git diff --check` exits 0.
+- Range-wide `git diff --check` from issue base `5a450a9` exits 2 with exactly
+  the documented 13 replay-artifact rows and no other finding.
+- The Zero worktree is intentionally uninitialized in this split worktree;
+  its index gitlink remains `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`
+  with no submodule diff.
+- No `red-proof` stash, replay temporary root, replay worktree registration, or
+  out-of-scope changed path remains.
+
+## Child A5 post-spawn result chronology
+
+Verified on `2026-07-19 22:19:01 EDT` against split base
+`d8a25f27c6e06bc1a4701538ae656a897537a61b`.
+
+The shared lifecycle now records every non-zero post-spawn transaction result
+in the same write-once status latch as soon as the result is determined. A
+release/wait/read failure records 67 before child settlement or ownership
+probes; a published collision outcome records 73 before ownership
+reconciliation and transaction cleanup. `lifecycle_latch_status` retains an
+earlier signal when one already exists, while a transaction result that arrives
+first masks later handled signals during mandatory settlement and cleanup.
+
+Four public-surface tests were added: release failure 67 followed by TERM and
+collision outcome 73 followed by TERM, each through both the canonical verifier
+and lifecycle harness. Before the shared source changed, the batched red run
+reported four failures: every child exited 143 instead of its earlier 67 or 73.
+After the correction, all four dedicated scenarios report `1/1 passed`. They
+also assert the spawned creation child is reaped and no exact claim,
+transaction link, owner marker, owned root, registered worktree, foreign
+collision probe, or fault-injection directory remains.
+
+The canonical replay verifier exits 0. The full lifecycle matrix passes 54/54
+named scenarios while retaining nine two-party races and 18 explicit
+participant outcomes. Existing signal-first, A4 pre-spawn reconciliation,
+same-name/static collisions, strict cleanup, and successful-finalization cases
+remain green.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `a49e2505bae5e0de3dc63c5f0c6d4c945790f2d89f815027d24e867396d02b81`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `fef0f68f3c510afb54eb41d21337059cd00adece13d09bf3de5d961d4a5c4040`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+### A5 Round-1 outcome-before-wait repair
+
+Verified on `2026-07-19 22:41:17 EDT`. The review regression proved that an
+outcome symlink can be authoritative while its creation child is still live:
+the prior settlement path waited for that child before reading the published
+value, so TERM delivered during the wait became the first latched status.
+
+The batched red run held the creation child after publishing its outcome. The
+verifier and harness collision probes both exited 143 instead of 73; their two
+unknown-outcome variants likewise exited 143 instead of the required protocol
+status 67. The fixed settlement path reads and classifies the published value
+before wait/reap. A non-zero 73 or mapped 67 enters the shared write-once latch
+first, after which the deterministic hook delivers TERM and releases the held
+child. Settlement still reaps the child and reconciles physical claim/marker
+ownership before cleanup or propagation. Outcome-read failure remains 67, and
+an earlier signal remains authoritative.
+
+All four focused scenarios then reported `1/1 passed` with exact 73/73/67/67.
+The full matrix passes 56/56 named scenarios, comprising 11 two-party races and
+22 participant outcomes. Each added/strengthened probe asserts no live creation
+child, claim, transaction link, owner marker, owned/foreign probe root,
+registered worktree, or fault directory remains.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `ea9df44279d32c9a36eaa6d468fe4e09771f277e67508f8126948477c665f8eb`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `d811699d6dc9e245bb2ceae082c1d85073aeadfe68b005e331f193a626fd1b0a`.
+
+### A5 Round-2 publication adoption and watchdog repair
+
+Verified on `2026-07-19 23:11:48 EDT`. While a creation transaction is active,
+each HUP/INT/TERM handler now checks the atomic outcome publication before it
+records the lifecycle event. If the outcome symlink already publishes collision
+73 or another non-zero protocol value, the handler adopts 73 or mapped 67 into
+the shared write-once latch first. A TERM that is already latched before outcome
+publication remains 143. This changes only parent classification order: every
+path still releases or force-terminates, reaps, reconciles, and cleans the
+creation child before propagating status.
+
+Four new readlink-window probes hold the creation child after publishing its
+outcome, deliver TERM from the parent's first outcome read, and cover collision
+73 plus unknown-to-67 through both verifier and harness. Against the pre-repair
+lifecycle source, all four exited 1 because the nested child returned 143.
+With transaction-active adoption restored, all four report `1/1 passed` at
+73/73/67/67. Two verifier/harness controls deliver TERM before the creation
+release and outcome publication; both preserve 143.
+
+The held-child watchdog no longer writes the production settlement-release
+marker. It writes a distinct watchdog-fired marker and kills the held creation
+path only to bound a broken test. Every held publication probe asserts that
+marker is absent. In the required mutation run, removing the production release
+write made the verifier/harness collision and unknown-outcome probes all exit 1
+within two seconds with `used its watchdog instead of the settlement release`;
+restoring production release made all four green.
+
+The canonical replay verifier exits 0. The full lifecycle matrix passes 62/62
+named scenarios, comprising 15 two-party races and 30 participant outcomes.
+Syntax and shellcheck pass for all three replay scripts; strict OpenSpec,
+incremental/range hygiene, replay hashes, gitlink/submodule state, stash state,
+and replay residue are verified by the final A5 gate.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `52044ce8c679303fd0fa9861f9ba3d89bc8aad839daf5c09f968726bb8d7422f`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `c87be155ad227f4dbfc569e5fcb8bb1275aeecca59d4ed6c35787e71179a3268`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.

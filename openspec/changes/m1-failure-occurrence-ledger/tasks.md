@@ -194,3 +194,54 @@
   and 18 participant outcomes. Converge every post-spawn release, outcome,
   wait/reap, and ownership-reconciliation path before propagating its exact
   write-once status.
+
+## 10. Round-3 Split Child A4 — Pre-spawn Claim Reconciliation
+
+- [x] 10.1 Reconcile the fixed claim before spawning the creation child: retain
+  a signal-capable first read, mask handled lifecycle signals, retry the exact
+  token read, and record physical ownership only on an exact match. Never remove
+  a mismatched claim; propagate any pre-existing latch only after
+  reconciliation.
+- [x] 10.2 Add deterministic verifier and harness public-surface regressions in
+  which TERM interrupts the first exact-token verification. Both MUST return
+  143 with no claim, transaction link, root, owner marker, registered worktree,
+  or spawned creation child.
+- [x] 10.3 Preserve the historical replay-patch bytes and run syntax,
+  shellcheck, canonical replay, the expanded 50-case lifecycle matrix, strict
+  OpenSpec validation, incremental/range hygiene, stash, Zero, submodule, and
+  replay-residue checks.
+
+## 11. Round-3 Split Child A5 — Post-spawn Result Chronology
+
+- [x] 11.1 Latch a non-zero post-spawn transaction result as soon as it is
+  determined, before later child settlement, ownership reconciliation, or
+  transaction cleanup can observe another lifecycle event. Preserve an earlier
+  signal already present in the shared write-once latch.
+- [x] 11.2 Add deterministic verifier and harness public-surface regressions for
+  both release failure 67 and collision outcome 73 followed by TERM. Each MUST
+  preserve the earlier transaction result and leave no live creation child,
+  claim, transaction link, root, owner marker, registered worktree, or probe.
+- [x] 11.3 Preserve the historical replay-patch bytes and run syntax,
+  shellcheck, canonical replay, the expanded 54-case lifecycle matrix, strict
+  OpenSpec validation, incremental/range hygiene, stash, Zero, submodule, and
+  replay-residue checks.
+- [x] 11.4 Read and classify a published outcome before waiting for its still-
+  live creation child. Prove verifier/harness collision 73 and unknown-protocol
+  67 each precede later TERM, while child settlement, ownership reconciliation,
+  zero-residue cleanup, outcome-read failure, and signal-first semantics remain
+  intact in the expanded 56-case matrix.
+- [x] 11.5 While a creation transaction is active, make every lifecycle handler
+  adopt an already-published non-zero outcome before latching its own signal.
+  Prove verifier/harness readlink-window collision 73 and unknown-protocol 67,
+  plus verifier/harness TERM-before-publication controls, in the expanded
+  62-case matrix without skipping child release, reap, or ownership settlement.
+- [x] 11.6 Separate the held-child watchdog from the normal settlement-release
+  marker. Assert that no focused probe fires the watchdog, and mutation-prove
+  that removing the production release makes all four verifier/harness
+  collision/unknown probes fail quickly instead of self-healing.
+- [x] 11.7 Replace handler adoption and ordinary settlement classification with
+  one side-effect-controlled outcome decoder. Map a failed published-symlink
+  read and unknown/mismatched protocol to 67 before later signals, preserve
+  exact zero, collision 73, TERM-before-publication, handler masking, mandatory
+  child settlement, A4 claim behavior, and zero residue in the expanded
+  64-case matrix.
