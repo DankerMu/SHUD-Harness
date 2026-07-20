@@ -19,9 +19,23 @@ import {
   semanticPrimaryValue,
   taskServiceErrorAtBoundary
 } from "./index";
+import * as coreServices from "./index";
+import * as corePackage from "@shud-harness/core";
 import * as failurePreservation from "./compensation-error-preservation";
 import { runWithPreservedRelease } from "./compensation-error-preservation";
 import { TaskServiceError } from "./task-card-service";
+import { preserveTaskServiceErrorFailureVector } from "./task-service-error-compensation";
+
+const semanticPrimaryErrorFromServices = (
+  coreServices as typeof coreServices & {
+    semanticPrimaryError: (value: unknown) => Error | undefined;
+  }
+).semanticPrimaryError;
+const semanticPrimaryErrorFromCore = (
+  corePackage as typeof corePackage & {
+    semanticPrimaryError: (value: unknown) => Error | undefined;
+  }
+).semanticPrimaryError;
 
 describe("failure occurrence ledger", () => {
   test("preserves equal primitives and reused Error identities as physical occurrences", () => {
@@ -619,6 +633,152 @@ describe("failure occurrence ledger", () => {
     }
   });
 
+  test("carries trusted typed classification through carrier adoption without touching the controlled Proxy", () => {
+    const proxyTarget = taskServiceError("adopted controlled proxy primary");
+    let prototypeReads = 0;
+    const proxy = createTrustedTaskServiceErrorProxy(proxyTarget, {
+      getPrototypeOf() {
+        prototypeReads += 1;
+        throw new Error("trusted controlled proxy must not be prototype-classified");
+      }
+    });
+    const first = preserveTaskServiceErrorFailureEntries(
+      captureFailureOccurrence("body", proxy),
+      [captureFailureOccurrence("settlement", new Error("first settlement"))],
+      "direct controlled proxy fold"
+    );
+    const inheritedIds = failureEvents(first).map((event) => event.occurrenceId);
+
+    const adopted = preserveTaskServiceErrorFailureEntries(
+      adoptFailureCarrier("body", first),
+      [captureFailureOccurrence("final_release", new Error("adopted release"))],
+      "adopted controlled proxy fold"
+    );
+    const adoptedEvents = failureEvents(adopted);
+
+    expect(prototypeReads).toBe(0);
+    expect(semanticPrimaryValue(adopted)).toBe(proxy);
+    expect(taskServiceErrorAtBoundary(adopted)).toBe(proxyTarget);
+    expect(taskServiceErrorAtBoundary(adopted)).toMatchObject({
+      code: proxyTarget.code,
+      status: proxyTarget.status,
+      category: proxyTarget.category,
+      message: proxyTarget.message,
+      userMessage: proxyTarget.userMessage,
+      retryable: proxyTarget.retryable,
+      evidenceRefs: proxyTarget.evidenceRefs,
+      recommendedNextActions: proxyTarget.recommendedNextActions
+    });
+    for (const inheritedId of inheritedIds) {
+      expect(adoptedEvents.filter((event) => event.occurrenceId === inheritedId)).toHaveLength(1);
+    }
+    expect(adoptedEvents.filter(
+      (event) => event.phase === "body" && event.value === first
+    )).toHaveLength(1);
+    expect(failureLedger(adopted)!.observedGraph.observationFailures).toEqual([]);
+  });
+
+  test("adopts a generic carrier into both typed adapters without reclassifying its controlled Proxy", () => {
+    for (const adapter of typedFailureAdapters()) {
+      const proxyTarget = taskServiceError(`${adapter.name} generic carrier primary`);
+      let prototypeReads = 0;
+      const proxy = createTrustedTaskServiceErrorProxy(proxyTarget, {
+        getPrototypeOf(target) {
+          prototypeReads += 1;
+          return Reflect.getPrototypeOf(target);
+        }
+      });
+      const firstSettlement = new Error(`${adapter.name} first settlement`);
+      const generic = mergeTrustedFailureOccurrences(
+        captureFailureOccurrence("body", proxy),
+        [captureFailureOccurrence("settlement", firstSettlement)],
+        `${adapter.name} generic fold`
+      );
+      const inheritedEvents = failureEvents(generic);
+      expect(prototypeReads).toBe(1);
+
+      const finalRelease = new Error(`${adapter.name} adopted release`);
+      const adopted = adapter.preserve(
+        adoptFailureCarrier("body", generic),
+        [captureFailureOccurrence("final_release", finalRelease)],
+        `${adapter.name} typed adoption`
+      );
+      const adoptedEvents = failureEvents(adopted);
+
+      expect(prototypeReads).toBe(1);
+      expect(semanticPrimaryValue(adopted)).toBe(proxy);
+      expect(taskServiceErrorAtBoundary(adopted)).toBe(proxyTarget);
+      expect(taskServiceErrorAtBoundary(adopted)).toMatchObject({
+        code: proxyTarget.code,
+        status: proxyTarget.status,
+        category: proxyTarget.category,
+        message: proxyTarget.message,
+        userMessage: proxyTarget.userMessage,
+        retryable: proxyTarget.retryable,
+        evidenceRefs: proxyTarget.evidenceRefs,
+        recommendedNextActions: proxyTarget.recommendedNextActions
+      });
+      for (const inherited of inheritedEvents) {
+        expect(adoptedEvents.filter(
+          (event) => event.occurrenceId === inherited.occurrenceId
+        )).toHaveLength(1);
+      }
+      expect(adoptedEvents.filter(
+        (event) => event.phase === "body" && event.value === generic
+      )).toHaveLength(1);
+      expect(adoptedEvents.filter(
+        (event) => event.phase === "final_release" && event.value === finalRelease
+      )).toHaveLength(1);
+      expect(failureLedger(adopted)!.observedGraph.observationFailures).toEqual([]);
+    }
+  });
+
+  test("adopts a generic carrier with one failed Proxy observation without retrying it in either typed adapter", () => {
+    for (const adapter of typedFailureAdapters()) {
+      const proxyTarget = taskServiceError(`${adapter.name} throwing generic primary`);
+      const prototypeFailure = new Error(`${adapter.name} prototype observation failed`);
+      let prototypeReads = 0;
+      const proxy = createTrustedTaskServiceErrorProxy(proxyTarget, {
+        getPrototypeOf() {
+          prototypeReads += 1;
+          throw prototypeFailure;
+        }
+      });
+      const generic = mergeTrustedFailureOccurrences(
+        captureFailureOccurrence("body", proxy),
+        [],
+        `${adapter.name} throwing generic fold`
+      );
+      const inheritedEvents = failureEvents(generic);
+      const inheritedObservationFailures = failureLedger(generic)!.observedGraph
+        .observationFailures;
+      expect(prototypeReads).toBe(1);
+      expect(inheritedObservationFailures.map((event) => event.value)).toEqual([
+        prototypeFailure
+      ]);
+
+      const adopted = adapter.preserve(
+        adoptFailureCarrier("body", generic),
+        [],
+        `${adapter.name} throwing typed adoption`
+      );
+      const adoptedEvents = failureEvents(adopted);
+
+      expect(prototypeReads).toBe(1);
+      expect(semanticPrimaryValue(adopted)).toBe(proxy);
+      expect(taskServiceErrorAtBoundary(adopted)).toBe(proxyTarget);
+      for (const inherited of inheritedEvents) {
+        expect(adoptedEvents.filter(
+          (event) => event.occurrenceId === inherited.occurrenceId
+        )).toHaveLength(1);
+      }
+      expect(adoptedEvents.filter(
+        (event) => event.phase === "body" && event.value === generic
+      )).toHaveLength(1);
+      expect(failureLedger(adopted)!.observedGraph.observationFailures).toEqual([]);
+    }
+  });
+
   test("captures physical body, release, and settlement phases at the shared helper", async () => {
     const bodyFailure = new Error("body failed");
     const releaseFailure = new Error("release failed");
@@ -1036,8 +1196,14 @@ describe("failure occurrence ledger", () => {
         : [];
 
       expect(ownKeysCalls).toBe(1);
+      const expectedFirstReturned = numericCount > FAILURE_GRAPH_MAX_NUMERIC_KEYS
+        ? 1
+        : 0;
       expect(edges.map((edge) => edge.index)).toEqual(
-        Array.from({ length: expectedEdgeCount }, (_, index) => index)
+        Array.from(
+          { length: expectedEdgeCount },
+          (_, index) => index + expectedFirstReturned
+        )
       );
       expect(observationIssueCodes(result)).toEqual(expectedIssues);
       expect(Object.isFrozen(ledger.observedGraph.nodes)).toBe(true);
@@ -1117,6 +1283,319 @@ describe("failure occurrence ledger", () => {
     expect(semanticPrimaryValue(result)).toBe(primary);
   });
 
+  test("stops a 65,536-key Proxy after the first N numeric keys and one witness", () => {
+    const numericCount = 65_536;
+    const returnedNumericKeys = Array.from(
+      { length: numericCount },
+      (_, index) => String(numericCount - index - 1)
+    );
+    let ownKeysCalls = 0;
+    let descriptorReads = 0;
+    const marker = Object.freeze({ kind: "bounded-first-returned" });
+    const errors = new Proxy([], {
+      ownKeys() {
+        ownKeysCalls += 1;
+        return ["length", "metadata", Symbol("metadata"), ...returnedNumericKeys];
+      },
+      getOwnPropertyDescriptor(target, property) {
+        if (property === "length") {
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        }
+        if (typeof property !== "string" || !/^\d+$/.test(property)) {
+          throw new Error(`tail descriptor must not be read: ${String(property)}`);
+        }
+        descriptorReads += 1;
+        return {
+          configurable: true,
+          enumerable: true,
+          value: marker,
+          writable: true
+        };
+      }
+    });
+    const primary = new AggregateError([], "65,536 numeric keys");
+    Object.defineProperty(primary, "errors", { value: errors });
+
+    const result = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", primary),
+      [],
+      "65,536 numeric keys"
+    );
+    const ledger = failureLedger(result)!;
+    const edges = ledger.observedGraph.nodes[0]!.edges.filter(
+      (edge) => edge.kind === "errors"
+    );
+
+    expect(ownKeysCalls).toBe(1);
+    expect(descriptorReads).toBe(FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1);
+    expect(edges.map((edge) => edge.index)).toEqual(Array.from(
+      { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS },
+      (_, index) => numericCount - FAILURE_GRAPH_MAX_NUMERIC_KEYS + index
+    ));
+    expect(observationIssueCodes(result)).toEqual([
+      "numeric_key_budget_exceeded",
+      "edge_budget_exceeded"
+    ]);
+    expect(Object.isFrozen(ledger.events)).toBe(true);
+    expect(Object.isFrozen(ledger.observedGraph.nodes)).toBe(true);
+    expect(Object.isFrozen(ledger.observedGraph.nodes[0]!.edges)).toBe(true);
+    expect(Object.isFrozen(ledger.observedGraph.observationFailures)).toBe(true);
+  });
+
+  test("reuses one immutable errors-container snapshot across aliasing parents", () => {
+    const stable = Object.freeze({ kind: "stable-shared-edge" });
+    const descriptorFailure = new Error("shared descriptor failure");
+    let ownKeysCalls = 0;
+    let descriptorReads = 0;
+    const sharedErrors = new Proxy([], {
+      ownKeys() {
+        ownKeysCalls += 1;
+        return ownKeysCalls === 1 ? ["length", "0", "1"] : ["length", "2"];
+      },
+      getOwnPropertyDescriptor(target, property) {
+        if (property === "length") {
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        }
+        descriptorReads += 1;
+        if (property === "1") throw descriptorFailure;
+        return {
+          configurable: true,
+          enumerable: true,
+          value: descriptorReads === 1 ? stable : Object.freeze({ descriptorReads }),
+          writable: true
+        };
+      }
+    });
+    const firstParent = Object.freeze({ errors: sharedErrors });
+    const secondParent = Object.freeze({ errors: sharedErrors });
+    const primary = new AggregateError([firstParent, secondParent], "shared errors alias");
+
+    const result = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", primary),
+      [],
+      "shared errors alias"
+    );
+    const ledger = failureLedger(result)!;
+    const firstEdges = ledger.observedGraph.nodes.find(
+      (node) => node.value === firstParent
+    )!.edges.filter((edge) => edge.kind === "errors");
+    const secondEdges = ledger.observedGraph.nodes.find(
+      (node) => node.value === secondParent
+    )!.edges.filter((edge) => edge.kind === "errors");
+
+    expect(ownKeysCalls).toBe(1);
+    expect(descriptorReads).toBe(2);
+    expect(firstEdges).toEqual([{ kind: "errors", target: stable, index: 0 }]);
+    expect(secondEdges).toEqual([{ kind: "errors", target: stable, index: 0 }]);
+    expect(ledger.observedGraph.observationFailures.map((event) => event.value)).toEqual([
+      descriptorFailure
+    ]);
+    expect(Object.isFrozen(firstEdges[0])).toBe(true);
+    expect(Object.isFrozen(secondEdges[0])).toBe(true);
+  });
+
+  test("caches failed errors-container classification once per fold for every alias", () => {
+    const revoked = Proxy.revocable([], {});
+    revoked.revoke();
+
+    for (const parentCount of [2, 257]) {
+      const parents = Array.from(
+        { length: parentCount },
+        () => Object.freeze({ errors: revoked.proxy })
+      );
+      const primary = new AggregateError(parents, `${parentCount} revoked aliases`);
+      const result = mergeTrustedFailureOccurrences(
+        captureFailureOccurrence("body", primary),
+        [],
+        `${parentCount} revoked aliases`
+      );
+      const ledger = failureLedger(result)!;
+
+      expect(ledger.observedGraph.observationFailures).toHaveLength(1);
+      expect(ledger.observedGraph.observationFailures[0]!.value).toBeInstanceOf(TypeError);
+      expect(observationIssueCodes(result)).toEqual([]);
+      expect(ledger.observedGraph.nodes.some((node) => node.value === revoked.proxy)).toBe(false);
+      expect(ledger.observedGraph.nodes.flatMap((node) => node.edges).some(
+        (edge) => edge.target === revoked.proxy
+      )).toBe(false);
+      expect(Object.isFrozen(ledger.events)).toBe(true);
+      expect(Object.isFrozen(ledger.observedGraph.observationFailures)).toBe(true);
+    }
+  });
+
+  test("replays one cached edge after its shared descriptor revokes the errors container", () => {
+    const stable = Object.freeze({ kind: "self-revoking-shared-edge" });
+    let ownKeysCalls = 0;
+    let descriptorReads = 0;
+    const revocable = Proxy.revocable([], {
+      ownKeys() {
+        ownKeysCalls += 1;
+        return ["0", "length"];
+      },
+      getOwnPropertyDescriptor(target, property) {
+        if (property === "length") {
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        }
+        descriptorReads += 1;
+        revocable.revoke();
+        return {
+          configurable: true,
+          enumerable: true,
+          value: stable,
+          writable: true
+        };
+      }
+    });
+    const parents = [
+      Object.freeze({ errors: revocable.proxy }),
+      Object.freeze({ errors: revocable.proxy })
+    ];
+    const primary = new AggregateError(parents, "self-revoking errors alias");
+    const result = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", primary),
+      [],
+      "self-revoking errors alias"
+    );
+    const ledger = failureLedger(result)!;
+
+    expect(ownKeysCalls).toBe(1);
+    expect(descriptorReads).toBe(1);
+    for (const parent of parents) {
+      expect(ledger.observedGraph.nodes.find((node) => node.value === parent)!.edges).toEqual([
+        { kind: "errors", target: stable, index: 0 }
+      ]);
+    }
+    expect(ledger.observedGraph.observationFailures).toEqual([]);
+    expect(observationIssueCodes(result)).toEqual([]);
+  });
+
+  test("keeps maximum absent descriptor snapshots compact across maximum parent fanout", () => {
+    const parentCount = FAILURE_GRAPH_MAX_NODES - 1;
+    const numericKeys = Array.from(
+      { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS },
+      (_, index) => String(index)
+    );
+    let ownKeysCalls = 0;
+    let descriptorReads = 0;
+    const phantomErrors = new Proxy([], {
+      ownKeys() {
+        ownKeysCalls += 1;
+        return ["length", ...numericKeys];
+      },
+      getOwnPropertyDescriptor(target, property) {
+        if (property === "length") {
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        }
+        descriptorReads += 1;
+        return undefined;
+      }
+    });
+    const parents = Array.from(
+      { length: parentCount },
+      () => Object.freeze({ errors: phantomErrors })
+    );
+    const primary = new AggregateError(parents, "maximum absent descriptor aliases");
+    const result = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", primary),
+      [],
+      "maximum absent descriptor aliases"
+    );
+    const ledger = failureLedger(result)!;
+    const parentSet = new Set<object>(parents);
+
+    expect(ownKeysCalls).toBe(1);
+    expect(descriptorReads).toBe(FAILURE_GRAPH_MAX_NUMERIC_KEYS);
+    expect(ledger.observedGraph.nodes).toHaveLength(FAILURE_GRAPH_MAX_NODES);
+    const parentNodes = ledger.observedGraph.nodes.filter((node) => parentSet.has(node.value));
+    expect(parentNodes).toHaveLength(parentCount);
+    expect(parentNodes.every((node) => node.edges.length === 0)).toBe(true);
+    expect(ledger.observedGraph.observationFailures).toEqual([]);
+    expect(observationIssueCodes(result)).toEqual([]);
+    expect(Object.isFrozen(ledger.observedGraph.nodes)).toBe(true);
+    expect(ledger.observedGraph.nodes.every(
+      (node) => Object.isFrozen(node) && Object.isFrozen(node.edges)
+    )).toBe(true);
+  });
+
+  test("records shared errors-container overflow evidence once", () => {
+    const stable = Object.freeze({ kind: "stable-shared-overflow-edge" });
+    const overflowKeys = Array.from(
+      { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1 },
+      (_, index) => String(index)
+    );
+    let overflowOwnKeysCalls = 0;
+    let overflowDescriptorReads = 0;
+    const sharedOverflow = new Proxy([], {
+      ownKeys() {
+        overflowOwnKeysCalls += 1;
+        return ["length", ...overflowKeys];
+      },
+      getOwnPropertyDescriptor(target, property) {
+        if (property === "length") {
+          return Reflect.getOwnPropertyDescriptor(target, property);
+        }
+        overflowDescriptorReads += 1;
+        return {
+          configurable: true,
+          enumerable: true,
+          value: stable,
+          writable: true
+        };
+      }
+    });
+    const overflowFirstParent = Object.freeze({ errors: sharedOverflow });
+    const overflowSecondParent = Object.freeze({ errors: sharedOverflow });
+    const overflowPrimary = new AggregateError(
+      [overflowFirstParent, overflowSecondParent],
+      "shared overflow alias"
+    );
+    const overflowResult = mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", overflowPrimary),
+      [],
+      "shared overflow alias"
+    );
+
+    expect(overflowOwnKeysCalls).toBe(1);
+    expect(overflowDescriptorReads).toBe(FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1);
+    expect(observationIssueCodes(overflowResult)).toEqual([
+      "numeric_key_budget_exceeded",
+      "edge_budget_exceeded"
+    ]);
+  });
+
+  test("retains the exact semantic primary Error beyond the public node budget", () => {
+    const earlier = Array.from(
+      { length: FAILURE_GRAPH_MAX_NODES },
+      (_, index) => Object.freeze({ index })
+    );
+    const first = captureFailureOccurrence("initial_release", earlier[0]);
+    const earlierSettlements = earlier.slice(1).map((value) =>
+      captureFailureOccurrence("settlement", value)
+    );
+    const exactPrimary = new Error("semantic primary after node boundary");
+    const primary = captureFailureOccurrence("settlement", exactPrimary);
+
+    const result = failurePreservation.mergeTrustedFailureOccurrenceVector(
+      primary,
+      [first, ...earlierSettlements, primary],
+      "late semantic primary"
+    );
+    const ledger = failureLedger(result)!;
+
+    expect(semanticPrimaryErrorFromServices(result)).toBe(exactPrimary);
+    expect(semanticPrimaryErrorFromCore(result)).toBe(exactPrimary);
+    expect(semanticPrimaryErrorFromServices(exactPrimary)).toBe(exactPrimary);
+    expect(semanticPrimaryErrorFromCore(exactPrimary)).toBe(exactPrimary);
+    expect(semanticPrimaryErrorFromServices("not an Error")).toBeUndefined();
+    expect(semanticPrimaryErrorFromCore("not an Error")).toBeUndefined();
+    expect(semanticPrimaryValue(result)).toBe(exactPrimary);
+    expect(ledger.observedGraph.nodes).toHaveLength(FAILURE_GRAPH_MAX_NODES);
+    expect(ledger.observedGraph.nodes.some((node) => node.value === exactPrimary)).toBe(false);
+    expect(observationIssueCodes(result)).toEqual(["node_budget_exceeded"]);
+    expect(Object.isFrozen(ledger.observedGraph.nodes)).toBe(true);
+    expect(Object.isFrozen(ledger.events)).toBe(true);
+  });
+
   test("records known numeric overflow before a preoccupied semantic edge exhausts the edge budget", () => {
     const marker = Object.freeze({ kind: "numeric-edge-marker" });
     const numericKeys = Array.from(
@@ -1182,7 +1661,7 @@ describe("failure occurrence ledger", () => {
     expect(semanticPrimaryValue(result)).toBe(primary);
   });
 
-  test("records known numeric overflow before a later nonnumeric tail exhausts controlled work", () => {
+  test("stops classification at a known numeric overflow before a nonnumeric tail", () => {
     const numericKeys = Array.from(
       { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1 },
       (_, index) => String(index)
@@ -1222,11 +1701,11 @@ describe("failure occurrence ledger", () => {
     expect(ownKeysCalls).toBe(1);
     expect(observationIssueCodes(result)).toEqual([
       "numeric_key_budget_exceeded",
-      "controlled_operation_budget_exceeded"
+      "edge_budget_exceeded"
     ]);
     expect(ledger.observedGraph.nodes[0]!.edges.filter(
       (edge) => edge.kind === "errors"
-    )).toEqual([]);
+    )).toHaveLength(FAILURE_GRAPH_MAX_NUMERIC_KEYS);
     expect(ledger.observedGraph.observationFailures).toHaveLength(2);
     expect(ledger.observedGraph.observationFailures.every(Object.isFrozen)).toBe(true);
     expect(Object.isFrozen(ledger.events)).toBe(true);
@@ -1243,7 +1722,7 @@ describe("failure occurrence ledger", () => {
 
   test("does not fabricate edge exhaustion when the omitted reverse/interleaved overflow descriptor is absent", () => {
     for (const order of ["reverse", "interleaved"] as const) {
-      const overflowIndex = FAILURE_GRAPH_MAX_NUMERIC_KEYS;
+      const overflowIndex = 0;
       const marker = Object.freeze({ order });
       const numericKeys = Array.from(
         { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1 },
@@ -1300,7 +1779,7 @@ describe("failure occurrence ledger", () => {
         (edge) => edge.index
       )).toEqual(Array.from(
         { length: FAILURE_GRAPH_MAX_NUMERIC_KEYS },
-        (_, index) => index
+        (_, index) => index + 1
       ));
       expect(observationIssueCodes(result)).toEqual([
         "numeric_key_budget_exceeded"
@@ -1378,4 +1857,25 @@ function taskServiceError(message: string): TaskServiceError {
     retryable: true,
     recommendedNextActions: ["Inspect the failure occurrence ledger."]
   });
+}
+
+function typedFailureAdapters(): readonly Readonly<{
+  name: "entries" | "vector";
+  preserve: typeof preserveTaskServiceErrorFailureEntries;
+}>[] {
+  return [
+    {
+      name: "entries",
+      preserve: preserveTaskServiceErrorFailureEntries
+    },
+    {
+      name: "vector",
+      preserve: (primary, compensations, aggregateMessage) =>
+        preserveTaskServiceErrorFailureVector(
+          primary,
+          [primary, ...compensations],
+          aggregateMessage
+        )
+    }
+  ];
 }

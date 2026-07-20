@@ -1,7 +1,9 @@
 # Round 3 hard-gate split plan
 
-Parent PR: #110  
-Reviewed parent head: `1511ca3b69b533ea1eb77f5f8df70c58d6301fd8`  
+Parent PR: #110
+
+Reviewed parent head: `1511ca3b69b533ea1eb77f5f8df70c58d6301fd8`
+
 Gate result: Round 3 not clean; 9 blocking verified findings; breadth retro registered.
 
 PR #110 is the non-mergeable integration parent. Its round counter remains at
