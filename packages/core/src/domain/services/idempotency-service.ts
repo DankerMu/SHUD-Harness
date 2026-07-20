@@ -11,6 +11,7 @@ import {
 import { TaskServiceError, isSafeTaskId } from "./task-card-service";
 import {
   captureFailureFoldEntry,
+  capturePostSettlementFailureFoldEntry,
   runWithPreservedRelease,
   type FailureAsyncOutcome,
   type FailureFoldEntry
@@ -660,7 +661,7 @@ export function createIdempotencyRecordService(
               "body",
               completedRecordInvalidationIdentityError(evidenceRef)
             ),
-            [captureFailureFoldEntry("settlement", error)],
+            [capturePostSettlementFailureFoldEntry(error)],
             IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
           );
         }
@@ -834,7 +835,7 @@ export function createIdempotencyRecordService(
                 } catch (secondWriteError) {
                   throw preserveTaskServiceErrorFailureEntries(
                     firstWriteEntry,
-                    [captureFailureFoldEntry("settlement", secondWriteError)],
+                    [capturePostSettlementFailureFoldEntry(secondWriteError)],
                     IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
                   );
                 }

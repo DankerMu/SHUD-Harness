@@ -114,6 +114,7 @@ import {
   failureEvents,
   failureGraphNodes,
   failureLedger,
+  failureTerminalPhysicalPhase,
   orderedDistinctCompensationFailures,
   orderedDistinctFailures,
   mergeTrustedFailureOccurrences,
@@ -31052,6 +31053,192 @@ describe("idempotency, lock, and artifact services", () => {
     expect((await service.getTaskFromSnapshot(taskId)).title).toBe(
       "S35 rollback zero successor"
     );
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("CORR-R4-01 exact quarantine settles a committed final-release producer without protocol substitution", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const key = "task:create:corr-r4-exact-quarantine";
+    const requestDigest = "digest-corr-r4-exact-quarantine";
+    const evidenceRef = idempotencyRecordEvidenceRef("task", key);
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(key)],
+      evidenceRef
+    );
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, key);
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key, requestDigest });
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const closeTracker = createCleanupPermitCloseTracker([recordPath, guardPath]);
+    const namespaceFailures = Array.from(
+      { length: 3 },
+      (_, index) => new Error(`CORR-R4 quarantine namespace cleanup ${index + 1}`)
+    );
+    let parentDrifts = 0;
+    let namespaceAttempts = 0;
+
+    const quarantined = await runWithWorkspaceRecordPublicationHooks(
+      {
+        beforeCommittedMutableBaselineCapture: async ({ path }) => {
+          if (path !== recordPath || parentDrifts > 0) return;
+          parentDrifts += 1;
+          await applyExternalParentMetadataDrift(dirname(path), "sibling-only");
+        },
+        beforeAuthorityNamespaceRemoval: () => {
+          if (parentDrifts === 0) return;
+          const marker = namespaceFailures[namespaceAttempts];
+          namespaceAttempts += 1;
+          if (marker) throw marker;
+        },
+        afterCleanupPermitPinnedHandleClosed: closeTracker.record
+      },
+      () => service.quarantineRecordAfterUnsafeRollback({
+        scope: "task",
+        key,
+        requestDigest
+      })
+    );
+    await Promise.race([
+      closeTracker.waitForAll(),
+      timeoutAfter(1_000, "CORR-R4 quarantine descriptors did not close")
+    ]);
+
+    expect(quarantined).toMatchObject({
+      status: "failed",
+      request_digest: requestDigest
+    });
+    expect(parentDrifts).toBe(1);
+    expect(namespaceAttempts).toBe(3);
+    expect(await service.getRecord("task", key)).toEqual(quarantined);
+    expect(JSON.parse(await readFile(guardPath, "utf8"))).toMatchObject({
+      owner_pid: process.pid,
+      intent: "fail",
+      request_digest: requestDigest
+    });
+    expect((await readdir(dirname(recordPath))).some(isOwnedRecordPath)).toBe(false);
+    for (const path of [recordPath, guardPath]) {
+      expect(closeTracker.count(path)).toBeGreaterThan(0);
+      for (const fd of closeTracker.descriptors(path)) await expectFileDescriptorClosed(fd);
+    }
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("CORR-R4-01 retained fail-intent second write preserves a committed final-release producer", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const key = "task:create:corr-r4-retained-second-write";
+    const requestDigest = "digest-corr-r4-retained-second-write";
+    const evidenceRef = idempotencyRecordEvidenceRef("task", key);
+    const recordPath = workspaceRecordPath(
+      workspaceRoot,
+      ["tasks", "_idempotency", "task", idempotencyRecordFileName(key)],
+      evidenceRef
+    );
+    const guardPath = idempotencyTransitionGuardPath(workspaceRoot, key);
+    const cleanupLockPath = idempotencyTransitionCleanupLockPath(workspaceRoot, key);
+    const service = createIdempotencyRecordService({ workspaceRoot });
+    await service.beginRecord({ scope: "task", key, requestDigest });
+    const staleGuard = {
+      guard_id: "corr-r4-retained-second-write",
+      owner_pid: 9_999_999,
+      acquired_at_ms: Date.now() - 31_000,
+      acquired_at: "2026-07-20T12:00:00.000Z",
+      intent: "fail",
+      request_digest: requestDigest
+    };
+    await writeFile(guardPath, `${JSON.stringify(staleGuard)}\n`, {
+      flag: "wx",
+      mode: 0o600
+    });
+    const firstWriteFailure = new TaskServiceError({
+      code: "record_schema_error",
+      status: 422,
+      category: "workspace_error",
+      message: "CORR-R4 retained first failed-record write rejected.",
+      userMessage: "The retained failed-record write could not be accepted.",
+      evidenceRefs: [evidenceRef],
+      retryable: true
+    });
+    const namespaceFailures = Array.from(
+      { length: 3 },
+      (_, index) => new Error(`CORR-R4 retained namespace cleanup ${index + 1}`)
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const closeTracker = createCleanupPermitCloseTracker([guardPath, cleanupLockPath]);
+    let firstWriteFailures = 0;
+    let parentDrifts = 0;
+    let namespaceAttempts = 0;
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordPublicationHooks(
+        {
+          afterTemporaryFileWritten: ({ canonicalPath }) => {
+            if (canonicalPath !== recordPath || firstWriteFailures > 0) return;
+            firstWriteFailures += 1;
+            throw firstWriteFailure;
+          },
+          beforeCommittedMutableBaselineCapture: async ({ path }) => {
+            if (path !== recordPath || parentDrifts > 0) return;
+            parentDrifts += 1;
+            await applyExternalParentMetadataDrift(dirname(path), "sibling-only");
+          },
+          beforeAuthorityNamespaceRemoval: () => {
+            if (parentDrifts === 0) return;
+            const marker = namespaceFailures[namespaceAttempts];
+            namespaceAttempts += 1;
+            if (marker) throw marker;
+          },
+          afterCleanupPermitPinnedHandleClosed: closeTracker.record
+        },
+        () => service.lookupReplay({ scope: "task", key, requestDigest })
+      )
+    );
+    await Promise.race([
+      closeTracker.waitForAll(),
+      timeoutAfter(1_000, "CORR-R4 retained recovery descriptors did not close")
+    ]);
+
+    expect(failure).not.toBeInstanceOf(FailureOccurrenceProtocolError);
+    expect(semanticPrimaryError(failure)).toBe(firstWriteFailure);
+    expect(taskServiceErrorAtBoundary(failure)).toBe(firstWriteFailure);
+    expect(failureTerminalPhysicalPhase(failure)).toBe("final_release");
+    expect(firstWriteFailures).toBe(1);
+    expect(parentDrifts).toBe(1);
+    expect(namespaceAttempts).toBe(3);
+    expect(countErrorNodes(failure, (error) => error === firstWriteFailure)).toBe(1);
+    for (const marker of namespaceFailures) {
+      expect(countErrorNodes(failure, (error) => error === marker)).toBe(1);
+      const inherited = [
+        ...failureEvents(failure),
+        ...failureGraphNodes(failure).flatMap((node) => failureEvents(node.value))
+      ].filter((event) => event.value === marker);
+      expect(new Set(inherited.map((event) => event.occurrenceId))).toHaveProperty(
+        "size",
+        1
+      );
+      expect(new Set(inherited.map((event) => event.phase))).toEqual(
+        new Set(["final_release"])
+      );
+    }
+    expect(await service.getRecord("task", key)).toMatchObject({
+      status: "failed",
+      request_digest: requestDigest
+    });
+    expect(JSON.parse(await readFile(guardPath, "utf8"))).toEqual(staleGuard);
+    expect(JSON.parse(await readFile(cleanupLockPath, "utf8"))).toMatchObject({
+      owner_pid: process.pid
+    });
+    expect((await readdir(dirname(recordPath))).some(isOwnedRecordPath)).toBe(false);
+    for (const path of [guardPath, cleanupLockPath]) {
+      expect(closeTracker.count(path)).toBeGreaterThan(0);
+      for (const fd of closeTracker.descriptors(path)) await expectFileDescriptorClosed(fd);
+    }
     expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });

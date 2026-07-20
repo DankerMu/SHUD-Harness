@@ -421,6 +421,17 @@ export function failureTerminalPhysicalPhase(
   return ledger ? terminalPhysicalPhase(ledger) : undefined;
 }
 
+export function capturePostSettlementFailureFoldEntry(
+  value: unknown
+): FailureFoldEntry {
+  return captureFailureFoldEntry(
+    failureTerminalPhysicalPhase(value) === "final_release"
+      ? "final_release"
+      : "settlement",
+    value
+  );
+}
+
 export function orderedDistinctFailures(value: unknown): readonly unknown[] {
   return failureLedger(value)?.orderedDistinct.map((occurrence) => occurrence.value) ?? [value];
 }
