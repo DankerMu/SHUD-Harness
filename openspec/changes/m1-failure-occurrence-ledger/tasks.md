@@ -230,3 +230,12 @@
   67 each precede later TERM, while child settlement, ownership reconciliation,
   zero-residue cleanup, outcome-read failure, and signal-first semantics remain
   intact in the expanded 56-case matrix.
+- [x] 11.5 While a creation transaction is active, make every lifecycle handler
+  adopt an already-published non-zero outcome before latching its own signal.
+  Prove verifier/harness readlink-window collision 73 and unknown-protocol 67,
+  plus verifier/harness TERM-before-publication controls, in the expanded
+  62-case matrix without skipping child release, reap, or ownership settlement.
+- [x] 11.6 Separate the held-child watchdog from the normal settlement-release
+  marker. Assert that no focused probe fires the watchdog, and mutation-prove
+  that removing the production release makes all four verifier/harness
+  collision/unknown probes fail quickly instead of self-healing.

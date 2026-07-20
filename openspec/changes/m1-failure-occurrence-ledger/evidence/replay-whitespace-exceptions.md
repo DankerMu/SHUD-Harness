@@ -69,10 +69,14 @@ inside the root only after its own `mkdir` succeeds. Every parent path after
 child spawn converges on one settlement boundary: it publishes the release
 barrier when possible, otherwise force-reaps the child. When an outcome is
 published while the creation child remains live, the parent reads, classifies,
-and latches it before wait/reap; an unknown protocol value maps to 67. As soon
-as a non-zero release or outcome result is determined, the parent records it in
-the shared write-once latch before later settlement, ownership reconciliation,
-or transaction cleanup; an earlier signal already in the latch remains first.
+and latches it before wait/reap; an unknown protocol value maps to 67. While
+that transaction remains active, each lifecycle handler first adopts an
+already-published non-zero outcome before recording its own signal, closing the
+readlink classification window without changing event-before-publication
+order. As soon as a non-zero release or outcome result is determined, the
+parent records it in the shared write-once latch before later settlement,
+ownership reconciliation, or transaction cleanup; an earlier signal already
+in the latch remains first.
 The parent accepts ownership only when child success, claim token, and root
 token all agree. A same-name or non-cooperating loser returns 73 without
 publishing a marker or touching the target; a pre-existing foreign target
@@ -83,8 +87,8 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 56/56 named scenarios. Eleven are two-party races with
-22 explicit participant outcomes:
+The self-test passed 62/62 named scenarios. Fifteen are two-party races with
+30 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -113,6 +117,13 @@ The self-test passed 56/56 named scenarios. Eleven are two-party races with
   to 67 before the same held-child TERM/release sequence; all six chronology
   probes prove that the earlier transaction result wins and every owned/probe
   artifact is removed;
+- verifier and harness readlink-window probes preserve already-published
+  collision 73 and unknown-protocol 67 when TERM enters the handler before the
+  ordinary parent read has classified that link; paired TERM-before-publication
+  controls remain 143;
+- the held-child watchdog uses a distinct failure marker and never creates the
+  settlement-release marker. Every held probe asserts it did not fire, so a
+  missing production release fails quickly instead of making the probe green;
 - verifier and harness first-claim-read TERM probes both preserve 143, reconcile
   and remove the exact owned claim, and prove that no creation child or
   transaction file exists; and

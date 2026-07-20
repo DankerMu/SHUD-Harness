@@ -664,3 +664,49 @@ Current script SHA-256 values:
   `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
 - `evidence/scripts/verify-replay-evidence.test.sh`:
   `d811699d6dc9e245bb2ceae082c1d85073aeadfe68b005e331f193a626fd1b0a`.
+
+### A5 Round-2 publication adoption and watchdog repair
+
+Verified on `2026-07-19 23:11:48 EDT`. While a creation transaction is active,
+each HUP/INT/TERM handler now checks the atomic outcome publication before it
+records the lifecycle event. If the outcome symlink already publishes collision
+73 or another non-zero protocol value, the handler adopts 73 or mapped 67 into
+the shared write-once latch first. A TERM that is already latched before outcome
+publication remains 143. This changes only parent classification order: every
+path still releases or force-terminates, reaps, reconciles, and cleans the
+creation child before propagating status.
+
+Four new readlink-window probes hold the creation child after publishing its
+outcome, deliver TERM from the parent's first outcome read, and cover collision
+73 plus unknown-to-67 through both verifier and harness. Against the pre-repair
+lifecycle source, all four exited 1 because the nested child returned 143.
+With transaction-active adoption restored, all four report `1/1 passed` at
+73/73/67/67. Two verifier/harness controls deliver TERM before the creation
+release and outcome publication; both preserve 143.
+
+The held-child watchdog no longer writes the production settlement-release
+marker. It writes a distinct watchdog-fired marker and kills the held creation
+path only to bound a broken test. Every held publication probe asserts that
+marker is absent. In the required mutation run, removing the production release
+write made the verifier/harness collision and unknown-outcome probes all exit 1
+within two seconds with `used its watchdog instead of the settlement release`;
+restoring production release made all four green.
+
+The canonical replay verifier exits 0. The full lifecycle matrix passes 62/62
+named scenarios, comprising 15 two-party races and 30 participant outcomes.
+Syntax and shellcheck pass for all three replay scripts; strict OpenSpec,
+incremental/range hygiene, replay hashes, gitlink/submodule state, stash state,
+and replay residue are verified by the final A5 gate.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `52044ce8c679303fd0fa9861f9ba3d89bc8aad839daf5c09f968726bb8d7422f`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `c87be155ad227f4dbfc569e5fcb8bb1275aeecca59d4ed6c35787e71179a3268`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.

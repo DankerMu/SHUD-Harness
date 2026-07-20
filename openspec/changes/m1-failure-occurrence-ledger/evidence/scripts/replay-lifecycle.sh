@@ -17,6 +17,8 @@ lifecycle_transaction_ready=
 lifecycle_transaction_release=
 lifecycle_transaction_outcome=
 lifecycle_create_pid=
+lifecycle_transaction_active=0
+lifecycle_transaction_adoption_active=0
 
 lifecycle_latch_status() {
   if [ -z "$lifecycle_first_status" ]; then
@@ -24,15 +26,41 @@ lifecycle_latch_status() {
   fi
 }
 
+lifecycle_adopt_published_transaction_outcome() {
+  if [ "$lifecycle_transaction_active" -ne 1 ] ||
+    [ "$lifecycle_transaction_adoption_active" -eq 1 ] ||
+    [ ! -L "$lifecycle_transaction_outcome" ]; then
+    return
+  fi
+
+  # A transaction outcome symlink is the publication boundary. A handled
+  # lifecycle event that arrives after it must first adopt the published
+  # non-zero result, even when the parent has not yet classified the link in
+  # its ordinary settlement flow. Keep zero unpublished as a failure status:
+  # a later lifecycle event still wins after a successful child outcome.
+  lifecycle_transaction_adoption_active=1
+  trap '' HUP INT TERM
+  lifecycle_adopted_outcome=$(readlink "$lifecycle_transaction_outcome") || lifecycle_adopted_outcome=
+  lifecycle_transaction_adoption_active=0
+  case "$lifecycle_adopted_outcome" in
+    "$lifecycle_token":73) lifecycle_latch_status 73 ;;
+    "$lifecycle_token":0|'') ;;
+    *) lifecycle_latch_status 67 ;;
+  esac
+}
+
 lifecycle_signal_hup() {
+  lifecycle_adopt_published_transaction_outcome
   lifecycle_latch_status 129
 }
 
 lifecycle_signal_int() {
+  lifecycle_adopt_published_transaction_outcome
   lifecycle_latch_status 130
 }
 
 lifecycle_signal_term() {
+  lifecycle_adopt_published_transaction_outcome
   lifecycle_latch_status 143
 }
 
@@ -332,6 +360,7 @@ lifecycle_settle_creation_transaction() {
     lifecycle_root_owned=1
   fi
 
+  lifecycle_transaction_active=0
   return "$lifecycle_transaction_result"
 }
 
@@ -339,6 +368,7 @@ lifecycle_run_creation_transaction() {
   lifecycle_external_ready=${SHUD_REPLAY_TEST_CREATE_BARRIER_READY:-}
   lifecycle_external_release=${SHUD_REPLAY_TEST_CREATE_BARRIER_RELEASE:-}
 
+  lifecycle_transaction_active=1
   (
     # This is the first child command. Once ready is published, the complete
     # mkdir + marker transaction ignores process-group HUP/INT/TERM.
