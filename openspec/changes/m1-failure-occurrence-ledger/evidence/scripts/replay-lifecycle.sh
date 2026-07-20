@@ -21,6 +21,7 @@ lifecycle_transaction_active=0
 lifecycle_transaction_adoption_active=0
 lifecycle_transaction_decode_active=0
 lifecycle_transaction_outcome_committed=0
+lifecycle_outcome_publication_witnessed=0
 lifecycle_decoded_outcome_published=0
 lifecycle_decoded_outcome_status=
 lifecycle_deferred_signal_status=
@@ -46,8 +47,12 @@ lifecycle_inject_decode_tail_signals() {
 }
 
 lifecycle_inject_post_classification_signal() {
+  lifecycle_post_classification_hook=${SHUD_REPLAY_TEST_POST_CLASSIFICATION_HOOK:-}
   lifecycle_post_classification_signal=${SHUD_REPLAY_TEST_POST_CLASSIFICATION_SIGNAL:-}
   lifecycle_post_classification_event=${SHUD_REPLAY_TEST_POST_CLASSIFICATION_EVENT:-}
+  if [ -n "$lifecycle_post_classification_hook" ]; then
+    "$lifecycle_post_classification_hook" "$lifecycle_transaction_outcome" "$lifecycle_token"
+  fi
   if [ -n "$lifecycle_post_classification_signal" ]; then
     if [ -n "$lifecycle_post_classification_event" ]; then
       : >"$lifecycle_post_classification_event"
@@ -72,13 +77,17 @@ lifecycle_commit_deferred_signal() {
 }
 
 lifecycle_decode_and_commit_transaction_outcome() {
+  lifecycle_outcome_publication_required=$1
+  lifecycle_decode_entry_event=${SHUD_REPLAY_TEST_DECODE_ENTRY_EVENT:-}
+  if [ -n "$lifecycle_decode_entry_event" ]; then
+    printf '%s\n' "$$" >>"$lifecycle_decode_entry_event"
+  fi
   if [ "$lifecycle_transaction_outcome_committed" -eq 1 ]; then
     return
   fi
 
   lifecycle_decoded_outcome_published=0
   lifecycle_decoded_outcome_status=
-  lifecycle_deferred_signal_status=
   lifecycle_transaction_decode_active=1
 
   if [ -L "$lifecycle_transaction_outcome" ]; then
@@ -91,6 +100,12 @@ lifecycle_decode_and_commit_transaction_outcome() {
         *) lifecycle_decoded_outcome_status=67 ;;
       esac
     fi
+  elif [ "$lifecycle_outcome_publication_required" -eq 1 ]; then
+    # Ordinary settlement already observed the atomic publication. If another
+    # same-user actor removes it before this shared boundary can classify it,
+    # the witnessed protocol state is unreadable rather than unpublished.
+    lifecycle_decoded_outcome_published=1
+    lifecycle_decoded_outcome_status=67
   fi
 
   if [ "$lifecycle_decoded_outcome_published" -eq 1 ] &&
@@ -119,7 +134,7 @@ lifecycle_adopt_published_transaction_outcome() {
   # while a post-clear event enters the latch directly.
   lifecycle_transaction_adoption_active=1
   trap '' HUP INT TERM
-  lifecycle_decode_and_commit_transaction_outcome
+  lifecycle_decode_and_commit_transaction_outcome "$lifecycle_outcome_publication_witnessed"
   lifecycle_transaction_adoption_active=0
 }
 
@@ -354,6 +369,26 @@ lifecycle_wait_for_link() {
   done
 }
 
+lifecycle_wait_for_transaction_outcome() {
+  while :; do
+    # Defer handlers across the presence test and witnessed-state write. A
+    # negative probe immediately returns any deferred event to the ordinary
+    # signal-first latch; a positive probe makes publication required before
+    # handlers can decode either the link or its subsequent disappearance.
+    lifecycle_transaction_decode_active=1
+    if [ -L "$lifecycle_transaction_outcome" ]; then
+      lifecycle_outcome_publication_witnessed=1
+      lifecycle_transaction_decode_active=0
+      return 0
+    fi
+    lifecycle_transaction_decode_active=0
+    lifecycle_commit_deferred_signal
+    if ! kill -0 "$lifecycle_create_pid" >/dev/null 2>&1; then
+      return 1
+    fi
+  done
+}
+
 lifecycle_wait_for_creation_child() {
   while :; do
     wait "$lifecycle_create_pid" >/dev/null 2>&1 || true
@@ -385,6 +420,13 @@ lifecycle_inject_published_outcome_signal() {
       : >"$lifecycle_published_outcome_event"
     fi
     kill -s "$lifecycle_published_outcome_signal" "$$"
+  fi
+}
+
+lifecycle_inject_outcome_witnessed_hook() {
+  lifecycle_outcome_witnessed_hook=${SHUD_REPLAY_TEST_OUTCOME_WITNESSED_HOOK:-}
+  if [ -n "$lifecycle_outcome_witnessed_hook" ]; then
+    "$lifecycle_outcome_witnessed_hook" "$lifecycle_transaction_outcome" "$lifecycle_token"
   fi
 }
 
@@ -435,7 +477,7 @@ lifecycle_settle_creation_transaction() {
 
   if [ "$lifecycle_release_published" -eq 1 ]; then
     lifecycle_inject_published_outcome_signal
-    lifecycle_decode_and_commit_transaction_outcome
+    lifecycle_decode_and_commit_transaction_outcome "$lifecycle_outcome_publication_witnessed"
   fi
 
   lifecycle_transaction_result=$lifecycle_settlement_status
@@ -465,6 +507,7 @@ lifecycle_settle_creation_transaction() {
 
   lifecycle_transaction_active=0
   lifecycle_transaction_outcome_committed=0
+  lifecycle_outcome_publication_witnessed=0
   return "$lifecycle_transaction_result"
 }
 
@@ -474,6 +517,7 @@ lifecycle_run_creation_transaction() {
 
   lifecycle_transaction_active=1
   lifecycle_transaction_outcome_committed=0
+  lifecycle_outcome_publication_witnessed=0
   lifecycle_decoded_outcome_published=0
   lifecycle_decoded_outcome_status=
   lifecycle_deferred_signal_status=
@@ -522,10 +566,13 @@ lifecycle_run_creation_transaction() {
     fi
   fi
 
-  if [ "$lifecycle_release_published" -eq 1 ] &&
-    ! lifecycle_wait_for_link "$lifecycle_transaction_outcome" "$lifecycle_create_pid"; then
-    lifecycle_settlement_status=67
-    lifecycle_latch_transaction_result "$lifecycle_settlement_status"
+  if [ "$lifecycle_release_published" -eq 1 ]; then
+    if ! lifecycle_wait_for_transaction_outcome; then
+      lifecycle_settlement_status=67
+      lifecycle_latch_transaction_result "$lifecycle_settlement_status"
+    else
+      lifecycle_inject_outcome_witnessed_hook
+    fi
   fi
   lifecycle_settle_creation_transaction "$lifecycle_settlement_status" "$lifecycle_release_published"
 }
