@@ -126,13 +126,16 @@ lifecycle_latch_status() {
 }
 
 lifecycle_latch_transfer_before_current_signal() {
-  if [ "$lifecycle_decoded_outcome_published" -eq 0 ] &&
+  if [ "$lifecycle_transaction_active" -eq 1 ] &&
+    [ "$lifecycle_transaction_decode_active" -eq 0 ] &&
+    [ "$lifecycle_outcome_publication_witnessed" -eq 0 ] &&
+    [ "$lifecycle_decoded_outcome_published" -eq 0 ] &&
     [ -z "$lifecycle_deferred_transfer_status" ] &&
     [ -n "$lifecycle_deferred_signal_status" ]; then
-    # Before any outcome has been decoded, a handler can enter after decode
-    # authority clears but before its caller finishes a negative-probe handoff.
-    # Promote that late source before adoption; an already decoded outcome
-    # retains its existing commit-before-later-signal priority.
+    # Only a negative probe whose decode authority has cleared can leave this
+    # late source for a handler to promote before adoption. A positive probe
+    # has already witnessed publication, while an active decoder still owns
+    # its deferred source; both continue through the shared outcome-first path.
     lifecycle_establish_deferred_transfer
   fi
   if [ -z "$lifecycle_deferred_transfer_status" ]; then

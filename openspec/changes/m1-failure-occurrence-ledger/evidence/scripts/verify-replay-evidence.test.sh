@@ -1098,6 +1098,211 @@ EOF
   record_pass
 }
 
+run_positive_probe_precedence_case() {
+  case_name=$1
+  child_kind=$2
+  disappear_outcome=$3
+  expected=$4
+  root_name="case-$case_name"
+  child_token="positive-probe-$case_name"
+  child_root="$lifecycle_root/$root_name"
+  child_claim="$lifecycle_root/.$root_name.claim"
+  child_marker="$child_root/.shud-replay-owner"
+  transaction_fault_dir="$lifecycle_root/$case_name.positive-probe"
+  transaction_probe_dir=$transaction_fault_dir
+  transaction_pid_file="$transaction_fault_dir/creation-pids"
+  outcome_published_event="$transaction_fault_dir/outcome-published"
+  outcome_wait_event="$transaction_fault_dir/deferred-hup-fired"
+  witnessed_event="$transaction_fault_dir/outcome-witnessed"
+  disappearance_event="$transaction_fault_dir/outcome-removed"
+  later_identity_event="$transaction_fault_dir/later-identity"
+  decode_event="$transaction_fault_dir/decode-commits"
+  settlement_release="$transaction_fault_dir/settlement-release"
+  watchdog_event="$transaction_fault_dir/watchdog-fired"
+  mkdir -m 700 "$transaction_fault_dir" "$child_root"
+
+  cat >"$transaction_fault_dir/ln" <<'EOF'
+#!/bin/sh
+last_arg=
+for arg do last_arg=$arg; done
+case "$last_arg" in
+  *.transaction.*.release)
+    /bin/ln "$@" || exit $?
+    hold_attempt=0
+    while [ ! -e "$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT" ]; do
+      hold_attempt=$((hold_attempt + 1))
+      if [ "$hold_attempt" -ge 40 ]; then
+        : >"$SHUD_REPLAY_TEST_WATCHDOG_EVENT"
+        exit 124
+      fi
+      sleep 0.05
+    done
+    exit 0
+    ;;
+  *.transaction.*.outcome)
+    /bin/ln "$@" || exit $?
+    printf '%s\n' "$PPID" >>"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+    : >"$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT"
+    hold_attempt=0
+    while [ ! -e "$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE" ]; do
+      hold_attempt=$((hold_attempt + 1))
+      if [ "$hold_attempt" -ge 40 ]; then
+        : >"$SHUD_REPLAY_TEST_WATCHDOG_EVENT"
+        kill -KILL "$PPID" >/dev/null 2>&1 || true
+        exit 124
+      fi
+      sleep 0.05
+    done
+    exit 0
+    ;;
+esac
+exec /bin/ln "$@"
+EOF
+  cat >"$transaction_fault_dir/outcome-witnessed-hook" <<'EOF'
+#!/bin/sh
+: >"$SHUD_REPLAY_TEST_OUTCOME_WITNESSED_EVENT"
+if [ "$SHUD_REPLAY_TEST_DISAPPEAR_OUTCOME" -eq 1 ]; then
+  rm "$1" || exit $?
+  : >"$SHUD_REPLAY_TEST_DISAPPEARANCE_EVENT"
+fi
+printf '%s\n' 'INT:130' >"$SHUD_REPLAY_TEST_LATER_IDENTITY_EVENT"
+kill -s INT "$PPID"
+EOF
+  cat >"$transaction_fault_dir/post-classification-hook" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$2" >>"$SHUD_REPLAY_TEST_DECODE_EVENT"
+EOF
+  chmod 700 "$transaction_fault_dir/ln" \
+    "$transaction_fault_dir/outcome-witnessed-hook" \
+    "$transaction_fault_dir/post-classification-hook"
+
+  case "$child_kind" in
+    verifier) transaction_command=$verifier ;;
+    harness) transaction_command=$self_test ;;
+    *)
+      echo "unknown positive-probe child kind: $child_kind" >&2
+      rm -rf "$transaction_fault_dir" "$child_root"
+      transaction_fault_dir=
+      return 1
+      ;;
+  esac
+
+  set +e
+  PATH="$transaction_fault_dir:$PATH" \
+    SHUD_REPLAY_TEST_CREATION_PID_FILE="$transaction_pid_file" \
+    SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT="$outcome_published_event" \
+    SHUD_REPLAY_TEST_OUTCOME_WAIT_SIGNAL=HUP \
+    SHUD_REPLAY_TEST_OUTCOME_WAIT_EVENT="$outcome_wait_event" \
+    SHUD_REPLAY_TEST_OUTCOME_WITNESSED_HOOK="$transaction_fault_dir/outcome-witnessed-hook" \
+    SHUD_REPLAY_TEST_OUTCOME_WITNESSED_EVENT="$witnessed_event" \
+    SHUD_REPLAY_TEST_DISAPPEAR_OUTCOME="$disappear_outcome" \
+    SHUD_REPLAY_TEST_DISAPPEARANCE_EVENT="$disappearance_event" \
+    SHUD_REPLAY_TEST_LATER_IDENTITY_EVENT="$later_identity_event" \
+    SHUD_REPLAY_TEST_POST_CLASSIFICATION_HOOK="$transaction_fault_dir/post-classification-hook" \
+    SHUD_REPLAY_TEST_DECODE_EVENT="$decode_event" \
+    SHUD_REPLAY_TEST_SETTLEMENT_RELEASE="$settlement_release" \
+    SHUD_REPLAY_TEST_WATCHDOG_EVENT="$watchdog_event" \
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_SCENARIO=decode_tail_probe \
+    SHUD_REPLAY_TEST_SCENARIO=normal \
+    SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+    "$transaction_command" >/dev/null 2>&1
+  actual=$?
+  set -e
+
+  precedence_failed=0
+  if [ "$actual" -ne "$expected" ]; then
+    echo "$case_name exited $actual, expected $expected" >&2
+    precedence_failed=1
+  fi
+  for required_event in "$outcome_published_event" "$outcome_wait_event" \
+    "$witnessed_event" "$later_identity_event" "$settlement_release"; do
+    if [ ! -e "$required_event" ]; then
+      echo "$case_name missed required event: $required_event" >&2
+      precedence_failed=1
+    fi
+  done
+  if [ "$(sed -n '1p' "$later_identity_event" 2>/dev/null || true)" != "INT:130" ]; then
+    echo "$case_name did not preserve its later INT:130 identity" >&2
+    precedence_failed=1
+  fi
+  if [ "$disappear_outcome" -eq 1 ]; then
+    if [ ! -e "$disappearance_event" ]; then
+      echo "$case_name did not remove its witnessed outcome" >&2
+      precedence_failed=1
+    fi
+  elif [ -e "$disappearance_event" ]; then
+    echo "$case_name unexpectedly removed its witnessed outcome" >&2
+    precedence_failed=1
+  fi
+  decode_count=0
+  if [ -f "$decode_event" ]; then
+    decode_count=$(wc -l <"$decode_event" | tr -d ' ')
+  fi
+  if [ "$decode_count" -ne 1 ] ||
+    [ "$(sed -n '1p' "$decode_event" 2>/dev/null || true)" != "$child_token" ]; then
+    echo "$case_name committed its shared decode $decode_count times, expected once" >&2
+    precedence_failed=1
+  fi
+  if [ -e "$watchdog_event" ]; then
+    echo "$case_name used its watchdog instead of mandatory child settlement" >&2
+    precedence_failed=1
+  fi
+  if [ ! -s "$transaction_pid_file" ]; then
+    echo "$case_name did not identify the creation child" >&2
+    precedence_failed=1
+  else
+    while IFS= read -r child_pid; do
+      case "$child_pid" in
+        ''|*[!0-9]*)
+          echo "$case_name recorded invalid creation pid: $child_pid" >&2
+          precedence_failed=1
+          ;;
+        *)
+          if kill -0 "$child_pid" >/dev/null 2>&1; then
+            echo "$case_name retained live creation child $child_pid" >&2
+            precedence_failed=1
+          fi
+          ;;
+      esac
+    done <"$transaction_pid_file"
+  fi
+  if find "$lifecycle_root" -maxdepth 1 -name ".$root_name.claim.transaction.*" -print -quit |
+    grep . >/dev/null; then
+    echo "$case_name retained transaction links" >&2
+    precedence_failed=1
+  fi
+  if [ -e "$child_claim" ] || [ -L "$child_claim" ] ||
+    [ -e "$child_marker" ] || [ -L "$child_marker" ]; then
+    echo "$case_name retained owned lifecycle residue" >&2
+    precedence_failed=1
+  fi
+  if [ ! -d "$child_root" ] ||
+    find "$child_root" -mindepth 1 -print -quit | grep . >/dev/null; then
+    echo "$case_name modified its foreign collision root" >&2
+    precedence_failed=1
+  elif ! rmdir "$child_root"; then
+    echo "$case_name could not remove its collision probe root" >&2
+    precedence_failed=1
+  fi
+  if test_worktree_is_registered "$child_root/round-1" ||
+    test_worktree_is_registered "$child_root/round-2"; then
+    echo "$case_name retained a registered worktree" >&2
+    precedence_failed=1
+  fi
+
+  cleanup_transaction_fault_residue "$child_root" "$child_claim" "$child_token"
+  if [ -e "$child_root" ] || [ -L "$child_root" ] ||
+    [ -e "$transaction_probe_dir" ]; then
+    echo "$case_name retained positive-probe residue" >&2
+    precedence_failed=1
+  fi
+  if [ "$precedence_failed" -ne 0 ]; then return 1; fi
+  record_pass
+}
+
 create_collision_fixture() {
   fixture_name=$1
   fixture_kind=${2:-marker}
@@ -1946,6 +2151,8 @@ case "$self_test_scenario" in
     empty_source_tail_unknown_verifier|empty_source_tail_unknown_harness|\
     outcome_disappearance_term_verifier|outcome_disappearance_term_harness|\
     outcome_disappearance_restore_verifier|outcome_disappearance_restore_harness|\
+    positive_probe_collision_verifier|positive_probe_collision_harness|\
+    positive_probe_disappearance_verifier|positive_probe_disappearance_harness|\
     transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
     claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     ;;
@@ -2131,6 +2338,18 @@ case "$self_test_scenario" in
   outcome_disappearance_restore_harness)
     run_outcome_disappearance_case outcome_disappearance_restore_harness harness 1 67
     ;;
+  positive_probe_collision_verifier)
+    run_positive_probe_precedence_case positive_probe_collision_verifier verifier 0 73
+    ;;
+  positive_probe_collision_harness)
+    run_positive_probe_precedence_case positive_probe_collision_harness harness 0 73
+    ;;
+  positive_probe_disappearance_verifier)
+    run_positive_probe_precedence_case positive_probe_disappearance_verifier verifier 1 67
+    ;;
+  positive_probe_disappearance_harness)
+    run_positive_probe_precedence_case positive_probe_disappearance_harness harness 1 67
+    ;;
   transaction_signal_before_publication_verifier)
     run_acquisition_signal_case signal_before_publication_verifier TERM '' 143 verifier
     ;;
@@ -2165,6 +2384,8 @@ case "$self_test_scenario" in
   empty_source_tail_unknown_verifier|empty_source_tail_unknown_harness|\
   outcome_disappearance_term_verifier|outcome_disappearance_term_harness|\
   outcome_disappearance_restore_verifier|outcome_disappearance_restore_harness|\
+  positive_probe_collision_verifier|positive_probe_collision_harness|\
+  positive_probe_disappearance_verifier|positive_probe_disappearance_harness|\
   transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
   claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     lifecycle_begin_successful_finalization
@@ -2331,6 +2552,14 @@ run_outcome_disappearance_case outcome_disappearance_term_harness harness 0 67
 run_outcome_disappearance_case outcome_disappearance_restore_verifier verifier 1 67
 run_outcome_disappearance_case outcome_disappearance_restore_harness harness 1 67
 
+# A deferred HUP captured by a positive probe remains subordinate to the
+# already witnessed collision or mandatory disappearance classification. The
+# later INT cannot promote the deferred source ahead of the shared decoder.
+run_positive_probe_precedence_case positive_probe_collision_verifier verifier 0 73
+run_positive_probe_precedence_case positive_probe_collision_harness harness 0 73
+run_positive_probe_precedence_case positive_probe_disappearance_verifier verifier 1 67
+run_positive_probe_precedence_case positive_probe_disappearance_harness harness 1 67
+
 # A handled event that arrives before outcome publication remains first.
 run_acquisition_signal_case signal_before_publication_verifier TERM '' 143 verifier
 run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harness
@@ -2339,11 +2568,11 @@ run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harnes
 run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
 run_claim_reconciliation_case claim_reconciliation_harness_term harness
 
-if [ "$passed" -ne 91 ]; then
-  echo "replay scenario accounting mismatch: $passed/91" >&2
+if [ "$passed" -ne 95 ]; then
+  echo "replay scenario accounting mismatch: $passed/95" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 91/91 named scenarios passed (36 two-party races, 72 participant outcomes)"
+echo "replay evidence lifecycle: 95/95 named scenarios passed (40 two-party races, 80 participant outcomes)"
