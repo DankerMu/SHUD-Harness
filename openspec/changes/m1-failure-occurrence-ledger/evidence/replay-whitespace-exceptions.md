@@ -67,10 +67,12 @@ pre-existing latch after ownership is knowable. One short child transaction
 ignores HUP/INT/TERM, wins or loses atomic `mkdir`, and publishes the same token
 inside the root only after its own `mkdir` succeeds. Every parent path after
 child spawn converges on one settlement boundary: it publishes the release
-barrier when possible, otherwise force-reaps the child, waits, reconciles the
-exact outcome and ownership tokens, and only then propagates the write-once
-status. The parent accepts ownership only when child success, claim token, and
-root token all agree. A same-name or non-cooperating loser returns 73 without
+barrier when possible, otherwise force-reaps the child, and waits. As soon as a
+non-zero release or outcome result is determined, the parent records it in the
+shared write-once latch before later settlement, ownership reconciliation, or
+transaction cleanup; an earlier signal already in the latch remains first. The
+parent accepts ownership only when child success, claim token, and root token
+all agree. A same-name or non-cooperating loser returns 73 without
 publishing a marker or touching the target; a pre-existing foreign target
 remains byte-for-byte unchanged. EXIT cleanup masks EXIT/HUP/INT/TERM as its
 first command, then preserves the write-once first status across later signals
@@ -79,7 +81,7 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 50/50 named scenarios. Nine are two-party races with
+The self-test passed 54/54 named scenarios. Nine are two-party races with
 18 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
@@ -101,6 +103,10 @@ The self-test passed 50/50 named scenarios. Nine are two-party races with
 - TERM interrupting the outcome read preserves 143 after reconciling committed
   ownership, while injected release-publication failure preserves transaction
   status 67 after force-reaping the unreleased child;
+- verifier and harness chronology probes preserve release failure 67 and
+  collision outcome 73 when TERM arrives only after that result is determined;
+  all four prove that the earlier transaction result wins and every owned/probe
+  artifact is removed;
 - verifier and harness first-claim-read TERM probes both preserve 143, reconcile
   and remove the exact owned claim, and prove that no creation child or
   transaction file exists; and
@@ -108,5 +114,5 @@ The self-test passed 50/50 named scenarios. Nine are two-party races with
   marker-created assertion-window TERM and HUP→INT paths.
 
 Every case leaves no exact registered worktree, claim, token, marker, or owned
-temporary root. A clean incremental A4 `git diff --check` must exit 0 because
-A4 introduces no new whitespace exception.
+temporary root. A clean incremental A5 `git diff --check` must exit 0 because
+A5 introduces no new whitespace exception.

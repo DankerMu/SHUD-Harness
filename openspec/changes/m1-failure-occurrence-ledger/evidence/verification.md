@@ -565,6 +565,19 @@ The replay patch hashes remain byte-identical at
 `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
 and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
 
+Final A5 verification:
+
+- `/bin/sh -n` and `shellcheck -s sh` pass for all three replay scripts.
+- The canonical verifier exits 0; the lifecycle matrix reports 54/54 passed.
+- `openspec validate m1-failure-occurrence-ledger --strict --no-interactive`
+  reports the change valid, and incremental `git diff --check` exits 0.
+- Range-wide `git diff --check` from issue base `5a450a9` exits 2 with exactly
+  the documented 13 replay-artifact rows and no other finding.
+- Zero remains uninitialized in this split worktree; its index gitlink remains
+  `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6` with no submodule diff.
+- No `red-proof` stash, replay temporary root, replay worktree registration,
+  fault probe, or out-of-scope changed path remains.
+
 Final A4 verification:
 
 - `/bin/sh -n` and `shellcheck -s sh` pass for all three replay scripts.
@@ -578,3 +591,44 @@ Final A4 verification:
   with no submodule diff.
 - No `red-proof` stash, replay temporary root, replay worktree registration, or
   out-of-scope changed path remains.
+
+## Child A5 post-spawn result chronology
+
+Verified on `2026-07-19 22:19:01 EDT` against split base
+`d8a25f27c6e06bc1a4701538ae656a897537a61b`.
+
+The shared lifecycle now records every non-zero post-spawn transaction result
+in the same write-once status latch as soon as the result is determined. A
+release/wait/read failure records 67 before child settlement or ownership
+probes; a published collision outcome records 73 before ownership
+reconciliation and transaction cleanup. `lifecycle_latch_status` retains an
+earlier signal when one already exists, while a transaction result that arrives
+first masks later handled signals during mandatory settlement and cleanup.
+
+Four public-surface tests were added: release failure 67 followed by TERM and
+collision outcome 73 followed by TERM, each through both the canonical verifier
+and lifecycle harness. Before the shared source changed, the batched red run
+reported four failures: every child exited 143 instead of its earlier 67 or 73.
+After the correction, all four dedicated scenarios report `1/1 passed`. They
+also assert the spawned creation child is reaped and no exact claim,
+transaction link, owner marker, owned root, registered worktree, foreign
+collision probe, or fault-injection directory remains.
+
+The canonical replay verifier exits 0. The full lifecycle matrix passes 54/54
+named scenarios while retaining nine two-party races and 18 explicit
+participant outcomes. Existing signal-first, A4 pre-spawn reconciliation,
+same-name/static collisions, strict cleanup, and successful-finalization cases
+remain green.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `a49e2505bae5e0de3dc63c5f0c6d4c945790f2d89f815027d24e867396d02b81`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `fef0f68f3c510afb54eb41d21337059cd00adece13d09bf3de5d961d4a5c4040`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.

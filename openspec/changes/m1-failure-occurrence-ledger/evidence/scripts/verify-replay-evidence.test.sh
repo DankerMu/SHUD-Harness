@@ -515,14 +515,18 @@ run_transaction_settlement_case() {
   case_name=$1
   fault_kind=$2
   expected=$3
+  child_kind=${4:-verifier}
   root_name="case-$case_name"
   child_token="transaction-$case_name"
   child_root="$lifecycle_root/$root_name"
   child_claim="$lifecycle_root/.$root_name.claim"
   child_marker="$child_root/.shud-replay-owner"
   transaction_fault_dir="$lifecycle_root/$case_name.fault-bin"
+  transaction_probe_dir=$transaction_fault_dir
   transaction_pid_file="$transaction_fault_dir/creation-pids"
   fault_event="$transaction_fault_dir/fault-fired"
+  later_event="$transaction_fault_dir/later-event-fired"
+  collision_fixture=0
   mkdir -m 700 "$transaction_fault_dir"
 
   case "$fault_kind" in
@@ -563,8 +567,60 @@ exec /bin/ln "$@"
 EOF
       chmod 700 "$transaction_fault_dir/ln"
       ;;
+    release_result_then_term)
+      cat >"$transaction_fault_dir/ln" <<'EOF'
+#!/bin/sh
+last_arg=
+for arg do last_arg=$arg; done
+case "$last_arg" in
+  *.transaction.*.release)
+    : >"$SHUD_REPLAY_TEST_FAULT_EVENT"
+    exit 67
+    ;;
+esac
+exec /bin/ln "$@"
+EOF
+      cat >"$transaction_fault_dir/readlink" <<'EOF'
+#!/bin/sh
+if [ "$1" = "$SHUD_REPLAY_TEST_FAULT_CLAIM" ] &&
+  [ -e "$SHUD_REPLAY_TEST_FAULT_EVENT" ] &&
+  [ ! -e "$SHUD_REPLAY_TEST_LATER_EVENT" ]; then
+  : >"$SHUD_REPLAY_TEST_LATER_EVENT"
+  kill -s TERM "$PPID"
+fi
+exec /usr/bin/readlink "$@"
+EOF
+      chmod 700 "$transaction_fault_dir/ln" "$transaction_fault_dir/readlink"
+      ;;
+    collision_result_then_term)
+      mkdir -m 700 "$child_root"
+      collision_fixture=1
+      cat >"$transaction_fault_dir/readlink" <<'EOF'
+#!/bin/sh
+case "$1" in
+  *.transaction.*.ready)
+    outcome_path=${1%.ready}.outcome
+    if [ -L "$outcome_path" ] && [ ! -e "$SHUD_REPLAY_TEST_LATER_EVENT" ]; then
+      : >"$SHUD_REPLAY_TEST_LATER_EVENT"
+      kill -s TERM "$PPID"
+    fi
+    ;;
+esac
+exec /usr/bin/readlink "$@"
+EOF
+      chmod 700 "$transaction_fault_dir/readlink"
+      ;;
     *)
       echo "unknown transaction fault: $fault_kind" >&2
+      return 1
+      ;;
+  esac
+
+  case "$child_kind" in
+    verifier) transaction_command=$verifier ;;
+    harness) transaction_command=$self_test ;;
+    *)
+      echo "unknown transaction child kind: $child_kind" >&2
       return 1
       ;;
   esac
@@ -572,11 +628,15 @@ EOF
   set +e
   PATH="$transaction_fault_dir:$PATH" \
     SHUD_REPLAY_TEST_FAULT_EVENT="$fault_event" \
+    SHUD_REPLAY_TEST_FAULT_CLAIM="$child_claim" \
+    SHUD_REPLAY_TEST_LATER_EVENT="$later_event" \
     SHUD_REPLAY_TEST_CREATION_PID_FILE="$transaction_pid_file" \
     SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
     SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_SCENARIO=matrix \
     SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
-    "$verifier" >/dev/null 2>&1
+    "$transaction_command" >/dev/null 2>&1
   actual=$?
   set -e
 
@@ -585,6 +645,14 @@ EOF
     echo "$case_name exited $actual, expected $expected" >&2
     settlement_failed=1
   fi
+  case "$fault_kind" in
+    release_result_then_term|collision_result_then_term)
+      if [ ! -e "$later_event" ]; then
+        echo "$case_name did not inject the later TERM" >&2
+        settlement_failed=1
+      fi
+      ;;
+  esac
   if [ ! -s "$transaction_pid_file" ]; then
     echo "$case_name did not identify the spawned creation child" >&2
     settlement_failed=1
@@ -617,7 +685,16 @@ EOF
     echo "$case_name retained its owner marker" >&2
     settlement_failed=1
   fi
-  if [ -e "$child_root" ] || [ -L "$child_root" ]; then
+  if [ "$collision_fixture" -eq 1 ]; then
+    if [ ! -d "$child_root" ] ||
+      find "$child_root" -mindepth 1 -print -quit | grep . >/dev/null; then
+      echo "$case_name modified its foreign collision root" >&2
+      settlement_failed=1
+    elif ! rmdir "$child_root"; then
+      echo "$case_name could not remove its collision probe root" >&2
+      settlement_failed=1
+    fi
+  elif [ -e "$child_root" ] || [ -L "$child_root" ]; then
     echo "$case_name retained its root" >&2
     settlement_failed=1
   fi
@@ -628,6 +705,11 @@ EOF
   fi
 
   cleanup_transaction_fault_residue "$child_root" "$child_claim" "$child_token"
+  if [ -e "$child_root" ] || [ -L "$child_root" ] ||
+    [ -e "$transaction_probe_dir" ]; then
+    echo "$case_name retained transaction probe residue" >&2
+    settlement_failed=1
+  fi
   if [ "$settlement_failed" -ne 0 ]; then return 1; fi
   record_pass
 }
@@ -737,6 +819,8 @@ case "$self_test_scenario" in
     collision_verifier_child_42|collision_harness_child_42|\
     assertion_signal_term|assertion_double_hup_int|\
     transaction_outcome_read_term|transaction_release_publication_failure|\
+    chronology_release_verifier|chronology_release_harness|\
+    chronology_collision_verifier|chronology_collision_harness|\
     claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     ;;
   *)
@@ -795,6 +879,18 @@ case "$self_test_scenario" in
   transaction_release_publication_failure)
     run_transaction_settlement_case release_publication_failure release_publication_failure 67
     ;;
+  chronology_release_verifier)
+    run_transaction_settlement_case release_result_then_term_verifier release_result_then_term 67 verifier
+    ;;
+  chronology_release_harness)
+    run_transaction_settlement_case release_result_then_term_harness release_result_then_term 67 harness
+    ;;
+  chronology_collision_verifier)
+    run_transaction_settlement_case collision_result_then_term_verifier collision_result_then_term 73 verifier
+    ;;
+  chronology_collision_harness)
+    run_transaction_settlement_case collision_result_then_term_harness collision_result_then_term 73 harness
+    ;;
   claim_reconciliation_verifier_term)
     run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
     ;;
@@ -805,6 +901,8 @@ esac
 
 case "$self_test_scenario" in
   transaction_outcome_read_term|transaction_release_publication_failure|\
+  chronology_release_verifier|chronology_release_harness|\
+  chronology_collision_verifier|chronology_collision_harness|\
   claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     lifecycle_begin_successful_finalization
     lifecycle_release_root_strict 84
@@ -875,16 +973,20 @@ run_harness_case assertion_double_hup_int assertion_double_hup_int 129
 # Every post-spawn fault settles the creation child before ownership cleanup.
 run_transaction_settlement_case outcome_read_term outcome_read_term 143
 run_transaction_settlement_case release_publication_failure release_publication_failure 67
+run_transaction_settlement_case release_result_then_term_verifier release_result_then_term 67 verifier
+run_transaction_settlement_case release_result_then_term_harness release_result_then_term 67 harness
+run_transaction_settlement_case collision_result_then_term_verifier collision_result_then_term 73 verifier
+run_transaction_settlement_case collision_result_then_term_harness collision_result_then_term 73 harness
 
 # A first claim-read signal is reconciled before any creation child is spawned.
 run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
 run_claim_reconciliation_case claim_reconciliation_harness_term harness
 
-if [ "$passed" -ne 50 ]; then
-  echo "replay scenario accounting mismatch: $passed/50" >&2
+if [ "$passed" -ne 54 ]; then
+  echo "replay scenario accounting mismatch: $passed/54" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 50/50 named scenarios passed (9 two-party races, 18 participant outcomes)"
+echo "replay evidence lifecycle: 54/54 named scenarios passed (9 two-party races, 18 participant outcomes)"

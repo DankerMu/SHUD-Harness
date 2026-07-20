@@ -237,6 +237,14 @@ lifecycle_mask_latched_signals() {
   fi
 }
 
+lifecycle_latch_transaction_result() {
+  lifecycle_transaction_result=$1
+  if [ "$lifecycle_transaction_result" -ne 0 ]; then
+    lifecycle_latch_status "$lifecycle_transaction_result"
+    lifecycle_mask_latched_signals
+  fi
+}
+
 lifecycle_link_matches_during_settlement() {
   lifecycle_settlement_match_path=$1
   lifecycle_settlement_match_token=$2
@@ -256,6 +264,11 @@ lifecycle_settle_creation_transaction() {
   lifecycle_settlement_status=$1
   lifecycle_release_published=$2
 
+  # A post-spawn transaction failure is already an externally observable
+  # lifecycle result. Latch it before child settlement or ownership probes so
+  # a later signal cannot replace the earlier result.
+  lifecycle_latch_transaction_result "$lifecycle_settlement_status"
+
   if [ "$lifecycle_release_published" -ne 1 ] &&
     kill -0 "$lifecycle_create_pid" >/dev/null 2>&1; then
     kill -KILL "$lifecycle_create_pid" >/dev/null 2>&1 || true
@@ -268,12 +281,23 @@ lifecycle_settle_creation_transaction() {
     lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || {
       lifecycle_outcome_value=
       lifecycle_settlement_status=67
+      lifecycle_latch_transaction_result "$lifecycle_settlement_status"
     }
     if [ -z "$lifecycle_outcome_value" ] && [ -n "$lifecycle_first_status" ]; then
       trap '' HUP INT TERM
       lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || lifecycle_outcome_value=
     fi
   fi
+
+  lifecycle_transaction_result=$lifecycle_settlement_status
+  if [ "$lifecycle_transaction_result" -eq 0 ]; then
+    case "$lifecycle_outcome_value" in
+      "$lifecycle_token":0) lifecycle_transaction_result=0 ;;
+      "$lifecycle_token":73) lifecycle_transaction_result=73 ;;
+      *) lifecycle_transaction_result=67 ;;
+    esac
+  fi
+  lifecycle_latch_transaction_result "$lifecycle_transaction_result"
 
   # Ownership is a physical fact independent of the command status. Record it
   # only after the child is reaped so EXIT cleanup cannot race later creation.
@@ -282,14 +306,7 @@ lifecycle_settle_creation_transaction() {
     lifecycle_root_owned=1
   fi
 
-  if [ "$lifecycle_settlement_status" -ne 0 ]; then
-    return "$lifecycle_settlement_status"
-  fi
-  case "$lifecycle_outcome_value" in
-    "$lifecycle_token":0) return 0 ;;
-    "$lifecycle_token":73) return 73 ;;
-    *) return 67 ;;
-  esac
+  return "$lifecycle_transaction_result"
 }
 
 lifecycle_run_creation_transaction() {
@@ -329,6 +346,7 @@ lifecycle_run_creation_transaction() {
   lifecycle_release_published=0
   if ! lifecycle_wait_for_link "$lifecycle_transaction_ready" "$lifecycle_create_pid"; then
     lifecycle_settlement_status=67
+    lifecycle_latch_transaction_result "$lifecycle_settlement_status"
   else
     lifecycle_inject_acquisition_signals
     ln -s "$lifecycle_token" "$lifecycle_transaction_release" >/dev/null 2>&1 || true
@@ -336,15 +354,14 @@ lifecycle_run_creation_transaction() {
       lifecycle_release_published=1
     else
       lifecycle_settlement_status=67
+      lifecycle_latch_transaction_result "$lifecycle_settlement_status"
     fi
   fi
 
   if [ "$lifecycle_release_published" -eq 1 ] &&
     ! lifecycle_wait_for_link "$lifecycle_transaction_outcome" "$lifecycle_create_pid"; then
     lifecycle_settlement_status=67
-  fi
-  if [ "$lifecycle_release_published" -eq 1 ] && [ -L "$lifecycle_transaction_outcome" ]; then
-    lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || lifecycle_settlement_status=67
+    lifecycle_latch_transaction_result "$lifecycle_settlement_status"
   fi
   lifecycle_settle_creation_transaction "$lifecycle_settlement_status" "$lifecycle_release_published"
 }

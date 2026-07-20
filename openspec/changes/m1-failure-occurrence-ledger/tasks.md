@@ -210,3 +210,18 @@
   shellcheck, canonical replay, the expanded 50-case lifecycle matrix, strict
   OpenSpec validation, incremental/range hygiene, stash, Zero, submodule, and
   replay-residue checks.
+
+## 11. Round-3 Split Child A5 — Post-spawn Result Chronology
+
+- [x] 11.1 Latch a non-zero post-spawn transaction result as soon as it is
+  determined, before later child settlement, ownership reconciliation, or
+  transaction cleanup can observe another lifecycle event. Preserve an earlier
+  signal already present in the shared write-once latch.
+- [x] 11.2 Add deterministic verifier and harness public-surface regressions for
+  both release failure 67 and collision outcome 73 followed by TERM. Each MUST
+  preserve the earlier transaction result and leave no live creation child,
+  claim, transaction link, root, owner marker, registered worktree, or probe.
+- [x] 11.3 Preserve the historical replay-patch bytes and run syntax,
+  shellcheck, canonical replay, the expanded 54-case lifecycle matrix, strict
+  OpenSpec validation, incremental/range hygiene, stash, Zero, submodule, and
+  replay-residue checks.
