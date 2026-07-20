@@ -299,3 +299,11 @@
   that already witnessed publication MUST decode/commit collision 73 or
   disappearance 67 before deferred HUP and later INT. Prove verifier/harness
   paths with settlement and zero residue in the 95-case matrix.
+
+## 13. Parent integration closure
+
+- [x] 13.1 Preserve a carrier producer's terminal `final_release` phase when
+  idempotency quarantine recaptures a post-settlement failure; otherwise use
+  `settlement`. Cover both carrier-producing write paths with real workspace
+  regressions that retain the typed primary, exact occurrences and cleanup
+  authority without `invalid_phase` substitution.

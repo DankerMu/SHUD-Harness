@@ -524,6 +524,45 @@ Replay artifact SHA-256 values:
 - Round-2 `red-before-backend-undefined.patch`:
   `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
 
+## Final parent integration terminal-phase repair
+
+Verified on `2026-07-20`. Commit
+`5bc7796c8376c6759887c8c72b1a530e401e8040` closes the Round-4 integrated
+finding that idempotency quarantine could relabel an imported
+`final_release` carrier as `settlement` and replace the real workspace failure
+with `FailureOccurrenceProtocolError(invalid_phase)`.
+
+`capturePostSettlementFailureFoldEntry()` now preserves `final_release` from
+the producer's terminal physical phase and uses `settlement` otherwise. Both
+carrier-producing idempotency write catches use that shared boundary. Two real
+workspace regressions cover exact quarantine replacement and retained
+fail-intent second write, retain the typed semantic primary and inherited
+occurrences, and prove authority, guard, descriptor and cleanup convergence.
+The old implementation fails both rows; the repair passes both.
+
+Final product/runtime-test semantic head:
+`5bc7796c8376c6759887c8c72b1a530e401e8040`.
+
+- Dedicated ledger suite: 41 pass, 0 fail, 520 assertions.
+- Full core services: 445 pass, 5 platform-conditioned skips, 0 fail.
+- Backend API: 163 pass, 0 fail.
+- Canonical replay and lifecycle matrix: 95/95.
+- Typecheck, root check, strict OpenSpec, syntax/shellcheck and hygiene: pass.
+
+Final seven-source binary diff SHA-256:
+`fca9218a77cc3dc342bf09d5668fbf3362a8b8f3a334e3c2f4b9a3e9c8ecaf49`.
+Final four-runtime-test-path binary diff SHA-256:
+`b6dc651e3c7a845240599828f795a7657f1f5cb156501ef41594b75e1062200e`.
+
+Updated file SHA-256 values:
+
+- `packages/core/src/domain/services/compensation-error-preservation.ts`:
+  `0c423d7eb9a2379512e20e6f5fe6e03836d43a13d1d8cb6d182b496479c00d78`;
+- `packages/core/src/domain/services/idempotency-service.ts`:
+  `9af7989224fb51692d70ffa28d4cdf5f76a0837c83b6dfd2a0382c83a5c288e8`;
+- `packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts`:
+  `b193394325e8bf74233cc0ee7d7d13ce5a05013090d9c017f88fe5e7ff41f9e3`.
+
 ## Child A4 pre-spawn claim reconciliation
 
 Verified on `2026-07-19 21:51:13 EDT` against split base
