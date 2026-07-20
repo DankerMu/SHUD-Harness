@@ -108,13 +108,6 @@ case "$replay_scenario" in
   signal_after_root_hup) kill -s HUP "$$"; lifecycle_abort_if_latched ;;
   signal_after_root_int) kill -s INT "$$"; lifecycle_abort_if_latched ;;
   signal_after_root_term) kill -s TERM "$$"; lifecycle_abort_if_latched ;;
-  hold_after_root)
-    if [ -z "$hold_ready" ] || [ -z "$hold_release" ]; then
-      lifecycle_fail 64
-    fi
-    : >"$hold_ready"
-    while [ ! -e "$hold_release" ]; do :; done
-    ;;
 esac
 
 if [ "$replay_scenario" = add_failure_round_1 ]; then
@@ -185,6 +178,16 @@ case "$replay_scenario" in
   *) round_1_remove_status=82 ;;
 esac
 
+if [ "$replay_scenario" = hold_after_root ]; then
+  if [ -z "$hold_ready" ] || [ -z "$hold_release" ]; then
+    lifecycle_fail 64
+  fi
+  : >"$hold_ready"
+  lifecycle_inject_hold_signals
+  while [ ! -e "$hold_release" ]; do :; done
+fi
+
+lifecycle_begin_successful_finalization
 strict_remove_worktree "$round_1_worktree" "$round_1_remove_status"
 round_1_registered=0
 round_1_worktree=

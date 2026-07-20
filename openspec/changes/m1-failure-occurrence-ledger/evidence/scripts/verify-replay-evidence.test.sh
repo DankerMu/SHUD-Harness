@@ -19,8 +19,15 @@ fixture_marker=
 fixture_marker_checksum=
 aux_ready=
 aux_release=
+aux_signals_ready=
 passed=0
 harness_owner_token=${SHUD_REPLAY_TEST_OWNER_TOKEN:-harness.$$}
+# Reset background-job INT before the held child installs its own handlers.
+# shellcheck disable=SC2016
+signal_enabled_child_runner='
+$SIG{HUP} = $SIG{INT} = $SIG{TERM} = "DEFAULT";
+exec @ARGV or die "exec: $!";
+'
 
 test_worktree_is_registered() {
   git -C "$repo_root" worktree list --porcelain |
@@ -83,6 +90,7 @@ cleanup_test_parent() {
   cleanup_fixture
   if [ -n "$aux_ready" ]; then rm "$aux_ready" >/dev/null 2>&1 || true; fi
   if [ -n "$aux_release" ]; then rm "$aux_release" >/dev/null 2>&1 || true; fi
+  if [ -n "$aux_signals_ready" ]; then rm "$aux_signals_ready" >/dev/null 2>&1 || true; fi
   lifecycle_cleanup_root_failure
   exit "$lifecycle_first_status"
 }
@@ -349,6 +357,77 @@ run_concurrent_case() {
   record_pass
 }
 
+run_finalization_signal_case() {
+  case_name=$1
+  child_kind=$2
+  first_signal=$3
+  second_signal=$4
+  expected=$5
+  root_name="case-$case_name"
+  child_token="finalization-$case_name"
+  aux_ready="$lifecycle_root/$case_name.ready"
+  aux_release="$lifecycle_root/$case_name.release"
+  aux_signals_ready="$lifecycle_root/$case_name.signals-ready"
+
+  if [ "$child_kind" = verifier ]; then
+    /usr/bin/perl -e "$signal_enabled_child_runner" /usr/bin/env \
+      SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+      SHUD_REPLAY_TEST_SCENARIO=hold_after_root \
+      SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+      SHUD_REPLAY_TEST_HOLD_READY="$aux_ready" \
+      SHUD_REPLAY_TEST_HOLD_RELEASE="$aux_release" \
+      SHUD_REPLAY_TEST_HOLD_SIGNAL_FIRST="$first_signal" \
+      SHUD_REPLAY_TEST_HOLD_SIGNAL_SECOND="$second_signal" \
+      SHUD_REPLAY_TEST_HOLD_SIGNALS_READY="$aux_signals_ready" \
+      "$verifier" >/dev/null 2>&1 &
+  else
+    /usr/bin/perl -e "$signal_enabled_child_runner" /usr/bin/env \
+      SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+      SHUD_REPLAY_SELF_TEST_SCENARIO=harness_hold_after_root \
+      SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+      SHUD_REPLAY_TEST_HOLD_READY="$aux_ready" \
+      SHUD_REPLAY_TEST_HOLD_RELEASE="$aux_release" \
+      SHUD_REPLAY_TEST_HOLD_SIGNAL_FIRST="$first_signal" \
+      SHUD_REPLAY_TEST_HOLD_SIGNAL_SECOND="$second_signal" \
+      SHUD_REPLAY_TEST_HOLD_SIGNALS_READY="$aux_signals_ready" \
+      "$self_test" >/dev/null 2>&1 &
+  fi
+  child_pid=$!
+
+  if ! wait_for_ready "$aux_ready"; then
+    : >"$aux_release"
+    wait "$child_pid" || true
+    echo "$case_name child did not reach finalization hold" >&2
+    return 1
+  fi
+
+  if ! wait_for_ready "$aux_signals_ready"; then
+    : >"$aux_release"
+    wait "$child_pid" || true
+    echo "$case_name child did not finish ordered signal delivery" >&2
+    return 1
+  fi
+  : >"$aux_release"
+  set +e
+  wait "$child_pid"
+  child_status=$?
+  set -e
+  rm "$aux_ready" "$aux_release" "$aux_signals_ready"
+  aux_ready=
+  aux_release=
+  aux_signals_ready=
+
+  if [ "$child_status" -ne "$expected" ]; then
+    echo "$case_name exited $child_status, expected $expected" >&2
+    cleanup_exact_child_root "$lifecycle_root/$root_name" "$lifecycle_root/.$root_name.claim" "$child_token"
+    return 1
+  fi
+  assert_child_absent "$case_name" "$root_name"
+  record_pass
+}
+
 run_acquisition_signal_case() {
   case_name=$1
   first_signal=$2
@@ -405,7 +484,9 @@ case "$self_test_scenario" in
     hold_release=${SHUD_REPLAY_TEST_HOLD_RELEASE:-}
     if [ -z "$hold_ready" ] || [ -z "$hold_release" ]; then lifecycle_fail 64; fi
     : >"$hold_ready"
+    lifecycle_inject_hold_signals
     while [ ! -e "$hold_release" ]; do :; done
+    lifecycle_begin_successful_finalization
     lifecycle_release_root_strict 84
     trap - EXIT HUP INT TERM
     exit 0
@@ -468,6 +549,11 @@ run_concurrent_case harness_same_name harness
 run_foreign_actor_race_case verifier_foreign_actor_race verifier
 run_foreign_actor_race_case harness_foreign_actor_race harness
 
+# Signals latched after work completes but before strict successful teardown.
+run_finalization_signal_case verifier_finalization_term verifier TERM '' 143
+run_finalization_signal_case harness_finalization_term harness TERM '' 143
+run_finalization_signal_case verifier_finalization_hup_int verifier HUP INT 129
+
 # Process-group signals while the external root-creation child is live.
 run_acquisition_signal_case acquisition_group_hup HUP '' 129
 run_acquisition_signal_case acquisition_group_int INT '' 130
@@ -482,10 +568,11 @@ run_harness_case forced_harness_child_42 collision_harness_child_42 42
 run_harness_case assertion_signal_term assertion_signal_term 143
 run_harness_case assertion_double_hup_int assertion_double_hup_int 129
 
-if [ "$passed" -ne 43 ]; then
-  echo "replay scenario accounting mismatch: $passed/43" >&2
+if [ "$passed" -ne 46 ]; then
+  echo "replay scenario accounting mismatch: $passed/46" >&2
   lifecycle_fail 85
 fi
+lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 43/43 named scenarios passed (4 two-party races, 8 participant outcomes)"
+echo "replay evidence lifecycle: 46/46 named scenarios passed (7 two-party races, 14 participant outcomes)"

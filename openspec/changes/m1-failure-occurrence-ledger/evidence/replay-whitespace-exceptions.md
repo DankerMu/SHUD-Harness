@@ -67,10 +67,13 @@ same-name or non-cooperating loser returns 73 without publishing a marker or
 touching the target; a pre-existing foreign target remains byte-for-byte
 unchanged. EXIT cleanup masks EXIT/HUP/INT/TERM as its first command, then
 preserves the write-once first status across later signals and cleanup
-diagnostics.
+diagnostics. Successful finalization masks HUP/INT/TERM while keeping EXIT
+cleanup armed, then immediately exits through that cleanup when the same
+write-once latch is already set; strict teardown only begins from a clear
+latch.
 
-The self-test passed 43/43 named scenarios. Four are two-party races with eight
-explicit participant outcomes:
+The self-test passed 46/46 named scenarios. Seven are two-party races with
+14 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -82,6 +85,10 @@ explicit participant outcomes:
 - two static foreign-target collisions, verifier and harness cooperative
   same-name atomic races, verifier and harness non-cooperating actor races, and
   the two prior harness startup/double-signal paths;
+- verifier and harness TERM plus verifier HUP→INT while each child is held
+  after normal work and before strict successful teardown; the held child
+  returns 143, 143, and 129 respectively and both participants leave no
+  residue;
 - HUP, INT, TERM, HUP→INT, INT→TERM, and TERM→HUP delivered to an isolated
   process group while the external root-creation child is live; and
 - verifier/harness collision helpers forced to observe child status 42 plus

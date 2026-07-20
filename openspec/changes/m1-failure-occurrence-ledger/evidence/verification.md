@@ -426,7 +426,7 @@ bindings after the Round-3 breadth split.
 The tracked definitive audit is
 `evidence/phase-6.2-definitive-audit.md`. Replay-artifact whitespace accounting
 and fresh-clone commands are in `evidence/replay-whitespace-exceptions.md`;
-their shared lifecycle authority, canonical verifier, and 43-scenario matrix
+their shared lifecycle authority, canonical verifier, and 46-scenario matrix
 are under `evidence/scripts/replay-lifecycle.sh`,
 `evidence/scripts/verify-replay-evidence.sh`, and
 `evidence/scripts/verify-replay-evidence.test.sh`.
@@ -439,15 +439,23 @@ infers ownership from root existence: it requires child success plus the exact
 claim/root token pair. Signals latch while the parent waits and exit only after
 the transaction outcome is knowable. EXIT cleanup masks EXIT/HUP/INT/TERM as
 its first command; command failures and signals share one write-once first-
-status latch.
+status latch. The successful-finalization boundary masks HUP/INT/TERM without
+disarming EXIT, immediately honors any latched status through failure cleanup,
+and permits strict teardown only when the latch is clear.
 
-Verified on `2026-07-19 19:56:07 EDT`, the matrix passed 43/43 named scenarios.
-Four are two-party races with eight explicit participant outcomes. Coverage
+The pre-fix syntax-plus-matrix command exited 1 with
+`verifier_finalization_term exited 0, expected 143`. The identical command
+after the shared boundary was added exited 0.
+
+Verified on `2026-07-19 20:55:09 EDT`, the matrix passed 46/46 named scenarios.
+Seven are two-party races with 14 explicit participant outcomes. Coverage
 includes the prior 18 baseline cases, seven exact-status cleanup-diagnostic
 variants, static verifier/harness collisions, cooperative same-name verifier/
 harness races, non-cooperating actor barriers for both scripts, six isolated-
 process-group acquisition signal orders, both collision helpers forced to child
-status 42, and marker-created assertion-window single/double signals. In each
+status 42, marker-created assertion-window single/double signals, and three
+barrier-driven finalization-window cases: verifier TERM, harness TERM, and
+verifier HUP→INT return 143/143/129 before any strict teardown. In each
 non-cooperating barrier the child pauses before `mkdir`, a foreign actor creates
 the exact root/marker without honoring the claim, and the child returns 73 with
 foreign bytes unchanged, no owner marker, and no retained claim. Controlled

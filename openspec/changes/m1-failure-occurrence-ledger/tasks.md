@@ -188,7 +188,7 @@
   verifier and one shared POSIX lifecycle authority. Establish ownership by an
   atomic fixed claim plus per-invocation root token, reject same-name/static
   collisions without touching foreign paths, preserve one write-once command/
-  signal status through cleanup, and prove the full normal/failure/collision/
-  process-group signal/harness rollback surface with a deterministic 43-case
-  zero-residue matrix, including four two-party races and eight participant
-  outcomes.
+  signal status through cleanup and successful finalization, and prove the full
+  normal/failure/collision/process-group signal/harness rollback surface with a
+  deterministic 46-case zero-residue matrix, including seven two-party races
+  and 14 participant outcomes.

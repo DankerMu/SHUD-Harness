@@ -51,6 +51,11 @@ lifecycle_abort_if_latched() {
   fi
 }
 
+lifecycle_begin_successful_finalization() {
+  trap '' HUP INT TERM
+  lifecycle_abort_if_latched
+}
+
 lifecycle_fail() {
   lifecycle_latch_status "$1"
   lifecycle_abort_if_latched
@@ -170,6 +175,21 @@ lifecycle_inject_acquisition_signals() {
   fi
   if [ -n "$lifecycle_inject_second" ]; then
     kill -s "$lifecycle_inject_second" 0
+  fi
+}
+
+lifecycle_inject_hold_signals() {
+  lifecycle_hold_first=${SHUD_REPLAY_TEST_HOLD_SIGNAL_FIRST:-}
+  lifecycle_hold_second=${SHUD_REPLAY_TEST_HOLD_SIGNAL_SECOND:-}
+  lifecycle_hold_signals_ready=${SHUD_REPLAY_TEST_HOLD_SIGNALS_READY:-}
+  if [ -n "$lifecycle_hold_first" ]; then
+    kill -s "$lifecycle_hold_first" "$$"
+  fi
+  if [ -n "$lifecycle_hold_second" ]; then
+    kill -s "$lifecycle_hold_second" "$$"
+  fi
+  if [ -n "$lifecycle_hold_signals_ready" ]; then
+    : >"$lifecycle_hold_signals_ready"
   fi
 }
 
