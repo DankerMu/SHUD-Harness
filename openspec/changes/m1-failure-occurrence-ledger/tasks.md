@@ -252,7 +252,8 @@
   result latching, deferred-event latching, and only then flag clearing. Route
   handler adoption and ordinary settlement through that one atomic shell state
   boundary so a later handler cannot re-read publication before status 67 is
-  committed.
+  committed. This initial A6 ordering is superseded at the exact-zero tail by
+  12.4; decoded non-zero commit-before-clear remains intact.
 - [x] 12.2 Add deterministic verifier and harness public-surface regressions in
   which the first published-outcome read fails to 67, TERM arrives in the
   decode-to-commit window, and a forbidden second read could observe collision
@@ -262,3 +263,8 @@
   TERM-before-publication, handler masking, mandatory child settlement, A4
   claim reconciliation, A5 watchdog behavior, replay-patch bytes, and the full
   expanded 66-case matrix.
+- [x] 12.4 Close the exact-zero decode tail: latch a decoded non-zero result,
+  clear `decode_active`, and only then consume the deferred first event so a
+  signal before the clear is consumed and one after the clear latches directly.
+  Prove verifier/harness `token:0` TERM returns 143 plus verifier HUP→INT
+  first-event order with zero residue in the expanded 69-case matrix.

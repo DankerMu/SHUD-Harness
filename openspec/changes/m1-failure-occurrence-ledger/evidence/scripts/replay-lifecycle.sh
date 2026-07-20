@@ -24,6 +24,26 @@ lifecycle_decoded_outcome_published=0
 lifecycle_decoded_outcome_status=
 lifecycle_deferred_signal_status=
 
+lifecycle_inject_decode_tail_signals() {
+  lifecycle_decode_tail_first=${SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_FIRST:-}
+  lifecycle_decode_tail_second=${SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_SECOND:-}
+  lifecycle_decode_tail_first_event=${SHUD_REPLAY_TEST_DECODE_TAIL_FIRST_EVENT:-}
+  lifecycle_decode_tail_second_event=${SHUD_REPLAY_TEST_DECODE_TAIL_SECOND_EVENT:-}
+
+  if [ -n "$lifecycle_decode_tail_first" ]; then
+    if [ -n "$lifecycle_decode_tail_first_event" ]; then
+      : >"$lifecycle_decode_tail_first_event"
+    fi
+    kill -s "$lifecycle_decode_tail_first" "$$"
+  fi
+  if [ -n "$lifecycle_decode_tail_second" ]; then
+    if [ -n "$lifecycle_decode_tail_second_event" ]; then
+      : >"$lifecycle_decode_tail_second_event"
+    fi
+    kill -s "$lifecycle_decode_tail_second" "$$"
+  fi
+}
+
 lifecycle_latch_status() {
   if [ -z "$lifecycle_first_status" ]; then
     lifecycle_first_status=$1
@@ -52,11 +72,12 @@ lifecycle_decode_and_commit_transaction_outcome() {
     [ "$lifecycle_decoded_outcome_status" -ne 0 ]; then
     lifecycle_latch_transaction_result "$lifecycle_decoded_outcome_status"
   fi
+  lifecycle_inject_decode_tail_signals
+  lifecycle_transaction_decode_active=0
   if [ -n "$lifecycle_deferred_signal_status" ]; then
     lifecycle_latch_status "$lifecycle_deferred_signal_status"
     lifecycle_mask_latched_signals
   fi
-  lifecycle_transaction_decode_active=0
 }
 
 lifecycle_adopt_published_transaction_outcome() {
@@ -66,9 +87,9 @@ lifecycle_adopt_published_transaction_outcome() {
   fi
 
   # Handler adoption and ordinary settlement both decode and commit through
-  # this boundary. decode_active remains set until the decoded result and any
-  # deferred event have entered the write-once latch, so a handler can never
-  # re-read publication between classification and commit.
+  # this boundary. The decoded result enters the write-once latch before the
+  # flag clears; a pre-clear event is then consumed from the deferred slot,
+  # while a post-clear event enters the latch directly.
   lifecycle_transaction_adoption_active=1
   trap '' HUP INT TERM
   lifecycle_decode_and_commit_transaction_outcome

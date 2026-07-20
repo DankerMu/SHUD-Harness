@@ -808,3 +808,53 @@ Current script SHA-256 values:
 The replay patch hashes remain byte-identical at
 `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
 and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+### A6 Round-1 exact-zero decode-tail repair
+
+Verified on `2026-07-20 06:29:21 EDT` against reviewed head
+`f626fd32ccfa673f1fcaa301fa2979354edfaf63`.
+
+The prior decoder checked the deferred first-signal slot before clearing
+`decode_active`. For exact `token:0`, TERM handled after that check but before
+the clear entered the deferred slot too late to be consumed, so acquisition
+could return 0. The shared boundary now latches any decoded non-zero result
+first, clears `decode_active`, and only then consumes the deferred slot. An
+event before the clear is therefore deferred and consumed; an event after the
+clear reaches the write-once latch directly. Existing non-zero 67/73 outcomes
+remain first because they are latched and their handlers masked before the
+clear.
+
+Three public-surface probes inject at the exact decode tail: verifier TERM,
+harness TERM, and verifier HUP→INT. With only the production lifecycle source
+stashed, all three deterministic red cases exited 1 because their nested
+entrypoint returned 0 instead of 143/143/129 and did not publish the injection
+events. The source stash was popped immediately; no `red-proof` stash remains.
+An exact old-order mutation then retained the injection seam but moved deferred
+consumption back before the injection and clear. All three event-complete probes
+again failed because the nested entrypoint returned 0, directly reproducing the
+missed deferred slot. With the repaired ordering restored, each focused
+scenario reports `1/1 passed`, proves both ordered events when present, and
+leaves no child, claim, transaction link, marker, root, worktree, or probe
+residue.
+
+The canonical replay verifier exits 0. The full lifecycle matrix passes 69/69
+named scenarios, comprising 19 two-party races and 38 participant outcomes.
+Focused release, collision, unknown-protocol, handler-read-failure,
+decode-commit, and TERM-before-publication controls retain exact 67/73/143
+behavior. Removing the production settlement-release write makes all four
+held collision/unknown verifier/harness controls fail quickly with
+`used its watchdog instead of the settlement release`; restoring it makes all
+four green.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `30e47015d33d7dd29986bc4b3b1d02d53611a09b33f2970a57b86b62e0fd59bc`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `b15ebded7e0af1adc36928f73edac0b6ff6b4031f7569c9008edd0f86b10c960`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.

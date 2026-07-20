@@ -164,6 +164,66 @@ run_harness_case() {
   record_pass
 }
 
+run_decode_tail_signal_case() {
+  case_name=$1
+  child_kind=$2
+  first_signal=$3
+  second_signal=$4
+  expected=$5
+  root_name="case-$case_name"
+  transaction_fault_dir="$lifecycle_root/$case_name.decode-tail-probe"
+  first_event="$transaction_fault_dir/first-signal-fired"
+  second_event="$transaction_fault_dir/second-signal-fired"
+  mkdir -m 700 "$transaction_fault_dir"
+
+  case "$child_kind" in
+    verifier) tail_command=$verifier ;;
+    harness) tail_command=$self_test ;;
+    *)
+      echo "unknown decode-tail child kind: $child_kind" >&2
+      rm -rf "$transaction_fault_dir"
+      transaction_fault_dir=
+      return 1
+      ;;
+  esac
+
+  set +e
+  SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_SCENARIO=decode_tail_probe \
+    SHUD_REPLAY_TEST_OWNER_TOKEN="decode-tail-$case_name" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_FIRST="$first_signal" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_SECOND="$second_signal" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_FIRST_EVENT="$first_event" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_SECOND_EVENT="$second_event" \
+    "$tail_command" >/dev/null 2>&1
+  actual=$?
+  set -e
+
+  tail_failed=0
+  if [ "$actual" -ne "$expected" ]; then
+    echo "$case_name exited $actual, expected $expected" >&2
+    tail_failed=1
+  fi
+  if [ ! -e "$first_event" ]; then
+    echo "$case_name did not inject its first decode-tail signal" >&2
+    tail_failed=1
+  fi
+  if [ -n "$second_signal" ] && [ ! -e "$second_event" ]; then
+    echo "$case_name did not inject its second decode-tail signal" >&2
+    tail_failed=1
+  fi
+
+  rm -rf "$transaction_fault_dir"
+  transaction_fault_dir=
+  if ! assert_child_absent "$case_name" "$root_name"; then
+    tail_failed=1
+  fi
+  if [ "$tail_failed" -ne 0 ]; then return 1; fi
+  record_pass
+}
+
 create_collision_fixture() {
   fixture_name=$1
   fixture_kind=${2:-marker}
@@ -999,6 +1059,8 @@ case "$self_test_scenario" in
     chronology_published_unknown_read_verifier|chronology_published_unknown_read_harness|\
     chronology_handler_read_failure_verifier|chronology_handler_read_failure_harness|\
     chronology_decode_commit_verifier|chronology_decode_commit_harness|\
+    decode_tail_probe|decode_tail_term_verifier|decode_tail_term_harness|\
+    decode_tail_hup_int_verifier|\
     transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
     claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     ;;
@@ -1014,6 +1076,12 @@ lifecycle_begin "$test_root_parent" "$test_root_name" "$harness_owner_token"
 lifecycle_acquire_root
 
 case "$self_test_scenario" in
+  decode_tail_probe)
+    lifecycle_begin_successful_finalization
+    lifecycle_release_root_strict 84
+    trap - EXIT HUP INT TERM
+    exit 0
+    ;;
   harness_startup_term)
     kill -s TERM "$$"
     lifecycle_abort_if_latched
@@ -1137,6 +1205,30 @@ case "$self_test_scenario" in
     echo "replay lifecycle fault probe: 1/1 passed"
     exit 0
     ;;
+  decode_tail_term_verifier)
+    run_decode_tail_signal_case decode_tail_term_verifier verifier TERM '' 143
+    lifecycle_begin_successful_finalization
+    lifecycle_release_root_strict 84
+    trap - EXIT HUP INT TERM
+    echo "replay evidence lifecycle: 1/1 passed"
+    exit 0
+    ;;
+  decode_tail_term_harness)
+    run_decode_tail_signal_case decode_tail_term_harness harness TERM '' 143
+    lifecycle_begin_successful_finalization
+    lifecycle_release_root_strict 84
+    trap - EXIT HUP INT TERM
+    echo "replay evidence lifecycle: 1/1 passed"
+    exit 0
+    ;;
+  decode_tail_hup_int_verifier)
+    run_decode_tail_signal_case decode_tail_hup_int_verifier verifier HUP INT 129
+    lifecycle_begin_successful_finalization
+    lifecycle_release_root_strict 84
+    trap - EXIT HUP INT TERM
+    echo "replay evidence lifecycle: 1/1 passed"
+    exit 0
+    ;;
 esac
 
 # 18 baseline verifier scenarios.
@@ -1217,6 +1309,11 @@ run_transaction_settlement_case handler_read_failure_harness published_handler_r
 run_transaction_settlement_case decode_commit_verifier decoded_read_failure_then_handler_collision 67 verifier
 run_transaction_settlement_case decode_commit_harness decoded_read_failure_then_handler_collision 67 harness
 
+# A token:0 decode consumes a pre-clear event; ordered events remain first-wins.
+run_decode_tail_signal_case decode_tail_term_verifier verifier TERM '' 143
+run_decode_tail_signal_case decode_tail_term_harness harness TERM '' 143
+run_decode_tail_signal_case decode_tail_hup_int_verifier verifier HUP INT 129
+
 # A handled event that arrives before outcome publication remains first.
 run_acquisition_signal_case signal_before_publication_verifier TERM '' 143 verifier
 run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harness
@@ -1225,11 +1322,11 @@ run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harnes
 run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
 run_claim_reconciliation_case claim_reconciliation_harness_term harness
 
-if [ "$passed" -ne 66 ]; then
-  echo "replay scenario accounting mismatch: $passed/66" >&2
+if [ "$passed" -ne 69 ]; then
+  echo "replay scenario accounting mismatch: $passed/69" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 66/66 named scenarios passed (19 two-party races, 38 participant outcomes)"
+echo "replay evidence lifecycle: 69/69 named scenarios passed (19 two-party races, 38 participant outcomes)"
