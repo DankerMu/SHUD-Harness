@@ -961,8 +961,8 @@ and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
 
 ### A6 Round-4 deferred-transfer authority repair
 
-Verified on `2026-07-20 08:22:55 EDT`. The semantic implementation is commit
-`a1a42a2782e8235ecf992b8957f82b4d9ecca5f9`, based on Round-4 head
+Verified through `2026-07-20 08:44:41 EDT`. The final semantic implementation
+is commit `b50c7f5a0fbaaee4bed9ba266c614ad90567c141`, based on Round-4 head
 `40dc415808dc818ec30a8cdc6f592da91e762803`.
 
 Round 4 confirmed that deferred handoff cleared its source slot before
@@ -977,11 +977,19 @@ handlers check it first, commit the transfer status, then attempt their current
 event. No separate active bit or signal masking creates a new establishment
 gap or discards the later event. Transaction start/end reset the authority.
 
+The first Phase-6.2 audit then found that a shared current-signal scratch could
+let nested TERM replace an outer INT identity. The final implementation uses
+each handler invocation's positional status directly. A deterministic nested
+seam records inner `129:143:129` followed by outer `129:130:129`, so both later
+events are attempted after the transferred authority and neither identity is
+lost.
+
 Four verifier/harness public-surface regressions inject a later INT/TERM after
 the original deferred HUP slot clears but before the outer latch, across both
 negative-wait and exact-zero paths. Pre-fix semantics returned 130/130/143/143;
-the fixed cases each return 129, transfer once, record the later event after
-129, classify once, settle the child, and leave no lifecycle or probe residue.
+the fixed cases each return 129, transfer once, record nested TERM and outer INT
+after 129, classify once, settle the child, and leave no lifecycle or probe
+residue.
 
 Independent checks passed:
 
@@ -996,11 +1004,11 @@ Independent checks passed:
 Current script SHA-256 values:
 
 - `evidence/scripts/replay-lifecycle.sh`:
-  `87303397bd9b20859c8c86ce2b21603932db689ba03da1dd1354a2b841d1ad73`;
+  `895e6464fd6f3703eaa1f4483ef896253bafd6eee260a3da65f6c81f22927a50`;
 - `evidence/scripts/verify-replay-evidence.sh`:
   `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
 - `evidence/scripts/verify-replay-evidence.test.sh`:
-  `9e0afca8904065bed986e88a8617790731cadedf7c49face40d4cedb779470d9`.
+  `00bcbfd029f4677b7b05245fd15a090a2332bba8c1e8e810c063c80360ab0e33`.
 
 The replay patch hashes remain byte-identical at
 `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`

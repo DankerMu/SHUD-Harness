@@ -149,11 +149,12 @@ with 56 explicit participant outcomes:
   post-clear INT at 129, and preserve post-clear TERM at 143 without a second
   publication read even when that read would fail or decode collision 73. All
   six prove child settlement and zero lifecycle/probe residue;
-- verifier and harness deferred-transfer probes inject INT/TERM after HUP 129
+- verifier and harness deferred-transfer probes inject outer INT after HUP 129
   moves out of its source slot but before the outer latch, on both negative-
-  wait and exact-zero paths. All four preserve 129, record that the later event
-  was attempted after it, classify once, settle the child, and leave no
-  lifecycle/probe residue;
+  wait and exact-zero paths, then nest TERM before that INT attempt. All four
+  preserve 129 and record inner `129:143:129` followed by outer
+  `129:130:129`, proving neither later identity is lost; they classify once,
+  settle the child, and leave no lifecycle/probe residue;
 - verifier and harness witnessed-publication probes remove the outcome before
   classification, then deliver TERM with the link absent or after restoring
   `token:73`. All four preserve the earlier required-publication failure 67,
