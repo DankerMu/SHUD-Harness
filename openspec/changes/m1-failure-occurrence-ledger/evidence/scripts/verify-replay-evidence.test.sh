@@ -426,6 +426,7 @@ run_deferred_transfer_case() {
   transfer_release="$transaction_fault_dir/transfer-release"
   transfer_event="$transaction_fault_dir/transfer-events"
   later_event="$transaction_fault_dir/later-signal-fired"
+  nested_event="$transaction_fault_dir/nested-term-fired"
   current_event="$transaction_fault_dir/current-event-attempts"
   decode_entry_event="$transaction_fault_dir/decode-entries"
   settlement_release="$transaction_fault_dir/settlement-release"
@@ -501,6 +502,8 @@ EOF
     SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT="$transfer_event" \
     SHUD_REPLAY_TEST_DEFERRED_TRANSFER_SIGNAL="$later_signal" \
     SHUD_REPLAY_TEST_DEFERRED_TRANSFER_SIGNAL_EVENT="$later_event" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_NESTED_SIGNAL=TERM \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_NESTED_EVENT="$nested_event" \
     SHUD_REPLAY_TEST_DEFERRED_TRANSFER_CURRENT_EVENT="$current_event" \
     SHUD_REPLAY_TEST_DECODE_ENTRY_EVENT="$decode_entry_event" \
     SHUD_REPLAY_TEST_SETTLEMENT_RELEASE="$settlement_release" \
@@ -521,7 +524,7 @@ EOF
     transfer_failed=1
   fi
   for required_event in "$outcome_attempted_event" "$outcome_published_event" \
-    "$first_event" "$later_event" "$settlement_release"; do
+    "$first_event" "$later_event" "$nested_event" "$settlement_release"; do
     if [ ! -e "$required_event" ]; then
       echo "$case_name missed required event: $required_event" >&2
       transfer_failed=1
@@ -536,15 +539,16 @@ EOF
     echo "$case_name transferred deferred HUP $transfer_count times, expected once" >&2
     transfer_failed=1
   fi
-  expected_current="129:130:129"
-  if [ "$later_signal" = TERM ]; then expected_current="129:143:129"; fi
   current_count=0
   if [ -f "$current_event" ]; then
     current_count=$(wc -l <"$current_event" | tr -d ' ')
   fi
-  if [ "$current_count" -ne 1 ] ||
-    [ "$(sed -n '1p' "$current_event" 2>/dev/null || true)" != "$expected_current" ]; then
-    echo "$case_name did not attempt $later_signal after transferred HUP latched" >&2
+  current_first=$(sed -n '1p' "$current_event" 2>/dev/null || true)
+  current_second=$(sed -n '2p' "$current_event" 2>/dev/null || true)
+  if [ "$current_count" -ne 2 ] ||
+    [ "$current_first" != "129:143:129" ] ||
+    [ "$current_second" != "129:130:129" ]; then
+    echo "$case_name current events were $current_first,$current_second; expected 129:143:129,129:130:129" >&2
     transfer_failed=1
   fi
   decode_entry_count=0
@@ -1808,10 +1812,10 @@ case "$self_test_scenario" in
     run_deferred_transfer_case deferred_transfer_wait_harness harness negative_wait INT
     ;;
   deferred_transfer_decode_verifier)
-    run_deferred_transfer_case deferred_transfer_decode_verifier verifier decode_tail TERM
+    run_deferred_transfer_case deferred_transfer_decode_verifier verifier decode_tail INT
     ;;
   deferred_transfer_decode_harness)
-    run_deferred_transfer_case deferred_transfer_decode_harness harness decode_tail TERM
+    run_deferred_transfer_case deferred_transfer_decode_harness harness decode_tail INT
     ;;
   outcome_disappearance_term_verifier)
     run_outcome_disappearance_case outcome_disappearance_term_verifier verifier 0 67
@@ -1993,8 +1997,8 @@ run_committed_outcome_signal_case classification_commit_collision_harness \
 # attempts its own event only after the transferred 129 is first.
 run_deferred_transfer_case deferred_transfer_wait_verifier verifier negative_wait INT
 run_deferred_transfer_case deferred_transfer_wait_harness harness negative_wait INT
-run_deferred_transfer_case deferred_transfer_decode_verifier verifier decode_tail TERM
-run_deferred_transfer_case deferred_transfer_decode_harness harness decode_tail TERM
+run_deferred_transfer_case deferred_transfer_decode_verifier verifier decode_tail INT
+run_deferred_transfer_case deferred_transfer_decode_harness harness decode_tail INT
 
 # Once ordinary settlement witnesses publication, disappearance commits 67
 # before a later TERM or any attempt to re-adopt a restored token:73 outcome.

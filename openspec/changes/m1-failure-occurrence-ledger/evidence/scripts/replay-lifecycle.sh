@@ -93,6 +93,17 @@ lifecycle_inject_deferred_transfer_signal() {
   fi
 }
 
+lifecycle_inject_nested_transfer_signal() {
+  lifecycle_nested_transfer_signal=${SHUD_REPLAY_TEST_DEFERRED_TRANSFER_NESTED_SIGNAL:-}
+  lifecycle_nested_transfer_event=${SHUD_REPLAY_TEST_DEFERRED_TRANSFER_NESTED_EVENT:-}
+  if [ "$1" = 130 ] && [ -n "$lifecycle_nested_transfer_signal" ] &&
+    [ -n "$lifecycle_nested_transfer_event" ] &&
+    [ ! -e "$lifecycle_nested_transfer_event" ]; then
+    : >"$lifecycle_nested_transfer_event"
+    kill -s "$lifecycle_nested_transfer_signal" "$$"
+  fi
+}
+
 lifecycle_latch_status() {
   if [ -z "$lifecycle_first_status" ]; then
     lifecycle_first_status=$1
@@ -100,17 +111,17 @@ lifecycle_latch_status() {
 }
 
 lifecycle_latch_transfer_before_current_signal() {
-  lifecycle_current_signal_status=$1
   if [ -z "$lifecycle_deferred_transfer_status" ]; then
     return 1
   fi
 
   lifecycle_latch_status "$lifecycle_deferred_transfer_status"
-  lifecycle_latch_status "$lifecycle_current_signal_status"
+  lifecycle_inject_nested_transfer_signal "$1"
+  lifecycle_latch_status "$1"
   lifecycle_transfer_current_event=${SHUD_REPLAY_TEST_DEFERRED_TRANSFER_CURRENT_EVENT:-}
   if [ -n "$lifecycle_transfer_current_event" ]; then
     printf '%s:%s:%s\n' "$lifecycle_deferred_transfer_status" \
-      "$lifecycle_current_signal_status" "$lifecycle_first_status" \
+      "$1" "$lifecycle_first_status" \
       >>"$lifecycle_transfer_current_event"
   fi
   lifecycle_mask_latched_signals
