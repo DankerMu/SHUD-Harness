@@ -73,10 +73,12 @@ and latches it before wait/reap. Handler adoption and ordinary settlement use
 one atomic decode-and-commit boundary that distinguishes no publication, exact
 token zero, collision 73, and protocol/read failures mapped to 67.
 `decode_active` remains asserted through classification and decoded-result
-latching. The boundary then clears the flag before consuming the deferred
-first event: a pre-clear signal is consumed from that slot, while a post-clear
-handler enters the write-once latch directly. This closes all read/commit and
-exact-zero tail windows without changing event-before-publication order.
+latching. Once classification is committed, handlers cannot re-adopt the
+publication until transaction settlement ends. The boundary then clears the
+flag before consuming the deferred first event; a post-clear handler first
+commits any existing deferred event and only then its current event. This
+closes all read/commit and exact-zero tail windows without changing event-
+before-publication order.
 As soon as a non-zero release or outcome result is determined, the parent
 records it in the shared write-once latch before later settlement, ownership
 reconciliation, or transaction cleanup; an earlier signal already in the
@@ -91,8 +93,8 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 69/69 named scenarios. Nineteen are two-party races with
-38 explicit participant outcomes:
+The self-test passed 75/75 named scenarios. Twenty-two are two-party races with
+44 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -137,6 +139,10 @@ The self-test passed 69/69 named scenarios. Nineteen are two-party races with
   `decode_active` clears and preserve 143; an ordered verifier HUP→INT probe
   preserves 129. All three prove both injected events and every lifecycle/probe
   artifact are absent after cleanup;
+- verifier and harness committed-outcome probes preserve deferred HUP ahead of
+  post-clear INT at 129, and preserve post-clear TERM at 143 without a second
+  publication read even when that read would fail or decode collision 73. All
+  six prove child settlement and zero lifecycle/probe residue;
 - the held-child watchdog uses a distinct failure marker and never creates the
   settlement-release marker. Every held probe asserts it did not fire, so a
   missing production release fails quickly instead of making the probe green;

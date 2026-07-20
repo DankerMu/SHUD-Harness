@@ -268,3 +268,9 @@
   signal before the clear is consumed and one after the clear latches directly.
   Prove verifier/harness `token:0` TERM returns 143 plus verifier HUP→INT
   first-event order with zero residue in the expanded 69-case matrix.
+- [x] 12.5 Keep the classified transaction outcome committed until child
+  settlement completes. Once committed, handlers MUST NOT re-adopt the
+  publication; a post-clear handler MUST commit an existing deferred first
+  event before its current event. Prove verifier/harness HUP→INT returns 129
+  and post-clear TERM returns 143 even when a forbidden second read would fail
+  or decode collision 73, with zero residue in the expanded 75-case matrix.

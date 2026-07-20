@@ -858,3 +858,53 @@ Current script SHA-256 values:
 The replay patch hashes remain byte-identical at
 `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
 and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+### A6 Round-2 committed outcome settlement repair
+
+Verified on `2026-07-20 07:06:53 EDT`. The semantic implementation is commit
+`2a7a6804c4e2eab7d83b5442a324f4ad5ec65ded`, based on A6 Round-1 head
+`7ee33f270eba7ada770090a84df91eda07eca7d5`.
+
+Round 2 demonstrated two post-clear re-entry failures. A deferred HUP could be
+erased when a later INT re-entered adoption, yielding 130 instead of the first
+event's 129. A post-clear TERM could likewise trigger a second publication
+read and let read failure 67 or collision 73 enter the latch before 143.
+
+Outcome classification now sets an explicit committed state that remains
+active through child settlement. While committed, handlers do not re-adopt
+publication. If a deferred event already exists, a post-clear handler commits
+that first event before considering its current signal. The committed state is
+reset only when the transaction begins or its settlement completes.
+
+Six verifier/harness public-surface regressions cover ordered HUP→INT, a
+forbidden second read that fails, and a forbidden second read that would decode
+collision 73. The source-only red run made all six fail with the old exact
+statuses 130, 67, or 73; its stash was popped immediately. The repaired head
+returns 129/129 and 143 for the four TERM cases, with no second read, watchdog,
+child, claim, transaction link, marker, root, registered worktree, or probe
+residue.
+
+Independent final-head checks passed:
+
+- `/bin/sh -n` and `shellcheck -s sh` for all three replay scripts;
+- all six focused committed-outcome scenarios, each `1/1 passed`;
+- canonical replay verifier;
+- full lifecycle matrix: 75/75 named scenarios, 22 two-party races and 44
+  participant outcomes;
+- strict OpenSpec validation and clean incremental `git diff --check`;
+- exactly the documented 13 issue-base replay-artifact whitespace findings;
+- byte-identical replay hashes, Zero gitlink, no submodule diff, no stash,
+  debug marker, watchdog/release probe, or replay residue.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `18ef9a6ff421ae51a21d76642d2612e6de19adcaa37628de8dbaa0a8d56a04c2`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `fbb108cc6ddbcf28dc6e79072c1c61adbd8833c2cf971f7b1c6d0fde0b6af6ed`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
