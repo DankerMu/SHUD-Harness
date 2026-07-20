@@ -110,11 +110,13 @@ import {
   FailureOccurrenceProtocolError,
   PreservedErrorCompensationEnvelope,
   captureFailureFoldEntry,
+  captureFailureOccurrence,
   failureEvents,
   failureGraphNodes,
   failureLedger,
   orderedDistinctCompensationFailures,
   orderedDistinctFailures,
+  mergeTrustedFailureOccurrences,
   preserveFailureOccurrencesWithCompatibility,
   runWithPreservedRelease,
   semanticPrimaryError,
@@ -29027,7 +29029,7 @@ describe("idempotency, lock, and artifact services", () => {
     expect(diagnostics.at(-1)).toEqual({ slots: 0, activeClaims: 0 });
   });
 
-  test("S34-P62-06 guard-recovery mid-window completed swap is refused fail-closed", async () => {
+  test("S34-P62-06/Child-A1 guard-recovery completed swap captures each rejection once", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const rawKey = "task:create:s34-guard-recovery-completed-swap";
@@ -29056,8 +29058,8 @@ describe("idempotency, lock, and artifact services", () => {
       { flag: "wx", mode: 0o600 }
     );
     // Out-of-band completed generation (schema-valid without result_ref) that
-    // lands mid-window: after the first failed-record write starts and before
-    // the recovery re-read.
+    // lands after the first failed-record write rejects and before its recovery
+    // re-read/classification resumes.
     const completedText = `${JSON.stringify({
       key: rawKey,
       scope: "task",
@@ -29068,24 +29070,65 @@ describe("idempotency, lock, and artifact services", () => {
     })}\n`;
     const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
     const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const firstWriteRejection = new Error("S31 exact first-write rejection");
+    const interveningRejection = new Error("S31 intervening rejection");
+    const originalGetRecord = service.getRecord.bind(service);
+    let firstWriteRejected = false;
+    let recoveryReadStarted = false;
     let swapped = false;
+    let interveningOrder: number | undefined;
 
-    const refusal = await captureTaskServiceError(() =>
+    service.getRecord = async (scope, key) => {
+      if (firstWriteRejected && !swapped) {
+        swapped = true;
+        await writeFile(recordPath, completedText, { flag: "w" });
+        recoveryReadStarted = true;
+      }
+      try {
+        return await originalGetRecord(scope, key);
+      } finally {
+        recoveryReadStarted = false;
+      }
+    };
+
+    const orderAnchor = failureEvents(mergeTrustedFailureOccurrences(
+      captureFailureOccurrence("body", new Error("S31 capture-order anchor")),
+      [],
+      "S31 capture-order anchor"
+    ))[0]!.order;
+    const failure = await captureThrownValue(() =>
       runWithWorkspaceRecordPublicationHooks(
         {
           afterTemporaryFileWritten: async ({ canonicalPath }) => {
-            if (canonicalPath !== recordPath || swapped) return;
-            swapped = true;
-            // The swap fails the in-flight first write (its canonical
-            // baseline changed) and leaves a completed record in the window.
-            await writeFile(recordPath, completedText, { flag: "w" });
+            if (canonicalPath !== recordPath || firstWriteRejected) return;
+            firstWriteRejected = true;
+            throw firstWriteRejection;
+          },
+          afterDurableRecordObservation: ({ path, status }) => {
+            if (
+              !recoveryReadStarted ||
+              path !== recordPath ||
+              status !== "read" ||
+              interveningOrder !== undefined
+            ) {
+              return;
+            }
+            const interveningCarrier = mergeTrustedFailureOccurrences(
+              captureFailureOccurrence("body", interveningRejection),
+              [],
+              "S31 intervening capture"
+            );
+            interveningOrder = failureEvents(interveningCarrier)[0]!.order;
           }
         },
         () => service.lookupReplay({ scope: "task", key: rawKey, requestDigest })
       )
     );
+    const refusal = taskServiceErrorAtBoundary(failure)!;
 
+    expect(firstWriteRejected).toBe(true);
     expect(swapped).toBe(true);
+    expect(interveningOrder).toBeDefined();
     // Refused fail-closed with the typed identity error, matching
     // assertUnsafeRollbackQuarantineAuthority semantics.
     expect(refusal.code).toBe("record_malformed");
@@ -29093,6 +29136,25 @@ describe("idempotency, lock, and artifact services", () => {
     expect(refusal.message).toBe(
       "Completed idempotency result changed before exact invalidation."
     );
+    const branchEvents = failureEvents(failure);
+    const firstWriteCarrierEvents = branchEvents.filter(
+      (event) => failureEvents(event.value).some(
+        (nested) => nested.value === firstWriteRejection
+      )
+    );
+    const identityEvents = branchEvents.filter((event) => event.value === refusal);
+    expect(firstWriteCarrierEvents).toHaveLength(1);
+    expect(
+      failureEvents(firstWriteCarrierEvents[0]!.value).filter(
+        (event) => event.value === firstWriteRejection
+      )
+    ).toHaveLength(1);
+    expect(firstWriteCarrierEvents[0]!.phase).toBe("body");
+    expect(identityEvents).toHaveLength(1);
+    expect(identityEvents[0]!.phase).toBe("settlement");
+    expect(firstWriteCarrierEvents[0]!.order).toBeGreaterThan(orderAnchor);
+    expect(firstWriteCarrierEvents[0]!.order).toBeLessThan(interveningOrder!);
+    expect(interveningOrder!).toBeLessThan(identityEvents[0]!.order);
     // The completed generation is preserved byte-identically.
     expect(await readFile(recordPath, "utf8")).toBe(completedText);
     // And it remains replayable: the invalid-completed protocol takes over.

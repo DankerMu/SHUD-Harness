@@ -28,9 +28,11 @@ export {
   failureFoldEntryValue,
   failureGraphNodes,
   failureLedger,
+  failureTerminalPhysicalPhase,
   mergeTrustedFailureOccurrences,
   orderedDistinctCompensationFailures,
   orderedDistinctFailures,
+  semanticPrimaryError,
   semanticPrimaryValue
 } from "./compensation-error-preservation";
 export type {

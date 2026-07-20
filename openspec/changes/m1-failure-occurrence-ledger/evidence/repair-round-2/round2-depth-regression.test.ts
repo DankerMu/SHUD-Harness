@@ -4,9 +4,10 @@ import * as taskBoundaryModule from "../../../../../packages/core/src/domain/ser
 import { TaskServiceError } from "../../../../../packages/core/src/domain/services/task-card-service";
 
 type DynamicFailureModule = typeof failureModule & {
-  adoptFailureCarrier?: (phase: failureModule.FailurePhase, carrier: unknown) => {
-    readonly occurrence: failureModule.FailureOccurrence;
-  };
+  adoptFailureCarrier?: (
+    phase: failureModule.FailurePhase,
+    carrier: unknown
+  ) => failureModule.FailureCarrierAdoption;
   createTrustedFailureTransportFamily?: <T>(input: {
     readonly name: string;
     readonly message: string;
@@ -49,8 +50,16 @@ describe("Round 2 depth corrective regression", () => {
     expect(events.filter((event) => inherited.some(
       (prior) => prior.occurrenceId === event.occurrenceId
     ))).toHaveLength(inherited.length);
-    expect(events).toContainEqual(adoption.occurrence);
-    expect(adoption.occurrence).toMatchObject({ phase: "body", value: seed });
+    const currentCatch = events.find((event) => event.order === adoption.order);
+    expect(currentCatch).toMatchObject({
+      phase: "body",
+      order: adoption.order,
+      value: seed
+    });
+    expect(["occurrence", "carrier"].map((field) => field in adoption)).toEqual([
+      false,
+      false
+    ]);
     expect(failureModule.semanticPrimaryValue(result)).toBe(primary);
     expect(new Set(events.map((event) => event.occurrenceId)).size).toBe(events.length);
   });

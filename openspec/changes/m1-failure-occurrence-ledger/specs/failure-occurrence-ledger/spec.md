@@ -57,15 +57,20 @@ mutable causes, accessors, and proxies.
 
 Observation SHALL use an iterative work queue with a maximum of 4096 unique
 object nodes and 8192 graph edges. After an engine operation returns, it SHALL
-inspect at most 8192 numeric keys per container, perform at most 65536 total
+retain at most 8192 numeric keys per container, MAY classify/read one additional
+numeric overflow witness, and SHALL perform at most 65536 total
 controlled prototype/property/descriptor/accessor operations, and record at
 most 256 ordinary observation failures plus one stable occurrence for each
 exhausted budget kind. Every controlled unit SHALL be charged before the work.
-For a normal
-array in `errors`, discovery SHALL enumerate present numeric own keys, including
-high indices, in numeric order without scanning `0..length-1`. A deceptive
-Proxy key list MUST NOT cause unbounded ledger-side filtering, sorting,
-descriptor reads, or failure-event growth after `Reflect.ownKeys()` returns.
+For a normal array in `errors`, discovery SHALL enumerate present numeric own
+keys, including high indices, in numeric order without scanning `0..length-1`.
+A deceptive Proxy key list MUST select only the first 8192 returned canonical
+numeric keys, emit that selected set in numeric-index order, stop key
+classification at one additional numeric witness, and MUST NOT cause unbounded
+ledger-side filtering, sorting, descriptor reads, or failure-event growth after
+`Reflect.ownKeys()` returns. The observer SHALL inspect each distinct `errors`
+container at most once per fold and SHALL reuse that immutable snapshot for
+aliasing parents.
 The engine allocation needed to construct that returned key array and a trap
 that never returns are explicit JavaScript platform limits. A brand, own-key,
 descriptor, accessor, proxy,
@@ -106,8 +111,9 @@ expose a naked traversal/stack `RangeError`.
 - **THEN** observation finishes iteratively within the declared budgets
 - **AND** failures/truncation are ledger observation occurrences
 - **AND** each exhausted budget contributes exactly one stable occurrence
-- **AND** no more than 8192 returned numeric keys per container, 65536 total
-  controlled operations, and 256 ordinary observation failures are consumed
+- **AND** no more than 8192 returned numeric keys plus one overflow witness per
+  container, 65536 total controlled operations, and 256 ordinary observation
+  failures are consumed
   after the relevant engine calls return
 - **AND** no naked stack-overflow or observation `RangeError` escapes
 
@@ -252,7 +258,9 @@ inner `TaskServiceError` MAY provide the existing typed HTTP projection.
 
 The failure ledger SHALL count canonical numeric keys independently of strings,
 symbols, and the `length` key after one `Reflect.ownKeys()` call returns. It
-SHALL observe at most 8192 numeric keys and SHALL record one
+SHALL retain the first 8192 returned numeric keys, emit that selected set in
+numeric-index order, classify/read at most one additional numeric witness, and
+SHALL record one
 stable occurrence for every budget actually exhausted. If controlled work is
 exhausted before the returned tail is classified, it SHALL record controlled
 work exhaustion without claiming an unobserved numeric overflow.
@@ -268,3 +276,21 @@ work exhaustion without claiming an unobserved numeric overflow.
   one edge-budget occurrence is also retained
 - **AND** `Reflect.ownKeys()` is called once and every event, issue, and graph
   vector remains frozen with exact semantic primary
+
+#### Scenario: aliased errors containers are inspected once
+
+- **WHEN** two observed parents reference the same `errors` Array or Array Proxy
+- **THEN** `Reflect.ownKeys()` and each selected/witness descriptor are read once
+  for that container during the fold
+- **AND** each parent retains its own capacity-accounted edges from the shared
+  immutable snapshot
+- **AND** observation failures and truncation evidence are not duplicated by
+  the alias
+
+#### Scenario: semantic primary survives the node boundary
+
+- **WHEN** a valid chronological vector selects an exact `Error` semantic
+  primary after 4096 earlier object values
+- **THEN** `semanticPrimaryError()` returns that exact Error identity
+- **AND** the public graph node vector remains capped at 4096 with one stable
+  node-budget occurrence

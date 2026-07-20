@@ -56,8 +56,10 @@ import {
 } from "../../../core/src/domain/services/workspace-record-store";
 import {
   PreservedErrorCompensationEnvelope,
+  captureFailureOccurrence,
   failureEvents,
   failureLedger,
+  mergeTrustedFailureOccurrences,
   orderedDistinctCompensationFailures,
   orderedDistinctFailures,
   semanticPrimaryError
@@ -7090,6 +7092,71 @@ describe("backend workspace and health routes", () => {
     expect(eventOrders).toEqual([...eventOrders].sort((left, right) => left - right));
     expect(errorGraphContainsIdentity(routedError, recovery)).toBe(true);
     expect(countErrorGraphIdentity(routedError, recovery)).toBe(1);
+  });
+
+  test("Child A1 keeps final release authoritative behind an observation tail", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const initialPrimary = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "Child A1 initial publication failure.",
+      userMessage: "The initial task publication failed.",
+      evidenceRefs: ["child-a1.initial-primary"],
+      retryable: true,
+      recommendedNextActions: ["Inspect the failure ledger."]
+    });
+    const observationFailure = new Error("Child A1 observation tail.");
+    const classificationPrimary = new Error("Child A1 authority classification failure.");
+    Object.defineProperty(classificationPrimary, "cause", {
+      get() {
+        throw observationFailure;
+      }
+    });
+    let classificationCarrier: unknown;
+    let routedError: unknown;
+    const app = createBackendApi({
+      workspaceRoot,
+      taskRouteErrorSinkForTest: (error) => { routedError = error; },
+      taskServiceFactory: (options) => {
+        const service = createTaskCardService(options);
+        return {
+          ...service,
+          createTaskForIdempotency: async () => { throw initialPrimary; }
+        };
+      },
+      idempotencyServiceFactory: (options) => {
+        const service = createIdempotencyRecordService(options);
+        return {
+          ...service,
+          consumeCompletedRecord: async () => {
+            classificationCarrier = mergeTrustedFailureOccurrences(
+              captureFailureOccurrence("body", classificationPrimary),
+              [captureFailureOccurrence("final_release", new Error("classification release"))],
+              "classification failure with terminal release"
+            );
+            expect(failureEvents(classificationCarrier).map((event) => event.phase)).toEqual([
+              "body",
+              "final_release",
+              "observation"
+            ]);
+            throw classificationCarrier;
+          }
+        } as typeof service;
+      }
+    });
+
+    const response = await postTask(app, validTaskCreateBody(), {
+      "Idempotency-Key": "task:create:child-a1-observation-tail"
+    });
+    expect(response.status).toBe(initialPrimary.status);
+    expect(taskServiceErrorAtBoundary(routedError)).toBe(initialPrimary);
+    expect(
+      failureEvents(routedError)
+        .filter((event) => event.value === classificationCarrier)
+        .map((event) => event.phase)
+    ).toEqual(["final_release"]);
   });
 
   test("S31-P62-06 earlier caller primary dominates invalid authority and post-rollback recovery", async () => {

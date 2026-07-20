@@ -1,10 +1,10 @@
 import {
   createTrustedFailureTransportFamily,
+  failureFoldEntrySemanticPrimaryValue,
+  failureFoldEntryValue,
   failureLedger,
-  isTrustedFailureOccurrence,
   mergeTrustedFailureOccurrenceVector,
   mergeTrustedFailureOccurrences,
-  semanticPrimaryValue,
   type FailureFoldEntry
 } from "./compensation-error-preservation";
 import {
@@ -43,26 +43,15 @@ export function preserveTaskServiceErrorFailureEntries(
   compensations: readonly FailureFoldEntry[],
   aggregateMessage: string
 ): unknown {
-  const directPrimary = isTrustedFailureOccurrence(primary) ? primary.value : undefined;
-  const directProjection = taskServiceErrorAuthorityTransportFamily.project(directPrimary);
-  const trustedDirectPrimary = trustedTaskServiceErrorFromFailureLedger(directPrimary) ??
-    trustedTaskServiceErrorTarget(directPrimary) ??
-    trustedTaskServiceErrorFromFailureLedger(directProjection) ??
-    trustedTaskServiceErrorTarget(directProjection);
+  const trustedDirectPrimary = trustedTaskServiceErrorForFoldPrimary(primary);
   const preserved = mergeTrustedFailureOccurrences(
     primary,
     compensations,
     aggregateMessage,
     trustedDirectPrimary ? { classify: () => "error" } : undefined
   );
-  const exactPrimary = semanticPrimaryValue(preserved);
-  const transportProjection = taskServiceErrorAuthorityTransportFamily.project(exactPrimary);
-  const trustedPrimary = trustedTaskServiceErrorFromFailureLedger(exactPrimary) ??
-    trustedTaskServiceErrorTarget(exactPrimary) ??
-    trustedTaskServiceErrorFromFailureLedger(transportProjection) ??
-    trustedTaskServiceErrorTarget(transportProjection);
-  if (trustedPrimary && isObjectLike(preserved)) {
-    trustedTaskServiceErrorLedgerViews.set(preserved, trustedPrimary);
+  if (trustedDirectPrimary && isObjectLike(preserved)) {
+    trustedTaskServiceErrorLedgerViews.set(preserved, trustedDirectPrimary);
     return preserved;
   }
   return preserved;
@@ -73,28 +62,36 @@ export function preserveTaskServiceErrorFailureVector(
   entries: readonly FailureFoldEntry[],
   aggregateMessage: string
 ): unknown {
-  const directPrimary = isTrustedFailureOccurrence(primary) ? primary.value : undefined;
-  const directProjection = taskServiceErrorAuthorityTransportFamily.project(directPrimary);
-  const trustedDirectPrimary = trustedTaskServiceErrorFromFailureLedger(directPrimary) ??
-    trustedTaskServiceErrorTarget(directPrimary) ??
-    trustedTaskServiceErrorFromFailureLedger(directProjection) ??
-    trustedTaskServiceErrorTarget(directProjection);
+  const trustedDirectPrimary = trustedTaskServiceErrorForFoldPrimary(primary);
   const preserved = mergeTrustedFailureOccurrenceVector(
     primary,
     entries,
     aggregateMessage,
     trustedDirectPrimary ? { classify: () => "error" } : undefined
   );
-  const exactPrimary = semanticPrimaryValue(preserved);
-  const transportProjection = taskServiceErrorAuthorityTransportFamily.project(exactPrimary);
-  const trustedPrimary = trustedTaskServiceErrorFromFailureLedger(exactPrimary) ??
-    trustedTaskServiceErrorTarget(exactPrimary) ??
-    trustedTaskServiceErrorFromFailureLedger(transportProjection) ??
-    trustedTaskServiceErrorTarget(transportProjection);
-  if (trustedPrimary && isObjectLike(preserved)) {
-    trustedTaskServiceErrorLedgerViews.set(preserved, trustedPrimary);
+  if (trustedDirectPrimary && isObjectLike(preserved)) {
+    trustedTaskServiceErrorLedgerViews.set(preserved, trustedDirectPrimary);
   }
   return preserved;
+}
+
+function trustedTaskServiceErrorForFoldPrimary(
+  primary: FailureFoldEntry
+): TaskServiceError | undefined {
+  const entryValue = failureFoldEntryValue(primary);
+  const semanticPrimary = failureFoldEntrySemanticPrimaryValue(primary);
+  return trustedTaskServiceErrorFromPrivateAuthority(entryValue) ??
+    trustedTaskServiceErrorFromPrivateAuthority(semanticPrimary);
+}
+
+function trustedTaskServiceErrorFromPrivateAuthority(
+  value: unknown
+): TaskServiceError | undefined {
+  const projection = taskServiceErrorAuthorityTransportFamily.project(value);
+  return trustedTaskServiceErrorFromFailureLedger(value) ??
+    trustedTaskServiceErrorTarget(value) ??
+    trustedTaskServiceErrorFromFailureLedger(projection) ??
+    trustedTaskServiceErrorTarget(projection);
 }
 
 function isObjectLike(value: unknown): value is object {

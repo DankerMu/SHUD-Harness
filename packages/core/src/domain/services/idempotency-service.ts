@@ -17,6 +17,7 @@ import {
 } from "./compensation-error-preservation";
 import {
   preserveTaskServiceErrorFailureEntries,
+  preserveTaskServiceErrorFailureVector,
   taskServiceErrorAtBoundary
 } from "./task-service-error-compensation";
 import {
@@ -781,11 +782,6 @@ export function createIdempotencyRecordService(
               await writeFailedRecord(current, scope, key, evidenceRef);
             } catch (firstWriteError) {
               const firstWriteEntry = captureFailureFoldEntry("body", firstWriteError);
-              transitionOutcome = {
-                status: "rejected",
-                reason: firstWriteError,
-                occurrence: firstWriteEntry
-              };
               let afterFirstWrite: IdempotencyRecord | undefined;
               try {
                 afterFirstWrite = await service.getRecord(scope, key);
@@ -816,12 +812,13 @@ export function createIdempotencyRecordService(
                 // assertUnsafeRollbackQuarantineAuthority semantics. Only the
                 // exact transported mutation authority may invalidate a
                 // completed generation.
-                throw preserveTaskServiceErrorFailureEntries(
-                  captureFailureFoldEntry(
-                    "body",
-                    completedRecordInvalidationIdentityError(evidenceRef)
-                  ),
-                  [captureFailureFoldEntry("settlement", firstWriteError)],
+                const identityEntry = captureFailureFoldEntry(
+                  "settlement",
+                  completedRecordInvalidationIdentityError(evidenceRef)
+                );
+                throw preserveTaskServiceErrorFailureVector(
+                  identityEntry,
+                  [firstWriteEntry, identityEntry],
                   IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
                 );
               }
@@ -842,6 +839,11 @@ export function createIdempotencyRecordService(
                   );
                 }
               }
+              transitionOutcome = {
+                status: "rejected",
+                reason: firstWriteError,
+                occurrence: firstWriteEntry
+              };
             }
           }
 

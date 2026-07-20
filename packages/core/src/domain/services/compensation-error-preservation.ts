@@ -24,10 +24,7 @@ export interface FailureOccurrence {
 
 export interface FailureCarrierAdoption {
   readonly [FAILURE_CARRIER_ADOPTION]: true;
-  readonly adoptionId: symbol;
   readonly order: number;
-  readonly carrier: object;
-  readonly occurrence: FailureOccurrence;
 }
 
 export type FailureFoldEntry = FailureOccurrence | FailureCarrierAdoption;
@@ -173,8 +170,9 @@ interface ObservationState {
   readonly queue: unknown[];
   readonly occurrenceById: Map<symbol, FailureOccurrence>;
   readonly visitedLedgers: Set<PreservedFailureLedger>;
+  readonly errorsContainerOutcomes: WeakMap<object, ErrorsContainerOutcome>;
   readonly semanticPrimaryValue: unknown;
-  readonly classifyPrimary?: (value: object) => FailureGraphNode["errorBrand"];
+  classifiedPrimaryBrand?: FailureGraphNode["errorBrand"];
   queueHead: number;
   edgeCount: number;
   controlledOperationCount: number;
@@ -186,12 +184,32 @@ interface ObservationState {
   observationFailureBudgetRecorded: boolean;
 }
 
+interface ErrorsContainerElementSnapshot {
+  readonly index: number;
+  readonly value: unknown;
+}
+
+interface ErrorsContainerSnapshot {
+  readonly elements: readonly ErrorsContainerElementSnapshot[];
+  readonly overflowWitnessPresent: boolean;
+}
+
+type ErrorsContainerOutcome =
+  | { readonly status: "array"; readonly snapshot: ErrorsContainerSnapshot }
+  | { readonly status: "non_array" }
+  | { readonly status: "failed" };
+
 let nextFailureOccurrenceOrder = 1;
 const trustedFailureOccurrences = new WeakSet<object>();
 const claimedFailureOccurrences = new WeakSet<object>();
-const trustedFailureCarrierAdoptions = new WeakMap<object, PreservedFailureLedger>();
+interface FailureCarrierAdoptionState {
+  readonly ledger: PreservedFailureLedger;
+  readonly occurrence: FailureOccurrence;
+}
+const trustedFailureCarrierAdoptions = new WeakMap<object, FailureCarrierAdoptionState>();
 const claimedFailureCarrierAdoptions = new WeakSet<object>();
 const preservedFailureLedgers = new WeakMap<object, PreservedFailureLedger>();
+const preservedSemanticPrimaryErrors = new WeakMap<object, Error>();
 
 class PreservedFailureCarrier extends Error {
   readonly semanticPrimary: unknown;
@@ -333,12 +351,9 @@ export function adoptFailureCarrier(
   const occurrence = mintFailureOccurrence(phase, carrier);
   const adoption = Object.freeze({
     [FAILURE_CARRIER_ADOPTION]: true as const,
-    adoptionId: Symbol("failure_carrier_adoption"),
-    order: occurrence.order,
-    carrier,
-    occurrence
+    order: occurrence.order
   });
-  trustedFailureCarrierAdoptions.set(adoption, ledger);
+  trustedFailureCarrierAdoptions.set(adoption, { ledger, occurrence });
   return adoption;
 }
 
@@ -353,7 +368,21 @@ export function failureFoldEntryValue(entry: FailureFoldEntry): unknown {
     throw new FailureOccurrenceProtocolError("untrusted_entry");
   }
   const adoption = trustedFailureCarrierAdoptions.get(entry);
-  if (adoption) return (entry as FailureCarrierAdoption).occurrence.value;
+  if (adoption) return adoption.occurrence.value;
+  if (trustedFailureOccurrences.has(entry)) {
+    return (entry as FailureOccurrence).value;
+  }
+  throw new FailureOccurrenceProtocolError("untrusted_entry");
+}
+
+export function failureFoldEntrySemanticPrimaryValue(
+  entry: FailureFoldEntry
+): unknown {
+  if (!isObjectLike(entry)) {
+    throw new FailureOccurrenceProtocolError("untrusted_entry");
+  }
+  const adoption = trustedFailureCarrierAdoptions.get(entry);
+  if (adoption) return adoption.ledger.primary.value;
   if (trustedFailureOccurrences.has(entry)) {
     return (entry as FailureOccurrence).value;
   }
@@ -372,12 +401,7 @@ export function semanticPrimaryValue(value: unknown): unknown {
 export function semanticPrimaryError(value: unknown): Error | undefined {
   const ledger = failureLedger(value);
   if (ledger) {
-    const primary = ledger.primary.value;
-    const node = ledger.observedGraph.nodes.find((candidate) => candidate.value === primary);
-    if (node?.errorBrand === "error" || node?.errorBrand === "indeterminate") {
-      return primary as Error;
-    }
-    return undefined;
+    return isObjectLike(value) ? preservedSemanticPrimaryErrors.get(value) : undefined;
   }
   return boundedErrorBrand(value) === "error" ? value as Error : undefined;
 }
@@ -388,6 +412,13 @@ export function failureGraphNodes(value: unknown): readonly FailureGraphNode[] {
 
 export function failureEvents(value: unknown): readonly FailureOccurrence[] {
   return failureLedger(value)?.events ?? [];
+}
+
+export function failureTerminalPhysicalPhase(
+  value: unknown
+): Exclude<FailurePhase, "observation"> | undefined {
+  const ledger = failureLedger(value);
+  return ledger ? terminalPhysicalPhase(ledger) : undefined;
 }
 
 export function orderedDistinctFailures(value: unknown): readonly unknown[] {
@@ -431,14 +462,45 @@ export function mergeTrustedFailureOccurrenceVector(
   _aggregateMessage: string,
   primaryClassification?: FailurePrimaryClassification
 ): unknown {
-  if (!entries.includes(primary)) {
+  const entrySnapshot = Object.freeze(Array.from(entries));
+  if (!entrySnapshot.includes(primary)) {
     throw new FailureOccurrenceProtocolError("invalid_cardinality");
   }
-  preflightFailureFoldEntries(entries);
-  claimFailureFoldEntries(entries);
-
   const primaryAdoption = trustedFailureCarrierAdoptions.get(primary as object);
-  const semanticPrimary = primaryAdoption?.primary ?? primary as FailureOccurrence;
+  const directPrimary = trustedFailureOccurrences.has(primary as object)
+    ? primary as FailureOccurrence
+    : undefined;
+  if (!primaryAdoption && !directPrimary) {
+    preflightFailureFoldEntries(entrySnapshot);
+    throw new FailureOccurrenceProtocolError("untrusted_entry");
+  }
+  const semanticPrimary = primaryAdoption?.ledger.primary ?? directPrimary!;
+  // Validate the frozen token vector before invoking the optional classifier,
+  // then repeat the same validation after it returns so reentrant claims or
+  // state changes cannot cross the final claim boundary unnoticed.
+  preflightFailureFoldEntries(entrySnapshot);
+  const classifyPrimary = primaryClassification?.classify;
+  let classifiedPrimaryBrand: FailureGraphNode["errorBrand"] | undefined;
+  if (classifyPrimary !== undefined) {
+    if (typeof classifyPrimary !== "function") {
+      throw new FailureOccurrenceProtocolError("untrusted_entry");
+    }
+    if (isObjectLike(semanticPrimary.value)) {
+      classifiedPrimaryBrand = classifyPrimary(semanticPrimary.value);
+      if (
+        classifiedPrimaryBrand !== "error" &&
+        classifiedPrimaryBrand !== "non_error" &&
+        classifiedPrimaryBrand !== "indeterminate"
+      ) {
+        throw new FailureOccurrenceProtocolError("untrusted_entry");
+      }
+    }
+  }
+  // No caller-controlled reads or calls occur between this final validation
+  // and claim. Preflight, claim, and fold all consume the same frozen snapshot.
+  preflightFailureFoldEntries(entrySnapshot);
+  claimFailureFoldEntries(entrySnapshot);
+
   const state: ObservationState = {
     nodes: [],
     observationFailures: [],
@@ -446,11 +508,12 @@ export function mergeTrustedFailureOccurrenceVector(
     queue: [],
     occurrenceById: new Map<symbol, FailureOccurrence>(),
     visitedLedgers: new Set<PreservedFailureLedger>(),
+    errorsContainerOutcomes: new WeakMap<object, ErrorsContainerOutcome>(),
     semanticPrimaryValue: semanticPrimary.value,
-    classifyPrimary: primaryClassification?.classify,
+    classifiedPrimaryBrand,
     queueHead: 0,
     edgeCount: 0,
-    controlledOperationCount: 0,
+    controlledOperationCount: classifiedPrimaryBrand === undefined ? 0 : 1,
     ordinaryObservationFailureCount: 0,
     nodeBudgetRecorded: false,
     edgeBudgetRecorded: false,
@@ -459,7 +522,11 @@ export function mergeTrustedFailureOccurrenceVector(
     observationFailureBudgetRecorded: false
   };
 
-  for (const entry of entries) adoptOrRetainEntry(entry, state);
+  if (isObjectLike(semanticPrimary.value) && state.classifiedPrimaryBrand === undefined) {
+    state.classifiedPrimaryBrand = observeErrorBrand(semanticPrimary.value, state);
+  }
+
+  for (const entry of entrySnapshot) adoptOrRetainEntry(entry, state);
 
   while (state.queueHead < state.queue.length) {
     const value = state.queue[state.queueHead++];
@@ -495,6 +562,13 @@ export function mergeTrustedFailureOccurrenceVector(
     ledger.compensations.map((occurrence) => occurrence.value)
   );
   preservedFailureLedgers.set(carrier, ledger);
+  if (
+    isObjectLike(semanticPrimary.value) &&
+    (state.classifiedPrimaryBrand === "error" ||
+      state.classifiedPrimaryBrand === "indeterminate")
+  ) {
+    preservedSemanticPrimaryErrors.set(carrier, semanticPrimary.value as Error);
+  }
   return Object.freeze(carrier);
 }
 
@@ -546,8 +620,8 @@ function adoptOrRetainEntry(
     retainOccurrence(entry as FailureOccurrence, state, true);
     return;
   }
-  adoptLedger(adopted, state);
-  retainOccurrence((entry as FailureCarrierAdoption).occurrence, state, true);
+  adoptLedger(adopted.ledger, state);
+  retainOccurrence(adopted.occurrence, state, true);
 }
 
 function adoptLedger(
@@ -560,8 +634,8 @@ function adoptLedger(
 }
 
 function observeNode(value: object, state: ObservationState): void {
-  const errorBrand = value === state.semanticPrimaryValue && state.classifyPrimary
-    ? observePrimaryClassification(value, state)
+  const errorBrand = value === state.semanticPrimaryValue && state.classifiedPrimaryBrand
+    ? state.classifiedPrimaryBrand
     : observeErrorBrand(value, state);
 
   const edges: FailureGraphEdge[] = [];
@@ -571,11 +645,10 @@ function observeNode(value: object, state: ObservationState): void {
     if (!field.present) continue;
 
     if (kind === "errors") {
-      const arrayBrand = safelyObserveArray(field.value, state);
-      for (const failure of arrayBrand.failures) recordObservationFailure(failure, state);
-      if (arrayBrand.status === "failed") continue;
-      if (arrayBrand.status === "array") {
-        observeSparseErrorsArray(arrayBrand.value, edges, state);
+      const container = observeErrorsContainer(field.value, state);
+      if (container.status === "failed") continue;
+      if (container.status === "array") {
+        replayErrorsContainerSnapshot(container.snapshot, edges, state);
         continue;
       }
     }
@@ -590,89 +663,93 @@ function observeNode(value: object, state: ObservationState): void {
   }));
 }
 
-function observeSparseErrorsArray(
-  values: object,
+function observeErrorsContainer(
+  value: unknown,
+  state: ObservationState
+): ErrorsContainerOutcome {
+  if (isObjectLike(value)) {
+    const cached = state.errorsContainerOutcomes.get(value);
+    if (cached) return cached;
+  }
+
+  const arrayBrand = safelyObserveArray(value, state);
+  for (const failure of arrayBrand.failures) {
+    recordObservationFailure(failure, state);
+  }
+  const outcome: ErrorsContainerOutcome = arrayBrand.status === "array"
+    ? Object.freeze({
+      status: "array",
+      snapshot: inspectSparseErrorsArray(arrayBrand.value, state)
+    })
+    : Object.freeze({ status: arrayBrand.status });
+  if (isObjectLike(value)) state.errorsContainerOutcomes.set(value, outcome);
+  return outcome;
+}
+
+function replayErrorsContainerSnapshot(
+  snapshot: ErrorsContainerSnapshot,
   edges: FailureGraphEdge[],
   state: ObservationState
 ): void {
+  for (const element of snapshot.elements) {
+    if (!addEdge({
+      kind: "errors",
+      target: element.value,
+      index: element.index
+    }, edges, state)) return;
+  }
+  if (
+    snapshot.overflowWitnessPresent &&
+    state.edgeCount >= FAILURE_GRAPH_MAX_EDGES
+  ) {
+    recordBudgetIssue("edge_budget_exceeded", FAILURE_GRAPH_MAX_EDGES, state);
+  }
+}
+
+function inspectSparseErrorsArray(
+  values: object,
+  state: ObservationState
+): ErrorsContainerSnapshot {
   let keys: (string | symbol)[];
-  if (!chargeControlledOperation(state)) return;
+  if (!chargeControlledOperation(state)) return emptyErrorsContainerSnapshot();
   try {
     keys = Reflect.ownKeys(values);
   } catch (error) {
     recordObservationFailure(error, state);
-    return;
+    return emptyErrorsContainerSnapshot();
   }
 
   type NumericKey = { readonly key: string; readonly index: number };
   const numericKeys: NumericKey[] = [];
-  let numericOverflow: { readonly key: string; readonly index: number } | undefined;
+  let numericOverflow: NumericKey | undefined;
   for (const key of keys) {
-    if (!chargeControlledOperation(state)) return;
+    if (!chargeControlledOperation(state)) break;
     if (typeof key === "string" && isCanonicalArrayIndex(key)) {
-      let omitted: NumericKey | undefined;
       const candidate = { key, index: Number(key) };
       if (numericKeys.length < FAILURE_GRAPH_MAX_NUMERIC_KEYS) {
         numericKeys.push(candidate);
-        let child = numericKeys.length - 1;
-        while (child > 0) {
-          const parent = Math.floor((child - 1) / 2);
-          if (numericKeys[parent]!.index >= numericKeys[child]!.index) break;
-          [numericKeys[parent], numericKeys[child]] = [
-            numericKeys[child]!,
-            numericKeys[parent]!
-          ];
-          child = parent;
-        }
-      } else if (candidate.index < numericKeys[0]!.index) {
-        omitted = numericKeys[0];
-        numericKeys[0] = candidate;
-        let parent = 0;
-        while (true) {
-          const left = parent * 2 + 1;
-          const right = left + 1;
-          if (left >= numericKeys.length) break;
-          const largerChild =
-            right < numericKeys.length &&
-            numericKeys[right]!.index > numericKeys[left]!.index
-              ? right
-              : left;
-          if (numericKeys[parent]!.index >= numericKeys[largerChild]!.index) break;
-          [numericKeys[parent], numericKeys[largerChild]] = [
-            numericKeys[largerChild]!,
-            numericKeys[parent]!
-          ];
-          parent = largerChild;
-        }
       } else {
-        omitted = candidate;
-      }
-      if (
-        omitted &&
-        (numericOverflow === undefined || omitted.index < numericOverflow.index)
-      ) {
-        numericOverflow = omitted;
-        // The first omitted canonical index proves numeric-key exhaustion.
-        // Record that fact at discovery time so a later controlled-work or
-        // edge-budget exit cannot suppress already-known evidence. The budget
-        // recorder is idempotent while `numericOverflow` may still move to a
-        // lower omitted index as the bounded lowest-N heap is refined.
+        numericOverflow = candidate;
         recordBudgetIssue(
           "numeric_key_budget_exceeded",
           FAILURE_GRAPH_MAX_NUMERIC_KEYS,
           state
         );
+        break;
       }
     }
   }
   numericKeys.sort((left, right) => left.index - right.index);
 
+  const elements: ErrorsContainerElementSnapshot[] = [];
   for (const { key, index } of numericKeys) {
     const element = observeOwnArrayElement(values, key, state);
     for (const failure of element.failures) recordObservationFailure(failure, state);
-    if (!element.present) continue;
-    if (!addEdge({ kind: "errors", target: element.value, index }, edges, state)) return;
+    if (element.present) {
+      elements.push(Object.freeze({ index, value: element.value }));
+    }
   }
+  let overflowWitnessPresent = false;
   if (numericOverflow) {
     const overflowElement = observeOwnArrayElement(
       values,
@@ -682,14 +759,19 @@ function observeSparseErrorsArray(
     for (const failure of overflowElement.failures) {
       recordObservationFailure(failure, state);
     }
-    if (overflowElement.present) {
-      addEdge({
-        kind: "errors",
-        target: overflowElement.value,
-        index: numericOverflow.index
-      }, edges, state);
-    }
+    overflowWitnessPresent = overflowElement.present;
   }
+  return Object.freeze({
+    elements: Object.freeze(elements),
+    overflowWitnessPresent
+  });
+}
+
+function emptyErrorsContainerSnapshot(): ErrorsContainerSnapshot {
+  return Object.freeze({
+    elements: Object.freeze([]),
+    overflowWitnessPresent: false
+  });
 }
 
 function preflightFailureFoldEntries(entries: readonly FailureFoldEntry[]): void {
@@ -725,27 +807,46 @@ function preflightFailureFoldEntries(entries: readonly FailureFoldEntry[]): void
       if (claimedFailureCarrierAdoptions.has(entry)) {
         throw new FailureOccurrenceProtocolError("stale_entry");
       }
-      const adoption = entry as FailureCarrierAdoption;
-      if (
-        !trustedFailureOccurrences.has(adoption.occurrence) ||
-        adoption.occurrence.value !== adoption.carrier ||
-        adoption.occurrence.order !== adoption.order
-      ) {
-        throw new FailureOccurrenceProtocolError("untrusted_entry");
-      }
+      const adoption = trustedFailureCarrierAdoptions.get(entry)!;
       if (claimedFailureOccurrences.has(adoption.occurrence)) {
         throw new FailureOccurrenceProtocolError("stale_entry");
       }
-      if (adoption.order <= previousEntryOrder) {
+      if (adoption.occurrence.order <= previousEntryOrder) {
         throw new FailureOccurrenceProtocolError("reordered_entry");
       }
       assertFailurePhaseRole(adoption.occurrence.phase, index, finalReleaseSeen);
       if (adoption.occurrence.phase === "final_release") finalReleaseSeen = true;
-      previousEntryOrder = adoption.order;
+      previousEntryOrder = adoption.occurrence.order;
       continue;
     }
     throw new FailureOccurrenceProtocolError("untrusted_entry");
   }
+  assertCombinedTerminalPhaseGrammar(entries);
+}
+
+function assertCombinedTerminalPhaseGrammar(
+  entries: readonly FailureFoldEntry[]
+): void {
+  for (const entry of entries) {
+    const adoption = trustedFailureCarrierAdoptions.get(entry as object);
+    if (
+      adoption &&
+      terminalPhysicalPhase(adoption.ledger) === "final_release" &&
+      adoption.occurrence.phase === "settlement"
+    ) {
+      throw new FailureOccurrenceProtocolError("invalid_phase");
+    }
+  }
+}
+
+function terminalPhysicalPhase(
+  ledger: PreservedFailureLedger
+): Exclude<FailurePhase, "observation"> | undefined {
+  for (let index = ledger.events.length - 1; index >= 0; index -= 1) {
+    const phase = ledger.events[index]!.phase;
+    if (phase !== "observation") return phase;
+  }
+  return undefined;
 }
 
 function claimFailureFoldEntries(entries: readonly FailureFoldEntry[]): void {
@@ -754,7 +855,9 @@ function claimFailureFoldEntries(entries: readonly FailureFoldEntry[]): void {
       claimedFailureOccurrences.add(entry as object);
     } else {
       claimedFailureCarrierAdoptions.add(entry as object);
-      claimedFailureOccurrences.add((entry as FailureCarrierAdoption).occurrence);
+      claimedFailureOccurrences.add(
+        trustedFailureCarrierAdoptions.get(entry as object)!.occurrence
+      );
     }
   }
 }
@@ -925,19 +1028,6 @@ function chargeControlledOperation(state: ObservationState): boolean {
   }
   state.controlledOperationCount += 1;
   return true;
-}
-
-function observePrimaryClassification(
-  value: object,
-  state: ObservationState
-): FailureGraphNode["errorBrand"] {
-  if (!chargeControlledOperation(state)) return "indeterminate";
-  try {
-    return state.classifyPrimary!(value);
-  } catch (error) {
-    recordObservationFailure(error, state);
-    return "indeterminate";
-  }
 }
 
 function observeErrorBrand(

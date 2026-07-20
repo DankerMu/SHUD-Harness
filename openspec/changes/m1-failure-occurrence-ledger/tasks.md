@@ -29,16 +29,19 @@
 ## 2. Bounded Hostile Observation
 
 - [x] 2.1 Retain iterative 4096-node/8192-edge limits and add pre-charged
-  limits after engine calls return: at most 8192 numeric keys per container,
+  limits after engine calls return: at most 8192 retained numeric keys plus one
+  classified/read overflow witness per container,
   65536 total controlled prototype/property/descriptor/accessor operations,
   and 256 ordinary observation failures plus one event per exhausted budget.
 - [x] 2.2 Replace unbounded `instanceof`/prototype traversal with bounded brand
   work covering cyclic and fresh-per-hop Proxy prototypes. Each exhausted
   budget records exactly one frozen observation occurrence.
-- [x] 2.3 Call `Reflect.ownKeys()` at most once per observed array/container;
-  after it returns, bound numeric-key filtering/sorting and throwing descriptor
-  reads before ledger-controlled work. For at least 16,384 returned keys, prove
-  no more than 8192 are inspected and calls/events stay within declared limits.
+- [x] 2.3 Call `Reflect.ownKeys()` at most once per distinct array/container per
+  fold and reuse one immutable snapshot for aliases. After it returns, retain
+  only the first 8192 returned canonical numeric keys, sort only that bounded
+  selected set, classify/read at most one overflow witness, and stop key
+  classification. For at least 16,384 returned keys, prove no more than N+1
+  numeric keys/descriptors are inspected and calls/events stay within limits.
 - [x] 2.4 Model array-brand observation as `array | non_array | failed`; on
   failure record exactly one occurrence and add no child edge/node.
 - [x] 2.5 Retain N-1/N/N+1 node/edge, max-length sparse array, 25K+ chain,
@@ -130,8 +133,10 @@
   envelope; untrusted lookalikes MUST stay generic and no caller constructor or
   getter may run.
 - [x] 7.4 Count actual canonical numeric keys independently from returned-key
-  position. Cover N-1/N/N+1 with `length`, strings, and symbols reordered;
-  assert one `ownKeys` call, complete edges, exact frozen budget vectors,
+  position. Select the first N returned numeric keys and emit the bounded set in
+  numeric order; do not scan an adversarial Proxy tail for globally lower
+  indices. Cover N-1/N/N+1 with `length`, strings, and symbols reordered; assert
+  one `ownKeys` call per aliased container, complete edges, exact frozen vectors,
   strictly increasing unique order, and unchanged semantic primary. Restore
   independent edge and numeric occurrences for a normal N+1 present-descriptor
   array without fabricating edge evidence for an unclassified/absent tail.
@@ -150,3 +155,147 @@
 - [x] 7.8 Run dedicated and real-producer focused tests, full core/backend,
   typecheck, root `check`, strict OpenSpec, diff/stash/submodule/Zero/workspace
   hygiene, then complete a full-inventory invariant audit before Round 3.
+
+## 8. Round-3 Split Child A2 — Observation Bounds
+
+- [x] 8.1 Enforce the reconciled first-N-plus-one-witness numeric contract and
+  update prior lowest-N tests without changing historical replay-patch bytes.
+- [x] 8.2 Memoize each distinct `errors` container inspection once per fold;
+  reuse the immutable snapshot across parent aliases while charging each edge.
+- [x] 8.3 Preserve exact semantic-primary Error identity independently of the
+  4096-node public graph budget.
+- [x] 8.4 Capture red-first regressions for a 65,536 numeric-key Proxy, a shared
+  mutating Array Proxy, and a late vector semantic primary; cover N-1/N/N+1,
+  descriptor failures, frozen vectors, budget events, and alias edge fan-out.
+- [x] 8.5 Run dedicated, full core/backend, typecheck, root check, strict
+  OpenSpec, and incremental hygiene verification on the final A2 head.
+
+## 9. Round-3 Split Child A3 — Tracked Evidence Closure
+
+- [x] 9.1 Persist the definitive Phase 6.2 invariant inventory under tracked
+  OpenSpec evidence, including every required surface, the A1/A2 semantic
+  heads, verification results, and residual platform limits.
+- [x] 9.2 Replace the final ignored `.workplans` audit reference with the
+  tracked report so a fresh clone can resolve every canonical evidence path.
+- [x] 9.3 Enumerate all 13 preserved replay-artifact whitespace lines: seven in
+  the Round-1 Phase 6.2 patch and six in the Round-2 backend patch. Remove all
+  unrelated trailing whitespace so range-wide hygiene reports only those
+  byte-preserving exceptions.
+- [x] 9.4 Bind final source/test diff hashes, file hashes, replay artifact
+  hashes, replay preflight commands, strict OpenSpec, and final-head hygiene to
+  the A1/A2 semantic stack without using `.workplans` as canonical evidence.
+- [x] 9.5 Replace the inline replay lifecycle with one tracked executable
+  verifier and one shared POSIX lifecycle authority. Establish ownership by an
+  atomic fixed claim plus per-invocation root token, reject same-name/static
+  collisions without touching foreign paths, preserve one write-once command/
+  signal status through cleanup and successful finalization, and prove the full
+  normal/failure/collision/process-group signal/harness rollback surface with a
+  deterministic 48-case zero-residue matrix, including nine two-party races
+  and 18 participant outcomes. Converge every post-spawn release, outcome,
+  wait/reap, and ownership-reconciliation path before propagating its exact
+  write-once status.
+
+## 10. Round-3 Split Child A4 — Pre-spawn Claim Reconciliation
+
+- [x] 10.1 Reconcile the fixed claim before spawning the creation child: retain
+  a signal-capable first read, mask handled lifecycle signals, retry the exact
+  token read, and record physical ownership only on an exact match. Never remove
+  a mismatched claim; propagate any pre-existing latch only after
+  reconciliation.
+- [x] 10.2 Add deterministic verifier and harness public-surface regressions in
+  which TERM interrupts the first exact-token verification. Both MUST return
+  143 with no claim, transaction link, root, owner marker, registered worktree,
+  or spawned creation child.
+- [x] 10.3 Preserve the historical replay-patch bytes and run syntax,
+  shellcheck, canonical replay, the expanded 50-case lifecycle matrix, strict
+  OpenSpec validation, incremental/range hygiene, stash, Zero, submodule, and
+  replay-residue checks.
+
+## 11. Round-3 Split Child A5 — Post-spawn Result Chronology
+
+- [x] 11.1 Latch a non-zero post-spawn transaction result as soon as it is
+  determined, before later child settlement, ownership reconciliation, or
+  transaction cleanup can observe another lifecycle event. Preserve an earlier
+  signal already present in the shared write-once latch.
+- [x] 11.2 Add deterministic verifier and harness public-surface regressions for
+  both release failure 67 and collision outcome 73 followed by TERM. Each MUST
+  preserve the earlier transaction result and leave no live creation child,
+  claim, transaction link, root, owner marker, registered worktree, or probe.
+- [x] 11.3 Preserve the historical replay-patch bytes and run syntax,
+  shellcheck, canonical replay, the expanded 54-case lifecycle matrix, strict
+  OpenSpec validation, incremental/range hygiene, stash, Zero, submodule, and
+  replay-residue checks.
+- [x] 11.4 Read and classify a published outcome before waiting for its still-
+  live creation child. Prove verifier/harness collision 73 and unknown-protocol
+  67 each precede later TERM, while child settlement, ownership reconciliation,
+  zero-residue cleanup, outcome-read failure, and signal-first semantics remain
+  intact in the expanded 56-case matrix.
+- [x] 11.5 While a creation transaction is active, make every lifecycle handler
+  adopt an already-published non-zero outcome before latching its own signal.
+  Prove verifier/harness readlink-window collision 73 and unknown-protocol 67,
+  plus verifier/harness TERM-before-publication controls, in the expanded
+  62-case matrix without skipping child release, reap, or ownership settlement.
+- [x] 11.6 Separate the held-child watchdog from the normal settlement-release
+  marker. Assert that no focused probe fires the watchdog, and mutation-prove
+  that removing the production release makes all four verifier/harness
+  collision/unknown probes fail quickly instead of self-healing.
+- [x] 11.7 Replace handler adoption and ordinary settlement classification with
+  one side-effect-controlled outcome decoder. Map a failed published-symlink
+  read and unknown/mismatched protocol to 67 before later signals, preserve
+  exact zero, collision 73, TERM-before-publication, handler masking, mandatory
+  child settlement, A4 claim behavior, and zero residue in the expanded
+  64-case matrix.
+
+## 12. Phase-7 Child A6 — Atomic Decode Commit
+
+- [x] 12.1 Keep `decode_active` asserted across outcome classification, decoded
+  result latching, deferred-event latching, and only then flag clearing. Route
+  handler adoption and ordinary settlement through that one atomic shell state
+  boundary so a later handler cannot re-read publication before status 67 is
+  committed. This initial A6 ordering is superseded at the exact-zero tail by
+  12.4; decoded non-zero commit-before-clear remains intact.
+- [x] 12.2 Add deterministic verifier and harness public-surface regressions in
+  which the first published-outcome read fails to 67, TERM arrives in the
+  decode-to-commit window, and a forbidden second read could observe collision
+  `token:73`. Both MUST preserve 67 and leave no child, claim, transaction link,
+  marker, root, registered worktree, watchdog, fault probe, or signal helper.
+- [x] 12.3 Preserve exact zero, collision 73, unknown/read failure 67,
+  TERM-before-publication, handler masking, mandatory child settlement, A4
+  claim reconciliation, A5 watchdog behavior, replay-patch bytes, and the full
+  expanded 66-case matrix.
+- [x] 12.4 Close the exact-zero decode tail: latch a decoded non-zero result,
+  clear `decode_active`, and only then consume the deferred first event so a
+  signal before the clear is consumed and one after the clear latches directly.
+  Prove verifier/harness `token:0` TERM returns 143 plus verifier HUP→INT
+  first-event order with zero residue in the expanded 69-case matrix.
+- [x] 12.5 Keep the classified transaction outcome committed until child
+  settlement completes. Once committed, handlers MUST NOT re-adopt the
+  publication; a post-clear handler MUST commit an existing deferred first
+  event before its current event. Prove verifier/harness HUP→INT returns 129
+  and post-clear TERM returns 143 even when a forbidden second read would fail
+  or decode collision 73, with zero residue in the expanded 75-case matrix.
+- [x] 12.6 Once ordinary settlement witnesses outcome publication, carry that
+  required-publication fact into the shared decoder. A link that disappears
+  before classification MUST atomically commit protocol status 67 before later
+  TERM or a restored collision 73; handler adoption before publication retains
+  signal-first behavior. Prove disappearance and disappearance-plus-restore in
+  verifier and harness with settlement and zero residue in the 79-case matrix.
+- [x] 12.7 Represent deferred-to-first-status transfer with one handler-visible
+  authority from capture through latch. A handler entering after the source
+  slot clears MUST commit transferred HUP 129 before its later INT/TERM, without
+  discarding that later event. Prove negative-wait and exact-zero paths through
+  verifier and harness with settlement and zero residue in the 83-case matrix.
+- [x] 12.8 Preserve that transfer authority across a negative outcome probe
+  handoff. Establish deferred HUP 129 before clearing `decode_active`, then
+  prove verifier/harness collision 73 and unknown-protocol 67 publications plus
+  later INT cannot overtake it, with settlement and zero residue in the
+  87-case matrix.
+- [x] 12.9 Close the empty-source tail of that handoff. If HUP 129 arrives after
+  the first empty-source check but before `decode_active` clears, a post-clear
+  handler MUST promote it before outcome adoption. Prove verifier/harness
+  collision and unknown publication paths with later INT, settlement, and zero
+  residue in the 91-case matrix.
+- [x] 12.10 Restrict late-source promotion to negative probes. A positive probe
+  that already witnessed publication MUST decode/commit collision 73 or
+  disappearance 67 before deferred HUP and later INT. Prove verifier/harness
+  paths with settlement and zero residue in the 95-case matrix.
