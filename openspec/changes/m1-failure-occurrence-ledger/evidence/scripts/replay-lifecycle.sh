@@ -17,6 +17,12 @@ lifecycle_transaction_ready=
 lifecycle_transaction_release=
 lifecycle_transaction_outcome=
 lifecycle_create_pid=
+lifecycle_transaction_active=0
+lifecycle_transaction_adoption_active=0
+lifecycle_transaction_decode_active=0
+lifecycle_decoded_outcome_published=0
+lifecycle_decoded_outcome_status=
+lifecycle_deferred_signal_status=
 
 lifecycle_latch_status() {
   if [ -z "$lifecycle_first_status" ]; then
@@ -24,15 +30,83 @@ lifecycle_latch_status() {
   fi
 }
 
+lifecycle_decode_transaction_outcome() {
+  lifecycle_decoded_outcome_published=0
+  lifecycle_decoded_outcome_status=
+  lifecycle_deferred_signal_status=
+  lifecycle_transaction_decode_active=1
+
+  if [ -L "$lifecycle_transaction_outcome" ]; then
+    lifecycle_decoded_outcome_published=1
+    lifecycle_decoded_outcome_status=67
+    if lifecycle_decoded_outcome_value=$(readlink "$lifecycle_transaction_outcome"); then
+      case "$lifecycle_decoded_outcome_value" in
+        "$lifecycle_token":0) lifecycle_decoded_outcome_status=0 ;;
+        "$lifecycle_token":73) lifecycle_decoded_outcome_status=73 ;;
+        *) lifecycle_decoded_outcome_status=67 ;;
+      esac
+    fi
+  fi
+
+  lifecycle_transaction_decode_active=0
+}
+
+lifecycle_latch_decoded_outcome() {
+  if [ "$lifecycle_decoded_outcome_published" -eq 1 ] &&
+    [ "$lifecycle_decoded_outcome_status" -ne 0 ]; then
+    lifecycle_latch_transaction_result "$lifecycle_decoded_outcome_status"
+  fi
+}
+
+lifecycle_latch_deferred_signal() {
+  if [ -n "$lifecycle_deferred_signal_status" ]; then
+    lifecycle_latch_status "$lifecycle_deferred_signal_status"
+    lifecycle_mask_latched_signals
+  fi
+}
+
+lifecycle_adopt_published_transaction_outcome() {
+  if [ "$lifecycle_transaction_active" -ne 1 ] ||
+    [ "$lifecycle_transaction_adoption_active" -eq 1 ]; then
+    return
+  fi
+
+  # The decoder owns no latch side effects. Both handler adoption and ordinary
+  # settlement therefore classify publication, zero, collision, protocol
+  # mismatch, and read failure through this same boundary before either caller
+  # allows a later status into the write-once latch.
+  lifecycle_transaction_adoption_active=1
+  trap '' HUP INT TERM
+  lifecycle_decode_transaction_outcome
+  lifecycle_latch_decoded_outcome
+  lifecycle_latch_deferred_signal
+  lifecycle_transaction_adoption_active=0
+}
+
 lifecycle_signal_hup() {
+  if [ "$lifecycle_transaction_decode_active" -eq 1 ]; then
+    if [ -z "$lifecycle_deferred_signal_status" ]; then lifecycle_deferred_signal_status=129; fi
+    return
+  fi
+  lifecycle_adopt_published_transaction_outcome
   lifecycle_latch_status 129
 }
 
 lifecycle_signal_int() {
+  if [ "$lifecycle_transaction_decode_active" -eq 1 ]; then
+    if [ -z "$lifecycle_deferred_signal_status" ]; then lifecycle_deferred_signal_status=130; fi
+    return
+  fi
+  lifecycle_adopt_published_transaction_outcome
   lifecycle_latch_status 130
 }
 
 lifecycle_signal_term() {
+  if [ "$lifecycle_transaction_decode_active" -eq 1 ]; then
+    if [ -z "$lifecycle_deferred_signal_status" ]; then lifecycle_deferred_signal_status=143; fi
+    return
+  fi
+  lifecycle_adopt_published_transaction_outcome
   lifecycle_latch_status 143
 }
 
@@ -237,6 +311,41 @@ lifecycle_mask_latched_signals() {
   fi
 }
 
+lifecycle_latch_transaction_result() {
+  lifecycle_transaction_result=$1
+  if [ "$lifecycle_transaction_result" -ne 0 ]; then
+    lifecycle_latch_status "$lifecycle_transaction_result"
+    lifecycle_mask_latched_signals
+  fi
+}
+
+lifecycle_inject_published_outcome_signal() {
+  lifecycle_published_outcome_signal=${SHUD_REPLAY_TEST_PUBLISHED_OUTCOME_SIGNAL:-}
+  lifecycle_published_outcome_event=${SHUD_REPLAY_TEST_PUBLISHED_OUTCOME_EVENT:-}
+  if [ -n "$lifecycle_published_outcome_signal" ]; then
+    if [ -n "$lifecycle_published_outcome_event" ]; then
+      : >"$lifecycle_published_outcome_event"
+    fi
+    kill -s "$lifecycle_published_outcome_signal" "$$"
+  fi
+}
+
+lifecycle_inject_settlement_events() {
+  lifecycle_settlement_event=${SHUD_REPLAY_TEST_SETTLEMENT_EVENT:-}
+  lifecycle_settlement_signal=${SHUD_REPLAY_TEST_SETTLEMENT_SIGNAL:-}
+  lifecycle_settlement_release=${SHUD_REPLAY_TEST_SETTLEMENT_RELEASE:-}
+
+  if [ -n "$lifecycle_settlement_signal" ]; then
+    if [ -n "$lifecycle_settlement_event" ]; then
+      : >"$lifecycle_settlement_event"
+    fi
+    kill -s "$lifecycle_settlement_signal" "$$"
+  fi
+  if [ -n "$lifecycle_settlement_release" ]; then
+    : >"$lifecycle_settlement_release"
+  fi
+}
+
 lifecycle_link_matches_during_settlement() {
   lifecycle_settlement_match_path=$1
   lifecycle_settlement_match_token=$2
@@ -256,24 +365,42 @@ lifecycle_settle_creation_transaction() {
   lifecycle_settlement_status=$1
   lifecycle_release_published=$2
 
+  # A post-spawn transaction failure is already an externally observable
+  # lifecycle result. Latch it before child settlement or ownership probes so
+  # a later signal cannot replace the earlier result.
+  lifecycle_latch_transaction_result "$lifecycle_settlement_status"
+
   if [ "$lifecycle_release_published" -ne 1 ] &&
     kill -0 "$lifecycle_create_pid" >/dev/null 2>&1; then
     kill -KILL "$lifecycle_create_pid" >/dev/null 2>&1 || true
   fi
-  lifecycle_wait_for_creation_child
-  lifecycle_mask_latched_signals
 
-  lifecycle_outcome_value=
-  if [ -L "$lifecycle_transaction_outcome" ]; then
-    lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || {
-      lifecycle_outcome_value=
-      lifecycle_settlement_status=67
-    }
-    if [ -z "$lifecycle_outcome_value" ] && [ -n "$lifecycle_first_status" ]; then
-      trap '' HUP INT TERM
-      lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || lifecycle_outcome_value=
+  lifecycle_decoded_outcome_published=0
+  lifecycle_decoded_outcome_status=
+  lifecycle_deferred_signal_status=
+  if [ "$lifecycle_release_published" -eq 1 ]; then
+    lifecycle_inject_published_outcome_signal
+    lifecycle_decode_transaction_outcome
+  fi
+
+  lifecycle_transaction_result=$lifecycle_settlement_status
+  if [ "$lifecycle_transaction_result" -eq 0 ]; then
+    if [ "$lifecycle_release_published" -eq 1 ] &&
+      [ "$lifecycle_decoded_outcome_published" -eq 1 ]; then
+      lifecycle_transaction_result=$lifecycle_decoded_outcome_status
+    else
+      lifecycle_transaction_result=67
     fi
   fi
+  lifecycle_latch_transaction_result "$lifecycle_transaction_result"
+  lifecycle_latch_deferred_signal
+
+  # The published outcome is authoritative before child process completion.
+  # Once classified, later signals cannot replace a non-zero result, but the
+  # child is still released, reaped, and reconciled before status propagation.
+  lifecycle_inject_settlement_events
+  lifecycle_wait_for_creation_child
+  lifecycle_mask_latched_signals
 
   # Ownership is a physical fact independent of the command status. Record it
   # only after the child is reaped so EXIT cleanup cannot race later creation.
@@ -282,20 +409,15 @@ lifecycle_settle_creation_transaction() {
     lifecycle_root_owned=1
   fi
 
-  if [ "$lifecycle_settlement_status" -ne 0 ]; then
-    return "$lifecycle_settlement_status"
-  fi
-  case "$lifecycle_outcome_value" in
-    "$lifecycle_token":0) return 0 ;;
-    "$lifecycle_token":73) return 73 ;;
-    *) return 67 ;;
-  esac
+  lifecycle_transaction_active=0
+  return "$lifecycle_transaction_result"
 }
 
 lifecycle_run_creation_transaction() {
   lifecycle_external_ready=${SHUD_REPLAY_TEST_CREATE_BARRIER_READY:-}
   lifecycle_external_release=${SHUD_REPLAY_TEST_CREATE_BARRIER_RELEASE:-}
 
+  lifecycle_transaction_active=1
   (
     # This is the first child command. Once ready is published, the complete
     # mkdir + marker transaction ignores process-group HUP/INT/TERM.
@@ -329,6 +451,7 @@ lifecycle_run_creation_transaction() {
   lifecycle_release_published=0
   if ! lifecycle_wait_for_link "$lifecycle_transaction_ready" "$lifecycle_create_pid"; then
     lifecycle_settlement_status=67
+    lifecycle_latch_transaction_result "$lifecycle_settlement_status"
   else
     lifecycle_inject_acquisition_signals
     ln -s "$lifecycle_token" "$lifecycle_transaction_release" >/dev/null 2>&1 || true
@@ -336,15 +459,14 @@ lifecycle_run_creation_transaction() {
       lifecycle_release_published=1
     else
       lifecycle_settlement_status=67
+      lifecycle_latch_transaction_result "$lifecycle_settlement_status"
     fi
   fi
 
   if [ "$lifecycle_release_published" -eq 1 ] &&
     ! lifecycle_wait_for_link "$lifecycle_transaction_outcome" "$lifecycle_create_pid"; then
     lifecycle_settlement_status=67
-  fi
-  if [ "$lifecycle_release_published" -eq 1 ] && [ -L "$lifecycle_transaction_outcome" ]; then
-    lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || lifecycle_settlement_status=67
+    lifecycle_latch_transaction_result "$lifecycle_settlement_status"
   fi
   lifecycle_settle_creation_transaction "$lifecycle_settlement_status" "$lifecycle_release_published"
 }
