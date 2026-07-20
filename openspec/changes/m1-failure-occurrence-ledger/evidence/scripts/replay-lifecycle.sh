@@ -70,6 +70,24 @@ lifecycle_link_matches() {
   [ "$lifecycle_match_actual" = "$lifecycle_match_token" ]
 }
 
+lifecycle_reconcile_claim_before_spawn() {
+  # Keep the first read signal-capable so a signal already in flight is
+  # latched. Then mask handled lifecycle signals and make one authoritative
+  # exact-token read before any creation child can be spawned. A transiently
+  # interrupted first read can therefore never hide a claim we physically own.
+  lifecycle_link_matches "$lifecycle_claim" "$lifecycle_token" >/dev/null 2>&1 || true
+  trap '' HUP INT TERM
+  if lifecycle_link_matches "$lifecycle_claim" "$lifecycle_token"; then
+    lifecycle_claim_owned=1
+  fi
+
+  if [ -n "$lifecycle_first_status" ]; then
+    lifecycle_abort_if_latched
+  fi
+  lifecycle_install_signal_handlers
+  [ "$lifecycle_claim_owned" -eq 1 ]
+}
+
 lifecycle_begin() {
   lifecycle_requested_parent=$1
   lifecycle_name=$2
@@ -335,13 +353,10 @@ lifecycle_acquire_root() {
   ln -s "$lifecycle_token" "$lifecycle_claim" >/dev/null 2>&1 || true
 
   # The atomic symlink value, not an earlier absence check or intent flag, is
-  # the ownership fact. An interrupted ln is resolved by reading that token.
-  if lifecycle_link_matches "$lifecycle_claim" "$lifecycle_token"; then
-    lifecycle_claim_owned=1
-  else
-    if [ -n "$lifecycle_first_status" ]; then
-      lifecycle_abort_if_latched
-    fi
+  # the ownership fact. Reconcile it before child spawn so an interrupted first
+  # verification is retried under masked signals and cleanup can release only
+  # the exact claim this invocation physically owns.
+  if ! lifecycle_reconcile_claim_before_spawn; then
     echo "lifecycle root collision: $lifecycle_root" >&2
     lifecycle_fail 73
   fi

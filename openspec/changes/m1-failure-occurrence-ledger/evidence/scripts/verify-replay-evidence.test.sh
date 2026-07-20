@@ -22,6 +22,7 @@ aux_release=
 aux_signals_ready=
 transaction_fault_dir=
 transaction_pid_file=
+claim_fault_dir=
 passed=0
 harness_owner_token=${SHUD_REPLAY_TEST_OWNER_TOKEN:-harness.$$}
 # Reset background-job INT before the held child installs its own handlers.
@@ -95,6 +96,9 @@ cleanup_test_parent() {
   if [ -n "$aux_signals_ready" ]; then rm "$aux_signals_ready" >/dev/null 2>&1 || true; fi
   if [ -n "$transaction_fault_dir" ] && [ -d "$transaction_fault_dir" ]; then
     rm -rf "$transaction_fault_dir" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$claim_fault_dir" ] && [ -d "$claim_fault_dir" ]; then
+    rm -rf "$claim_fault_dir" >/dev/null 2>&1 || true
   fi
   lifecycle_cleanup_root_failure
   exit "$lifecycle_first_status"
@@ -628,11 +632,112 @@ EOF
   record_pass
 }
 
+cleanup_claim_fault_residue() {
+  cleanup_claim=$1
+  cleanup_token=$2
+  if lifecycle_link_matches "$cleanup_claim" "$cleanup_token"; then
+    rm "$cleanup_claim" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$claim_fault_dir" >/dev/null 2>&1 || true
+  claim_fault_dir=
+}
+
+run_claim_reconciliation_case() {
+  case_name=$1
+  child_kind=$2
+  root_name="case-$case_name"
+  child_token="claim-$case_name"
+  child_root="$lifecycle_root/$root_name"
+  child_claim="$lifecycle_root/.$root_name.claim"
+  child_marker="$child_root/.shud-replay-owner"
+  claim_fault_dir="$lifecycle_root/$case_name.fault-bin"
+  fault_event="$claim_fault_dir/fault-fired"
+  creation_pid_file="$claim_fault_dir/creation-pids"
+  mkdir -m 700 "$claim_fault_dir"
+
+  cat >"$claim_fault_dir/readlink" <<'EOF'
+#!/bin/sh
+if [ "$1" = "$SHUD_REPLAY_TEST_FAULT_CLAIM" ] &&
+  [ ! -e "$SHUD_REPLAY_TEST_FAULT_EVENT" ]; then
+  : >"$SHUD_REPLAY_TEST_FAULT_EVENT"
+  kill -s TERM "$PPID"
+  exit 1
+fi
+exec /usr/bin/readlink "$@"
+EOF
+  chmod 700 "$claim_fault_dir/readlink"
+
+  set +e
+  if [ "$child_kind" = verifier ]; then
+    PATH="$claim_fault_dir:$PATH" \
+      SHUD_REPLAY_TEST_FAULT_CLAIM="$child_claim" \
+      SHUD_REPLAY_TEST_FAULT_EVENT="$fault_event" \
+      SHUD_REPLAY_TEST_CREATION_PID_FILE="$creation_pid_file" \
+      SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+      SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+      "$verifier" >/dev/null 2>&1
+  else
+    PATH="$claim_fault_dir:$PATH" \
+      SHUD_REPLAY_TEST_FAULT_CLAIM="$child_claim" \
+      SHUD_REPLAY_TEST_FAULT_EVENT="$fault_event" \
+      SHUD_REPLAY_TEST_CREATION_PID_FILE="$creation_pid_file" \
+      SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+      SHUD_REPLAY_SELF_TEST_SCENARIO=matrix \
+      SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+      "$self_test" >/dev/null 2>&1
+  fi
+  actual=$?
+  set -e
+
+  claim_failed=0
+  if [ ! -e "$fault_event" ]; then
+    echo "$case_name did not inject the first claim-read TERM" >&2
+    claim_failed=1
+  fi
+  if [ "$actual" -ne 143 ]; then
+    echo "$case_name exited $actual, expected 143" >&2
+    claim_failed=1
+  fi
+  if [ -s "$creation_pid_file" ]; then
+    echo "$case_name spawned a creation child before claim reconciliation" >&2
+    claim_failed=1
+  fi
+  if find "$lifecycle_root" -maxdepth 1 -name ".$root_name.claim.transaction.*" -print -quit |
+    grep . >/dev/null; then
+    echo "$case_name retained transaction links" >&2
+    claim_failed=1
+  fi
+  if [ -e "$child_claim" ] || [ -L "$child_claim" ]; then
+    echo "$case_name retained its exact claim" >&2
+    claim_failed=1
+  fi
+  if [ -e "$child_marker" ] || [ -L "$child_marker" ]; then
+    echo "$case_name retained its owner marker" >&2
+    claim_failed=1
+  fi
+  if [ -e "$child_root" ] || [ -L "$child_root" ]; then
+    echo "$case_name retained its root" >&2
+    claim_failed=1
+  fi
+  if test_worktree_is_registered "$child_root/round-1" ||
+    test_worktree_is_registered "$child_root/round-2"; then
+    echo "$case_name retained a registered worktree" >&2
+    claim_failed=1
+  fi
+
+  cleanup_claim_fault_residue "$child_claim" "$child_token"
+  if [ "$claim_failed" -ne 0 ]; then return 1; fi
+  record_pass
+}
+
 case "$self_test_scenario" in
   matrix|harness_startup_term|harness_double_hup_int|harness_hold_after_root|\
     collision_verifier_child_42|collision_harness_child_42|\
     assertion_signal_term|assertion_double_hup_int|\
-    transaction_outcome_read_term|transaction_release_publication_failure)
+    transaction_outcome_read_term|transaction_release_publication_failure|\
+    claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     ;;
   *)
     echo "unknown replay self-test scenario: $self_test_scenario" >&2
@@ -690,14 +795,21 @@ case "$self_test_scenario" in
   transaction_release_publication_failure)
     run_transaction_settlement_case release_publication_failure release_publication_failure 67
     ;;
+  claim_reconciliation_verifier_term)
+    run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
+    ;;
+  claim_reconciliation_harness_term)
+    run_claim_reconciliation_case claim_reconciliation_harness_term harness
+    ;;
 esac
 
 case "$self_test_scenario" in
-  transaction_outcome_read_term|transaction_release_publication_failure)
+  transaction_outcome_read_term|transaction_release_publication_failure|\
+  claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     lifecycle_begin_successful_finalization
     lifecycle_release_root_strict 84
     trap - EXIT HUP INT TERM
-    echo "replay transaction settlement probe: 1/1 passed"
+    echo "replay lifecycle fault probe: 1/1 passed"
     exit 0
     ;;
 esac
@@ -764,11 +876,15 @@ run_harness_case assertion_double_hup_int assertion_double_hup_int 129
 run_transaction_settlement_case outcome_read_term outcome_read_term 143
 run_transaction_settlement_case release_publication_failure release_publication_failure 67
 
-if [ "$passed" -ne 48 ]; then
-  echo "replay scenario accounting mismatch: $passed/48" >&2
+# A first claim-read signal is reconciled before any creation child is spawned.
+run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
+run_claim_reconciliation_case claim_reconciliation_harness_term harness
+
+if [ "$passed" -ne 50 ]; then
+  echo "replay scenario accounting mismatch: $passed/50" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 48/48 named scenarios passed (9 two-party races, 18 participant outcomes)"
+echo "replay evidence lifecycle: 50/50 named scenarios passed (9 two-party races, 18 participant outcomes)"

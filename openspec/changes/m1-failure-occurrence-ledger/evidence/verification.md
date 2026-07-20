@@ -523,3 +523,58 @@ Replay artifact SHA-256 values:
   `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`;
 - Round-2 `red-before-backend-undefined.patch`:
   `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+## Child A4 pre-spawn claim reconciliation
+
+Verified on `2026-07-19 21:51:13 EDT` against split base
+`8f7187d0eb4dcdd0f4fd49c2e5f7e344bbac2f29`.
+
+The first exact-token verification after atomic claim creation is deliberately
+signal-capable. The shared lifecycle boundary then masks HUP/INT/TERM and makes
+one authoritative exact-token retry before spawning a creation child. It sets
+`lifecycle_claim_owned` only when the current physical claim still matches the
+invocation token, never removes a mismatched claim, restores signal handlers
+only for a clean continuation, and propagates any already-latched status after
+the exact owned claim is known to EXIT cleanup.
+
+The initial dynamic verifier and harness probes each returned 143 and retained
+their exact claim (`verifier-red-token` and `harness-red-token`), confirming the
+R5-FULL-01 window. The batched source-only red proof then ran both new public-
+surface cases against the pre-change lifecycle source. Each test exited 1 with
+`retained its exact claim`; the source stash was popped immediately and no
+`red-proof` stash remains. With the shared reconciliation boundary restored,
+both dedicated probes report `1/1 passed`: their child process returns 143 and
+leaves no claim, transaction link, root, owner marker, registered worktree, or
+creation-child PID.
+
+The canonical replay verifier exits 0, and the expanded lifecycle matrix passes
+50/50 named scenarios while retaining nine two-party races and 18 explicit
+participant outcomes. A4 adds only the verifier/harness pre-spawn TERM cases;
+post-spawn transaction statuses 67/73 and their chronology are unchanged.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `921953b7f1646f9d6dfe807fa6fa683fd9fe6ff9d90ae7e03effc10a80fc58a5`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `07e8fe637158d5073b68d50f4ccd8860b43850262625dd6a1ce8229c71dc4e13`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+Final A4 verification:
+
+- `/bin/sh -n` and `shellcheck -s sh` pass for all three replay scripts.
+- The canonical verifier exits 0; the lifecycle matrix reports 50/50 passed.
+- `openspec validate m1-failure-occurrence-ledger --strict --no-interactive`
+  reports the change valid, and incremental `git diff --check` exits 0.
+- Range-wide `git diff --check` from issue base `5a450a9` exits 2 with exactly
+  the documented 13 replay-artifact rows and no other finding.
+- The Zero worktree is intentionally uninitialized in this split worktree;
+  its index gitlink remains `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`
+  with no submodule diff.
+- No `red-proof` stash, replay temporary root, replay worktree registration, or
+  out-of-scope changed path remains.

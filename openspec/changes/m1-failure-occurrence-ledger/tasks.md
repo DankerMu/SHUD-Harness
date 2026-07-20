@@ -194,3 +194,19 @@
   and 18 participant outcomes. Converge every post-spawn release, outcome,
   wait/reap, and ownership-reconciliation path before propagating its exact
   write-once status.
+
+## 10. Round-3 Split Child A4 — Pre-spawn Claim Reconciliation
+
+- [x] 10.1 Reconcile the fixed claim before spawning the creation child: retain
+  a signal-capable first read, mask handled lifecycle signals, retry the exact
+  token read, and record physical ownership only on an exact match. Never remove
+  a mismatched claim; propagate any pre-existing latch only after
+  reconciliation.
+- [x] 10.2 Add deterministic verifier and harness public-surface regressions in
+  which TERM interrupts the first exact-token verification. Both MUST return
+  143 with no claim, transaction link, root, owner marker, registered worktree,
+  or spawned creation child.
+- [x] 10.3 Preserve the historical replay-patch bytes and run syntax,
+  shellcheck, canonical replay, the expanded 50-case lifecycle matrix, strict
+  OpenSpec validation, incremental/range hygiene, stash, Zero, submodule, and
+  replay-residue checks.
