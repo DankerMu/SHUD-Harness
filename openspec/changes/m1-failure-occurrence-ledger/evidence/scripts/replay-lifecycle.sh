@@ -81,6 +81,13 @@ lifecycle_inject_negative_probe_handoff_hook() {
   fi
 }
 
+lifecycle_inject_negative_probe_empty_source_tail_hook() {
+  lifecycle_negative_probe_empty_source_tail_hook=${SHUD_REPLAY_TEST_NEGATIVE_PROBE_EMPTY_SOURCE_TAIL_HOOK:-}
+  if [ -n "$lifecycle_negative_probe_empty_source_tail_hook" ]; then
+    "$lifecycle_negative_probe_empty_source_tail_hook"
+  fi
+}
+
 lifecycle_inject_deferred_transfer_signal() {
   lifecycle_transfer_hook_status=$1
   lifecycle_transfer_release=${SHUD_REPLAY_TEST_TRANSFER_RELEASE:-}
@@ -119,6 +126,18 @@ lifecycle_latch_status() {
 }
 
 lifecycle_latch_transfer_before_current_signal() {
+  if [ "$lifecycle_transaction_active" -eq 1 ] &&
+    [ "$lifecycle_transaction_decode_active" -eq 0 ] &&
+    [ "$lifecycle_outcome_publication_witnessed" -eq 0 ] &&
+    [ "$lifecycle_decoded_outcome_published" -eq 0 ] &&
+    [ -z "$lifecycle_deferred_transfer_status" ] &&
+    [ -n "$lifecycle_deferred_signal_status" ]; then
+    # Only a negative probe whose decode authority has cleared can leave this
+    # late source for a handler to promote before adoption. A positive probe
+    # has already witnessed publication, while an active decoder still owns
+    # its deferred source; both continue through the shared outcome-first path.
+    lifecycle_establish_deferred_transfer
+  fi
   if [ -z "$lifecycle_deferred_transfer_status" ]; then
     return 1
   fi
@@ -484,8 +503,13 @@ lifecycle_wait_for_transaction_outcome() {
       return 0
     fi
     lifecycle_establish_deferred_transfer
+    lifecycle_inject_negative_probe_empty_source_tail_hook
     lifecycle_transaction_decode_active=0
     lifecycle_inject_negative_probe_handoff_hook
+    # Decode authority is now clear, so no handler can add a new deferred
+    # source after this final promotion. A handler entering before it promotes
+    # the source itself while decoded-outcome state still proves no adoption.
+    lifecycle_establish_deferred_transfer
     lifecycle_finish_deferred_transfer
     if ! kill -0 "$lifecycle_create_pid" >/dev/null 2>&1; then
       return 1
