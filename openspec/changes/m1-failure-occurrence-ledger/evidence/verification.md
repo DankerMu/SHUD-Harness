@@ -426,20 +426,35 @@ bindings after the Round-3 breadth split.
 The tracked definitive audit is
 `evidence/phase-6.2-definitive-audit.md`. Replay-artifact whitespace accounting
 and fresh-clone commands are in `evidence/replay-whitespace-exceptions.md`;
-their executable authority and 22-scenario lifecycle matrix are under
-`evidence/scripts/verify-replay-evidence.sh` and
+their shared lifecycle authority, canonical verifier, and 43-scenario matrix
+are under `evidence/scripts/replay-lifecycle.sh`,
+`evidence/scripts/verify-replay-evidence.sh`, and
 `evidence/scripts/verify-replay-evidence.test.sh`.
 No canonical claim depends on `.workplans`.
 
-The replay transaction pre-binds an exact per-process root before creation,
-rejects an existing target without changing it, and installs signal/EXIT
-authority before temporary state. Cleanup receives the first status as an
-already-expanded trap argument and masks HUP/INT/TERM as its first command.
-The 22-case matrix covers normal replay, immediate post-create failure and
-signals, add/patch/partial failures, strict dirty/locked/missing cleanup,
-cleanup-entry second signals, verifier and harness collision preservation, and
-the self-test harness's own startup and cleanup-entry signal paths. All cases
-leave zero registered-worktree and owned-filesystem residue.
+The replay transaction atomically establishes a fixed claim symlink containing
+a per-invocation token. A signal-immune child performs `mkdir` and publishes the
+same root token only after its own atomic creation succeeds. The parent never
+infers ownership from root existence: it requires child success plus the exact
+claim/root token pair. Signals latch while the parent waits and exit only after
+the transaction outcome is knowable. EXIT cleanup masks EXIT/HUP/INT/TERM as
+its first command; command failures and signals share one write-once first-
+status latch.
+
+Verified on `2026-07-19 19:56:07 EDT`, the matrix passed 43/43 named scenarios.
+Four are two-party races with eight explicit participant outcomes. Coverage
+includes the prior 18 baseline cases, seven exact-status cleanup-diagnostic
+variants, static verifier/harness collisions, cooperative same-name verifier/
+harness races, non-cooperating actor barriers for both scripts, six isolated-
+process-group acquisition signal orders, both collision helpers forced to child
+status 42, and marker-created assertion-window single/double signals. In each
+non-cooperating barrier the child pauses before `mkdir`, a foreign actor creates
+the exact root/marker without honoring the claim, and the child returns 73 with
+foreign bytes unchanged, no owner marker, and no retained claim. Controlled
+add/patch/dirty/locked/missing statuses are 74/75/76/78/79/80/81 and survive
+injected cleanup status 77. Signal contracts remain 129/130/143; partial/root
+contracts remain 38/39/41; collision remains 73. All cases leave zero exact
+registered-worktree, claim, token, marker, and owned-filesystem residue.
 
 Final A2 verification:
 

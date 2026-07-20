@@ -3,55 +3,381 @@
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
-verifier="$repo_root/openspec/changes/m1-failure-occurrence-ledger/evidence/scripts/verify-replay-evidence.sh"
-self_test="$repo_root/openspec/changes/m1-failure-occurrence-ledger/evidence/scripts/verify-replay-evidence.test.sh"
+script_dir=$repo_root/openspec/changes/m1-failure-occurrence-ledger/evidence/scripts
+verifier=$script_dir/verify-replay-evidence.sh
+self_test=$script_dir/verify-replay-evidence.test.sh
+# shellcheck disable=SC1091,SC2154
+. "$script_dir/replay-lifecycle.sh"
+lifecycle_first_status=${lifecycle_first_status-}
+lifecycle_root=${lifecycle_root-}
+
 test_root_parent=${SHUD_REPLAY_TEST_ROOT_PARENT:-${TMPDIR:-/tmp}}
 test_root_name=${SHUD_REPLAY_SELF_TEST_ROOT_NAME:-shud-ledger-replay-tests.$$}
 self_test_scenario=${SHUD_REPLAY_SELF_TEST_SCENARIO:-matrix}
-test_parent=
-test_parent_owned=0
-test_cleanup_entry_signal=
+fixture_root=
+fixture_marker=
+fixture_marker_checksum=
+aux_ready=
+aux_release=
+passed=0
+harness_owner_token=${SHUD_REPLAY_TEST_OWNER_TOKEN:-harness.$$}
+
+test_worktree_is_registered() {
+  git -C "$repo_root" worktree list --porcelain |
+    grep -F -x "worktree $1" >/dev/null
+}
+
+cleanup_exact_child_root() {
+  child_root=$1
+  child_claim=$2
+  expected_child_token=$3
+  if [ ! -L "$child_claim" ]; then
+    return
+  fi
+  child_token=$(readlink "$child_claim") || return
+  if [ "$child_token" != "$expected_child_token" ]; then
+    return
+  fi
+  if [ ! -L "$child_root/.shud-replay-owner" ] ||
+    [ "$(readlink "$child_root/.shud-replay-owner")" != "$child_token" ]; then
+    return
+  fi
+  child_round_1=$child_root/round-1
+  child_round_2=$child_root/round-2
+  if test_worktree_is_registered "$child_round_1"; then
+    git -C "$repo_root" worktree unlock "$child_round_1" >/dev/null 2>&1 || true
+    git -C "$repo_root" worktree remove --force "$child_round_1" >/dev/null 2>&1 || true
+  fi
+  if test_worktree_is_registered "$child_round_2"; then
+    git -C "$repo_root" worktree unlock "$child_round_2" >/dev/null 2>&1 || true
+    git -C "$repo_root" worktree remove --force "$child_round_2" >/dev/null 2>&1 || true
+  fi
+  if [ -L "$child_root/.shud-replay-owner" ]; then
+    rm "$child_root/.shud-replay-owner" >/dev/null 2>&1 || true
+  fi
+  if rmdir "$child_root" >/dev/null 2>&1 && [ -L "$child_claim" ]; then
+    rm "$child_claim" >/dev/null 2>&1 || true
+  elif [ -d "$child_root" ] && [ ! -e "$child_root/.shud-replay-owner" ]; then
+    ln -s "$child_token" "$child_root/.shud-replay-owner" >/dev/null 2>&1 || true
+  fi
+}
+
+cleanup_fixture() {
+  if [ -n "$fixture_marker" ] && [ -f "$fixture_marker" ] &&
+    [ "$(cksum <"$fixture_marker")" = "$fixture_marker_checksum" ]; then
+    rm "$fixture_marker" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$fixture_root" ]; then
+    rmdir "$fixture_root" >/dev/null 2>&1 || true
+  fi
+  fixture_marker=
+  fixture_marker_checksum=
+  fixture_root=
+}
 
 cleanup_test_parent() {
-  # The status argument was expanded by the EXIT trap before this function was
-  # entered. Masking is deliberately the first cleanup command.
-  trap '' EXIT HUP INT TERM
-  test_status=$1
-  if [ -n "$test_cleanup_entry_signal" ]; then
-    kill -s "$test_cleanup_entry_signal" "$$"
-  fi
-  if [ "$test_parent_owned" -eq 1 ]; then
-    git -C "$repo_root" worktree list --porcelain |
-      while IFS= read -r line; do
-        case "$line" in
-          "worktree $test_parent/"*)
-            test_worktree=${line#worktree }
-            git -C "$repo_root" worktree unlock "$test_worktree" >/dev/null 2>&1 || true
-            git -C "$repo_root" worktree remove --force "$test_worktree" >/dev/null 2>&1 || true
-            ;;
-        esac
-      done
-    find "$test_parent" -depth -type d -empty -delete >/dev/null 2>&1 || true
-    rmdir "$test_parent" >/dev/null 2>&1 || true
-  fi
-  exit "$test_status"
+  # First cleanup command: stop EXIT recursion and mask every handled signal.
+  lifecycle_mask_all_handlers
+  lifecycle_latch_status "$1"
+  lifecycle_inject_cleanup_diagnostic
+  cleanup_fixture
+  if [ -n "$aux_ready" ]; then rm "$aux_ready" >/dev/null 2>&1 || true; fi
+  if [ -n "$aux_release" ]; then rm "$aux_release" >/dev/null 2>&1 || true; fi
+  lifecycle_cleanup_root_failure
+  exit "$lifecycle_first_status"
 }
 
-exit_test_for_signal() {
-  # The literal signal status is already an argument. Mask before any other
-  # command so later signals cannot replace it.
-  trap '' HUP INT TERM
-  exit "$1"
+assert_child_absent() {
+  assertion_name=$1
+  assertion_root_name=$2
+  assertion_root="$lifecycle_root/$assertion_root_name"
+  assertion_claim="$lifecycle_root/.$assertion_root_name.claim"
+  if test_worktree_is_registered "$assertion_root/round-1" ||
+    test_worktree_is_registered "$assertion_root/round-2" ||
+    [ -e "$assertion_root" ] || [ -L "$assertion_root" ] ||
+    [ -e "$assertion_claim" ] || [ -L "$assertion_claim" ]; then
+    echo "replay residue after $assertion_name" >&2
+    return 1
+  fi
 }
 
-case "$test_root_name" in
-  ''|.|..|*/*)
-    echo "invalid replay self-test root name: $test_root_name" >&2
-    exit 64
-    ;;
-esac
+record_pass() {
+  passed=$((passed + 1))
+}
+
+run_verifier_case() {
+  case_name=$1
+  scenario=$2
+  expected=$3
+  cleanup_diagnostic=${4:-}
+  root_name="case-$case_name"
+  set +e
+  SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_TEST_SCENARIO="$scenario" \
+    SHUD_REPLAY_TEST_CLEANUP_DIAGNOSTIC="$cleanup_diagnostic" \
+    "$verifier" >/dev/null 2>&1
+  actual=$?
+  set -e
+  if [ "$actual" -ne "$expected" ]; then
+    echo "$case_name exited $actual, expected $expected" >&2
+    return 1
+  fi
+  assert_child_absent "$case_name" "$root_name"
+  record_pass
+}
+
+run_harness_case() {
+  case_name=$1
+  scenario=$2
+  expected=$3
+  root_name="case-$case_name"
+  set +e
+  SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_SCENARIO="$scenario" \
+    "$self_test" >/dev/null 2>&1
+  actual=$?
+  set -e
+  if [ "$actual" -ne "$expected" ]; then
+    echo "$case_name exited $actual, expected $expected" >&2
+    return 1
+  fi
+  assert_child_absent "$case_name" "$root_name"
+  record_pass
+}
+
+create_collision_fixture() {
+  fixture_name=$1
+  fixture_kind=${2:-marker}
+  fixture_candidate_root="$lifecycle_root/$fixture_name"
+  fixture_candidate_marker="$fixture_candidate_root/foreign-marker"
+  mkdir -m 700 "$fixture_candidate_root"
+  fixture_root=$fixture_candidate_root
+  if [ "$fixture_kind" = marker ]; then
+    printf '%s\n' foreign >"$fixture_candidate_marker"
+    fixture_marker=$fixture_candidate_marker
+    fixture_marker_checksum=$(cksum <"$fixture_marker")
+  fi
+}
+
+assert_fixture_unchanged() {
+  if [ ! -d "$fixture_root" ]; then
+    echo "$1 modified the foreign collision fixture" >&2
+    return 1
+  fi
+  if [ -n "$fixture_marker" ]; then
+    if [ ! -f "$fixture_marker" ] ||
+      [ "$(cksum <"$fixture_marker")" != "$fixture_marker_checksum" ]; then
+      echo "$1 modified the foreign collision fixture" >&2
+      return 1
+    fi
+  elif find "$fixture_root" -mindepth 1 -print -quit | grep . >/dev/null; then
+    echo "$1 modified the foreign empty target" >&2
+    return 1
+  fi
+}
+
+run_collision_case() {
+  case_name=$1
+  child_kind=$2
+  forced_status=${3:-}
+  fixture_kind=${4:-marker}
+  fixture_name="fixture-$case_name"
+  create_collision_fixture "$fixture_name" "$fixture_kind"
+  set +e
+  if [ -n "$forced_status" ]; then
+    actual=$forced_status
+  elif [ "$child_kind" = verifier ]; then
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_TEST_ROOT_NAME="$fixture_name" \
+      "$verifier" >/dev/null 2>&1
+    actual=$?
+  else
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_SELF_TEST_ROOT_NAME="$fixture_name" \
+      SHUD_REPLAY_SELF_TEST_SCENARIO=matrix \
+      "$self_test" >/dev/null 2>&1
+    actual=$?
+  fi
+  set -e
+  if [ -n "$forced_status" ]; then
+    lifecycle_latch_status "$actual"
+    lifecycle_abort_if_latched
+  fi
+  if [ "$actual" -ne 73 ]; then
+    echo "$case_name exited $actual, expected 73" >&2
+    return 1
+  fi
+  assert_fixture_unchanged "$case_name"
+  cleanup_fixture
+  assert_child_absent "$case_name" "$fixture_name"
+  record_pass
+}
+
+wait_for_ready() {
+  wait_attempt=0
+  while [ ! -e "$1" ] && [ ! -L "$1" ]; do
+    wait_attempt=$((wait_attempt + 1))
+    if [ "$wait_attempt" -gt 5 ]; then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+run_foreign_actor_race_case() {
+  case_name=$1
+  child_kind=$2
+  root_name="case-$case_name"
+  child_token="foreign-race-$case_name"
+  aux_ready="$lifecycle_root/$case_name.ready"
+  aux_release="$lifecycle_root/$case_name.release"
+
+  if [ "$child_kind" = verifier ]; then
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+      SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+      SHUD_REPLAY_TEST_CREATE_BARRIER_READY="$aux_ready" \
+      SHUD_REPLAY_TEST_CREATE_BARRIER_RELEASE="$aux_release" \
+      "$verifier" >/dev/null 2>&1 &
+  else
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+      SHUD_REPLAY_SELF_TEST_SCENARIO=matrix \
+      SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+      SHUD_REPLAY_TEST_CREATE_BARRIER_READY="$aux_ready" \
+      SHUD_REPLAY_TEST_CREATE_BARRIER_RELEASE="$aux_release" \
+      "$self_test" >/dev/null 2>&1 &
+  fi
+  child_pid=$!
+
+  if ! wait_for_ready "$aux_ready"; then
+    : >"$aux_release"
+    wait "$child_pid" || true
+    echo "$case_name creation child did not reach the barrier" >&2
+    return 1
+  fi
+
+  create_collision_fixture "$root_name" marker
+  : >"$aux_release"
+  set +e
+  wait "$child_pid"
+  child_status=$?
+  set -e
+
+  rm "$aux_ready" "$aux_release"
+  aux_ready=
+  aux_release=
+  if [ "$child_status" -ne 73 ]; then
+    echo "$case_name exited $child_status, expected 73" >&2
+    return 1
+  fi
+  assert_fixture_unchanged "$case_name"
+  race_claim="$lifecycle_root/.$root_name.claim"
+  if [ -e "$race_claim" ] || [ -L "$race_claim" ]; then
+    echo "$case_name retained its exact claim" >&2
+    return 1
+  fi
+  cleanup_fixture
+  assert_child_absent "$case_name" "$root_name"
+  record_pass
+}
+
+run_concurrent_case() {
+  case_name=$1
+  child_kind=$2
+  root_name="case-$case_name"
+  winner_token="winner-$case_name"
+  aux_ready="$lifecycle_root/$case_name.ready"
+  aux_release="$lifecycle_root/$case_name.release"
+
+  if [ "$child_kind" = verifier ]; then
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+      SHUD_REPLAY_TEST_SCENARIO=hold_after_root \
+      SHUD_REPLAY_TEST_OWNER_TOKEN="$winner_token" \
+      SHUD_REPLAY_TEST_HOLD_READY="$aux_ready" \
+      SHUD_REPLAY_TEST_HOLD_RELEASE="$aux_release" \
+      "$verifier" >/dev/null 2>&1 &
+  else
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+      SHUD_REPLAY_SELF_TEST_SCENARIO=harness_hold_after_root \
+      SHUD_REPLAY_TEST_OWNER_TOKEN="$winner_token" \
+      SHUD_REPLAY_TEST_HOLD_READY="$aux_ready" \
+      SHUD_REPLAY_TEST_HOLD_RELEASE="$aux_release" \
+      "$self_test" >/dev/null 2>&1 &
+  fi
+  winner_pid=$!
+
+  if ! wait_for_ready "$aux_ready"; then
+    : >"$aux_release"
+    wait "$winner_pid" || true
+    echo "$case_name winner did not acquire its root" >&2
+    return 1
+  fi
+
+  set +e
+  if [ "$child_kind" = verifier ]; then
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+      "$verifier" >/dev/null 2>&1
+  else
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+      SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+      SHUD_REPLAY_SELF_TEST_SCENARIO=matrix \
+      "$self_test" >/dev/null 2>&1
+  fi
+  loser_status=$?
+  set -e
+  : >"$aux_release"
+  set +e
+  wait "$winner_pid"
+  winner_status=$?
+  set -e
+  rm "$aux_ready" "$aux_release"
+  aux_ready=
+  aux_release=
+
+  if [ "$winner_status" -ne 0 ] || [ "$loser_status" -ne 73 ]; then
+    echo "$case_name statuses winner=$winner_status loser=$loser_status, expected 0/73" >&2
+    cleanup_exact_child_root "$lifecycle_root/$root_name" "$lifecycle_root/.$root_name.claim" "$winner_token"
+    return 1
+  fi
+  assert_child_absent "$case_name" "$root_name"
+  record_pass
+}
+
+run_acquisition_signal_case() {
+  case_name=$1
+  first_signal=$2
+  second_signal=$3
+  expected=$4
+  root_name="case-$case_name"
+  set +e
+  /usr/bin/perl -MPOSIX=setsid -e 'setsid() >= 0 or die "setsid: $!"; exec @ARGV or die "exec: $!"' \
+    /usr/bin/env \
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_TEST_SCENARIO=normal \
+    SHUD_REPLAY_TEST_ACQUIRE_SIGNAL_FIRST="$first_signal" \
+    SHUD_REPLAY_TEST_ACQUIRE_SIGNAL_SECOND="$second_signal" \
+    "$verifier" >/dev/null 2>&1
+  actual=$?
+  set -e
+  if [ "$actual" -ne "$expected" ]; then
+    echo "$case_name exited $actual, expected $expected" >&2
+    return 1
+  fi
+  assert_child_absent "$case_name" "$root_name"
+  record_pass
+}
+
 case "$self_test_scenario" in
-  matrix|harness_startup_term|harness_double_hup_int)
+  matrix|harness_startup_term|harness_double_hup_int|harness_hold_after_root|\
+    collision_verifier_child_42|collision_harness_child_42|\
+    assertion_signal_term|assertion_double_hup_int)
     ;;
   *)
     echo "unknown replay self-test scenario: $self_test_scenario" >&2
@@ -59,164 +385,107 @@ case "$self_test_scenario" in
     ;;
 esac
 
-test_parent="${test_root_parent%/}/$test_root_name"
-
-# Bind the exact harness root and install authority before creating it.
+lifecycle_install_signal_handlers
 trap 'cleanup_test_parent "$?"' EXIT
-trap 'exit_test_for_signal 129' HUP
-trap 'exit_test_for_signal 130' INT
-trap 'exit_test_for_signal 143' TERM
-
-if [ ! -d "$test_root_parent" ]; then
-  echo "replay self-test parent is not a directory: $test_root_parent" >&2
-  exit 66
-fi
-if [ -e "$test_parent" ] || [ -L "$test_parent" ]; then
-  echo "replay self-test root collision: $test_parent" >&2
-  exit 73
-fi
-
-test_parent_owned=1
-mkdir -m 700 "$test_parent"
+lifecycle_begin "$test_root_parent" "$test_root_name" "$harness_owner_token"
+lifecycle_acquire_root
 
 case "$self_test_scenario" in
   harness_startup_term)
     kill -s TERM "$$"
+    lifecycle_abort_if_latched
     ;;
   harness_double_hup_int)
-    test_cleanup_entry_signal=INT
     kill -s HUP "$$"
+    kill -s INT "$$"
+    lifecycle_abort_if_latched
+    ;;
+  harness_hold_after_root)
+    hold_ready=${SHUD_REPLAY_TEST_HOLD_READY:-}
+    hold_release=${SHUD_REPLAY_TEST_HOLD_RELEASE:-}
+    if [ -z "$hold_ready" ] || [ -z "$hold_release" ]; then lifecycle_fail 64; fi
+    : >"$hold_ready"
+    while [ ! -e "$hold_release" ]; do :; done
+    lifecycle_release_root_strict 84
+    trap - EXIT HUP INT TERM
+    exit 0
+    ;;
+  collision_verifier_child_42)
+    run_collision_case forced_verifier_child_42 verifier 42
+    ;;
+  collision_harness_child_42)
+    run_collision_case forced_harness_child_42 harness 42
+    ;;
+  assertion_signal_term)
+    create_collision_fixture assertion-signal-term
+    kill -s TERM "$$"
+    lifecycle_abort_if_latched
+    ;;
+  assertion_double_hup_int)
+    create_collision_fixture assertion-double-hup-int
+    kill -s HUP "$$"
+    kill -s INT "$$"
+    lifecycle_abort_if_latched
     ;;
 esac
 
-assert_no_residue() {
-  if git -C "$repo_root" worktree list --porcelain | grep -F "worktree $test_parent/" >/dev/null; then
-    echo "registered replay worktree residue after $1" >&2
-    return 1
-  fi
-  if find "$test_parent" -mindepth 1 -print -quit | grep . >/dev/null; then
-    echo "filesystem replay residue after $1" >&2
-    return 1
-  fi
-}
+# 18 baseline verifier scenarios.
+run_verifier_case normal normal 0
+run_verifier_case root_failure root_failure_after_create 41
+run_verifier_case add_failure_round_1 add_failure_round_1 74
+run_verifier_case add_failure_round_2 add_failure_round_2 75
+run_verifier_case patch_failure_round_1 patch_failure_round_1 76
+run_verifier_case patch_failure_round_2 patch_failure_round_2 78
+run_verifier_case partial_after_round_1 partial_after_round_1 38
+run_verifier_case partial_after_round_2 partial_after_round_2 39
+run_verifier_case dirty_cleanup dirty_cleanup 79
+run_verifier_case locked_cleanup locked_cleanup 80
+run_verifier_case missing_cleanup missing_cleanup 81
+run_verifier_case signal_after_root_hup signal_after_root_hup 129
+run_verifier_case signal_after_root_int signal_after_root_int 130
+run_verifier_case signal_after_root_term signal_after_root_term 143
+run_verifier_case double_hup_int double_hup_int 129
+run_verifier_case double_int_term double_int_term 130
+run_verifier_case double_term_hup double_term_hup 143
+run_verifier_case failure_cleanup_term failure_cleanup_term 37
 
-run_verifier_case() {
-  scenario=$1
-  expected=$2
-  set +e
-  SHUD_REPLAY_TEST_ROOT_PARENT="$test_parent" \
-    SHUD_REPLAY_TEST_SCENARIO="$scenario" \
-    "$verifier" >/dev/null 2>&1
-  actual=$?
-  set -e
-  case "$expected" in
-    nonzero)
-      if [ "$actual" -eq 0 ]; then
-        echo "$scenario unexpectedly succeeded" >&2
-        return 1
-      fi
-      ;;
-    *)
-      if [ "$actual" -ne "$expected" ]; then
-        echo "$scenario exited $actual, expected $expected" >&2
-        return 1
-      fi
-      ;;
-  esac
-  assert_no_residue "$scenario"
-}
+# Seven exact-status cleanup-diagnostic variants.
+run_verifier_case add_failure_round_1_cleanup_77 add_failure_round_1 74 77
+run_verifier_case add_failure_round_2_cleanup_77 add_failure_round_2 75 77
+run_verifier_case patch_failure_round_1_cleanup_77 patch_failure_round_1 76 77
+run_verifier_case patch_failure_round_2_cleanup_77 patch_failure_round_2 78 77
+run_verifier_case dirty_cleanup_77 dirty_cleanup 79 77
+run_verifier_case locked_cleanup_77 locked_cleanup 80 77
+run_verifier_case missing_cleanup_77 missing_cleanup 81 77
 
-run_harness_case() {
-  scenario=$1
-  expected=$2
-  root_name="harness-$scenario"
-  set +e
-  SHUD_REPLAY_TEST_ROOT_PARENT="$test_parent" \
-    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
-    SHUD_REPLAY_SELF_TEST_SCENARIO="$scenario" \
-    "$self_test" >/dev/null 2>&1
-  actual=$?
-  set -e
-  if [ "$actual" -ne "$expected" ]; then
-    echo "$scenario exited $actual, expected $expected" >&2
-    return 1
-  fi
-  assert_no_residue "$scenario"
-}
+# Static foreign targets, harness signal paths, and atomic same-name races.
+run_collision_case verifier_static_collision verifier '' empty
+run_collision_case harness_static_collision harness '' marker
+run_harness_case harness_startup_term harness_startup_term 143
+run_harness_case harness_double_hup_int harness_double_hup_int 129
+run_concurrent_case verifier_same_name verifier
+run_concurrent_case harness_same_name harness
+run_foreign_actor_race_case verifier_foreign_actor_race verifier
+run_foreign_actor_race_case harness_foreign_actor_race harness
 
-run_collision_case() {
-  collision_root="$test_parent/replay-collision"
-  mkdir -m 700 "$collision_root"
-  printf '%s\n' foreign >"$collision_root/foreign-marker"
-  set +e
-  SHUD_REPLAY_TEST_ROOT_PARENT="$test_parent" \
-    SHUD_REPLAY_TEST_ROOT_NAME=replay-collision \
-    SHUD_REPLAY_TEST_SCENARIO=normal \
-    "$verifier" >/dev/null 2>&1
-  actual=$?
-  set -e
-  if [ "$actual" -ne 73 ]; then
-    echo "root_collision exited $actual, expected 73" >&2
-    return 1
-  fi
-  if [ "$(sed -n '1p' "$collision_root/foreign-marker")" != foreign ]; then
-    echo "root_collision modified the foreign target" >&2
-    return 1
-  fi
-  rm "$collision_root/foreign-marker"
-  rmdir "$collision_root"
-  assert_no_residue root_collision
-}
+# Process-group signals while the external root-creation child is live.
+run_acquisition_signal_case acquisition_group_hup HUP '' 129
+run_acquisition_signal_case acquisition_group_int INT '' 130
+run_acquisition_signal_case acquisition_group_term TERM '' 143
+run_acquisition_signal_case acquisition_group_hup_int HUP INT 129
+run_acquisition_signal_case acquisition_group_int_term INT TERM 130
+run_acquisition_signal_case acquisition_group_term_hup TERM HUP 143
 
-run_harness_collision_case() {
-  collision_root="$test_parent/harness-collision"
-  mkdir -m 700 "$collision_root"
-  printf '%s\n' foreign >"$collision_root/foreign-marker"
-  set +e
-  SHUD_REPLAY_TEST_ROOT_PARENT="$test_parent" \
-    SHUD_REPLAY_SELF_TEST_ROOT_NAME=harness-collision \
-    SHUD_REPLAY_SELF_TEST_SCENARIO=matrix \
-    "$self_test" >/dev/null 2>&1
-  actual=$?
-  set -e
-  if [ "$actual" -ne 73 ]; then
-    echo "harness_collision exited $actual, expected 73" >&2
-    return 1
-  fi
-  if [ "$(sed -n '1p' "$collision_root/foreign-marker")" != foreign ]; then
-    echo "harness_collision modified the foreign target" >&2
-    return 1
-  fi
-  rm "$collision_root/foreign-marker"
-  rmdir "$collision_root"
-  assert_no_residue harness_collision
-}
+# Collision-helper rollback and marker-created assertion-window signals.
+run_harness_case forced_verifier_child_42 collision_verifier_child_42 42
+run_harness_case forced_harness_child_42 collision_harness_child_42 42
+run_harness_case assertion_signal_term assertion_signal_term 143
+run_harness_case assertion_double_hup_int assertion_double_hup_int 129
 
-run_verifier_case normal 0
-run_verifier_case root_failure_after_create 41
-run_verifier_case add_failure_round_1 nonzero
-run_verifier_case add_failure_round_2 nonzero
-run_verifier_case patch_failure_round_1 nonzero
-run_verifier_case patch_failure_round_2 nonzero
-run_verifier_case partial_after_round_1 38
-run_verifier_case partial_after_round_2 39
-run_verifier_case dirty_cleanup nonzero
-run_verifier_case locked_cleanup nonzero
-run_verifier_case missing_cleanup nonzero
-run_verifier_case signal_after_root_hup 129
-run_verifier_case signal_after_root_int 130
-run_verifier_case signal_after_root_term 143
-run_verifier_case double_hup_int 129
-run_verifier_case double_int_term 130
-run_verifier_case double_term_hup 143
-run_verifier_case failure_cleanup_term 37
-run_collision_case
-run_harness_case harness_startup_term 143
-run_harness_case harness_double_hup_int 129
-run_harness_collision_case
-
-rmdir "$test_parent"
-test_parent_owned=0
-test_parent=
+if [ "$passed" -ne 43 ]; then
+  echo "replay scenario accounting mismatch: $passed/43" >&2
+  lifecycle_fail 85
+fi
+lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 22/22 scenarios passed"
+echo "replay evidence lifecycle: 43/43 named scenarios passed (4 two-party races, 8 participant outcomes)"

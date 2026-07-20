@@ -49,24 +49,44 @@ Expected results:
 - hashes match the two values above.
 
 The canonical replay verifier and its deterministic lifecycle fault matrix are
-tracked beside this report:
+tracked beside this report. Both source the same POSIX lifecycle authority:
 
 ```sh
+shellcheck -s sh openspec/changes/m1-failure-occurrence-ledger/evidence/scripts/*.sh
 ./openspec/changes/m1-failure-occurrence-ledger/evidence/scripts/verify-replay-evidence.sh
 ./openspec/changes/m1-failure-occurrence-ledger/evidence/scripts/verify-replay-evidence.test.sh
 ```
 
 The verifier exited 0 after both `git apply --check` commands and strict cleanup.
-It pre-binds one exact per-process root, rejects a pre-existing target without
-touching it, and installs EXIT/HUP/INT/TERM authority before creating that root.
-Signal and EXIT handlers receive an already-expanded status and mask later
-signals as their first command.
+`replay-lifecycle.sh` atomically acquires a fixed claim symlink whose value is a
+per-invocation token. One short child transaction ignores HUP/INT/TERM, wins or
+loses atomic `mkdir`, and publishes the same token inside the root only after
+its own `mkdir` succeeds. The parent latches signals while waiting and accepts
+ownership only when child success, claim token, and root token all agree. A
+same-name or non-cooperating loser returns 73 without publishing a marker or
+touching the target; a pre-existing foreign target remains byte-for-byte
+unchanged. EXIT cleanup masks EXIT/HUP/INT/TERM as its first command, then
+preserves the write-once first status across later signals and cleanup
+diagnostics.
 
-The self-test passed 22/22 normal, root-creation failure, add/patch/partial,
-dirty/locked/missing cleanup, single-signal, cleanup-entry double-signal,
-first-failure preservation, verifier/harness collision, harness-startup signal,
-and harness cleanup-entry double-signal scenarios. Every case retained its
-required first status and left no registered worktree or owned temporary root;
-the collision cases also proved that the foreign targets remained unchanged. A clean
-incremental A3 `git diff --check` must exit 0 because A3 introduces no new
-whitespace exception.
+The self-test passed 43/43 named scenarios. Four are two-party races with eight
+explicit participant outcomes:
+
+- 18 baseline verifier scenarios: normal, post-create failure, two add failures,
+  two patch failures, two partial states, dirty/locked/missing strict cleanup,
+  three post-root signals, three ordered double signals, and failure-before-
+  cleanup signal;
+- seven cleanup-diagnostic variants of the controlled add/patch/dirty/locked/
+  missing failures. Their exact protocol statuses are 74, 75, 76, 78, 79, 80,
+  and 81; an injected cleanup diagnostic with status 77 never replaces them;
+- two static foreign-target collisions, verifier and harness cooperative
+  same-name atomic races, verifier and harness non-cooperating actor races, and
+  the two prior harness startup/double-signal paths;
+- HUP, INT, TERM, HUP→INT, INT→TERM, and TERM→HUP delivered to an isolated
+  process group while the external root-creation child is live; and
+- verifier/harness collision helpers forced to observe child status 42 plus
+  marker-created assertion-window TERM and HUP→INT paths.
+
+Every case leaves no exact registered worktree, claim, token, marker, or owned
+temporary root. A clean incremental A3 `git diff --check` must exit 0 because
+A3 introduces no new whitespace exception.
