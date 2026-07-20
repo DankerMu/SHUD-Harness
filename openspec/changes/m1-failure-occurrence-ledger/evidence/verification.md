@@ -1013,3 +1013,45 @@ Current script SHA-256 values:
 The replay patch hashes remain byte-identical at
 `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
 and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+### A7 Phase-7 negative-probe handoff repair
+
+Verified on `2026-07-20`. The semantic implementation is commit
+`fd0b4a1`, based on integrated A3 head
+`f598cb114b9544967d40bc059816cd022fb387d2`.
+
+A negative outcome probe previously cleared `decode_active` before moving a
+deferred HUP 129 into transfer authority. During that gap, the creation child
+could publish collision 73 or unknown-protocol 67 and a later INT handler could
+adopt it before the earlier HUP. The repair establishes the existing nonempty
+transfer authority first, clears the source slot, then clears `decode_active`
+and completes the latch. No second active bit or alternate ordering source is
+introduced.
+
+Four verifier/harness public-surface regressions cover collision and unknown
+publication during this handoff. Each preserves HUP 129 ahead of later INT,
+observes continuous transfer authority, classifies once, settles the creation
+child, and leaves no lifecycle or fault-probe residue.
+
+Independent checks passed:
+
+- all four new cases plus the prior disappearance/restore regression in three
+  consecutive focused runs;
+- canonical replay verifier and two consecutive 87/87 lifecycle matrices,
+  comprising 32 two-party races and 64 participant outcomes;
+- `/bin/sh -n`, `shellcheck -s sh`, strict OpenSpec and incremental hygiene;
+- exactly 13 documented issue-base replay-artifact whitespace findings;
+- byte-identical replay hashes, Zero gitlink, and no stash or replay residue.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `fd97f91522fbc039c17171e9efbb3d5c5816b57bc1f8ac9794ee690c7db17a7b`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `d9c2cc29604a8d91f4533d3c5914ba03c9b61c616d7439215c5211a9d8c77df5`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.

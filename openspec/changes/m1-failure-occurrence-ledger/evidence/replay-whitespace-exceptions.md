@@ -83,7 +83,10 @@ commits any existing deferred event and only then its current event. This
 handoff uses one nonempty transfer status as its authority from capture through
 the first-status latch. A reentrant handler sees and commits that status before
 attempting its current event, even after the original deferred slot clears.
-This closes all read/commit and exact-zero tail windows without changing event-
+On a negative outcome probe, the same authority is established before
+`decode_active` clears and remains authoritative while a creation child
+publishes collision or unknown-protocol status. This closes all read/commit,
+exact-zero tail, and negative-probe handoff windows without changing event-
 before-publication order or discarding the later event.
 As soon as a non-zero release or outcome result is determined, the parent
 records it in the shared write-once latch before later settlement, ownership
@@ -99,8 +102,8 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 83/83 named scenarios. Twenty-eight are two-party races
-with 56 explicit participant outcomes:
+The self-test passed 87/87 named scenarios. Thirty-two are two-party races
+with 64 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -155,6 +158,11 @@ with 56 explicit participant outcomes:
   preserve 129 and record inner `129:143:129` followed by outer
   `129:130:129`, proving neither later identity is lost; they classify once,
   settle the child, and leave no lifecycle/probe residue;
+- verifier and harness negative-probe handoff probes capture HUP 129 before an
+  absent outcome, then publish collision 73 or unknown-protocol 67 while a
+  later INT enters. All four preserve 129, expose continuous transfer
+  authority, classify once, settle the child, and leave no lifecycle/probe
+  residue;
 - verifier and harness witnessed-publication probes remove the outcome before
   classification, then deliver TERM with the link absent or after restoring
   `token:73`. All four preserve the earlier required-publication failure 67,
@@ -169,5 +177,5 @@ with 56 explicit participant outcomes:
   marker-created assertion-window TERM and HUP→INT paths.
 
 Every case leaves no exact registered worktree, claim, token, marker, or owned
-temporary root. A clean incremental A6 `git diff --check` must exit 0 because
-A6 introduces no new whitespace exception.
+temporary root. A clean incremental A7 `git diff --check` must exit 0 because
+A7 introduces no new whitespace exception.
