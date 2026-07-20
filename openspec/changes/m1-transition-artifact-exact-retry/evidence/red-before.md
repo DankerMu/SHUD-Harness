@@ -41,3 +41,31 @@ Received proofAttempts: 0
 The first test reached and passed successor-B preservation plus authority/binding baseline assertions before rejecting the terminal `{ status: "recovered", settlement: "deleted" }` acceptance. The second reached the proof-monotonicity assertion instead of failing collection. On the restored test HEAD, the identical command passes with 2 pass, 0 fail, 12 assertions.
 
 No `red-proof` stash remains.
+
+## Round-2 depth corrective-action red
+
+The concrete sibling-path bypass probe ran against source HEAD
+`662151a043a1ee83e54611949e63fdafb7afc110` with the pre-corrective watcher
+preload. It invoked `node:fs` default `promises.watch`, obtained its async
+iterator, aborted it, consumed the `AbortError`, and removed the temporary
+directory. The probe then failed with exit 1 because registrations were `[]`:
+
+```text
+error: RED: node:fs default promises.watch bypassed oracle; registrations=[]
+```
+
+After adding the 16-path negative-control matrix, only the preload source change
+was stashed as `red-proof`; the expanded test remained in the worktree. The
+exact oracle command was:
+
+```sh
+npx --yes bun@1.2.19 test \
+  --preload ./openspec/changes/m1-transition-artifact-exact-retry/evidence/delay-watch-preload.ts \
+  ./openspec/changes/m1-transition-artifact-exact-retry/evidence/delayed-watch-authority.test.ts
+```
+
+The old preload produced 1 pass and 1 fail: the negative control received 8
+registrations while requiring all 16. The preload stash was immediately popped;
+the unchanged command then passed 2 tests with 27 assertions. The original
+default-`promises.watch` bypass probe also exited 0 and recorded its exact path
+as `node:fs/promises.watch`. No `red-proof` stash remains.

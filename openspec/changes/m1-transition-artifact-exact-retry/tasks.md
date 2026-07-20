@@ -42,3 +42,9 @@
 - [x] 6.2 Intercept all three Node watcher families and prove the oracle with an executable negative control.
 - [x] 6.3 Replace collection-only red with a base-compatible behavioral red and unchanged test-HEAD green.
 - [x] 6.4 Prove consumer acceptance for explicit missing/superseded convergence and propagation for ordinary or ledger-carried failures.
+
+## 7. Round-2 depth corrective action
+
+- [x] 7.1 Share the wrapped promises object across `node:fs` and `node:fs/promises`, including CommonJS-visible exports.
+- [x] 7.2 Actually invoke and record all 16 named, default, namespace, and CommonJS watcher access paths in the negative control.
+- [x] 7.3 Mark `7127f83` as pre-fix Round-1 provenance and bind corrective green evidence to the exact current production commit plus reproducible oracle diff.

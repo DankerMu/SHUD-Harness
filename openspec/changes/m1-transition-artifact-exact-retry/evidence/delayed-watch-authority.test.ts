@@ -1,5 +1,15 @@
 import { expect, test } from "bun:test";
-import { unwatchFile, watch as watchCallback, watchFile } from "node:fs";
+import fsDefault, {
+  promises as fsNamedPromises,
+  unwatchFile,
+  watch as fsNamedWatch,
+  watchFile as fsNamedWatchFile
+} from "node:fs";
+import * as fsNamespace from "node:fs";
+import { createRequire } from "node:module";
+import fsPromisesDefault, {
+  watch as fsPromisesNamedWatch
+} from "node:fs/promises";
 import {
   lstat,
   mkdtemp,
@@ -7,9 +17,9 @@ import {
   realpath,
   rename,
   rm,
-  watch as watchPromise,
   writeFile
 } from "node:fs/promises";
+import * as fsPromisesNamespace from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -26,6 +36,9 @@ const globals = globalThis as typeof globalThis & {
 const store = await import(
   "../../../../packages/core/src/domain/services/workspace-record-store.ts"
 );
+const require = createRequire(import.meta.url);
+const fsCommonJs = require("node:fs") as typeof import("node:fs");
+const fsPromisesCommonJs = require("node:fs/promises") as typeof import("node:fs/promises");
 
 test("private exact settlement never registers or waits for delayed filesystem watchers", async () => {
   const tempRoot = await realpath(
@@ -102,32 +115,88 @@ test("private exact settlement never registers or waits for delayed filesystem w
   }
 });
 
-test("delayed watcher preload negative control observes every watcher family", async () => {
+test("delayed watcher preload negative control observes every supported access path", async () => {
   const tempRoot = await realpath(
     await mkdtemp(join(tmpdir(), "issue-108-private-settlement-watch-control-"))
   );
-  const path = join(tempRoot, "control.json");
-  const watchFileListener = (): void => {};
+  const callbackWatchers: ReturnType<typeof fsNamedWatch>[] = [];
+  const watchFileRegistrations: Array<{
+    path: string;
+    listener: () => void;
+  }> = [];
   try {
-    await writeFile(path, "{}\n", { flag: "wx", mode: 0o600 });
     globals.__issue108DelayedWatchEvents.length = 0;
     globals.__issue108DelayedWatchRegistrations.length = 0;
 
-    const callbackWatcher = watchCallback(path, () => {});
-    callbackWatcher.close();
-    const abortController = new AbortController();
-    watchPromise(path, { signal: abortController.signal });
-    abortController.abort();
-    watchFile(path, { persistent: false, interval: 10 }, watchFileListener);
-    unwatchFile(path, watchFileListener);
+    const callbackWatchAccesses = [
+      ["node-fs-named-watch", fsNamedWatch],
+      ["node-fs-default-watch", fsDefault.watch],
+      ["node-fs-namespace-watch", fsNamespace.watch],
+      ["node-fs-commonjs-watch", fsCommonJs.watch]
+    ] as const;
+    const watchFileAccesses = [
+      ["node-fs-named-watch-file", fsNamedWatchFile],
+      ["node-fs-default-watch-file", fsDefault.watchFile],
+      ["node-fs-namespace-watch-file", fsNamespace.watchFile],
+      ["node-fs-commonjs-watch-file", fsCommonJs.watchFile]
+    ] as const;
+    const promisesWatchAccesses = [
+      ["node-fs-named-promises-watch", fsNamedPromises.watch],
+      ["node-fs-default-promises-watch", fsDefault.promises.watch],
+      ["node-fs-namespace-promises-watch", fsNamespace.promises.watch],
+      ["node-fs-commonjs-promises-watch", fsCommonJs.promises.watch],
+      ["node-fs-promises-named-watch", fsPromisesNamedWatch],
+      ["node-fs-promises-default-watch", fsPromisesDefault.watch],
+      ["node-fs-promises-namespace-watch", fsPromisesNamespace.watch],
+      ["node-fs-promises-commonjs-watch", fsPromisesCommonJs.watch]
+    ] as const;
+    const expectedRegistrations: DelayedWatchRegistration[] = [];
 
-    expect(globals.__issue108DelayedWatchRegistrations).toEqual([
-      { family: "node:fs.watch", path },
-      { family: "node:fs/promises.watch", path },
-      { family: "node:fs.watchFile", path }
-    ]);
+    for (const [name, watch] of callbackWatchAccesses) {
+      const path = join(tempRoot, `${name}.json`);
+      await writeFile(path, "{}\n", { flag: "wx", mode: 0o600 });
+      const watcher = watch(path, () => {});
+      callbackWatchers.push(watcher);
+      watcher.close();
+      expectedRegistrations.push({ family: "node:fs.watch", path });
+    }
+
+    for (const [name, watch] of watchFileAccesses) {
+      const path = join(tempRoot, `${name}.json`);
+      const listener = (): void => {};
+      await writeFile(path, "{}\n", { flag: "wx", mode: 0o600 });
+      watchFileRegistrations.push({ path, listener });
+      watch(path, { persistent: false, interval: 10 }, listener);
+      unwatchFile(path, listener);
+      expectedRegistrations.push({ family: "node:fs.watchFile", path });
+    }
+
+    for (const [name, watch] of promisesWatchAccesses) {
+      const path = join(tempRoot, `${name}.json`);
+      const abortController = new AbortController();
+      await writeFile(path, "{}\n", { flag: "wx", mode: 0o600 });
+      const watcher = watch(path, { signal: abortController.signal });
+      const iterator = watcher[Symbol.asyncIterator]();
+      abortController.abort();
+      try {
+        await iterator.next();
+      } catch (error) {
+        if (!(error instanceof Error) || error.name !== "AbortError") throw error;
+      }
+      expectedRegistrations.push({ family: "node:fs/promises.watch", path });
+    }
+
+    expect(globals.__issue108DelayedWatchRegistrations).toHaveLength(
+      expectedRegistrations.length
+    );
+    for (const expected of expectedRegistrations) {
+      expect(globals.__issue108DelayedWatchRegistrations).toContainEqual(expected);
+    }
   } finally {
-    unwatchFile(path, watchFileListener);
+    for (const watcher of callbackWatchers) watcher.close();
+    for (const { path, listener } of watchFileRegistrations) {
+      unwatchFile(path, listener);
+    }
     await rm(tempRoot, { recursive: true, force: true });
   }
 });

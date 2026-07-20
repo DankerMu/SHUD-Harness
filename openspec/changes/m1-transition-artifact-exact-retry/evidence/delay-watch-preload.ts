@@ -60,14 +60,24 @@ const delayedWatchFile = ((...args: unknown[]) => {
   return (originalWatchFile as (...watchFileArgs: unknown[]) => unknown)(...args);
 }) as typeof fs.watchFile;
 
+const sharedPromises = fs.promises;
+Object.assign(sharedPromises, { watch: delayedPromisesWatch });
+Object.assign(fs, {
+  promises: sharedPromises,
+  watch: delayedWatch,
+  watchFile: delayedWatchFile
+});
+
 mock.module("node:fs", () => ({
   ...fs,
-  default: { ...fs, watch: delayedWatch, watchFile: delayedWatchFile },
+  default: fs,
+  promises: sharedPromises,
   watch: delayedWatch,
   watchFile: delayedWatchFile
 }));
 
 mock.module("node:fs/promises", () => ({
-  ...fsPromises,
+  ...sharedPromises,
+  default: sharedPromises,
   watch: delayedPromisesWatch
 }));

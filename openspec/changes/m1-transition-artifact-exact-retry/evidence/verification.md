@@ -4,21 +4,66 @@ Current worktree: `.worktrees/issue-108-private-exact-settlement`
 
 Branch: `codex/issue-108-private-exact-settlement`
 
-Reviewed HEAD: `7127f83f5f47ab2537edb4b57543da30aeb55047`
+Corrective-action base HEAD: `662151a043a1ee83e54611949e63fdafb7afc110`
 
 Base: `5a9151affc8ab3a984120a727e488d663d24e8a0`
 
-## Round-1 blocker closure
+## Fixed-source binding
 
-- Focused private-settlement/resource/consumer matrix: 8 pass, 0 fail, 143 assertions.
-- Delayed watcher oracle plus executable negative control: 2 pass, 0 fail, 11 assertions. Production registered none of `node:fs.watch`, `node:fs/promises.watch`, or `watchFile`; the negative control registered all three.
-- Base-compatible behavior harness on base source: 0 pass, 2 behavioral assertion failures after successful collection and fixture execution.
-- The unchanged behavior harness on test HEAD: 2 pass, 0 fail, 12 assertions.
+`7127f83f5f47ab2537edb4b57543da30aeb55047` is the pre-fix Round-1
+source commit. It does not contain the C1 occurrence correction or the complete
+watcher access-path oracle and is retained below only as historical Round-1
+provenance. It is not the source binding for any corrective-action green result.
+
+The production source used by the corrective-action green runs is exactly
+`662151a043a1ee83e54611949e63fdafb7afc110`. The executable watcher-evidence
+source is reproducibly defined as that commit plus the current binary diff for:
+
+- `evidence/delay-watch-preload.ts`
+- `evidence/delayed-watch-authority.test.ts`
+
+The exact command
+
+```sh
+git diff --no-ext-diff --binary 662151a043a1ee83e54611949e63fdafb7afc110 -- \
+  openspec/changes/m1-transition-artifact-exact-retry/evidence/delay-watch-preload.ts \
+  openspec/changes/m1-transition-artifact-exact-retry/evidence/delayed-watch-authority.test.ts | shasum -a 256
+```
+
+produces patch SHA-256
+`5b0c448070d24148d002ec9f6e1f2f5d76da3217e59bc5673f41d4dded6d77b6`.
+The ledger and task wording do not affect executable source and are excluded
+from that digest. The post-corrective-action commit does not exist yet and is
+therefore intentionally not claimed here; the orchestrator can add its SHA
+after committing.
+
+## Corrective-action green
+
+- Delayed watcher oracle and 16-path executable negative-control matrix: 2
+  pass, 0 fail, 27 assertions. Production registered no watcher; named,
+  default, namespace, and CommonJS access paths for `node:fs.watch`,
+  `node:fs.watchFile`, `node:fs.promises.watch`, and `node:fs/promises.watch`
+  were each actually invoked and recorded by the negative control.
+- The original `node:fs` default `promises.watch` bypass probe: exit 0 and one
+  exact `node:fs/promises.watch` path registration after abort cleanup.
+- Base-compatible behavior harness: 2 pass, 0 fail, 12 assertions.
+- C1 early permit-admission occurrence regression: 1 pass, 0 fail, 12
+  assertions.
+- Focused private-settlement/resource/consumer matrix: 8 pass, 0 fail, 143
+  assertions.
+- Core and root typecheck: exit 0.
+- `openspec validate m1-transition-artifact-exact-retry --strict
+  --no-interactive`: valid.
+
+## Historical Round-1 record
+
+- The old ledger labeled its green worktree as `7127f83f5f47ab2537edb4b57543da30aeb55047`.
+  Because that pre-fix commit cannot reproduce the later C1 repair, those
+  counts are historical execution notes rather than a fixed-source green
+  binding.
 - Full core services: 453 pass, 5 platform-dependent skips, 0 fail across 458 tests; 29,409 assertions.
 - Full backend routes: 163 pass, 0 fail across 163 tests; 5,094 assertions.
 - Dedicated public failure-ledger suite: 37 pass, 0 fail; 484 assertions.
-- Core and root typecheck: exit 0.
-- Strict OpenSpec validation: valid.
 - Canonical public-ledger replay verifier: exit 0; canonical matrix 95/95 named scenarios passed (40 two-party races, 80 participant outcomes).
 
 ## Resource and compatibility boundaries
@@ -33,5 +78,5 @@ The change continues to consume `failureLedger`, `captureFailureFoldEntry`, `cap
 
 - `git diff --check`: clean.
 - Zero remains pinned at `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`; its gitlink and worktree are unchanged.
-- No `red-proof` stash remains and the replay verifier left no temporary worktree.
+- No `red-proof` stash remains.
 - The pre-existing untracked `.review-gate.json` was not touched.
