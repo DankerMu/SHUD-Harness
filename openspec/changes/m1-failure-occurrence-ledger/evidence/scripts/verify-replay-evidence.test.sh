@@ -407,6 +407,204 @@ EOF
   record_pass
 }
 
+run_deferred_transfer_case() {
+  case_name=$1
+  child_kind=$2
+  transfer_path=$3
+  later_signal=$4
+  root_name="case-$case_name"
+  child_token="deferred-transfer-$case_name"
+  child_root="$lifecycle_root/$root_name"
+  child_claim="$lifecycle_root/.$root_name.claim"
+  child_marker="$child_root/.shud-replay-owner"
+  transaction_fault_dir="$lifecycle_root/$case_name.deferred-transfer-probe"
+  transaction_probe_dir=$transaction_fault_dir
+  transaction_pid_file="$transaction_fault_dir/creation-pids"
+  outcome_attempted_event="$transaction_fault_dir/outcome-attempted"
+  outcome_published_event="$transaction_fault_dir/outcome-published"
+  first_event="$transaction_fault_dir/first-hup-fired"
+  transfer_release="$transaction_fault_dir/transfer-release"
+  transfer_event="$transaction_fault_dir/transfer-events"
+  later_event="$transaction_fault_dir/later-signal-fired"
+  current_event="$transaction_fault_dir/current-event-attempts"
+  decode_entry_event="$transaction_fault_dir/decode-entries"
+  settlement_release="$transaction_fault_dir/settlement-release"
+  watchdog_event="$transaction_fault_dir/watchdog-fired"
+  mkdir -m 700 "$transaction_fault_dir"
+
+  cat >"$transaction_fault_dir/ln" <<'EOF'
+#!/bin/sh
+last_arg=
+for arg do last_arg=$arg; done
+case "$last_arg" in
+  *.transaction.*.outcome)
+    printf '%s\n' "$PPID" >>"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+    : >"$SHUD_REPLAY_TEST_OUTCOME_ATTEMPTED_EVENT"
+    if [ "$SHUD_REPLAY_TEST_DEFERRED_TRANSFER_PATH" = negative_wait ]; then
+      hold_path=$SHUD_REPLAY_TEST_TRANSFER_RELEASE
+    else
+      /bin/ln "$@" || exit $?
+      : >"$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT"
+      hold_path=$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE
+    fi
+    hold_attempt=0
+    while [ ! -e "$hold_path" ]; do
+      hold_attempt=$((hold_attempt + 1))
+      if [ "$hold_attempt" -ge 40 ]; then
+        : >"$SHUD_REPLAY_TEST_WATCHDOG_EVENT"
+        kill -KILL "$PPID" >/dev/null 2>&1 || true
+        exit 124
+      fi
+      sleep 0.05
+    done
+    if [ "$SHUD_REPLAY_TEST_DEFERRED_TRANSFER_PATH" = negative_wait ]; then
+      /bin/ln "$@" || exit $?
+      : >"$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT"
+    fi
+    exit 0
+    ;;
+esac
+exec /bin/ln "$@"
+EOF
+  chmod 700 "$transaction_fault_dir/ln"
+
+  case "$child_kind" in
+    verifier) transaction_command=$verifier ;;
+    harness) transaction_command=$self_test ;;
+    *)
+      echo "unknown deferred-transfer child kind: $child_kind" >&2
+      rm -rf "$transaction_fault_dir"
+      transaction_fault_dir=
+      return 1
+      ;;
+  esac
+
+  outcome_wait_signal=
+  decode_tail_signal=
+  if [ "$transfer_path" = negative_wait ]; then
+    outcome_wait_signal=HUP
+  else
+    decode_tail_signal=HUP
+  fi
+
+  set +e
+  PATH="$transaction_fault_dir:$PATH" \
+    SHUD_REPLAY_TEST_CREATION_PID_FILE="$transaction_pid_file" \
+    SHUD_REPLAY_TEST_OUTCOME_ATTEMPTED_EVENT="$outcome_attempted_event" \
+    SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT="$outcome_published_event" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_PATH="$transfer_path" \
+    SHUD_REPLAY_TEST_OUTCOME_WAIT_SIGNAL="$outcome_wait_signal" \
+    SHUD_REPLAY_TEST_OUTCOME_WAIT_EVENT="$first_event" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_FIRST="$decode_tail_signal" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_FIRST_EVENT="$first_event" \
+    SHUD_REPLAY_TEST_TRANSFER_RELEASE="$transfer_release" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT="$transfer_event" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_SIGNAL="$later_signal" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_SIGNAL_EVENT="$later_event" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_CURRENT_EVENT="$current_event" \
+    SHUD_REPLAY_TEST_DECODE_ENTRY_EVENT="$decode_entry_event" \
+    SHUD_REPLAY_TEST_SETTLEMENT_RELEASE="$settlement_release" \
+    SHUD_REPLAY_TEST_WATCHDOG_EVENT="$watchdog_event" \
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_SCENARIO=decode_tail_probe \
+    SHUD_REPLAY_TEST_SCENARIO=normal \
+    SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+    "$transaction_command" >/dev/null 2>&1
+  actual=$?
+  set -e
+
+  transfer_failed=0
+  if [ "$actual" -ne 129 ]; then
+    echo "$case_name exited $actual, expected 129" >&2
+    transfer_failed=1
+  fi
+  for required_event in "$outcome_attempted_event" "$outcome_published_event" \
+    "$first_event" "$later_event" "$settlement_release"; do
+    if [ ! -e "$required_event" ]; then
+      echo "$case_name missed required event: $required_event" >&2
+      transfer_failed=1
+    fi
+  done
+  transfer_count=0
+  if [ -f "$transfer_event" ]; then
+    transfer_count=$(wc -l <"$transfer_event" | tr -d ' ')
+  fi
+  if [ "$transfer_count" -ne 1 ] ||
+    [ "$(sed -n '1p' "$transfer_event" 2>/dev/null || true)" != 129 ]; then
+    echo "$case_name transferred deferred HUP $transfer_count times, expected once" >&2
+    transfer_failed=1
+  fi
+  expected_current="129:130:129"
+  if [ "$later_signal" = TERM ]; then expected_current="129:143:129"; fi
+  current_count=0
+  if [ -f "$current_event" ]; then
+    current_count=$(wc -l <"$current_event" | tr -d ' ')
+  fi
+  if [ "$current_count" -ne 1 ] ||
+    [ "$(sed -n '1p' "$current_event" 2>/dev/null || true)" != "$expected_current" ]; then
+    echo "$case_name did not attempt $later_signal after transferred HUP latched" >&2
+    transfer_failed=1
+  fi
+  decode_entry_count=0
+  if [ -f "$decode_entry_event" ]; then
+    decode_entry_count=$(wc -l <"$decode_entry_event" | tr -d ' ')
+  fi
+  if [ "$decode_entry_count" -ne 1 ]; then
+    echo "$case_name classified/adopted its outcome $decode_entry_count times, expected 1" >&2
+    transfer_failed=1
+  fi
+  if [ -e "$watchdog_event" ]; then
+    echo "$case_name used its watchdog instead of mandatory child settlement" >&2
+    transfer_failed=1
+  fi
+  if [ ! -s "$transaction_pid_file" ]; then
+    echo "$case_name did not identify the creation child" >&2
+    transfer_failed=1
+  else
+    while IFS= read -r child_pid; do
+      case "$child_pid" in
+        ''|*[!0-9]*)
+          echo "$case_name recorded invalid creation pid: $child_pid" >&2
+          transfer_failed=1
+          ;;
+        *)
+          if kill -0 "$child_pid" >/dev/null 2>&1; then
+            echo "$case_name retained live creation child $child_pid" >&2
+            transfer_failed=1
+          fi
+          ;;
+      esac
+    done <"$transaction_pid_file"
+  fi
+  if find "$lifecycle_root" -maxdepth 1 -name ".$root_name.claim.transaction.*" -print -quit |
+    grep . >/dev/null; then
+    echo "$case_name retained transaction links" >&2
+    transfer_failed=1
+  fi
+  if [ -e "$child_claim" ] || [ -L "$child_claim" ] ||
+    [ -e "$child_marker" ] || [ -L "$child_marker" ] ||
+    [ -e "$child_root" ] || [ -L "$child_root" ]; then
+    echo "$case_name retained owned lifecycle residue" >&2
+    transfer_failed=1
+  fi
+  if test_worktree_is_registered "$child_root/round-1" ||
+    test_worktree_is_registered "$child_root/round-2"; then
+    echo "$case_name retained a registered worktree" >&2
+    transfer_failed=1
+  fi
+
+  cleanup_transaction_fault_residue "$child_root" "$child_claim" "$child_token"
+  if [ -e "$child_root" ] || [ -L "$child_root" ] ||
+    [ -e "$transaction_probe_dir" ]; then
+    echo "$case_name retained deferred-transfer probe residue" >&2
+    transfer_failed=1
+  fi
+  if [ "$transfer_failed" -ne 0 ]; then return 1; fi
+  record_pass
+}
+
 run_outcome_disappearance_case() {
   case_name=$1
   child_kind=$2
@@ -1462,6 +1660,8 @@ case "$self_test_scenario" in
     classification_commit_hup_int_verifier|classification_commit_hup_int_harness|\
     classification_commit_read_failure_verifier|classification_commit_read_failure_harness|\
     classification_commit_collision_verifier|classification_commit_collision_harness|\
+    deferred_transfer_wait_verifier|deferred_transfer_wait_harness|\
+    deferred_transfer_decode_verifier|deferred_transfer_decode_harness|\
     outcome_disappearance_term_verifier|outcome_disappearance_term_harness|\
     outcome_disappearance_restore_verifier|outcome_disappearance_restore_harness|\
     transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
@@ -1601,6 +1801,18 @@ case "$self_test_scenario" in
     run_committed_outcome_signal_case classification_commit_collision_harness \
       harness '' TERM 73 143
     ;;
+  deferred_transfer_wait_verifier)
+    run_deferred_transfer_case deferred_transfer_wait_verifier verifier negative_wait INT
+    ;;
+  deferred_transfer_wait_harness)
+    run_deferred_transfer_case deferred_transfer_wait_harness harness negative_wait INT
+    ;;
+  deferred_transfer_decode_verifier)
+    run_deferred_transfer_case deferred_transfer_decode_verifier verifier decode_tail TERM
+    ;;
+  deferred_transfer_decode_harness)
+    run_deferred_transfer_case deferred_transfer_decode_harness harness decode_tail TERM
+    ;;
   outcome_disappearance_term_verifier)
     run_outcome_disappearance_case outcome_disappearance_term_verifier verifier 0 67
     ;;
@@ -1639,6 +1851,8 @@ case "$self_test_scenario" in
   classification_commit_hup_int_verifier|classification_commit_hup_int_harness|\
   classification_commit_read_failure_verifier|classification_commit_read_failure_harness|\
   classification_commit_collision_verifier|classification_commit_collision_harness|\
+  deferred_transfer_wait_verifier|deferred_transfer_wait_harness|\
+  deferred_transfer_decode_verifier|deferred_transfer_decode_harness|\
   outcome_disappearance_term_verifier|outcome_disappearance_term_harness|\
   outcome_disappearance_restore_verifier|outcome_disappearance_restore_harness|\
   transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
@@ -1774,6 +1988,14 @@ run_committed_outcome_signal_case classification_commit_collision_verifier \
 run_committed_outcome_signal_case classification_commit_collision_harness \
   harness '' TERM 73 143
 
+# Deferred HUP remains authoritative while moving from the negative-wait or
+# exact-zero decode slot into the write-once latch. A reentrant later handler
+# attempts its own event only after the transferred 129 is first.
+run_deferred_transfer_case deferred_transfer_wait_verifier verifier negative_wait INT
+run_deferred_transfer_case deferred_transfer_wait_harness harness negative_wait INT
+run_deferred_transfer_case deferred_transfer_decode_verifier verifier decode_tail TERM
+run_deferred_transfer_case deferred_transfer_decode_harness harness decode_tail TERM
+
 # Once ordinary settlement witnesses publication, disappearance commits 67
 # before a later TERM or any attempt to re-adopt a restored token:73 outcome.
 run_outcome_disappearance_case outcome_disappearance_term_verifier verifier 0 67
@@ -1789,11 +2011,11 @@ run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harnes
 run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
 run_claim_reconciliation_case claim_reconciliation_harness_term harness
 
-if [ "$passed" -ne 79 ]; then
-  echo "replay scenario accounting mismatch: $passed/79" >&2
+if [ "$passed" -ne 83 ]; then
+  echo "replay scenario accounting mismatch: $passed/83" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 79/79 named scenarios passed (24 two-party races, 48 participant outcomes)"
+echo "replay evidence lifecycle: 83/83 named scenarios passed (28 two-party races, 56 participant outcomes)"

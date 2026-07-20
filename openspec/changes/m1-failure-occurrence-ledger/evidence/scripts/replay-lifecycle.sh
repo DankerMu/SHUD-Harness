@@ -25,6 +25,7 @@ lifecycle_outcome_publication_witnessed=0
 lifecycle_decoded_outcome_published=0
 lifecycle_decoded_outcome_status=
 lifecycle_deferred_signal_status=
+lifecycle_deferred_transfer_status=
 
 lifecycle_inject_decode_tail_signals() {
   lifecycle_decode_tail_first=${SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_FIRST:-}
@@ -61,17 +62,76 @@ lifecycle_inject_post_classification_signal() {
   fi
 }
 
+lifecycle_inject_outcome_wait_signal() {
+  lifecycle_outcome_wait_signal=${SHUD_REPLAY_TEST_OUTCOME_WAIT_SIGNAL:-}
+  lifecycle_outcome_wait_event=${SHUD_REPLAY_TEST_OUTCOME_WAIT_EVENT:-}
+  if [ -n "$lifecycle_outcome_wait_signal" ]; then
+    if [ -n "$lifecycle_outcome_wait_event" ]; then
+      : >"$lifecycle_outcome_wait_event"
+    fi
+    kill -s "$lifecycle_outcome_wait_signal" "$$"
+  fi
+}
+
+lifecycle_inject_deferred_transfer_signal() {
+  lifecycle_transfer_hook_status=$1
+  lifecycle_transfer_release=${SHUD_REPLAY_TEST_TRANSFER_RELEASE:-}
+  lifecycle_transfer_event=${SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT:-}
+  lifecycle_transfer_signal=${SHUD_REPLAY_TEST_DEFERRED_TRANSFER_SIGNAL:-}
+  lifecycle_transfer_signal_event=${SHUD_REPLAY_TEST_DEFERRED_TRANSFER_SIGNAL_EVENT:-}
+  if [ -n "$lifecycle_transfer_release" ]; then
+    : >"$lifecycle_transfer_release"
+  fi
+  if [ -n "$lifecycle_transfer_event" ]; then
+    printf '%s\n' "$lifecycle_transfer_hook_status" >>"$lifecycle_transfer_event"
+  fi
+  if [ -n "$lifecycle_transfer_signal" ]; then
+    if [ -n "$lifecycle_transfer_signal_event" ]; then
+      : >"$lifecycle_transfer_signal_event"
+    fi
+    kill -s "$lifecycle_transfer_signal" "$$"
+  fi
+}
+
 lifecycle_latch_status() {
   if [ -z "$lifecycle_first_status" ]; then
     lifecycle_first_status=$1
   fi
 }
 
+lifecycle_latch_transfer_before_current_signal() {
+  lifecycle_current_signal_status=$1
+  if [ -z "$lifecycle_deferred_transfer_status" ]; then
+    return 1
+  fi
+
+  lifecycle_latch_status "$lifecycle_deferred_transfer_status"
+  lifecycle_latch_status "$lifecycle_current_signal_status"
+  lifecycle_transfer_current_event=${SHUD_REPLAY_TEST_DEFERRED_TRANSFER_CURRENT_EVENT:-}
+  if [ -n "$lifecycle_transfer_current_event" ]; then
+    printf '%s:%s:%s\n' "$lifecycle_deferred_transfer_status" \
+      "$lifecycle_current_signal_status" "$lifecycle_first_status" \
+      >>"$lifecycle_transfer_current_event"
+  fi
+  lifecycle_mask_latched_signals
+  return 0
+}
+
 lifecycle_commit_deferred_signal() {
+  if [ -n "$lifecycle_deferred_transfer_status" ]; then
+    lifecycle_latch_status "$lifecycle_deferred_transfer_status"
+    lifecycle_mask_latched_signals
+    return
+  fi
   if [ -n "$lifecycle_deferred_signal_status" ]; then
-    lifecycle_committed_deferred_status=$lifecycle_deferred_signal_status
+    # A nonempty transfer status is the single transfer-in-progress authority.
+    # Establish it before clearing the source slot so a handler can never see
+    # both representations empty. Keep it authoritative through the latch.
+    lifecycle_deferred_transfer_status=$lifecycle_deferred_signal_status
     lifecycle_deferred_signal_status=
-    lifecycle_latch_status "$lifecycle_committed_deferred_status"
+    lifecycle_inject_deferred_transfer_signal "$lifecycle_deferred_transfer_status"
+    lifecycle_latch_status "$lifecycle_deferred_transfer_status"
+    lifecycle_deferred_transfer_status=
     lifecycle_mask_latched_signals
   fi
 }
@@ -139,6 +199,9 @@ lifecycle_adopt_published_transaction_outcome() {
 }
 
 lifecycle_signal_hup() {
+  if lifecycle_latch_transfer_before_current_signal 129; then
+    return
+  fi
   if [ "$lifecycle_transaction_decode_active" -eq 1 ]; then
     if [ -z "$lifecycle_deferred_signal_status" ]; then lifecycle_deferred_signal_status=129; fi
     return
@@ -154,6 +217,9 @@ lifecycle_signal_hup() {
 }
 
 lifecycle_signal_int() {
+  if lifecycle_latch_transfer_before_current_signal 130; then
+    return
+  fi
   if [ "$lifecycle_transaction_decode_active" -eq 1 ]; then
     if [ -z "$lifecycle_deferred_signal_status" ]; then lifecycle_deferred_signal_status=130; fi
     return
@@ -169,6 +235,9 @@ lifecycle_signal_int() {
 }
 
 lifecycle_signal_term() {
+  if lifecycle_latch_transfer_before_current_signal 143; then
+    return
+  fi
   if [ "$lifecycle_transaction_decode_active" -eq 1 ]; then
     if [ -z "$lifecycle_deferred_signal_status" ]; then lifecycle_deferred_signal_status=143; fi
     return
@@ -376,6 +445,7 @@ lifecycle_wait_for_transaction_outcome() {
     # signal-first latch; a positive probe makes publication required before
     # handlers can decode either the link or its subsequent disappearance.
     lifecycle_transaction_decode_active=1
+    lifecycle_inject_outcome_wait_signal
     if [ -L "$lifecycle_transaction_outcome" ]; then
       lifecycle_outcome_publication_witnessed=1
       lifecycle_transaction_decode_active=0
@@ -508,6 +578,8 @@ lifecycle_settle_creation_transaction() {
   lifecycle_transaction_active=0
   lifecycle_transaction_outcome_committed=0
   lifecycle_outcome_publication_witnessed=0
+  lifecycle_deferred_signal_status=
+  lifecycle_deferred_transfer_status=
   return "$lifecycle_transaction_result"
 }
 
@@ -521,6 +593,7 @@ lifecycle_run_creation_transaction() {
   lifecycle_decoded_outcome_published=0
   lifecycle_decoded_outcome_status=
   lifecycle_deferred_signal_status=
+  lifecycle_deferred_transfer_status=
   (
     # This is the first child command. Once ready is published, the complete
     # mkdir + marker transaction ignores process-group HUP/INT/TERM.
