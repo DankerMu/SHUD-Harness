@@ -632,3 +632,35 @@ Current script SHA-256 values:
 The replay patch hashes remain byte-identical at
 `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
 and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+### A5 Round-1 outcome-before-wait repair
+
+Verified on `2026-07-19 22:41:17 EDT`. The review regression proved that an
+outcome symlink can be authoritative while its creation child is still live:
+the prior settlement path waited for that child before reading the published
+value, so TERM delivered during the wait became the first latched status.
+
+The batched red run held the creation child after publishing its outcome. The
+verifier and harness collision probes both exited 143 instead of 73; their two
+unknown-outcome variants likewise exited 143 instead of the required protocol
+status 67. The fixed settlement path reads and classifies the published value
+before wait/reap. A non-zero 73 or mapped 67 enters the shared write-once latch
+first, after which the deterministic hook delivers TERM and releases the held
+child. Settlement still reaps the child and reconciles physical claim/marker
+ownership before cleanup or propagation. Outcome-read failure remains 67, and
+an earlier signal remains authoritative.
+
+All four focused scenarios then reported `1/1 passed` with exact 73/73/67/67.
+The full matrix passes 56/56 named scenarios, comprising 11 two-party races and
+22 participant outcomes. Each added/strengthened probe asserts no live creation
+child, claim, transaction link, owner marker, owned/foreign probe root,
+registered worktree, or fault directory remains.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `ea9df44279d32c9a36eaa6d468fe4e09771f277e67508f8126948477c665f8eb`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `d811699d6dc9e245bb2ceae082c1d85073aeadfe68b005e331f193a626fd1b0a`.

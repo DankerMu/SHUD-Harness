@@ -225,3 +225,8 @@
   shellcheck, canonical replay, the expanded 54-case lifecycle matrix, strict
   OpenSpec validation, incremental/range hygiene, stash, Zero, submodule, and
   replay-residue checks.
+- [x] 11.4 Read and classify a published outcome before waiting for its still-
+  live creation child. Prove verifier/harness collision 73 and unknown-protocol
+  67 each precede later TERM, while child settlement, ownership reconciliation,
+  zero-residue cleanup, outcome-read failure, and signal-first semantics remain
+  intact in the expanded 56-case matrix.

@@ -245,6 +245,22 @@ lifecycle_latch_transaction_result() {
   fi
 }
 
+lifecycle_inject_settlement_events() {
+  lifecycle_settlement_event=${SHUD_REPLAY_TEST_SETTLEMENT_EVENT:-}
+  lifecycle_settlement_signal=${SHUD_REPLAY_TEST_SETTLEMENT_SIGNAL:-}
+  lifecycle_settlement_release=${SHUD_REPLAY_TEST_SETTLEMENT_RELEASE:-}
+
+  if [ -n "$lifecycle_settlement_signal" ]; then
+    if [ -n "$lifecycle_settlement_event" ]; then
+      : >"$lifecycle_settlement_event"
+    fi
+    kill -s "$lifecycle_settlement_signal" "$$"
+  fi
+  if [ -n "$lifecycle_settlement_release" ]; then
+    : >"$lifecycle_settlement_release"
+  fi
+}
+
 lifecycle_link_matches_during_settlement() {
   lifecycle_settlement_match_path=$1
   lifecycle_settlement_match_token=$2
@@ -273,19 +289,22 @@ lifecycle_settle_creation_transaction() {
     kill -0 "$lifecycle_create_pid" >/dev/null 2>&1; then
     kill -KILL "$lifecycle_create_pid" >/dev/null 2>&1 || true
   fi
-  lifecycle_wait_for_creation_child
-  lifecycle_mask_latched_signals
 
   lifecycle_outcome_value=
-  if [ -L "$lifecycle_transaction_outcome" ]; then
-    lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || {
-      lifecycle_outcome_value=
+  if [ "$lifecycle_release_published" -eq 1 ]; then
+    if [ -L "$lifecycle_transaction_outcome" ]; then
+      lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || {
+        lifecycle_outcome_value=
+        lifecycle_settlement_status=67
+        lifecycle_latch_transaction_result "$lifecycle_settlement_status"
+      }
+      if [ -z "$lifecycle_outcome_value" ] && [ -n "$lifecycle_first_status" ]; then
+        trap '' HUP INT TERM
+        lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || lifecycle_outcome_value=
+      fi
+    elif [ "$lifecycle_settlement_status" -eq 0 ]; then
       lifecycle_settlement_status=67
       lifecycle_latch_transaction_result "$lifecycle_settlement_status"
-    }
-    if [ -z "$lifecycle_outcome_value" ] && [ -n "$lifecycle_first_status" ]; then
-      trap '' HUP INT TERM
-      lifecycle_outcome_value=$(readlink "$lifecycle_transaction_outcome") || lifecycle_outcome_value=
     fi
   fi
 
@@ -298,6 +317,13 @@ lifecycle_settle_creation_transaction() {
     esac
   fi
   lifecycle_latch_transaction_result "$lifecycle_transaction_result"
+
+  # The published outcome is authoritative before child process completion.
+  # Once classified, later signals cannot replace a non-zero result, but the
+  # child is still released, reaped, and reconciled before status propagation.
+  lifecycle_inject_settlement_events
+  lifecycle_wait_for_creation_child
+  lifecycle_mask_latched_signals
 
   # Ownership is a physical fact independent of the command status. Record it
   # only after the child is reaped so EXIT cleanup cannot race later creation.

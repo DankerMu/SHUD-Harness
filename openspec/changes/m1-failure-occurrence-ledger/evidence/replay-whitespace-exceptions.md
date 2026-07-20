@@ -67,12 +67,14 @@ pre-existing latch after ownership is knowable. One short child transaction
 ignores HUP/INT/TERM, wins or loses atomic `mkdir`, and publishes the same token
 inside the root only after its own `mkdir` succeeds. Every parent path after
 child spawn converges on one settlement boundary: it publishes the release
-barrier when possible, otherwise force-reaps the child, and waits. As soon as a
-non-zero release or outcome result is determined, the parent records it in the
-shared write-once latch before later settlement, ownership reconciliation, or
-transaction cleanup; an earlier signal already in the latch remains first. The
-parent accepts ownership only when child success, claim token, and root token
-all agree. A same-name or non-cooperating loser returns 73 without
+barrier when possible, otherwise force-reaps the child. When an outcome is
+published while the creation child remains live, the parent reads, classifies,
+and latches it before wait/reap; an unknown protocol value maps to 67. As soon
+as a non-zero release or outcome result is determined, the parent records it in
+the shared write-once latch before later settlement, ownership reconciliation,
+or transaction cleanup; an earlier signal already in the latch remains first.
+The parent accepts ownership only when child success, claim token, and root
+token all agree. A same-name or non-cooperating loser returns 73 without
 publishing a marker or touching the target; a pre-existing foreign target
 remains byte-for-byte unchanged. EXIT cleanup masks EXIT/HUP/INT/TERM as its
 first command, then preserves the write-once first status across later signals
@@ -81,8 +83,8 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 54/54 named scenarios. Nine are two-party races with
-18 explicit participant outcomes:
+The self-test passed 56/56 named scenarios. Eleven are two-party races with
+22 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -103,9 +105,13 @@ The self-test passed 54/54 named scenarios. Nine are two-party races with
 - TERM interrupting the outcome read preserves 143 after reconciling committed
   ownership, while injected release-publication failure preserves transaction
   status 67 after force-reaping the unreleased child;
-- verifier and harness chronology probes preserve release failure 67 and
-  collision outcome 73 when TERM arrives only after that result is determined;
-  all four prove that the earlier transaction result wins and every owned/probe
+- verifier and harness chronology probes preserve release failure 67 and a
+  published collision outcome 73 when TERM arrives only after that result is
+  determined; the collision child remains held until the parent has classified
+  73, delivered TERM, and released it;
+- verifier and harness unknown-outcome probes map the published protocol value
+  to 67 before the same held-child TERM/release sequence; all six chronology
+  probes prove that the earlier transaction result wins and every owned/probe
   artifact is removed;
 - verifier and harness first-claim-read TERM probes both preserve 143, reconcile
   and remove the exact owned claim, and prove that no creation child or

@@ -526,6 +526,7 @@ run_transaction_settlement_case() {
   transaction_pid_file="$transaction_fault_dir/creation-pids"
   fault_event="$transaction_fault_dir/fault-fired"
   later_event="$transaction_fault_dir/later-event-fired"
+  child_release="$transaction_fault_dir/child-release"
   collision_fixture=0
   mkdir -m 700 "$transaction_fault_dir"
 
@@ -592,27 +593,64 @@ exec /usr/bin/readlink "$@"
 EOF
       chmod 700 "$transaction_fault_dir/ln" "$transaction_fault_dir/readlink"
       ;;
-    collision_result_then_term)
+    collision_result_then_term|unknown_outcome_then_term)
       mkdir -m 700 "$child_root"
       collision_fixture=1
-      cat >"$transaction_fault_dir/readlink" <<'EOF'
+      cat >"$transaction_fault_dir/ln" <<'EOF'
 #!/bin/sh
-case "$1" in
-  *.transaction.*.ready)
-    outcome_path=${1%.ready}.outcome
-    if [ -L "$outcome_path" ] && [ ! -e "$SHUD_REPLAY_TEST_LATER_EVENT" ]; then
-      : >"$SHUD_REPLAY_TEST_LATER_EVENT"
-      kill -s TERM "$PPID"
+last_arg=
+for arg do last_arg=$arg; done
+case "$last_arg" in
+  *.transaction.*.outcome)
+    outcome_target=$2
+    if [ -n "${SHUD_REPLAY_TEST_FORCED_OUTCOME:-}" ]; then
+      outcome_token=${outcome_target%%:*}
+      /bin/ln -s "$outcome_token:$SHUD_REPLAY_TEST_FORCED_OUTCOME" "$last_arg" || exit $?
+    else
+      /bin/ln "$@" || exit $?
     fi
+    printf '%s\n' "$PPID" >>"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+    : >"$SHUD_REPLAY_TEST_FAULT_EVENT"
+    hold_attempt=0
+    while [ ! -e "$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE" ]; do
+      hold_attempt=$((hold_attempt + 1))
+      if [ "$hold_attempt" -ge 20 ]; then
+        parent_pid=$(/bin/ps -o ppid= -p "$PPID" | /usr/bin/awk '{ print $1 }')
+        : >"$SHUD_REPLAY_TEST_LATER_EVENT"
+        kill -s TERM "$parent_pid"
+        : >"$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE"
+        break
+      fi
+      sleep 0.05
+    done
     ;;
+  *) exec /bin/ln "$@" ;;
 esac
-exec /usr/bin/readlink "$@"
+exit 0
 EOF
-      chmod 700 "$transaction_fault_dir/readlink"
+      chmod 700 "$transaction_fault_dir/ln"
       ;;
     *)
       echo "unknown transaction fault: $fault_kind" >&2
       return 1
+      ;;
+  esac
+
+  forced_outcome=
+  settlement_event=
+  settlement_release=
+  settlement_signal=
+  case "$fault_kind" in
+    collision_result_then_term)
+      settlement_event=$later_event
+      settlement_release=$child_release
+      settlement_signal=TERM
+      ;;
+    unknown_outcome_then_term)
+      forced_outcome=99
+      settlement_event=$later_event
+      settlement_release=$child_release
+      settlement_signal=TERM
       ;;
   esac
 
@@ -630,6 +668,10 @@ EOF
     SHUD_REPLAY_TEST_FAULT_EVENT="$fault_event" \
     SHUD_REPLAY_TEST_FAULT_CLAIM="$child_claim" \
     SHUD_REPLAY_TEST_LATER_EVENT="$later_event" \
+    SHUD_REPLAY_TEST_SETTLEMENT_EVENT="$settlement_event" \
+    SHUD_REPLAY_TEST_SETTLEMENT_RELEASE="$settlement_release" \
+    SHUD_REPLAY_TEST_SETTLEMENT_SIGNAL="$settlement_signal" \
+    SHUD_REPLAY_TEST_FORCED_OUTCOME="$forced_outcome" \
     SHUD_REPLAY_TEST_CREATION_PID_FILE="$transaction_pid_file" \
     SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
     SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
@@ -646,9 +688,17 @@ EOF
     settlement_failed=1
   fi
   case "$fault_kind" in
-    release_result_then_term|collision_result_then_term)
+    release_result_then_term|collision_result_then_term|unknown_outcome_then_term)
       if [ ! -e "$later_event" ]; then
         echo "$case_name did not inject the later TERM" >&2
+        settlement_failed=1
+      fi
+      ;;
+  esac
+  case "$fault_kind" in
+    collision_result_then_term|unknown_outcome_then_term)
+      if [ ! -e "$fault_event" ]; then
+        echo "$case_name did not hold its published outcome" >&2
         settlement_failed=1
       fi
       ;;
@@ -821,6 +871,7 @@ case "$self_test_scenario" in
     transaction_outcome_read_term|transaction_release_publication_failure|\
     chronology_release_verifier|chronology_release_harness|\
     chronology_collision_verifier|chronology_collision_harness|\
+    chronology_unknown_verifier|chronology_unknown_harness|\
     claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     ;;
   *)
@@ -891,6 +942,12 @@ case "$self_test_scenario" in
   chronology_collision_harness)
     run_transaction_settlement_case collision_result_then_term_harness collision_result_then_term 73 harness
     ;;
+  chronology_unknown_verifier)
+    run_transaction_settlement_case unknown_outcome_then_term_verifier unknown_outcome_then_term 67 verifier
+    ;;
+  chronology_unknown_harness)
+    run_transaction_settlement_case unknown_outcome_then_term_harness unknown_outcome_then_term 67 harness
+    ;;
   claim_reconciliation_verifier_term)
     run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
     ;;
@@ -903,6 +960,7 @@ case "$self_test_scenario" in
   transaction_outcome_read_term|transaction_release_publication_failure|\
   chronology_release_verifier|chronology_release_harness|\
   chronology_collision_verifier|chronology_collision_harness|\
+  chronology_unknown_verifier|chronology_unknown_harness|\
   claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     lifecycle_begin_successful_finalization
     lifecycle_release_root_strict 84
@@ -977,16 +1035,18 @@ run_transaction_settlement_case release_result_then_term_verifier release_result
 run_transaction_settlement_case release_result_then_term_harness release_result_then_term 67 harness
 run_transaction_settlement_case collision_result_then_term_verifier collision_result_then_term 73 verifier
 run_transaction_settlement_case collision_result_then_term_harness collision_result_then_term 73 harness
+run_transaction_settlement_case unknown_outcome_then_term_verifier unknown_outcome_then_term 67 verifier
+run_transaction_settlement_case unknown_outcome_then_term_harness unknown_outcome_then_term 67 harness
 
 # A first claim-read signal is reconciled before any creation child is spawned.
 run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
 run_claim_reconciliation_case claim_reconciliation_harness_term harness
 
-if [ "$passed" -ne 54 ]; then
-  echo "replay scenario accounting mismatch: $passed/54" >&2
+if [ "$passed" -ne 56 ]; then
+  echo "replay scenario accounting mismatch: $passed/56" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 54/54 named scenarios passed (9 two-party races, 18 participant outcomes)"
+echo "replay evidence lifecycle: 56/56 named scenarios passed (11 two-party races, 22 participant outcomes)"
