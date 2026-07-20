@@ -73,6 +73,14 @@ lifecycle_inject_outcome_wait_signal() {
   fi
 }
 
+lifecycle_inject_negative_probe_handoff_hook() {
+  lifecycle_negative_probe_handoff_hook=${SHUD_REPLAY_TEST_NEGATIVE_PROBE_HANDOFF_HOOK:-}
+  if [ -n "$lifecycle_negative_probe_handoff_hook" ]; then
+    "$lifecycle_negative_probe_handoff_hook" \
+      "$lifecycle_transaction_outcome" "$lifecycle_token"
+  fi
+}
+
 lifecycle_inject_deferred_transfer_signal() {
   lifecycle_transfer_hook_status=$1
   lifecycle_transfer_release=${SHUD_REPLAY_TEST_TRANSFER_RELEASE:-}
@@ -128,6 +136,26 @@ lifecycle_latch_transfer_before_current_signal() {
   return 0
 }
 
+lifecycle_establish_deferred_transfer() {
+  if [ -z "$lifecycle_deferred_transfer_status" ] &&
+    [ -n "$lifecycle_deferred_signal_status" ]; then
+    # A nonempty transfer status is the single transfer-in-progress authority.
+    # Establish it before clearing the source slot so a handler can never see
+    # both representations empty. Keep it authoritative through the latch.
+    lifecycle_deferred_transfer_status=$lifecycle_deferred_signal_status
+    lifecycle_deferred_signal_status=
+    lifecycle_inject_deferred_transfer_signal "$lifecycle_deferred_transfer_status"
+  fi
+}
+
+lifecycle_finish_deferred_transfer() {
+  if [ -n "$lifecycle_deferred_transfer_status" ]; then
+    lifecycle_latch_status "$lifecycle_deferred_transfer_status"
+    lifecycle_deferred_transfer_status=
+    lifecycle_mask_latched_signals
+  fi
+}
+
 lifecycle_commit_deferred_signal() {
   if [ -n "$lifecycle_deferred_transfer_status" ]; then
     lifecycle_latch_status "$lifecycle_deferred_transfer_status"
@@ -135,15 +163,8 @@ lifecycle_commit_deferred_signal() {
     return
   fi
   if [ -n "$lifecycle_deferred_signal_status" ]; then
-    # A nonempty transfer status is the single transfer-in-progress authority.
-    # Establish it before clearing the source slot so a handler can never see
-    # both representations empty. Keep it authoritative through the latch.
-    lifecycle_deferred_transfer_status=$lifecycle_deferred_signal_status
-    lifecycle_deferred_signal_status=
-    lifecycle_inject_deferred_transfer_signal "$lifecycle_deferred_transfer_status"
-    lifecycle_latch_status "$lifecycle_deferred_transfer_status"
-    lifecycle_deferred_transfer_status=
-    lifecycle_mask_latched_signals
+    lifecycle_establish_deferred_transfer
+    lifecycle_finish_deferred_transfer
   fi
 }
 
@@ -462,8 +483,10 @@ lifecycle_wait_for_transaction_outcome() {
       lifecycle_transaction_decode_active=0
       return 0
     fi
+    lifecycle_establish_deferred_transfer
     lifecycle_transaction_decode_active=0
-    lifecycle_commit_deferred_signal
+    lifecycle_inject_negative_probe_handoff_hook
+    lifecycle_finish_deferred_transfer
     if ! kill -0 "$lifecycle_create_pid" >/dev/null 2>&1; then
       return 1
     fi
