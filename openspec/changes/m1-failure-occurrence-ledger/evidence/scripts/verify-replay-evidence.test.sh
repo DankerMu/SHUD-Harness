@@ -164,6 +164,666 @@ run_harness_case() {
   record_pass
 }
 
+run_decode_tail_signal_case() {
+  case_name=$1
+  child_kind=$2
+  first_signal=$3
+  second_signal=$4
+  expected=$5
+  root_name="case-$case_name"
+  transaction_fault_dir="$lifecycle_root/$case_name.decode-tail-probe"
+  first_event="$transaction_fault_dir/first-signal-fired"
+  second_event="$transaction_fault_dir/second-signal-fired"
+  mkdir -m 700 "$transaction_fault_dir"
+
+  case "$child_kind" in
+    verifier) tail_command=$verifier ;;
+    harness) tail_command=$self_test ;;
+    *)
+      echo "unknown decode-tail child kind: $child_kind" >&2
+      rm -rf "$transaction_fault_dir"
+      transaction_fault_dir=
+      return 1
+      ;;
+  esac
+
+  set +e
+  SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_SCENARIO=decode_tail_probe \
+    SHUD_REPLAY_TEST_OWNER_TOKEN="decode-tail-$case_name" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_FIRST="$first_signal" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_SECOND="$second_signal" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_FIRST_EVENT="$first_event" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_SECOND_EVENT="$second_event" \
+    "$tail_command" >/dev/null 2>&1
+  actual=$?
+  set -e
+
+  tail_failed=0
+  if [ "$actual" -ne "$expected" ]; then
+    echo "$case_name exited $actual, expected $expected" >&2
+    tail_failed=1
+  fi
+  if [ ! -e "$first_event" ]; then
+    echo "$case_name did not inject its first decode-tail signal" >&2
+    tail_failed=1
+  fi
+  if [ -n "$second_signal" ] && [ ! -e "$second_event" ]; then
+    echo "$case_name did not inject its second decode-tail signal" >&2
+    tail_failed=1
+  fi
+
+  rm -rf "$transaction_fault_dir"
+  transaction_fault_dir=
+  if ! assert_child_absent "$case_name" "$root_name"; then
+    tail_failed=1
+  fi
+  if [ "$tail_failed" -ne 0 ]; then return 1; fi
+  record_pass
+}
+
+run_committed_outcome_signal_case() {
+  case_name=$1
+  child_kind=$2
+  pre_clear_signal=$3
+  post_clear_signal=$4
+  second_read_mode=$5
+  expected=$6
+  root_name="case-$case_name"
+  child_token="committed-outcome-$case_name"
+  child_root="$lifecycle_root/$root_name"
+  child_claim="$lifecycle_root/.$root_name.claim"
+  child_marker="$child_root/.shud-replay-owner"
+  transaction_fault_dir="$lifecycle_root/$case_name.committed-outcome-probe"
+  transaction_probe_dir=$transaction_fault_dir
+  transaction_pid_file="$transaction_fault_dir/creation-pids"
+  outcome_published_event="$transaction_fault_dir/outcome-published"
+  pre_clear_event="$transaction_fault_dir/pre-clear-signal-fired"
+  post_clear_event="$transaction_fault_dir/post-clear-signal-fired"
+  second_read_event="$transaction_fault_dir/second-read-fired"
+  settlement_release="$transaction_fault_dir/settlement-release"
+  watchdog_event="$transaction_fault_dir/watchdog-fired"
+  mkdir -m 700 "$transaction_fault_dir"
+
+  cat >"$transaction_fault_dir/ln" <<'EOF'
+#!/bin/sh
+last_arg=
+for arg do last_arg=$arg; done
+case "$last_arg" in
+  *.transaction.*.outcome)
+    /bin/ln "$@" || exit $?
+    printf '%s\n' "$PPID" >>"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+    : >"$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT"
+    hold_attempt=0
+    while [ ! -e "$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE" ]; do
+      hold_attempt=$((hold_attempt + 1))
+      if [ "$hold_attempt" -ge 20 ]; then
+        : >"$SHUD_REPLAY_TEST_WATCHDOG_EVENT"
+        kill -KILL "$PPID" >/dev/null 2>&1 || true
+        exit 124
+      fi
+      sleep 0.05
+    done
+    exit 0
+    ;;
+esac
+exec /bin/ln "$@"
+EOF
+  cat >"$transaction_fault_dir/readlink" <<'EOF'
+#!/bin/sh
+case "$1" in
+  *.transaction.*.outcome)
+    if [ -e "$SHUD_REPLAY_TEST_POST_CLASSIFICATION_EVENT" ] &&
+      [ ! -e "$SHUD_REPLAY_TEST_SECOND_READ_EVENT" ]; then
+      creation_child_live=0
+      while IFS= read -r creation_pid; do
+        case "$creation_pid" in
+          ''|*[!0-9]*) ;;
+          *)
+            if kill -0 "$creation_pid" >/dev/null 2>&1; then
+              creation_child_live=1
+            fi
+            ;;
+        esac
+      done <"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+      if [ "$creation_child_live" -eq 1 ]; then
+        : >"$SHUD_REPLAY_TEST_SECOND_READ_EVENT"
+        case "$SHUD_REPLAY_TEST_SECOND_READ_MODE" in
+          fail) exit 1 ;;
+          73)
+            outcome_value=$(/usr/bin/readlink "$@") || exit $?
+            printf '%s:73\n' "${outcome_value%%:*}"
+            exit 0
+            ;;
+        esac
+      fi
+    fi
+    ;;
+esac
+exec /usr/bin/readlink "$@"
+EOF
+  chmod 700 "$transaction_fault_dir/ln" "$transaction_fault_dir/readlink"
+
+  case "$child_kind" in
+    verifier) transaction_command=$verifier ;;
+    harness) transaction_command=$self_test ;;
+    *)
+      echo "unknown committed-outcome child kind: $child_kind" >&2
+      rm -rf "$transaction_fault_dir"
+      transaction_fault_dir=
+      return 1
+      ;;
+  esac
+
+  set +e
+  PATH="$transaction_fault_dir:$PATH" \
+    SHUD_REPLAY_TEST_CREATION_PID_FILE="$transaction_pid_file" \
+    SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT="$outcome_published_event" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_FIRST="$pre_clear_signal" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_FIRST_EVENT="$pre_clear_event" \
+    SHUD_REPLAY_TEST_POST_CLASSIFICATION_SIGNAL="$post_clear_signal" \
+    SHUD_REPLAY_TEST_POST_CLASSIFICATION_EVENT="$post_clear_event" \
+    SHUD_REPLAY_TEST_SECOND_READ_EVENT="$second_read_event" \
+    SHUD_REPLAY_TEST_SECOND_READ_MODE="$second_read_mode" \
+    SHUD_REPLAY_TEST_SETTLEMENT_RELEASE="$settlement_release" \
+    SHUD_REPLAY_TEST_WATCHDOG_EVENT="$watchdog_event" \
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_SCENARIO=decode_tail_probe \
+    SHUD_REPLAY_TEST_SCENARIO=normal \
+    SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+    "$transaction_command" >/dev/null 2>&1
+  actual=$?
+  set -e
+
+  committed_failed=0
+  if [ "$actual" -ne "$expected" ]; then
+    echo "$case_name exited $actual, expected $expected" >&2
+    committed_failed=1
+  fi
+  if [ ! -e "$outcome_published_event" ]; then
+    echo "$case_name did not publish token:0 before classification" >&2
+    committed_failed=1
+  fi
+  if [ -n "$pre_clear_signal" ] && [ ! -e "$pre_clear_event" ]; then
+    echo "$case_name did not inject its pre-clear signal" >&2
+    committed_failed=1
+  fi
+  if [ ! -e "$post_clear_event" ]; then
+    echo "$case_name did not inject its post-clear signal" >&2
+    committed_failed=1
+  fi
+  if [ -e "$second_read_event" ]; then
+    echo "$case_name re-adopted the committed token:0 outcome" >&2
+    committed_failed=1
+  fi
+  if [ -e "$watchdog_event" ]; then
+    echo "$case_name used its watchdog instead of settlement release" >&2
+    committed_failed=1
+  fi
+  if [ ! -s "$transaction_pid_file" ]; then
+    echo "$case_name did not identify the creation child" >&2
+    committed_failed=1
+  else
+    while IFS= read -r child_pid; do
+      case "$child_pid" in
+        ''|*[!0-9]*)
+          echo "$case_name recorded invalid creation pid: $child_pid" >&2
+          committed_failed=1
+          ;;
+        *)
+          if kill -0 "$child_pid" >/dev/null 2>&1; then
+            echo "$case_name retained live creation child $child_pid" >&2
+            committed_failed=1
+          fi
+          ;;
+      esac
+    done <"$transaction_pid_file"
+  fi
+  if find "$lifecycle_root" -maxdepth 1 -name ".$root_name.claim.transaction.*" -print -quit |
+    grep . >/dev/null; then
+    echo "$case_name retained transaction links" >&2
+    committed_failed=1
+  fi
+  if [ -e "$child_claim" ] || [ -L "$child_claim" ] ||
+    [ -e "$child_marker" ] || [ -L "$child_marker" ] ||
+    [ -e "$child_root" ] || [ -L "$child_root" ]; then
+    echo "$case_name retained owned lifecycle residue" >&2
+    committed_failed=1
+  fi
+  if test_worktree_is_registered "$child_root/round-1" ||
+    test_worktree_is_registered "$child_root/round-2"; then
+    echo "$case_name retained a registered worktree" >&2
+    committed_failed=1
+  fi
+
+  cleanup_transaction_fault_residue "$child_root" "$child_claim" "$child_token"
+  transaction_fault_dir=
+  transaction_pid_file=
+  if [ "$committed_failed" -ne 0 ]; then return 1; fi
+  record_pass
+}
+
+run_deferred_transfer_case() {
+  case_name=$1
+  child_kind=$2
+  transfer_path=$3
+  later_signal=$4
+  root_name="case-$case_name"
+  child_token="deferred-transfer-$case_name"
+  child_root="$lifecycle_root/$root_name"
+  child_claim="$lifecycle_root/.$root_name.claim"
+  child_marker="$child_root/.shud-replay-owner"
+  transaction_fault_dir="$lifecycle_root/$case_name.deferred-transfer-probe"
+  transaction_probe_dir=$transaction_fault_dir
+  transaction_pid_file="$transaction_fault_dir/creation-pids"
+  outcome_attempted_event="$transaction_fault_dir/outcome-attempted"
+  outcome_published_event="$transaction_fault_dir/outcome-published"
+  first_event="$transaction_fault_dir/first-hup-fired"
+  transfer_release="$transaction_fault_dir/transfer-release"
+  transfer_event="$transaction_fault_dir/transfer-events"
+  later_event="$transaction_fault_dir/later-signal-fired"
+  nested_event="$transaction_fault_dir/nested-term-fired"
+  current_event="$transaction_fault_dir/current-event-attempts"
+  decode_entry_event="$transaction_fault_dir/decode-entries"
+  settlement_release="$transaction_fault_dir/settlement-release"
+  watchdog_event="$transaction_fault_dir/watchdog-fired"
+  mkdir -m 700 "$transaction_fault_dir"
+
+  cat >"$transaction_fault_dir/ln" <<'EOF'
+#!/bin/sh
+last_arg=
+for arg do last_arg=$arg; done
+case "$last_arg" in
+  *.transaction.*.outcome)
+    printf '%s\n' "$PPID" >>"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+    : >"$SHUD_REPLAY_TEST_OUTCOME_ATTEMPTED_EVENT"
+    if [ "$SHUD_REPLAY_TEST_DEFERRED_TRANSFER_PATH" = negative_wait ]; then
+      hold_path=$SHUD_REPLAY_TEST_TRANSFER_RELEASE
+    else
+      /bin/ln "$@" || exit $?
+      : >"$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT"
+      hold_path=$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE
+    fi
+    hold_attempt=0
+    while [ ! -e "$hold_path" ]; do
+      hold_attempt=$((hold_attempt + 1))
+      if [ "$hold_attempt" -ge 40 ]; then
+        : >"$SHUD_REPLAY_TEST_WATCHDOG_EVENT"
+        kill -KILL "$PPID" >/dev/null 2>&1 || true
+        exit 124
+      fi
+      sleep 0.05
+    done
+    if [ "$SHUD_REPLAY_TEST_DEFERRED_TRANSFER_PATH" = negative_wait ]; then
+      /bin/ln "$@" || exit $?
+      : >"$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT"
+    fi
+    exit 0
+    ;;
+esac
+exec /bin/ln "$@"
+EOF
+  chmod 700 "$transaction_fault_dir/ln"
+
+  case "$child_kind" in
+    verifier) transaction_command=$verifier ;;
+    harness) transaction_command=$self_test ;;
+    *)
+      echo "unknown deferred-transfer child kind: $child_kind" >&2
+      rm -rf "$transaction_fault_dir"
+      transaction_fault_dir=
+      return 1
+      ;;
+  esac
+
+  outcome_wait_signal=
+  decode_tail_signal=
+  if [ "$transfer_path" = negative_wait ]; then
+    outcome_wait_signal=HUP
+  else
+    decode_tail_signal=HUP
+  fi
+
+  set +e
+  PATH="$transaction_fault_dir:$PATH" \
+    SHUD_REPLAY_TEST_CREATION_PID_FILE="$transaction_pid_file" \
+    SHUD_REPLAY_TEST_OUTCOME_ATTEMPTED_EVENT="$outcome_attempted_event" \
+    SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT="$outcome_published_event" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_PATH="$transfer_path" \
+    SHUD_REPLAY_TEST_OUTCOME_WAIT_SIGNAL="$outcome_wait_signal" \
+    SHUD_REPLAY_TEST_OUTCOME_WAIT_EVENT="$first_event" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_FIRST="$decode_tail_signal" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_FIRST_EVENT="$first_event" \
+    SHUD_REPLAY_TEST_TRANSFER_RELEASE="$transfer_release" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT="$transfer_event" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_SIGNAL="$later_signal" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_SIGNAL_EVENT="$later_event" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_NESTED_SIGNAL=TERM \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_NESTED_EVENT="$nested_event" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_CURRENT_EVENT="$current_event" \
+    SHUD_REPLAY_TEST_DECODE_ENTRY_EVENT="$decode_entry_event" \
+    SHUD_REPLAY_TEST_SETTLEMENT_RELEASE="$settlement_release" \
+    SHUD_REPLAY_TEST_WATCHDOG_EVENT="$watchdog_event" \
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_SCENARIO=decode_tail_probe \
+    SHUD_REPLAY_TEST_SCENARIO=normal \
+    SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+    "$transaction_command" >/dev/null 2>&1
+  actual=$?
+  set -e
+
+  transfer_failed=0
+  if [ "$actual" -ne 129 ]; then
+    echo "$case_name exited $actual, expected 129" >&2
+    transfer_failed=1
+  fi
+  for required_event in "$outcome_attempted_event" "$outcome_published_event" \
+    "$first_event" "$later_event" "$nested_event" "$settlement_release"; do
+    if [ ! -e "$required_event" ]; then
+      echo "$case_name missed required event: $required_event" >&2
+      transfer_failed=1
+    fi
+  done
+  transfer_count=0
+  if [ -f "$transfer_event" ]; then
+    transfer_count=$(wc -l <"$transfer_event" | tr -d ' ')
+  fi
+  if [ "$transfer_count" -ne 1 ] ||
+    [ "$(sed -n '1p' "$transfer_event" 2>/dev/null || true)" != 129 ]; then
+    echo "$case_name transferred deferred HUP $transfer_count times, expected once" >&2
+    transfer_failed=1
+  fi
+  current_count=0
+  if [ -f "$current_event" ]; then
+    current_count=$(wc -l <"$current_event" | tr -d ' ')
+  fi
+  current_first=$(sed -n '1p' "$current_event" 2>/dev/null || true)
+  current_second=$(sed -n '2p' "$current_event" 2>/dev/null || true)
+  if [ "$current_count" -ne 2 ] ||
+    [ "$current_first" != "129:143:129" ] ||
+    [ "$current_second" != "129:130:129" ]; then
+    echo "$case_name current events were $current_first,$current_second; expected 129:143:129,129:130:129" >&2
+    transfer_failed=1
+  fi
+  decode_entry_count=0
+  if [ -f "$decode_entry_event" ]; then
+    decode_entry_count=$(wc -l <"$decode_entry_event" | tr -d ' ')
+  fi
+  if [ "$decode_entry_count" -ne 1 ]; then
+    echo "$case_name classified/adopted its outcome $decode_entry_count times, expected 1" >&2
+    transfer_failed=1
+  fi
+  if [ -e "$watchdog_event" ]; then
+    echo "$case_name used its watchdog instead of mandatory child settlement" >&2
+    transfer_failed=1
+  fi
+  if [ ! -s "$transaction_pid_file" ]; then
+    echo "$case_name did not identify the creation child" >&2
+    transfer_failed=1
+  else
+    while IFS= read -r child_pid; do
+      case "$child_pid" in
+        ''|*[!0-9]*)
+          echo "$case_name recorded invalid creation pid: $child_pid" >&2
+          transfer_failed=1
+          ;;
+        *)
+          if kill -0 "$child_pid" >/dev/null 2>&1; then
+            echo "$case_name retained live creation child $child_pid" >&2
+            transfer_failed=1
+          fi
+          ;;
+      esac
+    done <"$transaction_pid_file"
+  fi
+  if find "$lifecycle_root" -maxdepth 1 -name ".$root_name.claim.transaction.*" -print -quit |
+    grep . >/dev/null; then
+    echo "$case_name retained transaction links" >&2
+    transfer_failed=1
+  fi
+  if [ -e "$child_claim" ] || [ -L "$child_claim" ] ||
+    [ -e "$child_marker" ] || [ -L "$child_marker" ] ||
+    [ -e "$child_root" ] || [ -L "$child_root" ]; then
+    echo "$case_name retained owned lifecycle residue" >&2
+    transfer_failed=1
+  fi
+  if test_worktree_is_registered "$child_root/round-1" ||
+    test_worktree_is_registered "$child_root/round-2"; then
+    echo "$case_name retained a registered worktree" >&2
+    transfer_failed=1
+  fi
+
+  cleanup_transaction_fault_residue "$child_root" "$child_claim" "$child_token"
+  if [ -e "$child_root" ] || [ -L "$child_root" ] ||
+    [ -e "$transaction_probe_dir" ]; then
+    echo "$case_name retained deferred-transfer probe residue" >&2
+    transfer_failed=1
+  fi
+  if [ "$transfer_failed" -ne 0 ]; then return 1; fi
+  record_pass
+}
+
+run_outcome_disappearance_case() {
+  case_name=$1
+  child_kind=$2
+  restore_outcome=$3
+  expected=$4
+  root_name="case-$case_name"
+  child_token="outcome-disappearance-$case_name"
+  child_root="$lifecycle_root/$root_name"
+  child_claim="$lifecycle_root/.$root_name.claim"
+  child_marker="$child_root/.shud-replay-owner"
+  transaction_fault_dir="$lifecycle_root/$case_name.outcome-disappearance-probe"
+  transaction_probe_dir=$transaction_fault_dir
+  transaction_pid_file="$transaction_fault_dir/creation-pids"
+  outcome_published_event="$transaction_fault_dir/outcome-published"
+  disappearance_event="$transaction_fault_dir/outcome-removed"
+  restoration_event="$transaction_fault_dir/outcome-restored"
+  signal_event="$transaction_fault_dir/term-fired"
+  decode_entry_event="$transaction_fault_dir/decode-entries"
+  readoption_event="$transaction_fault_dir/forbidden-readoption"
+  settlement_release="$transaction_fault_dir/settlement-release"
+  watchdog_event="$transaction_fault_dir/watchdog-fired"
+  mkdir -m 700 "$transaction_fault_dir"
+
+  cat >"$transaction_fault_dir/ln" <<'EOF'
+#!/bin/sh
+last_arg=
+for arg do last_arg=$arg; done
+case "$last_arg" in
+  *.transaction.*.outcome)
+    /bin/ln "$@" || exit $?
+    printf '%s\n' "$PPID" >>"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+    : >"$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT"
+    hold_attempt=0
+    while [ ! -e "$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE" ]; do
+      hold_attempt=$((hold_attempt + 1))
+      if [ "$hold_attempt" -ge 20 ]; then
+        : >"$SHUD_REPLAY_TEST_WATCHDOG_EVENT"
+        kill -KILL "$PPID" >/dev/null 2>&1 || true
+        exit 124
+      fi
+      sleep 0.05
+    done
+    exit 0
+    ;;
+esac
+exec /bin/ln "$@"
+EOF
+  cat >"$transaction_fault_dir/outcome-witnessed-hook" <<'EOF'
+#!/bin/sh
+rm "$1" || exit $?
+: >"$SHUD_REPLAY_TEST_DISAPPEARANCE_EVENT"
+EOF
+  cat >"$transaction_fault_dir/post-classification-hook" <<'EOF'
+#!/bin/sh
+if [ -e "$SHUD_REPLAY_TEST_RESTORATION_EVENT" ]; then
+  exit 0
+fi
+/bin/ln -s "$2:73" "$1" || exit $?
+: >"$SHUD_REPLAY_TEST_RESTORATION_EVENT"
+EOF
+  cat >"$transaction_fault_dir/readlink" <<'EOF'
+#!/bin/sh
+case "$1" in
+  *.transaction.*.outcome)
+    if [ ! -e "$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE" ]; then
+      : >"$SHUD_REPLAY_TEST_READOPTION_EVENT"
+    fi
+    ;;
+esac
+exec /usr/bin/readlink "$@"
+EOF
+  chmod 700 "$transaction_fault_dir/ln" \
+    "$transaction_fault_dir/outcome-witnessed-hook" \
+    "$transaction_fault_dir/post-classification-hook" \
+    "$transaction_fault_dir/readlink"
+
+  case "$child_kind" in
+    verifier) transaction_command=$verifier ;;
+    harness) transaction_command=$self_test ;;
+    *)
+      echo "unknown outcome-disappearance child kind: $child_kind" >&2
+      rm -rf "$transaction_fault_dir"
+      transaction_fault_dir=
+      return 1
+      ;;
+  esac
+
+  post_classification_hook=
+  decode_tail_signal=
+  post_classification_signal=
+  if [ "$restore_outcome" -eq 1 ]; then
+    post_classification_hook="$transaction_fault_dir/post-classification-hook"
+    post_classification_signal=TERM
+  else
+    decode_tail_signal=TERM
+  fi
+
+  set +e
+  PATH="$transaction_fault_dir:$PATH" \
+    SHUD_REPLAY_TEST_CREATION_PID_FILE="$transaction_pid_file" \
+    SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT="$outcome_published_event" \
+    SHUD_REPLAY_TEST_OUTCOME_WITNESSED_HOOK="$transaction_fault_dir/outcome-witnessed-hook" \
+    SHUD_REPLAY_TEST_DISAPPEARANCE_EVENT="$disappearance_event" \
+    SHUD_REPLAY_TEST_POST_CLASSIFICATION_HOOK="$post_classification_hook" \
+    SHUD_REPLAY_TEST_RESTORATION_EVENT="$restoration_event" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_FIRST="$decode_tail_signal" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_FIRST_EVENT="$signal_event" \
+    SHUD_REPLAY_TEST_POST_CLASSIFICATION_SIGNAL="$post_classification_signal" \
+    SHUD_REPLAY_TEST_POST_CLASSIFICATION_EVENT="$signal_event" \
+    SHUD_REPLAY_TEST_DECODE_ENTRY_EVENT="$decode_entry_event" \
+    SHUD_REPLAY_TEST_READOPTION_EVENT="$readoption_event" \
+    SHUD_REPLAY_TEST_SETTLEMENT_RELEASE="$settlement_release" \
+    SHUD_REPLAY_TEST_WATCHDOG_EVENT="$watchdog_event" \
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_SCENARIO=decode_tail_probe \
+    SHUD_REPLAY_TEST_SCENARIO=normal \
+    SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+    "$transaction_command" >/dev/null 2>&1
+  actual=$?
+  set -e
+
+  disappearance_failed=0
+  if [ "$actual" -ne "$expected" ]; then
+    echo "$case_name exited $actual, expected $expected" >&2
+    disappearance_failed=1
+  fi
+  if [ ! -e "$outcome_published_event" ]; then
+    echo "$case_name did not publish its outcome before the ordinary witness" >&2
+    disappearance_failed=1
+  fi
+  if [ ! -e "$disappearance_event" ]; then
+    echo "$case_name did not remove the witnessed outcome before classification" >&2
+    disappearance_failed=1
+  fi
+  if [ ! -e "$signal_event" ]; then
+    echo "$case_name did not inject its later TERM" >&2
+    disappearance_failed=1
+  fi
+  if [ "$restore_outcome" -eq 1 ]; then
+    if [ ! -e "$restoration_event" ]; then
+      echo "$case_name did not restore token:73 before its later TERM" >&2
+      disappearance_failed=1
+    fi
+    if [ -e "$readoption_event" ]; then
+      echo "$case_name re-adopted the restored token:73 outcome" >&2
+      disappearance_failed=1
+    fi
+  elif [ -e "$restoration_event" ]; then
+    echo "$case_name unexpectedly restored its disappeared outcome" >&2
+    disappearance_failed=1
+  fi
+  decode_entry_count=0
+  if [ -f "$decode_entry_event" ]; then
+    decode_entry_count=$(wc -l <"$decode_entry_event" | tr -d ' ')
+  fi
+  if [ "$decode_entry_count" -ne 1 ]; then
+    echo "$case_name classified its outcome $decode_entry_count times, expected 1" >&2
+    disappearance_failed=1
+  fi
+  if [ -e "$watchdog_event" ]; then
+    echo "$case_name used its watchdog instead of settlement release" >&2
+    disappearance_failed=1
+  fi
+  if [ ! -e "$settlement_release" ]; then
+    echo "$case_name did not release its creation child during settlement" >&2
+    disappearance_failed=1
+  fi
+  if [ ! -s "$transaction_pid_file" ]; then
+    echo "$case_name did not identify the creation child" >&2
+    disappearance_failed=1
+  else
+    while IFS= read -r child_pid; do
+      case "$child_pid" in
+        ''|*[!0-9]*)
+          echo "$case_name recorded invalid creation pid: $child_pid" >&2
+          disappearance_failed=1
+          ;;
+        *)
+          if kill -0 "$child_pid" >/dev/null 2>&1; then
+            echo "$case_name retained live creation child $child_pid" >&2
+            disappearance_failed=1
+          fi
+          ;;
+      esac
+    done <"$transaction_pid_file"
+  fi
+  if find "$lifecycle_root" -maxdepth 1 -name ".$root_name.claim.transaction.*" -print -quit |
+    grep . >/dev/null; then
+    echo "$case_name retained transaction links" >&2
+    disappearance_failed=1
+  fi
+  if [ -e "$child_claim" ] || [ -L "$child_claim" ] ||
+    [ -e "$child_marker" ] || [ -L "$child_marker" ] ||
+    [ -e "$child_root" ] || [ -L "$child_root" ]; then
+    echo "$case_name retained owned lifecycle residue" >&2
+    disappearance_failed=1
+  fi
+  if test_worktree_is_registered "$child_root/round-1" ||
+    test_worktree_is_registered "$child_root/round-2"; then
+    echo "$case_name retained a registered worktree" >&2
+    disappearance_failed=1
+  fi
+
+  cleanup_transaction_fault_residue "$child_root" "$child_claim" "$child_token"
+  if [ -e "$child_root" ] || [ -L "$child_root" ] ||
+    [ -e "$transaction_probe_dir" ]; then
+    echo "$case_name retained outcome-disappearance probe residue" >&2
+    disappearance_failed=1
+  fi
+  if [ "$disappearance_failed" -ne 0 ]; then return 1; fi
+  record_pass
+}
+
 create_collision_fixture() {
   fixture_name=$1
   fixture_kind=${2:-marker}
@@ -540,6 +1200,9 @@ run_transaction_settlement_case() {
   child_release="$transaction_fault_dir/child-release"
   watchdog_event="$transaction_fault_dir/watchdog-fired"
   handler_read_failure_event="$transaction_fault_dir/handler-read-failed"
+  decode_failure_event="$transaction_fault_dir/decode-read-failed"
+  decode_reentry_event="$transaction_fault_dir/decode-reentered"
+  signal_burst_done_event="$transaction_fault_dir/signal-burst-done"
   collision_fixture=0
   mkdir -m 700 "$transaction_fault_dir"
 
@@ -608,7 +1271,7 @@ EOF
       ;;
     collision_result_then_term|unknown_outcome_then_term|\
     published_collision_read_term|published_unknown_read_term|\
-    published_handler_read_failure)
+    published_handler_read_failure|decoded_read_failure_then_handler_collision)
       mkdir -m 700 "$child_root"
       collision_fixture=1
       cat >"$transaction_fault_dir/ln" <<'EOF'
@@ -674,6 +1337,34 @@ exec /usr/bin/readlink "$@"
 EOF
           chmod 700 "$transaction_fault_dir/readlink"
           ;;
+        decoded_read_failure_then_handler_collision)
+          cat >"$transaction_fault_dir/readlink" <<'EOF'
+#!/bin/sh
+case "$1" in
+  *.transaction.*.outcome)
+    if [ ! -e "$SHUD_REPLAY_TEST_DECODE_FAILURE_EVENT" ]; then
+      : >"$SHUD_REPLAY_TEST_DECODE_FAILURE_EVENT"
+      lifecycle_target_parent=$PPID
+      (
+        : >"$SHUD_REPLAY_TEST_LATER_EVENT"
+        lifecycle_signal_count=0
+        while [ "$lifecycle_signal_count" -lt 262144 ]; do
+          kill -s TERM "$lifecycle_target_parent" >/dev/null 2>&1 || break
+          lifecycle_signal_count=$((lifecycle_signal_count + 1))
+        done
+        : >"$SHUD_REPLAY_TEST_SIGNAL_BURST_DONE_EVENT"
+      ) </dev/null >/dev/null 2>&1 &
+      exit 1
+    fi
+    if [ ! -e "$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE" ]; then
+      : >"$SHUD_REPLAY_TEST_DECODE_REENTRY_EVENT"
+    fi
+    ;;
+esac
+exec /usr/bin/readlink "$@"
+EOF
+          chmod 700 "$transaction_fault_dir/readlink"
+          ;;
       esac
       ;;
     *)
@@ -710,6 +1401,9 @@ EOF
       published_outcome_signal=TERM
       settlement_release=$child_release
       ;;
+    decoded_read_failure_then_handler_collision)
+      settlement_release=$child_release
+      ;;
   esac
 
   case "$child_kind" in
@@ -728,6 +1422,9 @@ EOF
     SHUD_REPLAY_TEST_LATER_EVENT="$later_event" \
     SHUD_REPLAY_TEST_WATCHDOG_EVENT="$watchdog_event" \
     SHUD_REPLAY_TEST_HANDLER_READ_FAILURE_EVENT="$handler_read_failure_event" \
+    SHUD_REPLAY_TEST_DECODE_FAILURE_EVENT="$decode_failure_event" \
+    SHUD_REPLAY_TEST_DECODE_REENTRY_EVENT="$decode_reentry_event" \
+    SHUD_REPLAY_TEST_SIGNAL_BURST_DONE_EVENT="$signal_burst_done_event" \
     SHUD_REPLAY_TEST_PUBLISHED_OUTCOME_EVENT="$later_event" \
     SHUD_REPLAY_TEST_PUBLISHED_OUTCOME_SIGNAL="$published_outcome_signal" \
     SHUD_REPLAY_TEST_SETTLEMENT_EVENT="$settlement_event" \
@@ -744,6 +1441,12 @@ EOF
   actual=$?
   set -e
 
+  if [ "$fault_kind" = decoded_read_failure_then_handler_collision ] &&
+    ! wait_for_ready "$signal_burst_done_event"; then
+    echo "$case_name signal burst did not finish" >&2
+    return 1
+  fi
+
   settlement_failed=0
   if [ "$actual" -ne "$expected" ]; then
     echo "$case_name exited $actual, expected $expected" >&2
@@ -752,7 +1455,7 @@ EOF
   case "$fault_kind" in
     release_result_then_term|collision_result_then_term|unknown_outcome_then_term|\
     published_collision_read_term|published_unknown_read_term|\
-    published_handler_read_failure)
+    published_handler_read_failure|decoded_read_failure_then_handler_collision)
       if [ ! -e "$later_event" ]; then
         echo "$case_name did not inject the later TERM" >&2
         settlement_failed=1
@@ -762,7 +1465,7 @@ EOF
   case "$fault_kind" in
     collision_result_then_term|unknown_outcome_then_term|\
     published_collision_read_term|published_unknown_read_term|\
-    published_handler_read_failure)
+    published_handler_read_failure|decoded_read_failure_then_handler_collision)
       if [ ! -e "$fault_event" ]; then
         echo "$case_name did not hold its published outcome" >&2
         settlement_failed=1
@@ -776,6 +1479,11 @@ EOF
   if [ "$fault_kind" = published_handler_read_failure ] &&
     [ ! -e "$handler_read_failure_event" ]; then
     echo "$case_name did not fail the handler-internal outcome read" >&2
+    settlement_failed=1
+  fi
+  if [ "$fault_kind" = decoded_read_failure_then_handler_collision ] &&
+    [ -e "$decode_reentry_event" ]; then
+    echo "$case_name re-entered outcome decoding before committing status 67" >&2
     settlement_failed=1
   fi
   if [ ! -s "$transaction_pid_file" ]; then
@@ -950,6 +1658,16 @@ case "$self_test_scenario" in
     chronology_published_collision_read_verifier|chronology_published_collision_read_harness|\
     chronology_published_unknown_read_verifier|chronology_published_unknown_read_harness|\
     chronology_handler_read_failure_verifier|chronology_handler_read_failure_harness|\
+    chronology_decode_commit_verifier|chronology_decode_commit_harness|\
+    decode_tail_probe|decode_tail_term_verifier|decode_tail_term_harness|\
+    decode_tail_hup_int_verifier|\
+    classification_commit_hup_int_verifier|classification_commit_hup_int_harness|\
+    classification_commit_read_failure_verifier|classification_commit_read_failure_harness|\
+    classification_commit_collision_verifier|classification_commit_collision_harness|\
+    deferred_transfer_wait_verifier|deferred_transfer_wait_harness|\
+    deferred_transfer_decode_verifier|deferred_transfer_decode_harness|\
+    outcome_disappearance_term_verifier|outcome_disappearance_term_harness|\
+    outcome_disappearance_restore_verifier|outcome_disappearance_restore_harness|\
     transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
     claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     ;;
@@ -965,6 +1683,12 @@ lifecycle_begin "$test_root_parent" "$test_root_name" "$harness_owner_token"
 lifecycle_acquire_root
 
 case "$self_test_scenario" in
+  decode_tail_probe)
+    lifecycle_begin_successful_finalization
+    lifecycle_release_root_strict 84
+    trap - EXIT HUP INT TERM
+    exit 0
+    ;;
   harness_startup_term)
     kill -s TERM "$$"
     lifecycle_abort_if_latched
@@ -1045,6 +1769,66 @@ case "$self_test_scenario" in
   chronology_handler_read_failure_harness)
     run_transaction_settlement_case handler_read_failure_harness published_handler_read_failure 67 harness
     ;;
+  chronology_decode_commit_verifier)
+    for decode_commit_attempt in 1 2 3 4 5 6 7 8; do
+      run_transaction_settlement_case "decode_commit_verifier_$decode_commit_attempt" \
+        decoded_read_failure_then_handler_collision 67 verifier
+    done
+    ;;
+  chronology_decode_commit_harness)
+    for decode_commit_attempt in 1 2 3 4 5 6 7 8; do
+      run_transaction_settlement_case "decode_commit_harness_$decode_commit_attempt" \
+        decoded_read_failure_then_handler_collision 67 harness
+    done
+    ;;
+  classification_commit_hup_int_verifier)
+    run_committed_outcome_signal_case classification_commit_hup_int_verifier \
+      verifier HUP INT zero 129
+    ;;
+  classification_commit_hup_int_harness)
+    run_committed_outcome_signal_case classification_commit_hup_int_harness \
+      harness HUP INT zero 129
+    ;;
+  classification_commit_read_failure_verifier)
+    run_committed_outcome_signal_case classification_commit_read_failure_verifier \
+      verifier '' TERM fail 143
+    ;;
+  classification_commit_read_failure_harness)
+    run_committed_outcome_signal_case classification_commit_read_failure_harness \
+      harness '' TERM fail 143
+    ;;
+  classification_commit_collision_verifier)
+    run_committed_outcome_signal_case classification_commit_collision_verifier \
+      verifier '' TERM 73 143
+    ;;
+  classification_commit_collision_harness)
+    run_committed_outcome_signal_case classification_commit_collision_harness \
+      harness '' TERM 73 143
+    ;;
+  deferred_transfer_wait_verifier)
+    run_deferred_transfer_case deferred_transfer_wait_verifier verifier negative_wait INT
+    ;;
+  deferred_transfer_wait_harness)
+    run_deferred_transfer_case deferred_transfer_wait_harness harness negative_wait INT
+    ;;
+  deferred_transfer_decode_verifier)
+    run_deferred_transfer_case deferred_transfer_decode_verifier verifier decode_tail INT
+    ;;
+  deferred_transfer_decode_harness)
+    run_deferred_transfer_case deferred_transfer_decode_harness harness decode_tail INT
+    ;;
+  outcome_disappearance_term_verifier)
+    run_outcome_disappearance_case outcome_disappearance_term_verifier verifier 0 67
+    ;;
+  outcome_disappearance_term_harness)
+    run_outcome_disappearance_case outcome_disappearance_term_harness harness 0 67
+    ;;
+  outcome_disappearance_restore_verifier)
+    run_outcome_disappearance_case outcome_disappearance_restore_verifier verifier 1 67
+    ;;
+  outcome_disappearance_restore_harness)
+    run_outcome_disappearance_case outcome_disappearance_restore_harness harness 1 67
+    ;;
   transaction_signal_before_publication_verifier)
     run_acquisition_signal_case signal_before_publication_verifier TERM '' 143 verifier
     ;;
@@ -1067,12 +1851,44 @@ case "$self_test_scenario" in
   chronology_published_collision_read_verifier|chronology_published_collision_read_harness|\
   chronology_published_unknown_read_verifier|chronology_published_unknown_read_harness|\
   chronology_handler_read_failure_verifier|chronology_handler_read_failure_harness|\
+  chronology_decode_commit_verifier|chronology_decode_commit_harness|\
+  classification_commit_hup_int_verifier|classification_commit_hup_int_harness|\
+  classification_commit_read_failure_verifier|classification_commit_read_failure_harness|\
+  classification_commit_collision_verifier|classification_commit_collision_harness|\
+  deferred_transfer_wait_verifier|deferred_transfer_wait_harness|\
+  deferred_transfer_decode_verifier|deferred_transfer_decode_harness|\
+  outcome_disappearance_term_verifier|outcome_disappearance_term_harness|\
+  outcome_disappearance_restore_verifier|outcome_disappearance_restore_harness|\
   transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
   claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     lifecycle_begin_successful_finalization
     lifecycle_release_root_strict 84
     trap - EXIT HUP INT TERM
     echo "replay lifecycle fault probe: 1/1 passed"
+    exit 0
+    ;;
+  decode_tail_term_verifier)
+    run_decode_tail_signal_case decode_tail_term_verifier verifier TERM '' 143
+    lifecycle_begin_successful_finalization
+    lifecycle_release_root_strict 84
+    trap - EXIT HUP INT TERM
+    echo "replay evidence lifecycle: 1/1 passed"
+    exit 0
+    ;;
+  decode_tail_term_harness)
+    run_decode_tail_signal_case decode_tail_term_harness harness TERM '' 143
+    lifecycle_begin_successful_finalization
+    lifecycle_release_root_strict 84
+    trap - EXIT HUP INT TERM
+    echo "replay evidence lifecycle: 1/1 passed"
+    exit 0
+    ;;
+  decode_tail_hup_int_verifier)
+    run_decode_tail_signal_case decode_tail_hup_int_verifier verifier HUP INT 129
+    lifecycle_begin_successful_finalization
+    lifecycle_release_root_strict 84
+    trap - EXIT HUP INT TERM
+    echo "replay evidence lifecycle: 1/1 passed"
     exit 0
     ;;
 esac
@@ -1151,6 +1967,46 @@ run_transaction_settlement_case published_unknown_read_term_harness published_un
 run_transaction_settlement_case handler_read_failure_verifier published_handler_read_failure 67 verifier
 run_transaction_settlement_case handler_read_failure_harness published_handler_read_failure 67 harness
 
+# A decoded read failure commits before a later handler can re-adopt collision.
+run_transaction_settlement_case decode_commit_verifier decoded_read_failure_then_handler_collision 67 verifier
+run_transaction_settlement_case decode_commit_harness decoded_read_failure_then_handler_collision 67 harness
+
+# A token:0 decode consumes a pre-clear event; ordered events remain first-wins.
+run_decode_tail_signal_case decode_tail_term_verifier verifier TERM '' 143
+run_decode_tail_signal_case decode_tail_term_harness harness TERM '' 143
+run_decode_tail_signal_case decode_tail_hup_int_verifier verifier HUP INT 129
+
+# Outcome classification remains committed through child settlement. A
+# post-clear handler consumes any deferred first event and never re-adopts the
+# publication, even if a second read would fail or decode as collision.
+run_committed_outcome_signal_case classification_commit_hup_int_verifier \
+  verifier HUP INT zero 129
+run_committed_outcome_signal_case classification_commit_hup_int_harness \
+  harness HUP INT zero 129
+run_committed_outcome_signal_case classification_commit_read_failure_verifier \
+  verifier '' TERM fail 143
+run_committed_outcome_signal_case classification_commit_read_failure_harness \
+  harness '' TERM fail 143
+run_committed_outcome_signal_case classification_commit_collision_verifier \
+  verifier '' TERM 73 143
+run_committed_outcome_signal_case classification_commit_collision_harness \
+  harness '' TERM 73 143
+
+# Deferred HUP remains authoritative while moving from the negative-wait or
+# exact-zero decode slot into the write-once latch. A reentrant later handler
+# attempts its own event only after the transferred 129 is first.
+run_deferred_transfer_case deferred_transfer_wait_verifier verifier negative_wait INT
+run_deferred_transfer_case deferred_transfer_wait_harness harness negative_wait INT
+run_deferred_transfer_case deferred_transfer_decode_verifier verifier decode_tail INT
+run_deferred_transfer_case deferred_transfer_decode_harness harness decode_tail INT
+
+# Once ordinary settlement witnesses publication, disappearance commits 67
+# before a later TERM or any attempt to re-adopt a restored token:73 outcome.
+run_outcome_disappearance_case outcome_disappearance_term_verifier verifier 0 67
+run_outcome_disappearance_case outcome_disappearance_term_harness harness 0 67
+run_outcome_disappearance_case outcome_disappearance_restore_verifier verifier 1 67
+run_outcome_disappearance_case outcome_disappearance_restore_harness harness 1 67
+
 # A handled event that arrives before outcome publication remains first.
 run_acquisition_signal_case signal_before_publication_verifier TERM '' 143 verifier
 run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harness
@@ -1159,11 +2015,11 @@ run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harnes
 run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
 run_claim_reconciliation_case claim_reconciliation_harness_term harness
 
-if [ "$passed" -ne 64 ]; then
-  echo "replay scenario accounting mismatch: $passed/64" >&2
+if [ "$passed" -ne 83 ]; then
+  echo "replay scenario accounting mismatch: $passed/83" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 64/64 named scenarios passed (17 two-party races, 34 participant outcomes)"
+echo "replay evidence lifecycle: 83/83 named scenarios passed (28 two-party races, 56 participant outcomes)"

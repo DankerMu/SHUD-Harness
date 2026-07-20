@@ -245,3 +245,43 @@
   exact zero, collision 73, TERM-before-publication, handler masking, mandatory
   child settlement, A4 claim behavior, and zero residue in the expanded
   64-case matrix.
+
+## 12. Phase-7 Child A6 — Atomic Decode Commit
+
+- [x] 12.1 Keep `decode_active` asserted across outcome classification, decoded
+  result latching, deferred-event latching, and only then flag clearing. Route
+  handler adoption and ordinary settlement through that one atomic shell state
+  boundary so a later handler cannot re-read publication before status 67 is
+  committed. This initial A6 ordering is superseded at the exact-zero tail by
+  12.4; decoded non-zero commit-before-clear remains intact.
+- [x] 12.2 Add deterministic verifier and harness public-surface regressions in
+  which the first published-outcome read fails to 67, TERM arrives in the
+  decode-to-commit window, and a forbidden second read could observe collision
+  `token:73`. Both MUST preserve 67 and leave no child, claim, transaction link,
+  marker, root, registered worktree, watchdog, fault probe, or signal helper.
+- [x] 12.3 Preserve exact zero, collision 73, unknown/read failure 67,
+  TERM-before-publication, handler masking, mandatory child settlement, A4
+  claim reconciliation, A5 watchdog behavior, replay-patch bytes, and the full
+  expanded 66-case matrix.
+- [x] 12.4 Close the exact-zero decode tail: latch a decoded non-zero result,
+  clear `decode_active`, and only then consume the deferred first event so a
+  signal before the clear is consumed and one after the clear latches directly.
+  Prove verifier/harness `token:0` TERM returns 143 plus verifier HUP→INT
+  first-event order with zero residue in the expanded 69-case matrix.
+- [x] 12.5 Keep the classified transaction outcome committed until child
+  settlement completes. Once committed, handlers MUST NOT re-adopt the
+  publication; a post-clear handler MUST commit an existing deferred first
+  event before its current event. Prove verifier/harness HUP→INT returns 129
+  and post-clear TERM returns 143 even when a forbidden second read would fail
+  or decode collision 73, with zero residue in the expanded 75-case matrix.
+- [x] 12.6 Once ordinary settlement witnesses outcome publication, carry that
+  required-publication fact into the shared decoder. A link that disappears
+  before classification MUST atomically commit protocol status 67 before later
+  TERM or a restored collision 73; handler adoption before publication retains
+  signal-first behavior. Prove disappearance and disappearance-plus-restore in
+  verifier and harness with settlement and zero residue in the 79-case matrix.
+- [x] 12.7 Represent deferred-to-first-status transfer with one handler-visible
+  authority from capture through latch. A handler entering after the source
+  slot clears MUST commit transferred HUP 129 before its later INT/TERM, without
+  discarding that later event. Prove negative-wait and exact-zero paths through
+  verifier and harness with settlement and zero residue in the 83-case matrix.

@@ -69,12 +69,22 @@ inside the root only after its own `mkdir` succeeds. Every parent path after
 child spawn converges on one settlement boundary: it publishes the release
 barrier when possible, otherwise force-reaps the child. When an outcome is
 published while the creation child remains live, the parent reads, classifies,
-and latches it before wait/reap. Handler adoption and ordinary settlement use
-one decoder that distinguishes no publication, exact token zero, collision 73,
-and protocol/read failures mapped to 67. A signal arriving during ordinary
-decoding is deferred until that decoded result is latched; an active handler
-masks reentrancy while it uses the same decoder before recording its signal.
-This closes both read windows without changing event-before-publication order.
+and latches it before wait/reap. The outcome wait defers handlers across its
+presence test and witnessed-state write. Once publication is witnessed, a link
+that disappears before classification is a committed protocol failure 67, not
+an unpublished outcome. Handler adoption and ordinary settlement use
+one atomic decode-and-commit boundary that distinguishes no publication, exact
+token zero, collision 73, and protocol/read failures mapped to 67.
+`decode_active` remains asserted through classification and decoded-result
+latching. Once classification is committed, handlers cannot re-adopt the
+publication until transaction settlement ends. The boundary then clears the
+flag before consuming the deferred first event; a post-clear handler first
+commits any existing deferred event and only then its current event. This
+handoff uses one nonempty transfer status as its authority from capture through
+the first-status latch. A reentrant handler sees and commits that status before
+attempting its current event, even after the original deferred slot clears.
+This closes all read/commit and exact-zero tail windows without changing event-
+before-publication order or discarding the later event.
 As soon as a non-zero release or outcome result is determined, the parent
 records it in the shared write-once latch before later settlement, ownership
 reconciliation, or transaction cleanup; an earlier signal already in the
@@ -89,8 +99,8 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 64/64 named scenarios. Seventeen are two-party races with
-34 explicit participant outcomes:
+The self-test passed 83/83 named scenarios. Twenty-eight are two-party races
+with 56 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -127,6 +137,28 @@ The self-test passed 64/64 named scenarios. Seventeen are two-party races with
 - verifier and harness handler-read-failure probes publish collision first,
   make the handler's authoritative read fail, and preserve protocol status 67
   before the same TERM. Both prove mandatory child settlement and zero residue;
+- verifier and harness decode-commit probes make the first ordinary outcome
+  read fail to 67 while TERM is delivered before commit and a forbidden second
+  read could observe collision 73. Both preserve 67 without re-entering the
+  decoder and leave the signal helper plus every lifecycle artifact absent;
+- verifier and harness exact-zero tail probes inject TERM immediately before
+  `decode_active` clears and preserve 143; an ordered verifier HUP→INT probe
+  preserves 129. All three prove both injected events and every lifecycle/probe
+  artifact are absent after cleanup;
+- verifier and harness committed-outcome probes preserve deferred HUP ahead of
+  post-clear INT at 129, and preserve post-clear TERM at 143 without a second
+  publication read even when that read would fail or decode collision 73. All
+  six prove child settlement and zero lifecycle/probe residue;
+- verifier and harness deferred-transfer probes inject outer INT after HUP 129
+  moves out of its source slot but before the outer latch, on both negative-
+  wait and exact-zero paths, then nest TERM before that INT attempt. All four
+  preserve 129 and record inner `129:143:129` followed by outer
+  `129:130:129`, proving neither later identity is lost; they classify once,
+  settle the child, and leave no lifecycle/probe residue;
+- verifier and harness witnessed-publication probes remove the outcome before
+  classification, then deliver TERM with the link absent or after restoring
+  `token:73`. All four preserve the earlier required-publication failure 67,
+  classify once, settle the child, and leave zero lifecycle/probe residue;
 - the held-child watchdog uses a distinct failure marker and never creates the
   settlement-release marker. Every held probe asserts it did not fire, so a
   missing production release fails quickly instead of making the probe green;
@@ -137,5 +169,5 @@ The self-test passed 64/64 named scenarios. Seventeen are two-party races with
   marker-created assertion-window TERM and HUP→INT paths.
 
 Every case leaves no exact registered worktree, claim, token, marker, or owned
-temporary root. A clean incremental A5 `git diff --check` must exit 0 because
-A5 introduces no new whitespace exception.
+temporary root. A clean incremental A6 `git diff --check` must exit 0 because
+A6 introduces no new whitespace exception.
