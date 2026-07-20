@@ -48,3 +48,5 @@
 - [x] 7.1 Share the wrapped promises object across `node:fs` and `node:fs/promises`, including CommonJS-visible exports.
 - [x] 7.2 Actually invoke and record all 16 named, default, namespace, and CommonJS watcher access paths in the negative control.
 - [x] 7.3 Mark `7127f83` as pre-fix Round-1 provenance and bind corrective green evidence to the exact current production commit plus reproducible oracle diff.
+- [x] 7.4 Remove the proof-drift regression's wall-clock restoration race by retaining drift until the canonical settlement rejects.
+- [x] 7.5 Reuse the captured same-ticket settlement callable and prove the rejected promise identity, proof count, and unlink count remain unchanged.

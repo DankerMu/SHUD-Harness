@@ -31810,7 +31810,14 @@ describe("idempotency, lock, and artifact services", () => {
       );
       if (created.status !== "created") throw new Error("Expected drift fixture.");
       let privatePath = "";
-      let attempts = 0;
+      let privateProofs = 0;
+      let privateUnlinkAttempts = 0;
+      let canonicalSettlement: Promise<{ readonly status: "deleted" }> | undefined;
+      let settleSameTicket:
+        | (() => Promise<{ readonly status: "deleted" }>)
+        | undefined;
+      let settlementRejection: unknown;
+      let restoreDrift: (() => Promise<void>) | undefined;
       let restoration: Promise<void> | undefined;
 
       const failure = await captureThrownValue(() =>
@@ -31822,17 +31829,31 @@ describe("idempotency, lock, and artifact services", () => {
               await writeFile(path, successorBytes, { flag: "wx", mode: 0o600 });
               throw new Error(`initial ${drift}`);
             },
+            onExactFailureSettlementPromise: ({ settlement, settleSameTicket: settle }) => {
+              canonicalSettlement = settlement;
+              settleSameTicket = settle;
+              restoration = settlement.then(
+                () => undefined,
+                async (error) => {
+                  settlementRejection = error;
+                  await restoreDrift?.();
+                }
+              );
+            },
+            beforeCleanupPermitPinnedGenerationProof: ({ path: proofPath }) => {
+              if (proofPath === path) privateProofs += 1;
+            },
             beforeOwnedIsolatedSourceUnlink: async ({ site, attempt }) => {
               if (site !== "exact_failure_settlement") return;
-              attempts += 1;
+              privateUnlinkAttempts += 1;
               if (attempt !== 1) return;
               if (drift === "hardlink") {
                 const alias = join(tempRoot, "transient-private-alias");
                 await link(privatePath, alias);
-                restoration = delay(1).then(async () => await unlink(alias));
+                restoreDrift = async () => await unlink(alias);
               } else {
                 await chmod(dirname(privatePath), 0o755);
-                restoration = delay(1).then(async () => await chmod(dirname(privatePath), 0o700));
+                restoreDrift = async () => await chmod(dirname(privatePath), 0o700);
               }
             }
           },
@@ -31847,6 +31868,17 @@ describe("idempotency, lock, and artifact services", () => {
         )
       );
       await restoration;
+      const settledPrivateProofs = privateProofs;
+      const settledPrivateUnlinkAttempts = privateUnlinkAttempts;
+      expect(canonicalSettlement).toBeDefined();
+      expect(settleSameTicket).toBeDefined();
+      const repeatedSettlement = settleSameTicket!();
+      expect(repeatedSettlement).toBe(canonicalSettlement);
+      expect(await captureThrownValue(() => repeatedSettlement)).toBe(
+        settlementRejection
+      );
+      expect(privateProofs).toBe(settledPrivateProofs);
+      expect(privateUnlinkAttempts).toBe(settledPrivateUnlinkAttempts);
       await closeTracker.waitForAll();
 
       expect(
@@ -31855,7 +31887,7 @@ describe("idempotency, lock, and artifact services", () => {
           (error) => error instanceof WorkspaceRecordConditionalDeleteError
         )
       ).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
-      expect(attempts).toBe(1);
+      expect(privateUnlinkAttempts).toBe(1);
       expect(failureEvents(failure).map((event) => event.phase)).toContain("settlement");
       expect(await readFile(path)).toEqual(successorBytes);
       expect(await readFile(privatePath)).toEqual(

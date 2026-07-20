@@ -55,6 +55,33 @@ after committing.
 - `openspec validate m1-transition-artifact-exact-retry --strict
   --no-interactive`: valid.
 
+## Linux proof-drift timing repair
+
+The `linux-base` failure at `3e93ed60ea85b0180871496957356d59fc5c7171`
+was a test-only timing race. The private proof-drift regression restored its
+hardlink or namespace mode after a one-millisecond timer, so Linux could run
+that restoration before the settlement proof and incorrectly observe a
+successful settlement. Production settlement logic and APIs are unchanged.
+
+Before the repair, a focused 200-rerun attempt reproduced the race locally at
+run 197: `captureThrownValue` reported `Expected a thrown value.` The repaired
+fixture keeps the drift in place until the captured canonical settlement
+promise has rejected, then restores the filesystem fixture. It invokes the
+captured same-ticket settlement callable after rejection and proves that it
+returns the same rejected promise without increasing either the pinned-proof
+count or the private-unlink count.
+
+- Focused repaired regression repeated 100 actual executions: 100 pass, 0
+  fail, 3,200 assertions.
+- Focused private-settlement/resource/consumer matrix: 8 pass, 0 fail, 155
+  assertions.
+- Full core-service suite: exit 0.
+- Core and root typecheck: exit 0.
+- `openspec validate m1-transition-artifact-exact-retry --strict
+  --no-interactive`: valid.
+- `git diff --check`, Zero cleanliness, workspace tracked-residue check, and
+  `red-proof` stash check: clean.
+
 ## Historical Round-1 record
 
 - The old ledger labeled its green worktree as `7127f83f5f47ab2537edb4b57543da30aeb55047`.
