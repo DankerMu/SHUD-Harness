@@ -609,6 +609,254 @@ EOF
   record_pass
 }
 
+run_negative_probe_handoff_case() {
+  case_name=$1
+  child_kind=$2
+  forced_outcome=$3
+  expected_publication=$4
+  root_name="case-$case_name"
+  child_token="negative-handoff-$case_name"
+  child_root="$lifecycle_root/$root_name"
+  child_claim="$lifecycle_root/.$root_name.claim"
+  child_marker="$child_root/.shud-replay-owner"
+  transaction_fault_dir="$lifecycle_root/$case_name.negative-handoff-probe"
+  transaction_probe_dir=$transaction_fault_dir
+  transaction_pid_file="$transaction_fault_dir/creation-pids"
+  outcome_attempted_event="$transaction_fault_dir/outcome-attempted"
+  outcome_published_event="$transaction_fault_dir/outcome-published"
+  publication_value_event="$transaction_fault_dir/published-outcome-value"
+  first_event="$transaction_fault_dir/first-hup-fired"
+  handoff_event="$transaction_fault_dir/negative-handoff-entered"
+  handoff_release="$transaction_fault_dir/handoff-release"
+  ordering_violation_event="$transaction_fault_dir/missing-transfer-authority"
+  transfer_event="$transaction_fault_dir/transfer-events"
+  later_event="$transaction_fault_dir/later-int-fired"
+  nested_event="$transaction_fault_dir/nested-term-fired"
+  current_event="$transaction_fault_dir/current-event-attempts"
+  decode_entry_event="$transaction_fault_dir/decode-entries"
+  settlement_release="$transaction_fault_dir/settlement-release"
+  watchdog_event="$transaction_fault_dir/watchdog-fired"
+  mkdir -m 700 "$transaction_fault_dir" "$child_root"
+
+  cat >"$transaction_fault_dir/ln" <<'EOF'
+#!/bin/sh
+last_arg=
+for arg do last_arg=$arg; done
+case "$last_arg" in
+  *.transaction.*.outcome)
+    printf '%s\n' "$PPID" >>"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+    : >"$SHUD_REPLAY_TEST_OUTCOME_ATTEMPTED_EVENT"
+    hold_attempt=0
+    while [ ! -e "$SHUD_REPLAY_TEST_NEGATIVE_HANDOFF_RELEASE" ]; do
+      hold_attempt=$((hold_attempt + 1))
+      if [ "$hold_attempt" -ge 40 ]; then
+        : >"$SHUD_REPLAY_TEST_WATCHDOG_EVENT"
+        kill -KILL "$PPID" >/dev/null 2>&1 || true
+        exit 124
+      fi
+      sleep 0.05
+    done
+    outcome_target=$2
+    if [ -n "${SHUD_REPLAY_TEST_FORCED_OUTCOME:-}" ]; then
+      outcome_token=${outcome_target%%:*}
+      /bin/ln -s "$outcome_token:$SHUD_REPLAY_TEST_FORCED_OUTCOME" "$last_arg" || exit $?
+    else
+      /bin/ln "$@" || exit $?
+    fi
+    : >"$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT"
+    hold_attempt=0
+    while [ ! -e "$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE" ]; do
+      hold_attempt=$((hold_attempt + 1))
+      if [ "$hold_attempt" -ge 40 ]; then
+        : >"$SHUD_REPLAY_TEST_WATCHDOG_EVENT"
+        kill -KILL "$PPID" >/dev/null 2>&1 || true
+        exit 124
+      fi
+      sleep 0.05
+    done
+    exit 0
+    ;;
+esac
+exec /bin/ln "$@"
+EOF
+  cat >"$transaction_fault_dir/negative-probe-handoff-hook" <<'EOF'
+#!/bin/sh
+: >"$SHUD_REPLAY_TEST_NEGATIVE_HANDOFF_EVENT"
+if [ ! -s "$SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT" ] ||
+  [ "$(sed -n '1p' "$SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT" 2>/dev/null || true)" != 129 ]; then
+  : >"$SHUD_REPLAY_TEST_ORDERING_VIOLATION_EVENT"
+fi
+: >"$SHUD_REPLAY_TEST_NEGATIVE_HANDOFF_RELEASE"
+hold_attempt=0
+while [ ! -e "$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT" ]; do
+  hold_attempt=$((hold_attempt + 1))
+  if [ "$hold_attempt" -ge 40 ]; then
+    : >"$SHUD_REPLAY_TEST_WATCHDOG_EVENT"
+    exit 124
+  fi
+  sleep 0.05
+done
+/usr/bin/readlink "$1" >"$SHUD_REPLAY_TEST_PUBLICATION_VALUE_EVENT" || exit $?
+: >"$SHUD_REPLAY_TEST_LATER_EVENT"
+kill -s INT "$PPID"
+EOF
+  chmod 700 "$transaction_fault_dir/ln" \
+    "$transaction_fault_dir/negative-probe-handoff-hook"
+
+  case "$child_kind" in
+    verifier) transaction_command=$verifier ;;
+    harness) transaction_command=$self_test ;;
+    *)
+      echo "unknown negative-handoff child kind: $child_kind" >&2
+      rm -rf "$transaction_fault_dir" "$child_root"
+      transaction_fault_dir=
+      return 1
+      ;;
+  esac
+
+  set +e
+  PATH="$transaction_fault_dir:$PATH" \
+    SHUD_REPLAY_TEST_CREATION_PID_FILE="$transaction_pid_file" \
+    SHUD_REPLAY_TEST_OUTCOME_ATTEMPTED_EVENT="$outcome_attempted_event" \
+    SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT="$outcome_published_event" \
+    SHUD_REPLAY_TEST_PUBLICATION_VALUE_EVENT="$publication_value_event" \
+    SHUD_REPLAY_TEST_OUTCOME_WAIT_SIGNAL=HUP \
+    SHUD_REPLAY_TEST_OUTCOME_WAIT_EVENT="$first_event" \
+    SHUD_REPLAY_TEST_NEGATIVE_PROBE_HANDOFF_HOOK="$transaction_fault_dir/negative-probe-handoff-hook" \
+    SHUD_REPLAY_TEST_NEGATIVE_HANDOFF_EVENT="$handoff_event" \
+    SHUD_REPLAY_TEST_NEGATIVE_HANDOFF_RELEASE="$handoff_release" \
+    SHUD_REPLAY_TEST_ORDERING_VIOLATION_EVENT="$ordering_violation_event" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT="$transfer_event" \
+    SHUD_REPLAY_TEST_LATER_EVENT="$later_event" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_NESTED_SIGNAL=TERM \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_NESTED_EVENT="$nested_event" \
+    SHUD_REPLAY_TEST_DEFERRED_TRANSFER_CURRENT_EVENT="$current_event" \
+    SHUD_REPLAY_TEST_DECODE_ENTRY_EVENT="$decode_entry_event" \
+    SHUD_REPLAY_TEST_SETTLEMENT_RELEASE="$settlement_release" \
+    SHUD_REPLAY_TEST_WATCHDOG_EVENT="$watchdog_event" \
+    SHUD_REPLAY_TEST_FORCED_OUTCOME="$forced_outcome" \
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_SCENARIO=decode_tail_probe \
+    SHUD_REPLAY_TEST_SCENARIO=normal \
+    SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+    "$transaction_command" >/dev/null 2>&1
+  actual=$?
+  set -e
+
+  handoff_failed=0
+  if [ "$actual" -ne 129 ]; then
+    echo "$case_name exited $actual, expected 129 (later publication decoded as $expected_publication)" >&2
+    handoff_failed=1
+  fi
+  for required_event in "$outcome_attempted_event" "$first_event" "$handoff_event" \
+    "$handoff_release" "$outcome_published_event" "$publication_value_event" \
+    "$later_event" "$nested_event" "$settlement_release"; do
+    if [ ! -e "$required_event" ]; then
+      echo "$case_name missed required event: $required_event" >&2
+      handoff_failed=1
+    fi
+  done
+  expected_published_value="$child_token:73"
+  if [ -n "$forced_outcome" ]; then
+    expected_published_value="$child_token:$forced_outcome"
+  fi
+  if [ "$(sed -n '1p' "$publication_value_event" 2>/dev/null || true)" != \
+    "$expected_published_value" ]; then
+    echo "$case_name did not publish the expected $expected_publication outcome value" >&2
+    handoff_failed=1
+  fi
+  if [ -e "$ordering_violation_event" ]; then
+    echo "$case_name exposed publication before deferred HUP transfer authority" >&2
+    handoff_failed=1
+  fi
+  transfer_count=0
+  if [ -f "$transfer_event" ]; then
+    transfer_count=$(wc -l <"$transfer_event" | tr -d ' ')
+  fi
+  if [ "$transfer_count" -ne 1 ] ||
+    [ "$(sed -n '1p' "$transfer_event" 2>/dev/null || true)" != 129 ]; then
+    echo "$case_name established deferred HUP transfer $transfer_count times, expected once" >&2
+    handoff_failed=1
+  fi
+  current_count=0
+  if [ -f "$current_event" ]; then
+    current_count=$(wc -l <"$current_event" | tr -d ' ')
+  fi
+  current_first=$(sed -n '1p' "$current_event" 2>/dev/null || true)
+  current_second=$(sed -n '2p' "$current_event" 2>/dev/null || true)
+  if [ "$current_count" -ne 2 ] ||
+    [ "$current_first" != "129:143:129" ] ||
+    [ "$current_second" != "129:130:129" ]; then
+    echo "$case_name current events were $current_first,$current_second; expected 129:143:129,129:130:129" >&2
+    handoff_failed=1
+  fi
+  decode_entry_count=0
+  if [ -f "$decode_entry_event" ]; then
+    decode_entry_count=$(wc -l <"$decode_entry_event" | tr -d ' ')
+  fi
+  if [ "$decode_entry_count" -ne 1 ]; then
+    echo "$case_name classified/adopted its outcome $decode_entry_count times, expected 1" >&2
+    handoff_failed=1
+  fi
+  if [ -e "$watchdog_event" ]; then
+    echo "$case_name used its watchdog instead of mandatory child settlement" >&2
+    handoff_failed=1
+  fi
+  if [ ! -s "$transaction_pid_file" ]; then
+    echo "$case_name did not identify the creation child" >&2
+    handoff_failed=1
+  else
+    while IFS= read -r child_pid; do
+      case "$child_pid" in
+        ''|*[!0-9]*)
+          echo "$case_name recorded invalid creation pid: $child_pid" >&2
+          handoff_failed=1
+          ;;
+        *)
+          if kill -0 "$child_pid" >/dev/null 2>&1; then
+            echo "$case_name retained live creation child $child_pid" >&2
+            handoff_failed=1
+          fi
+          ;;
+      esac
+    done <"$transaction_pid_file"
+  fi
+  if find "$lifecycle_root" -maxdepth 1 -name ".$root_name.claim.transaction.*" -print -quit |
+    grep . >/dev/null; then
+    echo "$case_name retained transaction links" >&2
+    handoff_failed=1
+  fi
+  if [ -e "$child_claim" ] || [ -L "$child_claim" ] ||
+    [ -e "$child_marker" ] || [ -L "$child_marker" ]; then
+    echo "$case_name retained owned lifecycle residue" >&2
+    handoff_failed=1
+  fi
+  if [ ! -d "$child_root" ] ||
+    find "$child_root" -mindepth 1 -print -quit | grep . >/dev/null; then
+    echo "$case_name modified its foreign collision root" >&2
+    handoff_failed=1
+  elif ! rmdir "$child_root"; then
+    echo "$case_name could not remove its collision probe root" >&2
+    handoff_failed=1
+  fi
+  if test_worktree_is_registered "$child_root/round-1" ||
+    test_worktree_is_registered "$child_root/round-2"; then
+    echo "$case_name retained a registered worktree" >&2
+    handoff_failed=1
+  fi
+
+  cleanup_transaction_fault_residue "$child_root" "$child_claim" "$child_token"
+  if [ -e "$child_root" ] || [ -L "$child_root" ] ||
+    [ -e "$transaction_probe_dir" ]; then
+    echo "$case_name retained negative-handoff probe residue" >&2
+    handoff_failed=1
+  fi
+  if [ "$handoff_failed" -ne 0 ]; then return 1; fi
+  record_pass
+}
+
 run_outcome_disappearance_case() {
   case_name=$1
   child_kind=$2
@@ -1666,6 +1914,8 @@ case "$self_test_scenario" in
     classification_commit_collision_verifier|classification_commit_collision_harness|\
     deferred_transfer_wait_verifier|deferred_transfer_wait_harness|\
     deferred_transfer_decode_verifier|deferred_transfer_decode_harness|\
+    negative_handoff_collision_verifier|negative_handoff_collision_harness|\
+    negative_handoff_unknown_verifier|negative_handoff_unknown_harness|\
     outcome_disappearance_term_verifier|outcome_disappearance_term_harness|\
     outcome_disappearance_restore_verifier|outcome_disappearance_restore_harness|\
     transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
@@ -1817,6 +2067,18 @@ case "$self_test_scenario" in
   deferred_transfer_decode_harness)
     run_deferred_transfer_case deferred_transfer_decode_harness harness decode_tail INT
     ;;
+  negative_handoff_collision_verifier)
+    run_negative_probe_handoff_case negative_handoff_collision_verifier verifier '' 73
+    ;;
+  negative_handoff_collision_harness)
+    run_negative_probe_handoff_case negative_handoff_collision_harness harness '' 73
+    ;;
+  negative_handoff_unknown_verifier)
+    run_negative_probe_handoff_case negative_handoff_unknown_verifier verifier 99 67
+    ;;
+  negative_handoff_unknown_harness)
+    run_negative_probe_handoff_case negative_handoff_unknown_harness harness 99 67
+    ;;
   outcome_disappearance_term_verifier)
     run_outcome_disappearance_case outcome_disappearance_term_verifier verifier 0 67
     ;;
@@ -1857,6 +2119,8 @@ case "$self_test_scenario" in
   classification_commit_collision_verifier|classification_commit_collision_harness|\
   deferred_transfer_wait_verifier|deferred_transfer_wait_harness|\
   deferred_transfer_decode_verifier|deferred_transfer_decode_harness|\
+  negative_handoff_collision_verifier|negative_handoff_collision_harness|\
+  negative_handoff_unknown_verifier|negative_handoff_unknown_harness|\
   outcome_disappearance_term_verifier|outcome_disappearance_term_harness|\
   outcome_disappearance_restore_verifier|outcome_disappearance_restore_harness|\
   transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
@@ -2000,6 +2264,13 @@ run_deferred_transfer_case deferred_transfer_wait_harness harness negative_wait 
 run_deferred_transfer_case deferred_transfer_decode_verifier verifier decode_tail INT
 run_deferred_transfer_case deferred_transfer_decode_harness harness decode_tail INT
 
+# A HUP captured by a negative outcome probe remains authoritative while the
+# child publishes collision or unknown outcome status and a later INT enters.
+run_negative_probe_handoff_case negative_handoff_collision_verifier verifier '' 73
+run_negative_probe_handoff_case negative_handoff_collision_harness harness '' 73
+run_negative_probe_handoff_case negative_handoff_unknown_verifier verifier 99 67
+run_negative_probe_handoff_case negative_handoff_unknown_harness harness 99 67
+
 # Once ordinary settlement witnesses publication, disappearance commits 67
 # before a later TERM or any attempt to re-adopt a restored token:73 outcome.
 run_outcome_disappearance_case outcome_disappearance_term_verifier verifier 0 67
@@ -2015,11 +2286,11 @@ run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harnes
 run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
 run_claim_reconciliation_case claim_reconciliation_harness_term harness
 
-if [ "$passed" -ne 83 ]; then
-  echo "replay scenario accounting mismatch: $passed/83" >&2
+if [ "$passed" -ne 87 ]; then
+  echo "replay scenario accounting mismatch: $passed/87" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 83/83 named scenarios passed (28 two-party races, 56 participant outcomes)"
+echo "replay evidence lifecycle: 87/87 named scenarios passed (32 two-party races, 64 participant outcomes)"

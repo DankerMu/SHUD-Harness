@@ -285,3 +285,8 @@
   slot clears MUST commit transferred HUP 129 before its later INT/TERM, without
   discarding that later event. Prove negative-wait and exact-zero paths through
   verifier and harness with settlement and zero residue in the 83-case matrix.
+- [x] 12.8 Preserve that transfer authority across a negative outcome probe
+  handoff. Establish deferred HUP 129 before clearing `decode_active`, then
+  prove verifier/harness collision 73 and unknown-protocol 67 publications plus
+  later INT cannot overtake it, with settlement and zero residue in the
+  87-case matrix.
