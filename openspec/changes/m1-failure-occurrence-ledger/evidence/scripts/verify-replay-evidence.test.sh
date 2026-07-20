@@ -614,6 +614,7 @@ run_negative_probe_handoff_case() {
   child_kind=$2
   forced_outcome=$3
   expected_publication=$4
+  handoff_path=${5:-nonempty_transfer}
   root_name="case-$case_name"
   child_token="negative-handoff-$case_name"
   child_root="$lifecycle_root/$root_name"
@@ -682,10 +683,20 @@ EOF
   cat >"$transaction_fault_dir/negative-probe-handoff-hook" <<'EOF'
 #!/bin/sh
 : >"$SHUD_REPLAY_TEST_NEGATIVE_HANDOFF_EVENT"
-if [ ! -s "$SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT" ] ||
-  [ "$(sed -n '1p' "$SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT" 2>/dev/null || true)" != 129 ]; then
-  : >"$SHUD_REPLAY_TEST_ORDERING_VIOLATION_EVENT"
-fi
+case "$SHUD_REPLAY_TEST_NEGATIVE_HANDOFF_PATH" in
+  nonempty_transfer)
+    if [ ! -s "$SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT" ] ||
+      [ "$(sed -n '1p' "$SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT" 2>/dev/null || true)" != 129 ]; then
+      : >"$SHUD_REPLAY_TEST_ORDERING_VIOLATION_EVENT"
+    fi
+    ;;
+  empty_source_tail)
+    if [ -s "$SHUD_REPLAY_TEST_DEFERRED_TRANSFER_EVENT" ]; then
+      : >"$SHUD_REPLAY_TEST_ORDERING_VIOLATION_EVENT"
+    fi
+    ;;
+  *) exit 64 ;;
+esac
 : >"$SHUD_REPLAY_TEST_NEGATIVE_HANDOFF_RELEASE"
 hold_attempt=0
 while [ ! -e "$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT" ]; do
@@ -700,8 +711,21 @@ done
 : >"$SHUD_REPLAY_TEST_LATER_EVENT"
 kill -s INT "$PPID"
 EOF
+  cat >"$transaction_fault_dir/negative-probe-empty-source-tail-hook" <<'EOF'
+#!/bin/sh
+: >"$SHUD_REPLAY_TEST_OUTCOME_WAIT_EVENT"
+kill -s HUP "$PPID"
+EOF
   chmod 700 "$transaction_fault_dir/ln" \
-    "$transaction_fault_dir/negative-probe-handoff-hook"
+    "$transaction_fault_dir/negative-probe-handoff-hook" \
+    "$transaction_fault_dir/negative-probe-empty-source-tail-hook"
+
+  outcome_wait_signal=HUP
+  empty_source_tail_hook=
+  if [ "$handoff_path" = empty_source_tail ]; then
+    outcome_wait_signal=
+    empty_source_tail_hook="$transaction_fault_dir/negative-probe-empty-source-tail-hook"
+  fi
 
   case "$child_kind" in
     verifier) transaction_command=$verifier ;;
@@ -720,9 +744,11 @@ EOF
     SHUD_REPLAY_TEST_OUTCOME_ATTEMPTED_EVENT="$outcome_attempted_event" \
     SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT="$outcome_published_event" \
     SHUD_REPLAY_TEST_PUBLICATION_VALUE_EVENT="$publication_value_event" \
-    SHUD_REPLAY_TEST_OUTCOME_WAIT_SIGNAL=HUP \
+    SHUD_REPLAY_TEST_OUTCOME_WAIT_SIGNAL="$outcome_wait_signal" \
     SHUD_REPLAY_TEST_OUTCOME_WAIT_EVENT="$first_event" \
+    SHUD_REPLAY_TEST_NEGATIVE_PROBE_EMPTY_SOURCE_TAIL_HOOK="$empty_source_tail_hook" \
     SHUD_REPLAY_TEST_NEGATIVE_PROBE_HANDOFF_HOOK="$transaction_fault_dir/negative-probe-handoff-hook" \
+    SHUD_REPLAY_TEST_NEGATIVE_HANDOFF_PATH="$handoff_path" \
     SHUD_REPLAY_TEST_NEGATIVE_HANDOFF_EVENT="$handoff_event" \
     SHUD_REPLAY_TEST_NEGATIVE_HANDOFF_RELEASE="$handoff_release" \
     SHUD_REPLAY_TEST_ORDERING_VIOLATION_EVENT="$ordering_violation_event" \
@@ -1916,6 +1942,8 @@ case "$self_test_scenario" in
     deferred_transfer_decode_verifier|deferred_transfer_decode_harness|\
     negative_handoff_collision_verifier|negative_handoff_collision_harness|\
     negative_handoff_unknown_verifier|negative_handoff_unknown_harness|\
+    empty_source_tail_collision_verifier|empty_source_tail_collision_harness|\
+    empty_source_tail_unknown_verifier|empty_source_tail_unknown_harness|\
     outcome_disappearance_term_verifier|outcome_disappearance_term_harness|\
     outcome_disappearance_restore_verifier|outcome_disappearance_restore_harness|\
     transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
@@ -2079,6 +2107,18 @@ case "$self_test_scenario" in
   negative_handoff_unknown_harness)
     run_negative_probe_handoff_case negative_handoff_unknown_harness harness 99 67
     ;;
+  empty_source_tail_collision_verifier)
+    run_negative_probe_handoff_case empty_source_tail_collision_verifier verifier '' 73 empty_source_tail
+    ;;
+  empty_source_tail_collision_harness)
+    run_negative_probe_handoff_case empty_source_tail_collision_harness harness '' 73 empty_source_tail
+    ;;
+  empty_source_tail_unknown_verifier)
+    run_negative_probe_handoff_case empty_source_tail_unknown_verifier verifier 99 67 empty_source_tail
+    ;;
+  empty_source_tail_unknown_harness)
+    run_negative_probe_handoff_case empty_source_tail_unknown_harness harness 99 67 empty_source_tail
+    ;;
   outcome_disappearance_term_verifier)
     run_outcome_disappearance_case outcome_disappearance_term_verifier verifier 0 67
     ;;
@@ -2121,6 +2161,8 @@ case "$self_test_scenario" in
   deferred_transfer_decode_verifier|deferred_transfer_decode_harness|\
   negative_handoff_collision_verifier|negative_handoff_collision_harness|\
   negative_handoff_unknown_verifier|negative_handoff_unknown_harness|\
+  empty_source_tail_collision_verifier|empty_source_tail_collision_harness|\
+  empty_source_tail_unknown_verifier|empty_source_tail_unknown_harness|\
   outcome_disappearance_term_verifier|outcome_disappearance_term_harness|\
   outcome_disappearance_restore_verifier|outcome_disappearance_restore_harness|\
   transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
@@ -2271,6 +2313,17 @@ run_negative_probe_handoff_case negative_handoff_collision_harness harness '' 73
 run_negative_probe_handoff_case negative_handoff_unknown_verifier verifier 99 67
 run_negative_probe_handoff_case negative_handoff_unknown_harness harness 99 67
 
+# A HUP arriving after the negative probe found no deferred source but before
+# decode authority clears remains first when publication and a later INT race.
+run_negative_probe_handoff_case empty_source_tail_collision_verifier \
+  verifier '' 73 empty_source_tail
+run_negative_probe_handoff_case empty_source_tail_collision_harness \
+  harness '' 73 empty_source_tail
+run_negative_probe_handoff_case empty_source_tail_unknown_verifier \
+  verifier 99 67 empty_source_tail
+run_negative_probe_handoff_case empty_source_tail_unknown_harness \
+  harness 99 67 empty_source_tail
+
 # Once ordinary settlement witnesses publication, disappearance commits 67
 # before a later TERM or any attempt to re-adopt a restored token:73 outcome.
 run_outcome_disappearance_case outcome_disappearance_term_verifier verifier 0 67
@@ -2286,11 +2339,11 @@ run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harnes
 run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
 run_claim_reconciliation_case claim_reconciliation_harness_term harness
 
-if [ "$passed" -ne 87 ]; then
-  echo "replay scenario accounting mismatch: $passed/87" >&2
+if [ "$passed" -ne 91 ]; then
+  echo "replay scenario accounting mismatch: $passed/91" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 87/87 named scenarios passed (32 two-party races, 64 participant outcomes)"
+echo "replay evidence lifecycle: 91/91 named scenarios passed (36 two-party races, 72 participant outcomes)"
