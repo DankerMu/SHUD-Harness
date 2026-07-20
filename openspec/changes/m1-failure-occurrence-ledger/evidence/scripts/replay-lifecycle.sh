@@ -20,6 +20,7 @@ lifecycle_create_pid=
 lifecycle_transaction_active=0
 lifecycle_transaction_adoption_active=0
 lifecycle_transaction_decode_active=0
+lifecycle_transaction_outcome_committed=0
 lifecycle_decoded_outcome_published=0
 lifecycle_decoded_outcome_status=
 lifecycle_deferred_signal_status=
@@ -44,13 +45,37 @@ lifecycle_inject_decode_tail_signals() {
   fi
 }
 
+lifecycle_inject_post_classification_signal() {
+  lifecycle_post_classification_signal=${SHUD_REPLAY_TEST_POST_CLASSIFICATION_SIGNAL:-}
+  lifecycle_post_classification_event=${SHUD_REPLAY_TEST_POST_CLASSIFICATION_EVENT:-}
+  if [ -n "$lifecycle_post_classification_signal" ]; then
+    if [ -n "$lifecycle_post_classification_event" ]; then
+      : >"$lifecycle_post_classification_event"
+    fi
+    kill -s "$lifecycle_post_classification_signal" "$$"
+  fi
+}
+
 lifecycle_latch_status() {
   if [ -z "$lifecycle_first_status" ]; then
     lifecycle_first_status=$1
   fi
 }
 
+lifecycle_commit_deferred_signal() {
+  if [ -n "$lifecycle_deferred_signal_status" ]; then
+    lifecycle_committed_deferred_status=$lifecycle_deferred_signal_status
+    lifecycle_deferred_signal_status=
+    lifecycle_latch_status "$lifecycle_committed_deferred_status"
+    lifecycle_mask_latched_signals
+  fi
+}
+
 lifecycle_decode_and_commit_transaction_outcome() {
+  if [ "$lifecycle_transaction_outcome_committed" -eq 1 ]; then
+    return
+  fi
+
   lifecycle_decoded_outcome_published=0
   lifecycle_decoded_outcome_status=
   lifecycle_deferred_signal_status=
@@ -72,17 +97,19 @@ lifecycle_decode_and_commit_transaction_outcome() {
     [ "$lifecycle_decoded_outcome_status" -ne 0 ]; then
     lifecycle_latch_transaction_result "$lifecycle_decoded_outcome_status"
   fi
+  if [ "$lifecycle_decoded_outcome_published" -eq 1 ]; then
+    lifecycle_transaction_outcome_committed=1
+  fi
   lifecycle_inject_decode_tail_signals
   lifecycle_transaction_decode_active=0
-  if [ -n "$lifecycle_deferred_signal_status" ]; then
-    lifecycle_latch_status "$lifecycle_deferred_signal_status"
-    lifecycle_mask_latched_signals
-  fi
+  lifecycle_inject_post_classification_signal
+  lifecycle_commit_deferred_signal
 }
 
 lifecycle_adopt_published_transaction_outcome() {
   if [ "$lifecycle_transaction_active" -ne 1 ] ||
-    [ "$lifecycle_transaction_adoption_active" -eq 1 ]; then
+    [ "$lifecycle_transaction_adoption_active" -eq 1 ] ||
+    [ "$lifecycle_transaction_outcome_committed" -eq 1 ]; then
     return
   fi
 
@@ -101,6 +128,12 @@ lifecycle_signal_hup() {
     if [ -z "$lifecycle_deferred_signal_status" ]; then lifecycle_deferred_signal_status=129; fi
     return
   fi
+  if [ "$lifecycle_transaction_outcome_committed" -eq 1 ]; then
+    lifecycle_commit_deferred_signal
+    lifecycle_latch_status 129
+    lifecycle_mask_latched_signals
+    return
+  fi
   lifecycle_adopt_published_transaction_outcome
   lifecycle_latch_status 129
 }
@@ -110,6 +143,12 @@ lifecycle_signal_int() {
     if [ -z "$lifecycle_deferred_signal_status" ]; then lifecycle_deferred_signal_status=130; fi
     return
   fi
+  if [ "$lifecycle_transaction_outcome_committed" -eq 1 ]; then
+    lifecycle_commit_deferred_signal
+    lifecycle_latch_status 130
+    lifecycle_mask_latched_signals
+    return
+  fi
   lifecycle_adopt_published_transaction_outcome
   lifecycle_latch_status 130
 }
@@ -117,6 +156,12 @@ lifecycle_signal_int() {
 lifecycle_signal_term() {
   if [ "$lifecycle_transaction_decode_active" -eq 1 ]; then
     if [ -z "$lifecycle_deferred_signal_status" ]; then lifecycle_deferred_signal_status=143; fi
+    return
+  fi
+  if [ "$lifecycle_transaction_outcome_committed" -eq 1 ]; then
+    lifecycle_commit_deferred_signal
+    lifecycle_latch_status 143
+    lifecycle_mask_latched_signals
     return
   fi
   lifecycle_adopt_published_transaction_outcome
@@ -388,9 +433,6 @@ lifecycle_settle_creation_transaction() {
     kill -KILL "$lifecycle_create_pid" >/dev/null 2>&1 || true
   fi
 
-  lifecycle_decoded_outcome_published=0
-  lifecycle_decoded_outcome_status=
-  lifecycle_deferred_signal_status=
   if [ "$lifecycle_release_published" -eq 1 ]; then
     lifecycle_inject_published_outcome_signal
     lifecycle_decode_and_commit_transaction_outcome
@@ -422,6 +464,7 @@ lifecycle_settle_creation_transaction() {
   fi
 
   lifecycle_transaction_active=0
+  lifecycle_transaction_outcome_committed=0
   return "$lifecycle_transaction_result"
 }
 
@@ -430,6 +473,10 @@ lifecycle_run_creation_transaction() {
   lifecycle_external_release=${SHUD_REPLAY_TEST_CREATE_BARRIER_RELEASE:-}
 
   lifecycle_transaction_active=1
+  lifecycle_transaction_outcome_committed=0
+  lifecycle_decoded_outcome_published=0
+  lifecycle_decoded_outcome_status=
+  lifecycle_deferred_signal_status=
   (
     # This is the first child command. Once ready is published, the complete
     # mkdir + marker transaction ignores process-group HUP/INT/TERM.

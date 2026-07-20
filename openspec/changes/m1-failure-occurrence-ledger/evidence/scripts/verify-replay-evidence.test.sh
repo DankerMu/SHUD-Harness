@@ -224,6 +224,189 @@ run_decode_tail_signal_case() {
   record_pass
 }
 
+run_committed_outcome_signal_case() {
+  case_name=$1
+  child_kind=$2
+  pre_clear_signal=$3
+  post_clear_signal=$4
+  second_read_mode=$5
+  expected=$6
+  root_name="case-$case_name"
+  child_token="committed-outcome-$case_name"
+  child_root="$lifecycle_root/$root_name"
+  child_claim="$lifecycle_root/.$root_name.claim"
+  child_marker="$child_root/.shud-replay-owner"
+  transaction_fault_dir="$lifecycle_root/$case_name.committed-outcome-probe"
+  transaction_probe_dir=$transaction_fault_dir
+  transaction_pid_file="$transaction_fault_dir/creation-pids"
+  outcome_published_event="$transaction_fault_dir/outcome-published"
+  pre_clear_event="$transaction_fault_dir/pre-clear-signal-fired"
+  post_clear_event="$transaction_fault_dir/post-clear-signal-fired"
+  second_read_event="$transaction_fault_dir/second-read-fired"
+  settlement_release="$transaction_fault_dir/settlement-release"
+  watchdog_event="$transaction_fault_dir/watchdog-fired"
+  mkdir -m 700 "$transaction_fault_dir"
+
+  cat >"$transaction_fault_dir/ln" <<'EOF'
+#!/bin/sh
+last_arg=
+for arg do last_arg=$arg; done
+case "$last_arg" in
+  *.transaction.*.outcome)
+    /bin/ln "$@" || exit $?
+    printf '%s\n' "$PPID" >>"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+    : >"$SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT"
+    hold_attempt=0
+    while [ ! -e "$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE" ]; do
+      hold_attempt=$((hold_attempt + 1))
+      if [ "$hold_attempt" -ge 20 ]; then
+        : >"$SHUD_REPLAY_TEST_WATCHDOG_EVENT"
+        kill -KILL "$PPID" >/dev/null 2>&1 || true
+        exit 124
+      fi
+      sleep 0.05
+    done
+    exit 0
+    ;;
+esac
+exec /bin/ln "$@"
+EOF
+  cat >"$transaction_fault_dir/readlink" <<'EOF'
+#!/bin/sh
+case "$1" in
+  *.transaction.*.outcome)
+    if [ -e "$SHUD_REPLAY_TEST_POST_CLASSIFICATION_EVENT" ] &&
+      [ ! -e "$SHUD_REPLAY_TEST_SECOND_READ_EVENT" ]; then
+      creation_child_live=0
+      while IFS= read -r creation_pid; do
+        case "$creation_pid" in
+          ''|*[!0-9]*) ;;
+          *)
+            if kill -0 "$creation_pid" >/dev/null 2>&1; then
+              creation_child_live=1
+            fi
+            ;;
+        esac
+      done <"$SHUD_REPLAY_TEST_CREATION_PID_FILE"
+      if [ "$creation_child_live" -eq 1 ]; then
+        : >"$SHUD_REPLAY_TEST_SECOND_READ_EVENT"
+        case "$SHUD_REPLAY_TEST_SECOND_READ_MODE" in
+          fail) exit 1 ;;
+          73)
+            outcome_value=$(/usr/bin/readlink "$@") || exit $?
+            printf '%s:73\n' "${outcome_value%%:*}"
+            exit 0
+            ;;
+        esac
+      fi
+    fi
+    ;;
+esac
+exec /usr/bin/readlink "$@"
+EOF
+  chmod 700 "$transaction_fault_dir/ln" "$transaction_fault_dir/readlink"
+
+  case "$child_kind" in
+    verifier) transaction_command=$verifier ;;
+    harness) transaction_command=$self_test ;;
+    *)
+      echo "unknown committed-outcome child kind: $child_kind" >&2
+      rm -rf "$transaction_fault_dir"
+      transaction_fault_dir=
+      return 1
+      ;;
+  esac
+
+  set +e
+  PATH="$transaction_fault_dir:$PATH" \
+    SHUD_REPLAY_TEST_CREATION_PID_FILE="$transaction_pid_file" \
+    SHUD_REPLAY_TEST_OUTCOME_PUBLISHED_EVENT="$outcome_published_event" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_SIGNAL_FIRST="$pre_clear_signal" \
+    SHUD_REPLAY_TEST_DECODE_TAIL_FIRST_EVENT="$pre_clear_event" \
+    SHUD_REPLAY_TEST_POST_CLASSIFICATION_SIGNAL="$post_clear_signal" \
+    SHUD_REPLAY_TEST_POST_CLASSIFICATION_EVENT="$post_clear_event" \
+    SHUD_REPLAY_TEST_SECOND_READ_EVENT="$second_read_event" \
+    SHUD_REPLAY_TEST_SECOND_READ_MODE="$second_read_mode" \
+    SHUD_REPLAY_TEST_SETTLEMENT_RELEASE="$settlement_release" \
+    SHUD_REPLAY_TEST_WATCHDOG_EVENT="$watchdog_event" \
+    SHUD_REPLAY_TEST_ROOT_PARENT="$lifecycle_root" \
+    SHUD_REPLAY_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_ROOT_NAME="$root_name" \
+    SHUD_REPLAY_SELF_TEST_SCENARIO=decode_tail_probe \
+    SHUD_REPLAY_TEST_SCENARIO=normal \
+    SHUD_REPLAY_TEST_OWNER_TOKEN="$child_token" \
+    "$transaction_command" >/dev/null 2>&1
+  actual=$?
+  set -e
+
+  committed_failed=0
+  if [ "$actual" -ne "$expected" ]; then
+    echo "$case_name exited $actual, expected $expected" >&2
+    committed_failed=1
+  fi
+  if [ ! -e "$outcome_published_event" ]; then
+    echo "$case_name did not publish token:0 before classification" >&2
+    committed_failed=1
+  fi
+  if [ -n "$pre_clear_signal" ] && [ ! -e "$pre_clear_event" ]; then
+    echo "$case_name did not inject its pre-clear signal" >&2
+    committed_failed=1
+  fi
+  if [ ! -e "$post_clear_event" ]; then
+    echo "$case_name did not inject its post-clear signal" >&2
+    committed_failed=1
+  fi
+  if [ -e "$second_read_event" ]; then
+    echo "$case_name re-adopted the committed token:0 outcome" >&2
+    committed_failed=1
+  fi
+  if [ -e "$watchdog_event" ]; then
+    echo "$case_name used its watchdog instead of settlement release" >&2
+    committed_failed=1
+  fi
+  if [ ! -s "$transaction_pid_file" ]; then
+    echo "$case_name did not identify the creation child" >&2
+    committed_failed=1
+  else
+    while IFS= read -r child_pid; do
+      case "$child_pid" in
+        ''|*[!0-9]*)
+          echo "$case_name recorded invalid creation pid: $child_pid" >&2
+          committed_failed=1
+          ;;
+        *)
+          if kill -0 "$child_pid" >/dev/null 2>&1; then
+            echo "$case_name retained live creation child $child_pid" >&2
+            committed_failed=1
+          fi
+          ;;
+      esac
+    done <"$transaction_pid_file"
+  fi
+  if find "$lifecycle_root" -maxdepth 1 -name ".$root_name.claim.transaction.*" -print -quit |
+    grep . >/dev/null; then
+    echo "$case_name retained transaction links" >&2
+    committed_failed=1
+  fi
+  if [ -e "$child_claim" ] || [ -L "$child_claim" ] ||
+    [ -e "$child_marker" ] || [ -L "$child_marker" ] ||
+    [ -e "$child_root" ] || [ -L "$child_root" ]; then
+    echo "$case_name retained owned lifecycle residue" >&2
+    committed_failed=1
+  fi
+  if test_worktree_is_registered "$child_root/round-1" ||
+    test_worktree_is_registered "$child_root/round-2"; then
+    echo "$case_name retained a registered worktree" >&2
+    committed_failed=1
+  fi
+
+  cleanup_transaction_fault_residue "$child_root" "$child_claim" "$child_token"
+  transaction_fault_dir=
+  transaction_pid_file=
+  if [ "$committed_failed" -ne 0 ]; then return 1; fi
+  record_pass
+}
+
 create_collision_fixture() {
   fixture_name=$1
   fixture_kind=${2:-marker}
@@ -1061,6 +1244,9 @@ case "$self_test_scenario" in
     chronology_decode_commit_verifier|chronology_decode_commit_harness|\
     decode_tail_probe|decode_tail_term_verifier|decode_tail_term_harness|\
     decode_tail_hup_int_verifier|\
+    classification_commit_hup_int_verifier|classification_commit_hup_int_harness|\
+    classification_commit_read_failure_verifier|classification_commit_read_failure_harness|\
+    classification_commit_collision_verifier|classification_commit_collision_harness|\
     transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
     claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     ;;
@@ -1174,6 +1360,30 @@ case "$self_test_scenario" in
         decoded_read_failure_then_handler_collision 67 harness
     done
     ;;
+  classification_commit_hup_int_verifier)
+    run_committed_outcome_signal_case classification_commit_hup_int_verifier \
+      verifier HUP INT zero 129
+    ;;
+  classification_commit_hup_int_harness)
+    run_committed_outcome_signal_case classification_commit_hup_int_harness \
+      harness HUP INT zero 129
+    ;;
+  classification_commit_read_failure_verifier)
+    run_committed_outcome_signal_case classification_commit_read_failure_verifier \
+      verifier '' TERM fail 143
+    ;;
+  classification_commit_read_failure_harness)
+    run_committed_outcome_signal_case classification_commit_read_failure_harness \
+      harness '' TERM fail 143
+    ;;
+  classification_commit_collision_verifier)
+    run_committed_outcome_signal_case classification_commit_collision_verifier \
+      verifier '' TERM 73 143
+    ;;
+  classification_commit_collision_harness)
+    run_committed_outcome_signal_case classification_commit_collision_harness \
+      harness '' TERM 73 143
+    ;;
   transaction_signal_before_publication_verifier)
     run_acquisition_signal_case signal_before_publication_verifier TERM '' 143 verifier
     ;;
@@ -1197,6 +1407,9 @@ case "$self_test_scenario" in
   chronology_published_unknown_read_verifier|chronology_published_unknown_read_harness|\
   chronology_handler_read_failure_verifier|chronology_handler_read_failure_harness|\
   chronology_decode_commit_verifier|chronology_decode_commit_harness|\
+  classification_commit_hup_int_verifier|classification_commit_hup_int_harness|\
+  classification_commit_read_failure_verifier|classification_commit_read_failure_harness|\
+  classification_commit_collision_verifier|classification_commit_collision_harness|\
   transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
   claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     lifecycle_begin_successful_finalization
@@ -1314,6 +1527,22 @@ run_decode_tail_signal_case decode_tail_term_verifier verifier TERM '' 143
 run_decode_tail_signal_case decode_tail_term_harness harness TERM '' 143
 run_decode_tail_signal_case decode_tail_hup_int_verifier verifier HUP INT 129
 
+# Outcome classification remains committed through child settlement. A
+# post-clear handler consumes any deferred first event and never re-adopts the
+# publication, even if a second read would fail or decode as collision.
+run_committed_outcome_signal_case classification_commit_hup_int_verifier \
+  verifier HUP INT zero 129
+run_committed_outcome_signal_case classification_commit_hup_int_harness \
+  harness HUP INT zero 129
+run_committed_outcome_signal_case classification_commit_read_failure_verifier \
+  verifier '' TERM fail 143
+run_committed_outcome_signal_case classification_commit_read_failure_harness \
+  harness '' TERM fail 143
+run_committed_outcome_signal_case classification_commit_collision_verifier \
+  verifier '' TERM 73 143
+run_committed_outcome_signal_case classification_commit_collision_harness \
+  harness '' TERM 73 143
+
 # A handled event that arrives before outcome publication remains first.
 run_acquisition_signal_case signal_before_publication_verifier TERM '' 143 verifier
 run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harness
@@ -1322,11 +1551,11 @@ run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harnes
 run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
 run_claim_reconciliation_case claim_reconciliation_harness_term harness
 
-if [ "$passed" -ne 69 ]; then
-  echo "replay scenario accounting mismatch: $passed/69" >&2
+if [ "$passed" -ne 75 ]; then
+  echo "replay scenario accounting mismatch: $passed/75" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 69/69 named scenarios passed (19 two-party races, 38 participant outcomes)"
+echo "replay evidence lifecycle: 75/75 named scenarios passed (22 two-party races, 44 participant outcomes)"
