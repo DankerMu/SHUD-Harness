@@ -1,13 +1,27 @@
 import { expect, test } from "bun:test";
-import { lstat, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { unwatchFile, watch as watchCallback, watchFile } from "node:fs";
+import {
+  lstat,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  watch as watchPromise,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { CALLBACK_DELAY_MS, type DelayedWatchEvent } from "./delay-watch-preload";
+import {
+  CALLBACK_DELAY_MS,
+  type DelayedWatchEvent,
+  type DelayedWatchRegistration
+} from "./delay-watch-preload";
 
 const globals = globalThis as typeof globalThis & {
   __issue108DelayedWatchEvents: DelayedWatchEvent[];
-  __issue108DelayedWatchRegistrations: string[];
+  __issue108DelayedWatchRegistrations: DelayedWatchRegistration[];
 };
 const store = await import(
   "../../../../packages/core/src/domain/services/workspace-record-store.ts"
@@ -84,6 +98,36 @@ test("private exact settlement never registers or waits for delayed filesystem w
     expect(globals.__issue108DelayedWatchRegistrations).toEqual([]);
     expect(globals.__issue108DelayedWatchEvents).toEqual([]);
   } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("delayed watcher preload negative control observes every watcher family", async () => {
+  const tempRoot = await realpath(
+    await mkdtemp(join(tmpdir(), "issue-108-private-settlement-watch-control-"))
+  );
+  const path = join(tempRoot, "control.json");
+  const watchFileListener = (): void => {};
+  try {
+    await writeFile(path, "{}\n", { flag: "wx", mode: 0o600 });
+    globals.__issue108DelayedWatchEvents.length = 0;
+    globals.__issue108DelayedWatchRegistrations.length = 0;
+
+    const callbackWatcher = watchCallback(path, () => {});
+    callbackWatcher.close();
+    const abortController = new AbortController();
+    watchPromise(path, { signal: abortController.signal });
+    abortController.abort();
+    watchFile(path, { persistent: false, interval: 10 }, watchFileListener);
+    unwatchFile(path, watchFileListener);
+
+    expect(globals.__issue108DelayedWatchRegistrations).toEqual([
+      { family: "node:fs.watch", path },
+      { family: "node:fs/promises.watch", path },
+      { family: "node:fs.watchFile", path }
+    ]);
+  } finally {
+    unwatchFile(path, watchFileListener);
     await rm(tempRoot, { recursive: true, force: true });
   }
 });

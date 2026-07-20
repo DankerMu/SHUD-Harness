@@ -12,7 +12,7 @@ This change consumes the public occurrence ledger delivered by `m1-failure-occur
 4. Successful private settlement returns `{ status: "recovered", settlement: "deleted" }`. Initial success and a false predicate are terminal and never start settlement.
 5. After ticket capture the public pathname is observation-only. Missing public state, successor B, and ancestor ABA cannot authorize or block deletion of private A.
 6. A private proof failure is irreversible for the attempt. Only a raw transient unlink rejection is retried; restored hardlink or namespace-mode drift is not reclassified as safe.
-7. Action and directory-binding finalizer outcomes are captured separately. A successful finalizer cannot relabel an action rejection, while one object rejected at two physical release points produces two occurrences.
+7. Action and directory-binding finalizer outcomes are captured separately at their physical times. This includes an action rejected during permit admission, before the inner release path can retain it. A successful finalizer cannot relabel an action rejection, while one value (including `undefined`) rejected at two physical release points produces two occurrences.
 8. Transition guard and cleanup-lock consumers use the opt-in operation. A genuinely benign pre-mutation convergence is accepted only when the typed error explicitly carries `preMutationDisposition: "benign_convergence"` and is not already a ledger carrier.
 
 ## Result Matrix
@@ -29,7 +29,7 @@ This change consumes the public occurrence ledger delivered by `m1-failure-occur
 
 - Only the ticket's private physical A can be deleted.
 - Public B is preserved byte-for-byte and by physical identity.
-- No filesystem watcher or delayed callback participates in authority.
+- No `node:fs.watch`, `node:fs/promises.watch`, `watchFile`, or delayed callback participates in authority.
 - Each permit, pinned descriptor, capacity slot, mutex, binding, unlink, and namespace cleanup reaches one terminal state.
 - Existing occurrence-ledger phase/order and trusted typed-boundary rules remain authoritative.
 

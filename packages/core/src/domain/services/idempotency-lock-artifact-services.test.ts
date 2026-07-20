@@ -31548,6 +31548,237 @@ describe("idempotency, lock, and artifact services", () => {
     expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
+  test("early permit-admission action rejection keeps an undefined binding finalizer occurrence", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const schema = z.object({ id: z.string() });
+    const record = { id: "private-early-admission-finalizer" };
+    const evidenceRef = "private.early-admission-finalizer";
+    const directorySegments = ["private-early-admission-finalizer"] as const;
+    const path = workspaceRecordPath(
+      workspaceRoot,
+      [...directorySegments, "record.json"],
+      evidenceRef
+    );
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+    const closeTracker = createCleanupPermitCloseTracker([path]);
+    const created = await runWithWorkspaceRecordPublicationHooks(
+      { afterCleanupPermitPinnedHandleClosed: closeTracker.record },
+      () =>
+        createJsonRecordIfAbsentWithCleanupPermit(
+          workspaceRoot,
+          directorySegments,
+          "record.json",
+          record,
+          evidenceRef,
+          schema
+        )
+    );
+    if (created.status !== "created") throw new Error("Expected early-admission fixture.");
+    const publicGeneration = await readFileWithIdentity(path);
+
+    expect(
+      await conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+        created.cleanupPermit,
+        path,
+        evidenceRef,
+        schema,
+        { kind: "record", expected: record, matches: () => false }
+      )
+    ).toEqual({ status: "condition_not_met" });
+    await closeTracker.waitForAll();
+    expect(closeTracker.count(path)).toBe(1);
+    await expectFileDescriptorClosed(closeTracker.descriptors(path)[0]!);
+
+    const failure = await captureThrownValue(() =>
+      runWithWorkspaceRecordCompensationTestHooks(
+        {
+          afterRecordDirectoryBindingRelease: () => {
+            throw undefined;
+          }
+        },
+        () =>
+          conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+            created.cleanupPermit,
+            path,
+            evidenceRef,
+            schema,
+            { kind: "record", expected: record, matches: () => true }
+          )
+      )
+    );
+
+    const primary = semanticPrimaryValue(failure);
+    expect(primary).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+    expect((primary as WorkspaceRecordConditionalDeleteError).mutationPhase).toBe(
+      "pre_mutation"
+    );
+    expect((primary as WorkspaceRecordConditionalDeleteError).failureStage).toBe(
+      "permit_admission"
+    );
+    expect(failureEvents(failure).map(({ phase, value }) => ({ phase, value }))).toEqual([
+      { phase: "initial_release", value: primary },
+      { phase: "final_release", value: undefined }
+    ]);
+    expect(orderedDistinctFailures(failure)).toEqual([primary, undefined]);
+    expect(await readFileWithIdentity(path)).toEqual(publicGeneration);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+  });
+
+  test("idempotency owner-release consumer accepts explicit missing and superseded convergence", async () => {
+    for (const convergence of ["missing", "superseded"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:explicit-benign-${convergence}`;
+      const requestDigest = `digest-explicit-benign-${convergence}`;
+      const resultRef = `TASK-explicit-benign-${convergence}`;
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const displacedGuardPath = `${guardPath}.displaced`;
+      const successorBytes = Buffer.from(
+        `${JSON.stringify({
+          guard_id: `successor-${convergence}`,
+          owner_pid: process.pid,
+          acquired_at_ms: Date.now(),
+          acquired_at: new Date().toISOString()
+        })}\n`
+      );
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      const begin = await service.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      });
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let convergenceInjected = false;
+
+      const completed = await runWithWorkspaceRecordPublicationHooks(
+        {
+          beforeConditionalDelete: async ({ path, conditionStatus }) => {
+            if (path !== guardPath) return;
+            expect(conditionStatus).toBe("matched");
+            convergenceInjected = true;
+            if (convergence === "missing") {
+              await unlink(guardPath);
+            } else {
+              await rename(guardPath, displacedGuardPath);
+              await writeFile(guardPath, successorBytes, { flag: "wx", mode: 0o600 });
+            }
+            throw new Error(`explicit ${convergence} convergence`);
+          }
+        },
+        () =>
+          service.completeRecord({
+            scope: "task",
+            key: rawKey,
+            requestDigest,
+            resultRef
+          })
+      );
+
+      expect(begin.status).toBe("acquired");
+      expect(convergenceInjected).toBe(true);
+      expect(completed).toMatchObject({ status: "completed", result_ref: resultRef });
+      expect(await service.getRecord("task", rawKey)).toMatchObject({
+        status: "completed",
+        result_ref: resultRef
+      });
+      if (convergence === "missing") {
+        await expectPathMissing(guardPath);
+      } else {
+        expect(await readFile(guardPath)).toEqual(successorBytes);
+        expect(await readFile(displacedGuardPath)).toBeDefined();
+      }
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
+  test("idempotency owner-release consumer propagates ordinary and ledger-carried pre-mutation failures", async () => {
+    for (const failureClass of ["ordinary", "ledger_carried"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const rawKey = `task:create:pre-mutation-${failureClass}`;
+      const requestDigest = `digest-pre-mutation-${failureClass}`;
+      const resultRef = `TASK-pre-mutation-${failureClass}`;
+      const guardPath = idempotencyTransitionGuardPath(workspaceRoot, rawKey);
+      const callbackFailure = new Error(`pre-mutation callback ${failureClass}`);
+      const finalReleaseFailure = new Error(`final release ${failureClass}`);
+      const service = createIdempotencyRecordService({ workspaceRoot });
+      const begin = await service.beginRecord({
+        scope: "task",
+        key: rawKey,
+        requestDigest
+      });
+      const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+      const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
+      let failureInjected = false;
+
+      const failure = await captureTaskServiceError(() =>
+        runWithWorkspaceRecordCompensationTestHooks(
+          {
+            afterCleanupPermitPinnedFileClose: ({ path }) => {
+              if (failureClass === "ledger_carried" && path === guardPath) {
+                throw finalReleaseFailure;
+              }
+            }
+          },
+          () =>
+            runWithWorkspaceRecordPublicationHooks(
+              {
+                beforeConditionalDelete: async ({ path, conditionStatus }) => {
+                  if (path !== guardPath) return;
+                  expect(conditionStatus).toBe("matched");
+                  failureInjected = true;
+                  if (failureClass === "ledger_carried") await unlink(guardPath);
+                  throw callbackFailure;
+                }
+              },
+              () =>
+                service.completeRecord({
+                  scope: "task",
+                  key: rawKey,
+                  requestDigest,
+                  resultRef
+                })
+            )
+        )
+      );
+
+      expect(begin.status).toBe("acquired");
+      expect(failureInjected).toBe(true);
+      expect(failure.message).toBe(
+        "Idempotency transition artifact release did not settle safely."
+      );
+      const conditionalFailure = findErrorNode(
+        failure.cause,
+        (error) => error instanceof WorkspaceRecordConditionalDeleteError
+      ) as WorkspaceRecordConditionalDeleteError | undefined;
+      expect(conditionalFailure).toBeInstanceOf(WorkspaceRecordConditionalDeleteError);
+      expect(conditionalFailure!.mutationPhase).toBe("pre_mutation");
+      expect(conditionalFailure!.failureStage).toBe("operation");
+      expect(conditionalFailure!.preMutationDisposition).toBe(
+        failureClass === "ledger_carried" ? "benign_convergence" : undefined
+      );
+      if (failureClass === "ordinary") {
+        expect(failureLedger(failure.cause)).toBeUndefined();
+        expect(await readFile(guardPath)).toBeDefined();
+      } else {
+        expect(failureLedger(failure.cause)).toBeDefined();
+        expect(errorTreeContains(failure.cause, finalReleaseFailure)).toBe(true);
+        await expectPathMissing(guardPath);
+      }
+      expect(await service.getRecord("task", rawKey)).toMatchObject({
+        status: "completed",
+        result_ref: resultRef
+      });
+      expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+      expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
+    }
+  });
+
   test("private proof drift is irreversible after hardlink or namespace-mode restoration", async () => {
     for (const drift of ["hardlink", "namespace_mode"] as const) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();

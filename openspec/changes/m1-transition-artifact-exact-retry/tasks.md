@@ -35,3 +35,10 @@
 - [x] 5.3 Pass full core-service and backend-route suites.
 - [x] 5.4 Pass root check, strict OpenSpec validation, and canonical 95/95 replay verification.
 - [x] 5.5 Record final diff, Zero, stash, and residue evidence.
+
+## 6. Round-1 verified blocker closure
+
+- [x] 6.1 Preserve early permit-admission action primary plus an ordered exact-value binding `final_release`.
+- [x] 6.2 Intercept all three Node watcher families and prove the oracle with an executable negative control.
+- [x] 6.3 Replace collection-only red with a base-compatible behavioral red and unchanged test-HEAD green.
+- [x] 6.4 Prove consumer acceptance for explicit missing/superseded convergence and propagation for ordinary or ledger-carried failures.

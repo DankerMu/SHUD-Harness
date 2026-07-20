@@ -896,7 +896,8 @@ export async function runWithWorkspaceRecordAuthorityDeadline<T>(
 
 async function runWithRecordDirectoryBindingOperation<T>(
   action: () => Promise<T>,
-  onFinalReleaseFailure?: (failure: unknown) => void
+  onFinalReleaseFailure?: (failure: unknown) => void,
+  onActionFailure?: (failure: unknown) => void
 ): Promise<T> {
   const lease: RecordDirectoryBindingOperationLease = {
     bindings: new Map(),
@@ -912,6 +913,7 @@ async function runWithRecordDirectoryBindingOperation<T>(
       actionOutcome = { status: "fulfilled", value: await action() };
     } catch (reason) {
       actionOutcome = { status: "rejected", reason };
+      onActionFailure?.(reason);
     }
     let finalReleaseFailure: PresentFailure | undefined;
     try {
@@ -2172,6 +2174,12 @@ export async function conditionalDeleteJsonRecordWithCleanupPermitAndExactFailur
         ),
       (failure) => {
         finalReleaseFailure = capturePresentFailure("final_release", failure);
+      },
+      (failure) => {
+        failureBeforeBindingRelease ??= capturePresentFailure(
+          "initial_release",
+          failure
+        );
       }
     );
   } catch (error) {

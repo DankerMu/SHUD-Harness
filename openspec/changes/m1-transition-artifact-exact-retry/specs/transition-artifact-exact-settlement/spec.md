@@ -36,6 +36,10 @@ The operation SHALL preserve initial-release, settlement, and final-release fail
 - **WHEN** the operation action rejects and directory-binding finalization succeeds
 - **THEN** the action is not reclassified as final release
 
+#### Scenario: Permit admission and finalizer reject independently
+- **WHEN** permit admission rejects before the inner release path and directory-binding finalization independently rejects with any raw value, including `undefined`
+- **THEN** the admission action remains semantic primary and the finalizer is appended once as the ordered `final_release` occurrence without public-generation mutation or retained resources
+
 #### Scenario: One value rejects at two physical releases
 - **WHEN** one rejection object is thrown by pinned close and directory-binding release
 - **THEN** two physical occurrences are recorded while ordered-distinct identity contains the object once
@@ -54,4 +58,5 @@ Idempotency transition guards and cleanup locks SHALL use private exact settleme
 
 #### Scenario: Benign convergence is explicit
 - **WHEN** pre-mutation authority has already converged to missing or successor B
-- **THEN** the service accepts only an explicit benign-convergence disposition and leaves B unchanged
+- **THEN** the service accepts only a direct explicit benign-convergence disposition and leaves B unchanged
+- **AND** ordinary pre-mutation failures and ledger-carried failures propagate

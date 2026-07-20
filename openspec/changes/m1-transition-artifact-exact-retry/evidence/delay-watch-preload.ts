@@ -1,5 +1,6 @@
 import { mock } from "bun:test";
 import fs, { type WatchListener } from "node:fs";
+import * as fsPromises from "node:fs/promises";
 
 export const CALLBACK_DELAY_MS = 180;
 
@@ -10,8 +11,13 @@ export interface DelayedWatchEvent {
   filename: string | null;
 }
 
+export interface DelayedWatchRegistration {
+  family: "node:fs.watch" | "node:fs/promises.watch" | "node:fs.watchFile";
+  path: string;
+}
+
 const delayedEvents: DelayedWatchEvent[] = [];
-const registrations: string[] = [];
+const registrations: DelayedWatchRegistration[] = [];
 Object.assign(globalThis, {
   __issue108DelayedWatchEvents: delayedEvents,
   __issue108DelayedWatchRegistrations: registrations
@@ -19,7 +25,7 @@ Object.assign(globalThis, {
 
 const originalWatch = fs.watch;
 const delayedWatch = ((...args: Parameters<typeof fs.watch>) => {
-  registrations.push(String(args[0]));
+  registrations.push({ family: "node:fs.watch", path: String(args[0]) });
   const listener = args.at(-1) as WatchListener<string>;
   const wrapped: WatchListener<string> = (eventType, filename) => {
     const event: DelayedWatchEvent = {
@@ -39,8 +45,29 @@ const delayedWatch = ((...args: Parameters<typeof fs.watch>) => {
   ] as Parameters<typeof fs.watch>);
 }) as typeof fs.watch;
 
+const originalPromisesWatch = fsPromises.watch;
+const delayedPromisesWatch = ((...args: Parameters<typeof fsPromises.watch>) => {
+  registrations.push({
+    family: "node:fs/promises.watch",
+    path: String(args[0])
+  });
+  return originalPromisesWatch(...args);
+}) as typeof fsPromises.watch;
+
+const originalWatchFile = fs.watchFile;
+const delayedWatchFile = ((...args: unknown[]) => {
+  registrations.push({ family: "node:fs.watchFile", path: String(args[0]) });
+  return (originalWatchFile as (...watchFileArgs: unknown[]) => unknown)(...args);
+}) as typeof fs.watchFile;
+
 mock.module("node:fs", () => ({
   ...fs,
-  default: { ...fs, watch: delayedWatch },
-  watch: delayedWatch
+  default: { ...fs, watch: delayedWatch, watchFile: delayedWatchFile },
+  watch: delayedWatch,
+  watchFile: delayedWatchFile
+}));
+
+mock.module("node:fs/promises", () => ({
+  ...fsPromises,
+  watch: delayedPromisesWatch
 }));
