@@ -274,3 +274,9 @@
   event before its current event. Prove verifier/harness HUP→INT returns 129
   and post-clear TERM returns 143 even when a forbidden second read would fail
   or decode collision 73, with zero residue in the expanded 75-case matrix.
+- [x] 12.6 Once ordinary settlement witnesses outcome publication, carry that
+  required-publication fact into the shared decoder. A link that disappears
+  before classification MUST atomically commit protocol status 67 before later
+  TERM or a restored collision 73; handler adoption before publication retains
+  signal-first behavior. Prove disappearance and disappearance-plus-restore in
+  verifier and harness with settlement and zero residue in the 79-case matrix.

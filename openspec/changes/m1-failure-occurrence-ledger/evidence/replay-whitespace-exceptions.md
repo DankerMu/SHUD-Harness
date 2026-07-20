@@ -69,7 +69,10 @@ inside the root only after its own `mkdir` succeeds. Every parent path after
 child spawn converges on one settlement boundary: it publishes the release
 barrier when possible, otherwise force-reaps the child. When an outcome is
 published while the creation child remains live, the parent reads, classifies,
-and latches it before wait/reap. Handler adoption and ordinary settlement use
+and latches it before wait/reap. The outcome wait defers handlers across its
+presence test and witnessed-state write. Once publication is witnessed, a link
+that disappears before classification is a committed protocol failure 67, not
+an unpublished outcome. Handler adoption and ordinary settlement use
 one atomic decode-and-commit boundary that distinguishes no publication, exact
 token zero, collision 73, and protocol/read failures mapped to 67.
 `decode_active` remains asserted through classification and decoded-result
@@ -93,8 +96,8 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 75/75 named scenarios. Twenty-two are two-party races with
-44 explicit participant outcomes:
+The self-test passed 79/79 named scenarios. Twenty-four are two-party races
+with 48 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -143,6 +146,10 @@ The self-test passed 75/75 named scenarios. Twenty-two are two-party races with
   post-clear INT at 129, and preserve post-clear TERM at 143 without a second
   publication read even when that read would fail or decode collision 73. All
   six prove child settlement and zero lifecycle/probe residue;
+- verifier and harness witnessed-publication probes remove the outcome before
+  classification, then deliver TERM with the link absent or after restoring
+  `token:73`. All four preserve the earlier required-publication failure 67,
+  classify once, settle the child, and leave zero lifecycle/probe residue;
 - the held-child watchdog uses a distinct failure marker and never creates the
   settlement-release marker. Every held probe asserts it did not fire, so a
   missing production release fails quickly instead of making the probe green;

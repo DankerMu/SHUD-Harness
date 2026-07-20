@@ -908,3 +908,53 @@ Current script SHA-256 values:
 The replay patch hashes remain byte-identical at
 `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
 and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+### A6 Phase-7 witnessed-publication repair
+
+Verified on `2026-07-20 07:44:07 EDT`. The semantic implementation is commit
+`667a54f0ec1c4114615d700cd759eb54e2c474be`, based on clean Round-3 head
+`793ac2fe6f21d03b843dcce0ec4b4a542279bd95`.
+
+The Phase-7 gap sweep found that ordinary acquisition could observe the
+published outcome and then lose the symlink before the shared decoder's
+presence test. That path left classification uncommitted, allowing later TERM
+143 or a restored collision 73 to enter the write-once latch before fallback
+status 67.
+
+The outcome wait now defers handlers across its presence test and the write of
+an explicit witnessed-publication state. A negative probe immediately returns
+any deferred event to the existing signal-first latch. A positive probe makes
+publication required before handlers can run; the shared decoder then commits
+a missing witnessed link as protocol status 67. Both ordinary settlement and
+handler adoption pass the same witnessed fact. State resets only at transaction
+start/end, and release/reap/reconciliation/cleanup remain unchanged.
+
+Four verifier/harness public-surface regressions cover disappearance followed
+by TERM and disappearance followed by restored `token:73` plus TERM. Against
+the pre-fix semantics they returned 143/143/73/73; the restoration cases also
+classified twice. The fixed cases each pass `1/1`, return exact 67, classify
+once, settle the child, and leave no lifecycle, worktree, watchdog, or probe
+residue.
+
+Independent final-head checks passed:
+
+- four new cases plus pre-publication TERM and handler-read-failure controls;
+- canonical replay verifier and 79/79 lifecycle matrix, comprising 24
+  two-party races and 48 participant outcomes;
+- `/bin/sh -n`, `shellcheck -s sh`, strict OpenSpec and incremental hygiene;
+- exactly 13 documented issue-base replay-artifact whitespace findings;
+- byte-identical replay hashes, Zero gitlink, no submodule diff, stash, debug
+  marker, watchdog/release probe, or replay residue.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `69a0b2361ed0a84cd3c319d798aa5e874205ac17dd778b4a1195ac738bb61c77`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `31f74d5e3fe9c9a67804f63855fcea7760c1953cf3bc97ac7d53b734cb164861`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
