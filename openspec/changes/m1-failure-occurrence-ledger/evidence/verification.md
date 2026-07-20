@@ -760,3 +760,51 @@ Current script SHA-256 values:
 The replay patch hashes remain byte-identical at
 `b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
 and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.
+
+### A6 Phase-7 atomic decode commit
+
+Verified on `2026-07-20 06:02:01 EDT` against split base
+`40fd16a39c06e93f2c2536d8c58fcc90a3a5858e`.
+
+The prior shared decoder cleared `decode_active` after classifying a published
+outcome but before its caller latched the decoded status. A TERM handled in that
+gap could re-enter adoption, read the outcome a second time, and commit a later
+collision 73 ahead of the already-determined read-failure status 67.
+
+Handler adoption and ordinary settlement now share one atomic shell state
+boundary. It keeps `decode_active` asserted while it classifies publication,
+latches any decoded non-zero result, latches the first deferred event, and only
+then clears the flag. Exact `token:0`, collision 73, unknown/read-failure 67,
+event-before-publication order, reentrancy masking, mandatory child settlement,
+A4 claim reconciliation, and A5 watchdog semantics are unchanged.
+
+Two public-surface probes cover the canonical verifier and recursive harness.
+Their first published-outcome read fails to 67 while a TERM burst targets the
+decode-to-commit boundary; a forbidden handler re-adoption can then observe the
+still-published `token:73`. In the batched red run with only the production
+lifecycle source stashed, the old verifier and harness each exited 1: both
+re-entered decoding and each dynamically produced the wrong 73 in at least one
+focused attempt. The source stash was popped immediately and no `red-proof`
+stash remains. With the atomic boundary restored, each focused entrypoint
+passes eight consecutive exact-status/zero-residue trials.
+
+The canonical replay verifier exits 0. The full lifecycle matrix passes 66/66
+named scenarios, comprising 19 two-party races and 38 participant outcomes.
+All existing focused chronology/read-failure, TERM-before-publication, A4 claim,
+syntax, and shellcheck controls pass. Removing the production settlement-release
+write still makes the four held collision/unknown verifier/harness probes fail
+quickly with `used its watchdog instead of the settlement release`; restoring
+the write makes them green.
+
+Current script SHA-256 values:
+
+- `evidence/scripts/replay-lifecycle.sh`:
+  `45a795249332fd1e8cdc3e4bd39ec34d5d9254631bacccab716f0bc3e540010f`;
+- `evidence/scripts/verify-replay-evidence.sh`:
+  `bc858e1144b84662f1ff50fd639828d5dc1ab29de3196f200164fc293fb78381`;
+- `evidence/scripts/verify-replay-evidence.test.sh`:
+  `a90c1e35a15c2466275ff13d2d5ec6115e3e80164502aff4f34aee9608c79ac3`.
+
+The replay patch hashes remain byte-identical at
+`b47eb98f90431208d0ebe8bbed6f085a7269b72b8ff91e5c83ae577c0ac958a2`
+and `a5e3db535e3b4a40fd2606f4bbda8a0f13860ed3bf7294dad7951669808c68e9`.

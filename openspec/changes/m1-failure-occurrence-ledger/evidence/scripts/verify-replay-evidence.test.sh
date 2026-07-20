@@ -540,6 +540,9 @@ run_transaction_settlement_case() {
   child_release="$transaction_fault_dir/child-release"
   watchdog_event="$transaction_fault_dir/watchdog-fired"
   handler_read_failure_event="$transaction_fault_dir/handler-read-failed"
+  decode_failure_event="$transaction_fault_dir/decode-read-failed"
+  decode_reentry_event="$transaction_fault_dir/decode-reentered"
+  signal_burst_done_event="$transaction_fault_dir/signal-burst-done"
   collision_fixture=0
   mkdir -m 700 "$transaction_fault_dir"
 
@@ -608,7 +611,7 @@ EOF
       ;;
     collision_result_then_term|unknown_outcome_then_term|\
     published_collision_read_term|published_unknown_read_term|\
-    published_handler_read_failure)
+    published_handler_read_failure|decoded_read_failure_then_handler_collision)
       mkdir -m 700 "$child_root"
       collision_fixture=1
       cat >"$transaction_fault_dir/ln" <<'EOF'
@@ -674,6 +677,34 @@ exec /usr/bin/readlink "$@"
 EOF
           chmod 700 "$transaction_fault_dir/readlink"
           ;;
+        decoded_read_failure_then_handler_collision)
+          cat >"$transaction_fault_dir/readlink" <<'EOF'
+#!/bin/sh
+case "$1" in
+  *.transaction.*.outcome)
+    if [ ! -e "$SHUD_REPLAY_TEST_DECODE_FAILURE_EVENT" ]; then
+      : >"$SHUD_REPLAY_TEST_DECODE_FAILURE_EVENT"
+      lifecycle_target_parent=$PPID
+      (
+        : >"$SHUD_REPLAY_TEST_LATER_EVENT"
+        lifecycle_signal_count=0
+        while [ "$lifecycle_signal_count" -lt 262144 ]; do
+          kill -s TERM "$lifecycle_target_parent" >/dev/null 2>&1 || break
+          lifecycle_signal_count=$((lifecycle_signal_count + 1))
+        done
+        : >"$SHUD_REPLAY_TEST_SIGNAL_BURST_DONE_EVENT"
+      ) </dev/null >/dev/null 2>&1 &
+      exit 1
+    fi
+    if [ ! -e "$SHUD_REPLAY_TEST_SETTLEMENT_RELEASE" ]; then
+      : >"$SHUD_REPLAY_TEST_DECODE_REENTRY_EVENT"
+    fi
+    ;;
+esac
+exec /usr/bin/readlink "$@"
+EOF
+          chmod 700 "$transaction_fault_dir/readlink"
+          ;;
       esac
       ;;
     *)
@@ -710,6 +741,9 @@ EOF
       published_outcome_signal=TERM
       settlement_release=$child_release
       ;;
+    decoded_read_failure_then_handler_collision)
+      settlement_release=$child_release
+      ;;
   esac
 
   case "$child_kind" in
@@ -728,6 +762,9 @@ EOF
     SHUD_REPLAY_TEST_LATER_EVENT="$later_event" \
     SHUD_REPLAY_TEST_WATCHDOG_EVENT="$watchdog_event" \
     SHUD_REPLAY_TEST_HANDLER_READ_FAILURE_EVENT="$handler_read_failure_event" \
+    SHUD_REPLAY_TEST_DECODE_FAILURE_EVENT="$decode_failure_event" \
+    SHUD_REPLAY_TEST_DECODE_REENTRY_EVENT="$decode_reentry_event" \
+    SHUD_REPLAY_TEST_SIGNAL_BURST_DONE_EVENT="$signal_burst_done_event" \
     SHUD_REPLAY_TEST_PUBLISHED_OUTCOME_EVENT="$later_event" \
     SHUD_REPLAY_TEST_PUBLISHED_OUTCOME_SIGNAL="$published_outcome_signal" \
     SHUD_REPLAY_TEST_SETTLEMENT_EVENT="$settlement_event" \
@@ -744,6 +781,12 @@ EOF
   actual=$?
   set -e
 
+  if [ "$fault_kind" = decoded_read_failure_then_handler_collision ] &&
+    ! wait_for_ready "$signal_burst_done_event"; then
+    echo "$case_name signal burst did not finish" >&2
+    return 1
+  fi
+
   settlement_failed=0
   if [ "$actual" -ne "$expected" ]; then
     echo "$case_name exited $actual, expected $expected" >&2
@@ -752,7 +795,7 @@ EOF
   case "$fault_kind" in
     release_result_then_term|collision_result_then_term|unknown_outcome_then_term|\
     published_collision_read_term|published_unknown_read_term|\
-    published_handler_read_failure)
+    published_handler_read_failure|decoded_read_failure_then_handler_collision)
       if [ ! -e "$later_event" ]; then
         echo "$case_name did not inject the later TERM" >&2
         settlement_failed=1
@@ -762,7 +805,7 @@ EOF
   case "$fault_kind" in
     collision_result_then_term|unknown_outcome_then_term|\
     published_collision_read_term|published_unknown_read_term|\
-    published_handler_read_failure)
+    published_handler_read_failure|decoded_read_failure_then_handler_collision)
       if [ ! -e "$fault_event" ]; then
         echo "$case_name did not hold its published outcome" >&2
         settlement_failed=1
@@ -776,6 +819,11 @@ EOF
   if [ "$fault_kind" = published_handler_read_failure ] &&
     [ ! -e "$handler_read_failure_event" ]; then
     echo "$case_name did not fail the handler-internal outcome read" >&2
+    settlement_failed=1
+  fi
+  if [ "$fault_kind" = decoded_read_failure_then_handler_collision ] &&
+    [ -e "$decode_reentry_event" ]; then
+    echo "$case_name re-entered outcome decoding before committing status 67" >&2
     settlement_failed=1
   fi
   if [ ! -s "$transaction_pid_file" ]; then
@@ -950,6 +998,7 @@ case "$self_test_scenario" in
     chronology_published_collision_read_verifier|chronology_published_collision_read_harness|\
     chronology_published_unknown_read_verifier|chronology_published_unknown_read_harness|\
     chronology_handler_read_failure_verifier|chronology_handler_read_failure_harness|\
+    chronology_decode_commit_verifier|chronology_decode_commit_harness|\
     transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
     claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     ;;
@@ -1045,6 +1094,18 @@ case "$self_test_scenario" in
   chronology_handler_read_failure_harness)
     run_transaction_settlement_case handler_read_failure_harness published_handler_read_failure 67 harness
     ;;
+  chronology_decode_commit_verifier)
+    for decode_commit_attempt in 1 2 3 4 5 6 7 8; do
+      run_transaction_settlement_case "decode_commit_verifier_$decode_commit_attempt" \
+        decoded_read_failure_then_handler_collision 67 verifier
+    done
+    ;;
+  chronology_decode_commit_harness)
+    for decode_commit_attempt in 1 2 3 4 5 6 7 8; do
+      run_transaction_settlement_case "decode_commit_harness_$decode_commit_attempt" \
+        decoded_read_failure_then_handler_collision 67 harness
+    done
+    ;;
   transaction_signal_before_publication_verifier)
     run_acquisition_signal_case signal_before_publication_verifier TERM '' 143 verifier
     ;;
@@ -1067,6 +1128,7 @@ case "$self_test_scenario" in
   chronology_published_collision_read_verifier|chronology_published_collision_read_harness|\
   chronology_published_unknown_read_verifier|chronology_published_unknown_read_harness|\
   chronology_handler_read_failure_verifier|chronology_handler_read_failure_harness|\
+  chronology_decode_commit_verifier|chronology_decode_commit_harness|\
   transaction_signal_before_publication_verifier|transaction_signal_before_publication_harness|\
   claim_reconciliation_verifier_term|claim_reconciliation_harness_term)
     lifecycle_begin_successful_finalization
@@ -1151,6 +1213,10 @@ run_transaction_settlement_case published_unknown_read_term_harness published_un
 run_transaction_settlement_case handler_read_failure_verifier published_handler_read_failure 67 verifier
 run_transaction_settlement_case handler_read_failure_harness published_handler_read_failure 67 harness
 
+# A decoded read failure commits before a later handler can re-adopt collision.
+run_transaction_settlement_case decode_commit_verifier decoded_read_failure_then_handler_collision 67 verifier
+run_transaction_settlement_case decode_commit_harness decoded_read_failure_then_handler_collision 67 harness
+
 # A handled event that arrives before outcome publication remains first.
 run_acquisition_signal_case signal_before_publication_verifier TERM '' 143 verifier
 run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harness
@@ -1159,11 +1225,11 @@ run_acquisition_signal_case signal_before_publication_harness TERM '' 143 harnes
 run_claim_reconciliation_case claim_reconciliation_verifier_term verifier
 run_claim_reconciliation_case claim_reconciliation_harness_term harness
 
-if [ "$passed" -ne 64 ]; then
-  echo "replay scenario accounting mismatch: $passed/64" >&2
+if [ "$passed" -ne 66 ]; then
+  echo "replay scenario accounting mismatch: $passed/66" >&2
   lifecycle_fail 85
 fi
 lifecycle_begin_successful_finalization
 lifecycle_release_root_strict 84
 trap - EXIT HUP INT TERM
-echo "replay evidence lifecycle: 64/64 named scenarios passed (17 two-party races, 34 participant outcomes)"
+echo "replay evidence lifecycle: 66/66 named scenarios passed (19 two-party races, 38 participant outcomes)"

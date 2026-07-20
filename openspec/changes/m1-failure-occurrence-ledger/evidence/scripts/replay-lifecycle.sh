@@ -30,7 +30,7 @@ lifecycle_latch_status() {
   fi
 }
 
-lifecycle_decode_transaction_outcome() {
+lifecycle_decode_and_commit_transaction_outcome() {
   lifecycle_decoded_outcome_published=0
   lifecycle_decoded_outcome_status=
   lifecycle_deferred_signal_status=
@@ -48,21 +48,15 @@ lifecycle_decode_transaction_outcome() {
     fi
   fi
 
-  lifecycle_transaction_decode_active=0
-}
-
-lifecycle_latch_decoded_outcome() {
   if [ "$lifecycle_decoded_outcome_published" -eq 1 ] &&
     [ "$lifecycle_decoded_outcome_status" -ne 0 ]; then
     lifecycle_latch_transaction_result "$lifecycle_decoded_outcome_status"
   fi
-}
-
-lifecycle_latch_deferred_signal() {
   if [ -n "$lifecycle_deferred_signal_status" ]; then
     lifecycle_latch_status "$lifecycle_deferred_signal_status"
     lifecycle_mask_latched_signals
   fi
+  lifecycle_transaction_decode_active=0
 }
 
 lifecycle_adopt_published_transaction_outcome() {
@@ -71,15 +65,13 @@ lifecycle_adopt_published_transaction_outcome() {
     return
   fi
 
-  # The decoder owns no latch side effects. Both handler adoption and ordinary
-  # settlement therefore classify publication, zero, collision, protocol
-  # mismatch, and read failure through this same boundary before either caller
-  # allows a later status into the write-once latch.
+  # Handler adoption and ordinary settlement both decode and commit through
+  # this boundary. decode_active remains set until the decoded result and any
+  # deferred event have entered the write-once latch, so a handler can never
+  # re-read publication between classification and commit.
   lifecycle_transaction_adoption_active=1
   trap '' HUP INT TERM
-  lifecycle_decode_transaction_outcome
-  lifecycle_latch_decoded_outcome
-  lifecycle_latch_deferred_signal
+  lifecycle_decode_and_commit_transaction_outcome
   lifecycle_transaction_adoption_active=0
 }
 
@@ -380,7 +372,7 @@ lifecycle_settle_creation_transaction() {
   lifecycle_deferred_signal_status=
   if [ "$lifecycle_release_published" -eq 1 ]; then
     lifecycle_inject_published_outcome_signal
-    lifecycle_decode_transaction_outcome
+    lifecycle_decode_and_commit_transaction_outcome
   fi
 
   lifecycle_transaction_result=$lifecycle_settlement_status
@@ -393,7 +385,6 @@ lifecycle_settle_creation_transaction() {
     fi
   fi
   lifecycle_latch_transaction_result "$lifecycle_transaction_result"
-  lifecycle_latch_deferred_signal
 
   # The published outcome is authoritative before child process completion.
   # Once classified, later signals cannot replace a non-zero result, but the

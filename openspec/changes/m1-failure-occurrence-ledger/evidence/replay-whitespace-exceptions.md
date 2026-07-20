@@ -70,11 +70,12 @@ child spawn converges on one settlement boundary: it publishes the release
 barrier when possible, otherwise force-reaps the child. When an outcome is
 published while the creation child remains live, the parent reads, classifies,
 and latches it before wait/reap. Handler adoption and ordinary settlement use
-one decoder that distinguishes no publication, exact token zero, collision 73,
-and protocol/read failures mapped to 67. A signal arriving during ordinary
-decoding is deferred until that decoded result is latched; an active handler
-masks reentrancy while it uses the same decoder before recording its signal.
-This closes both read windows without changing event-before-publication order.
+one atomic decode-and-commit boundary that distinguishes no publication, exact
+token zero, collision 73, and protocol/read failures mapped to 67.
+`decode_active` remains asserted while the boundary latches the decoded result
+and then the first deferred event; only after both steps can a handler attempt
+another adoption. This closes all three read/commit windows without changing
+event-before-publication order.
 As soon as a non-zero release or outcome result is determined, the parent
 records it in the shared write-once latch before later settlement, ownership
 reconciliation, or transaction cleanup; an earlier signal already in the
@@ -89,8 +90,8 @@ keeping EXIT cleanup armed, then immediately exits through that cleanup when
 the same write-once latch is already set; strict teardown only begins from a
 clear latch.
 
-The self-test passed 64/64 named scenarios. Seventeen are two-party races with
-34 explicit participant outcomes:
+The self-test passed 66/66 named scenarios. Nineteen are two-party races with
+38 explicit participant outcomes:
 
 - 18 baseline verifier scenarios: normal, post-create failure, two add failures,
   two patch failures, two partial states, dirty/locked/missing strict cleanup,
@@ -127,6 +128,10 @@ The self-test passed 64/64 named scenarios. Seventeen are two-party races with
 - verifier and harness handler-read-failure probes publish collision first,
   make the handler's authoritative read fail, and preserve protocol status 67
   before the same TERM. Both prove mandatory child settlement and zero residue;
+- verifier and harness decode-commit probes make the first ordinary outcome
+  read fail to 67 while TERM is delivered before commit and a forbidden second
+  read could observe collision 73. Both preserve 67 without re-entering the
+  decoder and leave the signal helper plus every lifecycle artifact absent;
 - the held-child watchdog uses a distinct failure marker and never creates the
   settlement-release marker. Every held probe asserts it did not fire, so a
   missing production release fails quickly instead of making the probe green;
@@ -137,5 +142,5 @@ The self-test passed 64/64 named scenarios. Seventeen are two-party races with
   marker-created assertion-window TERM and HUP→INT paths.
 
 Every case leaves no exact registered worktree, claim, token, marker, or owned
-temporary root. A clean incremental A5 `git diff --check` must exit 0 because
-A5 introduces no new whitespace exception.
+temporary root. A clean incremental A6 `git diff --check` must exit 0 because
+A6 introduces no new whitespace exception.

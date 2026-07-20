@@ -245,3 +245,20 @@
   exact zero, collision 73, TERM-before-publication, handler masking, mandatory
   child settlement, A4 claim behavior, and zero residue in the expanded
   64-case matrix.
+
+## 12. Phase-7 Child A6 — Atomic Decode Commit
+
+- [x] 12.1 Keep `decode_active` asserted across outcome classification, decoded
+  result latching, deferred-event latching, and only then flag clearing. Route
+  handler adoption and ordinary settlement through that one atomic shell state
+  boundary so a later handler cannot re-read publication before status 67 is
+  committed.
+- [x] 12.2 Add deterministic verifier and harness public-surface regressions in
+  which the first published-outcome read fails to 67, TERM arrives in the
+  decode-to-commit window, and a forbidden second read could observe collision
+  `token:73`. Both MUST preserve 67 and leave no child, claim, transaction link,
+  marker, root, registered worktree, watchdog, fault probe, or signal helper.
+- [x] 12.3 Preserve exact zero, collision 73, unknown/read failure 67,
+  TERM-before-publication, handler masking, mandatory child settlement, A4
+  claim reconciliation, A5 watchdog behavior, replay-patch bytes, and the full
+  expanded 66-case matrix.
