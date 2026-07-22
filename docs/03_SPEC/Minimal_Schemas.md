@@ -72,7 +72,7 @@ repos:
 runtime:
   os: "Darwin 24.6.0"
   r_version: "4.4.1"
-  r_packages_lock:
+  r_packages_lock:                    # { path, sha256 } | null；下方为存在 renv.lock 的示例
     path: "renv.lock"
     sha256: "sha256:..."
   python_version: "3.12.4"
