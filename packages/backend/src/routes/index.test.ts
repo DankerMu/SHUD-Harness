@@ -1124,6 +1124,8 @@ describe("backend workspace and health routes", () => {
     tempRoots.push(tempRoot);
     let nextId = 0;
     const idempotencyKey = "task:create:replay";
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
     const app = createBackendApi({
       workspaceRoot,
       now: fixedNow("2026-07-07T12:03:30.000Z"),
@@ -1155,6 +1157,8 @@ describe("backend workspace and health routes", () => {
     expect((await readdir(join(workspaceRoot, "tasks", "_idempotency", "task")))).toHaveLength(1);
     expect(idempotencyRecord?.status).toBe("completed");
     expect(idempotencyRecord?.result_ref).toBe(firstTask.task_id);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
   test("POST /api/tasks delegates normal-owner pre-completion observation to completeRecord", async () => {
