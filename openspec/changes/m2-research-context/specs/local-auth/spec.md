@@ -4,6 +4,22 @@ D6 收缩口径鉴权：localhost 绑定 + 单一本地 token（grill 定案 1�
 
 ## ADDED Requirements
 
+### Requirement: workspace local-token mutation consistency
+
+所有修改 `workspace/secrets/local-token` 及其协议条目的 SHUD-Harness writer SHALL 先在已打开的 `secrets` 目录 descriptor 上取得 exclusive nonblocking mutation lock；只有成功持锁才能构造并传递 mutation capability，publication、recovery、rollback 与 cleanup helper MUST 接受该 capability，不得接受裸目录 descriptor 作为写权限证明。持锁 writer SHALL 在 pathname mutation 前后校验已观察 generation，并在可观察 mismatch 时以 `LocalTokenStorageError` fail closed，不返回 authority。
+
+本契约提供 cooperative-writer serialization，不声称 macOS/Linux 对一个拥有目录写权限且忽略 mutation lock 的进程提供 `rename/unlink only if pathname still names expected inode` 的线性化 compare-and-mutate 语义。已经在 mutation 前观察到的 foreign generation MUST NOT 被故意覆盖或删除；mutation 后观察到干扰时 MUST fail closed。
+
+#### Scenario: cooperative writer 被 mutation lock 串行化
+
+- **WHEN** writer A 持有同一 `secrets` 目录 inode 的 exclusive mutation lock，writer B 通过公开 token-store seam 尝试 publication/recovery
+- **THEN** writer B 在 2 秒内得到 `LocalTokenStorageError`，且不创建、rename 或 unlink 条目；A 释放 lock 后，B 可正常继续
+
+#### Scenario: mutation 前已观察到 foreign generation
+
+- **WHEN** 持锁 writer 在 mutation 前发现 pathname 不再指向先前观察的 `(dev, ino)`
+- **THEN** 保留当前 generation、返回 `LocalTokenStorageError`，且不声称拥有 compare-and-mutate authority
+
 ### Requirement: localhost 绑定
 
 后端进程 SHALL 仅监听 `127.0.0.1`（不监听 0.0.0.0 或外网接口）；绑定地址 MUST 可测试断言。

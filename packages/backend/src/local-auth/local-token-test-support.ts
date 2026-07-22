@@ -17,12 +17,18 @@ export type LocalTokenTestStage =
   | "before_legacy_cleanup"
   | "before_retired_cleanup"
   | "before_recovery_artifact_open"
+  | "after_workspace_leaf_mkdir"
+  | "after_secrets_mkdir"
+  | "after_descriptor_close"
+  | "after_mutation_lease_unlock"
+  | "after_mutation_lease_close"
   | "after_inventory"
   | "inventory_rejected"
   | "before_authority_return"
   | "before_assert_current";
 
 export type LocalTokenInventoryBoundary =
+  | "raw_work_limit"
   | "total_limit"
   | "external_limit"
   | "owned_limit"
@@ -38,6 +44,7 @@ export interface LocalTokenTestHookInput {
   readonly externalEntries?: number;
   readonly ownedEntries?: number;
   readonly maxNameBytes?: number;
+  readonly rawRecords?: number;
   readonly boundary?: LocalTokenInventoryBoundary;
 }
 

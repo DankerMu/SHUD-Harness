@@ -84,10 +84,32 @@ describe("workspace local-token store contract", () => {
     expect(readFileSync(join(workspace.secretsRoot, "local-token"), "utf8")).toBe(expected);
   });
 
+  test("every accepted token round-trips byte-for-byte through the frozen Bearer grammar", () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+    createPrivateSecrets(workspace);
+    const expected = "token-é-safe";
+    writeFileSync(join(workspace.secretsRoot, "local-token"), expected, { mode: 0o600 });
+
+    const authority = openWorkspaceLocalTokenAuthority({ workspaceRoot: workspace.workspaceRoot });
+    const header = `Bearer ${authority.token}`;
+    const parsed = /^Bearer ([^\s,\u0000]+)$/u.exec(header)?.[1];
+
+    expect(parsed).toBeDefined();
+    expect(Buffer.from(parsed!, "utf8")).toEqual(Buffer.from(expected, "utf8"));
+    authority.assertCurrent();
+  });
+
   for (const fixture of [
     { name: "empty", bytes: Buffer.alloc(0) },
     { name: "4097-byte", bytes: Buffer.alloc(4097, 0x61) },
-    { name: "malformed UTF-8", bytes: Buffer.from([0xff]) }
+    { name: "malformed UTF-8", bytes: Buffer.from([0xff]) },
+    { name: "space-bearing", bytes: Buffer.from("token with-space") },
+    { name: "tab-bearing", bytes: Buffer.from("token\twith-tab") },
+    { name: "newline-bearing", bytes: Buffer.from("token\nwith-newline") },
+    { name: "Unicode-whitespace-bearing", bytes: Buffer.from("token\u00a0with-space") },
+    { name: "comma-bearing", bytes: Buffer.from("token,with-comma") },
+    { name: "NUL-bearing", bytes: Buffer.from("token\u0000with-nul") }
   ]) {
     test(`rejects a ${fixture.name} token without overwriting it`, () => {
       const workspace = createLocalTokenTestWorkspace();
@@ -205,6 +227,65 @@ describe("workspace local-token store contract", () => {
     expect(() => lstatSync(join(outside, "secrets"))).toThrow();
   });
 
+  test("rejects an already-observable pre-adoption workspace leaf replacement after mkdir", () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+    const target = join(workspace.tempRoot, "replacement-target");
+    const displaced = join(workspace.tempRoot, "created-workspace-displaced");
+    let replacement: BigIntStats | undefined;
+
+    expect(() => runWithLocalTokenStoreTestContext({
+      hook: ({ stage }) => {
+        if (stage !== "after_workspace_leaf_mkdir" || replacement) return;
+        renameSync(target, displaced);
+        mkdirSync(target, { mode: 0o755 });
+        chmodSync(target, 0o755);
+        writeFileSync(join(target, "sentinel"), "foreign-workspace", { mode: 0o600 });
+        replacement = lstatSync(target, { bigint: true });
+      }
+    }, () => openWorkspaceLocalTokenAuthority({ workspaceRoot: target }))).toThrow(
+      LocalTokenStorageError
+    );
+
+    const current = lstatSync(target, { bigint: true });
+    expect(current.dev).toBe(replacement?.dev);
+    expect(current.ino).toBe(replacement?.ino);
+    expect(current.mode & 0o7777n).toBe(0o755n);
+    expect(readFileSync(join(target, "sentinel"), "utf8")).toBe("foreign-workspace");
+    expect(readdirSync(target)).toEqual(["sentinel"]);
+  });
+
+  test("rejects an already-observable pre-adoption secrets replacement after mkdir", () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+    const displaced = join(workspace.workspaceRoot, "created-secrets-displaced");
+    let replacement: BigIntStats | undefined;
+
+    expect(() => runWithLocalTokenStoreTestContext({
+      hook: ({ stage }) => {
+        if (stage !== "after_secrets_mkdir" || replacement) return;
+        renameSync(workspace.secretsRoot, displaced);
+        mkdirSync(workspace.secretsRoot, { mode: 0o755 });
+        chmodSync(workspace.secretsRoot, 0o755);
+        writeFileSync(join(workspace.secretsRoot, "sentinel"), "foreign-secrets", {
+          mode: 0o600
+        });
+        replacement = lstatSync(workspace.secretsRoot, { bigint: true });
+      }
+    }, () => openWorkspaceLocalTokenAuthority({
+      workspaceRoot: workspace.workspaceRoot
+    }))).toThrow(LocalTokenStorageError);
+
+    const current = lstatSync(workspace.secretsRoot, { bigint: true });
+    expect(current.dev).toBe(replacement?.dev);
+    expect(current.ino).toBe(replacement?.ino);
+    expect(current.mode & 0o7777n).toBe(0o755n);
+    expect(readFileSync(join(workspace.secretsRoot, "sentinel"), "utf8")).toBe(
+      "foreign-secrets"
+    );
+    expect(readdirSync(workspace.secretsRoot)).toEqual(["sentinel"]);
+  });
+
   test("assertCurrent rejects a same-byte replacement generation and preserves it", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
@@ -222,6 +303,39 @@ describe("workspace local-token store contract", () => {
     expect(readFileSync(join(workspace.secretsRoot, "local-token"), "utf8")).toBe(
       authority.token
     );
+  });
+
+  test("assertCurrent rejects a same-inode content rewrite and preserves it", () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+    const authority = openWorkspaceLocalTokenAuthority({ workspaceRoot: workspace.workspaceRoot });
+    const path = join(workspace.secretsRoot, "local-token");
+    const before = lstatSync(path, { bigint: true });
+    const replacement = "z".repeat(Buffer.byteLength(authority.token, "utf8"));
+
+    writeFileSync(path, replacement, { flag: "r+" });
+
+    const after = lstatSync(path, { bigint: true });
+    expect(after.dev).toBe(before.dev);
+    expect(after.ino).toBe(before.ino);
+    expect(() => authority.assertCurrent()).toThrow(LocalTokenStorageError);
+    expect(readFileSync(path, "utf8")).toBe(replacement);
+  });
+
+  test("accepts a relative workspace root and restores cwd before reproof", () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+    const originalCwd = process.cwd();
+    let authority: ReturnType<typeof openWorkspaceLocalTokenAuthority> | undefined;
+    try {
+      process.chdir(workspace.tempRoot);
+      authority = openWorkspaceLocalTokenAuthority({ workspaceRoot: "workspace" });
+    } finally {
+      process.chdir(originalCwd);
+    }
+
+    expect(authority?.source).toBe("workspace");
+    authority?.assertCurrent();
   });
 
   test("assertCurrent rejects a replaced secrets directory", () => {
@@ -250,7 +364,7 @@ describe("workspace local-token store contract", () => {
     expect(() => authority.assertCurrent()).toThrow(LocalTokenStorageError);
   });
 
-  test("final authority reproof rejects and preserves a canonical replacement", () => {
+  test("final authority reproof rejects and preserves a canonical replacement observable before return", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     const replacementBytes = "foreign-final-token";
@@ -276,7 +390,7 @@ describe("workspace local-token store contract", () => {
     );
   });
 
-  test("final authority reproof rejects a secrets pathname replacement", () => {
+  test("final authority reproof rejects a secrets pathname replacement observable before return", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     const displaced = join(workspace.workspaceRoot, "displaced-secrets");

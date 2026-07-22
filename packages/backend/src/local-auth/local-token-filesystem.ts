@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import {
   closeSync,
-  fchmodSync,
   fstatSync,
   fsyncSync,
   openSync,
@@ -10,10 +9,21 @@ import {
   type BigIntStats
 } from "node:fs";
 import { parse, resolve, sep } from "node:path";
-import { openAt, mkdirAt, readErrno, renameAtNoReplace, unlinkAt } from "./local-token-syscalls";
+import {
+  flockNonblocking,
+  openAt,
+  mkdirAt,
+  readErrno,
+  renameAtNoReplace,
+  unlinkAt
+} from "./local-token-syscalls";
+import { invokeLocalTokenTestHook } from "./local-token-test-support";
 import {
   CREATE_OPEN_FLAGS,
   DIRECTORY_OPEN_FLAGS,
+  FLOCK_EXCLUSIVE,
+  FLOCK_NONBLOCKING,
+  FLOCK_UNLOCK,
   LOCAL_TOKEN_DIRECTORY,
   LOCAL_TOKEN_FILE,
   LOCAL_TOKEN_MAX_BYTES,
@@ -41,6 +51,16 @@ export interface WorkspaceTokenDescriptors {
   readonly secretsIdentity: LocalTokenPhysicalIdentity;
 }
 
+const HELD_SECRETS_MUTATION_LEASE: unique symbol = Symbol("held-secrets-mutation-lease");
+
+export interface HeldSecretsMutationLease {
+  readonly [HELD_SECRETS_MUTATION_LEASE]: true;
+  readonly descriptor: number;
+  readonly identity: LocalTokenPhysicalIdentity;
+}
+
+const activeMutationLeases = new WeakSet<object>();
+
 export interface ObservedTokenArtifact extends ValidatedLocalToken {
   readonly digest: string;
 }
@@ -49,9 +69,22 @@ export function closeOwnedDescriptor(descriptor: number | undefined): void {
   if (descriptor === undefined) return;
   try {
     closeSync(descriptor);
+    invokeLocalTokenTestHook({ stage: "after_descriptor_close" });
   } catch {
-    // A descriptor with lost close status cannot confer namespace authority.
+    throw unsafeLocalTokenStorageError();
   }
+}
+
+export function settleOwnedDescriptors(...descriptors: Array<number | undefined>): void {
+  let failure: unknown;
+  for (const descriptor of descriptors) {
+    try {
+      closeOwnedDescriptor(descriptor);
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (failure !== undefined) throw unsafeLocalTokenStorageError();
 }
 
 function guardDirectoryType(descriptor: number): BigIntStats {
@@ -82,6 +115,24 @@ function guardedDirectoryOpenAt(parent: number, name: string): number {
   }
 }
 
+function assertReboundDirectoryIdentity(
+  parent: number,
+  name: string,
+  expected: LocalTokenPhysicalIdentity
+): void {
+  let rebound: number | undefined;
+  try {
+    rebound = guardedDirectoryOpenAt(parent, name);
+    if (rebound < 0) throw unsafeLocalTokenStorageError();
+    const observed = assertPrivateDirectory(rebound);
+    if (!sameIdentity(physicalIdentity(observed), expected)) {
+      throw unsafeLocalTokenStorageError();
+    }
+  } finally {
+    closeOwnedDescriptor(rebound);
+  }
+}
+
 export function openWorkspaceRootDescriptor(
   workspaceRootInput: string,
   createLeaf = true
@@ -101,14 +152,17 @@ export function openWorkspaceRootDescriptor(
         const created = mkdirAt(descriptor, segment, 0o700) === 0;
         next = guardedDirectoryOpenAt(descriptor, segment);
         if (next >= 0 && created) {
-          fchmodSync(next, 0o700);
+          const createdObservation = assertPrivateDirectory(next);
+          const createdIdentity = physicalIdentity(createdObservation);
+          invokeLocalTokenTestHook({ stage: "after_workspace_leaf_mkdir" });
+          assertReboundDirectoryIdentity(descriptor, segment, createdIdentity);
           fsyncSync(descriptor);
-          guardDirectoryType(next);
         }
       }
       if (next < 0) throw unsafeLocalTokenStorageError();
-      closeSync(descriptor);
+      const previous = descriptor;
       descriptor = next;
+      closeOwnedDescriptor(previous);
     }
     return Object.freeze({ root: workspaceRoot, descriptor });
   } catch {
@@ -132,7 +186,10 @@ export function openOrCreateWorkspaceTokenDescriptors(
       secrets = guardedDirectoryOpenAt(workspace, LOCAL_TOKEN_DIRECTORY);
       if (secrets < 0) throw unsafeLocalTokenStorageError();
       if (created) {
-        fchmodSync(secrets, 0o700);
+        const createdObservation = assertPrivateDirectory(secrets);
+        const createdIdentity = physicalIdentity(createdObservation);
+        invokeLocalTokenTestHook({ stage: "after_secrets_mkdir" });
+        assertReboundDirectoryIdentity(workspace, LOCAL_TOKEN_DIRECTORY, createdIdentity);
         fsyncSync(workspace);
       }
     }
@@ -145,10 +202,73 @@ export function openOrCreateWorkspaceTokenDescriptors(
       secretsIdentity: physicalIdentity(secretsObservation)
     });
   } catch {
-    closeOwnedDescriptor(secrets);
-    closeOwnedDescriptor(workspace);
+    settleOwnedDescriptors(secrets, workspace);
     throw unsafeLocalTokenStorageError();
   }
+}
+
+export function acquireHeldSecretsMutationLease(
+  descriptors: WorkspaceTokenDescriptors
+): HeldSecretsMutationLease {
+  const before = assertPrivateDirectory(descriptors.secrets);
+  const identity = physicalIdentity(before);
+  if (!sameIdentity(identity, descriptors.secretsIdentity)) {
+    throw unsafeLocalTokenStorageError();
+  }
+  if (
+    flockNonblocking(
+      descriptors.secrets,
+      FLOCK_EXCLUSIVE | FLOCK_NONBLOCKING
+    ) !== 0
+  ) {
+    throw unsafeLocalTokenStorageError();
+  }
+  try {
+    const after = assertPrivateDirectory(descriptors.secrets);
+    if (!sameIdentity(physicalIdentity(after), identity)) {
+      throw unsafeLocalTokenStorageError();
+    }
+    const lease = Object.freeze({
+      [HELD_SECRETS_MUTATION_LEASE]: true as const,
+      descriptor: descriptors.secrets,
+      identity
+    });
+    activeMutationLeases.add(lease);
+    return lease;
+  } catch {
+    flockNonblocking(descriptors.secrets, FLOCK_UNLOCK);
+    throw unsafeLocalTokenStorageError();
+  }
+}
+
+export function secretsDescriptorUnderLease(lease: HeldSecretsMutationLease): number {
+  if (!activeMutationLeases.has(lease)) throw unsafeLocalTokenStorageError();
+  const observed = assertPrivateDirectory(lease.descriptor);
+  if (!sameIdentity(physicalIdentity(observed), lease.identity)) {
+    throw unsafeLocalTokenStorageError();
+  }
+  return lease.descriptor;
+}
+
+export function releaseHeldSecretsMutationLease(lease: HeldSecretsMutationLease): void {
+  if (!activeMutationLeases.delete(lease)) throw unsafeLocalTokenStorageError();
+  let failure: unknown;
+  if (flockNonblocking(lease.descriptor, FLOCK_UNLOCK) !== 0) {
+    failure = unsafeLocalTokenStorageError();
+  } else {
+    try {
+      invokeLocalTokenTestHook({ stage: "after_mutation_lease_unlock" });
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  try {
+    closeSync(lease.descriptor);
+    invokeLocalTokenTestHook({ stage: "after_mutation_lease_close" });
+  } catch (error) {
+    failure ??= error;
+  }
+  if (failure !== undefined) throw unsafeLocalTokenStorageError();
 }
 
 export function assertWorkspaceAndSecretsBinding(input: WorkspaceTokenDescriptors): void {
@@ -175,8 +295,7 @@ export function assertWorkspaceAndSecretsBinding(input: WorkspaceTokenDescriptor
       throw unsafeLocalTokenStorageError();
     }
   } finally {
-    closeOwnedDescriptor(reboundSecrets);
-    closeOwnedDescriptor(reboundWorkspace);
+    settleOwnedDescriptors(reboundSecrets, reboundWorkspace);
   }
 }
 
@@ -202,6 +321,26 @@ function sameTokenObservation(left: BigIntStats, right: BigIntStats): boolean {
     left.ctimeNs === right.ctimeNs &&
     left.mtimeNs === right.mtimeNs
   );
+}
+
+function decodeTransportSafeLocalToken(bytes: Buffer): string {
+  if (bytes.byteLength === 0 || bytes.byteLength > LOCAL_TOKEN_MAX_BYTES) {
+    throw unsafeLocalTokenStorageError();
+  }
+  let token: string;
+  try {
+    token = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw unsafeLocalTokenStorageError();
+  }
+  if (
+    token.length === 0 ||
+    /[\s,\u0000]/u.test(token) ||
+    !Buffer.from(token, "utf8").equals(bytes)
+  ) {
+    throw unsafeLocalTokenStorageError();
+  }
+  return token;
 }
 
 export function readValidatedTokenDescriptor(
@@ -242,15 +381,7 @@ export function readValidatedTokenDescriptor(
     closeOwnedDescriptor(rebound);
   }
 
-  let token: string;
-  try {
-    token = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    throw unsafeLocalTokenStorageError();
-  }
-  if (token.length === 0 || !Buffer.from(token, "utf8").equals(bytes)) {
-    throw unsafeLocalTokenStorageError();
-  }
+  const token = decodeTransportSafeLocalToken(bytes);
   return Object.freeze({
     token,
     bytes,
@@ -343,24 +474,56 @@ export function assertControlStat(entry: BigIntStats): void {
   }
 }
 
-export function retireExactArtifact(
-  secretsDescriptor: number,
+export function moveObservedArtifactUnderLease(
+  lease: HeldSecretsMutationLease,
+  artifact: OwnedLocalTokenArtifact,
+  destinationName: string
+): boolean {
+  const secretsDescriptor = secretsDescriptorUnderLease(lease);
+  const before = observeRegularArtifact(secretsDescriptor, artifact.name);
+  if (before === undefined || !sameIdentity(before.identity, artifact.identity)) {
+    throw unsafeLocalTokenStorageError();
+  }
+  if (renameAtNoReplace(
+    secretsDescriptor,
+    artifact.name,
+    secretsDescriptor,
+    destinationName
+  ) !== 0) {
+    // This is tamper/collision detection, not pathname compare-and-swap.
+    const unchanged = observeRegularArtifact(secretsDescriptor, artifact.name);
+    if (unchanged === undefined || !sameIdentity(unchanged.identity, artifact.identity)) {
+      throw unsafeLocalTokenStorageError();
+    }
+    return false;
+  }
+  fsyncSync(secretsDescriptor);
+  // Postconditions detect observable interference; they do not provide hostile-writer CAS.
+  const source = observeRegularArtifact(secretsDescriptor, artifact.name);
+  const destination = observeRegularArtifact(secretsDescriptor, destinationName);
+  if (
+    source !== undefined ||
+    destination === undefined ||
+    !sameIdentity(destination.identity, artifact.identity)
+  ) {
+    throw unsafeLocalTokenStorageError();
+  }
+  return true;
+}
+
+export function retireObservedArtifactUnderLease(
+  lease: HeldSecretsMutationLease,
   artifact: OwnedLocalTokenArtifact
 ): void {
+  const secretsDescriptor = secretsDescriptorUnderLease(lease);
   const before = observeRegularArtifact(secretsDescriptor, artifact.name);
   if (before === undefined || !sameIdentity(before.identity, artifact.identity)) {
     throw unsafeLocalTokenStorageError();
   }
   const retirementName = `.local-token-retired-${identityName(artifact.identity)}-${crypto.randomUUID()}.retired`;
-  if (renameAtNoReplace(
-    secretsDescriptor,
-    artifact.name,
-    secretsDescriptor,
-    retirementName
-  ) !== 0) {
+  if (!moveObservedArtifactUnderLease(lease, artifact, retirementName)) {
     throw unsafeLocalTokenStorageError();
   }
-  fsyncSync(secretsDescriptor);
   const retired = observeRegularArtifact(secretsDescriptor, retirementName);
   if (retired === undefined || !sameIdentity(retired.identity, artifact.identity)) {
     throw unsafeLocalTokenStorageError();
@@ -373,6 +536,10 @@ export function retireExactArtifact(
     throw unsafeLocalTokenStorageError();
   }
   fsyncSync(secretsDescriptor);
+  // Absence is a postcondition/tamper check, not an atomic pathname predicate.
+  if (observeRegularArtifact(secretsDescriptor, retirementName) !== undefined) {
+    throw unsafeLocalTokenStorageError();
+  }
 }
 
 export function readObservedTokenArtifact(
@@ -404,11 +571,12 @@ export function writeAll(descriptor: number, bytes: Buffer): void {
   }
 }
 
-export function openCreatedArtifact(
-  secretsDescriptor: number,
+export function openCreatedArtifactUnderLease(
+  lease: HeldSecretsMutationLease,
   name: string,
   flags = CREATE_OPEN_FLAGS
 ): number {
+  const secretsDescriptor = secretsDescriptorUnderLease(lease);
   return openAt(secretsDescriptor, name, flags, 0o600);
 }
 
@@ -456,7 +624,6 @@ export function assertCurrentTokenAuthority(input: {
   } catch {
     throw unsafeLocalTokenStorageError();
   } finally {
-    closeOwnedDescriptor(secrets);
-    closeOwnedDescriptor(workspace);
+    settleOwnedDescriptors(secrets, workspace);
   }
 }

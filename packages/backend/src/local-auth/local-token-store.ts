@@ -1,16 +1,17 @@
 import {
+  acquireHeldSecretsMutationLease,
   assertCurrentTokenAuthority,
   assertWorkspaceAndSecretsBinding,
   closeOwnedDescriptor,
   openOrCreateWorkspaceTokenDescriptors,
-  readCanonicalToken
+  readCanonicalToken,
+  releaseHeldSecretsMutationLease,
+  settleOwnedDescriptors,
+  type HeldSecretsMutationLease
 } from "./local-token-filesystem";
 import { readLocalTokenDirectoryInventory } from "./local-token-inventory";
-import { flockNonblocking } from "./local-token-syscalls";
 import { invokeLocalTokenTestHook } from "./local-token-test-support";
 import {
-  FLOCK_EXCLUSIVE,
-  FLOCK_NONBLOCKING,
   LocalTokenStorageError,
   unsafeLocalTokenStorageError,
   sameIdentity,
@@ -32,21 +33,14 @@ export function openWorkspaceLocalTokenAuthority(
   input: OpenWorkspaceLocalTokenAuthorityInput
 ): WorkspaceLocalTokenAuthority {
   const descriptors = openOrCreateWorkspaceTokenDescriptors(input.workspaceRoot);
+  let mutationLease: HeldSecretsMutationLease | undefined;
   try {
-    if (
-      flockNonblocking(
-        descriptors.secrets,
-        FLOCK_EXCLUSIVE | FLOCK_NONBLOCKING
-      ) !== 0
-    ) {
-      throw unsafeLocalTokenStorageError();
-    }
-
+    mutationLease = acquireHeldSecretsMutationLease(descriptors);
     assertWorkspaceAndSecretsBinding(descriptors);
     const inventory = readLocalTokenDirectoryInventory(descriptors.secrets);
-    recoverInterruptedLocalTokenStore(descriptors, inventory);
+    recoverInterruptedLocalTokenStore(descriptors, inventory, mutationLease);
     const existing = readCanonicalToken(descriptors.secrets, true);
-    const token = existing ?? publishLocalToken(descriptors);
+    const token = existing ?? publishLocalToken(descriptors, mutationLease);
     invokeLocalTokenTestHook({ stage: "before_authority_return" });
     assertWorkspaceAndSecretsBinding(descriptors);
     const finalToken = readCanonicalToken(descriptors.secrets, false);
@@ -78,7 +72,25 @@ export function openWorkspaceLocalTokenAuthority(
     if (error instanceof LocalTokenStorageError) throw error;
     throw unsafeLocalTokenStorageError();
   } finally {
-    closeOwnedDescriptor(descriptors.secrets);
-    closeOwnedDescriptor(descriptors.workspace);
+    let failure: unknown;
+    if (mutationLease) {
+      try {
+        releaseHeldSecretsMutationLease(mutationLease);
+      } catch (error) {
+        failure = error;
+      }
+    } else {
+      try {
+        closeOwnedDescriptor(descriptors.secrets);
+      } catch (error) {
+        failure = error;
+      }
+    }
+    try {
+      settleOwnedDescriptors(descriptors.workspace);
+    } catch (error) {
+      failure ??= error;
+    }
+    if (failure !== undefined) throw unsafeLocalTokenStorageError();
   }
 }

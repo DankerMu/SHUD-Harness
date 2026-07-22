@@ -16,6 +16,7 @@ import {
   createLocalTokenTestWorkspace,
   descriptorInventory,
   interruptLocalTokenStore,
+  openAuthorityInSubprocess,
   replaceLocalTokenArtifact,
   transactionNames,
   type LocalTokenTestWorkspace
@@ -32,7 +33,7 @@ describe("workspace local-token store descriptor lifecycle", () => {
     }
   });
 
-  test("staged open failure closes descriptors before exact lease cleanup mismatch", () => {
+  test("staged open failure closes descriptors when pre-mutation lease replacement is rejected", () => {
     const before = descriptorInventory();
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const workspace = createLocalTokenTestWorkspace();
@@ -65,6 +66,51 @@ describe("workspace local-token store descriptor lifecycle", () => {
     }
   });
 
+  test("descriptor ownership transfer remains exception-safe when close status fails", () => {
+    const before = descriptorInventory();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const workspace = createLocalTokenTestWorkspace();
+      workspaces.push(workspace);
+      let injected = false;
+
+      expect(() => runWithLocalTokenStoreTestContext({
+        hook: ({ stage }) => {
+          if (stage !== "after_descriptor_close" || injected) return;
+          injected = true;
+          throw new Error("injected close-status failure");
+        }
+      }, () => openWorkspaceLocalTokenAuthority({
+        workspaceRoot: workspace.workspaceRoot
+      }))).toThrow(LocalTokenStorageError);
+
+      expect(injected).toBe(true);
+      expect(descriptorInventory()).toEqual(before);
+    }
+  });
+
+  test("mutation lease unlock and close settle before an injected close failure escapes", async () => {
+    const before = descriptorInventory();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const workspace = createLocalTokenTestWorkspace();
+      workspaces.push(workspace);
+      let injected = false;
+
+      expect(() => runWithLocalTokenStoreTestContext({
+        hook: ({ stage }) => {
+          if (stage !== "after_mutation_lease_close" || injected) return;
+          injected = true;
+          throw new Error("injected mutation-lease close-status failure");
+        }
+      }, () => openWorkspaceLocalTokenAuthority({
+        workspaceRoot: workspace.workspaceRoot
+      }))).toThrow(LocalTokenStorageError);
+
+      expect(injected).toBe(true);
+      expect(await openAuthorityInSubprocess(workspace.workspaceRoot)).toBe("success");
+      expect(descriptorInventory()).toEqual(before);
+    }
+  }, ADVERSARIAL_MATRIX_TIMEOUT_MS);
+
   test("staged fstat failure closes every acquired descriptor on repeated isolated attempts", () => {
     const before = descriptorInventory();
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -84,7 +130,7 @@ describe("workspace local-token store descriptor lifecycle", () => {
     }
   });
 
-  test("ordinary staged open failure removes the exact lease without residue", () => {
+  test("ordinary staged open failure removes its observed lease without residue", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
 
@@ -110,7 +156,7 @@ describe("workspace local-token store descriptor lifecycle", () => {
     expect(readdirSync(workspace.secretsRoot)).toEqual([]);
   });
 
-  test("lease setup cleanup preserves a replacement generation", () => {
+  test("lease setup rejects and preserves an already-observable pre-mutation replacement", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     const bytes = "foreign-lease-setup";
@@ -145,7 +191,7 @@ describe("workspace local-token store descriptor lifecycle", () => {
     expect(readdirSync(workspace.secretsRoot)).toEqual([]);
   });
 
-  test("marker setup cleanup preserves a replacement generation", () => {
+  test("marker setup rejects and preserves an already-observable pre-mutation replacement", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     const bytes = "foreign-marker-setup";
@@ -167,7 +213,7 @@ describe("workspace local-token store descriptor lifecycle", () => {
     expect(readFileSync(path, "utf8")).toBe(bytes);
   });
 
-  test("staged recovery cleanup preserves a replacement generation", async () => {
+  test("staged recovery rejects and preserves an already-observable pre-mutation replacement", async () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     await interruptLocalTokenStore(workspace.workspaceRoot, "after_staged_fsync");
@@ -189,7 +235,7 @@ describe("workspace local-token store descriptor lifecycle", () => {
     expect(readFileSync(path, "utf8")).toBe(bytes);
   }, ADVERSARIAL_MATRIX_TIMEOUT_MS);
 
-  test("candidate recovery cleanup preserves a replacement generation", async () => {
+  test("candidate recovery rejects and preserves an already-observable pre-mutation replacement", async () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     await interruptLocalTokenStore(
@@ -215,7 +261,7 @@ describe("workspace local-token store descriptor lifecycle", () => {
     expect(readFileSync(path, "utf8")).toBe(bytes);
   }, ADVERSARIAL_MATRIX_TIMEOUT_MS);
 
-  test("two uncoordinated foreign canonical generations are preserved and fail closed", async () => {
+  test("two already-observable foreign generations are both preserved and fail closed", async () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     await interruptLocalTokenStore(

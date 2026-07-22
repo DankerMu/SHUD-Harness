@@ -1,5 +1,6 @@
 import { ptr, read as ffiRead, toBuffer, type Pointer } from "bun:ffi";
-import { closeSync, fstatSync } from "node:fs";
+import { fstatSync } from "node:fs";
+import { closeOwnedDescriptor } from "./local-token-filesystem";
 import {
   clearErrno,
   directoryStreamSyscalls,
@@ -18,6 +19,7 @@ import {
   LOCAL_TOKEN_MAX_DECODED_ENTRIES,
   LOCAL_TOKEN_MAX_EXTERNAL_ENTRIES,
   LOCAL_TOKEN_MAX_OWNED_ENTRIES,
+  LOCAL_TOKEN_MAX_RAW_DIRECTORY_RECORDS,
   LOCAL_TOKEN_NAME_MAX_BYTES,
   RETIRED_ARTIFACT_PATTERN,
   TRANSACTION_ARTIFACT_PATTERN,
@@ -36,6 +38,7 @@ export interface LocalTokenDirectoryInventory {
   readonly ownedEntries: number;
   readonly externalEntries: number;
   readonly maxNameBytes: number;
+  readonly rawRecords: number;
 }
 
 function isRecognizedOwnedName(name: string): boolean {
@@ -53,7 +56,8 @@ function rejectInventory(
   totalEntries: number,
   externalEntries: number,
   ownedEntries: number,
-  maxNameBytes: number
+  maxNameBytes: number,
+  rawRecords: number
 ): never {
   invokeLocalTokenTestHook({
     stage: "inventory_rejected",
@@ -61,7 +65,8 @@ function rejectInventory(
     totalEntries,
     externalEntries,
     ownedEntries,
-    maxNameBytes
+    maxNameBytes,
+    rawRecords
   });
   throw unsafeLocalTokenStorageError();
 }
@@ -77,14 +82,14 @@ export function readLocalTokenDirectoryInventory(
       throw unsafeLocalTokenStorageError();
     }
   } catch (error) {
-    closeSync(streamDescriptor);
+    closeOwnedDescriptor(streamDescriptor);
     throw error;
   }
 
   const directorySyscalls = directoryStreamSyscalls();
   const stream = directorySyscalls.open(streamDescriptor);
   if (stream === null) {
-    closeSync(streamDescriptor);
+    closeOwnedDescriptor(streamDescriptor);
     throw unsafeLocalTokenStorageError();
   }
 
@@ -93,16 +98,19 @@ export function readLocalTokenDirectoryInventory(
   const ownedNames = new Set<string>();
   const externalNames = new Set<string>();
   let maxNameBytes = 0;
+  let rawRecords = 0;
   let failure: unknown;
 
   const accept = (entry: Pointer, layout: "darwin" | "linux"): void => {
-    if (names.length >= LOCAL_TOKEN_MAX_DECODED_ENTRIES) {
+    rawRecords += 1;
+    if (rawRecords > LOCAL_TOKEN_MAX_RAW_DIRECTORY_RECORDS) {
       rejectInventory(
-        "total_limit",
+        "raw_work_limit",
         names.length,
         externalNames.size,
         ownedNames.size,
-        maxNameBytes
+        maxNameBytes,
+        rawRecords
       );
     }
     let name: string;
@@ -114,10 +122,21 @@ export function readLocalTokenDirectoryInventory(
         names.length,
         externalNames.size,
         ownedNames.size,
-        maxNameBytes
+        maxNameBytes,
+        rawRecords
       );
     }
     if (name === "." || name === "..") return;
+    if (names.length >= LOCAL_TOKEN_MAX_DECODED_ENTRIES) {
+      rejectInventory(
+        "total_limit",
+        names.length,
+        externalNames.size,
+        ownedNames.size,
+        maxNameBytes,
+        rawRecords
+      );
+    }
     const nameBytes = Buffer.byteLength(name, "utf8");
     if (nameBytes > LOCAL_TOKEN_NAME_MAX_BYTES) {
       rejectInventory(
@@ -125,7 +144,8 @@ export function readLocalTokenDirectoryInventory(
         names.length,
         externalNames.size,
         ownedNames.size,
-        Math.max(maxNameBytes, nameBytes)
+        Math.max(maxNameBytes, nameBytes),
+        rawRecords
       );
     }
     if (decodedNames.has(name)) {
@@ -134,7 +154,8 @@ export function readLocalTokenDirectoryInventory(
         names.length,
         externalNames.size,
         ownedNames.size,
-        Math.max(maxNameBytes, nameBytes)
+        Math.max(maxNameBytes, nameBytes),
+        rawRecords
       );
     }
     const owned = isRecognizedOwnedName(name);
@@ -144,7 +165,8 @@ export function readLocalTokenDirectoryInventory(
         names.length,
         externalNames.size,
         ownedNames.size,
-        Math.max(maxNameBytes, nameBytes)
+        Math.max(maxNameBytes, nameBytes),
+        rawRecords
       );
     }
     if (!owned && externalNames.size >= LOCAL_TOKEN_MAX_EXTERNAL_ENTRIES) {
@@ -153,7 +175,8 @@ export function readLocalTokenDirectoryInventory(
         names.length,
         externalNames.size,
         ownedNames.size,
-        Math.max(maxNameBytes, nameBytes)
+        Math.max(maxNameBytes, nameBytes),
+        rawRecords
       );
     }
 
@@ -193,14 +216,16 @@ export function readLocalTokenDirectoryInventory(
     totalEntries: names.length,
     ownedEntries: ownedNames.size,
     externalEntries: externalNames.size,
-    maxNameBytes
+    maxNameBytes,
+    rawRecords
   });
   invokeLocalTokenTestHook({
     stage: "after_inventory",
     totalEntries: inventory.totalEntries,
     externalEntries: inventory.externalEntries,
     ownedEntries: inventory.ownedEntries,
-    maxNameBytes
+    maxNameBytes,
+    rawRecords
   });
   return inventory;
 }

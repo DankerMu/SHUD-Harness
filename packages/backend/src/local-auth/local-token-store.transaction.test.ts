@@ -19,7 +19,9 @@ import {
   cleanupLocalTokenTestWorkspace,
   createLocalTokenTestWorkspace,
   createPrivateSecrets,
+  holdSecretsMutationLeaseInSubprocess,
   interruptLocalTokenStore,
+  openAuthorityInSubprocess,
   replaceLocalTokenArtifact,
   transactionNames,
   type LocalTokenTestWorkspace
@@ -32,6 +34,7 @@ function expectReplacementPreserved(input: {
   readonly replacement: { readonly name: string; readonly dev: bigint; readonly ino: bigint };
   readonly bytes: string;
 }): void {
+  // Replacement hooks prove observable precondition tamper rejection, not source-inode CAS.
   const path = join(input.workspace.secretsRoot, input.replacement.name);
   const observed = lstatSync(path, { bigint: true });
   expect(observed.dev).toBe(input.replacement.dev);
@@ -95,6 +98,27 @@ describe("workspace local-token store transaction authority", () => {
     expect(readdirSync(workspace.secretsRoot)).toEqual(["local-token"]);
   });
 
+  test("a cross-process cooperative writer excludes the public seam without mutation", async () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+    createPrivateSecrets(workspace);
+    writeFileSync(join(workspace.secretsRoot, "sentinel"), "foreign", { mode: 0o600 });
+    const before = readdirSync(workspace.secretsRoot);
+    const held = await holdSecretsMutationLeaseInSubprocess(workspace);
+    try {
+      const started = performance.now();
+      expect(await openAuthorityInSubprocess(workspace.workspaceRoot)).toBe("blocked");
+      expect(performance.now() - started).toBeLessThan(2_000);
+      expect(readdirSync(workspace.secretsRoot)).toEqual(before);
+      expect(transactionNames(workspace.secretsRoot)).toEqual([]);
+    } finally {
+      await held.release();
+    }
+
+    expect(await openAuthorityInSubprocess(workspace.workspaceRoot)).toBe("success");
+    expect(readdirSync(workspace.secretsRoot).sort()).toEqual(["local-token", "sentinel"]);
+  }, ADVERSARIAL_MATRIX_TIMEOUT_MS);
+
   for (const fixture of [
     {
       name: "live publishing marker",
@@ -107,7 +131,7 @@ describe("workspace local-token store transaction authority", () => {
       artifactSuffix: ".lease"
     }
   ]) {
-    test(`${fixture.name} replacement is preserved and no authority returns`, () => {
+    test(`${fixture.name} already-observable pre-mutation replacement is preserved and no authority returns`, () => {
       const workspace = createLocalTokenTestWorkspace();
       workspaces.push(workspace);
       const bytes = `foreign-${fixture.name}`;
@@ -131,7 +155,7 @@ describe("workspace local-token store transaction authority", () => {
     });
   }
 
-  test("live rolling-back marker replacement is preserved and no authority returns", () => {
+  test("live rolling-back marker already-observable pre-mutation replacement is preserved and no authority returns", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     const bytes = "foreign-live-rolling-marker";
@@ -154,7 +178,7 @@ describe("workspace local-token store transaction authority", () => {
     expectReplacementPreserved({ workspace, replacement: replacement!, bytes });
   });
 
-  test("publishing recovery preserves a marker replaced after validation", async () => {
+  test("publishing recovery rejects and preserves an already-observable pre-mutation marker replacement", async () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     await interruptLocalTokenStore(workspace.workspaceRoot, "after_publish");
@@ -175,7 +199,29 @@ describe("workspace local-token store transaction authority", () => {
     expectReplacementPreserved({ workspace, replacement: replacement!, bytes });
   }, ADVERSARIAL_MATRIX_TIMEOUT_MS);
 
-  test("rolling-back recovery preserves a marker replaced after validation", async () => {
+  test("restart recovers a crash after rollback marker fsync before candidate creation", async () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+    await interruptLocalTokenStore(
+      workspace.workspaceRoot,
+      "after_rollback_marker_fsync",
+      "before_post_publish_binding"
+    );
+
+    const interrupted = transactionNames(workspace.secretsRoot);
+    expect(interrupted.some((name) => name.endsWith(".rolling-back"))).toBe(true);
+    expect(interrupted.some((name) => name.endsWith(".candidate"))).toBe(false);
+    expect(readdirSync(workspace.secretsRoot)).toContain("local-token");
+
+    const authority = openWorkspaceLocalTokenAuthority({
+      workspaceRoot: workspace.workspaceRoot
+    });
+    authority.assertCurrent();
+    expect(readdirSync(workspace.secretsRoot)).toEqual(["local-token"]);
+    expect(transactionNames(workspace.secretsRoot)).toEqual([]);
+  }, ADVERSARIAL_MATRIX_TIMEOUT_MS);
+
+  test("rolling-back recovery rejects and preserves an already-observable pre-mutation marker replacement", async () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     await interruptLocalTokenStore(
@@ -200,7 +246,7 @@ describe("workspace local-token store transaction authority", () => {
     expectReplacementPreserved({ workspace, replacement: replacement!, bytes });
   }, ADVERSARIAL_MATRIX_TIMEOUT_MS);
 
-  test("pre-publish recovery preserves a lease replaced after validation", async () => {
+  test("pre-publish recovery rejects and preserves an already-observable pre-mutation lease replacement", async () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     await interruptLocalTokenStore(workspace.workspaceRoot, "after_staged_fsync");
@@ -221,7 +267,7 @@ describe("workspace local-token store transaction authority", () => {
     expectReplacementPreserved({ workspace, replacement: replacement!, bytes });
   }, ADVERSARIAL_MATRIX_TIMEOUT_MS);
 
-  test("live rollback preserves a foreign candidate generation as canonical", () => {
+  test("live rollback preserves an already-observable pre-mutation foreign candidate and fails closed", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     const foreign = "foreign-candidate-generation";
@@ -284,7 +330,7 @@ describe("workspace local-token store transaction authority", () => {
     expect(readdirSync(workspace.secretsRoot)).toEqual(["local-token"]);
   });
 
-  test("legacy cleanup preserves a same-name replacement", () => {
+  test("legacy cleanup rejects and preserves an already-observable pre-mutation same-name replacement", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     createPrivateSecrets(workspace);
@@ -306,7 +352,7 @@ describe("workspace local-token store transaction authority", () => {
     expectReplacementPreserved({ workspace, replacement: replacement!, bytes });
   });
 
-  test("retired cleanup preserves a same-name replacement", () => {
+  test("retired cleanup rejects and preserves an already-observable pre-mutation same-name replacement", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     createPrivateSecrets(workspace);

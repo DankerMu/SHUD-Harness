@@ -24,6 +24,7 @@ import {
   transactionNames,
   type LocalTokenTestWorkspace
 } from "./local-token-test-helpers";
+import { LOCAL_TOKEN_MAX_RAW_DIRECTORY_RECORDS } from "./local-token-types";
 
 const ADVERSARIAL_MATRIX_TIMEOUT_MS = 30_000;
 
@@ -279,6 +280,79 @@ describe("workspace local-token store inventory bounds", () => {
   });
 
   for (const layout of ["darwin", "linux"] as const) {
+    test(`${layout} dot filtering is order-independent at 1024 external plus 8 owned`, () => {
+      const workspace = createLocalTokenTestWorkspace();
+      workspaces.push(workspace);
+      const names = createExternalEntries(workspace, 1024);
+      for (let index = 0; index < 8; index += 1) {
+        const name = `.local-token-transaction-20000000-0000-4000-8000-${index.toString().padStart(12, "0")}.lease`;
+        names.push(name);
+        writeFileSync(join(workspace.secretsRoot, name), "", { mode: 0o600 });
+      }
+      const dot = localTokenRawDirectoryEntryForTest(layout, Buffer.from("."));
+      const dotDot = localTokenRawDirectoryEntryForTest(layout, Buffer.from(".."));
+      const records = names.map((name) =>
+        localTokenRawDirectoryEntryForTest(layout, Buffer.from(name, "utf8"))
+      );
+      records.push(dot, dotDot, dot, dotDot);
+      let observed: { total?: number; external?: number; owned?: number; raw?: number } = {};
+
+      const authority = runWithLocalTokenStoreTestContext({
+        rawDirectoryReplay: { layout, records },
+        hook: (input) => {
+          if (input.stage !== "after_inventory") return;
+          observed = {
+            total: input.totalEntries,
+            external: input.externalEntries,
+            owned: input.ownedEntries,
+            raw: input.rawRecords
+          };
+        }
+      }, () => openWorkspaceLocalTokenAuthority({ workspaceRoot: workspace.workspaceRoot }));
+
+      expect(observed).toEqual({ total: 1032, external: 1024, owned: 8, raw: 1036 });
+      authority.assertCurrent();
+      expect(transactionNames(workspace.secretsRoot)).toEqual([]);
+      expect(readdirSync(workspace.secretsRoot)).toHaveLength(1025);
+    });
+
+    test(`${layout} repeated dot records obey a separate fixed raw-work bound`, () => {
+      const accepted = createLocalTokenTestWorkspace();
+      workspaces.push(accepted);
+      createPrivateSecrets(accepted);
+      const dot = localTokenRawDirectoryEntryForTest(layout, Buffer.from("."));
+      const records = Array.from(
+        { length: LOCAL_TOKEN_MAX_RAW_DIRECTORY_RECORDS },
+        () => dot
+      );
+      let rawRecords: number | undefined;
+
+      const authority = runWithLocalTokenStoreTestContext({
+        rawDirectoryReplay: { layout, records },
+        hook: (input) => {
+          if (input.stage === "after_inventory") rawRecords = input.rawRecords;
+        }
+      }, () => openWorkspaceLocalTokenAuthority({ workspaceRoot: accepted.workspaceRoot }));
+
+      expect(rawRecords).toBe(LOCAL_TOKEN_MAX_RAW_DIRECTORY_RECORDS);
+      authority.assertCurrent();
+
+      const rejected = createLocalTokenTestWorkspace();
+      workspaces.push(rejected);
+      createPrivateSecrets(rejected);
+      let boundary: LocalTokenInventoryBoundary | undefined;
+      expect(() => runWithLocalTokenStoreTestContext({
+        rawDirectoryReplay: { layout, records: [...records, dot] },
+        hook: (input) => {
+          if (input.stage === "inventory_rejected") boundary = input.boundary;
+        }
+      }, () => openWorkspaceLocalTokenAuthority({
+        workspaceRoot: rejected.workspaceRoot
+      }))).toThrow(LocalTokenStorageError);
+      expect(boundary).toBe("raw_work_limit");
+      expect(readdirSync(rejected.secretsRoot)).toEqual([]);
+    });
+
     test(`coverage-only: ${layout} production decoder rejects duplicate decoded names without residue`, () => {
       const workspace = createLocalTokenTestWorkspace();
       workspaces.push(workspace);

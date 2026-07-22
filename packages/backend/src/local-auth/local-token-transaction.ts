@@ -9,17 +9,21 @@ import {
   assertWorkspaceAndSecretsBinding,
   closeOwnedDescriptor,
   createdArtifactIdentity,
+  moveObservedArtifactUnderLease,
   observeRegularArtifact,
-  openCreatedArtifact,
+  openCreatedArtifactUnderLease,
   readCanonicalToken,
   readObservedTokenArtifact,
-  retireExactArtifact,
+  retireObservedArtifactUnderLease,
+  secretsDescriptorUnderLease,
+  settleOwnedDescriptors,
   validateControlArtifact,
   writeAll,
+  type HeldSecretsMutationLease,
   type WorkspaceTokenDescriptors
 } from "./local-token-filesystem";
 import type { LocalTokenDirectoryInventory } from "./local-token-inventory";
-import { openAt, renameAtNoReplace } from "./local-token-syscalls";
+import { openAt } from "./local-token-syscalls";
 import {
   invokeLocalTokenTestHook,
   shouldFailLocalTokenTestOperation
@@ -58,6 +62,18 @@ interface LocalTokenTransactionArtifacts {
 interface CreatedLease {
   readonly descriptor: number;
   readonly control: OwnedLocalTokenArtifact;
+}
+
+function settleOperations(...operations: ReadonlyArray<() => void>): void {
+  let failure: unknown;
+  for (const operation of operations) {
+    try {
+      operation();
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (failure !== undefined) throw unsafeLocalTokenStorageError();
 }
 
 function digest(bytes: Uint8Array): string {
@@ -158,7 +174,7 @@ function controlKind(name: string): "publishing" | "rolling-back" | "lease" {
 }
 
 function cleanupControl(
-  secretsDescriptor: number,
+  mutationLease: HeldSecretsMutationLease,
   control: OwnedLocalTokenArtifact
 ): void {
   const artifact = controlKind(control.name);
@@ -171,17 +187,23 @@ function cleanupControl(
     name: control.name,
     artifact
   });
-  retireExactArtifact(secretsDescriptor, control);
+  retireObservedArtifactUnderLease(mutationLease, control);
 }
 
 function cleanupControls(
-  secretsDescriptor: number,
+  mutationLease: HeldSecretsMutationLease,
   marker: OwnedLocalTokenArtifact | undefined,
   lease: OwnedLocalTokenArtifact | undefined
 ): void {
-  if (marker) cleanupControl(secretsDescriptor, marker);
-  if (lease) cleanupControl(secretsDescriptor, lease);
-  fsyncSync(secretsDescriptor);
+  settleOperations(
+    () => {
+      if (marker) cleanupControl(mutationLease, marker);
+    },
+    () => {
+      if (lease) cleanupControl(mutationLease, lease);
+    },
+    () => fsyncSync(secretsDescriptorUnderLease(mutationLease))
+  );
 }
 
 function validateRecoverablePartialArtifact(
@@ -219,10 +241,11 @@ function validateRecoverablePartialArtifact(
 }
 
 function recoverPublishing(
-  secretsDescriptor: number,
+  mutationLease: HeldSecretsMutationLease,
   transaction: LocalTokenTransactionArtifacts,
   lease: OwnedLocalTokenArtifact | undefined
 ): void {
+  const secretsDescriptor = secretsDescriptorUnderLease(mutationLease);
   if (
     !transaction.publishingMarkerName ||
     !transaction.digest ||
@@ -251,19 +274,20 @@ function recoverPublishing(
       name: transaction.stagedName,
       artifact: "staged"
     });
-    retireExactArtifact(secretsDescriptor, {
+    retireObservedArtifactUnderLease(mutationLease, {
       name: transaction.stagedName,
       identity: staged.identity
     });
   }
-  cleanupControls(secretsDescriptor, marker, lease);
+  cleanupControls(mutationLease, marker, lease);
 }
 
 function recoverRollingBack(
-  secretsDescriptor: number,
+  mutationLease: HeldSecretsMutationLease,
   transaction: LocalTokenTransactionArtifacts,
   lease: OwnedLocalTokenArtifact | undefined
 ): void {
+  const secretsDescriptor = secretsDescriptorUnderLease(mutationLease);
   if (
     !transaction.rollbackMarkerName ||
     !transaction.digest ||
@@ -284,7 +308,7 @@ function recoverRollingBack(
         name: transaction.candidateName,
         artifact: "candidate"
       });
-      retireExactArtifact(secretsDescriptor, {
+      retireObservedArtifactUnderLease(mutationLease, {
         name: transaction.candidateName,
         identity: candidate.identity
       });
@@ -293,15 +317,12 @@ function recoverRollingBack(
         // Two external canonical writers cannot be ordered without deleting one.
         throw unsafeLocalTokenStorageError();
       }
-      if (renameAtNoReplace(
-        secretsDescriptor,
-        transaction.candidateName,
-        secretsDescriptor,
-        LOCAL_TOKEN_FILE
-      ) !== 0) {
+      if (!moveObservedArtifactUnderLease(mutationLease, {
+        name: transaction.candidateName,
+        identity: candidate.identity
+      }, LOCAL_TOKEN_FILE)) {
         throw unsafeLocalTokenStorageError();
       }
-      fsyncSync(secretsDescriptor);
       const restored = readObservedTokenArtifact(secretsDescriptor, LOCAL_TOKEN_FILE);
       if (!restored || !sameIdentity(restored.identity, candidate.identity)) {
         throw unsafeLocalTokenStorageError();
@@ -313,32 +334,30 @@ function recoverRollingBack(
   if (canonical && sameIdentity(canonical.identity, transaction.generationIdentity)) {
     if (canonical.digest !== transaction.digest) throw unsafeLocalTokenStorageError();
     const candidateName = transactionCandidateName(transaction.id);
-    if (renameAtNoReplace(
-      secretsDescriptor,
-      LOCAL_TOKEN_FILE,
-      secretsDescriptor,
-      candidateName
-    ) !== 0) {
+    if (!moveObservedArtifactUnderLease(mutationLease, {
+      name: LOCAL_TOKEN_FILE,
+      identity: canonical.identity
+    }, candidateName)) {
       throw unsafeLocalTokenStorageError();
     }
-    fsyncSync(secretsDescriptor);
     invokeLocalTokenTestHook({
       stage: "before_candidate_cleanup",
       name: candidateName,
       artifact: "candidate"
     });
-    retireExactArtifact(secretsDescriptor, {
+    retireObservedArtifactUnderLease(mutationLease, {
       name: candidateName,
       identity: transaction.generationIdentity
     });
   }
-  cleanupControls(secretsDescriptor, marker, lease);
+  cleanupControls(mutationLease, marker, lease);
 }
 
 function recoverTransaction(
-  secretsDescriptor: number,
+  mutationLease: HeldSecretsMutationLease,
   transaction: LocalTokenTransactionArtifacts
 ): void {
+  const secretsDescriptor = secretsDescriptorUnderLease(mutationLease);
   const lease = transaction.leaseName
     ? validateControlArtifact(secretsDescriptor, transaction.leaseName)
     : undefined;
@@ -364,23 +383,27 @@ function recoverTransaction(
         name: transaction.stagedName,
         artifact: "staged"
       });
-      retireExactArtifact(secretsDescriptor, staged);
+      retireObservedArtifactUnderLease(mutationLease, staged);
     }
-    cleanupControls(secretsDescriptor, undefined, lease);
+    cleanupControls(mutationLease, undefined, lease);
     return;
   }
   if (transaction.publishingMarkerName) {
-    recoverPublishing(secretsDescriptor, transaction, lease);
+    recoverPublishing(mutationLease, transaction, lease);
     return;
   }
   if (transaction.rollbackMarkerName) {
-    recoverRollingBack(secretsDescriptor, transaction, lease);
+    recoverRollingBack(mutationLease, transaction, lease);
     return;
   }
   throw unsafeLocalTokenStorageError();
 }
 
-function recoverLegacyArtifact(secretsDescriptor: number, name: string): void {
+function recoverLegacyArtifact(
+  mutationLease: HeldSecretsMutationLease,
+  name: string
+): void {
+  const secretsDescriptor = secretsDescriptorUnderLease(mutationLease);
   invokeLocalTokenTestHook({
     stage: "before_recovery_artifact_open",
     name,
@@ -388,19 +411,23 @@ function recoverLegacyArtifact(secretsDescriptor: number, name: string): void {
   });
   const artifact = validateRecoverablePartialArtifact(secretsDescriptor, name);
   invokeLocalTokenTestHook({ stage: "before_legacy_cleanup", name, artifact: "legacy" });
-  retireExactArtifact(secretsDescriptor, artifact);
+  retireObservedArtifactUnderLease(mutationLease, artifact);
 }
 
 export function recoverInterruptedLocalTokenStore(
   descriptors: WorkspaceTokenDescriptors,
-  inventory: LocalTokenDirectoryInventory
+  inventory: LocalTokenDirectoryInventory,
+  mutationLease: HeldSecretsMutationLease
 ): void {
+  if (secretsDescriptorUnderLease(mutationLease) !== descriptors.secrets) {
+    throw unsafeLocalTokenStorageError();
+  }
   assertWorkspaceAndSecretsBinding(descriptors);
   for (const name of inventory.names) {
     const retired = RETIRED_ARTIFACT_PATTERN.exec(name);
     if (!retired) continue;
     invokeLocalTokenTestHook({ stage: "before_retired_cleanup", name, artifact: "retired" });
-    retireExactArtifact(descriptors.secrets, {
+    retireObservedArtifactUnderLease(mutationLease, {
       name,
       identity: Object.freeze({
         dev: BigInt(`0x${retired[1]}`),
@@ -409,19 +436,19 @@ export function recoverInterruptedLocalTokenStore(
     });
   }
   for (const transaction of collectTransactions(inventory.names).values()) {
-    recoverTransaction(descriptors.secrets, transaction);
+    recoverTransaction(mutationLease, transaction);
   }
   for (const name of inventory.names) {
-    if (LEGACY_STAGED_PATTERN.test(name)) recoverLegacyArtifact(descriptors.secrets, name);
+    if (LEGACY_STAGED_PATTERN.test(name)) recoverLegacyArtifact(mutationLease, name);
   }
   assertWorkspaceAndSecretsBinding(descriptors);
 }
 
 function createControlArtifact(
-  secretsDescriptor: number,
+  mutationLease: HeldSecretsMutationLease,
   name: string
 ): OwnedLocalTokenArtifact {
-  const descriptor = openCreatedArtifact(secretsDescriptor, name);
+  const descriptor = openCreatedArtifactUnderLease(mutationLease, name);
   if (descriptor < 0) throw unsafeLocalTokenStorageError();
   let control: OwnedLocalTokenArtifact | undefined;
   let valid = false;
@@ -436,13 +463,20 @@ function createControlArtifact(
     valid = true;
     return control;
   } finally {
-    closeOwnedDescriptor(descriptor);
-    if (!valid && control) cleanupControl(secretsDescriptor, control);
+    settleOperations(
+      () => closeOwnedDescriptor(descriptor),
+      () => {
+        if (!valid && control) cleanupControl(mutationLease, control);
+      }
+    );
   }
 }
 
-function createLease(secretsDescriptor: number, name: string): CreatedLease {
-  const descriptor = openCreatedArtifact(secretsDescriptor, name, LEASE_CREATE_FLAGS);
+function createLease(
+  mutationLease: HeldSecretsMutationLease,
+  name: string
+): CreatedLease {
+  const descriptor = openCreatedArtifactUnderLease(mutationLease, name, LEASE_CREATE_FLAGS);
   if (descriptor < 0) throw unsafeLocalTokenStorageError();
   let control: OwnedLocalTokenArtifact | undefined;
   let valid = false;
@@ -457,14 +491,19 @@ function createLease(secretsDescriptor: number, name: string): CreatedLease {
     return Object.freeze({ descriptor, control });
   } finally {
     if (!valid) {
-      closeOwnedDescriptor(descriptor);
-      if (control) cleanupControl(secretsDescriptor, control);
+      settleOperations(
+        () => closeOwnedDescriptor(descriptor),
+        () => {
+          if (control) cleanupControl(mutationLease, control);
+        }
+      );
     }
   }
 }
 
 function rollbackPublished(input: {
   readonly descriptors: WorkspaceTokenDescriptors;
+  readonly mutationLease: HeldSecretsMutationLease;
   readonly transactionId: string;
   readonly contentDigest: string;
   readonly generationIdentity: LocalTokenPhysicalIdentity;
@@ -474,6 +513,7 @@ function rollbackPublished(input: {
 }): void {
   const {
     descriptors,
+    mutationLease,
     transactionId,
     contentDigest,
     generationIdentity,
@@ -488,15 +528,9 @@ function rollbackPublished(input: {
   if (!sameIdentity(currentMarker.identity, publishingMarker.identity)) {
     throw unsafeLocalTokenStorageError();
   }
-  if (renameAtNoReplace(
-    descriptors.secrets,
-    publishingMarker.name,
-    descriptors.secrets,
-    rollbackName
-  ) !== 0) {
+  if (!moveObservedArtifactUnderLease(mutationLease, currentMarker, rollbackName)) {
     throw unsafeLocalTokenStorageError();
   }
-  fsyncSync(descriptors.secrets);
   const rollbackMarker = validateControlArtifact(descriptors.secrets, rollbackName);
   if (!sameIdentity(rollbackMarker.identity, publishingMarker.identity)) {
     throw unsafeLocalTokenStorageError();
@@ -504,20 +538,24 @@ function rollbackPublished(input: {
   invokeLocalTokenTestHook({ stage: "after_rollback_marker_fsync" });
 
   const candidateName = transactionCandidateName(transactionId);
-  if (renameAtNoReplace(
+  const canonicalBeforeMove = readObservedTokenArtifact(
     descriptors.secrets,
-    LOCAL_TOKEN_FILE,
-    descriptors.secrets,
-    candidateName
-  ) !== 0) {
+    LOCAL_TOKEN_FILE
+  );
+  if (
+    !canonicalBeforeMove ||
+    !moveObservedArtifactUnderLease(mutationLease, {
+      name: LOCAL_TOKEN_FILE,
+      identity: canonicalBeforeMove.identity
+    }, candidateName)
+  ) {
     const canonical = readObservedTokenArtifact(descriptors.secrets, LOCAL_TOKEN_FILE);
     if (!canonical || sameIdentity(canonical.identity, generationIdentity)) {
       throw unsafeLocalTokenStorageError();
     }
-    cleanupControls(descriptors.secrets, rollbackMarker, lease);
+    cleanupControls(mutationLease, rollbackMarker, lease);
     return;
   }
-  fsyncSync(descriptors.secrets);
   invokeLocalTokenTestHook({ stage: "after_rollback_move" });
   const candidate = readObservedTokenArtifact(descriptors.secrets, candidateName);
   if (!candidate) throw unsafeLocalTokenStorageError();
@@ -528,37 +566,39 @@ function rollbackPublished(input: {
       name: candidateName,
       artifact: "candidate"
     });
-    retireExactArtifact(descriptors.secrets, {
+    retireObservedArtifactUnderLease(mutationLease, {
       name: candidateName,
       identity: candidate.identity
     });
   } else {
-    if (renameAtNoReplace(
-      descriptors.secrets,
-      candidateName,
-      descriptors.secrets,
-      LOCAL_TOKEN_FILE
-    ) !== 0) {
+    if (!moveObservedArtifactUnderLease(mutationLease, {
+      name: candidateName,
+      identity: candidate.identity
+    }, LOCAL_TOKEN_FILE)) {
       throw unsafeLocalTokenStorageError();
     }
-    fsyncSync(descriptors.secrets);
     const restored = readObservedTokenArtifact(descriptors.secrets, LOCAL_TOKEN_FILE);
     if (!restored || !sameIdentity(restored.identity, candidate.identity)) {
       throw unsafeLocalTokenStorageError();
     }
   }
-  cleanupControls(descriptors.secrets, rollbackMarker, lease);
+  cleanupControls(mutationLease, rollbackMarker, lease);
 }
 
 export function publishLocalToken(
-  descriptors: WorkspaceTokenDescriptors
+  descriptors: WorkspaceTokenDescriptors,
+  mutationLease: HeldSecretsMutationLease
 ): ValidatedLocalToken {
+  if (secretsDescriptorUnderLease(mutationLease) !== descriptors.secrets) {
+    throw unsafeLocalTokenStorageError();
+  }
   const tokenBytes = Buffer.from(randomBytes(32).toString("base64url"), "utf8");
   const transactionId = randomUUID();
   const contentDigest = digest(tokenBytes);
   const leaseName = transactionLeaseName(transactionId);
   const stagedName = transactionStagedName(transactionId);
-  const lease = createLease(descriptors.secrets, leaseName);
+  const lease = createLease(mutationLease, leaseName);
+  let leaseDescriptorOpen = true;
   let stagedDescriptor: number | undefined;
   let staged: OwnedLocalTokenArtifact | undefined;
   let marker: OwnedLocalTokenArtifact | undefined;
@@ -569,12 +609,15 @@ export function publishLocalToken(
     invokeLocalTokenTestHook({ stage: "before_staged_open", name: stagedName, artifact: "staged" });
     stagedDescriptor = shouldFailLocalTokenTestOperation("staged_open")
       ? -1
-      : openCreatedArtifact(descriptors.secrets, stagedName);
+      : openCreatedArtifactUnderLease(mutationLease, stagedName);
     if (stagedDescriptor < 0) {
       stagedDescriptor = undefined;
-      closeOwnedDescriptor(lease.descriptor);
       leaseExists = false;
-      cleanupControl(descriptors.secrets, lease.control);
+      leaseDescriptorOpen = false;
+      settleOperations(
+        () => closeOwnedDescriptor(lease.descriptor),
+        () => cleanupControl(mutationLease, lease.control)
+      );
       throw unsafeLocalTokenStorageError();
     }
     stagedExists = true;
@@ -611,22 +654,21 @@ export function publishLocalToken(
       contentDigest,
       staged.identity
     );
-    marker = createControlArtifact(descriptors.secrets, publishingName);
+    marker = createControlArtifact(mutationLease, publishingName);
     fsyncSync(descriptors.secrets);
     invokeLocalTokenTestHook({ stage: "after_publishing_marker_fsync" });
 
-    published = renameAtNoReplace(
-      descriptors.secrets,
-      stagedName,
-      descriptors.secrets,
+    published = moveObservedArtifactUnderLease(
+      mutationLease,
+      staged,
       LOCAL_TOKEN_FILE
-    ) === 0;
+    );
     if (published) {
       stagedExists = false;
       invokeLocalTokenTestHook({ stage: "after_publish" });
     } else {
       invokeLocalTokenTestHook({ stage: "before_staged_cleanup", name: stagedName, artifact: "staged" });
-      retireExactArtifact(descriptors.secrets, staged);
+      retireObservedArtifactUnderLease(mutationLease, staged);
       stagedExists = false;
     }
     fsyncSync(descriptors.secrets);
@@ -634,7 +676,7 @@ export function publishLocalToken(
     if (!published) {
       const winner = readCanonicalToken(descriptors.secrets, false);
       if (!winner) throw unsafeLocalTokenStorageError();
-      cleanupControls(descriptors.secrets, marker, lease.control);
+      cleanupControls(mutationLease, marker, lease.control);
       marker = undefined;
       leaseExists = false;
       return winner;
@@ -650,7 +692,7 @@ export function publishLocalToken(
     ) {
       throw unsafeLocalTokenStorageError();
     }
-    cleanupControls(descriptors.secrets, marker, lease.control);
+    cleanupControls(mutationLease, marker, lease.control);
     marker = undefined;
     leaseExists = false;
     return canonical;
@@ -658,6 +700,7 @@ export function publishLocalToken(
     if (published && marker && staged) {
       rollbackPublished({
         descriptors,
+        mutationLease,
         transactionId,
         contentDigest,
         generationIdentity: staged.identity,
@@ -670,14 +713,16 @@ export function publishLocalToken(
     }
     if (stagedExists && staged) {
       invokeLocalTokenTestHook({ stage: "before_staged_cleanup", name: staged.name, artifact: "staged" });
-      retireExactArtifact(descriptors.secrets, staged);
+      retireObservedArtifactUnderLease(mutationLease, staged);
       stagedExists = false;
     }
-    if (marker) cleanupControl(descriptors.secrets, marker);
-    if (leaseExists) cleanupControl(descriptors.secrets, lease.control);
+    if (marker) cleanupControl(mutationLease, marker);
+    if (leaseExists) cleanupControl(mutationLease, lease.control);
     throw unsafeLocalTokenStorageError();
   } finally {
-    closeOwnedDescriptor(stagedDescriptor);
-    closeOwnedDescriptor(lease.descriptor);
+    settleOwnedDescriptors(
+      stagedDescriptor,
+      leaseDescriptorOpen ? lease.descriptor : undefined
+    );
   }
 }

@@ -8,6 +8,7 @@ export const LOCAL_TOKEN_MAX_EXTERNAL_ENTRIES = 1024;
 export const LOCAL_TOKEN_MAX_OWNED_ENTRIES = 8;
 export const LOCAL_TOKEN_MAX_DECODED_ENTRIES =
   LOCAL_TOKEN_MAX_EXTERNAL_ENTRIES + LOCAL_TOKEN_MAX_OWNED_ENTRIES;
+export const LOCAL_TOKEN_MAX_RAW_DIRECTORY_RECORDS = 4096;
 
 export const PRIVATE_MODE_MASK = 0o7777n;
 export const PRIVATE_TOKEN_MODE = 0o600n;
@@ -37,6 +38,7 @@ export const LEASE_CREATE_FLAGS =
 
 export const FLOCK_EXCLUSIVE = 0x02;
 export const FLOCK_NONBLOCKING = 0x04;
+export const FLOCK_UNLOCK = 0x08;
 
 export const LEGACY_STAGED_PATTERN =
   /^\.local-token-(\d+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/u;
