@@ -524,9 +524,19 @@ async function openRelativeDescriptor(
   evidenceRef: string
 ): Promise<number> {
   const syscalls = getDirectorySyscalls();
-  let descriptor = syscallDuplicate(syscalls, boundaryDescriptor, evidenceRef);
+  let descriptor =
+    segments.length === 0
+      ? syscallOpenAt(syscalls, boundaryDescriptor, ".", finalFlags, evidenceRef)
+      : syscallDuplicate(syscalls, boundaryDescriptor, evidenceRef);
   let observedPath = resolve(boundaryRoot);
   try {
+    if (segments.length === 0) {
+      const expected = await observeExpectedEntry(observedPath, finalKind, evidenceRef);
+      const observed = await descriptorStat(descriptor, evidenceRef);
+      assertExpectedKind(observed, finalKind, evidenceRef);
+      assertStableEntry(expected, observed, evidenceRef);
+      return descriptor;
+    }
     for (let index = 0; index < segments.length; index += 1) {
       const isFinal = index === segments.length - 1;
       observedPath = join(observedPath, segments[index]!);

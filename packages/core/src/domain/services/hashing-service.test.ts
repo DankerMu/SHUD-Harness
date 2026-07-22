@@ -105,6 +105,38 @@ describe("hashing service", () => {
     );
   });
 
+  test("hashDirectory supports the workspace boundary root by relative and absolute path", async () => {
+    const { workspaceRoot } = await createWorkspace();
+    await writeFile(join(workspaceRoot, "root.txt"), "root bytes");
+    const baselineOracle = exactDirectoryDigest({ "root.txt": "root bytes" });
+    expect(await hashDirectory(hashInput(workspaceRoot, ".", "hash.boundary.relative"))).toBe(baselineOracle);
+    expect(await hashDirectory(
+      hashInput(workspaceRoot, workspaceRoot, "hash.boundary.absolute")
+    )).toBe(baselineOracle);
+    expect(await hashDirectory(hashInput(workspaceRoot, ".", "hash.boundary.repeat"))).toBe(baselineOracle);
+    await writeFile(join(workspaceRoot, "root.txt"), "changed root bytes");
+    const changed = await hashDirectory(hashInput(workspaceRoot, workspaceRoot, "hash.boundary.changed"));
+    expect(changed).toBe(exactDirectoryDigest({ "root.txt": "changed root bytes" }));
+    expect(changed).not.toBe(baselineOracle);
+  });
+
+  test("hashDirectory supports an exact allowed read-only boundary root", async () => {
+    const { tempRoot, workspaceRoot } = await createWorkspace();
+    const readonlyRoot = join(tempRoot, "readonly-root");
+    await mkdir(readonlyRoot);
+    await writeFile(join(readonlyRoot, "evidence.txt"), "readonly bytes");
+    const input = (evidenceRef: string): HashingServiceInput => ({ workspaceRoot,
+      inputPath: readonlyRoot, evidenceRef, allowedReadonlyRoots: [readonlyRoot] });
+    const baselineOracle = exactDirectoryDigest({ "evidence.txt": "readonly bytes" });
+    expect(await hashDirectory(input("hash.boundary.readonly"))).toBe(baselineOracle);
+    expect(await hashDirectory(input("hash.boundary.readonly.repeat"))).toBe(baselineOracle);
+
+    await writeFile(join(readonlyRoot, "evidence.txt"), "changed readonly bytes");
+    const changed = await hashDirectory(input("hash.boundary.readonly.changed"));
+    expect(changed).toBe(exactDirectoryDigest({ "evidence.txt": "changed readonly bytes" }));
+    expect(changed).not.toBe(baselineOracle);
+  });
+
   test("hashDirectory preserves root sibling names that differ only by a leading BOM", async () => {
     const { workspaceRoot } = await createWorkspace();
     const directory = join(workspaceRoot, "bom-root");
@@ -399,6 +431,18 @@ describe("hashing service", () => {
     }
   });
 
+  test("LF and synthetic duplicate entries reject before affected inode reads", async () => {
+    const { workspaceRoot } = await createWorkspace();
+    const result = await runPreContentRejectionProbe(workspaceRoot);
+    expect(result.controlReadCalls).toBeGreaterThan(0);
+    expect(result).toMatchObject({
+      lfError: { name: "WorkspacePathSafetyError", evidenceRef: "hash.precontent.lf" },
+      duplicateError: { name: "WorkspacePathSafetyError", evidenceRef: "hash.precontent.duplicate" },
+      lfAffectedReads: 0, duplicateAffectedReads: 0,
+      duplicateReplayed: true
+    });
+  });
+
   test("root and nested directory substitution never enumerate symlink targets", async () => {
     const { workspaceRoot } = await createWorkspace();
     for (const scope of ["root", "nested"] as const) {
@@ -623,6 +667,72 @@ async function startSparseAppender(
     }
   });
 }
+
+async function runPreContentRejectionProbe(workspaceRoot: string): Promise<Readonly<{
+  controlReadCalls: number; lfAffectedReads: number; duplicateAffectedReads: number;
+  duplicateReplayed: boolean; lfError: ProbeError; duplicateError: ProbeError;
+}>> {
+  const script = `
+    import { mock } from "bun:test";
+    const fs = { ...await import("node:fs/promises") }, callbackFs = { ...await import("node:fs") };
+    const ffi = { ...await import("bun:ffi") };
+    const root = ${JSON.stringify(workspaceRoot)};
+    const control = root + "/precontent-control.bin", lfTree = root + "/precontent-lf";
+    const duplicateTree = root + "/precontent-duplicate";
+    const lfPath = lfTree + "/affected\\nfile", duplicatePath = duplicateTree + "/affected.txt";
+    await fs.mkdir(lfTree); await fs.mkdir(duplicateTree);
+    await fs.writeFile(control, "control"); await fs.writeFile(lfPath, "lf affected"); await fs.writeFile(duplicatePath, "duplicate affected");
+    const lfIdentity = await fs.stat(lfPath, { bigint: true }), duplicateIdentity = await fs.stat(duplicatePath, { bigint: true });
+    let readCalls = 0, lfAffectedReads = 0, duplicateAffectedReads = 0;
+    const same = (left, right) => left.dev === right.dev && left.ino === right.ino;
+    mock.module("node:fs", () => ({ ...callbackFs, read: (descriptor, ...args) => {
+      readCalls += 1; const identity = callbackFs.fstatSync(descriptor, { bigint: true });
+      if (same(identity, lfIdentity)) lfAffectedReads += 1;
+      if (same(identity, duplicateIdentity)) duplicateAffectedReads += 1;
+      return callbackFs.read(descriptor, ...args);
+    }}));
+    let replayEntry = null, duplicateReplayed = false;
+    const entryName = (entry) => {
+      if (process.platform === "darwin") {
+        const length = ffi.read.u16(entry, 18); return Buffer.from(ffi.toBuffer(entry, 21, length)).toString("utf8");
+      }
+      const recordLength = ffi.read.u16(entry, 16);
+      const bytes = Buffer.from(ffi.toBuffer(entry, 19, recordLength - 19)); return bytes.subarray(0, bytes.indexOf(0)).toString("utf8");
+    };
+    mock.module("bun:ffi", () => ({ ...ffi, dlopen: (...args) => {
+      const library = ffi.dlopen(...args);
+      const symbols = new Proxy(library.symbols, { get(target, property) {
+        const symbol = Reflect.get(target, property); if (property !== "readdir") return symbol;
+        return (stream) => {
+          if (replayEntry !== null) {
+            const entry = replayEntry; replayEntry = null; duplicateReplayed = true; return entry;
+          }
+          const entry = symbol(stream);
+          if (entry !== null && entryName(entry) === "affected.txt") replayEntry = entry;
+          return entry;
+        };
+      }});
+      return new Proxy(library, { get: (target, property) => property === "symbols" ? symbols : Reflect.get(target, property) });
+    }}));
+    const { hashDirectory, hashFile } = await import("./packages/core/src/domain/services/index.ts");
+    await hashFile({ workspaceRoot: root, inputPath: control, evidenceRef: "hash.precontent.control" });
+    const controlReadCalls = readCalls;
+    const capture = async (action) => { try { await action(); return { name: null, evidenceRef: null }; } catch (error) {
+      return { name: error?.name ?? null, evidenceRef: error?.evidenceRef ?? null }; } };
+    const lfError = await capture(() => hashDirectory({ workspaceRoot: root, inputPath: lfTree, evidenceRef: "hash.precontent.lf" }));
+    const duplicateError = await capture(() => hashDirectory({ workspaceRoot: root, inputPath: duplicateTree, evidenceRef: "hash.precontent.duplicate" }));
+    console.log(JSON.stringify({ controlReadCalls, lfAffectedReads, duplicateAffectedReads, duplicateReplayed, lfError, duplicateError }));
+  `;
+  const child = Bun.spawn([process.execPath, "-e", script], {
+    cwd: resolve(import.meta.dir, "../../../../.."), stdout: "pipe", stderr: "pipe"
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([child.exited,
+    new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  if (exitCode !== 0) throw new Error(`Pre-content probe failed: ${stderr.trim()}`);
+  return JSON.parse(stdout.trim());
+}
+
+type ProbeError = Readonly<{ name: string | null; evidenceRef: string | null }>;
 
 async function runDirectorySubstitutionProbe(
   workspaceRoot: string,

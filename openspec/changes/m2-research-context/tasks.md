@@ -25,10 +25,11 @@
     - 文件 fixture（已知字节、空文件、大于 stream chunk）-> digest 与独立 `createHash`/`shasum -a 256` 参照一致；测试证明实现不使用 `readFile` 整读。
     - 从 `packages/core/src/domain/services` barrel 导入 `hashFile`/`hashDirectory`，断言固定 options 输入、`Promise<string>` 输出及 `WorkspacePathSafetyError` 错误契约。
     - 独立目录协议 oracle：`a.txt="A"`（file sha `559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd`）与 `nested/b.txt="B"`（file sha `df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c`）按 `/` 相对路径和精确单换行组装后，directory sha 为 `abeb7f0f89055fff57ff5fdec6e07f6b397071d82f6b11e52d068bef7951bb0d`；不同创建顺序仍相同。
+    - `inputPath="."`、absolute workspace root 与 exact `allowedReadonlyRoot` 均以独立 directory oracle 重复验证并保持变更敏感；boundary root 枚举使用独立 open-file description，不共享目录 cursor。
     - 在上述目录新增文件、修改内容、重命名相对路径 -> digest 均改变。
     - 空目录、symlink leaf、symlink ancestor、目录内 symlink、FIFO（平台支持时）及枚举/打开窗口对象替换 -> `WorkspacePathSafetyError`，不跟随、不阻塞、不返回 partial digest；test-side `bun:ffi` directory descriptor 与 callback `node:fs.read` wrapper 先由 control hash 证明实际调用，再证明 root/nested 目录替换 target 未被枚举、替换 ancestor/leaf 的文件 bytes 未被读取。
-    - D3 行协议保持原 ordinary-name oracle；精确 LF collision 构造与 nested LF segment 在读取对应文件内容前拒绝，并保留原 `evidenceRef`。
-    - 目录项解码保留 leading UTF-8 BOM；root file 与 nested directory 分别以 `a`/`\uFEFFa` 共存，digest 等于独立 D3 oracle，修改任一 distinct file 均改变 digest；重复 decoded name/canonical path 在内容访问前拒绝。
+    - D3 行协议保持原 ordinary-name oracle；精确 LF collision 构造与 nested LF segment 在读取对应文件内容前拒绝，并保留原 `evidenceRef`；active callback `node:fs.read` control 证明受影响 inode 在拒绝前零读取。
+    - 目录项解码保留 leading UTF-8 BOM；root file 与 nested directory 分别以 `a`/`\uFEFFa` 共存，digest 等于独立 D3 oracle，修改任一 distinct file 均改变 digest；test-side FFI replay 合成的重复 decoded name/canonical path 在内容访问前拒绝，受影响 inode 零读取。
     - 文件首个 64 KiB chunk 后截断/增长/metadata 漂移拒绝；active appender 存活期间仍按首次 descriptor size 有界收敛为 `WorkspacePathSafetyError`。
     - `npx --yes bun@1.2.19 run test:core-services`；`npx --yes bun@1.2.19 run typecheck`；`npx --yes bun@1.2.19 run check`；`npx --yes openspec validate m2-research-context --strict --no-interactive`；`git diff --check`；`git -C zero diff --quiet`；`test -z "$(git ls-files workspace)"`；`git diff --exit-code origin/main -- package.json packages/*/package.json bun.lock`。
 
