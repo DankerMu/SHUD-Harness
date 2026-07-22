@@ -20,7 +20,7 @@
 ### D3. sha256 语义：文件与目录双形态
 
 - 文件：内容字节流式 sha256（不整读内存，SHUD 输出可能大）。
-- 目录（canonical 示例中 `forcing/` 是目录源）：对目录内全部常规文件按 **相对路径字典序** 生成 `"<relpath>\n<file-sha256>\n"` 行序列，对该序列再做 sha256。符号链接与非常规文件直接拒绝（raw 数据保护 + M1 no-follow 纪律）。
+- 目录（canonical 示例中 `forcing/` 是目录源）：对目录内全部常规文件按 **相对路径字典序** 生成 `"<relpath>\n<file-sha256>\n"` 行序列，对该序列再做 sha256。为保持该冻结行协议无歧义，任一相对路径 segment 含 LF（`\n`）时 MUST 在读取对应文件内容前以 path-safety 错误拒绝；普通名称的行协议与 oracle 不变。符号链接与非常规文件直接拒绝（raw 数据保护 + M1 no-follow 纪律）。
 - 空目录拒绝（422）：无内容可溯源。
 
 ### D4. 持久化复用 M1 硬化后的 workspace record store（关键的 review 经济决策）
@@ -114,7 +114,7 @@ Must preserve:
 Must add/change:
 - `hashFile` 对常规文件内容做流式 sha256，结果与 `shasum -a 256` 一致。
 - `hashDirectory` 递归检查目录树，拒绝任意 symlink/非常规项；把全部常规文件规范为 `/` 分隔的相对路径，按字典序生成 `"<relpath>\n<file-sha256>\n"` 字节序列并哈希；无常规文件时拒绝。
-- 在 path-safety preflight 后于打开/读取点再次执行 no-follow 与常规文件身份检查；错误统一为 `WorkspacePathSafetyError` 家族。
+- 在 path-safety preflight 后，以 Mac/Linux 的 descriptor-relative `openat` + `O_NOFOLLOW` 固定每级目录/文件身份，并通过固定目录 descriptor 枚举；文件读取受打开后首次 `fstat.size` 硬上限约束，再执行完整 metadata/身份复核。错误统一为 `WorkspacePathSafetyError` 家族。
 - 公共签名固定为 `hashFile(input)` / `hashDirectory(input)`，其中 input 为 `{ workspaceRoot, inputPath, evidenceRef, allowedReadonlyRoots? }`，返回 `Promise<string>`。
 
 Risk packs considered:
@@ -138,23 +138,25 @@ Invariant Matrix:
 - Governing invariant: digest 只能代表本次在受信 workspace/read-only 边界内、以 no-follow 方式完整读取并验证过的同一组常规文件字节及其 canonical 相对路径序列。
 - Source-of-truth identity/contract: design D3 的文件内容 sha256 与目录 `"<relpath>\n<file-sha256>\n"` 排序行协议；M1 `resolveWorkspacePath`/`WorkspacePathSafetyError`。
 - Producers: `hashFile`、`hashDirectory` 与共享的 descriptor/stream hashing 内部实现。
-- Validators/preflight: `resolveWorkspacePath(access="read")`、每级 `lstat`、打开后 `fstat`/identity 核对与 no-follow flag。
+- Validators/preflight: `resolveWorkspacePath(access="read")`、每级 `lstat`、descriptor-relative `openat`/`O_NOFOLLOW`、固定目录 descriptor 枚举、打开后 `fstat`/identity/metadata 核对与初始 size 读取上限。
 - Storage/cache/query: none - 纯读取并返回 digest，不缓存、不落盘。
 - Public routes/entrypoints: `packages/core/src/domain/services/index.ts` 导出的 `hashFile`/`hashDirectory`；HTTP/CLI/API route 为 none，调用方接线属于 4.1/5.1。
 - Frontend/downstream consumers: unchanged future consumers `StackLock` 与 `DataProvenance`；本 issue 只固定公共 service 契约。
-- Failure paths/rollback/stale state: missing、空目录、symlink leaf/ancestor、FIFO/socket/device、枚举后替换或读取中身份漂移均 fail closed，不返回 digest。
+- Failure paths/rollback/stale state: missing、空目录、LF-bearing path segment、symlink leaf/ancestor、FIFO/socket/device、目录/文件路径替换、读取中增长/截断/替换/metadata 漂移均 fail closed，不返回 digest；active appender 不得把读取延伸到首次 descriptor size 之外。
 - Evidence/audit/readiness: focused hashing tests、`test:core-services`、`typecheck`、`check` 与 strict OpenSpec。
 - Regression rows:
   - 常规文件（含大文件/分块边界） -> 流式 digest 等于独立 sha256 参照值，且不调用整文件读取 API。
   - `a.txt="A"`、`nested/b.txt="B"` -> canonical 行序列 `a.txt\n559a...fdffd\nnested/b.txt\ndf7e...20a5c\n` 的独立 oracle digest 为 `abeb7f0f89055fff57ff5fdec6e07f6b397071d82f6b11e52d068bef7951bb0d`；重复两次同 digest，创建顺序不影响结果。
+  - 精确碰撞构造 `a="A"`、`b="B"` 与单文件名 `a\n<sha256(A)>\nb`/内容 `B` 不得同时产生 digest：后者与任一 nested LF segment 在文件内容读取前返回 `WorkspacePathSafetyError`，普通名称 oracle 不变。
   - 在上述目录新增文件、修改内容或重命名相对路径 -> digest 改变。
-  - 空目录或树内 symlink/非常规项/对象替换 -> `WorkspacePathSafetyError`，且链接目标/特殊文件未被读取。
+  - 空目录或树内 symlink/非常规项/对象替换 -> `WorkspacePathSafetyError`，且替换后的目录 target 未被枚举、替换 ancestor 下的文件 bytes 未被读取。
+  - 首个 64 KiB chunk 后截断/增长及持续 active appender -> `WorkspacePathSafetyError`；读取在首次 descriptor size 内有界收敛。
   - 合法 M1 workspace path 与现有 core service consumers -> 原行为和测试保持通过；无 StackLock/DataProvenance 接线变化。
 
 Boundary-surface checklist:
 - Shared helper roots: `workspace-path-safety.ts` 只读复用，不修改。
 - Public entrypoints: `packages/core/src/domain/services/index.ts` 导出新的 hashing API；无 HTTP/CLI。
-- Read surfaces: 单文件、递归目录枚举、每个常规文件的 descriptor-bound 流式读取。
+- Read surfaces: 单文件、固定目录 descriptor 的递归枚举、每个常规文件的 descriptor-relative/no-follow 打开与初始 size 有界流式读取。
 - Write/delete/overwrite surfaces: none - 服务不得写入、删除或覆盖任何路径。
 - Producer/consumer evidence boundaries: 实际文件字节 + canonical 相对路径序列 -> 单一 sha256 字符串；不接受调用方提供 digest。
 - Stale-state/idempotency boundaries: 重复读取稳定树确定；读取期间身份/类型变化 fail closed。

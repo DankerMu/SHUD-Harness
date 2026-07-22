@@ -2,13 +2,17 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:net";
 import {
+  link,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   rename,
   rm,
+  stat,
   symlink,
+  truncate,
+  utimes,
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,11 +23,12 @@ import {
   hashFile,
   type HashingServiceInput
 } from "./index";
-import { runWithHashingServiceHooksForTest } from "./hashing-service";
 
 const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 const DIRECTORY_ORACLE = "abeb7f0f89055fff57ff5fdec6e07f6b397071d82f6b11e52d068bef7951bb0d";
+const COLLIDING_DIRECTORY_ORACLE =
+  "b6bfe7d76032d5a8702f538c8b26915dc76ff20e6a0d33267b4721dd046fa760";
 const tempRoots: string[] = [];
 const socketServers: Server[] = [];
 
@@ -35,7 +40,7 @@ describe("hashing service", () => {
     );
   });
 
-  test("services barrel exposes the fixed public API but keeps test hooks private", async () => {
+  test("services barrel exposes only the fixed public hashing API and production has no test hooks", async () => {
     const { workspaceRoot } = await createWorkspace();
     await writeFile(join(workspaceRoot, "public.txt"), "public-contract");
     const input: HashingServiceInput = {
@@ -51,6 +56,10 @@ describe("hashing service", () => {
     expect(serviceExports.hashFile).toBe(hashFile);
     expect(serviceExports.hashDirectory).toBe(hashDirectory);
     expect("runWithHashingServiceHooksForTest" in serviceExports).toBe(false);
+    const source = await readFile(join(import.meta.dir, "hashing-service.ts"), "utf8");
+    expect(source).not.toMatch(
+      /AsyncLocalStorage|HashingServiceHooks|runWithHashingServiceHooksForTest/
+    );
   });
 
   test("hashFile matches independent sha256 oracles for known, empty, and multi-chunk bytes", async () => {
@@ -94,6 +103,38 @@ describe("hashing service", () => {
     );
     expect(await hashDirectory(hashInput(workspaceRoot, "second", "hash.directory.second"))).toBe(
       DIRECTORY_ORACLE
+    );
+  });
+
+  test("hashDirectory rejects the exact LF-path collision while preserving the canonical oracle", async () => {
+    const { workspaceRoot } = await createWorkspace();
+    const ordinaryTree = join(workspaceRoot, "ordinary");
+    const collidingTree = join(workspaceRoot, "colliding");
+    const aDigest = createHash("sha256").update("A").digest("hex");
+    await Promise.all([mkdir(ordinaryTree), mkdir(collidingTree)]);
+    await Promise.all([
+      writeFile(join(ordinaryTree, "a"), "A"),
+      writeFile(join(ordinaryTree, "b"), "B"),
+      writeFile(join(collidingTree, `a\n${aDigest}\nb`), "B")
+    ]);
+
+    expect(await hashDirectory(hashInput(workspaceRoot, "ordinary", "hash.lf.ordinary"))).toBe(
+      COLLIDING_DIRECTORY_ORACLE
+    );
+    await expectPathSafety(
+      () => hashDirectory(hashInput(workspaceRoot, "colliding", "hash.lf.collision")),
+      "hash.lf.collision"
+    );
+  });
+
+  test("hashDirectory rejects LF in a nested relative-path segment", async () => {
+    const { workspaceRoot } = await createWorkspace();
+    await mkdir(join(workspaceRoot, "tree", "nested\nsegment"), { recursive: true });
+    await writeFile(join(workspaceRoot, "tree", "nested\nsegment", "evidence.txt"), "evidence");
+
+    await expectPathSafety(
+      () => hashDirectory(hashInput(workspaceRoot, "tree", "hash.lf.nested")),
+      "hash.lf.nested"
     );
   });
 
@@ -246,57 +287,65 @@ describe("hashing service", () => {
     }
   );
 
-  test("enumeration-time directory replacement is rejected without following the replacement", async () => {
+  test("post-first-chunk truncation fails closed without returning a partial digest", async () => {
     const { workspaceRoot } = await createWorkspace();
-    const dataset = join(workspaceRoot, "dataset");
-    const nested = join(dataset, "nested");
-    const displaced = join(dataset, "nested-original");
-    const replacement = join(workspaceRoot, "replacement");
-    await mkdir(nested, { recursive: true });
-    await mkdir(replacement);
-    await writeFile(join(nested, "evidence.txt"), "original");
-    await writeFile(join(replacement, "evidence.txt"), "replacement must not be read");
+    const path = join(workspaceRoot, "changing.bin");
+    const initialSize = 64 * 1024 * 1024;
+    await writeFile(path, "");
+    await truncate(path, initialSize);
+    const initialAtime = await makeAtimeObservable(path);
 
-    await expectPathSafety(
-      () =>
-        runWithHashingServiceHooksForTest(
-          {
-            afterDirectoryEnumeration: async () => {
-              await rename(nested, displaced);
-              await symlink(replacement, nested);
-            }
-          },
-          () => hashDirectory(hashInput(workspaceRoot, "dataset", "hash.race.enumeration"))
-        ),
-      "hash.race.enumeration"
-    );
-    expect(await readFile(join(replacement, "evidence.txt"), "utf8")).toBe(
-      "replacement must not be read"
-    );
+    const outcome = settle(hashFile(hashInput(workspaceRoot, "changing.bin", "hash.read.truncate")));
+    await waitForAtimeChange(path, initialAtime);
+    await truncate(path, initialSize / 2);
+
+    await expectSettledPathSafety(outcome, "hash.read.truncate", 2_000);
   });
 
-  test("open-window regular-file replacement fails pre-open identity binding", async () => {
+  test("active sparse appender cannot extend hashing beyond the initially opened size", async () => {
     const { workspaceRoot } = await createWorkspace();
-    const target = join(workspaceRoot, "target.bin");
-    const displaced = join(workspaceRoot, "target-original.bin");
-    await writeFile(target, "original bytes");
-    let replaced = false;
+    const path = join(workspaceRoot, "appending.bin");
+    const initialSize = 64 * 1024 * 1024;
+    await writeFile(path, "");
+    await truncate(path, initialSize);
+    const initialAtime = await makeAtimeObservable(path);
+    const appender = await startSparseAppender(path, initialSize);
 
-    await expectPathSafety(
-      () =>
-        runWithHashingServiceHooksForTest(
-          {
-            beforeFileOpen: async ({ absolutePath }) => {
-              if (replaced || absolutePath !== target) return;
-              replaced = true;
-              await rename(target, displaced);
-              await writeFile(target, "replacement bytes");
-            }
-          },
-          () => hashFile(hashInput(workspaceRoot, "target.bin", "hash.race.open"))
-        ),
-      "hash.race.open"
-    );
+    const outcome = settle(hashFile(hashInput(workspaceRoot, "appending.bin", "hash.read.append")));
+    await waitForAtimeChange(path, initialAtime);
+    appender.start();
+    try {
+      await expectSettledPathSafety(outcome, "hash.read.append", 2_000);
+      expect(appender.exited).toBe(false);
+    } finally {
+      await appender.stop();
+      await truncate(path, initialSize);
+      await outcome;
+    }
+  });
+
+  test("root and nested directory substitution never enumerate symlink targets", async () => {
+    const { workspaceRoot } = await createWorkspace();
+    for (const scope of ["root", "nested"] as const) {
+      const result = await runDirectorySubstitutionProbe(workspaceRoot, scope);
+      expect(result).toEqual({
+        errorName: "WorkspacePathSafetyError",
+        evidenceRef: `hash.directory-swap.${scope}`,
+        replacementEnumerated: false
+      });
+    }
+  });
+
+  test("ancestor and leaf substitution never read replacement file bytes", async () => {
+    const { workspaceRoot } = await createWorkspace();
+    for (const scope of ["ancestor", "leaf"] as const) {
+      const result = await runFileSubstitutionProbe(workspaceRoot, scope);
+      expect(result).toEqual({
+        errorName: "WorkspacePathSafetyError",
+        evidenceRef: `hash.file-swap.${scope}`,
+        replacementRead: false
+      });
+    }
   });
 });
 
@@ -389,4 +438,283 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolveClose, rejectClose) => {
     server.close((error) => (error ? rejectClose(error) : resolveClose()));
   });
+}
+
+type Settled<T> = Readonly<{ status: "fulfilled"; value: T }> | Readonly<{
+  status: "rejected";
+  reason: unknown;
+}>;
+
+function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
+  return promise.then(
+    (value) => Object.freeze({ status: "fulfilled" as const, value }),
+    (reason) => Object.freeze({ status: "rejected" as const, reason })
+  );
+}
+
+async function expectSettledPathSafety(
+  outcome: Promise<Settled<unknown>>,
+  evidenceRef: string,
+  timeoutMs: number
+): Promise<void> {
+  const result = await Promise.race([
+    outcome,
+    Bun.sleep(timeoutMs).then(() => Object.freeze({ status: "timed_out" as const }))
+  ]);
+  expect(result.status).not.toBe("timed_out");
+  if (result.status === "timed_out") return;
+  expect(result.status).toBe("rejected");
+  if (result.status !== "rejected") return;
+  expect(result.reason).toBeInstanceOf(WorkspacePathSafetyError);
+  expect((result.reason as WorkspacePathSafetyError).evidenceRef).toBe(evidenceRef);
+}
+
+async function makeAtimeObservable(path: string): Promise<bigint> {
+  const oldAtime = new Date("2000-01-01T00:00:00.000Z");
+  await utimes(path, oldAtime, new Date());
+  return (await stat(path, { bigint: true })).atimeNs;
+}
+
+async function waitForAtimeChange(path: string, initialAtime: bigint): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if ((await stat(path, { bigint: true })).atimeNs !== initialAtime) return;
+    await Bun.sleep(1);
+  }
+  throw new Error("Timed out waiting for the hashing reader to consume its first chunk.");
+}
+
+async function startSparseAppender(
+  path: string,
+  initialSize: number
+): Promise<Readonly<{ start: () => void; stop: () => Promise<void>; exited: boolean }>> {
+  const script = `
+    import { open } from "node:fs/promises";
+    const file = await open(process.argv[1], "r+");
+    const initialSize = Number(process.argv[2]);
+    process.stdout.write("ready\\n");
+    await new Promise((resolve) => process.stdin.once("data", resolve));
+    let position = initialSize;
+    try {
+      for (;;) {
+        position += 256 * 1024 * 1024;
+        await file.write(Buffer.from([0]), 0, 1, position - 1);
+        await Bun.sleep(1);
+      }
+    } finally {
+      await file.close();
+    }
+  `;
+  const child = Bun.spawn([process.execPath, "-e", script, path, String(initialSize)], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const reader = child.stdout.getReader();
+  const ready = await reader.read();
+  reader.releaseLock();
+  expect(new TextDecoder().decode(ready.value)).toContain("ready");
+  let exited = false;
+  void child.exited.then(() => {
+    exited = true;
+  });
+  return Object.freeze({
+    start: () => {
+      child.stdin.write("start\n");
+      child.stdin.flush();
+    },
+    stop: async () => {
+      if (exited) return;
+      child.kill(9);
+      await child.exited;
+      const stderr = await new Response(child.stderr).text();
+      if (stderr.trim()) throw new Error(`Sparse appender failed: ${stderr.trim()}`);
+    },
+    get exited() {
+      return exited;
+    }
+  });
+}
+
+async function runDirectorySubstitutionProbe(
+  workspaceRoot: string,
+  scope: "root" | "nested"
+): Promise<
+  Readonly<{ errorName: string | null; evidenceRef: string | null; replacementEnumerated: boolean }>
+> {
+  const caseRoot = join(workspaceRoot, `directory-swap-${scope}`);
+  const dataset = join(caseRoot, "dataset");
+  const live = scope === "root" ? dataset : join(dataset, "nested");
+  const displaced = `${live}-original`;
+  const replacement = join(caseRoot, "replacement");
+  await mkdir(live, { recursive: true });
+  await mkdir(replacement, { recursive: true });
+  await writeFile(join(live, "evidence.txt"), "original");
+  await writeFile(join(replacement, "sentinel.txt"), "replacement");
+  const triggerCount = scope === "root" ? 4 : 3;
+  const input = hashInput(
+    workspaceRoot,
+    `directory-swap-${scope}/dataset`,
+    `hash.directory-swap.${scope}`
+  );
+  const script = `
+    import { mock } from "bun:test";
+    const actual = { ...await import("node:fs/promises") };
+    const actualLstat = actual.lstat;
+    const actualReaddir = actual.readdir;
+    const live = ${JSON.stringify(live)};
+    const displaced = ${JSON.stringify(displaced)};
+    const replacement = ${JSON.stringify(replacement)};
+    const triggerCount = ${triggerCount};
+    let observations = 0;
+    let swapped = false;
+    let replacementEnumerated = false;
+    mock.module("node:fs/promises", () => ({
+      ...actual,
+      lstat: async (...args) => {
+        const result = await actualLstat(...args);
+        if (!swapped && String(args[0]) === live && ++observations === triggerCount) {
+          await actual.rename(live, displaced);
+          await actual.symlink(replacement, live);
+          swapped = true;
+        }
+        return result;
+      },
+      readdir: async (...args) => {
+        if (swapped && String(args[0]) === live) replacementEnumerated = true;
+        return await actualReaddir(...args);
+      }
+    }));
+    const { hashDirectory } = await import("./packages/core/src/domain/services/index.ts");
+    let errorName = null;
+    let evidenceRef = null;
+    try {
+      await hashDirectory(${JSON.stringify(input)});
+    } catch (error) {
+      errorName = error?.name ?? null;
+      evidenceRef = error?.evidenceRef ?? null;
+    } finally {
+      if (swapped) {
+        await actual.rm(live, { force: true });
+        await actual.rename(displaced, live);
+      }
+    }
+    console.log(JSON.stringify({ errorName, evidenceRef, replacementEnumerated }));
+  `;
+  const child = Bun.spawn([process.execPath, "-e", script], {
+    cwd: resolve(import.meta.dir, "../../../../.."),
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text()
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(`Directory substitution probe failed with exit ${exitCode}: ${stderr.trim()}`);
+  }
+  return JSON.parse(stdout.trim());
+}
+
+async function runFileSubstitutionProbe(
+  workspaceRoot: string,
+  scope: "ancestor" | "leaf"
+): Promise<
+  Readonly<{ errorName: string | null; evidenceRef: string | null; replacementRead: boolean }>
+> {
+  const caseRoot = join(workspaceRoot, `file-swap-${scope}`);
+  const ancestor = join(caseRoot, "ancestor");
+  const target = join(ancestor, "target.bin");
+  const displaced = scope === "ancestor" ? `${ancestor}-original` : `${target}-original`;
+  const replacementDirectory = join(caseRoot, "replacement");
+  const replacementLeaf = join(caseRoot, "replacement.bin");
+  await mkdir(ancestor, { recursive: true });
+  await writeFile(target, "original bytes");
+  if (scope === "ancestor") {
+    await mkdir(replacementDirectory);
+    await link(target, join(replacementDirectory, "target.bin"));
+  } else {
+    await writeFile(replacementLeaf, "replacement bytes");
+  }
+  const input = hashInput(
+    workspaceRoot,
+    `file-swap-${scope}/ancestor/target.bin`,
+    `hash.file-swap.${scope}`
+  );
+  const script = `
+    import { mock } from "bun:test";
+    const actual = { ...await import("node:fs/promises") };
+    const actualLstat = actual.lstat;
+    const actualOpen = actual.open;
+    const scope = ${JSON.stringify(scope)};
+    const ancestor = ${JSON.stringify(ancestor)};
+    const target = ${JSON.stringify(target)};
+    const displaced = ${JSON.stringify(displaced)};
+    const replacementDirectory = ${JSON.stringify(replacementDirectory)};
+    const replacementLeaf = ${JSON.stringify(replacementLeaf)};
+    let observations = 0;
+    let swapped = false;
+    let replacementRead = false;
+    mock.module("node:fs/promises", () => ({
+      ...actual,
+      lstat: async (...args) => {
+        const result = await actualLstat(...args);
+        if (!swapped && String(args[0]) === target && ++observations === 4) {
+          if (scope === "ancestor") {
+            await actual.rename(ancestor, displaced);
+            await actual.symlink(replacementDirectory, ancestor);
+          } else {
+            await actual.rename(target, displaced);
+            await actual.rename(replacementLeaf, target);
+          }
+          swapped = true;
+        }
+        return result;
+      },
+      open: async (...args) => {
+        const handle = await actualOpen(...args);
+        if (swapped && String(args[0]) === target) {
+          const actualRead = handle.read.bind(handle);
+          handle.read = async (...readArgs) => {
+            replacementRead = true;
+            return await actualRead(...readArgs);
+          };
+        }
+        return handle;
+      }
+    }));
+    const { hashFile } = await import("./packages/core/src/domain/services/index.ts");
+    let errorName = null;
+    let evidenceRef = null;
+    try {
+      await hashFile(${JSON.stringify(input)});
+    } catch (error) {
+      errorName = error?.name ?? null;
+      evidenceRef = error?.evidenceRef ?? null;
+    } finally {
+      if (swapped && scope === "ancestor") {
+        await actual.rm(ancestor, { force: true });
+        await actual.rename(displaced, ancestor);
+      } else if (swapped) {
+        await actual.rename(target, replacementLeaf);
+        await actual.rename(displaced, target);
+      }
+    }
+    console.log(JSON.stringify({ errorName, evidenceRef, replacementRead }));
+  `;
+  const child = Bun.spawn([process.execPath, "-e", script], {
+    cwd: resolve(import.meta.dir, "../../../../.."),
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text()
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(`File substitution probe failed with exit ${exitCode}: ${stderr.trim()}`);
+  }
+  return JSON.parse(stdout.trim());
 }
