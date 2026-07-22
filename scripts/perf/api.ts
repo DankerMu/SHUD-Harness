@@ -10,6 +10,7 @@ const TASK_COUNT = 100;
 const WARMUP_REQUESTS_PER_ENDPOINT = 5;
 const SAMPLE_REQUESTS_PER_ENDPOINT = 40;
 const P95_LIMIT_MS = 300;
+const PERF_TOKEN = configurePerfTokenSource();
 
 type EndpointMeasurement = {
   label: string;
@@ -33,7 +34,7 @@ async function main(): Promise<void> {
     });
 
     await expectStatus(
-      app.request("/api/workspace/init", { method: "POST" }),
+      requestWithAuth(app, "/api/workspace/init", { method: "POST" }),
       200,
       "POST /api/workspace/init"
     );
@@ -69,7 +70,7 @@ async function main(): Promise<void> {
 async function createTaskFixture(app: ReturnType<typeof createBackendApi>): Promise<TaskCard[]> {
   const tasks: TaskCard[] = [];
   for (let index = 0; index < TASK_COUNT; index += 1) {
-    const response = await app.request("/api/tasks", {
+    const response = await requestWithAuth(app, "/api/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(taskCreateInput(index))
@@ -93,7 +94,12 @@ async function expectTaskListCount(
   app: ReturnType<typeof createBackendApi>,
   expectedCount: number
 ): Promise<void> {
-  const response = await expectStatus(app.request("/api/tasks"), 200, "GET /api/tasks", false);
+  const response = await expectStatus(
+    requestWithAuth(app, "/api/tasks"),
+    200,
+    "GET /api/tasks",
+    false
+  );
   const body = (await response.json()) as TaskListResponse;
   if (!Array.isArray(body.tasks) || body.tasks.length !== expectedCount) {
     const actualCount = Array.isArray(body.tasks) ? body.tasks.length : "non-array";
@@ -110,13 +116,13 @@ async function measureEndpoint(
   expectedStatus: number
 ): Promise<EndpointMeasurement> {
   for (let index = 0; index < WARMUP_REQUESTS_PER_ENDPOINT; index += 1) {
-    await expectStatus(app.request(path), expectedStatus, label);
+    await expectStatus(requestWithAuth(app, path), expectedStatus, label);
   }
 
   const samples: number[] = [];
   for (let index = 0; index < SAMPLE_REQUESTS_PER_ENDPOINT; index += 1) {
     const startedAtMs = performance.now();
-    await expectStatus(app.request(path), expectedStatus, label);
+    await expectStatus(requestWithAuth(app, path), expectedStatus, label);
     samples.push(performance.now() - startedAtMs);
   }
 
@@ -169,6 +175,27 @@ function formatMs(value: number): string {
 function sequentialTaskIdFactory(): () => string {
   let nextId = 1;
   return () => `TASK-perf-${String(nextId++).padStart(3, "0")}`;
+}
+
+function configurePerfTokenSource(): string {
+  const configured = process.env.HARNESS_LOCAL_TOKEN?.trim();
+  const token = configured && configured.length > 0 ? configured : "perf-local-token";
+  process.env.HARNESS_LOCAL_TOKEN = token;
+  return token;
+}
+
+async function requestWithAuth(
+  app: ReturnType<typeof createBackendApi>,
+  path: Parameters<ReturnType<typeof createBackendApi>["request"]>[0],
+  init?: Parameters<ReturnType<typeof createBackendApi>["request"]>[1]
+): Promise<Response> {
+  const mergedInit = init ?? {};
+  const headers = new Headers(init?.headers);
+  if (!headers.has("authorization") && !headers.has("Authorization")) {
+    headers.set("authorization", `Bearer ${PERF_TOKEN}`);
+  }
+
+  return await app.request(path, { ...mergedInit, headers });
 }
 
 function taskCreateInput(index: number): CreateTaskInput {

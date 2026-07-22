@@ -18,6 +18,7 @@ export interface ResolveWorkspacePathInput {
   evidenceRef: string;
   access?: WorkspacePathAccess;
   allowedReadonlyRoots?: readonly string[];
+  deniedRelativeRoots?: readonly string[];
 }
 
 export class WorkspacePathSafetyError extends Error {
@@ -106,6 +107,18 @@ export async function resolveWorkspacePath(
 
   const access = input.access ?? "write";
   const absolutePath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(workspaceRoot, rawPath);
+  const deniedRoots = await normalizeDeniedRelativeRoots(
+    workspaceRoot,
+    input.deniedRelativeRoots ?? [],
+    input.evidenceRef
+  );
+  const deniedBoundary = matchingDeniedBoundary(workspaceRoot, deniedRoots, absolutePath);
+  if (deniedBoundary) {
+    throw new WorkspacePathSafetyError(
+      "Resolved path targets a denied workspace boundary.",
+      input.evidenceRef
+    );
+  }
   const boundary = matchingBoundary(workspaceRoot, input.allowedReadonlyRoots ?? [], absolutePath);
   if (!boundary) {
     throw new WorkspacePathSafetyError(
@@ -730,6 +743,75 @@ function matchingBoundary(
   if (isPathInsideBoundary(workspaceBoundary.root, targetPath)) {
     return workspaceBoundary;
   }
+}
+
+function matchingDeniedBoundary(
+  workspaceRoot: string,
+  deniedRoots: readonly string[],
+  targetPath: string
+): string | undefined {
+  if (!isPathInsideBoundary(workspaceRoot, targetPath)) {
+    return undefined;
+  }
+
+  const targetSegments = relative(workspaceRoot, targetPath)
+    .split(sep)
+    .filter(Boolean)
+    .map(unicodeCaseFoldSegment);
+  for (const root of deniedRoots) {
+    const rootSegments = relative(workspaceRoot, root)
+      .split(sep)
+      .filter(Boolean)
+      .map(unicodeCaseFoldSegment);
+    if (
+      rootSegments.length <= targetSegments.length &&
+      rootSegments.every((segment, index) => segment === targetSegments[index])
+    ) {
+      return root;
+    }
+  }
+
+  return undefined;
+}
+
+async function normalizeDeniedRelativeRoots(
+  workspaceRoot: string,
+  deniedRelativeRoots: readonly string[],
+  evidenceRef: string
+): Promise<string[]> {
+  const normalizedRoots: string[] = [];
+  for (const deniedRoot of deniedRelativeRoots) {
+    if (
+      typeof deniedRoot !== "string" ||
+      deniedRoot.trim().length === 0 ||
+      deniedRoot.includes("\u0000") ||
+      isAbsolute(deniedRoot)
+    ) {
+      throw invalidDeniedRootError(evidenceRef);
+    }
+    const segments = deniedRoot.split(sep);
+    if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
+      throw invalidDeniedRootError(evidenceRef);
+    }
+
+    const normalizedRoot = resolve(workspaceRoot, deniedRoot);
+    if (
+      normalizedRoot === workspaceRoot ||
+      !isPathInsideBoundary(workspaceRoot, normalizedRoot)
+    ) {
+      throw invalidDeniedRootError(evidenceRef);
+    }
+    await rejectSymlinkEscape(normalizedRoot, evidenceRef);
+    normalizedRoots.push(normalizedRoot);
+  }
+  return normalizedRoots;
+}
+
+function invalidDeniedRootError(evidenceRef: string): WorkspacePathSafetyError {
+  return new WorkspacePathSafetyError(
+    "deniedRelativeRoots must contain unambiguous workspace-relative subtrees.",
+    evidenceRef
+  );
 }
 
 function assertAbsolutePath(path: string, label: string, evidenceRef: string): void {

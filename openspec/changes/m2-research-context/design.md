@@ -96,6 +96,51 @@ M1 教训：#19 单 issue 扛整个 seatbelt 面（25 轮/205 项拦截）、#74
 | ID 格式偏离 canonical 示例被审查反复质疑 | D5 显式裁决 + spec 记录，审查以本 design 为准 |
 | STACK/DATA 记录并发写 | 全部经 M1 record store 权威（#74 硬化面），无新并发原语 |
 
+## Subagent Workflow Fixture — Issue #87
+
+Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.
+
+Change surface:
+- `packages/backend` 的生产监听配置、`createBackendApi` 全 `/api/**` 中间件、workspace init/ready 与 NDJSON request log。
+- `packages/core` 共享 `workspace-path-safety` deny 子树输入及 `scripts/perf/api.ts`；M1 route tests 全量迁移。
+
+Must preserve:
+- health live/ready 无凭据可达；正确 token 下全部既有 M1 route/status/body/idempotency/resource 行为不变；非 `/api` 面与 WebSocket 不纳入鉴权。
+- path helper 在未配置 deny roots 时保持 M1 containment、read-only root、symlink 与错误身份契约；日志、响应、URL、evidence refs 不出现 token。
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - `/api/**` 公共入口与 PERF-API-001 均改变调用前提，生产监听 host 必须固定为 `127.0.0.1`。
+- Config / project setup: selected - `HARNESS_LOCAL_TOKEN` 与 workspace 初始化/ready 目录集改变。
+- File IO / path safety / overwrite: selected - `secrets/local-token` 创建/复用、0600/0700 权限及共享 deny-root helper。
+- Schema / columns / units / field names: not selected - 复用既有 canonical error envelope，不改 Zod 或持久化 schema。
+- Auth / permissions / secrets: selected - exact Bearer 校验、health 豁免、secret 零泄露是主不变量。
+- Concurrency / shared state / ordering: selected - 并发首次启动只能收敛到同一有效 token 文件，不得截断、覆盖或返回不同 token。
+- Resource limits / large input / discovery: selected - env/header/token 文件按 UTF-8 字节统一上限 4096；4096 接受、4097 fail closed，不做无界 secret 读取。
+- Legacy compatibility / examples: selected - M1 全 route tests 与 failure-ledger tests 必须经统一 helper 迁移且不弱化断言。
+- Error handling / rollback / partial outputs: selected - token 文件缺失/非法/权限或 race 失败必须 fail closed，不留下可被误用的 partial secret。
+- Release / packaging / dependency compatibility: not selected - 不改依赖、包清单、构建或发布面。
+- Documentation / migration notes: not selected - canonical 文档已由 #86 落账，本 issue 仅实现既定契约。
+- Scientific governance / PI gate / evidence lineage: selected - request log 与错误证据必须证明拒绝但不能携带 secret。
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - 不触碰模型、R 工具链或科学数据。
+- Zero adapter / tool registry / agent role governance: not selected - Zero、工具注册和 agent role 不变。
+
+Invariant Matrix:
+- Governing invariant: 仅绑定在 `127.0.0.1` 的 backend 对非 health `/api/**` 接受与当前唯一、受权限保护且从未泄露的 token 完全匹配的 Bearer 请求，同时保持已授权 M1 行为与共享 path helper 兼容性。
+- Source-of-truth identity/contract: `HARNESS_LOCAL_TOKEN` 非空值，否则 `workspace/secrets/local-token` 的单一常规文件字节；`Authorization: Bearer <token>`；deny root `workspace/secrets/`。
+- Producers: `packages/backend/src/routes/index.ts` 的 production listen-options export、`createBackendApi` token resolver/generator、`WORKSPACE_CANONICAL_DIRECTORIES` 与 `createWorkspaceRoutesService.initWorkspace`。
+- Validators/preflight: 同文件 auth middleware/Authorization parser/token env-file validator；`packages/core/src/domain/services/workspace-path-safety.ts` 的 `ResolveWorkspacePathInput.deniedRelativeRoots` 与 `resolveWorkspacePath`。
+- Storage/cache/query: `workspace/secrets/local-token`、`WORKSPACE_CANONICAL_DIRECTORIES`、workspace init/ready directory-tree checks；无 token cache/DB。
+- Public routes/entrypoints: production listen options、`createBackendApi`、全部 `/api/**`、GET-only health 豁免、非 `/api` fallback 与 `scripts/perf/api.ts`。
+- Frontend/downstream consumers: `packages/backend/src/routes/index.test.ts`、`failure-occurrence-ledger-routes.test.ts`、`idempotency-lock-artifact-services.test.ts` 的 path-helper consumers 与 perf script；#88 前端、M3 WebSocket 不在本 issue。
+- Failure paths/rollback/stale state: missing/blank/malformed/4097-byte env/header/file，symlink leaf/ancestor/parent swap、目录/FIFO/权限错误，existing safe file 与 concurrent first-create race，错误/log redaction。
+- Evidence/audit/readiness: request logger middleware 的 canonical 401 NDJSON 行（零 token）、workspace init/ready payload、文件/目录 mode/no-clobber 与三组 consumer tests/完整回归。
+- Regression rows:
+  - env token 或安全生成文件 + exact Bearer -> 非 health API 保持既有成功结果，listen host 为 `127.0.0.1`。
+  - absent/wrong/non-Bearer/empty-or-multi-segment/4097-byte Bearer 或 deny-root 等效路径 -> 稳定 401/`WorkspacePathSafetyError` 与原 evidenceRef，响应与日志零 token；仅无 token GET live/ready 豁免。
+  - safe existing file/concurrent startup/symlink-parent-swap/nonregular secret lane + unchanged M1 caller -> 单一 token 收敛或 fail closed，无跟随/覆盖/partial/outside write，既有行为与资源诊断不变。
+
+Boundary-surface checklist: shared path helper root；backend/public API 与 perf entrypoint；secret read/write/create；workspace init/ready；auth producer/consumer 与 log evidence；并发 stale/race；全部 M1 route consumers。非目标：#88 前端、#89 core-schemas、M3 WebSocket、多用户 session、#94/#96/#98 deny-root 消费方、error enum/schema 变化。
+
 ## Subagent Workflow Fixture — Issue #90
 
 Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.

@@ -18589,6 +18589,134 @@ describe("idempotency, lock, and artifact services", () => {
     );
     expect(nestedReadonlyWriteError.evidenceRef).toBe("nested-readonly.path");
 
+    const secretsRoot = join(workspaceRoot, "secrets");
+    await mkdir(secretsRoot, { recursive: true });
+    const deniedSecretsError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: "secrets/local-token",
+        evidenceRef: "artifact.path",
+        deniedRelativeRoots: ["secrets"]
+      })
+    );
+    expect(deniedSecretsError.message).toContain("denied workspace boundary");
+    expect(deniedSecretsError.message).not.toContain(workspaceRoot);
+    expect(deniedSecretsError.evidenceRef).toBe("artifact.path");
+    const deniedAbsoluteRootError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: join(workspaceRoot, "secrets", "local-token"),
+        evidenceRef: "artifact.path",
+        deniedRelativeRoots: ["secrets"]
+      })
+    );
+    expect(deniedAbsoluteRootError.message).toContain("denied workspace boundary");
+    expect(deniedAbsoluteRootError.evidenceRef).toBe("artifact.path");
+
+    for (const equivalentDeniedPath of [
+      "secrets",
+      "data/../secrets/local-token",
+      join(workspaceRoot, "data", "..", "secrets", "local-token"),
+      "SECRETS/local-token"
+    ]) {
+      const equivalentError = await captureWorkspacePathSafetyError(() =>
+        resolveWorkspacePath({
+          workspaceRoot,
+          inputPath: equivalentDeniedPath,
+          evidenceRef: "artifact.equivalent_path",
+          deniedRelativeRoots: ["secrets"]
+        })
+      );
+      expect(equivalentError.message).toContain("denied workspace boundary");
+      expect(equivalentError.evidenceRef).toBe("artifact.equivalent_path");
+    }
+
+    const unicodeDeniedRoot = "s\u00e9crets";
+    const unicodeEquivalentError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: `s\u0065\u0301crets/local-token`,
+        evidenceRef: "artifact.unicode_path",
+        deniedRelativeRoots: [unicodeDeniedRoot]
+      })
+    );
+    expect(unicodeEquivalentError.message).toContain("denied workspace boundary");
+    expect(unicodeEquivalentError.evidenceRef).toBe("artifact.unicode_path");
+
+    const denyWinsOverReadonlyError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: "secrets/local-token",
+        evidenceRef: "artifact.deny_precedence",
+        access: "read",
+        allowedReadonlyRoots: [secretsRoot],
+        deniedRelativeRoots: ["secrets"]
+      })
+    );
+    expect(denyWinsOverReadonlyError.message).toContain("denied workspace boundary");
+    expect(denyWinsOverReadonlyError.evidenceRef).toBe("artifact.deny_precedence");
+
+    const externalSecretsRoot = join(tempRoot, "external-secrets");
+    await mkdir(externalSecretsRoot);
+    const externalSecretsResolution = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: join(externalSecretsRoot, "public-input.dat"),
+      evidenceRef: "external.readonly",
+      access: "read",
+      allowedReadonlyRoots: [externalSecretsRoot],
+      deniedRelativeRoots: ["secrets"]
+    });
+    expect(externalSecretsResolution.boundary).toBe("allowed_readonly");
+
+    const workspaceSibling = join(tempRoot, "workspace-sibling");
+    await mkdir(workspaceSibling);
+    const siblingResolution = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: join(workspaceSibling, "input.dat"),
+      evidenceRef: "sibling.readonly",
+      access: "read",
+      allowedReadonlyRoots: [workspaceSibling],
+      deniedRelativeRoots: ["secrets"]
+    });
+    expect(siblingResolution.boundary).toBe("allowed_readonly");
+
+    for (const invalidDeniedRoot of [
+      "",
+      "../outside",
+      join(workspaceRoot, "secrets"),
+      "secrets/../secrets",
+      "secrets\u0000suffix"
+    ]) {
+      const configurationError = await captureWorkspacePathSafetyError(() =>
+        resolveWorkspacePath({
+          workspaceRoot,
+          inputPath: "data/input.dat",
+          evidenceRef: "denied.configuration",
+          deniedRelativeRoots: [invalidDeniedRoot]
+        })
+      );
+      expect(configurationError.evidenceRef).toBe("denied.configuration");
+    }
+
+    const aliasPath = join(workspaceRoot, "secret-alias");
+    await symlink(secretsRoot, aliasPath, "dir");
+    const aliasError = await captureWorkspacePathSafetyError(() =>
+      resolveWorkspacePath({
+        workspaceRoot,
+        inputPath: "secret-alias/local-token",
+        evidenceRef: "artifact.alias_path",
+        deniedRelativeRoots: ["secrets"]
+      })
+    );
+    expect(aliasError.evidenceRef).toBe("artifact.alias_path");
+
+    const unchangedCallerResolution = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: "secrets/local-token",
+      evidenceRef: "legacy.caller"
+    });
+    expect(unchangedCallerResolution.normalizedPath).toBe("secrets/local-token");
+
     const otherCwd = join(tempRoot, "other-cwd");
     await mkdir(otherCwd, { recursive: true });
     const originalCwd = process.cwd();

@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFile as execFileWithCallback } from "node:child_process";
 import { writeFileSync, type BigIntStats } from "node:fs";
 import {
   access,
+  chmod,
   link,
   lstat,
   readdir,
@@ -41,7 +42,12 @@ import {
   type TaskCard,
   type TaskSnapshot
 } from "@shud-harness/core";
-import { createBackendApi, type ApiErrorResponse, type WorkspaceReadyResponse } from "./index";
+import {
+  createBackendApi,
+  type ApiErrorResponse,
+  type WorkspaceReadyResponse
+} from "./index";
+import * as backendRoutes from "./index";
 import {
   API_REQUEST_ID_HEADER,
   redactApiLogValue,
@@ -69,6 +75,8 @@ const tempRoots: string[] = [];
 const originalCwd = process.cwd();
 const originalHarnessWorkspaceDir = process.env.HARNESS_WORKSPACE_DIR;
 const originalLegacyWorkspaceRoot = process.env.SHUD_HARNESS_WORKSPACE_ROOT;
+const originalHarnessLocalToken = process.env.HARNESS_LOCAL_TOKEN;
+const LOCAL_TEST_TOKEN = "e2e-local-token-001";
 const TASK_HYDRATION_ENTRY_LIMIT = 1024;
 const IN_FLIGHT_TASK_CREATE_LIMIT = 1024;
 const INVALID_DURABLE_TASK_AUTHORITY_MESSAGE =
@@ -81,6 +89,7 @@ const EXPECTED_M1_RUNTIME_DIRECTORIES = [
   "repos/rSHUD",
   "repos/AutoSHUD",
   "repos/zero",
+  "secrets",
   "stacks",
   "data",
   "tasks",
@@ -108,10 +117,15 @@ const EXPECTED_M1_RUNTIME_DIRECTORIES = [
 ] as const;
 
 describe("backend workspace and health routes", () => {
+  beforeEach(() => {
+    process.env.HARNESS_LOCAL_TOKEN = LOCAL_TEST_TOKEN;
+  });
+
   afterEach(async () => {
     process.chdir(originalCwd);
     restoreEnv("HARNESS_WORKSPACE_DIR", originalHarnessWorkspaceDir);
     restoreEnv("SHUD_HARNESS_WORKSPACE_ROOT", originalLegacyWorkspaceRoot);
+    restoreEnv("HARNESS_LOCAL_TOKEN", originalHarnessLocalToken);
 
     await Promise.all(
       tempRoots.splice(0).map((tempRoot) => rm(tempRoot, { recursive: true, force: true }))
@@ -124,7 +138,7 @@ describe("backend workspace and health routes", () => {
     const app = createBackendApi({ workspaceRoot });
 
     await expectPathMissing(workspaceRoot);
-    const response = await app.request("/api/workspace/init", { method: "POST" });
+    const response = await requestApi(app, "/api/workspace/init", { method: "POST" });
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -140,7 +154,7 @@ describe("backend workspace and health routes", () => {
       expect((await stat(join(workspaceRoot, relativeDir))).isDirectory()).toBe(true);
     }
 
-    const readyResponse = await app.request("/api/health/ready");
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
     expect(readyResponse.status).toBe(200);
@@ -159,7 +173,7 @@ describe("backend workspace and health routes", () => {
     const app = createBackendApi({ workspaceRoot });
 
     await expectPathMissing(workspaceRoot);
-    const response = await app.request("/api/workspace/init", { method: "POST" });
+    const response = await requestApi(app, "/api/workspace/init", { method: "POST" });
 
     expect(response.status).toBe(200);
     expect((await stat(workspaceRoot)).isDirectory()).toBe(true);
@@ -173,10 +187,10 @@ describe("backend workspace and health routes", () => {
     const app = createBackendApi({ workspaceRoot });
     const sentinelPath = join(workspaceRoot, "readiness", "sentinel.txt");
 
-    expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
+    expect((await requestApi(app, "/api/workspace/init", { method: "POST" })).status).toBe(200);
     await writeFile(sentinelPath, "preserve me", { flag: "wx" });
 
-    const response = await app.request("/api/workspace/init", { method: "POST" });
+    const response = await requestApi(app, "/api/workspace/init", { method: "POST" });
 
     expect(response.status).toBe(200);
     expect(await readFile(sentinelPath, "utf8")).toBe("preserve me");
@@ -189,7 +203,7 @@ describe("backend workspace and health routes", () => {
 
     const responses = await Promise.all(
       Array.from({ length: 6 }, () =>
-        app.request("/api/workspace/init", { method: "POST" })
+        requestApi(app, "/api/workspace/init", { method: "POST" })
       )
     );
 
@@ -250,7 +264,7 @@ describe("backend workspace and health routes", () => {
         };
         const startInit = () =>
           runWithWorkspaceRecordPublicationHooks(hooks, () =>
-            app.request("/api/workspace/init", { method: "POST" })
+            requestApi(app, "/api/workspace/init", { method: "POST" })
           );
         const startRecord = () =>
           runWithWorkspaceRecordPublicationHooks(hooks, () =>
@@ -337,7 +351,7 @@ describe("backend workspace and health routes", () => {
       now: () => new Date("2026-07-07T00:00:03.500Z")
     });
 
-    const response = await app.request("/api/health/live");
+    const response = await requestApi(app, "/api/health/live");
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -362,7 +376,7 @@ describe("backend workspace and health routes", () => {
       }
     });
 
-    const response = await app.request("/api/health/live");
+    const response = await requestApi(app, "/api/health/live");
 
     expect(response.status).toBe(200);
     expect(response.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-success");
@@ -395,8 +409,8 @@ describe("backend workspace and health routes", () => {
       }
     });
 
-    const liveResponse = await app.request("/api/health/live", { method: "HEAD" });
-    const readyResponse = await app.request("/api/health/ready", { method: "HEAD" });
+    const liveResponse = await requestApi(app, "/api/health/live", { method: "HEAD" });
+    const readyResponse = await requestApi(app, "/api/health/ready", { method: "HEAD" });
 
     expect(liveResponse.status).toBe(200);
     expect(liveResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-head-live");
@@ -432,7 +446,7 @@ describe("backend workspace and health routes", () => {
       }
     });
 
-    const response = await app.request("/api/tasks", {
+    const response = await requestApi(app, "/api/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "Missing required fields" })
@@ -464,11 +478,11 @@ describe("backend workspace and health routes", () => {
       }
     });
 
-    const response = await app.request(`/api/tasks?api_key=${fakeSecret}`, {
+    const response = await requestApi(app, `/api/tasks?api_key=${fakeSecret}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${fakeSecret}`,
+        authorization: `Bearer ${LOCAL_TEST_TOKEN}`,
         "x-secret-ref": "env:GLM_API_KEY"
       },
       body: `{"title":"${fakeSecret}"`
@@ -488,6 +502,410 @@ describe("backend workspace and health routes", () => {
     expect(redactApiLogValue("env:GLM_API_KEY")).toBe("env:GLM_API_KEY");
   });
 
+  test("production listen options bind only to IPv4 loopback", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const options = backendRoutes.createBackendProductionListenOptions({ workspaceRoot });
+
+    expect(backendRoutes.BACKEND_PRODUCTION_LISTEN_OPTIONS).toEqual({ hostname: "127.0.0.1" });
+    expect(options.hostname).toBe("127.0.0.1");
+    expect((await options.fetch(new Request("http://127.0.0.1/api/health/live"))).status).toBe(200);
+  });
+
+  test("requests to authenticated /api routes without token are rejected", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({ workspaceRoot });
+
+    const response = await app.request("/api/tasks");
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(401);
+    expectCanonicalError(body, "permission_error");
+    expect(body.error.message).toContain("API request is not authorized");
+    expect(JSON.stringify(body)).not.toContain(LOCAL_TEST_TOKEN);
+  });
+
+  test("requests to authenticated /api routes with invalid token are rejected", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({ workspaceRoot });
+
+    const response = await app.request("/api/tasks", {
+      headers: { authorization: "Bearer invalid-token" }
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(401);
+    expectCanonicalError(body, "permission_error");
+    expect(body.error.message).toContain("API request is not authorized");
+  });
+
+  test("authentication covers known and unknown API routes while preserving authorized status", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({ workspaceRoot });
+
+    for (const path of ["/api/tasks", "/api/unknown", "/api"] as const) {
+      const unauthorized = await app.request(path);
+      const unauthorizedBody = (await unauthorized.json()) as ApiErrorResponse;
+      expect(unauthorized.status).toBe(401);
+      expectCanonicalError(unauthorizedBody, "permission_error");
+    }
+
+    expect((await requestApi(app, "/api/tasks")).status).toBe(200);
+    expect((await requestApi(app, "/api/unknown")).status).toBe(404);
+    expect((await requestApi(app, "/api")).status).toBe(404);
+    expect((await requestApi(app, "/api/tasks", { method: "PUT" })).status).toBe(404);
+    const nonApiResponse = await app.request("/frontend-entry");
+    expect(nonApiResponse.status).toBe(404);
+    expect(await nonApiResponse.text()).toBe("Not Found");
+  });
+
+  test("Authorization accepts exactly one bounded Bearer token segment", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const token4096 = "é".repeat(2048);
+    process.env.HARNESS_LOCAL_TOKEN = token4096;
+    const app = createBackendApi({ workspaceRoot });
+
+    expect((await app.request("/api/unknown", {
+      headers: { authorization: `Bearer ${token4096}` }
+    })).status).toBe(404);
+
+    const rejectedHeaders = [
+      undefined,
+      "",
+      `Bearer ${token4096}é`,
+      `Bearer ${token4096} second`,
+      `Bearer ${token4096}, Bearer other`,
+      `bearer ${token4096}`,
+      `Bearer  ${token4096}`,
+      "Basic abc"
+    ];
+    for (const authorization of rejectedHeaders) {
+      const headers = authorization === undefined ? undefined : { authorization };
+      const response = await app.request("/api/unknown", { headers });
+      const body = (await response.json()) as ApiErrorResponse;
+      expect(response.status).toBe(401);
+      expectCanonicalError(body, "permission_error");
+      expect(JSON.stringify(body)).not.toContain(token4096);
+    }
+  });
+
+  test("invalid or oversized configured tokens fail closed without creating workspace secrets", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+
+    for (const invalidToken of [
+      "x".repeat(4097),
+      "é".repeat(2049),
+      "two segments",
+      "line\nbreak",
+      "\u0000"
+    ] as const) {
+      process.env.HARNESS_LOCAL_TOKEN = invalidToken;
+      expect(() => createBackendApi({ workspaceRoot })).toThrow("Local API token is invalid");
+      await expectPathMissing(workspaceRoot);
+    }
+  });
+
+  test("a valid configured token has priority and never creates a token file", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    process.env.HARNESS_LOCAL_TOKEN = "configured-token";
+    const app = createBackendApi({ workspaceRoot });
+
+    const response = await app.request("/api/unknown", {
+      headers: { authorization: "Bearer configured-token" }
+    });
+    const rejected = await app.request("/api/unknown", {
+      headers: { authorization: "Bearer different-token" }
+    });
+
+    expect(response.status).toBe(404);
+    expect(rejected.status).toBe(401);
+    await expectPathMissing(workspaceRoot);
+  });
+
+  test("missing or blank configured token creates one bounded private workspace token", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    process.env.HARNESS_LOCAL_TOKEN = " \n\t ";
+
+    const app = createBackendApi({ workspaceRoot });
+    const tokenDirectory = join(workspaceRoot, "secrets");
+    const tokenPath = join(tokenDirectory, "local-token");
+    const [directoryEntry, tokenEntry, tokenBytes] = await Promise.all([
+      lstat(tokenDirectory),
+      lstat(tokenPath),
+      readFile(tokenPath)
+    ]);
+    const token = new TextDecoder("utf-8", { fatal: true }).decode(tokenBytes);
+
+    expect(directoryEntry.isDirectory()).toBe(true);
+    expect(directoryEntry.isSymbolicLink()).toBe(false);
+    expect(directoryEntry.mode & 0o777).toBe(0o700);
+    expect(tokenEntry.isFile()).toBe(true);
+    expect(tokenEntry.isSymbolicLink()).toBe(false);
+    expect(tokenEntry.nlink).toBe(1);
+    expect(tokenEntry.mode & 0o777).toBe(0o600);
+    expect(tokenBytes.byteLength).toBeGreaterThan(0);
+    expect(tokenBytes.byteLength).toBeLessThanOrEqual(4096);
+    expect(token).toBe(token.trim());
+    expect(token).not.toMatch(/\s/u);
+    expect((await app.request("/api/tasks", {
+      headers: { authorization: `Bearer ${token}` }
+    })).status).toBe(200);
+    const secretReadResponse = await app.request("/api/secrets/local-token", {
+      headers: { authorization: `Bearer ${token}` }
+    });
+    expect(secretReadResponse.status).toBe(404);
+    expect(JSON.stringify(await secretReadResponse.json())).not.toContain(token);
+  });
+
+  test("a safe existing 4096-byte token is reused without overwrite", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const token = "z".repeat(4096);
+    const tokenDirectory = join(workspaceRoot, "secrets");
+    const tokenPath = join(tokenDirectory, "local-token");
+    await mkdir(tokenDirectory, { recursive: true, mode: 0o700 });
+    await chmod(tokenDirectory, 0o700);
+    await writeFile(tokenPath, token, { flag: "wx", mode: 0o600 });
+    const before = await lstat(tokenPath, { bigint: true });
+
+    const app = createBackendApi({ workspaceRoot });
+    const response = await app.request("/api/unknown", {
+      headers: { authorization: `Bearer ${token}` }
+    });
+    const after = await lstat(tokenPath, { bigint: true });
+
+    expect(response.status).toBe(404);
+    expect((await app.request("/api/unknown", {
+      headers: { authorization: "Bearer different-token" }
+    })).status).toBe(401);
+    expect(after.dev).toBe(before.dev);
+    expect(after.ino).toBe(before.ino);
+    expect(after.size).toBe(before.size);
+    expect(await readFile(tokenPath, "utf8")).toBe(token);
+  });
+
+  test("concurrent first startup converges on one complete token generation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const backendIndexUrl = new URL("./index.ts", import.meta.url).href;
+    const childScript = [
+      `import { createBackendApi } from ${JSON.stringify(backendIndexUrl)};`,
+      `createBackendApi({ workspaceRoot: ${JSON.stringify(workspaceRoot)} });`
+    ].join("\n");
+    const childEnvironment = { ...process.env, HARNESS_LOCAL_TOKEN: "" };
+
+    await Promise.all(
+      Array.from({ length: 6 }, () =>
+        execFile(process.execPath, ["-e", childScript], { env: childEnvironment })
+      )
+    );
+
+    const tokenPath = join(workspaceRoot, "secrets", "local-token");
+    const token = await readFile(tokenPath, "utf8");
+    const tokenEntry = await lstat(tokenPath);
+    expect(token).toBe(token.trim());
+    expect(Buffer.byteLength(token, "utf8")).toBeLessThanOrEqual(4096);
+    expect(tokenEntry.nlink).toBe(1);
+    expect(tokenEntry.mode & 0o777).toBe(0o600);
+    expect((await createBackendApi({ workspaceRoot }).request("/api/tasks", {
+      headers: { authorization: `Bearer ${token}` }
+    })).status).toBe(200);
+  });
+
+  test("unsafe token files fail closed without following, overwriting, or blocking", async () => {
+    const cases: Array<{
+      label: string;
+      prepare: (workspaceRoot: string, tempRoot: string) => Promise<void>;
+      assertOutside?: (tempRoot: string) => Promise<void>;
+    }> = [
+      {
+        label: "symlink leaf",
+        prepare: async (workspaceRoot, tempRoot) => {
+          const outside = join(tempRoot, "outside-token");
+          await writeFile(outside, "outside-sentinel", { flag: "wx", mode: 0o600 });
+          await mkdir(join(workspaceRoot, "secrets"), { recursive: true, mode: 0o700 });
+          await symlink(outside, join(workspaceRoot, "secrets", "local-token"), "file");
+        },
+        assertOutside: async (tempRoot) => {
+          expect(await readFile(join(tempRoot, "outside-token"), "utf8")).toBe("outside-sentinel");
+        }
+      },
+      {
+        label: "directory leaf",
+        prepare: async (workspaceRoot) => {
+          await mkdir(join(workspaceRoot, "secrets", "local-token"), {
+            recursive: true,
+            mode: 0o700
+          });
+        }
+      },
+      {
+        label: "multiple links",
+        prepare: async (workspaceRoot) => {
+          const secrets = join(workspaceRoot, "secrets");
+          await mkdir(secrets, { recursive: true, mode: 0o700 });
+          await writeFile(join(secrets, "local-token"), "linked-token", { flag: "wx", mode: 0o600 });
+          await link(join(secrets, "local-token"), join(secrets, "second-link"));
+        }
+      },
+      {
+        label: "invalid UTF-8",
+        prepare: async (workspaceRoot) => {
+          const secrets = join(workspaceRoot, "secrets");
+          await mkdir(secrets, { recursive: true, mode: 0o700 });
+          await writeFile(join(secrets, "local-token"), Buffer.from([0xff]), { flag: "wx", mode: 0o600 });
+        }
+      },
+      {
+        label: "blank token",
+        prepare: async (workspaceRoot) => {
+          const secrets = join(workspaceRoot, "secrets");
+          await mkdir(secrets, { recursive: true, mode: 0o700 });
+          await writeFile(join(secrets, "local-token"), " \n", { flag: "wx", mode: 0o600 });
+        }
+      },
+      {
+        label: "oversized token",
+        prepare: async (workspaceRoot) => {
+          const secrets = join(workspaceRoot, "secrets");
+          await mkdir(secrets, { recursive: true, mode: 0o700 });
+          await writeFile(join(secrets, "local-token"), "x".repeat(4097), { flag: "wx", mode: 0o600 });
+        }
+      },
+      {
+        label: "file mode drift",
+        prepare: async (workspaceRoot) => {
+          const secrets = join(workspaceRoot, "secrets");
+          await mkdir(secrets, { recursive: true, mode: 0o700 });
+          await writeFile(join(secrets, "local-token"), "mode-token", { flag: "wx", mode: 0o644 });
+          await chmod(join(secrets, "local-token"), 0o644);
+        }
+      },
+      {
+        label: "directory mode drift",
+        prepare: async (workspaceRoot) => {
+          const secrets = join(workspaceRoot, "secrets");
+          await mkdir(secrets, { recursive: true, mode: 0o755 });
+          await chmod(secrets, 0o755);
+          await writeFile(join(secrets, "local-token"), "mode-token", { flag: "wx", mode: 0o600 });
+        }
+      },
+      {
+        label: "directory permission failure",
+        prepare: async (workspaceRoot) => {
+          const secrets = join(workspaceRoot, "secrets");
+          await mkdir(secrets, { recursive: true, mode: 0o700 });
+          await writeFile(join(secrets, "local-token"), "permission-token", { flag: "wx", mode: 0o600 });
+          await chmod(secrets, 0o000);
+        }
+      },
+      {
+        label: "FIFO leaf",
+        prepare: async (workspaceRoot) => {
+          const secrets = join(workspaceRoot, "secrets");
+          await mkdir(secrets, { recursive: true, mode: 0o700 });
+          await execFile("mkfifo", [join(secrets, "local-token")]);
+        }
+      }
+    ];
+
+    for (const unsafeCase of cases) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      await unsafeCase.prepare(workspaceRoot, tempRoot);
+      const result = await runTokenProvisionInChild(workspaceRoot);
+      expect(result, unsafeCase.label).toBe("safe-failure");
+      await unsafeCase.assertOutside?.(tempRoot);
+      await chmod(join(workspaceRoot, "secrets"), 0o700).catch(() => undefined);
+      expect((await readdir(join(workspaceRoot, "secrets"))).some((name) => name.endsWith(".tmp"))).toBe(false);
+    }
+  });
+
+  test("symlink ancestors and a swapped parent binding cannot redirect token creation", async () => {
+    const tempRoot = await createTempRoot("shud-harness-auth-parent-");
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const outside = join(tempRoot, "outside");
+    const originalParent = join(tempRoot, "parent");
+    const parkedParent = join(tempRoot, "parked-parent");
+    await mkdir(join(originalParent, "workspace"), { recursive: true });
+    await mkdir(outside);
+    await rename(originalParent, parkedParent);
+    await symlink(outside, originalParent, "dir");
+
+    expect(await runTokenProvisionInChild(join(originalParent, "workspace"))).toBe("safe-failure");
+    expect(await readdir(outside)).toEqual([]);
+    await expectPathMissing(join(outside, "workspace", "secrets", "local-token"));
+  });
+
+  test("health endpoints remain publicly accessible without token", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({ workspaceRoot });
+
+    const liveResponse = await app.request("/api/health/live");
+    const readyResponse = await app.request("/api/health/ready");
+
+    expect(liveResponse.status).toBe(200);
+    expect(readyResponse.status).toBe(503);
+  });
+
+  test("only GET health probes are exempt from local authentication", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const app = createBackendApi({ workspaceRoot });
+
+    expect((await app.request("/api/health/live")).status).toBe(200);
+    expect((await app.request("/api/health/ready")).status).toBe(503);
+    expect((await app.request("/api/health/live", { method: "HEAD" })).status).toBe(401);
+    expect((await app.request("/api/health/ready", { method: "POST" })).status).toBe(401);
+    expect((await requestApi(app, "/api/health/live", { method: "HEAD" })).status).toBe(200);
+    expect((await requestApi(app, "/api/health/ready", { method: "POST" })).status).toBe(404);
+  });
+
+  test("unauthenticated /api token failures do not include token in logs", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const logs: string[] = [];
+    const leakToken = "local-token-leak-check";
+    const app = createBackendApi({
+      workspaceRoot,
+      requestLogSink: (line) => {
+        logs.push(line);
+      }
+    });
+
+    const response = await app.request("/api/tasks", {
+      headers: {
+        authorization: `Bearer ${leakToken}`
+      }
+    });
+    const body = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(401);
+    expectCanonicalError(body, "permission_error");
+    await waitFor(() => logs.length === 1, "Rejected API request log was not emitted");
+    const serialized = logs[0] as string;
+    const log = parseApiRequestLogLine(serialized);
+    expect(log.route).toBe("/api/tasks");
+    expect(log.status).toBe(401);
+    expect(serialized).not.toContain(leakToken);
+    expect(serialized).not.toContain(LOCAL_TEST_TOKEN);
+    expect(JSON.stringify(body)).not.toContain(leakToken);
+    expect(JSON.stringify(body)).not.toContain(LOCAL_TEST_TOKEN);
+    expect(response.url).not.toContain(leakToken);
+    expect(response.url).not.toContain(LOCAL_TEST_TOKEN);
+  });
+
   test("API request logging does not wait for delayed or failing sinks", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -504,7 +922,7 @@ describe("backend workspace and health routes", () => {
     });
 
     const response = await Promise.race([
-      delayedApp.request("/api/health/live"),
+      requestApi(delayedApp, "/api/health/live"),
       timeoutAfter(50, "API response waited for delayed request log sink")
     ]);
 
@@ -523,7 +941,7 @@ describe("backend workspace and health routes", () => {
       }
     });
 
-    const rejectingResponse = await rejectingApp.request("/api/health/live");
+    const rejectingResponse = await requestApi(rejectingApp, "/api/health/live");
 
     expect(rejectingResponse.status).toBe(200);
     expect(rejectingResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-rejecting-sink");
@@ -539,7 +957,7 @@ describe("backend workspace and health routes", () => {
       }
     });
 
-    const throwingResponse = await throwingApp.request("/api/health/live");
+    const throwingResponse = await requestApi(throwingApp, "/api/health/live");
 
     expect(throwingResponse.status).toBe(200);
     expect(throwingResponse.headers.get(API_REQUEST_ID_HEADER)).toBe("REQ-log-throwing-sink");
@@ -558,7 +976,7 @@ describe("backend workspace and health routes", () => {
     });
 
     const synchronousResponse = await Promise.race([
-      synchronousApp.request("/api/health/live"),
+      requestApi(synchronousApp, "/api/health/live"),
       timeoutAfter(50, "API response waited for synchronous request log sink work")
     ]);
 
@@ -575,9 +993,9 @@ describe("backend workspace and health routes", () => {
     tempRoots.push(tempRoot);
     const app = createBackendApi({ workspaceRoot });
 
-    const readyResponse = await app.request("/api/health/ready");
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
-    const liveResponse = await app.request("/api/health/live");
+    const liveResponse = await requestApi(app, "/api/health/live");
 
     expect(readyResponse.status).toBe(503);
     expect(readyBody.status).toBe("not_ready");
@@ -592,8 +1010,8 @@ describe("backend workspace and health routes", () => {
     tempRoots.push(tempRoot);
     const app = createBackendApi({ workspaceRoot });
 
-    expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
-    const readyResponse = await app.request("/api/health/ready");
+    expect((await requestApi(app, "/api/workspace/init", { method: "POST" })).status).toBe(200);
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
     expect(readyResponse.status).toBe(200);
@@ -606,11 +1024,66 @@ describe("backend workspace and health routes", () => {
     expect(readyBody.missing_directories).toBeUndefined();
   });
 
+  test("ready fails closed when the private secrets directory is missing, unsafe, or mode-drifted", async () => {
+    const mutations: Array<{
+      label: string;
+      mutate: (workspaceRoot: string, tempRoot: string) => Promise<void>;
+    }> = [
+      {
+        label: "missing",
+        mutate: async (workspaceRoot) => {
+          await rm(join(workspaceRoot, "secrets"), { recursive: true });
+        }
+      },
+      {
+        label: "symlink",
+        mutate: async (workspaceRoot, tempRoot) => {
+          await rm(join(workspaceRoot, "secrets"), { recursive: true });
+          const outside = join(tempRoot, "outside-secrets");
+          await mkdir(outside);
+          await symlink(outside, join(workspaceRoot, "secrets"), "dir");
+        }
+      },
+      {
+        label: "non-directory",
+        mutate: async (workspaceRoot) => {
+          await rm(join(workspaceRoot, "secrets"), { recursive: true });
+          await writeFile(join(workspaceRoot, "secrets"), "not a directory", { flag: "wx" });
+        }
+      },
+      {
+        label: "mode drift",
+        mutate: async (workspaceRoot) => {
+          await chmod(join(workspaceRoot, "secrets"), 0o755);
+        }
+      }
+    ];
+
+    for (const mutation of mutations) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      const app = createBackendApi({ workspaceRoot });
+      expect((await requestApi(app, "/api/workspace/init", { method: "POST" })).status).toBe(200);
+      await mutation.mutate(workspaceRoot, tempRoot);
+
+      const response = await app.request("/api/health/ready");
+      const body = (await response.json()) as WorkspaceReadyResponse;
+      const serialized = JSON.stringify(body);
+
+      expect(response.status, mutation.label).toBe(503);
+      expect(body.status).toBe("not_ready");
+      expect(body.checks.directory_tree).toBe("fail");
+      expect(body.missing_directories).toContain("secrets");
+      expect(serialized).not.toContain(LOCAL_TEST_TOKEN);
+      expect(serialized).not.toContain(workspaceRoot);
+    }
+  });
+
   test("default writable probe converges with an active root record publication", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const app = createBackendApi({ workspaceRoot });
-    expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
+    expect((await requestApi(app, "/api/workspace/init", { method: "POST" })).status).toBe(200);
     const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
     const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
     const recordPath = join(workspaceRoot, "active-root-record.json");
@@ -642,7 +1115,7 @@ describe("backend workspace and health routes", () => {
     ]);
 
     const readyResponse = await Promise.race([
-      app.request("/api/health/ready"),
+      requestApi(app, "/api/health/ready"),
       timeoutAfter(2_000, "default writable probe waited on an unlocked root callback")
     ]);
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
@@ -686,11 +1159,11 @@ describe("backend workspace and health routes", () => {
           return true;
         }
       });
-      expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
+      expect((await requestApi(app, "/api/workspace/init", { method: "POST" })).status).toBe(200);
       const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
       const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
 
-      const readyResponse = await app.request("/api/health/ready");
+      const readyResponse = await requestApi(app, "/api/health/ready");
       const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
       expect(readyResponse.status).toBe(503);
@@ -720,8 +1193,8 @@ describe("backend workspace and health routes", () => {
       }
     });
 
-    expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
-    const readyResponse = await app.request("/api/health/ready");
+    expect((await requestApi(app, "/api/workspace/init", { method: "POST" })).status).toBe(200);
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
     expect(readyResponse.status).toBe(503);
@@ -740,7 +1213,7 @@ describe("backend workspace and health routes", () => {
     process.env.SHUD_HARNESS_WORKSPACE_ROOT = "";
     const app = createBackendApi({ workspaceRoot: "\n\t " });
 
-    const response = await app.request("/api/workspace/init", { method: "POST" });
+    const response = await requestApi(app, "/api/workspace/init", { method: "POST" });
 
     expect(response.status).toBe(200);
     for (const relativeDir of EXPECTED_M1_RUNTIME_DIRECTORIES) {
@@ -757,8 +1230,8 @@ describe("backend workspace and health routes", () => {
     process.env.SHUD_HARNESS_WORKSPACE_ROOT = legacyRoot;
     const app = createBackendApi();
 
-    expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
-    const readyResponse = await app.request("/api/health/ready");
+    expect((await requestApi(app, "/api/workspace/init", { method: "POST" })).status).toBe(200);
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
     expect(readyResponse.status).toBe(200);
@@ -774,7 +1247,7 @@ describe("backend workspace and health routes", () => {
     const workspaceRoot = join(missingParent, "workspace");
     const app = createBackendApi({ workspaceRoot });
 
-    const response = await app.request("/api/workspace/init", { method: "POST" });
+    const response = await requestApi(app, "/api/workspace/init", { method: "POST" });
 
     expect(response.status).toBe(500);
     await expectPathMissing(missingParent);
@@ -789,8 +1262,8 @@ describe("backend workspace and health routes", () => {
     await symlink(outsideRoot, join(workspaceRoot, "repos"), "dir");
     const app = createBackendApi({ workspaceRoot });
 
-    const response = await app.request("/api/workspace/init", { method: "POST" });
-    const readyResponse = await app.request("/api/health/ready");
+    const response = await requestApi(app, "/api/workspace/init", { method: "POST" });
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
     expect(response.status).toBe(500);
@@ -812,8 +1285,8 @@ describe("backend workspace and health routes", () => {
     await symlink(outsideRoot, linkPath, "dir");
     const app = createBackendApi({ workspaceRoot });
 
-    const response = await app.request("/api/workspace/init", { method: "POST" });
-    const readyResponse = await app.request("/api/health/ready");
+    const response = await requestApi(app, "/api/workspace/init", { method: "POST" });
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
     expect(response.status).toBe(500);
@@ -835,7 +1308,7 @@ describe("backend workspace and health routes", () => {
     await symlink(outsideRoot, workspaceRoot, "dir");
     const app = createBackendApi({ workspaceRoot });
 
-    const response = await app.request("/api/workspace/init", { method: "POST" });
+    const response = await requestApi(app, "/api/workspace/init", { method: "POST" });
 
     expect(response.status).toBe(500);
     await expectPathMissing(join(outsideRoot, "readiness"));
@@ -850,7 +1323,7 @@ describe("backend workspace and health routes", () => {
     await symlink(outsideSnapshots, join(workspaceRoot, "snapshots"), "dir");
     const app = createBackendApi({ workspaceRoot });
 
-    const readyResponse = await app.request("/api/health/ready");
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
     expect(readyResponse.status).toBe(503);
@@ -875,7 +1348,7 @@ describe("backend workspace and health routes", () => {
       }
     });
 
-    const readyResponse = await app.request("/api/health/ready");
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
     expect(readyResponse.status).toBe(503);
@@ -902,7 +1375,7 @@ describe("backend workspace and health routes", () => {
       }
     });
 
-    const readyResponse = await app.request("/api/health/ready");
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
     expect(readyResponse.status).toBe(503);
@@ -919,8 +1392,8 @@ describe("backend workspace and health routes", () => {
       snapshotReadableProbe: () => false
     });
 
-    expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
-    const readyResponse = await app.request("/api/health/ready");
+    expect((await requestApi(app, "/api/workspace/init", { method: "POST" })).status).toBe(200);
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
     expect(readyResponse.status).toBe(503);
@@ -937,14 +1410,14 @@ describe("backend workspace and health routes", () => {
     tempRoots.push(tempRoot);
     const app = createBackendApi({ workspaceRoot });
 
-    expect((await app.request("/api/workspace/init", { method: "POST" })).status).toBe(200);
+    expect((await requestApi(app, "/api/workspace/init", { method: "POST" })).status).toBe(200);
     await Promise.all(
       Array.from({ length: 512 }, (_, index) =>
         writeFile(join(workspaceRoot, "snapshots", `snapshot-${index}.json`), "{}")
       )
     );
 
-    const readyResponse = await app.request("/api/health/ready");
+    const readyResponse = await requestApi(app, "/api/health/ready");
     const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
 
     expect(readyResponse.status).toBe(200);
@@ -987,8 +1460,8 @@ describe("backend workspace and health routes", () => {
       updated_at: "2026-07-07T12:00:00.000Z"
     });
 
-    const listResponse = await app.request("/api/tasks");
-    const detailResponse = await app.request(`/api/tasks/${task.task_id}`);
+    const listResponse = await requestApi(app, "/api/tasks");
+    const detailResponse = await requestApi(app, `/api/tasks/${task.task_id}`);
 
     expect(listResponse.status).toBe(200);
     expect(await listResponse.json()).toEqual({ tasks: [task] });
@@ -1057,8 +1530,8 @@ describe("backend workspace and health routes", () => {
     const createdTask = (await createResponse.json()) as TaskCard;
     const freshApp = createBackendApi({ workspaceRoot });
 
-    const listResponse = await freshApp.request("/api/tasks");
-    const detailResponse = await freshApp.request(`/api/tasks/${createdTask.task_id}`);
+    const listResponse = await requestApi(freshApp, "/api/tasks");
+    const detailResponse = await requestApi(freshApp, `/api/tasks/${createdTask.task_id}`);
 
     expect(listResponse.status).toBe(200);
     expect(await listResponse.json()).toEqual({ tasks: [createdTask] });
@@ -1090,9 +1563,9 @@ describe("backend workspace and health routes", () => {
       await writeFile(snapshotPath, `${JSON.stringify(poisonedSnapshot)}\n`);
       const freshApp = createBackendApi({ workspaceRoot });
 
-      const listResponse = await freshApp.request("/api/tasks");
+      const listResponse = await requestApi(freshApp, "/api/tasks");
       const listBody = (await listResponse.json()) as ApiErrorResponse;
-      const detailResponse = await freshApp.request(`/api/tasks/${taskId}`);
+      const detailResponse = await requestApi(freshApp, `/api/tasks/${taskId}`);
       const detailBody = (await detailResponse.json()) as ApiErrorResponse;
 
       expect(listResponse.status).toBe(500);
@@ -1109,8 +1582,8 @@ describe("backend workspace and health routes", () => {
       expectNoAbsoluteWorkspacePath(detailBody, tempRoot, workspaceRoot);
 
       await writeFile(snapshotPath, canonicalSnapshotText);
-      const repairedListResponse = await freshApp.request("/api/tasks");
-      const repairedDetailResponse = await freshApp.request(`/api/tasks/${taskId}`);
+      const repairedListResponse = await requestApi(freshApp, "/api/tasks");
+      const repairedDetailResponse = await requestApi(freshApp, `/api/tasks/${taskId}`);
 
       expect(repairedListResponse.status).toBe(200);
       expect(await repairedListResponse.json()).toEqual({ tasks: [createdTask] });
@@ -1150,7 +1623,7 @@ describe("backend workspace and health routes", () => {
     expect(secondResponse.status).toBe(200);
     expect(secondTask).toEqual(firstTask);
     expect(nextId).toBe(1);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [firstTask]
     });
     expect(await taskSnapshotIds(workspaceRoot)).toEqual([firstTask.task_id]);
@@ -1324,7 +1797,7 @@ describe("backend workspace and health routes", () => {
     expect(replayResponse.status).toBe(200);
     expect(replayTask.task_id).toBe(taskId);
     expect(await readFile(snapshotPath)).toEqual(retainedBytes);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [replayTask]
     });
   });
@@ -1476,11 +1949,11 @@ describe("backend workspace and health routes", () => {
         task_card: TaskCard;
       };
       const retainedTask = retainedSnapshot.task_card;
-      const sameAppList = await app.request("/api/tasks");
-      const sameAppDetail = await app.request(`/api/tasks/${ownerTaskId}`);
+      const sameAppList = await requestApi(app, "/api/tasks");
+      const sameAppDetail = await requestApi(app, `/api/tasks/${ownerTaskId}`);
       const freshApp = createBackendApi({ workspaceRoot });
-      const freshList = await freshApp.request("/api/tasks");
-      const freshDetail = await freshApp.request(`/api/tasks/${ownerTaskId}`);
+      const freshList = await requestApi(freshApp, "/api/tasks");
+      const freshDetail = await requestApi(freshApp, `/api/tasks/${ownerTaskId}`);
 
       expect(failedResponse.status).toBe(500);
       expectCanonicalError(failedBody, "workspace_error");
@@ -1515,10 +1988,11 @@ describe("backend workspace and health routes", () => {
       expect(replayTask).toEqual(retainedTask);
       expect(taskIds).toEqual([unusedTaskId]);
       expect(recordAfterReplay).toEqual(recordAfterFailure);
-      expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+      expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
         tasks: [retainedTask]
       });
-      expect(await createBackendApi({ workspaceRoot }).request("/api/tasks").then(
+      expect(
+        await requestApi(createBackendApi({ workspaceRoot }), "/api/tasks").then(
         (response) => response.json()
       )).toEqual({ tasks: [retainedTask] });
       expect(await readFile(snapshotPath)).toEqual(retainedBytes);
@@ -1704,11 +2178,11 @@ describe("backend workspace and health routes", () => {
         dev: successorEntryAfterFailure.dev,
         ino: successorEntryAfterFailure.ino
       }).toEqual(successorIdentity!);
-      expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+      expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
         tasks: [successorTask]
       });
       expect(
-        await createBackendApi({ workspaceRoot }).request("/api/tasks").then(
+        await requestApi(createBackendApi({ workspaceRoot }), "/api/tasks").then(
           (response) => response.json()
         )
       ).toEqual({ tasks: [successorTask] });
@@ -1726,7 +2200,7 @@ describe("backend workspace and health routes", () => {
       expect(repairedTask.task_id).toBe(repairedTaskId);
       expect(repairedRecord?.status).toBe("completed");
       expect(repairedRecord?.result_ref).toBe(repairedTaskId);
-      expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+      expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
         tasks: [successorTask, repairedTask]
       });
       expect(await readFile(snapshotPath)).toEqual(successorBytes!);
@@ -1867,7 +2341,7 @@ describe("backend workspace and health routes", () => {
 
     expect(repairedResponse.status).toBe(201);
     expect(repairedTask.task_id).toBe(repairedTaskId);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [successorTask, repairedTask]
     });
   });
@@ -1899,11 +2373,11 @@ describe("backend workspace and health routes", () => {
     const replayBody = (await replayResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
-    const sameAppList = await app.request("/api/tasks");
-    const sameAppDetail = await app.request(`/api/tasks/${createdTask.task_id}`);
+    const sameAppList = await requestApi(app, "/api/tasks");
+    const sameAppDetail = await requestApi(app, `/api/tasks/${createdTask.task_id}`);
     const freshApp = createBackendApi({ workspaceRoot });
-    const freshList = await freshApp.request("/api/tasks");
-    const freshDetail = await freshApp.request(`/api/tasks/${createdTask.task_id}`);
+    const freshList = await requestApi(freshApp, "/api/tasks");
+    const freshDetail = await requestApi(freshApp, `/api/tasks/${createdTask.task_id}`);
 
     expect(createResponse.status).toBe(201);
     expect(replayResponse.status).toBe(500);
@@ -1934,7 +2408,7 @@ describe("backend workspace and health routes", () => {
     expect(taskIdFactoryCalls).toBe(2);
     expect(recordAfterRepair?.status).toBe("completed");
     expect(recordAfterRepair?.result_ref).toBe(repairedTask.task_id);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [repairedTask]
     });
   });
@@ -1981,11 +2455,11 @@ describe("backend workspace and health routes", () => {
       });
       const failedBody = (await failedResponse.json()) as ApiErrorResponse;
       const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
-      const sameAppList = await replayApp.request("/api/tasks");
-      const sameAppDetail = await replayApp.request(`/api/tasks/${taskId}`);
+      const sameAppList = await requestApi(replayApp, "/api/tasks");
+      const sameAppDetail = await requestApi(replayApp, `/api/tasks/${taskId}`);
       const freshApp = createBackendApi({ workspaceRoot });
-      const freshList = await freshApp.request("/api/tasks");
-      const freshDetail = await freshApp.request(`/api/tasks/${taskId}`);
+      const freshList = await requestApi(freshApp, "/api/tasks");
+      const freshDetail = await requestApi(freshApp, `/api/tasks/${taskId}`);
 
       expect(createResponse.status).toBe(201);
       expect(task.task_id).toBe(taskId);
@@ -2142,11 +2616,11 @@ describe("backend workspace and health routes", () => {
       });
       expect(successorReplay.status).toBe(200);
       expect(await successorReplay.json()).toEqual(task);
-      expect(await replayApp.request("/api/tasks").then((response) => response.json())).toEqual({
+      expect(await requestApi(replayApp, "/api/tasks").then((response) => response.json())).toEqual({
         tasks: [task]
       });
       const freshApp = createBackendApi({ workspaceRoot });
-      expect(await freshApp.request("/api/tasks").then((response) => response.json())).toEqual({
+      expect(await requestApi(freshApp, "/api/tasks").then((response) => response.json())).toEqual({
         tasks: [task]
       });
       const freshReplay = await postTask(freshApp, taskBody, {
@@ -2240,7 +2714,7 @@ describe("backend workspace and health routes", () => {
       let failedBody = initialBody;
       if (settlement === "b_changes_to_d") {
         const retainedRecord = await idempotencyService.getRecord("task", idempotencyKey);
-        const retainedList = await app.request("/api/tasks");
+        const retainedList = await requestApi(app, "/api/tasks");
         const retainedIdentity = await stat(snapshotPath, { bigint: true });
 
         expect(initialResponse.status).toBe(500);
@@ -2258,11 +2732,11 @@ describe("backend workspace and health routes", () => {
         failedBody = (await failedResponse.json()) as ApiErrorResponse;
       }
       const invalidatedRecord = await idempotencyService.getRecord("task", idempotencyKey);
-      const sameAppList = await app.request("/api/tasks");
-      const sameAppDetail = await app.request(`/api/tasks/${taskId}`);
+      const sameAppList = await requestApi(app, "/api/tasks");
+      const sameAppDetail = await requestApi(app, `/api/tasks/${taskId}`);
       const freshApp = createBackendApi({ workspaceRoot });
-      const freshList = await freshApp.request("/api/tasks");
-      const freshDetail = await freshApp.request(`/api/tasks/${taskId}`);
+      const freshList = await requestApi(freshApp, "/api/tasks");
+      const freshDetail = await requestApi(freshApp, `/api/tasks/${taskId}`);
       const currentIdentity = await stat(snapshotPath, { bigint: true });
 
       expect(createResponse.status).toBe(201);
@@ -2303,11 +2777,11 @@ describe("backend workspace and health routes", () => {
       const repairedTask = (await repairedResponse.json()) as TaskCard;
       const repairedRecord = await idempotencyService.getRecord("task", idempotencyKey);
       const expectedTasks = [expectedSuccessor, repairedTask];
-      const sameAppAfterRepair = await app.request("/api/tasks");
+      const sameAppAfterRepair = await requestApi(app, "/api/tasks");
       const freshAppAfterRepair = createBackendApi({ workspaceRoot });
-      const freshListAfterRepair = await freshAppAfterRepair.request("/api/tasks");
-      const freshSuccessorDetail = await freshAppAfterRepair.request(`/api/tasks/${taskId}`);
-      const freshRepairDetail = await freshAppAfterRepair.request(
+      const freshListAfterRepair = await requestApi(freshAppAfterRepair, "/api/tasks");
+      const freshSuccessorDetail = await requestApi(freshAppAfterRepair, `/api/tasks/${taskId}`);
+      const freshRepairDetail = await requestApi(freshAppAfterRepair,
         `/api/tasks/${repairedTaskId}`
       );
       const identityAfterRepair = await stat(snapshotPath, { bigint: true });
@@ -2472,7 +2946,7 @@ describe("backend workspace and health routes", () => {
     expect(invalidatedRecord?.status).toBe("failed");
     expect(invalidatedRecord?.result_ref).toBeUndefined();
     const freshApp = createBackendApi({ workspaceRoot });
-    expect(await freshApp.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(freshApp, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [task]
     });
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([taskId]);
@@ -2514,11 +2988,11 @@ describe("backend workspace and health routes", () => {
     const replayBody = (await replayResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const retainedRecord = await idempotencyService.getRecord("task", idempotencyKey);
-    const sameAppList = await app.request("/api/tasks");
-    const sameAppDetail = await app.request(`/api/tasks/${createdTask.task_id}`);
+    const sameAppList = await requestApi(app, "/api/tasks");
+    const sameAppDetail = await requestApi(app, `/api/tasks/${createdTask.task_id}`);
     const freshApp = createBackendApi({ workspaceRoot });
-    const freshList = await freshApp.request("/api/tasks");
-    const freshDetail = await freshApp.request(`/api/tasks/${createdTask.task_id}`);
+    const freshList = await requestApi(freshApp, "/api/tasks");
+    const freshDetail = await requestApi(freshApp, `/api/tasks/${createdTask.task_id}`);
 
     expect(createResponse.status).toBe(201);
     expect(replayResponse.status).toBe(500);
@@ -2579,7 +3053,7 @@ describe("backend workspace and health routes", () => {
       taskIdFactory: () => "TASK-stale-cache-original"
     });
 
-    const emptyListResponse = await staleApp.request("/api/tasks");
+    const emptyListResponse = await requestApi(staleApp, "/api/tasks");
     const firstResponse = await postTask(creatingApp, validTaskCreateBody(), {
       "Idempotency-Key": idempotencyKey
     });
@@ -2596,7 +3070,7 @@ describe("backend workspace and health routes", () => {
     expect(replayTask).toEqual(firstTask);
     expect(staleAppTaskIdFactoryCalls).toBe(0);
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([firstTask.task_id]);
-    expect(await staleApp.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(staleApp, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [firstTask]
     });
   });
@@ -2761,7 +3235,7 @@ describe("backend workspace and health routes", () => {
         }
       }
     });
-    const primedListResponse = await app.request("/api/tasks");
+    const primedListResponse = await requestApi(app, "/api/tasks");
     const snapshotWithoutTaskCard = JSON.parse(
       canonicalAuthoritativeSnapshotText
     ) as Record<string, unknown>;
@@ -2774,7 +3248,7 @@ describe("backend workspace and health routes", () => {
     const failedBody = (await failedResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
-    const localDetailResponse = await app.request(`/api/tasks/${localTaskId}`);
+    const localDetailResponse = await requestApi(app, `/api/tasks/${localTaskId}`);
 
     expect(primedListResponse.status).toBe(200);
     expect(await primedListResponse.json()).toEqual({ tasks: [authoritativeTask] });
@@ -2842,8 +3316,8 @@ describe("backend workspace and health routes", () => {
     const failedBody = (await failedResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
-    const sameAppListResponse = await app.request("/api/tasks");
-    const freshAppListResponse = await createBackendApi({ workspaceRoot }).request("/api/tasks");
+    const sameAppListResponse = await requestApi(app, "/api/tasks");
+    const freshAppListResponse = await requestApi(createBackendApi({ workspaceRoot }), "/api/tasks");
 
     expect(failedResponse.status).toBe(500);
     expectCanonicalError(failedBody, "workspace_error");
@@ -2931,8 +3405,11 @@ describe("backend workspace and health routes", () => {
     const failedBody = (await failedResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
-    const listAfterFailure = await app.request("/api/tasks");
-    const freshListAfterFailure = await createBackendApi({ workspaceRoot }).request("/api/tasks");
+    const listAfterFailure = await requestApi(app, "/api/tasks");
+    const freshListAfterFailure = await requestApi(
+      createBackendApi({ workspaceRoot }),
+      "/api/tasks"
+    );
 
     expect(failedResponse.status).toBe(500);
     expectCanonicalError(failedBody, "workspace_error");
@@ -3000,8 +3477,8 @@ describe("backend workspace and health routes", () => {
 
     const response = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
     const body = (await response.json()) as ApiErrorResponse;
-    const listResponse = await app.request("/api/tasks");
-    const localDetailResponse = await app.request("/api/tasks/TASK-local-unbound-convergence");
+    const listResponse = await requestApi(app, "/api/tasks");
+    const localDetailResponse = await requestApi(app, "/api/tasks/TASK-local-unbound-convergence");
     const localDetailBody = (await localDetailResponse.json()) as ApiErrorResponse;
 
     expect(response.status).toBe(500);
@@ -3075,8 +3552,8 @@ describe("backend workspace and health routes", () => {
       "task",
       idempotencyKey
     );
-    const listResponse = await app.request("/api/tasks");
-    const localDetailResponse = await app.request("/api/tasks/TASK-local-rollback-failure");
+    const listResponse = await requestApi(app, "/api/tasks");
+    const localDetailResponse = await requestApi(app, "/api/tasks/TASK-local-rollback-failure");
     const localDetailBody = (await localDetailResponse.json()) as ApiErrorResponse;
 
     expect(response.status).toBe(200);
@@ -3155,7 +3632,7 @@ describe("backend workspace and health routes", () => {
     expectNoAbsoluteWorkspacePath(body, tempRoot, workspaceRoot);
     expect(taskIdFactoryCalls).toBe(0);
     expect(await taskSnapshotIds(workspaceRoot)).toEqual([existingTask.task_id]);
-    expect(await app.request("/api/tasks").then((listResponse) => listResponse.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((listResponse) => listResponse.json())).toEqual({
       tasks: [existingTask]
     });
   });
@@ -3216,7 +3693,7 @@ describe("backend workspace and health routes", () => {
     expect(recordAfterFailure?.status).toBe("failed");
     expect(recordAfterFailure?.result_ref).toBeUndefined();
     expect(taskIdFactoryCalls).toBe(0);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: []
     });
 
@@ -3296,7 +3773,7 @@ describe("backend workspace and health routes", () => {
     expect(taskIdFactoryCalls).toBe(0);
     expect(recordAfterFailure?.status).toBe("failed");
     expect(recordAfterFailure?.result_ref).toBeUndefined();
-    expect(await app.request("/api/tasks").then((listResponse) => listResponse.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((listResponse) => listResponse.json())).toEqual({
       tasks: []
     });
     await expectPathMissing(join(workspaceRoot, "tasks", "TASK-repaired-unsafe-result-ref"));
@@ -3361,13 +3838,13 @@ describe("backend workspace and health routes", () => {
       "snapshot.json"
     );
     const foreignSnapshotText = await readFile(foreignSnapshotPath, "utf8");
-    const primedListResponse = await app.request("/api/tasks");
+    const primedListResponse = await requestApi(app, "/api/tasks");
 
     const response = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
     const body = (await response.json()) as ApiErrorResponse;
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
-    const listAfterFailure = await app.request("/api/tasks");
-    const detailAfterFailure = await app.request(`/api/tasks/${foreignTask.task_id}`);
+    const listAfterFailure = await requestApi(app, "/api/tasks");
+    const detailAfterFailure = await requestApi(app, `/api/tasks/${foreignTask.task_id}`);
 
     expect(primedListResponse.status).toBe(200);
     expect(await primedListResponse.json()).toEqual({ tasks: [foreignTask] });
@@ -3501,8 +3978,8 @@ describe("backend workspace and health routes", () => {
     const response = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
     const body = (await response.json()) as ApiErrorResponse;
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
-    const listAfterFailure = await app.request("/api/tasks");
-    const detailAfterFailure = await app.request(`/api/tasks/${targetTask.task_id}`);
+    const listAfterFailure = await requestApi(app, "/api/tasks");
+    const detailAfterFailure = await requestApi(app, `/api/tasks/${targetTask.task_id}`);
 
     expect(createResponse.status).toBe(201);
     expect(response.status).toBe(500);
@@ -3532,8 +4009,8 @@ describe("backend workspace and health routes", () => {
     });
     const repairedReplayTask = (await repairedReplayResponse.json()) as TaskCard;
     const recordAfterRepair = await idempotencyService.getRecord("task", idempotencyKey);
-    const listAfterRepair = await app.request("/api/tasks");
-    const detailAfterRepair = await app.request(`/api/tasks/${targetTask.task_id}`);
+    const listAfterRepair = await requestApi(app, "/api/tasks");
+    const detailAfterRepair = await requestApi(app, `/api/tasks/${targetTask.task_id}`);
 
     expect(repairedReplayResponse.status).toBe(200);
     expect(repairedReplayTask).toEqual(targetTask);
@@ -3685,7 +4162,7 @@ describe("backend workspace and health routes", () => {
       },
       idempotencyKey
     );
-    const secondResponse = await app.request("/api/tasks", {
+    const secondResponse = await requestApi(app, "/api/tasks", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -3772,7 +4249,7 @@ describe("backend workspace and health routes", () => {
     ]);
     expect(JSON.stringify(mismatchBody)).not.toContain(idempotencyKey);
     expectNoAbsoluteWorkspacePath(mismatchBody, tempRoot, workspaceRoot);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [firstTask]
     });
     expect(await taskSnapshotIds(workspaceRoot)).toEqual([firstTask.task_id]);
@@ -3789,8 +4266,8 @@ describe("backend workspace and health routes", () => {
 
     const response = await postTask(app, validTaskCreateBody());
     const task = (await response.json()) as TaskCard;
-    const listResponse = await app.request("/api/tasks");
-    const detailResponse = await app.request(`/api/tasks/${task.task_id}`);
+    const listResponse = await requestApi(app, "/api/tasks");
+    const detailResponse = await requestApi(app, `/api/tasks/${task.task_id}`);
 
     expect(response.status).toBe(201);
     expect(listResponse.status).toBe(200);
@@ -3856,7 +4333,7 @@ describe("backend workspace and health routes", () => {
 
     expect(statuses).toEqual([200, 200, 200, 200, 200, 200, 200, 201]);
     expect(nextId).toBe(1);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [firstTask]
     });
     expect(await taskSnapshotIds(workspaceRoot)).toEqual([firstTask.task_id]);
@@ -3968,10 +4445,10 @@ describe("backend workspace and health routes", () => {
       followerCReplayCalls += 1;
     });
 
-    expect(await followerB.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(followerB, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: []
     });
-    expect(await followerC.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(followerC, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: []
     });
 
@@ -4008,10 +4485,10 @@ describe("backend workspace and health routes", () => {
     expect(followerCReplayCalls).toBe(1);
     expect(ownerTaskIdFactoryCalls).toBe(1);
     for (const app of [followerB, followerC]) {
-      expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+      expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
         tasks: [ownerTask]
       });
-      const detail = await app.request(`/api/tasks/${ownerTask.task_id}`);
+      const detail = await requestApi(app, `/api/tasks/${ownerTask.task_id}`);
       expect(detail.status).toBe(200);
       expect(await detail.json()).toEqual(ownerTask);
     }
@@ -4855,7 +5332,7 @@ describe("backend workspace and health routes", () => {
           return collisionId;
         }
       });
-      expect(await app.request("/api/tasks").then((result) => result.json())).toEqual({
+      expect(await requestApi(app, "/api/tasks").then((result) => result.json())).toEqual({
         tasks: []
       });
       const seed = await createTaskCardService({
@@ -4881,13 +5358,13 @@ describe("backend workspace and health routes", () => {
       expect(taskIdFactoryCalls).toBe(20);
       expect(await readFile(snapshotPath)).toEqual(seedBytes);
       expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([collisionId]);
-      expect(await app.request("/api/tasks").then((result) => result.json())).toEqual({
+      expect(await requestApi(app, "/api/tasks").then((result) => result.json())).toEqual({
         tasks: []
       });
       expect(
-        await createBackendApi({ workspaceRoot })
-          .request("/api/tasks")
-          .then((result) => result.json())
+        await requestApi(createBackendApi({ workspaceRoot }), "/api/tasks").then((result) =>
+          result.json()
+        )
       ).toEqual({ tasks: [seed] });
       if (requestMode === "keyed") {
         const record = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
@@ -4916,7 +5393,7 @@ describe("backend workspace and health routes", () => {
           return candidates.shift() ?? `${uniqueId}-unexpected`;
         }
       });
-      expect(await app.request("/api/tasks").then((result) => result.json())).toEqual({
+      expect(await requestApi(app, "/api/tasks").then((result) => result.json())).toEqual({
         tasks: []
       });
       const seed = await createTaskCardService({
@@ -4938,13 +5415,13 @@ describe("backend workspace and health routes", () => {
       expect(created.task_id).toBe(uniqueId);
       expect(taskIdFactoryCalls).toBe(2);
       expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([collisionId, uniqueId]);
-      expect(await app.request("/api/tasks").then((result) => result.json())).toEqual({
+      expect(await requestApi(app, "/api/tasks").then((result) => result.json())).toEqual({
         tasks: [created]
       });
       expect(
-        await createBackendApi({ workspaceRoot })
-          .request("/api/tasks")
-          .then((result) => result.json())
+          await requestApi(createBackendApi({ workspaceRoot }), "/api/tasks").then((result) =>
+            result.json()
+          )
       ).toEqual({ tasks: [seed, created] });
       if (requestMode === "keyed") {
         const replay = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
@@ -4997,10 +5474,7 @@ describe("backend workspace and health routes", () => {
           : undefined
       });
       const apps = { A: makeApp("A"), B: makeApp("B") };
-      await Promise.all([
-        apps.A.request("/api/tasks"),
-        apps.B.request("/api/tasks")
-      ]);
+      await Promise.all([requestApi(apps.A, "/api/tasks"), requestApi(apps.B, "/api/tasks")]);
       const follower = owner === "A" ? "B" : "A";
       const ownerRequest = postTask(apps[owner], bodies[owner], {
         "Idempotency-Key": keys[owner]
@@ -5038,7 +5512,10 @@ describe("backend workspace and health routes", () => {
         [tasks.A.task_id, tasks.B.task_id].sort()
       );
       for (const label of ["A", "B"] as const) {
-        const detail = await apps[label].request(`/api/tasks/${tasks[label].task_id}`);
+        const detail = await requestApi(
+          apps[label],
+          `/api/tasks/${tasks[label].task_id}`
+        );
         expect(detail.status).toBe(200);
         expect(await detail.json()).toEqual(tasks[label]);
         const completed = await createIdempotencyRecordService({ workspaceRoot }).getRecord(
@@ -5057,7 +5534,7 @@ describe("backend workspace and health routes", () => {
       }
 
       const freshApp = createBackendApi({ workspaceRoot });
-      expect(await freshApp.request("/api/tasks").then((response) => response.json())).toEqual({
+      expect(await requestApi(freshApp, "/api/tasks").then((response) => response.json())).toEqual({
         tasks: [tasks.A, tasks.B].sort((left, right) =>
           left.created_at.localeCompare(right.created_at) ||
           left.task_id.localeCompare(right.task_id)
@@ -5071,7 +5548,7 @@ describe("backend workspace and health routes", () => {
         expect(replay.status).toBe(200);
         expect(await replay.json()).toEqual(tasks[label]);
         expect(
-          await replayApp.request(`/api/tasks/${tasks[label].task_id}`).then((response) =>
+          await requestApi(replayApp, `/api/tasks/${tasks[label].task_id}`).then((response) =>
             response.json()
           )
         ).toEqual(tasks[label]);
@@ -5800,9 +6277,9 @@ describe("backend workspace and health routes", () => {
         workspaceRoot,
         requestLogSink: () => undefined
       });
-      const listAtLimit = await freshAtLimit.request("/api/tasks");
+      const listAtLimit = await requestApi(freshAtLimit, "/api/tasks");
       const tasksAtLimit = (await listAtLimit.json()) as { tasks: TaskCard[] };
-      const detailAtLimit = await freshAtLimit.request(
+      const detailAtLimit = await requestApi(freshAtLimit,
         `/api/tasks/${finalTask!.task_id}`
       );
       expect(listAtLimit.status).toBe(200);
@@ -5827,7 +6304,7 @@ describe("backend workspace and health routes", () => {
         workspaceRoot,
         requestLogSink: () => undefined
       });
-      expect((await freshOverflow.request("/api/tasks")).status).toBe(500);
+      expect((await requestApi(freshOverflow, "/api/tasks")).status).toBe(500);
     },
     360_000
   );
@@ -5874,7 +6351,7 @@ describe("backend workspace and health routes", () => {
     expectCanonicalError(mismatchBody, "idempotency_mismatch");
     expect(taskIdFactoryCalls).toBe(1);
     expect(await taskSnapshotIds(workspaceRoot)).toEqual([firstTask.task_id]);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [firstTask]
     });
   });
@@ -5928,7 +6405,7 @@ describe("backend workspace and health routes", () => {
       taskIdFactory: () => taskIds.shift() ?? "TASK-unexpected-extra"
     });
 
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: []
     });
     await mkdir(join(workspaceRoot, "tasks"), { recursive: true });
@@ -5964,7 +6441,7 @@ describe("backend workspace and health routes", () => {
     expect(recordAfterRepair?.status).toBe("completed");
     expect(recordAfterRepair?.result_ref).toBe(repairedTask.task_id);
     expect(await taskSnapshotIds(workspaceRoot)).toEqual([repairedTask.task_id]);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [repairedTask]
     });
   });
@@ -6010,7 +6487,7 @@ describe("backend workspace and health routes", () => {
     });
     const retryTask = (await retryResponse.json()) as TaskCard;
     const freshApp = createBackendApi({ workspaceRoot });
-    const freshListResponse = await freshApp.request("/api/tasks");
+    const freshListResponse = await requestApi(freshApp, "/api/tasks");
 
     expect(retryResponse.status).toBe(201);
     expect(retryTask.task_id).toBe("TASK-hook-throws-retry");
@@ -6047,7 +6524,7 @@ describe("backend workspace and health routes", () => {
     const failedBody = (await failedResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
-    const listAfterFailure = await app.request("/api/tasks");
+    const listAfterFailure = await requestApi(app, "/api/tasks");
 
     expect(failedResponse.status).toBe(500);
     expectCanonicalError(failedBody, "workspace_error");
@@ -6065,7 +6542,7 @@ describe("backend workspace and health routes", () => {
     const retryTask = (await retryResponse.json()) as TaskCard;
     const recordAfterRetry = await idempotencyService.getRecord("task", idempotencyKey);
     const freshApp = createBackendApi({ workspaceRoot });
-    const freshListResponse = await freshApp.request("/api/tasks");
+    const freshListResponse = await requestApi(freshApp, "/api/tasks");
 
     expect(retryResponse.status).toBe(201);
     expect(retryTask.task_id).toBe("TASK-hook-deletes-retry");
@@ -6103,7 +6580,7 @@ describe("backend workspace and health routes", () => {
     const failedBody = (await failedResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
-    const listAfterFailure = await app.request("/api/tasks");
+    const listAfterFailure = await requestApi(app, "/api/tasks");
 
     expect(failedResponse.status).toBe(500);
     expectCanonicalError(failedBody, "workspace_error");
@@ -6158,7 +6635,7 @@ describe("backend workspace and health routes", () => {
     const failedBody = (await failedResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
-    const listAfterFailure = await app.request("/api/tasks");
+    const listAfterFailure = await requestApi(app, "/api/tasks");
 
     expect(failedResponse.status).toBe(500);
     expectCanonicalError(failedBody, "workspace_error");
@@ -6221,7 +6698,7 @@ describe("backend workspace and health routes", () => {
     expectNoAbsoluteWorkspacePath(failedBody, tempRoot, workspaceRoot);
     expect(recordAfterFailure?.status).toBe("failed");
     expect(recordAfterFailure?.result_ref).toBeUndefined();
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: []
     });
     await expectPathMissing(join(workspaceRoot, "tasks", "TASK-hook-unknown-top", "snapshot.json"));
@@ -6270,7 +6747,7 @@ describe("backend workspace and health routes", () => {
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
     const freshApp = createBackendApi({ workspaceRoot });
-    const freshListResponse = await freshApp.request("/api/tasks");
+    const freshListResponse = await requestApi(freshApp, "/api/tasks");
 
     expect(failedResponse.status).toBe(500);
     expectCanonicalError(failedBody, "workspace_error");
@@ -6403,8 +6880,8 @@ describe("backend workspace and health routes", () => {
     const firstBody = (await firstResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const recordAfterFirst = await idempotencyService.getRecord("task", idempotencyKey);
-    const firstList = await app.request("/api/tasks");
-    const firstDetail = await app.request(`/api/tasks/${taskId}`);
+    const firstList = await requestApi(app, "/api/tasks");
+    const firstDetail = await requestApi(app, `/api/tasks/${taskId}`);
     const firstListBody = (await firstList.json()) as { tasks: TaskCard[] };
     const retainedTask = firstListBody.tasks[0]!;
 
@@ -6432,12 +6909,12 @@ describe("backend workspace and health routes", () => {
     expect(taskIdFactoryCalls).toBe(2);
     expect(await realpath(taskLane)).toBe(await realpath(outsideLane));
     expect(await readFile(outsideSentinel, "utf8")).toBe(outsideText);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [retainedTask]
     });
 
     await unlink(taskLane);
-    const repairedList = await createBackendApi({ workspaceRoot }).request("/api/tasks");
+    const repairedList = await requestApi(createBackendApi({ workspaceRoot }), "/api/tasks");
     const repairedResponse = await postTask(app, validTaskCreateBody(), {
       "Idempotency-Key": idempotencyKey
     });
@@ -6510,7 +6987,7 @@ describe("backend workspace and health routes", () => {
     expect(recordAfterFailure?.result_ref).toBeUndefined();
     await expectPathMissing(join(workspaceRoot, "tasks", "TASK-complete-fails"));
     expect(await taskSnapshotIds(workspaceRoot)).toEqual([]);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: []
     });
 
@@ -6527,7 +7004,7 @@ describe("backend workspace and health routes", () => {
     expect(recordAfterRepair?.status).toBe("completed");
     expect(recordAfterRepair?.result_ref).toBe(repairedTask.task_id);
     expect(await taskSnapshotIds(workspaceRoot)).toEqual([repairedTask.task_id]);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [repairedTask]
     });
     expect(idempotencyFiles).toEqual([idempotencyRecordFileName(idempotencyKey)]);
@@ -8127,6 +8604,7 @@ describe("backend workspace and health routes", () => {
       'import { join } from "node:path";',
       `import { createBackendApi } from ${JSON.stringify(backendIndexPath)};`,
       `import { createIdempotencyRecordService, createTaskCardService } from ${JSON.stringify(coreIndexPath)};`,
+      `process.env.HARNESS_LOCAL_TOKEN = ${JSON.stringify(LOCAL_TEST_TOKEN)};`,
       'const body = {',
       '  type: "engineering",',
       '  title: "Phase 6.2 bounded proxy",',
@@ -8143,7 +8621,7 @@ describe("backend workspace and health routes", () => {
       '  return fresh();',
       '}',
       'async function post(app, key) {',
-      '  const headers = { "content-type": "application/json" };',
+      `  const headers = { "content-type": "application/json", authorization: "Bearer ${LOCAL_TEST_TOKEN}" };`,
       '  if (key) headers["Idempotency-Key"] = key;',
       '  return await app.request("/api/tasks", { method: "POST", headers, body: JSON.stringify(body) });',
       '}',
@@ -9035,14 +9513,17 @@ describe("backend workspace and health routes", () => {
     const failedBody = (await failedResponse.json()) as ApiErrorResponse;
     const idempotencyService = createIdempotencyRecordService({ workspaceRoot });
     const recordAfterFailure = await idempotencyService.getRecord("task", idempotencyKey);
-    const listAfterFailure = await app.request("/api/tasks");
-    const detailAfterFailure = await app.request(
+    const listAfterFailure = await requestApi(app, "/api/tasks");
+    const detailAfterFailure = await requestApi(app,
       "/api/tasks/TASK-rollback-failure-original"
     );
     const listBody = (await listAfterFailure.json()) as { tasks: TaskCard[] };
     const retainedTask = listBody.tasks[0]!;
     const detailBody = (await detailAfterFailure.json()) as TaskCard;
-    const freshListAfterFailure = await createBackendApi({ workspaceRoot }).request("/api/tasks");
+    const freshListAfterFailure = await requestApi(
+      createBackendApi({ workspaceRoot }),
+      "/api/tasks"
+    );
     const retryResponse = await postTask(app, taskBody, { "Idempotency-Key": idempotencyKey });
     const retryTask = (await retryResponse.json()) as TaskCard;
     const recordAfterRetry = await idempotencyService.getRecord("task", idempotencyKey);
@@ -9136,7 +9617,7 @@ describe("backend workspace and health routes", () => {
     expect((await readdir(taskLane)).sort()).toEqual(existingLaneEntries);
     await expectPathMissing(join(taskLane, "snapshot.json"));
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([]);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: []
     });
     expect(recordAfterFailure?.status).toBe("failed");
@@ -9154,7 +9635,7 @@ describe("backend workspace and health routes", () => {
     expect(await readFile(sentinelPath, "utf8")).toBe("preserve lane sentinel");
     expect((await readdir(taskLane)).sort()).toEqual(existingLaneEntries);
     expect(await taskIdsWithSnapshots(workspaceRoot)).toEqual([repairedTask.task_id]);
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [repairedTask]
     });
     expect(recordAfterRepair?.status).toBe("completed");
@@ -9285,7 +9766,7 @@ describe("backend workspace and health routes", () => {
     tempRoots.push(tempRoot);
     const app = createBackendApi({ workspaceRoot });
 
-    const response = await app.request("/api/tasks", {
+    const response = await requestApi(app, "/api/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -9307,7 +9788,7 @@ describe("backend workspace and health routes", () => {
     tempRoots.push(tempRoot);
     const app = createBackendApi({ workspaceRoot });
 
-    const response = await app.request("/api/tasks", {
+    const response = await requestApi(app, "/api/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{"
@@ -9327,7 +9808,7 @@ describe("backend workspace and health routes", () => {
       taskIdFactory: () => "TASK-invalid-enum"
     });
 
-    const response = await app.request("/api/tasks", {
+    const response = await requestApi(app, "/api/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -9359,7 +9840,7 @@ describe("backend workspace and health routes", () => {
     );
     const body = (await response.json()) as ApiErrorResponse;
     const freshApp = createBackendApi({ workspaceRoot });
-    const listResponse = await freshApp.request("/api/tasks");
+    const listResponse = await requestApi(freshApp, "/api/tasks");
 
     expect(response.status).toBe(400);
     expectCanonicalError(body, "schema_error");
@@ -9416,7 +9897,7 @@ describe("backend workspace and health routes", () => {
       MAX_TASK_SNAPSHOT_BYTES + 1
     )}`;
 
-    const response = await app.request("/api/tasks", {
+    const response = await requestApi(app, "/api/tasks", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -9455,7 +9936,7 @@ describe("backend workspace and health routes", () => {
     );
     const task = (await response.json()) as TaskCard;
     const freshApp = createBackendApi({ workspaceRoot });
-    const listResponse = await freshApp.request("/api/tasks");
+    const listResponse = await requestApi(freshApp, "/api/tasks");
 
     expect(response.status).toBe(201);
     expect((await stat(join(workspaceRoot, "tasks", task.task_id, "snapshot.json"))).size).toBeLessThanOrEqual(
@@ -9477,9 +9958,9 @@ describe("backend workspace and health routes", () => {
       }
     });
 
-    const apiRootResponse = await app.request("/api");
-    const unknownRouteResponse = await app.request("/api/not-registered");
-    const missingTaskResponse = await app.request("/api/tasks/TASK-missing");
+    const apiRootResponse = await requestApi(app, "/api");
+    const unknownRouteResponse = await requestApi(app, "/api/not-registered");
+    const missingTaskResponse = await requestApi(app, "/api/tasks/TASK-missing");
     const apiRootBody = (await apiRootResponse.json()) as ApiErrorResponse;
     const unknownRouteBody = (await unknownRouteResponse.json()) as ApiErrorResponse;
     const missingTaskBody = (await missingTaskResponse.json()) as ApiErrorResponse;
@@ -9513,7 +9994,7 @@ describe("backend workspace and health routes", () => {
     });
     const app = createBackendApi({ workspaceRoot });
 
-    const response = await app.request("/api/tasks");
+    const response = await requestApi(app, "/api/tasks");
     const body = (await response.json()) as ApiErrorResponse;
 
     expect(response.status).toBe(500);
@@ -9537,7 +10018,7 @@ describe("backend workspace and health routes", () => {
     );
     const app = createBackendApi({ workspaceRoot });
 
-    const response = await app.request("/api/tasks");
+    const response = await requestApi(app, "/api/tasks");
     const body = (await response.json()) as ApiErrorResponse;
 
     expect(response.status).toBe(500);
@@ -9670,7 +10151,7 @@ describe("backend workspace and health routes", () => {
     const app = createBackendApi({ workspaceRoot });
 
     const response = await Promise.race([
-      app.request("/api/tasks"),
+      requestApi(app, "/api/tasks"),
       timeoutAfter(1_000, "GET /api/tasks hung on a special snapshot file")
     ]);
     const body = (await response.json()) as ApiErrorResponse;
@@ -9691,7 +10172,7 @@ describe("backend workspace and health routes", () => {
     );
     const unsafeApp = createBackendApi({ workspaceRoot });
 
-    const unsafeResponse = await unsafeApp.request("/api/tasks");
+    const unsafeResponse = await requestApi(unsafeApp, "/api/tasks");
     const unsafeBody = (await unsafeResponse.json()) as ApiErrorResponse;
 
     expect(unsafeResponse.status).toBe(500);
@@ -9709,7 +10190,7 @@ describe("backend workspace and health routes", () => {
     );
     const mismatchApp = createBackendApi({ workspaceRoot });
 
-    const mismatchResponse = await mismatchApp.request("/api/tasks");
+    const mismatchResponse = await requestApi(mismatchApp, "/api/tasks");
     const mismatchBody = (await mismatchResponse.json()) as ApiErrorResponse;
 
     expect(mismatchResponse.status).toBe(500);
@@ -9735,7 +10216,7 @@ describe("backend workspace and health routes", () => {
     );
     const nestedMismatchApp = createBackendApi({ workspaceRoot });
 
-    const nestedMismatchResponse = await nestedMismatchApp.request("/api/tasks");
+    const nestedMismatchResponse = await requestApi(nestedMismatchApp, "/api/tasks");
     const nestedMismatchBody = (await nestedMismatchResponse.json()) as ApiErrorResponse;
 
     expect(nestedMismatchResponse.status).toBe(500);
@@ -9752,7 +10233,7 @@ describe("backend workspace and health routes", () => {
     );
     const latestSeqApp = createBackendApi({ workspaceRoot });
 
-    const latestSeqResponse = await latestSeqApp.request("/api/tasks");
+    const latestSeqResponse = await requestApi(latestSeqApp, "/api/tasks");
     const latestSeqBody = (await latestSeqResponse.json()) as ApiErrorResponse;
 
     expect(latestSeqResponse.status).toBe(500);
@@ -9768,7 +10249,7 @@ describe("backend workspace and health routes", () => {
     await writeFile(snapshotPath, "x".repeat(MAX_TASK_SNAPSHOT_BYTES + 1), { flag: "wx" });
     const app = createBackendApi({ workspaceRoot });
 
-    const response = await app.request("/api/tasks");
+    const response = await requestApi(app, "/api/tasks");
     const body = (await response.json()) as ApiErrorResponse;
 
     expect(response.status).toBe(500);
@@ -9786,7 +10267,7 @@ describe("backend workspace and health routes", () => {
     });
     const app = createBackendApi({ workspaceRoot });
 
-    const response = await app.request("/api/tasks");
+    const response = await requestApi(app, "/api/tasks");
     const body = (await response.json()) as ApiErrorResponse;
 
     expect(response.status).toBe(500);
@@ -9819,7 +10300,7 @@ describe("backend workspace and health routes", () => {
     });
     const freshApp = createBackendApi({ workspaceRoot });
 
-    const listResponse = await freshApp.request("/api/tasks");
+    const listResponse = await requestApi(freshApp, "/api/tasks");
 
     expect(listResponse.status).toBe(200);
     expect(await listResponse.json()).toEqual({ tasks: [task] });
@@ -9840,7 +10321,7 @@ describe("backend workspace and health routes", () => {
     await writeFillerTaskEntries(tasksRoot, TASK_HYDRATION_ENTRY_LIMIT);
     const app = createBackendApi({ workspaceRoot });
 
-    const response = await app.request("/api/tasks");
+    const response = await requestApi(app, "/api/tasks");
     const body = (await response.json()) as ApiErrorResponse;
 
     expect(response.status).toBe(500);
@@ -9879,7 +10360,7 @@ describe("backend workspace and health routes", () => {
 
     expect(failureResponse.status).toBe(500);
     expectCanonicalError(failureBody, "workspace_error");
-    expect(await app.request("/api/tasks").then((response) => response.json())).toEqual({
+    expect(await requestApi(app, "/api/tasks").then((response) => response.json())).toEqual({
       tasks: [firstTask, secondTask]
     });
     expect((await readdir(join(workspaceRoot, "tasks"))).filter((entry) => entry.startsWith("TASK-")).sort()).toEqual(
@@ -9896,11 +10377,11 @@ describe("backend workspace and health routes", () => {
     await writeFile(snapshotPath, "{", { flag: "wx" });
     const app = createBackendApi({ workspaceRoot });
 
-    const failedResponse = await app.request("/api/tasks");
+    const failedResponse = await requestApi(app, "/api/tasks");
     const failedBody = (await failedResponse.json()) as ApiErrorResponse;
     await rm(snapshotPath);
     await writeTaskSnapshotFixture(snapshotPath, repairedTask);
-    const repairedResponse = await app.request("/api/tasks");
+    const repairedResponse = await requestApi(app, "/api/tasks");
 
     expect(failedResponse.status).toBe(500);
     expectCanonicalError(failedBody, "workspace_error");
@@ -9931,11 +10412,11 @@ describe("backend workspace and health routes", () => {
 
     expect(responses.map((response) => response.status)).toEqual([201, 201, 201, 201]);
     expect(new Set(taskIds).size).toBe(4);
-    expect((await app.request("/api/tasks").then((response) => response.json()))).toEqual({
+    expect((await requestApi(app, "/api/tasks").then((response) => response.json()))).toEqual({
       tasks
     });
     for (const task of tasks) {
-      expect(await app.request(`/api/tasks/${task.task_id}`).then((response) => response.json())).toEqual(
+      expect(await requestApi(app, `/api/tasks/${task.task_id}`).then((response) => response.json())).toEqual(
         task
       );
       expect((await stat(join(workspaceRoot, "tasks", task.task_id, "snapshot.json"))).isFile()).toBe(
@@ -9976,6 +10457,60 @@ async function createTempWorkspacePath(): Promise<{ tempRoot: string; workspaceR
   };
 }
 
+type AppRequestInput = Parameters<ReturnType<typeof createBackendApi>["request"]>[0];
+type AppRequestInit = Parameters<ReturnType<typeof createBackendApi>["request"]>[1];
+
+function addLocalTokenToApiRequest(
+  path: AppRequestInput,
+  init?: AppRequestInit
+): AppRequestInit {
+  const pathValue = typeof path === "string" ? path : path.toString();
+  const method = (init?.method ?? "GET").toUpperCase();
+  const isPublicHealthGet =
+    method === "GET" &&
+    (pathValue === "/api/health/live" || pathValue === "/api/health/ready");
+  if (!(pathValue === "/api" || pathValue.startsWith("/api/")) || isPublicHealthGet) {
+    return init;
+  }
+
+  const mergedInit: NonNullable<AppRequestInit> = init ?? {};
+  const headers = new Headers(init?.headers);
+  if (!headers.has("authorization") && !headers.has("Authorization")) {
+    headers.set("authorization", `Bearer ${LOCAL_TEST_TOKEN}`);
+  }
+
+  return {
+    ...mergedInit,
+    headers
+  };
+}
+
+async function requestApi(
+  app: ReturnType<typeof createBackendApi>,
+  path: AppRequestInput,
+  init?: AppRequestInit
+): Promise<Response> {
+  return await app.request(path, addLocalTokenToApiRequest(path, init));
+}
+
+async function runTokenProvisionInChild(workspaceRoot: string): Promise<string> {
+  const backendIndexUrl = new URL("./index.ts", import.meta.url).href;
+  const script = [
+    `import { createBackendApi } from ${JSON.stringify(backendIndexUrl)};`,
+    "try {",
+    `  createBackendApi({ workspaceRoot: ${JSON.stringify(workspaceRoot)} });`,
+    '  console.log("unsafe-success");',
+    "} catch {",
+    '  console.log("safe-failure");',
+    "}"
+  ].join("\n");
+  const { stdout } = await execFile(process.execPath, ["-e", script], {
+    env: { ...process.env, HARNESS_LOCAL_TOKEN: "" },
+    timeout: 2_000
+  });
+  return stdout.trim();
+}
+
 async function createTempRoot(prefix: string): Promise<string> {
   return await realpath(await mkdtemp(join(tmpdir(), prefix)));
 }
@@ -9989,7 +10524,11 @@ async function createExpectedRuntimeTree(
     if (options.skip?.has(relativeDir)) {
       continue;
     }
-    await mkdir(join(workspaceRoot, relativeDir), { recursive: true });
+    const directoryPath = join(workspaceRoot, relativeDir);
+    await mkdir(directoryPath, { recursive: true });
+    if (relativeDir === "secrets") {
+      await chmod(directoryPath, 0o700);
+    }
   }
 }
 
@@ -10247,7 +10786,7 @@ async function postTask(
   body: CreateTaskInput,
   headers: Record<string, string> = {}
 ): Promise<Response> {
-  return await app.request("/api/tasks", {
+  return await requestApi(app, "/api/tasks", {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body)
@@ -10259,7 +10798,7 @@ async function postRawTask(
   body: Record<string, unknown>,
   idempotencyKey: string
 ): Promise<Response> {
-  return await app.request("/api/tasks", {
+  return await requestApi(app, "/api/tasks", {
     method: "POST",
     headers: {
       "content-type": "application/json",

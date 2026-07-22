@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,9 +17,20 @@ import {
 import { createBackendApi, type ApiErrorResponse } from "./index";
 
 const tempRoots: string[] = [];
+const LOCAL_TEST_TOKEN = "e2e-local-token-001";
+const originalHarnessLocalToken = process.env.HARNESS_LOCAL_TOKEN;
 
 describe("backend failure occurrence ledger boundary", () => {
+  beforeEach(() => {
+    process.env.HARNESS_LOCAL_TOKEN = LOCAL_TEST_TOKEN;
+  });
+
   afterEach(async () => {
+    if (originalHarnessLocalToken === undefined) {
+      delete process.env.HARNESS_LOCAL_TOKEN;
+    } else {
+      process.env.HARNESS_LOCAL_TOKEN = originalHarnessLocalToken;
+    }
     await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
 
@@ -50,7 +61,7 @@ describe("backend failure occurrence ledger boundary", () => {
       })
     });
 
-    const response = await app.request("/api/tasks", {
+    const response = await requestApi(app, "/api/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(validTaskCreateBody())
@@ -100,7 +111,7 @@ describe("backend failure occurrence ledger boundary", () => {
       })
     });
 
-    const response = await app.request("/api/tasks", {
+    const response = await requestApi(app, "/api/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(validTaskCreateBody())
@@ -138,7 +149,7 @@ describe("backend failure occurrence ledger boundary", () => {
           createTask: async () => { throw value; }
         })
       });
-      const response = await app.request("/api/tasks", {
+      const response = await requestApi(app, "/api/tasks", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(validTaskCreateBody())
@@ -172,7 +183,7 @@ describe("backend failure occurrence ledger boundary", () => {
       })
     });
 
-    const response = await app.request("/api/tasks", {
+    const response = await requestApi(app, "/api/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(validTaskCreateBody())
@@ -189,6 +200,20 @@ async function temporaryWorkspace(): Promise<string> {
   const tempRoot = await mkdtemp(join(tmpdir(), "shud-ledger-route-"));
   tempRoots.push(tempRoot);
   return join(tempRoot, "workspace");
+}
+
+function requestApi(
+  app: ReturnType<typeof createBackendApi>,
+  path: Parameters<ReturnType<typeof createBackendApi>["request"]>[0],
+  init?: Parameters<ReturnType<typeof createBackendApi>["request"]>[1]
+): Promise<Response> {
+  const mergedInit: NonNullable<typeof init> = init ?? {};
+  const headers = new Headers(init?.headers);
+  if (!headers.has("authorization") && !headers.has("Authorization")) {
+    headers.set("authorization", `Bearer ${LOCAL_TEST_TOKEN}`);
+  }
+
+  return app.request(path, { ...mergedInit, headers });
 }
 
 function typedPrimary(): TaskServiceError {

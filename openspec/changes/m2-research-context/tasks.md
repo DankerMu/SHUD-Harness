@@ -6,11 +6,18 @@
 
 ## 0. canonical 账目落账（bug 级修正批次，先行）
 
-- [ ] 0.1 canonical 文档 bug 级修正与账本补记（依据 design D1/D4/D5a/D6/D7a 的显式偏离记录）：Minimal_Schemas §2 repos 补 `zero` 行（与 Test_Plan W2-SUB-001 的 canonical 内部矛盾修正）+ `r_packages_lock` 形态改 `{ path, sha256 } | null`；Support_Schema_Contracts §1 Artifact 补 `llm_generated`、§2 ArtifactManifest 补 `superseded_by`；Config_Secrets §4 推荐环境变量表补 `HARNESS_LOCAL_TOKEN` 一行（批次 4 `GLM_API_KEY` 先例）、§6 harness 示例与 Minimal_Schemas §2 对齐；Workspace_Conventions §1.2/§5 与 Repository_Layout §2 的 provenance 目录形态统一为 `workspace/provenance/DATA-*.json` 并补 `secrets/`、`artifacts/manifest-sets/` 目录；Phased_Spec_Activation 例外批次 6 账补记上述各项（验证: 修正后各文档交叉引用一致、provenance 目录无第三种命名残留）
+- [x] 0.1 canonical 文档 bug 级修正与账本补记（依据 design D1/D4/D5a/D6/D7a 的显式偏离记录）：Minimal_Schemas §2 repos 补 `zero` 行（与 Test_Plan W2-SUB-001 的 canonical 内部矛盾修正）+ `r_packages_lock` 形态改 `{ path, sha256 } | null`；Support_Schema_Contracts §1 Artifact 补 `llm_generated`、§2 ArtifactManifest 补 `superseded_by`；Config_Secrets §4 推荐环境变量表补 `HARNESS_LOCAL_TOKEN` 一行（批次 4 `GLM_API_KEY` 先例）、§6 harness 示例与 Minimal_Schemas §2 对齐；Workspace_Conventions §1.2/§5 与 Repository_Layout §2 的 provenance 目录形态统一为 `workspace/provenance/DATA-*.json` 并补 `secrets/`、`artifacts/manifest-sets/` 目录；Phased_Spec_Activation 例外批次 6 账补记上述各项（验证: 修正后各文档交叉引用一致、provenance 目录无第三种命名残留）
 
 ## 1. local-auth（最前落地，design D1 排序决策）
 
-- [ ] 1.1 localhost 绑定 + 单一本地 token 中间件 + 既有测试面迁移（token 来源 `HARNESS_LOCAL_TOKEN` → `workspace/secrets/local-token` 文件 0600/目录 0700；`secrets/` 加入 `WORKSPACE_CANONICAL_DIRECTORIES` 并联动 ready 检查、不受任何目录列举/读取端点服务、token 值受 redaction 覆盖；豁免 health live/ready，非 `/api` 面不做 Bearer 校验；401 canonical envelope `category=permission_error`（design D1，不扩 frozen 枚举）；token 不入日志。迁移清单 = M1 全部路由测试（helper 统一注入）+ `scripts/perf/api.ts` 注入测试 token）（依赖: 0.1。验证: 新增负例 4 条 + `bun run check` 全绿 + `bun run test:perf:api` 通过）
+- [x] 1.1 localhost 绑定 + 单一本地 token 中间件 + 既有测试面迁移（token 来源 `HARNESS_LOCAL_TOKEN` → `workspace/secrets/local-token` 文件 0600/目录 0700；`secrets/` 加入 `WORKSPACE_CANONICAL_DIRECTORIES` 并联动 ready 检查、不受任何目录列举/读取端点服务、token 值受 redaction 覆盖；豁免 health live/ready，非 `/api` 面不做 Bearer 校验；401 canonical envelope `category=permission_error`（design D1，不扩 frozen 枚举）；token 不入日志。迁移清单 = M1 全部路由测试（helper 统一注入）+ `scripts/perf/api.ts` 注入测试 token）（依赖: 0.1。验证: 新增负例 4 条 + `bun run check` 全绿 + `bun run test:perf:api` 通过）
+  - Fixture (#87): expanded / high；风险包、Invariant Matrix、boundary checklist 见 design「Subagent Workflow Fixture — Issue #87」。
+  - Evidence floor (#87): production listen options 断言 `hostname=127.0.0.1`；absent/wrong/non-Bearer/empty-or-multi-segment/4097-byte Authorization 对已知与未知非 health `/api/**` 均 401 `permission_error`，4096-byte token 可用；正确 token 后保持原成功/404/405；仅 GET live/ready 无 token 豁免，非 `/api` 无 token保持原行为。
+  - Token provenance: valid env 优先且不落盘；missing/blank env 安全创建或复用 `secrets/local-token`，断言 init 后目录 0700、常规单链接文件 0600、UTF-8 非空且 ≤4096 bytes、并发首次创建收敛；4096/4097 file 边界、symlink leaf/ancestor/parent swap、目录/FIFO/非法内容/权限失败均不跟随、不覆盖、无 partial/outside write并稳定 fail closed。
+  - Ready evidence: init 后 `secrets/` 存在且 ready 200；删除、换成 symlink/非目录或 mode 漂移后 ready 503 `not_ready`，payload 不含 token或敏感绝对路径。
+  - Secret evidence: response、error evidence、request logs、ready payload、URL 与 PERF 输出均零 token；request log 仍记录拒绝请求的 401 与 route/status。
+  - Path helper: public helper deny-root 对 root/descendant/absolute/dot-normalized/case-insensitive/Unicode-normalization 等效形态拒绝并保留 `WorkspacePathSafetyError.evidenceRef`；deny 优先于 allowed-readonly，workspace sibling、外部 allowed-readonly 与未配置 caller 保持既有行为；deny-root 输入逃逸 workspace、symlink alias 或歧义形态 fail closed。
+  - Compatibility: M1 backend route + failure-ledger suites 经统一 request helper 注入 token且原断言不弱化；`test:core-services`、`test:backend-api`、`test:perf:api`、`typecheck`、完整 `check` 全绿，无新增 skip。
 - [ ] 1.2 前端 token bootstrap + 统一鉴权 fetch wrapper + M1 UI 回归（入口页注入 `window.__HARNESS_BOOTSTRAP__`；api 层统一 wrapper 为全部 `/api/**` 请求附加 Authorization；迁移 Dashboard 既有 `window.fetch` 直连调用点；token 不落 URL/localStorage）（依赖: 1.1。验证: 浏览器建卡 M1 走查在 token 体制下端到端成功 + `bun run test:frontend`）
 
 ## 2. core-schemas 扩展
