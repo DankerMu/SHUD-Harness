@@ -11,7 +11,7 @@ Contract amendment: user-approved cooperative-writer serialization; no hostile-w
 - Branded held mutation capability is constructible only after exclusive nonblocking `flock` on the opened `secrets` directory and identity reproof.
 - Recovery, publication, rollback, creation, move, retirement, and cleanup require the held capability instead of a bare mutation descriptor.
 - Mutation helpers keep explicit precondition tamper checks and postcondition validation; names/comments do not claim source-inode-conditioned rename/unlink.
-- Workspace leaf and `secrets` creation no longer chmod/adopt a generation based on stale pathname creation state.
+- Workspace leaf and `secrets` creation publish an opened, validated, identity-captured private staging directory to the final name with no-replace rename. A final-name collision fails the current call without adopting it; an independent retry may validate the now-existing directory.
 - Descriptor ownership transfer, lease unlock/close, and multi-resource settlement close every acquired resource before propagating failure.
 - Token reads share one transport-safe grammar: nonempty byte-preserving UTF-8, at most 4096 bytes, no whitespace/comma/NUL.
 - Inventory filters dot records before decoded-entry accounting and applies an independent 4096 raw-record work ceiling.
@@ -22,13 +22,13 @@ No routes, listener, readiness, deny-root, core, frontend, perf wiring, Child B,
 
 ## Source-bound semantic red
 
-All mutations were applied separately to the final source, run red, reverted immediately, and rerun green. The tracked diff SHA-256 before and after the replay was identical: `7452b2b577afadf4d8eec4de8628acabde11fb309b7e400d52790c5eec31ad38`.
+All mutations were applied separately to the final relevant source, run red, reverted immediately, and rerun green. Mutations 2 and 3 target files unchanged by the later first-create closure; mutation 1 was replayed again after that closure. Its final local-auth diff SHA-256 was identical before and after replay: `547a008b52fe6d7fa0afa312d4dc8635bef35c7cadd73d5466746eb7285cd673`.
 
 ### 1. Cooperative mutation-lock authorization
 
 Pre-mutation SHA-256:
 
-- `packages/backend/src/local-auth/local-token-filesystem.ts`: `7d3355de13dfb6416f1d3608f974d321206e8a69e7d4ed84eaa7a24109d05c81`
+- `packages/backend/src/local-auth/local-token-filesystem.ts`: `4994902adfca30a61560efabf2b64482fd6cd70e63088f5e4229e0c9742d77bd`
 - `packages/backend/src/local-auth/local-token-store.transaction.test.ts`: `8c5280785adbdf69fe30fba76d44e10e0618999f5a143951cb694e2104fb06a4`
 
 Applied production mutation:
@@ -48,7 +48,7 @@ Applied production mutation:
 +  );
 ```
 
-Mutated production SHA-256: `1a783fdcdd85e91511c27418719e1db4037c1860aa063b6d37107ccce3ca9fe0`.
+Mutated production SHA-256: `dc1b85116d80d03025dec4d481dc651a8e97c0edbaf81b50a1e5ce89f2a0a949`.
 
 Command:
 
@@ -58,7 +58,7 @@ npx --yes bun@1.2.19 test packages/backend/src/local-auth/local-token-store.tran
 
 Red result: exit 1; 0 pass, 1 fail, 15 filtered, 1 assertion. The public writer returned `success` instead of `blocked` while another process held the directory mutation lock, proving the public mutation path depends on successful lock authorization.
 
-After immediate restoration the production hash returned to `7d3355de13dfb6416f1d3608f974d321206e8a69e7d4ed84eaa7a24109d05c81`; the same command was green with 1 pass, 0 fail, 15 filtered, 6 assertions.
+After immediate restoration the production hash returned to `4994902adfca30a61560efabf2b64482fd6cd70e63088f5e4229e0c9742d77bd`; the same command was green with 1 pass, 0 fail, 15 filtered, 6 assertions.
 
 ### 2. Stable `1024 external + 8 owned` accounting
 
@@ -135,14 +135,41 @@ After immediate restoration the production hash returned to `2298e9d2b9c718b4aac
 
 The pre-mutation replacement cases are coverage for observable tamper rejection only and are not attributed as pathname CAS evidence.
 
+## Phase 6.2 first-create closure
+
+The invariant audit showed that removing stale pathname chmod was insufficient: the final-name directory could still change in `mkdirat -> first open`, then be captured as if it were the created generation. The final protocol now creates a UUID-named private staging directory under the held parent, opens and validates that staging inode, publishes it to the final name by no-replace rename, and rebinds the final name to the captured identity. A final-name collision cleans only the captured empty staging directory and fails the current call; it is never adopted in that call.
+
+Red command against the pre-fix final-name mkdir behavior with the exact post-staging-mkdir/pre-first-open seams and tests present:
+
+```sh
+npx --yes bun@1.2.19 test packages/backend/src/local-auth/local-token-store.contract.test.ts -t "post-staging .* collision"
+```
+
+Pre-fix SHA-256:
+
+- `local-token-filesystem.ts`: `a6f02f51b8a56efdedc870a9c57f120bf944b49e956e74fe8d2b3fe47309611b`
+- `local-token-store.contract.test.ts`: `8a1dca2cb9673aa5afeb37d1bd7daf9dd1a3b223606bb677b62d9c1d640da40b`
+- `local-token-test-support.ts`: `0fe984603ff3a24b927c7205a7bc58832b67be67c469c15fc5ae5f4158004ff0`
+
+Red result: exit 1; 0 pass, 2 fail, 30 filtered, 2 assertions. Both workspace-leaf and `secrets` tests observed no exception because the old final-name mkdir path opened and adopted the newly appeared private `0700` final directory, then continued to authority publication.
+
+Green result after the staging-directory protocol: exit 0; 2 pass, 0 fail, 30 filtered, 20 assertions. Both surfaces return `LocalTokenStorageError` for the collision call, preserve replacement inode/mode/sentinel, create no token/protocol entry there, leave no staging residue, and allow a later independent retry to validate and use the existing private directory.
+
+Final SHA-256:
+
+- `local-token-filesystem.ts`: `4994902adfca30a61560efabf2b64482fd6cd70e63088f5e4229e0c9742d77bd`
+- `local-token-syscalls.ts`: `3da6e548eb239913f708df2f31c070673b4730df4a6d51019b0f0ffe341cd292`
+- `local-token-store.contract.test.ts`: `8a1dca2cb9673aa5afeb37d1bd7daf9dd1a3b223606bb677b62d9c1d640da40b`
+- `local-token-test-support.ts`: `0fe984603ff3a24b927c7205a7bc58832b67be67c469c15fc5ae5f4158004ff0`
+
 ## Final green verification
 
-- macOS Bun 1.2.19 local-auth adversarial matrix: 77 pass, 0 fail, 302 assertions.
-- Linux `oven/bun:1.2.19`, UID/GID 65532, read-only repository mount: 77 pass, 0 fail, 302 assertions.
+- macOS Bun 1.2.19 local-auth adversarial matrix: 79 pass, 0 fail, 322 assertions.
+- Linux `oven/bun:1.2.19`, UID/GID 65532, read-only repository mount: 79 pass, 0 fail, 322 assertions.
 - `bun run test:backend-api`: exit 0; route suites and externally bounded local-auth matrix passed.
 - `bun run typecheck`: exit 0.
 - `bun run check`: exit 0 on orchestrator rerun.
-- `bun run test:perf:api`: exit 0; P95 tasks 0.07 ms, detail 0.03 ms, ready 9.83 ms, each below 300 ms.
+- `bun run test:perf:api`: exit 0; P95 tasks 0.09 ms, detail 0.01 ms, ready 12.46 ms, each below 300 ms.
 - `openspec validate m2-research-context --strict --no-interactive`: valid.
 - `git diff --check`, submodule/workspace/package/lock/stash/debug hygiene: clean.
 

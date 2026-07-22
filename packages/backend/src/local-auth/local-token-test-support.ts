@@ -17,6 +17,8 @@ export type LocalTokenTestStage =
   | "before_legacy_cleanup"
   | "before_retired_cleanup"
   | "before_recovery_artifact_open"
+  | "after_workspace_staging_mkdir"
+  | "after_secrets_staging_mkdir"
   | "after_workspace_leaf_mkdir"
   | "after_secrets_mkdir"
   | "after_descriptor_close"

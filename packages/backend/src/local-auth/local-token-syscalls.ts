@@ -131,6 +131,11 @@ export function unlinkAt(parentDescriptor: number, path: string): number {
   return syscalls().unlinkAt(parentDescriptor, cString(path), 0);
 }
 
+export function removeDirectoryAt(parentDescriptor: number, path: string): number {
+  const flags = process.platform === "darwin" ? 0x00000080 : 0x00000200;
+  return syscalls().unlinkAt(parentDescriptor, cString(path), flags);
+}
+
 export function flockNonblocking(descriptor: number, operation: number): number {
   return syscalls().flock(descriptor, operation);
 }
