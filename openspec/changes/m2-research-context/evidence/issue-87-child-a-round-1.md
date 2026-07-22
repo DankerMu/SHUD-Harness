@@ -2,7 +2,7 @@
 
 Implementation baseline: `2656ea0945aa64dde9b4ac4d1e7255d1a485dcd4`
 
-Verified implementation head: `bd9e776080b9fa23314e268a37048a41a5b6c8ea`. Any evidence-only descendant MUST retain the implementation/test hashes recorded in the Round 2 closure section below; `bd9e776..HEAD` may change only this evidence/PR bookkeeping.
+Verified production implementation head: `bd9e776080b9fa23314e268a37048a41a5b6c8ea`. Verified final test-oracle head: `2ebae919738a46aa597b60983d4ee98316c92c41`. Any evidence-only descendant MUST retain the production hashes from `bd9e776` and the final contract-test hash recorded below.
 
 Platform for semantic-red replay: macOS 15.6 (`24G84`), Bun 1.2.19
 
@@ -164,7 +164,7 @@ Implemented closure:
 - Workspace-leaf and `secrets` bootstrap inspect effective `0700 & ~umask` plus parent setgid before `mkdirat`; a mode-transforming environment fails before mutation with no final residue and never chmods a collision winner.
 - Token validation is explicitly visible ASCII and tests use real Bun 1.2.19 `Headers` plus `Request`; U+0100, emoji, Latin-1, C0, DEL, whitespace, comma and NUL are rejected while generated tokens and the 4096-byte ASCII boundary round-trip.
 
-Final implementation/test SHA-256 at `bd9e776080b9fa23314e268a37048a41a5b6c8ea`:
+Final production SHA-256 at `bd9e776080b9fa23314e268a37048a41a5b6c8ea`; unchanged tests also retain these hashes, except the contract test superseded at `2ebae919738a46aa597b60983d4ee98316c92c41`:
 
 - `local-token-filesystem.ts`: `4e68e925983bf9f756de8a8ea71ad94e5b0f30cf252c3dbf39963d081c87728c`
 - `local-token-transaction.ts`: `221c348066469e25a298576a956eae83c23c12bdddfa77e79b619a76e96cf9de`
@@ -174,7 +174,7 @@ Final implementation/test SHA-256 at `bd9e776080b9fa23314e268a37048a41a5b6c8ea`:
 - `local-token-inventory.ts`: `b8f53263ce5e01db1de4cc50b9bfdbc7fc60cd654cf386e5aacf9a673d20fe4e`
 - `local-token-test-support.ts`: `de96a359274358a6daebec699a29eded4f7c302a3dfd915f877b203856762296`
 - `local-token-test-helpers.ts`: `ae6c041d04747ac93a66824559dcb307241b164ce34bbb37447f465e4a493864`
-- `local-token-store.contract.test.ts`: `ecbe1dc3da06bf014c9bd31766edfaf4c9dcbd7066d9485b3c3e9fd8c7d63fde`
+- `local-token-store.contract.test.ts`: `724f3cea06a4315825655991249a2c0a37dfba18029aad51155132bba747105f`
 - `local-token-store.transaction.test.ts`: `d08b5f3be972e15532b85da194433a433e8197944bf5932d0418c6977b384279`
 - `local-token-store.inventory.test.ts`: `d58541830bb60dd087ca8e582aee81d86030ccb7b75cefec86cc7560c6242d86`
 - `local-token-store.lifecycle.test.ts`: `9f8ae9688ae9d02b9e85ac0d2a51481f9c42b125e99d571852d842f41d5d6e7b`
@@ -209,7 +209,9 @@ Phase 6.2 direct-test SHA-256 at `3f1b769` (historical; superseded by the Round 
 
 ## Final green verification
 
-All final implementation verification below ran at committed head `bd9e776080b9fa23314e268a37048a41a5b6c8ea` before this evidence-only update.
+Round 3 exposed two test-oracle gaps without a production regression. In the exact Linux container, the former setgid rows reported 2 pass but zero assertions because Bun `chmodSync(02700)` left mode `0700` and the tests returned early. The corrected tracked tests are Linux-only with explicit skips elsewhere, use `/bin/chmod 2700`, assert directory/uid/gid/mode before invoking the public seam, and then assert `LocalTokenStorageError` plus zero final residue at both surfaces. A second tracked fixture constructs every byte `0x21`–`0x7e` except comma (93 bytes) and proves storage plus real `Headers`→`Request` round-trip. Targeted Linux result at `2ebae919738a46aa597b60983d4ee98316c92c41`: 3 pass, 0 fail, 16 assertions.
+
+All final verification below ran at committed final test-oracle head `2ebae919738a46aa597b60983d4ee98316c92c41` before this evidence-only update; production files remain byte-identical to `bd9e776080b9fa23314e268a37048a41a5b6c8ea`.
 
 macOS command:
 
@@ -217,7 +219,7 @@ macOS command:
 npx --yes bun@1.2.19 run test:local-auth:adversarial
 ```
 
-Result: exit 0; 93 pass, 0 fail, 384 assertions.
+Result: exit 0; 92 pass, 2 explicit Linux-only skips, 0 fail, 388 assertions.
 
 Linux command (the first attempt used `git` inside the image and failed before tests because the minimal image has no `git`; this corrected command uses Bun to read the mounted ref and is the recorded green run):
 
@@ -229,15 +231,15 @@ docker run --rm \
   -v "$PWD:/work:ro" \
   -w /work \
   oven/bun:1.2.19 \
-  sh -lc 'bun -e '\''const head=(await Bun.file(".git/HEAD").text()).trim(); const ref=head.startsWith("ref: ") ? head.slice(5) : null; console.log(ref ? (await Bun.file(`.git/${ref}`).text()).trim() : head)'\'' && sha256sum packages/backend/src/local-auth/local-token-filesystem.ts packages/backend/src/local-auth/local-token-transaction.ts packages/backend/src/local-auth/local-token-test-helpers.ts packages/backend/src/local-auth/local-token-store.contract.test.ts packages/backend/src/local-auth/local-token-store.transaction.test.ts && bun scripts/local-auth/adversarial-matrix.ts'
+  sh -lc 'bun -e '\''const head=(await Bun.file(".git/HEAD").text()).trim(); const ref=head.startsWith("ref: ") ? head.slice(5) : null; console.log(ref ? (await Bun.file(`.git/${ref}`).text()).trim() : head)'\'' && sha256sum packages/backend/src/local-auth/local-token-store.contract.test.ts && bun scripts/local-auth/adversarial-matrix.ts'
 ```
 
-Result: exit 0; container printed head `bd9e776080b9fa23314e268a37048a41a5b6c8ea`, printed the five matching final hashes above, then 93 pass, 0 fail, 384 assertions as UID/GID 65532 with a read-only repository mount and tmpfs `/tmp`.
+Result: exit 0; container printed head `2ebae919738a46aa597b60983d4ee98316c92c41`, printed contract-test hash `724f3cea06a4315825655991249a2c0a37dfba18029aad51155132bba747105f`, then 94 pass, 0 skip, 0 fail, 400 assertions as UID/GID 65532 with a read-only repository mount and tmpfs `/tmp`. Both Linux setgid rows executed their store path and contributed assertions.
 
 - `bun run test:backend-api`: exit 0; route suites and externally bounded local-auth matrix passed.
 - `bun run typecheck`: exit 0.
 - `bun run check`: exit 0 on orchestrator rerun.
-- `bun run test:perf:api`: exit 0; final rerun stayed below the 300 ms P95 ceiling.
+- `bun run test:perf:api`: exit 0; P95 tasks 0.07 ms, detail 0.01 ms, ready 10.32 ms, each below 300 ms.
 - `openspec validate m2-research-context --strict --no-interactive`: valid.
 - `git diff --check`, submodule/workspace/package/lock/stash/debug hygiene: clean.
 
