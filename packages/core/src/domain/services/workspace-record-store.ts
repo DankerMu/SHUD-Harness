@@ -6,10 +6,18 @@ import { basename, dirname, isAbsolute, join, normalize, parse, resolve, sep } f
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import {
+  captureFailureFoldEntry,
+  capturePostSettlementFailureFoldEntry,
   runWithPreservedRelease,
-  semanticPrimaryError
+  semanticPrimaryError,
+  type FailureFoldEntry,
+  type FailurePhase
 } from "./compensation-error-preservation";
-import { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
+import {
+  preserveTaskServiceErrorFailureVector,
+  preserveTaskServiceErrorFailureEntries,
+  taskServiceErrorAtBoundary
+} from "./task-service-error-compensation";
 import {
   BOUNDED_NOFOLLOW_READ_OPEN_FLAGS,
   readDurableSingleLinkFile,
@@ -104,10 +112,18 @@ interface RecordDirectoryBindingOperationLease {
 
 interface PresentFailure {
   readonly value: unknown;
+  readonly occurrence: FailureFoldEntry;
+}
+
+function capturePresentFailure(
+  phase: Exclude<FailurePhase, "observation">,
+  value: unknown
+): PresentFailure {
+  return { value, occurrence: captureFailureFoldEntry(phase, value) };
 }
 
 interface ExactOwnedPublicLinkRemoval {
-  readonly cleanupErrors: unknown[];
+  readonly cleanupErrors: FailureFoldEntry[];
   readonly ownership: "removed" | "retained" | "relinquished";
   readonly isolatedSourceCleanupAllowed: boolean;
 }
@@ -127,14 +143,16 @@ interface CanonicalPathnameBinding {
 
 function appendSequentialFailure(
   primary: PresentFailure | undefined,
-  compensations: unknown[],
-  value: unknown
+  compensations: FailureFoldEntry[],
+  value: unknown,
+  phase: Exclude<FailurePhase, "observation">
 ): PresentFailure {
+  const occurrence = captureFailureFoldEntry(phase, value);
   if (primary) {
-    compensations.push(value);
+    compensations.push(occurrence);
     return primary;
   }
-  return { value };
+  return { value, occurrence };
 }
 
 type AuthorityMutatingCallbackOutcome =
@@ -150,8 +168,9 @@ interface AuthorityMutatingCallbackCancellation {
 async function captureAuthorityMutatingCallbackBoundary(
   callback: (() => Promise<void> | void) | undefined,
   proveAuthority: () => Promise<void>,
-  proofCompensations: readonly unknown[] = [],
-  cancellation?: AuthorityMutatingCallbackCancellation
+  proofCompensations: readonly FailureFoldEntry[] = [],
+  cancellation?: AuthorityMutatingCallbackCancellation,
+  boundary: "operation" | "settlement" | "final_release" = "operation"
 ): Promise<AuthorityMutatingCallbackOutcome> {
   if (!callback) {
     if (cancellation?.isCancelled()) return { status: "cancelled" };
@@ -164,7 +183,14 @@ async function captureAuthorityMutatingCallbackBoundary(
       await callback();
       return undefined;
     } catch (error) {
-      return { value: error };
+      return capturePresentFailure(
+        boundary === "final_release"
+          ? "final_release"
+          : boundary === "settlement"
+            ? "settlement"
+            : "body",
+        error
+      );
     }
   })();
   const callbackFailure = cancellation
@@ -184,9 +210,12 @@ async function captureAuthorityMutatingCallbackBoundary(
     await proveAuthority();
   } catch (proofError) {
     const preservedProofFailure = preserveWorkspacePrimaryError(
-      proofError,
+      captureFailureFoldEntry(
+        boundary === "final_release" ? "final_release" : "settlement",
+        proofError
+      ),
       [
-        ...(callbackFailure ? [callbackFailure.value] : []),
+        ...(callbackFailure ? [callbackFailure.occurrence] : []),
         ...proofCompensations
       ]
     );
@@ -207,14 +236,16 @@ async function captureAuthorityMutatingCallbackBoundary(
 async function runAuthorityMutatingCallbackBoundary(
   callback: (() => Promise<void> | void) | undefined,
   proveAuthority: () => Promise<void>,
-  proofCompensations: readonly unknown[] = [],
-  cancellation?: AuthorityMutatingCallbackCancellation
+  proofCompensations: readonly FailureFoldEntry[] = [],
+  cancellation?: AuthorityMutatingCallbackCancellation,
+  boundary: "operation" | "settlement" | "final_release" = "operation"
 ): Promise<void> {
   const outcome = await captureAuthorityMutatingCallbackBoundary(
     callback,
     proveAuthority,
     proofCompensations,
-    cancellation
+    cancellation,
+    boundary
   );
   if (outcome.status === "callback_failed") throw outcome.error;
 }
@@ -232,6 +263,35 @@ interface OwnedGenerationExpectation {
   mode: bigint;
   nlink: bigint;
 }
+
+type PrivateGenerationSettlementPhase =
+  | "isolated"
+  | "settling"
+  | "generation_removed"
+  | "namespace_cleanup"
+  | "settled_deleted"
+  | "failed_quarantined";
+
+interface PrivateGenerationSettlementTicket {
+  readonly permit: WorkspaceRecordCleanupPermit;
+  readonly publicPath: string;
+  namespace: OwnedAuthorityNamespace;
+  readonly isolatedPath: string;
+  readonly generation: OwnedGenerationExpectation;
+  phase: PrivateGenerationSettlementPhase;
+  settlementPromise?: Promise<{ readonly status: "deleted" }>;
+}
+
+interface ConditionalDeleteMutationState {
+  started: boolean;
+  exactIsolationCommitted: boolean;
+  deletedGeneration?: WorkspaceRecordPhysicalIdentity;
+  readonly postIsolationFailure: "restore" | "handoff_private_exact";
+  readonly privateSettlementPermit?: WorkspaceRecordCleanupPermit;
+  privateSettlementTicket?: PrivateGenerationSettlementTicket;
+}
+
+const privateGenerationSettlementTickets = new WeakSet<object>();
 
 interface OwnedGenerationCheckpoint {
   parentPath: string;
@@ -311,7 +371,7 @@ interface HardlinkPublicationOwnedResources {
   canonicalIdentity?: OwnedTemporaryRecordIdentity;
   canonicalPathnameAuthority: HardlinkCanonicalPathnameAuthority;
   handleClosed: boolean;
-  compensationErrors: unknown[];
+  compensationErrors: FailureFoldEntry[];
   directoryIdentity?: RecordDirectoryPathnameBinding;
 }
 
@@ -410,14 +470,16 @@ const pendingCleanupPermitFileCloses = new Set<Promise<void>>();
 
 export function isWorkspaceRecordDurableReadError(
   error: unknown
-): error is TaskServiceError {
-  return error instanceof TaskServiceError && workspaceRecordDurableReadErrors.has(error);
+): boolean {
+  const trusted = taskServiceErrorAtBoundary(error);
+  return trusted !== undefined && workspaceRecordDurableReadErrors.has(trusted);
 }
 
 export function isWorkspaceRecordOversizeError(
   error: unknown
-): error is TaskServiceError {
-  return error instanceof TaskServiceError && workspaceRecordOversizeErrors.has(error);
+): boolean {
+  const trusted = taskServiceErrorAtBoundary(error);
+  return trusted !== undefined && workspaceRecordOversizeErrors.has(trusted);
 }
 
 export interface WorkspaceRecordPublicationHookInput {
@@ -559,6 +621,7 @@ interface MutableWorkspaceJsonRecordLifecycleState {
 
 interface PreparedJsonRecordWrite<T> {
   readonly data: T;
+  readonly workspaceRoot: string;
   readonly directoryPath: string;
   readonly directoryIdentity: RecordDirectoryPathnameBinding;
   readonly fileName: string;
@@ -683,6 +746,7 @@ export function snapshotWorkspaceJsonRecordLifecycleState(
 
 type WorkspaceRecordPostIsolationSite =
   | "conditional_delete"
+  | "exact_failure_settlement"
   | "conditional_unlink_owned_path"
   | "published_rollback"
   | "temporary_generation_compensation";
@@ -702,6 +766,9 @@ export interface WorkspaceRecordCompensationTestHooks {
     input: Readonly<{ path: string; isolatedPath: string; site: WorkspaceRecordPostIsolationSite }>
   ) => Promise<void> | void;
   afterOwnedPathIsolation?: (
+    input: Readonly<{ path: string; isolatedPath: string; site: WorkspaceRecordPostIsolationSite }>
+  ) => Promise<void> | void;
+  afterOwnedPathIsolationSyscall?: (
     input: Readonly<{ path: string; isolatedPath: string; site: WorkspaceRecordPostIsolationSite }>
   ) => Promise<void> | void;
   beforeOwnedPathCompensationStateInspection?: (
@@ -760,6 +827,23 @@ export interface WorkspaceRecordCompensationTestHooks {
   beforeTerminalAuthorityNamespaceRemovalSyscall?: (
     input: Readonly<{ path: string }>
   ) => Promise<void> | void;
+  beforeExactFailureSettlement?: (
+    input: Readonly<{ path: string }>
+  ) => Promise<void> | void;
+  onExactFailureSettlementPromise?: (
+    input: Readonly<{
+      path: string;
+      settlement: Promise<{ readonly status: "deleted" }>;
+      settleSameTicket: () => Promise<{ readonly status: "deleted" }>;
+    }>
+  ) => void;
+  beforeCleanupPermitPinnedGenerationProof?: (
+    input: Readonly<{ path: string; fd: number }>
+  ) => Promise<void> | void;
+  afterCleanupPermitPinnedFileClose?: (
+    input: Readonly<{ path: string; fd: number }>
+  ) => Promise<void> | void;
+  afterRecordDirectoryBindingRelease?: () => Promise<void> | void;
 }
 
 const compensationTestHookStorage =
@@ -811,7 +895,9 @@ export async function runWithWorkspaceRecordAuthorityDeadline<T>(
 }
 
 async function runWithRecordDirectoryBindingOperation<T>(
-  action: () => Promise<T>
+  action: () => Promise<T>,
+  onFinalReleaseFailure?: (failure: unknown) => void,
+  onActionFailure?: (failure: unknown) => void
 ): Promise<T> {
   const lease: RecordDirectoryBindingOperationLease = {
     bindings: new Map(),
@@ -820,9 +906,17 @@ async function runWithRecordDirectoryBindingOperation<T>(
     state: "active"
   };
   return await recordDirectoryBindingOperationStorage.run(lease, async () => {
+    let actionOutcome:
+      | { readonly status: "fulfilled"; readonly value: T }
+      | { readonly status: "rejected"; readonly reason: unknown };
     try {
-      return await action();
-    } finally {
+      actionOutcome = { status: "fulfilled", value: await action() };
+    } catch (reason) {
+      actionOutcome = { status: "rejected", reason };
+      onActionFailure?.(reason);
+    }
+    let finalReleaseFailure: PresentFailure | undefined;
+    try {
       const participantReleases = [
         ...lease.pendingDurableChildCreationCohorts.values()
       ];
@@ -837,7 +931,19 @@ async function runWithRecordDirectoryBindingOperation<T>(
       for (let index = releases.length - 1; index >= 0; index -= 1) {
         releases[index]!();
       }
+      await compensationTestHookStorage.getStore()
+        ?.afterRecordDirectoryBindingRelease?.();
+    } catch (reason) {
+      finalReleaseFailure = capturePresentFailure("final_release", reason);
+      onFinalReleaseFailure?.(reason);
     }
+    if (actionOutcome.status === "rejected") {
+      throw actionOutcome.reason;
+    }
+    if (finalReleaseFailure) {
+      throw finalReleaseFailure.value;
+    }
+    return actionOutcome.value;
   });
 }
 
@@ -1081,11 +1187,13 @@ export function workspaceRecordAuthorityDiagnosticsForTest(): Readonly<{
 export class WorkspaceRecordConditionalDeleteError extends Error {
   readonly mutationPhase: "pre_mutation" | "post_mutation";
   readonly failureStage: "permit_admission" | "operation";
+  readonly preMutationDisposition?: "benign_convergence";
 
   constructor(
     mutationPhase: "pre_mutation" | "post_mutation",
     failureStage: "permit_admission" | "operation",
-    cause: unknown
+    cause: unknown,
+    preMutationDisposition?: "benign_convergence"
   ) {
     super(
       mutationPhase === "pre_mutation"
@@ -1096,6 +1204,7 @@ export class WorkspaceRecordConditionalDeleteError extends Error {
     this.name = "WorkspaceRecordConditionalDeleteError";
     this.mutationPhase = mutationPhase;
     this.failureStage = failureStage;
+    this.preMutationDisposition = preMutationDisposition;
   }
 }
 
@@ -1235,15 +1344,15 @@ export async function runWithExistingWorkspaceRecordDirectoryReproof(
     try {
       value = Boolean(await callback());
     } catch (error) {
-      callbackFailure = { value: error };
+      callbackFailure = capturePresentFailure("body", error);
     }
 
     try {
       await assertRecordDirectoryIdentity(admitted.path, admitted.binding, evidenceRef);
     } catch (proofError) {
       throw preserveWorkspacePrimaryError(
-        proofError,
-        callbackFailure ? [callbackFailure.value] : []
+        captureFailureFoldEntry("settlement", proofError),
+        callbackFailure ? [callbackFailure.occurrence] : []
       );
     }
     if (callbackFailure) throw callbackFailure.value;
@@ -1674,14 +1783,16 @@ export type WorkspaceJsonRecordCleanupObservation<T> =
 export async function observeJsonRecordForCleanup<T>(
   path: string,
   evidenceRef: string,
-  schema: z.ZodType<T>
+  schema: z.ZodType<T>,
+  trustedWorkspaceRoot?: string
 ): Promise<WorkspaceJsonRecordCleanupObservation<T>> {
   return await runWithRecordDirectoryBindingOperation(
     async () =>
       await observeJsonRecordForCleanupWithDirectoryBindingOperation(
         path,
         evidenceRef,
-        schema
+        schema,
+        trustedWorkspaceRoot
       )
   );
 }
@@ -1689,8 +1800,10 @@ export async function observeJsonRecordForCleanup<T>(
 async function observeJsonRecordForCleanupWithDirectoryBindingOperation<T>(
   path: string,
   evidenceRef: string,
-  schema: z.ZodType<T>
+  schema: z.ZodType<T>,
+  trustedWorkspaceRoot?: string
 ): Promise<WorkspaceJsonRecordCleanupObservation<T>> {
+  void trustedWorkspaceRoot;
   const hooks = publicationHookStorage.getStore();
   const authorityLease = await acquireRecordAuthority(path, evidenceRef, "read", hooks);
   let cleanupPermit: WorkspaceRecordCleanupPermit | undefined;
@@ -1775,7 +1888,10 @@ async function observeJsonRecordForCleanupWithDirectoryBindingOperation<T>(
     });
   } catch (error) {
     if (inspection?.status === "malformed" || inspection?.status === "schema_threw") {
-      throw preserveWorkspacePrimaryError(error, [inspection.error]);
+      throw preserveWorkspacePrimaryError(
+        captureFailureFoldEntry("settlement", error),
+        [inspection.errorOccurrence]
+      );
     }
     throw error;
   } finally {
@@ -1900,7 +2016,7 @@ export async function transferWorkspaceRecordCleanupPermitPublicationAuthority(
     authorityLease.release,
     "Workspace record publication-authority transfer and permit settlement both failed.",
     undefined,
-    preserveTaskServiceErrorCompensationCompatibility
+    preserveTaskServiceErrorFailureEntries
   );
   });
 }
@@ -1988,7 +2104,7 @@ export async function refreshWorkspaceRecordCleanupPermitAfterSiblingMutation(
       });
       state.pathnameBinding = pathnameBinding;
     } catch (error) {
-      if (error instanceof TaskServiceError) throw error;
+      if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
       throw publicationStateError(evidenceRef, error);
     }
   });
@@ -2004,6 +2120,13 @@ export type ConditionalDeleteJsonRecordCondition<T> =
 
 export type ConditionalDeleteJsonRecordResult =
   { status: "deleted" } | { status: "missing" } | { status: "condition_not_met" };
+
+export type ConditionalDeleteJsonRecordWithExactFailureSettlementResult =
+  | ConditionalDeleteJsonRecordResult
+  | {
+      readonly status: "recovered";
+      readonly settlement: "deleted";
+    };
 
 export async function conditionalDeleteJsonRecordWithCleanupPermit<T>(
   permit: WorkspaceRecordCleanupPermit,
@@ -2022,6 +2145,53 @@ export async function conditionalDeleteJsonRecordWithCleanupPermit<T>(
         condition
       )
   );
+}
+
+export async function conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement<T>(
+  permit: WorkspaceRecordCleanupPermit,
+  path: string,
+  evidenceRef: string,
+  schema: z.ZodType<T>,
+  condition: ConditionalDeleteJsonRecordCondition<T>
+): Promise<ConditionalDeleteJsonRecordWithExactFailureSettlementResult> {
+  let failureBeforeBindingRelease: PresentFailure | undefined;
+  let finalReleaseFailure: PresentFailure | undefined;
+  try {
+    return await runWithRecordDirectoryBindingOperation(
+      async () =>
+        await conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlementWithDirectoryBindingOperation(
+          permit,
+          path,
+          evidenceRef,
+          schema,
+          condition,
+          (failure) => {
+            failureBeforeBindingRelease = capturePresentFailure(
+              "initial_release",
+              failure
+            );
+          }
+        ),
+      (failure) => {
+        finalReleaseFailure = capturePresentFailure("final_release", failure);
+      },
+      (failure) => {
+        failureBeforeBindingRelease ??= capturePresentFailure(
+          "initial_release",
+          failure
+        );
+      }
+    );
+  } catch (error) {
+    if (failureBeforeBindingRelease && finalReleaseFailure) {
+      throw preserveTaskServiceErrorFailureEntries(
+        failureBeforeBindingRelease.occurrence,
+        [finalReleaseFailure.occurrence],
+        "Workspace record binding release and failure transport both failed.",
+      );
+    }
+    throw error;
+  }
 }
 
 async function conditionalDeleteJsonRecordWithCleanupPermitAndDirectoryBindingOperation<T>(
@@ -2043,7 +2213,11 @@ async function conditionalDeleteJsonRecordWithCleanupPermitAndDirectoryBindingOp
   } catch (error) {
     throw new WorkspaceRecordConditionalDeleteError("pre_mutation", "permit_admission", error);
   }
-  const mutationState = { started: false };
+  const mutationState: ConditionalDeleteMutationState = {
+    started: false,
+    exactIsolationCommitted: false,
+    postIsolationFailure: "restore"
+  };
   try {
     try {
       const admittedParent = authorityLease.expectedCleanupParent;
@@ -2081,6 +2255,211 @@ async function conditionalDeleteJsonRecordWithCleanupPermitAndDirectoryBindingOp
   }
 }
 
+async function conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlementWithDirectoryBindingOperation<T>(
+  permit: WorkspaceRecordCleanupPermit,
+  path: string,
+  evidenceRef: string,
+  schema: z.ZodType<T>,
+  condition: ConditionalDeleteJsonRecordCondition<T>,
+  retainFailureThroughBindingRelease: (failure: unknown) => void
+): Promise<ConditionalDeleteJsonRecordWithExactFailureSettlementResult> {
+  const hooks = publicationHookStorage.getStore();
+  let terminalAdmission: WorkspaceRecordCleanupTerminalAdmission;
+  try {
+    terminalAdmission = Object.freeze({
+      authority: "exact_observation" as const,
+      classificationPolicy: "exact_failure" as const,
+      expected: snapshotWorkspaceRecordCleanupPermitGeneration(
+        permit,
+        resolve(path),
+        evidenceRef
+      )
+    });
+  } catch (error) {
+    throw new WorkspaceRecordConditionalDeleteError(
+      "pre_mutation",
+      "permit_admission",
+      error
+    );
+  }
+  let authorityLease: RecordAuthorityLease;
+  try {
+    authorityLease = await acquireRecordAuthorityWithCleanupPermit(
+      permit,
+      path,
+      evidenceRef,
+      hooks,
+      terminalAdmission
+    );
+  } catch (error) {
+    throw new WorkspaceRecordConditionalDeleteError(
+      "pre_mutation",
+      "permit_admission",
+      error,
+      error instanceof WorkspaceRecordCleanupTerminalResultError
+        ? "benign_convergence"
+        : undefined
+    );
+  }
+
+  const mutationState: ConditionalDeleteMutationState = {
+    started: false,
+    exactIsolationCommitted: false,
+    postIsolationFailure: "handoff_private_exact",
+    privateSettlementPermit: permit
+  };
+  let initialResult: ConditionalDeleteJsonRecordResult | undefined;
+  let initialFailure: WorkspaceRecordConditionalDeleteError | undefined;
+  let initialFailureOccurrence: FailureFoldEntry | undefined;
+  let recoveredResult:
+    | Extract<
+        ConditionalDeleteJsonRecordWithExactFailureSettlementResult,
+        { status: "recovered" }
+      >
+    | undefined;
+  let settlementFailure: PresentFailure | undefined;
+
+  try {
+    try {
+      const admittedParent = authorityLease.expectedCleanupParent;
+      if (!admittedParent || !authorityLease.validateCleanupGeneration) {
+        throw publicationStateError(evidenceRef);
+      }
+      await authorityLease.validateCleanupGeneration();
+      if (hooks?.afterAuthorityLeaseAcquired) {
+        await runAuthorityMutatingCallbackBoundary(
+          () =>
+            hooks.afterAuthorityLeaseAcquired!(
+              Object.freeze({ operation: "delete" })
+            ),
+          authorityLease.validateCleanupGeneration
+        );
+      }
+      initialResult = await conditionalDeleteJsonRecordUnderAuthority(
+        path,
+        evidenceRef,
+        schema,
+        condition,
+        hooks,
+        mutationState,
+        authorityLease.expectedCleanupGeneration,
+        undefined,
+        { status: "existing", identity: admittedParent.identity },
+        authorityLease.expectedCleanupPathnameBinding
+      );
+    } catch (error) {
+      let preMutationDisposition: "benign_convergence" | undefined;
+      if (!mutationState.started) {
+        try {
+          const classification =
+            await classifyWorkspaceRecordCleanupPermitGeneration(
+              permit,
+              terminalAdmission.expected,
+              terminalAdmission.authority,
+              terminalAdmission.classificationPolicy
+            );
+          if (
+            classification.status === "missing" ||
+            classification.status === "superseded"
+          ) {
+            preMutationDisposition = "benign_convergence";
+          }
+        } catch (classificationError) {
+          error = preserveWorkspacePrimaryError(
+            captureFailureFoldEntry("body", error),
+            [capturePostSettlementFailureFoldEntry(classificationError)]
+          );
+        }
+      }
+      initialFailure = new WorkspaceRecordConditionalDeleteError(
+        mutationState.started ? "post_mutation" : "pre_mutation",
+        "operation",
+        error,
+        preMutationDisposition
+      );
+      initialFailureOccurrence = captureFailureFoldEntry(
+        "initial_release",
+        initialFailure
+      );
+    }
+
+    if (initialFailure?.mutationPhase === "post_mutation") {
+      try {
+        const ticket = mutationState.privateSettlementTicket;
+        if (!ticket) throw publicationStateError(evidenceRef);
+        const settlement = await settlePrivateGenerationAfterFailure(ticket);
+        recoveredResult = Object.freeze({
+          status: "recovered" as const,
+          settlement: settlement.status
+        });
+      } catch (error) {
+        settlementFailure = capturePresentFailure("settlement", error);
+      }
+    }
+  } finally {
+    let releaseFailure: PresentFailure | undefined;
+    try {
+      await authorityLease.release();
+    } catch (error) {
+      releaseFailure = capturePresentFailure("final_release", error);
+    }
+
+    if (initialFailure) {
+      if (
+        initialFailure.mutationPhase === "post_mutation" &&
+        recoveredResult &&
+        releaseFailure === undefined
+      ) {
+        retainFailureThroughBindingRelease(initialFailure);
+        return recoveredResult;
+      }
+      if (settlementFailure === undefined && releaseFailure === undefined) {
+        retainFailureThroughBindingRelease(initialFailure);
+        throw initialFailure;
+      }
+      const preservedFailure = preserveTaskServiceErrorFailureEntries(
+        initialFailureOccurrence!,
+        [
+          ...(settlementFailure ? [settlementFailure.occurrence] : []),
+          ...(releaseFailure ? [releaseFailure.occurrence] : [])
+        ],
+        "Workspace record publication compensation failed."
+      );
+      retainFailureThroughBindingRelease(preservedFailure);
+      throw preservedFailure;
+    }
+    if (releaseFailure !== undefined) {
+      retainFailureThroughBindingRelease(releaseFailure.value);
+      throw releaseFailure.value;
+    }
+  }
+
+  if (!initialResult) throw publicationStateError(evidenceRef);
+  return initialResult;
+}
+
+export function preserveWorkspaceRecordFailureGraph(
+  primary: unknown,
+  failures: readonly unknown[],
+  aggregateMessage: string,
+  primaryPhase: FailurePhase = "body",
+  failurePhases: readonly FailurePhase[] = failures.map(() => "settlement")
+): unknown {
+  if (failures.length === 0) return primary;
+  const primaryEntry = captureFailureFoldEntry(primaryPhase, primary);
+  const later = failures.map((failure, index) => {
+    const phase = failurePhases[index] ?? "settlement";
+    return phase === "settlement"
+      ? capturePostSettlementFailureFoldEntry(failure)
+      : captureFailureFoldEntry(phase, failure);
+  });
+  return preserveTaskServiceErrorFailureEntries(
+    primaryEntry,
+    later,
+    aggregateMessage
+  );
+}
+
 interface WorkspaceRecordCleanupPermitGenerationSnapshot {
   readonly publicPath: string;
   readonly evidenceRef: string;
@@ -2107,6 +2486,7 @@ type WorkspaceRecordCleanupGenerationAuthority =
 interface WorkspaceRecordCleanupTerminalAdmission {
   readonly authority: WorkspaceRecordCleanupGenerationAuthority;
   readonly expected: WorkspaceRecordCleanupPermitGenerationSnapshot;
+  readonly classificationPolicy?: "exact_failure";
 }
 
 class WorkspaceRecordCleanupTerminalResultError extends Error {
@@ -2297,7 +2677,8 @@ function openFileStatsMatchCanonicalBaseline(
 async function classifyWorkspaceRecordCleanupPermitGenerationNow(
   permit: WorkspaceRecordCleanupPermit,
   expected: WorkspaceRecordCleanupPermitGenerationSnapshot,
-  authority: WorkspaceRecordCleanupGenerationAuthority
+  authority: WorkspaceRecordCleanupGenerationAuthority,
+  classificationPolicy: "legacy" | "exact_failure" = "legacy"
 ): Promise<WorkspaceRecordCleanupPermitGenerationClassification> {
   const state = workspaceRecordCleanupPermitStateForTerminalOperation(
     permit,
@@ -2305,7 +2686,85 @@ async function classifyWorkspaceRecordCleanupPermitGenerationNow(
   );
   const parentPath = expected.bindingTimeParentSnapshot.path;
   const parentBefore = await readSafeDirectoryLeafEntry(parentPath);
-  if (!workspaceRecordCleanupSnapshotParentMatchesStat(parentBefore, expected)) {
+  if (classificationPolicy === "exact_failure") {
+    if (
+      !parentBefore ||
+      !recordDirectoryPathnameBindingMatchesPath(
+        parentPath,
+        expected.parentIdentity
+      ) ||
+      expected.parentIdentity.state !== "active" ||
+      !workspaceRecordPhysicalIdentityMatches(
+        parentBefore,
+        expected.bindingTimeParentSnapshot
+      )
+    ) {
+      throw publicationStateError(expected.evidenceRef);
+    }
+    const current = await captureCanonicalAuthorityBaseline(
+      expected.publicPath,
+      expected.evidenceRef
+    );
+    if (current.status === "absent") return { status: "missing" };
+    const currentIsExactPathname =
+      current.status === "existing" &&
+      workspaceRecordPhysicalIdentityMatches(
+        current.identity,
+        expected.generation.identity
+      ) &&
+      current.mode === expected.generation.mode &&
+      current.nlink === expected.generation.nlink &&
+      current.bytes.equals(expected.generation.bytes) &&
+      current.ctimeNs === expected.pathnameBinding.ctimeNs &&
+      current.mtimeNs === expected.pathnameBinding.mtimeNs;
+    if (
+      !recordDirectoryPathnameBindingMatchesAtProof(
+        parentBefore,
+        expected.parentIdentity
+      )
+    ) {
+      const unrelatedSiblingEpoch =
+        parentBefore.ctimeNs !== expected.bindingTimeParentSnapshot.ctimeNs &&
+        parentBefore.mtimeNs !== expected.bindingTimeParentSnapshot.mtimeNs;
+      if (currentIsExactPathname && !unrelatedSiblingEpoch) {
+        throw publicationStateError(expected.evidenceRef);
+      }
+      if (!currentIsExactPathname) return { status: "superseded" };
+      advanceRecordDirectoryPathnameEpochFromStat(
+        parentBefore,
+        expected.parentIdentity
+      );
+    }
+    if (
+      !currentIsExactPathname
+    ) {
+      return { status: "superseded" };
+    }
+    if (
+      !(await cleanupPermitPinnedPhysicalGenerationMatchesNow(
+        state,
+        expected.evidenceRef
+      ))
+    ) {
+      return { status: "superseded" };
+    }
+    const parentAfter = await readSafeDirectoryLeafEntry(parentPath);
+    if (
+      !parentAfter ||
+      !recordDirectoryPathnameBindingMatchesAtProof(
+        parentAfter,
+        expected.parentIdentity
+      ) ||
+      parentAfter.ctimeNs !== parentBefore.ctimeNs ||
+      parentAfter.mtimeNs !== parentBefore.mtimeNs
+    ) {
+      return { status: "superseded" };
+    }
+    return { status: "same_generation", proof: "exact_observation" };
+  }
+  if (
+    !workspaceRecordCleanupSnapshotParentMatchesStat(parentBefore, expected)
+  ) {
     return { status: "superseded" };
   }
   let exactObservation = false;
@@ -2378,7 +2837,8 @@ async function classifyWorkspaceRecordCleanupPermitGenerationNow(
 async function classifyWorkspaceRecordCleanupPermitGeneration(
   permit: WorkspaceRecordCleanupPermit,
   expected: WorkspaceRecordCleanupPermitGenerationSnapshot,
-  authority: WorkspaceRecordCleanupGenerationAuthority
+  authority: WorkspaceRecordCleanupGenerationAuthority,
+  classificationPolicy: "legacy" | "exact_failure" = "legacy"
 ): Promise<WorkspaceRecordCleanupPermitGenerationClassification> {
   const state = workspaceRecordCleanupPermitStateForTerminalOperation(
     permit,
@@ -2390,9 +2850,300 @@ async function classifyWorkspaceRecordCleanupPermitGeneration(
       await classifyWorkspaceRecordCleanupPermitGenerationNow(
         permit,
         expected,
-        authority
+        authority,
+        classificationPolicy
       )
   );
+}
+
+async function capturePrivateGenerationSettlementTicket(
+  permit: WorkspaceRecordCleanupPermit,
+  publicPath: string,
+  namespace: OwnedAuthorityNamespace,
+  isolatedPath: string,
+  generation: OwnedGenerationExpectation,
+  evidenceRef: string
+): Promise<PrivateGenerationSettlementTicket> {
+  const state = cleanupPermitState.get(permit);
+  if (
+    !state ||
+    state.status !== "claimed" ||
+    !state.capacityActive ||
+    state.publicPath !== resolve(publicPath) ||
+    state.evidenceRef !== evidenceRef ||
+    !state.pinnedFile ||
+    state.pinnedFileClosed
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  await assertAuthorityNamespaceOwnership(namespace, evidenceRef);
+  if (
+    !(await ownedGenerationStateMatches(
+      isolatedPath,
+      generation,
+      generation.nlink,
+      evidenceRef
+    ))
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  await assertCleanupPermitPinnedPrivateGeneration(
+    state,
+    generation,
+    generation.nlink,
+    evidenceRef
+  );
+  const ticket: PrivateGenerationSettlementTicket = {
+    permit,
+    publicPath: resolve(publicPath),
+    namespace,
+    isolatedPath,
+    generation: {
+      identity: Object.freeze({
+        dev: generation.identity.dev,
+        ino: generation.identity.ino
+      }),
+      bytes: Buffer.from(generation.bytes),
+      mode: generation.mode,
+      nlink: generation.nlink
+    },
+    phase: "isolated"
+  };
+  privateGenerationSettlementTickets.add(ticket);
+  return ticket;
+}
+
+function settlePrivateGenerationAfterFailure(
+  ticket: PrivateGenerationSettlementTicket
+): Promise<{ readonly status: "deleted" }> {
+  if (!privateGenerationSettlementTickets.has(ticket)) {
+    return Promise.reject(publicationStateError("private_generation_settlement"));
+  }
+  if (ticket.settlementPromise) return ticket.settlementPromise;
+  const settlement = settlePrivateGenerationAfterFailureOnce(ticket);
+  ticket.settlementPromise = settlement;
+  compensationTestHookStorage.getStore()?.onExactFailureSettlementPromise?.(
+    Object.freeze({
+      path: ticket.publicPath,
+      settlement,
+      settleSameTicket: () => settlePrivateGenerationAfterFailure(ticket)
+    })
+  );
+  return settlement;
+}
+
+async function settlePrivateGenerationAfterFailureOnce(
+  ticket: PrivateGenerationSettlementTicket
+): Promise<{ readonly status: "deleted" }> {
+  const state = cleanupPermitState.get(ticket.permit);
+  if (
+    !state ||
+    state.status !== "claimed" ||
+    !state.capacityActive ||
+    state.publicPath !== ticket.publicPath ||
+    !state.pinnedFile ||
+    state.pinnedFileClosed ||
+    (ticket.phase !== "isolated" && ticket.phase !== "generation_removed")
+  ) {
+    throw publicationStateError(state?.evidenceRef ?? "private_generation_settlement");
+  }
+  const evidenceRef = state.evidenceRef;
+  const resumedAfterRemoval = ticket.phase === "generation_removed";
+  ticket.phase = resumedAfterRemoval ? "generation_removed" : "settling";
+  try {
+    await compensationTestHookStorage.getStore()?.beforeExactFailureSettlement?.(
+      Object.freeze({ path: ticket.publicPath })
+    );
+
+    if (!resumedAfterRemoval) {
+      const unlinkFailures: FailureFoldEntry[] = [];
+      let removed = false;
+      for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
+        try {
+          await assertPrivateGenerationSettlementAuthority(ticket, state, evidenceRef);
+          const beforeUnlink = compensationTestHookStorage.getStore()
+            ?.beforeOwnedIsolatedSourceUnlink;
+          if (beforeUnlink) {
+            await runAuthorityMutatingCallbackBoundary(
+              () =>
+                beforeUnlink(
+                  Object.freeze({
+                    path: ticket.publicPath,
+                    isolatedPath: ticket.isolatedPath,
+                    site: "exact_failure_settlement" as const,
+                    attempt
+                  })
+                ),
+              async () =>
+                await assertPrivateGenerationSettlementAuthority(
+                  ticket,
+                  state,
+                  evidenceRef
+                )
+            );
+          }
+          await runOwnedAuthorityNamespaceMutation(
+            ticket.namespace,
+            evidenceRef,
+            async () => await unlink(ticket.isolatedPath)
+          );
+          ticket.phase = "generation_removed";
+          removed = true;
+          break;
+        } catch (error) {
+          if (
+            (((typeof error === "object" && error !== null) ||
+              typeof error === "function") &&
+              authorityCallbackProofFailures.has(error)) ||
+            taskServiceErrorAtBoundary(error) !== undefined
+          ) {
+            throw error;
+          }
+          unlinkFailures.push(captureFailureFoldEntry("settlement", error));
+          if (attempt < RECORD_TEMP_CLEANUP_ATTEMPTS) {
+            await sleep(RECORD_TEMP_CLEANUP_RETRY_MS);
+          }
+        }
+      }
+      if (!removed) {
+        throw preserveWorkspacePrimaryError(
+          unlinkFailures[0] ??
+            captureFailureFoldEntry("settlement", publicationStateError(evidenceRef)),
+          unlinkFailures.slice(1)
+        );
+      }
+    }
+
+    await assertPrivateGenerationRemoved(ticket, state, evidenceRef);
+    ticket.phase = "namespace_cleanup";
+    ticket.namespace =
+      await rebindExactOwnedAuthorityNamespaceForPrivateFinalization(
+        ticket.namespace,
+        evidenceRef
+      );
+    await removeEmptyAuthorityOwnedMutationNamespace(
+      ticket.namespace,
+      evidenceRef
+    );
+    ticket.phase = "settled_deleted";
+    return Object.freeze({ status: "deleted" as const });
+  } catch (error) {
+    if (ticket.phase !== "settled_deleted") ticket.phase = "failed_quarantined";
+    if (error instanceof TaskServiceError) throw error;
+    const typedFailure = publicationStateError(evidenceRef);
+    throw preserveWorkspaceRecordFailureGraph(
+      typedFailure,
+      [error],
+      "Private workspace generation settlement failed.",
+      "settlement",
+      ["settlement"]
+    );
+  }
+}
+
+async function assertPrivateGenerationSettlementAuthority(
+  ticket: PrivateGenerationSettlementTicket,
+  state: WorkspaceRecordCleanupPermitState,
+  evidenceRef: string
+): Promise<void> {
+  if (
+    !privateGenerationSettlementTickets.has(ticket) ||
+    (ticket.phase !== "isolated" && ticket.phase !== "settling")
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  ticket.namespace =
+    await rebindExactOwnedAuthorityNamespaceForPrivateFinalization(
+      ticket.namespace,
+      evidenceRef
+    );
+  if (
+    !(await ownedGenerationStateMatches(
+      ticket.isolatedPath,
+      ticket.generation,
+      ticket.generation.nlink,
+      evidenceRef
+    ))
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  await assertCleanupPermitPinnedPrivateGeneration(
+    state,
+    ticket.generation,
+    ticket.generation.nlink,
+    evidenceRef
+  );
+}
+
+async function assertPrivateGenerationRemoved(
+  ticket: PrivateGenerationSettlementTicket,
+  state: WorkspaceRecordCleanupPermitState,
+  evidenceRef: string
+): Promise<void> {
+  await assertAuthorityNamespaceOwnership(ticket.namespace, evidenceRef);
+  try {
+    await lstat(ticket.isolatedPath, { bigint: true });
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT")) {
+      throw publicationStateError(evidenceRef, error);
+    }
+    await assertCleanupPermitPinnedPrivateGeneration(
+      state,
+      ticket.generation,
+      0n,
+      evidenceRef
+    );
+    return;
+  }
+  throw publicationStateError(evidenceRef);
+}
+
+async function assertCleanupPermitPinnedPrivateGeneration(
+  state: WorkspaceRecordCleanupPermitState,
+  expected: OwnedGenerationExpectation,
+  expectedLinkCount: bigint,
+  evidenceRef: string
+): Promise<void> {
+  const pinnedFile = state.pinnedFile;
+  if (
+    state.status !== "claimed" ||
+    !state.capacityActive ||
+    !pinnedFile ||
+    state.pinnedFileClosed
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  try {
+    await compensationTestHookStorage.getStore()
+      ?.beforeCleanupPermitPinnedGenerationProof?.(
+        Object.freeze({ path: state.publicPath, fd: pinnedFile.fd })
+      );
+    const before = await pinnedFile.stat({ bigint: true });
+    const observed = await readBoundedOpenFile(pinnedFile, before);
+    if (
+      !before.isFile() ||
+      before.nlink !== expectedLinkCount ||
+      before.mode !== expected.mode ||
+      before.size !== BigInt(expected.bytes.length) ||
+      !workspaceRecordPhysicalIdentityMatches(before, expected.identity) ||
+      !observed.bytes.equals(expected.bytes) ||
+      observed.before.dev !== before.dev ||
+      observed.before.ino !== before.ino ||
+      observed.before.mode !== before.mode ||
+      observed.before.nlink !== before.nlink ||
+      observed.before.size !== before.size ||
+      observed.after.dev !== before.dev ||
+      observed.after.ino !== before.ino ||
+      observed.after.mode !== before.mode ||
+      observed.after.nlink !== before.nlink ||
+      observed.after.size !== before.size
+    ) {
+      throw publicationStateError(evidenceRef);
+    }
+  } catch (error) {
+    if (error instanceof TaskServiceError) throw error;
+    throw publicationStateError(evidenceRef, error);
+  }
 }
 
 async function removeWorkspaceRecordGenerationUnderCleanupPermitAuthority(
@@ -2515,7 +3266,11 @@ async function conditionalDeleteJsonRecordGenerationWithCleanupPermit<T>(
       );
     }
 
-    const mutationState = { started: false };
+    const mutationState: ConditionalDeleteMutationState = {
+      started: false,
+      exactIsolationCommitted: false,
+      postIsolationFailure: "restore"
+    };
     try {
       const admissionFailure = authorityLease.cleanupPermitAdmissionFailure;
       const classification =
@@ -2537,13 +3292,14 @@ async function conditionalDeleteJsonRecordGenerationWithCleanupPermit<T>(
           );
         } catch (cleanupError) {
           if (admissionFailure === undefined) throw cleanupError;
-          throw preserveWorkspacePrimaryError(
-            new WorkspaceRecordConditionalDeleteError(
+          const admissionError = new WorkspaceRecordConditionalDeleteError(
               "pre_mutation",
               "permit_admission",
               admissionFailure.value
-            ),
-            [cleanupError]
+            );
+          throw preserveWorkspacePrimaryError(
+            captureFailureFoldEntry("body", admissionError),
+            [captureFailureFoldEntry("final_release", cleanupError)]
           );
         }
       }
@@ -2635,7 +3391,10 @@ export async function settleWorkspaceRecordCleanupPermitAfterExactObservation(
         return removal;
       } catch (cleanupError) {
         if (cleanupError === admissionFailure.value) throw cleanupError;
-        throw preserveWorkspacePrimaryError(admissionFailure.value, [cleanupError]);
+        throw preserveWorkspacePrimaryError(
+          admissionFailure.occurrence,
+          [captureFailureFoldEntry("final_release", cleanupError)]
+        );
       } finally {
         await authorityLease.release();
       }
@@ -2658,7 +3417,7 @@ export async function settleWorkspaceRecordCleanupPermitAfterExactObservation(
         await authorityLease.validateCleanupGeneration();
       }
     } catch (error) {
-      validationFailure = { value: error };
+      validationFailure = capturePresentFailure("body", error);
     }
     if (!validationFailure) {
       await authorityLease.release();
@@ -2685,7 +3444,10 @@ export async function settleWorkspaceRecordCleanupPermitAfterExactObservation(
       return classification;
     } catch (cleanupError) {
       if (cleanupError === validationFailure.value) throw cleanupError;
-      throw preserveWorkspacePrimaryError(validationFailure.value, [cleanupError]);
+      throw preserveWorkspacePrimaryError(
+        validationFailure.occurrence,
+        [captureFailureFoldEntry("final_release", cleanupError)]
+      );
     } finally {
       await authorityLease.release();
     }
@@ -2758,13 +3520,13 @@ export async function validateWorkspaceRecordCleanupPermitAfterExactObservation(
           authorityLease.release,
           "Workspace record consumer validation and authority release both failed.",
           undefined,
-          preserveTaskServiceErrorCompensationCompatibility
+          preserveTaskServiceErrorFailureEntries
         );
       }),
     async () => await cancelRecordAuthorityCleanupPermit(permit),
     "Workspace record consumer validation and cleanup-permit cancellation both failed.",
     undefined,
-    preserveTaskServiceErrorCompensationCompatibility
+    preserveTaskServiceErrorFailureEntries
   );
 }
 
@@ -2870,7 +3632,7 @@ export async function replaceJsonRecordAfterExactObservation<T>(
     async () => await cancelRecordAuthorityCleanupPermit(permit),
     "Exact workspace record replacement and cleanup-permit settlement both failed.",
     undefined,
-    preserveTaskServiceErrorCompensationCompatibility
+    preserveTaskServiceErrorFailureEntries
   );
 }
 
@@ -2935,10 +3697,11 @@ async function conditionalDeleteJsonRecordWithDirectoryBindingOperation<T>(
 
   const hooks = publicationHookStorage.getStore();
   const authorityLease = await acquireRecordAuthority(path, evidenceRef, "delete", hooks);
-  const mutationState: {
-    started: boolean;
-    deletedGeneration?: WorkspaceRecordPhysicalIdentity;
-  } = { started: false };
+  const mutationState: ConditionalDeleteMutationState = {
+    started: false,
+    exactIsolationCommitted: false,
+    postIsolationFailure: "restore"
+  };
   try {
     const admittedParentBaseline = await captureSafeRecordDirectoryBaseline(
       parentPath,
@@ -2979,10 +3742,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
   schema: z.ZodType<T>,
   condition: ConditionalDeleteJsonRecordCondition<T>,
   hooks?: WorkspaceRecordPublicationHooks,
-  mutationState?: {
-    started: boolean;
-    deletedGeneration?: WorkspaceRecordPhysicalIdentity;
-  },
+  mutationState?: ConditionalDeleteMutationState,
   expectedGeneration?: OwnedGenerationExpectation,
   ordinaryCanonicalBaseline?: CanonicalAuthorityBaseline,
   admittedParentBaseline?: SafeRecordDirectoryBaseline,
@@ -3019,7 +3779,7 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
     try {
       matched = condition.matches(observation.record, condition.expected);
     } catch (error) {
-      conditionFailure = { value: error };
+      conditionFailure = capturePresentFailure("body", error);
     }
   }
   try {
@@ -3031,12 +3791,15 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       evidenceRef
     );
   } catch (proofError) {
-    const callbackErrors: unknown[] = [];
+    const callbackErrors: FailureFoldEntry[] = [];
     if (observation.status === "malformed" || observation.status === "schema_threw") {
-      callbackErrors.push(observation.error);
+      callbackErrors.push(observation.errorOccurrence);
     }
-    if (conditionFailure) callbackErrors.push(conditionFailure.value);
-    throw preserveWorkspacePrimaryError(proofError, callbackErrors);
+    if (conditionFailure) callbackErrors.push(conditionFailure.occurrence);
+    throw preserveWorkspacePrimaryError(
+      captureFailureFoldEntry("settlement", proofError),
+      callbackErrors
+    );
   }
   if (observation.status === "schema_threw") throw observation.error;
   if (conditionFailure) throw conditionFailure.value;
@@ -3148,14 +3911,17 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       );
     }
   } catch (error) {
-    const cleanupErrors: unknown[] = [];
+    const primaryEntry = captureFailureFoldEntry("body", error);
+    const cleanupErrors: FailureFoldEntry[] = [];
     try {
       await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
     } catch (cleanupError) {
-      cleanupErrors.push(cleanupError);
+      cleanupErrors.push(captureFailureFoldEntry("final_release", cleanupError));
     }
-    throw preserveWorkspacePrimaryError(error, cleanupErrors);
+    throw preserveWorkspacePrimaryError(primaryEntry, cleanupErrors);
   }
+  let isolationCommitted = false;
+  let isolationFailure: PresentFailure | undefined;
   try {
     await runOwnedRecordDirectoryTransferMutation(
       parentPath,
@@ -3163,29 +3929,74 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
       mutationNamespace.path,
       mutationNamespace.identity,
       evidenceRef,
-      async () => await rename(path, quarantinePath)
+      async () => {
+        await rename(path, quarantinePath);
+        isolationCommitted = true;
+        if (mutationState) {
+          mutationState.started = true;
+          if (mutationState.postIsolationFailure === "handoff_private_exact") {
+            mutationState.exactIsolationCommitted = true;
+          }
+        }
+        await compensationHooks?.afterOwnedPathIsolationSyscall?.(
+          Object.freeze({
+            path,
+            isolatedPath: quarantinePath,
+            site: "conditional_delete" as const
+          })
+        );
+      }
     );
-    if (mutationState) mutationState.started = true;
   } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
+    if (isolationCommitted) {
+      try {
+        const reboundNamespace = await rebindExactOwnedAuthorityNamespaceForPrivateFinalization(
+          mutationNamespace,
+          evidenceRef
+        );
+        if (
+          mutationState?.postIsolationFailure === "handoff_private_exact" &&
+          mutationState.privateSettlementPermit
+        ) {
+          mutationState.privateSettlementTicket =
+            await capturePrivateGenerationSettlementTicket(
+              mutationState.privateSettlementPermit,
+              path,
+              reboundNamespace,
+              quarantinePath,
+              generationExpectation,
+              evidenceRef
+            );
+        }
+      } catch (rebindError) {
+        error = preserveWorkspacePrimaryError(
+          captureFailureFoldEntry("body", error),
+          [capturePostSettlementFailureFoldEntry(rebindError)]
+        );
+      }
+      isolationFailure = capturePresentFailure("body", error);
+    } else {
+      if (hasErrorCode(error, "ENOENT")) {
+        await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
+        return { status: "missing" };
+      }
       await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
-      return { status: "missing" };
+      if (error instanceof TaskServiceError) throw error;
+      throw serviceWorkspaceError(
+        "workspace_path_not_safe",
+        "Failed to conditionally remove workspace record.",
+        "The workspace record could not be removed safely.",
+        [evidenceRef],
+        error
+      );
     }
-    await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
-    if (error instanceof TaskServiceError) throw error;
-    throw serviceWorkspaceError(
-      "workspace_path_not_safe",
-      "Failed to conditionally remove workspace record.",
-      "The workspace record could not be removed safely.",
-      [evidenceRef],
-      error
-    );
   }
 
   let quarantinedIdentity: OwnedTemporaryRecordIdentity | undefined;
-  let namespaceCleanupAttempted = false;
+  let namespaceCleanupCompleted = false;
   let modeNormalizationCommitted = false;
   try {
+    if (isolationFailure) throw isolationFailure.value;
     if (requiresPrivateModeNormalization) {
       generationExpectation = await normalizeLegacyIsolatedGenerationMode(
         quarantinePath,
@@ -3194,6 +4005,21 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
         evidenceRef
       );
       modeNormalizationCommitted = true;
+    }
+    if (
+      mutationState?.postIsolationFailure === "handoff_private_exact" &&
+      mutationState.privateSettlementPermit &&
+      !mutationState.privateSettlementTicket
+    ) {
+      mutationState.privateSettlementTicket =
+        await capturePrivateGenerationSettlementTicket(
+          mutationState.privateSettlementPermit,
+          path,
+          mutationNamespace,
+          quarantinePath,
+          generationExpectation,
+          evidenceRef
+        );
     }
     const afterIsolation = compensationTestHookStorage.getStore()?.afterOwnedPathIsolation;
     if (afterIsolation) {
@@ -3207,6 +4033,18 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
             })
           ),
         async () => {
+          if (mutationState?.privateSettlementTicket) {
+            const state = cleanupPermitState.get(
+              mutationState.privateSettlementTicket.permit
+            );
+            if (!state) throw publicationStateError(evidenceRef);
+            await assertPrivateGenerationSettlementAuthority(
+              mutationState.privateSettlementTicket,
+              state,
+              evidenceRef
+            );
+            return;
+          }
           if (
             !(await ownedGenerationStateMatches(
               quarantinePath,
@@ -3267,51 +4105,63 @@ async function conditionalDeleteJsonRecordUnderAuthority<T>(
           dev: quarantinedIdentity.dev,
           ino: quarantinedIdentity.ino
         });
+        if (mutationState.privateSettlementTicket) {
+          mutationState.privateSettlementTicket.phase = "generation_removed";
+        }
       }
-      namespaceCleanupAttempted = true;
       let namespaceCleanupFailure: PresentFailure | undefined;
-      let namespaceCleanupCompensations: readonly unknown[] = [];
+      let namespaceCleanupCompensations: readonly FailureFoldEntry[] = [];
       try {
         namespaceCleanupCompensations = await removeEmptyAuthorityOwnedMutationNamespace(
           mutationNamespace,
           evidenceRef
         );
+        namespaceCleanupCompleted = true;
       } catch (error) {
-        namespaceCleanupFailure = { value: error };
+        namespaceCleanupFailure = capturePresentFailure("final_release", error);
+      }
+      if (namespaceCleanupFailure) throw namespaceCleanupFailure.value;
+      if (
+        mutationState?.postIsolationFailure === "handoff_private_exact" &&
+        mutationState.privateSettlementTicket
+      ) {
+        mutationState.privateSettlementTicket.phase = "settled_deleted";
+        return { status: "deleted" };
       }
       try {
         await assertRecordDirectoryIdentity(parentPath, parentIdentity, evidenceRef);
         await assertMutableCanonicalBaseline(path, { status: "absent" }, evidenceRef);
       } catch (proofError) {
         throw preserveWorkspacePrimaryError(
-          proofError,
-          [
-            ...(namespaceCleanupFailure ? [namespaceCleanupFailure.value] : []),
-            ...namespaceCleanupCompensations
-          ]
+          captureFailureFoldEntry("final_release", proofError),
+          [...namespaceCleanupCompensations]
         );
       }
-      if (namespaceCleanupFailure) throw namespaceCleanupFailure.value;
       return { status: "deleted" };
     }
 
     throw recordChangedBeforeConditionalRemovalError(evidenceRef);
   } catch (error) {
-    const compensationErrors = await compensateOwnedIsolatedPath(
-      quarantinePath,
-      path,
-      mutationNamespace,
-      generationExpectation,
-      evidenceRef,
-      "conditional_delete",
-      namespaceCleanupAttempted,
-      undefined,
-      modeNormalizationCommitted ? admittedPublicGeneration : undefined
-    );
-    const primary = preserveWorkspacePrimaryError(error, compensationErrors);
+    const primaryEntry = captureFailureFoldEntry("body", error);
+    const compensationErrors =
+      mutationState?.postIsolationFailure === "handoff_private_exact" &&
+      mutationState.exactIsolationCommitted
+        ? []
+        : await compensateOwnedIsolatedPath(
+            quarantinePath,
+            path,
+            mutationNamespace,
+            generationExpectation,
+            evidenceRef,
+            "conditional_delete",
+            namespaceCleanupCompleted,
+            undefined,
+            modeNormalizationCommitted ? admittedPublicGeneration : undefined
+          );
+    const primary = preserveWorkspacePrimaryError(primaryEntry, compensationErrors);
     let taskServiceCompatible = false;
     try {
-      taskServiceCompatible = primary instanceof TaskServiceError;
+      taskServiceCompatible = taskServiceErrorAtBoundary(primary) !== undefined;
     } catch {
       taskServiceCompatible = false;
     }
@@ -3607,6 +4457,7 @@ type JsonRecordInspection<T> =
   | {
       status: "malformed";
       error: TaskServiceError;
+      errorOccurrence: FailureFoldEntry;
       bytes: Buffer;
       authorityObservation: Extract<
         Awaited<ReturnType<typeof readDurableSingleLinkFile>>,
@@ -3616,6 +4467,7 @@ type JsonRecordInspection<T> =
   | {
       status: "schema_threw";
       error: unknown;
+      errorOccurrence: FailureFoldEntry;
       bytes: Buffer;
       authorityObservation: Extract<
         Awaited<ReturnType<typeof readDurableSingleLinkFile>>,
@@ -3647,7 +4499,10 @@ async function readJsonRecordUnderAuthority<T>(
     );
   } catch (proofError) {
     if (inspection.status === "malformed" || inspection.status === "schema_threw") {
-      throw preserveWorkspacePrimaryError(proofError, [inspection.error]);
+      throw preserveWorkspacePrimaryError(
+        captureFailureFoldEntry("settlement", proofError),
+        [inspection.errorOccurrence]
+      );
     }
     throw proofError;
   }
@@ -3685,6 +4540,9 @@ async function inspectJsonRecordUnderAuthority<T>(
   const durableFailure = durableRead.status === "invalid"
     ? recordDurableReadError(durableRead.reason, evidenceRef, durableRead.cause)
     : undefined;
+  const durableFailureEntry = durableFailure
+    ? captureFailureFoldEntry("body", durableFailure)
+    : undefined;
   if (afterDurableObservation) {
     const callbackOutcome = await captureAuthorityMutatingCallbackBoundary(
       () => afterDurableObservation(Object.freeze({ path, status: durableRead.status })),
@@ -3696,11 +4554,16 @@ async function inspectJsonRecordUnderAuthority<T>(
           canonicalBaseline,
           evidenceRef
         ),
-      durableFailure ? [durableFailure] : []
+      durableFailureEntry ? [durableFailureEntry] : [],
+      undefined,
+      durableFailureEntry ? "settlement" : "operation"
     );
     if (callbackOutcome.status === "callback_failed") {
       if (durableFailure) {
-        throw preserveWorkspacePrimaryError(durableFailure, [callbackOutcome.error]);
+        throw preserveWorkspacePrimaryError(
+          durableFailureEntry!,
+          [captureFailureFoldEntry("settlement", callbackOutcome.error)]
+        );
       }
       throw callbackOutcome.error;
     }
@@ -3716,17 +4579,19 @@ async function inspectJsonRecordUnderAuthority<T>(
   try {
     rawRecord = JSON.parse(durableRead.bytes.toString("utf8")) as unknown;
   } catch (error) {
+    const malformedError = serviceWorkspaceError(
+      "record_malformed",
+      "Record is not valid JSON.",
+      "A workspace record is malformed.",
+      [evidenceRef],
+      error
+    );
     return {
       status: "malformed",
       bytes: durableRead.bytes,
       authorityObservation: durableRead,
-      error: serviceWorkspaceError(
-        "record_malformed",
-        "Record is not valid JSON.",
-        "A workspace record is malformed.",
-        [evidenceRef],
-        error
-      )
+      error: malformedError,
+      errorOccurrence: captureFailureFoldEntry("body", malformedError)
     };
   }
 
@@ -3739,24 +4604,27 @@ async function inspectJsonRecordUnderAuthority<T>(
     return {
       status: "schema_threw",
       error: schemaError,
+      errorOccurrence: captureFailureFoldEntry("body", schemaError),
       bytes: durableRead.bytes,
       authorityObservation: durableRead
     };
   }
   if (!parsedRecord.success) {
+    const schemaValidationError = new TaskServiceError({
+      code: "record_schema_error",
+      status: 400,
+      category: "schema_error",
+      message: "Workspace record failed schema validation.",
+      userMessage: "A workspace record has invalid fields.",
+      evidenceRefs: toSchemaEvidenceRefs(parsedRecord.error, evidenceRef),
+      recommendedNextActions: ["Inspect and repair the workspace record before retrying."]
+    });
     return {
       status: "malformed",
       bytes: durableRead.bytes,
       authorityObservation: durableRead,
-      error: new TaskServiceError({
-        code: "record_schema_error",
-        status: 400,
-        category: "schema_error",
-        message: "Workspace record failed schema validation.",
-        userMessage: "A workspace record has invalid fields.",
-        evidenceRefs: toSchemaEvidenceRefs(parsedRecord.error, evidenceRef),
-        recommendedNextActions: ["Inspect and repair the workspace record before retrying."]
-      })
+      error: schemaValidationError,
+      errorOccurrence: captureFailureFoldEntry("body", schemaValidationError)
     };
   }
 
@@ -3769,6 +4637,7 @@ async function inspectJsonRecordUnderAuthority<T>(
     return {
       status: "schema_threw",
       error: normalizationError,
+      errorOccurrence: captureFailureFoldEntry("body", normalizationError),
       bytes: durableRead.bytes,
       authorityObservation: durableRead
     };
@@ -3895,7 +4764,7 @@ async function readRecordPathIdentity(
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return undefined;
     }
-    if (error instanceof TaskServiceError) {
+    if (taskServiceErrorAtBoundary(error) !== undefined) {
       throw error;
     }
     throw recordDurableReadError("inspect_failed", evidenceRef, error);
@@ -3916,7 +4785,7 @@ async function readRegularFilePathIdentity(
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return undefined;
     }
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw recordDurableReadError("inspect_failed", evidenceRef, error);
   }
 }
@@ -4019,7 +4888,7 @@ async function createPrivateAuthorityNamespaceAt(
     if (!identity) throw publicationStateError(evidenceRef);
     return identity;
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw serviceWorkspaceError(
       "workspace_path_not_safe",
       "Failed to create a private workspace mutation namespace.",
@@ -4035,7 +4904,7 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
   evidenceRef: string,
   invokeHooks = true,
   proveCallerAuthority?: () => Promise<void>
-): Promise<readonly unknown[]> {
+): Promise<readonly FailureFoldEntry[]> {
   if (!invokeHooks) {
     ownership = await rebindExactOwnedAuthorityNamespaceForPrivateFinalization(
       ownership,
@@ -4043,7 +4912,7 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
     );
   }
   let primaryFailure: PresentFailure | undefined;
-  const compensationErrors: unknown[] = [];
+  const compensationErrors: FailureFoldEntry[] = [];
   let hookFailureObserved = false;
   let hookAuthorityProofFailureObserved = false;
   let namespaceOwnershipProofFailureObserved = false;
@@ -4057,7 +4926,10 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
             async () => {
               await assertAuthorityNamespaceOwnership(ownership, evidenceRef);
               await proveCallerAuthority?.();
-            }
+            },
+            [],
+            undefined,
+            "final_release"
           );
         } catch (error) {
           hookFailureObserved = true;
@@ -4070,7 +4942,8 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
           primaryFailure = appendSequentialFailure(
             primaryFailure,
             compensationErrors,
-            error
+            error,
+            "final_release"
           );
           if (attempt < RECORD_NAMESPACE_CLEANUP_ATTEMPTS) {
             await sleep(RECORD_TEMP_CLEANUP_RETRY_MS);
@@ -4085,7 +4958,7 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
         evidenceRef
       );
       return primaryFailure
-        ? [primaryFailure.value, ...compensationErrors]
+        ? [primaryFailure.occurrence, ...compensationErrors]
         : [];
     } catch (error) {
       if (
@@ -4097,7 +4970,8 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
       primaryFailure = appendSequentialFailure(
         primaryFailure,
         compensationErrors,
-        error
+        error,
+        "final_release"
       );
       if (attempt < RECORD_NAMESPACE_CLEANUP_ATTEMPTS) {
         await sleep(RECORD_TEMP_CLEANUP_RETRY_MS);
@@ -4124,13 +4998,14 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
         false
       );
       if (!hookAuthorityProofFailureObserved) {
-        return [primaryFailure!.value, ...compensationErrors];
+        return [primaryFailure!.occurrence, ...compensationErrors];
       }
     } catch (error) {
       primaryFailure = appendSequentialFailure(
         primaryFailure,
         compensationErrors,
-        error
+        error,
+        "final_release"
       );
     }
   }
@@ -4149,13 +5024,14 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
         false
       );
       return primaryFailure
-        ? [primaryFailure.value, ...compensationErrors]
+        ? [primaryFailure.occurrence, ...compensationErrors]
         : [];
     } catch (error) {
       primaryFailure = appendSequentialFailure(
         primaryFailure,
         compensationErrors,
-        error
+        error,
+        "final_release"
       );
     }
   }
@@ -4165,7 +5041,7 @@ async function removeEmptyAuthorityOwnedMutationNamespace(
     "Workspace mutation namespace cleanup did not complete.",
     "The workspace record mutation could not be finalized safely.",
     [evidenceRef],
-    preserveWorkspacePrimaryError(primaryFailure!.value, compensationErrors)
+    preserveWorkspacePrimaryError(primaryFailure!.occurrence, compensationErrors)
   );
 }
 
@@ -4215,6 +5091,7 @@ export async function publishJsonRecordWithLifecycleCallbacks<T>(
   let directoryPath: string | undefined;
   let cleanupPermit: WorkspaceRecordCleanupPermit | undefined;
   let operationFailure: PresentFailure | undefined;
+  let failedWriteCommitted = false;
   const lifecycleCallbackBoundaryObserved =
     beforeWrite !== undefined || afterWrite !== undefined;
   const exactGenerationPermitRequired =
@@ -4262,6 +5139,7 @@ export async function publishJsonRecordWithLifecycleCallbacks<T>(
       );
       if (writeOutcome.status === "failed") {
         cleanupPermit = writeOutcome.cleanupPermit;
+        failedWriteCommitted = writeOutcome.committed;
         throw writeOutcome.error;
       }
       const written = writeOutcome.written;
@@ -4297,10 +5175,13 @@ export async function publishJsonRecordWithLifecycleCallbacks<T>(
       return written.data;
     });
   } catch (error) {
-    operationFailure = { value: error };
+    operationFailure = capturePresentFailure(
+      failedWriteCommitted ? "final_release" : "body",
+      error
+    );
   }
 
-  const compensationErrors: unknown[] = [];
+  const compensationErrors: FailureFoldEntry[] = [];
   if (cleanupPermit) {
     const permit = cleanupPermit;
     cleanupPermit = undefined;
@@ -4317,7 +5198,7 @@ export async function publishJsonRecordWithLifecycleCallbacks<T>(
         { kind: "record", expected: record, matches: () => true }
       );
     } catch (error) {
-      compensationErrors.push(error);
+      compensationErrors.push(captureFailureFoldEntry("final_release", error));
     }
   }
   if (directoryPath) {
@@ -4328,10 +5209,10 @@ export async function publishJsonRecordWithLifecycleCallbacks<T>(
         evidenceRef
       );
     } catch (error) {
-      compensationErrors.push(error);
+      compensationErrors.push(captureFailureFoldEntry("final_release", error));
     }
   }
-  throw preserveWorkspacePrimaryError(operationFailure!.value, compensationErrors);
+  throw preserveWorkspacePrimaryError(operationFailure!.occurrence, compensationErrors);
 }
 
 async function assertExactWorkspaceRecordBytesWithDirectoryBindingOperation(
@@ -4457,6 +5338,7 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
 ): Promise<AttemptedPreparedJsonRecordWrite<T>> {
   const {
     data,
+    workspaceRoot,
     directoryPath,
     directoryIdentity,
     fileName,
@@ -4478,7 +5360,7 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
   let committedPublication: CommittedMutableRecordPublication | undefined;
   let committed = false;
   let operationFailure: PresentFailure | undefined;
-  const compensationErrors: unknown[] = [];
+  const compensationErrors: FailureFoldEntry[] = [];
   let cleanupPermit: WorkspaceRecordCleanupPermit | undefined;
   let cleanupPermitOwnership: "none" | "owned" | "transferred" = "none";
   const commitState: MutableRecordPublicationCommitState = {
@@ -4548,7 +5430,8 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
         evidenceRef,
         hooks,
         cleanupPermit,
-        commitState
+        commitState,
+        workspaceRoot
       );
       committed = true;
     } catch (error) {
@@ -4560,7 +5443,10 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
         committed = true;
       }
       if (commitState.committed) committed = true;
-      operationFailure = { value: error };
+      operationFailure = capturePresentFailure(
+        commitState.committed ? "final_release" : "body",
+        error
+      );
     }
 
     if (temporaryRecord && !temporaryRecord.handleClosed) {
@@ -4570,7 +5456,8 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
         operationFailure = appendSequentialFailure(
           operationFailure,
           compensationErrors,
-          error
+          error,
+          "final_release"
         );
       }
     }
@@ -4592,13 +5479,17 @@ async function attemptPreparedJsonRecordWriteWithDirectoryBindingOperation<T>(
         operationFailure = appendSequentialFailure(
           operationFailure,
           compensationErrors,
-          error
+          error,
+          "final_release"
         );
       }
     }
 
     if (operationFailure) {
-      const error = preserveWorkspacePrimaryError(operationFailure.value, compensationErrors);
+      const error = preserveWorkspacePrimaryError(
+        operationFailure.occurrence,
+        compensationErrors
+      );
       if (cleanupPermit && commitState.cleanupPermitBound) {
         cleanupPermitOwnership = "transferred";
         return Object.freeze({
@@ -4647,7 +5538,8 @@ async function publishOwnedMutableRecord(
   evidenceRef: string,
   hooks: WorkspaceRecordPublicationHooks | undefined,
   cleanupPermit: WorkspaceRecordCleanupPermit | undefined,
-  commitState: MutableRecordPublicationCommitState
+  commitState: MutableRecordPublicationCommitState,
+  workspaceRoot: string
 ): Promise<CommittedMutableRecordPublication> {
   const beforeCommittedMutableBaselineCapture =
     hooks?.beforeCommittedMutableBaselineCapture;
@@ -4771,7 +5663,7 @@ async function publishOwnedMutableRecord(
   } catch (baselineError) {
     committedBaselineCapture = {
       status: "failed",
-      failure: { value: baselineError }
+      failure: capturePresentFailure("settlement", baselineError)
     };
   }
 
@@ -4780,7 +5672,7 @@ async function publishOwnedMutableRecord(
   // proven commit, but they remain explicit after the committed generation and
   // its rebound parent authority are reproved.
   let namespaceCleanupFailure: PresentFailure | undefined;
-  let namespaceCleanupCompensations: readonly unknown[] = [];
+  let namespaceCleanupCompensations: readonly FailureFoldEntry[] = [];
   try {
     namespaceCleanupCompensations = await removeEmptyAuthorityOwnedMutationNamespace(
       {
@@ -4792,25 +5684,28 @@ async function publishOwnedMutableRecord(
       evidenceRef
     );
   } catch (error) {
-    namespaceCleanupFailure = { value: error };
+    namespaceCleanupFailure = capturePresentFailure("final_release", error);
   }
   const orderedNamespaceCleanupFailures = [
-    ...(namespaceCleanupFailure ? [namespaceCleanupFailure.value] : []),
+    ...(namespaceCleanupFailure ? [namespaceCleanupFailure.occurrence] : []),
     ...namespaceCleanupCompensations
   ];
   try {
     await bindCommittedCleanupPermitGeneration();
   } catch (bindingError) {
-    throw preserveWorkspacePrimaryError(bindingError, [
-      ...(committedBaselineCapture.status === "failed"
-        ? [committedBaselineCapture.failure.value]
-        : []),
-      ...orderedNamespaceCleanupFailures
-    ]);
+    throw preserveWorkspacePrimaryError(
+      captureFailureFoldEntry("final_release", bindingError),
+      [
+        ...(committedBaselineCapture.status === "failed"
+          ? [committedBaselineCapture.failure.occurrence]
+          : []),
+        ...orderedNamespaceCleanupFailures
+      ]
+    );
   }
   if (committedBaselineCapture.status === "failed") {
     throw preserveWorkspacePrimaryError(
-      committedBaselineCapture.failure.value,
+      committedBaselineCapture.failure.occurrence,
       orderedNamespaceCleanupFailures
     );
   }
@@ -4825,13 +5720,13 @@ async function publishOwnedMutableRecord(
     );
   } catch (proofError) {
     throw preserveWorkspacePrimaryError(
-      proofError,
+      captureFailureFoldEntry("final_release", proofError),
       orderedNamespaceCleanupFailures
     );
   }
   if (namespaceCleanupFailure) {
     const orderedCleanupFailure = preserveWorkspacePrimaryError(
-      namespaceCleanupFailure.value,
+      namespaceCleanupFailure.occurrence,
       [...namespaceCleanupCompensations]
     );
     const committedCleanupFailure = serviceWorkspaceError(
@@ -5097,7 +5992,7 @@ async function createJsonRecordIfAbsentWithDirectoryBindingOperation<T>(
         }
       }
     } catch (error) {
-      operationFailure = { value: error };
+      operationFailure = capturePresentFailure("body", error);
     }
 
     if (ownedResources.temporaryRecord && !ownedResources.handleClosed) {
@@ -5107,7 +6002,8 @@ async function createJsonRecordIfAbsentWithDirectoryBindingOperation<T>(
         operationFailure = appendSequentialFailure(
           operationFailure,
           compensationErrors,
-          cleanupError
+          cleanupError,
+          "final_release"
         );
       }
     }
@@ -5139,7 +6035,8 @@ async function createJsonRecordIfAbsentWithDirectoryBindingOperation<T>(
         operationFailure = appendSequentialFailure(
           operationFailure,
           compensationErrors,
-          cleanupError
+          cleanupError,
+          "final_release"
         );
       }
     }
@@ -5173,7 +6070,7 @@ async function createJsonRecordIfAbsentWithDirectoryBindingOperation<T>(
           );
         }
       } catch (error) {
-        operationFailure = { value: error };
+        operationFailure = capturePresentFailure("settlement", error);
       }
     }
 
@@ -5200,10 +6097,10 @@ async function createJsonRecordIfAbsentWithDirectoryBindingOperation<T>(
           ownedResources,
           rollbackAuthorityBefore
         )) {
-          compensationErrors.unshift(operationFailure.value);
-          operationFailure = { value: error };
+          compensationErrors.unshift(operationFailure.occurrence);
+          operationFailure = capturePresentFailure("final_release", error);
         } else {
-          compensationErrors.push(error);
+          compensationErrors.push(captureFailureFoldEntry("final_release", error));
         }
         try {
           const ownership = hardlinkTemporaryNamespaceOwnership(
@@ -5219,7 +6116,7 @@ async function createJsonRecordIfAbsentWithDirectoryBindingOperation<T>(
             await removeEmptyAuthorityOwnedMutationNamespace(ownership, evidenceRef);
           }
         } catch (cleanupError) {
-          compensationErrors.push(cleanupError);
+          compensationErrors.push(captureFailureFoldEntry("final_release", cleanupError));
         }
       }
       const compensationInspectionAuthorityBefore =
@@ -5260,10 +6157,10 @@ async function createJsonRecordIfAbsentWithDirectoryBindingOperation<T>(
           ownedResources,
           compensationInspectionAuthorityBefore
         )) {
-          compensationErrors.unshift(operationFailure.value);
-          operationFailure = { value: error };
+          compensationErrors.unshift(operationFailure!.occurrence);
+          operationFailure = capturePresentFailure("final_release", error);
         } else {
-          compensationErrors.push(error);
+          compensationErrors.push(captureFailureFoldEntry("final_release", error));
         }
         try {
           await finalizeHardlinkTemporaryCompensation(
@@ -5275,7 +6172,7 @@ async function createJsonRecordIfAbsentWithDirectoryBindingOperation<T>(
             ownedResources.temporaryIdentity ?? ownedResources.canonicalIdentity
           );
         } catch (cleanupError) {
-          compensationErrors.push(cleanupError);
+          compensationErrors.push(captureFailureFoldEntry("final_release", cleanupError));
         }
       }
       publicationOutcome = undefined;
@@ -5319,7 +6216,7 @@ async function createJsonRecordIfAbsentWithDirectoryBindingOperation<T>(
           ownedResources.temporaryIdentity
         );
       } catch (error) {
-        compensationErrors.push(error);
+        compensationErrors.push(captureFailureFoldEntry("final_release", error));
         try {
           await finalizeHardlinkTemporaryCompensation(
             ownedResources,
@@ -5330,13 +6227,13 @@ async function createJsonRecordIfAbsentWithDirectoryBindingOperation<T>(
             ownedResources.temporaryIdentity
           );
         } catch (cleanupError) {
-          compensationErrors.push(cleanupError);
+          compensationErrors.push(captureFailureFoldEntry("final_release", cleanupError));
         }
       }
     }
 
     if (operationFailure) {
-      throw preserveWorkspacePrimaryError(operationFailure.value, compensationErrors);
+      throw preserveWorkspacePrimaryError(operationFailure.occurrence, compensationErrors);
     }
 
     if (publicationOutcome === "exists") {
@@ -5392,7 +6289,7 @@ async function closeHardlinkTemporaryRecord(
     })
   });
   let primaryFailure: PresentFailure | undefined;
-  const compensationErrors: unknown[] = [];
+  const compensationErrors: FailureFoldEntry[] = [];
   try {
     await runHardlinkPostLinkCallbackBoundary(
       ownedResources,
@@ -5408,7 +6305,7 @@ async function closeHardlinkTemporaryRecord(
         )
     );
   } catch (error) {
-    primaryFailure = { value: error };
+    primaryFailure = capturePresentFailure("final_release", error);
   }
 
   try {
@@ -5416,7 +6313,12 @@ async function closeHardlinkTemporaryRecord(
     temporaryRecord.handleClosed = true;
     ownedResources.handleClosed = true;
   } catch (error) {
-    primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, error);
+    primaryFailure = appendSequentialFailure(
+      primaryFailure,
+      compensationErrors,
+      error,
+      "final_release"
+    );
   }
 
   if (temporaryRecord.handleClosed) {
@@ -5435,12 +6337,17 @@ async function closeHardlinkTemporaryRecord(
           )
       );
     } catch (error) {
-      primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, error);
+      primaryFailure = appendSequentialFailure(
+        primaryFailure,
+        compensationErrors,
+        error,
+        "final_release"
+      );
     }
   }
 
   if (primaryFailure) {
-    throw preserveWorkspacePrimaryError(primaryFailure.value, compensationErrors);
+    throw preserveWorkspacePrimaryError(primaryFailure.occurrence, compensationErrors);
   }
 }
 
@@ -5461,27 +6368,37 @@ async function closeTemporaryRecord(
     })
   });
   let primaryFailure: PresentFailure | undefined;
-  const compensationErrors: unknown[] = [];
+  const compensationErrors: FailureFoldEntry[] = [];
   try {
     await hooks?.beforeTemporaryFileClose?.(hookInput);
   } catch (error) {
-    primaryFailure = { value: error };
+    primaryFailure = capturePresentFailure("final_release", error);
   }
   try {
     await temporaryRecord.file.close();
     temporaryRecord.handleClosed = true;
   } catch (error) {
-    primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, error);
+    primaryFailure = appendSequentialFailure(
+      primaryFailure,
+      compensationErrors,
+      error,
+      "final_release"
+    );
   }
   if (temporaryRecord.handleClosed) {
     try {
       await hooks?.afterTemporaryFileClosed?.(hookInput);
     } catch (error) {
-      primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, error);
+      primaryFailure = appendSequentialFailure(
+        primaryFailure,
+        compensationErrors,
+        error,
+        "final_release"
+      );
     }
   }
   if (primaryFailure) {
-    throw preserveWorkspacePrimaryError(primaryFailure.value, compensationErrors);
+    throw preserveWorkspacePrimaryError(primaryFailure.occurrence, compensationErrors);
   }
 }
 
@@ -5514,7 +6431,7 @@ async function finalizeHardlinkTemporaryCompensation(
   );
   await assertHardlinkCanonicalCompensationState(ownedResources, evidenceRef);
   let finalizationFailure: PresentFailure | undefined;
-  const finalizationCompensations: unknown[] = [];
+  const finalizationCompensations: FailureFoldEntry[] = [];
   if (namespacePresent && (await recordPathEntryExists(temporaryPath, evidenceRef))) {
     try {
       await removeOwnedPathWithoutHooks(
@@ -5526,7 +6443,7 @@ async function finalizeHardlinkTemporaryCompensation(
         ownership.identity
       );
     } catch (error) {
-      finalizationFailure = { value: error };
+      finalizationFailure = capturePresentFailure("final_release", error);
     }
   }
   if (namespacePresent) {
@@ -5536,13 +6453,14 @@ async function finalizeHardlinkTemporaryCompensation(
       finalizationFailure = appendSequentialFailure(
         finalizationFailure,
         finalizationCompensations,
-        error
+        error,
+        "final_release"
       );
     }
   }
   if (finalizationFailure) {
     throw preserveWorkspacePrimaryError(
-      finalizationFailure.value,
+      finalizationFailure.occurrence,
       finalizationCompensations
     );
   }
@@ -5610,25 +6528,24 @@ async function writeOwnedTemporaryRecordFile(
       handleClosed: false
     };
   } catch (error) {
-    operationFailure = {
-      value: serviceWorkspaceError(
+    const operationError = serviceWorkspaceError(
         "workspace_path_not_safe",
         "Failed to write workspace record temporary file.",
         "The workspace record could not be written safely.",
         [evidenceRef],
         error
-      )
-    };
+      );
+    operationFailure = capturePresentFailure("body", operationError);
   }
 
-  const cleanupErrors: unknown[] = [];
+  const cleanupErrors: FailureFoldEntry[] = [];
   if (shouldCleanup) {
     let observedBytes: Buffer | undefined;
     if (temporaryFile) {
       try {
         observedBytes = (await readBoundedOpenFile(temporaryFile)).bytes;
       } catch (error) {
-        cleanupErrors.push(error);
+        cleanupErrors.push(captureFailureFoldEntry("final_release", error));
       }
     }
     if (temporaryIdentity && observedBytes) {
@@ -5650,14 +6567,14 @@ async function writeOwnedTemporaryRecordFile(
           namespaceIdentity
         );
       } catch (error) {
-        cleanupErrors.push(error);
+        cleanupErrors.push(captureFailureFoldEntry("final_release", error));
       }
     }
     if (temporaryFile) {
       try {
         await temporaryFile.close();
       } catch (error) {
-        cleanupErrors.push(error);
+        cleanupErrors.push(captureFailureFoldEntry("final_release", error));
       }
     }
   }
@@ -5673,10 +6590,10 @@ async function writeOwnedTemporaryRecordFile(
         evidenceRef
       );
     } catch (error) {
-      cleanupErrors.push(error);
+      cleanupErrors.push(captureFailureFoldEntry("final_release", error));
     }
   }
-  throw preserveWorkspacePrimaryError(operationFailure!.value, cleanupErrors);
+  throw preserveWorkspacePrimaryError(operationFailure!.occurrence, cleanupErrors);
 }
 
 async function removeOwnedMutablePublicationResources(
@@ -5717,10 +6634,10 @@ async function removeOwnedMutablePublicationResources(
     );
     return;
   } catch (error) {
-    cleanupFailure = { value: error };
+    cleanupFailure = capturePresentFailure("final_release", error);
   }
 
-  const finalizationErrors: unknown[] = [];
+  const finalizationErrors: FailureFoldEntry[] = [];
   let namespaceOwnership: OwnedAuthorityNamespace = {
     path: namespacePath,
     parentPath: directoryPath,
@@ -5784,10 +6701,10 @@ async function removeOwnedMutablePublicationResources(
 
     await removeEmptyAuthorityOwnedMutationNamespace(namespaceOwnership, evidenceRef, false);
   } catch (error) {
-    finalizationErrors.push(error);
+    finalizationErrors.push(captureFailureFoldEntry("final_release", error));
   }
 
-  throw preserveWorkspacePrimaryError(cleanupFailure!.value, finalizationErrors);
+  throw preserveWorkspacePrimaryError(cleanupFailure!.occurrence, finalizationErrors);
 }
 
 async function conditionalUnlinkOwnedPath(
@@ -5849,13 +6766,14 @@ async function conditionalUnlinkOwnedPath(
       }
     );
   } catch (error) {
-    const cleanupErrors: unknown[] = [];
+    const primaryEntry = captureFailureFoldEntry("body", error);
+    const cleanupErrors: FailureFoldEntry[] = [];
     try {
       await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
     } catch (cleanupError) {
-      cleanupErrors.push(cleanupError);
+      cleanupErrors.push(captureFailureFoldEntry("final_release", cleanupError));
     }
-    throw preserveWorkspacePrimaryError(error, cleanupErrors);
+    throw preserveWorkspacePrimaryError(primaryEntry, cleanupErrors);
   }
   try {
     await runOwnedRecordDirectoryTransferMutation(
@@ -5905,6 +6823,7 @@ async function conditionalUnlinkOwnedPath(
     );
     await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
   } catch (error) {
+    const primaryEntry = captureFailureFoldEntry("body", error);
     const compensationErrors = await compensateOwnedIsolatedPath(
       isolatedPath,
       path,
@@ -5913,7 +6832,7 @@ async function conditionalUnlinkOwnedPath(
       evidenceRef,
       "conditional_unlink_owned_path"
     );
-    throw preserveWorkspacePrimaryError(error, compensationErrors);
+    throw preserveWorkspacePrimaryError(primaryEntry, compensationErrors);
   }
 }
 
@@ -5987,7 +6906,7 @@ async function removeOwnedPublicationTemporaryPath(
   namespaceOwnership: OwnedAuthorityNamespace,
   ownedResources?: HardlinkPublicationOwnedResources
 ): Promise<void> {
-  const attemptErrors: unknown[] = [];
+  const attemptErrors: FailureFoldEntry[] = [];
   let canonicalAuthorityFailure: PresentFailure | undefined;
   let generationExpectation: OwnedGenerationExpectation | undefined;
   let generationExpectationFailure: PresentFailure | undefined;
@@ -6007,7 +6926,7 @@ async function removeOwnedPublicationTemporaryPath(
         PRIVATE_GENERATION_MODE
       );
     } catch (error) {
-      generationExpectationFailure = { value: error };
+      generationExpectationFailure = capturePresentFailure("final_release", error);
     }
   }
   const runCleanupCallback = async (
@@ -6019,10 +6938,17 @@ async function removeOwnedPublicationTemporaryPath(
         ownedResources,
         callback,
         evidenceRef,
-        proveAdditionalAuthority
+        proveAdditionalAuthority,
+        "final_release"
       );
     } else {
-      await runAuthorityMutatingCallbackBoundary(callback, proveAdditionalAuthority);
+      await runAuthorityMutatingCallbackBoundary(
+        callback,
+        proveAdditionalAuthority,
+        [],
+        undefined,
+        "final_release"
+      );
     }
   };
   for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
@@ -6151,7 +7077,7 @@ async function removeOwnedPublicationTemporaryPath(
           await assertRetainedHardlinkCanonicalEpoch(ownedResources, evidenceRef);
         } catch (canonicalProofError) {
           throw preserveWorkspacePrimaryError(
-            canonicalProofError,
+            captureFailureFoldEntry("final_release", canonicalProofError),
             [...namespaceCleanupErrors]
           );
         }
@@ -6160,9 +7086,9 @@ async function removeOwnedPublicationTemporaryPath(
       return;
     } catch (error) {
       if (ownedResources && hardlinkCanonicalAuthorityWasRelinquished(ownedResources)) {
-        canonicalAuthorityFailure = { value: error };
+        canonicalAuthorityFailure = capturePresentFailure("final_release", error);
       } else {
-        attemptErrors.push(error);
+        attemptErrors.push(captureFailureFoldEntry("final_release", error));
       }
       if (canonicalAuthorityFailure) break;
       if (attempt < RECORD_TEMP_CLEANUP_ATTEMPTS) {
@@ -6172,7 +7098,7 @@ async function removeOwnedPublicationTemporaryPath(
     }
   }
 
-  const finalizationErrors: unknown[] = [];
+  const finalizationErrors: FailureFoldEntry[] = [];
   let finalizationRemovedTemporaryGeneration = false;
   let finalizationOwnership = namespaceOwnership;
   try {
@@ -6202,7 +7128,7 @@ async function removeOwnedPublicationTemporaryPath(
       await advanceHardlinkCanonicalEpochAfterTemporaryUnlink(ownedResources, evidenceRef);
     }
   } catch (error) {
-    finalizationErrors.push(error);
+    finalizationErrors.push(captureFailureFoldEntry("final_release", error));
   }
   try {
     await removeEmptyAuthorityOwnedMutationNamespace(
@@ -6212,16 +7138,16 @@ async function removeOwnedPublicationTemporaryPath(
     );
     if (ownedResources) ownedResources.isolatedGeneration = undefined;
   } catch (error) {
-    finalizationErrors.push(error);
+    finalizationErrors.push(captureFailureFoldEntry("final_release", error));
   }
 
   throw canonicalAuthorityFailure
     ? preserveWorkspacePrimaryError(
-        canonicalAuthorityFailure.value,
+        canonicalAuthorityFailure.occurrence,
         [...attemptErrors, ...finalizationErrors]
       )
     : preserveWorkspacePrimaryError(
-        publicationTemporaryCleanupError(evidenceRef),
+        captureFailureFoldEntry("final_release", publicationTemporaryCleanupError(evidenceRef)),
         [...attemptErrors, ...finalizationErrors]
       );
 }
@@ -6326,7 +7252,9 @@ async function removeOwnedPathWithoutHooks(
   expectedPathnameBinding?: CanonicalPathnameBinding,
   expectedPathnameLinkCount = 1n,
   onPathnameBindingDrift?: () => void,
-  onExactPublicRestore?: (binding: CanonicalPathnameBinding) => void
+  onCommittedPublicBinding?: (
+    binding: CanonicalPathnameBinding
+  ) => Promise<void> | void
 ): Promise<void> {
   const generationExpectation = await captureOwnedGenerationExpectation(
     path,
@@ -6398,7 +7326,8 @@ async function removeOwnedPathWithoutHooks(
       }
     );
   } catch (error) {
-    const cleanupErrors: unknown[] = [];
+    const primaryEntry = captureFailureFoldEntry("body", error);
+    const cleanupErrors: FailureFoldEntry[] = [];
     if (expectedPathnameBinding) {
       try {
         if (!(await ownedGenerationStateMatches(
@@ -6412,15 +7341,15 @@ async function removeOwnedPathWithoutHooks(
         }
       } catch (bindingProofError) {
         onPathnameBindingDrift?.();
-        cleanupErrors.push(bindingProofError);
+        cleanupErrors.push(captureFailureFoldEntry("final_release", bindingProofError));
       }
     }
     try {
       await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
     } catch (cleanupError) {
-      cleanupErrors.push(cleanupError);
+      cleanupErrors.push(captureFailureFoldEntry("final_release", cleanupError));
     }
-    throw preserveWorkspacePrimaryError(error, cleanupErrors);
+    throw preserveWorkspacePrimaryError(primaryEntry, cleanupErrors);
   }
   try {
     await runOwnedRecordDirectoryTransferMutation(
@@ -6432,14 +7361,15 @@ async function removeOwnedPathWithoutHooks(
       async () => await rename(path, isolatedPath)
     );
   } catch (error) {
-    const cleanupErrors: unknown[] = [];
+    const primaryEntry = captureFailureFoldEntry("body", error);
+    const cleanupErrors: FailureFoldEntry[] = [];
     try {
       await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
     } catch (cleanupError) {
-      cleanupErrors.push(cleanupError);
+      cleanupErrors.push(captureFailureFoldEntry("final_release", cleanupError));
     }
     if (hasErrorCode(error, "ENOENT") && cleanupErrors.length === 0) return;
-    throw preserveWorkspacePrimaryError(error, cleanupErrors);
+    throw preserveWorkspacePrimaryError(primaryEntry, cleanupErrors);
   }
 
   try {
@@ -6474,6 +7404,7 @@ async function removeOwnedPathWithoutHooks(
     namespaceCleanupAttempted = true;
     await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
   } catch (error) {
+    const primaryEntry = captureFailureFoldEntry("body", error);
     const cleanupErrors = await compensateOwnedIsolatedPath(
       isolatedPath,
       path,
@@ -6482,9 +7413,9 @@ async function removeOwnedPathWithoutHooks(
       evidenceRef,
       site,
       namespaceCleanupAttempted,
-      onExactPublicRestore
+      onCommittedPublicBinding
     );
-    throw preserveWorkspacePrimaryError(error, cleanupErrors);
+    throw preserveWorkspacePrimaryError(primaryEntry, cleanupErrors);
   }
 }
 
@@ -6496,10 +7427,12 @@ async function compensateOwnedIsolatedPath(
   evidenceRef: string,
   site: WorkspaceRecordPostIsolationSite,
   namespaceCleanupAlreadyAttempted = false,
-  onExactPublicRestore?: (binding: CanonicalPathnameBinding) => void,
+  onCommittedPublicBinding?: (
+    binding: CanonicalPathnameBinding
+  ) => Promise<void> | void,
   publicRestoreGeneration?: OwnedGenerationExpectation
-): Promise<unknown[]> {
-  const compensationErrors: unknown[] = [];
+): Promise<FailureFoldEntry[]> {
+  const compensationErrors: FailureFoldEntry[] = [];
   let isolatedPathExists: boolean | undefined;
   try {
     const beforeInspection = compensationTestHookStorage.getStore()
@@ -6512,7 +7445,7 @@ async function compensateOwnedIsolatedPath(
     );
     isolatedPathExists = await recordPathEntryExists(isolatedPath, evidenceRef);
   } catch (error) {
-    compensationErrors.push(error);
+    compensationErrors.push(captureFailureFoldEntry("final_release", error));
   }
 
   if (isolatedPathExists !== false) {
@@ -6527,7 +7460,7 @@ async function compensateOwnedIsolatedPath(
           evidenceRef
         );
       } catch (error) {
-        compensationErrors.push(error);
+        compensationErrors.push(captureFailureFoldEntry("final_release", error));
         restoreGeneration = undefined;
         const cleanupErrors = await removeUnsafeOwnedIsolatedSource(
           isolatedPath,
@@ -6541,17 +7474,17 @@ async function compensateOwnedIsolatedPath(
     }
     if (restoreGeneration) {
       try {
-        const restoredBinding = await restoreOwnedIsolatedPath(
+        await restoreOwnedIsolatedPath(
           isolatedPath,
           publicPath,
           mutationNamespace,
           restoreGeneration,
           evidenceRef,
-          site
+          site,
+          onCommittedPublicBinding
         );
-        onExactPublicRestore?.(restoredBinding);
       } catch (error) {
-        compensationErrors.push(error);
+        compensationErrors.push(captureFailureFoldEntry("final_release", error));
       }
     }
   }
@@ -6560,7 +7493,7 @@ async function compensateOwnedIsolatedPath(
     try {
       await removeEmptyAuthorityOwnedMutationNamespace(mutationNamespace, evidenceRef);
     } catch (error) {
-      compensationErrors.push(error);
+      compensationErrors.push(captureFailureFoldEntry("final_release", error));
     }
   }
   return compensationErrors;
@@ -6572,7 +7505,10 @@ async function restoreOwnedIsolatedPath(
   mutationNamespace: OwnedAuthorityNamespace,
   expectedGeneration: OwnedGenerationExpectation,
   evidenceRef: string,
-  site: WorkspaceRecordPostIsolationSite
+  site: WorkspaceRecordPostIsolationSite,
+  onCommittedPublicBinding?: (
+    binding: CanonicalPathnameBinding
+  ) => Promise<void> | void
 ): Promise<CanonicalPathnameBinding> {
   let phase: "pre_public_link" | "public_link_created" | "post_source_committed" =
     "pre_public_link";
@@ -6592,10 +7528,13 @@ async function restoreOwnedIsolatedPath(
         expectedGeneration,
         evidenceRef
       );
-      throw preserveWorkspacePrimaryError(publicationStateError(evidenceRef), cleanupErrors);
+      throw preserveWorkspacePrimaryError(
+        captureFailureFoldEntry("final_release", publicationStateError(evidenceRef)),
+        cleanupErrors
+      );
     }
 
-    const linkAdmissionErrors: unknown[] = [];
+    const linkAdmissionErrors: FailureFoldEntry[] = [];
     let publicLinkAdmitted = false;
     let publicLinkBinding: RestoredPublicLinkBinding | undefined;
     for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
@@ -6607,7 +7546,7 @@ async function restoreOwnedIsolatedPath(
           async () => await link(isolatedPath, publicPath)
         );
       } catch (error) {
-        linkAdmissionErrors.push(error);
+        linkAdmissionErrors.push(captureFailureFoldEntry("final_release", error));
         break;
       }
       phase = "public_link_created";
@@ -6639,7 +7578,7 @@ async function restoreOwnedIsolatedPath(
         publicLinkAdmitted = true;
         break;
       } catch (error) {
-        linkAdmissionErrors.push(error);
+        linkAdmissionErrors.push(captureFailureFoldEntry("final_release", error));
         const rollback = await rollbackUnsafeRestoredLink(
           publicPath,
           isolatedPath,
@@ -6661,7 +7600,7 @@ async function restoreOwnedIsolatedPath(
       throw preserveWorkspacePrimaryError(linkAdmissionErrors[0], linkAdmissionErrors.slice(1));
     }
 
-    const sourceUnlinkErrors: unknown[] = [];
+    const sourceUnlinkErrors: FailureFoldEntry[] = [];
     let publicOwnership: "owned" | "relinquished" = "owned";
     let firstProofRollbackAttempted = false;
     for (let attempt = 1; attempt <= RECORD_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
@@ -6698,7 +7637,7 @@ async function restoreOwnedIsolatedPath(
               Object.freeze({ path: publicPath, isolatedPath, site })
             );
           } catch (error) {
-            unsafeRollbackCallbackFailure = { value: error };
+            unsafeRollbackCallbackFailure = capturePresentFailure("final_release", error);
           }
           firstProofRollbackAttempted = true;
           const rollback = await rollbackUnsafeRestoredLink(
@@ -6714,17 +7653,21 @@ async function restoreOwnedIsolatedPath(
               Object.freeze({ path: publicPath, isolatedPath, site })
             );
           } catch (error) {
-            rollback.cleanupErrors.push(error);
+            rollback.cleanupErrors.push(captureFailureFoldEntry("final_release", error));
           }
           const priorNoDriftCallbackFailures = sourceUnlinkErrors.splice(0);
-          sourceUnlinkErrors.push(
-            preserveWorkspacePrimaryError(authorityDrift, [
+          const preservedAuthorityDrift = preserveWorkspacePrimaryError(
+            captureFailureFoldEntry("final_release", authorityDrift),
+            [
               ...priorNoDriftCallbackFailures,
               ...(unsafeRollbackCallbackFailure
-                ? [unsafeRollbackCallbackFailure.value]
+                ? [unsafeRollbackCallbackFailure.occurrence]
                 : []),
               ...rollback.cleanupErrors
-            ])
+            ]
+          );
+          sourceUnlinkErrors.push(
+            captureFailureFoldEntry("final_release", preservedAuthorityDrift)
           );
           publicOwnership = rollback.publicOwnership;
           break;
@@ -6761,6 +7704,7 @@ async function restoreOwnedIsolatedPath(
           expectedGeneration.nlink,
           evidenceRef
         );
+        await onCommittedPublicBinding?.(committedBinding);
         const afterSourceUnlink = compensationTestHookStorage.getStore()
           ?.afterOwnedIsolatedSourceUnlink;
         await runAuthorityMutatingCallbackBoundary(
@@ -6789,12 +7733,12 @@ async function restoreOwnedIsolatedPath(
         );
         return committedBinding;
       } catch (error) {
-        sourceUnlinkErrors.push(error);
+        sourceUnlinkErrors.push(captureFailureFoldEntry("final_release", error));
         if (phase === "post_source_committed") break;
         try {
           await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
         } catch (authorityError) {
-          sourceUnlinkErrors.push(authorityError);
+          sourceUnlinkErrors.push(captureFailureFoldEntry("final_release", authorityError));
           break;
         }
         if (!(await recordPathEntryExists(isolatedPath, evidenceRef))) break;
@@ -6804,7 +7748,7 @@ async function restoreOwnedIsolatedPath(
       }
     }
 
-    let rollbackErrors: unknown[];
+    let rollbackErrors: FailureFoldEntry[];
     if (phase === "post_source_committed" || publicOwnership === "relinquished") {
       rollbackErrors = [];
     } else if (firstProofRollbackAttempted) {
@@ -6880,7 +7824,7 @@ async function rollbackUnsafeRestoredLink(
   evidenceRef: string,
   publicLinkBinding?: RestoredPublicLinkBinding
 ): Promise<{
-  cleanupErrors: unknown[];
+  cleanupErrors: FailureFoldEntry[];
   publicOwnership: "owned" | "relinquished";
 }> {
   const publicLinkRemoval = await removeExactOwnedPublicLink(
@@ -6918,7 +7862,7 @@ async function removeExactOwnedPublicLink(
   reportMismatch = true,
   expectedBinding?: RestoredPublicLinkBinding
 ): Promise<ExactOwnedPublicLinkRemoval> {
-  const cleanupErrors: unknown[] = [];
+  const cleanupErrors: FailureFoldEntry[] = [];
   let ownership: ExactOwnedPublicLinkRemoval["ownership"] = "retained";
   let isolatedSourceCleanupAllowed = false;
   let finalUnlinkHookPassed = false;
@@ -6964,7 +7908,11 @@ async function removeExactOwnedPublicLink(
           ))
         ) {
           ownership = "relinquished";
-          if (reportMismatch) cleanupErrors.push(publicationStateError(evidenceRef));
+          if (reportMismatch) {
+            cleanupErrors.push(
+              captureFailureFoldEntry("final_release", publicationStateError(evidenceRef))
+            );
+          }
           return { cleanupErrors, ownership, isolatedSourceCleanupAllowed };
         }
         const beforeExactUnlink = compensationTestHookStorage.getStore()
@@ -6995,7 +7943,7 @@ async function removeExactOwnedPublicLink(
           finalUnlinkHookPassed = beforeExactUnlink !== undefined;
         } catch (error) {
           ownership = "relinquished";
-          cleanupErrors.push(error);
+          cleanupErrors.push(captureFailureFoldEntry("final_release", error));
           return { cleanupErrors, ownership, isolatedSourceCleanupAllowed };
         }
         await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
@@ -7013,7 +7961,11 @@ async function removeExactOwnedPublicLink(
           )) !== bindingCtimeNs
         ) {
           ownership = "relinquished";
-          if (reportMismatch) cleanupErrors.push(publicationStateError(evidenceRef));
+          if (reportMismatch) {
+            cleanupErrors.push(
+              captureFailureFoldEntry("final_release", publicationStateError(evidenceRef))
+            );
+          }
           return { cleanupErrors, ownership, isolatedSourceCleanupAllowed };
         }
         try {
@@ -7029,13 +7981,13 @@ async function removeExactOwnedPublicLink(
           if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
             ownership = "relinquished";
           }
-          cleanupErrors.push(error);
+          cleanupErrors.push(captureFailureFoldEntry("final_release", error));
           try {
             await compensationTestHookStorage.getStore()?.afterExactOwnedPublicLinkUnlinkFailure?.(
               Object.freeze({ path: publicPath, error })
             );
           } catch (hookError) {
-            cleanupErrors.push(hookError);
+            cleanupErrors.push(captureFailureFoldEntry("final_release", hookError));
           }
         }
       } else {
@@ -7049,14 +8001,18 @@ async function removeExactOwnedPublicLink(
         } else {
           isolatedSourceCleanupAllowed = true;
         }
-        if (reportMismatch) cleanupErrors.push(publicationStateError(evidenceRef));
+        if (reportMismatch) {
+          cleanupErrors.push(
+            captureFailureFoldEntry("final_release", publicationStateError(evidenceRef))
+          );
+        }
       }
     } else {
       ownership = "relinquished";
     }
   } catch (error) {
     if (finalUnlinkHookPassed) ownership = "relinquished";
-    cleanupErrors.push(error);
+    cleanupErrors.push(captureFailureFoldEntry("final_release", error));
   }
   return { cleanupErrors, ownership, isolatedSourceCleanupAllowed };
 }
@@ -7209,8 +8165,8 @@ async function removeUnsafeOwnedIsolatedSource(
   expectedGeneration: OwnedGenerationExpectation,
   evidenceRef: string,
   publicRollbackGeneration?: OwnedGenerationExpectation
-): Promise<unknown[]> {
-  const cleanupErrors: unknown[] = [];
+): Promise<FailureFoldEntry[]> {
+  const cleanupErrors: FailureFoldEntry[] = [];
   try {
     await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
     const identity = await lstat(isolatedPath, { bigint: true });
@@ -7260,7 +8216,7 @@ async function removeUnsafeOwnedIsolatedSource(
     }
   } catch (error) {
     if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
-      cleanupErrors.push(error);
+      cleanupErrors.push(captureFailureFoldEntry("final_release", error));
     }
   }
   return cleanupErrors;
@@ -7330,7 +8286,7 @@ async function normalizeLegacyIsolatedGenerationMode(
   let originalModeRestored = false;
   let normalizedGeneration: OwnedGenerationExpectation | undefined;
   let primaryFailure: PresentFailure | undefined;
-  const compensationErrors: unknown[] = [];
+  const compensationErrors: FailureFoldEntry[] = [];
   try {
     file = await open(path, BOUNDED_NOFOLLOW_READ_OPEN_FLAGS);
     const before = await file.stat({ bigint: true });
@@ -7393,34 +8349,40 @@ async function normalizeLegacyIsolatedGenerationMode(
     }
     await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
   } catch (error) {
-    primaryFailure = {
-      value: error instanceof TaskServiceError ? error : publicationStateError(evidenceRef, error)
-    };
+    const primaryError = taskServiceErrorAtBoundary(error) !== undefined
+      ? error
+      : publicationStateError(evidenceRef, error);
+    primaryFailure = capturePresentFailure("final_release", primaryError);
     if (modeMutationAttempted && file) {
       try {
         await restoreOpenGenerationMode(file, expectedGeneration, evidenceRef);
         originalModeRestored = true;
       } catch (restoreError) {
-        compensationErrors.push(restoreError);
+        compensationErrors.push(captureFailureFoldEntry("final_release", restoreError));
       }
     }
   } finally {
     try {
       await file?.close();
     } catch (closeError) {
-      primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, closeError);
+      primaryFailure = appendSequentialFailure(
+        primaryFailure,
+        compensationErrors,
+        closeError,
+        "final_release"
+      );
       if (modeMutationAttempted && !originalModeRestored && file) {
         try {
           await restoreOpenGenerationMode(file, expectedGeneration, evidenceRef);
           originalModeRestored = true;
         } catch (restoreError) {
-          compensationErrors.push(restoreError);
+          compensationErrors.push(captureFailureFoldEntry("final_release", restoreError));
         }
       }
     }
   }
   if (primaryFailure) {
-    throw preserveWorkspacePrimaryError(primaryFailure.value, compensationErrors);
+    throw preserveWorkspacePrimaryError(primaryFailure.occurrence, compensationErrors);
   }
   if (!normalizedGeneration) throw publicationStateError(evidenceRef);
   return normalizedGeneration;
@@ -7456,7 +8418,7 @@ async function restoreIsolatedGenerationModeForPublicRollback(
 
   let file: RecordFileHandle | undefined;
   let primaryFailure: PresentFailure | undefined;
-  const compensationErrors: unknown[] = [];
+  const compensationErrors: FailureFoldEntry[] = [];
   try {
     file = await open(path, BOUNDED_NOFOLLOW_READ_OPEN_FLAGS);
     const before = await file.stat({ bigint: true });
@@ -7465,18 +8427,24 @@ async function restoreIsolatedGenerationModeForPublicRollback(
     const restored = await file.stat({ bigint: true });
     await assertOpenGenerationMatches(file, restored, publicGeneration, evidenceRef);
   } catch (error) {
-    primaryFailure = {
-      value: error instanceof TaskServiceError ? error : publicationStateError(evidenceRef, error)
-    };
+    const primaryError = taskServiceErrorAtBoundary(error) !== undefined
+      ? error
+      : publicationStateError(evidenceRef, error);
+    primaryFailure = capturePresentFailure("final_release", primaryError);
   } finally {
     try {
       await file?.close();
     } catch (closeError) {
-      primaryFailure = appendSequentialFailure(primaryFailure, compensationErrors, closeError);
+      primaryFailure = appendSequentialFailure(
+        primaryFailure,
+        compensationErrors,
+        closeError,
+        "final_release"
+      );
     }
   }
   if (primaryFailure) {
-    throw preserveWorkspacePrimaryError(primaryFailure.value, compensationErrors);
+    throw preserveWorkspacePrimaryError(primaryFailure.occurrence, compensationErrors);
   }
 
   await assertAuthorityNamespaceOwnership(mutationNamespace, evidenceRef);
@@ -7570,7 +8538,7 @@ async function captureOwnedGenerationExpectation(
       nlink: before.nlink
     };
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   } finally {
     await file?.close();
@@ -7746,19 +8714,23 @@ async function runHardlinkPostLinkCallbackBoundary(
   ownedResources: HardlinkPublicationOwnedResources,
   callback: (() => Promise<void> | void) | undefined,
   evidenceRef: string,
-  proveAdditionalAuthority?: () => Promise<void>
+  proveAdditionalAuthority?: () => Promise<void>,
+  boundary: "operation" | "final_release" = "operation"
 ): Promise<void> {
   if (!callback) return;
   await runAuthorityMutatingCallbackBoundary(
     callback,
     async () => {
       let proofFailure: PresentFailure | undefined;
-      const proofCompensations: unknown[] = [];
+      const proofCompensations: FailureFoldEntry[] = [];
       if (ownedResources.canonicalPathnameAuthority.status === "retained") {
         try {
           await assertRetainedHardlinkCanonicalEpoch(ownedResources, evidenceRef);
         } catch (error) {
-          proofFailure = { value: error };
+          proofFailure = capturePresentFailure(
+            boundary === "final_release" ? "final_release" : "settlement",
+            error
+          );
         }
       }
       try {
@@ -7767,16 +8739,20 @@ async function runHardlinkPostLinkCallbackBoundary(
         proofFailure = appendSequentialFailure(
           proofFailure,
           proofCompensations,
-          error
+          error,
+          boundary === "final_release" ? "final_release" : "settlement"
         );
       }
       if (proofFailure) {
         throw preserveWorkspacePrimaryError(
-          proofFailure.value,
+          proofFailure.occurrence,
           proofCompensations
         );
       }
-    }
+    },
+    [],
+    undefined,
+    boundary
   );
 }
 
@@ -7876,10 +8852,14 @@ async function assertHardlinkCanonicalCompensationState(
   }
 }
 
-function preserveWorkspacePrimaryError(primary: unknown, compensations: unknown[]): unknown {
-  return preserveTaskServiceErrorCompensationCompatibility(
+function preserveWorkspacePrimaryError(
+  primary: FailureFoldEntry,
+  compensations: readonly FailureFoldEntry[]
+): unknown {
+  const entries = [primary, ...compensations].sort((left, right) => left.order - right.order);
+  return preserveTaskServiceErrorFailureVector(
     primary,
-    compensations,
+    entries,
     "Workspace record publication compensation failed."
   );
 }
@@ -8376,7 +9356,7 @@ async function captureSafeRecordDirectoryBaseline(
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return { status: "absent" };
     }
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   }
 }
@@ -8827,10 +9807,10 @@ async function removeExactEmptyAuthorityOwnedMutationNamespace(
           );
         }
       } catch (error) {
-        const proofError = error instanceof TaskServiceError
+        const proofError = taskServiceErrorAtBoundary(error) !== undefined
           ? error
           : publicationStateError(evidenceRef, error);
-        authorityNamespaceRemovalProofFailures.add(proofError);
+        authorityNamespaceRemovalProofFailures.add(proofError as object);
         throw proofError;
       }
 
@@ -9035,7 +10015,7 @@ async function normalizeOwnedAuthorityNamespaceMode(
     }
     await assertAuthorityNamespaceOwnership(ownership, evidenceRef);
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   }
 }
@@ -9086,7 +10066,7 @@ async function captureCanonicalAuthorityBaseline(
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return { status: "absent" };
     }
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     return await captureInvalidCanonicalAuthorityBaseline(
       recordPath,
       evidenceRef,
@@ -9125,7 +10105,7 @@ async function captureCanonicalAuthorityBaseline(
       mtimeNs: before.mtimeNs
     };
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef, error);
   } finally {
     await file?.close();
@@ -9144,7 +10124,7 @@ async function captureInvalidCanonicalAuthorityBaseline(
     if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
       return { status: "absent" };
     }
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef, error);
   }
   if (
@@ -9311,7 +10291,7 @@ async function assertMutableCleanupPathAuthority(
           throw publicationStateError(evidenceRef);
         }
       } catch (error) {
-        if (error instanceof TaskServiceError) throw error;
+        if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
         throw publicationStateError(evidenceRef);
       }
     }
@@ -9372,7 +10352,7 @@ async function assertFinalMutablePublicationAuthority(
       nlink: generation.nlink
     });
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   }
   await assertMutableCanonicalBaseline(recordPath, canonicalBaseline, evidenceRef);
@@ -9770,14 +10750,15 @@ async function acquireRecordAuthorityWithCleanupPermit(
             await classifyWorkspaceRecordCleanupPermitGeneration(
               permit,
               terminalAdmission.expected,
-              terminalAdmission.authority
+              terminalAdmission.authority,
+              terminalAdmission.classificationPolicy
             );
           if (
             recordAuthorityWaiterIsPending(waiter) &&
             Date.now() < acquisitionDeadline &&
             classification.status === "same_generation"
           ) {
-            waiter.cleanupPermitAdmissionFailure = { value: error };
+            waiter.cleanupPermitAdmissionFailure = capturePresentFailure("body", error);
             releaseRecordAuthorityWaiterContention(waiter);
             waiter.status = "ready";
             if (!state.mutex.ownerActive) {
@@ -9795,7 +10776,10 @@ async function acquireRecordAuthorityWithCleanupPermit(
             );
           }
         } catch (classificationError) {
-          terminalError = preserveWorkspacePrimaryError(error, [classificationError]);
+          terminalError = preserveWorkspacePrimaryError(
+            captureFailureFoldEntry("body", error),
+            [captureFailureFoldEntry("settlement", classificationError)]
+          );
         }
       }
       finalizeRecordAuthorityWaiter(state.mutex, waiter, {
@@ -9819,10 +10803,14 @@ async function acquireRecordAuthorityWithCleanupPermit(
         classification = await classifyWorkspaceRecordCleanupPermitGeneration(
           permit,
           terminalAdmission.expected,
-          terminalAdmission.authority
+          terminalAdmission.authority,
+          terminalAdmission.classificationPolicy
         );
       } catch (classificationError) {
-        throw preserveWorkspacePrimaryError(error, [classificationError]);
+        throw preserveWorkspacePrimaryError(
+          captureFailureFoldEntry("body", error),
+          [captureFailureFoldEntry("settlement", classificationError)]
+        );
       }
       if (
         classification.status === "missing" ||
@@ -9834,7 +10822,7 @@ async function acquireRecordAuthorityWithCleanupPermit(
         );
       }
       if (acquiredLease.cleanupPermitAdmissionFailure === undefined) {
-        acquiredLease.cleanupPermitAdmissionFailure = { value: error };
+        acquiredLease.cleanupPermitAdmissionFailure = capturePresentFailure("body", error);
       }
     }
     if (Date.now() >= acquisitionDeadline) throw authorityWaitError(evidenceRef);
@@ -10150,7 +11138,7 @@ async function bindRecordAuthorityCleanupPermitGeneration(
     });
   } catch (error) {
     await pinnedFile?.close().catch(() => undefined);
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   }
 }
@@ -10167,7 +11155,7 @@ async function assertCleanupPermitPinnedGeneration(
       await assertCleanupPermitPinnedGenerationNow(state, path, evidenceRef);
     });
   } catch (error) {
-    if (error instanceof TaskServiceError) throw error;
+    if (taskServiceErrorAtBoundary(error) !== undefined) throw error;
     throw publicationStateError(evidenceRef);
   }
 }
@@ -10238,6 +11226,56 @@ async function assertCleanupPermitPinnedGenerationNow(
     evidenceRef
   );
   await assertRecordDirectoryIdentityNow(parentPath, parentIdentity, evidenceRef);
+}
+
+async function cleanupPermitPinnedPhysicalGenerationMatchesNow(
+  state: WorkspaceRecordCleanupPermitState,
+  evidenceRef: string
+): Promise<boolean> {
+  const pinnedFile = state.pinnedFile;
+  const generation = state.generation;
+  const expectedBytes = state.expectedBytes;
+  const generationExpectation = state.generationExpectation;
+  if (
+    state.status !== "claimed" ||
+    !state.capacityActive ||
+    !pinnedFile ||
+    !generation ||
+    !expectedBytes ||
+    !generationExpectation ||
+    state.pinnedFileClosed
+  ) {
+    throw publicationStateError(evidenceRef);
+  }
+  try {
+    await compensationTestHookStorage.getStore()
+      ?.beforeCleanupPermitPinnedGenerationProof?.(
+        Object.freeze({ path: state.publicPath, fd: pinnedFile.fd })
+      );
+    const pinnedIdentity = await pinnedFile.stat({ bigint: true });
+    const observed = await readBoundedOpenFile(pinnedFile, pinnedIdentity);
+    return (
+      pinnedIdentity.isFile() &&
+      pinnedIdentity.nlink === generationExpectation.nlink &&
+      pinnedIdentity.size === BigInt(expectedBytes.length) &&
+      pinnedIdentity.mode === generationExpectation.mode &&
+      observed.bytes.equals(expectedBytes) &&
+      observed.before.dev === pinnedIdentity.dev &&
+      observed.before.ino === pinnedIdentity.ino &&
+      observed.before.mode === pinnedIdentity.mode &&
+      observed.before.nlink === pinnedIdentity.nlink &&
+      observed.before.size === pinnedIdentity.size &&
+      observed.after.dev === pinnedIdentity.dev &&
+      observed.after.ino === pinnedIdentity.ino &&
+      observed.after.mode === pinnedIdentity.mode &&
+      observed.after.nlink === pinnedIdentity.nlink &&
+      observed.after.size === pinnedIdentity.size &&
+      workspaceRecordPhysicalIdentityMatches(pinnedIdentity, generation)
+    );
+  } catch (error) {
+    if (error instanceof TaskServiceError) throw error;
+    throw publicationStateError(evidenceRef, error);
+  }
 }
 
 function cancelRecordAuthorityCleanupPermit(
@@ -10322,7 +11360,9 @@ function settleRecordAuthorityCleanupAdmissionState(
   state.expectedBytes = undefined;
   releaseParentBinding?.();
   removeUnusedRecordAuthorityMutex(state.mutex);
-  return closeSettled;
+  const settlement = closeSettled;
+  state.pinnedFileClose = settlement;
+  return settlement;
 }
 
 function closeRecordAuthorityCleanupPermitPinnedFile(
@@ -10341,19 +11381,23 @@ function closeRecordAuthorityCleanupPermitPinnedFile(
   const input = Object.freeze({ path: state.publicPath, fd: pinnedFile.fd });
   const afterPinnedFileClosed = state.afterPinnedFileClosed;
   state.afterPinnedFileClosed = undefined;
-  const closeSettled = pinnedFile.close().then(
+  const closeResult = pinnedFile.close().then(async () => {
+    await compensationTestHookStorage.getStore()
+      ?.afterCleanupPermitPinnedFileClose?.(input);
+  });
+  const closeTracked = closeResult.then(
     () => undefined,
     () => undefined
   );
-  state.pinnedFileClose = closeSettled;
-  pendingCleanupPermitFileCloses.add(closeSettled);
-  void closeSettled.finally(() => {
-    pendingCleanupPermitFileCloses.delete(closeSettled);
+  state.pinnedFileClose = closeResult;
+  pendingCleanupPermitFileCloses.add(closeTracked);
+  void closeTracked.finally(() => {
+    pendingCleanupPermitFileCloses.delete(closeTracked);
   });
-  void closeSettled
+  void closeTracked
     .then(async () => await afterPinnedFileClosed?.(input))
     .catch(() => undefined);
-  return closeSettled;
+  return closeResult;
 }
 
 function releaseRecordAuthorityReservation(mutex: RecordAuthorityMutex): void {
@@ -10669,6 +11713,7 @@ async function prepareJsonRecordWrite<T>(
 
   return Object.freeze({
     data: normalizedRecord,
+    workspaceRoot: resolve(workspaceRoot),
     directoryPath,
     directoryIdentity,
     fileName,

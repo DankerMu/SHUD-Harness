@@ -9,12 +9,24 @@ import {
   type IdempotencyScope
 } from "../schemas/idempotency";
 import { TaskServiceError, isSafeTaskId } from "./task-card-service";
-import { runWithPreservedRelease } from "./compensation-error-preservation";
-import { preserveTaskServiceErrorCompensationCompatibility } from "./task-service-error-compensation";
+import {
+  captureFailureFoldEntry,
+  capturePostSettlementFailureFoldEntry,
+  failureLedger,
+  failureTerminalPhysicalPhase,
+  runWithPreservedRelease,
+  type FailureAsyncOutcome,
+  type FailureFoldEntry
+} from "./compensation-error-preservation";
+import {
+  preserveTaskServiceErrorFailureEntries,
+  preserveTaskServiceErrorFailureVector,
+  taskServiceErrorAtBoundary
+} from "./task-service-error-compensation";
 import {
   WorkspaceRecordConditionalDeleteError,
   cancelWorkspaceRecordCleanupPermit,
-  conditionalDeleteJsonRecordWithCleanupPermit,
+  conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement,
   createJsonRecordIfAbsent,
   createJsonRecordIfAbsentWithCleanupPermit,
   observeJsonRecordForCleanup,
@@ -48,59 +60,7 @@ async function runWithIdempotencyRelease<T>(
     release,
     IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE,
     settleFulfilledValueAfterReleaseFailure,
-    preserveAuthorityTransportAwareCombinedFailure
-  );
-}
-
-/**
- * Root C (V33-03): a caller-thrown authority-transport wrapper (an Error
- * exposing the inner failure via `authorityError`, e.g. the backend's
- * CompletedTaskSnapshotAuthorityUnknownError) must keep its INNER typed
- * primary reachable through the caller's one-level unwrap. The fold
- * preserves the inner error with the release failure as an ordered
- * compensation and re-wraps with the same constructor.
- */
-function preserveAuthorityTransportAwareCombinedFailure(
-  primary: unknown,
-  compensations: readonly unknown[],
-  aggregateMessage: string
-): unknown {
-  // Root C (V33-13): never count one occurrence twice — a compensation
-  // candidate that IS the primary is already represented by the primary
-  // itself, so a memoized rejection folded into itself yields primary-only.
-  const distinctCompensations = compensations.filter(
-    (candidate) => !Object.is(primary, candidate)
-  );
-  if (distinctCompensations.length === 0) return primary;
-  if (
-    primary instanceof Error &&
-    primary.name === "CompletedTaskSnapshotAuthorityUnknownError" &&
-    "authorityError" in primary
-  ) {
-    const authorityError =
-      (primary as Error & { authorityError: unknown }).authorityError;
-    const innerDistinctCompensations = distinctCompensations.filter(
-      (candidate) => !Object.is(authorityError, candidate)
-    );
-    if (innerDistinctCompensations.length === 0) return primary;
-    try {
-      const folded = preserveTaskServiceErrorCompensationCompatibility(
-        authorityError,
-        innerDistinctCompensations,
-        aggregateMessage
-      );
-      return Reflect.construct(
-        primary.constructor as new (inner: unknown) => Error,
-        [folded]
-      );
-    } catch {
-      // Fall through to the wrapper-blind fold when reconstruction fails.
-    }
-  }
-  return preserveTaskServiceErrorCompensationCompatibility(
-    primary,
-    distinctCompensations,
-    aggregateMessage
+    preserveTaskServiceErrorFailureEntries
   );
 }
 
@@ -140,17 +100,17 @@ type IdempotencyTransitionGuardAcquire =
   | { status: "busy" };
 
 type IdempotencyTransitionCleanupLockAcquire =
-  | {
-      status: "acquired";
-      release: () => Promise<void>;
-      settleAfterSiblingMutation: () => Promise<void>;
-    }
+  | { status: "acquired"; release: () => Promise<void> }
   | { status: "busy" };
 
 type FailedRecoveryWriteOutcome =
   | { readonly status: "resolved"; readonly record: IdempotencyRecord }
   | { readonly status: "generation_lost"; readonly record?: IdempotencyRecord }
-  | { readonly status: "generation_lost_with_error"; readonly error: unknown };
+  | {
+      readonly status: "generation_lost_with_error";
+      readonly error: unknown;
+      readonly occurrence: FailureFoldEntry;
+    };
 
 export interface IdempotencyRecordServiceOptions {
   workspaceRoot: string;
@@ -388,14 +348,15 @@ export function createIdempotencyRecordService(
         resultRef
       );
     } catch (identityError) {
+      const identityEntry = captureFailureFoldEntry("body", identityError);
       const state = completedMutationAuthorities.get(authority);
       if (state?.status === "outstanding") {
         try {
           await cancelCompletedMutationAuthority(authority);
         } catch (cancellationError) {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            identityError,
-            [cancellationError],
+          throw preserveTaskServiceErrorFailureEntries(
+            identityEntry,
+            [captureFailureFoldEntry("final_release", cancellationError)],
             IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
           );
         }
@@ -491,13 +452,14 @@ export function createIdempotencyRecordService(
     try {
       return await transition();
     } catch (error) {
+      const taskServiceError = taskServiceErrorAtBoundary(error);
       if (
-        error instanceof TaskServiceError &&
-        malformedIdempotencyTransitionGuardErrors.has(error)
+        taskServiceError &&
+        malformedIdempotencyTransitionGuardErrors.has(taskServiceError)
       ) {
         throw error;
       }
-      if (!(error instanceof TaskServiceError) || error.code !== "record_malformed") {
+      if (!taskServiceError || taskServiceError.code !== "record_malformed") {
         throw error;
       }
     }
@@ -578,24 +540,35 @@ export function createIdempotencyRecordService(
           IdempotencyRecordSchema
         );
       } catch (writerError) {
+        const writerEntry = failureTerminalPhysicalPhase(writerError) === "final_release"
+          ? capturePostSettlementFailureFoldEntry(writerError)
+          : captureFailureFoldEntry("body", writerError);
         let current: IdempotencyRecord | undefined;
         try {
           current = await service.getRecord(scope, key);
         } catch (classificationError) {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            writerError,
-            [classificationError],
+          throw preserveTaskServiceErrorFailureEntries(
+            writerEntry,
+            [captureFailureFoldEntry("settlement", classificationError)],
             IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
           );
         }
         if (current?.status === "completed") {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            completedRecordInvalidationIdentityError(evidenceRef),
-            [writerError],
+          const identityEntry = captureFailureFoldEntry(
+            "settlement",
+            completedRecordInvalidationIdentityError(evidenceRef)
+          );
+          throw preserveTaskServiceErrorFailureVector(
+            identityEntry,
+            [writerEntry, identityEntry],
             IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
           );
         }
-        throw writerError;
+        throw preserveTaskServiceErrorFailureEntries(
+          writerEntry,
+          [],
+          IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+        );
       }
       if (replacement.status === "replaced") {
         return { status: "resolved", record: replacement.record };
@@ -607,7 +580,11 @@ export function createIdempotencyRecordService(
           ? { status: "generation_lost", record: current }
           : { status: "generation_lost" };
       } catch (error) {
-        return { status: "generation_lost_with_error", error };
+        return {
+          status: "generation_lost_with_error",
+          error,
+          occurrence: captureFailureFoldEntry("settlement", error)
+        };
       }
     } finally {
       if (cleanupPermitOutstanding) {
@@ -667,7 +644,7 @@ export function createIdempotencyRecordService(
   }
 
   async function classifyFailedRecoveryAuthorityLoss(
-    authorityError: unknown,
+    authorityEntry: FailureFoldEntry,
     scope: IdempotencyScope,
     key: string
   ): Promise<FailedRecoveryWriteOutcome> {
@@ -677,13 +654,19 @@ export function createIdempotencyRecordService(
         ? { status: "generation_lost", record: current }
         : { status: "generation_lost" };
     } catch (classificationError) {
+      const classificationEntry = captureFailureFoldEntry(
+        "settlement",
+        classificationError
+      );
+      const error = preserveTaskServiceErrorFailureVector(
+        classificationEntry,
+        [authorityEntry, classificationEntry],
+        IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+      );
       return {
         status: "generation_lost_with_error",
-        error: preserveTaskServiceErrorCompensationCompatibility(
-          classificationError,
-          [authorityError],
-          IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
-        )
+        error,
+        occurrence: captureFailureFoldEntry("body", error)
       };
     }
   }
@@ -734,13 +717,14 @@ export function createIdempotencyRecordService(
       if (input.expectedCompletedAuthority?.mutationAuthority) {
         throw error;
       }
+      const taskServiceError = taskServiceErrorAtBoundary(error);
       if (
-        error instanceof TaskServiceError &&
-        malformedIdempotencyTransitionGuardErrors.has(error)
+        taskServiceError &&
+        malformedIdempotencyTransitionGuardErrors.has(taskServiceError)
       ) {
         throw error;
       }
-      if (!(error instanceof TaskServiceError) || error.code !== "record_malformed") {
+      if (!taskServiceError || taskServiceError.code !== "record_malformed") {
         throw error;
       }
     }
@@ -835,7 +819,8 @@ export function createIdempotencyRecordService(
       const observation = await observeJsonRecordForCleanup(
         recordPath,
         evidenceRef,
-        IdempotencyRecordSchema
+        IdempotencyRecordSchema,
+        workspaceRoot
       );
       if (observation.status === "missing") {
         throw missingTransitionRecordError(
@@ -874,9 +859,12 @@ export function createIdempotencyRecordService(
             IdempotencyRecordSchema
           );
         } catch (error) {
-          throw preserveTaskServiceErrorCompensationCompatibility(
-            completedRecordInvalidationIdentityError(evidenceRef),
-            [error],
+          throw preserveTaskServiceErrorFailureEntries(
+            captureFailureFoldEntry(
+              "body",
+              completedRecordInvalidationIdentityError(evidenceRef)
+            ),
+            [capturePostSettlementFailureFoldEntry(error)],
             IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
           );
         }
@@ -917,7 +905,8 @@ export function createIdempotencyRecordService(
         observation = await observeJsonRecordForCleanup(
           guardPath,
           evidenceRef,
-          IdempotencyTransitionGuardSchema
+          IdempotencyTransitionGuardSchema,
+          workspaceRoot
         );
         break;
       } catch (error) {
@@ -981,14 +970,19 @@ export function createIdempotencyRecordService(
           const exact = await observeJsonRecordForCleanup(
             recordPath,
             evidenceRef,
-            IdempotencyRecordSchema
+            IdempotencyRecordSchema,
+            workspaceRoot
           );
           let outcome: FailedRecoveryWriteOutcome | undefined;
           if (exact.status === "missing") {
             outcome = { status: "generation_lost" };
           } else if (exact.status === "malformed" || exact.status === "schema_threw") {
             await cancelWorkspaceRecordCleanupPermit(exact.cleanupPermit);
-            outcome = { status: "generation_lost_with_error", error: exact.error };
+            outcome = {
+              status: "generation_lost_with_error",
+              error: exact.error,
+              occurrence: captureFailureFoldEntry("body", exact.error)
+            };
           } else {
             let recordPermitOutstanding = true;
             try {
@@ -1022,7 +1016,7 @@ export function createIdempotencyRecordService(
                   await cancelWorkspaceRecordCleanupPermit(exact.cleanupPermit);
                   recordPermitOutstanding = false;
                   outcome = await classifyFailedRecoveryAuthorityLoss(
-                    authorityError,
+                    captureFailureFoldEntry("body", authorityError),
                     scope,
                     key
                   );
@@ -1048,7 +1042,7 @@ export function createIdempotencyRecordService(
 
           if (!outcome) throw completedRecordInvalidationStateError(evidenceRef);
 
-          const settlementErrors: unknown[] = [];
+          const settlementEntries: FailureFoldEntry[] = [];
           try {
             await transitionGuardHooks?.beforeStaleGuardSettlementRefresh?.({
               guardPath,
@@ -1061,74 +1055,45 @@ export function createIdempotencyRecordService(
               evidenceRef
             );
           } catch (error) {
-            settlementErrors.push(error);
+            settlementEntries.push(captureFailureFoldEntry("settlement", error));
           }
           try {
             if (!(await consume())) {
-              settlementErrors.push(
-                idempotencyTransitionArtifactSettlementError(
-                  evidenceRef,
-                  new Error(
-                    "Idempotency fail-intent guard changed while settling generation-bound recovery."
+              settlementEntries.push(
+                captureFailureFoldEntry(
+                  "settlement",
+                  idempotencyTransitionArtifactSettlementError(
+                    evidenceRef,
+                    new Error(
+                      "Idempotency fail-intent guard changed while settling generation-bound recovery."
+                    )
                   )
                 )
               );
             }
           } catch (consumeError) {
-            if (!settlementErrors.some((error) => Object.is(error, consumeError))) {
-              settlementErrors.push(consumeError);
-            }
-            try {
-              await settleExactIdempotencyTransitionArtifact(
-                guardPath,
-                evidenceRef,
-                guard
-              );
-            } catch (retryError) {
-              if (!settlementErrors.some((error) => Object.is(error, retryError))) {
-                settlementErrors.push(retryError);
-              }
-            }
+            settlementEntries.push(
+              captureFailureFoldEntry("settlement", consumeError)
+            );
           }
 
           if (outcome.status === "generation_lost_with_error") {
-            throw preserveTaskServiceErrorCompensationCompatibility(
-              outcome.error,
-              settlementErrors,
+            if (settlementEntries.length === 0) throw outcome.error;
+            throw preserveTaskServiceErrorFailureEntries(
+              outcome.occurrence,
+              settlementEntries,
               IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
             );
           }
-          if (settlementErrors.length > 0) {
-            throw preserveTaskServiceErrorCompensationCompatibility(
-              settlementErrors[0],
-              settlementErrors.slice(1),
+          if (settlementEntries.length > 0) {
+            throw preserveTaskServiceErrorFailureEntries(
+              settlementEntries[0]!,
+              settlementEntries.slice(1),
               IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
             );
           }
           return outcome.record;
-        }, async () => {
-          const settlementErrors: unknown[] = [];
-          try {
-            await cleanupLock.release();
-          } catch (releaseError) {
-            settlementErrors.push(releaseError);
-          }
-          try {
-            await cleanupLock.settleAfterSiblingMutation();
-          } catch (retryError) {
-            if (!settlementErrors.some((error) => Object.is(error, retryError))) {
-              settlementErrors.push(retryError);
-            }
-          }
-          if (settlementErrors.length === 1) throw settlementErrors[0];
-          if (settlementErrors.length > 1) {
-            throw preserveTaskServiceErrorCompensationCompatibility(
-              settlementErrors[0],
-              settlementErrors.slice(1),
-              IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
-            );
-          }
-        });
+        }, cleanupLock.release);
       }
     );
   }
@@ -1159,60 +1124,68 @@ export function createIdempotencyRecordService(
     guard: Extract<IdempotencyTransitionGuardAcquire, { status: "acquired" }>,
     body: () => Promise<T>
   ): Promise<T> {
-    let bodyCompleted = false;
-    let bodyResult: T | undefined;
-    let transitionError: unknown;
+    let bodyOutcome: FailureAsyncOutcome<T>;
     try {
-      bodyResult = await body();
-      bodyCompleted = true;
+      bodyOutcome = { status: "fulfilled", value: await body() };
     } catch (error) {
-      transitionError = error;
+      bodyOutcome = {
+        status: "rejected",
+        reason: error,
+        occurrence: captureFailureFoldEntry("body", error)
+      };
     }
 
-    let durableFailedRecord: IdempotencyRecord | undefined;
-    let classificationError: unknown;
+    let durableOutcome: FailureAsyncOutcome<IdempotencyRecord>;
     try {
-      durableFailedRecord = await requireDurablyFailedRecord(input, scope);
+      durableOutcome = {
+        status: "fulfilled",
+        value: await requireDurablyFailedRecord(input, scope)
+      };
     } catch (error) {
-      classificationError = error;
+      durableOutcome = {
+        status: "rejected",
+        reason: error,
+        occurrence: captureFailureFoldEntry("settlement", error)
+      };
     }
 
-    if (durableFailedRecord) {
-      const releaseErrors: unknown[] = [];
+    if (durableOutcome.status === "fulfilled") {
+      const releaseEntries: FailureFoldEntry[] = [];
       try {
         await guard.release();
       } catch (releaseError) {
-        releaseErrors.push(releaseError);
+        releaseEntries.push(captureFailureFoldEntry(
+          bodyOutcome.status === "rejected" ? "final_release" : "initial_release",
+          releaseError
+        ));
         try {
           await guard.recoverTerminalRelease(async () => {
             await requireDurablyFailedRecord(input, scope);
           });
         } catch (recoveryError) {
-          releaseErrors.push(recoveryError);
+          releaseEntries.push(captureFailureFoldEntry("final_release", recoveryError));
         }
       }
 
-      if (transitionError !== undefined) {
-        throw preserveTaskServiceErrorCompensationCompatibility(
-          transitionError,
-          releaseErrors,
+      if (bodyOutcome.status === "rejected") {
+        if (releaseEntries.length === 0) throw bodyOutcome.reason;
+        throw preserveTaskServiceErrorFailureEntries(
+          bodyOutcome.occurrence,
+          releaseEntries,
           IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
         );
       }
-      if (releaseErrors.length > 0) {
-        throw preserveTaskServiceErrorCompensationCompatibility(
-          releaseErrors[0],
-          releaseErrors.slice(1),
+      if (releaseEntries.length > 0) {
+        throw preserveTaskServiceErrorFailureEntries(
+          releaseEntries[0]!,
+          releaseEntries.slice(1),
           IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
         );
       }
-      if (!bodyCompleted) {
-        throw new TypeError("Failed idempotency transition settled without a body result.");
-      }
-      return bodyResult as T;
+      return bodyOutcome.value;
     }
 
-    const retentionErrors: unknown[] = [];
+    const retentionEntries: FailureFoldEntry[] = [];
     let retainExactFailIntent = true;
     try {
       retainExactFailIntent = await exactFailIntentStillProtectsCurrentRecord(
@@ -1221,15 +1194,32 @@ export function createIdempotencyRecordService(
         guard.guard
       );
     } catch (retentionClassificationError) {
-      retentionErrors.push(retentionClassificationError);
+      retentionEntries.push(captureFailureFoldEntry(
+        "settlement",
+        retentionClassificationError
+      ));
     }
     try {
       if (retainExactFailIntent) await guard.retain();
       else await guard.release();
     } catch (retentionError) {
-      retentionErrors.push(retentionError);
+      retentionEntries.push(captureFailureFoldEntry("final_release", retentionError));
     }
-    const primary = transitionError ?? classificationError ?? new TaskServiceError({
+    if (bodyOutcome.status === "rejected") {
+      throw preserveTaskServiceErrorFailureEntries(
+        bodyOutcome.occurrence,
+        [durableOutcome.occurrence, ...retentionEntries],
+        IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+      );
+    }
+    if (durableOutcome.status === "rejected") {
+      throw preserveTaskServiceErrorFailureEntries(
+        durableOutcome.occurrence,
+        retentionEntries,
+        IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
+      );
+    }
+    const fallback = new TaskServiceError({
       code: "record_malformed",
       status: 500,
       category: "workspace_error",
@@ -1239,15 +1229,9 @@ export function createIdempotencyRecordService(
       retryable: true,
       recommendedNextActions: ["Retry after inspecting the idempotency transition state."]
     });
-    const compensations = [
-      ...(transitionError !== undefined && classificationError !== undefined
-        ? [classificationError]
-        : []),
-      ...retentionErrors
-    ];
-    throw preserveTaskServiceErrorCompensationCompatibility(
-      primary,
-      compensations,
+    throw preserveTaskServiceErrorFailureEntries(
+      captureFailureFoldEntry("settlement", fallback),
+      retentionEntries,
       IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
     );
   }
@@ -1258,70 +1242,77 @@ export function createIdempotencyRecordService(
     guard: Extract<IdempotencyTransitionGuardAcquire, { status: "acquired" }>,
     body: () => Promise<T>
   ): Promise<T> {
-    let bodyResult: T | undefined;
-    let bodyCompleted = false;
-    let bodyError: unknown;
+    let bodyOutcome: FailureAsyncOutcome<T>;
     try {
-      bodyResult = await body();
-      bodyCompleted = true;
+      bodyOutcome = { status: "fulfilled", value: await body() };
     } catch (error) {
-      bodyError = error;
+      bodyOutcome = {
+        status: "rejected",
+        reason: error,
+        occurrence: captureFailureFoldEntry("body", error)
+      };
     }
 
-    let durableFailure: IdempotencyRecord | undefined;
-    let classificationError: unknown;
+    let durableOutcome: FailureAsyncOutcome<IdempotencyRecord>;
     try {
-      durableFailure = await requireDurablyFailedRecord(input, scope);
+      durableOutcome = {
+        status: "fulfilled",
+        value: await requireDurablyFailedRecord(input, scope)
+      };
     } catch (error) {
-      classificationError = error;
+      durableOutcome = {
+        status: "rejected",
+        reason: error,
+        occurrence: captureFailureFoldEntry("settlement", error)
+      };
     }
 
-    const releaseErrors: unknown[] = [];
+    const releaseEntries: FailureFoldEntry[] = [];
     try {
       await guard.release();
     } catch (releaseError) {
-      releaseErrors.push(releaseError);
-      if (durableFailure) {
+      releaseEntries.push(captureFailureFoldEntry(
+        bodyOutcome.status === "rejected" || durableOutcome.status === "rejected"
+          ? "final_release"
+          : "initial_release",
+        releaseError
+      ));
+      if (durableOutcome.status === "fulfilled") {
         try {
           await guard.recoverTerminalRelease(async () => {
             await requireDurablyFailedRecord(input, scope);
           });
         } catch (recoveryError) {
-          releaseErrors.push(recoveryError);
+          releaseEntries.push(captureFailureFoldEntry("final_release", recoveryError));
         }
       }
     }
 
-    if (bodyError !== undefined) {
-      throw preserveTaskServiceErrorCompensationCompatibility(
-        bodyError,
+    if (bodyOutcome.status === "rejected") {
+      throw preserveTaskServiceErrorFailureEntries(
+        bodyOutcome.occurrence,
         [
-          ...(classificationError === undefined ? [] : [classificationError]),
-          ...releaseErrors
+          ...(durableOutcome.status === "rejected" ? [durableOutcome.occurrence] : []),
+          ...releaseEntries
         ],
         IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
       );
     }
-    if (!durableFailure) {
-      throw preserveTaskServiceErrorCompensationCompatibility(
-        classificationError ?? completedRecordInvalidationStateError(
-          idempotencyRecordEvidenceRef(scope, input.key)
-        ),
-        releaseErrors,
+    if (durableOutcome.status === "rejected") {
+      throw preserveTaskServiceErrorFailureEntries(
+        durableOutcome.occurrence,
+        releaseEntries,
         IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
       );
     }
-    if (releaseErrors.length > 0) {
-      throw preserveTaskServiceErrorCompensationCompatibility(
-        releaseErrors[0],
-        releaseErrors.slice(1),
+    if (releaseEntries.length > 0) {
+      throw preserveTaskServiceErrorFailureEntries(
+        releaseEntries[0]!,
+        releaseEntries.slice(1),
         IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
       );
     }
-    if (!bodyCompleted) {
-      throw new TypeError("Exact failed transition completed without a body result.");
-    }
-    return bodyResult as T;
+    return bodyOutcome.value;
   }
 
   async function requireDurablyFailedRecord(
@@ -1608,7 +1599,8 @@ export function createIdempotencyRecordService(
         // transported reason resources without changing the result shape.
         let settleRejectedReasonAfterFailure: (() => Promise<void>) | undefined;
         const settleFulfilledDecisionResources = async (
-          fulfilled: unknown
+          fulfilled: unknown,
+          context: "guard_release_failure" | "body_failure"
         ): Promise<void> => {
           if (
             !fulfilled ||
@@ -1617,13 +1609,18 @@ export function createIdempotencyRecordService(
           ) {
             return;
           }
-          const settlementErrors: unknown[] = [];
+          const settlementErrors: FailureFoldEntry[] = [];
           try {
             await cancelCompletedMutationAuthority(
               fulfilled.mutationAuthority as CompletedIdempotencyRecordMutationAuthority
             );
           } catch (cancellationError) {
-            settlementErrors.push(cancellationError);
+            settlementErrors.push(
+              captureFailureFoldEntry(
+                context === "body_failure" ? "final_release" : "initial_release",
+                cancellationError
+              )
+            );
           }
           const settleRejectedReason = settleRejectedReasonAfterFailure;
           settleRejectedReasonAfterFailure = undefined;
@@ -1631,12 +1628,16 @@ export function createIdempotencyRecordService(
             try {
               await settleRejectedReason();
             } catch (reasonSettlementError) {
-              settlementErrors.push(reasonSettlementError);
+              settlementErrors.push(
+                captureFailureFoldEntry(
+                  context === "body_failure" ? "final_release" : "settlement",
+                  reasonSettlementError
+                )
+              );
             }
           }
-          if (settlementErrors.length === 1) throw settlementErrors[0];
-          if (settlementErrors.length > 1) {
-            throw preserveTaskServiceErrorCompensationCompatibility(
+          if (settlementErrors.length > 0) {
+            throw preserveTaskServiceErrorFailureEntries(
               settlementErrors[0],
               settlementErrors.slice(1),
               IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE
@@ -1656,7 +1657,8 @@ export function createIdempotencyRecordService(
             const exact = await observeJsonRecordForCleanup(
               recordPath,
               evidenceRef,
-              IdempotencyRecordSchema
+              IdempotencyRecordSchema,
+              workspaceRoot
             );
             if (exact.status === "missing") {
               retryWithCurrentAuthority = true;
@@ -1723,7 +1725,11 @@ export function createIdempotencyRecordService(
             }
           },
           guard.release,
-          settleFulfilledDecisionResources
+          async (fulfilled) =>
+            await settleFulfilledDecisionResources(
+              fulfilled,
+              "guard_release_failure"
+            )
         );
 
         if (!retryWithCurrentAuthority) {
@@ -1745,16 +1751,17 @@ export function createIdempotencyRecordService(
                 evidenceRef
               );
             } catch (refreshError) {
+              const refreshEntry = captureFailureFoldEntry("body", refreshError);
               // Root A (V33-01): this refresh window is the second
               // throw-after-fulfilled exit; settle the mutation authority AND
               // the rejected reason's transported resources before the
               // refresh failure propagates.
               try {
-                await settleFulfilledDecisionResources(result);
+                await settleFulfilledDecisionResources(result, "body_failure");
               } catch (settlementError) {
-                throw preserveTaskServiceErrorCompensationCompatibility(
-                  refreshError,
-                  [settlementError],
+                throw preserveTaskServiceErrorFailureEntries(
+                  refreshEntry,
+                  [captureFailureFoldEntry("final_release", settlementError)],
                   IDEMPOTENCY_RELEASE_COMPENSATION_MESSAGE
                 );
               }
@@ -1931,7 +1938,8 @@ export function createIdempotencyRecordService(
           const exact = await observeJsonRecordForCleanup(
             recordPath,
             evidenceRef,
-            IdempotencyRecordSchema
+            IdempotencyRecordSchema,
+            workspaceRoot
           );
           if (exact.status === "missing") {
             throw missingTransitionRecordError(
@@ -2099,7 +2107,8 @@ export function createIdempotencyRecordService(
       const observation = await observeJsonRecordForCleanup(
         recordPath,
         evidenceRef,
-        IdempotencyRecordSchema
+        IdempotencyRecordSchema,
+        workspaceRoot
       );
       if (observation.status === "missing") {
         throw missingTransitionRecordError(
@@ -2143,6 +2152,7 @@ export function createIdempotencyRecordService(
             evidenceRef
           );
         } catch (authorityError) {
+          const authorityEntry = captureFailureFoldEntry("body", authorityError);
           await cancelWorkspaceRecordCleanupPermit(observation.cleanupPermit);
           permitOutstanding = false;
           try {
@@ -2152,9 +2162,13 @@ export function createIdempotencyRecordService(
               evidenceRef
             );
           } catch (classificationError) {
-            throw preserveTaskServiceErrorCompensationCompatibility(
-              classificationError,
-              [authorityError],
+            const classificationEntry = captureFailureFoldEntry(
+              "settlement",
+              classificationError
+            );
+            throw preserveTaskServiceErrorFailureVector(
+              classificationEntry,
+              [authorityEntry, classificationEntry],
               IDEMPOTENCY_INVALIDATION_RECOVERY_COMPENSATION_MESSAGE
             );
           }
@@ -2317,12 +2331,6 @@ async function acquireIdempotencyTransitionGuard(
         },
         recoverTerminalRelease: async (assertDurablyFailed) =>
           await recoverOwnedIdempotencyTransitionGuardAfterTerminalReleaseFailure(
-            workspaceRoot,
-            scope,
-            key,
-            guardPath,
-            evidenceRef,
-            created.record,
             assertDurablyFailed
           )
       };
@@ -2361,7 +2369,8 @@ async function removeStaleIdempotencyTransitionGuard(
     observation = await observeJsonRecordForCleanup(
       guardPath,
       evidenceRef,
-      IdempotencyTransitionGuardSchema
+      IdempotencyTransitionGuardSchema,
+      workspaceRoot
     );
   } catch (error) {
     if (isRetryableWorkspaceRecordAuthorityContention(error)) return "blocked";
@@ -2426,7 +2435,8 @@ async function removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
     observation = await observeJsonRecordForCleanup(
       guardPath,
       evidenceRef,
-      IdempotencyTransitionGuardSchema
+      IdempotencyTransitionGuardSchema,
+      workspaceRoot
     );
   } catch (error) {
     if (isRetryableWorkspaceRecordAuthorityContention(error)) {
@@ -2467,57 +2477,9 @@ async function removeRecoverableIdempotencyTransitionGuardForRollbackRecovery(
 }
 
 async function recoverOwnedIdempotencyTransitionGuardAfterTerminalReleaseFailure(
-  workspaceRoot: string,
-  scope: IdempotencyScope,
-  key: string,
-  guardPath: string,
-  evidenceRef: string,
-  expected: IdempotencyTransitionGuard,
   assertDurablyFailed: () => Promise<void>
 ): Promise<void> {
-  let observation: WorkspaceJsonRecordCleanupObservation<IdempotencyTransitionGuard>;
-  try {
-    observation = await observeJsonRecordForCleanup(
-      guardPath,
-      evidenceRef,
-      IdempotencyTransitionGuardSchema
-    );
-  } catch (error) {
-    if (isRetryableWorkspaceRecordAuthorityContention(error)) {
-      throw transitionGuardBusyError(scope, key, "fail");
-    }
-    throw error;
-  }
-  if (observation.status === "missing") return;
-
-  await withOwnedIdempotencyTransitionObservation(
-    observation,
-    guardPath,
-    evidenceRef,
-    async (consume) => {
-      if (
-        observation.status !== "record" ||
-        !isSameIdempotencyTransitionGuard(observation.record, expected)
-      ) {
-        return;
-      }
-
-      const cleanupLock = await acquireIdempotencyTransitionCleanupLock(
-        workspaceRoot,
-        scope,
-        key,
-        evidenceRef
-      );
-      if (cleanupLock.status === "busy") {
-        throw transitionGuardBusyError(scope, key, "fail");
-      }
-
-      await runWithIdempotencyRelease(async () => {
-        await assertDurablyFailed();
-        await consume();
-      }, cleanupLock.release);
-    }
-  );
+  await assertDurablyFailed();
 }
 
 function assertValidIdempotencyTransitionGuardShape(
@@ -2607,43 +2569,6 @@ async function withOwnedIdempotencyTransitionObservation<T>(
   );
 }
 
-async function settleExactIdempotencyTransitionArtifact(
-  path: string,
-  evidenceRef: string,
-  expected: IdempotencyTransitionGuard
-): Promise<void> {
-  const refreshed = await observeJsonRecordForCleanup(
-    path,
-    evidenceRef,
-    IdempotencyTransitionGuardSchema
-  );
-  if (refreshed.status === "missing") return;
-
-  await withOwnedIdempotencyTransitionObservation(
-    refreshed,
-    path,
-    evidenceRef,
-    async (consume) => {
-      if (refreshed.status === "schema_threw") throw refreshed.error;
-      if (
-        refreshed.status !== "record" ||
-        !isSameIdempotencyTransitionGuard(refreshed.record, expected)
-      ) {
-        throw idempotencyTransitionArtifactSettlementError(
-          evidenceRef,
-          new Error("Idempotency transition artifact changed during settlement retry.")
-        );
-      }
-      if (!(await consume())) {
-        throw idempotencyTransitionArtifactSettlementError(
-          evidenceRef,
-          new Error("Idempotency transition artifact changed during settlement retry.")
-        );
-      }
-    }
-  );
-}
-
 async function consumeObservedIdempotencyTransitionArtifact(
   observation: ExistingIdempotencyTransitionObservation,
   path: string,
@@ -2651,19 +2576,20 @@ async function consumeObservedIdempotencyTransitionArtifact(
 ): Promise<boolean> {
   if (observation.status === "schema_threw") throw observation.error;
   try {
-    const result = await conditionalDeleteJsonRecordWithCleanupPermit(
-      observation.cleanupPermit,
-      path,
-      evidenceRef,
-      IdempotencyTransitionGuardSchema,
-      observation.status === "record"
-        ? {
-            kind: "record",
-            expected: observation.record,
-            matches: () => true
-          }
-        : { kind: "malformed" }
-    );
+    const result =
+      await conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
+        observation.cleanupPermit,
+        path,
+        evidenceRef,
+        IdempotencyTransitionGuardSchema,
+        observation.status === "record"
+          ? {
+              kind: "record",
+              expected: observation.record,
+              matches: () => true
+            }
+          : { kind: "malformed" }
+      );
     return result.status !== "condition_not_met";
   } catch (error) {
     if (error instanceof WorkspaceRecordConditionalDeleteError) {
@@ -2713,17 +2639,15 @@ async function acquireIdempotencyTransitionCleanupLock(
             cleanupLockPath,
             evidenceRef,
             cleanupLock
-          ),
-        settleAfterSiblingMutation: async () =>
-          await settleExactIdempotencyTransitionArtifact(
-            cleanupLockPath,
-            evidenceRef,
-            cleanupLock
           )
       };
     }
 
-    if (await removeStaleIdempotencyTransitionCleanupLock(cleanupLockPath, evidenceRef)) {
+    if (await removeStaleIdempotencyTransitionCleanupLock(
+      workspaceRoot,
+      cleanupLockPath,
+      evidenceRef
+    )) {
       continue;
     }
 
@@ -2736,6 +2660,7 @@ async function acquireIdempotencyTransitionCleanupLock(
 }
 
 async function removeStaleIdempotencyTransitionCleanupLock(
+  workspaceRoot: string,
   cleanupLockPath: string,
   evidenceRef: string
 ): Promise<boolean> {
@@ -2744,7 +2669,8 @@ async function removeStaleIdempotencyTransitionCleanupLock(
     observation = await observeJsonRecordForCleanup(
       cleanupLockPath,
       evidenceRef,
-      IdempotencyTransitionGuardSchema
+      IdempotencyTransitionGuardSchema,
+      workspaceRoot
     );
   } catch (error) {
     if (isRetryableWorkspaceRecordAuthorityContention(error)) return false;
@@ -2772,7 +2698,7 @@ async function releaseOwnedIdempotencyTransitionArtifact(
   expected: IdempotencyTransitionGuard
 ): Promise<void> {
   try {
-    await conditionalDeleteJsonRecordWithCleanupPermit(
+    await conditionalDeleteJsonRecordWithCleanupPermitAndExactFailureSettlement(
       cleanupPermit,
       path,
       evidenceRef,
@@ -2786,7 +2712,8 @@ async function releaseOwnedIdempotencyTransitionArtifact(
   } catch (error) {
     if (
       error instanceof WorkspaceRecordConditionalDeleteError &&
-      error.mutationPhase === "pre_mutation"
+      error.mutationPhase === "pre_mutation" &&
+      error.preMutationDisposition === "benign_convergence"
     ) {
       return;
     }
@@ -2833,19 +2760,23 @@ function malformedIdempotencyTransitionGuardError(
 }
 
 function isPreMutationIdempotencyArtifactAuthorityChange(error: unknown): boolean {
+  if (failureLedger(error)) return false;
+  const taskServiceError = taskServiceErrorAtBoundary(error);
   return (
-    error instanceof TaskServiceError &&
-    error.cause instanceof WorkspaceRecordConditionalDeleteError &&
-    error.cause.mutationPhase === "pre_mutation"
+    taskServiceError !== undefined &&
+    taskServiceError.cause instanceof WorkspaceRecordConditionalDeleteError &&
+    taskServiceError.cause.mutationPhase === "pre_mutation" &&
+    taskServiceError.cause.preMutationDisposition === "benign_convergence"
   );
 }
 
 function isRetryableWorkspaceRecordAuthorityContention(error: unknown): boolean {
+  const taskServiceError = taskServiceErrorAtBoundary(error);
   return (
-    error instanceof TaskServiceError &&
-    error.status === 409 &&
-    error.category === "workspace_error" &&
-    error.retryable
+    taskServiceError !== undefined &&
+    taskServiceError.status === 409 &&
+    taskServiceError.category === "workspace_error" &&
+    taskServiceError.retryable
   );
 }
 

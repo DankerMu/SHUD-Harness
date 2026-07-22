@@ -1,0 +1,227 @@
+import { describe, expect, test } from "bun:test";
+import * as failureModule from "../../../../../packages/core/src/domain/services/compensation-error-preservation";
+import * as taskBoundaryModule from "../../../../../packages/core/src/domain/services/task-service-error-compensation";
+import { TaskServiceError } from "../../../../../packages/core/src/domain/services/task-card-service";
+
+type DynamicFailureModule = typeof failureModule & {
+  adoptFailureCarrier?: (
+    phase: failureModule.FailurePhase,
+    carrier: unknown
+  ) => failureModule.FailureCarrierAdoption;
+  createTrustedFailureTransportFamily?: <T>(input: {
+    readonly name: string;
+    readonly message: string;
+  }) => {
+    readonly create: (projection: T) => Error;
+    readonly has: (value: unknown) => boolean;
+    readonly project: (value: unknown) => T | undefined;
+  };
+};
+
+type DynamicTaskBoundaryModule = typeof taskBoundaryModule & {
+  taskServiceErrorAuthorityTransportFamily?: {
+    readonly create: (projection: unknown) => Error;
+    readonly has: (value: unknown) => boolean;
+    readonly project: (value: unknown) => unknown;
+  };
+};
+
+const dynamicFailureModule = failureModule as DynamicFailureModule;
+const dynamicTaskBoundaryModule = taskBoundaryModule as DynamicTaskBoundaryModule;
+
+describe("Round 2 depth corrective regression", () => {
+  test("explicit adoption imports history and records the current catch", () => {
+    expect(typeof dynamicFailureModule.adoptFailureCarrier).toBe("function");
+    const primary = new Error("seed primary");
+    const seed = failureModule.mergeTrustedFailureOccurrences(
+      failureModule.captureFailureOccurrence("body", primary),
+      [failureModule.captureFailureOccurrence("final_release", "seed release")],
+      "seed"
+    );
+    const inherited = failureModule.failureEvents(seed);
+    const adoption = dynamicFailureModule.adoptFailureCarrier!("body", seed);
+    const result = failureModule.mergeTrustedFailureOccurrences(
+      adoption,
+      [failureModule.captureFailureOccurrence("final_release", "outer release")],
+      "outer"
+    );
+    const events = failureModule.failureEvents(result);
+
+    expect(events.filter((event) => inherited.some(
+      (prior) => prior.occurrenceId === event.occurrenceId
+    ))).toHaveLength(inherited.length);
+    const currentCatch = events.find((event) => event.order === adoption.order);
+    expect(currentCatch).toMatchObject({
+      phase: "body",
+      order: adoption.order,
+      value: seed
+    });
+    expect(["occurrence", "carrier"].map((field) => field in adoption)).toEqual([
+      false,
+      false
+    ]);
+    expect(failureModule.semanticPrimaryValue(result)).toBe(primary);
+    expect(new Set(events.map((event) => event.occurrenceId)).size).toBe(events.length);
+  });
+
+  test("phase-role grammar rejects a later body transactionally", () => {
+    const primary = failureModule.captureFailureOccurrence("body", "primary");
+    const illegalLater = failureModule.captureFailureOccurrence("body", "later");
+    expect(() => failureModule.mergeTrustedFailureOccurrences(
+      primary,
+      [illegalLater],
+      "illegal phase"
+    )).toThrow();
+
+    const recovered = failureModule.mergeTrustedFailureOccurrences(
+      primary,
+      [failureModule.captureFailureOccurrence("final_release", "release")],
+      "recovered after rejected preflight"
+    );
+    expect(failureModule.failureEvents(recovered)[0]).toBe(primary);
+  });
+
+  test("untrusted duplicate stale and reordered entries fail closed", () => {
+    expect(() => failureModule.mergeTrustedFailureOccurrences(
+      {} as failureModule.FailureOccurrence,
+      [],
+      "untrusted"
+    )).toThrow();
+
+    const duplicate = failureModule.captureFailureOccurrence("body", "duplicate");
+    expect(() => failureModule.mergeTrustedFailureOccurrences(
+      duplicate,
+      [duplicate],
+      "duplicate"
+    )).toThrow();
+
+    const older = failureModule.captureFailureOccurrence("body", "older");
+    const newer = failureModule.captureFailureOccurrence("final_release", "newer");
+    expect(() => failureModule.mergeTrustedFailureOccurrences(
+      newer,
+      [older],
+      "reordered"
+    )).toThrow();
+
+    const stale = failureModule.captureFailureOccurrence("body", "stale");
+    failureModule.mergeTrustedFailureOccurrences(stale, [], "first claim");
+    expect(() => failureModule.mergeTrustedFailureOccurrences(
+      stale,
+      [],
+      "stale claim"
+    )).toThrow();
+  });
+
+  test("numeric-key budget ignores returned nonnumeric positions and keeps edge evidence", () => {
+    for (const order of ["reverse", "interleaved"] as const) {
+      for (const overflowPresent of [true, false]) {
+        const numericCount = failureModule.FAILURE_GRAPH_MAX_NUMERIC_KEYS + 1;
+        let ownKeysCalls = 0;
+        const ascending = Array.from({ length: numericCount }, (_, index) => String(index));
+        const numericKeys = order === "reverse"
+          ? [...ascending].reverse()
+          : ascending.filter((_, index) => index % 2 === 0)
+            .concat(ascending.filter((_, index) => index % 2 === 1).reverse());
+        const values = new Proxy([], {
+          ownKeys() {
+            ownKeysCalls += 1;
+            return ["length", "metadata", Symbol("metadata"), ...numericKeys];
+          },
+          getOwnPropertyDescriptor(target, property) {
+            if (property === "length") {
+              return Reflect.getOwnPropertyDescriptor(target, property);
+            }
+            if (
+              typeof property === "string" &&
+              Number.isInteger(Number(property)) &&
+              String(Number(property)) === property
+            ) {
+              if (!overflowPresent && property === String(numericCount - 1)) return undefined;
+              return {
+                configurable: true,
+                enumerable: true,
+                value: Number(property),
+                writable: true
+              };
+            }
+            return undefined;
+          }
+        });
+        const primary = new AggregateError([], `${order} numeric ordering`);
+        Object.defineProperty(primary, "errors", { value: values });
+        const result = failureModule.mergeTrustedFailureOccurrences(
+          failureModule.captureFailureOccurrence("body", primary),
+          [],
+          `${order} numeric ordering`
+        );
+        const ledger = failureModule.failureLedger(result)!;
+        const codes = ledger.observedGraph.observationFailures
+          .map((event) => event.value)
+          .filter((value): value is failureModule.FailureGraphObservationIssue =>
+            value instanceof failureModule.FailureGraphObservationIssue
+          )
+          .map((value) => value.code);
+        const edges = ledger.observedGraph.nodes[0]!.edges.filter(
+          (edge) => edge.kind === "errors"
+        );
+
+        expect(ownKeysCalls).toBe(1);
+        expect(edges.map((edge) => edge.index)).toEqual(
+          Array.from(
+            { length: failureModule.FAILURE_GRAPH_MAX_NUMERIC_KEYS },
+            (_, index) => index
+          )
+        );
+        expect(codes).toEqual(overflowPresent
+          ? ["numeric_key_budget_exceeded", "edge_budget_exceeded"]
+          : ["numeric_key_budget_exceeded"]);
+        expect(ledger.events.every(Object.isFrozen)).toBe(true);
+        expect(new Set(ledger.events.map((event) => event.order)).size).toBe(
+          ledger.events.length
+        );
+        expect(failureModule.semanticPrimaryValue(result)).toBe(primary);
+      }
+    }
+  });
+
+  test("authority transport is closure-branded and never inspects lookalike code", () => {
+    expect(typeof dynamicFailureModule.createTrustedFailureTransportFamily).toBe("function");
+    expect(dynamicTaskBoundaryModule.taskServiceErrorAuthorityTransportFamily).toBeDefined();
+
+    const typed = new TaskServiceError({
+      code: "record_malformed",
+      status: 409,
+      category: "idempotency_conflict",
+      message: "trusted authority",
+      userMessage: "trusted authority",
+      evidenceRefs: ["round2.transport"],
+      retryable: true,
+      recommendedNextActions: ["Retry."]
+    });
+    const family = dynamicTaskBoundaryModule.taskServiceErrorAuthorityTransportFamily!;
+    const trusted = family.create(typed);
+    expect(family.has(trusted)).toBe(true);
+    expect(family.project(trusted)).toBe(typed);
+    expect(taskBoundaryModule.taskServiceErrorAtBoundary(trusted)).toBe(typed);
+
+    let getterRuns = 0;
+    let constructorRuns = 0;
+    const lookalike = new Error("lookalike");
+    Object.defineProperty(lookalike, "authorityError", {
+      get() {
+        getterRuns += 1;
+        return typed;
+      }
+    });
+    Object.defineProperty(lookalike, "constructor", {
+      value: function HostileConstructor() {
+        constructorRuns += 1;
+      }
+    });
+    expect(family.has(lookalike)).toBe(false);
+    expect(family.project(lookalike)).toBeUndefined();
+    expect(taskBoundaryModule.taskServiceErrorAtBoundary(lookalike)).toBeUndefined();
+    expect(getterRuns).toBe(0);
+    expect(constructorRuns).toBe(0);
+  });
+});
