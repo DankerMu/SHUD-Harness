@@ -20,11 +20,19 @@ import {
 import { runWithLocalTokenStoreTestContext } from "./local-token-test-support";
 import {
   cleanupLocalTokenTestWorkspace,
+  contendForCooperativeBootstrap,
   createLocalTokenTestWorkspace,
   createPrivateSecrets,
+  interruptBootstrapLocalTokenStore,
   replaceLocalTokenArtifact,
   type LocalTokenTestWorkspace
 } from "./local-token-test-helpers";
+
+function removedDirectoryBootstrapResidue(parent: string): string[] {
+  return readdirSync(parent).filter((name) =>
+    /^\.local-token-directory-.*\.staging$/u.test(name)
+  );
+}
 
 describe("workspace local-token store contract", () => {
   const workspaces: LocalTokenTestWorkspace[] = [];
@@ -236,7 +244,7 @@ describe("workspace local-token store contract", () => {
 
     expect(() => runWithLocalTokenStoreTestContext({
       hook: ({ stage }) => {
-        if (stage !== "after_workspace_leaf_mkdir" || replacement) return;
+        if (stage !== "after_workspace_leaf_bootstrap_mkdir" || replacement) return;
         renameSync(target, displaced);
         mkdirSync(target, { mode: 0o755 });
         chmodSync(target, 0o755);
@@ -263,7 +271,7 @@ describe("workspace local-token store contract", () => {
 
     expect(() => runWithLocalTokenStoreTestContext({
       hook: ({ stage }) => {
-        if (stage !== "after_secrets_mkdir" || replacement) return;
+        if (stage !== "after_secrets_bootstrap_mkdir" || replacement) return;
         renameSync(workspace.secretsRoot, displaced);
         mkdirSync(workspace.secretsRoot, { mode: 0o755 });
         chmodSync(workspace.secretsRoot, 0o755);
@@ -286,105 +294,136 @@ describe("workspace local-token store contract", () => {
     expect(readdirSync(workspace.secretsRoot)).toEqual(["sentinel"]);
   });
 
-  test("post-staging workspace collision fails closed before a later independent retry", () => {
+  test("cooperative workspace-leaf creators serialize at the final-name mkdir", async () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
-    const target = join(workspace.tempRoot, "post-staging-workspace");
-    const displaced = join(workspace.tempRoot, "post-staging-workspace-displaced");
-    let replacement: BigIntStats | undefined;
-    let stagingName: string | undefined;
-    let observed: unknown;
+    const target = join(workspace.tempRoot, "contended-workspace");
 
-    try {
-      runWithLocalTokenStoreTestContext({
-        hook: ({ stage, name }) => {
-          if (stage !== "after_workspace_staging_mkdir" || replacement) return;
-          stagingName = name;
-          try {
-            renameSync(target, displaced);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          }
-          mkdirSync(target, { mode: 0o700 });
-          writeFileSync(join(target, "sentinel"), "private-workspace-collision", {
-            mode: 0o600
-          });
-          replacement = lstatSync(target, { bigint: true });
-        }
-      }, () => openWorkspaceLocalTokenAuthority({ workspaceRoot: target }));
-    } catch (error) {
-      observed = error;
-    }
-
-    expect(observed).toBeInstanceOf(LocalTokenStorageError);
-    const current = lstatSync(target, { bigint: true });
-    expect(current.dev).toBe(replacement?.dev);
-    expect(current.ino).toBe(replacement?.ino);
-    expect(current.mode & 0o7777n).toBe(0o700n);
-    expect(readFileSync(join(target, "sentinel"), "utf8")).toBe(
-      "private-workspace-collision"
+    const contention = await contendForCooperativeBootstrap(
+      target,
+      "before_workspace_leaf_bootstrap_mkdir"
     );
-    expect(readdirSync(target)).toEqual(["sentinel"]);
-    expect(stagingName).toBeDefined();
-    expect(readdirSync(workspace.tempRoot)).not.toContain(stagingName!);
+    expect(contention.residueBeforeRelease).toEqual([]);
+    const results = contention.results;
+    const successes = results.filter(({ outcome }) => outcome === "success");
+    const errors = results.filter(({ outcome }) => outcome === "error");
+
+    expect(successes).toHaveLength(1);
+    expect(errors).toEqual([{
+      outcome: "error",
+      code: "local_token_storage_unsafe",
+      message: "Local API token storage is unsafe."
+    }]);
+    expect(readdirSync(target)).toEqual(["secrets"]);
+    expect(readdirSync(join(target, "secrets"))).toEqual(["local-token"]);
+    const created = lstatSync(target, { bigint: true });
+    expect(created.mode & 0o7777n).toBe(0o700n);
+    expect(removedDirectoryBootstrapResidue(workspace.tempRoot)).toEqual([]);
 
     const retry = openWorkspaceLocalTokenAuthority({ workspaceRoot: target });
+    expect(retry.token).toBe(successes[0]?.token);
+    expect(readFileSync(join(target, "secrets", "local-token"), "utf8")).toBe(
+      successes[0]?.token
+    );
     retry.assertCurrent();
     const afterRetry = lstatSync(target, { bigint: true });
-    expect(afterRetry.dev).toBe(replacement?.dev);
-    expect(afterRetry.ino).toBe(replacement?.ino);
+    expect(afterRetry.dev).toBe(created.dev);
+    expect(afterRetry.ino).toBe(created.ino);
   });
 
-  test("post-staging secrets collision fails closed before a later independent retry", () => {
+  test("cooperative secrets creators serialize at the final-name mkdir", async () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
-    const displaced = join(workspace.workspaceRoot, "post-staging-secrets-displaced");
-    let replacement: BigIntStats | undefined;
-    let stagingName: string | undefined;
-    let observed: unknown;
 
-    try {
-      runWithLocalTokenStoreTestContext({
-        hook: ({ stage, name }) => {
-          if (stage !== "after_secrets_staging_mkdir" || replacement) return;
-          stagingName = name;
-          try {
-            renameSync(workspace.secretsRoot, displaced);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          }
-          mkdirSync(workspace.secretsRoot, { mode: 0o700 });
-          writeFileSync(join(workspace.secretsRoot, "sentinel"), "private-secrets-collision", {
-            mode: 0o600
-          });
-          replacement = lstatSync(workspace.secretsRoot, { bigint: true });
-        }
-      }, () => openWorkspaceLocalTokenAuthority({
-        workspaceRoot: workspace.workspaceRoot
-      }));
-    } catch (error) {
-      observed = error;
-    }
-
-    expect(observed).toBeInstanceOf(LocalTokenStorageError);
-    const current = lstatSync(workspace.secretsRoot, { bigint: true });
-    expect(current.dev).toBe(replacement?.dev);
-    expect(current.ino).toBe(replacement?.ino);
-    expect(current.mode & 0o7777n).toBe(0o700n);
-    expect(readFileSync(join(workspace.secretsRoot, "sentinel"), "utf8")).toBe(
-      "private-secrets-collision"
+    const contention = await contendForCooperativeBootstrap(
+      workspace.workspaceRoot,
+      "before_secrets_bootstrap_mkdir"
     );
-    expect(readdirSync(workspace.secretsRoot)).toEqual(["sentinel"]);
-    expect(stagingName).toBeDefined();
-    expect(readdirSync(workspace.workspaceRoot)).not.toContain(stagingName!);
+    expect(contention.residueBeforeRelease).toEqual([]);
+    const results = contention.results;
+    const successes = results.filter(({ outcome }) => outcome === "success");
+    const errors = results.filter(({ outcome }) => outcome === "error");
+
+    expect(successes).toHaveLength(1);
+    expect(errors).toEqual([{
+      outcome: "error",
+      code: "local_token_storage_unsafe",
+      message: "Local API token storage is unsafe."
+    }]);
+    expect(readdirSync(workspace.workspaceRoot)).toEqual(["secrets"]);
+    expect(readdirSync(workspace.secretsRoot)).toEqual(["local-token"]);
+    const created = lstatSync(workspace.secretsRoot, { bigint: true });
+    expect(created.mode & 0o7777n).toBe(0o700n);
+    expect(removedDirectoryBootstrapResidue(workspace.workspaceRoot)).toEqual([]);
 
     const retry = openWorkspaceLocalTokenAuthority({
       workspaceRoot: workspace.workspaceRoot
     });
+    expect(retry.token).toBe(successes[0]?.token);
+    expect(readFileSync(join(workspace.secretsRoot, "local-token"), "utf8")).toBe(
+      successes[0]?.token
+    );
     retry.assertCurrent();
     const afterRetry = lstatSync(workspace.secretsRoot, { bigint: true });
-    expect(afterRetry.dev).toBe(replacement?.dev);
-    expect(afterRetry.ino).toBe(replacement?.ino);
+    expect(afterRetry.dev).toBe(created.dev);
+    expect(afterRetry.ino).toBe(created.ino);
+  });
+
+  test("restart converges after process death at the final workspace-leaf mkdir", async () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+    const target = join(workspace.tempRoot, "interrupted-workspace");
+
+    await interruptBootstrapLocalTokenStore(
+      target,
+      "before_workspace_leaf_bootstrap_mkdir",
+      "after_workspace_leaf_bootstrap_mkdir"
+    );
+
+    expect(removedDirectoryBootstrapResidue(workspace.tempRoot)).toEqual([]);
+    expect(readdirSync(target)).toEqual([]);
+    const interrupted = lstatSync(target, { bigint: true });
+    expect(interrupted.mode & 0o7777n).toBe(0o700n);
+
+    const authority = openWorkspaceLocalTokenAuthority({ workspaceRoot: target });
+    authority.assertCurrent();
+    expect(readdirSync(target)).toEqual(["secrets"]);
+    expect(readdirSync(join(target, "secrets"))).toEqual(["local-token"]);
+    expect(readFileSync(join(target, "secrets", "local-token"), "utf8")).toBe(
+      authority.token
+    );
+    const afterRestart = lstatSync(target, { bigint: true });
+    expect(afterRestart.dev).toBe(interrupted.dev);
+    expect(afterRestart.ino).toBe(interrupted.ino);
+  });
+
+  test("restart converges after process death at the final secrets mkdir", async () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+
+    await interruptBootstrapLocalTokenStore(
+      workspace.workspaceRoot,
+      "before_secrets_bootstrap_mkdir",
+      "after_secrets_bootstrap_mkdir"
+    );
+
+    expect(removedDirectoryBootstrapResidue(workspace.workspaceRoot)).toEqual([]);
+    expect(readdirSync(workspace.workspaceRoot)).toEqual(["secrets"]);
+    expect(readdirSync(workspace.secretsRoot)).toEqual([]);
+    const interrupted = lstatSync(workspace.secretsRoot, { bigint: true });
+    expect(interrupted.mode & 0o7777n).toBe(0o700n);
+
+    const authority = openWorkspaceLocalTokenAuthority({
+      workspaceRoot: workspace.workspaceRoot
+    });
+    authority.assertCurrent();
+    expect(readdirSync(workspace.secretsRoot)).toEqual(["local-token"]);
+    expect(readFileSync(join(workspace.secretsRoot, "local-token"), "utf8")).toBe(
+      authority.token
+    );
+    const afterRestart = lstatSync(workspace.secretsRoot, { bigint: true });
+    expect(afterRestart.dev).toBe(interrupted.dev);
+    expect(afterRestart.ino).toBe(interrupted.ino);
   });
 
   test("assertCurrent rejects a same-byte replacement generation and preserves it", () => {

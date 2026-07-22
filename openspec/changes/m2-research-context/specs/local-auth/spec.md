@@ -10,6 +10,23 @@ D6 收缩口径鉴权：localhost 绑定 + 单一本地 token（grill 定案 1�
 
 本契约提供 cooperative-writer serialization，不声称 macOS/Linux 对一个拥有目录写权限且忽略 mutation lock 的进程提供 `rename/unlink only if pathname still names expected inode` 的线性化 compare-and-mutate 语义。已经在 mutation 前观察到的 foreign generation MUST NOT 被故意覆盖或删除；mutation 后观察到干扰时 MUST fail closed。
 
+`secrets` mutation lock 尚不存在时，workspace leaf 与 `secrets` 目录创建属于 cooperative bootstrap。所有 SHUD-Harness creator MUST 以 private `0700` mode 对最终目录名执行 no-clobber `mkdirat`，不得以 rename 替换该最终目录名，也不得创建随机目录-staging 名。初始观察为 absent 后若 `mkdirat` 返回 collision，当前调用 MUST fail closed；后续独立调用 MAY 重新打开并验证已存在的 private directory。进程在最终目录 mkdir 后终止时，重启 MUST 通过验证该最终目录继续收敛，且不得遗留不可发现的随机 bootstrap staging 条目。拥有父目录写权限、却替换刚创建 bootstrap pathname 的进程不在 cooperative bootstrap serialization 契约内；模块不承诺阻止该 active replacement，但现有 rebind/binding check 一旦观察到 replacement，MUST 返回 `LocalTokenStorageError` 且不得返回 authority。
+
+#### Scenario: cooperative creator 并发创建 workspace leaf
+
+- **WHEN** 两个 SHUD-Harness creator 经 barrier 同时从 absent observation 竞争最终 workspace-leaf 名称
+- **THEN** 恰好一个公开 seam 调用成功、一个得到 `LocalTokenStorageError`；两者都不 rename 或覆盖最终目录名，失败方独立重试后复用成功方的 canonical token
+
+#### Scenario: cooperative creator 并发创建 secrets
+
+- **WHEN** 两个 SHUD-Harness creator 经 barrier 同时从 absent observation 竞争最终 `secrets` 名称
+- **THEN** 恰好一个公开 seam 调用成功、一个得到 `LocalTokenStorageError`；两者都不 rename 或覆盖最终目录名，失败方独立重试后复用成功方的 canonical token
+
+#### Scenario: bootstrap mkdir 后进程终止
+
+- **WHEN** 进程在最终 workspace leaf 或 `secrets` mkdir 后、完成 token publication 前终止
+- **THEN** 重启验证遗留的最终 private directory 并收敛，且父目录中不存在随机 bootstrap staging residue
+
 #### Scenario: cooperative writer 被 mutation lock 串行化
 
 - **WHEN** writer A 持有同一 `secrets` 目录 inode 的 exclusive mutation lock，writer B 通过公开 token-store seam 尝试 publication/recovery

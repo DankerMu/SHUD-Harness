@@ -11,24 +11,24 @@ Contract amendment: user-approved cooperative-writer serialization; no hostile-w
 - Branded held mutation capability is constructible only after exclusive nonblocking `flock` on the opened `secrets` directory and identity reproof.
 - Recovery, publication, rollback, creation, move, retirement, and cleanup require the held capability instead of a bare mutation descriptor.
 - Mutation helpers keep explicit precondition tamper checks and postcondition validation; names/comments do not claim source-inode-conditioned rename/unlink.
-- Workspace leaf and `secrets` creation publish an opened, validated, identity-captured private staging directory to the final name with no-replace rename. A final-name collision fails the current call without adopting it; an independent retry may validate the now-existing directory.
+- Workspace leaf and `secrets` creation use one final-name no-clobber `mkdirat(0700)` after an absent observation. A cooperative collision fails the current call; an independent retry validates the winner. No random directory-staging namespace exists.
 - Descriptor ownership transfer, lease unlock/close, and multi-resource settlement close every acquired resource before propagating failure.
 - Token reads share one transport-safe grammar: nonempty byte-preserving UTF-8, at most 4096 bytes, no whitespace/comma/NUL.
 - Inventory filters dot records before decoded-entry accounting and applies an independent 4096 raw-record work ceiling.
-- Crash after rollback-marker fsync, same-inode rewrite, relative root, first-create replacement, close failure, Darwin/Linux dot order/work bounds, and cooperative cross-process exclusion have direct regression tests.
+- Crash after rollback-marker fsync, process death after either final-name bootstrap mkdir, absent-tree cooperative contention at both directory surfaces, same-inode rewrite, relative root, close failure, Darwin/Linux dot order/work bounds, and cooperative cross-process exclusion have direct regression tests.
 - `scripts/local-auth/adversarial-matrix.ts` gives the complete local-auth matrix one external 30-second process-group deadline; test subprocess cases retain two-second ceilings.
 
 No routes, listener, readiness, deny-root, core, frontend, perf wiring, Child B, or M3+ production behavior changed.
 
 ## Source-bound semantic red
 
-All mutations were applied separately to the final relevant source, run red, reverted immediately, and rerun green. Mutations 2 and 3 target files unchanged by the later first-create closure; mutation 1 was replayed again after that closure. Its final local-auth diff SHA-256 was identical before and after replay: `547a008b52fe6d7fa0afa312d4dc8635bef35c7cadd73d5466746eb7285cd673`.
+All mutations were applied separately to the final relevant source, run red, reverted immediately, and rerun green. Mutations 2 and 3 target files unchanged by the later bootstrap redesign. Mutation 1 was replayed once more after the final-name bootstrap correction and restored to the exact final source hash.
 
 ### 1. Cooperative mutation-lock authorization
 
 Pre-mutation SHA-256:
 
-- `packages/backend/src/local-auth/local-token-filesystem.ts`: `4994902adfca30a61560efabf2b64482fd6cd70e63088f5e4229e0c9742d77bd`
+- `packages/backend/src/local-auth/local-token-filesystem.ts`: `67a3d47da5713f886d93d8e7340ac5b6ac36c3d8567e88cfb227ba085536c461`
 - `packages/backend/src/local-auth/local-token-store.transaction.test.ts`: `8c5280785adbdf69fe30fba76d44e10e0618999f5a143951cb694e2104fb06a4`
 
 Applied production mutation:
@@ -48,7 +48,7 @@ Applied production mutation:
 +  );
 ```
 
-Mutated production SHA-256: `dc1b85116d80d03025dec4d481dc651a8e97c0edbaf81b50a1e5ce89f2a0a949`.
+Mutated production SHA-256: `ec41a28482298cbc7428a11fa71ac8e64ca5bfe36e018d26ffc1f1cea5719839`.
 
 Command:
 
@@ -58,7 +58,7 @@ npx --yes bun@1.2.19 test packages/backend/src/local-auth/local-token-store.tran
 
 Red result: exit 1; 0 pass, 1 fail, 15 filtered, 1 assertion. The public writer returned `success` instead of `blocked` while another process held the directory mutation lock, proving the public mutation path depends on successful lock authorization.
 
-After immediate restoration the production hash returned to `4994902adfca30a61560efabf2b64482fd6cd70e63088f5e4229e0c9742d77bd`; the same command was green with 1 pass, 0 fail, 15 filtered, 6 assertions.
+After immediate restoration the production hash returned to `67a3d47da5713f886d93d8e7340ac5b6ac36c3d8567e88cfb227ba085536c461`; the same command was green with 1 pass, 0 fail, 15 filtered, 6 assertions. The source diff hash was identical before and after replay: `5e4557dbf1b44871e7d0115bcde7198bacf108be9878192224130e88a7ec3fe1`.
 
 ### 2. Stable `1024 external + 8 owned` accounting
 
@@ -135,42 +135,43 @@ After immediate restoration the production hash returned to `2298e9d2b9c718b4aac
 
 The pre-mutation replacement cases are coverage for observable tamper rejection only and are not attributed as pathname CAS evidence.
 
-## Phase 6.2 first-create closure
+## Phase 6.2 cooperative bootstrap redesign
 
-The invariant audit showed that removing stale pathname chmod was insufficient: the final-name directory could still change in `mkdirat -> first open`, then be captured as if it were the created generation. The final protocol now creates a UUID-named private staging directory under the held parent, opens and validates that staging inode, publishes it to the final name by no-replace rename, and rebinds the final name to the captured identity. A final-name collision cleans only the captured empty staging directory and fails the current call; it is never adopted in that call.
+The first invariant audit initially selected UUID directory staging to avoid adopting a final-name collision. Re-audit showed that randomness did not establish an unforgeable identity: an active parent writer could move the same pre-open race to the staging name, while ordinary process death after staging `mkdirat` left an undiscoverable, unbounded directory residue. The persisted same-invariant depth retro therefore replaced that protocol with a user-approved cooperative bootstrap boundary.
 
-Red command against the pre-fix final-name mkdir behavior with the exact post-staging-mkdir/pre-first-open seams and tests present:
+The final implementation performs one no-clobber `mkdirat(0700)` on the workspace-leaf / `secrets` final name after observing absence. Any collision fails the current call; an independent retry validates the winner. After successful mkdir it opens, validates, fsyncs, and rebinds the final name. It never chmods, renames, removes, or stages a bootstrap directory. Process death can leave only the bounded final private directory, which restart validates and resumes. Token/protocol mutations after `secrets` exists remain authorized exclusively by the branded held mutation lease.
+
+Corrected source-bound red command, with only the final production filesystem/syscall edits stashed back to c20 while the final public-seam tests remained:
 
 ```sh
-npx --yes bun@1.2.19 test packages/backend/src/local-auth/local-token-store.contract.test.ts -t "post-staging .* collision"
+npx --yes bun@1.2.19 test packages/backend/src/local-auth/local-token-store.contract.test.ts -t 'cooperative workspace-leaf creators|cooperative secrets creators|restart converges after process death at the final workspace-leaf mkdir|restart converges after process death at the final secrets mkdir'
 ```
 
-Pre-fix SHA-256:
+Production SHA-256 before stash and after immediate restoration:
 
-- `local-token-filesystem.ts`: `a6f02f51b8a56efdedc870a9c57f120bf944b49e956e74fe8d2b3fe47309611b`
-- `local-token-store.contract.test.ts`: `8a1dca2cb9673aa5afeb37d1bd7daf9dd1a3b223606bb677b62d9c1d640da40b`
-- `local-token-test-support.ts`: `0fe984603ff3a24b927c7205a7bc58832b67be67c469c15fc5ae5f4158004ff0`
+- `local-token-filesystem.ts`: `67a3d47da5713f886d93d8e7340ac5b6ac36c3d8567e88cfb227ba085536c461`
+- `local-token-syscalls.ts`: `4b6840c5422e724420fb3e4a46db8f496b396a350de72574e32b35b3e61c7a65`
+- combined production diff: `602978e9f89dc41628110519187453a022ab466d25ba24781dfc2933695cd044`
 
-Red result: exit 1; 0 pass, 2 fail, 30 filtered, 2 assertions. Both workspace-leaf and `secrets` tests observed no exception because the old final-name mkdir path opened and adopted the newly appeared private `0700` final directory, then continued to authority publication.
+The stashed c20 source hashes were `4994902adfca30a61560efabf2b64482fd6cd70e63088f5e4229e0c9742d77bd` and `3da6e548eb239913f708df2f31c070673b4730df4a6d51019b0f0ffe341cd292`. Red result: exit 1; 0 pass, 4 fail, 30 filtered, 4 assertions. Before releasing either contention barrier, the tests observed two UUID staging entries at the relevant parent. Each SIGKILL case observed one UUID staging entry and failed its first explicit no-residue assertion. No timeout, missing-hook, or collection failure contributed to the red result.
 
-Green result after the staging-directory protocol: exit 0; 2 pass, 0 fail, 30 filtered, 20 assertions. Both surfaces return `LocalTokenStorageError` for the collision call, preserve replacement inode/mode/sentinel, create no token/protocol entry there, leave no staging residue, and allow a later independent retry to validate and use the existing private directory.
+After immediate restoration the identical command passed 4/4 with 38 assertions. Both contention surfaces produce exactly one successful public call and one stable `LocalTokenStorageError`, never overwrite/rename the final directory, and let the loser independently retry the winner's exact canonical token. Both process-death surfaces retain the same final directory `(dev, ino)`, restart to one canonical authority, and leave no random directory-staging residue.
 
-Final SHA-256:
+Final direct-test SHA-256:
 
-- `local-token-filesystem.ts`: `4994902adfca30a61560efabf2b64482fd6cd70e63088f5e4229e0c9742d77bd`
-- `local-token-syscalls.ts`: `3da6e548eb239913f708df2f31c070673b4730df4a6d51019b0f0ffe341cd292`
-- `local-token-store.contract.test.ts`: `8a1dca2cb9673aa5afeb37d1bd7daf9dd1a3b223606bb677b62d9c1d640da40b`
-- `local-token-test-support.ts`: `0fe984603ff3a24b927c7205a7bc58832b67be67c469c15fc5ae5f4158004ff0`
+- `local-token-test-support.ts`: `de96a359274358a6daebec699a29eded4f7c302a3dfd915f877b203856762296`
+- `local-token-test-helpers.ts`: `4983a7d2957fb525b2d64d628b3809a82a536e0a04d603a152c09a4eca9d6f1c`
+- `local-token-store.contract.test.ts`: `964c58d9e65ed2e1f7c71cff6fbcaae4119b146e95039e91a42d6dcc32db0c41`
 
 ## Final green verification
 
-- macOS Bun 1.2.19 local-auth adversarial matrix: 79 pass, 0 fail, 322 assertions.
-- Linux `oven/bun:1.2.19`, UID/GID 65532, read-only repository mount: 79 pass, 0 fail, 322 assertions.
+- macOS Bun 1.2.19 local-auth adversarial matrix: 81 pass, 0 fail, 340 assertions.
+- Linux `oven/bun:1.2.19`, UID/GID 65532, read-only repository mount: 81 pass, 0 fail, 340 assertions.
 - `bun run test:backend-api`: exit 0; route suites and externally bounded local-auth matrix passed.
 - `bun run typecheck`: exit 0.
 - `bun run check`: exit 0 on orchestrator rerun.
-- `bun run test:perf:api`: exit 0; P95 tasks 0.09 ms, detail 0.01 ms, ready 12.46 ms, each below 300 ms.
+- `bun run test:perf:api`: exit 0; P95 tasks 0.07 ms, detail 0.02 ms, ready 9.64 ms, each below 300 ms.
 - `openspec validate m2-research-context --strict --no-interactive`: valid.
 - `git diff --check`, submodule/workspace/package/lock/stash/debug hygiene: clean.
 
-Deviation: the hostile same-directory writer promise was replaced by the user-approved cooperative-writer capability boundary after confirming Darwin/Linux lack source-inode-conditioned namespace mutation. No other deviation.
+Deviations: the hostile same-directory writer promise was replaced by the user-approved cooperative-writer capability boundary after confirming Darwin/Linux lack source-inode-conditioned namespace mutation. The first Phase 6.2 UUID directory-staging correction was superseded by the persisted same-invariant depth retro because it introduced unbounded crash residue; the final fixture and implementation use cooperative final-name bootstrap. The requested local-auth matrix alias did not exist, so verification used the repository's canonical `test:local-auth:adversarial` entry. No Child B/M3+ scope changed.

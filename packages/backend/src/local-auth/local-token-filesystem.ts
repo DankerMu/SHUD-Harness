@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   closeSync,
   fstatSync,
@@ -14,7 +14,6 @@ import {
   openAt,
   mkdirAt,
   readErrno,
-  removeDirectoryAt,
   renameAtNoReplace,
   unlinkAt
 } from "./local-token-syscalls";
@@ -43,9 +42,7 @@ import {
 } from "./local-token-types";
 
 const ENOENT = 2;
-const EEXIST = 17;
 const PRIVATE_DIRECTORY_CREATE_MODE = 0o700;
-const DIRECTORY_STAGING_ATTEMPTS = 8;
 
 export interface WorkspaceTokenDescriptors {
   readonly workspaceRoot: string;
@@ -137,69 +134,35 @@ function assertReboundDirectoryIdentity(
   }
 }
 
-function stagingDirectoryName(): string {
-  return `.local-token-directory-${randomUUID()}.staging`;
-}
-
-function createUnpredictableStagingDirectory(parent: number): string {
-  for (let attempt = 0; attempt < DIRECTORY_STAGING_ATTEMPTS; attempt += 1) {
-    const name = stagingDirectoryName();
-    if (mkdirAt(parent, name, PRIVATE_DIRECTORY_CREATE_MODE) === 0) return name;
-    if (readErrno() !== EEXIST) throw unsafeLocalTokenStorageError();
-  }
-  throw unsafeLocalTokenStorageError();
-}
-
-function removeCapturedEmptyStagingDirectory(
-  parent: number,
-  name: string,
-  expected: LocalTokenPhysicalIdentity
-): void {
-  assertReboundDirectoryIdentity(parent, name, expected);
-  if (removeDirectoryAt(parent, name) !== 0) throw unsafeLocalTokenStorageError();
-  fsyncSync(parent);
-}
-
 function createPrivateDirectoryNoReplace(
   parent: number,
   finalName: string,
-  stagingStage: "after_workspace_staging_mkdir" | "after_secrets_staging_mkdir",
-  publishedStage: "after_workspace_leaf_mkdir" | "after_secrets_mkdir"
+  beforeMkdirStage: "before_workspace_leaf_bootstrap_mkdir" | "before_secrets_bootstrap_mkdir",
+  afterMkdirStage: "after_workspace_leaf_bootstrap_mkdir" | "after_secrets_bootstrap_mkdir"
 ): number {
-  const stagingName = createUnpredictableStagingDirectory(parent);
-  let stagedDescriptor: number | undefined;
-  let stagedIdentity: LocalTokenPhysicalIdentity | undefined;
-  let published = false;
+  let descriptor: number | undefined;
   try {
-    invokeLocalTokenTestHook({ stage: stagingStage, name: stagingName });
-    stagedDescriptor = guardedDirectoryOpenAt(parent, stagingName);
-    if (stagedDescriptor < 0) {
-      stagedDescriptor = undefined;
+    invokeLocalTokenTestHook({ stage: beforeMkdirStage, name: finalName });
+    if (mkdirAt(parent, finalName, PRIVATE_DIRECTORY_CREATE_MODE) !== 0) {
       throw unsafeLocalTokenStorageError();
     }
-    const stagedObservation = assertPrivateDirectory(stagedDescriptor);
-    stagedIdentity = physicalIdentity(stagedObservation);
-    fsyncSync(stagedDescriptor);
-    if (renameAtNoReplace(parent, stagingName, parent, finalName) !== 0) {
+    invokeLocalTokenTestHook({ stage: afterMkdirStage, name: finalName });
+    descriptor = guardedDirectoryOpenAt(parent, finalName);
+    if (descriptor < 0) {
+      descriptor = undefined;
       throw unsafeLocalTokenStorageError();
     }
-    published = true;
-    invokeLocalTokenTestHook({ stage: publishedStage, name: finalName });
-    assertReboundDirectoryIdentity(parent, finalName, stagedIdentity);
+    const observation = assertPrivateDirectory(descriptor);
+    const identity = physicalIdentity(observation);
+    fsyncSync(descriptor);
+    assertReboundDirectoryIdentity(parent, finalName, identity);
     fsyncSync(parent);
-    const result = stagedDescriptor;
-    stagedDescriptor = undefined;
+    const result = descriptor;
+    descriptor = undefined;
     return result;
   } catch {
-    if (!published && stagedIdentity !== undefined) {
-      try {
-        removeCapturedEmptyStagingDirectory(parent, stagingName, stagedIdentity);
-      } catch {
-        // Descriptor settlement still runs before the stable failure escapes.
-      }
-    }
     try {
-      closeOwnedDescriptor(stagedDescriptor);
+      closeOwnedDescriptor(descriptor);
     } catch {
       // The public error remains stable after attempting every owned close.
     }
@@ -231,8 +194,8 @@ export function openWorkspaceRootDescriptor(
         next = createPrivateDirectoryNoReplace(
           descriptor,
           segment,
-          "after_workspace_staging_mkdir",
-          "after_workspace_leaf_mkdir"
+          "before_workspace_leaf_bootstrap_mkdir",
+          "after_workspace_leaf_bootstrap_mkdir"
         );
       }
       if (next < 0) throw unsafeLocalTokenStorageError();
@@ -261,8 +224,8 @@ export function openOrCreateWorkspaceTokenDescriptors(
       secrets = createPrivateDirectoryNoReplace(
         workspace,
         LOCAL_TOKEN_DIRECTORY,
-        "after_secrets_staging_mkdir",
-        "after_secrets_mkdir"
+        "before_secrets_bootstrap_mkdir",
+        "after_secrets_bootstrap_mkdir"
       );
     }
     const secretsObservation = assertPrivateDirectory(secrets);
