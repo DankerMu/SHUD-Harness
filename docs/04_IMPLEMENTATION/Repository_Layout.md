@@ -139,11 +139,11 @@ shud-harness/                        # TypeScript monorepo (Bun workspace)
 ## 2. 工作区结构 (运行时资产，不进代码仓)
 
 ```text
-shud-workspace/
+  shud-workspace/
   config.yaml
   tasks/TASK-*.yaml
   stacklocks/STACK-*.yaml
-  data_provenance/DATA-*.yaml
+  provenance/DATA-*.json
   analysis_plans/PLAN-*.yaml
   jobs/JOB-*.yaml
   runs/RUN-*/
@@ -153,6 +153,8 @@ shud-workspace/
   notes/NOTE-*.yaml
   changes/CHG-*.yaml
   artifacts/
+  artifacts/manifest-sets/
+  secrets/
   warehouse/shud_harness.duckdb
   repos/SHUD/, repos/rSHUD/, repos/AutoSHUD/
   data/raw/ (只读), data/processed/

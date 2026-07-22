@@ -51,7 +51,12 @@ findings 按 acceptance-boundary 修正处置（非实现漏项，process-creati
 读取端点，注册表漏登记。Schemas_APIs_CLIs §1 补 `GET /api/stacks/:stackId` 与 `GET /api/data/:dataId`
 两行。M2 其余 grill 定案（鉴权 = localhost + 单一本地 token；renv.lock 归 StackLock 采集；evidence_usable
 七条 + LLM 默认 false + audit、agent-403 推迟至 agent 身份里程碑；ID 采用 `STACK-/DATA-<uuid>` 沿用 M1
-已验收先例）不改 spec 正文，落实施记录 `openspec/changes/m2-research-context`。
+已验收先例）不改 spec 正文，落实施记录 `openspec/changes/m2-research-context`。与本批次同时补齐：
+- **D1：`Config_Secrets_And_Environment_Spec.md` + `Workspace_Conventions.md`** 登记 `HARNESS_LOCAL_TOKEN` 与 `workspace/secrets/`；
+- **D4：`Workspace_Conventions.md` + `Repository_Layout.md` 及其引用示例** 统一 provenance 为 `workspace/provenance/DATA-*.json`，并登记 `artifacts/manifest-sets/`；
+- **D5a：`Minimal_Schemas.md` 及其 StackLock 引用示例** 补齐 `zero` repo，并将 `r_packages_lock` 对象化为 `{ path, sha256 } | null`；
+- **D6：`Support_Schema_Contracts.md`** 将 `Artifact.llm_generated` 及 `ArtifactManifest.superseded_by` 落账；
+- **D7a：`Config_Secrets_And_Environment_Spec.md` §6** 的 harness 示例与 `Minimal_Schemas.md` §2 对齐。
 **例外批次 7（2026-07-16，PI 批准）**：清偿 m1-foundation proposal.md Impact 节记录的两笔待办账：
 ① Roles_and_Boundaries §3 coordinator「选择是否直接 bash」句补修订注（被 ADR-0002 开工三决②取代，
 工具面以 tool-registry-governance 映射表为准）；② `POST /api/tasks` 幂等语义（scope=task、sha256 key、
