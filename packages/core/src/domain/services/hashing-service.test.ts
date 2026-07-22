@@ -2,7 +2,6 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:net";
 import {
-  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -104,6 +103,82 @@ describe("hashing service", () => {
     expect(await hashDirectory(hashInput(workspaceRoot, "second", "hash.directory.second"))).toBe(
       DIRECTORY_ORACLE
     );
+  });
+
+  test("hashDirectory preserves root sibling names that differ only by a leading BOM", async () => {
+    const { workspaceRoot } = await createWorkspace();
+    const directory = join(workspaceRoot, "bom-root");
+    const bomName = "\uFEFFa";
+    await mkdir(directory);
+    await writeFile(join(directory, "a"), "ordinary");
+    await writeFile(join(directory, bomName), "bom-prefixed");
+
+    const baselineFiles = Object.freeze({ a: "ordinary", [bomName]: "bom-prefixed" });
+    const baseline = await hashDirectory(hashInput(workspaceRoot, "bom-root", "hash.bom.root"));
+    expect(baseline).toBe(exactDirectoryDigest(baselineFiles));
+
+    await writeFile(join(directory, "a"), "ordinary-changed");
+    const ordinaryChanged = await hashDirectory(
+      hashInput(workspaceRoot, "bom-root", "hash.bom.root.ordinary")
+    );
+    expect(ordinaryChanged).toBe(
+      exactDirectoryDigest({ a: "ordinary-changed", [bomName]: "bom-prefixed" })
+    );
+    expect(ordinaryChanged).not.toBe(baseline);
+
+    await writeFile(join(directory, "a"), "ordinary");
+    await writeFile(join(directory, bomName), "bom-prefixed-changed");
+    const bomChanged = await hashDirectory(
+      hashInput(workspaceRoot, "bom-root", "hash.bom.root.prefixed")
+    );
+    expect(bomChanged).toBe(
+      exactDirectoryDigest({ a: "ordinary", [bomName]: "bom-prefixed-changed" })
+    );
+    expect(bomChanged).not.toBe(baseline);
+  });
+
+  test("hashDirectory preserves nested directory names that differ only by a leading BOM", async () => {
+    const { workspaceRoot } = await createWorkspace();
+    const directory = join(workspaceRoot, "bom-nested");
+    const bomName = "\uFEFFa";
+    await mkdir(join(directory, "a"), { recursive: true });
+    await mkdir(join(directory, bomName));
+    await writeFile(join(directory, "a", "value"), "ordinary nested");
+    await writeFile(join(directory, bomName, "value"), "bom nested");
+
+    const baselineFiles = Object.freeze({
+      "a/value": "ordinary nested",
+      [`${bomName}/value`]: "bom nested"
+    });
+    const baseline = await hashDirectory(
+      hashInput(workspaceRoot, "bom-nested", "hash.bom.nested")
+    );
+    expect(baseline).toBe(exactDirectoryDigest(baselineFiles));
+
+    await writeFile(join(directory, "a", "value"), "ordinary nested changed");
+    const ordinaryChanged = await hashDirectory(
+      hashInput(workspaceRoot, "bom-nested", "hash.bom.nested.ordinary")
+    );
+    expect(ordinaryChanged).toBe(
+      exactDirectoryDigest({
+        "a/value": "ordinary nested changed",
+        [`${bomName}/value`]: "bom nested"
+      })
+    );
+    expect(ordinaryChanged).not.toBe(baseline);
+
+    await writeFile(join(directory, "a", "value"), "ordinary nested");
+    await writeFile(join(directory, bomName, "value"), "bom nested changed");
+    const bomChanged = await hashDirectory(
+      hashInput(workspaceRoot, "bom-nested", "hash.bom.nested.prefixed")
+    );
+    expect(bomChanged).toBe(
+      exactDirectoryDigest({
+        "a/value": "ordinary nested",
+        [`${bomName}/value`]: "bom nested changed"
+      })
+    );
+    expect(bomChanged).not.toBe(baseline);
   });
 
   test("hashDirectory rejects the exact LF-path collision while preserving the canonical oracle", async () => {
@@ -328,11 +403,12 @@ describe("hashing service", () => {
     const { workspaceRoot } = await createWorkspace();
     for (const scope of ["root", "nested"] as const) {
       const result = await runDirectorySubstitutionProbe(workspaceRoot, scope);
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         errorName: "WorkspacePathSafetyError",
         evidenceRef: `hash.directory-swap.${scope}`,
         replacementEnumerated: false
       });
+      expect(result.descriptorEnumerationCalls).toBeGreaterThan(0);
     }
   });
 
@@ -340,11 +416,12 @@ describe("hashing service", () => {
     const { workspaceRoot } = await createWorkspace();
     for (const scope of ["ancestor", "leaf"] as const) {
       const result = await runFileSubstitutionProbe(workspaceRoot, scope);
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         errorName: "WorkspacePathSafetyError",
         evidenceRef: `hash.file-swap.${scope}`,
         replacementRead: false
       });
+      expect(result.descriptorReadCalls).toBeGreaterThan(0);
     }
   });
 });
@@ -355,6 +432,17 @@ function hashInput(
   evidenceRef: string
 ): HashingServiceInput {
   return { workspaceRoot, inputPath, evidenceRef };
+}
+
+function exactDirectoryDigest(files: Readonly<Record<string, string>>): string {
+  const framing = Object.entries(files)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([path, contents]) => {
+      const fileDigest = createHash("sha256").update(contents).digest("hex");
+      return `${path}\n${fileDigest}\n`;
+    })
+    .join("");
+  return createHash("sha256").update(framing).digest("hex");
 }
 
 async function createWorkspace(): Promise<{ tempRoot: string; workspaceRoot: string }> {
@@ -540,35 +628,52 @@ async function runDirectorySubstitutionProbe(
   workspaceRoot: string,
   scope: "root" | "nested"
 ): Promise<
-  Readonly<{ errorName: string | null; evidenceRef: string | null; replacementEnumerated: boolean }>
+  Readonly<{
+    errorName: string | null;
+    evidenceRef: string | null;
+    replacementEnumerated: boolean;
+    descriptorEnumerationCalls: number;
+  }>
 > {
   const caseRoot = join(workspaceRoot, `directory-swap-${scope}`);
   const dataset = join(caseRoot, "dataset");
   const live = scope === "root" ? dataset : join(dataset, "nested");
   const displaced = `${live}-original`;
   const replacement = join(caseRoot, "replacement");
+  const control = join(caseRoot, "control");
   await mkdir(live, { recursive: true });
   await mkdir(replacement, { recursive: true });
+  await mkdir(control);
   await writeFile(join(live, "evidence.txt"), "original");
   await writeFile(join(replacement, "sentinel.txt"), "replacement");
+  await writeFile(join(control, "control.txt"), "control");
   const triggerCount = scope === "root" ? 4 : 3;
   const input = hashInput(
     workspaceRoot,
     `directory-swap-${scope}/dataset`,
     `hash.directory-swap.${scope}`
   );
+  const controlInput = hashInput(
+    workspaceRoot,
+    `directory-swap-${scope}/control`,
+    `hash.directory-swap.${scope}.control`
+  );
   const script = `
     import { mock } from "bun:test";
     const actual = { ...await import("node:fs/promises") };
+    const actualFs = { ...await import("node:fs") };
+    const actualFfi = { ...await import("bun:ffi") };
     const actualLstat = actual.lstat;
-    const actualReaddir = actual.readdir;
     const live = ${JSON.stringify(live)};
     const displaced = ${JSON.stringify(displaced)};
     const replacement = ${JSON.stringify(replacement)};
     const triggerCount = ${triggerCount};
+    const replacementIdentity = await actual.stat(replacement, { bigint: true });
     let observations = 0;
     let swapped = false;
     let replacementEnumerated = false;
+    let descriptorEnumerationCalls = 0;
+    const replacementStreams = new Set();
     mock.module("node:fs/promises", () => ({
       ...actual,
       lstat: async (...args) => {
@@ -579,13 +684,49 @@ async function runDirectorySubstitutionProbe(
           swapped = true;
         }
         return result;
-      },
-      readdir: async (...args) => {
-        if (swapped && String(args[0]) === live) replacementEnumerated = true;
-        return await actualReaddir(...args);
+      }
+    }));
+    mock.module("bun:ffi", () => ({
+      ...actualFfi,
+      dlopen: (...args) => {
+        const library = actualFfi.dlopen(...args);
+        const wrappedSymbols = new Proxy(library.symbols, {
+          get(symbols, property) {
+            const symbol = Reflect.get(symbols, property);
+            if (property === "fdopendir") {
+              return (descriptor) => {
+                const identity = actualFs.fstatSync(descriptor, { bigint: true });
+                const stream = symbol(descriptor);
+                if (
+                  stream !== null &&
+                  identity.dev === replacementIdentity.dev &&
+                  identity.ino === replacementIdentity.ino
+                ) {
+                  replacementEnumerated = true;
+                  replacementStreams.add(String(stream));
+                }
+                return stream;
+              };
+            }
+            if (property === "readdir") {
+              return (stream) => {
+                descriptorEnumerationCalls += 1;
+                if (replacementStreams.has(String(stream))) replacementEnumerated = true;
+                return symbol(stream);
+              };
+            }
+            return symbol;
+          }
+        });
+        return new Proxy(library, {
+          get(target, property) {
+            return property === "symbols" ? wrappedSymbols : Reflect.get(target, property);
+          }
+        });
       }
     }));
     const { hashDirectory } = await import("./packages/core/src/domain/services/index.ts");
+    await hashDirectory(${JSON.stringify(controlInput)});
     let errorName = null;
     let evidenceRef = null;
     try {
@@ -599,7 +740,12 @@ async function runDirectorySubstitutionProbe(
         await actual.rename(displaced, live);
       }
     }
-    console.log(JSON.stringify({ errorName, evidenceRef, replacementEnumerated }));
+    console.log(JSON.stringify({
+      errorName,
+      evidenceRef,
+      replacementEnumerated,
+      descriptorEnumerationCalls
+    }));
   `;
   const child = Bun.spawn([process.execPath, "-e", script], {
     cwd: resolve(import.meta.dir, "../../../../.."),
@@ -621,7 +767,12 @@ async function runFileSubstitutionProbe(
   workspaceRoot: string,
   scope: "ancestor" | "leaf"
 ): Promise<
-  Readonly<{ errorName: string | null; evidenceRef: string | null; replacementRead: boolean }>
+  Readonly<{
+    errorName: string | null;
+    evidenceRef: string | null;
+    replacementRead: boolean;
+    descriptorReadCalls: number;
+  }>
 > {
   const caseRoot = join(workspaceRoot, `file-swap-${scope}`);
   const ancestor = join(caseRoot, "ancestor");
@@ -629,11 +780,13 @@ async function runFileSubstitutionProbe(
   const displaced = scope === "ancestor" ? `${ancestor}-original` : `${target}-original`;
   const replacementDirectory = join(caseRoot, "replacement");
   const replacementLeaf = join(caseRoot, "replacement.bin");
+  const control = join(caseRoot, "control.bin");
   await mkdir(ancestor, { recursive: true });
   await writeFile(target, "original bytes");
+  await writeFile(control, "control bytes");
   if (scope === "ancestor") {
     await mkdir(replacementDirectory);
-    await link(target, join(replacementDirectory, "target.bin"));
+    await writeFile(join(replacementDirectory, "target.bin"), "replacement bytes");
   } else {
     await writeFile(replacementLeaf, "replacement bytes");
   }
@@ -642,20 +795,30 @@ async function runFileSubstitutionProbe(
     `file-swap-${scope}/ancestor/target.bin`,
     `hash.file-swap.${scope}`
   );
+  const controlInput = hashInput(
+    workspaceRoot,
+    `file-swap-${scope}/control.bin`,
+    `hash.file-swap.${scope}.control`
+  );
   const script = `
     import { mock } from "bun:test";
     const actual = { ...await import("node:fs/promises") };
+    const actualFs = { ...await import("node:fs") };
     const actualLstat = actual.lstat;
-    const actualOpen = actual.open;
     const scope = ${JSON.stringify(scope)};
     const ancestor = ${JSON.stringify(ancestor)};
     const target = ${JSON.stringify(target)};
     const displaced = ${JSON.stringify(displaced)};
     const replacementDirectory = ${JSON.stringify(replacementDirectory)};
     const replacementLeaf = ${JSON.stringify(replacementLeaf)};
+    const replacementPath = scope === "ancestor"
+      ? ${JSON.stringify(join(replacementDirectory, "target.bin"))}
+      : replacementLeaf;
+    const replacementIdentity = await actual.stat(replacementPath, { bigint: true });
     let observations = 0;
     let swapped = false;
     let replacementRead = false;
+    let descriptorReadCalls = 0;
     mock.module("node:fs/promises", () => ({
       ...actual,
       lstat: async (...args) => {
@@ -671,20 +834,26 @@ async function runFileSubstitutionProbe(
           swapped = true;
         }
         return result;
-      },
-      open: async (...args) => {
-        const handle = await actualOpen(...args);
-        if (swapped && String(args[0]) === target) {
-          const actualRead = handle.read.bind(handle);
-          handle.read = async (...readArgs) => {
+      }
+    }));
+    mock.module("node:fs", () => ({
+      ...actualFs,
+      read: (descriptor, ...args) => {
+        descriptorReadCalls += 1;
+        if (swapped) {
+          const identity = actualFs.fstatSync(descriptor, { bigint: true });
+          if (
+            identity.dev === replacementIdentity.dev &&
+            identity.ino === replacementIdentity.ino
+          ) {
             replacementRead = true;
-            return await actualRead(...readArgs);
-          };
+          }
         }
-        return handle;
+        return actualFs.read(descriptor, ...args);
       }
     }));
     const { hashFile } = await import("./packages/core/src/domain/services/index.ts");
+    await hashFile(${JSON.stringify(controlInput)});
     let errorName = null;
     let evidenceRef = null;
     try {
@@ -701,7 +870,7 @@ async function runFileSubstitutionProbe(
         await actual.rename(displaced, target);
       }
     }
-    console.log(JSON.stringify({ errorName, evidenceRef, replacementRead }));
+    console.log(JSON.stringify({ errorName, evidenceRef, replacementRead, descriptorReadCalls }));
   `;
   const child = Bun.spawn([process.execPath, "-e", script], {
     cwd: resolve(import.meta.dir, "../../../../.."),

@@ -16,7 +16,7 @@ const HASH_FILE_OPEN_FLAGS =
   (constants.O_NONBLOCK ?? 0);
 const HASH_DIRECTORY_OPEN_FLAGS = HASH_FILE_OPEN_FLAGS | (constants.O_DIRECTORY ?? 0);
 const DIRECTORY_ENTRY_BUFFER_BYTES = 4 * 1024;
-const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 export interface HashingServiceInput {
   workspaceRoot: string;
@@ -197,6 +197,7 @@ async function observeDirectoryTree(
     { absolutePath: rootPath, relativePath: "", kind: "directory", stat: rootStat }
   ];
   const files: ObservedEntry[] = [];
+  const canonicalPaths = new Set<string>([""]);
   await observeDirectory(
     input,
     resolution,
@@ -206,7 +207,8 @@ async function observeDirectoryTree(
     rootStat,
     undefined,
     entries,
-    files
+    files,
+    canonicalPaths
   );
   entries.sort(compareObservedEntries);
   files.sort(compareObservedEntries);
@@ -225,7 +227,8 @@ async function observeDirectory(
   expectedDirectory: BigIntStats,
   pinnedDirectoryDescriptor: number | undefined,
   entries: ObservedEntry[],
-  files: ObservedEntry[]
+  files: ObservedEntry[],
+  canonicalPaths: Set<string>
 ): Promise<void> {
   let directoryDescriptor = pinnedDirectoryDescriptor;
   let failure: unknown;
@@ -269,6 +272,13 @@ async function observeDirectory(
       assertSupportedRelativeSegment(childName, input.evidenceRef);
       const childSegments = [...relativeSegments, childName];
       const relativePath = childSegments.join("/");
+      if (canonicalPaths.has(relativePath)) {
+        throw new WorkspacePathSafetyError(
+          "Hash directory contains duplicate canonical paths.",
+          input.evidenceRef
+        );
+      }
+      canonicalPaths.add(relativePath);
       const absolutePath = join(directoryPath, childName);
       const childStat = await observeSupportedTreeEntry(absolutePath, input.evidenceRef);
       const childDescriptor = openRelativeEntryDescriptor(
@@ -297,7 +307,8 @@ async function observeDirectory(
             childStat,
             childDescriptor,
             entries,
-            files
+            files,
+            canonicalPaths
           );
         }
       } finally {
@@ -575,6 +586,7 @@ function readDirectoryNames(descriptor: number, evidenceRef: string): string[] {
   }
 
   const names: string[] = [];
+  const decodedNames = new Set<string>();
   let failure: unknown;
   try {
     for (;;) {
@@ -591,7 +603,15 @@ function readDirectoryNames(descriptor: number, evidenceRef: string): string[] {
         break;
       }
       const name = decodeDirectoryEntryName(entry, evidenceRef);
-      if (name !== "." && name !== "..") names.push(name);
+      if (name === "." || name === "..") continue;
+      if (decodedNames.has(name)) {
+        throw new WorkspacePathSafetyError(
+          "Hash directory contains duplicate decoded entry names.",
+          evidenceRef
+        );
+      }
+      decodedNames.add(name);
+      names.push(name);
     }
   } catch (error) {
     failure = error;
