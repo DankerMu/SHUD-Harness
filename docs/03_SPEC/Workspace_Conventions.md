@@ -39,6 +39,8 @@ workspace/
     AutoSHUD/
     zero/
   stacks/
+  provenance/
+  secrets/
   data/
   tasks/
   jobs/
@@ -59,6 +61,8 @@ workspace/
 | Task worktree | `workspace/tasks/TASK-*/worktrees/*` | 任务特定代码修改 | 允许 |
 | Scratch/tmp | `workspace/tasks/TASK-*/scratch/`, `workspace/tmp/` | 临时文件 | 允许 |
 | Artifacts | `workspace/artifacts/`, `workspace/runs/*/` | 运行产出 | 允许 |
+| Data provenance | `workspace/provenance/` | DATA-*.json 记录 | 允许（只读读取） |
+| Secrets | `workspace/secrets/` | local-token 等敏感文件（0600） | backend 私有 |
 
 ### 1.4 与其他规范的关系
 
@@ -109,6 +113,7 @@ artifacts/
   repo_context/
   toolcalls/
   manifests/
+  manifest-sets/
 ```
 
 ### 补充目录
@@ -134,10 +139,16 @@ TASK-001_patch_bundle.diff
 
 ```text
 data/
-  DATA-001/
-    provenance.yaml
-    processed/
-    checksums.yaml
+  raw/
+  processed/
+  checksums.yaml
+```
+
+### DataProvenance 目录
+
+```text
+provenance/
+  DATA-*.json
 ```
 
 Raw data 推荐只读引用，不直接复制到 Git。若复制到 workspace，也必须保留 checksum 和来源。

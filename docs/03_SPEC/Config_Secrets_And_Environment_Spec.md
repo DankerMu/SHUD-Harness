@@ -52,6 +52,7 @@ interface SecretRef {
 ```text
 HARNESS_WORKSPACE_DIR
 HARNESS_AUTH_MODE
+HARNESS_LOCAL_TOKEN
 HARNESS_DEFAULT_NOTIFY_EMAIL
 HARNESS_PUBLIC_BASE_URL
 OPENAI_API_KEY
@@ -89,13 +90,18 @@ StackLock 记录版本，不记录 secret：
 runtime:
   os: ...
   r_version: ...
-  r_packages_lock: renv.lock
+  r_packages_lock:
+    path: renv.lock
+    sha256: "sha256:..."
   sundials_version: ...
 harness:
   version: ...
-  config_profile: local_dev
-  secrets_policy_version: 0.8.1
+  cli_version: unknown
+  prompt_pack: promptpack-unset
+  skills_version: skills-unset
 ```
+
+`renv.lock` 缺失时 `runtime.r_packages_lock` 为 `null`；StackLock 不记录 secret value。
 
 ## 7. Observability / Operations 环境变量
 

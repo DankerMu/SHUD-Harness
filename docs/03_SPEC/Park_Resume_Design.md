@@ -121,7 +121,7 @@ parked_state:
     task_card: tasks/TASK-.../task.yaml
     plan: tasks/TASK-.../plan.md
     stack_lock: stacks/STACK-.../stacklock.yaml
-    data_provenance: data/DATA-.../provenance.yaml
+    data_provenance: provenance/DATA-<uuid>.json
   plan_cursor:
     completed_steps: [step-1, step-2]
     next_step: step-3

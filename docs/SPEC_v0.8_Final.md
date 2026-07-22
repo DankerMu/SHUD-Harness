@@ -140,10 +140,13 @@ repos:
   SHUD: {commit: 9b55b0c, branch: master}
   rSHUD: {commit: d162db3, branch: master}
   AutoSHUD: {commit: 1cbec6f, branch: master}
+  zero: {commit: 13e25c1, branch: main}
 runtime:
   os: Darwin 24.6.0
   r_version: "4.4.1"
-  r_packages_lock: renv.lock   # renv::snapshot() 产出的完整 R 包版本锁
+  r_packages_lock:
+    path: renv.lock
+    sha256: "sha256:..."       # renv::snapshot() 产出的内容哈希；缺失时为 null
   python_version: "3.12.4"
   sundials_version: "6.0.0"
   gcc_version: "14.1.0"
@@ -352,7 +355,7 @@ shud-workspace/                  # 运行时资产 (不进代码仓)
   config.yaml
   tasks/TASK-*.yaml
   stacklocks/STACK-*.yaml
-  data_provenance/DATA-*.yaml
+  provenance/DATA-*.json
   analysis_plans/PLAN-*.yaml
   jobs/JOB-*.yaml
   runs/RUN-*/
@@ -364,7 +367,9 @@ shud-workspace/                  # 运行时资产 (不进代码仓)
   repos/SHUD/, repos/rSHUD/, repos/AutoSHUD/
   data/raw/ (只读), data/processed/
   workspaces/TASK-*/
-```
+  artifacts/manifest-sets/
+  secrets/
+  ```
 
 ### 5.2 Sandbox 规则
 

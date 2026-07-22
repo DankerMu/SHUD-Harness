@@ -41,6 +41,7 @@ interface Artifact {
   created_at: string;
   created_by: "system" | "agent" | "user";
   evidence_usable: boolean;
+  llm_generated?: boolean;
   retention_class: "ephemeral" | "debug" | "evidence" | "accepted_report" | "benchmark";
   source_refs: string[];
   redaction_status: "not_needed" | "redacted" | "unsafe";
@@ -55,6 +56,7 @@ interface ArtifactManifest {
   task_id: string;
   run_id?: string;
   report_id?: string;
+  superseded_by?: string;
   artifacts: Artifact[];
   generated_at: string;
   generator: string;

@@ -68,10 +68,13 @@ repos:
   SHUD:      { commit: 9b55b0c, branch: master }
   rSHUD:     { commit: d162db3, branch: master }
   AutoSHUD:  { commit: 1cbec6f, branch: master }
+  zero:      { commit: 13e25c1, branch: main }
 runtime:
   os: "Darwin 24.6.0"
   r_version: "4.4.1"
-  r_packages_lock: renv.lock
+  r_packages_lock:
+    path: "renv.lock"
+    sha256: "sha256:..."
   python_version: "3.12.4"
   sundials_version: "6.0.0"
   gcc_version: "14.1.0"
