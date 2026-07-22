@@ -43,6 +43,7 @@ import {
 
 const ENOENT = 2;
 const PRIVATE_DIRECTORY_CREATE_MODE = 0o700;
+const SETGID_MODE = 0o2000n;
 
 export interface WorkspaceTokenDescriptors {
   readonly workspaceRoot: string;
@@ -142,6 +143,14 @@ function createPrivateDirectoryNoReplace(
 ): number {
   let descriptor: number | undefined;
   try {
+    const parentObservation = guardDirectoryType(parent);
+    const effectiveCreateMode = PRIVATE_DIRECTORY_CREATE_MODE & ~process.umask();
+    if (
+      BigInt(effectiveCreateMode) !== PRIVATE_DIRECTORY_MODE ||
+      (parentObservation.mode & SETGID_MODE) !== 0n
+    ) {
+      throw unsafeLocalTokenStorageError();
+    }
     invokeLocalTokenTestHook({ stage: beforeMkdirStage, name: finalName });
     if (mkdirAt(parent, finalName, PRIVATE_DIRECTORY_CREATE_MODE) !== 0) {
       throw unsafeLocalTokenStorageError();
@@ -370,7 +379,8 @@ function decodeTransportSafeLocalToken(bytes: Buffer): string {
   }
   if (
     token.length === 0 ||
-    /[\s,\u0000]/u.test(token) ||
+    /[\p{Cc}\p{White_Space},]/u.test(token) ||
+    [...token].some((character) => character.codePointAt(0)! > 0x7e) ||
     !Buffer.from(token, "utf8").equals(bytes)
   ) {
     throw unsafeLocalTokenStorageError();

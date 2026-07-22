@@ -12,7 +12,6 @@ import {
   moveObservedArtifactUnderLease,
   observeRegularArtifact,
   openCreatedArtifactUnderLease,
-  readCanonicalToken,
   readObservedTokenArtifact,
   retireObservedArtifactUnderLease,
   secretsDescriptorUnderLease,
@@ -256,6 +255,8 @@ function recoverPublishing(
   }
   const marker = validateControlArtifact(secretsDescriptor, transaction.publishingMarkerName);
   const canonical = readObservedTokenArtifact(secretsDescriptor, LOCAL_TOKEN_FILE);
+  const foreignCanonical = canonical !== undefined &&
+    !sameIdentity(canonical.identity, transaction.generationIdentity);
   if (canonical && sameIdentity(canonical.identity, transaction.generationIdentity)) {
     if (canonical.digest !== transaction.digest || transaction.stagedName) {
       throw unsafeLocalTokenStorageError();
@@ -280,6 +281,7 @@ function recoverPublishing(
     });
   }
   cleanupControls(mutationLease, marker, lease);
+  if (foreignCanonical) throw unsafeLocalTokenStorageError();
 }
 
 function recoverRollingBack(
@@ -297,6 +299,7 @@ function recoverRollingBack(
     throw unsafeLocalTokenStorageError();
   }
   const marker = validateControlArtifact(secretsDescriptor, transaction.rollbackMarkerName);
+  let foreignGenerationObserved = false;
 
   if (transaction.candidateName) {
     const candidate = readObservedTokenArtifact(secretsDescriptor, transaction.candidateName);
@@ -313,8 +316,10 @@ function recoverRollingBack(
         identity: candidate.identity
       });
     } else {
+      foreignGenerationObserved = true;
       if (readObservedTokenArtifact(secretsDescriptor, LOCAL_TOKEN_FILE)) {
         // Two external canonical writers cannot be ordered without deleting one.
+        cleanupControls(mutationLease, marker, lease);
         throw unsafeLocalTokenStorageError();
       }
       if (!moveObservedArtifactUnderLease(mutationLease, {
@@ -349,8 +354,11 @@ function recoverRollingBack(
       name: candidateName,
       identity: transaction.generationIdentity
     });
+  } else if (canonical) {
+    foreignGenerationObserved = true;
   }
   cleanupControls(mutationLease, marker, lease);
+  if (foreignGenerationObserved) throw unsafeLocalTokenStorageError();
 }
 
 function recoverTransaction(
@@ -674,12 +682,10 @@ export function publishLocalToken(
     fsyncSync(descriptors.secrets);
 
     if (!published) {
-      const winner = readCanonicalToken(descriptors.secrets, false);
-      if (!winner) throw unsafeLocalTokenStorageError();
       cleanupControls(mutationLease, marker, lease.control);
       marker = undefined;
       leaseExists = false;
-      return winner;
+      throw unsafeLocalTokenStorageError();
     }
 
     invokeLocalTokenTestHook({ stage: "before_post_publish_binding" });

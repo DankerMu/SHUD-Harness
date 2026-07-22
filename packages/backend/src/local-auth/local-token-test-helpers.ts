@@ -382,6 +382,32 @@ export async function openAuthorityInSubprocess(
   return output;
 }
 
+export async function openAuthorityWithUmaskInSubprocess(
+  workspaceRoot: string,
+  mask: number
+): Promise<"blocked" | "success"> {
+  const storeUrl = new URL("./local-token-store.ts", import.meta.url).href;
+  const script = [
+    `import { LocalTokenStorageError, openWorkspaceLocalTokenAuthority } from ${JSON.stringify(storeUrl)};`,
+    `process.umask(${mask});`,
+    "try {",
+    `  openWorkspaceLocalTokenAuthority({ workspaceRoot: ${JSON.stringify(workspaceRoot)} });`,
+    '  process.stdout.write("success");',
+    "} catch (error) {",
+    "  if (!(error instanceof LocalTokenStorageError)) throw error;",
+    '  process.stdout.write("blocked");',
+    "}"
+  ].join("\n");
+  const result = await execFileAsync(process.execPath, ["-e", script], {
+    timeout: 2_000
+  });
+  const output = result.stdout.trim();
+  if (output !== "blocked" && output !== "success") {
+    throw new Error(`Unexpected umask subprocess result: ${output}`);
+  }
+  return output;
+}
+
 export function readCanonicalBytes(workspace: LocalTokenTestWorkspace): Buffer {
   return readFileSync(join(workspace.secretsRoot, "local-token"));
 }

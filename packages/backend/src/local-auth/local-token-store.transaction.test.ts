@@ -51,13 +51,14 @@ describe("workspace local-token store transaction authority", () => {
     }
   });
 
-  test("a no-clobber collision adopts a valid external canonical token", () => {
+  test("a live no-clobber collision preserves the foreign canonical but fails this invocation", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     const externalToken = "external-collision-winner";
     let installed = false;
+    let externalIdentity: { dev: bigint; ino: bigint } | undefined;
 
-    const authority = runWithLocalTokenStoreTestContext({
+    expect(() => runWithLocalTokenStoreTestContext({
       hook: ({ stage }) => {
         if (stage !== "after_publishing_marker_fsync" || installed) return;
         installed = true;
@@ -65,14 +66,115 @@ describe("workspace local-token store transaction authority", () => {
           flag: "wx",
           mode: 0o600
         });
+        const observed = lstatSync(join(workspace.secretsRoot, "local-token"), {
+          bigint: true
+        });
+        externalIdentity = { dev: observed.dev, ino: observed.ino };
       }
-    }, () => openWorkspaceLocalTokenAuthority({ workspaceRoot: workspace.workspaceRoot }));
+    }, () => openWorkspaceLocalTokenAuthority({
+      workspaceRoot: workspace.workspaceRoot
+    }))).toThrow(LocalTokenStorageError);
 
     expect(installed).toBe(true);
-    expect(authority.token).toBe(externalToken);
-    authority.assertCurrent();
     expect(readdirSync(workspace.secretsRoot)).toEqual(["local-token"]);
+    const preserved = lstatSync(join(workspace.secretsRoot, "local-token"), { bigint: true });
+    expect(preserved.dev).toBe(externalIdentity?.dev);
+    expect(preserved.ino).toBe(externalIdentity?.ino);
+    expect(readFileSync(join(workspace.secretsRoot, "local-token"), "utf8")).toBe(externalToken);
+
+    const retry = openWorkspaceLocalTokenAuthority({ workspaceRoot: workspace.workspaceRoot });
+    expect(retry.token).toBe(externalToken);
+    expect(lstatSync(join(workspace.secretsRoot, "local-token"), { bigint: true }).ino).toBe(
+      preserved.ino
+    );
+    retry.assertCurrent();
   });
+
+  test("publishing recovery preserves a foreign canonical but fails this invocation", async () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+    await interruptLocalTokenStore(workspace.workspaceRoot, "after_publish");
+    const foreign = "foreign-publishing-canonical";
+    const identity = replaceLocalTokenArtifact(
+      workspace.secretsRoot,
+      "local-token",
+      foreign
+    );
+
+    expect(() => openWorkspaceLocalTokenAuthority({
+      workspaceRoot: workspace.workspaceRoot
+    })).toThrow(LocalTokenStorageError);
+
+    const canonical = lstatSync(join(workspace.secretsRoot, "local-token"), { bigint: true });
+    expect(canonical.dev).toBe(identity.dev);
+    expect(canonical.ino).toBe(identity.ino);
+    expect(readFileSync(join(workspace.secretsRoot, "local-token"), "utf8")).toBe(foreign);
+    expect(transactionNames(workspace.secretsRoot)).toEqual([]);
+
+    const retry = openWorkspaceLocalTokenAuthority({ workspaceRoot: workspace.workspaceRoot });
+    expect(retry.token).toBe(foreign);
+    retry.assertCurrent();
+  }, ADVERSARIAL_MATRIX_TIMEOUT_MS);
+
+  test("rolling-back recovery restores a foreign candidate but fails this invocation", async () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+    await interruptLocalTokenStore(
+      workspace.workspaceRoot,
+      "after_rollback_move",
+      "before_post_publish_binding"
+    );
+    const candidate = transactionNames(workspace.secretsRoot).find((name) =>
+      name.endsWith(".candidate")
+    );
+    expect(candidate).toBeDefined();
+    const foreign = "foreign-rolling-candidate";
+    const identity = replaceLocalTokenArtifact(workspace.secretsRoot, candidate!, foreign);
+
+    expect(() => openWorkspaceLocalTokenAuthority({
+      workspaceRoot: workspace.workspaceRoot
+    })).toThrow(LocalTokenStorageError);
+
+    const canonical = lstatSync(join(workspace.secretsRoot, "local-token"), { bigint: true });
+    expect(canonical.dev).toBe(identity.dev);
+    expect(canonical.ino).toBe(identity.ino);
+    expect(readFileSync(join(workspace.secretsRoot, "local-token"), "utf8")).toBe(foreign);
+    expect(transactionNames(workspace.secretsRoot)).toEqual([]);
+
+    const retry = openWorkspaceLocalTokenAuthority({ workspaceRoot: workspace.workspaceRoot });
+    expect(retry.token).toBe(foreign);
+    retry.assertCurrent();
+  }, ADVERSARIAL_MATRIX_TIMEOUT_MS);
+
+  test("rolling-back recovery preserves a foreign canonical but fails this invocation", async () => {
+    const workspace = createLocalTokenTestWorkspace();
+    workspaces.push(workspace);
+    await interruptLocalTokenStore(
+      workspace.workspaceRoot,
+      "after_rollback_marker_fsync",
+      "before_post_publish_binding"
+    );
+    const foreign = "foreign-rolling-canonical";
+    const identity = replaceLocalTokenArtifact(
+      workspace.secretsRoot,
+      "local-token",
+      foreign
+    );
+
+    expect(() => openWorkspaceLocalTokenAuthority({
+      workspaceRoot: workspace.workspaceRoot
+    })).toThrow(LocalTokenStorageError);
+
+    const canonical = lstatSync(join(workspace.secretsRoot, "local-token"), { bigint: true });
+    expect(canonical.dev).toBe(identity.dev);
+    expect(canonical.ino).toBe(identity.ino);
+    expect(readFileSync(join(workspace.secretsRoot, "local-token"), "utf8")).toBe(foreign);
+    expect(transactionNames(workspace.secretsRoot)).toEqual([]);
+
+    const retry = openWorkspaceLocalTokenAuthority({ workspaceRoot: workspace.workspaceRoot });
+    expect(retry.token).toBe(foreign);
+    retry.assertCurrent();
+  }, ADVERSARIAL_MATRIX_TIMEOUT_MS);
 
   test("the directory lease rejects a concurrent publisher without polling", () => {
     const workspace = createLocalTokenTestWorkspace();

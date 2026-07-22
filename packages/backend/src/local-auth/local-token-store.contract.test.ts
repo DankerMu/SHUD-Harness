@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -24,9 +25,17 @@ import {
   createLocalTokenTestWorkspace,
   createPrivateSecrets,
   interruptBootstrapLocalTokenStore,
+  openAuthorityWithUmaskInSubprocess,
   replaceLocalTokenArtifact,
   type LocalTokenTestWorkspace
 } from "./local-token-test-helpers";
+
+function bearerHeaderThroughRequest(token: string): string | null {
+  const headers = new Headers();
+  headers.set("Authorization", `Bearer ${token}`);
+  const request = new Request("http://127.0.0.1/", { headers });
+  return request.headers.get("Authorization");
+}
 
 function removedDirectoryBootstrapResidue(parent: string): string[] {
   return readdirSync(parent).filter((name) =>
@@ -51,6 +60,7 @@ describe("workspace local-token store contract", () => {
     expect(first.source).toBe("workspace");
     expect(Object.isFrozen(first)).toBe(true);
     expect(first.token.length).toBeGreaterThan(0);
+    expect(bearerHeaderThroughRequest(first.token)).toBe(`Bearer ${first.token}`);
     first.assertCurrent();
 
     const secrets = lstatSync(workspace.secretsRoot, { bigint: true });
@@ -88,6 +98,7 @@ describe("workspace local-token store contract", () => {
     const authority = openWorkspaceLocalTokenAuthority({ workspaceRoot: workspace.workspaceRoot });
 
     expect(authority.token).toBe(expected);
+    expect(bearerHeaderThroughRequest(authority.token)).toBe(`Bearer ${expected}`);
     authority.assertCurrent();
     expect(readFileSync(join(workspace.secretsRoot, "local-token"), "utf8")).toBe(expected);
   });
@@ -96,17 +107,38 @@ describe("workspace local-token store contract", () => {
     const workspace = createLocalTokenTestWorkspace();
     workspaces.push(workspace);
     createPrivateSecrets(workspace);
-    const expected = "token-é-safe";
+    const expected = "token-header-safe";
     writeFileSync(join(workspace.secretsRoot, "local-token"), expected, { mode: 0o600 });
 
     const authority = openWorkspaceLocalTokenAuthority({ workspaceRoot: workspace.workspaceRoot });
-    const header = `Bearer ${authority.token}`;
-    const parsed = /^Bearer ([^\s,\u0000]+)$/u.exec(header)?.[1];
+    const transported = bearerHeaderThroughRequest(authority.token);
 
-    expect(parsed).toBeDefined();
-    expect(Buffer.from(parsed!, "utf8")).toEqual(Buffer.from(expected, "utf8"));
+    expect(transported).toBe(`Bearer ${expected}`);
+    expect(Buffer.from(transported!.slice("Bearer ".length), "utf8")).toEqual(
+      Buffer.from(expected, "utf8")
+    );
     authority.assertCurrent();
   });
+
+  for (const fixture of [
+    { name: "U+0100", token: "token-\u0100-safe" },
+    { name: "emoji", token: "token-\u{1f600}-safe" }
+  ]) {
+    test(`rejects non-ByteString ${fixture.name} before the real Header transport seam`, () => {
+      const workspace = createLocalTokenTestWorkspace();
+      workspaces.push(workspace);
+      createPrivateSecrets(workspace);
+      const path = join(workspace.secretsRoot, "local-token");
+      const bytes = Buffer.from(fixture.token, "utf8");
+      writeFileSync(path, bytes, { mode: 0o600 });
+
+      expect(() => bearerHeaderThroughRequest(fixture.token)).toThrow(TypeError);
+      expect(() => openWorkspaceLocalTokenAuthority({
+        workspaceRoot: workspace.workspaceRoot
+      })).toThrow(LocalTokenStorageError);
+      expect(readFileSync(path)).toEqual(bytes);
+    });
+  }
 
   for (const fixture of [
     { name: "empty", bytes: Buffer.alloc(0) },
@@ -117,7 +149,10 @@ describe("workspace local-token store contract", () => {
     { name: "newline-bearing", bytes: Buffer.from("token\nwith-newline") },
     { name: "Unicode-whitespace-bearing", bytes: Buffer.from("token\u00a0with-space") },
     { name: "comma-bearing", bytes: Buffer.from("token,with-comma") },
-    { name: "NUL-bearing", bytes: Buffer.from("token\u0000with-nul") }
+    { name: "NUL-bearing", bytes: Buffer.from("token\u0000with-nul") },
+    { name: "C0-control-bearing", bytes: Buffer.from("token\u0001with-control") },
+    { name: "DEL-bearing", bytes: Buffer.from("token\u007fwith-control") },
+    { name: "non-ASCII Latin-1-bearing", bytes: Buffer.from("token-é-safe") }
   ]) {
     test(`rejects a ${fixture.name} token without overwriting it`, () => {
       const workspace = createLocalTokenTestWorkspace();
@@ -126,10 +161,83 @@ describe("workspace local-token store contract", () => {
       const path = join(workspace.secretsRoot, "local-token");
       writeFileSync(path, fixture.bytes, { mode: 0o600 });
 
+      if (fixture.name === "C0-control-bearing" || fixture.name === "DEL-bearing") {
+        const token = fixture.bytes.toString("utf8");
+        expect(bearerHeaderThroughRequest(token)).toBe(`Bearer ${token}`);
+      }
+
       expect(() => openWorkspaceLocalTokenAuthority({
         workspaceRoot: workspace.workspaceRoot
       })).toThrow(LocalTokenStorageError);
       expect(readFileSync(path)).toEqual(fixture.bytes);
+    });
+  }
+
+  for (const fixture of [
+    {
+      name: "workspace leaf",
+      target: (workspace: LocalTokenTestWorkspace) =>
+        join(workspace.tempRoot, "umask-workspace"),
+      finalName: (workspace: LocalTokenTestWorkspace) =>
+        join(workspace.tempRoot, "umask-workspace")
+    },
+    {
+      name: "secrets",
+      target: (workspace: LocalTokenTestWorkspace) => workspace.workspaceRoot,
+      finalName: (workspace: LocalTokenTestWorkspace) => workspace.secretsRoot
+    }
+  ]) {
+    test(`restrictive owner-bit umask fails before ${fixture.name} bootstrap mkdir`, async () => {
+      const workspace = createLocalTokenTestWorkspace();
+      workspaces.push(workspace);
+      const finalName = fixture.finalName(workspace);
+
+      try {
+        expect(await openAuthorityWithUmaskInSubprocess(
+          fixture.target(workspace),
+          0o777
+        )).toBe("blocked");
+        expect(existsSync(finalName)).toBe(false);
+      } finally {
+        if (existsSync(finalName)) chmodSync(finalName, 0o700);
+      }
+    });
+  }
+
+  for (const fixture of [
+    {
+      name: "workspace leaf",
+      parent: (workspace: LocalTokenTestWorkspace) => workspace.tempRoot,
+      target: (workspace: LocalTokenTestWorkspace) =>
+        join(workspace.tempRoot, "setgid-workspace"),
+      finalName: (workspace: LocalTokenTestWorkspace) =>
+        join(workspace.tempRoot, "setgid-workspace")
+    },
+    {
+      name: "secrets",
+      parent: (workspace: LocalTokenTestWorkspace) => workspace.workspaceRoot,
+      target: (workspace: LocalTokenTestWorkspace) => workspace.workspaceRoot,
+      finalName: (workspace: LocalTokenTestWorkspace) => workspace.secretsRoot
+    }
+  ]) {
+    test(`setgid parent cannot strand a mode-transformed ${fixture.name}`, async () => {
+      const workspace = createLocalTokenTestWorkspace();
+      workspaces.push(workspace);
+      const parent = fixture.parent(workspace);
+      chmodSync(parent, 0o2700);
+      if ((lstatSync(parent, { bigint: true }).mode & 0o2000n) === 0n) return;
+
+      const target = fixture.target(workspace);
+      const finalName = fixture.finalName(workspace);
+      const result = await openAuthorityWithUmaskInSubprocess(target, 0o077);
+      if (result === "blocked") {
+        expect(existsSync(finalName)).toBe(false);
+        return;
+      }
+
+      expect(lstatSync(finalName, { bigint: true }).mode & 0o7777n).toBe(0o700n);
+      const retry = openWorkspaceLocalTokenAuthority({ workspaceRoot: target });
+      retry.assertCurrent();
     });
   }
 
