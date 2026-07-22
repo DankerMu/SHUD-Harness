@@ -6,7 +6,12 @@ export type LocalTokenPublicationStageForTest =
   | "after_publish"
   | "before_temp_cleanup"
   | "before_directory_fsync"
-  | "before_post_publish_binding";
+  | "before_post_publish_binding"
+  | "after_rollback_armed"
+  | "after_rollback_move"
+  | "before_rollback_candidate_cleanup"
+  | "before_rollback_restore"
+  | "after_rollback_restore";
 
 export type LocalTokenPublicationStageHookForTest = (
   input: Readonly<{ stage: LocalTokenPublicationStageForTest }>

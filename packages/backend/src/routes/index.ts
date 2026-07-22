@@ -91,8 +91,25 @@ const LOCAL_TOKEN_CREATE_OPEN_FLAGS =
   constants.O_EXCL |
   (constants.O_NOFOLLOW ?? 0) |
   (constants.O_NONBLOCK ?? 0);
+const LOCAL_TOKEN_LEASE_OPEN_FLAGS =
+  constants.O_RDWR |
+  (constants.O_NOFOLLOW ?? 0) |
+  (constants.O_NONBLOCK ?? 0);
+const LOCAL_TOKEN_LEASE_CREATE_FLAGS =
+  LOCAL_TOKEN_LEASE_OPEN_FLAGS |
+  constants.O_CREAT |
+  constants.O_EXCL;
 const LOCAL_TOKEN_TEMPORARY_NAME_PATTERN =
   /^\.local-token-(\d+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/u;
+const LOCAL_TOKEN_TRANSACTION_ARTIFACT_PATTERN =
+  /^\.local-token-transaction-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(lease|staged|candidate)$/u;
+const LOCAL_TOKEN_TRANSACTION_PHASE_PATTERN =
+  /^\.local-token-transaction-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-([0-9a-f]{64})\.(publishing|rolling-back)$/u;
+const LOCAL_TOKEN_FLOCK_EXCLUSIVE = 0x02;
+const LOCAL_TOKEN_FLOCK_NONBLOCKING = 0x04;
+const LOCAL_TOKEN_PUBLICATION_LEASE_WAIT_MS = 2_000;
+const localTokenPublicationLeaseDepthByDirectory = new Map<string, number>();
+const activeLocalTokenTransactionIds = new Set<string>();
 
 export const WORKSPACE_CANONICAL_DIRECTORIES = [
   "repos",
@@ -521,12 +538,14 @@ function provisionWorkspaceLocalAuthToken(
 
   let workspaceDescriptor: number | undefined;
   let secretsDescriptor: number | undefined;
+  let publicationLeaseKey: string | undefined;
   try {
     workspaceDescriptor = openWorkspaceRootDescriptor(resolvedWorkspaceRoot);
     secretsDescriptor = openOrCreatePrivateDirectory(
       workspaceDescriptor,
       LOCAL_TOKEN_DIRECTORY
     );
+    publicationLeaseKey = acquireLocalTokenPublicationLease(secretsDescriptor);
     recoverInterruptedLocalTokenPublication(
       resolvedWorkspaceRoot,
       workspaceDescriptor,
@@ -557,6 +576,7 @@ function provisionWorkspaceLocalAuthToken(
     }
     throw unsafeLocalTokenStorageError();
   } finally {
+    releaseLocalTokenPublicationLease(publicationLeaseKey);
     closeDescriptorIfOwned(secretsDescriptor);
     closeDescriptorIfOwned(workspaceDescriptor);
   }
@@ -572,10 +592,17 @@ function recoverInterruptedLocalTokenPublication(
   assertWorkspaceTokenDirectoryBinding(workspaceRoot, workspaceDescriptor, secretsDescriptor);
   let directoryMutated = false;
 
+  const transactions = collectLocalTokenTransactions(names);
+  for (const transaction of transactions.values()) {
+    if (activeLocalTokenTransactionIds.has(transaction.id)) continue;
+    if (recoverLocalTokenTransaction(secretsDescriptor, transaction)) {
+      directoryMutated = true;
+    }
+  }
+
   for (const name of names) {
     const matched = LOCAL_TOKEN_TEMPORARY_NAME_PATTERN.exec(name);
     if (!matched) continue;
-    const publisherPid = Number(matched[1]);
     const temporaryDescriptor = syscallOpenAt(
       secretsDescriptor,
       name,
@@ -611,10 +638,11 @@ function recoverInterruptedLocalTokenPublication(
         } finally {
           closeSync(finalDescriptor);
         }
-      } else if (localTokenPublisherProcessIsAlive(publisherPid)) {
-        continue;
       }
 
+      // Legacy artifacts have no process-instance proof. A live PID cannot establish
+      // ownership because PID values are reusable, so a single-link legacy staging
+      // file is always stale. New publishers hold a kernel-released directory flock.
       if (syscallUnlinkAt(secretsDescriptor, name) !== 0) {
         const reboundDescriptor = syscallOpenAt(
           secretsDescriptor,
@@ -634,21 +662,298 @@ function recoverInterruptedLocalTokenPublication(
   if (directoryMutated) fsyncSync(secretsDescriptor);
 }
 
-function localTokenPublisherProcessIsAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw unsafeLocalTokenStorageError();
-  try {
-    process.kill(pid, 0);
+interface LocalTokenTransactionArtifacts {
+  readonly id: string;
+  leaseName?: string;
+  stagedName?: string;
+  candidateName?: string;
+  publishingMarkerName?: string;
+  rollbackMarkerName?: string;
+  digest?: string;
+}
+
+function collectLocalTokenTransactions(
+  names: readonly string[]
+): Map<string, LocalTokenTransactionArtifacts> {
+  const transactions = new Map<string, LocalTokenTransactionArtifacts>();
+  for (const name of names) {
+    const artifact = LOCAL_TOKEN_TRANSACTION_ARTIFACT_PATTERN.exec(name);
+    if (artifact) {
+      const id = artifact[1] as string;
+      const transaction = transactions.get(id) ?? { id };
+      const kind = artifact[2];
+      if (kind === "lease") transaction.leaseName = name;
+      if (kind === "staged") transaction.stagedName = name;
+      if (kind === "candidate") transaction.candidateName = name;
+      transactions.set(id, transaction);
+      continue;
+    }
+
+    const phase = LOCAL_TOKEN_TRANSACTION_PHASE_PATTERN.exec(name);
+    if (!phase) continue;
+    const id = phase[1] as string;
+    const digest = phase[2] as string;
+    const transaction = transactions.get(id) ?? { id };
+    if (transaction.digest !== undefined && transaction.digest !== digest) {
+      throw unsafeLocalTokenStorageError();
+    }
+    transaction.digest = digest;
+    if (phase[3] === "publishing") {
+      if (transaction.publishingMarkerName !== undefined) throw unsafeLocalTokenStorageError();
+      transaction.publishingMarkerName = name;
+    } else {
+      if (transaction.rollbackMarkerName !== undefined) throw unsafeLocalTokenStorageError();
+      transaction.rollbackMarkerName = name;
+    }
+    transactions.set(id, transaction);
+  }
+  return transactions;
+}
+
+function recoverLocalTokenTransaction(
+  secretsDescriptor: number,
+  transaction: LocalTokenTransactionArtifacts
+): boolean {
+  if (transaction.leaseName) {
+    assertLocalTokenTransactionControlArtifact(
+      secretsDescriptor,
+      transaction.leaseName
+    );
+  }
+  if (transaction.publishingMarkerName && transaction.rollbackMarkerName) {
+    throw unsafeLocalTokenStorageError();
+  }
+  if (transaction.digest === undefined) {
+    if (transaction.candidateName) throw unsafeLocalTokenStorageError();
+    if (transaction.stagedName) {
+      assertRecoverablePartialLocalTokenArtifact(
+        secretsDescriptor,
+        transaction.stagedName
+      );
+      unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.stagedName);
+    }
+    if (transaction.leaseName) {
+      unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.leaseName);
+    }
     return true;
-  } catch (error) {
-    if (hasNodeErrorCode(error, "ESRCH")) return false;
-    if (hasNodeErrorCode(error, "EPERM")) return true;
+  }
+  if (transaction.rollbackMarkerName) {
+    recoverRollingBackLocalTokenTransaction(secretsDescriptor, transaction);
+  } else if (transaction.publishingMarkerName) {
+    recoverPublishingLocalTokenTransaction(secretsDescriptor, transaction);
+  } else {
+    throw unsafeLocalTokenStorageError();
+  }
+  return true;
+}
+
+function recoverPublishingLocalTokenTransaction(
+  secretsDescriptor: number,
+  transaction: LocalTokenTransactionArtifacts
+): void {
+  if (!transaction.publishingMarkerName || !transaction.digest || transaction.candidateName) {
+    throw unsafeLocalTokenStorageError();
+  }
+  assertLocalTokenTransactionControlArtifact(
+    secretsDescriptor,
+    transaction.publishingMarkerName
+  );
+  const canonicalDigest = readLocalTokenDigestAt(secretsDescriptor, LOCAL_TOKEN_FILE);
+  if (canonicalDigest === transaction.digest) {
+    if (transaction.stagedName) throw unsafeLocalTokenStorageError();
+  } else if (transaction.stagedName) {
+    assertLocalTokenArtifactDigest(secretsDescriptor, transaction.stagedName, transaction.digest);
+    unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.stagedName);
+  }
+  unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.publishingMarkerName);
+  if (transaction.leaseName) {
+    unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.leaseName);
+  }
+}
+
+function recoverRollingBackLocalTokenTransaction(
+  secretsDescriptor: number,
+  transaction: LocalTokenTransactionArtifacts
+): void {
+  if (!transaction.rollbackMarkerName || !transaction.digest || transaction.stagedName) {
+    throw unsafeLocalTokenStorageError();
+  }
+  assertLocalTokenTransactionControlArtifact(
+    secretsDescriptor,
+    transaction.rollbackMarkerName
+  );
+
+  if (transaction.candidateName) {
+    const candidateDigest = requireLocalTokenDigestAt(
+      secretsDescriptor,
+      transaction.candidateName
+    );
+    if (candidateDigest === transaction.digest) {
+      unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.candidateName);
+      transaction.candidateName = undefined;
+    } else {
+      if (readLocalTokenDigestAt(secretsDescriptor, LOCAL_TOKEN_FILE) !== undefined) {
+        // Two independently written foreign generations cannot be ordered without
+        // deleting one. Preserve both and fail closed; cooperating publishers cannot
+        // create this state because their leases cover the whole transition.
+        throw unsafeLocalTokenStorageError();
+      }
+      if (syscallRenameAtNoReplace(
+        secretsDescriptor,
+        transaction.candidateName,
+        secretsDescriptor,
+        LOCAL_TOKEN_FILE
+      ) !== 0) {
+        throw unsafeLocalTokenStorageError();
+      }
+      transaction.candidateName = undefined;
+      fsyncSync(secretsDescriptor);
+    }
+  }
+
+  const canonicalDigest = readLocalTokenDigestAt(secretsDescriptor, LOCAL_TOKEN_FILE);
+  if (canonicalDigest === transaction.digest) {
+    const candidateName = localTokenTransactionCandidateName(transaction.id);
+    if (syscallRenameAtNoReplace(
+      secretsDescriptor,
+      LOCAL_TOKEN_FILE,
+      secretsDescriptor,
+      candidateName
+    ) !== 0) {
+      throw unsafeLocalTokenStorageError();
+    }
+    fsyncSync(secretsDescriptor);
+    assertLocalTokenArtifactDigest(secretsDescriptor, candidateName, transaction.digest);
+    unlinkLocalTokenTransactionArtifact(secretsDescriptor, candidateName);
+  }
+
+  unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.rollbackMarkerName);
+  if (transaction.leaseName) {
+    unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.leaseName);
+  }
+}
+
+function assertLocalTokenTransactionControlFile(descriptor: number): void {
+  const entry = fstatSync(descriptor, { bigint: true });
+  if (
+    !entry.isFile() ||
+    entry.isSymbolicLink() ||
+    entry.nlink !== 1n ||
+    entry.size !== 0n ||
+    (entry.mode & PRIVATE_MODE_MASK) !== PRIVATE_TOKEN_MODE
+  ) {
     throw unsafeLocalTokenStorageError();
   }
 }
 
-function hasNodeErrorCode(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && "code" in error &&
-    Reflect.get(error, "code") === code;
+function assertLocalTokenTransactionControlArtifact(
+  secretsDescriptor: number,
+  name: string
+): void {
+  const descriptor = syscallOpenAt(secretsDescriptor, name, LOCAL_TOKEN_READ_OPEN_FLAGS);
+  if (descriptor < 0) throw unsafeLocalTokenStorageError();
+  try {
+    assertLocalTokenTransactionControlFile(descriptor);
+    const observed = fstatSync(descriptor, { bigint: true });
+    const reboundDescriptor = syscallOpenAt(
+      secretsDescriptor,
+      name,
+      LOCAL_TOKEN_READ_OPEN_FLAGS
+    );
+    if (reboundDescriptor < 0) throw unsafeLocalTokenStorageError();
+    try {
+      assertLocalTokenTransactionControlFile(reboundDescriptor);
+      if (!sameFilesystemIdentity(
+        observed,
+        fstatSync(reboundDescriptor, { bigint: true })
+      )) {
+        throw unsafeLocalTokenStorageError();
+      }
+    } finally {
+      closeSync(reboundDescriptor);
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function unlinkLocalTokenTransactionArtifact(
+  secretsDescriptor: number,
+  name: string
+): void {
+  if (syscallUnlinkAt(secretsDescriptor, name) !== 0) {
+    throw unsafeLocalTokenStorageError();
+  }
+}
+
+function assertLocalTokenArtifactDigest(
+  secretsDescriptor: number,
+  name: string,
+  expectedDigest: string
+): void {
+  if (requireLocalTokenDigestAt(secretsDescriptor, name) !== expectedDigest) {
+    throw unsafeLocalTokenStorageError();
+  }
+}
+
+function assertRecoverablePartialLocalTokenArtifact(
+  secretsDescriptor: number,
+  name: string
+): void {
+  const descriptor = syscallOpenAt(secretsDescriptor, name, LOCAL_TOKEN_READ_OPEN_FLAGS);
+  if (descriptor < 0) throw unsafeLocalTokenStorageError();
+  try {
+    const observed = fstatSync(descriptor, { bigint: true });
+    if (
+      !observed.isFile() ||
+      observed.isSymbolicLink() ||
+      observed.nlink !== 1n ||
+      observed.size < 0n ||
+      observed.size > BigInt(LOCAL_TOKEN_MAX_BYTES) ||
+      (observed.mode & PRIVATE_MODE_MASK) !== PRIVATE_TOKEN_MODE
+    ) {
+      throw unsafeLocalTokenStorageError();
+    }
+    const reboundDescriptor = syscallOpenAt(
+      secretsDescriptor,
+      name,
+      LOCAL_TOKEN_READ_OPEN_FLAGS
+    );
+    if (reboundDescriptor < 0) throw unsafeLocalTokenStorageError();
+    try {
+      if (!sameTokenFileObservation(
+        observed,
+        fstatSync(reboundDescriptor, { bigint: true })
+      )) {
+        throw unsafeLocalTokenStorageError();
+      }
+    } finally {
+      closeSync(reboundDescriptor);
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function requireLocalTokenDigestAt(secretsDescriptor: number, name: string): string {
+  const digest = readLocalTokenDigestAt(secretsDescriptor, name);
+  if (digest === undefined) throw unsafeLocalTokenStorageError();
+  return digest;
+}
+
+function readLocalTokenDigestAt(
+  secretsDescriptor: number,
+  name: string
+): string | undefined {
+  const descriptor = syscallOpenAt(secretsDescriptor, name, LOCAL_TOKEN_READ_OPEN_FLAGS);
+  if (descriptor < 0) return undefined;
+  try {
+    return sha256Hex(
+      readAndValidateLocalTokenDescriptor(descriptor, secretsDescriptor, name).token
+    );
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function normalizeConfiguredLocalAuthToken(value: string | undefined): string | undefined {
@@ -828,18 +1133,36 @@ function publishGeneratedLocalToken(input: {
   const { workspaceRoot, workspaceDescriptor, secretsDescriptor, hookForTest } = input;
   const token = randomBytes(32).toString("base64url");
   const tokenBytes = Buffer.from(token, "utf8");
-  const temporaryName = `.local-token-${process.pid}-${randomUUID()}.tmp`;
+  const transactionId = randomUUID();
+  const digest = sha256Hex(token);
+  const leaseName = localTokenTransactionLeaseName(transactionId);
+  const temporaryName = localTokenTransactionStagedName(transactionId);
+  const publishingMarkerName = localTokenTransactionPublishingMarkerName(
+    transactionId,
+    digest
+  );
+  const rollbackMarkerName = localTokenTransactionRollbackMarkerName(transactionId, digest);
+  const leaseDescriptor = createLocalTokenTransactionLeaseFile(
+    secretsDescriptor,
+    leaseName
+  );
   const temporaryDescriptor = syscallOpenAt(
     secretsDescriptor,
     temporaryName,
     LOCAL_TOKEN_CREATE_OPEN_FLAGS,
     0o600
   );
-  if (temporaryDescriptor < 0) throw unsafeLocalTokenStorageError();
+  if (temporaryDescriptor < 0) {
+    unlinkLocalTokenTransactionArtifact(secretsDescriptor, leaseName);
+    closeSync(leaseDescriptor);
+    throw unsafeLocalTokenStorageError();
+  }
 
   let temporaryExists = true;
+  let markerName: string | undefined;
+  let leaseExists = true;
   let published = false;
-  let publishedObservation: BigIntStats | undefined;
+  activeLocalTokenTransactionIds.add(transactionId);
   try {
     fchmodSync(temporaryDescriptor, 0o600);
     writeAllDescriptorBytes(temporaryDescriptor, tokenBytes);
@@ -847,7 +1170,9 @@ function publishGeneratedLocalToken(input: {
     fsyncSync(temporaryDescriptor);
     invokeLocalTokenPublicationHookForTest(hookForTest, "after_file_fsync");
     assertTokenFileStat(fstatSync(temporaryDescriptor, { bigint: true }));
-    publishedObservation = fstatSync(temporaryDescriptor, { bigint: true });
+    createLocalTokenTransactionMarker(secretsDescriptor, publishingMarkerName);
+    markerName = publishingMarkerName;
+    fsyncSync(secretsDescriptor);
 
     published = syscallRenameAtNoReplace(
       secretsDescriptor,
@@ -871,10 +1196,23 @@ function publishGeneratedLocalToken(input: {
     if (!published) {
       const racedToken = readExistingLocalTokenWithRetry(secretsDescriptor);
       if (racedToken === undefined) throw unsafeLocalTokenStorageError();
+      cleanupLocalTokenTransactionControlArtifacts(
+        secretsDescriptor,
+        markerName,
+        leaseName
+      );
+      markerName = undefined;
+      leaseExists = false;
       return racedToken;
     }
 
     invokeLocalTokenPublicationHookForTest(hookForTest, "before_post_publish_binding");
+    // A synchronous parent-displacement failure is still cleaned through the held
+    // directory descriptor below. General POSIX has no reverse lookup from that
+    // descriptor to a workspace path: if an uncooperative actor moves the parent
+    // and this process is then killed, a later startup at the original path cannot
+    // discover the old inode. The transaction guarantees crash recovery only while
+    // the transaction directory remains reachable at its observed workspace path.
     assertWorkspaceTokenDirectoryBinding(
       workspaceRoot,
       workspaceDescriptor,
@@ -882,20 +1220,41 @@ function publishGeneratedLocalToken(input: {
     );
     const publishedToken = readExistingLocalTokenWithRetry(secretsDescriptor);
     if (publishedToken !== token) throw unsafeLocalTokenStorageError();
+    cleanupLocalTokenTransactionControlArtifacts(
+      secretsDescriptor,
+      markerName,
+      leaseName
+    );
+    markerName = undefined;
+    leaseExists = false;
     return publishedToken;
   } catch (error) {
-    if (published && publishedObservation) {
-      rollbackPublishedLocalTokenIfExact(secretsDescriptor, publishedObservation);
+    if (published && markerName === publishingMarkerName) {
+      rollbackPublishedLocalTokenTransaction({
+        secretsDescriptor,
+        transactionId,
+        digest,
+        publishingMarkerName,
+        rollbackMarkerName,
+        leaseName,
+        hookForTest
+      });
+      markerName = undefined;
+      leaseExists = false;
     }
     if (temporaryExists) {
-      if (syscallUnlinkAt(secretsDescriptor, temporaryName) === 0) {
-        try {
-          fsyncSync(secretsDescriptor);
-        } catch {
-          // The caller still fails closed after cleanup durability uncertainty.
-        }
-      }
+      unlinkLocalTokenTransactionArtifact(secretsDescriptor, temporaryName);
+      temporaryExists = false;
     }
+    if (markerName !== undefined) {
+      unlinkLocalTokenTransactionArtifact(secretsDescriptor, markerName);
+      markerName = undefined;
+    }
+    if (leaseExists) {
+      unlinkLocalTokenTransactionArtifact(secretsDescriptor, leaseName);
+      leaseExists = false;
+    }
+    fsyncSync(secretsDescriptor);
     throw error;
   } finally {
     try {
@@ -903,6 +1262,12 @@ function publishGeneratedLocalToken(input: {
     } catch {
       // The descriptor has no namespace authority after cleanup/rollback.
     }
+    try {
+      closeSync(leaseDescriptor);
+    } catch {
+      // The directory descriptor remains the kernel lease owner until provisioning exits.
+    }
+    activeLocalTokenTransactionIds.delete(transactionId);
   }
 }
 
@@ -913,61 +1278,215 @@ function invokeLocalTokenPublicationHookForTest(
   hook?.(Object.freeze({ stage }));
 }
 
-function rollbackPublishedLocalTokenIfExact(
-  secretsDescriptor: number,
-  publishedObservation: BigIntStats
-): void {
-  const rollbackName = `.local-token-rollback-${process.pid}-${randomUUID()}.tmp`;
+function rollbackPublishedLocalTokenTransaction(input: {
+  secretsDescriptor: number;
+  transactionId: string;
+  digest: string;
+  publishingMarkerName: string;
+  rollbackMarkerName: string;
+  leaseName: string;
+  hookForTest?: LocalTokenPublicationStageHookForTest;
+}): void {
+  const {
+    secretsDescriptor,
+    transactionId,
+    digest,
+    publishingMarkerName,
+    rollbackMarkerName,
+    leaseName,
+    hookForTest
+  } = input;
+  const candidateName = localTokenTransactionCandidateName(transactionId);
+
+  // Arm durable recovery before moving the canonical name. If this process dies
+  // after the following fsync, startup can distinguish and finish own-generation
+  // deletion or foreign-generation restoration from the digest-bearing marker.
+  if (syscallRenameAtNoReplace(
+    secretsDescriptor,
+    publishingMarkerName,
+    secretsDescriptor,
+    rollbackMarkerName
+  ) !== 0) {
+    throw unsafeLocalTokenStorageError();
+  }
+  fsyncSync(secretsDescriptor);
+  invokeLocalTokenPublicationHookForTest(hookForTest, "after_rollback_armed");
+
   if (syscallRenameAtNoReplace(
     secretsDescriptor,
     LOCAL_TOKEN_FILE,
     secretsDescriptor,
-    rollbackName
-  ) !== 0) return;
+    candidateName
+  ) !== 0) {
+    const canonicalDigest = readLocalTokenDigestAt(secretsDescriptor, LOCAL_TOKEN_FILE);
+    if (canonicalDigest === undefined || canonicalDigest === digest) {
+      // Absence cannot be distinguished from an unsafe/unopenable binding after a
+      // failed rename, so retain the durable marker for fail-closed recovery.
+      throw unsafeLocalTokenStorageError();
+    }
+    cleanupLocalTokenTransactionControlArtifacts(
+      secretsDescriptor,
+      rollbackMarkerName,
+      leaseName
+    );
+    return;
+  }
+  fsyncSync(secretsDescriptor);
+  invokeLocalTokenPublicationHookForTest(hookForTest, "after_rollback_move");
 
-  const reboundDescriptor = syscallOpenAt(
+  const candidateDigest = requireLocalTokenDigestAt(secretsDescriptor, candidateName);
+  if (candidateDigest === digest) {
+    invokeLocalTokenPublicationHookForTest(hookForTest, "before_rollback_candidate_cleanup");
+    unlinkLocalTokenTransactionArtifact(secretsDescriptor, candidateName);
+  } else {
+    invokeLocalTokenPublicationHookForTest(hookForTest, "before_rollback_restore");
+    if (syscallRenameAtNoReplace(
+      secretsDescriptor,
+      candidateName,
+      secretsDescriptor,
+      LOCAL_TOKEN_FILE
+    ) !== 0) {
+      // Never silently strand or delete a foreign generation. The durable rollback
+      // marker remains for startup adjudication; an uncooperative writer that also
+      // installs a second canonical generation is outside the serializable protocol.
+      throw unsafeLocalTokenStorageError();
+    }
+    fsyncSync(secretsDescriptor);
+    invokeLocalTokenPublicationHookForTest(hookForTest, "after_rollback_restore");
+  }
+  cleanupLocalTokenTransactionControlArtifacts(
     secretsDescriptor,
-    rollbackName,
-    LOCAL_TOKEN_READ_OPEN_FLAGS
+    rollbackMarkerName,
+    leaseName
   );
-  if (reboundDescriptor < 0) {
-    restoreRollbackCandidate(secretsDescriptor, rollbackName);
-    return;
-  }
-  let exactGeneration = false;
+}
+
+function createLocalTokenTransactionMarker(
+  secretsDescriptor: number,
+  markerName: string
+): void {
+  const markerDescriptor = syscallOpenAt(
+    secretsDescriptor,
+    markerName,
+    LOCAL_TOKEN_CREATE_OPEN_FLAGS,
+    0o600
+  );
+  if (markerDescriptor < 0) throw unsafeLocalTokenStorageError();
+  let valid = false;
   try {
-    const reboundObservation = fstatSync(reboundDescriptor, { bigint: true });
-    exactGeneration = sameFilesystemIdentity(publishedObservation, reboundObservation);
-  } catch {
-    exactGeneration = false;
+    fchmodSync(markerDescriptor, 0o600);
+    assertLocalTokenTransactionControlFile(markerDescriptor);
+    fsyncSync(markerDescriptor);
+    valid = true;
   } finally {
-    closeSync(reboundDescriptor);
-  }
-  if (!exactGeneration) {
-    restoreRollbackCandidate(secretsDescriptor, rollbackName);
-    return;
-  }
-  if (syscallUnlinkAt(secretsDescriptor, rollbackName) === 0) {
-    try {
+    closeSync(markerDescriptor);
+    if (!valid && syscallUnlinkAt(secretsDescriptor, markerName) === 0) {
       fsyncSync(secretsDescriptor);
-    } catch {
-      // The exact generation is already absent; durability failure remains fail-closed.
     }
   }
 }
 
-function restoreRollbackCandidate(secretsDescriptor: number, rollbackName: string): void {
-  if (syscallRenameAtNoReplace(
+function createLocalTokenTransactionLeaseFile(
+  secretsDescriptor: number,
+  leaseName: string
+): number {
+  const descriptor = syscallOpenAt(
     secretsDescriptor,
-    rollbackName,
-    secretsDescriptor,
-    LOCAL_TOKEN_FILE
-  ) !== 0) return;
+    leaseName,
+    LOCAL_TOKEN_LEASE_CREATE_FLAGS,
+    0o600
+  );
+  if (descriptor < 0) throw unsafeLocalTokenStorageError();
+  let valid = false;
   try {
-    fsyncSync(secretsDescriptor);
-  } catch {
-    // The foreign generation is restored; durability uncertainty remains fail-closed.
+    fchmodSync(descriptor, 0o600);
+    assertLocalTokenTransactionControlFile(descriptor);
+    valid = true;
+    return descriptor;
+  } finally {
+    if (!valid) {
+      syscallUnlinkAt(secretsDescriptor, leaseName);
+      closeSync(descriptor);
+    }
   }
+}
+
+function acquireLocalTokenPublicationLease(secretsDescriptor: number): string {
+  const observation = fstatSync(secretsDescriptor, { bigint: true });
+  const leaseKey = `${observation.dev}:${observation.ino}`;
+  const existingDepth = localTokenPublicationLeaseDepthByDirectory.get(leaseKey);
+  if (existingDepth !== undefined) {
+    localTokenPublicationLeaseDepthByDirectory.set(leaseKey, existingDepth + 1);
+    return leaseKey;
+  }
+
+  const waitCell = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  const deadline = Date.now() + LOCAL_TOKEN_PUBLICATION_LEASE_WAIT_MS;
+  do {
+    if (syscallFlock(
+      secretsDescriptor,
+      LOCAL_TOKEN_FLOCK_EXCLUSIVE | LOCAL_TOKEN_FLOCK_NONBLOCKING
+    ) === 0) {
+      localTokenPublicationLeaseDepthByDirectory.set(leaseKey, 1);
+      return leaseKey;
+    }
+    Atomics.wait(waitCell, 0, 0, 1);
+  } while (Date.now() < deadline);
+
+  // The directory descriptor is the cross-process publisher-instance lease. flock
+  // is released by the kernel at process exit on macOS and Linux; repeated refusal
+  // means either a truly active publisher or an unsupported/erroring filesystem,
+  // both of which fail closed without touching transaction artifacts.
+  throw unsafeLocalTokenStorageError();
+}
+
+function releaseLocalTokenPublicationLease(leaseKey: string | undefined): void {
+  if (leaseKey === undefined) return;
+  const depth = localTokenPublicationLeaseDepthByDirectory.get(leaseKey);
+  if (depth === undefined) return;
+  if (depth === 1) {
+    localTokenPublicationLeaseDepthByDirectory.delete(leaseKey);
+  } else {
+    localTokenPublicationLeaseDepthByDirectory.set(leaseKey, depth - 1);
+  }
+}
+
+function cleanupLocalTokenTransactionControlArtifacts(
+  secretsDescriptor: number,
+  markerName: string | undefined,
+  leaseName: string
+): void {
+  if (markerName !== undefined) {
+    unlinkLocalTokenTransactionArtifact(secretsDescriptor, markerName);
+  }
+  unlinkLocalTokenTransactionArtifact(secretsDescriptor, leaseName);
+  fsyncSync(secretsDescriptor);
+}
+
+function localTokenTransactionLeaseName(transactionId: string): string {
+  return `.local-token-transaction-${transactionId}.lease`;
+}
+
+function localTokenTransactionStagedName(transactionId: string): string {
+  return `.local-token-transaction-${transactionId}.staged`;
+}
+
+function localTokenTransactionCandidateName(transactionId: string): string {
+  return `.local-token-transaction-${transactionId}.candidate`;
+}
+
+function localTokenTransactionPublishingMarkerName(
+  transactionId: string,
+  digest: string
+): string {
+  return `.local-token-transaction-${transactionId}-${digest}.publishing`;
+}
+
+function localTokenTransactionRollbackMarkerName(
+  transactionId: string,
+  digest: string
+): string {
+  return `.local-token-transaction-${transactionId}-${digest}.rolling-back`;
 }
 
 function readExistingLocalTokenWithRetry(secretsDescriptor: number): string | undefined {
@@ -986,7 +1505,8 @@ function readExistingLocalTokenWithRetry(secretsDescriptor: number): string | un
 
 function readAndValidateLocalTokenDescriptor(
   descriptor: number,
-  secretsDescriptor: number
+  secretsDescriptor: number,
+  boundName = LOCAL_TOKEN_FILE
 ): LocalTokenDescriptorRead {
   const before = fstatSync(descriptor, { bigint: true });
   assertTokenFileStat(before);
@@ -1011,7 +1531,7 @@ function readAndValidateLocalTokenDescriptor(
 
   const reboundDescriptor = syscallOpenAt(
     secretsDescriptor,
-    LOCAL_TOKEN_FILE,
+    boundName,
     LOCAL_TOKEN_READ_OPEN_FLAGS
   );
   if (reboundDescriptor < 0) throw unsafeLocalTokenStorageError();
@@ -1149,6 +1669,7 @@ function closeDescriptorIfOwned(descriptor: number | undefined): void {
 
 interface LocalTokenFilesystemSyscalls {
   openAt(parentDescriptor: number, path: Buffer, flags: number, mode?: number): number;
+  flock(descriptor: number, operation: number): number;
   mkdirAt(parentDescriptor: number, path: Buffer, mode: number): number;
   renameAtNoReplace(
     oldParentDescriptor: number,
@@ -1165,6 +1686,7 @@ function getLocalTokenFilesystemSyscalls(): LocalTokenFilesystemSyscalls {
   if (localTokenFilesystemSyscalls) return localTokenFilesystemSyscalls;
   const baseSymbols = {
     openat: { args: ["i32", "cstring", "i32", "i32"], returns: "i32" },
+    flock: { args: ["i32", "i32"], returns: "i32" },
     mkdirat: { args: ["i32", "cstring", "i32"], returns: "i32" },
     unlinkat: { args: ["i32", "cstring", "i32"], returns: "i32" }
   } as const;
@@ -1179,6 +1701,7 @@ function getLocalTokenFilesystemSyscalls(): LocalTokenFilesystemSyscalls {
     const library = dlopen("/usr/lib/libSystem.B.dylib", symbols);
     localTokenFilesystemSyscalls = {
       openAt: library.symbols.openat,
+      flock: library.symbols.flock,
       mkdirAt: library.symbols.mkdirat,
       renameAtNoReplace: (oldParentDescriptor, oldPath, newParentDescriptor, newPath) =>
         library.symbols.renameatx_np(
@@ -1203,6 +1726,7 @@ function getLocalTokenFilesystemSyscalls(): LocalTokenFilesystemSyscalls {
     const library = dlopen("libc.so.6", symbols);
     localTokenFilesystemSyscalls = {
       openAt: library.symbols.openat,
+      flock: library.symbols.flock,
       mkdirAt: library.symbols.mkdirat,
       renameAtNoReplace: (oldParentDescriptor, oldPath, newParentDescriptor, newPath) =>
         library.symbols.renameat2(
@@ -1217,6 +1741,10 @@ function getLocalTokenFilesystemSyscalls(): LocalTokenFilesystemSyscalls {
     return localTokenFilesystemSyscalls;
   }
   throw unsafeLocalTokenStorageError();
+}
+
+function syscallFlock(descriptor: number, operation: number): number {
+  return getLocalTokenFilesystemSyscalls().flock(descriptor, operation);
 }
 
 function syscallOpenAt(parentDescriptor: number, path: string, flags: number, mode = 0): number {

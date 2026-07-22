@@ -89,6 +89,9 @@ const originalHarnessLocalToken = process.env.HARNESS_LOCAL_TOKEN;
 const LOCAL_TEST_TOKEN = "e2e-local-token-001";
 const TASK_HYDRATION_ENTRY_LIMIT = 1024;
 const IN_FLIGHT_TASK_CREATE_LIMIT = 1024;
+// Ten serialized child probes retain their own 2s deadline; the suite deadline
+// also leaves bounded room for process startup and filesystem cleanup on CI.
+const UNSAFE_TOKEN_MATRIX_TEST_TIMEOUT_MS = 30_000;
 const INVALID_DURABLE_TASK_AUTHORITY_MESSAGE =
   "Completed task idempotency authority is invalid and was quarantined.";
 const execFile = promisify(execFileWithCallback);
@@ -856,7 +859,7 @@ describe("backend workspace and health routes", () => {
       const retryToken = await readFile(join(workspaceRoot, "secrets", "local-token"), "utf8");
       expect((await requestWithToken(retryApp, "/api/tasks", retryToken)).status).toBe(200);
       expect((await lstat(join(workspaceRoot, "secrets", "local-token"))).nlink).toBe(1);
-      expect((await readdir(join(workspaceRoot, "secrets"))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+      expect(await readdir(join(workspaceRoot, "secrets"))).toEqual(["local-token"]);
     }
   });
 
@@ -881,7 +884,8 @@ describe("backend workspace and health routes", () => {
     expect(swapped).toBe(true);
     await expectPathMissing(join(parkedWorkspace, "secrets", "local-token"));
     await expectPathMissing(join(workspaceRoot, "secrets", "local-token"));
-    expect((await readdir(join(parkedWorkspace, "secrets"))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(await readdir(join(parkedWorkspace, "secrets"))).toEqual([]);
+    expect(await readdir(join(workspaceRoot, "secrets"))).toEqual([]);
   });
 
   test("publication collision cleanup preserves the winning authority and supports retry", async () => {
@@ -908,7 +912,7 @@ describe("backend workspace and health routes", () => {
     )).toThrow("Local API token storage is unsafe");
 
     expect(collisionCleanupReached).toBe(true);
-    expect((await readdir(join(workspaceRoot, "secrets"))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(await readdir(join(workspaceRoot, "secrets"))).toEqual(["local-token"]);
     expect(await readFile(join(workspaceRoot, "secrets", "local-token"), "utf8")).toBe(winnerToken);
     const retryApp = createBackendApi({ workspaceRoot });
     expect((await requestWithToken(retryApp, "/api/tasks", winnerToken)).status).toBe(200);
@@ -937,7 +941,7 @@ describe("backend workspace and health routes", () => {
 
     expect(replaced).toBe(true);
     expect(await readFile(join(workspaceRoot, "secrets", "local-token"), "utf8")).toBe(successorToken);
-    expect((await readdir(join(workspaceRoot, "secrets"))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(await readdir(join(workspaceRoot, "secrets"))).toEqual(["local-token"]);
     const retryApp = createBackendApi({ workspaceRoot });
     expect((await requestWithToken(retryApp, "/api/tasks", successorToken)).status).toBe(200);
   });
@@ -964,9 +968,12 @@ describe("backend workspace and health routes", () => {
     const tokenPath = join(workspaceRoot, "secrets", "local-token");
     const token = await readFile(tokenPath, "utf8");
     expect((await lstat(tokenPath)).nlink).toBe(1);
-    expect((await readdir(join(workspaceRoot, "secrets"))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    const interruptedEntries = await readdir(join(workspaceRoot, "secrets"));
+    expect(interruptedEntries.some((name) => name.endsWith(".publishing"))).toBe(true);
+    expect(interruptedEntries.some((name) => name.endsWith(".lease"))).toBe(true);
     const retryApp = createBackendApi({ workspaceRoot });
     expect((await requestWithToken(retryApp, "/api/tasks", token)).status).toBe(200);
+    expect(await readdir(join(workspaceRoot, "secrets"))).toEqual(["local-token"]);
   });
 
   test("publisher interruption before publish removes the orphan temp on retry", async () => {
@@ -989,11 +996,229 @@ describe("backend workspace and health routes", () => {
     })).rejects.toBeDefined();
 
     const secretsRoot = join(workspaceRoot, "secrets");
-    expect((await readdir(secretsRoot)).filter((name) => name.endsWith(".tmp"))).toHaveLength(1);
+    const interruptedEntries = await readdir(secretsRoot);
+    expect(interruptedEntries.filter((name) => name.endsWith(".staged"))).toHaveLength(1);
+    expect(interruptedEntries.filter((name) => name.endsWith(".lease"))).toHaveLength(1);
     await expectPathMissing(join(secretsRoot, "local-token"));
     const retryApp = createBackendApi({ workspaceRoot });
     const retryToken = await readFile(join(secretsRoot, "local-token"), "utf8");
     expect((await requestWithToken(retryApp, "/api/tasks", retryToken)).status).toBe(200);
+    expect(await readdir(secretsRoot)).toEqual(["local-token"]);
+  });
+
+  test("publisher interruption during exact rollback is recovered without secret residue", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const backendIndexUrl = new URL("./index.ts", import.meta.url).href;
+    const testSupportUrl = new URL("./local-auth-publication-test-support.ts", import.meta.url).href;
+    const childScript = [
+      `import { createBackendApi } from ${JSON.stringify(backendIndexUrl)};`,
+      `import { runWithLocalTokenPublicationStageHookForTest } from ${JSON.stringify(testSupportUrl)};`,
+      "runWithLocalTokenPublicationStageHookForTest(({ stage }) => {",
+      '    if ((stage as string) === "before_post_publish_binding") throw new Error("fault:rollback");',
+      '    if ((stage as string) === "after_rollback_move") process.kill(process.pid, "SIGKILL");',
+      `  }, () => createBackendApi({ workspaceRoot: ${JSON.stringify(workspaceRoot)} }));`
+    ].join("\n");
+
+    let childSignal: unknown;
+    try {
+      await execFile(process.execPath, ["-e", childScript], {
+        env: { ...process.env, HARNESS_LOCAL_TOKEN: "" },
+        timeout: 2_000
+      });
+    } catch (error) {
+      childSignal = typeof error === "object" && error !== null
+        ? Reflect.get(error, "signal")
+        : undefined;
+    }
+    expect(childSignal).toBe("SIGKILL");
+
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const interruptedEntries = await readdir(secretsRoot);
+    const interruptedLease = interruptedEntries.find((name) => name.endsWith(".lease"));
+    expect(interruptedEntries.some((name) => name.endsWith(".candidate"))).toBe(true);
+    expect(interruptedEntries.some((name) => name.endsWith(".rolling-back"))).toBe(true);
+    expect(interruptedLease).toBeDefined();
+    // A directory crash may durably persist the lease unlink before the phase
+    // marker unlink. Recovery ownership comes from the directory flock, so the
+    // remaining durable phase/candidate pair must still converge.
+    await unlink(join(secretsRoot, interruptedLease as string));
+    const retryApp = createBackendApi({ workspaceRoot });
+    const retryToken = await readFile(join(secretsRoot, "local-token"), "utf8");
+    const tokenEntry = await lstat(join(secretsRoot, "local-token"));
+    expect((await requestWithToken(retryApp, "/api/tasks", retryToken)).status).toBe(200);
+    expect(tokenEntry.mode & 0o777).toBe(0o600);
+    expect(tokenEntry.nlink).toBe(1);
+    expect(await readdir(secretsRoot)).toEqual(["local-token"]);
+  });
+
+  test("rollback crash restores a displaced foreign canonical generation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const successorToken = "foreign-successor-survives-rollback-crash";
+    const backendIndexUrl = new URL("./index.ts", import.meta.url).href;
+    const testSupportUrl = new URL("./local-auth-publication-test-support.ts", import.meta.url).href;
+    const childScript = [
+      'import { renameSync, unlinkSync, writeFileSync } from "node:fs";',
+      'import { join } from "node:path";',
+      `import { createBackendApi } from ${JSON.stringify(backendIndexUrl)};`,
+      `import { runWithLocalTokenPublicationStageHookForTest } from ${JSON.stringify(testSupportUrl)};`,
+      `const workspaceRoot = ${JSON.stringify(workspaceRoot)};`,
+      `const successorToken = ${JSON.stringify(successorToken)};`,
+      "runWithLocalTokenPublicationStageHookForTest(({ stage }) => {",
+      '    if ((stage as string) === "before_post_publish_binding") {',
+      '      const tokenPath = join(workspaceRoot, "secrets", "local-token");',
+      '      const displacedPath = join(workspaceRoot, "secrets", "displaced-own-generation");',
+      "      renameSync(tokenPath, displacedPath);",
+      "      unlinkSync(displacedPath);",
+      "      writeFileSync(tokenPath, successorToken, { flag: \"wx\", mode: 0o600 });",
+      '      throw new Error("fault:foreign-successor");',
+      "    }",
+      '    if ((stage as string) === "after_rollback_move") process.kill(process.pid, "SIGKILL");',
+      "  }, () => createBackendApi({ workspaceRoot }));"
+    ].join("\n");
+
+    let childSignal: unknown;
+    try {
+      await execFile(process.execPath, ["-e", childScript], {
+        env: { ...process.env, HARNESS_LOCAL_TOKEN: "" },
+        timeout: 2_000
+      });
+    } catch (error) {
+      childSignal = typeof error === "object" && error !== null
+        ? Reflect.get(error, "signal")
+        : undefined;
+    }
+    expect(childSignal).toBe("SIGKILL");
+
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const retryApp = createBackendApi({ workspaceRoot });
+    const tokenEntry = await lstat(join(secretsRoot, "local-token"));
+    expect(await readFile(join(secretsRoot, "local-token"), "utf8")).toBe(successorToken);
+    expect((await requestWithToken(retryApp, "/api/tasks", successorToken)).status).toBe(200);
+    expect(tokenEntry.mode & 0o777).toBe(0o600);
+    expect(tokenEntry.nlink).toBe(1);
+    expect(await readdir(secretsRoot)).toEqual(["local-token"]);
+  });
+
+  test("rollback with two uncoordinated foreign successors fails closed without deleting either", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const displacedSuccessor = "foreign-successor-held-in-rollback";
+    const laterSuccessor = "foreign-successor-at-canonical-name";
+    let installedDisplacedSuccessor = false;
+    let installedLaterSuccessor = false;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage }) => {
+        const tokenPath = join(workspaceRoot, "secrets", "local-token");
+        if (stage === "before_post_publish_binding" && !installedDisplacedSuccessor) {
+          installedDisplacedSuccessor = true;
+          const displacedOwn = join(workspaceRoot, "secrets", "displaced-own-generation");
+          renameSync(tokenPath, displacedOwn);
+          unlinkSync(displacedOwn);
+          writeFileSync(tokenPath, displacedSuccessor, { flag: "wx", mode: 0o600 });
+          throw new Error("fault:first-foreign-successor");
+        }
+        if (stage === "before_rollback_restore" && !installedLaterSuccessor) {
+          installedLaterSuccessor = true;
+          writeFileSync(tokenPath, laterSuccessor, { flag: "wx", mode: 0o600 });
+        }
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const interruptedEntries = await readdir(secretsRoot);
+    const candidateName = interruptedEntries.find((name) => name.endsWith(".candidate"));
+    expect(installedDisplacedSuccessor).toBe(true);
+    expect(installedLaterSuccessor).toBe(true);
+    expect(candidateName).toBeDefined();
+    expect(await readFile(join(secretsRoot, "local-token"), "utf8")).toBe(laterSuccessor);
+    expect(await readFile(join(secretsRoot, candidateName as string), "utf8")).toBe(
+      displacedSuccessor
+    );
+    expect(interruptedEntries.some((name) => name.endsWith(".rolling-back"))).toBe(true);
+
+    expect(() => createBackendApi({ workspaceRoot })).toThrow(
+      "Local API token storage is unsafe"
+    );
+    expect(await readFile(join(secretsRoot, "local-token"), "utf8")).toBe(laterSuccessor);
+    expect(await readFile(join(secretsRoot, candidateName as string), "utf8")).toBe(
+      displacedSuccessor
+    );
+  });
+
+  test("a stale legacy artifact is cleaned even when its PID belongs to an unrelated live process", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const staleName = `.local-token-${process.pid}-00000000-0000-4000-8000-000000000000.tmp`;
+    await mkdir(secretsRoot, { recursive: true, mode: 0o700 });
+    await chmod(secretsRoot, 0o700);
+    await writeFile(join(secretsRoot, staleName), "stale-publisher-token", {
+      flag: "wx",
+      mode: 0o600
+    });
+
+    const app = createBackendApi({ workspaceRoot });
+    const token = await readFile(join(secretsRoot, "local-token"), "utf8");
+    expect((await requestWithToken(app, "/api/tasks", token)).status).toBe(200);
+    expect(await readdir(secretsRoot)).toEqual(["local-token"]);
+  });
+
+  test("recovery preserves a kernel-leased live publisher and concurrent startup converges", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const readyPath = join(tempRoot, "publisher-ready");
+    const releasePath = join(tempRoot, "publisher-release");
+    const backendIndexUrl = new URL("./index.ts", import.meta.url).href;
+    const testSupportUrl = new URL("./local-auth-publication-test-support.ts", import.meta.url).href;
+    const childScript = [
+      'import { existsSync, writeFileSync } from "node:fs";',
+      `import { createBackendApi } from ${JSON.stringify(backendIndexUrl)};`,
+      `import { runWithLocalTokenPublicationStageHookForTest } from ${JSON.stringify(testSupportUrl)};`,
+      "const waitCell = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));",
+      "runWithLocalTokenPublicationStageHookForTest(({ stage }) => {",
+      '    if (stage !== "after_file_fsync") return;',
+      `    writeFileSync(${JSON.stringify(readyPath)}, "ready", { flag: "wx" });`,
+      `    const deadline = Date.now() + 800; while (!existsSync(${JSON.stringify(releasePath)}) && Date.now() < deadline) Atomics.wait(waitCell, 0, 0, 5);`,
+      `  }, () => createBackendApi({ workspaceRoot: ${JSON.stringify(workspaceRoot)} }));`
+    ].join("\n");
+    const child = execFile(process.execPath, ["-e", childScript], {
+      env: { ...process.env, HARNESS_LOCAL_TOKEN: "" },
+      timeout: 2_000
+    });
+    let concurrentApp: ReturnType<typeof createBackendApi> | undefined;
+    try {
+      await waitFor(() => {
+        try {
+          return lstatSync(readyPath).isFile();
+        } catch {
+          return false;
+        }
+      }, "live token publisher did not reach its durable staged generation");
+      const activeEntries = await readdir(join(workspaceRoot, "secrets"));
+      expect(activeEntries.some((name) => name.endsWith(".lease"))).toBe(true);
+
+      concurrentApp = createBackendApi({ workspaceRoot });
+    } finally {
+      try {
+        await writeFile(releasePath, "release", { flag: "w" });
+      } finally {
+        await child;
+      }
+    }
+    if (!concurrentApp) throw new Error("Concurrent token startup did not complete.");
+
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const token = await readFile(join(secretsRoot, "local-token"), "utf8");
+    expect((await requestWithToken(concurrentApp, "/api/tasks", token)).status).toBe(200);
     expect(await readdir(secretsRoot)).toEqual(["local-token"]);
   });
 
@@ -1209,7 +1434,7 @@ describe("backend workspace and health routes", () => {
       await chmod(join(workspaceRoot, "secrets"), 0o700).catch(() => undefined);
       expect((await readdir(join(workspaceRoot, "secrets"))).some((name) => name.endsWith(".tmp"))).toBe(false);
     }
-  });
+  }, UNSAFE_TOKEN_MATRIX_TEST_TIMEOUT_MS);
 
   test("symlink ancestors and a swapped parent binding cannot redirect token creation", async () => {
     const tempRoot = await createTempRoot("shud-harness-auth-parent-");
