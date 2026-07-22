@@ -1,4 +1,4 @@
-import { dlopen, read as ffiRead, toBuffer, type Pointer } from "bun:ffi";
+import { dlopen, ptr, read as ffiRead, toBuffer, type Pointer } from "bun:ffi";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   closeSync,
@@ -57,7 +57,9 @@ import {
   type ApiRequestLogSink
 } from "../middleware";
 import {
+  currentLocalTokenDirectoryEntryReplayForTest,
   currentLocalTokenPublicationStageHookForTest,
+  type LocalTokenDirectoryBoundaryForTest,
   type LocalTokenPublicationStageForTest,
   type LocalTokenPublicationStageHookForTest
 } from "./local-auth-publication-test-support";
@@ -222,6 +224,16 @@ interface LocalTokenDescriptorRead {
 interface LocalTokenPhysicalIdentity {
   readonly dev: bigint;
   readonly ino: bigint;
+}
+
+interface OwnedLocalTokenControlArtifact {
+  readonly name: string;
+  readonly identity: LocalTokenPhysicalIdentity;
+}
+
+interface CreatedLocalTokenLease {
+  readonly descriptor: number;
+  readonly control: OwnedLocalTokenControlArtifact;
 }
 
 export interface WorkspaceInitResponse {
@@ -621,7 +633,11 @@ function recoverInterruptedLocalTokenPublication(
   const transactions = collectLocalTokenTransactions(names);
   for (const transaction of transactions.values()) {
     if (activeLocalTokenTransactionIds.has(transaction.id)) continue;
-    if (recoverLocalTokenTransaction(secretsDescriptor, transaction)) {
+    if (recoverLocalTokenTransaction(
+      secretsDescriptor,
+      transaction,
+      hookForTest
+    )) {
       directoryMutated = true;
     }
   }
@@ -692,6 +708,7 @@ function readLocalTokenDirectoryNames(
   hookForTest?: LocalTokenPublicationStageHookForTest
 ): string[] {
   const syscalls = getLocalTokenFilesystemSyscalls();
+  const replayForTest = currentLocalTokenDirectoryEntryReplayForTest();
   const streamDescriptor = syscallOpenAt(
     secretsDescriptor,
     ".",
@@ -706,30 +723,79 @@ function readLocalTokenDirectoryNames(
 
   const names: string[] = [];
   const decodedNames = new Set<string>();
+  let maxNameBytes = 0;
   let failure: unknown;
   try {
     invokeLocalTokenPublicationHookForTest(hookForTest, "before_recovery_directory_read");
-    for (;;) {
-      const errnoPointer = syscalls.errnoPointer();
-      syscalls.clearErrno(errnoPointer);
-      const entry = syscalls.readDirectoryEntry(stream);
-      if (entry === null) {
-        if (ffiRead.i32(errnoPointer) !== 0) throw unsafeLocalTokenStorageError();
-        break;
+    const acceptEntry = (entry: Pointer, layout: "darwin" | "linux"): void => {
+      let name: string;
+      try {
+        name = decodeLocalTokenDirectoryEntryName(entry, layout);
+      } catch (error) {
+        invokeLocalTokenDirectoryBoundaryRejectionForTest(
+          hookForTest,
+          "decode",
+          names.length,
+          maxNameBytes
+        );
+        throw error;
       }
-      const name = decodeLocalTokenDirectoryEntryName(entry);
-      if (name === "." || name === "..") continue;
-      if (
-        Buffer.byteLength(name, "utf8") > LOCAL_TOKEN_DIRECTORY_NAME_MAX_BYTES ||
-        decodedNames.has(name) ||
-        names.length >= LOCAL_TOKEN_DIRECTORY_ENTRY_LIMIT
-      ) {
+      if (name === "." || name === "..") return;
+      const nameBytes = Buffer.byteLength(name, "utf8");
+      if (nameBytes > LOCAL_TOKEN_DIRECTORY_NAME_MAX_BYTES) {
+        invokeLocalTokenDirectoryBoundaryRejectionForTest(
+          hookForTest,
+          "name_bytes",
+          names.length,
+          Math.max(maxNameBytes, nameBytes)
+        );
+        throw unsafeLocalTokenStorageError();
+      }
+      if (decodedNames.has(name)) {
+        invokeLocalTokenDirectoryBoundaryRejectionForTest(
+          hookForTest,
+          "duplicate_decoded_name",
+          names.length,
+          Math.max(maxNameBytes, nameBytes)
+        );
+        throw unsafeLocalTokenStorageError();
+      }
+      if (names.length >= LOCAL_TOKEN_DIRECTORY_ENTRY_LIMIT) {
+        invokeLocalTokenDirectoryBoundaryRejectionForTest(
+          hookForTest,
+          "entry_limit",
+          names.length,
+          Math.max(maxNameBytes, nameBytes)
+        );
         throw unsafeLocalTokenStorageError();
       }
       decodedNames.add(name);
       names.push(name);
+      maxNameBytes = Math.max(maxNameBytes, nameBytes);
+    };
+
+    if (replayForTest) {
+      for (const record of replayForTest.records) {
+        acceptEntry(ptr(record), replayForTest.layout);
+      }
+    } else {
+      for (;;) {
+        const errnoPointer = syscalls.errnoPointer();
+        syscalls.clearErrno(errnoPointer);
+        const entry = syscalls.readDirectoryEntry(stream);
+        if (entry === null) {
+          if (ffiRead.i32(errnoPointer) !== 0) throw unsafeLocalTokenStorageError();
+          break;
+        }
+        acceptEntry(entry, process.platform === "darwin" ? "darwin" : "linux");
+      }
     }
-    invokeLocalTokenPublicationHookForTest(hookForTest, "after_recovery_directory_read");
+    invokeLocalTokenPublicationHookForTest(
+      hookForTest,
+      "after_recovery_directory_read",
+      undefined,
+      { entryCount: names.length, maxNameBytes }
+    );
   } catch (error) {
     failure = error;
   }
@@ -740,9 +806,12 @@ function readLocalTokenDirectoryNames(
   return names;
 }
 
-function decodeLocalTokenDirectoryEntryName(entry: Pointer): string {
+function decodeLocalTokenDirectoryEntryName(
+  entry: Pointer,
+  layout: "darwin" | "linux"
+): string {
   try {
-    if (process.platform === "darwin") {
+    if (layout === "darwin") {
       const nameLength = ffiRead.u16(entry, 18);
       if (
         nameLength === 0 ||
@@ -753,7 +822,7 @@ function decodeLocalTokenDirectoryEntryName(entry: Pointer): string {
       }
       return LOCAL_TOKEN_DIRECTORY_UTF8_DECODER.decode(toBuffer(entry, 21, nameLength));
     }
-    if (process.platform === "linux") {
+    if (layout === "linux") {
       const recordLength = ffiRead.u16(entry, 16);
       if (recordLength <= 19 || recordLength > LOCAL_TOKEN_DIRECTORY_ENTRY_BUFFER_BYTES) {
         throw new Error("invalid Linux directory entry");
@@ -769,6 +838,20 @@ function decodeLocalTokenDirectoryEntryName(entry: Pointer): string {
     throw unsafeLocalTokenStorageError();
   }
   throw unsafeLocalTokenStorageError();
+}
+
+function invokeLocalTokenDirectoryBoundaryRejectionForTest(
+  hookForTest: LocalTokenPublicationStageHookForTest | undefined,
+  boundary: LocalTokenDirectoryBoundaryForTest,
+  entryCount: number,
+  maxNameBytes: number
+): void {
+  invokeLocalTokenPublicationHookForTest(
+    hookForTest,
+    "recovery_directory_boundary_rejected",
+    undefined,
+    { boundary, entryCount, maxNameBytes }
+  );
 }
 
 function localTokenDirectoryContainsName(
@@ -841,14 +924,15 @@ function collectLocalTokenTransactions(
 
 function recoverLocalTokenTransaction(
   secretsDescriptor: number,
-  transaction: LocalTokenTransactionArtifacts
+  transaction: LocalTokenTransactionArtifacts,
+  hookForTest?: LocalTokenPublicationStageHookForTest
 ): boolean {
-  if (transaction.leaseName) {
-    assertLocalTokenTransactionControlArtifact(
+  const leaseControl = transaction.leaseName
+    ? validateLocalTokenTransactionControlArtifact(
       secretsDescriptor,
       transaction.leaseName
-    );
-  }
+    )
+    : undefined;
   if (transaction.publishingMarkerName && transaction.rollbackMarkerName) {
     throw unsafeLocalTokenStorageError();
   }
@@ -865,15 +949,29 @@ function recoverLocalTokenTransaction(
         stagedIdentity
       );
     }
-    if (transaction.leaseName) {
-      unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.leaseName);
+    if (leaseControl) {
+      unlinkOwnedLocalTokenControlArtifact(
+        secretsDescriptor,
+        leaseControl,
+        hookForTest
+      );
     }
     return true;
   }
   if (transaction.rollbackMarkerName) {
-    recoverRollingBackLocalTokenTransaction(secretsDescriptor, transaction);
+    recoverRollingBackLocalTokenTransaction(
+      secretsDescriptor,
+      transaction,
+      leaseControl,
+      hookForTest
+    );
   } else if (transaction.publishingMarkerName) {
-    recoverPublishingLocalTokenTransaction(secretsDescriptor, transaction);
+    recoverPublishingLocalTokenTransaction(
+      secretsDescriptor,
+      transaction,
+      leaseControl,
+      hookForTest
+    );
   } else {
     throw unsafeLocalTokenStorageError();
   }
@@ -882,7 +980,9 @@ function recoverLocalTokenTransaction(
 
 function recoverPublishingLocalTokenTransaction(
   secretsDescriptor: number,
-  transaction: LocalTokenTransactionArtifacts
+  transaction: LocalTokenTransactionArtifacts,
+  leaseControl: OwnedLocalTokenControlArtifact | undefined,
+  hookForTest?: LocalTokenPublicationStageHookForTest
 ): void {
   if (
     !transaction.publishingMarkerName ||
@@ -892,7 +992,7 @@ function recoverPublishingLocalTokenTransaction(
   ) {
     throw unsafeLocalTokenStorageError();
   }
-  assertLocalTokenTransactionControlArtifact(
+  const publishingMarker = validateLocalTokenTransactionControlArtifact(
     secretsDescriptor,
     transaction.publishingMarkerName
   );
@@ -920,15 +1020,25 @@ function recoverPublishingLocalTokenTransaction(
       transaction.generationIdentity
     );
   }
-  unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.publishingMarkerName);
-  if (transaction.leaseName) {
-    unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.leaseName);
+  unlinkOwnedLocalTokenControlArtifact(
+    secretsDescriptor,
+    publishingMarker,
+    hookForTest
+  );
+  if (leaseControl) {
+    unlinkOwnedLocalTokenControlArtifact(
+      secretsDescriptor,
+      leaseControl,
+      hookForTest
+    );
   }
 }
 
 function recoverRollingBackLocalTokenTransaction(
   secretsDescriptor: number,
-  transaction: LocalTokenTransactionArtifacts
+  transaction: LocalTokenTransactionArtifacts,
+  leaseControl: OwnedLocalTokenControlArtifact | undefined,
+  hookForTest?: LocalTokenPublicationStageHookForTest
 ): void {
   if (
     !transaction.rollbackMarkerName ||
@@ -938,7 +1048,7 @@ function recoverRollingBackLocalTokenTransaction(
   ) {
     throw unsafeLocalTokenStorageError();
   }
-  assertLocalTokenTransactionControlArtifact(
+  const rollbackMarker = validateLocalTokenTransactionControlArtifact(
     secretsDescriptor,
     transaction.rollbackMarkerName
   );
@@ -1006,9 +1116,17 @@ function recoverRollingBackLocalTokenTransaction(
     );
   }
 
-  unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.rollbackMarkerName);
-  if (transaction.leaseName) {
-    unlinkLocalTokenTransactionArtifact(secretsDescriptor, transaction.leaseName);
+  unlinkOwnedLocalTokenControlArtifact(
+    secretsDescriptor,
+    rollbackMarker,
+    hookForTest
+  );
+  if (leaseControl) {
+    unlinkOwnedLocalTokenControlArtifact(
+      secretsDescriptor,
+      leaseControl,
+      hookForTest
+    );
   }
 }
 
@@ -1025,10 +1143,10 @@ function assertLocalTokenTransactionControlFile(descriptor: number): void {
   }
 }
 
-function assertLocalTokenTransactionControlArtifact(
+function validateLocalTokenTransactionControlArtifact(
   secretsDescriptor: number,
   name: string
-): void {
+): OwnedLocalTokenControlArtifact {
   const descriptor = syscallOpenAt(secretsDescriptor, name, LOCAL_TOKEN_READ_OPEN_FLAGS);
   if (descriptor < 0) throw unsafeLocalTokenStorageError();
   try {
@@ -1051,18 +1169,59 @@ function assertLocalTokenTransactionControlArtifact(
     } finally {
       closeSync(reboundDescriptor);
     }
+    return ownedLocalTokenControlArtifact(
+      name,
+      physicalIdentityFromObservation(observed)
+    );
   } finally {
     closeSync(descriptor);
   }
 }
 
-function unlinkLocalTokenTransactionArtifact(
+function unlinkOwnedLocalTokenControlArtifact(
   secretsDescriptor: number,
-  name: string
+  control: OwnedLocalTokenControlArtifact,
+  hookForTest?: LocalTokenPublicationStageHookForTest
 ): void {
-  const identity = observeLocalTokenArtifactIdentity(secretsDescriptor, name);
-  if (identity === undefined) throw unsafeLocalTokenStorageError();
-  retireObservedLocalTokenArtifact(secretsDescriptor, name, identity);
+  invokeLocalTokenPublicationHookForTest(
+    hookForTest,
+    localTokenControlCleanupStageForTest(control.name),
+    control.name
+  );
+  retireObservedLocalTokenArtifact(
+    secretsDescriptor,
+    control.name,
+    control.identity
+  );
+}
+
+function localTokenControlCleanupStageForTest(
+  name: string
+): LocalTokenPublicationStageForTest {
+  if (name.endsWith(".publishing")) return "before_publishing_marker_cleanup";
+  if (name.endsWith(".rolling-back")) return "before_rollback_marker_cleanup";
+  if (name.endsWith(".lease")) return "before_lease_cleanup";
+  throw unsafeLocalTokenStorageError();
+}
+
+function ownedLocalTokenControlArtifact(
+  name: string,
+  identity: LocalTokenPhysicalIdentity
+): OwnedLocalTokenControlArtifact {
+  return Object.freeze({ name, identity });
+}
+
+function assertOwnedLocalTokenControlArtifactCurrent(
+  secretsDescriptor: number,
+  expected: OwnedLocalTokenControlArtifact
+): void {
+  const current = validateLocalTokenTransactionControlArtifact(
+    secretsDescriptor,
+    expected.name
+  );
+  if (!sameLocalTokenPhysicalIdentity(current.identity, expected.identity)) {
+    throw unsafeLocalTokenStorageError();
+  }
 }
 
 interface ObservedLocalTokenArtifact extends LocalTokenDescriptorRead {
@@ -1418,10 +1577,11 @@ function publishGeneratedLocalToken(input: {
   const digest = sha256Hex(token);
   const leaseName = localTokenTransactionLeaseName(transactionId);
   const temporaryName = localTokenTransactionStagedName(transactionId);
-  const leaseDescriptor = createLocalTokenTransactionLeaseFile(
+  const lease = createLocalTokenTransactionLeaseFile(
     secretsDescriptor,
     leaseName
   );
+  const leaseDescriptor = lease.descriptor;
   const temporaryDescriptor = syscallOpenAt(
     secretsDescriptor,
     temporaryName,
@@ -1429,7 +1589,11 @@ function publishGeneratedLocalToken(input: {
     0o600
   );
   if (temporaryDescriptor < 0) {
-    unlinkLocalTokenTransactionArtifact(secretsDescriptor, leaseName);
+    unlinkOwnedLocalTokenControlArtifact(
+      secretsDescriptor,
+      lease.control,
+      hookForTest
+    );
     closeSync(leaseDescriptor);
     throw unsafeLocalTokenStorageError();
   }
@@ -1448,7 +1612,7 @@ function publishGeneratedLocalToken(input: {
   );
 
   let temporaryExists = true;
-  let markerName: string | undefined;
+  let markerControl: OwnedLocalTokenControlArtifact | undefined;
   let leaseExists = true;
   let published = false;
   activeLocalTokenTransactionIds.add(transactionId);
@@ -1459,8 +1623,10 @@ function publishGeneratedLocalToken(input: {
     fsyncSync(temporaryDescriptor);
     invokeLocalTokenPublicationHookForTest(hookForTest, "after_file_fsync");
     assertTokenFileStat(fstatSync(temporaryDescriptor, { bigint: true }));
-    createLocalTokenTransactionMarker(secretsDescriptor, publishingMarkerName);
-    markerName = publishingMarkerName;
+    markerControl = createLocalTokenTransactionMarker(
+      secretsDescriptor,
+      publishingMarkerName
+    );
     fsyncSync(secretsDescriptor);
 
     published = syscallRenameAtNoReplace(
@@ -1489,10 +1655,11 @@ function publishGeneratedLocalToken(input: {
       if (racedToken === undefined) throw unsafeLocalTokenStorageError();
       cleanupLocalTokenTransactionControlArtifacts(
         secretsDescriptor,
-        markerName,
-        leaseName
+        markerControl,
+        lease.control,
+        hookForTest
       );
-      markerName = undefined;
+      markerControl = undefined;
       leaseExists = false;
       return racedToken;
     }
@@ -1521,25 +1688,26 @@ function publishGeneratedLocalToken(input: {
     }
     cleanupLocalTokenTransactionControlArtifacts(
       secretsDescriptor,
-      markerName,
-      leaseName
+      markerControl,
+      lease.control,
+      hookForTest
     );
-    markerName = undefined;
+    markerControl = undefined;
     leaseExists = false;
     return publishedObservation.token;
   } catch (error) {
-    if (published && markerName === publishingMarkerName) {
+    if (published && markerControl?.name === publishingMarkerName) {
       rollbackPublishedLocalTokenTransaction({
         secretsDescriptor,
         transactionId,
         digest,
         generationIdentity,
-        publishingMarkerName,
+        publishingMarker: markerControl,
         rollbackMarkerName,
-        leaseName,
+        leaseControl: lease.control,
         hookForTest
       });
-      markerName = undefined;
+      markerControl = undefined;
       leaseExists = false;
     }
     if (temporaryExists) {
@@ -1550,12 +1718,20 @@ function publishGeneratedLocalToken(input: {
       );
       temporaryExists = false;
     }
-    if (markerName !== undefined) {
-      unlinkLocalTokenTransactionArtifact(secretsDescriptor, markerName);
-      markerName = undefined;
+    if (markerControl !== undefined) {
+      unlinkOwnedLocalTokenControlArtifact(
+        secretsDescriptor,
+        markerControl,
+        hookForTest
+      );
+      markerControl = undefined;
     }
     if (leaseExists) {
-      unlinkLocalTokenTransactionArtifact(secretsDescriptor, leaseName);
+      unlinkOwnedLocalTokenControlArtifact(
+        secretsDescriptor,
+        lease.control,
+        hookForTest
+      );
       leaseExists = false;
     }
     fsyncSync(secretsDescriptor);
@@ -1578,9 +1754,14 @@ function publishGeneratedLocalToken(input: {
 function invokeLocalTokenPublicationHookForTest(
   hook: LocalTokenPublicationStageHookForTest | undefined,
   stage: LocalTokenPublicationStageForTest,
-  name?: string
+  name?: string,
+  details: Readonly<{
+    entryCount?: number;
+    maxNameBytes?: number;
+    boundary?: LocalTokenDirectoryBoundaryForTest;
+  }> = {}
 ): void {
-  hook?.(Object.freeze(name === undefined ? { stage } : { stage, name }));
+  hook?.(Object.freeze({ stage, ...(name === undefined ? {} : { name }), ...details }));
 }
 
 function rollbackPublishedLocalTokenTransaction(input: {
@@ -1588,9 +1769,9 @@ function rollbackPublishedLocalTokenTransaction(input: {
   transactionId: string;
   digest: string;
   generationIdentity: LocalTokenPhysicalIdentity;
-  publishingMarkerName: string;
+  publishingMarker: OwnedLocalTokenControlArtifact;
   rollbackMarkerName: string;
-  leaseName: string;
+  leaseControl: OwnedLocalTokenControlArtifact;
   hookForTest?: LocalTokenPublicationStageHookForTest;
 }): void {
   const {
@@ -1598,25 +1779,39 @@ function rollbackPublishedLocalTokenTransaction(input: {
     transactionId,
     digest,
     generationIdentity,
-    publishingMarkerName,
+    publishingMarker,
     rollbackMarkerName,
-    leaseName,
+    leaseControl,
     hookForTest
   } = input;
   const candidateName = localTokenTransactionCandidateName(transactionId);
+  assertOwnedLocalTokenControlArtifactCurrent(
+    secretsDescriptor,
+    publishingMarker
+  );
 
   // Arm durable recovery before moving the canonical name. If this process dies
   // after the following fsync, startup can distinguish and finish own-generation
   // deletion or foreign-generation restoration from the identity-bearing marker.
   if (syscallRenameAtNoReplace(
     secretsDescriptor,
-    publishingMarkerName,
+    publishingMarker.name,
     secretsDescriptor,
     rollbackMarkerName
   ) !== 0) {
     throw unsafeLocalTokenStorageError();
   }
   fsyncSync(secretsDescriptor);
+  const rollbackMarker = validateLocalTokenTransactionControlArtifact(
+    secretsDescriptor,
+    rollbackMarkerName
+  );
+  if (!sameLocalTokenPhysicalIdentity(
+    rollbackMarker.identity,
+    publishingMarker.identity
+  )) {
+    throw unsafeLocalTokenStorageError();
+  }
   invokeLocalTokenPublicationHookForTest(hookForTest, "after_rollback_armed");
 
   if (syscallRenameAtNoReplace(
@@ -1636,8 +1831,9 @@ function rollbackPublishedLocalTokenTransaction(input: {
     }
     cleanupLocalTokenTransactionControlArtifacts(
       secretsDescriptor,
-      rollbackMarkerName,
-      leaseName
+      rollbackMarker,
+      leaseControl,
+      hookForTest
     );
     return;
   }
@@ -1678,15 +1874,16 @@ function rollbackPublishedLocalTokenTransaction(input: {
   }
   cleanupLocalTokenTransactionControlArtifacts(
     secretsDescriptor,
-    rollbackMarkerName,
-    leaseName
+    rollbackMarker,
+    leaseControl,
+    hookForTest
   );
 }
 
 function createLocalTokenTransactionMarker(
   secretsDescriptor: number,
   markerName: string
-): void {
+): OwnedLocalTokenControlArtifact {
   const markerDescriptor = syscallOpenAt(
     secretsDescriptor,
     markerName,
@@ -1694,16 +1891,22 @@ function createLocalTokenTransactionMarker(
     0o600
   );
   if (markerDescriptor < 0) throw unsafeLocalTokenStorageError();
+  let markerControl: OwnedLocalTokenControlArtifact | undefined;
   let valid = false;
   try {
+    markerControl = ownedLocalTokenControlArtifact(
+      markerName,
+      physicalIdentityFromObservation(fstatSync(markerDescriptor, { bigint: true }))
+    );
     fchmodSync(markerDescriptor, 0o600);
     assertLocalTokenTransactionControlFile(markerDescriptor);
     fsyncSync(markerDescriptor);
     valid = true;
+    return markerControl;
   } finally {
     closeSync(markerDescriptor);
-    if (!valid && syscallUnlinkAt(secretsDescriptor, markerName) === 0) {
-      fsyncSync(secretsDescriptor);
+    if (!valid && markerControl !== undefined) {
+      unlinkOwnedLocalTokenControlArtifact(secretsDescriptor, markerControl);
     }
   }
 }
@@ -1711,7 +1914,7 @@ function createLocalTokenTransactionMarker(
 function createLocalTokenTransactionLeaseFile(
   secretsDescriptor: number,
   leaseName: string
-): number {
+): CreatedLocalTokenLease {
   const descriptor = syscallOpenAt(
     secretsDescriptor,
     leaseName,
@@ -1719,16 +1922,23 @@ function createLocalTokenTransactionLeaseFile(
     0o600
   );
   if (descriptor < 0) throw unsafeLocalTokenStorageError();
+  let leaseControl: OwnedLocalTokenControlArtifact | undefined;
   let valid = false;
   try {
+    leaseControl = ownedLocalTokenControlArtifact(
+      leaseName,
+      physicalIdentityFromObservation(fstatSync(descriptor, { bigint: true }))
+    );
     fchmodSync(descriptor, 0o600);
     assertLocalTokenTransactionControlFile(descriptor);
     valid = true;
-    return descriptor;
+    return Object.freeze({ descriptor, control: leaseControl });
   } finally {
     if (!valid) {
-      syscallUnlinkAt(secretsDescriptor, leaseName);
       closeSync(descriptor);
+      if (leaseControl !== undefined) {
+        unlinkOwnedLocalTokenControlArtifact(secretsDescriptor, leaseControl);
+      }
     }
   }
 }
@@ -1775,13 +1985,22 @@ function releaseLocalTokenPublicationLease(leaseKey: string | undefined): void {
 
 function cleanupLocalTokenTransactionControlArtifacts(
   secretsDescriptor: number,
-  markerName: string | undefined,
-  leaseName: string
+  marker: OwnedLocalTokenControlArtifact | undefined,
+  lease: OwnedLocalTokenControlArtifact,
+  hookForTest?: LocalTokenPublicationStageHookForTest
 ): void {
-  if (markerName !== undefined) {
-    unlinkLocalTokenTransactionArtifact(secretsDescriptor, markerName);
+  if (marker !== undefined) {
+    unlinkOwnedLocalTokenControlArtifact(
+      secretsDescriptor,
+      marker,
+      hookForTest
+    );
   }
-  unlinkLocalTokenTransactionArtifact(secretsDescriptor, leaseName);
+  unlinkOwnedLocalTokenControlArtifact(
+    secretsDescriptor,
+    lease,
+    hookForTest
+  );
   fsyncSync(secretsDescriptor);
 }
 

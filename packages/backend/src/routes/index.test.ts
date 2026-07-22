@@ -58,7 +58,13 @@ import {
   type WorkspaceReadyResponse
 } from "./index";
 import * as backendRoutes from "./index";
-import { runWithLocalTokenPublicationStageHookForTest } from "./local-auth-publication-test-support";
+import {
+  localTokenDirectoryEntryRecordForTest,
+  runWithLocalTokenDirectoryEntryReplayForTest,
+  runWithLocalTokenPublicationStageHookForTest,
+  type LocalTokenDirectoryBoundaryForTest,
+  type LocalTokenPublicationStageForTest
+} from "./local-auth-publication-test-support";
 import {
   API_REQUEST_ID_HEADER,
   redactApiLogValue,
@@ -976,6 +982,199 @@ describe("backend workspace and health routes", () => {
     expect(await readdir(join(workspaceRoot, "secrets"))).toEqual(["local-token"]);
   });
 
+  test("live success preserves a replaced publishing marker and returns no authority", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const replacementBytes = "foreign-publishing-marker";
+    let replacement: { name: string; identity: BigIntStats } | undefined;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage, name }) => {
+        if (stage !== "before_publishing_marker_cleanup" || !name || replacement) return;
+        replacement = {
+          name,
+          identity: replaceLocalTokenControlArtifactForTest(
+            secretsRoot,
+            name,
+            replacementBytes
+          )
+        };
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    expect(replacement).toBeDefined();
+    const preserved = await lstat(join(secretsRoot, replacement!.name), { bigint: true });
+    expect(preserved.dev).toBe(replacement!.identity.dev);
+    expect(preserved.ino).toBe(replacement!.identity.ino);
+    expect(await readFile(join(secretsRoot, replacement!.name), "utf8")).toBe(replacementBytes);
+  });
+
+  test("live rollback preserves a replaced rolling-back marker and returns no authority", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const replacementBytes = "foreign-rollback-marker";
+    let replacement: { name: string; identity: BigIntStats } | undefined;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage, name }) => {
+        if (stage === "before_post_publish_binding") {
+          throw new Error("fault:enter-control-rollback");
+        }
+        if (stage !== "before_rollback_marker_cleanup" || !name || replacement) return;
+        replacement = {
+          name,
+          identity: replaceLocalTokenControlArtifactForTest(
+            secretsRoot,
+            name,
+            replacementBytes
+          )
+        };
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    expect(replacement).toBeDefined();
+    const preserved = await lstat(join(secretsRoot, replacement!.name), { bigint: true });
+    expect(preserved.dev).toBe(replacement!.identity.dev);
+    expect(preserved.ino).toBe(replacement!.identity.ino);
+    expect(await readFile(join(secretsRoot, replacement!.name), "utf8")).toBe(replacementBytes);
+    await expectPathMissing(join(secretsRoot, "local-token"));
+  });
+
+  test("live success preserves a replaced lease and returns no authority", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const replacementBytes = "foreign-lease";
+    let replacement: { name: string; identity: BigIntStats } | undefined;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage, name }) => {
+        if (stage !== "before_lease_cleanup" || !name || replacement) return;
+        replacement = {
+          name,
+          identity: replaceLocalTokenControlArtifactForTest(
+            secretsRoot,
+            name,
+            replacementBytes
+          )
+        };
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    expect(replacement).toBeDefined();
+    const preserved = await lstat(join(secretsRoot, replacement!.name), { bigint: true });
+    expect(preserved.dev).toBe(replacement!.identity.dev);
+    expect(preserved.ino).toBe(replacement!.identity.ino);
+    expect(await readFile(join(secretsRoot, replacement!.name), "utf8")).toBe(replacementBytes);
+  });
+
+  test("publishing recovery preserves a marker replacement installed after validation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    await interruptLocalTokenPublisherForTest(workspaceRoot, "after_publish");
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const replacementBytes = "foreign-recovery-publishing-marker";
+    let replacement: { name: string; identity: BigIntStats } | undefined;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage, name }) => {
+        if (stage !== "before_publishing_marker_cleanup" || !name || replacement) return;
+        replacement = {
+          name,
+          identity: replaceLocalTokenControlArtifactForTest(
+            secretsRoot,
+            name,
+            replacementBytes
+          )
+        };
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    expect(replacement).toBeDefined();
+    const preserved = await lstat(join(secretsRoot, replacement!.name), { bigint: true });
+    expect(preserved.dev).toBe(replacement!.identity.dev);
+    expect(preserved.ino).toBe(replacement!.identity.ino);
+    expect(await readFile(join(secretsRoot, replacement!.name), "utf8")).toBe(replacementBytes);
+  });
+
+  test("rolling-back recovery preserves a marker replacement installed after validation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    await interruptLocalTokenPublisherForTest(
+      workspaceRoot,
+      "after_rollback_move",
+      "before_post_publish_binding"
+    );
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const replacementBytes = "foreign-recovery-rollback-marker";
+    let replacement: { name: string; identity: BigIntStats } | undefined;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage, name }) => {
+        if (stage !== "before_rollback_marker_cleanup" || !name || replacement) return;
+        replacement = {
+          name,
+          identity: replaceLocalTokenControlArtifactForTest(
+            secretsRoot,
+            name,
+            replacementBytes
+          )
+        };
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    expect(replacement).toBeDefined();
+    const preserved = await lstat(join(secretsRoot, replacement!.name), { bigint: true });
+    expect(preserved.dev).toBe(replacement!.identity.dev);
+    expect(preserved.ino).toBe(replacement!.identity.ino);
+    expect(await readFile(join(secretsRoot, replacement!.name), "utf8")).toBe(replacementBytes);
+    await expectPathMissing(join(secretsRoot, "local-token"));
+  });
+
+  test("pre-publish recovery preserves a lease replacement installed after validation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    await interruptLocalTokenPublisherForTest(workspaceRoot, "after_file_fsync");
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const replacementBytes = "foreign-recovery-lease";
+    let replacement: { name: string; identity: BigIntStats } | undefined;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage, name }) => {
+        if (stage !== "before_lease_cleanup" || !name || replacement) return;
+        replacement = {
+          name,
+          identity: replaceLocalTokenControlArtifactForTest(
+            secretsRoot,
+            name,
+            replacementBytes
+          )
+        };
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    expect(replacement).toBeDefined();
+    const preserved = await lstat(join(secretsRoot, replacement!.name), { bigint: true });
+    expect(preserved.dev).toBe(replacement!.identity.dev);
+    expect(preserved.ino).toBe(replacement!.identity.ino);
+    expect(await readFile(join(secretsRoot, replacement!.name), "utf8")).toBe(replacementBytes);
+    await expectPathMissing(join(secretsRoot, "local-token"));
+  });
+
   test("publisher interruption after no-clobber publish leaves one reusable single-link authority", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1332,6 +1531,163 @@ describe("backend workspace and health routes", () => {
     expect((await requestWithToken(app, "/api/tasks", token)).status).toBe(200);
     expect(await readdir(secretsRoot)).toEqual(["local-token"]);
     expect(await readdir(alternateSecretsRoot)).toEqual([alternateStaleName]);
+  });
+
+  test("descriptor enumerator accepts exactly 1024 entries before token publication", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const secretsRoot = join(workspaceRoot, "secrets");
+    await mkdir(secretsRoot, { recursive: true, mode: 0o700 });
+    await chmod(secretsRoot, 0o700);
+    const foreignNames = Array.from(
+      { length: 1024 },
+      (_, index) => `foreign-${index.toString().padStart(4, "0")}`
+    );
+    for (const name of foreignNames) {
+      writeFileSync(join(secretsRoot, name), "foreign", { mode: 0o600 });
+    }
+    let observedEntryCount: number | undefined;
+
+    const app = runWithLocalTokenPublicationStageHookForTest(
+      ({ stage, entryCount }) => {
+        if (stage === "after_recovery_directory_read") observedEntryCount = entryCount;
+      },
+      () => createBackendApi({ workspaceRoot })
+    );
+
+    expect(observedEntryCount).toBe(1024);
+    const token = await readFile(join(secretsRoot, "local-token"), "utf8");
+    expect((await requestWithToken(app, "/api/tasks", token)).status).toBe(200);
+    const finalNames = await readdir(secretsRoot);
+    expect(finalNames).toHaveLength(1025);
+    expect(finalNames).toContain(foreignNames[0]);
+    expect(finalNames).toContain(foreignNames[1023]);
+    expect(finalNames.some((name) => name.startsWith(".local-token-transaction-"))).toBe(false);
+  });
+
+  test("descriptor enumerator rejects entry 1025 without publication or cleanup residue", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const secretsRoot = join(workspaceRoot, "secrets");
+    await mkdir(secretsRoot, { recursive: true, mode: 0o700 });
+    await chmod(secretsRoot, 0o700);
+    for (let index = 0; index < 1025; index += 1) {
+      writeFileSync(
+        join(secretsRoot, `foreign-${index.toString().padStart(4, "0")}`),
+        "foreign",
+        { mode: 0o600 }
+      );
+    }
+    let rejection: { boundary?: LocalTokenDirectoryBoundaryForTest; entryCount?: number } = {};
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage, boundary, entryCount }) => {
+        if (stage === "recovery_directory_boundary_rejected") {
+          rejection = { boundary, entryCount };
+        }
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    expect(rejection).toEqual({ boundary: "entry_limit", entryCount: 1024 });
+    const finalNames = await readdir(secretsRoot);
+    expect(finalNames).toHaveLength(1025);
+    expect(finalNames).not.toContain("local-token");
+    expect(finalNames.some((name) => name.startsWith(".local-token-transaction-"))).toBe(false);
+  });
+
+  test("descriptor enumerator accepts a 255-byte name and reports the exact maximum", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const secretsRoot = join(workspaceRoot, "secrets");
+    await mkdir(secretsRoot, { recursive: true, mode: 0o700 });
+    await chmod(secretsRoot, 0o700);
+    const foreignName = "n".repeat(255);
+    await writeFile(join(secretsRoot, foreignName), "foreign", { mode: 0o600 });
+    let observedMaxNameBytes: number | undefined;
+
+    const app = runWithLocalTokenPublicationStageHookForTest(
+      ({ stage, maxNameBytes }) => {
+        if (stage === "after_recovery_directory_read") {
+          observedMaxNameBytes = maxNameBytes;
+        }
+      },
+      () => createBackendApi({ workspaceRoot })
+    );
+
+    expect(observedMaxNameBytes).toBe(255);
+    expect(await readFile(join(secretsRoot, foreignName), "utf8")).toBe("foreign");
+    const token = await readFile(join(secretsRoot, "local-token"), "utf8");
+    expect((await requestWithToken(app, "/api/tasks", token)).status).toBe(200);
+    expect((await readdir(secretsRoot)).some((name) => name.startsWith(".local-token-transaction-"))).toBe(false);
+  });
+
+  test("raw Darwin and Linux dirents reject duplicate decoded names", async () => {
+    for (const layout of ["darwin", "linux"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      delete process.env.HARNESS_LOCAL_TOKEN;
+      const secretsRoot = join(workspaceRoot, "secrets");
+      await mkdir(secretsRoot, { recursive: true, mode: 0o700 });
+      await chmod(secretsRoot, 0o700);
+      await writeFile(join(secretsRoot, "foreign-sentinel"), "foreign", { mode: 0o600 });
+      const duplicate = localTokenDirectoryEntryRecordForTest(
+        layout,
+        Buffer.from("duplicate", "utf8")
+      );
+      let boundary: LocalTokenDirectoryBoundaryForTest | undefined;
+
+      expect(() => runWithLocalTokenDirectoryEntryReplayForTest(
+        { layout, records: [duplicate, duplicate] },
+        () => runWithLocalTokenPublicationStageHookForTest(
+          (input) => {
+            if (input.stage === "recovery_directory_boundary_rejected") {
+              boundary = input.boundary;
+            }
+          },
+          () => createBackendApi({ workspaceRoot })
+        )
+      ), layout).toThrow("Local API token storage is unsafe");
+
+      expect(boundary, layout).toBe("duplicate_decoded_name");
+      expect(await readFile(join(secretsRoot, "foreign-sentinel"), "utf8")).toBe("foreign");
+      await expectPathMissing(join(secretsRoot, "local-token"));
+      expect(await readdir(secretsRoot)).toEqual(["foreign-sentinel"]);
+    }
+  });
+
+  test("raw Darwin and Linux dirents reject invalid UTF-8", async () => {
+    for (const layout of ["darwin", "linux"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      delete process.env.HARNESS_LOCAL_TOKEN;
+      const secretsRoot = join(workspaceRoot, "secrets");
+      await mkdir(secretsRoot, { recursive: true, mode: 0o700 });
+      await chmod(secretsRoot, 0o700);
+      await writeFile(join(secretsRoot, "foreign-sentinel"), "foreign", { mode: 0o600 });
+      const invalid = localTokenDirectoryEntryRecordForTest(layout, Buffer.from([0xff]));
+      let boundary: LocalTokenDirectoryBoundaryForTest | undefined;
+
+      expect(() => runWithLocalTokenDirectoryEntryReplayForTest(
+        { layout, records: [invalid] },
+        () => runWithLocalTokenPublicationStageHookForTest(
+          (input) => {
+            if (input.stage === "recovery_directory_boundary_rejected") {
+              boundary = input.boundary;
+            }
+          },
+          () => createBackendApi({ workspaceRoot })
+        )
+      ), layout).toThrow("Local API token storage is unsafe");
+
+      expect(boundary, layout).toBe("decode");
+      expect(await readFile(join(secretsRoot, "foreign-sentinel"), "utf8")).toBe("foreign");
+      await expectPathMissing(join(secretsRoot, "local-token"));
+      expect(await readdir(secretsRoot)).toEqual(["foreign-sentinel"]);
+    }
   });
 
   test("legacy recovery fails closed for present unopenable entries", async () => {
@@ -11342,6 +11698,51 @@ async function runTokenProvisionInChild(workspaceRoot: string): Promise<string> 
     timeout: 2_000
   });
   return stdout.trim();
+}
+
+function replaceLocalTokenControlArtifactForTest(
+  secretsRoot: string,
+  name: string,
+  bytes: string
+): BigIntStats {
+  const path = join(secretsRoot, name);
+  const displacedPath = join(secretsRoot, `${name}.displaced`);
+  renameSync(path, displacedPath);
+  writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
+  unlinkSync(displacedPath);
+  return lstatSync(path, { bigint: true });
+}
+
+async function interruptLocalTokenPublisherForTest(
+  workspaceRoot: string,
+  killStage: LocalTokenPublicationStageForTest,
+  faultStage?: LocalTokenPublicationStageForTest
+): Promise<void> {
+  const backendIndexUrl = new URL("./index.ts", import.meta.url).href;
+  const testSupportUrl = new URL("./local-auth-publication-test-support.ts", import.meta.url).href;
+  const childScript = [
+    `import { createBackendApi } from ${JSON.stringify(backendIndexUrl)};`,
+    `import { runWithLocalTokenPublicationStageHookForTest } from ${JSON.stringify(testSupportUrl)};`,
+    `const killStage = ${JSON.stringify(killStage)};`,
+    `const faultStage = ${JSON.stringify(faultStage)};`,
+    "runWithLocalTokenPublicationStageHookForTest(({ stage }) => {",
+    '  if (stage === faultStage) throw new Error("fault:control-recovery-fixture");',
+    '  if (stage === killStage) process.kill(process.pid, "SIGKILL");',
+    `}, () => createBackendApi({ workspaceRoot: ${JSON.stringify(workspaceRoot)} }));`
+  ].join("\n");
+
+  let childSignal: unknown;
+  try {
+    await execFile(process.execPath, ["-e", childScript], {
+      env: { ...process.env, HARNESS_LOCAL_TOKEN: "" },
+      timeout: 2_000
+    });
+  } catch (error) {
+    childSignal = typeof error === "object" && error !== null
+      ? Reflect.get(error, "signal")
+      : undefined;
+  }
+  expect(childSignal).toBe("SIGKILL");
 }
 
 async function createTempRoot(prefix: string): Promise<string> {
