@@ -4,6 +4,54 @@ D6 收缩口径鉴权：localhost 绑定 + 单一本地 token（grill 定案 1�
 
 ## ADDED Requirements
 
+### Requirement: workspace local-token mutation consistency
+
+所有修改 `workspace/secrets/local-token` 及其协议条目的 SHUD-Harness writer SHALL 先在已打开的 `secrets` 目录 descriptor 上取得 exclusive nonblocking mutation lock；只有成功持锁才能构造并传递 mutation capability，publication、recovery、rollback 与 cleanup helper MUST 接受该 capability，不得接受裸目录 descriptor 作为写权限证明。持锁 writer SHALL 在 pathname mutation 前后校验已观察 generation，并在可观察 mismatch 时以 `LocalTokenStorageError` fail closed，不返回 authority。若当前 publication/recovery 调用已经观察到 foreign generation，该调用可为保持可恢复状态而清理 identity-proven 自有协议条目或恢复 foreign generation，但 MUST 失败且不得采纳该 generation 为 authority；只有后续独立调用 MAY 重新验证并复用稳定 canonical token。
+
+本契约提供 cooperative-writer serialization，不声称 macOS/Linux 对一个拥有目录写权限且忽略 mutation lock 的进程提供 `rename/unlink only if pathname still names expected inode` 的线性化 compare-and-mutate 语义。已经在 mutation 前观察到的 foreign generation MUST NOT 被故意覆盖或删除；mutation 后观察到干扰时 MUST fail closed。
+
+`secrets` mutation lock 尚不存在时，workspace leaf 与 `secrets` 目录创建属于 cooperative bootstrap。所有 SHUD-Harness creator MUST 先确认当前 process umask 与父目录 mode 不会把请求的 private `0700` 转换为其他 mode，再对最终目录名执行 no-clobber `mkdirat`；若创建环境会转换 mode，MUST 在 mkdir 前 fail closed 且不遗留最终名。creator 不得以 rename 替换该最终目录名，也不得创建随机目录-staging 名。初始观察为 absent 后若 `mkdirat` 返回 collision，当前调用 MUST fail closed；后续独立调用 MAY 重新打开并验证已存在的 private directory。进程在最终目录 mkdir 后终止时，重启 MUST 通过验证该最终目录继续收敛，且不得遗留不可发现的随机 bootstrap staging 条目。拥有父目录写权限、却替换刚创建 bootstrap pathname 的进程不在 cooperative bootstrap serialization 契约内；模块不承诺阻止该 active replacement，但现有 rebind/binding check 一旦观察到 replacement，MUST 返回 `LocalTokenStorageError` 且不得返回 authority。
+
+#### Scenario: cooperative creator 并发创建 workspace leaf
+
+- **WHEN** 两个 SHUD-Harness creator 经 barrier 同时从 absent observation 竞争最终 workspace-leaf 名称
+- **THEN** 恰好一个公开 seam 调用成功、一个得到 `LocalTokenStorageError`；两者都不 rename 或覆盖最终目录名，失败方独立重试后复用成功方的 canonical token
+
+#### Scenario: cooperative creator 并发创建 secrets
+
+- **WHEN** 两个 SHUD-Harness creator 经 barrier 同时从 absent observation 竞争最终 `secrets` 名称
+- **THEN** 恰好一个公开 seam 调用成功、一个得到 `LocalTokenStorageError`；两者都不 rename 或覆盖最终目录名，失败方独立重试后复用成功方的 canonical token
+
+#### Scenario: bootstrap mkdir 后进程终止
+
+- **WHEN** 进程在最终 workspace leaf 或 `secrets` mkdir 后、完成 token publication 前终止
+- **THEN** 重启验证遗留的最终 private directory 并收敛，且父目录中不存在随机 bootstrap staging residue
+
+#### Scenario: bootstrap 创建环境会转换 private mode
+
+- **WHEN** process umask 会屏蔽 `0700` owner bits，或父目录的 setgid inheritance 会把新目录变为非精确 `0700`
+- **THEN** workspace leaf 与 `secrets` 两个 creator 都在 `mkdirat` 前返回 `LocalTokenStorageError`，最终目录名不存在，后续在安全环境中可正常重试
+
+#### Scenario: cooperative writer 被 mutation lock 串行化
+
+- **WHEN** writer A 持有同一 `secrets` 目录 inode 的 exclusive mutation lock，writer B 通过公开 token-store seam 尝试 publication/recovery
+- **THEN** writer B 在 2 秒内得到 `LocalTokenStorageError`，且不创建、rename 或 unlink 条目；A 释放 lock 后，B 可正常继续
+
+#### Scenario: mutation 前已观察到 foreign generation
+
+- **WHEN** 持锁 writer 在 mutation 前发现 pathname 不再指向先前观察的 `(dev, ino)`
+- **THEN** 保留当前 generation、返回 `LocalTokenStorageError`，且不声称拥有 compare-and-mutate authority
+
+#### Scenario: publication 或 recovery 观察到 foreign token generation
+
+- **WHEN** live no-clobber publication collision、publishing recovery 或 rolling-back recovery 已经观察到与本 transaction 不同的 canonical/candidate generation
+- **THEN** 当前调用保留 foreign inode/bytes、仅清理 identity-proven 自有协议条目并返回 `LocalTokenStorageError`；后续独立调用才可验证并复用稳定 canonical token
+
+#### Scenario: token 通过真实 Bearer Header seam
+
+- **WHEN** token store 读取或生成 token
+- **THEN** 仅接受 1–4096 bytes 的 visible ASCII（`0x21`–`0x7e`）且排除 comma；该 token 经 Bun 1.2.19 的真实 `Headers`/`Request` 以 `Authorization: Bearer <token>` 精确 round-trip；non-ASCII、control、whitespace、comma、NUL、malformed UTF-8 均 fail closed 且不覆盖原文件
+
 ### Requirement: localhost 绑定
 
 后端进程 SHALL 仅监听 `127.0.0.1`（不监听 0.0.0.0 或外网接口）；绑定地址 MUST 可测试断言。

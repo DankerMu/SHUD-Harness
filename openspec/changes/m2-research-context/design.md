@@ -96,6 +96,110 @@ M1 教训：#19 单 issue 扛整个 seatbelt 面（25 轮/205 项拦截）、#74
 | ID 格式偏离 canonical 示例被审查反复质疑 | D5 显式裁决 + spec 记录，审查以本 design 为准 |
 | STACK/DATA 记录并发写 | 全部经 M1 record store 权威（#74 硬化面），无新并发原语 |
 
+## Subagent Workflow Fixture — Issue #87 Child A (local-token store)
+
+Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness. Parent PR #125 reached the five-round ceiling and was split by recorded user decision.
+
+Change surface:
+- New focused production module under `packages/backend/src/` for workspace file-backed local-token authority, plus its direct tests and private test support.
+- No route, middleware, listener, readiness, shared path-helper, frontend, perf, or M1 caller wiring in Child A; those belong to dependent Child B.
+
+Shared production seam frozen for Child B:
+- Module path: `packages/backend/src/local-auth/local-token-store.ts` (not exported from a package-wide/public HTTP barrel).
+- `openWorkspaceLocalTokenAuthority(input: { workspaceRoot: string }): WorkspaceLocalTokenAuthority` is synchronous, matching backend startup; the input is one absolute/relative workspace root resolved under the module's descriptor-safe rules.
+- `WorkspaceLocalTokenAuthority` is frozen and exposes `token: string`, `source: "workspace"`, and `assertCurrent(): void`. `assertCurrent` re-proves the captured workspace/secrets directory binding, canonical file `(dev, ino)`, type/mode/link/size, and exact token bytes before a future caller trusts `token`.
+- `LocalTokenStorageError` is the stable failure type with `code="local_token_storage_unsafe"` and message `Local API token storage is unsafe.`; it never includes token bytes or absolute paths. Child B may let startup fail on this type and may use it for readiness classification, but must not reinterpret unsafe storage as missing credentials.
+
+Must preserve:
+- Existing backend, core, workspace, route, schema, package/lock, Zero, and submodule behavior remains byte-for-byte/API compatible because the module is not yet wired.
+- The accepted boundaries remain explicit: POSIX cannot rediscover a directory inode permanently displaced during simultaneous external move and process termination. Namespace mutation is serialized only among cooperative SHUD-Harness writers that first hold the exclusive nonblocking mutation lock on the opened `secrets` directory descriptor. A process with directory-write permission that ignores that lock is outside the mutation-serializability contract; observable precondition or postcondition interference still fails closed with `LocalTokenStorageError`, but the module does not claim cross-platform source-inode-conditioned rename/unlink against such a writer.
+- Bootstrap is a separate cooperative phase because the `secrets` mutation lock cannot exist before the `secrets` directory exists. Cooperative SHUD-Harness creators use no-clobber `mkdirat` on the final workspace-leaf / `secrets` name and never rename or replace those directory names. A creator that loses the initial absence-to-mkdir race fails the current call; a later independent call validates the existing private directory before use. A process with parent-directory write permission that replaces a just-created bootstrap pathname is outside this cooperative bootstrap serialization contract, just as a writer that ignores the established `secrets` lock is outside mutation serializability. The module does not promise to prevent such active replacement, but any replacement observable at the existing rebind/binding checks MUST yield `LocalTokenStorageError` and no authority.
+
+Must add/change:
+- A production internal seam that creates/reuses a file-backed token authority under `<workspace>/secrets/local-token`, returns the bounded token to its future integration caller, and can re-prove the same directory/file authority on demand.
+- Directory 0700 and single-link regular token 0600; bounded non-empty visible-ASCII token bytes that round-trip through the real Bun `Headers`/`Request` Bearer seam; descriptor-relative no-follow operations; a typed held-mutation-lease capability; generation validation before and after namespace mutation under that cooperative lease; no-clobber publication; durable staged/publishing/rolling-back recovery; observed uncertainty fails closed for the current invocation.
+- Workspace-leaf and `secrets` bootstrap checks before mutation that process umask and parent setgid inheritance cannot transform requested `0700`, then writes directly to the final directory name with private mode and no-clobber semantics; unsupported creation environments fail before mkdir with no final residue. It MUST NOT create random directory-staging names. Process death after final-name mkdir leaves at most the final private directory, which a later call validates and resumes, rather than an undiscoverable protocol artifact.
+- Stable bounded directory accounting that remains valid after canonical publication and through every recoverable protocol-artifact phase. The accepted external-entry boundary must restart successfully and interrupted states near that boundary must converge or fail closed without manual cleanup.
+- Every acquired descriptor is guarded immediately after acquisition and closes when setup, validation, or identity-checked cleanup under the cooperative mutation lease fails.
+
+Frozen resource accounting:
+- Token content: valid UTF-8 encoding of visible ASCII bytes `0x21`–`0x7e`, excluding comma; non-empty and at most 4096 bytes. This excludes all control, whitespace, NUL, DEL, and non-ASCII bytes and MUST round-trip exactly through Bun 1.2.19 `Headers` and `Request` at the frozen `Authorization: Bearer <token>` seam. Directory-entry names: valid UTF-8 and at most 255 bytes.
+- Directory enumeration hard cap: 1032 decoded entries = at most 1024 external/unrecognized entries plus at most 8 module-owned entries. Owned entries are the canonical `local-token` and recognized staged/publishing/rolling-back/lease/candidate/retired/legacy transaction artifacts; each recognized name must still pass its phase/identity structure checks. Neither canonical publication nor a recoverable protocol phase consumes the external budget.
+- A 1025th external entry or a 9th owned entry fails closed before new publication/deletion. Exactly 1024 external entries remain accepted through canonical publication, ordinary restart, and recovery of each supported interrupted phase.
+- Recovery performs one descriptor-relative enumeration of at most 1032 entries and bounded constant work per recognized artifact. Lease acquisition is non-blocking; there is no retry, polling, sleep, or PID-age wait. Test subprocesses use a 2 s per-case ceiling and the adversarial matrix a 30 s enclosing ceiling.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - new internal production module seam; no HTTP/CLI/script consumer yet.
+- Config / project setup: not selected - environment-token priority and server config belong to Child B.
+- File IO / path safety / overwrite: selected - private directory/token creation, no-follow reads, no-clobber publication, identity-checked cleanup under a held mutation lease.
+- Schema / columns / units / field names: not selected - no Zod or persisted business-record schema.
+- Auth / permissions / secrets: selected - token bytes and 0600/0700 permissions are the module's contract.
+- Concurrency / shared state / ordering: selected - typed cooperative mutation lease, first-create, publication collision, crash recovery, stale/foreign generation detection, and directory binding.
+- Resource limits / large input / discovery: selected - bounded token bytes, directory entries/names/decoding, descriptor lifecycle, bounded recovery time.
+- Legacy compatibility / examples: selected - safe legacy transaction residue remains recoverable; existing unrelated backend behavior is unchanged.
+- Error handling / rollback / partial outputs: selected - stable typed/recognizable unsafe-storage failure, no partial authority, lease-serialized generation-validated rollback and cleanup.
+- Release / packaging / dependency compatibility: selected - Bun 1.2.19/macOS/Linux, no new dependency or manifest drift.
+- Documentation / migration notes: not selected - internal prerequisite; Child B owns public behavior/migration notes.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - evidence must bind to the exact reviewed source and red/green baseline; no scientific decision is made.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no model/runtime behavior.
+- Zero adapter / tool registry / agent role governance: not selected - no Zero/tool/role changes.
+
+Invariant Matrix:
+- Governing invariant: the module returns authority only for one bounded private, real-Header-transportable token bound to the held secrets-directory mutation lease and current validated file generation; every in-model recovery/destructive transition requires that typed lease, detects observable identity mismatch before/after mutation, fails the affected invocation instead of adopting a foreign generation, remains restartable at accepted resource boundaries, and closes all owned descriptors.
+- Source-of-truth identity/contract: before the lease exists, bootstrap authority is the final-name absent observation followed by no-clobber `mkdirat` and private-directory validation; after `secrets` exists, the typed held-mutation-lease capability contains the opened secrets-directory descriptor and identity, plus canonical token/control artifact `(dev, ino)`, bounded token bytes, and stable entry-category accounting.
+- Producers: module authority factory and generated-token publication transaction.
+- Validators/preflight: workspace/secrets descriptor chain, file type/mode/link/size/UTF-8 validation, directory entry decoder/accounting, exact identity reproof.
+- Storage/cache/query: `workspace/secrets/local-token` and bounded transaction artifacts only; no global token cache or DB.
+- Public routes/entrypoints: internal module export only; HTTP/listener/readiness consumers are absent by design.
+- Frontend/downstream consumers: Child B is the sole planned consumer; no current consumer changes.
+- Failure paths/rollback/stale state: setup/open/fstat/write/fsync/rename/cleanup failure, crash at every durable phase, cooperative bootstrap contention, observable same-name replacements, cooperative lock contention, uncooperative interference detection, legacy residue, parent/path races, resource boundary and restart.
+- Evidence/audit/readiness: source-bound semantic red proof for new behavior; coverage-only labels for already-correct untested bounds; macOS/Linux focused matrix, backend compatibility, typecheck/check/perf/OpenSpec/hygiene.
+- Regression rows:
+  - absent safe store -> one 0600 token under 0700 secrets, reusable and re-provable across restart.
+  - accepted maximum external entries plus canonical/protocol allowance -> initial publish, ordinary restart, and each interrupted recovery remain bounded and converge.
+  - same-name foreign replacement already observable before mutation at canonical/control/candidate/legacy/retired surfaces -> replacement preserved and operation fails closed; postcondition interference -> stable failure without a false authority claim.
+  - live publication collision, publishing recovery, or rolling-back recovery observes a foreign canonical/candidate generation -> current invocation preserves the foreign inode/bytes, cleans only identity-proven owned protocol state, and fails; a later independent invocation may validate/reuse the stable canonical token.
+  - two cooperative creators are barrier-released at absent workspace-leaf creation -> exactly one public-seam call succeeds and one gets `LocalTokenStorageError`; neither renames/overwrites the final directory, and an independent retry reuses the winner's canonical token.
+  - two cooperative creators are barrier-released at absent `secrets` creation -> exactly one public-seam call succeeds and one gets `LocalTokenStorageError`; neither renames/overwrites the final directory, and an independent retry reuses the winner's canonical token.
+  - process death after final-name workspace-leaf or `secrets` mkdir -> restart validates the remaining private directory and converges without random directory-staging residue.
+  - restrictive owner-bit umask or parent setgid inheritance would transform requested `0700` -> both workspace-leaf and `secrets` creators fail before mkdir with no final-name residue; safe-environment retry succeeds.
+  - cooperative writer A holds the directory mutation lease -> writer B through the public module seam fails before namespace mutation; after A releases the lease, B can proceed normally.
+  - setup or cleanup failure after any descriptor acquisition -> no returned authority and descriptor/resource baseline restored.
+  - stable existing safe token -> exact bytes reused; invalid/symlink/directory/FIFO/oversize/permission state -> no overwrite and stable failure.
+  - unchanged backend/core/test consumers -> existing behavior remains green because module is not wired.
+
+Lease-serialized generation-validation inventory and required oracles:
+- Only successful exclusive nonblocking `flock` acquisition on the held `secrets` directory descriptor can construct the branded mutation capability. Destructive helpers accept that capability instead of a bare descriptor; callers cannot represent an unlocked mutation path through the production types.
+- Token-bearing `canonical`, `staged`, `candidate`, and retired/legacy artifacts: every observation returns `(dev, ino)`; every restore/retire/delete under the cooperative lease validates the observed identity before mutation and validates postconditions afterward. An already-observable same-name/same-byte new inode survives and yields `LocalTokenStorageError`.
+- Control `publishing`, `rolling-back`, and `lease`: creation captures identity from the held descriptor; recovery validation returns identity; publishing→rolling-back rename proves the name changed while inode did not for cooperative writers; success, collision, live rollback, startup recovery, catch cleanup, and marker/lease creation-failure cleanup all require the held capability and consume the captured observation for validation.
+- Direct tests replace publishing, rolling-back, and lease before mutation in live and recovery paths; replacement inode/bytes remain, no authority returns, and the next bounded recovery either converges or returns the stable error. These tests prove observable tamper rejection, not an unavailable pathname compare-and-swap primitive.
+
+Required scenario evidence:
+- `4096` visible-ASCII transport-safe token bytes accepted/reused; `4097`, empty, malformed UTF-8, control/whitespace/comma/NUL/DEL/non-ASCII, wrong mode/type/link count, symlink/FIFO/directory, and unsafe ancestor fail with `LocalTokenStorageError`, no overwrite/outside write; every accepted token round-trips byte-for-byte through real Bun 1.2.19 `Headers`/`Request` at the frozen Bearer seam.
+- `1024 external + 0 owned` -> publish canonical, return authority, leave 1025 total entries, second open reuses identical token; `1025 external` -> fail before publication and preserve all entries.
+- `1024 external` plus interruption at staged, publishing, and rolling-back durable phases -> next open stays within `1024 external + <=8 owned`, converges to one canonical authority or preserves foreign state with the stable error; no owned residue after successful convergence.
+- Real filesystem: 255-byte name accepted and counted; 256-byte is OS-rejected or module-rejected without publication. Controlled raw dirent records for both Darwin and Linux: invalid UTF-8 and duplicate decoded name reject with no publication/residue; these decoder cases are coverage-only because the pre-split implementation already contained the guards.
+- Descriptor lifecycle: inject staged `openat` failure plus lease same-name replacement so identity-checked cleanup under the held lease also fails; inject staged `fstat` failure. In each case replacement bytes/inode remain, no authority returns, and repeated isolated attempts restore `/dev/fd` (or platform-equivalent descriptor inventory) to the pre-attempt baseline.
+- Mutation-lease serialization: a process holds exclusive `flock` on the same opened `secrets` directory inode; a second process calling the public module seam returns `LocalTokenStorageError` within the 2 s ceiling and creates/renames/unlinks nothing; after release, the second process succeeds.
+- Cooperative bootstrap workspace-leaf barrier: two public-seam processes both observe an absent workspace leaf and contend on its final-name `mkdirat`; exactly one succeeds, one returns `LocalTokenStorageError`, neither renames/overwrites the final name, and the loser independently retries and reuses the winner's canonical token.
+- Cooperative bootstrap `secrets` barrier: two public-seam processes both observe absent `secrets` and contend on its final-name `mkdirat`; exactly one succeeds, one returns `LocalTokenStorageError`, neither renames/overwrites the final name, and the loser independently retries and reuses the winner's canonical token.
+- Cooperative bootstrap crash: killing a process immediately after either final-name mkdir leaves no random directory-staging entry, and restart converges through validation of the remaining `0700` directory.
+- Bootstrap creation-mode preflight: restrictive owner-bit umask and Linux setgid-parent cases exercise both workspace-leaf and `secrets`; the operation either proves exact `0700` and restart convergence or fails before mkdir with no final residue.
+- Foreign-generation transition: live publication collision plus publishing/rolling-back recovery foreign canonical/candidate cases fail the affected invocation, preserve exact foreign inode/bytes, remove only owned protocol residue, and permit only a later independent retry to reuse a stable canonical token.
+- Semantic red protocol: retain the final injection seams and apply three source-bound mutations separately: (1) bypass successful directory-lock acquisition before constructing the mutation capability, making the public cross-process cooperative-writer exclusion test red; (2) legacy total-entry limit of 1024 with no owned allowance, making boundary restart/interrupted-phase tests red; (3) move descriptor guards after staged setup, making lifecycle tests red. Record exact source SHA/patch, command, per-test failure reason, and restore immediately. Existing pre-mutation replacement, 255-byte, and decoder guards are explicitly coverage-only, never claimed as pathname compare-and-swap proof.
+
+Boundary-surface checklist:
+- Shared helper roots: new token-store module only; existing path helper and route root unchanged.
+- Read/write/delete/overwrite: workspace/secrets descriptors, canonical token, staged/marker/lease/candidate/legacy artifacts; final-name workspace-leaf / `secrets` bootstrap precedes lease availability and requires absent observation + no-clobber `mkdirat` + private-directory validation, while every token/protocol mutation after `secrets` exists requires the branded held lease, pre/post identity validation, and no-clobber publication.
+- Staging/publish/rollback: final-name directory bootstrap without staging residue; every token durable phase, cooperative lock contention, collision, restart, and generation-validated retirement under lease.
+- Stale-state/idempotency: repeated startup, crashes, foreign generation, resource boundary, descriptor cleanup.
+- Downstream: Child B contract documented but not connected.
+
+Non-goals: HTTP auth, listener binding, env priority, readiness, `WORKSPACE_CANONICAL_DIRECTORIES`, deny-root, route-test migration, perf harness, frontend bootstrap, WebSocket/M3+.
+
+Review focus: stable resource accounting across publication/restart; descriptor lifetime from first acquisition; typed lease capability and cooperative-writer serialization; honest pre/post generation-validation claims; source-bound red attribution; no route or shared-helper drift.
+
 ## Subagent Workflow Fixture — Issue #90
 
 Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.
