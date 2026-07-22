@@ -15,7 +15,7 @@ core-schemas SHALL 新增 DataProvenance **记录** schema：`data_id`（格式 
 
 ### Requirement: sha256 双形态（design D3）
 
-hashing 工具 SHALL 提供：文件 = 内容流式 sha256；目录 = 对目录内全部常规文件按相对路径字典序生成 `"<relpath>\n<file-sha256>\n"` 行序列再整体 sha256。符号链接、非常规文件 MUST 拒绝；空目录 MUST 拒绝。同内容 MUST 得同哈希（确定性）。
+hashing 工具 SHALL 提供：文件 = 内容流式 sha256；目录 = 对目录内全部常规文件按相对路径字典序生成 `"<relpath>\n<file-sha256>\n"` 行序列再整体 sha256。为使该冻结协议对支持的名称保持无歧义，任一相对路径 segment 含 LF（`\n`）时 MUST 在读取对应文件内容前以 path-safety 类错误拒绝；普通名称的协议与 canonical oracle 不变。目录与文件读取 MUST 绑定到最初验证的 filesystem object，不得枚举/读取经并发替换 symlink directory/ancestor 到达的 target。文件读取 MUST 以打开 descriptor 的初始 size 为硬上限，early EOF、增长、截断、替换或 metadata 漂移均拒绝。符号链接、非常规文件 MUST 拒绝；空目录 MUST 拒绝。同内容 MUST 得同哈希（确定性）。
 
 #### Scenario: 目录哈希确定性
 
@@ -26,6 +26,16 @@ hashing 工具 SHALL 提供：文件 = 内容流式 sha256；目录 = 对目录�
 
 - **WHEN** 待哈希路径下存在符号链接
 - **THEN** 拒绝并返回 path-safety 类错误，不跟随链接
+
+#### Scenario: LF 路径歧义被拒且普通 oracle 不变
+
+- **WHEN** 目录相对路径任一 segment 含 LF，或构造可与普通双文件树产生相同行序列的 LF 文件名
+- **THEN** 在读取该文件内容前以 path-safety 类错误拒绝并保留 `evidenceRef`；普通名称仍使用原精确行协议/oracle
+
+#### Scenario: 并发路径替换与 active mutation fail closed
+
+- **WHEN** 目录/文件 ancestor 在枚举或打开窗口被 symlink 替换，或文件在首个 chunk 后变化/持续追加
+- **THEN** 不枚举替换目录 target、不读取替换 ancestor 下的文件 bytes，并在首次 descriptor size 的有界读取后返回 path-safety 类错误而非 digest
 
 ### Requirement: register 输入契约（sha256 为服务端专属）
 
