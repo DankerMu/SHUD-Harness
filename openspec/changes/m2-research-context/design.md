@@ -96,6 +96,95 @@ M1 教训：#19 单 issue 扛整个 seatbelt 面（25 轮/205 项拦截）、#74
 | ID 格式偏离 canonical 示例被审查反复质疑 | D5 显式裁决 + spec 记录，审查以本 design 为准 |
 | STACK/DATA 记录并发写 | 全部经 M1 record store 权威（#74 硬化面），无新并发原语 |
 
+## Subagent Workflow Fixture — Issue #87 Child A (local-token store)
+
+Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness. Parent PR #125 reached the five-round ceiling and was split by recorded user decision.
+
+Change surface:
+- New focused production module under `packages/backend/src/` for workspace file-backed local-token authority, plus its direct tests and private test support.
+- No route, middleware, listener, readiness, shared path-helper, frontend, perf, or M1 caller wiring in Child A; those belong to dependent Child B.
+
+Shared production seam frozen for Child B:
+- Module path: `packages/backend/src/local-auth/local-token-store.ts` (not exported from a package-wide/public HTTP barrel).
+- `openWorkspaceLocalTokenAuthority(input: { workspaceRoot: string }): WorkspaceLocalTokenAuthority` is synchronous, matching backend startup; the input is one absolute/relative workspace root resolved under the module's descriptor-safe rules.
+- `WorkspaceLocalTokenAuthority` is frozen and exposes `token: string`, `source: "workspace"`, and `assertCurrent(): void`. `assertCurrent` re-proves the captured workspace/secrets directory binding, canonical file `(dev, ino)`, type/mode/link/size, and exact token bytes before a future caller trusts `token`.
+- `LocalTokenStorageError` is the stable failure type with `code="local_token_storage_unsafe"` and message `Local API token storage is unsafe.`; it never includes token bytes or absolute paths. Child B may let startup fail on this type and may use it for readiness classification, but must not reinterpret unsafe storage as missing credentials.
+
+Must preserve:
+- Existing backend, core, workspace, route, schema, package/lock, Zero, and submodule behavior remains byte-for-byte/API compatible because the module is not yet wired.
+- The accepted boundaries remain explicit: POSIX cannot rediscover a directory inode permanently displaced during simultaneous external move and process termination; two uncoordinated external canonical writers are preserved and fail closed.
+
+Must add/change:
+- A production internal seam that creates/reuses a file-backed token authority under `<workspace>/secrets/local-token`, returns the bounded token to its future integration caller, and can re-prove the same directory/file authority on demand.
+- Directory 0700 and single-link regular token 0600; bounded non-empty UTF-8 token bytes; descriptor-relative no-follow operations; exact `(dev, ino)` generation authority; no-clobber publication; durable staged/publishing/rolling-back recovery; uncertainty preserves foreign state and fails closed.
+- Stable bounded directory accounting that remains valid after canonical publication and through every recoverable protocol-artifact phase. The accepted external-entry boundary must restart successfully and interrupted states near that boundary must converge or fail closed without manual cleanup.
+- Every acquired descriptor is guarded immediately after acquisition and closes when setup, validation, or exact cleanup fails.
+
+Frozen resource accounting:
+- Token content: valid UTF-8, non-empty, at most 4096 bytes. Directory-entry names: valid UTF-8 and at most 255 bytes.
+- Directory enumeration hard cap: 1032 decoded entries = at most 1024 external/unrecognized entries plus at most 8 module-owned entries. Owned entries are the canonical `local-token` and recognized staged/publishing/rolling-back/lease/candidate/retired/legacy transaction artifacts; each recognized name must still pass its phase/identity structure checks. Neither canonical publication nor a recoverable protocol phase consumes the external budget.
+- A 1025th external entry or a 9th owned entry fails closed before new publication/deletion. Exactly 1024 external entries remain accepted through canonical publication, ordinary restart, and recovery of each supported interrupted phase.
+- Recovery performs one descriptor-relative enumeration of at most 1032 entries and bounded constant work per recognized artifact. Lease acquisition is non-blocking; there is no retry, polling, sleep, or PID-age wait. Test subprocesses use a 2 s per-case ceiling and the adversarial matrix a 30 s enclosing ceiling.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - new internal production module seam; no HTTP/CLI/script consumer yet.
+- Config / project setup: not selected - environment-token priority and server config belong to Child B.
+- File IO / path safety / overwrite: selected - private directory/token creation, no-follow reads, no-clobber publication, identity-bound cleanup.
+- Schema / columns / units / field names: not selected - no Zod or persisted business-record schema.
+- Auth / permissions / secrets: selected - token bytes and 0600/0700 permissions are the module's contract.
+- Concurrency / shared state / ordering: selected - first-create, publication collision, crash recovery, stale/foreign generation, and directory binding.
+- Resource limits / large input / discovery: selected - bounded token bytes, directory entries/names/decoding, descriptor lifecycle, bounded recovery time.
+- Legacy compatibility / examples: selected - safe legacy transaction residue remains recoverable; existing unrelated backend behavior is unchanged.
+- Error handling / rollback / partial outputs: selected - stable typed/recognizable unsafe-storage failure, no partial authority, exact rollback and cleanup.
+- Release / packaging / dependency compatibility: selected - Bun 1.2.19/macOS/Linux, no new dependency or manifest drift.
+- Documentation / migration notes: not selected - internal prerequisite; Child B owns public behavior/migration notes.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - evidence must bind to the exact reviewed source and red/green baseline; no scientific decision is made.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no model/runtime behavior.
+- Zero adapter / tool registry / agent role governance: not selected - no Zero/tool/role changes.
+
+Invariant Matrix:
+- Governing invariant: the module returns authority only for one bounded private token bound to the exact leased secrets directory and exact current file generation; every recovery/destructive transition uses previously established identity, preserves foreign state on mismatch, remains restartable at accepted resource boundaries, and closes all owned descriptors.
+- Source-of-truth identity/contract: held secrets-directory descriptor plus canonical token/control artifact `(dev, ino)`, bounded token bytes, and stable entry-category accounting.
+- Producers: module authority factory and generated-token publication transaction.
+- Validators/preflight: workspace/secrets descriptor chain, file type/mode/link/size/UTF-8 validation, directory entry decoder/accounting, exact identity reproof.
+- Storage/cache/query: `workspace/secrets/local-token` and bounded transaction artifacts only; no global token cache or DB.
+- Public routes/entrypoints: internal module export only; HTTP/listener/readiness consumers are absent by design.
+- Frontend/downstream consumers: Child B is the sole planned consumer; no current consumer changes.
+- Failure paths/rollback/stale state: setup/open/fstat/chmod/write/fsync/rename/cleanup failure, crash at every durable phase, same-name replacements, legacy residue, parent/path races, resource boundary and restart.
+- Evidence/audit/readiness: source-bound semantic red proof for new behavior; coverage-only labels for already-correct untested bounds; macOS/Linux focused matrix, backend compatibility, typecheck/check/perf/OpenSpec/hygiene.
+- Regression rows:
+  - absent safe store -> one 0600 token under 0700 secrets, reusable and re-provable across restart.
+  - accepted maximum external entries plus canonical/protocol allowance -> initial publish, ordinary restart, and each interrupted recovery remain bounded and converge.
+  - same-name foreign replacement at canonical/control/candidate/legacy surfaces -> replacement preserved and operation fails closed.
+  - setup or cleanup failure after any descriptor acquisition -> no returned authority and descriptor/resource baseline restored.
+  - stable existing safe token -> exact bytes reused; invalid/symlink/directory/FIFO/oversize/permission state -> no overwrite and stable failure.
+  - unchanged backend/core/test consumers -> existing behavior remains green because module is not wired.
+
+Exact-generation inventory and required oracles:
+- Token-bearing `canonical`, `staged`, `candidate`, and retired/legacy artifacts: every observation returns `(dev, ino)` and every restore/retire/delete accepts that prior identity; same-name/same-byte new inode survives and yields `LocalTokenStorageError`.
+- Control `publishing`, `rolling-back`, and `lease`: creation captures identity from the held descriptor; recovery validation returns identity; publishing→rolling-back rename proves the name changed while inode did not; success, collision, live rollback, startup recovery, catch cleanup, and marker/lease creation-failure cleanup all consume the captured identity.
+- Direct tests replace publishing, rolling-back, and lease after validation in live and recovery paths; replacement inode/bytes remain, no authority returns, and the next bounded recovery either converges or returns the stable error without deleting foreign state.
+
+Required scenario evidence:
+- `4096` token bytes accepted/reused; `4097`, empty, malformed UTF-8, wrong mode/type/link count, symlink/FIFO/directory, and unsafe ancestor fail with `LocalTokenStorageError`, no overwrite/outside write.
+- `1024 external + 0 owned` -> publish canonical, return authority, leave 1025 total entries, second open reuses identical token; `1025 external` -> fail before publication and preserve all entries.
+- `1024 external` plus interruption at staged, publishing, and rolling-back durable phases -> next open stays within `1024 external + <=8 owned`, converges to one canonical authority or preserves foreign state with the stable error; no owned residue after successful convergence.
+- Real filesystem: 255-byte name accepted and counted; 256-byte is OS-rejected or module-rejected without publication. Controlled raw dirent records for both Darwin and Linux: invalid UTF-8 and duplicate decoded name reject with no publication/residue; these decoder cases are coverage-only because the pre-split implementation already contained the guards.
+- Descriptor lifecycle: inject staged `openat` failure plus lease same-name replacement so exact cleanup also fails; inject staged `fstat` failure. In each case replacement bytes/inode remain, no authority returns, and repeated isolated attempts restore `/dev/fd` (or platform-equivalent descriptor inventory) to the pre-attempt baseline.
+- Semantic red protocol: retain the final injection seams and apply three source-bound mutations separately: (1) control cleanup re-observes current pathname identity, making all six control replacement tests red; (2) legacy total-entry limit of 1024 with no owned allowance, making boundary restart/interrupted-phase tests red; (3) move descriptor guards after staged setup, making lifecycle tests red. Record exact source SHA/patch, command, per-test failure reason, and restore immediately. Existing 255-byte/decoder guards are explicitly coverage-only, never counted as semantic red.
+
+Boundary-surface checklist:
+- Shared helper roots: new token-store module only; existing path helper and route root unchanged.
+- Read/write/delete/overwrite: workspace/secrets descriptors, canonical token, staged/marker/lease/candidate/legacy artifacts; all mutations exact-identity/no-clobber.
+- Staging/publish/rollback: every durable phase, collision, restart, and exact retirement.
+- Stale-state/idempotency: repeated startup, crashes, foreign generation, resource boundary, descriptor cleanup.
+- Downstream: Child B contract documented but not connected.
+
+Non-goals: HTTP auth, listener binding, env priority, readiness, `WORKSPACE_CANONICAL_DIRECTORIES`, deny-root, route-test migration, perf harness, frontend bootstrap, WebSocket/M3+.
+
+Review focus: stable resource accounting across publication/restart; descriptor lifetime from first acquisition; exact-generation control cleanup; source-bound red attribution; no route or shared-helper drift.
+
 ## Subagent Workflow Fixture — Issue #90
 
 Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.

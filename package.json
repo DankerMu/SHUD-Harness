@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:policy-gate": "bun test ./packages/core/src/tools/policy-gate-core.test.ts ./packages/core/src/tools/policy-gate-registry.test.ts ./packages/core/src/tools/raw-data-sandbox.test.ts",
     "test:tool-registry-governance": "bun test ./packages/core/src/tools/role-tool-map.test.ts",
-    "test:backend-api": "bun test ./packages/backend/src/routes/*.test.ts",
+    "test:backend-api": "bun test ./packages/backend/src/routes/*.test.ts ./packages/backend/src/local-auth/*.test.ts",
     "test:backend-ws": "bun test ./packages/backend/src/ws/index.test.ts",
     "test:frontend": "bun test ./packages/frontend/src/**/*.test.ts ./packages/frontend/src/**/*.test.tsx",
     "test:schemas": "bun test ./packages/core/src/domain/schemas/core-schemas.test.ts",
