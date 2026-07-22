@@ -112,7 +112,12 @@ export async function resolveWorkspacePath(
     input.deniedRelativeRoots ?? [],
     input.evidenceRef
   );
-  const deniedBoundary = matchingDeniedBoundary(workspaceRoot, deniedRoots, absolutePath);
+  const deniedBoundary = await matchingDeniedBoundary(
+    workspaceRoot,
+    deniedRoots,
+    absolutePath,
+    input.evidenceRef
+  );
   if (deniedBoundary) {
     throw new WorkspacePathSafetyError(
       "Resolved path targets a denied workspace boundary.",
@@ -745,29 +750,56 @@ function matchingBoundary(
   }
 }
 
-function matchingDeniedBoundary(
+async function matchingDeniedBoundary(
   workspaceRoot: string,
   deniedRoots: readonly string[],
-  targetPath: string
-): string | undefined {
-  if (!isPathInsideBoundary(workspaceRoot, targetPath)) {
-    return undefined;
-  }
-
-  const targetSegments = relative(workspaceRoot, targetPath)
-    .split(sep)
-    .filter(Boolean)
-    .map(unicodeCaseFoldSegment);
-  for (const root of deniedRoots) {
-    const rootSegments = relative(workspaceRoot, root)
+  targetPath: string,
+  evidenceRef: string
+): Promise<string | undefined> {
+  if (isPathInsideBoundary(workspaceRoot, targetPath)) {
+    const targetSegments = relative(workspaceRoot, targetPath)
       .split(sep)
       .filter(Boolean)
       .map(unicodeCaseFoldSegment);
-    if (
-      rootSegments.length <= targetSegments.length &&
-      rootSegments.every((segment, index) => segment === targetSegments[index])
-    ) {
-      return root;
+    for (const root of deniedRoots) {
+      const rootSegments = relative(workspaceRoot, root)
+        .split(sep)
+        .filter(Boolean)
+        .map(unicodeCaseFoldSegment);
+      if (
+        rootSegments.length <= targetSegments.length &&
+        rootSegments.every((segment, index) => segment === targetSegments[index])
+      ) {
+        return root;
+      }
+    }
+  }
+
+  if (deniedRoots.length === 0) return undefined;
+
+  const [workspaceIdentity, targetIdentity, ...deniedIdentities] = await Promise.all([
+    physicalAuthorityPathIdentityCandidates(workspaceRoot, evidenceRef),
+    physicalAuthorityPathIdentityCandidates(targetPath, evidenceRef),
+    ...deniedRoots.map((root) => physicalAuthorityPathIdentityCandidates(root, evidenceRef))
+  ]);
+  const workspaceCandidates = Array.from(
+    new Set([workspaceIdentity.exact, ...workspaceIdentity.aliases])
+  );
+  const targetCandidates = Array.from(new Set([targetIdentity.exact, ...targetIdentity.aliases]));
+
+  for (let index = 0; index < deniedRoots.length; index += 1) {
+    const deniedIdentity = deniedIdentities[index];
+    if (!deniedIdentity) continue;
+    const deniedCandidates = Array.from(new Set([deniedIdentity.exact, ...deniedIdentity.aliases]));
+    const physicallyDenied = targetCandidates.some((targetCandidate) =>
+      workspaceCandidates.some((workspaceCandidate) =>
+        isPathInsideBoundary(workspaceCandidate, targetCandidate)
+      ) && deniedCandidates.some((deniedCandidate) =>
+        isPathInsideBoundary(deniedCandidate, targetCandidate)
+      )
+    );
+    if (physicallyDenied) {
+      return deniedRoots[index];
     }
   }
 

@@ -178,8 +178,10 @@ function sequentialTaskIdFactory(): () => string {
 }
 
 function configurePerfTokenSource(): string {
-  const configured = process.env.HARNESS_LOCAL_TOKEN?.trim();
-  const token = configured && configured.length > 0 ? configured : "perf-local-token";
+  const configured = process.env.HARNESS_LOCAL_TOKEN;
+  const token = configured === undefined || configured.trim().length === 0
+    ? "perf-local-token"
+    : configured;
   process.env.HARNESS_LOCAL_TOKEN = token;
   return token;
 }

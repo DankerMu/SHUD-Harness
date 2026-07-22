@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFile as execFileWithCallback } from "node:child_process";
-import { writeFileSync, type BigIntStats } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+  type BigIntStats
+} from "node:fs";
 import {
   access,
   chmod,
@@ -48,6 +57,7 @@ import {
   type WorkspaceReadyResponse
 } from "./index";
 import * as backendRoutes from "./index";
+import { runWithLocalTokenPublicationStageHookForTest } from "./local-auth-publication-test-support";
 import {
   API_REQUEST_ID_HEADER,
   redactApiLogValue,
@@ -583,13 +593,15 @@ describe("backend workspace and health routes", () => {
       `Bearer  ${token4096}`,
       "Basic abc"
     ];
-    for (const authorization of rejectedHeaders) {
-      const headers = authorization === undefined ? undefined : { authorization };
-      const response = await app.request("/api/unknown", { headers });
-      const body = (await response.json()) as ApiErrorResponse;
-      expect(response.status).toBe(401);
-      expectCanonicalError(body, "permission_error");
-      expect(JSON.stringify(body)).not.toContain(token4096);
+    for (const path of ["/api/tasks", "/api/unknown"] as const) {
+      for (const authorization of rejectedHeaders) {
+        const headers = authorization === undefined ? undefined : { authorization };
+        const response = await app.request(path, { headers });
+        const body = (await response.json()) as ApiErrorResponse;
+        expect(response.status).toBe(401);
+        expectCanonicalError(body, "permission_error");
+        expect(JSON.stringify(body)).not.toContain(token4096);
+      }
     }
   });
 
@@ -600,6 +612,10 @@ describe("backend workspace and health routes", () => {
     for (const invalidToken of [
       "x".repeat(4097),
       "é".repeat(2049),
+      `${"x".repeat(4096)} `,
+      ` ${"x".repeat(4095)}`,
+      `${"x".repeat(4095)} `,
+      `${"é".repeat(2048)}x`,
       "two segments",
       "line\nbreak",
       "\u0000"
@@ -626,6 +642,89 @@ describe("backend workspace and health routes", () => {
     expect(response.status).toBe(404);
     expect(rejected.status).toBe(401);
     await expectPathMissing(workspaceRoot);
+  });
+
+  test("a valid configured token exclusively wins over an existing file authority without disk mutation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const tokenDirectory = join(workspaceRoot, "secrets");
+    const tokenPath = join(tokenDirectory, "local-token");
+    const fileToken = "safe-file-token";
+    await mkdir(tokenDirectory, { recursive: true, mode: 0o700 });
+    await chmod(tokenDirectory, 0o700);
+    await writeFile(tokenPath, fileToken, { flag: "wx", mode: 0o600 });
+    const beforeDirectory = await lstat(tokenDirectory, { bigint: true });
+    const beforeFile = await lstat(tokenPath, { bigint: true });
+    process.env.HARNESS_LOCAL_TOKEN = "configured-token";
+
+    const app = createBackendApi({ workspaceRoot });
+
+    expect((await app.request("/api/tasks", {
+      headers: { authorization: "Bearer configured-token" }
+    })).status).toBe(200);
+    expect((await app.request("/api/tasks", {
+      headers: { authorization: `Bearer ${fileToken}` }
+    })).status).toBe(401);
+    const afterDirectory = await lstat(tokenDirectory, { bigint: true });
+    const afterFile = await lstat(tokenPath, { bigint: true });
+    expect(afterDirectory.dev).toBe(beforeDirectory.dev);
+    expect(afterDirectory.ino).toBe(beforeDirectory.ino);
+    expect(afterDirectory.mode).toBe(beforeDirectory.mode);
+    expect(afterFile.dev).toBe(beforeFile.dev);
+    expect(afterFile.ino).toBe(beforeFile.ino);
+    expect(afterFile.mode).toBe(beforeFile.mode);
+    expect(afterFile.size).toBe(beforeFile.size);
+    expect(await readFile(tokenPath, "utf8")).toBe(fileToken);
+  });
+
+  test("a valid configured token ignores unsafe file-source state without touching it", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const outsideToken = join(tempRoot, "outside-token");
+    const tokenDirectory = join(workspaceRoot, "secrets");
+    const tokenPath = join(tokenDirectory, "local-token");
+    await writeFile(outsideToken, "outside-sentinel", { flag: "wx", mode: 0o600 });
+    await mkdir(tokenDirectory, { recursive: true, mode: 0o700 });
+    await symlink(outsideToken, tokenPath, "file");
+    const beforeLink = await lstat(tokenPath, { bigint: true });
+    process.env.HARNESS_LOCAL_TOKEN = "configured-token";
+
+    const app = createBackendApi({ workspaceRoot });
+
+    expect((await app.request("/api/tasks", {
+      headers: { authorization: "Bearer configured-token" }
+    })).status).toBe(200);
+    const afterLink = await lstat(tokenPath, { bigint: true });
+    expect(afterLink.isSymbolicLink()).toBe(true);
+    expect(afterLink.dev).toBe(beforeLink.dev);
+    expect(afterLink.ino).toBe(beforeLink.ino);
+    expect(await readFile(outsideToken, "utf8")).toBe("outside-sentinel");
+  });
+
+  test("a valid configured token ignores a malformed regular file without rewriting it", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const tokenDirectory = join(workspaceRoot, "secrets");
+    const tokenPath = join(tokenDirectory, "local-token");
+    const malformedBytes = Buffer.from([0xff, 0x00, 0x20]);
+    await mkdir(tokenDirectory, { recursive: true, mode: 0o700 });
+    await chmod(tokenDirectory, 0o700);
+    await writeFile(tokenPath, malformedBytes, { flag: "wx", mode: 0o644 });
+    await chmod(tokenPath, 0o644);
+    const before = await lstat(tokenPath, { bigint: true });
+    process.env.HARNESS_LOCAL_TOKEN = "configured-token";
+
+    const app = createBackendApi({ workspaceRoot });
+
+    expect((await app.request("/api/tasks", {
+      headers: { authorization: "Bearer configured-token" }
+    })).status).toBe(200);
+    const after = await lstat(tokenPath, { bigint: true });
+    expect(after.dev).toBe(before.dev);
+    expect(after.ino).toBe(before.ino);
+    expect(after.mode).toBe(before.mode);
+    expect(after.size).toBe(before.size);
+    expect(await readFile(tokenPath)).toEqual(malformedBytes);
   });
 
   test("missing or blank configured token creates one bounded private workspace token", async () => {
@@ -719,6 +818,288 @@ describe("backend workspace and health routes", () => {
     expect((await createBackendApi({ workspaceRoot }).request("/api/tasks", {
       headers: { authorization: `Bearer ${token}` }
     })).status).toBe(200);
+  });
+
+  test("token publication is single-link and failure-atomic at every mutation boundary", async () => {
+    const faultStages = [
+      "after_write",
+      "after_file_fsync",
+      "after_publish",
+      "before_directory_fsync",
+      "before_post_publish_binding"
+    ] as const;
+
+    for (const faultStage of faultStages) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      delete process.env.HARNESS_LOCAL_TOKEN;
+      let observedPublishedLinkCount: number | undefined;
+      expect(() => runWithLocalTokenPublicationStageHookForTest(
+        ({ stage }) => {
+          if (stage === "after_publish") {
+            observedPublishedLinkCount = lstatSync(
+              join(workspaceRoot, "secrets", "local-token")
+            ).nlink;
+          }
+          if (stage === faultStage) throw new Error(`fault:${faultStage}`);
+        },
+        () => createBackendApi({ workspaceRoot })
+      )).toThrow("Local API token storage is unsafe");
+
+      const entriesAfterFailure = await readdir(join(workspaceRoot, "secrets"));
+      expect(entriesAfterFailure, faultStage).toEqual([]);
+      if (faultStage === "after_publish") {
+        expect(observedPublishedLinkCount).toBe(1);
+      }
+
+      const retryApp = createBackendApi({ workspaceRoot });
+      const retryToken = await readFile(join(workspaceRoot, "secrets", "local-token"), "utf8");
+      expect((await requestWithToken(retryApp, "/api/tasks", retryToken)).status).toBe(200);
+      expect((await lstat(join(workspaceRoot, "secrets", "local-token"))).nlink).toBe(1);
+      expect((await readdir(join(workspaceRoot, "secrets"))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    }
+  });
+
+  test("post-publication parent replacement rolls back only the displaced generation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const parkedWorkspace = join(tempRoot, "parked-workspace");
+    let swapped = false;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage }) => {
+        if (stage !== "before_post_publish_binding" || swapped) return;
+        swapped = true;
+        renameSync(workspaceRoot, parkedWorkspace);
+        mkdirSync(join(workspaceRoot, "secrets"), { recursive: true, mode: 0o700 });
+        chmodSync(join(workspaceRoot, "secrets"), 0o700);
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    expect(swapped).toBe(true);
+    await expectPathMissing(join(parkedWorkspace, "secrets", "local-token"));
+    await expectPathMissing(join(workspaceRoot, "secrets", "local-token"));
+    expect((await readdir(join(parkedWorkspace, "secrets"))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  test("publication collision cleanup preserves the winning authority and supports retry", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    let winnerToken = "";
+    let collisionCleanupReached = false;
+    let winnerStarted = false;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage }) => {
+        if (stage === "after_file_fsync" && !winnerStarted) {
+          winnerStarted = true;
+          createBackendApi({ workspaceRoot });
+          winnerToken = readFileSync(join(workspaceRoot, "secrets", "local-token"), "utf8");
+        }
+        if (stage === "before_temp_cleanup") {
+          collisionCleanupReached = true;
+          throw new Error("fault:before_temp_cleanup");
+        }
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    expect(collisionCleanupReached).toBe(true);
+    expect((await readdir(join(workspaceRoot, "secrets"))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(await readFile(join(workspaceRoot, "secrets", "local-token"), "utf8")).toBe(winnerToken);
+    const retryApp = createBackendApi({ workspaceRoot });
+    expect((await requestWithToken(retryApp, "/api/tasks", winnerToken)).status).toBe(200);
+  });
+
+  test("rollback never deletes a foreign successor at the final token name", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const successorToken = "foreign-successor-token";
+    let replaced = false;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage }) => {
+        if (stage !== "after_publish" || replaced) return;
+        replaced = true;
+        const tokenPath = join(workspaceRoot, "secrets", "local-token");
+        const displaced = join(workspaceRoot, "secrets", "displaced-generation");
+        renameSync(tokenPath, displaced);
+        unlinkSync(displaced);
+        writeFileSync(tokenPath, successorToken, { flag: "wx", mode: 0o600 });
+        throw new Error("fault:foreign-successor");
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    expect(replaced).toBe(true);
+    expect(await readFile(join(workspaceRoot, "secrets", "local-token"), "utf8")).toBe(successorToken);
+    expect((await readdir(join(workspaceRoot, "secrets"))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    const retryApp = createBackendApi({ workspaceRoot });
+    expect((await requestWithToken(retryApp, "/api/tasks", successorToken)).status).toBe(200);
+  });
+
+  test("publisher interruption after no-clobber publish leaves one reusable single-link authority", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const backendIndexUrl = new URL("./index.ts", import.meta.url).href;
+    const testSupportUrl = new URL("./local-auth-publication-test-support.ts", import.meta.url).href;
+    const childScript = [
+      `import { createBackendApi } from ${JSON.stringify(backendIndexUrl)};`,
+      `import { runWithLocalTokenPublicationStageHookForTest } from ${JSON.stringify(testSupportUrl)};`,
+      "runWithLocalTokenPublicationStageHookForTest(({ stage }) => {",
+      '    if (stage === "after_publish") process.kill(process.pid, "SIGKILL");',
+      `  }, () => createBackendApi({ workspaceRoot: ${JSON.stringify(workspaceRoot)} }));`
+    ].join("\n");
+
+    await expect(execFile(process.execPath, ["-e", childScript], {
+      env: { ...process.env, HARNESS_LOCAL_TOKEN: "" },
+      timeout: 2_000
+    })).rejects.toBeDefined();
+
+    const tokenPath = join(workspaceRoot, "secrets", "local-token");
+    const token = await readFile(tokenPath, "utf8");
+    expect((await lstat(tokenPath)).nlink).toBe(1);
+    expect((await readdir(join(workspaceRoot, "secrets"))).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    const retryApp = createBackendApi({ workspaceRoot });
+    expect((await requestWithToken(retryApp, "/api/tasks", token)).status).toBe(200);
+  });
+
+  test("publisher interruption before publish removes the orphan temp on retry", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const backendIndexUrl = new URL("./index.ts", import.meta.url).href;
+    const testSupportUrl = new URL("./local-auth-publication-test-support.ts", import.meta.url).href;
+    const childScript = [
+      `import { createBackendApi } from ${JSON.stringify(backendIndexUrl)};`,
+      `import { runWithLocalTokenPublicationStageHookForTest } from ${JSON.stringify(testSupportUrl)};`,
+      "runWithLocalTokenPublicationStageHookForTest(({ stage }) => {",
+      '    if (stage === "after_file_fsync") process.kill(process.pid, "SIGKILL");',
+      `  }, () => createBackendApi({ workspaceRoot: ${JSON.stringify(workspaceRoot)} }));`
+    ].join("\n");
+
+    await expect(execFile(process.execPath, ["-e", childScript], {
+      env: { ...process.env, HARNESS_LOCAL_TOKEN: "" },
+      timeout: 2_000
+    })).rejects.toBeDefined();
+
+    const secretsRoot = join(workspaceRoot, "secrets");
+    expect((await readdir(secretsRoot)).filter((name) => name.endsWith(".tmp"))).toHaveLength(1);
+    await expectPathMissing(join(secretsRoot, "local-token"));
+    const retryApp = createBackendApi({ workspaceRoot });
+    const retryToken = await readFile(join(secretsRoot, "local-token"), "utf8");
+    expect((await requestWithToken(retryApp, "/api/tasks", retryToken)).status).toBe(200);
+    expect(await readdir(secretsRoot)).toEqual(["local-token"]);
+  });
+
+  test("retry self-heals a legacy interrupted double-link generation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const tokenPath = join(secretsRoot, "local-token");
+    const legacyTemp = join(
+      secretsRoot,
+      ".local-token-999999-00000000-0000-4000-8000-000000000000.tmp"
+    );
+    const token = "legacy-interrupted-token";
+    await mkdir(secretsRoot, { recursive: true, mode: 0o700 });
+    await chmod(secretsRoot, 0o700);
+    await writeFile(tokenPath, token, { flag: "wx", mode: 0o600 });
+    await link(tokenPath, legacyTemp);
+    expect((await lstat(tokenPath)).nlink).toBe(2);
+
+    const app = createBackendApi({ workspaceRoot });
+
+    expect((await lstat(tokenPath)).nlink).toBe(1);
+    await expectPathMissing(legacyTemp);
+    expect((await requestWithToken(app, "/api/tasks", token)).status).toBe(200);
+  });
+
+  test("file-backed authentication and readiness reject every replacement of the original authority", async () => {
+    const mutations: Array<{
+      label: string;
+      mutate: (workspaceRoot: string, tempRoot: string, originalToken: string) => Promise<string>;
+    }> = [
+      {
+        label: "deleted token",
+        mutate: async (workspaceRoot) => {
+          await unlink(join(workspaceRoot, "secrets", "local-token"));
+          return "replacement-token";
+        }
+      },
+      {
+        label: "mode drift",
+        mutate: async (workspaceRoot, _tempRoot, originalToken) => {
+          await chmod(join(workspaceRoot, "secrets", "local-token"), 0o644);
+          return originalToken;
+        }
+      },
+      {
+        label: "same-byte new inode",
+        mutate: async (workspaceRoot, _tempRoot, originalToken) => {
+          const secrets = join(workspaceRoot, "secrets");
+          const replacement = join(secrets, "replacement-token");
+          await writeFile(replacement, originalToken, { flag: "wx", mode: 0o600 });
+          await rename(replacement, join(secrets, "local-token"));
+          return originalToken;
+        }
+      },
+      {
+        label: "different-byte new inode",
+        mutate: async (workspaceRoot) => {
+          const secrets = join(workspaceRoot, "secrets");
+          const replacement = join(secrets, "replacement-token");
+          await writeFile(replacement, "replacement-token", { flag: "wx", mode: 0o600 });
+          await rename(replacement, join(secrets, "local-token"));
+          return "replacement-token";
+        }
+      },
+      {
+        label: "secrets tree generation drift",
+        mutate: async (workspaceRoot, tempRoot, originalToken) => {
+          const secrets = join(workspaceRoot, "secrets");
+          const parked = join(tempRoot, "parked-secrets");
+          await rename(secrets, parked);
+          await mkdir(secrets, { mode: 0o700 });
+          await writeFile(join(secrets, "local-token"), originalToken, {
+            flag: "wx",
+            mode: 0o600
+          });
+          return originalToken;
+        }
+      }
+    ];
+
+    for (const mutation of mutations) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      delete process.env.HARNESS_LOCAL_TOKEN;
+      const app = createBackendApi({ workspaceRoot });
+      const tokenPath = join(workspaceRoot, "secrets", "local-token");
+      const originalToken = await readFile(tokenPath, "utf8");
+      expect((await requestWithToken(app, "/api/workspace/init", originalToken, {
+        method: "POST"
+      })).status, mutation.label).toBe(200);
+
+      const replacementToken = await mutation.mutate(workspaceRoot, tempRoot, originalToken);
+      const readyResponse = await app.request("/api/health/ready");
+      const readyBody = (await readyResponse.json()) as WorkspaceReadyResponse;
+      expect(readyResponse.status, mutation.label).toBe(503);
+      expect(readyBody.status, mutation.label).toBe("not_ready");
+      expect((await requestWithToken(app, "/api/tasks", originalToken)).status, mutation.label).toBe(401);
+      expect((await requestWithToken(app, "/api/tasks", replacementToken)).status, mutation.label).toBe(401);
+      expect((await requestWithToken(app, "/api/workspace/init", originalToken, {
+        method: "POST"
+      })).status, mutation.label).toBe(401);
+      expect(JSON.stringify(readyBody)).not.toContain(originalToken);
+      expect(JSON.stringify(readyBody)).not.toContain(workspaceRoot);
+    }
   });
 
   test("unsafe token files fail closed without following, overwriting, or blocking", async () => {
@@ -10491,6 +10872,17 @@ async function requestApi(
   init?: AppRequestInit
 ): Promise<Response> {
   return await app.request(path, addLocalTokenToApiRequest(path, init));
+}
+
+async function requestWithToken(
+  app: ReturnType<typeof createBackendApi>,
+  path: AppRequestInput,
+  token: string,
+  init?: AppRequestInit
+): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  headers.set("authorization", `Bearer ${token}`);
+  return await app.request(path, { ...init, headers });
 }
 
 async function runTokenProvisionInChild(workspaceRoot: string): Promise<string> {

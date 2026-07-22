@@ -7,6 +7,7 @@ import {
   fstatSync,
   fsyncSync,
   openSync,
+  readdirSync,
   readSync,
   writeSync,
   type BigIntStats
@@ -56,6 +57,11 @@ import {
   createApiRequestLoggerMiddleware,
   type ApiRequestLogSink
 } from "../middleware";
+import {
+  currentLocalTokenPublicationStageHookForTest,
+  type LocalTokenPublicationStageForTest,
+  type LocalTokenPublicationStageHookForTest
+} from "./local-auth-publication-test-support";
 
 export const BACKEND_ROUTES_NAMESPACE = "backend/routes" as const;
 export const BACKEND_PRODUCTION_LISTEN_OPTIONS = Object.freeze({
@@ -85,6 +91,8 @@ const LOCAL_TOKEN_CREATE_OPEN_FLAGS =
   constants.O_EXCL |
   (constants.O_NOFOLLOW ?? 0) |
   (constants.O_NONBLOCK ?? 0);
+const LOCAL_TOKEN_TEMPORARY_NAME_PATTERN =
+  /^\.local-token-(\d+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/u;
 
 export const WORKSPACE_CANONICAL_DIRECTORIES = [
   "repos",
@@ -165,6 +173,27 @@ export interface BackendApiOptions {
   snapshotReadableProbe?: WorkspaceSnapshotReadableProbe;
 }
 
+interface EnvironmentLocalAuthAuthority {
+  readonly kind: "environment";
+  readonly token: string;
+}
+
+interface FileLocalAuthAuthority {
+  readonly kind: "file";
+  readonly token: string;
+  readonly workspaceRoot: string;
+  readonly workspaceObservation: BigIntStats;
+  readonly secretsObservation: BigIntStats;
+  readonly tokenObservation: BigIntStats;
+}
+
+type LocalAuthAuthority = EnvironmentLocalAuthAuthority | FileLocalAuthAuthority;
+
+interface LocalTokenDescriptorRead {
+  readonly token: string;
+  readonly observation: BigIntStats;
+}
+
 export interface WorkspaceInitResponse {
   status: "ok";
   directory_count: number;
@@ -226,8 +255,11 @@ export function createBackendProductionListenOptions(
 export function createBackendApi(options: BackendApiOptions = {}): Hono {
   const app = new Hono();
   const workspaceRoot = resolveWorkspaceRoot(options);
-  const localAuthToken = resolveWorkspaceLocalAuthToken(workspaceRoot);
-  const service = createWorkspaceRoutesService({ ...options, workspaceRoot });
+  const localAuthAuthority = resolveWorkspaceLocalAuthToken(
+    workspaceRoot,
+    currentLocalTokenPublicationStageHookForTest()
+  );
+  const service = createWorkspaceRoutesService({ ...options, workspaceRoot }, localAuthAuthority);
   const taskService = (options.taskServiceFactory ?? createTaskCardService)({
     workspaceRoot,
     now: options.now,
@@ -248,7 +280,7 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
       sink: options.requestLogSink
     })
   );
-  app.use("*", createLocalApiAuthMiddleware(localAuthToken));
+  app.use("*", createLocalApiAuthMiddleware(localAuthAuthority));
 
   app.post("/api/workspace/init", async (c) => {
     try {
@@ -400,7 +432,7 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
   return app;
 }
 
-function createLocalApiAuthMiddleware(localAuthToken: string): MiddlewareHandler {
+function createLocalApiAuthMiddleware(localAuthAuthority: LocalAuthAuthority): MiddlewareHandler {
   return async (c, next) => {
     const path = c.req.path;
     if (path !== "/api" && !path.startsWith("/api/")) {
@@ -417,7 +449,11 @@ function createLocalApiAuthMiddleware(localAuthToken: string): MiddlewareHandler
     }
 
     const bearerToken = parseBearerTokenFromAuthorizationHeader(c.req.header("authorization"));
-    if (bearerToken !== undefined && localAuthTokensMatch(bearerToken, localAuthToken)) {
+    if (
+      bearerToken !== undefined &&
+      localAuthAuthorityIsCurrent(localAuthAuthority) &&
+      localAuthTokensMatch(bearerToken, localAuthAuthority.token)
+    ) {
       await next();
       return;
     }
@@ -461,17 +497,23 @@ function localAuthTokensMatch(actual: string, expected: string): boolean {
   );
 }
 
-function resolveWorkspaceLocalAuthToken(workspaceRoot: string): string {
+function resolveWorkspaceLocalAuthToken(
+  workspaceRoot: string,
+  publicationHookForTest?: LocalTokenPublicationStageHookForTest
+): LocalAuthAuthority {
   const configuredValue = process.env[LOCAL_TOKEN_ENV_VAR];
   const configuredToken = normalizeConfiguredLocalAuthToken(configuredValue);
   if (configuredToken !== undefined) {
-    return configuredToken;
+    return Object.freeze({ kind: "environment", token: configuredToken });
   }
 
-  return provisionWorkspaceLocalAuthToken(workspaceRoot);
+  return provisionWorkspaceLocalAuthToken(workspaceRoot, publicationHookForTest);
 }
 
-function provisionWorkspaceLocalAuthToken(workspaceRoot: string): string {
+function provisionWorkspaceLocalAuthToken(
+  workspaceRoot: string,
+  publicationHookForTest?: LocalTokenPublicationStageHookForTest
+): FileLocalAuthAuthority {
   const resolvedWorkspaceRoot = resolve(workspaceRoot);
   if (resolvedWorkspaceRoot === parse(resolvedWorkspaceRoot).root) {
     throw unsafeLocalTokenStorageError();
@@ -485,15 +527,30 @@ function provisionWorkspaceLocalAuthToken(workspaceRoot: string): string {
       workspaceDescriptor,
       LOCAL_TOKEN_DIRECTORY
     );
+    recoverInterruptedLocalTokenPublication(
+      resolvedWorkspaceRoot,
+      workspaceDescriptor,
+      secretsDescriptor
+    );
     const token = readExistingLocalToken(secretsDescriptor) ??
-      publishGeneratedLocalToken(secretsDescriptor);
+      publishGeneratedLocalToken({
+        workspaceRoot: resolvedWorkspaceRoot,
+        workspaceDescriptor,
+        secretsDescriptor,
+        hookForTest: publicationHookForTest
+      });
     assertDirectoryDescriptorMode(secretsDescriptor, PRIVATE_TOKEN_DIRECTORY_MODE);
     assertWorkspaceTokenDirectoryBinding(
       resolvedWorkspaceRoot,
       workspaceDescriptor,
       secretsDescriptor
     );
-    return token;
+    return captureFileLocalAuthAuthority(
+      resolvedWorkspaceRoot,
+      token,
+      workspaceDescriptor,
+      secretsDescriptor
+    );
   } catch (error) {
     if (error instanceof Error && error.message === "Local API token is invalid.") {
       throw error;
@@ -505,15 +562,176 @@ function provisionWorkspaceLocalAuthToken(workspaceRoot: string): string {
   }
 }
 
+function recoverInterruptedLocalTokenPublication(
+  workspaceRoot: string,
+  workspaceDescriptor: number,
+  secretsDescriptor: number
+): void {
+  assertWorkspaceTokenDirectoryBinding(workspaceRoot, workspaceDescriptor, secretsDescriptor);
+  const names = readdirSync(join(workspaceRoot, LOCAL_TOKEN_DIRECTORY), { encoding: "utf8" });
+  assertWorkspaceTokenDirectoryBinding(workspaceRoot, workspaceDescriptor, secretsDescriptor);
+  let directoryMutated = false;
+
+  for (const name of names) {
+    const matched = LOCAL_TOKEN_TEMPORARY_NAME_PATTERN.exec(name);
+    if (!matched) continue;
+    const publisherPid = Number(matched[1]);
+    const temporaryDescriptor = syscallOpenAt(
+      secretsDescriptor,
+      name,
+      LOCAL_TOKEN_READ_OPEN_FLAGS
+    );
+    if (temporaryDescriptor < 0) continue;
+    try {
+      const temporaryObservation = fstatSync(temporaryDescriptor, { bigint: true });
+      if (
+        !temporaryObservation.isFile() ||
+        temporaryObservation.isSymbolicLink() ||
+        (temporaryObservation.mode & PRIVATE_MODE_MASK) !== PRIVATE_TOKEN_MODE ||
+        temporaryObservation.nlink < 1n ||
+        temporaryObservation.nlink > 2n
+      ) {
+        throw unsafeLocalTokenStorageError();
+      }
+
+      if (temporaryObservation.nlink === 2n) {
+        const finalDescriptor = syscallOpenAt(
+          secretsDescriptor,
+          LOCAL_TOKEN_FILE,
+          LOCAL_TOKEN_READ_OPEN_FLAGS
+        );
+        if (finalDescriptor < 0) throw unsafeLocalTokenStorageError();
+        try {
+          if (!sameFilesystemIdentity(
+            temporaryObservation,
+            fstatSync(finalDescriptor, { bigint: true })
+          )) {
+            throw unsafeLocalTokenStorageError();
+          }
+        } finally {
+          closeSync(finalDescriptor);
+        }
+      } else if (localTokenPublisherProcessIsAlive(publisherPid)) {
+        continue;
+      }
+
+      if (syscallUnlinkAt(secretsDescriptor, name) !== 0) {
+        const reboundDescriptor = syscallOpenAt(
+          secretsDescriptor,
+          name,
+          LOCAL_TOKEN_READ_OPEN_FLAGS
+        );
+        if (reboundDescriptor < 0) continue;
+        closeSync(reboundDescriptor);
+        throw unsafeLocalTokenStorageError();
+      }
+      directoryMutated = true;
+    } finally {
+      closeSync(temporaryDescriptor);
+    }
+  }
+
+  if (directoryMutated) fsyncSync(secretsDescriptor);
+}
+
+function localTokenPublisherProcessIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw unsafeLocalTokenStorageError();
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (hasNodeErrorCode(error, "ESRCH")) return false;
+    if (hasNodeErrorCode(error, "EPERM")) return true;
+    throw unsafeLocalTokenStorageError();
+  }
+}
+
+function hasNodeErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error &&
+    Reflect.get(error, "code") === code;
+}
+
 function normalizeConfiguredLocalAuthToken(value: string | undefined): string | undefined {
   if (value === undefined || value.trim().length === 0) {
     return undefined;
   }
-  const token = value.trim();
-  if (!isValidLocalAuthToken(token)) {
+  if (!isValidLocalAuthToken(value)) {
     throw invalidLocalTokenError();
   }
-  return token;
+  return value;
+}
+
+function captureFileLocalAuthAuthority(
+  workspaceRoot: string,
+  expectedToken: string,
+  workspaceDescriptor: number,
+  secretsDescriptor: number
+): FileLocalAuthAuthority {
+  const tokenDescriptor = syscallOpenAt(
+    secretsDescriptor,
+    LOCAL_TOKEN_FILE,
+    LOCAL_TOKEN_READ_OPEN_FLAGS
+  );
+  if (tokenDescriptor < 0) throw unsafeLocalTokenStorageError();
+  try {
+    const current = readAndValidateLocalTokenDescriptor(tokenDescriptor, secretsDescriptor);
+    if (!localAuthTokensMatch(current.token, expectedToken)) {
+      throw unsafeLocalTokenStorageError();
+    }
+    return Object.freeze({
+      kind: "file",
+      token: current.token,
+      workspaceRoot,
+      workspaceObservation: fstatSync(workspaceDescriptor, { bigint: true }),
+      secretsObservation: fstatSync(secretsDescriptor, { bigint: true }),
+      tokenObservation: current.observation
+    });
+  } finally {
+    closeSync(tokenDescriptor);
+  }
+}
+
+function localAuthAuthorityIsCurrent(authority: LocalAuthAuthority): boolean {
+  if (authority.kind === "environment") return true;
+
+  let workspaceDescriptor: number | undefined;
+  let secretsDescriptor: number | undefined;
+  let tokenDescriptor: number | undefined;
+  try {
+    workspaceDescriptor = openExistingWorkspaceRootDescriptor(authority.workspaceRoot);
+    if (!sameFilesystemIdentity(
+      authority.workspaceObservation,
+      fstatSync(workspaceDescriptor, { bigint: true })
+    )) return false;
+
+    secretsDescriptor = syscallOpenAt(
+      workspaceDescriptor,
+      LOCAL_TOKEN_DIRECTORY,
+      LOCAL_TOKEN_DIRECTORY_OPEN_FLAGS
+    );
+    if (secretsDescriptor < 0) return false;
+    assertDirectoryDescriptorMode(secretsDescriptor, PRIVATE_TOKEN_DIRECTORY_MODE);
+    if (!sameFilesystemIdentity(
+      authority.secretsObservation,
+      fstatSync(secretsDescriptor, { bigint: true })
+    )) return false;
+
+    tokenDescriptor = syscallOpenAt(
+      secretsDescriptor,
+      LOCAL_TOKEN_FILE,
+      LOCAL_TOKEN_READ_OPEN_FLAGS
+    );
+    if (tokenDescriptor < 0) return false;
+    const current = readAndValidateLocalTokenDescriptor(tokenDescriptor, secretsDescriptor);
+    return sameTokenFileObservation(authority.tokenObservation, current.observation) &&
+      localAuthTokensMatch(current.token, authority.token);
+  } catch {
+    return false;
+  } finally {
+    closeDescriptorIfOwned(tokenDescriptor);
+    closeDescriptorIfOwned(secretsDescriptor);
+    closeDescriptorIfOwned(workspaceDescriptor);
+  }
 }
 
 function isValidLocalAuthToken(token: string): boolean {
@@ -595,13 +813,19 @@ function readExistingLocalToken(secretsDescriptor: number): string | undefined {
   );
   if (descriptor < 0) return undefined;
   try {
-    return readAndValidateLocalTokenDescriptor(descriptor, secretsDescriptor);
+    return readAndValidateLocalTokenDescriptor(descriptor, secretsDescriptor).token;
   } finally {
     closeSync(descriptor);
   }
 }
 
-function publishGeneratedLocalToken(secretsDescriptor: number): string {
+function publishGeneratedLocalToken(input: {
+  workspaceRoot: string;
+  workspaceDescriptor: number;
+  secretsDescriptor: number;
+  hookForTest?: LocalTokenPublicationStageHookForTest;
+}): string {
+  const { workspaceRoot, workspaceDescriptor, secretsDescriptor, hookForTest } = input;
   const token = randomBytes(32).toString("base64url");
   const tokenBytes = Buffer.from(token, "utf8");
   const temporaryName = `.local-token-${process.pid}-${randomUUID()}.tmp`;
@@ -613,43 +837,136 @@ function publishGeneratedLocalToken(secretsDescriptor: number): string {
   );
   if (temporaryDescriptor < 0) throw unsafeLocalTokenStorageError();
 
-  let temporaryLinked = true;
+  let temporaryExists = true;
+  let published = false;
+  let publishedObservation: BigIntStats | undefined;
   try {
     fchmodSync(temporaryDescriptor, 0o600);
     writeAllDescriptorBytes(temporaryDescriptor, tokenBytes);
+    invokeLocalTokenPublicationHookForTest(hookForTest, "after_write");
     fsyncSync(temporaryDescriptor);
+    invokeLocalTokenPublicationHookForTest(hookForTest, "after_file_fsync");
     assertTokenFileStat(fstatSync(temporaryDescriptor, { bigint: true }));
-    closeSync(temporaryDescriptor);
+    publishedObservation = fstatSync(temporaryDescriptor, { bigint: true });
 
-    const published = syscallLinkAt(
+    published = syscallRenameAtNoReplace(
       secretsDescriptor,
       temporaryName,
       secretsDescriptor,
       LOCAL_TOKEN_FILE
     ) === 0;
-    if (syscallUnlinkAt(secretsDescriptor, temporaryName) !== 0) {
-      throw unsafeLocalTokenStorageError();
+    if (published) {
+      temporaryExists = false;
+      invokeLocalTokenPublicationHookForTest(hookForTest, "after_publish");
+    } else {
+      invokeLocalTokenPublicationHookForTest(hookForTest, "before_temp_cleanup");
+      if (syscallUnlinkAt(secretsDescriptor, temporaryName) !== 0) {
+        throw unsafeLocalTokenStorageError();
+      }
+      temporaryExists = false;
     }
-    temporaryLinked = false;
+
+    invokeLocalTokenPublicationHookForTest(hookForTest, "before_directory_fsync");
     fsyncSync(secretsDescriptor);
     if (!published) {
       const racedToken = readExistingLocalTokenWithRetry(secretsDescriptor);
       if (racedToken === undefined) throw unsafeLocalTokenStorageError();
       return racedToken;
     }
+
+    invokeLocalTokenPublicationHookForTest(hookForTest, "before_post_publish_binding");
+    assertWorkspaceTokenDirectoryBinding(
+      workspaceRoot,
+      workspaceDescriptor,
+      secretsDescriptor
+    );
     const publishedToken = readExistingLocalTokenWithRetry(secretsDescriptor);
     if (publishedToken !== token) throw unsafeLocalTokenStorageError();
     return publishedToken;
   } catch (error) {
+    if (published && publishedObservation) {
+      rollbackPublishedLocalTokenIfExact(secretsDescriptor, publishedObservation);
+    }
+    if (temporaryExists) {
+      if (syscallUnlinkAt(secretsDescriptor, temporaryName) === 0) {
+        try {
+          fsyncSync(secretsDescriptor);
+        } catch {
+          // The caller still fails closed after cleanup durability uncertainty.
+        }
+      }
+    }
+    throw error;
+  } finally {
     try {
       closeSync(temporaryDescriptor);
     } catch {
-      // The descriptor may already be closed after the durable write.
+      // The descriptor has no namespace authority after cleanup/rollback.
     }
-    if (temporaryLinked) {
-      syscallUnlinkAt(secretsDescriptor, temporaryName);
+  }
+}
+
+function invokeLocalTokenPublicationHookForTest(
+  hook: LocalTokenPublicationStageHookForTest | undefined,
+  stage: LocalTokenPublicationStageForTest
+): void {
+  hook?.(Object.freeze({ stage }));
+}
+
+function rollbackPublishedLocalTokenIfExact(
+  secretsDescriptor: number,
+  publishedObservation: BigIntStats
+): void {
+  const rollbackName = `.local-token-rollback-${process.pid}-${randomUUID()}.tmp`;
+  if (syscallRenameAtNoReplace(
+    secretsDescriptor,
+    LOCAL_TOKEN_FILE,
+    secretsDescriptor,
+    rollbackName
+  ) !== 0) return;
+
+  const reboundDescriptor = syscallOpenAt(
+    secretsDescriptor,
+    rollbackName,
+    LOCAL_TOKEN_READ_OPEN_FLAGS
+  );
+  if (reboundDescriptor < 0) {
+    restoreRollbackCandidate(secretsDescriptor, rollbackName);
+    return;
+  }
+  let exactGeneration = false;
+  try {
+    const reboundObservation = fstatSync(reboundDescriptor, { bigint: true });
+    exactGeneration = sameFilesystemIdentity(publishedObservation, reboundObservation);
+  } catch {
+    exactGeneration = false;
+  } finally {
+    closeSync(reboundDescriptor);
+  }
+  if (!exactGeneration) {
+    restoreRollbackCandidate(secretsDescriptor, rollbackName);
+    return;
+  }
+  if (syscallUnlinkAt(secretsDescriptor, rollbackName) === 0) {
+    try {
+      fsyncSync(secretsDescriptor);
+    } catch {
+      // The exact generation is already absent; durability failure remains fail-closed.
     }
-    throw error;
+  }
+}
+
+function restoreRollbackCandidate(secretsDescriptor: number, rollbackName: string): void {
+  if (syscallRenameAtNoReplace(
+    secretsDescriptor,
+    rollbackName,
+    secretsDescriptor,
+    LOCAL_TOKEN_FILE
+  ) !== 0) return;
+  try {
+    fsyncSync(secretsDescriptor);
+  } catch {
+    // The foreign generation is restored; durability uncertainty remains fail-closed.
   }
 }
 
@@ -670,7 +987,7 @@ function readExistingLocalTokenWithRetry(secretsDescriptor: number): string | un
 function readAndValidateLocalTokenDescriptor(
   descriptor: number,
   secretsDescriptor: number
-): string {
+): LocalTokenDescriptorRead {
   const before = fstatSync(descriptor, { bigint: true });
   assertTokenFileStat(before);
   const expectedBytes = Number(before.size);
@@ -713,7 +1030,7 @@ function readAndValidateLocalTokenDescriptor(
     throw invalidLocalTokenError();
   }
   if (!isValidLocalAuthToken(token)) throw invalidLocalTokenError();
-  return token;
+  return Object.freeze({ token, observation: after });
 }
 
 function assertTokenFileStat(entry: BigIntStats): void {
@@ -833,12 +1150,11 @@ function closeDescriptorIfOwned(descriptor: number | undefined): void {
 interface LocalTokenFilesystemSyscalls {
   openAt(parentDescriptor: number, path: Buffer, flags: number, mode?: number): number;
   mkdirAt(parentDescriptor: number, path: Buffer, mode: number): number;
-  linkAt(
+  renameAtNoReplace(
     oldParentDescriptor: number,
     oldPath: Buffer,
     newParentDescriptor: number,
-    newPath: Buffer,
-    flags: number
+    newPath: Buffer
   ): number;
   unlinkAt(parentDescriptor: number, path: Buffer, flags: number): number;
 }
@@ -847,28 +1163,55 @@ let localTokenFilesystemSyscalls: LocalTokenFilesystemSyscalls | undefined;
 
 function getLocalTokenFilesystemSyscalls(): LocalTokenFilesystemSyscalls {
   if (localTokenFilesystemSyscalls) return localTokenFilesystemSyscalls;
-  const symbols = {
+  const baseSymbols = {
     openat: { args: ["i32", "cstring", "i32", "i32"], returns: "i32" },
     mkdirat: { args: ["i32", "cstring", "i32"], returns: "i32" },
-    linkat: { args: ["i32", "cstring", "i32", "cstring", "i32"], returns: "i32" },
     unlinkat: { args: ["i32", "cstring", "i32"], returns: "i32" }
   } as const;
   if (process.platform === "darwin") {
+    const symbols = {
+      ...baseSymbols,
+      renameatx_np: {
+        args: ["i32", "cstring", "i32", "cstring", "u32"],
+        returns: "i32"
+      }
+    } as const;
     const library = dlopen("/usr/lib/libSystem.B.dylib", symbols);
     localTokenFilesystemSyscalls = {
       openAt: library.symbols.openat,
       mkdirAt: library.symbols.mkdirat,
-      linkAt: library.symbols.linkat,
+      renameAtNoReplace: (oldParentDescriptor, oldPath, newParentDescriptor, newPath) =>
+        library.symbols.renameatx_np(
+          oldParentDescriptor,
+          oldPath,
+          newParentDescriptor,
+          newPath,
+          0x00000004
+        ),
       unlinkAt: library.symbols.unlinkat
     };
     return localTokenFilesystemSyscalls;
   }
   if (process.platform === "linux") {
+    const symbols = {
+      ...baseSymbols,
+      renameat2: {
+        args: ["i32", "cstring", "i32", "cstring", "u32"],
+        returns: "i32"
+      }
+    } as const;
     const library = dlopen("libc.so.6", symbols);
     localTokenFilesystemSyscalls = {
       openAt: library.symbols.openat,
       mkdirAt: library.symbols.mkdirat,
-      linkAt: library.symbols.linkat,
+      renameAtNoReplace: (oldParentDescriptor, oldPath, newParentDescriptor, newPath) =>
+        library.symbols.renameat2(
+          oldParentDescriptor,
+          oldPath,
+          newParentDescriptor,
+          newPath,
+          0x00000001
+        ),
       unlinkAt: library.symbols.unlinkat
     };
     return localTokenFilesystemSyscalls;
@@ -889,18 +1232,17 @@ function syscallMkdirAt(parentDescriptor: number, path: string, mode: number): n
   return getLocalTokenFilesystemSyscalls().mkdirAt(parentDescriptor, cString(path), mode);
 }
 
-function syscallLinkAt(
+function syscallRenameAtNoReplace(
   oldParentDescriptor: number,
   oldPath: string,
   newParentDescriptor: number,
   newPath: string
 ): number {
-  return getLocalTokenFilesystemSyscalls().linkAt(
+  return getLocalTokenFilesystemSyscalls().renameAtNoReplace(
     oldParentDescriptor,
     cString(oldPath),
     newParentDescriptor,
-    cString(newPath),
-    0
+    cString(newPath)
   );
 }
 
@@ -2943,7 +3285,8 @@ function zodEvidenceRefs(error: ZodError): string[] {
 }
 
 export function createWorkspaceRoutesService(
-  options: BackendApiOptions = {}
+  options: BackendApiOptions = {},
+  localAuthAuthority?: LocalAuthAuthority
 ): WorkspaceRoutesService {
   const workspaceRoot = resolveWorkspaceRoot(options);
   const version = options.version ?? process.env.npm_package_version ?? "0.0.0";
@@ -2960,7 +3303,13 @@ export function createWorkspaceRoutesService(
         WORKSPACE_CANONICAL_DIRECTORIES.map((relativeDir) => relativeDir.split("/")),
         "workspace.init"
       );
-      secureExistingWorkspaceTokenDirectory(workspaceRoot);
+      if (localAuthAuthority?.kind === "file") {
+        if (!localAuthAuthorityIsCurrent(localAuthAuthority)) {
+          throw unsafeLocalTokenStorageError();
+        }
+      } else {
+        secureExistingWorkspaceTokenDirectory(workspaceRoot);
+      }
 
       return {
         status: "ok",
@@ -2981,6 +3330,13 @@ export function createWorkspaceRoutesService(
 
     async ready(): Promise<WorkspaceReadyResponse> {
       const missingDirectories = await findMissingWorkspaceDirectories(workspaceRoot);
+      if (
+        localAuthAuthority?.kind === "file" &&
+        !localAuthAuthorityIsCurrent(localAuthAuthority) &&
+        !missingDirectories.includes(LOCAL_TOKEN_DIRECTORY)
+      ) {
+        missingDirectories.push(LOCAL_TOKEN_DIRECTORY);
+      }
       const snapshotReadable = await probeSnapshotReadable(
         workspaceRoot,
         snapshotReadableProbe
