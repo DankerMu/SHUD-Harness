@@ -11,10 +11,13 @@ export type LocalTokenPublicationStageForTest =
   | "after_rollback_move"
   | "before_rollback_candidate_cleanup"
   | "before_rollback_restore"
-  | "after_rollback_restore";
+  | "after_rollback_restore"
+  | "before_recovery_directory_read"
+  | "after_recovery_directory_read"
+  | "before_recovery_artifact_open";
 
 export type LocalTokenPublicationStageHookForTest = (
-  input: Readonly<{ stage: LocalTokenPublicationStageForTest }>
+  input: Readonly<{ stage: LocalTokenPublicationStageForTest; name?: string }>
 ) => void;
 
 const localTokenPublicationHookStorage =

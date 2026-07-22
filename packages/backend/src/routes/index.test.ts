@@ -4,6 +4,7 @@ import {
   chmodSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -946,6 +947,35 @@ describe("backend workspace and health routes", () => {
     expect((await requestWithToken(retryApp, "/api/tasks", successorToken)).status).toBe(200);
   });
 
+  test("live rollback preserves a same-byte foreign inode at the final token name", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const tokenPath = join(workspaceRoot, "secrets", "local-token");
+    let successorToken = "";
+    let successorIdentity: BigIntStats | undefined;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage }) => {
+        if (stage !== "before_post_publish_binding" || successorIdentity !== undefined) return;
+        successorToken = readFileSync(tokenPath, "utf8");
+        const displacedPath = join(workspaceRoot, "secrets", "displaced-own-generation");
+        renameSync(tokenPath, displacedPath);
+        unlinkSync(displacedPath);
+        writeFileSync(tokenPath, successorToken, { flag: "wx", mode: 0o600 });
+        successorIdentity = lstatSync(tokenPath, { bigint: true });
+        throw new Error("fault:same-byte-foreign-successor");
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    const successor = await lstat(tokenPath, { bigint: true });
+    expect(successor.dev).toBe(successorIdentity?.dev);
+    expect(successor.ino).toBe(successorIdentity?.ino);
+    expect(await readFile(tokenPath, "utf8")).toBe(successorToken);
+    expect(await readdir(join(workspaceRoot, "secrets"))).toEqual(["local-token"]);
+  });
+
   test("publisher interruption after no-clobber publish leaves one reusable single-link authority", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1103,6 +1133,98 @@ describe("backend workspace and health routes", () => {
     expect(await readdir(secretsRoot)).toEqual(["local-token"]);
   });
 
+  test("rollback crash preserves a same-byte foreign inode as the canonical authority", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const identityPath = join(tempRoot, "foreign-identity.json");
+    const backendIndexUrl = new URL("./index.ts", import.meta.url).href;
+    const testSupportUrl = new URL("./local-auth-publication-test-support.ts", import.meta.url).href;
+    const childScript = [
+      'import { lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";',
+      'import { join } from "node:path";',
+      `import { createBackendApi } from ${JSON.stringify(backendIndexUrl)};`,
+      `import { runWithLocalTokenPublicationStageHookForTest } from ${JSON.stringify(testSupportUrl)};`,
+      `const workspaceRoot = ${JSON.stringify(workspaceRoot)};`,
+      `const identityPath = ${JSON.stringify(identityPath)};`,
+      "runWithLocalTokenPublicationStageHookForTest(({ stage }) => {",
+      '    if ((stage as string) === "before_post_publish_binding") {',
+      '      const tokenPath = join(workspaceRoot, "secrets", "local-token");',
+      '      const token = readFileSync(tokenPath, "utf8");',
+      '      const displacedPath = join(workspaceRoot, "secrets", "displaced-own-generation");',
+      "      renameSync(tokenPath, displacedPath);",
+      "      unlinkSync(displacedPath);",
+      '      writeFileSync(tokenPath, token, { flag: "wx", mode: 0o600 });',
+      '      const identity = lstatSync(tokenPath, { bigint: true });',
+      '      writeFileSync(identityPath, JSON.stringify({ dev: identity.dev.toString(), ino: identity.ino.toString(), token }));',
+      '      throw new Error("fault:same-byte-foreign-successor");',
+      "    }",
+      '    if ((stage as string) === "after_rollback_move") process.kill(process.pid, "SIGKILL");',
+      "  }, () => createBackendApi({ workspaceRoot }));"
+    ].join("\n");
+
+    let childSignal: unknown;
+    try {
+      await execFile(process.execPath, ["-e", childScript], {
+        env: { ...process.env, HARNESS_LOCAL_TOKEN: "" },
+        timeout: 2_000
+      });
+    } catch (error) {
+      childSignal = typeof error === "object" && error !== null
+        ? Reflect.get(error, "signal")
+        : undefined;
+    }
+    expect(childSignal).toBe("SIGKILL");
+
+    const expected = JSON.parse(await readFile(identityPath, "utf8")) as {
+      dev: string;
+      ino: string;
+      token: string;
+    };
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const retryApp = createBackendApi({ workspaceRoot });
+    const restored = await lstat(join(secretsRoot, "local-token"), { bigint: true });
+    expect(restored.dev.toString()).toBe(expected.dev);
+    expect(restored.ino.toString()).toBe(expected.ino);
+    expect(await readFile(join(secretsRoot, "local-token"), "utf8")).toBe(expected.token);
+    expect((await requestWithToken(retryApp, "/api/tasks", expected.token)).status).toBe(200);
+    expect(await readdir(secretsRoot)).toEqual(["local-token"]);
+  });
+
+  test("rollback candidate cleanup preserves a replacement installed after validation", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const secretsRoot = join(workspaceRoot, "secrets");
+    let replacementName = "";
+    let replacementIdentity: BigIntStats | undefined;
+
+    expect(() => runWithLocalTokenPublicationStageHookForTest(
+      ({ stage }) => {
+        if (stage === "before_post_publish_binding") {
+          throw new Error("fault:enter-rollback");
+        }
+        if (stage !== "before_rollback_candidate_cleanup" || replacementName !== "") return;
+        replacementName = readdirSync(secretsRoot).find((name) => name.endsWith(".candidate")) ?? "";
+        if (replacementName === "") throw new Error("missing rollback candidate");
+        const candidatePath = join(secretsRoot, replacementName);
+        const token = readFileSync(candidatePath, "utf8");
+        const displacedPath = join(secretsRoot, "displaced-own-candidate");
+        renameSync(candidatePath, displacedPath);
+        unlinkSync(displacedPath);
+        writeFileSync(candidatePath, token, { flag: "wx", mode: 0o600 });
+        replacementIdentity = lstatSync(candidatePath, { bigint: true });
+      },
+      () => createBackendApi({ workspaceRoot })
+    )).toThrow("Local API token storage is unsafe");
+
+    expect(replacementName).not.toBe("");
+    const replacement = await lstat(join(secretsRoot, replacementName), { bigint: true });
+    expect(replacement.dev).toBe(replacementIdentity?.dev);
+    expect(replacement.ino).toBe(replacementIdentity?.ino);
+    expect((await readdir(secretsRoot)).some((name) => name.endsWith(".rolling-back"))).toBe(true);
+  });
+
   test("rollback with two uncoordinated foreign successors fails closed without deleting either", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
@@ -1166,6 +1288,100 @@ describe("backend workspace and health routes", () => {
     });
 
     const app = createBackendApi({ workspaceRoot });
+    const token = await readFile(join(secretsRoot, "local-token"), "utf8");
+    expect((await requestWithToken(app, "/api/tasks", token)).status).toBe(200);
+    expect(await readdir(secretsRoot)).toEqual(["local-token"]);
+  });
+
+  test("descriptor-bound recovery ignores an A-to-B-to-A pathname swap during enumeration", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const parkedSecretsRoot = join(workspaceRoot, "parked-secrets");
+    const alternateSecretsRoot = join(workspaceRoot, "alternate-secrets");
+    const leasedStaleName = `.local-token-${process.pid}-10000000-0000-4000-8000-000000000001.tmp`;
+    const alternateStaleName = `.local-token-${process.pid}-20000000-0000-4000-8000-000000000002.tmp`;
+    await mkdir(secretsRoot, { recursive: true, mode: 0o700 });
+    await chmod(secretsRoot, 0o700);
+    await mkdir(alternateSecretsRoot, { mode: 0o700 });
+    await writeFile(join(secretsRoot, leasedStaleName), "leased-stale-token", { mode: 0o600 });
+    await writeFile(join(alternateSecretsRoot, alternateStaleName), "alternate-stale-token", { mode: 0o600 });
+    let swapped = false;
+    let restored = false;
+
+    const app = runWithLocalTokenPublicationStageHookForTest(
+      ({ stage }) => {
+        if (stage === "before_recovery_directory_read" && !swapped) {
+          swapped = true;
+          renameSync(secretsRoot, parkedSecretsRoot);
+          renameSync(alternateSecretsRoot, secretsRoot);
+        }
+        if (stage === "after_recovery_directory_read" && swapped && !restored) {
+          restored = true;
+          renameSync(secretsRoot, alternateSecretsRoot);
+          renameSync(parkedSecretsRoot, secretsRoot);
+        }
+      },
+      () => createBackendApi({ workspaceRoot })
+    );
+
+    expect(swapped).toBe(true);
+    expect(restored).toBe(true);
+    const token = await readFile(join(secretsRoot, "local-token"), "utf8");
+    expect((await requestWithToken(app, "/api/tasks", token)).status).toBe(200);
+    expect(await readdir(secretsRoot)).toEqual(["local-token"]);
+    expect(await readdir(alternateSecretsRoot)).toEqual([alternateStaleName]);
+  });
+
+  test("legacy recovery fails closed for present unopenable entries", async () => {
+    for (const kind of ["mode-zero", "symlink"] as const) {
+      const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+      tempRoots.push(tempRoot);
+      delete process.env.HARNESS_LOCAL_TOKEN;
+      const secretsRoot = join(workspaceRoot, "secrets");
+      const legacyName = `.local-token-${process.pid}-30000000-0000-4000-8000-000000000003.tmp`;
+      const legacyPath = join(secretsRoot, legacyName);
+      await mkdir(secretsRoot, { recursive: true, mode: 0o700 });
+      await chmod(secretsRoot, 0o700);
+      if (kind === "mode-zero") {
+        await writeFile(legacyPath, "unopenable-legacy-token", { mode: 0o600 });
+        await chmod(legacyPath, 0o000);
+      } else {
+        const outsidePath = join(tempRoot, "outside-token");
+        await writeFile(outsidePath, "outside-token", { mode: 0o600 });
+        await symlink(outsidePath, legacyPath);
+      }
+
+      expect(() => createBackendApi({ workspaceRoot }), kind).toThrow(
+        "Local API token storage is unsafe"
+      );
+      expect((await lstat(legacyPath)).isSymbolicLink()).toBe(kind === "symlink");
+      await expectPathMissing(join(secretsRoot, "local-token"));
+    }
+  });
+
+  test("legacy recovery permits only disappearance proven by descriptor re-enumeration", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    delete process.env.HARNESS_LOCAL_TOKEN;
+    const secretsRoot = join(workspaceRoot, "secrets");
+    const legacyName = `.local-token-${process.pid}-40000000-0000-4000-8000-000000000004.tmp`;
+    await mkdir(secretsRoot, { recursive: true, mode: 0o700 });
+    await chmod(secretsRoot, 0o700);
+    await writeFile(join(secretsRoot, legacyName), "disappearing-legacy-token", { mode: 0o600 });
+    let disappeared = false;
+
+    const app = runWithLocalTokenPublicationStageHookForTest(
+      ({ stage, name }) => {
+        if (stage !== "before_recovery_artifact_open" || name !== legacyName || disappeared) return;
+        disappeared = true;
+        unlinkSync(join(secretsRoot, legacyName));
+      },
+      () => createBackendApi({ workspaceRoot })
+    );
+
+    expect(disappeared).toBe(true);
     const token = await readFile(join(secretsRoot, "local-token"), "utf8");
     expect((await requestWithToken(app, "/api/tasks", token)).status).toBe(200);
     expect(await readdir(secretsRoot)).toEqual(["local-token"]);
