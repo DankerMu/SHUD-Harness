@@ -19,7 +19,15 @@
 
 ## 3. hashing 工具（高风险面，独立）
 
-- [ ] 3.1 sha256 双形态工具：文件流式 + 目录排序行协议；符号链接/非常规文件/空目录拒绝，no-follow 纪律，复用 M1 path-safety helper（验证: 确定性/变更敏感/链接拒绝单测，core-services 套件）
+- [x] 3.1 sha256 双形态工具：文件流式 + 目录排序行协议；符号链接/非常规文件/空目录拒绝，no-follow 纪律，复用 M1 path-safety helper（验证: 确定性/变更敏感/链接拒绝单测，core-services 套件）
+  - Fixture (#90): expanded / high；完整风险包、Invariant Matrix 与 boundary-surface checklist 见 design「Subagent Workflow Fixture — Issue #90」。
+  - Evidence floor (#90):
+    - 文件 fixture（已知字节、空文件、大于 stream chunk）-> digest 与独立 `createHash`/`shasum -a 256` 参照一致；测试证明实现不使用 `readFile` 整读。
+    - 从 `packages/core/src/domain/services` barrel 导入 `hashFile`/`hashDirectory`，断言固定 options 输入、`Promise<string>` 输出及 `WorkspacePathSafetyError` 错误契约。
+    - 独立目录协议 oracle：`a.txt="A"`（file sha `559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd`）与 `nested/b.txt="B"`（file sha `df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c`）按 `/` 相对路径和精确单换行组装后，directory sha 为 `abeb7f0f89055fff57ff5fdec6e07f6b397071d82f6b11e52d068bef7951bb0d`；不同创建顺序仍相同。
+    - 在上述目录新增文件、修改内容、重命名相对路径 -> digest 均改变。
+    - 空目录、symlink leaf、symlink ancestor、目录内 symlink、FIFO（平台支持时）及枚举/打开窗口对象替换 -> `WorkspacePathSafetyError`，不跟随、不阻塞、不返回 partial digest。
+    - `npx --yes bun@1.2.19 run test:core-services`；`npx --yes bun@1.2.19 run typecheck`；`npx --yes bun@1.2.19 run check`；`npx --yes openspec validate m2-research-context --strict --no-interactive`；`git diff --check`；`git -C zero diff --quiet`；`test -z "$(git ls-files workspace)"`；`git diff --exit-code origin/main -- package.json packages/*/package.json bun.lock`。
 
 ## 4. stack-lock
 

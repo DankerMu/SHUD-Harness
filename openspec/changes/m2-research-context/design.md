@@ -96,6 +96,80 @@ M1 教训：#19 单 issue 扛整个 seatbelt 面（25 轮/205 项拦截）、#74
 | ID 格式偏离 canonical 示例被审查反复质疑 | D5 显式裁决 + spec 记录，审查以本 design 为准 |
 | STACK/DATA 记录并发写 | 全部经 M1 record store 权威（#74 硬化面），无新并发原语 |
 
+## Subagent Workflow Fixture — Issue #90
+
+Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.
+
+Expanded-trigger rationale:
+- Core triggers: shared hashing service、文件/目录读取、symlink/no-follow、非常规文件拒绝和大输入流式处理。
+- Profile triggers: `workspace`、path/evidence lineage；后续 StackLock 与 DataProvenance 会消费本服务，但调用方接线不在本 issue。
+
+Change surface:
+- `packages/core/src/domain/services/` 下的 hashing service、service export boundary 与独立 core-services 单测。
+
+Must preserve:
+- M1 `workspace-path-safety` 是路径规范化、边界与 symlink preflight 的唯一 owner；本 issue 只消费其公开契约，不修改 helper 本体。
+- 现有 core service 导出、测试和 workspace record/read/write 行为不变；不接线 StackLock、DataProvenance、manifest 或 API route。
+
+Must add/change:
+- `hashFile` 对常规文件内容做流式 sha256，结果与 `shasum -a 256` 一致。
+- `hashDirectory` 递归检查目录树，拒绝任意 symlink/非常规项；把全部常规文件规范为 `/` 分隔的相对路径，按字典序生成 `"<relpath>\n<file-sha256>\n"` 字节序列并哈希；无常规文件时拒绝。
+- 在 path-safety preflight 后于打开/读取点再次执行 no-follow 与常规文件身份检查；错误统一为 `WorkspacePathSafetyError` 家族。
+- 公共签名固定为 `hashFile(input)` / `hashDirectory(input)`，其中 input 为 `{ workspaceRoot, inputPath, evidenceRef, allowedReadonlyRoots? }`，返回 `Promise<string>`。
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - `services/index.ts` 暴露公共 core service API；不新增 HTTP/CLI/script 入口。
+- Config / project setup: not selected - 无配置、环境变量或 workspace 初始化变化。
+- File IO / path safety / overwrite: selected - 读取文件树且必须拒绝 traversal、symlink 和非常规项，不产生写入。
+- Schema / columns / units / field names: not selected - 不新增或修改 Zod/持久化 schema。
+- Auth / permissions / secrets: not selected - 不接线用户输入端点或 secrets deny 子树；该策略属于 1.1/5.1。
+- Concurrency / shared state / ordering: selected - 目录枚举到读取间的对象替换必须 fail closed，不能跟随替换后的 symlink/非原对象。
+- Resource limits / large input / discovery: selected - 文件内容流式读取，目录发现仅限目标子树；内存不随文件字节数增长。
+- Legacy compatibility / examples: selected - M1 path-safety helper、service export 与既有 core-services 套件保持兼容。
+- Error handling / rollback / partial outputs: selected - 任一不安全/缺失/变化项使整次 hash 拒绝，不返回部分 digest；无写入或清理面。
+- Release / packaging / dependency compatibility: selected - 仅使用 Node/Bun 内建能力，不新增依赖，package manifests 与 lockfile 保持零漂移。
+- Documentation / migration notes: not selected - D3/spec 与 issue 已定义协议，无用户迁移面。
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - digest 是后续 provenance/StackLock 的证据身份，必须绑定实际读取字节与路径序列。
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: selected - SHUD 输出可能很大，文件读取不能整读内存；不修改模型或运行时。
+- Zero adapter / tool registry / agent role governance: not selected - 不触碰 Zero 或工具注册。
+
+Invariant Matrix:
+- Governing invariant: digest 只能代表本次在受信 workspace/read-only 边界内、以 no-follow 方式完整读取并验证过的同一组常规文件字节及其 canonical 相对路径序列。
+- Source-of-truth identity/contract: design D3 的文件内容 sha256 与目录 `"<relpath>\n<file-sha256>\n"` 排序行协议；M1 `resolveWorkspacePath`/`WorkspacePathSafetyError`。
+- Producers: `hashFile`、`hashDirectory` 与共享的 descriptor/stream hashing 内部实现。
+- Validators/preflight: `resolveWorkspacePath(access="read")`、每级 `lstat`、打开后 `fstat`/identity 核对与 no-follow flag。
+- Storage/cache/query: none - 纯读取并返回 digest，不缓存、不落盘。
+- Public routes/entrypoints: `packages/core/src/domain/services/index.ts` 导出的 `hashFile`/`hashDirectory`；HTTP/CLI/API route 为 none，调用方接线属于 4.1/5.1。
+- Frontend/downstream consumers: unchanged future consumers `StackLock` 与 `DataProvenance`；本 issue 只固定公共 service 契约。
+- Failure paths/rollback/stale state: missing、空目录、symlink leaf/ancestor、FIFO/socket/device、枚举后替换或读取中身份漂移均 fail closed，不返回 digest。
+- Evidence/audit/readiness: focused hashing tests、`test:core-services`、`typecheck`、`check` 与 strict OpenSpec。
+- Regression rows:
+  - 常规文件（含大文件/分块边界） -> 流式 digest 等于独立 sha256 参照值，且不调用整文件读取 API。
+  - `a.txt="A"`、`nested/b.txt="B"` -> canonical 行序列 `a.txt\n559a...fdffd\nnested/b.txt\ndf7e...20a5c\n` 的独立 oracle digest 为 `abeb7f0f89055fff57ff5fdec6e07f6b397071d82f6b11e52d068bef7951bb0d`；重复两次同 digest，创建顺序不影响结果。
+  - 在上述目录新增文件、修改内容或重命名相对路径 -> digest 改变。
+  - 空目录或树内 symlink/非常规项/对象替换 -> `WorkspacePathSafetyError`，且链接目标/特殊文件未被读取。
+  - 合法 M1 workspace path 与现有 core service consumers -> 原行为和测试保持通过；无 StackLock/DataProvenance 接线变化。
+
+Boundary-surface checklist:
+- Shared helper roots: `workspace-path-safety.ts` 只读复用，不修改。
+- Public entrypoints: `packages/core/src/domain/services/index.ts` 导出新的 hashing API；无 HTTP/CLI。
+- Read surfaces: 单文件、递归目录枚举、每个常规文件的 descriptor-bound 流式读取。
+- Write/delete/overwrite surfaces: none - 服务不得写入、删除或覆盖任何路径。
+- Producer/consumer evidence boundaries: 实际文件字节 + canonical 相对路径序列 -> 单一 sha256 字符串；不接受调用方提供 digest。
+- Stale-state/idempotency boundaries: 重复读取稳定树确定；读取期间身份/类型变化 fail closed。
+- Unchanged downstream consumers: path-safety、record store、artifact/task services 及未来 4.1/5.1 接线边界。
+
+Non-goals:
+- StackLock/DataProvenance/manifest/API 接线，修改 path-safety helper，目录写入/发布，或 M3+ 行为。
+- 对目录字节做全量内存缓存；M2 不引入跨进程目录快照/锁。
+
+Review focus:
+- no-follow 必须落实到打开/读取点，不能只依赖一次路径 preflight。
+- 目录行协议的相对路径、换行、排序与变化敏感性精确一致。
+- 特殊文件在任何可能阻塞的 read/open 之前被拒绝；大文件内容保持流式。
+- 错误保持 path-safety 家族且无 partial digest/副作用。
+
 ## Test IDs
 
 W2-SUB-001（submodule discovery）、W2-DATA-001/002（register 存在/缺失路径）、W2-ART-001（artifact metadata 合法性）、W2-ART-002（manifest_sha256 可复算）+ UI 三条（ResearchContext×2、ArtifactRef）。Exit gate：任一 task 可绑定 stack_id + data_id；registry 记录 evidence_usable artifact。
