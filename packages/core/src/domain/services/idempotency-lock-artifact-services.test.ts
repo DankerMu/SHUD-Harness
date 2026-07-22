@@ -300,6 +300,8 @@ describe("idempotency, lock, and artifact services", () => {
     });
     const rawKey = "raw/secret:idempotency key";
     const requestDigest = "digest-same-body";
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
 
     const begin = await service.beginRecord({
       scope: "task",
@@ -346,10 +348,12 @@ describe("idempotency, lock, and artifact services", () => {
       key: rawKey,
       requestDigest: "digest-different-body"
     });
-    expect(mismatch.status).toBe("mismatch");
+    expect(mismatch).toEqual({ status: "mismatch", record });
 
     await writeFile(join(idempotencyDirectory, `${"0".repeat(64)}.json`), "{", { flag: "wx" });
     expect(await service.getRecord("task", rawKey)).toEqual(record);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
   test("mutable create and update hold shared authority against reads and conditional deletes", async () => {
@@ -16871,6 +16875,8 @@ describe("idempotency, lock, and artifact services", () => {
     });
     const rawKey = "task:create:invalidate-exact-guard";
     const requestDigest = "digest-invalidate-guard";
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
     await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
     const completed = await service.completeRecord({
       scope: "task",
@@ -16903,6 +16909,8 @@ describe("idempotency, lock, and artifact services", () => {
     expect(JSON.stringify(resultMismatch)).not.toContain(rawKey);
     expect(JSON.stringify(digestMismatch)).not.toContain(rawKey);
     expect(await service.getRecord("task", rawKey)).toEqual(completed);
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
   test("IdempotencyRecord invalidates a completed record missing result_ref", async () => {
@@ -27417,6 +27425,8 @@ describe("idempotency, lock, and artifact services", () => {
     const requestDigest = "digest-s29-exact-quarantine";
     const resultRef = "TASK-s29-replacement-b";
     const service = createIdempotencyRecordService({ workspaceRoot });
+    const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
+    const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
     await service.beginRecord({ scope: "task", key: rawKey, requestDigest });
     const completedB = await service.completeRecord({
       scope: "task",
@@ -27466,6 +27476,8 @@ describe("idempotency, lock, and artifact services", () => {
     });
     expect(failed.status).toBe("failed");
     expect(failed.result_ref).toBeUndefined();
+    expect(workspaceRecordAuthorityDiagnosticsForTest()).toEqual(authorityBaseline);
+    expect(workspaceRecordDirectoryBindingDiagnosticsForTest()).toEqual(bindingBaseline);
   });
 
   test("S29-P62-03 torn private transition markers fail closed while identity-only legacy remains compatible", async () => {
@@ -33388,6 +33400,9 @@ async function expectIssue79GenerationBoundRecovery(
     }
   }
 
+  if (recovery === "completed_rollback") {
+    await expectPathMissing(guardPath);
+  }
   if (recovery === "stale_fail_intent") {
     if (successor === "malformed") {
       expect(taskServiceErrorAtBoundary(failure)?.code).toBe("record_malformed");
