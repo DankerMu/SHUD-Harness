@@ -139,7 +139,8 @@ function createPrivateDirectoryNoReplace(
   parent: number,
   finalName: string,
   beforeMkdirStage: "before_workspace_leaf_bootstrap_mkdir" | "before_secrets_bootstrap_mkdir",
-  afterMkdirStage: "after_workspace_leaf_bootstrap_mkdir" | "after_secrets_bootstrap_mkdir"
+  afterMkdirStage: "after_workspace_leaf_bootstrap_mkdir" | "after_secrets_bootstrap_mkdir",
+  reproveParentBindingBeforeCreate?: () => void
 ): number {
   let descriptor: number | undefined;
   try {
@@ -152,6 +153,7 @@ function createPrivateDirectoryNoReplace(
       throw unsafeLocalTokenStorageError();
     }
     invokeLocalTokenTestHook({ stage: beforeMkdirStage, name: finalName });
+    reproveParentBindingBeforeCreate?.();
     if (mkdirAt(parent, finalName, PRIVATE_DIRECTORY_CREATE_MODE) !== 0) {
       throw unsafeLocalTokenStorageError();
     }
@@ -228,26 +230,55 @@ export function openOrCreateWorkspaceTokenDescriptors(
     const opened = openWorkspaceRootDescriptor(workspaceRootInput, true);
     workspace = opened.descriptor;
     const workspaceObservation = guardDirectoryType(workspace);
+    const workspaceIdentity = physicalIdentity(workspaceObservation);
     secrets = guardedDirectoryOpenAt(workspace, LOCAL_TOKEN_DIRECTORY);
     if (secrets < 0 && readErrno() === ENOENT) {
       secrets = createPrivateDirectoryNoReplace(
         workspace,
         LOCAL_TOKEN_DIRECTORY,
         "before_secrets_bootstrap_mkdir",
-        "after_secrets_bootstrap_mkdir"
+        "after_secrets_bootstrap_mkdir",
+        () => assertWorkspaceRootDescriptorBinding(
+          opened.root,
+          workspace!,
+          workspaceIdentity
+        )
       );
     }
     const secretsObservation = assertPrivateDirectory(secrets);
-    return Object.freeze({
+    const result = Object.freeze({
       workspaceRoot: opened.root,
       workspace,
       secrets,
-      workspaceIdentity: physicalIdentity(workspaceObservation),
+      workspaceIdentity,
       secretsIdentity: physicalIdentity(secretsObservation)
     });
+    assertWorkspaceAndSecretsBinding(result);
+    return result;
   } catch {
     settleOwnedDescriptors(secrets, workspace);
     throw unsafeLocalTokenStorageError();
+  }
+}
+
+function assertWorkspaceRootDescriptorBinding(
+  workspaceRoot: string,
+  heldWorkspace: number,
+  expectedIdentity: LocalTokenPhysicalIdentity
+): void {
+  let reboundWorkspace: number | undefined;
+  try {
+    reboundWorkspace = openWorkspaceRootDescriptor(workspaceRoot, false).descriptor;
+    const rebound = guardDirectoryType(reboundWorkspace);
+    const held = guardDirectoryType(heldWorkspace);
+    if (
+      !sameIdentity(physicalIdentity(rebound), expectedIdentity) ||
+      !sameIdentity(physicalIdentity(held), expectedIdentity)
+    ) {
+      throw unsafeLocalTokenStorageError();
+    }
+  } finally {
+    closeOwnedDescriptor(reboundWorkspace);
   }
 }
 

@@ -54,7 +54,8 @@ export {
   ensureWorkspaceDirectoryTree,
   ensureWorkspaceRecordRootPhysicalIdentity,
   probeWorkspaceRecordDirectoryWritable,
-  runWithExistingWorkspaceRecordDirectoryReproof
+  runWithExistingWorkspaceRecordDirectoryReproof,
+  runWithWorkspaceRecordRootMutationAuthority
 } from "./workspace-record-store";
 export {
   WorkspacePathSafetyError,

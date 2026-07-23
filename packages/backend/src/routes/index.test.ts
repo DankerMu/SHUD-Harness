@@ -3,6 +3,7 @@ import { execFile as execFileWithCallback } from "node:child_process";
 import { writeFileSync, type BigIntStats } from "node:fs";
 import {
   access,
+  chmod,
   link,
   lstat,
   readdir,
@@ -41,7 +42,12 @@ import {
   type TaskCard,
   type TaskSnapshot
 } from "@shud-harness/core";
-import { createBackendApi, type ApiErrorResponse, type WorkspaceReadyResponse } from "./index";
+import { type ApiErrorResponse, type WorkspaceReadyResponse } from "./index";
+import {
+  BACKEND_TEST_LOCAL_TOKEN,
+  createAuthenticatedBackendApi as createBackendApi,
+  expectCanonicalApiError
+} from "./backend-api-test-helpers";
 import {
   API_REQUEST_ID_HEADER,
   redactApiLogValue,
@@ -81,6 +87,7 @@ const EXPECTED_M1_RUNTIME_DIRECTORIES = [
   "repos/rSHUD",
   "repos/AutoSHUD",
   "repos/zero",
+  "secrets",
   "stacks",
   "data",
   "tasks",
@@ -453,7 +460,7 @@ describe("backend workspace and health routes", () => {
   test("API request logs redact secret-like values and preserve secret refs", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
-    const fakeSecret = "sk-test-secret-value";
+    const fakeSecret = BACKEND_TEST_LOCAL_TOKEN;
     const logs: string[] = [];
     const app = createBackendApi({
       workspaceRoot,
@@ -8127,6 +8134,8 @@ describe("backend workspace and health routes", () => {
       'import { join } from "node:path";',
       `import { createBackendApi } from ${JSON.stringify(backendIndexPath)};`,
       `import { createIdempotencyRecordService, createTaskCardService } from ${JSON.stringify(coreIndexPath)};`,
+      'const localToken = "phase62-backend-local-token";',
+      'process.env.HARNESS_LOCAL_TOKEN = localToken;',
       'const body = {',
       '  type: "engineering",',
       '  title: "Phase 6.2 bounded proxy",',
@@ -8143,7 +8152,7 @@ describe("backend workspace and health routes", () => {
       '  return fresh();',
       '}',
       'async function post(app, key) {',
-      '  const headers = { "content-type": "application/json" };',
+      '  const headers = { "content-type": "application/json", Authorization: `Bearer ${localToken}` };',
       '  if (key) headers["Idempotency-Key"] = key;',
       '  return await app.request("/api/tasks", { method: "POST", headers, body: JSON.stringify(body) });',
       '}',
@@ -9989,7 +9998,10 @@ async function createExpectedRuntimeTree(
     if (options.skip?.has(relativeDir)) {
       continue;
     }
-    await mkdir(join(workspaceRoot, relativeDir), { recursive: true });
+    await mkdir(join(workspaceRoot, relativeDir), {
+      recursive: true,
+      ...(relativeDir === "secrets" ? { mode: 0o700 } : {})
+    });
   }
 }
 
@@ -10293,27 +10305,7 @@ async function taskIdsWithSnapshots(workspaceRoot: string): Promise<string[]> {
 }
 
 function expectCanonicalError(body: ApiErrorResponse, category: string): void {
-  expect(Object.keys(body.error).sort()).toEqual(
-    [
-      "category",
-      "error_id",
-      "evidence_refs",
-      "message",
-      "recommended_next_actions",
-      "retryable",
-      "severity",
-      "user_message"
-    ].sort()
-  );
-  expect(body.error.error_id.startsWith("api_error_")).toBe(true);
-  expect(body.error.category).toBe(category);
-  expect(body.error.severity).toBe("error");
-  expect(body.error.message.length).toBeGreaterThan(0);
-  expect(body.error.user_message.length).toBeGreaterThan(0);
-  expect(Array.isArray(body.error.evidence_refs)).toBe(true);
-  expect(typeof body.error.retryable).toBe("boolean");
-  expect(Array.isArray(body.error.recommended_next_actions)).toBe(true);
-  expect(body.error.recommended_next_actions.length).toBeGreaterThan(0);
+  expectCanonicalApiError(body, { category });
 }
 
 function expectNoAbsoluteWorkspacePath(

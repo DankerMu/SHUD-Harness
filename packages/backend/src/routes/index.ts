@@ -23,6 +23,7 @@ import {
   taskServiceErrorAuthorityTransportFamily,
   taskServiceErrorAtBoundary,
   runWithExistingWorkspaceRecordDirectoryReproof,
+  runWithWorkspaceRecordRootMutationAuthority,
   sha256Hex,
   type CreateTaskInput,
   type CompletedIdempotencyRecordMutationAuthority,
@@ -43,10 +44,23 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ZodError } from "zod";
 import {
   createApiRequestLoggerMiddleware,
+  createLocalApiAuthMiddleware,
   type ApiRequestLogSink
 } from "../middleware";
+import {
+  resolveLocalTokenAuthority,
+  type LocalTokenAuthority
+} from "../local-auth/local-auth-authority";
+import {
+  PRIVATE_DIRECTORY_MODE,
+  PRIVATE_MODE_MASK
+} from "../local-auth/local-token-types";
+import { ensurePrivateWorkspaceSecretsDirectory } from "../local-auth/local-token-store";
 
 export const BACKEND_ROUTES_NAMESPACE = "backend/routes" as const;
+export const BACKEND_PRODUCTION_LISTEN_OPTIONS = Object.freeze({
+  hostname: "127.0.0.1"
+} as const);
 
 export type BackendRoutesNamespace = typeof BACKEND_ROUTES_NAMESPACE;
 
@@ -56,6 +70,7 @@ export const WORKSPACE_CANONICAL_DIRECTORIES = [
   "repos/rSHUD",
   "repos/AutoSHUD",
   "repos/zero",
+  "secrets",
   "stacks",
   "data",
   "tasks",
@@ -171,10 +186,29 @@ export interface ApiErrorResponse {
   };
 }
 
+export interface BackendProductionListenOptions {
+  readonly hostname: typeof BACKEND_PRODUCTION_LISTEN_OPTIONS.hostname;
+  readonly fetch: Hono["fetch"];
+}
+
+export function createBackendProductionListenOptions(
+  options: BackendApiOptions = {}
+): BackendProductionListenOptions {
+  const app = createBackendApi(options);
+  return Object.freeze({
+    ...BACKEND_PRODUCTION_LISTEN_OPTIONS,
+    fetch: app.fetch
+  });
+}
+
 export function createBackendApi(options: BackendApiOptions = {}): Hono {
   const app = new Hono();
   const workspaceRoot = resolveWorkspaceRoot(options);
-  const service = createWorkspaceRoutesService({ ...options, workspaceRoot });
+  const localAuthAuthority = resolveLocalTokenAuthority({ workspaceRoot });
+  const service = createWorkspaceRoutesService(
+    { ...options, workspaceRoot },
+    localAuthAuthority
+  );
   const taskService = (options.taskServiceFactory ?? createTaskCardService)({
     workspaceRoot,
     now: options.now,
@@ -195,6 +229,7 @@ export function createBackendApi(options: BackendApiOptions = {}): Hono {
       sink: options.requestLogSink
     })
   );
+  app.use("*", createLocalApiAuthMiddleware(localAuthAuthority));
 
   app.post("/api/workspace/init", async (c) => {
     try {
@@ -2368,7 +2403,8 @@ function zodEvidenceRefs(error: ZodError): string[] {
 }
 
 export function createWorkspaceRoutesService(
-  options: BackendApiOptions = {}
+  options: BackendApiOptions = {},
+  localAuthAuthority?: LocalTokenAuthority
 ): WorkspaceRoutesService {
   const workspaceRoot = resolveWorkspaceRoot(options);
   const version = options.version ?? process.env.npm_package_version ?? "0.0.0";
@@ -2377,20 +2413,38 @@ export function createWorkspaceRoutesService(
   const writableProbe = options.writableProbe;
   const snapshotReadableProbe =
     options.snapshotReadableProbe ?? defaultSnapshotReadableProbe;
+  let initInFlight: Promise<WorkspaceInitResponse> | undefined;
+
+  const initializeWorkspace = async (): Promise<WorkspaceInitResponse> => {
+    await ensureWorkspaceDirectoryTree(
+      workspaceRoot,
+      WORKSPACE_CANONICAL_DIRECTORIES
+        .filter((relativeDir) => relativeDir !== "secrets")
+        .map((relativeDir) => relativeDir.split("/")),
+      "workspace.init"
+    );
+    await runWithWorkspaceRecordRootMutationAuthority(
+      workspaceRoot,
+      "workspace.init.secrets",
+      () => ensurePrivateWorkspaceSecretsDirectory(workspaceRoot)
+    );
+    localAuthAuthority?.assertCurrent();
+
+    return {
+      status: "ok",
+      directory_count: WORKSPACE_CANONICAL_DIRECTORIES.length,
+      directories: WORKSPACE_CANONICAL_DIRECTORIES
+    };
+  };
 
   return {
     async initWorkspace(): Promise<WorkspaceInitResponse> {
-      await ensureWorkspaceDirectoryTree(
-        workspaceRoot,
-        WORKSPACE_CANONICAL_DIRECTORIES.map((relativeDir) => relativeDir.split("/")),
-        "workspace.init"
-      );
-
-      return {
-        status: "ok",
-        directory_count: WORKSPACE_CANONICAL_DIRECTORIES.length,
-        directories: WORKSPACE_CANONICAL_DIRECTORIES
-      };
+      if (!initInFlight) {
+        initInFlight = initializeWorkspace().finally(() => {
+          initInFlight = undefined;
+        });
+      }
+      return await initInFlight;
     },
 
     live(): WorkspaceLiveResponse {
@@ -2499,7 +2553,25 @@ async function isSafeWorkspaceDirectory(
   workspaceRoot: string,
   relativeDir: WorkspaceCanonicalDirectory
 ): Promise<boolean> {
-  return await isSafeExistingDirectoryPath(join(workspaceRoot, relativeDir));
+  const path = join(workspaceRoot, relativeDir);
+  if (!(await isSafeExistingDirectoryPath(path))) {
+    return false;
+  }
+  if (relativeDir !== "secrets") {
+    return true;
+  }
+  const entry = await maybeLstat(path);
+  return isPrivateSecretsDirectoryEntry(entry);
+}
+
+function isPrivateSecretsDirectoryEntry(
+  entry: Awaited<ReturnType<typeof lstat>> | undefined
+): boolean {
+  return Boolean(
+    entry?.isDirectory() &&
+    !entry.isSymbolicLink() &&
+    (BigInt(entry.mode) & PRIVATE_MODE_MASK) === PRIVATE_DIRECTORY_MODE
+  );
 }
 
 async function maybeLstat(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
@@ -2534,6 +2606,15 @@ async function probeWorkspaceWritable(
 
 function statusFromBoolean(value: boolean): WorkspaceHealthCheckStatus {
   return value ? "ok" : "fail";
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === code
+  );
 }
 
 async function isSafeExistingDirectoryPath(path: string): Promise<boolean> {

@@ -200,6 +200,83 @@ Non-goals: HTTP auth, listener binding, env priority, readiness, `WORKSPACE_CANO
 
 Review focus: stable resource accounting across publication/restart; descriptor lifetime from first acquisition; typed lease capability and cooperative-writer serialization; honest pre/post generation-validation claims; source-bound red attribution; no route or shared-helper drift.
 
+## Subagent Workflow Fixture — Issue #87 Child B (local-auth integration)
+
+Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness. Child A is merged on `main`; Child B consumes its frozen local-token authority seam and owns the final backend auth/path-safety integration.
+
+Change surface:
+- Backend startup/listener and composition roots (`packages/backend/src/index.ts`, route/middleware composition, and focused local-auth integration), `WORKSPACE_CANONICAL_DIRECTORIES`/ready behavior, all M1 backend route tests, and `scripts/perf/api.ts`.
+- Shared core path boundary `packages/core/src/domain/services/workspace-path-safety.ts` and its public service exports/tests: add a generic deny-subtree input/contract; `workspace/secrets/**` is the first configured denied subtree.
+- No frontend bootstrap/fetch wrapper, stack/data/artifact consumer wiring, schema expansion, WebSocket auth, multi-user session, or M3+ behavior.
+
+Must preserve:
+- Child A's `openWorkspaceLocalTokenAuthority`, `WorkspaceLocalTokenAuthority.assertCurrent`, `LocalTokenStorageError`, token grammar, file identity, permissions, resource bounds, and cooperative-writer semantics remain unchanged; Child B must re-prove a workspace authority before trusting its token and must not reinterpret unsafe storage as missing credentials.
+- Existing M1 route status/body/idempotency/readiness/logging behavior and all non-auth assertions remain intact. Only `GET /api/health/live` and `GET /api/health/ready` bypass Bearer auth; non-`/api` requests remain outside the auth middleware.
+- Existing workspace containment/no-follow behavior remains unchanged for callers that do not configure denied subtrees; SHUD/rSHUD/AutoSHUD/zero, package manifests, schemas, error-category enum, and frontend remain unchanged.
+
+Must add/change:
+- Startup resolves exactly one bounded Header-safe token from `HARNESS_LOCAL_TOKEN` when present, otherwise from Child A's workspace authority. Invalid env token fails startup without fallback or secret echo. Workspace-backed use calls `assertCurrent()` before authentication trust; env-backed use does not create or overwrite the token file.
+- Server listen configuration is explicitly and testably `127.0.0.1`. A root auth middleware runs before every non-exempt `/api/**` handler, accepts exactly `Authorization: Bearer <token>`, and returns status 401 with the canonical `permission_error` envelope on missing/malformed/wrong credentials without invoking domain handlers.
+- `secrets/` joins canonical workspace initialization/readiness while ready output remains non-sensitive. Workspace init creates or validates this one canonical directory at exact `0700` even when the environment token wins, without creating/overwriting `local-token`; the modes and creation semantics of all other canonical directories remain unchanged.
+- The shared path helper adds `deniedRelativeRoots?: readonly string[]`: every element is a non-empty, NUL-free, unambiguous workspace-relative subtree (`.`/`..`/empty segments and absolute paths rejected), normalized beneath the absolute `workspaceRoot` and checked against physical aliases/symlink escape. Invalid policy input throws `WorkspacePathSafetyError("deniedRelativeRoots must contain unambiguous workspace-relative subtrees.", evidenceRef)`; a target equal to or within a denied subtree throws `WorkspacePathSafetyError("Resolved path targets a denied workspace boundary.", evidenceRef)` before returning a resolution. Omitted/empty policy preserves existing behavior.
+- Request/error logs contain only auth outcome and existing safe metadata; neither configured, presented, generated, nor expected token bytes may appear. M1 route tests use one helper-controlled valid Authorization header and the perf harness injects a test token.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - backend listener, root `/api/**` middleware, route-test entrypoints, and perf script change.
+- Config / project setup: selected - env/file token priority, workspace root, listen host, and startup failure behavior.
+- File IO / path safety / overwrite: selected - Child A authority consumption, canonical `secrets/` readiness, and shared deny-subtree helper behavior.
+- Schema / columns / units / field names: not selected - canonical error envelope and categories are consumed unchanged; no Zod/persisted business schema changes.
+- Auth / permissions / secrets: selected - Bearer grammar, health exemptions, authority reproof, 0600/0700 ownership, no leak, and fail-closed startup/request behavior.
+- Concurrency / shared state / ordering: selected - middleware must trust one startup authority and re-prove workspace identity before request authorization; no new mutable token cache or retry loop.
+- Resource limits / large input / discovery: selected - env/header token uses Child A's 1-4096-byte grammar; deny-subtree inputs and log handling remain bounded by existing request/path boundaries.
+- Legacy compatibility / examples: selected - every M1 HTTP route and readiness behavior remains reachable under the test helper; perf behavior does not regress.
+- Error handling / rollback / partial outputs: selected - unsafe token storage/invalid env fails startup, unauthorized requests fail before handlers, and no partial auth or token material is published.
+- Release / packaging / dependency compatibility: selected - Bun 1.2.19/macOS/Linux and no dependency/package/lock drift.
+- Documentation / migration notes: not selected - the OpenSpec requirement and issue already define this internal MVP auth migration; no public deployment guide is in this PR boundary.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - logs/review evidence must bind to the exact head without token material; no scientific decision is made.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no solver/toolbox/pipeline runtime change.
+- Zero adapter / tool registry / agent role governance: not selected - no Zero/tool/role surface.
+
+Invariant Matrix:
+- Governing invariant: the backend listens only on loopback and no non-exempt `/api/**` handler can run unless one syntactically exact Bearer credential matches the current validated startup token authority, while token bytes and `workspace/secrets/**` remain unavailable through responses, logs, readiness, or path-service consumers.
+- Source-of-truth identity/contract: one startup token source—validated `HARNESS_LOCAL_TOKEN`, otherwise a Child A `WorkspaceLocalTokenAuthority` whose `assertCurrent()` binds the current private file generation before trust—plus the canonical exemption set `{GET live, GET ready}` and configured denied subtree rooted at the resolved workspace `secrets` directory.
+- Producers: startup token-source resolver and Child A file authority; no request-provided token becomes authority.
+- Validators/preflight: env/Header grammar validation, workspace authority reproof, exact Authorization parsing/comparison, loopback listen config, and path-helper containment/deny checks.
+- Storage/cache/query: `workspace/secrets/local-token` via Child A only; no new token cache, persistence lane, URL/query/localStorage value, or business-record schema.
+- Public routes/entrypoints: backend listener, app/middleware composition, every `/api/**` route, live/ready exemptions, and perf harness.
+- Frontend/downstream consumers: M1 direct route tests and perf script migrate; frontend bootstrap/fetch, WebSocket, and #94/#96/#98 deny-subtree consumers remain out of scope.
+- Failure paths/rollback/stale state: invalid env fails app/startup construction with `LocalTokenStorageError`; unsafe/replaced workspace authority detected by `assertCurrent()` during a protected request returns 401 canonical `permission_error`, records only safe 401 metadata, and runs no protected handler; missing/malformed/wrong Authorization follows the same public envelope. Also cover method/path near exemptions, invalid deny-policy roots, path equal to/inside/outside denied subtree, ready before/after init, and logging on 401.
+- Evidence/audit/readiness: focused core/backend tests, four auth negative/positive scenarios, listener assertion, all M1 routes, perf, full check/typecheck, strict OpenSpec, hygiene, CI, and review evidence with secret scan.
+- Regression rows:
+  - env token or current workspace authority + exact Bearer on a protected M1 route -> original handler response; workspace source is re-proved before trust.
+  - absent/malformed/wrong credential or `assertCurrent()` stale/unsafe workspace authority -> 401 canonical `permission_error`, zero protected-handler effect, safe 401 request-log metadata only, and zero configured/presented/expected token bytes or storage details in response/log; invalid startup source/storage terminates app construction with `LocalTokenStorageError` before listening.
+  - exact `GET` live/ready without token -> existing health behavior; HEAD/other method or lookalike path does not gain an exemption.
+  - resolved path equal to or nested under configured `workspace/secrets` -> path-safety rejection before access; sibling/outside path follows unchanged M1 behavior.
+  - startup/listener inspection -> host exactly `127.0.0.1`; no wildcard/non-loopback default.
+  - unchanged M1 route/perf consumer -> valid helper token preserves prior status/body/performance contract without weakened assertions or new skips.
+
+Required scenario evidence:
+- Focused backend tests: no token and wrong/malformed token return 401 `permission_error`; correct token preserves a representative protected route; live/ready alone are exempt; method/path lookalikes remain protected; a handler-effect sentinel proves rejection precedes handler execution.
+- Token-source tests: valid env wins; after workspace init, `secrets/` exists as an exact `0700` directory while `secrets/local-token` remains absent and any pre-existing token bytes remain untouched. Invalid/empty/oversize/non-Header-safe env fails app construction with `LocalTokenStorageError` without falling back or echoing; absent env consumes Child A, and a replaced/unsafe authority on a protected request returns the specified 401 envelope before handler execution.
+- Logging/redaction tests: exercise configured and presented credentials through 200/401/error logging and assert exact token substrings are absent from every captured NDJSON line and error body.
+- Path-safety tests at the public helper seam: `deniedRelativeRoots: ["secrets"]` rejects exact root, nested regular path, traversal-normalized descendant, and physical alias/symlink-reachable attempts before read with the exact denied-boundary `WorkspacePathSafetyError`; blank/absolute/dot-segment/NUL policy entries fail with the exact invalid-policy error. An adjacent sibling and omitted/empty-policy readonly-root/workspace cases preserve existing outputs/errors.
+- Ready/listener/tests migration: canonical `secrets/` participates in initialization/ready checks without an absolute path/token in the response; all backend route tests use a shared auth helper; `scripts/perf/api.ts` supplies its test token; listener host assertion is made at the production startup seam.
+- Red proof: stash only new/changed production source while retaining new tests, run the focused core/backend new-behavior set once against pre-change source (collection/import failures count only for genuinely new seams), pop immediately, then run green; report exact failing tests and leave no `red-proof` stash.
+- Final commands: `npx --yes bun@1.2.19 run test:core-services`; `npx --yes bun@1.2.19 run test:backend-api`; `npx --yes bun@1.2.19 run test:perf:api`; `npx --yes bun@1.2.19 run typecheck`; `npx --yes bun@1.2.19 run check`; `npx --yes openspec validate m2-research-context --strict --no-interactive`; `git diff --check`; package/lock, tracked-workspace, submodule, stash hygiene checks.
+
+Boundary-surface checklist:
+- Shared helper roots: `resolveWorkspacePath`/path-safety exports and all unchanged direct consumers; deny policy must be opt-in and centralized rather than route-specific duplication.
+- Public entrypoints: production listen options, app composition order, all `/api/**` routes, exact live/ready exemption, non-API surface, test app factory, and perf harness.
+- Read/write/delete/overwrite: Child B only selects/re-proves Child A authority and adds canonical directory/readiness consumption; it must not reimplement token publication or add another write path.
+- Producer/consumer evidence: env/file authority -> middleware -> response/log; token bytes cannot cross the comparison boundary into evidence.
+- Stale-state/idempotency: file generation replacement between startup and request fails closed; existing task idempotency and route handler ordering stay unchanged.
+- Unchanged downstream consumers: frontend/WS and #94/#96/#98 wiring remain untouched; current core path callers behave identically when no denied subtree is configured.
+
+Non-goals: frontend token bootstrap/fetch wrapper (#88), stack/data/artifact route/service wiring, WebSocket authentication, sessions/passwords/users, new error categories, metadata/data endpoints, M3+ identity/audit convergence, and changes to Child A publication/recovery internals.
+
+Review focus: middleware altitude/order and exemption exactness; token-source authority/reproof and secret non-observability; deny-subtree helper compatibility across siblings; startup/ready/listener integration; complete M1/perf migration without weakened or skipped oracles.
+
 ## Subagent Workflow Fixture — Issue #90
 
 Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.

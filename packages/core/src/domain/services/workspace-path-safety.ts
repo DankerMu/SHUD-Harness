@@ -18,6 +18,7 @@ export interface ResolveWorkspacePathInput {
   evidenceRef: string;
   access?: WorkspacePathAccess;
   allowedReadonlyRoots?: readonly string[];
+  deniedRelativeRoots?: readonly string[];
 }
 
 export class WorkspacePathSafetyError extends Error {
@@ -99,6 +100,11 @@ export async function resolveWorkspacePath(
   }
 
   const workspaceRoot = resolve(input.workspaceRoot);
+  const deniedRoots = normalizeDeniedRelativeRoots(
+    workspaceRoot,
+    input.deniedRelativeRoots ?? [],
+    input.evidenceRef
+  );
   const rawPath = input.inputPath;
   if (rawPath.trim().length === 0) {
     throw new WorkspacePathSafetyError("Workspace path is blank.", input.evidenceRef);
@@ -110,6 +116,23 @@ export async function resolveWorkspacePath(
   if (!boundary) {
     throw new WorkspacePathSafetyError(
       "Resolved path escapes the configured workspace.",
+      input.evidenceRef
+    );
+  }
+  const deniedTargetPath = deniedRoots.length > 0
+    ? await deniedWorkspaceTargetPath(workspaceRoot, boundary, absolutePath, input.evidenceRef)
+    : undefined;
+  if (
+    deniedTargetPath !== undefined &&
+    await targetsDeniedWorkspaceBoundary(
+      workspaceRoot,
+      deniedRoots,
+      deniedTargetPath,
+      input.evidenceRef
+    )
+  ) {
+    throw new WorkspacePathSafetyError(
+      "Resolved path targets a denied workspace boundary.",
       input.evidenceRef
     );
   }
@@ -131,6 +154,115 @@ export async function resolveWorkspacePath(
     boundary: boundary.kind,
     boundaryRoot: boundary.root
   };
+}
+
+async function deniedWorkspaceTargetPath(
+  workspaceRoot: string,
+  boundary: BoundaryCandidate,
+  targetPath: string,
+  evidenceRef: string
+): Promise<string | undefined> {
+  if (boundary.kind === "workspace") return targetPath;
+  if (
+    isPathInsideBoundary(workspaceRoot, boundary.root) ||
+    isPathInsideBoundary(boundary.root, workspaceRoot)
+  ) {
+    return await readonlyTargetPhysicalLanding(targetPath, evidenceRef);
+  }
+
+  try {
+    const [physicalWorkspaceRoot, physicalBoundaryRoot] = await Promise.all([
+      realpath(workspaceRoot),
+      realpath(boundary.root)
+    ]);
+    if (
+      isPathInsideBoundary(physicalWorkspaceRoot, physicalBoundaryRoot) ||
+      isPathInsideBoundary(physicalBoundaryRoot, physicalWorkspaceRoot)
+    ) {
+      return await readonlyTargetPhysicalLanding(targetPath, evidenceRef);
+    }
+  } catch {
+    // Missing or changing read-only roots cannot be proven disjoint safely.
+    return await readonlyTargetPhysicalLanding(targetPath, evidenceRef);
+  }
+
+  if (!await targetPathCrossesSymlinkBelowBoundary(
+    boundary.root,
+    targetPath
+  )) {
+    return undefined;
+  }
+  return await readonlyTargetPhysicalLanding(targetPath, evidenceRef);
+}
+
+async function readonlyTargetPhysicalLanding(
+  targetPath: string,
+  evidenceRef: string
+): Promise<string> {
+  let candidate = targetPath;
+  const missingSegments: string[] = [];
+  for (;;) {
+    try {
+      const physicalCandidate = await realpath(candidate);
+      const physicalEntry = await lstat(physicalCandidate);
+      if (missingSegments.length > 0 && !physicalEntry.isDirectory()) {
+        throw new WorkspacePathSafetyError(
+          "Workspace path crosses a non-directory ancestor.",
+          evidenceRef
+        );
+      }
+      return join(physicalCandidate, ...missingSegments);
+    } catch (error) {
+      if (error instanceof WorkspacePathSafetyError) throw error;
+      if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
+        throw new WorkspacePathSafetyError(
+          "Workspace path cannot be canonicalized safely.",
+          evidenceRef
+        );
+      }
+    }
+
+    const parent = parse(candidate).dir;
+    if (parent === candidate) {
+      throw new WorkspacePathSafetyError(
+        "Workspace path has no canonical physical ancestor.",
+        evidenceRef
+      );
+    }
+    missingSegments.unshift(parse(candidate).base);
+    candidate = parent;
+  }
+}
+
+async function targetPathCrossesSymlinkBelowBoundary(
+  boundaryRoot: string,
+  targetPath: string
+): Promise<boolean> {
+  const relativeTarget = relative(boundaryRoot, targetPath);
+  if (
+    relativeTarget === "" ||
+    isAbsolute(relativeTarget) ||
+    relativeTarget === ".." ||
+    relativeTarget.startsWith(`..${sep}`)
+  ) {
+    return false;
+  }
+
+  let candidate = boundaryRoot;
+  for (const segment of relativeTarget.split(sep).filter(Boolean)) {
+    candidate = join(candidate, segment);
+    try {
+      const entry = await lstat(candidate);
+      if (entry.isSymbolicLink()) return true;
+    } catch (error) {
+      if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+        return false;
+      }
+      // An unreadable or changing descendant cannot be proven disjoint.
+      return true;
+    }
+  }
+  return false;
 }
 
 export function assertPathInsideWorkspace(
@@ -730,6 +862,95 @@ function matchingBoundary(
   if (isPathInsideBoundary(workspaceBoundary.root, targetPath)) {
     return workspaceBoundary;
   }
+}
+
+function normalizeDeniedRelativeRoots(
+  workspaceRoot: string,
+  deniedRelativeRoots: readonly string[],
+  evidenceRef: string
+): string[] {
+  return deniedRelativeRoots.map((deniedRoot) => {
+    if (
+      typeof deniedRoot !== "string" ||
+      deniedRoot.trim().length === 0 ||
+      deniedRoot.includes("\u0000") ||
+      isAbsolute(deniedRoot) ||
+      deniedRoot.startsWith("\\") ||
+      /^[A-Za-z]:/u.test(deniedRoot)
+    ) {
+      throw invalidDeniedRelativeRootsError(evidenceRef);
+    }
+
+    const segments = deniedRoot.split(/[\\/]/u);
+    if (
+      segments.some(
+        (segment) => segment.length === 0 || segment === "." || segment === ".."
+      )
+    ) {
+      throw invalidDeniedRelativeRootsError(evidenceRef);
+    }
+
+    const normalizedRoot = resolve(workspaceRoot, ...segments);
+    if (
+      normalizedRoot === workspaceRoot ||
+      !isPathInsideBoundary(workspaceRoot, normalizedRoot)
+    ) {
+      throw invalidDeniedRelativeRootsError(evidenceRef);
+    }
+    return normalizedRoot;
+  });
+}
+
+async function targetsDeniedWorkspaceBoundary(
+  workspaceRoot: string,
+  deniedRoots: readonly string[],
+  targetPath: string,
+  evidenceRef: string
+): Promise<boolean> {
+  if (deniedRoots.some((deniedRoot) => isPathInsideBoundary(deniedRoot, targetPath))) {
+    return true;
+  }
+  if (deniedRoots.length === 0) {
+    return false;
+  }
+
+  const [workspaceIdentity, targetIdentity, ...deniedIdentities] = await Promise.all([
+    physicalAuthorityPathIdentityCandidates(workspaceRoot, evidenceRef),
+    physicalAuthorityPathIdentityCandidates(targetPath, evidenceRef),
+    ...deniedRoots.map((root) =>
+      physicalAuthorityPathIdentityCandidates(root, evidenceRef)
+    )
+  ]);
+  const workspaceCandidates = identityCandidatePaths(workspaceIdentity);
+  const targetCandidates = identityCandidatePaths(targetIdentity);
+
+  return deniedIdentities.some((deniedIdentity) => {
+    const deniedCandidates = identityCandidatePaths(deniedIdentity);
+    return targetCandidates.some(
+      (targetCandidate) =>
+        workspaceCandidates.some((workspaceCandidate) =>
+          isPathInsideBoundary(workspaceCandidate, targetCandidate)
+        ) &&
+        deniedCandidates.some((deniedCandidate) =>
+          isPathInsideBoundary(deniedCandidate, targetCandidate)
+        )
+    );
+  });
+}
+
+function identityCandidatePaths(
+  identity: PhysicalAuthorityPathIdentityCandidates
+): string[] {
+  return Array.from(new Set([identity.exact, ...identity.aliases]));
+}
+
+function invalidDeniedRelativeRootsError(
+  evidenceRef: string
+): WorkspacePathSafetyError {
+  return new WorkspacePathSafetyError(
+    "deniedRelativeRoots must contain unambiguous workspace-relative subtrees.",
+    evidenceRef
+  );
 }
 
 function assertAbsolutePath(path: string, label: string, evidenceRef: string): void {

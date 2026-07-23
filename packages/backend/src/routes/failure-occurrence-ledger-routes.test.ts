@@ -14,7 +14,8 @@ import {
   taskServiceErrorAtBoundary,
   type CreateTaskInput
 } from "@shud-harness/core";
-import { createBackendApi, type ApiErrorResponse } from "./index";
+import { type ApiErrorResponse } from "./index";
+import { createAuthenticatedBackendApi as createBackendApi } from "./backend-api-test-helpers";
 
 const tempRoots: string[] = [];
 

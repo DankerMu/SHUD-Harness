@@ -1325,6 +1325,79 @@ export async function ensureWorkspaceDirectoryTree(
   });
 }
 
+export async function runWithWorkspaceRecordRootMutationAuthority<T>(
+  workspaceRoot: string,
+  evidenceRef: string,
+  mutation: () => T & (T extends PromiseLike<unknown> ? never : unknown)
+): Promise<T> {
+  return await runWithRecordDirectoryBindingOperation(async () => {
+    const admitted = await admitExistingWorkspaceRecordDirectory(
+      workspaceRoot,
+      [],
+      evidenceRef
+    );
+    if (!admitted) throw unsafeWorkspaceRecordDirectoryError(evidenceRef);
+
+    return await runWithRecordDirectoryMutationLocks([admitted.binding], async () => {
+      await assertRecordDirectoryIdentityNow(
+        admitted.path,
+        admitted.binding,
+        evidenceRef
+      );
+      let result!: T;
+      let mutationFailed = false;
+      let mutationFailure: unknown;
+      try {
+        result = mutation();
+        if (hasThenableShapeWithoutAssimilation(result)) {
+          mutationFailed = true;
+          mutationFailure = new TypeError(
+            "Workspace root mutation callback must return synchronously."
+          );
+        }
+      } catch (error) {
+        mutationFailed = true;
+        mutationFailure = error;
+      }
+
+      const observedRoot = await readSafeDirectoryLeafEntry(admitted.path);
+      if (!observedRoot) throw unsafeWorkspaceRecordDirectoryError(evidenceRef, true);
+      assertRecordDirectoryPathnameEpochCanAdvance(
+        observedRoot,
+        admitted.binding,
+        evidenceRef
+      );
+      advanceRecordDirectoryPathnameEpochFromStat(observedRoot, admitted.binding);
+      await assertRecordDirectoryIdentityNow(admitted.path, admitted.binding, evidenceRef);
+      if (mutationFailed) throw mutationFailure;
+      return result;
+    });
+  });
+}
+
+function hasThenableShapeWithoutAssimilation(value: unknown): boolean {
+  if (
+    (typeof value !== "object" || value === null) &&
+    typeof value !== "function"
+  ) {
+    return false;
+  }
+
+  let candidate: object | null = value as object;
+  for (let depth = 0; candidate !== null && depth < 128; depth += 1) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(candidate, "then");
+      if (descriptor) {
+        return descriptor.get !== undefined || typeof descriptor.value === "function";
+      }
+      candidate = Object.getPrototypeOf(candidate) as object | null;
+    } catch {
+      return true;
+    }
+  }
+  return candidate !== null;
+}
+
 export async function runWithExistingWorkspaceRecordDirectoryReproof(
   workspaceRoot: string,
   relativeSegments: readonly string[],

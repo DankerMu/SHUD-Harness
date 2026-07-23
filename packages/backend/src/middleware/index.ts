@@ -1,5 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
+import type { LocalTokenAuthority } from "../local-auth/local-auth-authority";
 
 export const BACKEND_MIDDLEWARE_NAMESPACE = "backend/middleware" as const;
 
@@ -29,6 +30,56 @@ export interface ApiRequestLoggerOptions {
   now?: () => Date;
   requestIdFactory?: () => string;
   sink?: ApiRequestLogSink;
+}
+
+export function createLocalApiAuthMiddleware(
+  authority: LocalTokenAuthority
+): MiddlewareHandler {
+  return async (c, next) => {
+    const path = c.req.path;
+    if (path !== "/api" && !path.startsWith("/api/")) {
+      await next();
+      return;
+    }
+
+    if (
+      c.req.method === "GET" &&
+      (path === "/api/health/live" || path === "/api/health/ready")
+    ) {
+      await next();
+      return;
+    }
+
+    const presentedToken = parseBearerToken(c.req.header("authorization"));
+    if (
+      presentedToken !== undefined &&
+      localTokensMatch(presentedToken, authority.token)
+    ) {
+      try {
+        authority.assertCurrent();
+        await next();
+        return;
+      } catch {
+        // Current-authority proof is intentionally last and still gates the handler.
+      }
+    }
+
+    return c.json(
+      {
+        error: {
+          error_id: `api_error_${randomUUID()}`,
+          category: "permission_error",
+          severity: "error",
+          message: "API request is not authorized.",
+          user_message: "Missing or invalid Authorization credentials.",
+          evidence_refs: ["request.authorization"],
+          retryable: false,
+          recommended_next_actions: ["Provide the configured local Bearer credential."]
+        }
+      },
+      401
+    );
+  };
 }
 
 export function createApiRequestLoggerMiddleware(
@@ -78,6 +129,17 @@ function emitApiRequestLogLine(sink: ApiRequestLogSink, line: string): void {
       // Request logging is best-effort; sink failures must not change API responses.
     }
   }, 0);
+}
+
+function parseBearerToken(value: string | undefined): string | undefined {
+  const match = /^Bearer ([\x21-\x2b\x2d-\x7e]{1,4096})$/u.exec(value ?? "");
+  return match?.[1];
+}
+
+function localTokensMatch(presented: string, expected: string): boolean {
+  const presentedDigest = createHash("sha256").update(presented, "utf8").digest();
+  const expectedDigest = createHash("sha256").update(expected, "utf8").digest();
+  return timingSafeEqual(presentedDigest, expectedDigest);
 }
 
 export function apiRoutePatternFor(method: string, path: string): string {

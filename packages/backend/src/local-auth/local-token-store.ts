@@ -29,6 +29,21 @@ export interface OpenWorkspaceLocalTokenAuthorityInput {
   readonly workspaceRoot: string;
 }
 
+export function ensurePrivateWorkspaceSecretsDirectory(workspaceRoot: string): void {
+  let descriptors: ReturnType<typeof openOrCreateWorkspaceTokenDescriptors> | undefined;
+  try {
+    descriptors = openOrCreateWorkspaceTokenDescriptors(workspaceRoot);
+    assertWorkspaceAndSecretsBinding(descriptors);
+  } catch (error) {
+    if (error instanceof LocalTokenStorageError) throw error;
+    throw unsafeLocalTokenStorageError();
+  } finally {
+    if (descriptors) {
+      settleOwnedDescriptors(descriptors.secrets, descriptors.workspace);
+    }
+  }
+}
+
 export function openWorkspaceLocalTokenAuthority(
   input: OpenWorkspaceLocalTokenAuthorityInput
 ): WorkspaceLocalTokenAuthority {
