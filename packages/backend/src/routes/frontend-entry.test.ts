@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,7 +22,7 @@ describe("production frontend entry", () => {
   });
 
   test("bootstraps the local token and completes browser create/list through the API wrapper", async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), "shud-harness-frontend-entry-"));
+    const tempRoot = await createTempRoot("shud-harness-frontend-entry-");
     tempRoots.push(tempRoot);
     const workspaceRoot = join(tempRoot, "workspace");
     const server = createServerWithTestToken({
@@ -149,7 +149,7 @@ describe("production frontend entry", () => {
   });
 
   test("does not disclose the bootstrap to a non-loopback Host origin", async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), "shud-harness-frontend-host-"));
+    const tempRoot = await createTempRoot("shud-harness-frontend-host-");
     tempRoots.push(tempRoot);
     const server = createServerWithTestToken({
       workspaceRoot: join(tempRoot, "workspace"),
@@ -165,6 +165,10 @@ describe("production frontend entry", () => {
     expect(body).not.toContain(HARNESS_BOOTSTRAP_SCRIPT_ATTRIBUTE);
   });
 });
+
+async function createTempRoot(prefix: string): Promise<string> {
+  return await realpath(await mkdtemp(join(tmpdir(), prefix)));
+}
 
 function toBrowserRequest(input: RequestInfo | URL, init?: RequestInit): Request {
   if (input instanceof Request) return new Request(input, init);

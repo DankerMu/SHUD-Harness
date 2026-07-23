@@ -49,12 +49,15 @@ The production page resolves the same workspace root and local-token authority c
 
 ## Verification evidence
 
-Locally executable in the implementation environment:
+Locally executed for the macOS fixture repair:
 
-- `npx --yes tsc -p /tmp/shud88/tsconfig.frontend.json` — passed.
-- `npx --yes tsc -p /tmp/shud88/tsconfig.backend.json` — passed.
-- Node runtime checks for wrapper target restrictions, forced Bearer headers, script-safe bootstrap serialization, and Dashboard document ordering — passed.
-- Whitespace/static scans for direct Dashboard native-fetch calls and token persistence strings — passed.
+- Before the repair, `npx --yes bun@1.2.19 test packages/backend/src/routes/frontend-entry.test.ts` reproduced the fail-closed path: 1 passed and 1 failed because workspace initialization returned 500 instead of 200.
+- After canonicalizing both temporary fixture roots, the same focused command passed: 2 passed, 0 failed.
+- `npx --yes bun@1.2.19 run test:backend-api` passed: the route suite reported 181 passed, 1 skipped, 0 failed; the local-auth adversarial matrix reported 92 passed, 2 skipped, 0 failed.
+- `npx --yes openspec validate m2-research-context --strict --no-interactive` passed.
+- `git diff --check` passed.
+
+This repair changes test fixtures and verification evidence only. Production workspace path-safety remains unchanged.
 
 Required repository gates on the PR head:
 
@@ -66,5 +69,3 @@ Required repository gates on the PR head:
 - `git diff --check`
 - `git -C zero diff --quiet`
 - `test -z "$(git ls-files workspace)"`
-
-Bun 1.2.19 and OpenSpec could not be executed in the local image; the PR checks remain authoritative for those gates.
