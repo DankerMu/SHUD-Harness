@@ -4,12 +4,18 @@ import type { TaskCard } from "@shud-harness/core";
 import {
   DASHBOARD_CREATE_FORM_SCRIPT,
   DASHBOARD_TASKS_ENDPOINT,
+  HARNESS_API_CLIENT_SCRIPT,
+  HARNESS_API_FETCH_GLOBAL,
+  HARNESS_BOOTSTRAP_GLOBAL,
   createDashboardController,
   createDashboardTask,
   listDashboardTasks,
   renderDashboardDocument,
   renderDashboardFromServer
 } from "../index";
+
+const DASHBOARD_TEST_ORIGIN = "http://127.0.0.1:3000";
+const DASHBOARD_TEST_TOKEN = "dashboard-browser-test-token";
 
 describe("Dashboard task page", () => {
   test("page-local helpers parse task list and create responses", async () => {
@@ -44,8 +50,11 @@ describe("Dashboard task page", () => {
     expect(fake.requests.map((request) => request.method)).toEqual(["GET", "POST"]);
   });
 
-  test("renders empty state and create controls", () => {
-    const document = renderDashboardDocument({ tasks: [], phase: "ready" });
+  test("renders empty state, bootstrap order, and create controls", () => {
+    const document = renderDashboardDocument(
+      { tasks: [], phase: "ready" },
+      { token: DASHBOARD_TEST_TOKEN }
+    );
 
     expect(document.startsWith("<!doctype html>")).toBe(true);
     expect(document).toContain('<html lang="zh-CN">');
@@ -55,7 +64,17 @@ describe("Dashboard task page", () => {
     expect(document).toContain('name="question_or_goal"');
     expect(document).toContain('name="budget_mode"');
     expect(document).toContain("创建 TaskCard");
+    expect(document).toContain("data-harness-bootstrap");
+    expect(document).toContain("data-harness-api-client");
     expect(document).toContain("data-dashboard-create-script");
+    expect(document.indexOf("data-harness-bootstrap")).toBeLessThan(
+      document.indexOf("data-harness-api-client")
+    );
+    expect(document.indexOf("data-harness-api-client")).toBeLessThan(
+      document.indexOf("data-dashboard-create-script")
+    );
+    expect(DASHBOARD_CREATE_FORM_SCRIPT).not.toContain("window.fetch");
+    expect(DASHBOARD_CREATE_FORM_SCRIPT).toContain(HARNESS_API_FETCH_GLOBAL);
   });
 
   test("create flow posts exact payload keys and refreshes from the backend list", async () => {
@@ -108,7 +127,7 @@ describe("Dashboard task page", () => {
     expect(countOccurrences(createdDocument, ">created<")).toBe(1);
   });
 
-  test("rendered form submit script posts exact JSON payload and refreshes task rows", async () => {
+  test("rendered form submit script posts exact authenticated JSON and refreshes task rows", async () => {
     const createdTask = taskCardFixture("TASK-dashboard-script", {
       title: "脚本建卡验收",
       status: "created"
@@ -129,6 +148,10 @@ describe("Dashboard task page", () => {
     expect(harness.fake.requests.map((request) => [request.method, request.url])).toEqual([
       ["POST", DASHBOARD_TASKS_ENDPOINT],
       ["GET", DASHBOARD_TASKS_ENDPOINT]
+    ]);
+    expect(harness.fake.requests.map((request) => request.authorization)).toEqual([
+      `Bearer ${DASHBOARD_TEST_TOKEN}`,
+      `Bearer ${DASHBOARD_TEST_TOKEN}`
     ]);
 
     const postBody = harness.fake.requests[0]?.jsonBody as Record<string, unknown>;
@@ -419,6 +442,7 @@ interface FakeFetchResponse {
 interface RecordedFetchRequest {
   url: string;
   method: string;
+  authorization: string | null;
   jsonBody?: unknown;
 }
 
@@ -439,6 +463,7 @@ function createFakeFetch(responses: FakeFetchResponse[]) {
     requests.push({
       url: String(input),
       method,
+      authorization: new Headers(init?.headers).get("authorization"),
       jsonBody: textBody ? JSON.parse(textBody) : undefined
     });
 
@@ -497,8 +522,23 @@ function createDashboardScriptHarness(
     }
   }
 
+  const windowLike: Record<string, unknown> = {
+    [HARNESS_BOOTSTRAP_GLOBAL]: Object.freeze({ token: DASHBOARD_TEST_TOKEN }),
+    location: { origin: DASHBOARD_TEST_ORIGIN },
+    fetch: fake.fetchClient
+  };
+  Object.defineProperty(windowLike, "localStorage", {
+    get() {
+      throw new Error("Dashboard authentication must not use localStorage.");
+    }
+  });
+  new Function("window", HARNESS_API_CLIENT_SCRIPT)(windowLike);
+  if (typeof windowLike[HARNESS_API_FETCH_GLOBAL] !== "function") {
+    throw new Error("Harness API client was not installed.");
+  }
+
   const runScript = new Function("document", "window", "FormData", DASHBOARD_CREATE_FORM_SCRIPT);
-  runScript(documentLike, { fetch: fake.fetchClient }, FakeFormData);
+  runScript(documentLike, windowLike, FakeFormData);
 
   return {
     fake,
