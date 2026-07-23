@@ -5,16 +5,20 @@ import {
   type TaskCard,
   type TaskType
 } from "@shud-harness/core";
+import {
+  harnessApiFetch,
+  renderHarnessApiClientScript,
+  renderHarnessBootstrapScript,
+  type HarnessApiFetch,
+  type HarnessBootstrap
+} from "../api";
 import { escapeHtml } from "../components";
 
 export const DASHBOARD_ROUTE = "/" as const;
 export const DASHBOARD_ALTERNATE_ROUTE = "/dashboard" as const;
 export const DASHBOARD_TASKS_ENDPOINT = "/api/tasks" as const;
 
-export type DashboardFetch = (
-  input: RequestInfo | URL,
-  init?: RequestInit
-) => Promise<Response>;
+export type DashboardFetch = HarnessApiFetch;
 
 export type DashboardBudgetMode = CreateTaskInput["inference_budget"]["mode"];
 
@@ -55,7 +59,7 @@ export class DashboardTaskApiError extends Error {
 }
 
 export async function listDashboardTasks(
-  fetchClient: DashboardFetch = fetch
+  fetchClient: DashboardFetch = harnessApiFetch
 ): Promise<TaskCard[]> {
   const response = await fetchClient(DASHBOARD_TASKS_ENDPOINT, {
     method: "GET",
@@ -77,7 +81,7 @@ export async function listDashboardTasks(
 
 export async function createDashboardTask(
   input: DashboardCreateTaskInput,
-  fetchClient: DashboardFetch = fetch
+  fetchClient: DashboardFetch = harnessApiFetch
 ): Promise<TaskCard> {
   const body = dashboardCreateTaskBody(input);
   const response = await fetchClient(DASHBOARD_TASKS_ENDPOINT, {
@@ -115,7 +119,7 @@ export function dashboardCreateTaskBody(
   };
 }
 
-export function createDashboardController(fetchClient: DashboardFetch = fetch) {
+export function createDashboardController(fetchClient: DashboardFetch = harnessApiFetch) {
   let state: DashboardRenderState = {
     tasks: [],
     phase: "loading"
@@ -185,10 +189,11 @@ export function createDashboardController(fetchClient: DashboardFetch = fetch) {
 }
 
 export async function renderDashboardFromServer(
-  fetchClient: DashboardFetch = fetch
+  fetchClient: DashboardFetch = harnessApiFetch,
+  bootstrap?: HarnessBootstrap
 ): Promise<string> {
   const tasks = await listDashboardTasks(fetchClient);
-  return renderDashboardDocument({ tasks, phase: "ready" });
+  return renderDashboardDocument({ tasks, phase: "ready" }, bootstrap);
 }
 
 export function renderDashboardPage(state: DashboardRenderState): string {
@@ -221,7 +226,10 @@ export function renderDashboardPage(state: DashboardRenderState): string {
   ].join("");
 }
 
-export function renderDashboardDocument(state: DashboardRenderState): string {
+export function renderDashboardDocument(
+  state: DashboardRenderState,
+  bootstrap?: HarnessBootstrap
+): string {
   const title = "SHUD Harness 任务看板";
 
   return [
@@ -235,6 +243,8 @@ export function renderDashboardDocument(state: DashboardRenderState): string {
     "</head>",
     "<body>",
     renderDashboardPage(state),
+    bootstrap ? renderHarnessBootstrapScript(bootstrap) : "",
+    renderHarnessApiClientScript(),
     `<script data-dashboard-create-script>${DASHBOARD_CREATE_FORM_SCRIPT}</script>`,
     "</body>",
     "</html>"
@@ -243,10 +253,11 @@ export function renderDashboardDocument(state: DashboardRenderState): string {
 
 export function renderDashboardRoute(
   path: string,
-  state: DashboardRenderState = { tasks: [], phase: "ready" }
+  state: DashboardRenderState = { tasks: [], phase: "ready" },
+  bootstrap?: HarnessBootstrap
 ): string | undefined {
   return path === DASHBOARD_ROUTE || path === DASHBOARD_ALTERNATE_ROUTE
-    ? renderDashboardDocument(state)
+    ? renderDashboardDocument(state, bootstrap)
     : undefined;
 }
 
@@ -400,10 +411,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export const DASHBOARD_CREATE_FORM_SCRIPT = `
 (() => {
   const endpoint = "/api/tasks";
+  const apiFetch = window.__HARNESS_API_FETCH__;
   const form = document.querySelector("[data-create-task-form]");
   const listRegion = document.querySelector("[data-dashboard-task-list]");
   const errorRegion = document.querySelector("[data-dashboard-errors]");
-  if (!form || !listRegion || !errorRegion || typeof window.fetch !== "function") {
+  if (!form || !listRegion || !errorRegion || typeof apiFetch !== "function") {
     return;
   }
 
@@ -513,7 +525,7 @@ export const DASHBOARD_CREATE_FORM_SCRIPT = `
     };
 
     try {
-      const createResponse = await window.fetch(endpoint, {
+      const createResponse = await apiFetch(endpoint, {
         method: "POST",
         headers: {
           accept: "application/json",
@@ -531,7 +543,7 @@ export const DASHBOARD_CREATE_FORM_SCRIPT = `
     }
 
     try {
-      const listResponse = await window.fetch(endpoint, {
+      const listResponse = await apiFetch(endpoint, {
         method: "GET",
         headers: {
           accept: "application/json"
@@ -623,7 +635,7 @@ body {
 
 .dashboard-status,
 .dashboard-empty,
-.dashboard-error {
+.dashboard-error  {
   margin: 16px 20px 0;
   font-size: 14px;
   line-height: 20px;
