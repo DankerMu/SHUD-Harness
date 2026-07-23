@@ -10,6 +10,7 @@ const TASK_COUNT = 100;
 const WARMUP_REQUESTS_PER_ENDPOINT = 5;
 const SAMPLE_REQUESTS_PER_ENDPOINT = 40;
 const P95_LIMIT_MS = 300;
+const PERF_LOCAL_TOKEN = "perf-api-local-token";
 
 type EndpointMeasurement = {
   label: string;
@@ -26,14 +27,22 @@ async function main(): Promise<void> {
   const tempRoot = await realpath(await mkdtemp(join(tmpdir(), "shud-harness-perf-api-")));
   try {
     const workspaceRoot = join(tempRoot, "workspace");
-    const app = createBackendApi({
-      workspaceRoot,
-      requestLogSink: () => undefined,
-      taskIdFactory: sequentialTaskIdFactory()
-    });
+    const previousToken = process.env.HARNESS_LOCAL_TOKEN;
+    process.env.HARNESS_LOCAL_TOKEN = PERF_LOCAL_TOKEN;
+    let app: ReturnType<typeof createBackendApi>;
+    try {
+      app = createBackendApi({
+        workspaceRoot,
+        requestLogSink: () => undefined,
+        taskIdFactory: sequentialTaskIdFactory()
+      });
+    } finally {
+      if (previousToken === undefined) delete process.env.HARNESS_LOCAL_TOKEN;
+      else process.env.HARNESS_LOCAL_TOKEN = previousToken;
+    }
 
     await expectStatus(
-      app.request("/api/workspace/init", { method: "POST" }),
+      requestWithAuth(app, "/api/workspace/init", { method: "POST" }),
       200,
       "POST /api/workspace/init"
     );
@@ -69,7 +78,7 @@ async function main(): Promise<void> {
 async function createTaskFixture(app: ReturnType<typeof createBackendApi>): Promise<TaskCard[]> {
   const tasks: TaskCard[] = [];
   for (let index = 0; index < TASK_COUNT; index += 1) {
-    const response = await app.request("/api/tasks", {
+    const response = await requestWithAuth(app, "/api/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(taskCreateInput(index))
@@ -93,7 +102,12 @@ async function expectTaskListCount(
   app: ReturnType<typeof createBackendApi>,
   expectedCount: number
 ): Promise<void> {
-  const response = await expectStatus(app.request("/api/tasks"), 200, "GET /api/tasks", false);
+  const response = await expectStatus(
+    requestWithAuth(app, "/api/tasks"),
+    200,
+    "GET /api/tasks",
+    false
+  );
   const body = (await response.json()) as TaskListResponse;
   if (!Array.isArray(body.tasks) || body.tasks.length !== expectedCount) {
     const actualCount = Array.isArray(body.tasks) ? body.tasks.length : "non-array";
@@ -110,13 +124,13 @@ async function measureEndpoint(
   expectedStatus: number
 ): Promise<EndpointMeasurement> {
   for (let index = 0; index < WARMUP_REQUESTS_PER_ENDPOINT; index += 1) {
-    await expectStatus(app.request(path), expectedStatus, label);
+    await expectStatus(requestWithAuth(app, path), expectedStatus, label);
   }
 
   const samples: number[] = [];
   for (let index = 0; index < SAMPLE_REQUESTS_PER_ENDPOINT; index += 1) {
     const startedAtMs = performance.now();
-    await expectStatus(app.request(path), expectedStatus, label);
+    await expectStatus(requestWithAuth(app, path), expectedStatus, label);
     samples.push(performance.now() - startedAtMs);
   }
 
@@ -169,6 +183,16 @@ function formatMs(value: number): string {
 function sequentialTaskIdFactory(): () => string {
   let nextId = 1;
   return () => `TASK-perf-${String(nextId++).padStart(3, "0")}`;
+}
+
+function requestWithAuth(
+  app: ReturnType<typeof createBackendApi>,
+  path: string,
+  init?: RequestInit
+): Response | Promise<Response> {
+  const headers = new Headers(init?.headers);
+  headers.set("Authorization", `Bearer ${PERF_LOCAL_TOKEN}`);
+  return app.request(path, { ...init, headers });
 }
 
 function taskCreateInput(index: number): CreateTaskInput {

@@ -3,6 +3,7 @@ import { execFile as execFileWithCallback } from "node:child_process";
 import { writeFileSync, type BigIntStats } from "node:fs";
 import {
   access,
+  chmod,
   link,
   lstat,
   readdir,
@@ -41,7 +42,11 @@ import {
   type TaskCard,
   type TaskSnapshot
 } from "@shud-harness/core";
-import { createBackendApi, type ApiErrorResponse, type WorkspaceReadyResponse } from "./index";
+import { type ApiErrorResponse, type WorkspaceReadyResponse } from "./index";
+import {
+  BACKEND_TEST_LOCAL_TOKEN,
+  createAuthenticatedBackendApi as createBackendApi
+} from "./backend-api-test-helpers";
 import {
   API_REQUEST_ID_HEADER,
   redactApiLogValue,
@@ -81,6 +86,7 @@ const EXPECTED_M1_RUNTIME_DIRECTORIES = [
   "repos/rSHUD",
   "repos/AutoSHUD",
   "repos/zero",
+  "secrets",
   "stacks",
   "data",
   "tasks",
@@ -199,10 +205,9 @@ describe("backend workspace and health routes", () => {
     }
   });
 
-  test("workspace init and record writers share canonical missing-child authority", async () => {
+  test("workspace init and record writers share canonical non-secret missing-child authority", async () => {
     const recordSchema = z.object({ id: z.string(), parent: z.string() });
     for (const directorySegments of [
-      [],
       ["tasks"],
       ["artifacts", "manifests"]
     ] as const) {
@@ -215,6 +220,8 @@ describe("backend workspace and health routes", () => {
             recursive: true
           });
         }
+        await mkdir(join(workspaceRoot, "secrets"), { recursive: true, mode: 0o700 });
+        await chmod(join(workspaceRoot, "secrets"), 0o700);
         const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
         const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
         const targetDirectory = join(workspaceRoot, ...directorySegments);
@@ -453,7 +460,7 @@ describe("backend workspace and health routes", () => {
   test("API request logs redact secret-like values and preserve secret refs", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
-    const fakeSecret = "sk-test-secret-value";
+    const fakeSecret = BACKEND_TEST_LOCAL_TOKEN;
     const logs: string[] = [];
     const app = createBackendApi({
       workspaceRoot,
@@ -8127,6 +8134,8 @@ describe("backend workspace and health routes", () => {
       'import { join } from "node:path";',
       `import { createBackendApi } from ${JSON.stringify(backendIndexPath)};`,
       `import { createIdempotencyRecordService, createTaskCardService } from ${JSON.stringify(coreIndexPath)};`,
+      'const localToken = "phase62-backend-local-token";',
+      'process.env.HARNESS_LOCAL_TOKEN = localToken;',
       'const body = {',
       '  type: "engineering",',
       '  title: "Phase 6.2 bounded proxy",',
@@ -8143,7 +8152,7 @@ describe("backend workspace and health routes", () => {
       '  return fresh();',
       '}',
       'async function post(app, key) {',
-      '  const headers = { "content-type": "application/json" };',
+      '  const headers = { "content-type": "application/json", Authorization: `Bearer ${localToken}` };',
       '  if (key) headers["Idempotency-Key"] = key;',
       '  return await app.request("/api/tasks", { method: "POST", headers, body: JSON.stringify(body) });',
       '}',
@@ -9989,7 +9998,10 @@ async function createExpectedRuntimeTree(
     if (options.skip?.has(relativeDir)) {
       continue;
     }
-    await mkdir(join(workspaceRoot, relativeDir), { recursive: true });
+    await mkdir(join(workspaceRoot, relativeDir), {
+      recursive: true,
+      ...(relativeDir === "secrets" ? { mode: 0o700 } : {})
+    });
   }
 }
 
