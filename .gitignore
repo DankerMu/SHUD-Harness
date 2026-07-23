@@ -22,10 +22,8 @@ node_modules/
 *.swp
 *.swo
 
-# Agent runtime projections (regenerate by reinstalling packs; canonical source: instructions/)
+# Claude runtime projection (regenerate by reinstalling packs; canonical source: instructions/)
 .claude/
-.agents/
-.codex/
 
 # Agent issue workplans
 /.workplans/issue-*/

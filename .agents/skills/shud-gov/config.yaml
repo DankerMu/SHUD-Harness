@@ -1,0 +1,62 @@
+# SHUD-Harness 治理 Review 维度配置
+# patterns: glob 匹配 diff 文件路径
+# keywords: 可选，匹配 diff 内容中的关键词（任一命中即触发）
+# phase: 建议在 cc-cx-workflow 哪个 phase 运行
+# checks: 确定性检查脚本（Phase 2）
+# review: codex review prompt 模板（Phase 4）
+
+dimensions:
+  zero-seam-guard:
+    description: "Zero 运行时扩展模式合规"
+    patterns:
+      - "zero/**"
+      - "packages/**/src/**"
+      - "apps/server/**"
+    keywords: ["@zero-os/", "BaseTool", "ToolRegistry", "AgentLoop", "SessionDB"]
+    phase: [2, 4]
+    checks:
+      - "checks/zod-schema-check.sh"
+      - "checks/dep-direction.sh"
+      - "checks/tool-throw-guard.sh"
+    review: "reviews/zero-seam-guard.md"
+
+  shud-unit-guard:
+    description: "SHUD 时间单位 / 参数语义 / 二进制格式一致性"
+    patterns:
+      - "**/tools/shud*"
+      - "**/parsers/**"
+      - "**/io/**"
+      - "scripts/**"
+    keywords: ["1440", "minutes", "KsatV", "macKsatV", "calib", "readBin", "binary"]
+    phase: [4]
+    review: "reviews/shud-unit-guard.md"
+
+  shud-io-contract:
+    description: "SHUD/rSHUD/AutoSHUD 文件格式与接口正确性"
+    patterns:
+      - "**/tools/shud*"
+      - "**/parsers/**"
+      - "**/io/**"
+      - "scripts/**"
+    keywords: [".mesh", ".riv", ".att", ".para", "read_output", "forcing", "TabularData"]
+    phase: [4]
+    review: "reviews/shud-io-contract.md"
+
+  spec-reality-sync:
+    description: "Spec 文档歧义点的一致性处理"
+    patterns:
+      - "**"
+    phase: [4]
+    review: "reviews/spec-reality-sync.md"
+    note: "每个 PR 都跑，但 review 模板内部按 diff 内容动态裁剪检查项"
+
+  park-resume-audit:
+    description: "Park/Resume 异步 job 模式正确性"
+    patterns:
+      - "**/services/job*"
+      - "**/services/task*"
+      - "**/agent/**"
+      - "**/session/**"
+    keywords: ["park", "resume", "collect", "RunJob", "AgentLoop", "SessionDB", "parked"]
+    phase: [4]
+    review: "reviews/park-resume-audit.md"

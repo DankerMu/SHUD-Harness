@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "name": "blind-spot-pass",
+  "displayName": "Blind Spot Pass",
+  "description": "开工前对陌生区域做盲区侦察：从代码库考古（git 历史、相似实现、隐形约定、危险区、邻接面）挖出你没意识到要问的 unknown unknowns，产出带证据的盲区清单、改写后的更好 prompt 和 reference 清单。Use before long tasks in unfamiliar territory to find unknown unknowns.",
+  "version": "0.1.1",
+  "maturity": "experimental",
+  "categories": [
+    "workflow",
+    "research"
+  ],
+  "tags": [
+    "unknown-unknowns",
+    "blind-spot",
+    "reconnaissance",
+    "codebase-archaeology",
+    "pre-implementation",
+    "prompt-improvement"
+  ],
+  "authors": [
+    {
+      "name": "danker"
+    }
+  ],
+  "license": "MIT",
+  "entrypoints": {
+    "skillDoc": "SKILL.md"
+  },
+  "capabilities": {
+    "shell": true,
+    "filesystemRead": true,
+    "filesystemWrite": false
+  }
+}

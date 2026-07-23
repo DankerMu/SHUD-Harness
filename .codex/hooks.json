@@ -1,0 +1,36 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .codex/hooks/worktree-guard/worktree-guard.sh",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "exec_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .codex/hooks/large-file-guard/large-file-guard.sh",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "matcher": "(collaboration\\.)?(spawn_agent|followup_task)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .codex/hooks/review-gate/review-gate.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

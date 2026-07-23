@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "name": "diagnosing-bugs",
+  "displayName": "Diagnosing Bugs",
+  "description": "因未知失败的诊断纪律：先建红色反馈回路（10 级构建阶梯），后假设——没有一条已跑过、能红的命令就禁止读代码编理论；随后最小化复现、3-5 个可证伪假设排序、单变量插桩、带 seam 纪律的回归测试与归因；难缠 bug 可选多代理扇出模式（回路构建与假设生成并行化）。Use to diagnose or debug hard bugs and performance regressions where the cause is unknown, fixes keep bouncing back, or CI fails without a local repro.",
+  "version": "0.2.0",
+  "maturity": "experimental",
+  "categories": [
+    "debugging",
+    "coding"
+  ],
+  "tags": [
+    "feedback-loop",
+    "root-cause",
+    "reproduction",
+    "falsifiable-hypotheses",
+    "instrumentation",
+    "regression-test",
+    "hitl"
+  ],
+  "authors": [
+    {
+      "name": "danker"
+    }
+  ],
+  "license": "MIT",
+  "entrypoints": {
+    "skillDoc": "SKILL.md"
+  },
+  "capabilities": {
+    "shell": true,
+    "filesystemRead": true,
+    "filesystemWrite": true
+  }
+}
