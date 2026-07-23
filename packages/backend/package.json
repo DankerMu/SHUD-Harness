@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@shud-harness/core": "workspace:*",
+    "@shud-harness/frontend": "workspace:*",
     "hono": "^4.7.0"
   }
 }
