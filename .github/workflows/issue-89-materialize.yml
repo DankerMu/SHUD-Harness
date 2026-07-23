@@ -1,3 +1,4 @@
+# temporary materializer; excluded from the final issue branch
 name: Issue 89 schema materializer
 
 on:
