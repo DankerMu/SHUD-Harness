@@ -5,7 +5,7 @@
     "name": "bun",
     "version": "1.2.19",
     "lockfile_path": "bun.lock",
-    "lockfile_sha256": "f4ae1f772f435473370253485389ae858085cf254ed1e8a2f441b4afcfbe846a"
+    "lockfile_sha256": "1653b2c991de952c1036415aee37ca96e3f279c493b589b156ddc3f24c74448d"
   },
   "packages": [
     {

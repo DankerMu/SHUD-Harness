@@ -146,8 +146,10 @@ function frontendUnavailableResponse(): Response {
 function frontendPageHeaders(contentType: string): Headers {
   return new Headers({
     "cache-control": "no-store",
+    "content-security-policy": "frame-ancestors 'none'",
     "content-type": contentType,
     "referrer-policy": "no-referrer",
-    "x-content-type-options": "nosniff"
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY"
   });
 }

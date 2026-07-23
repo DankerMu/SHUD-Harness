@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  unlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,6 +20,7 @@ import { createBackendProductionServerOptions } from "../production-server";
 const TEST_TOKEN = "backend-frontend-entry-token";
 const TEST_ORIGIN = "http://127.0.0.1:3000";
 const CREATED_TASK_ID = "TASK-11111111-1111-4111-8111-111111111111";
+const REPLACEMENT_TOKEN = "backend-frontend-entry-replacement-token";
 const tempRoots: string[] = [];
 
 describe("production frontend entry", () => {
@@ -42,8 +51,7 @@ describe("production frontend entry", () => {
     const entryResponse = await server.fetch(new Request(`${TEST_ORIGIN}/`));
     expect(entryResponse.status).toBe(200);
     expect(entryResponse.headers.get("content-type")).toContain("text/html");
-    expect(entryResponse.headers.get("cache-control")).toBe("no-store");
-    expect(entryResponse.headers.get("access-control-allow-origin")).toBeNull();
+    expectFrontendPageSecurityHeaders(entryResponse);
     const entryDocument = await entryResponse.text();
     expect(entryDocument).toContain(HARNESS_BOOTSTRAP_SCRIPT_ATTRIBUTE);
     expect(entryDocument).toContain(HARNESS_API_CLIENT_SCRIPT_ATTRIBUTE);
@@ -148,6 +156,26 @@ describe("production frontend entry", () => {
     expect(browserRequests.every((request) => !request.url.includes(TEST_TOKEN))).toBe(true);
   });
 
+  test("serves both frontend aliases with anti-framing and credential-safe headers", async () => {
+    const tempRoot = await createTempRoot("shud-harness-frontend-headers-");
+    tempRoots.push(tempRoot);
+    const server = createServerWithTestToken({
+      workspaceRoot: join(tempRoot, "workspace"),
+      requestLogSink: () => undefined
+    });
+
+    for (const pathname of ["/", "/dashboard"] as const) {
+      const response = await server.fetch(new Request(`${TEST_ORIGIN}${pathname}`));
+      const body = await response.text();
+
+      expect(response.status, pathname).toBe(200);
+      expect(response.headers.get("content-type"), pathname).toContain("text/html");
+      expectFrontendPageSecurityHeaders(response);
+      expect(body, pathname).toContain(HARNESS_BOOTSTRAP_SCRIPT_ATTRIBUTE);
+      expect(body, pathname).toContain(HARNESS_API_CLIENT_SCRIPT_ATTRIBUTE);
+    }
+  });
+
   test("does not disclose the bootstrap to a non-loopback Host origin", async () => {
     const tempRoot = await createTempRoot("shud-harness-frontend-host-");
     tempRoots.push(tempRoot);
@@ -160,9 +188,63 @@ describe("production frontend entry", () => {
     const body = await response.text();
 
     expect(response.status).toBe(404);
-    expect(response.headers.get("cache-control")).toBe("no-store");
+    expectFrontendPageSecurityHeaders(response);
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+    expect(body).toBe("Not Found");
     expect(body).not.toContain(TEST_TOKEN);
     expect(body).not.toContain(HARNESS_BOOTSTRAP_SCRIPT_ATTRIBUTE);
+  });
+
+  test("returns a generic 503 when file authority changes before the dashboard proof", async () => {
+    await withoutEnvironmentLocalToken(async () => {
+      const tempRoot = await createTempRoot("shud-harness-frontend-stale-before-");
+      tempRoots.push(tempRoot);
+      const workspaceRoot = join(tempRoot, "workspace");
+      const server = createBackendProductionServerOptions({
+        workspaceRoot,
+        requestLogSink: () => undefined
+      });
+      const oldToken = await readWorkspaceLocalToken(workspaceRoot);
+      await replaceWorkspaceLocalToken(workspaceRoot, REPLACEMENT_TOKEN);
+
+      const response = await server.fetch(new Request(`${TEST_ORIGIN}/dashboard`));
+
+      await expectGenericUnavailableResponse(response, {
+        oldToken,
+        newToken: REPLACEMENT_TOKEN,
+        workspaceRoot
+      });
+    });
+  });
+
+  test("returns a generic 503 when file authority changes during root snapshot rendering", async () => {
+    await withoutEnvironmentLocalToken(async () => {
+      const tempRoot = await createTempRoot("shud-harness-frontend-stale-render-");
+      tempRoots.push(tempRoot);
+      const workspaceRoot = join(tempRoot, "workspace");
+      let replacementStarted = false;
+      const server = createBackendProductionServerOptions({
+        workspaceRoot,
+        requestLogSink: () => undefined,
+        taskSnapshotReadHooks: {
+          async beforeHydrationTasksRootMetadata() {
+            if (replacementStarted) return;
+            replacementStarted = true;
+            await replaceWorkspaceLocalToken(workspaceRoot, REPLACEMENT_TOKEN);
+          }
+        }
+      });
+      const oldToken = await readWorkspaceLocalToken(workspaceRoot);
+
+      const response = await server.fetch(new Request(`${TEST_ORIGIN}/`));
+
+      expect(replacementStarted).toBe(true);
+      await expectGenericUnavailableResponse(response, {
+        oldToken,
+        newToken: REPLACEMENT_TOKEN,
+        workspaceRoot
+      });
+    });
   });
 });
 
@@ -182,6 +264,57 @@ function inlineScript(document: string, attribute: string): string {
   if (!match?.[1]) throw new Error(`Missing inline script: ${attribute}`);
   return match[1];
 }
+
+function expectFrontendPageSecurityHeaders(response: Response): void {
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(response.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+  expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(response.headers.get("x-frame-options")).toBe("DENY");
+  expect(response.headers.get("access-control-allow-origin")).toBeNull();
+}
+
+async function expectGenericUnavailableResponse(
+  response: Response,
+  secrets: { readonly oldToken: string; readonly newToken: string; readonly workspaceRoot: string }
+): Promise<void> {
+  const body = await response.text();
+  const publication = `${JSON.stringify([...response.headers])}\n${body}`;
+  expect(response.status).toBe(503);
+  expect(body).toBe("Service Unavailable");
+  expectFrontendPageSecurityHeaders(response);
+  expect(publication).not.toContain(HARNESS_BOOTSTRAP_SCRIPT_ATTRIBUTE);
+  expect(publication).not.toContain(secrets.oldToken);
+  expect(publication).not.toContain(secrets.newToken);
+  expect(publication).not.toContain(secrets.workspaceRoot);
+}
+
+async function readWorkspaceLocalToken(workspaceRoot: string): Promise<string> {
+  return await readFile(join(workspaceRoot, "secrets", "local-token"), "utf8");
+}
+
+async function replaceWorkspaceLocalToken(workspaceRoot: string, token: string): Promise<void> {
+  const tokenPath = join(workspaceRoot, "secrets", "local-token");
+  const displacedPath = join(workspaceRoot, "secrets", "local-token.displaced");
+  await rename(tokenPath, displacedPath);
+  await writeFile(tokenPath, token, { flag: "wx", mode: 0o600 });
+  await unlink(displacedPath);
+}
+
+async function withoutEnvironmentLocalToken(action: () => Promise<void>): Promise<void> {
+  const previousToken = process.env.HARNESS_LOCAL_TOKEN;
+  delete process.env.HARNESS_LOCAL_TOKEN;
+  try {
+    await action();
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.HARNESS_LOCAL_TOKEN;
+    } else {
+      process.env.HARNESS_LOCAL_TOKEN = previousToken;
+    }
+  }
+}
+
 function createServerWithTestToken(
   options: Parameters<typeof createBackendProductionServerOptions>[0]
 ): ReturnType<typeof createBackendProductionServerOptions> {

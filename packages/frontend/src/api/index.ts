@@ -66,7 +66,7 @@ export function createHarnessApiFetch(options: HarnessApiFetchOptions): HarnessA
     assertApiRequestTarget(input, origin);
     const headers = mergeRequestHeaders(input, init?.headers);
     headers.set("Authorization", `Bearer ${options.token}`);
-    return await fetchClient(input, { ...init, headers });
+    return await fetchClient(input, { ...init, headers, redirect: "error" });
   };
 }
 
@@ -135,6 +135,9 @@ export const HARNESS_API_CLIENT_SCRIPT = `
 
   const origin = new URL(runtimeOrigin).origin;
   const apiFetch = async (input, init) => {
+    if (typeof input === "string" && input.startsWith("//")) {
+      throw new Error("Harness API credentials cannot be sent cross-origin.");
+    }
     const rawUrl = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
     if (typeof rawUrl !== "string") {
       throw new Error("Harness API requests require a URL.");
@@ -154,7 +157,7 @@ export const HARNESS_API_CLIENT_SCRIPT = `
     }
     headers.set("Authorization", "Bearer " + bootstrap.token);
 
-    return await nativeFetch(input, { ...(init || {}), headers });
+    return await nativeFetch(input, { ...(init || {}), headers, redirect: "error" });
   };
 
   Object.defineProperty(window, "__HARNESS_API_FETCH__", {
@@ -196,6 +199,12 @@ function normalizeOrigin(origin: string | undefined): string | undefined {
 }
 
 function assertApiRequestTarget(input: RequestInfo | URL, origin: string | undefined): void {
+  if (typeof input === "string" && input.startsWith("//")) {
+    throw new HarnessApiClientError(
+      "request_cross_origin",
+      "Harness API credentials cannot be sent cross-origin."
+    );
+  }
   const rawUrl =
     input instanceof Request ? input.url : input instanceof URL ? input.href : String(input);
   const isRootRelative = rawUrl.startsWith("/") && !rawUrl.startsWith("//");
