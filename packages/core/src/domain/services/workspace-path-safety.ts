@@ -119,13 +119,15 @@ export async function resolveWorkspacePath(
       input.evidenceRef
     );
   }
+  const deniedTargetPath = deniedRoots.length > 0
+    ? await deniedWorkspaceTargetPath(workspaceRoot, boundary, absolutePath, input.evidenceRef)
+    : undefined;
   if (
-    deniedRoots.length > 0 &&
-    await boundaryMayOverlapWorkspace(workspaceRoot, boundary) &&
+    deniedTargetPath !== undefined &&
     await targetsDeniedWorkspaceBoundary(
       workspaceRoot,
       deniedRoots,
-      absolutePath,
+      deniedTargetPath,
       input.evidenceRef
     )
   ) {
@@ -154,16 +156,18 @@ export async function resolveWorkspacePath(
   };
 }
 
-async function boundaryMayOverlapWorkspace(
+async function deniedWorkspaceTargetPath(
   workspaceRoot: string,
-  boundary: BoundaryCandidate
-): Promise<boolean> {
-  if (boundary.kind === "workspace") return true;
+  boundary: BoundaryCandidate,
+  targetPath: string,
+  evidenceRef: string
+): Promise<string | undefined> {
+  if (boundary.kind === "workspace") return targetPath;
   if (
     isPathInsideBoundary(workspaceRoot, boundary.root) ||
     isPathInsideBoundary(boundary.root, workspaceRoot)
   ) {
-    return true;
+    return await readonlyTargetPhysicalLanding(targetPath, evidenceRef);
   }
 
   try {
@@ -171,14 +175,94 @@ async function boundaryMayOverlapWorkspace(
       realpath(workspaceRoot),
       realpath(boundary.root)
     ]);
-    return (
+    if (
       isPathInsideBoundary(physicalWorkspaceRoot, physicalBoundaryRoot) ||
       isPathInsideBoundary(physicalBoundaryRoot, physicalWorkspaceRoot)
-    );
+    ) {
+      return await readonlyTargetPhysicalLanding(targetPath, evidenceRef);
+    }
   } catch {
     // Missing or changing read-only roots cannot be proven disjoint safely.
-    return true;
+    return await readonlyTargetPhysicalLanding(targetPath, evidenceRef);
   }
+
+  if (!await targetPathCrossesSymlinkBelowBoundary(
+    boundary.root,
+    targetPath
+  )) {
+    return undefined;
+  }
+  return await readonlyTargetPhysicalLanding(targetPath, evidenceRef);
+}
+
+async function readonlyTargetPhysicalLanding(
+  targetPath: string,
+  evidenceRef: string
+): Promise<string> {
+  let candidate = targetPath;
+  const missingSegments: string[] = [];
+  for (;;) {
+    try {
+      const physicalCandidate = await realpath(candidate);
+      const physicalEntry = await lstat(physicalCandidate);
+      if (missingSegments.length > 0 && !physicalEntry.isDirectory()) {
+        throw new WorkspacePathSafetyError(
+          "Workspace path crosses a non-directory ancestor.",
+          evidenceRef
+        );
+      }
+      return join(physicalCandidate, ...missingSegments);
+    } catch (error) {
+      if (error instanceof WorkspacePathSafetyError) throw error;
+      if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
+        throw new WorkspacePathSafetyError(
+          "Workspace path cannot be canonicalized safely.",
+          evidenceRef
+        );
+      }
+    }
+
+    const parent = parse(candidate).dir;
+    if (parent === candidate) {
+      throw new WorkspacePathSafetyError(
+        "Workspace path has no canonical physical ancestor.",
+        evidenceRef
+      );
+    }
+    missingSegments.unshift(parse(candidate).base);
+    candidate = parent;
+  }
+}
+
+async function targetPathCrossesSymlinkBelowBoundary(
+  boundaryRoot: string,
+  targetPath: string
+): Promise<boolean> {
+  const relativeTarget = relative(boundaryRoot, targetPath);
+  if (
+    relativeTarget === "" ||
+    isAbsolute(relativeTarget) ||
+    relativeTarget === ".." ||
+    relativeTarget.startsWith(`..${sep}`)
+  ) {
+    return false;
+  }
+
+  let candidate = boundaryRoot;
+  for (const segment of relativeTarget.split(sep).filter(Boolean)) {
+    candidate = join(candidate, segment);
+    try {
+      const entry = await lstat(candidate);
+      if (entry.isSymbolicLink()) return true;
+    } catch (error) {
+      if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+        return false;
+      }
+      // An unreadable or changing descendant cannot be proven disjoint.
+      return true;
+    }
+  }
+  return false;
 }
 
 export function assertPathInsideWorkspace(

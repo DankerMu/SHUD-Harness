@@ -123,6 +123,68 @@ describe("workspace path denied relative roots", () => {
     }
   });
 
+  test("denied roots dominate descendant read-only aliases landing in the workspace", async () => {
+    const workspaceRoot = await createWorkspace();
+    await mkdir(join(workspaceRoot, "secrets", "nested"), {
+      recursive: true,
+      mode: 0o700
+    });
+    const readonlyRoot = join(workspaceRoot, "..", "disjoint-readonly-alias-root");
+    await mkdir(readonlyRoot);
+
+    for (const fixture of [
+      {
+        label: "workspace alias",
+        aliasName: "workspace-alias",
+        aliasTarget: workspaceRoot,
+        paths: [
+          "workspace-alias/secrets",
+          "workspace-alias/secrets/nested/token",
+          "workspace-alias/secrets/missing/token"
+        ]
+      },
+      {
+        label: "secrets alias",
+        aliasName: "secrets-alias",
+        aliasTarget: join(workspaceRoot, "secrets"),
+        paths: [
+          "secrets-alias",
+          "secrets-alias/nested/token",
+          "secrets-alias/missing/token"
+        ]
+      }
+    ]) {
+      await symlink(fixture.aliasTarget, join(readonlyRoot, fixture.aliasName), "dir");
+      for (const [index, relativePath] of fixture.paths.entries()) {
+        const error = await captureSafetyError(() => resolveWorkspacePath({
+          workspaceRoot,
+          inputPath: join(readonlyRoot, relativePath),
+          evidenceRef: `path.descendant-readonly-alias.${fixture.label}.${index}`,
+          access: "read",
+          allowedReadonlyRoots: [readonlyRoot],
+          deniedRelativeRoots: ["secrets"]
+        }));
+        expect(error.message, `${fixture.label} ${relativePath}`).toBe(
+          DENIED_BOUNDARY_MESSAGE
+        );
+      }
+    }
+
+    const disjointFile = join(readonlyRoot, "ordinary", "input.dat");
+    await mkdir(join(readonlyRoot, "ordinary"));
+    await writeFile(disjointFile, "readonly");
+    const resolution = await resolveWorkspacePath({
+      workspaceRoot,
+      inputPath: disjointFile,
+      evidenceRef: "path.descendant-readonly-alias.disjoint",
+      access: "read",
+      allowedReadonlyRoots: [readonlyRoot],
+      deniedRelativeRoots: ["secrets"]
+    });
+    expect(resolution.boundary).toBe("allowed_readonly");
+    expect(resolution.absolutePath).toBe(disjointFile);
+  });
+
   test("outside targets fail containment before denied-root physical observation", async () => {
     const workspaceRoot = await createWorkspace();
     await mkdir(join(workspaceRoot, "secrets"), { mode: 0o700 });

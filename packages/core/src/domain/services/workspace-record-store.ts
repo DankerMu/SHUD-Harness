@@ -1328,7 +1328,7 @@ export async function ensureWorkspaceDirectoryTree(
 export async function runWithWorkspaceRecordRootMutationAuthority<T>(
   workspaceRoot: string,
   evidenceRef: string,
-  mutation: () => T
+  mutation: () => T & (T extends PromiseLike<unknown> ? never : unknown)
 ): Promise<T> {
   return await runWithRecordDirectoryBindingOperation(async () => {
     const admitted = await admitExistingWorkspaceRecordDirectory(
@@ -1349,6 +1349,12 @@ export async function runWithWorkspaceRecordRootMutationAuthority<T>(
       let mutationFailure: unknown;
       try {
         result = mutation();
+        if (hasThenableShapeWithoutAssimilation(result)) {
+          mutationFailed = true;
+          mutationFailure = new TypeError(
+            "Workspace root mutation callback must return synchronously."
+          );
+        }
       } catch (error) {
         mutationFailed = true;
         mutationFailure = error;
@@ -1367,6 +1373,29 @@ export async function runWithWorkspaceRecordRootMutationAuthority<T>(
       return result;
     });
   });
+}
+
+function hasThenableShapeWithoutAssimilation(value: unknown): boolean {
+  if (
+    (typeof value !== "object" || value === null) &&
+    typeof value !== "function"
+  ) {
+    return false;
+  }
+
+  let candidate: object | null = value as object;
+  for (let depth = 0; candidate !== null && depth < 128; depth += 1) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(candidate, "then");
+      if (descriptor) {
+        return descriptor.get !== undefined || typeof descriptor.value === "function";
+      }
+      candidate = Object.getPrototypeOf(candidate) as object | null;
+    } catch {
+      return true;
+    }
+  }
+  return candidate !== null;
 }
 
 export async function runWithExistingWorkspaceRecordDirectoryReproof(
