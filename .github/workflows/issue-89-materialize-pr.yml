@@ -1,0 +1,74 @@
+name: Issue 89 PR materializer
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]' && github.head_ref == 'automation/issue-89-schema-materialize'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout scratch branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          submodules: false
+          fetch-depth: 0
+
+      - name: Init zero submodule only
+        run: git submodule update --init zero
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Execute materializer payload
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
+
+          workflow = Path('.github/workflows/issue-89-materialize.yml').read_text(encoding='utf-8')
+          payload = workflow.split("          python3 <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+          exec(compile(dedent(payload), '<issue-89-materializer>', 'exec'), {'__name__': '__main__'})
+          PY
+
+      - name: Generate and verify schemas
+        run: |
+          bun run test:schemas
+          bun run test:schema-generation
+          bun run schema:generate
+          bun run schema:check
+          bun run typecheck
+          bun run check
+          npx --yes openspec validate m2-research-context --strict --no-interactive
+          git diff --check
+          git diff --exit-code HEAD -- package.json packages/core/package.json bun.lock
+          git -C zero diff --quiet
+          test -z "$(git ls-files workspace)"
+
+      - name: Commit exact generated outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            packages/core/src/domain/schemas/artifact.ts \
+            packages/core/src/domain/schemas/research-context.ts \
+            packages/core/src/domain/schemas/index.ts \
+            packages/core/src/domain/schemas/core-schemas.test.ts \
+            scripts/schema/generate.ts \
+            docs/generated/json-schema \
+            docs/generated/schema \
+            openspec/changes/m2-research-context/tasks.md \
+            openspec/changes/m2-research-context/evidence/issue-89.md
+          git commit -m "feat(core-schemas): materialize issue 89 [materialized]"
+          git push origin HEAD:${{ github.head_ref }}
