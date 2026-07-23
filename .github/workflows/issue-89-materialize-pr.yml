@@ -42,19 +42,47 @@ jobs:
           exec(compile(dedent(payload), '<issue-89-materializer>', 'exec'), {'__name__': '__main__'})
           PY
 
-      - name: Generate and verify schemas
+      - name: Test schemas
+        run: bun run test:schemas 2>&1 | tee /tmp/issue-89-test-schemas.log
+
+      - name: Test schema generator
+        run: bun run test:schema-generation 2>&1 | tee /tmp/issue-89-test-generator.log
+
+      - name: Generate schema outputs
+        run: bun run schema:generate 2>&1 | tee /tmp/issue-89-generate.log
+
+      - name: Check generated drift
+        run: bun run schema:check 2>&1 | tee /tmp/issue-89-schema-check.log
+
+      - name: Typecheck
+        run: bun run typecheck 2>&1 | tee /tmp/issue-89-typecheck.log
+
+      - name: Full check
+        run: bun run check 2>&1 | tee /tmp/issue-89-full-check.log
+
+      - name: OpenSpec and hygiene
         run: |
-          bun run test:schemas
-          bun run test:schema-generation
-          bun run schema:generate
-          bun run schema:check
-          bun run typecheck
-          bun run check
           npx --yes openspec validate m2-research-context --strict --no-interactive
           git diff --check
           git diff --exit-code HEAD -- package.json packages/core/package.json bun.lock
           git -C zero diff --quiet
           test -z "$(git ls-files workspace)"
+
+      - name: Persist failure diagnostics
+        if: failure()
+        run: |
+          {
+            for log in /tmp/issue-89-*.log; do
+              test -f "$log" || continue
+              printf '\n===== %s =====\n' "$(basename "$log")"
+              cat "$log"
+            done
+          } > openspec/changes/m2-research-context/evidence/issue-89-materializer-failure.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add openspec/changes/m2-research-context/evidence/issue-89-materializer-failure.log
+          git commit -m "chore: capture issue 89 materializer failure"
+          git push origin HEAD:${{ github.head_ref }}
 
       - name: Commit exact generated outputs
         run: |
