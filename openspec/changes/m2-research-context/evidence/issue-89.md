@@ -48,6 +48,12 @@ GitHub Actions run `30013150853` used Bun `1.2.19` and the repository's Zod depe
 
 The temporary generation/red-proof workflows are verification harnesses only and are removed from the final PR tree.
 
+## Static compatibility review
+
+- Preserved the existing public `ArtifactType`, `ArtifactCreatedBy`, `ArtifactRetentionClass` and `ArtifactRedactionStatus` type exports.
+- Kept public `Artifact` and `ArtifactManifest` types aligned with their optional-input canonical contracts, while exposing `StoredArtifact` and `StoredArtifactManifest` for post-parse records whose defaulted fields are materialized.
+- Confirmed the final diff does not alter TaskCard, ErrorRecord, IdempotencyRecord, LockRecord, service logic, route logic, package manifests or dependency locks.
+
 ## Boundary and hygiene
 
 - No service, route, workspace write path, package manifest, dependency lock or submodule source is changed.
