@@ -16,14 +16,26 @@ Hard ceiling: 5 comprehensive rounds per PR (cost governor). The 5th not-clean
 round is terminal - only a `breadth` (PR split) retro may be registered, and
 `record-round` refuses any 6th round regardless of retro budgets.
 
+Per-issue ceiling memory (0.28.0): when `open` is given `--issue`, ceiling
+events and gate entries are recorded in <root>/.review-gate-issues.json, which
+survives `close` (commit it; only .review-gate.json is per-PR ephemeral). A
+later PR for an issue that already hit the ceiling on another PR is escalated:
+`depth`/`noise` retros are refused unless `record-retro --user-approved
+"<one-line user decision>"` records an explicit user call (the approval is
+appended to the ledger for audit). `breadth` and `converging` are unaffected -
+the anchor (a prior ceiling) derives from not-clean rounds and cannot be
+label-gamed, and the escape hatch keeps a genuinely recurring invariant from
+being forced into a forbidden split without a human in the loop.
+
 Commands:
-  open         --pr N [--review-dir PATH]
+  open         --pr N [--issue N] [--review-dir PATH]
   record-round --sha SHA (--clean | --not-clean) [--verified N]
                [--highest critical|major|minor|none] [--classes a,b]
   record-retro --path FILE --shape breadth|depth|noise|converging
+               [--user-approved TEXT]
   lock         --reason TEXT        (working-day / same-invariant triggers)
   status       [--assert-unlocked]
-  close
+  close        [--outcome merged|superseded-by-split|abandoned|descoped]
 
 Exit codes: 0 = ok/unlocked, 2 = refused or locked (attention required).
 """
@@ -38,10 +50,12 @@ import sys
 from pathlib import Path
 
 STATE_NAME = ".review-gate.json"
+HISTORY_NAME = ".review-gate-issues.json"
 LEDGER_NAME = "round-ledger.log"
 MAX_ROUNDS = 5
 SEVERITIES = ["none", "minor", "major", "critical"]
 SHAPES = ["breadth", "depth", "noise", "converging"]
+OUTCOMES = ["merged", "superseded-by-split", "abandoned", "descoped"]
 DEFAULT_BLOCKED = ["implementer", "reviewer"]
 
 
@@ -62,6 +76,49 @@ def save_state(root: str, state: dict) -> None:
     state["locked"] = locked
     state["lockReason"] = reason
     state_path(root).write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def history_path(root: str) -> Path:
+    return Path(root).resolve() / HISTORY_NAME
+
+
+def load_history(root: str) -> dict:
+    path = history_path(root)
+    if not path.is_file():
+        return {"issues": {}}
+    with path.open(encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def issue_record(history: dict, issue: int) -> dict:
+    return history["issues"].setdefault(str(issue), {"ceilingPrs": [], "gateEntries": 0, "closed": []})
+
+
+def save_history(root: str, history: dict) -> None:
+    history_path(root).write_text(json.dumps(history, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def record_ceiling(root: str, state: dict) -> None:
+    if state.get("issue") is None:
+        return
+    history = load_history(root)
+    rec = issue_record(history, state["issue"])
+    if state["pr"] not in rec["ceilingPrs"]:
+        rec["ceilingPrs"].append(state["pr"])
+        save_history(root, history)
+
+
+def escalation_reason(root: str, issue: int | None, pr: int) -> str | None:
+    if issue is None:
+        return None
+    rec = load_history(root)["issues"].get(str(issue))
+    if not rec:
+        return None
+    prior = [p for p in rec.get("ceilingPrs", []) if p != pr]
+    if prior:
+        return (f"issue #{issue} already hit the round ceiling on PR "
+                f"{', '.join(f'#{p}' for p in prior)}")
+    return None
 
 
 def compute_lock(state: dict) -> tuple[bool, str | None]:
@@ -191,9 +248,12 @@ def cmd_open(args) -> int:
     if path.is_file():
         print(f"review_gate: {path} already exists - run `close` first if the previous PR is done", file=sys.stderr)
         return 2
+    escalated = escalation_reason(args.root, args.issue, args.pr)
     state = {
         "enabled": True,
         "pr": args.pr,
+        "issue": args.issue,
+        "issueEscalated": escalated,
         "reviewDir": args.review_dir,
         "rounds": [],
         "retros": [],
@@ -202,6 +262,9 @@ def cmd_open(args) -> int:
     }
     save_state(args.root, state)
     print(f"review_gate: opened for PR #{args.pr} (state: {path}, ledger: {args.review_dir}/{LEDGER_NAME})")
+    if escalated:
+        print(f"review_gate: ESCALATED - {escalated}; depth/noise retros on this PR require "
+              "--user-approved with a recorded user decision (split/descope are the defaults)", file=sys.stderr)
     return 0
 
 
@@ -244,6 +307,8 @@ def cmd_record_round(args) -> int:
             gate = "three-round"
         else:
             gate = "post-gate-budget"
+    if gate == "round-ceiling":
+        record_ceiling(args.root, state)
     line = ledger_line(rd, gate)
     append_ledger(args.root, state, line)
     print(line)
@@ -273,6 +338,12 @@ def cmd_record_retro(args) -> int:
         print("review_gate: refused - the round ceiling is terminal; only a `breadth` retro documenting "
               "the PR split may be registered (descope or a user decision go through `close`)", file=sys.stderr)
         return 2
+    if args.shape in ("depth", "noise") and state.get("issueEscalated") and not args.user_approved:
+        print(f"review_gate: `{args.shape}` refused - {state['issueEscalated']}. A successor PR for a "
+              "ceiling-hit issue does not get to keep digging by default: split or descope, or pass "
+              "--user-approved \"<one-line user decision>\" to record an explicit human call to continue",
+              file=sys.stderr)
+        return 2
     if args.shape == "depth":
         problems = depth_form_problems(text)
         if problems:
@@ -299,8 +370,15 @@ def cmd_record_retro(args) -> int:
     state["retros"].append(retro)
     state["manualLock"] = None
     save_state(args.root, state)
+    if state.get("issue") is not None:
+        history = load_history(args.root)
+        issue_record(history, state["issue"])["gateEntries"] += 1
+        save_history(args.root, history)
     line = f"Retro | shape: {args.shape} | at round {at_round} | {retro_file} | budget: {retro['budget']} round(s)"
     append_ledger(args.root, state, line)
+    if args.user_approved and args.shape in ("depth", "noise") and state.get("issueEscalated"):
+        append_ledger(args.root, state,
+                      f"User decision | post-ceiling {args.shape} continuation approved: {args.user_approved}")
     status = ("gate unlocked - next action must be the retro's corrective action"
               if not state["locked"] else f"gate remains locked ({state['lockReason']})")
     print(f"review_gate: retro registered ({line}); {status}")
@@ -325,9 +403,12 @@ def cmd_status(args) -> int:
     state = load_state(args.root)
     rounds = state["rounds"]
     last = rounds[-1] if rounds else None
-    print(f"PR #{state['pr']} | rounds: {len(rounds)} | latest: "
+    issue = f" | issue #{state['issue']}" if state.get("issue") is not None else ""
+    print(f"PR #{state['pr']}{issue} | rounds: {len(rounds)} | latest: "
           f"{'-' if not last else ledger_line(last, 'n/a')}")
     print(f"locked: {state['locked']}" + (f" | {state['lockReason']}" if state["locked"] else ""))
+    if state.get("issueEscalated"):
+        print(f"escalated: {state['issueEscalated']}")
     if args.assert_unlocked and state["locked"]:
         print(f"review_gate: assert-unlocked failed - {state['lockReason']}", file=sys.stderr)
         return 2
@@ -336,11 +417,24 @@ def cmd_status(args) -> int:
 
 def cmd_close(args) -> int:
     path = state_path(args.root)
-    if path.is_file():
-        os.remove(path)
-        print(f"review_gate: closed ({path} removed)")
-    else:
+    if not path.is_file():
         print("review_gate: nothing to close")
+        return 0
+    with path.open(encoding="utf-8") as fh:
+        state = json.load(fh)
+    if state.get("issue") is not None:
+        history = load_history(args.root)
+        issue_record(history, state["issue"])["closed"].append(
+            {"pr": state["pr"], "outcome": args.outcome or "closed", "rounds": len(state.get("rounds", []))})
+        save_history(args.root, history)
+    os.remove(path)
+    print(f"review_gate: closed ({path} removed)")
+    if args.outcome and args.outcome != "merged":
+        print(f"review_gate: terminal outcome `{args.outcome}` - append the terminal accountability line "
+              "(outcome field) to docs/review-loop-log.jsonl, and when the issue came from "
+              "stage-change-pipeline, route it back as a sizing-retro line; split children re-enter that "
+              "pipeline's Stage 5 implementation-ready contract, not the workflow as bare fixtures",
+              file=sys.stderr)
     return 0
 
 
@@ -352,6 +446,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("open", help="start gate tracking for a PR")
     p.add_argument("--pr", type=int, required=True)
+    p.add_argument("--issue", type=int, default=None,
+                   help="source issue number - enables cross-PR ceiling memory in %s" % HISTORY_NAME)
     p.add_argument("--review-dir", default=None)
     p.set_defaults(fn=cmd_open)
 
@@ -368,6 +464,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("record-retro", help="register a persisted Review Failure Retro")
     p.add_argument("--path", required=True)
     p.add_argument("--shape", choices=SHAPES, required=True)
+    p.add_argument("--user-approved", default=None,
+                   help="one-line recorded user decision; required for depth/noise on a PR whose issue "
+                        "already hit the round ceiling on another PR")
     p.set_defaults(fn=cmd_record_retro)
 
     p = sub.add_parser("lock", help="manual gate trigger (working-day, same-invariant)")
@@ -379,6 +478,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_status)
 
     p = sub.add_parser("close", help="remove gate state (PR merged or abandoned)")
+    p.add_argument("--outcome", choices=OUTCOMES, default=None,
+                   help="how the PR ended; non-merged outcomes remind about the terminal "
+                        "accountability line and the upstream sizing-retro")
     p.set_defaults(fn=cmd_close)
     return parser
 
