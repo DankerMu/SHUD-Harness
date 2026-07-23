@@ -27,7 +27,7 @@ export const ArtifactRetentionClassSchema = z.enum([
 
 export const ArtifactRedactionStatusSchema = z.enum(["not_needed", "redacted", "unsafe"]);
 
-export const ArtifactSchema = z.object({
+export const ArtifactSchema = z.strictObject({
   artifact_id: z.string().min(1),
   task_id: z.string().min(1),
   run_id: z.string().min(1).optional(),
@@ -42,6 +42,7 @@ export const ArtifactSchema = z.object({
   created_at: z.string().min(1),
   created_by: ArtifactCreatedBySchema,
   evidence_usable: z.boolean(),
+  llm_generated: z.boolean().default(false),
   retention_class: ArtifactRetentionClassSchema,
   source_refs: z.array(z.string()),
   redaction_status: ArtifactRedactionStatusSchema
@@ -51,4 +52,6 @@ export type ArtifactType = z.infer<typeof ArtifactTypeSchema>;
 export type ArtifactCreatedBy = z.infer<typeof ArtifactCreatedBySchema>;
 export type ArtifactRetentionClass = z.infer<typeof ArtifactRetentionClassSchema>;
 export type ArtifactRedactionStatus = z.infer<typeof ArtifactRedactionStatusSchema>;
-export type Artifact = z.infer<typeof ArtifactSchema>;
+export type ArtifactInput = z.input<typeof ArtifactSchema>;
+export type Artifact = ArtifactInput;
+export type StoredArtifact = z.output<typeof ArtifactSchema>;

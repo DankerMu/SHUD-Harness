@@ -6,9 +6,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { z, type ZodType } from "zod";
 
 import { ArtifactSchema } from "../../packages/core/src/domain/schemas/artifact";
+import { ArtifactManifestSchema } from "../../packages/core/src/domain/schemas/artifact-manifest";
+import { DataProvenanceSchema } from "../../packages/core/src/domain/schemas/data-provenance";
 import { ErrorRecordSchema } from "../../packages/core/src/domain/schemas/error";
 import { IdempotencyRecordSchema } from "../../packages/core/src/domain/schemas/idempotency";
 import { LockRecordSchema } from "../../packages/core/src/domain/schemas/lock";
+import { StackLockSchema } from "../../packages/core/src/domain/schemas/stack-lock";
 import { TaskCardSchema } from "../../packages/core/src/domain/schemas/task";
 
 type JsonSchema = {
@@ -19,7 +22,9 @@ type JsonSchema = {
   enum?: unknown[];
   properties?: Record<string, JsonSchema>;
   required?: string[];
-  additionalProperties?: boolean;
+  additionalProperties?: boolean | JsonSchema;
+  default?: unknown;
+  pattern?: string;
   items?: JsonSchema;
   anyOf?: JsonSchema[];
   oneOf?: JsonSchema[];
@@ -37,6 +42,7 @@ type SchemaDefinition = {
   sourcePath: string;
   exportName: string;
   schema: ZodType;
+  strictInput?: boolean;
 };
 
 type FieldRow = {
@@ -78,11 +84,36 @@ const schemaDefinitions: SchemaDefinition[] = [
     schema: TaskCardSchema
   },
   {
+    name: "StackLock",
+    slug: "stack-lock",
+    sourcePath: "packages/core/src/domain/schemas/stack-lock.ts",
+    exportName: "StackLockSchema",
+    schema: StackLockSchema,
+    strictInput: true
+  },
+  {
+    name: "DataProvenance",
+    slug: "data-provenance",
+    sourcePath: "packages/core/src/domain/schemas/data-provenance.ts",
+    exportName: "DataProvenanceSchema",
+    schema: DataProvenanceSchema,
+    strictInput: true
+  },
+  {
     name: "Artifact",
     slug: "artifact",
     sourcePath: "packages/core/src/domain/schemas/artifact.ts",
     exportName: "ArtifactSchema",
-    schema: ArtifactSchema
+    schema: ArtifactSchema,
+    strictInput: true
+  },
+  {
+    name: "ArtifactManifest",
+    slug: "artifact-manifest",
+    sourcePath: "packages/core/src/domain/schemas/artifact-manifest.ts",
+    exportName: "ArtifactManifestSchema",
+    schema: ArtifactManifestSchema,
+    strictInput: true
   },
   {
     name: "ErrorRecord",
@@ -554,6 +585,14 @@ function constraintLabel(schema: JsonSchema): string {
     constraints.push(`format=${schemaWithoutNull.format}`);
   }
 
+  if (schemaWithoutNull.pattern !== undefined) {
+    constraints.push(`pattern=${schemaWithoutNull.pattern}`);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(schemaWithoutNull, "default")) {
+    constraints.push(`default=${JSON.stringify(schemaWithoutNull.default)}`);
+  }
+
   if (schemaWithoutNull.type === "array" && schemaWithoutNull.items !== undefined) {
     const itemConstraints = constraintLabel(schemaWithoutNull.items);
     if (itemConstraints !== "-") {
@@ -768,7 +807,12 @@ async function runSelfTest(): Promise<void> {
   await assertGeneratedPathRejectsSymlinkAncestor();
   assertTaskCardUnknownKeyParity();
   for (const definition of schemaDefinitions) {
-    assertNoAdditionalPropertiesFalse(buildJsonSchema(definition), definition.name);
+    const jsonSchema = buildJsonSchema(definition);
+    if (definition.strictInput) {
+      assertStrictInputClosed(jsonSchema, definition.name);
+    } else {
+      assertNoAdditionalPropertiesFalse(jsonSchema, definition.name);
+    }
   }
 
   console.log("schema generator self-test passed");
@@ -840,6 +884,38 @@ function assertTaskCardUnknownKeyParity(): void {
 
   if ("nested_trace" in (parsed.data.inference_budget as Record<string, unknown>)) {
     throw new Error("TaskCardSchema should strip unknown nested object keys");
+  }
+}
+
+function assertStrictInputClosed(schema: JsonSchema, path: string): void {
+  const schemaWithoutNull = nonNullSchema(schema);
+
+  if (schemaWithoutNull.type === "object") {
+    if (schemaWithoutNull.additionalProperties === undefined) {
+      throw new Error(`${path} strict JSON Schema has an implicitly open object boundary`);
+    }
+    if (typeof schemaWithoutNull.additionalProperties === "object") {
+      assertStrictInputClosed(schemaWithoutNull.additionalProperties, `${path}.*`);
+    }
+    for (const [propertyName, propertySchema] of Object.entries(
+      schemaWithoutNull.properties ?? {}
+    )) {
+      assertStrictInputClosed(propertySchema, `${path}.${propertyName}`);
+    }
+  }
+
+  if (schemaWithoutNull.type === "array" && schemaWithoutNull.items !== undefined) {
+    assertStrictInputClosed(schemaWithoutNull.items, `${path}[]`);
+  }
+
+  for (const [label, members] of [
+    ["anyOf", schemaWithoutNull.anyOf],
+    ["oneOf", schemaWithoutNull.oneOf],
+    ["allOf", schemaWithoutNull.allOf]
+  ] as const) {
+    members?.forEach((member, index) => {
+      assertStrictInputClosed(member, `${path}.${label}[${index}]`);
+    });
   }
 }
 
