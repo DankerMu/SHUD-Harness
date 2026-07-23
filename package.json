@@ -8,6 +8,7 @@
     "zero/packages/*"
   ],
   "scripts": {
+    "start:backend": "bun run --cwd packages/backend start",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:policy-gate": "bun test ./packages/core/src/tools/policy-gate-core.test.ts ./packages/core/src/tools/policy-gate-registry.test.ts ./packages/core/src/tools/raw-data-sandbox.test.ts",
     "test:tool-registry-governance": "bun test ./packages/core/src/tools/role-tool-map.test.ts",

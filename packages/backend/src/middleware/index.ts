@@ -50,22 +50,18 @@ export function createLocalApiAuthMiddleware(
       return;
     }
 
-    let authorityIsCurrent = false;
-    try {
-      authority.assertCurrent();
-      authorityIsCurrent = true;
-    } catch {
-      authorityIsCurrent = false;
-    }
-
     const presentedToken = parseBearerToken(c.req.header("authorization"));
     if (
-      authorityIsCurrent &&
       presentedToken !== undefined &&
       localTokensMatch(presentedToken, authority.token)
     ) {
-      await next();
-      return;
+      try {
+        authority.assertCurrent();
+        await next();
+        return;
+      } catch {
+        // Current-authority proof is intentionally last and still gates the handler.
+      }
     }
 
     return c.json(

@@ -1325,6 +1325,50 @@ export async function ensureWorkspaceDirectoryTree(
   });
 }
 
+export async function runWithWorkspaceRecordRootMutationAuthority<T>(
+  workspaceRoot: string,
+  evidenceRef: string,
+  mutation: () => T
+): Promise<T> {
+  return await runWithRecordDirectoryBindingOperation(async () => {
+    const admitted = await admitExistingWorkspaceRecordDirectory(
+      workspaceRoot,
+      [],
+      evidenceRef
+    );
+    if (!admitted) throw unsafeWorkspaceRecordDirectoryError(evidenceRef);
+
+    return await runWithRecordDirectoryMutationLocks([admitted.binding], async () => {
+      await assertRecordDirectoryIdentityNow(
+        admitted.path,
+        admitted.binding,
+        evidenceRef
+      );
+      let result!: T;
+      let mutationFailed = false;
+      let mutationFailure: unknown;
+      try {
+        result = mutation();
+      } catch (error) {
+        mutationFailed = true;
+        mutationFailure = error;
+      }
+
+      const observedRoot = await readSafeDirectoryLeafEntry(admitted.path);
+      if (!observedRoot) throw unsafeWorkspaceRecordDirectoryError(evidenceRef, true);
+      assertRecordDirectoryPathnameEpochCanAdvance(
+        observedRoot,
+        admitted.binding,
+        evidenceRef
+      );
+      advanceRecordDirectoryPathnameEpochFromStat(observedRoot, admitted.binding);
+      await assertRecordDirectoryIdentityNow(admitted.path, admitted.binding, evidenceRef);
+      if (mutationFailed) throw mutationFailure;
+      return result;
+    });
+  });
+}
+
 export async function runWithExistingWorkspaceRecordDirectoryReproof(
   workspaceRoot: string,
   relativeSegments: readonly string[],

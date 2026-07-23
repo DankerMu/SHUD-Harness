@@ -4,6 +4,7 @@ import {
 } from "@shud-harness/core";
 
 export * from "./middleware/index";
+export * from "./production-server";
 export * from "./routes/index";
 export * from "./ws/index";
 

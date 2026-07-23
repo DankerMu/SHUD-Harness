@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, chmod, lstat, mkdir, open } from "node:fs/promises";
+import { access, lstat } from "node:fs/promises";
 import { join, parse, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
@@ -23,6 +23,7 @@ import {
   taskServiceErrorAuthorityTransportFamily,
   taskServiceErrorAtBoundary,
   runWithExistingWorkspaceRecordDirectoryReproof,
+  runWithWorkspaceRecordRootMutationAuthority,
   sha256Hex,
   type CreateTaskInput,
   type CompletedIdempotencyRecordMutationAuthority,
@@ -51,10 +52,10 @@ import {
   type LocalTokenAuthority
 } from "../local-auth/local-auth-authority";
 import {
-  LocalTokenStorageError,
   PRIVATE_DIRECTORY_MODE,
   PRIVATE_MODE_MASK
 } from "../local-auth/local-token-types";
+import { ensurePrivateWorkspaceSecretsDirectory } from "../local-auth/local-token-store";
 
 export const BACKEND_ROUTES_NAMESPACE = "backend/routes" as const;
 export const BACKEND_PRODUCTION_LISTEN_OPTIONS = Object.freeze({
@@ -2422,7 +2423,11 @@ export function createWorkspaceRoutesService(
         .map((relativeDir) => relativeDir.split("/")),
       "workspace.init"
     );
-    await ensurePrivateSecretsDirectory(workspaceRoot);
+    await runWithWorkspaceRecordRootMutationAuthority(
+      workspaceRoot,
+      "workspace.init.secrets",
+      () => ensurePrivateWorkspaceSecretsDirectory(workspaceRoot)
+    );
     localAuthAuthority?.assertCurrent();
 
     return {
@@ -2567,59 +2572,6 @@ function isPrivateSecretsDirectoryEntry(
     !entry.isSymbolicLink() &&
     (BigInt(entry.mode) & PRIVATE_MODE_MASK) === PRIVATE_DIRECTORY_MODE
   );
-}
-
-async function ensurePrivateSecretsDirectory(
-  workspaceRoot: string
-): Promise<void> {
-  const path = join(workspaceRoot, "secrets");
-  let created = false;
-  try {
-    await mkdir(path, { mode: Number(PRIVATE_DIRECTORY_MODE) });
-    created = true;
-  } catch (error) {
-    if (!hasErrorCode(error, "EEXIST")) {
-      throw new LocalTokenStorageError();
-    }
-  }
-
-  if (created) {
-    try {
-      await chmod(path, Number(PRIVATE_DIRECTORY_MODE));
-    } catch {
-      throw new LocalTokenStorageError();
-    }
-  }
-
-  let descriptor: Awaited<ReturnType<typeof open>> | undefined;
-  let failure: LocalTokenStorageError | undefined;
-  try {
-    descriptor = await open(
-      path,
-      constants.O_RDONLY |
-        (constants.O_DIRECTORY ?? 0) |
-        (constants.O_NOFOLLOW ?? 0) |
-        (constants.O_NONBLOCK ?? 0)
-    );
-    const entry = await descriptor.stat({ bigint: true });
-    if (
-      !entry.isDirectory() ||
-      (entry.mode & PRIVATE_MODE_MASK) !== PRIVATE_DIRECTORY_MODE
-    ) {
-      throw new LocalTokenStorageError();
-    }
-  } catch (error) {
-    failure = error instanceof LocalTokenStorageError
-      ? error
-      : new LocalTokenStorageError();
-  } finally {
-    try {
-      await descriptor?.close();
-    } catch {
-      failure = new LocalTokenStorageError();
-    }
-  }
-  if (failure) throw failure;
 }
 
 async function maybeLstat(path: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {

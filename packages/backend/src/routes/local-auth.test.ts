@@ -1,9 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, lstatSync, mkdirSync, renameSync, symlinkSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTaskCardService } from "@shud-harness/core";
+import { Hono } from "hono";
+import {
+  createLocalApiAuthMiddleware
+} from "../middleware";
+import type { LocalTokenAuthority } from "../local-auth/local-auth-authority";
 import { LocalTokenStorageError } from "../local-auth/local-token-store";
+import { runWithLocalTokenStoreTestContext } from "../local-auth/local-token-test-support";
+import { startBackendProductionServer } from "../production-server";
+import { expectCanonicalApiError } from "./backend-api-test-helpers";
 import {
   BACKEND_PRODUCTION_LISTEN_OPTIONS,
   WORKSPACE_CANONICAL_DIRECTORIES,
@@ -15,6 +24,16 @@ import {
 
 const tempRoots: string[] = [];
 const originalToken = process.env.HARNESS_LOCAL_TOKEN;
+const linuxTest = process.platform === "linux" ? test : test.skip;
+const AUTH_ERROR_EXPECTATION = Object.freeze({
+  category: "permission_error",
+  severity: "error" as const,
+  message: "API request is not authorized.",
+  userMessage: "Missing or invalid Authorization credentials.",
+  evidenceRefs: ["request.authorization"],
+  retryable: false,
+  recommendedNextActions: ["Provide the configured local Bearer credential."]
+});
 
 describe("backend local API authentication", () => {
   afterEach(async () => {
@@ -31,6 +50,41 @@ describe("backend local API authentication", () => {
     expect(options.hostname).toBe("127.0.0.1");
     expect(typeof options.fetch).toBe("function");
     expect((await options.fetch(new Request("http://127.0.0.1/api/health/live"))).status).toBe(200);
+  });
+
+  test("the package production entrypoint serves health and protected API on a real loopback socket", async () => {
+    const workspaceRoot = await temporaryWorkspacePath();
+    const token = "real-listener-auth-token";
+    process.env.HARNESS_LOCAL_TOKEN = token;
+    const server = startBackendProductionServer({
+      workspaceRoot,
+      port: 0,
+      requestLogSink: () => undefined
+    });
+    try {
+      expect(server.hostname).toBe("127.0.0.1");
+      expect(server.url.hostname).toBe("127.0.0.1");
+      expect(server.port).toBeGreaterThan(0);
+
+      const live = await fetch(new URL("/api/health/live", server.url));
+      expect(live.status).toBe(200);
+      expect((await live.json()) as { status: string }).toMatchObject({ status: "ok" });
+
+      const denied = await fetch(new URL("/api/workspace/init", server.url), {
+        method: "POST"
+      });
+      expect(denied.status).toBe(401);
+      expectCanonicalApiError((await denied.json()) as ApiErrorResponse, AUTH_ERROR_EXPECTATION);
+
+      const initialized = await fetch(new URL("/api/workspace/init", server.url), {
+        method: "POST",
+        headers: authenticatedHeaders(token)
+      });
+      expect(initialized.status).toBe(200);
+      expect((await initialized.json()) as { status: string }).toMatchObject({ status: "ok" });
+    } finally {
+      await server.stop(true);
+    }
   });
 
   test("missing, malformed, and wrong credentials fail before the protected handler", async () => {
@@ -65,7 +119,7 @@ describe("backend local API authentication", () => {
       });
       const body = (await response.json()) as ApiErrorResponse;
       expect(response.status, fixture.label).toBe(401);
-      expect(body.error.category, fixture.label).toBe("permission_error");
+      expectCanonicalApiError(body, AUTH_ERROR_EXPECTATION);
       expect(JSON.stringify(body), fixture.label).not.toContain(configured);
       expect(JSON.stringify(body), fixture.label).not.toContain("presented-wrong-token");
     }
@@ -76,6 +130,46 @@ describe("backend local API authentication", () => {
     });
     expect(accepted.status).toBe(200);
     expect(await accepted.json()).toEqual({ tasks: [] });
+    expect(handlerEffects).toBe(1);
+  });
+
+  test("syntactically rejected credentials never reprove file authority and a match reproves exactly once", async () => {
+    const configured = "sentinel-current-authority-token";
+    let currentProofs = 0;
+    let handlerEffects = 0;
+    const authority: LocalTokenAuthority = Object.freeze({
+      source: "workspace" as const,
+      token: configured,
+      assertCurrent(): void {
+        currentProofs += 1;
+      }
+    });
+    const app = new Hono();
+    app.use("*", createLocalApiAuthMiddleware(authority));
+    app.get("/api/protected", (c) => {
+      handlerEffects += 1;
+      return c.json({ status: "ok" });
+    });
+
+    for (const authorization of [
+      undefined,
+      `Basic ${configured}`,
+      `Bearer  ${configured}`,
+      "Bearer syntactically-valid-but-wrong"
+    ]) {
+      const response = await app.request("/api/protected", {
+        headers: authorization ? { Authorization: authorization } : undefined
+      });
+      expect(response.status).toBe(401);
+      expectCanonicalApiError((await response.json()) as ApiErrorResponse, AUTH_ERROR_EXPECTATION);
+    }
+    expect(currentProofs).toBe(0);
+    expect(handlerEffects).toBe(0);
+
+    expect((await app.request("/api/protected", {
+      headers: authenticatedHeaders(configured)
+    })).status).toBe(200);
+    expect(currentProofs).toBe(1);
     expect(handlerEffects).toBe(1);
   });
 
@@ -196,7 +290,7 @@ describe("backend local API authentication", () => {
     });
     const body = (await rejected.json()) as ApiErrorResponse;
     expect(rejected.status).toBe(401);
-    expect(body.error.category).toBe("permission_error");
+    expectCanonicalApiError(body, AUTH_ERROR_EXPECTATION);
     expect(handlerEffects).toBe(1);
     expect(JSON.stringify(body)).not.toContain(token);
     expect(JSON.stringify(body)).not.toContain(tokenPath);
@@ -254,38 +348,114 @@ describe("backend local API authentication", () => {
     await expectMissing(join(workspaceRoot, "secrets", "local-token"));
   });
 
-  test("workspace init creates secrets at exact 0700 under permissive and restrictive umasks", async () => {
+  test("workspace init creates secrets at exact 0700 under a permissive umask", async () => {
     process.env.HARNESS_LOCAL_TOKEN = "umask-private-secrets-token";
-    for (const fixture of [
-      { label: "permissive", mode: 0o000 },
-      { label: "restrictive-owner-bits", mode: 0o777 }
-    ]) {
-      const workspaceRoot = await temporaryWorkspacePath();
-      if (fixture.mode === 0o777) {
-        for (const relativeDirectory of WORKSPACE_CANONICAL_DIRECTORIES) {
-          if (relativeDirectory === "secrets") continue;
-          await mkdir(join(workspaceRoot, relativeDirectory), { recursive: true });
-        }
-      }
-      const app = createBackendApi({ workspaceRoot, requestLogSink: () => undefined });
-      const previousUmask = process.umask(fixture.mode);
-      let response!: Response;
-      try {
-        response = await app.request("/api/workspace/init", {
-          method: "POST",
-          headers: authenticatedHeaders("umask-private-secrets-token")
-        });
-      } finally {
-        process.umask(previousUmask);
-      }
-
-      expect(response.status, fixture.label).toBe(200);
-      expect(
-        (await stat(join(workspaceRoot, "secrets"))).mode & 0o7777,
-        fixture.label
-      ).toBe(0o700);
-      await expectMissing(join(workspaceRoot, "secrets", "local-token"));
+    const workspaceRoot = await temporaryWorkspacePath();
+    const app = createBackendApi({ workspaceRoot, requestLogSink: () => undefined });
+    const previousUmask = process.umask(0o000);
+    let response!: Response;
+    try {
+      response = await app.request("/api/workspace/init", {
+        method: "POST",
+        headers: authenticatedHeaders("umask-private-secrets-token")
+      });
+    } finally {
+      process.umask(previousUmask);
     }
+
+    expect(response.status).toBe(200);
+    expect((await stat(join(workspaceRoot, "secrets"))).mode & 0o7777).toBe(0o700);
+    await expectMissing(join(workspaceRoot, "secrets", "local-token"));
+  });
+
+  test("restrictive owner-bit umask fails before secrets creation", async () => {
+    process.env.HARNESS_LOCAL_TOKEN = "private-preflight-token";
+    const workspaceRoot = await precreatedWorkspaceWithoutSecrets();
+    const app = createBackendApi({ workspaceRoot, requestLogSink: () => undefined });
+    const previousUmask = process.umask(0o700);
+    let response!: Response;
+    try {
+      response = await app.request("/api/workspace/init", {
+        method: "POST",
+        headers: authenticatedHeaders("private-preflight-token")
+      });
+    } finally {
+      process.umask(previousUmask);
+    }
+    expect(response.status).toBe(500);
+    await expectMissing(join(workspaceRoot, "secrets"));
+  });
+
+  linuxTest("setgid workspace fails before secrets creation", async () => {
+    process.env.HARNESS_LOCAL_TOKEN = "setgid-private-preflight-token";
+    const workspaceRoot = await precreatedWorkspaceWithoutSecrets();
+    chmodSync(workspaceRoot, 0o2700);
+    expect(lstatSync(workspaceRoot, { bigint: true }).mode & 0o7777n).toBe(0o2700n);
+    const app = createBackendApi({ workspaceRoot, requestLogSink: () => undefined });
+
+    const response = await app.request("/api/workspace/init", {
+      method: "POST",
+      headers: authenticatedHeaders("setgid-private-preflight-token")
+    });
+    expect(response.status).toBe(500);
+    await expectMissing(join(workspaceRoot, "secrets"));
+  });
+
+  test("workspace replacement before private bootstrap fails without displaced-root residue", async () => {
+    const workspaceRoot = await temporaryWorkspacePath();
+    const displacedRoot = `${workspaceRoot}-displaced`;
+    process.env.HARNESS_LOCAL_TOKEN = "workspace-replacement-token";
+    const app = createBackendApi({ workspaceRoot, requestLogSink: () => undefined });
+    let replaced = false;
+
+    const response = await runWithLocalTokenStoreTestContext({
+      hook: ({ stage }) => {
+        if (stage !== "before_secrets_bootstrap_mkdir" || replaced) return;
+        replaced = true;
+        renameSync(workspaceRoot, displacedRoot);
+        mkdirSync(workspaceRoot, { mode: 0o700 });
+      }
+    }, () => app.request("/api/workspace/init", {
+      method: "POST",
+      headers: authenticatedHeaders("workspace-replacement-token")
+    }));
+
+    expect(replaced).toBe(true);
+    expect(response.status).toBe(500);
+    await expectMissing(join(displacedRoot, "secrets"));
+    await expectMissing(join(workspaceRoot, "secrets"));
+  });
+
+  test("secrets symlink replacement fails without changing its outside target mode", async () => {
+    const workspaceRoot = await temporaryWorkspacePath();
+    const outside = `${workspaceRoot}-outside-secrets`;
+    await mkdir(workspaceRoot, { mode: 0o700 });
+    for (const relativeDirectory of WORKSPACE_CANONICAL_DIRECTORIES) {
+      if (relativeDirectory === "secrets") continue;
+      await mkdir(join(workspaceRoot, relativeDirectory), { recursive: true });
+    }
+    mkdirSync(outside, { mode: 0o755 });
+    chmodSync(outside, 0o755);
+    process.env.HARNESS_LOCAL_TOKEN = "secrets-symlink-token";
+    const app = createBackendApi({ workspaceRoot, requestLogSink: () => undefined });
+    let replaced = false;
+
+    const response = await runWithLocalTokenStoreTestContext({
+      hook: ({ stage }) => {
+        if (stage !== "before_secrets_bootstrap_mkdir" || replaced) return;
+        replaced = true;
+        symlinkSync(outside, join(workspaceRoot, "secrets"), "dir");
+      }
+    }, () => app.request("/api/workspace/init", {
+      method: "POST",
+      headers: authenticatedHeaders("secrets-symlink-token")
+    }));
+
+    expect(replaced).toBe(true);
+    expect(response.status).toBe(500);
+    expect(lstatSync(join(workspaceRoot, "secrets")).isSymbolicLink()).toBe(true);
+    expect(lstatSync(outside, { bigint: true }).mode & 0o7777n).toBe(0o755n);
+    await expectMissing(join(outside, "local-token"));
   });
 
   test("configured and presented credentials never enter 200, 401, or 500 logs and bodies", async () => {
@@ -338,6 +508,16 @@ async function temporaryWorkspacePath(): Promise<string> {
   );
   tempRoots.push(tempRoot);
   return join(tempRoot, "workspace");
+}
+
+async function precreatedWorkspaceWithoutSecrets(): Promise<string> {
+  const workspaceRoot = await temporaryWorkspacePath();
+  await mkdir(workspaceRoot, { mode: 0o700 });
+  for (const relativeDirectory of WORKSPACE_CANONICAL_DIRECTORIES) {
+    if (relativeDirectory === "secrets") continue;
+    await mkdir(join(workspaceRoot, relativeDirectory), { recursive: true });
+  }
+  return workspaceRoot;
 }
 
 async function expectMissing(path: string): Promise<void> {

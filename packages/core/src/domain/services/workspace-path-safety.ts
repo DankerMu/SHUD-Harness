@@ -120,7 +120,8 @@ export async function resolveWorkspacePath(
     );
   }
   if (
-    boundary.kind === "workspace" &&
+    deniedRoots.length > 0 &&
+    await boundaryMayOverlapWorkspace(workspaceRoot, boundary) &&
     await targetsDeniedWorkspaceBoundary(
       workspaceRoot,
       deniedRoots,
@@ -151,6 +152,33 @@ export async function resolveWorkspacePath(
     boundary: boundary.kind,
     boundaryRoot: boundary.root
   };
+}
+
+async function boundaryMayOverlapWorkspace(
+  workspaceRoot: string,
+  boundary: BoundaryCandidate
+): Promise<boolean> {
+  if (boundary.kind === "workspace") return true;
+  if (
+    isPathInsideBoundary(workspaceRoot, boundary.root) ||
+    isPathInsideBoundary(boundary.root, workspaceRoot)
+  ) {
+    return true;
+  }
+
+  try {
+    const [physicalWorkspaceRoot, physicalBoundaryRoot] = await Promise.all([
+      realpath(workspaceRoot),
+      realpath(boundary.root)
+    ]);
+    return (
+      isPathInsideBoundary(physicalWorkspaceRoot, physicalBoundaryRoot) ||
+      isPathInsideBoundary(physicalBoundaryRoot, physicalWorkspaceRoot)
+    );
+  } catch {
+    // Missing or changing read-only roots cannot be proven disjoint safely.
+    return true;
+  }
 }
 
 export function assertPathInsideWorkspace(

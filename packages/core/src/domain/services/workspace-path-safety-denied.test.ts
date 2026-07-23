@@ -70,6 +70,59 @@ describe("workspace path denied relative roots", () => {
     expect(error.evidenceRef).toBe("path.physical-alias");
   });
 
+  test("denied workspace roots dominate overlapping read-only boundaries", async () => {
+    const workspaceRoot = await createWorkspace();
+    const secretsRoot = join(workspaceRoot, "secrets");
+    await mkdir(join(secretsRoot, "nested"), { recursive: true, mode: 0o700 });
+    const workspaceParent = join(workspaceRoot, "..");
+    const physicalAlias = join(workspaceParent, "workspace-physical-alias");
+    await symlink(workspaceRoot, physicalAlias, "dir");
+
+    const fixtures = [
+      {
+        label: "workspace read-only root",
+        allowedReadonlyRoots: [workspaceRoot],
+        exactPath: secretsRoot,
+        nestedPath: join(secretsRoot, "nested", "token")
+      },
+      {
+        label: "denied subtree read-only root",
+        allowedReadonlyRoots: [secretsRoot],
+        exactPath: secretsRoot,
+        nestedPath: join(secretsRoot, "nested", "token")
+      },
+      {
+        label: "workspace ancestor read-only root",
+        allowedReadonlyRoots: [workspaceParent],
+        exactPath: secretsRoot,
+        nestedPath: join(secretsRoot, "nested", "token")
+      },
+      {
+        label: "physical workspace alias read-only root",
+        allowedReadonlyRoots: [physicalAlias],
+        exactPath: join(physicalAlias, "secrets"),
+        nestedPath: join(physicalAlias, "secrets", "nested", "token")
+      }
+    ];
+
+    for (const fixture of fixtures) {
+      for (const [kind, inputPath] of [
+        ["exact", fixture.exactPath],
+        ["nested", fixture.nestedPath]
+      ] as const) {
+        const error = await captureSafetyError(() => resolveWorkspacePath({
+          workspaceRoot,
+          inputPath,
+          evidenceRef: `path.readonly-deny-dominance.${fixture.label}.${kind}`,
+          access: "read",
+          allowedReadonlyRoots: fixture.allowedReadonlyRoots,
+          deniedRelativeRoots: ["secrets"]
+        }));
+        expect(error.message, `${fixture.label} ${kind}`).toBe(DENIED_BOUNDARY_MESSAGE);
+      }
+    }
+  });
+
   test("outside targets fail containment before denied-root physical observation", async () => {
     const workspaceRoot = await createWorkspace();
     await mkdir(join(workspaceRoot, "secrets"), { mode: 0o700 });

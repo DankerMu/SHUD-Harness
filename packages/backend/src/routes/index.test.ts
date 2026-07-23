@@ -45,7 +45,8 @@ import {
 import { type ApiErrorResponse, type WorkspaceReadyResponse } from "./index";
 import {
   BACKEND_TEST_LOCAL_TOKEN,
-  createAuthenticatedBackendApi as createBackendApi
+  createAuthenticatedBackendApi as createBackendApi,
+  expectCanonicalApiError
 } from "./backend-api-test-helpers";
 import {
   API_REQUEST_ID_HEADER,
@@ -205,9 +206,10 @@ describe("backend workspace and health routes", () => {
     }
   });
 
-  test("workspace init and record writers share canonical non-secret missing-child authority", async () => {
+  test("workspace init and record writers share canonical missing-child authority", async () => {
     const recordSchema = z.object({ id: z.string(), parent: z.string() });
     for (const directorySegments of [
+      [],
       ["tasks"],
       ["artifacts", "manifests"]
     ] as const) {
@@ -220,8 +222,6 @@ describe("backend workspace and health routes", () => {
             recursive: true
           });
         }
-        await mkdir(join(workspaceRoot, "secrets"), { recursive: true, mode: 0o700 });
-        await chmod(join(workspaceRoot, "secrets"), 0o700);
         const bindingBaseline = workspaceRecordDirectoryBindingDiagnosticsForTest();
         const authorityBaseline = workspaceRecordAuthorityDiagnosticsForTest();
         const targetDirectory = join(workspaceRoot, ...directorySegments);
@@ -10305,27 +10305,7 @@ async function taskIdsWithSnapshots(workspaceRoot: string): Promise<string[]> {
 }
 
 function expectCanonicalError(body: ApiErrorResponse, category: string): void {
-  expect(Object.keys(body.error).sort()).toEqual(
-    [
-      "category",
-      "error_id",
-      "evidence_refs",
-      "message",
-      "recommended_next_actions",
-      "retryable",
-      "severity",
-      "user_message"
-    ].sort()
-  );
-  expect(body.error.error_id.startsWith("api_error_")).toBe(true);
-  expect(body.error.category).toBe(category);
-  expect(body.error.severity).toBe("error");
-  expect(body.error.message.length).toBeGreaterThan(0);
-  expect(body.error.user_message.length).toBeGreaterThan(0);
-  expect(Array.isArray(body.error.evidence_refs)).toBe(true);
-  expect(typeof body.error.retryable).toBe("boolean");
-  expect(Array.isArray(body.error.recommended_next_actions)).toBe(true);
-  expect(body.error.recommended_next_actions.length).toBeGreaterThan(0);
+  expectCanonicalApiError(body, { category });
 }
 
 function expectNoAbsoluteWorkspacePath(

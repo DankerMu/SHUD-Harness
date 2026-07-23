@@ -56,7 +56,8 @@ async function main(): Promise<void> {
     const measurements: EndpointMeasurement[] = [
       await measureEndpoint(app, "GET /api/tasks", "/api/tasks", 200),
       await measureEndpoint(app, "GET /api/tasks/:id", `/api/tasks/${targetTask.task_id}`, 200),
-      await measureEndpoint(app, "GET /api/health/ready", "/api/health/ready", 200)
+      await measureEndpoint(app, "GET /api/health/ready", "/api/health/ready", 200),
+      await measureRejectedFileAuthorityEndpoint(tempRoot)
     ];
 
     printMeasurements(measurements);
@@ -73,6 +74,42 @@ async function main(): Promise<void> {
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
+}
+
+async function measureRejectedFileAuthorityEndpoint(
+  tempRoot: string
+): Promise<EndpointMeasurement> {
+  const previousToken = process.env.HARNESS_LOCAL_TOKEN;
+  delete process.env.HARNESS_LOCAL_TOKEN;
+  let app: ReturnType<typeof createBackendApi>;
+  try {
+    app = createBackendApi({
+      workspaceRoot: join(tempRoot, "file-authority-rejection-workspace"),
+      requestLogSink: () => undefined
+    });
+  } finally {
+    if (previousToken === undefined) delete process.env.HARNESS_LOCAL_TOKEN;
+    else process.env.HARNESS_LOCAL_TOKEN = previousToken;
+  }
+
+  const request = () => app.request("/api/tasks", {
+    headers: { Authorization: "Basic syntactically-rejected" }
+  });
+  for (let index = 0; index < WARMUP_REQUESTS_PER_ENDPOINT; index += 1) {
+    await expectStatus(request(), 401, "GET /api/tasks rejected file authority");
+  }
+  const samples: number[] = [];
+  for (let index = 0; index < SAMPLE_REQUESTS_PER_ENDPOINT; index += 1) {
+    const startedAtMs = performance.now();
+    await expectStatus(request(), 401, "GET /api/tasks rejected file authority");
+    samples.push(performance.now() - startedAtMs);
+  }
+  return {
+    label: "GET /api/tasks rejected file authority",
+    path: "/api/tasks",
+    expectedStatus: 401,
+    p95Ms: percentile(samples, 95)
+  };
 }
 
 async function createTaskFixture(app: ReturnType<typeof createBackendApi>): Promise<TaskCard[]> {

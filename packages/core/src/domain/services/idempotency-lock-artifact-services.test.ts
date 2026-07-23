@@ -27404,7 +27404,8 @@ describe("idempotency, lock, and artifact services", () => {
     ];
     const recordStoreOwnedInternalSettlement = [
       "runWithRecordDirectoryBindingOperation",
-      "runWithRecordDirectoryMutationLocks"
+      "runWithRecordDirectoryMutationLocks",
+      "runWithWorkspaceRecordRootMutationAuthority"
     ];
     const inventoriedFunctions = [
       ...contextOnlyWithoutTerminalProof,
