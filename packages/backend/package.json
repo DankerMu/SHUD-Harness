@@ -9,7 +9,6 @@
     }
   },
   "scripts": {
-    "start": "bun src/production-server.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
