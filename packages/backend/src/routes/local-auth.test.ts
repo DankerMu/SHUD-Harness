@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, renameSync, symlinkSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -389,8 +390,12 @@ describe("backend local API authentication", () => {
   linuxTest("setgid workspace fails before secrets creation", async () => {
     process.env.HARNESS_LOCAL_TOKEN = "setgid-private-preflight-token";
     const workspaceRoot = await precreatedWorkspaceWithoutSecrets();
-    chmodSync(workspaceRoot, 0o2700);
-    expect(lstatSync(workspaceRoot, { bigint: true }).mode & 0o7777n).toBe(0o2700n);
+    execFileSync("/bin/chmod", ["2700", workspaceRoot], { timeout: 2_000 });
+    const workspaceObservation = lstatSync(workspaceRoot, { bigint: true });
+    expect(workspaceObservation.isDirectory()).toBe(true);
+    expect(workspaceObservation.uid).toBe(BigInt(process.getuid!()));
+    expect(workspaceObservation.gid).toBe(BigInt(process.getgid!()));
+    expect(workspaceObservation.mode & 0o7777n).toBe(0o2700n);
     const app = createBackendApi({ workspaceRoot, requestLogSink: () => undefined });
 
     const response = await app.request("/api/workspace/init", {
