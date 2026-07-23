@@ -52,7 +52,7 @@ The production page resolves the same workspace root and local-token authority c
 Locally executable in the implementation environment:
 
 - `npx --yes tsc -p /tmp/shud88/tsconfig.frontend.json` — passed.
-- `npx --yes tsc -p /tmp/shud88/tsconfig.backend-relative.json` — passed.
+- `npx --yes tsc -p /tmp/shud88/tsconfig.backend.json` — passed.
 - Node runtime checks for wrapper target restrictions, forced Bearer headers, script-safe bootstrap serialization, and Dashboard document ordering — passed.
 - Whitespace/static scans for direct Dashboard native-fetch calls and token persistence strings — passed.
 
