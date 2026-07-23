@@ -124,19 +124,12 @@ export const HARNESS_API_CLIENT_SCRIPT = `
     return;
   }
 
-  // Isolated unit harnesses do not expose Window.location. Keep that seam
-  // injectable without creating a browser-reachable unauthenticated fallback.
-  if (!runtimeOrigin) {
-    Object.defineProperty(window, "__HARNESS_API_FETCH__", {
-      value: Object.freeze(nativeFetch),
-      writable: false,
-      configurable: false,
-      enumerable: false
-    });
-    return;
-  }
-
-  if (!bootstrap || typeof bootstrap !== "object" || !isSafeToken(bootstrap.token)) {
+  if (
+    !runtimeOrigin ||
+    !bootstrap ||
+    typeof bootstrap !== "object" ||
+    !isSafeToken(bootstrap.token)
+  ) {
     return;
   }
 

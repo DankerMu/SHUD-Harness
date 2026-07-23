@@ -51,8 +51,8 @@ The production page resolves the same workspace root and local-token authority c
 
 Locally executable in the implementation environment:
 
-- `tsc -p /tmp/shud88/tsconfig.frontend.json` — passed.
-- `tsc -p /tmp/shud88/tsconfig.backend.json` — passed.
+- `npx --yes tsc -p /tmp/shud88/tsconfig.frontend.json` — passed.
+- `npx --yes tsc -p /tmp/shud88/tsconfig.backend-relative.json` — passed.
 - Node runtime checks for wrapper target restrictions, forced Bearer headers, script-safe bootstrap serialization, and Dashboard document ordering — passed.
 - Whitespace/static scans for direct Dashboard native-fetch calls and token persistence strings — passed.
 
@@ -67,4 +67,4 @@ Required repository gates on the PR head:
 - `git -C zero diff --quiet`
 - `test -z "$(git ls-files workspace)"`
 
-Bun and OpenSpec were not available in the local execution image; GitHub Actions is the authoritative execution environment for those gates.
+Bun 1.2.19 and OpenSpec could not be executed in the local image; the PR checks remain authoritative for those gates.
