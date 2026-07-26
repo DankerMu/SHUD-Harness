@@ -52,15 +52,33 @@ The temporary generation/red-proof workflows are verification harnesses only and
 
 - Preserved the existing public `ArtifactType`, `ArtifactCreatedBy`, `ArtifactRetentionClass` and `ArtifactRedactionStatus` type exports.
 - Kept public `Artifact` and `ArtifactManifest` types aligned with their optional-input canonical contracts, while exposing `StoredArtifact` and `StoredArtifactManifest` for post-parse records whose defaulted fields are materialized.
-- Confirmed the final diff does not alter TaskCard, ErrorRecord, IdempotencyRecord, LockRecord, service logic, route logic, package manifests or dependency locks.
+- Aligned `ArtifactRegistryService` with that same boundary: it accepts `ArtifactInput` and returns `StoredArtifact`; runtime publication/path/duplicate logic is unchanged.
+- Confirmed the final diff does not alter TaskCard, ErrorRecord, IdempotencyRecord, LockRecord, route logic, package manifests or dependency locks.
+
+## M1 Artifact compatibility repair
+
+The original PR head exposed the additive default to existing M1 exact-equality fixtures. The focused pre-repair command
+`npx --yes bun@1.2.19 test packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts -t "Artifact registry register/get persists metadata under manifests only"`
+failed `0 pass / 1 fail`; the only value difference was the canonical parsed output adding `llm_generated: false`. The remote `test:core-services` job reported nine failures in the same class.
+
+The repair preserves `.default(false)` and adds boundary evidence instead of weakening the schema:
+
+- omitted M1 input registers, persists and reads back with explicit `llm_generated: false`;
+- a pre-existing JSON record that omits the field reads as false in memory without eager byte rewrite, and repeated legacy registration converges;
+- explicit true and false survive register/get, persisted JSON and nested ArtifactManifest parsing;
+- non-boolean/unknown metadata is rejected without a manifest file;
+- public barrel/type assertions prove optional Artifact input and required boolean StoredArtifact output, including the registry service return contract.
+
+Post-repair local verification on the merged-with-current-main worktree passed: the three focused registry rows (`1/0` each), `test:schemas` (`19/0`), `test:core-services` (`514 pass / 5 platform skips / 0 fail`), `schema:check`, `typecheck`, the full `check`, strict OpenSpec validation, `git diff --check`, and package/lock/submodule/workspace hygiene.
 
 ## Boundary and hygiene
 
-- No service, route, workspace write path, package manifest, dependency lock or submodule source is changed.
+- No route, workspace write-path implementation, package manifest, dependency lock or submodule source is changed. The only service production delta is the Artifact registry's input/output type alignment; its runtime write/path/publication flow is preserved.
 - No TaskCard, error, idempotency or lock schema semantics are intentionally changed.
 - No generated file is hand-authored; all generated files come from the checked-in generator.
 - Final required CI and exact final head are recorded in PR #129 after the temporary workflows are removed.
 
 ## Deviation record
 
-No product, schema or PR-boundary deviation. Execution-path deviation only: the interactive environment lacked the repository Bun/OpenSpec toolchain, so source-bound generation, semantic red proof and strict OpenSpec validation ran in temporary same-repository GitHub Actions workflows; those workflows are excluded from the final tree.
+- Implementation-path deviation: `artifact-registry-service.ts` was added to the repair surface because its public return type still represented optional caller input after runtime parsing had begun returning a materialized field. The change is restricted to `ArtifactInput`/`StoredArtifact` type alignment and the invalid-input generic return typing; no I/O、path、publication or duplicate runtime behavior changed.
+- Historical execution-path deviation: initial generation and semantic red proof ran in temporary same-repository GitHub Actions workflows because that earlier interactive environment lacked the Bun/OpenSpec toolchain. Those workflows remain excluded from the final tree; the current local worktree subsequently reran the complete Bun/OpenSpec verification successfully.

@@ -1,5 +1,10 @@
 import { join, resolve } from "node:path";
-import { ArtifactSchema, ArtifactTypeSchema, type Artifact } from "../schemas/artifact";
+import {
+  ArtifactSchema,
+  ArtifactTypeSchema,
+  type ArtifactInput,
+  type StoredArtifact
+} from "../schemas/artifact";
 import { TaskServiceError } from "./task-card-service";
 import {
   assertSafeRecordSegment,
@@ -16,8 +21,8 @@ export interface ArtifactRegistryServiceOptions {
 }
 
 export interface ArtifactRegistryService {
-  registerArtifact: (artifact: Artifact) => Promise<Artifact>;
-  getArtifact: (artifactId: string) => Promise<Artifact | undefined>;
+  registerArtifact: (artifact: ArtifactInput) => Promise<StoredArtifact>;
+  getArtifact: (artifactId: string) => Promise<StoredArtifact | undefined>;
 }
 
 export function createArtifactRegistryService(
@@ -26,7 +31,7 @@ export function createArtifactRegistryService(
   const workspaceRoot = resolve(options.workspaceRoot);
 
   return {
-    async registerArtifact(artifact: Artifact): Promise<Artifact> {
+    async registerArtifact(artifact: ArtifactInput): Promise<StoredArtifact> {
       const parsedArtifact = ArtifactSchema.safeParse(artifact);
       if (parsedArtifact.success) {
         assertSafeRecordSegment(parsedArtifact.data.artifact_id, "artifact.artifact_id");
@@ -54,17 +59,19 @@ export function createArtifactRegistryService(
         throw artifactManifestImmutableError(artifact.artifact_id);
       }
 
-      return await writeJsonRecord(
-        workspaceRoot,
-        artifactManifestDirectorySegments(),
-        "invalid.json",
-        artifact,
-        "workspace/artifacts/manifests",
-        ArtifactSchema
+      return ArtifactSchema.parse(
+        await writeJsonRecord(
+          workspaceRoot,
+          artifactManifestDirectorySegments(),
+          "invalid.json",
+          artifact,
+          "workspace/artifacts/manifests",
+          ArtifactSchema
+        )
       );
     },
 
-    async getArtifact(artifactId: string): Promise<Artifact | undefined> {
+    async getArtifact(artifactId: string): Promise<StoredArtifact | undefined> {
       assertSafeRecordSegment(artifactId, "artifact.artifact_id");
       const artifact = await readArtifactManifest(workspaceRoot, artifactId);
       if (!artifact) {
@@ -75,7 +82,10 @@ export function createArtifactRegistryService(
   };
 }
 
-async function normalizeArtifactPath(workspaceRoot: string, artifact: Artifact): Promise<Artifact> {
+async function normalizeArtifactPath(
+  workspaceRoot: string,
+  artifact: StoredArtifact
+): Promise<StoredArtifact> {
   try {
     const resolvedPath = await resolveWorkspacePath({
       workspaceRoot,
@@ -103,8 +113,8 @@ async function normalizeArtifactPath(workspaceRoot: string, artifact: Artifact):
 
 async function artifactsMatchForDuplicate(
   workspaceRoot: string,
-  existing: Artifact,
-  candidate: Artifact
+  existing: StoredArtifact,
+  candidate: StoredArtifact
 ): Promise<boolean> {
   if (canonicalJson(existing) === canonicalJson(candidate)) {
     return true;
@@ -141,7 +151,7 @@ export function artifactManifestEvidenceRef(artifactId: string): string {
 async function readArtifactManifest(
   workspaceRoot: string,
   artifactId: string
-): Promise<Artifact | undefined> {
+): Promise<StoredArtifact | undefined> {
   const recordPath = workspaceRecordPath(
     workspaceRoot,
     [...artifactManifestDirectorySegments(), artifactManifestFileName(artifactId)],
@@ -159,7 +169,7 @@ async function readArtifactManifest(
   return artifact;
 }
 
-function assertArtifactLookupIdentity(artifact: Artifact, artifactId: string): void {
+function assertArtifactLookupIdentity(artifact: StoredArtifact, artifactId: string): void {
   if (artifact.artifact_id === artifactId) {
     return;
   }

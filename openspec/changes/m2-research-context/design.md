@@ -277,6 +277,86 @@ Non-goals: frontend token bootstrap/fetch wrapper (#88), stack/data/artifact rou
 
 Review focus: middleware altitude/order and exemption exactness; token-source authority/reproof and secret non-observability; deny-subtree helper compatibility across siblings; startup/ready/listener integration; complete M1/perf migration without weakened or skipped oracles.
 
+## Subagent Workflow Fixture — Issue #89
+
+Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.
+
+Expanded-trigger rationale:
+- Core triggers: public Zod schema/field contracts、persisted Artifact default materialization、legacy compatibility and generated JSON Schema/Markdown.
+- Profile triggers: `artifact` and evidence-lineage semantics; the Artifact delta is consumed immediately by the existing M1 registry/store, while StackLock/DataProvenance/ArtifactManifest services follow in 4.x/5.x/6.x.
+
+Change surface:
+- `packages/core/src/domain/schemas/` public exports for StackLock、DataProvenance、ArtifactManifest and Artifact input/output types.
+- `packages/core/src/domain/schemas/core-schemas.test.ts`, existing M1 Artifact registry/store compatibility tests, `scripts/schema/generate.ts`, and generated JSON/Markdown under `docs/generated/`.
+
+Must preserve:
+- Existing callers may continue passing the M1 Artifact input without `llm_generated`; registration and reads now expose the canonical stored output with `llm_generated: false` rather than rejecting the caller or treating a repeated registration as divergent.
+- Existing persisted Artifact JSON without the additive field remains readable: parse/get materializes `false` in memory without requiring an eager rewrite; a later duplicate registration of the same legacy input converges on the same logical record.
+- Explicit `llm_generated: true` survives schema parse、registry persistence/read and nested ArtifactManifest parse; unknown/non-boolean values remain rejected.
+- TaskCard、ErrorRecord、IdempotencyRecord and LockRecord schemas, service behavior, package/lock files, API routes and workspace path/publication authority remain unchanged.
+
+Must add/change:
+- Add strict StackLock、DataProvenance and ArtifactManifest contracts exactly matching the task 2.1 deltas, plus their public input/output types and schema-generator registry entries.
+- Extend Artifact with optional-input `llm_generated` defaulting to `false`; distinguish `Artifact`/`ArtifactInput` caller input from `StoredArtifact` parse output, and apply the same distinction to ArtifactManifest.
+- Regenerate checked-in JSON Schema/Markdown exclusively through `scripts/schema/generate.ts`.
+
+Seams under test:
+- Public schema barrel imports are the highest schema seam: compile-time assertions prove omitted-input acceptance and boolean post-parse output.
+- `ArtifactSchema.safeParse` and nested `ArtifactManifestSchema.safeParse` prove strict field/default behavior.
+- Existing `createArtifactRegistryService` register/get/duplicate flows are the highest current persistence seam and prove the additive default across M1 callers and records.
+- `schema:check` proves generator registry and checked-in JSON/Markdown parity without adding a test-only seam.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - public schema barrel exports and generator registry gain new named contracts; no HTTP/CLI entrypoint changes.
+- Config / project setup: not selected - no environment、workspace bootstrap or configuration semantics change.
+- File IO / path safety / overwrite: selected - no I/O implementation changes, but the existing Artifact registry read/write boundary consumes the changed schema and must prove legacy record reads and canonical persisted defaults; path authority itself is a non-goal.
+- Schema / columns / units / field names: selected - this issue adds three strict object graphs and one persisted Artifact field with distinct input/output types.
+- Auth / permissions / secrets: not selected - schemas contain no credential and do not change authorization boundaries.
+- Concurrency / shared state / ordering: selected - the existing Artifact duplicate-registration comparison consumes parsed persisted state; omitted legacy input must converge rather than create a false immutable conflict.
+- Resource limits / large input / discovery: not selected - no reader/discovery loop or unbounded payload surface is introduced; existing schema parsing scope is unchanged.
+- Legacy compatibility / examples: selected - M1 callers and persisted Artifact JSON may omit the new field and must materialize the same canonical false value.
+- Error handling / rollback / partial outputs: selected - strict unknown/deprecated fields and invalid types fail parse without partial records; existing registry errors remain stable.
+- Release / packaging / dependency compatibility: selected - public exports and generated artifacts change while package manifests、lockfile and dependencies must remain unchanged.
+- Documentation / migration notes: selected - generated JSON/Markdown must describe required/optional/default semantics and the legacy omission policy is recorded here.
+Domain packs:
+- Scientific governance / PI gate / evidence lineage: selected - `llm_generated` controls later evidence eligibility, so false-by-default and true preservation must be auditable and deterministic; no scientific conclusion is made.
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected - no solver、R pipeline、model input/output or submodule runtime changes.
+- Zero adapter / tool registry / agent role governance: not selected - no Zero source、tool registration or role boundary changes.
+
+Invariant Matrix:
+- Governing invariant: every accepted research-context object has one strict canonical shape, and an Artifact omitted by a legacy caller can never lose or ambiguously represent its persisted LLM-origin state across parse、register、read、duplicate comparison or manifest nesting.
+- Source-of-truth identity/contract: Minimal_Schemas §2/§3、Support_Schema_Contracts §1/§2 and design D5/D5a/D6; `ArtifactSchema` input allows omission while `StoredArtifact` output requires boolean `llm_generated`.
+- Producers: existing M1 Artifact callers and legacy JSON records produce Artifact input; new schema fixtures produce StackLock/DataProvenance/ArtifactManifest input; `scripts/schema/generate.ts` produces checked-in JSON/Markdown.
+- Validators/preflight: public schemas in `packages/core/src/domain/schemas/`; existing `createArtifactRegistryService` invokes `ArtifactSchema` before register and `readJsonRecord` invokes it on persisted records.
+- Storage/cache/query: M1 `workspace/artifacts/manifests/<artifactId>.json` is the current consumer; register stores materialized false, get parses legacy omission to false without eager rewrite, and duplicate comparison uses canonical parsed records. New M2 object persistence is deferred to 4.x/5.x/6.x.
+- Public routes/entrypoints: `packages/core/src/domain/schemas/index.ts` and generated schema docs are changed; no HTTP route changes.
+- Frontend/downstream consumers: current Artifact registry/service tests plus future StackLock、DataProvenance and ArtifactManifest services; frontend and API wiring remain unchanged.
+- Failure paths/rollback/stale state: missing required、deprecated/unknown、wrong-type and invalid-ID inputs fail strict parse before persistence; divergent duplicate semantics and existing stable errors remain unchanged; no rollback surface is added.
+- Evidence/audit/readiness: compile-time barrel/type assertions、focused schema tests、focused M1 Artifact registry tests、generator drift check、full core/check suites、strict OpenSpec validation and final CI bound to the PR head.
+- Regression rows:
+  - M1 Artifact input omitting `llm_generated` -> schema output and register/get result contain `llm_generated: false`, and the persisted new record contains the explicit false value.
+  - Existing persisted JSON omitting `llm_generated` -> get returns canonical false without rewriting the file; registering the same old input again converges instead of raising immutable-conflict.
+  - Explicit `llm_generated: true` -> Artifact register/get and nested ArtifactManifest parse preserve true; explicit false remains false.
+  - Invalid/non-boolean/unknown Artifact field or incomplete/legacy-shaped new M2 object -> strict parse fails and no partial generated/persisted object is accepted.
+  - Existing TaskCard、ErrorRecord、IdempotencyRecord and LockRecord tests -> unchanged outputs and failures remain green.
+
+Boundary-surface checklist:
+- Shared schema roots: only the four named schema modules plus the public schema barrel are changed; existing sibling schema implementations stay untouched.
+- Public entrypoints: schema barrel/type exports and generator registry; no service/route wiring for the three new M2 objects.
+- Read/write surfaces: existing M1 Artifact registry/store is compatibility evidence only; no new writer、reader、delete or overwrite implementation.
+- Producer/consumer evidence: legacy/caller Artifact input -> ArtifactSchema -> registry/write/read/duplicate -> StoredArtifact; schema registry -> generated JSON/Markdown.
+- Stale-state/idempotency: repeated legacy omission and explicit false identify the same logical record; explicit true remains distinct and preserved.
+- Unchanged downstream consumers: TaskCard/error/idempotency/lock schemas, API/backend/frontend, package/dependency files and read-only submodules.
+
+Non-goals:
+- StackLock/DataProvenance/ArtifactManifest services、workspace directories、routes or UI; evidence rule engine/audit upgrade (6.1); path-safety changes; migration rewrite of legacy Artifact files; dependency or Zero changes.
+
+Review focus:
+- Zod input/output typing and default materialization at both direct and nested boundaries.
+- M1 Artifact registry register/get/duplicate compatibility, especially legacy omitted-field records.
+- Exact strict schemas and generated JSON/Markdown parity for D5/D5a/D6.
+- No unintended sibling schema、service、route、package/lock or submodule drift.
+
 ## Subagent Workflow Fixture — Issue #90
 
 Fixture level: expanded; repair intensity: high. Project profile: SHUD-Harness.

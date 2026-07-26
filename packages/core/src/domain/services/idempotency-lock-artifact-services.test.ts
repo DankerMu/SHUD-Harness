@@ -57,6 +57,7 @@ import {
   assertPathInsideWorkspace,
   resolveWorkspacePath,
   type Artifact,
+  type StoredArtifact,
   type IdempotencyRecord,
   type IdempotencyRecordService,
   type LockRecord,
@@ -3078,7 +3079,7 @@ describe("idempotency, lock, and artifact services", () => {
         schema: IdempotencyRecordSchema
       },
       { consumer: "lock", record: validLockRecord(), schema: LockRecordSchema },
-      { consumer: "artifact", record: validArtifact(), schema: ArtifactSchema }
+      { consumer: "artifact", record: storedArtifact(validArtifact()), schema: ArtifactSchema }
     ] as const;
     for (const fixture of fixtures) {
       const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
@@ -3114,7 +3115,11 @@ describe("idempotency, lock, and artifact services", () => {
     const fixtures = [
       { consumer: "idempotency", record: validIdempotencyRecord(), schema: IdempotencyRecordSchema },
       { consumer: "lock", record: validLockRecord(), schema: LockRecordSchema },
-      { consumer: "artifact", record: validArtifact(), schema: ArtifactSchema },
+      {
+        consumer: "artifact",
+        record: storedArtifact(validArtifact()),
+        schema: ArtifactSchema
+      },
       { consumer: "generic", record: { id: "base-compatible-generic" }, schema: genericSchema }
     ] as const;
 
@@ -5864,9 +5869,10 @@ describe("idempotency, lock, and artifact services", () => {
       ...artifact
     });
 
-    expect(ownerArtifact).toEqual(artifact);
-    expect(followerArtifact).toEqual(artifact);
-    expect(replayedArtifact).toEqual(artifact);
+    const expectedArtifact = storedArtifact(artifact);
+    expect(ownerArtifact).toEqual(expectedArtifact);
+    expect(followerArtifact).toEqual(expectedArtifact);
+    expect(replayedArtifact).toEqual(expectedArtifact);
     expect((await stat(publication.canonicalPath)).nlink).toBe(1);
     await expectPathMissing(publication.temporaryPath);
   });
@@ -5900,7 +5906,11 @@ describe("idempotency, lock, and artifact services", () => {
     );
     await artifactContention.promise;
     artifactHold.release();
-    expect(await Promise.all([artifactOwner, artifactAlias])).toEqual([artifact, artifact]);
+    const expectedArtifact = storedArtifact(artifact);
+    expect(await Promise.all([artifactOwner, artifactAlias])).toEqual([
+      expectedArtifact,
+      expectedArtifact
+    ]);
 
     const otherWorkspaceRoot = join(tempRoot, "PhysicallyDistinctWorkspace");
     await mkdir(otherWorkspaceRoot);
@@ -18312,7 +18322,9 @@ describe("idempotency, lock, and artifact services", () => {
     );
 
     expect(artifactError.code).toBe("record_malformed");
-    expect(await artifactService.getArtifact(siblingArtifact.artifact_id)).toEqual(siblingArtifact);
+    expect(await artifactService.getArtifact(siblingArtifact.artifact_id)).toEqual(
+      storedArtifact(siblingArtifact)
+    );
     expect(await readFile(artifactAlias)).toEqual(artifactBytes);
     expect((await stat(artifactAlias)).nlink).toBe(2);
   });
@@ -21418,7 +21430,7 @@ describe("idempotency, lock, and artifact services", () => {
       path: "artifacts/reports/./TASK-0001/report.md"
     };
     const expectedArtifact = {
-      ...artifact,
+      ...storedArtifact(artifact),
       path: "artifacts/reports/TASK-0001/report.md"
     };
     const manifestPath = join(
@@ -21431,6 +21443,62 @@ describe("idempotency, lock, and artifact services", () => {
     await expect(service.registerArtifact(artifact)).resolves.toEqual(expectedArtifact);
     expect(await service.getArtifact(artifact.artifact_id)).toEqual(expectedArtifact);
     expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(expectedArtifact);
+  });
+
+  test("Artifact registry public contract accepts optional input and returns stored output", () => {
+    const packageRootEntry = join(import.meta.dir, "../../index.ts");
+    const program = ts.createProgram({
+      rootNames: [packageRootEntry],
+      options: {
+        module: ts.ModuleKind.ESNext,
+        moduleResolution: ts.ModuleResolutionKind.Bundler,
+        noEmit: true,
+        skipLibCheck: true,
+        target: ts.ScriptTarget.ES2022
+      }
+    });
+    const source = program.getSourceFile(packageRootEntry);
+    expect(source).toBeDefined();
+    const checker = program.getTypeChecker();
+    const packageSymbol = source ? checker.getSymbolAtLocation(source) : undefined;
+    expect(packageSymbol).toBeDefined();
+    const serviceSymbol = packageSymbol
+      ? checker
+          .getExportsOfModule(packageSymbol)
+          .find((symbol) => symbol.getName() === "ArtifactRegistryService")
+      : undefined;
+    expect(serviceSymbol).toBeDefined();
+    const serviceType = serviceSymbol
+      ? checker.getDeclaredTypeOfSymbol(serviceSymbol)
+      : undefined;
+    const registerSymbol = serviceType?.getProperty("registerArtifact");
+    expect(registerSymbol).toBeDefined();
+    const registerType = registerSymbol && source
+      ? checker.getTypeOfSymbolAtLocation(registerSymbol, source)
+      : undefined;
+    const registerSignature = registerType?.getCallSignatures()[0];
+    expect(registerSignature).toBeDefined();
+
+    const inputSymbol = registerSignature?.parameters[0];
+    const inputType = inputSymbol && source
+      ? checker.getTypeOfSymbolAtLocation(inputSymbol, source)
+      : undefined;
+    const inputMarker = inputType?.getProperty("llm_generated");
+    expect(inputMarker).toBeDefined();
+    expect(Boolean(inputMarker && (inputMarker.flags & ts.SymbolFlags.Optional))).toBe(true);
+
+    const promiseType = registerSignature
+      ? checker.getReturnTypeOfSignature(registerSignature)
+      : undefined;
+    const outputType = promiseType ? checker.getPromisedTypeOfPromise(promiseType) : undefined;
+    const outputMarker = outputType?.getProperty("llm_generated");
+    expect(outputMarker).toBeDefined();
+    expect(Boolean(outputMarker && (outputMarker.flags & ts.SymbolFlags.Optional))).toBe(false);
+    expect(
+      outputMarker && source
+        ? checker.typeToString(checker.getTypeOfSymbolAtLocation(outputMarker, source))
+        : undefined
+    ).toBe("boolean");
   });
 
   test("Artifact registry preserves trailing-space artifact path identity", async () => {
@@ -21448,12 +21516,13 @@ describe("idempotency, lock, and artifact services", () => {
       `${artifact.artifact_id}.json`
     );
 
-    await expect(service.registerArtifact(artifact)).resolves.toEqual(artifact);
-    expect(await service.getArtifact(artifact.artifact_id)).toEqual(artifact);
-    expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(artifact);
+    const expectedArtifact = storedArtifact(artifact);
+    await expect(service.registerArtifact(artifact)).resolves.toEqual(expectedArtifact);
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(expectedArtifact);
+    expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(expectedArtifact);
   });
 
-  test("Artifact registry treats legacy dot-segment manifests as equivalent duplicates", async () => {
+  test("Artifact registry materializes legacy omitted defaults without eager rewrite and duplicate registration converges", async () => {
     const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
     tempRoots.push(tempRoot);
     const service = createArtifactRegistryService({ workspaceRoot });
@@ -21469,13 +21538,18 @@ describe("idempotency, lock, and artifact services", () => {
       `${artifact.artifact_id}.json`
     );
     const legacyManifestText = `${JSON.stringify(legacyArtifact)}\n`;
+    const expectedLegacyArtifact = storedArtifact(legacyArtifact);
     await mkdir(join(workspaceRoot, "artifacts", "manifests"), {
       recursive: true
     });
     await writeFile(manifestPath, legacyManifestText, { flag: "wx" });
 
-    await expect(service.registerArtifact(artifact)).resolves.toEqual(legacyArtifact);
-    expect(await service.getArtifact(artifact.artifact_id)).toEqual(legacyArtifact);
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(expectedLegacyArtifact);
+    expect(await readFile(manifestPath, "utf8")).toBe(legacyManifestText);
+    await expect(service.registerArtifact(legacyArtifact)).resolves.toEqual(expectedLegacyArtifact);
+    await expect(service.registerArtifact({ ...legacyArtifact })).resolves.toEqual(
+      expectedLegacyArtifact
+    );
     expect(await readFile(manifestPath, "utf8")).toBe(legacyManifestText);
   });
 
@@ -21506,9 +21580,17 @@ describe("idempotency, lock, and artifact services", () => {
     tempRoots.push(tempRoot);
     const service = createArtifactRegistryService({ workspaceRoot });
     const artifact = validArtifact();
+    const expectedArtifact = storedArtifact(artifact);
+    const manifestPath = join(
+      workspaceRoot,
+      "artifacts",
+      "manifests",
+      `${artifact.artifact_id}.json`
+    );
 
-    await expect(service.registerArtifact(artifact)).resolves.toEqual(artifact);
-    expect(await service.getArtifact(artifact.artifact_id)).toEqual(artifact);
+    await expect(service.registerArtifact(artifact)).resolves.toEqual(expectedArtifact);
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(expectedArtifact);
+    expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(expectedArtifact);
     expect(
       (
         await stat(join(workspaceRoot, "artifacts", "manifests", `${artifact.artifact_id}.json`))
@@ -21519,10 +21601,34 @@ describe("idempotency, lock, and artifact services", () => {
     await writeFile(join(workspaceRoot, "artifacts", "manifests", "ART-bad-sibling.json"), "{", {
       flag: "wx"
     });
-    expect(await service.getArtifact(artifact.artifact_id)).toEqual(artifact);
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(expectedArtifact);
   });
 
-  test("Artifact registry rejects invalid type, id, and path without manifest files", async () => {
+  test("Artifact registry preserves explicit true and false LLM markers", async () => {
+    const { tempRoot, workspaceRoot } = await createTempWorkspacePath();
+    tempRoots.push(tempRoot);
+    const service = createArtifactRegistryService({ workspaceRoot });
+    const artifacts: Artifact[] = [
+      { ...validArtifact(), artifact_id: "ART-llm-true", llm_generated: true },
+      { ...validArtifact(), artifact_id: "ART-llm-false", llm_generated: false }
+    ];
+
+    for (const artifact of artifacts) {
+      const expectedArtifact = storedArtifact(artifact);
+      await expect(service.registerArtifact(artifact)).resolves.toEqual(expectedArtifact);
+      expect(await service.getArtifact(artifact.artifact_id)).toEqual(expectedArtifact);
+      expect(
+        JSON.parse(
+          await readFile(
+            join(workspaceRoot, "artifacts", "manifests", `${artifact.artifact_id}.json`),
+            "utf8"
+          )
+        )
+      ).toEqual(expectedArtifact);
+    }
+  });
+
+  test("Artifact registry rejects invalid metadata, id, and path without manifest files", async () => {
     const invalidType = await createTempWorkspacePath();
     tempRoots.push(invalidType.tempRoot);
     const typeService = createArtifactRegistryService({
@@ -21537,6 +21643,36 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(typeError.code).toBe("record_schema_error");
     await expectPathMissing(join(invalidType.workspaceRoot, "artifacts"));
+
+    const invalidLlmMarker = await createTempWorkspacePath();
+    tempRoots.push(invalidLlmMarker.tempRoot);
+    const markerService = createArtifactRegistryService({
+      workspaceRoot: invalidLlmMarker.workspaceRoot
+    });
+    const markerError = await captureTaskServiceError(() =>
+      markerService.registerArtifact({
+        ...validArtifact(),
+        llm_generated: "false"
+      } as unknown as Artifact)
+    );
+
+    expect(markerError.code).toBe("record_schema_error");
+    await expectPathMissing(join(invalidLlmMarker.workspaceRoot, "artifacts"));
+
+    const unknownMetadata = await createTempWorkspacePath();
+    tempRoots.push(unknownMetadata.tempRoot);
+    const unknownMetadataService = createArtifactRegistryService({
+      workspaceRoot: unknownMetadata.workspaceRoot
+    });
+    const unknownMetadataError = await captureTaskServiceError(() =>
+      unknownMetadataService.registerArtifact({
+        ...validArtifact(),
+        legacy_evidence_flag: true
+      } as unknown as Artifact)
+    );
+
+    expect(unknownMetadataError.code).toBe("record_schema_error");
+    await expectPathMissing(join(unknownMetadata.workspaceRoot, "artifacts"));
 
     const invalidId = await createTempWorkspacePath();
     tempRoots.push(invalidId.tempRoot);
@@ -21667,8 +21803,9 @@ describe("idempotency, lock, and artifact services", () => {
       `${artifact.artifact_id}.json`
     );
 
-    await expect(service.registerArtifact(artifact)).resolves.toEqual(artifact);
-    await expect(service.registerArtifact({ ...artifact })).resolves.toEqual(artifact);
+    const expectedArtifact = storedArtifact(artifact);
+    await expect(service.registerArtifact(artifact)).resolves.toEqual(expectedArtifact);
+    await expect(service.registerArtifact({ ...artifact })).resolves.toEqual(expectedArtifact);
     const divergentError = await captureTaskServiceError(() =>
       service.registerArtifact({
         ...artifact,
@@ -21678,8 +21815,8 @@ describe("idempotency, lock, and artifact services", () => {
 
     expect(divergentError.code).toBe("record_schema_error");
     expect(divergentError.category).toBe("schema_error");
-    expect(await service.getArtifact(artifact.artifact_id)).toEqual(artifact);
-    expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(artifact);
+    expect(await service.getArtifact(artifact.artifact_id)).toEqual(expectedArtifact);
+    expect(JSON.parse(await readFile(manifestPath, "utf8"))).toEqual(expectedArtifact);
   });
 
   test("hardlink publication rejects same-inode canonical rebound epochs on return and throw", async () => {
@@ -34133,5 +34270,22 @@ function validArtifact(): Artifact {
     retention_class: "debug",
     source_refs: [],
     redaction_status: "not_needed"
+  };
+}
+
+function storedArtifact(artifact: Artifact): StoredArtifact {
+  const {
+    llm_generated: llmGenerated,
+    retention_class: retentionClass,
+    source_refs: sourceRefs,
+    redaction_status: redactionStatus,
+    ...fieldsBeforeLlmMarker
+  } = artifact;
+  return {
+    ...fieldsBeforeLlmMarker,
+    llm_generated: llmGenerated ?? false,
+    retention_class: retentionClass,
+    source_refs: sourceRefs,
+    redaction_status: redactionStatus
   };
 }

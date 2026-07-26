@@ -1,4 +1,6 @@
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import ts from "typescript";
 import {
   ArtifactManifestSchema,
   ArtifactSchema,
@@ -54,9 +56,73 @@ describe("core Zod schemas", () => {
     if (llmGenerated.success) {
       expect(llmGenerated.data.llm_generated).toBe(true);
     }
+
+    const explicitlyNotLlmGenerated = ArtifactSchema.safeParse({
+      ...validArtifact(),
+      llm_generated: false
+    });
+    expect(explicitlyNotLlmGenerated.success).toBe(true);
+    if (explicitlyNotLlmGenerated.success) {
+      expect(explicitlyNotLlmGenerated.data.llm_generated).toBe(false);
+    }
   });
 
-  test("Artifact remains strict and rejects missing required fields", () => {
+  test("public schema barrel keeps Artifact inputs optional and StoredArtifact output required", () => {
+    const barrelPath = join(import.meta.dir, "index.ts");
+    const program = ts.createProgram({
+      rootNames: [barrelPath],
+      options: {
+        module: ts.ModuleKind.ESNext,
+        moduleResolution: ts.ModuleResolutionKind.Bundler,
+        noEmit: true,
+        skipLibCheck: true,
+        target: ts.ScriptTarget.ES2022
+      }
+    });
+    expect(
+      ts.getPreEmitDiagnostics(program).map((diagnostic) =>
+        ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")
+      )
+    ).toEqual([]);
+
+    const source = program.getSourceFile(barrelPath);
+    expect(source).toBeDefined();
+    const checker = program.getTypeChecker();
+    const moduleSymbol = source ? checker.getSymbolAtLocation(source) : undefined;
+    expect(moduleSymbol).toBeDefined();
+    const exportsByName = new Map(
+      moduleSymbol
+        ? checker.getExportsOfModule(moduleSymbol).map((symbol) => [symbol.getName(), symbol])
+        : []
+    );
+
+    for (const inputTypeName of ["Artifact", "ArtifactInput"] as const) {
+      const inputTypeSymbol = exportsByName.get(inputTypeName);
+      expect(inputTypeSymbol).toBeDefined();
+      const inputType = inputTypeSymbol
+        ? checker.getDeclaredTypeOfSymbol(inputTypeSymbol)
+        : undefined;
+      const marker = inputType?.getProperty("llm_generated");
+      expect(marker).toBeDefined();
+      expect(Boolean(marker && (marker.flags & ts.SymbolFlags.Optional))).toBe(true);
+    }
+
+    const storedTypeSymbol = exportsByName.get("StoredArtifact");
+    expect(storedTypeSymbol).toBeDefined();
+    const storedType = storedTypeSymbol
+      ? checker.getDeclaredTypeOfSymbol(storedTypeSymbol)
+      : undefined;
+    const storedMarker = storedType?.getProperty("llm_generated");
+    expect(storedMarker).toBeDefined();
+    expect(Boolean(storedMarker && (storedMarker.flags & ts.SymbolFlags.Optional))).toBe(false);
+    expect(
+      storedMarker && source
+        ? checker.typeToString(checker.getTypeOfSymbolAtLocation(storedMarker, source))
+        : undefined
+    ).toBe("boolean");
+  });
+
+  test("Artifact remains strict and rejects missing, non-boolean, and unknown fields", () => {
     const missingPath = ArtifactSchema.safeParse(removeKey(validArtifact(), "path"));
     expect(missingPath.success).toBe(false);
     expect(issuePaths(missingPath)).toContain("path");
@@ -66,6 +132,13 @@ describe("core Zod schemas", () => {
       legacy_evidence_flag: true
     });
     expect(unknownField.success).toBe(false);
+
+    const nonBooleanMarker = ArtifactSchema.safeParse({
+      ...validArtifact(),
+      llm_generated: "false"
+    });
+    expect(nonBooleanMarker.success).toBe(false);
+    expect(issuePaths(nonBooleanMarker)).toContain("llm_generated");
   });
 
   test("StackLock accepts the four-repository shape and nullable R package lock", () => {
@@ -225,13 +298,22 @@ describe("core Zod schemas", () => {
     expect(unexpectedSourceField.success).toBe(false);
   });
 
-  test("ArtifactManifest accepts full Artifact objects and defaults their LLM marker", () => {
-    const parsed = ArtifactManifestSchema.safeParse(validArtifactManifest());
+  test("ArtifactManifest preserves omitted, true, and false Artifact LLM markers", () => {
+    const parsed = ArtifactManifestSchema.safeParse({
+      ...validArtifactManifest(),
+      artifacts: [
+        validArtifact(),
+        { ...validArtifact(), artifact_id: "ART-0002", llm_generated: true },
+        { ...validArtifact(), artifact_id: "ART-0003", llm_generated: false }
+      ]
+    });
     expect(parsed.success).toBe(true);
     if (parsed.success) {
       expect(parsed.data.manifest_id).toBe(MANIFEST_ID);
       expect(parsed.data.superseded_by).toBe(SUCCESSOR_MANIFEST_ID);
       expect(parsed.data.artifacts[0]?.llm_generated).toBe(false);
+      expect(parsed.data.artifacts[1]?.llm_generated).toBe(true);
+      expect(parsed.data.artifacts[2]?.llm_generated).toBe(false);
     }
   });
 
