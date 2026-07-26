@@ -94,4 +94,5 @@ jobs:
           git diff --check
           git -C zero diff --quiet
           test -z "$(git ls-files workspace)"
+          git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
           git diff --exit-code origin/main -- package.json packages/*/package.json bun.lock
