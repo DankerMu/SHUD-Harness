@@ -58,7 +58,7 @@ export interface StackLockGitCommandInput {
 }
 
 export interface StackLockGitCommandResult {
-  readonly stdout: string;
+  readonly stdout: string | Uint8Array;
   readonly stderr?: string;
 }
 
@@ -172,19 +172,17 @@ async function collectCheapSnapshot(
   gitCommand: StackLockGitCommand
 ): Promise<StackLockCheapSnapshot> {
   const reportedRepositoryRoot = await collectRepositoryRootIdentity(repositoryRoot, gitCommand);
-  const [revisions, harness, provider, gitmodules] = await Promise.all([
-    collectGitlinkRevisions(reportedRepositoryRoot, gitCommand),
+  const [authority, harness, provider] = await Promise.all([
+    collectHeadAuthority(reportedRepositoryRoot, gitCommand),
     readHarnessVersion(reportedRepositoryRoot),
-    readProviderIdentity(reportedRepositoryRoot),
-    readGitmodulesIdentity(reportedRepositoryRoot)
+    readProviderIdentity(reportedRepositoryRoot)
   ]);
-  const repos = repositoriesFromSnapshot(revisions, gitmodules);
   return Object.freeze({
     repositoryRoot: reportedRepositoryRoot,
-    repos,
+    repos: authority.repos,
     harness,
     provider,
-    gitmodules
+    gitmodules: authority.gitmodules
   });
 }
 
@@ -210,6 +208,7 @@ function cheapSnapshotsMatch(
     first.provider.modelId === second.provider.modelId &&
     first.provider.baseUrl === second.provider.baseUrl &&
     first.provider.sourceDigest === second.provider.sourceDigest &&
+    first.gitmodules.objectId === second.gitmodules.objectId &&
     first.gitmodules.sourceDigest === second.gitmodules.sourceDigest &&
     JSON.stringify(first.gitmodules.declarations) ===
       JSON.stringify(second.gitmodules.declarations)
@@ -259,17 +258,19 @@ async function collectRepositoryRootIdentity(
     throw new StackLockCollectionError("git_read_failed");
   }
 
-  let stdout: unknown;
+  let stdoutBytes: Buffer;
   try {
-    stdout = asRecord(rawResult)?.stdout;
+    stdoutBytes = boundedGitOutputBytes(asRecord(rawResult)?.stdout, MAX_GIT_OUTPUT_BYTES);
   } catch {
     throw new StackLockCollectionError("git_output_invalid");
   }
-  if (
-    typeof stdout !== "string" ||
-    Buffer.byteLength(stdout, "utf8") > MAX_GIT_OUTPUT_BYTES ||
-    !stdout.endsWith("\n")
-  ) {
+  let stdout: string;
+  try {
+    stdout = UTF8_DECODER.decode(stdoutBytes);
+  } catch {
+    throw new StackLockCollectionError("git_output_invalid");
+  }
+  if (!stdout.endsWith("\n")) {
     throw new StackLockCollectionError("git_output_invalid");
   }
   const reportedPath = stdout.slice(0, -1).replace(/\r$/u, "");
@@ -294,10 +295,34 @@ async function collectRepositoryRootIdentity(
   return physicalReportedPath;
 }
 
-async function collectGitlinkRevisions(
+interface HeadAuthorityInventory {
+  readonly revisions: Readonly<Record<StackLockRepositoryName, string>>;
+  readonly gitmodulesObjectId: string;
+}
+
+async function collectHeadAuthority(
   repositoryRoot: string,
   gitCommand: StackLockGitCommand
-): Promise<Readonly<Record<StackLockRepositoryName, string>>> {
+): Promise<{
+  readonly repos: StackLock["repos"];
+  readonly gitmodules: GitmodulesIdentity;
+}> {
+  const inventory = await collectHeadAuthorityInventory(repositoryRoot, gitCommand);
+  const gitmodules = await readHeadGitmodulesIdentity(
+    repositoryRoot,
+    inventory.gitmodulesObjectId,
+    gitCommand
+  );
+  return Object.freeze({
+    repos: repositoriesFromSnapshot(inventory.revisions, gitmodules),
+    gitmodules
+  });
+}
+
+async function collectHeadAuthorityInventory(
+  repositoryRoot: string,
+  gitCommand: StackLockGitCommand
+): Promise<HeadAuthorityInventory> {
   let rawResult: unknown;
   try {
     rawResult = await gitCommand({
@@ -309,6 +334,7 @@ async function collectGitlinkRevisions(
         "--full-tree",
         "HEAD",
         "--",
+        GITMODULES_RELATIVE_PATH,
         ...STACK_LOCK_REPOSITORY_NAMES
       ])
     });
@@ -316,27 +342,41 @@ async function collectGitlinkRevisions(
     throw new StackLockCollectionError("git_read_failed");
   }
 
-  let stdout: unknown;
+  let stdoutBytes: Buffer;
   try {
-    stdout = asRecord(rawResult)?.stdout;
+    stdoutBytes = boundedGitOutputBytes(asRecord(rawResult)?.stdout, MAX_GIT_OUTPUT_BYTES);
   } catch {
     throw new StackLockCollectionError("git_output_invalid");
   }
-  if (
-    typeof stdout !== "string" ||
-    Buffer.byteLength(stdout, "utf8") > MAX_GIT_OUTPUT_BYTES ||
-    !stdout.endsWith("\0")
-  ) {
+  let stdout: string;
+  try {
+    stdout = UTF8_DECODER.decode(stdoutBytes);
+  } catch {
+    throw new StackLockCollectionError("git_output_invalid");
+  }
+  if (!stdout.endsWith("\0")) {
     throw new StackLockCollectionError("git_output_invalid");
   }
 
   const revisions = new Map<StackLockRepositoryName, string>();
+  let gitmodulesObjectId: string | undefined;
   const records = stdout.slice(0, -1).split("\0");
-  if (records.length !== STACK_LOCK_REPOSITORY_NAMES.length) {
+  if (records.length === 0 || records.length > STACK_LOCK_REPOSITORY_NAMES.length + 1) {
     throw new StackLockCollectionError("git_output_invalid");
   }
 
   for (const record of records) {
+    const gitmodulesMatch = /^100644 blob ([0-9A-Fa-f]{40})\t\.gitmodules$/u.exec(record);
+    if (gitmodulesMatch) {
+      if (gitmodulesObjectId !== undefined) {
+        throw new StackLockCollectionError("gitmodules_invalid");
+      }
+      gitmodulesObjectId = gitmodulesMatch[1]!.toLowerCase();
+      continue;
+    }
+    if (record.endsWith(`\t${GITMODULES_RELATIVE_PATH}`)) {
+      throw new StackLockCollectionError("gitmodules_invalid");
+    }
     const match = GITLINK_PATTERN.exec(record);
     if (!match) throw new StackLockCollectionError("git_output_invalid");
     const repositoryName = match[2];
@@ -351,10 +391,16 @@ async function collectGitlinkRevisions(
       throw new StackLockCollectionError("git_output_invalid");
     }
   }
+  if (gitmodulesObjectId === undefined) {
+    throw new StackLockCollectionError("gitmodules_invalid");
+  }
 
-  return Object.freeze(Object.fromEntries(
-    STACK_LOCK_REPOSITORY_NAMES.map((name) => [name, revisions.get(name)!])
-  )) as Readonly<Record<StackLockRepositoryName, string>>;
+  return Object.freeze({
+    revisions: Object.freeze(Object.fromEntries(
+      STACK_LOCK_REPOSITORY_NAMES.map((name) => [name, revisions.get(name)!])
+    )) as Readonly<Record<StackLockRepositoryName, string>>,
+    gitmodulesObjectId
+  });
 }
 
 function repositoriesFromSnapshot(
@@ -375,7 +421,7 @@ function isStackLockRepositoryName(value: string): value is StackLockRepositoryN
 
 interface ReadOnlyGitExecOptions {
   readonly cwd: string;
-  readonly encoding: "utf8";
+  readonly encoding: null;
   readonly env: NodeJS.ProcessEnv;
   readonly maxBuffer: number;
   readonly timeout: number;
@@ -404,7 +450,7 @@ function runReadOnlyGitCommandWithExecutor(
         [...input.args],
         {
           cwd: input.cwd,
-          encoding: "utf8",
+          encoding: null,
           env: readOnlyGitEnvironment(env),
           maxBuffer: MAX_GIT_OUTPUT_BYTES,
           timeout: GIT_TIMEOUT_MS,
@@ -415,7 +461,7 @@ function runReadOnlyGitCommandWithExecutor(
             rejectCommand(new StackLockCollectionError("git_read_failed"));
             return;
           }
-          if (typeof stdout !== "string") {
+          if (typeof stdout !== "string" && !(stdout instanceof Uint8Array)) {
             rejectCommand(new StackLockCollectionError("git_output_invalid"));
             return;
           }
@@ -480,28 +526,43 @@ interface GitmoduleDeclaration {
 
 interface GitmodulesIdentity {
   readonly declarations: Readonly<Record<StackLockRepositoryName, GitmoduleDeclaration>>;
+  readonly objectId: string;
   readonly sourceDigest: string;
 }
 
-async function readGitmodulesIdentity(repositoryRoot: string): Promise<GitmodulesIdentity> {
-  const absolutePath = join(repositoryRoot, GITMODULES_RELATIVE_PATH);
+async function readHeadGitmodulesIdentity(
+  repositoryRoot: string,
+  objectId: string,
+  gitCommand: StackLockGitCommand
+): Promise<GitmodulesIdentity> {
+  let rawResult: unknown;
   try {
-    const resolution = await resolveWorkspacePath({
-      workspaceRoot: repositoryRoot,
-      inputPath: GITMODULES_RELATIVE_PATH,
-      evidenceRef: "stack-lock.gitmodules",
-      access: "read"
+    rawResult = await gitCommand({
+      cwd: repositoryRoot,
+      args: Object.freeze([
+        GIT_NO_LAZY_FETCH_GLOBAL_ARG,
+        "cat-file",
+        "blob",
+        objectId
+      ])
     });
-    const result = await readDurableSingleLinkFile({
-      path: resolution.absolutePath,
-      maxBytes: MAX_GITMODULES_FILE_BYTES,
-      validateParentPath: async () => await isSafeExistingDirectoryPath(dirname(absolutePath))
-    });
-    if (result.status !== "read") throw new Error("gitmodules unavailable");
-    const text = UTF8_DECODER.decode(result.bytes);
+  } catch {
+    throw new StackLockCollectionError("git_read_failed");
+  }
+
+  try {
+    const bytes = boundedGitOutputBytes(
+      asRecord(rawResult)?.stdout,
+      MAX_GITMODULES_FILE_BYTES
+    );
+    if (bytes.includes(0)) {
+      throw new Error("invalid gitmodules blob output");
+    }
+    const text = UTF8_DECODER.decode(bytes);
     return Object.freeze({
       declarations: parseGitmoduleDeclarations(text),
-      sourceDigest: createHash("sha256").update(result.bytes).digest("hex")
+      objectId,
+      sourceDigest: createHash("sha256").update(bytes).digest("hex")
     });
   } catch {
     throw new StackLockCollectionError("gitmodules_invalid");
@@ -561,6 +622,19 @@ function parseGitmoduleDeclarations(
   return Object.freeze(Object.fromEntries(entries)) as Readonly<
     Record<StackLockRepositoryName, GitmoduleDeclaration>
   >;
+}
+
+function boundedGitOutputBytes(value: unknown, maxBytes: number): Buffer {
+  let bytes: Buffer;
+  if (typeof value === "string") {
+    bytes = Buffer.from(value, "utf8");
+  } else if (value instanceof Uint8Array) {
+    bytes = Buffer.from(value);
+  } else {
+    throw new Error("invalid git output type");
+  }
+  if (bytes.byteLength > maxBytes) throw new Error("git output exceeds bound");
+  return bytes;
 }
 
 function isBoundedGitmoduleValue(value: string): boolean {

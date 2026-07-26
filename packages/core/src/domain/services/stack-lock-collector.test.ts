@@ -43,6 +43,8 @@ const SHAS = Object.freeze({
   AutoSHUD: "3333333333333333333333333333333333333333",
   zero: STACK_LOCK_ZERO_PIN
 });
+const GITMODULES_OBJECT_ID = "4444444444444444444444444444444444444444";
+const ALTERNATE_GITMODULES_OBJECT_ID = "5555555555555555555555555555555555555555";
 
 describe("StackLock context collector", () => {
   afterEach(async () => {
@@ -61,7 +63,7 @@ describe("StackLock context collector", () => {
       gitCommand
     });
 
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(6);
     expect(calls[0]).toEqual({
       cwd: resolve(repositoryRoot),
       args: ["--no-lazy-fetch", "rev-parse", "--show-toplevel"]
@@ -75,14 +77,20 @@ describe("StackLock context collector", () => {
         "--full-tree",
         "HEAD",
         "--",
+        ".gitmodules",
         "SHUD",
         "rSHUD",
         "AutoSHUD",
         "zero"
       ]
     });
-    expect(calls[2]).toEqual(calls[0]);
-    expect(calls[3]).toEqual(calls[1]);
+    expect(calls[2]).toEqual({
+      cwd: resolve(repositoryRoot),
+      args: ["--no-lazy-fetch", "cat-file", "blob", GITMODULES_OBJECT_ID]
+    });
+    expect(calls[3]).toEqual(calls[0]);
+    expect(calls[4]).toEqual(calls[1]);
+    expect(calls[5]).toEqual(calls[2]);
     expect(result.repos).toEqual({
       SHUD: { commit: SHAS.SHUD, branch: "master" },
       rSHUD: { commit: SHAS.rSHUD, branch: "master" },
@@ -297,11 +305,13 @@ describe("StackLock context collector", () => {
     ["mismatched branch", () => gitmodulesFixture({ zero: { branch: "main" } })]
   ] as const)("rejects stable .gitmodules %s with a typed non-disclosing error", async (_label, content) => {
     const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
-    await writeFile(join(repositoryRoot, ".gitmodules"), content());
     let collection: Awaited<ReturnType<typeof collectStackLockContext>> | undefined;
     let thrown: unknown;
     try {
-      collection = await collectStackLockContext({ repositoryRoot, gitCommand: fakeGitCommand() });
+      collection = await collectStackLockContext({
+        repositoryRoot,
+        gitCommand: fakeGitCommand(content())
+      });
     } catch (error) {
       thrown = error;
     }
@@ -311,6 +321,109 @@ describe("StackLock context collector", () => {
       message: "StackLock context collection failed."
     });
     expect((thrown as Error).message).not.toContain(repositoryRoot);
+  });
+
+  test.each([
+    ["missing", gitlinkOutput(["SHUD", "rSHUD", "AutoSHUD", "zero"], {}, null)],
+    [
+      "wrong-mode",
+      gitlinkOutput(["SHUD", "rSHUD", "AutoSHUD", "zero"]).replace(
+        "100644 blob",
+        "100755 blob"
+      )
+    ]
+  ] as const)("rejects a %s HEAD .gitmodules inventory entry", async (_label, inventory) => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    const gitCommand = gitCommandWithRootIdentity(repositoryRoot, async () => ({ stdout: inventory }));
+
+    await expect(collectStackLockContext({ repositoryRoot, gitCommand })).rejects.toMatchObject({
+      code: "gitmodules_invalid",
+      message: "StackLock context collection failed."
+    });
+  });
+
+  test.each([
+    ["malformed", "[submodule \"SHUD\"]\npath = SHUD\n"],
+    ["non-UTF-8", Buffer.from([0xff])]
+  ] as const)("rejects a %s HEAD .gitmodules blob", async (_label, blob) => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    const gitCommand: StackLockGitCommand = async (input) => {
+      if (isTopLevelCommand(input)) return { stdout: `${await realpath(repositoryRoot)}\n` };
+      if (isGitmodulesBlobCommand(input)) return { stdout: blob };
+      return { stdout: gitlinkOutput(["SHUD", "rSHUD", "AutoSHUD", "zero"]) };
+    };
+
+    await expect(collectStackLockContext({ repositoryRoot, gitCommand })).rejects.toMatchObject({
+      code: "gitmodules_invalid",
+      message: "StackLock context collection failed."
+    });
+  });
+
+  test("accepts an exact 64 KiB HEAD .gitmodules blob and rejects the next byte", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    const prefix = gitmodulesFixture();
+    const exact = `${prefix}#${"x".repeat(64 * 1024 - Buffer.byteLength(prefix) - 2)}\n`;
+    expect(Buffer.byteLength(exact)).toBe(64 * 1024);
+
+    const accepted = await collectStackLockContext({
+      repositoryRoot,
+      gitCommand: fakeGitCommand(exact)
+    });
+    expect(accepted.repos.zero.branch).toBe("development");
+
+    await expect(
+      collectStackLockContext({
+        repositoryRoot,
+        gitCommand: fakeGitCommand(`${exact}x`)
+      })
+    ).rejects.toMatchObject({
+      code: "gitmodules_invalid",
+      message: "StackLock context collection failed."
+    });
+  });
+
+  test("rejects an oversized HEAD authority inventory before reading its blob", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    let blobReads = 0;
+    const gitCommand: StackLockGitCommand = async (input) => {
+      if (isTopLevelCommand(input)) return { stdout: `${await realpath(repositoryRoot)}\n` };
+      if (isGitmodulesBlobCommand(input)) {
+        blobReads += 1;
+        return { stdout: gitmodulesFixture() };
+      }
+      return { stdout: `${"x".repeat(64 * 1024)}\0` };
+    };
+
+    await expect(collectStackLockContext({ repositoryRoot, gitCommand })).rejects.toMatchObject({
+      code: "git_output_invalid",
+      message: "StackLock context collection failed."
+    });
+    expect(blobReads).toBe(0);
+  });
+
+  test("rejects a committed .gitmodules object generation transition", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    let inventoryReads = 0;
+    const gitCommand: StackLockGitCommand = async (input) => {
+      if (isTopLevelCommand(input)) return { stdout: `${await realpath(repositoryRoot)}\n` };
+      if (isGitmodulesBlobCommand(input)) {
+        return {
+          stdout: input.args.at(-1) === GITMODULES_OBJECT_ID
+            ? gitmodulesFixture()
+            : `${gitmodulesFixture()}# committed generation two\n`
+        };
+      }
+      inventoryReads += 1;
+      return {
+        stdout: gitlinkOutput(
+          ["SHUD", "rSHUD", "AutoSHUD", "zero"],
+          {},
+          inventoryReads === 1 ? GITMODULES_OBJECT_ID : ALTERNATE_GITMODULES_OBJECT_ID
+        )
+      };
+    };
+
+    await expectStateChanged(repositoryRoot, gitCommand);
   });
 
   test.each([
@@ -434,7 +547,11 @@ describe("StackLock context collector", () => {
         thrown = error;
       }
 
-      expect(observedOptions).toMatchObject({ timeout: 10_000, maxBuffer: 64 * 1024 });
+      expect(observedOptions).toMatchObject({
+        encoding: null,
+        timeout: 10_000,
+        maxBuffer: 64 * 1024
+      });
       expect(thrown).toMatchObject({
         code: "git_read_failed",
         message: "StackLock context collection failed."
@@ -782,6 +899,7 @@ describe("StackLock context collector", () => {
               stdout: `${rootObservations === 1 ? repositoryRoot : changedRoot}\n`
             };
           }
+          if (isGitmodulesBlobCommand(input)) return { stdout: gitmodulesFixture() };
           gitlinkReads += 1;
           return { stdout: gitlinkOutput(["SHUD", "rSHUD", "AutoSHUD", "zero"]) };
         }
@@ -814,6 +932,77 @@ describe("StackLock context collector", () => {
       zero: { commit: SHAS.zero, branch: "development" }
     });
     expect(result.harness.version).toBe("0.8.0");
+  });
+
+  test("derives branches from HEAD while a stable dirty worktree .gitmodules disagrees", async () => {
+    const repositoryRoot = await createGitBackedFixtureRepository();
+    await writeFile(
+      join(repositoryRoot, ".gitmodules"),
+      gitmodulesFixture({ zero: { branch: "worktree-only" } })
+    );
+
+    const result = await collectStackLockContext({ repositoryRoot });
+
+    expect(result.repos.zero).toEqual({
+      commit: STACK_LOCK_ZERO_PIN,
+      branch: "development"
+    });
+    expect(git(repositoryRoot, ["status", "--porcelain=v1", "--", ".gitmodules"])).toContain(
+      ".gitmodules"
+    );
+  });
+
+  test("rejects an untracked canonical worktree .gitmodules when HEAD has no branch authority", async () => {
+    const repositoryRoot = await createGitBackedFixtureRepository();
+    git(repositoryRoot, ["rm", "--quiet", "--cached", ".gitmodules"]);
+    git(repositoryRoot, ["commit", "--quiet", "--message", "remove committed branch authority"]);
+    await writeFile(join(repositoryRoot, ".gitmodules"), gitmodulesFixture());
+
+    await expect(collectStackLockContext({ repositoryRoot })).rejects.toMatchObject({
+      code: "gitmodules_invalid",
+      message: "StackLock context collection failed."
+    });
+  });
+
+  test("rejects committed branch authority drift despite a stable canonical worktree .gitmodules", async () => {
+    const repositoryRoot = await createGitBackedFixtureRepository();
+    await writeFile(
+      join(repositoryRoot, ".gitmodules"),
+      gitmodulesFixture({ zero: { branch: "main" } })
+    );
+    git(repositoryRoot, ["add", ".gitmodules"]);
+    git(repositoryRoot, ["commit", "--quiet", "--message", "change committed branch authority"]);
+    await writeFile(join(repositoryRoot, ".gitmodules"), gitmodulesFixture());
+
+    let collection: Awaited<ReturnType<typeof collectStackLockContext>> | undefined;
+    let thrown: unknown;
+    try {
+      collection = await collectStackLockContext({ repositoryRoot });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(collection).toBeUndefined();
+    expect(thrown).toMatchObject({
+      code: "gitmodules_invalid",
+      message: "StackLock context collection failed."
+    });
+    expect((thrown as Error).message).not.toContain(repositoryRoot);
+  });
+
+  test("rejects a committed byte-only .gitmodules generation transition between snapshots", async () => {
+    const repositoryRoot = await createGitBackedFixtureRepository();
+    let rootReads = 0;
+    const gitCommand: StackLockGitCommand = async (input) => {
+      if (isTopLevelCommand(input) && ++rootReads === 2) {
+        await writeFile(join(repositoryRoot, ".gitmodules"), `${gitmodulesFixture()}# generation two\n`);
+        git(repositoryRoot, ["add", ".gitmodules"]);
+        git(repositoryRoot, ["commit", "--quiet", "--message", "advance branch authority bytes"]);
+      }
+      return { stdout: git(input.cwd, [...input.args]) };
+    };
+
+    await expectStateChanged(repositoryRoot, gitCommand);
   });
 
   test("default git reader observes the real four gitlinks including the frozen zero pin without git mutation", async () => {
@@ -958,9 +1147,10 @@ function providerConfigFixture(
   };
 }
 
-function fakeGitCommand(): StackLockGitCommand {
+function fakeGitCommand(gitmodulesContent = gitmodulesFixture()): StackLockGitCommand {
   return async (input) => {
     if (isTopLevelCommand(input)) return { stdout: `${await realpath(input.cwd)}\n` };
+    if (isGitmodulesBlobCommand(input)) return { stdout: gitmodulesContent };
     return { stdout: gitlinkOutput(["SHUD", "rSHUD", "AutoSHUD", "zero"]) };
   };
 }
@@ -973,6 +1163,9 @@ function gitCommandWithRootIdentity(
   return async (input) => {
     calls?.push(input);
     if (isTopLevelCommand(input)) return { stdout: `${await realpath(repositoryRoot)}\n` };
+    if (isGitmodulesBlobCommand(input)) {
+      return { stdout: await readFile(join(repositoryRoot, ".gitmodules"), "utf8") };
+    }
     return await collectGitlinks(input);
   };
 }
@@ -985,13 +1178,28 @@ function isTopLevelCommand(input: StackLockGitCommandInput): boolean {
   ]);
 }
 
+function isGitmodulesBlobCommand(input: StackLockGitCommandInput): boolean {
+  return (
+    input.args.length === 4 &&
+    input.args[0] === "--no-lazy-fetch" &&
+    input.args[1] === "cat-file" &&
+    input.args[2] === "blob" &&
+    /^[0-9a-f]{40}$/u.test(input.args[3] ?? "")
+  );
+}
+
 function gitlinkOutput(
   order: ReadonlyArray<keyof typeof SHAS>,
-  overrides: Partial<Record<keyof typeof SHAS, string>> = {}
+  overrides: Partial<Record<keyof typeof SHAS, string>> = {},
+  gitmodulesObjectId: string | null = GITMODULES_OBJECT_ID
 ): string {
-  return order
+  return [
+    ...(gitmodulesObjectId === null
+      ? []
+      : [`100644 blob ${gitmodulesObjectId}\t.gitmodules\0`]),
+    ...order
     .map((name) => `160000 commit ${overrides[name] ?? SHAS[name]}\t${name}\0`)
-    .join("");
+  ].join("");
 }
 
 async function createTempRoot(prefix: string): Promise<string> {

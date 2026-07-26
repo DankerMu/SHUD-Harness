@@ -16,7 +16,7 @@ Mandatory expanded triggers are public service API, repository/config file reads
 - `packages/core/src/domain/services/stack-lock-collector.ts`: bind and revalidate the Git-reported physical repository top-level before other producers, then collect and revalidate four gitlink revisions, declared branch authority, bounded `renv.lock` state, runtime placeholders, harness identity, and the safe provider projection.
 - `packages/core/src/domain/services/stack-lock-collector.test.ts`: positive, negative, no-follow, no-secret, bounded-command, and real-repository regression evidence.
 - `packages/core/src/domain/services/index.ts`: public collection contract.
-- `.gitmodules`: version-controlled branch authority (`master` for SHUD/rSHUD/AutoSHUD; `development` for zero) without entering submodule worktrees.
+- `HEAD:.gitmodules`: version-controlled branch authority (`master` for SHUD/rSHUD/AutoSHUD; `development` for zero), bound by object id to the same HEAD inventory as the gitlinks and read without entering submodule worktrees.
 - `packages/core/src/domain/services/hashing-service.ts` and tests: backward-compatible, file-only optional descriptor byte bound consumed by the collector.
 - Root `package.json`: establish the already-canonical SHUD-Harness `0.8.3` release identity required by D7a; `bun.lock` remains byte-identical.
 - This fixture and `tasks.md` bookkeeping.
@@ -24,21 +24,21 @@ Mandatory expanded triggers are public service API, repository/config file reads
 ## Must preserve
 
 - `hashFile` remains the sole sha256 authority for an existing `renv.lock`; its public file input gains an optional descriptor-bound `maxBytes`, while existing callers and `hashDirectory` remain unchanged.
-- The collector executes only fixed `git --no-lazy-fetch rev-parse --show-toplevel` and `git --no-lazy-fetch ls-tree` commands, never enters a submodule worktree, never runs checkout/fetch/config/status mutation, and leaves HEAD/index/worktree unchanged.
+- The collector executes only fixed `git --no-lazy-fetch rev-parse --show-toplevel`, bounded `git --no-lazy-fetch ls-tree`, and exact-object `git --no-lazy-fetch cat-file blob` commands, never enters a submodule worktree, never runs checkout/fetch/config/status mutation, and leaves HEAD/index/worktree unchanged.
 - Provider API-key values and environment variables are not inputs to the collector, are not logged, and cannot enter the returned object or stable errors.
 - Existing core services, StackLock schema, dependency lock, routes, workspace record store, submodule pins, and generated schemas remain unchanged. The sole manifest change is the required root `version: 0.8.3`; no dependency or workspace topology changes.
 
 ## Must add/change
 
 - Public `collectStackLockContext({ repositoryRoot, gitCommand? })` returning `{ repos, runtime, harness, llm, degraded }`; runtime identity cannot be supplied by callers.
-- The physical `repositoryRoot` must equal Git's reported superproject/linked-worktree top-level before any package/provider/`.gitmodules`/gitlink producer runs; this root identity is observed in both cheap snapshots and compared before publication.
-- Four exact repository keys with 40-hex gitlink commits and branches read from the exact `.gitmodules` declarations; zero must equal `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6` on declared branch `development` in the repository integration test.
+- The physical `repositoryRoot` must equal Git's reported superproject/linked-worktree top-level before any package/provider/HEAD-authority producer runs; this root identity is observed in both cheap snapshots and compared before publication.
+- Four exact repository keys with 40-hex gitlink commits and branches read from the exact HEAD-bound `.gitmodules` blob; zero must equal `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6` on declared branch `development` in the repository integration test.
 - Existing `renv.lock` -> `{ path: "renv.lock", sha256 }`; missing -> `null` plus the sole degradation reason `renv_lock_missing`.
 - Internal OS probe plus fixed runtime placeholders, the required root-package version, and the D7a harness constants. Missing/blank/non-string root version is a typed failure, never a silent `unknown` projection.
 - Provider/model/base URL projection follows the canonical `default_model` selector from `config/providers/glm.dmxapi.json`; params digest = sha256 of canonical `{}`, prompt-pack digest = sha256 of empty bytes.
 - Stable non-disclosing `StackLockCollectionError`; no partial result after any failed producer/validation boundary.
-- Two complete source snapshots, including raw `.gitmodules` bytes, must match before publication; legal-observation generation drift maps to `collection_state_changed`.
-- Every production Git argv places global `--no-lazy-fetch` before the subcommand. The default Git child uses a minimal non-secret environment, disables trace sinks, config inheritance, prompts, replacement objects and optional locks, and cannot fetch or write Git/trace state. Git <2.45 fails closed on the first root-identity command rather than dispatching `ls-tree` or a remote operation.
+- Two complete source snapshots, including the four gitlinks and `.gitmodules` object id/blob digest/declarations, must match before publication; legal-observation generation drift maps to `collection_state_changed`.
+- Every production Git argv places global `--no-lazy-fetch` before the subcommand. The default Git child uses a minimal non-secret environment, disables trace sinks, config inheritance, prompts, replacement objects and optional locks, and cannot fetch or write Git/trace state. Git <2.45 fails closed on the first root-identity command rather than dispatching `ls-tree`, `cat-file`, or a remote operation.
 - Existing `renv.lock` has an inclusive 16 MiB opened-descriptor limit; exact 16 MiB succeeds, 16 MiB+1 fails, and cheap bounded producers must succeed before hashing starts.
 
 ## Seams under test
@@ -71,28 +71,28 @@ Domain packs:
 
 ## Invariant Matrix
 
-- Governing invariant: a successful collection is rooted at the caller-selected physical Git top-level and is a complete, bounded, read-only snapshot of its four superproject gitlinks and canonical local configuration projections, with every digest bound to the bytes it claims and no credential bytes or partial result observable.
-- Source-of-truth identity/contract: twice-observed Git-reported physical top-level matching `repositoryRoot`; superproject `HEAD` gitlink entries; root `package.json`; `config/providers/glm.dmxapi.json`; optional root `renv.lock`; design D2/D7a; `StackLockSchema` content fields.
-- Producers: root-first fixed minimal-environment `git --no-lazy-fetch rev-parse --show-toplevel`, fixed `git --no-lazy-fetch ls-tree`, bounded repository JSON/`.gitmodules` readers, descriptor-bounded shared `hashFile`, internal runtime placeholder projection, and deterministic digest constants.
-- Validators/preflight: physical root equality before other producers, exact mode/type/path/count gitlink parser, 40-hex commits, exact four `.gitmodules` path/branch declarations, two-snapshot root/source identity comparison, repository path safety + durable single-link reads, required harness version, canonical provider/model selector consistency, safe HTTP(S) base URL, and StackLock content projection parse.
+- Governing invariant: a successful collection is rooted at the caller-selected physical Git top-level and is a complete, bounded, read-only snapshot whose four published repository commit/branch pairs are reconstructible from one superproject `HEAD` object generation, with every digest bound to the bytes it claims and no credential bytes or partial result observable.
+- Source-of-truth identity/contract: twice-observed Git-reported physical top-level matching `repositoryRoot`; one `HEAD` tree inventory containing four gitlinks plus the exact `.gitmodules` blob identity; root `package.json`; `config/providers/glm.dmxapi.json`; optional root `renv.lock`; design D2/D7a; `StackLockSchema` content fields.
+- Producers: root-first fixed minimal-environment `git --no-lazy-fetch rev-parse --show-toplevel`, one bounded `git --no-lazy-fetch ls-tree` HEAD authority inventory, fixed bounded `git --no-lazy-fetch cat-file blob OBJECT_ID_FROM_INVENTORY`, bounded repository JSON readers, descriptor-bounded shared `hashFile`, internal runtime placeholder projection, and deterministic digest constants.
+- Validators/preflight: physical root equality before other producers, exact mode/type/path/count HEAD inventory parser, 40-hex gitlink commits and `.gitmodules` object id, exact four blob-sourced path/branch declarations, two-snapshot root/complete-authority/source identity comparison, repository path safety + durable single-link reads for non-Git configuration, required harness version, canonical provider/model selector consistency, safe HTTP(S) base URL, and StackLock content projection parse.
 - Storage/cache/query: none — returned frozen memory value only; no cache, record store, workspace write, or route.
 - Public routes/entrypoints: `packages/core/src/domain/services/index.ts` only; no HTTP/CLI entrypoint.
 - Frontend/downstream consumers: future task 4.2 assembly consumes the content fields and task 4.3 carries `degraded`; current frontend/backend remain unchanged.
-- Failure paths/rollback/stale state: non-root/nested `repositoryRoot`, Git failure/malformed inventory or hostile redirect, unsupported global Git option, undeclared/changed branch authority, legal source generation drift, required version/config absence or mutation, unsafe URL, oversized/invalid/symlink `renv.lock`, or output contract mismatch throws a stable non-disclosing error and publishes nothing. An invalid revalidation observation retains its producer-specific `*_invalid` contract.
+- Failure paths/rollback/stale state: non-root/nested `repositoryRoot`, Git failure/malformed inventory or hostile redirect, unsupported global Git option, missing/wrong-mode/oversized/malformed HEAD `.gitmodules` object, undeclared/changed branch authority, legal source generation drift, required version/config absence or mutation, unsafe URL, oversized/invalid/symlink `renv.lock`, or output contract mismatch throws a stable non-disclosing error and publishes nothing. An invalid revalidation observation retains its producer-specific `*_invalid` contract.
 - Evidence/audit/readiness: focused collector tests, real git mutation guard, source-bound red proof, core-services/typecheck/check, strict OpenSpec, CI, and final PR-head evidence.
 
 Regression rows:
 
-- Stable four gitlinks + valid config + absent `renv.lock` -> exact four revisions, explicit placeholders, two independent deterministic digests, `r_packages_lock=null`, and `renv_lock_missing`.
+- Stable one-generation HEAD inventory (four gitlinks + canonical `.gitmodules` blob) + valid config + absent `renv.lock` -> exact four revisions/branches, explicit placeholders, two independent deterministic digests, `r_packages_lock=null`, and `renv_lock_missing`.
 - Stable physical repository/linked-worktree root + four gitlinks + regular `renv.lock` -> shared-file digest with no degradation; exact 16 MiB is admitted and byte change changes only the lock digest/content projection.
-- Nested/non-root directory, unsupported Git global option, missing/duplicate/wrong-mode gitlink, invalid `.gitmodules` inventory/path/branch, malformed injected result, unsafe provider URL/selector/model mismatch, missing/invalid harness version, hostile Git/credential/trace environment, source generation drift, or oversized/symlink `renv.lock` -> typed failure, zero partial output, no secret/path echo, no target modification.
+- Stable dirty worktree `.gitmodules` disagreeing with canonical HEAD -> branches come only from HEAD; untracked worktree `.gitmodules` with no HEAD blob, missing/wrong-mode/malformed/oversized HEAD blob, unsupported Git global option, missing/duplicate/wrong-mode gitlink, invalid HEAD declarations, malformed injected result, unsafe provider URL/selector/model mismatch, missing/invalid harness version, hostile Git/credential/trace environment, source generation drift, or oversized/symlink `renv.lock` -> typed failure, zero partial output, no secret/path echo, no target modification.
 - Existing hashing/path-safety/core service consumers -> unchanged tests and public contracts remain green.
 
 ## Boundary-surface checklist
 
 - Shared helper roots: `hashFile` adds the optional file-only descriptor byte bound; `resolveWorkspacePath`, durable single-link reader, and StackLock schema remain unchanged.
 - Public entrypoints: one new collector and associated types/constants in the core service barrel.
-- Read surfaces: Git-reported physical top-level and fixed superproject Git tree; fixed package/provider JSON and `.gitmodules`; optional fixed, inclusive-16-MiB-bounded `renv.lock`.
+- Read surfaces: Git-reported physical top-level, one fixed superproject HEAD tree inventory and its exact `.gitmodules` blob object; fixed worktree package/provider JSON; optional fixed, inclusive-16-MiB-bounded `renv.lock`. Worktree `.gitmodules` is not read.
 - Write/delete/overwrite surfaces: none.
 - Producer/consumer evidence boundary: exact gitlink/config/file bytes -> frozen content projection + degradation list -> future 4.2 assembly.
 - Stale-state/idempotency boundary: repeated stable inputs produce identical content/degradation; changed `renv.lock` changes its digest; changing files during safe reads fails closed.
@@ -100,16 +100,16 @@ Regression rows:
 
 ## Required evidence
 
-- Focused collector tests: exact injected/default root-identity and gitlink argv, minimal child environment, old-client fail-closed behavior, local no-lazy-fetch/trace fixtures, physical root/nested/linked-worktree authority, exact `.gitmodules` authority, missing/existing/symlink/exact-16-MiB/oversized renv, provider secret/URL rejection, real four-gitlink/declared-branch/zero-pin and git-mutation guard.
+- Focused collector tests: exact injected/default root-identity, one HEAD inventory and exact blob argv; minimal child environment; old-client fail-closed behavior; local no-lazy-fetch/trace fixtures; physical root/nested/linked-worktree authority; dirty/untracked worktree divergence; missing/wrong-mode/malformed/exact-64-KiB/oversized HEAD `.gitmodules` blob; committed branch/blob generation drift; missing/existing/symlink/exact-16-MiB/oversized renv; provider secret/URL rejection; real four-gitlink/declared-branch/zero-pin and git-mutation guard.
 - Git process failure (including the default command timeout/max-buffer failure path) -> `git_read_failed`; malformed injected results and stdout above 64 KiB -> `git_output_invalid`; both errors remain non-disclosing and no partial collection is returned.
 - Hostile inherited Git repository/config environment is removed before the default process call; physical canonical `repositoryRoot` must equal Git's reported top-level before any other producer, with real root and linked worktree accepted and a valid-looking nested fixture rejected without path disclosure.
 - Provider/API/general credentials and every inherited `GIT_TRACE*` sink are absent from the child environment; both environment `GIT_NO_LAZY_FETCH=1` and global argv `--no-lazy-fetch` prevent promisor fetch/object writes. A fake old client rejects the global option before `ls-tree` or remote dispatch and maps to `git_read_failed`.
-- Stable inputs produce matching full snapshots; physical root identity, gitlink, package, provider, `.gitmodules`, or renv content/presence transition between legal observations -> typed failure with no partial result.
+- Stable inputs produce matching full snapshots; physical root identity, gitlink, HEAD `.gitmodules` object id/digest/declarations, package, provider, or renv content/presence transition between legal observations -> typed failure with no partial result.
 - `hashFile` exact `maxBytes` succeeds; bound+1 fails from the opened descriptor before content reads. The collector accepts an exact 16 MiB regular file with the independent all-zero SHA256 oracle `080acf35a507ac9849cfcba47dc2ad83e01b75663a516279c8b9d243b719643e`, maps 16 MiB+1 to `renv_lock_invalid`, and starts no renv hash after a cheap producer failure.
 - Missing/duplicate/wrong-mode gitlink, missing/invalid harness version, and provider selector/model mismatch matrix rows each produce their stable typed failure.
 - Root `package.json` or provider JSON above 64 KiB -> the matching typed `*_invalid` error with no absolute path/config bytes in the error.
 - Fixed-file replacement/read drift is owned by `readDurableSingleLinkFile` and proved at that shared authority by `durable parent validators reject callback-time FIFO and socket replacements bounded` and `durable final parent validation rejects a live leaf replacement before return`; the collector maps every non-`read` result to its stable matching `*_invalid` boundary and publishes no partial collection.
-- Source-bound red proof: [`issue-91-round-2-red-proof.md`](issue-91-round-2-red-proof.md) records exact repaired/pre-repair commits and blobs, the exact focused command, all 15 failures and behavior mappings, restored 64-test green replay, worktree/stash hygiene, and the later production-only exact-16-MiB mutation proof.
+- Source-bound red proofs: [`issue-91-round-2-red-proof.md`](issue-91-round-2-red-proof.md) records the Round 2 15-failure replay and exact-16-MiB mutation; [`issue-91-round-4-authority-red-proof.md`](issue-91-round-4-authority-red-proof.md) binds the HEAD-object authority redesign to exact pre-repair/repaired source blobs, nine failing old-source regressions, restored green replay, and stash/worktree hygiene.
 - `npx --yes bun@1.2.19 run test:core-services`
 - `npx --yes bun@1.2.19 run typecheck`
 - `npx --yes bun@1.2.19 run check`
@@ -163,6 +163,10 @@ The remote implementation environment exposed no native implementer/reviewer/ver
 - Round 3 `npx --yes bun@1.2.19 run test:core-services`: 564 pass, 5 existing platform skips, 0 fail, 30,029 assertions. `npx --yes bun@1.2.19 run typecheck`: pass. The complete `npx --yes bun@1.2.19 run check` then passed at the same repair state; an initial unrelated four-case raw-data sandbox timeout was isolated with a named four-test loop, passed in five consecutive replays, and the complete 430-test policy gate plus the second full check both passed without any unrelated source change.
 - Round 3 `npx --yes bun@1.2.19 run test:perf:api`: pass; 100-task fixture P95 values were 0.12 ms (list), 0.02 ms (detail), 7.95 ms (ready), and 0.03 ms (rejected file authority), all below the 300 ms ceiling.
 - Round 3 strict OpenSpec validation, schema drift, frozen dependency install (188 installs/187 packages, no changes), DependencyLock (20 direct external dependencies plus four exact submodules), docs link check (342 Markdown files), `git diff --check`, exact zero pin, and evidence linter (38 referenced files at workflow head `a10e88a6d649`) pass. The four-test root/global-argv source-only replay failed 4/4 against the stashed workflow-head collector and passed 4/4 after immediate restore; no matching red-proof stash remains.
+- Round 4 depth-retro HEAD-object authority correction: focused collector 61 pass/0 fail/203 assertions; focused collector+hashing 81 pass/0 fail/293 assertions. Regressions cover one five-entry HEAD inventory, exact blob argv, exact 64 KiB/bound+1, missing/wrong-mode/malformed/non-UTF-8 blob, dirty and untracked worktree divergence, committed branch/blob drift, linked worktree, root-first old-Git failure, output caps and no-fetch/no-trace behavior.
+- Round 4 source-bound replay: [`issue-91-round-4-authority-red-proof.md`](issue-91-round-4-authority-red-proof.md) records the one-test real-Git reproduction plus ten failing regressions against production blob `6256434fd00706527eebe26b33af34aafb64bf7e`, the restored ten-test green replay against `0e63fd03109237069d525abb245fe2c04e8c4321`, and no remaining red-proof stash.
+- Round 4 core services: 576 pass/5 existing platform skips/0 fail/30,059 assertions. Full `npx --yes bun@1.2.19 run check`: exit 0, including typecheck and the same 576-pass core-services stage. Final PERF-API-001 passed at 0.07 ms (list), 0.02 ms (detail), 8.17 ms (ready), and 0.01 ms (rejected file authority), all below 300 ms.
+- Round 4 strict OpenSpec, schema drift/self-test, DependencyLock (20 direct dependencies + four submodules), docs links (342 Markdown files), frozen install (188 installs/187 packages, no changes), and `git diff --check` all passed.
 
 ## Non-goals
 
