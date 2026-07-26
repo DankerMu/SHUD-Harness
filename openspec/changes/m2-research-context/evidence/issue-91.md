@@ -103,6 +103,28 @@ Regression rows:
 - `npx --yes @fission-ai/openspec@1.3.1 validate m2-research-context --strict --no-interactive`
 - `git diff --check`; package/lock/submodule/tracked-workspace hygiene.
 
+## Executed verification
+
+- Production-code head `ad236f52b85cf94304199ca43d362b652e23ae85`: standard CI run `30192869203` completed successfully. Linux passed install, `bun run check`, schema drift, PERF-API-001 and zero-pin guard; macOS seatbelt and docs-links also passed.
+- Evidence head `1d8b758c7c37b4246b488e7546b770a48e96ad8f`: temporary workflow run `30193158335` completed successfully with the focused green suite, two independent source-bound red mutations, restored green suite, strict OpenSpec validation and repository hygiene.
+- Zero-binding red mutation changed only `zero.commit` from the observed zero gitlink to the SHUD gitlink; the named collector test became red, then passed after exact source restoration.
+- Digest-separation red mutation changed only `params_digest` from sha256 of canonical `{}` to sha256 of empty bytes; the named collector test became red because the two semantic digests collapsed, then passed after exact source restoration.
+- The first temporary proof run `30193116220` had already passed focused green, both red mutations and strict OpenSpec; only its final package/lock comparison lacked a fetched `origin/main` ref in the shallow checkout. That verification-harness defect was fixed without changing production or test source, and run `30193158335` closed it.
+- Local TypeScript 5.8.3 strict compile of the collector/public contract and a synthetic four-gitlink `git ls-tree -z --full-tree` parser check also passed before publication.
+
+## Review and gap sweep
+
+Because this environment exposes no native implementer/reviewer/verifier subagent primitive, the orchestrator performed separate correctness, integration, security/resource, test-evidence, spec-compliance and invariant-state passes and records that execution-path deviation below.
+
+- Correctness: exact four-key inventory, 40-hex gitlinks, canonical branch labels, missing/existing renv semantics, deterministic digest inputs and frozen complete output are covered; no actionable production finding remained.
+- Integration: the service is exported only through the core service barrel and has no assembly/persistence/route consumer in this PR; no package or lock edge was added.
+- Security/resource: fixed non-shell Git arguments, timeout/output caps, bounded durable config reads, no-follow hashing, stable non-disclosing errors and zero API-key/environment reads are covered; no actionable production finding remained.
+- Test evidence: independent oracles, real zero pin, HEAD/status no-mutation guard, secret/path non-disclosure, source-bound red proof and full CI are present.
+- Spec compliance: D2/D7a fields and issue #91 boundary are implemented; task 4.2/4.3 responsibilities remain excluded.
+- Invariant/state: every producer validates before publication, failures return no partial object, and the collector creates no storage, cache, lock or write surface.
+- Confirmed review finding: the temporary evidence workflow initially compared package/lock files against an unfetched `origin/main`; fixed in workflow-only commit `1d8b758c7c37b4246b488e7546b770a48e96ad8f` and proved green. This was not a production-code finding.
+- Source-data interpretation: the current private root `package.json` has no `version` property. The collector therefore emits the explicit existing placeholder `unknown` rather than inventing a release; if the root package later gains `version`, the same bounded reader returns it directly. No package metadata change is included because issue #91's PR boundary excludes project metadata.
+
 ## Non-goals
 
 - StackLock id/time/fingerprint assembly, persistence/readback, API responses/routes, real runtime command probing, prompt-pack content, provider smoke/network calls, or any submodule worktree access.
