@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile
@@ -144,6 +145,104 @@ describe("StackLock context collector", () => {
     });
   });
 
+  test("maps injected git process failures to a stable non-disclosing error without collection output", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    const processDetail = "git-process-sensitive-detail";
+    let collection: Awaited<ReturnType<typeof collectStackLockContext>> | undefined;
+    let thrown: unknown;
+
+    try {
+      collection = await collectStackLockContext({
+        repositoryRoot,
+        gitCommand: async () => {
+          throw new Error(processDetail);
+        }
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(collection).toBeUndefined();
+    expect(thrown).toBeInstanceOf(StackLockCollectionError);
+    expect(thrown).toMatchObject({
+      code: "git_read_failed",
+      message: "StackLock context collection failed."
+    });
+    expect((thrown as Error).message).not.toContain(processDetail);
+    expect((thrown as Error).message).not.toContain(repositoryRoot);
+  });
+
+  test("rejects injected git stdout above 64 KiB without disclosing output or publishing collection", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    const outputDetail = "oversized-git-output-sensitive-detail";
+    let collection: Awaited<ReturnType<typeof collectStackLockContext>> | undefined;
+    let thrown: unknown;
+
+    try {
+      collection = await collectStackLockContext({
+        repositoryRoot,
+        gitCommand: async () => ({ stdout: `${outputDetail}${"x".repeat(70_000)}\0` })
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(collection).toBeUndefined();
+    expect(thrown).toBeInstanceOf(StackLockCollectionError);
+    expect(thrown).toMatchObject({
+      code: "git_output_invalid",
+      message: "StackLock context collection failed."
+    });
+    expect((thrown as Error).message).not.toContain(outputDetail);
+    expect((thrown as Error).message).not.toContain(repositoryRoot);
+  });
+
+  test("rejects an oversized root package.json without disclosing its path or content", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    const packageDetail = "oversized-package-sensitive-detail";
+    await writeFile(
+      join(repositoryRoot, "package.json"),
+      JSON.stringify({ version: `${packageDetail}${"x".repeat(70_000)}` })
+    );
+
+    let thrown: unknown;
+    try {
+      await collectStackLockContext({ repositoryRoot, gitCommand: fakeGitCommand() });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(StackLockCollectionError);
+    expect(thrown).toMatchObject({
+      code: "package_json_invalid",
+      message: "StackLock context collection failed."
+    });
+    expect((thrown as Error).message).not.toContain(packageDetail);
+    expect((thrown as Error).message).not.toContain(join(repositoryRoot, "package.json"));
+  });
+
+  test("rejects oversized provider JSON without disclosing its path or content", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    const providerDetail = "oversized-provider-sensitive-detail";
+    const providerPath = join(repositoryRoot, "config", "providers", "glm.dmxapi.json");
+    await writeFile(providerPath, JSON.stringify({ payload: `${providerDetail}${"y".repeat(70_000)}` }));
+
+    let thrown: unknown;
+    try {
+      await collectStackLockContext({ repositoryRoot, gitCommand: fakeGitCommand() });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(StackLockCollectionError);
+    expect(thrown).toMatchObject({
+      code: "provider_config_invalid",
+      message: "StackLock context collection failed."
+    });
+    expect((thrown as Error).message).not.toContain(providerDetail);
+    expect((thrown as Error).message).not.toContain(providerPath);
+  });
+
   test("rejects unsafe provider identity without echoing config secrets or absolute paths", async () => {
     const repositoryRoot = await createFixtureRepository({
       version: "0.8.0",
@@ -266,7 +365,7 @@ function gitlinkOutput(order: ReadonlyArray<keyof typeof SHAS>): string {
 }
 
 async function createTempRoot(prefix: string): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), prefix));
+  const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   tempRoots.push(root);
   return root;
 }

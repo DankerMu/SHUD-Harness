@@ -94,6 +94,9 @@ Regression rows:
 ## Required evidence
 
 - Focused collector tests: injected Git command, missing/existing/symlink renv, provider secret/URL rejection, real four-gitlink/zero-pin and git-mutation guard.
+- Git process failure (including the default command timeout/max-buffer failure path) -> `git_read_failed`; injected Git stdout above 64 KiB -> `git_output_invalid`; both errors remain non-disclosing and no partial collection is returned.
+- Root `package.json` or provider JSON above 64 KiB -> the matching typed `*_invalid` error with no absolute path/config bytes in the error.
+- Fixed-file replacement/read drift is owned by `readDurableSingleLinkFile` and proved at that shared authority by `durable parent validators reject callback-time FIFO and socket replacements bounded` and `durable final parent validation rejects a live leaf replacement before return`; the collector maps every non-`read` result to its stable matching `*_invalid` boundary and publishes no partial collection.
 - Source-bound red proof: retain tests while independently weakening (1) zero/four-gitlink completeness and (2) digest source separation or `renv.lock` shared hashing; record exact failures and restore immediately.
 - `npx --yes bun@1.2.19 run test:core-services`
 - `npx --yes bun@1.2.19 run typecheck`
@@ -112,9 +115,9 @@ Regression rows:
 - The first temporary proof run `30193116220` had already passed focused green, both red mutations and strict OpenSpec; only its final package/lock comparison lacked a fetched `origin/main` ref in the shallow checkout. That verification-harness defect was fixed without changing production or test source, and run `30193158335` closed it.
 - Local TypeScript 5.8.3 strict compile of the collector/public contract and a synthetic four-gitlink `git ls-tree -z --full-tree` parser check also passed before publication.
 
-## Review and gap sweep
+## Historical upstream review record (superseded for merge gating)
 
-Because this environment exposes no native implementer/reviewer/verifier subagent primitive, the orchestrator performed separate correctness, integration, security/resource, test-evidence, spec-compliance and invariant-state passes and records that execution-path deviation below.
+The remote implementation environment exposed no native implementer/reviewer/verifier subagent primitive, so its orchestrator performed separate single-session passes. Those observations are retained below as provenance only and do not satisfy the current merge gate. The adoption workflow for PR #131 runs native fixture reviewer, risk-adaptive reviewer, independent verifier, and final gap-sweep agents against an exact reviewed HEAD; its SHA-bound reports are persisted under `.workplans/issue-91/review/` and posted to the PR before merge approval.
 
 - Correctness: exact four-key inventory, 40-hex gitlinks, canonical branch labels, missing/existing renv semantics, deterministic digest inputs and frozen complete output are covered; no actionable production finding remained.
 - Integration: the service is exported only through the core service barrel and has no assembly/persistence/route consumer in this PR; no package or lock edge was added.
@@ -125,10 +128,20 @@ Because this environment exposes no native implementer/reviewer/verifier subagen
 - Confirmed review finding: the temporary evidence workflow initially compared package/lock files against an unfetched `origin/main`; fixed in workflow-only commit `1d8b758c7c37b4246b488e7546b770a48e96ad8f` and proved green. This was not a production-code finding.
 - Source-data interpretation: the current private root `package.json` has no `version` property. The collector therefore emits the explicit existing placeholder `unknown` rather than inventing a release; if the root package later gains `version`, the same bounded reader returns it directly. No package metadata change is included because issue #91's PR boundary excludes project metadata.
 
+## Local adoption verification
+
+- The first native macOS focused run exposed a test-fixture-only failure: `tmpdir()` returned lexical `/var/...`, while `/var` is a symlink to `/private/var`; the production path-safety boundary correctly rejected the synthetic root before reading `package.json`. Canonicalizing the fixture root with `realpath()` fixed the fixture without weakening production path safety.
+- Focused collector suite after the fixture repair and added resource-boundary rows: 11 pass, 0 fail, 58 assertions.
+- Full `npx --yes bun@1.2.19 run check`: exit 0; its core-services stage reported 525 pass, 5 platform skips, 0 fail, including the exact shared durable-reader replacement/drift tests cited above.
+- `npx --yes bun@1.2.19 run schema:check`: pass.
+- `npx --yes bun@1.2.19 run test:perf:api`: pass; all four PERF-API-001 rows stayed below the 300 ms ceiling.
+- `npx --yes @fission-ai/openspec@1.3.1 validate m2-research-context --strict --no-interactive`: pass.
+- `git diff --check`, package/lock comparison, zero pin/diff, tracked-workspace, debug-marker, and red-proof-stash hygiene: pass.
+
 ## Non-goals
 
 - StackLock id/time/fingerprint assembly, persistence/readback, API responses/routes, real runtime command probing, prompt-pack content, provider smoke/network calls, or any submodule worktree access.
 
-## Execution-path deviation
+## Historical execution-path deviation
 
-The ChatGPT GitHub-App environment has no native implementer/reviewer/verifier subagent primitive. The implementation, verification synthesis, Git operations, and PR tracking are therefore performed by the orchestrator in one session; this is an execution-path deviation only, not a product/contract deviation. The PR remains Draft until repository CI and explicit review evidence are posted.
+The original ChatGPT GitHub-App implementation environment had no native implementer/reviewer/verifier subagent primitive. Its implementation, verification synthesis, Git operations, and PR tracking were therefore performed by one orchestrator session. This historical execution-path deviation is not accepted as current review evidence; PR #131 remains Draft until the local adoption workflow replaces it with independent SHA-bound review/verification evidence and re-runs the required checks.
