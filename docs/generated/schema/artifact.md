@@ -24,6 +24,7 @@ Required is evaluated within the immediate parent object.
 | created_at | yes | no | string | minLength=1 |
 | created_by | yes | no | enum<string> | values: `system`, `agent`, `user` |
 | evidence_usable | yes | no | boolean | - |
+| llm_generated | no | no | boolean | default=false |
 | retention_class | yes | no | enum<string> | values: `ephemeral`, `debug`, `evidence`, `accepted_report`, `benchmark` |
 | source_refs | yes | no | array<string> | - |
 | redaction_status | yes | no | enum<string> | values: `not_needed`, `redacted`, `unsafe` |
@@ -54,6 +55,7 @@ sha256: "example"
 created_at: "example"
 created_by: "system"
 evidence_usable: false
+llm_generated: false
 retention_class: "ephemeral"
 source_refs:
   - "example"
@@ -63,7 +65,7 @@ redaction_status: "not_needed"
 ## Changelog Diff
 
 ```diff
-+ schema Artifact sha256:87d28bfb56c166d15d5fa48779f4d9adc4101f3238db6839dcfdaea3d5f3e194
++ schema Artifact sha256:aae3a5a17abb26a5c6cfed60353b144d91ee888134fa242bcbaf558276edbe97
 + field artifact_id required=yes nullable=no type=string constraints=minLength=1
 + field task_id required=yes nullable=no type=string constraints=minLength=1
 + field run_id required=no nullable=no type=string constraints=minLength=1
@@ -78,6 +80,7 @@ redaction_status: "not_needed"
 + field created_at required=yes nullable=no type=string constraints=minLength=1
 + field created_by required=yes nullable=no type=enum<string> constraints=values: `system`, `agent`, `user`
 + field evidence_usable required=yes nullable=no type=boolean constraints=-
++ field llm_generated required=no nullable=no type=boolean constraints=default=false
 + field retention_class required=yes nullable=no type=enum<string> constraints=values: `ephemeral`, `debug`, `evidence`, `accepted_report`, `benchmark`
 + field source_refs required=yes nullable=no type=array<string> constraints=-
 + field redaction_status required=yes nullable=no type=enum<string> constraints=values: `not_needed`, `redacted`, `unsafe`

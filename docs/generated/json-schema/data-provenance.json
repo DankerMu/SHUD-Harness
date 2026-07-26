@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shud-harness.local/generated/json-schema/data-provenance.json",
+  "title": "DataProvenance",
+  "type": "object",
+  "properties": {
+    "data_id": {
+      "type": "string",
+      "pattern": "^DATA-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+    },
+    "basin": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_window": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "string",
+          "minLength": 1
+        },
+        "end": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "additionalProperties": false
+    },
+    "sources": {
+      "type": "object",
+      "properties": {
+        "terrain": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        "mesh": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        "forcing": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "variable": {
+                "type": "string",
+                "minLength": 1
+              },
+              "station": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "variable",
+              "station",
+              "path",
+              "sha256"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "terrain",
+        "mesh",
+        "forcing",
+        "observations"
+      ],
+      "additionalProperties": false
+    },
+    "preprocess": {
+      "type": "object",
+      "properties": {
+        "script": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "output_sha256": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "script",
+        "params",
+        "output_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "uncertainty_notes": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "data_id",
+    "basin",
+    "event_window",
+    "sources"
+  ],
+  "additionalProperties": false
+}

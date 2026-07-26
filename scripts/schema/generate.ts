@@ -6,9 +6,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { z, type ZodType } from "zod";
 
 import { ArtifactSchema } from "../../packages/core/src/domain/schemas/artifact";
+import { ArtifactManifestSchema } from "../../packages/core/src/domain/schemas/artifact-manifest";
+import { DataProvenanceSchema } from "../../packages/core/src/domain/schemas/data-provenance";
 import { ErrorRecordSchema } from "../../packages/core/src/domain/schemas/error";
 import { IdempotencyRecordSchema } from "../../packages/core/src/domain/schemas/idempotency";
 import { LockRecordSchema } from "../../packages/core/src/domain/schemas/lock";
+import { StackLockSchema } from "../../packages/core/src/domain/schemas/stack-lock";
 import { TaskCardSchema } from "../../packages/core/src/domain/schemas/task";
 
 type JsonSchema = {
@@ -19,7 +22,9 @@ type JsonSchema = {
   enum?: unknown[];
   properties?: Record<string, JsonSchema>;
   required?: string[];
-  additionalProperties?: boolean;
+  additionalProperties?: boolean | JsonSchema;
+  default?: unknown;
+  pattern?: string;
   items?: JsonSchema;
   anyOf?: JsonSchema[];
   oneOf?: JsonSchema[];
@@ -37,6 +42,8 @@ type SchemaDefinition = {
   sourcePath: string;
   exportName: string;
   schema: ZodType;
+  strictInput?: boolean;
+  exampleOverrides?: Readonly<Record<string, unknown>>;
 };
 
 type FieldRow = {
@@ -78,11 +85,46 @@ const schemaDefinitions: SchemaDefinition[] = [
     schema: TaskCardSchema
   },
   {
+    name: "StackLock",
+    slug: "stack-lock",
+    sourcePath: "packages/core/src/domain/schemas/stack-lock.ts",
+    exportName: "StackLockSchema",
+    schema: StackLockSchema,
+    strictInput: true,
+    exampleOverrides: {
+      stack_id: "STACK-11111111-1111-4111-8111-111111111111"
+    }
+  },
+  {
+    name: "DataProvenance",
+    slug: "data-provenance",
+    sourcePath: "packages/core/src/domain/schemas/data-provenance.ts",
+    exportName: "DataProvenanceSchema",
+    schema: DataProvenanceSchema,
+    strictInput: true,
+    exampleOverrides: {
+      data_id: "DATA-22222222-2222-4222-8222-222222222222"
+    }
+  },
+  {
     name: "Artifact",
     slug: "artifact",
     sourcePath: "packages/core/src/domain/schemas/artifact.ts",
     exportName: "ArtifactSchema",
-    schema: ArtifactSchema
+    schema: ArtifactSchema,
+    strictInput: true
+  },
+  {
+    name: "ArtifactManifest",
+    slug: "artifact-manifest",
+    sourcePath: "packages/core/src/domain/schemas/artifact-manifest.ts",
+    exportName: "ArtifactManifestSchema",
+    schema: ArtifactManifestSchema,
+    strictInput: true,
+    exampleOverrides: {
+      manifest_id: "MANIFEST-33333333-3333-4333-8333-333333333333",
+      superseded_by: "MANIFEST-44444444-4444-4444-8444-444444444444"
+    }
   },
   {
     name: "ErrorRecord",
@@ -106,6 +148,13 @@ const schemaDefinitions: SchemaDefinition[] = [
     schema: LockRecordSchema
   }
 ];
+
+const intentionalOpenRecordBoundary = {
+  name: "DataProvenance",
+  exportName: "DataProvenanceSchema",
+  schema: DataProvenanceSchema,
+  path: "DataProvenance.preprocess.params"
+} as const;
 
 const ignoredNestedObjectSchemaExports: IgnoredObjectSchemaExport[] = [
   {
@@ -174,7 +223,7 @@ function buildJsonSchema(definition: SchemaDefinition): JsonSchema {
 function buildMarkdown(definition: SchemaDefinition, jsonSchema: JsonSchema): string {
   const fields = flattenFields(jsonSchema);
   const enumFields = fields.filter((field) => field.constraints.startsWith("values: "));
-  const example = buildExample(jsonSchema);
+  const example = buildExample(jsonSchema, definition.exampleOverrides);
   const changelogLines = buildChangelogDiff(definition, jsonSchema, fields);
 
   const lines = [
@@ -458,12 +507,30 @@ function flattenFields(schema: JsonSchema, parentPath = ""): FieldRow[] {
       constraints: constraintLabel(propertySchema)
     });
 
-    if (propertyWithoutNull.type === "object" && propertyWithoutNull.properties !== undefined) {
-      rows.push(...flattenFields(propertyWithoutNull, fieldPath));
+    const nestedObject = nestedObjectSchema(propertyWithoutNull, fieldPath);
+    if (nestedObject !== undefined) {
+      rows.push(...flattenFields(nestedObject.schema, nestedObject.path));
     }
   }
 
   return rows;
+}
+
+function nestedObjectSchema(
+  schema: JsonSchema,
+  fieldPath: string
+): { schema: JsonSchema; path: string } | undefined {
+  let candidate = nonNullSchema(schema);
+  let candidatePath = fieldPath;
+
+  while (candidate.type === "array" && candidate.items !== undefined) {
+    candidate = nonNullSchema(candidate.items);
+    candidatePath = `${candidatePath}[]`;
+  }
+
+  return candidate.type === "object" && candidate.properties !== undefined
+    ? { schema: candidate, path: candidatePath }
+    : undefined;
 }
 
 function nonNullSchema(schema: JsonSchema): JsonSchema {
@@ -554,6 +621,14 @@ function constraintLabel(schema: JsonSchema): string {
     constraints.push(`format=${schemaWithoutNull.format}`);
   }
 
+  if (schemaWithoutNull.pattern !== undefined) {
+    constraints.push(`pattern=${schemaWithoutNull.pattern}`);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(schemaWithoutNull, "default")) {
+    constraints.push(`default=${JSON.stringify(schemaWithoutNull.default)}`);
+  }
+
   if (schemaWithoutNull.type === "array" && schemaWithoutNull.items !== undefined) {
     const itemConstraints = constraintLabel(schemaWithoutNull.items);
     if (itemConstraints !== "-") {
@@ -568,7 +643,15 @@ function constraintLabel(schema: JsonSchema): string {
   return constraints.length === 0 ? "-" : constraints.join("; ");
 }
 
-function buildExample(schema: JsonSchema): unknown {
+function buildExample(
+  schema: JsonSchema,
+  overrides: Readonly<Record<string, unknown>> = {},
+  path = ""
+): unknown {
+  if (path !== "" && Object.prototype.hasOwnProperty.call(overrides, path)) {
+    return overrides[path];
+  }
+
   const schemaWithoutNull = nonNullSchema(schema);
 
   if (schemaWithoutNull.enum !== undefined) {
@@ -578,13 +661,18 @@ function buildExample(schema: JsonSchema): unknown {
   if (schemaWithoutNull.type === "object") {
     const example: Record<string, unknown> = {};
     for (const [propertyName, propertySchema] of Object.entries(schemaWithoutNull.properties ?? {})) {
-      example[propertyName] = buildExample(propertySchema);
+      const propertyPath = path === "" ? propertyName : `${path}.${propertyName}`;
+      example[propertyName] = buildExample(propertySchema, overrides, propertyPath);
     }
     return example;
   }
 
   if (schemaWithoutNull.type === "array") {
-    return [schemaWithoutNull.items === undefined ? "example" : buildExample(schemaWithoutNull.items)];
+    return [
+      schemaWithoutNull.items === undefined
+        ? "example"
+        : buildExample(schemaWithoutNull.items, overrides, `${path}[]`)
+    ];
   }
 
   if (schemaWithoutNull.type === "integer" || schemaWithoutNull.type === "number") {
@@ -606,8 +694,14 @@ function yamlLines(value: unknown, indent = 0): string[] {
   const prefix = " ".repeat(indent);
 
   if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return [`${prefix}[]`];
+    }
     return value.flatMap((item) => {
       if (isPlainObject(item)) {
+        if (Object.keys(item).length === 0) {
+          return [`${prefix}- {}`];
+        }
         return [`${prefix}-`, ...yamlLines(item, indent + 2)];
       }
       return [`${prefix}- ${yamlScalar(item)}`];
@@ -615,8 +709,14 @@ function yamlLines(value: unknown, indent = 0): string[] {
   }
 
   if (isPlainObject(value)) {
+    if (Object.keys(value).length === 0) {
+      return [`${prefix}{}`];
+    }
     return Object.entries(value).flatMap(([key, item]) => {
       if (isPlainObject(item) || Array.isArray(item)) {
+        if (Object.keys(item).length === 0) {
+          return [`${prefix}${key}: ${Array.isArray(item) ? "[]" : "{}"}`];
+        }
         return [`${prefix}${key}:`, ...yamlLines(item, indent + 2)];
       }
       return [`${prefix}${key}: ${yamlScalar(item)}`];
@@ -634,6 +734,123 @@ function yamlScalar(value: unknown): string {
     return String(value);
   }
   return JSON.stringify(String(value));
+}
+
+function parseGeneratedYaml(lines: string[]): unknown {
+  const tokens = lines.map((line, index) => {
+    const content = line.trimStart();
+    return {
+      content,
+      indent: line.length - content.length,
+      lineNumber: index + 1
+    };
+  });
+
+  if (tokens.length === 0) {
+    throw new Error("empty YAML document");
+  }
+
+  const [value, nextIndex] = parseGeneratedYamlBlock(tokens, 0, tokens[0]!.indent);
+  if (nextIndex !== tokens.length) {
+    throw new Error(`unexpected content at line ${tokens[nextIndex]!.lineNumber}`);
+  }
+  return value;
+}
+
+type GeneratedYamlToken = {
+  content: string;
+  indent: number;
+  lineNumber: number;
+};
+
+function parseGeneratedYamlBlock(
+  tokens: GeneratedYamlToken[],
+  startIndex: number,
+  indent: number
+): [unknown, number] {
+  const first = tokens[startIndex];
+  if (first === undefined || first.indent !== indent) {
+    throw new Error(`expected indentation ${indent}`);
+  }
+
+  return first.content.startsWith("-")
+    ? parseGeneratedYamlArray(tokens, startIndex, indent)
+    : parseGeneratedYamlObject(tokens, startIndex, indent);
+}
+
+function parseGeneratedYamlObject(
+  tokens: GeneratedYamlToken[],
+  startIndex: number,
+  indent: number
+): [Record<string, unknown>, number] {
+  const value: Record<string, unknown> = {};
+  let index = startIndex;
+
+  while (index < tokens.length && tokens[index]!.indent === indent) {
+    const token = tokens[index]!;
+    if (token.content.startsWith("-")) break;
+    const separator = token.content.indexOf(":");
+    if (separator <= 0) {
+      throw new Error(`expected object field at line ${token.lineNumber}`);
+    }
+    const key = token.content.slice(0, separator);
+    const scalar = token.content.slice(separator + 1).trim();
+    index += 1;
+
+    if (scalar !== "") {
+      value[key] = parseGeneratedYamlScalar(scalar, token.lineNumber);
+      continue;
+    }
+    const child = tokens[index];
+    if (child === undefined || child.indent <= indent) {
+      value[key] = null;
+      continue;
+    }
+    [value[key], index] = parseGeneratedYamlBlock(tokens, index, child.indent);
+  }
+
+  return [value, index];
+}
+
+function parseGeneratedYamlArray(
+  tokens: GeneratedYamlToken[],
+  startIndex: number,
+  indent: number
+): [unknown[], number] {
+  const value: unknown[] = [];
+  let index = startIndex;
+
+  while (index < tokens.length && tokens[index]!.indent === indent) {
+    const token = tokens[index]!;
+    if (!token.content.startsWith("-")) break;
+    const scalar = token.content.slice(1).trim();
+    index += 1;
+
+    if (scalar !== "") {
+      value.push(parseGeneratedYamlScalar(scalar, token.lineNumber));
+      continue;
+    }
+    const child = tokens[index];
+    if (child === undefined || child.indent <= indent) {
+      value.push(null);
+      continue;
+    }
+    const [childValue, nextIndex] = parseGeneratedYamlBlock(tokens, index, child.indent);
+    value.push(childValue);
+    index = nextIndex;
+  }
+
+  return [value, index];
+}
+
+function parseGeneratedYamlScalar(value: string, lineNumber: number): unknown {
+  if (value === "{}") return {};
+  if (value === "[]") return [];
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw new Error(`unsupported scalar at line ${lineNumber}`);
+  }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -767,11 +984,136 @@ async function runSelfTest(): Promise<void> {
 
   await assertGeneratedPathRejectsSymlinkAncestor();
   assertTaskCardUnknownKeyParity();
+  assertGeneratorSemanticContracts();
   for (const definition of schemaDefinitions) {
-    assertNoAdditionalPropertiesFalse(buildJsonSchema(definition), definition.name);
+    const jsonSchema = buildJsonSchema(definition);
+    if (definition.strictInput) {
+      assertStrictInputClosed(jsonSchema, definition);
+    } else {
+      assertNoAdditionalPropertiesFalse(jsonSchema, definition.name);
+    }
   }
 
   console.log("schema generator self-test passed");
+}
+
+function assertGeneratorSemanticContracts(): void {
+  const failures: string[] = [];
+
+  for (const definition of schemaDefinitions) {
+    const jsonSchema = buildJsonSchema(definition);
+    const example = buildExample(jsonSchema, definition.exampleOverrides);
+    const emittedYaml = extractExampleYamlLines(buildMarkdown(definition, jsonSchema));
+    let yamlRoundTrip: unknown;
+    try {
+      yamlRoundTrip = parseGeneratedYaml(emittedYaml);
+    } catch (error) {
+      failures.push(
+        `${definition.name} generated example YAML did not parse: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      continue;
+    }
+    if (JSON.stringify(yamlRoundTrip) !== JSON.stringify(example)) {
+      failures.push(`${definition.name} generated example YAML did not round-trip`);
+    }
+    const parsed = definition.schema.safeParse(yamlRoundTrip);
+    if (!parsed.success) {
+      failures.push(`${definition.name} generated example is not valid source-schema input`);
+    }
+  }
+
+  const dataProvenanceSchema = buildJsonSchema(
+    schemaDefinitions.find((definition) => definition.name === "DataProvenance")!
+  );
+  const dataProvenanceFields = flattenFields(dataProvenanceSchema).map((field) => field.field);
+  if (!dataProvenanceFields.includes("sources.observations[].station")) {
+    failures.push("DataProvenance fields omit sources.observations[].station");
+  }
+  const dataProvenanceDefinition = schemaDefinitions.find(
+    (definition) => definition.name === "DataProvenance"
+  )!;
+  if (
+    !yamlLines(
+      buildExample(dataProvenanceSchema, dataProvenanceDefinition.exampleOverrides)
+    ).includes("  params: {}")
+  ) {
+    failures.push("DataProvenance empty params record is not rendered as {}");
+  }
+
+  const artifactManifestSchema = buildJsonSchema(
+    schemaDefinitions.find((definition) => definition.name === "ArtifactManifest")!
+  );
+  const artifactManifestFields = flattenFields(artifactManifestSchema).map((field) => field.field);
+  if (!artifactManifestFields.includes("artifacts[].llm_generated")) {
+    failures.push("ArtifactManifest fields omit artifacts[].llm_generated");
+  }
+
+  try {
+    const looseRootSchema = z.looseObject({ value: z.string() });
+    assertThrows(
+      () =>
+        assertStrictInputClosed(
+          z.toJSONSchema(looseRootSchema, { io: "input" }) as JsonSchema,
+          syntheticStrictDefinition("SyntheticLooseRoot", looseRootSchema)
+        ),
+      "additionalProperties must be false"
+    );
+  } catch {
+    failures.push("strict closure accepts a synthetic loose root object");
+  }
+
+  try {
+    const looseNestedSchema = z.strictObject({
+      nested: z.looseObject({ value: z.string() })
+    });
+    assertThrows(
+      () =>
+        assertStrictInputClosed(
+          z.toJSONSchema(looseNestedSchema, { io: "input" }) as JsonSchema,
+          syntheticStrictDefinition("SyntheticLooseNested", looseNestedSchema)
+        ),
+      "additionalProperties must be false"
+    );
+  } catch {
+    failures.push("strict closure accepts a synthetic loose nested object");
+  }
+
+  try {
+    assertStrictInputClosed(dataProvenanceSchema, dataProvenanceDefinition);
+  } catch (error) {
+    failures.push(
+      `intentional DataProvenance preprocess.params record was rejected: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+
+  if (failures.length > 0) {
+    throw new Error(`Generator semantic contract failed:\n${failures.join("\n")}`);
+  }
+}
+
+function extractExampleYamlLines(markdown: string): string[] {
+  const lines = markdown.split("\n");
+  const start = lines.indexOf("```yaml");
+  const end = start < 0 ? -1 : lines.indexOf("```", start + 1);
+  if (start < 0 || end < 0) {
+    throw new Error("generated Markdown does not contain a complete Example YAML fence");
+  }
+  return lines.slice(start + 1, end);
+}
+
+function syntheticStrictDefinition(name: string, schema: ZodType): SchemaDefinition {
+  return {
+    name,
+    slug: name.toLowerCase(),
+    sourcePath: "<synthetic>",
+    exportName: `${name}Schema`,
+    schema,
+    strictInput: true
+  };
 }
 
 async function assertGeneratedPathRejectsSymlinkAncestor(): Promise<void> {
@@ -841,6 +1183,57 @@ function assertTaskCardUnknownKeyParity(): void {
   if ("nested_trace" in (parsed.data.inference_budget as Record<string, unknown>)) {
     throw new Error("TaskCardSchema should strip unknown nested object keys");
   }
+}
+
+function assertStrictInputClosed(
+  schema: JsonSchema,
+  definition: SchemaDefinition,
+  path = definition.name
+): void {
+  const schemaWithoutNull = nonNullSchema(schema);
+
+  if (schemaWithoutNull.type === "object") {
+    if (isIntentionalOpenRecordBoundary(schemaWithoutNull, definition, path)) {
+      return;
+    }
+    if (schemaWithoutNull.additionalProperties !== false) {
+      throw new Error(`${path} strict JSON Schema additionalProperties must be false`);
+    }
+    for (const [propertyName, propertySchema] of Object.entries(
+      schemaWithoutNull.properties ?? {}
+    )) {
+      assertStrictInputClosed(propertySchema, definition, `${path}.${propertyName}`);
+    }
+  }
+
+  if (schemaWithoutNull.type === "array" && schemaWithoutNull.items !== undefined) {
+    assertStrictInputClosed(schemaWithoutNull.items, definition, `${path}[]`);
+  }
+
+  for (const [label, members] of [
+    ["anyOf", schemaWithoutNull.anyOf],
+    ["oneOf", schemaWithoutNull.oneOf],
+    ["allOf", schemaWithoutNull.allOf]
+  ] as const) {
+    members?.forEach((member, index) => {
+      assertStrictInputClosed(member, definition, `${path}.${label}[${index}]`);
+    });
+  }
+}
+
+function isIntentionalOpenRecordBoundary(
+  schema: JsonSchema,
+  definition: SchemaDefinition,
+  path: string
+): boolean {
+  return (
+    definition.name === intentionalOpenRecordBoundary.name &&
+    definition.exportName === intentionalOpenRecordBoundary.exportName &&
+    definition.schema === intentionalOpenRecordBoundary.schema &&
+    path === intentionalOpenRecordBoundary.path &&
+    schema.properties === undefined &&
+    typeof schema.additionalProperties === "object"
+  );
 }
 
 function assertNoAdditionalPropertiesFalse(schema: JsonSchema, path: string): void {
