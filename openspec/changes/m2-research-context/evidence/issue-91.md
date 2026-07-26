@@ -135,10 +135,13 @@ The remote implementation environment exposed no native implementer/reviewer/ver
 
 ## Local adoption verification
 
+- Round 1 Phase 6.2 reusable-pattern audit: [`issue-91-round-1-invariant-audit.md`](issue-91-round-1-invariant-audit.md); all eight invariant surfaces are `clean`, and all nine verified findings map to concrete green regression rows.
+
 - The first native macOS focused run exposed a test-fixture-only failure: `tmpdir()` returned lexical `/var/...`, while `/var` is a symlink to `/private/var`; the production path-safety boundary correctly rejected the synthetic root before reading `package.json`. Canonicalizing the fixture root with `realpath()` fixed the fixture without weakening production path safety.
 - Focused collector suite after Round 1 verified repairs: 28 pass, 0 fail, 99 assertions, including generation drift, default-process resource mapping, hostile Git environment sanitation, malformed injected results, version authority, full inventory, and provider-selector consistency.
 - `npx --yes bun@1.2.19 run test:core-services`: 542 pass, 5 platform skips, 0 fail, including the exact shared durable-reader replacement/drift tests cited above.
 - `npx --yes bun@1.2.19 run typecheck`: pass.
+- Full `npx --yes bun@1.2.19 run check`: exit 0; its collector/core-services stage reported the same 542 pass, 5 platform skips, 0 fail.
 - `npx --yes bun@1.2.19 run schema:check`: pass.
 - `npx --yes bun@1.2.19 run test:perf:api`: pass; all four PERF-API-001 rows stayed below the 300 ms ceiling.
 - `npx --yes @fission-ai/openspec@1.3.1 validate m2-research-context --strict --no-interactive`: pass.
