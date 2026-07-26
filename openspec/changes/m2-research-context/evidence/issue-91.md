@@ -13,32 +13,34 @@ Mandatory expanded triggers are public service API, repository/config file reads
 
 ## Change surface
 
-- `packages/core/src/domain/services/stack-lock-collector.ts`: collect four gitlink revisions, `renv.lock` state, runtime placeholders, harness identity, and the safe provider projection.
+- `packages/core/src/domain/services/stack-lock-collector.ts`: collect and revalidate four gitlink revisions, `renv.lock` state, runtime placeholders, harness identity, and the safe provider projection.
 - `packages/core/src/domain/services/stack-lock-collector.test.ts`: positive, negative, no-follow, no-secret, bounded-command, and real-repository regression evidence.
 - `packages/core/src/domain/services/index.ts`: public collection contract.
-- This fixture and `tasks.md` bookkeeping only.
+- Root `package.json`: establish the already-canonical SHUD-Harness `0.8.3` release identity required by D7a; `bun.lock` remains byte-identical.
+- This fixture and `tasks.md` bookkeeping.
 
 ## Must preserve
 
 - `hashFile` remains the sole sha256 authority for an existing `renv.lock`; this issue does not modify hashing or path-safety helpers.
 - The collector executes only `git ls-tree` with fixed arguments, never enters a submodule worktree, never runs checkout/fetch/config/status mutation, and leaves HEAD/index/worktree unchanged.
 - Provider API-key values and environment variables are not inputs to the collector, are not logged, and cannot enter the returned object or stable errors.
-- Existing core services, StackLock schema, package manifests, dependency lock, routes, workspace record store, submodule pins, and generated schemas remain unchanged.
+- Existing core services, StackLock schema, dependency lock, routes, workspace record store, submodule pins, and generated schemas remain unchanged. The sole manifest change is the required root `version: 0.8.3`; no dependency or workspace topology changes.
 
 ## Must add/change
 
-- Public `collectStackLockContext({ repositoryRoot, gitCommand?, runtimeVersions? })` returning `{ repos, runtime, harness, llm, degraded }`.
+- Public `collectStackLockContext({ repositoryRoot, gitCommand? })` returning `{ repos, runtime, harness, llm, degraded }`; runtime identity cannot be supplied by callers.
 - Four exact repository keys with 40-hex gitlink commits and canonical branch labels; zero must equal `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6` in the repository integration test.
 - Existing `renv.lock` -> `{ path: "renv.lock", sha256 }`; missing -> `null` plus the sole degradation reason `renv_lock_missing`.
-- Runtime placeholders, root-package version when present (otherwise explicit `unknown` rather than an invented release), and the D7a harness constants.
-- Provider/model/base URL projection from `config/providers/glm.dmxapi.json`; params digest = sha256 of canonical `{}`, prompt-pack digest = sha256 of empty bytes.
+- Internal OS probe plus fixed runtime placeholders, the required root-package version, and the D7a harness constants. Missing/blank/non-string root version is a typed failure, never a silent `unknown` projection.
+- Provider/model/base URL projection follows the canonical `default_model` selector from `config/providers/glm.dmxapi.json`; params digest = sha256 of canonical `{}`, prompt-pack digest = sha256 of empty bytes.
 - Stable non-disclosing `StackLockCollectionError`; no partial result after any failed producer/validation boundary.
+- Two complete source snapshots must match before publication; generation drift maps to `collection_state_changed`.
 
 ## Seams under test
 
 - Public service barrel import is the highest core API seam.
-- Injected `StackLockGitCommand` proves the exact non-mutating command and deterministic parser without a test-only global hook.
-- Real repository collection proves the four actual gitlinks and zero pin while comparing HEAD and tracked status before/after.
+- Injected `StackLockGitCommand` proves the exact non-mutating command, deterministic parser, generation barrier, and malformed-result normalization without a test-only global hook.
+- The non-barrel process seam proves default-runner timeout/maxBuffer mapping and child-environment sanitation. Real repository collection proves the four actual gitlinks and zero pin while comparing HEAD and complete tracked/untracked status before/after.
 - Shared `hashFile` proves real `renv.lock` bytes and symlink rejection.
 - Bounded durable JSON reads prove package/provider files are regular, single-link, size-bounded repository files.
 
@@ -49,11 +51,11 @@ Mandatory expanded triggers are public service API, repository/config file reads
 - File IO / path safety / overwrite: selected — bounded no-follow JSON reads and shared `hashFile`; zero writes/deletes/overwrites.
 - Schema / columns / units / field names: selected — output is the exact `repos/runtime/harness/llm` StackLock projection plus response-level degradation; StackLock schema itself is unchanged.
 - Auth / permissions / secrets: selected — provider config is credential-adjacent; API-key bytes must remain non-observable.
-- Concurrency / shared state / ordering: selected — file replacement/read drift fails closed; a Git snapshot is parsed as one complete inventory before publication.
+- Concurrency / shared state / ordering: selected — durable per-file replacement/read drift fails closed and two complete snapshots must match before publication, preventing mixed-generation evidence.
 - Resource limits / large input / discovery: selected — fixed four paths, 64 KiB Git output cap, 64 KiB JSON caps, 10 s subprocess timeout, and no recursive discovery.
 - Legacy compatibility / examples: selected — existing service exports and M1/M2 consumers remain unchanged; canonical branch labels match current schema examples.
 - Error handling / rollback / partial outputs: selected — all producer failures map to one stable typed boundary and return no partial collection.
-- Release / packaging / dependency compatibility: selected — Node/Bun built-ins only; package/lock/submodule files must not drift.
+- Release / packaging / dependency compatibility: selected — Node/Bun built-ins only; root metadata gains canonical `0.8.3`, while the dependency lock and submodule pins must not drift.
 - Documentation / migration notes: selected — issue fixture and downstream 4.2 contract are recorded; no user migration.
 
 Domain packs:
@@ -66,19 +68,19 @@ Domain packs:
 
 - Governing invariant: a successful collection is a complete, bounded, read-only snapshot of the four superproject gitlinks and canonical local configuration projections, with every digest bound to the bytes it claims and no credential bytes or partial result observable.
 - Source-of-truth identity/contract: superproject `HEAD` gitlink entries; root `package.json`; `config/providers/glm.dmxapi.json`; optional root `renv.lock`; design D2/D7a; `StackLockSchema` content fields.
-- Producers: fixed `git ls-tree` command, bounded repository JSON reader, shared `hashFile`, runtime placeholder projection, and deterministic digest constants.
-- Validators/preflight: exact mode/type/path/count gitlink parser, 40-hex commits, repository path safety + durable single-link reads, provider/model consistency, safe HTTP(S) base URL, and StackLock content projection parse.
+- Producers: fixed sanitized-environment `git ls-tree` command, bounded repository JSON reader, shared `hashFile`, internal runtime placeholder projection, and deterministic digest constants.
+- Validators/preflight: exact mode/type/path/count gitlink parser, 40-hex commits, two-snapshot source identity comparison, repository path safety + durable single-link reads, required harness version, canonical provider/model selector consistency, safe HTTP(S) base URL, and StackLock content projection parse.
 - Storage/cache/query: none — returned frozen memory value only; no cache, record store, workspace write, or route.
 - Public routes/entrypoints: `packages/core/src/domain/services/index.ts` only; no HTTP/CLI entrypoint.
 - Frontend/downstream consumers: future task 4.2 assembly consumes the content fields and task 4.3 carries `degraded`; current frontend/backend remain unchanged.
-- Failure paths/rollback/stale state: Git failure/malformed inventory, required config absence/mutation, unsafe URL, invalid/symlink `renv.lock`, or output contract mismatch throws a stable non-disclosing error and publishes nothing.
+- Failure paths/rollback/stale state: Git failure/malformed inventory or hostile redirect, source generation drift, required version/config absence or mutation, unsafe URL, invalid/symlink `renv.lock`, or output contract mismatch throws a stable non-disclosing error and publishes nothing.
 - Evidence/audit/readiness: focused collector tests, real git mutation guard, source-bound red proof, core-services/typecheck/check, strict OpenSpec, CI, and final PR-head evidence.
 
 Regression rows:
 
 - Stable four gitlinks + valid config + absent `renv.lock` -> exact four revisions, explicit placeholders, two independent deterministic digests, `r_packages_lock=null`, and `renv_lock_missing`.
 - Stable four gitlinks + regular `renv.lock` -> shared-file digest with no degradation; byte change changes only the lock digest/content projection.
-- Missing/duplicate/wrong-mode gitlink, unsafe provider URL/model mismatch, or symlink `renv.lock` -> typed failure, zero partial output, no secret/path echo, no target modification.
+- Missing/duplicate/wrong-mode gitlink, malformed injected result, unsafe provider URL/selector/model mismatch, missing/invalid harness version, hostile Git repository environment, source generation drift, or symlink `renv.lock` -> typed failure, zero partial output, no secret/path echo, no target modification.
 - Existing hashing/path-safety/core service consumers -> unchanged tests and public contracts remain green.
 
 ## Boundary-surface checklist
@@ -94,7 +96,10 @@ Regression rows:
 ## Required evidence
 
 - Focused collector tests: injected Git command, missing/existing/symlink renv, provider secret/URL rejection, real four-gitlink/zero-pin and git-mutation guard.
-- Git process failure (including the default command timeout/max-buffer failure path) -> `git_read_failed`; injected Git stdout above 64 KiB -> `git_output_invalid`; both errors remain non-disclosing and no partial collection is returned.
+- Git process failure (including the default command timeout/max-buffer failure path) -> `git_read_failed`; malformed injected results and stdout above 64 KiB -> `git_output_invalid`; both errors remain non-disclosing and no partial collection is returned.
+- Hostile inherited Git repository/config environment is removed before the default process call; the requested `repositoryRoot` remains authoritative.
+- Stable inputs produce matching full snapshots; gitlink or source-byte transition between collection and revalidation -> `collection_state_changed` with no partial result.
+- Missing/duplicate/wrong-mode gitlink, missing/invalid harness version, and provider selector/model mismatch matrix rows each produce their stable typed failure.
 - Root `package.json` or provider JSON above 64 KiB -> the matching typed `*_invalid` error with no absolute path/config bytes in the error.
 - Fixed-file replacement/read drift is owned by `readDurableSingleLinkFile` and proved at that shared authority by `durable parent validators reject callback-time FIFO and socket replacements bounded` and `durable final parent validation rejects a live leaf replacement before return`; the collector maps every non-`read` result to its stable matching `*_invalid` boundary and publishes no partial collection.
 - Source-bound red proof: retain tests while independently weakening (1) zero/four-gitlink completeness and (2) digest source separation or `renv.lock` shared hashing; record exact failures and restore immediately.
@@ -104,7 +109,7 @@ Regression rows:
 - `npx --yes bun@1.2.19 run schema:check`
 - `npx --yes bun@1.2.19 run test:perf:api`
 - `npx --yes @fission-ai/openspec@1.3.1 validate m2-research-context --strict --no-interactive`
-- `git diff --check`; package/lock/submodule/tracked-workspace hygiene.
+- `git diff --check`; canonical root version, lock/submodule/tracked-workspace hygiene; frozen dependency install and DependencyLock validation.
 
 ## Executed verification
 
@@ -126,17 +131,18 @@ The remote implementation environment exposed no native implementer/reviewer/ver
 - Spec compliance: D2/D7a fields and issue #91 boundary are implemented; task 4.2/4.3 responsibilities remain excluded.
 - Invariant/state: every producer validates before publication, failures return no partial object, and the collector creates no storage, cache, lock or write surface.
 - Confirmed review finding: the temporary evidence workflow initially compared package/lock files against an unfetched `origin/main`; fixed in workflow-only commit `1d8b758c7c37b4246b488e7546b770a48e96ad8f` and proved green. This was not a production-code finding.
-- Source-data interpretation: the current private root `package.json` has no `version` property. The collector therefore emits the explicit existing placeholder `unknown` rather than inventing a release; if the root package later gains `version`, the same bounded reader returns it directly. No package metadata change is included because issue #91's PR boundary excludes project metadata.
+- Superseded source-data interpretation: Round 1 independent verification rejected the historical missing-version fallback because D7a permits no harness-version placeholder. The repair establishes the repository's canonical `0.8.3` metadata and makes missing/invalid version a typed failure.
 
 ## Local adoption verification
 
 - The first native macOS focused run exposed a test-fixture-only failure: `tmpdir()` returned lexical `/var/...`, while `/var` is a symlink to `/private/var`; the production path-safety boundary correctly rejected the synthetic root before reading `package.json`. Canonicalizing the fixture root with `realpath()` fixed the fixture without weakening production path safety.
-- Focused collector suite after the fixture repair and added resource-boundary rows: 11 pass, 0 fail, 58 assertions.
-- Full `npx --yes bun@1.2.19 run check`: exit 0; its core-services stage reported 525 pass, 5 platform skips, 0 fail, including the exact shared durable-reader replacement/drift tests cited above.
+- Focused collector suite after Round 1 verified repairs: 28 pass, 0 fail, 99 assertions, including generation drift, default-process resource mapping, hostile Git environment sanitation, malformed injected results, version authority, full inventory, and provider-selector consistency.
+- `npx --yes bun@1.2.19 run test:core-services`: 542 pass, 5 platform skips, 0 fail, including the exact shared durable-reader replacement/drift tests cited above.
+- `npx --yes bun@1.2.19 run typecheck`: pass.
 - `npx --yes bun@1.2.19 run schema:check`: pass.
 - `npx --yes bun@1.2.19 run test:perf:api`: pass; all four PERF-API-001 rows stayed below the 300 ms ceiling.
 - `npx --yes @fission-ai/openspec@1.3.1 validate m2-research-context --strict --no-interactive`: pass.
-- `git diff --check`, package/lock comparison, zero pin/diff, tracked-workspace, debug-marker, and red-proof-stash hygiene: pass.
+- `bun install --frozen-lockfile --ignore-scripts`, `validate:dependency-lock`, `git diff --check`, lock comparison, all four submodule pins/diffs, tracked-workspace, debug-marker, and red-proof-stash hygiene: pass.
 
 ## Non-goals
 

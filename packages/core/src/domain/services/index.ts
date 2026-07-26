@@ -28,8 +28,7 @@ export type {
   StackLockGitCommand,
   StackLockGitCommandInput,
   StackLockGitCommandResult,
-  StackLockRepositoryName,
-  StackLockRuntimeVersionOverrides
+  StackLockRepositoryName
 } from "./stack-lock-collector";
 export * from "./task-card-service";
 export {
