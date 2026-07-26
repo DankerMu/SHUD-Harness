@@ -20,12 +20,22 @@ core-schemas SHALL 新增 StackLock schema：`stack_id`（格式 `STACK-<uuid>`�
 
 ### Requirement: submodule commit 只读发现（W2-SUB-001）
 
-采集服务 SHALL 经 superproject `HEAD` gitlink 只读读取 SHUD、rSHUD、AutoSHUD、zero 四个 submodule 的 commit，并从同仓库受版本控制的 `.gitmodules` exact 四项声明读取 branch（SHUD/rSHUD/AutoSHUD=`master`，zero=`development`）；不得把 schema 示例或未验证常量冒充 branch authority。采集 MUST 使用最小非敏感 Git 子进程环境、禁用 lazy fetch/trace 写入，MUST NOT 修改任何 git 状态、联网抓取对象或进入 submodule 工作树写操作。现有 `renv.lock` SHALL 在已打开 regular-file descriptor 上执行 16 MiB byte bound，超限以 typed failure 拒绝且不返回 partial result。
+采集服务 SHALL 在任何其他 producer 前把请求 `repositoryRoot` 物理规范化，并使用相同最小非敏感 Git seam 执行 `git --no-lazy-fetch rev-parse --show-toplevel`；Git 报告 top-level 的物理规范路径 MUST 与请求根完全相等，该身份 MUST 在两次 cheap snapshot 中观察并比较。nested directory 即使包含完整合法外观的 package/provider/`.gitmodules` 也必须在读取它们或执行 `ls-tree` 前以 typed failure 拒绝；真实 repository root 与 linked-worktree root 必须正常工作。采集服务随后 SHALL 经 superproject `HEAD` gitlink 只读读取 SHUD、rSHUD、AutoSHUD、zero 四个 submodule 的 commit，并从同仓库受版本控制的 `.gitmodules` exact 四项声明读取 branch（SHUD/rSHUD/AutoSHUD=`master`，zero=`development`）；不得把 schema 示例或未验证常量冒充 branch authority。每个生产 Git command MUST 在 subcommand 前携带全局 `--no-lazy-fetch`；Git <2.45 不支持时 MUST 在首条 root-identity command fail closed，不得降级 dispatch `ls-tree` 或 remote 操作。采集 MUST 使用最小非敏感 Git 子进程环境、禁用 lazy fetch/trace 写入，MUST NOT 修改任何 git 状态、联网抓取对象或进入 submodule 工作树写操作。现有 `renv.lock` SHALL 在已打开 regular-file descriptor 上执行 inclusive 16 MiB byte bound：恰好 16 MiB 成功，超限以 typed failure 拒绝且不返回 partial result。
 
 #### Scenario: 四个 submodule commit 均可读取
 
 - **WHEN** 在本仓库执行采集
 - **THEN** 返回四个 repo 各自的 40 位 commit hash，zero 的 commit 等于 pin `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`
+
+#### Scenario: nested directory 不是仓库根
+
+- **WHEN** 以仓库内 nested directory 调用采集，即使其中放置完整合法外观的固定配置文件
+- **THEN** Git 报告 top-level 与请求物理根不等，采集在其他 producer 前以不泄露路径的 `repository_root_invalid` 拒绝且不返回 partial result
+
+#### Scenario: renv.lock inclusive byte bound
+
+- **WHEN** 仓库根 regular `renv.lock` 恰好 16 MiB，随后以 16 MiB+1 重试
+- **THEN** 前者返回独立可校验的 sha256，后者以 `renv_lock_invalid` 拒绝且不读取超限内容
 
 ### Requirement: renv.lock 内容哈希采集（grill 定案 2）
 

@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { devNull, platform, release } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { env } from "node:process";
 import { StackLockSchema, type StackLock } from "../schemas/stack-lock";
 import { readDurableSingleLinkFile } from "./durable-single-link-reader";
@@ -39,6 +39,7 @@ const MAX_GITMODULES_FILE_BYTES = 64 * 1024;
 const STACK_LOCK_RENV_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024;
 const GIT_TIMEOUT_MS = 10_000;
+const GIT_NO_LAZY_FETCH_GLOBAL_ARG = "--no-lazy-fetch";
 const GITLINK_PATTERN = /^160000 commit ([0-9A-Fa-f]{40})\t([^\0]+)$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
@@ -111,7 +112,7 @@ async function collectStackLockContextWithHasher(
   options: CollectStackLockContextOptions,
   fileHasher: StackLockFileHasher
 ): Promise<StackLockCollectionResult> {
-  const repositoryRoot = resolveRepositoryRoot(options.repositoryRoot);
+  const repositoryRoot = await resolveRepositoryRoot(options.repositoryRoot);
   const gitCommand = options.gitCommand ?? runReadOnlyGitCommand;
   const firstCheap = await collectCheapSnapshot(repositoryRoot, gitCommand);
   assertExpectedGitmodules(firstCheap.gitmodules);
@@ -155,6 +156,7 @@ async function collectStackLockContextWithHasher(
 }
 
 interface StackLockCheapSnapshot {
+  readonly repositoryRoot: string;
   readonly repos: StackLock["repos"];
   readonly harness: HarnessIdentity;
   readonly provider: ProviderIdentity;
@@ -169,14 +171,21 @@ async function collectCheapSnapshot(
   repositoryRoot: string,
   gitCommand: StackLockGitCommand
 ): Promise<StackLockCheapSnapshot> {
+  const reportedRepositoryRoot = await collectRepositoryRootIdentity(repositoryRoot, gitCommand);
   const [revisions, harness, provider, gitmodules] = await Promise.all([
-    collectGitlinkRevisions(repositoryRoot, gitCommand),
-    readHarnessVersion(repositoryRoot),
-    readProviderIdentity(repositoryRoot),
-    readGitmodulesIdentity(repositoryRoot)
+    collectGitlinkRevisions(reportedRepositoryRoot, gitCommand),
+    readHarnessVersion(reportedRepositoryRoot),
+    readProviderIdentity(reportedRepositoryRoot),
+    readGitmodulesIdentity(reportedRepositoryRoot)
   ]);
   const repos = repositoriesFromSnapshot(revisions, gitmodules);
-  return Object.freeze({ repos, harness, provider, gitmodules });
+  return Object.freeze({
+    repositoryRoot: reportedRepositoryRoot,
+    repos,
+    harness,
+    provider,
+    gitmodules
+  });
 }
 
 async function completeSnapshot(
@@ -193,6 +202,7 @@ function cheapSnapshotsMatch(
   second: StackLockCheapSnapshot
 ): boolean {
   return (
+    first.repositoryRoot === second.repositoryRoot &&
     JSON.stringify(first.repos) === JSON.stringify(second.repos) &&
     first.harness.version === second.harness.version &&
     first.harness.sourceDigest === second.harness.sourceDigest &&
@@ -216,11 +226,72 @@ function snapshotsMatch(
   );
 }
 
-function resolveRepositoryRoot(input: string): string {
+async function resolveRepositoryRoot(input: string): Promise<string> {
   if (typeof input !== "string" || input.trim().length === 0) {
     throw new StackLockCollectionError("repository_root_invalid");
   }
-  return resolve(input);
+  try {
+    const physicalPath = await realpath(resolve(input));
+    if (!(await isSafeExistingDirectoryPath(physicalPath))) {
+      throw new Error("repository root is not a safe directory");
+    }
+    return physicalPath;
+  } catch {
+    throw new StackLockCollectionError("repository_root_invalid");
+  }
+}
+
+async function collectRepositoryRootIdentity(
+  repositoryRoot: string,
+  gitCommand: StackLockGitCommand
+): Promise<string> {
+  let rawResult: unknown;
+  try {
+    rawResult = await gitCommand({
+      cwd: repositoryRoot,
+      args: Object.freeze([
+        GIT_NO_LAZY_FETCH_GLOBAL_ARG,
+        "rev-parse",
+        "--show-toplevel"
+      ])
+    });
+  } catch {
+    throw new StackLockCollectionError("git_read_failed");
+  }
+
+  let stdout: unknown;
+  try {
+    stdout = asRecord(rawResult)?.stdout;
+  } catch {
+    throw new StackLockCollectionError("git_output_invalid");
+  }
+  if (
+    typeof stdout !== "string" ||
+    Buffer.byteLength(stdout, "utf8") > MAX_GIT_OUTPUT_BYTES ||
+    !stdout.endsWith("\n")
+  ) {
+    throw new StackLockCollectionError("git_output_invalid");
+  }
+  const reportedPath = stdout.slice(0, -1).replace(/\r$/u, "");
+  if (
+    reportedPath.length === 0 ||
+    reportedPath.includes("\n") ||
+    reportedPath.includes("\0") ||
+    !isAbsolute(reportedPath)
+  ) {
+    throw new StackLockCollectionError("git_output_invalid");
+  }
+
+  let physicalReportedPath: string;
+  try {
+    physicalReportedPath = await realpath(reportedPath);
+  } catch {
+    throw new StackLockCollectionError("repository_root_invalid");
+  }
+  if (physicalReportedPath !== repositoryRoot) {
+    throw new StackLockCollectionError("repository_root_invalid");
+  }
+  return physicalReportedPath;
 }
 
 async function collectGitlinkRevisions(
@@ -232,6 +303,7 @@ async function collectGitlinkRevisions(
     rawResult = await gitCommand({
       cwd: repositoryRoot,
       args: Object.freeze([
+        GIT_NO_LAZY_FETCH_GLOBAL_ARG,
         "ls-tree",
         "-z",
         "--full-tree",
