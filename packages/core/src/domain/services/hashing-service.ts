@@ -25,6 +25,10 @@ export interface HashingServiceInput {
   allowedReadonlyRoots?: readonly string[];
 }
 
+export interface HashFileInput extends HashingServiceInput {
+  maxBytes?: number;
+}
+
 type ObservedEntryKind = "directory" | "file";
 
 interface ObservedEntry {
@@ -52,7 +56,7 @@ interface DirectorySyscalls {
 
 let directorySyscalls: DirectorySyscalls | undefined;
 
-export async function hashFile(input: HashingServiceInput): Promise<string> {
+export async function hashFile(input: HashFileInput): Promise<string> {
   let boundaryDescriptor: number | undefined;
   let boundaryRoot: string | undefined;
   let failure: unknown;
@@ -78,7 +82,8 @@ export async function hashFile(input: HashingServiceInput): Promise<string> {
         relativePath: "",
         kind: "file",
         stat: observed
-      }
+      },
+      input.maxBytes
     );
   } catch (error) {
     failure = hashingSafetyError(error, input.evidenceRef, "File hashing failed safely.");
@@ -342,7 +347,8 @@ async function hashObservedFile(
   input: HashingServiceInput,
   resolution: WorkspacePathResolution,
   boundaryDescriptor: number,
-  observed: ObservedEntry
+  observed: ObservedEntry,
+  maxBytes?: number
 ): Promise<string> {
   await assertPathStillInsideBoundary(input, observed.absolutePath);
   const pathBeforeOpen = await observeExpectedEntry(
@@ -365,6 +371,7 @@ async function hashObservedFile(
     const descriptorBeforeRead = await descriptorStat(descriptor, input.evidenceRef);
     assertExpectedKind(descriptorBeforeRead, "file", input.evidenceRef);
     assertStableEntry(pathBeforeOpen, descriptorBeforeRead, input.evidenceRef);
+    assertDescriptorSizeWithinBound(descriptorBeforeRead, maxBytes, input.evidenceRef);
 
     const hash = createHash("sha256");
     const buffer = Buffer.allocUnsafe(HASH_STREAM_CHUNK_BYTES);
@@ -422,6 +429,20 @@ async function hashObservedFile(
     );
   }
   return digest;
+}
+
+function assertDescriptorSizeWithinBound(
+  stat: BigIntStats,
+  maxBytes: number | undefined,
+  evidenceRef: string
+): void {
+  if (maxBytes === undefined) return;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || stat.size > BigInt(maxBytes)) {
+    throw new WorkspacePathSafetyError(
+      "Hash source exceeded its configured byte bound.",
+      evidenceRef
+    );
+  }
 }
 
 async function openPinnedAbsoluteDirectory(

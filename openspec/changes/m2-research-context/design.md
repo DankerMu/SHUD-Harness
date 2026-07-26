@@ -58,7 +58,7 @@ SideNav 刷新后重建版本链快照需要 REST 读取；注册表原只登记
 
 ### D7a. submodule commit 采集：gitlink 只读发现 + harness/llm 占位口径
 
-`git ls-tree HEAD SHUD rSHUD AutoSHUD zero` 读取四个 gitlink commit（W2-SUB-001），不进入 submodule 工作树、不改任何 git 状态。runtime 版本（r/python/sundials/gcc/gdal）M2 填占位探测值或 `unknown`（Phased_Plan 明示"runtime versions 占位"）。llm 块从 provider 配置（#37 已落）读取 provider/model_id/base_url。
+最小非敏感环境下的 `git ls-tree HEAD SHUD rSHUD AutoSHUD zero` 读取四个 gitlink commit（W2-SUB-001），显式禁止 lazy fetch/trace 写；branch 从受版本控制的 `.gitmodules` exact 四项声明读取（SHUD/rSHUD/AutoSHUD=`master`，zero=`development`），不进入 submodule 工作树、不改任何 git 状态。runtime 版本（r/python/sundials/gcc/gdal）M2 填占位探测值或 `unknown`（Phased_Plan 明示"runtime versions 占位"）。llm 块从 provider 配置（#37 已落）读取 provider/model_id/base_url。现有 `renv.lock` 在打开后的 regular descriptor 上执行 16 MiB 上限，超限 fail closed。
 
 **harness 块与两个 digest 的 M2 采集口径**（勘误：早稿「params_digest/prompt_pack_digest 以配置内容哈希生成」与 canonical 字段语义冲突——Minimal_Schemas §2 定义 params_digest = 采样参数集哈希、prompt_pack_digest = prompt pack 实际内容哈希，而 M1 provider 配置的 exact keys 既不含采样参数也不含 prompt pack，照早稿两 digest 会退化为同一份配置文件哈希）：
 
@@ -376,7 +376,7 @@ Must add/change:
 - `hashFile` 对常规文件内容做流式 sha256，结果与 `shasum -a 256` 一致。
 - `hashDirectory` 递归检查目录树，拒绝任意 symlink/非常规项；把全部常规文件规范为 `/` 分隔的相对路径，按字典序生成 `"<relpath>\n<file-sha256>\n"` 字节序列并哈希；无常规文件时拒绝。
 - 在 path-safety preflight 后，以 Mac/Linux 的 descriptor-relative `openat` + `O_NOFOLLOW` 固定每级目录/文件身份，并通过固定目录 descriptor 枚举；文件读取受打开后首次 `fstat.size` 硬上限约束，再执行完整 metadata/身份复核。错误统一为 `WorkspacePathSafetyError` 家族。
-- 公共签名固定为 `hashFile(input)` / `hashDirectory(input)`，其中 input 为 `{ workspaceRoot, inputPath, evidenceRef, allowedReadonlyRoots? }`，返回 `Promise<string>`。
+- 公共签名固定为 `hashFile(input)` / `hashDirectory(input)`：共同 input 为 `{ workspaceRoot, inputPath, evidenceRef, allowedReadonlyRoots? }`，仅 `hashFile` 额外接受可选 `maxBytes?` 并在已打开 descriptor 的初始 size 上、内容读取前执行；返回 `Promise<string>`。
 
 Risk packs considered:
 - Public API / CLI / script entry: selected - `services/index.ts` 暴露公共 core service API；不新增 HTTP/CLI/script 入口。

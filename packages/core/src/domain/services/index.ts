@@ -4,7 +4,7 @@ export type CoreServiceNamespace = typeof CORE_SERVICE_NAMESPACE;
 
 export * from "./artifact-registry-service";
 export { hashDirectory, hashFile } from "./hashing-service";
-export type { HashingServiceInput } from "./hashing-service";
+export type { HashFileInput, HashingServiceInput } from "./hashing-service";
 export * from "./idempotency-service";
 export * from "./lock-service";
 export {

@@ -20,7 +20,7 @@ core-schemas SHALL 新增 StackLock schema：`stack_id`（格式 `STACK-<uuid>`�
 
 ### Requirement: submodule commit 只读发现（W2-SUB-001）
 
-采集服务 SHALL 经 gitlink 只读读取 SHUD、rSHUD、AutoSHUD、zero 四个 submodule 的 commit 与 branch，MUST NOT 修改任何 git 状态或进入 submodule 工作树写操作。
+采集服务 SHALL 经 superproject `HEAD` gitlink 只读读取 SHUD、rSHUD、AutoSHUD、zero 四个 submodule 的 commit，并从同仓库受版本控制的 `.gitmodules` exact 四项声明读取 branch（SHUD/rSHUD/AutoSHUD=`master`，zero=`development`）；不得把 schema 示例或未验证常量冒充 branch authority。采集 MUST 使用最小非敏感 Git 子进程环境、禁用 lazy fetch/trace 写入，MUST NOT 修改任何 git 状态、联网抓取对象或进入 submodule 工作树写操作。现有 `renv.lock` SHALL 在已打开 regular-file descriptor 上执行 16 MiB byte bound，超限以 typed failure 拒绝且不返回 partial result。
 
 #### Scenario: 四个 submodule commit 均可读取
 

@@ -1,12 +1,16 @@
 [submodule "SHUD"]
 	path = SHUD
 	url = https://github.com/SHUD-System/SHUD.git
+	branch = master
 [submodule "rSHUD"]
 	path = rSHUD
 	url = https://github.com/SHUD-System/rSHUD.git
+	branch = master
 [submodule "AutoSHUD"]
 	path = AutoSHUD
 	url = https://github.com/SHUD-System/AutoSHUD.git
+	branch = master
 [submodule "zero"]
 	path = zero
 	url = https://github.com/V1ki/zero.git
+	branch = development

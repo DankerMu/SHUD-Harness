@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
-import { platform, release } from "node:os";
+import { devNull, platform, release } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { env } from "node:process";
 import { StackLockSchema, type StackLock } from "../schemas/stack-lock";
@@ -18,11 +18,11 @@ export const STACK_LOCK_SKILLS_VERSION = "skills-unset" as const;
 export const STACK_LOCK_PARAMS_DIGEST = createHash("sha256").update("{}", "utf8").digest("hex");
 export const STACK_LOCK_PROMPT_PACK_DIGEST = createHash("sha256").update(Buffer.alloc(0)).digest("hex");
 
-const STACK_LOCK_REPOSITORY_BRANCHES = Object.freeze({
-  SHUD: "master",
-  rSHUD: "master",
-  AutoSHUD: "master",
-  zero: "main"
+const EXPECTED_GITMODULE_DECLARATIONS = Object.freeze({
+  SHUD: Object.freeze({ path: "SHUD", branch: "master" }),
+  rSHUD: Object.freeze({ path: "rSHUD", branch: "master" }),
+  AutoSHUD: Object.freeze({ path: "AutoSHUD", branch: "master" }),
+  zero: Object.freeze({ path: "zero", branch: "development" })
 } as const);
 const STACK_LOCK_CONTENT_SCHEMA = StackLockSchema.pick({
   repos: true,
@@ -32,8 +32,11 @@ const STACK_LOCK_CONTENT_SCHEMA = StackLockSchema.pick({
 });
 const PACKAGE_JSON_RELATIVE_PATH = "package.json";
 const PROVIDER_CONFIG_RELATIVE_PATH = "config/providers/glm.dmxapi.json";
+const GITMODULES_RELATIVE_PATH = ".gitmodules";
 const R_PACKAGES_LOCK_RELATIVE_PATH = "renv.lock";
 const MAX_JSON_FILE_BYTES = 64 * 1024;
+const MAX_GITMODULES_FILE_BYTES = 64 * 1024;
+const STACK_LOCK_RENV_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024;
 const GIT_TIMEOUT_MS = 10_000;
 const GITLINK_PATTERN = /^160000 commit ([0-9A-Fa-f]{40})\t([^\0]+)$/u;
@@ -71,6 +74,7 @@ export type StackLockCollectionErrorCode =
   | "repository_root_invalid"
   | "git_read_failed"
   | "git_output_invalid"
+  | "gitmodules_invalid"
   | "package_json_invalid"
   | "provider_config_invalid"
   | "renv_lock_invalid"
@@ -90,10 +94,34 @@ export class StackLockCollectionError extends Error {
 export async function collectStackLockContext(
   options: CollectStackLockContextOptions
 ): Promise<StackLockCollectionResult> {
+  return await collectStackLockContextWithHasher(options, hashFile);
+}
+
+type StackLockFileHasher = typeof hashFile;
+
+/** Internal deterministic seam for proving producer ordering; not barrel-exported. */
+export async function __collectStackLockContextWithHasherForTest(
+  options: CollectStackLockContextOptions,
+  fileHasher: StackLockFileHasher
+): Promise<StackLockCollectionResult> {
+  return await collectStackLockContextWithHasher(options, fileHasher);
+}
+
+async function collectStackLockContextWithHasher(
+  options: CollectStackLockContextOptions,
+  fileHasher: StackLockFileHasher
+): Promise<StackLockCollectionResult> {
   const repositoryRoot = resolveRepositoryRoot(options.repositoryRoot);
   const gitCommand = options.gitCommand ?? runReadOnlyGitCommand;
-  const first = await collectSnapshot(repositoryRoot, gitCommand);
-  const second = await collectSnapshot(repositoryRoot, gitCommand);
+  const firstCheap = await collectCheapSnapshot(repositoryRoot, gitCommand);
+  assertExpectedGitmodules(firstCheap.gitmodules);
+  const first = await completeSnapshot(repositoryRoot, firstCheap, fileHasher);
+  const secondCheap = await collectCheapSnapshot(repositoryRoot, gitCommand);
+  if (!cheapSnapshotsMatch(firstCheap, secondCheap)) {
+    throw new StackLockCollectionError("collection_state_changed");
+  }
+  assertExpectedGitmodules(secondCheap.gitmodules);
+  const second = await completeSnapshot(repositoryRoot, secondCheap, fileHasher);
   if (!snapshotsMatch(first, second)) {
     throw new StackLockCollectionError("collection_state_changed");
   }
@@ -126,29 +154,43 @@ export async function collectStackLockContext(
   return freezeCollectionResult(content, rPackagesLock.degraded);
 }
 
-interface StackLockCollectionSnapshot {
+interface StackLockCheapSnapshot {
   readonly repos: StackLock["repos"];
   readonly harness: HarnessIdentity;
   readonly provider: ProviderIdentity;
+  readonly gitmodules: GitmodulesIdentity;
+}
+
+interface StackLockCollectionSnapshot extends StackLockCheapSnapshot {
   readonly rPackagesLock: Awaited<ReturnType<typeof collectRPackagesLock>>;
 }
 
-async function collectSnapshot(
+async function collectCheapSnapshot(
   repositoryRoot: string,
   gitCommand: StackLockGitCommand
-): Promise<StackLockCollectionSnapshot> {
-  const [repos, harness, provider, rPackagesLock] = await Promise.all([
+): Promise<StackLockCheapSnapshot> {
+  const [revisions, harness, provider, gitmodules] = await Promise.all([
     collectGitlinkRevisions(repositoryRoot, gitCommand),
     readHarnessVersion(repositoryRoot),
     readProviderIdentity(repositoryRoot),
-    collectRPackagesLock(repositoryRoot)
+    readGitmodulesIdentity(repositoryRoot)
   ]);
-  return Object.freeze({ repos, harness, provider, rPackagesLock });
+  const repos = repositoriesFromSnapshot(revisions, gitmodules);
+  return Object.freeze({ repos, harness, provider, gitmodules });
 }
 
-function snapshotsMatch(
-  first: StackLockCollectionSnapshot,
-  second: StackLockCollectionSnapshot
+async function completeSnapshot(
+  repositoryRoot: string,
+  cheap: StackLockCheapSnapshot,
+  fileHasher: StackLockFileHasher
+): Promise<StackLockCollectionSnapshot> {
+  const rPackagesLock = await collectRPackagesLock(repositoryRoot, fileHasher);
+  return Object.freeze({ ...cheap, rPackagesLock });
+}
+
+function cheapSnapshotsMatch(
+  first: StackLockCheapSnapshot,
+  second: StackLockCheapSnapshot
 ): boolean {
   return (
     JSON.stringify(first.repos) === JSON.stringify(second.repos) &&
@@ -158,6 +200,18 @@ function snapshotsMatch(
     first.provider.modelId === second.provider.modelId &&
     first.provider.baseUrl === second.provider.baseUrl &&
     first.provider.sourceDigest === second.provider.sourceDigest &&
+    first.gitmodules.sourceDigest === second.gitmodules.sourceDigest &&
+    JSON.stringify(first.gitmodules.declarations) ===
+      JSON.stringify(second.gitmodules.declarations)
+  );
+}
+
+function snapshotsMatch(
+  first: StackLockCollectionSnapshot,
+  second: StackLockCollectionSnapshot
+): boolean {
+  return (
+    cheapSnapshotsMatch(first, second) &&
     JSON.stringify(first.rPackagesLock) === JSON.stringify(second.rPackagesLock)
   );
 }
@@ -172,7 +226,7 @@ function resolveRepositoryRoot(input: string): string {
 async function collectGitlinkRevisions(
   repositoryRoot: string,
   gitCommand: StackLockGitCommand
-): Promise<StackLock["repos"]> {
+): Promise<Readonly<Record<StackLockRepositoryName, string>>> {
   let rawResult: unknown;
   try {
     rawResult = await gitCommand({
@@ -226,24 +280,21 @@ async function collectGitlinkRevisions(
     }
   }
 
-  return Object.freeze({
-    SHUD: Object.freeze({
-      commit: revisions.get("SHUD")!,
-      branch: STACK_LOCK_REPOSITORY_BRANCHES.SHUD
-    }),
-    rSHUD: Object.freeze({
-      commit: revisions.get("rSHUD")!,
-      branch: STACK_LOCK_REPOSITORY_BRANCHES.rSHUD
-    }),
-    AutoSHUD: Object.freeze({
-      commit: revisions.get("AutoSHUD")!,
-      branch: STACK_LOCK_REPOSITORY_BRANCHES.AutoSHUD
-    }),
-    zero: Object.freeze({
-      commit: revisions.get("zero")!,
-      branch: STACK_LOCK_REPOSITORY_BRANCHES.zero
-    })
-  });
+  return Object.freeze(Object.fromEntries(
+    STACK_LOCK_REPOSITORY_NAMES.map((name) => [name, revisions.get(name)!])
+  )) as Readonly<Record<StackLockRepositoryName, string>>;
+}
+
+function repositoriesFromSnapshot(
+  revisions: Readonly<Record<StackLockRepositoryName, string>>,
+  gitmodules: GitmodulesIdentity
+): StackLock["repos"] {
+  return Object.freeze(Object.fromEntries(
+    STACK_LOCK_REPOSITORY_NAMES.map((name) => [
+      name,
+      Object.freeze({ commit: revisions[name], branch: gitmodules.declarations[name].branch })
+    ])
+  )) as StackLock["repos"];
 }
 
 function isStackLockRepositoryName(value: string): value is StackLockRepositoryName {
@@ -314,63 +365,156 @@ export function __runReadOnlyGitCommandForTest(
   return runReadOnlyGitCommandWithExecutor(input, executor);
 }
 
-const GIT_ENVIRONMENT_AUTHORITY_KEYS = new Set([
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_CEILING_DIRECTORIES",
-  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-  "GIT_NAMESPACE",
-  "GIT_PREFIX",
-  "GIT_GRAFT_FILE",
-  "GIT_REPLACE_REF_BASE",
-  "GIT_CONFIG",
-  "GIT_CONFIG_COUNT",
-  "GIT_CONFIG_NOSYSTEM",
-  "GIT_CONFIG_SYSTEM",
-  "GIT_CONFIG_GLOBAL",
-  "GIT_CONFIG_PARAMETERS",
-  "GIT_EXEC_PATH",
-  "GIT_SHALLOW_FILE",
-  "GIT_ATTR_SOURCE",
-  "GIT_LITERAL_PATHSPECS",
-  "GIT_GLOB_PATHSPECS",
-  "GIT_NOGLOB_PATHSPECS",
-  "GIT_ICASE_PATHSPECS",
-  "GIT_ASKPASS",
-  "GIT_SSH",
-  "GIT_SSH_COMMAND",
-  "SSH_ASKPASS",
-  "GIT_TRACE",
-  "GIT_TRACE_PACKET",
-  "GIT_TRACE_PERFORMANCE",
-  "GIT_TRACE_SETUP",
-  "GIT_TRACE_SHALLOW",
-  "GIT_TRACE_CURL",
-  "GIT_TRACE_CURL_NO_DATA",
-  "GIT_TRACE2",
-  "GIT_TRACE2_EVENT",
-  "GIT_TRACE2_PERF"
-]);
+const GIT_CHILD_POSIX_ENVIRONMENT_ALLOWLIST = Object.freeze([
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE"
+] as const);
+const GIT_CHILD_WINDOWS_ENVIRONMENT_ALLOWLIST = Object.freeze([
+  "PATH",
+  "Path",
+  "SystemRoot",
+  "WINDIR",
+  "ComSpec",
+  "PATHEXT"
+] as const);
 
 function readOnlyGitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const sanitized = Object.fromEntries(
-    Object.entries(source).filter(
-      ([key]) =>
-        !GIT_ENVIRONMENT_AUTHORITY_KEYS.has(key) &&
-        !/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/u.test(key)
-    )
-  );
+  const sanitized: NodeJS.ProcessEnv = {};
+  const allowlist = platform() === "win32"
+    ? GIT_CHILD_WINDOWS_ENVIRONMENT_ALLOWLIST
+    : GIT_CHILD_POSIX_ENVIRONMENT_ALLOWLIST;
+  for (const key of allowlist) {
+    const value = source[key];
+    if (typeof value === "string" && !value.includes("\0")) sanitized[key] = value;
+  }
   return {
     ...sanitized,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: devNull,
+    GIT_NO_LAZY_FETCH: "1",
     GIT_NO_REPLACE_OBJECTS: "1",
     GIT_OPTIONAL_LOCKS: "0",
     GIT_TERMINAL_PROMPT: "0",
     GCM_INTERACTIVE: "Never"
   };
+}
+
+interface GitmoduleDeclaration {
+  readonly path: string;
+  readonly branch: string;
+}
+
+interface GitmodulesIdentity {
+  readonly declarations: Readonly<Record<StackLockRepositoryName, GitmoduleDeclaration>>;
+  readonly sourceDigest: string;
+}
+
+async function readGitmodulesIdentity(repositoryRoot: string): Promise<GitmodulesIdentity> {
+  const absolutePath = join(repositoryRoot, GITMODULES_RELATIVE_PATH);
+  try {
+    const resolution = await resolveWorkspacePath({
+      workspaceRoot: repositoryRoot,
+      inputPath: GITMODULES_RELATIVE_PATH,
+      evidenceRef: "stack-lock.gitmodules",
+      access: "read"
+    });
+    const result = await readDurableSingleLinkFile({
+      path: resolution.absolutePath,
+      maxBytes: MAX_GITMODULES_FILE_BYTES,
+      validateParentPath: async () => await isSafeExistingDirectoryPath(dirname(absolutePath))
+    });
+    if (result.status !== "read") throw new Error("gitmodules unavailable");
+    const text = UTF8_DECODER.decode(result.bytes);
+    return Object.freeze({
+      declarations: parseGitmoduleDeclarations(text),
+      sourceDigest: createHash("sha256").update(result.bytes).digest("hex")
+    });
+  } catch {
+    throw new StackLockCollectionError("gitmodules_invalid");
+  }
+}
+
+function parseGitmoduleDeclarations(
+  text: string
+): Readonly<Record<StackLockRepositoryName, GitmoduleDeclaration>> {
+  const sections = new Map<string, Map<string, string>>();
+  let current: Map<string, string> | undefined;
+  for (const rawLine of text.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
+    const section = /^\[submodule "([^"]+)"\]$/u.exec(line);
+    if (section) {
+      const name = section[1]!;
+      if (!isStackLockRepositoryName(name) || sections.has(name)) {
+        throw new Error("invalid submodule inventory");
+      }
+      current = new Map<string, string>();
+      sections.set(name, current);
+      continue;
+    }
+    const property = /^([A-Za-z][A-Za-z0-9.-]*)\s*=\s*(.*)$/u.exec(line);
+    if (!current || !property) throw new Error("invalid gitmodules syntax");
+    const key = property[1]!.toLowerCase();
+    const value = property[2]!.trim();
+    if (!(["path", "url", "branch"] as const).includes(key as "path" | "url" | "branch")) {
+      throw new Error("unknown gitmodules property");
+    }
+    if (current.has(key) || !isBoundedGitmoduleValue(value)) {
+      throw new Error("invalid gitmodules property");
+    }
+    current.set(key, value);
+  }
+
+  if (sections.size !== STACK_LOCK_REPOSITORY_NAMES.length) {
+    throw new Error("incomplete submodule inventory");
+  }
+  const entries = STACK_LOCK_REPOSITORY_NAMES.map((name) => {
+    const section = sections.get(name);
+    const path = section?.get("path");
+    const branch = section?.get("branch");
+    const url = section?.get("url");
+    if (
+      section?.size !== 3 ||
+      path === undefined ||
+      branch === undefined ||
+      url === undefined ||
+      !isSafeBranchDeclaration(branch)
+    ) {
+      throw new Error("incomplete submodule declaration");
+    }
+    return [name, Object.freeze({ path, branch })] as const;
+  });
+  return Object.freeze(Object.fromEntries(entries)) as Readonly<
+    Record<StackLockRepositoryName, GitmoduleDeclaration>
+  >;
+}
+
+function isBoundedGitmoduleValue(value: string): boolean {
+  return value.length > 0 && value.length <= 4096 && !/[\0\r\n]/u.test(value);
+}
+
+function isSafeBranchDeclaration(value: string): boolean {
+  return (
+    value.length <= 255 &&
+    !/\s|\\|\.\.|@\{|\*|\?|\[|\^|~|:|\x7f/u.test(value) &&
+    !value.startsWith("-") &&
+    !value.startsWith("/") &&
+    !value.endsWith("/") &&
+    !value.endsWith(".") &&
+    !value.endsWith(".lock")
+  );
+}
+
+function assertExpectedGitmodules(gitmodules: GitmodulesIdentity): void {
+  for (const name of STACK_LOCK_REPOSITORY_NAMES) {
+    const actual = gitmodules.declarations[name];
+    const expected = EXPECTED_GITMODULE_DECLARATIONS[name];
+    if (actual.path !== expected.path || actual.branch !== expected.branch) {
+      throw new StackLockCollectionError("gitmodules_invalid");
+    }
+  }
 }
 
 interface HarnessIdentity {
@@ -500,7 +644,10 @@ async function readBoundedRepositoryJson(
   });
 }
 
-async function collectRPackagesLock(repositoryRoot: string): Promise<{
+async function collectRPackagesLock(
+  repositoryRoot: string,
+  fileHasher: StackLockFileHasher
+): Promise<{
   readonly value: StackLock["runtime"]["r_packages_lock"];
   readonly degraded: readonly StackLockDegradedReason[];
 }> {
@@ -519,10 +666,11 @@ async function collectRPackagesLock(repositoryRoot: string): Promise<{
 
   let sha256: string;
   try {
-    sha256 = await hashFile({
+    sha256 = await fileHasher({
       workspaceRoot: repositoryRoot,
       inputPath: R_PACKAGES_LOCK_RELATIVE_PATH,
-      evidenceRef: "stack-lock.runtime.r_packages_lock"
+      evidenceRef: "stack-lock.runtime.r_packages_lock",
+      maxBytes: STACK_LOCK_RENV_MAX_BYTES
     });
   } catch {
     throw new StackLockCollectionError("renv_lock_invalid");
