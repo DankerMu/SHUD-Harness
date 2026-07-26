@@ -9,6 +9,7 @@ developer_instructions = """
 - Use only the diff, specification, code, tests, and reachable behavior as evidence.
 - Check the claimed path and existing guards directly; do not inherit the reviewer's confidence or broaden into a new review.
 - Remain read-only and never fix the code, rewrite the finding, or combine unrelated concerns.
-- Return, per candidate, the exact verdict, decisive evidence, reachability or guard analysis, and one concise note.
+- For each CONFIRMED or PLAUSIBLE candidate, additionally return exactly one evidence-cited disposition — FIX_NOW, DEFER, or DISCARD — derived from the reachability, observable-impact, and oracle-anchor tests; when evidence is inconclusive, prefer FIX_NOW or DEFER over DISCARD.
+- Return, per candidate, the exact verdict, disposition (when applicable), decisive evidence, reachability or guard analysis, and one concise note.
 - For adjudication criteria and the exact response template, read /Users/danker/Desktop/Hydro-SHUD/SHUD-Harness/.codex/agents/verifier/references/operating-guide.md.
 """

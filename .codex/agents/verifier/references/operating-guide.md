@@ -44,8 +44,50 @@ You receive:
   anchor. Do not refute merely because a claim is "speculative" or "depends on runtime state" when
   the state is realistic.
 - **REFUTED**: only when constructible from the code — factually wrong (quote the actual line),
-  provably impossible (cite the type/constant/invariant), already handled in this diff (cite the
-  guard), or pure style with no observable effect.
+  provably impossible (cite the type/constant/invariant), or already handled in this diff (cite
+  the guard). A true-but-style-only concern is not REFUTED — verdict it honestly and let the
+  disposition tests discard it.
+
+## Disposition (return for every CONFIRMED or PLAUSIBLE candidate)
+
+The verdict answers "is it real"; the disposition answers "is it worth acting on". REFUTED
+candidates get no disposition. Derive the disposition mechanically from three tests, each cited
+with the same evidentiary bar as a verdict:
+
+- **T1 Reachability**: the failing scenario is reachable within the artifact's real input
+  domain — spec preconditions, type constraints, enumerable call sites. Distinct from REFUTED:
+  REFUTED means provably impossible; T1 fails when the scenario is constructible in theory but
+  outside the stated input domain.
+- **T2 Observable impact**: when it triggers, something breaks at a boundary an external party
+  depends on — user-visible behavior, API consumers, persisted data, operator signals
+  (logs/metrics/exit codes), downstream jobs, numerical output correctness or reproducibility.
+  Name the boundary. Redundant-but-correct code or cold-path micro-waste has no observable impact.
+- **T3 Oracle anchor**: the violated invariant is owned by the project, at the highest available
+  rung: (1) spec/fixture or acceptance criteria, (2) explicit issue/PR requirements, (3) existing
+  test assertions, (4) documented project rules (AGENTS.md, CLAUDE.md, lint config), (5) de facto
+  contract — current behavior that consumers observably rely on. A reviewer-imported "best
+  practice" that lands on no rung is not an anchor. Universal invariants (security hole, data
+  loss, crash) need no anchor.
+
+| T1   | T2   | T3                                                      | Disposition                                                |
+| ---- | ---- | ------------------------------------------------------- | ---------------------------------------------------------- |
+| pass | pass | pass; defect introduced or made reachable by the change | **FIX_NOW** — enters the fix set                           |
+| pass | pass | pass; defect pre-existing and untouched by the change   | **DEFER** — route to issue-scribe or record at round close |
+| pass | fail | —                                                       | **DISCARD** — real but immaterial                          |
+| fail | —    | —                                                       | **DISCARD** (REFUTED instead only if provably impossible)  |
+| pass | pass | fail (no rung, not a universal invariant)               | **DISCARD**; note may suggest downgrading to a Note        |
+
+Guardrails:
+
+- A CONFIRMED P0 (security hole, data loss, broken core behavior) is never DISCARD. It is
+  FIX_NOW — or DEFER only when pre-existing and outside the diff, and then the note must name
+  the issue-scribe routing.
+- Every DEFER or DISCARD must name the decisive test with evidence; a disposition without it is
+  invalid and the orchestrator reruns the batch.
+- You may downgrade severity citing one of the finding contract's Downgrading rationales; never
+  upgrade severity or broaden into a new review.
+- Doubt favors fixing, not dropping: when the evidence for a test is inconclusive, choose
+  FIX_NOW or DEFER, never DISCARD.
 
 ## Output Format
 
@@ -55,7 +97,8 @@ Reviewed head SHA: <40-char sha>
 
 Candidate: <candidate id>
 Verdict: CONFIRMED | PLAUSIBLE | REFUTED
-Evidence: <quoted line / cited guard / reachability path>
+Disposition: FIX_NOW | DEFER | DISCARD   (omit for REFUTED)
+Evidence: <quoted line / cited guard / reachability path; for DEFER/DISCARD also the decisive T1/T2/T3 test>
 Note: <one line, or "None.">
 ```
 

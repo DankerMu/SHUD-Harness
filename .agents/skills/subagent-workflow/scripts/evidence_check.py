@@ -22,6 +22,18 @@ Checks:
   round-status  "Round K pending/in progress/..." claims are stale once
                 .review-gate.json has recorded round K. Skipped with a note
                 when no state file exists.
+  gate-lock     .review-gate.json says `locked` - the mechanical gate
+                transition was skipped or its corrective action has not been
+                registered. Spawning reviewers or posting while locked is the
+                out-of-band bypass this check exists to catch; a deliberate
+                override (e.g. a user-approved descope merge at the terminal
+                ceiling) proceeds as a recorded skip block, never silently.
+  loop-log      --loop-log-entry validates a pending review-loop-log line
+                before it is appended: required keys, fixture level must be a
+                single canonical token (none|compact|expanded|high|
+                broad-expanded - composites like `expanded/high` and ad-hoc
+                labels like `standard` fragment the keep/cut sample), outcome
+                vocabulary, date format.
 
 Scanned files: every --file target (all checks) plus *.md/*.txt/*.log under
 the review dir from .review-gate.json or --evidence-dir (head-sha and
@@ -53,6 +65,50 @@ ROUND_CLAIM_RE = re.compile(
     r"(?i)\bround\s*#?\s*(\d+)\b[^\n]{0,40}?"
     r"(?:\bpending\b|\bin[- ]progress\b|\bnot\s+yet\b|待复审|待审|待跑|进行中|未完成)"
 )
+FIXTURE_LEVELS = ("none", "compact", "expanded", "high", "broad-expanded")
+OUTCOMES = ("merged", "ceiling-split", "abandoned", "descoped")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+ENTRY_REQUIRED_KEYS = ("issue", "pr", "date", "fixture", "rounds")
+
+
+def check_loop_log_entry(raw_path: str, findings: list[str]) -> None:
+    path = Path(raw_path)
+    if not path.is_file():
+        findings.append(f"{raw_path}:0: [loop-log] --loop-log-entry target missing")
+        return
+    text = path.read_text(encoding="utf-8").strip()
+    try:
+        entry = json.loads(text)
+    except json.JSONDecodeError as exc:
+        findings.append(f"{raw_path}:1: [loop-log] not valid JSON ({exc.msg})")
+        return
+    if not isinstance(entry, dict):
+        findings.append(f"{raw_path}:1: [loop-log] entry must be a single JSON object")
+        return
+    for key in ENTRY_REQUIRED_KEYS:
+        if key not in entry:
+            findings.append(f"{raw_path}:1: [loop-log] missing required key `{key}`")
+    fixture = entry.get("fixture")
+    if fixture is not None and fixture not in FIXTURE_LEVELS:
+        findings.append(
+            f"{raw_path}:1: [loop-log] fixture `{fixture}` is off-vocabulary - use exactly one of "
+            f"{'|'.join(FIXTURE_LEVELS)} (the effective tier, never composites or ad-hoc labels: "
+            "off-vocabulary levels fragment the keep/cut sample)"
+        )
+    outcome = entry.get("outcome", "merged")
+    if outcome not in OUTCOMES:
+        findings.append(f"{raw_path}:1: [loop-log] outcome `{outcome}` invalid - one of {'|'.join(OUTCOMES)}")
+    date = entry.get("date")
+    if date is not None and not (isinstance(date, str) and DATE_RE.match(date)):
+        findings.append(f"{raw_path}:1: [loop-log] date must be YYYY-MM-DD")
+    rounds = entry.get("rounds")
+    if rounds is not None and not (isinstance(rounds, int) and rounds >= 0):
+        findings.append(f"{raw_path}:1: [loop-log] rounds must be a non-negative integer")
+    if outcome == "merged":
+        for key in ("gate_net_catch", "verdicts"):
+            if key not in entry:
+                findings.append(f"{raw_path}:1: [loop-log] merged line missing `{key}` "
+                                "(terminal outcomes are exempt)")
 
 
 def resolve_head(root: Path, head: str | None) -> str | None:
@@ -127,6 +183,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="orchestrator-authored artifact (PR body draft, manifest); repeatable, gets all checks")
     parser.add_argument("--evidence-dir", default=None,
                         help="override the review dir from %s" % review_gate.STATE_NAME)
+    parser.add_argument("--loop-log-entry", default=None,
+                        help="pending review-loop-log line (single JSON object in a file) to validate "
+                             "before appending")
     args = parser.parse_args(argv)
 
     root = Path(args.root).resolve()
@@ -142,6 +201,15 @@ def main(argv: list[str] | None = None) -> int:
         print("evidence_check: no recorded rounds - round-status check skipped")
 
     findings: list[str] = []
+    if state and state.get("locked"):
+        findings.append(
+            f"{review_gate.STATE_NAME}:0: [gate-lock] review gate is locked "
+            f"({state.get('lockReason')}) - register the persisted retro (record-retro) before "
+            "spawning reviewers or posting; proceeding anyway is a recorded skip block, not a default"
+        )
+    if args.loop_log_entry:
+        check_loop_log_entry(args.loop_log_entry, findings)
+
     authored: list[Path] = []
     for raw in args.files:
         path = Path(raw)
@@ -164,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
 
     authored_set = set(authored)
     scanned = authored + [p for p in evidence_files if p not in authored_set]
-    if not scanned:
+    if not scanned and not args.loop_log_entry and not findings:
         print("evidence_check: nothing to check - pass --file and/or ensure the review dir exists", file=sys.stderr)
         return 2
 
@@ -177,7 +245,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"evidence_check: {len(findings)} finding(s) - fix the bookkeeping before spawning reviewers or posting",
               file=sys.stderr)
         return 2
-    print(f"evidence_check: clean ({len(scanned)} file(s), head {head[:12]})")
+    checked = len(scanned) + (1 if args.loop_log_entry else 0)
+    print(f"evidence_check: clean ({checked} file(s), head {head[:12]})")
     return 0
 
 
