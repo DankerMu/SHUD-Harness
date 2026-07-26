@@ -11,6 +11,7 @@ Round <N> | <sha> | clean|not-clean | verified findings: <n> | highest severity:
 ```
 
 - `N` is the counter every gate below reads. It never resets within a PR — not across commits, CI-only fixes, or sibling surfaces. A fresh counter is legitimate only for a child PR created by a gate-selected PR split, because it is a new PR.
+- `verified findings: <n>` counts only candidates verdicted CONFIRMED/PLAUSIBLE **with disposition FIX_NOW** in the Phase 4.5 pass. DEFER and DISCARD candidates never enter the count or trigger gates; they stay in the `verify-<CLASS_ID>.md` audit trail, and every DEFER joins the existing round-close routing (issue-scribe URL or recorded reason).
 - A round whose only verified findings are minor (P2) and whose every finding is routed at round close (issue-scribe URL or recorded reason; coverage findings excluded — they always fix) is recorded **clean**: routing resolves the findings, so no gate fires on a round the P2-deferral default exits anyway. The deferral counts live in the loop-log `residual_deferred` and the evidence bundle, not the ledger line.
 - The Phase 4.5 verification pass and failed no-report invocations get no ledger line — they are not rounds.
 - Taking any post-round action without the current round's ledger line is a skip block for the accountability log.

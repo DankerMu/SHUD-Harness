@@ -5,6 +5,17 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-07-25
+
+### Added
+
+- **Phase 4.5 disposition 轴（verifier 0.4.0 对接）**：verdict 之外，每个 CONFIRMED/PLAUSIBLE candidate 附带一个 disposition —— `FIX_NOW` / `DEFER` / `DISCARD`，由 verifier 的三测试机械推导（T1 真实输入域可达性、T2 依赖边界可观察影响、T3 oracle 锚定；本 workflow 中 OpenSpec fixture 与 Invariant Matrix 为最高锚级）。护栏：CONFIRMED P0 永不 DISCARD；DEFER/DISCARD 必须引证决定性测试；证据不足归 FIX_NOW/DEFER。
+
+### Changed
+
+- `gates.md`：ledger 的 `verified findings: <n>` 只计 disposition 为 FIX_NOW 的 candidate；DEFER/DISCARD 不进计数、不触发 gate，留痕于 `verify-<CLASS_ID>.md`，DEFER 并入既有 round-close 路由（issue-scribe URL 或记录理由）。
+- Phase 4.5 模板：REFUTED 不再包含 "pure style with no observable effect" —— 纯风格属实项如实给 verdict，由 T2 测试 DISCARD。
+
 ## [0.30.0] - 2026-07-23
 
 ### Changed
