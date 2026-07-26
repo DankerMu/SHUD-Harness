@@ -26,6 +26,10 @@ Required is evaluated within the immediate parent object.
 | sources.forcing.path | yes | no | string | minLength=1 |
 | sources.forcing.sha256 | yes | no | string | minLength=1 |
 | sources.observations | yes | no | array<object> | items: additionalProperties=false |
+| sources.observations[].variable | yes | no | string | minLength=1 |
+| sources.observations[].station | yes | no | string | minLength=1 |
+| sources.observations[].path | yes | no | string | minLength=1 |
+| sources.observations[].sha256 | yes | no | string | minLength=1 |
 | preprocess | no | no | object | additionalProperties=false |
 | preprocess.script | yes | no | string | minLength=1 |
 | preprocess.params | yes | no | object | - |
@@ -35,7 +39,7 @@ Required is evaluated within the immediate parent object.
 ## Example YAML
 
 ```yaml
-data_id: "example"
+data_id: "DATA-22222222-2222-4222-8222-222222222222"
 basin: "example"
 event_window:
   start: "example"
@@ -58,7 +62,7 @@ sources:
       sha256: "example"
 preprocess:
   script: "example"
-  params:
+  params: {}
   output_sha256: "example"
 uncertainty_notes: "example"
 ```
@@ -83,6 +87,10 @@ uncertainty_notes: "example"
 + field sources.forcing.path required=yes nullable=no type=string constraints=minLength=1
 + field sources.forcing.sha256 required=yes nullable=no type=string constraints=minLength=1
 + field sources.observations required=yes nullable=no type=array<object> constraints=items: additionalProperties=false
++ field sources.observations[].variable required=yes nullable=no type=string constraints=minLength=1
++ field sources.observations[].station required=yes nullable=no type=string constraints=minLength=1
++ field sources.observations[].path required=yes nullable=no type=string constraints=minLength=1
++ field sources.observations[].sha256 required=yes nullable=no type=string constraints=minLength=1
 + field preprocess required=no nullable=no type=object constraints=additionalProperties=false
 + field preprocess.script required=yes nullable=no type=string constraints=minLength=1
 + field preprocess.params required=yes nullable=no type=object constraints=-

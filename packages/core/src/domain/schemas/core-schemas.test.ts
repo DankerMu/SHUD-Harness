@@ -67,7 +67,7 @@ describe("core Zod schemas", () => {
     }
   });
 
-  test("public schema barrel keeps Artifact inputs optional and StoredArtifact output required", () => {
+  test("public schema barrel preserves Artifact and ArtifactManifest input/output requiredness", () => {
     const barrelPath = join(import.meta.dir, "index.ts");
     const program = ts.createProgram({
       rootNames: [barrelPath],
@@ -120,6 +120,41 @@ describe("core Zod schemas", () => {
         ? checker.typeToString(checker.getTypeOfSymbolAtLocation(storedMarker, source))
         : undefined
     ).toBe("boolean");
+
+    for (const manifestTypeName of [
+      "ArtifactManifest",
+      "ArtifactManifestInput",
+      "StoredArtifactManifest"
+    ] as const) {
+      const manifestTypeSymbol = exportsByName.get(manifestTypeName);
+      expect(manifestTypeSymbol).toBeDefined();
+      const manifestType = manifestTypeSymbol
+        ? checker.getDeclaredTypeOfSymbol(manifestTypeSymbol)
+        : undefined;
+
+      for (const requiredField of [
+        "manifest_id",
+        "task_id",
+        "artifacts",
+        "generated_at",
+        "generator"
+      ] as const) {
+        const field = manifestType?.getProperty(requiredField);
+        expect(field).toBeDefined();
+        expect(Boolean(field && (field.flags & ts.SymbolFlags.Optional))).toBe(false);
+      }
+
+      for (const optionalField of [
+        "run_id",
+        "report_id",
+        "superseded_by",
+        "manifest_sha256"
+      ] as const) {
+        const field = manifestType?.getProperty(optionalField);
+        expect(field).toBeDefined();
+        expect(Boolean(field && (field.flags & ts.SymbolFlags.Optional))).toBe(true);
+      }
+    }
   });
 
   test("Artifact remains strict and rejects missing, non-boolean, and unknown fields", () => {
@@ -177,6 +212,19 @@ describe("core Zod schemas", () => {
     });
     expect(withoutZero.success).toBe(false);
     expect(issuePaths(withoutZero)).toContain("repos.zero");
+  });
+
+  test("StackLock rejects the legacy runtime.r_packages_lock string", () => {
+    const legacyRPackagesLock = StackLockSchema.safeParse({
+      ...validStackLock(),
+      runtime: {
+        ...validStackLock().runtime,
+        r_packages_lock: "renv.lock"
+      }
+    });
+
+    expect(legacyRPackagesLock.success).toBe(false);
+    expect(issuePaths(legacyRPackagesLock)).toContain("runtime.r_packages_lock");
   });
 
   test("StackLock rejects deprecated or unknown fields at every strict boundary", () => {
@@ -314,6 +362,26 @@ describe("core Zod schemas", () => {
       expect(parsed.data.artifacts[0]?.llm_generated).toBe(false);
       expect(parsed.data.artifacts[1]?.llm_generated).toBe(true);
       expect(parsed.data.artifacts[2]?.llm_generated).toBe(false);
+    }
+  });
+
+  test("ArtifactManifest accepts omission of every optional reference and hash field", () => {
+    const parsed = ArtifactManifestSchema.safeParse(
+      removeKeys(validArtifactManifest(), [
+        "run_id",
+        "report_id",
+        "superseded_by",
+        "manifest_sha256"
+      ])
+    );
+
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.run_id).toBeUndefined();
+      expect(parsed.data.report_id).toBeUndefined();
+      expect(parsed.data.superseded_by).toBeUndefined();
+      expect(parsed.data.manifest_sha256).toBeUndefined();
+      expect(parsed.data.artifacts[0]?.llm_generated).toBe(false);
     }
   });
 
@@ -618,6 +686,17 @@ function removeKey<T extends Record<string, unknown>, K extends keyof T>(
 ): Omit<T, K> {
   const clone = { ...object };
   delete clone[key];
+  return clone;
+}
+
+function removeKeys<T extends Record<string, unknown>, K extends keyof T>(
+  object: T,
+  keys: readonly K[]
+): Omit<T, K> {
+  const clone = { ...object };
+  for (const key of keys) {
+    delete clone[key];
+  }
   return clone;
 }
 

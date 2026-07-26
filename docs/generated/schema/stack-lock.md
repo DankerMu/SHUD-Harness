@@ -51,7 +51,7 @@ Required is evaluated within the immediate parent object.
 ## Example YAML
 
 ```yaml
-stack_id: "example"
+stack_id: "STACK-11111111-1111-4111-8111-111111111111"
 repos:
   SHUD:
     commit: "example"

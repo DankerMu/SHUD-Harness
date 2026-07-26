@@ -71,6 +71,19 @@ The repair preserves `.default(false)` and adds boundary evidence instead of wea
 
 Post-repair local verification on the merged-with-current-main worktree passed: the three focused registry rows (`1/0` each), `test:schemas` (`19/0`), `test:core-services` (`514 pass / 5 platform skips / 0 fail`), `schema:check`, `typecheck`, the full `check`, strict OpenSpec validation, `git diff --check`, and package/lock/submodule/workspace hygiene.
 
+## Cross-review round 1 repair
+
+The first six-lens review of commit `0a9418449dad1e36f1e07595a1ee8b259263a986` produced four deduplicated candidates. Independent verification confirmed three `FIX_NOW` findings and refuted one path-normalization concern:
+
+- generated Markdown examples used semantically invalid placeholder identifiers, rendered empty `preprocess.params` as YAML null, and omitted fields of object-valued array items from field tables and changelogs;
+- the schema suite lacked explicit rejection of the deprecated string-valued `r_packages_lock` and a positive ArtifactManifest fixture omitting every optional field;
+- the strict-input closure self-test accepted `additionalProperties: {}` on arbitrary fixed objects instead of limiting that exception to `DataProvenance.preprocess.params`;
+- the alleged weakened dotted-path normalization oracle was refuted because the caller normalizes that path before comparison and the existing fixture necessarily exercises the fallback branch.
+
+The repair adds semantic round-trip validation for every generated Markdown YAML example against its source Zod schema, emits valid schema-specific example identifiers, preserves empty maps as `{}`, and recursively documents object-array fields such as `sources.observations[].station` and `artifacts[].llm_generated`. The strict-input checker now requires `additionalProperties: false` on fixed objects and permits the open-record schema only at the exact `DataProvenance.preprocess.params` identity/path. Focused mutation proofs made the generator self-test fail with eight aggregated semantic errors, made the legacy string lock fixture fail acceptance, and made the optional-manifest fixture fail when an optional field was artificially required; all mutations were restored before the final run.
+
+Post-round verification passed: generator semantic self-test, generated artifact regeneration and drift check, `test:schemas` (`21 pass / 0 fail`), `typecheck`, full `check`, strict OpenSpec validation, `git diff --check`, and package/lock/submodule/workspace/stash hygiene.
+
 ## Boundary and hygiene
 
 - No route, workspace write-path implementation, package manifest, dependency lock or submodule source is changed. The only service production delta is the Artifact registry's input/output type alignment; its runtime write/path/publication flow is preserved.
