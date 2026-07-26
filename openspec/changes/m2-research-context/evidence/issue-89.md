@@ -92,6 +92,8 @@ The exact SHA/blob binding, inventory, mutation recipe, commands, red summaries,
 
 Round 2 also observed that the baseline Artifact schema stripped unknown keys while this change rejects them. Independent verification disposed that candidate as non-actionable: tasks 2.1 and the expanded fixture explicitly require direct and nested Artifact unknown-key rejection, canonical support contracts enumerate the accepted fields, no repository caller or registry-produced persisted record relies on unknown metadata, and the supported compatibility invariant is omission of `llm_generated` rather than arbitrary extensions.
 
+The completed Phase 6.2 inventory is recorded in [issue-89-round-2-invariant-audit.md](./issue-89-round-2-invariant-audit.md). Its SHA-bound eight-category audit is clean, maps all 16 changed schema rows and all 13 changed registry rows to the batched proof, and includes a fresh red/green replay of the generator `constraintLabel` pattern/default golden mutation.
+
 ## Boundary and hygiene
 
 - No route, workspace write-path implementation, package manifest, dependency lock or submodule source is changed. The only service production delta is the Artifact registry's input/output type alignment; its runtime write/path/publication flow is preserved.

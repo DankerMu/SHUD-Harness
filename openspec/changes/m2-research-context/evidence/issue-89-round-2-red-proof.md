@@ -84,7 +84,7 @@ The generator semantic protections were removed one configuration at a time:
 3. Replace `nestedObjectSchema` array descent with direct-object-only traversal.
 4. Return immediately at the beginning of `assertStrictInputClosed`.
 5. Force `isIntentionalOpenRecordBoundary` to return false.
-6. Delete the `pattern` and `default` branches from `constraintSummary`.
+6. Delete the `pattern` and `default` branches from `constraintLabel`.
 
 Configurations 1–5 each ran:
 
