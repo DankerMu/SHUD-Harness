@@ -84,6 +84,14 @@ The repair adds semantic round-trip validation for every generated Markdown YAML
 
 Post-round verification passed: generator semantic self-test, generated artifact regeneration and drift check, `test:schemas` (`21 pass / 0 fail`), `typecheck`, full `check`, strict OpenSpec validation, `git diff --check`, and package/lock/submodule/workspace/stash hygiene.
 
+## Cross-review round 2 evidence closure
+
+Round 2 independently confirmed one blocking `test-evidence` gap: the earlier focused mutations did not account for the complete new-behavior test set. A disposable exact-HEAD worktree then ran one batched proof over 11 red groups and 10 source-only configurations, mapping the new StackLock/DataProvenance/ArtifactManifest contracts, Artifact default/strict/type behavior, all 13 changed registry rows, and the generator example/YAML/object-array/strict/open-record/golden behaviors to an observed red result. The batch rejected unexpected green or zero-test selections and finished with `UNEXPECTED_GREEN_COUNT: 0`.
+
+The exact SHA/blob binding, inventory, mutation recipe, commands, red summaries, restoration and green results are recorded in [issue-89-round-2-red-proof.md](./issue-89-round-2-red-proof.md). The disposable tree was restored to `b8cd98131bf091fbe17b32adb1fdecae8c49e9bd`; generator/schema/13-row registry/schema-drift checks passed, status and stash were empty, and the temporary script/logs were removed.
+
+Round 2 also observed that the baseline Artifact schema stripped unknown keys while this change rejects them. Independent verification disposed that candidate as non-actionable: tasks 2.1 and the expanded fixture explicitly require direct and nested Artifact unknown-key rejection, canonical support contracts enumerate the accepted fields, no repository caller or registry-produced persisted record relies on unknown metadata, and the supported compatibility invariant is omission of `llm_generated` rather than arbitrary extensions.
+
 ## Boundary and hygiene
 
 - No route, workspace write-path implementation, package manifest, dependency lock or submodule source is changed. The only service production delta is the Artifact registry's input/output type alignment; its runtime write/path/publication flow is preserved.
