@@ -12,15 +12,15 @@ Minimal mergeable slice: schema + collector + tests + generated schema + canonic
 ## Change surface and must-preserve behavior
 
 - Change: `RepositoryRevision` requires `{ commit, branch, detached, dirty }` for SHUD/rSHUD/AutoSHUD/zero；collector records each actual checkout state rather than projecting gitlink values，且合法 attached 分支 `detached` 与 detached HEAD 无碰撞。
-- Change: four no-follow checkout directory capabilities and actual `commit/branch/detached/dirty` join the two-snapshot checks and the post-schema/freeze publication barrier.
+- Change: four no-follow checkout directory capabilities and actual `commit/branch/detached/dirty` join the two-snapshot checks, two consecutive complete publication sweeps, and the final unified observable-identity recheck.
 - Preserve: superproject `HEAD` gitlinks and exact `HEAD:.gitmodules` remain the trusted path/generation authority；worktree `.gitmodules` never becomes authority.
-- Preserve: minimal non-secret Git environment, `--no-lazy-fetch`, bounded output, typed non-disclosing errors, zero partial publication, no fetch/checkout/reset/write；status disables repo-local fsmonitor and overrides nested-submodule ignore.
+- Preserve: minimal non-secret Git environment, `--no-lazy-fetch`, bounded output, typed non-disclosing errors, zero partial publication, no fetch/checkout/reset/write；status disables repo-local fsmonitor, overrides nested-submodule ignore, and is preceded by recursive non-executing clean/process filter rejection.
 - Preserve: #92 owns assembly/fingerprint/persistence and #93 owns routes；this issue only makes their future contract require complete repo revision propagation.
 
 ## Seams under test
 
 - Public `StackLockSchema.safeParse` and generated JSON/Markdown prove required boolean, invalid/missing rejection, strict unknown/deprecated-field behavior, and four-repo positive examples.
-- Public `collectStackLockContext({ repositoryRoot, gitCommand? })` proves actual HEAD/branch/detached/dirty observation, stable errors, and atomic result publication.
+- Public `collectStackLockContext({ repositoryRoot, gitCommand? })` proves actual HEAD/branch/detached/dirty observation, stable errors, and all-or-error publication without partial content.
 - Synthetic independent Git repositories are the standard CI seam；a canonical full-root check may run only when all four repo checkouts are present.
 - Future fingerprint/API behavior is a spec/task assertion only in #132；runtime verification remains owned by #92/#93.
 
@@ -34,7 +34,7 @@ Minimal mergeable slice: schema + collector + tests + generated schema + canonic
 - Concurrency / shared state / ordering: selected — actual checkout state and physical identity must match across two snapshots.
 - Resource limits / large input / discovery: selected — Git output remains bounded；the observer touches exactly four declared repos with fixed commands.
 - Legacy compatibility / examples: selected — old repo revisions without `dirty` are intentionally rejected；canonical and generated examples are updated together.
-- Error handling / rollback / partial outputs: selected — any malformed output, unsafe path, missing repo, or state drift fails atomically with a stable typed error.
+- Error handling / rollback / partial outputs: selected — any malformed output, unsafe path, missing repo, or observable state drift returns a stable typed error with no partial content；handle cleanup preserves primary-error precedence.
 - Release / packaging / dependency compatibility: selected — generated artifacts and public types change；package manifests, lockfile, dependencies, and submodule pins remain unchanged.
 - Documentation / migration notes: selected — frozen-spec bug correction is recorded in the activation ledger and canonical schema.
 - Scientific governance / PI gate / evidence lineage: selected — dirty state is P0 reproducibility evidence, not a scientific conclusion.
@@ -43,11 +43,11 @@ Minimal mergeable slice: schema + collector + tests + generated schema + canonic
 
 ## Invariant Matrix
 
-Governing invariant: a successful StackLock collection records one complete, contemporaneous view of the actual reproducible state of all four checkout directories while gitlinks remain internal path/generation authority.
+Governing invariant: a successful StackLock collection records the actual four-checkout map accepted by two consecutive complete equal publication sweeps and a subsequent unified root/four-path identity recheck；gitlinks remain internal path/generation authority. This is a stability-window guarantee, not strong atomic or return-time contemporaneity: mutation after the final identity observation and ABA wholly between observations are not claimed detectable.
 
 Source-of-truth identity/contract: superproject `HEAD` inventory + exact `HEAD:.gitmodules` declarations + each checkout no-follow directory descriptor/cwd capability `(path, dev, ino)` + actual Git `HEAD`/branch/detached/porcelain status + strict StackLock schema.
 
-- Producers: superproject inventory/blob reader；four serial descriptor-bound checkout top-level/HEAD/branch/status observers；post-freeze publication observers.
+- Producers: superproject inventory/blob reader；four serial descriptor-bound checkout top-level/HEAD/branch/status observers；two post-freeze complete publication sweeps；one unified final observable-identity recheck.
 - Validators/preflight: physical root identity, exact Git top-level and empty prefix, 40-hex HEAD, bounded single-line branch, porcelain dirty boolean, strict schema parse.
 - Storage/cache/query: none — current collector returns frozen memory content；#92/#93 remain future consumers.
 - Public routes/entrypoints: core schema and collector barrel only；no backend route change.
@@ -60,7 +60,7 @@ Regression rows:
 - Actual checkout HEAD differs from gitlink → actual commit/branch recorded, no rejection or fallback.
 - Tracked or untracked change in one repo → its `dirty=true`, unchanged siblings remain false.
 - Detached checkout → `branch="detached", detached=true`；attached branch `detached` → same branch string with `detached=false`.
-- Checkout physical identity or commit/branch/detached/dirty changes between snapshots or in the hash/schema/freeze/publication window → `collection_state_changed`, no partial output；first failure leaves no active sibling producer.
+- Checkout physical identity or commit/branch/detached/dirty changes between snapshots or in the hash/schema/freeze/publication stability window → `collection_state_changed`, no partial output；first failure leaves no active sibling producer or open owned handle.
 - Stable clean four-repo fixture → all dirty values false and no HEAD/index/tracked/untracked byte mutation.
 - Checkout path replaced by symlink → rejected without reading or modifying the target.
 - StackLock missing/non-boolean dirty or unknown/deprecated key → strict schema rejection；complete boolean shape passes.
@@ -89,7 +89,9 @@ Schema tests SHALL also parameterize all four keys: removing `dirty` or replacin
 | Config / project setup | `.gitmodules` missing one declaration, wrong path, nested repo path, or branch declaration drift | `gitmodules_invalid` or `collection_contract_invalid` as contract-specific；zero partial result |
 | File IO / path safety | checkout missing, non-directory, nested top-level, symlink leaf/ancestor, or same-path replacement | `collection_contract_invalid` at admission or `collection_state_changed` after admission；no target bytes read/written |
 | Auth / permissions / secrets | inherited credential/askpass/trace variables and failing Git command | child receives only allowlisted non-secret env；`git_read_failed` message/output contains no secret, absolute path, stderr, or trace file |
-| Concurrency / ordering | checkout physical identity or commit/branch/detached/dirty changes through publication；swap-use-restore；first sibling failure | observable drift → `collection_state_changed`；transient swap cannot redirect reads/publish target；no partial repo map or orphan producer |
+| Concurrency / ordering | each early repo drifts as its next sibling begins；checkout identity/logical state changes through two publication sweeps；swap-use-restore；first sibling failure | observable drift → `collection_state_changed`；two complete maps must match；transient swap cannot redirect reads/publish target；post-final-check/fully unobserved ABA excluded；no partial repo map or orphan producer |
+| Process/config isolation | `.`/empty/relative PATH component；Git exit 73 vs cwd mismatch；local/included clean/process filter in checkout or nested submodule；fsmonitor | resolve one absolute trusted Git before repo cwd or fail；marker-qualified mismatch only；filter helper never executes and typed fail occurs before status；fsmonitor disabled |
+| Resource/error precedence | authority acquired before outer postcondition；producer and close both fail；success then close fails | acquisition-time owner closes every handle；primary error preserved；close failure becomes primary only when no earlier error；FD baseline restored |
 | Resource limits / discovery | HEAD/branch empty, unterminated, multi-line, non-UTF-8, or above 64 KiB；real status above bound；Git timeout | invalid/maxBuffer output → `git_output_invalid`；timeout/nonzero → `git_read_failed`；status empty → clean and one/many porcelain records → dirty；exactly four fixed repos, no recursive discovery |
 | Legacy compatibility | legacy StackLock repo revision lacks dirty | intentional strict rejection；canonical/generated migration note updated；package/lock/submodule pins unchanged |
 | Error / rollback | any producer or final schema validation fails | stable typed error and no returned content；no rollback because the operation is read-only |
@@ -123,11 +125,19 @@ Schema tests SHALL also parameterize all four keys: removing `dirty` or replacin
 
 ## Executed evidence
 
+### Round 2 verified-finding repair (2026-07-27, pre-commit)
+
+- Focused collector/dirty-state batch: `141 pass / 0 fail / 452 expect`，覆盖两个完整 publication sweeps、三仓 next-sibling × commit/branch/dirty/identity 12 格、绝对 PATH、Git exit marker、handle/FD/primary precedence、no-follow-before-realpath 与真实 clean/process/nested filter marker。
+- `test:schemas`: `39 pass / 0 fail / 188 expect`；`test:core-services`: `656 pass / 5 skip / 0 fail / 30308 expect`。
+- 24-way transient replacement-wrapper stress: `24 pass / 0 fail`；所有进程 settlement 后 `stack-lock-dirty-*` temp residue = 0，环境变更 confined to child processes。
+- `schema:check`、`typecheck`、strict OpenSpec 与 `git diff --check`: pass。
+- Blob-bound semantic red-proof script/report已准备；它要求 orchestrator 创建最终 green commit 后传 `--green-sha`，并会打印实际 SHA/五个 blob ID/命令/两次一致的 RED `0/20` 与 GREEN `20/0`/cleanup。这里不伪造尚不存在的 final SHA 或执行结果。
+
 ### Round 1 confirmed-finding repair (2026-07-27)
 
-- Reproducible source-bound proof: `evidence/issue-132-round-1-red-proof.sh` fixed production sources to base `c9ea4fb325f2b4c9ff5c4693ffb90aa13ae8445e` while retaining the final three test files. The exact focused command produced RED `89 pass / 69 fail`, then GREEN `158 pass / 0 fail` after restoring the two final production sources. Full command/source/cleanup record: `evidence/issue-132-round-1-red-proof.md`.
-- Added final publication-barrier coverage for independent commit-only, branch-only, dirty-after-second-renv, physical identity and transient swap-use-restore windows；all fail atomically or prove replacement target cannot redirect reads.
-- Added real repo-local fsmonitor non-execution, nested submodule `ignore=all` override, real >64 KiB status/maxBuffer mapping, attached/detached collision, positive dirty-worktree `.gitmodules` authority and serial failure-settlement coverage.
+- Historical Round 1 run fixed production sources to base `c9ea4fb325f2b4c9ff5c4693ffb90aa13ae8445e` while retaining the then-final three test files and reported RED `89 pass / 69 fail`, then GREEN `158 pass / 0 fail`. Round 2 determined that its replay implementation was not admissible because it copied caller worktree files and accepted arbitrary non-zero RED；the historical record is retained in `evidence/issue-132-round-1-red-proof.md`, while the old script path now delegates to the blob-bound Round 2 proof.
+- Added two-sweep publication coverage for every early repo's commit/branch/dirty/identity drift at the next sibling boundary, plus dirty-after-second-renv, physical identity and transient swap-use-restore windows；all observable drift fails without partial output or proves replacement target cannot redirect reads.
+- Added real repo-local/included clean/process filter non-execution (including nested submodules), fsmonitor non-execution, nested submodule `ignore=all` override, absolute-PATH/exit-marker isolation, acquisition-time handle/FD/error-precedence checks, real >64 KiB status/maxBuffer mapping, attached/detached collision, positive dirty-worktree `.gitmodules` authority and serial failure-settlement coverage.
 - Replacement wrappers use 10-second readiness, unconditional release/restore, and pending settlement before cleanup；focused high-risk selection passed `10/10` without test bleed.
 - Final Round 1 suites: `test:schemas` = 39 pass / 0 fail；`test:core-services` = 634 pass / 5 skip / 0 fail；`test:backend-api` = 184 pass / 1 skip / 0 fail；local-token contracts = 92 pass / 2 skip / 0 fail；the unchanged full `bun run check` completed successfully. Schema generator self-test/drift check, `typecheck`, `PERF-API-001`, strict OpenSpec, docs self-test and 343-file link scan, `git diff --check`, package/lock/zero/workspace/stash hygiene all passed.
 

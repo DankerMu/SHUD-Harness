@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
+import { access, lstat, open, realpath, type FileHandle } from "node:fs/promises";
 import { devNull, platform, release } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { env } from "node:process";
 import { StackLockSchema, type StackLock } from "../schemas/stack-lock";
 import { readDurableSingleLinkFile } from "./durable-single-link-reader";
@@ -39,12 +39,14 @@ const MAX_JSON_FILE_BYTES = 64 * 1024;
 const MAX_GITMODULES_FILE_BYTES = 64 * 1024;
 const STACK_LOCK_RENV_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024;
+const MAX_GIT_INDEX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const GIT_TIMEOUT_MS = 10_000;
 const GIT_NO_LAZY_FETCH_GLOBAL_ARG = "--no-lazy-fetch";
 const GITLINK_PATTERN = /^160000 commit ([0-9A-Fa-f]{40})\t([^\0]+)$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const DETACHED_BRANCH_LABEL = "detached";
+const CWD_IDENTITY_MISMATCH_MARKER = "STACK_LOCK_CWD_IDENTITY_MISMATCH";
 
 export type StackLockRepositoryName = (typeof STACK_LOCK_REPOSITORY_NAMES)[number];
 export type StackLockDegradedReason = typeof STACK_LOCK_RENV_MISSING;
@@ -57,6 +59,8 @@ export interface StackLockCollectionResult extends StackLockCollectedContent {
 export interface StackLockGitCommandInput {
   readonly cwd: string;
   readonly args: readonly string[];
+  /** Per-command bounded output cap; omitted means the 64 KiB default. */
+  readonly maxOutputBytes?: number;
   /** Physical cwd identity required by the production checkout command wrapper. */
   readonly cwdIdentity?: Readonly<{ dev: string; ino: string }>;
 }
@@ -107,24 +111,31 @@ type StackLockFileHasher = typeof hashFile;
 /** Internal deterministic seam for proving producer ordering; not barrel-exported. */
 export async function __collectStackLockContextWithHasherForTest(
   options: CollectStackLockContextOptions,
-  fileHasher: StackLockFileHasher
+  fileHasher: StackLockFileHasher,
+  testHooks: StackLockCollectorTestHooks = {}
 ): Promise<StackLockCollectionResult> {
-  return await collectStackLockContextWithHasher(options, fileHasher);
+  return await collectStackLockContextWithHasher(options, fileHasher, testHooks);
 }
 
 async function collectStackLockContextWithHasher(
   options: CollectStackLockContextOptions,
-  fileHasher: StackLockFileHasher
+  fileHasher: StackLockFileHasher,
+  testHooks: StackLockCollectorTestHooks = {}
 ): Promise<StackLockCollectionResult> {
+  const gitCommand = options.gitCommand ?? await createDefaultGitCommand();
   const repositoryRoot = await resolveRepositoryRoot(options.repositoryRoot);
-  const gitCommand = options.gitCommand ?? runReadOnlyGitCommand;
+  const authorityOwner = new RepositoryCheckoutAuthorityOwner(testHooks.closeCheckoutDirectory);
+  const context: StackLockCollectorContext = Object.freeze({ authorityOwner, testHooks });
   let firstCheap: StackLockCheapSnapshot | undefined;
   let secondCheap: StackLockCheapSnapshot | undefined;
+  let result: StackLockCollectionResult | undefined;
+  let primaryError: unknown;
+  let primaryFailed = false;
   try {
-    firstCheap = await collectCheapSnapshot(repositoryRoot, gitCommand);
+    firstCheap = await collectCheapSnapshot(repositoryRoot, gitCommand, context);
     assertExpectedGitmodules(firstCheap.gitmodules);
     const first = await completeSnapshot(repositoryRoot, firstCheap, fileHasher);
-    secondCheap = await collectCheapSnapshot(repositoryRoot, gitCommand);
+    secondCheap = await collectCheapSnapshot(repositoryRoot, gitCommand, context);
     if (!cheapSnapshotsMatch(firstCheap, secondCheap)) {
       throw new StackLockCollectionError("collection_state_changed");
     }
@@ -160,11 +171,52 @@ async function collectStackLockContextWithHasher(
       throw new StackLockCollectionError("collection_contract_invalid");
     }
 
-    const result = freezeCollectionResult(content, rPackagesLock.degraded);
+    result = freezeCollectionResult(content, rPackagesLock.degraded);
     await assertPublicationSnapshot(repositoryRoot, second, gitCommand);
-    return result;
-  } finally {
-    await closeSnapshotCheckouts(firstCheap, secondCheap);
+  } catch (error) {
+    primaryFailed = true;
+    primaryError = error;
+  }
+  const closeFailed = await authorityOwner.closeAll();
+  if (primaryFailed) throw primaryError;
+  if (closeFailed) throw new StackLockCollectionError("collection_contract_invalid");
+  return result!;
+}
+
+interface StackLockCollectorTestHooks {
+  readonly closeCheckoutDirectory?: (directory: FileHandle) => Promise<void>;
+  readonly observeCheckoutPath?: typeof observeRepositoryRootIdentity;
+  readonly realpathCheckoutPath?: typeof realpath;
+  readonly openCheckoutDirectory?: typeof open;
+  readonly afterCheckoutAuthorityAcquired?: (
+    name: StackLockRepositoryName,
+    authority: RepositoryCheckoutAuthority
+  ) => Promise<void>;
+}
+
+interface StackLockCollectorContext {
+  readonly authorityOwner: RepositoryCheckoutAuthorityOwner;
+  readonly testHooks: StackLockCollectorTestHooks;
+}
+
+class RepositoryCheckoutAuthorityOwner {
+  private readonly authorities = new Set<RepositoryCheckoutAuthority>();
+  private readonly closer: (directory: FileHandle) => Promise<void>;
+
+  constructor(closer: ((directory: FileHandle) => Promise<void>) | undefined) {
+    this.closer = closer ?? (async (directory) => await directory.close());
+  }
+
+  register(authority: RepositoryCheckoutAuthority): void {
+    this.authorities.add(authority);
+  }
+
+  async closeAll(): Promise<boolean> {
+    const settlements = await Promise.allSettled(
+      [...this.authorities].map(async (authority) => await this.closer(authority.directory))
+    );
+    this.authorities.clear();
+    return settlements.some((settlement) => settlement.status === "rejected");
   }
 }
 
@@ -200,41 +252,36 @@ interface StackLockCollectionSnapshot extends StackLockCheapSnapshot {
 
 async function collectCheapSnapshot(
   repositoryRoot: RepositoryRootAuthority,
-  gitCommand: StackLockGitCommand
+  gitCommand: StackLockGitCommand,
+  context: StackLockCollectorContext
 ): Promise<StackLockCheapSnapshot> {
-  let authority: Awaited<ReturnType<typeof collectHeadAuthority>> | undefined;
-  try {
-    return await withRepositoryRootAuthority(repositoryRoot, async () => {
-      const reportedRepositoryRoot = await withRepositoryRootAuthority(
-        repositoryRoot,
-        async () => await collectRepositoryRootIdentity(repositoryRoot, gitCommand)
-      );
-      authority = await withRepositoryRootAuthority(
-        repositoryRoot,
-        async () => await collectHeadAuthority(reportedRepositoryRoot, gitCommand)
-      );
-      const harness = await withRepositoryRootAuthority(
-        repositoryRoot,
-        async () => await readHarnessVersion(reportedRepositoryRoot.path)
-      );
-      const provider = await withRepositoryRootAuthority(
-        repositoryRoot,
-        async () => await readProviderIdentity(reportedRepositoryRoot.path)
-      );
-      return Object.freeze({
-        repositoryRoot: reportedRepositoryRoot,
-        repos: authority.repos,
-        gitlinks: authority.gitlinks,
-        repositoryCheckouts: authority.repositoryCheckouts,
-        harness,
-        provider,
-        gitmodules: authority.gitmodules
-      });
+  return await withRepositoryRootAuthority(repositoryRoot, async () => {
+    const reportedRepositoryRoot = await withRepositoryRootAuthority(
+      repositoryRoot,
+      async () => await collectRepositoryRootIdentity(repositoryRoot, gitCommand)
+    );
+    const authority = await withRepositoryRootAuthority(
+      repositoryRoot,
+      async () => await collectHeadAuthority(reportedRepositoryRoot, gitCommand, context)
+    );
+    const harness = await withRepositoryRootAuthority(
+      repositoryRoot,
+      async () => await readHarnessVersion(reportedRepositoryRoot.path)
+    );
+    const provider = await withRepositoryRootAuthority(
+      repositoryRoot,
+      async () => await readProviderIdentity(reportedRepositoryRoot.path)
+    );
+    return Object.freeze({
+      repositoryRoot: reportedRepositoryRoot,
+      repos: authority.repos,
+      gitlinks: authority.gitlinks,
+      repositoryCheckouts: authority.repositoryCheckouts,
+      harness,
+      provider,
+      gitmodules: authority.gitmodules
     });
-  } catch (error) {
-    await closeRepositoryCheckouts(authority?.repositoryCheckouts);
-    throw error;
-  }
+  });
 }
 
 async function completeSnapshot(
@@ -288,45 +335,38 @@ async function assertPublicationSnapshot(
   snapshot: StackLockCollectionSnapshot,
   gitCommand: StackLockGitCommand
 ): Promise<void> {
+  const firstSweep = await collectPublicationSweep(repositoryRoot, snapshot, gitCommand);
+  const secondSweep = await collectPublicationSweep(repositoryRoot, snapshot, gitCommand);
+  if (
+    JSON.stringify(firstSweep) !== JSON.stringify(snapshot.repos) ||
+    JSON.stringify(secondSweep) !== JSON.stringify(snapshot.repos) ||
+    JSON.stringify(firstSweep) !== JSON.stringify(secondSweep)
+  ) {
+    throw new StackLockCollectionError("collection_state_changed");
+  }
+  await assertCurrentRepositoryRoot(repositoryRoot);
+  for (const name of STACK_LOCK_REPOSITORY_NAMES) {
+    await assertCurrentRepositoryCheckout(snapshot.repositoryCheckouts[name]);
+  }
+  await assertCurrentRepositoryRoot(repositoryRoot);
+}
+
+async function collectPublicationSweep(
+  repositoryRoot: RepositoryRootAuthority,
+  snapshot: StackLockCollectionSnapshot,
+  gitCommand: StackLockGitCommand
+): Promise<StackLock["repos"]> {
   await assertCurrentRepositoryRoot(repositoryRoot);
   const repos = {} as StackLock["repos"];
   for (const name of STACK_LOCK_REPOSITORY_NAMES) {
     const authority = snapshot.repositoryCheckouts[name];
-    await assertCurrentRepositoryCheckout(authority);
     repos[name] = await withRepositoryCheckoutAuthority(
       authority,
       async () => await collectStableRepositoryRevision(authority, gitCommand)
     );
   }
   await assertCurrentRepositoryRoot(repositoryRoot);
-  if (JSON.stringify(repos) !== JSON.stringify(snapshot.repos)) {
-    throw new StackLockCollectionError("collection_state_changed");
-  }
-}
-
-async function closeSnapshotCheckouts(
-  ...snapshots: Array<StackLockCheapSnapshot | undefined>
-): Promise<void> {
-  const authorities = snapshots.flatMap((snapshot) =>
-    snapshot === undefined
-      ? []
-      : STACK_LOCK_REPOSITORY_NAMES.map((name) => snapshot.repositoryCheckouts[name])
-  );
-  const settlements = await Promise.allSettled(
-    authorities.map(async (authority) => await authority.directory.close())
-  );
-  if (settlements.some((settlement) => settlement.status === "rejected")) {
-    throw new StackLockCollectionError("collection_contract_invalid");
-  }
-}
-
-async function closeRepositoryCheckouts(
-  authorities: Readonly<Record<StackLockRepositoryName, RepositoryCheckoutAuthority>> | undefined
-): Promise<void> {
-  if (authorities === undefined) return;
-  await Promise.allSettled(
-    STACK_LOCK_REPOSITORY_NAMES.map(async (name) => await authorities[name].directory.close())
-  );
+  return Object.freeze(repos);
 }
 
 async function resolveRepositoryRoot(input: string): Promise<RepositoryRootAuthority> {
@@ -485,7 +525,8 @@ interface RepositoryCollection {
 
 async function collectHeadAuthority(
   repositoryRoot: RepositoryRootAuthority,
-  gitCommand: StackLockGitCommand
+  gitCommand: StackLockGitCommand,
+  context: StackLockCollectorContext
 ): Promise<{
   readonly repos: StackLock["repos"];
   readonly gitlinks: Readonly<Record<StackLockRepositoryName, string>>;
@@ -511,7 +552,8 @@ async function collectHeadAuthority(
       await collectRepositoryRevisions(
         repositoryRoot.path,
         gitmodules.declarations,
-        gitCommand
+        gitCommand,
+        context
       )
   );
   return Object.freeze({
@@ -609,35 +651,27 @@ async function collectHeadAuthorityInventory(
 async function collectRepositoryRevisions(
   repositoryRoot: string,
   declarations: Readonly<Record<StackLockRepositoryName, GitmoduleDeclaration>>,
-  gitCommand: StackLockGitCommand
+  gitCommand: StackLockGitCommand,
+  context: StackLockCollectorContext
 ): Promise<RepositoryCollection> {
   const resolved: Array<readonly [
     StackLockRepositoryName,
     StackLock["repos"][StackLockRepositoryName],
     RepositoryCheckoutAuthority
   ]> = [];
-  try {
-    for (const name of STACK_LOCK_REPOSITORY_NAMES) {
-      const authority = await resolveRepositoryCheckoutAuthority(
-        repositoryRoot,
-        declarations[name].path
-      );
-      try {
-        const revision = await withRepositoryCheckoutAuthority(authority, async () => {
-          await assertRepositoryGitTopLevel(authority, gitCommand);
-          return await collectStableRepositoryRevision(authority, gitCommand);
-        });
-        resolved.push([name, revision, authority] as const);
-      } catch (error) {
-        await authority.directory.close();
-        throw error;
-      }
-    }
-  } catch (error) {
-    await Promise.allSettled(
-      resolved.map(async ([, , authority]) => await authority.directory.close())
+  for (const name of STACK_LOCK_REPOSITORY_NAMES) {
+    const authority = await resolveRepositoryCheckoutAuthority(
+      repositoryRoot,
+      declarations[name].path,
+      context.testHooks,
+      context.authorityOwner
     );
-    throw error;
+    await context.testHooks.afterCheckoutAuthorityAcquired?.(name, authority);
+    const revision = await withRepositoryCheckoutAuthority(authority, async () => {
+      await assertRepositoryGitTopLevel(authority, gitCommand);
+      return await collectStableRepositoryRevision(authority, gitCommand);
+    });
+    resolved.push([name, revision, authority] as const);
   }
   return Object.freeze({
     repos: Object.freeze(Object.fromEntries(
@@ -671,23 +705,36 @@ async function collectStableRepositoryRevision(
 
 async function resolveRepositoryCheckoutAuthority(
   repositoryRoot: string,
-  relativePath: string
+  relativePath: string,
+  testHooks: StackLockCollectorTestHooks = {},
+  authorityOwner?: RepositoryCheckoutAuthorityOwner
 ): Promise<RepositoryCheckoutAuthority> {
   const requestedPath = join(repositoryRoot, relativePath);
   let directory: FileHandle | undefined;
+  let ownerRegistered = false;
   try {
-    const firstIdentity = await observeRepositoryRootIdentity(requestedPath);
+    const observeCheckoutPath = testHooks.observeCheckoutPath ?? observeRepositoryRootIdentity;
+    const realpathCheckoutPath = testHooks.realpathCheckoutPath ?? realpath;
+    const openCheckoutDirectory = testHooks.openCheckoutDirectory ?? open;
+    const firstIdentity = await observeCheckoutPath(requestedPath);
     if (!(await isSafeExistingDirectoryPath(requestedPath))) {
       throw new Error("repository checkout is not a safe physical directory");
     }
-    directory = await open(
+    directory = await openCheckoutDirectory(
       requestedPath,
       constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
     );
     const descriptorStat = await directory.stat({ bigint: true });
     const descriptorIdentity = Object.freeze({ dev: descriptorStat.dev, ino: descriptorStat.ino });
-    const physicalPath = await realpath(requestedPath);
-    const secondIdentity = await observeRepositoryRootIdentity(requestedPath);
+    const authority = Object.freeze({
+      path: requestedPath,
+      identity: descriptorIdentity,
+      directory
+    });
+    authorityOwner?.register(authority);
+    ownerRegistered = authorityOwner !== undefined;
+    const physicalPath = await realpathCheckoutPath(requestedPath);
+    const secondIdentity = await observeCheckoutPath(requestedPath);
     if (!sameRepositoryRootIdentity(firstIdentity, secondIdentity)) {
       throw new Error("repository checkout changed during admission");
     }
@@ -697,9 +744,9 @@ async function resolveRepositoryCheckoutAuthority(
     ) {
       throw new Error("repository checkout is not the admitted directory object");
     }
-    return Object.freeze({ path: requestedPath, identity: secondIdentity, directory });
+    return authority;
   } catch {
-    await directory?.close().catch(() => undefined);
+    if (!ownerRegistered) await directory?.close().catch(() => undefined);
     throw new StackLockCollectionError("collection_contract_invalid");
   }
 }
@@ -737,13 +784,15 @@ async function withRepositoryCheckoutAuthority<T>(
 async function readRepositoryGitText(
   authority: RepositoryCheckoutAuthority,
   args: readonly string[],
-  gitCommand: StackLockGitCommand
+  gitCommand: StackLockGitCommand,
+  maxOutputBytes = MAX_GIT_OUTPUT_BYTES
 ): Promise<string> {
   let rawResult: unknown;
   try {
     rawResult = await gitCommand({
       cwd: authority.path,
       args: Object.freeze([...args]),
+      maxOutputBytes,
       cwdIdentity: Object.freeze({
         dev: authority.identity.dev.toString(),
         ino: authority.identity.ino.toString()
@@ -755,7 +804,7 @@ async function readRepositoryGitText(
   }
   try {
     return UTF8_DECODER.decode(
-      boundedGitOutputBytes(asRecord(rawResult)?.stdout, MAX_GIT_OUTPUT_BYTES)
+      boundedGitOutputBytes(asRecord(rawResult)?.stdout, maxOutputBytes)
     );
   } catch {
     throw new StackLockCollectionError("git_output_invalid");
@@ -839,6 +888,7 @@ async function collectRepositoryDirty(
   authority: RepositoryCheckoutAuthority,
   gitCommand: StackLockGitCommand
 ): Promise<boolean> {
+  await assertNoExecutableRepositoryFilters(authority, gitCommand);
   const stdout = await readRepositoryGitText(
     authority,
     [
@@ -854,6 +904,73 @@ async function collectRepositoryDirty(
     gitCommand
   );
   return stdout.length > 0;
+}
+
+async function assertNoExecutableRepositoryFilters(
+  authority: RepositoryCheckoutAuthority,
+  gitCommand: StackLockGitCommand
+): Promise<void> {
+  const config = await readRepositoryGitText(
+    authority,
+    [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "config", "--local", "--includes", "--null", "--list"],
+    gitCommand
+  );
+  for (const record of config.split("\0")) {
+    if (record === "") continue;
+    const separator = record.indexOf("\n");
+    const key = (separator === -1 ? record : record.slice(0, separator)).toLowerCase();
+    if (/^filter\..+\.(clean|process)$/u.test(key)) {
+      throw new StackLockCollectionError("collection_contract_invalid");
+    }
+  }
+
+  const index = await readRepositoryGitText(
+    authority,
+    [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"],
+    gitCommand,
+    MAX_GIT_INDEX_OUTPUT_BYTES
+  );
+  for (const record of index.split("\0")) {
+    if (record === "") continue;
+    const match = /^160000 [0-9A-Fa-f]{40} 0\t(.+)$/u.exec(record);
+    if (!match) continue;
+    await assertNoExecutableNestedRepositoryFilters(authority, match[1]!, gitCommand);
+  }
+}
+
+async function assertNoExecutableNestedRepositoryFilters(
+  parent: RepositoryCheckoutAuthority,
+  nestedPath: string,
+  gitCommand: StackLockGitCommand
+): Promise<void> {
+  const owner = new RepositoryCheckoutAuthorityOwner(undefined);
+  let primaryFailed = false;
+  let primaryError: unknown;
+  try {
+    const resolvedNestedPath = await resolveWorkspacePath({
+      workspaceRoot: parent.path,
+      inputPath: nestedPath,
+      evidenceRef: "stack-lock-nested-submodule-filter-audit",
+      access: "read"
+    });
+    const nestedAuthority = await resolveRepositoryCheckoutAuthority(
+      parent.path,
+      resolvedNestedPath.normalizedPath,
+      {},
+      owner
+    );
+    await assertRepositoryGitTopLevel(nestedAuthority, gitCommand);
+    await assertNoExecutableRepositoryFilters(nestedAuthority, gitCommand);
+  } catch (error) {
+    primaryFailed = true;
+    primaryError = error;
+  }
+  const closeFailed = await owner.closeAll();
+  if (primaryFailed) {
+    if (primaryError instanceof StackLockCollectionError) throw primaryError;
+    throw new StackLockCollectionError("collection_contract_invalid");
+  }
+  if (closeFailed) throw new StackLockCollectionError("collection_contract_invalid");
 }
 
 function isStackLockRepositoryName(value: string): value is StackLockRepositoryName {
@@ -876,25 +993,32 @@ export type StackLockGitProcessExecutor = (
   callback: (error: Error | null, stdout: unknown, stderr: unknown) => void
 ) => unknown;
 
-function runReadOnlyGitCommand(input: StackLockGitCommandInput): Promise<StackLockGitCommandResult> {
-  return runReadOnlyGitCommandWithExecutor(input, execFile as StackLockGitProcessExecutor);
+async function createDefaultGitCommand(): Promise<StackLockGitCommand> {
+  const gitExecutable = await resolveTrustedGitExecutable(env);
+  return async (input) => await runReadOnlyGitCommandWithExecutor(
+    input,
+    execFile as StackLockGitProcessExecutor,
+    gitExecutable
+  );
 }
 
 function runReadOnlyGitCommandWithExecutor(
   input: StackLockGitCommandInput,
-  executor: StackLockGitProcessExecutor
+  executor: StackLockGitProcessExecutor,
+  gitExecutable: string
 ): Promise<StackLockGitCommandResult> {
   return new Promise((resolveCommand, rejectCommand) => {
     try {
       const descriptorBound = input.cwdIdentity !== undefined;
       const identity = input.cwdIdentity;
-      const commandFile = descriptorBound ? "/bin/sh" : "git";
+      const commandFile = descriptorBound ? "/bin/sh" : gitExecutable;
       const commandArgs = descriptorBound
         ? [
             "-c",
             descriptorBoundGitScript(),
             "stack-lock-git",
             `${identity!.dev}:${identity!.ino}`,
+            gitExecutable,
             ...input.args
           ]
         : [...input.args];
@@ -905,7 +1029,7 @@ function runReadOnlyGitCommandWithExecutor(
           cwd: input.cwd,
           encoding: null,
           env: readOnlyGitEnvironment(env),
-          maxBuffer: MAX_GIT_OUTPUT_BYTES,
+          maxBuffer: input.maxOutputBytes ?? MAX_GIT_OUTPUT_BYTES,
           timeout: GIT_TIMEOUT_MS,
           windowsHide: true
         },
@@ -914,7 +1038,11 @@ function runReadOnlyGitCommandWithExecutor(
             const errorCode = (error as Error & { code?: unknown }).code;
             if (errorCode === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
               rejectCommand(new StackLockCollectionError("git_output_invalid"));
-            } else if (descriptorBound && (errorCode === 73 || errorCode === "73")) {
+            } else if (
+              descriptorBound &&
+              (errorCode === 73 || errorCode === "73") &&
+              boundedStderrEquals(stderr, `${CWD_IDENTITY_MISMATCH_MARKER}\n`)
+            ) {
               rejectCommand(new StackLockCollectionError("collection_state_changed"));
             } else {
               rejectCommand(new StackLockCollectionError("git_read_failed"));
@@ -939,18 +1067,62 @@ function descriptorBoundGitScript(): string {
   const statCommand = platform() === "darwin"
     ? "/usr/bin/stat -f '%d:%i' ."
     : "/usr/bin/stat -c '%d:%i' .";
-  return `actual=$(${statCommand}) || exit 73
-[ "$actual" = "$1" ] || exit 73
-shift
-exec git "$@"`;
+  return `actual=$(${statCommand}) || { printf '%s\\n' '${CWD_IDENTITY_MISMATCH_MARKER}' >&2; exit 73; }
+[ "$actual" = "$1" ] || { printf '%s\\n' '${CWD_IDENTITY_MISMATCH_MARKER}' >&2; exit 73; }
+git_executable=$2
+shift 2
+exec "$git_executable" "$@"`;
 }
 
 /** Internal deterministic seam for the collector's process-boundary tests; not barrel-exported. */
 export function __runReadOnlyGitCommandForTest(
   input: StackLockGitCommandInput,
-  executor: StackLockGitProcessExecutor
+  executor: StackLockGitProcessExecutor,
+  gitExecutable = "/usr/bin/git"
 ): Promise<StackLockGitCommandResult> {
-  return runReadOnlyGitCommandWithExecutor(input, executor);
+  return runReadOnlyGitCommandWithExecutor(input, executor, gitExecutable);
+}
+
+function boundedStderrEquals(value: unknown, expected: string): boolean {
+  if (typeof value === "string") return value === expected;
+  if (value instanceof Uint8Array) return Buffer.from(value).equals(Buffer.from(expected, "utf8"));
+  return false;
+}
+
+async function resolveTrustedGitExecutable(source: NodeJS.ProcessEnv): Promise<string> {
+  const pathValue = platform() === "win32" ? (source.Path ?? source.PATH) : source.PATH;
+  if (typeof pathValue !== "string" || pathValue.length === 0 || pathValue.includes("\0")) {
+    throw new StackLockCollectionError("git_read_failed");
+  }
+  const components = pathValue.split(delimiter);
+  if (components.some((component) => component.length === 0 || !isAbsolute(component))) {
+    throw new StackLockCollectionError("git_read_failed");
+  }
+  const executableName = platform() === "win32" ? "git.exe" : "git";
+  for (const component of components) {
+    const candidate = join(component, executableName);
+    try {
+      await access(candidate, constants.X_OK);
+      const physical = await realpath(candidate);
+      if (!isAbsolute(physical)) continue;
+      const executableStat = await lstat(physical);
+      if (!executableStat.isFile()) continue;
+      return physical;
+    } catch {
+      // Continue searching only within the already-validated absolute PATH.
+    }
+  }
+  throw new StackLockCollectionError("git_read_failed");
+}
+
+/** Internal filesystem-order seam; not barrel-exported. */
+export async function __resolveRepositoryCheckoutAuthorityForTest(
+  repositoryRoot: string,
+  relativePath: string,
+  testHooks: StackLockCollectorTestHooks
+): Promise<void> {
+  const authority = await resolveRepositoryCheckoutAuthority(repositoryRoot, relativePath, testHooks);
+  await authority.directory.close();
 }
 
 const GIT_CHILD_POSIX_ENVIRONMENT_ALLOWLIST = Object.freeze([

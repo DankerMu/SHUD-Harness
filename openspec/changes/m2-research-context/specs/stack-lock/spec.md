@@ -32,7 +32,9 @@ core-schemas SHALL 新增 StackLock schema：`stack_id`（格式 `STACK-<uuid>`�
 
 采集服务 SHALL 在任何其他 producer 前把请求 `repositoryRoot` 物理规范化，以 no-follow directory observation 捕获其稳定 `(dev, ino)`，并使用相同最小非敏感 Git seam 执行 `git --no-lazy-fetch rev-parse --show-toplevel`；Git 报告 top-level 的物理规范路径 MUST 与请求根完全相等。pathname 与该目录对象身份 MUST 在 admission、每个 snapshot/producer 前后和 publication 前重验；同 pathname 被替换为不同目录对象 MUST 以 typed failure 拒绝且不得返回 partial result。nested directory 即使包含完整合法外观的 package/provider/`.gitmodules` 也必须在读取它们或执行 `ls-tree` 前以 typed failure 拒绝；真实 repository root 与 linked-worktree root 必须正常工作。采集服务随后 SHALL 以一个 bounded `git --no-lazy-fetch ls-tree -z --full-tree HEAD -- .gitmodules SHUD rSHUD AutoSHUD zero` inventory，把四个 gitlink commit 与 mode=`100644` 的 `.gitmodules` blob identity 绑定到同一个 superproject `HEAD` object generation；再以 fixed `git --no-lazy-fetch cat-file blob <exact-object-id>` 读取不超过 64 KiB 的精确 blob，解析 exact 四项声明（path 必须为 SHUD/rSHUD/AutoSHUD/zero；branch metadata 为 SHUD/rSHUD/AutoSHUD=`master`，zero=`development`）。这些声明只校验配置 generation，不是 `repos.*.branch` 的输出 authority。工作树 `.gitmodules`（包括 dirty 或 untracked bytes）MUST NOT 成为路径或 generation authority；missing/wrong-mode/oversized/malformed HEAD blob MUST typed fail。两次 cheap snapshot MUST 比较完整 authority identity（root path + `(dev, ino)`、四个 gitlink、`.gitmodules` object id、blob digest 与 declarations），不得把 schema 示例、gitlink 或声明 branch 冒充实际 checkout 状态。每个生产 Git command MUST 在 subcommand 前携带全局 `--no-lazy-fetch`；Git <2.45 不支持时 MUST 在首条 root-identity command fail closed，不得降级 dispatch `ls-tree`、`cat-file` 或 remote 操作。采集 MUST 使用最小非敏感 Git 子进程环境、禁用 lazy fetch/trace 写入，MUST NOT 修改任何 git 状态、联网抓取对象或执行 checkout/fetch/reset。现有 `renv.lock` SHALL 在已打开 regular-file descriptor 上执行 inclusive 16 MiB byte bound：恰好 16 MiB 成功，超限以 typed failure 拒绝且不返回 partial result。
 
-四个 gitlink 与 `HEAD:.gitmodules` SHALL 仅作为 checkout 路径和采集代际 authority。每个 checkout admission MUST 先 no-follow 拒绝 symlink 再调用 realpath，并打开、持有 directory descriptor/cwd capability；每个生产 Git command MUST 先在其已绑定 cwd 内核对 `(dev, ino)`，匹配后才运行，MUST NOT 重新解析原 checkout pathname 来选择 Git worktree。采集服务 MUST 对每个声明 checkout 读取实际 40-hex `HEAD`、实际 branch 与 required `detached`（detached HEAD = `branch="detached", detached=true`；attached 分支 `detached` = 同 branch 且 `detached=false`），以及覆盖 tracked + untracked + nested submodule 的 `dirty`。status MUST 使用 `-c core.fsmonitor=false` 与 `--ignore-submodules=none`。实际 HEAD 与 gitlink 不同是合法状态，必须记录实际值。四 checkout pipeline MUST 串行，或在失败时 cancel 并等待全部 settlement；collector 不得在已启动 sibling Git producer 仍活跃时返回。每个 checkout 的 no-follow 物理目录身份与完整 `commit/branch/detached/dirty` MUST 纳入两次 cheap snapshot；第二次 renv producer、schema validation 与 result freeze 后、return 前 MUST 以第二 snapshot capability 再采集四 checkout 完整状态并核对 pathname identity。任一可观测路径替换或状态漂移 → `collection_state_changed`，不返回 partial result。无协作外部 writer 的瞬时 swap-use-restore 不承诺必被独立观测，但 MUST NOT 重定向 Git 读取或导致 replacement target 被发布；return 时 canonical pathname identity MUST 有最终证明。
+四个 gitlink 与 `HEAD:.gitmodules` SHALL 仅作为 checkout 路径和采集代际 authority。每个 checkout admission MUST 先 no-follow 拒绝 symlink 再调用 realpath，并打开、持有 directory descriptor/cwd capability；capability 创建后 MUST 立即登记到 collection-scope owner，不得等外层 root postcondition 成功才取得 ownership。每个生产 Git command MUST 先在其已绑定 cwd 内核对 `(dev, ino)`，匹配后才运行，MUST NOT 重新解析原 checkout pathname 来选择 Git worktree。默认 runner MUST 在进入任一 repo cwd 前从 PATH 解析一次绝对 Git executable；PATH 的每个 component MUST 非空且为绝对路径，root 与 checkout 命令都 MUST 执行解析后的绝对 binary。cwd identity mismatch MUST 以专用 marker/remap 与 Git 自身同 exit code 失败区分。采集服务 MUST 对每个声明 checkout 读取实际 40-hex `HEAD`、实际 branch 与 required `detached`（detached HEAD = `branch="detached", detached=true`；attached 分支 `detached` = 同 branch 且 `detached=false`），以及覆盖 tracked + untracked + nested submodule 的 `dirty`。status 前 MUST 用不会执行 filter helper 的受限 local/included config 读取与 index-only nested-submodule discovery 递归审计 checkout；发现任何有效 `filter.*.clean` 或 `filter.*.process` MUST 在 status 前以 typed failure 拒绝，helper 不得执行。status MUST 使用 `-c core.fsmonitor=false` 与 `--ignore-submodules=none`；审计后的其余 status 配置面不得执行 repository-controlled helper。实际 HEAD 与 gitlink 不同是合法状态，必须记录实际值。四 checkout pipeline MUST 串行，或在失败时 cancel 并等待全部 settlement；collector 不得在已启动 sibling Git producer 仍活跃时返回。所有已登记 handle MUST 在成功与所有 failure 路径释放；cleanup failure 不得覆盖 primary error，仅在没有 primary error 时成为 typed contract failure。
+
+每个 checkout 的 no-follow 物理目录身份与完整 `commit/branch/detached/dirty` MUST 纳入两次 cheap snapshot。第二次 renv producer、schema validation 与 result freeze 后 MUST 以第二 snapshot capability 执行至少两个连续、完整的四仓 publication map sweep；两个 map MUST 彼此相等并等于待发布 snapshot。所有 sweep 完成后 MUST 统一复核 repository root 与四个 canonical checkout pathname identity。任一在该稳定观测窗口中可见的路径替换或状态漂移 → `collection_state_changed`，且不返回 partial result。该只读协议不承诺强原子 snapshot 或 return-time contemporaneity：无协作 external writer 在 observations 之间完成并恢复的 ABA/swap，以及最后一次 identity 复核后的 mutation，均可能不可观测；但任一可观测漂移 MUST fail，且 replacement target MUST NOT 重定向 Git 读取或被发布。
 
 #### Scenario: 四个 submodule commit 均可读取
 
@@ -51,7 +53,7 @@ core-schemas SHALL 新增 StackLock schema：`stack_id`（格式 `STACK-<uuid>`�
 
 #### Scenario: checkout 状态跨快照漂移
 
-- **WHEN** 任一 checkout 的 HEAD、branch、detached、dirty 或物理目录身份在两次 snapshot 间、后续 hash/schema/freeze 窗口或 publication barrier 发生可观测变化
+- **WHEN** 任一 checkout 的 HEAD、branch、detached、dirty 或物理目录身份在两次 snapshot 间、后续 hash/schema/freeze 窗口、任一完整 publication sweep 或最终统一 identity 复核中发生可观测变化
 - **THEN** 以 `collection_state_changed` 拒绝且不发布任何 partial StackLock content
 
 #### Scenario: checkout 路径不可信
@@ -67,7 +69,17 @@ core-schemas SHALL 新增 StackLock schema：`stack_id`（格式 `STACK-<uuid>`�
 #### Scenario: checkout porcelain dirty 语义
 
 - **WHEN** `-c core.fsmonitor=false status --porcelain=v1 --untracked-files=all --ignore-submodules=none --` 返回空字节、一个合法记录或多个合法记录
-- **THEN** 空输出映射 `dirty=false`；一个或多个记录均映射 `dirty=true`；repo-local fsmonitor 不执行，`submodule.*.ignore=all` 不能隐藏 nested submodule change；仅非 UTF-8、超过 64 KiB 或进程失败按 `git_output_invalid`/`git_read_failed` 拒绝
+- **THEN** 空输出映射 `dirty=false`；一个或多个记录均映射 `dirty=true`；repo-local fsmonitor 不执行，`submodule.*.ignore=all` 不能隐藏 nested submodule change；任何 local/included `filter.*.clean`/`.process`（含 nested submodule）在 status 前 typed fail 且 helper 不执行；仅非 UTF-8、超过 64 KiB 或进程失败按 `git_output_invalid`/`git_read_failed` 拒绝
+
+#### Scenario: publication 稳定观测窗口
+
+- **WHEN** 任一早序 checkout 在本轮 sweep 已读取后、下一 sibling 开始时发生 commit/branch/dirty/identity 漂移
+- **THEN** 后续完整 sweep 或最终统一 identity 复核观察到变化并返回 `collection_state_changed`；不返回 partial repo map
+
+#### Scenario: 不可信 PATH 与 Git exit 码
+
+- **WHEN** PATH 含 `.`、空或其他相对 component，或可信 Git 自身以与 identity remap 相同的数值 exit code 失败
+- **THEN** 不执行 checkout-local binary；不可信 PATH 以 `git_read_failed` fail closed，可信 Git 失败仍为 `git_read_failed`，只有带专用 identity marker 的 mismatch 映射 `collection_state_changed`
 
 #### Scenario: nested directory 不是仓库根
 

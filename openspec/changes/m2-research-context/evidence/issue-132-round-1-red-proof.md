@@ -1,5 +1,7 @@
 # Issue #132 Round 1 source-bound red proof
 
+> Historical record only. The original replay implementation was retired after Round 2 found that it copied caller worktree files and accepted arbitrary non-zero RED outcomes. Its path now delegates to the committed-tree/blob-bound Round 2 proof, which requires `--green-sha`, checks exact semantic failure counts, repeats RED/GREEN twice, and rejects related dirty paths. The counts below describe the historical run and are not presented as replayable by the retired implementation.
+
 - Base production SHA: `c9ea4fb325f2b4c9ff5c4693ffb90aa13ae8445e`.
 - Production source set: `packages/core/src/domain/schemas/stack-lock.ts` and `packages/core/src/domain/services/stack-lock-collector.ts`.
 - Final tests retained: `core-schemas.test.ts`, `stack-lock-collector.test.ts`, and `stack-lock-dirty-state.test.ts`.

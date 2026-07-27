@@ -75,7 +75,7 @@ describe("StackLock context collector", () => {
       gitCommand
     });
 
-    expect(calls).toHaveLength(86);
+    expect(calls).toHaveLength(174);
     expect(calls[0]).toEqual({
       cwd: resolve(repositoryRoot),
       args: ["--no-lazy-fetch", "rev-parse", "--show-toplevel"]
@@ -111,10 +111,10 @@ describe("StackLock context collector", () => {
     const shudHeadReads = calls.filter(
       (call) => call.cwd === resolve(join(repositoryRoot, "SHUD")) && call.args[1] === "rev-parse"
     );
-    expect(shudHeadReads).toHaveLength(14);
+    expect(shudHeadReads).toHaveLength(18);
     expect(shudHeadReads.filter((call) => call.args.at(-1) === "--show-prefix")).toHaveLength(2);
-    expect(shudHeadReads.filter((call) => call.args.at(-1) === "HEAD" && call.args.length === 3)).toHaveLength(6);
-    expect(shudHeadReads.filter((call) => call.args.includes("--abbrev-ref"))).toHaveLength(6);
+    expect(shudHeadReads.filter((call) => call.args.at(-1) === "HEAD" && call.args.length === 3)).toHaveLength(8);
+    expect(shudHeadReads.filter((call) => call.args.includes("--abbrev-ref"))).toHaveLength(8);
     expect(result.repos).toEqual({
       SHUD: { commit: SHAS.SHUD, branch: "master", detached: false, dirty: false },
       rSHUD: { commit: SHAS.rSHUD, branch: "master", detached: false, dirty: false },
@@ -552,8 +552,111 @@ describe("StackLock context collector", () => {
         callback(null, "/trusted/repo\n", "");
       }
     );
-    expect(observedFile).toBe("git");
+    expect(observedFile).toBe("/usr/bin/git");
     expect(observedArgs).toEqual(["--no-lazy-fetch", "rev-parse", "--show-toplevel"]);
+  });
+
+  test("distinguishes a descriptor identity marker from Git's own exit 73", async () => {
+    const run = async (stderr: string) => {
+      let thrown: unknown;
+      try {
+        await __runReadOnlyGitCommandForTest(
+          {
+            cwd: "/trusted/repo",
+            cwdIdentity: { dev: "1", ino: "2" },
+            args: ["--no-lazy-fetch", "rev-parse", "HEAD"]
+          },
+          (_file, _args, _options, callback) => {
+            const error = Object.assign(new Error("exit 73"), { code: 73 });
+            callback(error, "", stderr);
+          }
+        );
+      } catch (error) {
+        thrown = error;
+      }
+      return thrown;
+    };
+
+    expect(await run("STACK_LOCK_CWD_IDENTITY_MISMATCH\n")).toMatchObject({
+      code: "collection_state_changed"
+    });
+    expect(await run("fatal: trusted Git failed with exit 73\n")).toMatchObject({
+      code: "git_read_failed"
+    });
+  });
+
+  test.each(["relative", "empty"] as const)(
+    "rejects %s PATH components before a checkout-local git marker can execute",
+    async (pathKind) => {
+      const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+      const marker = join(repositoryRoot, "untrusted-git-ran");
+      const localGit = join(repositoryRoot, "git");
+      await writeFile(localGit, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 0\n`);
+      await chmod(localGit, 0o700);
+      const previousPath = env.PATH;
+      const trustedDirectory = dirname(execFileSync("which", ["git"], { encoding: "utf8" }).trim());
+      env.PATH = pathKind === "relative"
+        ? `.:${trustedDirectory}`
+        : `:${trustedDirectory}`;
+      try {
+        await expect(collectStackLockContext({ repositoryRoot })).rejects.toMatchObject({
+          code: "git_read_failed"
+        });
+      } finally {
+        if (previousPath === undefined) delete env.PATH;
+        else env.PATH = previousPath;
+      }
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  );
+
+  test("owns a checkout handle before outer postconditions and preserves the primary error over close failure", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    const descriptorRoot = platform() === "linux" ? "/proc/self/fd" : "/dev/fd";
+    const baseline = (await readdir(descriptorRoot)).length;
+    let acquired = 0;
+    let closed = 0;
+
+    await expect(
+      __collectStackLockContextWithHasherForTest(
+        { repositoryRoot, gitCommand: fakeGitCommand() },
+        hashFile,
+        {
+          afterCheckoutAuthorityAcquired: async () => {
+            acquired += 1;
+            throw new StackLockCollectionError("provider_config_invalid");
+          },
+          closeCheckoutDirectory: async (directory) => {
+            closed += 1;
+            await directory.close();
+            throw new Error("close failure must not mask primary");
+          }
+        }
+      )
+    ).rejects.toMatchObject({ code: "provider_config_invalid" });
+
+    expect(acquired).toBe(1);
+    expect(closed).toBe(1);
+    expect((await readdir(descriptorRoot)).length).toBe(baseline);
+  });
+
+  test("reports close failure when collection otherwise has no primary error", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    let closed = 0;
+    await expect(
+      __collectStackLockContextWithHasherForTest(
+        { repositoryRoot, gitCommand: fakeGitCommand() },
+        hashFile,
+        {
+          closeCheckoutDirectory: async (directory) => {
+            closed += 1;
+            await directory.close();
+            throw new Error("close failure");
+          }
+        }
+      )
+    ).rejects.toMatchObject({ code: "collection_contract_invalid" });
+    expect(closed).toBe(8);
   });
 
   test.each(["timeout", "maxBuffer"])(
@@ -1268,9 +1371,21 @@ describe("StackLock context collector", () => {
     expect(serviceExports.collectStackLockContext).toBe(collectStackLockContext);
     expect("__runReadOnlyGitCommandForTest" in serviceExports).toBe(false);
     expect("__collectStackLockContextWithHasherForTest" in serviceExports).toBe(false);
+    expect("__resolveRepositoryCheckoutAuthorityForTest" in serviceExports).toBe(false);
     const source = await readFile(join(import.meta.dir, "stack-lock-collector.ts"), "utf8");
     expect(source).not.toMatch(/process\.env|GLM_API_KEY|console\./u);
     expect(source).not.toMatch(/runtimeVersions/u);
+  });
+
+  test("wrapper readiness timeout respects one total deadline budget", async () => {
+    const root = await createTempRoot("stack-lock-readiness-budget-");
+    const startedAt = Date.now();
+    await expect(waitForPath(join(root, "never-created"), 50)).rejects.toThrow(
+      "timed out waiting for Git wrapper synchronization"
+    );
+    const elapsed = Date.now() - startedAt;
+    expect(elapsed).toBeGreaterThanOrEqual(45);
+    expect(elapsed).toBeLessThan(250);
   });
 });
 
@@ -1459,6 +1574,20 @@ function simulatedSubmoduleGitResult(
     return { stdout: `${REPOSITORY_BRANCHES[repositoryName]}\n` };
   }
   if (
+    JSON.stringify(args) === JSON.stringify([
+      "--no-lazy-fetch", "config", "--local", "--includes", "--null", "--list"
+    ])
+  ) {
+    return { stdout: "" };
+  }
+  if (
+    JSON.stringify(args) === JSON.stringify([
+      "--no-lazy-fetch", "-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"
+    ])
+  ) {
+    return { stdout: "" };
+  }
+  if (
     args.length === 8 &&
     args[0] === "--no-lazy-fetch" &&
     args[1] === "-c" &&
@@ -1513,14 +1642,19 @@ async function replaceRepositoryRoot(
   await rename(replacementRoot, repositoryRoot);
 }
 
-async function waitForPath(path: string): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+async function waitForPath(path: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
     try {
       await access(path);
       return;
-    } catch {
-      await delay(10);
+    } catch (error) {
+      if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) {
+        throw error;
+      }
     }
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(10, Math.max(0, deadline - Date.now())));
   }
   throw new Error("timed out waiting for Git wrapper synchronization");
 }
