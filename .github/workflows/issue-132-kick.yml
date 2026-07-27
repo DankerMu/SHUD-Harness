@@ -60,6 +60,18 @@ jobs:
           ):
               script = script.replace(f"{variable} = '''", f"{variable} = r'''", 1)
           script = script.replace("insertion = '''", "insertion = r'''", 1)
+          for pattern_name, replacement_name in (
+              ('head_pattern', 'head_replacement'),
+              ('repo_pattern', 'repo_replacement'),
+              ('commit_pattern', 'commit_replacement'),
+              ('branch_pattern', 'branch_replacement'),
+              ('dirty_pattern', 'dirty_replacement'),
+          ):
+              old = f'{pattern_name}.subn({replacement_name}, source, count=1)'
+              new = f'{pattern_name}.subn(lambda _match: {replacement_name}, source, count=1)'
+              if script.count(old) != 1:
+                  raise SystemExit(f'{pattern_name} replacement call count was {script.count(old)}')
+              script = script.replace(old, new, 1)
 
           post_patch = r"""python3 - <<'PYFIX'
           from pathlib import Path
@@ -95,7 +107,11 @@ jobs:
           }
 
           async function collectRepositoryHeadCommit'''
-          collector, count = top_level_pattern.subn(top_level_replacement, collector, count=1)
+          collector, count = top_level_pattern.subn(
+              lambda _match: top_level_replacement,
+              collector,
+              count=1,
+          )
           if count != 1:
               raise SystemExit(f'top-level function repair count was {count}')
           collector_path.write_text(collector)
