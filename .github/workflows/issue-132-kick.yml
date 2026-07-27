@@ -1,0 +1,47 @@
+name: Issue 132 repair runner
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/issue-132-bootstrap.yml"
+      - ".github/workflows/issue-132-kick.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-132-stack-lock-dirty-state
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+      - name: Initialize required workspace submodule
+        run: git submodule update --init zero
+      - name: Extract and run the branch repair script
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          lines = Path('.github/workflows/issue-132-bootstrap.yml').read_text().splitlines()
+          marker = '        run: |'
+          try:
+              start = lines.index(marker) + 1
+          except ValueError as error:
+              raise SystemExit('repair run block not found') from error
+          script_lines = []
+          for line in lines[start:]:
+              if line and not line.startswith('          '):
+                  raise SystemExit(f'unexpected repair indentation: {line!r}')
+              script_lines.append(line[10:] if line else '')
+          Path('/tmp/issue-132-repair.sh').write_text('\n'.join(script_lines) + '\n')
+          PY
+          bash -n /tmp/issue-132-repair.sh
+          bash /tmp/issue-132-repair.sh
