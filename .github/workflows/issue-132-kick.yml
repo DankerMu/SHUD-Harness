@@ -186,6 +186,62 @@ jobs:
 
           test_path = Path('packages/core/src/domain/services/stack-lock-collector.test.ts')
           tests = test_path.read_text()
+          helper_pattern = re.compile(
+              r'function simulatedSubmoduleGitResult\([\s\S]*?\n}\n\nfunction repositoryNameFromPath'
+          )
+          helper_replacement = r'''function simulatedSubmoduleGitResult(
+            cwd: string,
+            args: readonly string[]
+          ): StackLockGitCommandResult | undefined {
+            const repositoryName = repositoryNameFromPath(cwd);
+            if (repositoryName === undefined) return undefined;
+            if (
+              args.length === 4 &&
+              args[0] === "--no-lazy-fetch" &&
+              args[1] === "rev-parse" &&
+              args[2] === "--show-toplevel" &&
+              args[3] === "--show-prefix"
+            ) {
+              return { stdout: `${resolve(cwd)}\n\n` };
+            }
+            if (
+              args.length === 3 &&
+              args[0] === "--no-lazy-fetch" &&
+              args[1] === "rev-parse" &&
+              args[2] === "HEAD"
+            ) {
+              return { stdout: `${SHAS[repositoryName]}\n` };
+            }
+            if (
+              args.length === 4 &&
+              args[0] === "--no-lazy-fetch" &&
+              args[1] === "rev-parse" &&
+              args[2] === "--abbrev-ref" &&
+              args[3] === "HEAD"
+            ) {
+              return { stdout: `${REPOSITORY_BRANCHES[repositoryName]}\n` };
+            }
+            if (
+              args.length === 5 &&
+              args[0] === "--no-lazy-fetch" &&
+              args[1] === "status" &&
+              args[2] === "--porcelain=v1" &&
+              args[3] === "--untracked-files=all" &&
+              args[4] === "--"
+            ) {
+              return { stdout: "" };
+            }
+            return undefined;
+          }
+
+          function repositoryNameFromPath'''
+          tests, helper_count = helper_pattern.subn(
+              lambda _match: helper_replacement,
+              tests,
+              count=1,
+          )
+          if helper_count != 1:
+              raise SystemExit(f'submodule helper replacement count was {helper_count}')
 
           old_setup = '''  await writeFixtureRepositoryFiles(repositoryRoot, { version });
             git(repositoryRoot, ["init", "--quiet"]);'''
@@ -204,6 +260,15 @@ jobs:
           if tests.count(old_setup) != 1:
               raise SystemExit(f'git-backed fixture setup count was {tests.count(old_setup)}')
           tests = tests.replace(old_setup, new_setup)
+
+          worktree_line = '''    git(repositoryRoot, ["worktree", "add", "--quiet", "--detach", linkedRoot, "HEAD"]);'''
+          worktree_insert = '''    git(repositoryRoot, ["worktree", "add", "--quiet", "--detach", linkedRoot, "HEAD"]);
+            await Promise.all(STACK_LOCK_REPOSITORY_NAMES.map((name) =>
+              mkdir(join(linkedRoot, name), { recursive: true })
+            ));'''
+          if tests.count(worktree_line) != 1:
+              raise SystemExit(f'linked worktree setup count was {tests.count(worktree_line)}')
+          tests = tests.replace(worktree_line, worktree_insert, 1)
 
           old_real = '''    const repositoryRoot = resolve(import.meta.dir, "../../../../..");
               const beforeHead = git(repositoryRoot, ["rev-parse", "HEAD"]);'''
