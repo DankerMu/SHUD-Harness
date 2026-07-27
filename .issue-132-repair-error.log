@@ -1,68 +1,80 @@
-From https://github.com/DankerMu/SHUD-Harness
- * branch            main       -> FETCH_HEAD
-Already up to date.
-bun install v1.2.19 (aad3abea)
++ 87 |   readonly code: StackLockCollectionErrorCode;
++ 88 | 
++ 89 |   constructor(code: StackLockCollectionErrorCode) {
++ 90 |     super("StackLock context collection failed.");
++          ^
++ StackLockCollectionError: StackLock context collection failed.
++  code: "git_output_invalid"
++ 
++       at new StackLockCollectionError (<runner-path>
++       at assertRepositoryGitTopLevel (<runner-path>
+- {
+-   code: "collection_state_changed",
+-   message: "StackLock context collection failed.",
+- }
 
-+ typescript@5.8.3
+- Expected  - 4
++ Received  + 12
 
-186 packages installed [563.00ms]
-bun test v1.2.19 (aad3abea)
+      at expectStateChanged (<runner-path>
+(fail) StackLock context collector > rejects a committed byte-only .gitmodules generation transition between snapshots [31.00ms]
 
-::group::packages/core/src/domain/schemas/core-schemas.test.ts:
-(pass) core Zod schemas > TaskCard accepts a valid stored object and rejects missing required fields [6.00ms]
-(pass) core Zod schemas > TaskCard rejects status values outside the coarse state machine
-(pass) core Zod schemas > Artifact defaults llm_generated to false and preserves an explicit true marker [1.00ms]
-(pass) core Zod schemas > public schema barrel preserves Artifact and ArtifactManifest input/output requiredness [1270.01ms]
-(pass) core Zod schemas > Artifact remains strict and rejects missing, non-boolean, and unknown fields [1.00ms]
-(pass) core Zod schemas > StackLock accepts the four-repository shape and nullable R package lock [2.00ms]
-(pass) core Zod schemas > StackLock requires llm.base_url and every canonical repository
-(pass) core Zod schemas > StackLock rejects the legacy runtime.r_packages_lock string [1.00ms]
-(pass) core Zod schemas > StackLock rejects deprecated or unknown fields at every strict boundary
-(pass) core Zod schemas > StackLock rejects ids outside STACK-<uuid>
-(pass) core Zod schemas > DataProvenance accepts the canonical object window and hashed sources [2.00ms]
-(pass) core Zod schemas > DataProvenance rejects the deprecated event window array and missing basin
-(pass) core Zod schemas > DataProvenance rejects unhashed sources and incomplete observations
-(pass) core Zod schemas > DataProvenance enforces DATA-<uuid> and strict nested records
-(pass) core Zod schemas > ArtifactManifest preserves omitted, true, and false Artifact LLM markers [1.00ms]
-(pass) core Zod schemas > ArtifactManifest accepts omission of every optional reference and hash field
-(pass) core Zod schemas > ArtifactManifest requires generator and full Artifact entries
-(pass) core Zod schemas > ArtifactManifest enforces MANIFEST-<uuid> references and strict fields [1.00ms]
-(pass) core Zod schemas > ErrorRecord accepts remediation and rejects invalid next_action [1.00ms]
-(pass) core Zod schemas > IdempotencyRecord accepts request_digest and rejects missing required fields [1.00ms]
-(pass) core Zod schemas > LockRecord accepts a valid object and rejects missing required fields
-(pass) StackLock repository dirty state > requires a boolean dirty field for every repository revision
+::error file=packages/core/src/domain/services/stack-lock-collector.ts,line=90,col=5,title=StackLockCollectionError: StackLock context collection failed.::%0A      at new StackLockCollectionError (<runner-path>      at assertRepositoryGitTopLevel (<runner-path>
+85 | 
+86 | export class StackLockCollectionError extends Error {
+87 |   readonly code: StackLockCollectionErrorCode;
+88 | 
+89 |   constructor(code: StackLockCollectionErrorCode) {
+90 |     super("StackLock context collection failed.");
+         ^
+StackLockCollectionError: StackLock context collection failed.
+ code: "git_output_invalid"
+
+      at new StackLockCollectionError (<runner-path>
+      at assertRepositoryGitTopLevel (<runner-path>
+(fail) StackLock context collector > default git reader observes the real four gitlinks including the frozen zero pin without git mutation [219.00ms]
+(pass) StackLock context collector > services barrel exposes the collector contract and production does not read API-key environment values
 
 ::endgroup::
 
- 22 pass
- 0 fail
- 161 expect() calls
-Ran 22 tests across 1 file. [1.99s]
-bun test v1.2.19 (aad3abea)
+35 tests failed:
+(fail) StackLock context collector > collects four gitlinks, explicit placeholders, provider identity, and missing-renv degradation [4.00ms]
+(fail) StackLock context collector > hashes an existing renv.lock through the shared file hashing service and is change-sensitive [4.00ms]
+(fail) StackLock context collector > rejects a generation transition between collection and revalidation [3.00ms]
+(fail) StackLock context collector > rejects a byte-only package source transition at the revalidation barrier [4.00ms]
+(fail) StackLock context collector > rejects provider byte-only drift even when its public projection is unchanged [5.00ms]
+(fail) StackLock context collector > keeps an invalid second provider observation source-specific [3.00ms]
+(fail) StackLock context collector > rejects renv A to B across the two-snapshot generation barrier [3.00ms]
+(fail) StackLock context collector > rejects renv missing to present across the two-snapshot generation barrier [3.00ms]
+(fail) StackLock context collector > rejects renv present to missing across the two-snapshot generation barrier [4.00ms]
+(fail) StackLock context collector > rejects .gitmodules byte-only drift across the generation barrier [3.00ms]
+(fail) StackLock context collector > rejects .gitmodules branch-authority drift across the generation barrier [3.00ms]
+(fail) StackLock context collector > accepts an exact 64 KiB HEAD .gitmodules blob and rejects the next byte [3.00ms]
+(fail) StackLock context collector > rejects a committed .gitmodules object generation transition [4.00ms]
+(fail) StackLock context collector > rejects an oversized root package.json without disclosing its path or content [4.00ms]
+(fail) StackLock context collector > rejects a missing canonical harness version [3.00ms]
+(fail) StackLock context collector > rejects a blank canonical harness version [3.00ms]
+(fail) StackLock context collector > rejects a non-string canonical harness version [3.00ms]
+(fail) StackLock context collector > rejects oversized provider JSON without disclosing its path or content [4.00ms]
+(fail) StackLock context collector > rejects unsafe provider identity without echoing config secrets or absolute paths [4.00ms]
+(fail) StackLock context collector > rejects provider selector provider drift without leaking config credentials [3.00ms]
+(fail) StackLock context collector > rejects provider selector model missing without leaking config credentials [3.00ms]
+(fail) StackLock context collector > rejects provider selector syntax drift without leaking config credentials [3.00ms]
+(fail) StackLock context collector > rejects provider target model id drift without leaking config credentials [3.00ms]
+(fail) StackLock context collector > rejects provider nested model id drift without leaking config credentials [2.00ms]
+(fail) StackLock context collector > rejects a symlink renv.lock without reading or modifying its target [3.00ms]
+(fail) StackLock context collector > hashes an exact 16 MiB regular renv.lock against an independent SHA256 oracle [3.00ms]
+(fail) StackLock context collector > maps the 16 MiB renv.lock descriptor bound to renv_lock_invalid [3.00ms]
+(fail) StackLock context collector > hostile inherited Git trace sinks are not created by real collection [12.00ms]
+(fail) StackLock context collector > revalidates the physical repository top-level before the second cheap snapshot [4.00ms]
+(fail) StackLock context collector > rejects a same-path repository replacement between cheap snapshots [3.00ms]
+(fail) StackLock context collector > rejects same-path replacement after the first renv producer [4.00ms]
+(fail) StackLock context collector > rejects same-path replacement after the publication-adjacent second renv producer [3.00ms]
+(fail) StackLock context collector > collects normally from a linked-worktree physical top-level [33.00ms]
+(fail) StackLock context collector > rejects a committed byte-only .gitmodules generation transition between snapshots [31.00ms]
+(fail) StackLock context collector > default git reader observes the real four gitlinks including the frozen zero pin without git mutation [219.00ms]
 
-::group::packages/core/src/domain/services/stack-lock-dirty-state.test.ts:
-
-# Unhandled error between tests
--------------------------------
-662 |   const lines = stdout.split("
-                                   ^
-error: Unterminated string literal
-    at <runner-path>
--------------------------------
-
-
-::group::packages/core/src/domain/services/stack-lock-collector.test.ts:
-
-# Unhandled error between tests
--------------------------------
-662 |   const lines = stdout.split("
-                                   ^
-error: Unterminated string literal
-    at <runner-path>
--------------------------------
-
-
- 0 pass
- 2 fail
- 2 errors
-Ran 2 tests across 2 files. [79.00ms]
+ 38 pass
+ 35 fail
+ 167 expect() calls
+Ran 73 tests across 2 files. [1.84s]
