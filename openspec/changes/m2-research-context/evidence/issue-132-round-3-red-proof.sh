@@ -68,8 +68,12 @@ assert_result() {
     echo "$phase unexpected exit: $actual_exit" >&2
     return 1
   fi
-  grep -Eq "^[[:space:]]*$expected_pass pass$" "$output"
-  grep -Eq "^[[:space:]]*$expected_fail fail$" "$output"
+  if ! grep -Eq "^[[:space:]]*$expected_pass pass$" "$output" ||
+     ! grep -Eq "^[[:space:]]*$expected_fail fail$" "$output"; then
+    echo "$phase unexpected pass/fail counts" >&2
+    grep -E '^\\((pass|fail)\\)|^[[:space:]]*[0-9]+ (pass|fail)|Ran [0-9]+ tests' "$output" >&2 || true
+    return 1
+  fi
   if grep -Eiq 'timed out|timeout|import error|unhandled|panic|harness error' "$output"; then
     echo "$phase contained a forbidden harness/import/timeout failure" >&2
     return 1

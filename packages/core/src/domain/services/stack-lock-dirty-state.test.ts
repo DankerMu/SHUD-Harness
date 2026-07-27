@@ -655,9 +655,29 @@ exec ${shellQuote(realGit)} "$@"
     git(repository, ["commit", "--quiet", "--message", "configure attributes"]);
     await writeFile(join(repository, "tracked.txt"), "would execute injected helper\n");
     let injected = false;
+    let helperRanDuringStatus = false;
+    let shudStatusReads = 0;
+    const gitCommand: StackLockGitCommand = async (input) => {
+      const result = runFixtureGitCommand(input);
+      if (
+        input.cwd === repository &&
+        isStatusCommand(input.args) &&
+        ++shudStatusReads === 1
+      ) {
+        try {
+          await access(marker);
+          helperRanDuringStatus = true;
+        } catch (error) {
+          if ((error as { code?: unknown }).code !== "ENOENT") throw error;
+        }
+        git(repository, ["config", "--unset-all", "filter.attack.clean"]);
+      }
+      return result;
+    };
 
-    const thrown = await expectCollectorFailureWithHooks(
-      fixture,
+    const collection = await __collectStackLockContextWithHasherForTest(
+      { repositoryRoot: fixture.root, gitCommand },
+      hashFile,
       {
         afterRepositoryDirtyAudit: async (path) => {
           if (!injected && path === repository) {
@@ -665,12 +685,13 @@ exec ${shellQuote(realGit)} "$@"
             git(repository, ["config", "filter.attack.clean", helper]);
           }
         }
-      },
-      "collection_contract_invalid"
+      }
     );
 
     expect(injected).toBe(true);
-    assertNonDisclosing(thrown, fixture.root);
+    expect(shudStatusReads).toBeGreaterThan(0);
+    expect(collection.repos.SHUD.dirty).toBe(true);
+    expect(helperRanDuringStatus).toBe(false);
     await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
