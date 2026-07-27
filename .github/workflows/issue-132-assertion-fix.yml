@@ -26,6 +26,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The collector now proves the superproject plus four checkout roots in each cheap snapshot.
           python3 - <<'PY'
           from pathlib import Path
           path = Path('packages/core/src/domain/services/stack-lock-collector.test.ts')
