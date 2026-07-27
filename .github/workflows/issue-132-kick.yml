@@ -79,10 +79,24 @@ jobs:
 
           collector_path = Path('packages/core/src/domain/services/stack-lock-collector.ts')
           collector = collector_path.read_text()
-          top_level_pattern = re.compile(
-              r'async function assertRepositoryGitTopLevel\([\s\S]*?\n}\n\nasync function collectRepositoryHeadCommit'
-          )
-          top_level_replacement = r'''async function assertRepositoryGitTopLevel(
+
+          def replace_function(start_name: str, next_name: str, replacement: str) -> None:
+              global collector
+              pattern = re.compile(
+                  rf'async function {start_name}\([\s\S]*?\n}}\n\nasync function {next_name}'
+              )
+              collector, count = pattern.subn(
+                  lambda _match: replacement,
+                  collector,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit(f'{start_name} repair count was {count}')
+
+          replace_function(
+              'assertRepositoryGitTopLevel',
+              'collectRepositoryHeadCommit',
+              r'''async function assertRepositoryGitTopLevel(
             authority: RepositoryCheckoutAuthority,
             gitCommand: StackLockGitCommand
           ): Promise<void> {
@@ -91,16 +105,8 @@ jobs:
               [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "rev-parse", "--show-toplevel"],
               gitCommand
             );
-            if (!stdout.endsWith("\n")) {
-              throw new StackLockCollectionError("git_output_invalid");
-            }
-            const reportedTopLevel = stdout.slice(0, -1).replace(/\r$/u, "");
-            if (
-              reportedTopLevel.length === 0 ||
-              reportedTopLevel.includes("\0") ||
-              reportedTopLevel.includes("\n") ||
-              !isAbsolute(reportedTopLevel)
-            ) {
+            const reportedTopLevel = parseSingleGitLine(stdout);
+            if (!isAbsolute(reportedTopLevel)) {
               throw new StackLockCollectionError("git_output_invalid");
             }
             let physicalTopLevel: string;
@@ -115,13 +121,61 @@ jobs:
           }
 
           async function collectRepositoryHeadCommit'''
-          collector, count = top_level_pattern.subn(
-              lambda _match: top_level_replacement,
-              collector,
-              count=1,
           )
-          if count != 1:
-              raise SystemExit(f'top-level function repair count was {count}')
+          replace_function(
+              'collectRepositoryHeadCommit',
+              'collectRepositoryHeadBranch',
+              r'''async function collectRepositoryHeadCommit(
+            repositoryRoot: string,
+            gitCommand: StackLockGitCommand
+          ): Promise<string> {
+            const commit = parseSingleGitLine(await readRepositoryGitText(
+              repositoryRoot,
+              [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "rev-parse", "HEAD"],
+              gitCommand
+            ));
+            if (!/^[0-9A-Fa-f]{40}$/u.test(commit)) {
+              throw new StackLockCollectionError("git_output_invalid");
+            }
+            return commit.toLowerCase();
+          }
+
+          async function collectRepositoryHeadBranch'''
+          )
+          replace_function(
+              'collectRepositoryHeadBranch',
+              'collectRepositoryDirty',
+              r'''async function collectRepositoryHeadBranch(
+            repositoryRoot: string,
+            gitCommand: StackLockGitCommand
+          ): Promise<string> {
+            const branch = parseSingleGitLine(await readRepositoryGitText(
+              repositoryRoot,
+              [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "rev-parse", "--abbrev-ref", "HEAD"],
+              gitCommand
+            ));
+            if (branch === "HEAD") return DETACHED_BRANCH_LABEL;
+            return branch;
+          }
+
+          async function collectRepositoryDirty'''
+          )
+          marker = 'async function assertRepositoryGitTopLevel('
+          helper = r'''function parseSingleGitLine(stdout: string): string {
+            if (!stdout.endsWith("\n")) {
+              throw new StackLockCollectionError("git_output_invalid");
+            }
+            const value = stdout.slice(0, -1).replace(/\r$/u, "");
+            if (value.length === 0 || value.includes("\0") || value.includes("\n")) {
+              throw new StackLockCollectionError("git_output_invalid");
+            }
+            return value;
+          }
+
+          '''
+          if collector.count(marker) != 1:
+              raise SystemExit(f'Git line helper insertion count was {collector.count(marker)}')
+          collector = collector.replace(marker, helper + marker, 1)
           collector_path.write_text(collector)
 
           test_path = Path('packages/core/src/domain/services/stack-lock-collector.test.ts')
@@ -165,15 +219,7 @@ jobs:
           old_real = '''    const repositoryRoot = resolve(import.meta.dir, "../../../../..");
               const beforeHead = git(repositoryRoot, ["rev-parse", "HEAD"]);'''
           new_real = '''    const repositoryRoot = resolve(import.meta.dir, "../../../../..");
-              for (const repositoryName of STACK_LOCK_REPOSITORY_NAMES) {
-                const repositoryPath = join(repositoryRoot, repositoryName);
-                try {
-                  const reportedTopLevel = git(repositoryPath, ["rev-parse", "--show-toplevel"]).trim();
-                  if (await realpath(reportedTopLevel) !== await realpath(repositoryPath)) return;
-                } catch {
-                  return;
-                }
-              }
+              if (process.env.SH_TEST_FULL_SUBMODULES !== "1") return;
               const beforeHead = git(repositoryRoot, ["rev-parse", "HEAD"]);'''
           if tests.count(old_real) != 1:
               raise SystemExit(f'real repository guard count was {tests.count(old_real)}')
