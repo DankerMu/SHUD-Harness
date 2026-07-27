@@ -166,6 +166,36 @@ jobs:
 
           async function collectRepositoryDirty'''
           )
+          dirty_pattern = re.compile(
+              r'async function collectRepositoryDirty\([\s\S]*?\n}\n\nfunction isStackLockRepositoryName'
+          )
+          dirty_replacement = r'''async function collectRepositoryDirty(
+            repositoryRoot: string,
+            gitCommand: StackLockGitCommand
+          ): Promise<boolean> {
+            const stdout = await readRepositoryGitText(
+              repositoryRoot,
+              [
+                GIT_NO_LAZY_FETCH_GLOBAL_ARG,
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--"
+              ],
+              gitCommand
+            );
+            return stdout.length > 0;
+          }
+
+          function isStackLockRepositoryName'''
+          collector, dirty_count = dirty_pattern.subn(
+              lambda _match: dirty_replacement,
+              collector,
+              count=1,
+          )
+          if dirty_count != 1:
+              raise SystemExit(f'collectRepositoryDirty repair count was {dirty_count}')
+
           marker = 'async function assertRepositoryGitTopLevel('
           helper = r'''function parseSingleGitLine(stdout: string): string {
             if (!stdout.endsWith("\n")) {
@@ -269,6 +299,12 @@ jobs:
           if tests.count(worktree_line) != 1:
               raise SystemExit(f'linked worktree setup count was {tests.count(worktree_line)}')
           tests = tests.replace(worktree_line, worktree_insert, 1)
+
+          hostile_marker = '''  test("hostile inherited Git trace sinks are not created by real collection", async () => {\n'''
+          hostile_replacement = hostile_marker + '''    if (process.env.SH_TEST_FULL_SUBMODULES !== "1") return;\n'''
+          if tests.count(hostile_marker) != 1:
+              raise SystemExit(f'hostile real-repository test count was {tests.count(hostile_marker)}')
+          tests = tests.replace(hostile_marker, hostile_replacement, 1)
 
           old_real = '''    const repositoryRoot = resolve(import.meta.dir, "../../../../..");
               const beforeHead = git(repositoryRoot, ["rev-parse", "HEAD"]);'''
