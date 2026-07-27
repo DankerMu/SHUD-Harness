@@ -205,46 +205,6 @@ jobs:
               raise SystemExit(f'git-backed fixture setup count was {tests.count(old_setup)}')
           tests = tests.replace(old_setup, new_setup)
 
-          linked_pattern = re.compile(
-              r'  test\("collects normally from a linked-worktree physical top-level", async \(\) => \{[\s\S]*?\n  \}\);\n\n  test\("derives branches'
-          )
-          linked_replacement = r'''  test("collects normally from a linked-worktree physical top-level", async () => {
-            const repositoryRoot = await createGitBackedFixtureRepository();
-            const linkedRoot = join(dirname(repositoryRoot), "linked-worktree");
-            git(repositoryRoot, ["worktree", "add", "--quiet", "--detach", linkedRoot, "HEAD"]);
-            const expectedRepos: Record<string, { commit: string; branch: string; dirty: boolean }> = {};
-            for (const name of STACK_LOCK_REPOSITORY_NAMES) {
-              const repository = join(linkedRoot, name);
-              await mkdir(repository, { recursive: true });
-              git(repository, ["init", "--quiet"]);
-              git(repository, ["config", "user.name", "StackLock Test"]);
-              git(repository, ["config", "user.email", "stack-lock@example.invalid"]);
-              await writeFile(join(repository, "tracked.txt"), `${name}\n`);
-              git(repository, ["add", "tracked.txt"]);
-              git(repository, ["commit", "--quiet", "--message", `linked ${name} checkout`]);
-              git(repository, ["branch", "-M", REPOSITORY_BRANCHES[name]]);
-              expectedRepos[name] = {
-                commit: git(repository, ["rev-parse", "HEAD"]).trim(),
-                branch: REPOSITORY_BRANCHES[name],
-                dirty: false
-              };
-            }
-
-            const result = await collectStackLockContext({ repositoryRoot: linkedRoot });
-
-            expect(result.repos).toEqual(expectedRepos);
-            expect(result.harness.version).toBe("0.8.0");
-          });
-
-          test("derives branches'''
-          tests, linked_count = linked_pattern.subn(
-              lambda _match: linked_replacement,
-              tests,
-              count=1,
-          )
-          if linked_count != 1:
-              raise SystemExit(f'linked worktree test replacement count was {linked_count}')
-
           old_real = '''    const repositoryRoot = resolve(import.meta.dir, "../../../../..");
               const beforeHead = git(repositoryRoot, ["rev-parse", "HEAD"]);'''
           new_real = '''    const repositoryRoot = resolve(import.meta.dir, "../../../../..");
