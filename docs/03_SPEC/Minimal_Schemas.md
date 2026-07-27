@@ -65,10 +65,10 @@ TaskCard.status 使用粗粒度状态机管理任务生命周期。执行期间�
 ```yaml
 stack_id: STACK-0001                  # 格式: STACK-NNNN
 repos:
-  SHUD:      { commit: 9b55b0c, branch: master }
-  rSHUD:     { commit: d162db3, branch: master }
-  AutoSHUD:  { commit: 1cbec6f, branch: master }
-  zero:      { commit: 13e25c1, branch: main }
+  SHUD:      { commit: 9b55b0c, branch: master, dirty: false }
+  rSHUD:     { commit: d162db3, branch: master, dirty: false }
+  AutoSHUD:  { commit: 1cbec6f, branch: master, dirty: false }
+  zero:      { commit: 13e25c1, branch: development, dirty: false }
 runtime:
   os: "Darwin 24.6.0"
   r_version: "4.4.1"
@@ -96,6 +96,8 @@ llm:
 fingerprint: "sha256:..."             # 整体哈希，用于快速比对
 created_at: 2026-04-25T10:00:00Z
 ```
+
+**repos 字段说明（#132 bug 级修正）：** `commit` 与 `branch` 表示采集时四个实际 checkout 的 `HEAD` 与分支；detached HEAD 统一记录 `branch: "detached"`。`dirty` 为必填 boolean，覆盖 tracked 与 untracked 变化。superproject gitlink 与 `HEAD:.gitmodules` 仅作为 checkout 路径及采集代际的内部 authority，不得冒充实际 checkout commit/branch。任一 checkout 或 authority 在双快照间变化时整次采集 fail closed，不产生部分 StackLock。
 
 **llm 字段说明**（AGA-P0-1）：agent 行为由 model + params + prompt 共同决定，三者任一变化都视为 **stack 变更**——需要新 StackLock，且触发行为 eval 子集（见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)）。cost_record 中的 per-call model 字段是计费粒度，不能替代本处的复现锁。
 

@@ -8,7 +8,7 @@ M2 按 Phased_Plan M2 节交付研究上下文层：StackLock（含 llm `base_ur
 
 ## What Changes
 
-- 新增 StackLock：`POST /api/stacks/lock` 自动采集四个 submodule commit + runtime 版本占位 + renv.lock 内容哈希 + llm（provider/model_id/base_url/params_digest/prompt_pack_digest）+ 整体 fingerprint。
+- 新增 StackLock：`POST /api/stacks/lock` 以四个 gitlink/`HEAD:.gitmodules` 作为路径与代际 authority，采集四个实际 checkout 的 commit/branch/dirty + runtime 版本占位 + renv.lock 内容哈希 + llm（provider/model_id/base_url/params_digest/prompt_pack_digest）+ 整体 fingerprint。
 - 新增 DataProvenance：`POST /api/data/register` 对已存在路径做安全校验 + sha256（文件与目录两种语义），缺失路径返回 404/422 canonical envelope。
 - Artifact registry 完整化：evidence_usable 七条确定性规则 + LLM 产物默认 `evidence_usable=false` + 升级操作写 audit 行；ArtifactManifest read/write 与 `manifest_sha256` 可复算；`GET /api/artifacts/:artifactId/data` skeleton（路径安全、不泄 secrets）。
 - 鉴权（D6 收缩口径，grill 已拍板）：server 仅监听 127.0.0.1 + 单一本地 token，API 统一校验（401 复用既有 `permission_error` 类别）；浏览器前端经入口页 bootstrap 注入获取 token、统一 fetch wrapper 携带（design D1）；不建多用户 Session 层。
@@ -19,7 +19,7 @@ M2 按 Phased_Plan M2 节交付研究上下文层：StackLock（含 llm `base_ur
 
 ## Capabilities
 
-- `stack-lock`：StackLock schema、submodule/runtime/renv 采集、fingerprint、`POST /api/stacks/lock` 与按 id 读取。
+- `stack-lock`：StackLock schema、四 repo 实际 checkout 状态/runtime/renv 采集、fingerprint、`POST /api/stacks/lock` 与按 id 读取。
 - `data-provenance`：DataProvenance schema、路径安全校验、文件/目录 sha256、`POST /api/data/register` 与按 id 读取。
 - `artifact-evidence`：evidence_usable 规则引擎、manifest read/write 与完整性、`GET /api/artifacts/:artifactId/data` skeleton。
 - `local-auth`：localhost 绑定 + 本地 token 中间件与负例。
@@ -32,4 +32,5 @@ M2 按 Phased_Plan M2 节交付研究上下文层：StackLock（含 llm `base_ur
 - `packages/frontend`：token bootstrap + 统一鉴权 fetch wrapper、SideNav ResearchContext 卡、ArtifactRef、ExperimentHeader 数据接线。
 - 不改 SHUD/rSHUD/AutoSHUD/zero submodule；不改 M1 frozen canonical 契约：TaskCard 字段集不动；error envelope 不扩（401 复用既有 `permission_error`，不加新类别）；幂等适用清单不扩（`POST /api/stacks/lock` 与 `POST /api/data/register` 显式裁决为非幂等；`POST /api/tasks` 仍是清单唯一 task 项，其 keyed digest 覆盖新可选字段 stack_id/data_id）。
 - 显式偏离与 canonical bug 级修正账（各 spec/design 逐处记录，文档补正集中在 tasks 0.1）：StackLock repos 四键（补 zero）与 `r_packages_lock` 对象化（Minimal_Schemas §2）；Artifact 增 `llm_generated`、ArtifactManifest 增 `superseded_by`（Support_Schema_Contracts §1/§2）；`HARNESS_LOCAL_TOKEN`（Config_Secrets §4）；provenance/secrets/manifest-sets 目录（Workspace_Conventions / Repository_Layout）。
+- #132 bug 级修正：StackLock 四 repo revision 增 required `dirty:boolean`，并以实际 checkout `HEAD`/branch/dirty 作为复现内容；superproject gitlink 仅保留为受信任路径与代际 authority。后续 4.2 fingerprint、4.3 persistence/API 必须保留完整 repo revision，本修正不提前实现这两个 task。
 - 验收门：一个 task 绑定 stack_id + data_id，SideNav 展示完整版本链（含 llm base_url）；registry 记录 evidence_usable artifact。测试细目 = Test_Plan W2（W2-SUB-001、W2-DATA-001/002、W2-ART-001/002 + 3 条 UI）。

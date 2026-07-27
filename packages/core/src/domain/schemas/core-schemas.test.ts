@@ -16,6 +16,7 @@ const STACK_ID = "STACK-11111111-1111-4111-8111-111111111111";
 const DATA_ID = "DATA-22222222-2222-4222-8222-222222222222";
 const MANIFEST_ID = "MANIFEST-33333333-3333-4333-8333-333333333333";
 const SUCCESSOR_MANIFEST_ID = "MANIFEST-44444444-4444-4444-8444-444444444444";
+const STACK_LOCK_REPOSITORIES = ["SHUD", "rSHUD", "AutoSHUD", "zero"] as const;
 
 describe("core Zod schemas", () => {
   test("TaskCard accepts a valid stored object and rejects missing required fields", () => {
@@ -716,33 +717,68 @@ function issuePaths(result: {
 
 
 describe("StackLock repository dirty state", () => {
-  test("requires a boolean dirty field for every repository revision", () => {
+  test("accepts a complete clean four-repository shape", () => {
     const clean = validStackLock();
     expect(StackLockSchema.safeParse(clean).success).toBe(true);
-    expect(StackLockSchema.safeParse({
-      ...clean,
-      repos: {
-        ...clean.repos,
-        SHUD: { ...clean.repos.SHUD, dirty: true }
-      }
-    }).success).toBe(true);
-
-    const { dirty: _missing, ...withoutDirty } = clean.repos.SHUD;
-    const missing = StackLockSchema.safeParse({
-      ...clean,
-      repos: { ...clean.repos, SHUD: withoutDirty }
-    });
-    expect(missing.success).toBe(false);
-    expect(issuePaths(missing)).toContain("repos.SHUD.dirty");
-
-    const wrongType = StackLockSchema.safeParse({
-      ...clean,
-      repos: {
-        ...clean.repos,
-        zero: { ...clean.repos.zero, dirty: "false" }
-      }
-    });
-    expect(wrongType.success).toBe(false);
-    expect(issuePaths(wrongType)).toContain("repos.zero.dirty");
   });
+
+  test.each(STACK_LOCK_REPOSITORIES)(
+    "accepts a complete shape when %s is dirty",
+    (repositoryName) => {
+      const clean = validStackLock();
+      expect(StackLockSchema.safeParse({
+        ...clean,
+        repos: {
+          ...clean.repos,
+          [repositoryName]: { ...clean.repos[repositoryName], dirty: true }
+        }
+      }).success).toBe(true);
+    }
+  );
+
+  test.each(STACK_LOCK_REPOSITORIES)(
+    "rejects %s when dirty is missing",
+    (repositoryName) => {
+      const clean = validStackLock();
+      const { dirty: _missing, ...withoutDirty } = clean.repos[repositoryName];
+      const result = StackLockSchema.safeParse({
+        ...clean,
+        repos: { ...clean.repos, [repositoryName]: withoutDirty }
+      });
+      expect(result.success).toBe(false);
+      expect(issuePaths(result)).toContain(`repos.${repositoryName}.dirty`);
+    }
+  );
+
+  test.each(STACK_LOCK_REPOSITORIES)(
+    "rejects %s when dirty is not boolean",
+    (repositoryName) => {
+      const clean = validStackLock();
+      const result = StackLockSchema.safeParse({
+        ...clean,
+        repos: {
+          ...clean.repos,
+          [repositoryName]: { ...clean.repos[repositoryName], dirty: "false" }
+        }
+      });
+      expect(result.success).toBe(false);
+      expect(issuePaths(result)).toContain(`repos.${repositoryName}.dirty`);
+    }
+  );
+
+  test.each(STACK_LOCK_REPOSITORIES)(
+    "rejects deprecated dirty aliases on %s",
+    (repositoryName) => {
+      const clean = validStackLock();
+      const result = StackLockSchema.safeParse({
+        ...clean,
+        repos: {
+          ...clean.repos,
+          [repositoryName]: { ...clean.repos[repositoryName], is_dirty: false }
+        }
+      });
+      expect(result.success).toBe(false);
+      expect(issuePaths(result)).toContain(`repos.${repositoryName}`);
+    }
+  );
 });

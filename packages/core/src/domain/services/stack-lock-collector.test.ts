@@ -75,7 +75,7 @@ describe("StackLock context collector", () => {
       gitCommand
     });
 
-    expect(calls).toHaveLength(38);
+    expect(calls).toHaveLength(54);
     expect(calls[0]).toEqual({
       cwd: resolve(repositoryRoot),
       args: ["--no-lazy-fetch", "rev-parse", "--show-toplevel"]
@@ -111,10 +111,10 @@ describe("StackLock context collector", () => {
     const shudHeadReads = calls.filter(
       (call) => call.cwd === resolve(join(repositoryRoot, "SHUD")) && call.args[1] === "rev-parse"
     );
-    expect(shudHeadReads).toHaveLength(6);
+    expect(shudHeadReads).toHaveLength(10);
     expect(shudHeadReads.filter((call) => call.args.at(-1) === "--show-prefix")).toHaveLength(2);
-    expect(shudHeadReads.filter((call) => call.args.at(-1) === "HEAD" && call.args.length === 3)).toHaveLength(2);
-    expect(shudHeadReads.filter((call) => call.args.includes("--abbrev-ref"))).toHaveLength(2);
+    expect(shudHeadReads.filter((call) => call.args.at(-1) === "HEAD" && call.args.length === 3)).toHaveLength(4);
+    expect(shudHeadReads.filter((call) => call.args.includes("--abbrev-ref"))).toHaveLength(4);
     expect(result.repos).toEqual({
       SHUD: { commit: SHAS.SHUD, branch: "master", dirty: false },
       rSHUD: { commit: SHAS.rSHUD, branch: "master", dirty: false },

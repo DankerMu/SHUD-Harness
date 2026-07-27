@@ -558,12 +558,7 @@ async function collectRepositoryRevisions(
         );
         const revision = await withRepositoryCheckoutAuthority(authority, async () => {
           await assertRepositoryGitTopLevel(authority, gitCommand);
-          const [commit, branch, dirty] = await Promise.all([
-            collectRepositoryHeadCommit(authority.path, gitCommand),
-            collectRepositoryHeadBranch(authority.path, gitCommand),
-            collectRepositoryDirty(authority.path, gitCommand)
-          ]);
-          return Object.freeze({ commit, branch, dirty });
+          return await collectStableRepositoryRevision(authority.path, gitCommand);
         });
         return [name, revision, authority] as const;
       })
@@ -577,6 +572,21 @@ async function collectRepositoryRevisions(
       resolved.map(([name, _revision, authority]) => [name, authority])
     )) as Readonly<Record<StackLockRepositoryName, RepositoryCheckoutAuthority>>
   });
+}
+
+async function collectStableRepositoryRevision(
+  repositoryRoot: string,
+  gitCommand: StackLockGitCommand
+): Promise<StackLock["repos"][StackLockRepositoryName]> {
+  const firstCommit = await collectRepositoryHeadCommit(repositoryRoot, gitCommand);
+  const firstBranch = await collectRepositoryHeadBranch(repositoryRoot, gitCommand);
+  const dirty = await collectRepositoryDirty(repositoryRoot, gitCommand);
+  const secondCommit = await collectRepositoryHeadCommit(repositoryRoot, gitCommand);
+  const secondBranch = await collectRepositoryHeadBranch(repositoryRoot, gitCommand);
+  if (firstCommit !== secondCommit || firstBranch !== secondBranch) {
+    throw new StackLockCollectionError("collection_state_changed");
+  }
+  return Object.freeze({ commit: secondCommit, branch: secondBranch, dirty });
 }
 
 async function resolveRepositoryCheckoutAuthority(
@@ -674,11 +684,13 @@ async function assertRepositoryGitTopLevel(
   const lines = normalized.split("\n");
   if (
     lines.length !== 3 ||
-    lines[1] !== "" ||
     lines[2] !== "" ||
     !isAbsolute(lines[0]!)
   ) {
     throw new StackLockCollectionError("git_output_invalid");
+  }
+  if (lines[1] !== "") {
+    throw new StackLockCollectionError("collection_contract_invalid");
   }
   let physicalTopLevel: string;
   try {
