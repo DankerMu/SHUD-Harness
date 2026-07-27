@@ -1,0 +1,96 @@
+name: Issue 132 red diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/issue-132-red-diagnostic.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  red-proof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-132-stack-lock-dirty-state
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+      - run: git submodule update --init zero
+      - run: bun install --frozen-lockfile
+      - name: Baseline
+        run: |
+          bun test packages/core/src/domain/schemas/core-schemas.test.ts
+          bun test packages/core/src/domain/services/stack-lock-dirty-state.test.ts
+      - name: Red 1 required dirty schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=packages/core/src/domain/schemas/stack-lock.ts
+          cp "$file" /tmp/stack-lock.ts
+          trap 'cp /tmp/stack-lock.ts "$file"' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/core/src/domain/schemas/stack-lock.ts')
+          s=p.read_text()
+          old='dirty: z.boolean()'
+          if s.count(old) != 1: raise SystemExit(f'mutation count={s.count(old)}')
+          p.write_text(s.replace(old, 'dirty: z.boolean().optional()', 1))
+          PY
+          set +e
+          bun test packages/core/src/domain/schemas/core-schemas.test.ts -t "requires a boolean dirty field" >/tmp/red1.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/red1.log
+          test "$status" -ne 0
+      - name: Red 2 dirty observer
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=packages/core/src/domain/services/stack-lock-collector.ts
+          cp "$file" /tmp/collector.ts
+          trap 'cp /tmp/collector.ts "$file"' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/core/src/domain/services/stack-lock-collector.ts')
+          s=p.read_text()
+          old='return stdout.length > 0;'
+          if s.count(old) != 1: raise SystemExit(f'mutation count={s.count(old)}')
+          p.write_text(s.replace(old, 'return false;', 1))
+          PY
+          set +e
+          bun test packages/core/src/domain/services/stack-lock-dirty-state.test.ts -t "marks tracked and untracked" >/tmp/red2.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/red2.log
+          test "$status" -ne 0
+      - name: Red 3 snapshot state binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=packages/core/src/domain/services/stack-lock-collector.ts
+          cp "$file" /tmp/collector.ts
+          trap 'cp /tmp/collector.ts "$file"' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/core/src/domain/services/stack-lock-collector.ts')
+          s=p.read_text()
+          old='JSON.stringify(first.repos) === JSON.stringify(second.repos) &&'
+          if s.count(old) != 1: raise SystemExit(f'mutation count={s.count(old)}')
+          p.write_text(s.replace(old, 'true &&', 1))
+          PY
+          set +e
+          bun test packages/core/src/domain/services/stack-lock-dirty-state.test.ts -t "fails closed when a repository changes" >/tmp/red3.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/red3.log
+          test "$status" -ne 0
+      - name: Restored green
+        run: |
+          git diff --exit-code -- packages/core/src/domain/schemas/stack-lock.ts packages/core/src/domain/services/stack-lock-collector.ts
+          bun test packages/core/src/domain/schemas/core-schemas.test.ts
+          bun test packages/core/src/domain/services/stack-lock-dirty-state.test.ts
