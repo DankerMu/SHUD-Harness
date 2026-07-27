@@ -92,8 +92,9 @@ jobs:
           cp /tmp/collector.ts "$file"
           cmp -s /tmp/collector.ts "$file"
           test "$status" -ne 0
-      - name: Restored green
-        run: |
-          git diff --exit-code -- packages/core/src/domain/schemas/stack-lock.ts packages/core/src/domain/services/stack-lock-collector.ts
-          bun test packages/core/src/domain/schemas/core-schemas.test.ts
-          bun test packages/core/src/domain/services/stack-lock-dirty-state.test.ts
+      - name: Restored production bytes
+        run: git diff --exit-code -- packages/core/src/domain/schemas/stack-lock.ts packages/core/src/domain/services/stack-lock-collector.ts
+      - name: Restored schema green
+        run: bun test packages/core/src/domain/schemas/core-schemas.test.ts
+      - name: Restored collector green
+        run: bun test packages/core/src/domain/services/stack-lock-dirty-state.test.ts
