@@ -131,7 +131,7 @@ Schema tests SHALL also parameterize all four keys: removing `dirty` or replacin
 - `test:schemas`: `39 pass / 0 fail / 188 expect`；`test:core-services`: `656 pass / 5 skip / 0 fail / 30308 expect`。
 - 24-way transient replacement-wrapper stress: `24 pass / 0 fail`；所有进程 settlement 后 `stack-lock-dirty-*` temp residue = 0，环境变更 confined to child processes。
 - `schema:check`、`typecheck`、strict OpenSpec 与 `git diff --check`: pass。
-- Blob-bound semantic red-proof script/report已准备；它要求 orchestrator 创建最终 green commit 后传 `--green-sha`，并会打印实际 SHA/五个 blob ID/命令/两次一致的 RED `0/20` 与 GREEN `20/0`/cleanup。这里不伪造尚不存在的 final SHA 或执行结果。
+- Blob-bound semantic red-proof script/report已准备；它要求 orchestrator 创建最终 green commit 后传 `--green-sha`，并会打印实际 SHA/五个 blob ID/命令/两次一致的 RED `0/17` 与 GREEN `17/0`/cleanup。这里不伪造尚不存在的 final SHA 或执行结果。
 
 ### Round 1 confirmed-finding repair (2026-07-27)
 

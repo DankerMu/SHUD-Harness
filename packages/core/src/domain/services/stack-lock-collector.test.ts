@@ -590,7 +590,7 @@ describe("StackLock context collector", () => {
     async (pathKind) => {
       const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
       const marker = join(repositoryRoot, "untrusted-git-ran");
-      const localGit = join(repositoryRoot, "git");
+      const localGit = join(repositoryRoot, "SHUD", "git");
       await writeFile(localGit, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 0\n`);
       await chmod(localGit, 0o700);
       const previousPath = env.PATH;

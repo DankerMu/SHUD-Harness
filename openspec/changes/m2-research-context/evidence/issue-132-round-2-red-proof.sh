@@ -37,7 +37,7 @@ git -C "$repo_root" worktree add --quiet --detach "$proof_repo" "$green_sha"
 (cd "$proof_repo" && git submodule update --init zero >/dev/null)
 (cd "$proof_repo" && npx --yes bun@1.2.19 install --frozen-lockfile >/dev/null)
 
-test_pattern='publication sibling|symlink checkout before|distinguishes a descriptor|PATH components|owns a checkout handle|filter'
+test_pattern='dirty drift when its next publication sibling|commit drift when its next publication sibling|branch drift when its next publication sibling|symlink checkout before|distinguishes a descriptor|PATH components|owns a checkout handle|filter'
 test_command="npx --yes bun@1.2.19 test packages/core/src/domain/services/stack-lock-collector.test.ts packages/core/src/domain/services/stack-lock-dirty-state.test.ts -t $test_pattern"
 
 echo "GREEN_SHA $green_sha"
@@ -78,6 +78,34 @@ assert_result() {
   fi
 }
 
+assert_expected_red_tests() {
+  output=$1
+  while IFS= read -r expected_test; do
+    if ! grep -Fq "(fail) $expected_test" "$output"; then
+      echo "RED missing expected semantic failure: $expected_test" >&2
+      return 1
+    fi
+  done <<'EXPECTED_RED_TESTS'
+StackLock context collector > distinguishes a descriptor identity marker from Git's own exit 73
+StackLock context collector > rejects relative PATH components before a checkout-local git marker can execute
+StackLock context collector > rejects empty PATH components before a checkout-local git marker can execute
+StackLock context collector > owns a checkout handle before outer postconditions and preserves the primary error over close failure
+StackLock actual repository state > rejects SHUD dirty drift when its next publication sibling rSHUD starts
+StackLock actual repository state > rejects SHUD commit drift when its next publication sibling rSHUD starts
+StackLock actual repository state > rejects SHUD branch drift when its next publication sibling rSHUD starts
+StackLock actual repository state > rejects rSHUD dirty drift when its next publication sibling AutoSHUD starts
+StackLock actual repository state > rejects rSHUD commit drift when its next publication sibling AutoSHUD starts
+StackLock actual repository state > rejects rSHUD branch drift when its next publication sibling AutoSHUD starts
+StackLock actual repository state > rejects AutoSHUD dirty drift when its next publication sibling zero starts
+StackLock actual repository state > rejects AutoSHUD commit drift when its next publication sibling zero starts
+StackLock actual repository state > rejects AutoSHUD branch drift when its next publication sibling zero starts
+StackLock actual repository state > rejects a symlink checkout before any checkout realpath observation
+StackLock actual repository state > rejects a real repo-local filter.clean command before status can execute it
+StackLock actual repository state > rejects a real repo-local filter.process command before status can execute it
+StackLock actual repository state > rejects a nested submodule process filter before parent status can execute it
+EXPECTED_RED_TESTS
+}
+
 for repetition in 1 2; do
   apply_semantic_mutants
   red_output="$proof_root/red-$repetition.log"
@@ -88,8 +116,9 @@ for repetition in 1 2; do
     -t "$test_pattern") >"$red_output" 2>&1
   red_exit=$?
   set -e
-  assert_result "RED[$repetition]" "$red_output" 0 20 1 "$red_exit"
-  echo "RED[$repetition] 0 pass / 20 expected semantic fail / exit 1"
+  assert_result "RED[$repetition]" "$red_output" 0 17 1 "$red_exit"
+  assert_expected_red_tests "$red_output"
+  echo "RED[$repetition] 0 pass / 17 named semantic fail / exit 1"
 
   git -C "$proof_repo" restore --source "$green_sha" -- \
     packages/core/src/domain/services/stack-lock-collector.ts
@@ -98,8 +127,8 @@ for repetition in 1 2; do
     packages/core/src/domain/services/stack-lock-collector.test.ts \
     packages/core/src/domain/services/stack-lock-dirty-state.test.ts \
     -t "$test_pattern") >"$green_output" 2>&1
-  assert_result "GREEN[$repetition]" "$green_output" 20 0 0 0
-  echo "GREEN[$repetition] 20 pass / 0 fail / exit 0"
+  assert_result "GREEN[$repetition]" "$green_output" 17 0 0 0
+  echo "GREEN[$repetition] 17 pass / 0 fail / exit 0"
 done
 
 echo "CLEANUP worktree removed by trap; source tree and index were never modified"
