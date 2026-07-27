@@ -588,7 +588,7 @@ describe("StackLock context collector", () => {
   test.each(["relative", "empty"] as const)(
     "rejects %s PATH components before a checkout-local git marker can execute",
     async (pathKind) => {
-      const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+      const repositoryRoot = await createGitBackedFixtureRepository("0.8.0");
       const marker = join(repositoryRoot, "untrusted-git-ran");
       const localGit = join(repositoryRoot, "SHUD", "git");
       await writeFile(localGit, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 0\n`);
