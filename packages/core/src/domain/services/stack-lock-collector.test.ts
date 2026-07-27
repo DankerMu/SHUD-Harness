@@ -1583,16 +1583,19 @@ function simulatedSubmoduleGitResult(
   }
   if (
     JSON.stringify(args) === JSON.stringify([
-      "--no-lazy-fetch", "config", "--local", "--includes", "--null", "--list"
+      "--no-lazy-fetch", "rev-parse", "--shared-index-path"
     ])
   ) {
     return { stdout: "" };
   }
   if (
     JSON.stringify(args) === JSON.stringify([
-      "--no-lazy-fetch", "-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"
+      "--no-lazy-fetch", "config", "--local", "--includes", "--null", "--list"
     ])
   ) {
+    return { stdout: "" };
+  }
+  if (args.includes("ls-files") && args.includes("--stage") && args.includes("-z")) {
     return { stdout: "" };
   }
   if (args.includes("status") && args.includes("--porcelain=v1")) {

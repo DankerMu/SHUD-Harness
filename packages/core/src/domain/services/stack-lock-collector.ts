@@ -1,11 +1,15 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  copyFileSync,
+  closeSync,
   constants,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
+  readSync,
+  realpathSync,
   rmSync,
   utimesSync,
   writeFileSync
@@ -55,6 +59,7 @@ const MAX_GITMODULES_FILE_BYTES = 64 * 1024;
 const STACK_LOCK_RENV_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024;
 const MAX_GIT_INDEX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const MAX_GIT_STATUS_AUXILIARY_BYTES = 1024 * 1024;
 const MAX_GIT_ADMIN_PATH_BYTES = 4096;
 const GIT_TIMEOUT_MS = 10_000;
 const GIT_NO_LAZY_FETCH_GLOBAL_ARG = "--no-lazy-fetch";
@@ -882,6 +887,25 @@ async function assertRepositoryGitTopLevel(
   }
 }
 
+async function assertNestedRepositoryGitTopLevel(
+  authority: RepositoryCheckoutAuthority,
+  gitCommand: StackLockGitCommand
+): Promise<void> {
+  const prefix = await readRepositoryGitText(
+    authority,
+    [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "rev-parse", "--show-prefix"],
+    gitCommand
+  );
+  const inside = await readRepositoryGitText(
+    authority,
+    [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "rev-parse", "--is-inside-work-tree"],
+    gitCommand
+  );
+  if (prefix !== "\n" || parseSingleGitLine(inside) !== "true") {
+    throw new StackLockCollectionError("collection_contract_invalid");
+  }
+}
+
 async function collectRepositoryHeadCommit(
   authority: RepositoryCheckoutAuthority,
   gitCommand: StackLockGitCommand
@@ -939,17 +963,51 @@ async function collectRepositoryDirty(
   return result!;
 }
 
+interface CapturedGitFile {
+  readonly bytes: Uint8Array;
+  readonly atimeMs: number;
+  readonly mtimeMs: number;
+  readonly source: string;
+  readonly identity: Readonly<{
+    dev: bigint;
+    ino: bigint;
+    size: bigint;
+    ctimeNs: bigint;
+    mtimeNs: bigint;
+  }>;
+}
+
+interface CapturedRepositoryIndex {
+  readonly index: CapturedGitFile;
+  readonly sharedIndex?: Readonly<{ name: string; file: CapturedGitFile }>;
+}
+
+interface FrozenStatusConfig {
+  readonly booleans: Readonly<Record<string, boolean>>;
+  readonly autocrlf?: "true" | "false" | "input";
+  readonly eol?: "lf" | "crlf" | "native";
+  readonly excludesFile?: CapturedGitFile;
+  readonly attributesFile?: CapturedGitFile;
+}
+
 interface AuditedDirtyRepository {
   readonly authority: RepositoryCheckoutAuthority;
   readonly headCommit: string;
-  readonly statusConfig: Readonly<Record<string, boolean>>;
+  readonly paths: RepositoryGitAdministrativePaths;
+  readonly statusConfig: FrozenStatusConfig;
+  readonly infoExclude?: CapturedGitFile;
+  readonly infoAttributes?: CapturedGitFile;
+  readonly capturedIndex: CapturedRepositoryIndex;
   readonly nested: readonly AuditedNestedRepository[];
 }
 
-interface AuditedNestedRepository {
-  readonly indexCommit: string;
-  readonly repository: AuditedDirtyRepository;
-}
+type AuditedNestedRepository = Readonly<{
+  indexCommit: string;
+  path: string;
+} & (
+  | { state: "initialized"; repository: AuditedDirtyRepository }
+  | { state: "uninitialized"; identity: RepositoryRootIdentity }
+)>;
 
 async function auditRepositoryForDirtyObservation(
   authority: RepositoryCheckoutAuthority,
@@ -957,14 +1015,18 @@ async function auditRepositoryForDirtyObservation(
   gitCommand: StackLockGitCommand,
   owner: RepositoryCheckoutAuthorityOwner
 ): Promise<AuditedDirtyRepository> {
+  const paths = await resolveRepositoryGitAdministrativePaths(authority);
   const localConfig = await readRepositoryGitText(
     authority,
     [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "config", "--local", "--includes", "--null", "--list"],
     gitCommand
   );
-  const statusConfig: Record<string, boolean> = {};
+  const statusConfig: MutableFrozenStatusConfig = { booleans: {} };
   const localRecords = parseAndAuditRepositoryConfig(localConfig, statusConfig);
-  if (localRecords.get("extensions.worktreeconfig")?.toLowerCase() === "true") {
+  const worktreeConfigEnabled = localRecords.has("extensions.worktreeconfig")
+    ? parseGitBoolean(localRecords.get("extensions.worktreeconfig"), "git_output_invalid")
+    : false;
+  if (worktreeConfigEnabled) {
     const worktreeConfig = await readRepositoryGitText(
       authority,
       [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "config", "--worktree", "--includes", "--null", "--list"],
@@ -973,44 +1035,96 @@ async function auditRepositoryForDirtyObservation(
     parseAndAuditRepositoryConfig(worktreeConfig, statusConfig);
   }
 
-  const index = await readRepositoryGitText(
-    authority,
-    [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"],
-    gitCommand,
-    MAX_GIT_INDEX_OUTPUT_BYTES
-  );
-  const gitlinks = parseIndexGitlinks(index);
-  const nested: AuditedNestedRepository[] = [];
-  for (const gitlink of gitlinks) {
-    const nestedAuthority = await resolveNestedRepositoryAuthority(
-      authority,
-      gitlink.path,
-      owner
-    );
-    const nestedHead = await collectRepositoryHeadCommit(nestedAuthority, gitCommand);
-    nested.push(Object.freeze({
-      indexCommit: gitlink.commit,
-      repository: await auditRepositoryForDirtyObservation(
-        nestedAuthority,
-        nestedHead,
-        gitCommand,
-        owner
-      )
-    }));
-  }
-  return Object.freeze({
+  const capturedIndex = await captureRepositoryIndex(authority, paths, gitCommand);
+  const excludesPath = statusConfig.excludesPath === undefined
+    ? undefined
+    : resolveSafeStatusConfigPath(authority.path, statusConfig.excludesPath);
+  const attributesPath = statusConfig.attributesPath === undefined
+    ? undefined
+    : resolveSafeStatusConfigPath(authority.path, statusConfig.attributesPath);
+  const observationBase: AuditedDirtyRepository = Object.freeze({
     authority,
     headCommit,
-    statusConfig: Object.freeze(statusConfig),
+    paths,
+    statusConfig: Object.freeze({
+      booleans: Object.freeze(statusConfig.booleans),
+      ...(statusConfig.autocrlf === undefined ? {} : { autocrlf: statusConfig.autocrlf }),
+      ...(statusConfig.eol === undefined ? {} : { eol: statusConfig.eol }),
+      ...(excludesPath === undefined ? {} : {
+        excludesFile: captureBoundedStableGitFile(excludesPath, MAX_GIT_STATUS_AUXILIARY_BYTES)
+      }),
+      ...(attributesPath === undefined ? {} : {
+        attributesFile: captureBoundedStableGitFile(attributesPath, MAX_GIT_STATUS_AUXILIARY_BYTES)
+      })
+    }),
+    infoExclude: captureOptionalBoundedStableGitFile(
+      join(paths.commonDirectory, "info", "exclude"),
+      MAX_GIT_STATUS_AUXILIARY_BYTES
+    ),
+    infoAttributes: captureOptionalBoundedStableGitFile(
+      join(paths.commonDirectory, "info", "attributes"),
+      MAX_GIT_STATUS_AUXILIARY_BYTES
+    ),
+    capturedIndex,
+    nested: Object.freeze([])
+  });
+  const indexObservation = await collectRepositoryGitOutputWithoutHelpers(
+    observationBase,
+    gitCommand,
+    ["-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"],
+    MAX_GIT_INDEX_OUTPUT_BYTES
+  );
+  assertCapturedRepositoryIndexCurrent(capturedIndex);
+  const gitlinks = parseIndexGitlinks(indexObservation);
+  const nested: AuditedNestedRepository[] = [];
+  for (const gitlink of gitlinks) {
+    const nestedObservation = await observeNestedRepositoryState(
+      authority,
+      gitlink.path,
+      gitCommand,
+      owner
+    );
+    if (nestedObservation.state === "uninitialized") {
+      nested.push(Object.freeze({
+        indexCommit: gitlink.commit,
+        path: nestedObservation.path,
+        state: "uninitialized",
+        identity: nestedObservation.identity
+      }));
+    } else {
+      const nestedHead = await collectRepositoryHeadCommit(nestedObservation.authority, gitCommand);
+      nested.push(Object.freeze({
+        indexCommit: gitlink.commit,
+        path: nestedObservation.path,
+        state: "initialized",
+        repository: await auditRepositoryForDirtyObservation(
+          nestedObservation.authority,
+          nestedHead,
+          gitCommand,
+          owner
+        )
+      }));
+    }
+  }
+  return Object.freeze({
+    ...observationBase,
     nested: Object.freeze(nested)
   });
 }
 
+interface MutableFrozenStatusConfig {
+  readonly booleans: Record<string, boolean>;
+  autocrlf?: "true" | "false" | "input";
+  eol?: "lf" | "crlf" | "native";
+  excludesPath?: string;
+  attributesPath?: string;
+}
+
 function parseAndAuditRepositoryConfig(
   config: string,
-  statusConfig: Record<string, boolean>
-): ReadonlyMap<string, string> {
-  const values = new Map<string, string>();
+  statusConfig: MutableFrozenStatusConfig
+): ReadonlyMap<string, string | undefined> {
+  const values = new Map<string, string | undefined>();
   for (const record of config.split("\0")) {
     if (record === "") continue;
     const separator = record.indexOf("\n");
@@ -1019,20 +1133,74 @@ function parseAndAuditRepositoryConfig(
     if (/^filter\..+\.(clean|process)$/u.test(key)) {
       throw new StackLockCollectionError("collection_contract_invalid");
     }
-    if (
-      separator !== -1 &&
-      ["core.filemode", "core.symlinks", "core.ignorecase", "core.precomposeunicode"]
-        .includes(key)
-    ) {
-      const normalizedValue = value.toLowerCase();
-      if (normalizedValue !== "true" && normalizedValue !== "false") {
+    if (["core.filemode", "core.symlinks", "core.ignorecase", "core.precomposeunicode"]
+      .includes(key)) {
+      statusConfig.booleans[key] = parseGitBoolean(
+        separator === -1 ? undefined : value,
+        "git_output_invalid"
+      );
+    } else if (key === "core.autocrlf") {
+      const normalizedValue = separator === -1 ? "true" : value.toLowerCase();
+      if (!["true", "false", "input", "yes", "no", "on", "off", "1", "0"]
+        .includes(normalizedValue)) {
         throw new StackLockCollectionError("git_output_invalid");
       }
-      statusConfig[key] = normalizedValue === "true";
+      statusConfig.autocrlf = normalizedValue === "input"
+        ? "input"
+        : parseGitBoolean(normalizedValue, "git_output_invalid") ? "true" : "false";
+    } else if (key === "core.eol") {
+      const normalizedValue = separator === -1 ? "" : value.toLowerCase();
+      if (!(normalizedValue === "lf" || normalizedValue === "crlf" || normalizedValue === "native")) {
+        throw new StackLockCollectionError("git_output_invalid");
+      }
+      statusConfig.eol = normalizedValue;
+    } else if (key === "core.excludesfile") {
+      if (separator === -1 || value.length === 0 || value.includes("\0") || value.includes("\n")) {
+        throw new StackLockCollectionError("git_output_invalid");
+      }
+      statusConfig.excludesPath = value;
+    } else if (key === "core.attributesfile") {
+      if (separator === -1 || value.length === 0 || value.includes("\0") || value.includes("\n")) {
+        throw new StackLockCollectionError("git_output_invalid");
+      }
+      statusConfig.attributesPath = value;
     }
-    values.set(key, value);
+    values.set(key, separator === -1 ? undefined : value);
   }
   return values;
+}
+
+function parseGitBoolean(
+  value: string | undefined,
+  errorCode: "git_output_invalid" | "collection_contract_invalid"
+): boolean {
+  const normalized = value === undefined ? "true" : value.toLowerCase();
+  if (["true", "yes", "on", "1"].includes(normalized)) return true;
+  if (["false", "no", "off", "0"].includes(normalized)) return false;
+  throw new StackLockCollectionError(errorCode);
+}
+
+function resolveSafeStatusConfigPath(checkout: string, configuredPath: string): string {
+  try {
+    let candidate: string;
+    if (configuredPath.startsWith("~/")) {
+      const home = env.HOME;
+      if (typeof home !== "string" || !isAbsolute(home) || home.includes("\0")) {
+        throw new Error("home unavailable");
+      }
+      candidate = resolve(home, configuredPath.slice(2));
+    } else if (configuredPath.startsWith("~")) {
+      throw new Error("user home expansion is not admitted");
+    } else {
+      candidate = isAbsolute(configuredPath)
+        ? resolve(configuredPath)
+        : resolve(checkout, configuredPath);
+    }
+    if (candidate.includes("\0")) throw new Error("invalid config path");
+    return candidate;
+  } catch {
+    throw new StackLockCollectionError("collection_contract_invalid");
+  }
 }
 
 function parseIndexGitlinks(index: string): readonly Readonly<{
@@ -1071,11 +1239,17 @@ function parseIndexGitlinks(index: string): readonly Readonly<{
   return Object.freeze([...gitlinks].map(([path, commit]) => Object.freeze({ path, commit })));
 }
 
-async function resolveNestedRepositoryAuthority(
+type NestedRepositoryState = Readonly<
+  | { state: "initialized"; path: string; authority: RepositoryCheckoutAuthority }
+  | { state: "uninitialized"; path: string; identity: RepositoryRootIdentity }
+>;
+
+async function observeNestedRepositoryState(
   parent: RepositoryCheckoutAuthority,
   nestedPath: string,
+  gitCommand: StackLockGitCommand,
   owner: RepositoryCheckoutAuthorityOwner
-): Promise<RepositoryCheckoutAuthority> {
+): Promise<NestedRepositoryState> {
   try {
     const resolvedNestedPath = await resolveWorkspacePath({
       workspaceRoot: parent.path,
@@ -1083,12 +1257,25 @@ async function resolveNestedRepositoryAuthority(
       evidenceRef: "stack-lock-nested-submodule-filter-audit",
       access: "read"
     });
-    return await resolveRepositoryCheckoutAuthority(
+    const path = join(parent.path, resolvedNestedPath.normalizedPath);
+    try {
+      await lstat(join(path, ".git"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return Object.freeze({
+        state: "uninitialized",
+        path,
+        identity: await observeRepositoryRootIdentity(path)
+      });
+    }
+    const authority = await resolveRepositoryCheckoutAuthority(
       parent.path,
-      resolvedNestedPath.normalizedPath,
+      nestedPath,
       {},
       owner
     );
+    await assertNestedRepositoryGitTopLevel(authority, gitCommand);
+    return Object.freeze({ state: "initialized", path, authority });
   } catch (error) {
     if (error instanceof StackLockCollectionError) throw error;
     throw new StackLockCollectionError("collection_contract_invalid");
@@ -1102,11 +1289,34 @@ async function observeAuditedRepositoryDirty(
   const stdout = await collectRepositoryStatusWithoutHelpers(audit, gitCommand);
   if (stdout.length > 0) return true;
   for (const nested of audit.nested) {
+    if (nested.state === "uninitialized") {
+      await assertNestedRepositoryRemainsUninitialized(nested);
+      continue;
+    }
     const currentHead = await collectRepositoryHeadCommit(nested.repository.authority, gitCommand);
     if (currentHead !== nested.indexCommit) return true;
     if (await observeAuditedRepositoryDirty(nested.repository, gitCommand)) return true;
   }
   return false;
+}
+
+async function assertNestedRepositoryRemainsUninitialized(
+  nested: Extract<AuditedNestedRepository, { state: "uninitialized" }>
+): Promise<void> {
+  try {
+    const current = await observeRepositoryRootIdentity(nested.path);
+    if (!sameRepositoryRootIdentity(current, nested.identity)) {
+      throw new Error("nested path changed");
+    }
+    try {
+      await lstat(join(nested.path, ".git"));
+      throw new Error("nested checkout initialized");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  } catch {
+    throw new StackLockCollectionError("collection_state_changed");
+  }
 }
 
 interface RepositoryGitAdministrativePaths {
@@ -1120,14 +1330,36 @@ async function collectRepositoryStatusWithoutHelpers(
   audit: AuditedDirtyRepository,
   gitCommand: StackLockGitCommand
 ): Promise<string> {
-  const paths = await resolveRepositoryGitAdministrativePaths(audit.authority);
+  return await collectRepositoryGitOutputWithoutHelpers(
+    audit,
+    gitCommand,
+    [
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "core.untrackedCache=false",
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+      "--ignore-submodules=all",
+      "--"
+    ],
+    MAX_GIT_OUTPUT_BYTES
+  );
+}
 
+async function collectRepositoryGitOutputWithoutHelpers(
+  audit: AuditedDirtyRepository,
+  gitCommand: StackLockGitCommand,
+  commandArgs: readonly string[],
+  maxOutputBytes: number
+): Promise<string> {
   let frozenDirectory: string | undefined;
   let frozenIdentity: RepositoryRootIdentity | undefined;
   let stdout: string | undefined;
   let primaryError: unknown;
   try {
-    frozenDirectory = mkdtempSync(join(tmpdir(), "stack-lock-status-"));
+    frozenDirectory = createExternalFrozenGitDirectory(audit.authority);
     try {
       frozenIdentity = observeRepositoryRootIdentitySync(frozenDirectory);
     } catch {
@@ -1141,6 +1373,7 @@ async function collectRepositoryStatusWithoutHelpers(
     }
     mkdirSync(join(frozenDirectory, "refs"), { mode: 0o700 });
     mkdirSync(join(frozenDirectory, "objects"), { mode: 0o700 });
+    mkdirSync(join(frozenDirectory, "info"), { mode: 0o700 });
     writeFileSync(
       join(frozenDirectory, "HEAD"),
       `${audit.headCommit}\n`,
@@ -1148,30 +1381,47 @@ async function collectRepositoryStatusWithoutHelpers(
     );
     writeFileSync(
       join(frozenDirectory, "config"),
-      frozenStatusConfig(audit.statusConfig),
+      frozenStatusConfig(audit.statusConfig, frozenDirectory),
       { encoding: "utf8", flag: "wx", mode: 0o600 }
     );
-    copyBoundedStableIndex(paths.indexPath, join(frozenDirectory, "index"));
+    writeCapturedGitFile(audit.capturedIndex.index, join(frozenDirectory, "index"));
+    if (audit.capturedIndex.sharedIndex !== undefined) {
+      writeCapturedGitFile(
+        audit.capturedIndex.sharedIndex.file,
+        join(frozenDirectory, audit.capturedIndex.sharedIndex.name)
+      );
+    }
+    if (audit.infoExclude !== undefined) {
+      writeCapturedGitFile(audit.infoExclude, join(frozenDirectory, "info", "exclude"));
+    }
+    if (audit.infoAttributes !== undefined) {
+      writeCapturedGitFile(audit.infoAttributes, join(frozenDirectory, "info", "attributes"));
+    }
+    if (audit.statusConfig.excludesFile !== undefined) {
+      writeCapturedGitFile(
+        audit.statusConfig.excludesFile,
+        join(frozenDirectory, "info", "core-excludes")
+      );
+    }
+    if (audit.statusConfig.attributesFile !== undefined) {
+      writeCapturedGitFile(
+        audit.statusConfig.attributesFile,
+        join(frozenDirectory, "info", "core-attributes")
+      );
+    }
     stdout = await readRepositoryGitText(
       audit.authority,
       [
         GIT_NO_LAZY_FETCH_GLOBAL_ARG,
         `--git-dir=${frozenDirectory}`,
         "--work-tree=.",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.untrackedCache=false",
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-        "--ignore-submodules=all",
-        "--"
+        ...commandArgs
       ],
       withGitObjectDirectory(gitCommand, checkoutRelativeObjectDirectory(
         audit.authority.path,
-        paths.objectDirectory
-      ))
+        audit.paths.objectDirectory
+      )),
+      maxOutputBytes
     );
   } catch (error) {
     primaryError = error instanceof StackLockCollectionError
@@ -1186,6 +1436,41 @@ async function collectRepositoryStatusWithoutHelpers(
   if (primaryError !== undefined) throw primaryError;
   if (cleanupFailed) throw new StackLockCollectionError("collection_contract_invalid");
   return stdout!;
+}
+
+function createExternalFrozenGitDirectory(
+  authority: RepositoryCheckoutAuthority
+): string {
+  try {
+    const configuredParent = tmpdir();
+    if (
+      configuredParent.length === 0 ||
+      configuredParent.includes("\0") ||
+      configuredParent.includes("\n") ||
+      configuredParent.includes("\r")
+    ) {
+      throw new Error("invalid temporary parent");
+    }
+    const physicalParent = realpathSync(configuredParent);
+    const parentStat = lstatSync(physicalParent, { bigint: true });
+    if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) {
+      throw new Error("unsafe temporary parent");
+    }
+    const relativeFromCheckout = relative(authority.path, physicalParent);
+    if (
+      relativeFromCheckout === "" ||
+      (
+        !isAbsolute(relativeFromCheckout) &&
+        relativeFromCheckout !== ".." &&
+        !relativeFromCheckout.startsWith(`..${sep}`)
+      )
+    ) {
+      throw new Error("temporary parent is inside checkout");
+    }
+    return mkdtempSync(join(physicalParent, "stack-lock-status-"));
+  } catch {
+    throw new StackLockCollectionError("collection_contract_invalid");
+  }
 }
 
 function checkoutRelativeObjectDirectory(checkout: string, objectDirectory: string): string {
@@ -1205,50 +1490,213 @@ function withGitObjectDirectory(
   return async (input) => await gitCommand(Object.freeze({ ...input, gitObjectDirectory: objectDirectory }));
 }
 
-function copyBoundedStableIndex(source: string, destination: string): void {
+async function captureRepositoryIndex(
+  _authority: RepositoryCheckoutAuthority,
+  paths: RepositoryGitAdministrativePaths,
+  _gitCommand: StackLockGitCommand
+): Promise<CapturedRepositoryIndex> {
+  const index = captureBoundedStableGitFile(paths.indexPath, MAX_GIT_INDEX_OUTPUT_BYTES);
+  const sharedName = referencedSharedIndexName(index.bytes);
+  const sharedIndex = sharedName === undefined
+    ? undefined
+    : Object.freeze({
+        name: sharedName,
+        file: captureBoundedStableGitFile(
+          join(paths.gitDirectory, sharedName),
+          MAX_GIT_INDEX_OUTPUT_BYTES
+        )
+      });
+  assertCapturedGitFileCurrent(index);
+  if (sharedIndex !== undefined) assertCapturedGitFileCurrent(sharedIndex.file);
+  return Object.freeze({ index, ...(sharedIndex === undefined ? {} : { sharedIndex }) });
+}
+
+function referencedSharedIndexName(indexBytes: Uint8Array): string | undefined {
+  const index = Buffer.from(indexBytes);
+  const checksumStart = index.byteLength - 20;
+  if (
+    index.byteLength < 32 ||
+    index.subarray(0, 4).toString("ascii") !== "DIRC" ||
+    ![2, 3, 4].includes(index.readUInt32BE(4))
+  ) {
+    throw new StackLockCollectionError("collection_contract_invalid");
+  }
+  const candidates: number[] = [];
+  for (let offset = 12; offset + 28 <= checksumStart; offset += 1) {
+    if (index.subarray(offset, offset + 4).toString("ascii") !== "link") continue;
+    const size = index.readUInt32BE(offset + 4);
+    if (size < 20 || offset + 8 + size > checksumStart) continue;
+    if (isValidIndexExtensionChain(index, offset, checksumStart)) candidates.push(offset);
+  }
+  if (candidates.length === 0) return undefined;
+  if (candidates.length !== 1) {
+    throw new StackLockCollectionError("collection_contract_invalid");
+  }
+  const hash = index.subarray(candidates[0]! + 8, candidates[0]! + 28).toString("hex");
+  return `sharedindex.${hash}`;
+}
+
+function isValidIndexExtensionChain(index: Buffer, start: number, end: number): boolean {
+  let offset = start;
+  while (offset < end) {
+    if (offset + 8 > end) return false;
+    const signature = index.subarray(offset, offset + 4).toString("ascii");
+    if (!/^[A-Za-z]{4}$/u.test(signature)) return false;
+    const size = index.readUInt32BE(offset + 4);
+    offset += 8 + size;
+    if (offset > end) return false;
+  }
+  return offset === end;
+}
+
+function assertCapturedRepositoryIndexCurrent(captured: CapturedRepositoryIndex): void {
+  assertCapturedGitFileCurrent(captured.index);
+  if (captured.sharedIndex !== undefined) assertCapturedGitFileCurrent(captured.sharedIndex.file);
+}
+
+function captureOptionalBoundedStableGitFile(
+  source: string,
+  maxBytes: number
+): CapturedGitFile | undefined {
+  try {
+    lstatSync(source, { bigint: true });
+    return captureBoundedStableGitFile(source, maxBytes);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (error instanceof StackLockCollectionError) throw error;
+    throw new StackLockCollectionError("collection_contract_invalid");
+  }
+}
+
+function captureBoundedStableGitFile(source: string, maxBytes: number): CapturedGitFile {
+  let descriptor: number | undefined;
+  let primaryError: unknown;
+  let captured: CapturedGitFile | undefined;
   try {
     const pathBefore = lstatSync(source, { bigint: true });
     if (
       !pathBefore.isFile() ||
       pathBefore.isSymbolicLink() ||
       pathBefore.nlink !== 1n ||
-      pathBefore.size > BigInt(MAX_GIT_INDEX_OUTPUT_BYTES)
+      pathBefore.size > BigInt(maxBytes)
     ) {
-      throw new Error("invalid index entry");
+      throw new Error("invalid Git observation file");
     }
-    copyFileSync(source, destination, constants.COPYFILE_EXCL);
-    utimesSync(destination, Number(pathBefore.atimeMs), Number(pathBefore.mtimeMs));
+    descriptor = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const openedBefore = fstatSync(descriptor, { bigint: true });
+    if (
+      !openedBefore.isFile() ||
+      openedBefore.nlink !== 1n ||
+      openedBefore.dev !== pathBefore.dev ||
+      openedBefore.ino !== pathBefore.ino ||
+      openedBefore.size !== pathBefore.size ||
+      openedBefore.size > BigInt(maxBytes)
+    ) {
+      throw new Error("Git observation file changed before read");
+    }
+    const bytes = Buffer.alloc(Number(openedBefore.size));
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const count = readSync(descriptor, bytes, offset, bytes.byteLength - offset, offset);
+      if (count === 0) throw new Error("short Git observation file");
+      offset += count;
+    }
+    const openedAfter = fstatSync(descriptor, { bigint: true });
     const pathAfter = lstatSync(source, { bigint: true });
-    const copied = lstatSync(destination, { bigint: true });
     if (
       pathAfter.dev !== pathBefore.dev ||
       pathAfter.ino !== pathBefore.ino ||
       pathAfter.size !== pathBefore.size ||
       pathAfter.ctimeNs !== pathBefore.ctimeNs ||
       pathAfter.mtimeNs !== pathBefore.mtimeNs ||
-      !copied.isFile() ||
-      copied.isSymbolicLink() ||
-      copied.nlink !== 1n ||
-      copied.size !== pathBefore.size ||
-      copied.size > BigInt(MAX_GIT_INDEX_OUTPUT_BYTES)
+      openedAfter.dev !== openedBefore.dev ||
+      openedAfter.ino !== openedBefore.ino ||
+      openedAfter.size !== openedBefore.size ||
+      openedAfter.ctimeNs !== openedBefore.ctimeNs ||
+      openedAfter.mtimeNs !== openedBefore.mtimeNs
     ) {
-      throw new Error("index changed while copying");
+      throw new Error("Git observation file changed while reading");
+    }
+    captured = Object.freeze({
+      bytes: Uint8Array.from(bytes),
+      atimeMs: Number(pathBefore.atimeMs),
+      mtimeMs: Number(pathBefore.mtimeMs),
+      source,
+      identity: Object.freeze({
+        dev: pathBefore.dev,
+        ino: pathBefore.ino,
+        size: pathBefore.size,
+        ctimeNs: pathBefore.ctimeNs,
+        mtimeNs: pathBefore.mtimeNs
+      })
+    });
+  } catch (error) {
+    primaryError = error;
+  }
+  let closeFailed = false;
+  if (descriptor !== undefined) {
+    try {
+      closeSync(descriptor);
+    } catch {
+      closeFailed = true;
+    }
+  }
+  if (primaryError !== undefined || closeFailed) {
+    throw new StackLockCollectionError("collection_contract_invalid");
+  }
+  return captured!;
+}
+
+function assertCapturedGitFileCurrent(captured: CapturedGitFile): void {
+  try {
+    const current = lstatSync(captured.source, { bigint: true });
+    if (
+      !current.isFile() ||
+      current.isSymbolicLink() ||
+      current.nlink !== 1n ||
+      current.dev !== captured.identity.dev ||
+      current.ino !== captured.identity.ino ||
+      current.size !== captured.identity.size ||
+      current.ctimeNs !== captured.identity.ctimeNs ||
+      current.mtimeNs !== captured.identity.mtimeNs
+    ) {
+      throw new Error("captured Git file changed");
     }
   } catch {
-    throw new StackLockCollectionError("collection_contract_invalid");
+    throw new StackLockCollectionError("collection_state_changed");
   }
 }
 
-function frozenStatusConfig(statusConfig: Readonly<Record<string, boolean>>): string {
+function writeCapturedGitFile(captured: CapturedGitFile, destination: string): void {
+  writeFileSync(destination, captured.bytes, { flag: "wx", mode: 0o600 });
+  utimesSync(destination, new Date(captured.atimeMs), new Date(captured.mtimeMs));
+}
+
+function frozenStatusConfig(statusConfig: FrozenStatusConfig, frozenDirectory: string): string {
   const booleanValue = (key: string, fallback: boolean): string =>
-    (statusConfig[key] ?? fallback) ? "true" : "false";
+    (statusConfig.booleans[key] ?? fallback) ? "true" : "false";
   return `[core]\n` +
     `\trepositoryformatversion = 0\n` +
     `\tbare = false\n` +
     `\tfilemode = ${booleanValue("core.filemode", platform() !== "win32")}\n` +
     `\tsymlinks = ${booleanValue("core.symlinks", platform() !== "win32")}\n` +
     `\tignorecase = ${booleanValue("core.ignorecase", platform() === "win32")}\n` +
-    `\tprecomposeunicode = ${booleanValue("core.precomposeunicode", false)}\n`;
+    `\tprecomposeunicode = ${booleanValue("core.precomposeunicode", false)}\n` +
+    (statusConfig.autocrlf === undefined ? "" : `\tautocrlf = ${statusConfig.autocrlf}\n`) +
+    (statusConfig.eol === undefined ? "" : `\teol = ${statusConfig.eol}\n`) +
+    (statusConfig.excludesFile === undefined
+      ? ""
+      : `\texcludesFile = ${quoteGitConfigValue(join(frozenDirectory, "info", "core-excludes"))}\n`) +
+    (statusConfig.attributesFile === undefined
+      ? ""
+      : `\tattributesFile = ${quoteGitConfigValue(join(frozenDirectory, "info", "core-attributes"))}\n`);
+}
+
+function quoteGitConfigValue(value: string): string {
+  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) {
+    throw new StackLockCollectionError("collection_contract_invalid");
+  }
+  return `"${value.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"`;
 }
 
 async function resolveRepositoryGitAdministrativePaths(
