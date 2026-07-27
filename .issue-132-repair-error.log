@@ -1,9 +1,68 @@
 From https://github.com/DankerMu/SHUD-Harness
  * branch            main       -> FETCH_HEAD
-Merge made by the 'ort' strategy.
- .review-gate-issues.json                           |  8 ++++-
- ...0003-keep-risk-adaptive-review-lens-rotation.md | 42 ++++++++++++++++++++++
- docs/review-loop-log.jsonl                         |  1 +
- 3 files changed, 50 insertions(+), 1 deletion(-)
- create mode 100644 docs/adr/0003-keep-risk-adaptive-review-lens-rotation.md
-test replacement expected once, found 0: '    args.length === 5 &&\n      args[0] === "--no-lazy-fetch" &&\n      args[1] =='
+Already up to date.
+bun install v1.2.19 (aad3abea)
+
++ typescript@5.8.3
+
+186 packages installed [563.00ms]
+bun test v1.2.19 (aad3abea)
+
+::group::packages/core/src/domain/schemas/core-schemas.test.ts:
+(pass) core Zod schemas > TaskCard accepts a valid stored object and rejects missing required fields [6.00ms]
+(pass) core Zod schemas > TaskCard rejects status values outside the coarse state machine
+(pass) core Zod schemas > Artifact defaults llm_generated to false and preserves an explicit true marker [1.00ms]
+(pass) core Zod schemas > public schema barrel preserves Artifact and ArtifactManifest input/output requiredness [1270.01ms]
+(pass) core Zod schemas > Artifact remains strict and rejects missing, non-boolean, and unknown fields [1.00ms]
+(pass) core Zod schemas > StackLock accepts the four-repository shape and nullable R package lock [2.00ms]
+(pass) core Zod schemas > StackLock requires llm.base_url and every canonical repository
+(pass) core Zod schemas > StackLock rejects the legacy runtime.r_packages_lock string [1.00ms]
+(pass) core Zod schemas > StackLock rejects deprecated or unknown fields at every strict boundary
+(pass) core Zod schemas > StackLock rejects ids outside STACK-<uuid>
+(pass) core Zod schemas > DataProvenance accepts the canonical object window and hashed sources [2.00ms]
+(pass) core Zod schemas > DataProvenance rejects the deprecated event window array and missing basin
+(pass) core Zod schemas > DataProvenance rejects unhashed sources and incomplete observations
+(pass) core Zod schemas > DataProvenance enforces DATA-<uuid> and strict nested records
+(pass) core Zod schemas > ArtifactManifest preserves omitted, true, and false Artifact LLM markers [1.00ms]
+(pass) core Zod schemas > ArtifactManifest accepts omission of every optional reference and hash field
+(pass) core Zod schemas > ArtifactManifest requires generator and full Artifact entries
+(pass) core Zod schemas > ArtifactManifest enforces MANIFEST-<uuid> references and strict fields [1.00ms]
+(pass) core Zod schemas > ErrorRecord accepts remediation and rejects invalid next_action [1.00ms]
+(pass) core Zod schemas > IdempotencyRecord accepts request_digest and rejects missing required fields [1.00ms]
+(pass) core Zod schemas > LockRecord accepts a valid object and rejects missing required fields
+(pass) StackLock repository dirty state > requires a boolean dirty field for every repository revision
+
+::endgroup::
+
+ 22 pass
+ 0 fail
+ 161 expect() calls
+Ran 22 tests across 1 file. [1.99s]
+bun test v1.2.19 (aad3abea)
+
+::group::packages/core/src/domain/services/stack-lock-dirty-state.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+662 |   const lines = stdout.split("
+                                   ^
+error: Unterminated string literal
+    at <runner-path>
+-------------------------------
+
+
+::group::packages/core/src/domain/services/stack-lock-collector.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+662 |   const lines = stdout.split("
+                                   ^
+error: Unterminated string literal
+    at <runner-path>
+-------------------------------
+
+
+ 0 pass
+ 2 fail
+ 2 errors
+Ran 2 tests across 2 files. [79.00ms]
