@@ -34,6 +34,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 git -C "$repo_root" worktree add --quiet --detach "$proof_repo" "$green_sha"
+(cd "$proof_repo" && git submodule update --init zero >/dev/null)
 (cd "$proof_repo" && npx --yes bun@1.2.19 install --frozen-lockfile >/dev/null)
 
 test_pattern='publication sibling|symlink checkout before|distinguishes a descriptor|PATH components|owns a checkout handle|filter'
@@ -44,6 +45,7 @@ for path in $paths; do
   echo "BLOB $(git -C "$repo_root" rev-parse "$green_sha:$path") $path"
 done
 echo "COMMAND $test_command"
+echo "SETUP git submodule update --init zero"
 echo "SETUP npx --yes bun@1.2.19 install --frozen-lockfile"
 
 apply_semantic_mutants() {

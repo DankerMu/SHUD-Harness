@@ -1,6 +1,6 @@
 # Issue #132 Round 2 semantic red proof
 
-The final proof script requires a committed green SHA, verifies that five governing production/test/spec/script blobs exist at that commit, and refuses any related working-tree, index, or untracked drift. It creates a detached temporary worktree directly from the supplied tree and performs a frozen Bun install there；it never copies source, tests, or dependencies from the caller's dirty worktree.
+The final proof script requires a committed green SHA, verifies that five governing production/test/spec/script blobs exist at that commit, and refuses any related working-tree, index, or untracked drift. It creates a detached temporary worktree directly from the supplied tree, initializes only the pinned `zero` workspace submodule, and performs a frozen Bun install there；it never copies source, tests, or dependencies from the caller's dirty worktree.
 
 RED applies six isolated semantic regressions to the temporary production source: one publication sweep, realpath-before-no-follow, unmarked exit-code remap, bare PATH-selected Git, delayed handle ownership, and skipped filter preflight. The fixed 20-test selection must report exactly `0 pass / 20 fail` with exit 1 and no timeout/import/unhandled/harness errors. GREEN restores the production blob from the supplied commit and must report exactly `20 pass / 0 fail` with exit 0. Both phases run twice and must reproduce identical counts.
 
