@@ -1,0 +1,25 @@
+name: Issue 132 bootstrap
+
+on:
+  push:
+    branches: [feat/issue-132-stack-lock-dirty-state]
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-132-stack-lock-dirty-state
+          fetch-depth: 0
+      - name: Reapply reverted implementation baseline
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git cherry-pick f5bd18e884c8ca911cf170f6e56979f927b9562a
+          git push origin HEAD:feat/issue-132-stack-lock-dirty-state
