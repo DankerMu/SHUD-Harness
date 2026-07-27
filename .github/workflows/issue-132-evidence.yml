@@ -1,0 +1,328 @@
+name: Issue 132 evidence
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/issue-132-evidence.yml"
+      - "packages/core/src/domain/schemas/**"
+      - "packages/core/src/domain/services/stack-lock-**"
+      - "docs/generated/**"
+      - "docs/03_SPEC/Minimal_Schemas.md"
+      - "docs/Phased_Spec_Activation.md"
+      - "openspec/changes/m2-research-context/**"
+
+permissions:
+  contents: write
+
+jobs:
+  evidence:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-132-stack-lock-dirty-state
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+      - name: Initialize zero
+        run: git submodule update --init zero
+      - name: Align canonical and OpenSpec contracts
+        shell: bash
+        env:
+          EVIDENCE_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          def replace_once(path: Path, old: str, new: str) -> None:
+              source = path.read_text()
+              if source.count(old) != 1:
+                  raise SystemExit(f'{path}: expected one replacement, found {source.count(old)}')
+              path.write_text(source.replace(old, new, 1))
+
+          minimal = Path('docs/03_SPEC/Minimal_Schemas.md')
+          replace_once(
+              minimal,
+              '''  SHUD:      { commit: 9b55b0c, branch: master }
+            rSHUD:     { commit: d162db3, branch: master }
+            AutoSHUD:  { commit: 1cbec6f, branch: master }
+            zero:      { commit: 13e25c1, branch: main }''',
+              '''  SHUD:      { commit: 9b55b0c, branch: master, dirty: false }
+            rSHUD:     { commit: d162db3, branch: master, dirty: false }
+            AutoSHUD:  { commit: 1cbec6f, branch: master, dirty: false }
+            zero:      { commit: 13e25c1, branch: main, dirty: false }'''
+          )
+          replace_once(
+              minimal,
+              '''**llm 字段说明**（AGA-P0-1）：''',
+              '''**repos 字段说明（#132 bug 级修正）：** `commit` 与 `branch` 表示采集时四个实际 checkout 的 `HEAD` 与分支；detached HEAD 统一记录 `branch: "detached"`。`dirty` 为必填 boolean，覆盖 tracked 与 untracked 变化。superproject gitlink 与 `HEAD:.gitmodules` 仅作为四个 checkout 路径及采集代际的内部 authority，不得冒充实际 checkout commit/branch。任一 checkout 或 authority 在双快照间变化时整次采集 fail closed，不产生部分 StackLock。
+
+            **llm 字段说明**（AGA-P0-1）：'''
+          )
+
+          design = Path('openspec/changes/m2-research-context/design.md')
+          design_source = design.read_text()
+          design_pattern = re.compile(r'### D7a\.[\s\S]*?\n### D8\.')
+          design_replacement = '''### D7a. StackLock repo 采集：gitlink 代际 authority + 实际 checkout 状态
+
+            superproject `HEAD` 的四个 gitlink 与同一 generation 的 `HEAD:.gitmodules` 只负责确认 SHUD/rSHUD/AutoSHUD/zero 四个声明路径及代际完整性；它们 **不是** StackLock `repos.*.commit/branch` 的输出值。每个声明路径均须以 no-follow 物理目录身份 `(path, dev, ino)` 绑定，并证明 `git --no-lazy-fetch rev-parse --show-toplevel --show-prefix` 的 top-level 精确等于该 checkout 且 prefix 为空。
+
+            StackLock `repos` 对每个实际 checkout 读取：`rev-parse HEAD` → `commit`，`rev-parse --abbrev-ref HEAD` → `branch`（`HEAD` 规范化为 `detached`），`status --porcelain=v1 --untracked-files=all --` → required `dirty`。实际 checkout HEAD 可以合法偏离 superproject gitlink；这种偏离必须被忠实记录，不能拒绝、回退或伪装成 gitlink。采集前后两次 cheap snapshot 同时比较 root authority、四 gitlink、四 checkout 物理身份、实际 `commit/branch/dirty`、`.gitmodules`、package/provider 配置；任一变化均以 `collection_state_changed` fail closed，零 partial result。
+
+            runtime 版本（r/python/sundials/gcc/gdal）M2 填占位探测值或 `unknown`。`harness.version` = 仓库根 `package.json` 版本；`cli_version="unknown"`、`prompt_pack="promptpack-unset"`、`skills_version="skills-unset"`。`llm` 从 provider 配置读取 provider/model_id/base_url；`params_digest` = canonical `{}` sha256，`prompt_pack_digest` = 空字节 sha256，两者语义独立且值不同。
+
+            ### D8.'''
+          design_source, count = design_pattern.subn(design_replacement, design_source, count=1)
+          if count != 1:
+              raise SystemExit(f'design D7a replacement count was {count}')
+          design.write_text(design_source)
+
+          spec = Path('openspec/changes/m2-research-context/specs/stack-lock/spec.md')
+          spec_source = spec.read_text()
+          spec_source = spec_source.replace('各含 commit + branch——', '各含 commit + branch + required `dirty: boolean`——', 1)
+          spec_source = spec_source.replace(
+              '以含四 repo commit、runtime 占位、完整 llm 块的输入校验',
+              '以含四 repo 实际 commit/branch/dirty、runtime 占位、完整 llm 块的输入校验',
+              1
+          )
+          marker = '''现有 `renv.lock` SHALL 在已打开 regular-file descriptor 上执行 inclusive 16 MiB byte bound：恰好 16 MiB 成功，超限以 typed failure 拒绝且不返回 partial result。
+
+            #### Scenario: 四个 submodule commit 均可读取'''
+          addition = '''现有 `renv.lock` SHALL 在已打开 regular-file descriptor 上执行 inclusive 16 MiB byte bound：恰好 16 MiB 成功，超限以 typed failure 拒绝且不返回 partial result。
+
+            四个 gitlink 与 `HEAD:.gitmodules` SHALL 仅作为路径和代际 authority。采集服务 MUST 对每个声明 checkout 读取实际 `HEAD`、实际 branch（detached 规范化为 `detached`）以及覆盖 tracked + untracked 的 `dirty`；实际 HEAD 与 gitlink 不同是合法状态，必须记录实际值。每个 checkout 的物理目录身份与完整 `commit/branch/dirty` MUST 纳入两次 cheap snapshot；任一 checkout 路径替换或状态漂移 → `collection_state_changed`，不返回 partial result。
+
+            #### Scenario: 四个 submodule commit 均可读取'''
+          if spec_source.count(marker) != 1:
+              raise SystemExit('stack-lock actual-state requirement insertion point missing')
+          spec_source = spec_source.replace(marker, addition, 1)
+          scenario_anchor = '''- **THEN** 返回四个 repo 各自的 40 位 commit hash，zero 的 commit 等于 pin `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`
+
+            #### Scenario: nested directory 不是仓库根'''
+          scenarios = '''- **THEN** 返回四个 repo 各自的实际 40 位 HEAD commit；在 canonical checkout 中 zero 等于 pin `13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`
+
+            #### Scenario: 实际 checkout HEAD 可偏离 gitlink
+
+            - **WHEN** SHUD checkout 在 superproject gitlink 之后产生本地 commit 或切换到其他 branch
+            - **THEN** `repos.SHUD.commit/branch` 记录实际 checkout 状态，gitlink 仍只参与代际一致性检查；不拒绝、不回退到 gitlink
+
+            #### Scenario: dirty 与 detached 状态完整记录
+
+            - **WHEN** 任一 checkout 有 tracked 修改、untracked 文件，或处于 detached HEAD
+            - **THEN** 前两者 `dirty=true`，干净 sibling 为 false；detached checkout 的 `branch="detached"`
+
+            #### Scenario: checkout 状态跨快照漂移
+
+            - **WHEN** 任一 checkout 的 HEAD、branch、dirty 或物理目录身份在两次 snapshot 间变化
+            - **THEN** 以 `collection_state_changed` 拒绝且不发布任何 partial StackLock content
+
+            #### Scenario: nested directory 不是仓库根'''
+          if spec_source.count(scenario_anchor) != 1:
+              raise SystemExit('stack-lock scenario insertion point missing')
+          spec_source = spec_source.replace(scenario_anchor, scenarios, 1)
+          spec_source = spec_source.replace(
+              '`fingerprint` SHALL 是对 StackLock **内容字段**（`repos`/`runtime`/`harness`/`llm`）canonical JSON',
+              '`fingerprint` SHALL 是对 StackLock **内容字段**（`repos`，含四项实际 commit/branch/dirty；`runtime`/`harness`/`llm`）canonical JSON',
+              1
+          )
+          spec_source = spec_source.replace(
+              '- **WHEN** 改动 `llm.base_url` 后再次 lock\n- **THEN** fingerprint 与此前不同',
+              '- **WHEN** 改动 `llm.base_url`，或任一 repo 从 clean 变 dirty / dirty 变 clean 后再次 lock\n- **THEN** fingerprint 与此前不同',
+              1
+          )
+          spec_source = spec_source.replace(
+              'GET 返回与响应 `stack` 字段一致的同一记录，含四 repo commit、llm.base_url 与 fingerprint',
+              'GET 返回与响应 `stack` 字段一致的同一记录，完整保留四 repo 实际 commit/branch/dirty、llm.base_url 与 fingerprint',
+              1
+          )
+          spec.write_text(spec_source)
+
+          ledger = Path('docs/Phased_Spec_Activation.md')
+          replace_once(
+              ledger,
+              '''API_Error_And_Idempotency_Contracts §3 适用清单——M1 期间刻意 change-scoped，经 #74 硬化（24 轮审查
+            + 3× exact-SHA CI）与 M1 验收后，canonical 清单追认既成事实，属 spec 落后于已验收现实的 bug 级修正。
+
+            **依据：**''',
+              '''API_Error_And_Idempotency_Contracts §3 适用清单——M1 期间刻意 change-scoped，经 #74 硬化（24 轮审查
+            + 3× exact-SHA CI）与 M1 验收后，canonical 清单追认既成事实，属 spec 落后于已验收现实的 bug 级修正。
+            **例外批次 8（2026-07-27，#132 bug 级修正）**：IR-001 的“实际运行状态可复现”与既有 StackLock 示例只记录 superproject gitlink commit 发生语义冲突；gitlink 不能代表 checkout 的本地 commit、detached branch 或 tracked/untracked dirty 状态。修正 `Minimal_Schemas.md` §2、M2 design/spec/tasks 与生成 schema：四 repo revision 增 required `dirty:boolean`，commit/branch 改为实际 checkout 状态；gitlink + `HEAD:.gitmodules` 保留为路径/代际 authority。两次 snapshot 纳入 gitlink、checkout 物理身份及实际 commit/branch/dirty，漂移 fail closed。后续 #92 fingerprint 与 #93 持久化/API 必须完整保留 dirty；本批不提前实现其 service/route。
+
+            **依据：**'''
+          )
+
+          tasks = Path('openspec/changes/m2-research-context/tasks.md')
+          tasks_source = tasks.read_text()
+          task_anchor = '- [ ] 4.2 StackLock 组装 + 内容域 canonical fingerprint'
+          correction = '''- [x] 4.1a P0 correction #132 — StackLock 四 repo revision 增 required `dirty:boolean`；collector 以 gitlink/HEAD `.gitmodules` 作路径与代际 authority，但输出实际 checkout HEAD/branch/detached/dirty；checkout 物理身份与完整状态进入双快照，漂移 typed fail closed；同步 canonical/OpenSpec/生成 schema（验证见 `evidence/issue-132.md`）。
+              - Fixture (#132): expanded / high；schema/evidence contract、四 repo Git read surface、shared collector、dirty fingerprint downstream 与 frozen-spec bug correction 触发 mandatory expanded。
+              - Invariant Matrix (#132): authority = superproject gitlinks + exact HEAD `.gitmodules` + four physical checkout identities；record truth = each checkout actual HEAD/branch/dirty；validators = exact top-level/no-follow/bounded Git parser + required schema；storage = deferred #92/#93；failure = `collection_state_changed`, zero partial output。
+              - Boundary checklist (#132): change schema/generated docs/collector/tests/canonical/OpenSpec only；zero write/fetch/submodule mutation；不提前实现 #92 assembly/fingerprint/store 或 #93 routes。
+              - Evidence floor (#132): actual HEAD != gitlink、tracked/untracked、clean sibling、detached、physical symlink、snapshot drift、no-mutation；三项 source-bound red proof；schemas/core/backend/check/schema/perf/OpenSpec/hygiene。
+            '''
+          if tasks_source.count(task_anchor) != 1:
+              raise SystemExit('tasks 4.2 anchor missing')
+          tasks_source = tasks_source.replace(task_anchor, correction + task_anchor, 1)
+          tasks_source = tasks_source.replace(
+              '（依赖: 4.1。验证:',
+              '（依赖: 4.1、4.1a/#132。验证:',
+              1
+          )
+          tasks.write_text(tasks_source)
+
+          evidence = Path('openspec/changes/m2-research-context/evidence/issue-132.md')
+          evidence.write_text(f'''# Issue #132 — StackLock actual checkout state evidence
+
+            - Workflow: `subagent-workflow` 0.31.0
+            - Fixture: expanded
+            - Repair intensity: high
+            - Minimal mergeable slice: schema + collector + tests + canonical/OpenSpec correction; no #92/#93 service or route implementation
+            - Evidence workflow run: `{os.environ.get("EVIDENCE_RUN_ID", "unknown")}`
+
+            ## Governing invariant
+
+            A successful StackLock collection records the actual reproducible state of all four checkout directories (`commit`, `branch`, required `dirty`) while superproject gitlinks and `HEAD:.gitmodules` remain internal path/generation authority; every authority and checkout state must match across the two snapshots or the whole collection fails without partial output.
+
+            ## Risk packs
+
+            - Public API/schema: selected — persisted StackLock shape changes.
+            - Config/project setup: selected — `.gitmodules`, provider and package identities participate in the same snapshot.
+            - File IO/path safety: selected — four physical checkout directories use no-follow identity binding.
+            - Auth/secrets: selected — Git environment remains minimal and provider secrets remain non-observable.
+            - Concurrency/shared state: selected — HEAD/branch/dirty/path replacement between snapshots must fail closed.
+            - Resource limits: selected — fixed four paths, bounded Git output/timeouts; no recursive discovery.
+            - Legacy compatibility/migration: selected — old StackLock records lacking dirty are invalid under the corrected required contract; no persisted M2 StackLock service has shipped yet.
+            - Error/rollback: selected — stable typed failures and zero partial content.
+            - Release/docs: selected — generated schemas and frozen-spec correction ledger change.
+            - Scientific evidence lineage, hydrology repositories, Zero governance: selected — all four repo states are reproduction evidence; no scientific conclusion or submodule source mutation.
+
+            ## Invariant Matrix
+
+            - Producers: superproject inventory/blob reader; four checkout root/HEAD/branch/status observers.
+            - Validators: physical path `(dev, ino)`, exact Git top-level + empty prefix, 40-hex HEAD, bounded single-line branch, porcelain dirty boolean, StackLock strict schema.
+            - Storage/query/routes: none in #132; #92/#93 are explicitly blocked until they preserve dirty.
+            - Failure paths: missing/replaced/symlink checkout, malformed Git output, or any cross-snapshot gitlink/checkout-state drift -> non-disclosing typed failure, no partial result.
+            - Evidence: independent synthetic four-repo fixtures, existing collector regressions, generated-schema drift check, semantic red proof, full CI.
+
+            ## Regression rows
+
+            - actual HEAD differs from gitlink -> actual commit/branch recorded, no rejection or fallback.
+            - tracked or untracked changes -> dirty true; unchanged siblings remain false.
+            - detached checkout -> `branch="detached"`.
+            - checkout state changes between snapshots -> `collection_state_changed`, no result.
+            - stable clean four-repo checkout -> deterministic complete collection and no HEAD/index/status/byte mutation.
+            - symlink replacement -> rejected without reading or modifying target.
+
+            ## Source-bound red proof
+
+            The temporary evidence workflow retains the tests while independently weakening: (1) required dirty schema -> optional; (2) dirty observer -> constant false; (3) snapshot repo-state comparison -> bypassed. Each named focused test must turn red, then the exact source is restored before full verification.
+
+            ## Execution-path deviation
+
+            The ChatGPT GitHub-App environment has no native implementer/reviewer/verifier subagent primitive. No agent fan-out is claimed. The orchestrator separated correctness, integration, security/resource, test-evidence, spec-compliance and invariant-state review passes and leaves the PR Draft for the human merge gate.
+            ''')
+          PY
+      - name: Install and regenerate
+        run: |
+          npx --yes bun@1.2.19 install --frozen-lockfile
+          npx --yes bun@1.2.19 run schema:generate
+      - name: Focused green baseline
+        run: |
+          npx --yes bun@1.2.19 test packages/core/src/domain/schemas/core-schemas.test.ts
+          npx --yes bun@1.2.19 test packages/core/src/domain/services/stack-lock-collector.test.ts packages/core/src/domain/services/stack-lock-dirty-state.test.ts
+      - name: Source-bound semantic red proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          schema=packages/core/src/domain/schemas/stack-lock.ts
+          collector=packages/core/src/domain/services/stack-lock-collector.ts
+          cp "$schema" /tmp/stack-lock-schema.ts
+          cp "$collector" /tmp/stack-lock-collector.ts
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/core/src/domain/schemas/stack-lock.ts')
+          s=p.read_text()
+          old='dirty: z.boolean()'
+          if s.count(old) != 1: raise SystemExit('dirty schema mutation count')
+          p.write_text(s.replace(old, 'dirty: z.boolean().optional()', 1))
+          PY
+          set +e
+          npx --yes bun@1.2.19 test packages/core/src/domain/schemas/core-schemas.test.ts -t "requires a boolean dirty field" >/tmp/red-schema.log 2>&1
+          schema_status=$?
+          set -e
+          test "$schema_status" -ne 0
+          cp /tmp/stack-lock-schema.ts "$schema"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/core/src/domain/services/stack-lock-collector.ts')
+          s=p.read_text()
+          old='return stdout.length > 0;'
+          if s.count(old) != 1: raise SystemExit('dirty observer mutation count')
+          p.write_text(s.replace(old, 'return false;', 1))
+          PY
+          set +e
+          npx --yes bun@1.2.19 test packages/core/src/domain/services/stack-lock-dirty-state.test.ts -t "marks tracked and untracked" >/tmp/red-dirty.log 2>&1
+          dirty_status=$?
+          set -e
+          test "$dirty_status" -ne 0
+          cp /tmp/stack-lock-collector.ts "$collector"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('packages/core/src/domain/services/stack-lock-collector.ts')
+          s=p.read_text()
+          old='JSON.stringify(first.repos) === JSON.stringify(second.repos) &&'
+          if s.count(old) != 1: raise SystemExit('snapshot comparison mutation count')
+          p.write_text(s.replace(old, 'true &&', 1))
+          PY
+          set +e
+          npx --yes bun@1.2.19 test packages/core/src/domain/services/stack-lock-dirty-state.test.ts -t "fails closed when a repository changes" >/tmp/red-snapshot.log 2>&1
+          snapshot_status=$?
+          set -e
+          test "$snapshot_status" -ne 0
+          cp /tmp/stack-lock-collector.ts "$collector"
+
+          cmp -s "$schema" /tmp/stack-lock-schema.ts
+          cmp -s "$collector" /tmp/stack-lock-collector.ts
+          npx --yes bun@1.2.19 test packages/core/src/domain/schemas/core-schemas.test.ts
+          npx --yes bun@1.2.19 test packages/core/src/domain/services/stack-lock-collector.test.ts packages/core/src/domain/services/stack-lock-dirty-state.test.ts
+      - name: Full verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --yes bun@1.2.19 run test:schemas
+          npx --yes bun@1.2.19 run test:core-services
+          npx --yes bun@1.2.19 run test:backend-api
+          npx --yes bun@1.2.19 run schema:check
+          npx --yes bun@1.2.19 run typecheck
+          npx --yes bun@1.2.19 run check
+          npx --yes bun@1.2.19 run test:perf:api
+          npx --yes @fission-ai/openspec@1.3.1 validate m2-research-context --strict --no-interactive
+          git diff --check
+          git -C zero diff --quiet
+          test -z "$(git ls-files workspace)"
+          git diff --exit-code origin/main -- package.json packages/*/package.json bun.lock
+      - name: Commit verified contracts and evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/03_SPEC/Minimal_Schemas.md \
+            docs/Phased_Spec_Activation.md \
+            docs/generated/json-schema/stack-lock.json \
+            docs/generated/schema/stack-lock.md \
+            openspec/changes/m2-research-context/design.md \
+            openspec/changes/m2-research-context/specs/stack-lock/spec.md \
+            openspec/changes/m2-research-context/tasks.md \
+            openspec/changes/m2-research-context/evidence/issue-132.md
+          git commit -m "docs(stack-lock): align actual repo state contracts (#132)"
+          git push origin HEAD:feat/issue-132-stack-lock-dirty-state
