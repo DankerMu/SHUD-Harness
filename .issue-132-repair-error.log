@@ -1,4 +1,0 @@
-From https://github.com/DankerMu/SHUD-Harness
- * branch            main       -> FETCH_HEAD
-Already up to date.
-collector replacement expected once, found 0: 'interface RepositoryRootAuthority {\n  readonly path: string;\n  readonly identity'
