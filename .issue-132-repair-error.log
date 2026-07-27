@@ -1,4 +1,120 @@
-From https://github.com/DankerMu/SHUD-Harness
- * branch            main       -> FETCH_HEAD
-Already up to date.
-linked worktree test replacement count was 0
+error: expect(received).toBe(expected)
+
+Expected: 1
+Received: 0
+
+      at <anonymous> (<runner-path>
+(fail) StackLock context collector > rejects same-path replacement after the first renv producer [3.00ms]
+
+::error file=packages/core/src/domain/services/stack-lock-collector.test.ts,line=1057,col=23,title=error: expect(received).toBe(expected)::Expected: 2%0AReceived: 0%0A%0A      at <anonymous> (<runner-path>
+1052 |     } catch (error) {
+1053 |       thrown = error;
+1054 |     }
+1055 | 
+1056 |     expect(collection).toBeUndefined();
+1057 |     expect(hashCalls).toBe(replacementCall);
+                             ^
+error: expect(received).toBe(expected)
+
+Expected: 2
+Received: 0
+
+      at <anonymous> (<runner-path>
+(fail) StackLock context collector > rejects same-path replacement after the publication-adjacent second renv producer [2.00ms]
+(pass) StackLock context collector > default Git execution rejects a real same-path repository replacement after root observation [163.00ms]
+
+::error file=packages/core/src/domain/services/stack-lock-collector.ts,line=90,col=5,title=StackLockCollectionError: StackLock context collection failed.::%0A      at new StackLockCollectionError (<runner-path>      at assertRepositoryGitTopLevel (<runner-path>
+85 | 
+86 | export class StackLockCollectionError extends Error {
+87 |   readonly code: StackLockCollectionErrorCode;
+88 | 
+89 |   constructor(code: StackLockCollectionErrorCode) {
+90 |     super("StackLock context collection failed.");
+         ^
+StackLockCollectionError: StackLock context collection failed.
+ code: "git_output_invalid"
+
+      at new StackLockCollectionError (<runner-path>
+      at assertRepositoryGitTopLevel (<runner-path>
+(fail) StackLock context collector > collects normally from a linked-worktree physical top-level [92.00ms]
+(pass) StackLock context collector > rejects a dirty worktree when .gitmodules branch authority disagrees [72.00ms]
+(pass) StackLock context collector > rejects an untracked canonical worktree .gitmodules when HEAD has no branch authority [78.00ms]
+(pass) StackLock context collector > rejects committed branch authority drift despite a stable canonical worktree .gitmodules [86.00ms]
+
+::error file=packages/core/src/domain/services/stack-lock-collector.test.ts,line=1572,col=18,title=error: expect(received).toMatchObject(expected)::+ 85 | %0A+ 86 | export class StackLockCollectionError extends Error {%0A+ 87 |   readonly code: StackLockCollectionErrorCode;%0A+ 88 | %0A+ 89 |   constructor(code: StackLockCollectionErrorCode) {%0A+ 90 |     super("StackLock context collection failed.");%0A+          ^%0A+ StackLockCollectionError: StackLock context collection failed.%0A+  code: "git_output_invalid"%0A+ %0A+       at new StackLockCollectionError (<runner-path>       at assertRepositoryGitTopLevel (<runner-path> {%0A-   code: "collection_state_changed",%0A-   message: "StackLock context collection failed.",%0A- }%0A%0A- Expected  - 4%0A+ Received  + 12%0A%0A      at expectStateChanged (<runner-path>
+1567 |     collection = await collectStackLockContext({ repositoryRoot, gitCommand });
+1568 |   } catch (error) {
+1569 |     thrown = error;
+1570 |   }
+1571 |   expect(collection).toBeUndefined();
+1572 |   expect(thrown).toMatchObject({
+                        ^
+error: expect(received).toMatchObject(expected)
+
++ 85 | 
++ 86 | export class StackLockCollectionError extends Error {
++ 87 |   readonly code: StackLockCollectionErrorCode;
++ 88 | 
++ 89 |   constructor(code: StackLockCollectionErrorCode) {
++ 90 |     super("StackLock context collection failed.");
++          ^
++ StackLockCollectionError: StackLock context collection failed.
++  code: "git_output_invalid"
++ 
++       at new StackLockCollectionError (<runner-path>
++       at assertRepositoryGitTopLevel (<runner-path>
+- {
+-   code: "collection_state_changed",
+-   message: "StackLock context collection failed.",
+- }
+
+- Expected  - 4
++ Received  + 12
+
+      at expectStateChanged (<runner-path>
+(fail) StackLock context collector > rejects a committed byte-only .gitmodules generation transition between snapshots [73.00ms]
+(pass) StackLock context collector > default git reader observes the real four gitlinks including the frozen zero pin without git mutation
+(pass) StackLock context collector > services barrel exposes the collector contract and production does not read API-key environment values [1.00ms]
+
+::endgroup::
+
+34 tests failed:
+(fail) StackLock context collector > collects four gitlinks, explicit placeholders, provider identity, and missing-renv degradation [2.00ms]
+(fail) StackLock context collector > hashes an existing renv.lock through the shared file hashing service and is change-sensitive [2.00ms]
+(fail) StackLock context collector > rejects a generation transition between collection and revalidation [2.00ms]
+(fail) StackLock context collector > rejects a byte-only package source transition at the revalidation barrier [2.00ms]
+(fail) StackLock context collector > rejects provider byte-only drift even when its public projection is unchanged [2.00ms]
+(fail) StackLock context collector > keeps an invalid second provider observation source-specific [4.00ms]
+(fail) StackLock context collector > rejects renv A to B across the two-snapshot generation barrier [3.00ms]
+(fail) StackLock context collector > rejects renv missing to present across the two-snapshot generation barrier [2.00ms]
+(fail) StackLock context collector > rejects renv present to missing across the two-snapshot generation barrier [2.00ms]
+(fail) StackLock context collector > rejects .gitmodules byte-only drift across the generation barrier [2.00ms]
+(fail) StackLock context collector > rejects .gitmodules branch-authority drift across the generation barrier [4.00ms]
+(fail) StackLock context collector > accepts an exact 64 KiB HEAD .gitmodules blob and rejects the next byte [2.00ms]
+(fail) StackLock context collector > rejects a committed .gitmodules object generation transition [1.00ms]
+(fail) StackLock context collector > rejects an oversized root package.json without disclosing its path or content [3.00ms]
+(fail) StackLock context collector > rejects a missing canonical harness version [2.00ms]
+(fail) StackLock context collector > rejects a blank canonical harness version [2.00ms]
+(fail) StackLock context collector > rejects a non-string canonical harness version [2.00ms]
+(fail) StackLock context collector > rejects oversized provider JSON without disclosing its path or content [2.00ms]
+(fail) StackLock context collector > rejects unsafe provider identity without echoing config secrets or absolute paths [2.00ms]
+(fail) StackLock context collector > rejects provider selector provider drift without leaking config credentials [2.00ms]
+(fail) StackLock context collector > rejects provider selector model missing without leaking config credentials [2.00ms]
+(fail) StackLock context collector > rejects provider selector syntax drift without leaking config credentials [2.00ms]
+(fail) StackLock context collector > rejects provider target model id drift without leaking config credentials [2.00ms]
+(fail) StackLock context collector > rejects provider nested model id drift without leaking config credentials [2.00ms]
+(fail) StackLock context collector > rejects a symlink renv.lock without reading or modifying its target [2.00ms]
+(fail) StackLock context collector > hashes an exact 16 MiB regular renv.lock against an independent SHA256 oracle [2.00ms]
+(fail) StackLock context collector > maps the 16 MiB renv.lock descriptor bound to renv_lock_invalid [2.00ms]
+(fail) StackLock context collector > hostile inherited Git trace sinks are not created by real collection [9.00ms]
+(fail) StackLock context collector > revalidates the physical repository top-level before the second cheap snapshot [3.00ms]
+(fail) StackLock context collector > rejects a same-path repository replacement between cheap snapshots [2.00ms]
+(fail) StackLock context collector > rejects same-path replacement after the first renv producer [3.00ms]
+(fail) StackLock context collector > rejects same-path replacement after the publication-adjacent second renv producer [2.00ms]
+(fail) StackLock context collector > collects normally from a linked-worktree physical top-level [92.00ms]
+(fail) StackLock context collector > rejects a committed byte-only .gitmodules generation transition between snapshots [73.00ms]
+
+ 39 pass
+ 34 fail
+ 167 expect() calls
+Ran 73 tests across 2 files. [1.99s]
