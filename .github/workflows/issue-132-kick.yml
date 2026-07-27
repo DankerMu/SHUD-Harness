@@ -51,6 +51,15 @@ jobs:
           if replacements != 1:
               raise SystemExit(f'status helper patch block count was {replacements}')
           script = script.replace('                "--ignore-submodules=none",\n', '', 1)
+          for variable in (
+              'head_replacement',
+              'repo_replacement',
+              'commit_replacement',
+              'branch_replacement',
+              'dirty_replacement',
+          ):
+              script = script.replace(f"{variable} = '''", f"{variable} = r'''", 1)
+          script = script.replace("insertion = '''", "insertion = r'''", 1)
           Path('/tmp/issue-132-repair.sh').write_text(script)
           PY
           bash -n /tmp/issue-132-repair.sh
