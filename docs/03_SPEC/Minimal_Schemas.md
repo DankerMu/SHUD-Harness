@@ -65,10 +65,10 @@ TaskCard.status 使用粗粒度状态机管理任务生命周期。执行期间�
 ```yaml
 stack_id: STACK-0001                  # 格式: STACK-NNNN
 repos:
-  SHUD:      { commit: 9b55b0c, branch: master, dirty: false }
-  rSHUD:     { commit: d162db3, branch: master, dirty: false }
-  AutoSHUD:  { commit: 1cbec6f, branch: master, dirty: false }
-  zero:      { commit: 13e25c1, branch: development, dirty: false }
+  SHUD:      { commit: 9b55b0c, branch: master, detached: false, dirty: false }
+  rSHUD:     { commit: d162db3, branch: master, detached: false, dirty: false }
+  AutoSHUD:  { commit: 1cbec6f, branch: master, detached: false, dirty: false }
+  zero:      { commit: 13e25c1, branch: development, detached: false, dirty: false }
 runtime:
   os: "Darwin 24.6.0"
   r_version: "4.4.1"
@@ -97,7 +97,7 @@ fingerprint: "sha256:..."             # 整体哈希，用于快速比对
 created_at: 2026-04-25T10:00:00Z
 ```
 
-**repos 字段说明（#132 bug 级修正）：** `commit` 与 `branch` 表示采集时四个实际 checkout 的 `HEAD` 与分支；detached HEAD 统一记录 `branch: "detached"`。`dirty` 为必填 boolean，覆盖 tracked 与 untracked 变化。superproject gitlink 与 `HEAD:.gitmodules` 仅作为 checkout 路径及采集代际的内部 authority，不得冒充实际 checkout commit/branch。任一 checkout 或 authority 在双快照间变化时整次采集 fail closed，不产生部分 StackLock。
+**repos 字段说明（#132 bug 级修正）：** `commit` 与 `branch` 表示采集时四个实际 checkout 的 `HEAD` 与分支；`detached` 为必填 boolean，detached HEAD 记录为 `branch: "detached", detached: true`，而合法 attached 分支名 `detached` 记录为 `branch: "detached", detached: false`。`dirty` 为必填 boolean，覆盖 tracked、untracked 与 nested submodule 变化。superproject gitlink 与 `HEAD:.gitmodules` 仅作为 checkout 路径及采集代际的内部 authority，不得冒充实际 checkout 状态。checkout admission 先 no-follow 拒绝 symlink，再建立目录 descriptor/cwd capability；每个 Git producer 只在核对该 capability 的物理身份后运行。最终 schema/freeze 之后、return 之前再次核对四 checkout 的物理身份与完整 `commit/branch/detached/dirty`。任何可观测 drift 都 fail closed；短暂 swap 即使恢复也不得把 Git 读取重定向到 replacement target 或发布 target 状态。整次失败不产生部分 StackLock。
 
 **llm 字段说明**（AGA-P0-1）：agent 行为由 model + params + prompt 共同决定，三者任一变化都视为 **stack 变更**——需要新 StackLock，且触发行为 eval 子集（见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)）。cost_record 中的 per-call model 字段是计费粒度，不能替代本处的复现锁。
 

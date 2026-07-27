@@ -75,7 +75,7 @@ describe("StackLock context collector", () => {
       gitCommand
     });
 
-    expect(calls).toHaveLength(54);
+    expect(calls).toHaveLength(86);
     expect(calls[0]).toEqual({
       cwd: resolve(repositoryRoot),
       args: ["--no-lazy-fetch", "rev-parse", "--show-toplevel"]
@@ -111,15 +111,15 @@ describe("StackLock context collector", () => {
     const shudHeadReads = calls.filter(
       (call) => call.cwd === resolve(join(repositoryRoot, "SHUD")) && call.args[1] === "rev-parse"
     );
-    expect(shudHeadReads).toHaveLength(10);
+    expect(shudHeadReads).toHaveLength(14);
     expect(shudHeadReads.filter((call) => call.args.at(-1) === "--show-prefix")).toHaveLength(2);
-    expect(shudHeadReads.filter((call) => call.args.at(-1) === "HEAD" && call.args.length === 3)).toHaveLength(4);
-    expect(shudHeadReads.filter((call) => call.args.includes("--abbrev-ref"))).toHaveLength(4);
+    expect(shudHeadReads.filter((call) => call.args.at(-1) === "HEAD" && call.args.length === 3)).toHaveLength(6);
+    expect(shudHeadReads.filter((call) => call.args.includes("--abbrev-ref"))).toHaveLength(6);
     expect(result.repos).toEqual({
-      SHUD: { commit: SHAS.SHUD, branch: "master", dirty: false },
-      rSHUD: { commit: SHAS.rSHUD, branch: "master", dirty: false },
-      AutoSHUD: { commit: SHAS.AutoSHUD, branch: "master", dirty: false },
-      zero: { commit: SHAS.zero, branch: "development", dirty: false }
+      SHUD: { commit: SHAS.SHUD, branch: "master", detached: false, dirty: false },
+      rSHUD: { commit: SHAS.rSHUD, branch: "master", detached: false, dirty: false },
+      AutoSHUD: { commit: SHAS.AutoSHUD, branch: "master", detached: false, dirty: false },
+      zero: { commit: SHAS.zero, branch: "development", detached: false, dirty: false }
     });
     expect(result.runtime).toEqual({
       os: `${platform()} ${release()}`,
@@ -588,7 +588,7 @@ describe("StackLock context collector", () => {
         maxBuffer: 64 * 1024
       });
       expect(thrown).toMatchObject({
-        code: "git_read_failed",
+        code: failureKind === "maxBuffer" ? "git_output_invalid" : "git_read_failed",
         message: "StackLock context collection failed."
       });
       expect((thrown as Error).message).not.toContain(sensitiveDetail);
@@ -1084,19 +1084,20 @@ describe("StackLock context collector", () => {
     env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
     let collection: Awaited<ReturnType<typeof collectStackLockContext>> | undefined;
     let thrown: unknown;
+    let pending: Promise<Awaited<ReturnType<typeof collectStackLockContext>>> | undefined;
 
     try {
-      const pending = collectStackLockContext({ repositoryRoot });
+      pending = collectStackLockContext({ repositoryRoot });
       await waitForPath(readyPath);
       await replaceRepositoryRoot(repositoryRoot, replacementRoot);
       await writeFile(releasePath, "release\n");
+    } finally {
+      await writeFile(releasePath, "release\n").catch(() => undefined);
       try {
         collection = await pending;
       } catch (error) {
         thrown = error;
       }
-    } finally {
-      await writeFile(releasePath, "release\n").catch(() => undefined);
       if (previousPath === undefined) delete env.PATH;
       else env.PATH = previousPath;
     }
@@ -1142,40 +1143,24 @@ describe("StackLock context collector", () => {
     });
 
     expect(result.repos).toEqual({
-      SHUD: { commit: SHAS.SHUD, branch: "detached", dirty: false },
-      rSHUD: { commit: SHAS.rSHUD, branch: "detached", dirty: false },
-      AutoSHUD: { commit: SHAS.AutoSHUD, branch: "detached", dirty: false },
-      zero: { commit: SHAS.zero, branch: "detached", dirty: false }
+      SHUD: { commit: SHAS.SHUD, branch: "detached", detached: false, dirty: false },
+      rSHUD: { commit: SHAS.rSHUD, branch: "detached", detached: false, dirty: false },
+      AutoSHUD: { commit: SHAS.AutoSHUD, branch: "detached", detached: false, dirty: false },
+      zero: { commit: SHAS.zero, branch: "detached", detached: false, dirty: false }
     });
     expect(result.harness.version).toBe("0.8.0");
   });
 
-  test("rejects a dirty worktree when .gitmodules branch authority disagrees", async () => {
+  test("uses the committed .gitmodules blob when worktree-only branch bytes disagree", async () => {
     const repositoryRoot = await createGitBackedFixtureRepository();
     await writeFile(
       join(repositoryRoot, ".gitmodules"),
       gitmodulesFixture({ zero: { branch: "worktree-only" } })
     );
 
-    await expectStateChanged(repositoryRoot, async (input) => {
-        if (isTopLevelCommand(input)) return { stdout: `${await realpath(repositoryRoot)}\n` };
-        if (isGitmodulesBlobCommand(input)) {
-          return { stdout: gitmodulesFixture({ zero: { branch: "worktree-only" } }) };
-        }
-        const simulated = simulatedSubmoduleGitResult(input.cwd, input.args);
-        if (simulated !== undefined) {
-          if (
-            input.args.length === 4 &&
-            input.args[1] === "rev-parse" &&
-            input.args[2] === "--abbrev-ref" &&
-            input.args[3] === "HEAD"
-          ) {
-            return { stdout: "detached\n" };
-          }
-          return simulated;
-        }
-        return { stdout: gitlinkOutput(["SHUD", "rSHUD", "AutoSHUD", "zero"]) };
-      }, "gitmodules_invalid");
+    const result = await collectStackLockContext({ repositoryRoot });
+
+    expect(Object.values(result.repos).every((revision) => !revision.detached)).toBe(true);
     expect(git(repositoryRoot, ["status", "--porcelain=v1", "--", ".gitmodules"])).toContain(".gitmodules");
   });
 
@@ -1474,12 +1459,15 @@ function simulatedSubmoduleGitResult(
     return { stdout: `${REPOSITORY_BRANCHES[repositoryName]}\n` };
   }
   if (
-    args.length === 5 &&
+    args.length === 8 &&
     args[0] === "--no-lazy-fetch" &&
-    args[1] === "status" &&
-    args[2] === "--porcelain=v1" &&
-    args[3] === "--untracked-files=all" &&
-    args[4] === "--"
+    args[1] === "-c" &&
+    args[2] === "core.fsmonitor=false" &&
+    args[3] === "status" &&
+    args[4] === "--porcelain=v1" &&
+    args[5] === "--untracked-files=all" &&
+    args[6] === "--ignore-submodules=none" &&
+    args[7] === "--"
   ) {
     return { stdout: "" };
   }

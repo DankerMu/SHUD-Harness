@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -14,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { env } from "node:process";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   collectStackLockContext,
   type StackLockCollectionResult,
@@ -21,6 +23,8 @@ import {
   type StackLockGitCommandInput,
   type StackLockGitCommandResult
 } from "./index";
+import { __collectStackLockContextWithHasherForTest } from "./stack-lock-collector";
+import { hashFile } from "./hashing-service";
 
 const REPOSITORIES = ["SHUD", "rSHUD", "AutoSHUD", "zero"] as const;
 const REPOSITORY_BRANCHES = Object.freeze({
@@ -57,11 +61,24 @@ describe("StackLock actual repository state", () => {
       expect(result.repos).toEqual(withRepositoryRevision(fixture, repositoryName, {
         commit: actualHead,
         branch: actualBranch,
+        detached: false,
         dirty: false
       }));
       expect(result.repos[repositoryName].commit).not.toBe(oldPin);
     }
   );
+
+  test("keeps an attached branch literally named detached distinct from detached HEAD", async () => {
+    const fixture = await createFixture();
+    git(fixture.repositories.SHUD, ["branch", "-M", "detached"]);
+
+    const attached = await collectStackLockContext({ repositoryRoot: fixture.root });
+    expect(attached.repos.SHUD).toMatchObject({ branch: "detached", detached: false });
+
+    git(fixture.repositories.SHUD, ["checkout", "--quiet", "--detach", "HEAD"]);
+    const detached = await collectStackLockContext({ repositoryRoot: fixture.root });
+    expect(detached.repos.SHUD).toMatchObject({ branch: "detached", detached: true });
+  });
 
   test.each(REPOSITORIES)(
     "marks a tracked modification in %s dirty while every sibling remains exact and clean",
@@ -100,7 +117,8 @@ describe("StackLock actual repository state", () => {
       const result = await collectStackLockContext({ repositoryRoot: fixture.root });
       expect(result.repos).toEqual(withRepositoryRevision(fixture, repositoryName, {
         ...cleanRepositoryRevisions(fixture)[repositoryName],
-        branch: "detached"
+        branch: "detached",
+        detached: true
       }));
     }
   );
@@ -133,7 +151,7 @@ describe("StackLock actual repository state", () => {
       if (
         input.cwd === fixture.repositories.SHUD &&
         isStatusCommand(input.args) &&
-        ++shudStatusReads === 1
+        ++shudStatusReads === 2
       ) {
         await writeFile(join(fixture.repositories.SHUD, "drift.txt"), "drift\n");
       }
@@ -141,6 +159,75 @@ describe("StackLock actual repository state", () => {
     };
 
     await expectCollectorFailure(fixture, gitCommand, "collection_state_changed");
+  });
+
+  test.each(["commit", "branch"] as const)(
+    "fails the publication barrier on independent %s-only drift after the second snapshot",
+    async (driftKind) => {
+      const fixture = await createFixture();
+      let shudStatusReads = 0;
+      const gitCommand: StackLockGitCommand = async (input) => {
+        const result = runFixtureGitCommand(input);
+        if (
+          input.cwd === fixture.repositories.SHUD &&
+          isStatusCommand(input.args) &&
+          ++shudStatusReads === 4
+        ) {
+          if (driftKind === "commit") {
+            await writeFile(join(fixture.repositories.SHUD, "tracked.txt"), "commit-only drift\n");
+            git(fixture.repositories.SHUD, ["add", "tracked.txt"]);
+            git(fixture.repositories.SHUD, ["commit", "--quiet", "--message", "publication drift"]);
+          } else {
+            git(fixture.repositories.SHUD, ["branch", "-M", "publication-only"]);
+          }
+        }
+        return result;
+      };
+
+      await expectCollectorFailure(fixture, gitCommand, "collection_state_changed");
+    }
+  );
+
+  test("fails the publication barrier when dirty state changes during the second renv hash", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.root, "renv.lock"), "{}\n");
+    let hashCalls = 0;
+    let collection: Awaited<ReturnType<typeof collectStackLockContext>> | undefined;
+    let thrown: unknown;
+    try {
+      collection = await __collectStackLockContextWithHasherForTest(
+        { repositoryRoot: fixture.root },
+        async (input) => {
+          const digest = await hashFile(input);
+          if (++hashCalls === 2) {
+            await writeFile(join(fixture.repositories.zero, "publication-dirty.txt"), "drift\n");
+          }
+          return digest;
+        }
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(collection).toBeUndefined();
+    expect(hashCalls).toBe(2);
+    expect(thrown).toMatchObject({ code: "collection_state_changed" });
+  });
+
+  test("settles repository collection serially and never dispatches a later checkout after failure", async () => {
+    const fixture = await createFixture();
+    const checkoutCalls: string[] = [];
+    const gitCommand: StackLockGitCommand = async (input) => {
+      if (REPOSITORIES.some((name) => input.cwd === fixture.repositories[name])) {
+        checkoutCalls.push(input.cwd);
+      }
+      if (input.cwd === fixture.repositories.SHUD && isHeadCommand(input.args)) {
+        throw new Error("first checkout failed");
+      }
+      return runFixtureGitCommand(input);
+    };
+
+    await expectCollectorFailure(fixture, gitCommand, "git_read_failed");
+    expect(checkoutCalls.every((cwd) => cwd === fixture.repositories.SHUD)).toBe(true);
   });
 
   test("does not modify superproject or checkout HEAD, index, status, tracked, or untracked bytes", async () => {
@@ -215,6 +302,76 @@ describe("StackLock actual repository state", () => {
 
     await expectCollectorFailure(fixture, gitCommand, "collection_state_changed");
     expect(await readFile(join(displaced, "tracked.txt"), "utf8")).toBe(trackedBefore);
+  });
+
+  test("a transient checkout swap cannot redirect a Git producer to the replacement target", async () => {
+    if (process.platform === "win32") return;
+    const fixture = await createFixture();
+    const checkout = fixture.repositories.SHUD;
+    const displaced = join(fixture.container, "displaced-shud");
+    const target = join(fixture.container, "replacement-target");
+    await mkdir(target);
+    git(target, ["init", "--quiet"]);
+    configureGit(target);
+    await writeFile(join(target, "tracked.txt"), "target\n");
+    git(target, ["add", "tracked.txt"]);
+    git(target, ["commit", "--quiet", "--message", "target"]);
+    await writeFile(join(target, "target-only-untracked.txt"), "must not be observed\n");
+
+    const wrapperRoot = join(fixture.container, "git-wrapper");
+    await mkdir(wrapperRoot);
+    const wrapper = join(wrapperRoot, "git");
+    const ready = join(wrapperRoot, "ready");
+    const release = join(wrapperRoot, "release");
+    const done = join(wrapperRoot, "done");
+    const restored = join(wrapperRoot, "restored");
+    const once = join(wrapperRoot, "once");
+    const output = join(wrapperRoot, "output");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    await writeFile(wrapper, `#!/bin/sh
+if [ "$1" = "--no-lazy-fetch" ] && [ "$4" = "status" ] && [ ! -e ${shellQuote(once)} ]; then
+  : > ${shellQuote(once)}
+  : > ${shellQuote(ready)}
+  while [ ! -e ${shellQuote(release)} ]; do sleep 0.01; done
+  ${shellQuote(realGit)} "$@" > ${shellQuote(output)}
+  status=$?
+  : > ${shellQuote(done)}
+  while [ ! -e ${shellQuote(restored)} ]; do sleep 0.01; done
+  cat ${shellQuote(output)}
+  exit "$status"
+fi
+exec ${shellQuote(realGit)} "$@"
+`);
+    await chmod(wrapper, 0o700);
+    const previousPath = env.PATH;
+    env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    let pending: Promise<StackLockCollectionResult> | undefined;
+    let restoredCheckout = false;
+    try {
+      pending = collectStackLockContext({ repositoryRoot: fixture.root });
+      await waitForPath(ready);
+      await rename(checkout, displaced);
+      await symlink(target, checkout, "dir");
+      await writeFile(release, "release\n");
+      await waitForPath(done);
+      await rm(checkout);
+      await rename(displaced, checkout);
+      restoredCheckout = true;
+      await writeFile(restored, "restored\n");
+
+      const result = await pending;
+      expect(result.repos.SHUD.dirty).toBe(false);
+    } finally {
+      await writeFile(release, "release\n").catch(() => undefined);
+      if (!restoredCheckout) {
+        await rm(checkout, { recursive: true, force: true }).catch(() => undefined);
+        await rename(displaced, checkout).catch(() => undefined);
+      }
+      await writeFile(restored, "restored\n").catch(() => undefined);
+      await pending?.catch(() => undefined);
+      if (previousPath === undefined) delete env.PATH;
+      else env.PATH = previousPath;
+    }
   });
 
   test.each([
@@ -312,6 +469,70 @@ describe("StackLock actual repository state", () => {
     }
     await expect(access(tracePath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(access(askpassMarker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("disables a real repo-local fsmonitor command while collecting status", async () => {
+    const fixture = await createFixture();
+    const marker = join(fixture.container, "fsmonitor-ran");
+    const hook = join(fixture.container, "fsmonitor-hook");
+    await writeFile(hook, `#!/bin/sh\n: > ${JSON.stringify(marker)}\n`);
+    await chmod(hook, 0o700);
+    git(fixture.repositories.SHUD, ["config", "core.fsmonitor", hook]);
+
+    const result = await collectStackLockContext({ repositoryRoot: fixture.root });
+
+    expect(result.repos.SHUD.dirty).toBe(false);
+    await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("reports a modified nested submodule dirty despite repo-local ignore=all", async () => {
+    const fixture = await createFixture();
+    const nestedSource = join(fixture.container, "nested-source");
+    await mkdir(nestedSource);
+    git(nestedSource, ["init", "--quiet"]);
+    configureGit(nestedSource);
+    await writeFile(join(nestedSource, "tracked.txt"), "nested\n");
+    git(nestedSource, ["add", "tracked.txt"]);
+    git(nestedSource, ["commit", "--quiet", "--message", "nested initial"]);
+    git(fixture.repositories.SHUD, [
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "--quiet",
+      nestedSource,
+      "nested"
+    ]);
+    git(fixture.repositories.SHUD, ["commit", "--quiet", "-am", "add nested submodule"]);
+    git(fixture.repositories.SHUD, ["config", "submodule.nested.ignore", "all"]);
+    await writeFile(join(fixture.repositories.SHUD, "nested", "tracked.txt"), "nested changed\n");
+
+    const result = await collectStackLockContext({ repositoryRoot: fixture.root });
+
+    expect(result.repos.SHUD.dirty).toBe(true);
+  });
+
+  test("uses committed .gitmodules authority when the worktree file is dirty", async () => {
+    const fixture = await createFixture();
+    const worktreeOnly = (await readFile(join(fixture.root, ".gitmodules"), "utf8"))
+      .replace("branch = master", "branch = worktree-only");
+    await writeFile(join(fixture.root, ".gitmodules"), worktreeOnly);
+
+    const result = await collectStackLockContext({ repositoryRoot: fixture.root });
+
+    expect(result.repos).toEqual(cleanRepositoryRevisions(fixture));
+    expect(git(fixture.root, ["status", "--porcelain=v1", "--", ".gitmodules"])).toContain(".gitmodules");
+  });
+
+  test("maps a real status output above 64 KiB to git_output_invalid", async () => {
+    const fixture = await createFixture();
+    const untracked = join(fixture.repositories.SHUD, "untracked");
+    await mkdir(untracked);
+    for (let index = 0; index < 700; index += 1) {
+      await writeFile(join(untracked, `${index.toString().padStart(4, "0")}-${"x".repeat(100)}`), "x");
+    }
+
+    await expectCollectorFailure(fixture, undefined, "git_output_invalid");
   });
 });
 
@@ -435,9 +656,12 @@ function isBranchCommand(args: readonly string[]): boolean {
 function isStatusCommand(args: readonly string[]): boolean {
   return JSON.stringify(args) === JSON.stringify([
     "--no-lazy-fetch",
+    "-c",
+    "core.fsmonitor=false",
     "status",
     "--porcelain=v1",
     "--untracked-files=all",
+    "--ignore-submodules=none",
     "--"
   ]);
 }
@@ -450,6 +674,7 @@ function cleanRepositoryRevisions(
     {
       commit: fixture.gitlinks[name],
       branch: REPOSITORY_BRANCHES[name],
+      detached: false,
       dirty: false
     }
   ])) as Record<RepositoryName, RepositoryRevision>;
@@ -518,4 +743,24 @@ function restoreEnvironment(previous: Record<string, string | undefined>): void 
     if (value === undefined) delete env[key];
     else env[key] = value;
   }
+}
+
+async function waitForPath(path: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      await access(path);
+      return;
+    } catch (error) {
+      if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) {
+        throw error;
+      }
+    }
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for Git wrapper readiness.");
+    await delay(10);
+  }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }

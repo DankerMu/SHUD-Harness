@@ -1,12 +1,12 @@
 # stack-lock
 
-StackLock schema 与采集服务：以 submodule gitlink 作路径/代际 authority，记录四个实际 checkout 的 commit/branch/dirty、runtime 版本占位、renv.lock 内容哈希、llm 块（ADR-0002 D9 `base_url` 必锁）、整体 fingerprint、`POST /api/stacks/lock` 与 `GET /api/stacks/:stackId`。权威源：[Minimal_Schemas §2](../../../../../docs/03_SPEC/Minimal_Schemas.md)、[Workspace_Conventions §1.4](../../../../../docs/03_SPEC/Workspace_Conventions.md)、[Schemas_APIs_CLIs §1](../../../../../docs/04_IMPLEMENTATION/Schemas_APIs_CLIs.md)（含例外批次 6 读端点）、[Phase_By_Phase_Test_Plan W2](../../../../../docs/04_IMPLEMENTATION/Phase_By_Phase_Test_Plan.md)（W2-SUB-001）、[ADR-0002](../../../../../docs/adr/0002-mvp-reality-anchoring.md) D9。
+StackLock schema 与采集服务：以 submodule gitlink 作路径/代际 authority，记录四个实际 checkout 的 commit/branch/detached/dirty、runtime 版本占位、renv.lock 内容哈希、llm 块（ADR-0002 D9 `base_url` 必锁）、整体 fingerprint、`POST /api/stacks/lock` 与 `GET /api/stacks/:stackId`。权威源：[Minimal_Schemas §2](../../../../../docs/03_SPEC/Minimal_Schemas.md)、[Workspace_Conventions §1.4](../../../../../docs/03_SPEC/Workspace_Conventions.md)、[Schemas_APIs_CLIs §1](../../../../../docs/04_IMPLEMENTATION/Schemas_APIs_CLIs.md)（含例外批次 6 读端点）、[Phase_By_Phase_Test_Plan W2](../../../../../docs/04_IMPLEMENTATION/Phase_By_Phase_Test_Plan.md)（W2-SUB-001）、[ADR-0002](../../../../../docs/adr/0002-mvp-reality-anchoring.md) D9。
 
 ## ADDED Requirements
 
 ### Requirement: StackLock Zod schema
 
-core-schemas SHALL 新增 StackLock schema：`stack_id`（格式 `STACK-<uuid>`，design D5 记录的对 canonical NNNN 示意格式的偏离）、`repos`（SHUD/rSHUD/AutoSHUD/zero 四键，各含实际 checkout 的 commit + branch + required `dirty: boolean`——design D5a 与 D7a；canonical 补正走任务 4.1a/#132）、`runtime`（os/r_version/python_version/sundials_version/gcc_version/gdal_version 占位值或 `unknown`；`r_packages_lock` 为 `{ path, sha256 } | null`——design D5a）、`harness`（version/cli_version/prompt_pack/skills_version，M2 采集口径见下方 requirement）、`llm`（provider/model_id/**base_url**/params_digest/prompt_pack_digest，全部 required）、`fingerprint`（sha256）、`created_at`。废弃字段 `runtime.container`/`limits`/`policy_version` MUST NOT 出现。
+core-schemas SHALL 新增 StackLock schema：`stack_id`（格式 `STACK-<uuid>`，design D5 记录的对 canonical NNNN 示意格式的偏离）、`repos`（SHUD/rSHUD/AutoSHUD/zero 四键，各含实际 checkout 的 commit + branch + required `detached: boolean` + required `dirty: boolean`——design D5a 与 D7a；canonical 补正走任务 4.1a/#132）、`runtime`（os/r_version/python_version/sundials_version/gcc_version/gdal_version 占位值或 `unknown`；`r_packages_lock` 为 `{ path, sha256 } | null`——design D5a）、`harness`（version/cli_version/prompt_pack/skills_version，M2 采集口径见下方 requirement）、`llm`（provider/model_id/**base_url**/params_digest/prompt_pack_digest，全部 required）、`fingerprint`（sha256）、`created_at`。废弃字段 `runtime.container`/`limits`/`policy_version` MUST NOT 出现。
 
 #### Scenario: llm 块缺 base_url 被拒
 
@@ -15,7 +15,7 @@ core-schemas SHALL 新增 StackLock schema：`stack_id`（格式 `STACK-<uuid>`�
 
 #### Scenario: 正例通过且废弃字段被拒
 
-- **WHEN** 以含四 repo 实际 commit/branch/dirty、runtime 占位、完整 llm 块的输入校验
+- **WHEN** 以含四 repo 实际 commit/branch/detached/dirty、runtime 占位、完整 llm 块的输入校验
 - **THEN** 通过；含 `runtime.container` 的输入按 strict 模式拒绝
 
 #### Scenario: 四 repo dirty 字段逐项必填
@@ -23,11 +23,16 @@ core-schemas SHALL 新增 StackLock schema：`stack_id`（格式 `STACK-<uuid>`�
 - **WHEN** 分别从 SHUD、rSHUD、AutoSHUD 或 zero revision 删除 `dirty`，或将其替换为非 boolean
 - **THEN** 每个变体均被 strict schema 拒绝；四项完整 boolean 输入通过
 
+#### Scenario: detached discriminator required and unambiguous
+
+- **WHEN** 任一 repo revision 缺 `detached`，或分别输入 attached branch `detached` 与 detached HEAD
+- **THEN** 缺字段被 strict schema 拒绝；两态均保留 `branch="detached"` 并由 required boolean 形成不同 public value
+
 ### Requirement: 四 repo 实际 checkout 状态只读发现（W2-SUB-001）
 
 采集服务 SHALL 在任何其他 producer 前把请求 `repositoryRoot` 物理规范化，以 no-follow directory observation 捕获其稳定 `(dev, ino)`，并使用相同最小非敏感 Git seam 执行 `git --no-lazy-fetch rev-parse --show-toplevel`；Git 报告 top-level 的物理规范路径 MUST 与请求根完全相等。pathname 与该目录对象身份 MUST 在 admission、每个 snapshot/producer 前后和 publication 前重验；同 pathname 被替换为不同目录对象 MUST 以 typed failure 拒绝且不得返回 partial result。nested directory 即使包含完整合法外观的 package/provider/`.gitmodules` 也必须在读取它们或执行 `ls-tree` 前以 typed failure 拒绝；真实 repository root 与 linked-worktree root 必须正常工作。采集服务随后 SHALL 以一个 bounded `git --no-lazy-fetch ls-tree -z --full-tree HEAD -- .gitmodules SHUD rSHUD AutoSHUD zero` inventory，把四个 gitlink commit 与 mode=`100644` 的 `.gitmodules` blob identity 绑定到同一个 superproject `HEAD` object generation；再以 fixed `git --no-lazy-fetch cat-file blob <exact-object-id>` 读取不超过 64 KiB 的精确 blob，解析 exact 四项声明（path 必须为 SHUD/rSHUD/AutoSHUD/zero；branch metadata 为 SHUD/rSHUD/AutoSHUD=`master`，zero=`development`）。这些声明只校验配置 generation，不是 `repos.*.branch` 的输出 authority。工作树 `.gitmodules`（包括 dirty 或 untracked bytes）MUST NOT 成为路径或 generation authority；missing/wrong-mode/oversized/malformed HEAD blob MUST typed fail。两次 cheap snapshot MUST 比较完整 authority identity（root path + `(dev, ino)`、四个 gitlink、`.gitmodules` object id、blob digest 与 declarations），不得把 schema 示例、gitlink 或声明 branch 冒充实际 checkout 状态。每个生产 Git command MUST 在 subcommand 前携带全局 `--no-lazy-fetch`；Git <2.45 不支持时 MUST 在首条 root-identity command fail closed，不得降级 dispatch `ls-tree`、`cat-file` 或 remote 操作。采集 MUST 使用最小非敏感 Git 子进程环境、禁用 lazy fetch/trace 写入，MUST NOT 修改任何 git 状态、联网抓取对象或执行 checkout/fetch/reset。现有 `renv.lock` SHALL 在已打开 regular-file descriptor 上执行 inclusive 16 MiB byte bound：恰好 16 MiB 成功，超限以 typed failure 拒绝且不返回 partial result。
 
-四个 gitlink 与 `HEAD:.gitmodules` SHALL 仅作为 checkout 路径和采集代际 authority。采集服务 MUST 对每个声明 checkout 读取实际 40-hex `HEAD`、实际 branch（detached 规范化为 `detached`）以及覆盖 tracked + untracked 的 `dirty`；实际 HEAD 与 gitlink 不同是合法状态，必须记录实际值。每个 checkout 的 no-follow 物理目录身份与完整 `commit/branch/dirty` MUST 纳入两次 cheap snapshot；任一 checkout 路径替换或状态漂移 → `collection_state_changed`，不返回 partial result。
+四个 gitlink 与 `HEAD:.gitmodules` SHALL 仅作为 checkout 路径和采集代际 authority。每个 checkout admission MUST 先 no-follow 拒绝 symlink 再调用 realpath，并打开、持有 directory descriptor/cwd capability；每个生产 Git command MUST 先在其已绑定 cwd 内核对 `(dev, ino)`，匹配后才运行，MUST NOT 重新解析原 checkout pathname 来选择 Git worktree。采集服务 MUST 对每个声明 checkout 读取实际 40-hex `HEAD`、实际 branch 与 required `detached`（detached HEAD = `branch="detached", detached=true`；attached 分支 `detached` = 同 branch 且 `detached=false`），以及覆盖 tracked + untracked + nested submodule 的 `dirty`。status MUST 使用 `-c core.fsmonitor=false` 与 `--ignore-submodules=none`。实际 HEAD 与 gitlink 不同是合法状态，必须记录实际值。四 checkout pipeline MUST 串行，或在失败时 cancel 并等待全部 settlement；collector 不得在已启动 sibling Git producer 仍活跃时返回。每个 checkout 的 no-follow 物理目录身份与完整 `commit/branch/detached/dirty` MUST 纳入两次 cheap snapshot；第二次 renv producer、schema validation 与 result freeze 后、return 前 MUST 以第二 snapshot capability 再采集四 checkout 完整状态并核对 pathname identity。任一可观测路径替换或状态漂移 → `collection_state_changed`，不返回 partial result。无协作外部 writer 的瞬时 swap-use-restore 不承诺必被独立观测，但 MUST NOT 重定向 Git 读取或导致 replacement target 被发布；return 时 canonical pathname identity MUST 有最终证明。
 
 #### Scenario: 四个 submodule commit 均可读取
 
@@ -42,11 +47,11 @@ core-schemas SHALL 新增 StackLock schema：`stack_id`（格式 `STACK-<uuid>`�
 #### Scenario: dirty 与 detached 状态完整记录
 
 - **WHEN** 任一 checkout 有 tracked 修改、untracked 文件，或处于 detached HEAD
-- **THEN** 前两者 `dirty=true`，干净 sibling 为 false；detached checkout 的 `branch="detached"`
+- **THEN** 前两者 `dirty=true`，干净 sibling 为 false；detached checkout 为 `branch="detached", detached=true`，同名 attached branch 为 `branch="detached", detached=false`
 
 #### Scenario: checkout 状态跨快照漂移
 
-- **WHEN** 任一 checkout 的 HEAD、branch、dirty 或物理目录身份在两次 snapshot 间变化
+- **WHEN** 任一 checkout 的 HEAD、branch、detached、dirty 或物理目录身份在两次 snapshot 间、后续 hash/schema/freeze 窗口或 publication barrier 发生可观测变化
 - **THEN** 以 `collection_state_changed` 拒绝且不发布任何 partial StackLock content
 
 #### Scenario: checkout 路径不可信
@@ -61,8 +66,8 @@ core-schemas SHALL 新增 StackLock schema：`stack_id`（格式 `STACK-<uuid>`�
 
 #### Scenario: checkout porcelain dirty 语义
 
-- **WHEN** `status --porcelain=v1 --untracked-files=all --` 返回空字节、一个合法记录或多个合法记录
-- **THEN** 空输出映射 `dirty=false`；一个或多个记录均映射 `dirty=true`；仅非 UTF-8、超过 64 KiB 或进程失败按 `git_output_invalid`/`git_read_failed` 拒绝
+- **WHEN** `-c core.fsmonitor=false status --porcelain=v1 --untracked-files=all --ignore-submodules=none --` 返回空字节、一个合法记录或多个合法记录
+- **THEN** 空输出映射 `dirty=false`；一个或多个记录均映射 `dirty=true`；repo-local fsmonitor 不执行，`submodule.*.ignore=all` 不能隐藏 nested submodule change；仅非 UTF-8、超过 64 KiB 或进程失败按 `git_output_invalid`/`git_read_failed` 拒绝
 
 #### Scenario: nested directory 不是仓库根
 
@@ -114,7 +119,7 @@ lock 采集 SHALL 读取仓库根 `renv.lock`：存在时记录 `{ path, sha256 
 
 ### Requirement: fingerprint 确定性
 
-`fingerprint` SHALL 是对 StackLock **内容字段**（`repos`，含四项实际 commit/branch/dirty；`runtime`/`harness`/`llm`）canonical JSON（键排序）的 sha256；计算域 MUST 显式排除 `stack_id`、`created_at` 与 `fingerprint` 自身——canonical 用途是「快速比对」（Minimal_Schemas §2），同一环境两次 lock 必须比对相等，随机 `stack_id` 不得进入计算域。同内容 MUST 得同 fingerprint。
+`fingerprint` SHALL 是对 StackLock **内容字段**（`repos`，含四项实际 commit/branch/detached/dirty；`runtime`/`harness`/`llm`）canonical JSON（键排序）的 sha256；计算域 MUST 显式排除 `stack_id`、`created_at` 与 `fingerprint` 自身——canonical 用途是「快速比对」（Minimal_Schemas §2），同一环境两次 lock 必须比对相等，随机 `stack_id` 不得进入计算域。同内容 MUST 得同 fingerprint；合法 attached 分支 `detached` 与 detached HEAD 必须产生不同 fingerprint input。
 
 #### Scenario: 同一环境两次 lock 同 fingerprint
 
@@ -133,7 +138,7 @@ lock 采集 SHALL 读取仓库根 `renv.lock`：存在时记录 `{ path, sha256 
 #### Scenario: lock 后可读取
 
 - **WHEN** `POST /api/stacks/lock` 成功后 `GET /api/stacks/:stackId`
-- **THEN** GET 返回与响应 `stack` 字段一致的同一记录，完整保留四 repo 实际 commit/branch/dirty、llm.base_url 与 fingerprint；记录本体不含 `degraded`
+- **THEN** GET 返回与响应 `stack` 字段一致的同一记录，完整保留四 repo 实际 commit/branch/detached/dirty、llm.base_url 与 fingerprint；记录本体不含 `degraded`
 
 #### Scenario: 不存在的 stack 返回 404
 

@@ -15,18 +15,22 @@ Required is evaluated within the immediate parent object.
 | repos.SHUD | yes | no | object | additionalProperties=false |
 | repos.SHUD.commit | yes | no | string | minLength=1 |
 | repos.SHUD.branch | yes | no | string | minLength=1 |
+| repos.SHUD.detached | yes | no | boolean | - |
 | repos.SHUD.dirty | yes | no | boolean | - |
 | repos.rSHUD | yes | no | object | additionalProperties=false |
 | repos.rSHUD.commit | yes | no | string | minLength=1 |
 | repos.rSHUD.branch | yes | no | string | minLength=1 |
+| repos.rSHUD.detached | yes | no | boolean | - |
 | repos.rSHUD.dirty | yes | no | boolean | - |
 | repos.AutoSHUD | yes | no | object | additionalProperties=false |
 | repos.AutoSHUD.commit | yes | no | string | minLength=1 |
 | repos.AutoSHUD.branch | yes | no | string | minLength=1 |
+| repos.AutoSHUD.detached | yes | no | boolean | - |
 | repos.AutoSHUD.dirty | yes | no | boolean | - |
 | repos.zero | yes | no | object | additionalProperties=false |
 | repos.zero.commit | yes | no | string | minLength=1 |
 | repos.zero.branch | yes | no | string | minLength=1 |
+| repos.zero.detached | yes | no | boolean | - |
 | repos.zero.dirty | yes | no | boolean | - |
 | runtime | yes | no | object | additionalProperties=false |
 | runtime.os | yes | no | string | minLength=1 |
@@ -60,18 +64,22 @@ repos:
   SHUD:
     commit: "example"
     branch: "example"
+    detached: false
     dirty: false
   rSHUD:
     commit: "example"
     branch: "example"
+    detached: false
     dirty: false
   AutoSHUD:
     commit: "example"
     branch: "example"
+    detached: false
     dirty: false
   zero:
     commit: "example"
     branch: "example"
+    detached: false
     dirty: false
 runtime:
   os: "example"
@@ -101,24 +109,28 @@ created_at: "example"
 ## Changelog Diff
 
 ```diff
-+ schema StackLock sha256:a0ade2e9c6603a87ace31f6b0762daf1690339b1992f9f0af8c3660e69858290
++ schema StackLock sha256:e526b352909c924c5c692d22ed6ec8b61a4faf87b2bb4b1ae0f7c2fdf0fe7c36
 + field stack_id required=yes nullable=no type=string constraints=pattern=^STACK-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$
 + field repos required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.SHUD required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.SHUD.commit required=yes nullable=no type=string constraints=minLength=1
 + field repos.SHUD.branch required=yes nullable=no type=string constraints=minLength=1
++ field repos.SHUD.detached required=yes nullable=no type=boolean constraints=-
 + field repos.SHUD.dirty required=yes nullable=no type=boolean constraints=-
 + field repos.rSHUD required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.rSHUD.commit required=yes nullable=no type=string constraints=minLength=1
 + field repos.rSHUD.branch required=yes nullable=no type=string constraints=minLength=1
++ field repos.rSHUD.detached required=yes nullable=no type=boolean constraints=-
 + field repos.rSHUD.dirty required=yes nullable=no type=boolean constraints=-
 + field repos.AutoSHUD required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.AutoSHUD.commit required=yes nullable=no type=string constraints=minLength=1
 + field repos.AutoSHUD.branch required=yes nullable=no type=string constraints=minLength=1
++ field repos.AutoSHUD.detached required=yes nullable=no type=boolean constraints=-
 + field repos.AutoSHUD.dirty required=yes nullable=no type=boolean constraints=-
 + field repos.zero required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.zero.commit required=yes nullable=no type=string constraints=minLength=1
 + field repos.zero.branch required=yes nullable=no type=string constraints=minLength=1
++ field repos.zero.detached required=yes nullable=no type=boolean constraints=-
 + field repos.zero.dirty required=yes nullable=no type=boolean constraints=-
 + field runtime required=yes nullable=no type=object constraints=additionalProperties=false
 + field runtime.os required=yes nullable=no type=string constraints=minLength=1
