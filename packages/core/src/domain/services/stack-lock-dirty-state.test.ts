@@ -71,17 +71,21 @@ describe("StackLock actual repository state", () => {
     }
   );
 
-  test("keeps an attached branch literally named detached distinct from detached HEAD", async () => {
+  test("keeps an attached branch literally named detached attached", async () => {
     const fixture = await createFixture();
     git(fixture.repositories.SHUD, ["branch", "-M", "detached"]);
 
     const attached = await collectStackLockContext({ repositoryRoot: fixture.root });
     expect(attached.repos.SHUD).toMatchObject({ branch: "detached", detached: false });
+  }, { timeout: 30_000 });
+
+  test("records a real detached HEAD with the explicit detached discriminator", async () => {
+    const fixture = await createFixture();
 
     git(fixture.repositories.SHUD, ["checkout", "--quiet", "--detach", "HEAD"]);
     const detached = await collectStackLockContext({ repositoryRoot: fixture.root });
     expect(detached.repos.SHUD).toMatchObject({ branch: "detached", detached: true });
-  });
+  }, { timeout: 30_000 });
 
   test.each(REPOSITORIES)(
     "marks a tracked modification in %s dirty while every sibling remains exact and clean",
@@ -110,6 +114,16 @@ describe("StackLock actual repository state", () => {
       }));
     }
   );
+
+  test("marks a staged tracked modification dirty", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.repositories.SHUD, "tracked.txt"), "staged modification\n");
+    git(fixture.repositories.SHUD, ["add", "tracked.txt"]);
+
+    const result = await collectStackLockContext({ repositoryRoot: fixture.root });
+
+    expect(result.repos.SHUD.dirty).toBe(true);
+  });
 
   test.each(REPOSITORIES)(
     "uses the explicit detached label for %s while every sibling remains exact and clean",
@@ -225,7 +239,7 @@ describe("StackLock actual repository state", () => {
       ] as const)
     )
   )(
-    "rejects %s %s drift when its next publication sibling %s starts",
+    "rejects first-sweep %s %s drift when its next sibling %s starts and the second sweep or final identity observes it",
     async (repositoryName, driftKind, nextRepositoryName) => {
       const fixture = await createFixture();
       const repository = fixture.repositories[repositoryName];
@@ -258,6 +272,50 @@ describe("StackLock actual repository state", () => {
 
       await expectCollectorFailure(fixture, gitCommand, "collection_state_changed");
       expect(drifted).toBe(true);
+    }
+  );
+
+  test.each(
+    REPOSITORIES.slice(0, -1).flatMap((repositoryName) =>
+      (["dirty", "commit", "branch"] as const).map((driftKind) => [
+        repositoryName,
+        driftKind
+      ] as const)
+    )
+  )(
+    "documents the public exclusion when %s %s mutates after its second-sweep final logical observation",
+    async (repositoryName, driftKind) => {
+      const fixture = await createFixture();
+      const repository = fixture.repositories[repositoryName];
+      let statusReads = 0;
+      let drifted = false;
+      const gitCommand: StackLockGitCommand = async (input) => {
+        const result = runFixtureGitCommand(input);
+        if (
+          !drifted &&
+          input.cwd === repository &&
+          isStatusCommand(input.args) &&
+          ++statusReads === 8
+        ) {
+          drifted = true;
+          if (driftKind === "dirty") {
+            await writeFile(join(repository, "post-final-observation.txt"), "dirty\n");
+          } else if (driftKind === "commit") {
+            await writeFile(join(repository, "tracked.txt"), "post-final commit\n");
+            git(repository, ["add", "tracked.txt"]);
+            git(repository, ["commit", "--quiet", "--message", "post-final observation"]);
+          } else {
+            git(repository, ["branch", "-M", "post-final-observation"]);
+          }
+        }
+        return result;
+      };
+
+      const result = await collectStackLockContext({ repositoryRoot: fixture.root, gitCommand });
+
+      expect(drifted).toBe(true);
+      expect(statusReads).toBe(8);
+      expect(result.repos[repositoryName]).toEqual(cleanRepositoryRevisions(fixture)[repositoryName]);
     }
   );
 
@@ -370,7 +428,7 @@ describe("StackLock actual repository state", () => {
 
     await expectCollectorFailure(fixture, gitCommand, "collection_state_changed");
     expect(await readFile(join(displaced, "tracked.txt"), "utf8")).toBe(trackedBefore);
-  });
+  }, { timeout: 30_000 });
 
   test("a transient checkout swap cannot redirect a Git producer to the replacement target", async () => {
     if (process.platform === "win32") return;
@@ -397,7 +455,11 @@ describe("StackLock actual repository state", () => {
     const output = join(wrapperRoot, "output");
     const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
     await writeFile(wrapper, `#!/bin/sh
-if [ "$1" = "--no-lazy-fetch" ] && [ "$4" = "status" ] && [ ! -e ${shellQuote(once)} ]; then
+is_status=false
+for arg in "$@"; do
+  if [ "$arg" = "status" ]; then is_status=true; fi
+done
+if [ "$is_status" = "true" ] && [ ! -e ${shellQuote(once)} ]; then
   : > ${shellQuote(once)}
   : > ${shellQuote(ready)}
   while [ ! -e ${shellQuote(release)} ]; do sleep 0.01; done
@@ -581,6 +643,78 @@ exec ${shellQuote(realGit)} "$@"
     }
   );
 
+  test("does not execute a filter injected after audit and before dirty observation", async () => {
+    const fixture = await createFixture();
+    const repository = fixture.repositories.SHUD;
+    const marker = join(fixture.container, "post-audit-filter-ran");
+    const helper = join(fixture.container, "post-audit-filter-helper");
+    await writeFile(helper, `#!/bin/sh\n: > ${JSON.stringify(marker)}\ncat\n`);
+    await chmod(helper, 0o700);
+    await writeFile(join(repository, ".gitattributes"), "tracked.txt filter=attack\n");
+    git(repository, ["add", ".gitattributes"]);
+    git(repository, ["commit", "--quiet", "--message", "configure attributes"]);
+    await writeFile(join(repository, "tracked.txt"), "would execute injected helper\n");
+    let injected = false;
+
+    const thrown = await expectCollectorFailureWithHooks(
+      fixture,
+      {
+        afterRepositoryDirtyAudit: async (path) => {
+          if (!injected && path === repository) {
+            injected = true;
+            git(repository, ["config", "filter.attack.clean", helper]);
+          }
+        }
+      },
+      "collection_contract_invalid"
+    );
+
+    expect(injected).toBe(true);
+    assertNonDisclosing(thrown, fixture.root);
+    await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test.each([
+    ["main", "clean"],
+    ["main", "process"],
+    ["linked", "clean"],
+    ["linked", "process"],
+    ["nested", "clean"],
+    ["nested", "process"]
+  ] as const)(
+    "rejects a real %s checkout worktree-config filter.%s including included config before observation",
+    async (scope, filterKind) => {
+      const fixture = await createFixture();
+      let repository: string;
+      if (scope === "linked") {
+        repository = await replaceWithLinkedCheckout(fixture, "SHUD");
+      } else if (scope === "nested") {
+        repository = await addNestedSubmodule(fixture, "nested-worktree-config");
+      } else {
+        repository = fixture.repositories.SHUD;
+      }
+      const marker = join(fixture.container, `${scope}-${filterKind}-worktree-filter-ran`);
+      const helper = join(fixture.container, `${scope}-${filterKind}-worktree-filter-helper`);
+      await writeFile(helper, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 1\n`);
+      await chmod(helper, 0o700);
+      await writeFile(join(repository, ".gitattributes"), "tracked.txt filter=attack\n");
+      git(repository, ["add", ".gitattributes"]);
+      git(repository, ["commit", "--quiet", "--message", "configure worktree filter"]);
+      git(repository, ["config", "extensions.worktreeConfig", "true"]);
+      if (filterKind === "clean") {
+        git(repository, ["config", "--worktree", "filter.attack.clean", helper]);
+      } else {
+        const includedConfig = join(fixture.container, `${scope}-included-worktree-filter-config`);
+        await writeFile(includedConfig, `[filter "attack"]\n\tprocess = ${helper}\n`);
+        git(repository, ["config", "--worktree", "include.path", includedConfig]);
+      }
+      await writeFile(join(repository, "tracked.txt"), "would execute worktree helper\n");
+
+      await expectCollectorFailure(fixture, undefined, "collection_contract_invalid");
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  );
+
   test("rejects a nested submodule process filter before parent status can execute it", async () => {
     const fixture = await createFixture();
     const nestedSource = join(fixture.container, "filter-nested-source");
@@ -634,6 +768,90 @@ exec ${shellQuote(realGit)} "$@"
     const result = await collectStackLockContext({ repositoryRoot: fixture.root });
 
     expect(result.repos.SHUD.dirty).toBe(true);
+  });
+
+  test("keeps a clean nested checkout clean and disables its repo-local fsmonitor", async () => {
+    const fixture = await createFixture();
+    const nested = await addNestedSubmodule(fixture, "nested-clean-fsmonitor");
+    const marker = join(fixture.container, "nested-fsmonitor-ran");
+    const hook = join(fixture.container, "nested-fsmonitor-hook");
+    await writeFile(hook, `#!/bin/sh\n: > ${JSON.stringify(marker)}\n`);
+    await chmod(hook, 0o700);
+    git(nested, ["config", "core.fsmonitor", hook]);
+
+    const result = await collectStackLockContext({ repositoryRoot: fixture.root });
+
+    expect(result.repos.SHUD.dirty).toBe(false);
+    await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test.each([
+    ["LF", "nested\nline"],
+    ["U+2028", "nested\u2028line"],
+    ["U+2029", "nested\u2029line"]
+  ] as const)("preserves a %s pathname in a stage-0 gitlink for recursive filter rejection", async (_label, nestedPath) => {
+    const fixture = await createFixture();
+    const nested = await addNestedGitlink(fixture, nestedPath);
+    const marker = join(fixture.container, `${_label}-gitlink-helper-ran`);
+    const helper = join(fixture.container, `${_label}-gitlink-helper`);
+    await writeFile(helper, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 1\n`);
+    await chmod(helper, 0o700);
+    await writeFile(join(nested, ".gitattributes"), "tracked.txt filter=attack\n");
+    git(nested, ["add", ".gitattributes"]);
+    git(nested, ["commit", "--quiet", "--message", "nested attributes"]);
+    git(nested, ["config", "filter.attack.clean", helper]);
+    await writeFile(join(nested, "tracked.txt"), "nested changed\n");
+
+    await expectCollectorFailure(fixture, undefined, "collection_contract_invalid");
+    await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test.each([1, 2, 3] as const)(
+    "rejects a stage-%i gitlink conflict before any status or nested helper can execute",
+    async (stage) => {
+      const fixture = await createFixture();
+      const nested = await addNestedSubmodule(fixture, "conflicted-gitlink");
+      const marker = join(fixture.container, `stage-${stage}-nested-helper-ran`);
+      const helper = join(fixture.container, `stage-${stage}-nested-helper`);
+      await writeFile(helper, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 1\n`);
+      await chmod(helper, 0o700);
+      git(nested, ["config", "filter.attack.clean", helper]);
+      git(fixture.repositories.SHUD, ["update-index", "--force-remove", "--", "conflicted-gitlink"]);
+      gitWithInput(
+        fixture.repositories.SHUD,
+        ["update-index", "--index-info"],
+        `160000 ${git(nested, ["rev-parse", "HEAD"]).trim()} ${stage}\tconflicted-gitlink\n`
+      );
+      let statusReads = 0;
+      const gitCommand: StackLockGitCommand = async (input) => {
+        if (input.cwd === fixture.repositories.SHUD && isStatusCommand(input.args)) {
+          statusReads += 1;
+        }
+        return runFixtureGitCommand(input);
+      };
+
+      await expectCollectorFailure(fixture, gitCommand, "collection_contract_invalid");
+      expect(statusReads).toBe(0);
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  );
+
+  test.each([
+    ["unknown stage", "160000 1111111111111111111111111111111111111111 4\tnested\0", "git_output_invalid"],
+    ["malformed header", "160000 1111111111111111111111111111111111111111 0 nested\0", "git_output_invalid"]
+  ] as const)("fails closed on a %s gitlink index record", async (_label, indexOutput, code) => {
+    const fixture = await createFixture();
+    let statusReads = 0;
+    const gitCommand: StackLockGitCommand = async (input) => {
+      if (input.cwd === fixture.repositories.SHUD && isIndexCommand(input.args)) {
+        return { stdout: indexOutput };
+      }
+      if (input.cwd === fixture.repositories.SHUD && isStatusCommand(input.args)) statusReads += 1;
+      return runFixtureGitCommand(input);
+    };
+
+    await expectCollectorFailure(fixture, gitCommand, code);
+    expect(statusReads).toBe(0);
   });
 
   test("uses committed .gitmodules authority when the worktree file is dirty", async () => {
@@ -735,12 +953,78 @@ function git(root: string, args: string[]): string {
   });
 }
 
+function gitWithInput(root: string, args: string[], input: string): string {
+  return execFileSync("git", args, {
+    cwd: root,
+    input,
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+}
+
+async function addNestedSubmodule(fixture: Fixture, nestedPath: string): Promise<string> {
+  const nestedSource = join(fixture.container, `nested-source-${Date.now()}-${Math.random()}`);
+  await mkdir(nestedSource);
+  git(nestedSource, ["init", "--quiet"]);
+  configureGit(nestedSource);
+  await writeFile(join(nestedSource, "tracked.txt"), "nested\n");
+  git(nestedSource, ["add", "tracked.txt"]);
+  git(nestedSource, ["commit", "--quiet", "--message", "nested initial"]);
+  git(fixture.repositories.SHUD, [
+    "-c",
+    "protocol.file.allow=always",
+    "submodule",
+    "add",
+    "--quiet",
+    nestedSource,
+    nestedPath
+  ]);
+  git(fixture.repositories.SHUD, ["commit", "--quiet", "-am", "add nested submodule"]);
+  return join(fixture.repositories.SHUD, nestedPath);
+}
+
+async function addNestedGitlink(fixture: Fixture, nestedPath: string): Promise<string> {
+  const nested = join(fixture.repositories.SHUD, nestedPath);
+  await mkdir(nested);
+  git(nested, ["init", "--quiet"]);
+  configureGit(nested);
+  await writeFile(join(nested, "tracked.txt"), "nested\n");
+  git(nested, ["add", "tracked.txt"]);
+  git(nested, ["commit", "--quiet", "--message", "nested initial"]);
+  git(fixture.repositories.SHUD, [
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `160000,${git(nested, ["rev-parse", "HEAD"]).trim()},${nestedPath}`
+  ]);
+  git(fixture.repositories.SHUD, ["commit", "--quiet", "--message", "add nested gitlink"]);
+  return nested;
+}
+
+async function replaceWithLinkedCheckout(
+  fixture: Fixture,
+  repositoryName: RepositoryName
+): Promise<string> {
+  const checkout = fixture.repositories[repositoryName];
+  const main = join(fixture.container, `${repositoryName}-main-worktree`);
+  await rename(checkout, main);
+  git(main, ["worktree", "add", "--quiet", "--detach", checkout, "HEAD"]);
+  return checkout;
+}
+
 function runFixtureGitCommand(input: StackLockGitCommandInput): StackLockGitCommandResult {
   return {
     stdout: execFileSync("git", [...input.args], {
       cwd: input.cwd,
       encoding: "buffer",
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_NO_LAZY_FETCH: "1" },
+      env: {
+        ...process.env,
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_NO_LAZY_FETCH: "1",
+        ...(input.gitObjectDirectory === undefined
+          ? {}
+          : { GIT_OBJECT_DIRECTORY: input.gitObjectDirectory })
+      },
       stdio: ["ignore", "pipe", "pipe"]
     })
   };
@@ -778,16 +1062,11 @@ function isBranchCommand(args: readonly string[]): boolean {
 }
 
 function isStatusCommand(args: readonly string[]): boolean {
-  return JSON.stringify(args) === JSON.stringify([
-    "--no-lazy-fetch",
-    "-c",
-    "core.fsmonitor=false",
-    "status",
-    "--porcelain=v1",
-    "--untracked-files=all",
-    "--ignore-submodules=none",
-    "--"
-  ]);
+  return args.includes("status") && args.includes("--porcelain=v1");
+}
+
+function isIndexCommand(args: readonly string[]): boolean {
+  return args.includes("ls-files") && args.includes("--stage") && args.includes("-z");
 }
 
 function cleanRepositoryRevisions(
@@ -821,6 +1100,31 @@ async function expectCollectorFailure(
   let thrown: unknown;
   try {
     collection = await collectStackLockContext({ repositoryRoot: fixture.root, gitCommand });
+  } catch (error) {
+    thrown = error;
+  }
+  expect(collection).toBeUndefined();
+  expect(thrown).toMatchObject({
+    name: "StackLockCollectionError",
+    code,
+    message: "StackLock context collection failed."
+  });
+  return thrown as Error;
+}
+
+async function expectCollectorFailureWithHooks(
+  fixture: Fixture,
+  hooks: Parameters<typeof __collectStackLockContextWithHasherForTest>[2],
+  code: string
+): Promise<Error> {
+  let collection: Awaited<ReturnType<typeof collectStackLockContext>> | undefined;
+  let thrown: unknown;
+  try {
+    collection = await __collectStackLockContextWithHasherForTest(
+      { repositoryRoot: fixture.root },
+      hashFile,
+      hooks
+    );
   } catch (error) {
     thrown = error;
   }

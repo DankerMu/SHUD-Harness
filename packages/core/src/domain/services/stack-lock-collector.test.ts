@@ -1217,9 +1217,13 @@ describe("StackLock context collector", () => {
     const repositoryRoot = await createGitBackedFixtureRepository();
     const linkedRoot = join(dirname(repositoryRoot), "linked-worktree");
     git(repositoryRoot, ["worktree", "add", "--quiet", "--detach", linkedRoot, "HEAD"]);
-  await Promise.all(STACK_LOCK_REPOSITORY_NAMES.map((name) =>
-    mkdir(join(linkedRoot, name), { recursive: true })
-  ));
+    await Promise.all(STACK_LOCK_REPOSITORY_NAMES.map((name) =>
+      mkdir(join(linkedRoot, name), { recursive: true })
+    ));
+    for (const name of STACK_LOCK_REPOSITORY_NAMES) {
+      git(join(linkedRoot, name), ["init", "--quiet"]);
+      git(join(linkedRoot, name), ["read-tree", "--empty"]);
+    }
     const result = await collectStackLockContext({
       repositoryRoot: linkedRoot,
       gitCommand: async (input) => {
@@ -1409,6 +1413,10 @@ async function writeFixtureRepositoryFiles(
   await Promise.all(STACK_LOCK_REPOSITORY_NAMES.map((name) =>
     mkdir(join(repositoryRoot, name), { recursive: true })
   ));
+  for (const name of STACK_LOCK_REPOSITORY_NAMES) {
+    git(join(repositoryRoot, name), ["init", "--quiet"]);
+    git(join(repositoryRoot, name), ["read-tree", "--empty"]);
+  }
   await writeFile(
     join(repositoryRoot, "package.json"),
     `${JSON.stringify(
@@ -1587,17 +1595,7 @@ function simulatedSubmoduleGitResult(
   ) {
     return { stdout: "" };
   }
-  if (
-    args.length === 8 &&
-    args[0] === "--no-lazy-fetch" &&
-    args[1] === "-c" &&
-    args[2] === "core.fsmonitor=false" &&
-    args[3] === "status" &&
-    args[4] === "--porcelain=v1" &&
-    args[5] === "--untracked-files=all" &&
-    args[6] === "--ignore-submodules=none" &&
-    args[7] === "--"
-  ) {
+  if (args.includes("status") && args.includes("--porcelain=v1")) {
     return { stdout: "" };
   }
   return undefined;
