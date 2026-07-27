@@ -32,7 +32,6 @@ jobs:
           set -euo pipefail
           file=packages/core/src/domain/schemas/stack-lock.ts
           cp "$file" /tmp/stack-lock.ts
-          trap 'cp /tmp/stack-lock.ts "$file"' EXIT
           python3 - <<'PY'
           from pathlib import Path
           p=Path('packages/core/src/domain/schemas/stack-lock.ts')
@@ -46,6 +45,8 @@ jobs:
           status=$?
           set -e
           cat /tmp/red1.log
+          cp /tmp/stack-lock.ts "$file"
+          cmp -s /tmp/stack-lock.ts "$file"
           test "$status" -ne 0
       - name: Red 2 dirty observer
         shell: bash
@@ -53,7 +54,6 @@ jobs:
           set -euo pipefail
           file=packages/core/src/domain/services/stack-lock-collector.ts
           cp "$file" /tmp/collector.ts
-          trap 'cp /tmp/collector.ts "$file"' EXIT
           python3 - <<'PY'
           from pathlib import Path
           p=Path('packages/core/src/domain/services/stack-lock-collector.ts')
@@ -67,6 +67,8 @@ jobs:
           status=$?
           set -e
           cat /tmp/red2.log
+          cp /tmp/collector.ts "$file"
+          cmp -s /tmp/collector.ts "$file"
           test "$status" -ne 0
       - name: Red 3 snapshot state binding
         shell: bash
@@ -74,7 +76,6 @@ jobs:
           set -euo pipefail
           file=packages/core/src/domain/services/stack-lock-collector.ts
           cp "$file" /tmp/collector.ts
-          trap 'cp /tmp/collector.ts "$file"' EXIT
           python3 - <<'PY'
           from pathlib import Path
           p=Path('packages/core/src/domain/services/stack-lock-collector.ts')
@@ -88,6 +89,8 @@ jobs:
           status=$?
           set -e
           cat /tmp/red3.log
+          cp /tmp/collector.ts "$file"
+          cmp -s /tmp/collector.ts "$file"
           test "$status" -ne 0
       - name: Restored green
         run: |
