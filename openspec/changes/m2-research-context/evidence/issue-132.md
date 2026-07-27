@@ -125,13 +125,13 @@ Schema tests SHALL also parameterize all four keys: removing `dirty` or replacin
 
 ## Executed evidence
 
-### Round 2 verified-finding repair (2026-07-27, pre-commit)
+### Round 2 verified-finding repair (2026-07-27)
 
 - Focused collector/dirty-state batch: `141 pass / 0 fail / 452 expect`，覆盖两个完整 publication sweeps、三仓 next-sibling × commit/branch/dirty/identity 12 格、绝对 PATH、Git exit marker、handle/FD/primary precedence、no-follow-before-realpath 与真实 clean/process/nested filter marker。
 - `test:schemas`: `39 pass / 0 fail / 188 expect`；`test:core-services`: `656 pass / 5 skip / 0 fail / 30308 expect`。
 - 24-way transient replacement-wrapper stress: `24 pass / 0 fail`；所有进程 settlement 后 `stack-lock-dirty-*` temp residue = 0，环境变更 confined to child processes。
 - `schema:check`、`typecheck`、strict OpenSpec 与 `git diff --check`: pass。
-- Blob-bound semantic red-proof script/report已准备；它要求 orchestrator 创建最终 green commit 后传 `--green-sha`，并会打印实际 SHA/五个 blob ID/命令/两次一致的 RED `0/17` 与 GREEN `17/0`/cleanup。这里不伪造尚不存在的 final SHA 或执行结果。
+- Blob-bound semantic red proof 在 committed green tree `f493e77235acbe26ff3f8587192a9eab32efa77e` 上完成；五个 governing blob 已记录，两轮均为 RED `0 pass / 17 named semantic fail`、GREEN `17 pass / 0 fail`，且 detached worktree 完整清理。首次 replay 的缺失 `zero` workspace 与未到达 checkout command 的 PATH fixture 均被 proof 自身拒绝并修正，未用 harness/setup failure 冒充红证据。
 
 ### Round 1 confirmed-finding repair (2026-07-27)
 
