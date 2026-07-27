@@ -4,9 +4,32 @@ export type CoreServiceNamespace = typeof CORE_SERVICE_NAMESPACE;
 
 export * from "./artifact-registry-service";
 export { hashDirectory, hashFile } from "./hashing-service";
-export type { HashingServiceInput } from "./hashing-service";
+export type { HashFileInput, HashingServiceInput } from "./hashing-service";
 export * from "./idempotency-service";
 export * from "./lock-service";
+export {
+  STACK_LOCK_PARAMS_DIGEST,
+  STACK_LOCK_PROMPT_PACK,
+  STACK_LOCK_PROMPT_PACK_DIGEST,
+  STACK_LOCK_RENV_MISSING,
+  STACK_LOCK_REPOSITORY_NAMES,
+  STACK_LOCK_SKILLS_VERSION,
+  STACK_LOCK_UNKNOWN_VERSION,
+  STACK_LOCK_ZERO_PIN,
+  StackLockCollectionError,
+  collectStackLockContext
+} from "./stack-lock-collector";
+export type {
+  CollectStackLockContextOptions,
+  StackLockCollectedContent,
+  StackLockCollectionErrorCode,
+  StackLockCollectionResult,
+  StackLockDegradedReason,
+  StackLockGitCommand,
+  StackLockGitCommandInput,
+  StackLockGitCommandResult,
+  StackLockRepositoryName
+} from "./stack-lock-collector";
 export * from "./task-card-service";
 export {
   preserveTaskServiceErrorFailureEntries,

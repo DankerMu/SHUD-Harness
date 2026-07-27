@@ -83,6 +83,20 @@ describe("hashing service", () => {
     expect(source).not.toMatch(/\breadFile(?:Sync)?\b/);
   });
 
+  test("hashFile accepts an exact descriptor byte bound and rejects bound plus one before content reads", async () => {
+    const { workspaceRoot } = await createWorkspace();
+    const result = await runMaxBytesProbe(workspaceRoot);
+    expect(result).toEqual({
+      exactDigest: ABC_SHA256,
+      exactReads: 1,
+      oversizedReads: 0,
+      oversizedError: {
+        name: "WorkspacePathSafetyError",
+        evidenceRef: "hash.max-bytes.oversized"
+      }
+    });
+  });
+
   test("hashDirectory implements the exact canonical line protocol independent of creation order", async () => {
     const { workspaceRoot } = await createWorkspace();
     const first = join(workspaceRoot, "first");
@@ -994,6 +1008,76 @@ async function runFileSubstitutionProbe(
   ]);
   if (exitCode !== 0) {
     throw new Error(`File substitution probe failed with exit ${exitCode}: ${stderr.trim()}`);
+  }
+  return JSON.parse(stdout.trim());
+}
+
+async function runMaxBytesProbe(workspaceRoot: string): Promise<Readonly<{
+  exactDigest: string;
+  exactReads: number;
+  oversizedReads: number;
+  oversizedError: ProbeError;
+}>> {
+  const exactPath = join(workspaceRoot, "max-bytes-exact.bin");
+  const oversizedPath = join(workspaceRoot, "max-bytes-oversized.bin");
+  await writeFile(exactPath, "abc");
+  await writeFile(oversizedPath, "abcd");
+  const script = `
+    import { mock } from "bun:test";
+    const actualFs = { ...await import("node:fs") };
+    const exactIdentity = actualFs.statSync(${JSON.stringify(exactPath)}, { bigint: true });
+    const oversizedIdentity = actualFs.statSync(${JSON.stringify(oversizedPath)}, { bigint: true });
+    let exactReads = 0;
+    let oversizedReads = 0;
+    const same = (left, right) => left.dev === right.dev && left.ino === right.ino;
+    mock.module("node:fs", () => ({
+      ...actualFs,
+      read: (descriptor, ...args) => {
+        const identity = actualFs.fstatSync(descriptor, { bigint: true });
+        if (same(identity, exactIdentity)) exactReads += 1;
+        if (same(identity, oversizedIdentity)) oversizedReads += 1;
+        return actualFs.read(descriptor, ...args);
+      }
+    }));
+    const { hashFile } = await import("./packages/core/src/domain/services/index.ts");
+    const exactDigest = await hashFile({
+      workspaceRoot: ${JSON.stringify(workspaceRoot)},
+      inputPath: "max-bytes-exact.bin",
+      evidenceRef: "hash.max-bytes.exact",
+      maxBytes: 3
+    });
+    let name = null;
+    let evidenceRef = null;
+    try {
+      await hashFile({
+        workspaceRoot: ${JSON.stringify(workspaceRoot)},
+        inputPath: "max-bytes-oversized.bin",
+        evidenceRef: "hash.max-bytes.oversized",
+        maxBytes: 3
+      });
+    } catch (error) {
+      name = error?.name ?? null;
+      evidenceRef = error?.evidenceRef ?? null;
+    }
+    console.log(JSON.stringify({
+      exactDigest,
+      exactReads,
+      oversizedReads,
+      oversizedError: { name, evidenceRef }
+    }));
+  `;
+  const child = Bun.spawn([process.execPath, "-e", script], {
+    cwd: resolve(import.meta.dir, "../../../../.."),
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text()
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(`Max-bytes probe failed with exit ${exitCode}: ${stderr.trim()}`);
   }
   return JSON.parse(stdout.trim());
 }
