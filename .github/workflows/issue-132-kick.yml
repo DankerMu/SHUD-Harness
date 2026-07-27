@@ -88,16 +88,24 @@ jobs:
           ): Promise<void> {
             const stdout = await readRepositoryGitText(
               authority.path,
-              [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "rev-parse", "--show-toplevel", "--show-prefix"],
+              [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "rev-parse", "--show-toplevel"],
               gitCommand
             );
-            const topLevelMatch = /^([^\0\r\n]+)\r?\n(?:\r?\n)?$/u.exec(stdout);
-            if (!topLevelMatch || !isAbsolute(topLevelMatch[1]!)) {
+            if (!stdout.endsWith("\n")) {
+              throw new StackLockCollectionError("git_output_invalid");
+            }
+            const reportedTopLevel = stdout.slice(0, -1).replace(/\r$/u, "");
+            if (
+              reportedTopLevel.length === 0 ||
+              reportedTopLevel.includes("\0") ||
+              reportedTopLevel.includes("\n") ||
+              !isAbsolute(reportedTopLevel)
+            ) {
               throw new StackLockCollectionError("git_output_invalid");
             }
             let physicalTopLevel: string;
             try {
-              physicalTopLevel = await realpath(topLevelMatch[1]!);
+              physicalTopLevel = await realpath(reportedTopLevel);
             } catch {
               throw new StackLockCollectionError("collection_contract_invalid");
             }
@@ -118,6 +126,33 @@ jobs:
 
           test_path = Path('packages/core/src/domain/services/stack-lock-collector.test.ts')
           tests = test_path.read_text()
+          old_top_level_helper = r'''  if (
+              args.length === 4 &&
+              args[0] === "--no-lazy-fetch" &&
+              args[1] === "rev-parse" &&
+              args[2] === "--show-toplevel" &&
+              args[3] === "--show-prefix"
+            ) {
+              return { stdout: `${resolve(cwd)}\n\n` };
+            }
+          '''
+          new_top_level_helper = r'''  if (
+              args.length === 3 &&
+              args[0] === "--no-lazy-fetch" &&
+              args[1] === "rev-parse" &&
+              args[2] === "--show-toplevel"
+            ) {
+              return { stdout: `${resolve(cwd)}\n` };
+            }
+          '''
+          if tests.count(old_top_level_helper) != 1:
+              raise SystemExit(f'top-level helper count was {tests.count(old_top_level_helper)}')
+          tests = tests.replace(old_top_level_helper, new_top_level_helper)
+          tests = tests.replace(
+              'call.args.at(-1) === "--show-prefix"',
+              'call.args.at(-1) === "--show-toplevel"',
+          )
+
           old_setup = '''  await writeFixtureRepositoryFiles(repositoryRoot, { version });
             git(repositoryRoot, ["init", "--quiet"]);'''
           new_setup = '''  await writeFixtureRepositoryFiles(repositoryRoot, { version });
