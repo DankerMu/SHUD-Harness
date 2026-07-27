@@ -4,11 +4,13 @@ import { createHash } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   readdir,
+  rename,
   rm,
   symlink,
   truncate,
@@ -17,6 +19,7 @@ import {
 import { platform, release, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { env } from "node:process";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   STACK_LOCK_PARAMS_DIGEST,
   STACK_LOCK_PROMPT_PACK,
@@ -31,9 +34,11 @@ import {
   type StackLockGitCommandInput
 } from "./index";
 import {
+  __collectStackLockContextWithHasherForTest,
   __runReadOnlyGitCommandForTest,
   type StackLockGitProcessExecutor
 } from "./stack-lock-collector";
+import { hashFile } from "./hashing-service";
 
 const tempRoots: string[] = [];
 const SECRET_API_KEY = "super-secret-provider-value";
@@ -918,6 +923,153 @@ describe("StackLock context collector", () => {
     expect((thrown as Error).message).not.toContain(changedRoot);
   });
 
+  test("rejects an injected same-path repository replacement during the first root observation", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "original" });
+    const replacementRoot = await createFixtureRepository({ version: "replacement" });
+    let rootObservations = 0;
+
+    await expectStateChanged(repositoryRoot, async (input) => {
+      if (isTopLevelCommand(input)) {
+        rootObservations += 1;
+        if (rootObservations === 1) {
+          await replaceRepositoryRoot(repositoryRoot, replacementRoot);
+        }
+        return { stdout: `${repositoryRoot}\n` };
+      }
+      if (isGitmodulesBlobCommand(input)) {
+        return { stdout: await readFile(join(repositoryRoot, ".gitmodules"), "utf8") };
+      }
+      return { stdout: gitlinkOutput(["SHUD", "rSHUD", "AutoSHUD", "zero"]) };
+    });
+
+    expect(rootObservations).toBe(1);
+  });
+
+  test("rejects a same-path repository replacement between cheap snapshots", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    const replacementRoot = await createFixtureRepository({ version: "0.8.0" });
+    let rootObservations = 0;
+
+    await expectStateChanged(repositoryRoot, async (input) => {
+      if (isTopLevelCommand(input)) {
+        rootObservations += 1;
+        if (rootObservations === 2) {
+          await replaceRepositoryRoot(repositoryRoot, replacementRoot);
+        }
+        return { stdout: `${repositoryRoot}\n` };
+      }
+      if (isGitmodulesBlobCommand(input)) {
+        return { stdout: await readFile(join(repositoryRoot, ".gitmodules"), "utf8") };
+      }
+      return { stdout: gitlinkOutput(["SHUD", "rSHUD", "AutoSHUD", "zero"]) };
+    });
+
+    expect(rootObservations).toBe(2);
+  });
+
+  test("rejects same-path replacement adjacent to package and provider producers", async () => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    const replacementRoot = await createFixtureRepository({ version: "0.8.0" });
+    let inventoryReads = 0;
+
+    await expectStateChanged(repositoryRoot, async (input) => {
+      if (isTopLevelCommand(input)) return { stdout: `${repositoryRoot}\n` };
+      if (isGitmodulesBlobCommand(input)) {
+        return { stdout: await readFile(join(repositoryRoot, ".gitmodules"), "utf8") };
+      }
+      inventoryReads += 1;
+      if (inventoryReads === 1) {
+        await replaceRepositoryRoot(repositoryRoot, replacementRoot);
+      }
+      return { stdout: gitlinkOutput(["SHUD", "rSHUD", "AutoSHUD", "zero"]) };
+    });
+
+    expect(inventoryReads).toBe(1);
+  });
+
+  test.each([
+    ["first renv producer", 1],
+    ["publication-adjacent second renv producer", 2]
+  ] as const)("rejects same-path replacement after the %s", async (_label, replacementCall) => {
+    const repositoryRoot = await createFixtureRepository({ version: "0.8.0" });
+    const replacementRoot = await createFixtureRepository({ version: "0.8.0" });
+    await writeFile(join(repositoryRoot, "renv.lock"), "stable-lock\n");
+    await writeFile(join(replacementRoot, "renv.lock"), "stable-lock\n");
+    let hashCalls = 0;
+    let collection: Awaited<ReturnType<typeof collectStackLockContext>> | undefined;
+    let thrown: unknown;
+
+    try {
+      collection = await __collectStackLockContextWithHasherForTest(
+        { repositoryRoot, gitCommand: fakeGitCommand() },
+        async (input) => {
+          const digest = await hashFile(input);
+          hashCalls += 1;
+          if (hashCalls === replacementCall) {
+            await replaceRepositoryRoot(repositoryRoot, replacementRoot);
+          }
+          return digest;
+        }
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(collection).toBeUndefined();
+    expect(hashCalls).toBe(replacementCall);
+    expect(thrown).toMatchObject({
+      code: "collection_state_changed",
+      message: "StackLock context collection failed."
+    });
+    expect((thrown as Error).message).not.toContain(repositoryRoot);
+    expect((thrown as Error).message).not.toContain(SECRET_API_KEY);
+  });
+
+  test("default Git execution rejects a real same-path repository replacement after root observation", async () => {
+    if (platform() === "win32") return;
+    const repositoryRoot = await createGitBackedFixtureRepository("original");
+    const replacementRoot = await createGitBackedFixtureRepository("replacement");
+    const wrapperRoot = await createTempRoot("shud-stack-git-wrapper-");
+    const wrapperPath = join(wrapperRoot, "git");
+    const readyPath = join(wrapperRoot, "ready");
+    const releasePath = join(wrapperRoot, "release");
+    const outputPath = join(wrapperRoot, "root-output");
+    const oncePath = join(wrapperRoot, "once");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const previousPath = env.PATH;
+    await writeFile(
+      wrapperPath,
+      `#!/bin/sh\nREAL_GIT=${shellQuote(realGit)}\nREADY=${shellQuote(readyPath)}\nRELEASE=${shellQuote(releasePath)}\nOUTPUT=${shellQuote(outputPath)}\nONCE=${shellQuote(oncePath)}\nif [ "$1" = "--no-lazy-fetch" ] && [ "$2" = "rev-parse" ] && [ "$3" = "--show-toplevel" ] && [ ! -e "$ONCE" ]; then\n  : > "$ONCE"\n  "$REAL_GIT" "$@" > "$OUTPUT"\n  STATUS=$?\n  : > "$READY"\n  while [ ! -e "$RELEASE" ]; do sleep 0.01; done\n  cat "$OUTPUT"\n  exit "$STATUS"\nfi\nexec "$REAL_GIT" "$@"\n`
+    );
+    await chmod(wrapperPath, 0o700);
+    env.PATH = `${wrapperRoot}:${previousPath ?? ""}`;
+    let collection: Awaited<ReturnType<typeof collectStackLockContext>> | undefined;
+    let thrown: unknown;
+
+    try {
+      const pending = collectStackLockContext({ repositoryRoot });
+      await waitForPath(readyPath);
+      await replaceRepositoryRoot(repositoryRoot, replacementRoot);
+      await writeFile(releasePath, "release\n");
+      try {
+        collection = await pending;
+      } catch (error) {
+        thrown = error;
+      }
+    } finally {
+      await writeFile(releasePath, "release\n").catch(() => undefined);
+      if (previousPath === undefined) delete env.PATH;
+      else env.PATH = previousPath;
+    }
+
+    expect(collection).toBeUndefined();
+    expect(thrown).toMatchObject({
+      code: "collection_state_changed",
+      message: "StackLock context collection failed."
+    });
+    expect((thrown as Error).message).not.toContain(repositoryRoot);
+  });
+
   test("collects normally from a linked-worktree physical top-level", async () => {
     const repositoryRoot = await createGitBackedFixtureRepository();
     const linkedRoot = join(dirname(repositoryRoot), "linked-worktree");
@@ -1086,10 +1238,10 @@ async function writeFixtureRepositoryFiles(
   await writeFile(join(repositoryRoot, ".gitmodules"), gitmodulesFixture());
 }
 
-async function createGitBackedFixtureRepository(): Promise<string> {
+async function createGitBackedFixtureRepository(version = "0.8.0"): Promise<string> {
   const container = await createTempRoot("shud-stack-git-root-");
   const repositoryRoot = join(container, "source");
-  await writeFixtureRepositoryFiles(repositoryRoot, { version: "0.8.0" });
+  await writeFixtureRepositoryFiles(repositoryRoot, { version });
   git(repositoryRoot, ["init", "--quiet"]);
   git(repositoryRoot, ["config", "user.name", "StackLock Test"]);
   git(repositoryRoot, ["config", "user.email", "stack-lock@example.invalid"]);
@@ -1206,6 +1358,32 @@ async function createTempRoot(prefix: string): Promise<string> {
   const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   tempRoots.push(root);
   return root;
+}
+
+async function replaceRepositoryRoot(
+  repositoryRoot: string,
+  replacementRoot: string
+): Promise<void> {
+  const displacedRoot = `${repositoryRoot}.displaced`;
+  await rename(repositoryRoot, displacedRoot);
+  tempRoots.push(displacedRoot);
+  await rename(replacementRoot, repositoryRoot);
+}
+
+async function waitForPath(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      await access(path);
+      return;
+    } catch {
+      await delay(10);
+    }
+  }
+  throw new Error("timed out waiting for Git wrapper synchronization");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function git(repositoryRoot: string, args: string[]): string {

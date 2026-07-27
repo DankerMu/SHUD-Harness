@@ -128,6 +128,7 @@ async function collectStackLockContextWithHasher(
   }
   const { repos, harness, provider, rPackagesLock } = second;
   const runtime = collectRuntimeVersions(rPackagesLock.value);
+  await assertCurrentRepositoryRoot(repositoryRoot);
 
   let content: StackLockCollectedContent;
   try {
@@ -152,11 +153,23 @@ async function collectStackLockContextWithHasher(
     throw new StackLockCollectionError("collection_contract_invalid");
   }
 
-  return freezeCollectionResult(content, rPackagesLock.degraded);
+  const result = freezeCollectionResult(content, rPackagesLock.degraded);
+  await assertCurrentRepositoryRoot(repositoryRoot);
+  return result;
+}
+
+interface RepositoryRootIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
+interface RepositoryRootAuthority {
+  readonly path: string;
+  readonly identity: RepositoryRootIdentity;
 }
 
 interface StackLockCheapSnapshot {
-  readonly repositoryRoot: string;
+  readonly repositoryRoot: RepositoryRootAuthority;
   readonly repos: StackLock["repos"];
   readonly harness: HarnessIdentity;
   readonly provider: ProviderIdentity;
@@ -168,31 +181,48 @@ interface StackLockCollectionSnapshot extends StackLockCheapSnapshot {
 }
 
 async function collectCheapSnapshot(
-  repositoryRoot: string,
+  repositoryRoot: RepositoryRootAuthority,
   gitCommand: StackLockGitCommand
 ): Promise<StackLockCheapSnapshot> {
-  const reportedRepositoryRoot = await collectRepositoryRootIdentity(repositoryRoot, gitCommand);
-  const [authority, harness, provider] = await Promise.all([
-    collectHeadAuthority(reportedRepositoryRoot, gitCommand),
-    readHarnessVersion(reportedRepositoryRoot),
-    readProviderIdentity(reportedRepositoryRoot)
-  ]);
-  return Object.freeze({
-    repositoryRoot: reportedRepositoryRoot,
-    repos: authority.repos,
-    harness,
-    provider,
-    gitmodules: authority.gitmodules
+  return await withRepositoryRootAuthority(repositoryRoot, async () => {
+    const reportedRepositoryRoot = await withRepositoryRootAuthority(
+      repositoryRoot,
+      async () => await collectRepositoryRootIdentity(repositoryRoot, gitCommand)
+    );
+    const authority = await withRepositoryRootAuthority(
+      repositoryRoot,
+      async () => await collectHeadAuthority(reportedRepositoryRoot, gitCommand)
+    );
+    const harness = await withRepositoryRootAuthority(
+      repositoryRoot,
+      async () => await readHarnessVersion(reportedRepositoryRoot.path)
+    );
+    const provider = await withRepositoryRootAuthority(
+      repositoryRoot,
+      async () => await readProviderIdentity(reportedRepositoryRoot.path)
+    );
+    return Object.freeze({
+      repositoryRoot: reportedRepositoryRoot,
+      repos: authority.repos,
+      harness,
+      provider,
+      gitmodules: authority.gitmodules
+    });
   });
 }
 
 async function completeSnapshot(
-  repositoryRoot: string,
+  repositoryRoot: RepositoryRootAuthority,
   cheap: StackLockCheapSnapshot,
   fileHasher: StackLockFileHasher
 ): Promise<StackLockCollectionSnapshot> {
-  const rPackagesLock = await collectRPackagesLock(repositoryRoot, fileHasher);
-  return Object.freeze({ ...cheap, rPackagesLock });
+  return await withRepositoryRootAuthority(repositoryRoot, async () => {
+    const rPackagesLock = await withRepositoryRootAuthority(
+      repositoryRoot,
+      async () => await collectRPackagesLock(repositoryRoot.path, fileHasher)
+    );
+    return Object.freeze({ ...cheap, rPackagesLock });
+  });
 }
 
 function cheapSnapshotsMatch(
@@ -200,7 +230,7 @@ function cheapSnapshotsMatch(
   second: StackLockCheapSnapshot
 ): boolean {
   return (
-    first.repositoryRoot === second.repositoryRoot &&
+    sameRepositoryRootAuthority(first.repositoryRoot, second.repositoryRoot) &&
     JSON.stringify(first.repos) === JSON.stringify(second.repos) &&
     first.harness.version === second.harness.version &&
     first.harness.sourceDigest === second.harness.sourceDigest &&
@@ -225,29 +255,38 @@ function snapshotsMatch(
   );
 }
 
-async function resolveRepositoryRoot(input: string): Promise<string> {
+async function resolveRepositoryRoot(input: string): Promise<RepositoryRootAuthority> {
   if (typeof input !== "string" || input.trim().length === 0) {
     throw new StackLockCollectionError("repository_root_invalid");
   }
   try {
-    const physicalPath = await realpath(resolve(input));
+    const requestedPath = resolve(input);
+    const physicalPath = await realpath(requestedPath);
+    const firstIdentity = await observeRepositoryRootIdentity(physicalPath);
     if (!(await isSafeExistingDirectoryPath(physicalPath))) {
       throw new Error("repository root is not a safe directory");
     }
-    return physicalPath;
+    if (await realpath(requestedPath) !== physicalPath) {
+      throw new Error("repository root changed during admission");
+    }
+    const secondIdentity = await observeRepositoryRootIdentity(physicalPath);
+    if (!sameRepositoryRootIdentity(firstIdentity, secondIdentity)) {
+      throw new Error("repository root changed during admission");
+    }
+    return Object.freeze({ path: physicalPath, identity: secondIdentity });
   } catch {
     throw new StackLockCollectionError("repository_root_invalid");
   }
 }
 
 async function collectRepositoryRootIdentity(
-  repositoryRoot: string,
+  repositoryRoot: RepositoryRootAuthority,
   gitCommand: StackLockGitCommand
-): Promise<string> {
+): Promise<RepositoryRootAuthority> {
   let rawResult: unknown;
   try {
     rawResult = await gitCommand({
-      cwd: repositoryRoot,
+      cwd: repositoryRoot.path,
       args: Object.freeze([
         GIT_NO_LAZY_FETCH_GLOBAL_ARG,
         "rev-parse",
@@ -289,10 +328,65 @@ async function collectRepositoryRootIdentity(
   } catch {
     throw new StackLockCollectionError("repository_root_invalid");
   }
-  if (physicalReportedPath !== repositoryRoot) {
+  if (physicalReportedPath !== repositoryRoot.path) {
     throw new StackLockCollectionError("repository_root_invalid");
   }
-  return physicalReportedPath;
+  await assertCurrentRepositoryRoot(repositoryRoot);
+  return repositoryRoot;
+}
+
+async function observeRepositoryRootIdentity(path: string): Promise<RepositoryRootIdentity> {
+  const observation = await lstat(path, { bigint: true });
+  if (observation.isSymbolicLink() || !observation.isDirectory()) {
+    throw new Error("repository root is not a physical directory");
+  }
+  return Object.freeze({ dev: observation.dev, ino: observation.ino });
+}
+
+function sameRepositoryRootIdentity(
+  left: RepositoryRootIdentity,
+  right: RepositoryRootIdentity
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameRepositoryRootAuthority(
+  left: RepositoryRootAuthority,
+  right: RepositoryRootAuthority
+): boolean {
+  return left.path === right.path && sameRepositoryRootIdentity(left.identity, right.identity);
+}
+
+async function assertCurrentRepositoryRoot(
+  repositoryRoot: RepositoryRootAuthority
+): Promise<void> {
+  try {
+    const current = await observeRepositoryRootIdentity(repositoryRoot.path);
+    if (!sameRepositoryRootIdentity(repositoryRoot.identity, current)) {
+      throw new Error("repository root identity changed");
+    }
+  } catch {
+    throw new StackLockCollectionError("collection_state_changed");
+  }
+}
+
+async function withRepositoryRootAuthority<T>(
+  repositoryRoot: RepositoryRootAuthority,
+  producer: () => Promise<T>
+): Promise<T> {
+  await assertCurrentRepositoryRoot(repositoryRoot);
+  let result: T | undefined;
+  let producerThrew = false;
+  let producerError: unknown;
+  try {
+    result = await producer();
+  } catch (error) {
+    producerThrew = true;
+    producerError = error;
+  }
+  await assertCurrentRepositoryRoot(repositoryRoot);
+  if (producerThrew) throw producerError;
+  return result as T;
 }
 
 interface HeadAuthorityInventory {
@@ -301,17 +395,23 @@ interface HeadAuthorityInventory {
 }
 
 async function collectHeadAuthority(
-  repositoryRoot: string,
+  repositoryRoot: RepositoryRootAuthority,
   gitCommand: StackLockGitCommand
 ): Promise<{
   readonly repos: StackLock["repos"];
   readonly gitmodules: GitmodulesIdentity;
 }> {
-  const inventory = await collectHeadAuthorityInventory(repositoryRoot, gitCommand);
-  const gitmodules = await readHeadGitmodulesIdentity(
+  const inventory = await withRepositoryRootAuthority(
     repositoryRoot,
-    inventory.gitmodulesObjectId,
-    gitCommand
+    async () => await collectHeadAuthorityInventory(repositoryRoot.path, gitCommand)
+  );
+  const gitmodules = await withRepositoryRootAuthority(
+    repositoryRoot,
+    async () => await readHeadGitmodulesIdentity(
+      repositoryRoot.path,
+      inventory.gitmodulesObjectId,
+      gitCommand
+    )
   );
   return Object.freeze({
     repos: repositoriesFromSnapshot(inventory.revisions, gitmodules),
