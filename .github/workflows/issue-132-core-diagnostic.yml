@@ -1,0 +1,53 @@
+name: Issue 132 per-file core diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/issue-132-core-diagnostic.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-132-stack-lock-dirty-state
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+      - run: git submodule update --init zero
+      - run: bun install --frozen-lockfile
+      - name: Run every core service test file in isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          summary=.issue-132-core-diagnostic.log
+          : > "$summary"
+          failures=0
+          for file in packages/core/src/domain/services/*.test.ts; do
+            log="/tmp/$(basename "$file").log"
+            set +e
+            timeout 240s bun test "$file" >"$log" 2>&1
+            status=$?
+            set -e
+            if [ "$status" -eq 0 ]; then
+              printf 'PASS %s\n' "$file" >> "$summary"
+            else
+              failures=$((failures + 1))
+              printf '\nFAIL %s status=%s\n' "$file" "$status" >> "$summary"
+              tail -n 120 "$log" | sed -E 's#/home/runner/work/[^ ]+#<runner-path>#g' >> "$summary"
+            fi
+          done
+          printf '\nFAILURE_COUNT=%s\n' "$failures" >> "$summary"
+          cat "$summary"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add "$summary"
+          git commit -m "chore(issue-132): record isolated core diagnostics"
+          git push origin HEAD:feat/issue-132-stack-lock-dirty-state
