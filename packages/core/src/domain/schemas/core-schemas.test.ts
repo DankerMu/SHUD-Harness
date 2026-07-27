@@ -534,23 +534,19 @@ function validStackLock() {
     repos: {
       SHUD: {
         commit: "9b55b0cb9b55b0cb9b55b0cb9b55b0cb9b55b0cb",
-        branch: "master",
-        dirty: false
+        branch: "master"
       },
       rSHUD: {
         commit: "d162db3d162db3d162db3d162db3d162db3d162d",
-        branch: "master",
-        dirty: false
+        branch: "master"
       },
       AutoSHUD: {
         commit: "1cbec6f1cbec6f1cbec6f1cbec6f1cbec6f1cbe",
-        branch: "master",
-        dirty: false
+        branch: "master"
       },
       zero: {
         commit: "13e25c116c62411e6ee8a0ad67a6c53dc7c376c6",
-        branch: "main",
-        dirty: false
+        branch: "main"
       }
     },
     runtime: {

@@ -43,7 +43,6 @@ const GIT_NO_LAZY_FETCH_GLOBAL_ARG = "--no-lazy-fetch";
 const GITLINK_PATTERN = /^160000 commit ([0-9A-Fa-f]{40})\t([^\0]+)$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
-const DETACHED_BRANCH_LABEL = "detached";
 
 export type StackLockRepositoryName = (typeof STACK_LOCK_REPOSITORY_NAMES)[number];
 export type StackLockDegradedReason = typeof STACK_LOCK_RENV_MISSING;
@@ -414,19 +413,8 @@ async function collectHeadAuthority(
       gitCommand
     )
   );
-  assertExpectedGitmodules(gitmodules);
-  const repos = await withRepositoryRootAuthority(
-    repositoryRoot,
-    async () =>
-      await collectRepositoryRevisions(
-        repositoryRoot.path,
-        inventory.revisions,
-        gitmodules.declarations,
-        gitCommand
-      )
-  );
   return Object.freeze({
-    repos,
+    repos: repositoriesFromSnapshot(inventory.revisions, gitmodules),
     gitmodules
   });
 }
@@ -515,119 +503,16 @@ async function collectHeadAuthorityInventory(
   });
 }
 
-async function collectRepositoryRevisions(
-  repositoryRoot: string,
+function repositoriesFromSnapshot(
   revisions: Readonly<Record<StackLockRepositoryName, string>>,
-  declarations: Readonly<Record<StackLockRepositoryName, GitmoduleDeclaration>>,
-  gitCommand: StackLockGitCommand
-): Promise<StackLock["repos"]> {
-  const resolved = Object.freeze(
-    await Promise.all(
-      STACK_LOCK_REPOSITORY_NAMES.map(async (name) => {
-        const declaration = declarations[name];
-        const repositoryPath = join(repositoryRoot, declaration.path);
-        const [commit, branch, dirty] = await Promise.all([
-          collectRepositoryHeadCommit(repositoryPath, gitCommand),
-          collectRepositoryHeadBranch(repositoryPath, gitCommand),
-          collectRepositoryDirty(repositoryPath, gitCommand)
-        ]);
-        return [name, Object.freeze({ commit, branch, dirty })] as const;
-      })
-    )
-  );
-  const snapshot = Object.fromEntries(
-    resolved.map(([name, identity]) => {
-      const declaredCommit = revisions[name];
-      if (identity.commit !== declaredCommit) {
-        throw new StackLockCollectionError("collection_contract_invalid");
-      }
-      return [name, identity];
-    })
-  );
-  return Object.freeze(snapshot) as StackLock["repos"];
-}
-
-async function collectRepositoryHeadCommit(
-  repositoryRoot: string,
-  gitCommand: StackLockGitCommand
-): Promise<string> {
-  const rawResult = await gitCommand({
-    cwd: repositoryRoot,
-    args: Object.freeze([GIT_NO_LAZY_FETCH_GLOBAL_ARG, "rev-parse", "HEAD"])
-  });
-  const stdoutBytes = boundedGitOutputBytes(asRecord(rawResult)?.stdout, MAX_GIT_OUTPUT_BYTES);
-  let stdout: string;
-  try {
-    stdout = UTF8_DECODER.decode(stdoutBytes);
-  } catch {
-    throw new StackLockCollectionError("git_output_invalid");
-  }
-  if (!stdout.endsWith("\n")) {
-    throw new StackLockCollectionError("git_output_invalid");
-  }
-  const commit = stdout.trim();
-  if (!/^[0-9A-Fa-f]{40}$/u.test(commit)) {
-    throw new StackLockCollectionError("git_output_invalid");
-  }
-  return commit.toLowerCase();
-}
-
-async function collectRepositoryHeadBranch(
-  repositoryRoot: string,
-  gitCommand: StackLockGitCommand
-): Promise<string> {
-  const rawResult = await gitCommand({
-    cwd: repositoryRoot,
-    args: Object.freeze([
-      GIT_NO_LAZY_FETCH_GLOBAL_ARG,
-      "rev-parse",
-      "--abbrev-ref",
-      "HEAD"
+  gitmodules: GitmodulesIdentity
+): StackLock["repos"] {
+  return Object.freeze(Object.fromEntries(
+    STACK_LOCK_REPOSITORY_NAMES.map((name) => [
+      name,
+      Object.freeze({ commit: revisions[name], branch: gitmodules.declarations[name].branch })
     ])
-  });
-  const stdoutBytes = boundedGitOutputBytes(asRecord(rawResult)?.stdout, MAX_GIT_OUTPUT_BYTES);
-  let stdout: string;
-  try {
-    stdout = UTF8_DECODER.decode(stdoutBytes);
-  } catch {
-    throw new StackLockCollectionError("git_output_invalid");
-  }
-  if (!stdout.endsWith("\n")) {
-    throw new StackLockCollectionError("git_output_invalid");
-  }
-  const branch = stdout.slice(0, -1).replace(/\r$/u, "");
-  if (branch === "HEAD") return DETACHED_BRANCH_LABEL;
-  if (branch.includes("\0") || branch.includes("\n")) {
-    throw new StackLockCollectionError("git_output_invalid");
-  }
-  if (branch.length === 0) {
-    throw new StackLockCollectionError("git_output_invalid");
-  }
-  return branch;
-}
-
-async function collectRepositoryDirty(
-  repositoryRoot: string,
-  gitCommand: StackLockGitCommand
-): Promise<boolean> {
-  const rawResult = await gitCommand({
-    cwd: repositoryRoot,
-    args: Object.freeze([
-      GIT_NO_LAZY_FETCH_GLOBAL_ARG,
-      "status",
-      "--porcelain=v1",
-      "--untracked-files=all",
-      "--"
-    ])
-  });
-  const stdoutBytes = boundedGitOutputBytes(asRecord(rawResult)?.stdout, MAX_GIT_OUTPUT_BYTES);
-  let stdout: string;
-  try {
-    stdout = UTF8_DECODER.decode(stdoutBytes);
-  } catch {
-    throw new StackLockCollectionError("git_output_invalid");
-  }
-  return stdout.length > 0;
+  )) as StackLock["repos"];
 }
 
 function isStackLockRepositoryName(value: string): value is StackLockRepositoryName {
