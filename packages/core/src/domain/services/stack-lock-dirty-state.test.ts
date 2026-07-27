@@ -646,6 +646,7 @@ exec ${shellQuote(realGit)} "$@"
   test("does not execute a filter injected after audit and before dirty observation", async () => {
     const fixture = await createFixture();
     const repository = fixture.repositories.SHUD;
+    const originalGitDirectory = git(repository, ["rev-parse", "--absolute-git-dir"]).trim();
     const marker = join(fixture.container, "post-audit-filter-ran");
     const helper = join(fixture.container, "post-audit-filter-helper");
     await writeFile(helper, `#!/bin/sh\n: > ${JSON.stringify(marker)}\ncat\n`);
@@ -657,6 +658,7 @@ exec ${shellQuote(realGit)} "$@"
     let injected = false;
     let helperRanDuringStatus = false;
     let shudStatusReads = 0;
+    let firstStatusGitDirectory: string | undefined;
     const gitCommand: StackLockGitCommand = async (input) => {
       const result = runFixtureGitCommand(input);
       if (
@@ -664,6 +666,7 @@ exec ${shellQuote(realGit)} "$@"
         isStatusCommand(input.args) &&
         ++shudStatusReads === 1
       ) {
+        firstStatusGitDirectory = input.args.find((argument) => argument.startsWith("--git-dir="));
         try {
           await access(marker);
           helperRanDuringStatus = true;
@@ -690,6 +693,8 @@ exec ${shellQuote(realGit)} "$@"
 
     expect(injected).toBe(true);
     expect(shudStatusReads).toBeGreaterThan(0);
+    expect(firstStatusGitDirectory).toBeDefined();
+    expect(firstStatusGitDirectory).not.toBe(`--git-dir=${originalGitDirectory}`);
     expect(collection.repos.SHUD.dirty).toBe(true);
     expect(helperRanDuringStatus).toBe(false);
     await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
