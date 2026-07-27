@@ -1,4 +1,4 @@
-name: Issue 132 per-file core diagnostic
+name: Issue 132 aggregate core diagnostic
 
 on:
   pull_request:
@@ -23,31 +23,25 @@ jobs:
           bun-version: 1.2.19
       - run: git submodule update --init zero
       - run: bun install --frozen-lockfile
-      - name: Run every core service test file in isolation
+      - name: Capture aggregate core-services failure
         shell: bash
         run: |
           set -euo pipefail
+          set +e
+          bun run test:core-services >/tmp/core-services.log 2>&1
+          status=$?
+          set -e
           summary=.issue-132-core-diagnostic.log
-          : > "$summary"
-          failures=0
-          for file in packages/core/src/domain/services/*.test.ts; do
-            log="/tmp/$(basename "$file").log"
-            set +e
-            timeout 240s bun test "$file" >"$log" 2>&1
-            status=$?
-            set -e
-            if [ "$status" -eq 0 ]; then
-              printf 'PASS %s\n' "$file" >> "$summary"
-            else
-              failures=$((failures + 1))
-              printf '\nFAIL %s status=%s\n' "$file" "$status" >> "$summary"
-              tail -n 120 "$log" | sed -E 's#/home/runner/work/[^ ]+#<runner-path>#g' >> "$summary"
-            fi
-          done
-          printf '\nFAILURE_COUNT=%s\n' "$failures" >> "$summary"
+          {
+            printf 'AGGREGATE_STATUS=%s\n\n' "$status"
+            printf '%s\n' '=== FAILURE SIGNALS ==='
+            grep -nE '(^|[^A-Za-z])(FAIL|fail|Error|error|Expected|Received|timed out|timeout|panic)([^A-Za-z]|$)' /tmp/core-services.log | tail -n 200 || true
+            printf '\n%s\n' '=== LOG TAIL ==='
+            tail -n 300 /tmp/core-services.log
+          } | sed -E 's#/home/runner/work/[^ ]+#<runner-path>#g' > "$summary"
           cat "$summary"
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add "$summary"
-          git commit -m "chore(issue-132): record isolated core diagnostics"
+          git commit -m "chore(issue-132): record aggregate core failure"
           git push origin HEAD:feat/issue-132-stack-lock-dirty-state
