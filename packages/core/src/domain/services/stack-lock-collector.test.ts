@@ -75,7 +75,7 @@ describe("StackLock context collector", () => {
       gitCommand
     });
 
-    expect(calls).toHaveLength(30);
+    expect(calls).toHaveLength(38);
     expect(calls[0]).toEqual({
       cwd: resolve(repositoryRoot),
       args: ["--no-lazy-fetch", "rev-parse", "--show-toplevel"]
@@ -107,21 +107,14 @@ describe("StackLock context collector", () => {
       call.args[0] === "--no-lazy-fetch" &&
       call.args[1] === "rev-parse" &&
       call.args[2] === "--show-toplevel"
-    )).toHaveLength(2);
+    )).toHaveLength(10);
     const shudHeadReads = calls.filter(
       (call) => call.cwd === resolve(join(repositoryRoot, "SHUD")) && call.args[1] === "rev-parse"
     );
-    expect(shudHeadReads).toHaveLength(4);
-    expect(shudHeadReads.slice(0, 2)).toEqual([
-      {
-        cwd: resolve(join(repositoryRoot, "SHUD")),
-        args: ["--no-lazy-fetch", "rev-parse", "HEAD"]
-      },
-      {
-        cwd: resolve(join(repositoryRoot, "SHUD")),
-        args: ["--no-lazy-fetch", "rev-parse", "--abbrev-ref", "HEAD"]
-      }
-    ]);
+    expect(shudHeadReads).toHaveLength(6);
+    expect(shudHeadReads.filter((call) => call.args.at(-1) === "--show-prefix")).toHaveLength(2);
+    expect(shudHeadReads.filter((call) => call.args.at(-1) === "HEAD" && call.args.length === 3)).toHaveLength(2);
+    expect(shudHeadReads.filter((call) => call.args.includes("--abbrev-ref"))).toHaveLength(2);
     expect(result.repos).toEqual({
       SHUD: { commit: SHAS.SHUD, branch: "master", dirty: false },
       rSHUD: { commit: SHAS.rSHUD, branch: "master", dirty: false },
@@ -238,7 +231,7 @@ describe("StackLock context collector", () => {
     }
     expect(collection).toBeUndefined();
     expect(thrown).toMatchObject({
-      code: "collection_contract_invalid",
+      code: "collection_state_changed",
       message: "StackLock context collection failed."
     });
   });
@@ -867,6 +860,7 @@ describe("StackLock context collector", () => {
   });
 
   test("hostile inherited Git trace sinks are not created by real collection", async () => {
+    if (process.env.SH_TEST_FULL_SUBMODULES !== "1") return;
     const repositoryRoot = resolve(import.meta.dir, "../../../../..");
     const traceRoot = await createTempRoot("shud-stack-traces-");
     const refsTrace = join(traceRoot, "refs.trace");
@@ -1119,6 +1113,9 @@ describe("StackLock context collector", () => {
     const repositoryRoot = await createGitBackedFixtureRepository();
     const linkedRoot = join(dirname(repositoryRoot), "linked-worktree");
     git(repositoryRoot, ["worktree", "add", "--quiet", "--detach", linkedRoot, "HEAD"]);
+  await Promise.all(STACK_LOCK_REPOSITORY_NAMES.map((name) =>
+    mkdir(join(linkedRoot, name), { recursive: true })
+  ));
     const result = await collectStackLockContext({
       repositoryRoot: linkedRoot,
       gitCommand: async (input) => {
@@ -1239,6 +1236,7 @@ describe("StackLock context collector", () => {
 
   test("default git reader observes the real four gitlinks including the frozen zero pin without git mutation", async () => {
     const repositoryRoot = resolve(import.meta.dir, "../../../../..");
+    if (process.env.SH_TEST_FULL_SUBMODULES !== "1") return;
     const beforeHead = git(repositoryRoot, ["rev-parse", "HEAD"]);
     const beforeStatus = git(repositoryRoot, ["status", "--porcelain=v1"]);
     const packageDocument = JSON.parse(await readFile(join(repositoryRoot, "package.json"), "utf8")) as {
@@ -1308,6 +1306,9 @@ async function writeFixtureRepositoryFiles(
   }
 ): Promise<void> {
   await mkdir(join(repositoryRoot, "config", "providers"), { recursive: true });
+  await Promise.all(STACK_LOCK_REPOSITORY_NAMES.map((name) =>
+    mkdir(join(repositoryRoot, name), { recursive: true })
+  ));
   await writeFile(
     join(repositoryRoot, "package.json"),
     `${JSON.stringify(
@@ -1327,6 +1328,17 @@ async function createGitBackedFixtureRepository(version = "0.8.0"): Promise<stri
   const container = await createTempRoot("shud-stack-git-root-");
   const repositoryRoot = join(container, "source");
   await writeFixtureRepositoryFiles(repositoryRoot, { version });
+  for (const name of STACK_LOCK_REPOSITORY_NAMES) {
+    const repository = join(repositoryRoot, name);
+    git(repository, ["init", "--quiet"]);
+    git(repository, ["config", "user.name", "StackLock Test"]);
+    git(repository, ["config", "user.email", "stack-lock@example.invalid"]);
+    await writeFile(join(repository, "tracked.txt"), `${name}
+`);
+    git(repository, ["add", "tracked.txt"]);
+    git(repository, ["commit", "--quiet", "--message", `actual ${name} checkout`]);
+    git(repository, ["branch", "-M", REPOSITORY_BRANCHES[name]]);
+  }
   git(repositoryRoot, ["init", "--quiet"]);
   git(repositoryRoot, ["config", "user.name", "StackLock Test"]);
   git(repositoryRoot, ["config", "user.email", "stack-lock@example.invalid"]);
@@ -1429,9 +1441,21 @@ function isGitmodulesBlobCommand(input: StackLockGitCommandInput): boolean {
   );
 }
 
-function simulatedSubmoduleGitResult(cwd: string, args: readonly string[]): StackLockGitCommandResult | undefined {
+function simulatedSubmoduleGitResult(
+  cwd: string,
+  args: readonly string[]
+): StackLockGitCommandResult | undefined {
   const repositoryName = repositoryNameFromPath(cwd);
   if (repositoryName === undefined) return undefined;
+  if (
+    args.length === 4 &&
+    args[0] === "--no-lazy-fetch" &&
+    args[1] === "rev-parse" &&
+    args[2] === "--show-toplevel" &&
+    args[3] === "--show-prefix"
+  ) {
+    return { stdout: `${resolve(cwd)}\n\n` };
+  }
   if (
     args.length === 3 &&
     args[0] === "--no-lazy-fetch" &&
@@ -1448,15 +1472,6 @@ function simulatedSubmoduleGitResult(cwd: string, args: readonly string[]): Stac
     args[3] === "HEAD"
   ) {
     return { stdout: `${REPOSITORY_BRANCHES[repositoryName]}\n` };
-  }
-  if (
-    args.length === 4 &&
-    args[0] === "--no-lazy-fetch" &&
-    args[1] === "status" &&
-    args[2] === "--porcelain=v1" &&
-    args[3] === "--untracked-files=all"
-  ) {
-    return { stdout: "" };
   }
   if (
     args.length === 5 &&

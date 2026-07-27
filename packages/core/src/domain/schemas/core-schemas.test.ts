@@ -713,3 +713,36 @@ function issuePaths(result: {
   if (result.success) return [];
   return result.error.issues.map((issue) => issue.path.join("."));
 }
+
+
+describe("StackLock repository dirty state", () => {
+  test("requires a boolean dirty field for every repository revision", () => {
+    const clean = validStackLock();
+    expect(StackLockSchema.safeParse(clean).success).toBe(true);
+    expect(StackLockSchema.safeParse({
+      ...clean,
+      repos: {
+        ...clean.repos,
+        SHUD: { ...clean.repos.SHUD, dirty: true }
+      }
+    }).success).toBe(true);
+
+    const { dirty: _missing, ...withoutDirty } = clean.repos.SHUD;
+    const missing = StackLockSchema.safeParse({
+      ...clean,
+      repos: { ...clean.repos, SHUD: withoutDirty }
+    });
+    expect(missing.success).toBe(false);
+    expect(issuePaths(missing)).toContain("repos.SHUD.dirty");
+
+    const wrongType = StackLockSchema.safeParse({
+      ...clean,
+      repos: {
+        ...clean.repos,
+        zero: { ...clean.repos.zero, dirty: "false" }
+      }
+    });
+    expect(wrongType.success).toBe(false);
+    expect(issuePaths(wrongType)).toContain("repos.zero.dirty");
+  });
+});
