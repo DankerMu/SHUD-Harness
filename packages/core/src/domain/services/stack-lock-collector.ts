@@ -148,7 +148,15 @@ async function collectStackLockContextWithHasher(
   const gitCommand = options.gitCommand ?? await createDefaultGitCommand();
   const repositoryRoot = await resolveRepositoryRoot(options.repositoryRoot);
   const authorityOwner = new RepositoryCheckoutAuthorityOwner(testHooks.closeCheckoutDirectory);
-  const context: StackLockCollectorContext = Object.freeze({ authorityOwner, testHooks });
+  const temporaryDirectoryAuthority = resolveCollectionTemporaryDirectoryAuthority(
+    repositoryRoot,
+    testHooks.createTemporaryDirectory
+  );
+  const context: StackLockCollectorContext = Object.freeze({
+    authorityOwner,
+    temporaryDirectoryAuthority,
+    testHooks
+  });
   let firstCheap: StackLockCheapSnapshot | undefined;
   let secondCheap: StackLockCheapSnapshot | undefined;
   let result: StackLockCollectionResult | undefined;
@@ -195,7 +203,7 @@ async function collectStackLockContextWithHasher(
     }
 
     result = freezeCollectionResult(content, rPackagesLock.degraded);
-    await assertPublicationSnapshot(repositoryRoot, second, gitCommand);
+    await assertPublicationSnapshot(repositoryRoot, second, gitCommand, context);
   } catch (error) {
     primaryFailed = true;
     primaryError = error;
@@ -217,10 +225,13 @@ interface StackLockCollectorTestHooks {
   ) => Promise<void>;
   /** Deterministic TOCTOU seam after recursive config/index audit and before dirty observation. */
   readonly afterRepositoryDirtyAudit?: (repositoryPath: string) => Promise<void>;
+  /** Deterministic oracle proving protected temporary parents reject before creation. */
+  readonly createTemporaryDirectory?: typeof mkdtempSync;
 }
 
 interface StackLockCollectorContext {
   readonly authorityOwner: RepositoryCheckoutAuthorityOwner;
+  readonly temporaryDirectoryAuthority: CollectionTemporaryDirectoryAuthority;
   readonly testHooks: StackLockCollectorTestHooks;
 }
 
@@ -253,6 +264,12 @@ interface RepositoryRootIdentity {
 interface RepositoryRootAuthority {
   readonly path: string;
   readonly identity: RepositoryRootIdentity;
+}
+
+interface CollectionTemporaryDirectoryAuthority {
+  readonly parent: string;
+  readonly identity: RepositoryRootIdentity;
+  readonly create: typeof mkdtempSync;
 }
 
 interface RepositoryCheckoutAuthority {
@@ -358,10 +375,11 @@ function snapshotsMatch(
 async function assertPublicationSnapshot(
   repositoryRoot: RepositoryRootAuthority,
   snapshot: StackLockCollectionSnapshot,
-  gitCommand: StackLockGitCommand
+  gitCommand: StackLockGitCommand,
+  context: StackLockCollectorContext
 ): Promise<void> {
-  const firstSweep = await collectPublicationSweep(repositoryRoot, snapshot, gitCommand);
-  const secondSweep = await collectPublicationSweep(repositoryRoot, snapshot, gitCommand);
+  const firstSweep = await collectPublicationSweep(repositoryRoot, snapshot, gitCommand, context);
+  const secondSweep = await collectPublicationSweep(repositoryRoot, snapshot, gitCommand, context);
   if (
     JSON.stringify(firstSweep) !== JSON.stringify(snapshot.repos) ||
     JSON.stringify(secondSweep) !== JSON.stringify(snapshot.repos) ||
@@ -379,7 +397,8 @@ async function assertPublicationSnapshot(
 async function collectPublicationSweep(
   repositoryRoot: RepositoryRootAuthority,
   snapshot: StackLockCollectionSnapshot,
-  gitCommand: StackLockGitCommand
+  gitCommand: StackLockGitCommand,
+  context: StackLockCollectorContext
 ): Promise<StackLock["repos"]> {
   await assertCurrentRepositoryRoot(repositoryRoot);
   const repos = {} as StackLock["repos"];
@@ -387,7 +406,7 @@ async function collectPublicationSweep(
     const authority = snapshot.repositoryCheckouts[name];
     repos[name] = await withRepositoryCheckoutAuthority(
       authority,
-      async () => await collectStableRepositoryRevision(authority, gitCommand)
+      async () => await collectStableRepositoryRevision(authority, gitCommand, context)
     );
   }
   await assertCurrentRepositoryRoot(repositoryRoot);
@@ -415,6 +434,43 @@ async function resolveRepositoryRoot(input: string): Promise<RepositoryRootAutho
     return Object.freeze({ path: physicalPath, identity: secondIdentity });
   } catch {
     throw new StackLockCollectionError("repository_root_invalid");
+  }
+}
+
+function resolveCollectionTemporaryDirectoryAuthority(
+  repositoryRoot: RepositoryRootAuthority,
+  create: typeof mkdtempSync | undefined
+): CollectionTemporaryDirectoryAuthority {
+  try {
+    const configuredParent = tmpdir();
+    if (
+      configuredParent.length === 0 ||
+      configuredParent.includes("\0") ||
+      configuredParent.includes("\n") ||
+      configuredParent.includes("\r")
+    ) {
+      throw new Error("invalid temporary parent");
+    }
+    const physicalParent = realpathSync(configuredParent);
+    const parentIdentity = observeRepositoryRootIdentitySync(physicalParent);
+    const relativeFromCollectionRoot = relative(repositoryRoot.path, physicalParent);
+    if (
+      relativeFromCollectionRoot === "" ||
+      (
+        !isAbsolute(relativeFromCollectionRoot) &&
+        relativeFromCollectionRoot !== ".." &&
+        !relativeFromCollectionRoot.startsWith(`..${sep}`)
+      )
+    ) {
+      throw new Error("temporary parent is inside protected collection root");
+    }
+    return Object.freeze({
+      parent: physicalParent,
+      identity: parentIdentity,
+      create: create ?? mkdtempSync
+    });
+  } catch {
+    throw new StackLockCollectionError("collection_contract_invalid");
   }
 }
 
@@ -694,7 +750,7 @@ async function collectRepositoryRevisions(
     await context.testHooks.afterCheckoutAuthorityAcquired?.(name, authority);
     const revision = await withRepositoryCheckoutAuthority(authority, async () => {
       await assertRepositoryGitTopLevel(authority, gitCommand);
-      return await collectStableRepositoryRevision(authority, gitCommand, context.testHooks);
+      return await collectStableRepositoryRevision(authority, gitCommand, context);
     });
     resolved.push([name, revision, authority] as const);
   }
@@ -711,18 +767,18 @@ async function collectRepositoryRevisions(
 async function collectStableRepositoryRevision(
   authority: RepositoryCheckoutAuthority,
   gitCommand: StackLockGitCommand,
-  testHooks: StackLockCollectorTestHooks = {}
+  context: StackLockCollectorContext
 ): Promise<StackLock["repos"][StackLockRepositoryName]> {
   const firstCommit = await collectRepositoryHeadCommit(authority, gitCommand);
   const firstBranch = await collectRepositoryHeadBranch(authority, gitCommand);
-  const dirty = await collectRepositoryDirty(authority, firstCommit, gitCommand, testHooks);
+  const dirty = await collectRepositoryDirty(authority, firstCommit, gitCommand, context);
   const secondCommit = await collectRepositoryHeadCommit(authority, gitCommand);
   const secondBranch = await collectRepositoryHeadBranch(authority, gitCommand);
   const secondDirty = await collectRepositoryDirty(
     authority,
     secondCommit,
     gitCommand,
-    testHooks
+    context
   );
   if (
     firstCommit !== secondCommit ||
@@ -940,7 +996,7 @@ async function collectRepositoryDirty(
   authority: RepositoryCheckoutAuthority,
   headCommit: string,
   gitCommand: StackLockGitCommand,
-  testHooks: StackLockCollectorTestHooks
+  context: StackLockCollectorContext
 ): Promise<boolean> {
   const owner = new RepositoryCheckoutAuthorityOwner(undefined);
   let result: boolean | undefined;
@@ -950,9 +1006,10 @@ async function collectRepositoryDirty(
       authority,
       headCommit,
       gitCommand,
+      context.temporaryDirectoryAuthority,
       owner
     );
-    await testHooks.afterRepositoryDirtyAudit?.(authority.path);
+    await context.testHooks.afterRepositoryDirtyAudit?.(authority.path);
     result = await observeAuditedRepositoryDirty(audit, gitCommand);
   } catch (error) {
     primaryError = error;
@@ -984,6 +1041,7 @@ interface CapturedRepositoryIndex {
 
 interface FrozenStatusConfig {
   readonly booleans: Readonly<Record<string, boolean>>;
+  readonly checkStat?: "default" | "minimal";
   readonly autocrlf?: "true" | "false" | "input";
   readonly eol?: "lf" | "crlf" | "native";
   readonly excludesFile?: CapturedGitFile;
@@ -992,6 +1050,7 @@ interface FrozenStatusConfig {
 
 interface AuditedDirtyRepository {
   readonly authority: RepositoryCheckoutAuthority;
+  readonly temporaryDirectoryAuthority: CollectionTemporaryDirectoryAuthority;
   readonly headCommit: string;
   readonly paths: RepositoryGitAdministrativePaths;
   readonly statusConfig: FrozenStatusConfig;
@@ -1006,13 +1065,15 @@ type AuditedNestedRepository = Readonly<{
   path: string;
 } & (
   | { state: "initialized"; repository: AuditedDirtyRepository }
-  | { state: "uninitialized"; identity: RepositoryRootIdentity }
+  | { state: "deinitialized"; identity: RepositoryRootIdentity }
+  | { state: "absent" }
 )>;
 
 async function auditRepositoryForDirtyObservation(
   authority: RepositoryCheckoutAuthority,
   headCommit: string,
   gitCommand: StackLockGitCommand,
+  temporaryDirectoryAuthority: CollectionTemporaryDirectoryAuthority,
   owner: RepositoryCheckoutAuthorityOwner
 ): Promise<AuditedDirtyRepository> {
   const paths = await resolveRepositoryGitAdministrativePaths(authority);
@@ -1044,10 +1105,12 @@ async function auditRepositoryForDirtyObservation(
     : resolveSafeStatusConfigPath(authority.path, statusConfig.attributesPath);
   const observationBase: AuditedDirtyRepository = Object.freeze({
     authority,
+    temporaryDirectoryAuthority,
     headCommit,
     paths,
     statusConfig: Object.freeze({
       booleans: Object.freeze(statusConfig.booleans),
+      ...(statusConfig.checkStat === undefined ? {} : { checkStat: statusConfig.checkStat }),
       ...(statusConfig.autocrlf === undefined ? {} : { autocrlf: statusConfig.autocrlf }),
       ...(statusConfig.eol === undefined ? {} : { eol: statusConfig.eol }),
       ...(excludesPath === undefined ? {} : {
@@ -1084,11 +1147,17 @@ async function auditRepositoryForDirtyObservation(
       gitCommand,
       owner
     );
-    if (nestedObservation.state === "uninitialized") {
+    if (nestedObservation.state === "absent") {
       nested.push(Object.freeze({
         indexCommit: gitlink.commit,
         path: nestedObservation.path,
-        state: "uninitialized",
+        state: "absent"
+      }));
+    } else if (nestedObservation.state === "deinitialized") {
+      nested.push(Object.freeze({
+        indexCommit: gitlink.commit,
+        path: nestedObservation.path,
+        state: "deinitialized",
         identity: nestedObservation.identity
       }));
     } else {
@@ -1101,6 +1170,7 @@ async function auditRepositoryForDirtyObservation(
           nestedObservation.authority,
           nestedHead,
           gitCommand,
+          temporaryDirectoryAuthority,
           owner
         )
       }));
@@ -1114,6 +1184,7 @@ async function auditRepositoryForDirtyObservation(
 
 interface MutableFrozenStatusConfig {
   readonly booleans: Record<string, boolean>;
+  checkStat?: "default" | "minimal";
   autocrlf?: "true" | "false" | "input";
   eol?: "lf" | "crlf" | "native";
   excludesPath?: string;
@@ -1133,12 +1204,25 @@ function parseAndAuditRepositoryConfig(
     if (/^filter\..+\.(clean|process)$/u.test(key)) {
       throw new StackLockCollectionError("collection_contract_invalid");
     }
-    if (["core.filemode", "core.symlinks", "core.ignorecase", "core.precomposeunicode"]
+    if ([
+      "core.filemode",
+      "core.symlinks",
+      "core.ignorecase",
+      "core.precomposeunicode",
+      "core.trustctime",
+      "core.ignorestat"
+    ]
       .includes(key)) {
       statusConfig.booleans[key] = parseGitBoolean(
         separator === -1 ? undefined : value,
         "git_output_invalid"
       );
+    } else if (key === "core.checkstat") {
+      const normalizedValue = separator === -1 ? "" : value.toLowerCase();
+      if (!(normalizedValue === "default" || normalizedValue === "minimal")) {
+        throw new StackLockCollectionError("git_output_invalid");
+      }
+      statusConfig.checkStat = normalizedValue;
     } else if (key === "core.autocrlf") {
       const normalizedValue = separator === -1 ? "true" : value.toLowerCase();
       if (!["true", "false", "input", "yes", "no", "on", "off", "1", "0"]
@@ -1241,8 +1325,27 @@ function parseIndexGitlinks(index: string): readonly Readonly<{
 
 type NestedRepositoryState = Readonly<
   | { state: "initialized"; path: string; authority: RepositoryCheckoutAuthority }
-  | { state: "uninitialized"; path: string; identity: RepositoryRootIdentity }
+  | { state: "deinitialized"; path: string; identity: RepositoryRootIdentity }
+  | { state: "absent"; path: string }
 >;
+
+type OptionalNestedDirectoryObservation = Readonly<
+  | { state: "absent" }
+  | { state: "present"; identity: RepositoryRootIdentity }
+>;
+
+async function observeOptionalNestedDirectory(
+  path: string
+): Promise<OptionalNestedDirectoryObservation> {
+  try {
+    return Object.freeze({ state: "present", identity: await observeRepositoryRootIdentity(path) });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return Object.freeze({ state: "absent" });
+    }
+    throw error;
+  }
+}
 
 async function observeNestedRepositoryState(
   parent: RepositoryCheckoutAuthority,
@@ -1258,15 +1361,30 @@ async function observeNestedRepositoryState(
       access: "read"
     });
     const path = join(parent.path, resolvedNestedPath.normalizedPath);
+    const pathBefore = await observeOptionalNestedDirectory(path);
+    if (pathBefore.state === "absent") {
+      const pathAfter = await observeOptionalNestedDirectory(path);
+      if (pathAfter.state !== "absent") {
+        throw new StackLockCollectionError("collection_state_changed");
+      }
+      return Object.freeze({ state: "absent", path });
+    }
+    let dotGitPresent = true;
     try {
       await lstat(join(path, ".git"));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      return Object.freeze({
-        state: "uninitialized",
-        path,
-        identity: await observeRepositoryRootIdentity(path)
-      });
+      dotGitPresent = false;
+    }
+    const pathAfter = await observeOptionalNestedDirectory(path);
+    if (
+      pathAfter.state !== "present" ||
+      !sameRepositoryRootIdentity(pathBefore.identity, pathAfter.identity)
+    ) {
+      throw new StackLockCollectionError("collection_state_changed");
+    }
+    if (!dotGitPresent) {
+      return Object.freeze({ state: "deinitialized", path, identity: pathAfter.identity });
     }
     const authority = await resolveRepositoryCheckoutAuthority(
       parent.path,
@@ -1289,8 +1407,12 @@ async function observeAuditedRepositoryDirty(
   const stdout = await collectRepositoryStatusWithoutHelpers(audit, gitCommand);
   if (stdout.length > 0) return true;
   for (const nested of audit.nested) {
-    if (nested.state === "uninitialized") {
-      await assertNestedRepositoryRemainsUninitialized(nested);
+    if (nested.state === "absent") {
+      await assertNestedRepositoryRemainsAbsent(nested);
+      return true;
+    }
+    if (nested.state === "deinitialized") {
+      await assertNestedRepositoryRemainsDeinitialized(nested);
       continue;
     }
     const currentHead = await collectRepositoryHeadCommit(nested.repository.authority, gitCommand);
@@ -1300,8 +1422,19 @@ async function observeAuditedRepositoryDirty(
   return false;
 }
 
-async function assertNestedRepositoryRemainsUninitialized(
-  nested: Extract<AuditedNestedRepository, { state: "uninitialized" }>
+async function assertNestedRepositoryRemainsAbsent(
+  nested: Extract<AuditedNestedRepository, { state: "absent" }>
+): Promise<void> {
+  try {
+    const current = await observeOptionalNestedDirectory(nested.path);
+    if (current.state !== "absent") throw new Error("nested path appeared");
+  } catch {
+    throw new StackLockCollectionError("collection_state_changed");
+  }
+}
+
+async function assertNestedRepositoryRemainsDeinitialized(
+  nested: Extract<AuditedNestedRepository, { state: "deinitialized" }>
 ): Promise<void> {
   try {
     const current = await observeRepositoryRootIdentity(nested.path);
@@ -1359,7 +1492,7 @@ async function collectRepositoryGitOutputWithoutHelpers(
   let stdout: string | undefined;
   let primaryError: unknown;
   try {
-    frozenDirectory = createExternalFrozenGitDirectory(audit.authority);
+    frozenDirectory = createExternalFrozenGitDirectory(audit.temporaryDirectoryAuthority);
     try {
       frozenIdentity = observeRepositoryRootIdentitySync(frozenDirectory);
     } catch {
@@ -1439,36 +1572,16 @@ async function collectRepositoryGitOutputWithoutHelpers(
 }
 
 function createExternalFrozenGitDirectory(
-  authority: RepositoryCheckoutAuthority
+  authority: CollectionTemporaryDirectoryAuthority
 ): string {
   try {
-    const configuredParent = tmpdir();
-    if (
-      configuredParent.length === 0 ||
-      configuredParent.includes("\0") ||
-      configuredParent.includes("\n") ||
-      configuredParent.includes("\r")
-    ) {
-      throw new Error("invalid temporary parent");
+    const current = observeRepositoryRootIdentitySync(authority.parent);
+    if (!sameRepositoryRootIdentity(current, authority.identity)) {
+      throw new StackLockCollectionError("collection_state_changed");
     }
-    const physicalParent = realpathSync(configuredParent);
-    const parentStat = lstatSync(physicalParent, { bigint: true });
-    if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) {
-      throw new Error("unsafe temporary parent");
-    }
-    const relativeFromCheckout = relative(authority.path, physicalParent);
-    if (
-      relativeFromCheckout === "" ||
-      (
-        !isAbsolute(relativeFromCheckout) &&
-        relativeFromCheckout !== ".." &&
-        !relativeFromCheckout.startsWith(`..${sep}`)
-      )
-    ) {
-      throw new Error("temporary parent is inside checkout");
-    }
-    return mkdtempSync(join(physicalParent, "stack-lock-status-"));
-  } catch {
+    return authority.create(join(authority.parent, "stack-lock-status-"));
+  } catch (error) {
+    if (error instanceof StackLockCollectionError) throw error;
     throw new StackLockCollectionError("collection_contract_invalid");
   }
 }
@@ -1682,6 +1795,9 @@ function frozenStatusConfig(statusConfig: FrozenStatusConfig, frozenDirectory: s
     `\tsymlinks = ${booleanValue("core.symlinks", platform() !== "win32")}\n` +
     `\tignorecase = ${booleanValue("core.ignorecase", platform() === "win32")}\n` +
     `\tprecomposeunicode = ${booleanValue("core.precomposeunicode", false)}\n` +
+    `\ttrustctime = ${booleanValue("core.trustctime", true)}\n` +
+    `\tcheckStat = ${statusConfig.checkStat ?? "default"}\n` +
+    `\tignoreStat = ${booleanValue("core.ignorestat", false)}\n` +
     (statusConfig.autocrlf === undefined ? "" : `\tautocrlf = ${statusConfig.autocrlf}\n`) +
     (statusConfig.eol === undefined ? "" : `\teol = ${statusConfig.eol}\n`) +
     (statusConfig.excludesFile === undefined

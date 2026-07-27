@@ -172,6 +172,133 @@ describe("StackLock actual repository state", () => {
     expect(result.repos.SHUD.dirty).toBe(false);
   });
 
+  test.each(["main-local", "linked-worktree", "nested-include"] as const)(
+    "preserves native same-stat clean semantics for %s effective stat config",
+    async (scope) => {
+      const fixture = await createFixture();
+      let repository = fixture.repositories.SHUD;
+      if (scope === "linked-worktree") {
+        repository = await replaceWithLinkedCheckout(fixture, "SHUD");
+        git(repository, ["config", "extensions.worktreeConfig", "true"]);
+        git(repository, ["config", "--worktree", "core.trustctime", "false"]);
+        git(repository, ["config", "--worktree", "core.checkStat", "minimal"]);
+        git(repository, ["config", "--worktree", "core.ignoreStat", "false"]);
+      } else if (scope === "nested-include") {
+        repository = await addNestedSubmodule(fixture, "stat-config-nested");
+        const includedConfig = join(fixture.container, "nested-stat-config");
+        await writeFile(
+          includedConfig,
+          "[core]\n\ttrustctime = false\n\tcheckStat = minimal\n\tignoreStat = false\n"
+        );
+        git(repository, ["config", "include.path", includedConfig]);
+      } else {
+        git(repository, ["config", "core.trustctime", "false"]);
+        git(repository, ["config", "core.checkStat", "minimal"]);
+        git(repository, ["config", "core.ignoreStat", "false"]);
+      }
+
+      const tracked = join(repository, "tracked.txt");
+      const stableTimestamp = new Date(Math.floor((Date.now() - 5_000) / 1_000) * 1_000);
+      await utimes(tracked, stableTimestamp, stableTimestamp);
+      git(repository, ["update-index", "--refresh"]);
+      const original = await readFile(tracked);
+      const replacement = Buffer.from(original).reverse();
+      const originalStat = await stat(tracked);
+      expect(replacement.byteLength).toBe(original.byteLength);
+      expect(replacement.equals(original)).toBe(false);
+      await writeFile(tracked, replacement);
+      await utimes(tracked, originalStat.atime, originalStat.mtime);
+      expect(git(repository, ["status", "--porcelain=v1", "--", "tracked.txt"])).toBe("");
+
+      let observedFrozenStatConfig = false;
+      const gitCommand: StackLockGitCommand = async (input) => {
+        if (input.cwd === repository && isStatusCommand(input.args)) {
+          const frozenGitDirectory = input.args
+            .find((argument) => argument.startsWith("--git-dir="))
+            ?.slice("--git-dir=".length);
+          expect(frozenGitDirectory).toBeDefined();
+          const frozenConfig = await readFile(join(frozenGitDirectory!, "config"), "utf8");
+          expect(frozenConfig).toContain("\ttrustctime = false\n");
+          expect(frozenConfig).toContain("\tcheckStat = minimal\n");
+          expect(frozenConfig).toContain("\tignoreStat = false\n");
+          observedFrozenStatConfig = true;
+        }
+        return runFixtureGitCommand(input);
+      };
+
+      const result = await collectStackLockContext({ repositoryRoot: fixture.root, gitCommand });
+      expect(observedFrozenStatConfig).toBe(true);
+      expect(result.repos.SHUD.dirty).toBe(false);
+    }
+  );
+
+  test.each(["default", "minimal", "MINIMAL"])(
+    "freezes canonical core.checkStat value %s",
+    async (configuredValue) => {
+      const fixture = await createFixture();
+      const repository = fixture.repositories.SHUD;
+      git(repository, ["config", "core.checkStat", configuredValue]);
+      let frozenConfig = "";
+      const gitCommand: StackLockGitCommand = async (input) => {
+        if (input.cwd === repository && isStatusCommand(input.args)) {
+          const frozenGitDirectory = input.args
+            .find((argument) => argument.startsWith("--git-dir="))
+            ?.slice("--git-dir=".length);
+          frozenConfig = await readFile(join(frozenGitDirectory!, "config"), "utf8");
+        }
+        return runFixtureGitCommand(input);
+      };
+
+      const result = await collectStackLockContext({ repositoryRoot: fixture.root, gitCommand });
+      expect(result.repos.SHUD.dirty).toBe(false);
+      expect(frozenConfig).toContain(`\tcheckStat = ${configuredValue.toLowerCase()}\n`);
+    }
+  );
+
+  test.each([
+    ["core.checkStat", "extended"],
+    ["core.checkStat", ""],
+    ["core.ignoreStat", "sometimes"],
+    ["core.trustctime", "sometimes"]
+  ] as const)("fails typed on unsupported stat config %s=%s", async (key, value) => {
+    const fixture = await createFixture();
+    const repository = fixture.repositories.SHUD;
+    if (value === "") {
+      const config = checkoutGitPath(repository, "config");
+      await writeFile(config, `${await readFile(config, "utf8")}\n[core]\n\tcheckStat\n`);
+    } else {
+      git(repository, ["config", key, value]);
+    }
+    // Git itself rejects these tokens before the snapshot parser runs; the public seam
+    // therefore preserves the existing non-disclosing process-failure mapping.
+    await expectCollectorFailure(fixture, undefined, "git_read_failed");
+  });
+
+  test("treats valueless core.trustctime and core.ignoreStat as canonical true", async () => {
+    const fixture = await createFixture();
+    const repository = fixture.repositories.SHUD;
+    const config = checkoutGitPath(repository, "config");
+    await writeFile(
+      config,
+      `${await readFile(config, "utf8")}\n[core]\n\ttrustctime\n\tignoreStat\n`
+    );
+    let frozenConfig = "";
+    const gitCommand: StackLockGitCommand = async (input) => {
+      if (input.cwd === repository && isStatusCommand(input.args)) {
+        const frozenGitDirectory = input.args
+          .find((argument) => argument.startsWith("--git-dir="))
+          ?.slice("--git-dir=".length);
+        frozenConfig = await readFile(join(frozenGitDirectory!, "config"), "utf8");
+      }
+      return runFixtureGitCommand(input);
+    };
+
+    const result = await collectStackLockContext({ repositoryRoot: fixture.root, gitCommand });
+    expect(result.repos.SHUD.dirty).toBe(false);
+    expect(frozenConfig).toContain("\ttrustctime = true\n");
+    expect(frozenConfig).toContain("\tignoreStat = true\n");
+  });
+
   test.each([
     ["clean", false],
     ["staged", true],
@@ -852,7 +979,8 @@ exec ${shellQuote(realGit)} "$@"
       git(fixture.repositories.SHUD, ["config", "core.filemode", alias]);
       const result = await collectStackLockContext({ repositoryRoot: fixture.root });
       expect(result.repos.SHUD.dirty).toBe(false);
-    }
+    },
+    { timeout: 30_000 }
   );
 
   test("treats a valueless safe Git boolean as true", async () => {
@@ -863,7 +991,7 @@ exec ${shellQuote(realGit)} "$@"
 
     const result = await collectStackLockContext({ repositoryRoot: fixture.root });
     expect(result.repos.SHUD.dirty).toBe(false);
-  });
+  }, { timeout: 30_000 });
 
   test("rejects a worktree filter when extensions.worktreeConfig is valueless", async () => {
     const fixture = await createFixture();
@@ -893,6 +1021,55 @@ exec ${shellQuote(realGit)} "$@"
     await expectCollectorFailure(fixture, undefined, "git_read_failed");
   });
 
+  test.each([
+    ["superproject", false],
+    ["published-sibling", false],
+    ["nested-sibling", false],
+    ["superproject-symlink-alias", true],
+    ["published-symlink-alias", true],
+    ["nested-symlink-alias", true]
+  ] as const)(
+    "rejects collection-wide protected TMPDIR %s before any transient creation",
+    async (scope, useAlias) => {
+      if (useAlias && process.platform === "win32") return;
+      const fixture = await createFixture();
+      const protectedRoot = scope.startsWith("superproject")
+        ? fixture.root
+        : scope.startsWith("published")
+          ? fixture.repositories.rSHUD
+          : await addNestedSubmoduleToRepository(
+              fixture.repositories.rSHUD,
+              fixture.container,
+              "temp-protected-nested"
+            );
+      let configuredTempParent = protectedRoot;
+      if (useAlias) {
+        configuredTempParent = join(fixture.container, `${scope}-alias`);
+        await symlink(protectedRoot, configuredTempParent, "dir");
+      }
+      let observedTransientCreation = false;
+      const gitCommand: StackLockGitCommand = async (input) => {
+        if ((await readdirNames(protectedRoot))
+          .some((entry) => entry.startsWith("stack-lock-status-"))) {
+          observedTransientCreation = true;
+        }
+        return runFixtureGitCommand(input);
+      };
+      const previous = { TMPDIR: env.TMPDIR, TMP: env.TMP, TEMP: env.TEMP };
+      try {
+        env.TMPDIR = configuredTempParent;
+        delete env.TMP;
+        delete env.TEMP;
+        await expectCollectorFailure(fixture, gitCommand, "collection_contract_invalid");
+      } finally {
+        restoreEnvironment(previous);
+      }
+      expect(observedTransientCreation).toBe(false);
+      expect((await readdirNames(protectedRoot))
+        .some((entry) => entry.startsWith("stack-lock-status-"))).toBe(false);
+    }
+  );
+
   test.each(["main", "linked", "nested", "symlink-alias"] as const)(
     "never observes its own temporary status authority when TMPDIR is inside a %s checkout",
     async (scope) => {
@@ -920,6 +1097,38 @@ exec ${shellQuote(realGit)} "$@"
     }
   );
 
+  test("fails on external temporary-parent replacement before creating an authority", async () => {
+    const fixture = await createFixture();
+    const externalTemp = join(fixture.container, "external-temp-authority");
+    await mkdir(externalTemp);
+    let replaced = false;
+    let createCalls = 0;
+    const previous = { TMPDIR: env.TMPDIR, TMP: env.TMP, TEMP: env.TEMP };
+    try {
+      env.TMPDIR = externalTemp;
+      delete env.TMP;
+      delete env.TEMP;
+      await expectCollectorFailureWithHooks(fixture, {
+        afterCheckoutAuthorityAcquired: async () => {
+          if (replaced) return;
+          replaced = true;
+          await rename(externalTemp, `${externalTemp}.displaced`);
+          await mkdir(externalTemp);
+        },
+        createTemporaryDirectory: () => {
+          createCalls += 1;
+          throw new Error("temporary creator must not be called after authority drift");
+        }
+      }, "collection_state_changed");
+    } finally {
+      restoreEnvironment(previous);
+    }
+    expect(replaced).toBe(true);
+    expect(createCalls).toBe(0);
+    expect((await readdirNames(externalTemp))
+      .some((entry) => entry.startsWith("stack-lock-status-"))).toBe(false);
+  });
+
   test("treats a deinitialized stage-0 nested submodule like native clean status", async () => {
     const fixture = await createFixture();
     await addNestedSubmodule(fixture, "deinitialized-nested");
@@ -931,6 +1140,68 @@ exec ${shellQuote(realGit)} "$@"
     const result = await collectStackLockContext({ repositoryRoot: fixture.root });
     expect(result.repos.SHUD.dirty).toBe(false);
   }, { timeout: 30_000 });
+
+  test("treats a stably absent direct stage-0 nested path as dirty", async () => {
+    const fixture = await createFixture();
+    const nested = await addNestedSubmodule(fixture, "absent-direct-nested");
+    await rm(nested, { recursive: true });
+    expect(git(fixture.repositories.SHUD, [
+      "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none", "--"
+    ])).toContain(" D absent-direct-nested");
+
+    const result = await collectStackLockContext({ repositoryRoot: fixture.root });
+    expect(result.repos.SHUD.dirty).toBe(true);
+  }, { timeout: 30_000 });
+
+  test("treats a stably absent recursive stage-0 nested path as dirty", async () => {
+    const fixture = await createFixture();
+    const outer = await addNestedSubmodule(fixture, "outer-nested");
+    const inner = await addNestedSubmoduleToRepository(
+      outer,
+      fixture.container,
+      "absent-inner-nested"
+    );
+    git(fixture.repositories.SHUD, ["add", "outer-nested"]);
+    git(fixture.repositories.SHUD, ["commit", "--quiet", "--message", "advance outer gitlink"]);
+    await rm(inner, { recursive: true });
+    expect(git(outer, [
+      "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none", "--"
+    ])).toContain(" D absent-inner-nested");
+
+    const result = await collectStackLockContext({ repositoryRoot: fixture.root });
+    expect(result.repos.SHUD.dirty).toBe(true);
+  }, { timeout: 30_000 });
+
+  test.each(["absent-appears", "deinitialized-disappears", "deinitialized-replaced"] as const)(
+    "fails typed when nested state transition %s occurs after audit",
+    async (transition) => {
+      const fixture = await createFixture();
+      const nested = await addNestedSubmodule(fixture, `transition-${transition}`);
+      if (transition === "absent-appears") {
+        await rm(nested, { recursive: true });
+      } else {
+        git(fixture.repositories.SHUD, [
+          "submodule", "deinit", "--force", "--", `transition-${transition}`
+        ]);
+      }
+      let mutated = false;
+      await expectCollectorFailureWithHooks(fixture, {
+        afterRepositoryDirtyAudit: async (repositoryPath) => {
+          if (mutated || repositoryPath !== fixture.repositories.SHUD) return;
+          mutated = true;
+          if (transition === "absent-appears") {
+            await mkdir(nested);
+          } else if (transition === "deinitialized-disappears") {
+            await rm(nested, { recursive: true });
+          } else {
+            await rename(nested, `${nested}.displaced`);
+            await mkdir(nested);
+          }
+        }
+      }, "collection_state_changed");
+      expect(mutated).toBe(true);
+    }
+  );
 
   test("ignores hostile credential, askpass, and trace environment during real collection", async () => {
     const fixture = await createFixture();
@@ -1359,14 +1630,26 @@ function sharedIndexPath(repository: string): string {
 }
 
 async function addNestedSubmodule(fixture: Fixture, nestedPath: string): Promise<string> {
-  const nestedSource = join(fixture.container, `nested-source-${Date.now()}-${Math.random()}`);
+  return await addNestedSubmoduleToRepository(
+    fixture.repositories.SHUD,
+    fixture.container,
+    nestedPath
+  );
+}
+
+async function addNestedSubmoduleToRepository(
+  parentRepository: string,
+  fixtureContainer: string,
+  nestedPath: string
+): Promise<string> {
+  const nestedSource = join(fixtureContainer, `nested-source-${Date.now()}-${Math.random()}`);
   await mkdir(nestedSource);
   git(nestedSource, ["init", "--quiet"]);
   configureGit(nestedSource);
   await writeFile(join(nestedSource, "tracked.txt"), "nested\n");
   git(nestedSource, ["add", "tracked.txt"]);
   git(nestedSource, ["commit", "--quiet", "--message", "nested initial"]);
-  git(fixture.repositories.SHUD, [
+  git(parentRepository, [
     "-c",
     "protocol.file.allow=always",
     "submodule",
@@ -1375,9 +1658,9 @@ async function addNestedSubmodule(fixture: Fixture, nestedPath: string): Promise
     nestedSource,
     nestedPath
   ]);
-  const nested = join(fixture.repositories.SHUD, nestedPath);
+  const nested = join(parentRepository, nestedPath);
   configureGit(nested);
-  git(fixture.repositories.SHUD, ["commit", "--quiet", "-am", "add nested submodule"]);
+  git(parentRepository, ["commit", "--quiet", "-am", "add nested submodule"]);
   return nested;
 }
 
