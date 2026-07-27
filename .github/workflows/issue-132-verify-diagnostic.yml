@@ -1,0 +1,95 @@
+name: Issue 132 split final verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/issue-132-verify-diagnostic.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/issue-132-stack-lock-dirty-state
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+      - run: git submodule update --init zero
+      - name: Reuse the proven contract-alignment script
+        shell: bash
+        env:
+          EVIDENCE_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          lines = Path('.github/workflows/issue-132-finalize.yml').read_text().splitlines()
+          step = '      - name: Align canonical and OpenSpec contracts'
+          start_step = lines.index(step)
+          run_line = next(index for index in range(start_step, len(lines)) if lines[index] == '        run: |')
+          body = []
+          for line in lines[run_line + 1:]:
+              if line.startswith('      - name:'):
+                  break
+              if line and not line.startswith('          '):
+                  raise SystemExit(f'unexpected alignment indentation: {line!r}')
+              body.append(line[10:] if line else '')
+          Path('/tmp/issue-132-align.sh').write_text('\n'.join(body) + '\n')
+          PY
+          bash -n /tmp/issue-132-align.sh
+          bash /tmp/issue-132-align.sh
+      - name: Install and regenerate
+        run: |
+          bun install --frozen-lockfile
+          bun run schema:generate
+      - name: Focused collector and schema suites
+        run: |
+          bun test packages/core/src/domain/schemas/core-schemas.test.ts
+          bun test packages/core/src/domain/services/stack-lock-collector.test.ts packages/core/src/domain/services/stack-lock-dirty-state.test.ts
+      - name: Schema package suite
+        run: bun run test:schemas
+      - name: Core services suite
+        run: bun run test:core-services
+      - name: Backend API suite
+        run: bun run test:backend-api
+      - name: Generated schema drift
+        run: bun run schema:check
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Full repository check
+        run: bun run check
+      - name: PERF-API-001
+        run: bun run test:perf:api
+      - name: Strict OpenSpec
+        run: npx --yes @fission-ai/openspec@1.3.1 validate m2-research-context --strict --no-interactive
+      - name: Boundary and hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git -C zero diff --quiet
+          test -z "$(git ls-files workspace)"
+          git diff --exit-code origin/main -- package.json packages/*/package.json bun.lock
+      - name: Commit verified contracts and evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/03_SPEC/Minimal_Schemas.md \
+            docs/Phased_Spec_Activation.md \
+            docs/generated/json-schema/stack-lock.json \
+            docs/generated/schema/stack-lock.md \
+            openspec/changes/m2-research-context/design.md \
+            openspec/changes/m2-research-context/specs/stack-lock/spec.md \
+            openspec/changes/m2-research-context/tasks.md \
+            openspec/changes/m2-research-context/evidence/issue-132.md
+          git commit -m "docs(stack-lock): align actual repo state contracts (#132)"
+          git push origin HEAD:feat/issue-132-stack-lock-dirty-state
