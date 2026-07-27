@@ -126,17 +126,10 @@ jobs:
 
           test_path = Path('packages/core/src/domain/services/stack-lock-collector.test.ts')
           tests = test_path.read_text()
-          old_top_level_helper = r'''  if (
-              args.length === 4 &&
-              args[0] === "--no-lazy-fetch" &&
-              args[1] === "rev-parse" &&
-              args[2] === "--show-toplevel" &&
-              args[3] === "--show-prefix"
-            ) {
-              return { stdout: `${resolve(cwd)}\n\n` };
-            }
-          '''
-          new_top_level_helper = r'''  if (
+          helper_pattern = re.compile(
+              r'''  if \(\n\s*args\.length === 4 &&\n\s*args\[0\] === "--no-lazy-fetch" &&\n\s*args\[1\] === "rev-parse" &&\n\s*args\[2\] === "--show-toplevel" &&\n\s*args\[3\] === "--show-prefix"\n\s*\) \{\n\s*return \{ stdout: `\$\{resolve\(cwd\)\}\\n\\n` \};\n\s*\}\n'''
+          )
+          helper_replacement = r'''  if (
               args.length === 3 &&
               args[0] === "--no-lazy-fetch" &&
               args[1] === "rev-parse" &&
@@ -145,9 +138,13 @@ jobs:
               return { stdout: `${resolve(cwd)}\n` };
             }
           '''
-          if tests.count(old_top_level_helper) != 1:
-              raise SystemExit(f'top-level helper count was {tests.count(old_top_level_helper)}')
-          tests = tests.replace(old_top_level_helper, new_top_level_helper)
+          tests, helper_count = helper_pattern.subn(
+              lambda _match: helper_replacement,
+              tests,
+              count=1,
+          )
+          if helper_count != 1:
+              raise SystemExit(f'top-level helper count was {helper_count}')
           tests = tests.replace(
               'call.args.at(-1) === "--show-prefix"',
               'call.args.at(-1) === "--show-toplevel"',
