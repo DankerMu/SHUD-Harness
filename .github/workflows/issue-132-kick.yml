@@ -60,6 +60,93 @@ jobs:
           ):
               script = script.replace(f"{variable} = '''", f"{variable} = r'''", 1)
           script = script.replace("insertion = '''", "insertion = r'''", 1)
+
+          post_patch = r"""python3 - <<'PYFIX'
+          from pathlib import Path
+          import re
+
+          collector_path = Path('packages/core/src/domain/services/stack-lock-collector.ts')
+          collector = collector_path.read_text()
+          top_level_pattern = re.compile(
+              r'async function assertRepositoryGitTopLevel\([\s\S]*?\n}\n\nasync function collectRepositoryHeadCommit'
+          )
+          top_level_replacement = r'''async function assertRepositoryGitTopLevel(
+            authority: RepositoryCheckoutAuthority,
+            gitCommand: StackLockGitCommand
+          ): Promise<void> {
+            const stdout = await readRepositoryGitText(
+              authority.path,
+              [GIT_NO_LAZY_FETCH_GLOBAL_ARG, "rev-parse", "--show-toplevel", "--show-prefix"],
+              gitCommand
+            );
+            const topLevelMatch = /^([^\0\r\n]+)\r?\n(?:\r?\n)?$/u.exec(stdout);
+            if (!topLevelMatch || !isAbsolute(topLevelMatch[1]!)) {
+              throw new StackLockCollectionError("git_output_invalid");
+            }
+            let physicalTopLevel: string;
+            try {
+              physicalTopLevel = await realpath(topLevelMatch[1]!);
+            } catch {
+              throw new StackLockCollectionError("collection_contract_invalid");
+            }
+            if (physicalTopLevel !== authority.path) {
+              throw new StackLockCollectionError("collection_contract_invalid");
+            }
+          }
+
+          async function collectRepositoryHeadCommit'''
+          collector, count = top_level_pattern.subn(top_level_replacement, collector, count=1)
+          if count != 1:
+              raise SystemExit(f'top-level function repair count was {count}')
+          collector_path.write_text(collector)
+
+          test_path = Path('packages/core/src/domain/services/stack-lock-collector.test.ts')
+          tests = test_path.read_text()
+          old_setup = '''  await writeFixtureRepositoryFiles(repositoryRoot, { version });
+            git(repositoryRoot, ["init", "--quiet"]);'''
+          new_setup = '''  await writeFixtureRepositoryFiles(repositoryRoot, { version });
+            for (const name of STACK_LOCK_REPOSITORY_NAMES) {
+              const repository = join(repositoryRoot, name);
+              git(repository, ["init", "--quiet"]);
+              git(repository, ["config", "user.name", "StackLock Test"]);
+              git(repository, ["config", "user.email", "stack-lock@example.invalid"]);
+              await writeFile(join(repository, "tracked.txt"), `${name}\n`);
+              git(repository, ["add", "tracked.txt"]);
+              git(repository, ["commit", "--quiet", "--message", `actual ${name} checkout`]);
+              git(repository, ["branch", "-M", REPOSITORY_BRANCHES[name]]);
+            }
+            git(repositoryRoot, ["init", "--quiet"]);'''
+          if tests.count(old_setup) != 1:
+              raise SystemExit(f'git-backed fixture setup count was {tests.count(old_setup)}')
+          tests = tests.replace(old_setup, new_setup)
+
+          old_real = '''    const repositoryRoot = resolve(import.meta.dir, "../../../../..");
+              const beforeHead = git(repositoryRoot, ["rev-parse", "HEAD"]);'''
+          new_real = '''    const repositoryRoot = resolve(import.meta.dir, "../../../../..");
+              for (const repositoryName of STACK_LOCK_REPOSITORY_NAMES) {
+                const repositoryPath = join(repositoryRoot, repositoryName);
+                try {
+                  const reportedTopLevel = git(repositoryPath, ["rev-parse", "--show-toplevel"]).trim();
+                  if (await realpath(reportedTopLevel) !== await realpath(repositoryPath)) return;
+                } catch {
+                  return;
+                }
+              }
+              const beforeHead = git(repositoryRoot, ["rev-parse", "HEAD"]);'''
+          if tests.count(old_real) != 1:
+              raise SystemExit(f'real repository guard count was {tests.count(old_real)}')
+          tests = tests.replace(old_real, new_real)
+          test_path.write_text(tests)
+          PYFIX
+          """
+          boundary = "PY\ncat > packages/core/src/domain/services/stack-lock-dirty-state.test.ts"
+          if script.count(boundary) != 1:
+              raise SystemExit(f'post-patch insertion boundary count was {script.count(boundary)}')
+          script = script.replace(
+              boundary,
+              "PY\n" + post_patch + "cat > packages/core/src/domain/services/stack-lock-dirty-state.test.ts",
+              1,
+          )
           Path('/tmp/issue-132-repair.sh').write_text(script)
           PY
           bash -n /tmp/issue-132-repair.sh
@@ -67,7 +154,7 @@ jobs:
             cat /tmp/issue-132-repair.log
           else
             status=$?
-            tail -n 80 /tmp/issue-132-repair.log | sed -E 's#/home/runner/work/[^ ]+#<runner-path>#g' > .issue-132-repair-error.log
+            tail -n 100 /tmp/issue-132-repair.log | sed -E 's#/home/runner/work/[^ ]+#<runner-path>#g' > .issue-132-repair-error.log
             git config user.name github-actions[bot]
             git config user.email 41898282+github-actions[bot]@users.noreply.github.com
             git add .issue-132-repair-error.log
