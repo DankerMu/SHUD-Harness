@@ -1,0 +1,9 @@
+PASS packages/core/src/domain/services/failure-occurrence-ledger.test.ts
+PASS packages/core/src/domain/services/hashing-service.test.ts
+PASS packages/core/src/domain/services/idempotency-lock-artifact-services.test.ts
+PASS packages/core/src/domain/services/stack-lock-collector.test.ts
+PASS packages/core/src/domain/services/stack-lock-dirty-state.test.ts
+PASS packages/core/src/domain/services/workspace-path-safety-denied.test.ts
+PASS packages/core/src/domain/services/workspace-record-root-mutation.test.ts
+
+FAILURE_COUNT=0
