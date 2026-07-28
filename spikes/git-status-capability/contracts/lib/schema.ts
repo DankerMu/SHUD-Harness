@@ -14,6 +14,7 @@ import { validateFailureCauseForRow } from "./causal-proof";
 import {
   deriveInvalidState,
   encodeDecisionGateProjection,
+  encodeDecisionRowProjection,
   validateDecisionProjection
 } from "./decision";
 export { deriveInvalidState, encodeDecisionGateProjection } from "./decision";
@@ -281,7 +282,7 @@ function immutableEvidenceReference(value: unknown, location: EvidenceLocation, 
     value.lane !== location.lane || value.platform !== (location.platform ?? "none") ||
     value.source_input_record_sha256 !== sourceRecordSha ||
     !["application/json", "text/markdown", "text/plain"].includes(value.media_type as string) ||
-    !sha256(value.sha256) || !boundedInteger(value.byte_length, INGESTION_LIMITS.final_bundle.bytes, true) ||
+    !sha256(value.sha256) || !boundedInteger(value.byte_length, INGESTION_LIMITS.final_bundle.bytes, false) ||
     value.immutable_identity !== `sha256:${value.sha256}` || !record(value.retention) || !record(value.access) ||
     !record(value.offline_retrieval)) return false;
   return exactKeys(value.retention, ["policy", "minimum_days"]) &&
@@ -338,6 +339,7 @@ function evidenceJsonRecord(value: unknown, location: EvidenceLocation, sourceRe
   if ((location.lane === "source" || location.lane === "final") && fileName === "source-input-record.json" &&
     value.schema_version === "shud.git-status-capability.source-input-record.v1")
     return value.source_input_digest === location.digest && validateSourceInputRecord(value);
+  if (value.source_input_record_sha256 !== sourceRecordSha) return false;
   if (location.lane === "platform" && fileName === "platform-bundle.json" && value.schema_version === "shud.git-status-capability.platform-bundle.v1")
     return value.platform === location.platform && validatePlatformBundle(value);
   if (location.lane === "gates" && fileName === "repository-gate.json" && value.schema_version === "shud.git-status-capability.repository-gate.v1")
@@ -435,6 +437,47 @@ async function validateEvidenceSubtree(root: string, prefix: string): Promise<vo
   validateEvidenceCollection(blobs);
 }
 
+function directRecord(value: JsonRecord | undefined, schemaVersion: string): value is JsonRecord {
+  return value?.schema_version === schemaVersion;
+}
+
+function decisionCoverage(decision: JsonRecord): { macos_rows: number; linux_rows: number } {
+  const rows = decision.rows as string[];
+  return {
+    macos_rows: rows.filter((row) => row.split("\0", 1)[0] === "m").length,
+    linux_rows: rows.filter((row) => row.split("\0", 1)[0] === "l").length
+  };
+}
+
+function terminalStateMatches(finalBundle: JsonRecord, decision: JsonRecord): boolean {
+  const decisionCompleteness = Object.fromEntries(COMPLETENESS_FIELDS.map((field) => [field, decision[field]]));
+  const terminalFields = ["run_status", "terminal_decision", "first_cause", "all_failure_codes"];
+  if (terminalFields.some((field) => !exactJson(finalBundle[field], decision[field])) ||
+    !exactJson(finalBundle.completeness, decisionCompleteness) ||
+    !exactJson(finalBundle.coverage, decisionCoverage(decision)) ||
+    finalBundle.decision_projection_digest !== canonicalJsonDigest(decision)) return false;
+  try {
+    const gateProjection = (finalBundle.repository_gates as JsonRecord[])
+      .map((receipt, ordinal) => encodeDecisionGateProjection(receipt, ordinal));
+    return exactJson(gateProjection, decision.gates);
+  } catch {
+    return false;
+  }
+}
+
+function directPlatformMatchesDecision(platformBundle: JsonRecord, decision: JsonRecord): boolean {
+  if (decision.run_status === "valid_complete" && platformBundle.run_status !== "valid_complete") return false;
+  let projection: string[];
+  try {
+    projection = (platformBundle.rows as JsonRecord[]).map(encodeDecisionRowProjection);
+  } catch {
+    return false;
+  }
+  const token = platformBundle.platform === "macos" ? "m" : "l";
+  const decisionRows = (decision.rows as string[]).filter((row) => row.split("\0", 1)[0] === token);
+  return exactJson(projection, decisionRows);
+}
+
 function validateEvidenceCollection(blobs: Array<{ path: string; bytes: Buffer; location: EvidenceLocation }>): void {
   const byDigest = new Map<string, typeof blobs>();
   for (const blob of blobs) {
@@ -485,20 +528,39 @@ function validateEvidenceCollection(blobs: Array<{ path: string; bytes: Buffer; 
       if (Object.entries(expected).some(([field, value]) => value && finalBundle[field] !== value))
         throw new ContractError("CONTRACT_SCHEMA_INVALID");
     }
+    const decisionPath = `${EVIDENCE_ROOT}/final/${digest}/decision.json`;
+    const decision = values.get(decisionPath);
+    if (directRecord(finalBundle, "shud.git-status-capability.final-bundle.v1") &&
+      directRecord(decision, "shud.git-status-capability.decision.v1")) {
+      if (!terminalStateMatches(finalBundle, decision)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    }
+    const directGate = values.get(`${EVIDENCE_ROOT}/gates/${digest}/repository-gate.json`);
+    if (directRecord(finalBundle, "shud.git-status-capability.final-bundle.v1") &&
+      directRecord(directGate, "shud.git-status-capability.repository-gate.v1") &&
+      !exactJson(finalBundle.repository_gates, directGate.gates)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    if (directRecord(decision, "shud.git-status-capability.decision.v1")) {
+      for (const platform of ["macos", "linux"] as const) {
+        const platformBundle = values.get(`${EVIDENCE_ROOT}/platform/${digest}/${platform}/platform-bundle.json`);
+        if (directRecord(platformBundle, "shud.git-status-capability.platform-bundle.v1") &&
+          !directPlatformMatchesDecision(platformBundle, decision)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+      }
+    }
     const assertionPath = `${EVIDENCE_ROOT}/final/${digest}/publication-assertion.json`;
     const assertion = values.get(assertionPath);
-    const decisionDigest = artifactDigests.get(`${EVIDENCE_ROOT}/final/${digest}/decision.json`);
-    if (assertion?.schema_version === "shud.git-status-capability.publication-assertion.v1" &&
-      decisionDigest && assertion.decision_sha256 !== decisionDigest) throw new ContractError("CONTRACT_SCHEMA_INVALID");
-    const decision = values.get(`${EVIDENCE_ROOT}/final/${digest}/decision.json`);
-    if (assertion?.schema_version === "shud.git-status-capability.publication-assertion.v1" &&
-      decision?.schema_version === "shud.git-status-capability.decision.v1" &&
-      assertion.expected_decision !== decision.terminal_decision) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    const decisionDigest = artifactDigests.get(decisionPath);
+    if (directRecord(assertion, "shud.git-status-capability.publication-assertion.v1") &&
+      (!directRecord(decision, "shud.git-status-capability.decision.v1") ||
+        !directRecord(finalBundle, "shud.git-status-capability.final-bundle.v1") ||
+        decision.run_status !== "valid_complete" || finalBundle.run_status !== "valid_complete" ||
+        !decisionDigest || assertion.decision_sha256 !== decisionDigest ||
+        assertion.expected_decision !== decision.terminal_decision ||
+        assertion.expected_decision !== finalBundle.terminal_decision)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     const governancePath = `${EVIDENCE_ROOT}/final/${digest}/publication-governance-recheck.json`;
     const governance = values.get(governancePath);
     const gate = values.get(`${EVIDENCE_ROOT}/gates/${digest}/repository-gate.json`);
-    if (governance?.schema_version === "shud.git-status-capability.publication-governance-recheck.v1" &&
-      gate?.schema_version === "shud.git-status-capability.repository-gate.v1" && Array.isArray(gate.gates)) {
+    if (directRecord(governance, "shud.git-status-capability.publication-governance-recheck.v1")) {
+      if (!directRecord(gate, "shud.git-status-capability.repository-gate.v1") || !Array.isArray(gate.gates))
+        throw new ContractError("CONTRACT_SCHEMA_INVALID");
       const receipt = gate.gates[D9_COMMAND_PROFILE.findIndex((profile) => profile.id === "GATE-GOVERNANCE")];
       if (!record(receipt) || governance.d9_governance_receipt_sha256 !== canonicalDigest(receipt))
         throw new ContractError("CONTRACT_SCHEMA_INVALID");
