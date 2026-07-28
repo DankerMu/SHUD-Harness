@@ -21,19 +21,11 @@
             "branch": {
               "type": "string",
               "minLength": 1
-            },
-            "detached": {
-              "type": "boolean"
-            },
-            "dirty": {
-              "type": "boolean"
             }
           },
           "required": [
             "commit",
-            "branch",
-            "detached",
-            "dirty"
+            "branch"
           ],
           "additionalProperties": false
         },
@@ -47,19 +39,11 @@
             "branch": {
               "type": "string",
               "minLength": 1
-            },
-            "detached": {
-              "type": "boolean"
-            },
-            "dirty": {
-              "type": "boolean"
             }
           },
           "required": [
             "commit",
-            "branch",
-            "detached",
-            "dirty"
+            "branch"
           ],
           "additionalProperties": false
         },
@@ -73,19 +57,11 @@
             "branch": {
               "type": "string",
               "minLength": 1
-            },
-            "detached": {
-              "type": "boolean"
-            },
-            "dirty": {
-              "type": "boolean"
             }
           },
           "required": [
             "commit",
-            "branch",
-            "detached",
-            "dirty"
+            "branch"
           ],
           "additionalProperties": false
         },
@@ -99,19 +75,11 @@
             "branch": {
               "type": "string",
               "minLength": 1
-            },
-            "detached": {
-              "type": "boolean"
-            },
-            "dirty": {
-              "type": "boolean"
             }
           },
           "required": [
             "commit",
-            "branch",
-            "detached",
-            "dirty"
+            "branch"
           ],
           "additionalProperties": false
         }

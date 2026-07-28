@@ -50,10 +50,10 @@ linked_reports: []
 ```yaml
 stack_id: STACK-0001
 repos:
-  SHUD:      { commit: 9b55b0c, branch: master, detached: false, dirty: false }
-  rSHUD:     { commit: d162db3, branch: master, detached: false, dirty: false }
-  AutoSHUD:  { commit: 1cbec6f, branch: master, detached: false, dirty: false }
-  zero:      { commit: 13e25c1, branch: main, detached: false, dirty: false }
+  SHUD:      { commit: 9b55b0c, branch: master }
+  rSHUD:     { commit: d162db3, branch: master }
+  AutoSHUD:  { commit: 1cbec6f, branch: master }
+  zero:      { commit: 13e25c1, branch: main }
 runtime:
   os: "Darwin 24.6.0"
   r_version: "4.4.1"
