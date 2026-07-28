@@ -230,15 +230,15 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
     field_types: {
       schema_version: "literal", platform: "enum:macos|linux", row_id: "catalog-row-id", observation_id: "sha256",
       checkout_capability_identity: "sha256", git_state_generation_digest: "sha256", frame_digest: "sha256",
-      frame_binding: "strict:{scheduled:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,input_length,input_digest,material:canonical-frame-wire-v1:{version=1,header_length=128,body_length,extension_length},frame_reference:{encoding:literal:shud.git-status-capability.canonical-frame-json.v1,frame:strict-frame-v1}},supplied:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,input_length,input_digest,material:strict-supplied-input-proof-v1}};wire=magic:SHUDCAP1|version:u8@8|flags-zero:u8@9|header-length:u16be@10|total-length:u64be@12|body-length:u32be@20|extension-length:u64be@24|body-sha256@32|extension-sha256@64|frame-sha256@96;header=128;frame-sha256=sha256(header[0:96]||body||extension);total=header+body+extension;no-trailing-bytes;scheduled=strict-canonical;supplied=actual-wire-proof;CAP-010-checksum-byte-mutation|CAP-011-truncate-one|CAP-012-surplus-frame|LIM-001-one-legal-8MiB-wire|LIM-002-wire-plus-one-byte",
+      frame_binding: "strict:{scheduled:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,input_length,input_digest,material:canonical-frame-wire-v1:{version=1,header_length=128,body_length,extension_length},frame_reference:{encoding:literal:shud.git-status-capability.canonical-frame-json.v1,frame:strict-frame-v1}},supplied:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,input_length,input_digest,material:strict-supplied-input-proof-v1}};wire=magic:SHUDCAP1|version:u8@8|flags-zero:u8@9|header-length:u16be@10|total-length:u64be@12|body-length:u32be@20|extension-length:u64be@24|body-sha256@32|extension-sha256@64|frame-sha256@96;header=128;frame-sha256=sha256(header[0:96]||body||extension);total=header+body+extension;no-trailing-bytes;length-limit-classified-before-structure;scheduled=strict-canonical;supplied=actual-wire-proof;CAP-010-payload-byte-mutation|CAP-011-truncate-one|CAP-012-surplus-frame|LIM-001-one-legal-8MiB-wire|LIM-002-wire-plus-one-byte",
       expected_outcome: "frozen-platform-slot-outcome", observer_outcome: "observer-outcome", producing_boundary: "frozen-row-enum:observer|launcher|tripwire",
       row_verdict: "iff:expected=observed-and-all-required-active-controls-pass", oracle_digest: "sha256",
       control_assertions: "strict:{oracle,ambient_path,subprocess,network,protected_write,protection,cleanup}:{active:literal:true,verdict:pass|fail}",
       protection_set_equal: "boolean;iff-control-protection-pass",
-      cleanup: "strict:{verdict:pass|fail,descriptors_restored:boolean,processes_reaped:boolean,secondary_errors:string[]};verdict=control-cleanup",
+      cleanup: "strict:{verdict:pass|fail,descriptors_restored:boolean,processes_reaped:boolean};LIF-006|007=causal-cleanup-failure-with-control-pass;otherwise-verdict=control-cleanup",
       resource_record: "strict:frozen-row-boundary:{below|exact|exceeded,observer-limit|none,within_limits=(boundary!=exceeded)}", source_input_record_sha256: "sha256",
-      first_cause: "optional:nonempty-string", secondary_errors: "optional:string[]",
-      determinism_proof: "iff-row-DET-001..004:strict:{variation_axis,first,second,comparison};two-distinct-invocations;same-row|observation|checkout|generation|supplied-input|outcome;content-addressed-normalized-row-output-and-decision-projection-byte-equality;DET-001=same-input-repeat;DET-002=fixture-creation-order;DET-003=fixture-root;DET-004=volatile-fields"
+      first_cause: "optional:nonempty-string;LIF-002|006=FRAME_VERSION_UNSUPPORTED;LIF-007=CLEANUP_FAILED", secondary_errors: "optional:string[];LIF-002|007=[];LIF-006=[CLEANUP_FAILED]",
+      determinism_proof: "iff-row-DET-001..004:strict:{variation_axis,axis_material,axis_digest,first,second,comparison};two-distinct-receipts;strict-structured-per-invocation-input-and-output;production-recomputed-normalized-row-output-and-nonrecursive-formal-d8-projection;axis-digest-recomputed-from-DET-specific-material;DET-001=same-input-repeat;DET-002=fixture-creation-order;DET-003=fixture-root;DET-004=permitted-volatile-material"
     },
     additional_properties: false
   },
@@ -256,7 +256,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       toolchain: "strict:{rustc_vv,cargo_version,git_version,target_triple}", target: "platform-target",
       dependency_graph_digest: "sha256", direct_feature_digest: "sha256", call_ledger_digest: "sha256",
       sbom_digest: "sha256", license_inventory_digest: "sha256",
-      rows: "array:row-evidence;valid_complete=174-exact;top-level-observation,scheduled-generation,actual-supplied-input-identities=unique-per-platform-slot;DET-paired-invocation-identities=8-globally-unique;same-row-nested-observation-repeat-only-exception",
+      rows: "array:row-evidence;valid_complete=174-exact;top-level-observation,scheduled-generation,actual-supplied-input-identities=unique-per-platform-slot;DET-paired-receipt-identities=8-globally-unique;same-row-nested-observation-repeat-only-exception",
       protection_set: "array:strict:{identity,pre_digest,post_digest,event_digest};valid_complete=nonempty",
       raw_command_manifest: "array:command-receipt;valid_complete=nonempty", first_cause: "invalid-only:nonempty-string",
       all_failure_codes: "invalid-only:sorted-unique-string[]"

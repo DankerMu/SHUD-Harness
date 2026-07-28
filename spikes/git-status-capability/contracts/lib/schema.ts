@@ -12,6 +12,7 @@ import {
 } from "./canonical-frame";
 import { validateDecisionProjection } from "./decision";
 import { validateDeterminismProof } from "./determinism-proof";
+import { validateLifecycleCausality } from "./lifecycle-causality";
 import {
   CATALOG_V1,
   CONTROL_ASSERTION_IDS,
@@ -30,7 +31,6 @@ import {
 import { ContractError, readJsonFileBounded, type InputKind } from "./ingestion";
 import {
   canonicalWireFrameBytes,
-  WIRE_FRAME_CHECKSUM_OFFSET,
   WIRE_FRAME_HEADER_BYTES,
   WIRE_FRAME_VERSION
 } from "./wire-frame";
@@ -810,8 +810,8 @@ function suppliedInputProof(scheduled: JsonRecord, supplied: JsonRecord, rowId: 
   if (exactKeys(material, ["kind"]) && material.kind === "scheduled-input-v1") {
     bytes = scheduledBytes;
   } else if (exactKeys(material, ["kind", "offset", "xor"]) && material.kind === "xor-byte-v1" && rowId === "CAP-010" &&
-    Number.isSafeInteger(material.offset) && (material.offset as number) >= WIRE_FRAME_CHECKSUM_OFFSET &&
-    (material.offset as number) < WIRE_FRAME_HEADER_BYTES && material.xor === 1) {
+    Number.isSafeInteger(material.offset) && (material.offset as number) >= WIRE_FRAME_HEADER_BYTES &&
+    (material.offset as number) < scheduledBytes.length && material.xor === 1) {
     bytes = Buffer.from(scheduledBytes);
     bytes[material.offset as number] ^= 1;
   } else if (exactKeys(material, ["kind", "byte_count"]) && material.kind === "truncate-tail-v1" && rowId === "CAP-011" && material.byte_count === 1) {
@@ -908,19 +908,14 @@ export function validateRowEvidence(value: unknown): boolean {
   if (!sha256(value.oracle_digest) || !controlAssertions(value.control_assertions) || typeof value.protection_set_equal !== "boolean") return false;
   const assertions = value.control_assertions as JsonRecord;
   if (((assertions.protection as JsonRecord).verdict === "pass") !== value.protection_set_equal) return false;
-  if (!record(value.cleanup) || !exactKeys(value.cleanup, ["verdict", "descriptors_restored", "processes_reaped", "secondary_errors"]) ||
-    !["pass", "fail"].includes(value.cleanup.verdict as string) || value.cleanup.verdict !== (assertions.cleanup as JsonRecord).verdict ||
-    typeof value.cleanup.descriptors_restored !== "boolean" || typeof value.cleanup.processes_reaped !== "boolean" ||
-    (value.cleanup.verdict === "pass" && (value.cleanup.descriptors_restored !== true || value.cleanup.processes_reaped !== true)) ||
-    !Array.isArray(value.cleanup.secondary_errors) || !value.cleanup.secondary_errors.every(nonEmptyString)) return false;
+  if (!validateLifecycleCausality(value, assertions.cleanup as JsonRecord)) return false;
   if (!rowResourceRecord(value.resource_record, value.row_id as string) || !sha256(value.source_input_record_sha256)) return false;
   const determinismRow = /^DET-00[1-4]$/.test(value.row_id as string);
   if (determinismRow !== Object.hasOwn(value, "determinism_proof") || (determinismRow && !validateDeterminismProof(value))) return false;
   const shouldPass = exactJson(value.expected_outcome, value.observer_outcome) &&
     CONTROL_ASSERTION_IDS.every((id) => (assertions[id] as JsonRecord).verdict === "pass");
   if ((value.row_verdict === "pass") !== shouldPass) return false;
-  if (value.first_cause !== undefined && !nonEmptyString(value.first_cause)) return false;
-  return value.secondary_errors === undefined || stringArray(value.secondary_errors);
+  return true;
 }
 
 export function validatePlatformBundle(value: unknown): boolean {
@@ -939,7 +934,7 @@ export function validatePlatformBundle(value: unknown): boolean {
   const determinismInvocationIds = value.rows.flatMap((row) => {
     const proof = (row as JsonRecord).determinism_proof;
     return record(proof) && record(proof.first) && record(proof.second)
-      ? [proof.first.invocation_id, proof.second.invocation_id] : [];
+      ? [proof.first.receipt_id, proof.second.receipt_id] : [];
   });
   if (!determinismInvocationIds.every(sha256) || new Set(determinismInvocationIds).size !== determinismInvocationIds.length ||
     (value.run_status === "valid_complete" && determinismInvocationIds.length !== 8)) return false;
