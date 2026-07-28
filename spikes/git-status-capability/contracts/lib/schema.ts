@@ -11,6 +11,7 @@ import {
   sealFrame
 } from "./canonical-frame";
 import { validateDecisionProjection } from "./decision";
+import { validateDeterminismProof } from "./determinism-proof";
 import {
   CATALOG_V1,
   CONTROL_ASSERTION_IDS,
@@ -27,6 +28,12 @@ import {
   TOOLCHAIN
 } from "./frozen";
 import { ContractError, readJsonFileBounded, type InputKind } from "./ingestion";
+import {
+  canonicalWireFrameBytes,
+  WIRE_FRAME_CHECKSUM_OFFSET,
+  WIRE_FRAME_HEADER_BYTES,
+  WIRE_FRAME_VERSION
+} from "./wire-frame";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -743,19 +750,28 @@ const SUPPLIED_INPUT_KEYS = Object.freeze([
   ...SLOT_KEYS, "input_length", "input_digest", "material"
 ]);
 
-const INLINE_SUPPLIED_MAX_BYTES = 64 * 1024;
-
 function frameReference(value: unknown): value is JsonRecord {
   return record(value) && exactKeys(value, ["encoding", "frame"]) && value.encoding === FRAME_EVIDENCE_ENCODING &&
     record(value.frame) && validateFrame(value.frame);
 }
 
-function canonicalEnvelopeBytes(frame: JsonRecord, inputLength: number): Buffer | null {
-  const frameBytes = canonicalFrameBytes(frame);
-  if (!boundedInteger(inputLength, OBSERVER_LIMITS.frame_bytes, false) || inputLength < frameBytes.length) return null;
-  return inputLength === frameBytes.length
-    ? frameBytes
-    : Buffer.concat([frameBytes, Buffer.alloc(inputLength - frameBytes.length)]);
+function rawFrameReference(value: unknown): value is JsonRecord {
+  return record(value) && exactKeys(value, ["encoding", "frame"]) && value.encoding === FRAME_EVIDENCE_ENCODING && record(value.frame);
+}
+
+function wireBytes(frame: JsonRecord, inputLength: number): Buffer | null {
+  if (!boundedInteger(inputLength, OBSERVER_LIMITS.frame_bytes, false)) return null;
+  try { return canonicalWireFrameBytes(frame, inputLength); } catch { return null; }
+}
+
+function wireMaterial(value: unknown, frame: JsonRecord, inputLength: number, frameReferenceRequired: boolean): value is JsonRecord {
+  if (!record(value)) return false;
+  const keys = ["kind", "version", "header_length", "body_length", "extension_length"];
+  if (frameReferenceRequired) keys.push("frame_reference");
+  const bodyLength = canonicalFrameBytes(frame).length;
+  return exactKeys(value, keys) && value.kind === "canonical-frame-wire-v1" && value.version === WIRE_FRAME_VERSION &&
+    value.header_length === WIRE_FRAME_HEADER_BYTES && value.body_length === bodyLength &&
+    value.extension_length === inputLength - WIRE_FRAME_HEADER_BYTES - bodyLength && value.extension_length >= 0;
 }
 
 function slotMatches(left: JsonRecord, right: JsonRecord, fields = SLOT_KEYS): boolean {
@@ -767,10 +783,8 @@ function declaredSlot(value: JsonRecord): boolean {
     sha256(value.observation_id) && sha256(value.checkout_capability_identity) && sha256(value.git_state_generation_digest);
 }
 
-function malformedPathFrame(bytes: Buffer, violation: "absolute-path" | "path-escape", supplied: JsonRecord): boolean {
-  let frame: JsonRecord;
-  try { frame = JSON.parse(bytes.toString("utf8")); } catch { return false; }
-  if (!record(frame) || !canonicalFrameBytes(frame).equals(bytes) || validateFrame(frame) || !slotMatches(frame, supplied)) return false;
+function malformedPathFrame(frame: JsonRecord, violation: "absolute-path" | "path-escape", supplied: JsonRecord): boolean {
+  if (validateFrame(frame) || !slotMatches(frame, supplied)) return false;
   if (frame.body_length !== canonicalFrameBodyBytes(frame).length || frame.body_digest !== canonicalFrameBodyDigest(frame) ||
     frame.git_state_generation_digest !== frame.body_digest || frame.checksum !== canonicalFrameChecksum(frame)) return false;
   const config = frame.effective_config;
@@ -790,37 +804,34 @@ function suppliedInputProof(scheduled: JsonRecord, supplied: JsonRecord, rowId: 
   if (!exactKeys(supplied, SUPPLIED_INPUT_KEYS) || !declaredSlot(supplied) || !record(supplied.material) ||
     !boundedInteger(supplied.input_length, OBSERVER_LIMITS.frame_bytes + 1, false) || !sha256(supplied.input_digest)) return null;
   const material = supplied.material;
-  const scheduledBytes = canonicalEnvelopeBytes((scheduled.frame_reference as JsonRecord).frame as JsonRecord, scheduled.input_length as number);
+  const scheduledBytes = wireBytes((scheduled.frame_reference as JsonRecord).frame as JsonRecord, scheduled.input_length as number);
   if (!scheduledBytes) return null;
   let bytes: Buffer;
   if (exactKeys(material, ["kind"]) && material.kind === "scheduled-input-v1") {
     bytes = scheduledBytes;
   } else if (exactKeys(material, ["kind", "offset", "xor"]) && material.kind === "xor-byte-v1" && rowId === "CAP-010" &&
-    Number.isSafeInteger(material.offset) && (material.offset as number) >= 0 && (material.offset as number) < scheduledBytes.length && material.xor === 1) {
+    Number.isSafeInteger(material.offset) && (material.offset as number) >= WIRE_FRAME_CHECKSUM_OFFSET &&
+    (material.offset as number) < WIRE_FRAME_HEADER_BYTES && material.xor === 1) {
     bytes = Buffer.from(scheduledBytes);
     bytes[material.offset as number] ^= 1;
-    let parsed: JsonRecord;
-    try { parsed = JSON.parse(bytes.toString("utf8")); } catch { return null; }
-    const scheduledFrame = (scheduled.frame_reference as JsonRecord).frame as JsonRecord;
-    if (!record(parsed) || !slotMatches(parsed, scheduled) || validateFrame(parsed) || parsed.checksum === scheduledFrame.checksum ||
-      canonicalFrameChecksum(parsed) !== scheduledFrame.checksum) return null;
   } else if (exactKeys(material, ["kind", "byte_count"]) && material.kind === "truncate-tail-v1" && rowId === "CAP-011" && material.byte_count === 1) {
     bytes = scheduledBytes.subarray(0, -1);
   } else if (exactKeys(material, ["kind", "copies"]) && material.kind === "append-scheduled-input-v1" && rowId === "CAP-012" && material.copies === 1) {
     bytes = Buffer.concat([scheduledBytes, scheduledBytes]);
-  } else if (exactKeys(material, ["kind", "violation", "content_base64"]) && material.kind === "inline-bytes-v1" &&
-    ((rowId === "CAP-013" && material.violation === "absolute-path") || (rowId === "CAP-014" && material.violation === "path-escape")) &&
-    typeof material.content_base64 === "string") {
-    bytes = Buffer.from(material.content_base64, "base64");
-    if (bytes.length > INLINE_SUPPLIED_MAX_BYTES || bytes.toString("base64") !== material.content_base64 ||
-      !malformedPathFrame(bytes, material.violation as "absolute-path" | "path-escape", supplied)) return null;
-  } else if (exactKeys(material, ["kind", "padding_byte", "frame_reference"]) && material.kind === "canonical-frame-envelope-v1" &&
-    ["CAP-015", "CAP-016", "CAP-017"].includes(rowId) && material.padding_byte === 0 && frameReference(material.frame_reference)) {
+  } else if (record(material.frame_reference) && rawFrameReference(material.frame_reference) &&
+    wireMaterial(Object.fromEntries(Object.entries(material).filter(([key]) => key !== "violation")),
+      (material.frame_reference as JsonRecord).frame as JsonRecord, supplied.input_length as number, true) &&
+    ["CAP-013", "CAP-014", "CAP-015", "CAP-016", "CAP-017"].includes(rowId)) {
     const suppliedFrame = (material.frame_reference as JsonRecord).frame as JsonRecord;
     if (!slotMatches(suppliedFrame, supplied)) return null;
-    const envelope = canonicalEnvelopeBytes(suppliedFrame, supplied.input_length as number);
-    if (!envelope) return null;
-    bytes = envelope;
+    if (["CAP-013", "CAP-014"].includes(rowId)) {
+      const violation = rowId === "CAP-013" ? "absolute-path" : "path-escape";
+      if (!exactKeys(material, ["kind", "version", "header_length", "body_length", "extension_length", "frame_reference", "violation"]) ||
+        material.violation !== violation || !malformedPathFrame(suppliedFrame, violation, supplied)) return null;
+    } else if (!frameReference(material.frame_reference) || !wireMaterial(material, suppliedFrame, supplied.input_length as number, true)) return null;
+    const wire = wireBytes(suppliedFrame, supplied.input_length as number);
+    if (!wire) return null;
+    bytes = wire;
   } else if (exactKeys(material, ["kind", "byte", "count"]) && material.kind === "append-byte-v1" &&
     rowId === "LIM-002" && material.byte === 0 && material.count === 1) {
     bytes = Buffer.concat([scheduledBytes, Buffer.from([0])]);
@@ -836,14 +847,13 @@ function scheduledSuppliedBinding(binding: JsonRecord, row: JsonRecord): boolean
   const scheduled = binding.scheduled;
   const supplied = binding.supplied;
   if (!exactKeys(scheduled, SCHEDULED_INPUT_KEYS) || !declaredSlot(scheduled) || !record(scheduled.material) ||
-    !exactKeys(scheduled.material, ["kind", "padding_byte"]) || scheduled.material.kind !== "canonical-frame-envelope-v1" ||
-    scheduled.material.padding_byte !== 0 || !frameReference(scheduled.frame_reference) || !slotMatches(scheduled, row) ||
+    !frameReference(scheduled.frame_reference) || !slotMatches(scheduled, row) ||
     !boundedInteger(scheduled.input_length, OBSERVER_LIMITS.frame_bytes, false) || !sha256(scheduled.input_digest)) return false;
   const scheduledFrame = (scheduled.frame_reference as JsonRecord).frame as JsonRecord;
-  if (!slotMatches(scheduledFrame, scheduled)) return false;
-  const scheduledBytes = canonicalEnvelopeBytes(scheduledFrame, scheduled.input_length as number);
+  if (!slotMatches(scheduledFrame, scheduled) || !wireMaterial(scheduled.material, scheduledFrame, scheduled.input_length as number, false)) return false;
+  const scheduledBytes = wireBytes(scheduledFrame, scheduled.input_length as number);
   if (!scheduledBytes || createHash("sha256").update(scheduledBytes).digest("hex") !== scheduled.input_digest) return false;
-  if (/^CAP-01[0-7]$/.test(row.row_id as string) && scheduled.input_length !== canonicalFrameBytes(scheduledFrame).length) return false;
+  if (/^CAP-01[0-7]$/.test(row.row_id as string) && scheduled.input_length !== WIRE_FRAME_HEADER_BYTES + canonicalFrameBytes(scheduledFrame).length) return false;
   const suppliedBytes = suppliedInputProof(scheduled, supplied, row.row_id as string);
   if (!suppliedBytes || supplied.input_digest !== row.frame_digest) return false;
 
@@ -855,18 +865,18 @@ function scheduledSuppliedBinding(binding: JsonRecord, row: JsonRecord): boolean
   const suppliedReference = record(supplied.material) && record(supplied.material.frame_reference)
     ? supplied.material.frame_reference as JsonRecord : null;
   const exactCanonicalReplay = suppliedReference && record(suppliedReference.frame) &&
-    supplied.input_length === canonicalFrameBytes(suppliedReference.frame).length;
+    supplied.input_length === WIRE_FRAME_HEADER_BYTES + canonicalFrameBytes(suppliedReference.frame).length;
   if (row.row_id === "CAP-010") return sameRow && sameObservation && sameCapability && sameGeneration && !sameInput && supplied.material.kind === "xor-byte-v1";
   if (row.row_id === "CAP-011") return sameRow && sameObservation && sameCapability && sameGeneration &&
     supplied.input_length === (scheduled.input_length as number) - 1 && supplied.material.kind === "truncate-tail-v1";
   if (row.row_id === "CAP-012") return sameRow && sameObservation && sameCapability && sameGeneration &&
     supplied.input_length === (scheduled.input_length as number) * 2 && supplied.material.kind === "append-scheduled-input-v1";
   if (["CAP-013", "CAP-014"].includes(row.row_id as string)) return sameRow && sameObservation && sameCapability && !sameGeneration &&
-    supplied.material.kind === "inline-bytes-v1";
-  if (row.row_id === "CAP-015") return sameRow && sameObservation && !sameCapability && sameGeneration && exactCanonicalReplay === true && supplied.material.kind === "canonical-frame-envelope-v1";
-  if (row.row_id === "CAP-016") return sameRow && sameObservation && sameCapability && !sameGeneration && exactCanonicalReplay === true && supplied.material.kind === "canonical-frame-envelope-v1";
+    supplied.material.kind === "canonical-frame-wire-v1";
+  if (row.row_id === "CAP-015") return sameRow && sameObservation && !sameCapability && sameGeneration && exactCanonicalReplay === true && supplied.material.kind === "canonical-frame-wire-v1";
+  if (row.row_id === "CAP-016") return sameRow && sameObservation && sameCapability && !sameGeneration && exactCanonicalReplay === true && supplied.material.kind === "canonical-frame-wire-v1";
   if (row.row_id === "CAP-017") return supplied.row_id === "CAP-001" && !sameRow && !sameObservation && sameCapability &&
-    sameGeneration && exactCanonicalReplay === true && supplied.material.kind === "canonical-frame-envelope-v1";
+    sameGeneration && exactCanonicalReplay === true && supplied.material.kind === "canonical-frame-wire-v1";
   if (row.row_id === "LIM-001") return sameRow && sameObservation && sameCapability && sameGeneration && sameInput &&
     scheduled.input_length === OBSERVER_LIMITS.frame_bytes && supplied.material.kind === "scheduled-input-v1";
   if (row.row_id === "LIM-002") return sameRow && sameObservation && sameCapability && sameGeneration &&
@@ -874,7 +884,7 @@ function scheduledSuppliedBinding(binding: JsonRecord, row: JsonRecord): boolean
     supplied.material.kind === "append-byte-v1";
   if (/^CAP-01[0-7]$/.test(row.row_id as string)) return false;
   return sameRow && sameObservation && sameCapability && sameGeneration && sameInput &&
-    scheduled.input_length === canonicalFrameBytes(scheduledFrame).length && supplied.material.kind === "scheduled-input-v1";
+    scheduled.input_length === WIRE_FRAME_HEADER_BYTES + canonicalFrameBytes(scheduledFrame).length && supplied.material.kind === "scheduled-input-v1";
 }
 
 function controlAssertions(value: unknown): value is JsonRecord {
@@ -904,6 +914,8 @@ export function validateRowEvidence(value: unknown): boolean {
     (value.cleanup.verdict === "pass" && (value.cleanup.descriptors_restored !== true || value.cleanup.processes_reaped !== true)) ||
     !Array.isArray(value.cleanup.secondary_errors) || !value.cleanup.secondary_errors.every(nonEmptyString)) return false;
   if (!rowResourceRecord(value.resource_record, value.row_id as string) || !sha256(value.source_input_record_sha256)) return false;
+  const determinismRow = /^DET-00[1-4]$/.test(value.row_id as string);
+  if (determinismRow !== Object.hasOwn(value, "determinism_proof") || (determinismRow && !validateDeterminismProof(value))) return false;
   const shouldPass = exactJson(value.expected_outcome, value.observer_outcome) &&
     CONTROL_ASSERTION_IDS.every((id) => (assertions[id] as JsonRecord).verdict === "pass");
   if ((value.row_verdict === "pass") !== shouldPass) return false;
@@ -924,6 +936,13 @@ export function validatePlatformBundle(value: unknown): boolean {
     new Set(value.rows.map((row) => (row as JsonRecord).git_state_generation_digest)).size !== 174 ||
     new Set(value.rows.map((row) => (row as JsonRecord).frame_digest)).size !== 174 ||
     value.protection_set.length === 0 || value.raw_command_manifest.length === 0)) return false;
+  const determinismInvocationIds = value.rows.flatMap((row) => {
+    const proof = (row as JsonRecord).determinism_proof;
+    return record(proof) && record(proof.first) && record(proof.second)
+      ? [proof.first.invocation_id, proof.second.invocation_id] : [];
+  });
+  if (!determinismInvocationIds.every(sha256) || new Set(determinismInvocationIds).size !== determinismInvocationIds.length ||
+    (value.run_status === "valid_complete" && determinismInvocationIds.length !== 8)) return false;
   if (value.run_status === "invalid") {
     if (!nonEmptyString(value.first_cause) || !sortedUniqueStrings(value.all_failure_codes) || !(value.all_failure_codes as string[]).includes(value.first_cause)) return false;
   } else if (value.first_cause !== undefined || value.all_failure_codes !== undefined) return false;
