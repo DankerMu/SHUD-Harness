@@ -10,6 +10,7 @@ import {
   canonicalJsonDigest,
   sealFrame
 } from "./canonical-frame";
+import { validateFailureCauseForRow } from "./causal-proof";
 import { validateDecisionProjection } from "./decision";
 import { validateDeterminismProof } from "./determinism-proof";
 import { validateLifecycleCausality } from "./lifecycle-causality";
@@ -766,12 +767,6 @@ const ROW_RESOURCE_UNITS = Object.freeze([
   "bytes", "bytes", "count", "bytes", "segments", "count", "count", "bytes", "milliseconds", "milliseconds", "count", "bytes", "bytes"
 ]);
 
-const ROW_RESOURCE_REJECTIONS = Object.freeze([
-  "LIMIT_FRAME_BYTES", "LIMIT_INDEX_BYTES", "LIMIT_INDEX_ENTRIES", "LIMIT_PATH_BYTES", "LIMIT_PATH_DEPTH",
-  "LIMIT_NESTED_REPOSITORIES", "LIMIT_TRAVERSAL_ENTRIES", "LIMIT_HASHED_BYTES", "LIMIT_WALL_TIME", "LIMIT_CPU_TIME",
-  "LIMIT_THREADS", "LIMIT_MEMORY", "LIMIT_OUTPUT_BYTES"
-]);
-
 function rowResourceRecord(value: unknown, rowId: string): boolean {
   if (!record(value) || !exactKeys(value, ["boundary_class", "declared_limit", "within_limits"])) return false;
   const match = /^LIM-(\d{3})$/.exec(rowId);
@@ -855,63 +850,12 @@ function expectedActualResourceForRow(actual: JsonRecord, row: JsonRecord): bool
   return actual.declared_limit === limit && actual.measurement.value === ceiling + (ordinal % 2 === 0 ? 1 : 0);
 }
 
-function receiptDigestValid(receipt: JsonRecord): boolean {
-  if (!sha256(receipt.receipt_digest)) return false;
-  return receipt.receipt_digest === canonicalDigest(Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== "receipt_digest")));
-}
-
-function boundFailureReceipt(receipt: JsonRecord, row: JsonRecord): boolean {
-  return receipt.schema_version === "shud.git-status-capability.row-failure-receipt.v1" &&
-    receipt.producer === row.actual_producing_boundary && receipt.row_id === row.row_id && receipt.observation_id === row.observation_id &&
-    receipt.supplied_input_digest === row.frame_digest && receiptDigestValid(receipt);
-}
-
-function validateFailureCause(row: JsonRecord, assertions: JsonRecord): boolean {
-  if (!record(row.failure_cause) || !exactKeys(row.failure_cause, ["kind", "receipt"]) || !record(row.failure_cause.receipt)) return false;
-  const cause = row.failure_cause;
-  const receipt = cause.receipt as JsonRecord;
-  const baseKeys = ["schema_version", "producer", "row_id", "observation_id", "supplied_input_digest", "receipt_digest"];
-  if (!boundFailureReceipt(receipt, row)) return false;
-  const resource = row.actual_resource_record as JsonRecord;
-  const controlsPassed = CONTROL_ASSERTION_IDS.every((id) => (assertions[id] as JsonRecord).verdict === "pass");
-  if (cause.kind === "outcome-mismatch-v1") {
-    return exactKeys(receipt, [...baseKeys, "observed_outcome"]) && exactJson(receipt.observed_outcome, row.observer_outcome) &&
-      !exactJson(row.expected_outcome, row.observer_outcome) && resource.boundary_class !== "exceeded" && controlsPassed;
-  }
-  if (cause.kind === "control-failure-v1") {
-    if (!exactKeys(receipt, [...baseKeys, "control_id", "control_verdict"]) || !CONTROL_ASSERTION_IDS.includes(receipt.control_id as any) ||
-      receipt.control_verdict !== "fail" || (assertions[receipt.control_id as string] as JsonRecord)?.verdict !== "fail" ||
-      !exactJson(row.expected_outcome, row.observer_outcome) || resource.boundary_class === "exceeded") return false;
-    const allowed = row.actual_producing_boundary === "tripwire" ? ["protected_write", "protection"] :
-      row.actual_producing_boundary === "observer" ? ["oracle"] : ["ambient_path", "subprocess", "network", "cleanup"];
-    return allowed.includes(receipt.control_id as string);
-  }
-  if (cause.kind === "resource-exceeded-v1") {
-    if (!exactKeys(receipt, [...baseKeys, "declared_limit", "stimulus_receipt_digest", "observed_outcome"]) ||
-      row.actual_producing_boundary !== "launcher" || resource.boundary_class !== "exceeded" ||
-      receipt.declared_limit !== resource.declared_limit || !record(resource.stimulus) || !record(resource.stimulus.locator) ||
-      receipt.stimulus_receipt_digest !== resource.stimulus.locator.receipt_digest || !exactJson(receipt.observed_outcome, row.observer_outcome) ||
-      !controlsPassed) return false;
-    const index = ROW_RESOURCE_LIMITS.indexOf(resource.declared_limit as string);
-    return index >= 0 && record(row.observer_outcome) && row.observer_outcome.kind === "rejected" &&
-      (row.observer_outcome.code === ROW_RESOURCE_REJECTIONS[index] ||
-        (resource.declared_limit === "wall_time_ms" && row.observer_outcome.code === "TIMEOUT"));
-  }
-  if (cause.kind === "lifecycle-fault-v1") {
-    return exactKeys(receipt, [...baseKeys, "mutation_kind", "first_cause", "cleanup_verdict"]) &&
-      ["LIF-002", "LIF-006", "LIF-007"].includes(row.row_id as string) && record(row.frame_binding) && record(row.frame_binding.supplied) &&
-      record(row.frame_binding.supplied.material) && receipt.mutation_kind === row.frame_binding.supplied.material.kind &&
-      receipt.first_cause === row.first_cause && receipt.cleanup_verdict === (row.cleanup as JsonRecord).verdict;
-  }
-  return false;
-}
-
-function actualFailureCausality(row: JsonRecord, assertions: JsonRecord): boolean {
+function actualFailureCausality(row: JsonRecord): boolean {
   const actualResource = row.actual_resource_record as JsonRecord;
   if (row.row_verdict === "pass") return row.failure_cause === undefined && row.actual_producing_boundary === row.producing_boundary &&
     record(row.resource_record) && ["boundary_class", "declared_limit", "within_limits"].every((key) =>
       actualResource[key] === (row.resource_record as JsonRecord)[key]);
-  return validateFailureCause(row, assertions);
+  return validateFailureCauseForRow(row);
 }
 
 const SLOT_KEYS = Object.freeze([
@@ -1105,7 +1049,7 @@ export function validateRowEvidence(value: unknown): boolean {
     value.actual_producing_boundary === value.producing_boundary && record(value.actual_resource_record) && record(value.resource_record) &&
     ["boundary_class", "declared_limit", "within_limits"].every((key) => (value.actual_resource_record as JsonRecord)[key] === (value.resource_record as JsonRecord)[key]);
   if ((value.row_verdict === "pass") !== shouldPass) return false;
-  return actualFailureCausality(value, assertions);
+  return actualFailureCausality(value);
 }
 
 export function validatePlatformBundle(value: unknown): boolean {

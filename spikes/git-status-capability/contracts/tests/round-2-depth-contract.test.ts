@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { canonicalJsonBytes, sealFrame } from "../lib/canonical-frame";
 import { encodeDecisionRowProjection } from "../lib/decision";
 import { encodeDecisionRowProjectionCore } from "../lib/row-projection";
-import { OBSERVER_LIMITS } from "../lib/frozen";
+import { INGESTION_LIMITS, OBSERVER_LIMITS } from "../lib/frozen";
 import { validateDeterminismProof } from "../lib/determinism-proof";
 import { validateDecision, validateFrame, validatePlatformBundle, validateRowEvidence, validateSourceInputRecord } from "../lib/schema";
 import { canonicalWireFrameBytes } from "../lib/wire-frame";
@@ -128,16 +128,91 @@ function causalReceipt(row: any, kind: "outcome-mismatch-v1" | "control-failure-
     base.control_verdict = "fail";
   }
   if (kind === "resource-exceeded-v1") {
-    base.declared_limit = row.actual_resource_record.declared_limit;
-    base.stimulus_receipt_digest = row.actual_resource_record.stimulus.locator.receipt_digest;
     base.observed_outcome = structuredClone(row.observer_outcome);
+    base.resource = structuredClone(row.actual_resource_record);
   }
   if (kind === "lifecycle-fault-v1") {
-    base.mutation_kind = row.frame_binding.supplied.material.kind;
+    base.supplied_mutation = structuredClone(row.frame_binding.supplied.material);
     base.first_cause = row.first_cause;
-    base.cleanup_verdict = row.cleanup.verdict;
+    base.secondary_errors = structuredClone(row.secondary_errors);
+    base.cleanup = structuredClone(row.cleanup);
   }
   return { kind, receipt: { ...base, receipt_digest: digest(base) } };
+}
+
+function resignCause(cause: any): any {
+  const changed = structuredClone(cause);
+  const { receipt_digest: _discarded, ...receipt } = changed.receipt;
+  changed.receipt = { ...receipt, receipt_digest: digest(receipt) };
+  return changed;
+}
+
+function rejectedDecisionFor(row: any, cause = row.failure_cause): any {
+  const decision = structuredClone(generic.decision);
+  const index = decision.rows.findIndex((scalar: string) => {
+    const candidate = scalar.split("\0");
+    return candidate[0] === (row.platform === "macos" ? "m" : "l") && candidate[1] === row.row_id;
+  });
+  const fields = decision.rows[index].split("\0");
+  const kindToken = ({ clean: "c", dirty: "d", rejected: "r" } as any)[row.observer_outcome.kind];
+  const producerToken = ({ observer: "o", launcher: "l", tripwire: "t" } as any)[row.actual_producing_boundary];
+  let passedBits = 0;
+  for (let controlIndex = 0; controlIndex < Object.keys(row.control_assertions).length; controlIndex += 1) {
+    const id = ["oracle", "ambient_path", "subprocess", "network", "protected_write", "protection", "cleanup"][controlIndex]!;
+    if (row.control_assertions[id].verdict === "pass") passedBits |= 1 << controlIndex;
+  }
+  fields[4] = kindToken;
+  fields[5] = row.observer_outcome.code ?? "";
+  fields[6] = "f";
+  fields[7] = row.observation_id;
+  fields[8] = row.git_state_generation_digest;
+  fields[9] = row.frame_digest;
+  fields[10] = producerToken;
+  fields[12] = passedBits.toString(16).padStart(2, "0");
+  fields[13] = row.protection_set_equal ? "1" : "0";
+  fields[14] = row.cleanup.verdict === "pass" ? "p" : "f";
+  fields[15] = String(row.actual_resource_record.declared_limit === "none" ? 0 :
+    LIMITS.findIndex(([limit]) => limit === row.actual_resource_record.declared_limit) + 1);
+  fields[16] = ({ below: "b", exact: "e", exceeded: "x" } as any)[row.actual_resource_record.boundary_class];
+  fields[18] = canonicalJsonBytes(cause).toString("base64url");
+  decision.rows[index] = fields.join("\0");
+  decision.terminal_decision = "rejected";
+  decision.first_cause = "ROW_VERDICT_FAILED";
+  decision.all_failure_codes = ["ROW_VERDICT_FAILED"];
+  return decision;
+}
+
+function causalParity(row: any, cause = row.failure_cause): [boolean, boolean] {
+  const raw = structuredClone(row);
+  raw.failure_cause = cause;
+  return [validateRowEvidence(raw), validateDecision(rejectedDecisionFor(row, cause))];
+}
+
+function outcomeFailure(rowId: string, producer: "observer" | "launcher" | "tripwire", observed: any): any {
+  const row = normalizedRow(rowId);
+  row.observer_outcome = observed;
+  row.actual_producing_boundary = producer;
+  row.row_verdict = "fail";
+  row.failure_cause = causalReceipt(row, "outcome-mismatch-v1");
+  return row;
+}
+
+function resourceFailure(rowId: string, limit: string, unit: string, code: string): any {
+  const row = normalizedRow(rowId);
+  row.observer_outcome = { kind: "rejected", code };
+  row.actual_producing_boundary = "launcher";
+  row.actual_resource_record = measuredResource(row, limit, unit, (OBSERVER_LIMITS as any)[limit] + 1);
+  row.row_verdict = "fail";
+  row.failure_cause = causalReceipt(row, "resource-exceeded-v1");
+  return row;
+}
+
+function lifecycleFailure(rowId: "LIF-002" | "LIF-006" | "LIF-007"): any {
+  const row = normalizedRow(rowId);
+  row.observer_outcome = { kind: row.expected_outcome.kind === "dirty" ? "clean" : "dirty" };
+  row.row_verdict = "fail";
+  row.failure_cause = causalReceipt(row, "lifecycle-fault-v1");
+  return row;
 }
 
 describe("Round 2 canonical proof binding", () => {
@@ -321,7 +396,9 @@ describe("Round 2 canonical proof binding", () => {
     expect(validateRowEvidence(launcher), "missing-cause").toBe(false);
 
     launcher.failure_cause = causalReceipt(launcher, "outcome-mismatch-v1");
-    expect(validateRowEvidence(launcher), "bound-launcher-cause").toBe(true);
+    expect(validateRowEvidence(launcher), "bound-launcher-cause").toBe(false);
+    const observer = outcomeFailure("BAS-004", "observer", { kind: "clean" });
+    expect(validateRowEvidence(observer), "bound-observer-cause").toBe(true);
     const swappedProducer = structuredClone(launcher);
     swappedProducer.failure_cause.receipt.producer = "observer";
     expect(validateRowEvidence(swappedProducer), "producer-swap").toBe(false);
@@ -349,7 +426,7 @@ describe("Round 2 canonical proof binding", () => {
 
     const directDecision = structuredClone(generic.decision);
     const index = directDecision.rows.findIndex((scalar: string) => scalar.split("\0")[0] === "m" && scalar.split("\0")[1] === "BAS-004");
-    directDecision.rows[index] = encodeDecisionRowProjection(launcher);
+    directDecision.rows[index] = encodeDecisionRowProjection(observer);
     directDecision.terminal_decision = "rejected";
     directDecision.first_cause = "ROW_VERDICT_FAILED";
     directDecision.all_failure_codes = ["ROW_VERDICT_FAILED"];
@@ -357,5 +434,133 @@ describe("Round 2 canonical proof binding", () => {
     const missingD8Cause = structuredClone(directDecision);
     missingD8Cause.rows[index] = missingD8Cause.rows[index].split("\0").slice(0, -1).concat("").join("\0");
     expect(validateDecision(missingD8Cause), "D8 missing cause").toBe(false);
+  });
+
+  test("generic outcome mismatch is observer-only at the raw seam", () => {
+    const launcher = outcomeFailure("BAS-004", "launcher", { kind: "rejected", code: "TIMEOUT" });
+    expect(validateRowEvidence(launcher), "launcher mismatch").toBe(false);
+    const tripwire = outcomeFailure("BAS-004", "tripwire", { kind: "clean" });
+    expect(validateRowEvidence(tripwire), "tripwire mismatch").toBe(false);
+    const observer = outcomeFailure("BAS-004", "observer", { kind: "clean" });
+    expect(validateRowEvidence(observer), "observer mismatch").toBe(true);
+  });
+
+  test("generic outcome mismatch is observer-only at the D8 seam", () => {
+    const launcher = outcomeFailure("BAS-004", "launcher", { kind: "rejected", code: "TIMEOUT" });
+    expect(validateDecision(rejectedDecisionFor(launcher)), "launcher mismatch").toBe(false);
+    const tripwire = outcomeFailure("BAS-004", "tripwire", { kind: "clean" });
+    expect(validateDecision(rejectedDecisionFor(tripwire)), "tripwire mismatch").toBe(false);
+    const observer = outcomeFailure("BAS-004", "observer", { kind: "clean" });
+    expect(validateDecision(rejectedDecisionFor(observer)), "observer mismatch").toBe(true);
+  });
+
+  test("raw and D8 accept the same complete projection for every causal kind", () => {
+    const outcome = outcomeFailure("BAS-004", "observer", { kind: "clean" });
+    const control = normalizedRow("BAS-002");
+    control.actual_producing_boundary = "tripwire";
+    control.control_assertions.protected_write.verdict = "fail";
+    control.row_verdict = "fail";
+    control.failure_cause = causalReceipt(control, "control-failure-v1", "protected_write");
+    const resource = resourceFailure("BAS-001", "wall_time_ms", "milliseconds", "TIMEOUT");
+    const lifecycle = lifecycleFailure("LIF-002");
+    expect([outcome, control, resource, lifecycle].map((row) => causalParity(row))).toEqual([
+      [true, true], [true, true], [true, true], [true, true]
+    ]);
+    for (const row of [outcome, control, resource, lifecycle]) {
+      expect(Buffer.byteLength(JSON.stringify(rejectedDecisionFor(row)))).toBeLessThanOrEqual(INGESTION_LIMITS.decision.bytes);
+    }
+  });
+
+  test("resource cause revalidates every signed recipe, locator, measurement, and sibling limit field", () => {
+    const row = resourceFailure("BAS-003", "memory_bytes", "bytes", "LIMIT_MEMORY");
+    expect(causalParity(row)).toEqual([true, true]);
+    const mutations = [
+      (cause: any) => { cause.receipt.resource.stimulus.recipe.value += 1; },
+      (cause: any) => { cause.receipt.resource.stimulus.locator.supplied_input_digest = shaA; },
+      (cause: any) => { cause.receipt.resource.measurement.value += 1; },
+      (cause: any) => { cause.receipt.resource.declared_limit = "output_bytes"; },
+      (cause: any) => { cause.receipt.resource.stimulus.recipe.unit = "count"; },
+      (cause: any) => { cause.receipt.supplied_input_digest = shaA; }
+    ];
+    for (const mutate of mutations) {
+      const cause = structuredClone(row.failure_cause);
+      mutate(cause);
+      expect(causalParity(row, resignCause(cause))).toEqual([false, false]);
+    }
+    const sibling = resourceFailure("BAS-003", "output_bytes", "bytes", "LIMIT_OUTPUT_BYTES");
+    const siblingCause = structuredClone(sibling.failure_cause);
+    siblingCause.receipt.row_id = row.row_id;
+    siblingCause.receipt.observation_id = row.observation_id;
+    siblingCause.receipt.supplied_input_digest = row.frame_digest;
+    expect(causalParity(row, resignCause(siblingCause))).toEqual([false, false]);
+  });
+
+  test("lifecycle cause revalidates complete row-specific mutation, ordered errors, and cleanup material", () => {
+    for (const rowId of ["LIF-002", "LIF-006", "LIF-007"] as const) {
+      const row = lifecycleFailure(rowId);
+      expect(causalParity(row), `${rowId}:baseline`).toEqual([true, true]);
+      const mutations = [
+        (cause: any) => { cause.receipt.supplied_mutation = cause.receipt.supplied_mutation.kind === "scheduled-input-v1"
+          ? { kind: "set-wire-version-v1", offset: 8, from: 1, to: 2 } : { kind: "scheduled-input-v1" }; },
+        (cause: any) => { cause.receipt.first_cause = cause.receipt.first_cause === "CLEANUP_FAILED"
+          ? "FRAME_VERSION_UNSUPPORTED" : "CLEANUP_FAILED"; },
+        (cause: any) => { cause.receipt.secondary_errors = ["CLEANUP_FAILED", "FRAME_VERSION_UNSUPPORTED"]; },
+        (cause: any) => { cause.receipt.cleanup.descriptors_restored = !cause.receipt.cleanup.descriptors_restored; }
+      ];
+      for (const mutate of mutations) {
+        const cause = structuredClone(row.failure_cause);
+        mutate(cause);
+        expect(causalParity(row, resignCause(cause)), `${rowId}:mutation`).toEqual([false, false]);
+      }
+    }
+    for (const targetId of ["LIF-002", "LIF-006", "LIF-007"] as const) {
+      for (const siblingId of ["LIF-002", "LIF-006", "LIF-007"] as const) {
+        if (targetId === siblingId) continue;
+        const row = lifecycleFailure(targetId);
+        const sibling = lifecycleFailure(siblingId).failure_cause;
+        sibling.receipt.row_id = row.row_id;
+        sibling.receipt.observation_id = row.observation_id;
+        sibling.receipt.supplied_input_digest = row.frame_digest;
+        expect(causalParity(row, resignCause(sibling)), `${targetId}<-${siblingId}`).toEqual([false, false]);
+      }
+    }
+  });
+
+  test("producer and cause-kind combinations remain closed at both seams", () => {
+    const tripwireMismatch = outcomeFailure("BAS-005", "tripwire", { kind: "clean" });
+    expect(causalParity(tripwireMismatch)).toEqual([false, false]);
+    const outcome = outcomeFailure("BAS-004", "observer", { kind: "clean" });
+    for (const mutate of [
+      (cause: any) => { cause.receipt.observed_outcome = { kind: "rejected", code: "TIMEOUT" }; },
+      (cause: any) => { cause.receipt.producer = "launcher"; },
+      (cause: any) => { cause.receipt.supplied_input_digest = shaA; }
+    ]) {
+      const cause = structuredClone(outcome.failure_cause);
+      mutate(cause);
+      expect(causalParity(outcome, resignCause(cause))).toEqual([false, false]);
+    }
+    const control = normalizedRow("BAS-002");
+    control.actual_producing_boundary = "tripwire";
+    control.control_assertions.protected_write.verdict = "fail";
+    control.row_verdict = "fail";
+    control.failure_cause = causalReceipt(control, "control-failure-v1", "protected_write");
+    for (const mutate of [
+      (cause: any) => { cause.receipt.control_id = "protection"; },
+      (cause: any) => { cause.receipt.control_verdict = "pass"; },
+      (cause: any) => { cause.receipt.producer = "launcher"; },
+      (cause: any) => { cause.receipt.supplied_input_digest = shaA; }
+    ]) {
+      const cause = structuredClone(control.failure_cause);
+      mutate(cause);
+      expect(causalParity(control, resignCause(cause))).toEqual([false, false]);
+    }
+    const resource = resourceFailure("BAS-003", "memory_bytes", "bytes", "LIMIT_MEMORY");
+    resource.actual_producing_boundary = "observer";
+    resource.failure_cause = causalReceipt(resource, "resource-exceeded-v1");
+    expect(causalParity(resource)).toEqual([false, false]);
+    const lifecycle = lifecycleFailure("LIF-002");
+    lifecycle.actual_producing_boundary = "launcher";
+    lifecycle.failure_cause = causalReceipt(lifecycle, "lifecycle-fault-v1");
+    expect(causalParity(lifecycle)).toEqual([false, false]);
   });
 });
