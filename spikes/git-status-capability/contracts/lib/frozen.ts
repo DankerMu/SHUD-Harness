@@ -166,6 +166,17 @@ export const FRAME_EVIDENCE_FIELD_ORDER = Object.freeze([
   "effective_config", "exclude_state", "attribute_state", "nested_state", "limit_stimulus"
 ]);
 
+export const DECISION_ROW_SEGMENTS = Object.freeze([
+  "platform", "row_id", "expected_kind", "expected_code", "observed_kind", "observed_code", "row_verdict",
+  "observation_id", "generation_payload_digest", "frame_digest", "producing_boundary", "oracle_verdict",
+  "active_tripwire_bitset", "protection_set_equal", "cleanup_verdict", "declared_limit", "boundary_class"
+]);
+
+export const DECISION_LIMIT_TOKENS = Object.freeze([
+  "none", "frame_bytes", "index_bytes", "index_entries", "path_bytes", "path_depth", "nested_repositories",
+  "traversal_entries", "hashed_bytes", "wall_time_ms", "cpu_time_ms", "threads", "memory_bytes", "output_bytes"
+]);
+
 export const SCHEMA_DESCRIPTORS = Object.freeze({
   frame: {
     schema_version: "shud.git-status-capability.frame.v1",
@@ -248,17 +259,36 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
   decision: {
     schema_version: "shud.git-status-capability.decision.v1",
     required_fields: [
-      "schema_version", "catalog_version", "catalog_digest", "source_input_record_sha256", "platforms", "rows",
-      "gates", "run_status"
+      "schema_version", "catalog_version", "catalog_digest", "base_sha",
+      "fixture_identity", "oracle_identity", "frame_identity", "runner_identity", "validator_identity", "tripwire_identity",
+      "source_input_record_sha256", "lockfile_digest", "lockfile_completeness_verdict",
+      "direct_feature_digest", "direct_feature_completeness_verdict",
+      "macos_target_graph_digest", "macos_target_graph_completeness_verdict",
+      "linux_target_graph_digest", "linux_target_graph_completeness_verdict",
+      "call_ledger_digest", "call_ledger_completeness_verdict", "sbom_digest", "sbom_completeness_verdict",
+      "license_inventory_digest", "license_inventory_completeness_verdict",
+      "macos_target_identity", "macos_toolchain_identity", "linux_target_identity", "linux_toolchain_identity",
+      "platforms", "rows", "gates", "run_status"
     ],
     optional_fields: ["terminal_decision", "first_cause", "all_failure_codes"],
     field_types: {
-      schema_version: "literal", catalog_version: "integer:1", catalog_digest: "sha256", source_input_record_sha256: "sha256",
+      schema_version: "literal", catalog_version: "integer:1", catalog_digest: "sha256", base_sha: "git-object-id",
+      fixture_identity: "sha256", oracle_identity: "sha256", frame_identity: "sha256", runner_identity: "sha256",
+      validator_identity: "sha256", tripwire_identity: "sha256", source_input_record_sha256: "sha256",
+      lockfile_digest: "sha256", lockfile_completeness_verdict: "literal:pass",
+      direct_feature_digest: "sha256", direct_feature_completeness_verdict: "literal:pass",
+      macos_target_graph_digest: "sha256", macos_target_graph_completeness_verdict: "literal:pass",
+      linux_target_graph_digest: "sha256", linux_target_graph_completeness_verdict: "literal:pass",
+      call_ledger_digest: "sha256", call_ledger_completeness_verdict: "literal:pass",
+      sbom_digest: "sha256", sbom_completeness_verdict: "literal:pass",
+      license_inventory_digest: "sha256", license_inventory_completeness_verdict: "literal:pass",
+      macos_target_identity: "literal:aarch64-apple-darwin", macos_toolchain_identity: "sha256",
+      linux_target_identity: "literal:x86_64-unknown-linux-gnu", linux_toolchain_identity: "sha256",
       platforms: "exact:[macos,linux]",
-      rows: "array:compact-row-projection-v1:{platform,row,expected-kind,expected-code,observed-kind,observed-code,verdict,observation-id,generation-payload-digest,complete-frame-digest};valid_complete=348-exact;slot,observation,generation/payload,complete-frame-identities=globally-unique",
-      gates: "nonempty-map:literal-pass",
-      run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted|rejected",
-      first_cause: "optional:nonempty-string", all_failure_codes: "optional:string[]"
+      rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,frame_digest,producing_boundary(o=observer),oracle_verdict(p),active_tripwire_bitset(7=ambient_path|subprocess|protected_write),protection_set_equal(1),cleanup_verdict(p),declared_limit(0..13=frozen-limit-order),boundary_class(b|e|x)];valid_complete=348-exact;slot,observation,generation/payload,complete-frame-identities=globally-unique",
+      gates: "nonempty-array:strict-repository-command-receipt:{id,argv,version,exit_verdict,summary_digest,source_input_record_sha256};id-unique;source-record-equal",
+      run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted-iff-all-row-verdicts-pass|rejected-iff-any-row-verdict-fails",
+      first_cause: "rejected-or-invalid:nonempty-string", all_failure_codes: "rejected-or-invalid:sorted-unique-string[]"
     },
     additional_properties: false
   },
