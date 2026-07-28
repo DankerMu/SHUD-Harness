@@ -167,17 +167,10 @@ function mutateDecisionRow(decision: Record<string, any>, rowIndex: number, segm
 
 function bindDecisionFailureCause(
   decision: Record<string, any>, rowIndex: number, kind: "outcome-mismatch-v1" | "control-failure-v1",
-  details: Record<string, unknown>
+  _details: Record<string, unknown>
 ): void {
   const fields = decisionRowFields(decision.rows[rowIndex]);
-  const producer = fields[10] === "o" ? "observer" : fields[10] === "l" ? "launcher" : "tripwire";
-  const receipt = {
-    schema_version: "shud.git-status-capability.row-failure-receipt.v1",
-    producer, row_id: fields[1], observation_id: fields[7], supplied_input_digest: fields[9], ...details
-  };
-  const receiptDigest = createHash("sha256").update(Buffer.from(JSON.stringify(canonicalEvidenceValue(receipt)), "utf8")).digest("hex");
-  const cause = { kind, receipt: { ...receipt, receipt_digest: receiptDigest } };
-  fields[18] = Buffer.from(JSON.stringify(canonicalEvidenceValue(cause)), "utf8").toString("base64url");
+  fields[18] = kind === "outcome-mismatch-v1" ? "o" : "c";
   decision.rows[rowIndex] = fields.join("\0");
 }
 

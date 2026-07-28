@@ -29,13 +29,7 @@ function rejectedDecision(code: string): any {
   fields[4] = "r";
   fields[5] = code;
   fields[6] = "f";
-  const receipt = {
-    schema_version: "shud.git-status-capability.row-failure-receipt.v1", producer: "observer",
-    row_id: fields[1], observation_id: fields[7], supplied_input_digest: fields[9],
-    observed_outcome: { kind: "rejected", code }
-  };
-  const cause = { kind: "outcome-mismatch-v1", receipt: { ...receipt, receipt_digest: canonicalDigest(receipt) } };
-  fields[18] = Buffer.from(JSON.stringify(canonicalValue(cause)), "utf8").toString("base64url");
+  fields[18] = "o";
   decision.rows[0] = fields.join("\0");
   decision.terminal_decision = "rejected";
   decision.first_cause = "ROW_VERDICT_FAILED";

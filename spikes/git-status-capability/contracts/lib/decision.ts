@@ -1,5 +1,5 @@
 import { CATALOG_V1, CONTROL_ASSERTION_IDS, DECISION_LIMIT_TOKENS, DECISION_ROW_SEGMENTS, REJECTION_CODES } from "./frozen";
-import { decodeAndValidateFailureCause } from "./causal-proof";
+import { validateFailureCauseTag } from "./causal-proof";
 import { determinismProjectionToken } from "./determinism-proof";
 import { encodeDecisionRowProjectionCore } from "./row-projection";
 
@@ -111,7 +111,7 @@ function decodeDecisionRow(value: unknown): DecodedRow | null {
   const controlsPassed = passedControlBits === ALL_CONTROL_BITS;
   const cleanupFailureIsEvidence = rowId === "LIF-006" || rowId === "LIF-007";
   const actualMatchesExpected = producingBoundary === catalog?.producing_boundary && limitOrdinal === frozenLimitOrdinal && boundaryClass === frozenBoundary;
-  const failureCauseValid = decodeAndValidateFailureCause(failureCauseToken!, {
+  const failureCauseValid = validateFailureCauseTag(failureCauseToken!, {
     platform, rowVerdict, expectedOutcome, observedOutcome, producingBoundary, rowId: rowId!, observationId: observationId!,
     suppliedInputDigest: frameDigest!, declaredLimit, boundaryClass, passedControlBits,
     cleanupVerdict: cleanupVerdict === "p" ? "pass" : "fail"

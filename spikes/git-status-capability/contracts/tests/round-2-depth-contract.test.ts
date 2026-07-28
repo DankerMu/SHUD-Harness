@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalJsonBytes, sealFrame } from "../lib/canonical-frame";
 import { encodeDecisionRowProjection } from "../lib/decision";
 import { encodeDecisionRowProjectionCore } from "../lib/row-projection";
-import { CATALOG_V1, INGESTION_LIMITS, OBSERVER_LIMITS } from "../lib/frozen";
+import { CATALOG_V1, INGESTION_LIMITS, OBSERVER_LIMITS, REJECTION_CODES } from "../lib/frozen";
 import { validateDeterminismProof } from "../lib/determinism-proof";
 import { validateDecision, validateFrame, validatePlatformBundle, validateRowEvidence, validateSourceInputRecord } from "../lib/schema";
 import { canonicalWireFrameBytes } from "../lib/wire-frame";
@@ -198,7 +200,7 @@ function rejectedDecisionFor(row: any, cause = row.failure_cause): any {
   fields[15] = String(row.actual_resource_record.declared_limit === "none" ? 0 :
     LIMITS.findIndex(([limit]) => limit === row.actual_resource_record.declared_limit) + 1);
   fields[16] = ({ below: "b", exact: "e", exceeded: "x" } as any)[row.actual_resource_record.boundary_class];
-  fields[18] = canonicalJsonBytes(cause).toString("base64url");
+  fields[18] = (FAILURE_CAUSE_TAGS as Record<string, string>)[cause?.kind] ?? cause?.kind ?? "";
   decision.rows[index] = fields.join("\0");
   decision.terminal_decision = "rejected";
   decision.first_cause = "ROW_VERDICT_FAILED";
@@ -252,6 +254,72 @@ const CATALOG_NEGATIVE_ROWS = [
   "PRT-001", "PRT-002", "PRT-003", "PRT-004", "PRT-005", "PRT-006", "PRT-007", "PRT-008", "PRT-009",
   "PRT-010", "PRT-011", "PRT-012", "LIF-003", "LIF-004", "LIF-005", "LIF-007"
 ] as const;
+
+const FAILURE_CAUSE_TAGS = {
+  "outcome-mismatch-v1": "o",
+  "control-failure-v1": "c",
+  "resource-exceeded-v1": "r",
+  "lifecycle-fault-v1": "l",
+  "catalog-negative-mismatch-v1": "n"
+} as const;
+
+function longestAlternateRejection(expectedCode?: string): string {
+  return [...REJECTION_CODES].filter((code) => code !== expectedCode)
+    .sort((left, right) => Buffer.byteLength(right) - Buffer.byteLength(left) || left.localeCompare(right))[0]!;
+}
+
+function refreshDeterminismFailureProof(row: any): any {
+  if (!row.determinism_proof) return row;
+  for (const receipt of [row.determinism_proof.first, row.determinism_proof.second]) {
+    receipt.output.observer_outcome = structuredClone(row.observer_outcome);
+    receipt.output.row_verdict = row.row_verdict;
+    receipt.output.control_assertions = structuredClone(row.control_assertions);
+    receipt.output.protection_set_equal = row.protection_set_equal;
+    receipt.output.cleanup = structuredClone(row.cleanup);
+    receipt.output.actual_producing_boundary = row.actual_producing_boundary;
+    receipt.output.actual_resource_record = structuredClone(row.actual_resource_record);
+    receipt.normalized_row_output_digest = digest(receipt.output);
+    receipt.decision_projection_digest = createHash("sha256")
+      .update(encodeDecisionRowProjectionCore(row, row.row_id.at(-1)!))
+      .digest("hex");
+  }
+  return row;
+}
+
+function worstFailureRow(rowId: string, platform: "macos" | "linux"): any {
+  if (rowId === "PRT-012") {
+    const row = normalizedRow(rowId, platform);
+    row.control_assertions.protected_write.verdict = "fail";
+    row.row_verdict = "fail";
+    row.failure_cause = causalReceipt(row, "control-failure-v1", "protected_write");
+    return refreshDeterminismFailureProof(row);
+  }
+  if (CATALOG_NEGATIVE_ROWS.includes(rowId as any)) {
+    return refreshDeterminismFailureProof(
+      catalogNegativeFailure(rowId, platform, longestAlternateRejection(normalizedRow(rowId, platform).expected_outcome.code))
+    );
+  }
+  const row = normalizedRow(rowId, platform);
+  if (rowId === "LIF-002" || rowId === "LIF-006") {
+    row.observer_outcome = { kind: "rejected", code: longestAlternateRejection(row.expected_outcome.code) };
+    row.row_verdict = "fail";
+    row.failure_cause = causalReceipt(row, "lifecycle-fault-v1");
+    return refreshDeterminismFailureProof(row);
+  }
+  const limitMatch = /^LIM-(\d{3})$/.exec(rowId);
+  if (limitMatch && Number(limitMatch[1]) % 2 === 0) {
+    row.observer_outcome = structuredClone(row.expected_outcome);
+    row.actual_producing_boundary = "launcher";
+    row.row_verdict = "fail";
+    row.failure_cause = causalReceipt(row, "resource-exceeded-v1");
+    return refreshDeterminismFailureProof(row);
+  }
+  row.observer_outcome = { kind: "rejected", code: longestAlternateRejection(row.expected_outcome.code) };
+  row.actual_producing_boundary = "observer";
+  row.row_verdict = "fail";
+  row.failure_cause = causalReceipt(row, "outcome-mismatch-v1");
+  return refreshDeterminismFailureProof(row);
+}
 
 describe("Round 2 canonical proof binding", () => {
   test("all 13 LIM exact/+1 pairs bind the declared boundary to a replayable stimulus and actual measurement", () => {
@@ -523,14 +591,14 @@ describe("Round 2 canonical proof binding", () => {
     for (const mutate of mutations) {
       const cause = structuredClone(row.failure_cause);
       mutate(cause);
-      expect(causalParity(row, resignCause(cause))).toEqual([false, false]);
+      expect(causalParity(row, resignCause(cause))).toEqual([false, true]);
     }
     const sibling = resourceFailure("BAS-003", "output_bytes", "bytes", "LIMIT_OUTPUT_BYTES");
     const siblingCause = structuredClone(sibling.failure_cause);
     siblingCause.receipt.row_id = row.row_id;
     siblingCause.receipt.observation_id = row.observation_id;
     siblingCause.receipt.supplied_input_digest = row.frame_digest;
-    expect(causalParity(row, resignCause(siblingCause))).toEqual([false, false]);
+    expect(causalParity(row, resignCause(siblingCause))).toEqual([false, true]);
   });
 
   test("lifecycle cause revalidates complete row-specific mutation, ordered errors, and cleanup material", () => {
@@ -548,7 +616,7 @@ describe("Round 2 canonical proof binding", () => {
       for (const mutate of mutations) {
         const cause = structuredClone(row.failure_cause);
         mutate(cause);
-        expect(causalParity(row, resignCause(cause)), `${rowId}:mutation`).toEqual([false, false]);
+        expect(causalParity(row, resignCause(cause)), `${rowId}:mutation`).toEqual([false, true]);
       }
     }
     for (const targetId of ["LIF-002", "LIF-006", "LIF-007"] as const) {
@@ -559,7 +627,7 @@ describe("Round 2 canonical proof binding", () => {
         sibling.receipt.row_id = row.row_id;
         sibling.receipt.observation_id = row.observation_id;
         sibling.receipt.supplied_input_digest = row.frame_digest;
-        expect(causalParity(row, resignCause(sibling)), `${targetId}<-${siblingId}`).toEqual([false, false]);
+        expect(causalParity(row, resignCause(sibling)), `${targetId}<-${siblingId}`).toEqual([false, true]);
       }
     }
   });
@@ -575,7 +643,7 @@ describe("Round 2 canonical proof binding", () => {
     ]) {
       const cause = structuredClone(outcome.failure_cause);
       mutate(cause);
-      expect(causalParity(outcome, resignCause(cause))).toEqual([false, false]);
+      expect(causalParity(outcome, resignCause(cause))).toEqual([false, true]);
     }
     const control = normalizedRow("BAS-002");
     control.actual_producing_boundary = "tripwire";
@@ -590,7 +658,7 @@ describe("Round 2 canonical proof binding", () => {
     ]) {
       const cause = structuredClone(control.failure_cause);
       mutate(cause);
-      expect(causalParity(control, resignCause(cause))).toEqual([false, false]);
+      expect(causalParity(control, resignCause(cause))).toEqual([false, true]);
     }
     const resource = resourceFailure("BAS-003", "memory_bytes", "bytes", "LIMIT_MEMORY");
     resource.actual_producing_boundary = "observer";
@@ -648,7 +716,7 @@ describe("Round 2 canonical proof binding", () => {
     for (const mutate of mutations) {
       const cause = structuredClone(row.failure_cause);
       mutate(cause);
-      expect(causalParity(row, resignCause(cause))).toEqual([false, false]);
+      expect(causalParity(row, resignCause(cause))).toEqual([false, true]);
     }
     const fullyResigned = structuredClone(row.failure_cause);
     fullyResigned.receipt.supplied_state.material.extra = true;
@@ -657,7 +725,7 @@ describe("Round 2 canonical proof binding", () => {
     const { recipe_digest: _oldRecipeDigest, ...recipe } = fullyResigned.receipt.relationship_recipe;
     recipe.supplied_material_digest = materialDigest;
     fullyResigned.receipt.relationship_recipe = { ...recipe, recipe_digest: digest(recipe) };
-    expect(causalParity(row, resignCause(fullyResigned))).toEqual([false, false]);
+    expect(causalParity(row, resignCause(fullyResigned))).toEqual([false, true]);
   });
 
   test("catalog negative cause cannot hide control, resource, producer, or generic-row drift", () => {
@@ -683,4 +751,109 @@ describe("Round 2 canonical proof binding", () => {
     generic.failure_cause = causalReceipt(generic, "catalog-negative-mismatch-v1");
     expect(causalParity(generic)).toEqual([false, false]);
   });
+
+  test("D8 projects exactly one canonical byte per causal kind and never copies raw causal material", () => {
+    const outcome = outcomeFailure("BAS-004", "observer", { kind: "clean" });
+    const control = normalizedRow("BAS-002");
+    control.actual_producing_boundary = "tripwire";
+    control.control_assertions.protected_write.verdict = "fail";
+    control.row_verdict = "fail";
+    control.failure_cause = causalReceipt(control, "control-failure-v1", "protected_write");
+    const rows = [
+      outcome,
+      control,
+      resourceFailure("BAS-003", "memory_bytes", "bytes", "LIMIT_MEMORY"),
+      lifecycleFailure("LIF-002"),
+      catalogNegativeFailure("CAP-005", "macos", "PLATFORM_UNSUPPORTED"),
+      catalogNegativeFailure("CAP-016", "macos", "PLATFORM_UNSUPPORTED"),
+      catalogNegativeFailure("CAP-017", "linux", "PLATFORM_UNSUPPORTED")
+    ];
+    for (const row of rows) {
+      expect(validateRowEvidence(row), `${row.platform}/${row.row_id}:raw`).toBe(true);
+      const decision = rejectedDecisionFor(row);
+      const index = decision.rows.findIndex((scalar: string) => {
+        const fields = scalar.split("\0");
+        return fields[0] === (row.platform === "macos" ? "m" : "l") && fields[1] === row.row_id;
+      });
+      const tag = decision.rows[index].split("\0")[18];
+      expect(validateDecision(decision), `${row.platform}/${row.row_id}:d8-tag`).toBe(true);
+      expect(tag, `${row.platform}/${row.row_id}:tag`).toBe((FAILURE_CAUSE_TAGS as Record<string, string>)[row.failure_cause.kind]);
+      expect(Buffer.byteLength(tag), `${row.platform}/${row.row_id}:width`).toBe(1);
+      expect(tag.includes("{") || tag.includes(row.frame_digest), `${row.platform}/${row.row_id}:opaque-material`).toBe(false);
+      const wrongTag = structuredClone(decision);
+      const fields = wrongTag.rows[index].split("\0");
+      fields[18] = tag === "o" ? "c" : "o";
+      wrongTag.rows[index] = fields.join("\0");
+      expect(validateDecision(wrongTag), `${row.platform}/${row.row_id}:unique-tag`).toBe(false);
+    }
+    const passFields = generic.decision.rows[0].split("\0");
+    expect(passFields[6]).toBe("p");
+    expect(passFields[18]).toBe("");
+  });
+
+  test("raw rejects forged causal material while standalone D8 validates only its projected semantics", () => {
+    for (const rowId of ["CAP-016", "CAP-017"]) {
+      const row = catalogNegativeFailure(rowId, "macos", "PLATFORM_UNSUPPORTED");
+      const decision = rejectedDecisionFor(row);
+      expect(validateRowEvidence(row), `${rowId}:raw-baseline`).toBe(true);
+      expect(validateDecision(decision), `${rowId}:d8-baseline`).toBe(true);
+      const forged = structuredClone(row);
+      forged.failure_cause.receipt.supplied_state.material.frame_reference.frame = {};
+      const materialDigest = digest(forged.failure_cause.receipt.supplied_state.material);
+      forged.failure_cause.receipt.supplied_state.material_digest = materialDigest;
+      const { recipe_digest: _oldRecipeDigest, ...recipe } = forged.failure_cause.receipt.relationship_recipe;
+      recipe.supplied_material_digest = materialDigest;
+      forged.failure_cause.receipt.relationship_recipe = { ...recipe, recipe_digest: digest(recipe) };
+      forged.failure_cause = resignCause(forged.failure_cause);
+      expect(validateRowEvidence(forged), `${rowId}:raw-forgery`).toBe(false);
+      expect(validateDecision(decision), `${rowId}:d8-does-not-claim-raw-revalidation`).toBe(true);
+    }
+  });
+
+  test("all 348 raw-valid worst-length failure projections fit the public decision ingress exact/+1 boundary", async () => {
+    const decision = structuredClone(generic.decision);
+    decision.rows = decision.rows.map((scalar: string) => {
+      const fields = scalar.split("\0");
+      const platform = fields[0] === "m" ? "macos" : "linux";
+      const row = worstFailureRow(fields[1], platform);
+      expect(validateRowEvidence(row), `${platform}/${fields[1]}:raw-eligibility`).toBe(true);
+      const projection = encodeDecisionRowProjection(row);
+      expect(Buffer.byteLength(projection.split("\0")[18]), `${platform}/${fields[1]}:cause-width`).toBe(1);
+      return projection;
+    });
+    decision.terminal_decision = "rejected";
+    decision.first_cause = "ROW_VERDICT_FAILED";
+    decision.all_failure_codes = ["ROW_VERDICT_FAILED"];
+    expect(validateDecision(decision), "348-slot semantic projection").toBe(true);
+
+    const serialized = Buffer.from(JSON.stringify(decision));
+    expect(serialized.byteLength).toBeLessThanOrEqual(INGESTION_LIMITS.decision.bytes);
+    const exact = Buffer.concat([serialized, Buffer.alloc(INGESTION_LIMITS.decision.bytes - serialized.byteLength, 0x20)]);
+    const plusOne = Buffer.concat([exact, Buffer.from(" ")]);
+    const directory = await mkdtemp(join(tmpdir(), "shud-d8-capacity-"));
+    try {
+      const checkPath = join(import.meta.dir, "../check.ts");
+      const runPublic = async (bytes: Buffer, name: string): Promise<{ exit: number; stdout: string; stderr: string }> => {
+        const input = join(directory, name);
+        await writeFile(input, bytes);
+        const child = Bun.spawn([process.execPath, checkPath, "--input", input, "--kind", "decision"], {
+          stdout: "pipe", stderr: "pipe"
+        });
+        const [exit, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text()
+        ]);
+        return { exit, stdout, stderr };
+      };
+      expect(await runPublic(serialized, "all-failure.json")).toMatchObject({ exit: 0, stderr: "" });
+      expect(await runPublic(exact, "decision-exact.json")).toMatchObject({ exit: 0, stderr: "" });
+      const rejected = await runPublic(plusOne, "decision-plus-one.json");
+      expect(rejected.exit).toBe(2);
+      expect(rejected.stdout).toBe("");
+      expect(JSON.parse(rejected.stderr).code).toBe("CONTRACT_BYTES_LIMIT");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

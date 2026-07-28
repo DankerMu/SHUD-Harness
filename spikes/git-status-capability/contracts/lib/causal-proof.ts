@@ -42,6 +42,16 @@ const RESOURCE_REJECTIONS = Object.freeze([
 const COMMON_RECEIPT_KEYS = Object.freeze([
   "schema_version", "producer", "row_id", "observation_id", "supplied_input_digest", "receipt_digest"
 ]);
+const FAILURE_CAUSE_KIND_TO_TAG = Object.freeze<Record<string, string>>({
+  "outcome-mismatch-v1": "o",
+  "control-failure-v1": "c",
+  "resource-exceeded-v1": "r",
+  "lifecycle-fault-v1": "l",
+  "catalog-negative-mismatch-v1": "n"
+});
+const FAILURE_CAUSE_TAG_TO_KIND = Object.freeze(Object.fromEntries(
+  Object.entries(FAILURE_CAUSE_KIND_TO_TAG).map(([kind, tag]) => [tag, kind])
+));
 
 const LIFECYCLE_MATERIAL = Object.freeze<Record<string, JsonRecord>>({
   "LIF-002": {
@@ -159,19 +169,65 @@ function suppliedMaterialProof(value: JsonRecord, expectedKind: string): boolean
     value.frame_reference.encoding === "shud.git-status-capability.canonical-frame-json.v1" && record(value.frame_reference.frame);
 }
 
+function catalogNegativeProjection(context: CausalContext): boolean {
+  const catalog = CATALOG_V1.find((row) => row.id === context.rowId);
+  const frozenExpected = context.platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
+  const expectedCleanup = context.rowId === "LIF-007" ? "fail" : "pass";
+  return record(CATALOG_NEGATIVE_RELATIONSHIPS_V1[context.rowId]) && frozenExpected?.kind === "rejected" &&
+    ["launcher", "tripwire"].includes(catalog?.producing_boundary as string) &&
+    context.expectedOutcome.kind === "rejected" && context.expectedOutcome.code === frozenExpected.code &&
+    context.observedOutcome.kind === "rejected" && REJECTION_CODES.includes(context.observedOutcome.code as any) &&
+    context.observedOutcome.code !== frozenExpected.code && context.producingBoundary === catalog?.producing_boundary &&
+    context.passedControlBits === ALL_CONTROL_BITS && context.boundaryClass === "below" && context.declaredLimit === "none" &&
+    context.cleanupVerdict === expectedCleanup;
+}
+
+function projectedCauseKindValid(kind: string, context: CausalContext): boolean {
+  const controlsPassed = context.passedControlBits === ALL_CONTROL_BITS;
+  if (kind === "outcome-mismatch-v1") return context.producingBoundary === "observer" &&
+    !record(LIFECYCLE_MATERIAL[context.rowId]) && !exactJson(context.expectedOutcome, context.observedOutcome) &&
+    context.boundaryClass !== "exceeded" && controlsPassed;
+  if (kind === "control-failure-v1") {
+    if (!exactJson(context.expectedOutcome, context.observedOutcome) || context.boundaryClass === "exceeded") return false;
+    const allowed = context.producingBoundary === "tripwire" ? ["protected_write", "protection"] :
+      context.producingBoundary === "observer" ? ["oracle"] : context.producingBoundary === "launcher"
+        ? ["ambient_path", "subprocess", "network", "cleanup"] : [];
+    return allowed.some((id) => {
+      const index = CONTROL_ASSERTION_IDS.indexOf(id as any);
+      return index >= 0 && (context.passedControlBits & (1 << index)) === 0;
+    });
+  }
+  if (kind === "resource-exceeded-v1") {
+    const index = RESOURCE_LIMITS.indexOf(context.declaredLimit);
+    return context.producingBoundary === "launcher" && context.boundaryClass === "exceeded" && controlsPassed && index >= 0 &&
+      context.observedOutcome.kind === "rejected" && (context.observedOutcome.code === RESOURCE_REJECTIONS[index] ||
+        (context.declaredLimit === "wall_time_ms" && context.observedOutcome.code === "TIMEOUT"));
+  }
+  if (kind === "catalog-negative-mismatch-v1") return catalogNegativeProjection(context);
+  if (kind !== "lifecycle-fault-v1") return false;
+  const expected = LIFECYCLE_MATERIAL[context.rowId];
+  return record(expected) && context.producingBoundary === expected.producer && controlsPassed &&
+    context.boundaryClass !== "exceeded" && !exactJson(context.expectedOutcome, context.observedOutcome) &&
+    context.cleanupVerdict === expected.cleanup.verdict && !catalogNegativeProjection(context);
+}
+
+function projectedCauseTag(context: CausalContext): string | null {
+  const matchingTags = Object.entries(FAILURE_CAUSE_KIND_TO_TAG)
+    .filter(([kind]) => projectedCauseKindValid(kind, context))
+    .map(([, tag]) => tag);
+  return matchingTags.length === 1 ? matchingTags[0]! : null;
+}
+
 function validateProjection(value: unknown, context: CausalContext): boolean {
   if (context.rowVerdict === "pass") return value === undefined;
   if (!record(value) || !exactKeys(value, ["kind", "receipt"]) || !record(value.receipt)) return false;
   const receipt = value.receipt;
-  if (!receiptIsBound(receipt, context)) return false;
-  const controlsPassed = context.passedControlBits === ALL_CONTROL_BITS;
+  if (!receiptIsBound(receipt, context) || !projectedCauseKindValid(value.kind, context)) return false;
   if (value.kind === "outcome-mismatch-v1") return exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "observed_outcome"]) &&
-    context.producingBoundary === "observer" && exactJson(receipt.observed_outcome, context.observedOutcome) &&
-    !exactJson(context.expectedOutcome, context.observedOutcome) && context.boundaryClass !== "exceeded" && controlsPassed;
+    exactJson(receipt.observed_outcome, context.observedOutcome);
   if (value.kind === "control-failure-v1") {
     if (!exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "control_id", "control_verdict"]) ||
-      !CONTROL_ASSERTION_IDS.includes(receipt.control_id as any) || receipt.control_verdict !== "fail" ||
-      !exactJson(context.expectedOutcome, context.observedOutcome) || context.boundaryClass === "exceeded") return false;
+      !CONTROL_ASSERTION_IDS.includes(receipt.control_id as any) || receipt.control_verdict !== "fail") return false;
     const controlIndex = CONTROL_ASSERTION_IDS.indexOf(receipt.control_id as any);
     if ((context.passedControlBits & (1 << controlIndex)) !== 0) return false;
     const allowed = context.producingBoundary === "tripwire" ? ["protected_write", "protection"] :
@@ -181,19 +237,14 @@ function validateProjection(value: unknown, context: CausalContext): boolean {
   }
   if (value.kind === "resource-exceeded-v1") {
     if (!exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "observed_outcome", "resource"]) ||
-      context.producingBoundary !== "launcher" || context.boundaryClass !== "exceeded" || !controlsPassed ||
       !exactJson(receipt.observed_outcome, context.observedOutcome) || !resourceProof(receipt.resource, context)) return false;
-    const index = RESOURCE_LIMITS.indexOf(context.declaredLimit);
-    return index >= 0 && context.observedOutcome.kind === "rejected" &&
-      (context.observedOutcome.code === RESOURCE_REJECTIONS[index] ||
-        (context.declaredLimit === "wall_time_ms" && context.observedOutcome.code === "TIMEOUT"));
+    return true;
   }
   if (value.kind === "catalog-negative-mismatch-v1") {
     if (!exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "platform", "frozen_expected_code", "frozen_boundary",
       "actual_code", "actual_boundary", "supplied_state", "relationship_recipe"]) ||
       receipt.platform !== context.platform || receipt.actual_code !== context.observedOutcome.code ||
-      receipt.actual_boundary !== context.producingBoundary || !controlsPassed || context.boundaryClass !== "below" ||
-      context.declaredLimit !== "none" || !record(receipt.supplied_state) ||
+      receipt.actual_boundary !== context.producingBoundary || !record(receipt.supplied_state) ||
       !exactKeys(receipt.supplied_state, ["material", "material_digest"]) || !record(receipt.supplied_state.material) ||
       !sha256(receipt.supplied_state.material_digest) ||
       receipt.supplied_state.material_digest !== canonicalDigest(receipt.supplied_state.material) ||
@@ -201,19 +252,14 @@ function validateProjection(value: unknown, context: CausalContext): boolean {
     const catalog = CATALOG_V1.find((row) => row.id === context.rowId);
     const frozenExpected = context.platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
     const relationship = catalogRelationshipRecipe(context.rowId, receipt.supplied_state.material_digest as string);
-    const expectedCleanup = context.rowId === "LIF-007" ? "fail" : "pass";
-    return frozenExpected?.kind === "rejected" && ["launcher", "tripwire"].includes(catalog?.producing_boundary as string) &&
-      context.expectedOutcome.kind === "rejected" && context.expectedOutcome.code === frozenExpected.code &&
-      context.observedOutcome.kind === "rejected" && REJECTION_CODES.includes(context.observedOutcome.code as any) &&
-      context.observedOutcome.code !== frozenExpected.code && context.producingBoundary === catalog?.producing_boundary &&
-      receipt.frozen_expected_code === frozenExpected.code && receipt.frozen_boundary === catalog?.producing_boundary &&
+    return frozenExpected?.kind === "rejected" && receipt.frozen_expected_code === frozenExpected.code &&
+      receipt.frozen_boundary === catalog?.producing_boundary &&
       receipt.actual_code === context.observedOutcome.code && receipt.actual_boundary === catalog?.producing_boundary &&
-      context.cleanupVerdict === expectedCleanup && record(relationship) && exactJson(receipt.relationship_recipe, relationship) &&
+      record(relationship) && exactJson(receipt.relationship_recipe, relationship) &&
       suppliedMaterialProof(receipt.supplied_state.material, relationship.supplied_material_kind as string);
   }
   if (value.kind !== "lifecycle-fault-v1" ||
-    !exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "supplied_mutation", "first_cause", "secondary_errors", "cleanup"]) ||
-    !controlsPassed || context.boundaryClass === "exceeded" || exactJson(context.expectedOutcome, context.observedOutcome)) return false;
+    !exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "supplied_mutation", "first_cause", "secondary_errors", "cleanup"])) return false;
   const expected = LIFECYCLE_MATERIAL[context.rowId];
   return record(expected) && context.producingBoundary === expected.producer &&
     exactJson(receipt.supplied_mutation, expected.supplied_mutation) && receipt.first_cause === expected.first_cause &&
@@ -288,19 +334,23 @@ export function validateFailureCauseForRow(row: JsonRecord): boolean {
   return row.row_verdict === "pass" ? row.failure_cause === undefined : canonicalFailureCauseForRow(row) !== null;
 }
 
+export function projectedFailureCauseTagForRow(row: JsonRecord): string | null {
+  if (!record(row.control_assertions) || !["pass", "fail"].includes(row.row_verdict)) return null;
+  if (row.row_verdict === "pass") return "";
+  const context = rawContext(row, row.control_assertions);
+  return projectedCauseTag(context);
+}
+
 export function encodeFailureCauseTokenForRow(row: JsonRecord): string | null {
   if (row.row_verdict === "pass") return row.failure_cause === undefined ? "" : null;
   const cause = canonicalFailureCauseForRow(row);
-  return cause ? canonicalJsonBytes(cause).toString("base64url") : null;
+  const rawTag = cause ? FAILURE_CAUSE_KIND_TO_TAG[cause.kind] : undefined;
+  const projectedTag = projectedFailureCauseTagForRow(row);
+  return rawTag && rawTag === projectedTag ? rawTag : null;
 }
 
-export function decodeAndValidateFailureCause(token: string, context: CausalContext): boolean {
+export function validateFailureCauseTag(token: string, context: CausalContext): boolean {
   if (context.rowVerdict === "pass") return token === "";
-  if (!token) return false;
-  try {
-    const bytes = Buffer.from(token, "base64url");
-    if (bytes.toString("base64url") !== token) return false;
-    const cause = JSON.parse(bytes.toString("utf8"));
-    return canonicalJsonBytes(cause).equals(bytes) && validateProjection(cause, context);
-  } catch { return false; }
+  const kind = FAILURE_CAUSE_TAG_TO_KIND[token];
+  return typeof kind === "string" && token.length === 1 && projectedCauseTag(context) === token;
 }
