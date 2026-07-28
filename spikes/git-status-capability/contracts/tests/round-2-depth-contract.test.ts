@@ -41,6 +41,7 @@ function measuredResource(row: any, limit: string, unit: string, value: number):
   const recipeDigest = digest(recipe);
   const locatorCore = {
     kind: LIMITS.findIndex(([candidate]) => candidate === limit) < 8 ? "supplied-frame-locator-v1" : "launcher-receipt-v1",
+    platform: row.platform,
     row_id: row.row_id,
     observation_id: row.observation_id,
     supplied_input_digest: row.frame_digest,
@@ -880,6 +881,75 @@ describe("Round 2 canonical proof binding", () => {
       expect(validateDecision(failedDecision), `${limit}:d8-plus-one`).toBe(true);
       expect(await publicValidation("decision", failedDecision), `${limit}:public-d8-plus-one`).toEqual({ exit: 0, code: undefined });
     }
+  }, 30_000);
+
+  test("every actual measurement locator digest-binds the owning row platform", async () => {
+    const launcherCases = [
+      ["wall_time_ms", "milliseconds"],
+      ["cpu_time_ms", "milliseconds"],
+      ["threads", "count"],
+      ["memory_bytes", "bytes"],
+      ["output_bytes", "bytes"]
+    ] as const;
+    const resignLocator = (row: any): void => {
+      const locator = row.actual_resource_record.stimulus.locator;
+      const { receipt_digest: _discarded, ...core } = locator;
+      locator.receipt_digest = digest(core);
+      row.actual_resource_record.measurement.stimulus_receipt_digest = locator.receipt_digest;
+    };
+    const negativeMutations = [
+      ["missing-platform", (row: any) => {
+        delete row.actual_resource_record.stimulus.locator.platform;
+        resignLocator(row);
+      }],
+      ["wrong-platform-unsigned", (row: any) => {
+        row.actual_resource_record.stimulus.locator.platform = "linux";
+      }],
+      ["wrong-platform-resigned", (row: any) => {
+        row.actual_resource_record.stimulus.locator.platform = "linux";
+        resignLocator(row);
+      }],
+      ["top-level-platform-only-swap", (row: any) => {
+        row.platform = "linux";
+      }],
+      ["cross-slot", (row: any) => {
+        row.actual_resource_record.stimulus.locator.row_id = "BAS-002";
+        resignLocator(row);
+      }],
+      ["cross-input", (row: any) => {
+        row.actual_resource_record.stimulus.locator.supplied_input_digest = shaA;
+        resignLocator(row);
+      }]
+    ] as const;
+
+    for (const [limit, unit] of launcherCases) {
+      const canonical = normalizedRow("BAS-001");
+      canonical.actual_resource_record = measuredResource(canonical, limit, unit, OBSERVER_LIMITS[limit] - 1);
+      expect(validateRowEvidence(canonical), `${limit}:canonical`).toBe(true);
+      for (const [name, mutate] of negativeMutations) {
+        const changed = structuredClone(canonical);
+        mutate(changed);
+        expect(validateRowEvidence(changed), `${limit}:${name}:raw`).toBe(false);
+        expect(await publicValidation("row_evidence", changed), `${limit}:${name}:public`)
+          .toEqual({ exit: 2, code: "CONTRACT_SCHEMA_INVALID" });
+      }
+
+      const exceeded = resourceFailure("BAS-001", limit, unit,
+        limit === "wall_time_ms" ? "TIMEOUT" : `LIMIT_${limit.replace(/_ms$|_bytes$/, "").toUpperCase()}`);
+      exceeded.actual_resource_record.stimulus.locator.platform = "linux";
+      resignLocator(exceeded);
+      exceeded.failure_cause.receipt.resource = structuredClone(exceeded.actual_resource_record);
+      exceeded.failure_cause = resignCause(exceeded.failure_cause);
+      expect(validateRowEvidence(exceeded), `${limit}:+1:resigned-outer-wrong-nested-platform`).toBe(false);
+    }
+
+    const frameDerived = normalizedRow("LIM-001");
+    expect(validateRowEvidence(frameDerived), "supplied-frame:canonical").toBe(true);
+    delete frameDerived.actual_resource_record.stimulus.locator.platform;
+    resignLocator(frameDerived);
+    expect(validateRowEvidence(frameDerived), "supplied-frame:missing-platform").toBe(false);
+    expect(await publicValidation("row_evidence", frameDerived), "supplied-frame:public-missing-platform")
+      .toEqual({ exit: 2, code: "CONTRACT_SCHEMA_INVALID" });
   }, 30_000);
 
   test("specialized PRT and LIF rows select launcher causality from the actual boundary and outcome", async () => {

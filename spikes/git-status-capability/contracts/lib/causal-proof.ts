@@ -147,8 +147,8 @@ function resourceProof(value: unknown, context: CausalContext): boolean {
     stimulus.recipe.value <= OBSERVER_LIMITS[limit] || stimulus.recipe_digest !== canonicalDigest(stimulus.recipe) ||
     !record(stimulus.locator)) return false;
   const locator = stimulus.locator;
-  if (!exactKeys(locator, ["kind", "row_id", "observation_id", "supplied_input_digest", "recipe_digest", "source", "receipt_digest"]) ||
-    locator.row_id !== context.rowId || locator.observation_id !== context.observationId ||
+  if (!exactKeys(locator, ["kind", "platform", "row_id", "observation_id", "supplied_input_digest", "recipe_digest", "source", "receipt_digest"]) ||
+    locator.platform !== context.platform || locator.row_id !== context.rowId || locator.observation_id !== context.observationId ||
     locator.supplied_input_digest !== context.suppliedInputDigest || locator.recipe_digest !== stimulus.recipe_digest ||
     !sha256(locator.receipt_digest)) return false;
   const frameDerived = limitIndex < 8;

@@ -381,6 +381,14 @@ only after D9 passes. A failed stage writes neither its lane nor any later lane.
 These are non-decision-bearing evidence checkpoints, not D10 publication; they
 contain only bounded JSON/Markdown or content-addressed references, never code,
 contracts, symlinks, executables, imports, source/oracles, or another live digest.
+Markdown is not free-form. Every admitted `.md` file is exactly the canonical
+UTF-8 `shud.git-status-capability.markdown-evidence.v1` rendering: one fixed
+title followed by fixed `Schema`, `Lane`, `Platform`, `Source input`, `Artifact
+SHA-256`, and `Status` scalar lines, with no fences, prose, comments, or extra
+bytes. `Lane`, `Platform`, and `Source input` must equal the containing evidence
+path; status is a closed lane-specific token. This positive grammar is the
+mechanical meaning of non-executable Markdown; source-language blacklists are
+not an admissible substitute.
 Only after D10 candidate expectation and governance succeed may 5.4 atomically
 publish `evidence/final/<digest>/**`; no evidence write is observer/launcher
 authority or may touch another protected or production path.
