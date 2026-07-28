@@ -10,7 +10,7 @@ submodules; and MUST NOT close Issue #132 or restore PR #133 behavior.
 
 #### Scenario: Spike executes without production integration
 - **WHEN** the spike runner, native prototype, fixtures, validator, evidence, and isolated CI entry are added
-- **THEN** the only changed paths relative to frozen implementation base `9b761459760db16c1088ec81f91387790f8567e2` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory, and the Phase-0.5-only `openspec/project-profile.md` update
+- **THEN** the only changed paths relative to frozen implementation base `4a9748431c870fc271ec02773a4643b9453649dc` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory, and the Phase-0.5-only `openspec/project-profile.md` update
 
 #### Scenario: Accepted evidence is produced
 - **WHEN** a valid complete run yields terminal decision `accepted`
@@ -387,7 +387,7 @@ record. Task 5.2 SHALL invoke task 3.1's fixed emitter and `PLATFORM-MATRIX`
 without changing covered source. After both matrices and supply capture, task 5.3
 SHALL invoke task 1.3's already source-digested implementation for every and only fixed pre-decision command in design D9
 using Bun `1.2.19`, OpenSpec `1.3.1`, Git `2.49.0`, and frozen base/merge-base
-`9b761459760db16c1088ec81f91387790f8567e2`. It SHALL record exact argv/version,
+`4a9748431c870fc271ec02773a4643b9453649dc`. It SHALL record exact argv/version,
 exit code, bounded summary/digest, and source-input-record SHA-256 for source framing,
 full `check`,
 `schema:check`, PERF-API-001, docs self-test/links, strict OpenSpec validation,

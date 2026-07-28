@@ -22,7 +22,7 @@ add only bounded output under excluded `evidence/**` lanes and never update it.
 
 ## 1. Frozen contract and validator
 
-- [ ] 1.1 Freeze catalog v1, schemas, rejection taxonomy, limits, and dependency contract.
+- [x] 1.1 Freeze catalog v1, schemas, rejection taxonomy, limits, and dependency contract.
   - PR boundary: contract only; minimal mergeable slice is a Bun-only strict schema/catalog checker plus golden valid/invalid fixtures, with no launcher, observer, validator decision, or stable task-1.3 CLI.
   - In: `spikes/git-status-capability/contracts/**`, specifically `contracts/{check.ts,lib,tests,fixtures}/**`, `source-input-v1.paths`, the synthetic-only `goldens/source-input-v1.synthetic.{frame,sha256}`, `native/Cargo.toml`, `native/Cargo.lock`, `native/rust-toolchain.toml`, and `dependency-graph-catalog.json`; exact 174 IDs/outcomes, exact 25-floor-ID bijection, exhaustive fixture/native ownership maps, four-layer state schema, exact `source_input_digest_v1` frame/record, frame/evidence/bundle/decision schemas, Rust `1.88.0`, Git `2.49.0`, direct crates/features, target graph predicates, and all finite ingestion/observer limits. Phase 0.5 may also update `openspec/project-profile.md` only to register this new isolated surface. The checker uses Bun standard APIs only and writes no files.
   - Out: validator decisions, fixture recipes, process launch, native source, CI, raw evidence, production paths.

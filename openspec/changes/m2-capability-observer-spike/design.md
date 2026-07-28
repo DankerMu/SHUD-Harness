@@ -498,7 +498,7 @@ Tasks 5.1 and 5.2 own the fixed source/platform commands before D9:
 ### D9. Run repository and reproducibility gates before the decision
 
 The immutable implementation base and merge-base are
-`9b761459760db16c1088ec81f91387790f8567e2`. The only implementation paths admitted
+`4a9748431c870fc271ec02773a4643b9453649dc`. The only implementation paths admitted
 relative to that base are `spikes/git-status-capability/**`,
 `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory,
 and the Phase-0.5-only `openspec/project-profile.md` update. Production packages, root/workspace manifests and lockfiles, schema
@@ -517,7 +517,7 @@ for every command ID:
 
 | ID | Exact reproducible command / assertion |
 |---|---|
-| `GATE-BASE` | `test "$(git merge-base 9b761459760db16c1088ec81f91387790f8567e2 HEAD)" = 9b761459760db16c1088ec81f91387790f8567e2` and `git merge-base --is-ancestor 9b761459760db16c1088ec81f91387790f8567e2 HEAD` |
+| `GATE-BASE` | `test "$(git merge-base 4a9748431c870fc271ec02773a4643b9453649dc HEAD)" = 4a9748431c870fc271ec02773a4643b9453649dc` and `git merge-base --is-ancestor 4a9748431c870fc271ec02773a4643b9453649dc HEAD` |
 | `GATE-SOURCE-INPUT` | `spikes/git-status-capability/verify.sh source-input-digest --version 1 --source-sha <SOURCE_SHA> --manifest spikes/git-status-capability/contracts/source-input-v1.paths --primary source-input-primary-v1 --witness source-input-witness-v1 --verify-record <external-evidence-root>/source-input-record.json --no-write`; it reruns both encoders in-memory and emits only verdict plus record SHA-256, never another live-digest field |
 | `GATE-INSTALL` | `npx --yes bun@1.2.19 install --frozen-lockfile` |
 | `GATE-CHECK` | `npx --yes bun@1.2.19 run check` |
@@ -527,12 +527,12 @@ for every command ID:
 | `GATE-DOCS-LINKS` | `scripts/docs/check_links.sh` |
 | `GATE-OPENSPEC-STATUS` | `npx --yes @fission-ai/openspec@1.3.1 status --change m2-capability-observer-spike`; it must report 4/4 artifacts complete |
 | `GATE-OPENSPEC` | `npx --yes @fission-ai/openspec@1.3.1 validate m2-capability-observer-spike --strict --no-interactive` |
-| `GATE-DIFF-CHECK` | `git diff --check 9b761459760db16c1088ec81f91387790f8567e2...HEAD` |
-| `GATE-SCOPE` | `spikes/git-status-capability/verify.sh repository-scope --base 9b761459760db16c1088ec81f91387790f8567e2`; it validates `git diff --name-status --find-renames` against the four-path allowlist above and rejects every other tracked path |
+| `GATE-DIFF-CHECK` | `git diff --check 4a9748431c870fc271ec02773a4643b9453649dc...HEAD` |
+| `GATE-SCOPE` | `spikes/git-status-capability/verify.sh repository-scope --base 4a9748431c870fc271ec02773a4643b9453649dc`; it validates `git diff --name-status --find-renames` against the four-path allowlist above and rejects every other tracked path |
 | `GATE-UNTRACKED` | `git status --porcelain=v1 --untracked-files=all` followed by `spikes/git-status-capability/verify.sh untracked-inventory`; after bounded external build outputs are removed, the inventory must be empty, including nested submodule inventories |
-| `GATE-PRODUCTION` | `spikes/git-status-capability/verify.sh production-isolation --base 9b761459760db16c1088ec81f91387790f8567e2`; it asserts zero tracked/untracked drift for `workspace/**`, `package.json`, `bun.lock`, `packages/**`, `scripts/**`, `docs/**`, existing `.github/workflows/ci.yml`, production manifests/import graph/schema/generated/release surfaces, and scans production manifests/imports/release assembly for a spike import or invocation |
+| `GATE-PRODUCTION` | `spikes/git-status-capability/verify.sh production-isolation --base 4a9748431c870fc271ec02773a4643b9453649dc`; it asserts zero tracked/untracked drift for `workspace/**`, `package.json`, `bun.lock`, `packages/**`, `scripts/**`, `docs/**`, existing `.github/workflows/ci.yml`, production manifests/import graph/schema/generated/release surfaces, and scans production manifests/imports/release assembly for a spike import or invocation |
 | `GATE-GOVERNANCE` | `spikes/git-status-capability/verify.sh governance-handoff --repo DankerMu/SHUD-Harness --issue 132 --require-open --recovery-state blocked --pr 133 --reverted-merge 7d74a56eff27e34099961bdf14a40678c88d2603 --require-main-revert 2bf3ef8859278dd0817100c01775765612170648 --read-only`; public GET-only audit records `governance-handoff.json`, proves zero GitHub mutation calls, and rejects any state/revert/recovery mismatch |
-| `GATE-SUBMODULE-DIFF` | `git diff --exit-code 9b761459760db16c1088ec81f91387790f8567e2...HEAD -- SHUD rSHUD AutoSHUD zero` |
+| `GATE-SUBMODULE-DIFF` | `git diff --exit-code 4a9748431c870fc271ec02773a4643b9453649dc...HEAD -- SHUD rSHUD AutoSHUD zero` |
 | `GATE-SUBMODULE-PINS` | `spikes/git-status-capability/verify.sh submodules --expect SHUD=3aec65755926c478e13ca7d4fea80715e4e90345 --expect rSHUD=2b7742e32ea323a57fd0a947dc2cea67bfd0afd1 --expect AutoSHUD=f421445340f70b8cb160ce58cefb066751628593 --expect zero=13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`; it checks gitlink, checkout HEAD, recursive tracked and untracked status for all four |
 
 `recovery_state=blocked` means #132 is OPEN while the reverted implementation is absent from `main` and production isolation still passes. The governance record contains the observed issue state, PR merge/revert SHAs, main ancestry proof, recovery state, allowed GET request ledger, and `mutation_count=0`; the harness provides no mutation credential or POST/PATCH/PUT/DELETE seam.
@@ -993,6 +993,6 @@ None for spike execution. Task 1.1 commits the exact direct crate versions/featu
 lockfile, and target graph catalog before launcher/native work; no semantic task
 may select or update them. Rust is fixed at `1.88.0`, Git oracle at `2.49.0`, Bun
 at `1.2.19`, OpenSpec at `1.3.1`, and the frozen implementation base is
-`9b761459760db16c1088ec81f91387790f8567e2`. The accept/reject result remains
+`4a9748431c870fc271ec02773a4643b9453649dc`. The accept/reject result remains
 intentionally unknown until task 5.4 consumes valid complete evidence and the
 post-matrix repository gate.
