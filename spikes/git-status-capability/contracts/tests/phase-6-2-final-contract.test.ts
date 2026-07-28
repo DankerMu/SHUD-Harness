@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalFrameBytes, canonicalFrameDigest } from "../lib/canonical-frame";
+import { runCheck } from "../lib/checker";
 import { encodeDecisionRowProjection, validateDecisionProjection } from "../lib/decision";
 import { expectedOutcome, OBSERVER_LIMITS } from "../lib/frozen";
 import { validatePlatformBundle, validateRowEvidence } from "../lib/schema";
@@ -18,6 +21,19 @@ const controlIds = [
 
 function digest(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function rejectedDecision(code: string): any {
+  const decision = structuredClone(generic.decision);
+  const fields = decision.rows[0].split("\0");
+  fields[4] = "r";
+  fields[5] = code;
+  fields[6] = "f";
+  decision.rows[0] = fields.join("\0");
+  decision.terminal_decision = "rejected";
+  decision.first_cause = "ROW_VERDICT_FAILED";
+  decision.all_failure_codes = ["ROW_VERDICT_FAILED"];
+  return decision;
 }
 
 const WIRE_MAGIC = Buffer.from("SHUDCAP1", "ascii");
@@ -680,5 +696,42 @@ describe("Phase 6.2 lifecycle causal surface", () => {
     const lif007Secondary = rowFor("LIF-007");
     lif007Secondary.secondary_errors = ["CLEANUP_FAILED"];
     expect(validateRowEvidence(lif007Secondary)).toBe(false);
+  });
+});
+
+describe("Phase 6.2 D8 rejection taxonomy", () => {
+  test("direct decision validation rejects an observed code outside the frozen taxonomy", () => {
+    expect(validateDecisionProjection(rejectedDecision("UNKNOWN_REJECTION_CODE"))).toBe(false);
+  });
+
+  test("public decision ingestion rejects an observed code outside the frozen taxonomy", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "shud-d8-rejection-"));
+    try {
+      const path = join(temporary, "decision.json");
+      await writeFile(path, JSON.stringify(rejectedDecision("UNKNOWN_REJECTION_CODE")));
+      let stdout = "";
+      let stderr = "";
+      const exit = await runCheck(["--input", path, "--kind", "decision"], {
+        stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; }
+      });
+      expect(exit).toBe(2);
+      expect(stdout).toBe("");
+      expect(JSON.parse(stderr)).toEqual({
+        schema_version: "shud.git-status-capability.contract-error.v1",
+        status: "error", code: "CONTRACT_SCHEMA_INVALID"
+      });
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  });
+
+  test("PLATFORM_UNSUPPORTED remains legal only as an observed rejection and expected codes stay catalog-bound", () => {
+    expect(validateDecisionProjection(rejectedDecision("PLATFORM_UNSUPPORTED"))).toBe(true);
+    const unknownExpected = structuredClone(generic.decision);
+    const fields = unknownExpected.rows[0].split("\0");
+    fields[2] = "r";
+    fields[3] = "UNKNOWN_REJECTION_CODE";
+    unknownExpected.rows[0] = fields.join("\0");
+    expect(validateDecisionProjection(unknownExpected)).toBe(false);
   });
 });

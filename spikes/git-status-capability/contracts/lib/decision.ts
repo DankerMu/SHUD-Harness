@@ -1,4 +1,4 @@
-import { CATALOG_V1, CONTROL_ASSERTION_IDS, DECISION_LIMIT_TOKENS, DECISION_ROW_SEGMENTS } from "./frozen";
+import { CATALOG_V1, CONTROL_ASSERTION_IDS, DECISION_LIMIT_TOKENS, DECISION_ROW_SEGMENTS, REJECTION_CODES } from "./frozen";
 import { determinismProjectionToken } from "./determinism-proof";
 import { encodeDecisionRowProjectionCore } from "./row-projection";
 
@@ -59,7 +59,7 @@ function exactJson(left: unknown, right: unknown): boolean {
 function decodeOutcome(kindToken: string, code: string): JsonRecord | null {
   const kind = TOKEN_TO_KIND[kindToken as keyof typeof TOKEN_TO_KIND];
   if (kind === "clean" || kind === "dirty") return code === "" ? { kind } : null;
-  return kind === "rejected" && nonEmptyString(code) ? { kind, code } : null;
+  return kind === "rejected" && REJECTION_CODES.includes(code) ? { kind, code } : null;
 }
 
 type DecodedRow = {
