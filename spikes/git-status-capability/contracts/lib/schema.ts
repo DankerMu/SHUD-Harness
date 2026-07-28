@@ -5,6 +5,8 @@ import { join, posix, relative, resolve, sep } from "node:path";
 import {
   CATALOG_V1,
   FLOOR_V1,
+  FRAME_EVIDENCE_ENCODING,
+  FRAME_EVIDENCE_FIELD_ORDER,
   INGESTION_LIMITS,
   OBSERVER_LIMITS,
   OWNERSHIP_V1,
@@ -535,6 +537,19 @@ function canonicalDigest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function canonicalEvidenceValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalEvidenceValue);
+  if (!record(value)) return value;
+  return Object.fromEntries(Object.keys(value).sort((left, right) => Buffer.from(left).compare(Buffer.from(right)))
+    .map((key) => [key, canonicalEvidenceValue(value[key])]));
+}
+
+function canonicalFrameEvidenceBytes(frame: JsonRecord): Buffer {
+  return Buffer.from(JSON.stringify(Object.fromEntries(FRAME_EVIDENCE_FIELD_ORDER
+    .filter((field) => Object.hasOwn(frame, field))
+    .map((field) => [field, canonicalEvidenceValue(frame[field])]))), "utf8");
+}
+
 function frameConfig(value: unknown): boolean {
   if (!record(value) || !exactKeys(value, ["digest", "entries"]) || !sha256(value.digest) || !Array.isArray(value.entries)) return false;
   const entries = value.entries;
@@ -741,6 +756,21 @@ function rowResourceRecord(value: unknown, rowId: string): boolean {
     value.within_limits === !exceeded;
 }
 
+function frameReferenceBinding(binding: JsonRecord, row: JsonRecord): boolean {
+  const reference = binding.frame_reference;
+  if (!record(reference) || !exactKeys(reference, ["encoding", "frame"]) ||
+    reference.encoding !== FRAME_EVIDENCE_ENCODING || !record(reference.frame) || !validateFrame(reference.frame)) return false;
+  const frame = reference.frame;
+  if (frame.row_id !== row.row_id || frame.observation_id !== row.observation_id ||
+    frame.checkout_capability_identity !== row.checkout_capability_identity ||
+    frame.git_state_generation_digest !== row.git_state_generation_digest ||
+    frame.body_length !== binding.payload_length || frame.body_length !== binding.canonical_body_length ||
+    frame.body_digest !== binding.payload_digest || frame.body_digest !== binding.canonical_body_digest) return false;
+  const frameBytes = canonicalFrameEvidenceBytes(frame);
+  const frameDigest = createHash("sha256").update(frameBytes).digest("hex");
+  return frameBytes.length === binding.frame_length && frameDigest === binding.frame_digest && frameDigest === row.frame_digest;
+}
+
 export function validateRowEvidence(value: unknown): boolean {
   const descriptor = SCHEMA_DESCRIPTORS.row_evidence;
   if (!matchesDescriptor(value, descriptor)) return false;
@@ -751,7 +781,8 @@ export function validateRowEvidence(value: unknown): boolean {
   if (![value.observation_id, value.checkout_capability_identity, value.git_state_generation_digest, value.frame_digest].every(sha256)) return false;
   if (!record(value.frame_binding) || !exactKeys(value.frame_binding, [
     "row_id", "observation_id", "checkout_capability_identity", "git_state_generation_digest",
-    "frame_length", "frame_digest", "payload_length", "payload_digest", "canonical_body_length", "canonical_body_digest"
+    "frame_length", "frame_digest", "payload_length", "payload_digest", "canonical_body_length", "canonical_body_digest",
+    "frame_reference"
   ]) || value.frame_binding.row_id !== value.row_id || value.frame_binding.observation_id !== value.observation_id ||
     value.frame_binding.checkout_capability_identity !== value.checkout_capability_identity ||
     value.frame_binding.git_state_generation_digest !== value.git_state_generation_digest ||
@@ -760,7 +791,7 @@ export function validateRowEvidence(value: unknown): boolean {
     !boundedInteger(value.frame_binding.canonical_body_length, (value.frame_binding.frame_length as number) - 1, false) ||
     value.frame_binding.payload_length !== value.frame_binding.canonical_body_length || !sha256(value.frame_binding.payload_digest) ||
     !sha256(value.frame_binding.canonical_body_digest) || value.frame_binding.payload_digest !== value.frame_binding.canonical_body_digest ||
-    value.frame_binding.payload_digest !== value.git_state_generation_digest) return false;
+    value.frame_binding.payload_digest !== value.git_state_generation_digest || !frameReferenceBinding(value.frame_binding, value)) return false;
   if (!sha256(value.oracle_digest) || value.oracle_verdict !== "pass" || !record(value.tripwire_verdicts) || !exactKeys(value.tripwire_verdicts, ["ambient_path", "subprocess", "protected_write"]) || !Object.values(value.tripwire_verdicts).every((item) => item === true) || value.protection_set_equal !== true) return false;
   if (!record(value.cleanup) || !exactKeys(value.cleanup, ["verdict", "descriptors_restored", "processes_reaped", "secondary_errors"]) || value.cleanup.verdict !== "pass" || value.cleanup.descriptors_restored !== true || value.cleanup.processes_reaped !== true || !Array.isArray(value.cleanup.secondary_errors) || !value.cleanup.secondary_errors.every(nonEmptyString)) return false;
   if (!rowResourceRecord(value.resource_record, value.row_id as string) || !sha256(value.source_input_record_sha256)) return false;

@@ -158,6 +158,14 @@ export const TOOLCHAIN = Object.freeze({
   openspec: "1.3.1"
 });
 
+export const FRAME_EVIDENCE_ENCODING = "shud.git-status-capability.canonical-frame-json.v1";
+
+export const FRAME_EVIDENCE_FIELD_ORDER = Object.freeze([
+  "schema_version", "catalog_version", "row_id", "observation_id", "checkout_capability_identity",
+  "git_state_generation_digest", "body_length", "body_digest", "checksum", "index", "head_tree",
+  "effective_config", "exclude_state", "attribute_state", "nested_state", "limit_stimulus"
+]);
+
 export const SCHEMA_DESCRIPTORS = Object.freeze({
   frame: {
     schema_version: "shud.git-status-capability.frame.v1",
@@ -191,7 +199,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
     field_types: {
       schema_version: "literal", platform: "enum:macos|linux", row_id: "catalog-row-id", observation_id: "sha256",
       checkout_capability_identity: "sha256", git_state_generation_digest: "sha256", frame_digest: "sha256",
-      frame_binding: "strict:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,frame_length,frame_digest,payload_length,payload_digest,canonical_body_length,canonical_body_digest};payload=canonical-frame-body-bytes",
+      frame_binding: "strict:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,frame_length,frame_digest,payload_length,payload_digest,canonical_body_length,canonical_body_digest,frame_reference:{encoding:literal:shud.git-status-capability.canonical-frame-json.v1,frame:strict-frame-v1}};payload=canonical-frame-body-bytes;complete-frame=utf8-json-no-bom-no-whitespace-no-length-prefix;top-level-field-order=frozen;nested-object-fields=utf8-byte-sorted",
       expected_outcome: "frozen-platform-slot-outcome", observer_outcome: "observer-outcome", producing_boundary: "nonempty-string",
       row_verdict: "iff:expected=observed", oracle_digest: "sha256", oracle_verdict: "literal:pass",
       tripwire_verdicts: "strict:{ambient_path,subprocess,protected_write}:true", protection_set_equal: "literal:true",

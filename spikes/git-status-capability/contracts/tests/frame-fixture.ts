@@ -4,6 +4,12 @@ const shaA = "01".repeat(32);
 const shaB = "ab".repeat(32);
 const oidA = "01".repeat(20);
 const oidB = "ab".repeat(20);
+export const frameEvidenceEncoding = "shud.git-status-capability.canonical-frame-json.v1";
+const frameEvidenceFields = [
+  "schema_version", "catalog_version", "row_id", "observation_id", "checkout_capability_identity",
+  "git_state_generation_digest", "body_length", "body_digest", "checksum", "index", "head_tree",
+  "effective_config", "exclude_state", "attribute_state", "nested_state", "limit_stimulus"
+] as const;
 
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -38,6 +44,36 @@ function emptyIndex() {
     state: "parsed", format_version: 2, byte_length: 12, digest: shaA, entry_count: 0, entries: [], effective_entries: [],
     extensions: [], shared_index: { state: "absent" }
   };
+}
+
+function pathMaterial(path: string) {
+  const bytes = Buffer.from(path, "utf8");
+  return { kind: "path-material-v1", byte_length: bytes.length, digest: digest(path), content_base64: bytes.toString("base64") };
+}
+
+function limitStimulus(rowId: string): Record<string, unknown> | undefined {
+  if (rowId === "LIM-006") return { kind: "index-entry-series-v1", count: 50_001, path_prefix: "limit-index-", object_id: oidA };
+  if (rowId === "LIM-008") return pathMaterial("x".repeat(513));
+  if (rowId === "LIM-010") return pathMaterial(Array.from({ length: 17 }, () => "x").join("/"));
+  if (rowId === "LIM-012") return { kind: "nested-repository-series-v1", count: 17, path_prefix: "limit-nested-", object_id: oidA };
+  if (rowId === "LIM-014") return { kind: "tree-entry-series-v1", count: 200_001, path_prefix: "limit-tree-", mode: "100644", object_id: oidA };
+  if (rowId === "LIM-016") return {
+    kind: "repeat-byte-v1", byte: 0, byte_length: 256 * 1024 * 1024 + 1,
+    digest: "da6ce8755151acd05195db67ebce3ee0fb5f4012e71e821cc5750f3304eaf41e"
+  };
+  return undefined;
+}
+
+function canonicalEvidenceValue(value: any): any {
+  if (Array.isArray(value)) return value.map(canonicalEvidenceValue);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort((left, right) => Buffer.from(left).compare(Buffer.from(right)))
+    .map((key) => [key, canonicalEvidenceValue(value[key])]));
+}
+
+export function canonicalFrameEvidenceBytes(frame: Record<string, any>): Buffer {
+  return Buffer.from(JSON.stringify(Object.fromEntries(frameEvidenceFields.filter((field) => Object.hasOwn(frame, field))
+    .map((field) => [field, canonicalEvidenceValue(frame[field])]))), "utf8");
 }
 
 export function materialFrame(split = false): Record<string, any> {
@@ -103,4 +139,14 @@ export function resealFrame(frame: Record<string, any>): Record<string, any> {
   };
   frame.checksum = digest(JSON.stringify({ header, body }));
   return frame;
+}
+
+export function frameForEvidenceSlot(rowId: string, observationId: string, capabilityIdentity: string): Record<string, any> {
+  const frame = materialFrame();
+  frame.row_id = rowId;
+  frame.observation_id = observationId;
+  frame.checkout_capability_identity = capabilityIdentity;
+  const stimulus = limitStimulus(rowId);
+  if (stimulus) frame.limit_stimulus = stimulus;
+  return resealFrame(frame);
 }
