@@ -1,5 +1,5 @@
 import { CONTROL_ASSERTION_IDS, DECISION_LIMIT_TOKENS } from "./frozen";
-import { encodeFailureCauseTokenForRow } from "./causal-proof";
+import { encodeFailureCauseTokenForRow, projectedFailureCauseTagForRow } from "./causal-proof";
 
 type JsonRecord = Record<string, any>;
 
@@ -18,7 +18,7 @@ function exactKeys(value: JsonRecord, keys: readonly string[]): boolean {
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
-export function encodeDecisionRowProjectionCore(row: JsonRecord, determinismToken: string): string {
+function encodeProjection(row: JsonRecord, determinismToken: string, requireRawCause: boolean): string {
   const expectedKind = KIND_TO_TOKEN[row.expected_outcome.kind as keyof typeof KIND_TO_TOKEN];
   const observedKind = KIND_TO_TOKEN[row.observer_outcome.kind as keyof typeof KIND_TO_TOKEN];
   const limitOrdinal = DECISION_LIMIT_TOKENS.indexOf(row.actual_resource_record.declared_limit);
@@ -37,8 +37,9 @@ export function encodeDecisionRowProjectionCore(row: JsonRecord, determinismToke
   if (!expectedKind || !observedKind || limitOrdinal < 0 || !boundary || !producer ||
     typeof row.protection_set_equal !== "boolean" || row.protection_set_equal !== protectionPassed ||
     !record(row.cleanup) || !["pass", "fail"].includes(row.cleanup.verdict)) throw new Error("invalid D8 projection source");
-  const failureCause = encodeFailureCauseTokenForRow(row);
-  if (failureCause === null) throw new Error("invalid D8 projection source");
+  const projectedCause = projectedFailureCauseTagForRow(row);
+  const failureCause = requireRawCause ? encodeFailureCauseTokenForRow(row) : projectedCause;
+  if (failureCause === null || failureCause !== projectedCause) throw new Error("invalid D8 projection source");
   return [
     row.platform === "macos" ? "m" : row.platform === "linux" ? "l" : "",
     row.row_id, expectedKind, row.expected_outcome.code ?? "", observedKind, row.observer_outcome.code ?? "",
@@ -47,4 +48,12 @@ export function encodeDecisionRowProjectionCore(row: JsonRecord, determinismToke
     passedControlBits.toString(16).padStart(2, "0"), row.protection_set_equal ? "1" : "0",
     row.cleanup.verdict === "pass" ? "p" : "f", String(limitOrdinal), boundary, determinismToken, failureCause
   ].join("\0");
+}
+
+export function encodeDecisionRowProjectionCore(row: JsonRecord, determinismToken: string): string {
+  return encodeProjection(row, determinismToken, true);
+}
+
+export function encodeFormalDecisionRowProjectionCore(row: JsonRecord, determinismToken: string): string {
+  return encodeProjection(row, determinismToken, false);
 }

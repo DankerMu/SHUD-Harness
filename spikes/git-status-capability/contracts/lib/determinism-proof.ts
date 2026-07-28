@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalJsonBytes } from "./canonical-frame";
-import { encodeDecisionRowProjectionCore } from "./row-projection";
+import { encodeFormalDecisionRowProjectionCore } from "./row-projection";
 
 type JsonRecord = Record<string, any>;
 
@@ -128,7 +128,7 @@ function receipt(value: unknown, row: JsonRecord, token: string, side: "first" |
   if (!exactJson(stableInput(value.input), expectedInput) || !exactJson(value.output, expectedOutput) ||
     value.normalized_row_output_digest !== digest(value.output)) return false;
   let projection: string;
-  try { projection = encodeDecisionRowProjectionCore(reconstructedRow(value.input, value.output), token); } catch { return false; }
+  try { projection = encodeFormalDecisionRowProjectionCore(reconstructedRow(value.input, value.output), token); } catch { return false; }
   return value.decision_projection_digest === createHash("sha256").update(projection).digest("hex");
 }
 
