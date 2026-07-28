@@ -13,15 +13,21 @@ Unless a path is repository-absolute in prose, abbreviated paths such as
 The row partitions in design are exhaustive: every catalog ID has exactly one
 task-2 fixture owner and one task-4 native owner, and no checkbox may absorb a row
 owned by another checkbox.
+The sole shared generated-file exception is `contracts/source-input-v1.paths`:
+task 1.1 owns its sync/check algorithm and initial current-HEAD content; every task
+1.2–5.1 that adds/removes/renames a covered candidate has implicit In permission
+to regenerate only this file, MUST list no future path, and MUST run the exact-set
+check. This mechanical update grants no semantic contract ownership. Tasks 5.2–5.4
+add only bounded output under excluded `evidence/**` lanes and never update it.
 
 ## 1. Frozen contract and validator
 
 - [ ] 1.1 Freeze catalog v1, schemas, rejection taxonomy, limits, and dependency contract.
-  - PR boundary: contract only; minimal mergeable slice is strict schema/catalog parsing plus golden valid/invalid fixtures, with no launcher or observer.
-  - In: `spikes/git-status-capability/contracts/**` including `source-input-v1.paths`, the synthetic-only `goldens/source-input-v1.synthetic.{frame,sha256}`, `native/Cargo.toml`, `native/Cargo.lock`, `native/rust-toolchain.toml`, and `dependency-graph-catalog.json`; exact 174 IDs/outcomes, exact 25-floor-ID bijection, exhaustive fixture/native ownership maps, four-layer state schema, exact `source_input_digest_v1` frame/record, frame/evidence/bundle/decision schemas, Rust `1.88.0`, Git `2.49.0`, direct crates/features, target graph predicates, and all finite limits.
+  - PR boundary: contract only; minimal mergeable slice is a Bun-only strict schema/catalog checker plus golden valid/invalid fixtures, with no launcher, observer, validator decision, or stable task-1.3 CLI.
+  - In: `spikes/git-status-capability/contracts/**`, specifically `contracts/{check.ts,lib,tests,fixtures}/**`, `source-input-v1.paths`, the synthetic-only `goldens/source-input-v1.synthetic.{frame,sha256}`, `native/Cargo.toml`, `native/Cargo.lock`, `native/rust-toolchain.toml`, and `dependency-graph-catalog.json`; exact 174 IDs/outcomes, exact 25-floor-ID bijection, exhaustive fixture/native ownership maps, four-layer state schema, exact `source_input_digest_v1` frame/record, frame/evidence/bundle/decision schemas, Rust `1.88.0`, Git `2.49.0`, direct crates/features, target graph predicates, and all finite ingestion/observer limits. Phase 0.5 may also update `openspec/project-profile.md` only to register this new isolated surface. The checker uses Bun standard APIs only and writes no files.
   - Out: validator decisions, fixture recipes, process launch, native source, CI, raw evidence, production paths.
   - Depends on: none.
-  - Verification: manifest exact-set test rejects missing/extra/duplicate/skip/platform-conditional rows, any floor-ID merge/gap, and any fixture/native ownership overlap or gap; the only committed digest literal is for the fixed synthetic frame, never the live manifest; strict source-record/schema tests reject unknown/duplicate/missing fields, unsafe paths, exact evidence size + 1, and floating dependency sources; exact observer limits remain inclusive.
+  - Verification: first run `npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests` with only `contracts/{check.ts,lib}/**` source stashed; every new-behavior test must be red, then restore source and require green. The same command covers valid/exact/bound+1, invalid UTF-8, malformed/trailing/duplicate/deep/wide JSON, unknown/missing fields, stable codes, exit/stdout/stderr, no partial output, manifest missing/extra/future/duplicate/skip/platform-conditional rows, floor merge/gap, ownership overlap/gap, synthetic-only literal, unsafe paths, floating dependencies, and inclusive observer limits. Then `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --repository-root . --manifest spikes/git-status-capability/contracts/source-input-v1.paths --check-current` must emit one success receipt without writes; no launcher/observer/`verify.sh` command runs.
 
 - [ ] 1.2 Implement the deterministic evidence validator and four-layer golden state machine.
   - PR boundary: pure evidence-to-validation library/CLI module; minimal mergeable slice consumes committed synthetic bundles and never runs Git, fixtures, or native code.
@@ -30,12 +36,12 @@ owned by another checkbox.
   - Depends on: 1.1.
   - Verification: goldens cover all-pass accepted; unexpected semantic rejection rejected; exact expected negative and exact-bound pass; bound+1 right/wrong code; platform unsupported rejected; missing/duplicate/corrupt/oversized/stale/source-drift/repository/governance-gate failure invalid with no decision; the witness independently enumerates/frames live inputs and matches only the synthetic literal; raw versus RFC-8785 projection digests vary exactly as design D8 specifies.
 
-- [ ] 1.3 Expose stable spike-only commands and the reusable atomic finalizer.
-  - PR boundary: command/finalizer seam; minimal mergeable slice wires 1.1/1.2, independently implements `source-input-primary-v1`, and proves publication mechanics with synthetic candidates without publishing live evidence.
-  - In: `spikes/git-status-capability/verify.sh`, `spikes/git-status-capability/{cli,finalizer}/**`, public-seam finalizer tests, and spike-local command documentation.
+- [ ] 1.3 Expose stable spike-only commands, repository gates, and the reusable atomic finalizer.
+  - PR boundary: fixed command/finalizer/repository-gate source; minimal mergeable slice wires 1.1/1.2, independently implements `source-input-primary-v1`, implements every D9 spike-local gate command against disposable repositories, and proves publication mechanics with synthetic candidates without publishing live evidence.
+  - In: `spikes/git-status-capability/verify.sh`, `spikes/git-status-capability/{cli,finalizer,repository-gate}/**`, public-seam finalizer/gate tests, and spike-local command documentation.
   - Out: fixture setup, observer launch, semantic implementation, workflow, and live evidence; for the finalizer seam specifically, only live candidate invocation/terminal publication is deferred to 5.4.
   - Depends on: 1.2.
-  - Verification: primary and witness share no framing/enumeration code and cross-check live digest/set/manifest identity at runtime; contract/health/expect exits remain distinct; the fixed `evidence publish` finalizer proves destination-race no-clobber, cross-device rejection, overwrite refusal, partial-rename fault rollback, primary/cleanup failure precedence, absent final destination on failure, and no residue; expectation consumes only a staged candidate and is never a D9 input.
+  - Verification: primary and witness share no framing/enumeration code and cross-check live digest/set/manifest identity at runtime; contract/health/expect exits remain distinct; every D9 spike-local gate command is fixed and red/green tested with disposable clean/drift repositories but emits no live gate record; the fixed `evidence publish` finalizer proves destination-race no-clobber, cross-device rejection, overwrite refusal, partial-rename fault rollback, primary/cleanup failure precedence, absent final destination on failure, and no residue; expectation consumes only a staged candidate and is never a D9 input.
 
 ## 2. Independent fixture and oracle slices
 
@@ -77,11 +83,11 @@ owned by another checkbox.
 ## 3. Launcher and active tripwire slices
 
 - [ ] 3.1 Implement descriptor/frame launcher and replay boundary.
-  - PR boundary: launcher transport only; minimal mergeable slice opens/validates one checkout, freezes schedule, supplies one frame, launches a stub observer, bounds/reaps it, and emits launcher evidence.
-  - In: `spikes/git-status-capability/launcher/**` and launcher public-seam tests.
+  - PR boundary: launcher transport and generic raw-evidence emitter only; minimal mergeable slice opens/validates one checkout, freezes schedule, supplies one frame, launches a stub observer, bounds/reaps it, and emits schema-valid launcher evidence without claiming semantics.
+  - In: `spikes/git-status-capability/{launcher,evidence-emitter}/**` and launcher/emitter public-seam tests.
   - Out: protection-set tripwire implementation, native Rust transport, semantic status, CI.
   - Depends on: 1.1, 2.4, 2.5.
-  - Verification: no-follow descriptor allowlist, minimal credential-free environment, no network, replacement/deleted-open attacks, stale/cross-row rejection, timeout/signal/reap, and no partial outcome all match catalog; observer receives only descriptor plus frame.
+  - Verification: no-follow descriptor allowlist, minimal credential-free environment, no network, replacement/deleted-open attacks, stale/cross-row rejection, timeout/signal/reap, and no partial outcome all match catalog; observer receives only descriptor plus frame. The generic emitter rejects missing/duplicate/oversized/unbound receipts and can assemble a synthetic bounded platform bundle without Git semantics or a terminal decision.
 
 - [ ] 3.2 Implement active transitive tripwires and collection-wide zero-write protection.
   - PR boundary: launcher-adjacent controls only; minimal mergeable slice wraps the exact stub invocation and makes every attack control from 2.4/2.5 bite.
@@ -144,29 +150,29 @@ owned by another checkbox.
 ## 5. Dual-platform evidence, repository gate, and handoff
 
 - [ ] 5.1 Add isolated dual-platform CI and exact supply-chain capture.
-  - PR boundary: workflow/supply only; minimal mergeable slice runs already-complete matrix on macOS and Linux and records actual build inventories, without deriving a terminal decision.
+  - PR boundary: final covered workflow/supply source plus source freeze only; minimal mergeable slice fixes the last covered bytes, freezes `SOURCE_SHA`, runs source/native checks on both platforms, and persists the immutable source record without deriving a terminal decision.
   - In: `.github/workflows/git-status-capability-spike.yml`, `spikes/git-status-capability/supply/**`, and target graph/SBOM/license tests.
-  - Out: production CI/release, final evidence persistence, repository-gate decision, and every GitHub mutation/comment.
+  - Out: production CI/release, platform bundles, repository-gate record, terminal evidence, and every GitHub mutation/comment.
   - Depends on: 4.2, 4.3, 4.4, 4.5, 4.6, 4.7.
-  - Verification: after fixing `SOURCE_SHA`, fixed `PLATFORM-SOURCE-INPUT` runs both independent encoders once and create-new writes the sole external `source-input-record.json`; no other artifact repeats its live-digest field. Fixed `PLATFORM-NATIVE` then runs with that record identity and the same lock/source/direct features; actual graphs, call ledger, SBOM, and license inventories are complete/digested.
+  - Verification: after all workflow/supply source and the manifest are final, fixed `PLATFORM-SOURCE-INPUT` runs both independent encoders once and create-new writes the sole external record; fixed `PLATFORM-NATIVE` uses the same lock/source/direct features. Only after source/native observation closes, unchanged record bytes are persisted at `evidence/source/<digest>/source-input-record.json`; actual graphs, call ledger, SBOM, and license inventories are complete/digested. Failure leaves no source lane or later lane. No task after 5.1 changes covered source or repeats the live-digest field.
 
 - [ ] 5.2 Produce complete bounded macOS/Linux raw bundles.
-  - PR boundary: evidence emission/cross-binding only; minimal mergeable slice produces two schema-valid raw bundles and bundle manifests, but still no terminal decision.
-  - In: spike evidence-emitter modules and CI outputs under bounded temporary artifact paths.
-  - Out: repository gate, committed final bundle/reference, decision/summary, and every Issue #132/PR #133 write.
+  - PR boundary: evidence invocation/cross-binding only; minimal mergeable slice invokes task 3.1's fixed emitter and persists two schema-valid raw bundles/manifests, with no source or terminal decision.
+  - In: external bounded CI outputs plus `openspec/changes/m2-capability-observer-spike/evidence/platform/<source-input-digest>/**` containing only immutable JSON/Markdown or content-addressed references.
+  - Out: evidence-emitter source, covered source/manifest changes, repository gate, final decision/summary, and every Issue #132/PR #133 write.
   - Depends on: 5.1.
-  - Verification: fixed `PLATFORM-MATRIX` produces each of 174 IDs exactly once per OS and the exact 25-floor-ID bijection; both bundles bind SHA-256 of the immutable source-input record without copying its live digest; all oracle/tripwire/protection/resource/cleanup/supply/command identities are present and any source/input mismatch invalidates both.
+  - Verification: fixed `PLATFORM-MATRIX` produces each of 174 IDs exactly once per OS and the exact 25-floor-ID bijection; only after both observations and collection-wide zero-write oracles close are the two bundles persisted in the platform lane. Both bind SHA-256 of the immutable source-input record without copying its live digest; all oracle/tripwire/protection/resource/cleanup/supply/command identities are present. Any mismatch/failure leaves no platform lane or later lane.
 
 - [ ] 5.3 Run the post-matrix repository regression, isolation, and reproducibility gate.
   - PR boundary: pre-decision gate records only; minimal mergeable slice executes every D9 command against the evidence-bound source and emits `repository-gate.json`, with no candidate/terminal decision derivation, read, expectation, or publication.
-  - In: spike-local repository gate implementation and bounded gate evidence.
-  - Out: fixes to production/tests/docs/submodules, decision publication, canonical docs, GitHub comments, and #132/#133 mutation.
+  - In: invocation of task 1.3's fixed repository-gate commands plus `openspec/changes/m2-capability-observer-spike/evidence/gates/<source-input-digest>/**` bounded gate receipts only.
+  - Out: repository-gate/covered source or manifest changes, fixes to production/tests/docs/submodules, decision publication, canonical docs, GitHub comments, and #132/#133 mutation.
   - Depends on: 5.2.
-  - Verification: exact `GATE-SOURCE-INPUT` reruns both independent live encoders with `--no-write`, permits a committed literal only for the synthetic vector, and verifies task 5.1's immutable record plus record SHA-256; Bun `1.2.19`, docs, OpenSpec `1.3.1`, base/diff/scope/untracked/production/submodule gates and GET-only `GATE-GOVERNANCE` all record exact receipts. #132 must be OPEN/blocked, PR #133 merge `7d74a56eff27e34099961bdf14a40678c88d2603` reverted by main ancestor `2bf3ef8859278dd0817100c01775765612170648`, and GitHub mutation count zero; any mismatch/failure is invalid/no decision.
+  - Verification: exact `GATE-SOURCE-INPUT` reruns both independent live encoders with `--no-write`, permits a committed literal only for the synthetic vector, and verifies task 5.1's immutable record plus record SHA-256; Bun `1.2.19`, docs, OpenSpec `1.3.1`, base/diff/scope/untracked/production/submodule gates and GET-only `GATE-GOVERNANCE` all record exact receipts. #132 must be OPEN/blocked, PR #133 merge `7d74a56eff27e34099961bdf14a40678c88d2603` reverted by main ancestor `2bf3ef8859278dd0817100c01775765612170648`, and GitHub mutation count zero. Only after every D9 gate passes may the non-decision-bearing gates lane persist; any mismatch/failure is invalid/no decision and leaves no gates lane or final lane.
 
 - [ ] 5.4 Derive a candidate, assert it, then atomically persist the only terminal decision/handoff.
   - PR boundary: D10 invocation/evidence only; minimal mergeable slice validates 5.2/5.3, invokes task 1.3's already source-digested finalizer, derives a candidate under external same-filesystem staging, asserts it, repeats the read-only governance check, and publishes only after success; it owns no finalizer source.
-  - In: external harness-owned staging plus `openspec/changes/m2-capability-observer-spike/evidence/final/<source-input-digest>/**`, unchanged external `source-input-record.json`, staged candidate/summary, `publication-assertion.json`, and `publication-governance-recheck.json`.
+  - In: external harness-owned staging plus `openspec/changes/m2-capability-observer-spike/evidence/final/<source-input-digest>/**`, unchanged `evidence/source/<source-input-digest>/source-input-record.json`, staged candidate/summary, `publication-assertion.json`, and `publication-governance-recheck.json`.
   - Out: `verify.sh`, `cli/**`, `finalizer/**`, production integration, canonical docs, every GitHub mutation/comment, closing #132, restoring/merging #133, or promotion.
   - Depends on: 1.3, 5.3.
   - Verification: candidate health, matching expect, governance recheck, unchanged source record, and fixed `FINALIZE-PUBLISH` precede one same-filesystem atomic no-replace rename; destination race, cross-device, overwrite, partial rename, digest/source-record/governance drift, or cleanup failure is invalid/CI red with no published terminal. Both accepted and rejected summaries persist #132 OPEN/blocked, #133 reverted, zero GitHub mutation, no production integration, and the unconditional requirement for a separate reviewed OpenSpec+ADR plus explicit human approval before any integration/close/merge/comment/promotion.
