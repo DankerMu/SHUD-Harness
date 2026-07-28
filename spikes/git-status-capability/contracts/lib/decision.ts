@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
 import { CATALOG_V1, CONTROL_ASSERTION_IDS, DECISION_LIMIT_TOKENS, DECISION_ROW_SEGMENTS, REJECTION_CODES } from "./frozen";
-import { canonicalJsonBytes } from "./canonical-frame";
+import { decodeAndValidateFailureCause } from "./causal-proof";
 import { determinismProjectionToken } from "./determinism-proof";
 import { encodeDecisionRowProjectionCore } from "./row-projection";
 
@@ -31,12 +30,6 @@ const TOKEN_TO_BOUNDARY = Object.freeze({ b: "below", e: "exact", x: "exceeded" 
 const TOKEN_TO_PRODUCER = Object.freeze({ o: "observer", l: "launcher", t: "tripwire" });
 const ALL_CONTROL_BITS = (1 << CONTROL_ASSERTION_IDS.length) - 1;
 const ALL_CONTROL_TOKEN = ALL_CONTROL_BITS.toString(16).padStart(2, "0");
-const LIMIT_REJECTION_BY_NAME = Object.freeze<Record<string, string>>({
-  frame_bytes: "LIMIT_FRAME_BYTES", index_bytes: "LIMIT_INDEX_BYTES", index_entries: "LIMIT_INDEX_ENTRIES",
-  path_bytes: "LIMIT_PATH_BYTES", path_depth: "LIMIT_PATH_DEPTH", nested_repositories: "LIMIT_NESTED_REPOSITORIES",
-  traversal_entries: "LIMIT_TRAVERSAL_ENTRIES", hashed_bytes: "LIMIT_HASHED_BYTES", wall_time_ms: "LIMIT_WALL_TIME",
-  cpu_time_ms: "LIMIT_CPU_TIME", threads: "LIMIT_THREADS", memory_bytes: "LIMIT_MEMORY", output_bytes: "LIMIT_OUTPUT_BYTES"
-});
 
 function record(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -69,51 +62,6 @@ function exactJson(left: unknown, right: unknown): boolean {
     return Object.keys(right).every((key) => exactJson(left[key], right[key]));
   }
   return false;
-}
-
-function decodedFailureCause(token: string, context: {
-  rowVerdict: "pass" | "fail"; expectedOutcome: JsonRecord; observedOutcome: JsonRecord; producingBoundary: string;
-  rowId: string; observationId: string; frameDigest: string; declaredLimit: string; boundaryClass: string; passedControlBits: number;
-}): boolean {
-  if (context.rowVerdict === "pass") return token === "";
-  if (!token) return false;
-  let bytes: Buffer;
-  let cause: JsonRecord;
-  try {
-    bytes = Buffer.from(token, "base64url");
-    if (bytes.toString("base64url") !== token) return false;
-    const parsed = JSON.parse(bytes.toString("utf8"));
-    if (!record(parsed) || !canonicalJsonBytes(parsed).equals(bytes)) return false;
-    cause = parsed;
-  } catch { return false; }
-  if (!exactKeys(cause, ["kind", "receipt"]) || !record(cause.receipt)) return false;
-  const receipt = cause.receipt;
-  const baseKeys = ["schema_version", "producer", "row_id", "observation_id", "supplied_input_digest", "receipt_digest"];
-  if (receipt.schema_version !== "shud.git-status-capability.row-failure-receipt.v1" || receipt.producer !== context.producingBoundary ||
-    receipt.row_id !== context.rowId || receipt.observation_id !== context.observationId || receipt.supplied_input_digest !== context.frameDigest ||
-    !sha256(receipt.receipt_digest) || receipt.receipt_digest !== createHash("sha256").update(canonicalJsonBytes(
-      Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== "receipt_digest")))).digest("hex")) return false;
-  const controlsPassed = context.passedControlBits === ALL_CONTROL_BITS;
-  if (cause.kind === "outcome-mismatch-v1") return exactKeys(receipt, [...baseKeys, "observed_outcome"]) &&
-    exactJson(receipt.observed_outcome, context.observedOutcome) && !exactJson(context.expectedOutcome, context.observedOutcome) &&
-    context.boundaryClass !== "exceeded" && controlsPassed;
-  if (cause.kind === "control-failure-v1") {
-    if (!exactKeys(receipt, [...baseKeys, "control_id", "control_verdict"]) || !CONTROL_ASSERTION_IDS.includes(receipt.control_id as any) ||
-      receipt.control_verdict !== "fail" || exactJson(context.expectedOutcome, context.observedOutcome) === false || context.boundaryClass === "exceeded") return false;
-    const controlIndex = CONTROL_ASSERTION_IDS.indexOf(receipt.control_id as any);
-    if ((context.passedControlBits & (1 << controlIndex)) !== 0) return false;
-    const allowed = context.producingBoundary === "tripwire" ? ["protected_write", "protection"] :
-      context.producingBoundary === "observer" ? ["oracle"] : ["ambient_path", "subprocess", "network", "cleanup"];
-    return allowed.includes(receipt.control_id as string);
-  }
-  if (cause.kind === "resource-exceeded-v1") return exactKeys(receipt, [...baseKeys, "declared_limit", "stimulus_receipt_digest", "observed_outcome"]) &&
-    context.producingBoundary === "launcher" && context.boundaryClass === "exceeded" && receipt.declared_limit === context.declaredLimit &&
-    sha256(receipt.stimulus_receipt_digest) && exactJson(receipt.observed_outcome, context.observedOutcome) &&
-    context.observedOutcome.kind === "rejected" && (context.observedOutcome.code === LIMIT_REJECTION_BY_NAME[context.declaredLimit] ||
-      (context.declaredLimit === "wall_time_ms" && context.observedOutcome.code === "TIMEOUT")) && controlsPassed;
-  return cause.kind === "lifecycle-fault-v1" && exactKeys(receipt, [...baseKeys, "mutation_kind", "first_cause", "cleanup_verdict"]) &&
-    ["LIF-002", "LIF-006", "LIF-007"].includes(context.rowId) && nonEmptyString(receipt.mutation_kind) &&
-    nonEmptyString(receipt.first_cause) && ["pass", "fail"].includes(receipt.cleanup_verdict as string);
 }
 
 function decodeOutcome(kindToken: string, code: string): JsonRecord | null {
@@ -163,9 +111,10 @@ function decodeDecisionRow(value: unknown): DecodedRow | null {
   const controlsPassed = passedControlBits === ALL_CONTROL_BITS;
   const cleanupFailureIsEvidence = rowId === "LIF-006" || rowId === "LIF-007";
   const actualMatchesExpected = producingBoundary === catalog?.producing_boundary && limitOrdinal === frozenLimitOrdinal && boundaryClass === frozenBoundary;
-  const failureCauseValid = decodedFailureCause(failureCauseToken!, {
+  const failureCauseValid = decodeAndValidateFailureCause(failureCauseToken!, {
     rowVerdict, expectedOutcome, observedOutcome, producingBoundary, rowId: rowId!, observationId: observationId!,
-    frameDigest: frameDigest!, declaredLimit, boundaryClass, passedControlBits
+    suppliedInputDigest: frameDigest!, declaredLimit, boundaryClass, passedControlBits,
+    cleanupVerdict: cleanupVerdict === "p" ? "pass" : "fail"
   });
   if (!exactJson(expectedOutcome, frozenExpected) || (rowVerdict === "pass" && !actualMatchesExpected) ||
     protectionPassed !== (protectionSetEqual === "1") ||

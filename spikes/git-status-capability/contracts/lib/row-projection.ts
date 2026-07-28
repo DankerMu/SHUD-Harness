@@ -1,5 +1,5 @@
 import { CONTROL_ASSERTION_IDS, DECISION_LIMIT_TOKENS } from "./frozen";
-import { canonicalJsonBytes } from "./canonical-frame";
+import { encodeFailureCauseTokenForRow } from "./causal-proof";
 
 type JsonRecord = Record<string, any>;
 
@@ -37,8 +37,8 @@ export function encodeDecisionRowProjectionCore(row: JsonRecord, determinismToke
   if (!expectedKind || !observedKind || limitOrdinal < 0 || !boundary || !producer ||
     typeof row.protection_set_equal !== "boolean" || row.protection_set_equal !== protectionPassed ||
     !record(row.cleanup) || !["pass", "fail"].includes(row.cleanup.verdict)) throw new Error("invalid D8 projection source");
-  const failureCause = row.row_verdict === "pass" ? "" : record(row.failure_cause)
-    ? canonicalJsonBytes(row.failure_cause).toString("base64url") : (() => { throw new Error("invalid D8 projection source"); })();
+  const failureCause = encodeFailureCauseTokenForRow(row);
+  if (failureCause === null) throw new Error("invalid D8 projection source");
   return [
     row.platform === "macos" ? "m" : row.platform === "linux" ? "l" : "",
     row.row_id, expectedKind, row.expected_outcome.code ?? "", observedKind, row.observer_outcome.code ?? "",
