@@ -45,7 +45,8 @@ function referenceWireBytes(frame: Record<string, any>, byteLength?: number): Bu
   return Buffer.concat([header, body, extension]);
 }
 
-function referenceDecode(bytes: Buffer): "clean" | "FRAME_CHECKSUM" | "FRAME_TRUNCATED" | "FRAME_SURPLUS" | "FRAME_MALFORMED" {
+function referenceDecode(bytes: Buffer): "clean" | "LIMIT_FRAME_BYTES" | "FRAME_CHECKSUM" | "FRAME_TRUNCATED" | "FRAME_SURPLUS" | "FRAME_MALFORMED" {
+  if (bytes.length > OBSERVER_LIMITS.frame_bytes) return "LIMIT_FRAME_BYTES";
   if (bytes.length < WIRE_HEADER_BYTES) return "FRAME_TRUNCATED";
   if (!bytes.subarray(0, 8).equals(WIRE_MAGIC) || bytes[8] !== 1 || bytes[9] !== 0 || bytes.readUInt16BE(10) !== WIRE_HEADER_BYTES) {
     return "FRAME_MALFORMED";
@@ -78,9 +79,23 @@ function scheduledBytes(row: any): Buffer {
   return Buffer.concat([body, Buffer.alloc(scheduled.input_length - body.length)]);
 }
 
-function byteMaterial(value: string) {
-  const bytes = Buffer.from(value, "utf8");
-  return { byte_length: bytes.length, digest: digest(bytes), content_base64: bytes.toString("base64") };
+function canonicalValue(value: any): any {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort((a, b) => Buffer.from(a).compare(Buffer.from(b)))
+    .map((key) => [key, canonicalValue(value[key])]));
+}
+
+function canonicalDigest(value: any): string {
+  return digest(Buffer.from(JSON.stringify(canonicalValue(value)), "utf8"));
+}
+
+function formalDetProjection(input: any, output: any, token: string): string {
+  return [
+    input.platform === "macos" ? "m" : "l", input.row_id, "c", "", "c", "", "p",
+    input.observation_id, input.git_state_generation_digest, input.supplied_input_digest, "o",
+    "7f", "7f", "1", output.cleanup.verdict === "pass" ? "p" : "f", "0", "b", token
+  ].join("\0");
 }
 
 function determinismProof(row: any): any {
@@ -90,29 +105,53 @@ function determinismProof(row: any): any {
     "DET-003": "fixture-root",
     "DET-004": "volatile-fields"
   };
-  const common = {
+  const input = {
+    platform: row.platform,
     row_id: row.row_id,
     observation_id: row.observation_id,
     checkout_capability_identity: row.checkout_capability_identity,
     git_state_generation_digest: row.git_state_generation_digest,
     supplied_input_digest: row.frame_digest,
-    observer_outcome: structuredClone(row.observer_outcome),
-    normalized_row_output: byteMaterial(JSON.stringify({ row_id: row.row_id, observer_outcome: row.observer_outcome })),
-    decision_projection: byteMaterial(`${row.row_id}\0clean`)
+    expected_outcome: structuredClone(row.expected_outcome),
+    oracle_digest: row.oracle_digest,
+    source_input_record_sha256: row.source_input_record_sha256
   };
-  const firstVariation = digest(Buffer.from(`${row.row_id}:variation:first`));
+  const output = {
+    observer_outcome: structuredClone(row.observer_outcome),
+    producing_boundary: row.producing_boundary,
+    row_verdict: row.row_verdict,
+    control_assertions: structuredClone(row.control_assertions),
+    protection_set_equal: row.protection_set_equal,
+    cleanup: structuredClone(row.cleanup),
+    resource_record: structuredClone(row.resource_record)
+  };
+  const token = row.row_id.at(-1);
+  const normalizedDigest = canonicalDigest(output);
+  const projectionDigest = digest(Buffer.from(formalDetProjection(input, output, token), "utf8"));
+  const axisMaterial: Record<string, any> = row.row_id === "DET-001"
+    ? { kind: "same-input-repeat", input_digest: canonicalDigest(input) }
+    : row.row_id === "DET-002"
+      ? { kind: "fixture-creation-order", first_order: ["checkout", "nested"], second_order: ["nested", "checkout"] }
+      : row.row_id === "DET-003"
+        ? { kind: "fixture-root", first_root_token: digest(Buffer.from("root:first")), second_root_token: digest(Buffer.from("root:second")) }
+        : {
+            kind: "permitted-volatile-material",
+            first: { timestamp_digest: digest(Buffer.from("time:first")), map_order_digest: digest(Buffer.from("map:first")), below_bound_counter_digest: digest(Buffer.from("counter:first")) },
+            second: { timestamp_digest: digest(Buffer.from("time:second")), map_order_digest: digest(Buffer.from("map:second")), below_bound_counter_digest: digest(Buffer.from("counter:second")) }
+          };
+  const receipt = (side: "first" | "second") => ({
+    receipt_id: digest(Buffer.from(`${row.row_id}:receipt:${side}`)),
+    input: structuredClone(input),
+    output: structuredClone(output),
+    normalized_row_output_digest: normalizedDigest,
+    decision_projection_digest: projectionDigest
+  });
   return {
     variation_axis: axes[row.row_id],
-    first: {
-      invocation_id: digest(Buffer.from(`${row.row_id}:invocation:first`)),
-      variation_value_digest: firstVariation,
-      ...common
-    },
-    second: {
-      invocation_id: digest(Buffer.from(`${row.row_id}:invocation:second`)),
-      variation_value_digest: row.row_id === "DET-001" ? firstVariation : digest(Buffer.from(`${row.row_id}:variation:second`)),
-      ...common
-    },
+    axis_material: axisMaterial,
+    axis_digest: canonicalDigest(axisMaterial),
+    first: receipt("first"),
+    second: receipt("second"),
     comparison: { normalized_row_output_equal: true, decision_projection_equal: true }
   };
 }
@@ -155,6 +194,17 @@ function rowFor(rowId: string): any {
   }
   const frame = frameForEvidenceSlot("macos", rowId, row.observation_id, row.checkout_capability_identity);
   bindScheduled(row, frame, /^LIM-00[12]$/.test(rowId) ? OBSERVER_LIMITS.frame_bytes : undefined);
+  if (rowId === "LIF-002") {
+    row.first_cause = "FRAME_VERSION_UNSUPPORTED";
+    row.secondary_errors = [];
+  }
+  if (rowId === "LIF-006" || rowId === "LIF-007") {
+    row.first_cause = rowId === "LIF-006" ? "FRAME_VERSION_UNSUPPORTED" : "CLEANUP_FAILED";
+    row.secondary_errors = rowId === "LIF-006" ? ["CLEANUP_FAILED"] : [];
+    row.cleanup = { verdict: "fail", descriptors_restored: false, processes_reaped: true };
+  } else {
+    delete row.cleanup.secondary_errors;
+  }
   if (/^DET-00[1-4]$/.test(rowId)) row.determinism_proof = determinismProof(row);
   return row;
 }
@@ -340,9 +390,9 @@ describe("Phase 6.2 scheduled versus supplied frame proof", () => {
   test("tamper, truncate, surplus, absolute, and escape supplied material validate only in matching rows", () => {
     const tamper = rowFor("CAP-010");
     const tampered = Buffer.from(scheduledBytes(tamper));
-    const checksumOffset = WIRE_CHECKSUM_OFFSET;
-    tampered[checksumOffset] ^= 1;
-    suppliedBytes(tamper, tampered, { kind: "xor-byte-v1", offset: checksumOffset, xor: 1 });
+    const payloadOffset = WIRE_HEADER_BYTES;
+    tampered[payloadOffset] ^= 1;
+    suppliedBytes(tamper, tampered, { kind: "xor-byte-v1", offset: payloadOffset, xor: 1 });
 
     const truncate = rowFor("CAP-011");
     const scheduledTruncate = scheduledBytes(truncate);
@@ -394,7 +444,10 @@ describe("Phase 6.2 scheduled versus supplied frame proof", () => {
     });
     over.frame_digest = appendedDigest;
     expect(validateRowEvidence(over)).toBe(true);
-    expect(referenceDecode(appendedBytes)).toBe("FRAME_SURPLUS");
+    expect(referenceDecode(appendedBytes)).toBe("LIMIT_FRAME_BYTES");
+    const malformedOver = Buffer.from(appendedBytes);
+    malformedOver[0] ^= 1;
+    expect(referenceDecode(malformedOver)).toBe("LIMIT_FRAME_BYTES");
     expect(Buffer.byteLength(JSON.stringify(exact))).toBeLessThan(512 * 1024);
     expect(Buffer.byteLength(JSON.stringify(over))).toBeLessThan(512 * 1024);
   });
@@ -405,12 +458,33 @@ describe("Phase 6.2 scheduled versus supplied frame proof", () => {
     const legacyJson = canonicalFrameBytes(row.frame_binding.scheduled.frame_reference.frame);
     const legacyPostJsonPadding = Buffer.concat([legacyJson, Buffer.alloc(OBSERVER_LIMITS.frame_bytes - legacyJson.length)]);
     const tampered = Buffer.from(wire);
-    tampered[WIRE_CHECKSUM_OFFSET] ^= 1;
+    tampered[WIRE_HEADER_BYTES] ^= 1;
     expect(referenceDecode(legacyPostJsonPadding)).toBe("FRAME_MALFORMED");
     expect(referenceDecode(wire)).toBe("clean");
     expect(referenceDecode(tampered)).toBe("FRAME_CHECKSUM");
     expect(referenceDecode(wire.subarray(0, -1))).toBe("FRAME_TRUNCATED");
-    expect(referenceDecode(Buffer.concat([wire, wire]))).toBe("FRAME_SURPLUS");
+    const twoFrames = Buffer.concat([wire, wire]);
+    expect(twoFrames.length).toBeLessThan(OBSERVER_LIMITS.frame_bytes);
+    expect(referenceDecode(twoFrames)).toBe("FRAME_SURPLUS");
+  });
+
+  test("CAP-010 requires a payload mutation while checksum-only and wrong-row retags fail", () => {
+    const payload = rowFor("CAP-010");
+    const payloadBytes = Buffer.from(scheduledBytes(payload));
+    payloadBytes[WIRE_HEADER_BYTES] ^= 1;
+    suppliedBytes(payload, payloadBytes, { kind: "xor-byte-v1", offset: WIRE_HEADER_BYTES, xor: 1 });
+    expect(validateRowEvidence(payload)).toBe(true);
+
+    const checksumOnly = rowFor("CAP-010");
+    const checksumBytes = Buffer.from(scheduledBytes(checksumOnly));
+    checksumBytes[WIRE_CHECKSUM_OFFSET] ^= 1;
+    suppliedBytes(checksumOnly, checksumBytes, { kind: "xor-byte-v1", offset: WIRE_CHECKSUM_OFFSET, xor: 1 });
+    expect(validateRowEvidence(checksumOnly)).toBe(false);
+
+    const retagged = structuredClone(payload);
+    retagged.row_id = "CAP-011";
+    retagged.expected_outcome = expectedOutcome("CAP-011");
+    expect(validateRowEvidence(retagged)).toBe(false);
   });
 });
 
@@ -426,31 +500,46 @@ describe("Phase 6.2 paired determinism proof", () => {
       expect(validateRowEvidence(missingSecond), `${rowId}:missing-second`).toBe(false);
 
       const changedFrame = structuredClone(row);
-      changedFrame.determinism_proof.second.supplied_input_digest = shaA;
+      changedFrame.determinism_proof.second.input.supplied_input_digest = shaA;
       expect(validateRowEvidence(changedFrame), `${rowId}:changed-frame`).toBe(false);
 
       const changedOutcome = structuredClone(row);
-      changedOutcome.determinism_proof.second.observer_outcome = { kind: "dirty" };
+      changedOutcome.determinism_proof.second.output.observer_outcome = { kind: "dirty" };
       expect(validateRowEvidence(changedOutcome), `${rowId}:changed-outcome`).toBe(false);
 
       const changedOutput = structuredClone(row);
-      changedOutput.determinism_proof.second.normalized_row_output = byteMaterial("changed");
+      changedOutput.determinism_proof.second.output.resource_record.within_limits = false;
       expect(validateRowEvidence(changedOutput), `${rowId}:changed-output`).toBe(false);
 
       const changedProjection = structuredClone(row);
-      changedProjection.determinism_proof.second.decision_projection = byteMaterial("changed");
+      changedProjection.determinism_proof.second.decision_projection_digest = shaA;
       expect(validateRowEvidence(changedProjection), `${rowId}:changed-projection`).toBe(false);
 
       const wrongAxis = structuredClone(row);
-      wrongAxis.determinism_proof.variation_axis = "fixture-root";
-      expect(validateRowEvidence(wrongAxis), `${rowId}:wrong-axis`).toBe(rowId === "DET-003");
+      wrongAxis.determinism_proof.axis_material = rowId === "DET-003"
+        ? { kind: "fixture-root", first_root_token: shaA, second_root_token: shaA }
+        : { kind: "fixture-root", first_root_token: shaA, second_root_token: shaB };
+      wrongAxis.determinism_proof.axis_digest = canonicalDigest(wrongAxis.determinism_proof.axis_material);
+      expect(validateRowEvidence(wrongAxis), `${rowId}:wrong-axis`).toBe(false);
     }
+  });
+
+  test("equal forged digests and stale formal projections cannot replace structured derivation", () => {
+    const forged = rowFor("DET-004");
+    forged.determinism_proof.second.output.resource_record.within_limits = false;
+    forged.determinism_proof.second.normalized_row_output_digest = forged.determinism_proof.first.normalized_row_output_digest;
+    forged.determinism_proof.second.decision_projection_digest = forged.determinism_proof.first.decision_projection_digest;
+    expect(validateRowEvidence(forged)).toBe(false);
+
+    const staleProjection = rowFor("DET-002");
+    staleProjection.determinism_proof.second.decision_projection_digest = digest(Buffer.from("legacy-projection"));
+    expect(validateRowEvidence(staleProjection)).toBe(false);
   });
 
   test("same-row sub-observation repeat is legal but a duplicate catalog row and unprojected proof remain invalid", () => {
     const det = rowFor("DET-001");
-    expect(det.determinism_proof.first.observation_id).toBe(det.determinism_proof.second.observation_id);
-    expect(det.determinism_proof.first.invocation_id).not.toBe(det.determinism_proof.second.invocation_id);
+    expect(det.determinism_proof.first.input.observation_id).toBe(det.determinism_proof.second.input.observation_id);
+    expect(det.determinism_proof.first.receipt_id).not.toBe(det.determinism_proof.second.receipt_id);
     expect(validateRowEvidence(det)).toBe(true);
 
     const bundle = structuredClone(generic.platform_bundle);
@@ -458,7 +547,7 @@ describe("Phase 6.2 paired determinism proof", () => {
     const collidingInvocation = structuredClone(bundle);
     const firstDet = collidingInvocation.rows.find((row: any) => row.row_id === "DET-001");
     const secondDet = collidingInvocation.rows.find((row: any) => row.row_id === "DET-002");
-    secondDet.determinism_proof.first.invocation_id = firstDet.determinism_proof.first.invocation_id;
+    secondDet.determinism_proof.first.receipt_id = firstDet.determinism_proof.first.receipt_id;
     expect(validatePlatformBundle(collidingInvocation)).toBe(false);
     bundle.rows.push(structuredClone(bundle.rows.find((row: any) => row.row_id === "DET-001")));
     expect(validatePlatformBundle(bundle)).toBe(false);
@@ -470,5 +559,35 @@ describe("Phase 6.2 paired determinism proof", () => {
     fields[fields.length - 1] = "0";
     decision.rows[index] = fields.join("\0");
     expect(validateDecisionProjection(decision)).toBe(false);
+  });
+});
+
+describe("Phase 6.2 lifecycle causal surface", () => {
+  test("LIF-002, LIF-006, and LIF-007 accept only their exact cleanup causality", () => {
+    for (const rowId of ["LIF-002", "LIF-006", "LIF-007"]) expect(validateRowEvidence(rowFor(rowId)), rowId).toBe(true);
+
+    const promoted = rowFor("LIF-006");
+    promoted.first_cause = "CLEANUP_FAILED";
+    expect(validateRowEvidence(promoted)).toBe(false);
+
+    const demoted = rowFor("LIF-006");
+    demoted.secondary_errors = [];
+    expect(validateRowEvidence(demoted)).toBe(false);
+
+    const duplicate = rowFor("LIF-006");
+    duplicate.secondary_errors = ["CLEANUP_FAILED", "CLEANUP_FAILED"];
+    expect(validateRowEvidence(duplicate)).toBe(false);
+
+    const cleanupCausalDuplicate = rowFor("LIF-006");
+    cleanupCausalDuplicate.cleanup.secondary_errors = ["CLEANUP_FAILED"];
+    expect(validateRowEvidence(cleanupCausalDuplicate)).toBe(false);
+
+    const lif002CleanupCause = rowFor("LIF-002");
+    lif002CleanupCause.secondary_errors = ["CLEANUP_FAILED"];
+    expect(validateRowEvidence(lif002CleanupCause)).toBe(false);
+
+    const lif007Secondary = rowFor("LIF-007");
+    lif007Secondary.secondary_errors = ["CLEANUP_FAILED"];
+    expect(validateRowEvidence(lif007Secondary)).toBe(false);
   });
 });

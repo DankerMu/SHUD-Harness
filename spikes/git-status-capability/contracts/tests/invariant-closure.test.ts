@@ -143,7 +143,7 @@ function validRow(): Record<string, unknown> {
     row_verdict: "pass", oracle_digest: shaA,
     control_assertions: Object.fromEntries(CONTROL_ASSERTION_IDS.map((id) => [id, { active: true, verdict: "pass" }])),
     protection_set_equal: true,
-    cleanup: { verdict: "pass", descriptors_restored: true, processes_reaped: true, secondary_errors: [] },
+    cleanup: { verdict: "pass", descriptors_restored: true, processes_reaped: true },
     resource_record: { boundary_class: "below", declared_limit: "none", within_limits: true },
     source_input_record_sha256: shaB
   };

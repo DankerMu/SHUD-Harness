@@ -1,5 +1,6 @@
 import { CATALOG_V1, CONTROL_ASSERTION_IDS, DECISION_LIMIT_TOKENS, DECISION_ROW_SEGMENTS } from "./frozen";
 import { determinismProjectionToken } from "./determinism-proof";
+import { encodeDecisionRowProjectionCore } from "./row-projection";
 
 type JsonRecord = Record<string, any>;
 
@@ -23,11 +24,8 @@ const COMPLETENESS_FIELDS = Object.freeze([
   "call_ledger_completeness_verdict", "sbom_completeness_verdict", "license_inventory_completeness_verdict"
 ]);
 
-const KIND_TO_TOKEN = Object.freeze({ clean: "c", dirty: "d", rejected: "r" });
 const TOKEN_TO_KIND = Object.freeze({ c: "clean", d: "dirty", r: "rejected" });
-const BOUNDARY_TO_TOKEN = Object.freeze({ below: "b", exact: "e", exceeded: "x" });
 const TOKEN_TO_BOUNDARY = Object.freeze({ b: "below", e: "exact", x: "exceeded" });
-const PRODUCER_TO_TOKEN = Object.freeze({ observer: "o", launcher: "l", tripwire: "t" });
 const TOKEN_TO_PRODUCER = Object.freeze({ o: "observer", l: "launcher", t: "tripwire" });
 const ALL_CONTROL_BITS = (1 << CONTROL_ASSERTION_IDS.length) - 1;
 const ALL_CONTROL_TOKEN = ALL_CONTROL_BITS.toString(16).padStart(2, "0");
@@ -103,57 +101,18 @@ function decodeDecisionRow(value: unknown): DecodedRow | null {
   const protectionPassed = (passedControlBits & (1 << CONTROL_ASSERTION_IDS.indexOf("protection"))) !== 0;
   const cleanupPassed = (passedControlBits & (1 << CONTROL_ASSERTION_IDS.indexOf("cleanup"))) !== 0;
   const controlsPassed = passedControlBits === ALL_CONTROL_BITS;
+  const cleanupFailureIsEvidence = rowId === "LIF-006" || rowId === "LIF-007";
   if (!exactJson(expectedOutcome, frozenExpected) || producingBoundary !== catalog?.producing_boundary ||
     limitOrdinal !== frozenLimitOrdinal || boundaryClass !== frozenBoundary || protectionPassed !== (protectionSetEqual === "1") ||
-    cleanupPassed !== (cleanupVerdict === "p") ||
+    (cleanupFailureIsEvidence ? !(cleanupPassed && cleanupVerdict === "f") : cleanupPassed !== (cleanupVerdict === "p")) ||
     ((rowVerdict === "pass") !== (exactJson(expectedOutcome, observedOutcome) && controlsPassed))) return null;
   return { platform, rowId, rowVerdict, observationId, generationPayloadDigest, frameDigest };
 }
 
 export function encodeDecisionRowProjection(row: JsonRecord): string {
-  const expectedKind = KIND_TO_TOKEN[row.expected_outcome.kind as keyof typeof KIND_TO_TOKEN];
-  const observedKind = KIND_TO_TOKEN[row.observer_outcome.kind as keyof typeof KIND_TO_TOKEN];
-  const limitOrdinal = DECISION_LIMIT_TOKENS.indexOf(row.resource_record.declared_limit);
-  const boundary = BOUNDARY_TO_TOKEN[row.resource_record.boundary_class as keyof typeof BOUNDARY_TO_TOKEN];
-  const producer = PRODUCER_TO_TOKEN[row.producing_boundary as keyof typeof PRODUCER_TO_TOKEN];
   const determinismToken = determinismProjectionToken(row);
-  if (!record(row.control_assertions) || !exactKeys(row.control_assertions, CONTROL_ASSERTION_IDS)) {
-    throw new Error("invalid D8 projection source");
-  }
-  let passedControlBits = 0;
-  for (let index = 0; index < CONTROL_ASSERTION_IDS.length; index += 1) {
-    const assertion = row.control_assertions[CONTROL_ASSERTION_IDS[index]!];
-    if (!record(assertion) || !exactKeys(assertion, ["active", "verdict"]) || assertion.active !== true ||
-      !["pass", "fail"].includes(assertion.verdict as string)) throw new Error("invalid D8 projection source");
-    if (assertion.verdict === "pass") passedControlBits |= 1 << index;
-  }
-  const protectionPassed = (row.control_assertions.protection as JsonRecord).verdict === "pass";
-  const cleanupPassed = (row.control_assertions.cleanup as JsonRecord).verdict === "pass";
-  if (!expectedKind || !observedKind || limitOrdinal < 0 || !boundary || !producer || determinismToken === null ||
-    typeof row.protection_set_equal !== "boolean" || row.protection_set_equal !== protectionPassed ||
-    !record(row.cleanup) || row.cleanup.verdict !== (cleanupPassed ? "pass" : "fail")) {
-    throw new Error("invalid D8 projection source");
-  }
-  return [
-    row.platform === "macos" ? "m" : row.platform === "linux" ? "l" : "",
-    row.row_id,
-    expectedKind,
-    row.expected_outcome.code ?? "",
-    observedKind,
-    row.observer_outcome.code ?? "",
-    row.row_verdict === "pass" ? "p" : row.row_verdict === "fail" ? "f" : "",
-    row.observation_id,
-    row.git_state_generation_digest,
-    row.frame_digest,
-    producer,
-    ALL_CONTROL_TOKEN,
-    passedControlBits.toString(16).padStart(2, "0"),
-    row.protection_set_equal ? "1" : "0",
-    cleanupPassed ? "p" : "f",
-    String(limitOrdinal),
-    boundary,
-    determinismToken
-  ].join("\0");
+  if (determinismToken === null) throw new Error("invalid D8 projection source");
+  return encodeDecisionRowProjectionCore(row, determinismToken);
 }
 
 function repositoryReceipt(value: unknown, sourceInputDigest: string): value is JsonRecord {

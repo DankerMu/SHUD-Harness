@@ -18,6 +18,8 @@ spikes/git-status-capability/contracts/lib/decision.ts
 spikes/git-status-capability/contracts/lib/determinism-proof.ts
 spikes/git-status-capability/contracts/lib/frozen.ts
 spikes/git-status-capability/contracts/lib/ingestion.ts
+spikes/git-status-capability/contracts/lib/lifecycle-causality.ts
+spikes/git-status-capability/contracts/lib/row-projection.ts
 spikes/git-status-capability/contracts/lib/schema.ts
 spikes/git-status-capability/contracts/lib/source-frame.ts
 spikes/git-status-capability/contracts/lib/wire-frame.ts
