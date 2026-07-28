@@ -112,7 +112,7 @@ function decodeDecisionRow(value: unknown): DecodedRow | null {
   const cleanupFailureIsEvidence = rowId === "LIF-006" || rowId === "LIF-007";
   const actualMatchesExpected = producingBoundary === catalog?.producing_boundary && limitOrdinal === frozenLimitOrdinal && boundaryClass === frozenBoundary;
   const failureCauseValid = decodeAndValidateFailureCause(failureCauseToken!, {
-    rowVerdict, expectedOutcome, observedOutcome, producingBoundary, rowId: rowId!, observationId: observationId!,
+    platform, rowVerdict, expectedOutcome, observedOutcome, producingBoundary, rowId: rowId!, observationId: observationId!,
     suppliedInputDigest: frameDigest!, declaredLimit, boundaryClass, passedControlBits,
     cleanupVerdict: cleanupVerdict === "p" ? "pass" : "fail"
   });

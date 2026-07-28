@@ -106,6 +106,23 @@ export const CATALOG_V1: readonly CatalogRow[] = Object.freeze(CATALOG_IDS.map((
   producing_boundary: producingBoundaryFor(id)
 })));
 
+const CATALOG_NEGATIVE_RELATIONSHIP_MATERIAL = Object.freeze<Record<string, string>>({
+  "CAP-005": "scheduled-input-v1", "CAP-006": "scheduled-input-v1", "CAP-008": "scheduled-input-v1",
+  "CAP-009": "scheduled-input-v1", "CAP-016": "canonical-frame-wire-v1", "CAP-017": "canonical-frame-wire-v1",
+  "PRT-001": "scheduled-input-v1", "PRT-002": "scheduled-input-v1", "PRT-003": "scheduled-input-v1",
+  "PRT-004": "scheduled-input-v1", "PRT-005": "scheduled-input-v1", "PRT-006": "scheduled-input-v1",
+  "PRT-007": "scheduled-input-v1", "PRT-008": "scheduled-input-v1", "PRT-009": "scheduled-input-v1",
+  "PRT-010": "scheduled-input-v1", "PRT-011": "scheduled-input-v1", "PRT-012": "scheduled-input-v1",
+  "LIF-003": "scheduled-input-v1", "LIF-004": "scheduled-input-v1", "LIF-005": "scheduled-input-v1",
+  "LIF-007": "scheduled-input-v1"
+});
+
+export const CATALOG_NEGATIVE_RELATIONSHIPS_V1 = Object.freeze(Object.fromEntries(
+  Object.entries(CATALOG_NEGATIVE_RELATIONSHIP_MATERIAL).map(([rowId, suppliedMaterialKind]) => [rowId, Object.freeze({
+    identity: `shud.catalog-negative.${rowId}.v1`, supplied_material_kind: suppliedMaterialKind
+  })])
+));
+
 const floorRows = [
   "IDX-012", "IDX-013", "IDX-014", "IDX-015", "NES-008", "NES-009", "NES-010", "NES-011", "NES-012", "NES-013",
   "IDX-016", "IDX-017", "IDX-018", "IDX-019", "IDX-020", "HLP-008", "HLP-009", "HLP-010", "HLP-011", "HLP-012",
@@ -242,7 +259,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       actual_resource_record: "strict:actual-boundary;LIM=content-addressed-stimulus-and-measurement;technical-failure=causality-bound;below-none-has-no-proof", source_input_record_sha256: "sha256",
       first_cause: "optional:nonempty-string;LIF-002|006=FRAME_VERSION_UNSUPPORTED;LIF-007=CLEANUP_FAILED", secondary_errors: "optional:string[];LIF-002|007=[];LIF-006=[CLEANUP_FAILED]",
       determinism_proof: "iff-row-DET-001..004:strict:{variation_axis,axis_material,axis_digest,first,second,comparison};two-distinct-receipts;strict-structured-per-invocation-input-and-output;production-recomputed-normalized-row-output-and-nonrecursive-formal-d8-projection;outer-axis-material-and-digest-derived-only-from-per-receipt-axis-binding;stable-input-equal-after-excluding-only-declared-axis;DET-001=exact-full-input-repeat;DET-002=side-bound-fixture-creation-order;DET-003=side-bound-fixture-root;DET-004=side-bound-permitted-volatile-material",
-      failure_cause: "iff-row-verdict-fail:shared-canonical-closed-union:outcome-mismatch-v1(observer-only)|control-failure-v1(producer-specific-control)|resource-exceeded-v1(complete-stimulus-and-measurement)|lifecycle-fault-v1(exact-LIF-002|006|007-mutation-errors-cleanup);content-addressed-receipt-bound-to-row-slot-and-actual-supplied-input"
+      failure_cause: "iff-row-verdict-fail:shared-canonical-closed-union:outcome-mismatch-v1(observer-only)|control-failure-v1(producer-specific-control)|resource-exceeded-v1(complete-stimulus-and-measurement)|lifecycle-fault-v1(exact-LIF-002|006|007-mutation-errors-cleanup)|catalog-negative-mismatch-v1(frozen-launcher-or-tripwire-negative-row,alternate-frozen-code,exact-boundary,content-addressed-supplied-state-and-per-row-relationship-recipe);content-addressed-receipt-bound-to-platform-row-slot-and-actual-supplied-input"
     },
     additional_properties: false
   },
@@ -311,7 +328,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       macos_target_identity: "literal:aarch64-apple-darwin", macos_toolchain_identity: "sha256",
       linux_target_identity: "literal:x86_64-unknown-linux-gnu", linux_toolchain_identity: "sha256",
       platforms: "exact:[macos,linux]",
-      rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,actual_supplied_input_digest,actual_producing_boundary(o|l|t),active_control_bitset(7f=all-required-active),passed_control_bitset(00..7f),protection_set_equal(1|0),cleanup_verdict(p|f),actual_declared_limit(0..13),actual_boundary_class(b|e|x),determinism_proof(0=non-DET|1..4=validated-paired-DET-proof),failure_cause(empty-if-pass|canonical-base64url-shared-causal-projection-if-fail)];failure-cause=observer-only-generic-mismatch|producer-specific-control|complete-resource-proof|exact-LIF-mutation-errors-cleanup;pass=actual-boundaries-equal-catalog-expected;fail=causality-bound;control-bit-order=oracle|ambient_path|subprocess|network|protected_write|protection|cleanup;valid_complete=348-exact;catalog-slot,top-level-observation,generation/payload,actual-supplied-input-identities=globally-unique;DET nested same-slot repeat-only-exception",
+      rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,actual_supplied_input_digest,actual_producing_boundary(o|l|t),active_control_bitset(7f=all-required-active),passed_control_bitset(00..7f),protection_set_equal(1|0),cleanup_verdict(p|f),actual_declared_limit(0..13),actual_boundary_class(b|e|x),determinism_proof(0=non-DET|1..4=validated-paired-DET-proof),failure_cause(empty-if-pass|canonical-base64url-shared-causal-projection-if-fail)];failure-cause=observer-only-generic-mismatch|producer-specific-control|complete-resource-proof|exact-LIF-mutation-errors-cleanup|frozen-catalog-negative-code-mismatch-with-content-addressed-supplied-state-and-per-row-relationship;pass=actual-boundaries-equal-catalog-expected;fail=causality-bound;control-bit-order=oracle|ambient_path|subprocess|network|protected_write|protection|cleanup;valid_complete=348-exact;catalog-slot,top-level-observation,generation/payload,actual-supplied-input-identities=globally-unique;DET nested same-slot repeat-only-exception",
       gates: "nonempty-array:strict-repository-command-receipt:{id,argv,version,exit_verdict,summary_digest,source_input_record_sha256};id-unique;source-record-equal",
       run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted-iff-all-row-verdicts-pass|rejected-iff-any-row-verdict-fails",
       first_cause: "rejected-or-invalid:nonempty-string", all_failure_codes: "rejected-or-invalid:sorted-unique-string[]"
