@@ -98,6 +98,45 @@ function formalDetProjection(input: any, output: any, token: string): string {
   ].join("\0");
 }
 
+function receiptAxisBinding(rowId: string, side: "first" | "second"): any {
+  if (rowId === "DET-002") return {
+    kind: "fixture-creation-order", side,
+    sequence: side === "first" ? ["checkout", "nested"] : ["nested", "checkout"]
+  };
+  if (rowId === "DET-003") return {
+    kind: "fixture-root", side, root_token: digest(Buffer.from(`root:${side}`))
+  };
+  if (rowId === "DET-004") return {
+    kind: "permitted-volatile-material", side,
+    timestamp_digest: digest(Buffer.from(`time:${side}`)),
+    map_order_digest: digest(Buffer.from(`map:${side}`)),
+    below_bound_counter_digest: digest(Buffer.from(`counter:${side}`))
+  };
+}
+
+function axisMaterialFromReceipts(rowId: string, first: any, second: any): any {
+  if (rowId === "DET-001") return { kind: "same-input-repeat", input_digest: canonicalDigest(first.input) };
+  if (rowId === "DET-002") return {
+    kind: "fixture-creation-order",
+    first_order: structuredClone(first.input.axis_binding.sequence),
+    second_order: structuredClone(second.input.axis_binding.sequence)
+  };
+  if (rowId === "DET-003") return {
+    kind: "fixture-root",
+    first_root_token: first.input.axis_binding.root_token,
+    second_root_token: second.input.axis_binding.root_token
+  };
+  const volatile = (binding: any) => ({
+    timestamp_digest: binding.timestamp_digest,
+    map_order_digest: binding.map_order_digest,
+    below_bound_counter_digest: binding.below_bound_counter_digest
+  });
+  return {
+    kind: "permitted-volatile-material",
+    first: volatile(first.input.axis_binding), second: volatile(second.input.axis_binding)
+  };
+}
+
 function determinismProof(row: any): any {
   const axes: Record<string, string> = {
     "DET-001": "same-input-repeat",
@@ -128,30 +167,21 @@ function determinismProof(row: any): any {
   const token = row.row_id.at(-1);
   const normalizedDigest = canonicalDigest(output);
   const projectionDigest = digest(Buffer.from(formalDetProjection(input, output, token), "utf8"));
-  const axisMaterial: Record<string, any> = row.row_id === "DET-001"
-    ? { kind: "same-input-repeat", input_digest: canonicalDigest(input) }
-    : row.row_id === "DET-002"
-      ? { kind: "fixture-creation-order", first_order: ["checkout", "nested"], second_order: ["nested", "checkout"] }
-      : row.row_id === "DET-003"
-        ? { kind: "fixture-root", first_root_token: digest(Buffer.from("root:first")), second_root_token: digest(Buffer.from("root:second")) }
-        : {
-            kind: "permitted-volatile-material",
-            first: { timestamp_digest: digest(Buffer.from("time:first")), map_order_digest: digest(Buffer.from("map:first")), below_bound_counter_digest: digest(Buffer.from("counter:first")) },
-            second: { timestamp_digest: digest(Buffer.from("time:second")), map_order_digest: digest(Buffer.from("map:second")), below_bound_counter_digest: digest(Buffer.from("counter:second")) }
-          };
   const receipt = (side: "first" | "second") => ({
     receipt_id: digest(Buffer.from(`${row.row_id}:receipt:${side}`)),
-    input: structuredClone(input),
+    input: { ...structuredClone(input), ...(row.row_id === "DET-001" ? {} : { axis_binding: receiptAxisBinding(row.row_id, side) }) },
     output: structuredClone(output),
     normalized_row_output_digest: normalizedDigest,
     decision_projection_digest: projectionDigest
   });
+  const first = receipt("first");
+  const second = receipt("second");
+  const axisMaterial = axisMaterialFromReceipts(row.row_id, first, second);
   return {
     variation_axis: axes[row.row_id],
     axis_material: axisMaterial,
     axis_digest: canonicalDigest(axisMaterial),
-    first: receipt("first"),
-    second: receipt("second"),
+    first, second,
     comparison: { normalized_row_output_equal: true, decision_projection_equal: true }
   };
 }
@@ -489,6 +519,62 @@ describe("Phase 6.2 scheduled versus supplied frame proof", () => {
 });
 
 describe("Phase 6.2 paired determinism proof", () => {
+  for (const rowId of ["DET-002", "DET-003", "DET-004"]) {
+    test(`${rowId} binds its declared variation directly to both receipt inputs`, () => {
+      const row = rowFor(rowId);
+      expect(validateRowEvidence(row)).toBe(true);
+      expect(row.determinism_proof.first.input.axis_binding.side).toBe("first");
+      expect(row.determinism_proof.second.input.axis_binding.side).toBe("second");
+    });
+  }
+
+  test("recomputed outer axis claims cannot replace unchanged receipt inputs", () => {
+    const replacements: Record<string, any> = {
+      "DET-002": { kind: "fixture-creation-order", first_order: ["alpha", "beta"], second_order: ["beta", "alpha"] },
+      "DET-003": { kind: "fixture-root", first_root_token: shaA, second_root_token: shaB },
+      "DET-004": {
+        kind: "permitted-volatile-material",
+        first: { timestamp_digest: shaA, map_order_digest: shaA, below_bound_counter_digest: shaA },
+        second: { timestamp_digest: shaB, map_order_digest: shaB, below_bound_counter_digest: shaB }
+      }
+    };
+    const results = ["DET-002", "DET-003", "DET-004"].map((rowId) => {
+      const row = structuredClone(generic.platform_bundle.rows.find((candidate: any) => candidate.row_id === rowId));
+      row.determinism_proof.axis_material = replacements[rowId];
+      row.determinism_proof.axis_digest = canonicalDigest(row.determinism_proof.axis_material);
+      return validateRowEvidence(row);
+    });
+    expect(results).toEqual([false, false, false]);
+  });
+
+  test("same, wrong-kind, wrong-side, and swapped receipt axes fail even when outer claims are recomputed", () => {
+    const fixtureRow = (rowId: string) => structuredClone(
+      generic.platform_bundle.rows.find((candidate: any) => candidate.row_id === rowId)
+    );
+    const same = fixtureRow("DET-003");
+    same.determinism_proof.second.input.axis_binding = {
+      ...structuredClone(same.determinism_proof.first.input.axis_binding), side: "second"
+    };
+    same.determinism_proof.axis_material = axisMaterialFromReceipts("DET-003", same.determinism_proof.first, same.determinism_proof.second);
+    same.determinism_proof.axis_digest = canonicalDigest(same.determinism_proof.axis_material);
+
+    const wrongKind = fixtureRow("DET-002");
+    wrongKind.determinism_proof.first.input.axis_binding.kind = "fixture-root";
+
+    const wrongSide = fixtureRow("DET-004");
+    wrongSide.determinism_proof.first.input.axis_binding.side = "second";
+    wrongSide.determinism_proof.axis_material = axisMaterialFromReceipts("DET-004", wrongSide.determinism_proof.first, wrongSide.determinism_proof.second);
+    wrongSide.determinism_proof.axis_digest = canonicalDigest(wrongSide.determinism_proof.axis_material);
+
+    const swapped = fixtureRow("DET-002");
+    [swapped.determinism_proof.first.input.axis_binding, swapped.determinism_proof.second.input.axis_binding] =
+      [swapped.determinism_proof.second.input.axis_binding, swapped.determinism_proof.first.input.axis_binding];
+    swapped.determinism_proof.axis_material = axisMaterialFromReceipts("DET-002", swapped.determinism_proof.first, swapped.determinism_proof.second);
+    swapped.determinism_proof.axis_digest = canonicalDigest(swapped.determinism_proof.axis_material);
+
+    expect([same, wrongKind, wrongSide, swapped].map(validateRowEvidence)).toEqual([false, false, false, false]);
+  });
+
   test("DET-001 through DET-004 require a bound second invocation and exact variation axis", () => {
     for (const rowId of ["DET-001", "DET-002", "DET-003", "DET-004"]) {
       const row = rowFor(rowId);
@@ -502,6 +588,11 @@ describe("Phase 6.2 paired determinism proof", () => {
       const changedFrame = structuredClone(row);
       changedFrame.determinism_proof.second.input.supplied_input_digest = shaA;
       expect(validateRowEvidence(changedFrame), `${rowId}:changed-frame`).toBe(false);
+
+      const sharedStableDrift = structuredClone(row);
+      sharedStableDrift.determinism_proof.first.input.source_input_record_sha256 = shaA;
+      sharedStableDrift.determinism_proof.second.input.source_input_record_sha256 = shaA;
+      expect(validateRowEvidence(sharedStableDrift), `${rowId}:shared-stable-drift`).toBe(false);
 
       const changedOutcome = structuredClone(row);
       changedOutcome.determinism_proof.second.output.observer_outcome = { kind: "dirty" };

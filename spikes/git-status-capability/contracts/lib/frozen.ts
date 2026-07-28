@@ -238,7 +238,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       cleanup: "strict:{verdict:pass|fail,descriptors_restored:boolean,processes_reaped:boolean};LIF-006|007=causal-cleanup-failure-with-control-pass;otherwise-verdict=control-cleanup",
       resource_record: "strict:frozen-row-boundary:{below|exact|exceeded,observer-limit|none,within_limits=(boundary!=exceeded)}", source_input_record_sha256: "sha256",
       first_cause: "optional:nonempty-string;LIF-002|006=FRAME_VERSION_UNSUPPORTED;LIF-007=CLEANUP_FAILED", secondary_errors: "optional:string[];LIF-002|007=[];LIF-006=[CLEANUP_FAILED]",
-      determinism_proof: "iff-row-DET-001..004:strict:{variation_axis,axis_material,axis_digest,first,second,comparison};two-distinct-receipts;strict-structured-per-invocation-input-and-output;production-recomputed-normalized-row-output-and-nonrecursive-formal-d8-projection;axis-digest-recomputed-from-DET-specific-material;DET-001=same-input-repeat;DET-002=fixture-creation-order;DET-003=fixture-root;DET-004=permitted-volatile-material"
+      determinism_proof: "iff-row-DET-001..004:strict:{variation_axis,axis_material,axis_digest,first,second,comparison};two-distinct-receipts;strict-structured-per-invocation-input-and-output;production-recomputed-normalized-row-output-and-nonrecursive-formal-d8-projection;outer-axis-material-and-digest-derived-only-from-per-receipt-axis-binding;stable-input-equal-after-excluding-only-declared-axis;DET-001=exact-full-input-repeat;DET-002=side-bound-fixture-creation-order;DET-003=side-bound-fixture-root;DET-004=side-bound-permitted-volatile-material"
     },
     additional_properties: false
   },
