@@ -252,11 +252,11 @@ describe("bounded fail-closed JSON ingestion", () => {
           final_bundle: [
             ["invalid-with-decision", (value) => { value.run_status = "invalid"; }],
             ["complete-without-decision", (value) => { delete value.terminal_decision; }],
-            ["empty-complete-gates", (value) => { value.repository_gates = {}; }],
-            ["nested-gate-unknown", (value) => { value.repository_gates.check.future = true; }],
-            ["gate-source-mismatch", (value) => { value.repository_gates.check.source_input_record_sha256 = "0".repeat(64); }],
-            ["missing-source-input-gate", (value) => { delete value.repository_gates["GATE-SOURCE-INPUT"]; }],
-            ["source-input-gate-create-mode", (value) => { value.repository_gates["GATE-SOURCE-INPUT"].argv[12] = "--record"; value.repository_gates["GATE-SOURCE-INPUT"].argv[14] = "--create"; }]
+            ["empty-complete-gates", (value) => { value.repository_gates = []; }],
+            ["nested-gate-unknown", (value) => { value.repository_gates[0].future = true; }],
+            ["gate-source-mismatch", (value) => { value.repository_gates[0].source_input_record_sha256 = "0".repeat(64); }],
+            ["missing-source-input-gate", (value) => { value.repository_gates.splice(1, 1); }],
+            ["source-input-gate-create-mode", (value) => { value.repository_gates[1].argv[0] = "unexpected"; }]
           ],
           decision: [
             ["invalid-with-decision", (value) => { value.run_status = "invalid"; }],

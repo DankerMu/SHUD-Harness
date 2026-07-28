@@ -178,6 +178,56 @@ export const IMMUTABLE_EVIDENCE_REFERENCE_LIMITS = Object.freeze({
   items: 32
 });
 
+export const EVIDENCE_RECORD_LIMITS = Object.freeze({
+  markdown: { bytes: 4 * 1024, depth: 1, nodes: 1, items: 0 },
+  immutable_evidence_reference: IMMUTABLE_EVIDENCE_REFERENCE_LIMITS,
+  source_input_record: INGESTION_LIMITS.source_input_record,
+  platform_bundle: INGESTION_LIMITS.platform_bundle,
+  repository_gate: { bytes: 256 * 1024, depth: 12, nodes: 4_096, items: 1_024 },
+  final_bundle: INGESTION_LIMITS.final_bundle,
+  decision: INGESTION_LIMITS.decision,
+  publication_assertion: { bytes: 64 * 1024, depth: 12, nodes: 2_048, items: 512 },
+  publication_governance_recheck: { bytes: 64 * 1024, depth: 12, nodes: 2_048, items: 512 }
+});
+
+export const EVIDENCE_LANE_LIMITS = Object.freeze({
+  source: 128 * 1024,
+  gates: 1024 * 1024,
+  platform: 8 * 1024 * 1024,
+  final: 20 * 1024 * 1024
+});
+
+export const COMPLETENESS_FIELDS = Object.freeze([
+  "lockfile_completeness_verdict", "direct_feature_completeness_verdict",
+  "macos_target_graph_completeness_verdict", "linux_target_graph_completeness_verdict",
+  "call_ledger_completeness_verdict", "sbom_completeness_verdict", "license_inventory_completeness_verdict"
+] as const);
+
+export const D9_COMMAND_PROFILE = Object.freeze([
+  { id: "GATE-BASE", argv: ["sh", "-c", "test \"$(git merge-base 4a9748431c870fc271ec02773a4643b9453649dc HEAD)\" = 4a9748431c870fc271ec02773a4643b9453649dc && git merge-base --is-ancestor 4a9748431c870fc271ec02773a4643b9453649dc HEAD"], version: "git 2.49.0" },
+  { id: "GATE-SOURCE-INPUT", argv: ["spikes/git-status-capability/verify.sh", "source-input-digest", "--version", "1", "--source-sha", "<SOURCE_SHA>", "--manifest", "spikes/git-status-capability/contracts/source-input-v1.paths", "--primary", "source-input-primary-v1", "--witness", "source-input-witness-v1", "--verify-record", "<EXTERNAL_EVIDENCE_ROOT>/source-input-record.json", "--no-write"], version: "1" },
+  { id: "GATE-INSTALL", argv: ["npx", "--yes", "bun@1.2.19", "install", "--frozen-lockfile"], version: "bun 1.2.19" },
+  { id: "GATE-CHECK", argv: ["npx", "--yes", "bun@1.2.19", "run", "check"], version: "bun 1.2.19" },
+  { id: "GATE-SCHEMA", argv: ["npx", "--yes", "bun@1.2.19", "run", "schema:check"], version: "bun 1.2.19" },
+  { id: "GATE-PERF", argv: ["npx", "--yes", "bun@1.2.19", "run", "test:perf:api"], version: "bun 1.2.19" },
+  { id: "GATE-DOCS-SELF", argv: ["scripts/docs/self_test.sh"], version: "repository-script-v1" },
+  { id: "GATE-DOCS-LINKS", argv: ["scripts/docs/check_links.sh"], version: "repository-script-v1" },
+  { id: "GATE-OPENSPEC-STATUS", argv: ["npx", "--yes", "@fission-ai/openspec@1.3.1", "status", "--change", "m2-capability-observer-spike"], version: "openspec 1.3.1" },
+  { id: "GATE-OPENSPEC", argv: ["npx", "--yes", "@fission-ai/openspec@1.3.1", "validate", "m2-capability-observer-spike", "--strict", "--no-interactive"], version: "openspec 1.3.1" },
+  { id: "GATE-DIFF-CHECK", argv: ["git", "diff", "--check", "4a9748431c870fc271ec02773a4643b9453649dc...HEAD"], version: "git 2.49.0" },
+  { id: "GATE-SCOPE", argv: ["spikes/git-status-capability/verify.sh", "repository-scope", "--base", "4a9748431c870fc271ec02773a4643b9453649dc"], version: "1" },
+  { id: "GATE-UNTRACKED", argv: ["spikes/git-status-capability/verify.sh", "untracked-inventory"], version: "1" },
+  { id: "GATE-PRODUCTION", argv: ["spikes/git-status-capability/verify.sh", "production-isolation", "--base", "4a9748431c870fc271ec02773a4643b9453649dc"], version: "1" },
+  { id: "GATE-GOVERNANCE", argv: ["spikes/git-status-capability/verify.sh", "governance-handoff", "--repo", "DankerMu/SHUD-Harness", "--issue", "132", "--require-open", "--recovery-state", "blocked", "--pr", "133", "--reverted-merge", "7d74a56eff27e34099961bdf14a40678c88d2603", "--require-main-revert", "2bf3ef8859278dd0817100c01775765612170648", "--read-only"], version: "1" },
+  { id: "GATE-SUBMODULE-DIFF", argv: ["git", "diff", "--exit-code", "4a9748431c870fc271ec02773a4643b9453649dc...HEAD", "--", "SHUD", "rSHUD", "AutoSHUD", "zero"], version: "git 2.49.0" },
+  { id: "GATE-SUBMODULE-PINS", argv: ["spikes/git-status-capability/verify.sh", "submodules", "--expect", "SHUD=3aec65755926c478e13ca7d4fea80715e4e90345", "--expect", "rSHUD=2b7742e32ea323a57fd0a947dc2cea67bfd0afd1", "--expect", "AutoSHUD=f421445340f70b8cb160ce58cefb066751628593", "--expect", "zero=13e25c116c62411e6ee8a0ad67a6c53dc7c376c6"], version: "1" }
+] as const);
+
+export const INVALIDITY_CODES = Object.freeze([
+  "STRUCTURE_INVALID", "SOURCE_RECORD_INVALID", "PLATFORM_EVIDENCE_INVALID",
+  "GOVERNANCE_INVALID", "PUBLICATION_INVALID"
+] as const);
+
 export const OBSERVER_LIMITS = Object.freeze({
   frame_bytes: 8 * 1024 * 1024,
   index_bytes: 6 * 1024 * 1024,
@@ -285,7 +335,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       dependency_graph_digest: "sha256", direct_feature_digest: "sha256", call_ledger_digest: "sha256",
       sbom_digest: "sha256", license_inventory_digest: "sha256",
       rows: "array:row-evidence;valid_complete=174-exact;top-level-observation,scheduled-generation,actual-supplied-input-identities=unique-per-platform-slot;DET-paired-receipt-identities=8-globally-unique;same-row-nested-observation-repeat-only-exception",
-      protection_set: "array:174-exact-slot-receipts:strict:{platform,row_id,observation_id,supplied_input_digest,profile_material,profile_digest,inventory:[strict:{identity_material,identity_digest,ingress_records,pre_measurement,pre_digest,post_measurement,post_digest,event_material,event_digest}],receipt_digest};profile=strict-slot-bound-canonical-6-base-root-roles+regular-contract-anchor+every-scheduled-initialized|deinitialized|absent-nested-role;each-object-one-identity;canonical+physical-alias+symlink-alias-ingresses;absent-parent-adds-basename-ingress;profile-and-inventory-sets-independently-derived-and-exactly-equal;directory|regular-file|absent-parent-content+metadata;all-digests-recomputed;pre=post;event-ledger-globally-unique;receipt-covers-all-material;row-boolean-derived",
+      protection_set: "array:174-exact-slot-receipts:strict:{platform,row_id,observation_id,supplied_input_digest,profile_material,profile_digest,inventory:[strict:{identity_material,identity_digest,ingress_records,pre_measurement,pre_digest,post_measurement,post_digest,event_material,event_digest}],receipt_digest};profile=strict-slot-bound-canonical-6-base-root-roles+regular-contract-anchor+every-scheduled-initialized|deinitialized|absent-nested-role;each-object-one-identity;canonical+physical-alias+symlink-alias-ingresses;absent-parent-adds-basename-ingress;profile-and-inventory-sets-independently-derived-and-exactly-equal;directory|regular-file|absent-parent-content+metadata;all-digests-recomputed;event=verified-unchanged-v1-iff-pre-post-equal|verified-changed-v1-iff-pre-post-differ;event-ledger-globally-unique;receipt-covers-all-material;row-boolean-derived-from-all-member-events",
       raw_command_manifest: "array:command-receipt;valid_complete=nonempty", first_cause: "invalid-only:nonempty-string",
       all_failure_codes: "invalid-only:sorted-unique-string[]"
     },
@@ -295,14 +345,18 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
     schema_version: "shud.git-status-capability.final-bundle.v1",
     required_fields: [
       "schema_version", "source_input_record_sha256", "macos_bundle_sha256", "linux_bundle_sha256",
-      "repository_gates", "raw_evidence_digest", "decision_projection_digest", "run_status"
+      "repository_gate_sha256", "repository_gates", "completeness", "coverage",
+      "raw_evidence_digest", "decision_projection_digest", "run_status"
     ],
-    optional_fields: ["terminal_decision", "first_cause", "all_failure_codes"],
+    optional_fields: ["terminal_decision", "first_cause", "all_failure_codes", "invalidity_receipts"],
     field_types: {
       schema_version: "literal", source_input_record_sha256: "sha256", macos_bundle_sha256: "sha256",
-      linux_bundle_sha256: "sha256;valid_complete:distinct-from-macos", repository_gates: "nonempty-map:gate-receipt", raw_evidence_digest: "sha256",
+      linux_bundle_sha256: "sha256;valid_complete:distinct-from-macos", repository_gate_sha256: "sha256",
+      repository_gates: "exact-ordered-17:strict-full-d9-receipt", completeness: "strict-seven-pass|fail-verdicts",
+      coverage: "strict:{macos_rows:uint<=174,linux_rows:uint<=174}", raw_evidence_digest: "sha256",
       decision_projection_digest: "sha256", run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted|rejected",
-      first_cause: "optional:nonempty-string", all_failure_codes: "optional:string[]"
+      first_cause: "invalid-or-rejected:derived-nonempty-string", all_failure_codes: "invalid-or-rejected:derived-sorted-unique-string[]",
+      invalidity_receipts: "invalid-only:array:strict-content-addressed-invalidity-receipt-v1"
     },
     additional_properties: false
   },
@@ -320,25 +374,26 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       "macos_target_identity", "macos_toolchain_identity", "linux_target_identity", "linux_toolchain_identity",
       "platforms", "rows", "gates", "run_status"
     ],
-    optional_fields: ["terminal_decision", "first_cause", "all_failure_codes"],
+    optional_fields: ["terminal_decision", "first_cause", "all_failure_codes", "invalidity_receipts"],
     field_types: {
       schema_version: "literal", catalog_version: "integer:1", catalog_digest: "sha256", base_sha: "git-object-id",
       fixture_identity: "sha256", oracle_identity: "sha256", frame_identity: "sha256", runner_identity: "sha256",
       validator_identity: "sha256", tripwire_identity: "sha256", source_input_record_sha256: "sha256",
-      lockfile_digest: "sha256", lockfile_completeness_verdict: "literal:pass",
-      direct_feature_digest: "sha256", direct_feature_completeness_verdict: "literal:pass",
-      macos_target_graph_digest: "sha256", macos_target_graph_completeness_verdict: "literal:pass",
-      linux_target_graph_digest: "sha256", linux_target_graph_completeness_verdict: "literal:pass",
-      call_ledger_digest: "sha256", call_ledger_completeness_verdict: "literal:pass",
-      sbom_digest: "sha256", sbom_completeness_verdict: "literal:pass",
-      license_inventory_digest: "sha256", license_inventory_completeness_verdict: "literal:pass",
+      lockfile_digest: "sha256", lockfile_completeness_verdict: "enum:pass|fail;valid_complete=pass",
+      direct_feature_digest: "sha256", direct_feature_completeness_verdict: "enum:pass|fail;valid_complete=pass",
+      macos_target_graph_digest: "sha256", macos_target_graph_completeness_verdict: "enum:pass|fail;valid_complete=pass",
+      linux_target_graph_digest: "sha256", linux_target_graph_completeness_verdict: "enum:pass|fail;valid_complete=pass",
+      call_ledger_digest: "sha256", call_ledger_completeness_verdict: "enum:pass|fail;valid_complete=pass",
+      sbom_digest: "sha256", sbom_completeness_verdict: "enum:pass|fail;valid_complete=pass",
+      license_inventory_digest: "sha256", license_inventory_completeness_verdict: "enum:pass|fail;valid_complete=pass",
       macos_target_identity: "literal:aarch64-apple-darwin", macos_toolchain_identity: "sha256",
       linux_target_identity: "literal:x86_64-unknown-linux-gnu", linux_toolchain_identity: "sha256",
       platforms: "exact:[macos,linux]",
       rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,actual_supplied_input_digest,actual_producing_boundary(o|l|t),active_control_bitset(7f=all-required-active),passed_control_bitset(00..7f),protection_set_equal(1|0),cleanup_verdict(p|f),actual_declared_limit(0..13),actual_boundary_class(b|e|x),determinism_proof(0=non-DET|1..4=validated-paired-DET-proof),failure_cause(empty-if-pass|one-byte-canonical-tag-if-fail:o=outcome,c=control,r=resource,l=lifecycle,n=catalog-negative,u=launcher-fault)];failure-cause-tag-semantics=validated-only-from-projected-platform-row-outcomes-producer-controls-cleanup-resource-and-identities;raw-causal-receipt-and-material-remain-row-evidence-only;pass=actual-within-limit-and-catalog-outcome;fail=causality-bound;control-bit-order=oracle|ambient_path|subprocess|network|protected_write|protection|cleanup;valid_complete=348-exact;catalog-slot,top-level-observation,generation/payload,actual-supplied-input-identities=globally-unique;DET nested same-slot repeat-only-exception",
-      gates: "nonempty-array:strict-repository-command-receipt:{id,argv,version,exit_verdict,summary_digest,source_input_record_sha256};id-unique;source-record-equal",
+      gates: "exact-17-fixed-order:compact-scalar-v1:{ordinal,normalized-argv-template-digest,frozen-tool-version-identity,pass|fail,summary-digest};global-source-record-binding",
       run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted-iff-all-row-verdicts-pass|rejected-iff-any-row-verdict-fails",
-      first_cause: "rejected-or-invalid:nonempty-string", all_failure_codes: "rejected-or-invalid:sorted-unique-string[]"
+      first_cause: "rejected-or-invalid:nonempty-string", all_failure_codes: "rejected-or-invalid:sorted-unique-string[]",
+      invalidity_receipts: "invalid-only:array:strict-content-addressed-invalidity-receipt-v1"
     },
     additional_properties: false
   },
@@ -357,14 +412,48 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
     },
     additional_properties: false
   },
+  repository_gate: {
+    schema_version: "shud.git-status-capability.repository-gate.v1",
+    required_fields: ["schema_version", "source_input_record_sha256", "gates"],
+    optional_fields: [],
+    field_types: {
+      schema_version: "literal;ingestion=bytes:262144,depth:12,nodes:4096,items:1024",
+      source_input_record_sha256: "sha256",
+      gates: "exact-ordered-17:strict:{id,argv,version,exit_code,stdout_summary,stderr_summary,summary_digest,source_input_record_sha256};fixed-D9-profile;bounded-summary"
+    },
+    additional_properties: false
+  },
+  publication_assertion: {
+    schema_version: "shud.git-status-capability.publication-assertion.v1",
+    required_fields: ["schema_version", "source_input_record_sha256", "decision_sha256", "expected_decision", "command_receipt"],
+    optional_fields: [],
+    field_types: {
+      schema_version: "literal;ingestion=bytes:65536,depth:12,nodes:2048,items:512",
+      source_input_record_sha256: "sha256", decision_sha256: "sha256", expected_decision: "enum:accepted|rejected",
+      command_receipt: "strict:matching-literal-PUBLICATION-EXPECT-argv-version-exit-summary-digest"
+    },
+    additional_properties: false
+  },
+  publication_governance_recheck: {
+    schema_version: "shud.git-status-capability.publication-governance-recheck.v1",
+    required_fields: ["schema_version", "source_input_record_sha256", "d9_governance_receipt_sha256", "repeated_receipt_sha256", "exact_match", "mutation_count"],
+    optional_fields: [],
+    field_types: {
+      schema_version: "literal;ingestion=bytes:65536,depth:12,nodes:2048,items:512",
+      source_input_record_sha256: "sha256", d9_governance_receipt_sha256: "sha256", repeated_receipt_sha256: "sha256;equal-D9",
+      exact_match: "literal:true", mutation_count: "literal:0"
+    },
+    additional_properties: false
+  },
   immutable_evidence_reference: {
     schema_version: "shud.git-status-capability.immutable-evidence-reference.v1",
     required_fields: [
-      "schema_version", "media_type", "sha256", "byte_length", "immutable_identity", "retention", "access", "offline_retrieval"
+      "schema_version", "lane", "platform", "source_input_record_sha256", "media_type", "sha256", "byte_length", "immutable_identity", "retention", "access", "offline_retrieval"
     ],
     optional_fields: [],
     field_types: {
       schema_version: "literal;ingestion=bytes:4096,depth:6,nodes:64,items:32",
+      lane: "enum:source|platform|gates|final", platform: "enum:macos|linux|none;path-bound", source_input_record_sha256: "sha256;collection-bound",
       media_type: "enum:application/json|text/markdown|text/plain", sha256: "sha256",
       byte_length: "positive-safe-integer<=final-bundle-bytes", immutable_identity: "literal:sha256:<sha256>",
       retention: "strict:{policy:retain-until-change-archived-v1,minimum_days:3650}",

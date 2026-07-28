@@ -186,6 +186,13 @@ The checker exits `2`, keeps stdout empty, emits one bounded machine-readable er
 receipt on stderr, and produces no partial file or success receipt. Success exits
 `0` and emits one canonical receipt only after all checks pass.
 
+Path input SHALL be opened once with the platform's read-only nonblocking and
+no-follow descriptor flags, then classified by `fstat` on that descriptor before
+any read. Only a regular file is admissible. A FIFO without a writer, symlink,
+directory, socket, or device SHALL terminate within the bounded command test and
+return the same exit/stdout/stderr/no-partial-output contract; a pathname
+precheck followed by a second open is forbidden.
+
 #### Scenario: Contract input reaches an exact bound
 - **WHEN** each input kind reaches exactly one declared byte, depth, node, or item bound with otherwise valid content
 - **THEN** ingestion continues to strict schema validation and may succeed
@@ -193,6 +200,10 @@ receipt on stderr, and produces no partial file or success receipt. Success exit
 #### Scenario: Contract input exceeds a bound or is malformed
 - **WHEN** an input is bound+1, invalid UTF-8, malformed/trailing JSON, duplicate-keyed, too deep, too wide, missing, unknown, or schema-invalid
 - **THEN** the checker returns only the matching stable code, exit `2`, empty stdout, and no partial output
+
+#### Scenario: Contract input is not a regular file
+- **WHEN** `--input` names a writerless FIFO, symlink, directory, socket, or available device
+- **THEN** the checker finishes within the public bound with exit `2`, empty stdout, one bounded error receipt, no partial result or write, and closes the descriptor
 
 ### Requirement: Outcome, verdict, validity, and decision are distinct
 The evidence schema SHALL model exactly these layers:
@@ -222,6 +233,10 @@ The evidence schema SHALL model exactly these layers:
 - **WHEN** evidence is missing, duplicate, corrupt, stale, oversized, schema-invalid, identity-mismatched, or lacks an active oracle/tripwire/gate record
 - **THEN** run status is `invalid`, terminal decision is absent, harness-health and expectation commands fail, and CI is red
 
+#### Scenario: An invalid run is recorded truthfully
+- **WHEN** a supply-completeness field, one of the exact 17 D9 gates, platform/row coverage, source identity, governance, or publication validation fails
+- **THEN** the normalized invalid record retains the failed verdict or strict content-addressed invalidity receipt, has no terminal decision, and derives its first/sorted-all failure codes from that evidence; an arbitrary failure label with complete all-pass evidence is rejected
+
 #### Scenario: All platform rows pass
 - **WHEN** all 348 platform-row slots pass and every supply/repository/governance gate is valid
 - **THEN** run status is `valid_complete` and terminal decision is `accepted`
@@ -229,6 +244,10 @@ The evidence schema SHALL model exactly these layers:
 #### Scenario: At least one row fails in an otherwise valid experiment
 - **WHEN** all harness evidence/gates are complete but one or more row verdicts fail
 - **THEN** run status is `valid_complete`, terminal decision is `rejected`, and harness-health succeeds while `expect accepted` fails
+
+#### Scenario: Protection is observably unequal
+- **WHEN** the complete slot-bound protection profile contains one or more recomputable changed pre/post member measurements
+- **THEN** the protection receipt uses the canonical changed-event form, the row protection assertion and equality boolean are derived as failed/false, the raw row and complete platform bundle remain valid technical evidence, and the terminal decision is `rejected`; missing, copied, incomplete, duplicate, or self-claimed material is schema-invalid
 
 ### Requirement: Observation is read-only, bounded, and fully settled
 The observer MUST enforce the inclusive finite bounds frozen in the catalog for
@@ -386,6 +405,23 @@ Only task 5.4 MAY publish `evidence/final/<digest>/**`, after D10's candidate
 expectation and governance succeed. No evidence write is observer/launcher write
 authority or may touch another protected or production path.
 
+The evidence collection SHALL distinguish the path's live
+`source_input_digest_v1` from SHA-256 of the exact immutable source-record bytes.
+The source record's internal live digest equals the path; every non-source
+record/reference/summary binds the source-record SHA; and the final source-record
+copy is byte-identical. The fixed direct-record vocabulary is source record,
+platform bundle, 17-receipt repository gate, final bundle, decision, publication
+assertion, and publication governance recheck in their designated lanes. Wrong
+digest/lane/platform/source-record bindings fail closed.
+
+Logical aggregate capacity SHALL count referenced artifact length rather than
+only small reference metadata: source is 128 KiB, gates 1 MiB, each platform OS
+8 MiB, and final 20 MiB. Inline/reference mixtures sum, duplicate reference
+identities within one aggregate fail, and worktree and staged Git blobs use the
+same exact/+1 algorithm. Canonical Markdown and immutable references are each
+4 KiB, the repository-gate record is 256 KiB, and each publication receipt is
+64 KiB, with independent structural limits frozen by Task 1.1.
+
 The validator SHALL compute the exact `raw_evidence_digest` and normalized
 `decision_projection_digest` defined in `design.md`. It SHALL include every
 decision-bearing identity/outcome/gate and exclude only the enumerated volatile
@@ -411,6 +447,14 @@ SHUD/rSHUD/AutoSHUD/zero. It SHALL also run the fixed GET-only governance gate:
 `2bf3ef8859278dd0817100c01775765612170648`, and GitHub mutation count is zero.
 D9 MUST NOT derive/read a candidate decision or run
 health/expect/publication commands.
+
+The raw repository-gate record SHALL retain the exact full receipts for every
+and only the 17 D9 IDs in design order. The decision projection SHALL encode all
+17 as fixed-order compact canonical scalars derived from the frozen normalized
+argv templates and tool identities, plus pass/fail and summary digest, while the
+decision's global source-record SHA provides their repeated binding. The exact
+all-pass and all-348-row-failure projections MUST remain within the unchanged
+128 KiB public decision limit; exact bytes pass and +1 fails.
 
 #### Scenario: Volatile raw data changes without a decision change
 - **WHEN** timestamps, temporary roots, map order, job IDs, numeric FDs, or below-bound counters vary while included identities/outcomes/classes are identical
