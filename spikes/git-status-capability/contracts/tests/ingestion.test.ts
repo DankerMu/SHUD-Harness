@@ -213,8 +213,8 @@ describe("bounded fail-closed JSON ingestion", () => {
             ["wrong-verdict", (value) => { value.row_verdict = "accepted"; }],
             ["slot-expectation-drift", (value) => { value.expected_outcome = { kind: "dirty" }; }],
             ["nested-cleanup-unknown", (value) => { value.cleanup.future = true; }],
-            ["missing-frame-payload-length", (value) => { delete value.frame_binding.payload_length; }],
-            ["frame-binding-mismatch", (value) => { value.frame_binding.row_id = "BAS-002"; }]
+            ["missing-supplied-input-length", (value) => { delete value.frame_binding.supplied.input_length; }],
+            ["frame-binding-mismatch", (value) => { value.frame_binding.scheduled.row_id = "BAS-002"; }]
           ],
           platform_bundle: [
             ["wrong-status", (value) => { value.run_status = "accepted"; }],

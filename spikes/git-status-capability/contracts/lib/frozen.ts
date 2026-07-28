@@ -7,7 +7,16 @@ export type CatalogRow = {
   id: string;
   macos_expected: ObserverOutcome;
   linux_expected: ObserverOutcome;
+  producing_boundary: ProducingBoundary;
 };
+
+export type ProducingBoundary = "observer" | "launcher" | "tripwire";
+
+export const PRODUCING_BOUNDARIES = Object.freeze(["observer", "launcher", "tripwire"] as const);
+
+export const CONTROL_ASSERTION_IDS = Object.freeze([
+  "oracle", "ambient_path", "subprocess", "network", "protected_write", "protection", "cleanup"
+] as const);
 
 export type FloorMapping = {
   floor_id: string;
@@ -81,10 +90,20 @@ export function expectedOutcome(id: string): ObserverOutcome {
   return { kind: DIRTY_IDS.has(id) ? "dirty" : "clean" };
 }
 
+export function producingBoundaryFor(id: string): ProducingBoundary {
+  if (/^PRT-01[0-2]$/.test(id)) return "tripwire";
+  if ([
+    "CAP-005", "CAP-006", "CAP-008", "CAP-009", "CAP-016", "CAP-017",
+    "LIF-003", "LIF-004", "LIF-005", "LIF-007"
+  ].includes(id) || /^PRT-00[1-9]$/.test(id)) return "launcher";
+  return "observer";
+}
+
 export const CATALOG_V1: readonly CatalogRow[] = Object.freeze(CATALOG_IDS.map((id) => ({
   id,
   macos_expected: expectedOutcome(id),
-  linux_expected: expectedOutcome(id)
+  linux_expected: expectedOutcome(id),
+  producing_boundary: producingBoundaryFor(id)
 })));
 
 const floorRows = [
@@ -168,8 +187,8 @@ export const FRAME_EVIDENCE_FIELD_ORDER = Object.freeze([
 
 export const DECISION_ROW_SEGMENTS = Object.freeze([
   "platform", "row_id", "expected_kind", "expected_code", "observed_kind", "observed_code", "row_verdict",
-  "observation_id", "generation_payload_digest", "frame_digest", "producing_boundary", "oracle_verdict",
-  "active_tripwire_bitset", "protection_set_equal", "cleanup_verdict", "declared_limit", "boundary_class"
+  "observation_id", "generation_payload_digest", "frame_digest", "producing_boundary",
+  "active_control_bitset", "passed_control_bitset", "protection_set_equal", "cleanup_verdict", "declared_limit", "boundary_class"
 ]);
 
 export const DECISION_LIMIT_TOKENS = Object.freeze([
@@ -203,18 +222,19 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
     required_fields: [
       "schema_version", "platform", "row_id", "observation_id", "checkout_capability_identity",
       "git_state_generation_digest", "frame_digest", "frame_binding", "expected_outcome", "observer_outcome", "producing_boundary",
-      "row_verdict", "oracle_digest", "oracle_verdict", "tripwire_verdicts", "protection_set_equal", "cleanup", "resource_record",
+      "row_verdict", "oracle_digest", "control_assertions", "protection_set_equal", "cleanup", "resource_record",
       "source_input_record_sha256"
     ],
     optional_fields: ["first_cause", "secondary_errors"],
     field_types: {
       schema_version: "literal", platform: "enum:macos|linux", row_id: "catalog-row-id", observation_id: "sha256",
       checkout_capability_identity: "sha256", git_state_generation_digest: "sha256", frame_digest: "sha256",
-      frame_binding: "strict:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,frame_length,frame_digest,payload_length,payload_digest,canonical_body_length,canonical_body_digest,frame_reference:{encoding:literal:shud.git-status-capability.canonical-frame-json.v1,frame:strict-frame-v1}};payload=canonical-frame-body-bytes;complete-frame=utf8-json-no-bom-no-whitespace-no-length-prefix;top-level-field-order=frozen;nested-object-fields=utf8-byte-sorted",
-      expected_outcome: "frozen-platform-slot-outcome", observer_outcome: "observer-outcome", producing_boundary: "nonempty-string",
-      row_verdict: "iff:expected=observed", oracle_digest: "sha256", oracle_verdict: "literal:pass",
-      tripwire_verdicts: "strict:{ambient_path,subprocess,protected_write}:true", protection_set_equal: "literal:true",
-      cleanup: "strict:{verdict:pass,descriptors_restored:true,processes_reaped:true,secondary_errors:string[]}",
+      frame_binding: "strict:{scheduled:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,input_length,input_digest,material:canonical-frame-envelope-v1,frame_reference:{encoding:literal:shud.git-status-capability.canonical-frame-json.v1,frame:strict-frame-v1}},supplied:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,input_length,input_digest,material:strict-supplied-input-proof-v1}};scheduled=strict-canonical;supplied=actual-wire-proof;malformed-supplied-does-not-require-frame-validation;CAP-010..017-and-LIM-001..002-relations-frozen",
+      expected_outcome: "frozen-platform-slot-outcome", observer_outcome: "observer-outcome", producing_boundary: "frozen-row-enum:observer|launcher|tripwire",
+      row_verdict: "iff:expected=observed-and-all-required-active-controls-pass", oracle_digest: "sha256",
+      control_assertions: "strict:{oracle,ambient_path,subprocess,network,protected_write,protection,cleanup}:{active:literal:true,verdict:pass|fail}",
+      protection_set_equal: "boolean;iff-control-protection-pass",
+      cleanup: "strict:{verdict:pass|fail,descriptors_restored:boolean,processes_reaped:boolean,secondary_errors:string[]};verdict=control-cleanup",
       resource_record: "strict:frozen-row-boundary:{below|exact|exceeded,observer-limit|none,within_limits=(boundary!=exceeded)}", source_input_record_sha256: "sha256",
       first_cause: "optional:nonempty-string", secondary_errors: "optional:string[]"
     },
@@ -234,7 +254,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       toolchain: "strict:{rustc_vv,cargo_version,git_version,target_triple}", target: "platform-target",
       dependency_graph_digest: "sha256", direct_feature_digest: "sha256", call_ledger_digest: "sha256",
       sbom_digest: "sha256", license_inventory_digest: "sha256",
-      rows: "array:row-evidence;valid_complete=174-exact;observation,generation/payload,complete-frame-identities=unique-per-platform-slot",
+      rows: "array:row-evidence;valid_complete=174-exact;observation,scheduled-generation,actual-supplied-input-identities=unique-per-platform-slot",
       protection_set: "array:strict:{identity,pre_digest,post_digest,event_digest};valid_complete=nonempty",
       raw_command_manifest: "array:command-receipt;valid_complete=nonempty", first_cause: "invalid-only:nonempty-string",
       all_failure_codes: "invalid-only:sorted-unique-string[]"
@@ -285,7 +305,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       macos_target_identity: "literal:aarch64-apple-darwin", macos_toolchain_identity: "sha256",
       linux_target_identity: "literal:x86_64-unknown-linux-gnu", linux_toolchain_identity: "sha256",
       platforms: "exact:[macos,linux]",
-      rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,frame_digest,producing_boundary(o=observer),oracle_verdict(p),active_tripwire_bitset(7=ambient_path|subprocess|protected_write),protection_set_equal(1),cleanup_verdict(p),declared_limit(0..13=frozen-limit-order),boundary_class(b|e|x)];valid_complete=348-exact;slot,observation,generation/payload,complete-frame-identities=globally-unique",
+      rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,actual_supplied_input_digest,producing_boundary(o|l|t=frozen-row),active_control_bitset(7f=all-required-active),passed_control_bitset(00..7f),protection_set_equal(1|0),cleanup_verdict(p|f),declared_limit(0..13=frozen-limit-order),boundary_class(b|e|x)];control-bit-order=oracle|ambient_path|subprocess|network|protected_write|protection|cleanup;valid_complete=348-exact;slot,observation,generation/payload,actual-supplied-input-identities=globally-unique",
       gates: "nonempty-array:strict-repository-command-receipt:{id,argv,version,exit_verdict,summary_digest,source_input_record_sha256};id-unique;source-record-equal",
       run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted-iff-all-row-verdicts-pass|rejected-iff-any-row-verdict-fails",
       first_cause: "rejected-or-invalid:nonempty-string", all_failure_codes: "rejected-or-invalid:sorted-unique-string[]"
