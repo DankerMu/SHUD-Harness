@@ -75,7 +75,7 @@ async function publicCode(kind: InputKind, bytes: Uint8Array, directory: string,
 }
 
 describe("bounded fail-closed JSON ingestion", () => {
-  test("all eight public kinds expose exact/+1 byte, depth, and aggregate array/object item receipts", async () => {
+  test("all eight public kinds expose independently reachable exact/+1 byte, depth, node, and object-member receipts", async () => {
     const temporary = await mkdtemp(join(tmpdir(), "shud-contract-public-bounds-"));
     try {
       for (const kind of kinds) {
@@ -84,8 +84,8 @@ describe("bounded fail-closed JSON ingestion", () => {
         expect(await publicCode(kind, bytesAt(limit.bytes + 1), temporary, "bytes-plus-one")).toMatchObject({ exit: 2, code: "CONTRACT_BYTES_LIMIT", stdout: "" });
         expect((await publicCode(kind, depthAt(limit.depth), temporary, "depth-exact")).code).toBe("CONTRACT_SCHEMA_INVALID");
         expect(await publicCode(kind, depthAt(limit.depth + 1), temporary, "depth-plus-one")).toMatchObject({ exit: 2, code: "CONTRACT_JSON_DEPTH_LIMIT", stdout: "" });
-        expect((await publicCode(kind, itemsAt(limit.items), temporary, "array-items-exact")).code).toBe("CONTRACT_SCHEMA_INVALID");
-        expect(await publicCode(kind, itemsAt(limit.items + 1), temporary, "array-items-plus-one")).toMatchObject({ exit: 2, code: "CONTRACT_JSON_ITEM_LIMIT", stdout: "" });
+        expect((await publicCode(kind, nodesAt(limit.nodes), temporary, "nodes-exact")).code).toBe("CONTRACT_SCHEMA_INVALID");
+        expect(await publicCode(kind, nodesAt(limit.nodes + 1), temporary, "nodes-plus-one")).toMatchObject({ exit: 2, code: "CONTRACT_JSON_NODE_LIMIT", stdout: "" });
         expect((await publicCode(kind, objectItemsAt(limit.items), temporary, "object-items-exact")).code).toBe("CONTRACT_SCHEMA_INVALID");
         expect(await publicCode(kind, objectItemsAt(limit.items + 1), temporary, "object-items-plus-one")).toMatchObject({ exit: 2, code: "CONTRACT_JSON_ITEM_LIMIT", stdout: "" });
       }
@@ -121,8 +121,8 @@ describe("bounded fail-closed JSON ingestion", () => {
   test("accepts and rejects every declared item bound at the strict parser seam", () => {
     for (const kind of kinds) {
       const limit = isolated(INGESTION_LIMITS[kind], "items");
-      expect(ingestJsonAgainstLimits(itemsAt(INGESTION_LIMITS[kind].items), limit)).toBeDefined();
-      expect(codeOf(() => ingestJsonAgainstLimits(itemsAt(INGESTION_LIMITS[kind].items + 1), limit))).toBe("CONTRACT_JSON_ITEM_LIMIT");
+      expect(ingestJsonAgainstLimits(objectItemsAt(INGESTION_LIMITS[kind].items), limit)).toBeDefined();
+      expect(codeOf(() => ingestJsonAgainstLimits(objectItemsAt(INGESTION_LIMITS[kind].items + 1), limit))).toBe("CONTRACT_JSON_ITEM_LIMIT");
     }
   });
 
@@ -138,7 +138,7 @@ describe("bounded fail-closed JSON ingestion", () => {
       expect(codeOf(() => ingestJson(bytes, "schema"))).toBe(expected);
     }
     expect(codeOf(() => ingestJsonAgainstLimits(depthAt(3), { bytes: 100, depth: 2, nodes: 100, items: 100 }))).toBe("CONTRACT_JSON_DEPTH_LIMIT");
-    expect(codeOf(() => ingestJsonAgainstLimits(itemsAt(3), { bytes: 100, depth: 10, nodes: 100, items: 2 }))).toBe("CONTRACT_JSON_ITEM_LIMIT");
+    expect(codeOf(() => ingestJsonAgainstLimits(objectItemsAt(3), { bytes: 100, depth: 10, nodes: 100, items: 2 }))).toBe("CONTRACT_JSON_ITEM_LIMIT");
     expect(codeOf(() => ingestJson(encoder.encode("{}"), "schema", () => false))).toBe("CONTRACT_SCHEMA_INVALID");
   });
 

@@ -25,6 +25,7 @@ import {
   REJECTION_CODES,
   SCHEMA_DESCRIPTORS,
   SOURCE_INPUT_DIGEST_V1,
+  SOURCE_MANIFEST_DIGEST_V1,
   TARGET_GRAPH_EXPECTATIONS,
   TOOLCHAIN
 } from "./frozen";
@@ -40,7 +41,7 @@ type JsonRecord = Record<string, unknown>;
 const CONTRACT_KEYS = [
   "schema_version", "catalog_version", "catalog", "floor_crosswalk", "ownership",
   "rejection_codes", "ingestion_limits", "observer_limits", "toolchain", "state_model",
-  "source_input_digest_v1", "schemas"
+  "source_input_digest_v1", "source_manifest_digest_v1", "schemas"
 ];
 const OUTCOME_KEYS = ["kind"];
 const REJECTED_OUTCOME_KEYS = ["kind", "code"];
@@ -102,6 +103,8 @@ export function validateContract(value: unknown): boolean {
   })) return false;
   if (!record(value.source_input_digest_v1) || !exactKeys(value.source_input_digest_v1, ["domain_prefix", "entry_order", "integer_encoding", "allowed_git_modes", "frame_fields", "source_sha_hashed", "live_literal_allowed", "synthetic_literal_path"])) return false;
   if (!exactJson(value.source_input_digest_v1, SOURCE_INPUT_DIGEST_V1)) return false;
+  if (!record(value.source_manifest_digest_v1) || !exactKeys(value.source_manifest_digest_v1, ["domain_prefix", "entry_order", "entry_frame", "terminal_lf"]) ||
+    !exactJson(value.source_manifest_digest_v1, SOURCE_MANIFEST_DIGEST_V1)) return false;
   if (!record(value.schemas) || !exactKeys(value.schemas, ["frame", "row_evidence", "platform_bundle", "final_bundle", "decision", "source_input_record"])) return false;
   return Object.values(value.schemas).every(strictSchemaDescriptor) && exactJson(value.schemas, SCHEMA_DESCRIPTORS);
 }
@@ -346,6 +349,15 @@ function admittedPathSet(value: unknown, count: number): boolean {
   const keys = value.map((entry) => `${entry.path}\0${entry.git_mode}`);
   return new Set(value.map((entry) => entry.path)).size === value.length && new Set(keys).size === keys.length &&
     exactJson(value.map((entry) => entry.path), [...value.map((entry) => entry.path)].sort((left, right) => Buffer.from(left).compare(Buffer.from(right))));
+}
+
+export function sourceManifestDigest(admittedPaths: unknown): string | null {
+  if (!Array.isArray(admittedPaths) || !admittedPathSet(admittedPaths, admittedPaths.length)) return null;
+  const pieces: Buffer[] = [Buffer.from(SOURCE_MANIFEST_DIGEST_V1.domain_prefix, "utf8")];
+  for (const entry of admittedPaths as JsonRecord[]) {
+    pieces.push(Buffer.from(`${entry.git_mode as string}\0${entry.path as string}\n`, "utf8"));
+  }
+  return createHash("sha256").update(Buffer.concat(pieces)).digest("hex");
 }
 
 function encoderResult(value: unknown, count: number, expectedPaths: unknown): boolean {
@@ -593,14 +605,15 @@ function gitlink(value: unknown): boolean {
     value.mode === "160000" && gitObjectId(value.object_id);
 }
 
-function nestedFrameState(value: unknown): boolean {
+function nestedFrameState(value: unknown, rowId: string): boolean {
   if (!record(value) || !exactKeys(value, ["path", "relation", "gitlink", "checkout_state", "audit"]) || !framePath(value.path) ||
     !["direct", "recursive"].includes(value.relation as string) || !gitlink(value.gitlink) ||
     !record(value.gitlink) || value.gitlink.path !== value.path || !record(value.audit) || value.audit.state !== value.checkout_state) return false;
   const audit = value.audit;
   if (value.checkout_state === "initialized") {
     return exactKeys(audit, ["state", "directory_identity", "index", "head_tree", "effective_config", "exclude_state", "attribute_state"]) &&
-      sha256(audit.directory_identity) && frameIndex(audit.index) && headTree(audit.head_tree) && frameConfig(audit.effective_config) &&
+      sha256(audit.directory_identity) && frameIndex(audit.index) && indexMaterialRowConsistency(audit.index, rowId) &&
+      headTree(audit.head_tree) && frameConfig(audit.effective_config) &&
       framePathState(audit.exclude_state) && framePathState(audit.attribute_state);
   }
   const basename = (value.path as string).split("/").at(-1);
@@ -652,7 +665,7 @@ export function validateFrame(value: unknown): boolean {
     !sha256(value.body_digest) || !sha256(value.checksum) || !frameIndex(value.index) || !headTree(value.head_tree) ||
     !frameConfig(value.effective_config) || !framePathState(value.exclude_state) || !framePathState(value.attribute_state) ||
     !Array.isArray(value.nested_state) || value.nested_state.length > OBSERVER_LIMITS.nested_repositories ||
-    !value.nested_state.every(nestedFrameState) || !indexMaterialRowConsistency(value.index, value.row_id) ||
+    !value.nested_state.every((nested) => nestedFrameState(nested, value.row_id as string)) || !indexMaterialRowConsistency(value.index, value.row_id) ||
     (hasLimitStimulus !== LIMIT_STIMULUS_ROWS.has(value.row_id)) ||
     (hasLimitStimulus && !limitStimulus(value.limit_stimulus, value.row_id))) return false;
   const nestedPaths = value.nested_state.map((nested) => (nested as JsonRecord).path as string);
@@ -718,12 +731,24 @@ export function validateSourceInputRecord(value: unknown): boolean {
   const witness = value.witness_encoder as JsonRecord;
   if (primary.identity !== "source-input-primary-v1" || witness.identity !== "source-input-witness-v1" || !exactJson(primary.result, witness.result)) return false;
   const result = primary.result as JsonRecord;
-  return result.source_input_digest === value.source_input_digest && result.manifest_digest === value.manifest_digest && sourceCommandReceipt(value.command_receipt, value.source_sha);
+  const manifestDigest = sourceManifestDigest(value.admitted_paths);
+  return manifestDigest !== null && value.manifest_digest === manifestDigest && result.source_input_digest === value.source_input_digest &&
+    result.manifest_digest === manifestDigest && sourceCommandReceipt(value.command_receipt, value.source_sha);
 }
 
 const ROW_RESOURCE_LIMITS = Object.freeze([
   "frame_bytes", "index_bytes", "index_entries", "path_bytes", "path_depth", "nested_repositories",
   "traversal_entries", "hashed_bytes", "wall_time_ms", "cpu_time_ms", "threads", "memory_bytes", "output_bytes"
+]);
+
+const ROW_RESOURCE_UNITS = Object.freeze([
+  "bytes", "bytes", "count", "bytes", "segments", "count", "count", "bytes", "milliseconds", "milliseconds", "count", "bytes", "bytes"
+]);
+
+const ROW_RESOURCE_REJECTIONS = Object.freeze([
+  "LIMIT_FRAME_BYTES", "LIMIT_INDEX_BYTES", "LIMIT_INDEX_ENTRIES", "LIMIT_PATH_BYTES", "LIMIT_PATH_DEPTH",
+  "LIMIT_NESTED_REPOSITORIES", "LIMIT_TRAVERSAL_ENTRIES", "LIMIT_HASHED_BYTES", "LIMIT_WALL_TIME", "LIMIT_CPU_TIME",
+  "LIMIT_THREADS", "LIMIT_MEMORY", "LIMIT_OUTPUT_BYTES"
 ]);
 
 function rowResourceRecord(value: unknown, rowId: string): boolean {
@@ -736,6 +761,60 @@ function rowResourceRecord(value: unknown, rowId: string): boolean {
   const exceeded = ordinal % 2 === 0;
   return value.boundary_class === (exceeded ? "exceeded" : "exact") && value.declared_limit === declaredLimit &&
     value.within_limits === !exceeded;
+}
+
+function actualResourceRecord(value: unknown): boolean {
+  if (!record(value)) return false;
+  if (exactKeys(value, ["boundary_class", "declared_limit", "within_limits"])) {
+    return value.boundary_class === "below" && value.declared_limit === "none" && value.within_limits === true;
+  }
+  if (!exactKeys(value, ["boundary_class", "declared_limit", "within_limits", "stimulus", "measurement"])) return false;
+  const limitIndex = ROW_RESOURCE_LIMITS.indexOf(value.declared_limit as string);
+  if (limitIndex < 0 || !record(value.stimulus) || !record(value.measurement)) return false;
+  const limit = value.declared_limit as keyof typeof OBSERVER_LIMITS;
+  const unit = ROW_RESOURCE_UNITS[limitIndex]!;
+  const ceiling = OBSERVER_LIMITS[limit];
+  const stimulus = value.stimulus;
+  const measurement = value.measurement;
+  if (!exactKeys(stimulus, ["schema_version", "recipe", "recipe_digest"]) ||
+    stimulus.schema_version !== "shud.git-status-capability.limit-stimulus.v1" || !record(stimulus.recipe) ||
+    !exactKeys(stimulus.recipe, ["kind", "limit", "unit", "value"]) || stimulus.recipe.kind !== "literal-counter-v1" ||
+    stimulus.recipe.limit !== limit || stimulus.recipe.unit !== unit || !Number.isSafeInteger(stimulus.recipe.value) ||
+    (stimulus.recipe.value as number) < 0 || stimulus.recipe_digest !== canonicalDigest(stimulus.recipe)) return false;
+  if (!exactKeys(measurement, ["schema_version", "limit", "unit", "value", "stimulus_digest"]) ||
+    measurement.schema_version !== "shud.git-status-capability.limit-measurement.v1" || measurement.limit !== limit ||
+    measurement.unit !== unit || measurement.value !== stimulus.recipe.value || measurement.stimulus_digest !== stimulus.recipe_digest) return false;
+  const measured = measurement.value as number;
+  const boundary = measured < ceiling ? "below" : measured === ceiling ? "exact" : "exceeded";
+  return value.boundary_class === boundary && value.within_limits === (measured <= ceiling);
+}
+
+function expectedActualResourceForRow(actual: JsonRecord, rowId: string): boolean {
+  const match = /^LIM-(\d{3})$/.exec(rowId);
+  if (!match) return actualResourceRecord(actual);
+  if (!actualResourceRecord(actual) || !record(actual.measurement)) return false;
+  const ordinal = Number(match[1]);
+  const limitIndex = Math.floor((ordinal - 1) / 2);
+  const limit = ROW_RESOURCE_LIMITS[limitIndex];
+  const ceiling = OBSERVER_LIMITS[limit as keyof typeof OBSERVER_LIMITS];
+  return actual.declared_limit === limit && actual.measurement.value === ceiling + (ordinal % 2 === 0 ? 1 : 0);
+}
+
+function actualFailureCausality(row: JsonRecord, assertions: JsonRecord): boolean {
+  const actualResource = row.actual_resource_record as JsonRecord;
+  if (row.row_verdict === "pass") return row.actual_producing_boundary === row.producing_boundary && record(row.resource_record) &&
+    ["boundary_class", "declared_limit", "within_limits"].every((key) => actualResource[key] === (row.resource_record as JsonRecord)[key]);
+  if (actualResource.boundary_class === "exceeded") {
+    const index = ROW_RESOURCE_LIMITS.indexOf(actualResource.declared_limit as string);
+    return row.actual_producing_boundary === "launcher" && index >= 0 && record(row.observer_outcome) &&
+      row.observer_outcome.kind === "rejected" && (row.observer_outcome.code === ROW_RESOURCE_REJECTIONS[index] ||
+        (actualResource.declared_limit === "wall_time_ms" && row.observer_outcome.code === "TIMEOUT"));
+  }
+  if (row.actual_producing_boundary === "tripwire") {
+    return (assertions.protected_write as JsonRecord).verdict === "fail" || (assertions.protection as JsonRecord).verdict === "fail";
+  }
+  if (row.actual_producing_boundary === "launcher") return record(row.observer_outcome) && row.observer_outcome.kind === "rejected";
+  return row.actual_producing_boundary === "observer";
 }
 
 const SLOT_KEYS = Object.freeze([
@@ -783,7 +862,7 @@ function declaredSlot(value: JsonRecord): boolean {
     sha256(value.observation_id) && sha256(value.checkout_capability_identity) && sha256(value.git_state_generation_digest);
 }
 
-function malformedPathFrame(frame: JsonRecord, violation: "absolute-path" | "path-escape", supplied: JsonRecord): boolean {
+function malformedPathFrame(frame: JsonRecord, scheduledFrame: JsonRecord, violation: "absolute-path" | "path-escape", supplied: JsonRecord): boolean {
   if (validateFrame(frame) || !slotMatches(frame, supplied)) return false;
   if (frame.body_length !== canonicalFrameBodyBytes(frame).length || frame.body_digest !== canonicalFrameBodyDigest(frame) ||
     frame.git_state_generation_digest !== frame.body_digest || frame.checksum !== canonicalFrameChecksum(frame)) return false;
@@ -797,7 +876,8 @@ function malformedPathFrame(frame: JsonRecord, violation: "absolute-path" | "pat
   if (!record(repairedEntry)) return false;
   repairedEntry.origin = ".git/config";
   (repaired.effective_config as JsonRecord).digest = canonicalDigest((repaired.effective_config as JsonRecord).entries);
-  return validateFrame(sealFrame(repaired));
+  const sealed = sealFrame(repaired);
+  return validateFrame(sealed) && canonicalFrameBytes(sealed).equals(canonicalFrameBytes(scheduledFrame));
 }
 
 function suppliedInputProof(scheduled: JsonRecord, supplied: JsonRecord, rowId: string): Buffer | null {
@@ -827,7 +907,8 @@ function suppliedInputProof(scheduled: JsonRecord, supplied: JsonRecord, rowId: 
     if (["CAP-013", "CAP-014"].includes(rowId)) {
       const violation = rowId === "CAP-013" ? "absolute-path" : "path-escape";
       if (!exactKeys(material, ["kind", "version", "header_length", "body_length", "extension_length", "frame_reference", "violation"]) ||
-        material.violation !== violation || !malformedPathFrame(suppliedFrame, violation, supplied)) return null;
+        material.violation !== violation || !malformedPathFrame(suppliedFrame,
+          (scheduled.frame_reference as JsonRecord).frame as JsonRecord, violation, supplied)) return null;
     } else if (!frameReference(material.frame_reference) || !wireMaterial(material, suppliedFrame, supplied.input_length as number, true)) return null;
     const wire = wireBytes(suppliedFrame, supplied.input_length as number);
     if (!wire) return null;
@@ -835,6 +916,11 @@ function suppliedInputProof(scheduled: JsonRecord, supplied: JsonRecord, rowId: 
   } else if (exactKeys(material, ["kind", "byte", "count"]) && material.kind === "append-byte-v1" &&
     rowId === "LIM-002" && material.byte === 0 && material.count === 1) {
     bytes = Buffer.concat([scheduledBytes, Buffer.from([0])]);
+  } else if (exactKeys(material, ["kind", "offset", "from", "to"]) && material.kind === "set-wire-version-v1" &&
+    ["LIF-002", "LIF-006"].includes(rowId) && material.offset === 8 && material.from === WIRE_FRAME_VERSION && material.to === 2 &&
+    scheduledBytes[8] === WIRE_FRAME_VERSION) {
+    bytes = Buffer.from(scheduledBytes);
+    bytes[8] = 2;
   } else {
     return null;
   }
@@ -882,6 +968,9 @@ function scheduledSuppliedBinding(binding: JsonRecord, row: JsonRecord): boolean
   if (row.row_id === "LIM-002") return sameRow && sameObservation && sameCapability && sameGeneration &&
     scheduled.input_length === OBSERVER_LIMITS.frame_bytes && supplied.input_length === OBSERVER_LIMITS.frame_bytes + 1 &&
     supplied.material.kind === "append-byte-v1";
+  if (["LIF-002", "LIF-006"].includes(row.row_id as string)) return sameRow && sameObservation && sameCapability && sameGeneration &&
+    supplied.input_length === scheduled.input_length && supplied.input_digest !== scheduled.input_digest &&
+    supplied.material.kind === "set-wire-version-v1";
   if (/^CAP-01[0-7]$/.test(row.row_id as string)) return false;
   return sameRow && sameObservation && sameCapability && sameGeneration && sameInput &&
     scheduled.input_length === WIRE_FRAME_HEADER_BYTES + canonicalFrameBytes(scheduledFrame).length && supplied.material.kind === "scheduled-input-v1";
@@ -902,20 +991,24 @@ export function validateRowEvidence(value: unknown): boolean {
   const catalog = CATALOG_V1.find((row) => row.id === value.row_id);
   const frozenExpected = value.platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
   if (!outcome(value.expected_outcome) || !exactJson(value.expected_outcome, frozenExpected) || !outcome(value.observer_outcome) ||
-    value.producing_boundary !== catalog?.producing_boundary || !["pass", "fail"].includes(value.row_verdict as string)) return false;
+    value.producing_boundary !== catalog?.producing_boundary || !PRODUCING_BOUNDARIES.includes(value.actual_producing_boundary as any) ||
+    !["pass", "fail"].includes(value.row_verdict as string)) return false;
   if (![value.observation_id, value.checkout_capability_identity, value.git_state_generation_digest, value.frame_digest].every(sha256)) return false;
   if (!record(value.frame_binding) || !scheduledSuppliedBinding(value.frame_binding, value)) return false;
   if (!sha256(value.oracle_digest) || !controlAssertions(value.control_assertions) || typeof value.protection_set_equal !== "boolean") return false;
   const assertions = value.control_assertions as JsonRecord;
   if (((assertions.protection as JsonRecord).verdict === "pass") !== value.protection_set_equal) return false;
   if (!validateLifecycleCausality(value, assertions.cleanup as JsonRecord)) return false;
-  if (!rowResourceRecord(value.resource_record, value.row_id as string) || !sha256(value.source_input_record_sha256)) return false;
+  if (!rowResourceRecord(value.resource_record, value.row_id as string) || !record(value.actual_resource_record) ||
+    !expectedActualResourceForRow(value.actual_resource_record, value.row_id as string) || !sha256(value.source_input_record_sha256)) return false;
   const determinismRow = /^DET-00[1-4]$/.test(value.row_id as string);
   if (determinismRow !== Object.hasOwn(value, "determinism_proof") || (determinismRow && !validateDeterminismProof(value))) return false;
   const shouldPass = exactJson(value.expected_outcome, value.observer_outcome) &&
-    CONTROL_ASSERTION_IDS.every((id) => (assertions[id] as JsonRecord).verdict === "pass");
+    CONTROL_ASSERTION_IDS.every((id) => (assertions[id] as JsonRecord).verdict === "pass") &&
+    value.actual_producing_boundary === value.producing_boundary && record(value.actual_resource_record) && record(value.resource_record) &&
+    ["boundary_class", "declared_limit", "within_limits"].every((key) => (value.actual_resource_record as JsonRecord)[key] === (value.resource_record as JsonRecord)[key]);
   if ((value.row_verdict === "pass") !== shouldPass) return false;
-  return true;
+  return actualFailureCausality(value, assertions);
 }
 
 export function validatePlatformBundle(value: unknown): boolean {
@@ -924,7 +1017,10 @@ export function validatePlatformBundle(value: unknown): boolean {
   if (!["macos", "linux"].includes(value.platform as string) || !["valid_complete", "invalid"].includes(value.run_status as string) || !gitObjectId(value.source_commit)) return false;
   const target = value.platform === "macos" ? "aarch64-apple-darwin" : "x86_64-unknown-linux-gnu";
   if (value.target !== target || !record(value.toolchain) || !exactKeys(value.toolchain, ["rustc_vv", "cargo_version", "git_version", "target_triple"]) || !Object.values(value.toolchain).every(nonEmptyString) || value.toolchain.target_triple !== target) return false;
-  if (!Array.isArray(value.rows) || !value.rows.every(validateRowEvidence) || !Array.isArray(value.protection_set) || !value.protection_set.every((item) => record(item) && exactKeys(item, ["identity", "pre_digest", "post_digest", "event_digest"]) && Object.values(item).every(sha256)) || !Array.isArray(value.raw_command_manifest) || !value.raw_command_manifest.every(executionReceipt)) return false;
+  if (!Array.isArray(value.rows) || !value.rows.every(validateRowEvidence) || !Array.isArray(value.protection_set) || !value.protection_set.every((item) =>
+    record(item) && exactKeys(item, ["identity", "pre_digest", "post_digest", "event_digest"]) && Object.values(item).every(sha256) &&
+    item.pre_digest === item.post_digest) || new Set(value.protection_set.map((item) => (item as JsonRecord).identity)).size !== value.protection_set.length ||
+    !Array.isArray(value.raw_command_manifest) || !value.raw_command_manifest.every(executionReceipt)) return false;
   if (value.rows.some((row) => (row as JsonRecord).platform !== value.platform || (row as JsonRecord).source_input_record_sha256 !== value.source_input_record_sha256)) return false;
   if (value.run_status === "valid_complete" && (value.rows.length !== 174 || new Set(value.rows.map((row) => (row as JsonRecord).row_id)).size !== 174 ||
     new Set(value.rows.map((row) => (row as JsonRecord).observation_id)).size !== 174 ||

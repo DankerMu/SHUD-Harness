@@ -29,6 +29,11 @@ const TOKEN_TO_BOUNDARY = Object.freeze({ b: "below", e: "exact", x: "exceeded" 
 const TOKEN_TO_PRODUCER = Object.freeze({ o: "observer", l: "launcher", t: "tripwire" });
 const ALL_CONTROL_BITS = (1 << CONTROL_ASSERTION_IDS.length) - 1;
 const ALL_CONTROL_TOKEN = ALL_CONTROL_BITS.toString(16).padStart(2, "0");
+const LIMIT_REJECTION_BY_ORDINAL = Object.freeze([
+  "", "LIMIT_FRAME_BYTES", "LIMIT_INDEX_BYTES", "LIMIT_INDEX_ENTRIES", "LIMIT_PATH_BYTES", "LIMIT_PATH_DEPTH",
+  "LIMIT_NESTED_REPOSITORIES", "LIMIT_TRAVERSAL_ENTRIES", "LIMIT_HASHED_BYTES", "LIMIT_WALL_TIME", "LIMIT_CPU_TIME",
+  "LIMIT_THREADS", "LIMIT_MEMORY", "LIMIT_OUTPUT_BYTES"
+]);
 
 function record(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -53,7 +58,14 @@ function gitObjectId(value: unknown): value is string {
 }
 
 function exactJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
+    left.every((item, index) => exactJson(item, right[index]));
+  if (record(left) || record(right)) {
+    if (!record(left) || !record(right) || !exactKeys(left, Object.keys(right))) return false;
+    return Object.keys(right).every((key) => exactJson(left[key], right[key]));
+  }
+  return false;
 }
 
 function decodeOutcome(kindToken: string, code: string): JsonRecord | null {
@@ -102,10 +114,19 @@ function decodeDecisionRow(value: unknown): DecodedRow | null {
   const cleanupPassed = (passedControlBits & (1 << CONTROL_ASSERTION_IDS.indexOf("cleanup"))) !== 0;
   const controlsPassed = passedControlBits === ALL_CONTROL_BITS;
   const cleanupFailureIsEvidence = rowId === "LIF-006" || rowId === "LIF-007";
-  if (!exactJson(expectedOutcome, frozenExpected) || producingBoundary !== catalog?.producing_boundary ||
-    limitOrdinal !== frozenLimitOrdinal || boundaryClass !== frozenBoundary || protectionPassed !== (protectionSetEqual === "1") ||
+  const actualMatchesExpected = producingBoundary === catalog?.producing_boundary && limitOrdinal === frozenLimitOrdinal && boundaryClass === frozenBoundary;
+  const protectedWritePassed = (passedControlBits & (1 << CONTROL_ASSERTION_IDS.indexOf("protected_write"))) !== 0;
+  const failedCausality = boundaryClass === "exceeded"
+    ? producingBoundary === "launcher" && observedOutcome.kind === "rejected" &&
+      (observedOutcome.code === LIMIT_REJECTION_BY_ORDINAL[limitOrdinal] || (declaredLimit === "wall_time_ms" && observedOutcome.code === "TIMEOUT"))
+    : producingBoundary === "tripwire"
+      ? !protectedWritePassed || !protectionPassed
+      : producingBoundary === "launcher" ? observedOutcome.kind === "rejected" : producingBoundary === "observer";
+  if (!exactJson(expectedOutcome, frozenExpected) || (rowVerdict === "pass" && !actualMatchesExpected) ||
+    protectionPassed !== (protectionSetEqual === "1") ||
     (cleanupFailureIsEvidence ? !(cleanupPassed && cleanupVerdict === "f") : cleanupPassed !== (cleanupVerdict === "p")) ||
-    ((rowVerdict === "pass") !== (exactJson(expectedOutcome, observedOutcome) && controlsPassed))) return null;
+    ((rowVerdict === "pass") !== (exactJson(expectedOutcome, observedOutcome) && controlsPassed && actualMatchesExpected)) ||
+    (rowVerdict === "fail" && !failedCausality)) return null;
   return { platform, rowId, rowVerdict, observationId, generationPayloadDigest, frameDigest };
 }
 

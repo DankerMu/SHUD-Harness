@@ -91,8 +91,6 @@ class StrictJsonParser {
       return result;
     }
     for (;;) {
-      this.items += 1;
-      if (this.items > this.limit.items) this.fail("CONTRACT_JSON_ITEM_LIMIT");
       result.push(this.value(depth + 1));
       this.space();
       const delimiter = this.input[this.index++];
