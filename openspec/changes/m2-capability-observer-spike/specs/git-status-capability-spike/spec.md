@@ -10,7 +10,7 @@ submodules; and MUST NOT close Issue #132 or restore PR #133 behavior.
 
 #### Scenario: Spike executes without production integration
 - **WHEN** the spike runner, native prototype, fixtures, validator, evidence, and isolated CI entry are added
-- **THEN** the only changed paths relative to frozen base `2bf3ef8859278dd0817100c01775765612170648` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, and this OpenSpec change directory
+- **THEN** the only changed paths relative to frozen implementation base `9b761459760db16c1088ec81f91387790f8567e2` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory, and the Phase-0.5-only `openspec/project-profile.md` update
 
 #### Scenario: Accepted evidence is produced
 - **WHEN** a valid complete run yields terminal decision `accepted`
@@ -157,6 +157,41 @@ The manifest SHALL also contain the exact `F132-01..25` evidence-floor crosswalk
 - **WHEN** catalog, validator, its oracle, or active tripwire identity is absent or bound to another source digest
 - **THEN** the evidence is harness-invalid and cannot record a decision-bearing pass
 
+### Requirement: Contract ingestion is bounded and fail-closed
+Task 1.1 SHALL provide a Bun-only contract checker under
+`spikes/git-status-capability/contracts/{check.ts,lib,tests,fixtures}/**`. It SHALL
+use only the pinned Bun runtime and standard library, SHALL NOT depend on task
+1.3's `verify.sh`, launcher, observer, or production package, and SHALL write no
+files. Before JSON parsing it SHALL enforce these inclusive limits:
+
+| Input kind | Bytes | Depth | Nodes | Object members + array items |
+|---|---:|---:|---:|---:|
+| catalog/crosswalk/ownership contract | 512 KiB | 16 | 32,768 | 4,096 |
+| dependency graph catalog | 256 KiB | 16 | 16,384 | 4,096 |
+| schema or synthetic-frame metadata | 256 KiB | 32 | 32,768 | 8,192 |
+| source-input record | 64 KiB | 12 | 2,048 | 512 |
+| row evidence | 512 KiB | 32 | 65,536 | 16,384 |
+| macOS/Linux platform bundle | 8 MiB | 32 | 1,048,576 | 262,144 |
+| final bundle | 20 MiB | 32 | 2,097,152 | 524,288 |
+| candidate/terminal decision | 128 KiB | 16 | 8,192 | 2,048 |
+
+Depth counts the root as one; each scalar, object, or array value is one node;
+the item counter counts every object member and array element. Strict UTF-8,
+duplicate-key detection, depth/node/item accounting, and trailing-token rejection
+occur before semantic trust. Failures use exactly
+`CONTRACT_BYTES_LIMIT|CONTRACT_UTF8_INVALID|CONTRACT_JSON_MALFORMED|CONTRACT_JSON_DUPLICATE_KEY|CONTRACT_JSON_DEPTH_LIMIT|CONTRACT_JSON_NODE_LIMIT|CONTRACT_JSON_ITEM_LIMIT|CONTRACT_SCHEMA_INVALID`.
+The checker exits `2`, keeps stdout empty, emits one bounded machine-readable error
+receipt on stderr, and produces no partial file or success receipt. Success exits
+`0` and emits one canonical receipt only after all checks pass.
+
+#### Scenario: Contract input reaches an exact bound
+- **WHEN** each input kind reaches exactly one declared byte, depth, node, or item bound with otherwise valid content
+- **THEN** ingestion continues to strict schema validation and may succeed
+
+#### Scenario: Contract input exceeds a bound or is malformed
+- **WHEN** an input is bound+1, invalid UTF-8, malformed/trailing JSON, duplicate-keyed, too deep, too wide, missing, unknown, or schema-invalid
+- **THEN** the checker returns only the matching stable code, exit `2`, empty stdout, and no partial output
+
 ### Requirement: Outcome, verdict, validity, and decision are distinct
 The evidence schema SHALL model exactly these layers:
 `observer_outcome = clean | dirty | rejected(code)`, per-platform
@@ -257,8 +292,27 @@ bytes.
 The strict `contracts/source-input-v1.paths` manifest SHALL list itself and exactly
 all Git-tracked regular files under the spike, the isolated spike workflow, and
 this change's `.openspec.yaml`, proposal, design, tasks, and specs. Only Git modes
-`100644` and `100755` are allowed. Final evidence output is excluded. The source
+`100644` and `100755` are allowed. The output-only change subtree `evidence/**` is
+excluded and admits only bounded non-executable `source|platform|gates|final/<digest>/**`
+JSON/Markdown or immutable content-addressed references. The source
 commit SHALL be recorded beside the digest but MUST NOT be hashed into it.
+
+Task 1.1 SHALL generate the initial manifest from only the covered files present
+at its HEAD and SHALL freeze the sync/check algorithm; absent future paths are
+forbidden. Every task 1.2–5.1 that adds or removes a covered candidate SHALL use
+that algorithm to update the shared derived manifest and prove exact equality at
+its own HEAD. Such an update is mandatory mechanical bookkeeping, not ownership
+of the catalog or digest contract. Task 5.1 SHALL freeze the final `SOURCE_SHA`
+only after its covered workflow/supply source is final. Tasks 5.2–5.4 SHALL modify
+only excluded evidence lanes and MUST NOT update the manifest.
+
+#### Scenario: A DAG slice changes the covered source set
+- **WHEN** a task from 1.2 through 5.1 adds, removes, or renames a covered source file
+- **THEN** the same PR regenerates the manifest from current tracked files, rejects predeclared future paths, proves exact-set equality, and invalidates older source-bound evidence
+
+#### Scenario: A post-freeze slice persists evidence
+- **WHEN** task 5.2, 5.3, or 5.4 commits platform, gate, or terminal evidence after task 5.1
+- **THEN** it uses only its fixed excluded lane, adds no code/contract/executable/symlink/import, leaves the manifest and source digest unchanged, and binds SHA-256 of the immutable source record
 
 Both `PLATFORM-SOURCE-INPUT` and `GATE-SOURCE-INPUT` SHALL run the independently
 implemented `source-input-primary-v1` and `source-input-witness-v1` against the
@@ -270,11 +324,11 @@ literal SHALL be `contracts/goldens/source-input-v1.synthetic.sha256` for the
 fixed synthetic frame vector.
 
 Task 5.1 SHALL be the sole producer of
-`<external-evidence-root>/source-input-record.json` before either platform run;
-task 5.4 SHALL publish those
-unchanged bytes only at
-`evidence/final/<source-input-digest>/source-input-record.json`. That persisted
-path is excluded from the source preimage. The record SHALL bind `SOURCE_SHA`,
+`<external-evidence-root>/source-input-record.json` before either platform run and,
+after observation closes, SHALL persist those unchanged bytes at
+`evidence/source/<source-input-digest>/source-input-record.json`. Task 5.4 SHALL
+copy the same bytes into `evidence/final/<source-input-digest>/source-input-record.json`.
+Both output paths are excluded from the source preimage. The record SHALL bind `SOURCE_SHA`,
 the live digest/manifest, both encoder identities/results, and argv/version/exit
 receipt, but SHALL contain no self-hash.
 All other evidence SHALL bind only the source-record SHA-256, not repeat the live
@@ -297,9 +351,9 @@ and verify the immutable record.
 - **WHEN** a path is duplicate, non-UTF-8, non-canonical, untracked, a symlink/non-regular file, absent/extra relative to the closed candidate rules, or differs from `SOURCE_SHA`
 - **THEN** hashing fails harness-invalid before a digest or terminal result is accepted
 
-#### Scenario: Only final evidence or evidence commit changes
-- **WHEN** only `evidence/final/**` or the evidence-only descendant commit changes while every enumerated blob/mode is identical
-- **THEN** the digest remains identical because final output and the separately recorded commit ID are not in the preimage
+#### Scenario: Only admitted evidence or evidence commit changes
+- **WHEN** only an admitted `evidence/**` output lane or the evidence-only descendant commit changes while every enumerated blob/mode is identical
+- **THEN** the digest remains identical because bounded output and the separately recorded commit ID are not in the preimage
 
 ### Requirement: Persistent evidence and post-matrix repository gates control the terminal result
 Each platform SHALL emit strict bounded raw evidence for every catalog row and all
@@ -308,11 +362,17 @@ and cleanup results. The final PR MUST persist the bounded raw bundle or immutab
 content-addressed references under this change; expiring CI artifacts alone are
 insufficient.
 
-Per-run raw output MUST be created under a harness-owned external evidence root
-outside the protection set. Publication into this change directory MAY occur only
-after all observer processes are reaped, every collection-wide zero-write oracle
-has closed, D9 gates pass, and D10's candidate expectation succeeds; it MUST NOT
-be an observer or launcher write authority.
+Per-run raw output MUST first be created under a harness-owned external evidence
+root outside the protection set. Task 5.1 MAY persist `evidence/source/<digest>/**`
+only after source/native observation closes; task 5.2 MAY persist
+`evidence/platform/<digest>/**` only after both platform observations and their
+collection-wide zero-write oracles close; task 5.3 MAY persist
+`evidence/gates/<digest>/**` only after every D9 gate passes. These immutable
+checkpoints are not terminal publication and have no decision-bearing, source, or
+oracle authority. A failed stage MUST create neither its lane nor any later lane.
+Only task 5.4 MAY publish `evidence/final/<digest>/**`, after D10's candidate
+expectation and governance succeed. No evidence write is observer/launcher write
+authority or may touch another protected or production path.
 
 The validator SHALL compute the exact `raw_evidence_digest` and normalized
 `decision_projection_digest` defined in `design.md`. It SHALL include every
@@ -321,11 +381,13 @@ timestamps, host/job/path/process/descriptor assignments, ordering, diagnostics,
 and below-bound measured counters. Secrets and absolute fixture paths MUST be
 absent from raw and derived evidence.
 
-Tasks 5.1/5.2 SHALL run design's fixed `PLATFORM-SOURCE-INPUT`, `PLATFORM-NATIVE`, and `PLATFORM-MATRIX`
-commands using Rust `1.88.0` and Git `2.49.0`. After both matrices and supply
-capture, task 5.3 SHALL run every and only fixed pre-decision command in design D9
+Task 5.1 SHALL run design's fixed `PLATFORM-SOURCE-INPUT` and `PLATFORM-NATIVE`
+commands using Rust `1.88.0` and Git `2.49.0`, then persist the immutable source
+record. Task 5.2 SHALL invoke task 3.1's fixed emitter and `PLATFORM-MATRIX`
+without changing covered source. After both matrices and supply capture, task 5.3
+SHALL invoke task 1.3's already source-digested implementation for every and only fixed pre-decision command in design D9
 using Bun `1.2.19`, OpenSpec `1.3.1`, Git `2.49.0`, and frozen base/merge-base
-`2bf3ef8859278dd0817100c01775765612170648`. It SHALL record exact argv/version,
+`9b761459760db16c1088ec81f91387790f8567e2`. It SHALL record exact argv/version,
 exit code, bounded summary/digest, and source-input-record SHA-256 for source framing,
 full `check`,
 `schema:check`, PERF-API-001, docs self-test/links, strict OpenSpec validation,

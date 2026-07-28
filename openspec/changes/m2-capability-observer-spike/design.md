@@ -373,12 +373,17 @@ raw bytes, the same directory must instead commit immutable content-addressed
 object references, byte lengths, media types, retention/access proof, and an
 offline retrieval verification; a mutable URL or CI run URL is invalid.
 
-All per-run raw output is first written to a harness-owned external evidence root
-outside the protection set. Only after the observer processes are reaped, every
-row's set-wide zero-write oracle closes, D9 gates finish, and the D10 candidate
-assertion succeeds may task 5.4 atomically publish the already-digested bounded
-bundle into this change directory. That publication is not inside an observation
-window and may touch no other protected or production path.
+Tasks 5.1–5.3 persist immutable output-only lanes before terminal publication:
+5.1 writes `evidence/source/<digest>/**` only after source/native observation
+closes; 5.2 writes `evidence/platform/<digest>/**` only after both platform
+observations and zero-write oracles close; 5.3 writes `evidence/gates/<digest>/**`
+only after D9 passes. A failed stage writes neither its lane nor any later lane.
+These are non-decision-bearing evidence checkpoints, not D10 publication; they
+contain only bounded JSON/Markdown or content-addressed references, never code,
+contracts, symlinks, executables, imports, source/oracles, or another live digest.
+Only after D10 candidate expectation and governance succeed may 5.4 atomically
+publish `evidence/final/<digest>/**`; no evidence write is observer/launcher
+authority or may touch another protected or production path.
 
 `raw_evidence_digest` is exact: SHA-256 over the UTF-8 byte string
 `shud-capability-raw-v1\0` followed by, for every raw file other than
@@ -436,8 +441,9 @@ itself and exactly:
 - this change's `.openspec.yaml`, `proposal.md`, `design.md`, `tasks.md`, and every
   `specs/**/spec.md`.
 
-`openspec/changes/m2-capability-observer-spike/evidence/final/**` is the sole
-explicit self-referential output exclusion and MUST NOT appear in the manifest.
+`openspec/changes/m2-capability-observer-spike/evidence/**` is the sole explicit
+output exclusion and MUST NOT appear in the manifest; only the frozen
+`source|platform|gates|final/<digest>/**` lanes above are admitted there.
 The enumerator compares the manifest with the exact Git-tracked candidate set
 under those rules. A missing/extra/duplicate entry, candidate allowlist drift,
 symlink or non-regular input, non-UTF-8 path, untracked input in a candidate root,
@@ -445,6 +451,13 @@ or input whose mode/bytes differ from `SOURCE_SHA` is harness-invalid before
 hashing. Repository-relative paths use `/`, are nonempty canonical UTF-8 without
 NUL, absolute prefix, `.` or `..` components, and are sorted lexicographically by
 their raw UTF-8 bytes.
+
+Task 1.1 initializes this manifest from files at its own HEAD; future paths MUST
+NOT be predeclared. It owns the frozen sync/check algorithm. Every task 1.2–5.1
+that changes a covered file mechanically regenerates the derived manifest and
+proves exact-set equality at that HEAD. This shared permission grants no semantic
+ownership. Task 5.1 freezes `SOURCE_SHA` only after its workflow/supply source is
+final; tasks 5.2–5.4 may add excluded evidence only and cannot update the manifest.
 
 The framed preimage is exact:
 
@@ -468,9 +481,11 @@ self-referential.
 
 Every live run invokes two independently implemented encoders, `source-input-primary-v1` (task 1.3) and `source-input-witness-v1` (task 1.2), against the same live manifest and `SOURCE_SHA`. They may share this written byte contract and synthetic fixtures only: neither may import, link, shell out to, or reuse framing/enumeration code from the other. The gate compares digest, entry count, manifest digest, and admitted path/mode set. A literal digest for the live manifest MUST NOT be committed or read as an oracle.
 
-Only the fixed synthetic vector `contracts/goldens/source-input-v1.synthetic.frame` has a committed literal `source-input-v1.synthetic.sha256`; both encoders must independently match it. After `SOURCE_SHA` is fixed and before either platform command, task 5.1 is the sole producer of `<external-evidence-root>/source-input-record.json`; task 5.4 may only publish those unchanged bytes as `openspec/changes/m2-capability-observer-spike/evidence/final/<source-input-digest>/source-input-record.json`. The record contains schema/version, `SOURCE_SHA`, the sole persisted live-digest field, manifest digest, both encoder identities/results, and argv/version/exit receipt, but no self-hash. Every other artifact stores only SHA-256 of this record, never another live-digest field. Its final path is inside the sole preimage exclusion; it is never a source input or oracle.
+Only the fixed synthetic vector `contracts/goldens/source-input-v1.synthetic.frame` has a committed literal `source-input-v1.synthetic.sha256`; both encoders must independently match it. After all covered source is final, task 5.1 creates `<external-evidence-root>/source-input-record.json`, runs source/native supply checks, then persists those unchanged bytes at `evidence/source/<source-input-digest>/source-input-record.json`. Tasks 5.2/5.3 bind only its SHA-256; task 5.4 copies the same bytes into `evidence/final/<source-input-digest>/source-input-record.json`. The record contains schema/version, `SOURCE_SHA`, the sole persisted live-digest field, manifest digest, both encoder identities/results, and argv/version/exit receipt, but no self-hash. Output lanes are excluded from the preimage and never act as source or oracle.
 
-Encoder failure/disagreement, an existing/malformed record, record drift before publication, or any committed live literal is harness-invalid, CI red, and yields no candidate or terminal publication. Synthetic goldens prove framing and manifest-order invariance; live mutation tests prove a content/path/mode/input change alters the digest, unsafe enumeration rejects, and only `evidence/final/**` or the evidence-only descendant commit leaves it unchanged. Any covered change invalidates every older bundle and requires both platform matrices, supply capture, and all D9 gates to rerun; an old bundle cannot be relabeled.
+Encoder failure/disagreement, an existing/malformed record, record drift before publication, or any committed live literal is harness-invalid, CI red, and yields no candidate or terminal publication. Synthetic goldens prove framing and manifest-order invariance; live mutation tests prove a content/path/mode/input change alters the digest, unsafe enumeration rejects, and only admitted `evidence/**` output or an evidence-only descendant commit leaves it unchanged. Any covered change invalidates every older bundle and requires both platform matrices, supply capture, and all D9 gates to rerun; an old bundle cannot be relabeled.
+
+Task 1.1's Bun-only contract harness lives under `contracts/{check.ts,lib,tests,fixtures}/**`, writes no files, and is independent of task 1.3's stable CLI. It enforces the per-kind byte/depth/node/item table and stable ingestion codes frozen in the spec before semantic schema validation.
 
 Tasks 5.1 and 5.2 own the fixed source/platform commands before D9:
 
@@ -483,16 +498,17 @@ Tasks 5.1 and 5.2 own the fixed source/platform commands before D9:
 ### D9. Run repository and reproducibility gates before the decision
 
 The immutable implementation base and merge-base are
-`2bf3ef8859278dd0817100c01775765612170648`. The only implementation paths admitted
+`9b761459760db16c1088ec81f91387790f8567e2`. The only implementation paths admitted
 relative to that base are `spikes/git-status-capability/**`,
-`.github/workflows/git-status-capability-spike.yml`, and this OpenSpec change
-directory. Production packages, root/workspace manifests and lockfiles, schema
+`.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory,
+and the Phase-0.5-only `openspec/project-profile.md` update. Production packages, root/workspace manifests and lockfiles, schema
 sources/generated outputs, runtime imports, release assembly, existing workflows,
 canonical docs, and all four submodules are prohibited paths.
 
 The evidence-bound source commit is recorded as `SOURCE_SHA`; the final evidence-
 only commit may descend from it, but covered source bytes must retain the same
-`source_input_digest_v1`. Task 5.3 runs every command below from repository root
+`source_input_digest_v1`. Task 1.3 owns the fixed spike-local D9 implementation;
+task 5.3 only invokes it and records every command below from repository root
 before candidate derivation, with Bun
 `1.2.19`, OpenSpec `1.3.1`, Git oracle `2.49.0`, and Rust `1.88.0` where relevant.
 The committed spike command recorder stores the exact argv/tool version, exit
@@ -501,7 +517,7 @@ for every command ID:
 
 | ID | Exact reproducible command / assertion |
 |---|---|
-| `GATE-BASE` | `test "$(git merge-base 2bf3ef8859278dd0817100c01775765612170648 HEAD)" = 2bf3ef8859278dd0817100c01775765612170648` and `git merge-base --is-ancestor 2bf3ef8859278dd0817100c01775765612170648 HEAD` |
+| `GATE-BASE` | `test "$(git merge-base 9b761459760db16c1088ec81f91387790f8567e2 HEAD)" = 9b761459760db16c1088ec81f91387790f8567e2` and `git merge-base --is-ancestor 9b761459760db16c1088ec81f91387790f8567e2 HEAD` |
 | `GATE-SOURCE-INPUT` | `spikes/git-status-capability/verify.sh source-input-digest --version 1 --source-sha <SOURCE_SHA> --manifest spikes/git-status-capability/contracts/source-input-v1.paths --primary source-input-primary-v1 --witness source-input-witness-v1 --verify-record <external-evidence-root>/source-input-record.json --no-write`; it reruns both encoders in-memory and emits only verdict plus record SHA-256, never another live-digest field |
 | `GATE-INSTALL` | `npx --yes bun@1.2.19 install --frozen-lockfile` |
 | `GATE-CHECK` | `npx --yes bun@1.2.19 run check` |
@@ -511,12 +527,12 @@ for every command ID:
 | `GATE-DOCS-LINKS` | `scripts/docs/check_links.sh` |
 | `GATE-OPENSPEC-STATUS` | `npx --yes @fission-ai/openspec@1.3.1 status --change m2-capability-observer-spike`; it must report 4/4 artifacts complete |
 | `GATE-OPENSPEC` | `npx --yes @fission-ai/openspec@1.3.1 validate m2-capability-observer-spike --strict --no-interactive` |
-| `GATE-DIFF-CHECK` | `git diff --check 2bf3ef8859278dd0817100c01775765612170648...HEAD` |
-| `GATE-SCOPE` | `spikes/git-status-capability/verify.sh repository-scope --base 2bf3ef8859278dd0817100c01775765612170648`; it validates `git diff --name-status --find-renames` against the three-path allowlist above and rejects every other tracked path |
+| `GATE-DIFF-CHECK` | `git diff --check 9b761459760db16c1088ec81f91387790f8567e2...HEAD` |
+| `GATE-SCOPE` | `spikes/git-status-capability/verify.sh repository-scope --base 9b761459760db16c1088ec81f91387790f8567e2`; it validates `git diff --name-status --find-renames` against the four-path allowlist above and rejects every other tracked path |
 | `GATE-UNTRACKED` | `git status --porcelain=v1 --untracked-files=all` followed by `spikes/git-status-capability/verify.sh untracked-inventory`; after bounded external build outputs are removed, the inventory must be empty, including nested submodule inventories |
-| `GATE-PRODUCTION` | `spikes/git-status-capability/verify.sh production-isolation --base 2bf3ef8859278dd0817100c01775765612170648`; it asserts zero tracked/untracked drift for `workspace/**`, `package.json`, `bun.lock`, `packages/**`, `scripts/**`, `docs/**`, existing `.github/workflows/ci.yml`, production manifests/import graph/schema/generated/release surfaces, and scans production manifests/imports/release assembly for a spike import or invocation |
+| `GATE-PRODUCTION` | `spikes/git-status-capability/verify.sh production-isolation --base 9b761459760db16c1088ec81f91387790f8567e2`; it asserts zero tracked/untracked drift for `workspace/**`, `package.json`, `bun.lock`, `packages/**`, `scripts/**`, `docs/**`, existing `.github/workflows/ci.yml`, production manifests/import graph/schema/generated/release surfaces, and scans production manifests/imports/release assembly for a spike import or invocation |
 | `GATE-GOVERNANCE` | `spikes/git-status-capability/verify.sh governance-handoff --repo DankerMu/SHUD-Harness --issue 132 --require-open --recovery-state blocked --pr 133 --reverted-merge 7d74a56eff27e34099961bdf14a40678c88d2603 --require-main-revert 2bf3ef8859278dd0817100c01775765612170648 --read-only`; public GET-only audit records `governance-handoff.json`, proves zero GitHub mutation calls, and rejects any state/revert/recovery mismatch |
-| `GATE-SUBMODULE-DIFF` | `git diff --exit-code 2bf3ef8859278dd0817100c01775765612170648...HEAD -- SHUD rSHUD AutoSHUD zero` |
+| `GATE-SUBMODULE-DIFF` | `git diff --exit-code 9b761459760db16c1088ec81f91387790f8567e2...HEAD -- SHUD rSHUD AutoSHUD zero` |
 | `GATE-SUBMODULE-PINS` | `spikes/git-status-capability/verify.sh submodules --expect SHUD=3aec65755926c478e13ca7d4fea80715e4e90345 --expect rSHUD=2b7742e32ea323a57fd0a947dc2cea67bfd0afd1 --expect AutoSHUD=f421445340f70b8cb160ce58cefb066751628593 --expect zero=13e25c116c62411e6ee8a0ad67a6c53dc7c376c6`; it checks gitlink, checkout HEAD, recursive tracked and untracked status for all four |
 
 `recovery_state=blocked` means #132 is OPEN while the reverted implementation is absent from `main` and production isolation still passes. The governance record contains the observed issue state, PR merge/revert SHAs, main ancestry proof, recovery state, allowed GET request ledger, and `mutation_count=0`; the harness provides no mutation credential or POST/PATCH/PUT/DELETE seam.
@@ -546,7 +562,7 @@ Task 1.3 owns the reusable finalizer source and public-seam fault tests under `s
    decision-bearing input, is excluded from both evidence digests, and cannot feed
    back into candidate derivation.
 3. `PUBLICATION-GOVERNANCE`: repeat the fixed GET-only governance assertion immediately before publication, require an exact match to D9's `governance-handoff.json`, and write `publication-governance-recheck.json`; it is excluded from both digests, cannot feed derivation, and any mutation-capable request or drift fails.
-4. `FINALIZE-PUBLISH`: run `spikes/git-status-capability/verify.sh evidence publish --candidate <external-staging> --destination openspec/changes/m2-capability-observer-spike/evidence/final/<source-input-digest> --source-record <external-evidence-root>/source-input-record.json --same-filesystem --no-replace`. It rechecks both digests and unchanged source/governance records, then makes one atomic no-replace directory rename. Cross-device fallback, overwrite, merge, copy, or file-by-file publication is prohibited.
+4. `FINALIZE-PUBLISH`: run `spikes/git-status-capability/verify.sh evidence publish --candidate <external-staging> --destination openspec/changes/m2-capability-observer-spike/evidence/final/<source-input-digest> --source-record openspec/changes/m2-capability-observer-spike/evidence/source/<source-input-digest>/source-input-record.json --same-filesystem --no-replace`. It rechecks both digests and unchanged source/governance records, then makes one atomic no-replace directory rename. Cross-device fallback, overwrite, merge, copy, or file-by-file publication is prohibited.
 
 Candidate-health failure, wrong expectation/exit, governance drift/mutation, source-record or digest drift, non-atomic or partial publication, existing destination, or cleanup failure makes the run
 `invalid`, CI red, and leaves the final destination absent; no staged candidate is
@@ -893,13 +909,13 @@ remaining non-production. The dependency DAG is:
 
 ```text
 1.1 frozen catalog/schemas
- ├─> 1.2 validator/state goldens ─> 1.3 CLI contract
+ ├─> 1.2 validator/state goldens ─> 1.3 CLI/finalizer/repository-gate source
  ├─> 2.1 baseline/staging/true-untracked oracle ┐
  ├─> 2.2 ignore/exclude/attribute/config oracle │
  ├─> 2.3 index/layout/nested floor oracle ├─ semantic prerequisite set
  ├─> 2.4 attack/helper/protection oracle  │
  └─> 2.5 limits/lifecycle oracle  ┘
-1.1 + 2.4 + 2.5 ─> 3.1 launcher ─> 3.2 active tripwires/protection
+1.1 + 2.4 + 2.5 ─> 3.1 launcher/evidence-emitter source ─> 3.2 active tripwires/protection
 1.3 + 3.2 ─> 4.1 native transport (no semantic pass claim)
 1.2 + 2.1 + 3.2 + 4.1 ─> 4.2 baseline/staging/true-untracked
 1.2 + 2.2 + 3.2 + 4.1 ─> 4.3 ignore/exclude/attribute/config
@@ -936,7 +952,8 @@ exist and are identity-bound to the same `source_input_digest_v1`. Task 4.1 may 
 transport and negative contract rows. Focused semantic test output created earlier
 is development feedback, never decision-bearing evidence.
 
-Task 5.4 is the only owner of a published `terminal_decision`. Task 5.3 executes
+Task 5.4 is the only owner of a published `terminal_decision`. All covered source
+is owned by tasks 1.1–5.1; tasks 5.2/5.3 commit only excluded platform/gate evidence. Task 5.3 executes
 after the complete two-platform matrix, contributes only pre-decision gate inputs,
 and never reads a decision. Task 5.4 follows D10's candidate→assert→atomic-publish
 sequence; the assertion cannot point back into D9. Changing any covered
@@ -975,7 +992,7 @@ Either terminal result remains local evidence and carries the same immutable gov
 None for spike execution. Task 1.1 commits the exact direct crate versions/features,
 lockfile, and target graph catalog before launcher/native work; no semantic task
 may select or update them. Rust is fixed at `1.88.0`, Git oracle at `2.49.0`, Bun
-at `1.2.19`, OpenSpec at `1.3.1`, and the frozen base is
-`2bf3ef8859278dd0817100c01775765612170648`. The accept/reject result remains
+at `1.2.19`, OpenSpec at `1.3.1`, and the frozen implementation base is
+`9b761459760db16c1088ec81f91387790f8567e2`. The accept/reject result remains
 intentionally unknown until task 5.4 consumes valid complete evidence and the
 post-matrix repository gate.
