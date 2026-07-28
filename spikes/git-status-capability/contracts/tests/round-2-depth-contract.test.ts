@@ -34,9 +34,18 @@ function digest(value: unknown): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function measuredResource(limit: string, unit: string, value: number): any {
+function measuredResource(row: any, limit: string, unit: string, value: number): any {
   const recipe = { kind: "literal-counter-v1", limit, unit, value };
   const recipeDigest = digest(recipe);
+  const locatorCore = {
+    kind: LIMITS.findIndex(([candidate]) => candidate === limit) < 8 ? "supplied-frame-locator-v1" : "launcher-receipt-v1",
+    row_id: row.row_id,
+    observation_id: row.observation_id,
+    supplied_input_digest: row.frame_digest,
+    recipe_digest: recipeDigest,
+    source: LIMITS.findIndex(([candidate]) => candidate === limit) < 8 ? "canonical-supplied-frame" : "launcher-counter"
+  };
+  const locator = { ...locatorCore, receipt_digest: digest(locatorCore) };
   return {
     boundary_class: value > (OBSERVER_LIMITS as any)[limit] ? "exceeded" : value === (OBSERVER_LIMITS as any)[limit] ? "exact" : "below",
     declared_limit: limit,
@@ -44,14 +53,15 @@ function measuredResource(limit: string, unit: string, value: number): any {
     stimulus: {
       schema_version: "shud.git-status-capability.limit-stimulus.v1",
       recipe,
-      recipe_digest: recipeDigest
+      recipe_digest: recipeDigest,
+      locator
     },
     measurement: {
       schema_version: "shud.git-status-capability.limit-measurement.v1",
       limit,
       unit,
       value,
-      stimulus_digest: recipeDigest
+      stimulus_receipt_digest: locator.receipt_digest
     }
   };
 }
@@ -74,7 +84,7 @@ function normalizedRow(rowId: string, platform = "macos"): any {
   if (match) {
     const ordinal = Number(match[1]);
     const [limit, unit, ceiling] = LIMITS[Math.floor((ordinal - 1) / 2)]!;
-    row.actual_resource_record = measuredResource(limit, unit, ceiling + (ordinal % 2 === 0 ? 1 : 0));
+    row.actual_resource_record = measuredResource(row, limit, unit, ceiling + (ordinal % 2 === 0 ? 1 : 0));
   } else {
     row.actual_resource_record = structuredClone(row.resource_record);
   }
@@ -104,6 +114,32 @@ function reorder(value: Record<string, any>): Record<string, any> {
   return Object.fromEntries(Object.entries(value).reverse());
 }
 
+function causalReceipt(row: any, kind: "outcome-mismatch-v1" | "control-failure-v1" | "resource-exceeded-v1" | "lifecycle-fault-v1", controlId?: string): any {
+  const base: Record<string, any> = {
+    schema_version: "shud.git-status-capability.row-failure-receipt.v1",
+    producer: row.actual_producing_boundary,
+    row_id: row.row_id,
+    observation_id: row.observation_id,
+    supplied_input_digest: row.frame_digest
+  };
+  if (kind === "outcome-mismatch-v1") base.observed_outcome = structuredClone(row.observer_outcome);
+  if (kind === "control-failure-v1") {
+    base.control_id = controlId;
+    base.control_verdict = "fail";
+  }
+  if (kind === "resource-exceeded-v1") {
+    base.declared_limit = row.actual_resource_record.declared_limit;
+    base.stimulus_receipt_digest = row.actual_resource_record.stimulus.locator.receipt_digest;
+    base.observed_outcome = structuredClone(row.observer_outcome);
+  }
+  if (kind === "lifecycle-fault-v1") {
+    base.mutation_kind = row.frame_binding.supplied.material.kind;
+    base.first_cause = row.first_cause;
+    base.cleanup_verdict = row.cleanup.verdict;
+  }
+  return { kind, receipt: { ...base, receipt_digest: digest(base) } };
+}
+
 describe("Round 2 canonical proof binding", () => {
   test("all 13 LIM exact/+1 pairs bind the declared boundary to a replayable stimulus and actual measurement", () => {
     for (let ordinal = 1; ordinal <= 26; ordinal += 1) {
@@ -116,6 +152,14 @@ describe("Round 2 canonical proof binding", () => {
       const changedRecipe = structuredClone(row);
       changedRecipe.actual_resource_record.stimulus.recipe.value += 1;
       expect(validateRowEvidence(changedRecipe), `${rowId}:recipe`).toBe(false);
+      const changedLocator = structuredClone(row);
+      changedLocator.actual_resource_record.stimulus.locator.supplied_input_digest = shaA;
+      expect(validateRowEvidence(changedLocator), `${rowId}:locator-input`).toBe(false);
+      const sibling = structuredClone(row);
+      const siblingRow = normalizedRow(ordinal === 26 ? "LIM-025" : `LIM-${String(ordinal + 1).padStart(3, "0")}`);
+      sibling.actual_resource_record.stimulus.locator = structuredClone(siblingRow.actual_resource_record.stimulus.locator);
+      sibling.actual_resource_record.measurement.stimulus_receipt_digest = sibling.actual_resource_record.stimulus.locator.receipt_digest;
+      expect(validateRowEvidence(sibling), `${rowId}:sibling-receipt`).toBe(false);
     }
   });
 
@@ -170,6 +214,39 @@ describe("Round 2 canonical proof binding", () => {
     expect(validateFrame(frame)).toBe(false);
   });
 
+  test("every negative raw-index row freezes one root target and rejects moved, copied, duplicate, or wrong-path material", () => {
+    const parsedFrame = normalizedRow("BAS-001").frame_binding.scheduled.frame_reference.frame;
+    const parsedRoot = structuredClone(parsedFrame.index);
+    const nestedTemplate = structuredClone(parsedFrame.nested_state[0]);
+    for (const rowId of ["IDX-007", "IDX-008", "IDX-009", "IDX-010", "IDX-011", "IDX-020", "LIM-003", "LIM-004"]) {
+      const row = normalizedRow(rowId);
+      const frame = row.frame_binding.scheduled.frame_reference.frame;
+      expect(frame.index.state, `${rowId}:root-target`).toBe("material");
+      expect(validateFrame(frame), `${rowId}:baseline`).toBe(true);
+
+      const moved = structuredClone(frame);
+      moved.nested_state = [structuredClone(nestedTemplate)];
+      moved.nested_state[0].audit.index = structuredClone(moved.index);
+      moved.index = structuredClone(parsedRoot);
+      sealFrame(moved);
+      expect(validateFrame(moved), `${rowId}:moved`).toBe(false);
+
+      const duplicate = structuredClone(frame);
+      duplicate.nested_state = [structuredClone(nestedTemplate)];
+      duplicate.nested_state[0].audit.index = structuredClone(duplicate.index);
+      sealFrame(duplicate);
+      expect(validateFrame(duplicate), `${rowId}:duplicate`).toBe(false);
+
+      const wrongPath = structuredClone(frame);
+      wrongPath.nested_state = [structuredClone(nestedTemplate)];
+      wrongPath.nested_state[0].path = "other";
+      wrongPath.nested_state[0].gitlink.path = "other";
+      wrongPath.nested_state[0].audit.index = structuredClone(wrongPath.index);
+      sealFrame(wrongPath);
+      expect(validateFrame(wrongPath), `${rowId}:wrong-path`).toBe(false);
+    }
+  });
+
   test("CAP-013/014 repair only the illegal path and reject unrelated scheduled-frame drift", () => {
     for (const rowId of ["CAP-013", "CAP-014"]) {
       const row = normalizedRow(rowId);
@@ -203,21 +280,24 @@ describe("Round 2 canonical proof binding", () => {
     const timeout = normalizedRow("BAS-001");
     timeout.observer_outcome = { kind: "rejected", code: "TIMEOUT" };
     timeout.actual_producing_boundary = "launcher";
-    timeout.actual_resource_record = measuredResource("wall_time_ms", "milliseconds", OBSERVER_LIMITS.wall_time_ms + 1);
+    timeout.actual_resource_record = measuredResource(timeout, "wall_time_ms", "milliseconds", OBSERVER_LIMITS.wall_time_ms + 1);
     timeout.row_verdict = "fail";
+    timeout.failure_cause = causalReceipt(timeout, "resource-exceeded-v1");
     expect(validateRowEvidence(timeout)).toBe(true);
 
     const tripwire = normalizedRow("BAS-002");
     tripwire.actual_producing_boundary = "tripwire";
     tripwire.control_assertions.protected_write.verdict = "fail";
     tripwire.row_verdict = "fail";
+    tripwire.failure_cause = causalReceipt(tripwire, "control-failure-v1", "protected_write");
     expect(validateRowEvidence(tripwire)).toBe(true);
 
     const memory = normalizedRow("BAS-003");
     memory.observer_outcome = { kind: "rejected", code: "LIMIT_MEMORY" };
     memory.actual_producing_boundary = "launcher";
-    memory.actual_resource_record = measuredResource("memory_bytes", "bytes", OBSERVER_LIMITS.memory_bytes + 1);
+    memory.actual_resource_record = measuredResource(memory, "memory_bytes", "bytes", OBSERVER_LIMITS.memory_bytes + 1);
     memory.row_verdict = "fail";
+    memory.failure_cause = causalReceipt(memory, "resource-exceeded-v1");
     expect(validateRowEvidence(memory)).toBe(true);
 
     const bundle = normalizedBundle();
@@ -231,5 +311,51 @@ describe("Round 2 canonical proof binding", () => {
     decision.first_cause = "ROW_VERDICT_FAILED";
     decision.all_failure_codes = ["ROW_VERDICT_FAILED"];
     expect(validateDecision(decision)).toBe(true);
+  });
+
+  test("the failure-cause union rejects cause-free launcher outcomes and producer/control/resource interchange", () => {
+    const launcher = normalizedRow("BAS-004");
+    launcher.observer_outcome = { kind: "rejected", code: "TIMEOUT" };
+    launcher.actual_producing_boundary = "launcher";
+    launcher.row_verdict = "fail";
+    expect(validateRowEvidence(launcher), "missing-cause").toBe(false);
+
+    launcher.failure_cause = causalReceipt(launcher, "outcome-mismatch-v1");
+    expect(validateRowEvidence(launcher), "bound-launcher-cause").toBe(true);
+    const swappedProducer = structuredClone(launcher);
+    swappedProducer.failure_cause.receipt.producer = "observer";
+    expect(validateRowEvidence(swappedProducer), "producer-swap").toBe(false);
+
+    const tripwire = normalizedRow("BAS-005");
+    tripwire.actual_producing_boundary = "tripwire";
+    tripwire.control_assertions.protected_write.verdict = "fail";
+    tripwire.row_verdict = "fail";
+    tripwire.failure_cause = causalReceipt(tripwire, "control-failure-v1", "protection");
+    expect(validateRowEvidence(tripwire), "wrong-failed-control").toBe(false);
+
+    const resource = normalizedRow("BAS-006");
+    resource.observer_outcome = { kind: "rejected", code: "LIMIT_MEMORY" };
+    resource.actual_producing_boundary = "launcher";
+    resource.actual_resource_record = measuredResource(resource, "memory_bytes", "bytes", OBSERVER_LIMITS.memory_bytes + 1);
+    resource.row_verdict = "fail";
+    resource.failure_cause = causalReceipt(resource, "resource-exceeded-v1");
+    resource.failure_cause.receipt.stimulus_receipt_digest = shaA;
+    expect(validateRowEvidence(resource), "resource-stimulus-swap").toBe(false);
+
+    const artificial = normalizedRow("BAS-001");
+    artificial.row_verdict = "fail";
+    artificial.failure_cause = causalReceipt(artificial, "outcome-mismatch-v1");
+    expect(validateRowEvidence(artificial), "matching-outcome-artificial-fail").toBe(false);
+
+    const directDecision = structuredClone(generic.decision);
+    const index = directDecision.rows.findIndex((scalar: string) => scalar.split("\0")[0] === "m" && scalar.split("\0")[1] === "BAS-004");
+    directDecision.rows[index] = encodeDecisionRowProjection(launcher);
+    directDecision.terminal_decision = "rejected";
+    directDecision.first_cause = "ROW_VERDICT_FAILED";
+    directDecision.all_failure_codes = ["ROW_VERDICT_FAILED"];
+    expect(validateDecision(directDecision), "D8 bound cause").toBe(true);
+    const missingD8Cause = structuredClone(directDecision);
+    missingD8Cause.rows[index] = missingD8Cause.rows[index].split("\0").slice(0, -1).concat("").join("\0");
+    expect(validateDecision(missingD8Cause), "D8 missing cause").toBe(false);
   });
 });

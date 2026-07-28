@@ -464,8 +464,10 @@ function inlineByteMaterial(value: unknown): boolean {
 
 function repeatedIndexByteMaterial(value: unknown): boolean {
   return record(value) && exactKeys(value, ["kind", "byte", "byte_length", "digest"]) && value.kind === "repeat-byte-v1" &&
-    value.byte === 0 && value.byte_length === OBSERVER_LIMITS.index_bytes + 1 &&
-    value.digest === "8996de63e472cbfe218412fd3512ad6d908f83119f02c439fbc16446d6d9e5db";
+    value.byte === 0 && ((value.byte_length === OBSERVER_LIMITS.index_bytes &&
+      value.digest === "b69dae56a14d1a8314ed40664c4033ea0a550eea2673e04df42a66ac6b9faf2c") ||
+      (value.byte_length === OBSERVER_LIMITS.index_bytes + 1 &&
+        value.digest === "8996de63e472cbfe218412fd3512ad6d908f83119f02c439fbc16446d6d9e5db"));
 }
 
 function materialIndex(value: JsonRecord): boolean {
@@ -514,20 +516,23 @@ function limitStimulus(value: unknown, rowId: string): boolean {
   if (!record(value) || typeof value.kind !== "string") return false;
   if (value.kind === "repeat-byte-v1") {
     return exactKeys(value, ["kind", "byte", "byte_length", "digest"]) && value.byte === 0 &&
-      rowId === "LIM-016" && value.byte_length === OBSERVER_LIMITS.hashed_bytes + 1 &&
-      value.digest === "da6ce8755151acd05195db67ebce3ee0fb5f4012e71e821cc5750f3304eaf41e";
+      ["LIM-015", "LIM-016"].includes(rowId) && value.byte_length === OBSERVER_LIMITS.hashed_bytes + (rowId === "LIM-016" ? 1 : 0) &&
+      value.digest === (rowId === "LIM-016" ? "da6ce8755151acd05195db67ebce3ee0fb5f4012e71e821cc5750f3304eaf41e" :
+        "a6d72ac7690f53be6ae46ba88506bd97302a093f7108472bd9efc3cefda06484");
   }
   if (value.kind === "index-entry-series-v1") {
     return exactKeys(value, ["kind", "count", "path_prefix", "object_id"]) &&
-      rowId === "LIM-006" && value.count === OBSERVER_LIMITS.index_entries + 1 && value.path_prefix === "limit-index-" && gitObjectId(value.object_id);
+      ["LIM-005", "LIM-006"].includes(rowId) && value.count === OBSERVER_LIMITS.index_entries + (rowId === "LIM-006" ? 1 : 0) &&
+      value.path_prefix === "limit-index-" && gitObjectId(value.object_id);
   }
   if (value.kind === "nested-repository-series-v1") {
     return exactKeys(value, ["kind", "count", "path_prefix", "object_id"]) &&
-      rowId === "LIM-012" && value.count === OBSERVER_LIMITS.nested_repositories + 1 && value.path_prefix === "limit-nested-" && gitObjectId(value.object_id);
+      ["LIM-011", "LIM-012"].includes(rowId) && value.count === OBSERVER_LIMITS.nested_repositories + (rowId === "LIM-012" ? 1 : 0) &&
+      value.path_prefix === "limit-nested-" && gitObjectId(value.object_id);
   }
   if (value.kind === "tree-entry-series-v1") {
     return exactKeys(value, ["kind", "count", "path_prefix", "mode", "object_id"]) &&
-      rowId === "LIM-014" && value.count === OBSERVER_LIMITS.traversal_entries + 1 && value.path_prefix === "limit-tree-" &&
+      ["LIM-013", "LIM-014"].includes(rowId) && value.count === OBSERVER_LIMITS.traversal_entries + (rowId === "LIM-014" ? 1 : 0) && value.path_prefix === "limit-tree-" &&
       value.mode === "100644" && gitObjectId(value.object_id);
   }
   if (value.kind !== "path-material-v1" || !exactKeys(value, ["kind", "byte_length", "digest", "content_base64"]) ||
@@ -536,17 +541,31 @@ function limitStimulus(value: unknown, rowId: string): boolean {
   if (bytes.toString("base64") !== value.content_base64 || bytes.length !== value.byte_length ||
     createHash("sha256").update(bytes).digest("hex") !== value.digest) return false;
   const path = bytes.toString("utf8");
-  return canonicalRelativePath(path) && ((rowId === "LIM-008" && path === "x".repeat(OBSERVER_LIMITS.path_bytes + 1)) ||
-    (rowId === "LIM-010" && path === Array.from({ length: OBSERVER_LIMITS.path_depth + 1 }, () => "x").join("/")));
+  return canonicalRelativePath(path) && ((["LIM-007", "LIM-008"].includes(rowId) &&
+    path === "x".repeat(OBSERVER_LIMITS.path_bytes + (rowId === "LIM-008" ? 1 : 0))) ||
+    (["LIM-009", "LIM-010"].includes(rowId) &&
+      path === Array.from({ length: OBSERVER_LIMITS.path_depth + (rowId === "LIM-010" ? 1 : 0) }, () => "x").join("/")));
 }
 
-const LIMIT_STIMULUS_ROWS = new Set(["LIM-006", "LIM-008", "LIM-010", "LIM-012", "LIM-014", "LIM-016"]);
+const LIMIT_STIMULUS_ROWS = new Set(Array.from({ length: 12 }, (_, index) => `LIM-${String(index + 5).padStart(3, "0")}`));
 
 function indexMaterialRowConsistency(index: unknown, rowId: string): boolean {
   if (!record(index) || index.state !== "material") return true;
   return repeatedIndexByteMaterial(index.primary)
-    ? ["IDX-011", "LIM-004"].includes(rowId)
+    ? ["IDX-011", "LIM-003", "LIM-004"].includes(rowId)
     : ["IDX-007", "IDX-008", "IDX-009", "IDX-010", "IDX-020"].includes(rowId);
+}
+
+const ROOT_INDEX_MATERIAL_ROWS = new Set(["IDX-007", "IDX-008", "IDX-009", "IDX-010", "IDX-011", "IDX-020", "LIM-003", "LIM-004"]);
+
+function indexMaterialPositions(rootIndex: unknown, nestedState: JsonRecord[]): string[] {
+  const positions: string[] = [];
+  if (record(rootIndex) && rootIndex.state === "material") positions.push("root");
+  for (const nested of nestedState) {
+    const audit = nested.audit;
+    if (record(audit) && record(audit.index) && audit.index.state === "material") positions.push(`nested:${nested.path as string}`);
+  }
+  return positions;
 }
 
 function treeEntry(value: unknown): boolean {
@@ -671,6 +690,8 @@ export function validateFrame(value: unknown): boolean {
   const nestedPaths = value.nested_state.map((nested) => (nested as JsonRecord).path as string);
   if (new Set(nestedPaths).size !== nestedPaths.length || !nestedPaths.every((path, index) => index === 0 || Buffer.from(nestedPaths[index - 1]!).compare(Buffer.from(path)) < 0)) return false;
   if (!nestedParentConsistency(value.index, value.nested_state as JsonRecord[])) return false;
+  const materialPositions = indexMaterialPositions(value.index, value.nested_state as JsonRecord[]);
+  if (ROOT_INDEX_MATERIAL_ROWS.has(value.row_id as string) ? !exactJson(materialPositions, ["root"]) : materialPositions.length !== 0) return false;
   const bodyBytes = canonicalFrameBodyBytes(value);
   const bodyDigest = canonicalFrameBodyDigest(value);
   return value.body_length === bodyBytes.length && value.body_digest === bodyDigest &&
@@ -763,7 +784,30 @@ function rowResourceRecord(value: unknown, rowId: string): boolean {
     value.within_limits === !exceeded;
 }
 
-function actualResourceRecord(value: unknown): boolean {
+function derivedFrameStimulusValue(limitIndex: number, row: JsonRecord): number | null {
+  if (!record(row.frame_binding) || !record(row.frame_binding.scheduled) || !record(row.frame_binding.supplied)) return null;
+  const scheduled = row.frame_binding.scheduled;
+  const supplied = row.frame_binding.supplied;
+  if (!record(scheduled.frame_reference) || !record(scheduled.frame_reference.frame)) return null;
+  const frame = scheduled.frame_reference.frame;
+  if (limitIndex === 0) return Number.isSafeInteger(supplied.input_length) ? supplied.input_length as number : null;
+  if (limitIndex === 1) {
+    const index = frame.index;
+    return record(index) && index.state === "material" && record(index.primary) && Number.isSafeInteger(index.primary.byte_length)
+      ? index.primary.byte_length as number : null;
+  }
+  const stimulus = frame.limit_stimulus;
+  if (!record(stimulus)) return null;
+  if ([2, 5, 6].includes(limitIndex)) return Number.isSafeInteger(stimulus.count) ? stimulus.count as number : null;
+  if ([3, 7].includes(limitIndex)) return Number.isSafeInteger(stimulus.byte_length) ? stimulus.byte_length as number : null;
+  if (limitIndex === 4 && stimulus.kind === "path-material-v1" && typeof stimulus.content_base64 === "string") {
+    const path = Buffer.from(stimulus.content_base64, "base64").toString("utf8");
+    return path.split("/").length;
+  }
+  return null;
+}
+
+function actualResourceRecord(value: unknown, row?: JsonRecord): boolean {
   if (!record(value)) return false;
   if (exactKeys(value, ["boundary_class", "declared_limit", "within_limits"])) {
     return value.boundary_class === "below" && value.declared_limit === "none" && value.within_limits === true;
@@ -776,23 +820,34 @@ function actualResourceRecord(value: unknown): boolean {
   const ceiling = OBSERVER_LIMITS[limit];
   const stimulus = value.stimulus;
   const measurement = value.measurement;
-  if (!exactKeys(stimulus, ["schema_version", "recipe", "recipe_digest"]) ||
+  if (!exactKeys(stimulus, ["schema_version", "recipe", "recipe_digest", "locator"]) ||
     stimulus.schema_version !== "shud.git-status-capability.limit-stimulus.v1" || !record(stimulus.recipe) ||
     !exactKeys(stimulus.recipe, ["kind", "limit", "unit", "value"]) || stimulus.recipe.kind !== "literal-counter-v1" ||
     stimulus.recipe.limit !== limit || stimulus.recipe.unit !== unit || !Number.isSafeInteger(stimulus.recipe.value) ||
-    (stimulus.recipe.value as number) < 0 || stimulus.recipe_digest !== canonicalDigest(stimulus.recipe)) return false;
-  if (!exactKeys(measurement, ["schema_version", "limit", "unit", "value", "stimulus_digest"]) ||
+    (stimulus.recipe.value as number) < 0 || stimulus.recipe_digest !== canonicalDigest(stimulus.recipe) || !record(stimulus.locator)) return false;
+  const locator = stimulus.locator;
+  if (!exactKeys(locator, ["kind", "row_id", "observation_id", "supplied_input_digest", "recipe_digest", "source", "receipt_digest"]) ||
+    !["supplied-frame-locator-v1", "launcher-receipt-v1"].includes(locator.kind as string) || !sha256(locator.observation_id) ||
+    !sha256(locator.supplied_input_digest) || locator.recipe_digest !== stimulus.recipe_digest || !sha256(locator.receipt_digest)) return false;
+  const locatorCore = Object.fromEntries(Object.entries(locator).filter(([key]) => key !== "receipt_digest"));
+  if (locator.receipt_digest !== canonicalDigest(locatorCore)) return false;
+  const frameDerived = limitIndex < 8;
+  if ((frameDerived ? locator.kind !== "supplied-frame-locator-v1" || locator.source !== "canonical-supplied-frame" :
+    locator.kind !== "launcher-receipt-v1" || locator.source !== "launcher-counter")) return false;
+  if (row && (locator.row_id !== row.row_id || locator.observation_id !== row.observation_id || locator.supplied_input_digest !== row.frame_digest)) return false;
+  if (!exactKeys(measurement, ["schema_version", "limit", "unit", "value", "stimulus_receipt_digest"]) ||
     measurement.schema_version !== "shud.git-status-capability.limit-measurement.v1" || measurement.limit !== limit ||
-    measurement.unit !== unit || measurement.value !== stimulus.recipe.value || measurement.stimulus_digest !== stimulus.recipe_digest) return false;
+    measurement.unit !== unit || measurement.value !== stimulus.recipe.value || measurement.stimulus_receipt_digest !== locator.receipt_digest) return false;
+  if (row && frameDerived && derivedFrameStimulusValue(limitIndex, row) !== measurement.value) return false;
   const measured = measurement.value as number;
   const boundary = measured < ceiling ? "below" : measured === ceiling ? "exact" : "exceeded";
   return value.boundary_class === boundary && value.within_limits === (measured <= ceiling);
 }
 
-function expectedActualResourceForRow(actual: JsonRecord, rowId: string): boolean {
-  const match = /^LIM-(\d{3})$/.exec(rowId);
-  if (!match) return actualResourceRecord(actual);
-  if (!actualResourceRecord(actual) || !record(actual.measurement)) return false;
+function expectedActualResourceForRow(actual: JsonRecord, row: JsonRecord): boolean {
+  const match = /^LIM-(\d{3})$/.exec(row.row_id as string);
+  if (!match) return actualResourceRecord(actual, row);
+  if (!actualResourceRecord(actual, row) || !record(actual.measurement)) return false;
   const ordinal = Number(match[1]);
   const limitIndex = Math.floor((ordinal - 1) / 2);
   const limit = ROW_RESOURCE_LIMITS[limitIndex];
@@ -800,21 +855,63 @@ function expectedActualResourceForRow(actual: JsonRecord, rowId: string): boolea
   return actual.declared_limit === limit && actual.measurement.value === ceiling + (ordinal % 2 === 0 ? 1 : 0);
 }
 
+function receiptDigestValid(receipt: JsonRecord): boolean {
+  if (!sha256(receipt.receipt_digest)) return false;
+  return receipt.receipt_digest === canonicalDigest(Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== "receipt_digest")));
+}
+
+function boundFailureReceipt(receipt: JsonRecord, row: JsonRecord): boolean {
+  return receipt.schema_version === "shud.git-status-capability.row-failure-receipt.v1" &&
+    receipt.producer === row.actual_producing_boundary && receipt.row_id === row.row_id && receipt.observation_id === row.observation_id &&
+    receipt.supplied_input_digest === row.frame_digest && receiptDigestValid(receipt);
+}
+
+function validateFailureCause(row: JsonRecord, assertions: JsonRecord): boolean {
+  if (!record(row.failure_cause) || !exactKeys(row.failure_cause, ["kind", "receipt"]) || !record(row.failure_cause.receipt)) return false;
+  const cause = row.failure_cause;
+  const receipt = cause.receipt as JsonRecord;
+  const baseKeys = ["schema_version", "producer", "row_id", "observation_id", "supplied_input_digest", "receipt_digest"];
+  if (!boundFailureReceipt(receipt, row)) return false;
+  const resource = row.actual_resource_record as JsonRecord;
+  const controlsPassed = CONTROL_ASSERTION_IDS.every((id) => (assertions[id] as JsonRecord).verdict === "pass");
+  if (cause.kind === "outcome-mismatch-v1") {
+    return exactKeys(receipt, [...baseKeys, "observed_outcome"]) && exactJson(receipt.observed_outcome, row.observer_outcome) &&
+      !exactJson(row.expected_outcome, row.observer_outcome) && resource.boundary_class !== "exceeded" && controlsPassed;
+  }
+  if (cause.kind === "control-failure-v1") {
+    if (!exactKeys(receipt, [...baseKeys, "control_id", "control_verdict"]) || !CONTROL_ASSERTION_IDS.includes(receipt.control_id as any) ||
+      receipt.control_verdict !== "fail" || (assertions[receipt.control_id as string] as JsonRecord)?.verdict !== "fail" ||
+      !exactJson(row.expected_outcome, row.observer_outcome) || resource.boundary_class === "exceeded") return false;
+    const allowed = row.actual_producing_boundary === "tripwire" ? ["protected_write", "protection"] :
+      row.actual_producing_boundary === "observer" ? ["oracle"] : ["ambient_path", "subprocess", "network", "cleanup"];
+    return allowed.includes(receipt.control_id as string);
+  }
+  if (cause.kind === "resource-exceeded-v1") {
+    if (!exactKeys(receipt, [...baseKeys, "declared_limit", "stimulus_receipt_digest", "observed_outcome"]) ||
+      row.actual_producing_boundary !== "launcher" || resource.boundary_class !== "exceeded" ||
+      receipt.declared_limit !== resource.declared_limit || !record(resource.stimulus) || !record(resource.stimulus.locator) ||
+      receipt.stimulus_receipt_digest !== resource.stimulus.locator.receipt_digest || !exactJson(receipt.observed_outcome, row.observer_outcome) ||
+      !controlsPassed) return false;
+    const index = ROW_RESOURCE_LIMITS.indexOf(resource.declared_limit as string);
+    return index >= 0 && record(row.observer_outcome) && row.observer_outcome.kind === "rejected" &&
+      (row.observer_outcome.code === ROW_RESOURCE_REJECTIONS[index] ||
+        (resource.declared_limit === "wall_time_ms" && row.observer_outcome.code === "TIMEOUT"));
+  }
+  if (cause.kind === "lifecycle-fault-v1") {
+    return exactKeys(receipt, [...baseKeys, "mutation_kind", "first_cause", "cleanup_verdict"]) &&
+      ["LIF-002", "LIF-006", "LIF-007"].includes(row.row_id as string) && record(row.frame_binding) && record(row.frame_binding.supplied) &&
+      record(row.frame_binding.supplied.material) && receipt.mutation_kind === row.frame_binding.supplied.material.kind &&
+      receipt.first_cause === row.first_cause && receipt.cleanup_verdict === (row.cleanup as JsonRecord).verdict;
+  }
+  return false;
+}
+
 function actualFailureCausality(row: JsonRecord, assertions: JsonRecord): boolean {
   const actualResource = row.actual_resource_record as JsonRecord;
-  if (row.row_verdict === "pass") return row.actual_producing_boundary === row.producing_boundary && record(row.resource_record) &&
-    ["boundary_class", "declared_limit", "within_limits"].every((key) => actualResource[key] === (row.resource_record as JsonRecord)[key]);
-  if (actualResource.boundary_class === "exceeded") {
-    const index = ROW_RESOURCE_LIMITS.indexOf(actualResource.declared_limit as string);
-    return row.actual_producing_boundary === "launcher" && index >= 0 && record(row.observer_outcome) &&
-      row.observer_outcome.kind === "rejected" && (row.observer_outcome.code === ROW_RESOURCE_REJECTIONS[index] ||
-        (actualResource.declared_limit === "wall_time_ms" && row.observer_outcome.code === "TIMEOUT"));
-  }
-  if (row.actual_producing_boundary === "tripwire") {
-    return (assertions.protected_write as JsonRecord).verdict === "fail" || (assertions.protection as JsonRecord).verdict === "fail";
-  }
-  if (row.actual_producing_boundary === "launcher") return record(row.observer_outcome) && row.observer_outcome.kind === "rejected";
-  return row.actual_producing_boundary === "observer";
+  if (row.row_verdict === "pass") return row.failure_cause === undefined && row.actual_producing_boundary === row.producing_boundary &&
+    record(row.resource_record) && ["boundary_class", "declared_limit", "within_limits"].every((key) =>
+      actualResource[key] === (row.resource_record as JsonRecord)[key]);
+  return validateFailureCause(row, assertions);
 }
 
 const SLOT_KEYS = Object.freeze([
@@ -1000,7 +1097,7 @@ export function validateRowEvidence(value: unknown): boolean {
   if (((assertions.protection as JsonRecord).verdict === "pass") !== value.protection_set_equal) return false;
   if (!validateLifecycleCausality(value, assertions.cleanup as JsonRecord)) return false;
   if (!rowResourceRecord(value.resource_record, value.row_id as string) || !record(value.actual_resource_record) ||
-    !expectedActualResourceForRow(value.actual_resource_record, value.row_id as string) || !sha256(value.source_input_record_sha256)) return false;
+    !expectedActualResourceForRow(value.actual_resource_record, value) || !sha256(value.source_input_record_sha256)) return false;
   const determinismRow = /^DET-00[1-4]$/.test(value.row_id as string);
   if (determinismRow !== Object.hasOwn(value, "determinism_proof") || (determinismRow && !validateDeterminismProof(value))) return false;
   const shouldPass = exactJson(value.expected_outcome, value.observer_outcome) &&

@@ -29,6 +29,13 @@ function rejectedDecision(code: string): any {
   fields[4] = "r";
   fields[5] = code;
   fields[6] = "f";
+  const receipt = {
+    schema_version: "shud.git-status-capability.row-failure-receipt.v1", producer: "observer",
+    row_id: fields[1], observation_id: fields[7], supplied_input_digest: fields[9],
+    observed_outcome: { kind: "rejected", code }
+  };
+  const cause = { kind: "outcome-mismatch-v1", receipt: { ...receipt, receipt_digest: canonicalDigest(receipt) } };
+  fields[18] = Buffer.from(JSON.stringify(canonicalValue(cause)), "utf8").toString("base64url");
   decision.rows[0] = fields.join("\0");
   decision.terminal_decision = "rejected";
   decision.first_cause = "ROW_VERDICT_FAILED";
@@ -110,7 +117,7 @@ function formalDetProjection(input: any, output: any, token: string): string {
   return [
     input.platform === "macos" ? "m" : "l", input.row_id, "c", "", "c", "", "p",
     input.observation_id, input.git_state_generation_digest, input.supplied_input_digest, "o",
-    "7f", "7f", "1", output.cleanup.verdict === "pass" ? "p" : "f", "0", "b", token
+    "7f", "7f", "1", output.cleanup.verdict === "pass" ? "p" : "f", "0", "b", token, ""
   ].join("\0");
 }
 
@@ -218,15 +225,33 @@ const resourceLimits = [
   ["output_bytes", "bytes", OBSERVER_LIMITS.output_bytes]
 ] as const;
 
-function measuredResource(limit: string, unit: string, value: number): any {
+function measuredResource(row: any, limit: string, unit: string, value: number): any {
   const recipe = { kind: "literal-counter-v1", limit, unit, value };
   const recipeDigest = canonicalDigest(recipe);
+  const locatorCore = {
+    kind: resourceLimits.findIndex(([candidate]) => candidate === limit) < 8 ? "supplied-frame-locator-v1" : "launcher-receipt-v1",
+    row_id: row.row_id, observation_id: row.observation_id, supplied_input_digest: row.frame_digest,
+    recipe_digest: recipeDigest,
+    source: resourceLimits.findIndex(([candidate]) => candidate === limit) < 8 ? "canonical-supplied-frame" : "launcher-counter"
+  };
+  const locator = { ...locatorCore, receipt_digest: canonicalDigest(locatorCore) };
   return {
     boundary_class: value > (OBSERVER_LIMITS as any)[limit] ? "exceeded" : value === (OBSERVER_LIMITS as any)[limit] ? "exact" : "below",
     declared_limit: limit, within_limits: value <= (OBSERVER_LIMITS as any)[limit],
-    stimulus: { schema_version: "shud.git-status-capability.limit-stimulus.v1", recipe, recipe_digest: recipeDigest },
-    measurement: { schema_version: "shud.git-status-capability.limit-measurement.v1", limit, unit, value, stimulus_digest: recipeDigest }
+    stimulus: { schema_version: "shud.git-status-capability.limit-stimulus.v1", recipe, recipe_digest: recipeDigest, locator },
+    measurement: { schema_version: "shud.git-status-capability.limit-measurement.v1", limit, unit, value, stimulus_receipt_digest: locator.receipt_digest }
   };
+}
+
+function bindControlFailure(row: any, controlId: string): void {
+  row.actual_producing_boundary = controlId === "oracle" ? "observer" :
+    ["protected_write", "protection"].includes(controlId) ? "tripwire" : "launcher";
+  const receipt = {
+    schema_version: "shud.git-status-capability.row-failure-receipt.v1", producer: row.actual_producing_boundary,
+    row_id: row.row_id, observation_id: row.observation_id, supplied_input_digest: row.frame_digest,
+    control_id: controlId, control_verdict: "fail"
+  };
+  row.failure_cause = { kind: "control-failure-v1", receipt: { ...receipt, receipt_digest: canonicalDigest(receipt) } };
 }
 
 function expectedBoundary(rowId: string): "observer" | "launcher" | "tripwire" {
@@ -260,13 +285,17 @@ function rowFor(rowId: string): any {
       within_limits: ordinal % 2 === 1
     };
     const [limit, unit, ceiling] = resourceLimits[Math.floor((ordinal - 1) / 2)]!;
-    row.actual_resource_record = measuredResource(limit, unit, ceiling + (ordinal % 2 === 0 ? 1 : 0));
+    row.actual_resource_record = { limit, unit, ceiling, ordinal };
   } else {
     row.resource_record = { boundary_class: "below", declared_limit: "none", within_limits: true };
     row.actual_resource_record = structuredClone(row.resource_record);
   }
   const frame = frameForEvidenceSlot("macos", rowId, row.observation_id, row.checkout_capability_identity);
   bindScheduled(row, frame, /^LIM-00[12]$/.test(rowId) ? OBSERVER_LIMITS.frame_bytes : undefined);
+  if (match) {
+    const { limit, unit, ceiling, ordinal } = row.actual_resource_record;
+    row.actual_resource_record = measuredResource(row, limit, unit, ceiling + (ordinal % 2 === 0 ? 1 : 0));
+  }
   if (rowId === "LIF-002" || rowId === "LIF-006") {
     const bytes = scheduledBytes(row);
     bytes[8] = 2;
@@ -413,6 +442,7 @@ describe("Phase 6.2 row control-state closure", () => {
     const row = rowFor("BAS-001");
     row.control_assertions.ambient_path.verdict = "fail";
     row.row_verdict = "fail";
+    bindControlFailure(row, "ambient_path");
     expect(validateRowEvidence(row)).toBe(true);
     expect(() => encodeDecisionRowProjection(row)).not.toThrow();
   });
@@ -422,6 +452,7 @@ describe("Phase 6.2 row control-state closure", () => {
     row.control_assertions.protection.verdict = "fail";
     row.protection_set_equal = false;
     row.row_verdict = "fail";
+    bindControlFailure(row, "protection");
     expect(validateRowEvidence(row)).toBe(true);
   });
 
@@ -434,6 +465,7 @@ describe("Phase 6.2 row control-state closure", () => {
         row.cleanup.descriptors_restored = false;
       }
       row.row_verdict = "fail";
+      bindControlFailure(row, controlId);
       expect(validateRowEvidence(row), controlId).toBe(true);
       expect(() => encodeDecisionRowProjection(row), controlId).not.toThrow();
     }
@@ -521,6 +553,9 @@ describe("Phase 6.2 scheduled versus supplied frame proof", () => {
       material: { kind: "append-byte-v1", byte: 0, count: 1 }
     });
     over.frame_digest = appendedDigest;
+    over.actual_resource_record = measuredResource(
+      over, "frame_bytes", "bytes", OBSERVER_LIMITS.frame_bytes + 1
+    );
     expect(validateRowEvidence(over)).toBe(true);
     expect(referenceDecode(appendedBytes)).toBe("LIMIT_FRAME_BYTES");
     const malformedOver = Buffer.from(appendedBytes);
@@ -627,7 +662,7 @@ describe("Phase 6.2 paired determinism proof", () => {
     for (const rowId of ["DET-001", "DET-002", "DET-003", "DET-004"]) {
       const row = rowFor(rowId);
       expect(validateRowEvidence(row), rowId).toBe(true);
-      expect(encodeDecisionRowProjection(row).split("\0").at(-1), rowId).toBe(rowId.at(-1));
+      expect(encodeDecisionRowProjection(row).split("\0")[17], rowId).toBe(rowId.at(-1));
 
       const missingSecond = structuredClone(row);
       delete missingSecond.determinism_proof.second;

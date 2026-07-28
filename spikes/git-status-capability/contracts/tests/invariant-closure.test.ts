@@ -165,6 +165,22 @@ function mutateDecisionRow(decision: Record<string, any>, rowIndex: number, segm
   decision.rows[rowIndex] = fields.join("\0");
 }
 
+function bindDecisionFailureCause(
+  decision: Record<string, any>, rowIndex: number, kind: "outcome-mismatch-v1" | "control-failure-v1",
+  details: Record<string, unknown>
+): void {
+  const fields = decisionRowFields(decision.rows[rowIndex]);
+  const producer = fields[10] === "o" ? "observer" : fields[10] === "l" ? "launcher" : "tripwire";
+  const receipt = {
+    schema_version: "shud.git-status-capability.row-failure-receipt.v1",
+    producer, row_id: fields[1], observation_id: fields[7], supplied_input_digest: fields[9], ...details
+  };
+  const receiptDigest = createHash("sha256").update(Buffer.from(JSON.stringify(canonicalEvidenceValue(receipt)), "utf8")).digest("hex");
+  const cause = { kind, receipt: { ...receipt, receipt_digest: receiptDigest } };
+  fields[18] = Buffer.from(JSON.stringify(canonicalEvidenceValue(cause)), "utf8").toString("base64url");
+  decision.rows[rowIndex] = fields.join("\0");
+}
+
 function admittedPaths() {
   return [{ path: "a.txt", git_mode: "100644" }, { path: "bin/run", git_mode: "100755" }];
 }
@@ -511,6 +527,7 @@ describe("round-1 invariant closure", () => {
     mutateDecisionRow(rejected, 0, 4, "d");
     mutateDecisionRow(rejected, 0, 5, "");
     mutateDecisionRow(rejected, 0, 6, "f");
+    bindDecisionFailureCause(rejected, 0, "outcome-mismatch-v1", { observed_outcome: { kind: "dirty" } });
     rejected.terminal_decision = "rejected";
     rejected.first_cause = "ROW_VERDICT_FAILED";
     rejected.all_failure_codes = ["ROW_VERDICT_FAILED"];
@@ -518,7 +535,11 @@ describe("round-1 invariant closure", () => {
 
     const controlRejected = structuredClone(accepted);
     mutateDecisionRow(controlRejected, 0, 6, "f");
+    mutateDecisionRow(controlRejected, 0, 10, "l");
     mutateDecisionRow(controlRejected, 0, 12, "7d");
+    bindDecisionFailureCause(controlRejected, 0, "control-failure-v1", {
+      control_id: "ambient_path", control_verdict: "fail"
+    });
     controlRejected.terminal_decision = "rejected";
     controlRejected.first_cause = "ROW_CONTROL_FAILED";
     controlRejected.all_failure_codes = ["ROW_CONTROL_FAILED"];
