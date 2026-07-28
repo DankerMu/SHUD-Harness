@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { canonicalJsonBytes, sealFrame } from "../lib/canonical-frame";
 import { encodeDecisionRowProjection } from "../lib/decision";
 import { encodeDecisionRowProjectionCore } from "../lib/row-projection";
-import { INGESTION_LIMITS, OBSERVER_LIMITS } from "../lib/frozen";
+import { CATALOG_V1, INGESTION_LIMITS, OBSERVER_LIMITS } from "../lib/frozen";
 import { validateDeterminismProof } from "../lib/determinism-proof";
 import { validateDecision, validateFrame, validatePlatformBundle, validateRowEvidence, validateSourceInputRecord } from "../lib/schema";
 import { canonicalWireFrameBytes } from "../lib/wire-frame";
@@ -114,7 +114,19 @@ function reorder(value: Record<string, any>): Record<string, any> {
   return Object.fromEntries(Object.entries(value).reverse());
 }
 
-function causalReceipt(row: any, kind: "outcome-mismatch-v1" | "control-failure-v1" | "resource-exceeded-v1" | "lifecycle-fault-v1", controlId?: string): any {
+function catalogRelationship(row: any): any {
+  const suppliedMaterialDigest = digest(row.frame_binding.supplied.material);
+  const core = {
+    schema_version: "shud.git-status-capability.catalog-negative-relationship.v1",
+    row_id: row.row_id,
+    identity: `shud.catalog-negative.${row.row_id}.v1`,
+    supplied_material_kind: row.frame_binding.supplied.material.kind,
+    supplied_material_digest: suppliedMaterialDigest
+  };
+  return { ...core, recipe_digest: digest(core) };
+}
+
+function causalReceipt(row: any, kind: "outcome-mismatch-v1" | "control-failure-v1" | "resource-exceeded-v1" | "lifecycle-fault-v1" | "catalog-negative-mismatch-v1", controlId?: string): any {
   const base: Record<string, any> = {
     schema_version: "shud.git-status-capability.row-failure-receipt.v1",
     producer: row.actual_producing_boundary,
@@ -136,6 +148,18 @@ function causalReceipt(row: any, kind: "outcome-mismatch-v1" | "control-failure-
     base.first_cause = row.first_cause;
     base.secondary_errors = structuredClone(row.secondary_errors);
     base.cleanup = structuredClone(row.cleanup);
+  }
+  if (kind === "catalog-negative-mismatch-v1") {
+    base.platform = row.platform;
+    base.frozen_expected_code = row.expected_outcome.code;
+    base.frozen_boundary = row.producing_boundary;
+    base.actual_code = row.observer_outcome.code;
+    base.actual_boundary = row.actual_producing_boundary;
+    base.supplied_state = {
+      material: structuredClone(row.frame_binding.supplied.material),
+      material_digest: digest(row.frame_binding.supplied.material)
+    };
+    base.relationship_recipe = catalogRelationship(row);
   }
   return { kind, receipt: { ...base, receipt_digest: digest(base) } };
 }
@@ -214,6 +238,20 @@ function lifecycleFailure(rowId: "LIF-002" | "LIF-006" | "LIF-007"): any {
   row.failure_cause = causalReceipt(row, "lifecycle-fault-v1");
   return row;
 }
+
+function catalogNegativeFailure(rowId: string, platform: "macos" | "linux", actualCode: string): any {
+  const row = normalizedRow(rowId, platform);
+  row.observer_outcome = { kind: "rejected", code: actualCode };
+  row.row_verdict = "fail";
+  row.failure_cause = causalReceipt(row, "catalog-negative-mismatch-v1");
+  return row;
+}
+
+const CATALOG_NEGATIVE_ROWS = [
+  "CAP-005", "CAP-006", "CAP-008", "CAP-009", "CAP-016", "CAP-017",
+  "PRT-001", "PRT-002", "PRT-003", "PRT-004", "PRT-005", "PRT-006", "PRT-007", "PRT-008", "PRT-009",
+  "PRT-010", "PRT-011", "PRT-012", "LIF-003", "LIF-004", "LIF-005", "LIF-007"
+] as const;
 
 describe("Round 2 canonical proof binding", () => {
   test("all 13 LIM exact/+1 pairs bind the declared boundary to a replayable stimulus and actual measurement", () => {
@@ -562,5 +600,87 @@ describe("Round 2 canonical proof binding", () => {
     lifecycle.actual_producing_boundary = "launcher";
     lifecycle.failure_cause = causalReceipt(lifecycle, "lifecycle-fault-v1");
     expect(causalParity(lifecycle)).toEqual([false, false]);
+  });
+
+  test("all frozen launcher/tripwire negative slots accept only a bound catalog-code mismatch", () => {
+    const eligible = CATALOG_V1.filter((row) => row.macos_expected.kind === "rejected" &&
+      ["launcher", "tripwire"].includes(row.producing_boundary)).map((row) => row.id);
+    expect(eligible).toEqual([...CATALOG_NEGATIVE_ROWS]);
+    for (const platform of ["macos", "linux"] as const) {
+      for (const rowId of CATALOG_NEGATIVE_ROWS) {
+        const row = catalogNegativeFailure(rowId, platform, "PLATFORM_UNSUPPORTED");
+        expect(causalParity(row), `${platform}/${rowId}`).toEqual([true, true]);
+        expect(Buffer.byteLength(JSON.stringify(rejectedDecisionFor(row))), `${platform}/${rowId}:capacity`)
+          .toBeLessThanOrEqual(INGESTION_LIMITS.decision.bytes);
+        const expectedPass = normalizedRow(rowId, platform);
+        expect(validateRowEvidence(expectedPass), `${platform}/${rowId}:expected-pass`).toBe(true);
+      }
+    }
+  });
+
+  test("descriptor, lifecycle, and protection negatives preserve alternate frozen rejection codes", () => {
+    const cases = [
+      ["CAP-005", "DESCRIPTOR_CLOSED"],
+      ["LIF-003", "SIGNALLED_TERM"],
+      ["PRT-010", "PROTECTED_METADATA_ATTEMPT"]
+    ] as const;
+    for (const platform of ["macos", "linux"] as const) {
+      for (const [rowId, code] of cases) expect(causalParity(catalogNegativeFailure(rowId, platform, code))).toEqual([true, true]);
+    }
+  });
+
+  test("catalog negative cause rejects every re-signed slot, code, boundary, supplied-state, and relationship exchange", () => {
+    const row = catalogNegativeFailure("CAP-005", "macos", "PLATFORM_UNSUPPORTED");
+    expect(causalParity(row)).toEqual([true, true]);
+    const mutations = [
+      (cause: any) => { cause.receipt.platform = "linux"; },
+      (cause: any) => { cause.receipt.row_id = "CAP-006"; },
+      (cause: any) => { cause.receipt.frozen_expected_code = "DESCRIPTOR_CLOSED"; },
+      (cause: any) => { cause.receipt.frozen_boundary = "tripwire"; },
+      (cause: any) => { cause.receipt.actual_code = "DESCRIPTOR_CLOSED"; },
+      (cause: any) => { cause.receipt.actual_boundary = "tripwire"; },
+      (cause: any) => { cause.receipt.supplied_input_digest = shaA; },
+      (cause: any) => { cause.receipt.supplied_state.material = { kind: "canonical-frame-wire-v1" }; },
+      (cause: any) => { cause.receipt.supplied_state.material_digest = shaA; },
+      (cause: any) => { cause.receipt.relationship_recipe.identity = "shud.catalog-negative.CAP-006.v1"; },
+      (cause: any) => { cause.receipt.relationship_recipe.recipe_digest = shaA; }
+    ];
+    for (const mutate of mutations) {
+      const cause = structuredClone(row.failure_cause);
+      mutate(cause);
+      expect(causalParity(row, resignCause(cause))).toEqual([false, false]);
+    }
+    const fullyResigned = structuredClone(row.failure_cause);
+    fullyResigned.receipt.supplied_state.material.extra = true;
+    const materialDigest = digest(fullyResigned.receipt.supplied_state.material);
+    fullyResigned.receipt.supplied_state.material_digest = materialDigest;
+    const { recipe_digest: _oldRecipeDigest, ...recipe } = fullyResigned.receipt.relationship_recipe;
+    recipe.supplied_material_digest = materialDigest;
+    fullyResigned.receipt.relationship_recipe = { ...recipe, recipe_digest: digest(recipe) };
+    expect(causalParity(row, resignCause(fullyResigned))).toEqual([false, false]);
+  });
+
+  test("catalog negative cause cannot hide control, resource, producer, or generic-row drift", () => {
+    const failedControl = catalogNegativeFailure("CAP-005", "macos", "PLATFORM_UNSUPPORTED");
+    failedControl.control_assertions.network.verdict = "fail";
+    failedControl.failure_cause = causalReceipt(failedControl, "catalog-negative-mismatch-v1");
+    expect(causalParity(failedControl)).toEqual([false, false]);
+
+    const exceeded = catalogNegativeFailure("LIF-003", "macos", "PLATFORM_UNSUPPORTED");
+    exceeded.actual_resource_record = measuredResource(exceeded, "memory_bytes", "bytes", OBSERVER_LIMITS.memory_bytes + 1);
+    exceeded.failure_cause = causalReceipt(exceeded, "catalog-negative-mismatch-v1");
+    expect(causalParity(exceeded)).toEqual([false, false]);
+
+    const wrongBoundary = catalogNegativeFailure("PRT-010", "macos", "PLATFORM_UNSUPPORTED");
+    wrongBoundary.actual_producing_boundary = "launcher";
+    wrongBoundary.failure_cause = causalReceipt(wrongBoundary, "catalog-negative-mismatch-v1");
+    expect(causalParity(wrongBoundary)).toEqual([false, false]);
+
+    const generic = normalizedRow("BAS-001");
+    generic.observer_outcome = { kind: "rejected", code: "PLATFORM_UNSUPPORTED" };
+    generic.actual_producing_boundary = "launcher";
+    generic.row_verdict = "fail";
+    generic.failure_cause = causalReceipt(generic, "catalog-negative-mismatch-v1");
+    expect(causalParity(generic)).toEqual([false, false]);
   });
 });

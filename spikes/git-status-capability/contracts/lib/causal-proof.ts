@@ -1,10 +1,17 @@
 import { createHash } from "node:crypto";
 import { canonicalJsonBytes } from "./canonical-frame";
-import { CONTROL_ASSERTION_IDS, OBSERVER_LIMITS } from "./frozen";
+import {
+  CATALOG_NEGATIVE_RELATIONSHIPS_V1,
+  CATALOG_V1,
+  CONTROL_ASSERTION_IDS,
+  OBSERVER_LIMITS,
+  REJECTION_CODES
+} from "./frozen";
 
 type JsonRecord = Record<string, any>;
 
 export type CausalContext = {
+  platform: "macos" | "linux";
   rowVerdict: "pass" | "fail";
   expectedOutcome: JsonRecord;
   observedOutcome: JsonRecord;
@@ -129,6 +136,29 @@ function resourceProof(value: unknown, context: CausalContext): boolean {
     measurement.stimulus_receipt_digest === locator.receipt_digest;
 }
 
+function catalogRelationshipRecipe(rowId: string, suppliedMaterialDigest: string): JsonRecord | null {
+  const frozen = CATALOG_NEGATIVE_RELATIONSHIPS_V1[rowId];
+  if (!record(frozen) || !sha256(suppliedMaterialDigest)) return null;
+  const core = {
+    schema_version: "shud.git-status-capability.catalog-negative-relationship.v1",
+    row_id: rowId,
+    identity: frozen.identity,
+    supplied_material_kind: frozen.supplied_material_kind,
+    supplied_material_digest: suppliedMaterialDigest
+  };
+  return { ...core, recipe_digest: canonicalDigest(core) };
+}
+
+function suppliedMaterialProof(value: JsonRecord, expectedKind: string): boolean {
+  if (expectedKind === "scheduled-input-v1") return exactKeys(value, ["kind"]) && value.kind === expectedKind;
+  return expectedKind === "canonical-frame-wire-v1" &&
+    exactKeys(value, ["kind", "version", "header_length", "body_length", "extension_length", "frame_reference"]) &&
+    value.kind === expectedKind && value.version === 1 && value.header_length === 128 &&
+    Number.isSafeInteger(value.body_length) && value.body_length >= 0 && Number.isSafeInteger(value.extension_length) &&
+    value.extension_length >= 0 && record(value.frame_reference) && exactKeys(value.frame_reference, ["encoding", "frame"]) &&
+    value.frame_reference.encoding === "shud.git-status-capability.canonical-frame-json.v1" && record(value.frame_reference.frame);
+}
+
 function validateProjection(value: unknown, context: CausalContext): boolean {
   if (context.rowVerdict === "pass") return value === undefined;
   if (!record(value) || !exactKeys(value, ["kind", "receipt"]) || !record(value.receipt)) return false;
@@ -158,6 +188,29 @@ function validateProjection(value: unknown, context: CausalContext): boolean {
       (context.observedOutcome.code === RESOURCE_REJECTIONS[index] ||
         (context.declaredLimit === "wall_time_ms" && context.observedOutcome.code === "TIMEOUT"));
   }
+  if (value.kind === "catalog-negative-mismatch-v1") {
+    if (!exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "platform", "frozen_expected_code", "frozen_boundary",
+      "actual_code", "actual_boundary", "supplied_state", "relationship_recipe"]) ||
+      receipt.platform !== context.platform || receipt.actual_code !== context.observedOutcome.code ||
+      receipt.actual_boundary !== context.producingBoundary || !controlsPassed || context.boundaryClass !== "below" ||
+      context.declaredLimit !== "none" || !record(receipt.supplied_state) ||
+      !exactKeys(receipt.supplied_state, ["material", "material_digest"]) || !record(receipt.supplied_state.material) ||
+      !sha256(receipt.supplied_state.material_digest) ||
+      receipt.supplied_state.material_digest !== canonicalDigest(receipt.supplied_state.material) ||
+      !record(receipt.relationship_recipe)) return false;
+    const catalog = CATALOG_V1.find((row) => row.id === context.rowId);
+    const frozenExpected = context.platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
+    const relationship = catalogRelationshipRecipe(context.rowId, receipt.supplied_state.material_digest as string);
+    const expectedCleanup = context.rowId === "LIF-007" ? "fail" : "pass";
+    return frozenExpected?.kind === "rejected" && ["launcher", "tripwire"].includes(catalog?.producing_boundary as string) &&
+      context.expectedOutcome.kind === "rejected" && context.expectedOutcome.code === frozenExpected.code &&
+      context.observedOutcome.kind === "rejected" && REJECTION_CODES.includes(context.observedOutcome.code as any) &&
+      context.observedOutcome.code !== frozenExpected.code && context.producingBoundary === catalog?.producing_boundary &&
+      receipt.frozen_expected_code === frozenExpected.code && receipt.frozen_boundary === catalog?.producing_boundary &&
+      receipt.actual_code === context.observedOutcome.code && receipt.actual_boundary === catalog?.producing_boundary &&
+      context.cleanupVerdict === expectedCleanup && record(relationship) && exactJson(receipt.relationship_recipe, relationship) &&
+      suppliedMaterialProof(receipt.supplied_state.material, relationship.supplied_material_kind as string);
+  }
   if (value.kind !== "lifecycle-fault-v1" ||
     !exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "supplied_mutation", "first_cause", "secondary_errors", "cleanup"]) ||
     !controlsPassed || context.boundaryClass === "exceeded" || exactJson(context.expectedOutcome, context.observedOutcome)) return false;
@@ -178,7 +231,7 @@ function passedBits(assertions: JsonRecord): number {
 
 function rawContext(row: JsonRecord, assertions: JsonRecord): CausalContext {
   return {
-    rowVerdict: row.row_verdict, expectedOutcome: row.expected_outcome, observedOutcome: row.observer_outcome,
+    platform: row.platform, rowVerdict: row.row_verdict, expectedOutcome: row.expected_outcome, observedOutcome: row.observer_outcome,
     producingBoundary: row.actual_producing_boundary, rowId: row.row_id, observationId: row.observation_id,
     suppliedInputDigest: row.frame_digest, declaredLimit: row.actual_resource_record.declared_limit,
     boundaryClass: row.actual_resource_record.boundary_class, passedControlBits: passedBits(assertions),
@@ -207,6 +260,24 @@ export function canonicalFailureCauseForRow(row: JsonRecord): JsonRecord | null 
     receipt.first_cause = row.first_cause;
     receipt.secondary_errors = row.secondary_errors;
     receipt.cleanup = row.cleanup;
+  } else if (row.failure_cause.kind === "catalog-negative-mismatch-v1") {
+    if (!record(row.frame_binding?.supplied?.material)) return null;
+    const suppliedMaterialDigest = canonicalDigest(row.frame_binding.supplied.material);
+    const relationship = catalogRelationshipRecipe(row.row_id, suppliedMaterialDigest);
+    if (!relationship) return null;
+    const catalog = CATALOG_V1.find((candidate) => candidate.id === row.row_id);
+    const frozenExpected = row.platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
+    if (frozenExpected?.kind !== "rejected") return null;
+    receipt.platform = row.platform;
+    receipt.frozen_expected_code = frozenExpected.code;
+    receipt.frozen_boundary = catalog?.producing_boundary;
+    receipt.actual_code = row.observer_outcome?.code;
+    receipt.actual_boundary = row.actual_producing_boundary;
+    receipt.supplied_state = {
+      material: row.frame_binding.supplied.material,
+      material_digest: suppliedMaterialDigest
+    };
+    receipt.relationship_recipe = relationship;
   } else return null;
   const projection = { kind: row.failure_cause.kind, receipt: signedReceipt(receipt) };
   const context = rawContext(row, row.control_assertions);
