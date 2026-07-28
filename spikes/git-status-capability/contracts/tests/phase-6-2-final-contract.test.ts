@@ -241,7 +241,8 @@ function bindControlFailure(row: any, controlId: string): void {
   row.actual_producing_boundary = controlId === "oracle" ? "observer" :
     ["protected_write", "protection"].includes(controlId) ? "tripwire" : "launcher";
   const receipt = {
-    schema_version: "shud.git-status-capability.row-failure-receipt.v1", producer: row.actual_producing_boundary,
+    schema_version: "shud.git-status-capability.row-failure-receipt.v1", platform: row.platform,
+    producer: row.actual_producing_boundary,
     row_id: row.row_id, observation_id: row.observation_id, supplied_input_digest: row.frame_digest,
     control_id: controlId, control_verdict: "fail"
   };

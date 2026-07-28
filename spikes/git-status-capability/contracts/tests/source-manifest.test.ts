@@ -12,6 +12,56 @@ import { enumerateSourceCandidates, validateGitCandidateSet, validateManifest } 
 const repositoryRoot = join(import.meta.dir, "..", "..", "..", "..");
 const manifestRelative = "spikes/git-status-capability/contracts/source-input-v1.paths";
 const temporaryRoots: string[] = [];
+const generic = JSON.parse(await readFile(join(import.meta.dir, "../fixtures/valid/generic.json"), "utf8"));
+
+function immutableReference(seed = "03"): Record<string, unknown> {
+  const sha256 = seed.repeat(32);
+  return {
+    schema_version: "shud.git-status-capability.immutable-evidence-reference.v1",
+    media_type: "application/json",
+    sha256,
+    byte_length: 128,
+    immutable_identity: `sha256:${sha256}`,
+    retention: { policy: "retain-until-change-archived-v1", minimum_days: 3650 },
+    access: { scope: "repository-local", requires_network: false },
+    offline_retrieval: {
+      kind: "content-addressed-path-v1", path: `artifacts/sha256/${sha256}`, sha256, byte_length: 128
+    }
+  };
+}
+
+function paddedJson(value: unknown, bytes: number): Buffer {
+  const serialized = Buffer.from(JSON.stringify(value));
+  if (serialized.length > bytes) throw new Error("fixture exceeds requested byte size");
+  return Buffer.concat([serialized, Buffer.alloc(bytes - serialized.length, 0x20)]);
+}
+
+function depthBoundaryJson(schemaVersion: string, depth: number): string {
+  let padding: unknown = null;
+  for (let current = 2; current < depth; current += 1) padding = [padding];
+  return JSON.stringify({ schema_version: schemaVersion, padding });
+}
+
+function nodeBoundaryJson(schemaVersion: string, nodes: number): string {
+  // Root + schema_version value + padding array are three parser nodes.
+  return JSON.stringify({ schema_version: schemaVersion, padding: Array(nodes - 3).fill(null) });
+}
+
+function itemBoundaryJson(schemaVersion: string, items: number): string {
+  // The root contributes the schema_version and padding keys; array elements do
+  // not consume the strict parser's object-member item budget.
+  return JSON.stringify({
+    schema_version: schemaVersion,
+    padding: Object.fromEntries(Array.from({ length: items - 2 }, (_, index) => [`k${index}`, null]))
+  });
+}
+
+async function writeEvidence(root: string, relative: string, content: Uint8Array | string): Promise<string> {
+  const absolute = join(root, "openspec/changes/m2-capability-observer-spike/evidence", ...relative.split("/"));
+  await mkdir(join(absolute, ".."), { recursive: true });
+  await writeFile(absolute, content);
+  return absolute;
+}
 
 async function temporaryRepository(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "shud-contract-manifest-"));
@@ -104,8 +154,8 @@ describe("source-input-v1 current-set authority", () => {
     const root = await temporaryRepository();
     const before = await enumerateSourceCandidates(root);
     const digest = "01".repeat(32);
-    await mkdir(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}`), { recursive: true });
-    await writeFile(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}/result.json`), "{}\n");
+    await mkdir(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}/macos`), { recursive: true });
+    await writeFile(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}/macos/result.md`), "# bounded evidence\n");
     expect(await enumerateSourceCandidates(root)).toEqual(before);
     await mkdir(join(root, ".github/workflows"), { recursive: true });
     await writeFile(join(root, ".github/workflows/git-status-capability-spike.yml"), "name: spike\n");
@@ -118,15 +168,18 @@ describe("source-input-v1 current-set authority", () => {
 
   test("evidence exclusion is a closed lane/digest/mode/content classifier for tracked and untracked files", async () => {
     const digest = "02".repeat(32);
-    const validPaths = [
-      `source/${digest}/record.json`, `platform/${digest}/summary.md`,
-      `gates/${digest}/receipt.json`, `final/${digest}/decision.md`
+    const validRecords: Array<[string, unknown | string]> = [
+      [`source/${digest}/record.json`, generic.source_input_record],
+      [`platform/${digest}/macos/platform.json`, generic.platform_bundle],
+      [`platform/${digest}/linux/platform.json`, generic.linux_platform_bundle],
+      [`gates/${digest}/receipt.json`, immutableReference("04")],
+      [`final/${digest}/final.json`, generic.final_bundle],
+      [`final/${digest}/decision.json`, generic.decision],
+      [`final/${digest}/summary.md`, "# bounded evidence\n"]
     ];
     const validRoot = await temporaryRepository();
-    const evidenceRoot = join(validRoot, "openspec/changes/m2-capability-observer-spike/evidence");
-    for (const path of validPaths) {
-      await mkdir(join(evidenceRoot, ...path.split("/").slice(0, -1)), { recursive: true });
-      await writeFile(join(evidenceRoot, ...path.split("/")), path.endsWith(".json") ? "{}\n" : "# bounded evidence\n");
+    for (const [path, value] of validRecords) {
+      await writeEvidence(validRoot, path, typeof value === "string" ? value : `${JSON.stringify(value)}\n`);
     }
     const before = await enumerateSourceCandidates(validRoot);
     expect(spawnSync("git", ["init", "-q"], { cwd: validRoot }).status).toBe(0);
@@ -136,12 +189,17 @@ describe("source-input-v1 current-set authority", () => {
     const invalidCases: Array<[string, Uint8Array | string, boolean]> = [
       [`wrong/${digest}/result.json`, "{}\n", false],
       ["platform/not-a-digest/result.json", "{}\n", false],
-      [`platform/${digest}/observer.ts`, "export {};\n", false],
-      [`platform/${digest}/import.md`, "import x from 'source';\n", false],
-      [`platform/${digest}/binary.json`, new Uint8Array([0, 255, 0]), false],
-      [`platform/${digest}/unsupported.png`, "image", false],
-      [`platform/${digest}/executable.md`, "# evidence\n", true],
-      [`platform/${digest}/oversize.json`, new Uint8Array(INGESTION_LIMITS.platform_bundle.bytes + 1), false]
+      [`platform/${digest}/macos/observer.ts`, "export {};\n", false],
+      [`platform/${digest}/macos/import.md`, "import x from 'source';\n", false],
+      [`platform/${digest}/macos/binary.json`, new Uint8Array([0, 255, 0]), false],
+      [`platform/${digest}/macos/unsupported.png`, "image", false],
+      [`platform/${digest}/macos/executable.md`, "# evidence\n", true],
+      [`platform/${digest}/macos/oversize.json`, new Uint8Array(INGESTION_LIMITS.platform_bundle.bytes + 1), false],
+      [`source/${digest}/unknown.json`, '{"schema_version":"unknown.v1"}\n', false],
+      [`source/${digest}/source-wrapper.json`, '{"schema_version":"wrapper.v1","source":"import x from \'covered\';"}\n', false],
+      [`source/${digest}/base64-wrapper.json`, '{"schema_version":"wrapper.v1","content_base64":"aW1wb3J0IHg="}\n', false],
+      [`source/${digest}/byte-array.json`, '{"schema_version":"wrapper.v1","bytes":[105,109,112,111,114,116]}\n', false],
+      [`gates/${digest}/mutable-url.json`, '{"schema_version":"shud.git-status-capability.immutable-evidence-reference.v1","url":"https://mutable.invalid/latest"}\n', false]
     ];
     for (const [path, content, executable] of invalidCases) {
       const root = await temporaryRepository();
@@ -174,6 +232,146 @@ describe("source-input-v1 current-set authority", () => {
     const stagedCandidates = await enumerateSourceCandidates(stagedRoot);
     expect(() => validateGitCandidateSet(stagedRoot, stagedCandidates), "staged-invalid/worktree-legal").toThrow(ContractError);
   });
+
+  test("Markdown evidence admits bounded prose and text/json/console fences but rejects executable declarations", async () => {
+    const digest = "05".repeat(32);
+    const positive = [
+      "Import results are summarized below.\nExport notes remain prose.\n",
+      "```text\nbounded observation\n```\n",
+      "```json\n{\"status\":\"ok\",\"count\":1}\n```\n",
+      "```console\ncheck: pass\n```\n"
+    ].join("\n");
+    for (const tracked of [false, true]) {
+      const root = await temporaryRepository();
+      await writeEvidence(root, `final/${digest}/summary.md`, positive);
+      const candidates = await enumerateSourceCandidates(root);
+      if (tracked) {
+        expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
+        expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: root }).status).toBe(0);
+        expect(() => validateGitCandidateSet(root, candidates), "tracked-positive").not.toThrow();
+      }
+    }
+    const negatives = [
+      "```ts\nconst hidden = true;\n```\n",
+      "````ts\nconst hidden = true;\n````\n",
+      "~~~js\nconst hidden = true;\n~~~\n",
+      "```bash\necho hidden\n```\n",
+      "```json\n{not-json}\n```\n",
+      "import hidden from 'covered-source';\n",
+      "import type { Hidden } from 'covered-source';\n",
+      "import('covered-source');\n",
+      "export const hidden = true;\n",
+      "export async function hidden() {}\n",
+      "```text\nexport const hidden = true;\n```\n",
+      "```console\nimport hidden from 'covered-source';\n```\n",
+      "```text\nconst hidden = true;\n```\n",
+      "```console\nfunction hidden() {}\n```\n"
+    ];
+    for (const [index, content] of negatives.entries()) {
+      for (const tracked of [false, true]) {
+        const root = await temporaryRepository();
+        await writeEvidence(root, `final/${digest}/invalid-${index}.md`, content);
+        if (tracked) {
+          expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
+          expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: root }).status).toBe(0);
+          const candidates = (await enumerateSourceCandidates(root).catch(() => []));
+          expect(() => validateGitCandidateSet(root, candidates), `tracked-negative-${index}`).toThrow(ContractError);
+        } else {
+          await expect(enumerateSourceCandidates(root), `untracked-negative-${index}`).rejects.toBeInstanceOf(ContractError);
+        }
+      }
+    }
+  }, 30_000);
+
+  test("closed evidence JSON schemas enforce their own byte, depth, node, and item limits after version discovery", async () => {
+    const digest = "13".repeat(32);
+    const cases = [
+      ["source-input-record", `source/${digest}/record.json`, "shud.git-status-capability.source-input-record.v1", INGESTION_LIMITS.source_input_record, generic.source_input_record],
+      ["platform-bundle", `platform/${digest}/macos/platform.json`, "shud.git-status-capability.platform-bundle.v1", INGESTION_LIMITS.platform_bundle, generic.platform_bundle],
+      ["final-bundle", `final/${digest}/final.json`, "shud.git-status-capability.final-bundle.v1", INGESTION_LIMITS.final_bundle, generic.final_bundle],
+      ["decision", `final/${digest}/decision.json`, "shud.git-status-capability.decision.v1", INGESTION_LIMITS.decision, generic.decision],
+      ["immutable-reference", `gates/${digest}/reference.json`, "shud.git-status-capability.immutable-evidence-reference.v1",
+        { bytes: 4096, depth: 6, nodes: 64, items: 32 }, immutableReference("13")]
+    ] as const;
+    const boundaries = [
+      ["depth", depthBoundaryJson, "CONTRACT_JSON_DEPTH_LIMIT"],
+      ["nodes", nodeBoundaryJson, "CONTRACT_JSON_NODE_LIMIT"],
+      ["items", itemBoundaryJson, "CONTRACT_JSON_ITEM_LIMIT"]
+    ] as const;
+
+    const root = await temporaryRepository();
+    for (const [kind, path, schemaVersion, limits, valid] of cases) {
+      await writeEvidence(root, path, paddedJson(valid, limits.bytes));
+      expect(await enumerateSourceCandidates(root), `${kind}:bytes:exact`).toBeInstanceOf(Array);
+      await writeEvidence(root, path, paddedJson(valid, limits.bytes + 1));
+      await expect(enumerateSourceCandidates(root), `${kind}:bytes:plus-one`)
+        .rejects.toMatchObject({ code: "CONTRACT_BYTES_LIMIT" });
+      await writeEvidence(root, path, `${JSON.stringify(valid)}\n`);
+      for (const [axis, build, code] of boundaries) {
+        const exact = build(schemaVersion, limits[axis]);
+        await writeEvidence(root, path, exact);
+        await expect(enumerateSourceCandidates(root), `${kind}:${axis}:exact`)
+          .rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+
+        const plusOne = build(schemaVersion, limits[axis] + 1);
+        await writeEvidence(root, path, plusOne);
+        await expect(enumerateSourceCandidates(root), `${kind}:${axis}:plus-one`)
+          .rejects.toMatchObject({ code });
+        await writeEvidence(root, path, `${JSON.stringify(valid)}\n`);
+      }
+    }
+  }, 120_000);
+
+  test("evidence byte ceilings are isolated per digest and per platform subtree for tracked and untracked blobs", async () => {
+    const digestA = "06".repeat(32);
+    const digestB = "07".repeat(32);
+    const platformLimit = INGESTION_LIMITS.platform_bundle.bytes;
+    const finalLimit = INGESTION_LIMITS.final_bundle.bytes;
+
+    for (const tracked of [false, true]) {
+      const exact = await temporaryRepository();
+      await writeEvidence(exact, `platform/${digestA}/macos/exact.md`, Buffer.alloc(platformLimit, 0x20));
+      await writeEvidence(exact, `platform/${digestA}/linux/exact.md`, Buffer.alloc(platformLimit, 0x20));
+      await writeEvidence(exact, `final/${digestA}/exact.md`, Buffer.alloc(finalLimit, 0x20));
+      const exactCandidates = await enumerateSourceCandidates(exact);
+      if (tracked) {
+        expect(spawnSync("git", ["init", "-q"], { cwd: exact }).status).toBe(0);
+        expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: exact }).status).toBe(0);
+        expect(() => validateGitCandidateSet(exact, exactCandidates), "tracked-exact").not.toThrow();
+      }
+
+      const isolated = await temporaryRepository();
+      await writeEvidence(isolated, `platform/${digestA}/macos/a.md`, Buffer.alloc(5 * 1024 * 1024, 0x20));
+      await writeEvidence(isolated, `platform/${digestA}/linux/a.md`, Buffer.alloc(5 * 1024 * 1024, 0x20));
+      await writeEvidence(isolated, `platform/${digestB}/macos/b.md`, Buffer.alloc(5 * 1024 * 1024, 0x20));
+      await writeEvidence(isolated, `final/${digestA}/a.md`, Buffer.alloc(12 * 1024 * 1024, 0x20));
+      await writeEvidence(isolated, `final/${digestB}/b.md`, Buffer.alloc(12 * 1024 * 1024, 0x20));
+      const isolatedCandidates = await enumerateSourceCandidates(isolated);
+      if (tracked) {
+        expect(spawnSync("git", ["init", "-q"], { cwd: isolated }).status).toBe(0);
+        expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: isolated }).status).toBe(0);
+        expect(() => validateGitCandidateSet(isolated, isolatedCandidates), "tracked-isolated").not.toThrow();
+      }
+    }
+
+    for (const [path, limit] of [
+      [`platform/${digestA}/macos/plus-one.md`, platformLimit],
+      [`platform/${digestA}/linux/plus-one.md`, platformLimit],
+      [`final/${digestA}/plus-one.md`, finalLimit]
+    ] as const) {
+      const untracked = await temporaryRepository();
+      await writeEvidence(untracked, path, paddedJson(immutableReference("10"), limit + 1));
+      await expect(enumerateSourceCandidates(untracked), `untracked:${path}`).rejects.toMatchObject({ code: "CONTRACT_BYTES_LIMIT" });
+
+      const staged = await temporaryRepository();
+      const stagedPath = await writeEvidence(staged, path, paddedJson(immutableReference("11"), limit + 1));
+      expect(spawnSync("git", ["init", "-q"], { cwd: staged }).status).toBe(0);
+      expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: staged }).status).toBe(0);
+      await writeFile(stagedPath, "bounded legal worktree evidence\n");
+      const candidates = await enumerateSourceCandidates(staged);
+      expect(() => validateGitCandidateSet(staged, candidates), `tracked:${path}`).toThrow(ContractError);
+    }
+  }, 120_000);
 
   test("the exact current checker returns one complete receipt and writes zero files", async () => {
     const before = await inventory(repositoryRoot);

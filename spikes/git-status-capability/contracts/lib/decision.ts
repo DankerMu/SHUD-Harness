@@ -96,11 +96,12 @@ function decodeDecisionRow(value: unknown): DecodedRow | null {
   const producingBoundary = TOKEN_TO_PRODUCER[producingBoundaryToken as keyof typeof TOKEN_TO_PRODUCER];
   const expectedDeterminismToken = /^DET-00([1-4])$/.exec(rowId!)?.[1] ?? "0";
   const passedControlBits = /^[0-9a-f]{2}$/.test(passedControls!) ? Number.parseInt(passedControls!, 16) : -1;
+  const nonLimLauncherCounter = limitOrdinal >= 9 && limitOrdinal <= 13;
   if (!platform || !nonEmptyString(rowId) || !expectedOutcome || !observedOutcome || !rowVerdict || !sha256(observationId) ||
     !sha256(generationPayloadDigest) || !sha256(frameDigest) || !producingBoundary || activeControls !== ALL_CONTROL_TOKEN ||
     passedControlBits < 0 || (passedControlBits & ~ALL_CONTROL_BITS) !== 0 || !["0", "1"].includes(protectionSetEqual!) ||
     !["p", "f"].includes(cleanupVerdict!) || !declaredLimit || !boundaryClass || determinismToken !== expectedDeterminismToken ||
-    ((boundaryClass === "below") !== (declaredLimit === "none"))) return null;
+    (declaredLimit === "none" ? boundaryClass !== "below" : boundaryClass === "below" && !nonLimLauncherCounter)) return null;
   const catalog = CATALOG_V1.find((row) => row.id === rowId);
   const frozenExpected = platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
   const limitMatch = /^LIM-(\d{3})$/.exec(rowId);

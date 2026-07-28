@@ -420,7 +420,8 @@ describe("round-1 invariant closure", () => {
       expect(validatePlatformBundle(bundle)).toBe(false);
     }
     const invalidPlatform = structuredClone(generic.platform_bundle);
-    invalidPlatform.run_status = "invalid"; invalidPlatform.rows = []; invalidPlatform.first_cause = "EVIDENCE_MISSING"; invalidPlatform.all_failure_codes = ["EVIDENCE_MISSING"];
+    invalidPlatform.run_status = "invalid"; invalidPlatform.rows = []; invalidPlatform.protection_set = [];
+    invalidPlatform.first_cause = "EVIDENCE_MISSING"; invalidPlatform.all_failure_codes = ["EVIDENCE_MISSING"];
     expect(validatePlatformBundle(invalidPlatform)).toBe(true);
   });
 
