@@ -61,7 +61,39 @@ function itemsAt(items: number): Uint8Array {
   return encoder.encode(`[${Array.from({ length: items }, () => "0").join(",")}]`);
 }
 
+function objectItemsAt(items: number): Uint8Array {
+  return encoder.encode(`{${Array.from({ length: items }, (_, index) => `"k${index}":0`).join(",")}}`);
+}
+
+async function publicCode(kind: InputKind, bytes: Uint8Array, directory: string, label: string): Promise<{ exit: number; code?: string; stdout: string }> {
+  const path = join(directory, `${kind}-${label}.json`);
+  await writeFile(path, bytes);
+  let stdout = "";
+  let stderr = "";
+  const exit = await runCheck(["--input", path, "--kind", kind], { stdout: (text) => stdout += text, stderr: (text) => stderr += text });
+  return { exit, code: stderr ? JSON.parse(stderr).code : undefined, stdout };
+}
+
 describe("bounded fail-closed JSON ingestion", () => {
+  test("all eight public kinds expose exact/+1 byte, depth, and aggregate array/object item receipts", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "shud-contract-public-bounds-"));
+    try {
+      for (const kind of kinds) {
+        const limit = INGESTION_LIMITS[kind];
+        expect((await publicCode(kind, bytesAt(limit.bytes), temporary, "bytes-exact")).code).toBe("CONTRACT_SCHEMA_INVALID");
+        expect(await publicCode(kind, bytesAt(limit.bytes + 1), temporary, "bytes-plus-one")).toMatchObject({ exit: 2, code: "CONTRACT_BYTES_LIMIT", stdout: "" });
+        expect((await publicCode(kind, depthAt(limit.depth), temporary, "depth-exact")).code).toBe("CONTRACT_SCHEMA_INVALID");
+        expect(await publicCode(kind, depthAt(limit.depth + 1), temporary, "depth-plus-one")).toMatchObject({ exit: 2, code: "CONTRACT_JSON_DEPTH_LIMIT", stdout: "" });
+        expect((await publicCode(kind, itemsAt(limit.items), temporary, "array-items-exact")).code).toBe("CONTRACT_SCHEMA_INVALID");
+        expect(await publicCode(kind, itemsAt(limit.items + 1), temporary, "array-items-plus-one")).toMatchObject({ exit: 2, code: "CONTRACT_JSON_ITEM_LIMIT", stdout: "" });
+        expect((await publicCode(kind, objectItemsAt(limit.items), temporary, "object-items-exact")).code).toBe("CONTRACT_SCHEMA_INVALID");
+        expect(await publicCode(kind, objectItemsAt(limit.items + 1), temporary, "object-items-plus-one")).toMatchObject({ exit: 2, code: "CONTRACT_JSON_ITEM_LIMIT", stdout: "" });
+      }
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("accepts every per-kind byte bound and rejects bound plus one before parsing", () => {
     for (const kind of kinds) {
       const limit = INGESTION_LIMITS[kind];
@@ -155,29 +187,55 @@ describe("bounded fail-closed JSON ingestion", () => {
           ["wrong-version", (value) => { value.schema_version = "shud.git-status-capability.future.v2"; }]
         ];
         const kindMutations: Partial<Record<InputKind, Array<[string, (value: Record<string, any>) => void]>>> = {
-          catalog: [["wrong-type", (value) => { value.catalog_version = "1"; }]],
-          dependency_graph: [["wrong-type", (value) => { value.lockfile_version = "4"; }]],
-          schema: [["schema-open", (value) => { value.additional_properties = true; }]],
+          catalog: [
+            ["wrong-type", (value) => { value.catalog_version = "1"; }],
+            ["digest-frame-drift", (value) => { value.source_input_digest_v1.frame_fields.pop(); }]
+          ],
+          dependency_graph: [
+            ["wrong-type", (value) => { value.lockfile_version = "4"; }],
+            ["nested-feature-drift", (value) => { value.target_graphs["aarch64-apple-darwin"].activated_features[0].features.push("future"); }]
+          ],
+          schema: [
+            ["missing-nested", (value) => { delete value.index.shared_index; }],
+            ["nested-unknown", (value) => { value.index.future = true; }],
+            ["nested-wrong-type", (value) => { value.effective_config.entries = {}; }],
+            ["nested-absolute-path", (value) => { value.exclude_state.sources[0].path = "/tmp/exclude"; }]
+          ],
           source_input_record: [
             ["wrong-type", (value) => { value.entry_count = "2"; }],
-            ["unsafe-path", (value) => { value.admitted_paths[0] = "../escape"; }]
+            ["unsafe-path", (value) => { value.admitted_paths[0].path = "../escape"; }],
+            ["nested-encoder-unknown", (value) => { value.primary_encoder.result.future = true; }],
+            ["empty-receipt", (value) => { value.command_receipt = {}; }]
           ],
           row_evidence: [
             ["wrong-platform", (value) => { value.platform = "windows"; }],
             ["wrong-outcome", (value) => { value.observer_outcome = { kind: "unknown" }; }],
-            ["wrong-verdict", (value) => { value.row_verdict = "accepted"; }]
+            ["wrong-verdict", (value) => { value.row_verdict = "accepted"; }],
+            ["slot-expectation-drift", (value) => { value.expected_outcome = { kind: "dirty" }; }],
+            ["nested-cleanup-unknown", (value) => { value.cleanup.future = true; }],
+            ["missing-frame-payload-length", (value) => { delete value.frame_binding.payload_length; }],
+            ["frame-binding-mismatch", (value) => { value.frame_binding.row_id = "BAS-002"; }]
           ],
           platform_bundle: [
             ["wrong-status", (value) => { value.run_status = "accepted"; }],
-            ["target-mismatch", (value) => { value.target = "x86_64-unknown-linux-gnu"; }]
+            ["target-mismatch", (value) => { value.target = "x86_64-unknown-linux-gnu"; }],
+            ["nested-toolchain-unknown", (value) => { value.toolchain.future = true; }],
+            ["empty-complete-rows", (value) => { value.rows = []; }]
           ],
           final_bundle: [
             ["invalid-with-decision", (value) => { value.run_status = "invalid"; }],
-            ["complete-without-decision", (value) => { delete value.terminal_decision; }]
+            ["complete-without-decision", (value) => { delete value.terminal_decision; }],
+            ["empty-complete-gates", (value) => { value.repository_gates = {}; }],
+            ["nested-gate-unknown", (value) => { value.repository_gates.check.future = true; }],
+            ["gate-source-mismatch", (value) => { value.repository_gates.check.source_input_record_sha256 = "0".repeat(64); }],
+            ["missing-source-input-gate", (value) => { delete value.repository_gates["GATE-SOURCE-INPUT"]; }],
+            ["source-input-gate-create-mode", (value) => { value.repository_gates["GATE-SOURCE-INPUT"].argv[12] = "--record"; value.repository_gates["GATE-SOURCE-INPUT"].argv[14] = "--create"; }]
           ],
           decision: [
             ["invalid-with-decision", (value) => { value.run_status = "invalid"; }],
-            ["complete-without-decision", (value) => { delete value.terminal_decision; }]
+            ["complete-without-decision", (value) => { delete value.terminal_decision; }],
+            ["empty-complete-rows", (value) => { value.rows = []; }],
+            ["nested-row-invalid", (value) => { value.rows[0] = "macos\\0BAS-001"; }]
           ]
         };
         mutations.push(...(kindMutations[kind] ?? []));

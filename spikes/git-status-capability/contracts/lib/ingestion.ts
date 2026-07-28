@@ -1,4 +1,5 @@
 import { INGESTION_LIMITS } from "./frozen";
+import { open } from "node:fs/promises";
 
 export type InputKind = keyof typeof INGESTION_LIMITS;
 export type ContractErrorCode =
@@ -51,7 +52,10 @@ class StrictJsonParser {
 
   private object(depth: number): Record<string, unknown> {
     this.index += 1;
-    const result: Record<string, unknown> = {};
+    // Null-prototype objects preserve every JSON key as inert data. In
+    // particular, assigning `__proto__` must neither invoke an inherited setter
+    // nor hide the key from strict unknown-field validation.
+    const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     const keys = new Set<string>();
     this.space();
     if (this.input[this.index] === "}") {
@@ -148,6 +152,34 @@ class StrictJsonParser {
 
   private fail(code: ContractErrorCode): never {
     throw new ContractError(code);
+  }
+}
+
+export async function readJsonFileBounded(
+  path: string,
+  kind: InputKind,
+  validate: (value: unknown) => boolean = () => true
+): Promise<unknown> {
+  const limit = INGESTION_LIMITS[kind];
+  let handle;
+  try {
+    handle = await open(path, "r");
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > limit.bytes) throw new ContractError("CONTRACT_BYTES_LIMIT");
+    const buffer = Buffer.alloc(limit.bytes + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const result = await handle.read(buffer, offset, buffer.length - offset, offset);
+      if (result.bytesRead === 0) break;
+      offset += result.bytesRead;
+    }
+    if (offset > limit.bytes) throw new ContractError("CONTRACT_BYTES_LIMIT");
+    return ingestJson(buffer.subarray(0, offset), kind, validate);
+  } catch (error) {
+    if (error instanceof ContractError) throw error;
+    throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  } finally {
+    await handle?.close();
   }
 }
 
