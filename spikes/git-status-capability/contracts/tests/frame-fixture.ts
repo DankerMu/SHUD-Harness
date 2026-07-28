@@ -5,6 +5,7 @@ const shaB = "ab".repeat(32);
 const oidA = "01".repeat(20);
 const oidB = "ab".repeat(20);
 export const frameEvidenceEncoding = "shud.git-status-capability.canonical-frame-json.v1";
+export type EvidencePlatform = "macos" | "linux";
 const frameEvidenceFields = [
   "schema_version", "catalog_version", "row_id", "observation_id", "checkout_capability_identity",
   "git_state_generation_digest", "body_length", "body_digest", "checksum", "index", "head_tree",
@@ -141,11 +142,28 @@ export function resealFrame(frame: Record<string, any>): Record<string, any> {
   return frame;
 }
 
-export function frameForEvidenceSlot(rowId: string, observationId: string, capabilityIdentity: string): Record<string, any> {
+export function slotObservationId(platform: EvidencePlatform, rowId: string): string {
+  return digest(`shud.git-status-capability.observation-slot.v1\0${platform}\0${rowId}`);
+}
+
+function slotObjectId(platform: EvidencePlatform, rowId: string, kind: string, path = ""): string {
+  return createHash("sha1").update(`shud.git-status-capability.actual-object-slot.v1\0${platform}\0${rowId}\0${kind}\0${path}`).digest("hex");
+}
+
+export function frameForEvidenceSlot(
+  platform: EvidencePlatform,
+  rowId: string,
+  observationId: string,
+  capabilityIdentity: string
+): Record<string, any> {
   const frame = materialFrame();
   frame.row_id = rowId;
   frame.observation_id = observationId;
   frame.checkout_capability_identity = capabilityIdentity;
+  frame.head_tree.object_id = slotObjectId(platform, rowId, "tree");
+  for (const entry of frame.head_tree.entries) {
+    entry.object_id = slotObjectId(platform, rowId, "entry", entry.path);
+  }
   const stimulus = limitStimulus(rowId);
   if (stimulus) frame.limit_stimulus = stimulus;
   return resealFrame(frame);
