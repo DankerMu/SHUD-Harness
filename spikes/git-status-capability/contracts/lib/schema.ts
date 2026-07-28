@@ -417,15 +417,32 @@ function sortedPathSet(value: unknown): value is string[] {
     value.every((path, index) => index === 0 || Buffer.from(value[index - 1]!).compare(Buffer.from(path)) < 0);
 }
 
+function inlineByteMaterial(value: unknown): boolean {
+  if (!record(value) || !exactKeys(value, ["kind", "byte_length", "digest", "content_base64"]) ||
+    value.kind !== "inline-bytes-v1" || !boundedInteger(value.byte_length, OBSERVER_LIMITS.index_bytes, false) ||
+    !sha256(value.digest) || typeof value.content_base64 !== "string") return false;
+  const bytes = Buffer.from(value.content_base64, "base64");
+  return bytes.toString("base64") === value.content_base64 && bytes.length === value.byte_length &&
+    createHash("sha256").update(bytes).digest("hex") === value.digest;
+}
+
+function repeatedIndexByteMaterial(value: unknown): boolean {
+  return record(value) && exactKeys(value, ["kind", "byte", "byte_length", "digest"]) && value.kind === "repeat-byte-v1" &&
+    value.byte === 0 && value.byte_length === OBSERVER_LIMITS.index_bytes + 1 &&
+    value.digest === "8996de63e472cbfe218412fd3512ad6d908f83119f02c439fbc16446d6d9e5db";
+}
+
+function materialIndex(value: JsonRecord): boolean {
+  if (!exactKeys(value, ["state", "primary", "shared_index"]) || value.state !== "material" ||
+    (!inlineByteMaterial(value.primary) && !repeatedIndexByteMaterial(value.primary)) || !record(value.shared_index)) return false;
+  const shared = value.shared_index;
+  return (exactKeys(shared, ["state"]) && shared.state === "absent") ||
+    (exactKeys(shared, ["state", "material"]) && shared.state === "present" && inlineByteMaterial(shared.material));
+}
+
 function frameIndex(value: unknown): boolean {
   if (!record(value)) return false;
-  if (exactKeys(value, ["state", "byte_length", "digest", "rejection_code"]) && value.state === "rejected" &&
-    ["INDEX_SHARED_MISSING", "INDEX_SHARED_CORRUPT", "INDEX_MALFORMED", "INDEX_TRUNCATED", "LIMIT_INDEX_BYTES"].includes(value.rejection_code as string) &&
-    boundedInteger(value.byte_length, OBSERVER_LIMITS.frame_bytes) && sha256(value.digest)) {
-    return value.rejection_code === "LIMIT_INDEX_BYTES"
-      ? value.byte_length === OBSERVER_LIMITS.index_bytes + 1
-      : (value.byte_length as number) <= OBSERVER_LIMITS.index_bytes;
-  }
+  if (value.state === "material") return materialIndex(value);
   if (!exactKeys(value, [
     "state", "format_version", "byte_length", "digest", "entry_count", "entries", "effective_entries", "extensions", "shared_index"
   ]) || value.state !== "parsed" || ![2, 4].includes(value.format_version as number) ||
@@ -455,6 +472,45 @@ function frameIndex(value: unknown): boolean {
   const expected = [...(shared.entries as JsonRecord[]).filter((entry) => !deleted.has(entry.path as string) && !replaced.has(entry.path as string)),
     ...(value.entries as JsonRecord[])].sort(comparePathStage);
   return exactJson(value.effective_entries, expected);
+}
+
+function limitStimulus(value: unknown, rowId: string): boolean {
+  if (!record(value) || typeof value.kind !== "string") return false;
+  if (value.kind === "repeat-byte-v1") {
+    return exactKeys(value, ["kind", "byte", "byte_length", "digest"]) && value.byte === 0 &&
+      rowId === "LIM-016" && value.byte_length === OBSERVER_LIMITS.hashed_bytes + 1 &&
+      value.digest === "da6ce8755151acd05195db67ebce3ee0fb5f4012e71e821cc5750f3304eaf41e";
+  }
+  if (value.kind === "index-entry-series-v1") {
+    return exactKeys(value, ["kind", "count", "path_prefix", "object_id"]) &&
+      rowId === "LIM-006" && value.count === OBSERVER_LIMITS.index_entries + 1 && value.path_prefix === "limit-index-" && gitObjectId(value.object_id);
+  }
+  if (value.kind === "nested-repository-series-v1") {
+    return exactKeys(value, ["kind", "count", "path_prefix", "object_id"]) &&
+      rowId === "LIM-012" && value.count === OBSERVER_LIMITS.nested_repositories + 1 && value.path_prefix === "limit-nested-" && gitObjectId(value.object_id);
+  }
+  if (value.kind === "tree-entry-series-v1") {
+    return exactKeys(value, ["kind", "count", "path_prefix", "mode", "object_id"]) &&
+      rowId === "LIM-014" && value.count === OBSERVER_LIMITS.traversal_entries + 1 && value.path_prefix === "limit-tree-" &&
+      value.mode === "100644" && gitObjectId(value.object_id);
+  }
+  if (value.kind !== "path-material-v1" || !exactKeys(value, ["kind", "byte_length", "digest", "content_base64"]) ||
+    !sha256(value.digest) || typeof value.content_base64 !== "string") return false;
+  const bytes = Buffer.from(value.content_base64, "base64");
+  if (bytes.toString("base64") !== value.content_base64 || bytes.length !== value.byte_length ||
+    createHash("sha256").update(bytes).digest("hex") !== value.digest) return false;
+  const path = bytes.toString("utf8");
+  return canonicalRelativePath(path) && ((rowId === "LIM-008" && path === "x".repeat(OBSERVER_LIMITS.path_bytes + 1)) ||
+    (rowId === "LIM-010" && path === Array.from({ length: OBSERVER_LIMITS.path_depth + 1 }, () => "x").join("/")));
+}
+
+const LIMIT_STIMULUS_ROWS = new Set(["LIM-006", "LIM-008", "LIM-010", "LIM-012", "LIM-014", "LIM-016"]);
+
+function indexMaterialRowConsistency(index: unknown, rowId: string): boolean {
+  if (!record(index) || index.state !== "material") return true;
+  return repeatedIndexByteMaterial(index.primary)
+    ? ["IDX-011", "LIM-004"].includes(rowId)
+    : ["IDX-007", "IDX-008", "IDX-009", "IDX-010", "IDX-020"].includes(rowId);
 }
 
 function treeEntry(value: unknown): boolean {
@@ -533,7 +589,7 @@ function nestedFrameState(value: unknown): boolean {
 }
 
 function frameBody(value: JsonRecord): JsonRecord {
-  return {
+  const body: JsonRecord = {
     index: value.index,
     head_tree: value.head_tree,
     effective_config: value.effective_config,
@@ -541,6 +597,39 @@ function frameBody(value: JsonRecord): JsonRecord {
     attribute_state: value.attribute_state,
     nested_state: value.nested_state
   };
+  if (Object.hasOwn(value, "limit_stimulus")) body.limit_stimulus = value.limit_stimulus;
+  return body;
+}
+
+function effectiveIndexEntries(value: unknown): JsonRecord[] | null {
+  return record(value) && value.state === "parsed" && Array.isArray(value.effective_entries)
+    ? value.effective_entries as JsonRecord[] : null;
+}
+
+function matchingParentGitlink(entries: JsonRecord[] | null, path: string, nested: JsonRecord): boolean {
+  if (!entries) return false;
+  const parent = entries.find((entry) => entry.path === path && entry.stage === 0);
+  const link = nested.gitlink as JsonRecord;
+  return !!parent && parent.mode === "160000" && parent.object_id === link.object_id && link.stage === 0 && link.mode === "160000";
+}
+
+function nestedParentConsistency(rootIndex: unknown, nestedState: JsonRecord[]): boolean {
+  const rootEntries = effectiveIndexEntries(rootIndex);
+  for (const nested of nestedState) {
+    const path = nested.path as string;
+    if (nested.relation === "direct") {
+      if (!matchingParentGitlink(rootEntries, path, nested)) return false;
+      continue;
+    }
+    const ancestors = nestedState.filter((candidate) => candidate.checkout_state === "initialized" &&
+      path.startsWith(`${candidate.path as string}/`)).sort((left, right) => (right.path as string).length - (left.path as string).length);
+    const parent = ancestors[0];
+    if (!parent) return false;
+    const relativePath = path.slice((parent.path as string).length + 1);
+    const audit = parent.audit as JsonRecord;
+    if (!matchingParentGitlink(effectiveIndexEntries(audit.index), relativePath, nested)) return false;
+  }
+  return true;
 }
 
 function frameHeader(value: JsonRecord): JsonRecord {
@@ -558,15 +647,19 @@ function frameHeader(value: JsonRecord): JsonRecord {
 
 export function validateFrame(value: unknown): boolean {
   const descriptor = SCHEMA_DESCRIPTORS.frame;
+  const hasLimitStimulus = record(value) && Object.hasOwn(value, "limit_stimulus");
   if (!matchesDescriptor(value, descriptor) || value.catalog_version !== 1 || typeof value.row_id !== "string" ||
     !CATALOG_V1.some((row) => row.id === value.row_id) || !sha256(value.observation_id) || !sha256(value.checkout_capability_identity) ||
     !sha256(value.git_state_generation_digest) || !boundedInteger(value.body_length, OBSERVER_LIMITS.frame_bytes, false) ||
     !sha256(value.body_digest) || !sha256(value.checksum) || !frameIndex(value.index) || !headTree(value.head_tree) ||
     !frameConfig(value.effective_config) || !framePathState(value.exclude_state) || !framePathState(value.attribute_state) ||
     !Array.isArray(value.nested_state) || value.nested_state.length > OBSERVER_LIMITS.nested_repositories ||
-    !value.nested_state.every(nestedFrameState)) return false;
+    !value.nested_state.every(nestedFrameState) || !indexMaterialRowConsistency(value.index, value.row_id) ||
+    (hasLimitStimulus !== LIMIT_STIMULUS_ROWS.has(value.row_id)) ||
+    (hasLimitStimulus && !limitStimulus(value.limit_stimulus, value.row_id))) return false;
   const nestedPaths = value.nested_state.map((nested) => (nested as JsonRecord).path as string);
   if (new Set(nestedPaths).size !== nestedPaths.length || !nestedPaths.every((path, index) => index === 0 || Buffer.from(nestedPaths[index - 1]!).compare(Buffer.from(path)) < 0)) return false;
+  if (!nestedParentConsistency(value.index, value.nested_state as JsonRecord[])) return false;
   const body = frameBody(value);
   const bodyBytes = JSON.stringify(body);
   const bodyDigest = canonicalDigest(body);
@@ -585,12 +678,14 @@ export function deriveFrameComparisonInputs(value: unknown): JsonRecord {
     exclude_sources: clone((frame.exclude_state as JsonRecord).sources),
     attribute_sources: clone((frame.attribute_state as JsonRecord).sources)
   };
-  if (index.state === "rejected") {
+  const stimulus = Object.hasOwn(frame, "limit_stimulus") ? { limit_stimulus: clone(frame.limit_stimulus) } : {};
+  if (index.state === "material") {
     return {
       baseline: null,
       staged: null,
-      index: { state: "rejected", rejection_code: index.rejection_code, byte_length: index.byte_length, digest: index.digest },
-      path_policy: pathPolicy
+      index: clone(index),
+      path_policy: pathPolicy,
+      ...stimulus
     };
   }
   const shared = index.shared_index as JsonRecord;
@@ -607,7 +702,8 @@ export function deriveFrameComparisonInputs(value: unknown): JsonRecord {
       shared_entries: clone(shared.state === "present" ? shared.entries : []),
       effective_entries: clone(index.effective_entries)
     },
-    path_policy: pathPolicy
+    path_policy: pathPolicy,
+    ...stimulus
   };
 }
 
@@ -628,6 +724,23 @@ export function validateSourceInputRecord(value: unknown): boolean {
   return result.source_input_digest === value.source_input_digest && result.manifest_digest === value.manifest_digest && sourceCommandReceipt(value.command_receipt, value.source_sha);
 }
 
+const ROW_RESOURCE_LIMITS = Object.freeze([
+  "frame_bytes", "index_bytes", "index_entries", "path_bytes", "path_depth", "nested_repositories",
+  "traversal_entries", "hashed_bytes", "wall_time_ms", "cpu_time_ms", "threads", "memory_bytes", "output_bytes"
+]);
+
+function rowResourceRecord(value: unknown, rowId: string): boolean {
+  if (!record(value) || !exactKeys(value, ["boundary_class", "declared_limit", "within_limits"])) return false;
+  const match = /^LIM-(\d{3})$/.exec(rowId);
+  if (!match) return value.boundary_class === "below" && value.declared_limit === "none" && value.within_limits === true;
+  const ordinal = Number(match[1]);
+  const declaredLimit = ROW_RESOURCE_LIMITS[Math.floor((ordinal - 1) / 2)];
+  if (!declaredLimit) return false;
+  const exceeded = ordinal % 2 === 0;
+  return value.boundary_class === (exceeded ? "exceeded" : "exact") && value.declared_limit === declaredLimit &&
+    value.within_limits === !exceeded;
+}
+
 export function validateRowEvidence(value: unknown): boolean {
   const descriptor = SCHEMA_DESCRIPTORS.row_evidence;
   if (!matchesDescriptor(value, descriptor)) return false;
@@ -638,15 +751,19 @@ export function validateRowEvidence(value: unknown): boolean {
   if (![value.observation_id, value.checkout_capability_identity, value.git_state_generation_digest, value.frame_digest].every(sha256)) return false;
   if (!record(value.frame_binding) || !exactKeys(value.frame_binding, [
     "row_id", "observation_id", "checkout_capability_identity", "git_state_generation_digest",
-    "frame_length", "frame_digest", "payload_length", "payload_digest"
+    "frame_length", "frame_digest", "payload_length", "payload_digest", "canonical_body_length", "canonical_body_digest"
   ]) || value.frame_binding.row_id !== value.row_id || value.frame_binding.observation_id !== value.observation_id ||
     value.frame_binding.checkout_capability_identity !== value.checkout_capability_identity ||
     value.frame_binding.git_state_generation_digest !== value.git_state_generation_digest ||
     value.frame_binding.frame_digest !== value.frame_digest || !boundedInteger(value.frame_binding.frame_length, OBSERVER_LIMITS.frame_bytes, false) ||
-    !boundedInteger(value.frame_binding.payload_length, value.frame_binding.frame_length as number, false) || !sha256(value.frame_binding.payload_digest)) return false;
+    !boundedInteger(value.frame_binding.payload_length, (value.frame_binding.frame_length as number) - 1, false) ||
+    !boundedInteger(value.frame_binding.canonical_body_length, (value.frame_binding.frame_length as number) - 1, false) ||
+    value.frame_binding.payload_length !== value.frame_binding.canonical_body_length || !sha256(value.frame_binding.payload_digest) ||
+    !sha256(value.frame_binding.canonical_body_digest) || value.frame_binding.payload_digest !== value.frame_binding.canonical_body_digest ||
+    value.frame_binding.payload_digest !== value.git_state_generation_digest) return false;
   if (!sha256(value.oracle_digest) || value.oracle_verdict !== "pass" || !record(value.tripwire_verdicts) || !exactKeys(value.tripwire_verdicts, ["ambient_path", "subprocess", "protected_write"]) || !Object.values(value.tripwire_verdicts).every((item) => item === true) || value.protection_set_equal !== true) return false;
   if (!record(value.cleanup) || !exactKeys(value.cleanup, ["verdict", "descriptors_restored", "processes_reaped", "secondary_errors"]) || value.cleanup.verdict !== "pass" || value.cleanup.descriptors_restored !== true || value.cleanup.processes_reaped !== true || !Array.isArray(value.cleanup.secondary_errors) || !value.cleanup.secondary_errors.every(nonEmptyString)) return false;
-  if (!record(value.resource_record) || !exactKeys(value.resource_record, ["boundary_class", "declared_limit", "within_limits"]) || !["below", "exact", "exceeded"].includes(value.resource_record.boundary_class as string) || !nonEmptyString(value.resource_record.declared_limit) || value.resource_record.within_limits !== true || !sha256(value.source_input_record_sha256)) return false;
+  if (!rowResourceRecord(value.resource_record, value.row_id as string) || !sha256(value.source_input_record_sha256)) return false;
   const shouldPass = exactJson(value.expected_outcome, value.observer_outcome);
   if ((value.row_verdict === "pass") !== shouldPass) return false;
   if (value.first_cause !== undefined && !nonEmptyString(value.first_cause)) return false;

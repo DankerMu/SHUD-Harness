@@ -50,7 +50,8 @@ function validRow(): Record<string, unknown> {
     observation_id: shaA, checkout_capability_identity: shaB, git_state_generation_digest: shaA, frame_digest: shaB,
     frame_binding: {
       row_id: "BAS-001", observation_id: shaA, checkout_capability_identity: shaB, git_state_generation_digest: shaA,
-      frame_length: 1024, frame_digest: shaB, payload_length: 768, payload_digest: shaA
+      frame_length: 1024, frame_digest: shaB, payload_length: 768, payload_digest: shaA,
+      canonical_body_length: 768, canonical_body_digest: shaA
     },
     expected_outcome: { kind: "clean" }, observer_outcome: { kind: "clean" }, producing_boundary: "observer",
     row_verdict: "pass", oracle_digest: shaA, oracle_verdict: "pass",
@@ -119,9 +120,43 @@ describe("round-1 invariant closure", () => {
       (row: any) => { row.frame_binding.observation_id = shaB; },
       (row: any) => { row.frame_binding.frame_digest = shaA; },
       (row: any) => { row.frame_binding.payload_digest = "short"; },
+      (row: any) => { row.frame_binding.payload_digest = shaB; },
+      (row: any) => { row.frame_binding.canonical_body_digest = shaB; },
+      (row: any) => { row.frame_binding.canonical_body_length -= 1; },
       (row: any) => { row.frame_binding.payload_length = row.frame_binding.frame_length + 1; }
     ]) {
       const row = structuredClone(validRow()); mutate(row); expect(validateRowEvidence(row)).toBe(false);
+    }
+  });
+
+  test("all row resource records use the frozen catalog boundary and truthful within_limits value", () => {
+    const limits = [
+      "frame_bytes", "index_bytes", "index_entries", "path_bytes", "path_depth", "nested_repositories",
+      "traversal_entries", "hashed_bytes", "wall_time_ms", "cpu_time_ms", "threads", "memory_bytes", "output_bytes"
+    ];
+    for (const catalog of CATALOG_V1) {
+      const row: any = structuredClone(validRow());
+      row.row_id = catalog.id;
+      row.frame_binding.row_id = catalog.id;
+      row.expected_outcome = structuredClone(catalog.macos_expected);
+      row.observer_outcome = structuredClone(catalog.macos_expected);
+      const match = /^LIM-(\d{3})$/.exec(catalog.id);
+      if (match) {
+        const ordinal = Number(match[1]);
+        row.resource_record = {
+          boundary_class: ordinal % 2 === 1 ? "exact" : "exceeded",
+          declared_limit: limits[Math.floor((ordinal - 1) / 2)], within_limits: ordinal % 2 === 1
+        };
+      }
+      expect(validateRowEvidence(row), catalog.id).toBe(true);
+      for (const mutate of [
+        (changed: any) => { changed.resource_record.within_limits = !changed.resource_record.within_limits; },
+        (changed: any) => { changed.resource_record.declared_limit = changed.resource_record.declared_limit === "none" ? "frame_bytes" : "none"; },
+        (changed: any) => { changed.resource_record.boundary_class = changed.resource_record.boundary_class === "below" ? "exact" : "below"; }
+      ]) {
+        const changed = structuredClone(row); mutate(changed);
+        expect(validateRowEvidence(changed), `${catalog.id}:drift`).toBe(false);
+      }
     }
   });
 
@@ -177,7 +212,8 @@ describe("round-1 invariant closure", () => {
       (bundle: any) => { bundle.rows[0].source_input_record_sha256 = shaA; },
       (bundle: any) => { bundle.rows[1].observation_id = bundle.rows[0].observation_id; },
       (bundle: any) => { bundle.rows[1].frame_digest = bundle.rows[0].frame_digest; },
-      (bundle: any) => { bundle.rows[0].frame_binding.payload_digest = "short"; }
+      (bundle: any) => { bundle.rows[0].frame_binding.payload_digest = "short"; },
+      (bundle: any) => { bundle.rows[0].resource_record.within_limits = !bundle.rows[0].resource_record.within_limits; }
     ]) {
       const bundle = structuredClone(generic.platform_bundle); mutate(bundle); expect(validatePlatformBundle(bundle)).toBe(false);
     }

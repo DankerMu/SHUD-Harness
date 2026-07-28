@@ -22,9 +22,9 @@ function config(entries: Array<Record<string, string>>) {
   return { digest: digest(JSON.stringify(entries)), entries };
 }
 
-function entry(path: string, objectId = oidA) {
+function entry(path: string, objectId = oidA, mode = "100644") {
   return {
-    path, stage: 0, mode: "100644", object_id: objectId,
+    path, stage: 0, mode, object_id: objectId,
     stat: {
       ctime_seconds: 1, ctime_nanoseconds: 2, mtime_seconds: 3, mtime_nanoseconds: 4,
       device: 5, inode: 6, uid: 501, gid: 20, size: 6
@@ -43,10 +43,12 @@ function emptyIndex() {
 export function materialFrame(split = false): Record<string, any> {
   const local = entry(split ? "b.txt" : "a.txt", oidB);
   const shared = entry("a.txt", oidA);
-  const effective = split ? [shared, local] : [local];
+  const nestedGitlink = entry("nested", oidB, "160000");
+  const entries = [local, nestedGitlink].sort((left, right) => Buffer.from(left.path).compare(Buffer.from(right.path)));
+  const effective = (split ? [shared, ...entries] : entries).sort((left, right) => Buffer.from(left.path).compare(Buffer.from(right.path)));
   const index = {
     state: "parsed", format_version: split ? 4 : 2, byte_length: 256, digest: shaA, entry_count: effective.length,
-    entries: [local], effective_entries: effective,
+    entries, effective_entries: effective,
     extensions: split ? [{ signature: "link", byte_length: 64, digest: shaB }] : [],
     shared_index: split ? {
       state: "present", byte_length: 128, digest: shaB, entries: [shared], deleted_paths: [], replaced_paths: []
@@ -87,7 +89,8 @@ export function materialFrame(split = false): Record<string, any> {
 export function resealFrame(frame: Record<string, any>): Record<string, any> {
   const body = {
     index: frame.index, head_tree: frame.head_tree, effective_config: frame.effective_config,
-    exclude_state: frame.exclude_state, attribute_state: frame.attribute_state, nested_state: frame.nested_state
+    exclude_state: frame.exclude_state, attribute_state: frame.attribute_state, nested_state: frame.nested_state,
+    ...(Object.hasOwn(frame, "limit_stimulus") ? { limit_stimulus: frame.limit_stimulus } : {})
   };
   const bodyBytes = JSON.stringify(body);
   frame.body_length = Buffer.byteLength(bodyBytes);
