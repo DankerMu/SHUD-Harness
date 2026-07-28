@@ -1,4 +1,5 @@
 import { CONTROL_ASSERTION_IDS, DECISION_LIMIT_TOKENS } from "./frozen";
+import { canonicalJsonBytes } from "./canonical-frame";
 
 type JsonRecord = Record<string, any>;
 
@@ -36,12 +37,14 @@ export function encodeDecisionRowProjectionCore(row: JsonRecord, determinismToke
   if (!expectedKind || !observedKind || limitOrdinal < 0 || !boundary || !producer ||
     typeof row.protection_set_equal !== "boolean" || row.protection_set_equal !== protectionPassed ||
     !record(row.cleanup) || !["pass", "fail"].includes(row.cleanup.verdict)) throw new Error("invalid D8 projection source");
+  const failureCause = row.row_verdict === "pass" ? "" : record(row.failure_cause)
+    ? canonicalJsonBytes(row.failure_cause).toString("base64url") : (() => { throw new Error("invalid D8 projection source"); })();
   return [
     row.platform === "macos" ? "m" : row.platform === "linux" ? "l" : "",
     row.row_id, expectedKind, row.expected_outcome.code ?? "", observedKind, row.observer_outcome.code ?? "",
     row.row_verdict === "pass" ? "p" : row.row_verdict === "fail" ? "f" : "",
     row.observation_id, row.git_state_generation_digest, row.frame_digest, producer, ALL_CONTROL_TOKEN,
     passedControlBits.toString(16).padStart(2, "0"), row.protection_set_equal ? "1" : "0",
-    row.cleanup.verdict === "pass" ? "p" : "f", String(limitOrdinal), boundary, determinismToken
+    row.cleanup.verdict === "pass" ? "p" : "f", String(limitOrdinal), boundary, determinismToken, failureCause
   ].join("\0");
 }

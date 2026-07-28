@@ -33,11 +33,20 @@ function pathMaterial(path: string) {
 }
 
 const limitStimuli = [
+  { row_id: "LIM-005", recipe: { kind: "index-entry-series-v1", count: 50_000, path_prefix: "limit-index-", object_id: "01".repeat(20) } },
   { row_id: "LIM-006", recipe: { kind: "index-entry-series-v1", count: 50_001, path_prefix: "limit-index-", object_id: "01".repeat(20) } },
+  { row_id: "LIM-011", recipe: { kind: "nested-repository-series-v1", count: 16, path_prefix: "limit-nested-", object_id: "01".repeat(20) } },
   { row_id: "LIM-012", recipe: { kind: "nested-repository-series-v1", count: 17, path_prefix: "limit-nested-", object_id: "01".repeat(20) } },
+  { row_id: "LIM-013", recipe: { kind: "tree-entry-series-v1", count: 200_000, path_prefix: "limit-tree-", mode: "100644", object_id: "01".repeat(20) } },
   { row_id: "LIM-014", recipe: { kind: "tree-entry-series-v1", count: 200_001, path_prefix: "limit-tree-", mode: "100644", object_id: "01".repeat(20) } },
+  { row_id: "LIM-007", recipe: pathMaterial("x".repeat(512)) },
   { row_id: "LIM-008", recipe: pathMaterial("x".repeat(513)) },
+  { row_id: "LIM-009", recipe: pathMaterial(Array.from({ length: 16 }, () => "x").join("/")) },
   { row_id: "LIM-010", recipe: pathMaterial(Array.from({ length: 17 }, () => "x").join("/")) },
+  { row_id: "LIM-015", recipe: {
+    kind: "repeat-byte-v1", byte: 0, byte_length: 256 * 1024 * 1024,
+    digest: "a6d72ac7690f53be6ae46ba88506bd97302a093f7108472bd9efc3cefda06484"
+  } },
   { row_id: "LIM-016", recipe: {
     kind: "repeat-byte-v1", byte: 0, byte_length: 256 * 1024 * 1024 + 1,
     digest: "da6ce8755151acd05195db67ebce3ee0fb5f4012e71e821cc5750f3304eaf41e"

@@ -48,15 +48,42 @@ function pathMaterial(path: string) {
   return { kind: "path-material-v1", byte_length: bytes.length, digest: digest(path), content_base64: bytes.toString("base64") };
 }
 
+function inlineMaterial(text: string) {
+  const bytes = Buffer.from(text, "utf8");
+  return { kind: "inline-bytes-v1", byte_length: bytes.length, digest: digest(text), content_base64: bytes.toString("base64") };
+}
+
+function materialIndex(primary: Record<string, unknown>, shared?: Record<string, unknown>) {
+  return { state: "material", primary, shared_index: shared ? { state: "present", material: shared } : { state: "absent" } };
+}
+
+function negativeIndexMaterial(rowId: string): Record<string, unknown> | undefined {
+  if (rowId === "IDX-007") return materialIndex(inlineMaterial("DIRC\0link\0shared-index-name"));
+  if (rowId === "IDX-008") return materialIndex(inlineMaterial("DIRC\0link\0shared-index-name"), inlineMaterial("corrupt shared bytes"));
+  if (rowId === "IDX-009") return materialIndex(inlineMaterial("not a git index"));
+  if (rowId === "IDX-010") return materialIndex(inlineMaterial("DIRC\0\0\0"));
+  if (rowId === "IDX-020") return materialIndex(inlineMaterial("unsupported index extension"));
+  if (["IDX-011", "LIM-004"].includes(rowId)) return materialIndex({
+    kind: "repeat-byte-v1", byte: 0, byte_length: 6 * 1024 * 1024 + 1,
+    digest: "8996de63e472cbfe218412fd3512ad6d908f83119f02c439fbc16446d6d9e5db"
+  });
+  if (rowId === "LIM-003") return materialIndex({
+    kind: "repeat-byte-v1", byte: 0, byte_length: 6 * 1024 * 1024,
+    digest: "b69dae56a14d1a8314ed40664c4033ea0a550eea2673e04df42a66ac6b9faf2c"
+  });
+  return undefined;
+}
+
 function limitStimulus(rowId: string): Record<string, unknown> | undefined {
-  if (rowId === "LIM-006") return { kind: "index-entry-series-v1", count: 50_001, path_prefix: "limit-index-", object_id: oidA };
-  if (rowId === "LIM-008") return pathMaterial("x".repeat(513));
-  if (rowId === "LIM-010") return pathMaterial(Array.from({ length: 17 }, () => "x").join("/"));
-  if (rowId === "LIM-012") return { kind: "nested-repository-series-v1", count: 17, path_prefix: "limit-nested-", object_id: oidA };
-  if (rowId === "LIM-014") return { kind: "tree-entry-series-v1", count: 200_001, path_prefix: "limit-tree-", mode: "100644", object_id: oidA };
-  if (rowId === "LIM-016") return {
-    kind: "repeat-byte-v1", byte: 0, byte_length: 256 * 1024 * 1024 + 1,
-    digest: "da6ce8755151acd05195db67ebce3ee0fb5f4012e71e821cc5750f3304eaf41e"
+  if (["LIM-005", "LIM-006"].includes(rowId)) return { kind: "index-entry-series-v1", count: 50_000 + (rowId === "LIM-006" ? 1 : 0), path_prefix: "limit-index-", object_id: oidA };
+  if (["LIM-007", "LIM-008"].includes(rowId)) return pathMaterial("x".repeat(512 + (rowId === "LIM-008" ? 1 : 0)));
+  if (["LIM-009", "LIM-010"].includes(rowId)) return pathMaterial(Array.from({ length: 16 + (rowId === "LIM-010" ? 1 : 0) }, () => "x").join("/"));
+  if (["LIM-011", "LIM-012"].includes(rowId)) return { kind: "nested-repository-series-v1", count: 16 + (rowId === "LIM-012" ? 1 : 0), path_prefix: "limit-nested-", object_id: oidA };
+  if (["LIM-013", "LIM-014"].includes(rowId)) return { kind: "tree-entry-series-v1", count: 200_000 + (rowId === "LIM-014" ? 1 : 0), path_prefix: "limit-tree-", mode: "100644", object_id: oidA };
+  if (["LIM-015", "LIM-016"].includes(rowId)) return {
+    kind: "repeat-byte-v1", byte: 0, byte_length: 256 * 1024 * 1024 + (rowId === "LIM-016" ? 1 : 0),
+    digest: rowId === "LIM-016" ? "da6ce8755151acd05195db67ebce3ee0fb5f4012e71e821cc5750f3304eaf41e" :
+      "a6d72ac7690f53be6ae46ba88506bd97302a093f7108472bd9efc3cefda06484"
   };
   return undefined;
 }
@@ -130,5 +157,10 @@ export function frameForEvidenceSlot(
   }
   const stimulus = limitStimulus(rowId);
   if (stimulus) frame.limit_stimulus = stimulus;
+  const rawIndex = negativeIndexMaterial(rowId);
+  if (rawIndex) {
+    frame.index = rawIndex;
+    frame.nested_state = [];
+  }
   return resealFrame(frame);
 }

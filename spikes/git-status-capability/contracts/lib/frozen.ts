@@ -189,7 +189,7 @@ export const DECISION_ROW_SEGMENTS = Object.freeze([
   "platform", "row_id", "expected_kind", "expected_code", "observed_kind", "observed_code", "row_verdict",
   "observation_id", "generation_payload_digest", "frame_digest", "producing_boundary",
   "active_control_bitset", "passed_control_bitset", "protection_set_equal", "cleanup_verdict", "declared_limit", "boundary_class",
-  "determinism_proof"
+  "determinism_proof", "failure_cause"
 ]);
 
 export const DECISION_LIMIT_TOKENS = Object.freeze([
@@ -227,7 +227,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       "actual_resource_record",
       "source_input_record_sha256"
     ],
-    optional_fields: ["first_cause", "secondary_errors", "determinism_proof"],
+    optional_fields: ["first_cause", "secondary_errors", "determinism_proof", "failure_cause"],
     field_types: {
       schema_version: "literal", platform: "enum:macos|linux", row_id: "catalog-row-id", observation_id: "sha256",
       checkout_capability_identity: "sha256", git_state_generation_digest: "sha256", frame_digest: "sha256",
@@ -241,7 +241,8 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       resource_record: "strict:catalog-expected-boundary:{below|exact|exceeded,observer-limit|none,within_limits=(boundary!=exceeded)}",
       actual_resource_record: "strict:actual-boundary;LIM=content-addressed-stimulus-and-measurement;technical-failure=causality-bound;below-none-has-no-proof", source_input_record_sha256: "sha256",
       first_cause: "optional:nonempty-string;LIF-002|006=FRAME_VERSION_UNSUPPORTED;LIF-007=CLEANUP_FAILED", secondary_errors: "optional:string[];LIF-002|007=[];LIF-006=[CLEANUP_FAILED]",
-      determinism_proof: "iff-row-DET-001..004:strict:{variation_axis,axis_material,axis_digest,first,second,comparison};two-distinct-receipts;strict-structured-per-invocation-input-and-output;production-recomputed-normalized-row-output-and-nonrecursive-formal-d8-projection;outer-axis-material-and-digest-derived-only-from-per-receipt-axis-binding;stable-input-equal-after-excluding-only-declared-axis;DET-001=exact-full-input-repeat;DET-002=side-bound-fixture-creation-order;DET-003=side-bound-fixture-root;DET-004=side-bound-permitted-volatile-material"
+      determinism_proof: "iff-row-DET-001..004:strict:{variation_axis,axis_material,axis_digest,first,second,comparison};two-distinct-receipts;strict-structured-per-invocation-input-and-output;production-recomputed-normalized-row-output-and-nonrecursive-formal-d8-projection;outer-axis-material-and-digest-derived-only-from-per-receipt-axis-binding;stable-input-equal-after-excluding-only-declared-axis;DET-001=exact-full-input-repeat;DET-002=side-bound-fixture-creation-order;DET-003=side-bound-fixture-root;DET-004=side-bound-permitted-volatile-material",
+      failure_cause: "iff-row-verdict-fail:closed-union:outcome-mismatch-v1|control-failure-v1|resource-exceeded-v1|lifecycle-fault-v1;content-addressed-receipt-bound-to-row-slot-and-actual-supplied-input"
     },
     additional_properties: false
   },
@@ -310,7 +311,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       macos_target_identity: "literal:aarch64-apple-darwin", macos_toolchain_identity: "sha256",
       linux_target_identity: "literal:x86_64-unknown-linux-gnu", linux_toolchain_identity: "sha256",
       platforms: "exact:[macos,linux]",
-      rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,actual_supplied_input_digest,actual_producing_boundary(o|l|t),active_control_bitset(7f=all-required-active),passed_control_bitset(00..7f),protection_set_equal(1|0),cleanup_verdict(p|f),actual_declared_limit(0..13),actual_boundary_class(b|e|x),determinism_proof(0=non-DET|1..4=validated-paired-DET-proof)];pass=actual-boundaries-equal-catalog-expected;fail=causality-bound;control-bit-order=oracle|ambient_path|subprocess|network|protected_write|protection|cleanup;valid_complete=348-exact;catalog-slot,top-level-observation,generation/payload,actual-supplied-input-identities=globally-unique;DET nested same-slot repeat-only-exception",
+      rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,actual_supplied_input_digest,actual_producing_boundary(o|l|t),active_control_bitset(7f=all-required-active),passed_control_bitset(00..7f),protection_set_equal(1|0),cleanup_verdict(p|f),actual_declared_limit(0..13),actual_boundary_class(b|e|x),determinism_proof(0=non-DET|1..4=validated-paired-DET-proof),failure_cause(empty-if-pass|canonical-base64url-closed-causal-union-if-fail)];pass=actual-boundaries-equal-catalog-expected;fail=causality-bound;control-bit-order=oracle|ambient_path|subprocess|network|protected_write|protection|cleanup;valid_complete=348-exact;catalog-slot,top-level-observation,generation/payload,actual-supplied-input-identities=globally-unique;DET nested same-slot repeat-only-exception",
       gates: "nonempty-array:strict-repository-command-receipt:{id,argv,version,exit_verdict,summary_digest,source_input_record_sha256};id-unique;source-record-equal",
       run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted-iff-all-row-verdicts-pass|rejected-iff-any-row-verdict-fails",
       first_cause: "rejected-or-invalid:nonempty-string", all_failure_codes: "rejected-or-invalid:sorted-unique-string[]"
