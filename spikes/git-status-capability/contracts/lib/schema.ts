@@ -810,7 +810,10 @@ export function validatePlatformBundle(value: unknown): boolean {
   if (!Array.isArray(value.rows) || !value.rows.every(validateRowEvidence) || !Array.isArray(value.protection_set) || !value.protection_set.every((item) => record(item) && exactKeys(item, ["identity", "pre_digest", "post_digest", "event_digest"]) && Object.values(item).every(sha256)) || !Array.isArray(value.raw_command_manifest) || !value.raw_command_manifest.every(executionReceipt)) return false;
   if (value.rows.some((row) => (row as JsonRecord).platform !== value.platform || (row as JsonRecord).source_input_record_sha256 !== value.source_input_record_sha256)) return false;
   if (value.run_status === "valid_complete" && (value.rows.length !== 174 || new Set(value.rows.map((row) => (row as JsonRecord).row_id)).size !== 174 ||
-    new Set(value.rows.map((row) => (row as JsonRecord).observation_id)).size !== 174 || new Set(value.rows.map((row) => (row as JsonRecord).frame_digest)).size !== 174 ||
+    new Set(value.rows.map((row) => (row as JsonRecord).observation_id)).size !== 174 ||
+    new Set(value.rows.map((row) => (row as JsonRecord).git_state_generation_digest)).size !== 174 ||
+    new Set(value.rows.map((row) => ((row as JsonRecord).frame_binding as JsonRecord).payload_digest)).size !== 174 ||
+    new Set(value.rows.map((row) => (row as JsonRecord).frame_digest)).size !== 174 ||
     value.protection_set.length === 0 || value.raw_command_manifest.length === 0)) return false;
   if (value.run_status === "invalid") {
     if (!nonEmptyString(value.first_cause) || !sortedUniqueStrings(value.all_failure_codes) || !(value.all_failure_codes as string[]).includes(value.first_cause)) return false;
@@ -835,6 +838,7 @@ function terminalState(value: JsonRecord): boolean {
 export function validateFinalBundle(value: unknown): boolean {
   const descriptor = SCHEMA_DESCRIPTORS.final_bundle;
   if (!matchesDescriptor(value, descriptor) || !terminalState(value) || !record(value.repository_gates) || Object.keys(value.repository_gates).length === 0 || !Object.values(value.repository_gates).every((gate) => record(gate) && exactKeys(gate, ["argv", "tool_version", "exit_code", "summary_digest", "source_input_record_sha256"]) && stringArray(gate.argv) && nonEmptyString(gate.tool_version) && gate.exit_code === 0 && sha256(gate.summary_digest) && sha256(gate.source_input_record_sha256))) return false;
+  if (value.run_status === "valid_complete" && value.macos_bundle_sha256 === value.linux_bundle_sha256) return false;
   if (Object.values(value.repository_gates).some((gate) => (gate as JsonRecord).source_input_record_sha256 !== value.source_input_record_sha256)) return false;
   if (!Object.hasOwn(value.repository_gates, "GATE-SOURCE-INPUT") || !sourceGateReceipt(value.repository_gates["GATE-SOURCE-INPUT"])) return false;
   return [value.source_input_record_sha256, value.macos_bundle_sha256, value.linux_bundle_sha256, value.raw_evidence_digest, value.decision_projection_digest].every(sha256);
@@ -845,14 +849,21 @@ export function validateDecision(value: unknown): boolean {
   if (!matchesDescriptor(value, descriptor) || !terminalState(value) || value.catalog_version !== 1 || !sha256(value.catalog_digest) || !sha256(value.source_input_record_sha256)) return false;
   if (!Array.isArray(value.platforms) || !exactJson(value.platforms, ["macos", "linux"]) || !Array.isArray(value.rows) || !value.rows.every((row) => {
     if (typeof row !== "string") return false;
-    const [platform, rowId, expectedKind, expectedCode, observedKind, observedCode, verdict, observationId, frameDigest, ...surplus] = row.split("\0");
+    const [platform, rowId, expectedKind, expectedCode, observedKind, observedCode, verdict, observationId, generationPayloadDigest, frameDigest, ...surplus] = row.split("\0");
     const catalog = CATALOG_V1.find((item) => item.id === rowId);
     const frozen = platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
     const expected = expectedKind === "rejected" ? { kind: expectedKind, code: expectedCode } : { kind: expectedKind };
     const observed = observedKind === "rejected" ? { kind: observedKind, code: observedCode } : { kind: observedKind };
-    return surplus.length === 0 && ["macos", "linux"].includes(platform!) && outcome(expected) && exactJson(expected, frozen) && outcome(observed) && ["pass", "fail"].includes(verdict!) && sha256(observationId) && sha256(frameDigest) && ((verdict === "pass") === exactJson(expected, observed));
+    return surplus.length === 0 && ["macos", "linux"].includes(platform!) && outcome(expected) && exactJson(expected, frozen) && outcome(observed) &&
+      ["pass", "fail"].includes(verdict!) && sha256(observationId) && sha256(generationPayloadDigest) && sha256(frameDigest) &&
+      ((verdict === "pass") === exactJson(expected, observed));
   }) || !record(value.gates) || Object.keys(value.gates).length === 0 || !Object.values(value.gates).every((gate) => gate === "pass")) return false;
-  if (value.run_status === "valid_complete" && (value.rows.length !== 348 || new Set(value.rows.map((row) => (row as string).split("\0").slice(0, 2).join("/"))).size !== 348)) return false;
+  if (value.run_status === "valid_complete") {
+    const fields = value.rows.map((row) => (row as string).split("\0"));
+    if (fields.length !== 348 || new Set(fields.map((row) => row.slice(0, 2).join("/"))).size !== 348 ||
+      new Set(fields.map((row) => row[7])).size !== 348 || new Set(fields.map((row) => row[8])).size !== 348 ||
+      new Set(fields.map((row) => row[9])).size !== 348) return false;
+  }
   return true;
 }
 

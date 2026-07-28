@@ -79,7 +79,7 @@ function frameForSlot(rowId: string, observationId: string, capabilityIdentity: 
   return resealFrame(frame);
 }
 
-function bindRowFrame(row: any, frame = frameForEvidenceSlot(row.row_id, row.observation_id, row.checkout_capability_identity)): void {
+function bindRowFrame(row: any, frame = frameForEvidenceSlot(row.platform, row.row_id, row.observation_id, row.checkout_capability_identity)): void {
   const frameBytes = canonicalFrameEvidenceBytes(frame);
   const frameDigest = createHash("sha256").update(frameBytes).digest("hex");
   row.git_state_generation_digest = frame.git_state_generation_digest;
@@ -324,34 +324,75 @@ describe("round-1 invariant closure", () => {
     }
   });
 
-  test("complete bundle cardinalities and cross-slot identities are closed while invalid has no decision", async () => {
+  test("complete platform bundles own 174 unique observation, generation, and frame identities", async () => {
     const generic = JSON.parse(await readFile(join(contractRoot, "fixtures/valid/generic.json"), "utf8"));
-    expect(validatePlatformBundle(generic.platform_bundle)).toBe(true);
-    for (const row of generic.platform_bundle.rows) {
-      const reference = row.frame_binding.frame_reference;
-      expect(reference.encoding, row.row_id).toBe(frameEvidenceEncoding);
-      expect(reference.frame.row_id, row.row_id).toBe(row.row_id);
-      expect(reference.frame.observation_id, row.row_id).toBe(row.observation_id);
-      expect(reference.frame.checkout_capability_identity, row.row_id).toBe(row.checkout_capability_identity);
-      const bytes = canonicalFrameEvidenceBytes(reference.frame);
-      expect(row.frame_binding.frame_length, row.row_id).toBe(bytes.length);
-      expect(row.frame_digest, row.row_id).toBe(createHash("sha256").update(bytes).digest("hex"));
+    for (const bundle of [generic.platform_bundle, generic.linux_platform_bundle]) {
+      expect(validatePlatformBundle(bundle), bundle.platform).toBe(true);
+      expect(new Set(bundle.rows.map((row: any) => row.observation_id)).size, bundle.platform).toBe(174);
+      expect(new Set(bundle.rows.map((row: any) => row.git_state_generation_digest)).size, bundle.platform).toBe(174);
+      expect(new Set(bundle.rows.map((row: any) => row.frame_binding.payload_digest)).size, bundle.platform).toBe(174);
+      expect(new Set(bundle.rows.map((row: any) => row.frame_digest)).size, bundle.platform).toBe(174);
+      for (const row of bundle.rows) {
+        const reference = row.frame_binding.frame_reference;
+        expect(reference.encoding, `${bundle.platform}/${row.row_id}`).toBe(frameEvidenceEncoding);
+        expect(reference.frame.row_id, `${bundle.platform}/${row.row_id}`).toBe(row.row_id);
+        expect(reference.frame.observation_id, `${bundle.platform}/${row.row_id}`).toBe(row.observation_id);
+        expect(reference.frame.checkout_capability_identity, `${bundle.platform}/${row.row_id}`).toBe(row.checkout_capability_identity);
+        const bytes = canonicalFrameEvidenceBytes(reference.frame);
+        expect(row.frame_binding.frame_length, `${bundle.platform}/${row.row_id}`).toBe(bytes.length);
+        expect(row.frame_digest, `${bundle.platform}/${row.row_id}`).toBe(createHash("sha256").update(bytes).digest("hex"));
+      }
     }
-    expect(validateFinalBundle(generic.final_bundle)).toBe(true);
-    expect(validateDecision(generic.decision)).toBe(true);
+    const allRows = [...generic.platform_bundle.rows, ...generic.linux_platform_bundle.rows];
+    expect(new Set(allRows.map((row: any) => row.observation_id)).size).toBe(348);
+    expect(new Set(allRows.map((row: any) => row.git_state_generation_digest)).size).toBe(348);
+    expect(new Set(allRows.map((row: any) => row.frame_binding.payload_digest)).size).toBe(348);
+    expect(new Set(allRows.map((row: any) => row.frame_digest)).size).toBe(348);
+
+    const repeatedObservation = structuredClone(generic.platform_bundle);
+    repeatedObservation.rows[1].observation_id = repeatedObservation.rows[0].observation_id;
+    repeatedObservation.rows[1].frame_binding.frame_reference.frame.observation_id = repeatedObservation.rows[0].observation_id;
+    bindRowFrame(repeatedObservation.rows[1], resealFrame(repeatedObservation.rows[1].frame_binding.frame_reference.frame));
+    expect(validateRowEvidence(repeatedObservation.rows[1])).toBe(true);
+    expect(validatePlatformBundle(repeatedObservation)).toBe(false);
+
+    const repeatedGeneration = structuredClone(generic.platform_bundle);
+    const sourceFrame = repeatedGeneration.rows[0].frame_binding.frame_reference.frame;
+    const targetFrame = repeatedGeneration.rows[1].frame_binding.frame_reference.frame;
+    for (const field of ["index", "head_tree", "effective_config", "exclude_state", "attribute_state", "nested_state"]) {
+      targetFrame[field] = structuredClone(sourceFrame[field]);
+    }
+    bindRowFrame(repeatedGeneration.rows[1], resealFrame(targetFrame));
+    expect(validateRowEvidence(repeatedGeneration.rows[1])).toBe(true);
+    expect(repeatedGeneration.rows[1].git_state_generation_digest).toBe(repeatedGeneration.rows[0].git_state_generation_digest);
+    expect(repeatedGeneration.rows[1].frame_digest).not.toBe(repeatedGeneration.rows[0].frame_digest);
+    expect(validatePlatformBundle(repeatedGeneration)).toBe(false);
+
+    const repeatedFrame = structuredClone(generic.platform_bundle);
+    repeatedFrame.rows[1].frame_digest = repeatedFrame.rows[0].frame_digest;
+    repeatedFrame.rows[1].frame_binding.frame_digest = repeatedFrame.rows[0].frame_digest;
+    expect(validatePlatformBundle(repeatedFrame)).toBe(false);
+
     for (const mutate of [
       (bundle: any) => { bundle.rows[0].platform = "linux"; },
       (bundle: any) => { bundle.rows[0].source_input_record_sha256 = shaA; },
-      (bundle: any) => { bundle.rows[1].observation_id = bundle.rows[0].observation_id; },
-      (bundle: any) => { bundle.rows[1].frame_digest = bundle.rows[0].frame_digest; },
       (bundle: any) => { bundle.rows[0].frame_binding.payload_digest = "short"; },
       (bundle: any) => { bundle.rows[0].resource_record.within_limits = !bundle.rows[0].resource_record.within_limits; }
     ]) {
-      const bundle = structuredClone(generic.platform_bundle); mutate(bundle); expect(validatePlatformBundle(bundle)).toBe(false);
+      const bundle = structuredClone(generic.platform_bundle); mutate(bundle);
+      expect(validatePlatformBundle(bundle)).toBe(false);
     }
     const invalidPlatform = structuredClone(generic.platform_bundle);
     invalidPlatform.run_status = "invalid"; invalidPlatform.rows = []; invalidPlatform.first_cause = "EVIDENCE_MISSING"; invalidPlatform.all_failure_codes = ["EVIDENCE_MISSING"];
     expect(validatePlatformBundle(invalidPlatform)).toBe(true);
+  });
+
+  test("final bundle rejects equal platform bundle digests while preserving terminal state rules", async () => {
+    const generic = JSON.parse(await readFile(join(contractRoot, "fixtures/valid/generic.json"), "utf8"));
+    expect(validateFinalBundle(generic.final_bundle)).toBe(true);
+    const sameBundleDigest = structuredClone(generic.final_bundle);
+    sameBundleDigest.linux_bundle_sha256 = sameBundleDigest.macos_bundle_sha256;
+    expect(validateFinalBundle(sameBundleDigest)).toBe(false);
     const invalidFinal = structuredClone(generic.final_bundle);
     invalidFinal.run_status = "invalid"; delete invalidFinal.terminal_decision; invalidFinal.first_cause = "PLATFORM_MISSING"; invalidFinal.all_failure_codes = ["PLATFORM_MISSING"];
     expect(validateFinalBundle(invalidFinal)).toBe(true);
@@ -364,6 +405,36 @@ describe("round-1 invariant closure", () => {
     ]) {
       const bundle = structuredClone(generic.final_bundle); mutate(bundle); expect(validateFinalBundle(bundle)).toBe(false);
     }
+  });
+
+  test("348-slot decision projects generation identity and rejects every cross-platform reuse", async () => {
+    const generic = JSON.parse(await readFile(join(contractRoot, "fixtures/valid/generic.json"), "utf8"));
+    expect(validateDecision(generic.decision)).toBe(true);
+    expect(new Set(generic.decision.rows.map((row: string) => row.split("\0")[7])).size).toBe(348);
+    expect(new Set(generic.decision.rows.map((row: string) => row.split("\0")[8])).size).toBe(348);
+    expect(new Set(generic.decision.rows.map((row: string) => row.split("\0")[9])).size).toBe(348);
+    for (const { label, targetIndex } of [
+      { label: "cross-platform", targetIndex: 1 },
+      { label: "cross-row", targetIndex: 2 }
+    ]) {
+      for (const identityIndex of [7, 8, 9]) {
+        const reused = structuredClone(generic.decision);
+        const source = reused.rows[0].split("\0");
+        const target = reused.rows[targetIndex].split("\0");
+        target[identityIndex] = source[identityIndex];
+        reused.rows[targetIndex] = target.join("\0");
+        expect(validateDecision(reused), `${label}/identity-index-${identityIndex}`).toBe(false);
+      }
+    }
+    const detMac = generic.decision.rows.findIndex((row: string) => row.startsWith("macos\0DET-001\0"));
+    const detLinux = generic.decision.rows.findIndex((row: string) => row.startsWith("linux\0DET-001\0"));
+    const detReuse = structuredClone(generic.decision);
+    const detMacFields = detReuse.rows[detMac].split("\0");
+    const detLinuxFields = detReuse.rows[detLinux].split("\0");
+    detLinuxFields[8] = detMacFields[8];
+    detReuse.rows[detLinux] = detLinuxFields.join("\0");
+    expect(validateDecision(detReuse), "DET-001-cross-platform-generation").toBe(false);
+
     const duplicateSlot = structuredClone(generic.decision); duplicateSlot.rows[1] = duplicateSlot.rows[0];
     expect(validateDecision(duplicateSlot)).toBe(false);
   });

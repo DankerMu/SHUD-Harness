@@ -222,7 +222,8 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       source_commit: "git-object-id", source_input_record_sha256: "sha256", catalog_digest: "sha256",
       toolchain: "strict:{rustc_vv,cargo_version,git_version,target_triple}", target: "platform-target",
       dependency_graph_digest: "sha256", direct_feature_digest: "sha256", call_ledger_digest: "sha256",
-      sbom_digest: "sha256", license_inventory_digest: "sha256", rows: "array:row-evidence;valid_complete=174-exact",
+      sbom_digest: "sha256", license_inventory_digest: "sha256",
+      rows: "array:row-evidence;valid_complete=174-exact;observation,generation/payload,complete-frame-identities=unique-per-platform-slot",
       protection_set: "array:strict:{identity,pre_digest,post_digest,event_digest};valid_complete=nonempty",
       raw_command_manifest: "array:command-receipt;valid_complete=nonempty", first_cause: "invalid-only:nonempty-string",
       all_failure_codes: "invalid-only:sorted-unique-string[]"
@@ -238,7 +239,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
     optional_fields: ["terminal_decision", "first_cause", "all_failure_codes"],
     field_types: {
       schema_version: "literal", source_input_record_sha256: "sha256", macos_bundle_sha256: "sha256",
-      linux_bundle_sha256: "sha256", repository_gates: "nonempty-map:gate-receipt", raw_evidence_digest: "sha256",
+      linux_bundle_sha256: "sha256;valid_complete:distinct-from-macos", repository_gates: "nonempty-map:gate-receipt", raw_evidence_digest: "sha256",
       decision_projection_digest: "sha256", run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted|rejected",
       first_cause: "optional:nonempty-string", all_failure_codes: "optional:string[]"
     },
@@ -253,7 +254,9 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
     optional_fields: ["terminal_decision", "first_cause", "all_failure_codes"],
     field_types: {
       schema_version: "literal", catalog_version: "integer:1", catalog_digest: "sha256", source_input_record_sha256: "sha256",
-      platforms: "exact:[macos,linux]", rows: "array:compact-row-projection-v1;valid_complete=348-exact", gates: "nonempty-map:literal-pass",
+      platforms: "exact:[macos,linux]",
+      rows: "array:compact-row-projection-v1:{platform,row,expected-kind,expected-code,observed-kind,observed-code,verdict,observation-id,generation-payload-digest,complete-frame-digest};valid_complete=348-exact;slot,observation,generation/payload,complete-frame-identities=globally-unique",
+      gates: "nonempty-map:literal-pass",
       run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted|rejected",
       first_cause: "optional:nonempty-string", all_failure_codes: "optional:string[]"
     },
