@@ -370,54 +370,245 @@ function digestSizedBytes(value: unknown, maximum: number): boolean {
   return record(value) && exactKeys(value, ["byte_length", "digest"]) && boundedInteger(value.byte_length, maximum) && sha256(value.digest);
 }
 
+function framePath(value: unknown): value is string {
+  return typeof value === "string" && canonicalRelativePath(value) && Buffer.byteLength(value) <= OBSERVER_LIMITS.path_bytes &&
+    value.split("/").length <= OBSERVER_LIMITS.path_depth;
+}
+
+function unsigned(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function indexStat(value: unknown): boolean {
+  return record(value) && exactKeys(value, [
+    "ctime_seconds", "ctime_nanoseconds", "mtime_seconds", "mtime_nanoseconds", "device", "inode", "uid", "gid", "size"
+  ]) && unsigned(value.ctime_seconds) && unsigned(value.mtime_seconds) && unsigned(value.device) && unsigned(value.inode) &&
+    unsigned(value.uid) && unsigned(value.gid) && unsigned(value.size) && unsigned(value.ctime_nanoseconds) &&
+    unsigned(value.mtime_nanoseconds) && (value.ctime_nanoseconds as number) < 1_000_000_000 &&
+    (value.mtime_nanoseconds as number) < 1_000_000_000;
+}
+
+function indexFlags(value: unknown): boolean {
+  return record(value) && exactKeys(value, ["assume_unchanged", "skip_worktree", "intent_to_add", "fsmonitor_valid"]) &&
+    Object.values(value).every((flag) => typeof flag === "boolean");
+}
+
+function indexEntry(value: unknown, gitlinkOnly = false): boolean {
+  if (!record(value) || !exactKeys(value, ["path", "stage", "mode", "object_id", "stat", "flags"]) || !framePath(value.path) ||
+    !Number.isInteger(value.stage) || (value.stage as number) < 0 || (value.stage as number) > 4 ||
+    !["100644", "100755", "120000", "160000"].includes(value.mode as string) || !gitObjectId(value.object_id) || !indexFlags(value.flags)) return false;
+  if (gitlinkOnly && value.mode !== "160000") return false;
+  return value.stage === 0 ? indexStat(value.stat) : value.stat === null;
+}
+
+function comparePathStage(left: JsonRecord, right: JsonRecord): number {
+  const pathOrder = Buffer.from(left.path as string).compare(Buffer.from(right.path as string));
+  return pathOrder || (left.stage as number) - (right.stage as number);
+}
+
+function indexEntrySet(value: unknown, maximum = OBSERVER_LIMITS.index_entries): value is JsonRecord[] {
+  if (!Array.isArray(value) || value.length > maximum || !value.every((entry) => indexEntry(entry))) return false;
+  const keys = value.map((entry) => `${entry.path}\0${entry.stage}`);
+  return new Set(keys).size === keys.length && value.every((entry, index) => index === 0 || comparePathStage(value[index - 1]!, entry) < 0);
+}
+
+function sortedPathSet(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(framePath) && new Set(value).size === value.length &&
+    value.every((path, index) => index === 0 || Buffer.from(value[index - 1]!).compare(Buffer.from(path)) < 0);
+}
+
 function frameIndex(value: unknown): boolean {
-  if (!record(value) || !exactKeys(value, ["format_version", "byte_length", "digest", "entry_count", "extensions", "shared_index"]) ||
-    ![2, 4].includes(value.format_version as number) || !boundedInteger(value.byte_length, OBSERVER_LIMITS.index_bytes) ||
-    !sha256(value.digest) || !boundedInteger(value.entry_count, OBSERVER_LIMITS.index_entries) || !Array.isArray(value.extensions)) return false;
+  if (!record(value)) return false;
+  if (exactKeys(value, ["state", "byte_length", "digest", "rejection_code"]) && value.state === "rejected" &&
+    ["INDEX_SHARED_MISSING", "INDEX_SHARED_CORRUPT", "INDEX_MALFORMED", "INDEX_TRUNCATED", "LIMIT_INDEX_BYTES"].includes(value.rejection_code as string) &&
+    boundedInteger(value.byte_length, OBSERVER_LIMITS.frame_bytes) && sha256(value.digest)) {
+    return value.rejection_code === "LIMIT_INDEX_BYTES"
+      ? value.byte_length === OBSERVER_LIMITS.index_bytes + 1
+      : (value.byte_length as number) <= OBSERVER_LIMITS.index_bytes;
+  }
+  if (!exactKeys(value, [
+    "state", "format_version", "byte_length", "digest", "entry_count", "entries", "effective_entries", "extensions", "shared_index"
+  ]) || value.state !== "parsed" || ![2, 4].includes(value.format_version as number) ||
+    !boundedInteger(value.byte_length, OBSERVER_LIMITS.index_bytes, false) ||
+    !sha256(value.digest) || !boundedInteger(value.entry_count, OBSERVER_LIMITS.index_entries) || !indexEntrySet(value.entries) ||
+    !indexEntrySet(value.effective_entries) || value.entry_count !== value.effective_entries.length || !Array.isArray(value.extensions)) return false;
   if (!value.extensions.every((extension) => record(extension) && exactKeys(extension, ["signature", "byte_length", "digest"]) &&
-    typeof extension.signature === "string" && /^[A-Z][A-Z0-9 ]{3}$/.test(extension.signature) &&
+    typeof extension.signature === "string" && /^[A-Za-z][A-Za-z0-9 ]{3}$/.test(extension.signature) &&
     boundedInteger(extension.byte_length, OBSERVER_LIMITS.index_bytes) && sha256(extension.digest))) return false;
+  const extensionKeys = value.extensions.map((extension) => (extension as JsonRecord).signature as string);
+  if (new Set(extensionKeys).size !== extensionKeys.length || !exactJson(extensionKeys, [...extensionKeys].sort())) return false;
   const shared = value.shared_index;
-  return record(shared) && ((exactKeys(shared, ["state"]) && shared.state === "absent") ||
-    (exactKeys(shared, ["state", "byte_length", "digest"]) && shared.state === "present" && digestSizedBytes({ byte_length: shared.byte_length, digest: shared.digest }, OBSERVER_LIMITS.index_bytes)));
+  if (!record(shared)) return false;
+  if (exactKeys(shared, ["state"]) && shared.state === "absent") {
+    return !extensionKeys.includes("link") && exactJson(value.effective_entries, value.entries);
+  }
+  if (!exactKeys(shared, ["state", "byte_length", "digest", "entries", "deleted_paths", "replaced_paths"]) || shared.state !== "present" ||
+    !digestSizedBytes({ byte_length: shared.byte_length, digest: shared.digest }, OBSERVER_LIMITS.index_bytes) || !indexEntrySet(shared.entries) ||
+    !sortedPathSet(shared.deleted_paths) || !sortedPathSet(shared.replaced_paths) || !extensionKeys.includes("link")) return false;
+  const deleted = new Set(shared.deleted_paths as string[]);
+  const replaced = new Set(shared.replaced_paths as string[]);
+  if ([...deleted].some((path) => replaced.has(path))) return false;
+  const sharedPaths = new Set((shared.entries as JsonRecord[]).map((entry) => entry.path as string));
+  const localPaths = new Set((value.entries as JsonRecord[]).map((entry) => entry.path as string));
+  if ([...deleted].some((path) => !sharedPaths.has(path) || localPaths.has(path)) ||
+    [...replaced].some((path) => !sharedPaths.has(path) || !localPaths.has(path))) return false;
+  const expected = [...(shared.entries as JsonRecord[]).filter((entry) => !deleted.has(entry.path as string) && !replaced.has(entry.path as string)),
+    ...(value.entries as JsonRecord[])].sort(comparePathStage);
+  return exactJson(value.effective_entries, expected);
+}
+
+function treeEntry(value: unknown): boolean {
+  return record(value) && exactKeys(value, ["path", "mode", "object_id"]) && framePath(value.path) &&
+    ["100644", "100755", "120000", "160000"].includes(value.mode as string) && gitObjectId(value.object_id);
+}
+
+function treeEntrySet(value: unknown): value is JsonRecord[] {
+  return Array.isArray(value) && value.length <= OBSERVER_LIMITS.traversal_entries && value.every(treeEntry) &&
+    new Set(value.map((entry) => entry.path)).size === value.length &&
+    value.every((entry, index) => index === 0 || Buffer.from(value[index - 1]!.path as string).compare(Buffer.from(entry.path as string)) < 0);
 }
 
 function headTree(value: unknown): boolean {
-  return record(value) && ((exactKeys(value, ["state"]) && value.state === "unborn") ||
-    (exactKeys(value, ["state", "object_id"]) && value.state === "present" && gitObjectId(value.object_id)));
+  if (!record(value) || !Object.hasOwn(value, "state") || !Object.hasOwn(value, "entry_count") || !Object.hasOwn(value, "entries") ||
+    !treeEntrySet(value.entries) || value.entry_count !== value.entries.length) return false;
+  return (exactKeys(value, ["state", "entry_count", "entries"]) && value.state === "unborn" && value.entry_count === 0) ||
+    (exactKeys(value, ["state", "object_id", "entry_count", "entries"]) && value.state === "present" && gitObjectId(value.object_id));
+}
+
+function canonicalDigest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 function frameConfig(value: unknown): boolean {
-  return record(value) && exactKeys(value, ["digest", "entries"]) && sha256(value.digest) && Array.isArray(value.entries) &&
-    value.entries.every((entry) => record(entry) && exactKeys(entry, ["scope", "key", "value", "origin"]) &&
-      ["local", "worktree", "include"].includes(entry.scope as string) && nonEmptyString(entry.key) && typeof entry.value === "string" &&
-      typeof entry.origin === "string" && canonicalRelativePath(entry.origin));
+  if (!record(value) || !exactKeys(value, ["digest", "entries"]) || !sha256(value.digest) || !Array.isArray(value.entries)) return false;
+  const entries = value.entries;
+  if (!entries.every((entry) => record(entry) && exactKeys(entry, ["scope", "key", "value", "origin"]) &&
+    ["local", "worktree", "include"].includes(entry.scope as string) && nonEmptyString(entry.key) && typeof entry.value === "string" &&
+    framePath(entry.origin))) return false;
+  const keys = entries.map((entry) => `${entry.scope}\0${entry.key}\0${entry.origin}`);
+  return new Set(keys).size === keys.length && exactJson(keys, [...keys].sort()) && value.digest === canonicalDigest(entries);
 }
 
 function framePathState(value: unknown): boolean {
-  return record(value) && exactKeys(value, ["digest", "sources"]) && sha256(value.digest) && Array.isArray(value.sources) &&
-    value.sources.every((source) => record(source) && exactKeys(source, ["path", "digest"]) && typeof source.path === "string" &&
-      canonicalRelativePath(source.path) && sha256(source.digest));
+  if (!record(value) || !exactKeys(value, ["digest", "sources"]) || !sha256(value.digest) || !Array.isArray(value.sources)) return false;
+  let totalBytes = 0;
+  const paths: string[] = [];
+  for (const source of value.sources) {
+    if (!record(source) || !exactKeys(source, ["path", "byte_length", "digest", "content_base64"]) || !framePath(source.path) ||
+      !boundedInteger(source.byte_length, OBSERVER_LIMITS.hashed_bytes) || !sha256(source.digest) || typeof source.content_base64 !== "string") return false;
+    const bytes = Buffer.from(source.content_base64, "base64");
+    if (bytes.toString("base64") !== source.content_base64) return false;
+    if (bytes.length !== source.byte_length || createHash("sha256").update(bytes).digest("hex") !== source.digest) return false;
+    totalBytes += bytes.length;
+    if (totalBytes > OBSERVER_LIMITS.hashed_bytes) return false;
+    paths.push(source.path);
+  }
+  return new Set(paths).size === paths.length && paths.every((path, index) => index === 0 || Buffer.from(paths[index - 1]!).compare(Buffer.from(path)) < 0) &&
+    value.digest === canonicalDigest(value.sources);
+}
+
+function gitlink(value: unknown): boolean {
+  return record(value) && exactKeys(value, ["path", "stage", "mode", "object_id"]) && framePath(value.path) &&
+    Number.isInteger(value.stage) && (value.stage as number) >= 0 && (value.stage as number) <= 4 &&
+    value.mode === "160000" && gitObjectId(value.object_id);
 }
 
 function nestedFrameState(value: unknown): boolean {
-  return record(value) && exactKeys(value, [
-    "path", "relation", "identity", "gitlink_path", "gitlink_stage", "checkout_state", "config_digest", "index_digest", "head_tree_digest"
-  ]) && typeof value.path === "string" && canonicalRelativePath(value.path) && ["direct", "recursive"].includes(value.relation as string) &&
-    sha256(value.identity) && typeof value.gitlink_path === "string" && canonicalRelativePath(value.gitlink_path) &&
-    value.gitlink_stage === 0 && ["initialized", "deinitialized", "absent"].includes(value.checkout_state as string) &&
-    sha256(value.config_digest) && sha256(value.index_digest) && sha256(value.head_tree_digest);
+  if (!record(value) || !exactKeys(value, ["path", "relation", "gitlink", "checkout_state", "audit"]) || !framePath(value.path) ||
+    !["direct", "recursive"].includes(value.relation as string) || !gitlink(value.gitlink) ||
+    !record(value.gitlink) || value.gitlink.path !== value.path || !record(value.audit) || value.audit.state !== value.checkout_state) return false;
+  const audit = value.audit;
+  if (value.checkout_state === "initialized") {
+    return exactKeys(audit, ["state", "directory_identity", "index", "head_tree", "effective_config", "exclude_state", "attribute_state"]) &&
+      sha256(audit.directory_identity) && frameIndex(audit.index) && headTree(audit.head_tree) && frameConfig(audit.effective_config) &&
+      framePathState(audit.exclude_state) && framePathState(audit.attribute_state);
+  }
+  const basename = (value.path as string).split("/").at(-1);
+  if (value.checkout_state === "deinitialized") {
+    return exactKeys(audit, ["state", "parent_identity", "basename", "directory_identity"]) && sha256(audit.parent_identity) &&
+      audit.basename === basename && sha256(audit.directory_identity);
+  }
+  return value.checkout_state === "absent" && exactKeys(audit, ["state", "parent_identity", "basename"]) &&
+    sha256(audit.parent_identity) && audit.basename === basename;
+}
+
+function frameBody(value: JsonRecord): JsonRecord {
+  return {
+    index: value.index,
+    head_tree: value.head_tree,
+    effective_config: value.effective_config,
+    exclude_state: value.exclude_state,
+    attribute_state: value.attribute_state,
+    nested_state: value.nested_state
+  };
+}
+
+function frameHeader(value: JsonRecord): JsonRecord {
+  return {
+    schema_version: value.schema_version,
+    catalog_version: value.catalog_version,
+    row_id: value.row_id,
+    observation_id: value.observation_id,
+    checkout_capability_identity: value.checkout_capability_identity,
+    git_state_generation_digest: value.git_state_generation_digest,
+    body_length: value.body_length,
+    body_digest: value.body_digest
+  };
 }
 
 export function validateFrame(value: unknown): boolean {
   const descriptor = SCHEMA_DESCRIPTORS.frame;
-  return matchesDescriptor(value, descriptor) && value.catalog_version === 1 && typeof value.row_id === "string" &&
-    CATALOG_V1.some((row) => row.id === value.row_id) && sha256(value.observation_id) && sha256(value.checkout_capability_identity) &&
-    sha256(value.git_state_generation_digest) && boundedInteger(value.body_length, OBSERVER_LIMITS.frame_bytes, false) &&
-    sha256(value.body_digest) && sha256(value.checksum) && frameIndex(value.index) && headTree(value.head_tree) &&
-    frameConfig(value.effective_config) && framePathState(value.exclude_state) && framePathState(value.attribute_state) &&
-    Array.isArray(value.nested_state) && value.nested_state.length <= OBSERVER_LIMITS.nested_repositories &&
-    value.nested_state.every(nestedFrameState);
+  if (!matchesDescriptor(value, descriptor) || value.catalog_version !== 1 || typeof value.row_id !== "string" ||
+    !CATALOG_V1.some((row) => row.id === value.row_id) || !sha256(value.observation_id) || !sha256(value.checkout_capability_identity) ||
+    !sha256(value.git_state_generation_digest) || !boundedInteger(value.body_length, OBSERVER_LIMITS.frame_bytes, false) ||
+    !sha256(value.body_digest) || !sha256(value.checksum) || !frameIndex(value.index) || !headTree(value.head_tree) ||
+    !frameConfig(value.effective_config) || !framePathState(value.exclude_state) || !framePathState(value.attribute_state) ||
+    !Array.isArray(value.nested_state) || value.nested_state.length > OBSERVER_LIMITS.nested_repositories ||
+    !value.nested_state.every(nestedFrameState)) return false;
+  const nestedPaths = value.nested_state.map((nested) => (nested as JsonRecord).path as string);
+  if (new Set(nestedPaths).size !== nestedPaths.length || !nestedPaths.every((path, index) => index === 0 || Buffer.from(nestedPaths[index - 1]!).compare(Buffer.from(path)) < 0)) return false;
+  const body = frameBody(value);
+  const bodyBytes = JSON.stringify(body);
+  const bodyDigest = canonicalDigest(body);
+  return value.body_length === Buffer.byteLength(bodyBytes) && value.body_digest === bodyDigest &&
+    value.git_state_generation_digest === bodyDigest && value.checksum === canonicalDigest({ header: frameHeader(value), body });
+}
+
+export function deriveFrameComparisonInputs(value: unknown): JsonRecord {
+  if (!validateFrame(value)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  const frame = value as JsonRecord;
+  const index = frame.index as JsonRecord;
+  const head = frame.head_tree as JsonRecord;
+  const clone = <T>(item: T): T => structuredClone(item);
+  const pathPolicy = {
+    effective_config: clone((frame.effective_config as JsonRecord).entries),
+    exclude_sources: clone((frame.exclude_state as JsonRecord).sources),
+    attribute_sources: clone((frame.attribute_state as JsonRecord).sources)
+  };
+  if (index.state === "rejected") {
+    return {
+      baseline: null,
+      staged: null,
+      index: { state: "rejected", rejection_code: index.rejection_code, byte_length: index.byte_length, digest: index.digest },
+      path_policy: pathPolicy
+    };
+  }
+  const shared = index.shared_index as JsonRecord;
+  return {
+    baseline: {
+      tracked_entries: clone((index.effective_entries as JsonRecord[]).filter((entry) => entry.stage === 0)),
+      head_tree_entries: clone(head.entries)
+    },
+    staged: { index_entries: clone(index.effective_entries), head_tree_entries: clone(head.entries) },
+    index: {
+      state: "parsed",
+      format_version: index.format_version,
+      primary_entries: clone(index.entries),
+      shared_entries: clone(shared.state === "present" ? shared.entries : []),
+      effective_entries: clone(index.effective_entries)
+    },
+    path_policy: pathPolicy
+  };
 }
 
 function validateSchema(value: unknown): boolean {

@@ -170,9 +170,11 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
     field_types: {
       schema_version: "literal", catalog_version: "integer:1", row_id: "catalog-row-id", observation_id: "sha256",
       checkout_capability_identity: "sha256", git_state_generation_digest: "sha256", body_length: "uint64",
-      body_digest: "sha256", checksum: "sha256", index: "strict:index-frame-v1", head_tree: "strict:head-tree-v1",
-      effective_config: "strict:effective-config-v1", exclude_state: "strict:exclude-state-v1",
-      attribute_state: "strict:attribute-state-v1", nested_state: "array:strict:nested-state-v1"
+      body_digest: "sha256", checksum: "sha256", index: "strict:index-frame-v1-parsed-material-or-exact-parse-rejection",
+      head_tree: "strict:head-tree-v1-with-baseline-entries", effective_config: "strict:effective-config-v1-with-content-digest",
+      exclude_state: "strict:path-source-state-v1-with-base64-content-byte-length-and-digest",
+      attribute_state: "strict:path-source-state-v1-with-base64-content-byte-length-and-digest",
+      nested_state: "sorted-array:strict:nested-state-v1-with-state-specific-audit-material"
     },
     additional_properties: false
   },
