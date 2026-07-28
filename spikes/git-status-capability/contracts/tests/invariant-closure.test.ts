@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalFrameBytes, canonicalFrameChecksum, canonicalFrameDigest } from "../lib/canonical-frame";
+import { canonicalFrameBytes, canonicalFrameChecksum } from "../lib/canonical-frame";
+import { canonicalWireFrameBytes, canonicalWireFrameDigest, canonicalWireFrameMaterial } from "../lib/wire-frame";
 import { runCheck } from "../lib/checker";
 import { CATALOG_V1, CONTROL_ASSERTION_IDS, FLOOR_V1 } from "../lib/frozen";
 import {
@@ -47,8 +48,8 @@ function canonicalFrameEvidenceBytes(frame: Record<string, any>): Buffer {
 function synchronizeRowDeclarations(row: any, recomputeChecksum: boolean): void {
   const frame = row.frame_binding.scheduled.frame_reference.frame;
   if (recomputeChecksum) frame.checksum = canonicalFrameChecksum(frame);
-  const bytes = canonicalFrameBytes(frame);
-  const digest = canonicalFrameDigest(frame);
+  const bytes = canonicalWireFrameBytes(frame);
+  const digest = canonicalWireFrameDigest(frame);
   row.git_state_generation_digest = frame.git_state_generation_digest;
   row.frame_digest = digest;
   Object.assign(row.frame_binding.scheduled, {
@@ -72,8 +73,8 @@ function frameForSlot(rowId: string, observationId: string, capabilityIdentity: 
 }
 
 function bindRowFrame(row: any, frame = frameForEvidenceSlot(row.platform, row.row_id, row.observation_id, row.checkout_capability_identity)): void {
-  const frameBytes = canonicalFrameBytes(frame);
-  const frameDigest = canonicalFrameDigest(frame);
+  const frameBytes = canonicalWireFrameBytes(frame);
+  const frameDigest = canonicalWireFrameDigest(frame);
   row.git_state_generation_digest = frame.git_state_generation_digest;
   row.frame_digest = frameDigest;
   const slot = {
@@ -87,7 +88,7 @@ function bindRowFrame(row: any, frame = frameForEvidenceSlot(row.platform, row.r
   row.frame_binding = {
     scheduled: {
       ...slot,
-      material: { kind: "canonical-frame-envelope-v1", padding_byte: 0 },
+      material: canonicalWireFrameMaterial(frame),
       frame_reference: { encoding: frameEvidenceEncoding, frame }
     },
     supplied: { ...slot, material: { kind: "scheduled-input-v1" } }
@@ -117,8 +118,8 @@ async function oracleTables(): Promise<{ rows: Map<string, string>; floors: stri
 
 function validRow(): Record<string, unknown> {
   const frame = frameForSlot("BAS-001", shaA, shaB);
-  const frameBytes = canonicalFrameBytes(frame);
-  const frameDigest = canonicalFrameDigest(frame);
+  const frameBytes = canonicalWireFrameBytes(frame);
+  const frameDigest = canonicalWireFrameDigest(frame);
   return {
     schema_version: "shud.git-status-capability.row-evidence.v1", platform: "macos", row_id: "BAS-001",
     observation_id: shaA, checkout_capability_identity: shaB,
@@ -128,7 +129,7 @@ function validRow(): Record<string, unknown> {
         row_id: "BAS-001", observation_id: shaA, checkout_capability_identity: shaB,
         git_state_generation_digest: frame.git_state_generation_digest,
         input_length: frameBytes.length, input_digest: frameDigest,
-        material: { kind: "canonical-frame-envelope-v1", padding_byte: 0 },
+        material: canonicalWireFrameMaterial(frame),
         frame_reference: { encoding: frameEvidenceEncoding, frame }
       },
       supplied: {

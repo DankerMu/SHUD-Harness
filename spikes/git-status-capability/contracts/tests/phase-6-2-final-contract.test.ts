@@ -3,9 +3,9 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalFrameBytes, canonicalFrameDigest } from "../lib/canonical-frame";
-import { encodeDecisionRowProjection } from "../lib/decision";
+import { encodeDecisionRowProjection, validateDecisionProjection } from "../lib/decision";
 import { expectedOutcome, OBSERVER_LIMITS } from "../lib/frozen";
-import { validateRowEvidence } from "../lib/schema";
+import { validatePlatformBundle, validateRowEvidence } from "../lib/schema";
 import { frameForEvidenceSlot, resealFrame } from "./frame-fixture";
 
 const shaA = "01".repeat(32);
@@ -20,17 +20,101 @@ function digest(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function envelopeDigest(frame: Record<string, any>, byteLength: number): string {
-  const frameBytes = canonicalFrameBytes(frame);
-  const hash = createHash("sha256").update(frameBytes);
-  let remaining = byteLength - frameBytes.length;
-  const zeros = Buffer.alloc(64 * 1024);
-  while (remaining > 0) {
-    const count = Math.min(remaining, zeros.length);
-    hash.update(zeros.subarray(0, count));
-    remaining -= count;
+const WIRE_MAGIC = Buffer.from("SHUDCAP1", "ascii");
+const WIRE_HEADER_BYTES = 128;
+const WIRE_CHECKSUM_OFFSET = 96;
+
+function referenceWireBytes(frame: Record<string, any>, byteLength?: number): Buffer {
+  const body = canonicalFrameBytes(frame);
+  const totalLength = byteLength ?? WIRE_HEADER_BYTES + body.length;
+  const extensionLength = totalLength - WIRE_HEADER_BYTES - body.length;
+  if (extensionLength < 0) throw new Error("wire target is shorter than its header and body");
+  const extension = Buffer.alloc(extensionLength);
+  const header = Buffer.alloc(WIRE_HEADER_BYTES);
+  WIRE_MAGIC.copy(header, 0);
+  header[8] = 1;
+  header[9] = 0;
+  header.writeUInt16BE(WIRE_HEADER_BYTES, 10);
+  header.writeBigUInt64BE(BigInt(totalLength), 12);
+  header.writeUInt32BE(body.length, 20);
+  header.writeBigUInt64BE(BigInt(extensionLength), 24);
+  Buffer.from(digest(body), "hex").copy(header, 32);
+  Buffer.from(digest(extension), "hex").copy(header, 64);
+  const checksum = createHash("sha256").update(header.subarray(0, WIRE_CHECKSUM_OFFSET)).update(body).update(extension).digest();
+  checksum.copy(header, WIRE_CHECKSUM_OFFSET);
+  return Buffer.concat([header, body, extension]);
+}
+
+function referenceDecode(bytes: Buffer): "clean" | "FRAME_CHECKSUM" | "FRAME_TRUNCATED" | "FRAME_SURPLUS" | "FRAME_MALFORMED" {
+  if (bytes.length < WIRE_HEADER_BYTES) return "FRAME_TRUNCATED";
+  if (!bytes.subarray(0, 8).equals(WIRE_MAGIC) || bytes[8] !== 1 || bytes[9] !== 0 || bytes.readUInt16BE(10) !== WIRE_HEADER_BYTES) {
+    return "FRAME_MALFORMED";
   }
-  return hash.digest("hex");
+  const totalLength = Number(bytes.readBigUInt64BE(12));
+  const bodyLength = bytes.readUInt32BE(20);
+  const extensionLength = Number(bytes.readBigUInt64BE(24));
+  if (!Number.isSafeInteger(totalLength) || !Number.isSafeInteger(extensionLength) ||
+    totalLength !== WIRE_HEADER_BYTES + bodyLength + extensionLength) return "FRAME_MALFORMED";
+  if (bytes.length < totalLength) return "FRAME_TRUNCATED";
+  if (bytes.length > totalLength) return "FRAME_SURPLUS";
+  const body = bytes.subarray(WIRE_HEADER_BYTES, WIRE_HEADER_BYTES + bodyLength);
+  const extension = bytes.subarray(WIRE_HEADER_BYTES + bodyLength);
+  if (digest(body) !== bytes.subarray(32, 64).toString("hex") || digest(extension) !== bytes.subarray(64, 96).toString("hex")) {
+    return "FRAME_CHECKSUM";
+  }
+  const checksum = createHash("sha256")
+    .update(bytes.subarray(0, WIRE_CHECKSUM_OFFSET))
+    .update(body)
+    .update(extension)
+    .digest("hex");
+  return checksum === bytes.subarray(WIRE_CHECKSUM_OFFSET, WIRE_HEADER_BYTES).toString("hex") ? "clean" : "FRAME_CHECKSUM";
+}
+
+function scheduledBytes(row: any): Buffer {
+  const scheduled = row.frame_binding.scheduled;
+  const frame = scheduled.frame_reference.frame;
+  if (scheduled.material.kind === "canonical-frame-wire-v1") return referenceWireBytes(frame, scheduled.input_length);
+  const body = canonicalFrameBytes(frame);
+  return Buffer.concat([body, Buffer.alloc(scheduled.input_length - body.length)]);
+}
+
+function byteMaterial(value: string) {
+  const bytes = Buffer.from(value, "utf8");
+  return { byte_length: bytes.length, digest: digest(bytes), content_base64: bytes.toString("base64") };
+}
+
+function determinismProof(row: any): any {
+  const axes: Record<string, string> = {
+    "DET-001": "same-input-repeat",
+    "DET-002": "fixture-creation-order",
+    "DET-003": "fixture-root",
+    "DET-004": "volatile-fields"
+  };
+  const common = {
+    row_id: row.row_id,
+    observation_id: row.observation_id,
+    checkout_capability_identity: row.checkout_capability_identity,
+    git_state_generation_digest: row.git_state_generation_digest,
+    supplied_input_digest: row.frame_digest,
+    observer_outcome: structuredClone(row.observer_outcome),
+    normalized_row_output: byteMaterial(JSON.stringify({ row_id: row.row_id, observer_outcome: row.observer_outcome })),
+    decision_projection: byteMaterial(`${row.row_id}\0clean`)
+  };
+  const firstVariation = digest(Buffer.from(`${row.row_id}:variation:first`));
+  return {
+    variation_axis: axes[row.row_id],
+    first: {
+      invocation_id: digest(Buffer.from(`${row.row_id}:invocation:first`)),
+      variation_value_digest: firstVariation,
+      ...common
+    },
+    second: {
+      invocation_id: digest(Buffer.from(`${row.row_id}:invocation:second`)),
+      variation_value_digest: row.row_id === "DET-001" ? firstVariation : digest(Buffer.from(`${row.row_id}:variation:second`)),
+      ...common
+    },
+    comparison: { normalized_row_output_equal: true, decision_projection_equal: true }
+  };
 }
 
 function controls(verdict: "pass" | "fail" = "pass") {
@@ -70,12 +154,15 @@ function rowFor(rowId: string): any {
     row.resource_record = { boundary_class: "below", declared_limit: "none", within_limits: true };
   }
   const frame = frameForEvidenceSlot("macos", rowId, row.observation_id, row.checkout_capability_identity);
-  bindScheduled(row, frame, /^LIM-00[12]$/.test(rowId) ? OBSERVER_LIMITS.frame_bytes : canonicalFrameBytes(frame).length);
+  bindScheduled(row, frame, /^LIM-00[12]$/.test(rowId) ? OBSERVER_LIMITS.frame_bytes : undefined);
+  if (/^DET-00[1-4]$/.test(rowId)) row.determinism_proof = determinismProof(row);
   return row;
 }
 
-function bindScheduled(row: any, frame: Record<string, any>, inputLength: number): void {
-  const inputDigest = envelopeDigest(frame, inputLength);
+function bindScheduled(row: any, frame: Record<string, any>, inputLength?: number): void {
+  const bytes = referenceWireBytes(frame, inputLength);
+  const extensionLength = bytes.length - WIRE_HEADER_BYTES - canonicalFrameBytes(frame).length;
+  const inputDigest = digest(bytes);
   row.git_state_generation_digest = frame.git_state_generation_digest;
   row.frame_digest = inputDigest;
   row.frame_binding = {
@@ -84,9 +171,15 @@ function bindScheduled(row: any, frame: Record<string, any>, inputLength: number
       observation_id: frame.observation_id,
       checkout_capability_identity: frame.checkout_capability_identity,
       git_state_generation_digest: frame.git_state_generation_digest,
-      input_length: inputLength,
+      input_length: bytes.length,
       input_digest: inputDigest,
-      material: { kind: "canonical-frame-envelope-v1", padding_byte: 0 },
+      material: {
+        kind: "canonical-frame-wire-v1",
+        version: 1,
+        header_length: WIRE_HEADER_BYTES,
+        body_length: canonicalFrameBytes(frame).length,
+        extension_length: extensionLength
+      },
       frame_reference: {
         encoding: "shud.git-status-capability.canonical-frame-json.v1",
         frame
@@ -97,10 +190,23 @@ function bindScheduled(row: any, frame: Record<string, any>, inputLength: number
       observation_id: frame.observation_id,
       checkout_capability_identity: frame.checkout_capability_identity,
       git_state_generation_digest: frame.git_state_generation_digest,
-      input_length: inputLength,
+      input_length: bytes.length,
       input_digest: inputDigest,
       material: { kind: "scheduled-input-v1" }
     }
+  };
+}
+
+function suppliedWireMaterial(frame: Record<string, any>, inputLength: number, extra: Record<string, unknown> = {}) {
+  const bodyLength = canonicalFrameBytes(frame).length;
+  return {
+    kind: "canonical-frame-wire-v1",
+    version: 1,
+    header_length: WIRE_HEADER_BYTES,
+    body_length: bodyLength,
+    extension_length: inputLength - WIRE_HEADER_BYTES - bodyLength,
+    frame_reference: { encoding: "shud.git-status-capability.canonical-frame-json.v1", frame },
+    ...extra
   };
 }
 
@@ -148,12 +254,8 @@ function replayFrame(row: any, mutate: (frame: any) => void): void {
   const frame = structuredClone(row.frame_binding.scheduled.frame_reference.frame);
   mutate(frame);
   resealFrame(frame);
-  const bytes = canonicalFrameBytes(frame);
-  suppliedBytes(row, bytes, {
-    kind: "canonical-frame-envelope-v1",
-    padding_byte: 0,
-    frame_reference: { encoding: "shud.git-status-capability.canonical-frame-json.v1", frame }
-  }, {
+  const bytes = referenceWireBytes(frame);
+  suppliedBytes(row, bytes, suppliedWireMaterial(frame, bytes.length), {
     row_id: frame.row_id,
     observation_id: frame.observation_id,
     checkout_capability_identity: frame.checkout_capability_identity,
@@ -166,12 +268,10 @@ function malformedPathRow(rowId: "CAP-013" | "CAP-014", origin: string): any {
   const frame = structuredClone(row.frame_binding.scheduled.frame_reference.frame);
   frame.effective_config.entries[0].origin = origin;
   resealFrame(frame);
-  const bytes = canonicalFrameBytes(frame);
-  suppliedBytes(row, bytes, {
-    kind: "inline-bytes-v1",
-    violation: rowId === "CAP-013" ? "absolute-path" : "path-escape",
-    content_base64: bytes.toString("base64")
-  }, {
+  const bytes = referenceWireBytes(frame);
+  suppliedBytes(row, bytes, suppliedWireMaterial(frame, bytes.length, {
+    violation: rowId === "CAP-013" ? "absolute-path" : "path-escape"
+  }), {
     row_id: frame.row_id,
     observation_id: frame.observation_id,
     checkout_capability_identity: frame.checkout_capability_identity,
@@ -239,17 +339,17 @@ describe("Phase 6.2 scheduled versus supplied frame proof", () => {
 
   test("tamper, truncate, surplus, absolute, and escape supplied material validate only in matching rows", () => {
     const tamper = rowFor("CAP-010");
-    const tampered = Buffer.concat([canonicalFrameBytes(tamper.frame_binding.scheduled.frame_reference.frame)]);
-    const checksumOffset = tampered.indexOf(tamper.frame_binding.scheduled.frame_reference.frame.checksum) + 1;
+    const tampered = Buffer.from(scheduledBytes(tamper));
+    const checksumOffset = WIRE_CHECKSUM_OFFSET;
     tampered[checksumOffset] ^= 1;
     suppliedBytes(tamper, tampered, { kind: "xor-byte-v1", offset: checksumOffset, xor: 1 });
 
     const truncate = rowFor("CAP-011");
-    const scheduledTruncate = canonicalFrameBytes(truncate.frame_binding.scheduled.frame_reference.frame);
+    const scheduledTruncate = scheduledBytes(truncate);
     suppliedBytes(truncate, scheduledTruncate.subarray(0, -1), { kind: "truncate-tail-v1", byte_count: 1 });
 
     const surplus = rowFor("CAP-012");
-    const scheduledSurplus = canonicalFrameBytes(surplus.frame_binding.scheduled.frame_reference.frame);
+    const scheduledSurplus = scheduledBytes(surplus);
     suppliedBytes(surplus, Buffer.concat([scheduledSurplus, scheduledSurplus]), { kind: "append-scheduled-input-v1", copies: 1 });
 
     const rows = [tamper, truncate, surplus, malformedPathRow("CAP-013", "/absolute/config"), malformedPathRow("CAP-014", "../escape")];
@@ -277,14 +377,16 @@ describe("Phase 6.2 scheduled versus supplied frame proof", () => {
     const exact = rowFor("LIM-001");
     expect(validateRowEvidence(exact)).toBe(true);
     expect(exact.frame_binding.supplied.input_length).toBe(OBSERVER_LIMITS.frame_bytes);
+    const exactWire = scheduledBytes(exact);
+    expect(referenceDecode(exactWire)).toBe("clean");
+    const changedExtension = Buffer.from(exactWire);
+    changedExtension[changedExtension.length - 1] ^= 1;
+    expect(referenceDecode(changedExtension)).toBe("FRAME_CHECKSUM");
 
     const over = rowFor("LIM-002");
     const scheduledLength = over.frame_binding.scheduled.input_length;
-    const appendedDigest = createHash("sha256")
-      .update(canonicalFrameBytes(over.frame_binding.scheduled.frame_reference.frame))
-      .update(Buffer.alloc(scheduledLength - canonicalFrameBytes(over.frame_binding.scheduled.frame_reference.frame).length))
-      .update(Buffer.from([0]))
-      .digest("hex");
+    const appendedBytes = Buffer.concat([scheduledBytes(over), Buffer.from([0])]);
+    const appendedDigest = digest(appendedBytes);
     Object.assign(over.frame_binding.supplied, {
       input_length: OBSERVER_LIMITS.frame_bytes + 1,
       input_digest: appendedDigest,
@@ -292,7 +394,81 @@ describe("Phase 6.2 scheduled versus supplied frame proof", () => {
     });
     over.frame_digest = appendedDigest;
     expect(validateRowEvidence(over)).toBe(true);
+    expect(referenceDecode(appendedBytes)).toBe("FRAME_SURPLUS");
     expect(Buffer.byteLength(JSON.stringify(exact))).toBeLessThan(512 * 1024);
     expect(Buffer.byteLength(JSON.stringify(over))).toBeLessThan(512 * 1024);
+  });
+
+  test("the independent decoder distinguishes checksum, truncation, and surplus on one explicit wire", () => {
+    const row = rowFor("CAP-010");
+    const wire = scheduledBytes(row);
+    const legacyJson = canonicalFrameBytes(row.frame_binding.scheduled.frame_reference.frame);
+    const legacyPostJsonPadding = Buffer.concat([legacyJson, Buffer.alloc(OBSERVER_LIMITS.frame_bytes - legacyJson.length)]);
+    const tampered = Buffer.from(wire);
+    tampered[WIRE_CHECKSUM_OFFSET] ^= 1;
+    expect(referenceDecode(legacyPostJsonPadding)).toBe("FRAME_MALFORMED");
+    expect(referenceDecode(wire)).toBe("clean");
+    expect(referenceDecode(tampered)).toBe("FRAME_CHECKSUM");
+    expect(referenceDecode(wire.subarray(0, -1))).toBe("FRAME_TRUNCATED");
+    expect(referenceDecode(Buffer.concat([wire, wire]))).toBe("FRAME_SURPLUS");
+  });
+});
+
+describe("Phase 6.2 paired determinism proof", () => {
+  test("DET-001 through DET-004 require a bound second invocation and exact variation axis", () => {
+    for (const rowId of ["DET-001", "DET-002", "DET-003", "DET-004"]) {
+      const row = rowFor(rowId);
+      expect(validateRowEvidence(row), rowId).toBe(true);
+      expect(encodeDecisionRowProjection(row).split("\0").at(-1), rowId).toBe(rowId.at(-1));
+
+      const missingSecond = structuredClone(row);
+      delete missingSecond.determinism_proof.second;
+      expect(validateRowEvidence(missingSecond), `${rowId}:missing-second`).toBe(false);
+
+      const changedFrame = structuredClone(row);
+      changedFrame.determinism_proof.second.supplied_input_digest = shaA;
+      expect(validateRowEvidence(changedFrame), `${rowId}:changed-frame`).toBe(false);
+
+      const changedOutcome = structuredClone(row);
+      changedOutcome.determinism_proof.second.observer_outcome = { kind: "dirty" };
+      expect(validateRowEvidence(changedOutcome), `${rowId}:changed-outcome`).toBe(false);
+
+      const changedOutput = structuredClone(row);
+      changedOutput.determinism_proof.second.normalized_row_output = byteMaterial("changed");
+      expect(validateRowEvidence(changedOutput), `${rowId}:changed-output`).toBe(false);
+
+      const changedProjection = structuredClone(row);
+      changedProjection.determinism_proof.second.decision_projection = byteMaterial("changed");
+      expect(validateRowEvidence(changedProjection), `${rowId}:changed-projection`).toBe(false);
+
+      const wrongAxis = structuredClone(row);
+      wrongAxis.determinism_proof.variation_axis = "fixture-root";
+      expect(validateRowEvidence(wrongAxis), `${rowId}:wrong-axis`).toBe(rowId === "DET-003");
+    }
+  });
+
+  test("same-row sub-observation repeat is legal but a duplicate catalog row and unprojected proof remain invalid", () => {
+    const det = rowFor("DET-001");
+    expect(det.determinism_proof.first.observation_id).toBe(det.determinism_proof.second.observation_id);
+    expect(det.determinism_proof.first.invocation_id).not.toBe(det.determinism_proof.second.invocation_id);
+    expect(validateRowEvidence(det)).toBe(true);
+
+    const bundle = structuredClone(generic.platform_bundle);
+    expect(validatePlatformBundle(bundle)).toBe(true);
+    const collidingInvocation = structuredClone(bundle);
+    const firstDet = collidingInvocation.rows.find((row: any) => row.row_id === "DET-001");
+    const secondDet = collidingInvocation.rows.find((row: any) => row.row_id === "DET-002");
+    secondDet.determinism_proof.first.invocation_id = firstDet.determinism_proof.first.invocation_id;
+    expect(validatePlatformBundle(collidingInvocation)).toBe(false);
+    bundle.rows.push(structuredClone(bundle.rows.find((row: any) => row.row_id === "DET-001")));
+    expect(validatePlatformBundle(bundle)).toBe(false);
+
+    const decision = structuredClone(generic.decision);
+    expect(validateDecisionProjection(decision)).toBe(true);
+    const index = decision.rows.findIndex((scalar: string) => scalar.split("\0")[1] === "DET-001");
+    const fields = decision.rows[index].split("\0");
+    fields[fields.length - 1] = "0";
+    decision.rows[index] = fields.join("\0");
+    expect(validateDecisionProjection(decision)).toBe(false);
   });
 });

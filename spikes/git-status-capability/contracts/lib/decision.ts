@@ -1,4 +1,5 @@
 import { CATALOG_V1, CONTROL_ASSERTION_IDS, DECISION_LIMIT_TOKENS, DECISION_ROW_SEGMENTS } from "./frozen";
+import { determinismProjectionToken } from "./determinism-proof";
 
 type JsonRecord = Record<string, any>;
 
@@ -78,7 +79,7 @@ function decodeDecisionRow(value: unknown): DecodedRow | null {
   if (fields.length !== DECISION_ROW_SEGMENTS.length) return null;
   const [platformToken, rowId, expectedKind, expectedCode, observedKind, observedCode, verdictToken,
     observationId, generationPayloadDigest, frameDigest, producingBoundaryToken, activeControls, passedControls,
-    protectionSetEqual, cleanupVerdict, declaredLimitToken, boundaryToken] = fields;
+    protectionSetEqual, cleanupVerdict, declaredLimitToken, boundaryToken, determinismToken] = fields;
   const platform = platformToken === "m" ? "macos" : platformToken === "l" ? "linux" : null;
   const expectedOutcome = decodeOutcome(expectedKind!, expectedCode!);
   const observedOutcome = decodeOutcome(observedKind!, observedCode!);
@@ -87,11 +88,12 @@ function decodeDecisionRow(value: unknown): DecodedRow | null {
   const declaredLimit = DECISION_LIMIT_TOKENS[limitOrdinal];
   const boundaryClass = TOKEN_TO_BOUNDARY[boundaryToken as keyof typeof TOKEN_TO_BOUNDARY];
   const producingBoundary = TOKEN_TO_PRODUCER[producingBoundaryToken as keyof typeof TOKEN_TO_PRODUCER];
+  const expectedDeterminismToken = /^DET-00([1-4])$/.exec(rowId!)?.[1] ?? "0";
   const passedControlBits = /^[0-9a-f]{2}$/.test(passedControls!) ? Number.parseInt(passedControls!, 16) : -1;
   if (!platform || !nonEmptyString(rowId) || !expectedOutcome || !observedOutcome || !rowVerdict || !sha256(observationId) ||
     !sha256(generationPayloadDigest) || !sha256(frameDigest) || !producingBoundary || activeControls !== ALL_CONTROL_TOKEN ||
     passedControlBits < 0 || (passedControlBits & ~ALL_CONTROL_BITS) !== 0 || !["0", "1"].includes(protectionSetEqual!) ||
-    !["p", "f"].includes(cleanupVerdict!) || !declaredLimit || !boundaryClass ||
+    !["p", "f"].includes(cleanupVerdict!) || !declaredLimit || !boundaryClass || determinismToken !== expectedDeterminismToken ||
     ((boundaryClass === "below") !== (declaredLimit === "none"))) return null;
   const catalog = CATALOG_V1.find((row) => row.id === rowId);
   const frozenExpected = platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
@@ -114,6 +116,7 @@ export function encodeDecisionRowProjection(row: JsonRecord): string {
   const limitOrdinal = DECISION_LIMIT_TOKENS.indexOf(row.resource_record.declared_limit);
   const boundary = BOUNDARY_TO_TOKEN[row.resource_record.boundary_class as keyof typeof BOUNDARY_TO_TOKEN];
   const producer = PRODUCER_TO_TOKEN[row.producing_boundary as keyof typeof PRODUCER_TO_TOKEN];
+  const determinismToken = determinismProjectionToken(row);
   if (!record(row.control_assertions) || !exactKeys(row.control_assertions, CONTROL_ASSERTION_IDS)) {
     throw new Error("invalid D8 projection source");
   }
@@ -126,7 +129,7 @@ export function encodeDecisionRowProjection(row: JsonRecord): string {
   }
   const protectionPassed = (row.control_assertions.protection as JsonRecord).verdict === "pass";
   const cleanupPassed = (row.control_assertions.cleanup as JsonRecord).verdict === "pass";
-  if (!expectedKind || !observedKind || limitOrdinal < 0 || !boundary || !producer ||
+  if (!expectedKind || !observedKind || limitOrdinal < 0 || !boundary || !producer || determinismToken === null ||
     typeof row.protection_set_equal !== "boolean" || row.protection_set_equal !== protectionPassed ||
     !record(row.cleanup) || row.cleanup.verdict !== (cleanupPassed ? "pass" : "fail")) {
     throw new Error("invalid D8 projection source");
@@ -148,7 +151,8 @@ export function encodeDecisionRowProjection(row: JsonRecord): string {
     row.protection_set_equal ? "1" : "0",
     cleanupPassed ? "p" : "f",
     String(limitOrdinal),
-    boundary
+    boundary,
+    determinismToken
   ].join("\0");
 }
 

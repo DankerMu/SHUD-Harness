@@ -188,7 +188,8 @@ export const FRAME_EVIDENCE_FIELD_ORDER = Object.freeze([
 export const DECISION_ROW_SEGMENTS = Object.freeze([
   "platform", "row_id", "expected_kind", "expected_code", "observed_kind", "observed_code", "row_verdict",
   "observation_id", "generation_payload_digest", "frame_digest", "producing_boundary",
-  "active_control_bitset", "passed_control_bitset", "protection_set_equal", "cleanup_verdict", "declared_limit", "boundary_class"
+  "active_control_bitset", "passed_control_bitset", "protection_set_equal", "cleanup_verdict", "declared_limit", "boundary_class",
+  "determinism_proof"
 ]);
 
 export const DECISION_LIMIT_TOKENS = Object.freeze([
@@ -225,18 +226,19 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       "row_verdict", "oracle_digest", "control_assertions", "protection_set_equal", "cleanup", "resource_record",
       "source_input_record_sha256"
     ],
-    optional_fields: ["first_cause", "secondary_errors"],
+    optional_fields: ["first_cause", "secondary_errors", "determinism_proof"],
     field_types: {
       schema_version: "literal", platform: "enum:macos|linux", row_id: "catalog-row-id", observation_id: "sha256",
       checkout_capability_identity: "sha256", git_state_generation_digest: "sha256", frame_digest: "sha256",
-      frame_binding: "strict:{scheduled:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,input_length,input_digest,material:canonical-frame-envelope-v1,frame_reference:{encoding:literal:shud.git-status-capability.canonical-frame-json.v1,frame:strict-frame-v1}},supplied:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,input_length,input_digest,material:strict-supplied-input-proof-v1}};scheduled=strict-canonical;supplied=actual-wire-proof;malformed-supplied-does-not-require-frame-validation;CAP-010..017-and-LIM-001..002-relations-frozen",
+      frame_binding: "strict:{scheduled:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,input_length,input_digest,material:canonical-frame-wire-v1:{version=1,header_length=128,body_length,extension_length},frame_reference:{encoding:literal:shud.git-status-capability.canonical-frame-json.v1,frame:strict-frame-v1}},supplied:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,input_length,input_digest,material:strict-supplied-input-proof-v1}};wire=magic:SHUDCAP1|version:u8@8|flags-zero:u8@9|header-length:u16be@10|total-length:u64be@12|body-length:u32be@20|extension-length:u64be@24|body-sha256@32|extension-sha256@64|frame-sha256@96;header=128;frame-sha256=sha256(header[0:96]||body||extension);total=header+body+extension;no-trailing-bytes;scheduled=strict-canonical;supplied=actual-wire-proof;CAP-010-checksum-byte-mutation|CAP-011-truncate-one|CAP-012-surplus-frame|LIM-001-one-legal-8MiB-wire|LIM-002-wire-plus-one-byte",
       expected_outcome: "frozen-platform-slot-outcome", observer_outcome: "observer-outcome", producing_boundary: "frozen-row-enum:observer|launcher|tripwire",
       row_verdict: "iff:expected=observed-and-all-required-active-controls-pass", oracle_digest: "sha256",
       control_assertions: "strict:{oracle,ambient_path,subprocess,network,protected_write,protection,cleanup}:{active:literal:true,verdict:pass|fail}",
       protection_set_equal: "boolean;iff-control-protection-pass",
       cleanup: "strict:{verdict:pass|fail,descriptors_restored:boolean,processes_reaped:boolean,secondary_errors:string[]};verdict=control-cleanup",
       resource_record: "strict:frozen-row-boundary:{below|exact|exceeded,observer-limit|none,within_limits=(boundary!=exceeded)}", source_input_record_sha256: "sha256",
-      first_cause: "optional:nonempty-string", secondary_errors: "optional:string[]"
+      first_cause: "optional:nonempty-string", secondary_errors: "optional:string[]",
+      determinism_proof: "iff-row-DET-001..004:strict:{variation_axis,first,second,comparison};two-distinct-invocations;same-row|observation|checkout|generation|supplied-input|outcome;content-addressed-normalized-row-output-and-decision-projection-byte-equality;DET-001=same-input-repeat;DET-002=fixture-creation-order;DET-003=fixture-root;DET-004=volatile-fields"
     },
     additional_properties: false
   },
@@ -254,7 +256,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       toolchain: "strict:{rustc_vv,cargo_version,git_version,target_triple}", target: "platform-target",
       dependency_graph_digest: "sha256", direct_feature_digest: "sha256", call_ledger_digest: "sha256",
       sbom_digest: "sha256", license_inventory_digest: "sha256",
-      rows: "array:row-evidence;valid_complete=174-exact;observation,scheduled-generation,actual-supplied-input-identities=unique-per-platform-slot",
+      rows: "array:row-evidence;valid_complete=174-exact;top-level-observation,scheduled-generation,actual-supplied-input-identities=unique-per-platform-slot;DET-paired-invocation-identities=8-globally-unique;same-row-nested-observation-repeat-only-exception",
       protection_set: "array:strict:{identity,pre_digest,post_digest,event_digest};valid_complete=nonempty",
       raw_command_manifest: "array:command-receipt;valid_complete=nonempty", first_cause: "invalid-only:nonempty-string",
       all_failure_codes: "invalid-only:sorted-unique-string[]"
@@ -305,7 +307,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       macos_target_identity: "literal:aarch64-apple-darwin", macos_toolchain_identity: "sha256",
       linux_target_identity: "literal:x86_64-unknown-linux-gnu", linux_toolchain_identity: "sha256",
       platforms: "exact:[macos,linux]",
-      rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,actual_supplied_input_digest,producing_boundary(o|l|t=frozen-row),active_control_bitset(7f=all-required-active),passed_control_bitset(00..7f),protection_set_equal(1|0),cleanup_verdict(p|f),declared_limit(0..13=frozen-limit-order),boundary_class(b|e|x)];control-bit-order=oracle|ambient_path|subprocess|network|protected_write|protection|cleanup;valid_complete=348-exact;slot,observation,generation/payload,actual-supplied-input-identities=globally-unique",
+      rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,actual_supplied_input_digest,producing_boundary(o|l|t=frozen-row),active_control_bitset(7f=all-required-active),passed_control_bitset(00..7f),protection_set_equal(1|0),cleanup_verdict(p|f),declared_limit(0..13=frozen-limit-order),boundary_class(b|e|x),determinism_proof(0=non-DET|1..4=validated-paired-DET-proof)];control-bit-order=oracle|ambient_path|subprocess|network|protected_write|protection|cleanup;valid_complete=348-exact;catalog-slot,top-level-observation,generation/payload,actual-supplied-input-identities=globally-unique;DET nested same-slot repeat-only-exception",
       gates: "nonempty-array:strict-repository-command-receipt:{id,argv,version,exit_verdict,summary_digest,source_input_record_sha256};id-unique;source-record-equal",
       run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted-iff-all-row-verdicts-pass|rejected-iff-any-row-verdict-fails",
       first_cause: "rejected-or-invalid:nonempty-string", all_failure_codes: "rejected-or-invalid:sorted-unique-string[]"
