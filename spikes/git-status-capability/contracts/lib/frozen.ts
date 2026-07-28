@@ -166,15 +166,16 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       "git_state_generation_digest", "body_length", "body_digest", "checksum", "index", "head_tree",
       "effective_config", "exclude_state", "attribute_state", "nested_state"
     ],
-    optional_fields: [],
+    optional_fields: ["limit_stimulus"],
     field_types: {
       schema_version: "literal", catalog_version: "integer:1", row_id: "catalog-row-id", observation_id: "sha256",
       checkout_capability_identity: "sha256", git_state_generation_digest: "sha256", body_length: "uint64",
-      body_digest: "sha256", checksum: "sha256", index: "strict:index-frame-v1-parsed-material-or-exact-parse-rejection",
+      body_digest: "sha256", checksum: "sha256", index: "strict:index-frame-v1-parsed-or-byte-material-without-observer-answer",
       head_tree: "strict:head-tree-v1-with-baseline-entries", effective_config: "strict:effective-config-v1-with-content-digest",
       exclude_state: "strict:path-source-state-v1-with-base64-content-byte-length-and-digest",
       attribute_state: "strict:path-source-state-v1-with-base64-content-byte-length-and-digest",
-      nested_state: "sorted-array:strict:nested-state-v1-with-state-specific-audit-material"
+      nested_state: "sorted-array:strict:nested-state-v1-with-state-specific-audit-material",
+      limit_stimulus: "optional:strict:catalog-exact-plus-one-deterministic-material-recipe"
     },
     additional_properties: false
   },
@@ -190,12 +191,12 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
     field_types: {
       schema_version: "literal", platform: "enum:macos|linux", row_id: "catalog-row-id", observation_id: "sha256",
       checkout_capability_identity: "sha256", git_state_generation_digest: "sha256", frame_digest: "sha256",
-      frame_binding: "strict:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,frame_length,frame_digest,payload_length,payload_digest}",
+      frame_binding: "strict:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,frame_length,frame_digest,payload_length,payload_digest,canonical_body_length,canonical_body_digest};payload=canonical-frame-body-bytes",
       expected_outcome: "frozen-platform-slot-outcome", observer_outcome: "observer-outcome", producing_boundary: "nonempty-string",
       row_verdict: "iff:expected=observed", oracle_digest: "sha256", oracle_verdict: "literal:pass",
       tripwire_verdicts: "strict:{ambient_path,subprocess,protected_write}:true", protection_set_equal: "literal:true",
       cleanup: "strict:{verdict:pass,descriptors_restored:true,processes_reaped:true,secondary_errors:string[]}",
-      resource_record: "strict:{boundary_class,declared_limit,within_limits:true}", source_input_record_sha256: "sha256",
+      resource_record: "strict:frozen-row-boundary:{below|exact|exceeded,observer-limit|none,within_limits=(boundary!=exceeded)}", source_input_record_sha256: "sha256",
       first_cause: "optional:nonempty-string", secondary_errors: "optional:string[]"
     },
     additional_properties: false
