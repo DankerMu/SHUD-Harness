@@ -174,11 +174,13 @@ function determinismProof(row: any): any {
   const output = {
     observer_outcome: structuredClone(row.observer_outcome),
     producing_boundary: row.producing_boundary,
+    actual_producing_boundary: row.actual_producing_boundary,
     row_verdict: row.row_verdict,
     control_assertions: structuredClone(row.control_assertions),
     protection_set_equal: row.protection_set_equal,
     cleanup: structuredClone(row.cleanup),
-    resource_record: structuredClone(row.resource_record)
+    resource_record: structuredClone(row.resource_record),
+    actual_resource_record: structuredClone(row.actual_resource_record)
   };
   const token = row.row_id.at(-1);
   const normalizedDigest = canonicalDigest(output);
@@ -206,6 +208,27 @@ function controls(verdict: "pass" | "fail" = "pass") {
   return Object.fromEntries(controlIds.map((id) => [id, { active: true, verdict }]));
 }
 
+const resourceLimits = [
+  ["frame_bytes", "bytes", OBSERVER_LIMITS.frame_bytes], ["index_bytes", "bytes", OBSERVER_LIMITS.index_bytes],
+  ["index_entries", "count", OBSERVER_LIMITS.index_entries], ["path_bytes", "bytes", OBSERVER_LIMITS.path_bytes],
+  ["path_depth", "segments", OBSERVER_LIMITS.path_depth], ["nested_repositories", "count", OBSERVER_LIMITS.nested_repositories],
+  ["traversal_entries", "count", OBSERVER_LIMITS.traversal_entries], ["hashed_bytes", "bytes", OBSERVER_LIMITS.hashed_bytes],
+  ["wall_time_ms", "milliseconds", OBSERVER_LIMITS.wall_time_ms], ["cpu_time_ms", "milliseconds", OBSERVER_LIMITS.cpu_time_ms],
+  ["threads", "count", OBSERVER_LIMITS.threads], ["memory_bytes", "bytes", OBSERVER_LIMITS.memory_bytes],
+  ["output_bytes", "bytes", OBSERVER_LIMITS.output_bytes]
+] as const;
+
+function measuredResource(limit: string, unit: string, value: number): any {
+  const recipe = { kind: "literal-counter-v1", limit, unit, value };
+  const recipeDigest = canonicalDigest(recipe);
+  return {
+    boundary_class: value > (OBSERVER_LIMITS as any)[limit] ? "exceeded" : value === (OBSERVER_LIMITS as any)[limit] ? "exact" : "below",
+    declared_limit: limit, within_limits: value <= (OBSERVER_LIMITS as any)[limit],
+    stimulus: { schema_version: "shud.git-status-capability.limit-stimulus.v1", recipe, recipe_digest: recipeDigest },
+    measurement: { schema_version: "shud.git-status-capability.limit-measurement.v1", limit, unit, value, stimulus_digest: recipeDigest }
+  };
+}
+
 function expectedBoundary(rowId: string): "observer" | "launcher" | "tripwire" {
   if (/^PRT-01[0-2]$/.test(rowId)) return "tripwire";
   if (["CAP-005", "CAP-006", "CAP-008", "CAP-009", "CAP-016", "CAP-017",
@@ -219,6 +242,7 @@ function rowFor(rowId: string): any {
   row.expected_outcome = expectedOutcome(rowId);
   row.observer_outcome = structuredClone(row.expected_outcome);
   row.producing_boundary = expectedBoundary(rowId);
+  row.actual_producing_boundary = row.producing_boundary;
   row.row_verdict = "pass";
   row.control_assertions = controls();
   delete row.oracle_verdict;
@@ -235,11 +259,19 @@ function rowFor(rowId: string): any {
       declared_limit: limits[Math.floor((ordinal - 1) / 2)],
       within_limits: ordinal % 2 === 1
     };
+    const [limit, unit, ceiling] = resourceLimits[Math.floor((ordinal - 1) / 2)]!;
+    row.actual_resource_record = measuredResource(limit, unit, ceiling + (ordinal % 2 === 0 ? 1 : 0));
   } else {
     row.resource_record = { boundary_class: "below", declared_limit: "none", within_limits: true };
+    row.actual_resource_record = structuredClone(row.resource_record);
   }
   const frame = frameForEvidenceSlot("macos", rowId, row.observation_id, row.checkout_capability_identity);
   bindScheduled(row, frame, /^LIM-00[12]$/.test(rowId) ? OBSERVER_LIMITS.frame_bytes : undefined);
+  if (rowId === "LIF-002" || rowId === "LIF-006") {
+    const bytes = scheduledBytes(row);
+    bytes[8] = 2;
+    suppliedBytes(row, bytes, { kind: "set-wire-version-v1", offset: 8, from: 1, to: 2 });
+  }
   if (rowId === "LIF-002") {
     row.first_cause = "FRAME_VERSION_UNSUPPORTED";
     row.secondary_errors = [];

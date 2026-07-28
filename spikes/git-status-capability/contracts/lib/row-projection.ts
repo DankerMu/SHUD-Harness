@@ -20,9 +20,9 @@ function exactKeys(value: JsonRecord, keys: readonly string[]): boolean {
 export function encodeDecisionRowProjectionCore(row: JsonRecord, determinismToken: string): string {
   const expectedKind = KIND_TO_TOKEN[row.expected_outcome.kind as keyof typeof KIND_TO_TOKEN];
   const observedKind = KIND_TO_TOKEN[row.observer_outcome.kind as keyof typeof KIND_TO_TOKEN];
-  const limitOrdinal = DECISION_LIMIT_TOKENS.indexOf(row.resource_record.declared_limit);
-  const boundary = BOUNDARY_TO_TOKEN[row.resource_record.boundary_class as keyof typeof BOUNDARY_TO_TOKEN];
-  const producer = PRODUCER_TO_TOKEN[row.producing_boundary as keyof typeof PRODUCER_TO_TOKEN];
+  const limitOrdinal = DECISION_LIMIT_TOKENS.indexOf(row.actual_resource_record.declared_limit);
+  const boundary = BOUNDARY_TO_TOKEN[row.actual_resource_record.boundary_class as keyof typeof BOUNDARY_TO_TOKEN];
+  const producer = PRODUCER_TO_TOKEN[row.actual_producing_boundary as keyof typeof PRODUCER_TO_TOKEN];
   if (!/^[0-4]$/.test(determinismToken) || !record(row.control_assertions) ||
     !exactKeys(row.control_assertions, CONTROL_ASSERTION_IDS)) throw new Error("invalid D8 projection source");
   let passedControlBits = 0;

@@ -14,7 +14,8 @@ const STABLE_INPUT_KEYS = Object.freeze([
 ]);
 const AXIS_INPUT_KEYS = Object.freeze([...STABLE_INPUT_KEYS, "axis_binding"]);
 const OUTPUT_KEYS = Object.freeze([
-  "observer_outcome", "producing_boundary", "row_verdict", "control_assertions", "protection_set_equal", "cleanup", "resource_record"
+  "observer_outcome", "producing_boundary", "actual_producing_boundary", "row_verdict", "control_assertions", "protection_set_equal", "cleanup",
+  "resource_record", "actual_resource_record"
 ]);
 const RECEIPT_KEYS = Object.freeze([
   "receipt_id", "input", "output", "normalized_row_output_digest", "decision_projection_digest"
@@ -35,7 +36,14 @@ function sha256(value: unknown): value is string {
 }
 
 function exactJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
+    left.every((item, index) => exactJson(item, right[index]));
+  if (record(left) || record(right)) {
+    if (!record(left) || !record(right) || !exactKeys(left, Object.keys(right))) return false;
+    return Object.keys(right).every((key) => exactJson(left[key], right[key]));
+  }
+  return false;
 }
 
 function digest(value: unknown): string {
@@ -92,10 +100,10 @@ function reconstructedRow(input: JsonRecord, output: JsonRecord): JsonRecord {
     checkout_capability_identity: input.checkout_capability_identity,
     git_state_generation_digest: input.git_state_generation_digest, frame_digest: input.supplied_input_digest,
     expected_outcome: input.expected_outcome, observer_outcome: output.observer_outcome,
-    producing_boundary: output.producing_boundary, row_verdict: output.row_verdict,
+    producing_boundary: output.producing_boundary, actual_producing_boundary: output.actual_producing_boundary, row_verdict: output.row_verdict,
     oracle_digest: input.oracle_digest, control_assertions: output.control_assertions,
     protection_set_equal: output.protection_set_equal, cleanup: output.cleanup,
-    resource_record: output.resource_record, source_input_record_sha256: input.source_input_record_sha256
+    resource_record: output.resource_record, actual_resource_record: output.actual_resource_record, source_input_record_sha256: input.source_input_record_sha256
   };
 }
 
@@ -112,9 +120,10 @@ function receipt(value: unknown, row: JsonRecord, token: string, side: "first" |
     source_input_record_sha256: row.source_input_record_sha256
   };
   const expectedOutput = {
-    observer_outcome: row.observer_outcome, producing_boundary: row.producing_boundary, row_verdict: row.row_verdict,
+    observer_outcome: row.observer_outcome, producing_boundary: row.producing_boundary,
+    actual_producing_boundary: row.actual_producing_boundary, row_verdict: row.row_verdict,
     control_assertions: row.control_assertions, protection_set_equal: row.protection_set_equal,
-    cleanup: row.cleanup, resource_record: row.resource_record
+    cleanup: row.cleanup, resource_record: row.resource_record, actual_resource_record: row.actual_resource_record
   };
   if (!exactJson(stableInput(value.input), expectedInput) || !exactJson(value.output, expectedOutput) ||
     value.normalized_row_output_digest !== digest(value.output)) return false;

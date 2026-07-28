@@ -140,11 +140,13 @@ function validRow(): Record<string, unknown> {
       }
     },
     expected_outcome: { kind: "clean" }, observer_outcome: { kind: "clean" }, producing_boundary: "observer",
+    actual_producing_boundary: "observer",
     row_verdict: "pass", oracle_digest: shaA,
     control_assertions: Object.fromEntries(CONTROL_ASSERTION_IDS.map((id) => [id, { active: true, verdict: "pass" }])),
     protection_set_equal: true,
     cleanup: { verdict: "pass", descriptors_restored: true, processes_reaped: true },
     resource_record: { boundary_class: "below", declared_limit: "none", within_limits: true },
+    actual_resource_record: { boundary_class: "below", declared_limit: "none", within_limits: true },
     source_input_record_sha256: shaB
   };
 }
@@ -167,14 +169,20 @@ function admittedPaths() {
   return [{ path: "a.txt", git_mode: "100644" }, { path: "bin/run", git_mode: "100755" }];
 }
 
+function manifestDigest(): string {
+  const pieces = [Buffer.from("SHUD-HARNESS\0GIT-STATUS-CAPABILITY\0SOURCE-MANIFEST-DIGEST\0V1\n", "utf8")];
+  for (const entry of admittedPaths()) pieces.push(Buffer.from(`${entry.git_mode}\0${entry.path}\n`, "utf8"));
+  return createHash("sha256").update(Buffer.concat(pieces)).digest("hex");
+}
+
 function encoder(identity: string) {
-  return { identity, result: { source_input_digest: shaA, manifest_digest: shaB, entry_count: 2, admitted_paths: admittedPaths() } };
+  return { identity, result: { source_input_digest: shaA, manifest_digest: manifestDigest(), entry_count: 2, admitted_paths: admittedPaths() } };
 }
 
 function validSourceRecord(): Record<string, unknown> {
   return {
     schema_version: "shud.git-status-capability.source-input-record.v1", source_sha: "01".repeat(20),
-    source_input_digest: shaA, manifest_digest: shaB, entry_count: 2, admitted_paths: admittedPaths(),
+    source_input_digest: shaA, manifest_digest: manifestDigest(), entry_count: 2, admitted_paths: admittedPaths(),
     primary_encoder: encoder("source-input-primary-v1"), witness_encoder: encoder("source-input-witness-v1"),
     command_receipt: {
       argv: [

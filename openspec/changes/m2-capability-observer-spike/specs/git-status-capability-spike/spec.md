@@ -164,7 +164,7 @@ use only the pinned Bun runtime and standard library, SHALL NOT depend on task
 1.3's `verify.sh`, launcher, observer, or production package, and SHALL write no
 files. Before JSON parsing it SHALL enforce these inclusive limits:
 
-| Input kind | Bytes | Depth | Nodes | Object members + array items |
+| Input kind | Bytes | Depth | Nodes | Object members |
 |---|---:|---:|---:|---:|
 | catalog/crosswalk/ownership contract | 512 KiB | 16 | 32,768 | 4,096 |
 | dependency graph catalog | 256 KiB | 16 | 16,384 | 4,096 |
@@ -176,7 +176,9 @@ files. Before JSON parsing it SHALL enforce these inclusive limits:
 | candidate/terminal decision | 128 KiB | 16 | 8,192 | 2,048 |
 
 Depth counts the root as one; each scalar, object, or array value is one node;
-the item counter counts every object member and array element. Strict UTF-8,
+the item counter counts every object member. Array elements are already bounded
+by the node counter, while object members have the additional independent item
+ceiling. Strict UTF-8,
 duplicate-key detection, depth/node/item accounting, and trailing-token rejection
 occur before semantic trust. Failures use exactly
 `CONTRACT_BYTES_LIMIT|CONTRACT_UTF8_INVALID|CONTRACT_JSON_MALFORMED|CONTRACT_JSON_DUPLICATE_KEY|CONTRACT_JSON_DEPTH_LIMIT|CONTRACT_JSON_NODE_LIMIT|CONTRACT_JSON_ITEM_LIMIT|CONTRACT_SCHEMA_INVALID`.
