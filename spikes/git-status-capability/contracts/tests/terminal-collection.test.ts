@@ -225,6 +225,13 @@ async function assertViews(root: string, candidates: string[], accepted: boolean
   else expect(staged, `staged:${label}`).toThrow(ContractError);
 }
 
+function refreshDirectDigests(collection: DirectCollection): void {
+  collection.finalBundle.macos_bundle_sha256 = sha256(jsonBytes(collection.macos));
+  collection.finalBundle.linux_bundle_sha256 = sha256(jsonBytes(collection.linux));
+  collection.finalBundle.decision_projection_digest = canonicalJsonDigest(collection.decision);
+  if (collection.assertion) collection.assertion = publicationAssertion(collection.decision, collection.sourceRecordSha);
+}
+
 type DirectCollection = {
   root: string;
   candidates: string[];
@@ -304,6 +311,48 @@ afterEach(async () => {
 });
 
 describe("Phase 6.2 terminal evidence collection", () => {
+  test("direct platform supply identities are bound to the decision projection in both views", async () => {
+    const mutations: Array<[string, (bundle: JsonRecord) => void]> = [
+      ["source-commit", (bundle) => { bundle.source_commit = "02".repeat(20); }],
+      ["catalog", (bundle) => { bundle.catalog_digest = "03".repeat(32); }],
+      ["target", (bundle) => {
+        bundle.target = bundle.platform === "macos" ? "x86_64-unknown-linux-gnu" : "aarch64-apple-darwin";
+      }],
+      ["target-graph", (bundle) => { bundle.dependency_graph_digest = "04".repeat(32); }],
+      ["direct-feature", (bundle) => { bundle.direct_feature_digest = "05".repeat(32); }],
+      ["call-ledger", (bundle) => { bundle.call_ledger_digest = "06".repeat(32); }],
+      ["sbom", (bundle) => { bundle.sbom_digest = "07".repeat(32); }],
+      ["license-inventory", (bundle) => { bundle.license_inventory_digest = "08".repeat(32); }],
+      ["toolchain", (bundle) => { bundle.toolchain.rustc_vv = "rustc 1.88.0 (drift)"; }]
+    ];
+    for (const platform of ["macos", "linux"] as const) {
+      for (const [field, mutate] of mutations) {
+        const collection = await installDirect("accepted");
+        mutate(collection[platform]);
+        refreshDirectDigests(collection);
+        await persistDirect(collection);
+        await assertViews(collection.root, collection.candidates, false, `${platform}:${field}`);
+      }
+    }
+  }, 900_000);
+
+  test("public checker rejects a complete collection with platform supply drift", async () => {
+    const collection = await installDirect("accepted");
+    collection.macos.sbom_digest = "09".repeat(32);
+    refreshDirectDigests(collection);
+    await persistDirect(collection);
+    expect(spawnSync("git", ["init", "-q"], { cwd: collection.root }).status).toBe(0);
+    expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], {
+      cwd: collection.root
+    }).status).toBe(0);
+    const result = spawnSync(process.execPath, [
+      checkerPath, "--repository-root", collection.root, "--manifest", manifestRelative, "--check-current"
+    ], { cwd: collection.root, encoding: "utf8" });
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("CONTRACT_SCHEMA_INVALID");
+  }, 120_000);
+
   test("every direct descendant binds the exact source-record bytes in worktree and staged views", async () => {
     const wrongSha = "ff".repeat(32);
     const cases: Array<[string, string, JsonRecord]> = [

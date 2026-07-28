@@ -467,6 +467,21 @@ function terminalStateMatches(finalBundle: JsonRecord, decision: JsonRecord): bo
 
 function directPlatformMatchesDecision(platformBundle: JsonRecord, decision: JsonRecord): boolean {
   if (decision.run_status === "valid_complete" && platformBundle.run_status !== "valid_complete") return false;
+  const platform = platformBundle.platform as "macos" | "linux";
+  const target = platform === "macos" ? "aarch64-apple-darwin" : "x86_64-unknown-linux-gnu";
+  const targetGraphField = platform === "macos" ? "macos_target_graph_digest" : "linux_target_graph_digest";
+  const targetIdentityField = platform === "macos" ? "macos_target_identity" : "linux_target_identity";
+  const toolchainIdentityField = platform === "macos" ? "macos_toolchain_identity" : "linux_toolchain_identity";
+  if (platformBundle.source_commit !== decision.base_sha ||
+    platformBundle.catalog_digest !== decision.catalog_digest ||
+    platformBundle.target !== decision[targetIdentityField] ||
+    platformBundle.dependency_graph_digest !== decision[targetGraphField] ||
+    platformBundle.dependency_graph_digest !== TARGET_GRAPH_EXPECTATIONS[target].graph_digest ||
+    platformBundle.direct_feature_digest !== decision.direct_feature_digest ||
+    platformBundle.call_ledger_digest !== decision.call_ledger_digest ||
+    platformBundle.sbom_digest !== decision.sbom_digest ||
+    platformBundle.license_inventory_digest !== decision.license_inventory_digest ||
+    canonicalJsonDigest(platformBundle.toolchain) !== decision[toolchainIdentityField]) return false;
   let projection: string[];
   try {
     projection = (platformBundle.rows as JsonRecord[]).map(encodeDecisionRowProjection);
@@ -1594,6 +1609,7 @@ export function validatePlatformBundle(value: unknown): boolean {
   if (!["macos", "linux"].includes(value.platform as string) || !["valid_complete", "invalid"].includes(value.run_status as string) || !gitObjectId(value.source_commit)) return false;
   const target = value.platform === "macos" ? "aarch64-apple-darwin" : "x86_64-unknown-linux-gnu";
   if (value.target !== target || !record(value.toolchain) || !exactKeys(value.toolchain, ["rustc_vv", "cargo_version", "git_version", "target_triple"]) || !Object.values(value.toolchain).every(nonEmptyString) || value.toolchain.target_triple !== target) return false;
+  if (value.dependency_graph_digest !== TARGET_GRAPH_EXPECTATIONS[target].graph_digest) return false;
   if (!Array.isArray(value.rows) || !value.rows.every(validateRowEvidence) || !Array.isArray(value.protection_set)) return false;
   const rowById = new Map(value.rows.map((row) => [(row as JsonRecord).row_id, row as JsonRecord]));
   if (!value.protection_set.every((receipt) => {
