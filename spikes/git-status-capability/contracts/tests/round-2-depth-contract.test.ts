@@ -105,17 +105,144 @@ function normalizedRow(rowId: string, platform = "macos"): any {
   return row;
 }
 
+function protectionRoles(row: any): any[] {
+  const fixed = [
+    ["canonical-superproject", "superproject", "directory"],
+    ["canonical-contract-file", "superproject/spikes/git-status-capability/contracts/contract-v1.json", "regular-file"],
+    ["published-shud", "published/SHUD", "directory"],
+    ["published-rshud", "published/rSHUD", "directory"],
+    ["published-autoshud", "published/AutoSHUD", "directory"],
+    ["published-zero", "published/zero", "directory"],
+    ["current-disposable", "disposable", "directory"]
+  ].map(([role, path, objectType]) => ({
+    role,
+    object_type: objectType,
+    subject: {
+      kind: "fixed-role-v1", name: role,
+      authority_identity: role === "current-disposable"
+        ? row.checkout_capability_identity
+        : digest({ schema_version: "shud.git-status-capability.fixed-protected-authority.v1", platform: row.platform, role })
+    },
+    ingresses: [
+      { kind: "canonical-v1", name: `protected/${path}` },
+      { kind: "physical-alias-v1", name: `aliases/physical/${role}` },
+      { kind: "symlink-alias-v1", name: `aliases/symlink/${role}` }
+    ]
+  }));
+  const frame = row.frame_binding.scheduled.frame_reference.frame;
+  const nested = frame.nested_state.map((state: any) => {
+    const role = `nested-${state.checkout_state}-${digest({ path: state.path, checkout_state: state.checkout_state })}`;
+    const absent = state.checkout_state === "absent";
+    const subject = absent
+      ? { kind: "absent-nested-v1", path: state.path, parent_identity: state.audit.parent_identity, basename: state.audit.basename }
+      : { kind: "nested-checkout-v1", path: state.path, checkout_state: state.checkout_state,
+          directory_identity: state.audit.directory_identity };
+    const ingresses = [
+      { kind: "canonical-v1", name: absent ? `protected/disposable/${state.path.split("/").slice(0, -1).join("/") || "root"}` : `protected/disposable/${state.path}` },
+      { kind: "physical-alias-v1", name: `aliases/physical/${role}` },
+      { kind: "symlink-alias-v1", name: `aliases/symlink/${role}` }
+    ];
+    if (absent) ingresses.push({ kind: "absent-basename-v1", name: `protected/disposable/${state.path}` });
+    return { role, object_type: absent ? "absent-parent" : "directory", subject, ingresses };
+  });
+  return [...fixed, ...nested];
+}
+
+function protectionReceipt(row: any, platform: "macos" | "linux", _memberPath?: string): any {
+  const slot = {
+    platform, row_id: row.row_id, observation_id: row.observation_id, supplied_input_digest: row.frame_digest
+  };
+  const profileMaterial = {
+    schema_version: "shud.git-status-capability.protection-profile.v1", ...slot, roles: protectionRoles(row)
+  };
+  const profileDigest = digest(profileMaterial);
+  const inventory = profileMaterial.roles.map((role: any, sequence: number) => {
+    const subjectDigest = digest(role.subject);
+    const identityMaterial = {
+      schema_version: "shud.git-status-capability.protected-identity.v1", profile_digest: profileDigest,
+      role: role.role, object_type: role.object_type, subject_digest: subjectDigest
+    };
+    const identityDigest = digest(identityMaterial);
+    const ingressRecords = role.ingresses.map((ingress: any) => {
+      const ingressMaterial = {
+        schema_version: "shud.git-status-capability.protected-ingress.v1", profile_digest: profileDigest,
+        identity_digest: identityDigest, role: role.role, kind: ingress.kind, name: ingress.name
+      };
+      return { ingress_material: ingressMaterial, ingress_digest: digest(ingressMaterial) };
+    });
+    const ingressDigests = ingressRecords.map((record: any) => record.ingress_digest);
+    const text = role.object_type === "absent-parent"
+      ? `absent:${role.subject.parent_identity}:${role.subject.basename}\n`
+      : `${role.object_type === "regular-file" ? "regular" : "directory"}:${role.role}:${subjectDigest}\n`;
+    const content = {
+      encoding: role.object_type === "absent-parent" ? "absent-parent-manifest-v1"
+        : role.object_type === "regular-file" ? "utf8-v1" : "directory-manifest-v1", text
+    };
+    const measurement = {
+      schema_version: "shud.git-status-capability.protected-measurement.v1", profile_digest: profileDigest,
+      identity_digest: identityDigest, ingress_digests: ingressDigests, content,
+      metadata: { object_type: role.object_type, git_mode: role.object_type === "regular-file" ? "100644" : "040000",
+        byte_length: Buffer.byteLength(text) }
+    };
+    const measurementDigest = digest(measurement);
+    const eventMaterial = {
+      schema_version: "shud.git-status-capability.protection-event.v1", profile_digest: profileDigest,
+      identity_digest: identityDigest, ingress_digests: ingressDigests, pre_digest: measurementDigest,
+      post_digest: measurementDigest, sequence, kind: "verified-unchanged-v1"
+    };
+    return {
+      identity_material: identityMaterial, identity_digest: identityDigest, ingress_records: ingressRecords,
+      pre_measurement: measurement, pre_digest: measurementDigest,
+      post_measurement: structuredClone(measurement), post_digest: measurementDigest,
+      event_material: eventMaterial, event_digest: digest(eventMaterial)
+    };
+  });
+  const core = { ...slot, profile_material: profileMaterial, profile_digest: profileDigest, inventory };
+  return { ...core, receipt_digest: digest(core) };
+}
+
 function normalizedBundle(platform = "macos"): any {
   const source = platform === "macos" ? generic.platform_bundle : generic.linux_platform_bundle;
   const bundle = structuredClone(source);
   bundle.rows = source.rows.map((row: any) => normalizedRow(row.row_id, platform));
-  bundle.protection_set = bundle.protection_set.map((receipt: any) => {
-    const row = bundle.rows.find((candidate: any) => candidate.row_id === receipt.row_id);
-    const core = { ...receipt, platform, observation_id: row.observation_id, supplied_input_digest: row.frame_digest };
-    delete core.receipt_digest;
-    return { ...core, receipt_digest: digest(core) };
-  });
+  bundle.protection_set = bundle.rows.map((row: any) => protectionReceipt(row, platform as "macos" | "linux"));
   return bundle;
+}
+
+function rowWithAbsentNested(rowId = "BAS-001", platform: "macos" | "linux" = "macos"): any {
+  const row = normalizedRow(rowId, platform);
+  const oldFrameDigest = row.frame_digest;
+  const oldGeneration = row.git_state_generation_digest;
+  const frame = row.frame_binding.scheduled.frame_reference.frame;
+  frame.nested_state[0].checkout_state = "absent";
+  frame.nested_state[0].audit = {
+    state: "absent", parent_identity: shaA, basename: frame.nested_state[0].path.split("/").at(-1)
+  };
+  sealFrame(frame);
+  const newGeneration = frame.git_state_generation_digest;
+  const newLength = 128 + canonicalJsonBytes(frame).length;
+  const newFrameDigest = digest(canonicalWireFrameBytes(frame, newLength));
+  const replace = (value: any): any => {
+    if (value === oldFrameDigest) return newFrameDigest;
+    if (value === oldGeneration) return newGeneration;
+    if (Array.isArray(value)) return value.map(replace);
+    if (value && typeof value === "object") {
+      for (const key of Object.keys(value)) value[key] = replace(value[key]);
+    }
+    return value;
+  };
+  replace(row);
+  row.frame_binding.scheduled.input_length = newLength;
+  row.frame_binding.scheduled.material.body_length = canonicalJsonBytes(frame).length;
+  row.frame_binding.supplied.input_length = newLength;
+  for (const resource of [row.resource_record, row.actual_resource_record]) {
+    if (!resource.stimulus) continue;
+    resource.stimulus.locator.supplied_input_digest = newFrameDigest;
+    const { receipt_digest: _old, ...locatorCore } = resource.stimulus.locator;
+    resource.stimulus.locator.receipt_digest = digest(locatorCore);
+    resource.measurement.stimulus_receipt_digest = resource.stimulus.locator.receipt_digest;
+  }
+  return row;
 }
 
 function reorder(value: Record<string, any>): Record<string, any> {
@@ -137,6 +264,7 @@ function catalogRelationship(row: any): any {
 function causalReceipt(row: any, kind: "outcome-mismatch-v1" | "control-failure-v1" | "resource-exceeded-v1" | "lifecycle-fault-v1" | "catalog-negative-mismatch-v1" | "launcher-fault-v1", controlId?: string): any {
   const base: Record<string, any> = {
     schema_version: "shud.git-status-capability.row-failure-receipt.v1",
+    platform: row.platform,
     producer: row.actual_producing_boundary,
     row_id: row.row_id,
     observation_id: row.observation_id,
@@ -164,7 +292,6 @@ function causalReceipt(row: any, kind: "outcome-mismatch-v1" | "control-failure-
     base.cleanup = structuredClone(row.cleanup);
   }
   if (kind === "catalog-negative-mismatch-v1") {
-    base.platform = row.platform;
     base.frozen_expected_code = row.expected_outcome.code;
     base.frozen_boundary = row.producing_boundary;
     base.actual_code = row.observer_outcome.code;
@@ -182,6 +309,33 @@ function resignCause(cause: any): any {
   const changed = structuredClone(cause);
   const { receipt_digest: _discarded, ...receipt } = changed.receipt;
   changed.receipt = { ...receipt, receipt_digest: digest(receipt) };
+  return changed;
+}
+
+function resignProtection(receipt: any): any {
+  const changed = structuredClone(receipt);
+  const { receipt_digest: _discarded, ...core } = changed;
+  return { ...core, receipt_digest: digest(core) };
+}
+
+function resignProtectionMember(member: any): any {
+  const changed = structuredClone(member);
+  changed.identity_digest = digest(changed.identity_material);
+  for (const ingress of changed.ingress_records) {
+    ingress.ingress_material.identity_digest = changed.identity_digest;
+    ingress.ingress_digest = digest(ingress.ingress_material);
+  }
+  const ingressDigests = changed.ingress_records.map((ingress: any) => ingress.ingress_digest);
+  for (const phase of ["pre", "post"] as const) {
+    changed[`${phase}_measurement`].identity_digest = changed.identity_digest;
+    changed[`${phase}_measurement`].ingress_digests = ingressDigests;
+    changed[`${phase}_digest`] = digest(changed[`${phase}_measurement`]);
+  }
+  changed.event_material.identity_digest = changed.identity_digest;
+  changed.event_material.ingress_digests = ingressDigests;
+  changed.event_material.pre_digest = changed.pre_digest;
+  changed.event_material.post_digest = changed.post_digest;
+  changed.event_digest = digest(changed.event_material);
   return changed;
 }
 
@@ -457,10 +611,11 @@ describe("Round 2 canonical proof binding", () => {
         (value: any) => { value.protection_set[0].inventory.push(structuredClone(value.protection_set[0].inventory[0])); },
         (value: any) => { value.protection_set[0].inventory[0].post_digest = shaA; },
         (value: any) => { value.protection_set[0].inventory = []; },
-        (value: any) => { value.protection_set[0].inventory = Array.from({ length: 65 }, (_, index) => ({
-          identity: digest(`member-${index}`), pre_digest: digest(`stable-${index}`), post_digest: digest(`stable-${index}`),
-          event_digest: digest(`event-${index}`)
-        })); },
+        (value: any) => {
+          const row = value.rows[0];
+          value.protection_set[0].inventory = Array.from({ length: 65 }, (_, index) =>
+            protectionReceipt(row, platform, `.shud-harness/protected/${row.row_id}-${index}.state`).inventory[0]);
+        },
         (value: any) => { value.protection_set[0].platform = platform === "macos" ? "linux" : "macos"; },
         (value: any) => { value.rows[0].protection_set_equal = false; }
       ];
@@ -476,6 +631,106 @@ describe("Round 2 canonical proof binding", () => {
       }
     }
   }, 30_000);
+
+  test("protection receipts reject copied or self-claimed material even after the outer receipt is re-signed", () => {
+    const bundle = normalizedBundle();
+    expect(validatePlatformBundle(bundle), "baseline").toBe(true);
+
+    const copied = structuredClone(bundle);
+    copied.protection_set[1].inventory = structuredClone(copied.protection_set[0].inventory);
+    copied.protection_set[1] = resignProtection(copied.protection_set[1]);
+    expect(validatePlatformBundle(copied), "cross-slot material copy").toBe(false);
+
+    const arbitrary = structuredClone(bundle);
+    arbitrary.protection_set[0].inventory[0].identity_digest = shaA;
+    arbitrary.protection_set[0].inventory[0].ingress_records[0].ingress_digest = shaA;
+    arbitrary.protection_set[0].inventory[0].pre_digest = shaA;
+    arbitrary.protection_set[0].inventory[0].post_digest = shaA;
+    arbitrary.protection_set[0].inventory[0].event_digest = shaA;
+    arbitrary.protection_set[0] = resignProtection(arbitrary.protection_set[0]);
+    expect(validatePlatformBundle(arbitrary), "digest-only replacement").toBe(false);
+
+    const reusedEvent = structuredClone(bundle);
+    reusedEvent.protection_set[1].inventory[0].event_material =
+      structuredClone(reusedEvent.protection_set[0].inventory[0].event_material);
+    reusedEvent.protection_set[1].inventory[0].event_digest = reusedEvent.protection_set[0].inventory[0].event_digest;
+    reusedEvent.protection_set[1] = resignProtection(reusedEvent.protection_set[1]);
+    expect(validatePlatformBundle(reusedEvent), "event reuse").toBe(false);
+
+    const materialMutation = structuredClone(bundle);
+    materialMutation.protection_set[0].inventory[0].pre_measurement.content.text += "mutated";
+    materialMutation.protection_set[0] = resignProtection(materialMutation.protection_set[0]);
+    expect(validatePlatformBundle(materialMutation), "material byte mutation").toBe(false);
+
+    const wrongPlatform = structuredClone(bundle);
+    wrongPlatform.protection_set[0] = protectionReceipt(bundle.rows[0], "linux");
+    expect(validatePlatformBundle(wrongPlatform), "fully re-signed inner platform").toBe(false);
+
+    const wrongInput = structuredClone(bundle);
+    const wrongInputRow = structuredClone(bundle.rows[0]);
+    wrongInputRow.frame_digest = shaA;
+    wrongInput.protection_set[0] = protectionReceipt(wrongInputRow, "macos");
+    expect(validatePlatformBundle(wrongInput), "fully re-signed inner supplied input").toBe(false);
+  });
+
+  test("every invocation requires the derived complete protection role and ingress set", () => {
+    const bundle = normalizedBundle();
+    expect(validatePlatformBundle(bundle), "complete profile baseline").toBe(true);
+    const receipt = bundle.protection_set[0];
+    expect(receipt.inventory.length).toBe(8);
+
+    const cases: Array<[string, (value: any) => void]> = [
+      ["missing mandatory base role", (value) => { value.protection_set[0].inventory.shift(); }],
+      ["missing initialized nested member", (value) => {
+        value.protection_set[0].inventory = value.protection_set[0].inventory.filter(
+          (member: any) => !member.identity_material.role.startsWith("nested-")
+        );
+      }],
+      ["missing physical alias ingress", (value) => {
+        value.protection_set[0].inventory[0].ingress_records = value.protection_set[0].inventory[0].ingress_records.filter(
+          (record: any) => record.ingress_material.kind !== "physical-alias-v1"
+        );
+        value.protection_set[0].inventory[0] = resignProtectionMember(value.protection_set[0].inventory[0]);
+      }],
+      ["missing symlink alias ingress", (value) => {
+        value.protection_set[0].inventory[0].ingress_records = value.protection_set[0].inventory[0].ingress_records.filter(
+          (record: any) => record.ingress_material.kind !== "symlink-alias-v1"
+        );
+        value.protection_set[0].inventory[0] = resignProtectionMember(value.protection_set[0].inventory[0]);
+      }],
+      ["directory measured as regular file", (value) => {
+        const member = value.protection_set[0].inventory[0];
+        member.identity_material.object_type = "regular-file";
+        member.pre_measurement.metadata.object_type = "regular-file";
+        member.pre_measurement.metadata.git_mode = "100644";
+        member.post_measurement = structuredClone(member.pre_measurement);
+        value.protection_set[0].inventory[0] = resignProtectionMember(member);
+      }],
+      ["single synthetic member", (value) => { value.protection_set[0].inventory = [value.protection_set[0].inventory[0]]; }]
+    ];
+    for (const [label, mutate] of cases) {
+      const changed = structuredClone(bundle);
+      mutate(changed);
+      changed.protection_set[0] = resignProtection(changed.protection_set[0]);
+      expect(validatePlatformBundle(changed), label).toBe(false);
+    }
+
+    const absentBundle = normalizedBundle();
+    absentBundle.rows[0] = rowWithAbsentNested();
+    expect(validateRowEvidence(absentBundle.rows[0]), "absent row").toBe(true);
+    absentBundle.protection_set[0] = protectionReceipt(absentBundle.rows[0], "macos");
+    expect(validatePlatformBundle(absentBundle), "absent complete profile").toBe(true);
+    const absentMember = absentBundle.protection_set[0].inventory.find(
+      (member: any) => member.identity_material.object_type === "absent-parent"
+    );
+    absentMember.ingress_records = absentMember.ingress_records.filter(
+      (record: any) => record.ingress_material.kind !== "absent-basename-v1"
+    );
+    const index = absentBundle.protection_set[0].inventory.indexOf(absentMember);
+    absentBundle.protection_set[0].inventory[index] = resignProtectionMember(absentMember);
+    absentBundle.protection_set[0] = resignProtection(absentBundle.protection_set[0]);
+    expect(validatePlatformBundle(absentBundle), "missing absent basename ingress").toBe(false);
+  });
 
   test("initialized nested audit indexes obey the same row-specific material rules as the root index", () => {
     const frame = structuredClone(normalizedRow("BAS-001").frame_binding.scheduled.frame_reference.frame);
@@ -588,7 +843,7 @@ describe("Round 2 canonical proof binding", () => {
     expect(validateDecision(decision)).toBe(true);
   });
 
-  test("non-LIM rows separate catalog expectations from five exact launcher measurements and +1 failures", async () => {
+  test("non-LIM rows separate catalog expectations from five below/exact launcher measurements and +1 failures", async () => {
     const cases = [
       ["wall_time_ms", "milliseconds", "TIMEOUT"],
       ["cpu_time_ms", "milliseconds", "LIMIT_CPU_TIME"],
@@ -597,20 +852,22 @@ describe("Round 2 canonical proof binding", () => {
       ["output_bytes", "bytes", "LIMIT_OUTPUT_BYTES"]
     ] as const;
     for (const [limit, unit, code] of cases) {
-      const pass = normalizedRow("BAS-001");
-      pass.actual_resource_record = measuredResource(pass, limit, unit, OBSERVER_LIMITS[limit]);
-      expect(pass.resource_record).toEqual({ boundary_class: "below", declared_limit: "none", within_limits: true });
-      expect(validateRowEvidence(pass), `${limit}:raw-exact`).toBe(true);
-      expect(await publicValidation("row_evidence", pass), `${limit}:public-row-exact`).toEqual({ exit: 0, code: undefined });
-      const passBundle = normalizedBundle();
-      passBundle.rows[0] = pass;
-      expect(validatePlatformBundle(passBundle), `${limit}:platform-exact`).toBe(true);
-      expect(await publicValidation("platform_bundle", passBundle), `${limit}:public-platform-exact`).toEqual({ exit: 0, code: undefined });
-      const projected = structuredClone(generic.decision);
-      const index = projected.rows.findIndex((scalar: string) => scalar.split("\0")[0] === "m" && scalar.split("\0")[1] === "BAS-001");
-      projected.rows[index] = encodeDecisionRowProjection(pass);
-      expect(validateDecision(projected), `${limit}:d8-exact`).toBe(true);
-      expect(await publicValidation("decision", projected), `${limit}:public-d8-exact`).toEqual({ exit: 0, code: undefined });
+      for (const [boundary, value] of [["below", OBSERVER_LIMITS[limit] - 1], ["exact", OBSERVER_LIMITS[limit]]] as const) {
+        const pass = normalizedRow("BAS-001");
+        pass.actual_resource_record = measuredResource(pass, limit, unit, value);
+        expect(pass.resource_record).toEqual({ boundary_class: "below", declared_limit: "none", within_limits: true });
+        expect(validateRowEvidence(pass), `${limit}:${boundary}:raw`).toBe(true);
+        expect(await publicValidation("row_evidence", pass), `${limit}:${boundary}:public-row`).toEqual({ exit: 0, code: undefined });
+        const passBundle = normalizedBundle();
+        passBundle.rows[0] = pass;
+        expect(validatePlatformBundle(passBundle), `${limit}:${boundary}:platform`).toBe(true);
+        expect(await publicValidation("platform_bundle", passBundle), `${limit}:${boundary}:public-platform`).toEqual({ exit: 0, code: undefined });
+        const projected = structuredClone(generic.decision);
+        const index = projected.rows.findIndex((scalar: string) => scalar.split("\0")[0] === "m" && scalar.split("\0")[1] === "BAS-001");
+        projected.rows[index] = encodeDecisionRowProjection(pass);
+        expect(validateDecision(projected), `${limit}:${boundary}:d8`).toBe(true);
+        expect(await publicValidation("decision", projected), `${limit}:${boundary}:public-d8`).toEqual({ exit: 0, code: undefined });
+      }
 
       const fail = resourceFailure("BAS-001", limit, unit, code);
       expect(validateRowEvidence(fail), `${limit}:raw-plus-one`).toBe(true);
@@ -624,6 +881,69 @@ describe("Round 2 canonical proof binding", () => {
       expect(await publicValidation("decision", failedDecision), `${limit}:public-d8-plus-one`).toEqual({ exit: 0, code: undefined });
     }
   }, 30_000);
+
+  test("specialized PRT and LIF rows select launcher causality from the actual boundary and outcome", async () => {
+    for (const rowId of ["BAS-001", "PRT-010", "LIF-002"] as const) {
+      for (const code of ["SIGNALLED_TERM", "SIGNALLED_KILL", "TIMEOUT", "CLEANUP_FAILED"] as const) {
+        const row = normalizedRow(rowId);
+        row.observer_outcome = { kind: "rejected", code };
+        row.actual_producing_boundary = "launcher";
+        row.row_verdict = "fail";
+        row.first_cause = code;
+        row.secondary_errors = [];
+        row.cleanup = code === "CLEANUP_FAILED"
+          ? { verdict: "fail", descriptors_restored: false, processes_reaped: true }
+          : { verdict: "pass", descriptors_restored: true, processes_reaped: true };
+        row.control_assertions.cleanup.verdict = "pass";
+        row.failure_cause = causalReceipt(row, "launcher-fault-v1");
+        expect(validateRowEvidence(row), `${rowId}/${code}:raw`).toBe(true);
+        expect(await publicValidation("row_evidence", row), `${rowId}/${code}:public-row`).toEqual({ exit: 0, code: undefined });
+        const bundle = normalizedBundle();
+        bundle.rows[bundle.rows.findIndex((candidate: any) => candidate.row_id === rowId)] = row;
+        expect(validatePlatformBundle(bundle), `${rowId}/${code}:platform`).toBe(true);
+        const decision = rejectedDecisionFor(row);
+        expect(validateDecision(decision), `${rowId}/${code}:D8`).toBe(true);
+        expect(await publicValidation("decision", decision), `${rowId}/${code}:public-D8`).toEqual({ exit: 0, code: undefined });
+      }
+    }
+  }, 30_000);
+
+  test("all six causal receipt kinds bind platform in their common canonical preimage", () => {
+    const control = normalizedRow("BAS-002");
+    control.actual_producing_boundary = "tripwire";
+    control.control_assertions.protected_write.verdict = "fail";
+    control.row_verdict = "fail";
+    control.failure_cause = causalReceipt(control, "control-failure-v1", "protected_write");
+    const launcher = normalizedRow("BAS-001");
+    launcher.observer_outcome = { kind: "rejected", code: "SIGNALLED_TERM" };
+    launcher.actual_producing_boundary = "launcher";
+    launcher.row_verdict = "fail";
+    launcher.first_cause = "SIGNALLED_TERM";
+    launcher.secondary_errors = [];
+    launcher.failure_cause = causalReceipt(launcher, "launcher-fault-v1");
+    const rows = [
+      outcomeFailure("BAS-004", "observer", { kind: "clean" }), control,
+      resourceFailure("BAS-003", "memory_bytes", "bytes", "LIMIT_MEMORY"),
+      lifecycleFailure("LIF-002"), catalogNegativeFailure("CAP-005", "macos", "PLATFORM_UNSUPPORTED"), launcher
+    ];
+    for (const row of rows) {
+      row.failure_cause.receipt.platform = row.platform;
+      row.failure_cause = resignCause(row.failure_cause);
+      expect(validateRowEvidence(row), `${row.failure_cause.kind}:baseline`).toBe(true);
+      for (const mutate of [
+        (cause: any) => { delete cause.receipt.platform; },
+        (cause: any) => { cause.receipt.platform = row.platform === "macos" ? "linux" : "macos"; }
+      ]) {
+        const changed = structuredClone(row);
+        mutate(changed.failure_cause);
+        changed.failure_cause = resignCause(changed.failure_cause);
+        expect(validateRowEvidence(changed), `${row.failure_cause.kind}:platform-binding`).toBe(false);
+      }
+      const crossPlatform = structuredClone(row);
+      crossPlatform.platform = row.platform === "macos" ? "linux" : "macos";
+      expect(validateRowEvidence(crossPlatform), `${row.failure_cause.kind}:cross-platform-reuse`).toBe(false);
+    }
+  });
 
   test("normal passes reject hidden cause metadata and launcher outcomes preserve ordered causal settlement", async () => {
     for (const field of ["first_cause", "secondary_errors", "failure_cause"] as const) {

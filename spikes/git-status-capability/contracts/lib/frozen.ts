@@ -171,6 +171,13 @@ export const INGESTION_LIMITS = Object.freeze({
   decision: { bytes: 128 * 1024, depth: 16, nodes: 8_192, items: 2_048 }
 });
 
+export const IMMUTABLE_EVIDENCE_REFERENCE_LIMITS = Object.freeze({
+  bytes: 4 * 1024,
+  depth: 6,
+  nodes: 64,
+  items: 32
+});
+
 export const OBSERVER_LIMITS = Object.freeze({
   frame_bytes: 8 * 1024 * 1024,
   index_bytes: 6 * 1024 * 1024,
@@ -278,7 +285,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       dependency_graph_digest: "sha256", direct_feature_digest: "sha256", call_ledger_digest: "sha256",
       sbom_digest: "sha256", license_inventory_digest: "sha256",
       rows: "array:row-evidence;valid_complete=174-exact;top-level-observation,scheduled-generation,actual-supplied-input-identities=unique-per-platform-slot;DET-paired-receipt-identities=8-globally-unique;same-row-nested-observation-repeat-only-exception",
-      protection_set: "array:174-exact-slot-receipts:strict:{platform,row_id,observation_id,supplied_input_digest,inventory:[strict:{identity,pre_digest,post_digest,event_digest}],receipt_digest};slot-exact-once;inventory=1..64-identity-unique;pre_digest=post_digest;row-boolean-derived",
+      protection_set: "array:174-exact-slot-receipts:strict:{platform,row_id,observation_id,supplied_input_digest,profile_material,profile_digest,inventory:[strict:{identity_material,identity_digest,ingress_records,pre_measurement,pre_digest,post_measurement,post_digest,event_material,event_digest}],receipt_digest};profile=strict-slot-bound-canonical-6-base-root-roles+regular-contract-anchor+every-scheduled-initialized|deinitialized|absent-nested-role;each-object-one-identity;canonical+physical-alias+symlink-alias-ingresses;absent-parent-adds-basename-ingress;profile-and-inventory-sets-independently-derived-and-exactly-equal;directory|regular-file|absent-parent-content+metadata;all-digests-recomputed;pre=post;event-ledger-globally-unique;receipt-covers-all-material;row-boolean-derived",
       raw_command_manifest: "array:command-receipt;valid_complete=nonempty", first_cause: "invalid-only:nonempty-string",
       all_failure_codes: "invalid-only:sorted-unique-string[]"
     },
@@ -347,6 +354,22 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       entry_count: "positive-safe-integer", admitted_paths: "sorted-array:strict:{path,git_mode}",
       primary_encoder: "strict:{identity,result}", witness_encoder: "strict:{identity,result};identity-distinct;result-equal",
       command_receipt: "strict:PLATFORM-SOURCE-INPUT-create-argv-version-exit-receipt"
+    },
+    additional_properties: false
+  },
+  immutable_evidence_reference: {
+    schema_version: "shud.git-status-capability.immutable-evidence-reference.v1",
+    required_fields: [
+      "schema_version", "media_type", "sha256", "byte_length", "immutable_identity", "retention", "access", "offline_retrieval"
+    ],
+    optional_fields: [],
+    field_types: {
+      schema_version: "literal;ingestion=bytes:4096,depth:6,nodes:64,items:32",
+      media_type: "enum:application/json|text/markdown|text/plain", sha256: "sha256",
+      byte_length: "positive-safe-integer<=final-bundle-bytes", immutable_identity: "literal:sha256:<sha256>",
+      retention: "strict:{policy:retain-until-change-archived-v1,minimum_days:3650}",
+      access: "strict:{scope:repository-local,requires_network:false}",
+      offline_retrieval: "strict:{kind:content-addressed-path-v1,path:artifacts/sha256/<sha256>,sha256,byte_length}"
     },
     additional_properties: false
   }

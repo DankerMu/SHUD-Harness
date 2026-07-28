@@ -40,7 +40,7 @@ const RESOURCE_REJECTIONS = Object.freeze([
   "LIMIT_THREADS", "LIMIT_MEMORY", "LIMIT_OUTPUT_BYTES"
 ]);
 const COMMON_RECEIPT_KEYS = Object.freeze([
-  "schema_version", "producer", "row_id", "observation_id", "supplied_input_digest", "receipt_digest"
+  "schema_version", "platform", "producer", "row_id", "observation_id", "supplied_input_digest", "receipt_digest"
 ]);
 const FAILURE_CAUSE_KIND_TO_TAG = Object.freeze<Record<string, string>>({
   "outcome-mismatch-v1": "o",
@@ -80,7 +80,7 @@ function launcherCausalMaterial(context: CausalContext): JsonRecord | null {
   if (context.producingBoundary !== "launcher" || context.observedOutcome.kind !== "rejected" ||
     !LAUNCHER_FAILURE_CODES.includes(code) || context.boundaryClass === "exceeded" ||
     context.passedControlBits !== ALL_CONTROL_BITS || exactJson(context.expectedOutcome, context.observedOutcome) ||
-    record(CATALOG_NEGATIVE_RELATIONSHIPS_V1[context.rowId]) || record(LIFECYCLE_MATERIAL[context.rowId])) return null;
+    catalogNegativeProjection(context) || lifecycleProjection(context)) return null;
   if (code === "CLEANUP_FAILED") return context.cleanupVerdict === "fail"
     ? { first_cause: code, secondary_errors: [] } : null;
   return context.cleanupVerdict === "pass"
@@ -123,7 +123,7 @@ function signedReceipt(receipt: JsonRecord): JsonRecord {
 
 function receiptIsBound(receipt: JsonRecord, context: CausalContext): boolean {
   if (receipt.schema_version !== "shud.git-status-capability.row-failure-receipt.v1" ||
-    receipt.producer !== context.producingBoundary || receipt.row_id !== context.rowId ||
+    receipt.platform !== context.platform || receipt.producer !== context.producingBoundary || receipt.row_id !== context.rowId ||
     receipt.observation_id !== context.observationId || receipt.supplied_input_digest !== context.suppliedInputDigest ||
     !sha256(receipt.receipt_digest)) return false;
   const unsigned = Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== "receipt_digest"));
@@ -198,6 +198,14 @@ function catalogNegativeProjection(context: CausalContext): boolean {
     context.cleanupVerdict === expectedCleanup;
 }
 
+function lifecycleProjection(context: CausalContext): boolean {
+  const expected = LIFECYCLE_MATERIAL[context.rowId];
+  return record(expected) && context.producingBoundary === expected.producer &&
+    context.passedControlBits === ALL_CONTROL_BITS && context.boundaryClass !== "exceeded" &&
+    !exactJson(context.expectedOutcome, context.observedOutcome) && context.cleanupVerdict === expected.cleanup.verdict &&
+    !catalogNegativeProjection(context);
+}
+
 function projectedCauseKindValid(kind: string, context: CausalContext): boolean {
   const controlsPassed = context.passedControlBits === ALL_CONTROL_BITS;
   if (kind === "outcome-mismatch-v1") return context.producingBoundary === "observer" &&
@@ -221,11 +229,7 @@ function projectedCauseKindValid(kind: string, context: CausalContext): boolean 
   }
   if (kind === "catalog-negative-mismatch-v1") return catalogNegativeProjection(context);
   if (kind === "launcher-fault-v1") return launcherCausalMaterial(context) !== null;
-  if (kind !== "lifecycle-fault-v1") return false;
-  const expected = LIFECYCLE_MATERIAL[context.rowId];
-  return record(expected) && context.producingBoundary === expected.producer && controlsPassed &&
-    context.boundaryClass !== "exceeded" && !exactJson(context.expectedOutcome, context.observedOutcome) &&
-    context.cleanupVerdict === expected.cleanup.verdict && !catalogNegativeProjection(context);
+  return kind === "lifecycle-fault-v1" && lifecycleProjection(context);
 }
 
 function projectedCauseTag(context: CausalContext): string | null {
@@ -258,7 +262,7 @@ function validateProjection(value: unknown, context: CausalContext): boolean {
     return true;
   }
   if (value.kind === "catalog-negative-mismatch-v1") {
-    if (!exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "platform", "frozen_expected_code", "frozen_boundary",
+    if (!exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "frozen_expected_code", "frozen_boundary",
       "actual_code", "actual_boundary", "supplied_state", "relationship_recipe"]) ||
       receipt.platform !== context.platform || receipt.actual_code !== context.observedOutcome.code ||
       receipt.actual_boundary !== context.producingBoundary || !record(receipt.supplied_state) ||
@@ -317,7 +321,8 @@ export function canonicalFailureCauseForRow(row: JsonRecord): JsonRecord | null 
   if (row.row_verdict !== "fail" || !record(row.failure_cause) || typeof row.failure_cause.kind !== "string" ||
     !record(row.control_assertions)) return null;
   const receipt: JsonRecord = {
-    schema_version: "shud.git-status-capability.row-failure-receipt.v1", producer: row.actual_producing_boundary,
+    schema_version: "shud.git-status-capability.row-failure-receipt.v1", platform: row.platform,
+    producer: row.actual_producing_boundary,
     row_id: row.row_id, observation_id: row.observation_id, supplied_input_digest: row.frame_digest
   };
   if (row.failure_cause.kind === "outcome-mismatch-v1") receipt.observed_outcome = row.observer_outcome;
@@ -347,7 +352,6 @@ export function canonicalFailureCauseForRow(row: JsonRecord): JsonRecord | null 
     const catalog = CATALOG_V1.find((candidate) => candidate.id === row.row_id);
     const frozenExpected = row.platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
     if (frozenExpected?.kind !== "rejected") return null;
-    receipt.platform = row.platform;
     receipt.frozen_expected_code = frozenExpected.code;
     receipt.frozen_boundary = catalog?.producing_boundary;
     receipt.actual_code = row.observer_outcome?.code;

@@ -19,6 +19,7 @@ import {
   CONTROL_ASSERTION_IDS,
   FLOOR_V1,
   FRAME_EVIDENCE_ENCODING,
+  IMMUTABLE_EVIDENCE_REFERENCE_LIMITS,
   INGESTION_LIMITS,
   OBSERVER_LIMITS,
   OWNERSHIP_V1,
@@ -30,7 +31,7 @@ import {
   TARGET_GRAPH_EXPECTATIONS,
   TOOLCHAIN
 } from "./frozen";
-import { ContractError, readJsonFileBounded, type InputKind } from "./ingestion";
+import { ContractError, ingestJsonAgainstLimits, readJsonFileBounded, type InputKind } from "./ingestion";
 import {
   canonicalWireFrameBytes,
   WIRE_FRAME_HEADER_BYTES,
@@ -106,7 +107,9 @@ export function validateContract(value: unknown): boolean {
   if (!exactJson(value.source_input_digest_v1, SOURCE_INPUT_DIGEST_V1)) return false;
   if (!record(value.source_manifest_digest_v1) || !exactKeys(value.source_manifest_digest_v1, ["domain_prefix", "entry_order", "entry_frame", "terminal_lf"]) ||
     !exactJson(value.source_manifest_digest_v1, SOURCE_MANIFEST_DIGEST_V1)) return false;
-  if (!record(value.schemas) || !exactKeys(value.schemas, ["frame", "row_evidence", "platform_bundle", "final_bundle", "decision", "source_input_record"])) return false;
+  if (!record(value.schemas) || !exactKeys(value.schemas, [
+    "frame", "row_evidence", "platform_bundle", "final_bundle", "decision", "source_input_record", "immutable_evidence_reference"
+  ])) return false;
   return Object.values(value.schemas).every(strictSchemaDescriptor) && exactJson(value.schemas, SCHEMA_DESCRIPTORS);
 }
 
@@ -224,24 +227,140 @@ async function walkRegular(root: string, prefix: string, output: string[]): Prom
 
 const EVIDENCE_ROOT = "openspec/changes/m2-capability-observer-spike/evidence";
 const EVIDENCE_LANES = new Set(["source", "platform", "gates", "final"]);
+const EVIDENCE_PLATFORMS = new Set(["macos", "linux"]);
 
-function validateEvidenceContent(path: string, bytes: Uint8Array): void {
+type EvidenceLocation = {
+  lane: "source" | "platform" | "gates" | "final";
+  digest: string;
+  platform?: "macos" | "linux";
+  capacityKey: string;
+  byteLimit: number;
+};
+
+function evidenceLocation(path: string, file: boolean): EvidenceLocation | null {
+  if (!path.startsWith(`${EVIDENCE_ROOT}/`)) return null;
+  const parts = path.slice(EVIDENCE_ROOT.length + 1).split("/");
+  if (parts.some((part) => !canonicalRelativePath(part)) || !EVIDENCE_LANES.has(parts[0]!) ||
+    !/^[0-9a-f]{64}$/.test(parts[1] ?? "")) return null;
+  const lane = parts[0] as EvidenceLocation["lane"];
+  const digest = parts[1]!;
+  if (lane === "platform") {
+    if (!EVIDENCE_PLATFORMS.has(parts[2] ?? "") || (file && parts.length < 4)) return null;
+    const platform = parts[2] as "macos" | "linux";
+    return { lane, digest, platform, capacityKey: `${lane}/${digest}/${platform}`, byteLimit: INGESTION_LIMITS.platform_bundle.bytes };
+  }
+  if (file && parts.length < 3) return null;
+  return {
+    lane, digest, capacityKey: `${lane}/${digest}`,
+    byteLimit: lane === "final" ? INGESTION_LIMITS.final_bundle.bytes : INGESTION_LIMITS.platform_bundle.bytes
+  };
+}
+
+function canonicalEvidenceDirectory(path: string): boolean {
+  if (!path.startsWith(`${EVIDENCE_ROOT}/`)) return false;
+  const parts = path.slice(EVIDENCE_ROOT.length + 1).split("/");
+  if (parts.some((part) => !canonicalRelativePath(part)) || !EVIDENCE_LANES.has(parts[0]!)) return false;
+  if (parts.length >= 2 && !/^[0-9a-f]{64}$/.test(parts[1]!)) return false;
+  return parts[0] !== "platform" || parts.length < 3 || EVIDENCE_PLATFORMS.has(parts[2]!);
+}
+
+function immutableEvidenceReference(value: unknown): boolean {
+  if (!record(value) || !exactKeys(value, ["schema_version", "media_type", "sha256", "byte_length", "immutable_identity",
+    "retention", "access", "offline_retrieval"]) ||
+    value.schema_version !== "shud.git-status-capability.immutable-evidence-reference.v1" ||
+    !["application/json", "text/markdown", "text/plain"].includes(value.media_type as string) ||
+    !sha256(value.sha256) || !boundedInteger(value.byte_length, INGESTION_LIMITS.final_bundle.bytes, true) ||
+    value.immutable_identity !== `sha256:${value.sha256}` || !record(value.retention) || !record(value.access) ||
+    !record(value.offline_retrieval)) return false;
+  return exactKeys(value.retention, ["policy", "minimum_days"]) &&
+    value.retention.policy === "retain-until-change-archived-v1" && value.retention.minimum_days === 3650 &&
+    exactKeys(value.access, ["scope", "requires_network"]) && value.access.scope === "repository-local" &&
+    value.access.requires_network === false &&
+    exactKeys(value.offline_retrieval, ["kind", "path", "sha256", "byte_length"]) &&
+    value.offline_retrieval.kind === "content-addressed-path-v1" &&
+    value.offline_retrieval.path === `artifacts/sha256/${value.sha256}` &&
+    value.offline_retrieval.sha256 === value.sha256 && value.offline_retrieval.byte_length === value.byte_length;
+}
+
+function evidenceJsonRecord(value: unknown, location: EvidenceLocation): boolean {
+  if (!record(value) || typeof value.schema_version !== "string") return false;
+  if (value.schema_version === "shud.git-status-capability.immutable-evidence-reference.v1")
+    return immutableEvidenceReference(value);
+  if (location.lane === "source" && value.schema_version === "shud.git-status-capability.source-input-record.v1")
+    return validateSourceInputRecord(value);
+  if (location.lane === "platform" && value.schema_version === "shud.git-status-capability.platform-bundle.v1")
+    return value.platform === location.platform && validatePlatformBundle(value);
+  if (location.lane === "final" && value.schema_version === "shud.git-status-capability.final-bundle.v1")
+    return validateFinalBundle(value);
+  if (location.lane === "final" && value.schema_version === "shud.git-status-capability.decision.v1")
+    return validateDecision(value);
+  return false;
+}
+
+function markdownEvidence(text: string): boolean {
+  const sourceDeclaration = (line: string): boolean => {
+    const candidate = line.replace(/^\s*(?:[$>]\s+)?/, "");
+    return /^import(?:\s*\(|\.meta\b|\s+(?:type\b|["'{*]|[A-Za-z_$][\w$]*(?:\s*,|\s+from\b|\s*=\s*require\b)))/.test(candidate) ||
+      /^export\s+(?:default\b|async\s+function\b|(?:const|let|var|function|class|interface|type|enum|namespace)\b|[{:*])/.test(candidate) ||
+      /^(?:(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=|(?:async\s+)?function\s+[A-Za-z_$][\w$]*\s*\(|class\s+[A-Za-z_$][\w$]*\s*(?:\{|extends\b)|interface\s+[A-Za-z_$][\w$]*\s*\{|type\s+[A-Za-z_$][\w$]*\s*=|enum\s+[A-Za-z_$][\w$]*\s*\{|namespace\s+[A-Za-z_$][\w$]*\s*\{|(?:pub\s+)?fn\s+[A-Za-z_][\w]*\s*\(|def\s+[A-Za-z_][\w]*\s*\(|#include\s*[<"])/.test(candidate);
+  };
+  const lines = text.split(/\r?\n/);
+  let fence: "text" | "json" | "console" | null = null;
+  let fenced: string[] = [];
+  for (const line of lines) {
+    const marker = /^\s*```([A-Za-z0-9_-]*)\s*$/.exec(line);
+    if (marker) {
+      if (fence === null) {
+        const language = marker[1]!.trim();
+        if (!["text", "json", "console"].includes(language)) return false;
+        fence = language as typeof fence;
+        fenced = [];
+      } else {
+        if (marker[1]!.trim() !== "") return false;
+        if (fence === "json") {
+          try { JSON.parse(fenced.join("\n")); } catch { return false; }
+        }
+        fence = null;
+        fenced = [];
+      }
+      continue;
+    }
+    if (/^\s*(?:`{3,}|~{3,})/.test(line)) return false;
+    if (fence !== null) {
+      if (fence !== "json" && sourceDeclaration(line)) return false;
+      fenced.push(line);
+      continue;
+    }
+    if (sourceDeclaration(line)) return false;
+  }
+  return fence === null;
+}
+
+const EVIDENCE_JSON_LIMITS = Object.freeze({
+  "shud.git-status-capability.source-input-record.v1": INGESTION_LIMITS.source_input_record,
+  "shud.git-status-capability.platform-bundle.v1": INGESTION_LIMITS.platform_bundle,
+  "shud.git-status-capability.final-bundle.v1": INGESTION_LIMITS.final_bundle,
+  "shud.git-status-capability.decision.v1": INGESTION_LIMITS.decision,
+  "shud.git-status-capability.immutable-evidence-reference.v1": IMMUTABLE_EVIDENCE_REFERENCE_LIMITS
+});
+
+function validateEvidenceContent(path: string, bytes: Uint8Array, location: EvidenceLocation): void {
   if (!/\.(?:json|md)$/.test(path)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new ContractError("CONTRACT_UTF8_INVALID"); }
   if (path.endsWith(".json")) {
-    try { JSON.parse(text); } catch { throw new ContractError("CONTRACT_SCHEMA_INVALID"); }
-  } else if (/^\s*(?:import|export)\b/m.test(text) || /```/.test(text)) {
-    throw new ContractError("CONTRACT_SCHEMA_INVALID");
-  }
+    const discoveryLimit = { ...INGESTION_LIMITS.final_bundle, bytes: location.byteLimit };
+    const discovered = ingestJsonAgainstLimits(bytes, discoveryLimit, (value) =>
+      record(value) && typeof value.schema_version === "string" && Object.hasOwn(EVIDENCE_JSON_LIMITS, value.schema_version)
+    ) as JsonRecord;
+    const limit = EVIDENCE_JSON_LIMITS[discovered.schema_version as keyof typeof EVIDENCE_JSON_LIMITS];
+    ingestJsonAgainstLimits(bytes, limit, (value) => evidenceJsonRecord(value, location));
+  } else if (!markdownEvidence(text)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
 }
 
 async function validateEvidenceSubtree(root: string, prefix: string): Promise<void> {
   const totals = new Map<string, number>();
   const visit = async (relativePath: string): Promise<void> => {
-    const parts = relativePath.slice(EVIDENCE_ROOT.length + 1).split("/").filter(Boolean);
-    if (parts.length > 0 && (!EVIDENCE_LANES.has(parts[0]!) || (parts.length > 1 && !/^[0-9a-f]{64}$/.test(parts[1]!))))
-      throw new ContractError("CONTRACT_SCHEMA_INVALID");
     const absolute = join(root, ...relativePath.split("/"));
     for (const entry of await readdir(absolute, { withFileTypes: true })) {
       const childPath = `${relativePath}/${entry.name}`;
@@ -252,16 +371,16 @@ async function validateEvidenceSubtree(root: string, prefix: string): Promise<vo
       if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile()) || (stat.isFile() && (stat.mode & 0o111) !== 0))
         throw new ContractError("CONTRACT_SCHEMA_INVALID");
       if (stat.isDirectory()) {
+        if (!canonicalEvidenceDirectory(childPath)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
         await visit(childPath);
         continue;
       }
-      if (childParts.length < 3) throw new ContractError("CONTRACT_SCHEMA_INVALID");
-      const lane = childParts[0]!;
-      const nextTotal = (totals.get(lane) ?? 0) + stat.size;
-      if (nextTotal > (lane === "final" ? INGESTION_LIMITS.final_bundle.bytes : INGESTION_LIMITS.platform_bundle.bytes))
-        throw new ContractError("CONTRACT_BYTES_LIMIT");
-      totals.set(lane, nextTotal);
-      validateEvidenceContent(childPath, await readFile(child));
+      const location = evidenceLocation(childPath, true);
+      if (!location) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+      const nextTotal = (totals.get(location.capacityKey) ?? 0) + stat.size;
+      if (nextTotal > location.byteLimit) throw new ContractError("CONTRACT_BYTES_LIMIT");
+      totals.set(location.capacityKey, nextTotal);
+      validateEvidenceContent(childPath, await readFile(child), location);
     }
   };
   await visit(prefix);
@@ -346,19 +465,18 @@ export function validateGitCandidateSet(repositoryRoot: string, candidates: read
     if (!match || match[3] !== "0") throw new ContractError("CONTRACT_SCHEMA_INVALID");
     const path = match[4]!;
     const evidence = path.startsWith(`${EVIDENCE_ROOT}/`);
-    if (evidence ? match[1] !== "100644" || !new RegExp(`^${EVIDENCE_ROOT}/(?:source|platform|gates|final)/[0-9a-f]{64}/`).test(path)
+    const location = evidence ? evidenceLocation(path, true) : null;
+    if (evidence ? match[1] !== "100644" || !location
       : !["100644", "100755"].includes(match[1]!)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     if (evidence) {
       const blob = spawnSync("git", ["cat-file", "blob", match[2]!], {
-        cwd: repositoryRoot, encoding: "buffer", stdio: ["ignore", "pipe", "ignore"], maxBuffer: INGESTION_LIMITS.final_bundle.bytes + 1
+        cwd: repositoryRoot, encoding: "buffer", stdio: ["ignore", "pipe", "ignore"], maxBuffer: INGESTION_LIMITS.final_bundle.bytes + 1024
       });
       if (blob.status !== 0 || !Buffer.isBuffer(blob.stdout)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
-      const lane = path.slice(EVIDENCE_ROOT.length + 1).split("/")[0]!;
-      const total = (evidenceTotals.get(lane) ?? 0) + blob.stdout.length;
-      if (total > (lane === "final" ? INGESTION_LIMITS.final_bundle.bytes : INGESTION_LIMITS.platform_bundle.bytes))
-        throw new ContractError("CONTRACT_BYTES_LIMIT");
-      evidenceTotals.set(lane, total);
-      validateEvidenceContent(path, blob.stdout);
+      const total = (evidenceTotals.get(location!.capacityKey) ?? 0) + blob.stdout.length;
+      if (total > location!.byteLimit) throw new ContractError("CONTRACT_BYTES_LIMIT");
+      evidenceTotals.set(location!.capacityKey, total);
+      validateEvidenceContent(path, blob.stdout, location!);
     } else tracked.push(path);
   }
   const trackedSpike = tracked.filter((path) => path.startsWith("spikes/git-status-capability/"));
@@ -1109,6 +1227,156 @@ function controlAssertions(value: unknown): value is JsonRecord {
   });
 }
 
+const PROTECTION_MEMBER_KEYS = Object.freeze([
+  "identity_material", "identity_digest", "ingress_records",
+  "pre_measurement", "pre_digest", "post_measurement", "post_digest", "event_material", "event_digest"
+]);
+
+const FIXED_PROTECTION_ROLES = Object.freeze([
+  ["canonical-superproject", "superproject", "directory"],
+  ["canonical-contract-file", "superproject/spikes/git-status-capability/contracts/contract-v1.json", "regular-file"],
+  ["published-shud", "published/SHUD", "directory"],
+  ["published-rshud", "published/rSHUD", "directory"],
+  ["published-autoshud", "published/AutoSHUD", "directory"],
+  ["published-zero", "published/zero", "directory"],
+  ["current-disposable", "disposable", "directory"]
+] as const);
+
+function protectionProfileRoles(row: JsonRecord): JsonRecord[] | null {
+  if (!record(row.frame_binding) || !record(row.frame_binding.scheduled) ||
+    !record(row.frame_binding.scheduled.frame_reference) ||
+    !record((row.frame_binding.scheduled.frame_reference as JsonRecord).frame)) return null;
+  const frame = (row.frame_binding.scheduled.frame_reference as JsonRecord).frame as JsonRecord;
+  if (!Array.isArray(frame.nested_state)) return null;
+  const fixed = FIXED_PROTECTION_ROLES.map(([role, path, objectType]) => ({
+    role,
+    object_type: objectType,
+    subject: {
+      kind: "fixed-role-v1",
+      name: role,
+      authority_identity: role === "current-disposable"
+        ? row.checkout_capability_identity
+        : canonicalDigest({
+          schema_version: "shud.git-status-capability.fixed-protected-authority.v1",
+          platform: row.platform,
+          role
+        })
+    },
+    ingresses: [
+      { kind: "canonical-v1", name: `protected/${path}` },
+      { kind: "physical-alias-v1", name: `aliases/physical/${role}` },
+      { kind: "symlink-alias-v1", name: `aliases/symlink/${role}` }
+    ]
+  }));
+  const nested: JsonRecord[] = [];
+  for (const state of frame.nested_state) {
+    if (!record(state) || typeof state.path !== "string" || typeof state.checkout_state !== "string" || !record(state.audit)) return null;
+    const role = `nested-${state.checkout_state}-${canonicalDigest({ path: state.path, checkout_state: state.checkout_state })}`;
+    const absent = state.checkout_state === "absent";
+    const subject = absent
+      ? { kind: "absent-nested-v1", path: state.path, parent_identity: state.audit.parent_identity, basename: state.audit.basename }
+      : { kind: "nested-checkout-v1", path: state.path, checkout_state: state.checkout_state,
+        directory_identity: state.audit.directory_identity };
+    const parentPath = state.path.split("/").slice(0, -1).join("/") || "root";
+    const ingresses: JsonRecord[] = [
+      { kind: "canonical-v1", name: absent ? `protected/disposable/${parentPath}` : `protected/disposable/${state.path}` },
+      { kind: "physical-alias-v1", name: `aliases/physical/${role}` },
+      { kind: "symlink-alias-v1", name: `aliases/symlink/${role}` }
+    ];
+    if (absent) ingresses.push({ kind: "absent-basename-v1", name: `protected/disposable/${state.path}` });
+    nested.push({ role, object_type: absent ? "absent-parent" : "directory", subject, ingresses });
+  }
+  return [...fixed, ...nested];
+}
+
+function expectedProtectionProfile(row: JsonRecord, receipt: JsonRecord): JsonRecord | null {
+  const roles = protectionProfileRoles(row);
+  if (!roles) return null;
+  return {
+    schema_version: "shud.git-status-capability.protection-profile.v1",
+    platform: receipt.platform,
+    row_id: receipt.row_id,
+    observation_id: receipt.observation_id,
+    supplied_input_digest: receipt.supplied_input_digest,
+    roles
+  };
+}
+
+function validateProtectionMember(
+  value: unknown,
+  profile: JsonRecord,
+  role: JsonRecord,
+  sequence: number
+): value is JsonRecord {
+  if (!record(value) || !exactKeys(value, PROTECTION_MEMBER_KEYS) ||
+    !record(value.identity_material) || !Array.isArray(value.ingress_records) ||
+    !record(value.pre_measurement) || !record(value.post_measurement) || !record(value.event_material) ||
+    ![value.identity_digest, value.pre_digest, value.post_digest, value.event_digest].every(sha256) ||
+    !sha256(profile.profile_digest)) return false;
+
+  const identity = value.identity_material as JsonRecord;
+  if (!exactKeys(identity, ["schema_version", "profile_digest", "role", "object_type", "subject_digest"]) ||
+    identity.schema_version !== "shud.git-status-capability.protected-identity.v1" ||
+    identity.profile_digest !== profile.profile_digest || identity.role !== role.role ||
+    identity.object_type !== role.object_type || identity.subject_digest !== canonicalDigest(role.subject) ||
+    value.identity_digest !== canonicalDigest(identity)) return false;
+
+  if (!Array.isArray(role.ingresses) || value.ingress_records.length !== role.ingresses.length) return false;
+  const ingressDigests: string[] = [];
+  for (let index = 0; index < role.ingresses.length; index += 1) {
+    const expectedIngress = role.ingresses[index];
+    const ingressRecord = value.ingress_records[index];
+    if (!record(expectedIngress) || !record(ingressRecord) ||
+      !exactKeys(ingressRecord, ["ingress_material", "ingress_digest"]) ||
+      !record(ingressRecord.ingress_material) || !sha256(ingressRecord.ingress_digest)) return false;
+    const ingress = ingressRecord.ingress_material as JsonRecord;
+    if (!exactKeys(ingress, ["schema_version", "profile_digest", "identity_digest", "role", "kind", "name"]) ||
+      ingress.schema_version !== "shud.git-status-capability.protected-ingress.v1" ||
+      ingress.profile_digest !== profile.profile_digest || ingress.identity_digest !== value.identity_digest ||
+      ingress.role !== role.role || ingress.kind !== expectedIngress.kind || ingress.name !== expectedIngress.name ||
+      typeof ingress.name !== "string" || Buffer.byteLength(ingress.name) > 1024 || !canonicalRelativePath(ingress.name) ||
+      ingressRecord.ingress_digest !== canonicalDigest(ingress)) return false;
+    ingressDigests.push(ingressRecord.ingress_digest as string);
+  }
+  if (new Set(ingressDigests).size !== ingressDigests.length) return false;
+
+  const measurementValid = (measurement: JsonRecord, digestValue: unknown): boolean => {
+    if (!exactKeys(measurement, ["schema_version", "profile_digest", "identity_digest", "ingress_digests", "content", "metadata"]) ||
+      measurement.schema_version !== "shud.git-status-capability.protected-measurement.v1" ||
+      measurement.profile_digest !== profile.profile_digest || measurement.identity_digest !== value.identity_digest ||
+      !exactJson(measurement.ingress_digests, ingressDigests) || !record(measurement.content) || !record(measurement.metadata) ||
+      !exactKeys(measurement.content as JsonRecord, ["encoding", "text"]) ||
+      typeof (measurement.content as JsonRecord).text !== "string" ||
+      !exactKeys(measurement.metadata as JsonRecord, ["object_type", "git_mode", "byte_length"]) ||
+      (measurement.metadata as JsonRecord).object_type !== role.object_type) return false;
+    const subjectDigest = canonicalDigest(role.subject);
+    const expectedText = role.object_type === "absent-parent"
+      ? `absent:${(role.subject as JsonRecord).parent_identity}:${(role.subject as JsonRecord).basename}\n`
+      : `${role.object_type === "regular-file" ? "regular" : "directory"}:${role.role}:${subjectDigest}\n`;
+    const expectedEncoding = role.object_type === "absent-parent" ? "absent-parent-manifest-v1"
+      : role.object_type === "regular-file" ? "utf8-v1" : "directory-manifest-v1";
+    const expectedMode = role.object_type === "regular-file" ? "100644" : "040000";
+    if ((measurement.content as JsonRecord).encoding !== expectedEncoding ||
+      (measurement.content as JsonRecord).text !== expectedText || Buffer.byteLength(expectedText) > 4096 ||
+      (measurement.metadata as JsonRecord).git_mode !== expectedMode ||
+      (measurement.metadata as JsonRecord).byte_length !== Buffer.byteLength(expectedText)) return false;
+    return digestValue === canonicalDigest(measurement);
+  };
+  if (!measurementValid(value.pre_measurement as JsonRecord, value.pre_digest) ||
+    !measurementValid(value.post_measurement as JsonRecord, value.post_digest) ||
+    !exactJson(value.pre_measurement, value.post_measurement) || value.pre_digest !== value.post_digest) return false;
+
+  const event = value.event_material as JsonRecord;
+  return exactKeys(event, ["schema_version", "profile_digest", "identity_digest", "ingress_digests",
+    "pre_digest", "post_digest", "sequence", "kind"]) &&
+    event.schema_version === "shud.git-status-capability.protection-event.v1" &&
+    event.kind === "verified-unchanged-v1" && event.sequence === sequence &&
+    event.profile_digest === profile.profile_digest && event.identity_digest === value.identity_digest &&
+    exactJson(event.ingress_digests, ingressDigests) &&
+    event.pre_digest === value.pre_digest && event.post_digest === value.post_digest &&
+    value.event_digest === canonicalDigest(event);
+}
+
 export function validateRowEvidence(value: unknown): boolean {
   const descriptor = SCHEMA_DESCRIPTORS.row_evidence;
   if (!matchesDescriptor(value, descriptor)) return false;
@@ -1141,14 +1409,29 @@ export function validatePlatformBundle(value: unknown): boolean {
   if (!["macos", "linux"].includes(value.platform as string) || !["valid_complete", "invalid"].includes(value.run_status as string) || !gitObjectId(value.source_commit)) return false;
   const target = value.platform === "macos" ? "aarch64-apple-darwin" : "x86_64-unknown-linux-gnu";
   if (value.target !== target || !record(value.toolchain) || !exactKeys(value.toolchain, ["rustc_vv", "cargo_version", "git_version", "target_triple"]) || !Object.values(value.toolchain).every(nonEmptyString) || value.toolchain.target_triple !== target) return false;
-  if (!Array.isArray(value.rows) || !value.rows.every(validateRowEvidence) || !Array.isArray(value.protection_set) || !value.protection_set.every((receipt) => {
-    if (!record(receipt) || !exactKeys(receipt, ["platform", "row_id", "observation_id", "supplied_input_digest", "inventory", "receipt_digest"]) ||
+  if (!Array.isArray(value.rows) || !value.rows.every(validateRowEvidence) || !Array.isArray(value.protection_set)) return false;
+  const rowById = new Map(value.rows.map((row) => [(row as JsonRecord).row_id, row as JsonRecord]));
+  if (!value.protection_set.every((receipt) => {
+    if (!record(receipt) || !exactKeys(receipt, ["platform", "row_id", "observation_id", "supplied_input_digest",
+      "profile_material", "profile_digest", "inventory", "receipt_digest"]) ||
       receipt.platform !== value.platform || typeof receipt.row_id !== "string" || !sha256(receipt.observation_id) ||
-      !sha256(receipt.supplied_input_digest) || !sha256(receipt.receipt_digest) || !Array.isArray(receipt.inventory) ||
-      receipt.inventory.length === 0 || receipt.inventory.length > 64) return false;
-    if (!receipt.inventory.every((item) => record(item) && exactKeys(item, ["identity", "pre_digest", "post_digest", "event_digest"]) &&
-      Object.values(item).every(sha256) && item.pre_digest === item.post_digest) ||
-      new Set(receipt.inventory.map((item) => (item as JsonRecord).identity)).size !== receipt.inventory.length) return false;
+      !sha256(receipt.supplied_input_digest) || !sha256(receipt.profile_digest) || !sha256(receipt.receipt_digest) ||
+      !record(receipt.profile_material) || !Array.isArray(receipt.inventory)) return false;
+    const row = rowById.get(receipt.row_id);
+    if (!row || receipt.observation_id !== row.observation_id || receipt.supplied_input_digest !== row.frame_digest) return false;
+    const expectedProfile = expectedProtectionProfile(row, receipt);
+    if (!expectedProfile || !exactJson(receipt.profile_material, expectedProfile) ||
+      receipt.profile_digest !== canonicalDigest(receipt.profile_material) || !Array.isArray(expectedProfile.roles) ||
+      expectedProfile.roles.length === 0 || expectedProfile.roles.length > 64 ||
+      receipt.inventory.length !== expectedProfile.roles.length) return false;
+    const profile = { ...expectedProfile, profile_digest: receipt.profile_digest };
+    if (!receipt.inventory.every((item, index) =>
+      validateProtectionMember(item, profile, (expectedProfile.roles as JsonRecord[])[index]!, index)
+    ) ||
+      new Set(receipt.inventory.map((item) => (item as JsonRecord).identity_digest)).size !== receipt.inventory.length ||
+      new Set(receipt.inventory.flatMap((item) =>
+        ((item as JsonRecord).ingress_records as JsonRecord[]).map((ingress) => ingress.ingress_digest)
+      )).size !== receipt.inventory.reduce((count, item) => count + ((item as JsonRecord).ingress_records as JsonRecord[]).length, 0)) return false;
     const unsigned = Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== "receipt_digest"));
     return receipt.receipt_digest === canonicalDigest(unsigned);
   }) ||
@@ -1161,6 +1444,9 @@ export function validatePlatformBundle(value: unknown): boolean {
     value.protection_set.length !== 174 || new Set(value.protection_set.map((receipt) => (receipt as JsonRecord).row_id)).size !== 174 ||
     value.raw_command_manifest.length === 0)) return false;
   const protectionByRow = new Map(value.protection_set.map((receipt) => [(receipt as JsonRecord).row_id, receipt as JsonRecord]));
+  const protectionEvents = value.protection_set.flatMap((receipt) =>
+    ((receipt as JsonRecord).inventory as JsonRecord[]).map((item) => item.event_digest));
+  if (new Set(protectionEvents).size !== protectionEvents.length) return false;
   for (const rowValue of value.rows) {
     const row = rowValue as JsonRecord;
     const receipt = protectionByRow.get(row.row_id as string);
