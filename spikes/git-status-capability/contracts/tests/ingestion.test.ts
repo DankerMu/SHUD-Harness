@@ -142,6 +142,33 @@ describe("bounded fail-closed JSON ingestion", () => {
     expect(codeOf(() => ingestJson(encoder.encode("{}"), "schema", () => false))).toBe("CONTRACT_SCHEMA_INVALID");
   });
 
+  test("all eight public kinds reject non-canonical or lossy number tokens before semantic acceptance", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "shud-contract-number-"));
+    try {
+      for (const kind of kinds) {
+        const valid = await validInput(kind);
+        const canonical = JSON.stringify(valid);
+        expect((await publicCode(kind, encoder.encode(canonical), temporary, "canonical-integer")).exit, kind).toBe(0);
+        expect(ingestJson(encoder.encode("9007199254740991"), kind), `${kind}:MAX_SAFE_INTEGER`).toBe(Number.MAX_SAFE_INTEGER);
+        expect(codeOf(() => ingestJson(encoder.encode("9007199254740992"), kind)), `${kind}:MAX_SAFE_INTEGER+1`)
+          .toBe("CONTRACT_SCHEMA_INVALID");
+        const match = /:-?(?:0|[1-9][0-9]*)/.exec(canonical);
+        expect(match, `${kind}:numeric-field`).not.toBeNull();
+        for (const [label, token] of [
+          ["fraction", "128.5"], ["exponent-alias", "128e0"],
+          ["precision-collapse", "128.00000000000001"], ["unsafe-integer", "9007199254740992"],
+          ["non-finite-result", "1e999"]
+        ] as const) {
+          const changed = `${canonical.slice(0, match!.index + 1)}${token}${canonical.slice(match!.index + match![0].length)}`;
+          expect(await publicCode(kind, encoder.encode(changed), temporary, label), `${kind}:${label}`)
+            .toMatchObject({ exit: 2, code: "CONTRACT_SCHEMA_INVALID", stdout: "" });
+        }
+      }
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("error CLI emits exit 2, empty stdout, exactly one bounded JSON stderr record, and no partial success", async () => {
     let stdout = "";
     let stderr = "";

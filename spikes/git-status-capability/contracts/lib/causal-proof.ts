@@ -47,7 +47,8 @@ const FAILURE_CAUSE_KIND_TO_TAG = Object.freeze<Record<string, string>>({
   "control-failure-v1": "c",
   "resource-exceeded-v1": "r",
   "lifecycle-fault-v1": "l",
-  "catalog-negative-mismatch-v1": "n"
+  "catalog-negative-mismatch-v1": "n",
+  "launcher-fault-v1": "u"
 });
 const FAILURE_CAUSE_TAG_TO_KIND = Object.freeze(Object.fromEntries(
   Object.entries(FAILURE_CAUSE_KIND_TO_TAG).map(([kind, tag]) => [tag, kind])
@@ -71,6 +72,21 @@ const LIFECYCLE_MATERIAL = Object.freeze<Record<string, JsonRecord>>({
     secondary_errors: [], cleanup: { verdict: "fail", descriptors_restored: false, processes_reaped: true }
   }
 });
+
+const LAUNCHER_FAILURE_CODES = Object.freeze(["SIGNALLED_TERM", "SIGNALLED_KILL", "TIMEOUT", "CLEANUP_FAILED"]);
+
+function launcherCausalMaterial(context: CausalContext): JsonRecord | null {
+  const code = context.observedOutcome.code;
+  if (context.producingBoundary !== "launcher" || context.observedOutcome.kind !== "rejected" ||
+    !LAUNCHER_FAILURE_CODES.includes(code) || context.boundaryClass === "exceeded" ||
+    context.passedControlBits !== ALL_CONTROL_BITS || exactJson(context.expectedOutcome, context.observedOutcome) ||
+    record(CATALOG_NEGATIVE_RELATIONSHIPS_V1[context.rowId]) || record(LIFECYCLE_MATERIAL[context.rowId])) return null;
+  if (code === "CLEANUP_FAILED") return context.cleanupVerdict === "fail"
+    ? { first_cause: code, secondary_errors: [] } : null;
+  return context.cleanupVerdict === "pass"
+    ? { first_cause: code, secondary_errors: [] }
+    : { first_cause: code, secondary_errors: ["CLEANUP_FAILED"] };
+}
 
 function record(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -204,6 +220,7 @@ function projectedCauseKindValid(kind: string, context: CausalContext): boolean 
         (context.declaredLimit === "wall_time_ms" && context.observedOutcome.code === "TIMEOUT"));
   }
   if (kind === "catalog-negative-mismatch-v1") return catalogNegativeProjection(context);
+  if (kind === "launcher-fault-v1") return launcherCausalMaterial(context) !== null;
   if (kind !== "lifecycle-fault-v1") return false;
   const expected = LIFECYCLE_MATERIAL[context.rowId];
   return record(expected) && context.producingBoundary === expected.producer && controlsPassed &&
@@ -258,6 +275,17 @@ function validateProjection(value: unknown, context: CausalContext): boolean {
       record(relationship) && exactJson(receipt.relationship_recipe, relationship) &&
       suppliedMaterialProof(receipt.supplied_state.material, relationship.supplied_material_kind as string);
   }
+  if (value.kind === "launcher-fault-v1") {
+    const expected = launcherCausalMaterial(context);
+    return record(expected) && exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "observed_outcome", "first_cause", "secondary_errors", "cleanup"]) &&
+      exactJson(receipt.observed_outcome, context.observedOutcome) && receipt.first_cause === expected.first_cause &&
+      exactJson(receipt.secondary_errors, expected.secondary_errors) && record(receipt.cleanup) &&
+      exactKeys(receipt.cleanup, ["verdict", "descriptors_restored", "processes_reaped"]) &&
+      receipt.cleanup.verdict === context.cleanupVerdict && typeof receipt.cleanup.descriptors_restored === "boolean" &&
+      typeof receipt.cleanup.processes_reaped === "boolean" && (context.cleanupVerdict === "pass"
+        ? receipt.cleanup.descriptors_restored && receipt.cleanup.processes_reaped
+        : !receipt.cleanup.descriptors_restored || !receipt.cleanup.processes_reaped);
+  }
   if (value.kind !== "lifecycle-fault-v1" ||
     !exactKeys(receipt, [...COMMON_RECEIPT_KEYS, "supplied_mutation", "first_cause", "secondary_errors", "cleanup"])) return false;
   const expected = LIFECYCLE_MATERIAL[context.rowId];
@@ -306,6 +334,11 @@ export function canonicalFailureCauseForRow(row: JsonRecord): JsonRecord | null 
     receipt.first_cause = row.first_cause;
     receipt.secondary_errors = row.secondary_errors;
     receipt.cleanup = row.cleanup;
+  } else if (row.failure_cause.kind === "launcher-fault-v1") {
+    receipt.observed_outcome = row.observer_outcome;
+    receipt.first_cause = row.first_cause;
+    receipt.secondary_errors = row.secondary_errors;
+    receipt.cleanup = row.cleanup;
   } else if (row.failure_cause.kind === "catalog-negative-mismatch-v1") {
     if (!record(row.frame_binding?.supplied?.material)) return null;
     const suppliedMaterialDigest = canonicalDigest(row.frame_binding.supplied.material);
@@ -331,7 +364,17 @@ export function canonicalFailureCauseForRow(row: JsonRecord): JsonRecord | null 
 }
 
 export function validateFailureCauseForRow(row: JsonRecord): boolean {
-  return row.row_verdict === "pass" ? row.failure_cause === undefined : canonicalFailureCauseForRow(row) !== null;
+  return row.row_verdict === "pass"
+    ? passCauseMetadataValid(row)
+    : canonicalFailureCauseForRow(row) !== null;
+}
+
+function passCauseMetadataValid(row: JsonRecord): boolean {
+  if (row.failure_cause !== undefined) return false;
+  const expected = LIFECYCLE_MATERIAL[row.row_id];
+  if (!record(expected)) return row.first_cause === undefined && row.secondary_errors === undefined;
+  return row.actual_producing_boundary === expected.producer && row.first_cause === expected.first_cause &&
+    exactJson(row.secondary_errors, expected.secondary_errors) && exactJson(row.cleanup, expected.cleanup);
 }
 
 export function projectedFailureCauseTagForRow(row: JsonRecord): string | null {
@@ -342,7 +385,7 @@ export function projectedFailureCauseTagForRow(row: JsonRecord): string | null {
 }
 
 export function encodeFailureCauseTokenForRow(row: JsonRecord): string | null {
-  if (row.row_verdict === "pass") return row.failure_cause === undefined ? "" : null;
+  if (row.row_verdict === "pass") return passCauseMetadataValid(row) ? "" : null;
   const cause = canonicalFailureCauseForRow(row);
   const rawTag = cause ? FAILURE_CAUSE_KIND_TO_TAG[cause.kind] : undefined;
   const projectedTag = projectedFailureCauseTagForRow(row);

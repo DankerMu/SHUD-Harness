@@ -133,8 +133,13 @@ class StrictJsonParser {
     const match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(rest);
     if (!match) this.fail("CONTRACT_JSON_MALFORMED");
     this.index += match[0].length;
-    const value = Number(match[0]);
-    if (!Number.isFinite(value)) this.fail("CONTRACT_JSON_MALFORMED");
+    const lexeme = match[0];
+    const value = Number(lexeme);
+    if (!Number.isFinite(value)) this.fail("CONTRACT_SCHEMA_INVALID");
+    // Every numeric field in the frozen contract is an integer. Accept only the
+    // unique base-10 spelling that round-trips without IEEE-754 precision loss.
+    if (!/^-?(?:0|[1-9][0-9]*)$/.test(lexeme) || !Number.isSafeInteger(value) || String(value) !== lexeme)
+      this.fail("CONTRACT_SCHEMA_INVALID");
     return value;
   }
 

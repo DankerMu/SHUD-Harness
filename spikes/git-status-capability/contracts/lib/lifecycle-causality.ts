@@ -30,7 +30,14 @@ export function validateLifecycleCausality(row: JsonRecord, cleanupAssertion: Js
   if (row.row_id === "LIF-002") return causal("FRAME_VERSION_UNSUPPORTED", [], "pass");
   if (row.row_id === "LIF-006") return causal("FRAME_VERSION_UNSUPPORTED", ["CLEANUP_FAILED"], "fail");
   if (row.row_id === "LIF-007") return causal("CLEANUP_FAILED", [], "fail");
+  if (row.first_cause !== undefined || row.secondary_errors !== undefined) {
+    if (row.row_verdict !== "fail" || row.actual_producing_boundary !== "launcher" ||
+      !record(row.observer_outcome) || row.observer_outcome.kind !== "rejected" || cleanupAssertion.verdict !== "pass") return false;
+    const code = row.observer_outcome.code;
+    if (!["SIGNALLED_TERM", "SIGNALLED_KILL", "TIMEOUT", "CLEANUP_FAILED"].includes(code)) return false;
+    if (code === "CLEANUP_FAILED") return causal(code, [], "fail");
+    return causal(code, row.cleanup.verdict === "fail" ? ["CLEANUP_FAILED"] : [], row.cleanup.verdict);
+  }
   if (row.cleanup.verdict !== cleanupAssertion.verdict) return false;
-  if (row.first_cause !== undefined && !nonEmptyString(row.first_cause)) return false;
-  return row.secondary_errors === undefined || stringArray(row.secondary_errors);
+  return row.first_cause === undefined && row.secondary_errors === undefined;
 }

@@ -5,6 +5,7 @@ import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkCurrent } from "../lib/checker";
+import { INGESTION_LIMITS } from "../lib/frozen";
 import { ContractError } from "../lib/ingestion";
 import { enumerateSourceCandidates, validateGitCandidateSet, validateManifest } from "../lib/schema";
 
@@ -102,8 +103,9 @@ describe("source-input-v1 current-set authority", () => {
   test("the fixed workflow participates only when present and canonical evidence never changes the set", async () => {
     const root = await temporaryRepository();
     const before = await enumerateSourceCandidates(root);
-    await mkdir(join(root, "openspec/changes/m2-capability-observer-spike/evidence/platform/digest"), { recursive: true });
-    await writeFile(join(root, "openspec/changes/m2-capability-observer-spike/evidence/platform/digest/result.json"), "{}\n");
+    const digest = "01".repeat(32);
+    await mkdir(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}`), { recursive: true });
+    await writeFile(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}/result.json`), "{}\n");
     expect(await enumerateSourceCandidates(root)).toEqual(before);
     await mkdir(join(root, ".github/workflows"), { recursive: true });
     await writeFile(join(root, ".github/workflows/git-status-capability-spike.yml"), "name: spike\n");
@@ -112,6 +114,65 @@ describe("source-input-v1 current-set authority", () => {
     expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
     expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike", ".github/workflows/git-status-capability-spike.yml"], { cwd: root }).status).toBe(0);
     expect(() => validateGitCandidateSet(root, withWorkflow)).not.toThrow();
+  });
+
+  test("evidence exclusion is a closed lane/digest/mode/content classifier for tracked and untracked files", async () => {
+    const digest = "02".repeat(32);
+    const validPaths = [
+      `source/${digest}/record.json`, `platform/${digest}/summary.md`,
+      `gates/${digest}/receipt.json`, `final/${digest}/decision.md`
+    ];
+    const validRoot = await temporaryRepository();
+    const evidenceRoot = join(validRoot, "openspec/changes/m2-capability-observer-spike/evidence");
+    for (const path of validPaths) {
+      await mkdir(join(evidenceRoot, ...path.split("/").slice(0, -1)), { recursive: true });
+      await writeFile(join(evidenceRoot, ...path.split("/")), path.endsWith(".json") ? "{}\n" : "# bounded evidence\n");
+    }
+    const before = await enumerateSourceCandidates(validRoot);
+    expect(spawnSync("git", ["init", "-q"], { cwd: validRoot }).status).toBe(0);
+    expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: validRoot }).status).toBe(0);
+    expect(() => validateGitCandidateSet(validRoot, before)).not.toThrow();
+
+    const invalidCases: Array<[string, Uint8Array | string, boolean]> = [
+      [`wrong/${digest}/result.json`, "{}\n", false],
+      ["platform/not-a-digest/result.json", "{}\n", false],
+      [`platform/${digest}/observer.ts`, "export {};\n", false],
+      [`platform/${digest}/import.md`, "import x from 'source';\n", false],
+      [`platform/${digest}/binary.json`, new Uint8Array([0, 255, 0]), false],
+      [`platform/${digest}/unsupported.png`, "image", false],
+      [`platform/${digest}/executable.md`, "# evidence\n", true],
+      [`platform/${digest}/oversize.json`, new Uint8Array(INGESTION_LIMITS.platform_bundle.bytes + 1), false]
+    ];
+    for (const [path, content, executable] of invalidCases) {
+      const root = await temporaryRepository();
+      const absolute = join(root, "openspec/changes/m2-capability-observer-spike/evidence", ...path.split("/"));
+      await mkdir(join(absolute, ".."), { recursive: true });
+      await writeFile(absolute, content);
+      if (executable) expect(spawnSync("chmod", ["755", absolute]).status).toBe(0);
+      await expect(enumerateSourceCandidates(root), path).rejects.toBeInstanceOf(ContractError);
+      expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
+      expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: root }).status).toBe(0);
+      await expect(enumerateSourceCandidates(root), `tracked:${path}`).rejects.toBeInstanceOf(ContractError);
+    }
+    const symlinkRoot = await temporaryRepository();
+    const symlinkDirectory = join(symlinkRoot, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}`);
+    await mkdir(symlinkDirectory, { recursive: true });
+    await symlink("../../../../proposal.md", join(symlinkDirectory, "linked.md"));
+    await expect(enumerateSourceCandidates(symlinkRoot)).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+    expect(spawnSync("git", ["init", "-q"], { cwd: symlinkRoot }).status).toBe(0);
+    expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: symlinkRoot }).status).toBe(0);
+    await expect(enumerateSourceCandidates(symlinkRoot)).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+
+    const stagedRoot = await temporaryRepository();
+    const stagedDirectory = join(stagedRoot, `openspec/changes/m2-capability-observer-spike/evidence/gates/${digest}`);
+    const stagedPath = join(stagedDirectory, "receipt.md");
+    await mkdir(stagedDirectory, { recursive: true });
+    await writeFile(stagedPath, "import hidden from 'covered-source';\n");
+    expect(spawnSync("git", ["init", "-q"], { cwd: stagedRoot }).status).toBe(0);
+    expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: stagedRoot }).status).toBe(0);
+    await writeFile(stagedPath, "# legal worktree evidence\n");
+    const stagedCandidates = await enumerateSourceCandidates(stagedRoot);
+    expect(() => validateGitCandidateSet(stagedRoot, stagedCandidates), "staged-invalid/worktree-legal").toThrow(ContractError);
   });
 
   test("the exact current checker returns one complete receipt and writes zero files", async () => {

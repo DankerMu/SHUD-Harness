@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { canonicalJsonBytes, sealFrame } from "../lib/canonical-frame";
 import { encodeDecisionRowProjection } from "../lib/decision";
 import { encodeDecisionRowProjectionCore } from "../lib/row-projection";
-import { CATALOG_V1, INGESTION_LIMITS, OBSERVER_LIMITS, REJECTION_CODES } from "../lib/frozen";
+import { CATALOG_V1, DECISION_ROW_SEGMENTS, INGESTION_LIMITS, OBSERVER_LIMITS, REJECTION_CODES } from "../lib/frozen";
 import { validateDeterminismProof } from "../lib/determinism-proof";
 import { validateDecision, validateFrame, validatePlatformBundle, validateRowEvidence, validateSourceInputRecord } from "../lib/schema";
 import { canonicalWireFrameBytes } from "../lib/wire-frame";
@@ -109,6 +109,12 @@ function normalizedBundle(platform = "macos"): any {
   const source = platform === "macos" ? generic.platform_bundle : generic.linux_platform_bundle;
   const bundle = structuredClone(source);
   bundle.rows = source.rows.map((row: any) => normalizedRow(row.row_id, platform));
+  bundle.protection_set = bundle.protection_set.map((receipt: any) => {
+    const row = bundle.rows.find((candidate: any) => candidate.row_id === receipt.row_id);
+    const core = { ...receipt, platform, observation_id: row.observation_id, supplied_input_digest: row.frame_digest };
+    delete core.receipt_digest;
+    return { ...core, receipt_digest: digest(core) };
+  });
   return bundle;
 }
 
@@ -128,7 +134,7 @@ function catalogRelationship(row: any): any {
   return { ...core, recipe_digest: digest(core) };
 }
 
-function causalReceipt(row: any, kind: "outcome-mismatch-v1" | "control-failure-v1" | "resource-exceeded-v1" | "lifecycle-fault-v1" | "catalog-negative-mismatch-v1", controlId?: string): any {
+function causalReceipt(row: any, kind: "outcome-mismatch-v1" | "control-failure-v1" | "resource-exceeded-v1" | "lifecycle-fault-v1" | "catalog-negative-mismatch-v1" | "launcher-fault-v1", controlId?: string): any {
   const base: Record<string, any> = {
     schema_version: "shud.git-status-capability.row-failure-receipt.v1",
     producer: row.actual_producing_boundary,
@@ -147,6 +153,12 @@ function causalReceipt(row: any, kind: "outcome-mismatch-v1" | "control-failure-
   }
   if (kind === "lifecycle-fault-v1") {
     base.supplied_mutation = structuredClone(row.frame_binding.supplied.material);
+    base.first_cause = row.first_cause;
+    base.secondary_errors = structuredClone(row.secondary_errors);
+    base.cleanup = structuredClone(row.cleanup);
+  }
+  if (kind === "launcher-fault-v1") {
+    base.observed_outcome = structuredClone(row.observer_outcome);
     base.first_cause = row.first_cause;
     base.secondary_errors = structuredClone(row.secondary_errors);
     base.cleanup = structuredClone(row.cleanup);
@@ -214,6 +226,23 @@ function causalParity(row: any, cause = row.failure_cause): [boolean, boolean] {
   return [validateRowEvidence(raw), validateDecision(rejectedDecisionFor(row, cause))];
 }
 
+async function publicValidation(kind: string, value: any, padTo?: number): Promise<{ exit: number; code?: string }> {
+  const directory = await mkdtemp(join(tmpdir(), "shud-round3-public-"));
+  try {
+    const serialized = Buffer.from(JSON.stringify(value));
+    const bytes = padTo === undefined ? serialized : Buffer.concat([serialized, Buffer.alloc(padTo - serialized.length, 0x20)]);
+    const input = join(directory, `${kind}.json`);
+    await writeFile(input, bytes);
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "../check.ts"), "--input", input, "--kind", kind], {
+      stdout: "pipe", stderr: "pipe"
+    });
+    const [exit, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    return { exit, code: stderr ? JSON.parse(stderr).code : undefined };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 function outcomeFailure(rowId: string, producer: "observer" | "launcher" | "tripwire", observed: any): any {
   const row = normalizedRow(rowId);
   row.observer_outcome = observed;
@@ -260,7 +289,8 @@ const FAILURE_CAUSE_TAGS = {
   "control-failure-v1": "c",
   "resource-exceeded-v1": "r",
   "lifecycle-fault-v1": "l",
-  "catalog-negative-mismatch-v1": "n"
+  "catalog-negative-mismatch-v1": "n",
+  "launcher-fault-v1": "u"
 } as const;
 
 function longestAlternateRejection(expectedCode?: string): string {
@@ -322,6 +352,29 @@ function worstFailureRow(rowId: string, platform: "macos" | "linux"): any {
 }
 
 describe("Round 2 canonical proof binding", () => {
+  test("D8 exposes the exact canonical 19-segment vocabulary", () => {
+    expect(DECISION_ROW_SEGMENTS).toEqual([
+      "platform", "row_id", "expected_kind", "expected_code", "observed_kind", "observed_code", "row_verdict",
+      "observation_id", "generation_payload_digest", "actual_supplied_input_digest", "actual_producing_boundary",
+      "active_control_bitset", "passed_control_bitset", "protection_set_equal", "cleanup_verdict", "declared_limit",
+      "boundary_class", "determinism_proof", "failure_cause"
+    ]);
+  });
+
+  test("every raw-valid frozen platform slot has exactly its canonical D8 projection", () => {
+    for (const platform of ["macos", "linux"] as const) {
+      const bundle = normalizedBundle(platform);
+      for (const row of bundle.rows) {
+        expect(validateRowEvidence(row), `${platform}/${row.row_id}:raw`).toBe(true);
+        const encoded = encodeDecisionRowProjection(row);
+        const expected = generic.decision.rows.find((scalar: string) => {
+          const fields = scalar.split("\0");
+          return fields[0] === (platform === "macos" ? "m" : "l") && fields[1] === row.row_id;
+        });
+        expect(encoded, `${platform}/${row.row_id}:D8`).toBe(expected);
+      }
+    }
+  });
   test("all 13 LIM exact/+1 pairs bind the declared boundary to a replayable stimulus and actual measurement", () => {
     for (let ordinal = 1; ordinal <= 26; ordinal += 1) {
       const rowId = `LIM-${String(ordinal).padStart(3, "0")}`;
@@ -376,12 +429,53 @@ describe("Round 2 canonical proof binding", () => {
     const bundle = normalizedBundle();
     expect(validatePlatformBundle(bundle)).toBe(true);
     const changed = structuredClone(bundle);
-    changed.protection_set[0].post_digest = "cd".repeat(32);
+    changed.protection_set[0].inventory[0].post_digest = "cd".repeat(32);
     expect(validatePlatformBundle(changed)).toBe(false);
     const duplicate = structuredClone(bundle);
     duplicate.protection_set.push(structuredClone(duplicate.protection_set[0]));
     expect(validatePlatformBundle(duplicate)).toBe(false);
   });
+
+  test("both platforms require one content-addressed protection receipt for every catalog slot", async () => {
+    for (const platform of ["macos", "linux"] as const) {
+      const bundle = normalizedBundle(platform);
+      expect(validatePlatformBundle(bundle), `${platform}:baseline`).toBe(true);
+      const bytes = Buffer.byteLength(JSON.stringify(bundle));
+      expect(bytes, `${platform}:raw-capacity`).toBeLessThanOrEqual(INGESTION_LIMITS.platform_bundle.bytes);
+      expect(await publicValidation("platform_bundle", bundle, INGESTION_LIMITS.platform_bundle.bytes), `${platform}:exact-bytes`)
+        .toEqual({ exit: 0, code: undefined });
+      const plusOne = await publicValidation("platform_bundle", bundle, INGESTION_LIMITS.platform_bundle.bytes + 1);
+      expect(plusOne, `${platform}:plus-one-byte`).toEqual({ exit: 2, code: "CONTRACT_BYTES_LIMIT" });
+      expect(bundle.protection_set).toHaveLength(174);
+      expect(new Set(bundle.protection_set.map((receipt: any) => receipt.row_id)).size).toBe(174);
+      const mutations = [
+        (value: any) => value.protection_set.pop(),
+        (value: any) => value.protection_set.push(structuredClone(value.protection_set[0])),
+        (value: any) => { value.protection_set[1] = structuredClone(value.protection_set[0]); },
+        (value: any) => { value.protection_set[0].observation_id = value.protection_set[1].observation_id; },
+        (value: any) => { value.protection_set[0].supplied_input_digest = value.protection_set[1].supplied_input_digest; },
+        (value: any) => { value.protection_set[0].inventory.push(structuredClone(value.protection_set[0].inventory[0])); },
+        (value: any) => { value.protection_set[0].inventory[0].post_digest = shaA; },
+        (value: any) => { value.protection_set[0].inventory = []; },
+        (value: any) => { value.protection_set[0].inventory = Array.from({ length: 65 }, (_, index) => ({
+          identity: digest(`member-${index}`), pre_digest: digest(`stable-${index}`), post_digest: digest(`stable-${index}`),
+          event_digest: digest(`event-${index}`)
+        })); },
+        (value: any) => { value.protection_set[0].platform = platform === "macos" ? "linux" : "macos"; },
+        (value: any) => { value.rows[0].protection_set_equal = false; }
+      ];
+      for (const [index, mutate] of mutations.entries()) {
+        const changed = structuredClone(bundle);
+        mutate(changed);
+        changed.protection_set = changed.protection_set.map((receipt: any) => {
+          const core = structuredClone(receipt);
+          delete core.receipt_digest;
+          return { ...core, receipt_digest: digest(core) };
+        });
+        expect(validatePlatformBundle(changed), `${platform}:mutation-${index}`).toBe(false);
+      }
+    }
+  }, 30_000);
 
   test("initialized nested audit indexes obey the same row-specific material rules as the root index", () => {
     const frame = structuredClone(normalizedRow("BAS-001").frame_binding.scheduled.frame_reference.frame);
@@ -493,6 +587,101 @@ describe("Round 2 canonical proof binding", () => {
     decision.all_failure_codes = ["ROW_VERDICT_FAILED"];
     expect(validateDecision(decision)).toBe(true);
   });
+
+  test("non-LIM rows separate catalog expectations from five exact launcher measurements and +1 failures", async () => {
+    const cases = [
+      ["wall_time_ms", "milliseconds", "TIMEOUT"],
+      ["cpu_time_ms", "milliseconds", "LIMIT_CPU_TIME"],
+      ["threads", "count", "LIMIT_THREADS"],
+      ["memory_bytes", "bytes", "LIMIT_MEMORY"],
+      ["output_bytes", "bytes", "LIMIT_OUTPUT_BYTES"]
+    ] as const;
+    for (const [limit, unit, code] of cases) {
+      const pass = normalizedRow("BAS-001");
+      pass.actual_resource_record = measuredResource(pass, limit, unit, OBSERVER_LIMITS[limit]);
+      expect(pass.resource_record).toEqual({ boundary_class: "below", declared_limit: "none", within_limits: true });
+      expect(validateRowEvidence(pass), `${limit}:raw-exact`).toBe(true);
+      expect(await publicValidation("row_evidence", pass), `${limit}:public-row-exact`).toEqual({ exit: 0, code: undefined });
+      const passBundle = normalizedBundle();
+      passBundle.rows[0] = pass;
+      expect(validatePlatformBundle(passBundle), `${limit}:platform-exact`).toBe(true);
+      expect(await publicValidation("platform_bundle", passBundle), `${limit}:public-platform-exact`).toEqual({ exit: 0, code: undefined });
+      const projected = structuredClone(generic.decision);
+      const index = projected.rows.findIndex((scalar: string) => scalar.split("\0")[0] === "m" && scalar.split("\0")[1] === "BAS-001");
+      projected.rows[index] = encodeDecisionRowProjection(pass);
+      expect(validateDecision(projected), `${limit}:d8-exact`).toBe(true);
+      expect(await publicValidation("decision", projected), `${limit}:public-d8-exact`).toEqual({ exit: 0, code: undefined });
+
+      const fail = resourceFailure("BAS-001", limit, unit, code);
+      expect(validateRowEvidence(fail), `${limit}:raw-plus-one`).toBe(true);
+      expect(await publicValidation("row_evidence", fail), `${limit}:public-row-plus-one`).toEqual({ exit: 0, code: undefined });
+      const failBundle = normalizedBundle();
+      failBundle.rows[0] = fail;
+      expect(validatePlatformBundle(failBundle), `${limit}:platform-plus-one`).toBe(true);
+      expect(await publicValidation("platform_bundle", failBundle), `${limit}:public-platform-plus-one`).toEqual({ exit: 0, code: undefined });
+      const failedDecision = rejectedDecisionFor(fail);
+      expect(validateDecision(failedDecision), `${limit}:d8-plus-one`).toBe(true);
+      expect(await publicValidation("decision", failedDecision), `${limit}:public-d8-plus-one`).toEqual({ exit: 0, code: undefined });
+    }
+  }, 30_000);
+
+  test("normal passes reject hidden cause metadata and launcher outcomes preserve ordered causal settlement", async () => {
+    for (const field of ["first_cause", "secondary_errors", "failure_cause"] as const) {
+      const pass = normalizedRow("BAS-001");
+      if (field === "first_cause") pass.first_cause = "SIGNALLED_TERM";
+      else if (field === "secondary_errors") pass.secondary_errors = [];
+      else pass.failure_cause = { kind: "launcher-fault-v1" };
+      expect(validateRowEvidence(pass), `pass:${field}`).toBe(false);
+    }
+    const cases = [
+      ["SIGNALLED_TERM", "pass", "SIGNALLED_TERM", []],
+      ["SIGNALLED_KILL", "pass", "SIGNALLED_KILL", []],
+      ["TIMEOUT", "pass", "TIMEOUT", []],
+      ["CLEANUP_FAILED", "fail", "CLEANUP_FAILED", []],
+      ["SIGNALLED_TERM", "fail", "SIGNALLED_TERM", ["CLEANUP_FAILED"]]
+    ] as const;
+    for (const [code, cleanup, firstCause, secondary] of cases) {
+      const row = normalizedRow("BAS-001");
+      row.observer_outcome = { kind: "rejected", code };
+      row.actual_producing_boundary = "launcher";
+      row.row_verdict = "fail";
+      row.first_cause = firstCause;
+      row.secondary_errors = [...secondary];
+      row.cleanup = cleanup === "pass"
+        ? { verdict: "pass", descriptors_restored: true, processes_reaped: true }
+        : { verdict: "fail", descriptors_restored: false, processes_reaped: true };
+      row.control_assertions.cleanup.verdict = "pass";
+      row.failure_cause = causalReceipt(row, "launcher-fault-v1");
+      expect(validateRowEvidence(row), `${code}/${cleanup}:raw`).toBe(true);
+      expect(await publicValidation("row_evidence", row), `${code}/${cleanup}:public-raw`).toEqual({ exit: 0, code: undefined });
+      const bundle = normalizedBundle();
+      bundle.rows[0] = row;
+      expect(validatePlatformBundle(bundle), `${code}/${cleanup}:platform`).toBe(true);
+      const decision = rejectedDecisionFor(row);
+      expect(validateDecision(decision), `${code}/${cleanup}:d8`).toBe(true);
+      expect(decision.rows.find((scalar: string) => scalar.split("\0")[0] === "m" && scalar.split("\0")[1] === "BAS-001")
+        .split("\0")[18], `${code}/${cleanup}:tag`).toBe("u");
+      expect(await publicValidation("decision", decision), `${code}/${cleanup}:public-terminal-rejected`).toEqual({ exit: 0, code: undefined });
+      const reordered = structuredClone(row);
+      reordered.first_cause = "CLEANUP_FAILED";
+      reordered.secondary_errors = [firstCause];
+      reordered.failure_cause = causalReceipt(reordered, "launcher-fault-v1");
+      if (firstCause !== "CLEANUP_FAILED") expect(validateRowEvidence(reordered), `${code}/${cleanup}:precedence`).toBe(false);
+      for (const mutate of [
+        (cause: any) => { cause.receipt.producer = "observer"; },
+        (cause: any) => { cause.receipt.observed_outcome = { kind: "rejected", code: "PLATFORM_UNSUPPORTED" }; },
+        (cause: any) => { cause.receipt.supplied_input_digest = shaA; },
+        (cause: any) => { delete cause.receipt.cleanup; }
+      ]) {
+        const changed = structuredClone(row.failure_cause);
+        mutate(changed);
+        if (changed.receipt.cleanup !== undefined) changed.receipt = resignCause(changed).receipt;
+        const invalid = structuredClone(row);
+        invalid.failure_cause = changed;
+        expect(validateRowEvidence(invalid), `${code}/${cleanup}:receipt-binding`).toBe(false);
+      }
+    }
+  }, 30_000);
 
   test("the failure-cause union rejects cause-free launcher outcomes and producer/control/resource interchange", () => {
     const launcher = normalizedRow("BAS-004");
@@ -827,6 +1016,7 @@ describe("Round 2 canonical proof binding", () => {
     expect(validateDecision(decision), "348-slot semantic projection").toBe(true);
 
     const serialized = Buffer.from(JSON.stringify(decision));
+    expect(serialized.byteLength, "348-failure-decision-bytes").toBe(127_648);
     expect(serialized.byteLength).toBeLessThanOrEqual(INGESTION_LIMITS.decision.bytes);
     const exact = Buffer.concat([serialized, Buffer.alloc(INGESTION_LIMITS.decision.bytes - serialized.byteLength, 0x20)]);
     const plusOne = Buffer.concat([exact, Buffer.from(" ")]);

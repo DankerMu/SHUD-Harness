@@ -214,13 +214,57 @@ async function walkRegular(root: string, prefix: string, output: string[]): Prom
   const directory = join(root, ...prefix.split("/").filter(Boolean));
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (path === "openspec/changes/m2-capability-observer-spike/evidence" || path.startsWith("openspec/changes/m2-capability-observer-spike/evidence/")) continue;
     const absolute = join(root, ...path.split("/"));
     const stat = await lstat(absolute);
     if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     if (stat.isDirectory()) await walkRegular(root, path, output);
     else output.push(path);
   }
+}
+
+const EVIDENCE_ROOT = "openspec/changes/m2-capability-observer-spike/evidence";
+const EVIDENCE_LANES = new Set(["source", "platform", "gates", "final"]);
+
+function validateEvidenceContent(path: string, bytes: Uint8Array): void {
+  if (!/\.(?:json|md)$/.test(path)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new ContractError("CONTRACT_UTF8_INVALID"); }
+  if (path.endsWith(".json")) {
+    try { JSON.parse(text); } catch { throw new ContractError("CONTRACT_SCHEMA_INVALID"); }
+  } else if (/^\s*(?:import|export)\b/m.test(text) || /```/.test(text)) {
+    throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  }
+}
+
+async function validateEvidenceSubtree(root: string, prefix: string): Promise<void> {
+  const totals = new Map<string, number>();
+  const visit = async (relativePath: string): Promise<void> => {
+    const parts = relativePath.slice(EVIDENCE_ROOT.length + 1).split("/").filter(Boolean);
+    if (parts.length > 0 && (!EVIDENCE_LANES.has(parts[0]!) || (parts.length > 1 && !/^[0-9a-f]{64}$/.test(parts[1]!))))
+      throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    const absolute = join(root, ...relativePath.split("/"));
+    for (const entry of await readdir(absolute, { withFileTypes: true })) {
+      const childPath = `${relativePath}/${entry.name}`;
+      const childParts = childPath.slice(EVIDENCE_ROOT.length + 1).split("/");
+      if (!childParts.every((part) => canonicalRelativePath(part))) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+      const child = join(root, ...childPath.split("/"));
+      const stat = await lstat(child);
+      if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile()) || (stat.isFile() && (stat.mode & 0o111) !== 0))
+        throw new ContractError("CONTRACT_SCHEMA_INVALID");
+      if (stat.isDirectory()) {
+        await visit(childPath);
+        continue;
+      }
+      if (childParts.length < 3) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+      const lane = childParts[0]!;
+      const nextTotal = (totals.get(lane) ?? 0) + stat.size;
+      if (nextTotal > (lane === "final" ? INGESTION_LIMITS.final_bundle.bytes : INGESTION_LIMITS.platform_bundle.bytes))
+        throw new ContractError("CONTRACT_BYTES_LIMIT");
+      totals.set(lane, nextTotal);
+      validateEvidenceContent(childPath, await readFile(child));
+    }
+  };
+  await visit(prefix);
 }
 
 async function walkSpecs(root: string, prefix: string, output: string[]): Promise<void> {
@@ -249,6 +293,14 @@ export async function enumerateSourceCandidates(repositoryRoot: string): Promise
     candidates.push(path);
   }
   await walkSpecs(repositoryRoot, "openspec/changes/m2-capability-observer-spike/specs", candidates);
+  try {
+    const evidence = await lstat(join(repositoryRoot, ...EVIDENCE_ROOT.split("/")));
+    if (!evidence.isDirectory() || evidence.isSymbolicLink()) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    await validateEvidenceSubtree(repositoryRoot, EVIDENCE_ROOT);
+  } catch (error) {
+    if (error instanceof ContractError) throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  }
   const workflow = ".github/workflows/git-status-capability-spike.yml";
   try {
     const stat = await lstat(join(repositoryRoot, ...workflow.split("/")));
@@ -288,10 +340,26 @@ export function validateGitCandidateSet(repositoryRoot: string, candidates: read
   if (result.status !== 0 || !Buffer.isBuffer(result.stdout)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
   const records = result.stdout.subarray(0, result.stdout.length - (result.stdout.at(-1) === 0 ? 1 : 0)).toString("utf8").split("\0").filter(Boolean);
   const tracked: string[] = [];
+  const evidenceTotals = new Map<string, number>();
   for (const record of records) {
-    const match = /^(\d{6}) [0-9a-f]{40,64} (\d)\t(.+)$/.exec(record);
-    if (!match || match[2] !== "0" || !["100644", "100755"].includes(match[1]!)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
-    if (!match[3]!.startsWith("openspec/changes/m2-capability-observer-spike/evidence/")) tracked.push(match[3]!);
+    const match = /^(\d{6}) ([0-9a-f]{40,64}) (\d)\t(.+)$/.exec(record);
+    if (!match || match[3] !== "0") throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    const path = match[4]!;
+    const evidence = path.startsWith(`${EVIDENCE_ROOT}/`);
+    if (evidence ? match[1] !== "100644" || !new RegExp(`^${EVIDENCE_ROOT}/(?:source|platform|gates|final)/[0-9a-f]{64}/`).test(path)
+      : !["100644", "100755"].includes(match[1]!)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    if (evidence) {
+      const blob = spawnSync("git", ["cat-file", "blob", match[2]!], {
+        cwd: repositoryRoot, encoding: "buffer", stdio: ["ignore", "pipe", "ignore"], maxBuffer: INGESTION_LIMITS.final_bundle.bytes + 1
+      });
+      if (blob.status !== 0 || !Buffer.isBuffer(blob.stdout)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+      const lane = path.slice(EVIDENCE_ROOT.length + 1).split("/")[0]!;
+      const total = (evidenceTotals.get(lane) ?? 0) + blob.stdout.length;
+      if (total > (lane === "final" ? INGESTION_LIMITS.final_bundle.bytes : INGESTION_LIMITS.platform_bundle.bytes))
+        throw new ContractError("CONTRACT_BYTES_LIMIT");
+      evidenceTotals.set(lane, total);
+      validateEvidenceContent(path, blob.stdout);
+    } else tracked.push(path);
   }
   const trackedSpike = tracked.filter((path) => path.startsWith("spikes/git-status-capability/"));
   if (trackedSpike.length === 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
@@ -841,7 +909,12 @@ function actualResourceRecord(value: unknown, row?: JsonRecord): boolean {
 
 function expectedActualResourceForRow(actual: JsonRecord, row: JsonRecord): boolean {
   const match = /^LIM-(\d{3})$/.exec(row.row_id as string);
-  if (!match) return actualResourceRecord(actual, row);
+  if (!match) {
+    if (!actualResourceRecord(actual, row)) return false;
+    if (exactKeys(actual, ["boundary_class", "declared_limit", "within_limits"])) return true;
+    const limitIndex = ROW_RESOURCE_LIMITS.indexOf(actual.declared_limit as string);
+    return limitIndex >= 8;
+  }
   if (!actualResourceRecord(actual, row) || !record(actual.measurement)) return false;
   const ordinal = Number(match[1]);
   const limitIndex = Math.floor((ordinal - 1) / 2);
@@ -850,11 +923,22 @@ function expectedActualResourceForRow(actual: JsonRecord, row: JsonRecord): bool
   return actual.declared_limit === limit && actual.measurement.value === ceiling + (ordinal % 2 === 0 ? 1 : 0);
 }
 
+function actualResourcePasses(row: JsonRecord): boolean {
+  const actual = row.actual_resource_record;
+  if (!record(actual)) return false;
+  if (/^LIM-\d{3}$/.test(row.row_id as string)) return record(row.resource_record) &&
+    ["boundary_class", "declared_limit", "within_limits"].every((key) => actual[key] === (row.resource_record as JsonRecord)[key]);
+  if (actual.within_limits !== true || !["below", "exact"].includes(actual.boundary_class as string)) return false;
+  return actual.declared_limit === "none" || ROW_RESOURCE_LIMITS.slice(8).includes(actual.declared_limit as any);
+}
+
 function actualFailureCausality(row: JsonRecord): boolean {
-  const actualResource = row.actual_resource_record as JsonRecord;
-  if (row.row_verdict === "pass") return row.failure_cause === undefined && row.actual_producing_boundary === row.producing_boundary &&
-    record(row.resource_record) && ["boundary_class", "declared_limit", "within_limits"].every((key) =>
-      actualResource[key] === (row.resource_record as JsonRecord)[key]);
+  if (row.row_verdict === "pass") {
+    const specializedLifecycle = ["LIF-002", "LIF-006", "LIF-007"].includes(row.row_id as string);
+    return row.failure_cause === undefined && (specializedLifecycle ||
+      (row.first_cause === undefined && row.secondary_errors === undefined)) &&
+      row.actual_producing_boundary === row.producing_boundary && actualResourcePasses(row);
+  }
   return validateFailureCauseForRow(row);
 }
 
@@ -1046,8 +1130,7 @@ export function validateRowEvidence(value: unknown): boolean {
   if (determinismRow !== Object.hasOwn(value, "determinism_proof") || (determinismRow && !validateDeterminismProof(value))) return false;
   const shouldPass = exactJson(value.expected_outcome, value.observer_outcome) &&
     CONTROL_ASSERTION_IDS.every((id) => (assertions[id] as JsonRecord).verdict === "pass") &&
-    value.actual_producing_boundary === value.producing_boundary && record(value.actual_resource_record) && record(value.resource_record) &&
-    ["boundary_class", "declared_limit", "within_limits"].every((key) => (value.actual_resource_record as JsonRecord)[key] === (value.resource_record as JsonRecord)[key]);
+    value.actual_producing_boundary === value.producing_boundary && actualResourcePasses(value);
   if ((value.row_verdict === "pass") !== shouldPass) return false;
   return actualFailureCausality(value);
 }
@@ -1058,16 +1141,32 @@ export function validatePlatformBundle(value: unknown): boolean {
   if (!["macos", "linux"].includes(value.platform as string) || !["valid_complete", "invalid"].includes(value.run_status as string) || !gitObjectId(value.source_commit)) return false;
   const target = value.platform === "macos" ? "aarch64-apple-darwin" : "x86_64-unknown-linux-gnu";
   if (value.target !== target || !record(value.toolchain) || !exactKeys(value.toolchain, ["rustc_vv", "cargo_version", "git_version", "target_triple"]) || !Object.values(value.toolchain).every(nonEmptyString) || value.toolchain.target_triple !== target) return false;
-  if (!Array.isArray(value.rows) || !value.rows.every(validateRowEvidence) || !Array.isArray(value.protection_set) || !value.protection_set.every((item) =>
-    record(item) && exactKeys(item, ["identity", "pre_digest", "post_digest", "event_digest"]) && Object.values(item).every(sha256) &&
-    item.pre_digest === item.post_digest) || new Set(value.protection_set.map((item) => (item as JsonRecord).identity)).size !== value.protection_set.length ||
+  if (!Array.isArray(value.rows) || !value.rows.every(validateRowEvidence) || !Array.isArray(value.protection_set) || !value.protection_set.every((receipt) => {
+    if (!record(receipt) || !exactKeys(receipt, ["platform", "row_id", "observation_id", "supplied_input_digest", "inventory", "receipt_digest"]) ||
+      receipt.platform !== value.platform || typeof receipt.row_id !== "string" || !sha256(receipt.observation_id) ||
+      !sha256(receipt.supplied_input_digest) || !sha256(receipt.receipt_digest) || !Array.isArray(receipt.inventory) ||
+      receipt.inventory.length === 0 || receipt.inventory.length > 64) return false;
+    if (!receipt.inventory.every((item) => record(item) && exactKeys(item, ["identity", "pre_digest", "post_digest", "event_digest"]) &&
+      Object.values(item).every(sha256) && item.pre_digest === item.post_digest) ||
+      new Set(receipt.inventory.map((item) => (item as JsonRecord).identity)).size !== receipt.inventory.length) return false;
+    const unsigned = Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== "receipt_digest"));
+    return receipt.receipt_digest === canonicalDigest(unsigned);
+  }) ||
     !Array.isArray(value.raw_command_manifest) || !value.raw_command_manifest.every(executionReceipt)) return false;
   if (value.rows.some((row) => (row as JsonRecord).platform !== value.platform || (row as JsonRecord).source_input_record_sha256 !== value.source_input_record_sha256)) return false;
   if (value.run_status === "valid_complete" && (value.rows.length !== 174 || new Set(value.rows.map((row) => (row as JsonRecord).row_id)).size !== 174 ||
     new Set(value.rows.map((row) => (row as JsonRecord).observation_id)).size !== 174 ||
     new Set(value.rows.map((row) => (row as JsonRecord).git_state_generation_digest)).size !== 174 ||
     new Set(value.rows.map((row) => (row as JsonRecord).frame_digest)).size !== 174 ||
-    value.protection_set.length === 0 || value.raw_command_manifest.length === 0)) return false;
+    value.protection_set.length !== 174 || new Set(value.protection_set.map((receipt) => (receipt as JsonRecord).row_id)).size !== 174 ||
+    value.raw_command_manifest.length === 0)) return false;
+  const protectionByRow = new Map(value.protection_set.map((receipt) => [(receipt as JsonRecord).row_id, receipt as JsonRecord]));
+  for (const rowValue of value.rows) {
+    const row = rowValue as JsonRecord;
+    const receipt = protectionByRow.get(row.row_id as string);
+    if (!receipt || receipt.observation_id !== row.observation_id || receipt.supplied_input_digest !== row.frame_digest ||
+      row.protection_set_equal !== true || (row.control_assertions as JsonRecord).protection.verdict !== "pass") return false;
+  }
   const determinismInvocationIds = value.rows.flatMap((row) => {
     const proof = (row as JsonRecord).determinism_proof;
     return record(proof) && record(proof.first) && record(proof.second)

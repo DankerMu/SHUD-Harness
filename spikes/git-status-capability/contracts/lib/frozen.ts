@@ -204,7 +204,7 @@ export const FRAME_EVIDENCE_FIELD_ORDER = Object.freeze([
 
 export const DECISION_ROW_SEGMENTS = Object.freeze([
   "platform", "row_id", "expected_kind", "expected_code", "observed_kind", "observed_code", "row_verdict",
-  "observation_id", "generation_payload_digest", "frame_digest", "producing_boundary",
+  "observation_id", "generation_payload_digest", "actual_supplied_input_digest", "actual_producing_boundary",
   "active_control_bitset", "passed_control_bitset", "protection_set_equal", "cleanup_verdict", "declared_limit", "boundary_class",
   "determinism_proof", "failure_cause"
 ]);
@@ -254,12 +254,12 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       row_verdict: "iff:expected=observed-and-all-required-active-controls-pass", oracle_digest: "sha256",
       control_assertions: "strict:{oracle,ambient_path,subprocess,network,protected_write,protection,cleanup}:{active:literal:true,verdict:pass|fail}",
       protection_set_equal: "boolean;iff-control-protection-pass",
-      cleanup: "strict:{verdict:pass|fail,descriptors_restored:boolean,processes_reaped:boolean};LIF-006|007=causal-cleanup-failure-with-control-pass;otherwise-verdict=control-cleanup",
+      cleanup: "strict:{verdict:pass|fail,descriptors_restored:boolean,processes_reaped:boolean};LIF-006|007-or-launcher-fault=causal-cleanup-failure-with-control-pass;otherwise-verdict=control-cleanup",
       resource_record: "strict:catalog-expected-boundary:{below|exact|exceeded,observer-limit|none,within_limits=(boundary!=exceeded)}",
-      actual_resource_record: "strict:actual-boundary;LIM=content-addressed-stimulus-and-measurement;technical-failure=causality-bound;below-none-has-no-proof", source_input_record_sha256: "sha256",
-      first_cause: "optional:nonempty-string;LIF-002|006=FRAME_VERSION_UNSUPPORTED;LIF-007=CLEANUP_FAILED", secondary_errors: "optional:string[];LIF-002|007=[];LIF-006=[CLEANUP_FAILED]",
+      actual_resource_record: "strict:actual-boundary;LIM=content-addressed-stimulus-and-measurement;non-LIM-launcher-counters=bound-below|exact-pass-or-exceeded-causal-fail;below-none-has-no-proof", source_input_record_sha256: "sha256",
+      first_cause: "specialized-LIF-technical-pass-or-fail-only-launcher:ordered-primary;LIF-002|006=FRAME_VERSION_UNSUPPORTED;LIF-007=CLEANUP_FAILED;launcher=observed-technical-code", secondary_errors: "specialized-LIF-technical-pass-or-fail-only-launcher:ordered-string[];cleanup-failure-secondary-unless-primary",
       determinism_proof: "iff-row-DET-001..004:strict:{variation_axis,axis_material,axis_digest,first,second,comparison};two-distinct-receipts;strict-structured-per-invocation-input-and-output;production-recomputed-normalized-row-output-and-nonrecursive-formal-d8-projection;outer-axis-material-and-digest-derived-only-from-per-receipt-axis-binding;stable-input-equal-after-excluding-only-declared-axis;DET-001=exact-full-input-repeat;DET-002=side-bound-fixture-creation-order;DET-003=side-bound-fixture-root;DET-004=side-bound-permitted-volatile-material",
-      failure_cause: "iff-row-verdict-fail:shared-canonical-closed-union:outcome-mismatch-v1(observer-only)|control-failure-v1(producer-specific-control)|resource-exceeded-v1(complete-stimulus-and-measurement)|lifecycle-fault-v1(exact-LIF-002|006|007-mutation-errors-cleanup)|catalog-negative-mismatch-v1(frozen-launcher-or-tripwire-negative-row,alternate-frozen-code,exact-boundary,content-addressed-supplied-state-and-per-row-relationship-recipe);content-addressed-receipt-bound-to-platform-row-slot-and-actual-supplied-input"
+      failure_cause: "iff-row-verdict-fail:shared-canonical-closed-union:outcome-mismatch-v1(observer-only)|control-failure-v1(producer-specific-control)|resource-exceeded-v1(complete-stimulus-and-measurement)|lifecycle-fault-v1(exact-LIF-002|006|007-mutation-errors-cleanup)|catalog-negative-mismatch-v1(frozen-launcher-or-tripwire-negative-row,alternate-frozen-code,exact-boundary,content-addressed-supplied-state-and-per-row-relationship-recipe)|launcher-fault-v1(signal|timeout|cleanup,ordered-primary-secondary);content-addressed-receipt-bound-to-platform-row-slot-and-actual-supplied-input"
     },
     additional_properties: false
   },
@@ -278,7 +278,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       dependency_graph_digest: "sha256", direct_feature_digest: "sha256", call_ledger_digest: "sha256",
       sbom_digest: "sha256", license_inventory_digest: "sha256",
       rows: "array:row-evidence;valid_complete=174-exact;top-level-observation,scheduled-generation,actual-supplied-input-identities=unique-per-platform-slot;DET-paired-receipt-identities=8-globally-unique;same-row-nested-observation-repeat-only-exception",
-      protection_set: "array:strict:{identity,pre_digest,post_digest,event_digest};identity-unique;pre_digest=post_digest;valid_complete=nonempty",
+      protection_set: "array:174-exact-slot-receipts:strict:{platform,row_id,observation_id,supplied_input_digest,inventory:[strict:{identity,pre_digest,post_digest,event_digest}],receipt_digest};slot-exact-once;inventory=1..64-identity-unique;pre_digest=post_digest;row-boolean-derived",
       raw_command_manifest: "array:command-receipt;valid_complete=nonempty", first_cause: "invalid-only:nonempty-string",
       all_failure_codes: "invalid-only:sorted-unique-string[]"
     },
@@ -328,7 +328,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       macos_target_identity: "literal:aarch64-apple-darwin", macos_toolchain_identity: "sha256",
       linux_target_identity: "literal:x86_64-unknown-linux-gnu", linux_toolchain_identity: "sha256",
       platforms: "exact:[macos,linux]",
-      rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,actual_supplied_input_digest,actual_producing_boundary(o|l|t),active_control_bitset(7f=all-required-active),passed_control_bitset(00..7f),protection_set_equal(1|0),cleanup_verdict(p|f),actual_declared_limit(0..13),actual_boundary_class(b|e|x),determinism_proof(0=non-DET|1..4=validated-paired-DET-proof),failure_cause(empty-if-pass|one-byte-canonical-tag-if-fail:o=outcome,c=control,r=resource,l=lifecycle,n=catalog-negative)];failure-cause-tag-semantics=validated-only-from-projected-platform-row-outcomes-producer-controls-cleanup-resource-and-identities;raw-causal-receipt-and-material-remain-row-evidence-only;pass=actual-boundaries-equal-catalog-expected;fail=causality-bound;control-bit-order=oracle|ambient_path|subprocess|network|protected_write|protection|cleanup;valid_complete=348-exact;catalog-slot,top-level-observation,generation/payload,actual-supplied-input-identities=globally-unique;DET nested same-slot repeat-only-exception",
+      rows: "array:strict-d8-row-scalar-v1:nul-segments:[platform(m|l),row_id,expected_kind(c|d|r),expected_code,observed_kind(c|d|r),observed_code,row_verdict(p|f),observation_id,generation_payload_digest,actual_supplied_input_digest,actual_producing_boundary(o|l|t),active_control_bitset(7f=all-required-active),passed_control_bitset(00..7f),protection_set_equal(1|0),cleanup_verdict(p|f),actual_declared_limit(0..13),actual_boundary_class(b|e|x),determinism_proof(0=non-DET|1..4=validated-paired-DET-proof),failure_cause(empty-if-pass|one-byte-canonical-tag-if-fail:o=outcome,c=control,r=resource,l=lifecycle,n=catalog-negative,u=launcher-fault)];failure-cause-tag-semantics=validated-only-from-projected-platform-row-outcomes-producer-controls-cleanup-resource-and-identities;raw-causal-receipt-and-material-remain-row-evidence-only;pass=actual-within-limit-and-catalog-outcome;fail=causality-bound;control-bit-order=oracle|ambient_path|subprocess|network|protected_write|protection|cleanup;valid_complete=348-exact;catalog-slot,top-level-observation,generation/payload,actual-supplied-input-identities=globally-unique;DET nested same-slot repeat-only-exception",
       gates: "nonempty-array:strict-repository-command-receipt:{id,argv,version,exit_verdict,summary_digest,source_input_record_sha256};id-unique;source-record-equal",
       run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted-iff-all-row-verdicts-pass|rejected-iff-any-row-verdict-fails",
       first_cause: "rejected-or-invalid:nonempty-string", all_failure_codes: "rejected-or-invalid:sorted-unique-string[]"

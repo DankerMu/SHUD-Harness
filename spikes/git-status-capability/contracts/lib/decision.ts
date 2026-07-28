@@ -109,8 +109,12 @@ function decodeDecisionRow(value: unknown): DecodedRow | null {
   const protectionPassed = (passedControlBits & (1 << CONTROL_ASSERTION_IDS.indexOf("protection"))) !== 0;
   const cleanupPassed = (passedControlBits & (1 << CONTROL_ASSERTION_IDS.indexOf("cleanup"))) !== 0;
   const controlsPassed = passedControlBits === ALL_CONTROL_BITS;
-  const cleanupFailureIsEvidence = rowId === "LIF-006" || rowId === "LIF-007";
-  const actualMatchesExpected = producingBoundary === catalog?.producing_boundary && limitOrdinal === frozenLimitOrdinal && boundaryClass === frozenBoundary;
+  const cleanupFailureIsEvidence = rowId === "LIF-006" || rowId === "LIF-007" ||
+    (failureCauseToken === "u" && cleanupVerdict === "f");
+  const nonLimWithinLimit = !limitMatch && ((limitOrdinal === 0 && boundaryClass === "below") ||
+    (limitOrdinal >= 9 && limitOrdinal <= 13 && ["below", "exact"].includes(boundaryClass)));
+  const actualMatchesExpected = producingBoundary === catalog?.producing_boundary &&
+    (limitMatch ? limitOrdinal === frozenLimitOrdinal && boundaryClass === frozenBoundary : nonLimWithinLimit);
   const failureCauseValid = validateFailureCauseTag(failureCauseToken!, {
     platform, rowVerdict, expectedOutcome, observedOutcome, producingBoundary, rowId: rowId!, observationId: observationId!,
     suppliedInputDigest: frameDigest!, declaredLimit, boundaryClass, passedControlBits,
