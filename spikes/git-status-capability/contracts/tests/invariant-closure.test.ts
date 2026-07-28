@@ -16,12 +16,88 @@ import {
   validateSourceInputRecord,
   validateSupplyFiles
 } from "../lib/schema";
-import { materialFrame } from "./frame-fixture";
+import { frameForEvidenceSlot, materialFrame, resealFrame } from "./frame-fixture";
 
 const contractRoot = join(import.meta.dir, "..");
 const repositoryRoot = join(contractRoot, "..", "..", "..");
 const shaA = "01".repeat(32);
 const shaB = "ab".repeat(32);
+const frameEvidenceEncoding = "shud.git-status-capability.canonical-frame-json.v1";
+const frameEvidenceFields = [
+  "schema_version", "catalog_version", "row_id", "observation_id", "checkout_capability_identity",
+  "git_state_generation_digest", "body_length", "body_digest", "checksum", "index", "head_tree",
+  "effective_config", "exclude_state", "attribute_state", "nested_state", "limit_stimulus"
+] as const;
+
+function canonicalEvidenceValue(value: any): any {
+  if (Array.isArray(value)) return value.map(canonicalEvidenceValue);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort((left, right) => Buffer.from(left).compare(Buffer.from(right)))
+    .map((key) => [key, canonicalEvidenceValue(value[key])]));
+}
+
+function canonicalFrameEvidenceBytes(frame: Record<string, any>): Buffer {
+  const entries = frameEvidenceFields.filter((field) => Object.hasOwn(frame, field))
+    .map((field) => [field, canonicalEvidenceValue(frame[field])]);
+  return Buffer.from(JSON.stringify(Object.fromEntries(entries)), "utf8");
+}
+
+function synchronizeRowDeclarations(row: any, recomputeChecksum: boolean): void {
+  const frame = row.frame_binding.frame_reference.frame;
+  if (recomputeChecksum) {
+    const body = {
+      index: frame.index, head_tree: frame.head_tree, effective_config: frame.effective_config,
+      exclude_state: frame.exclude_state, attribute_state: frame.attribute_state, nested_state: frame.nested_state,
+      ...(Object.hasOwn(frame, "limit_stimulus") ? { limit_stimulus: frame.limit_stimulus } : {})
+    };
+    const header = {
+      schema_version: frame.schema_version, catalog_version: frame.catalog_version, row_id: frame.row_id,
+      observation_id: frame.observation_id, checkout_capability_identity: frame.checkout_capability_identity,
+      git_state_generation_digest: frame.git_state_generation_digest, body_length: frame.body_length,
+      body_digest: frame.body_digest
+    };
+    frame.checksum = createHash("sha256").update(JSON.stringify({ header, body })).digest("hex");
+  }
+  const bytes = canonicalFrameEvidenceBytes(frame);
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  row.git_state_generation_digest = frame.git_state_generation_digest;
+  row.frame_digest = digest;
+  row.frame_binding.git_state_generation_digest = frame.git_state_generation_digest;
+  row.frame_binding.frame_length = bytes.length;
+  row.frame_binding.frame_digest = digest;
+  row.frame_binding.payload_length = frame.body_length;
+  row.frame_binding.canonical_body_length = frame.body_length;
+  row.frame_binding.payload_digest = frame.body_digest;
+  row.frame_binding.canonical_body_digest = frame.body_digest;
+}
+
+function frameForSlot(rowId: string, observationId: string, capabilityIdentity: string): Record<string, any> {
+  const frame = materialFrame();
+  frame.row_id = rowId;
+  frame.observation_id = observationId;
+  frame.checkout_capability_identity = capabilityIdentity;
+  return resealFrame(frame);
+}
+
+function bindRowFrame(row: any, frame = frameForEvidenceSlot(row.row_id, row.observation_id, row.checkout_capability_identity)): void {
+  const frameBytes = canonicalFrameEvidenceBytes(frame);
+  const frameDigest = createHash("sha256").update(frameBytes).digest("hex");
+  row.git_state_generation_digest = frame.git_state_generation_digest;
+  row.frame_digest = frameDigest;
+  Object.assign(row.frame_binding, {
+    row_id: row.row_id,
+    observation_id: row.observation_id,
+    checkout_capability_identity: row.checkout_capability_identity,
+    git_state_generation_digest: frame.git_state_generation_digest,
+    frame_length: frameBytes.length,
+    frame_digest: frameDigest,
+    payload_length: frame.body_length,
+    payload_digest: frame.body_digest,
+    canonical_body_length: frame.body_length,
+    canonical_body_digest: frame.body_digest,
+    frame_reference: { encoding: frameEvidenceEncoding, frame }
+  });
+}
 
 function outcome(text: string): Record<string, string> {
   const rejected = /^rejected\(([^)]+)\)$/.exec(text);
@@ -45,13 +121,20 @@ async function oracleTables(): Promise<{ rows: Map<string, string>; floors: stri
 }
 
 function validRow(): Record<string, unknown> {
+  const frame = frameForSlot("BAS-001", shaA, shaB);
+  const frameBytes = canonicalFrameEvidenceBytes(frame);
+  const frameDigest = createHash("sha256").update(frameBytes).digest("hex");
   return {
     schema_version: "shud.git-status-capability.row-evidence.v1", platform: "macos", row_id: "BAS-001",
-    observation_id: shaA, checkout_capability_identity: shaB, git_state_generation_digest: shaA, frame_digest: shaB,
+    observation_id: shaA, checkout_capability_identity: shaB,
+    git_state_generation_digest: frame.git_state_generation_digest, frame_digest: frameDigest,
     frame_binding: {
-      row_id: "BAS-001", observation_id: shaA, checkout_capability_identity: shaB, git_state_generation_digest: shaA,
-      frame_length: 1024, frame_digest: shaB, payload_length: 768, payload_digest: shaA,
-      canonical_body_length: 768, canonical_body_digest: shaA
+      row_id: "BAS-001", observation_id: shaA, checkout_capability_identity: shaB,
+      git_state_generation_digest: frame.git_state_generation_digest,
+      frame_length: frameBytes.length, frame_digest: frameDigest,
+      payload_length: frame.body_length, payload_digest: frame.body_digest,
+      canonical_body_length: frame.body_length, canonical_body_digest: frame.body_digest,
+      frame_reference: { encoding: frameEvidenceEncoding, frame }
     },
     expected_outcome: { kind: "clean" }, observer_outcome: { kind: "clean" }, producing_boundary: "observer",
     row_verdict: "pass", oracle_digest: shaA, oracle_verdict: "pass",
@@ -129,6 +212,45 @@ describe("round-1 invariant closure", () => {
     }
   });
 
+  test("row evidence binds one canonical complete-frame JSON reference and rejects declaration drift", () => {
+    const baseFrameBytes = canonicalFrameEvidenceBytes(materialFrame());
+    expect(baseFrameBytes.length).toBe(4079);
+    expect(createHash("sha256").update(baseFrameBytes).digest("hex"))
+      .toBe("bb14993b44f6dc90882550b8631d9e6ed22fb694938015564c47652c8bd9c765");
+    expect(validateRowEvidence(validRow())).toBe(true);
+    const reordered: any = structuredClone(validRow());
+    reordered.frame_binding.frame_reference.frame = Object.fromEntries(
+      Object.entries(reordered.frame_binding.frame_reference.frame).reverse()
+    );
+    expect(validateRowEvidence(reordered)).toBe(true);
+    for (const mutate of [
+      (row: any) => { delete row.frame_binding.frame_reference; },
+      (row: any) => { row.frame_binding.frame_reference.encoding = "json"; },
+      (row: any) => { row.frame_binding.frame_length += 1; },
+      (row: any) => { row.frame_binding.frame_digest = shaA; },
+      (row: any) => { row.frame_digest = shaA; row.frame_binding.frame_digest = shaA; },
+      (row: any) => { row.frame_binding.frame_reference.frame.row_id = "BAS-002"; },
+      (row: any) => { row.frame_binding.frame_reference.frame.observation_id = shaB; },
+      (row: any) => { row.frame_binding.frame_reference.frame.checkout_capability_identity = shaA; },
+      (row: any) => { row.frame_binding.frame_reference.frame.body_length += 1; },
+      (row: any) => {
+        row.frame_binding.frame_reference.frame.body_length += 1;
+        synchronizeRowDeclarations(row, true);
+      },
+      (row: any) => {
+        row.frame_binding.frame_reference.frame.body_digest = shaA;
+        row.frame_binding.frame_reference.frame.git_state_generation_digest = shaA;
+        synchronizeRowDeclarations(row, true);
+      },
+      (row: any) => {
+        row.frame_binding.frame_reference.frame.checksum = shaA;
+        synchronizeRowDeclarations(row, false);
+      }
+    ]) {
+      const row = structuredClone(validRow()); mutate(row); expect(validateRowEvidence(row)).toBe(false);
+    }
+  });
+
   test("all row resource records use the frozen catalog boundary and truthful within_limits value", () => {
     const limits = [
       "frame_bytes", "index_bytes", "index_entries", "path_bytes", "path_depth", "nested_repositories",
@@ -137,7 +259,6 @@ describe("round-1 invariant closure", () => {
     for (const catalog of CATALOG_V1) {
       const row: any = structuredClone(validRow());
       row.row_id = catalog.id;
-      row.frame_binding.row_id = catalog.id;
       row.expected_outcome = structuredClone(catalog.macos_expected);
       row.observer_outcome = structuredClone(catalog.macos_expected);
       const match = /^LIM-(\d{3})$/.exec(catalog.id);
@@ -148,6 +269,7 @@ describe("round-1 invariant closure", () => {
           declared_limit: limits[Math.floor((ordinal - 1) / 2)], within_limits: ordinal % 2 === 1
         };
       }
+      bindRowFrame(row);
       expect(validateRowEvidence(row), catalog.id).toBe(true);
       for (const mutate of [
         (changed: any) => { changed.resource_record.within_limits = !changed.resource_record.within_limits; },
@@ -205,6 +327,16 @@ describe("round-1 invariant closure", () => {
   test("complete bundle cardinalities and cross-slot identities are closed while invalid has no decision", async () => {
     const generic = JSON.parse(await readFile(join(contractRoot, "fixtures/valid/generic.json"), "utf8"));
     expect(validatePlatformBundle(generic.platform_bundle)).toBe(true);
+    for (const row of generic.platform_bundle.rows) {
+      const reference = row.frame_binding.frame_reference;
+      expect(reference.encoding, row.row_id).toBe(frameEvidenceEncoding);
+      expect(reference.frame.row_id, row.row_id).toBe(row.row_id);
+      expect(reference.frame.observation_id, row.row_id).toBe(row.observation_id);
+      expect(reference.frame.checkout_capability_identity, row.row_id).toBe(row.checkout_capability_identity);
+      const bytes = canonicalFrameEvidenceBytes(reference.frame);
+      expect(row.frame_binding.frame_length, row.row_id).toBe(bytes.length);
+      expect(row.frame_digest, row.row_id).toBe(createHash("sha256").update(bytes).digest("hex"));
+    }
     expect(validateFinalBundle(generic.final_bundle)).toBe(true);
     expect(validateDecision(generic.decision)).toBe(true);
     for (const mutate of [
