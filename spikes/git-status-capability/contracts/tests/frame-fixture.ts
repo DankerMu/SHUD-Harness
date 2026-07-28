@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { canonicalJsonDigest, sealFrame } from "../lib/canonical-frame";
 
 const shaA = "01".repeat(32);
 const shaB = "ab".repeat(32);
@@ -6,11 +7,6 @@ const oidA = "01".repeat(20);
 const oidB = "ab".repeat(20);
 export const frameEvidenceEncoding = "shud.git-status-capability.canonical-frame-json.v1";
 export type EvidencePlatform = "macos" | "linux";
-const frameEvidenceFields = [
-  "schema_version", "catalog_version", "row_id", "observation_id", "checkout_capability_identity",
-  "git_state_generation_digest", "body_length", "body_digest", "checksum", "index", "head_tree",
-  "effective_config", "exclude_state", "attribute_state", "nested_state", "limit_stimulus"
-] as const;
 
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -22,11 +18,11 @@ function source(path: string, content: string) {
 }
 
 function pathState(sources: ReturnType<typeof source>[]) {
-  return { digest: digest(JSON.stringify(sources)), sources };
+  return { digest: canonicalJsonDigest(sources), sources };
 }
 
 function config(entries: Array<Record<string, string>>) {
-  return { digest: digest(JSON.stringify(entries)), entries };
+  return { digest: canonicalJsonDigest(entries), entries };
 }
 
 function entry(path: string, objectId = oidA, mode = "100644") {
@@ -65,18 +61,6 @@ function limitStimulus(rowId: string): Record<string, unknown> | undefined {
   return undefined;
 }
 
-function canonicalEvidenceValue(value: any): any {
-  if (Array.isArray(value)) return value.map(canonicalEvidenceValue);
-  if (value === null || typeof value !== "object") return value;
-  return Object.fromEntries(Object.keys(value).sort((left, right) => Buffer.from(left).compare(Buffer.from(right)))
-    .map((key) => [key, canonicalEvidenceValue(value[key])]));
-}
-
-export function canonicalFrameEvidenceBytes(frame: Record<string, any>): Buffer {
-  return Buffer.from(JSON.stringify(Object.fromEntries(frameEvidenceFields.filter((field) => Object.hasOwn(frame, field))
-    .map((field) => [field, canonicalEvidenceValue(frame[field])]))), "utf8");
-}
-
 export function materialFrame(split = false): Record<string, any> {
   const local = entry(split ? "b.txt" : "a.txt", oidB);
   const shared = entry("a.txt", oidA);
@@ -113,34 +97,14 @@ export function materialFrame(split = false): Record<string, any> {
       }
     }]
   };
-  const bodyBytes = JSON.stringify(body);
-  const bodyDigest = digest(bodyBytes);
-  const header = {
+  return sealFrame({
     schema_version: "shud.git-status-capability.frame.v1", catalog_version: 1, row_id: "BAS-001",
-    observation_id: shaA, checkout_capability_identity: shaB, git_state_generation_digest: bodyDigest,
-    body_length: Buffer.byteLength(bodyBytes), body_digest: bodyDigest
-  };
-  return { ...header, checksum: digest(JSON.stringify({ header, body })), ...body };
+    observation_id: shaA, checkout_capability_identity: shaB, git_state_generation_digest: "",
+    body_length: 0, body_digest: "", checksum: "", ...body
+  });
 }
 
-export function resealFrame(frame: Record<string, any>): Record<string, any> {
-  const body = {
-    index: frame.index, head_tree: frame.head_tree, effective_config: frame.effective_config,
-    exclude_state: frame.exclude_state, attribute_state: frame.attribute_state, nested_state: frame.nested_state,
-    ...(Object.hasOwn(frame, "limit_stimulus") ? { limit_stimulus: frame.limit_stimulus } : {})
-  };
-  const bodyBytes = JSON.stringify(body);
-  frame.body_length = Buffer.byteLength(bodyBytes);
-  frame.body_digest = digest(bodyBytes);
-  frame.git_state_generation_digest = frame.body_digest;
-  const header = {
-    schema_version: frame.schema_version, catalog_version: frame.catalog_version, row_id: frame.row_id,
-    observation_id: frame.observation_id, checkout_capability_identity: frame.checkout_capability_identity,
-    git_state_generation_digest: frame.git_state_generation_digest, body_length: frame.body_length, body_digest: frame.body_digest
-  };
-  frame.checksum = digest(JSON.stringify({ header, body }));
-  return frame;
-}
+export const resealFrame = sealFrame;
 
 export function slotObservationId(platform: EvidencePlatform, rowId: string): string {
   return digest(`shud.git-status-capability.observation-slot.v1\0${platform}\0${rowId}`);

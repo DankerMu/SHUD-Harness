@@ -3,10 +3,18 @@ import { spawnSync } from "node:child_process";
 import { readFile, readdir, lstat } from "node:fs/promises";
 import { join, posix, relative, resolve, sep } from "node:path";
 import {
+  canonicalFrameBodyBytes,
+  canonicalFrameBodyDigest,
+  canonicalFrameBytes,
+  canonicalFrameChecksum,
+  canonicalFrameDigest,
+  canonicalJsonDigest
+} from "./canonical-frame";
+import { validateDecisionProjection } from "./decision";
+import {
   CATALOG_V1,
   FLOOR_V1,
   FRAME_EVIDENCE_ENCODING,
-  FRAME_EVIDENCE_FIELD_ORDER,
   INGESTION_LIMITS,
   OBSERVER_LIMITS,
   OWNERSHIP_V1,
@@ -534,20 +542,7 @@ function headTree(value: unknown): boolean {
 }
 
 function canonicalDigest(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-
-function canonicalEvidenceValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalEvidenceValue);
-  if (!record(value)) return value;
-  return Object.fromEntries(Object.keys(value).sort((left, right) => Buffer.from(left).compare(Buffer.from(right)))
-    .map((key) => [key, canonicalEvidenceValue(value[key])]));
-}
-
-function canonicalFrameEvidenceBytes(frame: JsonRecord): Buffer {
-  return Buffer.from(JSON.stringify(Object.fromEntries(FRAME_EVIDENCE_FIELD_ORDER
-    .filter((field) => Object.hasOwn(frame, field))
-    .map((field) => [field, canonicalEvidenceValue(frame[field])]))), "utf8");
+  return canonicalJsonDigest(value);
 }
 
 function frameConfig(value: unknown): boolean {
@@ -603,19 +598,6 @@ function nestedFrameState(value: unknown): boolean {
     sha256(audit.parent_identity) && audit.basename === basename;
 }
 
-function frameBody(value: JsonRecord): JsonRecord {
-  const body: JsonRecord = {
-    index: value.index,
-    head_tree: value.head_tree,
-    effective_config: value.effective_config,
-    exclude_state: value.exclude_state,
-    attribute_state: value.attribute_state,
-    nested_state: value.nested_state
-  };
-  if (Object.hasOwn(value, "limit_stimulus")) body.limit_stimulus = value.limit_stimulus;
-  return body;
-}
-
 function effectiveIndexEntries(value: unknown): JsonRecord[] | null {
   return record(value) && value.state === "parsed" && Array.isArray(value.effective_entries)
     ? value.effective_entries as JsonRecord[] : null;
@@ -647,19 +629,6 @@ function nestedParentConsistency(rootIndex: unknown, nestedState: JsonRecord[]):
   return true;
 }
 
-function frameHeader(value: JsonRecord): JsonRecord {
-  return {
-    schema_version: value.schema_version,
-    catalog_version: value.catalog_version,
-    row_id: value.row_id,
-    observation_id: value.observation_id,
-    checkout_capability_identity: value.checkout_capability_identity,
-    git_state_generation_digest: value.git_state_generation_digest,
-    body_length: value.body_length,
-    body_digest: value.body_digest
-  };
-}
-
 export function validateFrame(value: unknown): boolean {
   const descriptor = SCHEMA_DESCRIPTORS.frame;
   const hasLimitStimulus = record(value) && Object.hasOwn(value, "limit_stimulus");
@@ -675,11 +644,10 @@ export function validateFrame(value: unknown): boolean {
   const nestedPaths = value.nested_state.map((nested) => (nested as JsonRecord).path as string);
   if (new Set(nestedPaths).size !== nestedPaths.length || !nestedPaths.every((path, index) => index === 0 || Buffer.from(nestedPaths[index - 1]!).compare(Buffer.from(path)) < 0)) return false;
   if (!nestedParentConsistency(value.index, value.nested_state as JsonRecord[])) return false;
-  const body = frameBody(value);
-  const bodyBytes = JSON.stringify(body);
-  const bodyDigest = canonicalDigest(body);
-  return value.body_length === Buffer.byteLength(bodyBytes) && value.body_digest === bodyDigest &&
-    value.git_state_generation_digest === bodyDigest && value.checksum === canonicalDigest({ header: frameHeader(value), body });
+  const bodyBytes = canonicalFrameBodyBytes(value);
+  const bodyDigest = canonicalFrameBodyDigest(value);
+  return value.body_length === bodyBytes.length && value.body_digest === bodyDigest &&
+    value.git_state_generation_digest === bodyDigest && value.checksum === canonicalFrameChecksum(value);
 }
 
 export function deriveFrameComparisonInputs(value: unknown): JsonRecord {
@@ -766,8 +734,8 @@ function frameReferenceBinding(binding: JsonRecord, row: JsonRecord): boolean {
     frame.git_state_generation_digest !== row.git_state_generation_digest ||
     frame.body_length !== binding.payload_length || frame.body_length !== binding.canonical_body_length ||
     frame.body_digest !== binding.payload_digest || frame.body_digest !== binding.canonical_body_digest) return false;
-  const frameBytes = canonicalFrameEvidenceBytes(frame);
-  const frameDigest = createHash("sha256").update(frameBytes).digest("hex");
+  const frameBytes = canonicalFrameBytes(frame);
+  const frameDigest = canonicalFrameDigest(frame);
   return frameBytes.length === binding.frame_length && frameDigest === binding.frame_digest && frameDigest === row.frame_digest;
 }
 
@@ -847,24 +815,7 @@ export function validateFinalBundle(value: unknown): boolean {
 export function validateDecision(value: unknown): boolean {
   const descriptor = SCHEMA_DESCRIPTORS.decision;
   if (!matchesDescriptor(value, descriptor) || !terminalState(value) || value.catalog_version !== 1 || !sha256(value.catalog_digest) || !sha256(value.source_input_record_sha256)) return false;
-  if (!Array.isArray(value.platforms) || !exactJson(value.platforms, ["macos", "linux"]) || !Array.isArray(value.rows) || !value.rows.every((row) => {
-    if (typeof row !== "string") return false;
-    const [platform, rowId, expectedKind, expectedCode, observedKind, observedCode, verdict, observationId, generationPayloadDigest, frameDigest, ...surplus] = row.split("\0");
-    const catalog = CATALOG_V1.find((item) => item.id === rowId);
-    const frozen = platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
-    const expected = expectedKind === "rejected" ? { kind: expectedKind, code: expectedCode } : { kind: expectedKind };
-    const observed = observedKind === "rejected" ? { kind: observedKind, code: observedCode } : { kind: observedKind };
-    return surplus.length === 0 && ["macos", "linux"].includes(platform!) && outcome(expected) && exactJson(expected, frozen) && outcome(observed) &&
-      ["pass", "fail"].includes(verdict!) && sha256(observationId) && sha256(generationPayloadDigest) && sha256(frameDigest) &&
-      ((verdict === "pass") === exactJson(expected, observed));
-  }) || !record(value.gates) || Object.keys(value.gates).length === 0 || !Object.values(value.gates).every((gate) => gate === "pass")) return false;
-  if (value.run_status === "valid_complete") {
-    const fields = value.rows.map((row) => (row as string).split("\0"));
-    if (fields.length !== 348 || new Set(fields.map((row) => row.slice(0, 2).join("/"))).size !== 348 ||
-      new Set(fields.map((row) => row[7])).size !== 348 || new Set(fields.map((row) => row[8])).size !== 348 ||
-      new Set(fields.map((row) => row[9])).size !== 348) return false;
-  }
-  return true;
+  return validateDecisionProjection(value);
 }
 
 const INPUT_VALIDATORS: Record<InputKind, SchemaValidator> = {

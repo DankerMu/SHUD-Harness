@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalFrameBytes, canonicalFrameChecksum, canonicalFrameDigest } from "../lib/canonical-frame";
 import { runCheck } from "../lib/checker";
 import { CATALOG_V1, FLOOR_V1 } from "../lib/frozen";
 import {
@@ -11,6 +12,7 @@ import {
   validateDependencyCatalog,
   validateDecision,
   validateFinalBundle,
+  validateFrame,
   validatePlatformBundle,
   validateRowEvidence,
   validateSourceInputRecord,
@@ -44,22 +46,9 @@ function canonicalFrameEvidenceBytes(frame: Record<string, any>): Buffer {
 
 function synchronizeRowDeclarations(row: any, recomputeChecksum: boolean): void {
   const frame = row.frame_binding.frame_reference.frame;
-  if (recomputeChecksum) {
-    const body = {
-      index: frame.index, head_tree: frame.head_tree, effective_config: frame.effective_config,
-      exclude_state: frame.exclude_state, attribute_state: frame.attribute_state, nested_state: frame.nested_state,
-      ...(Object.hasOwn(frame, "limit_stimulus") ? { limit_stimulus: frame.limit_stimulus } : {})
-    };
-    const header = {
-      schema_version: frame.schema_version, catalog_version: frame.catalog_version, row_id: frame.row_id,
-      observation_id: frame.observation_id, checkout_capability_identity: frame.checkout_capability_identity,
-      git_state_generation_digest: frame.git_state_generation_digest, body_length: frame.body_length,
-      body_digest: frame.body_digest
-    };
-    frame.checksum = createHash("sha256").update(JSON.stringify({ header, body })).digest("hex");
-  }
-  const bytes = canonicalFrameEvidenceBytes(frame);
-  const digest = createHash("sha256").update(bytes).digest("hex");
+  if (recomputeChecksum) frame.checksum = canonicalFrameChecksum(frame);
+  const bytes = canonicalFrameBytes(frame);
+  const digest = canonicalFrameDigest(frame);
   row.git_state_generation_digest = frame.git_state_generation_digest;
   row.frame_digest = digest;
   row.frame_binding.git_state_generation_digest = frame.git_state_generation_digest;
@@ -80,8 +69,8 @@ function frameForSlot(rowId: string, observationId: string, capabilityIdentity: 
 }
 
 function bindRowFrame(row: any, frame = frameForEvidenceSlot(row.platform, row.row_id, row.observation_id, row.checkout_capability_identity)): void {
-  const frameBytes = canonicalFrameEvidenceBytes(frame);
-  const frameDigest = createHash("sha256").update(frameBytes).digest("hex");
+  const frameBytes = canonicalFrameBytes(frame);
+  const frameDigest = canonicalFrameDigest(frame);
   row.git_state_generation_digest = frame.git_state_generation_digest;
   row.frame_digest = frameDigest;
   Object.assign(row.frame_binding, {
@@ -122,8 +111,8 @@ async function oracleTables(): Promise<{ rows: Map<string, string>; floors: stri
 
 function validRow(): Record<string, unknown> {
   const frame = frameForSlot("BAS-001", shaA, shaB);
-  const frameBytes = canonicalFrameEvidenceBytes(frame);
-  const frameDigest = createHash("sha256").update(frameBytes).digest("hex");
+  const frameBytes = canonicalFrameBytes(frame);
+  const frameDigest = canonicalFrameDigest(frame);
   return {
     schema_version: "shud.git-status-capability.row-evidence.v1", platform: "macos", row_id: "BAS-001",
     observation_id: shaA, checkout_capability_identity: shaB,
@@ -143,6 +132,20 @@ function validRow(): Record<string, unknown> {
     resource_record: { boundary_class: "below", declared_limit: "none", within_limits: true },
     source_input_record_sha256: shaB
   };
+}
+
+function d8Decision(generic: any): Record<string, any> {
+  return structuredClone(generic.decision);
+}
+
+function decisionRowFields(row: string): string[] {
+  return row.split("\0");
+}
+
+function mutateDecisionRow(decision: Record<string, any>, rowIndex: number, segment: number, value: string): void {
+  const fields = decisionRowFields(decision.rows[rowIndex]);
+  fields[segment] = value;
+  decision.rows[rowIndex] = fields.join("\0");
 }
 
 function admittedPaths() {
@@ -216,7 +219,7 @@ describe("round-1 invariant closure", () => {
     const baseFrameBytes = canonicalFrameEvidenceBytes(materialFrame());
     expect(baseFrameBytes.length).toBe(4079);
     expect(createHash("sha256").update(baseFrameBytes).digest("hex"))
-      .toBe("bb14993b44f6dc90882550b8631d9e6ed22fb694938015564c47652c8bd9c765");
+      .toBe("fab8dfefd91991c8260c06aec44ea9708a864a1c3ae7ae3aa7f982ad3630d1b0");
     expect(validateRowEvidence(validRow())).toBe(true);
     const reordered: any = structuredClone(validRow());
     reordered.frame_binding.frame_reference.frame = Object.fromEntries(
@@ -249,6 +252,30 @@ describe("round-1 invariant closure", () => {
     ]) {
       const row = structuredClone(validRow()); mutate(row); expect(validateRowEvidence(row)).toBe(false);
     }
+  });
+
+  test("canonical complete-frame bytes replay through the public frame validator", () => {
+    const bytes = canonicalFrameEvidenceBytes(materialFrame());
+    expect(bytes.length).toBe(4079);
+    expect(createHash("sha256").update(bytes).digest("hex"))
+      .toBe("fab8dfefd91991c8260c06aec44ea9708a864a1c3ae7ae3aa7f982ad3630d1b0");
+    const replay = JSON.parse(bytes.toString("utf8"));
+    expect(validateFrame(replay)).toBe(true);
+    expect(canonicalFrameEvidenceBytes(replay)).toEqual(bytes);
+  });
+
+  test("nested object key reordering converges to the same sealed frame bytes and digest", () => {
+    const original = materialFrame();
+    const reordered = structuredClone(original);
+    const reverse = (value: Record<string, any>) => Object.fromEntries(Object.entries(value).reverse());
+    reordered.index.entries[0].stat = reverse(reordered.index.entries[0].stat);
+    resealFrame(reordered);
+    expect(validateFrame(reordered)).toBe(true);
+    const originalBytes = canonicalFrameEvidenceBytes(original);
+    const reorderedBytes = canonicalFrameEvidenceBytes(reordered);
+    expect(reorderedBytes).toEqual(originalBytes);
+    expect(createHash("sha256").update(reorderedBytes).digest("hex"))
+      .toBe(createHash("sha256").update(originalBytes).digest("hex"));
   });
 
   test("all row resource records use the frozen catalog boundary and truthful within_limits value", () => {
@@ -407,36 +434,98 @@ describe("round-1 invariant closure", () => {
     }
   });
 
-  test("348-slot decision projects generation identity and rejects every cross-platform reuse", async () => {
+  test("D8 decision projects strict rows, identities, receipts, and global slot uniqueness", async () => {
     const generic = JSON.parse(await readFile(join(contractRoot, "fixtures/valid/generic.json"), "utf8"));
-    expect(validateDecision(generic.decision)).toBe(true);
-    expect(new Set(generic.decision.rows.map((row: string) => row.split("\0")[7])).size).toBe(348);
-    expect(new Set(generic.decision.rows.map((row: string) => row.split("\0")[8])).size).toBe(348);
-    expect(new Set(generic.decision.rows.map((row: string) => row.split("\0")[9])).size).toBe(348);
+    const decision = d8Decision(generic);
+    expect(validateDecision(decision)).toBe(true);
+    expect(new Set(decision.rows.map((row: string) => decisionRowFields(row)[7])).size).toBe(348);
+    expect(new Set(decision.rows.map((row: string) => decisionRowFields(row)[8])).size).toBe(348);
+    expect(new Set(decision.rows.map((row: string) => decisionRowFields(row)[9])).size).toBe(348);
     for (const { label, targetIndex } of [
       { label: "cross-platform", targetIndex: 1 },
       { label: "cross-row", targetIndex: 2 }
     ]) {
-      for (const identityIndex of [7, 8, 9]) {
-        const reused = structuredClone(generic.decision);
-        const source = reused.rows[0].split("\0");
-        const target = reused.rows[targetIndex].split("\0");
-        target[identityIndex] = source[identityIndex];
-        reused.rows[targetIndex] = target.join("\0");
-        expect(validateDecision(reused), `${label}/identity-index-${identityIndex}`).toBe(false);
+      for (const { identityField, segment } of [
+        { identityField: "observation_id", segment: 7 },
+        { identityField: "generation_payload_digest", segment: 8 },
+        { identityField: "frame_digest", segment: 9 }
+      ]) {
+        const reused = structuredClone(decision);
+        mutateDecisionRow(reused, targetIndex, segment, decisionRowFields(reused.rows[0])[segment]!);
+        expect(validateDecision(reused), `${label}/${identityField}`).toBe(false);
       }
     }
-    const detMac = generic.decision.rows.findIndex((row: string) => row.startsWith("macos\0DET-001\0"));
-    const detLinux = generic.decision.rows.findIndex((row: string) => row.startsWith("linux\0DET-001\0"));
-    const detReuse = structuredClone(generic.decision);
-    const detMacFields = detReuse.rows[detMac].split("\0");
-    const detLinuxFields = detReuse.rows[detLinux].split("\0");
-    detLinuxFields[8] = detMacFields[8];
-    detReuse.rows[detLinux] = detLinuxFields.join("\0");
+    const detMac = decision.rows.findIndex((row: string) => decisionRowFields(row)[0] === "m" && decisionRowFields(row)[1] === "DET-001");
+    const detLinux = decision.rows.findIndex((row: string) => decisionRowFields(row)[0] === "l" && decisionRowFields(row)[1] === "DET-001");
+    const detReuse = structuredClone(decision);
+    mutateDecisionRow(detReuse, detLinux, 8, decisionRowFields(detReuse.rows[detMac])[8]!);
     expect(validateDecision(detReuse), "DET-001-cross-platform-generation").toBe(false);
 
-    const duplicateSlot = structuredClone(generic.decision); duplicateSlot.rows[1] = duplicateSlot.rows[0];
+    const duplicateSlot = structuredClone(decision); duplicateSlot.rows[1] = duplicateSlot.rows[0];
     expect(validateDecision(duplicateSlot)).toBe(false);
+
+    for (const mutate of [
+      (value: any) => { delete value.base_sha; },
+      (value: any) => { value.extra = true; },
+      (value: any) => { value.fixture_identity = "short"; },
+      (value: any) => { value.lockfile_completeness_verdict = "incomplete"; },
+      (value: any) => { value.rows[0] = decisionRowFields(value.rows[0]).slice(0, 16).join("\0"); },
+      (value: any) => { value.rows[0] += "\0surplus"; },
+      (value: any) => { mutateDecisionRow(value, 0, 0, "x"); },
+      (value: any) => { mutateDecisionRow(value, 0, 1, "UNKNOWN-001"); },
+      (value: any) => { mutateDecisionRow(value, 0, 2, "x"); },
+      (value: any) => { mutateDecisionRow(value, 0, 3, "UNEXPECTED"); },
+      (value: any) => { mutateDecisionRow(value, 0, 4, "x"); },
+      (value: any) => { mutateDecisionRow(value, 0, 5, "UNEXPECTED"); },
+      (value: any) => { mutateDecisionRow(value, 0, 6, "x"); },
+      (value: any) => { mutateDecisionRow(value, 0, 7, "short"); },
+      (value: any) => { mutateDecisionRow(value, 0, 8, "short"); },
+      (value: any) => { mutateDecisionRow(value, 0, 9, "short"); },
+      (value: any) => { mutateDecisionRow(value, 0, 10, "x"); },
+      (value: any) => { mutateDecisionRow(value, 0, 11, "x"); },
+      (value: any) => { mutateDecisionRow(value, 0, 12, "6"); },
+      (value: any) => { mutateDecisionRow(value, 0, 13, "0"); },
+      (value: any) => { mutateDecisionRow(value, 0, 14, "f"); },
+      (value: any) => { mutateDecisionRow(value, 0, 15, "14"); },
+      (value: any) => { mutateDecisionRow(value, 0, 15, "1"); },
+      (value: any) => { mutateDecisionRow(value, 0, 16, "q"); },
+      (value: any) => { mutateDecisionRow(value, 0, 16, "e"); },
+      (value: any) => { delete value.gates[0].id; },
+      (value: any) => { value.gates[0].extra = true; },
+      (value: any) => { value.gates[1].id = value.gates[0].id; },
+      (value: any) => { value.gates[0].source_input_record_sha256 = shaA; },
+      (value: any) => { value.gates[0].exit_verdict = "fail"; },
+      (value: any) => { value.gates[0].argv = []; }
+    ]) {
+      const changed = structuredClone(decision); mutate(changed); expect(validateDecision(changed)).toBe(false);
+    }
+  });
+
+  test("D8 terminal decision is accepted iff every projected row verdict passes", async () => {
+    const generic = JSON.parse(await readFile(join(contractRoot, "fixtures/valid/generic.json"), "utf8"));
+    const accepted = d8Decision(generic);
+    expect(validateDecision(accepted)).toBe(true);
+
+    const rejected = structuredClone(accepted);
+    mutateDecisionRow(rejected, 0, 4, "d");
+    mutateDecisionRow(rejected, 0, 5, "");
+    mutateDecisionRow(rejected, 0, 6, "f");
+    rejected.terminal_decision = "rejected";
+    rejected.first_cause = "ROW_VERDICT_FAILED";
+    rejected.all_failure_codes = ["ROW_VERDICT_FAILED"];
+    expect(validateDecision(rejected)).toBe(true);
+
+    const falseRejected = structuredClone(accepted);
+    falseRejected.terminal_decision = "rejected";
+    falseRejected.first_cause = "ROW_VERDICT_FAILED";
+    falseRejected.all_failure_codes = ["ROW_VERDICT_FAILED"];
+    expect(validateDecision(falseRejected)).toBe(false);
+
+    const falseAccepted = structuredClone(rejected);
+    falseAccepted.terminal_decision = "accepted";
+    delete falseAccepted.first_cause;
+    delete falseAccepted.all_failure_codes;
+    expect(validateDecision(falseAccepted)).toBe(false);
   });
 
   test("raw __proto__ remains an own key and fails every strict public schema", async () => {
