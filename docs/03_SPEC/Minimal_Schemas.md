@@ -65,10 +65,10 @@ TaskCard.status 使用粗粒度状态机管理任务生命周期。执行期间�
 ```yaml
 stack_id: STACK-0001                  # 格式: STACK-NNNN
 repos:
-  SHUD:      { commit: 9b55b0c, branch: master }
-  rSHUD:     { commit: d162db3, branch: master }
-  AutoSHUD:  { commit: 1cbec6f, branch: master }
-  zero:      { commit: 13e25c1, branch: main }
+  SHUD:      { commit: 9b55b0c, branch: master, detached: false, dirty: false }
+  rSHUD:     { commit: d162db3, branch: master, detached: false, dirty: false }
+  AutoSHUD:  { commit: 1cbec6f, branch: master, detached: false, dirty: false }
+  zero:      { commit: 13e25c1, branch: development, detached: false, dirty: false }
 runtime:
   os: "Darwin 24.6.0"
   r_version: "4.4.1"
@@ -96,6 +96,8 @@ llm:
 fingerprint: "sha256:..."             # 整体哈希，用于快速比对
 created_at: 2026-04-25T10:00:00Z
 ```
+
+**repos 字段说明（#132 bug 级修正）：** `commit` 与 `branch` 表示采集时四个实际 checkout 的 `HEAD` 与分支；`detached` 为必填 boolean，detached HEAD 记录为 `branch: "detached", detached: true`，而合法 attached 分支名 `detached` 记录为 `branch: "detached", detached: false`。`dirty` 为必填 boolean，覆盖 tracked、untracked、staged 与 nested submodule 变化。superproject gitlink 与 `HEAD:.gitmodules` 仅作为 checkout 路径及采集代际的内部 authority，不得冒充实际 checkout 状态。checkout admission 先 no-follow 拒绝 symlink，再建立目录 descriptor/cwd capability；每个 Git producer 只在核对该 capability 的物理身份后运行。dirty observation snapshot 以 canonical Git boolean grammar 审计 main/linked/nested effective config 并拒绝 `filter.*.clean/process`，bounded/identity-stable 地冻结 standalone/split index companion 与正确 timestamp、safe ignore/attributes/line-ending/stat-refresh（含 `core.trustctime`、`core.checkStat`、`core.ignoreStat`）输入，再由 helper-free Git context 以 `--ignore-submodules=all` 观察本层。initialized stage-0 nested checkout 递归相同协议；present-deinitialized nested 不向上发现 parent 且保持 clean；stably-absent nested 贡献 dirty，三态 appearance/disappearance/replacement drift typed fail。collection-wide 临时父目录先物理绑定在 canonical superproject 保护域之外，superproject/published/nested 或其 symlink alias 内的 TMPDIR 在任何创建前 typed fail。最终 schema/freeze 之后按固定仓库顺序执行 first-sweep，再执行 second-sweep；成功仅证明这两个完整 map 彼此相等并等于待发布 snapshot，随后 pathname identity 仍相等。该协议没有三字段共同的 final command：commit、branch/detached、dirty 分别以其最后一次 HEAD、branch、frozen-status/nested observation 为公开排除边界；final pathname identity 之后的 mutation 与 observation 间完整发生并恢复的 ABA 也不保证被捕获。该协议不承诺强原子或 return-time contemporaneity，但保证 pathname replacement target 不能重定向 Git 读取或被发布。
 
 **llm 字段说明**（AGA-P0-1）：agent 行为由 model + params + prompt 共同决定，三者任一变化都视为 **stack 变更**——需要新 StackLock，且触发行为 eval 子集（见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)）。cost_record 中的 per-call model 字段是计费粒度，不能替代本处的复现锁。
 

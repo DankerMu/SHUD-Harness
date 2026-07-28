@@ -64,6 +64,8 @@ digest 配方、mismatch 422）补入 Idempotency_Concurrency_Locking_Spec §4 �
 API_Error_And_Idempotency_Contracts §3 适用清单——M1 期间刻意 change-scoped，经 #74 硬化（24 轮审查
 + 3× exact-SHA CI）与 M1 验收后，canonical 清单追认既成事实，属 spec 落后于已验收现实的 bug 级修正。
 
+**例外批次 8（2026-07-27，#132 bug 级修正）**：Requirements_Catalog IR-001 要求 StackLock 锁定 SHUD/rSHUD/AutoSHUD/zero 四个 repo 的 commit 与 dirty state，Workspace_Conventions §1.4 进一步要求记录 runtime submodule/clone/worktree 的实际 commit 与 dirty state；`Minimal_Schemas.md` §2 与 M2 初始投影却只记录 superproject gitlink commit/branch，无法区分同一 gitlink 下的本地 commit、detached HEAD、tracked、untracked 或 nested submodule 变化。修正 canonical 与 M2 design/spec/tasks：四 repo revision 增 required `detached: boolean` 与 `dirty: boolean`，`commit`/`branch` 改为实际 checkout 状态；`detached` 消除合法 attached 分支名 `detached` 与 detached HEAD 的 public-shape 碰撞。gitlink 与 `HEAD:.gitmodules` 保留为受信任路径和采集代际 authority。checkout admission 先 no-follow 拒绝 symlink，再以目录 descriptor/cwd capability 绑定每个 Git producer；status 显式禁用 fsmonitor 并覆盖 nested-submodule ignore。两次 snapshot 及 schema/freeze 后的 publication barrier 同时绑定 gitlink、checkout 物理身份与实际 commit/branch/detached/dirty，任何可观测漂移 fail closed；短暂 swap 不承诺作为独立事件被观测，但不得重定向 Git 读取或发布 replacement target。后续 #92 fingerprint 与 #93 persistence/API 必须完整保留四字段；本批不提前实现其 service/route。
+
 **依据：** 本文档基于全部文档的交叉引用和依赖链深度分析生成。
 
 **配套文档：**

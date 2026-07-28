@@ -5,7 +5,9 @@ const STACK_ID_PATTERN =
 
 const RepositoryRevisionSchema = z.strictObject({
   commit: z.string().min(1),
-  branch: z.string().min(1)
+  branch: z.string().min(1),
+  detached: z.boolean(),
+  dirty: z.boolean()
 });
 
 const RPackagesLockSchema = z.strictObject({
