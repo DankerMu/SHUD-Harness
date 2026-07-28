@@ -1406,7 +1406,7 @@ describe("Round 2 canonical proof binding", () => {
     expect(validateDecision(decision), "348-slot semantic projection").toBe(true);
 
     const serialized = Buffer.from(JSON.stringify(decision));
-    expect(serialized.byteLength, "348-failure-decision-bytes").toBe(127_648);
+    expect(serialized.byteLength, "348-failure-decision-bytes").toBe(129_894);
     expect(serialized.byteLength).toBeLessThanOrEqual(INGESTION_LIMITS.decision.bytes);
     const exact = Buffer.concat([serialized, Buffer.alloc(INGESTION_LIMITS.decision.bytes - serialized.byteLength, 0x20)]);
     const plusOne = Buffer.concat([exact, Buffer.from(" ")]);

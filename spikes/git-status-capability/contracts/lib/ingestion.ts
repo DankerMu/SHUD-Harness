@@ -1,4 +1,5 @@
 import { INGESTION_LIMITS } from "./frozen";
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
 export type InputKind = keyof typeof INGESTION_LIMITS;
@@ -166,7 +167,7 @@ export async function readJsonFileBounded(
   const limit = INGESTION_LIMITS[kind];
   let handle;
   try {
-    handle = await open(path, "r");
+    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > limit.bytes) throw new ContractError("CONTRACT_BYTES_LIMIT");
     const buffer = Buffer.alloc(limit.bytes + 1);

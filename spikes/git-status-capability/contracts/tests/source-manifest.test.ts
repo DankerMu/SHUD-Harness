@@ -2,12 +2,17 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalJsonDigest } from "../lib/canonical-frame";
 import { checkCurrent } from "../lib/checker";
+import { runCheck } from "../lib/checker";
 import { INGESTION_LIMITS } from "../lib/frozen";
+import * as frozen from "../lib/frozen";
 import { ContractError } from "../lib/ingestion";
 import { enumerateSourceCandidates, validateGitCandidateSet, validateManifest } from "../lib/schema";
+import * as schema from "../lib/schema";
 
 const repositoryRoot = join(import.meta.dir, "..", "..", "..", "..");
 const manifestRelative = "spikes/git-status-capability/contracts/source-input-v1.paths";
@@ -16,6 +21,22 @@ const generic = JSON.parse(await readFile(join(import.meta.dir, "../fixtures/val
 const checkerPath = join(import.meta.dir, "../check.ts");
 
 type EvidenceLane = "source" | "platform" | "gates" | "final";
+type JsonRecord = Record<string, any>;
+
+const digest = "01".repeat(32);
+const otherDigest = "02".repeat(32);
+const D9_IDS = [
+  "GATE-BASE", "GATE-SOURCE-INPUT", "GATE-INSTALL", "GATE-CHECK", "GATE-SCHEMA", "GATE-PERF",
+  "GATE-DOCS-SELF", "GATE-DOCS-LINKS", "GATE-OPENSPEC-STATUS", "GATE-OPENSPEC", "GATE-DIFF-CHECK",
+  "GATE-SCOPE", "GATE-UNTRACKED", "GATE-PRODUCTION", "GATE-GOVERNANCE", "GATE-SUBMODULE-DIFF",
+  "GATE-SUBMODULE-PINS"
+] as const;
+const COMPLETENESS_FIELDS = [
+  "lockfile_completeness_verdict", "direct_feature_completeness_verdict",
+  "macos_target_graph_completeness_verdict", "linux_target_graph_completeness_verdict",
+  "call_ledger_completeness_verdict", "sbom_completeness_verdict", "license_inventory_completeness_verdict"
+] as const;
+const clone = <T>(value: T): T => structuredClone(value);
 
 const evidenceStatuses: Record<EvidenceLane, readonly string[]> = {
   source: ["source-input-recorded"],
@@ -28,7 +49,8 @@ function canonicalMarkdown(
   lane: EvidenceLane,
   digest: string,
   platform: "macos" | "linux" | "none" = "none",
-  status = evidenceStatuses[lane][0]!
+  status = evidenceStatuses[lane][0]!,
+  sourceRecordSha = sha256Record(sourceRecordForDigest(digest))
 ): string {
   return [
     "# SHUD Git Status Capability Evidence",
@@ -36,6 +58,7 @@ function canonicalMarkdown(
     `Lane: ${lane}`,
     `Platform: ${platform}`,
     `Source input: ${digest}`,
+    `Source record SHA-256: ${sourceRecordSha}`,
     `Artifact SHA-256: ${"a5".repeat(32)}`,
     `Status: ${status}`,
     ""
@@ -48,20 +71,61 @@ function publicCurrentCheck(root: string): ReturnType<typeof spawnSync> {
   ], { cwd: root, encoding: "utf8" });
 }
 
-function immutableReference(seed = "03"): Record<string, unknown> {
-  const sha256 = seed.repeat(32);
+function sourceRecordForDigest(digest: string): Record<string, any> {
+  const record = structuredClone(generic.source_input_record);
+  record.source_input_digest = digest;
+  record.primary_encoder.result.source_input_digest = digest;
+  record.witness_encoder.result.source_input_digest = digest;
+  return record;
+}
+
+function sourceRecordBytes(record: Record<string, any> = generic.source_input_record): Buffer {
+  return Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+}
+
+function sha256Record(record: Record<string, any>): string {
+  return createHash("sha256").update(sourceRecordBytes(record)).digest("hex");
+}
+
+function sourceRecordSha(record: Record<string, any> = generic.source_input_record): string {
+  return sha256Record(record);
+}
+
+function bindSourceRecord<T>(value: T, sourceRecordSha: string): T {
+  const visit = (item: any): any => Array.isArray(item) ? item.map(visit) : item && typeof item === "object"
+    ? Object.fromEntries(Object.entries(item).map(([key, child]) => [key, key === "source_input_record_sha256" ? sourceRecordSha : visit(child)]))
+    : item;
+  return visit(value) as T;
+}
+
+function immutableReference(lane: EvidenceLane, platform: "macos" | "linux" | "none", sourceRecordSha: string, seed = "03", byteLength = 128): Record<string, unknown> {
+  const sha256 = seed.length === 64 ? seed : seed.repeat(32);
   return {
     schema_version: "shud.git-status-capability.immutable-evidence-reference.v1",
+    lane,
+    platform,
+    source_input_record_sha256: sourceRecordSha,
     media_type: "application/json",
     sha256,
-    byte_length: 128,
+    byte_length: byteLength,
     immutable_identity: `sha256:${sha256}`,
     retention: { policy: "retain-until-change-archived-v1", minimum_days: 3650 },
     access: { scope: "repository-local", requires_network: false },
     offline_retrieval: {
-      kind: "content-addressed-path-v1", path: `artifacts/sha256/${sha256}`, sha256, byte_length: 128
+      kind: "content-addressed-path-v1", path: `artifacts/sha256/${sha256}`, sha256, byte_length: byteLength
     }
   };
+}
+
+async function installSourceRecord(root: string, digest: string): Promise<string> {
+  const record = sourceRecordForDigest(digest);
+  await writeEvidence(root, `source/${digest}/source-input-record.json`, sourceRecordBytes(record));
+  return sha256Record(record);
+}
+
+async function installRound4SourceRecord(root: string, record: JsonRecord = generic.source_input_record): Promise<string> {
+  await writeEvidence(root, `source/${record.source_input_digest}/source-input-record.json`, sourceRecordBytes(record));
+  return sourceRecordSha(record);
 }
 
 function paddedJson(value: unknown, bytes: number): Buffer {
@@ -101,10 +165,10 @@ function itemBoundaryJson(schemaVersion: string, items: number): string {
   });
 }
 
-async function writeEvidence(root: string, relative: string, content: Uint8Array | string): Promise<string> {
+async function writeEvidence(root: string, relative: string, content: Uint8Array | string | JsonRecord): Promise<string> {
   const absolute = join(root, "openspec/changes/m2-capability-observer-spike/evidence", ...relative.split("/"));
   await mkdir(join(absolute, ".."), { recursive: true });
-  await writeFile(absolute, content);
+  await writeFile(absolute, typeof content === "string" || content instanceof Uint8Array ? content : `${JSON.stringify(content)}\n`);
   return absolute;
 }
 
@@ -135,6 +199,104 @@ async function inventory(root: string): Promise<Record<string, string>> {
     result[path] = `${stat.mode}:${stat.size}:${stat.mtimeMs}:${digest}`;
   }
   return result;
+}
+
+function d9RawReceipts(recordSha = sourceRecordSha(), failedId?: string): JsonRecord[] {
+  return D9_IDS.map((id, ordinal) => {
+    const profile = frozen.D9_COMMAND_PROFILE[ordinal]!;
+    const stdout_summary = id === failedId ? "" : "ok";
+    const stderr_summary = id === failedId ? "failed" : "";
+    return {
+      id,
+      argv: [...profile.argv],
+      version: profile.version,
+      exit_code: id === failedId ? 1 : 0,
+      stdout_summary,
+      stderr_summary,
+      summary_digest: canonicalJsonDigest({ stdout_summary, stderr_summary }),
+      source_input_record_sha256: recordSha
+    };
+  });
+}
+
+function repositoryGate(recordSha = sourceRecordSha()): JsonRecord {
+  return {
+    schema_version: "shud.git-status-capability.repository-gate.v1",
+    source_input_record_sha256: recordSha,
+    gates: d9RawReceipts(recordSha)
+  };
+}
+
+function publicationAssertion(decision: JsonRecord, recordSha = sourceRecordSha()): JsonRecord {
+  return {
+    schema_version: "shud.git-status-capability.publication-assertion.v1",
+    source_input_record_sha256: recordSha,
+    decision_sha256: createHash("sha256").update(`${JSON.stringify(decision)}\n`).digest("hex"),
+    expected_decision: "accepted",
+    command_receipt: {
+      argv: ["spikes/git-status-capability/verify.sh", "evidence", "expect", "accepted", "--decision", "/external-staging/candidate-decision.json"],
+      version: "1",
+      exit_code: 0,
+      summary_digest: "32".repeat(32)
+    }
+  };
+}
+
+function publicationGovernance(gate: JsonRecord, recordSha = sourceRecordSha()): JsonRecord {
+  const governanceDigest = canonicalJsonDigest(gate.gates[D9_IDS.indexOf("GATE-GOVERNANCE")]);
+  return {
+    schema_version: "shud.git-status-capability.publication-governance-recheck.v1",
+    source_input_record_sha256: recordSha,
+    d9_governance_receipt_sha256: governanceDigest,
+    repeated_receipt_sha256: governanceDigest,
+    exact_match: true,
+    mutation_count: 0
+  };
+}
+
+function invalidDecisionFrom(base: JsonRecord, codes: string[]): JsonRecord {
+  const decision = clone(base);
+  decision.run_status = "invalid";
+  delete decision.terminal_decision;
+  decision.first_cause = codes[0];
+  decision.all_failure_codes = [...new Set(codes)].sort();
+  return decision;
+}
+
+function bindControlFailure(row: JsonRecord, controlId: string, producer: "observer" | "launcher" | "tripwire"): void {
+  row.actual_producing_boundary = producer;
+  const receipt = {
+    schema_version: "shud.git-status-capability.row-failure-receipt.v1",
+    platform: row.platform,
+    producer,
+    row_id: row.row_id,
+    observation_id: row.observation_id,
+    supplied_input_digest: row.frame_digest,
+    control_id: controlId,
+    control_verdict: "fail"
+  };
+  row.failure_cause = { kind: "control-failure-v1", receipt: { ...receipt, receipt_digest: canonicalJsonDigest(receipt) } };
+}
+
+function changedProtectionBundle(): JsonRecord {
+  const bundle = bindSourceRecord(clone(generic.platform_bundle), sourceRecordSha());
+  const row = bundle.rows[0];
+  row.control_assertions.protection.verdict = "fail";
+  row.protection_set_equal = false;
+  row.row_verdict = "fail";
+  bindControlFailure(row, "protection", "tripwire");
+  const receipt = bundle.protection_set[0];
+  const member = receipt.inventory[0];
+  member.post_measurement.content.encoding = "observed-change-v1";
+  member.post_measurement.content.text = "changed:canonical-superproject\n";
+  member.post_measurement.metadata.byte_length = Buffer.byteLength(member.post_measurement.content.text);
+  member.post_digest = canonicalJsonDigest(member.post_measurement);
+  member.event_material.kind = "verified-changed-v1";
+  member.event_material.post_digest = member.post_digest;
+  member.event_digest = canonicalJsonDigest(member.event_material);
+  const unsigned = Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== "receipt_digest"));
+  receipt.receipt_digest = canonicalJsonDigest(unsigned);
+  return bundle;
 }
 
 afterEach(async () => {
@@ -199,6 +361,7 @@ describe("source-input-v1 current-set authority", () => {
     const root = await temporaryRepository();
     const before = await enumerateSourceCandidates(root);
     const digest = "01".repeat(32);
+    await installSourceRecord(root, digest);
     await mkdir(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}/macos`), { recursive: true });
     await writeFile(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}/macos/result.md`),
       canonicalMarkdown("platform", digest, "macos"));
@@ -213,15 +376,18 @@ describe("source-input-v1 current-set authority", () => {
   });
 
   test("evidence exclusion is a closed lane/digest/mode/content classifier for tracked and untracked files", async () => {
-    const digest = "02".repeat(32);
+    const digest = "01".repeat(32);
+    const record = sourceRecordForDigest(digest);
+    const recordSha = sha256Record(record);
     const validRecords: Array<[string, unknown | string]> = [
-      [`source/${digest}/record.json`, generic.source_input_record],
-      [`platform/${digest}/macos/platform.json`, generic.platform_bundle],
-      [`platform/${digest}/linux/platform.json`, generic.linux_platform_bundle],
-      [`gates/${digest}/receipt.json`, immutableReference("04")],
-      [`final/${digest}/final.json`, generic.final_bundle],
-      [`final/${digest}/decision.json`, generic.decision],
-      [`final/${digest}/summary.md`, canonicalMarkdown("final", digest, "none", "accepted")]
+      [`source/${digest}/source-input-record.json`, record],
+      [`platform/${digest}/macos/platform-bundle.json`, bindSourceRecord(generic.platform_bundle, recordSha)],
+      [`platform/${digest}/linux/platform-bundle.json`, bindSourceRecord(generic.linux_platform_bundle, recordSha)],
+      [`gates/${digest}/receipt.json`, immutableReference("gates", "none", recordSha, "04")],
+      [`final/${digest}/source-input-record.json`, record],
+      [`final/${digest}/final-bundle.json`, bindSourceRecord(generic.final_bundle, recordSha)],
+      [`final/${digest}/decision.json`, bindSourceRecord(generic.decision, recordSha)],
+      [`final/${digest}/summary.md`, canonicalMarkdown("final", digest, "none", "accepted", recordSha)]
     ];
     const validRoot = await temporaryRepository();
     for (const [path, value] of validRecords) {
@@ -268,6 +434,7 @@ describe("source-input-v1 current-set authority", () => {
     await expect(enumerateSourceCandidates(symlinkRoot)).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
 
     const stagedRoot = await temporaryRepository();
+    await installSourceRecord(stagedRoot, digest);
     const stagedDirectory = join(stagedRoot, `openspec/changes/m2-capability-observer-spike/evidence/gates/${digest}`);
     const stagedPath = join(stagedDirectory, "receipt.md");
     await mkdir(stagedDirectory, { recursive: true });
@@ -280,7 +447,7 @@ describe("source-input-v1 current-set authority", () => {
   });
 
   test("Markdown evidence accepts only the canonical path-bound positive grammar", async () => {
-    const digest = "05".repeat(32);
+    const digest = "01".repeat(32);
     const positives = [
       [`source/${digest}/summary.md`, canonicalMarkdown("source", digest)],
       [`platform/${digest}/macos/summary.md`, canonicalMarkdown("platform", digest, "macos")],
@@ -290,6 +457,7 @@ describe("source-input-v1 current-set authority", () => {
       [`final/${digest}/rejected.md`, canonicalMarkdown("final", digest, "none", "rejected")]
     ] as const;
     const positiveRoot = await temporaryRepository();
+    await installSourceRecord(positiveRoot, digest);
     for (const [path, content] of positives) await writeEvidence(positiveRoot, path, content);
     const candidates = await enumerateSourceCandidates(positiveRoot);
     expect(candidates).toHaveLength(39);
@@ -319,6 +487,7 @@ describe("source-input-v1 current-set authority", () => {
     ] as const;
     for (const [name, content] of invalidGrammar) {
       const root = await temporaryRepository();
+      await installSourceRecord(root, digest);
       await writeEvidence(root, `platform/${digest}/macos/${name}.md`, content);
       await expect(enumerateSourceCandidates(root), name).rejects.toBeInstanceOf(ContractError);
     }
@@ -339,6 +508,7 @@ describe("source-input-v1 current-set authority", () => {
     for (const [name, content] of sourceRepresentatives) {
       for (const tracked of [false, true] as const) {
         const root = await temporaryRepository();
+        await installSourceRecord(root, digest);
         await writeEvidence(root, `final/${digest}/${name}.md`, content);
         if (tracked) {
           expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
@@ -350,6 +520,7 @@ describe("source-input-v1 current-set authority", () => {
     }
 
     const stagedRoot = await temporaryRepository();
+    await installSourceRecord(stagedRoot, digest);
     const stagedPath = await writeEvidence(stagedRoot, `final/${digest}/staged.md`, "declare const hidden: string;\n");
     expect(spawnSync("git", ["init", "-q"], { cwd: stagedRoot }).status).toBe(0);
     expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: stagedRoot }).status).toBe(0);
@@ -359,14 +530,18 @@ describe("source-input-v1 current-set authority", () => {
   }, 120_000);
 
   test("closed evidence JSON schemas enforce their own byte, depth, node, and item limits after version discovery", async () => {
-    const digest = "13".repeat(32);
+    const digest = "01".repeat(32);
+    const recordSha = sha256Record(sourceRecordForDigest(digest));
     const cases = [
-      ["source-input-record", `source/${digest}/record.json`, "shud.git-status-capability.source-input-record.v1", INGESTION_LIMITS.source_input_record, generic.source_input_record],
-      ["platform-bundle", `platform/${digest}/macos/platform.json`, "shud.git-status-capability.platform-bundle.v1", INGESTION_LIMITS.platform_bundle, generic.platform_bundle],
-      ["final-bundle", `final/${digest}/final.json`, "shud.git-status-capability.final-bundle.v1", INGESTION_LIMITS.final_bundle, generic.final_bundle],
-      ["decision", `final/${digest}/decision.json`, "shud.git-status-capability.decision.v1", INGESTION_LIMITS.decision, generic.decision],
+      ["source-input-record", `source/${digest}/source-input-record.json`, "shud.git-status-capability.source-input-record.v1", INGESTION_LIMITS.source_input_record, sourceRecordForDigest(digest)],
+      ["platform-bundle", `platform/${digest}/macos/platform-bundle.json`, "shud.git-status-capability.platform-bundle.v1", INGESTION_LIMITS.platform_bundle, bindSourceRecord(generic.platform_bundle, recordSha)],
+      ["repository-gate", `gates/${digest}/repository-gate.json`, "shud.git-status-capability.repository-gate.v1", { bytes: 256 * 1024, depth: 12, nodes: 4096, items: 1024 }, bindSourceRecord(generic.repository_gate, recordSha)],
+      ["final-bundle", `final/${digest}/final-bundle.json`, "shud.git-status-capability.final-bundle.v1", INGESTION_LIMITS.final_bundle, bindSourceRecord(generic.final_bundle, recordSha)],
+      ["decision", `final/${digest}/decision.json`, "shud.git-status-capability.decision.v1", INGESTION_LIMITS.decision, bindSourceRecord(generic.decision, recordSha)],
+      ["publication-assertion", `final/${digest}/publication-assertion.json`, "shud.git-status-capability.publication-assertion.v1", { bytes: 64 * 1024, depth: 12, nodes: 2048, items: 512 }, bindSourceRecord(generic.publication_assertion, recordSha)],
+      ["publication-governance-recheck", `final/${digest}/publication-governance-recheck.json`, "shud.git-status-capability.publication-governance-recheck.v1", { bytes: 64 * 1024, depth: 12, nodes: 2048, items: 512 }, bindSourceRecord(generic.publication_governance_recheck, recordSha)],
       ["immutable-reference", `gates/${digest}/reference.json`, "shud.git-status-capability.immutable-evidence-reference.v1",
-        { bytes: 4096, depth: 6, nodes: 64, items: 32 }, immutableReference("13")]
+        { bytes: 4096, depth: 6, nodes: 64, items: 32 }, immutableReference("gates", "none", recordSha, "13")]
     ] as const;
     const boundaries = [
       ["depth", depthBoundaryJson, "CONTRACT_JSON_DEPTH_LIMIT"],
@@ -374,8 +549,9 @@ describe("source-input-v1 current-set authority", () => {
       ["items", itemBoundaryJson, "CONTRACT_JSON_ITEM_LIMIT"]
     ] as const;
 
-    const root = await temporaryRepository();
     for (const [kind, path, schemaVersion, limits, valid] of cases) {
+      const root = await temporaryRepository();
+      if (kind !== "source-input-record") await installSourceRecord(root, digest);
       await writeEvidence(root, path, paddedJson(valid, limits.bytes));
       expect(await enumerateSourceCandidates(root), `${kind}:bytes:exact`).toBeInstanceOf(Array);
       await writeEvidence(root, path, paddedJson(valid, limits.bytes + 1));
@@ -397,57 +573,113 @@ describe("source-input-v1 current-set authority", () => {
     }
   }, 120_000);
 
-  test("evidence byte ceilings are isolated per digest and per platform subtree for tracked and untracked blobs", async () => {
+  test("logical evidence ceilings compose across references, inline bytes, digests, platforms, worktree, tracked, and staged views", async () => {
     const digestA = "06".repeat(32);
     const digestB = "07".repeat(32);
     const platformLimit = INGESTION_LIMITS.platform_bundle.bytes;
     const finalLimit = INGESTION_LIMITS.final_bundle.bytes;
 
+    const initialized = async (root: string, sourceDigest = digestA) => ({
+      recordSha: await installSourceRecord(root, sourceDigest),
+      sourceBytes: sourceRecordBytes(sourceRecordForDigest(sourceDigest)).byteLength
+    });
+    const admitTracked = async (root: string, label: string): Promise<void> => {
+      const candidates = await enumerateSourceCandidates(root);
+      expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
+      expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: root }).status).toBe(0);
+      expect(() => validateGitCandidateSet(root, candidates), label).not.toThrow();
+    };
+
     for (const tracked of [false, true]) {
       const exact = await temporaryRepository();
-      await writeEvidence(exact, `platform/${digestA}/macos/exact.json`, paddedJson(compactInvalidPlatformBundle("macos"), platformLimit));
-      await writeEvidence(exact, `platform/${digestA}/linux/exact.json`, paddedJson(compactInvalidPlatformBundle("linux"), platformLimit));
-      await writeEvidence(exact, `final/${digestA}/exact.json`, paddedJson(generic.final_bundle, finalLimit));
-      const exactCandidates = await enumerateSourceCandidates(exact);
-      if (tracked) {
-        expect(spawnSync("git", ["init", "-q"], { cwd: exact }).status).toBe(0);
-        expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: exact }).status).toBe(0);
-        expect(() => validateGitCandidateSet(exact, exactCandidates), "tracked-exact").not.toThrow();
-      }
-
-      const isolated = await temporaryRepository();
-      await writeEvidence(isolated, `platform/${digestA}/macos/a.json`, paddedJson(compactInvalidPlatformBundle("macos"), 5 * 1024 * 1024));
-      await writeEvidence(isolated, `platform/${digestA}/linux/a.json`, paddedJson(compactInvalidPlatformBundle("linux"), 5 * 1024 * 1024));
-      await writeEvidence(isolated, `platform/${digestB}/macos/b.json`, paddedJson(compactInvalidPlatformBundle("macos"), 5 * 1024 * 1024));
-      await writeEvidence(isolated, `final/${digestA}/a.json`, paddedJson(generic.final_bundle, 12 * 1024 * 1024));
-      await writeEvidence(isolated, `final/${digestB}/b.json`, paddedJson(generic.final_bundle, 12 * 1024 * 1024));
-      const isolatedCandidates = await enumerateSourceCandidates(isolated);
-      if (tracked) {
-        expect(spawnSync("git", ["init", "-q"], { cwd: isolated }).status).toBe(0);
-        expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: isolated }).status).toBe(0);
-        expect(() => validateGitCandidateSet(isolated, isolatedCandidates), "tracked-isolated").not.toThrow();
-      }
+      const { recordSha, sourceBytes } = await initialized(exact);
+      await writeEvidence(exact, `source/${digestA}/supplement.json`,
+        `${JSON.stringify(immutableReference("source", "none", recordSha, "20", 128 * 1024 - sourceBytes))}\n`);
+      try { expect(await enumerateSourceCandidates(exact), "source-lane-exact").toBeInstanceOf(Array); }
+      catch (error) { throw new Error(`source-lane-exact:${String(error)}`); }
+      await writeEvidence(exact, `gates/${digestA}/first.json`,
+        `${JSON.stringify(immutableReference("gates", "none", recordSha, "21", 512 * 1024))}\n`);
+      await writeEvidence(exact, `gates/${digestA}/second.json`,
+        `${JSON.stringify(immutableReference("gates", "none", recordSha, "22", 512 * 1024))}\n`);
+      try { expect(await enumerateSourceCandidates(exact), "gates-lane-exact").toBeInstanceOf(Array); }
+      catch (error) { throw new Error(`gates-lane-exact:${String(error)}`); }
+      await writeEvidence(exact, `platform/${digestA}/macos/first.json`,
+        `${JSON.stringify(immutableReference("platform", "macos", recordSha, "23", 4 * 1024 * 1024))}\n`);
+      await writeEvidence(exact, `platform/${digestA}/macos/second.json`,
+        `${JSON.stringify(immutableReference("platform", "macos", recordSha, "24", 4 * 1024 * 1024))}\n`);
+      try { expect(await enumerateSourceCandidates(exact), "platform-lane-exact").toBeInstanceOf(Array); }
+      catch (error) { throw new Error(`platform-lane-exact:${String(error)}`); }
+      await writeEvidence(exact, `final/${digestA}/exact.json`,
+        `${JSON.stringify(immutableReference("final", "none", recordSha, "25", finalLimit))}\n`);
+      try { expect(await enumerateSourceCandidates(exact), "all-lanes-exact").toBeInstanceOf(Array); }
+      catch (error) { throw new Error(`all-lanes-exact:${String(error)}`); }
+      if (tracked) await admitTracked(exact, "tracked-all-lanes-exact");
     }
 
-    for (const [path, limit] of [
-      [`platform/${digestA}/macos/plus-one.md`, platformLimit],
-      [`platform/${digestA}/linux/plus-one.md`, platformLimit],
-      [`final/${digestA}/plus-one.md`, finalLimit]
-    ] as const) {
-      const untracked = await temporaryRepository();
-      await writeEvidence(untracked, path, paddedJson(immutableReference("10"), limit + 1));
-      await expect(enumerateSourceCandidates(untracked), `untracked:${path}`).rejects.toMatchObject({ code: "CONTRACT_BYTES_LIMIT" });
+    const singlePlusOne = await temporaryRepository();
+    const singleSha = (await initialized(singlePlusOne)).recordSha;
+    await writeEvidence(singlePlusOne, `platform/${digestA}/macos/plus-one.json`,
+      `${JSON.stringify(immutableReference("platform", "macos", singleSha, "30", platformLimit + 1))}\n`);
+    await expect(enumerateSourceCandidates(singlePlusOne), "single-reference-plus-one")
+      .rejects.toMatchObject({ code: "CONTRACT_BYTES_LIMIT" });
 
-      const staged = await temporaryRepository();
-      const stagedPath = await writeEvidence(staged, path, paddedJson(immutableReference("11"), limit + 1));
-      expect(spawnSync("git", ["init", "-q"], { cwd: staged }).status).toBe(0);
-      expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: staged }).status).toBe(0);
-      const [lane, digest, platform] = path.split("/");
-      await writeFile(stagedPath, canonicalMarkdown(lane as EvidenceLane, digest!,
-        lane === "platform" ? platform as "macos" | "linux" : "none"));
-      const candidates = await enumerateSourceCandidates(staged);
-      expect(() => validateGitCandidateSet(staged, candidates), `tracked:${path}`).toThrow(ContractError);
+    const aggregatePlusOne = await temporaryRepository();
+    const aggregateSha = (await initialized(aggregatePlusOne)).recordSha;
+    await writeEvidence(aggregatePlusOne, `platform/${digestA}/macos/first.json`,
+      `${JSON.stringify(immutableReference("platform", "macos", aggregateSha, "31", 4 * 1024 * 1024))}\n`);
+    await writeEvidence(aggregatePlusOne, `platform/${digestA}/macos/second.json`,
+      `${JSON.stringify(immutableReference("platform", "macos", aggregateSha, "32", 4 * 1024 * 1024 + 1))}\n`);
+    await expect(enumerateSourceCandidates(aggregatePlusOne), "aggregate-plus-one")
+      .rejects.toMatchObject({ code: "CONTRACT_BYTES_LIMIT" });
+
+    for (const extra of [0, 1]) {
+      const mixed = await temporaryRepository();
+      const mixedSha = (await initialized(mixed)).recordSha;
+      const inline = canonicalMarkdown("platform", digestA, "macos", "platform-observation-recorded", mixedSha);
+      const inlineBytes = Buffer.byteLength(inline);
+      await writeEvidence(mixed, `platform/${digestA}/macos/summary.md`, inline);
+      await writeEvidence(mixed, `platform/${digestA}/macos/supplement.json`,
+        `${JSON.stringify(immutableReference("platform", "macos", mixedSha, `4${extra}`, platformLimit - inlineBytes + extra))}\n`);
+      if (extra === 0) {
+        try { expect(await enumerateSourceCandidates(mixed), "mixed-exact").toBeInstanceOf(Array); }
+        catch (error) { throw new Error(`mixed-exact:${String(error)}`); }
+      }
+      else await expect(enumerateSourceCandidates(mixed), "mixed-plus-one").rejects.toMatchObject({ code: "CONTRACT_BYTES_LIMIT" });
     }
+
+    const duplicate = await temporaryRepository();
+    const duplicateSha = (await initialized(duplicate)).recordSha;
+    const repeated = `${JSON.stringify(immutableReference("platform", "macos", duplicateSha, "50", 1024))}\n`;
+    await writeEvidence(duplicate, `platform/${digestA}/macos/first.json`, repeated);
+    await writeEvidence(duplicate, `platform/${digestA}/macos/second.json`, repeated);
+    await expect(enumerateSourceCandidates(duplicate), "duplicate-reference")
+      .rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+
+    const isolated = await temporaryRepository();
+    const shaA = (await initialized(isolated, digestA)).recordSha;
+    const shaB = (await initialized(isolated, digestB)).recordSha;
+    await writeEvidence(isolated, `platform/${digestA}/macos/a.json`,
+      `${JSON.stringify(immutableReference("platform", "macos", shaA, "61", 5 * 1024 * 1024))}\n`);
+    await writeEvidence(isolated, `platform/${digestA}/linux/a.json`,
+      `${JSON.stringify(immutableReference("platform", "linux", shaA, "62", 5 * 1024 * 1024))}\n`);
+    await writeEvidence(isolated, `platform/${digestB}/macos/b.json`,
+      `${JSON.stringify(immutableReference("platform", "macos", shaB, "63", 5 * 1024 * 1024))}\n`);
+    await writeEvidence(isolated, `final/${digestA}/a.json`,
+      `${JSON.stringify(immutableReference("final", "none", shaA, "64", 12 * 1024 * 1024))}\n`);
+    await writeEvidence(isolated, `final/${digestB}/b.json`,
+      `${JSON.stringify(immutableReference("final", "none", shaB, "65", 12 * 1024 * 1024))}\n`);
+    try { expect(await enumerateSourceCandidates(isolated), "platform-and-digest-isolation").toBeInstanceOf(Array); }
+    catch (error) { throw new Error(`platform-and-digest-isolation:${String(error)}`); }
+
+    const staged = await temporaryRepository();
+    const stagedSha = (await initialized(staged)).recordSha;
+    const stagedPath = await writeEvidence(staged, `platform/${digestA}/macos/plus-one.json`,
+      `${JSON.stringify(immutableReference("platform", "macos", stagedSha, "70", platformLimit + 1))}\n`);
+    expect(spawnSync("git", ["init", "-q"], { cwd: staged }).status).toBe(0);
+    expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: staged }).status).toBe(0);
+    await writeFile(stagedPath, `${JSON.stringify(immutableReference("platform", "macos", stagedSha, "70", 1024))}\n`);
+    const candidates = await enumerateSourceCandidates(staged);
+    expect(() => validateGitCandidateSet(staged, candidates), "staged-invalid/worktree-valid").toThrow(ContractError);
   }, 120_000);
 
   test("the exact current checker returns one complete receipt and writes zero files", async () => {
@@ -463,5 +695,221 @@ describe("source-input-v1 current-set authority", () => {
     });
     expect(after).toEqual(before);
     expect(statusAfter).toEqual(statusBefore);
+  }, 15_000);
+});
+
+describe("Round 4 terminal contract model", () => {
+  test("collection identity binds the live digest, exact source-record bytes, final copy, and every descendant", async () => {
+    const mismatch = await temporaryRepository();
+    await writeEvidence(mismatch, `source/${otherDigest}/source-input-record.json`, sourceRecordBytes());
+    await expect(schema.enumerateSourceCandidates(mismatch)).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+
+    const referencedSource = await temporaryRepository();
+    await writeEvidence(referencedSource, `source/${digest}/source-input-record.json`,
+      immutableReference("source", "none", sourceRecordSha(), "79", 1024));
+    await expect(schema.enumerateSourceCandidates(referencedSource)).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+
+    const copyDrift = await temporaryRepository();
+    const recordSha = await installRound4SourceRecord(copyDrift);
+    await writeEvidence(copyDrift, `final/${digest}/source-input-record.json`, Buffer.concat([sourceRecordBytes(), Buffer.from(" ")]));
+    await expect(schema.enumerateSourceCandidates(copyDrift)).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+
+    const wrongBinding = await temporaryRepository();
+    await installRound4SourceRecord(wrongBinding);
+    await writeEvidence(wrongBinding, `platform/${digest}/macos/platform-bundle.json`,
+      bindSourceRecord(clone(generic.platform_bundle), "ff".repeat(32)));
+    await expect(schema.enumerateSourceCandidates(wrongBinding)).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+    expect(recordSha).toBe(createHash("sha256").update(sourceRecordBytes()).digest("hex"));
+  }, 60_000);
+
+  test("complete Tasks 5.1-5.4 direct and referenced vocabularies preserve final-only publication receipts", async () => {
+    const root = await temporaryRepository();
+    const recordSha = await installRound4SourceRecord(root);
+    await writeEvidence(root, `platform/${digest}/macos/platform-bundle.json`, bindSourceRecord(clone(generic.platform_bundle), recordSha));
+    await writeEvidence(root, `platform/${digest}/linux/platform-bundle.json`, bindSourceRecord(clone(generic.linux_platform_bundle), recordSha));
+    const gate = repositoryGate(recordSha);
+    await writeEvidence(root, `gates/${digest}/repository-gate.json`, gate);
+    await writeEvidence(root, `final/${digest}/source-input-record.json`, sourceRecordBytes());
+    const finalBundle = bindSourceRecord(clone(generic.final_bundle), recordSha);
+    const decision = bindSourceRecord(clone(generic.decision), recordSha);
+    await writeEvidence(root, `final/${digest}/final-bundle.json`, finalBundle);
+    await writeEvidence(root, `final/${digest}/decision.json`, decision);
+    await writeEvidence(root, `final/${digest}/publication-assertion.json`, publicationAssertion(decision, recordSha));
+    await writeEvidence(root, `final/${digest}/publication-governance-recheck.json`, publicationGovernance(gate, recordSha));
+    await expect(schema.enumerateSourceCandidates(root)).resolves.toBeInstanceOf(Array);
+
+    const referenced = await temporaryRepository();
+    const referencedSha = await installRound4SourceRecord(referenced);
+    const references = [
+      [`platform/${digest}/macos/platform-bundle.json`, immutableReference("platform", "macos", referencedSha, "81".repeat(32), 1024)],
+      [`platform/${digest}/linux/platform-bundle.json`, immutableReference("platform", "linux", referencedSha, "82".repeat(32), 1024)],
+      [`gates/${digest}/repository-gate.json`, immutableReference("gates", "none", referencedSha, "83".repeat(32), 1024)],
+      [`final/${digest}/final-bundle.json`, immutableReference("final", "none", referencedSha, "84".repeat(32), 1024)],
+      [`final/${digest}/decision.json`, immutableReference("final", "none", referencedSha, "85".repeat(32), 1024)],
+      [`final/${digest}/publication-assertion.json`, immutableReference("final", "none", referencedSha, "86".repeat(32), 1024)],
+      [`final/${digest}/publication-governance-recheck.json`, immutableReference("final", "none", referencedSha, "87".repeat(32), 1024)]
+    ] as const;
+    await writeEvidence(referenced, `final/${digest}/source-input-record.json`, sourceRecordBytes());
+    for (const [path, reference] of references) await writeEvidence(referenced, path, reference);
+    await expect(schema.enumerateSourceCandidates(referenced)).resolves.toBeInstanceOf(Array);
+
+    const mismatchedAssertion = publicationAssertion(decision, recordSha);
+    mismatchedAssertion.expected_decision = "rejected";
+    mismatchedAssertion.command_receipt.argv[3] = "rejected";
+    await writeEvidence(root, `final/${digest}/publication-assertion.json`, mismatchedAssertion);
+    await expect(schema.enumerateSourceCandidates(root)).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+    await writeEvidence(root, `final/${digest}/publication-assertion.json`, publicationAssertion(decision, recordSha));
+
+    await writeEvidence(root, `gates/${digest}/evidence-index.json`, { schema_version: "shud.git-status-capability.evidence-index.v1" });
+    await expect(schema.enumerateSourceCandidates(root)).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+    const wrongLane = await temporaryRepository();
+    const wrongLaneSha = await installRound4SourceRecord(wrongLane);
+    await writeEvidence(wrongLane, `gates/${digest}/publication-assertion.json`,
+      bindSourceRecord(clone(generic.publication_assertion), wrongLaneSha));
+    await expect(schema.enumerateSourceCandidates(wrongLane)).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+  }, 60_000);
+
+  test("invalid decisions are evidence-derived and reject arbitrary all-pass labels", () => {
+    const valid = bindSourceRecord(clone(generic.decision), sourceRecordSha());
+    const supplyFailure = invalidDecisionFrom(valid, ["SUPPLY_SBOM_INCOMPLETE"]);
+    supplyFailure.sbom_completeness_verdict = "fail";
+    expect(schema.validateDecision(supplyFailure)).toBe(true);
+    expect(schema.validateDecision(invalidDecisionFrom(valid, ["ARBITRARY_LABEL"]))).toBe(false);
+
+    const duplicateRows = clone(valid);
+    duplicateRows.run_status = "invalid";
+    delete duplicateRows.terminal_decision;
+    duplicateRows.rows = [valid.rows[0], valid.rows[0]];
+    const coverageFailure = schema.deriveInvalidState({
+      completeness: Object.fromEntries(COMPLETENESS_FIELDS.map((field) => [field, "pass"])),
+      gates: d9RawReceipts(), coverage: { macos_rows: 1, linux_rows: 0 }, invalidity_receipts: []
+    })!;
+    Object.assign(duplicateRows, coverageFailure);
+    expect(schema.validateDecision(duplicateRows)).toBe(false);
+
+    const forgedGate = d9RawReceipts()[0]!;
+    forgedGate.stdout_summary = "forged-without-rehash";
+    expect(() => schema.encodeDecisionGateProjection(forgedGate, 0)).toThrow();
+  });
+
+  test("every direct/reference kind freezes independently reachable byte/depth/node/item limits", () => {
+    expect(frozen.EVIDENCE_RECORD_LIMITS).toEqual({
+      markdown: { bytes: 4096, depth: 1, nodes: 1, items: 0 },
+      immutable_evidence_reference: { bytes: 4096, depth: 6, nodes: 64, items: 32 },
+      source_input_record: { bytes: 64 * 1024, depth: 12, nodes: 2048, items: 512 },
+      platform_bundle: { bytes: 8 * 1024 * 1024, depth: 32, nodes: 1_048_576, items: 262_144 },
+      repository_gate: { bytes: 256 * 1024, depth: 12, nodes: 4096, items: 1024 },
+      final_bundle: { bytes: 20 * 1024 * 1024, depth: 32, nodes: 2_097_152, items: 524_288 },
+      decision: { bytes: 128 * 1024, depth: 16, nodes: 8192, items: 2048 },
+      publication_assertion: { bytes: 64 * 1024, depth: 12, nodes: 2048, items: 512 },
+      publication_governance_recheck: { bytes: 64 * 1024, depth: 12, nodes: 2048, items: 512 }
+    });
+    expect(Object.keys(frozen.SCHEMA_DESCRIPTORS).sort()).toEqual([
+      "decision", "final_bundle", "frame", "immutable_evidence_reference", "platform_bundle",
+      "publication_assertion", "publication_governance_recheck", "repository_gate", "row_evidence", "source_input_record"
+    ]);
+  });
+
+  test("recomputable changed protection material remains valid technical rejection end-to-end", () => {
+    const bundle = changedProtectionBundle();
+    expect(schema.validateRowEvidence(bundle.rows[0])).toBe(true);
+    expect(schema.validatePlatformBundle(bundle)).toBe(true);
+    expect(bundle.rows[0]).toMatchObject({ row_verdict: "fail", protection_set_equal: false });
+    const malformed = clone(bundle);
+    delete malformed.protection_set[0].inventory[0].post_digest;
+    expect(schema.validatePlatformBundle(malformed)).toBe(false);
+  });
+
+  test("all seven completeness failures and all 17 D9 failures derive exact deterministic invalid causes", () => {
+    for (const field of COMPLETENESS_FIELDS) {
+      const state = schema.deriveInvalidState({
+        completeness: Object.fromEntries(COMPLETENESS_FIELDS.map((name) => [name, name === field ? "fail" : "pass"])),
+        gates: d9RawReceipts(), coverage: { macos_rows: 174, linux_rows: 174 }, invalidity_receipts: []
+      });
+      expect(state.all_failure_codes).toHaveLength(1);
+      expect(state.first_cause).toBe(state.all_failure_codes[0]);
+    }
+    for (const id of D9_IDS) {
+      const state = schema.deriveInvalidState({
+        completeness: Object.fromEntries(COMPLETENESS_FIELDS.map((name) => [name, "pass"])),
+        gates: d9RawReceipts(sourceRecordSha(), id), coverage: { macos_rows: 174, linux_rows: 174 }, invalidity_receipts: []
+      });
+      expect(state).toEqual({ first_cause: `D9_${id.replaceAll("-", "_")}_FAILED`, all_failure_codes: [`D9_${id.replaceAll("-", "_")}_FAILED`] });
+    }
+  });
+
+  test("exact ordered 17-gate compact D8 fits all-pass and all-348-row-failure actual/exact/+1", async () => {
+    const decision = bindSourceRecord(clone(generic.decision), sourceRecordSha());
+    decision.gates = d9RawReceipts().map((receipt, ordinal) => schema.encodeDecisionGateProjection(receipt, ordinal));
+    expect(decision.gates).toHaveLength(17);
+    expect(schema.validateDecision(decision)).toBe(true);
+    const failed = clone(decision);
+    const catalogNegativeRows = new Set([
+      "CAP-005", "CAP-006", "CAP-008", "CAP-009", "CAP-016", "CAP-017",
+      "PRT-001", "PRT-002", "PRT-003", "PRT-004", "PRT-005", "PRT-006", "PRT-007", "PRT-008", "PRT-009",
+      "PRT-010", "PRT-011", "LIF-003", "LIF-004", "LIF-005", "LIF-007"
+    ]);
+    const longestAlternate = (expected: string): string => [...frozen.REJECTION_CODES]
+      .filter((code) => code !== expected)
+      .sort((left, right) => Buffer.byteLength(right) - Buffer.byteLength(left) || left.localeCompare(right))[0]!;
+    failed.rows = decision.rows.map((scalar: string) => {
+      const fields = scalar.split("\0");
+      const rowId = fields[1]!;
+      if (rowId === "PRT-012") { fields[6] = "f"; fields[12] = "6f"; fields[18] = "c"; return fields.join("\0"); }
+      const evenLimit = /^LIM-(\d{3})$/.exec(rowId)?.[1];
+      if (evenLimit && Number(evenLimit) % 2 === 0) { fields[6] = "f"; fields[10] = "l"; fields[18] = "r"; return fields.join("\0"); }
+      fields[4] = "r";
+      fields[5] = longestAlternate(fields[3]!);
+      fields[6] = "f";
+      if (["LIF-002", "LIF-006"].includes(rowId)) fields[18] = "l";
+      else if (catalogNegativeRows.has(rowId)) fields[18] = "n";
+      else { fields[10] = "o"; fields[18] = "o"; }
+      return fields.join("\0");
+    });
+    failed.terminal_decision = "rejected";
+    failed.first_cause = "ROW_FAILURE";
+    failed.all_failure_codes = ["ROW_FAILURE"];
+    expect(schema.validateDecision(failed)).toBe(true);
+    const actualBytes = Buffer.byteLength(JSON.stringify(failed));
+    expect(actualBytes).toBeLessThanOrEqual(frozen.INGESTION_LIMITS.decision.bytes);
+    const root = await mkdtemp(join(tmpdir(), "shud-d9-capacity-"));
+    temporaryRoots.push(root);
+    const input = join(root, "decision.json");
+    await writeFile(input, `${JSON.stringify(failed)}${" ".repeat(frozen.INGESTION_LIMITS.decision.bytes - actualBytes)}`);
+    let stdout = "";
+    let stderr = "";
+    expect(await runCheck(["--input", input, "--kind", "decision"], { stdout: (text) => stdout += text, stderr: (text) => stderr += text })).toBe(0);
+    await writeFile(input, `${await readFile(input, "utf8")} `);
+    stdout = "";
+    stderr = "";
+    expect(await runCheck(["--input", input, "--kind", "decision"], { stdout: (text) => stdout += text, stderr: (text) => stderr += text })).toBe(2);
+    expect(JSON.parse(stderr).code).toBe("CONTRACT_BYTES_LIMIT");
+  }, 60_000);
+
+  test("FIFO, symlink, directory, socket, and device inputs terminate with one closed bounded rejection", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shud-descriptor-input-"));
+    temporaryRoots.push(root);
+    const regular = join(root, "regular.json");
+    const fifo = join(root, "input.fifo");
+    const link = join(root, "input.link");
+    const socket = join(root, "input.sock");
+    await writeFile(regular, "{}\n");
+    expect(spawnSync("mkfifo", [fifo]).status).toBe(0);
+    await symlink(regular, link);
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => server.listen(socket, resolve).once("error", reject));
+    try {
+      for (const input of [fifo, link, root, socket, "/dev/null"]) {
+        const before = input === "/dev/null" ? null : await lstat(input);
+        const result = spawnSync(process.execPath, [checkerPath, "--input", input, "--kind", "schema"], { encoding: "utf8", timeout: 1500 });
+        expect(result.status, `${input}:${result.signal}:${result.error?.message}`).toBe(2);
+        expect(result.stdout).toBe("");
+        expect(result.stderr.trim().split("\n")).toHaveLength(1);
+        expect(Buffer.byteLength(result.stderr)).toBeLessThan(512);
+        if (before) expect((await lstat(input)).size).toBe(before.size);
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   }, 15_000);
 });

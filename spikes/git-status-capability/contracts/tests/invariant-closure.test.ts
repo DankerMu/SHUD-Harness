@@ -432,14 +432,16 @@ describe("round-1 invariant closure", () => {
     sameBundleDigest.linux_bundle_sha256 = sameBundleDigest.macos_bundle_sha256;
     expect(validateFinalBundle(sameBundleDigest)).toBe(false);
     const invalidFinal = structuredClone(generic.final_bundle);
-    invalidFinal.run_status = "invalid"; delete invalidFinal.terminal_decision; invalidFinal.first_cause = "PLATFORM_MISSING"; invalidFinal.all_failure_codes = ["PLATFORM_MISSING"];
+    invalidFinal.run_status = "invalid"; delete invalidFinal.terminal_decision;
+    invalidFinal.completeness.sbom_completeness_verdict = "fail";
+    invalidFinal.first_cause = "SUPPLY_SBOM_INCOMPLETE"; invalidFinal.all_failure_codes = ["SUPPLY_SBOM_INCOMPLETE"];
     expect(validateFinalBundle(invalidFinal)).toBe(true);
     for (const mutate of [
-      (bundle: any) => { delete bundle.repository_gates["GATE-SOURCE-INPUT"]; },
-      (bundle: any) => { bundle.repository_gates["GATE-SOURCE-INPUT"].argv[12] = "--record"; },
-      (bundle: any) => { bundle.repository_gates["GATE-SOURCE-INPUT"].argv[14] = "--create"; },
-      (bundle: any) => { bundle.repository_gates["GATE-SOURCE-INPUT"].tool_version = "opaque"; },
-      (bundle: any) => { bundle.repository_gates["GATE-SOURCE-INPUT"].exit_code = 1; }
+      (bundle: any) => { bundle.repository_gates.splice(1, 1); },
+      (bundle: any) => { bundle.repository_gates[1].argv[12] = "--record"; },
+      (bundle: any) => { bundle.repository_gates[1].argv[14] = "--create"; },
+      (bundle: any) => { bundle.repository_gates[1].version = "opaque"; },
+      (bundle: any) => { bundle.repository_gates[1].exit_code = 1; }
     ]) {
       const bundle = structuredClone(generic.final_bundle); mutate(bundle); expect(validateFinalBundle(bundle)).toBe(false);
     }
@@ -501,12 +503,12 @@ describe("round-1 invariant closure", () => {
       (value: any) => { mutateDecisionRow(value, 0, 15, "1"); },
       (value: any) => { mutateDecisionRow(value, 0, 16, "q"); },
       (value: any) => { mutateDecisionRow(value, 0, 16, "e"); },
-      (value: any) => { delete value.gates[0].id; },
-      (value: any) => { value.gates[0].extra = true; },
-      (value: any) => { value.gates[1].id = value.gates[0].id; },
-      (value: any) => { value.gates[0].source_input_record_sha256 = shaA; },
-      (value: any) => { value.gates[0].exit_verdict = "fail"; },
-      (value: any) => { value.gates[0].argv = []; }
+      (value: any) => { value.gates[0] = value.gates[0].replace(/^00/, "99"); },
+      (value: any) => { value.gates[0] += "\0surplus"; },
+      (value: any) => { value.gates[1] = value.gates[0]; },
+      (value: any) => { value.gates[0] = value.gates[0].replace(/\0p\0/, "\0x\0"); },
+      (value: any) => { value.gates[0] = value.gates[0].replace(/[0-9a-f]{64}$/, "short"); },
+      (value: any) => { value.gates = value.gates.slice(0, 16); }
     ]) {
       const changed = structuredClone(decision); mutate(changed); expect(validateDecision(changed)).toBe(false);
     }

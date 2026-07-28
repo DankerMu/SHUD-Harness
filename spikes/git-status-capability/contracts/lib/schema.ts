@@ -11,16 +11,25 @@ import {
   sealFrame
 } from "./canonical-frame";
 import { validateFailureCauseForRow } from "./causal-proof";
-import { validateDecisionProjection } from "./decision";
+import {
+  deriveInvalidState,
+  encodeDecisionGateProjection,
+  validateDecisionProjection
+} from "./decision";
+export { deriveInvalidState, encodeDecisionGateProjection } from "./decision";
 import { validateDeterminismProof } from "./determinism-proof";
 import { validateLifecycleCausality } from "./lifecycle-causality";
 import {
   CATALOG_V1,
+  COMPLETENESS_FIELDS,
   CONTROL_ASSERTION_IDS,
+  D9_COMMAND_PROFILE,
+  EVIDENCE_LANE_LIMITS,
+  EVIDENCE_RECORD_LIMITS,
   FLOOR_V1,
   FRAME_EVIDENCE_ENCODING,
-  IMMUTABLE_EVIDENCE_REFERENCE_LIMITS,
   INGESTION_LIMITS,
+  INVALIDITY_CODES,
   OBSERVER_LIMITS,
   OWNERSHIP_V1,
   PRODUCING_BOUNDARIES,
@@ -108,7 +117,8 @@ export function validateContract(value: unknown): boolean {
   if (!record(value.source_manifest_digest_v1) || !exactKeys(value.source_manifest_digest_v1, ["domain_prefix", "entry_order", "entry_frame", "terminal_lf"]) ||
     !exactJson(value.source_manifest_digest_v1, SOURCE_MANIFEST_DIGEST_V1)) return false;
   if (!record(value.schemas) || !exactKeys(value.schemas, [
-    "frame", "row_evidence", "platform_bundle", "final_bundle", "decision", "source_input_record", "immutable_evidence_reference"
+    "frame", "row_evidence", "platform_bundle", "final_bundle", "decision", "source_input_record", "repository_gate",
+    "publication_assertion", "publication_governance_recheck", "immutable_evidence_reference"
   ])) return false;
   return Object.values(value.schemas).every(strictSchemaDescriptor) && exactJson(value.schemas, SCHEMA_DESCRIPTORS);
 }
@@ -247,12 +257,12 @@ function evidenceLocation(path: string, file: boolean): EvidenceLocation | null 
   if (lane === "platform") {
     if (!EVIDENCE_PLATFORMS.has(parts[2] ?? "") || (file && parts.length < 4)) return null;
     const platform = parts[2] as "macos" | "linux";
-    return { lane, digest, platform, capacityKey: `${lane}/${digest}/${platform}`, byteLimit: INGESTION_LIMITS.platform_bundle.bytes };
+    return { lane, digest, platform, capacityKey: `${lane}/${digest}/${platform}`, byteLimit: EVIDENCE_LANE_LIMITS.platform };
   }
   if (file && parts.length < 3) return null;
   return {
     lane, digest, capacityKey: `${lane}/${digest}`,
-    byteLimit: lane === "final" ? INGESTION_LIMITS.final_bundle.bytes : INGESTION_LIMITS.platform_bundle.bytes
+    byteLimit: EVIDENCE_LANE_LIMITS[lane]
   };
 }
 
@@ -264,10 +274,12 @@ function canonicalEvidenceDirectory(path: string): boolean {
   return parts[0] !== "platform" || parts.length < 3 || EVIDENCE_PLATFORMS.has(parts[2]!);
 }
 
-function immutableEvidenceReference(value: unknown): boolean {
-  if (!record(value) || !exactKeys(value, ["schema_version", "media_type", "sha256", "byte_length", "immutable_identity",
+function immutableEvidenceReference(value: unknown, location: EvidenceLocation, sourceRecordSha: string): boolean {
+  if (!record(value) || !exactKeys(value, ["schema_version", "lane", "platform", "source_input_record_sha256", "media_type", "sha256", "byte_length", "immutable_identity",
     "retention", "access", "offline_retrieval"]) ||
     value.schema_version !== "shud.git-status-capability.immutable-evidence-reference.v1" ||
+    value.lane !== location.lane || value.platform !== (location.platform ?? "none") ||
+    value.source_input_record_sha256 !== sourceRecordSha ||
     !["application/json", "text/markdown", "text/plain"].includes(value.media_type as string) ||
     !sha256(value.sha256) || !boundedInteger(value.byte_length, INGESTION_LIMITS.final_bundle.bytes, true) ||
     value.immutable_identity !== `sha256:${value.sha256}` || !record(value.retention) || !record(value.access) ||
@@ -282,18 +294,62 @@ function immutableEvidenceReference(value: unknown): boolean {
     value.offline_retrieval.sha256 === value.sha256 && value.offline_retrieval.byte_length === value.byte_length;
 }
 
-function evidenceJsonRecord(value: unknown, location: EvidenceLocation): boolean {
+function fullD9Receipt(value: unknown, ordinal: number, sourceRecordSha: string): value is JsonRecord {
+  const profile = D9_COMMAND_PROFILE[ordinal];
+  if (!profile || !record(value) || !exactKeys(value, ["id", "argv", "version", "exit_code", "stdout_summary", "stderr_summary", "summary_digest", "source_input_record_sha256"]) ||
+    value.id !== profile.id || !exactJson(value.argv, profile.argv) || value.version !== profile.version ||
+    !Number.isSafeInteger(value.exit_code) || (value.exit_code as number) < 0 || typeof value.stdout_summary !== "string" ||
+    typeof value.stderr_summary !== "string" || Buffer.byteLength(value.stdout_summary) > 4096 || Buffer.byteLength(value.stderr_summary) > 4096 ||
+    !sha256(value.summary_digest) || value.source_input_record_sha256 !== sourceRecordSha) return false;
+  return value.summary_digest === canonicalDigest({ stdout_summary: value.stdout_summary, stderr_summary: value.stderr_summary });
+}
+
+export function validateRepositoryGate(value: unknown): boolean {
+  const descriptor = SCHEMA_DESCRIPTORS.repository_gate;
+  return matchesDescriptor(value, descriptor) && sha256(value.source_input_record_sha256) && Array.isArray(value.gates) &&
+    value.gates.length === D9_COMMAND_PROFILE.length && value.gates.every((gate, ordinal) =>
+      fullD9Receipt(gate, ordinal, value.source_input_record_sha256 as string));
+}
+
+export function validatePublicationAssertion(value: unknown): boolean {
+  const descriptor = SCHEMA_DESCRIPTORS.publication_assertion;
+  if (!matchesDescriptor(value, descriptor) || !sha256(value.source_input_record_sha256) || !sha256(value.decision_sha256) ||
+    !["accepted", "rejected"].includes(value.expected_decision as string) || !record(value.command_receipt)) return false;
+  const receipt = value.command_receipt;
+  return exactKeys(receipt, ["argv", "version", "exit_code", "summary_digest"]) && receipt.version === "1" &&
+    receipt.exit_code === 0 && sha256(receipt.summary_digest) && exactJson(receipt.argv, [
+      "spikes/git-status-capability/verify.sh", "evidence", "expect", value.expected_decision,
+      "--decision", "/external-staging/candidate-decision.json"
+    ]);
+}
+
+export function validatePublicationGovernanceRecheck(value: unknown): boolean {
+  const descriptor = SCHEMA_DESCRIPTORS.publication_governance_recheck;
+  return matchesDescriptor(value, descriptor) && sha256(value.source_input_record_sha256) &&
+    sha256(value.d9_governance_receipt_sha256) && value.repeated_receipt_sha256 === value.d9_governance_receipt_sha256 &&
+    value.exact_match === true && value.mutation_count === 0;
+}
+
+function evidenceJsonRecord(value: unknown, location: EvidenceLocation, sourceRecordSha: string, path: string): boolean {
   if (!record(value) || typeof value.schema_version !== "string") return false;
   if (value.schema_version === "shud.git-status-capability.immutable-evidence-reference.v1")
-    return immutableEvidenceReference(value);
-  if (location.lane === "source" && value.schema_version === "shud.git-status-capability.source-input-record.v1")
-    return validateSourceInputRecord(value);
-  if (location.lane === "platform" && value.schema_version === "shud.git-status-capability.platform-bundle.v1")
+    return immutableEvidenceReference(value, location, sourceRecordSha);
+  const fileName = path.split("/").at(-1);
+  if ((location.lane === "source" || location.lane === "final") && fileName === "source-input-record.json" &&
+    value.schema_version === "shud.git-status-capability.source-input-record.v1")
+    return value.source_input_digest === location.digest && validateSourceInputRecord(value);
+  if (location.lane === "platform" && fileName === "platform-bundle.json" && value.schema_version === "shud.git-status-capability.platform-bundle.v1")
     return value.platform === location.platform && validatePlatformBundle(value);
-  if (location.lane === "final" && value.schema_version === "shud.git-status-capability.final-bundle.v1")
+  if (location.lane === "gates" && fileName === "repository-gate.json" && value.schema_version === "shud.git-status-capability.repository-gate.v1")
+    return validateRepositoryGate(value);
+  if (location.lane === "final" && fileName === "final-bundle.json" && value.schema_version === "shud.git-status-capability.final-bundle.v1")
     return validateFinalBundle(value);
-  if (location.lane === "final" && value.schema_version === "shud.git-status-capability.decision.v1")
+  if (location.lane === "final" && fileName === "decision.json" && value.schema_version === "shud.git-status-capability.decision.v1")
     return validateDecision(value);
+  if (location.lane === "final" && fileName === "publication-assertion.json" && value.schema_version === "shud.git-status-capability.publication-assertion.v1")
+    return validatePublicationAssertion(value);
+  if (location.lane === "final" && fileName === "publication-governance-recheck.json" && value.schema_version === "shud.git-status-capability.publication-governance-recheck.v1")
+    return validatePublicationGovernanceRecheck(value);
   return false;
 }
 
@@ -304,45 +360,57 @@ const MARKDOWN_EVIDENCE_STATUSES = Object.freeze({
   final: new Set(["accepted", "rejected"])
 });
 
-function markdownEvidence(text: string, location: EvidenceLocation): boolean {
+function markdownEvidence(text: string, location: EvidenceLocation, sourceRecordSha: string): boolean {
   if (text.includes("\r")) return false;
   const lines = text.split("\n");
-  if (lines.length !== 8 || lines[7] !== "") return false;
+  if (lines.length !== 9 || lines[8] !== "") return false;
   if (lines[0] !== "# SHUD Git Status Capability Evidence" ||
     lines[1] !== "Schema: shud.git-status-capability.markdown-evidence.v1" ||
     lines[2] !== `Lane: ${location.lane}` ||
     lines[3] !== `Platform: ${location.platform ?? "none"}` ||
     lines[4] !== `Source input: ${location.digest}` ||
-    !lines[5]!.startsWith("Artifact SHA-256: ") ||
-    !sha256(lines[5]!.slice("Artifact SHA-256: ".length)) ||
-    !lines[6]!.startsWith("Status: ")) return false;
-  return MARKDOWN_EVIDENCE_STATUSES[location.lane].has(lines[6]!.slice("Status: ".length));
+    lines[5] !== `Source record SHA-256: ${sourceRecordSha}` ||
+    !lines[6]!.startsWith("Artifact SHA-256: ") ||
+    !sha256(lines[6]!.slice("Artifact SHA-256: ".length)) ||
+    !lines[7]!.startsWith("Status: ")) return false;
+  return MARKDOWN_EVIDENCE_STATUSES[location.lane].has(lines[7]!.slice("Status: ".length));
 }
 
 const EVIDENCE_JSON_LIMITS = Object.freeze({
-  "shud.git-status-capability.source-input-record.v1": INGESTION_LIMITS.source_input_record,
-  "shud.git-status-capability.platform-bundle.v1": INGESTION_LIMITS.platform_bundle,
-  "shud.git-status-capability.final-bundle.v1": INGESTION_LIMITS.final_bundle,
-  "shud.git-status-capability.decision.v1": INGESTION_LIMITS.decision,
-  "shud.git-status-capability.immutable-evidence-reference.v1": IMMUTABLE_EVIDENCE_REFERENCE_LIMITS
+  "shud.git-status-capability.source-input-record.v1": EVIDENCE_RECORD_LIMITS.source_input_record,
+  "shud.git-status-capability.platform-bundle.v1": EVIDENCE_RECORD_LIMITS.platform_bundle,
+  "shud.git-status-capability.repository-gate.v1": EVIDENCE_RECORD_LIMITS.repository_gate,
+  "shud.git-status-capability.final-bundle.v1": EVIDENCE_RECORD_LIMITS.final_bundle,
+  "shud.git-status-capability.decision.v1": EVIDENCE_RECORD_LIMITS.decision,
+  "shud.git-status-capability.publication-assertion.v1": EVIDENCE_RECORD_LIMITS.publication_assertion,
+  "shud.git-status-capability.publication-governance-recheck.v1": EVIDENCE_RECORD_LIMITS.publication_governance_recheck,
+  "shud.git-status-capability.immutable-evidence-reference.v1": EVIDENCE_RECORD_LIMITS.immutable_evidence_reference
 });
 
-function validateEvidenceContent(path: string, bytes: Uint8Array, location: EvidenceLocation): void {
+type ValidatedEvidenceContent = { logicalCharge: number; referenceSha?: string; value?: JsonRecord };
+
+function validateEvidenceContent(path: string, bytes: Uint8Array, location: EvidenceLocation, sourceRecordSha: string): ValidatedEvidenceContent {
   if (!/\.(?:json|md)$/.test(path)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
-  let text: string;
-  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new ContractError("CONTRACT_UTF8_INVALID"); }
   if (path.endsWith(".json")) {
     const discoveryLimit = { ...INGESTION_LIMITS.final_bundle, bytes: location.byteLimit };
     const discovered = ingestJsonAgainstLimits(bytes, discoveryLimit, (value) =>
       record(value) && typeof value.schema_version === "string" && Object.hasOwn(EVIDENCE_JSON_LIMITS, value.schema_version)
     ) as JsonRecord;
     const limit = EVIDENCE_JSON_LIMITS[discovered.schema_version as keyof typeof EVIDENCE_JSON_LIMITS];
-    ingestJsonAgainstLimits(bytes, limit, (value) => evidenceJsonRecord(value, location));
-  } else if (!markdownEvidence(text, location)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    const value = ingestJsonAgainstLimits(bytes, limit, (candidate) => evidenceJsonRecord(candidate, location, sourceRecordSha, path)) as JsonRecord;
+    const reference = value.schema_version === "shud.git-status-capability.immutable-evidence-reference.v1";
+    return { logicalCharge: reference ? Math.max(bytes.byteLength, value.byte_length as number) : bytes.byteLength,
+      referenceSha: reference ? value.sha256 as string : undefined, value };
+  }
+  if (bytes.byteLength > EVIDENCE_RECORD_LIMITS.markdown.bytes) throw new ContractError("CONTRACT_BYTES_LIMIT");
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new ContractError("CONTRACT_UTF8_INVALID"); }
+  if (!markdownEvidence(text, location, sourceRecordSha)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  return { logicalCharge: bytes.byteLength };
 }
 
 async function validateEvidenceSubtree(root: string, prefix: string): Promise<void> {
-  const totals = new Map<string, number>();
+  const blobs: Array<{ path: string; bytes: Buffer; location: EvidenceLocation }> = [];
   const visit = async (relativePath: string): Promise<void> => {
     const absolute = join(root, ...relativePath.split("/"));
     for (const entry of await readdir(absolute, { withFileTypes: true })) {
@@ -360,13 +428,82 @@ async function validateEvidenceSubtree(root: string, prefix: string): Promise<vo
       }
       const location = evidenceLocation(childPath, true);
       if (!location) throw new ContractError("CONTRACT_SCHEMA_INVALID");
-      const nextTotal = (totals.get(location.capacityKey) ?? 0) + stat.size;
-      if (nextTotal > location.byteLimit) throw new ContractError("CONTRACT_BYTES_LIMIT");
-      totals.set(location.capacityKey, nextTotal);
-      validateEvidenceContent(childPath, await readFile(child), location);
+      blobs.push({ path: childPath, bytes: await readFile(child), location });
     }
   };
   await visit(prefix);
+  validateEvidenceCollection(blobs);
+}
+
+function validateEvidenceCollection(blobs: Array<{ path: string; bytes: Buffer; location: EvidenceLocation }>): void {
+  const byDigest = new Map<string, typeof blobs>();
+  for (const blob of blobs) {
+    const values = byDigest.get(blob.location.digest) ?? [];
+    values.push(blob);
+    byDigest.set(blob.location.digest, values);
+  }
+  for (const [digest, collection] of byDigest) {
+    const sourcePath = `${EVIDENCE_ROOT}/source/${digest}/source-input-record.json`;
+    const source = collection.find((blob) => blob.path === sourcePath);
+    if (!source) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    ingestJsonAgainstLimits(source.bytes, EVIDENCE_RECORD_LIMITS.source_input_record, (value) =>
+      record(value) && value.schema_version === "shud.git-status-capability.source-input-record.v1" &&
+      value.source_input_digest === digest && validateSourceInputRecord(value)
+    );
+    const sourceRecordSha = createHash("sha256").update(source.bytes).digest("hex");
+    const totals = new Map<string, number>();
+    const referenceShas = new Map<string, Set<string>>();
+    const values = new Map<string, JsonRecord>();
+    const artifactDigests = new Map<string, string>();
+    for (const blob of collection) {
+      const validated = validateEvidenceContent(blob.path, blob.bytes, blob.location, sourceRecordSha);
+      const total = (totals.get(blob.location.capacityKey) ?? 0) + validated.logicalCharge;
+      if (validated.logicalCharge > blob.location.byteLimit || total > blob.location.byteLimit)
+        throw new ContractError("CONTRACT_BYTES_LIMIT");
+      totals.set(blob.location.capacityKey, total);
+      if (validated.referenceSha) {
+        const identities = referenceShas.get(blob.location.capacityKey) ?? new Set<string>();
+        if (identities.has(validated.referenceSha)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+        identities.add(validated.referenceSha);
+        referenceShas.set(blob.location.capacityKey, identities);
+      }
+      if (validated.value) values.set(blob.path, validated.value);
+      artifactDigests.set(blob.path, validated.referenceSha ?? createHash("sha256").update(blob.bytes).digest("hex"));
+    }
+    const finalSourcePath = `${EVIDENCE_ROOT}/final/${digest}/source-input-record.json`;
+    const finalSource = collection.find((blob) => blob.path === finalSourcePath);
+    if (finalSource && !finalSource.bytes.equals(source.bytes)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+
+    const finalPath = `${EVIDENCE_ROOT}/final/${digest}/final-bundle.json`;
+    const finalBundle = values.get(finalPath);
+    if (finalBundle?.schema_version === "shud.git-status-capability.final-bundle.v1") {
+      const expected = {
+        macos_bundle_sha256: artifactDigests.get(`${EVIDENCE_ROOT}/platform/${digest}/macos/platform-bundle.json`),
+        linux_bundle_sha256: artifactDigests.get(`${EVIDENCE_ROOT}/platform/${digest}/linux/platform-bundle.json`),
+        repository_gate_sha256: artifactDigests.get(`${EVIDENCE_ROOT}/gates/${digest}/repository-gate.json`)
+      };
+      if (Object.entries(expected).some(([field, value]) => value && finalBundle[field] !== value))
+        throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    }
+    const assertionPath = `${EVIDENCE_ROOT}/final/${digest}/publication-assertion.json`;
+    const assertion = values.get(assertionPath);
+    const decisionDigest = artifactDigests.get(`${EVIDENCE_ROOT}/final/${digest}/decision.json`);
+    if (assertion?.schema_version === "shud.git-status-capability.publication-assertion.v1" &&
+      decisionDigest && assertion.decision_sha256 !== decisionDigest) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    const decision = values.get(`${EVIDENCE_ROOT}/final/${digest}/decision.json`);
+    if (assertion?.schema_version === "shud.git-status-capability.publication-assertion.v1" &&
+      decision?.schema_version === "shud.git-status-capability.decision.v1" &&
+      assertion.expected_decision !== decision.terminal_decision) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    const governancePath = `${EVIDENCE_ROOT}/final/${digest}/publication-governance-recheck.json`;
+    const governance = values.get(governancePath);
+    const gate = values.get(`${EVIDENCE_ROOT}/gates/${digest}/repository-gate.json`);
+    if (governance?.schema_version === "shud.git-status-capability.publication-governance-recheck.v1" &&
+      gate?.schema_version === "shud.git-status-capability.repository-gate.v1" && Array.isArray(gate.gates)) {
+      const receipt = gate.gates[D9_COMMAND_PROFILE.findIndex((profile) => profile.id === "GATE-GOVERNANCE")];
+      if (!record(receipt) || governance.d9_governance_receipt_sha256 !== canonicalDigest(receipt))
+        throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    }
+  }
 }
 
 async function walkSpecs(root: string, prefix: string, output: string[]): Promise<void> {
@@ -442,7 +579,7 @@ export function validateGitCandidateSet(repositoryRoot: string, candidates: read
   if (result.status !== 0 || !Buffer.isBuffer(result.stdout)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
   const records = result.stdout.subarray(0, result.stdout.length - (result.stdout.at(-1) === 0 ? 1 : 0)).toString("utf8").split("\0").filter(Boolean);
   const tracked: string[] = [];
-  const evidenceTotals = new Map<string, number>();
+  const evidenceBlobs: Array<{ path: string; bytes: Buffer; location: EvidenceLocation }> = [];
   for (const record of records) {
     const match = /^(\d{6}) ([0-9a-f]{40,64}) (\d)\t(.+)$/.exec(record);
     if (!match || match[3] !== "0") throw new ContractError("CONTRACT_SCHEMA_INVALID");
@@ -456,12 +593,10 @@ export function validateGitCandidateSet(repositoryRoot: string, candidates: read
         cwd: repositoryRoot, encoding: "buffer", stdio: ["ignore", "pipe", "ignore"], maxBuffer: INGESTION_LIMITS.final_bundle.bytes + 1024
       });
       if (blob.status !== 0 || !Buffer.isBuffer(blob.stdout)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
-      const total = (evidenceTotals.get(location!.capacityKey) ?? 0) + blob.stdout.length;
-      if (total > location!.byteLimit) throw new ContractError("CONTRACT_BYTES_LIMIT");
-      evidenceTotals.set(location!.capacityKey, total);
-      validateEvidenceContent(path, blob.stdout, location!);
+      evidenceBlobs.push({ path, bytes: blob.stdout, location: location! });
     } else tracked.push(path);
   }
+  if (evidenceBlobs.length > 0) validateEvidenceCollection(evidenceBlobs);
   const trackedSpike = tracked.filter((path) => path.startsWith("spikes/git-status-capability/"));
   if (trackedSpike.length === 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
   const sorted = tracked.sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
@@ -1325,7 +1460,7 @@ function validateProtectionMember(
   }
   if (new Set(ingressDigests).size !== ingressDigests.length) return false;
 
-  const measurementValid = (measurement: JsonRecord, digestValue: unknown): boolean => {
+  const measurementValid = (measurement: JsonRecord, digestValue: unknown, baseline: boolean): boolean => {
     if (!exactKeys(measurement, ["schema_version", "profile_digest", "identity_digest", "ingress_digests", "content", "metadata"]) ||
       measurement.schema_version !== "shud.git-status-capability.protected-measurement.v1" ||
       measurement.profile_digest !== profile.profile_digest || measurement.identity_digest !== value.identity_digest ||
@@ -1341,21 +1476,24 @@ function validateProtectionMember(
     const expectedEncoding = role.object_type === "absent-parent" ? "absent-parent-manifest-v1"
       : role.object_type === "regular-file" ? "utf8-v1" : "directory-manifest-v1";
     const expectedMode = role.object_type === "regular-file" ? "100644" : "040000";
-    if ((measurement.content as JsonRecord).encoding !== expectedEncoding ||
-      (measurement.content as JsonRecord).text !== expectedText || Buffer.byteLength(expectedText) > 4096 ||
+    const content = measurement.content as JsonRecord;
+    const contentBytes = Buffer.byteLength(content.text as string);
+    const canonicalBaseline = content.encoding === expectedEncoding && content.text === expectedText;
+    const observedChange = content.encoding === "observed-change-v1" && contentBytes > 0 && contentBytes <= 4096;
+    if ((baseline ? !canonicalBaseline : !(canonicalBaseline || observedChange)) ||
       (measurement.metadata as JsonRecord).git_mode !== expectedMode ||
-      (measurement.metadata as JsonRecord).byte_length !== Buffer.byteLength(expectedText)) return false;
+      (measurement.metadata as JsonRecord).byte_length !== contentBytes) return false;
     return digestValue === canonicalDigest(measurement);
   };
-  if (!measurementValid(value.pre_measurement as JsonRecord, value.pre_digest) ||
-    !measurementValid(value.post_measurement as JsonRecord, value.post_digest) ||
-    !exactJson(value.pre_measurement, value.post_measurement) || value.pre_digest !== value.post_digest) return false;
+  if (!measurementValid(value.pre_measurement as JsonRecord, value.pre_digest, true) ||
+    !measurementValid(value.post_measurement as JsonRecord, value.post_digest, false)) return false;
 
   const event = value.event_material as JsonRecord;
+  const unchanged = exactJson(value.pre_measurement, value.post_measurement) && value.pre_digest === value.post_digest;
   return exactKeys(event, ["schema_version", "profile_digest", "identity_digest", "ingress_digests",
     "pre_digest", "post_digest", "sequence", "kind"]) &&
     event.schema_version === "shud.git-status-capability.protection-event.v1" &&
-    event.kind === "verified-unchanged-v1" && event.sequence === sequence &&
+    event.kind === (unchanged ? "verified-unchanged-v1" : "verified-changed-v1") && event.sequence === sequence &&
     event.profile_digest === profile.profile_digest && event.identity_digest === value.identity_digest &&
     exactJson(event.ingress_digests, ingressDigests) &&
     event.pre_digest === value.pre_digest && event.post_digest === value.post_digest &&
@@ -1435,8 +1573,10 @@ export function validatePlatformBundle(value: unknown): boolean {
   for (const rowValue of value.rows) {
     const row = rowValue as JsonRecord;
     const receipt = protectionByRow.get(row.row_id as string);
+    const unchanged = !!receipt && (receipt.inventory as JsonRecord[]).every((item) =>
+      (item.event_material as JsonRecord).kind === "verified-unchanged-v1");
     if (!receipt || receipt.observation_id !== row.observation_id || receipt.supplied_input_digest !== row.frame_digest ||
-      row.protection_set_equal !== true || (row.control_assertions as JsonRecord).protection.verdict !== "pass") return false;
+      row.protection_set_equal !== unchanged || ((row.control_assertions as JsonRecord).protection as JsonRecord).verdict !== (unchanged ? "pass" : "fail")) return false;
   }
   const determinismInvocationIds = value.rows.flatMap((row) => {
     const proof = (row as JsonRecord).determinism_proof;
@@ -1467,11 +1607,34 @@ function terminalState(value: JsonRecord): boolean {
 
 export function validateFinalBundle(value: unknown): boolean {
   const descriptor = SCHEMA_DESCRIPTORS.final_bundle;
-  if (!matchesDescriptor(value, descriptor) || !terminalState(value) || !record(value.repository_gates) || Object.keys(value.repository_gates).length === 0 || !Object.values(value.repository_gates).every((gate) => record(gate) && exactKeys(gate, ["argv", "tool_version", "exit_code", "summary_digest", "source_input_record_sha256"]) && stringArray(gate.argv) && nonEmptyString(gate.tool_version) && gate.exit_code === 0 && sha256(gate.summary_digest) && sha256(gate.source_input_record_sha256))) return false;
-  if (value.run_status === "valid_complete" && value.macos_bundle_sha256 === value.linux_bundle_sha256) return false;
-  if (Object.values(value.repository_gates).some((gate) => (gate as JsonRecord).source_input_record_sha256 !== value.source_input_record_sha256)) return false;
-  if (!Object.hasOwn(value.repository_gates, "GATE-SOURCE-INPUT") || !sourceGateReceipt(value.repository_gates["GATE-SOURCE-INPUT"])) return false;
-  return [value.source_input_record_sha256, value.macos_bundle_sha256, value.linux_bundle_sha256, value.raw_evidence_digest, value.decision_projection_digest].every(sha256);
+  if (!matchesDescriptor(value, descriptor) || !terminalState(value) || !sha256(value.source_input_record_sha256) ||
+    !sha256(value.macos_bundle_sha256) || !sha256(value.linux_bundle_sha256) || !sha256(value.repository_gate_sha256) ||
+    !sha256(value.raw_evidence_digest) || !sha256(value.decision_projection_digest) || !Array.isArray(value.repository_gates) ||
+    value.repository_gates.length !== D9_COMMAND_PROFILE.length || !value.repository_gates.every((gate, ordinal) =>
+      fullD9Receipt(gate, ordinal, value.source_input_record_sha256 as string)) || !record(value.completeness) ||
+    !exactKeys(value.completeness, COMPLETENESS_FIELDS) || !COMPLETENESS_FIELDS.every((field) =>
+      ["pass", "fail"].includes((value.completeness as JsonRecord)[field] as string)) || !record(value.coverage) ||
+    !exactKeys(value.coverage, ["macos_rows", "linux_rows"]) || !boundedInteger(value.coverage.macos_rows, 174) ||
+    !boundedInteger(value.coverage.linux_rows, 174)) return false;
+  const invalidityReceipts = value.invalidity_receipts ?? [];
+  if (!Array.isArray(invalidityReceipts) || !invalidityReceipts.every((receipt) =>
+    record(receipt) && exactKeys(receipt, ["schema_version", "code", "subject_sha256", "summary_digest", "source_input_record_sha256"]) &&
+    receipt.schema_version === "shud.git-status-capability.invalidity-receipt.v1" && INVALIDITY_CODES.includes(receipt.code as any) &&
+    sha256(receipt.subject_sha256) && sha256(receipt.summary_digest) && receipt.source_input_record_sha256 === value.source_input_record_sha256)) return false;
+  if (value.run_status === "invalid") {
+    const state = deriveInvalidState({
+      completeness: value.completeness as Record<string, unknown>,
+      gates: value.repository_gates,
+      coverage: value.coverage as { macos_rows: number; linux_rows: number },
+      invalidity_receipts: invalidityReceipts,
+      source_input_record_sha256: value.source_input_record_sha256 as string
+    });
+    return !!state && value.first_cause === state.first_cause && exactJson(value.all_failure_codes, state.all_failure_codes);
+  }
+  return value.macos_bundle_sha256 !== value.linux_bundle_sha256 && invalidityReceipts.length === 0 &&
+    COMPLETENESS_FIELDS.every((field) => (value.completeness as JsonRecord)[field] === "pass") &&
+    (value.coverage as JsonRecord).macos_rows === 174 && (value.coverage as JsonRecord).linux_rows === 174 &&
+    value.repository_gates.every((gate) => (gate as JsonRecord).exit_code === 0);
 }
 
 export function validateDecision(value: unknown): boolean {

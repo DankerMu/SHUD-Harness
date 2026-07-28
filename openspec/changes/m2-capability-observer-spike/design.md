@@ -389,6 +389,33 @@ bytes. `Lane`, `Platform`, and `Source input` must equal the containing evidence
 path; status is a closed lane-specific token. This positive grammar is the
 mechanical meaning of non-executable Markdown; source-language blacklists are
 not an admissible substitute.
+The path digest is the live `source_input_digest_v1`, while
+`source_input_record_sha256` is the SHA-256 of the exact source-record bytes;
+they are distinct identities. The source-lane record's internal live digest
+must equal its path. Every other record/reference/summary binds the latter SHA,
+and the final-lane source-record copy is byte-identical to the source-lane
+record. Evidence validation is collection-aware: a record moved across digest,
+lane, or platform is invalid even if its local schema and self-digests remain
+valid.
+
+Task 1.1 freezes the complete later-output vocabulary now. Direct JSON includes
+`source-input-record.v1` in source and as an unchanged final copy,
+`platform-bundle.v1` per platform, `repository-gate.v1` in gates,
+`final-bundle.v1` and `decision.v1` in final, plus final-only
+`publication-assertion.v1` and `publication-governance-recheck.v1`. The last two
+are audit metadata excluded from both evidence digests. A strict immutable
+reference carries lane, platform, source-record SHA, artifact SHA/media/length,
+retention and offline retrieval; it cannot replace the source record that
+establishes the collection context.
+
+Logical aggregate ceilings are inclusive: source 128 KiB, gates 1 MiB, each
+platform/digest subtree 8 MiB, and final/digest 20 MiB. Inline content charges
+its bytes; a reference charges the greater of its metadata bytes and declared
+artifact bytes. Duplicate artifact identities within one aggregate are invalid,
+and mixed inline/reference charges sum. Worktree and Git-index validation use
+the same accounting. Individual limits are: canonical Markdown and immutable
+reference 4 KiB, repository gate 256 KiB, and each publication receipt 64 KiB;
+each also freezes independent depth/node/object-member ceilings in the contract.
 Only after D10 candidate expectation and governance succeed may 5.4 atomically
 publish `evidence/final/<digest>/**`; no evidence write is observer/launcher
 authority or may touch another protected or production path.
@@ -420,9 +447,23 @@ digest beside, not inside, that hashed object:
   tripwire verdicts, protection-set equality, cleanup verdict, declared limit,
   and normalized boundary class (`below|exact|exceeded`);
 - every repository regression/isolation/reproducibility command ID, argv/version,
-  exit verdict, bounded summary digest, and source-input-record digest;
+  exit verdict, bounded summary digest, and source-input-record digest. The raw
+  `repository-gate.v1` owns all 17 full receipts in D9 order. The normalized
+  decision stores exactly 17 fixed-order compact scalars carrying the ID
+  ordinal, frozen normalized-argv-template digest, tool-version identity,
+  pass/fail token and summary digest; its one global source-record SHA supplies
+  the repeated binding;
 - `run_status`, and only for `valid_complete`, the terminal decision, ordered
   first cause, and sorted all-failure codes.
+
+Completeness and D9 verdicts are truthful `pass|fail`, not unconditional pass.
+`valid_complete` requires every one to pass. `invalid` has no terminal decision
+and deterministically derives its first/all failure codes from failed
+completeness fields, failed D9 receipts, incomplete platform/row coverage, or a
+strict content-addressed source/platform/governance/publication invalidity
+receipt; an arbitrary failure label with otherwise complete all-pass evidence is
+invalid. Compact D9 encoding MUST keep the all-348-row-failure decision within
+the unchanged 128 KiB ceiling using the exact 17 command templates.
 
 It deliberately excludes timestamps, CI run/job IDs and URLs, host/user names,
 temporary roots, process IDs, numeric descriptor assignments, unordered-map

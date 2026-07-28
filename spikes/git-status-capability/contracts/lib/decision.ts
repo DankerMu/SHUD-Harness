@@ -1,13 +1,19 @@
-import { CATALOG_V1, CONTROL_ASSERTION_IDS, DECISION_LIMIT_TOKENS, DECISION_ROW_SEGMENTS, REJECTION_CODES } from "./frozen";
+import { createHash } from "node:crypto";
+import {
+  CATALOG_V1,
+  COMPLETENESS_FIELDS,
+  CONTROL_ASSERTION_IDS,
+  D9_COMMAND_PROFILE,
+  DECISION_LIMIT_TOKENS,
+  DECISION_ROW_SEGMENTS,
+  INVALIDITY_CODES,
+  REJECTION_CODES
+} from "./frozen";
 import { validateFailureCauseTag } from "./causal-proof";
 import { determinismProjectionToken } from "./determinism-proof";
 import { encodeDecisionRowProjectionCore } from "./row-projection";
 
 type JsonRecord = Record<string, any>;
-
-const RECEIPT_FIELDS = Object.freeze([
-  "id", "argv", "version", "exit_verdict", "summary_digest", "source_input_record_sha256"
-]);
 
 const IDENTITY_FIELDS = Object.freeze([
   "fixture_identity", "oracle_identity", "frame_identity", "runner_identity", "validator_identity", "tripwire_identity",
@@ -17,12 +23,6 @@ const IDENTITY_FIELDS = Object.freeze([
 const DIGEST_FIELDS = Object.freeze([
   "lockfile_digest", "direct_feature_digest", "macos_target_graph_digest", "linux_target_graph_digest",
   "call_ledger_digest", "sbom_digest", "license_inventory_digest"
-]);
-
-const COMPLETENESS_FIELDS = Object.freeze([
-  "lockfile_completeness_verdict", "direct_feature_completeness_verdict",
-  "macos_target_graph_completeness_verdict", "linux_target_graph_completeness_verdict",
-  "call_ledger_completeness_verdict", "sbom_completeness_verdict", "license_inventory_completeness_verdict"
 ]);
 
 const TOKEN_TO_KIND = Object.freeze({ c: "clean", d: "dirty", r: "rejected" });
@@ -62,6 +62,87 @@ function exactJson(left: unknown, right: unknown): boolean {
     return Object.keys(right).every((key) => exactJson(left[key], right[key]));
   }
   return false;
+}
+
+function digestJson(value: unknown): string {
+  const canonical = (item: any): any => Array.isArray(item) ? item.map(canonical) : record(item)
+    ? Object.fromEntries(Object.keys(item).sort((left, right) => Buffer.from(left).compare(Buffer.from(right))).map((key) => [key, canonical(item[key])]))
+    : item;
+  return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+}
+
+const COMPLETENESS_CODES = Object.freeze(Object.fromEntries(COMPLETENESS_FIELDS.map((field) => [
+  field, `SUPPLY_${field.replace("_completeness_verdict", "").toUpperCase()}_INCOMPLETE`
+])) as Record<string, string>);
+
+export type InvalidStateInput = {
+  completeness: Record<string, unknown>;
+  gates: unknown[];
+  coverage: { macos_rows: number; linux_rows: number };
+  invalidity_receipts?: unknown[];
+  source_input_record_sha256?: string;
+};
+
+function invalidityReceipt(value: unknown, sourceRecordSha?: string): value is JsonRecord {
+  return record(value) && exactKeys(value, ["schema_version", "code", "subject_sha256", "summary_digest", "source_input_record_sha256"]) &&
+    value.schema_version === "shud.git-status-capability.invalidity-receipt.v1" &&
+    INVALIDITY_CODES.includes(value.code as any) && sha256(value.subject_sha256) && sha256(value.summary_digest) &&
+    sha256(value.source_input_record_sha256) && (!sourceRecordSha || value.source_input_record_sha256 === sourceRecordSha);
+}
+
+function gateFailureId(value: unknown, ordinal: number): string | null {
+  if (typeof value === "string") return decodeDecisionGateProjection(value, ordinal)?.verdict === "fail"
+    ? D9_COMMAND_PROFILE[ordinal]!.id : null;
+  if (!record(value)) return null;
+  return value.id === D9_COMMAND_PROFILE[ordinal]?.id &&
+    ((value.exit_code !== undefined && value.exit_code !== 0) || value.exit_verdict === "fail")
+    ? value.id as string : null;
+}
+
+export function deriveInvalidState(input: InvalidStateInput): { first_cause: string; all_failure_codes: string[] } | null {
+  if (!record(input.completeness) || !exactKeys(input.completeness, COMPLETENESS_FIELDS) ||
+    !COMPLETENESS_FIELDS.every((field) => ["pass", "fail"].includes(input.completeness[field] as string)) ||
+    !Array.isArray(input.gates) || input.gates.length !== D9_COMMAND_PROFILE.length ||
+    !record(input.coverage) || !exactKeys(input.coverage, ["macos_rows", "linux_rows"]) ||
+    !Number.isSafeInteger(input.coverage.macos_rows) || !Number.isSafeInteger(input.coverage.linux_rows) ||
+    input.coverage.macos_rows < 0 || input.coverage.macos_rows > 174 || input.coverage.linux_rows < 0 || input.coverage.linux_rows > 174 ||
+    !Array.isArray(input.invalidity_receipts ?? []) || !(input.invalidity_receipts ?? []).every((receipt) => invalidityReceipt(receipt, input.source_input_record_sha256))) return null;
+  const precedence: string[] = [];
+  for (const code of INVALIDITY_CODES) if ((input.invalidity_receipts ?? []).some((receipt) => (receipt as JsonRecord).code === code)) precedence.push(code);
+  for (const field of COMPLETENESS_FIELDS) if (input.completeness[field] === "fail") precedence.push(COMPLETENESS_CODES[field]!);
+  for (let index = 0; index < D9_COMMAND_PROFILE.length; index += 1) {
+    const id = gateFailureId(input.gates[index], index);
+    if (id) precedence.push(`D9_${id.replaceAll("-", "_")}_FAILED`);
+  }
+  if (input.coverage.macos_rows !== 174) precedence.push("COVERAGE_MACOS_INCOMPLETE");
+  if (input.coverage.linux_rows !== 174) precedence.push("COVERAGE_LINUX_INCOMPLETE");
+  if (precedence.length === 0) return null;
+  return { first_cause: precedence[0]!, all_failure_codes: [...new Set(precedence)].sort() };
+}
+
+type DecodedGate = { verdict: "pass" | "fail"; summaryDigest: string };
+
+export function encodeDecisionGateProjection(receipt: JsonRecord, ordinal: number): string {
+  const profile = D9_COMMAND_PROFILE[ordinal];
+  if (!profile || !record(receipt) || !exactKeys(receipt, ["id", "argv", "version", "exit_code", "stdout_summary", "stderr_summary", "summary_digest", "source_input_record_sha256"]) ||
+    receipt.id !== profile.id || !exactJson(receipt.argv, profile.argv) ||
+    receipt.version !== profile.version || !Number.isSafeInteger(receipt.exit_code) || (receipt.exit_code as number) < 0 ||
+    typeof receipt.stdout_summary !== "string" || typeof receipt.stderr_summary !== "string" ||
+    Buffer.byteLength(receipt.stdout_summary) > 4096 || Buffer.byteLength(receipt.stderr_summary) > 4096 ||
+    receipt.summary_digest !== digestJson({ stdout_summary: receipt.stdout_summary, stderr_summary: receipt.stderr_summary }) ||
+    !sha256(receipt.source_input_record_sha256)) throw new Error("invalid D9 receipt");
+  return [String(ordinal).padStart(2, "0"), digestJson(profile.argv), profile.version,
+    receipt.exit_code === 0 ? "p" : "f", receipt.summary_digest].join("\0");
+}
+
+export function decodeDecisionGateProjection(value: unknown, ordinal: number): DecodedGate | null {
+  if (typeof value !== "string") return null;
+  const profile = D9_COMMAND_PROFILE[ordinal];
+  const fields = value.split("\0");
+  if (!profile || fields.length !== 5 || fields[0] !== String(ordinal).padStart(2, "0") ||
+    fields[1] !== digestJson(profile.argv) || fields[2] !== profile.version || !["p", "f"].includes(fields[3]!) ||
+    !sha256(fields[4])) return null;
+  return { verdict: fields[3] === "p" ? "pass" : "fail", summaryDigest: fields[4]! };
 }
 
 function decodeOutcome(kindToken: string, code: string): JsonRecord | null {
@@ -134,25 +215,39 @@ export function encodeDecisionRowProjection(row: JsonRecord): string {
   return encodeDecisionRowProjectionCore(row, determinismToken);
 }
 
-function repositoryReceipt(value: unknown, sourceInputDigest: string): value is JsonRecord {
-  return record(value) && exactKeys(value, RECEIPT_FIELDS) && nonEmptyString(value.id) &&
-    Array.isArray(value.argv) && value.argv.length > 0 && value.argv.every(nonEmptyString) && nonEmptyString(value.version) &&
-    value.exit_verdict === "pass" && sha256(value.summary_digest) && value.source_input_record_sha256 === sourceInputDigest;
-}
-
 export function validateDecisionProjection(value: JsonRecord): boolean {
   if (!gitObjectId(value.base_sha) || !IDENTITY_FIELDS.every((field) => sha256(value[field])) ||
-    !DIGEST_FIELDS.every((field) => sha256(value[field])) || !COMPLETENESS_FIELDS.every((field) => value[field] === "pass") ||
+    !DIGEST_FIELDS.every((field) => sha256(value[field])) || !COMPLETENESS_FIELDS.every((field) => ["pass", "fail"].includes(value[field] as string)) ||
     value.macos_target_identity !== "aarch64-apple-darwin" || value.linux_target_identity !== "x86_64-unknown-linux-gnu" ||
     !sha256(value.source_input_record_sha256) || !Array.isArray(value.platforms) || !exactJson(value.platforms, ["macos", "linux"]) ||
-    !Array.isArray(value.rows) || !Array.isArray(value.gates) || value.gates.length === 0 ||
-    !value.gates.every((receipt) => repositoryReceipt(receipt, value.source_input_record_sha256))) return false;
+    !Array.isArray(value.rows) || !Array.isArray(value.gates) || value.gates.length !== D9_COMMAND_PROFILE.length ||
+    !value.gates.every((gate, ordinal) => decodeDecisionGateProjection(gate, ordinal) !== null)) return false;
   const rows = value.rows.map(decodeDecisionRow);
   if (rows.some((row) => row === null)) return false;
-  const receiptIds = value.gates.map((receipt) => (receipt as JsonRecord).id);
-  if (new Set(receiptIds).size !== receiptIds.length) return false;
-  if (value.run_status !== "valid_complete") return true;
-  const completeRows = rows as DecodedRow[];
+  const decodedRows = rows as DecodedRow[];
+  if (new Set(decodedRows.map((row) => `${row.platform}/${row.rowId}`)).size !== decodedRows.length ||
+    new Set(decodedRows.map((row) => row.observationId)).size !== decodedRows.length ||
+    new Set(decodedRows.map((row) => row.generationPayloadDigest)).size !== decodedRows.length ||
+    new Set(decodedRows.map((row) => row.frameDigest)).size !== decodedRows.length) return false;
+  const invalidityReceipts = value.invalidity_receipts ?? [];
+  if (!Array.isArray(invalidityReceipts) || !invalidityReceipts.every((receipt) => invalidityReceipt(receipt, value.source_input_record_sha256))) return false;
+  if (value.run_status === "invalid") {
+    const state = deriveInvalidState({
+      completeness: Object.fromEntries(COMPLETENESS_FIELDS.map((field) => [field, value[field]])),
+      gates: value.gates,
+      coverage: {
+        macos_rows: decodedRows.filter((row) => row.platform === "macos").length,
+        linux_rows: decodedRows.filter((row) => row.platform === "linux").length
+      },
+      invalidity_receipts: invalidityReceipts,
+      source_input_record_sha256: value.source_input_record_sha256
+    });
+    return !!state && value.first_cause === state.first_cause && exactJson(value.all_failure_codes, state.all_failure_codes);
+  }
+  if (value.run_status !== "valid_complete" || invalidityReceipts.length !== 0 ||
+    !COMPLETENESS_FIELDS.every((field) => value[field] === "pass") ||
+    !value.gates.every((gate, ordinal) => decodeDecisionGateProjection(gate, ordinal)?.verdict === "pass")) return false;
+  const completeRows = decodedRows;
   if (completeRows.length !== 348 || new Set(completeRows.map((row) => `${row.platform}/${row.rowId}`)).size !== 348 ||
     new Set(completeRows.map((row) => row.observationId)).size !== 348 ||
     new Set(completeRows.map((row) => row.generationPayloadDigest)).size !== 348 ||
