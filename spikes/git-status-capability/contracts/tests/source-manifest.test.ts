@@ -254,6 +254,31 @@ function publicationGovernance(gate: JsonRecord, recordSha = sourceRecordSha()):
   };
 }
 
+function synchronizeFinalBundle(finalBundle: JsonRecord, decision: JsonRecord, macos?: JsonRecord, linux?: JsonRecord, gate?: JsonRecord): void {
+  if (macos) finalBundle.macos_bundle_sha256 = createHash("sha256").update(`${JSON.stringify(macos)}\n`).digest("hex");
+  if (linux) finalBundle.linux_bundle_sha256 = createHash("sha256").update(`${JSON.stringify(linux)}\n`).digest("hex");
+  if (gate) {
+    finalBundle.repository_gate_sha256 = createHash("sha256").update(`${JSON.stringify(gate)}\n`).digest("hex");
+    finalBundle.repository_gates = clone(gate.gates);
+  }
+  finalBundle.decision_projection_digest = canonicalJsonDigest(decision);
+}
+
+async function installPublicationCompanions(root: string, recordSha: string): Promise<{ gate: JsonRecord; decision: JsonRecord }> {
+  const macos = bindSourceRecord(clone(generic.platform_bundle), recordSha);
+  const linux = bindSourceRecord(clone(generic.linux_platform_bundle), recordSha);
+  const gate = repositoryGate(recordSha);
+  const decision = bindSourceRecord(clone(generic.decision), recordSha);
+  const finalBundle = bindSourceRecord(clone(generic.final_bundle), recordSha);
+  synchronizeFinalBundle(finalBundle, decision, macos, linux, gate);
+  await writeEvidence(root, `platform/${digest}/macos/platform-bundle.json`, macos);
+  await writeEvidence(root, `platform/${digest}/linux/platform-bundle.json`, linux);
+  await writeEvidence(root, `gates/${digest}/repository-gate.json`, gate);
+  await writeEvidence(root, `final/${digest}/final-bundle.json`, finalBundle);
+  await writeEvidence(root, `final/${digest}/decision.json`, decision);
+  return { gate, decision };
+}
+
 function invalidDecisionFrom(base: JsonRecord, codes: string[]): JsonRecord {
   const decision = clone(base);
   decision.run_status = "invalid";
@@ -379,14 +404,19 @@ describe("source-input-v1 current-set authority", () => {
     const digest = "01".repeat(32);
     const record = sourceRecordForDigest(digest);
     const recordSha = sha256Record(record);
+    const validMacos = bindSourceRecord(clone(generic.platform_bundle), recordSha);
+    const validLinux = bindSourceRecord(clone(generic.linux_platform_bundle), recordSha);
+    const validDecision = bindSourceRecord(clone(generic.decision), recordSha);
+    const validFinal = bindSourceRecord(clone(generic.final_bundle), recordSha);
+    synchronizeFinalBundle(validFinal, validDecision, validMacos, validLinux);
     const validRecords: Array<[string, unknown | string]> = [
       [`source/${digest}/source-input-record.json`, record],
-      [`platform/${digest}/macos/platform-bundle.json`, bindSourceRecord(generic.platform_bundle, recordSha)],
-      [`platform/${digest}/linux/platform-bundle.json`, bindSourceRecord(generic.linux_platform_bundle, recordSha)],
+      [`platform/${digest}/macos/platform-bundle.json`, validMacos],
+      [`platform/${digest}/linux/platform-bundle.json`, validLinux],
       [`gates/${digest}/receipt.json`, immutableReference("gates", "none", recordSha, "04")],
       [`final/${digest}/source-input-record.json`, record],
-      [`final/${digest}/final-bundle.json`, bindSourceRecord(generic.final_bundle, recordSha)],
-      [`final/${digest}/decision.json`, bindSourceRecord(generic.decision, recordSha)],
+      [`final/${digest}/final-bundle.json`, validFinal],
+      [`final/${digest}/decision.json`, validDecision],
       [`final/${digest}/summary.md`, canonicalMarkdown("final", digest, "none", "accepted", recordSha)]
     ];
     const validRoot = await temporaryRepository();
@@ -460,7 +490,7 @@ describe("source-input-v1 current-set authority", () => {
     await installSourceRecord(positiveRoot, digest);
     for (const [path, content] of positives) await writeEvidence(positiveRoot, path, content);
     const candidates = await enumerateSourceCandidates(positiveRoot);
-    expect(candidates).toHaveLength(39);
+    expect(candidates).toHaveLength(40);
     expect(spawnSync("git", ["init", "-q"], { cwd: positiveRoot }).status).toBe(0);
     expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: positiveRoot }).status).toBe(0);
     expect(() => validateGitCandidateSet(positiveRoot, candidates), "tracked-positive").not.toThrow();
@@ -552,6 +582,15 @@ describe("source-input-v1 current-set authority", () => {
     for (const [kind, path, schemaVersion, limits, valid] of cases) {
       const root = await temporaryRepository();
       if (kind !== "source-input-record") await installSourceRecord(root, digest);
+      if (kind === "publication-assertion") {
+        const companions = await installPublicationCompanions(root, recordSha);
+        Object.assign(valid, publicationAssertion(companions.decision, recordSha));
+      }
+      if (kind === "publication-governance-recheck") {
+        const gate = repositoryGate(recordSha);
+        await writeEvidence(root, `gates/${digest}/repository-gate.json`, gate);
+        Object.assign(valid, publicationGovernance(gate, recordSha));
+      }
       await writeEvidence(root, path, paddedJson(valid, limits.bytes));
       expect(await enumerateSourceCandidates(root), `${kind}:bytes:exact`).toBeInstanceOf(Array);
       await writeEvidence(root, path, paddedJson(valid, limits.bytes + 1));
@@ -732,6 +771,8 @@ describe("Round 4 terminal contract model", () => {
     await writeEvidence(root, `final/${digest}/source-input-record.json`, sourceRecordBytes());
     const finalBundle = bindSourceRecord(clone(generic.final_bundle), recordSha);
     const decision = bindSourceRecord(clone(generic.decision), recordSha);
+    synchronizeFinalBundle(finalBundle, decision, bindSourceRecord(clone(generic.platform_bundle), recordSha),
+      bindSourceRecord(clone(generic.linux_platform_bundle), recordSha), gate);
     await writeEvidence(root, `final/${digest}/final-bundle.json`, finalBundle);
     await writeEvidence(root, `final/${digest}/decision.json`, decision);
     await writeEvidence(root, `final/${digest}/publication-assertion.json`, publicationAssertion(decision, recordSha));
