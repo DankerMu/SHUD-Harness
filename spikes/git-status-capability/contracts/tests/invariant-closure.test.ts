@@ -16,6 +16,7 @@ import {
   validateSourceInputRecord,
   validateSupplyFiles
 } from "../lib/schema";
+import { materialFrame } from "./frame-fixture";
 
 const contractRoot = join(import.meta.dir, "..");
 const repositoryRoot = join(contractRoot, "..", "..", "..");
@@ -85,23 +86,7 @@ function validSourceRecord(): Record<string, unknown> {
 }
 
 function validFrame(): Record<string, unknown> {
-  return {
-    schema_version: "shud.git-status-capability.frame.v1", catalog_version: 1, row_id: "BAS-001",
-    observation_id: shaA, checkout_capability_identity: shaB, git_state_generation_digest: shaA,
-    body_length: 768, body_digest: shaA, checksum: shaB,
-    index: {
-      format_version: 4, byte_length: 256, digest: shaA, entry_count: 2,
-      extensions: [{ signature: "TREE", byte_length: 32, digest: shaB }], shared_index: { state: "absent" }
-    },
-    head_tree: { state: "present", object_id: "01".repeat(20) },
-    effective_config: { digest: shaA, entries: [{ scope: "local", key: "status.showUntrackedFiles", value: "all", origin: ".git/config" }] },
-    exclude_state: { digest: shaB, sources: [{ path: ".git/info/exclude", digest: shaA }] },
-    attribute_state: { digest: shaA, sources: [{ path: ".gitattributes", digest: shaB }] },
-    nested_state: [{
-      path: "nested", relation: "direct", identity: shaA, gitlink_path: "nested", gitlink_stage: 0,
-      checkout_state: "initialized", config_digest: shaA, index_digest: shaB, head_tree_digest: shaA
-    }]
-  };
+  return materialFrame();
 }
 
 describe("round-1 invariant closure", () => {
@@ -150,7 +135,7 @@ describe("round-1 invariant closure", () => {
         [false, (frame) => { frame.index.entry_count = "2"; }],
         [false, (frame) => { frame.head_tree = "01".repeat(20); }],
         [false, (frame) => { frame.effective_config.entries[0].origin = "/absolute/config"; }],
-        [false, (frame) => { frame.nested_state[0].gitlink_stage = 1; }]
+        [false, (frame) => { frame.nested_state[0].gitlink.stage = 5; }]
       ];
       for (let index = 0; index < cases.length; index += 1) {
         const [expectedValid, mutate] = cases[index]!;
