@@ -224,6 +224,7 @@ function measuredResource(row: any, limit: string, unit: string, value: number):
   const recipeDigest = canonicalDigest(recipe);
   const locatorCore = {
     kind: resourceLimits.findIndex(([candidate]) => candidate === limit) < 8 ? "supplied-frame-locator-v1" : "launcher-receipt-v1",
+    platform: row.platform,
     row_id: row.row_id, observation_id: row.observation_id, supplied_input_digest: row.frame_digest,
     recipe_digest: recipeDigest,
     source: resourceLimits.findIndex(([candidate]) => candidate === limit) < 8 ? "canonical-supplied-frame" : "launcher-counter"

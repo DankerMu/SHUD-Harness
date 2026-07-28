@@ -297,43 +297,26 @@ function evidenceJsonRecord(value: unknown, location: EvidenceLocation): boolean
   return false;
 }
 
-function markdownEvidence(text: string): boolean {
-  const sourceDeclaration = (line: string): boolean => {
-    const candidate = line.replace(/^\s*(?:[$>]\s+)?/, "");
-    return /^import(?:\s*\(|\.meta\b|\s+(?:type\b|["'{*]|[A-Za-z_$][\w$]*(?:\s*,|\s+from\b|\s*=\s*require\b)))/.test(candidate) ||
-      /^export\s+(?:default\b|async\s+function\b|(?:const|let|var|function|class|interface|type|enum|namespace)\b|[{:*])/.test(candidate) ||
-      /^(?:(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=|(?:async\s+)?function\s+[A-Za-z_$][\w$]*\s*\(|class\s+[A-Za-z_$][\w$]*\s*(?:\{|extends\b)|interface\s+[A-Za-z_$][\w$]*\s*\{|type\s+[A-Za-z_$][\w$]*\s*=|enum\s+[A-Za-z_$][\w$]*\s*\{|namespace\s+[A-Za-z_$][\w$]*\s*\{|(?:pub\s+)?fn\s+[A-Za-z_][\w]*\s*\(|def\s+[A-Za-z_][\w]*\s*\(|#include\s*[<"])/.test(candidate);
-  };
-  const lines = text.split(/\r?\n/);
-  let fence: "text" | "json" | "console" | null = null;
-  let fenced: string[] = [];
-  for (const line of lines) {
-    const marker = /^\s*```([A-Za-z0-9_-]*)\s*$/.exec(line);
-    if (marker) {
-      if (fence === null) {
-        const language = marker[1]!.trim();
-        if (!["text", "json", "console"].includes(language)) return false;
-        fence = language as typeof fence;
-        fenced = [];
-      } else {
-        if (marker[1]!.trim() !== "") return false;
-        if (fence === "json") {
-          try { JSON.parse(fenced.join("\n")); } catch { return false; }
-        }
-        fence = null;
-        fenced = [];
-      }
-      continue;
-    }
-    if (/^\s*(?:`{3,}|~{3,})/.test(line)) return false;
-    if (fence !== null) {
-      if (fence !== "json" && sourceDeclaration(line)) return false;
-      fenced.push(line);
-      continue;
-    }
-    if (sourceDeclaration(line)) return false;
-  }
-  return fence === null;
+const MARKDOWN_EVIDENCE_STATUSES = Object.freeze({
+  source: new Set(["source-input-recorded"]),
+  platform: new Set(["platform-observation-recorded"]),
+  gates: new Set(["repository-gates-passed"]),
+  final: new Set(["accepted", "rejected"])
+});
+
+function markdownEvidence(text: string, location: EvidenceLocation): boolean {
+  if (text.includes("\r")) return false;
+  const lines = text.split("\n");
+  if (lines.length !== 8 || lines[7] !== "") return false;
+  if (lines[0] !== "# SHUD Git Status Capability Evidence" ||
+    lines[1] !== "Schema: shud.git-status-capability.markdown-evidence.v1" ||
+    lines[2] !== `Lane: ${location.lane}` ||
+    lines[3] !== `Platform: ${location.platform ?? "none"}` ||
+    lines[4] !== `Source input: ${location.digest}` ||
+    !lines[5]!.startsWith("Artifact SHA-256: ") ||
+    !sha256(lines[5]!.slice("Artifact SHA-256: ".length)) ||
+    !lines[6]!.startsWith("Status: ")) return false;
+  return MARKDOWN_EVIDENCE_STATUSES[location.lane].has(lines[6]!.slice("Status: ".length));
 }
 
 const EVIDENCE_JSON_LIMITS = Object.freeze({
@@ -355,7 +338,7 @@ function validateEvidenceContent(path: string, bytes: Uint8Array, location: Evid
     ) as JsonRecord;
     const limit = EVIDENCE_JSON_LIMITS[discovered.schema_version as keyof typeof EVIDENCE_JSON_LIMITS];
     ingestJsonAgainstLimits(bytes, limit, (value) => evidenceJsonRecord(value, location));
-  } else if (!markdownEvidence(text)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  } else if (!markdownEvidence(text, location)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
 }
 
 async function validateEvidenceSubtree(root: string, prefix: string): Promise<void> {
@@ -1007,15 +990,17 @@ function actualResourceRecord(value: unknown, row?: JsonRecord): boolean {
     stimulus.recipe.limit !== limit || stimulus.recipe.unit !== unit || !Number.isSafeInteger(stimulus.recipe.value) ||
     (stimulus.recipe.value as number) < 0 || stimulus.recipe_digest !== canonicalDigest(stimulus.recipe) || !record(stimulus.locator)) return false;
   const locator = stimulus.locator;
-  if (!exactKeys(locator, ["kind", "row_id", "observation_id", "supplied_input_digest", "recipe_digest", "source", "receipt_digest"]) ||
+  if (!exactKeys(locator, ["kind", "platform", "row_id", "observation_id", "supplied_input_digest", "recipe_digest", "source", "receipt_digest"]) ||
     !["supplied-frame-locator-v1", "launcher-receipt-v1"].includes(locator.kind as string) || !sha256(locator.observation_id) ||
-    !sha256(locator.supplied_input_digest) || locator.recipe_digest !== stimulus.recipe_digest || !sha256(locator.receipt_digest)) return false;
+    !["macos", "linux"].includes(locator.platform as string) || !sha256(locator.supplied_input_digest) ||
+    locator.recipe_digest !== stimulus.recipe_digest || !sha256(locator.receipt_digest)) return false;
   const locatorCore = Object.fromEntries(Object.entries(locator).filter(([key]) => key !== "receipt_digest"));
   if (locator.receipt_digest !== canonicalDigest(locatorCore)) return false;
   const frameDerived = limitIndex < 8;
   if ((frameDerived ? locator.kind !== "supplied-frame-locator-v1" || locator.source !== "canonical-supplied-frame" :
     locator.kind !== "launcher-receipt-v1" || locator.source !== "launcher-counter")) return false;
-  if (row && (locator.row_id !== row.row_id || locator.observation_id !== row.observation_id || locator.supplied_input_digest !== row.frame_digest)) return false;
+  if (row && (locator.platform !== row.platform || locator.row_id !== row.row_id || locator.observation_id !== row.observation_id ||
+    locator.supplied_input_digest !== row.frame_digest)) return false;
   if (!exactKeys(measurement, ["schema_version", "limit", "unit", "value", "stimulus_receipt_digest"]) ||
     measurement.schema_version !== "shud.git-status-capability.limit-measurement.v1" || measurement.limit !== limit ||
     measurement.unit !== unit || measurement.value !== stimulus.recipe.value || measurement.stimulus_receipt_digest !== locator.receipt_digest) return false;

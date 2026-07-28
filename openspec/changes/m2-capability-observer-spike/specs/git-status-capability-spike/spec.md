@@ -298,6 +298,12 @@ this change's `.openspec.yaml`, proposal, design, tasks, and specs. Only Git mod
 excluded and admits only bounded non-executable `source|platform|gates|final/<digest>/**`
 JSON/Markdown or immutable content-addressed references. The source
 commit SHALL be recorded beside the digest but MUST NOT be hashed into it.
+Admitted Markdown SHALL use only the exact canonical
+`shud.git-status-capability.markdown-evidence.v1` positive grammar defined by
+`design.md`: fixed title and six fixed scalar fields, path-bound lane/platform/
+source digest, closed lane-specific status, terminal LF, and no additional
+prose, fence, comment, declaration, import, source, or encoded payload. A
+source-language blacklist does not satisfy this requirement.
 
 Task 1.1 SHALL generate the initial manifest from only the covered files present
 at its HEAD and SHALL freeze the sync/check algorithm; absent future paths are
@@ -315,6 +321,10 @@ only excluded evidence lanes and MUST NOT update the manifest.
 #### Scenario: A post-freeze slice persists evidence
 - **WHEN** task 5.2, 5.3, or 5.4 commits platform, gate, or terminal evidence after task 5.1
 - **THEN** it uses only its fixed excluded lane, adds no code/contract/executable/symlink/import, leaves the manifest and source digest unchanged, and binds SHA-256 of the immutable source record
+
+#### Scenario: A Markdown evidence summary is persisted
+- **WHEN** an evidence lane contains a `.md` summary
+- **THEN** the checker accepts it only when every byte matches the canonical positive grammar and its lane, platform, and source-input digest equal the containing path; free-form prose, fences, source declarations, encoded payloads, missing fields, extra fields, and cross-lane or cross-platform reuse fail closed
 
 Both `PLATFORM-SOURCE-INPUT` and `GATE-SOURCE-INPUT` SHALL run the independently
 implemented `source-input-primary-v1` and `source-input-witness-v1` against the

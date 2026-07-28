@@ -13,6 +13,40 @@ const repositoryRoot = join(import.meta.dir, "..", "..", "..", "..");
 const manifestRelative = "spikes/git-status-capability/contracts/source-input-v1.paths";
 const temporaryRoots: string[] = [];
 const generic = JSON.parse(await readFile(join(import.meta.dir, "../fixtures/valid/generic.json"), "utf8"));
+const checkerPath = join(import.meta.dir, "../check.ts");
+
+type EvidenceLane = "source" | "platform" | "gates" | "final";
+
+const evidenceStatuses: Record<EvidenceLane, readonly string[]> = {
+  source: ["source-input-recorded"],
+  platform: ["platform-observation-recorded"],
+  gates: ["repository-gates-passed"],
+  final: ["accepted", "rejected"]
+};
+
+function canonicalMarkdown(
+  lane: EvidenceLane,
+  digest: string,
+  platform: "macos" | "linux" | "none" = "none",
+  status = evidenceStatuses[lane][0]!
+): string {
+  return [
+    "# SHUD Git Status Capability Evidence",
+    "Schema: shud.git-status-capability.markdown-evidence.v1",
+    `Lane: ${lane}`,
+    `Platform: ${platform}`,
+    `Source input: ${digest}`,
+    `Artifact SHA-256: ${"a5".repeat(32)}`,
+    `Status: ${status}`,
+    ""
+  ].join("\n");
+}
+
+function publicCurrentCheck(root: string): ReturnType<typeof spawnSync> {
+  return spawnSync(process.execPath, [
+    checkerPath, "--repository-root", root, "--manifest", manifestRelative, "--check-current"
+  ], { cwd: root, encoding: "utf8" });
+}
 
 function immutableReference(seed = "03"): Record<string, unknown> {
   const sha256 = seed.repeat(32);
@@ -34,6 +68,17 @@ function paddedJson(value: unknown, bytes: number): Buffer {
   const serialized = Buffer.from(JSON.stringify(value));
   if (serialized.length > bytes) throw new Error("fixture exceeds requested byte size");
   return Buffer.concat([serialized, Buffer.alloc(bytes - serialized.length, 0x20)]);
+}
+
+function compactInvalidPlatformBundle(platform: "macos" | "linux"): Record<string, unknown> {
+  const bundle = structuredClone(platform === "macos" ? generic.platform_bundle : generic.linux_platform_bundle);
+  bundle.run_status = "invalid";
+  bundle.rows = [];
+  bundle.protection_set = [];
+  bundle.raw_command_manifest = [];
+  bundle.first_cause = "SYNTHETIC_INVALID_BUNDLE";
+  bundle.all_failure_codes = ["SYNTHETIC_INVALID_BUNDLE"];
+  return bundle;
 }
 
 function depthBoundaryJson(schemaVersion: string, depth: number): string {
@@ -155,7 +200,8 @@ describe("source-input-v1 current-set authority", () => {
     const before = await enumerateSourceCandidates(root);
     const digest = "01".repeat(32);
     await mkdir(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}/macos`), { recursive: true });
-    await writeFile(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}/macos/result.md`), "# bounded evidence\n");
+    await writeFile(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}/macos/result.md`),
+      canonicalMarkdown("platform", digest, "macos"));
     expect(await enumerateSourceCandidates(root)).toEqual(before);
     await mkdir(join(root, ".github/workflows"), { recursive: true });
     await writeFile(join(root, ".github/workflows/git-status-capability-spike.yml"), "name: spike\n");
@@ -175,7 +221,7 @@ describe("source-input-v1 current-set authority", () => {
       [`gates/${digest}/receipt.json`, immutableReference("04")],
       [`final/${digest}/final.json`, generic.final_bundle],
       [`final/${digest}/decision.json`, generic.decision],
-      [`final/${digest}/summary.md`, "# bounded evidence\n"]
+      [`final/${digest}/summary.md`, canonicalMarkdown("final", digest, "none", "accepted")]
     ];
     const validRoot = await temporaryRepository();
     for (const [path, value] of validRecords) {
@@ -228,60 +274,89 @@ describe("source-input-v1 current-set authority", () => {
     await writeFile(stagedPath, "import hidden from 'covered-source';\n");
     expect(spawnSync("git", ["init", "-q"], { cwd: stagedRoot }).status).toBe(0);
     expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: stagedRoot }).status).toBe(0);
-    await writeFile(stagedPath, "# legal worktree evidence\n");
+    await writeFile(stagedPath, canonicalMarkdown("gates", digest));
     const stagedCandidates = await enumerateSourceCandidates(stagedRoot);
     expect(() => validateGitCandidateSet(stagedRoot, stagedCandidates), "staged-invalid/worktree-legal").toThrow(ContractError);
   });
 
-  test("Markdown evidence admits bounded prose and text/json/console fences but rejects executable declarations", async () => {
+  test("Markdown evidence accepts only the canonical path-bound positive grammar", async () => {
     const digest = "05".repeat(32);
-    const positive = [
-      "Import results are summarized below.\nExport notes remain prose.\n",
-      "```text\nbounded observation\n```\n",
-      "```json\n{\"status\":\"ok\",\"count\":1}\n```\n",
-      "```console\ncheck: pass\n```\n"
-    ].join("\n");
-    for (const tracked of [false, true]) {
+    const positives = [
+      [`source/${digest}/summary.md`, canonicalMarkdown("source", digest)],
+      [`platform/${digest}/macos/summary.md`, canonicalMarkdown("platform", digest, "macos")],
+      [`platform/${digest}/linux/summary.md`, canonicalMarkdown("platform", digest, "linux")],
+      [`gates/${digest}/summary.md`, canonicalMarkdown("gates", digest)],
+      [`final/${digest}/accepted.md`, canonicalMarkdown("final", digest, "none", "accepted")],
+      [`final/${digest}/rejected.md`, canonicalMarkdown("final", digest, "none", "rejected")]
+    ] as const;
+    const positiveRoot = await temporaryRepository();
+    for (const [path, content] of positives) await writeEvidence(positiveRoot, path, content);
+    const candidates = await enumerateSourceCandidates(positiveRoot);
+    expect(candidates).toHaveLength(39);
+    expect(spawnSync("git", ["init", "-q"], { cwd: positiveRoot }).status).toBe(0);
+    expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: positiveRoot }).status).toBe(0);
+    expect(() => validateGitCandidateSet(positiveRoot, candidates), "tracked-positive").not.toThrow();
+    const publicPositive = publicCurrentCheck(positiveRoot);
+    expect(publicPositive.status, publicPositive.stderr).toBe(0);
+
+    const canonical = canonicalMarkdown("platform", digest, "macos");
+    const invalidGrammar = [
+      ["free-prose", "bounded observation\n"],
+      ["fence", "```json\n{\"status\":\"ok\"}\n```\n"],
+      ["missing-field", canonical.replace(/^Artifact SHA-256:.*\n/m, "")],
+      ["extra-field", canonical.replace(/Status:/, "Comment: hidden\nStatus:")],
+      ["reordered-field", canonical.replace(/Lane: platform\nPlatform: macos/, "Platform: macos\nLane: platform")],
+      ["no-terminal-lf", canonical.slice(0, -1)],
+      ["extra-byte", `${canonical}\n`],
+      ["wrong-title", canonical.replace("# SHUD Git Status Capability Evidence", "# Evidence")],
+      ["wrong-schema", canonical.replace("markdown-evidence.v1", "markdown-evidence.v2")],
+      ["wrong-lane", canonical.replace("Lane: platform", "Lane: gates")],
+      ["wrong-platform", canonical.replace("Platform: macos", "Platform: linux")],
+      ["wrong-source", canonical.replace(`Source input: ${digest}`, `Source input: ${"06".repeat(32)}`)],
+      ["bad-artifact", canonical.replace("a5".repeat(32), "A5".repeat(32))],
+      ["wrong-status", canonical.replace("platform-observation-recorded", "accepted")],
+      ["encoded-payload", canonical.replace("Status: platform-observation-recorded", "Status: aW1wb3J0IHg=")]
+    ] as const;
+    for (const [name, content] of invalidGrammar) {
       const root = await temporaryRepository();
-      await writeEvidence(root, `final/${digest}/summary.md`, positive);
-      const candidates = await enumerateSourceCandidates(root);
-      if (tracked) {
-        expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
-        expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: root }).status).toBe(0);
-        expect(() => validateGitCandidateSet(root, candidates), "tracked-positive").not.toThrow();
-      }
+      await writeEvidence(root, `platform/${digest}/macos/${name}.md`, content);
+      await expect(enumerateSourceCandidates(root), name).rejects.toBeInstanceOf(ContractError);
     }
-    const negatives = [
-      "```ts\nconst hidden = true;\n```\n",
-      "````ts\nconst hidden = true;\n````\n",
-      "~~~js\nconst hidden = true;\n~~~\n",
-      "```bash\necho hidden\n```\n",
-      "```json\n{not-json}\n```\n",
-      "import hidden from 'covered-source';\n",
-      "import type { Hidden } from 'covered-source';\n",
-      "import('covered-source');\n",
-      "export const hidden = true;\n",
-      "export async function hidden() {}\n",
-      "```text\nexport const hidden = true;\n```\n",
-      "```console\nimport hidden from 'covered-source';\n```\n",
-      "```text\nconst hidden = true;\n```\n",
-      "```console\nfunction hidden() {}\n```\n"
-    ];
-    for (const [index, content] of negatives.entries()) {
-      for (const tracked of [false, true]) {
+
+    const sourceRepresentatives = [
+      ["typescript", "declare const token: string;\n"],
+      ["rust", "use std::fs; struct Receipt { digest: String }\n"],
+      ["python", "class Evidence:\n    pass\n"],
+      ["c", "int validate_record(const char *p) { return 1; }\n"],
+      ["expression", "(() => 1)();\n"],
+      ["shell", "echo hidden > result\n"],
+      ["r", "hidden <- function(x) x + 1\n"],
+      ["cpp", "template<class T> T hidden(T value) { return value; }\n"],
+      ["macro", "#define HIDDEN(x) ((x) + 1)\n"],
+      ["polyglot", "//<!--\nconsole.log('hidden')\n//-->\n"],
+      ["encoded", "aW1wb3J0IHggaGVsbG8K\n"]
+    ] as const;
+    for (const [name, content] of sourceRepresentatives) {
+      for (const tracked of [false, true] as const) {
         const root = await temporaryRepository();
-        await writeEvidence(root, `final/${digest}/invalid-${index}.md`, content);
+        await writeEvidence(root, `final/${digest}/${name}.md`, content);
         if (tracked) {
           expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
           expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: root }).status).toBe(0);
-          const candidates = (await enumerateSourceCandidates(root).catch(() => []));
-          expect(() => validateGitCandidateSet(root, candidates), `tracked-negative-${index}`).toThrow(ContractError);
-        } else {
-          await expect(enumerateSourceCandidates(root), `untracked-negative-${index}`).rejects.toBeInstanceOf(ContractError);
         }
+        const result = publicCurrentCheck(root);
+        expect(result.status, `${tracked ? "tracked" : "untracked"}:${name}:${result.stdout}:${result.stderr}`).toBe(2);
       }
     }
-  }, 30_000);
+
+    const stagedRoot = await temporaryRepository();
+    const stagedPath = await writeEvidence(stagedRoot, `final/${digest}/staged.md`, "declare const hidden: string;\n");
+    expect(spawnSync("git", ["init", "-q"], { cwd: stagedRoot }).status).toBe(0);
+    expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: stagedRoot }).status).toBe(0);
+    await writeFile(stagedPath, canonicalMarkdown("final", digest, "none", "accepted"));
+    const staged = publicCurrentCheck(stagedRoot);
+    expect(staged.status, `staged-invalid/worktree-legal:${staged.stdout}:${staged.stderr}`).toBe(2);
+  }, 120_000);
 
   test("closed evidence JSON schemas enforce their own byte, depth, node, and item limits after version discovery", async () => {
     const digest = "13".repeat(32);
@@ -330,9 +405,9 @@ describe("source-input-v1 current-set authority", () => {
 
     for (const tracked of [false, true]) {
       const exact = await temporaryRepository();
-      await writeEvidence(exact, `platform/${digestA}/macos/exact.md`, Buffer.alloc(platformLimit, 0x20));
-      await writeEvidence(exact, `platform/${digestA}/linux/exact.md`, Buffer.alloc(platformLimit, 0x20));
-      await writeEvidence(exact, `final/${digestA}/exact.md`, Buffer.alloc(finalLimit, 0x20));
+      await writeEvidence(exact, `platform/${digestA}/macos/exact.json`, paddedJson(compactInvalidPlatformBundle("macos"), platformLimit));
+      await writeEvidence(exact, `platform/${digestA}/linux/exact.json`, paddedJson(compactInvalidPlatformBundle("linux"), platformLimit));
+      await writeEvidence(exact, `final/${digestA}/exact.json`, paddedJson(generic.final_bundle, finalLimit));
       const exactCandidates = await enumerateSourceCandidates(exact);
       if (tracked) {
         expect(spawnSync("git", ["init", "-q"], { cwd: exact }).status).toBe(0);
@@ -341,11 +416,11 @@ describe("source-input-v1 current-set authority", () => {
       }
 
       const isolated = await temporaryRepository();
-      await writeEvidence(isolated, `platform/${digestA}/macos/a.md`, Buffer.alloc(5 * 1024 * 1024, 0x20));
-      await writeEvidence(isolated, `platform/${digestA}/linux/a.md`, Buffer.alloc(5 * 1024 * 1024, 0x20));
-      await writeEvidence(isolated, `platform/${digestB}/macos/b.md`, Buffer.alloc(5 * 1024 * 1024, 0x20));
-      await writeEvidence(isolated, `final/${digestA}/a.md`, Buffer.alloc(12 * 1024 * 1024, 0x20));
-      await writeEvidence(isolated, `final/${digestB}/b.md`, Buffer.alloc(12 * 1024 * 1024, 0x20));
+      await writeEvidence(isolated, `platform/${digestA}/macos/a.json`, paddedJson(compactInvalidPlatformBundle("macos"), 5 * 1024 * 1024));
+      await writeEvidence(isolated, `platform/${digestA}/linux/a.json`, paddedJson(compactInvalidPlatformBundle("linux"), 5 * 1024 * 1024));
+      await writeEvidence(isolated, `platform/${digestB}/macos/b.json`, paddedJson(compactInvalidPlatformBundle("macos"), 5 * 1024 * 1024));
+      await writeEvidence(isolated, `final/${digestA}/a.json`, paddedJson(generic.final_bundle, 12 * 1024 * 1024));
+      await writeEvidence(isolated, `final/${digestB}/b.json`, paddedJson(generic.final_bundle, 12 * 1024 * 1024));
       const isolatedCandidates = await enumerateSourceCandidates(isolated);
       if (tracked) {
         expect(spawnSync("git", ["init", "-q"], { cwd: isolated }).status).toBe(0);
@@ -367,7 +442,9 @@ describe("source-input-v1 current-set authority", () => {
       const stagedPath = await writeEvidence(staged, path, paddedJson(immutableReference("11"), limit + 1));
       expect(spawnSync("git", ["init", "-q"], { cwd: staged }).status).toBe(0);
       expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: staged }).status).toBe(0);
-      await writeFile(stagedPath, "bounded legal worktree evidence\n");
+      const [lane, digest, platform] = path.split("/");
+      await writeFile(stagedPath, canonicalMarkdown(lane as EvidenceLane, digest!,
+        lane === "platform" ? platform as "macos" | "linux" : "none"));
       const candidates = await enumerateSourceCandidates(staged);
       expect(() => validateGitCandidateSet(staged, candidates), `tracked:${path}`).toThrow(ContractError);
     }
