@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { ContractError, canonicalReceipt, ingestJson, type InputKind } from "./ingestion";
+import { ContractError, canonicalReceipt, readJsonFileBounded, type InputKind } from "./ingestion";
 import {
   enumerateSourceCandidates,
   loadAndValidateContract,
@@ -73,8 +72,7 @@ export async function checkCurrent(repositoryRoot: string, manifest: string): Pr
 
 async function execute(options: Options): Promise<Record<string, unknown>> {
   if (options.mode === "input") {
-    const bytes = new Uint8Array(await readFile(options.input));
-    ingestJson(bytes, options.kind, validatorForInputKind(options.kind));
+    await readJsonFileBounded(options.input, options.kind, validatorForInputKind(options.kind));
     return {
       schema_version: "shud.git-status-capability.contract-check-receipt.v1",
       status: "ok",

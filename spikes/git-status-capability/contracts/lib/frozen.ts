@@ -167,16 +167,35 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       "effective_config", "exclude_state", "attribute_state", "nested_state"
     ],
     optional_fields: [],
+    field_types: {
+      schema_version: "literal", catalog_version: "integer:1", row_id: "catalog-row-id", observation_id: "sha256",
+      checkout_capability_identity: "sha256", git_state_generation_digest: "sha256", body_length: "uint64",
+      body_digest: "sha256", checksum: "sha256", index: "strict:index-frame-v1", head_tree: "strict:head-tree-v1",
+      effective_config: "strict:effective-config-v1", exclude_state: "strict:exclude-state-v1",
+      attribute_state: "strict:attribute-state-v1", nested_state: "array:strict:nested-state-v1"
+    },
     additional_properties: false
   },
   row_evidence: {
     schema_version: "shud.git-status-capability.row-evidence.v1",
     required_fields: [
-      "schema_version", "platform", "row_id", "expected_outcome", "observer_outcome", "producing_boundary",
-      "row_verdict", "oracle_digest", "tripwire_verdicts", "protection_set_equal", "cleanup", "resource_record",
+      "schema_version", "platform", "row_id", "observation_id", "checkout_capability_identity",
+      "git_state_generation_digest", "frame_digest", "frame_binding", "expected_outcome", "observer_outcome", "producing_boundary",
+      "row_verdict", "oracle_digest", "oracle_verdict", "tripwire_verdicts", "protection_set_equal", "cleanup", "resource_record",
       "source_input_record_sha256"
     ],
     optional_fields: ["first_cause", "secondary_errors"],
+    field_types: {
+      schema_version: "literal", platform: "enum:macos|linux", row_id: "catalog-row-id", observation_id: "sha256",
+      checkout_capability_identity: "sha256", git_state_generation_digest: "sha256", frame_digest: "sha256",
+      frame_binding: "strict:{row_id,observation_id,checkout_capability_identity,git_state_generation_digest,frame_length,frame_digest,payload_length,payload_digest}",
+      expected_outcome: "frozen-platform-slot-outcome", observer_outcome: "observer-outcome", producing_boundary: "nonempty-string",
+      row_verdict: "iff:expected=observed", oracle_digest: "sha256", oracle_verdict: "literal:pass",
+      tripwire_verdicts: "strict:{ambient_path,subprocess,protected_write}:true", protection_set_equal: "literal:true",
+      cleanup: "strict:{verdict:pass,descriptors_restored:true,processes_reaped:true,secondary_errors:string[]}",
+      resource_record: "strict:{boundary_class,declared_limit,within_limits:true}", source_input_record_sha256: "sha256",
+      first_cause: "optional:nonempty-string", secondary_errors: "optional:string[]"
+    },
     additional_properties: false
   },
   platform_bundle: {
@@ -186,7 +205,17 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       "toolchain", "target", "dependency_graph_digest", "direct_feature_digest", "call_ledger_digest", "sbom_digest",
       "license_inventory_digest", "rows", "protection_set", "raw_command_manifest"
     ],
-    optional_fields: [],
+    optional_fields: ["first_cause", "all_failure_codes"],
+    field_types: {
+      schema_version: "literal", platform: "enum:macos|linux", run_status: "enum:valid_complete|invalid",
+      source_commit: "git-object-id", source_input_record_sha256: "sha256", catalog_digest: "sha256",
+      toolchain: "strict:{rustc_vv,cargo_version,git_version,target_triple}", target: "platform-target",
+      dependency_graph_digest: "sha256", direct_feature_digest: "sha256", call_ledger_digest: "sha256",
+      sbom_digest: "sha256", license_inventory_digest: "sha256", rows: "array:row-evidence;valid_complete=174-exact",
+      protection_set: "array:strict:{identity,pre_digest,post_digest,event_digest};valid_complete=nonempty",
+      raw_command_manifest: "array:command-receipt;valid_complete=nonempty", first_cause: "invalid-only:nonempty-string",
+      all_failure_codes: "invalid-only:sorted-unique-string[]"
+    },
     additional_properties: false
   },
   final_bundle: {
@@ -196,6 +225,12 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       "repository_gates", "raw_evidence_digest", "decision_projection_digest", "run_status"
     ],
     optional_fields: ["terminal_decision", "first_cause", "all_failure_codes"],
+    field_types: {
+      schema_version: "literal", source_input_record_sha256: "sha256", macos_bundle_sha256: "sha256",
+      linux_bundle_sha256: "sha256", repository_gates: "nonempty-map:gate-receipt", raw_evidence_digest: "sha256",
+      decision_projection_digest: "sha256", run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted|rejected",
+      first_cause: "optional:nonempty-string", all_failure_codes: "optional:string[]"
+    },
     additional_properties: false
   },
   decision: {
@@ -205,6 +240,12 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       "gates", "run_status"
     ],
     optional_fields: ["terminal_decision", "first_cause", "all_failure_codes"],
+    field_types: {
+      schema_version: "literal", catalog_version: "integer:1", catalog_digest: "sha256", source_input_record_sha256: "sha256",
+      platforms: "exact:[macos,linux]", rows: "array:compact-row-projection-v1;valid_complete=348-exact", gates: "nonempty-map:literal-pass",
+      run_status: "enum:valid_complete|invalid", terminal_decision: "iff-valid_complete:accepted|rejected",
+      first_cause: "optional:nonempty-string", all_failure_codes: "optional:string[]"
+    },
     additional_properties: false
   },
   source_input_record: {
@@ -214,8 +255,28 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
       "primary_encoder", "witness_encoder", "command_receipt"
     ],
     optional_fields: [],
+    field_types: {
+      schema_version: "literal", source_sha: "git-object-id", source_input_digest: "sha256", manifest_digest: "sha256",
+      entry_count: "positive-safe-integer", admitted_paths: "sorted-array:strict:{path,git_mode}",
+      primary_encoder: "strict:{identity,result}", witness_encoder: "strict:{identity,result};identity-distinct;result-equal",
+      command_receipt: "strict:PLATFORM-SOURCE-INPUT-create-argv-version-exit-receipt"
+    },
     additional_properties: false
   }
+} as const);
+
+export const SOURCE_INPUT_DIGEST_V1 = Object.freeze({
+  domain_prefix: "SHUD-HARNESS\0GIT-STATUS-CAPABILITY\0SOURCE-INPUT-DIGEST\0V1\0",
+  entry_order: "raw_repository_relative_utf8_bytes",
+  integer_encoding: "unsigned_big_endian",
+  allowed_git_modes: ["100644", "100755"],
+  frame_fields: [
+    "u32_entry_count", "u32_path_byte_length", "path_utf8_bytes", "u32_git_mode_octal",
+    "u64_content_byte_length", "raw_git_blob_bytes"
+  ],
+  source_sha_hashed: false,
+  live_literal_allowed: false,
+  synthetic_literal_path: "spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.sha256"
 } as const);
 
 export const TARGET_GRAPH_EXPECTATIONS = Object.freeze({
@@ -223,12 +284,12 @@ export const TARGET_GRAPH_EXPECTATIONS = Object.freeze({
     packages: 115,
     edges: 342,
     predicates: 25,
-    graph_digest: "2ed2d79ad7c49fd4e9a472afd844f01165e23e619c6df348938b4cffda3ae74e"
+    graph_digest: "b93ceb0faa116f32ce9da94de32cf295900a1240900cc352ae555719a6cc6a82"
   },
   "x86_64-unknown-linux-gnu": {
     packages: 117,
     edges: 343,
     predicates: 23,
-    graph_digest: "bcb5d7f1225584561ac029c384fc742730e4666f9f25df714806849567bba0a0"
+    graph_digest: "6bf62b2ab2dd76a15a8ade65a7ef4d3b0f9b8438bf2d956423ed38520e2100db"
   }
 } as const);
