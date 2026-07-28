@@ -5,10 +5,12 @@ import { join } from "node:path";
 import {
   CATALOG_IDS,
   CATALOG_V1,
+  CONTROL_ASSERTION_IDS,
   FLOOR_V1,
   INGESTION_LIMITS,
   OBSERVER_LIMITS,
   OWNERSHIP_V1,
+  PRODUCING_BOUNDARIES,
   REJECTION_CODES,
   TOOLCHAIN
 } from "../lib/frozen";
@@ -39,7 +41,7 @@ describe("frozen catalog v1 contract", () => {
     expect(CATALOG_V1.find((row) => row.id === "LIM-026")?.linux_expected).toEqual({ kind: "rejected", code: "LIMIT_OUTPUT_BYTES" });
     for (const row of CATALOG_V1) {
       expect(row.macos_expected).toEqual(row.linux_expected);
-      expect(Object.keys(row).sort()).toEqual(["id", "linux_expected", "macos_expected"]);
+      expect(Object.keys(row).sort()).toEqual(["id", "linux_expected", "macos_expected", "producing_boundary"]);
     }
   });
 
@@ -59,11 +61,24 @@ describe("frozen catalog v1 contract", () => {
     expect(Object.fromEntries(partitionCounts)).toEqual({ "2.1/4.2": 21, "2.2/4.3": 32, "2.3/4.4": 20, "2.3/4.5": 14, "2.3/4.6": 3, "2.4/4.6": 46, "2.5/4.7": 38 });
   });
 
+  test("freezes every catalog row's exact outcome-producing boundary", () => {
+    const launcher = new Set([
+      "CAP-005", "CAP-006", "CAP-008", "CAP-009", "CAP-016", "CAP-017",
+      "PRT-001", "PRT-002", "PRT-003", "PRT-004", "PRT-005", "PRT-006", "PRT-007", "PRT-008", "PRT-009",
+      "LIF-003", "LIF-004", "LIF-005", "LIF-007"
+    ]);
+    const tripwire = new Set(["PRT-010", "PRT-011", "PRT-012"]);
+    for (const row of CATALOG_V1) {
+      expect(row.producing_boundary, row.id).toBe(tripwire.has(row.id) ? "tripwire" : launcher.has(row.id) ? "launcher" : "observer");
+    }
+  });
+
   test("freezes four state layers, all limits, stable codes, and tool versions", async () => {
     const value = await contract();
     expect(validateContract(value)).toBe(true);
     expect(value.state_model).toEqual({
       observer_outcome: ["clean", "dirty", "rejected(code)"], expected_platforms: ["macos", "linux"], row_verdict: ["pass", "fail"],
+      producing_boundary: PRODUCING_BOUNDARIES, required_control_assertions: CONTROL_ASSERTION_IDS,
       run_status: ["valid_complete", "invalid"], terminal_decision: ["accepted", "rejected"],
       terminal_decision_rule: "present_if_and_only_if_run_status_valid_complete"
     });

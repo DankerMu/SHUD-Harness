@@ -1,4 +1,4 @@
-import { CATALOG_V1, DECISION_LIMIT_TOKENS, DECISION_ROW_SEGMENTS } from "./frozen";
+import { CATALOG_V1, CONTROL_ASSERTION_IDS, DECISION_LIMIT_TOKENS, DECISION_ROW_SEGMENTS } from "./frozen";
 
 type JsonRecord = Record<string, any>;
 
@@ -26,6 +26,10 @@ const KIND_TO_TOKEN = Object.freeze({ clean: "c", dirty: "d", rejected: "r" });
 const TOKEN_TO_KIND = Object.freeze({ c: "clean", d: "dirty", r: "rejected" });
 const BOUNDARY_TO_TOKEN = Object.freeze({ below: "b", exact: "e", exceeded: "x" });
 const TOKEN_TO_BOUNDARY = Object.freeze({ b: "below", e: "exact", x: "exceeded" });
+const PRODUCER_TO_TOKEN = Object.freeze({ observer: "o", launcher: "l", tripwire: "t" });
+const TOKEN_TO_PRODUCER = Object.freeze({ o: "observer", l: "launcher", t: "tripwire" });
+const ALL_CONTROL_BITS = (1 << CONTROL_ASSERTION_IDS.length) - 1;
+const ALL_CONTROL_TOKEN = ALL_CONTROL_BITS.toString(16).padStart(2, "0");
 
 function record(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -73,7 +77,7 @@ function decodeDecisionRow(value: unknown): DecodedRow | null {
   const fields = value.split("\0");
   if (fields.length !== DECISION_ROW_SEGMENTS.length) return null;
   const [platformToken, rowId, expectedKind, expectedCode, observedKind, observedCode, verdictToken,
-    observationId, generationPayloadDigest, frameDigest, producingBoundary, oracleVerdict, activeTripwires,
+    observationId, generationPayloadDigest, frameDigest, producingBoundaryToken, activeControls, passedControls,
     protectionSetEqual, cleanupVerdict, declaredLimitToken, boundaryToken] = fields;
   const platform = platformToken === "m" ? "macos" : platformToken === "l" ? "linux" : null;
   const expectedOutcome = decodeOutcome(expectedKind!, expectedCode!);
@@ -82,17 +86,25 @@ function decodeDecisionRow(value: unknown): DecodedRow | null {
   const limitOrdinal = /^(?:[0-9]|1[0-3])$/.test(declaredLimitToken!) ? Number(declaredLimitToken) : -1;
   const declaredLimit = DECISION_LIMIT_TOKENS[limitOrdinal];
   const boundaryClass = TOKEN_TO_BOUNDARY[boundaryToken as keyof typeof TOKEN_TO_BOUNDARY];
+  const producingBoundary = TOKEN_TO_PRODUCER[producingBoundaryToken as keyof typeof TOKEN_TO_PRODUCER];
+  const passedControlBits = /^[0-9a-f]{2}$/.test(passedControls!) ? Number.parseInt(passedControls!, 16) : -1;
   if (!platform || !nonEmptyString(rowId) || !expectedOutcome || !observedOutcome || !rowVerdict || !sha256(observationId) ||
-    !sha256(generationPayloadDigest) || !sha256(frameDigest) || producingBoundary !== "o" || oracleVerdict !== "p" ||
-    activeTripwires !== "7" || protectionSetEqual !== "1" || cleanupVerdict !== "p" || !declaredLimit || !boundaryClass ||
+    !sha256(generationPayloadDigest) || !sha256(frameDigest) || !producingBoundary || activeControls !== ALL_CONTROL_TOKEN ||
+    passedControlBits < 0 || (passedControlBits & ~ALL_CONTROL_BITS) !== 0 || !["0", "1"].includes(protectionSetEqual!) ||
+    !["p", "f"].includes(cleanupVerdict!) || !declaredLimit || !boundaryClass ||
     ((boundaryClass === "below") !== (declaredLimit === "none"))) return null;
   const catalog = CATALOG_V1.find((row) => row.id === rowId);
   const frozenExpected = platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
   const limitMatch = /^LIM-(\d{3})$/.exec(rowId);
   const frozenLimitOrdinal = limitMatch ? Math.floor((Number(limitMatch[1]) - 1) / 2) + 1 : 0;
   const frozenBoundary = limitMatch ? Number(limitMatch[1]) % 2 === 1 ? "exact" : "exceeded" : "below";
-  if (!exactJson(expectedOutcome, frozenExpected) || limitOrdinal !== frozenLimitOrdinal || boundaryClass !== frozenBoundary ||
-    ((rowVerdict === "pass") !== exactJson(expectedOutcome, observedOutcome))) return null;
+  const protectionPassed = (passedControlBits & (1 << CONTROL_ASSERTION_IDS.indexOf("protection"))) !== 0;
+  const cleanupPassed = (passedControlBits & (1 << CONTROL_ASSERTION_IDS.indexOf("cleanup"))) !== 0;
+  const controlsPassed = passedControlBits === ALL_CONTROL_BITS;
+  if (!exactJson(expectedOutcome, frozenExpected) || producingBoundary !== catalog?.producing_boundary ||
+    limitOrdinal !== frozenLimitOrdinal || boundaryClass !== frozenBoundary || protectionPassed !== (protectionSetEqual === "1") ||
+    cleanupPassed !== (cleanupVerdict === "p") ||
+    ((rowVerdict === "pass") !== (exactJson(expectedOutcome, observedOutcome) && controlsPassed))) return null;
   return { platform, rowId, rowVerdict, observationId, generationPayloadDigest, frameDigest };
 }
 
@@ -101,10 +113,22 @@ export function encodeDecisionRowProjection(row: JsonRecord): string {
   const observedKind = KIND_TO_TOKEN[row.observer_outcome.kind as keyof typeof KIND_TO_TOKEN];
   const limitOrdinal = DECISION_LIMIT_TOKENS.indexOf(row.resource_record.declared_limit);
   const boundary = BOUNDARY_TO_TOKEN[row.resource_record.boundary_class as keyof typeof BOUNDARY_TO_TOKEN];
-  if (!expectedKind || !observedKind || limitOrdinal < 0 || !boundary || row.producing_boundary !== "observer" ||
-    row.oracle_verdict !== "pass" || row.cleanup.verdict !== "pass" || row.protection_set_equal !== true ||
-    !record(row.tripwire_verdicts) || !exactKeys(row.tripwire_verdicts, ["ambient_path", "subprocess", "protected_write"]) ||
-    !Object.values(row.tripwire_verdicts).every((verdict) => verdict === true)) {
+  const producer = PRODUCER_TO_TOKEN[row.producing_boundary as keyof typeof PRODUCER_TO_TOKEN];
+  if (!record(row.control_assertions) || !exactKeys(row.control_assertions, CONTROL_ASSERTION_IDS)) {
+    throw new Error("invalid D8 projection source");
+  }
+  let passedControlBits = 0;
+  for (let index = 0; index < CONTROL_ASSERTION_IDS.length; index += 1) {
+    const assertion = row.control_assertions[CONTROL_ASSERTION_IDS[index]!];
+    if (!record(assertion) || !exactKeys(assertion, ["active", "verdict"]) || assertion.active !== true ||
+      !["pass", "fail"].includes(assertion.verdict as string)) throw new Error("invalid D8 projection source");
+    if (assertion.verdict === "pass") passedControlBits |= 1 << index;
+  }
+  const protectionPassed = (row.control_assertions.protection as JsonRecord).verdict === "pass";
+  const cleanupPassed = (row.control_assertions.cleanup as JsonRecord).verdict === "pass";
+  if (!expectedKind || !observedKind || limitOrdinal < 0 || !boundary || !producer ||
+    typeof row.protection_set_equal !== "boolean" || row.protection_set_equal !== protectionPassed ||
+    !record(row.cleanup) || row.cleanup.verdict !== (cleanupPassed ? "pass" : "fail")) {
     throw new Error("invalid D8 projection source");
   }
   return [
@@ -118,7 +142,13 @@ export function encodeDecisionRowProjection(row: JsonRecord): string {
     row.observation_id,
     row.git_state_generation_digest,
     row.frame_digest,
-    "o", "p", "7", "1", "p", String(limitOrdinal), boundary
+    producer,
+    ALL_CONTROL_TOKEN,
+    passedControlBits.toString(16).padStart(2, "0"),
+    row.protection_set_equal ? "1" : "0",
+    cleanupPassed ? "p" : "f",
+    String(limitOrdinal),
+    boundary
   ].join("\0");
 }
 

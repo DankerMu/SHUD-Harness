@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalFrameBytes, canonicalFrameChecksum, canonicalFrameDigest } from "../lib/canonical-frame";
 import { runCheck } from "../lib/checker";
-import { CATALOG_V1, FLOOR_V1 } from "../lib/frozen";
+import { CATALOG_V1, CONTROL_ASSERTION_IDS, FLOOR_V1 } from "../lib/frozen";
 import {
   enumerateSourceCandidates,
   validateContract,
@@ -45,19 +45,22 @@ function canonicalFrameEvidenceBytes(frame: Record<string, any>): Buffer {
 }
 
 function synchronizeRowDeclarations(row: any, recomputeChecksum: boolean): void {
-  const frame = row.frame_binding.frame_reference.frame;
+  const frame = row.frame_binding.scheduled.frame_reference.frame;
   if (recomputeChecksum) frame.checksum = canonicalFrameChecksum(frame);
   const bytes = canonicalFrameBytes(frame);
   const digest = canonicalFrameDigest(frame);
   row.git_state_generation_digest = frame.git_state_generation_digest;
   row.frame_digest = digest;
-  row.frame_binding.git_state_generation_digest = frame.git_state_generation_digest;
-  row.frame_binding.frame_length = bytes.length;
-  row.frame_binding.frame_digest = digest;
-  row.frame_binding.payload_length = frame.body_length;
-  row.frame_binding.canonical_body_length = frame.body_length;
-  row.frame_binding.payload_digest = frame.body_digest;
-  row.frame_binding.canonical_body_digest = frame.body_digest;
+  Object.assign(row.frame_binding.scheduled, {
+    git_state_generation_digest: frame.git_state_generation_digest,
+    input_length: bytes.length,
+    input_digest: digest
+  });
+  Object.assign(row.frame_binding.supplied, {
+    git_state_generation_digest: frame.git_state_generation_digest,
+    input_length: bytes.length,
+    input_digest: digest
+  });
 }
 
 function frameForSlot(rowId: string, observationId: string, capabilityIdentity: string): Record<string, any> {
@@ -73,19 +76,22 @@ function bindRowFrame(row: any, frame = frameForEvidenceSlot(row.platform, row.r
   const frameDigest = canonicalFrameDigest(frame);
   row.git_state_generation_digest = frame.git_state_generation_digest;
   row.frame_digest = frameDigest;
-  Object.assign(row.frame_binding, {
+  const slot = {
     row_id: row.row_id,
     observation_id: row.observation_id,
     checkout_capability_identity: row.checkout_capability_identity,
     git_state_generation_digest: frame.git_state_generation_digest,
-    frame_length: frameBytes.length,
-    frame_digest: frameDigest,
-    payload_length: frame.body_length,
-    payload_digest: frame.body_digest,
-    canonical_body_length: frame.body_length,
-    canonical_body_digest: frame.body_digest,
-    frame_reference: { encoding: frameEvidenceEncoding, frame }
-  });
+    input_length: frameBytes.length,
+    input_digest: frameDigest
+  };
+  row.frame_binding = {
+    scheduled: {
+      ...slot,
+      material: { kind: "canonical-frame-envelope-v1", padding_byte: 0 },
+      frame_reference: { encoding: frameEvidenceEncoding, frame }
+    },
+    supplied: { ...slot, material: { kind: "scheduled-input-v1" } }
+  };
 }
 
 function outcome(text: string): Record<string, string> {
@@ -118,16 +124,24 @@ function validRow(): Record<string, unknown> {
     observation_id: shaA, checkout_capability_identity: shaB,
     git_state_generation_digest: frame.git_state_generation_digest, frame_digest: frameDigest,
     frame_binding: {
-      row_id: "BAS-001", observation_id: shaA, checkout_capability_identity: shaB,
-      git_state_generation_digest: frame.git_state_generation_digest,
-      frame_length: frameBytes.length, frame_digest: frameDigest,
-      payload_length: frame.body_length, payload_digest: frame.body_digest,
-      canonical_body_length: frame.body_length, canonical_body_digest: frame.body_digest,
-      frame_reference: { encoding: frameEvidenceEncoding, frame }
+      scheduled: {
+        row_id: "BAS-001", observation_id: shaA, checkout_capability_identity: shaB,
+        git_state_generation_digest: frame.git_state_generation_digest,
+        input_length: frameBytes.length, input_digest: frameDigest,
+        material: { kind: "canonical-frame-envelope-v1", padding_byte: 0 },
+        frame_reference: { encoding: frameEvidenceEncoding, frame }
+      },
+      supplied: {
+        row_id: "BAS-001", observation_id: shaA, checkout_capability_identity: shaB,
+        git_state_generation_digest: frame.git_state_generation_digest,
+        input_length: frameBytes.length, input_digest: frameDigest,
+        material: { kind: "scheduled-input-v1" }
+      }
     },
     expected_outcome: { kind: "clean" }, observer_outcome: { kind: "clean" }, producing_boundary: "observer",
-    row_verdict: "pass", oracle_digest: shaA, oracle_verdict: "pass",
-    tripwire_verdicts: { ambient_path: true, subprocess: true, protected_write: true }, protection_set_equal: true,
+    row_verdict: "pass", oracle_digest: shaA,
+    control_assertions: Object.fromEntries(CONTROL_ASSERTION_IDS.map((id) => [id, { active: true, verdict: "pass" }])),
+    protection_set_equal: true,
     cleanup: { verdict: "pass", descriptors_restored: true, processes_reaped: true, secondary_errors: [] },
     resource_record: { boundary_class: "below", declared_limit: "none", within_limits: true },
     source_input_record_sha256: shaB
@@ -199,17 +213,14 @@ describe("round-1 invariant closure", () => {
       (row: any) => { row.expected_outcome = { kind: "dirty" }; },
       (row: any) => { row.row_verdict = "fail"; },
       (row: any) => { delete row.observation_id; },
-      (row: any) => { row.oracle_verdict = "fail"; },
-      (row: any) => { row.tripwire_verdicts = {}; },
+      (row: any) => { delete row.control_assertions.oracle; },
+      (row: any) => { row.control_assertions.network.active = false; },
       (row: any) => { row.frame_digest = "short"; },
-      (row: any) => { delete row.frame_binding.payload_length; },
-      (row: any) => { row.frame_binding.observation_id = shaB; },
-      (row: any) => { row.frame_binding.frame_digest = shaA; },
-      (row: any) => { row.frame_binding.payload_digest = "short"; },
-      (row: any) => { row.frame_binding.payload_digest = shaB; },
-      (row: any) => { row.frame_binding.canonical_body_digest = shaB; },
-      (row: any) => { row.frame_binding.canonical_body_length -= 1; },
-      (row: any) => { row.frame_binding.payload_length = row.frame_binding.frame_length + 1; }
+      (row: any) => { delete row.frame_binding.supplied.input_length; },
+      (row: any) => { row.frame_binding.scheduled.observation_id = shaB; },
+      (row: any) => { row.frame_binding.supplied.input_digest = shaA; },
+      (row: any) => { row.frame_binding.supplied.material = { kind: "future" }; },
+      (row: any) => { row.producing_boundary = "launcher"; }
     ]) {
       const row = structuredClone(validRow()); mutate(row); expect(validateRowEvidence(row)).toBe(false);
     }
@@ -222,31 +233,31 @@ describe("round-1 invariant closure", () => {
       .toBe("fab8dfefd91991c8260c06aec44ea9708a864a1c3ae7ae3aa7f982ad3630d1b0");
     expect(validateRowEvidence(validRow())).toBe(true);
     const reordered: any = structuredClone(validRow());
-    reordered.frame_binding.frame_reference.frame = Object.fromEntries(
-      Object.entries(reordered.frame_binding.frame_reference.frame).reverse()
+    reordered.frame_binding.scheduled.frame_reference.frame = Object.fromEntries(
+      Object.entries(reordered.frame_binding.scheduled.frame_reference.frame).reverse()
     );
     expect(validateRowEvidence(reordered)).toBe(true);
     for (const mutate of [
-      (row: any) => { delete row.frame_binding.frame_reference; },
-      (row: any) => { row.frame_binding.frame_reference.encoding = "json"; },
-      (row: any) => { row.frame_binding.frame_length += 1; },
-      (row: any) => { row.frame_binding.frame_digest = shaA; },
-      (row: any) => { row.frame_digest = shaA; row.frame_binding.frame_digest = shaA; },
-      (row: any) => { row.frame_binding.frame_reference.frame.row_id = "BAS-002"; },
-      (row: any) => { row.frame_binding.frame_reference.frame.observation_id = shaB; },
-      (row: any) => { row.frame_binding.frame_reference.frame.checkout_capability_identity = shaA; },
-      (row: any) => { row.frame_binding.frame_reference.frame.body_length += 1; },
+      (row: any) => { delete row.frame_binding.scheduled.frame_reference; },
+      (row: any) => { row.frame_binding.scheduled.frame_reference.encoding = "json"; },
+      (row: any) => { row.frame_binding.scheduled.input_length += 1; },
+      (row: any) => { row.frame_binding.scheduled.input_digest = shaA; },
+      (row: any) => { row.frame_digest = shaA; row.frame_binding.supplied.input_digest = shaA; },
+      (row: any) => { row.frame_binding.scheduled.frame_reference.frame.row_id = "BAS-002"; },
+      (row: any) => { row.frame_binding.scheduled.frame_reference.frame.observation_id = shaB; },
+      (row: any) => { row.frame_binding.scheduled.frame_reference.frame.checkout_capability_identity = shaA; },
+      (row: any) => { row.frame_binding.scheduled.frame_reference.frame.body_length += 1; },
       (row: any) => {
-        row.frame_binding.frame_reference.frame.body_length += 1;
+        row.frame_binding.scheduled.frame_reference.frame.body_length += 1;
         synchronizeRowDeclarations(row, true);
       },
       (row: any) => {
-        row.frame_binding.frame_reference.frame.body_digest = shaA;
-        row.frame_binding.frame_reference.frame.git_state_generation_digest = shaA;
+        row.frame_binding.scheduled.frame_reference.frame.body_digest = shaA;
+        row.frame_binding.scheduled.frame_reference.frame.git_state_generation_digest = shaA;
         synchronizeRowDeclarations(row, true);
       },
       (row: any) => {
-        row.frame_binding.frame_reference.frame.checksum = shaA;
+        row.frame_binding.scheduled.frame_reference.frame.checksum = shaA;
         synchronizeRowDeclarations(row, false);
       }
     ]) {
@@ -278,25 +289,10 @@ describe("round-1 invariant closure", () => {
       .toBe(createHash("sha256").update(originalBytes).digest("hex"));
   });
 
-  test("all row resource records use the frozen catalog boundary and truthful within_limits value", () => {
-    const limits = [
-      "frame_bytes", "index_bytes", "index_entries", "path_bytes", "path_depth", "nested_repositories",
-      "traversal_entries", "hashed_bytes", "wall_time_ms", "cpu_time_ms", "threads", "memory_bytes", "output_bytes"
-    ];
+  test("all row resource records use the frozen catalog boundary and truthful within_limits value", async () => {
+    const generic = JSON.parse(await readFile(join(contractRoot, "fixtures/valid/generic.json"), "utf8"));
     for (const catalog of CATALOG_V1) {
-      const row: any = structuredClone(validRow());
-      row.row_id = catalog.id;
-      row.expected_outcome = structuredClone(catalog.macos_expected);
-      row.observer_outcome = structuredClone(catalog.macos_expected);
-      const match = /^LIM-(\d{3})$/.exec(catalog.id);
-      if (match) {
-        const ordinal = Number(match[1]);
-        row.resource_record = {
-          boundary_class: ordinal % 2 === 1 ? "exact" : "exceeded",
-          declared_limit: limits[Math.floor((ordinal - 1) / 2)], within_limits: ordinal % 2 === 1
-        };
-      }
-      bindRowFrame(row);
+      const row: any = structuredClone(generic.platform_bundle.rows.find((item: any) => item.row_id === catalog.id));
       expect(validateRowEvidence(row), catalog.id).toBe(true);
       for (const mutate of [
         (changed: any) => { changed.resource_record.within_limits = !changed.resource_record.within_limits; },
@@ -357,35 +353,31 @@ describe("round-1 invariant closure", () => {
       expect(validatePlatformBundle(bundle), bundle.platform).toBe(true);
       expect(new Set(bundle.rows.map((row: any) => row.observation_id)).size, bundle.platform).toBe(174);
       expect(new Set(bundle.rows.map((row: any) => row.git_state_generation_digest)).size, bundle.platform).toBe(174);
-      expect(new Set(bundle.rows.map((row: any) => row.frame_binding.payload_digest)).size, bundle.platform).toBe(174);
       expect(new Set(bundle.rows.map((row: any) => row.frame_digest)).size, bundle.platform).toBe(174);
       for (const row of bundle.rows) {
-        const reference = row.frame_binding.frame_reference;
+        const reference = row.frame_binding.scheduled.frame_reference;
         expect(reference.encoding, `${bundle.platform}/${row.row_id}`).toBe(frameEvidenceEncoding);
         expect(reference.frame.row_id, `${bundle.platform}/${row.row_id}`).toBe(row.row_id);
         expect(reference.frame.observation_id, `${bundle.platform}/${row.row_id}`).toBe(row.observation_id);
         expect(reference.frame.checkout_capability_identity, `${bundle.platform}/${row.row_id}`).toBe(row.checkout_capability_identity);
-        const bytes = canonicalFrameEvidenceBytes(reference.frame);
-        expect(row.frame_binding.frame_length, `${bundle.platform}/${row.row_id}`).toBe(bytes.length);
-        expect(row.frame_digest, `${bundle.platform}/${row.row_id}`).toBe(createHash("sha256").update(bytes).digest("hex"));
+        expect(row.frame_digest, `${bundle.platform}/${row.row_id}`).toBe(row.frame_binding.supplied.input_digest);
       }
     }
     const allRows = [...generic.platform_bundle.rows, ...generic.linux_platform_bundle.rows];
     expect(new Set(allRows.map((row: any) => row.observation_id)).size).toBe(348);
     expect(new Set(allRows.map((row: any) => row.git_state_generation_digest)).size).toBe(348);
-    expect(new Set(allRows.map((row: any) => row.frame_binding.payload_digest)).size).toBe(348);
     expect(new Set(allRows.map((row: any) => row.frame_digest)).size).toBe(348);
 
     const repeatedObservation = structuredClone(generic.platform_bundle);
     repeatedObservation.rows[1].observation_id = repeatedObservation.rows[0].observation_id;
-    repeatedObservation.rows[1].frame_binding.frame_reference.frame.observation_id = repeatedObservation.rows[0].observation_id;
-    bindRowFrame(repeatedObservation.rows[1], resealFrame(repeatedObservation.rows[1].frame_binding.frame_reference.frame));
+    repeatedObservation.rows[1].frame_binding.scheduled.frame_reference.frame.observation_id = repeatedObservation.rows[0].observation_id;
+    bindRowFrame(repeatedObservation.rows[1], resealFrame(repeatedObservation.rows[1].frame_binding.scheduled.frame_reference.frame));
     expect(validateRowEvidence(repeatedObservation.rows[1])).toBe(true);
     expect(validatePlatformBundle(repeatedObservation)).toBe(false);
 
     const repeatedGeneration = structuredClone(generic.platform_bundle);
-    const sourceFrame = repeatedGeneration.rows[0].frame_binding.frame_reference.frame;
-    const targetFrame = repeatedGeneration.rows[1].frame_binding.frame_reference.frame;
+    const sourceFrame = repeatedGeneration.rows[0].frame_binding.scheduled.frame_reference.frame;
+    const targetFrame = repeatedGeneration.rows[1].frame_binding.scheduled.frame_reference.frame;
     for (const field of ["index", "head_tree", "effective_config", "exclude_state", "attribute_state", "nested_state"]) {
       targetFrame[field] = structuredClone(sourceFrame[field]);
     }
@@ -397,13 +389,13 @@ describe("round-1 invariant closure", () => {
 
     const repeatedFrame = structuredClone(generic.platform_bundle);
     repeatedFrame.rows[1].frame_digest = repeatedFrame.rows[0].frame_digest;
-    repeatedFrame.rows[1].frame_binding.frame_digest = repeatedFrame.rows[0].frame_digest;
+    repeatedFrame.rows[1].frame_binding.supplied.input_digest = repeatedFrame.rows[0].frame_digest;
     expect(validatePlatformBundle(repeatedFrame)).toBe(false);
 
     for (const mutate of [
       (bundle: any) => { bundle.rows[0].platform = "linux"; },
       (bundle: any) => { bundle.rows[0].source_input_record_sha256 = shaA; },
-      (bundle: any) => { bundle.rows[0].frame_binding.payload_digest = "short"; },
+      (bundle: any) => { bundle.rows[0].frame_binding.supplied.input_digest = "short"; },
       (bundle: any) => { bundle.rows[0].resource_record.within_limits = !bundle.rows[0].resource_record.within_limits; }
     ]) {
       const bundle = structuredClone(generic.platform_bundle); mutate(bundle);
@@ -514,6 +506,14 @@ describe("round-1 invariant closure", () => {
     rejected.first_cause = "ROW_VERDICT_FAILED";
     rejected.all_failure_codes = ["ROW_VERDICT_FAILED"];
     expect(validateDecision(rejected)).toBe(true);
+
+    const controlRejected = structuredClone(accepted);
+    mutateDecisionRow(controlRejected, 0, 6, "f");
+    mutateDecisionRow(controlRejected, 0, 12, "7d");
+    controlRejected.terminal_decision = "rejected";
+    controlRejected.first_cause = "ROW_CONTROL_FAILED";
+    controlRejected.all_failure_codes = ["ROW_CONTROL_FAILED"];
+    expect(validateDecision(controlRejected)).toBe(true);
 
     const falseRejected = structuredClone(accepted);
     falseRejected.terminal_decision = "rejected";

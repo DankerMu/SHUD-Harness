@@ -25,6 +25,7 @@ spikes/git-status-capability/contracts/tests/frame-fixture.ts
 spikes/git-status-capability/contracts/tests/frame-material.test.ts
 spikes/git-status-capability/contracts/tests/ingestion.test.ts
 spikes/git-status-capability/contracts/tests/invariant-closure.test.ts
+spikes/git-status-capability/contracts/tests/phase-6-2-final-contract.test.ts
 spikes/git-status-capability/contracts/tests/source-manifest.test.ts
 spikes/git-status-capability/dependency-graph-catalog.json
 spikes/git-status-capability/native/Cargo.lock

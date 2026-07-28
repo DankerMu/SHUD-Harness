@@ -7,17 +7,19 @@ import {
   canonicalFrameBodyDigest,
   canonicalFrameBytes,
   canonicalFrameChecksum,
-  canonicalFrameDigest,
-  canonicalJsonDigest
+  canonicalJsonDigest,
+  sealFrame
 } from "./canonical-frame";
 import { validateDecisionProjection } from "./decision";
 import {
   CATALOG_V1,
+  CONTROL_ASSERTION_IDS,
   FLOOR_V1,
   FRAME_EVIDENCE_ENCODING,
   INGESTION_LIMITS,
   OBSERVER_LIMITS,
   OWNERSHIP_V1,
+  PRODUCING_BOUNDARIES,
   REJECTION_CODES,
   SCHEMA_DESCRIPTORS,
   SOURCE_INPUT_DIGEST_V1,
@@ -76,13 +78,18 @@ export function validateContract(value: unknown): boolean {
   if (value.schema_version !== "shud.git-status-capability.contract.v1" || value.catalog_version !== 1) return false;
   if (!Array.isArray(value.catalog) || value.catalog.length !== 174) return false;
   for (const row of value.catalog) {
-    if (!record(row) || !exactKeys(row, ["id", "macos_expected", "linux_expected"]) || typeof row.id !== "string" || !outcome(row.macos_expected) || !outcome(row.linux_expected)) return false;
+    if (!record(row) || !exactKeys(row, ["id", "macos_expected", "linux_expected", "producing_boundary"]) || typeof row.id !== "string" ||
+      !outcome(row.macos_expected) || !outcome(row.linux_expected) || !PRODUCING_BOUNDARIES.includes(row.producing_boundary as any)) return false;
   }
   if (!exactJson(value.catalog, CATALOG_V1) || !exactJson(value.floor_crosswalk, FLOOR_V1) || !exactJson(value.ownership, OWNERSHIP_V1)) return false;
   if (!exactJson(value.rejection_codes, REJECTION_CODES) || !exactJson(value.ingestion_limits, INGESTION_LIMITS) || !exactJson(value.observer_limits, OBSERVER_LIMITS) || !exactJson(value.toolchain, TOOLCHAIN)) return false;
-  if (!record(value.state_model) || !exactKeys(value.state_model, ["observer_outcome", "expected_platforms", "row_verdict", "run_status", "terminal_decision", "terminal_decision_rule"])) return false;
+  if (!record(value.state_model) || !exactKeys(value.state_model, [
+    "observer_outcome", "expected_platforms", "producing_boundary", "required_control_assertions", "row_verdict",
+    "run_status", "terminal_decision", "terminal_decision_rule"
+  ])) return false;
   if (!exactJson(value.state_model, {
     observer_outcome: ["clean", "dirty", "rejected(code)"], expected_platforms: ["macos", "linux"],
+    producing_boundary: PRODUCING_BOUNDARIES, required_control_assertions: CONTROL_ASSERTION_IDS,
     row_verdict: ["pass", "fail"], run_status: ["valid_complete", "invalid"], terminal_decision: ["accepted", "rejected"],
     terminal_decision_rule: "present_if_and_only_if_run_status_valid_complete"
   })) return false;
@@ -724,19 +731,158 @@ function rowResourceRecord(value: unknown, rowId: string): boolean {
     value.within_limits === !exceeded;
 }
 
-function frameReferenceBinding(binding: JsonRecord, row: JsonRecord): boolean {
-  const reference = binding.frame_reference;
-  if (!record(reference) || !exactKeys(reference, ["encoding", "frame"]) ||
-    reference.encoding !== FRAME_EVIDENCE_ENCODING || !record(reference.frame) || !validateFrame(reference.frame)) return false;
-  const frame = reference.frame;
-  if (frame.row_id !== row.row_id || frame.observation_id !== row.observation_id ||
-    frame.checkout_capability_identity !== row.checkout_capability_identity ||
-    frame.git_state_generation_digest !== row.git_state_generation_digest ||
-    frame.body_length !== binding.payload_length || frame.body_length !== binding.canonical_body_length ||
-    frame.body_digest !== binding.payload_digest || frame.body_digest !== binding.canonical_body_digest) return false;
+const SLOT_KEYS = Object.freeze([
+  "row_id", "observation_id", "checkout_capability_identity", "git_state_generation_digest"
+]);
+
+const SCHEDULED_INPUT_KEYS = Object.freeze([
+  ...SLOT_KEYS, "input_length", "input_digest", "material", "frame_reference"
+]);
+
+const SUPPLIED_INPUT_KEYS = Object.freeze([
+  ...SLOT_KEYS, "input_length", "input_digest", "material"
+]);
+
+const INLINE_SUPPLIED_MAX_BYTES = 64 * 1024;
+
+function frameReference(value: unknown): value is JsonRecord {
+  return record(value) && exactKeys(value, ["encoding", "frame"]) && value.encoding === FRAME_EVIDENCE_ENCODING &&
+    record(value.frame) && validateFrame(value.frame);
+}
+
+function canonicalEnvelopeBytes(frame: JsonRecord, inputLength: number): Buffer | null {
   const frameBytes = canonicalFrameBytes(frame);
-  const frameDigest = canonicalFrameDigest(frame);
-  return frameBytes.length === binding.frame_length && frameDigest === binding.frame_digest && frameDigest === row.frame_digest;
+  if (!boundedInteger(inputLength, OBSERVER_LIMITS.frame_bytes, false) || inputLength < frameBytes.length) return null;
+  return inputLength === frameBytes.length
+    ? frameBytes
+    : Buffer.concat([frameBytes, Buffer.alloc(inputLength - frameBytes.length)]);
+}
+
+function slotMatches(left: JsonRecord, right: JsonRecord, fields = SLOT_KEYS): boolean {
+  return fields.every((field) => left[field] === right[field]);
+}
+
+function declaredSlot(value: JsonRecord): boolean {
+  return typeof value.row_id === "string" && CATALOG_V1.some((row) => row.id === value.row_id) &&
+    sha256(value.observation_id) && sha256(value.checkout_capability_identity) && sha256(value.git_state_generation_digest);
+}
+
+function malformedPathFrame(bytes: Buffer, violation: "absolute-path" | "path-escape", supplied: JsonRecord): boolean {
+  let frame: JsonRecord;
+  try { frame = JSON.parse(bytes.toString("utf8")); } catch { return false; }
+  if (!record(frame) || !canonicalFrameBytes(frame).equals(bytes) || validateFrame(frame) || !slotMatches(frame, supplied)) return false;
+  if (frame.body_length !== canonicalFrameBodyBytes(frame).length || frame.body_digest !== canonicalFrameBodyDigest(frame) ||
+    frame.git_state_generation_digest !== frame.body_digest || frame.checksum !== canonicalFrameChecksum(frame)) return false;
+  const config = frame.effective_config;
+  if (!record(config) || !Array.isArray(config.entries)) return false;
+  const candidates = config.entries.filter((entry) => record(entry) && typeof entry.origin === "string" &&
+    (violation === "absolute-path" ? (entry.origin as string).startsWith("/") : (entry.origin as string).split("/").includes("..")));
+  if (candidates.length !== 1) return false;
+  const repaired = structuredClone(frame);
+  const repairedEntry = (repaired.effective_config as JsonRecord).entries.find((entry: JsonRecord) => entry.origin === (candidates[0] as JsonRecord).origin);
+  if (!record(repairedEntry)) return false;
+  repairedEntry.origin = ".git/config";
+  (repaired.effective_config as JsonRecord).digest = canonicalDigest((repaired.effective_config as JsonRecord).entries);
+  return validateFrame(sealFrame(repaired));
+}
+
+function suppliedInputProof(scheduled: JsonRecord, supplied: JsonRecord, rowId: string): Buffer | null {
+  if (!exactKeys(supplied, SUPPLIED_INPUT_KEYS) || !declaredSlot(supplied) || !record(supplied.material) ||
+    !boundedInteger(supplied.input_length, OBSERVER_LIMITS.frame_bytes + 1, false) || !sha256(supplied.input_digest)) return null;
+  const material = supplied.material;
+  const scheduledBytes = canonicalEnvelopeBytes((scheduled.frame_reference as JsonRecord).frame as JsonRecord, scheduled.input_length as number);
+  if (!scheduledBytes) return null;
+  let bytes: Buffer;
+  if (exactKeys(material, ["kind"]) && material.kind === "scheduled-input-v1") {
+    bytes = scheduledBytes;
+  } else if (exactKeys(material, ["kind", "offset", "xor"]) && material.kind === "xor-byte-v1" && rowId === "CAP-010" &&
+    Number.isSafeInteger(material.offset) && (material.offset as number) >= 0 && (material.offset as number) < scheduledBytes.length && material.xor === 1) {
+    bytes = Buffer.from(scheduledBytes);
+    bytes[material.offset as number] ^= 1;
+    let parsed: JsonRecord;
+    try { parsed = JSON.parse(bytes.toString("utf8")); } catch { return null; }
+    const scheduledFrame = (scheduled.frame_reference as JsonRecord).frame as JsonRecord;
+    if (!record(parsed) || !slotMatches(parsed, scheduled) || validateFrame(parsed) || parsed.checksum === scheduledFrame.checksum ||
+      canonicalFrameChecksum(parsed) !== scheduledFrame.checksum) return null;
+  } else if (exactKeys(material, ["kind", "byte_count"]) && material.kind === "truncate-tail-v1" && rowId === "CAP-011" && material.byte_count === 1) {
+    bytes = scheduledBytes.subarray(0, -1);
+  } else if (exactKeys(material, ["kind", "copies"]) && material.kind === "append-scheduled-input-v1" && rowId === "CAP-012" && material.copies === 1) {
+    bytes = Buffer.concat([scheduledBytes, scheduledBytes]);
+  } else if (exactKeys(material, ["kind", "violation", "content_base64"]) && material.kind === "inline-bytes-v1" &&
+    ((rowId === "CAP-013" && material.violation === "absolute-path") || (rowId === "CAP-014" && material.violation === "path-escape")) &&
+    typeof material.content_base64 === "string") {
+    bytes = Buffer.from(material.content_base64, "base64");
+    if (bytes.length > INLINE_SUPPLIED_MAX_BYTES || bytes.toString("base64") !== material.content_base64 ||
+      !malformedPathFrame(bytes, material.violation as "absolute-path" | "path-escape", supplied)) return null;
+  } else if (exactKeys(material, ["kind", "padding_byte", "frame_reference"]) && material.kind === "canonical-frame-envelope-v1" &&
+    ["CAP-015", "CAP-016", "CAP-017"].includes(rowId) && material.padding_byte === 0 && frameReference(material.frame_reference)) {
+    const suppliedFrame = (material.frame_reference as JsonRecord).frame as JsonRecord;
+    if (!slotMatches(suppliedFrame, supplied)) return null;
+    const envelope = canonicalEnvelopeBytes(suppliedFrame, supplied.input_length as number);
+    if (!envelope) return null;
+    bytes = envelope;
+  } else if (exactKeys(material, ["kind", "byte", "count"]) && material.kind === "append-byte-v1" &&
+    rowId === "LIM-002" && material.byte === 0 && material.count === 1) {
+    bytes = Buffer.concat([scheduledBytes, Buffer.from([0])]);
+  } else {
+    return null;
+  }
+  return bytes.length === supplied.input_length && createHash("sha256").update(bytes).digest("hex") === supplied.input_digest
+    ? bytes : null;
+}
+
+function scheduledSuppliedBinding(binding: JsonRecord, row: JsonRecord): boolean {
+  if (!exactKeys(binding, ["scheduled", "supplied"]) || !record(binding.scheduled) || !record(binding.supplied)) return false;
+  const scheduled = binding.scheduled;
+  const supplied = binding.supplied;
+  if (!exactKeys(scheduled, SCHEDULED_INPUT_KEYS) || !declaredSlot(scheduled) || !record(scheduled.material) ||
+    !exactKeys(scheduled.material, ["kind", "padding_byte"]) || scheduled.material.kind !== "canonical-frame-envelope-v1" ||
+    scheduled.material.padding_byte !== 0 || !frameReference(scheduled.frame_reference) || !slotMatches(scheduled, row) ||
+    !boundedInteger(scheduled.input_length, OBSERVER_LIMITS.frame_bytes, false) || !sha256(scheduled.input_digest)) return false;
+  const scheduledFrame = (scheduled.frame_reference as JsonRecord).frame as JsonRecord;
+  if (!slotMatches(scheduledFrame, scheduled)) return false;
+  const scheduledBytes = canonicalEnvelopeBytes(scheduledFrame, scheduled.input_length as number);
+  if (!scheduledBytes || createHash("sha256").update(scheduledBytes).digest("hex") !== scheduled.input_digest) return false;
+  if (/^CAP-01[0-7]$/.test(row.row_id as string) && scheduled.input_length !== canonicalFrameBytes(scheduledFrame).length) return false;
+  const suppliedBytes = suppliedInputProof(scheduled, supplied, row.row_id as string);
+  if (!suppliedBytes || supplied.input_digest !== row.frame_digest) return false;
+
+  const sameRow = supplied.row_id === scheduled.row_id;
+  const sameObservation = supplied.observation_id === scheduled.observation_id;
+  const sameCapability = supplied.checkout_capability_identity === scheduled.checkout_capability_identity;
+  const sameGeneration = supplied.git_state_generation_digest === scheduled.git_state_generation_digest;
+  const sameInput = supplied.input_length === scheduled.input_length && supplied.input_digest === scheduled.input_digest;
+  const suppliedReference = record(supplied.material) && record(supplied.material.frame_reference)
+    ? supplied.material.frame_reference as JsonRecord : null;
+  const exactCanonicalReplay = suppliedReference && record(suppliedReference.frame) &&
+    supplied.input_length === canonicalFrameBytes(suppliedReference.frame).length;
+  if (row.row_id === "CAP-010") return sameRow && sameObservation && sameCapability && sameGeneration && !sameInput && supplied.material.kind === "xor-byte-v1";
+  if (row.row_id === "CAP-011") return sameRow && sameObservation && sameCapability && sameGeneration &&
+    supplied.input_length === (scheduled.input_length as number) - 1 && supplied.material.kind === "truncate-tail-v1";
+  if (row.row_id === "CAP-012") return sameRow && sameObservation && sameCapability && sameGeneration &&
+    supplied.input_length === (scheduled.input_length as number) * 2 && supplied.material.kind === "append-scheduled-input-v1";
+  if (["CAP-013", "CAP-014"].includes(row.row_id as string)) return sameRow && sameObservation && sameCapability && !sameGeneration &&
+    supplied.material.kind === "inline-bytes-v1";
+  if (row.row_id === "CAP-015") return sameRow && sameObservation && !sameCapability && sameGeneration && exactCanonicalReplay === true && supplied.material.kind === "canonical-frame-envelope-v1";
+  if (row.row_id === "CAP-016") return sameRow && sameObservation && sameCapability && !sameGeneration && exactCanonicalReplay === true && supplied.material.kind === "canonical-frame-envelope-v1";
+  if (row.row_id === "CAP-017") return supplied.row_id === "CAP-001" && !sameRow && !sameObservation && sameCapability &&
+    sameGeneration && exactCanonicalReplay === true && supplied.material.kind === "canonical-frame-envelope-v1";
+  if (row.row_id === "LIM-001") return sameRow && sameObservation && sameCapability && sameGeneration && sameInput &&
+    scheduled.input_length === OBSERVER_LIMITS.frame_bytes && supplied.material.kind === "scheduled-input-v1";
+  if (row.row_id === "LIM-002") return sameRow && sameObservation && sameCapability && sameGeneration &&
+    scheduled.input_length === OBSERVER_LIMITS.frame_bytes && supplied.input_length === OBSERVER_LIMITS.frame_bytes + 1 &&
+    supplied.material.kind === "append-byte-v1";
+  if (/^CAP-01[0-7]$/.test(row.row_id as string)) return false;
+  return sameRow && sameObservation && sameCapability && sameGeneration && sameInput &&
+    scheduled.input_length === canonicalFrameBytes(scheduledFrame).length && supplied.material.kind === "scheduled-input-v1";
+}
+
+function controlAssertions(value: unknown): value is JsonRecord {
+  return record(value) && exactKeys(value, CONTROL_ASSERTION_IDS) && CONTROL_ASSERTION_IDS.every((id) => {
+    const assertion = value[id];
+    return record(assertion) && exactKeys(assertion, ["active", "verdict"]) && assertion.active === true &&
+      ["pass", "fail"].includes(assertion.verdict as string);
+  });
 }
 
 export function validateRowEvidence(value: unknown): boolean {
@@ -745,25 +891,21 @@ export function validateRowEvidence(value: unknown): boolean {
   if (!["macos", "linux"].includes(value.platform as string) || typeof value.row_id !== "string" || !CATALOG_V1.some((row) => row.id === value.row_id)) return false;
   const catalog = CATALOG_V1.find((row) => row.id === value.row_id);
   const frozenExpected = value.platform === "macos" ? catalog?.macos_expected : catalog?.linux_expected;
-  if (!outcome(value.expected_outcome) || !exactJson(value.expected_outcome, frozenExpected) || !outcome(value.observer_outcome) || !nonEmptyString(value.producing_boundary) || !["pass", "fail"].includes(value.row_verdict as string)) return false;
+  if (!outcome(value.expected_outcome) || !exactJson(value.expected_outcome, frozenExpected) || !outcome(value.observer_outcome) ||
+    value.producing_boundary !== catalog?.producing_boundary || !["pass", "fail"].includes(value.row_verdict as string)) return false;
   if (![value.observation_id, value.checkout_capability_identity, value.git_state_generation_digest, value.frame_digest].every(sha256)) return false;
-  if (!record(value.frame_binding) || !exactKeys(value.frame_binding, [
-    "row_id", "observation_id", "checkout_capability_identity", "git_state_generation_digest",
-    "frame_length", "frame_digest", "payload_length", "payload_digest", "canonical_body_length", "canonical_body_digest",
-    "frame_reference"
-  ]) || value.frame_binding.row_id !== value.row_id || value.frame_binding.observation_id !== value.observation_id ||
-    value.frame_binding.checkout_capability_identity !== value.checkout_capability_identity ||
-    value.frame_binding.git_state_generation_digest !== value.git_state_generation_digest ||
-    value.frame_binding.frame_digest !== value.frame_digest || !boundedInteger(value.frame_binding.frame_length, OBSERVER_LIMITS.frame_bytes, false) ||
-    !boundedInteger(value.frame_binding.payload_length, (value.frame_binding.frame_length as number) - 1, false) ||
-    !boundedInteger(value.frame_binding.canonical_body_length, (value.frame_binding.frame_length as number) - 1, false) ||
-    value.frame_binding.payload_length !== value.frame_binding.canonical_body_length || !sha256(value.frame_binding.payload_digest) ||
-    !sha256(value.frame_binding.canonical_body_digest) || value.frame_binding.payload_digest !== value.frame_binding.canonical_body_digest ||
-    value.frame_binding.payload_digest !== value.git_state_generation_digest || !frameReferenceBinding(value.frame_binding, value)) return false;
-  if (!sha256(value.oracle_digest) || value.oracle_verdict !== "pass" || !record(value.tripwire_verdicts) || !exactKeys(value.tripwire_verdicts, ["ambient_path", "subprocess", "protected_write"]) || !Object.values(value.tripwire_verdicts).every((item) => item === true) || value.protection_set_equal !== true) return false;
-  if (!record(value.cleanup) || !exactKeys(value.cleanup, ["verdict", "descriptors_restored", "processes_reaped", "secondary_errors"]) || value.cleanup.verdict !== "pass" || value.cleanup.descriptors_restored !== true || value.cleanup.processes_reaped !== true || !Array.isArray(value.cleanup.secondary_errors) || !value.cleanup.secondary_errors.every(nonEmptyString)) return false;
+  if (!record(value.frame_binding) || !scheduledSuppliedBinding(value.frame_binding, value)) return false;
+  if (!sha256(value.oracle_digest) || !controlAssertions(value.control_assertions) || typeof value.protection_set_equal !== "boolean") return false;
+  const assertions = value.control_assertions as JsonRecord;
+  if (((assertions.protection as JsonRecord).verdict === "pass") !== value.protection_set_equal) return false;
+  if (!record(value.cleanup) || !exactKeys(value.cleanup, ["verdict", "descriptors_restored", "processes_reaped", "secondary_errors"]) ||
+    !["pass", "fail"].includes(value.cleanup.verdict as string) || value.cleanup.verdict !== (assertions.cleanup as JsonRecord).verdict ||
+    typeof value.cleanup.descriptors_restored !== "boolean" || typeof value.cleanup.processes_reaped !== "boolean" ||
+    (value.cleanup.verdict === "pass" && (value.cleanup.descriptors_restored !== true || value.cleanup.processes_reaped !== true)) ||
+    !Array.isArray(value.cleanup.secondary_errors) || !value.cleanup.secondary_errors.every(nonEmptyString)) return false;
   if (!rowResourceRecord(value.resource_record, value.row_id as string) || !sha256(value.source_input_record_sha256)) return false;
-  const shouldPass = exactJson(value.expected_outcome, value.observer_outcome);
+  const shouldPass = exactJson(value.expected_outcome, value.observer_outcome) &&
+    CONTROL_ASSERTION_IDS.every((id) => (assertions[id] as JsonRecord).verdict === "pass");
   if ((value.row_verdict === "pass") !== shouldPass) return false;
   if (value.first_cause !== undefined && !nonEmptyString(value.first_cause)) return false;
   return value.secondary_errors === undefined || stringArray(value.secondary_errors);
@@ -780,7 +922,6 @@ export function validatePlatformBundle(value: unknown): boolean {
   if (value.run_status === "valid_complete" && (value.rows.length !== 174 || new Set(value.rows.map((row) => (row as JsonRecord).row_id)).size !== 174 ||
     new Set(value.rows.map((row) => (row as JsonRecord).observation_id)).size !== 174 ||
     new Set(value.rows.map((row) => (row as JsonRecord).git_state_generation_digest)).size !== 174 ||
-    new Set(value.rows.map((row) => ((row as JsonRecord).frame_binding as JsonRecord).payload_digest)).size !== 174 ||
     new Set(value.rows.map((row) => (row as JsonRecord).frame_digest)).size !== 174 ||
     value.protection_set.length === 0 || value.raw_command_manifest.length === 0)) return false;
   if (value.run_status === "invalid") {
