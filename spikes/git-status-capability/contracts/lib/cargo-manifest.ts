@@ -10,6 +10,25 @@ type CatalogDependency = {
   source: string;
 };
 
+function trimTomlWhitespace(input: string): string {
+  return input.replace(/^[ \t]+|[ \t]+$/g, "");
+}
+
+function assertTomlLexicalDomain(input: string): void {
+  let quoted = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input[index]!;
+    if (character === '"' && input[index - 1] !== "\\") quoted = !quoted;
+    if (quoted) continue;
+    const code = character.charCodeAt(0);
+    if (code < 0x20 && character !== "\t" && character !== "\n") throw new TypeError("CARGO_TOML_INVALID");
+    if (/\s/u.test(character) && character !== " " && character !== "\t" && character !== "\n") {
+      throw new TypeError("CARGO_TOML_INVALID");
+    }
+  }
+  if (quoted) throw new TypeError("CARGO_TOML_INVALID");
+}
+
 function splitTopLevel(input: string): string[] {
   const output: string[] = [];
   let start = 0;
@@ -23,12 +42,12 @@ function splitTopLevel(input: string): string[] {
     if (character === "]") bracketDepth -= 1;
     if (bracketDepth < 0) throw new TypeError("CARGO_TOML_INVALID");
     if (character === "," && bracketDepth === 0) {
-      output.push(input.slice(start, index).trim());
+      output.push(trimTomlWhitespace(input.slice(start, index)));
       start = index + 1;
     }
   }
   if (quoted || bracketDepth !== 0) throw new TypeError("CARGO_TOML_INVALID");
-  output.push(input.slice(start).trim());
+  output.push(trimTomlWhitespace(input.slice(start)));
   return output;
 }
 function parseString(input: string): string {
@@ -37,21 +56,21 @@ function parseString(input: string): string {
 }
 
 function parseValue(input: string): TomlValue {
-  const trimmed = input.trim();
+  const trimmed = trimTomlWhitespace(input);
   if (trimmed === "true") return true;
   if (trimmed === "false") return false;
   if (trimmed.startsWith('"')) return parseString(trimmed);
   if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    const body = trimmed.slice(1, -1).trim();
+    const body = trimTomlWhitespace(trimmed.slice(1, -1));
     if (!body) return [];
     return splitTopLevel(body).map(parseString);
   }
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-    const body = trimmed.slice(1, -1).trim();
+    const body = trimTomlWhitespace(trimmed.slice(1, -1));
     const result: TomlTable = Object.create(null) as TomlTable;
     if (!body) return result;
     for (const field of splitTopLevel(body)) {
-      const match = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(field);
+      const match = /^([A-Za-z0-9_-]+)[ \t]*=[ \t]*(.+)$/.exec(field);
       if (!match || Object.hasOwn(result, match[1]!)) throw new TypeError("CARGO_TOML_INVALID");
       result[match[1]!] = parseValue(match[2]!);
     }
@@ -61,11 +80,12 @@ function parseValue(input: string): TomlValue {
 }
 
 function parseCargoToml(input: string): Record<string, TomlTable> {
+  assertTomlLexicalDomain(input);
   if (input.includes("#") || input.includes("\r") || !input.endsWith("\n")) throw new TypeError("CARGO_TOML_INVALID");
   const document: Record<string, TomlTable> = Object.create(null) as Record<string, TomlTable>;
   let table: TomlTable | undefined;
   for (const rawLine of input.split("\n")) {
-    const line = rawLine.trim();
+    const line = trimTomlWhitespace(rawLine);
     if (!line) continue;
     const header = /^\[([A-Za-z0-9_-]+)\]$/.exec(line);
     if (header) {
@@ -74,7 +94,7 @@ function parseCargoToml(input: string): Record<string, TomlTable> {
       document[header[1]!] = table;
       continue;
     }
-    const assignment = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line);
+    const assignment = /^([A-Za-z0-9_-]+)[ \t]*=[ \t]*(.+)$/.exec(line);
     if (!table || !assignment || Object.hasOwn(table, assignment[1]!)) throw new TypeError("CARGO_TOML_INVALID");
     table[assignment[1]!] = parseValue(assignment[2]!);
   }

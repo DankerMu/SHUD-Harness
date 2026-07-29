@@ -11,6 +11,7 @@ import {
   validatorForInputKind,
   SOURCE_MANIFEST_RELATIVE
 } from "./schema";
+import { validateSourceInputRecord } from "./source-record";
 
 export type CheckIo = {
   stdout: (text: string) => void;
@@ -81,7 +82,12 @@ async function execute(options: Options): Promise<Record<string, unknown>> {
     if (options.kind === "authority_set") {
       const spikeRoot = resolve(options.repositoryRoot!, "spikes/git-status-capability");
       const actualSupply = await readActualSupply(spikeRoot);
-      await readJsonFileBounded(options.input, options.kind, (value) => validateAuthoritySet(value, actualSupply));
+      await readJsonFileBounded(
+        options.input,
+        options.kind,
+        (value) => validateAuthoritySet(value, actualSupply),
+        { key: "source_record", kind: "source_input_record", validate: validateSourceInputRecord }
+      );
     } else {
       await readJsonFileBounded(options.input, options.kind, validatorForInputKind(options.kind));
     }

@@ -14,8 +14,8 @@ The row partitions in design are exhaustive: every catalog ID has exactly one
 task-2 fixture owner and one task-4 native owner, and no checkbox may absorb a row
 owned by another checkbox.
 The sole shared generated-file exception is `contracts/source-input-v1.paths`:
-task 1.1a owns its sync/check algorithm and initial current-HEAD content; every task
-1.2–5.1 that adds/removes/renames a covered candidate has implicit In permission
+task 1.1a owns its sync/check algorithm and initial current-HEAD content; tasks
+1.1b, 1.1c, and every task 1.2–5.1 that adds/removes/renames a covered candidate have implicit In permission
 to regenerate only this file, MUST list no future path, and MUST run the exact-set
 check. This mechanical update grants no semantic contract ownership. Tasks 5.2–5.4
 add only bounded output under excluded `evidence/**` lanes and never update it.
@@ -46,14 +46,14 @@ add only bounded output under excluded `evidence/**` lanes and never update it.
 
 - [ ] 1.1b Close row, platform, harness-validity, and decision-eligibility state semantics (#161).
   - PR boundary: Bun schema-level state consistency checks and exact state fixtures only; no normalized decision derivation or emission.
-  - In: `contracts/{contract-v1.json,lib,tests,fixtures}/**` state vocabulary and cross-field validators for compound technical failure, row verdict, caller-declared platform state, harness validity, and decision eligibility.
+  - In: `contracts/{contract-v1.json,lib,tests,fixtures}/**` state vocabulary and cross-field validators for compound technical failure, row verdict, caller-declared platform state, harness validity, and decision eligibility; mechanically regenerated `contracts/source-input-v1.paths` only when this slice changes the covered candidate set, without semantic authority over its algorithm.
   - Out: 1.1a authority/supply/profile redefinition; 1.1c evidence collection; task 1.2 evidence-to-decision/retrieval; task 1.3 CLI/finalizer; task 5.4 candidate derivation/live publication/persistence; launcher/observer/native execution and production paths.
   - Depends on: 1.1a.
   - Verification: batched red/green Bun tests cover simultaneous outcome+control failure without cause loss; every legal/illegal four-layer state combination; caller-declared all-pass/mixed/invalid contradictions; invalid evidence with no decision; unchanged 1.1a authority fixtures.
 
 - [ ] 1.1c Enforce bounded evidence admission and final/reference/publication schema vocabulary (#162).
   - PR boundary: bounded contract-fixture worktree/staged-blob admission and schema-level final-bundle/immutable-reference/publication-receipt checks under `contracts/**`; no validator engine, retrieval, finalizer, persistence, or live publication.
-  - In: `contracts/{check.ts,contract-v1.json,lib,tests,fixtures}/**` evidence traversal/read budgets, incremental aggregate accounting, current checker, and frozen evidence/final/reference/receipt vocabulary.
+  - In: `contracts/{check.ts,contract-v1.json,lib,tests,fixtures}/**` evidence traversal/read budgets, incremental aggregate accounting, current checker, and frozen evidence/final/reference/receipt vocabulary; mechanically regenerated `contracts/source-input-v1.paths` only when this slice changes the covered candidate set, without semantic authority over its algorithm.
   - Out: 1.1a/1.1b redefinition; task 1.2 evidence-to-decision and offline retrieval; task 1.3 CLI/finalizer; task 5.4 candidate derivation/live publication/evidence persistence; launcher/observer/native execution and production paths.
   - Depends on: 1.1b.
   - Verification: batched red/green Bun tests cover worktree and staged paths, source `64 KiB` exact/+1, final `20 MiB` exact/+1, physical aggregate exact/+1, multiple digest collections with bounded retained memory, malformed/unsafe/partial/cleanup failures, final/reference/receipt schema bindings, no-decision-on-invalid, and unchanged 1.1a/1.1b fixtures. The full Task 1.1 contract command and current-set checker then pass without writes.

@@ -444,6 +444,22 @@ rejection code, or gate verdict changes the projection digest. Exact-bound
 evidence is valid; an evidence bundle of 8 MiB+1, a final bundle of 20 MiB+1, or a
 malformed manifest is harness-invalid with no decision.
 
+Task 1.1a uses one authority-boundary matrix rather than trusting semantic
+self-claims. The matrix binds: opened regular-file resources to captured path and
+file identity; Git to one resolved executable that itself proves exact version
+`2.49.0` and a usable exec-path before that same executable runs `ls-files`; the
+supplied repository root to Git's exact top-level and common-directory identity
+(including linked worktrees, excluding ancestor discovery); nested
+`authority_set.source_record` to its raw input subtree under the complete 64 KiB,
+depth-12, 2,048-node, 512-item profile; filesystem paths to no-symlink ancestor
+and opened-handle identity; and the canonical manifest to the shared candidate
+predicate plus exact tracked set. Every row has a foreign/mismatched negative;
+no reserialized JSON, caller-declared version, ambient repository discovery, or
+test-local path approximation may ground a success receipt.
+The task-local Cargo manifest lexer admits only TOML ASCII space, tab, and LF as
+whitespace outside strings; Unicode whitespace and other control characters fail
+at the public current-checker seam before supply identity can succeed.
+
 `source_input_digest_v1` is independently reproducible and has no JSON or host-ordering dependency. Its closed input set is committed as the strict LF-delimited, byte-sorted manifest
 `spikes/git-status-capability/contracts/source-input-v1.paths`, which MUST list
 itself and exactly:
@@ -467,7 +483,8 @@ NUL, absolute prefix, `.` or `..` components, and are sorted lexicographically b
 their raw UTF-8 bytes.
 
 Task 1.1a initializes this manifest from files at its own HEAD; future paths MUST
-NOT be predeclared. It owns the frozen sync/check algorithm. Every task 1.2–5.1
+NOT be predeclared. It owns the frozen sync/check algorithm. Tasks 1.1b, 1.1c,
+and every task 1.2–5.1
 that changes a covered file mechanically regenerates the derived manifest and
 proves exact-set equality at that HEAD. This shared permission grants no semantic
 ownership. Task 5.1 freezes `SOURCE_SHA` only after its workflow/supply source is

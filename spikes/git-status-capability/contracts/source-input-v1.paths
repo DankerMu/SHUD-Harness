@@ -16,6 +16,7 @@ spikes/git-status-capability/contracts/fixtures/valid/generic.json
 spikes/git-status-capability/contracts/fixtures/valid/source-input-record-paired-surrogate.json
 spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.frame
 spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.sha256
+spikes/git-status-capability/contracts/lib/authority-boundary.ts
 spikes/git-status-capability/contracts/lib/authority.ts
 spikes/git-status-capability/contracts/lib/canonical-json.ts
 spikes/git-status-capability/contracts/lib/cargo-manifest.ts
@@ -28,6 +29,7 @@ spikes/git-status-capability/contracts/lib/schema.ts
 spikes/git-status-capability/contracts/lib/source-frame.ts
 spikes/git-status-capability/contracts/lib/source-record.ts
 spikes/git-status-capability/contracts/source-input-v1.paths
+spikes/git-status-capability/contracts/tests/authority-boundary-round3.test.ts
 spikes/git-status-capability/contracts/tests/authority-source.test.ts
 spikes/git-status-capability/contracts/tests/authority-supply.test.ts
 spikes/git-status-capability/contracts/tests/authority-test-helpers.ts

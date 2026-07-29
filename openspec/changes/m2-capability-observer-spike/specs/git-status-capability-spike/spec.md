@@ -188,6 +188,21 @@ extra whitespace and with one LF:
 Success exits `0` and emits one canonical receipt only after all checks pass;
 identical invocations produce byte-identical receipts.
 
+Task 1.1a SHALL enforce one explicit authority-boundary matrix covering actual
+opened resources, the resolved Git executable, the supplied repository root, the
+raw nested `authority_set.source_record` subtree, no-symlink filesystem paths,
+and the canonical source manifest. Each row SHALL bind an actual boundary to an
+identity/profile proof and a foreign/mismatch negative. In particular the same
+resolved executable MUST prove exact Git `2.49.0` and a usable exec-path before
+running `ls-files`; Git's exact top-level MUST equal the supplied root while a
+linked worktree remains valid; and the raw nested source record MUST independently
+receive its full 64 KiB/depth-12/2,048-node/512-item profile before semantic
+validation. Caller-declared versions, ancestor repository discovery, JSON
+reserialization, and test-local candidate approximations MUST NOT ground success.
+The task-local Cargo manifest lexer SHALL treat only TOML ASCII space, tab, and
+LF as whitespace outside strings; Unicode whitespace and every other control
+character SHALL fail at the public current-checker seam.
+
 #### Scenario: Contract input reaches an exact bound
 - **WHEN** each input kind reaches exactly one declared byte, depth, node, or item bound with otherwise valid content
 - **THEN** ingestion continues to strict schema validation and may succeed
@@ -331,7 +346,7 @@ commit SHALL be recorded beside the digest but MUST NOT be hashed into it.
 
 Task 1.1a SHALL generate the initial manifest from only the covered files present
 at its HEAD and SHALL freeze the sync/check algorithm; absent future paths are
-forbidden. Every task 1.2–5.1 that adds or removes a covered candidate SHALL use
+forbidden. Tasks 1.1b and 1.1c, and every task 1.2–5.1 that adds or removes a covered candidate SHALL use
 that algorithm to update the shared derived manifest and prove exact equality at
 its own HEAD. Such an update is mandatory mechanical bookkeeping, not ownership
 of the catalog or digest contract. Task 5.1 SHALL freeze the final `SOURCE_SHA`
@@ -339,7 +354,7 @@ only after its covered workflow/supply source is final. Tasks 5.2–5.4 SHALL mo
 only excluded evidence lanes and MUST NOT update the manifest.
 
 #### Scenario: A DAG slice changes the covered source set
-- **WHEN** a task from 1.2 through 5.1 adds, removes, or renames a covered source file
+- **WHEN** task 1.1b, task 1.1c, or a task from 1.2 through 5.1 adds, removes, or renames a covered source file
 - **THEN** the same PR regenerates the manifest from current tracked files, rejects predeclared future paths, proves exact-set equality, and invalidates older source-bound evidence
 
 #### Scenario: A post-freeze slice persists evidence

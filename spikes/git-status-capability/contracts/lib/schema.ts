@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { readdir, lstat } from "node:fs/promises";
 import { join, posix, relative, resolve, sep } from "node:path";
 import { canonicalEqual } from "./canonical-json";
@@ -21,6 +20,7 @@ import { ContractError, readJsonFileBounded, type InputKind } from "./ingestion"
 import { validateCargoManifest } from "./cargo-manifest";
 import { validateSourceInputRecord } from "./source-record";
 import { captureNoSymlinkPath, verifyNoSymlinkPath } from "./path-safety";
+import { establishGitAuthority, runBoundGit } from "./authority-boundary";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -286,18 +286,11 @@ export async function validateManifest(repositoryRoot: string, manifestPath: str
 }
 
 export function validateGitCandidateSet(repositoryRoot: string, candidates: readonly string[]): void {
-  const controlledEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
-  Object.assign(controlledEnvironment, {
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_OPTIONAL_LOCKS: "0",
-    LC_ALL: "C"
-  });
-  const result = spawnSync("git", ["-C", resolve(repositoryRoot), "ls-files", "--stage", "-z", "--", "spikes/git-status-capability", CHANGE_ROOT, WORKFLOW_PATH], {
-    encoding: "buffer",
-    env: controlledEnvironment,
-    stdio: ["ignore", "pipe", "ignore"]
-  });
+  const authority = establishGitAuthority(repositoryRoot);
+  const result = runBoundGit(authority, [
+    "-C", authority.repositoryRoot, "ls-files", "--stage", "-z", "--",
+    "spikes/git-status-capability", CHANGE_ROOT, WORKFLOW_PATH
+  ]);
   if (result.status !== 0 || !Buffer.isBuffer(result.stdout)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
   let records: string[];
   try {

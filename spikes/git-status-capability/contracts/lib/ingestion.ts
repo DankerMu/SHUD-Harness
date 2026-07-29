@@ -24,14 +24,26 @@ export class ContractError extends Error {
   }
 }
 
-export type IngestionLimit = (typeof INGESTION_LIMITS)[InputKind];
+export type IngestionLimit = { bytes: number; depth: number; nodes: number; items: number };
+
+export type NestedIngestionProfile = {
+  key: string;
+  kind: InputKind;
+  validate?: (value: unknown) => boolean;
+};
 
 class StrictJsonParser {
   private index = 0;
   private nodes = 0;
   private items = 0;
 
-  constructor(private readonly input: string, private readonly limit: IngestionLimit) {}
+  private nestedRange: { start: number; end: number } | undefined;
+
+  constructor(
+    private readonly input: string,
+    private readonly limit: IngestionLimit,
+    private readonly trackedTopLevelKey?: string
+  ) {}
 
   parse(): unknown {
     this.space();
@@ -39,6 +51,10 @@ class StrictJsonParser {
     this.space();
     if (this.index !== this.input.length) this.fail("CONTRACT_JSON_MALFORMED");
     return value;
+  }
+
+  trackedRange(): { start: number; end: number } | undefined {
+    return this.nestedRange;
   }
 
   private value(depth: number): unknown {
@@ -75,7 +91,11 @@ class StrictJsonParser {
       if (this.input[this.index] !== ":") this.fail("CONTRACT_JSON_MALFORMED");
       this.index += 1;
       this.space();
+      const valueStart = this.index;
       result[key] = this.value(depth + 1);
+      if (depth === 1 && key === this.trackedTopLevelKey) {
+        this.nestedRange = { start: valueStart, end: this.index };
+      }
       this.space();
       const delimiter = this.input[this.index++];
       if (delimiter === "}") return result;
@@ -179,10 +199,39 @@ export function ingestJson(
   return value;
 }
 
+function decodeUtf8(bytes: Uint8Array): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new ContractError("CONTRACT_UTF8_INVALID");
+  }
+}
+
+export function ingestJsonWithNestedLimits(
+  bytes: Uint8Array,
+  outerLimit: IngestionLimit,
+  nestedKey: string,
+  nestedLimit: IngestionLimit,
+  validateOuter: (value: unknown) => boolean = () => true,
+  validateNested: (value: unknown) => boolean = () => true
+): unknown {
+  if (bytes.byteLength > outerLimit.bytes) throw new ContractError("CONTRACT_BYTES_LIMIT");
+  const text = decodeUtf8(bytes);
+  const outerParser = new StrictJsonParser(text, outerLimit, nestedKey);
+  const value = outerParser.parse();
+  const range = outerParser.trackedRange();
+  if (!range) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  const rawNestedBytes = new TextEncoder().encode(text.slice(range.start, range.end));
+  ingestJsonAgainstLimits(rawNestedBytes, nestedLimit, validateNested);
+  if (!validateOuter(value)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  return value;
+}
+
 export async function readJsonFileBounded(
   path: string,
   kind: InputKind,
-  validate: (value: unknown) => boolean = () => true
+  validate: (value: unknown) => boolean = () => true,
+  nested?: NestedIngestionProfile
 ): Promise<unknown> {
   const limit = INGESTION_LIMITS[kind];
   let handle;
@@ -204,7 +253,18 @@ export async function readJsonFileBounded(
     }
     if (offset > limit.bytes) throw new ContractError("CONTRACT_BYTES_LIMIT");
     await verifyNoSymlinkPath(snapshot);
-    return ingestJson(buffer.subarray(0, offset), kind, validate);
+    const admitted = buffer.subarray(0, offset);
+    if (nested) {
+      return ingestJsonWithNestedLimits(
+        admitted,
+        limit,
+        nested.key,
+        INGESTION_LIMITS[nested.kind],
+        validate,
+        nested.validate
+      );
+    }
+    return ingestJson(admitted, kind, validate);
   } catch (error) {
     if (error instanceof ContractError) throw error;
     throw new ContractError("CONTRACT_SCHEMA_INVALID");

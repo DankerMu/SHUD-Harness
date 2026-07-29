@@ -180,12 +180,19 @@ describe("source-input-v1 current-set authority", () => {
     const root = await temporaryRepository();
     expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
     expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: root }).status).toBe(0);
+    const canonicalEvidence = "openspec/changes/m2-capability-observer-spike/evidence/source/deadbeef/source-input-record.json";
+    await mkdir(join(root, "openspec", "changes", "m2-capability-observer-spike", "evidence", "source", "deadbeef"), { recursive: true });
+    await writeFile(join(root, canonicalEvidence), "{}\n");
+    const candidates = await enumerateSourceCandidates(root);
+    await writeFile(join(root, manifestRelative), `${candidates.join("\n")}\n`);
+    expect(spawnSync("git", ["add", manifestRelative, canonicalEvidence], { cwd: root }).status).toBe(0);
+    expect(candidates).not.toContain(canonicalEvidence);
     const before = await inventory(root);
     const receipt = await checkCurrent(root, manifestRelative);
     const after = await inventory(root);
     expect(receipt).toEqual({
       schema_version: "shud.git-status-capability.contract-check-receipt.v1", status: "ok", catalog_rows: 174,
-      floor_mappings: 25, fixture_owners: 174, native_owners: 174, source_entries: Object.keys(before).filter((path) => path.startsWith("spikes/git-status-capability/") || path.startsWith("openspec/changes/m2-capability-observer-spike/")).length,
+      floor_mappings: 25, fixture_owners: 174, native_owners: 174, source_entries: candidates.length,
       rust_version: "1.88.0", git_oracle_version: "2.49.0"
     });
     expect(after).toEqual(before);
